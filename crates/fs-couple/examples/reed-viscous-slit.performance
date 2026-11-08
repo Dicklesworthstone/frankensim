@@ -2,7 +2,7 @@ frankensim-reed-performance-v1
 audio 48000 4801 20000
 ambient 293.15 101325 0
 reed 0.0004 0.013 6000 0.00001 100 0.35
-slit_length 0.001
+slit_length 0.0025
 listener_m 1
 termination unflanged
 segments 1

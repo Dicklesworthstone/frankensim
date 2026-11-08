@@ -12,10 +12,30 @@
 //! is common; this does not resolve transverse flow, unsteady boundary layers,
 //! entrance flow, pressure recovery, compressibility or turbulence.
 //! Material parameters are explicit; existing inviscid callers are unchanged.
+//!
+//! That fully developed law is the one every constructor here builds. The reed channel of a single-reed instrument has an
+//! entrance region it does not model: [`ViscousSlit::separated_jet_from_gas`] builds the separated-jet law of van Zon et al. 1990
+//! instead (the module `separated_jet`, which carries the equations and the print checks), a uniform-gap law in `dp(v)` form
+//! with the same bound-gas rules. `evaluate`, `characteristic_pressure` and `characteristic_junction_with_recovery` follow
+//! whichever law the slit was built with; the spatial and condensed paths (`linear_gap_flow`, `fixed_opening_pressure_drop`)
+//! are the fully developed law's and refuse the jet law.
+
+mod separated_jet;
+#[cfg(test)]
+mod jet_tests;
 
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_material::gas::GasState;
 use fs_math::det;
+
+/// Which pressure-drop law a [`ViscousSlit`] follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlitLaw {
+    /// `dp = 12 mu L v / h^2 + rho v |v| / 2`: fully developed, no entrance region.
+    FullyDeveloped,
+    /// van Zon et al. 1990 (see `separated_jet`): a separated entrance that reattaches at `S = 2 h`, boundary layers, then Poiseuille.
+    SeparatedJet,
+}
 
 /// Explicit fluid viscosity and uniform slit length. Both are strictly positive.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -23,6 +43,7 @@ pub struct ViscousSlit {
     dynamic_viscosity_pa_s: f64,
     length_m: f64,
     gas: Option<GasState>,
+    law: SlitLaw,
 }
 
 /// Signed flow, local tangents and nonnegative loss of the reduced slit law.
@@ -165,7 +186,7 @@ impl ViscousSlit {
         }
         let numerator = 12.0 * (dynamic_viscosity_pa_s * length_m);
         if !numerator.is_finite() || numerator <= 0.0 { return Err(numerical()); }
-        Ok(Self { dynamic_viscosity_pa_s, length_m, gas: None })
+        Ok(Self { dynamic_viscosity_pa_s, length_m, gas: None, law: SlitLaw::FullyDeveloped })
     }
 
     /// Bind viscosity and density to one complete material gas snapshot.
@@ -178,6 +199,22 @@ impl ViscousSlit {
         Ok(law)
     }
 
+    /// The reed channel's separated-jet law (van Zon, Hirschberg, Gilbert and Wijnands 1990, eqs. 1-8; see the module
+    /// `separated_jet`) bound to one complete material gas: viscosity and density from the gas, `length_m` the reed channel's
+    /// streamwise length. Uniform-gap, stationary, laminar and 2-D, with the printed `S = 2 h`.
+    ///
+    /// # Errors
+    /// As [`Self::from_gas`].
+    pub fn separated_jet_from_gas(gas: &GasState, length_m: f64) -> Result<Self, AcousticRealizeError> {
+        let mut law = Self::from_gas(gas, length_m)?;
+        law.law = SlitLaw::SeparatedJet;
+        Ok(law)
+    }
+
+    /// Whether this slit follows the separated-jet law (otherwise the fully developed one).
+    #[must_use]
+    pub const fn is_separated_jet(&self) -> bool { matches!(self.law, SlitLaw::SeparatedJet) }
+
     /// Original material state, when constructed from a complete source gas.
     #[must_use]
     pub const fn gas(&self) -> Option<&GasState> { self.gas.as_ref() }
@@ -188,7 +225,10 @@ impl ViscousSlit {
     pub(super) fn rebind_source_gas(self, gas: &GasState)
         -> Result<Self, AcousticRealizeError>
     {
-        if self.gas.is_some() { Self::from_gas(gas, self.length_m) } else { Ok(self) }
+        if self.gas.is_none() { return Ok(self); }
+        let mut next = Self::from_gas(gas, self.length_m)?;
+        next.law = self.law;
+        Ok(next)
     }
 
     fn admit_density(self, density: f64) -> Result<(), AcousticRealizeError> {
@@ -228,6 +268,7 @@ impl ViscousSlit {
             return Err(invalid("viscous slit pressure drop must be finite"));
         }
         if opening_m == 0.0 { return Ok(ViscousSlitFlow::default()); }
+        if self.is_separated_jet() { return self.jet_evaluate(width_m, area, opening_m, density_kg_m3, pressure_drop_pa); }
         let linear = self.linear_pressure(opening_m)?;
         let velocity = solve_velocity(linear, density_kg_m3, pressure_drop_pa)?;
         let denominator = linear + density_kg_m3 * velocity.abs();
@@ -279,6 +320,10 @@ impl ViscousSlit {
         let drive = no_drop - no_jet;
         if ![no_jet, no_drop, drive].iter().all(|v| v.is_finite()) { return Err(numerical()); }
         if opening_m == 0.0 || drive == 0.0 { return Ok(no_jet); }
+        if self.is_separated_jet() {
+            let jet = self.jet_velocity(opening_m, density_kg_m3, impedance_pa_s_m3 * area, 0.0, drive)?;
+            return jet_outgoing(no_jet, no_drop, impedance_pa_s_m3 * area, jet);
+        }
         let linear = self.linear_pressure(opening_m)?;
         let wave_load = impedance_pa_s_m3 * area;
         let velocity = solve_velocity(linear + wave_load, density_kg_m3, drive)?;
@@ -327,6 +372,10 @@ impl ViscousSlit {
                 outgoing_pa: no_jet, flow_m3_s: 0.0, constriction_drop_pa: drive, recovered_pa: 0.0,
             });
         }
+        if self.is_separated_jet() {
+            return self.jet_junction_with_recovery(recovery, area, opening_m, density_kg_m3, impedance_pa_s_m3,
+                no_jet, no_drop, drive);
+        }
         let linear = self.linear_pressure(opening_m)?;
         let wave_load = impedance_pa_s_m3 * area;
         // The junction is monotone in the mean velocity and zero at rest, so forward flow is a positive drive.
@@ -368,6 +417,7 @@ impl ViscousSlit {
             return Err(invalid("viscous slit condensation requires positive impedance and finite drive"));
         }
         if opening_m == 0.0 || drive_pa == 0.0 { return Ok(drive_pa); }
+        if self.is_separated_jet() { return Err(jet_refusal()); }
         let linear = self.linear_pressure(opening_m)?;
         let velocity = solve_velocity(linear + impedance_pa_s_m3 * area, density_kg_m3, drive_pa)?;
         let dp = linear * velocity + (0.5 * density_kg_m3 * velocity) * velocity.abs();
@@ -396,6 +446,7 @@ impl ViscousSlit {
         admitted_area(width_m, upper, density_kg_m3)?;
         self.admit_density(density_kg_m3)?;
         if upper == 0.0 { return Ok(ViscousProfileFlow::default()); }
+        if self.is_separated_jet() { return Err(jet_refusal()); }
         if lower == upper {
             let flow = self.evaluate(width_m, upper, density_kg_m3, pressure_drop_pa)?;
             return Ok(ViscousProfileFlow { flow_m3_s: flow.flow_m3_s,
@@ -429,6 +480,109 @@ impl ViscousSlit {
             return Err(numerical());
         }
         Ok(ViscousProfileFlow { flow_m3_s: flow, flow_per_pressure_m3_s_pa: tangent })
+    }
+}
+
+fn jet_refusal() -> AcousticRealizeError {
+    invalid("the separated-jet slit law is defined on a uniform reed gap only (spatial and condensed paths use the fully developed law)")
+}
+
+/// The speed solved for a jet-law junction, with the slit's own signed drop at it.
+#[derive(Debug, Clone, Copy)]
+struct JetSolution {
+    /// Signed mean speed [m/s].
+    velocity: f64,
+    /// Signed constitutive drop of the slit alone [Pa].
+    drop: f64,
+    /// The law at that speed (unsigned speed), with its tangents.
+    law: separated_jet::Drop,
+}
+
+/// The outgoing characteristic wave from the same two candidates the fully developed junction picks between.
+fn jet_outgoing(no_jet: f64, no_drop: f64, wave_load: f64, jet: JetSolution) -> Result<f64, AcousticRealizeError> {
+    let jet_pressure = wave_load * jet.velocity;
+    let outgoing = if no_drop.abs().max(jet.drop.abs()) <= no_jet.abs().max(jet_pressure.abs()) {
+        no_drop - jet.drop
+    } else {
+        no_jet + jet_pressure
+    };
+    if ![jet.drop, jet_pressure, outgoing].iter().all(|v| v.is_finite()) { return Err(numerical()); }
+    Ok(outgoing)
+}
+
+impl ViscousSlit {
+    /// Signed speed and slit drop of `dp(v) + wave_load v - recovery v^2 = drive` (the recovery acts on forward flow only, so the
+    /// caller passes zero for a reversed drive).
+    fn jet_velocity(self, opening_m: f64, density_kg_m3: f64, wave_load: f64, recovery: f64, drive: f64)
+        -> Result<JetSolution, AcousticRealizeError>
+    {
+        let speed = separated_jet::speed_for_drive(
+            opening_m, self.length_m, density_kg_m3, self.dynamic_viscosity_pa_s, wave_load, recovery, drive.abs(),
+        ).ok_or_else(numerical)?;
+        let sign = if drive < 0.0 { -1.0 } else { 1.0 };
+        let law = separated_jet::drop_at(speed, opening_m, self.length_m, density_kg_m3, self.dynamic_viscosity_pa_s);
+        if !law.dp.is_finite() { return Err(numerical()); }
+        Ok(JetSolution { velocity: sign * speed, drop: sign * law.dp, law })
+    }
+
+    /// [`Self::evaluate`] on the separated-jet law. At rest on the contracted branch (`L / h < 3`, `dp` quadratic in `v`) the
+    /// pressure tangent is infinite and reported as such; every other field is finite.
+    fn jet_evaluate(self, width_m: f64, area: f64, opening_m: f64, density_kg_m3: f64, pressure_drop_pa: f64)
+        -> Result<ViscousSlitFlow, AcousticRealizeError>
+    {
+        let jet = self.jet_velocity(opening_m, density_kg_m3, 0.0, 0.0, pressure_drop_pa)?;
+        let speed = jet.velocity.abs();
+        let sign = if jet.velocity < 0.0 { -1.0 } else { 1.0 };
+        let law = jet.law;
+        let flow = area * jet.velocity;
+        let tangent = if law.d_dv > 0.0 { area / law.d_dv } else { f64::INFINITY };
+        // U = w h v(h, dp): dU/dh = w v - sign w h (d dp/dh) / (d dp/dv) (both zero at rest).
+        let opening_term = if law.d_dv > 0.0 { sign * (width_m * opening_m) * (law.d_dh / law.d_dv) } else { 0.0 };
+        let separation = (((0.5 * density_kg_m3) * speed) * speed) * (area * speed);
+        let total = law.dp * (area * speed);
+        let result = ViscousSlitFlow {
+            flow_m3_s: flow,
+            flow_per_pressure_m3_s_pa: tangent,
+            flow_per_opening_m2_s: width_m * jet.velocity - opening_term,
+            // Everything beyond the mean-flow dynamic head: the entrance region, the contraction below L / h = 3, wall friction.
+            viscous_dissipation_w: (total - separation).max(0.0),
+            separation_dissipation_w: separation,
+        };
+        if ![result.flow_m3_s, result.flow_per_opening_m2_s, result.viscous_dissipation_w, result.separation_dissipation_w]
+            .iter().all(|v| v.is_finite()) || result.flow_per_pressure_m3_s_pa.is_nan()
+        {
+            return Err(numerical());
+        }
+        Ok(result)
+    }
+
+    /// [`Self::characteristic_junction_with_recovery`] on the separated-jet law: the staple's recovery is `recovery * v^2` with
+    /// `recovery = C_P rho (A / S_c)^2 / 2`, `rho / 2` less than the jet head it reduces (`forward_factor` is that margin).
+    #[allow(clippy::too_many_arguments)]
+    fn jet_junction_with_recovery(
+        self, recovery: StapleRecovery, area: f64, opening_m: f64, density_kg_m3: f64, impedance_pa_s_m3: f64,
+        no_jet: f64, no_drop: f64, drive: f64,
+    ) -> Result<RecoveredJunction, AcousticRealizeError> {
+        let wave_load = impedance_pa_s_m3 * area;
+        let head_removed = if drive > 0.0 {
+            0.5 * density_kg_m3 * (1.0 - recovery.forward_factor(area)?)
+        } else {
+            0.0
+        };
+        let jet = self.jet_velocity(opening_m, density_kg_m3, wave_load, head_removed, drive)?;
+        let flow = area * jet.velocity;
+        let recovered = recovery.recovered_pressure_pa(density_kg_m3, flow);
+        let dp = jet.drop - recovered;
+        let jet_pressure = wave_load * jet.velocity;
+        let outgoing = if no_drop.abs().max(dp.abs()) <= no_jet.abs().max(jet_pressure.abs()) {
+            no_drop - dp
+        } else {
+            no_jet + jet_pressure
+        };
+        if ![flow, jet.drop, recovered, dp, outgoing].iter().all(|v| v.is_finite()) { return Err(numerical()); }
+        Ok(RecoveredJunction {
+            outgoing_pa: outgoing, flow_m3_s: flow, constriction_drop_pa: jet.drop, recovered_pa: recovered,
+        })
     }
 }
 

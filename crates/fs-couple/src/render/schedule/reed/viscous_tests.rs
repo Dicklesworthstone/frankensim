@@ -28,15 +28,26 @@ fn selected_slit_reaches_massless_and_massive_performances() {
         let source = source(massive);
         let loaded = ReedPerformance::from_bytes(source.as_bytes(), 37).unwrap();
         let slit = loaded.viscous_slit().unwrap();
-        assert_eq!(slit.length_m(), 0.001);
+        assert_eq!(slit.length_m(), 0.0025);
         assert_eq!(slit.gas(), Some(loaded.ambient_gas()));
         let viscous = pressure(&source, 37);
         assert_eq!(viscous, pressure(&source, 113));
-        let inviscid = pressure(&source.replace("slit_length 0.001\n", ""), 37);
+        let inviscid = pressure(&source.replace("slit_length 0.0025\n", ""), 37);
         let energy: f64 = inviscid.iter().map(|p| p * p).sum();
         let changed: f64 = viscous.iter().zip(inviscid).map(|(a, b)| (a-b).powi(2)).sum();
         assert!(energy > 0.0 && changed > 1e-8 * energy);
     }
+}
+
+#[test]
+fn slit_length_selects_the_separated_jet_law_and_a_card_without_it_builds_no_slit() {
+    for massive in [false, true] {
+        let loaded = ReedPerformance::from_bytes(source(massive).as_bytes(), 37).unwrap();
+        let slit = loaded.viscous_slit().unwrap();
+        assert!(slit.is_separated_jet());
+        assert_eq!(slit.length_m(), 0.0025);
+    }
+    assert!(ReedPerformance::from_bytes(INPUT.as_bytes(), 37).unwrap().viscous_slit().is_none());
 }
 
 #[test]
@@ -77,9 +88,9 @@ fn axial_field_channel_uses_the_exact_inlet_instead_of_its_first_midpoint_cell()
 #[test]
 fn malformed_slit_geometry_refuses_before_rendering() {
     for row in ["slit_length 0", "slit_length -0.001", "slit_length NaN",
-        "slit_length inf", "slit_length", "slit_length 0.001 extra",
-        "slit_length 0.001\nslit_length 0.001"] {
-        let source = source(false).replace("slit_length 0.001", row);
+        "slit_length inf", "slit_length", "slit_length 0.0025 extra",
+        "slit_length 0.0025\nslit_length 0.0025"] {
+        let source = source(false).replace("slit_length 0.0025", row);
         assert!(ReedPerformance::from_bytes(source.as_bytes(), 37).is_err(), "{row}");
     }
     assert!(ReedPerformance::from_bytes(INPUT.as_bytes(), 37).unwrap().viscous_slit().is_none());
@@ -93,7 +104,7 @@ fn staple_source(row: Option<&str>) -> String {
     let base = VISCOUS_INPUT.replace("reed 0.0004 0.013 6000 0.00001 100 0.35",
         "reed 0.000357 0.0056 17720 2.2e-5 3464 0.114");
     match row {
-        Some(row) => base.replace("slit_length 0.001\n", &format!("slit_length 0.001\n{row}\n")),
+        Some(row) => base.replace("slit_length 0.0025\n", &format!("slit_length 0.0025\n{row}\n")),
         None => base,
     }
 }
@@ -138,7 +149,7 @@ fn staple_recovery_row_is_refused_for_a_massless_reed_a_malformed_row_or_an_unde
         assert!(ReedPerformance::from_bytes(staple_source(Some(bad)).as_bytes(), 37).is_err(), "{bad}");
     }
     // The fixture's own clarinet-sized reed (0.4 mm x 13 mm = 5.2 mm^2) is above S_c / sqrt(C_P) = 4.47 mm^2.
-    let wide = VISCOUS_INPUT.replace("slit_length 0.001\n", "slit_length 0.001\nstaple_recovery 0.8 4e-6\n");
+    let wide = VISCOUS_INPUT.replace("slit_length 0.0025\n", "slit_length 0.0025\nstaple_recovery 0.8 4e-6\n");
     assert_eq!(refusal(&wide), STAPLE_RECOVERY_DOMAIN);
     // The same on the inviscid law (no slit_length): the row loads there and the same opening is refused by name.
     let wide_inviscid = INPUT.replace("reed 0.0004 0.013 6000 0 0 0.35",

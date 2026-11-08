@@ -364,7 +364,7 @@ mod tests {
         // With a slit so short that its viscous term is negligible, the viscous law gives the same voice: the two junctions
         // solve one equation (the junction-level test in `bernoulli_aperture::moving` pins the agreement to 1e-9).
         let mut slit = inviscid_voice(None);
-        slit.set_viscous_slit_length(1e-9).unwrap();
+        slit.set_viscous_slit_length_fully_developed(1e-9).unwrap(); // the jet law below L / h = 3 is alpha = 0.45, not the inviscid law
         slit.set_staple_recovery(crate::bernoulli_aperture::viscous::StapleRecovery::new(0.8, 4e-6).unwrap()).unwrap();
         let mut viscous = vec![0.0; 600];
         slit.step_block(&mut viscous).unwrap();
@@ -500,12 +500,23 @@ mod tests {
     // G1: independently reconstruct the original affine wave boundary and the
     // parallel-plate plus separation pressure law. A post-filtered inviscid
     // result, an old-sample gap or an omitted swept flow cannot satisfy it.
+    /// The card's slit selector (the separated-jet law), or the fully developed law it selected before.
+    fn select_slit(v: &mut ReedBoreVoice, length: f64, jet_law: bool) {
+        if jet_law { v.set_viscous_slit_length(length).unwrap(); } else { v.set_viscous_slit_length_fully_developed(length).unwrap(); }
+        assert_eq!(v.viscous_slit().unwrap().is_separated_jet(), jet_law);
+    }
+
     #[test]
-    fn viscous_source_closes_the_same_sample_flow_for_both_reed_mechanisms() {
+    fn viscous_source_closes_the_same_sample_flow_for_both_reed_mechanisms() { source_closes_the_same_sample_flow(false); }
+
+    #[test]
+    fn jet_source_closes_the_same_sample_flow_for_both_reed_mechanisms() { source_closes_the_same_sample_flow(true); }
+
+    fn source_closes_the_same_sample_flow(jet_law: bool) {
         for direct in [-0.7, 0.0, 0.65] {
             for massive in [false, true] {
                 let mut v = voice(direct, massive);
-                v.set_viscous_slit_length(0.001).unwrap();
+                select_slit(&mut v, 0.001, jet_law);
                 let mu = v.viscous_slit().unwrap().dynamic_viscosity_pa_s();
                 for _ in 0..160 {
                     let (old_y, old_v) = (v.reed_y, v.reed_v);
@@ -524,6 +535,14 @@ mod tests {
                     };
                     assert!(opening > 0.0);
                     let velocity = (total - swept) / (v.reed.width_m * opening);
+                    if jet_law {
+                        // The same-sample flow is the slit's own flow at the same-sample drop (`evaluate` is the independent entry point).
+                        let flow = v.viscous_slit().unwrap().evaluate(v.reed.width_m, opening, v.rho, dp).unwrap().flow_m3_s;
+                        let expected = total - swept;
+                        assert!((flow - expected).abs() <= 1e-9 * (flow.abs() + expected.abs()) + 1e-18,
+                            "r={direct} massive={massive}: {flow} != {expected}");
+                        continue;
+                    }
                     let viscous = 12.0 * mu * 0.001 * velocity / opening.powi(2);
                     let separation = 0.5 * v.rho * velocity * velocity.abs();
                     assert!((viscous + separation - dp).abs()
@@ -541,10 +560,15 @@ mod tests {
     // G1/G3: actual beating and reopening must keep the contact potential,
     // mechanical damping and jet/wall heat in one pressure-work balance.
     #[test]
-    fn viscous_massive_reed_closes_and_reopens_without_losing_pressure_work() {
+    fn viscous_massive_reed_closes_and_reopens_without_losing_pressure_work() { massive_reed_closes_and_reopens(false); }
+
+    #[test]
+    fn jet_massive_reed_closes_and_reopens_without_losing_pressure_work() { massive_reed_closes_and_reopens(true); }
+
+    fn massive_reed_closes_and_reopens(jet_law: bool) {
         use crate::unilateral_contact::distributed::ApertureContactStep;
         let mut v = voice(-0.2, true);
-        v.set_viscous_slit_length(0.001).unwrap();
+        select_slit(&mut v, 0.001, jet_law);
         let slit = *v.viscous_slit().unwrap();
         let (stiffness, damping) = crate::reed_bore::reed_structural(v.reed);
         let face = crate::reed_bore::reed_pressure_face(v.reed);
@@ -619,6 +643,7 @@ mod tests {
             }
             assert!(b.fast_stats.fallback_samples > 0);
             let original = *a.viscous_slit().unwrap();
+            assert!(original.is_separated_jet(), "the card's slit_length selects the separated-jet law");
             assert!(a.set_viscous_slit_length(0.002).is_err());
             assert_eq!(a.viscous_slit(), Some(&original));
         }

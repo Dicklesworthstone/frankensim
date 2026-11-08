@@ -16,8 +16,12 @@
 //! It does not infer material identity
 //! or turn a pitch into a medium property. Pressure commands replace the fixture
 //! attack envelope; all retained reed and bore state survives release and resume.
-//! Optional `slit_length LENGTH_M` after the reed record selects the shared
-//! quasisteady viscous slit from the exact inlet gas, including axial fields.
+//! Optional `slit_length LENGTH_M` after the reed record selects the reed channel's separated-jet slit law (van Zon, Hirschberg,
+//! Gilbert and Wijnands 1990, eqs. 1-8; `bernoulli_aperture::viscous::ViscousSlit::separated_jet_from_gas`) from the exact inlet
+//! gas, including axial fields. `LENGTH_M` is the reed channel's streamwise length (the printed mouthpiece's, not the lay
+//! length of the reed): below `L / h = 3` the jet never reattaches (`phi / phi_B = 0.45`), above it a separated entrance
+//! reattaches at `S = 2 h`, boundary layers grow, then the flow is Poiseuille. Quasisteady, laminar, 2-D. Before this law the row
+//! selected the fully developed parallel-plate law (no entrance region).
 //! Optional `staple_recovery C_P S_C_M2` right after `slit_length`, or right after the reed row on a card without one (it
 //! needs a massive reed), selects the double reed's staple pressure recovery of Almeida, Vergez and Caussé (J. Acoust.
 //! Soc. Am. 121(1) 536-546, 2007, eqs. 14-17): the flow follows the slit law on the constriction drop (the viscous one
@@ -704,7 +708,7 @@ impl ReedPerformance {
             Some(length)
         } else { None };
         // `staple_recovery C_P S_C_M2`, right after `slit_length` (or right after the reed row on a card without one): the
-        // double reed's staple pressure recovery (Almeida, Vergez and Caussé 2007 eqs. 14-17). It acts on the viscous slit law
+        // double reed's staple pressure recovery (Almeida, Vergez and Caussé 2007 eqs. 14-17). It acts on the slit law
         // if the card has `slit_length`, and on the inviscid Bernoulli law otherwise.
         let staple_recovery = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("staple_recovery") {

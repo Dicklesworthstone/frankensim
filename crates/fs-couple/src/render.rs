@@ -770,16 +770,31 @@ impl ReedBoreVoice {
         self.register_shunt = Some(shunt);
     }
 
-    /// Select the shared viscous channel law from physical streamwise length
-    /// [m] and this voice's exact inlet gas. Density and viscosity therefore
-    /// remain bound to the SAME regional or axial material state as the source
-    /// impedance. This law enters every trial contact/flow junction.
+    /// Select the reed channel's separated-jet law from the channel's physical streamwise length [m] and this voice's exact inlet
+    /// gas. Density and viscosity therefore remain bound to the SAME regional or axial material state as the source impedance.
+    /// This law enters every trial contact/flow junction.
     ///
-    /// Omitting this selection preserves the inviscid source. The selected
-    /// model is fully developed, quasisteady parallel-plate flow plus separated
-    /// jet loss; it does not resolve unsteady channel inertia or turbulence.
-    /// Admission is allowed only before the first rendered sample.
+    /// Omitting this selection preserves the inviscid source. The selected law is van Zon, Hirschberg, Gilbert and Wijnands 1990
+    /// (J. Phys. Colloques 51 C2-821, eqs. 1-8: [`crate::bernoulli_aperture::viscous::ViscousSlit::separated_jet_from_gas`]): a
+    /// separated entrance that reattaches at `S = 2 h`, a growing boundary layer, then Poiseuille flow, and below `L / h = 3` a
+    /// jet that never reattaches (`phi / phi_B = 0.45`). It is quasisteady, laminar (`Re` up to about 4000 in the print) and 2-D,
+    /// and it does not resolve unsteady channel inertia. Before this law the selection was the fully developed parallel-plate
+    /// law, which has no entrance region. Admission is allowed only before the first rendered sample.
+    ///
+    /// # Errors
+    /// An advanced voice, a jet contraction already selected, or an invalid length or gas.
     pub fn set_viscous_slit_length(&mut self, length_m: f64) -> Result<(), AcousticRealizeError> {
+        self.select_viscous_slit(length_m, true)
+    }
+
+    /// The fully developed law (`dp = 12 mu L v / h^2 + rho v |v| / 2`) that `set_viscous_slit_length` selected before the
+    /// separated-jet law: kept for the tests that pin its closed form and for A/B controls.
+    #[cfg(test)]
+    pub(crate) fn set_viscous_slit_length_fully_developed(&mut self, length_m: f64) -> Result<(), AcousticRealizeError> {
+        self.select_viscous_slit(length_m, false)
+    }
+
+    fn select_viscous_slit(&mut self, length_m: f64, separated_jet: bool) -> Result<(), AcousticRealizeError> {
         if self.sample_index != 0 {
             return Err(AcousticRealizeError::InvalidDescription {
                 what: "viscous reed channel selection requires an unadvanced voice",
@@ -790,7 +805,11 @@ impl ReedBoreVoice {
                 what: "a jet contraction is defined on the inviscid reed law only, not with a viscous reed channel",
             });
         }
-        let slit = crate::bernoulli_aperture::viscous::ViscousSlit::from_gas(&self.inlet_gas, length_m)?;
+        let slit = if separated_jet {
+            crate::bernoulli_aperture::viscous::ViscousSlit::separated_jet_from_gas(&self.inlet_gas, length_m)?
+        } else {
+            crate::bernoulli_aperture::viscous::ViscousSlit::from_gas(&self.inlet_gas, length_m)?
+        };
         self.viscous_slit = Some(slit);
         Ok(())
     }

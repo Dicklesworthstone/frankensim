@@ -1509,7 +1509,12 @@ fn load_with_all_sources(
         let observer_json=format!("{}{}",super::duct_metadata::reed_provenance(&p),super::thermochemical::provenance(p.gas_records()));
         let slit_json = p.viscous_slit().map_or_else(String::new, |slit| {
             let gas = slit.gas().expect("reed channel retains its actual inlet gas");
-            format!(",\"slit_channel\":{{\"model\":\"quasisteady parallel-plate resistance plus separated jet\",\"length_m\":{:e},\"inlet_temperature_k\":{:e},\"inlet_pressure_pa\":{:e},\"inlet_density_kg_m3\":{:e},\"dynamic_viscosity_pa_s\":{:e}}}",
+            format!(",\"slit_channel\":{{\"model\":\"{}\",\"length_m\":{:e},\"inlet_temperature_k\":{:e},\"inlet_pressure_pa\":{:e},\"inlet_density_kg_m3\":{:e},\"dynamic_viscosity_pa_s\":{:e}}}",
+                if slit.is_separated_jet() {
+                    "separated-jet reed channel: van Zon et al. 1990 eqs. 1-8 as constructed from eqs. 1, 5, 6 (S = 2 h, alpha = 0.45 below L/h = 3, laminar, 2-D)"
+                } else {
+                    "quasisteady parallel-plate resistance plus separated jet"
+                },
                 slit.length_m(), gas.temperature, gas.pressure, gas.density, gas.dynamic_viscosity)
         });
         let policy_name=if policy==ObservationPolicy::Acceptance {"acceptance"} else {"diagnostic"};
