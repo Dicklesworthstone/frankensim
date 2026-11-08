@@ -1,11 +1,20 @@
 use super::super::{IonizationChannelBalance, IonizationNetworkBalance};
+use super::diffuse::{
+    NetworkDiffuseCellExposure, NetworkDiffuseEvolutionBalance, NetworkDiffuseEvolutionSummary,
+};
 use super::*;
 use crate::chemistry::collisional_radiative::solve::DiffuseIncrement;
+use crate::chemistry::diffuse_recombination::DiffuseRecombinationSolve;
+use crate::chemistry::diffuse_recombination::evolution::DiffuseRecombinationExposure;
 use crate::chemistry::radiation_transport::RadiationTransportBandBalance;
 use fs_math::dd::Dd;
 use fs_math::det::{exp, ln};
 use fs_qty::Time;
 use fs_thermochem::electron_collision::AVOGADRO_PER_MOL as NA;
+
+mod diffuse_accounts;
+mod radiation;
+use radiation::RadiationField;
 
 /// Original mixture, accepted endpoint and independent channel/beam accounts.
 #[derive(Clone, Debug, PartialEq)]
@@ -17,6 +26,7 @@ pub struct NetworkRadiationCellResult {
     channels: Vec<IonizationChannelBalance>,
     beams: Vec<RadiationTransportBandBalance>,
     balance: IonizationNetworkBalance,
+    diffuse: Option<NetworkDiffuseCellExposure>,
 }
 impl NetworkRadiationCellResult {
     pub const fn initial_state(&self) -> &FrozenIonizedGasStateV1 {
@@ -40,6 +50,9 @@ impl NetworkRadiationCellResult {
     pub const fn balance(&self) -> IonizationNetworkBalance {
         self.balance
     }
+    pub const fn diffuse_radiation(&self) -> Option<&NetworkDiffuseCellExposure> {
+        self.diffuse.as_ref()
+    }
 }
 
 /// Whole-column physical balances and all accepted/rejected numerical work.
@@ -48,7 +61,7 @@ pub struct NetworkRadiationBalance {
     pub absorbed_photons: f64,
     pub emitted_photons: f64,
     pub absorbed_radiation_energy_j: f64,
-    /// All spontaneous capture photons escape this evolution closure.
+    /// Gross spontaneous emission; the optional diffuse summary records escape.
     pub emitted_radiation_energy_j: f64,
     /// Direct signed gas radiation source, before gross-traffic subtraction.
     pub net_radiation_energy_j: f64,
@@ -82,6 +95,7 @@ pub struct NetworkRadiationResult {
     area: Area,
     elapsed: Time,
     controls: NetworkRadiationSolve,
+    diffuse: Option<NetworkDiffuseEvolutionSummary>,
 }
 impl NetworkRadiationResult {
     pub fn cells(&self) -> &[NetworkRadiationCellResult] {
@@ -105,6 +119,9 @@ impl NetworkRadiationResult {
     pub const fn controls(&self) -> NetworkRadiationSolve {
         self.controls
     }
+    pub const fn diffuse_radiation(&self) -> Option<&NetworkDiffuseEvolutionSummary> {
+        self.diffuse.as_ref()
+    }
 }
 
 /// Evolve competing atomic ladders and shared thermal pools under finite beams.
@@ -123,13 +140,26 @@ impl NetworkRadiationResult {
 /// no clipping, population floor or artificial electron seed is introduced.
 /// Source tables and work buffers persist across every trial. This is not an
 /// unconditionally stiff method or a global-error certificate. Recombination
-/// emission escapes; the diffuse single-channel owner is a separate closure.
+/// emission escapes in this entry. The diffuse network entry reuses the same
+/// controller with spectral transport of spontaneous radiation.
 pub fn advance_network_radiation_transport(
     cells: &[NetworkRadiationCell<'_>],
     area: Area,
     beams: &[DiffuseRecombinationBeam],
     duration: Time,
     controls: NetworkRadiationSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<NetworkRadiationResult, NetworkRadiationError> {
+    advance_impl(cells, area, beams, duration, controls, None, cancelled)
+}
+
+pub(super) fn advance_impl(
+    cells: &[NetworkRadiationCell<'_>],
+    area: Area,
+    beams: &[DiffuseRecombinationBeam],
+    duration: Time,
+    controls: NetworkRadiationSolve,
+    diffuse: Option<DiffuseRecombinationSolve>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<NetworkRadiationResult, NetworkRadiationError> {
     controls.validate(cells, beams.len())?;
@@ -138,7 +168,15 @@ pub fn advance_network_radiation_transport(
         return Err(Error::Invalid("photon exposure duration"));
     }
     let problems = prepare_problems(cells, controls, &mut cancelled)?;
-    let field = field::PreparedField::new(cells, &problems, area, beams, controls, &mut cancelled)?;
+    let field = RadiationField::new(
+        cells,
+        &problems,
+        area,
+        beams,
+        controls,
+        diffuse,
+        &mut cancelled,
+    )?;
     let mut column = Column {
         problems,
         field,
@@ -154,9 +192,9 @@ pub fn advance_network_radiation_transport(
     for point in &points {
         increments.push(buffer(point.events.len(), DiffuseIncrement::default())?);
     }
-    let mut accounts = Accounts::new(cells.len(), beams.len())?;
-    let mut full_accounts = Accounts::new(cells.len(), beams.len())?;
-    let mut fine_accounts = Accounts::new(cells.len(), beams.len())?;
+    let mut accounts = Accounts::new(cells.len(), beams.len(), diffuse.is_some())?;
+    let mut full_accounts = Accounts::new(cells.len(), beams.len(), diffuse.is_some())?;
+    let mut fine_accounts = Accounts::new(cells.len(), beams.len(), diffuse.is_some())?;
     let local = controls.network.local;
     let mut time = 0.0;
     let mut step = local.initial_step_s;
@@ -284,7 +322,7 @@ pub fn advance_network_radiation_transport(
 
 struct Column<'a> {
     problems: Vec<Problem<'a>>,
-    field: field::PreparedField,
+    field: RadiationField<'a>,
     controls: NetworkRadiationSolve,
     balance: NetworkRadiationBalance,
 }
@@ -307,8 +345,16 @@ impl Column<'_> {
             let before_cell = statistics[c].rate_evaluations;
             let thermal_before = statistics[c].thermal_evaluations;
             statistics[c].rate_evaluations = before_total;
-            let result =
-                self.problems[c].compose(&mut points[c], dt, &mut statistics[c], cancelled);
+            let result = if self.field.is_diffuse() {
+                self.problems[c].collisional_compose(
+                    &mut points[c],
+                    dt,
+                    &mut statistics[c],
+                    cancelled,
+                )
+            } else {
+                self.problems[c].compose(&mut points[c], dt, &mut statistics[c], cancelled)
+            };
             let after_total = statistics[c].rate_evaluations;
             self.balance.rate_evaluations = after_total;
             statistics[c].rate_evaluations = before_cell + (after_total - before_total);
@@ -329,7 +375,7 @@ impl Column<'_> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), Error> {
         self.dark_step(points, 0.5 * dt, statistics, cancelled)?;
-        if self.field.illuminated() {
+        if self.field.radiation_enabled() {
             self.field.evaluate(points, cancelled)?;
             copy_points(predictor, points);
             self.absorb(predictor, 0.5 * dt, increments, cancelled)?;
@@ -349,22 +395,13 @@ impl Column<'_> {
     ) -> Result<(), Error> {
         for c in 0..points.len() {
             poll(cancelled)?;
-            for (increment, rate) in increments[c].iter_mut().zip(self.field.channel_rates(c)) {
-                let extent = product(rate.ionization_rate_mol_per_s, dt)?;
-                let energy = product(rate.absorbed_power_w, dt)?;
-                *increment = DiffuseIncrement {
-                    net_extent_mol: extent,
-                    net_electron_energy_j: product(rate.electron_heating_power_w, dt)?,
-                    net_gas_energy_j: energy,
-                    absorbed_mol: extent,
-                    captured_mol: 0.0,
-                    absorbed_energy_j: energy,
-                    captured_energy_j: 0.0,
-                };
-            }
-            self.problems[c]
-                .apply_diffuse(&mut points[c], &increments[c])
-                .map_err(|error| cell_error(c, error))?;
+            let totals = self.field.increments(c, dt, &mut increments[c])?;
+            let result = if let Some(totals) = totals {
+                self.problems[c].apply_diffuse_with_totals(&mut points[c], &increments[c], totals)
+            } else {
+                self.problems[c].apply_diffuse(&mut points[c], &increments[c])
+            };
+            result.map_err(|error| cell_error(c, error))?;
         }
         Ok(())
     }
@@ -381,7 +418,7 @@ impl Column<'_> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NetworkRadiationResult, Error> {
         let mut results = reserved(cells.len())?;
-        // Gas storage, direct radiation, escaping recombination, work, emitted photons.
+        // Gas storage, direct radiation, gross recombination, work, emitted photons.
         let mut totals = [Dd::ZERO; 5];
         for (c, cell) in cells.iter().enumerate() {
             poll(cancelled)?;
@@ -404,11 +441,18 @@ impl Column<'_> {
                 absorbed_energy = sum(absorbed_energy, Dd::from_f64(result.absorbed_energy_j))?;
                 band_results.push(result);
             }
+            let diffuse = accounts.diffuse_cells.get(c).copied();
+            if let Some(a) = diffuse {
+                absorbed = sum(absorbed, a[1] + a[2] + a[3])?;
+                absorbed_energy = sum(absorbed_energy, a[4])?;
+            }
             let photon_residual = (absorbed - Dd::from_f64(b.absorbed_photons)).to_f64();
             let photon_allowance = NA * self.controls.network.local.absolute_amount_tolerance_mol
                 + 128.0 * f64::EPSILON * absorbed.to_f64().max(b.absorbed_photons);
             if !photon_residual.is_finite() || photon_residual.abs() > photon_allowance {
-                return Err(Error::Arithmetic("channel and beam absorption disagree"));
+                return Err(Error::Arithmetic(
+                    "channel and transported absorption disagree",
+                ));
             }
             let energy_residual =
                 (absorbed_energy - Dd::from_f64(b.absorbed_radiation_energy_j)).to_f64();
@@ -440,6 +484,7 @@ impl Column<'_> {
                 channels,
                 beams: band_results,
                 balance: b,
+                diffuse: diffuse.map(radiation::exposure),
             });
         }
         let mut band_results = reserved(beams.len())?;
@@ -452,6 +497,10 @@ impl Column<'_> {
             absorbed = sum(absorbed, a[1])?;
             absorbed_energy = sum(absorbed_energy, Dd::from_f64(b.absorbed_energy_j))?;
             band_results.push(b);
+        }
+        for a in &accounts.diffuse_cells {
+            absorbed = sum(absorbed, a[1] + a[2] + a[3])?;
+            absorbed_energy = sum(absorbed_energy, a[4])?;
         }
         let [gas, radiation, emitted, work, emitted_photons] = totals;
         let residual = (gas - radiation - work).to_f64();
@@ -477,8 +526,9 @@ impl Column<'_> {
         self.balance.energy_residual_j = residual;
         self.balance.photon_energy_residual_j = photon_residual;
         self.balance.radiation_energy_roundoff_j = roundoff;
-        self.balance.radiation_evaluations = self.field.evaluations;
-        self.balance.radiation_work = self.field.work;
+        self.balance.radiation_evaluations = self.field.evaluations();
+        self.balance.radiation_work = self.field.work();
+        let diffuse = accounts.publish_diffuse(&self.field, self.balance, self.controls)?;
         poll(cancelled)?;
         Ok(NetworkRadiationResult {
             cells: results,
@@ -488,6 +538,7 @@ impl Column<'_> {
             area,
             elapsed: duration,
             controls: self.controls,
+            diffuse,
         })
     }
 }
@@ -497,17 +548,28 @@ impl Column<'_> {
 struct Accounts {
     cells: Vec<[Dd; 3]>,
     column: Vec<[Dd; 3]>,
+    diffuse_cells: Vec<[Dd; 10]>,
+    faces: Vec<[Dd; 4]>,
 }
 impl Accounts {
-    fn new(cells: usize, beams: usize) -> Result<Self, Error> {
+    fn new(cells: usize, beams: usize, diffuse: bool) -> Result<Self, Error> {
+        let faces = if diffuse {
+            cells.checked_add(1).ok_or(Error::WorkBudget)?
+        } else {
+            0
+        };
         Ok(Self {
             cells: buffer(cells * beams, [Dd::ZERO; 3])?,
             column: buffer(beams, [Dd::ZERO; 3])?,
+            diffuse_cells: buffer(if diffuse { cells } else { 0 }, [Dd::ZERO; 10])?,
+            faces: buffer(faces, [Dd::ZERO; 4])?,
         })
     }
     fn clear(&mut self) {
         self.cells.fill([Dd::ZERO; 3]);
         self.column.fill([Dd::ZERO; 3]);
+        self.diffuse_cells.fill([Dd::ZERO; 10]);
+        self.faces.fill([Dd::ZERO; 4]);
     }
     fn add(&mut self, increment: &Self) -> Result<(), Error> {
         for (target, source) in self
@@ -520,17 +582,19 @@ impl Accounts {
                 target[j] = sum(target[j], source[j])?;
             }
         }
+        self.add_diffuse(increment)?;
         Ok(())
     }
-    fn integrate(&mut self, field: &field::PreparedField, dt: f64) -> Result<(), Error> {
+    fn integrate(&mut self, field: &RadiationField<'_>, dt: f64) -> Result<(), Error> {
         let beams = self.column.len();
         for (k, target) in self.cells.iter_mut().enumerate() {
             let rate = field.cell_beam_rates(k / beams)[k % beams];
             integrate_rate(target, rate, dt)?;
         }
-        for (target, rate) in self.column.iter_mut().zip(&field.beam_rates) {
+        for (target, rate) in self.column.iter_mut().zip(field.beam_rates()) {
             integrate_rate(target, *rate, dt)?;
         }
+        self.integrate_diffuse(field, dt)?;
         Ok(())
     }
     fn error(
@@ -570,7 +634,7 @@ impl Accounts {
                 error = error.max(amount_error).max(energy_error);
             }
         }
-        Ok(error)
+        Ok(error.max(self.diffuse_error(full, fine, controls)?))
     }
 }
 fn integrate_rate(

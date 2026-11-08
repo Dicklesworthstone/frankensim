@@ -8503,6 +8503,48 @@ This entry evaluates a frozen field. It does not assume excited-state cascades,
 case-B branching, a fitted escape fraction, an average emitted photon,
 scattering, photon travel time or atomic source data beyond the originals.
 
+## Evolving mixed ionization networks with diffuse recycling
+
+`advance_network_diffuse_recombination` shares the native network time
+controller with finite-beam evolution. Each radiation midpoint uses the
+current original populations and electron temperature to refresh reciprocal
+emission, common opacity, cross-channel recycling and nonlocal transport.
+The surrounding native collisional/thermal steps include impact ionization,
+three-body capture, elastic pool exchange and retained external powers;
+spontaneous capture occurs exactly once through the diffuse field.
+
+All channel increments update the common species vector together. Independent
+compensated cell totals determine electron number, electron energy and signed
+gas radiation energy after consistency checks against the canonical edges.
+This preserves the small net loss of a trapped mixed cell without losing
+large opposite chemical exchanges. Exactly neutral cells can acquire
+electrons from transported photons; their birth temperature follows the
+actual deposited photoelectron energy, without a seed population or a
+stored-empty-pool temperature prescription.
+
+The existing full/half-step comparison controls populations, temperatures,
+channel ledgers, beam exposures, same-source/cross-source/nonlocal diffuse
+traffic, direct signed cell moments and every directional interface
+exposure. Rejected trials contribute to one global work/evaluation budget.
+All source and scratch storage is retained across stages. Invalid trials
+refuse or reduce the step through the existing controller, never clip
+populations or publish a partial endpoint.
+
+`NetworkRadiationResult::diffuse_radiation` exposes accepted interface
+exposures and independent photon/source/boundary audits; the cell accessor
+exposes spontaneous and recycling accounts. Existing beam-only entry points
+and band balances retain their semantics. Gross emitted radiation is
+distinguished from actual boundary escape. The strict actual-gas versus
+direct-source energy check retains the original absolute chemistry
+tolerance; only incoming/outgoing boundary subtraction receives its explicit
+floating-point traffic allowance.
+
+The field remains quasi-steady and plane-parallel. Time-step estimates and
+spectral/angular/tail bounds are separate controls, not a global accuracy
+certificate or an unconditionally stiff solver. Excited-state cascades,
+scattering, moving radiation boundaries, finite light-travel time and
+unsupported atomic cross sections are not inferred.
+
 ## Evolving mixed ionization networks under finite beams
 
 `chemistry::ionization_network::transport::advance_network_radiation_transport`

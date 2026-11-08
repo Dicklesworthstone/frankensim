@@ -4,6 +4,8 @@ use crate::chemistry::diffuse_recombination::{
 };
 use crate::chemistry::ionization_network::transport::diffuse::*;
 
+mod evolution;
+
 fn diffuse_controls(relative_tolerance: f64) -> NetworkDiffuseSolve {
     NetworkDiffuseSolve::new(
         NetworkRadiationSolve::new(controls(1e-6)),

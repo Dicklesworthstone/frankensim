@@ -7,10 +7,12 @@
 //! excited-state cascade or additional atomic source is inferred.
 
 use super::*;
+use crate::chemistry::diffuse_recombination::evolution::DiffuseRecombinationExposure;
 use crate::chemistry::diffuse_recombination::{
     DiffuseRecombinationBalance, DiffuseRecombinationCellBalance, DiffuseRecombinationError,
     DiffuseRecombinationFlux, DiffuseRecombinationSolve,
 };
+use fs_qty::Time;
 
 pub(super) mod field;
 
@@ -24,6 +26,113 @@ impl NetworkDiffuseSolve {
     pub const fn new(network: NetworkRadiationSolve, radiation: DiffuseRecombinationSolve) -> Self {
         Self { network, radiation }
     }
+}
+
+/// Accepted spontaneous emission and recycling in one evolving mixture.
+/// Counts are gross except the explicitly signed net moments. Same-source,
+/// cross-source and nonlocal absorption are disjoint; boundary beams retain
+/// their existing independent band accounts on the parent result.
+/// The signed net moments include absorption from those boundary beams.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct NetworkDiffuseCellExposure {
+    pub emitted_photons: f64,
+    pub self_absorbed_photons: f64,
+    pub cross_channel_absorbed_photons: f64,
+    pub nonlocal_absorbed_photons: f64,
+    pub diffuse_absorbed_energy_j: f64,
+    pub emitted_energy_j: f64,
+    pub captured_electron_energy_j: f64,
+    pub net_ionization_extent_mol: f64,
+    pub net_electron_energy_j: f64,
+    pub net_gas_energy_j: f64,
+}
+impl NetworkDiffuseCellExposure {
+    pub fn diffuse_absorbed_photons(&self) -> f64 {
+        self.self_absorbed_photons
+            + self.cross_channel_absorbed_photons
+            + self.nonlocal_absorbed_photons
+    }
+}
+
+/// Independent time-integrated boundary and gas-source conservation audits.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct NetworkDiffuseEvolutionBalance {
+    pub emitted_photons: f64,
+    pub emitted_energy_j: f64,
+    pub diffuse_absorbed_photons: f64,
+    pub diffuse_absorbed_energy_j: f64,
+    pub incident_photons: f64,
+    pub incident_energy_j: f64,
+    pub escaped_photons: f64,
+    pub escaped_energy_j: f64,
+    pub net_ionization_extent_mol: f64,
+    pub net_radiation_energy_j: f64,
+    /// N_A times the direct net radiative extent plus escape minus incidence.
+    pub photon_residual: f64,
+    /// Direct signed gas radiation source plus escape minus incidence.
+    pub radiation_energy_residual_j: f64,
+    /// Actual gas storage plus escape minus incidence minus external work.
+    pub energy_residual_j: f64,
+    /// Allowance confined to subtraction of bright incoming/outgoing energy.
+    /// The independent gas-source audit keeps its original absolute tolerance.
+    pub boundary_energy_roundoff_j: f64,
+    pub radiation_evaluations: usize,
+    pub radiation_work: usize,
+    pub maximum_normalized_spectral_estimate: f64,
+    pub maximum_normalized_angular_estimate: f64,
+    pub maximum_normalized_tail_bound: f64,
+}
+
+/// Directional interface exposures and original controls for the live field.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NetworkDiffuseEvolutionSummary {
+    pub(super) interfaces: Vec<DiffuseRecombinationExposure>,
+    pub(super) balance: NetworkDiffuseEvolutionBalance,
+    pub(super) controls: NetworkDiffuseSolve,
+}
+impl NetworkDiffuseEvolutionSummary {
+    pub fn interfaces(&self) -> &[DiffuseRecombinationExposure] {
+        &self.interfaces
+    }
+    pub const fn balance(&self) -> NetworkDiffuseEvolutionBalance {
+        self.balance
+    }
+    pub const fn controls(&self) -> NetworkDiffuseSolve {
+        self.controls
+    }
+}
+
+/// Evolve shared atomic ladders, temperatures and the diffuse radiation field.
+///
+/// The original collisional/thermal network surrounds a simultaneous midpoint
+/// radiation update. Recombination photons may escape, recycle locally across
+/// different thresholds, or ionize another cell. Every trial recomputes the
+/// spectrum and opacity from its actual populations and temperature. Source
+/// tables and transport buffers persist; no artificial electron seed, clipped
+/// population, empirical escape fraction or mean photon replaces the sources.
+///
+/// The existing full/two-half controller also checks integrated radiation
+/// moments and all interface exposures. Spectral/angular errors and omitted
+/// tails have separate bounds, and all rejected work shares the global budget.
+/// This quasi-steady plane-parallel closure does not model photon travel time,
+/// scattering, excited-state cascades or unrestricted stiff kinetics.
+pub fn advance_network_diffuse_recombination(
+    cells: &[NetworkRadiationCell<'_>],
+    area: Area,
+    beams: &[DiffuseRecombinationBeam],
+    duration: Time,
+    controls: NetworkDiffuseSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<super::NetworkRadiationResult, NetworkRadiationError> {
+    super::evolution::advance_impl(
+        cells,
+        area,
+        beams,
+        duration,
+        controls.network,
+        Some(controls.radiation),
+        cancelled,
+    )
 }
 
 /// Spectral rates of one canonical source edge in its actual mixed cell.

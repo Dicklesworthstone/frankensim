@@ -715,6 +715,27 @@ impl<'a> Problem<'a> {
         point: &mut Point,
         increments: &[DiffuseIncrement],
     ) -> Result<(), IonizationNetworkError> {
+        self.apply_diffuse_impl(point, increments, None)
+    }
+
+    /// Preserve independently accumulated cell moments when large exchanges
+    /// between channels hide a much smaller escape in their rounded f64 rates.
+    /// Totals are signed net electron moles, electron energy and gas energy.
+    pub fn apply_diffuse_with_totals(
+        &self,
+        point: &mut Point,
+        increments: &[DiffuseIncrement],
+        totals: [Dd; 3],
+    ) -> Result<(), IonizationNetworkError> {
+        self.apply_diffuse_impl(point, increments, Some(totals))
+    }
+
+    fn apply_diffuse_impl(
+        &self,
+        point: &mut Point,
+        increments: &[DiffuseIncrement],
+        totals: Option<[Dd; 3]>,
+    ) -> Result<(), IonizationNetworkError> {
         if increments.len() != self.edges.len()
             || point.events.len() != self.edges.len()
             || point.amounts.len() != self.initial.amounts().len()
@@ -725,6 +746,11 @@ impl<'a> Problem<'a> {
             ));
         }
         if self.edges.is_empty() {
+            if totals.is_some_and(|values| values.iter().any(|v| *v != Dd::ZERO)) {
+                return Err(IonizationNetworkError::Invalid(
+                    "radiation without source edges",
+                ));
+            }
             return Ok(());
         }
         let electron = self.electron.expect("admitted structural electron");
@@ -733,6 +759,8 @@ impl<'a> Problem<'a> {
         let mut next_events = [Events::default(); MAX_EQUILIBRIUM_SPECIES_V1];
         let mut sensible = Dd::ZERO;
         let mut radiation = Dd::ZERO;
+        let mut magnitudes = [Dd::ZERO; 3];
+        let mut chemical_total = Dd::ZERO;
         for (index, (edge, increment)) in self.edges.iter().zip(increments).enumerate() {
             let DiffuseIncrement {
                 net_extent_mol: extent,
@@ -783,6 +811,10 @@ impl<'a> Problem<'a> {
             changes[electron] = changes[electron] + Dd::from_f64(extent);
             sensible = sensible + Dd::from_f64(heat);
             radiation = radiation + Dd::from_f64(energy);
+            chemical_total = chemical_total + Dd::from_f64(chi) * Dd::from_f64(extent);
+            for (sum, value) in magnitudes.iter_mut().zip([extent, heat, energy]) {
+                *sum = *sum + Dd::from_f64(value.abs());
+            }
             next_events[index] = point.events[index];
             for (slot, (sum, value)) in next_events[index]
                 .0
@@ -797,6 +829,41 @@ impl<'a> Problem<'a> {
                     ));
                 }
             }
+        }
+        if let Some(direct) = totals {
+            let assembled = [changes[electron], sensible, radiation];
+            for slot in 0..3 {
+                let absolute = if slot == 0 {
+                    controls.absolute_amount_tolerance_mol
+                } else {
+                    controls.energy_tolerance_j
+                };
+                let scale = magnitudes[slot].to_f64().max(direct[slot].abs().to_f64());
+                let allowance = absolute + 128.0 * f64::EPSILON * scale;
+                let mismatch = (direct[slot] - assembled[slot]).to_f64();
+                if !direct[slot].hi.is_finite()
+                    || !direct[slot].lo.is_finite()
+                    || !nonnegative(allowance)
+                    || !mismatch.is_finite()
+                    || mismatch.abs() > allowance
+                {
+                    return Err(IonizationNetworkError::Invalid(
+                        "shared radiation totals disagree with canonical edge moments",
+                    ));
+                }
+            }
+            let closure = (direct[1] + chemical_total - direct[2]).to_f64();
+            let closure_scale =
+                magnitudes[1].to_f64() + chemical_total.abs().to_f64() + direct[2].abs().to_f64();
+            let allowance = controls.energy_tolerance_j + 128.0 * f64::EPSILON * closure_scale;
+            if !closure.is_finite() || !nonnegative(allowance) || closure.abs() > allowance {
+                return Err(IonizationNetworkError::Invalid(
+                    "shared radiation electron/chemical/gas disagreement",
+                ));
+            }
+            changes[electron] = direct[0];
+            sensible = direct[1];
+            radiation = direct[2];
         }
         let mut amounts = [0.0; MAX_EQUILIBRIUM_SPECIES_V1];
         for (index, &before) in point.amounts.iter().enumerate() {
