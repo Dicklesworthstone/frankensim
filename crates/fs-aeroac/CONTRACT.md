@@ -1,3 +1,29 @@
+## Full moving volume, force and stress arrays
+
+`PreparedMovingSourceArray::multipole_field_at` composes the original moving
+compact and stress-source owners at one physical microphone event. Every
+source/image path solves its causal root once; that same emission time and
+original position, velocity, acceleration and jerk prepare both mechanisms.
+The caller supplies their original physical strengths and the distinct,
+spatially weighted force/stress past-worldline integrals. Missing prior forcing
+or an initial acoustic field is not reconstructed from a scalar impulse.
+
+All source mechanisms and direct/ideal-plane/wedge paths remain in compensated
+pressure and Cartesian particle-velocity sums before rounding or signed `p*u`.
+The original image parity and vector transformation apply once to the complete
+field. Microphone motion changes the causal observation event; it adds no
+acoustic velocity or pressure multiplier. Existing uniform-flow preparations
+retain their fluid-rest-frame observation and exclude mean-flow energy advection.
+
+Queries allocate no additional storage and preserve original aggregate source,
+path and retarded-iteration limits. History callbacks retain their own
+clearance, integration accuracy and work limits. Native compactness, lossless
+propagation and ideal-boundary assumptions remain; this is not finite-body
+scattering or feedback into the producing structure/flow. Five regressions in
+`tests/moving_source_array/multipole.rs` check independent stationary Green
+derivatives, accelerating/wedge composition, coherent cancellation with weak
+stress or surviving velocity, original Q/F recovery and complete-history refusal.
+
 ## Broadband coherent mixed sources at a dispersive impedance wall
 
 `PreparedImpedanceWallCompactSourceObserver::evaluate_welch_bin` propagates

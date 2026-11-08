@@ -55,6 +55,19 @@ pub struct PreparedMovingQuadrupoleFieldSample {
 }
 
 impl MovingCompactObserver {
+    // A coherent Q/F/stress composition already owns this admitted causal root
+    // and its original motion jet. Keep both tensor derivatives in this owner
+    // without another retarded search or reconstructing motion at a new time.
+    pub(in crate::curle3d) fn prepare_quadrupole_field_sample(
+        &self,
+        propagation: PreparedMovingCompactSample,
+        source: SourceKinematics,
+        jerk_m_s3: [f64; 3],
+    ) -> Result<PreparedMovingQuadrupoleFieldSample, AeroacError> {
+        let pressure = self.prepare_kinematic_quadrupole(propagation, source, jerk_m_s3)?;
+        self.prepare_kinematic_quadrupole_field(pressure, source, jerk_m_s3)
+    }
+
     /// Full-field coefficients for uniform motion on the original causal root.
     pub fn prepare_uniform_quadrupole_field(
         &self,

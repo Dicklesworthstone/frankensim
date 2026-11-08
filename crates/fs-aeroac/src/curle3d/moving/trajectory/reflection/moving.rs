@@ -385,7 +385,12 @@ impl<'a> PreparedReflectedMovingReceiverSource<'a> {
         Ok(self.path(path)?.maximum_source_time_rate())
     }
 
-    fn path(&self, index: usize) -> Result<&PreparedMovingReceiverSource<'a>, AeroacError> {
+    // A mixed-source array needs the original root before any image map is
+    // applied, so every mechanism shares one causal event and one final map.
+    pub(in crate::curle3d::moving::trajectory) fn path(
+        &self,
+        index: usize,
+    ) -> Result<&PreparedMovingReceiverSource<'a>, AeroacError> {
         if index >= self.path_count() {
             return Err(invalid(
                 "moving reflection path index exceeds the complete image group",
@@ -578,24 +583,39 @@ impl<'a> PreparedReflectedMovingReceiverSource<'a> {
             poll(cancelled)?;
             let history = force_history_at(path, &virtual_observer, source_time)?;
             let (_, pressure, velocity) = prepared.evaluate_with_fields_dd(strength, history)?;
-            let sign = self.observer.signs[path];
-            sum.add(
-                pressure * Dd::from_f64(sign),
-                image_velocity(
-                    velocity,
-                    sign,
-                    self.observer.planes(),
-                    path,
-                    self.observer
-                        .wedge_images
-                        .get(path)
-                        .filter(|_| path != 0)
-                        .map(|image| &image.matrix),
-                ),
-                residual,
-            );
+            self.add_field_path(path, pressure, velocity, residual, sum)?;
         }
         poll(cancelled)
+    }
+
+    // All source mechanisms use the original image parity and DD polar-vector
+    // map exactly once, before the coherent array sum or intensity is rounded.
+    pub(in crate::curle3d::moving::trajectory) fn add_field_path(
+        &self,
+        path: usize,
+        pressure: Dd,
+        velocity: [Dd; 3],
+        residual: f64,
+        sum: &mut ReflectedFieldSum,
+    ) -> Result<(), AeroacError> {
+        self.path(path)?;
+        let sign = self.observer.signs[path];
+        sum.add(
+            pressure * Dd::from_f64(sign),
+            image_velocity(
+                velocity,
+                sign,
+                self.observer.planes(),
+                path,
+                self.observer
+                    .wedge_images
+                    .get(path)
+                    .filter(|_| path != 0)
+                    .map(|image| &image.matrix),
+            ),
+            residual,
+        );
+        Ok(())
     }
 }
 

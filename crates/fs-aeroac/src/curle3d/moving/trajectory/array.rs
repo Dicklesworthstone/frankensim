@@ -14,6 +14,9 @@ use super::{
 use crate::AeroacError;
 use crate::curle3d::moving::{CompactSourceStrength, MovingCompactObserver};
 
+mod multipole;
+pub use multipole::{MovingMultipoleHistory, MovingMultipoleSource};
+
 /// Aggregate work admission for one complete receiver event.
 /// Native source/receiver preparation budgets remain in force as well.
 #[derive(Clone, Copy, Debug)]

@@ -14,6 +14,9 @@ use fs_aeroac::curle3d::{IdealAcousticPlane, IdealPlaneBoundary};
 use fs_material::fluid_acoustics::FluidAcousticState;
 use std::f64::consts::PI;
 
+#[path = "moving_source_array/multipole.rs"]
+mod multipole;
+
 fn medium() -> FluidAcousticState {
     FluidAcousticState::try_new(1.4, 20.0).unwrap()
 }

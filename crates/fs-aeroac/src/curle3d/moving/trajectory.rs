@@ -21,7 +21,7 @@ use fs_math::dd::Dd;
 
 mod doppler;
 
-/// Coherent full Q/F fields from independently moving original source histories.
+/// Coherent full Q/F/stress fields from independently moving original histories.
 pub mod array;
 /// Shared, observer-independent C2 path preparation.
 pub mod path;
@@ -30,7 +30,10 @@ pub mod receiver;
 /// Exact ideal-wall paths on the original finite source trajectory and clock.
 pub mod reflection;
 
-pub use array::{MovingSourceArrayBudget, MovingSourceArrayField, PreparedMovingSourceArray};
+pub use array::{
+    MovingMultipoleHistory, MovingMultipoleSource, MovingSourceArrayBudget, MovingSourceArrayField,
+    PreparedMovingSourceArray,
+};
 pub use path::PreparedKinematicTrajectory;
 pub use receiver::{
     MovingReceiverBudget, MovingReceiverConfig, PreparedMovingReceiverSample,
