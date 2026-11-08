@@ -10,7 +10,12 @@
 //! Declared omissions, none corrected by a constant: the tube's wall is not a scatterer of the bar's field; the
 //! mouth radiates to the receiver as a free compact source, with no reflection off the bar; the mouth's flow is a
 //! piston; each tube mode's reflection is taken at that mode's frequency and modes aren't coupled through it; the
-//! neighbouring bars and the frame are absent; the receiver's narrow-band hearing of the bar itself is unchanged.
+//! neighbouring bars and the frame are absent.
+//!
+//! Without the card's observer row the receiver hears the bar itself through the narrow-band law, as a bar alone
+//! does. With it, the broadband observer hears the bar: its one-way copy of the bar steps under the same held
+//! forces the bar takes, the contact and the tube's reaction on each mode, so it hears the coupled bar and moves
+//! nothing, and the mouth's term is added to it as it is to the narrow-band one.
 //!
 //! Each bar mode exchanges with its nearest tube mode alone, resistance and inertance alike. A transfer held at
 //! one tube mode's frequency is only true near that frequency, and with every pair kept A3's tube modes at 2027
@@ -19,6 +24,7 @@
 use crate::bar::TAU;
 use crate::card::{Card, Tube};
 use crate::render::{Body, strike_budget};
+use fs_couple::modal_acoustic_time::broadband::BroadbandModalObserver;
 use fs_couple::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticTimeModel, ModalAcousticWorkspace,
 };
@@ -324,6 +330,12 @@ pub struct TubeBody {
     monopole: f64,
     delay_samples: f64,
     history: Vec<f64>,
+    /// The broadband observer, when the card names one: it hears the bar in place of the narrow-band law.
+    observer: Option<BroadbandModalObserver>,
+    /// The observer's pressure after the substeps just taken [Pa].
+    observed: f64,
+    /// The narrow-band receiver plus the mouth, kept apart when the observer is the one heard.
+    narrow: Vec<f64>,
 }
 
 impl TubeBody {
@@ -403,7 +415,21 @@ impl TubeBody {
             monopole,
             delay_samples,
             history: Vec::new(),
+            observer: None,
+            observed: 0.0,
+            narrow: Vec::new(),
         })
+    }
+
+    /// The bar's own modal model, built as a bar alone builds it: the broadband observer is fitted on it.
+    pub fn model(&self) -> &ModalAcousticTimeModel {
+        &self.body
+    }
+
+    /// Hear the bar through `observer` in place of the narrow-band law. The narrow-band receiver, plus the
+    /// mouth, is still computed and kept apart as the check that the bar and the tube did not change.
+    pub fn observe(&mut self, observer: BroadbandModalObserver) {
+        self.observer = Some(observer);
     }
 
     /// Mechanical energy: both sets of modes plus the mutual kinetic term.
@@ -516,6 +542,12 @@ impl Body for TubeBody {
             .step_into(&self.total, &mut self.workspace)
             .map_err(|e| format!("modal step: {e:?}"))?;
         self.bar_pressure = frame.observer_pressure_pa;
+        if let Some(o) = self.observer.as_mut() {
+            // The same held forces the bar just took: the contact and the tube's reaction on each mode.
+            self.observed = o
+                .step(&self.total)
+                .map_err(|e| format!("broadband observer step: {e:?}"))?;
+        }
         let n = self.bar_held.len();
         self.bar_held.copy_from_slice(&self.total[..n]);
         for (o, f) in self.tube.iter_mut().zip(&self.tube_force) {
@@ -531,7 +563,17 @@ impl Body for TubeBody {
             .map(|o| o.acceleration() * o.inverse_root_mass)
             .sum();
         self.history.push(volume_acceleration);
-        self.bar_pressure + self.monopole * self.delayed_acceleration()
+        let mouth = self.monopole * self.delayed_acceleration();
+        let narrow = self.bar_pressure + mouth;
+        if self.observer.is_none() {
+            return narrow;
+        }
+        self.narrow.push(narrow);
+        self.observed + mouth
+    }
+
+    fn take_narrow(&mut self) -> Vec<f64> {
+        std::mem::take(&mut self.narrow)
     }
 }
 

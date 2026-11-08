@@ -454,9 +454,6 @@ impl Card {
             if self.resonator.is_some() {
                 return Err("a card takes a resonator or a tube, not both".into());
             }
-            if self.observer.is_some() {
-                return Err("the broadband observer is not wired to a tube's body".into());
-            }
             if !(t.radius_m > 0.0 && t.air_length_m > 2.0 * t.radius_m && t.gap_m > 0.0) {
                 return Err(
                     "tube needs a positive radius and gap and a column longer than its diameter"

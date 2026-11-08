@@ -319,6 +319,39 @@ pub struct ObserverOutcome {
     pub rigid_check: Option<observer::RigidCheck>,
 }
 
+/// The broadband observer fitted on `model`, the bar's modal model as the render steps it, with what its band
+/// and fit cost. A bar alone and a bar over its tube build it the same way.
+fn broadband_observer(
+    card: &Card,
+    row: card::ObserverRow,
+    medium: Medium,
+    (surface, shapes): (&fs_bem::panel3d::SpherePanels, &[Vec<f64>]),
+    s: &Structure,
+    transfers: &radiation::Transfers,
+    model: &fs_couple::modal_acoustic_time::ModalAcousticTimeModel,
+) -> Result<(BroadbandModalObserver, ObserverOutcome), String> {
+    let band = observer::band(card, medium, surface, shapes, s, transfers)?;
+    observer::report_band(card, &band);
+    let fit_started = Instant::now();
+    let (heard, report) = BroadbandModalObserver::build(
+        model,
+        &band.samples,
+        observer::controls(row.fit_order, row.held_out_budget),
+        card.rate_hz * card.substeps,
+    )
+    .map_err(|e| format!("broadband observer: {e:?}"))?;
+    let outcome = ObserverOutcome {
+        report,
+        top_hz: band.top_hz,
+        training: band.samples.omega_rad_s.len(),
+        held_out: band.samples.held_out.len(),
+        band_wall_s: band.wall_s,
+        fit_wall_s: fit_started.elapsed().as_secs_f64(),
+        rigid_check: band.rigid_check,
+    };
+    Ok((heard, outcome))
+}
+
 /// Radiate every mode of `s` to the card's receiver and render the cited mallet's stroke.
 #[allow(clippy::too_many_lines)] // one coherent realization dispatcher
 pub fn strike(card: &Card, s: &Structure) -> Result<Strike, String> {
@@ -365,25 +398,16 @@ pub fn strike(card: &Card, s: &Structure) -> Result<Strike, String> {
             match card.observer {
                 None => Box::new(direct),
                 Some(row) => {
-                    let band = observer::band(card, medium, &surface, &shapes, s, &transfers)?;
-                    observer::report_band(card, &band);
-                    let fit_started = Instant::now();
-                    let (heard, report) = BroadbandModalObserver::build(
+                    let (heard, outcome) = broadband_observer(
+                        card,
+                        row,
+                        medium,
+                        (&surface, &shapes),
+                        s,
+                        &transfers,
                         direct.model(),
-                        &band.samples,
-                        observer::controls(row.fit_order, row.held_out_budget),
-                        card.rate_hz * card.substeps,
-                    )
-                    .map_err(|e| format!("broadband observer: {e:?}"))?;
-                    observer_outcome = Some(ObserverOutcome {
-                        report,
-                        top_hz: band.top_hz,
-                        training: band.samples.omega_rad_s.len(),
-                        held_out: band.samples.held_out.len(),
-                        band_wall_s: band.wall_s,
-                        fit_wall_s: fit_started.elapsed().as_secs_f64(),
-                        rigid_check: band.rigid_check,
-                    });
+                    )?;
+                    observer_outcome = Some(outcome);
                     started = Instant::now();
                     Box::new(render::ObservedBody::new(direct, heard))
                 }
@@ -404,14 +428,29 @@ pub fn strike(card: &Card, s: &Structure) -> Result<Strike, String> {
             let network = tube::Network::new(&gas, t, &isolated, &fields, &bar_omega)?;
             tube::report(card, t, &isolated, &fields, &network);
             let (monopole, delay) = tube::monopole_to_receiver(card, t, &gas);
-            Box::new(tube::TubeBody::new(
+            let mut over_tube = tube::TubeBody::new(
                 card.rate_hz * card.substeps,
                 &modes,
                 s.modes.len(),
                 &network,
                 monopole,
                 delay,
-            )?)
+            )?;
+            if let Some(row) = card.observer {
+                let (heard, outcome) = broadband_observer(
+                    card,
+                    row,
+                    medium,
+                    (&surface, &shapes),
+                    s,
+                    &transfers,
+                    over_tube.model(),
+                )?;
+                observer_outcome = Some(outcome);
+                started = Instant::now();
+                over_tube.observe(heard);
+            }
+            Box::new(over_tube)
         }
     };
     let stroke = render::render(card, body.as_mut(), &projection, &mallet)?;

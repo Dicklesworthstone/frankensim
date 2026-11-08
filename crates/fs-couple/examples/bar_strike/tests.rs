@@ -1191,6 +1191,72 @@ fn a_tube_adds_its_line_and_the_two_way_render_replays() {
     assert!((alone.stroke.contact_time_s / loaded.stroke.contact_time_s - 1.0).abs() < 0.02);
 }
 
+/// A bar over its tube takes the observer row, and the row changes what is heard and nothing in the bar or the
+/// tube: same contact, same force, and the same run's narrow-band receiver plus the mouth replays a render
+/// without the row bit for bit.
+#[test]
+fn broadband_observer_hears_the_bar_over_its_tube() {
+    let rows = "tube\tclosed_open\ntube_radius_m\t0.015\ntube_air_length_m\t0.2\ntube_gap_m\t0.016\ntube_modes\t1\nobserver\tbroadband\nobserver_fit_order\t12\nobserver_held_out_budget\t0.05\n";
+    let parsed = Card::parse(&format!("{}\n{rows}", blank().text), &root())
+        .expect("a tube card takes the observer row");
+    assert!(parsed.tube.is_some() && parsed.observer.is_some());
+    let mut card = coarse(3000.0);
+    card.duration_s = 0.05;
+    card.substeps = 8;
+    card.tube = Some(Tube {
+        radius_m: 0.015,
+        air_length_m: 0.2,
+        gap_m: 0.016,
+        modes: 1,
+    });
+    let s = structure(&card, 1, card.density_kg_m3).expect("structure");
+    let plain = strike(&card, &s).expect("narrow-band strike over the tube");
+    assert!(plain.observer.is_none() && plain.narrow_samples.is_empty());
+    let heard = observed_strike(&mut card, &s, false);
+    let again = strike(&card, &s).expect("broadband replay over the tube");
+    assert_eq!(
+        plain.stroke.contact_time_s.to_bits(),
+        heard.stroke.contact_time_s.to_bits()
+    );
+    assert_eq!(
+        plain.stroke.peak_force_n.to_bits(),
+        heard.stroke.peak_force_n.to_bits()
+    );
+    assert_eq!(plain.stroke.samples.len(), heard.narrow_samples.len());
+    assert!(
+        plain
+            .stroke
+            .samples
+            .iter()
+            .zip(&heard.narrow_samples)
+            .all(|(a, b)| a.to_bits() == b.to_bits()),
+        "the bar and the tube must not change"
+    );
+    assert!(
+        plain
+            .stroke
+            .samples
+            .iter()
+            .zip(&heard.stroke.samples)
+            .any(|(a, b)| a != b),
+        "the observer must be the one heard"
+    );
+    assert!(
+        heard
+            .stroke
+            .samples
+            .iter()
+            .zip(&again.stroke.samples)
+            .all(|(a, b)| a.to_bits() == b.to_bits()),
+        "same-host exact replay"
+    );
+    let report = &heard.observer.as_ref().expect("observer outcome").report;
+    println!(
+        "coarse blank over its tube: held-out worst {:e}, delay {} samples",
+        report.held_out_max_rel_error, report.delay_samples
+    );
+}
+
 /// A long bar whose cut edge falls past the middle of its end cell. A lower-face midpoint there sits .28 mm from the
 /// lower face and 4.45 mm from the end face, yet nearer the end as a fraction: .012 of the thickness against .009
 /// of the length. Snapping by the fraction moved it onto the end face and folded the element.
