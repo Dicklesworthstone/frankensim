@@ -207,6 +207,11 @@ fn g1_authored_mushy_intervals_retain_their_total_enthalpy_law() {
         120.0,
         3e-11,
     );
+    near(
+        response.jacobian.mean_log_exposure_derivative_k,
+        480.0 - 600.0 + 96_000.0 / x,
+        3e-10,
+    );
     near(result.state.temperature_k(), 480.0, 2e-10);
     near(result.state.specific_enthalpy_j_kg(), 108_000.0, 2e-8);
     near(result.state.liquid_mass_fraction(), 0.9, 2e-13);
@@ -323,6 +328,18 @@ fn g1_source_exact_response_carries_latent_residence_in_both_directions() {
             3e-10,
         );
         near(j.exposure_enthalpy_derivative_k, bath - to, 3e-11);
+        let target_h = if to > 400.0 {
+            let delta = to - 400.0;
+            170_000.0 + 2000.0 * delta + 10.0 * delta * delta
+        } else {
+            let delta = to - 300.0;
+            1000.0 * delta + 5.0 * delta * delta
+        };
+        near(
+            j.mean_log_exposure_derivative_k,
+            to - bath + (target_h - h0) / x,
+            3e-10,
+        );
         near(
             j.mean_reservoir_derivative,
             1.0 - bath_derivative / x,
@@ -359,6 +376,7 @@ fn g1_weak_and_rounded_equilibrium_responses_retain_nonzero_derivatives() {
         1.0,
         3e-15,
     );
+    assert_eq!(weak.jacobian.mean_log_exposure_derivative_k, 0.0);
 
     let constant = EquilibriumEnthalpyPhaseCurve::try_new(
         ContentHash([0xd7; 32]),
@@ -398,6 +416,11 @@ fn g1_weak_and_rounded_equilibrium_responses_retain_nonzero_derivatives() {
             1.0 - 200.0 / x,
             3e-15,
         );
+        near(
+            response.jacobian.mean_log_exposure_derivative_k,
+            300.0 * ((200.0 / x) * (1.0 - gain) - gain),
+            3e-12,
+        );
     }
 }
 
@@ -416,6 +439,7 @@ fn g0_equilibrium_latent_interior_has_a_response_but_nondifferentiable_corners_d
     assert_eq!(plateau.jacobian.reservoir_enthalpy_derivative_j_kg_k, 50.0);
     assert_eq!(plateau.jacobian.exposure_enthalpy_derivative_k, 0.0);
     assert_eq!(plateau.jacobian.mean_reservoir_derivative, 0.0);
+    assert_eq!(plateau.jacobian.mean_log_exposure_derivative_k, 0.0);
     // An ordinary source subdivision with equal Cp on both sides is smooth.
     assert!(
         curve
@@ -495,6 +519,11 @@ fn g3_response_composes_and_preserves_the_original_source_under_subdivision() {
             split.jacobian.mean_reservoir_derivative,
             3e-14,
         );
+        near(
+            direct.jacobian.mean_log_exposure_derivative_k,
+            split.jacobian.mean_log_exposure_derivative_k,
+            3e-10,
+        );
         let first = curve
             .linear_heat_exchange_response(initial, 550.0, 600.0)
             .unwrap();
@@ -519,5 +548,25 @@ fn g3_response_composes_and_preserves_the_original_source_under_subdivision() {
                 + b.inlet_enthalpy_loss * a.reservoir_enthalpy_derivative_j_kg_k / 1200.0,
             3e-12,
         );
+    }
+}
+
+#[test]
+fn g1_phase_mean_exposure_response_retains_sub_ulp_temperature_travel() {
+    // Put h=0 at 350 K so a representable tiny heat input remains storable even
+    // though both absolute material temperatures round to the same 350 K.
+    let curve = source_curve(-62_500.0, false);
+    let initial = curve.state_at_specific_enthalpy(0.0).unwrap();
+    assert_eq!(initial.temperature_k(), 350.0);
+    let x = 1e-200;
+    for bath in [250.0, 550.0] {
+        let response = curve.linear_heat_exchange_response(initial, bath, x).unwrap();
+        assert_eq!(response.exchange.state.temperature_k(), 350.0);
+        assert_eq!(response.exchange.mean_temperature_k, 350.0);
+        assert_ne!(response.exchange.state.specific_enthalpy_j_kg(), 0.0);
+        // Independent local ODE expansion: Cp(350)=1500, so
+        // T_end - T_mean = (T_bath-350)*X/(2*1500) + O(X^2).
+        let expected = (bath - 350.0) * (x / 3000.0);
+        near(response.jacobian.mean_log_exposure_derivative_k / expected, 1.0, 3e-14);
     }
 }

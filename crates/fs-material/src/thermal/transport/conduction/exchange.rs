@@ -3,7 +3,8 @@
 use super::{CaloricConductionLayer, OriginalConduction};
 use super::super::capacity::{CapacityCurve, CapacityDrivenExchange, CapacityExchange, CapacityKnot};
 use fs_matdb::MaterialAnswer;
-use fs_thermal::enthalpy::{DepositionError, ThermalStorageBasis};
+use fs_thermal::enthalpy::{DepositionError, ThermalLaw, ThermalStorageBasis};
+use crate::thermal::conduction::ResolvedConductionLayer;
 
 /// One immutable exact exchange proposal and its represented native storage.
 ///
@@ -118,9 +119,10 @@ impl CaloricConductionLayer<'_, '_> {
     /// reports the difference. The final coordinate must pass its ORIGINAL
     /// caloric inverse; unsupported paths and unrepresentable arithmetic refuse.
     ///
-    /// Equilibrium-phase layers retain their original phase exchange API.
-    /// Its response does not yet supply this result's stable exposure-mean
-    /// derivative, so this convenience method refuses that layer type.
+    /// Equilibrium-phase storage delegates to its original exact phase flow
+    /// and response, retaining its response-domain refusals. The complete path
+    /// must stay in this layer's prepared pure-phase/source span; this method
+    /// does not infer a homogeneous mixed-phase conductivity profile.
     pub fn linear_heat_exchange(
         &self,
         initial_specific_energy_j_kg: f64,
@@ -139,10 +141,11 @@ impl CaloricConductionLayer<'_, '_> {
         let caloric = self.caloric_law();
         let initial_temperature = caloric.temperature_k(initial_specific_energy_j_kg)?;
         let (exchange, temperatures) = match self.original {
-            OriginalConduction::EquilibriumPhase(_) => {
-                return Err(DepositionError::InvalidInput(
-                    "fixed-bath caloric response is unsupported for equilibrium-phase storage",
-                ));
+            OriginalConduction::EquilibriumPhase(law) => {
+                return phase_exchange(
+                    law, initial_specific_energy_j_kg,
+                    reservoir_temperature_k, exposure_j_kg_k,
+                );
             }
             OriginalConduction::Isobaric(law) => solve(
                 &law.caloric().source_line().knots,
@@ -307,6 +310,42 @@ impl CaloricConductionLayer<'_, '_> {
         Ok((final_energy, temperature, represented, residual))
     }
 
+}
+
+// Reuse the original phase traversal and every stable response moment.
+// The fixed-bath trajectory is monotone in h, so admitting its two endpoints
+// admits its complete path on the prepared pure-phase/source interval.
+fn phase_exchange(
+    layer: &ResolvedConductionLayer<'_>,
+    initial_h: f64,
+    reservoir: f64,
+    exposure: f64,
+) -> Result<CaloricHeatExchange, DepositionError> {
+    layer.temperature_at_enthalpy(initial_h).map_err(|_| DepositionError::MaterialDomain)?;
+    let curve = layer.caloric_curve();
+    let initial = curve.state_at_specific_enthalpy(initial_h)
+        .map_err(|_| DepositionError::MaterialDomain)?;
+    let response = curve.linear_heat_exchange_response(initial, reservoir, exposure)
+        .map_err(|_| DepositionError::MaterialDomain)?;
+    let (exchange, jacobian) = (response.exchange, response.jacobian);
+    let final_h = exchange.state.specific_enthalpy_j_kg();
+    layer.temperature_at_enthalpy(final_h).map_err(|_| DepositionError::MaterialDomain)?;
+    Ok(CaloricHeatExchange {
+        storage_basis: curve.storage_basis(),
+        initial_specific_energy_j_kg: initial_h,
+        final_specific_energy_j_kg: final_h,
+        temperature_k: exchange.state.temperature_k(),
+        mean_temperature_k: exchange.mean_temperature_k,
+        specific_heat_j_kg: exchange.specific_heat_j_kg,
+        represented_energy_change_j_kg: exchange.represented_enthalpy_change_j_kg,
+        heat_residual_j_kg: exchange.heat_residual_j_kg,
+        inlet_energy_gain: jacobian.inlet_enthalpy_gain,
+        inlet_energy_loss: jacobian.inlet_enthalpy_loss,
+        reservoir_energy_derivative_j_kg_k: jacobian.reservoir_enthalpy_derivative_j_kg_k,
+        mean_reservoir_derivative: jacobian.mean_reservoir_derivative,
+        remaining_temperature_difference_k: jacobian.exposure_enthalpy_derivative_k,
+        mean_log_exposure_derivative_k: jacobian.mean_log_exposure_derivative_k,
+    })
 }
 
 // Capacity is J/(kg K), J/(m3 K), or J/K. Solve in that original source basis,

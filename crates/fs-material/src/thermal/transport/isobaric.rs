@@ -27,7 +27,7 @@ pub mod crystallization;
 
 use super::{
     SPECIFIC_HEAT, ThermalTransportError, admit_temperature_point,
-    capacity::{CapacityCurve, CapacityInverse},
+    capacity::{CapacityCurve, CapacityExchange, CapacityInverse},
     positive, source_line,
 };
 use fs_blake3::{ContentHash, DomainHasher};
@@ -416,7 +416,26 @@ pub(crate) fn source_linear_heat_exchange(
     let answer = CapacityCurve::new(knots).linear_heat_exchange(
         initial_k, reservoir_k, exposure_j_kg_k,
     )?;
-    Ok(LinearHeatExchange {
+    Ok(source_exchange_answer(answer))
+}
+
+/// Original enthalpy-coordinate exchange, retaining heat and relative moments
+/// even when absolute temperature cannot move. The phase owner still admits
+/// the resulting enthalpy and reports its represented storage change/residual.
+pub(crate) fn source_linear_heat_exchange_preserving_heat(
+    knots: &[[f64; 2]],
+    initial_k: f64,
+    reservoir_k: f64,
+    exposure_j_kg_k: f64,
+) -> Result<LinearHeatExchange, ThermalTransportError> {
+    let answer = CapacityCurve::new(knots).linear_heat_exchange_preserving_heat(
+        initial_k, reservoir_k, exposure_j_kg_k,
+    )?;
+    Ok(source_exchange_answer(answer))
+}
+
+fn source_exchange_answer(answer: CapacityExchange) -> LinearHeatExchange {
+    LinearHeatExchange {
         temperature_k: answer.temperature,
         specific_enthalpy_change_j_kg: answer.energy_change,
         mean_temperature_k: answer.mean_temperature,
@@ -426,7 +445,7 @@ pub(crate) fn source_linear_heat_exchange(
         mean_reservoir_derivative: answer.mean_reservoir_derivative,
         remaining_temperature_difference_k: answer.remaining_temperature_difference,
         mean_log_exposure_derivative_k: answer.mean_log_exposure_derivative,
-    })
+    }
 }
 
 /// Exact exposure to a boundary of one already admitted original Cp interval.

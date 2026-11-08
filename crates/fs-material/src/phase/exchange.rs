@@ -11,7 +11,10 @@ pub mod pair;
 use super::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, PhaseStateError};
 use crate::thermal::transport::{
     ThermalTransportError,
-    isobaric::{source_linear_heat_exchange, source_linear_heat_exchange_exposure},
+    isobaric::{
+        source_linear_heat_exchange_exposure,
+        source_linear_heat_exchange_preserving_heat as source_linear_heat_exchange,
+    },
 };
 
 /// Refusal leaves the source chart and supplied accepted state unchanged.
@@ -86,6 +89,10 @@ pub struct PhaseHeatExchangeJacobian {
     pub exposure_enthalpy_derivative_k: f64,
     /// d T_mean / d T_reservoir. A positive moment preserves weak exchange.
     pub mean_reservoir_derivative: f64,
+    /// d T_mean / d ln(X) = T_out - T_mean [K], at fixed inlet and bath.
+    /// Retained from relative source moments, even when both absolute
+    /// temperatures round to the same value. Latent residence is included.
+    pub mean_log_exposure_derivative_k: f64,
 }
 
 /// One exact exchange and its analytic response, from the same chart traversal.
@@ -324,6 +331,11 @@ impl EquilibriumEnthalpyPhaseCurve {
                         local_exposure,
                         exposure_j_kg_k,
                     )?;
+                    response.push_temperature_moment(
+                        used, local_exposure, exposure_j_kg_k,
+                        driving * exchange.inlet_enthalpy_loss,
+                        exchange.mean_log_exposure_derivative_k,
+                    )?;
                 }
                 (
                     exchange.specific_enthalpy_change_j_kg,
@@ -492,6 +504,8 @@ struct ResponseAccumulator {
     reservoir: f64,
     mean: f64,
     mean_correction: f64,
+    mean_log_exposure: f64,
+    mean_log_exposure_correction: f64,
 }
 
 impl ResponseAccumulator {
@@ -502,6 +516,8 @@ impl ResponseAccumulator {
             reservoir: 0.0,
             mean: 0.0,
             mean_correction: 0.0,
+            mean_log_exposure: 0.0,
+            mean_log_exposure_correction: 0.0,
         }
     }
 
@@ -537,6 +553,32 @@ impl ResponseAccumulator {
         Ok(())
     }
 
+    // At each new endpoint, all prior temperature deficits gain this segment's
+    // relative travel. Its own deficit is the original endpoint-minus-mean
+    // moment. Normalize before multiplying; both contributions share the flow
+    // sign, avoiding subtraction of nearly equal absolute temperatures.
+    // Isothermal segments have zero travel and local deficit. Their residence
+    // still enters total_exposure in every preceding/following contribution.
+    fn push_temperature_moment(
+        &mut self,
+        prior_exposure: f64,
+        local_exposure: f64,
+        total_exposure: f64,
+        temperature_increment: f64,
+        local_mean_gap: f64,
+    ) -> Result<(), PhaseHeatExchangeError> {
+        add(
+            &mut self.mean_log_exposure,
+            &mut self.mean_log_exposure_correction,
+            (prior_exposure / total_exposure) * temperature_increment,
+        )?;
+        add(
+            &mut self.mean_log_exposure,
+            &mut self.mean_log_exposure_correction,
+            (local_exposure / total_exposure) * local_mean_gap,
+        )
+    }
+
     fn finish(
         self,
         exchange: PhaseHeatExchange,
@@ -552,6 +594,7 @@ impl ResponseAccumulator {
             reservoir_enthalpy_derivative_j_kg_k: self.reservoir,
             exposure_enthalpy_derivative_k: exposure_derivative,
             mean_reservoir_derivative: self.mean,
+            mean_log_exposure_derivative_k: self.mean_log_exposure,
         })
     }
 }

@@ -460,12 +460,31 @@ fn g1_equilibrium_layers_keep_exact_cp_source_bounds_and_inward_phase_tangents()
         assert_eq!(layer.caloric_law().storage_basis(), ThermalStorageBasis::Enthalpy);
         assert_eq!(layer.energy_bounds_j_kg(), [energy(1, 350.0), energy(1, 500.0)]);
         assert_eq!(layer.conductivity_curve(), resolved.conductivity_curve());
-        assert!(matches!(
-            layer.linear_heat_exchange(energy(1, 400.0), 450.0, 10.0),
-            Err(DepositionError::InvalidInput(
-                "fixed-bath caloric response is unsupported for equilibrium-phase storage"
-            ))
-        ));
+        for (initial_t, bath, target_t) in [
+            (400.0_f64, 450.0, 420.0),
+            (450.0, 350.0, 420.0),
+        ] {
+            // Independent integral of Cp(T)/(T_bath-T), Cp(T)=400+T.
+            let x = (400.0 + bath) * ((bath - initial_t) / (bath - target_t)).ln()
+                - (target_t - initial_t);
+            let exchange = layer.linear_heat_exchange(energy(1, initial_t), bath, x).unwrap();
+            let heat = energy(1, target_t) - energy(1, initial_t);
+            let mean = bath - heat / x;
+            assert_eq!(exchange.storage_basis, ThermalStorageBasis::Enthalpy);
+            assert_eq!(exchange.initial_specific_energy_j_kg, energy(1, initial_t));
+            near(exchange.final_specific_energy_j_kg, energy(1, target_t), 2e-7);
+            near(exchange.temperature_k, target_t, 2e-10);
+            near(exchange.specific_heat_j_kg, heat, 2e-7);
+            near(exchange.heat_residual_j_kg, 0.0, 2e-9);
+            near(exchange.mean_temperature_k, mean, 2e-10);
+            near(exchange.inlet_energy_gain, (bath - target_t) / (bath - initial_t), 3e-14);
+            near(exchange.remaining_temperature_difference_k, bath - target_t, 3e-11);
+            near(exchange.mean_log_exposure_derivative_k, target_t - mean, 3e-10);
+        }
+        // The original caloric chart extends farther than this k-source layer.
+        // Fixed-bath convenience must not silently widen the prepared support.
+        assert!(layer.linear_heat_exchange(energy(1, 400.0), 700.0, 10_000.0).is_err());
+        assert!(layer.linear_heat_exchange(energy(1, 300.0), 450.0, 0.0).is_err());
         let end = layer.state_at_specific_energy(energy(1, 500.0)).unwrap();
         assert_eq!(end.temperature_k, 500.0);
         near(end.temperature_slope_kg_k_j, 1.0 / 900.0, 1e-16);
@@ -500,6 +519,7 @@ fn g1_equilibrium_layers_keep_exact_cp_source_bounds_and_inward_phase_tangents()
         near(layer.state_at_specific_energy(bounds[1]).unwrap().temperature_slope_kg_k_j,
             end_slope, 1e-16);
         assert!(layer.state_at_specific_energy(185_000.0).is_err());
+        assert!(layer.linear_heat_exchange(185_000.0, 550.0, 1.0).is_err());
     }
     assert!(ResolvedConductionLayer::new(
         &curve, phase_point(&source), &source.conductivity, SELECTION,
