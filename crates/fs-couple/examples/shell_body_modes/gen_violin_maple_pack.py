@@ -19,10 +19,11 @@ inplane=laemmlein (the audio-band pack, registered as violin-maple-sycamore-sond
 nu_LR as above; the pack is then named ...-shell-laemmlein.
 With shear=fpl (a declared SENSITIVITY, not the registered model) G_LR and G_LT are the Wood Handbook sugar maple ratios times the same E_L (glr_over_el 0.111, glt_over_el 0.063 of the committed pack
 maple-sugar-fpl-gtr282) instead of the ultrasonic values; G_RT stays ultrasonic (the Wood Handbook set has no G_RT ratio); the pack is then named ...-fplshear-shell.
-bridge=merhar2020 (with inplane=laemmlein only) writes the violin BRIDGE's pack: the audio-band pack with its density replaced by the measured density of a maple violin bridge
-(maple-bridge-aubert-merhar2020: Merhar and Humar 2020, Aubert bridge No. 1, from the bridge's own mass and volume) and every other row unchanged, so the stiffness and the loss
-stay the back maple's, a declared borrowing (orchestrator ruling, mail 14630); the nine viscosities hold no density, so they are the parent pack's byte for byte. The pack is
-then named ...-shell-laemmlein-bridge-merhar2020.
+bridge=merhar2020 writes the violin BRIDGE's pack: the parent pack (the audio-band pack with inplane=laemmlein, the registered pack without it) with its density replaced by
+the measured density of a maple violin bridge (maple-bridge-aubert-merhar2020: Merhar and Humar 2020, Aubert bridge No. 1, from the bridge's own mass and volume) and every
+other row unchanged, so the stiffness and the loss stay the parent's, a declared borrowing (orchestrator rulings, mails 14630 and 16211: the measured value replaces the borrowed
+one on every live page, the pages on the registered pack included); the nine viscosities hold no density, so they are the parent pack's byte for byte. The pack is then named
+...-shell-laemmlein-bridge-merhar2020 or ...-shell-bridge-merhar2020.
 """
 import math
 import os
@@ -33,7 +34,7 @@ FPL_SHEAR = "shear=fpl" in sys.argv[3:]
 ULTRASONIC_SHEAR = "shear=ultrasonic" in sys.argv[3:]
 INPLANE_LAEMMLEIN = "inplane=laemmlein" in sys.argv[3:]
 BRIDGE_MERHAR = "bridge=merhar2020" in sys.argv[3:]
-assert not BRIDGE_MERHAR or (INPLANE_LAEMMLEIN and not FPL_SHEAR and not ULTRASONIC_SHEAR), "bridge=merhar2020 is built on the audio-band pack only (inplane=laemmlein)"
+assert not BRIDGE_MERHAR or not (FPL_SHEAR or ULTRASONIC_SHEAR), "bridge=merhar2020 is built on the audio-band or the registered pack only, not on a shear variant"
 SEED = REPO + "/data/matdb/seed-v1/"
 OMEGA_MIN, OMEGA_MAX = 2.0 * math.pi * 150.0, 2.0 * math.pi * 10000.0  # the narrower of the sources' bands: Laemmlein's sweep, 150-10000 Hz
 OMEGA_REF = 2.0 * math.pi * 200.0
@@ -67,11 +68,16 @@ if INPLANE_LAEMMLEIN:
 DENSITY_OBS = "sond-shell"
 if BRIDGE_MERHAR:
     # The violin bridge's one measured property: its density, from the mass and volume of Aubert bridge No. 1 (Merhar and Humar 2020, p.164 and Table 2,
-    # unmodified). It replaces the back plates' 665.1 kg/m3 on the bridge only. The stiffness stays the back maple's, a declared borrowing: the paper's
-    # elastic set (Table 2) is literature ratios scaled to one clamped-bridge mode, a fit, and is not used.
+    # unmodified). It replaces the parent's density on the bridge only: the back plates' 665.1 kg/m3 (audio-band pack) or the one tree's 626 (registered
+    # pack). The stiffness stays the parent's, a declared borrowing: the paper's elastic set (Table 2) is literature ratios scaled to one clamped-bridge
+    # mode, a fit, and is not used.
     mh = scalars("maple-bridge-aubert-merhar2020")
-    stiffness_text = ("E_L %.0f MPa and E_R %.0f MPa of Laemmlein's violin-back plates (maple-sycamore-lammlein2020-plates, audio band); the plates' density %.1f kg/m3 is NOT "
-                      "used: this bridge pack carries the measured density of a violin bridge (observation merhar-bridge)" % (E_L / 1e6, E_R / 1e6, density))
+    if INPLANE_LAEMMLEIN:
+        stiffness_text = ("E_L %.0f MPa and E_R %.0f MPa of Laemmlein's violin-back plates (maple-sycamore-lammlein2020-plates, audio band); the plates' density %.1f kg/m3 is NOT "
+                          "used: this bridge pack carries the measured density of a violin bridge (observation merhar-bridge)" % (E_L / 1e6, E_R / 1e6, density))
+    else:
+        stiffness_text += ("; the tree's normal-climate density %.0f kg/m3 is NOT used: this bridge pack carries the measured density of a violin bridge "
+                           "(observation merhar-bridge)" % density)
     density, DENSITY_OBS = mh["row:density-bridge-unmodified"], "merhar-bridge"
 g_lr, g_lt, g_rt = so["shear_modulus_lr_ultrasonic"], so["shear_modulus_lt_ultrasonic"], so["shear_modulus_rt_ultrasonic"]  # MPa
 shear_text = "ULTRASONIC values (1 MHz transverse waves, 10 mm cubes)"
@@ -151,8 +157,9 @@ if BRIDGE_MERHAR:
                 "Merhar and Humar (2020) Drvna Industrija 71(2):163-169 as committed in the pack maple-bridge-aubert-merhar2020: density %.0f kg/m3 of the unmodified bridge, determined "
                 "from measurements of the mass and volume of the bridge (p.164; Table 2)" % density,
                 "ONE bridge, density only. The moisture content and the climate of the unmodified bridge's measurement are not printed (the modified pieces were stored a week at 23 C and "
-                "65 percent RH). The bridge's stiffness and loss are not measured and stay the violin-back plates' values of this pack, a DECLARED BORROWING: the paper's elastic set is "
-                "literature ratios (Kollmann 1975) adjusted so that the computed main mode of the clamped bridge matches its measured 4720 Hz, a fit, and its damping ratio 0.029 is the "
+                "65 percent RH). The bridge's stiffness and loss are not measured and stay " + ("the violin-back plates' values of this pack" if INPLANE_LAEMMLEIN else
+                "this pack's values (the one tree's static E_L, E_R and nu_LR and its ultrasonic G_LT and G_RT; the violin-back plates' G_LR and loss)") + ", a DECLARED BORROWING: the "
+                "paper's elastic set is literature ratios (Kollmann 1975) adjusted so that the computed main mode of the clamped bridge matches its measured 4720 Hz, a fit, and its damping ratio 0.029 is the "
                 "clamped bridge's modal bandwidth, not a material loss; neither is used."))
 
 

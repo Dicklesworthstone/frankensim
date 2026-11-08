@@ -85,11 +85,12 @@ Tools next to this file (Python; run with `uv run --python 3.12 --with triangle 
   - `shear=fpl` writes the Wood Handbook shear sensitivity.
   - `inplane=laemmlein` writes the audio-band pack, with density, E_L, E_R and G_LR all from Laemmlein's plates; it is
     registered as `violin-maple-sycamore-sonderegger2013-shell-laemmlein`, and the violin, viola and cello maple parts use it.
-  - `bridge=merhar2020` (with `inplane=laemmlein` only) writes the violin bridge's pack,
-    `violin-maple-sycamore-sonderegger2013-shell-laemmlein-bridge-merhar2020`: the audio-band pack with its density replaced
-    by the measured density of an Aubert violin bridge (560 kg/m3, from the bridge's own mass and volume, Merhar and Humar 2020,
-    committed as `maple-bridge-aubert-merhar2020`). Its stiffness and loss rows are the audio-band pack's byte for byte, a
-    declared borrowing.
+  - `bridge=merhar2020` writes the violin bridge's pack: its parent pack with the density replaced by the measured density
+    of an Aubert violin bridge (560 kg/m3, from the bridge's own mass and volume, Merhar and Humar 2020, committed as
+    `maple-bridge-aubert-merhar2020`). With `inplane=laemmlein` the parent is the audio-band pack and the bridge pack is
+    `violin-maple-sycamore-sonderegger2013-shell-laemmlein-bridge-merhar2020`; without it the parent is the registered pack
+    (626 kg/m3) and the bridge pack is `violin-maple-sycamore-sonderegger2013-shell-bridge-merhar2020`, for the pages whose
+    maple parts use the registered pack. Its stiffness and loss rows are the parent's byte for byte, a declared borrowing.
 - `gen_violin_spruce_pack.py REPO_ROOT OUT_ROOT` writes the shell-ready Norway spruce pack from the committed Viala 2020
   violin-quarter pack, with the Sitka nu_LR of the Wood Handbook pack as a declared surrogate.
 
