@@ -9610,8 +9610,47 @@ method. G1/G3 controls compare independent longitudinal/transverse laws and
 finite differences of emitted proper time against the Lorentz frequency
 ratio, and cover common motion, changing detector gamma, knot/history
 semantics, uniform subdivision, DD receiver geometry, clock refusal and
-proper-time thermal-to-electron-rate integration. These APIs supply detector
-events, not exposure quadrature, apparent-area geometry or smooth acceleration.
+proper-time thermal-to-electron-rate integration. These instantaneous APIs supply
+detector events, not apparent-area geometry or smooth acceleration.
+
+`spectral::doppler::retarded::exposure` integrates nonnegative per-ray rates over
+authored detector-proper-time panels. Uniform and piecewise endpoint owners
+share four-point Gauss--Legendre temporal quadrature, DD accumulation, fixed
+channel caps and an explicit ray-query budget. Both interval endpoints are
+admitted before the first observable callback; the subluminal causal clock is
+monotone, so a missing source-history tail cannot hide beyond the interior
+quadrature nodes. Numerical node collapse, nonfinite/negative rates, original
+geometry errors and cancellation refuse without publishing a partial integral.
+Observable callbacks receive the same cancellation checkpoint and must read,
+rather than advance, the source history. Quadrature is an estimate: authored
+panel edges and refinement must resolve source discontinuities and velocity
+changes. There is no certified error bound or claim about unsampled geometry.
+
+`thermal_surface::doppler::retarded::exposure::RetardedThermalExposure` connects
+that owner to the original thermal history and `QuantumEfficiencySensor`.
+At each temporal node it resolves the original emitting side and source state,
+then checks the complete receiver sensor band against shifted source support.
+It merges original QE knots and Doppler-shifted emissivity knots with a bounded
+streaming cursor, splitting at narrow spectral features without a resampled
+table or heap allocation. Explicit wavelength subdivisions refine Gauss4
+integration inside these smooth intervals without changing physical QE data.
+Every spectral point consumes the caller's total Planck/QE-evaluation budget
+and checks cancellation. Fixed-size DD channel sums retain expected collected
+electrons and QE-weighted energy in joules; the latter is a response integral,
+not an absorbed-heat debit. Photon energy uses receiver wavelength exactly once.
+
+The supplied finite nonnegative etendue is constant in the receiver rest frame
+and already includes projected area, solid angle and throughput. No extra
+Doppler, clock, incidence-cosine or inverse-square multiplier is applied.
+Changing optical collection geometry requires caller-controlled exposure
+panels/etendue or a separate geometry owner. No visibility, stochastic charge,
+shutter profile, electrical gain, saturation or material calibration is inferred.
+Time and spectral quadratures remain estimates; sampled source-band admission
+does not certify arbitrary unsampled source-state changes. G1/G3/G4 controls
+cover analytic proper-clock integrals, receiver turns, refinement, DD epochs,
+history/budget admission and cancellation, together with absolute SI thermal
+energy/photon integrals, narrow shifted source/QE features, wavelength refinement
+and dark-etendue/original-band refusal in the native thermal adapter tests.
 
 
 ## Coupled resonant photon recycling on the native excitation timeline

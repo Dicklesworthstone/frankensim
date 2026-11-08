@@ -22,6 +22,9 @@ use fs_math::dd::Dd;
 pub mod trajectory;
 pub use trajectory::{PiecewiseVacuumWorldline, VacuumTrajectoryKnot};
 
+/// Bounded finite exposure on the receiver's proper clock.
+pub mod exposure;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RetardedVacuumError {
     InvalidClock,

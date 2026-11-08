@@ -5,7 +5,8 @@
 //! source's rotation-free rest frame. The already-aberrated source direction
 //! decides whether this side emits toward the receiver. Diffuse radiance gets
 //! no additional cosine or clock multiplier here: projected area, visibility,
-//! etendue and exposure remain the caller's separate geometry responsibilities.
+//! etendue remain the caller's separate geometry responsibilities. [`exposure`]
+//! integrates finite receiver-proper-time exposures with supplied etendue.
 
 use super::{
     ObservedThermalDetector, ObservedThermalSurface, ThermalDetectorSample, ThermalDopplerError,
@@ -19,6 +20,9 @@ use crate::spectral::{
 };
 use crate::thermal_surface::{DiffuseThermalSurface, ThermalSurfaceError};
 use fs_math::{dd::Dd, det};
+
+/// Finite detector exposures through the original thermal and QE owners.
+pub mod exposure;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RetardedThermalError {

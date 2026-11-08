@@ -14,7 +14,8 @@
 //! transform surface normals, move existing scene instances, debit thermal
 //! storage, or treat a dielectric/moving-medium path as vacuum.
 //! [`retarded`] selects the original thermal history and emitting hemisphere
-//! at the source event supplied by a uniform-worldline light-cone solution.
+//! at the source event supplied by a finite-worldline light-cone solution, and
+//! its exposure owner integrates these observations on the detector's clock.
 
 use super::{DiffuseThermalSurface, ThermalSurfaceError, planck_radiance_w_m2_sr_nm};
 use crate::spectral::{
