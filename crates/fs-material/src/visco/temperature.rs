@@ -12,8 +12,9 @@
 //! Coefficients, reference temperature and calibrated validity are caller
 //! declarations: no material-name constants, glass transition, source accuracy,
 //! moisture shift, vertical modulus shift or thermal expansion is inferred.
-//! This supplies fixed-temperature laws, not integration along a changing
-//! thermal history or a heat-capacity/entropy model.
+//! This module supplies fixed-temperature laws. Prescribed changing-temperature
+//! tensor histories use [`crate::visco_tensor::temperature`] and retain the
+//! original memory. Neither path supplies a heat-capacity/entropy model.
 
 use super::{TensorProny, ViscoError};
 use fs_math::det;

@@ -5674,6 +5674,30 @@ ledger together only after finite-response checks. G0/G1 tests cover atomic
 overflow refusal and retry, explicit zero viscosity, and stress/storage/heat/
 work parity between Mandel and tensor-shear histories.
 
+`TensorPronyHistory::advance_temperature_ramp` retains the original reference
+law, its tensor factors and every Maxwell memory coordinate through prescribed
+linear temperature and physical-time strain ramps. The existing WLF/Arrhenius
+calibration scales branch times by `a_T` and Kelvin viscosity by `a_T`; all
+elastic tensors remain fixed. A caller-bounded midpoint subdivision reuses the
+original exact affine-strain/positive-heat transaction without rebuilding or
+factoring a material law. Its logarithmic-shift variation limit is a coefficient
+resolution control, not a certified trajectory-error bound. Both thermal and
+strain histories require refinement.
+
+The returned mean stress is weighted in physical time. Local signed work and
+independent positive heat are accumulated before touching cumulative ledgers;
+the complete history's endpoint stress uses actual endpoint-temperature Kelvin
+viscosity and the prescribed physical strain rate. Constant reference temperature
+retains original advance arithmetic; existing isothermal adjoints are unchanged.
+This temperature-ramp extension supplies no temperature/path adjoint. Zero-time
+temperature changes, out-of-calibration paths, unrepresentable shifted parameters,
+exhausted work limits and cancellation refuse transactionally, including at the
+final poll. No thermal expansion, temperature-dependent elastic modulus, caloric
+storage, entropy or self-heating closure is inferred. Six focused regressions
+cover fixed-temperature parity, loaded-memory thermal cycles, endpoint/mean
+Kelvin stress, independent full-tensor ODE refinement of stress/work/heat, weak
+local increments after large cumulative histories and atomic refusals.
+
 `TensorPronyHistory::advance_linearized` retains exact matrix-free forward and
 reverse derivatives of the original anisotropic Maxwell/Kelvin ramp. Both
 endpoints' tensor-shear strains, every original six-coordinate branch memory and

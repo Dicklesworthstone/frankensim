@@ -44,6 +44,10 @@ pub mod stress_control;
 /// Full-tensor stress control with positive-definite Kelvin viscosity.
 pub mod kelvin_control;
 
+/// Prescribed temperature ramps retaining the original tensor material memory.
+pub mod temperature;
+pub use temperature::{TemperatureRamp, TemperatureRampControls, TensorPronyTemperatureStep};
+
 /// Maximum retained relaxation branches per material.
 pub const MAX_BRANCHES: usize = 256;
 const WEIGHTS: Voigt = [1.0, 1.0, 1.0, core::f64::consts::SQRT_2,
@@ -369,6 +373,15 @@ impl TensorPronyHistory {
     // Both paths use this same primal transaction. The derivative path records
     // the original branch coordinates while supplying the same ramp coefficients.
     fn advance_with_ramps(&mut self, strain: Voigt, dt_s: f64,
+        cancelled: impl FnMut() -> bool,
+        prepare: impl FnMut(f64, &Voigt) -> crate::visco::PronyRamp,
+    ) -> Result<TensorPronyStep> {
+        self.advance_with_kinetics(strain, dt_s, 1.0, cancelled, prepare)
+    }
+
+    // The reference law/factors and branch memory remain unchanged. At scale
+    // one, the original primal and adjoint arithmetic follows the same path.
+    fn advance_with_kinetics(&mut self, strain: Voigt, dt_s: f64, kinetic_scale: f64,
         mut cancelled: impl FnMut() -> bool,
         mut prepare: impl FnMut(f64, &Voigt) -> crate::visco::PronyRamp,
     ) -> Result<TensorPronyStep> {
@@ -398,7 +411,10 @@ impl TensorPronyHistory {
             poll(&mut cancelled)?;
             let gram_rows = branch.resolved_gram_rows(factor);
             let d = apply(&gram_rows, &delta);
-            let ramp = prepare(dt_s / branch.tau_s, q);
+            let tau_s = if kinetic_scale == 1.0 { branch.tau_s } else {
+                temperature::scaled_parameter(branch.tau_s, kinetic_scale)?
+            };
+            let ramp = prepare(dt_s / tau_s, q);
             let mut mean_q = [0.0;6];
             for i in 0..6 {
                 let (next, mean, loss) = ramp.apply(q[i], d[i]);
@@ -414,9 +430,14 @@ impl TensorPronyHistory {
                 }
             } else {
                 let rate = delta.map(|v| v/dt_s);
-                let viscous = apply(kv,&rate);
                 let factor = self.model.kv_factor.as_ref()
                     .ok_or_else(||invalid("missing admitted Kelvin viscosity factor"))?;
+                let shifted;
+                let (kv, factor) = if kinetic_scale == 1.0 { (kv, factor) } else {
+                    shifted = temperature::scaled_kelvin(kv, factor, kinetic_scale)?;
+                    (&shifted.0, &shifted.1)
+                };
+                let viscous = apply(kv,&rate);
                 // Independent nonnegative integral dt * |L^T strain_rate|^2.
                 // Kelvin viscosity stores no energy and has no memory state.
                 let mut kelvin_heat = 0.0;
