@@ -31,6 +31,9 @@ pub use tangent::{
 mod sensitivity;
 pub use sensitivity::{PhsForcedSensitivityError, PreparedPhsForcedSensitivity};
 
+/// Periodically modulated original Hamiltonians and exact physical pump work.
+pub mod parametric;
+
 /// Physical port harmonics evaluated through the original nonlinear storage.
 pub mod spectrum;
 

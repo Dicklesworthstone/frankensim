@@ -8159,3 +8159,89 @@ fit support. Passive continuation does not widen that declared support. Unlowere
 frequency-local coating or constant-loss slices still refuse instead of silently
 losing material storage. Existing conforming geometry/source identity obligations
 and complete-mode admission remain unchanged.
+
+## Periodic quadratic Hamiltonian modulation and parametric excitation
+
+`phs_orbit::parametric` admits a complete original `PortHamiltonian`, its
+`PeriodicPortInput`, and an explicitly authored physical energy addition
+`H(t,x) = H0(x) + x^T Q(t) x / 2`. This enables periodically varying stiffness,
+inverse inertia and coupled energy terms without replacing the original
+nonlinear storage, changing coordinates, eliminating memory states, fitting a
+frequency shift, or introducing another numerical solver. The author remains
+responsible for the constitutive meaning and support of that energy addition.
+
+`PeriodicQuadraticModulation` stores complete row-major Fourier matrices in
+original state units: `Q(t) = Q0 + 2 Re sum_{n>=1} Qn exp(+i n omega t)`.
+A peak cosine matrix therefore supplies half its peak amplitude at the positive
+harmonic. Every complex matrix is exactly **transpose symmetric**, including its
+imaginary part; Hermitian symmetry is a different proposition and is refused.
+DC must be real. Units are energy divided by the product of the two corresponding
+state units. All supplied entries are finite, every matrix has the original
+square shape, and the pump and port drive share the exact same positive finite
+clock. The period and active harmonic frequencies must also be representable.
+
+Source admission caps the original dimension at 256, positive harmonic index at
+256, and total supplied full-matrix complex entries at 1,048,576. Preparation
+keeps only exactly nonzero upper-triangle entry sequences and their actual
+nonzero bandwidth; it applies no magnitude threshold, frequency clipping or
+symmetrization. Reusable source scratch caches one physical-time matrix and,
+when needed, its analytic time derivative. Positive definiteness is deliberately
+not inferred or imposed: signed modulation, including an instantaneous
+stiffness crossing zero, needs its author's physical justification. Symmetry
+alone establishes neither passivity, bounded motion nor Floquet stability.
+
+The physical field is evaluated as
+`(J-R) (gradient H0(x) + Q(t)x) + G u(t)` through the **original compensated pHS
+field owner in one contraction**. The complete source Hessian action is retained
+and `Q(t)` is added exactly once before the same `J-R` map. Native storage
+tangents survive boxing, nonlinear terms and explicit memory coordinates.
+An authored Hessian override must cover all of H0 in the original physical
+coordinate order. A declared tangent refusal remains a named solver refusal;
+there is no numerical replacement for an authored action that fails.
+
+`power` reports the original H0 plus the quadratic energy, explicit pump power
+`x^T Qdot(t) x / 2`, original physical port power, resistance power evaluated
+using the complete modulated effort, and total energy rate from that same effort
+and actual original field plus pump power. Pump work is external supplied work;
+it is not dissipative heat or unexplained energy creation. The reported energy
+rate is evaluated independently of the port-minus-resistance expression, so it
+does not manufacture closure by construction. These are instantaneous
+diagnostics, not an integrated-work, stability or passivity certificate.
+
+The prepared source delegates fixed-order and adaptive physically scaled HB to
+the existing AFT/Newton owners, variational shooting to the existing original-ODE
+RK4/monodromy owner, and physical-port sideband response to the existing periodic
+linearization/complex-factor owner. No state reduction, new Newton iteration,
+Fourier transform, time integrator, linear solver or eigensolver is added.
+Initial HB/base/sideband orders must resolve every actually nonzero authored
+drive and pump harmonic. Shooting additionally requires the complete pump and
+drive bandwidth below its declared grid's Nyquist index; that admission alone
+does not establish temporal accuracy. High, tiny pump coefficients cannot be
+silently dropped to make these gates pass. Adaptive HB still measures actual
+successive solves, full equations, omitted harmonics and independent quadrature
+changes. Callers must supply their intended period chart and appropriate seeds;
+a response driven at twice that chart's frequency may be subharmonic relative
+to the pump, without implying primitive-period or branch selection.
+
+Physical sideband probes use the shared owner's **peak complex amplitudes**
+at signed `carrier + k*omega` frequencies. The original `G` maps every real and
+imaginary port component into the complete state forcing. Both converted
+positive and negative sidebands remain present. Adapter forcing scratch and a
+declared mapping score `64*(2N+1)*dimension*max(ports,1)` are charged against the
+supplied sideband payload/work limits before the shared owner runs. Already
+prepared source storage and source callbacks' internal work are excluded, as
+in the original shared-owner contracts. Cancellation and original source,
+conditioning, residual, sampling and omitted-band refusals remain visible.
+Finite-order responses and finite-grid multipliers do not imply a converged
+continuous spectrum, stability, passivity, attraction or a quasiperiodic model.
+
+Focused regressions compare a forced damped Mathieu response against an
+independently written time-domain physical equation at two RK4 resolutions;
+compare explicit pump work against independently integrated energy change;
+retain a nonlinear cubic storage and its explicit relaxing material state under
+actual adaptive HB; check mixed-coordinate energy/tangent terms; compare the
+shared variational shooting state with HB and its monodromy determinant with
+Liouville's identity; and check physical-port conversion into both signed
+sidebands against weak-pump perturbation coefficients. Admission regressions
+cover Fourier symmetry/DC, clock mismatch, tiny high-harmonic bandwidth,
+explicit sideband payload limits and declared-Hessian refusal.
