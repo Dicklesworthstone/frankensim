@@ -3636,3 +3636,56 @@ and cross-mechanism interference, contour/future-pulse causality, and onset,
 storage, clock and cancellation refusals. Selective formatting/diff checks,
 bounded independent source review and a separate numerical fixture calculation
 passed; native Rust execution remains unverified.
+
+## Coherent FW-H surface and exterior-volume recordings
+
+`curle3d::array::recorded::joint::JointSourceWelchStream` binds disjoint compact
+and Lighthill-stress source layouts, one acoustic reference and one physical
+clock to a SINGLE native Welch stream. Source-major `[Q,Fx,Fy,Fz]` blocks
+(m3/s, N) precede `[xx,yy,zz,xy,xz,yz]` integrated stress blocks (N m), with
+physical undoubled shear. The original mixed observer coherently sums both
+mechanisms' pressure and full vector velocity before forming second moments.
+Cross-source, cross-axis and cross-mechanism terms survive, with native phase
+and peak-bin scaling applied once. Existing lossless, molecular and matching
+ideal-image paths remain available. Finite-record factors are not deterministic
+cross-frequency waveform phases or an assumption of independent segments.
+
+`curle3d::quadrupole::flux::surface::exterior::ExteriorSurfaceWelchStream`
+privately owns the original surface and volume extractors. Frozen-gas and
+original mixture entry points read ONE borrowed accepted flow state per sample;
+matching timestamps on separately supplied states cannot substitute for that
+identity. Constructors include the current sample exactly once. All selected
+volume cells must lie outside the original half-open control box. Face-adjacent
+exterior cells remain valid; enclosed cells refuse instead of being radiated
+a second time. Original gas/species, grid, boundaries, frame, acoustic reference,
+source order and uniform recording clock remain bound. No CFD step, source
+kernel, area/volume multiplier or source derivative is added.
+
+Every unsuccessful sample restores both accepted source histories and the
+joint recording. A failed second extractor restores only the already committed
+surface; a rejected spectral push restores both caches. The original Welch
+transaction retains its prior factors, and no fallible action follows a
+successful push. Warm observation adds no adapter allocation. Three explicit
+byte caps bound both native caches and the joint recording; geometry is charged
+to its recording allowance, source counts bound extraction, and one native work
+budget covers all `4*S + 6*V` channels. No dense covariance or full history is
+constructed.
+
+`RecordedExteriorSurfaceSpectrum` retains the original control box and frame.
+Its preparation/evaluation checks use the actual frame inverse and reject
+inside, on-surface and roundoff-near-surface receivers. The original mixed
+propagator additionally requires identical receiver, frequency, medium,
+molecular law and ideal boundary domains. The source scope remains stationary,
+inviscid, resolved and finite in its selected exterior extent; viscous
+source stress, SGS sound, missing exterior volume, moving geometry and source
+feedback are not inferred. Spatial, temporal and source-model qualification
+remain necessary.
+
+Analytical regressions specify compact/stress interference with zero pressure
+but nonzero particle velocity, compact-only parity under zero exterior stress,
+and propagation/binding refusals. Native-source regressions use actual frozen
+and ten-species mixture histories, joint batch factors/full fields, exterior
+geometry and rotated receivers, source/clock refusal, both rollback paths and
+exact retry. Pinned formatting and independent source/API/physics review passed.
+These Rust regressions are authored, not claimed executed: the real dependency
+build exceeded the bounded shared validation environment.

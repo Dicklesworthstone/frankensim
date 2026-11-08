@@ -23,6 +23,9 @@ use fs_math::c64::C64;
 /// No second clock or conversion of an adaptive history is introduced.
 pub use crate::curle3d::quadrupole::recorded::QuadrupoleSampleClock as SourceSampleClock;
 
+/// Joint compact and volume-stress histories with their original measured coherence.
+pub mod joint;
+
 /// Joint bounds on retained source geometry and the original Welch workspace.
 #[derive(Clone, Copy, Debug)]
 pub struct CompactSourceRecordingBudget {

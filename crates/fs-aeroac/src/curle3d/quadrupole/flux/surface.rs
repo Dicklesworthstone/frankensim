@@ -36,6 +36,9 @@ use fs_flux::compressible::spatial::mixture::{Cell, state_into};
 use fs_flux::compressible::spatial::{BoundarySide, State};
 use fs_math::dd::Dd;
 
+/// Native joint recording of this surface and selected exterior volume stresses.
+pub mod exterior;
+
 /// Half-open original cell box. Its six bounding planes form the source surface.
 /// A real cell must exist on BOTH sides of every face: periodic wrapping,
 /// physical-wall ghosts and extrapolated exterior states are never inferred.
