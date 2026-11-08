@@ -1,5 +1,34 @@
 # fs-feec CONTRACT
 
+## Signed circumferential Fourier acoustics on the original meridian mesh
+
+`AxisymmetricPressureFe::new_fourier` resolves one complete signed component
+`psi_m(r,z) exp(i*m*phi)` under the original peak `exp(+i*omega*t)` convention,
+with `p = i*omega*psi`. All original cells, material fields and non-axis pressure
+coordinates remain. Native sparse assembly adds the physical angular form
+`K_phi,ij = 2*pi*m^2 integral(phi_i*phi_j/(rho*r) dr dz)` to the original
+meridian stiffness. Nonzero orders constrain axis pressure exactly to zero
+before the existing harmonic factor and expand results to the original full
+coordinates. The original constructor and `m=0` operation path remain unchanged.
+
+The angular integral analytically collapses one triangle coordinate and uses
+native positive Gauss--Legendre quadrature in the other. Caller-declared
+`q`-to-`2q` comparison, `2 <= q <= 32`, `|m| <= 1024`, and original assembly
+limits bound admitted work. No artificial axis radius or logarithmic cutoff is
+used. The quadrature difference and algebraic residual do not certify spatial,
+geometry or physical-model accuracy; physical mesh refinement remains necessary.
+
+Total kinetic energy includes a separately reported angular contribution.
+`probe_fourier` reconstructs radial, azimuthal and axial Euler velocity,
+Cartesian position and velocity, and active intensity at an authored azimuth.
+Every signed component retains the original full-turn `2*pi*r` mass and work
+normalization. Real cosine/sine shapes require explicit coherent positive and
+negative components; no degeneracy factor is inferred. Geometry, materials and
+boundary coefficients must be independent of azimuth, and separate orders do
+not couple. P1 fields enforce finite angular energy rather than exact
+pointwise `O(r^|m|)` regularity. Nonzero-order vector probes exactly on the axis
+refuse because these fields do not establish a unique Cartesian limit there.
+
 ## Purpose and layer
 
 Layer: **L3 FLUX** (deps: fs-rep-mesh L2; fs-la, fs-sparse L1;

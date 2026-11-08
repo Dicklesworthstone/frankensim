@@ -1,9 +1,11 @@
 //! Full meridional P1 pressure acoustics for a complete axisymmetric body.
 //!
-//! Coordinates are (r,z) in metres and the azimuthal order is m=0. The sealed
+//! Coordinates are (r,z) in metres; [`AxisymmetricPressureFe::new`] keeps m=0,
+//! while [`AxisymmetricPressureFe::new_fourier`] retains one signed azimuthal
+//! Fourier order. The sealed
 //! TriComplex2 must carry the full-turn metric 2*pi*r dA. Original nodal
 //! pressure-potential and pressure fields retain radial as well as axial
-//! variation and the constant compression coordinate; no modal basis is used.
+//! variation; m=0 also retains constant compression. No reduced basis is used.
 //!
 //! With p=psi_dot and v=-grad(psi)/rho, the original physical weak equations are
 //! M_beta p_dot + C_Y p + K_rho psi = b_in, where
@@ -20,16 +22,18 @@
 //! the factor 1/2. A prepared frequency reuses its full factor for new drives.
 //!
 //! Axis edges have zero swept surface measure and receive no boundary data or
-//! pressure constraint. Their pressure coordinates remain live: regularity is
-//! the natural finite-energy m=0 weak condition, without division by radius.
+//! surface boundary condition. For m=0 their pressure coordinates remain live:
+//! regularity is the natural finite-energy weak condition, without division by radius.
 //! A finite P1 mesh does not impose a pointwise zero radial derivative in each
-//! axis-adjacent cell. Geometry and h refinement remain necessary.
+//! axis-adjacent cell. Nonzero Fourier orders instead constrain axis pressure
+//! exactly to zero and retain their angular kinetic energy. Geometry and h
+//! refinement remain necessary.
 //!
 //! This is a frozen, lossless, isotropic bulk fluid with piecewise constant
 //! density/compressibility and real passive local wall admittance. Straight
 //! meridian triangles approximate curved profiles. There is no PML, exterior
-//! radiation, nonzero azimuthal order, boundary-layer or mean-flow model here.
-//! This delivers the m=0 interior slice, not completion of plan M2.4-W1d.
+//! radiation, boundary-layer or mean-flow model here.
+//! This delivers the interior Fourier slice, not completion of plan M2.4-W1d.
 
 use crate::weighted::{WeightedAssemblyLimits, WeightedError, WeightedMass, assemble_triplets};
 use crate::weighted2::{CellWeight2, weighted_mass_matrix_2d};
@@ -42,6 +46,11 @@ use fs_qty::Dims;
 use fs_rep_mesh::{Metric2, TriComplex2, TriComplex2Error};
 use fs_sparse::Csr;
 use std::collections::BTreeSet;
+
+mod fourier;
+pub use fourier::{
+    FourierAcousticPoint, FourierQuadrature, MAX_AZIMUTHAL_ORDER, MAX_FOURIER_QUADRATURE_POINTS,
+};
 
 /// Frozen physical coefficients for one original meridian triangle.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -134,6 +143,7 @@ pub struct AxisymmetricPressureFe<'m> {
     boundary: Vec<AxisymmetricBoundaryEdge>,
     boundary_index: Vec<usize>,
     volume_m3: f64,
+    fourier: Option<fourier::FourierForm>,
 }
 
 /// One full original-space harmonic factor, with optional exact zero-pressure
@@ -155,7 +165,10 @@ pub struct AxisymmetricHarmonicField<'f, 'm> {
     pub input_power_w: f64,
     /// Original real wall loss; signed floating-point roundoff is retained.
     pub boundary_dissipation_w: f64,
+    /// Total meridional plus azimuthal kinetic energy, integrated over 2*pi.
     pub kinetic_energy_j: f64,
+    /// Angular part of kinetic_energy_j; exactly zero for the original m=0.
+    pub azimuthal_kinetic_energy_j: f64,
     pub compressional_energy_j: f64,
     /// Native componentwise backward error; not a spatial or forward-error bound.
     pub relative_residual: f64,
@@ -357,6 +370,7 @@ impl<'m> AxisymmetricPressureFe<'m> {
             boundary,
             boundary_index,
             volume_m3,
+            fourier: None,
         })
     }
 
@@ -430,6 +444,9 @@ impl<'m> AxisymmetricPressureFe<'m> {
             ));
         }
         let mut fixed = vec![false; self.ndof()];
+        for &vertex in self.axis_pressure_constraints() {
+            fixed[vertex] = true;
+        }
         let mut pressure_release = BTreeSet::new();
         for &vertices in pressure_release_edges {
             poll(cx)?;
@@ -608,7 +625,8 @@ impl<'f, 'm> PreparedAxisymmetricHarmonic<'f, 'm> {
 
     /// Solve another original normal-velocity trace with this prepared factor.
     /// All outputs are peak phasors in exp(+i omega t). Original full nodal
-    /// vectors are returned with exactly zero entries on pressure-release traces.
+    /// vectors are returned with exactly zero entries on pressure-release traces
+    /// and, for a nonzero Fourier order, on the physical axis.
     pub fn solve(
         &self,
         inward_velocity: &[AxisymmetricVelocityTrace],
@@ -660,11 +678,19 @@ impl<'f, 'm> PreparedAxisymmetricHarmonic<'f, 'm> {
             }
         }
         let input_power_w = 0.5 * input.to_f64();
-        let kinetic_energy_j = 0.25 * kinetic.to_f64();
+        let mut kinetic_energy_j = 0.25 * kinetic.to_f64();
+        let azimuthal_kinetic_energy_j = if let Some(fourier) = &self.model.fourier {
+            let angular = 0.25 * quadratic(&fourier.stiffness, &potential, cx)?;
+            kinetic_energy_j += angular;
+            angular
+        } else {
+            0.0
+        };
         if [
             input_power_w,
             boundary_dissipation_w,
             kinetic_energy_j,
+            azimuthal_kinetic_energy_j,
             compressional_energy_j,
         ]
         .iter()
@@ -682,6 +708,7 @@ impl<'f, 'm> PreparedAxisymmetricHarmonic<'f, 'm> {
             input_power_w,
             boundary_dissipation_w,
             kinetic_energy_j,
+            azimuthal_kinetic_energy_j,
             compressional_energy_j,
             relative_residual: solved.relative_residual,
         })
@@ -702,8 +729,10 @@ impl AxisymmetricHarmonicField<'_, '_> {
         self.input_power_w - self.boundary_dissipation_w
     }
 
-    /// Interpolate the original cell-side field at barycentric coordinates.
-    /// No division by r appears, so evaluation on the axis remains finite.
+    /// Interpolate the original cell-side Fourier amplitudes at barycentric
+    /// coordinates. No division by r appears in these meridional components,
+    /// so evaluation on the axis remains finite. For a nonzero order use
+    /// [`Self::probe_fourier`] to include azimuthal velocity and the phase.
     /// The P1 radial derivative is a cell approximation, not an enforced
     /// pointwise regularity condition or a spatial error estimate.
     pub fn probe(
