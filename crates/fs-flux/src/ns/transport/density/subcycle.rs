@@ -200,6 +200,7 @@ impl<'m> PreparedDensityTransport<'m> {
                     size_of::<[f64; 2]>(),
                 ),
                 (linear_edges, size_of::<[f64; 2]>() + size_of::<[Mean; 2]>()),
+                (inventory_cells, size_of::<super::linear::LinearCell>()),
                 (inventory_cells, size_of::<[[f64; 3]; N]>()),
                 (inventory_cells, size_of::<[[f64; 2]; N]>()),
                 (inventory_cells, size_of::<f64>()),

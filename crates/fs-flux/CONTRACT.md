@@ -1297,13 +1297,15 @@ free streams and the closed native kinetic-energy identity.
 `DensityReconstruction::BoundedLinearInventories` retains the same bounded
 density, directional mass transfers, native momentum coupling and sufficient
 Courant limit, while reconstructing the carried specific quantities. The
-original least-squares stencil supplies linear specific variations, centered
-to have zero **mass-weighted** triangle mean under the reconstructed density.
+least-squares stencil locates each cell's specific mean at the **mass centroid**
+of its reconstructed density. Its weights are rebuilt once per stage and shared
+by all components, with variations centered to have zero **mass-weighted**
+triangle mean. Affine physical specific fields supplied as mass means are
+reproduced where the density reconstruction and inventory limiter retain their
+affine slopes and the local stencil has full rank.
 Each original sign interval uses its density-weighted flux centroid; this
 exactly integrates the selected affine density/specific traces against the
-affine normal velocity, including their cubic covariance term. Physical affine
-specific fields sampled as variable-density mass means need not be reproduced
-exactly by the geometric-centroid slope stencil.
+affine normal velocity, including their cubic covariance term.
 
 A single cell limiter bounds all components at the original vertex patches
 and bounds the retained donor inventory. For retained mass `r=m-sum(M_out)`
@@ -1321,8 +1323,8 @@ Euler, subcycling and SSPRK2 use the same reconstruction and transfer accounts.
 Work is linear in component count and native mesh size, with bounded local
 roundoff retries and no warm heap allocation; all extra scratch is budgeted.
 `tests/density_transport/linear.rs` checks spatial thermal-pulse refinement at
-matched time steps, reduced heat diffusion, independent signed cubic face
-quadrature, large-density-contrast species bounds/sums, flux compatibility and
+matched time steps, reduced heat diffusion, affine mass-mean reproduction and
+independent signed cubic face quadrature, large-density-contrast species bounds/sums, flux compatibility and
 transactional cancellation. Limiter activation can reduce local accuracy;
 this adds neither sharp interfaces nor diffusion, reactions, pressure work or
 thermodynamic closure.

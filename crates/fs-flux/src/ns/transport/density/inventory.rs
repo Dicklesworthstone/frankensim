@@ -13,7 +13,8 @@ impl PreparedDensityTransport<'_> {
         work: &mut DensityTransportWorkspace<N>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<()> {
-        if work.specific_deviations.len() != cells.len()
+        if work.specific_stencils.len() != cells.len()
+            || work.specific_deviations.len() != cells.len()
             || work.specific_margins.len() != cells.len()
             || work.specific_limiter.len() != cells.len()
         {
@@ -22,6 +23,13 @@ impl PreparedDensityTransport<'_> {
             ));
         }
         let linear = self.linear.as_ref().expect("bounded density geometry");
+        linear.specific_stencils(
+            self.mesh,
+            &self.volume_rates,
+            &work.vertex_densities,
+            &mut work.specific_stencils,
+            cancelled,
+        )?;
         for limiter in &mut work.specific_limiter {
             poll(cancelled)?;
             *limiter = 1.0;
@@ -85,8 +93,8 @@ impl PreparedDensityTransport<'_> {
                         sample / scale - value / scale
                     };
                 }
-                let variation = linear
-                    .specific_deviations(cell, differences, work.vertex_densities[cell])
+                let variation = work.specific_stencils[cell]
+                    .specific_deviations(differences, work.vertex_densities[cell])
                     .map(|delta| delta * scale);
                 if variation.iter().any(|delta| !delta.is_finite()) {
                     // An unrepresentable slope keeps the already admitted

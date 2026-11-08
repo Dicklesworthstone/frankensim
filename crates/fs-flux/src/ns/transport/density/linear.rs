@@ -8,7 +8,7 @@ use super::{
 #[derive(Clone, Copy, Default)]
 pub(super) struct LinearCell {
     // Two vertex deviations from the mean, as linear functions of the three
-    // neighboring density differences. The third deviation is minus their sum.
+    // neighboring sample differences. The third deviation is minus their sum.
     variation: [[f64; 3]; 2],
 }
 
@@ -42,9 +42,134 @@ fn centroid(points: [[f64; 2]; 3]) -> [f64; 2] {
     })
 }
 
+fn density_centroid(points: [[f64; 2]; 3], density: [f64; 3]) -> [f64; 2] {
+    let center = centroid(points);
+    let scale = density.into_iter().fold(0.0_f64, f64::max);
+    let rho = density.map(|value| value / scale);
+    let denominator = 4.0 * (rho[0] + rho[1] + rho[2]);
+    // For affine density, integral(rho*(x-center))/mass is the vertex
+    // covariance divided by four. Differences preserve the uniform-density
+    // center exactly and avoid summing large absolute coordinates.
+    core::array::from_fn(|k| {
+        center[k]
+            + (rho[0] - rho[2]).mul_add(
+                points[0][k] - center[k],
+                (rho[1] - rho[2]) * (points[1][k] - center[k]),
+            ) / denominator
+    })
+}
+
 pub(super) fn neighbor(mesh: &TriMesh, cell: usize, edge: usize) -> usize {
     let (a, b) = mesh.edges[edge].tris;
     if a == cell { b } else { a }
+}
+
+impl LinearCell {
+    fn prepare(
+        mesh: &TriMesh,
+        cell: usize,
+        rates: &[EdgeVolumeTransport],
+        density: Option<&[[f64; 3]]>,
+    ) -> Result<Self> {
+        let points = vertices(mesh, cell)?;
+        let center = centroid(points);
+        let sample_center = density.map_or(center, |rho| density_centroid(points, rho[cell]));
+        let length = points
+            .iter()
+            .flat_map(|p| [p[0] - center[0], p[1] - center[1]])
+            .fold(0.0_f64, |a, b| a.max(b.abs()));
+        if !positive(length) || center.iter().any(|x| !x.is_finite()) {
+            return Err(invalid("nondegenerate linear density geometry required"));
+        }
+        let mut vectors = [[0.0; 2]; 3];
+        let mut normal = [0.0; 3];
+        for (local, &(edge, _)) in mesh.tri_edges[cell].iter().enumerate() {
+            let face = &mesh.edges[edge];
+            let a = *mesh
+                .verts
+                .get(face.verts.0)
+                .ok_or(invalid("original density edge vertex required"))?;
+            let b = *mesh
+                .verts
+                .get(face.verts.1)
+                .ok_or(invalid("original density edge vertex required"))?;
+            if face.verts.0 == face.verts.1
+                || !mesh.tris[cell].contains(&face.verts.0)
+                || !mesh.tris[cell].contains(&face.verts.1)
+            {
+                return Err(invalid("density face must belong to its original triangle"));
+            }
+            let other = neighbor(mesh, cell, edge);
+            let sample = if other != usize::MAX {
+                let adjacent = vertices(mesh, other)?;
+                density.map_or_else(
+                    || centroid(adjacent),
+                    |rho| density_centroid(adjacent, rho[other]),
+                )
+            } else if rates[edge].against_normal_m2_s() > 0.0 {
+                core::array::from_fn(|k| a[k] + 0.5 * (b[k] - a[k]))
+            } else {
+                continue;
+            };
+            let d: [f64; 2] = core::array::from_fn(|k| (sample[k] - sample_center[k]) / length);
+            let square = d[0].mul_add(d[0], d[1] * d[1]);
+            if !positive(square) {
+                return Err(invalid("finite distinct density stencil sites required"));
+            }
+            vectors[local] = d.map(|value| value / square);
+            normal[0] += d[0] * vectors[local][0];
+            normal[1] += d[0] * vectors[local][1];
+            normal[2] += d[1] * vectors[local][1];
+        }
+        let determinant = normal[0].mul_add(normal[2], -normal[1] * normal[1]);
+        let trace = normal[0] + normal[2];
+        let mut stencil = Self::default();
+        // A one-sided/collinear stencil cannot identify a planar slope.
+        // Retain the original constant donor there; no ghost state is invented.
+        if !determinant.is_finite() || determinant <= 64.0 * f64::EPSILON * trace * trace {
+            return Ok(stencil);
+        }
+        for (vertex, row) in stencil.variation.iter_mut().enumerate() {
+            // Keep deviations about the geometric center so the third remains
+            // minus their sum. Specific reconstruction subsequently shifts all
+            // three by their exact density-weighted mean.
+            let d: [f64; 2] = core::array::from_fn(|k| (points[vertex][k] - center[k]) / length);
+            let inverse = [
+                (d[0] * normal[2] - d[1] * normal[1]) / determinant,
+                (d[1] * normal[0] - d[0] * normal[1]) / determinant,
+            ];
+            for (weight, vector) in row.iter_mut().zip(&vectors) {
+                *weight = inverse[0].mul_add(vector[0], inverse[1] * vector[1]);
+                if !weight.is_finite() {
+                    return Err(invalid("unrepresentable density reconstruction stencil"));
+                }
+            }
+        }
+        Ok(stencil)
+    }
+
+    fn deviations(&self, differences: [f64; 3]) -> [f64; 3] {
+        let mut deviation = [0.0; 3];
+        for (value, weights) in deviation[..2].iter_mut().zip(&self.variation) {
+            *value = weights[0].mul_add(
+                differences[0],
+                weights[1].mul_add(differences[1], weights[2] * differences[2]),
+            );
+        }
+        deviation[2] = -deviation[0] - deviation[1];
+        deviation
+    }
+
+    /// Shift the affine variation to zero density-weighted triangle mean:
+    /// integral(rho*delta)/mass = sum(rho_vertex*delta_vertex)/(4*sum(rho_vertex)).
+    pub(super) fn specific_deviations(&self, differences: [f64; 3], density: [f64; 3]) -> [f64; 3] {
+        let deviation = self.deviations(differences);
+        let scale = density.into_iter().fold(0.0_f64, f64::max);
+        let rho = density.map(|value| value / scale);
+        let shift = (rho[0] - rho[2]).mul_add(deviation[0], (rho[1] - rho[2]) * deviation[1])
+            / (4.0 * (rho[0] + rho[1] + rho[2]));
+        deviation.map(|value| value - shift)
+    }
 }
 
 impl LinearReconstruction {
@@ -57,72 +182,7 @@ impl LinearReconstruction {
         let mut cells = allocate(mesh.tris.len(), LinearCell::default())?;
         for (cell, stencil) in cells.iter_mut().enumerate() {
             poll(cancelled)?;
-            let points = vertices(mesh, cell)?;
-            let center = centroid(points);
-            let length = points
-                .iter()
-                .flat_map(|p| [p[0] - center[0], p[1] - center[1]])
-                .fold(0.0_f64, |a, b| a.max(b.abs()));
-            if !positive(length) || center.iter().any(|x| !x.is_finite()) {
-                return Err(invalid("nondegenerate linear density geometry required"));
-            }
-            let mut vectors = [[0.0; 2]; 3];
-            let mut normal = [0.0; 3];
-            for (local, &(edge, _)) in mesh.tri_edges[cell].iter().enumerate() {
-                let face = &mesh.edges[edge];
-                let a = *mesh
-                    .verts
-                    .get(face.verts.0)
-                    .ok_or(invalid("original density edge vertex required"))?;
-                let b = *mesh
-                    .verts
-                    .get(face.verts.1)
-                    .ok_or(invalid("original density edge vertex required"))?;
-                if face.verts.0 == face.verts.1
-                    || !mesh.tris[cell].contains(&face.verts.0)
-                    || !mesh.tris[cell].contains(&face.verts.1)
-                {
-                    return Err(invalid("density face must belong to its original triangle"));
-                }
-                let other = neighbor(mesh, cell, edge);
-                let sample = if other != usize::MAX {
-                    centroid(vertices(mesh, other)?)
-                } else if rates[edge].against_normal_m2_s() > 0.0 {
-                    core::array::from_fn(|k| a[k] + 0.5 * (b[k] - a[k]))
-                } else {
-                    continue;
-                };
-                let d: [f64; 2] = core::array::from_fn(|k| (sample[k] - center[k]) / length);
-                let square = d[0].mul_add(d[0], d[1] * d[1]);
-                if !positive(square) {
-                    return Err(invalid("finite distinct density stencil sites required"));
-                }
-                vectors[local] = d.map(|value| value / square);
-                normal[0] += d[0] * vectors[local][0];
-                normal[1] += d[0] * vectors[local][1];
-                normal[2] += d[1] * vectors[local][1];
-            }
-            let determinant = normal[0].mul_add(normal[2], -normal[1] * normal[1]);
-            let trace = normal[0] + normal[2];
-            // A one-sided/collinear stencil cannot identify a planar slope.
-            // Retain the original constant donor there; no ghost density is invented.
-            if !determinant.is_finite() || determinant <= 64.0 * f64::EPSILON * trace * trace {
-                continue;
-            }
-            for (vertex, row) in stencil.variation.iter_mut().enumerate() {
-                let d: [f64; 2] =
-                    core::array::from_fn(|k| (points[vertex][k] - center[k]) / length);
-                let inverse = [
-                    (d[0] * normal[2] - d[1] * normal[1]) / determinant,
-                    (d[1] * normal[0] - d[0] * normal[1]) / determinant,
-                ];
-                for (weight, vector) in row.iter_mut().zip(&vectors) {
-                    *weight = inverse[0].mul_add(vector[0], inverse[1] * vector[1]);
-                    if !weight.is_finite() {
-                        return Err(invalid("unrepresentable density reconstruction stencil"));
-                    }
-                }
-            }
+            *stencil = LinearCell::prepare(mesh, cell, rates, None)?;
         }
         let mut fractions = allocate(mesh.edges.len(), [[0.5, 1.0 / 12.0]; 2])?;
         for (edge, target) in fractions.iter_mut().enumerate() {
@@ -133,32 +193,31 @@ impl LinearReconstruction {
     }
 
     pub(super) fn deviations(&self, cell: usize, differences: [f64; 3]) -> [f64; 3] {
-        let mut deviation = [0.0; 3];
-        for (value, weights) in deviation[..2].iter_mut().zip(&self.cells[cell].variation) {
-            *value = weights[0].mul_add(
-                differences[0],
-                weights[1].mul_add(differences[1], weights[2] * differences[2]),
-            );
-        }
-        deviation[2] = -deviation[0] - deviation[1];
-        deviation
+        self.cells[cell].deviations(differences)
     }
 
-    /// A specific value is a MASS mean. Shift the affine variation so its
-    /// density-weighted triangle mean is zero: integral(rho*delta)/mass
-    /// equals sum(rho_vertex*delta_vertex)/(4*sum(rho_vertex)).
-    pub(super) fn specific_deviations(
+    /// Specific inventories are sampled at mass centroids, which change with
+    /// the accepted density reconstruction. Prepare once per stage, then reuse
+    /// the same geometric weights for every carried component without allocation.
+    pub(super) fn specific_stencils(
         &self,
-        cell: usize,
-        differences: [f64; 3],
-        density: [f64; 3],
-    ) -> [f64; 3] {
-        let deviation = self.deviations(cell, differences);
-        let scale = density.into_iter().fold(0.0_f64, f64::max);
-        let rho = density.map(|value| value / scale);
-        let shift = (rho[0] - rho[2]).mul_add(deviation[0], (rho[1] - rho[2]) * deviation[1])
-            / (4.0 * (rho[0] + rho[1] + rho[2]));
-        deviation.map(|value| value - shift)
+        mesh: &TriMesh,
+        rates: &[EdgeVolumeTransport],
+        density: &[[f64; 3]],
+        stencils: &mut [LinearCell],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<()> {
+        if density.len() != self.cells.len()
+            || stencils.len() != self.cells.len()
+            || rates.len() != self.fractions.len()
+        {
+            return Err(invalid("matching mass-centroid stencil workspace required"));
+        }
+        for (cell, stencil) in stencils.iter_mut().enumerate() {
+            poll(cancelled)?;
+            *stencil = LinearCell::prepare(mesh, cell, rates, Some(density))?;
+        }
+        Ok(())
     }
 
     /// Covariance shifts the volume centroid to the mass centroid. Evaluating

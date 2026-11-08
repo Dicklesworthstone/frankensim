@@ -384,8 +384,8 @@ fn bounded_inventory_convection_reduces_thermal_diffusion_and_refines_in_space()
 }
 
 #[test]
-fn reconstructed_counterflow_integrates_each_cubic_inventory_flux() {
-    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 4, 4));
+fn reconstructed_counterflow_reproduces_affine_mass_means_and_cubic_inventory_flux() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 8, 8));
     let system = FluxSystem::new(&mesh)
         .with_density_reconstruction(DensityReconstruction::BoundedLinearInventories);
     let edge = mesh
@@ -396,7 +396,7 @@ fn reconstructed_counterflow_integrates_each_cubic_inventory_flux() {
                 && [face.tris.0, face.tris.1].into_iter().all(|cell| {
                     mesh.tris[cell]
                         .iter()
-                        .all(|&v| mesh.verts[v].into_iter().all(|x| x > 0.0 && x < 1.0))
+                        .all(|&v| mesh.verts[v].into_iter().all(|x| x > 0.125 && x < 0.875))
                 })
         })
         .unwrap();
@@ -405,14 +405,24 @@ fn reconstructed_counterflow_integrates_each_cubic_inventory_flux() {
     let plan = system
         .prepare_density_transport(&velocity, depth, 1e-12, 1 << 22, || false)
         .unwrap();
-    let rho = |point: [f64; 2]| 2.0 + point[0] + 2.0 * point[1];
+    let rho = |point: [f64; 2]| 1.0 + 8.0 * point[0] + 3.0 * point[1];
     let specific = |point: [f64; 2]| -20.0 + 3.0 * point[0] - point[1];
     let cells: Vec<_> = mesh
         .centroids
         .iter()
-        .map(|&point| Cell {
-            density_kg_m3: rho(point),
-            specific: [specific(point), 7.0],
+        .enumerate()
+        .map(|(cell, &point)| {
+            // The physical specific field is affine, but its cell state is
+            // the integral of rho*s divided by mass, not s(geometric center).
+            let mean = tri_quad(mesh.tris[cell].map(|v| mesh.verts[v]), mesh.areas[cell])
+                .into_iter()
+                .map(|(point, weight)| weight * rho(point) * specific(point))
+                .sum::<f64>()
+                / (mesh.areas[cell] * rho(point));
+            Cell {
+                density_kg_m3: rho(point),
+                specific: [mean, 7.0],
+            }
         })
         .collect();
     let mut work = plan.workspace::<2>(1 << 22).unwrap();
@@ -434,21 +444,15 @@ fn reconstructed_counterflow_integrates_each_cubic_inventory_flux() {
     let b = mesh.verts[face.verts.1];
     for (direction, donor, left, right) in [(0, face.tris.0, 0.5, 1.0), (1, face.tris.1, 0.0, 0.5)]
     {
-        // Independent triangle quadrature centers the reconstructed affine
-        // specific field on the declared MASS mean, then two-point Gauss
-        // integrates its cubic directional product with density and velocity.
-        let mean = tri_quad(mesh.tris[donor].map(|v| mesh.verts[v]), mesh.areas[donor])
-            .into_iter()
-            .map(|(point, weight)| weight * rho(point) * specific(point))
-            .sum::<f64>()
-            / (mesh.areas[donor] * cells[donor].density_kg_m3);
-        let shift = mean - cells[donor].specific[0];
+        // Independent two-point Gauss exactly integrates the PHYSICAL cubic
+        // rho*s*u_n on each counterflow interval. A geometric-center stencil
+        // distorts the affine field and fails this oracle at variable density.
         let mut expected = 0.0;
         for t in [-1.0 / 3.0_f64.sqrt(), 1.0 / 3.0_f64.sqrt()] {
             let s = 0.5 * (left + right) + 0.5 * (right - left) * t;
             let point = core::array::from_fn(|k| a[k] + s * (b[k] - a[k]));
             let normal = (12.0 * velocity[2 * edge + 1] * (s - 0.5)).abs();
-            expected += 0.5 * (right - left) * normal * rho(point) * (specific(point) - shift);
+            expected += 0.5 * (right - left) * normal * rho(point) * specific(point);
         }
         let accepted = work.face_transfers().unwrap()[edge];
         near(
