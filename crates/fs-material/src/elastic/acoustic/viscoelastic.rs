@@ -13,8 +13,9 @@
 //! driving and thick slabs. Positive bulk/shear strain-work integrals remain
 //! independent of reflected/transmitted powers, including below roundoff loss.
 //! This frozen, small-strain, steady harmonic response does not evolve a
-//! thermal state, infer measured source authority, resolve oblique P/S waves,
-//! move a porous frame or model a finite aperture.
+//! thermal state, infer measured source authority, move a porous frame or model
+//! a finite aperture. The separate [`interface`] owner resolves oblique P/S
+//! conversion at a fluid/viscoelastic half-space contact.
 //! The optional [`thermal`] adapter deposits its cycle-mean work on the original
 //! thermal timeline while keeping these acoustic laws frozen.
 
@@ -25,6 +26,9 @@ use fs_blake3::ContentHash;
 use fs_math::c64::C64;
 
 mod kernel;
+
+/// Oblique reflection and coherent P/S conversion into an absorbing solid.
+pub mod interface;
 
 /// Coherent bonded solid stacks with the original loss law in every layer.
 pub mod layers;
@@ -47,7 +51,9 @@ pub struct ViscoelasticSlabSource<'a> {
     pub density_kg_m3: f64,
     /// Closed supported angular-frequency interval [rad/s].
     pub frequency_band_rad_s: (f64, f64),
-    /// Positive peak absolute longitudinal strain ceiling of the original law.
+    /// Positive peak strain ceiling of the original law. Normal slabs enforce
+    /// longitudinal strain; oblique interfaces enforce the conservative norm
+    /// of the full Mandel strain, including the converted shear wave.
     pub maximum_absolute_strain: f64,
     /// Nonzero identity of the authored material state, not inferred evidence.
     pub source_identity: ContentHash,
