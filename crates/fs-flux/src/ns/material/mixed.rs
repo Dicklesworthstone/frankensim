@@ -427,7 +427,8 @@ impl<G> MaterialStokesRheologySolution<G> {
     pub fn samples(&self) -> &[MaterialFluxRheologySample<G>] {
         &self.samples
     }
-    /// Completed linearized constitutive/flow solves.
+    /// Completed Picard flow updates. Flow control additionally solves one
+    /// pressure response per controlled port in each update.
     #[must_use]
     pub const fn iterations(&self) -> usize {
         self.flow.iterations
@@ -632,68 +633,34 @@ impl<'s, 'm, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, '_, F> {
         resolve: impl FnMut(MaterialFluxRheologyPoint, &FluidTransportState) -> Result<G, MaterialError>,
     ) -> Result<MaterialStokesRheologySolution<G>, MaterialFluxError> {
         let density = self.transport.density_kg_m3();
-        // Homogeneous closure storage avoids a boxed callback per edge.
-        // Admission still happens before any force, traction or source query.
-        let scaled_tractions: Vec<_> = boundaries
-            .iter()
-            .map(|boundary| {
-                move |point: [f64; 2], normal: [f64; 2]| match boundary {
-                    MaterialStokesBoundary::TotalTraction { value, .. } => {
-                        let physical = value(point, normal);
-                        [physical[0] / density, physical[1] / density]
-                    }
-                    MaterialStokesBoundary::Velocity { .. }
-                    | MaterialStokesBoundary::NavierSlip { .. } => {
-                        unreachable!("only traction owners request stress samples")
-                    }
-                }
-            })
-            .collect();
-        let primitive_boundaries: Vec<_> = boundaries
-            .iter()
-            .zip(&scaled_tractions)
-            .map(|(boundary, scaled)| match boundary {
-                MaterialStokesBoundary::Velocity { edge, value } => StokesBoundary::Velocity {
-                    edge: *edge,
-                    value: *value,
-                },
-                MaterialStokesBoundary::NavierSlip {
-                    edge,
-                    value,
-                    tangential_resistance_pa_s_per_m,
-                } => StokesBoundary::NavierSlip {
-                    edge: *edge,
-                    value: *value,
-                    tangential_resistance_m_s: kinematic_slip_resistance(
-                        *tangential_resistance_pa_s_per_m,
-                        density,
-                    ),
-                },
-                MaterialStokesBoundary::TotalTraction { edge, .. } => {
-                    StokesBoundary::TotalTraction {
-                        edge: *edge,
-                        value: scaled,
-                    }
-                }
-            })
-            .collect();
         let field = RheologyField::new(&self.system.mesh.centroids, &self.transport, resolve);
-        let result = self
-            .system
-            .solve_stokes_mixed_rheology_checked(
+        let result = with_physical_boundaries(boundaries, density, |primitive| {
+            self.system.solve_stokes_mixed_rheology_checked(
                 self.params,
                 &|cell, _, rate| field.viscosity(cell, rate),
                 &|point| {
                     let physical = force_density(point);
                     [physical[0] / density, physical[1] / density]
                 },
-                &primitive_boundaries,
+                primitive,
                 initial_velocity,
                 controls,
                 &|| field.is_valid(),
             )
-            .map_err(MaterialFluxError::Boundary);
+        })
+        .map_err(MaterialFluxError::Boundary);
         let (flow, samples) = field.finish(result)?;
+        self.material_stokes_rheology_solution(flow, samples)
+    }
+
+    // Both pressure-driven and flow-driven endpoints retain the exact material
+    // samples that produced their final independently reassembled residual.
+    pub(super) fn material_stokes_rheology_solution<G>(
+        &self,
+        flow: StokesRheologySolution,
+        samples: Vec<MaterialFluxRheologySample<G>>,
+    ) -> Result<MaterialStokesRheologySolution<G>, MaterialFluxError> {
+        let density = self.transport.density_kg_m3();
         let pressure_pa: Vec<_> = flow.solution.pressure.iter().map(|p| density * p).collect();
         let kinetic_energy_j_per_m = density * self.system.kinetic_energy(&flow.solution.field.x);
         let viscous_dissipation = self.viscous_dissipation(&flow.solution.field.x, &|cell| {

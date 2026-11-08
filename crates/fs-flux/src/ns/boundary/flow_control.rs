@@ -7,9 +7,9 @@ use super::{StokesAssembly, StokesBoundaryError, StokesSolution};
 use crate::ns::FluxSolution;
 
 /// Resolved flow and the uniform pressure increments required at controlled ports.
-pub struct StokesFlowControlSolution {
-    /// Original velocity, pressure datum and complete physical boundary reactions.
-    pub flow: StokesSolution,
+pub struct StokesFlowControlSolution<S = StokesSolution> {
+    /// Accepted linear or rheological flow, including its boundary reactions.
+    pub flow: S,
     /// Pressure added to each port's original traction as -p*n [m²/s²].
     /// Multiply by the SAME reference density as the assembled equations for Pa.
     pub pressure_offsets_m2_s2: Vec<f64>,
@@ -187,18 +187,11 @@ impl PreparedStokesFlowControl<'_, '_> {
         outward_volume_rates_m2_s: &[f64],
         absolute_tolerance_m2_s: f64,
     ) -> Result<StokesFlowControlSolution, StokesBoundaryError> {
-        let count = self.ports.len();
-        if outward_volume_rates_m2_s.len() != count
-            || outward_volume_rates_m2_s
-                .iter()
-                .any(|value| !value.is_finite())
-            || !absolute_tolerance_m2_s.is_finite()
-            || absolute_tolerance_m2_s < 0.0
-        {
-            return Err(invalid(
-                "finite complete port flows and nonnegative absolute flow tolerance required",
-            ));
-        }
+        admit_flow_targets(
+            self.ports.len(),
+            outward_volume_rates_m2_s,
+            absolute_tolerance_m2_s,
+        )?;
         let mut pressures: Vec<_> = outward_volume_rates_m2_s
             .iter()
             .zip(&self.baseline_flows)
@@ -239,16 +232,8 @@ impl PreparedStokesFlowControl<'_, '_> {
             }
             *value = sum.to_f64();
         }
-        let mut rhs = self.assembly.rhs.clone();
-        for (port, &pressure) in self.ports.iter().zip(&pressures) {
-            for &edge in port {
-                rhs[2 * edge] = (Dd::from_f64(rhs[2 * edge])
-                    - Dd::from_f64(pressure)
-                        * Dd::from_f64(self.assembly.system.mesh.edges[edge].len))
-                .to_f64();
-            }
-        }
-        if x.iter().chain(&rhs).any(|value| !value.is_finite()) {
+        let rhs = pressure_rhs(&self.assembly, &self.ports, &pressures)?;
+        if x.iter().any(|value| !value.is_finite()) {
             return Err(invalid("unrepresentable controlled flow field or load"));
         }
         let mut work = vec![0.0; x.len()];
@@ -262,27 +247,13 @@ impl PreparedStokesFlowControl<'_, '_> {
             scaled_rel_residual,
         };
         check_convergence(&self.assembly, &field)?;
-        let flows: Vec<_> = self
-            .ports
-            .iter()
-            .map(|port| port_flow(&self.assembly, port, &field.x))
-            .collect();
-        let mut maximum_flow_residual_m2_s = 0.0_f64;
-        for (port, (&requested, &actual)) in
-            outward_volume_rates_m2_s.iter().zip(&flows).enumerate()
-        {
-            let tolerance = absolute_tolerance_m2_s + self.assembly.params.tol * requested.abs();
-            let residual = (actual - requested).abs();
-            if !actual.is_finite() || !tolerance.is_finite() || residual > tolerance {
-                return Err(StokesBoundaryError::FlowRateNotConverged {
-                    port,
-                    requested_m2_s: requested,
-                    actual_m2_s: actual,
-                    tolerance_m2_s: tolerance,
-                });
-            }
-            maximum_flow_residual_m2_s = maximum_flow_residual_m2_s.max(residual);
-        }
+        let (flows, maximum_flow_residual_m2_s) = checked_port_flows(
+            &self.assembly,
+            &self.ports,
+            outward_volume_rates_m2_s,
+            absolute_tolerance_m2_s,
+            &field.x,
+        )?;
         let mut flow = self.assembly.report_solution(field)?;
         flow.reactions.add_port_pressures(&self.ports, &pressures)?;
         Ok(StokesFlowControlSolution {
@@ -301,6 +272,96 @@ impl PreparedStokesFlowControl<'_, '_> {
     pub fn kinetic_energy(&self, velocity: &[f64]) -> Result<f64, StokesBoundaryError> {
         self.assembly.kinetic_energy(velocity)
     }
+}
+
+// Borrowed nonlinear constraints; geometry is admitted by each native
+// response preparation, while the same load/flow functionals check endpoints.
+#[derive(Clone, Copy)]
+pub(super) struct FlowControl<'a> {
+    pub(super) ports: &'a [&'a [usize]],
+    pub(super) targets: &'a [f64],
+    pub(super) absolute_tolerance_m2_s: f64,
+}
+
+impl FlowControl<'_> {
+    pub(super) fn admit(&self) -> Result<(), StokesBoundaryError> {
+        if self.ports.is_empty() || self.ports.iter().any(|port| port.is_empty()) {
+            return Err(invalid("at least one nonempty controlled port required"));
+        }
+        admit_flow_targets(self.ports.len(), self.targets, self.absolute_tolerance_m2_s)
+    }
+}
+
+fn admit_flow_targets(
+    count: usize,
+    targets: &[f64],
+    absolute_tolerance_m2_s: f64,
+) -> Result<(), StokesBoundaryError> {
+    if targets.len() != count
+        || targets.iter().any(|value| !value.is_finite())
+        || !absolute_tolerance_m2_s.is_finite()
+        || absolute_tolerance_m2_s < 0.0
+    {
+        return Err(invalid(
+            "finite complete port flows and nonnegative absolute flow tolerance required",
+        ));
+    }
+    Ok(())
+}
+
+// The frozen linear solve and the reassembled nonlinear residual use exactly
+// the same conjugate pressure load, including its compensated arithmetic.
+pub(super) fn pressure_rhs(
+    assembly: &StokesAssembly<'_, '_>,
+    ports: &[impl AsRef<[usize]>],
+    pressures: &[f64],
+) -> Result<Vec<f64>, StokesBoundaryError> {
+    if pressures.len() != ports.len() || pressures.iter().any(|value| !value.is_finite()) {
+        return Err(invalid(
+            "finite complete controlled port pressures required",
+        ));
+    }
+    let mut rhs = assembly.rhs.clone();
+    for (port, &pressure) in ports.iter().zip(pressures) {
+        for &edge in port.as_ref() {
+            rhs[2 * edge] = (Dd::from_f64(rhs[2 * edge])
+                - Dd::from_f64(pressure) * Dd::from_f64(assembly.system.mesh.edges[edge].len))
+            .to_f64();
+        }
+    }
+    if rhs.iter().any(|value| !value.is_finite()) {
+        return Err(invalid("unrepresentable controlled flow field or load"));
+    }
+    Ok(rhs)
+}
+
+pub(super) fn checked_port_flows(
+    assembly: &StokesAssembly<'_, '_>,
+    ports: &[impl AsRef<[usize]>],
+    targets: &[f64],
+    absolute_tolerance_m2_s: f64,
+    velocity: &[f64],
+) -> Result<(Vec<f64>, f64), StokesBoundaryError> {
+    admit_flow_targets(ports.len(), targets, absolute_tolerance_m2_s)?;
+    let flows: Vec<_> = ports
+        .iter()
+        .map(|port| port_flow(assembly, port.as_ref(), velocity))
+        .collect();
+    let mut maximum_flow_residual_m2_s = 0.0_f64;
+    for (port, (&requested, &actual)) in targets.iter().zip(&flows).enumerate() {
+        let tolerance = absolute_tolerance_m2_s + assembly.params.tol * requested.abs();
+        let residual = (actual - requested).abs();
+        if !actual.is_finite() || !tolerance.is_finite() || residual > tolerance {
+            return Err(StokesBoundaryError::FlowRateNotConverged {
+                port,
+                requested_m2_s: requested,
+                actual_m2_s: actual,
+                tolerance_m2_s: tolerance,
+            });
+        }
+        maximum_flow_residual_m2_s = maximum_flow_residual_m2_s.max(residual);
+    }
+    Ok((flows, maximum_flow_residual_m2_s))
 }
 
 fn port_flow(assembly: &StokesAssembly<'_, '_>, edges: &[usize], x: &[f64]) -> f64 {

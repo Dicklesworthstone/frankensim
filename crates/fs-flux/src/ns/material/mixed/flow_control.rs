@@ -1,10 +1,16 @@
 //! Source-owned physical pressure required by resolved integral port flows.
 
-use fs_material::fluid_transport::FluidTransport;
+use fs_material::MaterialError;
+use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 
-use super::super::{MaterialFluxError, MaterialFluxSystem};
-use super::{MaterialStokesBoundary, MaterialStokesSolution, with_physical_boundaries};
-use crate::ns::boundary::{StokesAssembly, StokesFlowControlSolution, StokesSolution};
+use super::super::{
+    MaterialFluxError, MaterialFluxRheologyPoint, MaterialFluxSystem, rheology::RheologyField,
+};
+use super::{
+    MaterialStokesBoundary, MaterialStokesRheologySolution, MaterialStokesSolution,
+    with_physical_boundaries,
+};
+use crate::ns::boundary::{StokesAssembly, StokesFlowControlSolution, StokesRheologyControls};
 
 /// Physical source-backed result of an integral port-flow constraint.
 pub struct MaterialStokesFlowControlSolution<S> {
@@ -140,6 +146,70 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         )
     }
 
+    /// Solve the material pressure needed for shear-dependent steady port flows.
+    ///
+    /// Each cell's source is queried at its actual resolved shear, and the
+    /// pressure needed for the requested integral flow changes with that
+    /// viscosity. The existing coupled Picard loop accepts only the final
+    /// viscosity's nonlinear equations and the original port-flow tolerances.
+    /// Pressure offsets are relaxed with the complete field. Returned source
+    /// owners, pressure, reactions, kinetic energy and viscous heat all belong
+    /// to that accepted endpoint.
+    ///
+    /// Force density is N/m³, total traction and required pressures are Pa,
+    /// velocity is m/s, and signed outward flow and its absolute tolerance are
+    /// m²/s per unit depth. Ports retain the original traction-datum rules;
+    /// their velocity profiles remain unknown. Sources must retain the bound
+    /// reference density; captured temperature/composition remain fixed. This
+    /// is generalized-Newtonian creeping flow, without convection, thermal
+    /// evolution, material transport or viscoelastic memory.
+    ///
+    /// # Errors
+    /// Preserves typed material refusals, native boundary/flow admission,
+    /// coupled nonlinear convergence and SI representability. The initial
+    /// velocity is immutable; refusal publishes no partial flow or source set.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_stokes_mixed_rheology_flow_control<G: FluidTransport>(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialStokesBoundary<'_>],
+        ports: &[&[usize]],
+        outward_volume_rates_m2_s: &[f64],
+        initial_velocity: &[f64],
+        controls: StokesRheologyControls,
+        absolute_tolerance_m2_s: f64,
+        resolve: impl FnMut(MaterialFluxRheologyPoint, &FluidTransportState) -> Result<G, MaterialError>,
+    ) -> Result<
+        MaterialStokesFlowControlSolution<MaterialStokesRheologySolution<G>>,
+        MaterialFluxError,
+    > {
+        let density = self.transport.density_kg_m3();
+        let field = RheologyField::new(&self.system.mesh.centroids, &self.transport, resolve);
+        let result = with_physical_boundaries(boundaries, density, |primitive| {
+            self.system
+                .solve_stokes_mixed_rheology_flow_control_checked(
+                    self.params,
+                    &|cell, _, rate| field.viscosity(cell, rate),
+                    &|point| {
+                        let physical = force_density(point);
+                        [physical[0] / density, physical[1] / density]
+                    },
+                    primitive,
+                    ports,
+                    outward_volume_rates_m2_s,
+                    initial_velocity,
+                    controls,
+                    absolute_tolerance_m2_s,
+                    &|| field.is_valid(),
+                )
+        })
+        .map_err(MaterialFluxError::Boundary);
+        let (native, samples) = field.finish(result)?;
+        physical_control(native, density, |flow| {
+            self.material_stokes_rheology_solution(flow, samples)
+        })
+    }
+
     fn solve_controlled_assembly(
         &self,
         assembly: StokesAssembly<'_, '_>,
@@ -159,10 +229,10 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
     }
 }
 
-pub(super) fn physical_control<S>(
-    native: StokesFlowControlSolution,
+pub(super) fn physical_control<N, S>(
+    native: StokesFlowControlSolution<N>,
     density: f64,
-    recover: impl FnOnce(StokesSolution) -> Result<S, MaterialFluxError>,
+    recover: impl FnOnce(N) -> Result<S, MaterialFluxError>,
 ) -> Result<MaterialStokesFlowControlSolution<S>, MaterialFluxError> {
     let pressure_offsets_pa: Vec<_> = native
         .pressure_offsets_m2_s2

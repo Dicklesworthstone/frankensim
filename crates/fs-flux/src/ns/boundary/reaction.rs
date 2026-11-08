@@ -228,11 +228,11 @@ impl BoundaryReactions {
     // constraint reactions already see the solved pressure in the field.
     pub(super) fn add_port_pressures(
         &mut self,
-        ports: &[Vec<usize>],
+        ports: &[impl AsRef<[usize]>],
         pressures: &[f64],
     ) -> Result<(), StokesBoundaryError> {
         for (port, &pressure) in ports.iter().zip(pressures) {
-            for &edge in port {
+            for &edge in port.as_ref() {
                 let index = self
                     .edges
                     .binary_search_by_key(&edge, |face| face.edge)

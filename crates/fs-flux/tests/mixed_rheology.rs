@@ -433,3 +433,382 @@ fn constant_law_mixed_rheology_reduces_to_the_checked_linear_flow() {
             .all(|(a, b)| a.to_bits() == b.to_bits())
     );
 }
+
+#[test]
+fn prescribed_shear_thinning_flow_recovers_independent_required_pressure() {
+    // Invert tau=nu0*gamma/(1+lambda*gamma) for tau=G*|y-h/2|
+    // and integrate the resulting velocity and volume rate analytically.
+    // The port fixes only that integral; its profile and pressure are unknown.
+    let nu0: f64 = 0.4;
+    let lambda: f64 = 0.5;
+    let gradient: f64 = 0.4;
+    let half: f64 = 0.5;
+    let b = lambda * gradient;
+    let exact = |point: [f64; 2]| {
+        let z = (point[1] - half).abs();
+        [
+            -(half - z) / lambda
+                - nu0 / (lambda * lambda * gradient) * ((nu0 - b * half) / (nu0 - b * z)).ln(),
+            0.0,
+        ]
+    };
+    let exact_flux = 2.0
+        * gradient
+        * (-half * half / (2.0 * b)
+            - nu0 * half / (b * b)
+            - nu0 * nu0 / (b * b * b) * ((nu0 - b * half) / nu0).ln());
+    let mut pressure_errors = Vec::new();
+    for n in [4, 8] {
+        let mesh = TriMesh::from_mesh2(&Mesh2::triangles(2.0, 1.0, 2 * n, n));
+        let sys = FluxSystem::new(&mesh);
+        let params = FluxParams {
+            nu: f64::NAN,
+            tol: 1e-12,
+            ..FluxParams::default()
+        };
+        let controls = StokesRheologyControls {
+            maximum_iterations: 80,
+            relative_tolerance: 1e-9,
+            relaxation: 0.65,
+        };
+        let wall = |_: [f64; 2]| [0.0; 2];
+        let traction = |point: [f64; 2], normal: [f64; 2]| {
+            let shear = gradient * (half - point[1]);
+            [
+                -4.2 * normal[0] + shear * normal[1],
+                shear * normal[0] - 4.2 * normal[1],
+            ]
+        };
+        let inlet: Vec<_> = mesh
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(edge, g)| mesh.is_boundary(*edge) && g.normal[0] < -0.5)
+            .map(|(edge, _)| edge)
+            .collect();
+        let boundaries: Vec<_> = mesh
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(edge, _)| mesh.is_boundary(*edge))
+            .map(|(edge, g)| {
+                if g.normal[0].abs() > 0.5 {
+                    StokesBoundary::TotalTraction {
+                        edge,
+                        value: &traction,
+                    }
+                } else {
+                    StokesBoundary::Velocity { edge, value: &wall }
+                }
+            })
+            .collect();
+        let initial = vec![0.0; sys.n_u];
+        let controlled = sys
+            .solve_stokes_mixed_rheology_flow_control(
+                params,
+                &|_, _, gamma| nu0 / (1.0 + lambda * gamma),
+                &|_| [0.0; 2],
+                &boundaries,
+                &[&inlet],
+                &[-exact_flux],
+                &initial,
+                controls,
+                1e-12,
+            )
+            .unwrap();
+        let solved = &controlled.flow;
+        assert!(solved.solution.field.converged(controls.relative_tolerance));
+        assert!(solved.relative_update <= controls.relative_tolerance);
+        assert!(solved.nonlinear_residual <= controls.relative_tolerance);
+        assert!(controlled.maximum_flow_residual_m2_s < 2e-12);
+        assert!((controlled.outward_volume_rates_m2_s[0] + exact_flux).abs() < 2e-12);
+        let (error, divergence) = sys.velocity_error(&solved.solution.field.x, &exact);
+        assert!(divergence < 1e-8);
+        let pressure_error = (controlled.pressure_offsets_m2_s2[0] - 0.8).abs();
+        pressure_errors.push(pressure_error);
+        if n == 8 {
+            assert!(error < 0.004, "resolved velocity error={error:e}");
+            assert!(
+                pressure_error < 0.04,
+                "required pressure error={pressure_error:e}"
+            );
+        } else {
+            // Freezing the zero-shear viscosity gives a different required
+            // pressure even though it also enforces the same total flow.
+            let frozen = sys
+                .assemble_stokes_mixed_variable_viscosity(
+                    params,
+                    &|_, _| nu0,
+                    &|_| [0.0; 2],
+                    &boundaries,
+                )
+                .unwrap()
+                .prepare_flow_control(&[&inlet])
+                .unwrap()
+                .solve(&[-exact_flux], 1e-12)
+                .unwrap();
+            assert!(
+                (frozen.pressure_offsets_m2_s2[0] - 0.8).abs() > 2.0 * pressure_error,
+                "a frozen material must not satisfy the nonlinear pressure reference"
+            );
+        }
+        assert_eq!(initial, vec![0.0; sys.n_u]);
+    }
+    assert!(
+        pressure_errors[1] < 0.7 * pressure_errors[0],
+        "required pressure must approach the independent channel law: {pressure_errors:?}"
+    );
+}
+
+#[test]
+fn material_flow_control_closes_layered_shear_and_required_pressure_together() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
+    let sys = FluxSystem::new(&mesh);
+    // mu=K(T)*(1+gamma²), with gamma=3 below and gamma=1 above:
+    // the continuous shear stress is 1 Pa and the integral flow is 1.45 m²/s.
+    let velocity = |p: [f64; 2]| [0.2 + 3.0 * p[1].min(0.5) + (p[1] - 0.5).max(0.0), 0.0];
+    let traction = |_: [f64; 2], n: [f64; 2]| [-7.0 * n[0] + n[1], n[0] - 7.0 * n[1]];
+    let inlet: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(edge, g)| mesh.is_boundary(*edge) && g.normal[0] < -0.5)
+        .map(|(edge, _)| edge)
+        .collect();
+    let boundaries: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(edge, _)| mesh.is_boundary(*edge))
+        .map(|(edge, g)| {
+            if g.normal[1].abs() > 0.5 {
+                MaterialStokesBoundary::Velocity {
+                    edge,
+                    value: &velocity,
+                }
+            } else {
+                MaterialStokesBoundary::TotalTraction {
+                    edge,
+                    value: &traction,
+                }
+            }
+        })
+        .collect();
+    let initial = vec![0.0; sys.n_u];
+    let controls = StokesRheologyControls {
+        maximum_iterations: 100,
+        relative_tolerance: 1e-9,
+        relaxation: 0.5,
+    };
+    for density in [2.0, 7.0] {
+        let reference = transport(density, 0.3);
+        let flow = MaterialFluxSystem::new(
+            &sys,
+            &reference,
+            MaterialFluxNumerics {
+                linear_tolerance: 1e-12,
+                ..MaterialFluxNumerics::default()
+            },
+        )
+        .unwrap();
+        let mut queries = 0;
+        let controlled = flow
+            .solve_stokes_mixed_rheology_flow_control(
+                &|_| [-1.7, 0.0],
+                &boundaries,
+                &[&inlet],
+                &[-1.45],
+                &initial,
+                controls,
+                1e-12,
+                |point, reference| {
+                    queries += 1;
+                    let lower = point.position_m[1] < 0.5;
+                    let k = if lower { 1.0 / 30.0 } else { 0.5 };
+                    Ok(Response {
+                        state: transport(
+                            reference.density_kg_m3(),
+                            k * (1.0 + point.shear_rate_per_s.powi(2)),
+                        ),
+                        point,
+                        temperature_k: if lower { 330.0 } else { 300.0 },
+                        query: queries,
+                    })
+                },
+            )
+            .unwrap();
+        let solved = &controlled.flow;
+        let (error, divergence) = sys.velocity_error(&solved.discrete().x, &velocity);
+        assert!(error < 1e-7 && divergence < 1e-9, "{error}, {divergence}");
+        assert!((controlled.pressure_offsets_pa[0] - 1.7).abs() < 1e-7);
+        assert!(controlled.maximum_flow_residual_m2_s < 3e-12);
+        assert!(solved.discrete().converged(controls.relative_tolerance));
+        assert!(solved.relative_update() <= controls.relative_tolerance);
+        assert!(solved.nonlinear_residual() <= controls.relative_tolerance);
+        let rates = sys.shear_rates(&solved.discrete().x);
+        for (cell, sample) in solved.samples().iter().enumerate() {
+            assert_eq!(sample.point(), sample.material().point);
+            assert_eq!(
+                sample.point().shear_rate_per_s.to_bits(),
+                rates[cell].to_bits()
+            );
+            assert_eq!(sample.transport().density_kg_m3(), density);
+            assert_eq!(sample.point().position_m, mesh.centroids[cell]);
+            assert!(sample.material().query <= queries);
+            assert_eq!(
+                sample.material().temperature_k,
+                if mesh.centroids[cell][1] < 0.5 {
+                    330.0
+                } else {
+                    300.0
+                }
+            );
+            assert!((sample.transport().dynamic_viscosity_pa_s() * rates[cell] - 1.0).abs() < 1e-7);
+            assert!(
+                (solved.pressure_pa()[cell] - 7.0 - 1.7 * (1.0 - mesh.centroids[cell][0])).abs()
+                    < 1e-7
+            );
+        }
+        let exact_energy = 0.5
+            * density
+            * ((1.7_f64.powi(3) - 0.2_f64.powi(3)) / 9.0
+                + (2.2_f64.powi(3) - 1.7_f64.powi(3)) / 3.0);
+        assert!((solved.kinetic_energy_j_per_m() / exact_energy - 1.0).abs() < 1e-7);
+        assert!((solved.viscous_dissipation().total_power_w_per_m() - 2.0).abs() < 4e-7);
+        let load = solved.boundary_loads(&inlet, [0.0; 2], &[None]).unwrap();
+        assert!((load.stress.force_n_per_m[0] + 8.7).abs() < 1e-7);
+        assert!((load.stress.force_n_per_m[1] - 1.0).abs() < 1e-7);
+        assert!((load.stress.moment_n - 4.35).abs() < 1e-7);
+        assert!(queries <= mesh.tris.len() * (solved.iterations() + 1));
+        assert_eq!(initial, vec![0.0; sys.n_u]);
+    }
+}
+
+#[test]
+fn flow_control_refuses_source_and_nonlinear_failures_without_partial_state() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
+    let sys = FluxSystem::new(&mesh);
+    let reference = transport(2.0, 1.0);
+    let flow = MaterialFluxSystem::new(&sys, &reference, MaterialFluxNumerics::default()).unwrap();
+    let initial = vec![0.0; sys.n_u];
+    let velocity = |p: [f64; 2]| [p[1], 0.0];
+    let traction = |_: [f64; 2], n: [f64; 2]| [-7.0 * n[0] + n[1], n[0] - 7.0 * n[1]];
+    let inlet: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(edge, g)| mesh.is_boundary(*edge) && g.normal[0] < -0.5)
+        .map(|(edge, _)| edge)
+        .collect();
+    let boundaries: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(edge, _)| mesh.is_boundary(*edge))
+        .map(|(edge, g)| {
+            if g.normal[1].abs() > 0.5 {
+                MaterialStokesBoundary::Velocity {
+                    edge,
+                    value: &velocity,
+                }
+            } else {
+                MaterialStokesBoundary::TotalTraction {
+                    edge,
+                    value: &traction,
+                }
+            }
+        })
+        .collect();
+    let refusal = MaterialError::State {
+        what: "outside original material support".into(),
+    };
+    let controls = StokesRheologyControls::default();
+    let mut queries = 0;
+    let failed = flow.solve_stokes_mixed_rheology_flow_control(
+        &|_| [0.0; 2],
+        &boundaries,
+        &[&inlet],
+        &[-0.5],
+        &initial,
+        controls,
+        1e-12,
+        |_, _| {
+            queries += 1;
+            Err::<FluidTransportState, _>(refusal.clone())
+        },
+    );
+    assert!(matches!(failed, Err(MaterialFluxError::Material(error)) if error == refusal));
+    assert_eq!(queries, 1);
+    queries = 0;
+    let failed = flow.solve_stokes_mixed_rheology_flow_control(
+        &|_| [0.0; 2],
+        &boundaries,
+        &[&inlet],
+        &[-0.5],
+        &initial,
+        controls,
+        1e-12,
+        |point, _| {
+            queries += 1;
+            if point.shear_rate_per_s > 1e-6 {
+                Err(refusal.clone())
+            } else {
+                Ok(reference)
+            }
+        },
+    );
+    assert!(matches!(failed, Err(MaterialFluxError::Material(error)) if error == refusal));
+    assert!(queries > mesh.tris.len() && queries <= 2 * mesh.tris.len());
+    let failed = flow.solve_stokes_mixed_rheology_flow_control(
+        &|_| [0.0; 2],
+        &boundaries,
+        &[&inlet],
+        &[-0.5],
+        &initial,
+        controls,
+        1e-12,
+        |_, _| Ok(transport(3.0, 1.0)),
+    );
+    assert!(matches!(failed, Err(MaterialFluxError::Invalid(_))));
+    let failed = flow.solve_stokes_mixed_rheology_flow_control(
+        &|_| [0.0; 2],
+        &boundaries,
+        &[&inlet],
+        &[-0.5],
+        &initial,
+        StokesRheologyControls {
+            maximum_iterations: 1,
+            ..controls
+        },
+        1e-12,
+        |_, _| Ok(reference),
+    );
+    assert!(matches!(
+        failed,
+        Err(MaterialFluxError::Boundary(StokesBoundaryError::Rheology(
+            FluxRheologyError::NonlinearConvergence { iterations: 1, .. }
+        )))
+    ));
+    queries = 0;
+    let failed = flow.solve_stokes_mixed_rheology_flow_control(
+        &|_| [0.0; 2],
+        &boundaries,
+        &[&inlet],
+        &[f64::NAN],
+        &initial,
+        controls,
+        1e-12,
+        |_, _| {
+            queries += 1;
+            Ok(reference)
+        },
+    );
+    assert!(matches!(
+        failed,
+        Err(MaterialFluxError::Boundary(
+            StokesBoundaryError::InvalidInput(_)
+        ))
+    ));
+    assert_eq!(queries, 0);
+    assert_eq!(initial, vec![0.0; sys.n_u]);
+}
