@@ -2,6 +2,7 @@ use super::*;
 use crate::chemistry::diffuse_recombination::DiffuseRecombinationBeam;
 use crate::chemistry::ionization_network::transport::*;
 
+mod diffuse;
 mod evolution;
 
 fn beam(energy_ev: f64, flux: f64, mu: f64) -> DiffuseRecombinationBeam {

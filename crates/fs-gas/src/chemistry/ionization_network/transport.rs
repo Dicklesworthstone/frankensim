@@ -24,6 +24,8 @@ use fs_thermochem::kinetics::atomic_ionization::photoionization::{
 };
 use fs_thermochem::kinetics::atomic_ionization::radiative_recombination::AtomicRadiativeRecombinationV1;
 
+/// Spectral recombination emission and cross-species photon recycling.
+pub mod diffuse;
 mod evolution;
 mod field;
 pub use evolution::{
@@ -204,6 +206,8 @@ impl NetworkRadiationField {
 pub enum NetworkRadiationError {
     Invalid(&'static str),
     Chemistry(IonizationNetworkError),
+    /// Original spectral/angular transfer or reciprocal source refused.
+    Diffuse(crate::chemistry::diffuse_recombination::DiffuseRecombinationError),
     Cell {
         index: usize,
         error: IonizationNetworkError,

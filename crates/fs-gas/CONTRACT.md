@@ -8472,6 +8472,37 @@ Geometry is fixed, propagation is quasi-static, and the caller owns discrete
 spectral/angular resolution. This entry does not supply excited-state channels,
 scattering, secondary nonthermal electrons, diffuse emission or light-travel time.
 
+## Diffuse radiation shared by co-located charge-stage networks
+
+`chemistry::ionization_network::transport::diffuse::evaluate_network_diffuse_recombination`
+retains each original mixed cell and its canonical reciprocal atomic sources.
+Every emitting edge supplies its own Milne spectrum; all bound-free absorbers
+in that slab compete through the sum of their actual optical depths. Exact
+uniform-source characteristics carry isotropic emission across a common-area
+plane-parallel column. Same-source recycling, absorption by another channel
+in the same cell, nonlocal absorption and prescribed boundary-beam absorption
+are distinct accounts. The existing finite-beam kernel is reused.
+
+Cross-channel recycling transfers the difference between the original chemical
+thresholds to the shared electron pool. Pairwise local exchanges are assembled
+antisymmetrically before angular transport, while independent compensated cell
+moments retain net reaction, electron energy and gas energy before large
+per-channel exchanges are rounded. Trapped escape is therefore not obtained
+by subtracting gross emitted and absorbed traffic. Cell and boundary photon,
+power and chemical/electron balances are checked separately.
+
+Every active emitter and absorber must support the common spectral interval.
+Cold emission cutoffs do not switch off higher-energy absorption. Source
+conditional tails and spectral/angular estimates are bounded independently of
+incident beam brightness. Unsupported opacity, inadequate finite source tails,
+invalid original-state/source bindings, cancellation and exhausted work or
+quadrature budgets refuse the whole result. Retained source tables and scratch
+buffers avoid per-channel state clones inside spectral/angular quadrature.
+
+This entry evaluates a frozen field. It does not assume excited-state cascades,
+case-B branching, a fitted escape fraction, an average emitted photon,
+scattering, photon travel time or atomic source data beyond the originals.
+
 ## Evolving mixed ionization networks under finite beams
 
 `chemistry::ionization_network::transport::advance_network_radiation_transport`
