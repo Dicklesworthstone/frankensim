@@ -744,3 +744,11 @@ nothing, and no complete material owner or population field is cloned.
 The interface enables reciprocal finite-body force/couple and dissipation
 checks in `fs-couple` before native publication, with the same source binding
 for frozen, non-Newtonian and thermally evolving liquids.
+
+## Native open-grid spatial force epochs
+
+`lattice3::open_boundaries::forcing::ForcedOpenBoundaryGrid3` binds an explicit per-cell force density to the original native D3Q19/D3Q27 open-grid populations. Initial attachment changes only the native half-source coordinates: density, physical velocity, nonequilibrium stress, accepted time and reservoir/pressure controls survive. There is no public inner-grid escape with stale uniform-force macroscopic readback.
+
+A step collides with the accepted opening force and interprets streamed donors and targets with their own endpoint force. Donor physical stress uses the donor source; reconstruction attaches the target source. The fluid body impulse is the trapezoidal sum of the two force epochs, separate from measured reservoir and wall transport. Ordinary steps do not perform an extra source-coordinate reframe. Both source fields must satisfy original collision capability, finite-value, shape and solid-zero admission. Cancellation, Mach or reconstruction failure leaves accepted populations, force history and time unchanged. The wrapper retains original native collision kernels and preallocated grid scratch; holding a spatial force allocates no per-step adapter storage.
+
+Focused checks execute the actual generic-poll native owner cores across five D3Q19 and six D3Q27 collision configurations: physical velocity/stress attachment, periodic trapezoidal impulse, bitwise constant-field equivalence, all three open axes with distinct donor/target sources, measured reservoir closure, and late refusal/exact retry. These extracted-production checks exclude the thin `Cx`/pool wrappers and do not substitute numerical kernels. They do not constitute a full Cargo integration run or a new finite-force accuracy claim for the native collision families.

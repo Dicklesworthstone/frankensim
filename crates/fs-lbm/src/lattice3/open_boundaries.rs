@@ -28,6 +28,8 @@ use std::sync::Mutex;
 
 mod pressure;
 mod rheology;
+/// Spatial force epochs on the same native reservoir and population owner.
+pub mod forcing;
 /// Conservative D3Q7 heat transport on the same native open-grid transaction.
 pub mod thermal;
 /// Explicit local turbulent momentum and heat on original reservoir geometry.
@@ -53,10 +55,20 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         cx: &Cx<'_>,
         boundaries: BoundarySpec3,
     ) -> Result<Self, GridError3<L::Error>> {
+        Self::try_new_with_poll(grid, boundaries, &mut || {
+            cx.checkpoint().map_err(|_| GridError3::Cancelled)
+        })
+    }
+
+    pub(super) fn try_new_with_poll(
+        grid: Grid3<L, Q>,
+        boundaries: BoundarySpec3,
+        poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
+    ) -> Result<Self, GridError3<L::Error>> {
         let plan = FacePlan::admit(&grid, boundaries)?;
         for (index, cell) in plan.cells().enumerate() {
             if index % 64 == 0 {
-                cx.checkpoint().map_err(|_| GridError3::Cancelled)?;
+                poll()?;
             }
             if !grid.solid[cell]
                 && let Some((_, donor)) = plan.locate(cell)
@@ -68,7 +80,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
                 });
             }
         }
-        cx.checkpoint().map_err(|_| GridError3::Cancelled)?;
+        poll()?;
         Ok(Self {
             grid,
             plan,
@@ -210,7 +222,26 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         origin: [f64; 3],
     ) -> Result<(OpenBoundaryMomentumTransport3, usize), GridError3<L::Error>> {
         let mut poll = || cx.checkpoint().map_err(|_| GridError3::Cancelled);
-        let step = self.admit_step(collisions, origin, &mut poll)?;
+        self.stage_serial_with_forces(plan, collisions, None, None, origin, &mut poll)
+    }
+
+    // One original collision/stream operator serves both the uniform owner
+    // and the source-history wrapper. End forces interpret the streamed donor
+    // and target populations; they are not applied as a second collision.
+    #[allow(clippy::too_many_arguments)]
+    fn stage_serial_with_forces(
+        &mut self,
+        plan: FacePlan,
+        collisions: Option<&[L::Collision]>,
+        forces_at_start: Option<&[[f64; 3]]>,
+        forces_at_end: Option<&[[f64; 3]]>,
+        origin: [f64; 3],
+        poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
+    ) -> Result<(OpenBoundaryMomentumTransport3, usize), GridError3<L::Error>> {
+        let step = self.admit_step(collisions, origin, poll)?;
+        for forces in [forces_at_start, forces_at_end].into_iter().flatten() {
+            super::sources::admit_forces(&self.grid, forces, collisions, poll)?;
+        }
         let grid = &mut self.grid;
         let data = StepData::<L, Q> {
             dims: grid.dims,
@@ -219,7 +250,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
             collision: grid.collision,
             collisions,
             force: grid.force,
-            forces: None,
+            forces: forces_at_start,
             budget: grid.budget,
             marker: PhantomData,
         };
@@ -228,7 +259,10 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
             data.process(&grid.f, chunk, tile * 64, false)?;
         }
         let view = OpenStep {
-            data,
+            data: StepData {
+                forces: forces_at_end,
+                ..data
+            },
             plan,
             pressure_profiles: &self.pressure_profiles,
         };
@@ -236,7 +270,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
             poll()?;
             view.process(&grid.post, chunk, tile * 64)?;
         }
-        let receipt = view.measure(&grid.post, &grid.next, origin, &mut poll)?;
+        let receipt = view.measure(&grid.post, &grid.next, origin, poll)?;
         poll()?;
         Ok((receipt, step))
     }
@@ -520,7 +554,9 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenStep<'_, L, Q> {
                 }
                 let (_, velocity) = macro_cell::<L, Q>(
                     output,
-                    self.data.force,
+                    self.data
+                        .forces
+                        .map_or(self.data.force, |field| field[cell]),
                     cell,
                     self.data.budget.maximum_mach,
                 )?;
@@ -550,7 +586,10 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenStep<'_, L, Q> {
     ) -> Result<(), GridError3<L::Error>> {
         let mut source = [0.0; Q];
         self.data.pull_cell(src, &mut source, donor);
-        let force = self.data.force;
+        let force = self
+            .data
+            .forces
+            .map_or(self.data.force, |field| field[donor]);
         let (rho_source, velocity_source) =
             macro_cell::<L, Q>(&source, force, donor, self.data.budget.maximum_mach)?;
         let donor_law = self
@@ -607,7 +646,11 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenStep<'_, L, Q> {
             }
             reconstructed[q] += L::W[q] * contraction / (2.0 * L::CS2 * L::CS2);
         }
-        initial::attach_force::<L, Q>(&mut reconstructed, law, velocity, force);
+        let target_force = self
+            .data
+            .forces
+            .map_or(self.data.force, |field| field[cell]);
+        initial::attach_force::<L, Q>(&mut reconstructed, law, velocity, target_force);
         for q in 0..Q {
             if walls == 0 || open & (1 << q) != 0 {
                 output[q] = reconstructed[q];

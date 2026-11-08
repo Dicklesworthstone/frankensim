@@ -266,7 +266,7 @@ impl<L: super::EquilibriumLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
     }
 }
 
-fn admit_forces<L: ForcedLattice3<Q>, const Q: usize>(
+pub(super) fn admit_forces<L: ForcedLattice3<Q>, const Q: usize>(
     grid: &Grid3<L, Q>,
     forces: &[[f64; 3]],
     collisions: Option<&[L::Collision]>,
