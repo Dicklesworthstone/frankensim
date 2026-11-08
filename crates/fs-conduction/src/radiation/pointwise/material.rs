@@ -20,7 +20,7 @@ pub use source::MaterialRadiationSmoothnessError;
 use source::{DerivativeMode, MaterialEmissivitySource};
 
 mod native;
-pub use native::MaterialGraySurfaceLaw;
+pub use native::{MaterialGraySurfaceLaw, MaterialGraySurfacePath};
 
 /// One homogeneous material trace and its independently declared black bath.
 /// Different material charts require different named traces. Other conditions

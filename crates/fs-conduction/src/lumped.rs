@@ -39,6 +39,9 @@ pub mod interference;
 pub mod exchange;
 /// Prepared original uniform-body residual for coupled endpoint solves.
 pub mod endpoint;
+/// Original conductivity and emissivity along a complete caloric phase path.
+pub mod phase_transport;
+pub use phase_transport::LumpedPhaseThermalTransport;
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
@@ -385,6 +388,96 @@ impl LumpedThermalTransport {
     }
 }
 
+/// The transport authority used by an enthalpy body.
+///
+/// A phase model borrows the original prepared material laws and caloric chart.
+/// It does not freeze their values into a representative temperature table.
+#[derive(Debug, Clone)]
+pub enum LumpedEnthalpyTransport<'a> {
+    Temperature(LumpedThermalTransport),
+    MaterialPhase(&'a LumpedPhaseThermalTransport<'a>),
+}
+
+impl PartialEq for LumpedEnthalpyTransport<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Temperature(a), Self::Temperature(b)) => a == b,
+            (Self::MaterialPhase(a), Self::MaterialPhase(b)) => a.identity() == b.identity(),
+            _ => false,
+        }
+    }
+}
+
+impl<'a> From<LumpedThermalTransport> for LumpedEnthalpyTransport<'a> {
+    fn from(transport: LumpedThermalTransport) -> Self {
+        Self::Temperature(transport)
+    }
+}
+
+impl<'a> From<&'a LumpedPhaseThermalTransport<'a>> for LumpedEnthalpyTransport<'a> {
+    fn from(transport: &'a LumpedPhaseThermalTransport<'a>) -> Self {
+        Self::MaterialPhase(transport)
+    }
+}
+
+impl LumpedEnthalpyTransport<'_> {
+    /// Original conductivity receipts, including all retained phase-path knots.
+    /// Iteration allocates nothing and never substitutes a representative state.
+    pub fn conductivity_receipts(&self) -> impl Iterator<Item = &PropertyUsageReceipt> {
+        let (temperature, phase): (&[PropertyUsageReceipt], _) = match self {
+            Self::Temperature(transport) => (transport.conductivity_receipts(), None),
+            Self::MaterialPhase(transport) => (&[], Some(*transport)),
+        };
+        temperature.iter().chain(
+            phase
+                .into_iter()
+                .flat_map(|transport| transport.conductivity().source_paths())
+                .flat_map(|path| path.knots.iter().map(|(_, answer)| &answer.receipt)),
+        )
+    }
+
+    /// Original material card, absent only for declared constant transport.
+    #[must_use]
+    pub fn material_card_identity(&self) -> Option<ContentHash> {
+        match self {
+            Self::Temperature(transport) => transport.material_card_identity(),
+            Self::MaterialPhase(transport) => {
+                Some(transport.caloric_curve().material_card_identity())
+            }
+        }
+    }
+
+    /// Complete immutable source/condition/caloric identity.
+    #[must_use]
+    pub fn identity(&self) -> ContentHash {
+        match self {
+            Self::Temperature(transport) => transport.identity(),
+            Self::MaterialPhase(transport) => transport.identity(),
+        }
+    }
+
+    fn minimum_conductivity_w_per_m_k(&self) -> f64 {
+        match self {
+            Self::Temperature(transport) => transport.minimum_conductivity_w_per_m_k,
+            Self::MaterialPhase(transport) => transport.minimum_conductivity_w_per_m_k(),
+        }
+    }
+
+    fn maximum_emissivity(&self) -> f64 {
+        match self {
+            Self::Temperature(transport) => transport.maximum_emissivity,
+            Self::MaterialPhase(transport) => transport.maximum_emissivity(),
+        }
+    }
+
+    fn emissivity_at(&self, h: f64, temperature_k: f64) -> Result<f64, ConductionError> {
+        match self {
+            Self::Temperature(transport) => transport.emissivity_at(temperature_k),
+            Self::MaterialPhase(transport) => Ok(transport.radiation().evaluate(h)?.0.emissivity),
+        }
+    }
+}
+
 /// One isothermal body whose constitutive coordinate is specific enthalpy.
 ///
 /// Unlike [`LumpedNode`], this body does not assume a constant heat capacity.
@@ -398,7 +491,7 @@ pub struct LumpedEnthalpyBody<'a> {
     surface_area_m2: f64,
     convection_w_per_m2_k: f64,
     characteristic_length_m: f64,
-    transport: LumpedThermalTransport,
+    transport: LumpedEnthalpyTransport<'a>,
     phase_curve: &'a EquilibriumEnthalpyPhaseCurve,
     identity: ContentHash,
 }
@@ -437,10 +530,11 @@ impl<'a> LumpedEnthalpyBody<'a> {
         surface_area_m2: f64,
         convection_w_per_m2_k: f64,
         characteristic_length_m: f64,
-        transport: LumpedThermalTransport,
+        transport: impl Into<LumpedEnthalpyTransport<'a>>,
         phase_curve: &'a EquilibriumEnthalpyPhaseCurve,
     ) -> Result<Self, ConductionError> {
         let name = name.into();
+        let transport = transport.into();
         if name.trim().is_empty() {
             return Err(lumped_error(
                 "<unnamed>",
@@ -476,9 +570,22 @@ impl<'a> LumpedEnthalpyBody<'a> {
                     .to_owned(),
             ));
         }
-        for knot in phase_curve.knots() {
-            transport.conductivity_at(knot.temperature_k)?;
-            transport.emissivity_at(knot.temperature_k)?;
+        match &transport {
+            LumpedEnthalpyTransport::Temperature(model) => {
+                for knot in phase_curve.knots() {
+                    model.conductivity_at(knot.temperature_k)?;
+                    model.emissivity_at(knot.temperature_k)?;
+                }
+            }
+            LumpedEnthalpyTransport::MaterialPhase(model) => {
+                if !std::ptr::eq(model.caloric_curve(), phase_curve) {
+                    return Err(lumped_error(
+                        &name,
+                        "phase transport and storage require the same original caloric object"
+                            .to_owned(),
+                    ));
+                }
+            }
         }
         let mut identity =
             DomainHasher::new("org.frankensim.fs-conduction.lumped-enthalpy-body.v2");
@@ -530,9 +637,9 @@ impl<'a> LumpedEnthalpyBody<'a> {
         self.characteristic_length_m
     }
 
-    /// Temperature-dependent conductivity/emissivity authority.
+    /// Original temperature-table or caloric-phase transport authority.
     #[must_use]
-    pub const fn transport(&self) -> &LumpedThermalTransport {
+    pub const fn transport(&self) -> &LumpedEnthalpyTransport<'a> {
         &self.transport
     }
 
@@ -556,13 +663,13 @@ impl<'a> LumpedEnthalpyBody<'a> {
             .fold(0.0_f64, f64::max);
         let maximum_temperature = maximum_curve_temperature.max(radiation_temperature_k);
         let radiation = 4.0
-            * self.transport.maximum_emissivity
+            * self.transport.maximum_emissivity()
             * STEFAN_BOLTZMANN_W_M2_K4
             * maximum_temperature
             * maximum_temperature
             * maximum_temperature;
         (self.convection_w_per_m2_k + radiation) * self.characteristic_length_m
-            / self.transport.minimum_conductivity_w_per_m_k
+            / self.transport.minimum_conductivity_w_per_m_k()
     }
 }
 
@@ -726,7 +833,7 @@ pub fn solve_lumped_enthalpy(
         at: 0,
     })?;
     let initial = phase_state(body, config.initial_specific_enthalpy_j_kg)?;
-    let (convection, radiation, net) = enthalpy_power(body, config, initial.temperature_k())?;
+    let (convection, radiation, net) = enthalpy_power(body, config, initial.specific_enthalpy_j_kg(), initial.temperature_k())?;
     let mut samples = Vec::with_capacity(requested_steps.saturating_add(1));
     samples.push(LumpedEnthalpySample {
         time_s: 0.0,
@@ -766,7 +873,7 @@ pub fn solve_lumped_enthalpy(
         }
         let next = solve_enthalpy_step(body, config, specific_enthalpy, dt_s)?;
         let state = phase_state(body, next)?;
-        let (convection, radiation, net) = enthalpy_power(body, config, state.temperature_k())?;
+        let (convection, radiation, net) = enthalpy_power(body, config, next, state.temperature_k())?;
         let residual = body.mass_kg * (next - specific_enthalpy) - dt_s * net;
         cumulative_absolute_energy_residual_j += residual.abs();
         if !residual.is_finite() || !cumulative_absolute_energy_residual_j.is_finite() {
@@ -1019,7 +1126,7 @@ fn solve_lumped_contact_step_with_temperatures(
         let biot = body.characteristic_length_m
             / r
             / body.surface_area_m2
-            / body.transport.minimum_conductivity_w_per_m_k;
+            / body.transport.minimum_conductivity_w_per_m_k();
         if !biot.is_finite() || biot > LUMPED_BIOT_CEILING {
             return Err(fail(
                 "contact Biot exceeds the lumped limit; use spatial enthalpy transport",
@@ -1377,7 +1484,29 @@ fn monotone_enthalpy_step_limit_s(
     radiation_temperature_k: f64,
     mut checkpoint: impl FnMut() -> Result<(), ConductionError>,
 ) -> Result<f64, ConductionError> {
-    let LumpedEmissivityModel::MaterialCard(samples) = &body.transport.emissivity else {
+    let transport = match &body.transport {
+        LumpedEnthalpyTransport::Temperature(transport) => transport,
+        LumpedEnthalpyTransport::MaterialPhase(transport) => {
+            let feedback = transport.maximum_positive_radiative_feedback_w_per_j_kg(
+                body.surface_area_m2,
+                radiation_temperature_k,
+                &mut checkpoint,
+            )?;
+            if feedback == 0.0 {
+                return Ok(f64::INFINITY);
+            }
+            let rate = (feedback / body.mass_kg).next_up();
+            let limit = (0.5 / rate).next_down();
+            if !rate.is_finite() || rate <= 0.0 || limit <= 0.0 || limit.is_nan() {
+                return Err(lumped_error(
+                    &body.name,
+                    "phase radiative-feedback step bound is not representable".to_owned(),
+                ));
+            }
+            return Ok(limit);
+        }
+    };
+    let LumpedEmissivityModel::MaterialCard(samples) = &transport.emissivity else {
         return Ok(f64::INFINITY);
     };
     let knots = body.phase_curve.knots();
@@ -1400,7 +1529,11 @@ fn monotone_enthalpy_step_limit_s(
         if upper <= lower || emissivity_change == 0.0 {
             continue;
         }
-        let temperature = if emissivity_change > 0.0 { lower } else { upper };
+        let temperature = if emissivity_change > 0.0 {
+            lower
+        } else {
+            upper
+        };
         let contrast = if emissivity_change > 0.0 {
             radiation_temperature_k - temperature
         } else {
@@ -1411,7 +1544,7 @@ fn monotone_enthalpy_step_limit_s(
         }
         let emissivity_slope = (emissivity_change.abs()
             / (pair[1].temperature_k() - pair[0].temperature_k()))
-            .next_up();
+        .next_up();
         // Factor the fourth-power difference, as the original power owner
         // does. No radiative energy is approximated or added by this bound.
         let feedback = STEFAN_BOLTZMANN_W_M2_K4
@@ -1419,8 +1552,7 @@ fn monotone_enthalpy_step_limit_s(
             * emissivity_slope
             * contrast
             * (radiation_temperature_k + temperature)
-            * (radiation_temperature_k * radiation_temperature_k
-                + temperature * temperature);
+            * (radiation_temperature_k * radiation_temperature_k + temperature * temperature);
         if !feedback.is_finite() || feedback <= 0.0 {
             return Err(invalid());
         }
@@ -1438,7 +1570,8 @@ fn monotone_enthalpy_step_limit_s(
         if temperature_change == 0.0 {
             continue;
         }
-        let minimum_capacity = body.phase_curve
+        let minimum_capacity = body
+            .phase_curve
             .sensible_heat_capacity_bounds_j_kg_k(index)
             .map_err(|error| lumped_error(&body.name, error.to_string()))?[0];
         let slope = (1.0 / minimum_capacity).next_up();
@@ -1450,9 +1583,8 @@ fn monotone_enthalpy_step_limit_s(
     if maximum_temperature_slope == 0.0 {
         return Ok(f64::INFINITY);
     }
-    let rate = ((maximum_feedback_w_k * maximum_temperature_slope).next_up()
-        / body.mass_kg)
-        .next_up();
+    let rate =
+        ((maximum_feedback_w_k * maximum_temperature_slope).next_up() / body.mass_kg).next_up();
     if !rate.is_finite() || rate <= 0.0 {
         return Err(invalid());
     }
@@ -1477,7 +1609,7 @@ fn solve_enthalpy_step(
             .phase_curve
             .values_at_specific_enthalpy(specific_enthalpy)
             .map_err(|error| lumped_error(&body.name, error.to_string()))?;
-        let (_, _, power) = enthalpy_power(body, config, values.temperature_k)?;
+        let (_, _, power) = enthalpy_power(body, config, specific_enthalpy, values.temperature_k)?;
         Ok(body.mass_kg * (specific_enthalpy - previous_h) - dt_s * power)
     };
     bisect_enthalpy_step(
@@ -1603,12 +1735,13 @@ fn phase_state(
 fn enthalpy_power(
     body: &LumpedEnthalpyBody<'_>,
     config: LumpedEnthalpyMarchConfig,
+    specific_enthalpy_j_kg: f64,
     body_temperature_k: f64,
 ) -> Result<(f64, f64, f64), ConductionError> {
     let convection = body.convection_w_per_m2_k
         * body.surface_area_m2
         * (config.ambient_temperature_k - body_temperature_k);
-    let emissivity = body.transport.emissivity_at(body_temperature_k)?;
+    let emissivity = body.transport.emissivity_at(specific_enthalpy_j_kg, body_temperature_k)?;
     let radiation = if emissivity == 0.0 {
         // A disabled reservoir must not introduce 0*infinity or NaN through
         // an irrelevant fourth power of its otherwise finite temperature.

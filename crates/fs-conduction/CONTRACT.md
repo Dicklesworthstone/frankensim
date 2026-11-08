@@ -1,5 +1,27 @@
 # CONTRACT: fs-conduction
 
+## Material-phase transport on the original lumped enthalpy owner
+
+`lumped::LumpedPhaseThermalTransport` binds the original prepared conductivity
+and gray-surface law to the same complete caloric object. Conductivity, emissivity,
+typed temperature/fraction axes and fixed query conditions must agree. Preparation
+retains exact pinned emissivity paths and the full-chart conductivity minimum;
+the existing Biot gate therefore includes the least-conductive admitted phase.
+
+Every native march, spectral-heating residual and coupled endpoint evaluates
+radiation at its actual trial enthalpy. Positive radiation feedback includes
+changing emissivity on isothermal latent plateaus and uses original minimum Cp
+on sensible spans. The cached interval bound combines with electrical/source
+feedback in the existing monotone implicit solver. Native heat storage,
+convection, radiation and fixed mass/geometry retain their existing owners.
+`LumpedPhaseThermalEnvironment` exposes this same path to uniform coupled steps.
+
+Three tests of the exact production radiation-feedback helper passed using the
+pinned Rust toolchain. Native integration regressions cover latent emissivity,
+source-path support and full-chart admission; their execution remains pending
+the missing constellation dependencies. This bound controls implicit-root
+admission, not temporal accuracy or measured-material calibration.
+
 ## Conductivity design through both physical SDIRK2 stages
 
 `EnthalpySdirk2Linearization::conductivity_scale_pullback` retains each

@@ -63,3 +63,75 @@ fn missing_conditions_foreign_caloric_card_and_nonphysical_emissivity_refuse() {
             law.state_at_specific_enthalpy(50.0).unwrap(),MaterialPropertySelection::SingleClaimOnly).is_err());
     }
 }
+
+#[test]
+fn g1_whole_caloric_source_path_retains_latent_radiative_feedback() {
+    use fs_conduction::radiation::MaterialGraySurfaceLaw;
+    let card = card(0.8, 0.2);
+    let curve = curve(&card, 100.0);
+    let context = context();
+    let law = MaterialGraySurfaceLaw::new(
+        "wall",
+        &curve,
+        binding(&card, &context),
+        MaterialPropertySelection::SingleClaimOnly,
+        [-100.0, 200.0],
+    )
+    .unwrap();
+    let path = law.prepare_caloric_path(|| Ok(())).unwrap();
+    assert_eq!(path.source_paths().len(), 3);
+    assert_eq!(path.maximum_emissivity(), 0.8);
+    let bound = path
+        .maximum_positive_radiative_feedback_w_per_j_kg(2.0, 300.0, || Ok(()))
+        .unwrap();
+    let expected = 2.0 * STEFAN_BOLTZMANN_W_M2_K4 * 0.006 * (400.0_f64.powi(4) - 300.0_f64.powi(4));
+    assert!(bound >= expected);
+    near(bound, expected);
+    for (h, expected_epsilon) in [(25.0, 0.65), (75.0, 0.35)] {
+        let (sample, state) = law.evaluate(h).unwrap();
+        near(sample.emissivity, expected_epsilon);
+        near(sample.emissivity_enthalpy_derivative_kg_j, -0.006);
+        assert_eq!(state.phase.temperature_k(), 400.0);
+        assert_eq!(
+            state.emissivity.receipt().selected,
+            law.reference_emissivity().receipt().selected
+        );
+    }
+    assert_eq!(
+        path.maximum_positive_radiative_feedback_w_per_j_kg(2.0, 500.0, || Ok(()))
+            .unwrap(),
+        0.0
+    );
+}
+
+#[test]
+fn g0_gray_path_keeps_constant_compatibility_and_requires_the_whole_original_chart() {
+    use fs_conduction::radiation::MaterialGraySurfaceLaw;
+    let card = card(0.5, 0.5);
+    let curve = curve(&card, 100.0);
+    let context = context();
+    let build = |bounds| {
+        MaterialGraySurfaceLaw::new(
+            "wall",
+            &curve,
+            binding(&card, &context),
+            MaterialPropertySelection::SingleClaimOnly,
+            bounds,
+        )
+        .unwrap()
+    };
+    let law = build([-100.0, 200.0]);
+    let path = law.prepare_caloric_path(|| Ok(())).unwrap();
+    assert_eq!(
+        path.maximum_positive_radiative_feedback_w_per_j_kg(1.0, 300.0, || Ok(()))
+            .unwrap(),
+        0.0
+    );
+    assert!(
+        path.maximum_positive_radiative_feedback_w_per_j_kg(0.0, 300.0, || Ok(()))
+            .is_err()
+    );
+    assert!(build([0.0, 100.0]).prepare_caloric_path(|| Ok(())).is_err());
+    assert!(core::ptr::eq(law.caloric_curve(), &curve));
+    assert_eq!(law.material_point().context, &context);
+}

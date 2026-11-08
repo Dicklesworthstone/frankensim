@@ -10,6 +10,10 @@ use fs_thermal::enthalpy::conduction::implicit::boundary::{
 };
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
 
+mod feedback;
+mod path;
+pub use path::MaterialGraySurfacePath;
+
 /// A pinned original emissivity source for native gray boundaries and links.
 ///
 /// The existing radiation source owner evaluates static scalars, thermal/phase
@@ -74,6 +78,16 @@ impl<'a> MaterialGraySurfaceLaw<'a> {
     #[must_use]
     pub fn reference_emissivity(&self) -> &SurfaceEmissivity {
         self.source.snapshot()
+    }
+
+    /// Original caloric object, shared with the finite thermal store.
+    pub fn caloric_curve(&self) -> &'a EquilibriumEnthalpyPhaseCurve {
+        self.source.curve()
+    }
+
+    /// Original typed source context and explicitly evolving T/f coordinates.
+    pub const fn material_point(&self) -> ThermalMaterialPoint<'a> {
+        self.source.material
     }
 
     /// Resolve emissivity, its full d(epsilon)/dh and the original source receipt.

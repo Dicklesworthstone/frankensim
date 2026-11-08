@@ -156,7 +156,7 @@ fn solve_with_caloric_response<R>(
             "invalid fixed-bath exchange state, duration or energy tolerance".into(),
         ));
     }
-    if body.transport.maximum_emissivity != 0.0 {
+    if body.transport.maximum_emissivity() != 0.0 {
         return Err(lumped_error(
             &body.name,
             "exact fixed-bath convection requires radiation to be explicitly disabled".into(),

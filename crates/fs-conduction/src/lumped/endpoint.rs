@@ -42,6 +42,29 @@ pub struct DrivenLumpedEnthalpyStep {
     pub source_evaluations: usize,
 }
 
+/// Shared preparation seam for the original uniform-body endpoint solver.
+/// Both temperature-only and complete material-phase boundaries use it.
+pub trait LumpedEndpointEnvironment {
+    fn prepare_endpoint<'a>(
+        &'a self,
+        input: UniformEnthalpyStepInput<'a>,
+    ) -> Result<LumpedEnthalpyEndpoint<'a>, ConductionError>;
+    fn enthalpy_tolerance_j_kg(&self) -> f64;
+    fn maximum_thermal_residual_j(&self) -> f64;
+}
+
+/// A held reservoir with conductivity and emissivity on the original phase path.
+/// Mass, geometry and initial enthalpy remain inputs to each physical step.
+#[derive(Clone, Copy, Debug)]
+pub struct LumpedPhaseThermalEnvironment<'a> {
+    pub temperature_k: f64,
+    pub radiation_temperature_k: f64,
+    pub convection_w_per_m2_k: f64,
+    pub transport: &'a LumpedPhaseThermalTransport<'a>,
+    pub enthalpy_tolerance_j_kg: f64,
+    pub maximum_thermal_residual_j: f64,
+}
+
 impl LumpedThermalEnvironment {
     /// Prepare repeated coupled residual evaluations on the SAME native wall.
     ///
@@ -54,41 +77,134 @@ impl LumpedThermalEnvironment {
         &self,
         input: UniformEnthalpyStepInput<'a>,
     ) -> Result<LumpedEnthalpyEndpoint<'a>, ConductionError> {
-        if input.initial.phase_curve_identity() != input.curve.identity()
-            || !(input.duration_s.is_finite() && input.duration_s > 0.0)
-            || !(input.volume_m3.is_finite() && input.volume_m3 > 0.0)
-            || !(self.maximum_thermal_residual_j.is_finite()
-                && self.maximum_thermal_residual_j >= 0.0)
-        {
-            return Err(lumped_error(
+        prepare_uniform_endpoint(
+            input,
+            self.transport.clone(),
+            self.temperature_k,
+            self.radiation_temperature_k,
+            self.convection_w_per_m2_k,
+            self.enthalpy_tolerance_j_kg,
+            self.maximum_thermal_residual_j,
+        )
+    }
+}
+
+impl LumpedEndpointEnvironment for LumpedThermalEnvironment {
+    fn prepare_endpoint<'a>(
+        &'a self,
+        input: UniformEnthalpyStepInput<'a>,
+    ) -> Result<LumpedEnthalpyEndpoint<'a>, ConductionError> {
+        LumpedThermalEnvironment::prepare_endpoint(self, input)
+    }
+    fn enthalpy_tolerance_j_kg(&self) -> f64 {
+        self.enthalpy_tolerance_j_kg
+    }
+    fn maximum_thermal_residual_j(&self) -> f64 {
+        self.maximum_thermal_residual_j
+    }
+}
+
+impl LumpedPhaseThermalEnvironment<'_> {
+    pub fn prepare_endpoint<'a>(
+        &'a self,
+        input: UniformEnthalpyStepInput<'a>,
+    ) -> Result<LumpedEnthalpyEndpoint<'a>, ConductionError> {
+        let transport: &'a LumpedPhaseThermalTransport<'a> = self.transport;
+        prepare_uniform_endpoint(
+            input,
+            transport,
+            self.temperature_k,
+            self.radiation_temperature_k,
+            self.convection_w_per_m2_k,
+            self.enthalpy_tolerance_j_kg,
+            self.maximum_thermal_residual_j,
+        )
+    }
+}
+
+impl LumpedEndpointEnvironment for LumpedPhaseThermalEnvironment<'_> {
+    fn prepare_endpoint<'a>(
+        &'a self,
+        input: UniformEnthalpyStepInput<'a>,
+    ) -> Result<LumpedEnthalpyEndpoint<'a>, ConductionError> {
+        LumpedPhaseThermalEnvironment::prepare_endpoint(self, input)
+    }
+    fn enthalpy_tolerance_j_kg(&self) -> f64 {
+        self.enthalpy_tolerance_j_kg
+    }
+    fn maximum_thermal_residual_j(&self) -> f64 {
+        self.maximum_thermal_residual_j
+    }
+}
+
+fn prepare_uniform_endpoint<'a>(
+    input: UniformEnthalpyStepInput<'a>,
+    transport: impl Into<LumpedEnthalpyTransport<'a>>,
+    temperature_k: f64,
+    radiation_temperature_k: f64,
+    convection_w_per_m2_k: f64,
+    enthalpy_tolerance_j_kg: f64,
+    maximum_thermal_residual_j: f64,
+) -> Result<LumpedEnthalpyEndpoint<'a>, ConductionError> {
+    if input.initial.phase_curve_identity() != input.curve.identity()
+        || !(input.duration_s.is_finite() && input.duration_s > 0.0)
+        || !(input.volume_m3.is_finite() && input.volume_m3 > 0.0)
+        || !(maximum_thermal_residual_j.is_finite() && maximum_thermal_residual_j >= 0.0)
+    {
+        return Err(lumped_error(
                 "coupled uniform body",
                 "thermal proposal needs its initial chart, positive duration/volume and a finite nonnegative energy-residual budget".to_owned(),
             ));
-        }
-        let body = LumpedEnthalpyBody::try_new_with_transport(
-            "coupled uniform body",
-            input.mass_kg,
-            input.surface_area_m2,
-            self.convection_w_per_m2_k,
-            input.volume_m3 / input.surface_area_m2,
-            self.transport.clone(),
-            input.curve,
-        )?;
-        let config = LumpedEnthalpyMarchConfig {
-            initial_specific_enthalpy_j_kg: input.initial.specific_enthalpy_j_kg(),
-            ambient_temperature_k: self.temperature_k,
-            radiation_temperature_k: self.radiation_temperature_k,
-            internal_power_w: input.internal_heat_j / input.duration_s,
-            duration_s: input.duration_s,
-            maximum_step_s: input.duration_s,
-            maximum_steps: 1,
-            enthalpy_tolerance_j_kg: self.enthalpy_tolerance_j_kg,
-        };
-        if input.internal_heat_j != 0.0 && config.internal_power_w == 0.0 {
-            return Err(lumped_error(
-                &body.name,
-                "nonzero prepared source underflows to zero power".to_owned(),
-            ));
+    }
+    let body = LumpedEnthalpyBody::try_new_with_transport(
+        "coupled uniform body",
+        input.mass_kg,
+        input.surface_area_m2,
+        convection_w_per_m2_k,
+        input.volume_m3 / input.surface_area_m2,
+        transport,
+        input.curve,
+    )?;
+    let config = LumpedEnthalpyMarchConfig {
+        initial_specific_enthalpy_j_kg: input.initial.specific_enthalpy_j_kg(),
+        ambient_temperature_k: temperature_k,
+        radiation_temperature_k,
+        internal_power_w: input.internal_heat_j / input.duration_s,
+        duration_s: input.duration_s,
+        maximum_step_s: input.duration_s,
+        maximum_steps: 1,
+        enthalpy_tolerance_j_kg,
+    };
+    if input.internal_heat_j != 0.0 && config.internal_power_w == 0.0 {
+        return Err(lumped_error(
+            &body.name,
+            "nonzero prepared source underflows to zero power".to_owned(),
+        ));
+    }
+    LumpedEnthalpyEndpoint::try_new(body, input.initial, config, maximum_thermal_residual_j)
+}
+
+impl<'a> LumpedEnthalpyEndpoint<'a> {
+    /// Prepare one original body with its full temperature/phase transport.
+    ///
+    /// This is the same endpoint owner used by `LumpedThermalEnvironment`.
+    /// The original caloric state, single physical interval, global Biot gate
+    /// and algebraic energy budget are admitted before any source solve.
+    pub fn try_new(
+        body: LumpedEnthalpyBody<'a>,
+        initial: EquilibriumPhaseState,
+        config: LumpedEnthalpyMarchConfig,
+        maximum_thermal_residual_j: f64,
+    ) -> Result<Self, ConductionError> {
+        if initial.phase_curve_identity() != body.phase_curve.identity()
+            || initial.specific_enthalpy_j_kg() != config.initial_specific_enthalpy_j_kg
+            || !maximum_thermal_residual_j.is_finite()
+            || maximum_thermal_residual_j < 0.0
+            || config.duration_s <= 0.0
+            || config.duration_s > config.maximum_step_s
+        {
+            return Err(lumped_error(&body.name,
+                "endpoint needs its original initial state, a positive admitted single interval and a finite energy budget".to_owned()));
         }
         validate_enthalpy_config(&body, config)?;
         let maximum_biot = body.maximum_biot(config.radiation_temperature_k);
@@ -106,13 +222,29 @@ impl LumpedThermalEnvironment {
         Ok(LumpedEnthalpyEndpoint {
             body,
             config,
-            initial: input.initial,
-            maximum_thermal_residual_j: self.maximum_thermal_residual_j,
+            initial,
+            maximum_thermal_residual_j,
         })
     }
-}
 
-impl LumpedEnthalpyEndpoint<'_> {
+    /// Body carrying the exact geometry, original calorics and transport laws.
+    #[must_use]
+    pub const fn body(&self) -> &LumpedEnthalpyBody<'a> {
+        &self.body
+    }
+
+    /// Initial accepted caloric state; solving a proposal never mutates it.
+    #[must_use]
+    pub const fn initial_state(&self) -> EquilibriumPhaseState {
+        self.initial
+    }
+
+    /// Physical duration of this implicit proposal [s].
+    #[must_use]
+    pub const fn duration_s(&self) -> f64 {
+        self.config.duration_s
+    }
+
     /// Original whole-surface convection/radiation bound used at preparation.
     /// Coupled owners must add independently occupied heat paths to this bound.
     #[must_use]
@@ -352,7 +484,7 @@ impl LumpedEnthalpyEndpoint<'_> {
         let mut config = self.config;
         config.ambient_temperature_k = ambient_temperature_k;
         config.internal_power_w = internal_power_w;
-        let (convection, radiation, net) = enthalpy_power(&self.body, config, temperature_k)?;
+        let (convection, radiation, net) = enthalpy_power(&self.body, config, h, temperature_k)?;
         let stored_energy_change_j = self.body.mass_kg * (h - h0);
         let convection_heat_j = config.duration_s * convection;
         let radiation_heat_j = config.duration_s * radiation;

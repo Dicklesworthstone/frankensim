@@ -353,7 +353,7 @@ pub fn solve_lumped_enthalpy_spectrum_from_clock_dd_cancellable<'a>(
     }
     let initial = phase_state(body, config.initial_specific_enthalpy_j_kg)?;
     let (initial_convection, initial_radiation) =
-        boundary_power(body, config, initial.temperature_k())?;
+        boundary_power(body, config, initial.specific_enthalpy_j_kg(), initial.temperature_k())?;
     let terms = binding
         .spectrum
         .tones()
@@ -517,7 +517,7 @@ pub fn solve_lumped_enthalpy_spectrum_from_clock_dd_cancellable<'a>(
             &mut residual,
         )?;
         let state = phase_state(body, next_h)?;
-        let (convection, radiation) = boundary_power(body, config, state.temperature_k())?;
+        let (convection, radiation) = boundary_power(body, config, state.specific_enthalpy_j_kg(), state.temperature_k())?;
         let energy = step_energy(body, config, previous_h, state, dt_s, source_j)?;
         let absolute_residual = abs_dd(energy.residual_j);
         if positive(absolute_residual - Dd::from_f64(controls.maximum_step_energy_residual_j)) {
@@ -658,7 +658,7 @@ fn step_energy_at(
     dt_s: f64,
     source_j: Dd,
 ) -> Result<LumpedEnthalpySpectrumEnergy, ConductionError> {
-    let (convection, radiation) = boundary_power(body, config, temperature_k)?;
+    let (convection, radiation) = boundary_power(body, config, specific_enthalpy_j_kg, temperature_k)?;
     let duration = Dd::from_f64(dt_s);
     let mut energy = LumpedEnthalpySpectrumEnergy {
         source_input_j: source_j,
@@ -687,9 +687,10 @@ fn step_energy_at(
 fn boundary_power(
     body: &LumpedEnthalpyBody<'_>,
     config: LumpedEnthalpyMarchConfig,
+    specific_enthalpy_j_kg: f64,
     temperature_k: f64,
 ) -> Result<(f64, f64), ConductionError> {
-    let (convection, radiation, net) = enthalpy_power(body, config, temperature_k)?;
+    let (convection, radiation, net) = enthalpy_power(body, config, specific_enthalpy_j_kg, temperature_k)?;
     if [convection, radiation, net]
         .iter()
         .all(|value| value.is_finite())

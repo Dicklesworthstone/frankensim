@@ -78,7 +78,7 @@ pub fn solve_lumped_pair_exchange(
         let biot = body.characteristic_length_m
             / r
             / body.surface_area_m2
-            / body.transport.minimum_conductivity_w_per_m_k;
+            / body.transport.minimum_conductivity_w_per_m_k();
         if !biot.is_finite() || biot > LUMPED_BIOT_CEILING {
             return Err(fail(
                 "contact Biot exceeds the lumped limit; use spatial enthalpy transport",

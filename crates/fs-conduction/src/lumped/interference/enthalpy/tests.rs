@@ -367,7 +367,7 @@ fn rk4_reference(body: &LumpedEnthalpyBody<'_>, cfg: LumpedEnthalpyMarchConfig) 
     let dt = cfg.duration_s / n as f64;
     let rhs = |t: f64, h: f64| {
         let state = phase_state(body, h).unwrap();
-        let (convection, radiation, _) = enthalpy_power(body, cfg, state.temperature_k()).unwrap();
+        let (convection, radiation, _) = enthalpy_power(body, cfg, h, state.temperature_k()).unwrap();
         let power = 20.0 + 15.0 * fs_math::det::cos(core::f64::consts::TAU * 0.2 * t);
         (power + convection + radiation) / body.mass_kg()
     };
