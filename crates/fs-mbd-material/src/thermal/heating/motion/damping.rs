@@ -12,6 +12,9 @@
 //! interface. Expansion parameter work remains separate; dissipative feedback
 //! does not supply the missing thermoelastic free-energy model.
 
+/// Full passive spatial resistance on the same finite thermal/motion owner.
+pub mod spatial;
+
 pub use super::loads::MaterialAttachment as DamperAttachment;
 use super::loads::{attachment_arm, attachment_region};
 use super::*;
@@ -73,6 +76,8 @@ pub enum DampingError {
     /// Ordered thermal source, physical context or bulk-state identity refusal.
     Interface(ThermalMaterialError),
     Thermal(DepositionError),
+    /// Original six-coordinate native momentum/source owner refused.
+    Spatial(fs_mbd::spatial_loads::internal_impulse::viscous::ViscousConnectorError),
     Newton(NewtonError),
     NotConverged(NewtonReport),
     Interrupted(SolverRunProgress),
@@ -115,6 +120,13 @@ impl From<DepositionError> for DampingError {
         Self::Thermal(e)
     }
 }
+impl From<fs_mbd::spatial_loads::internal_impulse::viscous::ViscousConnectorError>
+    for DampingError
+{
+    fn from(e: fs_mbd::spatial_loads::internal_impulse::viscous::ViscousConnectorError) -> Self {
+        Self::Spatial(e)
+    }
+}
 impl From<NewtonError> for DampingError {
     fn from(e: NewtonError) -> Self {
         Self::Newton(e)
@@ -123,8 +135,8 @@ impl From<NewtonError> for DampingError {
 
 /// Native impulse, independent heat/storage accounts and fresh source evaluation.
 #[derive(Debug)]
-pub struct DampingAudit {
-    pub impulse: ActionReactionImpulseReceipt,
+pub struct DampingAudit<I = ActionReactionImpulseReceipt> {
+    pub impulse: I,
     pub source: ResolvedLinearInterface,
     pub thermal: [EnergyAudit; 2],
     pub heat_by_body_j: [f64; 2],
@@ -315,6 +327,30 @@ impl<'a> DampedRigidPair<'a> {
         initial_energy_increments_j: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<(Self, DampingAudit), DampingError> {
+        self.step_with_impulse(
+            target_s,
+            controls,
+            initial_energy_increments_j,
+            cancelled,
+            |source, dt, limits, _checkpoint| self.impulse(source, dt, limits),
+        )
+    }
+
+    // One original thermal residual, source refresh, contact transfer and
+    // accepted motion/configuration update serves both native impulse laws.
+    fn step_with_impulse<I>(
+        &self,
+        target_s: f64,
+        controls: DampingSolve,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+        propose: impl Fn(
+            &ResolvedLinearInterface,
+            f64,
+            DampingSolve,
+            &mut dyn FnMut() -> Result<(), DepositionError>,
+        ) -> Result<Dissipation<I>, DampingError>,
+    ) -> Result<(Self, DampingAudit<I>), DampingError> {
         let cancel = RefCell::new(cancelled);
         let checkpoint = || {
             if (*cancel.borrow_mut())() {
@@ -374,7 +410,7 @@ impl<'a> DampedRigidPair<'a> {
                             }
                             trials.set(trials.get() + 1);
                             let (source, contact) = self.resolve_interface(a, b, dt)?;
-                            let impulse = self.impulse(&source, dt, controls)?;
+                            let impulse = propose(&source, dt, controls, &mut || checkpoint())?;
                             let qa = number(impulse.heat_j * self.damper.first_heat_fraction)?;
                             let qb = number(impulse.heat_j - qa)?;
                             Ok::<_, DampingError>(StepCoefficients {
@@ -470,10 +506,7 @@ impl<'a> DampedRigidPair<'a> {
             ));
         }
         let mut next = self.clone();
-        let states = [
-            impulse.receipt.first.state_after,
-            impulse.receipt.second.state_after,
-        ];
+        let states = impulse.states_after;
         for (i, thermal) in [ta, tb].into_iter().enumerate() {
             checkpoint()?;
             let motion = &mut next.bodies[i].motion;
@@ -668,6 +701,7 @@ impl<'a> DampedRigidPair<'a> {
             ));
         }
         Ok(Dissipation {
+            states_after: [receipt.first.state_after, receipt.second.state_after],
             receipt,
             heat_j,
             residual_j,
@@ -708,8 +742,9 @@ fn relaxation_impulse_and_heat(
     Ok((magnitude, heat))
 }
 
-struct Dissipation {
-    receipt: ActionReactionImpulseReceipt,
+struct Dissipation<I = ActionReactionImpulseReceipt> {
+    states_after: [RigidBodyState; 2],
+    receipt: I,
     heat_j: f64,
     residual_j: f64,
 }

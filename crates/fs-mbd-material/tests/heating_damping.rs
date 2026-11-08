@@ -855,3 +855,6 @@ fn conducting_damper_refusals_preserve_both_bodies_and_the_complete_source() {
     ));
     unchanged(&limited, &prior);
 }
+
+#[path = "heating_damping/spatial.rs"]
+mod spatial;

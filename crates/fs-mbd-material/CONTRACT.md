@@ -2100,3 +2100,32 @@ inclination equation `5*tan(theta)+4*tan(theta)^3=1.2` (with reversed sign for
 the reversed mass offset), and the free-heave pitch stiffness from the exact
 integrated box energy. Off-diagonal heave/tilt terms therefore participate in
 the comparison, rather than testing only an upright homogeneous block.
+
+## Finite thermal feedback for full spatial viscous recoil
+
+With `dissipative-coupling`, `thermal::heating::motion::damping::spatial`
+continues the same two original thermal bodies through a complete passive
+six-coordinate connector. `SpatialResistanceShape` declares a dimensionless
+positive-semidefinite form S and a fixed positive rotary length ell. In the
+first body's original material axes, z = [v, ell*omega] and loss power is
+c(T) z^T S z. The scalar c(T), original interface area, ordered source identity,
+thermal cells and heat partition remain owned by `MaterialDamper`. This is an
+explicit geometric lift of that scalar law, not independently sourced tensor
+viscosity. The material form is congruence-mapped into the actual principal
+frame, so inertia-driven eigenframe changes cannot rotate material resistance.
+
+`SpatialDampedRigidPair` reuses the existing finite-cell backward-Euler and
+Newton-Krylov solve. Each endpoint source proposal uses the native prepared
+connector's exact fixed-pose relaxation, full force/couple recoil and independent
+integrated positive loss. The complete prepared decay-rate range must satisfy
+original source frequency support and the explicit timestep budget. Original
+contact conduction can coexist with generated heat; neither becomes an authored
+persistent source. Both accepted momentum states then pass through the original
+free-flight and source expansion owners, retaining mass and world momenta.
+Rotational inertia changes contribute only their independently bounded parameter
+work, never additional dissipative heat. Native impulse work, thermal residuals,
+fixed-inertia numerical error and complete mechanical/caloric closure retain
+separate gates. Late source, budget, energy or cancellation refusal publishes no
+new history. Shape/area remain fixed, and this retains the existing first-order
+source/free-flight/configuration split requiring independent timestep refinement;
+no reciprocal thermoelastic free-energy law is supplied.
