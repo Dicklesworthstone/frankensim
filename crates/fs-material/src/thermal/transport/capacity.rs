@@ -41,7 +41,7 @@ pub(super) struct CapacityExchange {
 /// Same exact response for C(T) dT/du = drive - feedback*(T-T_initial).
 /// Drive, feedback and duration carry the caller's original compatible units.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct CapacityDrivenExchange {
+pub(crate) struct CapacityDrivenExchange {
     pub temperature: f64,
     pub temperature_change: f64,
     pub energy_change: f64,
@@ -399,7 +399,20 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
         initial_drive: f64,
         exposure: f64,
     ) -> Result<CapacityDrivenExchange, ThermalTransportError> {
-        self.exchange_driven::<true>(initial, initial_drive, exposure, 1.0, None)
+        self.driven_heat_exchange_for_duration(initial, initial_drive, exposure, 1.0)
+    }
+
+    /// The same exact source kernel in the caller's time coordinate. Original
+    /// phase intervals keep their boundary residence without rescaling it to
+    /// unity, which could round a supported endpoint just past source support.
+    pub(super) fn driven_heat_exchange_for_duration(
+        &self,
+        initial: f64,
+        initial_drive: f64,
+        feedback: f64,
+        duration: f64,
+    ) -> Result<CapacityDrivenExchange, ThermalTransportError> {
+        self.exchange_driven::<true>(initial, initial_drive, feedback, duration, None)
     }
 
     fn exchange_driven<const PRESERVE_HEAT: bool>(
@@ -471,7 +484,16 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
             // An infinite drive/feedback ratio is harmless: the finite original
             // source interval still bounds the travel, and z is computed directly.
             let equilibrium_width = if feedback == 0.0 { f64::INFINITY } else { drive / feedback };
-            let width = source_width.min(equilibrium_width);
+            // A rounded D/B can equal a source boundary despite a positive
+            // residual drive there. Such a boundary remains reachable, which
+            // matters when the next original interval is a latent plateau.
+            let equilibrium_end = feedback > 0.0
+                && (-feedback).mul_add(source_width, drive) <= 0.0;
+            let width = if equilibrium_end {
+                source_width.min(equilibrium_width)
+            } else {
+                source_width
+            };
             if !positive(width) {
                 return Err(invalid("driven exchange travel is not representable"));
             }
@@ -489,7 +511,7 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
                 (1.0 - fraction) * initial_capacity + fraction * boundary_capacity
             };
             let segment = ExchangeSegment {
-                drive, feedback, width, initial_capacity, end_capacity,
+                drive, feedback, width, initial_capacity, end_capacity, equilibrium_end,
             };
             let amount = segment.exposure(width)?;
             let corrected = amount - correction;
@@ -633,8 +655,51 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
             width: (final_t - initial).abs(),
             initial_capacity: self.on_segment(index, initial),
             end_capacity: self.on_segment(index, final_t),
+            equilibrium_end: final_t == reservoir,
         };
         segment.exposure(segment.width)
+    }
+
+    /// Normalized residence to a boundary of one original sensible interval.
+    /// Reaching or crossing the equilibrium takes infinite time; no absolute
+    /// virtual bath is constructed, including when drive/feedback overflows.
+    pub(super) fn driven_exchange_integral(
+        &self,
+        index: usize,
+        initial: f64,
+        final_t: f64,
+        initial_drive: f64,
+        feedback: f64,
+    ) -> Result<f64, ThermalTransportError> {
+        let Some(upper) = index.checked_add(1).and_then(|i| self.knots.get(i)) else {
+            return Err(invalid("driven interval is outside source support"));
+        };
+        let lower = &self.knots[index];
+        if !initial.is_finite() || !final_t.is_finite()
+            || !initial_drive.is_finite()
+            || !feedback.is_finite() || feedback < 0.0
+            || initial < lower.temperature() || initial > upper.temperature()
+            || final_t < lower.temperature() || final_t > upper.temperature()
+        {
+            return Err(invalid("driven residence needs a supported original sensible interval"));
+        }
+        if initial == final_t { return Ok(0.0); }
+        if initial_drive == 0.0
+            || (final_t > initial) != (initial_drive > 0.0)
+        {
+            return Err(invalid("driven residence needs a target along its initial heat flow"));
+        }
+        let width = (final_t - initial).abs();
+        let drive = initial_drive.abs();
+        if feedback > 0.0 && (-feedback).mul_add(width, drive) <= 0.0 {
+            return Ok(f64::INFINITY);
+        }
+        ExchangeSegment {
+            drive, feedback, width,
+            initial_capacity: self.on_segment(index, initial),
+            end_capacity: self.on_segment(index, final_t),
+            equilibrium_end: false,
+        }.exposure(width)
     }
 
     /// Bounded segment traversal followed by a scaled quadratic inverse.
@@ -803,6 +868,9 @@ struct ExchangeSegment {
     width: f64,
     initial_capacity: f64,
     end_capacity: f64,
+    // Only a true equilibrium boundary may use finite-duration saturation.
+    // An original source endpoint can retain positive drive below one z ULP.
+    equilibrium_end: bool,
 }
 
 impl ExchangeSegment {
@@ -812,20 +880,28 @@ impl ExchangeSegment {
     }
 
     fn fraction(&self, travel: f64) -> f64 {
-        if self.feedback > 0.0
-            && travel == self.width && self.width == self.drive / self.feedback
-        {
+        if self.equilibrium_end && travel == self.width {
             1.0
         } else {
-            product_over(self.feedback, travel, self.drive)
+            let z = product_over(self.feedback, travel, self.drive);
+            if z > 1.0 && (-self.feedback).mul_add(travel, self.drive) > 0.0 {
+                1.0
+            } else {
+                z
+            }
         }
     }
 
     fn exposure(&self, travel: f64) -> Result<f64, ThermalTransportError> {
         if travel == 0.0 { return Ok(0.0); }
         let z = self.fraction(travel);
-        if z == 1.0 { return Ok(f64::INFINITY); }
-        if !z.is_finite() || !(0.0..1.0).contains(&z) {
+        let remaining = if self.equilibrium_end && travel == self.width {
+            0.0
+        } else {
+            (-self.feedback).mul_add(travel, self.drive)
+        };
+        if remaining == 0.0 { return Ok(f64::INFINITY); }
+        if !z.is_finite() || !(0.0..=1.0).contains(&z) || !positive(remaining) {
             return Err(invalid("driven exchange exceeded its positive driving interval"));
         }
         let end_capacity = self.capacity(travel);
@@ -833,6 +909,14 @@ impl ExchangeSegment {
             // Preserve the original fast, cancellation-resistant bath integral.
             let [near, far] = entropy_weights_with_width(self.drive - travel, self.drive, travel);
             end_capacity * near + self.initial_capacity * far
+        } else if z > 0.5 {
+            // Retain the logarithmic distance even if B*r/D rounds to one.
+            // This is the same positive affine integral in driving-power units.
+            let [near, far] = entropy_weights_with_width(
+                remaining, self.drive, self.feedback * travel,
+            );
+            product_over(end_capacity, near, self.feedback)
+                + product_over(self.initial_capacity, far, self.feedback)
         } else {
             let heat = (0.5 * self.initial_capacity + 0.5 * end_capacity) * travel;
             if self.feedback == 0.0 {
@@ -903,7 +987,9 @@ impl ExchangeSegment {
             }
             if lower.next_up() >= upper {
                 return Ok(
-                    if self.fraction(upper) == 1.0 || high_value - duration < duration - low_value {
+                    if (self.equilibrium_end && upper == self.width)
+                        || high_value - duration < duration - low_value
+                    {
                         upper
                     } else {
                         lower
@@ -947,7 +1033,7 @@ impl ExchangeSegment {
             let (c0, c1) = (self.initial_capacity / scale, end_capacity / scale);
             let response = product_over(scale, c0 * w0 + c1 * (z - w0), self.feedback);
             let heat_rate = heat / duration;
-            let mean = if heat_rate <= 0.75 * self.drive {
+            let mean = if heat_rate <= 0.75 * self.drive || z == 1.0 {
                 (self.drive - heat_rate) / self.feedback
             } else {
                 let [a0, a1, b0, b1] = exchange_moment_weights(z);
@@ -965,9 +1051,9 @@ impl ExchangeSegment {
             1.0
         } else if self.initial_capacity == self.end_capacity {
             (-product_over(self.feedback, duration, self.initial_capacity)).exp()
-        } else if self.fraction(travel) < 1.0 {
+        } else if !(self.equilibrium_end && travel == self.width) {
             (-self.feedback).mul_add(travel, self.drive) / self.drive
-        } else if self.width == self.drive / self.feedback {
+        } else if self.equilibrium_end {
             let capacity_change = self.end_capacity - self.initial_capacity;
             let exposure = self.feedback * duration;
             let attenuation = if capacity_change < 0.0 {
@@ -1961,5 +2047,53 @@ mod tests {
             assert!(curve.driven_heat_exchange(500.0, -1e9, x).is_err());
         }
     }
+
+    #[test]
+    fn g1_driven_boundary_time_reuses_original_interval_and_zero_feedback_limit() {
+        let knots = [[300.0, 350.0], [700.0, 550.0]];
+        let curve = CapacityCurve::new(&knots);
+        for (initial, target, equilibrium) in [(350.0, 650.0, 900.0), (650.0, 350.0, -200.0)] {
+            for feedback in [0.25, 75.0] {
+                let drive = feedback * (equilibrium - initial);
+                let time = curve.driven_exchange_integral(0, initial, target, drive, feedback).unwrap();
+                let expected = affine_exchange(initial, target, equilibrium, 200.0, 0.5) / feedback;
+                close_driven(time, expected, 2e-12 * expected);
+                let boundary = if drive > 0.0 { 700.0 } else { 300.0 };
+                let residence = curve.driven_exchange_integral(0, initial, boundary, drive, feedback).unwrap();
+                let reached = curve.driven_heat_exchange_for_duration(initial, drive, feedback, residence).unwrap();
+                assert_eq!(reached.temperature, boundary);
+            }
+            let heat = (200.0 + 0.25 * (initial + target)) * (target - initial);
+            let drive = heat.signum() * 1e6;
+            close_driven(
+                curve.driven_exchange_integral(0, initial, target, drive, 0.0).unwrap(),
+                heat / drive, 2e-15,
+            );
+        }
+        assert!(curve.driven_exchange_integral(0, 350.0, 650.0, 300.0, 1.0).unwrap().is_infinite());
+        assert!(curve.driven_exchange_integral(0, 350.0, 650.0, -300.0, 1.0).is_err());
+    }
+
+    #[test]
+    fn g1_driven_residence_retains_positive_drive_below_rounded_equilibrium_ratio() {
+        let initial = 0.5;
+        let target = 1.5 + f64::EPSILON;
+        let width = target - initial;
+        let drive = 2.0_f64.powi(100);
+        let feedback = drive * (1.0 - f64::EPSILON);
+        assert_eq!(drive / feedback, width);
+        assert_eq!((-feedback).mul_add(width, drive), 0.0625);
+        for capacities in [[1000.0, 1000.0], [1000.0, 2000.0]] {
+            let knots = [[initial, capacities[0]], [target, capacities[1]]];
+            let curve = CapacityCurve::new(&knots);
+            let time = curve.driven_exchange_integral(0, initial, target, drive, feedback).unwrap();
+            assert!(time.is_finite() && time > 0.0 && time < 1.0);
+            let reached = curve.driven_heat_exchange_for_duration(initial, drive, feedback, time).unwrap();
+            assert_eq!(reached.temperature, target);
+            close_driven(reached.remaining_drive, 0.0625, 2e-15);
+            assert!(reached.mean_temperature.is_finite());
+        }
+    }
+
 
 }

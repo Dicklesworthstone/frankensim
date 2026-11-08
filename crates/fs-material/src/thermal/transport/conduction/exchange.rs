@@ -208,8 +208,8 @@ impl CaloricConductionLayer<'_, '_> {
     /// retain their original storage basis and source support. All crossed
     /// capacities and analytic moments use the SAME shared exchange kernel.
     ///
-    /// Equilibrium-phase layers retain their original phase exchange API and
-    /// are not admitted by this sensible-storage response.
+    /// Equilibrium-phase layers use that original chart's driven response and
+    /// retain their prepared homogeneous phase and conductivity support.
     ///
     /// Successful queries allocate nothing, query no material card and mutate
     /// no thermal state. Relative heat and temperature moments survive absolute
@@ -230,10 +230,10 @@ impl CaloricConductionLayer<'_, '_> {
         let caloric = self.caloric_law();
         let initial_temperature = caloric.temperature_k(initial_specific_energy_j_kg)?;
         let (exchange, temperatures) = match self.original {
-            OriginalConduction::EquilibriumPhase(_) => {
-                return Err(DepositionError::InvalidInput(
-                    "driven caloric response is unsupported for equilibrium-phase storage",
-                ));
+            OriginalConduction::EquilibriumPhase(law) => {
+                return phase_driven_exchange(
+                    law, initial_specific_energy_j_kg, initial_drive_j_kg, exposure_j_kg_k,
+                );
             }
             OriginalConduction::Isobaric(law) => solve_driven(
                 &law.caloric().source_line().knots, 1.0,
@@ -345,6 +345,44 @@ fn phase_exchange(
         mean_reservoir_derivative: jacobian.mean_reservoir_derivative,
         remaining_temperature_difference_k: jacobian.exposure_enthalpy_derivative_k,
         mean_log_exposure_derivative_k: jacobian.mean_log_exposure_derivative_k,
+    })
+}
+
+
+// The prepared layer remains homogeneous; the original phase chart owns its
+// caloric integral, and both endpoints must remain in this selected phase.
+fn phase_driven_exchange(
+    layer: &ResolvedConductionLayer<'_>,
+    initial_h: f64,
+    drive: f64,
+    exposure: f64,
+) -> Result<CaloricDrivenHeatExchange, DepositionError> {
+    layer.temperature_at_enthalpy(initial_h).map_err(|_| DepositionError::MaterialDomain)?;
+    let curve = layer.caloric_curve();
+    let initial = curve.state_at_specific_enthalpy(initial_h)
+        .map_err(|_| DepositionError::MaterialDomain)?;
+    let response = curve.driven_heat_exchange_response(initial, drive, exposure)
+        .map_err(|_| DepositionError::MaterialDomain)?;
+    let (exchange, jacobian) = (response.exchange, response.jacobian);
+    let final_h = exchange.state.specific_enthalpy_j_kg();
+    layer.temperature_at_enthalpy(final_h).map_err(|_| DepositionError::MaterialDomain)?;
+    Ok(CaloricDrivenHeatExchange {
+        storage_basis: curve.storage_basis(),
+        initial_specific_energy_j_kg: initial_h,
+        final_specific_energy_j_kg: final_h,
+        temperature_k: exchange.state.temperature_k(),
+        temperature_change_k: exchange.temperature_change_k,
+        mean_temperature_k: exchange.mean_temperature_k,
+        mean_temperature_change_k: exchange.mean_temperature_change_k,
+        specific_heat_j_kg: exchange.specific_heat_j_kg,
+        represented_energy_change_j_kg: exchange.represented_enthalpy_change_j_kg,
+        heat_residual_j_kg: exchange.heat_residual_j_kg,
+        inlet_energy_gain: jacobian.inlet_enthalpy_gain,
+        inlet_energy_loss: jacobian.inlet_enthalpy_loss,
+        source_heat_gain: jacobian.source_heat_gain,
+        mean_source_derivative_kg_k_j: jacobian.mean_source_derivative_kg_k_j,
+        remaining_drive_j_kg: jacobian.remaining_drive_j_kg,
+        mean_log_duration_derivative_k: jacobian.mean_log_duration_derivative_k,
     })
 }
 

@@ -1,5 +1,8 @@
 //! Independent manufactured calorics and exchange times; no measured material claim.
 
+#[path = "tests/driven.rs"]
+mod driven;
+
 use super::*;
 use crate::phase::EnthalpyPhaseKnot;
 use fs_blake3::ContentHash;
@@ -570,3 +573,4 @@ fn g1_phase_mean_exposure_response_retains_sub_ulp_temperature_travel() {
         near(response.jacobian.mean_log_exposure_derivative_k / expected, 1.0, 3e-14);
     }
 }
+

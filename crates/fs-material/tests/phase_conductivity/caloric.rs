@@ -364,3 +364,64 @@ fn prepared_solid_prefix_keeps_its_sensible_derivative_at_the_melting_boundary()
     close_derivative(native.temperature_slope_kg_k_j, 1.0 / 2000.0);
     close_derivative(native.conductivity_slope_kg_w_m_k_j, 0.02 / 2000.0);
 }
+
+
+#[test]
+fn g1_driven_native_phase_layer_retains_source_cp_and_prepared_support() {
+    use fs_material::thermal::conduction::source::ResolvedConductionLayer;
+    use fs_material::thermal::transport::conduction::CaloricConductionLayer;
+
+    let card = conductivity_card();
+    let capacities = [1000.0, 3500.0]; // C(T) = -500 + 5*T.
+    let datum = 12345.0;
+    let curve = source_curve(&card, capacities, datum);
+    let point = context();
+    let prepared = ResolvedConductionLayer::new(
+        &curve,
+        ThermalMaterialPoint {
+            material: &card,
+            context: &point,
+            temperature_axis: "T",
+            liquid_fraction_axis: Some("f"),
+        },
+        &PropertyKey::new("k", KD),
+        ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly),
+        SolidLiquidPhase::Solid,
+        [350.0, 650.0],
+        || Ok(()),
+    ).unwrap();
+    let layer = CaloricConductionLayer::from_equilibrium_phase(&prepared);
+    let h = |t| original_enthalpy(capacities, datum, t);
+    for (initial_t, final_t, equilibrium_t) in [
+        (400.0, 600.0, 900.0),
+        (600.0, 400.0, -200.0),
+    ] {
+        // Independent integral of (-500+5T)/(equilibrium-T) dT.
+        // This virtual temperature is only an oracle; the material driver
+        // receives the relative physical drive, including the cooling case.
+        let ratio: f64 = (equilibrium_t - final_t) / (equilibrium_t - initial_t);
+        let exposure = -5.0 * (final_t - initial_t)
+            - (-500.0 + 5.0 * equilibrium_t) * ratio.ln();
+        assert!(exposure > 0.0);
+        let result = layer.driven_heat_exchange(
+            h(initial_t), exposure * (equilibrium_t - initial_t), exposure,
+        ).unwrap();
+        close(result.temperature_k, final_t);
+        close(result.final_specific_energy_j_kg, h(final_t));
+        close(result.specific_heat_j_kg, h(final_t) - h(initial_t));
+        assert!(result.source_heat_gain > 0.0);
+        assert!(result.inlet_energy_gain > 0.0 && result.inlet_energy_gain < 1.0);
+        assert!(result.heat_residual_j_kg.abs() < 1e-6);
+
+        let impulse = layer.driven_heat_exchange(
+            h(initial_t), h(final_t) - h(initial_t), 0.0,
+        ).unwrap();
+        close(impulse.temperature_k, final_t);
+        assert_eq!(impulse.source_heat_gain, 1.0);
+        assert_eq!(impulse.specific_heat_j_kg, h(final_t) - h(initial_t));
+    }
+    // The original chart reaches 800 K, but this conductivity layer does not.
+    // Retaining the original calorics must not widen prepared physical support.
+    assert!(layer.driven_heat_exchange(h(400.0), h(700.0) - h(400.0), 0.0).is_err());
+    assert!(layer.driven_heat_exchange(h(300.0), h(400.0) - h(300.0), 0.0).is_err());
+}

@@ -405,6 +405,34 @@ impl IsobaricHeatCapacityLaw {
     }
 }
 
+pub(crate) use super::capacity::CapacityDrivenExchange as SourceDrivenHeatExchange;
+
+/// Shared sensible source kernel for the original phase owner's time segments.
+pub(crate) fn source_driven_heat_exchange(
+    knots: &[[f64; 2]; 2],
+    initial_k: f64,
+    initial_drive_j_kg: f64,
+    exposure_j_kg_k: f64,
+    duration: f64,
+) -> Result<SourceDrivenHeatExchange, ThermalTransportError> {
+    CapacityCurve::new(knots).driven_heat_exchange_for_duration(
+        initial_k, initial_drive_j_kg, exposure_j_kg_k, duration,
+    )
+}
+
+/// Exact residence to an original sensible boundary, in the caller's time basis.
+pub(crate) fn source_driven_heat_exchange_duration(
+    knots: &[[f64; 2]; 2],
+    initial_k: f64,
+    final_k: f64,
+    initial_drive_j_kg: f64,
+    exposure_j_kg_k: f64,
+) -> Result<f64, ThermalTransportError> {
+    CapacityCurve::new(knots).driven_exchange_integral(
+        0, initial_k, final_k, initial_drive_j_kg, exposure_j_kg_k,
+    )
+}
+
 /// Shared numerical owner for already admitted original specific-Cp knots.
 /// Source identity and pressure/composition admission remain with each adapter.
 pub(crate) fn source_linear_heat_exchange(
@@ -649,3 +677,4 @@ mod tests {
         }
     }
 }
+

@@ -8,6 +8,12 @@
 /// Direct isolated exchange between two finite original phase charts.
 pub mod pair;
 
+/// Constant applied source plus linear-bath exchange through sensible and latent storage.
+mod driven;
+pub use driven::{
+    PhaseDrivenHeatExchange, PhaseDrivenHeatExchangeJacobian, PhaseDrivenHeatExchangeResponse,
+};
+
 use super::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, PhaseStateError};
 use crate::thermal::transport::{
     ThermalTransportError,
@@ -605,3 +611,4 @@ fn invalid(what: &'static str) -> PhaseHeatExchangeError {
 
 #[cfg(test)]
 mod tests;
+
