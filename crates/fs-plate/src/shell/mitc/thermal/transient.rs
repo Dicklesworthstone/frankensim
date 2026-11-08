@@ -37,6 +37,7 @@ use fs_sparse::{Coo, Csr};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+mod body_acceleration;
 mod material;
 mod relaxation;
 mod step;
@@ -54,6 +55,8 @@ pub struct EnrichedMitcShell {
     gauge_stiffness: Arc<Csr>,
     stiffness: Arc<Csr>,
     mass: Arc<Csr>,
+    // Original physical mass response to the three world translations.
+    body_acceleration: Arc<Vec<[f64; 3]>>,
     gauges: Arc<Vec<AlgebraicGauge>>,
     viscosity: Option<Arc<viscosity::EnrichedViscosity>>,
     relaxation: Option<Arc<relaxation::EnrichedRelaxation>>,
@@ -233,6 +236,7 @@ impl EnrichedMitcShell {
             .ok_or_else(|| invalid("enriched shell coordinate extent overflow"))?;
         let mut k = Coo::new(dimension, dimension);
         let mut m = Coo::new(dimension, dimension);
+        let mut body_acceleration = vec![[0.0; 3]; dimension];
         let mut gauge = Coo::new(nodal, nodal);
         let mut reference_fields = Vec::with_capacity(model.mesh.tris.len());
         for row in 0..nodal {
@@ -256,6 +260,13 @@ impl EnrichedMitcShell {
             let inertia = field.physical_inertia(
                 &model.sections[e],
                 model.reference_inertia.as_ref().map(|moments| &moments[e]),
+                &mut cancelled,
+            )?;
+            body_acceleration::accumulate(
+                &mut body_acceleration,
+                &model,
+                e,
+                &inertia,
                 &mut cancelled,
             )?;
             material::scatter(&mut m, &model, e, &inertia, 1.0, &mut cancelled)?;
@@ -284,6 +295,7 @@ impl EnrichedMitcShell {
             gauge_stiffness,
             stiffness,
             mass,
+            body_acceleration: Arc::new(body_acceleration),
             gauges,
             viscosity: None,
             relaxation: None,

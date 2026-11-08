@@ -80,6 +80,7 @@ impl EnrichedMitcShell {
             gauge_stiffness: Arc::clone(&self.gauge_stiffness),
             stiffness,
             mass: Arc::clone(&self.mass),
+            body_acceleration: Arc::clone(&self.body_acceleration),
             gauges: Arc::clone(&self.gauges),
             viscosity: self.viscosity.clone(),
             relaxation: self.relaxation.clone(),
