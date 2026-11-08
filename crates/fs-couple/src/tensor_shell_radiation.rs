@@ -84,9 +84,12 @@ pub enum TensorShellRadiationError {
     Budget { quantity: &'static str, required: u128, maximum: u128 },
     Geometry(fs_bem::BemError),
     Boundary(HelmholtzError),
+    Molecular(fs_bem::helmholtz::molecular::MolecularError),
     Shell(TensorShellHarmonicError),
     /// Total input/heat/flux, projected port/surface work, and surface/flux defects.
     PowerBalance { coupled: f64, port_work: f64, flux: f64, tolerance: f64 },
+    /// Signed illuminated-shell work and original-coordinate traction defects.
+    IlluminationBalance { coupled: f64, motion_work: f64, traction: f64, tolerance: f64 },
     Allocation(&'static str),
     Cancelled,
 }
@@ -104,6 +107,9 @@ impl From<HelmholtzError> for TensorShellRadiationError {
 }
 impl From<TensorShellHarmonicError> for TensorShellRadiationError {
     fn from(value: TensorShellHarmonicError) -> Self { Self::Shell(value) }
+}
+impl From<fs_bem::helmholtz::molecular::MolecularError> for TensorShellRadiationError {
+    fn from(value: fs_bem::helmholtz::molecular::MolecularError) -> Self { Self::Molecular(value) }
 }
 fn checkpoint(cx: &Cx<'_>) -> Result<(), TensorShellRadiationError> {
     cx.checkpoint().map_err(|_| TensorShellRadiationError::Cancelled)

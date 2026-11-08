@@ -1,3 +1,34 @@
+## Incident sound drives original material shells in relaxing gas
+
+`tensor_shell_radiation::open::molecular` composes the original full-coordinate
+`TensorPronyShell` with native two-sided molecular screen illumination. One
+boundary factor serves all physical motion columns and declared incident cases;
+one loaded material factor serves repeated external force/torque vectors. The
+blocked pressure jump supplies `f_blocked = -G p_blocked`, and the shell solves
+with `f_external + f_blocked`. All translations, rotations, tensor-Prony branches,
+Kelvin loss and mutual acoustic reaction remain in their native owners.
+
+The total fluid reaction is independently projected from the coherent blocked
+and motion jumps. Accepted responses check both `external = material heat +
+total exterior work` and `external + blocked = material heat + motion exterior
+work`, together with native port work and componentwise traction. Total exterior
+work stays signed: incoming sound can do work on the shell. Molecular gas heat
+is included in exterior work and is never mislabeled as far-field radiation.
+Continuous incident pressure has no jump across the sheet and is not applied
+twice. Prepared receivers reuse total pressure and Euler particle-velocity rows,
+add incident sound once, and reject responses from another source preparation.
+
+The equilibrium gas, frequency/material bands, original strain limits, actual
+source/receiver clearance, complex-wavenumber boundary admission, cancellation
+and explicit work/storage limits remain enforced. This is fixed-geometry,
+small-signal stationary harmonic acoustics with peak `exp(-i omega t)` phasors,
+the same gas on both sides, and a zero-offset acoustic sheet. It does not infer
+finite skins, enclosed cavities, causal dynamics or measured material accuracy.
+`tests/tensor_shell_illumination.rs` covers the lossless force-only limit,
+independent original P1 traction, signed sound-driven power, coherent combined
+drives and source-bound receivers. The broader shell-radiation and material
+coupling validation Beads remain open.
+
 ## Source-bound incandescent heating on native enthalpy
 
 `incandescent::PreparedIncandescentSource` holds one signed current or voltage

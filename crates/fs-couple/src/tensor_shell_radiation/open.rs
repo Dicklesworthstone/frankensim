@@ -26,6 +26,9 @@ use fs_modal::harmonic::{HarmonicPortControls, HarmonicResponse, HarmonicRespons
 use fs_plate::shell::viscosity::harmonic::{PreparedTensorPronyShell, TensorPronyShell};
 use std::collections::BTreeMap;
 
+/// Original material-shell motion, molecular gas and coherent incident sound.
+pub mod molecular;
+
 /// Original shell-to-screen geometry and complete physical trace limits.
 #[derive(Clone, Copy, Debug)]
 pub struct OpenTensorShellRadiationControls {
