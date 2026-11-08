@@ -9848,6 +9848,37 @@ effective log-survival semantics. Six regressions cover independent layered
 Beer–Lambert references, colored subpixel coverage/refinement, uniform and SI
 parity, range limits, palette/map refusal and exact spectral work admission.
 
+### Prepared mass-mixture opacity
+
+`prepare_density_absorption_mixtures` prepares one point-sampled absorption row
+per declared composition for the existing indexed renderer. Constituent input
+is component-major/wavelength-fastest in m²/kg of constituent; supplied weights
+are mixture-major/component-fastest in kg of constituent per kg of the density
+field's declared reference mass. Output is mixture-major/wavelength-fastest in
+m²/kg of that reference mass. Total-density mass fractions and carrier-relative
+loadings retain their explicit meaning; weights are never normalized.
+
+The independent-constituent model sums mass-weighted absorption at each exact
+supplied wavelength. Homogeneous composition within one cell remains distinct
+from the renderer's spatial average of transported intensities across different
+rays. No index, phase, temperature, interpolation, material identity or optical
+measurement authority is inferred. Mixtures are prepared once; rendering keeps
+the existing indexed hot loop and never evaluates constituents per ray.
+
+Component count, mixture count and the full mixture/component/wavelength
+product are admitted before complete input scans or output allocation, including
+zero weights and unused components. All inputs are finite and nonnegative.
+Positive coefficient products that underflow to zero and overflowing prepared
+coefficients refuse explicitly, because later density/path scaling could make
+the lost absorption observable. Only the final palette is allocated.
+
+The browser `prepare_vessel_spectral_absorption_mixtures` function and wasm
+export forward this same owner with limits of 64 component spectra, 4,096
+recipes and 1,048,576 total evaluations; invalid requests return an empty vector.
+The targeted volumes-enabled native source build passed all 134 tests, including
+four mixture regressions and the previously typechecked indexed/observer cases.
+This is separate from material-state, tracer and WASM feature validation.
+
 ### Spectral illumination and visible observation
 
 `SpectralOpacityImage::approximate_transmitted_xyz` and its per-image-background

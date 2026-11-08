@@ -11,11 +11,13 @@ use super::{
 use fs_math::det;
 
 mod indexed;
+mod mixture;
 mod observer;
 pub use indexed::{
     IndexedDensityAbsorptionSpectrum, IndexedSpectralAbsorptionImageSettings,
     render_density_spectral_indexed_box, render_density_spectral_indexed_transmittance_box,
 };
+pub use mixture::{AbsorptionMixtureSettings, prepare_density_absorption_mixtures};
 
 /// Maximum supplied wavelength samples in one lean opacity image.
 pub const MAX_OPACITY_WAVELENGTHS: usize = 16;

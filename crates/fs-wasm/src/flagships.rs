@@ -41,8 +41,9 @@ use fs_qty::{Dims, QtyAny};
 use fs_race::{LossSpan, RaceSettings, race_field};
 use fs_rand::StreamKey;
 use fs_render::volumes::{
-    AbsorptionImageSettings, IndexedSpectralAbsorptionImageSettings,
-    SpectralAbsorptionImageSettings, VolumeGrid, render_absorption_transmittance,
+    AbsorptionImageSettings, AbsorptionMixtureSettings, IndexedSpectralAbsorptionImageSettings,
+    SpectralAbsorptionImageSettings, VolumeGrid, prepare_density_absorption_mixtures,
+    render_absorption_transmittance,
 };
 use fs_scenario::ensemble::{SpectrumModel, StochasticEnsemble};
 use fs_sos::lyapunov_certifies_stability;
@@ -1094,6 +1095,42 @@ pub fn render_vessel_spectral_transmittance(
     .unwrap_or_default()
 }
 
+/// Prepare reusable mass-mixture spectra for captured vessel frames.
+///
+/// Constituent coefficients are component-major, wavelength-fastest, in m²/kg
+/// of each constituent. Weights are mixture-major, component-fastest, in kg of
+/// constituent per kg of the density field's declared reference mass. The
+/// returned table is mixture-major, wavelength-fastest, in m²/kg of that same
+/// reference mass. Its rows can be selected by the cell map passed to
+/// [render_vessel_indexed_spectral_transmittance].
+///
+/// For total mixture density, callers supply mass fractions summing to one;
+/// carrier-relative loadings need not sum to one. Weights are retained without
+/// normalization. Absorption is additive within each homogeneous mixture;
+/// spatial coverage is still filtered after attenuation by the renderer.
+///
+/// Limits are 64 constituents, 4,096 mixtures, sixteen common wavelength
+/// samples and 1,048,576 weighted coefficient evaluations, including zero
+/// weights. Invalid input, exceeded limits or unrepresentable coefficients
+/// return an empty vector.
+pub fn prepare_vessel_spectral_absorption_mixtures(
+    wavelengths_nm: &[f64],
+    component_absorption_m2_kg: &[f64],
+    mixture_mass_weights: &[f64],
+) -> Vec<f64> {
+    prepare_density_absorption_mixtures(
+        wavelengths_nm,
+        component_absorption_m2_kg,
+        mixture_mass_weights,
+        AbsorptionMixtureSettings {
+            max_components: 64,
+            max_mixtures: 4_096,
+            max_spectral_evaluations: 1_048_576,
+        },
+    )
+    .unwrap_or_default()
+}
+
 /// Render a captured mass frame with an explicit per-cell spectral material map.
 ///
 /// `cell_materials` has the original mass field's x-fastest layout and length.
@@ -2010,6 +2047,20 @@ mod wasm {
         )
     }
 
+    /// Prepare mass-mixture coefficient rows for the indexed vessel renderer.
+    #[wasm_bindgen]
+    pub fn prepare_vessel_spectral_absorption_mixtures(
+        wavelengths_nm: &[f64],
+        component_absorption_m2_kg: &[f64],
+        mixture_mass_weights: &[f64],
+    ) -> Vec<f64> {
+        super::prepare_vessel_spectral_absorption_mixtures(
+            wavelengths_nm,
+            component_absorption_m2_kg,
+            mixture_mass_weights,
+        )
+    }
+
     /// Spectral SI absorption using explicit original cell material indices.
     #[wasm_bindgen]
     #[allow(clippy::too_many_arguments)]
@@ -2260,6 +2311,86 @@ mod tests {
                 2e-3,
             )
             .is_empty()
+        );
+    }
+
+    /// G1: mass mixtures and spatial coverage retain their different physics.
+    #[test]
+    fn browser_prepared_mass_mixtures_feed_the_original_indexed_renderer() {
+        let wavelengths = [450.0, 650.0];
+        let a = core::f64::consts::LN_2;
+        let components = [0.0, 0.0, 2.0 * a, 4.0 * a];
+        let palette = prepare_vessel_spectral_absorption_mixtures(
+            &wavelengths,
+            &components,
+            &[1.0, 0.0, 0.0, 1.0, 0.5, 0.5],
+        );
+        assert_eq!(palette, vec![0.0, 0.0, 2.0 * a, 4.0 * a, a, 2.0 * a]);
+        assert_eq!(
+            prepare_vessel_spectral_absorption_mixtures(&wavelengths, &components, &[0.0, 2.0]),
+            vec![4.0 * a, 8.0 * a],
+        );
+        let mixed = render_vessel_indexed_spectral_transmittance(
+            &[1.0], &[2], 1, 1, 1, &wavelengths, &palette, 1000.0, 1e-3, 1e-3,
+        );
+        let covered = render_vessel_indexed_spectral_transmittance(
+            &[1.0, 1.0], &[0, 1], 2, 1, 1, &wavelengths, &palette, 1000.0, 1e-3, 1e-3,
+        );
+        assert_eq!(mixed.len(), 2);
+        assert_eq!(covered.len(), 2);
+        for ((mixed, covered), (expected_mixture, expected_coverage)) in mixed
+            .into_iter()
+            .zip(covered)
+            .zip([(0.5, 0.625), (0.25, 0.53125)])
+        {
+            assert!((mixed - expected_mixture).abs() < 8e-15);
+            assert!((covered - expected_coverage).abs() < 8e-15);
+        }
+    }
+
+    /// G0: preparation bounds complete inputs, including unused constituents.
+    #[test]
+    fn browser_mass_mixture_preparation_refuses_invalid_inputs_and_excess_work() {
+        let wavelengths = [450.0, 650.0];
+        for (coefficients, weights) in [
+            (&[0.1, 0.2, 0.3][..], &[1.0, 0.0][..]),
+            (&[0.1, 0.2, 0.3, 0.4][..], &[1.0][..]),
+            (&[0.1, 0.2, 0.3, 0.4][..], &[1.0, -1.0][..]),
+            (&[0.1, 0.2, f64::NAN, 0.4][..], &[1.0, 0.0][..]),
+        ] {
+            assert!(
+                prepare_vessel_spectral_absorption_mixtures(&wavelengths, coefficients, weights)
+                    .is_empty()
+            );
+        }
+        assert!(
+            prepare_vessel_spectral_absorption_mixtures(
+                &[550.0], &[f64::from_bits(1)], &[0.25],
+            )
+            .is_empty()
+        );
+        assert!(
+            prepare_vessel_spectral_absorption_mixtures(
+                &wavelengths, &vec![0.0; 65 * 2], &vec![0.0; 65],
+            )
+            .is_empty()
+        );
+        assert!(
+            prepare_vessel_spectral_absorption_mixtures(
+                &wavelengths, &[0.1, 0.2], &vec![0.0; 4_097],
+            )
+            .is_empty()
+        );
+        let nodes: [f64; 16] = std::array::from_fn(|lane| 400.0 + 20.0 * lane as f64);
+        let components = vec![0.0; 64 * 16];
+        let recipes = vec![0.0; 1_025 * 64];
+        assert_eq!(
+            prepare_vessel_spectral_absorption_mixtures(&nodes, &components, &recipes[..1_024 * 64])
+                .len(),
+            1_024 * 16,
+        );
+        assert!(
+            prepare_vessel_spectral_absorption_mixtures(&nodes, &components, &recipes).is_empty()
         );
     }
 

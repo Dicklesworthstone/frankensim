@@ -19,10 +19,11 @@ pub mod preintegrated;
 /// Exact scalar-transfer transport and physical mass-density opacity.
 pub mod opacity;
 pub use opacity::{
-    DensityAbsorption, DensityAbsorptionSpectrum, IndexedDensityAbsorptionSpectrum,
-    IndexedSpectralAbsorptionImageSettings, MAX_OPACITY_WAVELENGTHS,
-    SpectralAbsorptionImageSettings, SpectralOpacityImage, SpectralOpacitySample,
-    TransferTransportPixel, render_density_spectral_box, render_density_spectral_indexed_box,
+    AbsorptionMixtureSettings, DensityAbsorption, DensityAbsorptionSpectrum,
+    IndexedDensityAbsorptionSpectrum, IndexedSpectralAbsorptionImageSettings,
+    MAX_OPACITY_WAVELENGTHS, SpectralAbsorptionImageSettings, SpectralOpacityImage,
+    SpectralOpacitySample, TransferTransportPixel, prepare_density_absorption_mixtures,
+    render_density_spectral_box, render_density_spectral_indexed_box,
     render_density_spectral_indexed_transmittance_box, render_density_spectral_transmittance_box,
     render_density_transmittance, render_density_transmittance_box, render_density_transport_box,
     render_transfer_transport, render_transfer_transport_box,
@@ -129,6 +130,22 @@ pub enum DvrError {
     InvalidAbsorptionSpectrum,
     /// The material palette or per-cell index map has an invalid shape.
     InvalidAbsorptionMaterialMap,
+    /// Empty, malformed, negative or nonfinite constituent mass weights.
+    InvalidAbsorptionMixtureWeights,
+    /// Preparation would erase a positive contribution or overflow a coefficient.
+    UnrepresentableAbsorptionMixture,
+    /// The component spectra exceed their explicit preparation budget.
+    AbsorptionComponentBudgetExceeded {
+        /// Requested component spectra.
+        requested: usize,
+        /// Admitted component spectra.
+        limit: usize,
+    },
+    /// Storage for the prepared mixture coefficients could not be reserved.
+    AbsorptionMixtureAllocationRefused {
+        /// Requested scalar coefficients in the output palette.
+        coefficients: usize,
+    },
     /// A cell selects a material absent from the absorption palette.
     AbsorptionMaterialIndexOutOfBounds {
         /// Linear x-major field index.
