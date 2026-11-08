@@ -27,6 +27,7 @@ mod refinement;
 pub use refinement::{MaterialDyadicRefinementControls3, MaterialDyadicRefinementInventory3,
     MaterialDyadicRefinementReport3};
 pub use impulse::{
+    MaterialFreeSurfaceMomentum3,
     MaterialFreeSurfaceImpulseControls2, MaterialFreeSurfaceImpulseControls3,
     MaterialFreeSurfaceImpulseError, MaterialFreeSurfaceImpulseReport2,
     MaterialFreeSurfaceImpulseReport3,

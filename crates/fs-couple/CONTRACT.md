@@ -7963,3 +7963,26 @@ storage. Ordinary material circuits retain all physical L/C checks and existing
 bounded graph capacities. Focused regression definitions cover source/phase
 orientation, peak scaling, original branch ordering, placeholder ownership,
 source-domain refusal, inconsistent receipts and cancellation.
+
+## Reciprocal drag on thermal and non-Newtonian liquid owners
+
+Both `liquid_momentum::material::apply_rigid_drag` and
+`apply_heterogeneous_rigid_drag` accept the sealed
+`fs_lbm::material::free_surface::MaterialFreeSurfaceMomentum3` interface.
+The existing exact uniform source and bounded directional source now operate
+directly on frozen material, source-rheology and enthalpy free-surface owners.
+
+The physical unit map and wet-cell stage belong to the same original liquid.
+Actual partial mass reacts against the finite body's original mass and complete
+inertia. Existing actual linear/angular momentum, kinetic work, independent
+dissipation and paired-publication gates are reused without an owner clone or
+duplicate mechanical solver. Accepted viscosity/pressure samples, thermal
+storage, source identity and chronology survive; reported source dissipation
+still requires an explicit thermal allocation.
+
+Integration regressions use previously evolved rheological and thermal/rheology
+owners, compare recoil and dissipation with independent finite-mass solutions,
+retain material and thermal histories, and advance the original flow afterwards.
+A directional endpoint-speed violation occurs after the rigid candidate is
+formed, checking refusal of both owners, retained enthalpy, cancellation and
+exact retry.

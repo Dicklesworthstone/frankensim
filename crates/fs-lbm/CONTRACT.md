@@ -723,3 +723,24 @@ ratio, late thermal, cancellation and retry behavior including positive
 sub-ulp modeled transport. These regressions are authored and parsed/formatted;
 the native integration suite was not compiled or executed in the constrained
 implementation workspace.
+
+## Reciprocal momentum on evolving material liquids
+
+The sealed `MaterialFreeSurfaceMomentum3` interface binds the existing
+`MaterialFreeSurface3`, `MaterialFreeSurfaceRheology3` and
+`MaterialFreeSurfaceEnthalpy3` owners to the same compact native impulse
+transaction. It exposes the original reference-density, length, velocity and
+scenario scaling together with a borrowed native wet-cell stage. Implementations
+delegate to the original physical speed/unit admission and retained liquid
+inventory; composing solvers cannot substitute another material or flow owner.
+
+This instantaneous mechanical source preserves canonical density, actual partial
+mass, held force frame and physical nonequilibrium stress. The thermal and
+rheological owners retain their accepted source samples, caloric/phase/rheology
+history and chronology. No collision, constitutive query, heat deposition,
+geometry update or clock advance is inferred. Dropping a refused stage publishes
+nothing, and no complete material owner or population field is cloned.
+
+The interface enables reciprocal finite-body force/couple and dissipation
+checks in `fs-couple` before native publication, with the same source binding
+for frozen, non-Newtonian and thermally evolving liquids.

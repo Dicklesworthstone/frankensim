@@ -2,7 +2,9 @@
 use super::*;
 use fs_evidence::ValidityDomain;
 use fs_lbm::d3q19::freesurface3::ContactModel3;
-use fs_lbm::material::free_surface::{MaterialFreeSurfaceDomain3, plan_free_surface_from_material};
+use fs_lbm::material::free_surface::{
+    MaterialFreeSurface3, MaterialFreeSurfaceDomain3, plan_free_surface_from_material,
+};
 use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
     PropertyValue, Provenance, QueryPoint, UncertaintyModel,
@@ -224,3 +226,6 @@ fn directional_material_source_retains_original_units_and_partial_liquid_inertia
     assert_eq!(rigid.pose(), original.pose());
     assert!(report.exchange.drag_dissipation_j > 0.0);
 }
+
+#[path = "tests/evolving.rs"]
+mod evolving;

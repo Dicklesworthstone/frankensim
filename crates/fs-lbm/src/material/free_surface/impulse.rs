@@ -22,6 +22,63 @@ pub use wrench::{
     MaterialFreeSurfaceWrenchImpulseReport3,
 };
 
+
+/// Original material-bound liquid that admits a compact reciprocal momentum
+/// transaction without detaching its rheological or thermal history.
+///
+/// Implementations are sealed to the native material owners. The returned
+/// scaling belongs to the same retained flow as the borrowed impulse stencil;
+/// it cannot be independently substituted by a composing solver. The stencil
+/// contains NATIVE lattice masses, velocities and impulses. A physical
+/// coupling must convert with `momentum_scaling()`, check all participants'
+/// SI momentum/work balances, and only then commit the native candidate.
+///
+/// Source rates are held over this instantaneous mechanical operation.
+/// Preserving force-corrected nonequilibrium stress also preserves accepted
+/// viscosity/pressure samples. Thermal storage and chronology do not advance;
+/// positive source dissipation remains an explicit thermal coupling decision.
+/// Dropping the borrowed stage or any refused candidate publishes nothing.
+pub trait MaterialFreeSurfaceMomentum3: sealed::Sealed {
+    /// The original reference-density, length, velocity and scenario scales.
+    fn momentum_scaling(&self) -> MaterialFreeSurfaceScaling<'_>;
+
+    /// Borrow the original wet-cell transaction under its SI scenario limits.
+    /// This adds no collision, geometry change, constitutive query or heat.
+    fn prepare_native_impulse_stencil(
+        &mut self,
+        indices: &[usize],
+        controls: MaterialFreeSurfaceImpulseControls3,
+        gate: &CancelGate,
+    ) -> Result<
+        crate::d3q19::freesurface3::FreeSurfaceImpulseStencil3<'_>,
+        MaterialFreeSurfaceImpulseError,
+    >;
+}
+
+pub(super) mod sealed {
+    pub trait Sealed {}
+}
+
+impl sealed::Sealed for MaterialFreeSurface3<'_> {}
+
+impl MaterialFreeSurfaceMomentum3 for MaterialFreeSurface3<'_> {
+    fn momentum_scaling(&self) -> MaterialFreeSurfaceScaling<'_> {
+        *self.scaling()
+    }
+
+    fn prepare_native_impulse_stencil(
+        &mut self,
+        indices: &[usize],
+        controls: MaterialFreeSurfaceImpulseControls3,
+        gate: &CancelGate,
+    ) -> Result<
+        crate::d3q19::freesurface3::FreeSurfaceImpulseStencil3<'_>,
+        MaterialFreeSurfaceImpulseError,
+    > {
+        MaterialFreeSurface3::prepare_native_impulse_stencil(self, indices, controls, gate)
+    }
+}
+
 /// Explicit physical admission limits for a three-dimensional liquid impulse.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialFreeSurfaceImpulseControls3 {

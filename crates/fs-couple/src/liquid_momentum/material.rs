@@ -1,8 +1,9 @@
-//! Original frozen-material liquid binding for the common reciprocal source.
+//! Reciprocal momentum through original frozen, rheological and thermal liquids.
 
 use super::*;
 use fs_lbm::material::free_surface::{
-    MaterialFreeSurface3, MaterialFreeSurfaceImpulseControls3, MaterialFreeSurfaceImpulseError,
+    MaterialFreeSurfaceImpulseControls3, MaterialFreeSurfaceImpulseError,
+    MaterialFreeSurfaceMomentum3,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -35,9 +36,13 @@ impl From<MaterialFreeSurfaceImpulseError> for MaterialLiquidMomentumError {
 /// bindings and deposits no heat; its physical loss is returned for an explicit
 /// thermal owner. This is a frozen-pose source duration, not elapsed transport
 /// or rigid drift. Both original states remain unchanged on refusal.
+///
+/// Frozen, source-rheology and enthalpy owners all retain their own original
+/// native flow, viscosity/pressure samples, thermal history and chronology.
+/// No flow clone, constitutive re-query or implicit heat allocation is used.
 #[allow(clippy::too_many_arguments)]
-pub fn apply_rigid_drag(
-    liquid: &mut MaterialFreeSurface3<'_>,
+pub fn apply_rigid_drag<L: MaterialFreeSurfaceMomentum3 + ?Sized>(
+    liquid: &mut L,
     body: &mut RigidBodyState,
     properties: MassProperties,
     indices: &[usize],
@@ -49,7 +54,7 @@ pub fn apply_rigid_drag(
 ) -> Result<LiquidRigidDragReport, MaterialLiquidMomentumError> {
     poll(gate)?;
     controls.admit(indices.len())?;
-    let scale = liquid.scaling();
+    let scale = liquid.momentum_scaling();
     let units = LiquidMomentumUnits3 {
         cell_size_m: scale.cell_size_m(),
         velocity_unit_m_s: scale
@@ -85,9 +90,11 @@ pub fn apply_rigid_drag(
 /// liquid. Native mass, physical scales and scenario speed stay source-bound.
 /// The explicit symmetric substep schedule controls composition accuracy;
 /// independent physical dissipation is returned without assigning heating.
+/// Thermal and non-Newtonian owners participate through the same sealed
+/// original-material transaction; accepted history and all clocks survive.
 #[allow(clippy::too_many_arguments)]
-pub fn apply_heterogeneous_rigid_drag(
-    liquid: &mut MaterialFreeSurface3<'_>,
+pub fn apply_heterogeneous_rigid_drag<L: MaterialFreeSurfaceMomentum3 + ?Sized>(
+    liquid: &mut L,
     body: &mut RigidBodyState,
     properties: MassProperties,
     indices: &[usize],
@@ -99,7 +106,7 @@ pub fn apply_heterogeneous_rigid_drag(
 ) -> Result<heterogeneous::HeterogeneousRigidDragReport, MaterialLiquidMomentumError> {
     poll(gate)?;
     controls.admit(indices.len(), laws, source_duration_s)?;
-    let scale = liquid.scaling();
+    let scale = liquid.momentum_scaling();
     let units = LiquidMomentumUnits3 {
         cell_size_m: scale.cell_size_m(),
         velocity_unit_m_s: scale

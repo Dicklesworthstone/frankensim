@@ -3,6 +3,7 @@
 use super::MaterialFreeSurfaceRheology3;
 use crate::material::free_surface::{
     MaterialFreeSurfaceImpulseControls3, MaterialFreeSurfaceImpulseError,
+    MaterialFreeSurfaceMomentum3, MaterialFreeSurfaceScaling,
     MaterialFreeSurfaceImpulseReport3,
     MaterialFreeSurfaceWrenchImpulse3, MaterialFreeSurfaceWrenchImpulseControls3,
     MaterialFreeSurfaceWrenchImpulseReport3,
@@ -47,5 +48,29 @@ impl MaterialFreeSurfaceRheology3<'_, '_> {
     ) -> Result<MaterialFreeSurfaceImpulseReport3, MaterialFreeSurfaceImpulseError> {
         self.flow
             .apply_impulse_density(impulse_n_s_m3, controls, gate)
+    }
+}
+
+impl crate::material::free_surface::impulse::sealed::Sealed
+    for MaterialFreeSurfaceRheology3<'_, '_>
+{
+}
+
+impl MaterialFreeSurfaceMomentum3 for MaterialFreeSurfaceRheology3<'_, '_> {
+    fn momentum_scaling(&self) -> MaterialFreeSurfaceScaling<'_> {
+        *self.flow.scaling()
+    }
+
+    fn prepare_native_impulse_stencil(
+        &mut self,
+        indices: &[usize],
+        controls: MaterialFreeSurfaceImpulseControls3,
+        gate: &CancelGate,
+    ) -> Result<
+        crate::d3q19::freesurface3::FreeSurfaceImpulseStencil3<'_>,
+        MaterialFreeSurfaceImpulseError,
+    > {
+        self.flow
+            .prepare_native_impulse_stencil(indices, controls, gate)
     }
 }
