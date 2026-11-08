@@ -2584,3 +2584,50 @@ separation exponential, dynamic physical-span couples and refused updates.
 `DrivenPropulsion::step_power_limited` optionally solves source torque against the accepted endpoint-average relative output speed. It reuses the original two aerodynamic stages and native `geared::step_held`; only the scalar source/mechanical closure iterates. Explicit `DriveSolveControls` bound trials, speed mismatch and energy error. Every accepted source/loss work agrees with its conjugate mean-power contraction within that allowance, and engine work is bounded by the midpoint command's rated power times duration. Failed trials withdraw no reserve; the original empty-source and depletion-refusal rules remain.
 
 This bounds interval work, not unresolved instantaneous peaks, arbitrary-step stability, root uniqueness or exhaustion-event timing. The original staged `step` retains its declared approximation. The geared-drive regressions cover real-motion power limits, bearing heat, coordinate invariance, the torque/power knee and atomic refusal.
+
+## Conditioned Mann turbulence in connected wake evolution
+
+`atmosphere::mann_wake::MannWakeWind` advances the original fixed-step Mann
+source together with native `fs-vpm` connected near-only or hybrid near/far
+wakes. Direct/tree midpoint and adaptive RK3(2) paths retain their original
+source assembly, topology, circulation, core law, image treatment and error
+reports. One exact conditional `MannOuBridge` spans the complete shedding
+interval. Every vertex at a stage shares its frame; rejected or reordered
+stages revisit the same Gaussian history, with no amplitude interpolation or
+independent per-vertex forcing.
+
+The source dt must equal `1 / shed_hz`, and the owner binds the expected wake
+tick while retaining the source's original physical time origin. Native elapsed
+stage times map to the same represented physical endpoints used by the bridge;
+an interior stage that rounds onto an endpoint refuses. Endpoints are prepared
+before wake evolution. After the native owner performs its final cancellation
+check and publishes the wake, only an infallible wind-endpoint swap and tick
+update follow. Refusal therefore publishes neither a partial wake nor a new
+accepted wind. Checkpoint/resume retains the source, bridge identity, physical
+observation and expected wake tick.
+
+All geometry and tensor components use one right-handed z-up Mann/VPM frame.
+An optional original log-law mean uses the declared wall as height origin.
+Wall-blocked incident turbulence requires the identical native image plane and
+zero normal uniform ambient flow; selecting the log-law mean also requires a
+zero native uniform mean. The accepted field query retains analytic gradients.
+Flight-world coordinate conversion remains explicit.
+
+Additional work budgets count every field query and conditional normal draw,
+including rejected trials. Consecutive vertices at one stage reuse the frame.
+The byte budget admits both retained source endpoints and one transient bridge
+and frame; per-stage and per-vertex sampling allocates no numerical storage.
+Original native wake storage/work budgets remain independent. The endpoint and
+bridge each evaluate the same original endpoint innovations, and both costs
+are counted. This couples prescribed finite-band atmospheric turbulence to
+actual wake trajectories; it introduces no wake SGS model or viscous tube
+strain law. OU paths are continuous but not differentiable, so smooth-forcing
+formal RK order is not claimed.
+
+The focused source regressions exercise native midpoint/adaptive callbacks,
+rejected-stage history, hybrid continuation, original bridge equivalence,
+changed trajectories versus frozen forcing, cancellation at final publication,
+clock/storage/work refusals and matching mean/wall semantics. These six newly
+added regression groups passed pinned parser checks and bounded source review
+but have not compiled or executed in this environment: the complete native
+dependency closure and build storage remain unavailable.
