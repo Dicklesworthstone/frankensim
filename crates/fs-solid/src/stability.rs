@@ -7,7 +7,10 @@
 //! symmetric operator Ã = L⁻¹(−K_G)L⁻ᵀ (K = LLᵀ): the largest Ritz
 //! value θ gives the critical load λ = 1/θ. The dense factorization is
 //! fixture-gated (the cond-probe discipline); production-scale shifted
-//! iterations are a recorded no-claim.
+//! iterations are a recorded no-claim. Independently scaled matrices preserve
+//! physical load factors; transformed and original-pencil residuals gate every
+//! result. Small pencils that cannot fit a LOBPCG block use fs-la's native dense
+//! symmetric eigensolver within an explicit 64-DOF bound.
 //!
 //! Eigenvalue derivatives ship with the pencil: the DIRECT derivative
 //! `dλ/ds = φᵀ(∂K/∂s)φ / (φᵀ(−K_G)φ)` at frozen prebuckling stress,
@@ -22,7 +25,7 @@
 use crate::SolidError;
 use crate::linear::{Formulation, LinearProblem};
 use crate::mesh2::{quad_points, shapes_at};
-use fs_la::eigen::{LobpcgState, lobpcg_run};
+use fs_la::eigen::{EigenPair, LobpcgState, householder_eigh, lobpcg_run};
 use fs_la::factor::cholesky;
 use fs_sparse::{Coo, Csr};
 
@@ -34,6 +37,8 @@ pub struct BucklingResult {
     pub loads: Vec<f64>,
     /// Modes (free-DOF vectors, `−K_G`-normalized), one per load.
     pub modes: Vec<Vec<f64>>,
+    /// Recomputed relative original-pencil residuals, each <= 1e-8.
+    pub relative_residuals: Vec<f64>,
     /// Free-DOF map: `dof_map[full_dof] = Some(free_index)`.
     pub dof_map: Vec<Option<usize>>,
     /// LOBPCG iterations spent.
@@ -166,17 +171,24 @@ fn reference_strain(conn: &[usize], grads: &[[f64; 2]], u: &[[f64; 2]]) -> [f64;
     eps
 }
 
-/// Solve the buckling pencil `(K + λ K_G) φ = 0` for the `nev` lowest
-/// positive critical loads, matrix-free LOBPCG on the reduced
-/// operator.
+/// Solve `(K + lambda K_G) phi = 0` for the lowest positive critical loads.
+///
+/// Independent matrix scaling removes physical units before Cholesky/LOBPCG.
+/// Both transformed and original-pencil relative residuals must be <= 1e-8;
+/// exhausted iterations refuse instead of publishing an unconverged prediction.
+/// No absolute cutoff on the inverse load can erase a small reference load.
+///
+/// If the requested block cannot fit LOBPCG's search space, pencils with at
+/// most 64 free DOFs use the native dense symmetric eigensolver. The Cholesky
+/// reduction is bounded to 4096 free DOFs. This is not a scalable sparse
+/// buckling algorithm, a nonlinear stability limit or a convergence certificate.
 ///
 /// # Errors
-/// [`SolidError::SolveFailed`] if the stiffness is not SPD (fixture
-/// misconfiguration) — carried as a structured refusal.
-///
-/// # Panics
-/// On fixture-gate violation (free DOFs > 4096; the dense Cholesky
-/// reduction is for conformance-scale systems).
+/// Invalid, nonfinite, nonsymmetric or oversized pencils and invalid DOF maps
+/// return `InvalidInput`. Non-SPD stiffness or unconverged eigenpairs return
+/// `SolveFailed`. Near-zero unresolved eigenvalues and unrepresentable loads
+/// or work-normalized modes refuse rather than being silently discarded.
+#[allow(clippy::too_many_lines)]
 pub fn buckling_loads(
     k: &Csr,
     kg: &Csr,
@@ -184,80 +196,270 @@ pub fn buckling_loads(
     nev: usize,
     steps: usize,
 ) -> Result<BucklingResult, SolidError> {
+    let invalid = |what: &str| SolidError::InvalidInput { what: what.into() };
     let n = k.nrows();
-    assert!(
-        n <= 4096,
-        "dense pencil reduction is fixture-gated (n = {n})"
-    );
-    let chol = cholesky(&k.to_dense(), n).map_err(|_| SolidError::SolveFailed {
+    if n == 0 || n > 4096 || k.ncols() != n || kg.nrows() != n || kg.ncols() != n {
+        return Err(invalid(
+            "buckling requires matching nonempty square pencils with at most 4096 DOFs",
+        ));
+    }
+    if nev == 0 || steps == 0 || !dof_map.len().is_multiple_of(2) {
+        return Err(invalid(
+            "buckling requires positive mode/iteration allowances and a planar DOF map",
+        ));
+    }
+    let mut seen = vec![false; n];
+    for &free in dof_map.iter().flatten() {
+        if free >= n || seen[free] {
+            return Err(invalid(
+                "buckling DOF map must cover each free DOF exactly once",
+            ));
+        }
+        seen[free] = true;
+    }
+    if seen.contains(&false) {
+        return Err(invalid("buckling DOF map is missing a free DOF"));
+    }
+    let count = nev.min(n);
+    let mut iterative = LobpcgState::try_new(n, count);
+    if iterative.is_none() && n > 64 {
+        return Err(invalid(
+            "requested buckling block exceeds the bounded eigensolver workspace",
+        ));
+    }
+    let (k_scale, scaled_k) = scaled_symmetric(k)?;
+    let (g_scale, scaled_g) = scaled_symmetric(kg)?;
+    if k_scale == 0.0 {
+        return Err(SolidError::SolveFailed {
+            iters: 0,
+            rel_residual: f64::INFINITY,
+        });
+    }
+    let chol = cholesky(&scaled_k.to_dense(), n).map_err(|_| SolidError::SolveFailed {
         iters: 0,
         rel_residual: f64::INFINITY,
     })?;
-    // Lower-triangular access for the two half-solves.
-    let l_at = |i: usize, j: usize| chol.l(i, j);
+    if g_scale == 0.0 {
+        return Ok(BucklingResult {
+            loads: Vec::new(),
+            modes: Vec::new(),
+            relative_residuals: Vec::new(),
+            dof_map: dof_map.to_vec(),
+            iters: 0,
+        });
+    }
     let fwd = |b: &mut [f64]| {
         for i in 0..n {
             let mut v = b[i];
-            for (kk, bv) in b.iter().enumerate().take(i) {
-                v -= l_at(i, kk) * bv;
+            for (j, bv) in b.iter().enumerate().take(i) {
+                v -= chol.l(i, j) * bv;
             }
-            b[i] = v / l_at(i, i);
+            b[i] = v / chol.l(i, i);
         }
     };
     let bwd = |b: &mut [f64]| {
         for i in (0..n).rev() {
             let mut v = b[i];
-            for (kk, bv) in b.iter().enumerate().skip(i + 1) {
-                v -= l_at(kk, i) * bv;
+            for (j, bv) in b.iter().enumerate().skip(i + 1) {
+                v -= chol.l(j, i) * bv;
             }
-            b[i] = v / l_at(i, i);
+            b[i] = v / chol.l(i, i);
         }
     };
-    // Ã v = L⁻¹ (−K_G) L⁻ᵀ v, symmetric by construction.
-    let op = |v: &[f64], out: &mut [f64]| {
-        let mut t = v.to_vec();
-        bwd(&mut t);
-        let mut s = vec![0.0f64; n];
-        kg.spmv(&t, &mut s);
-        for x in &mut s {
-            *x = -*x;
+    // Ahat = Lhat^-1 (-Ghat) Lhat^-T. Reuse the operator's two work vectors.
+    let scratch = std::cell::RefCell::new((vec![0.0; n], vec![0.0; n]));
+    let op = |x: &[f64], out: &mut [f64]| {
+        let mut scratch = scratch.borrow_mut();
+        let (t, s) = &mut *scratch;
+        t.copy_from_slice(x);
+        bwd(t);
+        scaled_g.spmv(t, s);
+        for value in s.iter_mut() {
+            *value = -*value;
         }
-        fwd(&mut s);
-        out.copy_from_slice(&s);
+        fwd(s);
+        out.copy_from_slice(s);
     };
-    let ident = |r: &[f64], out: &mut [f64]| out.copy_from_slice(r);
-    let mut state = LobpcgState::new(n, nev.min(n));
-    let pairs = lobpcg_run(&op, &mut state, steps, true, &ident);
+    let (pairs, iters) = if let Some(state) = &mut iterative {
+        let pairs = lobpcg_run(&op, state, steps, true, &|r, out| out.copy_from_slice(r));
+        (pairs, state.iters)
+    } else {
+        (small_buckling_pairs(n, count, &op)?, 0)
+    };
     let mut loads = Vec::new();
     let mut modes = Vec::new();
-    for p in &pairs {
-        if p.value <= 1e-12 {
-            continue; // not a compressive (positive-load) mode
+    let mut relative_residuals = Vec::new();
+    let mut k_phi = vec![0.0; n];
+    let mut g_phi = vec![0.0; n];
+    for pair in &pairs {
+        let transformed = if pair.value == 0.0 && pair.residual == 0.0 {
+            0.0
+        } else {
+            pair.residual / pair.value.abs()
+        };
+        if !pair.value.is_finite()
+            || !transformed.is_finite()
+            || transformed > 1e-8
+            || pair.vector.iter().any(|v| !v.is_finite())
+        {
+            return Err(SolidError::SolveFailed {
+                iters,
+                rel_residual: transformed,
+            });
         }
-        let lam = 1.0 / p.value;
-        // φ = L⁻ᵀ x, normalized so φᵀ(−K_G)φ = 1.
-        let mut phi = p.vector.clone();
+        if pair.value <= 0.0 {
+            continue;
+        }
+        let mut load = (k_scale / g_scale) / pair.value;
+        if !load.is_finite() || load <= 0.0 {
+            load = (k_scale / pair.value) / g_scale;
+        }
+        if !load.is_finite() || load <= 0.0 {
+            return Err(invalid(
+                "critical buckling load factor is not representable",
+            ));
+        }
+        let mut phi = pair.vector.clone();
         bwd(&mut phi);
-        let mut kg_phi = vec![0.0f64; n];
-        kg.spmv(&phi, &mut kg_phi);
-        let m: f64 = -phi.iter().zip(&kg_phi).map(|(a, b)| a * b).sum::<f64>();
-        if m > 0.0 {
-            let s = 1.0 / m.sqrt();
-            for x in &mut phi {
-                *x *= s;
-            }
+        // Remove arbitrary amplitude before evaluating work and residuals.
+        let amplitude = phi.iter().fold(0.0_f64, |scale, v| scale.max(v.abs()));
+        if !amplitude.is_finite() || amplitude <= 0.0 {
+            return Err(invalid("buckling mode is not representable"));
         }
-        loads.push(lam);
+        for value in &mut phi {
+            *value /= amplitude;
+        }
+        scaled_k.spmv(&phi, &mut k_phi);
+        scaled_g.spmv(&phi, &mut g_phi);
+        // ||theta Khat phi + Ghat phi|| / (|theta| ||Khat phi|| + ||Ghat phi||),
+        // dividing out the larger scalar before arithmetic, without dimensional floors.
+        let (ks, gs) = if pair.value <= 1.0 {
+            (pair.value, 1.0)
+        } else {
+            (1.0, 1.0 / pair.value)
+        };
+        let (mut residual, mut knorm, mut gnorm) = (0.0_f64, 0.0_f64, 0.0_f64);
+        for i in 0..n {
+            residual = residual.hypot(ks.mul_add(k_phi[i], gs * g_phi[i]));
+            knorm = knorm.hypot(k_phi[i]);
+            gnorm = gnorm.hypot(g_phi[i]);
+        }
+        let relative = residual / (ks * knorm + gs * gnorm);
+        if !relative.is_finite() || relative > 1e-8 {
+            return Err(SolidError::SolveFailed {
+                iters,
+                rel_residual: relative,
+            });
+        }
+        let work = -phi.iter().zip(&g_phi).map(|(a, b)| a * b).sum::<f64>();
+        // Avoid forming work*g_scale: that can overflow even for finite modes.
+        let normalization = work.sqrt() * g_scale.sqrt();
+        if !normalization.is_finite() || normalization <= 0.0 {
+            return Err(invalid(
+                "buckling mode has no representable positive geometric work",
+            ));
+        }
+        for value in &mut phi {
+            *value /= normalization;
+        }
+        if phi.iter().any(|v| !v.is_finite()) {
+            return Err(invalid(
+                "work-normalized buckling mode is not representable",
+            ));
+        }
+        loads.push(load);
         modes.push(phi);
+        relative_residuals.push(relative);
     }
     let mut order: Vec<usize> = (0..loads.len()).collect();
-    order.sort_by(|&a, &b| loads[a].partial_cmp(&loads[b]).expect("finite loads"));
+    order.sort_by(|&a, &b| loads[a].total_cmp(&loads[b]));
     Ok(BucklingResult {
         loads: order.iter().map(|&i| loads[i]).collect(),
         modes: order.iter().map(|&i| modes[i].clone()).collect(),
+        relative_residuals: order.iter().map(|&i| relative_residuals[i]).collect(),
         dof_map: dof_map.to_vec(),
-        iters: state.iters,
+        iters,
     })
+}
+
+/// Remove physical units without changing sparsity or hiding asymmetry.
+fn scaled_symmetric(matrix: &Csr) -> Result<(f64, Csr), SolidError> {
+    let mut scale = 0.0_f64;
+    for row in 0..matrix.nrows() {
+        for &value in matrix.row(row).1 {
+            if !value.is_finite() {
+                return Err(SolidError::InvalidInput {
+                    what: "buckling matrices must be finite".into(),
+                });
+            }
+            scale = scale.max(value.abs());
+        }
+    }
+    let mut scaled = matrix.clone();
+    if scale > 0.0 {
+        for row in 0..matrix.nrows() {
+            let (columns, values) = matrix.row(row);
+            for (&column, &value) in columns.iter().zip(values) {
+                if (value / scale - matrix.get(column, row) / scale).abs() > 64.0 * f64::EPSILON {
+                    return Err(SolidError::InvalidInput {
+                        what: "buckling matrices must be symmetric".into(),
+                    });
+                }
+            }
+            for value in scaled.row_values_mut(row) {
+                *value /= scale;
+            }
+        }
+    }
+    Ok((scale, scaled))
+}
+
+/// Exact native dense reduction for small pencils that cannot fit a 3b search space.
+fn small_buckling_pairs(
+    n: usize,
+    count: usize,
+    op: &impl Fn(&[f64], &mut [f64]),
+) -> Result<Vec<EigenPair>, SolidError> {
+    let mut matrix = vec![0.0; n * n];
+    let mut unit = vec![0.0; n];
+    let mut column = vec![0.0; n];
+    for j in 0..n {
+        unit[j] = 1.0;
+        op(&unit, &mut column);
+        unit[j] = 0.0;
+        for i in 0..n {
+            matrix[i * n + j] = column[i];
+        }
+    }
+    if matrix.iter().any(|v| !v.is_finite()) {
+        return Err(SolidError::InvalidInput {
+            what: "buckling reduction is not representable".into(),
+        });
+    }
+    for i in 0..n {
+        for j in 0..i {
+            let mean = f64::midpoint(matrix[i * n + j], matrix[j * n + i]);
+            matrix[i * n + j] = mean;
+            matrix[j * n + i] = mean;
+        }
+    }
+    let (values, vectors) = householder_eigh(&matrix, n);
+    Ok((0..n)
+        .rev()
+        .take(count)
+        .map(|j| {
+            let vector: Vec<_> = (0..n).map(|i| vectors[i * n + j]).collect();
+            op(&vector, &mut column);
+            let residual = (0..n).fold(0.0_f64, |norm, i| {
+                norm.hypot((-values[j]).mul_add(vector[i], column[i]))
+            });
+            EigenPair {
+                value: values[j],
+                vector,
+                residual,
+            }
+        })
+        .collect())
 }
 
 /// DIRECT pencil eigenvalue derivative at frozen prebuckling stress:

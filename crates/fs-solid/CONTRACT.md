@@ -5318,7 +5318,15 @@ cancellation, budget and late-jump rollback.
   geometric stiffness K_G(σ₀) from the linear prebuckling state),
   `buckling_loads` — the pencil `(K + λK_G)φ = 0` solved MATRIX-FREE
   by fs-la LOBPCG on the Cholesky-reduced operator L⁻¹(−K_G)L⁻ᵀ
-  (dense reduction fixture-gated at n ≤ 4096), modes −K_G-normalized;
+  (dense reduction fixture-gated at n ≤ 4096), modes −K_G-normalized.
+  Both matrices are independently scaled before reduction; positive inverse
+  loads have no dimensioned absolute cutoff. Transformed and original-pencil
+  relative residuals must pass 1e-8 before publication, with original residuals
+  retained in the result. Exhausted iterations refuse. Small pencils (n ≤ 64)
+  whose requested block cannot fit LOBPCG use the native dense symmetric solver;
+  invalid shapes, maps, nonfinite coefficients and asymmetry refuse explicitly.
+  `tests/buckling_scaling.rs` covers load/unit invariance, geometric work, small
+  and full blocks, known noncommuting pencils and convergence refusal;
   `lambda_indicator` (Richardson) + `evidence_row`;
   `eigenvalue_derivative` (direct pencil derivative at frozen
   prebuckling stress), `group_stiffness` (per-group Young's-scale
