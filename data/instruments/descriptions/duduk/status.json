@@ -3,7 +3,7 @@
   "family": "duduk",
   "title": "Duduk",
   "reference_instrument": null,
-  "summary": "No render yet and no real recording to compare with: the University of Iowa library has no duduk. The best documented specimen (Maugeais and Dalmont 2024) gives hole positions, the bore, and reed opening, stiffness, resonance and closing pressure, but not the hole diameters or undercut.",
+  "summary": "No render yet and no recording to grade against: the University of Iowa library has no duduk, and the screened duduk clips are listening references only (below). The best documented specimen (Maugeais and Dalmont 2024) gives hole positions, the bore, and reed opening, stiffness, resonance and closing pressure, but not the hole diameters or undercut. The paper (Maugeais and Dalmont 2024, 'What makes the duduk special', Acta Acustica 8, article 60, open access) was not read in the hunt of 11-08: the publisher refused the automated fetch, so the statement that the hole diameters are unpublished is this card's claim, not checked against the text.",
   "physics_present": [
     "generic fs-duct conical and cylindrical segments, tone-hole side branches and a flanged bell load, the lumped single-reed owner and the physical baffled outlet receiver already run for the clarinet; none has been given this instrument's geometry"
   ],
@@ -12,7 +12,7 @@
     "which two holes are on the back",
     "reed volume and channel interior",
     "a double-reed valve driving this bore",
-    "a real-versus-ours comparison: no duduk reference recording is in the library"
+    "a real-versus-model comparison: the screened library holds 32 valid duduk clips (of 65 screened; five YouTube videos, among them sample-library demos), under the YouTube standard licence with all rights reserved, so they are listening references only: not committed, not posted, and not a grade target on the site; the 12 clips cut from three Wikimedia Commons files (CC BY-SA 4.0 and CC BY 3.0) did not pass the screen"
   ],
   "blocked": "Hole diameters are unpublished; rendering would mean inventing them. Needs the corresponding author's data (stated available on request) or an owner measurement; and a separate reference recording would be needed for any comparison.",
   "beads": [
