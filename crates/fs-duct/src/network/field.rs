@@ -20,6 +20,11 @@ mod material_tests;
 mod welch;
 pub use welch::NetworkFieldBinStatistics;
 
+mod absorption;
+pub use absorption::{
+    NetworkCylinderAbsorption, NetworkCylinderAbsorptionCell, PreparedNetworkCylinderAbsorption,
+};
+
 mod spectrum;
 pub use spectrum::{
     MAX_FIELD_FREQUENCIES, MAX_FIELD_SPECTRAL_LINES, NetworkFieldExposureLimits,
@@ -141,6 +146,10 @@ pub struct PreparedNetworkFields {
     ports: PreparedNetworkSources,
     source_clock: String,
     locations: Vec<NetworkFieldLocation>,
+    // Original constitutive inputs and local cylinder coordinates, bounded by
+    // maximum_probes. No material query or graph reconstruction during heat use.
+    cylinders: Vec<Option<absorption::CylinderSection>>,
+    loss: LossModel,
     pressure: Vec<C64>,
     flow: Vec<C64>,
 }
@@ -229,6 +238,19 @@ impl PreparedNetworkFields {
             net,
             request,
             |_edge| (acoustic.density_kg_m3(), acoustic.sound_speed_m_s()),
+            |_edge| match state {
+                MaterialSnapshot::Acoustic(_) => None,
+                MaterialSnapshot::Thermoviscous(state) => {
+                    let transport = state.transport();
+                    Some(crate::WallDiffusionInputs {
+                        density: acoustic.density_kg_m3(),
+                        sound_speed: acoustic.sound_speed_m_s(),
+                        dynamic_viscosity: transport.dynamic_viscosity_pa_s(),
+                        gamma: state.heat_capacity_ratio(),
+                        prandtl: transport.prandtl(),
+                    })
+                }
+            },
             |selected, cancelled| {
                 super::fluid::prepare_spatial_snapshot(
                     net,
@@ -279,6 +301,7 @@ impl PreparedNetworkFields {
                 let gas = gas_at(edge);
                 (gas.density, gas.sound_speed)
             },
+            |edge| Some(crate::WallDiffusionInputs::from_gas(gas_at(edge))),
             |selected, _cancelled| {
                 super::loaded::prepare_spatial_transfers(
                     net,
@@ -321,6 +344,7 @@ impl PreparedNetworkFields {
         net: &DuctNetwork,
         request: &NetworkFieldRequest<'_>,
         medium: impl Fn(&NetworkEdge) -> (f64, f64),
+        diffusion: impl Fn(&NetworkEdge) -> Option<crate::WallDiffusionInputs>,
         mut spatial: impl FnMut(
             &[usize],
             &mut dyn FnMut() -> bool,
@@ -363,6 +387,7 @@ impl PreparedNetworkFields {
         edges.sort_unstable_by(|a, b| a.id.cmp(&b.id));
         let mut selected = Vec::new();
         let mut locations = Vec::with_capacity(request.probes.len());
+        let mut cylinders = Vec::with_capacity(request.probes.len());
         let mut probe_edges = Vec::with_capacity(request.probes.len());
         for (index, probe) in request.probes.iter().enumerate() {
             poll(&mut cancelled, index)?;
@@ -372,6 +397,7 @@ impl PreparedNetworkFields {
             let edge = edges[edge_index];
             let (density, sound_speed) = medium(edge);
             locations.push(resolve_location(probe, edge, density, sound_speed)?);
+            cylinders.push(absorption::cylinder_section(probe, edge, diffusion(edge)));
             probe_edges.push(edge_index);
             selected.push(edge_index);
         }
@@ -576,6 +602,8 @@ impl PreparedNetworkFields {
             ports,
             source_clock: request.source_clock.to_owned(),
             locations,
+            cylinders,
+            loss: request.loss,
             pressure,
             flow,
         })

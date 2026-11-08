@@ -3574,6 +3574,44 @@ standing-wave refinement, original lossy material panels, coherent finite-window
 observations, exact endpoint cuts, coordinate placement and admission limits.
 They are synthetic numerical/model checks, not experimental duct validation.
 
+### Positive cycle-mean heat in original network cylinders
+
+`PreparedNetworkFields::prepare_cylinder_absorption` binds each cell to two
+existing probes in the same authored cylinder, including its exact inlet/outlet
+planes. It retains original local offsets, original gas or material diffusion
+coefficients, and the same source coordinates, clock and solved graph. Probe
+addition does not remesh propagation. Cells are bounded by both the caller's
+maximum and the 1024-probe hard cap; constant-size per-cell operators and
+per-probe material snapshots obey those bounds. Overlapping cells are permitted
+but are not silently summed or deposited.
+
+The original Bessel telegraph law supplies the positive series/shunt weights
+before square roots. For peak phasors in exp(-i omega t),
+`-P' = 0.5 [Re(Z_series)|U|² + Re(Y_shunt)|p|²]`.
+Exact positive integrals retain both coherent waves and the cubic small-cell
+loss at pressure/flow nodes. Waves are anchored at opposite cell faces; neither
+growing reverse propagation nor subtraction of nearly equal face powers is
+used. The shared positive wave-integral kernel also serves original porous
+layers without changing their arithmetic. Prepared source and covariance-factor
+queries contract complete fields before the loss square. The mean and factors
+use the original source units; distinct factors have zero mean, unit covariance
+and no mutual correlation. No Gaussian or proper-process assumption is needed
+for this cycle mean. Separate viscous, thermal and total watts are returned.
+
+Lossless cells and equal endpoints give exact zero; Cp=Cv gives an exact zero
+thermal channel. WideTube's first-order wave correction does not supply this
+independently sourced channel split and refuses. Cones, profiles, holes,
+junctions, molecular attenuation and exterior radiation require their own
+physical volume-loss laws. This owner supplies harmonic frozen-background
+absorption, not finite-window reactive flux, transient storage, temperature
+evolution or a wall/fluid heat partition.
+
+Focused regressions compare separate watts against independent volume
+quadrature and cycle-mean boundary work, retain cell partitions and destructive
+coherence, resolve positive cubic node heat and a next-representable cell whose
+loss is below surface-work precision, preserve original liquid transport with
+Cp=Cv, and exercise geometry, source, budget and cancellation admissions.
+
 ### Native broadband interior-field interference
 
 `network::field::PreparedNetworkFieldSpectrum` prepares strictly increasing

@@ -700,7 +700,7 @@ fn helmholtz_wave_from_telegraph(z_series: C64, y_shunt: C64) -> (C64, C64) {
 // ideal-gas EOS. `gamma` means the actual Cp/Cv ratio. Legacy gas callers
 // retain their original checked Pr arithmetic; generic fluids use the shared
 // material snapshot. Neither route constructs a gas from liquid coefficients.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct WallDiffusionInputs {
     density: f64,
     sound_speed: f64,

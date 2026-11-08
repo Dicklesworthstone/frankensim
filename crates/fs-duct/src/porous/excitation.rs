@@ -9,6 +9,7 @@
 
 use super::{DuctError, PorousLayer, PorousLayerPower, bad, finite};
 use fs_math::{c64::C64, det};
+use crate::compose::pressure_wave_integral_weights as integral_weights;
 
 /// Cycle-averaged interior fields and local irreversible acoustic losses.
 /// Pressure and velocity are peak phasors; positive flow points left to right.
@@ -233,54 +234,6 @@ fn travel(k: C64, distance: f64) -> Result<C64, DuctError> {
     }
     let (sin, cos) = det::sin_cos(angle);
     Ok(C64::new(cos, sin).scale(attenuation))
-}
-
-// For forward amplitude F at the cell's left and backward B at its right,
-// integral |p|² = (G+H)/2 |F+B|² + (G-H)/2 |F-B|², where
-// G=(1-exp(-2 alpha d))/(2 alpha), H=exp(-alpha d) d sinc(Re(k)d).
-// The velocity integral swaps the two nonnegative weights and divides by |Z|².
-fn integral_weights(k: C64, length: f64) -> Result<(f64, f64), DuctError> {
-    let a = k.im * length;
-    let b = k.re * length;
-    let decay = det::exp(-a);
-    let g = if a == 0.0 {
-        length
-    } else if a < 0.5 {
-        length * (-det::expm1(-2.0 * a) / (2.0 * a))
-    } else {
-        (-0.5 * det::expm1(-2.0 * a)) / k.im
-    };
-    let minus = if a <= 0.125 && b <= 0.125 {
-        // exp(-a) [sinh(a)/a - sin(b)/b], without subtracting two
-        // nearly equal units. Terms through x^10 suffice in this small domain.
-        let aa = a * a;
-        let bb = b * b;
-        let hyperbolic = aa
-            * (1.0 / 6.0
-                + aa * (1.0 / 120.0
-                    + aa * (1.0 / 5040.0 + aa * (1.0 / 362880.0 + aa / 39916800.0))));
-        let circular = bb
-            * (1.0 / 6.0
-                - bb * (1.0 / 120.0
-                    - bb * (1.0 / 5040.0 - bb * (1.0 / 362880.0 - bb / 39916800.0))));
-        length * (0.5 * decay * (hyperbolic + circular))
-    } else {
-        let h = if decay == 0.0 {
-            0.0
-        } else if b == 0.0 {
-            length * decay
-        } else if !b.is_finite() {
-            return Err(bad("porous cell interference phase is unrepresentable"));
-        } else {
-            (length * (det::sin(b) / b)) * decay
-        };
-        0.5 * g - 0.5 * h
-    };
-    let plus = g - minus;
-    if [plus, minus].into_iter().any(|v| !v.is_finite() || v < 0.0) {
-        return Err(bad("porous cell loss integral is unrepresentable"));
-    }
-    Ok((plus, minus))
 }
 
 #[cfg(test)]
