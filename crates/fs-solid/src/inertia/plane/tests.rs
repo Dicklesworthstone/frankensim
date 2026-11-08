@@ -49,6 +49,31 @@ fn warped_quad() -> Mesh2 {
 }
 
 #[test]
+fn equal_element_thickness_preserves_every_uniform_mass_bit() {
+    with_cx(false, |cx| {
+        for mesh in [triangle(), warped_quad()] {
+            let uniform = ReferenceMass::from_plane(&mesh, 0.2, &[7.0], 1 << 20, cx).unwrap();
+            let layers =
+                ReferenceMass::from_plane_layers(&mesh, &[0.2], &[7.0], 1 << 20, cx).unwrap();
+            assert_eq!(
+                uniform.reference_mass_kg().to_bits(),
+                layers.reference_mass_kg().to_bits()
+            );
+            for row in 0..uniform.ndofs() {
+                for col in 0..uniform.ndofs() {
+                    assert_eq!(
+                        uniform.matrix().get(row, col).to_bits(),
+                        layers.matrix().get(row, col).to_bits()
+                    );
+                }
+            }
+            assert!(ReferenceMass::from_plane_layers(&mesh, &[], &[7.0], 1 << 20, cx).is_err());
+            assert!(ReferenceMass::from_plane_layers(&mesh, &[-0.2], &[7.0], 1 << 20, cx).is_err());
+        }
+    });
+}
+
+#[test]
 fn p1_mass_matches_exact_degree_two_coefficients_and_retains_nonrigid_inertia() {
     with_cx(false, |cx| {
         let mesh = triangle();

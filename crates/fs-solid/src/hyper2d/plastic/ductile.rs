@@ -39,6 +39,9 @@ use crate::mesh2::{Mesh2, checked_reference_element};
 use crate::plastic3::increment::{self, IncrementControls, IncrementOperator};
 use crate::plastic3::{IncrementRecord, IncrementSettings, SmallStrainTetError};
 
+/// Reference-mass dynamics on the same progressive finite sheet solve.
+pub mod dynamics;
+
 type Motion = (Vec<[f64; 2]>, InertialEnergy);
 
 /// Native geometry/solver, original point constitutive, or physical work refusal.

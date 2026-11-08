@@ -973,9 +973,8 @@ fn assemble_sheet(
         }
     }
     if let Some(inertia) = inertia {
-        inertia
-            .add_force(u, &mut force, cx)
-            .map_err(SmallStrainTetError::from)?;
+        // The shared increment owner adds inertia to residual forces and
+        // reactions. This operator supplies only its tangent contribution.
         if let Some(matrix) = &mut matrix {
             inertia
                 .add_tangent(matrix, cx)

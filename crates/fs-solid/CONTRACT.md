@@ -1,5 +1,44 @@
 # fs-solid CONTRACT
 
+## Progressive finite ductile sheet motion
+
+`hyper2d::plastic::ductile::dynamics::FiniteDuctileSheetMotion` advances the
+original P1/Q1 progressive ductile sheet through the native backward-Euler
+momentum owner. One positive physical interval drives inertia, rate-dependent
+plastic flow and initiation; trial/Newton retries retain the same old history.
+This is two-component in-plane membrane inertia. Transverse shear and thickness
+are eliminated through the full quasistatic plane-stress solve, without
+independent thickness or rotary inertia.
+
+Each element's original thickness and volumetric density produce one retained
+consistent reference mass. Neither damage nor the solved current thickness
+removes mass. Acceleration loads use that same mass action; authored body forces
+integrate the original reference shape functions and volumes. The existing
+uniform-thickness path retains its accumulation expressions. The shared
+increment owner adds inertial residual forces and support reactions once; the
+sheet operator adds only the matching inertial tangent.
+
+Complete material point histories and receipts, physical plastic dissipation,
+released damaged storage, signed material endpoint-work defects, kinetic change,
+and backward-Euler numerical kinetic loss remain separate. Independent loss and
+work gates precede publication of the complete accepted motion. Material,
+equilibrium, work-budget or cancellation refusals leave the prior sheet,
+velocity, reference inventory and clock unchanged.
+
+Focused source tests cover heterogeneous thickness/density mass and moment,
+free acceleration, independent affine kinetic work during rate-dependent
+softening and held relaxation, a loaded free deformation degree of freedom,
+transactional refusals, and uniform-versus-elementwise mass parity. Formatting
+and parser checks passed. Execution remains unverified: both offline Cargo
+checks were terminated by SIGKILL during the real asupersync dependency, including
+a one-job, one-compiler-thread retry, before compiling these changes. No passing
+Rust test result is claimed.
+
+This membrane path does not supply contact, impulses, mass transfer, independent
+out-of-plane bending motion, thermal evolution, topological separation, or a
+temporal error estimator. The directional crack-band and local regular-branch
+limits of the progressive sheet/material remain in force.
+
 ## Progressive ductile native shell endpoints
 
 The existing CST/DKT owner provides `solve_ductile_with_energy` and

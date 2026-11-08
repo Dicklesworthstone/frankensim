@@ -19,6 +19,12 @@ enum PlaneDensity<'a> {
     Nodes(&'a [f64]),
 }
 
+#[derive(Clone, Copy)]
+enum PlaneThickness<'a> {
+    Uniform(f64),
+    Elements(&'a [f64]),
+}
+
 impl ReferenceMass {
     /// Build immutable P1/Q1 reference mass with two components per mesh node.
     ///
@@ -37,7 +43,27 @@ impl ReferenceMass {
     ) -> Result<Self, InertiaError> {
         Self::from_plane_density(
             mesh,
-            reference_thickness_m,
+            PlaneThickness::Uniform(reference_thickness_m),
+            PlaneDensity::Elements(reference_density_kg_m3),
+            maximum_assembly_bytes,
+            cx,
+        )
+        .map(|(mass, _)| mass)
+    }
+
+    /// Original cellwise thickness and volumetric density on the same P1/Q1
+    /// shapes and consistent mass quadrature. Thickness is never absorbed into
+    /// a relabelled density or replaced by the current plane-stress thickness.
+    pub(crate) fn from_plane_layers(
+        mesh: &Mesh2,
+        reference_thickness_m: &[f64],
+        reference_density_kg_m3: &[f64],
+        maximum_assembly_bytes: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Self, InertiaError> {
+        Self::from_plane_density(
+            mesh,
+            PlaneThickness::Elements(reference_thickness_m),
             PlaneDensity::Elements(reference_density_kg_m3),
             maximum_assembly_bytes,
             cx,
@@ -57,7 +83,7 @@ impl ReferenceMass {
     ) -> Result<(Self, Vec<f64>), InertiaError> {
         Self::from_plane_density(
             mesh,
-            reference_thickness_m,
+            PlaneThickness::Uniform(reference_thickness_m),
             PlaneDensity::Nodes(reference_density_kg_m3),
             maximum_assembly_bytes,
             cx,
@@ -66,7 +92,7 @@ impl ReferenceMass {
 
     fn from_plane_density(
         mesh: &Mesh2,
-        reference_thickness_m: f64,
+        thickness: PlaneThickness<'_>,
         density: PlaneDensity<'_>,
         maximum_assembly_bytes: usize,
         cx: &Cx<'_>,
@@ -80,12 +106,25 @@ impl ReferenceMass {
         if mesh.nodes.is_empty()
             || mesh.elems.is_empty()
             || values.len() != count
-            || !reference_thickness_m.is_finite()
-            || reference_thickness_m <= 0.0
+            || matches!(thickness, PlaneThickness::Elements(values) if values.len() != mesh.elems.len())
         {
             return Err(invalid(
                 "nonempty plane mesh, original positive thickness and exact density coverage required",
             ));
+        }
+        let thicknesses: &[f64] = match &thickness {
+            PlaneThickness::Uniform(value) => core::slice::from_ref(value),
+            PlaneThickness::Elements(values) => values,
+        };
+        for (element, &value) in thicknesses.iter().enumerate() {
+            if element % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            if !value.is_finite() || value <= 0.0 {
+                return Err(invalid(
+                    "finite positive original plane thicknesses required",
+                ));
+            }
         }
         let ndofs = mesh
             .nodes
@@ -159,6 +198,10 @@ impl ReferenceMass {
         });
         for (element, conn) in mesh.elems.iter().enumerate() {
             checkpoint(cx)?;
+            let reference_thickness_m = match thickness {
+                PlaneThickness::Uniform(value) => value,
+                PlaneThickness::Elements(values) => values[element],
+            };
             let reference = checked_reference_element(&mesh.nodes, conn).ok_or_else(|| {
                 invalid("plane reference element has invalid connectivity or orientation")
             })?;
