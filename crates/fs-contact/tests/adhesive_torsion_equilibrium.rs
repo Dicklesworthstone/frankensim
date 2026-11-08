@@ -1,6 +1,8 @@
 //! G0/G1/G3: changing-area I/III equilibrium, coupled work and physical limits.
 #[path = "source_point/common.rs"]
 mod common;
+#[path = "adhesive_torsion_equilibrium/motion.rs"]
+mod motion;
 
 use core::f64::consts::PI;
 use fs_contact::normal_patch::adhesive::mixed_mode::torsion::path::JkrTorsionalPathError;

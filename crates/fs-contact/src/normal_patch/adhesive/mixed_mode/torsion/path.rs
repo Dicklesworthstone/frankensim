@@ -22,6 +22,8 @@ use fs_exec::CancelGate;
 pub enum JkrTorsionalPathError {
     Source(JkrTorsionalError),
     Cancelled,
+    /// Exhausted original-source queries before another evaluation started.
+    Budget,
     /// Endpoint or radial secant is singular or numerically unresolved.
     UnresolvedSecant,
     /// The whole coordinate box cannot establish stable attached contact.
@@ -146,7 +148,22 @@ impl SourceJkrMixedMode {
         to: [f64; 2],
         gate: &CancelGate,
     ) -> Result<JkrTorsionalPath, JkrTorsionalPathError> {
+        let mut evaluations = 0;
+        self.torsional_path_counted(before, to, &mut evaluations, usize::MAX, gate)
+    }
+
+    /// Only a sealed original endpoint may enter from the sibling motion
+    /// owner. Rejected probes retain the actual number of queries consumed.
+    pub(super) fn torsional_path_counted(
+        &self,
+        before: JkrTorsionalResponse,
+        to: [f64; 2],
+        evaluations: &mut usize,
+        maximum_evaluations: usize,
+        gate: &CancelGate,
+    ) -> Result<JkrTorsionalPath, JkrTorsionalPathError> {
         poll(gate)?;
+        let started = *evaluations;
         let from = [before.indentation_m, before.twist_angle_rad];
         let tangent = strictly_attached(before)?;
         if from == to {
@@ -162,11 +179,21 @@ impl SourceJkrMixedMode {
                 evaluations: 0,
             });
         }
+        charge(evaluations, maximum_evaluations)?;
         let contact = self.evaluate_torsion_displacement_controlled(to[0], to[1])?;
         strictly_attached(contact)?;
-        let mut evaluations = 1;
-        let [minimum_contact_radius_m, maximum_contact_radius_m] =
-            self.admit_torsional_box(before, contact, &mut evaluations, gate)?;
+        let bounds = [
+            core::array::from_fn(|i| from[i].min(to[i])),
+            core::array::from_fn(|i| from[i].max(to[i])),
+        ];
+        let [minimum_contact_radius_m, maximum_contact_radius_m] = self.admit_torsional_box(
+            before,
+            contact,
+            bounds,
+            evaluations,
+            maximum_evaluations,
+            gate,
+        )?;
         let e = self.normal.normal_state().elastic().reduced_modulus_pa();
         let b = (8.0 / 3.0) * self.torsional_reduced_shear_modulus_pa();
         let r = self.normal.effective_radius_m();
@@ -262,20 +289,29 @@ impl SourceJkrMixedMode {
             work_residual_j,
             minimum_contact_radius_m,
             maximum_contact_radius_m,
-            evaluations,
+            evaluations: *evaluations - started,
         })
     }
 
-    fn admit_torsional_box(
+    /// Original radius/applicability bounds shared by straight and inertial
+    /// paths. `coordinates` holds componentwise [minimum, maximum] corners.
+    pub(super) fn admit_torsional_box(
         &self,
         before: JkrTorsionalResponse,
         contact: JkrTorsionalResponse,
+        coordinates: [[f64; 2]; 2],
         evaluations: &mut usize,
+        maximum_evaluations: usize,
         gate: &CancelGate,
     ) -> Result<[f64; 2], JkrTorsionalPathError> {
-        let low = before.indentation_m.min(contact.indentation_m);
-        let high = before.indentation_m.max(contact.indentation_m);
-        let p = [before.twist_angle_rad, contact.twist_angle_rad];
+        if coordinates.iter().flatten().any(|x| !x.is_finite())
+            || (0..2).any(|i| coordinates[0][i] > coordinates[1][i])
+        {
+            return Err(JkrTorsionalPathError::UnresolvedEnvelope);
+        }
+        let low = coordinates[0][0];
+        let high = coordinates[1][0];
+        let p = [coordinates[0][1], coordinates[1][1]];
         let maximum_twist = p[0].abs().max(p[1].abs());
         let minimum_twist = if p[0].is_sign_negative() == p[1].is_sign_negative() {
             p[0].abs().min(p[1].abs())
@@ -290,7 +326,7 @@ impl SourceJkrMixedMode {
                         return Ok(cached);
                     }
                 }
-                *evaluations += 1;
+                charge(evaluations, maximum_evaluations)?;
                 let point = self
                     .evaluate_torsion_displacement_controlled(delta, twist)
                     .map_err(|_| JkrTorsionalPathError::UnresolvedEnvelope)?;
@@ -335,6 +371,13 @@ fn poll(gate: &CancelGate) -> Result<(), JkrTorsionalPathError> {
     } else {
         Ok(())
     }
+}
+fn charge(evaluations: &mut usize, maximum: usize) -> Result<(), JkrTorsionalPathError> {
+    if *evaluations >= maximum {
+        return Err(JkrTorsionalPathError::Budget);
+    }
+    *evaluations += 1;
+    Ok(())
 }
 fn dot(a: [f64; 2], b: [f64; 2]) -> f64 {
     a[0] * b[0] + a[1] * b[1]

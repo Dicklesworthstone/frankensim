@@ -25,6 +25,9 @@ mod radius;
 /// Work-consistent normal/twist exchange along an admitted attached path.
 pub mod path;
 
+/// Coupled normal/twist inertia using the original reversible contact work.
+pub mod motion;
+
 use super::{JkrMixedModeError, SourceJkrMixedMode, finite, positive};
 use crate::normal_patch::adhesive::JkrError;
 use core::f64::consts::PI;

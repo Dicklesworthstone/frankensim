@@ -4043,3 +4043,43 @@ reversal/subdivision, endpoint derivatives, one-ulp increments, original source
 identity, path-boundary refusals, cancellation and a reversible rotor consuming
 the public path/tangent API. No new material calibration, irreversible loss or
 heat partition is introduced.
+
+### Coupled normal/twist motion with native mobility
+
+`torsion::motion::JkrTorsionalMotion` advances approach and twist together under
+the original relaxed-area I/III discrete gradient. The complete reciprocal
+positive native mobility maps force and torque to their respective coordinate
+accelerations; its cross terms are retained. Diagonal mobility normalization
+gives a dimensionally consistent two-by-two Newton system. The analytic original
+path tangent supplies its Jacobian. Bounded damped continuation refuses a
+numerically unresolved mobility or nonpositive symmetric inertial tangent;
+these are local numerical screens, not global uniqueness or continuum stability
+certificates. Held native projection, fixed material and temporal refinement
+remain necessary assumptions.
+
+Separate physical bounds cover duration, both coordinate increments, both
+rates, original/discrete/equivalent external efforts and actual source-query
+counts, including rejected proposals. The original endpoint is cached in sealed
+source/mobility/policy state. The complete constant-acceleration quadratic path
+is screened through its coordinate extrema, including reversals hidden from
+the endpoint segment. Its enclosing normal/twist box retains the original
+fold, opening-edge and material/geometry checks and bounds source force/torque.
+Both the native trajectory endpoint and the source endpoint are enclosed when
+the admitted nonlinear coordinate residual is nonzero. These conservative
+floating-point screens may require subdivision; no post-fold or partial-slip
+state is inferred.
+
+An accepted phase returns positive resisting impulse and its time moment,
+original reversible contact work, full-mobility kinetic change, held external
+work and independent source/inertial residuals. No irreversible loss or heat is
+invented. Cancellation, source refusal, a work limit or failed balance returns
+no successor. `rebind_projection` authenticates the old owner and preserves the
+exact source endpoint, coordinates, clock and step count while rebinding native
+mobility and rates. Its projected kinetic repartition is diagnostic, not work;
+the actual mechanical owner must separately audit body momentum and energy.
+
+Focused tests in `tests/adhesive_torsion_equilibrium/motion.rs` compare coupled
+motion against an independent point-force RK4 reference, check time reversal,
+full mixed-unit kinetic work and impulse moments, exercise hidden intrastep
+twist-boundary excursions and inertial ambiguity, and verify bounded refusal
+and projection continuity without changing the original source history.
