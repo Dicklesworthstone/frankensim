@@ -14,7 +14,8 @@
 /// Tapered round-beam flexure with consistent rotary inertia.
 pub mod beam;
 mod inertia;
-pub use inertia::BeamMass;
+pub use inertia::{BeamMass, BeamSectionInertia};
+pub(super) use inertia::{BeamReferenceInertia, BeamReferenceInertiaField};
 /// Shear-deformable (Timoshenko) segments between a beam's own nodes; Euler-Bernoulli is its Phi = 0 case.
 pub mod timoshenko;
 
@@ -57,11 +58,13 @@ impl BeamSection {
     }
 }
 
-/// Two shell nodes joined by one physical centroidal beam segment.
+/// Two shell nodes joined by one beam's original elastic reference segment.
 #[derive(Debug, Clone, Copy)]
 pub struct ShellBeam {
     pub nodes: [usize; 2],
-    /// Cartesian offsets from each midsurface node to its beam centroid [m].
+    /// Cartesian offsets from each midsurface node to the original elastic
+    /// beam axis [m]. Full section density moments may have a different mass
+    /// centroid; that offset is retained in the moments, not added here again.
     pub offsets_m: [[f64; 3]; 2],
     /// Direction defining +z of the cross section. Its projection normal to
     /// the centroidal chord is normalized; collinear directions refuse.
@@ -142,8 +145,19 @@ pub fn assemble_stiffened_shell_with_reference_density(
     reference_beam_density_kg_m3: &[[f64; 2]],
     mass: BeamMass,
 ) -> Result<ShellModel, PlateError> {
-    assemble_sections_with_reference_density(mesh, sections, boundary, support, beams, mass,
-        Some((reference_corner_density_kg_m3, reference_beam_density_kg_m3)), None)
+    assemble_sections_with_reference_inertia(
+        mesh,
+        sections,
+        boundary,
+        support,
+        beams,
+        mass,
+        Some((
+            super::ReferenceInertia::Density(reference_corner_density_kg_m3),
+            BeamReferenceInertiaField::Density(reference_beam_density_kg_m3),
+        )),
+        None,
+    )
 }
 
 /// Independent membrane/bending sections with the same graded panel and beam
@@ -163,8 +177,19 @@ pub fn assemble_stiffened_shell_materials_with_reference_density(
     reference_beam_density_kg_m3: &[[f64; 2]],
     mass: BeamMass,
 ) -> Result<ShellModel, PlateError> {
-    assemble_sections_with_reference_density(mesh, sections, boundary, support, beams, mass,
-        Some((reference_corner_density_kg_m3, reference_beam_density_kg_m3)), None)
+    assemble_sections_with_reference_inertia(
+        mesh,
+        sections,
+        boundary,
+        support,
+        beams,
+        mass,
+        Some((
+            super::ReferenceInertia::Density(reference_corner_density_kg_m3),
+            BeamReferenceInertiaField::Density(reference_beam_density_kg_m3),
+        )),
+        None,
+    )
 }
 
 /// Assemble the graded pencil and its complete uniform-acceleration response.
@@ -195,8 +220,9 @@ pub fn assemble_stiffened_shell_with_reference_density_and_body_acceleration(
     mass: BeamMass,
 ) -> Result<(ShellModel, ShellBodyAcceleration), PlateError> {
     let mut response = ShellBodyAcceleration::empty();
-    let model = assemble_sections_with_reference_density(mesh, sections, boundary, support,
-        beams, mass, Some((reference_corner_density_kg_m3, reference_beam_density_kg_m3)),
+    let model = assemble_sections_with_reference_inertia(mesh, sections, boundary, support,
+        beams, mass, Some((super::ReferenceInertia::Density(reference_corner_density_kg_m3),
+            BeamReferenceInertiaField::Density(reference_beam_density_kg_m3))),
         Some(&mut response))?;
     Ok((model, response))
 }
@@ -218,41 +244,177 @@ pub fn assemble_stiffened_shell_materials_with_reference_density_and_body_accele
     mass: BeamMass,
 ) -> Result<(ShellModel, ShellBodyAcceleration), PlateError> {
     let mut response = ShellBodyAcceleration::empty();
-    let model = assemble_sections_with_reference_density(mesh, sections, boundary, support,
-        beams, mass, Some((reference_corner_density_kg_m3, reference_beam_density_kg_m3)),
+    let model = assemble_sections_with_reference_inertia(mesh, sections, boundary, support,
+        beams, mass, Some((super::ReferenceInertia::Density(reference_corner_density_kg_m3),
+            BeamReferenceInertiaField::Density(reference_beam_density_kg_m3))),
         Some(&mut response))?;
     Ok((model, response))
 }
 
+/// Bonded reinforcement with original full density moments in panels and beams.
+/// Panel moments follow each facet's original corner order and oriented mesh
+/// surface. Beam endpoint moments follow `ShellBeam::nodes`, in its original
+/// local y/z axes about the elastic reference chord. The density centroid may
+/// differ from that chord; `offsets_m` still locates the elastic axis relative
+/// to the shell and must not be replaced by a second mass-centroid offset.
+///
+/// Both native consistent kinetic fields retain their signed cross blocks
+/// through the original eccentric bond, support elimination and CSR assembly.
+/// This does not change elastic sections or introduce section warping.
+/// # Errors
+/// Incomplete fields or existing geometry, section and arithmetic refusals.
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_stiffened_shell_with_reference_inertia(
+    mesh: &ShellMesh,
+    sections: &[PlateSection],
+    reference_corner_moments: &[[super::ReferenceDensityMoments; 3]],
+    boundary: &[usize],
+    support: ShellSupport,
+    beams: &[ShellBeam],
+    reference_beam_inertia: &[[BeamSectionInertia; 2]],
+) -> Result<ShellModel, PlateError> {
+    assemble_sections_with_reference_inertia(
+        mesh,
+        sections,
+        boundary,
+        support,
+        beams,
+        BeamMass::Consistent,
+        Some((
+            super::ReferenceInertia::Moments(reference_corner_moments),
+            BeamReferenceInertiaField::Section(reference_beam_inertia),
+        )),
+        None,
+    )
+}
+
+/// Independent membrane/bending sections with the same original full panel
+/// and beam inventory as [`assemble_stiffened_shell_with_reference_inertia`].
+/// # Errors
+/// The same complete-field, geometry, material and arithmetic refusals.
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_stiffened_shell_materials_with_reference_inertia(
+    mesh: &ShellMesh,
+    sections: &[ShellSection],
+    reference_corner_moments: &[[super::ReferenceDensityMoments; 3]],
+    boundary: &[usize],
+    support: ShellSupport,
+    beams: &[ShellBeam],
+    reference_beam_inertia: &[[BeamSectionInertia; 2]],
+) -> Result<ShellModel, PlateError> {
+    assemble_sections_with_reference_inertia(
+        mesh,
+        sections,
+        boundary,
+        support,
+        beams,
+        BeamMass::Consistent,
+        Some((
+            super::ReferenceInertia::Moments(reference_corner_moments),
+            BeamReferenceInertiaField::Section(reference_beam_inertia),
+        )),
+        None,
+    )
+}
+
+/// The full original panel/beam section inventory and its uniform-acceleration
+/// response before support restriction. The same native mass entries supply
+/// both outputs, retaining force and torque from signed density offsets on
+/// supported as well as free nodes. No additional mass integration is used.
+/// # Errors
+/// The original full-inventory assembly or body-acceleration refusals.
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_stiffened_shell_with_reference_inertia_and_body_acceleration(
+    mesh: &ShellMesh,
+    sections: &[PlateSection],
+    reference_corner_moments: &[[super::ReferenceDensityMoments; 3]],
+    boundary: &[usize],
+    support: ShellSupport,
+    beams: &[ShellBeam],
+    reference_beam_inertia: &[[BeamSectionInertia; 2]],
+) -> Result<(ShellModel, ShellBodyAcceleration), PlateError> {
+    let mut response = ShellBodyAcceleration::empty();
+    let model = assemble_sections_with_reference_inertia(
+        mesh,
+        sections,
+        boundary,
+        support,
+        beams,
+        BeamMass::Consistent,
+        Some((
+            super::ReferenceInertia::Moments(reference_corner_moments),
+            BeamReferenceInertiaField::Section(reference_beam_inertia),
+        )),
+        Some(&mut response),
+    )?;
+    Ok((model, response))
+}
+
+/// Independent membrane/bending sections with the same full original inertia
+/// and supported-node body-force/moment response.
+/// # Errors
+/// The same full-inventory and body-acceleration refusals.
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_stiffened_shell_materials_with_reference_inertia_and_body_acceleration(
+    mesh: &ShellMesh,
+    sections: &[ShellSection],
+    reference_corner_moments: &[[super::ReferenceDensityMoments; 3]],
+    boundary: &[usize],
+    support: ShellSupport,
+    beams: &[ShellBeam],
+    reference_beam_inertia: &[[BeamSectionInertia; 2]],
+) -> Result<(ShellModel, ShellBodyAcceleration), PlateError> {
+    let mut response = ShellBodyAcceleration::empty();
+    let model = assemble_sections_with_reference_inertia(
+        mesh,
+        sections,
+        boundary,
+        support,
+        beams,
+        BeamMass::Consistent,
+        Some((
+            super::ReferenceInertia::Moments(reference_corner_moments),
+            BeamReferenceInertiaField::Section(reference_beam_inertia),
+        )),
+        Some(&mut response),
+    )?;
+    Ok((model, response))
+}
 pub(super) fn assemble_sections<S: Section>(mesh: &ShellMesh, sections: &[S],
     boundary: &[usize], support: ShellSupport, beams: &[ShellBeam])
     -> Result<ShellModel, PlateError> {
     assemble_sections_with_mass(mesh, sections, boundary, support, beams, BeamMass::Lumped)
 }
-fn assemble_sections_with_mass<S: Section>(mesh: &ShellMesh, sections: &[S],
-    boundary: &[usize], support: ShellSupport, beams: &[ShellBeam], mass: BeamMass)
-    -> Result<ShellModel, PlateError> {
-    assemble_sections_with_reference_density(mesh, sections, boundary, support, beams, mass, None, None)
+fn assemble_sections_with_mass<S: Section>(
+    mesh: &ShellMesh,
+    sections: &[S],
+    boundary: &[usize],
+    support: ShellSupport,
+    beams: &[ShellBeam],
+    mass: BeamMass,
+) -> Result<ShellModel, PlateError> {
+    assemble_sections_with_reference_inertia(
+        mesh, sections, boundary, support, beams, mass, None, None,
+    )
 }
-fn assemble_sections_with_reference_density<S: Section>(mesh: &ShellMesh, sections: &[S],
-    boundary: &[usize], support: ShellSupport, beams: &[ShellBeam], mass: BeamMass,
-    reference_density: Option<(&[[f64; 3]], &[[f64; 2]])>,
-    mut body_acceleration: Option<&mut ShellBodyAcceleration>)
-    -> Result<ShellModel, PlateError> {
-    if let Some((panels, reinforcement)) = reference_density {
-        crate::reference_density::validate(mesh.tris.len(), panels)?;
-        if reinforcement.len() != beams.len() {
-            return Err(bad("bonded beam reference density needs one endpoint pair per beam"));
-        }
-        for &density in reinforcement {
-            inertia::validate_reference_density(density)?;
-        }
+fn assemble_sections_with_reference_inertia<S: Section>(
+    mesh: &ShellMesh,
+    sections: &[S],
+    boundary: &[usize],
+    support: ShellSupport,
+    beams: &[ShellBeam],
+    mass: BeamMass,
+    reference_inertia: Option<(super::ReferenceInertia<'_>, BeamReferenceInertiaField<'_>)>,
+    mut body_acceleration: Option<&mut ShellBodyAcceleration>,
+) -> Result<ShellModel, PlateError> {
+    if let Some((panels, reinforcement)) = reference_inertia {
+        panels.validate(mesh.tris.len())?;
+        reinforcement.validate(beams.len())?;
     }
-    let mut model = match reference_density {
+    let mut model = match reference_inertia {
         Some((panels, _)) => super::assemble_with_reference_inertia_and_body_acceleration(
             mesh, sections, false, boundary, support, super::DRILLING_ALPHA,
-            super::CstDktMass::Consistent, None, Some(super::ReferenceInertia::Density(panels)),
-            body_acceleration.as_deref_mut())?,
+            super::CstDktMass::Consistent, None, Some(panels), body_acceleration.as_deref_mut())?,
         None => super::assemble(mesh, sections, false, boundary, support)?,
     };
     if beams.is_empty() { return Ok(model); }
@@ -261,9 +423,9 @@ fn assemble_sections_with_reference_density<S: Section>(mesh: &ShellMesh, sectio
     copy_sparse(&model.k, &mut k);
     copy_sparse(&model.m, &mut m);
     for (index, beam) in beams.iter().enumerate() {
-        let (ke, me) = match reference_density {
-            Some((_, reinforcement)) => element_with_reference_density(
-                mesh, beam, mass, Some(reinforcement[index]))?,
+        let (ke, me) = match reference_inertia {
+            Some((_, reinforcement)) => element_with_reference_inertia(
+                mesh, beam, mass, Some(reinforcement.at(index)))?,
             None => element_with_mass(mesh, beam, mass)?,
         };
         if let Some(response) = body_acceleration.as_deref_mut() {
@@ -311,9 +473,25 @@ fn element_with_mass(mesh: &ShellMesh, beam: &ShellBeam, mass: BeamMass)
     -> Result<([f64;144],[f64;144]),PlateError> {
     element_with_reference_density(mesh, beam, mass, None)
 }
-fn element_with_reference_density(mesh: &ShellMesh, beam: &ShellBeam, mass: BeamMass,
-    reference_density_kg_m3: Option<[f64; 2]>)
-    -> Result<([f64;144],[f64;144]),PlateError> {
+fn element_with_reference_density(
+    mesh: &ShellMesh,
+    beam: &ShellBeam,
+    mass: BeamMass,
+    reference_density_kg_m3: Option<[f64; 2]>,
+) -> Result<([f64; 144], [f64; 144]), PlateError> {
+    element_with_reference_inertia(
+        mesh,
+        beam,
+        mass,
+        reference_density_kg_m3.map(BeamReferenceInertia::Density),
+    )
+}
+fn element_with_reference_inertia(
+    mesh: &ShellMesh,
+    beam: &ShellBeam,
+    mass: BeamMass,
+    reference_inertia: Option<BeamReferenceInertia>,
+) -> Result<([f64; 144], [f64; 144]), PlateError> {
     let (length, transform) = element_kinematics(mesh, beam)?;
     let s = beam.section;
     let mut k = [0.0;144];
@@ -334,8 +512,8 @@ fn element_with_reference_density(mesh: &ShellMesh, beam: &ShellBeam, mass: Beam
             k[12*slots[i]+slots[j]] += coefficient*hermite[i][j]*signs[i]*signs[j];
         }}
     }
-    let m = match reference_density_kg_m3 {
-        Some(density) => inertia::local_mass_with_reference_density(s, l, [0.0; 2], mass, density)?,
+    let m = match reference_inertia {
+        Some(inventory) => inventory.local_mass(s, l, [0.0; 2], mass)?,
         None => inertia::local_mass(s, l, [0.0; 2], mass)?,
     };
     let k = congruence(&k,&transform);

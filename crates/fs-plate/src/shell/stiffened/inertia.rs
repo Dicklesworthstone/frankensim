@@ -1,7 +1,97 @@
-//! Shared centroidal kinetic integral for prismatic 3-D beam segments.
+//! Shared reference-frame kinetic integral for prismatic 3-D beam segments.
 
 use super::{BeamSection, bad};
 use crate::PlateError;
+
+mod section;
+pub use section::BeamSectionInertia;
+
+#[derive(Clone, Copy)]
+pub(in crate::shell) enum BeamReferenceInertia {
+    Density([f64; 2]),
+    Section([BeamSectionInertia; 2]),
+}
+
+impl BeamReferenceInertia {
+    pub(in crate::shell) fn validate(self) -> Result<(), PlateError> {
+        match self {
+            Self::Density(rho) => validate_reference_density(rho),
+            Self::Section(_) => Ok(()), // Immutable, admitted physical moments.
+        }
+    }
+
+    pub(in crate::shell) fn local_mass(
+        self,
+        section: BeamSection,
+        length: f64,
+        phi: [f64; 2],
+        mass: BeamMass,
+    ) -> Result<[f64; 144], PlateError> {
+        match self {
+            Self::Density(rho) => {
+                local_mass_with_reference_density(section, length, phi, mass, rho)
+            }
+            Self::Section(moments) => section::local_mass(section, length, phi, mass, moments),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::shell) enum BeamReferenceInertiaField<'a> {
+    Density(&'a [[f64; 2]]),
+    Section(&'a [[BeamSectionInertia; 2]]),
+}
+
+impl BeamReferenceInertiaField<'_> {
+    pub(in crate::shell) fn validate(self, segments: usize) -> Result<(), PlateError> {
+        let len = match self {
+            Self::Density(v) => v.len(),
+            Self::Section(v) => v.len(),
+        };
+        if len != segments {
+            return Err(bad(
+                "beam reference inertia must cover every original segment",
+            ));
+        }
+        if let Self::Density(values) = self {
+            for &value in values {
+                validate_reference_density(value)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(in crate::shell) fn at(self, index: usize) -> BeamReferenceInertia {
+        match self {
+            Self::Density(v) => BeamReferenceInertia::Density(v[index]),
+            Self::Section(v) => BeamReferenceInertia::Section(v[index]),
+        }
+    }
+}
+
+// Shared original four-point Gauss rule; P1 section moments increase the
+// degree-six velocity product to degree seven without changing the sites.
+const GAUSS: [(f64, f64); 4] = [
+    (0.06943184420297371, 0.17392742256872693),
+    (0.33000947820757187, 0.32607257743127307),
+    (0.6699905217924281, 0.32607257743127307),
+    (0.9305681557970262, 0.17392742256872693),
+];
+
+// Original independent static Timoshenko velocity and section-rotation fields.
+fn bending_fields(l: f64, p: f64, t: f64) -> ([f64; 4], [f64; 4]) {
+    let r = 1.0 / (1.0 + p);
+    let f = r * (3.0 * t * t - 2.0 * t * t * t) + (p * r) * t;
+    let a = 6.0 * r * (t - t * t) / l;
+    let n = [
+        1.0 - f,
+        l * (t - 0.5 * t * t - 0.5 * f),
+        f,
+        l * (0.5 * t * t - 0.5 * f),
+    ];
+    let h = [-a, 1.0 - t - 0.5 * l * a, a, t - 0.5 * l * a];
+    (n, h)
+}
 
 /// Inertia discretization of a straight beam; both choices include section rotary inertia.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,32 +209,17 @@ fn local_mass_impl(
         }
         // Four Gauss points integrate the degree-six velocity products, or
         // degree seven with P1 density, without any additional quadrature.
-        const GAUSS: [(f64, f64); 4] = [
-            (0.06943184420297371, 0.17392742256872693),
-            (0.33000947820757187, 0.32607257743127307),
-            (0.6699905217924281, 0.32607257743127307),
-            (0.9305681557970262, 0.17392742256872693),
-        ];
         for (slots, signs, inertia, p) in [
             ([1, 5, 7, 11], [1.0; 4], s.iz_m4, phi[0]),
             ([2, 4, 8, 10], [1.0, -1.0, 1.0, -1.0], s.iy_m4, phi[1]),
         ] {
-            let r = 1.0 / (1.0 + p);
             for (t, weight) in GAUSS {
                 let rho = reference_density
                     .map_or(s.density_kg_m3, |rho| (1.0 - t) * rho[0] + t * rho[1]);
                 // Exact static Timoshenko fields: V=GA_s(v'-theta) is constant,
                 // EI theta''=-V. Cubic v and quadratic theta interpolate the four
                 // endpoint DOFs; at phi=0, theta=v' and v is cubic Hermite.
-                let f = r * (3.0 * t * t - 2.0 * t * t * t) + (p * r) * t;
-                let a = 6.0 * r * (t - t * t) / l;
-                let n = [
-                    1.0 - f,
-                    l * (t - 0.5 * t * t - 0.5 * f),
-                    f,
-                    l * (0.5 * t * t - 0.5 * f),
-                ];
-                let h = [-a, 1.0 - t - 0.5 * l * a, a, t - 0.5 * l * a];
+                let (n, h) = bending_fields(l, p, t);
                 for i in 0..4 {
                     for j in i..4 {
                         let value = rho

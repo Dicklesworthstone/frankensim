@@ -15,7 +15,10 @@
 //! DOF order at each node: [u, v, w, theta_x, theta_y, theta_z] in global axes. Rotations about the
 //! section axes follow `ShellBeam`: the slope of v is theta_z, the slope of w is -theta_y.
 //! No offsets: an off-node beam is attached to a shell by a tie, not by a rigid arm here.
-use super::{BeamMass, BeamSection, bad, congruence, cross, dot, inertia, unit};
+use super::inertia::{BeamReferenceInertia, BeamReferenceInertiaField};
+use super::{
+    BeamMass, BeamSection, BeamSectionInertia, bad, congruence, cross, dot, inertia, unit,
+};
 use crate::PlateError;
 use fs_sparse::{Coo, Csr};
 
@@ -88,7 +91,7 @@ pub fn segment_matrices_with_reference_density(
     kind: BeamKind,
     reference_density_kg_m3: [f64; 2],
     mass: BeamMass,
-) -> Result<([f64; 144], [f64; 144]), PlateError> {
+) -> Result<([f64; 144], [f64; 144]), PlateError>{
     segment_matrices_with_axial_force(
         p0_m,
         p1_m,
@@ -97,7 +100,41 @@ pub fn segment_matrices_with_reference_density(
         kind,
         mass,
         0.0,
-        Some(reference_density_kg_m3),
+        Some(BeamReferenceInertia::Density(reference_density_kg_m3)),
+    )
+}
+
+/// Consistent inertia with full original cross-sectional density moments,
+/// interpolated linearly between the two endpoints. The moments are about
+/// the original elastic axis in the local `(y,z)` frame defined by the chord
+/// and `section_z`; they do not move that axis or change its stiffness.
+///
+/// All signed translation/rotation and product-inertia couplings follow
+/// `v + omega cross [0,y,z]`, with independent Timoshenko section rotation.
+/// Four positive Gauss sites integrate the degree-seven kinetic field exactly.
+/// Reversing the chord with the same z hint reverses y: transform the signed
+/// y and yz moments as well as exchanging the endpoints. These are retained
+/// reference inventories, not current-density samples on frozen geometry.
+/// Diagonal lumping is not provided because it would erase the mass offsets.
+/// # Errors
+/// Original section/geometry/shear refusals or unrepresentable kinetic entries.
+pub fn segment_matrices_with_reference_inertia(
+    p0_m: [f64; 3],
+    p1_m: [f64; 3],
+    section_z: [f64; 3],
+    section: BeamSection,
+    kind: BeamKind,
+    reference_inertia: [BeamSectionInertia; 2],
+) -> Result<([f64; 144], [f64; 144]), PlateError> {
+    segment_matrices_with_axial_force(
+        p0_m,
+        p1_m,
+        section_z,
+        section,
+        kind,
+        BeamMass::Consistent,
+        0.0,
+        Some(BeamReferenceInertia::Section(reference_inertia)),
     )
 }
 
@@ -152,6 +189,32 @@ pub fn prestressed_segment_matrices_with_reference_density(
     kind: BeamKind,
     reference_density_kg_m3: [f64; 2],
     axial_force_n: f64,
+) -> Result<([f64; 144], [f64; 144]), PlateError>{
+    segment_matrices_with_axial_force(
+        p0_m,
+        p1_m,
+        section_z,
+        section,
+        kind,
+        BeamMass::Consistent,
+        axial_force_n,
+        Some(BeamReferenceInertia::Density(reference_density_kg_m3)),
+    )
+}
+
+/// The original signed axial-force tangent with full section reference inertia.
+/// Prestress changes stiffness only; the consistent mass and original elastic
+/// frame have the meaning of [`segment_matrices_with_reference_inertia`].
+/// # Errors
+/// Original prestressed-segment refusals or unrepresentable inertia.
+pub fn prestressed_segment_matrices_with_reference_inertia(
+    p0_m: [f64; 3],
+    p1_m: [f64; 3],
+    section_z: [f64; 3],
+    section: BeamSection,
+    kind: BeamKind,
+    reference_inertia: [BeamSectionInertia; 2],
+    axial_force_n: f64,
 ) -> Result<([f64; 144], [f64; 144]), PlateError> {
     segment_matrices_with_axial_force(
         p0_m,
@@ -161,7 +224,7 @@ pub fn prestressed_segment_matrices_with_reference_density(
         kind,
         BeamMass::Consistent,
         axial_force_n,
-        Some(reference_density_kg_m3),
+        Some(BeamReferenceInertia::Section(reference_inertia)),
     )
 }
 
@@ -174,11 +237,11 @@ fn segment_matrices_with_axial_force(
     kind: BeamKind,
     mass: BeamMass,
     axial_force_n: f64,
-    reference_density: Option<[f64; 2]>,
-) -> Result<([f64; 144], [f64; 144]), PlateError> {
+    reference_inertia: Option<BeamReferenceInertia>,
+) -> Result<([f64; 144], [f64; 144]), PlateError>{
     section.validate()?;
-    if let Some(density) = reference_density {
-        inertia::validate_reference_density(density)?;
+    if let Some(inventory) = reference_inertia {
+        inventory.validate()?;
     }
     if !axial_force_n.is_finite() {
         return Err(bad("beam axial force must be finite, positive in tension"));
@@ -206,7 +269,7 @@ fn segment_matrices_with_axial_force(
     let projection = dot(hint, x);
     let z = unit(std::array::from_fn(|i| hint[i] - projection * x[i]))?;
     let axes = [x, cross(z, x), z];
-    let (mut k, m) = local_matrices(section, kind, length, mass, reference_density)?;
+    let (mut k, m) = local_matrices(section, kind, length, mass, reference_inertia)?;
     if axial_force_n != 0.0 {
         add_initial_stress(&mut k, section, kind, length, axial_force_n)?;
     }
@@ -293,8 +356,8 @@ fn local_matrices(
     kind: BeamKind,
     l: f64,
     mass: BeamMass,
-    reference_density: Option<[f64; 2]>,
-) -> Result<([f64; 144], [f64; 144]), PlateError> {
+    reference_inertia: Option<BeamReferenceInertia>,
+) -> Result<([f64; 144], [f64; 144]), PlateError>{
     let mut k = [0.0; 144];
     for (a, b, coefficient) in [
         (0, 6, s.young_pa * s.area_m2 / l),
@@ -334,10 +397,8 @@ fn local_matrices(
             }
         }
     }
-    let m = match reference_density {
-        Some(density) => {
-            inertia::local_mass_with_reference_density(s, l, phi_bending, mass, density)?
-        }
+    let m = match reference_inertia {
+        Some(inventory) => inventory.local_mass(s, l, phi_bending, mass)?,
         None => inertia::local_mass(s, l, phi_bending, mass)?,
     };
     Ok((k, m))
@@ -392,7 +453,30 @@ pub fn assemble_beam_chain_with_reference_density(
         kind,
         mass,
         None,
-        Some(reference_density_kg_m3),
+        Some(BeamReferenceInertiaField::Density(reference_density_kg_m3)),
+    )
+}
+
+/// Assemble full reference section moments independently on each original
+/// segment, in its local frame and node order. Shared-node material jumps are
+/// preserved. The native CSR owner retains every consistent mass cross block.
+/// # Errors
+/// Original chain refusals, incomplete moment coverage or inertia overflow.
+pub fn assemble_beam_chain_with_reference_inertia(
+    nodes_m: &[[f64; 3]],
+    section_z: [f64; 3],
+    section: BeamSection,
+    kind: BeamKind,
+    reference_inertia: &[[BeamSectionInertia; 2]],
+) -> Result<(Csr, Csr), PlateError> {
+    assemble_beam_chain_impl(
+        nodes_m,
+        section_z,
+        section,
+        kind,
+        BeamMass::Consistent,
+        None,
+        Some(BeamReferenceInertiaField::Section(reference_inertia)),
     )
 }
 
@@ -446,31 +530,47 @@ pub fn assemble_prestressed_beam_chain_with_reference_density(
         kind,
         BeamMass::Consistent,
         Some(axial_forces_n),
-        Some(reference_density_kg_m3),
+        Some(BeamReferenceInertiaField::Density(reference_density_kg_m3)),
     )
 }
 
-fn assemble_beam_chain_impl(
+/// Full section inventory with independently supplied original axial forces.
+/// Forces alter the tangent only; consistent inertia is retained exactly.
+/// # Errors
+/// The complete-field, section, geometry and arithmetic refusals of both owners.
+pub fn assemble_prestressed_beam_chain_with_reference_inertia(
+    nodes_m: &[[f64; 3]],
+    section_z: [f64; 3],
+    section: BeamSection,
+    kind: BeamKind,
+    reference_inertia: &[[BeamSectionInertia; 2]],
+    axial_forces_n: &[f64],
+) -> Result<(Csr, Csr), PlateError> {
+    assemble_beam_chain_impl(
+        nodes_m,
+        section_z,
+        section,
+        kind,
+        BeamMass::Consistent,
+        Some(axial_forces_n),
+        Some(BeamReferenceInertiaField::Section(reference_inertia)),
+    )
+}
+
+pub(in crate::shell) fn assemble_beam_chain_impl(
     nodes_m: &[[f64; 3]],
     section_z: [f64; 3],
     section: BeamSection,
     kind: BeamKind,
     mass: BeamMass,
     axial_forces_n: Option<&[f64]>,
-    reference_density: Option<&[[f64; 2]]>,
+    reference_inertia: Option<BeamReferenceInertiaField<'_>>,
 ) -> Result<(Csr, Csr), PlateError> {
     if nodes_m.len() < 2 {
         return Err(bad("a beam chain needs at least two nodes"));
     }
-    if let Some(density) = reference_density {
-        if density.len() != nodes_m.len() - 1 {
-            return Err(bad(
-                "beam chain needs endpoint reference densities for every segment",
-            ));
-        }
-        for &endpoints in density {
-            inertia::validate_reference_density(endpoints)?;
-        }
+    if let Some(inventory) = reference_inertia {
+        inventory.validate(nodes_m.len() - 1)?;
     }
     if let Some(forces) = axial_forces_n {
         if forces.len() != nodes_m.len() - 1 || forces.iter().any(|f| !f.is_finite()) {
@@ -489,7 +589,7 @@ fn assemble_beam_chain_impl(
             kind,
             mass,
             axial_forces_n.map_or(0.0, |forces| forces[e]),
-            reference_density.map(|density| density[e]),
+            reference_inertia.map(|inventory| inventory.at(e)),
         )?;
         for i in 0..12 {
             for j in 0..12 {

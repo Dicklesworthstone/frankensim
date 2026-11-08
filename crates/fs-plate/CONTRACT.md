@@ -977,6 +977,47 @@ mass/centroid/rotary work with prestress. The model remains a small-motion,
 prismatic centered beam; this field does not introduce transverse eccentric
 density, graded elastic coefficients, warping inertia or moving-frame transport.
 
+### Full cross-section density moments in three-dimensional beams
+
+`BeamSectionInertia` retains the six original integrals of
+`rho * [1,y,z,y²,y*z,z²]` over a section, with units kg/m, kg, kg,
+kg m, kg m and kg m. They are about the elastic reference chord and its
+oriented local y/z axes. Signed first moments and yz product inertia are
+retained. Exact binary-significand product comparisons admit a strictly
+positive moment matrix across finite scales without a conditioning cutoff,
+centroid repair or diagonal floor. Geometry containment is not inferred from
+moments when the section boundary has not been supplied.
+
+The new `*_with_reference_inertia` beam entries interpolate these moments
+linearly on each original segment. They integrate the complete physical
+`v + omega cross [0,y,z]` field at the existing four positive Gauss sites,
+retaining axial/bending, torsion/transverse and section-rotation cross blocks.
+Independent Timoshenko rotation remains distinct from centerline slope;
+physical y rotation is the negative x/z bending slope convention. The rule
+is exact through degree seven. The full-moment entries use consistent inertia
+only; the existing diagonal `BeamMass::Lumped` contract is unchanged.
+`from_uniform` retains the original scalar/P1-density arithmetic when its
+source geometric moments match the supplied beam section.
+
+The complete mass follows native chain assembly, the original prestressed
+tangent, bonded `ShellBeam` reinforcement and nonmatching mortar shell ties.
+Bonded assembly also retains the existing panel density moments. Elastic
+axes and attachment offsets are not moved to the density centroid, avoiding
+a second application of that offset. Reversing a chord with the same z hint
+requires reversing signed y and yz moments and exchanging its endpoints.
+The bonded `*_with_reference_inertia_and_body_acceleration` forms reuse the
+same full mass entries before support restriction, preserving applied force
+and moment at supported nodes without a separate body-load integration.
+
+`tests/beam_section_density.rs` checks independent heterogeneous volume
+integration, all 36 rigid spatial mass products, member/frame reversal,
+nonrigid polynomial kinetic work, scaled and nearly singular admission,
+scalar arithmetic, discontinuous chains, prestress, bonded and off-node
+shell transfer, and body-force/torque resultants with a clamped endpoint.
+The model retains original prismatic elastic geometry, fixed section frames
+and small motions; these inventory moments do not supply graded elasticity,
+warping inertia, finite-rotation transport or temperature-driven mass transfer.
+
 ### Signed axial prestress in beams and shell ties
 
 `timoshenko::{prestressed_segment_matrices, assemble_prestressed_beam_chain}`

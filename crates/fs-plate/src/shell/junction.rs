@@ -20,11 +20,8 @@
 //! $K_r = T^T K T$, $M_r = T^T M T$, preserving exact symmetry, positive-semidefinite
 //! energy, and zero net virtual interface power $P_m + P_s = 0$.
 
-use super::stiffened::timoshenko::{
-    BeamKind, assemble_beam_chain, assemble_beam_chain_with_reference_density,
-    assemble_prestressed_beam_chain, assemble_prestressed_beam_chain_with_reference_density,
-};
-use super::stiffened::{BeamMass, BeamSection};
+use super::stiffened::timoshenko::{BeamKind, assemble_beam_chain_impl};
+use super::stiffened::{BeamMass, BeamReferenceInertiaField, BeamSection, BeamSectionInertia};
 use super::{ShellMesh, ShellModel, dot, sub};
 use crate::PlateError;
 use fs_math::{dd::Dd, det};
@@ -2691,7 +2688,35 @@ pub fn tie_beams_to_shells_with_reference_density(
         components,
         beams,
         None,
-        Some(reference_density_kg_m3),
+        Some(BeamTieInertia::Density(reference_density_kg_m3)),
+        budget,
+        cancelled,
+    )
+}
+
+/// Tie beams carrying all six original cross-section density moments. Each
+/// `[beam][segment]` pair follows the original segment order and its local
+/// y/z frame about the elastic reference chord. Signed mass offsets and yz
+/// product inertia pass through the original mortar and eccentric rigid-arm
+/// congruence; no additional centroid shift or diagonal mass is substituted.
+/// Shell inertia and the applicability limits of [`tie_beams_to_shells`]
+/// are retained. Only consistent beam inertia is used.
+/// # Errors
+/// Original tie refusals, incomplete section inventory, or inertia overflow.
+pub fn tie_beams_to_shells_with_reference_inertia(
+    tied: &TiedShellModel,
+    components: &[ShellComponent<'_>],
+    beams: &[BeamOnShell<'_>],
+    reference_inertia: &[&[[BeamSectionInertia; 2]]],
+    budget: TieBudget,
+    cancelled: impl FnMut() -> bool,
+) -> Result<BeamTiedShellModel, PlateError> {
+    tie_beams_to_shells_impl(
+        tied,
+        components,
+        beams,
+        None,
+        Some(BeamTieInertia::Section(reference_inertia)),
         budget,
         cancelled,
     )
@@ -2754,10 +2779,65 @@ pub fn tie_prestressed_beams_to_shells_with_reference_density(
         components,
         beams,
         Some(axial_forces_n),
-        Some(reference_density_kg_m3),
+        Some(BeamTieInertia::Density(reference_density_kg_m3)),
         budget,
         cancelled,
     )
+}
+
+/// Full original section inventory and independently supplied equilibrated
+/// segment forces. Prestress changes stiffness only; the complete consistent
+/// inertia and its signed coupling use the same original transfer map.
+/// # Errors
+/// The combined inertia-field and prestressed beam-tie refusals.
+pub fn tie_prestressed_beams_to_shells_with_reference_inertia(
+    tied: &TiedShellModel,
+    components: &[ShellComponent<'_>],
+    beams: &[BeamOnShell<'_>],
+    reference_inertia: &[&[[BeamSectionInertia; 2]]],
+    axial_forces_n: &[&[f64]],
+    budget: TieBudget,
+    cancelled: impl FnMut() -> bool,
+) -> Result<BeamTiedShellModel, PlateError> {
+    tie_beams_to_shells_impl(
+        tied,
+        components,
+        beams,
+        Some(axial_forces_n),
+        Some(BeamTieInertia::Section(reference_inertia)),
+        budget,
+        cancelled,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum BeamTieInertia<'a> {
+    Density(&'a [&'a [[f64; 2]]]),
+    Section(&'a [&'a [[BeamSectionInertia; 2]]]),
+}
+impl<'a> BeamTieInertia<'a> {
+    fn field(self, beam: usize) -> BeamReferenceInertiaField<'a> {
+        match self {
+            Self::Density(v) => BeamReferenceInertiaField::Density(v[beam]),
+            Self::Section(v) => BeamReferenceInertiaField::Section(v[beam]),
+        }
+    }
+    fn validate(self, beams: &[BeamOnShell<'_>]) -> Result<(), PlateError> {
+        let len = match self {
+            Self::Density(v) => v.len(),
+            Self::Section(v) => v.len(),
+        };
+        if len != beams.len() {
+            return Err(PlateError::BadConstraint {
+                what: "beam ties require reference inertia for every original beam",
+            });
+        }
+        for (b, beam) in beams.iter().enumerate() {
+            self.field(b)
+                .validate(beam.beam_nodes_m.len().saturating_sub(1))?;
+        }
+        Ok(())
+    }
 }
 
 fn tie_beams_to_shells_impl(
@@ -2765,27 +2845,15 @@ fn tie_beams_to_shells_impl(
     components: &[ShellComponent<'_>],
     beams: &[BeamOnShell<'_>],
     axial_forces_n: Option<&[&[f64]]>,
-    reference_density: Option<&[&[[f64; 2]]]>,
+    reference_inertia: Option<BeamTieInertia<'_>>,
     budget: TieBudget,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<BeamTiedShellModel, PlateError> {
     if cancelled() {
         return Err(PlateError::Cancelled);
     }
-    if let Some(density) = reference_density {
-        if density.len() != beams.len()
-            || density.iter().zip(beams).any(|(field, beam)| {
-                field.len() != beam.beam_nodes_m.len().saturating_sub(1)
-                    || field
-                        .iter()
-                        .flatten()
-                        .any(|rho| !rho.is_finite() || *rho <= 0.0)
-            })
-        {
-            return Err(PlateError::BadConstraint {
-                what: "beam ties require positive endpoint reference densities for every segment",
-            });
-        }
+    if let Some(inventory) = reference_inertia {
+        inventory.validate(beams)?;
     }
     if let Some(forces) = axial_forces_n {
         if forces.len() != beams.len()
@@ -2950,36 +3018,11 @@ fn tie_beams_to_shells_impl(
                 rows.push(acc.into_iter().filter(|&(_, w)| w != 0.0).collect());
             }
         }
-        let (k_b, m_b) = match (axial_forces_n, reference_density) {
-            (Some(forces), Some(density)) => {
-                assemble_prestressed_beam_chain_with_reference_density(
-                    beam.beam_nodes_m,
-                    beam.section_z,
-                    beam.section,
-                    beam.kind,
-                    density[beam_index],
-                    forces[beam_index],
-                )?
-            }
-            (None, Some(density)) => assemble_beam_chain_with_reference_density(
-                beam.beam_nodes_m,
-                beam.section_z,
-                beam.section,
-                beam.kind,
-                density[beam_index],
-                BeamMass::Consistent,
-            )?,
-            (Some(forces), None) => assemble_prestressed_beam_chain(
-                beam.beam_nodes_m,
-                beam.section_z,
-                beam.section,
-                beam.kind,
-                forces[beam_index],
-            )?,
-            (None, None) => {
-                assemble_beam_chain(beam.beam_nodes_m, beam.section_z, beam.section, beam.kind)?
-            }
-        };
+        let (k_b, m_b) = assemble_beam_chain_impl(
+            beam.beam_nodes_m, beam.section_z, beam.section, beam.kind, BeamMass::Consistent,
+            axial_forces_n.map(|forces| forces[beam_index]),
+            reference_inertia.map(|inventory| inventory.field(beam_index)),
+        )?;
         accumulate_congruence(&k_b, &rows, &mut k_coo, &mut cancelled)?;
         accumulate_congruence(&m_b, &rows, &mut m_coo, &mut cancelled)?;
         beam_rows.push(rows);
