@@ -15,6 +15,7 @@ use super::{QuadraticThermalResponse, elastic_response_at};
 use crate::linear3::{
     QuadraticThermalStrainField, TetElasticAssembly, TetElasticError, TetMaterialField, hash_usize,
 };
+use crate::prestress::{hash_elastic_material, prestress_configuration};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_sparse::{Coo, Csr};
@@ -32,6 +33,7 @@ pub struct QuadraticPrestressedAssembly {
     geometric_stiffness: Csr,
     response: QuadraticThermalResponse,
     identity: ContentHash,
+    configuration_identity: ContentHash,
 }
 
 impl QuadraticPrestressedAssembly {
@@ -64,6 +66,12 @@ impl QuadraticPrestressedAssembly {
     pub const fn identity(&self) -> ContentHash {
         self.identity
     }
+
+    // Original geometry, source tensors, quadrature, formulation and supports;
+    // thermal strains, dead loads and prescribed values are the affine load path.
+    pub(crate) const fn configuration_identity(&self) -> ContentHash {
+        self.configuration_identity
+    }
 }
 
 /// Private entry point: each public problem solves and assembles on the same
@@ -87,6 +95,19 @@ pub(in crate::linear3) fn assemble<const N: usize, const D: usize, R: Copy>(
     if n == 0 {
         return Err(TetElasticError::NoFreeDofs);
     }
+    let formulation = match response.formulation() {
+        crate::linear::Formulation::Standard => 0,
+        crate::linear::Formulation::BBar => 1,
+    };
+    let mut configuration = prestress_configuration(
+        nodes_m,
+        elements,
+        &pencil.free_dofs,
+        response.mesh_frame(),
+        formulation,
+        cx,
+    )?;
+    hash_usize(&mut configuration, stiffness_rule.len())?;
     let full_dofs = nodes_m
         .len()
         .checked_mul(3)
@@ -103,6 +124,7 @@ pub(in crate::linear3) fn assemble<const N: usize, const D: usize, R: Copy>(
         checkpoint(cx)?;
         let nodes = connectivity.map(|node| nodes_m[node]);
         let material = materials.at(element);
+        hash_elastic_material(&mut configuration, material);
         let projection = StrainProjection::prepare(
             nodes,
             element,
@@ -122,6 +144,14 @@ pub(in crate::linear3) fn assemble<const N: usize, const D: usize, R: Copy>(
                 &compatible_point
             };
             let material = thermal.material_at(material, element, point)?;
+            hash_elastic_material(&mut configuration, material);
+            for value in [weight, p.determinant]
+                .iter()
+                .chain(p.shapes.iter())
+                .chain(p.gradients.iter().flatten())
+            {
+                configuration.update(&value.to_bits().to_le_bytes());
+            }
             // Initial stress must be the same physical stress accepted by the
             // equilibrium owner. B-bar changes that constitutive strain, while
             // the geometric contraction still uses the actual basis gradients.
@@ -234,6 +264,7 @@ pub(in crate::linear3) fn assemble<const N: usize, const D: usize, R: Copy>(
         geometric_stiffness,
         response,
         identity: identity.finalize(),
+        configuration_identity: configuration.finalize(),
     })
 }
 

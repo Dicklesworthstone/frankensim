@@ -5562,11 +5562,25 @@ cancellation, budget and late-jump rollback.
   its load factor scales the complete reference stress without counting it
   twice. Results retain the reference assembly identity and original xyz mode
   mapping, including fully supported nodes. Geometry, mass and constitutive
-  tangent remain frozen. This is not a nonlinear load/temperature path, a
-  mixture of fixed and proportional preloads, or admission of the scaled
-  material state. `tests/buckling3.rs` supplies analytical constrained-tet and
-  Standard/B-bar HEX8 references, while `tests/buckling_scaling.rs` exercises
-  numerical cancellation and odd three-component maps.
+  tangent remain frozen. The proportional entry point scales the complete
+  reference and does not admit a scaled material state.
+  Accepted P1 and isoparametric assemblies also expose
+  `base.incremental_buckling(&reference, ...)`: lambda=0 denotes the fixed base
+  equilibrium and lambda=1 denotes the accepted unit-increment reference. The
+  pencil is `K_e + K_g,base + lambda*(K_g,reference - K_g,base)`. Pairing binds
+  original coordinates/connectivity/frame, actual original/incremental material
+  tensors and source identities, homogeneous incremental supports, and native
+  isoparametric formulation/quadrature. Thermal strain, dead loads and prescribed
+  values may differ. Canonical CSR subtraction is linear in nonzeros. The complete
+  base tangent must pass native SPD admission even for a zero increment; an
+  unstable or singular base refuses. Results retain both accepted state
+  identities and original xyz modes. These frozen-reference linear screens do
+  not predict changing material laws, follower loads or postbuckling.
+  `tests/buckling3.rs` supplies analytical constrained-tet and Standard/B-bar
+  HEX8 references; `tests/buckling3_preload.rs` independently checks fixed thermal
+  preloads plus prescribed increments, source/configuration pairing and unstable
+  bases. `tests/buckling_scaling.rs` exercises numerical cancellation and odd
+  three-component maps.
   `tests/buckling_scaling.rs` covers load/unit invariance, geometric work, small
   and full blocks, known noncommuting pencils and convergence refusal;
   `lambda_indicator` (Richardson) + `evidence_row`;

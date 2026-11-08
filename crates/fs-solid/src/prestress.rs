@@ -23,7 +23,7 @@ use fs_la::batched::{BatchMat, batch_inv};
 use fs_sparse::{Coo, Csr};
 use crate::linear3::{TetElasticAssembly, TetElasticError, TetLinearElasticProblem,
     TetThermalDisplacementSolution, TetThermalStrainField, TetThermalStressReport,
-    TetMaterialField};
+    TetMaterialField, TetElasticMaterial};
 use crate::linear3::{TetEigenstrainDisplacementSolution, eigenstrain::TetEigenstrainField};
 
 /// The original consistent-mass pencil with its source-bound stress correction.
@@ -35,6 +35,7 @@ pub struct PrestressedTetAssembly {
     geometric_stiffness: Csr,
     stress: TetThermalStressReport,
     identity: ContentHash,
+    configuration_identity: ContentHash,
 }
 impl PrestressedTetAssembly {
     /// Existing (K_t, M) carrier, directly consumable by fs-modal.
@@ -47,6 +48,11 @@ impl PrestressedTetAssembly {
     pub const fn stress(&self) -> &TetThermalStressReport { &self.stress }
     /// Binds the approximation to its original geometry/material/support/solution.
     pub const fn identity(&self) -> ContentHash { self.identity }
+    // Geometry, original/incremental material and homogeneous support space;
+    // thermal/dead/support-displacement loads deliberately remain separate.
+    pub(crate) const fn configuration_identity(&self) -> ContentHash {
+        self.configuration_identity
+    }
 }
 
 impl TetLinearElasticProblem<'_> {
@@ -60,7 +66,7 @@ impl TetLinearElasticProblem<'_> {
     ) -> Result<PrestressedTetAssembly, TetElasticError> {
         let stress = self.recover_eigenstrain_stress(solution, strains, mesh_frame,
             maximum_absolute_mandel_strain, cx)?;
-        self.assemble_tangent_from_stress(stress, None, cx)
+        self.assemble_tangent_from_stress(stress, self.materials, None, cx)
     }
     /// Assemble a thermal-prestressed vibration/stability pencil.
     ///
@@ -84,7 +90,7 @@ impl TetLinearElasticProblem<'_> {
     ) -> Result<PrestressedTetAssembly, TetElasticError> {
         let stress = self.recover_thermal_stress(solution, thermal, mesh_frame,
             maximum_absolute_mandel_strain, cx)?;
-        self.assemble_tangent_from_stress(stress, None, cx)
+        self.assemble_tangent_from_stress(stress, self.materials, None, cx)
     }
 
     /// The same initial-stress pencil for equilibrium with explicit dead nodal
@@ -102,7 +108,7 @@ impl TetLinearElasticProblem<'_> {
     ) -> Result<PrestressedTetAssembly, TetElasticError> {
         let stress = self.recover_thermal_stress_with_nodal_forces(solution, thermal,
             nodal_forces_n, mesh_frame, maximum_absolute_mandel_strain, cx)?;
-        self.assemble_tangent_from_stress(stress, None, cx)
+        self.assemble_tangent_from_stress(stress, self.materials, None, cx)
     }
 
     /// Initial-stress pencil about the same prescribed-displacement equilibrium.
@@ -123,7 +129,7 @@ impl TetLinearElasticProblem<'_> {
             solution, thermal, nodal_forces_n, prescribed_m,
             maximum_prescribed_displacement_m, mesh_frame,
             maximum_absolute_mandel_strain, cx)?;
-        self.assemble_tangent_from_stress(stress, None, cx)
+        self.assemble_tangent_from_stress(stress, self.materials, None, cx)
     }
 
     /// Preserve the original recovered stress while using an explicitly
@@ -213,7 +219,8 @@ impl TetLinearElasticProblem<'_> {
             materials: constitutive_materials, fixed_dofs: self.fixed_dofs,
             budget: self.budget,
         };
-        let mut result = problem.assemble_tangent_from_stress(stress, nodal_reference_density, cx)?;
+        let mut result = problem.assemble_tangent_from_stress(
+            stress, self.materials, nodal_reference_density, cx)?;
         // The original identity binds the accepted stress; the new one ALSO
         // binds the selected incremental constitutive law and exact coefficients.
         hash.update(result.identity().as_bytes());
@@ -231,6 +238,7 @@ impl TetLinearElasticProblem<'_> {
 
     fn assemble_tangent_from_stress(
         &self, stress: TetThermalStressReport,
+        stress_materials: TetMaterialField<'_>,
         nodal_reference_density: Option<&[f64]>, cx: &Cx<'_>,
     ) -> Result<PrestressedTetAssembly, TetElasticError> {
         let mut pencil = match nodal_reference_density {
@@ -238,6 +246,16 @@ impl TetLinearElasticProblem<'_> {
             None => self.assemble(cx)?,
         };
         checkpoint(cx)?;
+        let mut configuration = prestress_configuration(
+            self.nodes_m, self.tetrahedra, &pencil.free_dofs,
+            stress.mesh_frame(), 0, cx)?;
+        configuration.update(&[u8::from(nodal_reference_density.is_some())]);
+        if let Some(density) = nodal_reference_density {
+            for (i, value) in density.iter().enumerate() {
+                if i % 256 == 0 { checkpoint(cx)?; }
+                configuration.update(&value.to_bits().to_le_bytes());
+            }
+        }
         let mut reduced = vec![None; self.nodes_m.len().checked_mul(3)
             .ok_or(TetElasticError::SizeOverflow)?];
         for (i, &dof) in pencil.free_dofs.iter().enumerate() {
@@ -259,6 +277,13 @@ impl TetLinearElasticProblem<'_> {
             }
             for (local, tet) in cells.iter().enumerate() {
                 let e = batch * 64 + local;
+                for field in [stress_materials, self.materials] {
+                    let material = match field {
+                        TetMaterialField::Uniform(value) => value,
+                        TetMaterialField::PerElement(values) => &values[e],
+                    };
+                    hash_elastic_material(&mut configuration, material);
+                }
                 let mut grad = [[0.0; 3]; 4];
                 for a in 1..4 {
                     for i in 0..3 { grad[a][i] = inverse.get(local, a - 1, i); }
@@ -326,11 +351,58 @@ impl TetLinearElasticProblem<'_> {
         }
         let identity = hash.finalize();
         checkpoint(cx)?;
-        Ok(PrestressedTetAssembly { pencil, elastic_stiffness, geometric_stiffness, stress, identity })
+        Ok(PrestressedTetAssembly { pencil, elastic_stiffness, geometric_stiffness, stress, identity,
+            configuration_identity: configuration.finalize() })
     }
 }
 fn invalid(what: &'static str) -> TetElasticError { TetElasticError::InvalidStressObservation { what } }
 fn checkpoint(cx: &Cx<'_>) -> Result<(), TetElasticError> {
     cx.checkpoint().map_err(|_| TetElasticError::Cancelled)
+}
+
+// Pairing equilibria for an affine load path requires the original physical
+// configuration, not merely equal reduced matrix dimensions or load receipts.
+// Keep this digest private to accepted prestress owners; it excludes loads.
+pub(crate) fn prestress_configuration<const N: usize>(
+    nodes_m: &[[f64; 3]],
+    elements: &[[usize; N]],
+    free_dofs: &[usize],
+    mesh_frame: ContentHash,
+    formulation: u8,
+    cx: &Cx<'_>,
+) -> Result<DomainHasher, TetElasticError> {
+    let mut identity = DomainHasher::new("org.frankensim.fs-solid.prestress-configuration.v1");
+    identity.update(mesh_frame.as_bytes());
+    identity.update(&[formulation]);
+    for count in [N, nodes_m.len(), elements.len(), free_dofs.len()] {
+        let count = u64::try_from(count).map_err(|_| TetElasticError::SizeOverflow)?;
+        identity.update(&count.to_le_bytes());
+    }
+    for (node, point) in nodes_m.iter().enumerate() {
+        if node % 256 == 0 { checkpoint(cx)?; }
+        for value in point { identity.update(&value.to_bits().to_le_bytes()); }
+    }
+    for (element, connectivity) in elements.iter().enumerate() {
+        if element % 64 == 0 { checkpoint(cx)?; }
+        for &node in connectivity {
+            let node = u64::try_from(node).map_err(|_| TetElasticError::SizeOverflow)?;
+            identity.update(&node.to_le_bytes());
+        }
+    }
+    for (row, &dof) in free_dofs.iter().enumerate() {
+        if row % 256 == 0 { checkpoint(cx)?; }
+        let dof = u64::try_from(dof).map_err(|_| TetElasticError::SizeOverflow)?;
+        identity.update(&dof.to_le_bytes());
+    }
+    checkpoint(cx)?;
+    Ok(identity)
+}
+
+pub(crate) fn hash_elastic_material(identity: &mut DomainHasher, material: &TetElasticMaterial) {
+    identity.update(&material.material_state_identity);
+    identity.update(&material.density_kg_m3.to_bits().to_le_bytes());
+    for value in material.stiffness_mandel_pa().iter().flatten() {
+        identity.update(&value.to_bits().to_le_bytes());
+    }
 }
 
