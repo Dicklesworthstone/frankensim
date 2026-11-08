@@ -22208,3 +22208,11 @@ confinement, pressure-dependent EOS, Gibbs stability, melting support or melt
 flow. Regressions cover different original caloric datums, unequal density and
 expansion, adiabatic phase shrinkage, subsequent heat, resumed kinetics,
 explicit pressure support, phase identity and late cancellation.
+
+## Corning 7980 reference stress birefringence
+
+`silica_stress_optic` retains Priestley (Corning), SPIE 4346 (2001), equation (2) and Table 1, DOI `10.1117/12.435666`: the nominal 193/248/633 nm lines have mean stress-optic coefficients 51/42/35 nm/cm/MPa and between-specimen one-sigma spreads 3/1/1 in those units. They convert to inverse Pa with factor `1e-13`. The source used uniaxial compression, did not specify temperature dependence, and plotted different fit ranges by wavelength; the 1.24 MPa load-cell capacity is not an admitted multi-axial stress envelope. These remain three discrete source lines, without a borrowed continuous dispersion fit.
+
+The evaluator borrows the original tension-positive tensor-shear `Voigt` stress and projects its transverse anisotropy under an explicitly adopted isotropic linear constitutive extension. It returns differential indices and relative phase with the higher-index slow axis; hydrostatic stress cancels. Common index/group shifts, splitting and walk-off are outside this law. Applicability to the caller's stress, temperature and specimen remains the caller's responsibility, distinct from scalar CHARMS provenance.
+
+Validation: the three original source assertion bodies executed successfully in a small dynamic-std executable using the exact production module, exact original Voigt alias and original cached fs-math/fs-blake3. They cover the published SI/one-sigma controls, signed tensor shear and principal stresses, oblique projection/frame covariance, hydrostatic null and refusals. Rustfmt passed. Cargo libtest and Clippy could not write their outputs because the environment was full; no workspace lint or native-renderer test pass is claimed.

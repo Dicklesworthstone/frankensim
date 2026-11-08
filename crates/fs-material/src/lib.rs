@@ -126,6 +126,8 @@ pub mod thermal;
 pub mod thermo_optic;
 /// Original NASA CHARMS Corning 7980 silica phase/group and thermal refraction.
 pub mod silica_refraction;
+/// Source-line Corning 7980 stress birefringence on original Cauchy stress.
+pub mod silica_stress_optic;
 /// Original IAPWS ordinary-water phase/group indices and state derivatives.
 pub mod water_refraction;
 /// Complete sourced 25 degree Celsius liquid-water extinction spectrum.
