@@ -481,6 +481,11 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
         gate: &CancelGate,
     ) -> Result<Self> {
         check(gate)?;
+        if mechanical.axial_relaxation_state().is_some() {
+            return Err(invalid(
+                "axial Maxwell memory requires an explicit hereditary caloric coupling; its heat cannot be omitted",
+            ));
+        }
         if !source_energy_tolerance_j.is_finite()
             || source_energy_tolerance_j < 0.0
             || !network_source.resistors.is_empty()

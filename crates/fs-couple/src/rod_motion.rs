@@ -373,6 +373,10 @@ pub use bending_loss::{PreparedRodBendingLoss, RodAngularLosses, RodBendingHeat}
 pub mod axial_loss;
 pub use axial_loss::{PreparedRodAxialLoss, RodAxialHeat};
 
+/// Source-bound axial Maxwell memory within the original native motion step.
+pub mod axial_relaxation;
+pub use axial_relaxation::{PreparedRodAxialRelaxation, RodAxialRelaxationHeat, RodAxialRelaxationState};
+
 /// Original transverse shear viscosity using the full native strain pullback.
 pub mod transverse_loss;
 pub use transverse_loss::{PreparedRodTransverseLoss, RodMaterialLosses, RodTransverseHeat};
@@ -408,6 +412,8 @@ pub struct RodMotionControls {
 pub enum RodMotionError {
     Solid(SpatialRodError),
     Rotation(LieStepError),
+    /// Exact axial momentum/memory flow or its physical heat integral refused.
+    AxialRelaxation(fs_phs::PhsError),
     SpatialInertia(fs_mbd::articulated::ArticulatedError),
     PrincipalFrame(fs_mbd_material::principal::PrincipalFrameError),
     SpatialLoads(fs_mbd::spatial_loads::SpatialLoadError),
@@ -424,6 +430,7 @@ impl core::fmt::Display for RodMotionError {
         match self {
             Self::Solid(e)=>write!(f,"rod motion: {e}"),
             Self::Rotation(e)=>write!(f,"rod motion: {e}"),
+            Self::AxialRelaxation(e)=>write!(f,"rod axial relaxation: {e}"),
             Self::SpatialInertia(e)=>write!(f,"rod reference inertia: {e}"),
             Self::PrincipalFrame(e)=>write!(f,"rod principal inertia: {e}"),
             Self::SpatialLoads(e)=>write!(f,"rod applied load: {e}"),
@@ -444,7 +451,7 @@ impl From<LieStepError> for RodMotionError { fn from(e:LieStepError)->Self {Self
 #[derive(Clone, Debug, PartialEq)]
 pub struct RodMotionObservables {
     pub kinetic_energy_j: f64,
-    /// Native elastic/link storage plus gravity and hydrostatic potentials.
+    /// Native elastic/link/Maxwell storage plus gravity and hydrostatic potentials.
     pub potential_energy_j: f64,
     pub linear_momentum_kg_m_s: [f64; 3],
     /// Centroid orbital momentum about the requested origin PLUS central spin.
@@ -473,6 +480,8 @@ pub struct RodMotionStep {
     pub bending_heat: Option<RodBendingHeat>,
     /// Intrinsic axial heat in original segment order, never numerical damping.
     pub axial_heat: Option<RodAxialHeat>,
+    /// Independently integrated axial Maxwell heat; distinct from Kelvin loss.
+    pub axial_relaxation_heat: Option<RodAxialRelaxationHeat>,
     /// Intrinsic transverse shear heat, distinct from torsion and numerical loss.
     pub transverse_heat: Option<RodTransverseHeat>,
     /// Applied loads, gravity/buoyancy wrenches and stationary-support impulses.
@@ -499,6 +508,7 @@ pub struct RodMotion<I = RodNodalInertia> {
     /// Central angular momentum expressed in the ORIGINAL material frame.
     spin: Vec<[f64; 3]>,
     response: RodMotionResponse,
+    axial_relaxation: Option<RodAxialRelaxationState>,
     time_s: f64,
     steps: usize,
 }
@@ -562,7 +572,7 @@ impl<I:RodMotionInertia> RodMotion<I> {
             kinetics.push(k);
         }
         let state=Self {model,kinetics:Arc::from(kinetics),pose,translation_remainder_m:vec![[0.0;3];n],
-            linear,spin,response,time_s,steps:0};
+            linear,spin,response,axial_relaxation:None,time_s,steps:0};
         state.observe([0.0;3])?;
         checkpoint(gate)?;Ok(state)
     }
@@ -606,8 +616,10 @@ impl<I:RodMotionInertia> RodMotion<I> {
         Ok(RodMotionObservables {kinetic_energy_j:kinetic,potential_energy_j:self.response.potential_energy_j,
             linear_momentum_kg_m_s:linear,angular_momentum_kg_m2_s:angular})
     }
-    /// One atomic candidate. One fresh analytical force assembly; no dense
-    /// tangent or new eigendecomposition in the step. Sources remain immutable.
+    /// One atomic candidate using the original analytical elastic force assembly.
+    /// Attached axial memory reuses exact local plans for matching mobility and
+    /// duration; changed geometric mobility can require a new preparation.
+    /// Sources remain immutable.
     pub fn step_candidate(&self,dt:f64,loads:&[RodNodalWrench],controls:RodMotionControls,
         gate:&CancelGate)->Result<(Self,RodMotionStep),RodMotionError> {
         self.step_with_loads(dt,StageLoads::World(loads),controls,gate)
@@ -664,6 +676,11 @@ impl<I:RodMotionInertia> RodMotion<I> {
         let before=self.observe(controls.balance_origin_m)?;
         let mut candidate=self.clone();
         let mut accounts=KickAccounts::new(loads.len());
+        let mut axial_relaxation_heat=candidate.axial_relaxation.as_ref()
+            .map(RodAxialRelaxationState::heat_record);
+        if let Some(heat)=&mut axial_relaxation_heat {
+            candidate.flow_axial_relaxation(0.5*dt,controls.balance_origin_m,&mut accounts,heat,gate)?;
+        }
         let mut torsional_heat=losses.torsional.map(PreparedRodTorsionalLoss::heat);
         let mut bending_heat=losses.bending.map(PreparedRodBendingLoss::heat);
         let mut axial_heat=axial.map(PreparedRodAxialLoss::heat);
@@ -733,6 +750,7 @@ impl<I:RodMotionInertia> RodMotion<I> {
             }
         }
         candidate.response=candidate.model.evaluate(&candidate.pose,gate)?;
+        candidate.restore_axial_relaxation_response(gate)?;
         candidate.kick_retained(0.5*dt,loads,controls.balance_origin_m,
             &mut remainders,&mut work,&mut accounts,gate)?;
         accounts.work=momentum::checked(work).map_err(RodMotionError::Invalid)?.to_f64();
@@ -740,6 +758,9 @@ impl<I:RodMotionInertia> RodMotion<I> {
         // Never reapply these discarded tails after a dissipative state change.
         drop(remainders);
         loss_flow(&mut candidate,&mut accounts)?;
+        if let Some(heat)=&mut axial_relaxation_heat {
+            candidate.flow_axial_relaxation(0.5*dt,controls.balance_origin_m,&mut accounts,heat,gate)?;
+        }
         let after=candidate.observe(controls.balance_origin_m)?;
         let mut defect=(after.kinetic_energy_j-before.kinetic_energy_j)
             +(after.potential_energy_j-before.potential_energy_j)-accounts.work;
@@ -747,6 +768,7 @@ impl<I:RodMotionInertia> RodMotion<I> {
         if let Some(heat)=&bending_heat {defect+=heat.total_heat_j;}
         if let Some(heat)=&axial_heat {defect+=heat.total_heat_j;}
         if let Some(heat)=&transverse_heat {defect+=heat.total_heat_j;}
+        if let Some(heat)=&axial_relaxation_heat {defect+=heat.total_heat_j;}
         finite(&[accounts.work,defect])?;
         if defect.abs()>controls.energy_defect_limit_j {
             return Err(RodMotionError::Energy {defect_j:defect,limit_j:controls.energy_defect_limit_j});
@@ -759,7 +781,7 @@ impl<I:RodMotionInertia> RodMotion<I> {
         candidate.steps=self.steps.checked_add(1).ok_or(RodMotionError::Invalid("rod step count overflow"))?;
         checkpoint(gate)?;
         Ok((candidate,RodMotionStep {before,after,source_work_quadrature_j:accounts.work,
-            integration_defect_j:defect,torsional_heat,bending_heat,axial_heat,transverse_heat,external_linear_impulse_n_s:accounts.linear,
+            integration_defect_j:defect,torsional_heat,bending_heat,axial_heat,axial_relaxation_heat,transverse_heat,external_linear_impulse_n_s:accounts.linear,
             external_angular_impulse_nm_s:accounts.angular,linear_balance_residual_n_s:linear_residual,
             angular_balance_residual_nm_s:angular_residual,support_impulses:accounts.supports}))
     }

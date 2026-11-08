@@ -191,6 +191,9 @@ impl DisplacementMode {
         spin: [[0.0; 3]; 2],
         mobility: 0.0,
     };
+    pub(super) fn mobility(self) -> f64 {
+        self.mobility
+    }
 }
 
 /// Shared native pullback for axial extension and transverse shear. Reference
@@ -248,6 +251,18 @@ pub(super) fn relax_displacement<I: RodMotionInertia>(
     gate: &CancelGate,
 ) -> Result<f64, RodMotionError> {
     checkpoint(gate)?;
+    let rate = displacement_rate(state, segment, mode)?;
+    let (impulse, dissipated) = rank_one_relaxation(rate, mode.mobility, resistance, dt)?;
+    apply_displacement_impulse(state, segment, mode, impulse, origin, accounts, gate)?;
+    Ok(dissipated)
+}
+
+/// Work-conjugate extension/shear rate on the original centroid/spin inventory.
+pub(super) fn displacement_rate<I: RodMotionInertia>(
+    state: &RodMotion<I>,
+    segment: usize,
+    mode: DisplacementMode,
+) -> Result<f64, RodMotionError> {
     let mut rate = 0.0;
     for side in 0..2 {
         let node = segment + side;
@@ -256,9 +271,24 @@ pub(super) fn relax_displacement<I: RodMotionInertia>(
             + dot(mode.spin[side], k.omega(state.spin[node])?);
     }
     finite(&[rate])?;
-    let (impulse, dissipated) = rank_one_relaxation(rate, mode.mobility, resistance, dt)?;
+    Ok(rate)
+}
+
+/// Apply one original strain-covector impulse, including stationary reactions.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_displacement_impulse<I: RodMotionInertia>(
+    state: &mut RodMotion<I>,
+    segment: usize,
+    mode: DisplacementMode,
+    impulse: f64,
+    origin: [f64; 3],
+    accounts: &mut KickAccounts,
+    gate: &CancelGate,
+) -> Result<(), RodMotionError> {
+    checkpoint(gate)?;
+    finite(&[impulse])?;
     if impulse == 0.0 {
-        return Ok(dissipated);
+        return Ok(());
     }
     for side in 0..2 {
         let node = segment + side;
@@ -302,8 +332,113 @@ pub(super) fn relax_displacement<I: RodMotionInertia>(
         finite(&accounts.supports[node].linear_n_s)?;
         finite(&accounts.supports[node].angular_nm_s)?;
     }
-    Ok(dissipated)
+    Ok(())
 }
+
+/// Use the exact responsive endpoint only when ordinary impulse subtraction
+/// strongly cancels. The original integral still owns all support reactions.
+/// Affine invariants in the SAME impulse covector preserve perpendicular motion;
+/// no nonzero invariant is discarded to manufacture a pure-mode tail.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_displacement_flow<I: RodMotionInertia>(
+    state: &mut RodMotion<I>,
+    segment: usize,
+    mode: DisplacementMode,
+    impulse: f64,
+    endpoint_rate: f64,
+    origin: [f64; 3],
+    accounts: &mut KickAccounts,
+    gate: &CancelGate,
+) -> Result<(), RodMotionError> {
+    use super::momentum;
+    use fs_math::dd::Dd;
+    finite(&[endpoint_rate])?;
+    let mut before = [0.0; 12];
+    let mut direction = [0.0; 12];
+    for side in 0..2 {
+        let node = segment + side;
+        for axis in 0..3 {
+            before[6 * side + axis] = state.linear[node][axis];
+            before[6 * side + 3 + axis] = state.spin[node][axis];
+            if !state.model.fixed_positions()[node][axis] {
+                direction[6 * side + axis] = mode.force[side][axis];
+            }
+            if !state.model.fixed_frames()[node] {
+                direction[6 * side + 3 + axis] = mode.spin[side][axis];
+            }
+        }
+    }
+    apply_displacement_impulse(state, segment, mode, impulse, origin, accounts, gate)?;
+    let cancelled = (0..12).any(|i| {
+        let side = i / 6;
+        let axis = i % 6;
+        let node = segment + side;
+        let next = if axis < 3 {
+            state.linear[node][axis]
+        } else {
+            state.spin[node][axis - 3]
+        };
+        direction[i] != 0.0 && before[i] != 0.0 && next.abs() < before[i].abs() / 256.0
+    });
+    if !cancelled {
+        return Ok(());
+    }
+    let pivot = (0..12)
+        .max_by(|&i, &j| direction[i].abs().total_cmp(&direction[j].abs()))
+        .expect("twelve native momentum coordinates");
+    let gp = Dd::from_f64(direction[pivot]);
+    let pp = Dd::from_f64(before[pivot]);
+    let mut invariant = [Dd::ZERO; 12];
+    for i in 0..12 {
+        if i != pivot {
+            invariant[i] =
+                momentum::checked(Dd::from_f64(before[i]) - (Dd::from_f64(direction[i]) / gp) * pp)
+                    .map_err(RodMotionError::Invalid)?;
+        }
+    }
+    let project = |values: [Dd; 12]| -> Result<Dd, RodMotionError> {
+        let mut rate = Dd::ZERO;
+        for side in 0..2 {
+            let k = state.kinetics[segment + side];
+            let velocity =
+                momentum::velocity(std::array::from_fn(|i| values[6 * side + i]), k.mass)
+                    .map_err(RodMotionError::Invalid)?;
+            let omega = k.omega_retained(std::array::from_fn(|i| values[6 * side + 3 + i]))?;
+            for i in 0..3 {
+                rate = rate
+                    + Dd::from_f64(mode.force[side][i]) * velocity[i]
+                    + Dd::from_f64(mode.spin[side][i]) * omega[i];
+            }
+        }
+        momentum::checked(rate).map_err(RodMotionError::Invalid)
+    };
+    let mobility = project(direction.map(Dd::from_f64))?;
+    if mobility.to_f64() <= 0.0 {
+        return Err(RodMotionError::Invalid(
+            "positive responsive mobility required for exact endpoint",
+        ));
+    }
+    let amplitude =
+        momentum::checked((Dd::from_f64(endpoint_rate) - project(invariant)?) / mobility)
+            .map_err(RodMotionError::Invalid)?;
+    for i in 0..12 {
+        if direction[i] == 0.0 {
+            continue;
+        }
+        let next = momentum::checked(invariant[i] + Dd::from_f64(direction[i]) * amplitude)
+            .map_err(RodMotionError::Invalid)?
+            .to_f64();
+        let node = segment + i / 6;
+        let axis = i % 6;
+        if axis < 3 {
+            state.linear[node][axis] = next;
+        } else {
+            state.spin[node][axis - 3] = next;
+        }
+    }
+    checkpoint(gate)
+}
+
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     (0..3).map(|i| a[i] * b[i]).sum()
 }

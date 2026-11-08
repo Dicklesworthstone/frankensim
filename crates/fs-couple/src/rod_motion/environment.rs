@@ -72,6 +72,7 @@ impl<I: RodMotionInertia> RodMotion<I> {
         let mut candidate = self.clone();
         candidate.model = Arc::new(model);
         candidate.response = response;
+        candidate.restore_axial_relaxation_response(gate)?;
         let report = RodFluidRefresh {
             time_s: self.time_s,
             before,

@@ -7379,3 +7379,61 @@ orders of magnitude while holding the physical channels fixed, and checks
 harmonic response, causal motion, heat, and extent refusal. It is authored but
 not claimed executed: native Rust validation remains blocked by the bounded
 shared dependency build.
+
+## Axial Maxwell history on native finite-rotation rods
+
+`rod_motion::PreparedRodAxialRelaxation` binds one original
+`ConcentricPronyAxialSection` to each native reference segment. Equilibrium
+Young stiffness stays with the existing elastic rod; each retained material arm
+adds its own area-weighted excess axial rigidity, relaxation time and independent
+history. Segment lengths, complete material queries, geometry, original elastic
+selectors and source receipts must agree. A finite-frequency sample cannot
+silently authorize this transient law: explicit broadband source support is
+required. The scalar small-strain axial material model does not infer hereditary
+shear, bending or torsion.
+
+`RodMotion::with_relaxed_axial_relaxation` declares relaxed initial memory;
+`with_axial_relaxation` accepts explicit dimensionless spring strains in original
+segment/layer/declaration order. Both attach only at initialization. The native
+motion state retains history, storage and cumulative physical heat through
+clones, accepted continuation and instantaneous momentum changes. Rejected
+candidates do not mutate that accepted state. Fluid refresh rebuilds the native
+response with the same memory; changed solid source queries refuse. The existing
+finite-enthalpy composer refuses this history until an explicit hereditary
+caloric coupling can retain its physical heat.
+
+The actual geodesic-midpoint axial rate and its full work-conjugate force/couple
+pullback come from `fs-solid`'s original finite-rotation kinematics. The original
+centroid/spin mobility and support-impulse owner are shared with axial viscosity.
+Each frozen-pose arm forms a reciprocal two-state kinetic/spring system and uses
+the existing exact quadratic pHS propagator. A zero-held reciprocal observation
+port supplies the integrated force impulse directly; subtraction of nearly equal
+endpoint velocities does not determine it. Under strong momentum cancellation,
+retained native covector invariants and the exact responsive endpoint preserve
+representable motion tails; weak updates and physical support accounts keep the
+original integrated impulse. The same original exact owner
+independently integrates nonnegative material heat. Symmetric original-arm sweeps
+surround the native equilibrium-elastic mechanical step. Branch forces and strain
+advection are not repeated in that mechanical step.
+
+Returned `RodMotionStep::axial_relaxation_heat` separates original branch and
+segment heat; the original energy gate includes branch storage and this physical
+heat while retaining the signed numerical integration defect separately. Existing
+Kelvin loss channels remain independently selectable. No residual is renamed as
+heat and no heat is implicitly deposited in a thermal owner. Fixed supports
+retain the complete time-integrated material reaction. Clamped arms use the
+original exact held-strain Prony map, including positive heat and force integral;
+zero-strength arms retain their authored history without force or dissipation.
+
+The symmetric composition is second order for resolved smooth motion and still
+requires elastic-wave and geometric-splitting refinement. The local reciprocal
+flow treats fast Maxwell dynamics jointly: at fixed excess stiffness its force
+and heat vanish as relaxation time tends to zero, while fixed excess stiffness
+times relaxation time approaches the physical Kelvin resistance. No explicit
+branch-force kick leaves artificial step-dependent drag. This does not establish
+exact complete moving-rod trajectories, finite-strain material calibration or a
+general hereditary tensor law. Existing pHS exponential resource and energy gates
+remain authoritative and can refuse unrepresentable intervals. Immutable exact
+plans reuse matching mobility and duration across candidates; one caller-owned
+workspace serves all arms without warm per-arm allocations, and original
+strain-covector scratch remains bounded on the stack.

@@ -81,6 +81,7 @@ impl<I: RodMotionInertia> RodMotion<I> {
         let mut candidate = self.clone();
         candidate.model = model;
         candidate.response = response;
+        candidate.restore_axial_relaxation_response(gate)?;
         checkpoint(gate)?;
         Ok((candidate, report))
     }
