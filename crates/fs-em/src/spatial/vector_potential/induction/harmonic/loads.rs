@@ -8,9 +8,10 @@
 //! real coefficient fields are P1. The original consistent load integrator
 //! preserves their force, torque and virtual work without vertex lumping.
 //!
-//! These are AC conduction-current volume forces. DC/AC cross terms, impressed
-//! winding-current forces, magnetization, magnetostriction and interface
-//! traction are outside this transfer. Do not add an overlapping enclosing
+//! These are conduction-current volume forces. The static-bias child retains
+//! fundamental forcing in stationary, DC-current-free selected conductors.
+//! General moving/DC-driven cross terms, impressed winding-current forces,
+//! magnetization, magnetostriction and interface traction are outside this transfer. Do not add an overlapping enclosing
 //! Maxwell-stress load to the same body. Mechanical feedback, geometry changes
 //! and vibration-induced electrical sidebands require a coupled evolution;
 //! these fixed-geometry coefficients supply one-way mechanical forcing only.
@@ -22,6 +23,8 @@ use super::super::mechanical::{
 use super::{SpatialHarmonicInductionResponse, cross};
 use fs_material::conductor::spatial::SpatialConductorMaterial;
 
+mod bias;
+pub use bias::SpatialHarmonicBiasLorentzLoads;
 mod cross;
 pub use cross::SpatialHarmonicLorentzCrossLoads;
 

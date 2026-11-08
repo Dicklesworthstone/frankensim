@@ -1,5 +1,27 @@
 # fs-em contract
 
+## Fundamental Lorentz forcing in an original static magnetic bias
+
+`SpatialHarmonicInductionResponse::static_bias_lorentz_loads` transfers the
+peak carrier-frequency term `J_ac cross B_dc` from an accepted original
+magnetostatic field and the retained AC current. Its cosine and sine loads
+have no half-factor. Add them to the existing AC mean and twice-frequency
+loads; both coefficients retain consistent P1 nodal force, native wrench
+and virtual work. The original static gauge and trace values may differ,
+while geometry, material identity and prescribed-trace mask must agree.
+No electromagnetic solve, temporal sampling or state advancement occurs.
+
+This path admits stationary conductors and selected cells without impressed
+DC current. Motion or DC-driven selected cells require the additional
+DC-current/AC-field term and are refused. Linear original magnetic laws,
+source-bound fields, bounded selection/storage, canonical ordering and
+transactional cancellation remain explicit. Nonlinear saturation, recoil
+operating envelopes, DC terminals, impressed-current force and mechanical
+feedback are outside this owner. Tests reconstruct full real J and static+AC
+B before independent tetrahedral quadrature, exercise gauge/phase/scaling,
+and reject incompatible source, trace, DC current, motion and work budgets.
+
+
 ## Coherent finite-window heat and loads from native 3D harmonic induction
 
 With `harmonic-exposure`, `SpatialInduction::prepare_harmonic_exposure` retains

@@ -1,4 +1,6 @@
 //! AC mechanical forcing from the original solved field, including magnetic hum.
+#[path = "loads/bias.rs"]
+mod bias;
 use super::*;
 use fs_em::spatial::vector_potential::induction::{
     harmonic::SpatialHarmonicInductionResponse,
@@ -32,6 +34,14 @@ fn instantaneous_superposition_reference(
     responses: &[(&SpatialHarmonicInductionResponse<'_, '_>, f64)],
     selected: &[usize],
 ) -> (Vec<[f64; 3]>, [f64; 6], f64) {
+    instantaneous_superposition_with_bias(responses, selected, None)
+}
+
+fn instantaneous_superposition_with_bias(
+    responses: &[(&SpatialHarmonicInductionResponse<'_, '_>, f64)],
+    selected: &[usize],
+    bias: Option<&[[f64; 3]]>,
+) -> (Vec<[f64; 3]>, [f64; 6], f64) {
     let problem = responses[0].0.problem();
     let mut nodal = vec![[0.0; 3]; problem.mesh().vertex_count];
     let mut wrench = [0.0; 6];
@@ -49,7 +59,7 @@ fn instantaneous_superposition_reference(
             .find(|c| c.cell == cell)
             .unwrap();
         let tet = problem.mesh().tets[cell].map(|v| v as usize);
-        let mut b = [0.0; 3];
+        let mut b = bias.map_or([0.0; 3], |field| field[cell]);
         let mut current = [[0.0; 3]; 4];
         for &(response, phase) in responses {
             let (sine, cosine) = det::sin_cos(phase);
