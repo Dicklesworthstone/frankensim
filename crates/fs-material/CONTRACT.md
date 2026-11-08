@@ -5495,6 +5495,24 @@ constitutive law, not an automatic derivative of a coupled dynamics solve, a
 stress-control eigenbasis, a source selection or fractional-to-Prony fit, and it
 does not establish measured-material identifiability or a new applicability band.
 
+`visco::history_fit::fit_prony_history[_with_cancel]` fits a passive runtime
+material directly to original, nonuniform strain/stress observations on a
+caller-supplied relaxation-time ladder. The first observation explicitly has
+fully relaxed branch memory, including at nonzero total strain. Exact original
+`PronyRamp` histories form the design columns; the existing nonnegative solver
+fits positive equilibrium and nonnegative branch moduli. Each observation's
+authored absolute stress error weights its row. Factored column equilibration
+preserves stress-unit scaling, and an independent replay through the original
+material `step` must satisfy EVERY observation bound. Sample/branch capacities,
+unexcited columns, duplicate times, unrepresentable arithmetic and cancellation
+have explicit refusals. The small dense path supports at most 63 branches plus
+equilibrium and polls before/after its bounded NNLS solve, not inside it.
+G1/G3 tests recover a multibranch law through loading/reversal, reproduce heat
+on a different loading history, exercise unequal observation errors and preserve
+stress/clock unit changes. These are synthetic numerical checks; a successful
+sampled fit does not identify unknown relaxation times, establish unique physical
+parameters, validate unsampled histories or invent a source applicability band.
+
 `visco::slab_ted` evaluates the complete insulated-slab thermal diffusion
 spectrum in constant work, using a positive low-frequency series and scaled
 closed form. `slab_loss_factor` is the uniaxial bending loss;

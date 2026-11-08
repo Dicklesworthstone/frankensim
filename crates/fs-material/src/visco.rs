@@ -50,6 +50,8 @@ pub mod slab_ted;
 pub mod modified_zener;
 pub mod source;
 pub mod stress_control;
+/// Passive Prony calibration from original prescribed strain/stress histories.
+pub mod history_fit;
 /// Declared WLF/Arrhenius shifts of existing scalar and tensor viscous kinetics.
 pub mod temperature;
 /// Passive full-tensor Prony (generalized Maxwell) viscoelastic law in Mandel coordinates.
