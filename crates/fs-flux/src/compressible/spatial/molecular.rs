@@ -77,7 +77,8 @@ struct MolecularWorkspace {
 /// flux includes wall mechanical work and friction heat sent to the wall.
 /// Fourier flux uses the physical half-cell distance. SGS wall flux vanishes
 /// by default; an explicit smooth equilibrium
-/// stress model can supply adiabatic wall traction on a coarse SGS mesh.
+/// stress model can supply adiabatic wall traction on a coarse SGS mesh, or
+/// explicitly include integrated heat transfer at an isothermal wall.
 /// Other walls require a resolved molecular wall layer. Transmissive ends
 /// have zero molecular flux by default. [`Self::with_reservoir_exchange`]
 /// enables heat and stress exchange through complete source-admitted uniform
@@ -878,6 +879,22 @@ fn spatial<L: TransportLaw>(
             };
             #[cfg(feature = "experimental-sgs")]
             let (wall_mu, shear_diffusion) = (wall_viscosity.secant, wall_viscosity.tangent);
+            #[cfg(feature = "experimental-sgs")]
+            let conductivity = match (subgrid.as_ref(), wall_model) {
+                (Some(sgs), Some(model)) => sgs.wall_conductivity(
+                    gas,
+                    2 * axis + usize::from(face == count),
+                    model,
+                    pl,
+                    0.5 * grid.spacing[axis],
+                    mu,
+                    conductivity,
+                    temperature,
+                    pressure,
+                    cancelled,
+                )?,
+                _ => conductivity,
+            };
             #[cfg(not(feature = "experimental-sgs"))]
             let (wall_mu, shear_diffusion) = (mu, mu);
             // Cover both tangential cross-derivative stencils, variable face

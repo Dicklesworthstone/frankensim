@@ -89,3 +89,23 @@ fn invalid_physics_budget_and_cancellation_refuse() {
     assert!(matches!(equilibrium_wall_heat_transfer(1.0, 1.0, &fluid(0.7), config(), &cancelled),
         Err(ChtError::Cancelled)));
 }
+
+#[test]
+fn callback_owner_matches_gate_and_can_cancel_during_thermal_quadrature() {
+    let gate = CancelGate::new_clock_free();
+    let fluid = fluid(7.0);
+    let expected = equilibrium_wall_heat_transfer(7e4, 1.0, &fluid, config(), &gate).unwrap();
+    let mut polls = 0;
+    let actual = equilibrium_wall_heat_transfer_cancellable(7e4, 1.0, &fluid, config(), || {
+        polls += 1;
+        false
+    }).unwrap();
+    assert_eq!(actual, expected);
+    assert!(polls > 20);
+    let mut seen = 0;
+    assert!(matches!(equilibrium_wall_heat_transfer_cancellable(7e4, 1.0, &fluid, config(), || {
+        seen += 1;
+        seen == 20
+    }), Err(ChtError::Cancelled)));
+    assert_eq!(seen, 20);
+}

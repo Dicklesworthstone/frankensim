@@ -1278,13 +1278,15 @@ fn spatial<'a, L: TransportLaw>(
                 #[cfg(feature = "experimental-sgs")]
                 let receipt = if let Some(sgs) = sgs.as_ref() {
                     sgs.add_wall(
+                        source.gas(),
+                        &states[cell * width..cell * width + species],
                         side,
                         wall,
                         primitive[cell],
                         0.5 * grid.spacing[axis],
-                        species,
                         receipt,
                         output,
+                        cancelled,
                     )?
                 } else {
                     receipt

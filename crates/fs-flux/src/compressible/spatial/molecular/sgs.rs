@@ -26,6 +26,8 @@
 //! Reflecting boundaries retain their adiabatic slip semantics unless an
 //! explicit wall is authored. [`EquilibriumWallConfig`] optionally supplies
 //! smooth adiabatic wall stress when the viscous sublayer is not resolved.
+//! [`EquilibriumThermalWallConfig`] explicitly adds the integrated thermal wall
+//! resistance for isothermal no-slip walls, using the original face calorics.
 //! Complete reservoirs remain molecular-only unless local SGS bath exchange is
 //! explicitly enabled. That policy uses the admitted bath trace, half-cell
 //! normal differences and the same tangential tensor as the bath stress. It
@@ -41,7 +43,8 @@ use super::*;
 use fs_lbm::sgs3::{SgsConfig, eddy_viscosity, smagorinsky_viscosity, vreman_eddy_viscosity};
 pub use fs_lbm::sgs3::{SgsModel, SgsUse};
 pub(in crate::compressible::spatial) mod wall;
-pub use wall::EquilibriumWallConfig;
+pub use wall::{EquilibriumThermalWallConfig, EquilibriumWallConfig, WallHeatConfig};
+use wall::EquilibriumWallModel;
 
 mod dynamic;
 pub use dynamic::DynamicSubgridConfig;
@@ -213,7 +216,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
 
 pub(super) struct SubgridTransport {
     closure: SubgridClosure,
-    wall_models: [Option<EquilibriumWallConfig>; 6],
+    wall_models: [Option<EquilibriumWallModel>; 6],
     // Reused at every stage. Store C_s squared independently of cell strain,
     // so the conservative face selects its own viscosity. No hot allocation.
     dynamic_coefficient_squared: Vec<f64>,

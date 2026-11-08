@@ -18,8 +18,9 @@
 //! referenced-enthalpy flux rather than prescribing a turbulent Schmidt number.
 //!
 //! Physical wall faces retain the original molecular law unless explicitly
-//! given [`EquilibriumWallConfig`] for smooth adiabatic wall stress. All other
-//! walls require resolved molecular layers; no wall heat/species or turbulent
+//! given [`EquilibriumWallConfig`] for smooth adiabatic wall stress, or
+//! [`EquilibriumThermalWallConfig`] for equilibrium isothermal stress/heat.
+//! Other walls require resolved molecular layers; no wall species or turbulent
 //! reaction-rate closure is inferred. The existing
 //! reactive split integrator can compose this operator without changing its
 //! chemistry owner. Isotropic SGS energy, backscatter, pressure dilatation,
@@ -34,10 +35,11 @@
 use super::super::sum;
 use super::*;
 use crate::compressible::spatial::molecular::sgs::face_gradient;
+use crate::compressible::spatial::molecular::sgs::wall::EquilibriumWallModel;
 pub use crate::compressible::spatial::molecular::sgs::{
     ChannelDynamicThermalSubgridConfig, DynamicAveraging, DynamicScalarConfig, DynamicScalarReport,
     DynamicSgsConfig, DynamicSgsReport, DynamicSubgridConfig, DynamicThermalSubgridConfig,
-    EquilibriumWallConfig,
+    EquilibriumThermalWallConfig, EquilibriumWallConfig, WallHeatConfig,
     LagrangianSgsConfig, LagrangianSubgridConfig, SgsModel, SgsUse, SubgridConfig,
 };
 use fs_gas::multicomponent::dissipation::{MaxwellStefanSolveV1, TransportFaceReport};
@@ -155,7 +157,7 @@ enum ViscosityClosure {
 
 pub(super) struct SubgridTransport {
     closure: ViscosityClosure,
-    wall_models: [Option<EquilibriumWallConfig>; 6],
+    wall_models: [Option<EquilibriumWallModel>; 6],
     dynamic_coefficient_squared: Vec<f64>,
     heat_capacity_v_density: Vec<f64>,
 }

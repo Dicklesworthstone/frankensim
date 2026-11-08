@@ -8,7 +8,7 @@
 //! is inferred. A wall model is not a resolved-boundary-layer certificate.
 
 use super::{KAPPA, SPALDING_E};
-use crate::conjugate::{ChtError, domain::FluidProperties, poll};
+use crate::conjugate::{ChtError, domain::FluidProperties};
 use fs_exec::CancelGate;
 
 pub(in crate::conjugate) mod coupling;
@@ -102,7 +102,11 @@ fn profile(u: f64) -> (f64, f64) {
         1.0 + KAPPA * remainder(x, 3) / SPALDING_E)
 }
 
-fn wall_coordinates(re: f64, gate: &CancelGate) -> Result<(f64, f64), ChtError> {
+fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), ChtError> {
+    if cancelled() { Err(ChtError::Cancelled) } else { Ok(()) }
+}
+
+fn wall_coordinates(re: f64, cancelled: &mut impl FnMut() -> bool) -> Result<(f64, f64), ChtError> {
     // y+(u) >= u: sqrt(Re) is an upper bound. Grow a smaller bound
     // geometrically so very large Re does not waste bisections in overflow.
     let mut high = re.sqrt().min(1.0);
@@ -112,7 +116,7 @@ fn wall_coordinates(re: f64, gate: &CancelGate) -> Result<(f64, f64), ChtError> 
     }
     let mut low = 0.0;
     for iteration in 0..96 {
-        if iteration % 16 == 0 { poll(gate)?; }
+        if iteration % 16 == 0 { poll(cancelled)?; }
         let mid = low + 0.5 * (high - low);
         if mid == low || mid == high { break; }
         if mid * profile(mid).0 > re { high = mid; } else { low = mid; }
@@ -127,7 +131,7 @@ fn wall_coordinates(re: f64, gate: &CancelGate) -> Result<(f64, f64), ChtError> 
     Ok((u, y))
 }
 
-fn integral(u: f64, ratio: f64, config: WallHeatConfig, gate: &CancelGate)
+fn integral(u: f64, ratio: f64, config: WallHeatConfig, cancelled: &mut impl FnMut() -> bool)
     -> Result<(f64, f64, usize), ChtError>
 {
     // Integrate T+/Pr. This form avoids overflowing ratio*(slope-1).
@@ -138,12 +142,12 @@ fn integral(u: f64, ratio: f64, config: WallHeatConfig, gate: &CancelGate)
     let mut trapezoid = 0.5 * u * (1.0 + value(u));
     let mut previous = f64::NAN;
     for level in 1..=config.max_refinements {
-        poll(gate)?;
+        poll(cancelled)?;
         let panels = 1usize << level;
         let h = u / panels as f64;
         let mut sum = 0.0;
         for j in 0..panels / 2 {
-            if j % 64 == 0 { poll(gate)?; }
+            if j % 64 == 0 { poll(cancelled)?; }
             sum += value((2 * j + 1) as f64 * h);
         }
         let next = 0.5 * trapezoid + h * sum;
@@ -179,7 +183,22 @@ pub fn equilibrium_wall_heat_transfer(
     config: WallHeatConfig,
     gate: &CancelGate,
 ) -> Result<WallHeatTransfer, ChtError> {
-    poll(gate)?;
+    equilibrium_wall_heat_transfer_cancellable(
+        tangential_speed_m_s, distance_m, fluid, config, || gate.is_requested(),
+    )
+}
+
+/// The same wall law with the caller's cancellation owner. This adapter lets
+/// conservative flow operators poll their complete trial during both the
+/// momentum inversion and thermal quadrature, without allocating a new gate.
+pub fn equilibrium_wall_heat_transfer_cancellable(
+    tangential_speed_m_s: f64,
+    distance_m: f64,
+    fluid: &FluidProperties,
+    config: WallHeatConfig,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<WallHeatTransfer, ChtError> {
+    poll(&mut cancelled)?;
     config.validate()?;
     fluid.validate()?;
     if !tangential_speed_m_s.is_finite() || tangential_speed_m_s < 0.0
@@ -199,11 +218,11 @@ pub fn equilibrium_wall_heat_transfer(
     let (u, y, friction, temperature, resistance, change, evaluations) = if re == 0.0 {
         (0.0, 0.0, 0.0, 0.0, molecular, 0.0, 0)
     } else {
-        let (u, y) = wall_coordinates(re, gate)?;
+        let (u, y) = wall_coordinates(re, &mut cancelled)?;
         let (thermal, change, count) = if ratio == 1.0 {
             (u, 0.0, 0)
         } else {
-            integral(u, ratio, config, gate)?
+            integral(u, ratio, config, &mut cancelled)?
         };
         (u, y, tangential_speed_m_s / u, pr * thermal,
             molecular * (thermal / y), change, count)
@@ -214,7 +233,7 @@ pub fn equilibrium_wall_heat_transfer(
     {
         return Err(invalid("dimensional wall heat transport is not representable"));
     }
-    poll(gate)?;
+    poll(&mut cancelled)?;
     Ok(WallHeatTransfer {
         friction_velocity_m_s: friction, u_plus: u, y_plus: y,
         temperature_plus: temperature, resistance_m2_k_w: resistance,

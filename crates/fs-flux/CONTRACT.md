@@ -3175,8 +3175,8 @@ The explicit controls admit `0 < maximum_wall_distance_plus <= 1000` and
 `0 < maximum_mach_number <= 0.3`; current states outside either authored bound
 refuse the complete trial without clipping wall stress. The Mach check uses
 the full wall-relative velocity. Positive source density and molecular
-viscosity are required. Changing a modeled side to slip or isothermal also
-refuses, since no turbulent thermal wall law is supplied. These numerical
+viscosity are required. The momentum-only selector refuses slip or isothermal
+walls; the separate thermal selector below admits isothermal heat. These numerical
 checks do not establish physical applicability: the caller must select smooth,
 attached, approximately equilibrium flow and an adjacent sample within its
 inner layer. Roughness, separation/adverse-pressure-gradient corrections,
@@ -3191,6 +3191,53 @@ moving-wall work, species impermeability, no added workspace, enhanced
 coarse-cell braking and total-energy conservation. Late wall-domain refusal
 preserves accepted fields, loads and mixture reports. The coefficient check
 also covers rest, the viscous limit and wall-relative Galilean invariance.
+
+### Equilibrium turbulent heat transfer at prescribed-temperature walls
+
+Both spatial frozen-gas and evolving-mixture `MolecularTransport3d` owners expose
+`with_equilibrium_sgs_thermal_wall(side, EquilibriumThermalWallConfig)` under
+`experimental-sgs`. Configure an isothermal no-slip wall and an explicit SGS
+operator first. Frozen `MolecularEuler3d` exposes the same selector; mixture
+coupled and reactive owners retain it through the supplied molecular operator.
+The config combines the existing momentum applicability bounds with an explicit
+`WallHeatConfig` (turbulent Prandtl number, quadrature tolerance and bounded
+refinements). The original adiabatic selector and default wall behavior remain.
+
+The shared `fs-lbm` thermal wall kernel integrates
+`dT+/dy+ = Pr / (1 + Pr/Pr_t * nu_t/nu)` on the same continuous Spalding
+profile. Its area-specific resistance `R_w` gives the effective half-cell
+conductivity `k_wall = y/R_w`. This includes the molecular sublayer and buffer
+layer; it does not multiply molecular conductivity by an arbitrary interior
+SGS ratio. At rest it returns the exact original conductivity. At `Pr=Pr_t`
+it recovers `k_wall/k = y+/u+`, independently of thermal quadrature.
+
+The original source supplies molecular viscosity and conductivity once per
+face at the arithmetic fluid/wall temperature. Source Cp is sampled at that
+same temperature; evolving mixtures use the current partial densities and
+original species molar masses and calorics, excluding absent species. Density
+and wall-relative velocity use the same adjacent sample as momentum. No new
+material law, frozen-composition surrogate, species leakage, or per-face heap
+workspace is introduced. Properties are constant within the wall integral;
+the closure assumes small property variations and does not model strong
+heating, compressible wall corrections, or viscous heating within that layer.
+
+The full conductance enters the existing signed total-energy wall flux along
+with mechanical work at the prescribed wall velocity. The mixture owner also
+updates its nonmechanical heat receipt without subtracting mechanical energy.
+The explicit rate uses the modeled thermal conductance and the original
+volumetric Cv, in addition to the nonlinear wall-traction bound and physical
+half-cell/three-axis inverse lengths. No separate volume heating is added.
+Zero molecular conductivity, invalid properties, applicability exit, exhausted
+thermal quadrature or cancellation refuse the complete trial. The shared
+callback adapter polls the enclosing trial during inversion and quadrature;
+accepted states, clocks, wall impulses and reports remain transactional.
+
+Authored regressions cover the independent Reynolds-analogy flux and timestep
+on all axes/signs; moving, co-moving, heated and cooled walls; local and channel
+dynamic SGS; changing mixture composition and temperature-dependent Cp;
+complete-step energy and species inventories; and late quadrature refusal.
+Runtime execution of these new regressions was blocked by exhausted build
+storage and unavailable dependencies in the implementation session.
 
 ### Periodic dynamic gas transport
 

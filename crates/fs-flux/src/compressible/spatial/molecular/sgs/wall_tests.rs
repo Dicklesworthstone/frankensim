@@ -1,7 +1,7 @@
 use super::*;
 use crate::compressible::spatial::molecular::sgs::{
     ChannelDynamicScalarConfig, ChannelDynamicSgsConfig, ChannelDynamicThermalSubgridConfig,
-    EquilibriumWallConfig,
+    EquilibriumThermalWallConfig, EquilibriumWallConfig, WallHeatConfig,
 };
 use fs_lbm::conjugate::turbulence::law_of_the_wall_ratios;
 
@@ -40,7 +40,17 @@ fn operator(
     velocity: [f64; 3],
     dynamic: bool,
 ) -> MolecularTransport3d<ConstantTransport> {
-    let source = law(flow.gas(), 1e-4, 0.0, 0.0);
+    operator_with_conductivity(flow, axis, velocity, dynamic, 0.0)
+}
+
+fn operator_with_conductivity(
+    flow: &Euler3d,
+    axis: usize,
+    velocity: [f64; 3],
+    dynamic: bool,
+    conductivity: f64,
+) -> MolecularTransport3d<ConstantTransport> {
+    let source = law(flow.gas(), 1e-4, 0.0, conductivity);
     if dynamic {
         let cfg = ChannelDynamicThermalSubgridConfig {
             momentum: ChannelDynamicSgsConfig {
@@ -77,6 +87,119 @@ fn operator(
         .with_wall(BoundarySide::ALL[2 * axis + 1], wall(velocity))
         .unwrap()
     }
+}
+
+fn thermal_config() -> EquilibriumThermalWallConfig {
+    EquilibriumThermalWallConfig {
+        momentum: wall_config(),
+        // The original manufactured gas has cp = 3.5 J/(kg K).
+        heat: WallHeatConfig {
+            turbulent_prandtl: 3.5 * 1e-4 / 0.01,
+            relative_tolerance: 1e-10,
+            max_refinements: 14,
+        },
+    }
+}
+
+fn isothermal(velocity: [f64; 3], temperature: f64) -> MolecularWall3d {
+    MolecularWall3d::NoSlip {
+        velocity,
+        thermal: WallThermalCondition::Isothermal(Temperature::new(temperature)),
+    }
+}
+
+#[test]
+fn equilibrium_sgs_thermal_wall_native_flux_and_timestep_obey_reynolds_analogy() {
+    for axis in 0..3 {
+        let [a, b] = tangents(axis);
+        let mut velocity = [0.0; 3];
+        velocity[a] = 0.2;
+        velocity[b] = -0.1;
+        let flow = channel(axis, velocity);
+        let distance = 0.5 * flow.grid.spacing[axis];
+        for dynamic in [false, true] {
+            for wall_temperature in [1.8, 2.2] {
+                // Co-moving walls recover molecular heat exactly; relative
+                // motion exercises both signs and the modeled wall work.
+                for fraction in [0.25, 1.0] {
+                    let wall_velocity = velocity.map(|u| fraction * u);
+                    let speed = (1.0 - fraction) * (0.2_f64.powi(2) + 0.1_f64.powi(2)).sqrt();
+                    let ratio = law_of_the_wall_ratios(speed * distance / 1e-4).1;
+                    let mut op = operator_with_conductivity(&flow, axis, wall_velocity, dynamic, 0.01);
+                    let bytes = op.workspace_bytes();
+                    for side in &BoundarySide::ALL[2 * axis..2 * axis + 2] {
+                        op = op.with_wall(*side, isothermal(wall_velocity, wall_temperature)).unwrap()
+                            .with_equilibrium_sgs_thermal_wall(*side, thermal_config()).unwrap();
+                        assert_eq!(op.equilibrium_sgs_thermal_wall(*side), Some(thermal_config()));
+                    }
+                    let rate = prepare(&mut op, &flow);
+                    // Thermal diffusion dominates this manufactured case.
+                    // Pr = Pr_t gives k_wall/k = mu_secant/mu independently
+                    // of production thermal quadrature, and Cv = 2.5.
+                    close(rate, 4.0 * (0.01 * ratio / 2.5)
+                        * flow.grid.spacing.map(|h| h.recip().powi(2)).iter().sum::<f64>(), 2e-12);
+                    assert_eq!(op.workspace_bytes(), bytes);
+                    for upper in [false, true] {
+                        let sign = if upper { 1.0 } else { -1.0 };
+                        let mut face = [1; 3];
+                        face[axis] = if upper { 4 } else { 0 };
+                        let flux = op.work.flux[axis][op.grid.cell_face(axis, face)];
+                        let heat = -0.01 * ratio * sign * (wall_temperature - 2.0) / distance;
+                        let work = flux.transverse_momentum[0] * wall_velocity[a]
+                            + flux.transverse_momentum[1] * wall_velocity[b];
+                        close(flux.energy, heat + work, 2e-12);
+                        assert_eq!(heat.signum(), (sign * (2.0 - wall_temperature)).signum());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn equilibrium_sgs_thermal_wall_heat_survives_the_complete_native_split_and_report() {
+    for wall_temperature in [1.8, 2.2] {
+        let flow = channel(1, [0.4, 0.0, 0.0]);
+        let source = law(flow.gas(), 1e-4, 0.0, 0.01);
+        let mut coupled = MolecularEuler3d::with_sgs(flow, source,
+            config(SgsModel::Smagorinsky { cs: 0.0 }), || false).unwrap();
+        for side in [BoundarySide::YMin, BoundarySide::YMax] {
+            coupled = coupled.with_wall(side, isothermal([0.0; 3], wall_temperature)).unwrap()
+                .with_equilibrium_sgs_thermal_wall(side, thermal_config()).unwrap();
+        }
+        let report = coupled.step(Time::new(0.005), MolecularStepControl::default(), || false).unwrap();
+        assert_eq!(report.boundary_change.energy.signum(), (wall_temperature - 2.0).signum());
+        close(report.after.energy - report.before.energy, report.boundary_change.energy, 3e-12);
+        for residual in report.conservation_residual.array() { close(residual, 0.0, 3e-12); }
+        assert!(report.first.maximum_parabolic_number <= 0.40000000000001);
+        assert!(report.second.maximum_parabolic_number <= 0.40000000000001);
+        assert!(coupled.last_step().is_some());
+        coupled = coupled.with_equilibrium_sgs_thermal_wall(BoundarySide::YMin,
+            EquilibriumThermalWallConfig { heat: WallHeatConfig {
+                turbulent_prandtl: 0.9, ..thermal_config().heat
+            }, ..thermal_config() }).unwrap();
+        assert!(coupled.last_step().is_none());
+    }
+}
+
+#[test]
+fn equilibrium_sgs_thermal_wall_quadrature_refusal_preserves_native_field_and_loads() {
+    let mut flow = channel(1, [0.4, 0.0, 0.0]);
+    let mut op = operator_with_conductivity(&flow, 1, [0.0; 3], false, 0.01);
+    for side in [BoundarySide::YMin, BoundarySide::YMax] {
+        op = op.with_wall(side, isothermal([0.0; 3], 2.2)).unwrap()
+            .with_equilibrium_sgs_thermal_wall(side, thermal_config()).unwrap();
+    }
+    op.advance(&mut flow, Time::new(0.005), MolecularControl::default(), || false).unwrap();
+    let states = flow.states().to_vec();
+    let loads = op.boundary_impulses.clone();
+    op = op.with_equilibrium_sgs_thermal_wall(BoundarySide::YMax,
+        EquilibriumThermalWallConfig { heat: WallHeatConfig {
+            turbulent_prandtl: 0.9, relative_tolerance: 1e-12, max_refinements: 3,
+        }, ..thermal_config() }).unwrap();
+    assert!(op.advance(&mut flow, Time::new(0.005), MolecularControl::default(), || false).is_err());
+    assert_eq!(flow.states(), states);
+    assert_eq!(op.boundary_impulses, loads);
 }
 
 fn prepare(op: &mut MolecularTransport3d<ConstantTransport>, flow: &Euler3d) -> f64 {
