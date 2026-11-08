@@ -82,7 +82,9 @@ impl RheologySolve {
 pub(crate) struct LocalRheology<F> {
     pub value: F,
     pub shear_rate_per_s: f64,
-    /// Actual iterate used for the retained material query, not its next tau.
+    /// Relaxation reproducing the retained material query. Usually the actual
+    /// iterate; when the shear numerator is exactly zero, the query is tau
+    /// independent and this is the source's exact relaxation instead.
     pub relaxation_time: f64,
     pub iterations: usize,
     pub relaxation_defect: f64,
@@ -119,7 +121,7 @@ pub(crate) fn solve_local<F, E>(
 /// `|div(u)|/sqrt(3)`: the plane's trace is not isotropic in three dimensions.
 /// Three-dimensional material laws have no fixed contribution to shear.
 #[allow(clippy::too_many_arguments)]
-fn solve_local_with_fixed_strain<F, E>(
+pub(crate) fn solve_local_with_fixed_strain<F, E>(
     numerator: f64,
     fixed_rate: f64,
     timestep_s: f64,
@@ -162,6 +164,23 @@ fn solve_local_with_fixed_strain<F, E>(
             return Err(LocalRheologyError::Invalid(
                 "rheology tolerance is unrepresentable",
             ));
+        }
+        if numerator == 0.0 {
+            // The complete rate is fixed_rate / dt, independent of shear tau.
+            // The retained source therefore supplies the exact root without
+            // repeating an identical material query or damping toward its tau.
+            if !next.is_finite() || next <= 0.5 {
+                return Err(LocalRheologyError::Invalid(
+                    "constitutive relaxation is unrepresentable",
+                ));
+            }
+            return Ok(LocalRheology {
+                value,
+                shear_rate_per_s: rate,
+                relaxation_time: next,
+                iterations,
+                relaxation_defect: 0.0,
+            });
         }
         if relaxation_defect <= tolerance {
             return Ok(LocalRheology {
@@ -521,7 +540,7 @@ impl MaterialSlab<ThermalLbm3> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LocalRheologyError, RheologySolve, solve_local};
+    use super::{LocalRheologyError, RheologySolve, solve_local, solve_local_with_fixed_strain};
     use fs_material::MaterialError;
     use fs_material::fluid_transport::{FluidTransportState, rheology::CarreauYasuda};
     use std::cell::Cell;
@@ -718,11 +737,169 @@ mod tests {
         }
     }
 
+
+
+    #[test]
+    fn fixed_strain_uses_one_original_query_and_the_source_relaxation() {
+        let curve = CarreauYasuda::new(3.0, 0.1, 0.4, 0.45, 2.0, [0.0, 100.0]).unwrap();
+        for fixed_rate in [0.0, 0.013] {
+            let expected_rate = fixed_rate / 0.01;
+            let (expected, expected_tau) = carreau_transport(&curve, expected_rate).unwrap();
+            for initial_tau in [0.65, 1.8, expected_tau + 1e-14] {
+                let polls = Cell::new(0usize);
+                let mut queries = Vec::new();
+                let result = solve_local_with_fixed_strain(
+                    0.0,
+                    fixed_rate,
+                    0.01,
+                    initial_tau,
+                    RheologySolve {
+                        maximum_iterations: 1,
+                        ..controls(0.25)
+                    },
+                    || {
+                        polls.set(polls.get() + 1);
+                        Ok(())
+                    },
+                    |rate| {
+                        queries.push(rate.to_bits());
+                        carreau_transport(&curve, rate)
+                    },
+                );
+                let Ok(root) = result else {
+                    panic!("an exact fixed-rate root was refused")
+                };
+                assert_eq!(queries, [expected_rate.to_bits()]);
+                assert_eq!(polls.get(), 1);
+                assert_eq!(root.value, expected);
+                assert_eq!(root.shear_rate_per_s.to_bits(), expected_rate.to_bits());
+                assert_eq!(root.relaxation_time.to_bits(), expected_tau.to_bits());
+                assert_eq!(root.iterations, 1);
+                assert_eq!(root.relaxation_defect, 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_strain_retains_budget_and_arithmetic_refusals() {
+        let result = solve_local_with_fixed_strain(
+            0.0,
+            0.013,
+            0.01,
+            0.8,
+            RheologySolve {
+                maximum_iterations: 0,
+                ..controls(0.75)
+            },
+            || -> Result<(), ()> { panic!("zero budget cannot poll or query") },
+            |_| -> Result<((), f64), ()> { panic!("zero budget cannot query") },
+        );
+        assert!(matches!(
+            result,
+            Err(LocalRheologyError::Convergence { iterations: 0, .. })
+        ));
+
+        for next in [0.5, 0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut calls = 0;
+            let result = solve_local_with_fixed_strain(
+                0.0,
+                0.013,
+                0.01,
+                0.8,
+                controls(0.75),
+                || Ok::<_, ()>(()),
+                |_| {
+                    calls += 1;
+                    Ok(((), next))
+                },
+            );
+            assert!(matches!(result, Err(LocalRheologyError::Invalid(_))));
+            assert_eq!(calls, 1);
+        }
+        for (fixed_rate, timestep_s, initial_tau) in [
+            (0.0, 0.0, 0.8),
+            (0.0, 0.01, 0.0),
+            (f64::MAX, f64::MIN_POSITIVE, 0.8),
+        ] {
+            let result = solve_local_with_fixed_strain(
+                0.0,
+                fixed_rate,
+                timestep_s,
+                initial_tau,
+                controls(0.75),
+                || Ok::<_, ()>(()),
+                |_| -> Result<((), f64), ()> { panic!("invalid rate precedes source work") },
+            );
+            assert!(matches!(
+                result,
+                Err(LocalRheologyError::Invalid(
+                    "physical shear rate is unrepresentable"
+                ))
+            ));
+        }
+        let mut calls = 0;
+        let result = solve_local_with_fixed_strain(
+            0.0,
+            0.013,
+            0.01,
+            0.8,
+            RheologySolve {
+                absolute_relaxation_tolerance: f64::MAX,
+                relative_relaxation_tolerance: 0.5,
+                ..controls(0.75)
+            },
+            || Ok::<_, ()>(()),
+            |_| {
+                calls += 1;
+                Ok(((), f64::MAX))
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(LocalRheologyError::Invalid(
+                "rheology tolerance is unrepresentable"
+            ))
+        ));
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn fixed_strain_retains_cancellation_and_original_source_errors() {
+        for cancelled in [false, true] {
+            let polls = Cell::new(0usize);
+            let mut calls = 0;
+            let result = solve_local_with_fixed_strain(
+                0.0,
+                0.013,
+                0.01,
+                0.8,
+                controls(0.75),
+                || {
+                    polls.set(polls.get() + 1);
+                    if cancelled { Err("cancelled") } else { Ok(()) }
+                },
+                |_| -> Result<((), f64), &'static str> {
+                    calls += 1;
+                    Err("original source refused")
+                },
+            );
+            let expected = if cancelled {
+                "cancelled"
+            } else {
+                "original source refused"
+            };
+            assert!(matches!(result, Err(LocalRheologyError::Evaluation(e)) if e == expected));
+            assert_eq!(polls.get(), 1);
+            assert_eq!(calls, usize::from(!cancelled));
+        }
+    }
+
     #[test]
     fn newtonian_limit_preserves_original_queries_and_root_bits() {
         // Equal plateaus make an actual Newtonian Carreau limit. With full
-        // relaxation, the original solve has exactly two known source queries:
+        // relaxation, nonzero strain retains the two original source queries:
         // at the authored initial tau, then at the material's physical tau.
+        // Exactly zero strain needs only its single tau-independent query.
         let curve = CarreauYasuda::new(0.3, 0.3, 0.4, 0.45, 2.0, [0.0, 100.0]).unwrap();
         let (_, target_tau) = carreau_transport(&curve, 0.0).unwrap();
         for numerator in [0.0, 0.01661, 1e-12] {
@@ -733,10 +910,12 @@ mod tests {
             });
             let Ok(root) = result else { panic!("Newtonian root refused") };
             let expected = [((numerator / 0.8) / 0.01).to_bits(), ((numerator / target_tau) / 0.01).to_bits()];
-            assert_eq!(queries, expected);
-            assert_eq!(root.shear_rate_per_s.to_bits(), expected[1]);
+            let evaluations = if numerator == 0.0 { 1 } else { 2 };
+            assert_eq!(queries, expected[..evaluations]);
+            assert_eq!(root.shear_rate_per_s.to_bits(), expected[evaluations - 1]);
+            assert_eq!(root.relaxation_time.to_bits(), target_tau.to_bits());
             assert_eq!(root.relaxation_defect, 0.0);
-            assert_eq!(root.iterations, 2);
+            assert_eq!(root.iterations, evaluations);
         }
     }
 }
