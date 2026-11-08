@@ -7296,3 +7296,28 @@ independent diffusion/RLC reference, physical node/reference consistency,
 orientation and numerical-reference invariance, moving-field power splitting,
 and bounded cancellation/retry behavior. Synthetic fixtures are implementation
 evidence, not experimental device validation.
+
+### Original optical phase, group and attenuation dispersion
+
+The bulk dispersion owner accepts original visible and finite-band optical
+responses: Cauchy and Sellmeier phase laws, tabulated dielectrics, complex-index
+conductors, and the explicitly lossless IAPWS water response. Original phase
+and absorption samples, fitted bands, interpolation-gap policies, material
+snapshots and absolute permeability remain authoritative. Index laws are not
+replaced by fits or a monochromatic constant. The native Maxwell carrier root
+and propagation exponential remain unchanged.
+
+Analytic wavelength derivatives supply group slowness, GVD and both attenuation
+derivatives without frequency sampling or allocation. Tabulated n/k retains
+exactly zero local GVD within a linear wavelength segment. Dielectric intensity
+absorption is differentiated before conversion to extinction: constant alpha
+has exactly zero attenuation slope/curvature even though extinction varies.
+Water curvature comes from the original material owner at fixed T and density.
+Band endpoints and unequal adjacent table slopes refuse two-sided derivatives;
+smooth knots remain admitted. These are local original-law derivatives, not
+measured derivative accuracy, a causal reservoir or broadband-pulse error bounds.
+
+Focused existing optical/material regressions compare original Maxwell and
+permittivity frequency differences, closed Cauchy/linear-index references,
+constant and varying power absorption, infrared Sellmeier GVD including its
+sign change, water phase/group curvature, source identity and domain refusals.

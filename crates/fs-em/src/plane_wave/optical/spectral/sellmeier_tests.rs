@@ -245,3 +245,34 @@ fn g0_active_pole_in_full_fit_refuses_even_when_outside_absorption_support() {
         cold
     );
 }
+
+
+#[test]
+fn g1_bulk_spectral_sellmeier_curvature_matches_original_ir_phase_and_absorption() {
+    let card = card(true, false);
+    let source = source(&card, 300.0);
+    let law = SpectralOpticalResponse::try_new((&source).into(), 2e-7).unwrap();
+    let wave = crate::plane_wave::DielectricResponse::SpectralOptical(law);
+    for wavelength in [1.225e-6, 1.45e-6, 1.625e-6, 1.75e-6] {
+        let omega = FREQUENCY_WAVELENGTH_M / wavelength;
+        let jet = wave.bulk_dispersion(omega).unwrap();
+        let h = 2e-4 * omega;
+        let values: [C64; 5] = core::array::from_fn(|i| {
+            let frequency = omega + (i as f64 - 2.0) * h;
+            law.complex_index(frequency).unwrap().scale(frequency / VACUUM_SPEED_M_S)
+        });
+        let first = (values[0] - values[1].scale(8.0) + values[3].scale(8.0) - values[4])
+            .scale(1.0 / (12.0 * h));
+        let second = (-values[0] + values[1].scale(16.0) - values[2].scale(30.0)
+            + values[3].scale(16.0) - values[4]).scale(1.0 / (12.0 * h * h));
+        near(jet.group_slowness_s_m(), first.re, 2e-8);
+        near(jet.group_velocity_dispersion_s2_m(), second.re, 5e-5);
+        near(jet.wavenumber_derivative_s_m().im, first.im, 2e-8);
+        near(jet.wavenumber_second_derivative_s2_m().im, second.im, 5e-5);
+    }
+    // Absorption support [1.2,1.8]um is narrower than the analytic fit [1,2]um.
+    for wavelength in [1.2e-6, 1.8e-6, 1.1e-6, 1.9e-6] {
+        assert!(wave.bulk_dispersion(FREQUENCY_WAVELENGTH_M / wavelength).is_err());
+    }
+    assert!(wave.bulk_dispersion(FREQUENCY_WAVELENGTH_M / 1.25e-6).is_err());
+}

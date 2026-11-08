@@ -1,9 +1,11 @@
 //! Analytic bulk dispersion of the original passive electric material laws.
 //!
 //! The outgoing branch is `exp(+i omega t - i k z)`, with `Im(k) <= 0`.
-//! The native constitutive owner supplies epsilon; its retained Debye/Lorentz
-//! poles supply analytic derivatives. No frequency differencing, pole fitting,
-//! material query, or allocation occurs. Ohmic leakage is differentiated once.
+//! The native constitutive owner supplies epsilon; original Debye/Lorentz
+//! poles or finite-band optical laws supply analytic derivatives. No frequency
+//! differencing, pole fitting, material query, or allocation occurs. Ohmic
+//! leakage is differentiated once; optical intensity absorption keeps its
+//! original wavelength parameterization.
 //!
 //! `Re(dk/domega)` is group slowness and `Re(d²k/domega²)` is GVD. For an
 //! absorbing/anomalous band, the inverse phase slope is NOT a signal-front or
@@ -62,12 +64,24 @@ pub struct BulkPropagation {
 impl<'a> DielectricResponse<'a> {
     /// Prepare phase, group and second-order dispersion at a positive angular
     /// frequency [rad/s], using the original passive nondispersive, Debye,
-    /// Lorentz and/or Ohmic laws. Source/material/refusal semantics match the
-    /// native interfaces. Finite-band optical tables and frequency-prepared
-    /// gas/plasma sources refuse until their derivative owner is supplied;
-    /// a single monochromatic value is never treated as a constant law.
+    /// Lorentz, Ohmic and original finite-band optical laws. Source/material
+    /// semantics match native interfaces. Optical derivatives retain Cauchy,
+    /// Sellmeier, linear wavelength tables or the original IAPWS water law;
+    /// endpoints and nonsmooth source knots refuse. Frequency-prepared gas/plasma
+    /// sources refuse until their derivative owner is supplied; a monochromatic
+    /// value is never treated as a constant law.
     pub fn bulk_dispersion(self, omega_rad_s: f64) -> Result<BulkWaveDispersion<'a>> {
         let omega = positive(omega_rad_s)?;
+        let optical = match self {
+            Self::OpticalConductor(source) => Some(source.frequency_jet(omega)?),
+            Self::OpticalMaterial(source) => Some(source.frequency_jet(omega)?),
+            Self::SpectralOptical(source) => Some(source.frequency_jet(omega)?),
+            Self::WaterOptical(source) => Some(source.frequency_jet(omega)?),
+            _ => None,
+        };
+        if let Some(jet) = optical {
+            return optical_bulk(self, omega, jet);
+        }
         let epsilon = self.permittivity(omega)?;
         let permeability = linear_magnetic_permeability(self.material())?;
         let (epsilon_derivatives, loss_moments) = derivatives(self, omega)?;
@@ -214,6 +228,38 @@ impl<'a> BulkWaveDispersion<'a> {
             log_amplitude_second_derivative_s2,
         })
     }
+}
+
+// Optical phase and attenuation are already the original vacuum-referenced N.
+// Keep the native carrier branch, but differentiate k=omega*N/c0 directly:
+// reconstructing optical group/GVD by squaring N and taking another root loses
+// exact constant-alpha and linear-index cancellations.
+fn optical_bulk<'a>(
+    source: DielectricResponse<'a>,
+    omega: f64,
+    jet: super::optical::frequency::OpticalFrequencyJet,
+) -> Result<BulkWaveDispersion<'a>> {
+    let permeability = linear_magnetic_permeability(source.material())?;
+    let wave_number = super::absorbing_incidence::kernel::Medium::new(
+        omega, 0.0, jet.epsilon, permeability,
+    )?.normal;
+    let second = C64::new(
+        jet.second_scaled_s_m.re / omega,
+        jet.second_scaled_s_m.im / omega,
+    );
+    if wave_number == C64::ZERO || !finite(second) {
+        return Err(invalid("optical bulk frequency derivatives are unrepresentable"));
+    }
+    Ok(BulkWaveDispersion {
+        source,
+        omega,
+        epsilon: jet.epsilon,
+        epsilon_derivatives: jet.epsilon_derivatives,
+        permeability,
+        wave_number,
+        first: jet.first_s_m,
+        second,
+    })
 }
 
 fn invalid(message: &'static str) -> ReflectionError {

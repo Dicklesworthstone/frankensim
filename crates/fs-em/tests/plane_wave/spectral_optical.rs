@@ -907,3 +907,44 @@ fn check_absorbing_film_illumination(
         assert!(dark.poynting_w_m2(region, invalid, || false).is_err());
     }
 }
+
+
+#[test]
+fn g1_bulk_spectral_complex_index_and_si_sources_keep_original_wavelength_derivatives() {
+    let (_, generic) = generic_source(true, true);
+    let conductor_card = si_grid_card(false);
+    let conductor = SpectralConductorStatePoint::try_from_material(resolve(&conductor_card)).unwrap();
+    let dielectric_card = si_grid_card(true);
+    let dielectric = SpectralTabulatedDielectricStatePoint::try_from_material(resolve(&dielectric_card)).unwrap();
+    for source in [
+        SpectralOpticalSource::ComplexIndex(&generic),
+        SpectralOpticalSource::Conductor(&conductor),
+        SpectralOpticalSource::TabulatedDielectric(&dielectric),
+    ] {
+        let law = SpectralOpticalResponse::try_new(source, 6.1e-6).unwrap();
+        let wave = DielectricResponse::SpectralOptical(law);
+        for wavelength in [8.25e-6, 9.25e-6, 12.5e-6] {
+            let omega = WL_FREQUENCY_M / wavelength;
+            let jet = wave.bulk_dispersion(omega).unwrap();
+            assert!(core::ptr::eq(jet.source().material(), law.material()));
+            assert_eq!(jet.permittivity_f_m(), law.permittivity_f_m(omega).unwrap());
+            let group = if matches!(source, SpectralOpticalSource::ComplexIndex(_)) { 1.32 } else { 1.42 };
+            assert!((jet.group_slowness_s_m() / (group / C0) - 1.0).abs() < 8e-15);
+            assert_eq!(jet.group_velocity_dispersion_s2_m(), 0.0);
+            if matches!(source, SpectralOpticalSource::TabulatedDielectric(_)) {
+                // Original alpha slope is 1000 per micrometre, not k slope.
+                let first = wavelength * 1e9 / (2.0 * omega);
+                let second = -(wavelength * 1e9 / omega) / omega;
+                assert!((jet.wavenumber_derivative_s_m().im / first - 1.0).abs() < 8e-15);
+                assert!((jet.wavenumber_second_derivative_s2_m().im / second - 1.0).abs() < 8e-15);
+            } else {
+                // The authored linear extinction has intercept -0.03.
+                assert!((jet.wavenumber_derivative_s_m().im / (0.03 / C0) - 1.0).abs() < 2e-14);
+                assert_eq!(jet.wavenumber_second_derivative_s2_m(), C64::ZERO);
+            }
+        }
+        for omega in [WL_FREQUENCY_M / 8e-6, WL_FREQUENCY_M / 14e-6] {
+            assert!(wave.bulk_dispersion(omega).is_err());
+        }
+    }
+}

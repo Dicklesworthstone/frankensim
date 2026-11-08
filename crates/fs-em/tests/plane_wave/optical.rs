@@ -464,3 +464,36 @@ fn finite_window_heat_refuses_empirical_optical_loss_without_a_causal_reservoir(
         "finite-window film heat needs an original causal material reservoir"
     ))));
 }
+
+
+#[test]
+fn g1_bulk_visible_metal_uses_original_complex_slope_without_group_velocity_clipping() {
+    let family = fs_material::state_point::VisibleOpticalStatePoint::Conductor(metal(Some(1.4 * M)));
+    let fs_material::state_point::VisibleOpticalStatePoint::Conductor(source) = &family else {
+        unreachable!()
+    };
+    let direct = OpticalConductorResponse::try_new(source).unwrap();
+    let family_response = fs_em::plane_wave::OpticalMaterialResponse::try_new(&family).unwrap();
+    let ambient = host();
+    for response in [
+        DielectricResponse::OpticalConductor(direct),
+        DielectricResponse::OpticalMaterial(family_response),
+    ] {
+        let interface = PlanarDielectricInterface::try_new(&ambient, response).unwrap();
+        for wavelength in [405.0, 550.0, 725.0] {
+            let omega = WAVELENGTH_FREQUENCY / wavelength;
+            let jet = response.bulk_dispersion(omega).unwrap();
+            assert!(jet.permittivity_f_m().re < 0.0);
+            let expected = C64::new(0.06, -2.62).scale(C0.recip());
+            complex_near(jet.wavenumber_derivative_s_m(), expected, 3e-14 * expected.abs());
+            assert_eq!(jet.wavenumber_second_derivative_s2_m(), C64::ZERO);
+            assert!(jet.group_velocity_m_s().unwrap() > C0);
+            let original = interface.response(omega, 1.0, Polarization::Te).unwrap();
+            complex_near(jet.wavenumber_rad_m(), original.transmitted_normal_wavenumber_rad_m,
+                8e-15 * original.transmitted_normal_wavenumber_rad_m.abs());
+            let transfer = jet.propagation(1e-8).unwrap();
+            relative(transfer.log_amplitude_derivative_s, expected.im * 1e-8, 3e-14);
+            assert_eq!(transfer.group_delay_dispersion_s2, 0.0);
+        }
+    }
+}

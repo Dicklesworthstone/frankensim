@@ -21768,3 +21768,15 @@ The existing thermal-fiber test seam specifies G1 heating, loaded relaxation, st
 `fs-material::water_absorption` retains all 169 original Hale–Querry (1973) Table I imaginary-index knots, using the CC0 refractiveindex.info transcription at Git blob `114173ed00461bc5b4910ffd6711aa6759ec86c5`. Source support is 200–200000 vacuum nm at the single nominal temperature 298.15 K. The historical compilation is not a modern visible-accuracy claim or a temperature/pressure-dependent absorption model. The allocation-free evaluator shares the original table, interpolates dimensionless k, and then computes intensity absorption `4*pi*k/lambda_vacuum_m`; no RGB conversion, knot reduction or extrapolation is applied. Its 32-byte identity binds the source, every knot, units, temperature, band and interpolation. Phase/group dispersion, scattering and strongly absorbing interface optics require their separate owners.
 
 Validation: all 169 k values and exact micrometre-to-nanometre conversions were compared with the pinned source transcription. Three focused tests of the original source module passed via the existing small source facade, including independent SI controls, interpolation order and invalid/support-boundary refusals; strict Clippy passed. This records source-module execution, not a full workspace build.
+
+### Original ordinary-water wavelength curvature
+
+The IAPWS R9-97 refraction owner also reports
+`WaterRefractiveSample::wavelength_second_derivative_per_nm2`, obtained by
+analytically differentiating the original rational wavelength terms and the
+same nonlinear Lorentz-Lorenz phase law. Preparation retains the wavelength
+coefficients for allocation-free T/rho sampling. This derivative holds the
+original temperature and density fixed, preserves the exact vacuum limit and
+the original 200--1100 nm domain, and introduces no EOS or absorption model.
+Native phase and group wavelength differences verify the added curvature;
+the release's original uncertainty and applicability limits remain unchanged.

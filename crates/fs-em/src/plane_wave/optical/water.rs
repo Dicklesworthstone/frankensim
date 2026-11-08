@@ -106,6 +106,13 @@ impl<'a> WaterOpticalResponse<'a> {
         Ok(response)
     }
 
+    pub(in crate::plane_wave) fn frequency_jet(
+        self,
+        omega: f64,
+    ) -> Result<super::frequency::OpticalFrequencyJet, ReflectionError> {
+        super::frequency::water(self, omega, self.index_to_sqrt_permittivity)
+    }
+
     /// Complete original T/rho/mu bundle, including its source-use identity.
     pub const fn source(self) -> &'a ResolvedMaterialStatePoint {
         self.source

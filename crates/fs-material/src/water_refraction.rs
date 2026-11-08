@@ -110,12 +110,20 @@ impl IapwsWaterRefraction {
         let wavelength_constant = -2.0 * lambda / LAMBDA_STAR_NM
             * (A[4] / (square * square) + A[5] / (uv * uv) + A[6] / (ir * ir));
         let wavelength_temperature = 2.0 * A[3] * lambda / (LAMBDA_STAR_NM * T_STAR_K);
+        let wavelength_second_constant = (6.0 * A[4] / (square * square)
+            + A[5] * (-2.0 + 8.0 * square / uv) / (uv * uv)
+            + A[6] * (-2.0 + 8.0 * square / ir) / (ir * ir))
+            / (LAMBDA_STAR_NM * LAMBDA_STAR_NM);
+        let wavelength_second_temperature =
+            2.0 * A[3] / (LAMBDA_STAR_NM * LAMBDA_STAR_NM * T_STAR_K);
         Ok(PreparedWaterRefraction {
             wavelength_nm,
             constant,
             temperature,
             wavelength_constant,
             wavelength_temperature,
+            wavelength_second_constant,
+            wavelength_second_temperature,
         })
     }
 }
@@ -129,6 +137,8 @@ pub struct PreparedWaterRefraction {
     temperature: f64,
     wavelength_constant: f64,
     wavelength_temperature: f64,
+    wavelength_second_constant: f64,
+    wavelength_second_temperature: f64,
 }
 
 /// Absolute phase/group indices and exact partial derivatives of this same law.
@@ -143,6 +153,9 @@ pub struct WaterRefractiveSample {
     /// `n - lambda_vac * dn/dlambda_vac`, from analytic source dispersion.
     pub group_index: f64,
     pub wavelength_derivative_per_nm: f64,
+    /// Analytic d²n/dlambda_vac² [nm^-2] at fixed original temperature/density.
+    /// Together with the first derivative this supplies bulk optical GVD.
+    pub wavelength_second_derivative_per_nm2: f64,
     pub temperature_derivative_per_k: f64,
     pub density_derivative_m3_per_kg: f64,
     pub temperature_second_derivative_per_k2: f64,
@@ -193,12 +206,17 @@ impl PreparedWaterRefraction {
             .wavelength_temperature
             .mul_add(temperature_k, self.wavelength_constant);
         let wavelength_derivative_per_nm = first * l_lambda;
+        let l_lambda_lambda = r * self
+            .wavelength_second_temperature
+            .mul_add(temperature_k, self.wavelength_second_constant);
         let sample = WaterRefractiveSample {
             phase_index: 1.0 + refractivity,
             phase_index_minus_one: refractivity,
             group_index: (-self.wavelength_nm)
                 .mul_add(wavelength_derivative_per_nm, 1.0 + refractivity),
             wavelength_derivative_per_nm,
+            wavelength_second_derivative_per_nm2:
+                second.mul_add(l_lambda * l_lambda, first * l_lambda_lambda),
             temperature_derivative_per_k: first * l_t,
             density_derivative_m3_per_kg: first * l_r,
             temperature_second_derivative_per_k2: second * l_t * l_t,
@@ -213,6 +231,7 @@ impl PreparedWaterRefraction {
                 sample.phase_index_minus_one,
                 sample.group_index,
                 sample.wavelength_derivative_per_nm,
+                sample.wavelength_second_derivative_per_nm2,
                 sample.temperature_derivative_per_k,
                 sample.density_derivative_m3_per_kg,
                 sample.temperature_second_derivative_per_k2,

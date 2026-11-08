@@ -215,6 +215,7 @@ fn g0_source_domain_and_vacuum_limit_remain_explicit() {
     assert_eq!(vacuum.phase_index_minus_one, 0.0);
     assert_eq!(vacuum.group_index, 1.0);
     assert_eq!(vacuum.wavelength_derivative_per_nm, 0.0);
+    assert_eq!(vacuum.wavelength_second_derivative_per_nm2, 0.0);
     assert_eq!(vacuum.temperature_derivative_per_k, 0.0);
     assert_eq!(vacuum.temperature_second_derivative_per_k2, 0.0);
     let dilute = prepared.sample(300.0, 1.0e-15).unwrap();
@@ -225,4 +226,27 @@ fn g0_source_domain_and_vacuum_limit_remain_explicit() {
         vacuum.density_derivative_m3_per_kg,
         1.0e-18,
     );
+}
+
+#[test]
+fn g1_wavelength_curvature_matches_phase_and_group_wavelength_differences() {
+    for wavelength in [210.0, 400.0, 589.0, 1000.0, 1090.0] {
+        for (temperature, density) in [(275.0, 1030.0), (300.0, 996.0), (500.0, 12.0), (760.0, 450.0)] {
+            let at = |shift| IapwsWaterRefraction::prepare(wavelength + shift)
+                .unwrap().sample(temperature, density).unwrap();
+            let sample = at(0.0);
+            let h = 0.2;
+            let phase_curvature = (-at(-2.0 * h).phase_index
+                + 16.0 * at(-h).phase_index - 30.0 * sample.phase_index
+                + 16.0 * at(h).phase_index - at(2.0 * h).phase_index)
+                / (12.0 * h * h);
+            near(sample.wavelength_second_derivative_per_nm2, phase_curvature, 5e-14);
+            // d(n-lambda*n')/dlambda = -lambda*n''; the original group
+            // evaluator supplies an independent first-derivative observation.
+            let h = 0.05;
+            let group_slope = (at(-2.0 * h).group_index - 8.0 * at(-h).group_index
+                + 8.0 * at(h).group_index - at(2.0 * h).group_index) / (12.0 * h);
+            near(-wavelength * sample.wavelength_second_derivative_per_nm2, group_slope, 4e-14);
+        }
+    }
 }

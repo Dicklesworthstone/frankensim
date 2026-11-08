@@ -653,3 +653,44 @@ fn water_multifrequency_source_identity_is_retained_without_inventing_a_heat_res
         }
     }
 }
+
+
+#[test]
+fn g1_bulk_water_gvd_reuses_original_iapws_curvature_and_maxwell_branch() {
+    let ambient = unit_index_port();
+    for (temperature, density) in [(273.15, 999.84), (500.0, 12.0), (760.0, 450.0)] {
+        for mu in [MU, 2.3 * MU] {
+            let source = water_state(temperature, density, mu);
+            let law = WaterOpticalResponse::try_lossless(&source, "T").unwrap();
+            let response = DielectricResponse::WaterOptical(law);
+            let interface = PlanarDielectricInterface::try_new(&ambient, response).unwrap();
+            for wavelength in [210.0, 550.0, 1000.0] {
+                let omega = FREQUENCY_WAVELENGTH_NM / wavelength;
+                let sample = law.refractive_sample(omega).unwrap();
+                let jet = response.bulk_dispersion(omega).unwrap();
+                assert!(core::ptr::eq(jet.source().material(), &source));
+                near(jet.group_slowness_s_m(), sample.group_index / VACUUM_SPEED_M_S, 2e-24);
+                let expected = (wavelength * wavelength) * sample.wavelength_second_derivative_per_nm2
+                    / VACUUM_SPEED_M_S / omega;
+                near(jet.group_velocity_dispersion_s2_m(), expected, 3e-15 * expected.abs());
+                assert_eq!(jet.wavenumber_derivative_s_m().im, 0.0);
+                assert_eq!(jet.wavenumber_second_derivative_s2_m().im, 0.0);
+                let h = 1e-3 * omega;
+                let at = |frequency| interface.response(frequency, 1.0, Polarization::Te)
+                    .unwrap().transmitted_normal_wavenumber_rad_m.re;
+                let second = (-at(omega - 2.0 * h) + 16.0 * at(omega - h)
+                    - 30.0 * at(omega) + 16.0 * at(omega + h) - at(omega + 2.0 * h))
+                    / (12.0 * h * h);
+                near(jet.group_velocity_dispersion_s2_m(), second, 1e-4 * expected.abs());
+            }
+            for wavelength in WAVELENGTH_RANGE_NM {
+                assert!(response.bulk_dispersion(FREQUENCY_WAVELENGTH_NM / wavelength).is_err());
+            }
+        }
+    }
+    let vacuum = water_state(300.0, 0.0, MU);
+    let response = DielectricResponse::WaterOptical(WaterOpticalResponse::try_lossless(&vacuum, "T").unwrap());
+    let jet = response.bulk_dispersion(FREQUENCY_WAVELENGTH_NM / 589.0).unwrap();
+    assert_eq!(jet.group_velocity_dispersion_s2_m(), 0.0);
+    assert_eq!(jet.group_velocity_m_s(), Some(VACUUM_SPEED_M_S));
+}

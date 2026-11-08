@@ -858,3 +858,129 @@ fn glass_exposure_reuses_original_film_and_exit_sources_and_refuses_substitution
         }
     }
 }
+
+
+fn dispersion_glass(family: Family, absorption: [f64; 9]) -> VisibleOpticalStatePoint {
+    let base = glass_card(family, true);
+    let mut claims = ClaimSet::new();
+    for (_, claim) in base.claims().claims_ordered() {
+        let mut claim = claim.clone();
+        if let Some(i) = VISIBLE_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES
+            .iter().position(|name| *name == claim.key.name())
+        {
+            claim.value = PropertyValue::Scalar {
+                value: absorption[i],
+                dims: VISIBLE_DIELECTRIC_ABSORPTION_QUANTITY.dims(),
+            };
+        }
+        claims.insert_claim(claim).unwrap();
+    }
+    let card = MaterialCard::assemble(base.id().clone(), claims, vec![]).unwrap();
+    let original = resolve_visible_optical_state_point(
+        &card, &point(300.0), MaterialPropertySelection::SingleClaimOnly,
+    ).unwrap();
+    extend(&original, &card)
+}
+
+fn dispersion_differences(omega: f64, at: impl Fn(f64) -> C64) -> [C64; 2] {
+    let h = 2e-4 * omega;
+    let v: [C64; 5] = core::array::from_fn(|i| at(omega + (i as f64 - 2.0) * h));
+    [
+        (v[0] - v[1].scale(8.0) + v[3].scale(8.0) - v[4]).scale(1.0 / (12.0 * h)),
+        (-v[0] + v[1].scale(16.0) - v[2].scale(30.0) + v[3].scale(16.0) - v[4])
+            .scale(1.0 / (12.0 * h * h)),
+    ]
+}
+
+#[test]
+fn g1_bulk_optical_phase_gvd_and_constant_intensity_absorption_keep_original_laws() {
+    let ambient = material(1.0 / (M * C0 * C0), M);
+    for family in [Family::Cauchy, Family::Tabulated, Family::Sellmeier] {
+        let source = dispersion_glass(family, [2e5; 9]);
+        let law = OpticalMaterialResponse::try_new(&source).unwrap();
+        let response = DielectricResponse::OpticalMaterial(law);
+        let interface = PlanarDielectricInterface::try_new(&ambient, response).unwrap();
+        for wavelength_nm in [405.0, 550.0, 735.0] {
+            let omega = WL_FREQUENCY / wavelength_nm;
+            let jet = response.bulk_dispersion(omega).unwrap();
+            assert!(core::ptr::eq(jet.source().material(), source.resolved()));
+            assert_eq!(jet.permittivity_f_m(), law.permittivity_f_m(omega).unwrap());
+            let native = interface.response(omega, 1.0, Polarization::Te).unwrap();
+            assert!((jet.wavenumber_rad_m() - native.transmitted_normal_wavenumber_rad_m).abs()
+                < 8e-15 * jet.wavenumber_rad_m().abs());
+            let [first, second] = dispersion_differences(omega, |frequency| {
+                interface.response(frequency, 1.0, Polarization::Te)
+                    .unwrap().transmitted_normal_wavenumber_rad_m
+            });
+            assert!((jet.wavenumber_derivative_s_m() - first).abs() < 2e-8 * first.abs());
+            if matches!(family, Family::Tabulated) {
+                assert_eq!(jet.group_velocity_dispersion_s2_m(), 0.0);
+            } else {
+                assert!((jet.wavenumber_second_derivative_s2_m() - second).abs()
+                    < 3e-5 * second.abs());
+            }
+            // The native amplitude loss is alpha/2, independent of frequency:
+            // index extinction varies as 1/omega and must not look constant.
+            assert_eq!(jet.wavenumber_derivative_s_m().im, 0.0);
+            assert_eq!(jet.wavenumber_second_derivative_s2_m().im, 0.0);
+            let transfer = jet.propagation(1e-6).unwrap();
+            assert_eq!(transfer.log_amplitude_derivative_s, 0.0);
+            assert_eq!(transfer.log_amplitude_second_derivative_s2, 0.0);
+            assert!((transfer.transfer.norm_sq() - det::exp(-0.2)).abs() < 8e-15);
+            if matches!(family, Family::Cauchy) {
+                let square = (wavelength_nm * 1e-9_f64).powi(2);
+                let b = 5e-15 / square;
+                let c = 2e-28 / square / square;
+                let group = (1.4 + 3.0 * b + 5.0 * c) / C0;
+                let gvd = (6.0 * b + 20.0 * c) / C0 / omega;
+                assert!((jet.group_slowness_s_m() / group - 1.0).abs() < 5e-15);
+                assert!((jet.group_velocity_dispersion_s2_m() / gvd - 1.0).abs() < 5e-15);
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_bulk_optical_differentiates_original_alpha_before_extinction_conversion() {
+    let source = dispersion_glass(Family::Cauchy, VISIBLE_DIELECTRIC_WAVELENGTHS_NM.map(alpha));
+    let law = OpticalMaterialResponse::try_new(&source).unwrap();
+    let response = DielectricResponse::OpticalMaterial(law);
+    for wavelength in [405.0, 550.0, 735.0] {
+        let omega = WL_FREQUENCY / wavelength;
+        let jet = response.bulk_dispersion(omega).unwrap();
+        // Independent differentiation of Im(k_wave)=-alpha(lambda(omega))/2.
+        let first = wavelength * 1e3 / (2.0 * omega);
+        let second = -(wavelength * 1e3 / omega) / omega;
+        assert!((jet.wavenumber_derivative_s_m().im / first - 1.0).abs() < 5e-15);
+        assert!((jet.wavenumber_second_derivative_s2_m().im / second - 1.0).abs() < 5e-15);
+        let finite = dispersion_differences(omega, |frequency| law.permittivity_f_m(frequency).unwrap());
+        let analytic = jet.scaled_permittivity_derivatives_f_m();
+        for (actual, expected) in analytic.into_iter().zip([
+            finite[0].scale(omega), finite[1].scale(omega).scale(omega),
+        ]) {
+            assert!((actual - expected).abs() < 3e-5 * expected.abs());
+        }
+    }
+}
+
+#[test]
+fn g0_bulk_optical_refuses_band_edges_and_cusps_but_admits_smooth_knots() {
+    let smooth = dispersion_glass(Family::Cauchy, [2e5; 9]);
+    let response = DielectricResponse::OpticalMaterial(OpticalMaterialResponse::try_new(&smooth).unwrap());
+    for wavelength in [380.0, 780.0] {
+        let omega = WL_FREQUENCY / wavelength;
+        assert!(OpticalMaterialResponse::try_new(&smooth).unwrap().complex_index(omega).is_ok());
+        assert!(response.bulk_dispersion(omega).is_err());
+    }
+    for wavelength in &VISIBLE_DIELECTRIC_WAVELENGTHS_NM[1..8] {
+        assert!(response.bulk_dispersion(WL_FREQUENCY / wavelength).is_ok());
+    }
+    let mut absorption = [2e5; 9];
+    absorption[4] = 2.5e5;
+    let cusp = dispersion_glass(Family::Cauchy, absorption);
+    let response = DielectricResponse::OpticalMaterial(OpticalMaterialResponse::try_new(&cusp).unwrap());
+    let omega = WL_FREQUENCY / VISIBLE_DIELECTRIC_WAVELENGTHS_NM[4];
+    assert!(response.bulk_dispersion(omega).is_err());
+    assert!(response.bulk_dispersion(omega.next_up()).unwrap().wavenumber_derivative_s_m().im > 0.0);
+    assert!(response.bulk_dispersion(omega.next_down()).unwrap().wavenumber_derivative_s_m().im < 0.0);
+}
