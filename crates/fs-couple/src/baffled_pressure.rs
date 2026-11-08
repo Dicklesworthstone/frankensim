@@ -50,6 +50,8 @@ pub mod harmonic;
 /// Synchronized transient pressure, particle velocity and signed energy flux.
 #[path = "baffled_pressure_field.rs"]
 pub mod field;
+#[path = "baffled_pressure_molecular_field.rs"]
+pub mod molecular_field;
 
 /// Material-derived absorption/dispersion on every original surface path.
 #[path = "baffled_pressure_gas.rs"]

@@ -1,3 +1,39 @@
+## Complete transient Rayleigh fields in a molecularly relaxing gas
+
+`baffled_pressure::molecular_field::PreparedMolecularBaffledField` maps each
+original surface quadrature point and signed input basis to the existing
+material Green-function owner with Q=2*A*sum(phi*v) and Qdot=2*A*sum(phi*a).
+The rigid-baffle factor is applied once. Every original path retains its own
+position, direction and calorically frozen arrival front. Original reservoir
+absorption and dispersion enter pressure and the full spatial velocity gradient;
+reactive velocity is never reconstructed from pressure/impedance.
+
+One caller-owned consistent velocity/acceleration history supplies every query
+on the original DD physical clock. Initially resting input coordinates and
+unexcited medium are explicit; missing onset impulses or nonfinite motion
+refuse. A finite acceleration jump is admitted without a smooth-onset
+second-order claim. The finite-prefix record includes coherent pressure,
+Cartesian velocity and signed instantaneous intensity. Ideal first-order
+microphone orientation may change on that record, with the same gas's
+equilibrium rho*c retained as an explicit calibration reference.
+
+The adapter prepares one original BDF2 convolution-quadrature cache, adds DD
+surface projection, and includes retained/temporary mapping arrays and
+projection work in explicit budgets. This is offline prescribed-motion
+observation in a stationary flat infinite rigid baffle and homogeneous relaxing
+gas. Classical viscothermal loss, wall layers, finite-baffle scattering,
+motion and reciprocal loading are not supplied by this path. Source, spatial,
+time and contour refinement remain independent.
+
+Five regressions cover the independent lossless retarded Rayleigh field,
+multiple physical fronts, molecular pressure cancellation with surviving
+velocity, an independent single-reservoir Bromwich inversion with timestep
+refinement, quiet modal residuals and transactional admission. Pinned rustfmt
+and bounded source/API/physics review passed. Native Rust tests remain
+unexecuted because the constrained real-source build stopped in asupersync
+before reaching the affected crates; numerical oracle checks are not a Rust
+test pass.
+
 ## Modal convergence with conservative and cancelling fields
 
 The modal vibroacoustic convergence APIs now require both the original active
