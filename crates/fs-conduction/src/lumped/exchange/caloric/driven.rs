@@ -11,7 +11,8 @@ use fs_exec::Cx;
 use fs_material::thermal::transport::conduction::{
     CaloricConductionLayer, CaloricDrivenHeatExchange,
 };
-use fs_math::eft::{two_prod, two_sum};
+use fs_math::eft::two_prod;
+use super::super::{compensated_sum, product_ratio};
 use fs_thermal::enthalpy::DepositedCell;
 
 /// Exact held-boundary proposal including signed applied cell heat.
@@ -293,35 +294,3 @@ fn original_initial_power(
     ])
 }
 
-// Three possible multiplication orders avoid introducing an overflowing
-// intermediate when the finite physical product/ratio itself is representable.
-// A nonzero drive or exposure must not silently become zero.
-fn product_ratio(a: f64, b: f64, denominator: f64) -> Option<f64> {
-    if a == 0.0 || b == 0.0 {
-        return Some(0.0);
-    }
-    for value in [(a / denominator) * b, a * (b / denominator), (a * b) / denominator] {
-        if value.is_finite() && value != 0.0 {
-            return Some(value);
-        }
-    }
-    None
-}
-
-fn compensated_sum(values: &[f64]) -> Option<f64> {
-    let mut sum = 0.0;
-    let mut correction = 0.0;
-    for &value in values {
-        if !value.is_finite() {
-            return None;
-        }
-        let (next, error) = two_sum(sum, value);
-        if !next.is_finite() {
-            return None;
-        }
-        sum = next;
-        correction += error;
-    }
-    let result = sum + correction;
-    result.is_finite().then_some(result)
-}

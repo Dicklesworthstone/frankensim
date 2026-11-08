@@ -688,7 +688,8 @@ pub struct LumpedEnthalpyMarchConfig {
     pub internal_power_w: f64,
     /// Requested physical horizon [s].
     pub duration_s: f64,
-    /// Maximum backward-Euler step [s]; the final step is shortened exactly.
+    /// Maximum backward-Euler step or exact-history sampling interval [s].
+    /// The final interval is shortened exactly.
     /// Temperature-dependent radiative feedback can require smaller steps to
     /// keep each implicit balance single-valued. Every subdivision counts
     /// against maximum_steps; this admission is not temporal error control.
@@ -719,7 +720,8 @@ pub struct LumpedEnthalpySample {
     pub internal_power_w: f64,
     /// Total power into the body [W].
     pub net_power_into_body_w: f64,
-    /// Backward-Euler energy closure `m delta h - dt P_end` [J].
+    /// Stored enthalpy minus the preceding interval's integrated heat [J].
+    /// Backward Euler uses dt*P_end; exact history uses retained source/bath heat.
     pub step_energy_residual_j: f64,
 }
 
@@ -785,9 +787,66 @@ pub fn solve_lumped_enthalpy(
     gate: BiotGate,
     config: LumpedEnthalpyMarchConfig,
 ) -> Result<LumpedEnthalpyMarch, ConductionError> {
+    solve_lumped_enthalpy_with_scheme::<false>(cx, body, gate, config)
+}
+
+/// Sample exact held-source/convection evolution on the original phase chart.
+///
+/// Uses the same body, controls, sample clock and complete history result as
+/// the native enthalpy march. Each interval is an exact original-Cp/latent
+/// exchange, so maximum_step_s controls output cadence rather than temporal
+/// discretization accuracy. The material source support, maximum sample count,
+/// cancellation and mass-scaled enthalpy representation budget remain binding.
+///
+/// Radiation must be explicitly disabled; the radiation temperature remains a
+/// validated input of the shared configuration but supplies no heat. Geometry,
+/// pressure/work convention and source power are held for the complete history.
+/// A refused interval returns no partial history or committed source debit.
+pub fn solve_lumped_enthalpy_exact(
+    cx: &Cx<'_>,
+    body: &LumpedEnthalpyBody<'_>,
+    gate: BiotGate,
+    config: LumpedEnthalpyMarchConfig,
+) -> Result<LumpedEnthalpyMarch, ConductionError> {
+    solve_lumped_enthalpy_with_scheme::<true>(cx, body, gate, config)
+}
+
+fn solve_lumped_enthalpy_with_scheme<const EXACT: bool>(
+    cx: &Cx<'_>,
+    body: &LumpedEnthalpyBody<'_>,
+    gate: BiotGate,
+    config: LumpedEnthalpyMarchConfig,
+) -> Result<LumpedEnthalpyMarch, ConductionError> {
     validate_enthalpy_config(body, config)?;
-    let maximum_biot = body.maximum_biot(config.radiation_temperature_k);
-    if !maximum_biot.is_finite() || maximum_biot > gate.ceiling() {
+    let exact_energy_tolerance_j = if EXACT {
+        if body.transport.maximum_emissivity() != 0.0 {
+            return Err(lumped_error(
+                &body.name,
+                "exact held-source enthalpy history requires radiation to be explicitly disabled".into(),
+            ));
+        }
+        let tolerance = body.mass_kg * config.enthalpy_tolerance_j_kg;
+        if !tolerance.is_finite() || tolerance <= 0.0 {
+            return Err(lumped_error(
+                &body.name,
+                "exact history's native-energy tolerance is not representable".into(),
+            ));
+        }
+        tolerance
+    } else {
+        0.0
+    };
+    let maximum_biot = if EXACT {
+        // Radiation is disabled, and transport already retains the complete
+        // original chart's minimum conductivity. No per-sample chart scan.
+        body.convection_w_per_m2_k * body.characteristic_length_m
+            / body.transport.minimum_conductivity_w_per_m_k()
+    } else {
+        body.maximum_biot(config.radiation_temperature_k)
+    };
+    if !maximum_biot.is_finite() || maximum_biot > gate.ceiling()
+        || (EXACT && body.convection_w_per_m2_k > 0.0 && maximum_biot == 0.0)
+    {
         return Err(lumped_error(
             &body.name,
             format!(
@@ -796,7 +855,7 @@ pub fn solve_lumped_enthalpy(
             ),
         ));
     }
-    let admitted_step_s = if config.duration_s == 0.0 {
+    let admitted_step_s = if EXACT || config.duration_s == 0.0 {
         config.maximum_step_s
     } else {
         config.maximum_step_s.min(monotone_enthalpy_step_limit_s(
@@ -871,10 +930,30 @@ pub fn solve_lumped_enthalpy(
                 "enthalpy timestep cannot make representable clock progress".to_owned(),
             ));
         }
-        let next = solve_enthalpy_step(body, config, specific_enthalpy, dt_s)?;
-        let state = phase_state(body, next)?;
+        let (next, state, exact_balance) = if EXACT {
+            let proposal = exchange::solve_lumped_driven_exchange(
+                cx, body, gate,
+                exchange::LumpedDrivenExchangeConfig {
+                    initial_specific_enthalpy_j_kg: specific_enthalpy,
+                    reservoir_temperature_k: config.ambient_temperature_k,
+                    applied_power_w: config.internal_power_w,
+                    duration_s: dt_s,
+                    energy_tolerance_j: exact_energy_tolerance_j,
+                },
+            )?;
+            (
+                proposal.caloric.state.specific_enthalpy_j_kg(),
+                proposal.caloric.state,
+                Some(-proposal.energy_balance_residual_j),
+            )
+        } else {
+            let next = solve_enthalpy_step(body, config, specific_enthalpy, dt_s)?;
+            (next, phase_state(body, next)?, None)
+        };
         let (convection, radiation, net) = enthalpy_power(body, config, next, state.temperature_k())?;
-        let residual = body.mass_kg * (next - specific_enthalpy) - dt_s * net;
+        let residual = exact_balance.unwrap_or_else(|| {
+            body.mass_kg * (next - specific_enthalpy) - dt_s * net
+        });
         cumulative_absolute_energy_residual_j += residual.abs();
         if !residual.is_finite() || !cumulative_absolute_energy_residual_j.is_finite() {
             return Err(lumped_error(
@@ -894,7 +973,11 @@ pub fn solve_lumped_enthalpy(
             step_energy_residual_j: residual,
         });
     }
-    let mut identity = DomainHasher::new("org.frankensim.fs-conduction.lumped-enthalpy-march.v2");
+    let mut identity = DomainHasher::new(if EXACT {
+        "org.frankensim.fs-conduction.lumped-enthalpy-exact-linear-march.v1"
+    } else {
+        "org.frankensim.fs-conduction.lumped-enthalpy-march.v2"
+    });
     identity.update(body.identity().as_bytes());
     for value in [
         config.initial_specific_enthalpy_j_kg,

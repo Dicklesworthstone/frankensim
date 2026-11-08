@@ -1,5 +1,6 @@
 //! Native uniform-body exchange through sensible branches and sharp fusion.
 
+mod driven;
 mod pair;
 
 use super::*;

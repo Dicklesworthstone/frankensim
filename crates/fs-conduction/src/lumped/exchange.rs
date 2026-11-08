@@ -10,6 +10,14 @@ pub mod caloric;
 /// Direct isolated fixed-resistance exchange between two finite bodies.
 pub mod pair;
 
+/// Constant applied heat with convection through the full original phase chart.
+pub mod driven;
+
+pub use driven::{
+    LumpedDrivenExchange, LumpedDrivenExchangeConfig, LumpedDrivenExchangeResponse,
+    solve_lumped_driven_exchange, solve_lumped_driven_exchange_response,
+};
+
 use super::{BiotGate, LumpedEnthalpyBody, lumped_error, phase_state};
 use crate::ConductionError;
 use fs_blake3::ContentHash;
@@ -233,4 +241,37 @@ fn checkpoint(cx: &Cx<'_>) -> Result<(), ConductionError> {
         stage: "lumped-linear-exchange",
         at: 0,
     })
+}
+
+// Shared by native-energy and phase-chart exchange adapters. Three possible
+// multiplication orders avoid an overflowing intermediate for a finite result.
+// A nonzero integrated drive or exposure must not silently become zero.
+pub(super) fn product_ratio(a: f64, b: f64, denominator: f64) -> Option<f64> {
+    if a == 0.0 || b == 0.0 {
+        return Some(0.0);
+    }
+    for value in [(a / denominator) * b, a * (b / denominator), (a * b) / denominator] {
+        if value.is_finite() && value != 0.0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+pub(super) fn compensated_sum(values: &[f64]) -> Option<f64> {
+    let mut sum = 0.0;
+    let mut correction = 0.0;
+    for &value in values {
+        if !value.is_finite() {
+            return None;
+        }
+        let (next, error) = fs_math::eft::two_sum(sum, value);
+        if !next.is_finite() {
+            return None;
+        }
+        sum = next;
+        correction += error;
+    }
+    let result = sum + correction;
+    result.is_finite().then_some(result)
 }
