@@ -824,6 +824,31 @@ eigenvalues and the existing mass-normalized acoustic pressure port. No new
 eigensolver, acoustic model or time integrator is introduced; those consumers
 receive the resulting physical mass matrix.
 
+### Graded panels with bonded beam reinforcement
+
+`assemble_stiffened_shell_with_reference_density` and its `materials` form
+bind one original density triple per panel facet and one endpoint pair per
+bonded `ShellBeam`. Both fields are admitted before shell assembly. Adjacent
+panels or reinforcements can retain distinct densities at a shared node;
+neither field is replaced by its mean or inferred from the other component.
+
+The original consistent panel reference-mass kernel and existing selected
+`BeamMass` kernel integrate their respective fields. The same eccentric
+rigid-arm congruence transforms beam stiffness and inertia before sparse
+accumulation and original support restriction. Beam translation, sectional
+spin and offset coupling therefore retain the same density distribution.
+The resulting native pencil supplies modal normalization and frequency;
+no additional integration formula, mass owner or elastic law is introduced.
+Every original bonded assembly entry retains its frozen legacy pencil.
+
+Five regression definitions in `shell/stiffened/reference_density_tests.rs`
+check independent complete spatial moments and frame covariance, polynomial
+density--velocity correlation for both beam mass images, supported native
+modes and density scaling, original uniform/empty/material-section paths,
+and complete-field admission. Changed Rust was parsed with pinned Rustfmt
+and independent moment arithmetic was checked; native execution of these
+new regressions remains unperformed.
+
 ### Layered CST/DKT reference density and first mass moment
 
 `ReferenceDensityMoments` and the `*_with_reference_density_moments` assembly

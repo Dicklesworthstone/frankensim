@@ -116,6 +116,55 @@ pub fn assemble_stiffened_shell_materials_with_mass(mesh: &ShellMesh, sections: 
     -> Result<ShellModel, PlateError> {
     assemble_sections_with_mass(mesh, sections, boundary, support, beams, mass)
 }
+/// Bonded reinforcement with explicit reference density in every panel and beam.
+/// Panel triples follow each original facet's corner order; beam pairs follow
+/// each `ShellBeam::nodes` order along its centroidal chord. Shared nodes may
+/// retain different densities in distinct physical panels or reinforcements.
+///
+/// The existing consistent panel inertia integrates its P1 density field. Beam
+/// inertia uses the selected exact or lumped native image before the same
+/// eccentric rigid-arm congruence as stiffness. No density is averaged into a
+/// section, and the original stiffness, support and modal owners are retained.
+/// The original assembly entries keep their frozen legacy pencils.
+///
+/// # Errors
+/// Incomplete/nonpositive/nonfinite fields or any original shell/beam refusal.
+/// Both density fields are admitted before allocating the shell assembly.
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_stiffened_shell_with_reference_density(
+    mesh: &ShellMesh,
+    sections: &[PlateSection],
+    reference_corner_density_kg_m3: &[[f64; 3]],
+    boundary: &[usize],
+    support: ShellSupport,
+    beams: &[ShellBeam],
+    reference_beam_density_kg_m3: &[[f64; 2]],
+    mass: BeamMass,
+) -> Result<ShellModel, PlateError> {
+    assemble_sections_with_reference_density(mesh, sections, boundary, support, beams, mass,
+        Some((reference_corner_density_kg_m3, reference_beam_density_kg_m3)))
+}
+
+/// Independent membrane/bending sections with the same graded panel and beam
+/// inventories as [`assemble_stiffened_shell_with_reference_density`].
+/// Density changes inertia only; no membrane/bending material law is inferred.
+///
+/// # Errors
+/// The same complete-field, geometry, material and arithmetic refusals.
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_stiffened_shell_materials_with_reference_density(
+    mesh: &ShellMesh,
+    sections: &[ShellSection],
+    reference_corner_density_kg_m3: &[[f64; 3]],
+    boundary: &[usize],
+    support: ShellSupport,
+    beams: &[ShellBeam],
+    reference_beam_density_kg_m3: &[[f64; 2]],
+    mass: BeamMass,
+) -> Result<ShellModel, PlateError> {
+    assemble_sections_with_reference_density(mesh, sections, boundary, support, beams, mass,
+        Some((reference_corner_density_kg_m3, reference_beam_density_kg_m3)))
+}
 pub(super) fn assemble_sections<S: Section>(mesh: &ShellMesh, sections: &[S],
     boundary: &[usize], support: ShellSupport, beams: &[ShellBeam])
     -> Result<ShellModel, PlateError> {
@@ -124,14 +173,38 @@ pub(super) fn assemble_sections<S: Section>(mesh: &ShellMesh, sections: &[S],
 fn assemble_sections_with_mass<S: Section>(mesh: &ShellMesh, sections: &[S],
     boundary: &[usize], support: ShellSupport, beams: &[ShellBeam], mass: BeamMass)
     -> Result<ShellModel, PlateError> {
-    let mut model = super::assemble(mesh, sections, false, boundary, support)?;
+    assemble_sections_with_reference_density(mesh, sections, boundary, support, beams, mass, None)
+}
+fn assemble_sections_with_reference_density<S: Section>(mesh: &ShellMesh, sections: &[S],
+    boundary: &[usize], support: ShellSupport, beams: &[ShellBeam], mass: BeamMass,
+    reference_density: Option<(&[[f64; 3]], &[[f64; 2]])>)
+    -> Result<ShellModel, PlateError> {
+    if let Some((panels, reinforcement)) = reference_density {
+        crate::reference_density::validate(mesh.tris.len(), panels)?;
+        if reinforcement.len() != beams.len() {
+            return Err(bad("bonded beam reference density needs one endpoint pair per beam"));
+        }
+        for &density in reinforcement {
+            inertia::validate_reference_density(density)?;
+        }
+    }
+    let mut model = match reference_density {
+        Some((panels, _)) => super::assemble_with_reference_inertia(
+            mesh, sections, false, boundary, support, super::DRILLING_ALPHA,
+            super::CstDktMass::Consistent, None, Some(super::ReferenceInertia::Density(panels)))?,
+        None => super::assemble(mesh, sections, false, boundary, support)?,
+    };
     if beams.is_empty() { return Ok(model); }
     let mut k = Coo::new(model.free, model.free);
     let mut m = Coo::new(model.free, model.free);
     copy_sparse(&model.k, &mut k);
     copy_sparse(&model.m, &mut m);
-    for beam in beams {
-        let (ke, me) = element_with_mass(mesh, beam, mass)?;
+    for (index, beam) in beams.iter().enumerate() {
+        let (ke, me) = match reference_density {
+            Some((_, reinforcement)) => element_with_reference_density(
+                mesh, beam, mass, Some(reinforcement[index]))?,
+            None => element_with_mass(mesh, beam, mass)?,
+        };
         for i in 0..12 {
             let Some(row) = model.dof_map[6*beam.nodes[i/6]+i%6] else { continue; };
             for j in 0..12 {
@@ -167,6 +240,11 @@ fn element(mesh: &ShellMesh, beam: &ShellBeam)
 }
 fn element_with_mass(mesh: &ShellMesh, beam: &ShellBeam, mass: BeamMass)
     -> Result<([f64;144],[f64;144]),PlateError> {
+    element_with_reference_density(mesh, beam, mass, None)
+}
+fn element_with_reference_density(mesh: &ShellMesh, beam: &ShellBeam, mass: BeamMass,
+    reference_density_kg_m3: Option<[f64; 2]>)
+    -> Result<([f64;144],[f64;144]),PlateError> {
     let (length, transform) = element_kinematics(mesh, beam)?;
     let s = beam.section;
     let mut k = [0.0;144];
@@ -187,7 +265,10 @@ fn element_with_mass(mesh: &ShellMesh, beam: &ShellBeam, mass: BeamMass)
             k[12*slots[i]+slots[j]] += coefficient*hermite[i][j]*signs[i]*signs[j];
         }}
     }
-    let m = inertia::local_mass(s, l, [0.0; 2], mass)?;
+    let m = match reference_density_kg_m3 {
+        Some(density) => inertia::local_mass_with_reference_density(s, l, [0.0; 2], mass, density)?,
+        None => inertia::local_mass(s, l, [0.0; 2], mass)?,
+    };
     let k = congruence(&k,&transform);
     let m = congruence(&m,&transform);
     if k.iter().chain(m.iter()).any(|x| !x.is_finite()) {
@@ -240,6 +321,10 @@ fn congruence(a: &[f64;144], t: &[f64;144]) -> [f64;144] {
     }}
     out
 }
+
+#[cfg(test)]
+#[path = "stiffened/reference_density_tests.rs"]
+mod reference_density_tests;
 
 #[cfg(test)]
 mod tests {
