@@ -19,6 +19,8 @@ use crate::curle3d::{CoherenceBudget, CoherentCompactField, CompactFieldStatisti
 use crate::observation::HarmonicFieldLine;
 use fs_math::c64::C64;
 
+mod recorded;
+
 /// Every returning cell retains its original tensor, position and source clock.
 pub const IMPEDANCE_WALL_REFLECTED_QUADRUPOLE_ARRAY_SCOPE: &str = "Prescribed stationary \
 symmetric 3D Lighthill stress moments [N m] at their original positions and clock; \

@@ -109,6 +109,22 @@ invalid source counts, exhausted budgets and cancellation refuse atomically.
 Robin absorption, destructive and partial coherence, ideal-wall path cross terms,
 aggregate work, cancellation and self-field admission.
 
+`RecordedQuadrupoleSpectrum` now binds its original stress cells and exact
+interior-bin frequency to reflected-only or coherent total impedance-wall
+observation. The prepared wall array delegates each original Welch factor to
+the unchanged generic stress reducer, retaining full pressure/velocity moments
+and cell, tensor and direct/reflected cross terms. The native peak-bin owner
+applies sqrt(2 df) once; no extra density, cell volume, phase origin, propagation
+delay or FFT is introduced. Recording-aware evaluation rejects changed positions
+or order and enforces the original frequency and combined cell/segment work.
+The caller supplies the original material impedance at each requested frequency;
+a prepared response cannot be applied at another bin. Results are bin-integrated
+moments with the original window, aliasing and finite-record limitations, without
+waveform continuation, cross-frequency phase or inferred source independence.
+`impedance_wall_recorded` specifies known-tone normalization and full moments,
+ideal-image interference, finite-wall Robin absorption and physical binding,
+work and cancellation refusals.
+
 `PreparedImpedanceWallCompactSourceObserver` prepares complete physical Q/F
 source assemblies for reflected-only or coherent total observation, including
 receivers on the wall. One 4-by-4 Cartesian transfer per original source feeds
