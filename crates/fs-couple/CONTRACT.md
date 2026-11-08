@@ -6078,6 +6078,28 @@ unchanged and still an explicit declaration. A residual above the raised floor s
 Measured on the refusal that motivated it (a 2.65 s D4 render on the typed DG reed, 1.047 s in): residual 4.2e-21 m^3/s on a
 flow scale of 6.2e-11, `eps x 6178 Pa / 1.7e8 Pa s/m^3` = 8e-21 m^3/s.
 
+## Positive exact blade damping heat
+
+The shared `ExactBlade` used by scalar, paired and diagonal modal apertures
+retains physical viscous and Maxwell loss through the existing
+`fs-phs::linear_exact::PreparedSourceLoss` owner. Its source rows are
+`sqrt(c) v` and `(c_j x-z_j)/sqrt(tau_j)` on the original held-force trajectory.
+The unit-interval generator is the same `A dt` as the motion map, with source
+rows multiplied by `sqrt(dt)`. No auxiliary inverse physical exponential or
+expanded energy difference supplies the heat. Positive Gauss/QR factors retain
+nonnegative loss, exact zero loss at resolved static equilibrium, and small
+vibration heat about a large held-load displacement.
+
+Preparation retains the existing 256-coordinate doubled-block capacity and
+explicit byte/work bounds. Warm heat evaluation uses bounded stack scratch;
+it allocates no vector, advances no history, and changes no motion or contact
+solve. The material-source clock and applicability restrictions are unchanged.
+The existing Maxwell ODE regression includes stiff relaxation rungs; independent
+overdamped poles are checked through the live paired aperture, and an analytic
+loaded-vibration regression distinguishes tiny physical heat from its much
+larger equilibrium spring storage. These are synthetic G1/G3 checks of the
+represented equations, not measured material or instrument validation.
+
 ## Per-opening quadrature of a circular opening array
 
 An array of coplanar circular openings (`BaffledPressure::circular_openings*`) used to give every opening the receiver's one

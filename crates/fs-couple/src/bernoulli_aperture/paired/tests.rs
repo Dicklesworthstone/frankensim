@@ -288,8 +288,16 @@ fn exact_dynamic_aperture_matches_the_exact_symmetric_paired_image() {
 /// the energy identity closes. Midpoint would refuse this omega*dt.
 #[test]
 fn exact_block_with_maxwell_arms_matches_an_independent_integration() {
+    // Resolve the source clock independently, including dt/tau > 1000. An
+    // inverse-exponential heat calculation overflows on the stiffest rung.
+    for fastest_tau in [2e-4, 2e-6, 2e-8] {
+        check_exact_block_with_maxwell_arms(fastest_tau);
+    }
+}
+
+fn check_exact_block_with_maxwell_arms(fastest_tau: f64) {
     let (m,k,c)=(1e-5,500.0,0.01);
-    let arms=[ExactArm {coupling:300.0_f64.sqrt(),relaxation_time_s:2e-4},
+    let arms=[ExactArm {coupling:300.0_f64.sqrt(),relaxation_time_s:fastest_tau},
         ExactArm {coupling:150.0_f64.sqrt(),relaxation_time_s:3e-3}];
     let dt=1.0/48_000.0;
     let blade=ExactBlade::with_arms(m,c,k,&arms,dt).unwrap();
@@ -304,7 +312,7 @@ fn exact_block_with_maxwell_arms_matches_an_independent_integration() {
             c*s[1]*s[1],ext[0]*ext[0]/arms[0].relaxation_time_s+ext[1]*ext[1]/arms[1].relaxation_time_s]
     };
     let mut s=[start.displacement_m,start.velocity_m_s,memory[0],memory[1],0.0,0.0,0.0,0.0];
-    let n=20_000;let h=dt/f64::from(n);
+    let n=20_000_usize.max((128.0*dt/fastest_tau).ceil() as usize);let h=dt/n as f64;
     for _ in 0..n {
         let k1=rate(&s);
         let k2=rate(&std::array::from_fn(|i| s[i]+0.5*h*k1[i]));
@@ -332,4 +340,82 @@ fn exact_block_with_maxwell_arms_matches_an_independent_integration() {
         -blade.arm_loss_j(start,force,&memory);
     assert!((change-work).abs()<=1e-12*energy(start.displacement_m,start.velocity_m_s,&memory),
         "energy identity: {change} vs {work}");
+}
+
+/// G1: antisymmetric blades have zero swept flow and fixed total gap, so the
+/// live aperture must reproduce two free, analytically overdamped oscillators.
+/// Both the initial fast transient and the retained slow pole contribute heat.
+#[test]
+fn g1_exact_blades_retain_overdamped_motion_and_positive_heat() {
+    let (mass, stiffness, dt) = (1.0, 4.0, 0.02);
+    for damping in [10.0, 1_000.0, 100_000.0] {
+        let mut source = spec();
+        source.time_step_s = dt;
+        source.blades = [ApertureBlade {
+            mass_kg: mass,
+            stiffness_n_m: stiffness,
+            damping_n_s_m: damping,
+            pressure_area_m2: 1e-4,
+        }; 2];
+        let initial = [
+            BladeState { displacement_m: 0.0, velocity_m_s: 1.0 },
+            BladeState { displacement_m: 0.0, velocity_m_s: -1.0 },
+        ];
+        let mut pair = PairedAperture::new_with_propagator(
+            source, initial, contact(0.0), BladePropagator::ExactZoh,
+        ).unwrap();
+        let frame = pair.step(ApertureDrive::default()).unwrap();
+        let gamma = damping / (2.0 * mass);
+        let delta = (gamma * gamma - stiffness / mass).sqrt();
+        let fast = -gamma - delta;
+        let slow = -(stiffness / mass) / (gamma + delta);
+        let q = ((slow * dt).exp() - (fast * dt).exp()) / (slow - fast);
+        let v = (slow * (slow * dt).exp() - fast * (fast * dt).exp()) / (slow - fast);
+        let heat = 0.5 * mass * (1.0 - v * v) - 0.5 * stiffness * q * q;
+        for (state, sign) in frame.blades.iter().zip([1.0, -1.0]) {
+            assert!((state.displacement_m - sign * q).abs() <= 2e-10 * q.abs());
+            assert!((state.velocity_m_s - sign * v).abs() <= 1e-8 * v.abs() + 1e-15);
+        }
+        assert!(heat > 0.0 && frame.aperture.dissipated_energy_j > 0.0);
+        assert!((frame.aperture.dissipated_energy_j - 2.0 * heat).abs() < 2e-9 * heat);
+        assert_eq!(frame.aperture.relaxation_loss_j, 0.0);
+        assert!(frame.aperture.balance_residual_j().abs() < 2e-9 * mass);
+    }
+}
+
+/// G1/G3: a static supported displacement contributes no physical damping
+/// heat. A representable tiny vibration about it must retain its own positive
+/// loss, independently of the much larger equilibrium spring energy.
+#[test]
+fn g1_exact_blade_heat_resolves_small_motion_about_static_load() {
+    let (mass, stiffness, damping, dt) = (1.0, 4.0, 3.0, 0.25);
+    let equilibrium = 2.0_f64.powi(20);
+    let force = stiffness * equilibrium;
+    let rest = BladeState { displacement_m: equilibrium, velocity_m_s: 0.0 };
+    let blade = ExactBlade::from_mechanics(mass, damping, stiffness, dt).unwrap();
+    assert_eq!(blade.viscous_loss_j(rest, force, &[]), 0.0);
+    assert_eq!(blade.arm_loss_j(rest, force, &[]), 0.0);
+
+    let amplitude = 2.0_f64.powi(-20);
+    let initial = BladeState { displacement_m: equilibrium + amplitude, ..rest };
+    let actual = blade.viscous_loss_j(initial, force, &[]);
+    // Independent underdamped free-motion solution for the perturbation alone.
+    let gamma = damping / (2.0 * mass);
+    let wd = (stiffness / mass - gamma * gamma).sqrt();
+    let decay = (-gamma * dt).exp();
+    let q = amplitude * decay * ((wd * dt).cos() + gamma / wd * (wd * dt).sin());
+    let v = -amplitude * decay * (stiffness / mass) / wd * (wd * dt).sin();
+    let expected = 0.5 * stiffness * (amplitude * amplitude - q * q) - 0.5 * mass * v * v;
+    assert!(actual > 0.0 && expected > 0.0);
+    assert!((actual - expected).abs() < 1e-10 * expected, "{actual:e} vs {expected:e}");
+    let unloaded = BladeState { displacement_m: amplitude, velocity_m_s: 0.0 };
+    assert!((actual - blade.viscous_loss_j(unloaded, 0.0, &[])).abs() < 1e-10 * expected);
+
+    let undamped = ExactBlade::from_mechanics(mass, 0.0, stiffness, dt).unwrap();
+    assert_eq!(undamped.viscous_loss_j(initial, force, &[]), 0.0);
+    let arms = [ExactArm { coupling: 2.0, relaxation_time_s: 0.125 }];
+    let hereditary = ExactBlade::with_arms(mass, damping, stiffness, &arms, dt).unwrap();
+    let relaxed_memory = [arms[0].coupling * equilibrium];
+    assert_eq!(hereditary.viscous_loss_j(rest, force, &relaxed_memory), 0.0);
+    assert_eq!(hereditary.arm_loss_j(rest, force, &relaxed_memory), 0.0);
 }

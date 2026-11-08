@@ -41,6 +41,9 @@ use crate::acoustic_realize::AcousticRealizeError;
 use crate::unilateral_contact::distributed::ApertureContactStep;
 use fs_dcontact::{ContactStorage, Obstacle};
 use fs_material::gas::GasState;
+use fs_phs::linear_exact::{
+    DenseExponentialBudget, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM, PreparedSourceLoss,
+};
 use fs_phs::Storage;
 use std::rc::Rc;
 
@@ -98,17 +101,18 @@ pub(crate) struct ExactArm {
 /// increment directly, without subtracting nearly equal values. With arms, one
 /// extra row integrates their restoring force divided by mass, avoiding an
 /// endpoint subtraction when reporting the step-mean material force.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub(crate) struct ExactBlade {
     omega: f64,
     mass: f64,
     arms: Vec<ExactArm>,
     // Square map, side 5 + arms plus one material-force integral when nonempty.
     map: Vec<f64>,
-    // Exact c*int v^2 and arm int (c x - z)^2/tau over the step, as quadratic
-    // forms on the leading 3 + arms (state and held force) coordinates.
-    viscous: Vec<f64>,
-    arm_loss: Vec<f64>,
+    // Positive source squares on the original held-force trajectory. Keeping
+    // factors avoids inverse-exponential overflow and cancellation of a small
+    // physical loss against large, force-supported elastic storage.
+    viscous: PreparedSourceLoss,
+    arm_loss: PreparedSourceLoss,
 }
 
 impl ExactBlade {
@@ -137,6 +141,9 @@ impl ExactBlade {
         let a = arms.len();
         // Preserve the original no-memory matrix and its arithmetic exactly.
         let (core, n) = (3 + a, 5 + a + usize::from(a != 0));
+        if core > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM / 2 {
+            return Err(invalid("exact blade propagator exceeds its source-loss capacity"));
+        }
         let mut generator = vec![0.0; n * n];
         generator[1] = w;
         generator[n] = -w;
@@ -157,43 +164,36 @@ impl ExactBlade {
         generator[(3 + a) * n + 1] = w;
         generator[(4 + a) * n] = w;
         let map = fs_phs::linear_exact::exponential(&generator, n).map_err(refuse)?;
-        // Van Loan: exp([[-A^T, W], [0, A]] dt) = [[., F12], [0, F22]], and
-        // int_0^dt e^{A^T s} W e^{A s} ds = F22^T F12 on the closed core block.
-        let quadratic = |weights: &[f64]| -> Result<Vec<f64>, AcousticRealizeError> {
-            let side = 2 * core;
-            let mut van_loan = vec![0.0; side * side];
-            for i in 0..core {
-                for j in 0..core {
-                    van_loan[i * side + j] = -generator[j * n + i];
-                    van_loan[(i + core) * side + j + core] = generator[i * n + j];
-                    van_loan[i * side + j + core] = weights[i * core + j] * dt;
-                }
-            }
-            let blocks = fs_phs::linear_exact::exponential(&van_loan, side).map_err(refuse)?;
-            let mut form = vec![0.0; core * core];
-            for i in 0..core {
-                for j in 0..core {
-                    form[i * core + j] = (0..core)
-                        .map(|l| blocks[(l + core) * side + i + core] * blocks[l * side + j + core])
-                        .sum();
-                }
-            }
-            Ok(form)
-        };
-        let mut viscous_weights = vec![0.0; core * core];
-        viscous_weights[core + 1] = damping_n_s_m;
-        let mut arm_weights = vec![0.0; core * core];
+        // Reuse the physical source-square owner on the SAME unit-interval
+        // generator A*dt. Multiplying source rows by sqrt(dt) gives joules
+        // directly, without dividing its admitted coefficients by a small dt.
+        // The held force is already the constant third state, so there are no
+        // separate input columns. No inverse physical exponential is formed.
+        let flow: Vec<_> = generator.chunks_exact(n).take(core)
+            .flat_map(|row| row[..core].iter().copied()).collect();
+        let mut viscous_source = vec![0.0; core];
+        viscous_source[1] = fs_math::det::sqrt(damping_n_s_m) * fs_math::det::sqrt(dt);
+        let mut arm_sources = vec![0.0; a * core];
         for (j, arm) in arms.iter().enumerate() {
-            // (c x - z)^2 / tau = (c/omega)^2 (omega x - w)^2 / tau.
-            let k = arm.coupling * arm.coupling / (omega * omega * arm.relaxation_time_s);
-            arm_weights[0] += k;
-            arm_weights[3 + j] -= k;
-            arm_weights[(3 + j) * core] -= k;
-            arm_weights[(3 + j) * core + 3 + j] += k;
+            // sqrt(dt/tau) (c x - z), in the original scaled coordinates.
+            let factor = arm.coupling / omega * fs_math::det::sqrt(dt / arm.relaxation_time_s);
+            arm_sources[j * core] = factor;
+            arm_sources[j * core + 3 + j] = -factor;
         }
-        let (viscous, arm_loss) = (quadratic(&viscous_weights)?, quadratic(&arm_weights)?);
-        if !(omega.is_finite() && omega > 0.0)
-            || !map.iter().chain(&viscous).chain(&arm_loss).all(|x| x.is_finite()) {
+        // The existing 2*core <= 256 cap is unchanged. These explicit ceilings
+        // cover the source owner's 32 doubled-matrix workspaces and bounded
+        // cold products; no unbounded preparation is admitted.
+        let budget = DenseExponentialBudget {
+            max_dimension: 2 * core,
+            max_dense_bytes: 132 * core * core * core::mem::size_of::<f64>(),
+            max_multiply_terms: 2048 * (2 * core as u64).pow(3),
+        };
+        let source_loss = |source: &[f64]| {
+            PreparedSourceLoss::new_controlled(core, 0, &flow, &[], source, 1.0, budget, || false)
+                .map_err(|_| invalid("exact blade physical loss could not be prepared"))
+        };
+        let (viscous, arm_loss) = (source_loss(&viscous_source)?, source_loss(&arm_sources)?);
+        if !(omega.is_finite() && omega > 0.0) || !map.iter().all(|x| x.is_finite()) {
             return Err(invalid("exact blade propagator is not representable"));
         }
         Ok(Self { omega, mass, arms: arms.to_vec(), map, viscous, arm_loss })
@@ -227,18 +227,18 @@ impl ExactBlade {
         (0..3 + self.arms.len()).map(|j|
             self.map[row * n + j] * self.coordinate(state, force_n, memory, j)).sum()
     }
-    fn form_state(&self, matrix: &[f64], state: BladeState, force_n: f64, memory: &[f64]) -> f64 {
+    fn source_loss(&self, source: &PreparedSourceLoss, state: BladeState, force_n: f64, memory: &[f64]) -> f64 {
         assert_eq!(memory.len(), self.arms.len(), "exact blade memory must name every arm");
         let core = 3 + self.arms.len();
-        (0..core).map(|i| {
-            let left = self.coordinate(state, force_n, memory, i);
-            (0..core).map(|j| left * matrix[i * core + j]
-                * self.coordinate(state, force_n, memory, j)).sum::<f64>()
-        }).sum()
-    }
-    fn form(&self, matrix: &[f64], z: &[f64]) -> f64 {
-        let core = z.len();
-        (0..core).map(|i| (0..core).map(|j| z[i] * matrix[i * core + j] * z[j]).sum::<f64>()).sum()
+        let mut state_coordinates = [0.0; MAX_LINEAR_EXPONENTIAL_BLOCK_DIM / 2];
+        for (j, value) in state_coordinates[..core].iter_mut().enumerate() {
+            *value = self.coordinate(state, force_n, memory, j);
+        }
+        let mut scratch = [0.0; MAX_LINEAR_EXPONENTIAL_BLOCK_DIM];
+        source.evaluate_into_controlled(&state_coordinates[..core], &[], &mut scratch[..2 * core], || false)
+            // The existing trial publisher rejects any nonfinite physical
+            // loss before accepting mechanics or material history.
+            .unwrap_or(f64::NAN)
     }
     /// Mean velocity `dx/dt` over the step is `free + mobility * F` for held F.
     pub(crate) fn free_and_mobility(&self, state: BladeState, external_n: f64, dt: f64, memory: &[f64])
@@ -256,7 +256,7 @@ impl ExactBlade {
         self.row(4 + self.arms.len(), &self.scaled(state, held_n, memory)) / (self.omega * self.omega * dt)
     }
     pub(crate) fn viscous_loss_j(&self, state: BladeState, held_n: f64, memory: &[f64]) -> f64 {
-        self.form_state(&self.viscous, state, held_n, memory)
+        self.source_loss(&self.viscous, state, held_n, memory)
     }
     /// End-of-step arm memories z_j, energy-normalized like the arms' own owner.
     pub(crate) fn end_memory(&self, state: BladeState, held_n: f64, memory: &[f64]) -> Vec<f64> {
@@ -272,7 +272,7 @@ impl ExactBlade {
     }
     /// Exact arm dissipation over the step [J].
     pub(crate) fn arm_loss_j(&self, state: BladeState, held_n: f64, memory: &[f64]) -> f64 {
-        self.form(&self.arm_loss, &self.scaled(state, held_n, memory))
+        self.source_loss(&self.arm_loss, state, held_n, memory)
     }
 }
 
