@@ -5496,8 +5496,8 @@ Parcel entropy may decrease on cooling. Admission uses parcel-plus-reservoir
 production delta-S-Q/Tb; reports retain parcel delta-S, reservoir transfer,
 total production and minimum accepted-step production. Original element,
 charge, mass, nonnegative inventory, source support and energy gates remain.
-Zero conductance preserves adiabatic results. Explicit-energy zero-duration
-calls resolve initial U/H before any exchange.
+Zero conductance with radiation disabled preserves adiabatic results.
+Explicit-energy zero-duration calls resolve initial U/H before any exchange.
 
 Six new native tests passed: frozen heating/cooling, simultaneous reaction and
 heat against an independent closed form including resonance, fixed-pressure
@@ -5507,10 +5507,41 @@ The bounded native fs-gas library run passed 68 tests, with two lengthy existing
 hydrogen/methane reference cases excluded; the SDIRK hydrogen reference passed.
 These are focused G0/G1/G3/G4 checks, not a full repository Gauntlet result.
 
-Scope remains a sealed homogeneous ideal-gas parcel with caller-declared
-constant conductance and an infinite fixed-temperature reservoir. No finite
-wall capacity, evolving wall source, radiation law, streams, spatial transport
-or empirical mechanism validation is implied. Time-error estimates are local.
+`HeatBath::with_gray_radiation(area, effective_emissivity)` additionally admits
+gray thermal radiation to the same held reservoir. The caller supplies a
+nonnegative area and an effective emissivity in [0,1], including the declared
+gray geometry closure. The bath retains their product epsilon*A [m²]; it does
+not infer opacity from the reacting species. The complete exchange is
+Qdot=G(Tb-T)+sigma*epsilon*A*(Tb^4-T^4), using the same rounded SI constant
+sigma=5.670374419e-8 W m^-2 K^-4 as the native gray surface/gap owners.
+
+Both original implicit methods eliminate that complete stage heat inside the
+same total-U or total-H root. Its analytic caloric feedback is
+dt*(G+4*sigma*epsilon*A*T^3), with the original reference-volume scaling.
+Fourth-power differences are factored by the represented Kelvin separation;
+no large-power subtraction, separate radiation timestep, frozen radiation
+conductance, or duplicate formation-energy source is introduced. Radiation
+and conduction share the original compensated heat and held-reservoir entropy
+account. Zero effective area retains the original linear arithmetic exactly.
+The declared area remains fixed during an advance even if the gas expands.
+Original material parcel and piston adapters forward the same complete bath.
+`HeatBathSchedule` linearly interpolates the physical epsilon*A coefficient
+alongside G and Tb, retaining authored baths at exact knots; it does not infer
+independent area and emissivity trajectories.
+
+Added native regression cases cover the independent analytic fourth-power
+cooling/heating integral, simultaneous reaction/radiation against a separate
+scalar ODE reference, both U/H constraints and time methods, analytic
+constrained-Jacobian differences, near-equilibrium fluxes, admission, and a
+programmed radiating-area material parcel with heat/work/entropy closure.
+These numerical fixtures do not establish empirical radiation calibration.
+
+Scope remains a sealed homogeneous ideal-gas parcel and an infinite
+fixed-temperature reservoir, with caller-declared conductance and optional
+lumped gray exchange. This bath does not imply finite wall capacity,
+participating-gas spectral transport, an evolving wall source, streams,
+spatial transport or empirical mechanism validation. Time-error estimates are
+local. Finite original-source bodies remain the separate owner below.
 
 ## Finite material bodies in adaptive reacting parcels
 

@@ -1,6 +1,9 @@
 use super::*;
 use crate::chemistry::isobaric::IsobaricReactor;
 
+#[path = "heat/radiation.rs"]
+mod radiation;
+
 #[cfg(feature = "material")]
 #[path = "heat/material.rs"]
 mod finite_body;
@@ -352,29 +355,35 @@ fn thermal_constrained_jacobian_matches_temperature_sensitive_rate_differences()
                 &mut || false,
             )
             .unwrap();
-        let thermal_bath = bath(1000.0, 700.0);
-        let extents = [0.016; 5];
-        let (_, analytic) = reactor
-            .thermal_rate_linearization(&extents, 500.0, thermal_bath, 0.1)
-            .unwrap();
-        for column in 0..5 {
-            let mut plus = extents;
-            let mut minus = extents;
-            plus[column] += 1e-6;
-            minus[column] -= 1e-6;
-            let (plus, _) = reactor
-                .thermal_rate_linearization(&plus, 500.0, thermal_bath, 0.1)
+        for thermal_bath in [
+            bath(1000.0, 700.0),
+            bath(30.0, 700.0)
+                .with_gray_radiation(fs_qty::Area::new(2.0), 0.8)
+                .unwrap(),
+        ] {
+            let extents = [0.016; 5];
+            let (_, analytic) = reactor
+                .thermal_rate_linearization(&extents, 500.0, thermal_bath, 0.1)
                 .unwrap();
-            let (minus, _) = reactor
-                .thermal_rate_linearization(&minus, 500.0, thermal_bath, 0.1)
-                .unwrap();
-            for row in 0..5 {
-                let numeric = (plus[row] - minus[row]) / 2e-6;
-                let expected = analytic[row * 5 + column];
-                assert!(
-                    (numeric - expected).abs() < 2e-7 * expected.abs().max(1.0),
-                    "p={pressure}, column {column}, row {row}: {numeric} != {expected}"
-                );
+            for column in 0..5 {
+                let mut plus = extents;
+                let mut minus = extents;
+                plus[column] += 1e-6;
+                minus[column] -= 1e-6;
+                let (plus, _) = reactor
+                    .thermal_rate_linearization(&plus, 500.0, thermal_bath, 0.1)
+                    .unwrap();
+                let (minus, _) = reactor
+                    .thermal_rate_linearization(&minus, 500.0, thermal_bath, 0.1)
+                    .unwrap();
+                for row in 0..5 {
+                    let numeric = (plus[row] - minus[row]) / 2e-6;
+                    let expected = analytic[row * 5 + column];
+                    assert!(
+                        (numeric - expected).abs() < 2e-7 * expected.abs().max(1.0),
+                        "p={pressure}, bath={thermal_bath:?}, column {column}, row {row}: {numeric} != {expected}"
+                    );
+                }
             }
         }
     }

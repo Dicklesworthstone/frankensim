@@ -1,7 +1,8 @@
 //! Prescribed thermal forcing during source-owned reacting volume strokes.
 //!
-//! Bath temperature and total conductance are linear between authored physical
-//! time knots. Every original interval holds its own midpoint values; full and
+//! Bath temperature, total nonradiative conductance and effective radiating
+//! area `epsilon A` are linear between authored physical time knots. Every
+//! original interval holds its own midpoint values; full and
 //! half-step probes therefore see different forcing when the program changes.
 //! No probe crosses a forcing knot. The same native chemistry/heat and volume
 //! operators own all thermodynamics, work, entropy and source admission.
@@ -25,7 +26,7 @@ use super::{
 use crate::chemistry::heat::{HeatBath, ThermalConductance, material::FiniteHeatBody};
 use crate::material::MaterialKineticsError;
 use crate::material::isochoric::MaterialIsochoricReactor;
-use fs_qty::{Temperature, Time, Volume};
+use fs_qty::{Area, Temperature, Time, Volume};
 
 type Error = MaterialCompressionError;
 
@@ -43,12 +44,14 @@ pub struct ConductanceKnot {
     pub conductance: ThermalConductance,
 }
 
-/// Immutable, bounded linear bath-temperature and conductance history.
+/// Immutable, bounded linear bath-temperature and heat-coupling history.
 ///
 /// The first knot is at zero; subsequent times strictly increase. A single
 /// zero-time knot represents a no-op, otherwise the last knot sets duration.
 /// There is no extrapolation. At most 4097 knots are admitted, and original
 /// bath admission supplies positive temperatures and nonnegative conductances.
+/// Gray radiation interpolates the declared effective area `epsilon A`; it
+/// does not infer separate area or emissivity trajectories between the knots.
 #[derive(Clone, Copy, Debug)]
 pub struct HeatBathSchedule<'s> {
     knots: &'s [HeatBathKnot],
@@ -105,6 +108,15 @@ impl<'s> HeatBathSchedule<'s> {
                 b.bath.temperature().value(),
             )),
         )
+        .and_then(|bath| {
+            bath.with_gray_radiation(
+                Area::new(interpolate(
+                    a.bath.effective_radiating_area().value(),
+                    b.bath.effective_radiating_area().value(),
+                )),
+                1.0,
+            )
+        })
         .map_err(MaterialKineticsError::from)?)
     }
 }

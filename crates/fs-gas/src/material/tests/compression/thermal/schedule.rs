@@ -239,6 +239,54 @@ fn heat_only_adaptation_resolves_a_varying_bath_at_exactly_fixed_gas_volume() {
     assert!(errors[0] / errors[1] > 15.0, "{errors:?}");
 }
 
+#[test]
+fn effective_radiating_area_ramp_survives_the_original_bath_schedule() {
+    let mut knots = [bath_knot(0.0, 800.0, 0.0), bath_knot(0.125, 800.0, 0.0)];
+    knots[0].bath = knots[0]
+        .bath
+        .with_gray_radiation(fs_qty::Area::new(0.001), 0.5)
+        .unwrap();
+    knots[1].bath = knots[1]
+        .bath
+        .with_gray_radiation(fs_qty::Area::new(0.004), 0.75)
+        .unwrap();
+    let schedule = HeatBathSchedule::new(&knots, || false).unwrap();
+    // Interpolate epsilon*A itself, not independently interpolated factors.
+    // The manufactured source has 0.01 mol, Cv=3R and a first-order A -> B.
+    let expected = rk4(&[0.0, 0.125], [400.0, 0.0], |time, state| {
+        let effective_area = 0.0005 + (0.003 - 0.0005) * time / 0.125;
+        let heat = 5.670_374_419e-8 * effective_area * (800.0_f64.powi(4) - state[0].powi(4));
+        [
+            (heat + 0.01 * 12_000.0 * 4.0 * (-4.0 * time).exp()) / (0.03 * R),
+            heat,
+        ]
+    });
+    let (bank, mechanism, original) = fixture(-12_000.0, 2000.0);
+    let mut reactor =
+        MaterialThermalCompressionReactor::new(bank, mechanism, kinetics(), || false).unwrap();
+    let mut parcel = original.clone();
+    let step = reactor
+        .advance_with_heat_bath_schedule(
+            &mut parcel,
+            Volume::new(0.01),
+            schedule,
+            path(128),
+            || false,
+        )
+        .unwrap();
+    close(parcel.state().state().temperature, expected[0], 0.003);
+    close(step.heat_input_j, expected[1], 0.001);
+    assert!(step.heat_input_j > 1.0);
+    assert_eq!(step.boundary_work_on_gas_j, 0.0);
+    close(step.internal_energy_change_j, step.heat_input_j, 2e-6);
+    close(
+        step.thermal_partner_entropy_change_j_k,
+        -step.heat_input_j / 800.0,
+        2e-10,
+    );
+    assert!(step.entropy_production_j_k > 0.0);
+}
+
 fn latent_curve(bank: &ThermochemicalGasModel, datum: f64) -> EquilibriumEnthalpyPhaseCurve {
     let knot = |h, temperature_k, liquid_mass_fraction, bulk_density_kg_m3| EnthalpyPhaseKnot {
         specific_enthalpy_j_kg: datum + h,
