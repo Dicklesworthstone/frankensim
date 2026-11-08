@@ -40,7 +40,9 @@ mod anisotropic_tests;
 /// subpath. Their emission is evaluated independently at each camera prefix.
 /// Version 11 bounds sampled mesh-emitter ray origins by their original native
 /// surface witnesses, preserving nearby reflectors and endpoint media.
-pub const BIDIRECTIONAL_TRACER_SEMANTICS_VERSION: u32 = 11;
+/// Version 12 shares native chart departures across both subpaths and their
+/// connections, including the source departure replayed by dielectric NEE.
+pub const BIDIRECTIONAL_TRACER_SEMANTICS_VERSION: u32 = 12;
 
 /// Admitted finite-light BDPT technique set.
 ///
@@ -177,7 +179,7 @@ struct Vertex<'scene> {
     kind: VertexKind,
     point: Point3,
     geometric_normal: Option<Vec3>,
-    mesh_boundary_origin: Option<MeshBoundaryOrigin>,
+    boundary_origin: Option<BoundaryOrigin>,
     /// Body-locked frame at this path's shutter time, facing the sampled
     /// predecessor. Reversing a reflection exchanges directions on that same
     /// side; it must not reconstruct the grooves from world coordinates.
@@ -198,7 +200,7 @@ impl<'scene> Vertex<'scene> {
             kind: VertexKind::Camera,
             point,
             geometric_normal: None,
-            mesh_boundary_origin: None,
+            boundary_origin: None,
             brushed_frame: None,
             wo: None,
             beta: 1.0,
@@ -220,7 +222,7 @@ impl<'scene> Vertex<'scene> {
             },
             point: sample.point,
             geometric_normal: Some(sample.normal),
-            mesh_boundary_origin: None,
+            boundary_origin: None,
             brushed_frame: None,
             wo: None,
             beta: spectrum.eval(wavelength_nm) * scale,
@@ -288,7 +290,7 @@ impl<'scene> Vertex<'scene> {
             kind: VertexKind::Surface { primitive_index },
             point: intersection.hit.point,
             geometric_normal: Some(frame.geometric),
-            mesh_boundary_origin: intersection.mesh_boundary_origin,
+            boundary_origin: intersection.boundary_origin,
             brushed_frame,
             wo: Some(ray.dir.scale(-1.0)),
             beta,
@@ -304,12 +306,9 @@ impl<'scene> Vertex<'scene> {
         matches!(self.kind, VertexKind::Surface { .. })
     }
 
-    fn spawn_origin(self, direction: Vec3) -> Point3 {
-        self.geometric_normal.map_or(self.point, |normal| {
-            self.mesh_boundary_origin.map_or_else(
-                || dielectric_spawn_origin(self.point, normal, direction),
-                |origin| origin.spawn(normal, direction),
-            )
+    fn spawn_origin(self, direction: Vec3) -> Result<Point3, TracerError> {
+        self.geometric_normal.map_or(Ok(self.point), |normal| {
+            boundary_ray_origin(self.point, normal, direction, self.boundary_origin)
         })
     }
 
@@ -898,6 +897,7 @@ fn update_stack_after_sample<'scene>(
 #[allow(clippy::too_many_arguments)]
 fn random_walk<'scene>(
     scene: &'scene Scene,
+    chart_departure: Option<&chart_departure::Prepared<'_>>,
     cx: &Cx<'_>,
     ray_time: Option<&PathTime>,
     wavelength_nm: f64,
@@ -946,6 +946,7 @@ fn random_walk<'scene>(
         if !beta.is_finite() || beta <= 0.0 {
             break;
         }
+        let intersection = chart_departure::prepare(intersection, chart_departure, cx, ray_time)?;
         let frame = surface_frame(&intersection.hit, &ray)?;
         let placeholder = Vertex {
             kind: VertexKind::Surface {
@@ -953,7 +954,7 @@ fn random_walk<'scene>(
             },
             point: intersection.hit.point,
             geometric_normal: Some(frame.geometric),
-            mesh_boundary_origin: intersection.mesh_boundary_origin,
+            boundary_origin: intersection.boundary_origin,
             brushed_frame: None,
             wo: Some(ray.dir.scale(-1.0)),
             beta,
@@ -1027,7 +1028,7 @@ fn random_walk<'scene>(
         pdf_fwd_solid_angle = sample.pdf_fwd_solid_angle;
         segment_origin = vertices[current_index].point;
         ray = Ray {
-            origin: vertices[current_index].spawn_origin(sample.direction),
+            origin: vertices[current_index].spawn_origin(sample.direction)?,
             dir: sample.direction,
         };
     }
@@ -1041,6 +1042,7 @@ fn random_walk<'scene>(
 #[allow(clippy::too_many_arguments)]
 fn generate_camera_subpaths<'scene>(
     scene: &'scene Scene,
+    chart_departure: Option<&chart_departure::Prepared<'_>>,
     cx: &Cx<'_>,
     settings: &Settings,
     physical_camera: &PhysicalCamera,
@@ -1068,6 +1070,7 @@ fn generate_camera_subpaths<'scene>(
         let mut rng = SubpathRng::new(settings, pixel, sample, CAMERA_WALK_DOMAIN, path_sobol);
         let outcome = random_walk(
             scene,
+            chart_departure,
             cx,
             ray_time,
             wavelength_nm,
@@ -1222,15 +1225,15 @@ fn generate_light_subpath<'scene>(
     };
     let mut vertices = Vec::with_capacity(settings.max_depth as usize + 1);
     vertices.push(Vertex::light(emission, wavelength_nm));
-    vertices[0].mesh_boundary_origin = Some(sampled_emitter_origin(
+    vertices[0].boundary_origin = Some(BoundaryOrigin::Mesh(sampled_emitter_origin(
         scene, cx, emission.primitive_index, emission.point, emission.normal,
-    )?);
+    )?));
     let (spectrum, scale) = emission.emission;
     let emitted = spectrum.eval(wavelength_nm) * scale;
     let cosine = emission.normal.dot(emission.direction).abs();
     let beta = emitted * cosine / (emission.pdf_position_area * emission.pdf_direction_solid_angle);
     let ray = Ray {
-        origin: vertices[0].spawn_origin(emission.direction),
+        origin: vertices[0].spawn_origin(emission.direction)?,
         dir: emission.direction,
     };
     let initial_stack = lighting
@@ -1240,6 +1243,7 @@ fn generate_light_subpath<'scene>(
     vertices[0].negative_medium = initial_stack.last().copied();
     let _ = random_walk(
         scene,
+        lighting.chart_departure.as_ref(),
         cx,
         ray_time,
         wavelength_nm,
@@ -1391,7 +1395,7 @@ fn segment_transmittance(
     if !same_medium(from_medium, to_medium) {
         return Ok(0.0);
     }
-    let origin = from.spawn_origin(direction);
+    let origin = from.spawn_origin(direction)?;
     let ray = Ray {
         origin,
         dir: direction,
@@ -1439,7 +1443,7 @@ fn environment_visible(
     if from.medium_toward(direction).is_some() {
         return Ok(false);
     }
-    let origin = from.spawn_origin(direction);
+    let origin = from.spawn_origin(direction)?;
     Ok(intersect(
         scene,
         cx,
@@ -1728,7 +1732,7 @@ fn primary_parallel_slab_lane(
         return Ok(None);
     }
     let straight_shadow = Ray {
-        origin: source.spawn_origin(direct.direction),
+        origin: source.spawn_origin(direct.direction)?,
         dir: direct.direction,
     };
     let Some(first_blocker) = intersect(scene, cx, &straight_shadow, ray_time)? else {
@@ -1748,6 +1752,7 @@ fn primary_parallel_slab_lane(
         ray_time,
         source.point,
         source_normal,
+        chart_origin_only(source.boundary_origin),
         slab,
         direct,
         wavelength_nm,
@@ -1968,7 +1973,7 @@ fn connect_s1(
                 },
                 point: sample.point,
                 geometric_normal: Some(sample.normal),
-                mesh_boundary_origin: Some(emitter_origin),
+                boundary_origin: Some(BoundaryOrigin::Mesh(emitter_origin)),
                 brushed_frame: None,
                 wo: None,
                 beta: emitted / sample.pdf_solid_angle,
@@ -2471,6 +2476,7 @@ fn render_admitted_sample_range(
             for (wavelength_lane, &wavelength_nm) in wavelengths.iter().enumerate() {
                 let camera_subpaths = generate_camera_subpaths(
                     scene,
+                    lighting.chart_departure.as_ref(),
                     &render_cx,
                     settings,
                     &physical,
@@ -3061,6 +3067,74 @@ mod tests {
     }
 
     #[test]
+    fn chart_reflection_departure_is_shared_by_camera_and_light_walks() {
+        with_test_cx(|cx| {
+            let optics = ConductorOptics::representative_tungsten();
+            let white = lift_rgb([1.0; 3]);
+            let gap = 5.0e-7;
+            let scene = Scene {
+                primitives: vec![
+                    Primitive {
+                        shape: Shape::Chart(Box::new(fs_geom::fixtures::SphereChart {
+                            center: Point3::new(0.0, 0.0, -1.0), radius: 1.0,
+                        })),
+                        material: Material::Conductor { optics, surface: ConductorSurface::SMOOTH },
+                        emission: None,
+                    },
+                    Primitive {
+                        shape: Shape::Mesh(emitter_quad(gap)),
+                        material: Material::SpectralDiffuse {
+                            reflectance: crate::spectral::SpectralReflectance::constant(0.0).unwrap(),
+                        },
+                        emission: Some((white, 3.0)),
+                    },
+                ],
+                lights: vec![RectLight {
+                    corner: Point3::new(-1.0, -1.0, gap),
+                    edge_u: Vec3::new(2.0, 0.0, 0.0), edge_v: Vec3::new(0.0, 2.0, 0.0),
+                    prim: 1, emission: (white, 3.0),
+                }], environment: None,
+                camera: Camera { eye: Point3::new(0.0, 0.0, gap * 0.9),
+                    forward: Vec3::new(0.0, 0.0, -1.0), up: Vec3::new(0.0, 1.0, 0.0),
+                    half_tan: 0.0 },
+            };
+            let lighting = validate_scene(&scene, cx, None).unwrap();
+            let settings = Settings { width: 1, height: 1, spp: 1, max_depth: 2,
+                sampler: Sampler::Iid, strategy: DirectStrategy::Mis, seed: 73 };
+            for mode in [TransportMode::Radiance, TransportMode::Importance] {
+                let source = if mode == TransportMode::Radiance {
+                    Vertex::camera(scene.camera.eye)
+                } else {
+                    let emission = crate::lighting::RectEmissionSample {
+                        light_index: 0, primitive_index: 1, point: Point3::new(0.0, 0.0, gap),
+                        normal: Vec3::new(0.0, 0.0, 1.0), direction: scene.camera.forward,
+                        emission: (white, 3.0), pdf_position_area: 0.25,
+                        pdf_direction_solid_angle: 1.0 / (2.0 * PI),
+                    };
+                    let mut source = Vertex::light(emission, 550.0);
+                    source.boundary_origin = Some(BoundaryOrigin::Mesh(sampled_emitter_origin(
+                        &scene, cx, 1, emission.point, emission.normal,
+                    ).unwrap()));
+                    source
+                };
+                let ray = Ray { origin: source.spawn_origin(scene.camera.forward).unwrap(),
+                    dir: scene.camera.forward };
+                let mut vertices = vec![source];
+                let mut rng = SubpathRng::new(&settings, 0, 0, CAMERA_WALK_DOMAIN, None);
+                random_walk(&scene, lighting.chart_departure.as_ref(), cx, None, 550.0, mode,
+                    ray, 1.0, 1.0, 3, &mut vertices, &mut rng, None,
+                    MediumStack::new(), source.point).unwrap();
+                assert_eq!(vertices.len(), 3, "the chart must not jump the nearby emitter");
+                assert!(matches!(vertices[1].kind, VertexKind::Surface { primitive_index: 0 }));
+                assert!(matches!(vertices[2].kind, VertexKind::Surface { primitive_index: 1 }));
+                assert!((vertices[2].beta - optics.fresnel(550.0, 1.0, 1.0).unwrap()).abs() < 2.0e-13);
+                assert!(vertices[1].spawn_origin(Vec3::new(0.0, 0.0, 1.0)).unwrap().z < gap);
+            }
+        });
+    }
+
+
+    #[test]
     fn g1_sampled_emitter_launches_preserve_nearby_reflections() {
         with_test_cx(|cx| {
             let optics = ConductorOptics::representative_tungsten();
@@ -3280,6 +3354,7 @@ mod tests {
             };
             let paths = generate_camera_subpaths(
                 &scene,
+                None,
                 cx,
                 &settings,
                 &physical,
@@ -3372,7 +3447,7 @@ mod tests {
             kind: VertexKind::Surface { primitive_index: 0 },
             point: Point3::new(0.0, 0.0, 0.0),
             geometric_normal: Some(normal),
-            mesh_boundary_origin: None,
+            boundary_origin: None,
             brushed_frame: None,
             wo: Some(wo),
             beta: 1.0,
@@ -3428,7 +3503,7 @@ mod tests {
             let vertex = Vertex {
                 kind: VertexKind::Surface { primitive_index: 0 },
                 point: Point3::new(0.0, 0.0, 0.0),
-                geometric_normal: Some(normal), mesh_boundary_origin: None, brushed_frame: None,
+                geometric_normal: Some(normal), boundary_origin: None, brushed_frame: None,
                 wo: Some(wo), beta: 1.0, pdf_fwd: 1.0, pdf_rev: 0.0, delta: false,
                 positive_medium: medium, negative_medium: medium,
             };
@@ -3497,7 +3572,7 @@ mod tests {
             let medium = Some(MediumEntry { boundary_primitive: 0, glass: &glass });
             let vertex = Vertex {
                 kind: VertexKind::Surface { primitive_index: 0 }, point: Point3::new(0.0, 0.0, 0.0),
-                mesh_boundary_origin: None,
+                boundary_origin: None,
                 brushed_frame: None,
                 geometric_normal: Some(normal), wo: Some(normal), beta: 1.0, pdf_fwd: 1.0,
                 pdf_rev: 0.0, delta: false, positive_medium: medium, negative_medium: medium,
@@ -3538,7 +3613,7 @@ mod tests {
         let normal = Vec3::new(0.0, 0.0, 1.0);
         let mut vertex = Vertex {
             kind: VertexKind::Surface { primitive_index: 0 },
-            mesh_boundary_origin: None,
+            boundary_origin: None,
             brushed_frame: None,
             point: Point3::new(0.0, 0.0, 0.0), geometric_normal: Some(normal), wo: Some(normal),
             beta: 1.0, pdf_fwd: 1.0, pdf_rev: 0.0, delta: true, positive_medium: None,
@@ -3625,6 +3700,7 @@ mod tests {
             let wavelength_nm = 550.0;
             let paths = generate_camera_subpaths(
                 &scene,
+                None,
                 cx,
                 &settings,
                 &physical,
@@ -3734,7 +3810,7 @@ mod tests {
         .unwrap();
         let surface = |primitive_index, point, normal| Vertex {
             kind: VertexKind::Surface { primitive_index },
-            mesh_boundary_origin: None,
+            boundary_origin: None,
             brushed_frame: None,
             point,
             geometric_normal: Some(normal),
@@ -4173,7 +4249,7 @@ mod tests {
             .unwrap();
             let surface_vertex = |primitive_index, point, normal, delta| Vertex {
                 kind: VertexKind::Surface { primitive_index },
-                mesh_boundary_origin: None,
+                boundary_origin: None,
                 brushed_frame: None,
                 point,
                 geometric_normal: Some(normal),
@@ -4500,7 +4576,7 @@ mod tests {
                 sampler: Sampler::Iid, strategy: DirectStrategy::Mis, seed: 73 };
             let mut vertices = vec![Vertex::light(launch, 550.0)];
             let mut rng = SubpathRng::new(&settings, 0, 0, LIGHT_WALK_DOMAIN, None);
-            random_walk(&scene, cx, None, 550.0, TransportMode::Importance,
+            random_walk(&scene, None, cx, None, 550.0, TransportMode::Importance,
                 Ray { origin: Point3::new(0.0, 0.0, 3.0 - RAY_EPS), dir: launch.direction },
                 1.0, launch.pdf_direction_solid_angle, 3, &mut vertices, &mut rng, None,
                 MediumStack::new(), launch.point).unwrap();
@@ -4563,7 +4639,7 @@ mod tests {
                         Vertex::camera(point.offset(normal)),
                         Vertex {
                             kind: VertexKind::Surface { primitive_index: 0 },
-                            mesh_boundary_origin: None,
+                            boundary_origin: None,
                             brushed_frame: None,
                             point,
                             geometric_normal: Some(Vec3::new(0.0, 0.0, 1.0)),

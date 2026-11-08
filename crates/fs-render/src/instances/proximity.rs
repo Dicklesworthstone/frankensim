@@ -323,6 +323,174 @@ impl PreparedPose {
     }
 }
 
+/// Borrowed native geometry with validation and interval placement amortized
+/// across straight optical paths. No tessellation or point-sampled normals
+/// replace the native chart or the retained mesh BVH.
+#[cfg(feature = "tracer")]
+#[derive(Clone, Copy)]
+enum NativeProximityShape<'scene> {
+    Mesh(crate::charts::proximity::PreparedMeshProximity<'scene>),
+    Chart(&'scene dyn fs_geom::Chart),
+}
+
+#[cfg(feature = "tracer")]
+#[derive(Clone, Copy)]
+pub(crate) struct PreparedNativeProximity<'scene> {
+    shape: NativeProximityShape<'scene>,
+    pose: Option<PreparedPose>,
+    trace_inverse: Option<RigidTransform>,
+    local_bounds: Option<Aabb>,
+    bounds: Option<Aabb>,
+}
+
+#[cfg(feature = "tracer")]
+impl<'scene> PreparedNativeProximity<'scene> {
+    pub(crate) fn mesh(
+        mesh: &'scene crate::charts::TriMesh,
+        cx: &Cx<'_>,
+        budget: &mut ProximityBudget,
+    ) -> Result<Self, ProximityError> {
+        let mesh = crate::charts::proximity::PreparedMeshProximity::try_new(mesh, cx, budget)?;
+        Ok(Self {
+            shape: NativeProximityShape::Mesh(mesh),
+            pose: None,
+            trace_inverse: None,
+            local_bounds: mesh.bounds(),
+            bounds: mesh.bounds(),
+        })
+    }
+
+    pub(crate) fn chart(chart: &'scene dyn fs_geom::Chart) -> Self {
+        // An unbounded support only disables box pruning. It is not evidence
+        // that the native signed field or proximity authority is absent.
+        let bounds = checked_bounds(chart.support()).ok();
+        Self {
+            shape: NativeProximityShape::Chart(chart),
+            pose: None,
+            trace_inverse: None,
+            local_bounds: bounds,
+            bounds,
+        }
+    }
+
+    pub(crate) fn shared(
+        geometry: &'scene SharedGeometry,
+        cx: &Cx<'_>,
+        budget: &mut ProximityBudget,
+    ) -> Result<Self, ProximityError> {
+        match geometry {
+            SharedGeometry::Mesh(mesh) => Self::mesh(mesh, cx, budget),
+            SharedGeometry::Chart(chart) => Ok(Self::chart(chart.as_ref())),
+        }
+    }
+
+    pub(crate) fn at_transform(
+        mut self,
+        transform: RigidTransform,
+    ) -> Result<Self, ProximityError> {
+        self.pose = (transform != RigidTransform::identity())
+            .then(|| PreparedPose::new(transform))
+            .transpose()?;
+        self.trace_inverse = (transform != RigidTransform::identity())
+            .then(|| transform.inverse().map_err(|_| ProximityError::InvalidGeometry))
+            .transpose()?;
+        self.bounds = match (self.pose, self.local_bounds) {
+            (Some(pose), Some(bounds)) => Some(pose.world_bounds(bounds)?),
+            (_, bounds) => bounds,
+        };
+        Ok(self)
+    }
+
+    pub(crate) fn bounds(self) -> Option<Aabb> {
+        self.bounds
+    }
+
+    pub(crate) fn is_chart(self) -> bool {
+        matches!(self.shape, NativeProximityShape::Chart(_))
+    }
+
+    pub(crate) fn is_exact_distance(self) -> bool {
+        matches!(self.shape, NativeProximityShape::Chart(chart)
+            if chart.trace_step_claim() == fs_geom::TraceStepClaim::ExactDistance)
+    }
+
+    pub(crate) fn trace_tolerance(self, local_tolerance: f64) -> f64 {
+        self.pose.map_or(local_tolerance, |pose| {
+            (Interval::point(local_tolerance) * Interval::point(pose.max_scale)).hi()
+        })
+    }
+
+    pub(crate) fn query(
+        self,
+        cx: &Cx<'_>,
+        point: Point3,
+        budget: &mut ProximityBudget,
+    ) -> Result<SurfaceProximity, ProximityError> {
+        let (local, error) = self.pose.map_or(Ok((point, 0.0)), |pose| pose.local_point(point))?;
+        let proximity = match self.shape {
+            NativeProximityShape::Mesh(mesh) => mesh.query(cx, local, budget)?,
+            NativeProximityShape::Chart(chart) => chart_proximity(chart, cx, local, budget)?,
+        };
+        self.pose.map_or(Ok(proximity), |pose| pose.world_proximity(proximity, error))
+    }
+
+    pub(crate) fn signed_distance(
+        self,
+        cx: &Cx<'_>,
+        point: Point3,
+        budget: &mut ProximityBudget,
+    ) -> Result<Interval, ProximityError> {
+        let NativeProximityShape::Chart(chart) = self.shape else {
+            return Err(ProximityError::UnsupportedDeparture);
+        };
+        let (local, error) = self.pose.map_or(Ok((point, 0.0)), |pose| pose.local_point(point))?;
+        let value = chart_signed_distance(chart, cx, local, budget)?;
+        Ok(self.pose.map_or(value, |pose| pose.world_signed_distance(value, error)))
+    }
+
+    pub(crate) fn normal_cone(
+        self,
+        cx: &Cx<'_>,
+        center: Point3,
+        radius: f64,
+        budget: &mut ProximityBudget,
+    ) -> Result<Option<TraceNormalCone>, ProximityError> {
+        let NativeProximityShape::Chart(chart) = self.shape else {
+            return Ok(None);
+        };
+        let (local, error) = self.pose.map_or(Ok((center, 0.0)), |pose| pose.local_point(center))?;
+        let local_radius = self.pose.map_or(radius, |pose| {
+            (Interval::point(radius) / Interval::point(pose.min_scale)
+                + Interval::point(error)).hi()
+        });
+        let cone = chart_normal_cone(chart, cx, local, local_radius, budget)?;
+        match (self.pose, cone) {
+            (Some(pose), Some(cone)) => Ok(Some(pose.world_normal_cone(cone)?)),
+            (_, cone) => Ok(cone),
+        }
+    }
+
+    /// Check the exact origin arithmetic consumed by GeometryInstance::intersect
+    /// as well as the geometric interval affine map. Rotating a large point
+    /// before adding the precomputed inverse translation can cancel differently
+    /// from the interval inverse of (point - translation).
+    pub(crate) fn native_trace_signed_distance(
+        self,
+        cx: &Cx<'_>,
+        point: Point3,
+        budget: &mut ProximityBudget,
+    ) -> Result<Option<Interval>, ProximityError> {
+        let Some(inverse) = self.trace_inverse else {
+            return Ok(None); // The geometric query already used this origin.
+        };
+        let NativeProximityShape::Chart(chart) = self.shape else {
+            return Err(ProximityError::UnsupportedDeparture);
+        };
+        chart_signed_distance(chart, cx, inverse.transform_point(point), budget).map(Some)
+    }
+}
+
+
 /// Separate numerical point-query witness carrying native frame identity.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InstanceProximity {

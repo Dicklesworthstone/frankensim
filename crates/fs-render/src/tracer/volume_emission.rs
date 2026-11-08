@@ -49,14 +49,14 @@ pub(super) enum Receiver<'a> {
     Surface {
         material: &'a Material,
         frame: SurfaceFrame,
-        mesh_boundary_origin: Option<MeshBoundaryOrigin>,
+        boundary_origin: Option<BoundaryOrigin>,
         outgoing: Vec3,
         brushed: Option<&'a crate::surface_detail::ShadingFrame>,
         incident_glass: Option<DielectricGlass>,
     },
     Dielectric {
         frame: SurfaceFrame,
-        mesh_boundary_origin: Option<MeshBoundaryOrigin>,
+        boundary_origin: Option<BoundaryOrigin>,
         outgoing: Vec3,
         boundary: BoundaryMedia<'a>,
         alpha: f64,
@@ -86,22 +86,19 @@ impl Receiver<'_> {
         }
     }
 
-    fn shadow_origin(&self, point: Point3, direction: Vec3) -> Point3 {
+    fn shadow_origin(&self, point: Point3, direction: Vec3) -> Result<Point3, TracerError> {
         match self {
             Self::Surface {
                 frame,
-                mesh_boundary_origin,
+                boundary_origin,
                 ..
             }
             | Self::Dielectric {
                 frame,
-                mesh_boundary_origin,
+                boundary_origin,
                 ..
-            } => mesh_boundary_origin.map_or_else(
-                || dielectric_spawn_origin(point, frame.geometric, direction),
-                |origin| origin.spawn(frame.geometric, direction),
-            ),
-            Self::Phase { .. } => point,
+            } => boundary_ray_origin(point, frame.geometric, direction, *boundary_origin),
+            Self::Phase { .. } => Ok(point),
         }
     }
 
@@ -321,7 +318,7 @@ pub(super) fn direct_contribution(
         ));
     }
     let ray = Ray {
-        origin: receiver.shadow_origin(point, direction),
+        origin: receiver.shadow_origin(point, direction)?,
         dir: direction,
     };
     #[cfg(feature = "photometry")]
@@ -407,7 +404,7 @@ mod tests {
         let normal = Vec3::new(0.0, 0.0, 1.0);
         Receiver::Dielectric {
             surface: DielectricSurface::POLISHED,
-            mesh_boundary_origin: None,
+            boundary_origin: None,
             frame: SurfaceFrame {
                 oriented: normal,
                 geometric: normal,
@@ -451,12 +448,14 @@ mod tests {
         assert!(
             dielectric_receiver(None, Some(glass), SourceSide::Incident)
                 .shadow_origin(origin, positive)
+                .unwrap()
                 .z
                 > 0.0
         );
         assert!(
             dielectric_receiver(Some(glass), None, SourceSide::Transmitted)
                 .shadow_origin(origin, negative)
+                .unwrap()
                 .z
                 < 0.0
         );
@@ -601,7 +600,7 @@ mod tests {
                     geometric: normal,
                     entering: true,
                 },
-                mesh_boundary_origin: None,
+                boundary_origin: None,
                 outgoing: normal,
                 brushed: None,
                 incident_glass,

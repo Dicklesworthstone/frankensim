@@ -306,7 +306,7 @@ differentiable lift). Pure Rust throughout.
   densities without long-ray cancellation; instanced world/local witnesses
   remain consistent and traversal retains its original ray parameter.
   Numerical origins never shorten the declared optical path. Implicit charts
-  retain their separate proximity-based offset. This is geometric-optics
+  use the native departures described below. This is geometric-optics
   transport, not coherent interference across a geometrically thin body or a
   general certified minimum separation. Analytic regressions cover submicron
   absorption, distant camera origins, oblique Snell/Fresnel power, metre
@@ -325,6 +325,27 @@ differentiable lift). Pure Rust throughout.
   gaps, instancing, translated scenes, metre-scale light gaps at large world
   coordinates, and environment-light occlusion. Calibrated photometric probes
   retain their authored geometric resolution limit.
+- **Native chart departures:** straight camera, bidirectional and shadow paths
+  retain physical chart hit points and prepare side-specific ray origins from
+  the original signed field, native normal-neighborhood certificates and
+  prepared native surface clearance. Direct, rigid and shutter-evaluated
+  animated charts share this path. Rigid candidates also clear the exact
+  inverse-transform arithmetic used by native intersection. Normal-cone bounds
+  cover the complete skipped chord; endpoint clearance alone does not establish
+  self-separation. Nearby unresolved separation refuses only the hemisphere
+  actually used, so an unused side does not suppress terminal emission.
+  Charts without a supplied local normal-neighborhood certificate retain
+  legacy self-departure resolution, with certified exclusion of other
+  primitives; that compatibility path does not certify uniqueness of their
+  own surface sheet. Shared meshes validate once at admission, native
+  proximity work remains bounded, and cached box pruning is separately bounded
+  by the known primitive count. Physical directions, PDFs and optical distances
+  remain attached to the original hit. Camera and light continuations, thermal,
+  volume-emission and calibrated-area shadows, and slab/manifold source replay
+  retain the same prepared origin. Tracer, dielectric and bidirectional semantic
+  versions are respectively 8, 19 and 12. Focused regressions specify both sides
+  of submicrometre gaps, direct/rigid/animated charts, large rotated placement,
+  blocker visibility, unused-side refusals and unsupported-chart compatibility.
 - `gradient_index` module (feature `tracer`): allocation-free adaptive
   Dormand--Prince 5(4) propagation of the geometric-optics ray equation
   `d(n t)/ds = grad(n)`. An immutable field supplies local phase index,

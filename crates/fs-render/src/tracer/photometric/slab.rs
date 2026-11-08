@@ -629,7 +629,7 @@ impl<'a> SlabConnection<'a> {
             );
         }
         let mut inside_ray = Ray {
-            origin: entry.spawn_boundary_ray(entry_frame.geometric, internal_direction),
+            origin: entry.spawn_boundary_ray(entry_frame.geometric, internal_direction)?,
             dir: internal_direction,
         };
         let exit_optics = surface
@@ -684,7 +684,7 @@ impl<'a> SlabConnection<'a> {
             state = exit_optics.reflection.apply(state);
             let reflected = crate::dielectric::reflect(inside_ray.dir.scale(-1.0), frame.geometric);
             inside_ray = Ray {
-                origin: hit.spawn_boundary_ray(frame.geometric, reflected),
+                origin: hit.spawn_boundary_ray(frame.geometric, reflected)?,
                 dir: reflected,
             };
             previous_point = hit.hit.point;
@@ -796,7 +796,7 @@ impl<'a> SlabConnection<'a> {
             return Err(PhotometryError::DistanceLimitExceeded);
         }
         let exit_ray = Ray {
-            origin: exit.spawn_boundary_ray(exit_geometric, outgoing),
+            origin: exit.spawn_boundary_ray(exit_geometric, outgoing)?,
             dir: outgoing,
         };
         let limit = self

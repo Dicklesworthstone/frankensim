@@ -499,6 +499,7 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
                 // independently integrated physical volume-emission term.
                 volume_emission_competitor: false,
                 opaque_source_geometric_normal: Some(normal),
+                source_boundary_origin: None,
                 smooth_slab: None,
             })
         } else {

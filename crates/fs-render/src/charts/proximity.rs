@@ -156,6 +156,40 @@ pub(crate) fn box_clearance(point: Point3, bounds: Aabb) -> Result<f64, Proximit
     Ok(iv_norm(delta).lo().max(0.0))
 }
 
+/// Immutable validated BVH view for repeated non-planar proximity queries.
+/// The borrow prevents changes to the public authoring arrays after admission.
+#[cfg(feature = "tracer")]
+#[derive(Clone, Copy)]
+pub(crate) struct PreparedMeshProximity<'mesh>(&'mesh TriMesh);
+
+#[cfg(feature = "tracer")]
+impl<'mesh> PreparedMeshProximity<'mesh> {
+    pub(crate) fn try_new(
+        mesh: &'mesh TriMesh,
+        cx: &Cx<'_>,
+        budget: &mut ProximityBudget,
+    ) -> Result<Self, ProximityError> {
+        validate_mesh_bvh(mesh, cx, budget)?;
+        Ok(Self(mesh))
+    }
+
+    pub(crate) fn bounds(self) -> Option<Aabb> {
+        self.0.nodes.first().map(|node| Aabb {
+            min: array_point(node.lo),
+            max: array_point(node.hi),
+        })
+    }
+
+    pub(crate) fn query(
+        self,
+        cx: &Cx<'_>,
+        point: Point3,
+        budget: &mut ProximityBudget,
+    ) -> Result<SurfaceProximity, ProximityError> {
+        self.0.nearest_surface_filtered(cx, point, budget, None)
+    }
+}
+
 /// Native cancellable nearest-surface traversal over the existing mesh BVH.
 impl TriMesh {
     /// Validate the public authoring arrays before using retained BVH bounds.

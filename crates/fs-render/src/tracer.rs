@@ -116,6 +116,7 @@ pub use sharding::{
 mod bdpt;
 mod coated_diffuse;
 mod initial_medium;
+mod chart_departure;
 #[cfg(test)]
 mod immersed_wave_tests;
 mod manifold;
@@ -184,7 +185,9 @@ mod transport;
 /// compares reconstructed endpoint positions after the bounded origin shift.
 /// Version 7 shares the all-sphere orthonormal frame with diffuse reflection,
 /// retaining unit ray directions and the cosine proposal at both poles.
-pub const TRACER_BIT_SEMANTICS_VERSION: u32 = 7;
+/// Version 8 uses native chart departure bounds for continuations and shadows,
+/// preserving resolvable nearby surfaces without changing physical hit points.
+pub const TRACER_BIT_SEMANTICS_VERSION: u32 = 8;
 
 /// Bit-affecting semantics of the optional motion-time path. This is versioned
 /// separately because the legacy static entry points do not draw a shutter
@@ -203,7 +206,9 @@ pub const CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
 // v18 reconstructs dielectric mesh vertices from their triangle witness and
 // projects floating-point position error onto the normal. A fixed metric
 // displacement must not jump over a thin material's opposite interface.
-pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 18;
+// v19 carries native chart departures through both dielectric hemispheres and
+// the matching finite-interface proposal/reverse-MIS source records.
+pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 19;
 
 /// Radiance-mode shading-normal projection for brushed GGX conductors.
 /// Version 2 removes spurious gain at geometric grazing incidence.
@@ -271,6 +276,7 @@ struct SceneLighting<'scene> {
     // already exited when it reaches its terminal opaque receiver.
     has_dielectric_materials: bool,
     initial_media: initial_medium::InitialMedia<'scene>,
+    chart_departure: Option<chart_departure::Prepared<'scene>>,
 }
 
 impl<'scene> core::ops::Deref for SceneLighting<'scene> {
@@ -288,6 +294,7 @@ impl<'scene> From<AdmittedLighting<'scene>> for SceneLighting<'scene> {
             moving: None,
             has_dielectric_materials: false,
             initial_media: initial_medium::InitialMedia::default(),
+            chart_departure: None,
         }
     }
 }
@@ -323,7 +330,7 @@ struct SceneIntersection {
     primitive_index: usize,
     hit: Hit,
     instance_hit: Option<InstanceHit>,
-    mesh_boundary_origin: Option<MeshBoundaryOrigin>,
+    boundary_origin: Option<BoundaryOrigin>,
 }
 
 /// Unoffset mesh vertex and its numerical uncertainty. Physical
@@ -335,11 +342,38 @@ struct MeshBoundaryOrigin {
 }
 
 impl SceneIntersection {
-    fn spawn_boundary_ray(self, normal: Vec3, direction: Vec3) -> Point3 {
-        self.mesh_boundary_origin.map_or_else(
-            || dielectric_spawn_origin(self.hit.point, normal, direction),
-            |origin| origin.spawn(normal, direction),
-        )
+    fn spawn_boundary_ray(self, normal: Vec3, direction: Vec3) -> Result<Point3, TracerError> {
+        boundary_ray_origin(self.hit.point, normal, direction, self.boundary_origin)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BoundaryOrigin {
+    Mesh(MeshBoundaryOrigin),
+    Chart(chart_departure::ChartOrigin),
+    // Intersections used only for visibility or emission need no departure.
+    // A chart that reaches a continuation must pass through prepared geometry.
+    UnpreparedChart,
+}
+
+// The existing finite-interface connectors keep their mesh source arithmetic.
+// A chart source must retain the same certified departure in its forward
+// proposal and the reverse MIS replay of that proposal.
+fn chart_origin_only(origin: Option<BoundaryOrigin>) -> Option<BoundaryOrigin> {
+    origin.filter(|origin| matches!(origin, BoundaryOrigin::Chart(_) | BoundaryOrigin::UnpreparedChart))
+}
+
+fn boundary_ray_origin(
+    point: Point3,
+    normal: Vec3,
+    direction: Vec3,
+    origin: Option<BoundaryOrigin>,
+) -> Result<Point3, TracerError> {
+    match origin {
+        Some(BoundaryOrigin::Mesh(origin)) => Ok(origin.spawn(normal, direction)),
+        Some(BoundaryOrigin::Chart(origin)) => origin.spawn(direction),
+        Some(BoundaryOrigin::UnpreparedChart) => Err(TracerError::InvalidInput),
+        None => Ok(dielectric_spawn_origin(point, normal, direction)),
     }
 }
 
@@ -556,6 +590,7 @@ struct PreviousBsdf {
     /// `None` prevents a rough-dielectric vertex from acquiring a competitor
     /// that cannot evaluate its source BSDF.
     opaque_source_geometric_normal: Option<Vec3>,
+    source_boundary_origin: Option<BoundaryOrigin>,
     smooth_slab: Option<SmoothSlabPath>,
 }
 
@@ -573,6 +608,7 @@ enum SmoothSlabPath {
 struct SmoothSlabEntry {
     source_origin: Point3,
     source_geometric_normal: Vec3,
+    source_boundary_origin: Option<BoundaryOrigin>,
     source_direction: Vec3,
     source_pdf_solid_angle: f64,
     slab: ParallelSlab,
@@ -583,6 +619,7 @@ struct SmoothSlabEntry {
 struct SmoothSlabExit {
     source_origin: Point3,
     source_geometric_normal: Vec3,
+    source_boundary_origin: Option<BoundaryOrigin>,
     source_direction: Vec3,
     source_pdf_solid_angle: f64,
     slab: ParallelSlab,
@@ -593,6 +630,7 @@ struct SmoothSlabExit {
 struct PlanarManifoldEntry {
     source_origin: Point3,
     source_geometric_normal: Vec3,
+    source_boundary_origin: Option<BoundaryOrigin>,
     source_direction: Vec3,
     source_pdf_solid_angle: f64,
     boundary_primitive: usize,
@@ -604,6 +642,7 @@ struct PlanarManifoldEntry {
 struct PlanarManifoldExit {
     source_origin: Point3,
     source_geometric_normal: Vec3,
+    source_boundary_origin: Option<BoundaryOrigin>,
     source_direction: Vec3,
     source_pdf_solid_angle: f64,
     boundary_primitive: usize,
@@ -615,6 +654,7 @@ struct PlanarManifoldExit {
 struct PlanarReflectedManifoldExit {
     source_origin: Point3,
     source_geometric_normal: Vec3,
+    source_boundary_origin: Option<BoundaryOrigin>,
     source_direction: Vec3,
     source_pdf_solid_angle: f64,
     boundary_primitive: usize,
@@ -627,6 +667,7 @@ struct PlanarReflectedManifoldExit {
 struct PlanarManifoldReflected {
     source_origin: Point3,
     source_geometric_normal: Vec3,
+    source_boundary_origin: Option<BoundaryOrigin>,
     source_direction: Vec3,
     source_pdf_solid_angle: f64,
     boundary_primitive: usize,
@@ -3137,6 +3178,9 @@ pub enum TracerError {
     /// A chart returned a terminal result without retaining its typed
     /// no-tunneling claim. Uncertified misses are not geometry absence.
     UncertifiedTrace,
+    /// A used chart departure could not establish native separation or
+    /// clearance from another surface within its bounded work envelope.
+    BoundaryDeparture(crate::charts::proximity::ProximityError),
     /// A progressive sample range had its exclusive end before its start.
     InvalidRange {
         /// Inclusive start of the rejected sample range.
@@ -3283,6 +3327,9 @@ impl core::fmt::Display for TracerError {
             }
             Self::UncertifiedTrace => {
                 formatter.write_str("chart backend produced an uncertified trace result")
+            }
+            Self::BoundaryDeparture(error) => {
+                write!(formatter, "chart boundary departure is unresolved: {error:?}")
             }
             Self::InvalidRange { from, to } => {
                 write!(formatter, "invalid progressive sample range {from}..{to}")
@@ -10839,7 +10886,7 @@ fn discover_parallel_slab_with_probe(
     }
     let axis = entry_frame.geometric.scale(-1.0);
     let probe = Ray {
-        origin: first_hit.spawn_boundary_ray(entry_frame.geometric, axis),
+        origin: first_hit.spawn_boundary_ray(entry_frame.geometric, axis)?,
         dir: axis,
     };
     let Some(opposite) = intersect_probe(&probe)? else {
@@ -11239,6 +11286,7 @@ fn trace_parallel_slab_direct_lane(
     ray_time: Option<&PathTime>,
     source_point: Point3,
     source_geometric_normal: Vec3,
+    source_boundary_origin: Option<BoundaryOrigin>,
     slab: ParallelSlab,
     direct: PreparedDirectLight,
     wavelength_nm: f64,
@@ -11281,11 +11329,7 @@ fn trace_parallel_slab_direct_lane(
     }
 
     let entry_ray = Ray {
-        origin: dielectric_spawn_origin(
-            source_point,
-            source_geometric_normal,
-            geometry.incident_direction,
-        ),
+        origin: boundary_ray_origin(source_point, source_geometric_normal, geometry.incident_direction, source_boundary_origin)?,
         dir: geometry.incident_direction,
     };
     let Some(entry) = intersect(scene, cx, &entry_ray, ray_time)? else {
@@ -11358,7 +11402,7 @@ fn trace_parallel_slab_direct_lane(
         ));
     }
     let internal_ray = Ray {
-        origin: entry.spawn_boundary_ray(entry_frame.geometric, internal_direction),
+        origin: entry.spawn_boundary_ray(entry_frame.geometric, internal_direction)?,
         dir: internal_direction,
     };
     let Some(exit) = intersect(scene, cx, &internal_ray, ray_time)? else {
@@ -11416,7 +11460,7 @@ fn trace_parallel_slab_direct_lane(
         ));
     }
     let exit_ray = Ray {
-        origin: exit.spawn_boundary_ray(exit_frame.geometric, outgoing_direction),
+        origin: exit.spawn_boundary_ray(exit_frame.geometric, outgoing_direction)?,
         dir: outgoing_direction,
     };
     let final_hit = intersect(scene, cx, &exit_ray, ray_time)?;
@@ -11976,6 +12020,7 @@ fn trace_planar_manifold_direct_lanes(
     ray_time: Option<&PathTime>,
     source_point: Point3,
     source_geometric_normal: Vec3,
+    source_boundary_origin: Option<BoundaryOrigin>,
     boundary: PlanarManifoldBoundary,
     direct: PreparedDirectLight,
     wavelength_nm: f64,
@@ -11987,6 +12032,7 @@ fn trace_planar_manifold_direct_lanes(
             ray_time,
             source_point,
             source_geometric_normal,
+            source_boundary_origin,
             boundary,
             direct,
             wavelength_nm,
@@ -11997,6 +12043,7 @@ fn trace_planar_manifold_direct_lanes(
             ray_time,
             source_point,
             source_geometric_normal,
+            source_boundary_origin,
             boundary,
             direct,
             wavelength_nm,
@@ -12011,6 +12058,7 @@ fn trace_planar_manifold_rectangle_direct_lanes(
     ray_time: Option<&PathTime>,
     source_point: Point3,
     source_geometric_normal: Vec3,
+    source_boundary_origin: Option<BoundaryOrigin>,
     boundary: PlanarManifoldBoundary,
     direct: PreparedDirectLight,
     wavelength_nm: f64,
@@ -12047,7 +12095,7 @@ fn trace_planar_manifold_rectangle_direct_lanes(
     let light_tangent = basis_all_sphere(light_normal).0;
     let light_bitangent = cross(light_normal, light_tangent);
     let first_ray = Ray {
-        origin: dielectric_spawn_origin(source_point, source_geometric_normal, direct.direction),
+        origin: boundary_ray_origin(source_point, source_geometric_normal, direct.direction, source_boundary_origin)?,
         dir: direct.direction,
     };
     let Some(first_hit) = intersect(scene, cx, &first_ray, ray_time)? else {
@@ -12110,11 +12158,7 @@ fn trace_planar_manifold_rectangle_direct_lanes(
         }
 
         let entry_ray = Ray {
-            origin: dielectric_spawn_origin(
-                source_point,
-                source_geometric_normal,
-                connection.incident_direction,
-            ),
+            origin: boundary_ray_origin(source_point, source_geometric_normal, connection.incident_direction, source_boundary_origin)?,
             dir: connection.incident_direction,
         };
         let Some(entry_hit) = intersect(scene, cx, &entry_ray, ray_time)? else {
@@ -12151,7 +12195,7 @@ fn trace_planar_manifold_rectangle_direct_lanes(
             origin: entry_hit.spawn_boundary_ray(
                 entry_frame.geometric,
                 internal_direction,
-            ),
+            )?,
             dir: internal_direction,
         };
         let Some(exit_hit) = intersect(scene, cx, &internal_ray, ray_time)? else {
@@ -12191,7 +12235,7 @@ fn trace_planar_manifold_rectangle_direct_lanes(
             origin: exit_hit.spawn_boundary_ray(
                 exit_frame.geometric,
                 outgoing_direction,
-            ),
+            )?,
             dir: outgoing_direction,
         };
         let Some(light_hit) = intersect(scene, cx, &exit_ray, ray_time)? else {
@@ -12238,6 +12282,7 @@ fn trace_prepared_planar_reflected_manifold_rectangle_direct_lanes(
     ray_time: Option<&PathTime>,
     source_point: Point3,
     source_geometric_normal: Vec3,
+    source_boundary_origin: Option<BoundaryOrigin>,
     boundary: PlanarManifoldBoundary,
     planes: &[PreparedReflectedManifoldPlane],
     direct: PreparedDirectLight,
@@ -12321,11 +12366,7 @@ fn trace_prepared_planar_reflected_manifold_rectangle_direct_lanes(
             }
 
             let entry_ray = Ray {
-                origin: dielectric_spawn_origin(
-                    source_point,
-                    source_geometric_normal,
-                    connection.incident_direction,
-                ),
+                origin: boundary_ray_origin(source_point, source_geometric_normal, connection.incident_direction, source_boundary_origin)?,
                 dir: connection.incident_direction,
             };
             let Some(entry_hit) = intersect(scene, cx, &entry_ray, ray_time)? else {
@@ -12361,7 +12402,7 @@ fn trace_prepared_planar_reflected_manifold_rectangle_direct_lanes(
                 origin: entry_hit.spawn_boundary_ray(
                     entry_frame.geometric,
                     internal_incident,
-                ),
+                )?,
                 dir: internal_incident,
             };
             let Some(reflection_hit) = intersect(scene, cx, &reflection_ray, ray_time)? else {
@@ -12406,7 +12447,7 @@ fn trace_prepared_planar_reflected_manifold_rectangle_direct_lanes(
                 origin: reflection_hit.spawn_boundary_ray(
                     reflection_frame.geometric,
                     reflected,
-                ),
+                )?,
                 dir: reflected,
             };
             let Some(exit_hit) = intersect(scene, cx, &exit_ray, ray_time)? else {
@@ -12441,7 +12482,7 @@ fn trace_prepared_planar_reflected_manifold_rectangle_direct_lanes(
                 continue;
             }
             let light_ray = Ray {
-                origin: exit_hit.spawn_boundary_ray(exit_frame.geometric, outgoing),
+                origin: exit_hit.spawn_boundary_ray(exit_frame.geometric, outgoing)?,
                 dir: outgoing,
             };
             let Some(light_hit) = intersect(scene, cx, &light_ray, ray_time)? else {
@@ -12498,6 +12539,7 @@ fn trace_planar_reflected_manifold_rectangle_direct_lanes(
     ray_time: Option<&PathTime>,
     source_point: Point3,
     source_geometric_normal: Vec3,
+    source_boundary_origin: Option<BoundaryOrigin>,
     boundary: PlanarManifoldBoundary,
     direct: PreparedDirectLight,
     wavelength_nm: f64,
@@ -12520,6 +12562,7 @@ fn trace_planar_reflected_manifold_rectangle_direct_lanes(
         ray_time,
         source_point,
         source_geometric_normal,
+        source_boundary_origin,
         boundary,
         &prepared.1,
         direct,
@@ -12544,6 +12587,7 @@ fn trace_prepared_reflected_manifold_rectangle_direct_lanes(
     ray_time: Option<&PathTime>,
     source_point: Point3,
     source_geometric_normal: Vec3,
+    source_boundary_origin: Option<BoundaryOrigin>,
     prepared: Option<&[PreparedReflectedManifoldPrimitive]>,
     direct: PreparedDirectLight,
     wavelength_nm: f64,
@@ -12560,6 +12604,7 @@ fn trace_prepared_reflected_manifold_rectangle_direct_lanes(
                         ray_time,
                         source_point,
                         source_geometric_normal,
+                        source_boundary_origin,
                         boundary,
                         &primitive.1,
                         direct,
@@ -12581,6 +12626,7 @@ fn trace_prepared_reflected_manifold_rectangle_direct_lanes(
                     ray_time,
                     source_point,
                     source_geometric_normal,
+                    source_boundary_origin,
                     boundary,
                     direct,
                     wavelength_nm,
@@ -12598,6 +12644,7 @@ fn trace_reflected_manifold_rectangle_direct_lanes(
     ray_time: Option<&PathTime>,
     source_point: Point3,
     source_geometric_normal: Vec3,
+    source_boundary_origin: Option<BoundaryOrigin>,
     direct: PreparedDirectLight,
     wavelength_nm: f64,
 ) -> Result<Vec<SlabDirectLane>, TracerError> {
@@ -12607,6 +12654,7 @@ fn trace_reflected_manifold_rectangle_direct_lanes(
         ray_time,
         source_point,
         source_geometric_normal,
+        source_boundary_origin,
         None,
         direct,
         wavelength_nm,
@@ -12620,6 +12668,7 @@ fn trace_planar_manifold_environment_direct_lanes(
     ray_time: Option<&PathTime>,
     source_point: Point3,
     source_geometric_normal: Vec3,
+    source_boundary_origin: Option<BoundaryOrigin>,
     boundary: PlanarManifoldBoundary,
     direct: PreparedDirectLight,
     wavelength_nm: f64,
@@ -12643,7 +12692,7 @@ fn trace_planar_manifold_environment_direct_lanes(
         return Ok(Vec::new());
     };
     let first_ray = Ray {
-        origin: dielectric_spawn_origin(source_point, source_geometric_normal, direct.direction),
+        origin: boundary_ray_origin(source_point, source_geometric_normal, direct.direction, source_boundary_origin)?,
         dir: direct.direction,
     };
     let Some(first_hit) = intersect(scene, cx, &first_ray, ray_time)? else {
@@ -12680,11 +12729,7 @@ fn trace_planar_manifold_environment_direct_lanes(
         }
 
         let entry_ray = Ray {
-            origin: dielectric_spawn_origin(
-                source_point,
-                source_geometric_normal,
-                connection.incident_direction,
-            ),
+            origin: boundary_ray_origin(source_point, source_geometric_normal, connection.incident_direction, source_boundary_origin)?,
             dir: connection.incident_direction,
         };
         let Some(entry_hit) = intersect(scene, cx, &entry_ray, ray_time)? else {
@@ -12722,7 +12767,7 @@ fn trace_planar_manifold_environment_direct_lanes(
             origin: entry_hit.spawn_boundary_ray(
                 entry_frame.geometric,
                 internal_direction,
-            ),
+            )?,
             dir: internal_direction,
         };
         let Some(exit_hit) = intersect(scene, cx, &internal_ray, ray_time)? else {
@@ -12758,7 +12803,7 @@ fn trace_planar_manifold_environment_direct_lanes(
             origin: exit_hit.spawn_boundary_ray(
                 exit_frame.geometric,
                 outgoing_direction,
-            ),
+            )?,
             dir: outgoing_direction,
         };
         if intersect(scene, cx, &exit_ray, ray_time)?.is_some() {
@@ -12834,6 +12879,7 @@ fn previous_after_dielectric_sample(
                 .ok_or(TracerError::InvalidInput)?
         },
         opaque_source_geometric_normal: None,
+        source_boundary_origin: None,
         smooth_slab: None,
     };
     if surface.is_delta()
@@ -12844,6 +12890,7 @@ fn previous_after_dielectric_sample(
             Some(SmoothSlabPath::Entered(entry)) => Some(PlanarManifoldEntry {
                 source_origin: entry.source_origin,
                 source_geometric_normal: entry.source_geometric_normal,
+                source_boundary_origin: entry.source_boundary_origin,
                 source_direction: entry.source_direction,
                 source_pdf_solid_angle: entry.source_pdf_solid_angle,
                 boundary_primitive: entry.slab.boundary_primitive,
@@ -12889,6 +12936,7 @@ fn previous_after_dielectric_sample(
         next.smooth_slab = Some(SmoothSlabPath::ManifoldReflected(PlanarManifoldReflected {
             source_origin: entry.source_origin,
             source_geometric_normal: entry.source_geometric_normal,
+            source_boundary_origin: entry.source_boundary_origin,
             source_direction: entry.source_direction,
             source_pdf_solid_angle: entry.source_pdf_solid_angle,
             boundary_primitive,
@@ -12925,6 +12973,7 @@ fn previous_after_dielectric_sample(
                 Ok(slab) => Some(SmoothSlabPath::Entered(SmoothSlabEntry {
                     source_origin: previous_origin,
                     source_geometric_normal,
+                    source_boundary_origin: source.source_boundary_origin,
                     source_direction: incident_ray.dir,
                     source_pdf_solid_angle: source.pdf.forward_solid_angle(),
                     slab,
@@ -12945,6 +12994,7 @@ fn previous_after_dielectric_sample(
                             Some(SmoothSlabPath::ManifoldEntered(PlanarManifoldEntry {
                                 source_origin: previous_origin,
                                 source_geometric_normal,
+                                source_boundary_origin: source.source_boundary_origin,
                                 source_direction: incident_ray.dir,
                                 source_pdf_solid_angle: source.pdf.forward_solid_angle(),
                                 boundary_primitive: boundary.boundary_primitive,
@@ -12980,6 +13030,7 @@ fn previous_after_dielectric_sample(
             PlanarReflectedManifoldExit {
                 source_origin: reflected.source_origin,
                 source_geometric_normal: reflected.source_geometric_normal,
+                source_boundary_origin: reflected.source_boundary_origin,
                 source_direction: reflected.source_direction,
                 source_pdf_solid_angle: reflected.source_pdf_solid_angle,
                 boundary_primitive,
@@ -13014,6 +13065,7 @@ fn previous_after_dielectric_sample(
             next.smooth_slab = Some(SmoothSlabPath::Exited(SmoothSlabExit {
                 source_origin: entry.source_origin,
                 source_geometric_normal: entry.source_geometric_normal,
+                source_boundary_origin: entry.source_boundary_origin,
                 source_direction: entry.source_direction,
                 source_pdf_solid_angle: entry.source_pdf_solid_angle,
                 slab: entry.slab,
@@ -13035,6 +13087,7 @@ fn previous_after_dielectric_sample(
         next.smooth_slab = Some(SmoothSlabPath::ManifoldExited(PlanarManifoldExit {
             source_origin: entry.source_origin,
             source_geometric_normal: entry.source_geometric_normal,
+            source_boundary_origin: entry.source_boundary_origin,
             source_direction: entry.source_direction,
             source_pdf_solid_angle: entry.source_pdf_solid_angle,
             boundary_primitive,
@@ -13052,6 +13105,7 @@ fn previous_after_dielectric_sample(
         next.smooth_slab = Some(SmoothSlabPath::ManifoldExited(PlanarManifoldExit {
             source_origin: entry.source_origin,
             source_geometric_normal: entry.source_geometric_normal,
+            source_boundary_origin: entry.source_boundary_origin,
             source_direction: entry.source_direction,
             source_pdf_solid_angle: entry.source_pdf_solid_angle,
             boundary_primitive,
@@ -13149,9 +13203,12 @@ fn replay_forward_slab_eligibility(
         return Ok(None);
     }
     let straight_shadow = Ray {
-        origin: slab_path
-            .source_origin
-            .offset(slab_path.source_geometric_normal.scale(RAY_EPS)),
+        origin: if slab_path.source_boundary_origin.is_some() {
+            boundary_ray_origin(slab_path.source_origin, slab_path.source_geometric_normal,
+                straight_direction, slab_path.source_boundary_origin)?
+        } else {
+            slab_path.source_origin.offset(slab_path.source_geometric_normal.scale(RAY_EPS))
+        },
         dir: straight_direction,
     };
     let Some(first_blocker) = intersect(scene, cx, &straight_shadow, ray_time)? else {
@@ -13222,6 +13279,7 @@ fn completed_slab_rectangle_nee_pdf(
         ray_time,
         slab_path.source_origin,
         slab_path.source_geometric_normal,
+        slab_path.source_boundary_origin,
         replayed_slab,
         direct,
         wavelength_nm,
@@ -13271,9 +13329,12 @@ fn completed_manifold_rectangle_nee_pdf(
         return Ok(0.0);
     }
     let shadow = Ray {
-        origin: path
-            .source_origin
-            .offset(path.source_geometric_normal.scale(RAY_EPS)),
+        origin: if path.source_boundary_origin.is_some() {
+            boundary_ray_origin(path.source_origin, path.source_geometric_normal,
+                direction, path.source_boundary_origin)?
+        } else {
+            path.source_origin.offset(path.source_geometric_normal.scale(RAY_EPS))
+        },
         dir: direction,
     };
     let Some(first_blocker) = intersect(scene, cx, &shadow, ray_time)? else {
@@ -13311,6 +13372,7 @@ fn completed_manifold_rectangle_nee_pdf(
             ray_time,
             path.source_origin,
             path.source_geometric_normal,
+            path.source_boundary_origin,
             slab,
             direct,
             wavelength_nm,
@@ -13330,6 +13392,7 @@ fn completed_manifold_rectangle_nee_pdf(
         ray_time,
         path.source_origin,
         path.source_geometric_normal,
+        path.source_boundary_origin,
         boundary,
         direct,
         wavelength_nm,
@@ -13402,6 +13465,7 @@ fn completed_reflected_manifold_rectangle_nee_pdf(
             ray_time,
             path.source_origin,
             path.source_geometric_normal,
+            path.source_boundary_origin,
             boundary,
             direct,
             wavelength_nm,
@@ -13455,6 +13519,7 @@ fn completed_slab_environment_nee_pdf(
         ray_time,
         slab_path.source_origin,
         slab_path.source_geometric_normal,
+        slab_path.source_boundary_origin,
         replayed_slab,
         direct,
         wavelength_nm,
@@ -13492,11 +13557,9 @@ fn completed_manifold_environment_nee_pdf(
         return Ok(0.0);
     }
     let shadow = Ray {
-        origin: dielectric_spawn_origin(
-            path.source_origin,
-            path.source_geometric_normal,
-            direction,
-        ),
+        origin: boundary_ray_origin(
+            path.source_origin, path.source_geometric_normal, direction, path.source_boundary_origin,
+        )?,
         dir: direction,
     };
     let Some(first_blocker) = intersect(scene, cx, &shadow, ray_time)? else {
@@ -13529,6 +13592,7 @@ fn completed_manifold_environment_nee_pdf(
             ray_time,
             path.source_origin,
             path.source_geometric_normal,
+            path.source_boundary_origin,
             slab,
             direct,
             wavelength_nm,
@@ -13544,6 +13608,7 @@ fn completed_manifold_environment_nee_pdf(
         ray_time,
         path.source_origin,
         path.source_geometric_normal,
+        path.source_boundary_origin,
         boundary,
         direct,
         wavelength_nm,
@@ -14331,6 +14396,7 @@ fn trace_path_with_regions<'scene>(
                     pdf: DirectionalPdfPair::continuous(pdf, pdf)
                         .ok_or(TracerError::InvalidInput)?,
                     opaque_source_geometric_normal: None,
+                    source_boundary_origin: None,
                     smooth_slab: None,
                 });
                 prev_origin = event.position;
@@ -14444,6 +14510,9 @@ fn trace_path_with_regions<'scene>(
             }
             break;
         };
+        let intersection = chart_departure::prepare(
+            intersection, lighting.chart_departure.as_ref(), cx, ray_time,
+        )?;
         let SceneIntersection {
             primitive_index: prim_idx,
             hit,
@@ -14762,7 +14831,7 @@ fn trace_path_with_regions<'scene>(
                         let surface = dielectric_surface_in_frame(*surface, brushed_frame.as_ref())?;
                         surface.roughness_alpha().map(|alpha| volume_emission::Receiver::Dielectric {
                             frame,
-                            mesh_boundary_origin: intersection.mesh_boundary_origin,
+                            boundary_origin: intersection.boundary_origin,
                             outgoing: ray.dir.scale(-1.0),
                             boundary,
                             alpha,
@@ -14773,7 +14842,7 @@ fn trace_path_with_regions<'scene>(
                     (_, None) if !smooth_conductor => Some(volume_emission::Receiver::Surface {
                         material: &prim.material,
                         frame,
-                        mesh_boundary_origin: intersection.mesh_boundary_origin,
+                        boundary_origin: intersection.boundary_origin,
                         outgoing: ray.dir.scale(-1.0),
                         brushed: brushed_frame.as_ref(),
                         incident_glass: source_region.host,
@@ -14831,7 +14900,7 @@ fn trace_path_with_regions<'scene>(
                     light,
                     &prim.material,
                     hit.point,
-                    intersection.mesh_boundary_origin,
+                    intersection.boundary_origin,
                     frame,
                     ray.dir.scale(-1.0),
                     &medium_stack,
@@ -14866,7 +14935,7 @@ fn trace_path_with_regions<'scene>(
                                 light,
                                 &prim.material,
                                 hit.point,
-                                intersection.mesh_boundary_origin,
+                                intersection.boundary_origin,
                                 frame,
                                 ray.dir.scale(-1.0),
                                 &medium_stack,
@@ -14896,7 +14965,7 @@ fn trace_path_with_regions<'scene>(
                             let wo = ray.dir.scale(-1.0);
                             if cos_s > 0.0 {
                                 let shadow = direct.shadow_ray(
-                                    intersection.spawn_boundary_ray(frame.geometric, wi),
+                                    intersection.spawn_boundary_ray(frame.geometric, wi)?,
                                 )?;
                                 let shadow_hit = intersect(scene, cx, &shadow, ray_time)?;
                                 let visible = direct.is_visible(hit.point, shadow_hit);
@@ -15045,7 +15114,7 @@ fn trace_path_with_regions<'scene>(
                             light,
                             &prim.material,
                             hit.point,
-                            intersection.mesh_boundary_origin,
+                            intersection.boundary_origin,
                             frame,
                             ray.dir.scale(-1.0),
                             &medium_stack,
@@ -15074,7 +15143,7 @@ fn trace_path_with_regions<'scene>(
                         let cos_s = n.dot(wi);
                         if cos_s > 0.0 {
                             let shadow = direct.shadow_ray(
-                                intersection.spawn_boundary_ray(frame.geometric, wi),
+                                intersection.spawn_boundary_ray(frame.geometric, wi)?,
                             )?;
                             let shadow_hit = intersect(scene, cx, &shadow, ray_time)?;
                             let visible = direct.is_visible(hit.point, shadow_hit);
@@ -15113,6 +15182,7 @@ fn trace_path_with_regions<'scene>(
                                             ray_time,
                                             hit.point,
                                             frame.geometric,
+                                            chart_origin_only(intersection.boundary_origin),
                                             prepared.as_deref(),
                                             direct,
                                             lambda,
@@ -15364,6 +15434,7 @@ fn trace_path_with_regions<'scene>(
                                                 ray_time,
                                                 hit.point,
                                                 frame.geometric,
+                                                chart_origin_only(intersection.boundary_origin),
                                                 slab,
                                                 direct,
                                                 lambda,
@@ -15390,6 +15461,7 @@ fn trace_path_with_regions<'scene>(
                                                     ray_time,
                                                     hit.point,
                                                     frame.geometric,
+                                                    chart_origin_only(intersection.boundary_origin),
                                                     manifold,
                                                     direct,
                                                     lambda,
@@ -15547,7 +15619,7 @@ fn trace_path_with_regions<'scene>(
                                         origin: intersection.spawn_boundary_ray(
                                             frame.geometric,
                                             direction,
-                                        ),
+                                        )?,
                                         dir: direction,
                                     },
                                     throughput: child_throughput,
@@ -15793,7 +15865,7 @@ fn trace_path_with_regions<'scene>(
                                     origin: intersection.spawn_boundary_ray(
                                         frame.geometric,
                                         continuation.direction,
-                                    ),
+                                    )?,
                                     dir: continuation.direction,
                                 },
                                 throughput: child_throughput,
@@ -15876,7 +15948,7 @@ fn trace_path_with_regions<'scene>(
                 prev_origin = hit.point;
                 segment_origin = hit.point;
                 ray = Ray {
-                    origin: intersection.spawn_boundary_ray(frame.geometric, sampled.direction),
+                    origin: intersection.spawn_boundary_ray(frame.geometric, sampled.direction)?,
                     dir: sampled.direction,
                 };
             }
@@ -15903,12 +15975,13 @@ fn trace_path_with_regions<'scene>(
                             .ok_or(TracerError::InvalidInput)?
                     },
                     opaque_source_geometric_normal: Some(n),
+                    source_boundary_origin: chart_origin_only(intersection.boundary_origin),
                     smooth_slab: None,
                 });
                 prev_origin = hit.point;
                 segment_origin = hit.point;
                 ray = Ray {
-                    origin: intersection.spawn_boundary_ray(frame.geometric, sampled.direction),
+                    origin: intersection.spawn_boundary_ray(frame.geometric, sampled.direction)?,
                     dir: sampled.direction,
                 };
             }
@@ -15926,12 +15999,13 @@ fn trace_path_with_regions<'scene>(
                     volume_emission_competitor: false,
                     pdf: DirectionalPdfPair::delta(),
                     opaque_source_geometric_normal: Some(n),
+                    source_boundary_origin: chart_origin_only(intersection.boundary_origin),
                     smooth_slab: None,
                 });
                 prev_origin = hit.point;
                 segment_origin = hit.point;
                 ray = Ray {
-                    origin: intersection.spawn_boundary_ray(frame.geometric, wi),
+                    origin: intersection.spawn_boundary_ray(frame.geometric, wi)?,
                     dir: wi,
                 };
             }
@@ -15972,12 +16046,13 @@ fn trace_path_with_regions<'scene>(
                     )
                     .ok_or(TracerError::InvalidInput)?,
                     opaque_source_geometric_normal: Some(n),
+                    source_boundary_origin: chart_origin_only(intersection.boundary_origin),
                     smooth_slab: None,
                 });
                 prev_origin = hit.point;
                 segment_origin = hit.point;
                 ray = Ray {
-                    origin: intersection.spawn_boundary_ray(frame.geometric, wi),
+                    origin: intersection.spawn_boundary_ray(frame.geometric, wi)?,
                     dir: wi,
                 };
             }
@@ -16670,7 +16745,7 @@ fn intersect_primitive(
     current_best_t: Option<f64>,
 ) -> Result<Option<SceneIntersection>, TracerError> {
     cx.checkpoint()?;
-    let candidate = match &prim.shape {
+    let mut candidate = match &prim.shape {
         Shape::Mesh(mesh) => mesh
             .intersect_surface_with_cx_bounded(
                 cx,
@@ -16678,11 +16753,11 @@ fn intersect_primitive(
                 current_best_t.unwrap_or(distance_limit.unwrap_or(f64::INFINITY)),
             )?
             .map(|mut surface_hit| {
-                let mesh_boundary_origin = surface_hit.hit.normal.and_then(|normal| MeshBoundaryOrigin::from_triangle(
+                let boundary_origin = surface_hit.hit.normal.and_then(|normal| MeshBoundaryOrigin::from_triangle(
                         mesh, surface_hit.triangle_index, surface_hit.barycentric,
                         RigidTransform::identity(), normal,
                     )).map(|(origin, _)| origin);
-                if let Some(origin) = mesh_boundary_origin {
+                if let Some(origin) = boundary_origin {
                     // Retain the kernel's t for nearest-hit ordering. Recover
                     // physical distances from the unoffset surface witness,
                     // never from a cancelling ray.origin + t * ray.direction.
@@ -16692,7 +16767,7 @@ fn intersect_primitive(
                     primitive_index: i,
                     hit: surface_hit.hit,
                     instance_hit: None,
-                    mesh_boundary_origin,
+                    boundary_origin: boundary_origin.map(BoundaryOrigin::Mesh),
                 }
             }),
         Shape::Chart(chart) => {
@@ -16718,7 +16793,7 @@ fn intersect_primitive(
                     primitive_index: i,
                     hit: hit.ok_or(TracerError::BackendFailure(TraceTermination::Hit))?,
                     instance_hit: None,
-                    mesh_boundary_origin: None,
+                    boundary_origin: None,
                 }),
                 termination => return Err(TracerError::BackendFailure(termination)),
             }
@@ -16732,13 +16807,13 @@ fn intersect_primitive(
             instance
                 .intersect(cx, ray, t_max, TRACE_EPS)?
                 .map(|mut instance_hit| {
-                    let mesh_boundary_origin =
+                    let boundary_origin =
                         MeshBoundaryOrigin::reconstruct_instance_hit(instance, &mut instance_hit);
                     SceneIntersection {
                         primitive_index: i,
                         hit: instance_hit.hit,
                         instance_hit: Some(instance_hit),
-                        mesh_boundary_origin,
+                        boundary_origin: boundary_origin.map(BoundaryOrigin::Mesh),
                     }
                 })
         }
@@ -16749,7 +16824,7 @@ fn intersect_primitive(
                 SharedGeometry::Mesh(_) => current_best_t.map_or(limit, |t| t.min(limit)),
                 SharedGeometry::Chart(_) => limit,
             };
-            let (instance_hit, mesh_boundary_origin) = if let Some(cached) = time
+            let (instance_hit, boundary_origin) = if let Some(cached) = time
                 .cached_animated
                 .iter()
                 .flatten()
@@ -16771,10 +16846,15 @@ fn intersect_primitive(
                 primitive_index: i,
                 hit: instance_hit.hit,
                 instance_hit: Some(instance_hit),
-                mesh_boundary_origin,
+                boundary_origin: boundary_origin.map(BoundaryOrigin::Mesh),
             })
         }
     };
+    if chart_departure::has_chart(&prim.shape) {
+        if let Some(hit) = &mut candidate {
+            hit.boundary_origin = Some(BoundaryOrigin::UnpreparedChart);
+        }
+    }
     Ok(candidate)
 }
 
@@ -16902,6 +16982,7 @@ fn validate_scene_with_medium_emission<'scene>(
     }
     let mut lighting = SceneLighting::from(lighting);
     lighting.has_dielectric_materials = has_dielectric_materials;
+    lighting.chart_departure = chart_departure::Prepared::for_scene(scene, cx)?;
     if has_dielectric_materials {
         lighting.initial_media = initial_medium::InitialMedia::try_new(scene, cx)?;
     }
@@ -18040,6 +18121,7 @@ mod tests {
             SmoothSlabExit {
                 source_origin: Point3::new(0.0, 0.0, 0.0),
                 source_geometric_normal: Vec3::new(0.0, 0.0, 1.0),
+                source_boundary_origin: None,
                 source_direction: Vec3::new(0.0, 0.0, 1.0),
                 source_pdf_solid_angle: source_bsdf_pdf,
                 slab: ParallelSlab {
@@ -18606,6 +18688,7 @@ mod tests {
                     None,
                     source,
                     Vec3::new(0.0, 0.0, 1.0),
+                    None,
                     slab,
                     direct,
                     550.0,
@@ -18652,6 +18735,7 @@ mod tests {
                 None,
                 source,
                 Vec3::new(0.0, 0.0, 1.0),
+                None,
                 slab,
                 direct,
                 550.0,
@@ -18686,6 +18770,7 @@ mod tests {
             let retained_path = SmoothSlabExit {
                 source_origin: source,
                 source_geometric_normal: Vec3::new(0.0, 0.0, 1.0),
+                source_boundary_origin: None,
                 source_direction: direction,
                 source_pdf_solid_angle: 0.29,
                 slab,
@@ -18775,6 +18860,7 @@ mod tests {
                     None,
                     source,
                     Vec3::new(0.0, 0.0, 1.0),
+                    None,
                     slab,
                     direct,
                     550.0,
@@ -18967,6 +19053,7 @@ mod tests {
             let retained_path = SmoothSlabExit {
                 source_origin: scene.camera.eye,
                 source_geometric_normal: scene.camera.forward,
+                source_boundary_origin: None,
                 source_direction: scene.camera.forward,
                 source_pdf_solid_angle: 0.25,
                 slab: ParallelSlab {
@@ -19159,6 +19246,7 @@ mod tests {
                 None,
                 source,
                 Vec3::new(0.0, 0.0, 1.0),
+                None,
                 boundary,
                 direct,
                 550.0,
@@ -19178,6 +19266,7 @@ mod tests {
                 PlanarManifoldExit {
                     source_origin: source,
                     source_geometric_normal: Vec3::new(0.0, 0.0, 1.0),
+                    source_boundary_origin: None,
                     source_direction: lane.incident_direction,
                     source_pdf_solid_angle: 0.25,
                     boundary_primitive: 0,
@@ -19355,6 +19444,7 @@ mod tests {
                 None,
                 source,
                 Vec3::new(0.0, 0.0, 1.0),
+                None,
                 direct,
                 550.0,
             )
@@ -19433,9 +19523,11 @@ mod tests {
                     volume_emission_competitor: false,
                     pdf: DirectionalPdfPair::delta(),
                     opaque_source_geometric_normal: None,
+                    source_boundary_origin: None,
                     smooth_slab: Some(SmoothSlabPath::ManifoldEntered(PlanarManifoldEntry {
                         source_origin: source,
                         source_geometric_normal: source_normal,
+                        source_boundary_origin: None,
                         source_direction: lane.incident_direction,
                         source_pdf_solid_angle: 0.25,
                         boundary_primitive: 0,
@@ -19484,6 +19576,7 @@ mod tests {
                 PlanarReflectedManifoldExit {
                     source_origin: source,
                     source_geometric_normal: source_normal,
+                    source_boundary_origin: None,
                     source_direction: lane.incident_direction,
                     source_pdf_solid_angle: 0.25,
                     boundary_primitive: 0,
@@ -19511,6 +19604,7 @@ mod tests {
                     PlanarReflectedManifoldExit {
                         source_origin: source,
                         source_geometric_normal: source_normal,
+                        source_boundary_origin: None,
                         source_direction: lane.incident_direction,
                         source_pdf_solid_angle: 0.25,
                         boundary_primitive: 0,
@@ -19586,6 +19680,7 @@ mod tests {
                 None,
                 source,
                 source_normal,
+                None,
                 boundary,
                 direct,
                 550.0,
@@ -19681,6 +19776,7 @@ mod tests {
             let retained_path = PlanarManifoldExit {
                 source_origin: source,
                 source_geometric_normal: source_normal,
+                source_boundary_origin: None,
                 source_direction: lane.incident_direction,
                 source_pdf_solid_angle: 0.25,
                 boundary_primitive: 0,
@@ -19790,6 +19886,7 @@ mod tests {
             SmoothSlabExit {
                 source_origin: source,
                 source_geometric_normal: source_normal,
+                source_boundary_origin: None,
                 source_direction: connection.incident_direction,
                 source_pdf_solid_angle: 0.31,
                 slab,
@@ -21828,6 +21925,7 @@ mod tests {
             volume_emission_competitor: false,
             pdf: DirectionalPdfPair::continuous(bsdf_pdf, bsdf_pdf).unwrap(),
             opaque_source_geometric_normal: Some(Vec3::new(0.0, 0.0, 1.0)),
+            source_boundary_origin: None,
             smooth_slab: None,
         });
         assert_eq!(
@@ -21868,6 +21966,7 @@ mod tests {
                     volume_emission_competitor: false,
                     pdf: DirectionalPdfPair::delta(),
                     opaque_source_geometric_normal: None,
+                    source_boundary_origin: None,
                     smooth_slab: None,
                 }),
                 Some(nee_pdf),
@@ -22173,7 +22272,7 @@ mod tests {
             let hit = intersect(&scene, cx, &ray, None).unwrap().unwrap();
             let slab = discover_parallel_slab(&scene, cx, &ray, hit, None).unwrap();
             let lane = trace_parallel_slab_direct_lane(&scene, cx, None,
-                origin, normal, slab, direct, 550.0).unwrap();
+                origin, normal, None, slab, direct, 550.0).unwrap();
             assert!(lane.visible);
             let entry = surface.interface(550.0, false).unwrap()
                 .fresnel(lane.incident_direction.z, 1.0, 1.5).unwrap();
