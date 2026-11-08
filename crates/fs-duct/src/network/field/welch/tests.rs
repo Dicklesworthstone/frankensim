@@ -75,6 +75,8 @@ fn fields(omega: f64) -> PreparedNetworkFields {
         ports: PreparedNetworkSources::recorded_test_tube(omega, ANGLE, Z),
         source_clock: "recorded source clock".into(),
         locations,
+        cylinders: Vec::new(),
+        loss: LossModel::Lossless,
         pressure,
         flow,
     }
