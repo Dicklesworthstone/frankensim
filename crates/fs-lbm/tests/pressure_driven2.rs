@@ -444,8 +444,18 @@ fn pressure_profiles_and_transverse_wall_admission_are_atomic() {
     assert!(std::panic::catch_unwind(|| PressureProfileX2::new(&[], &[])).is_err());
     assert!(std::panic::catch_unwind(|| PressureProfileX2::new(&[1.0], &[1.0, 1.0])).is_err());
     for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-        assert!(std::panic::catch_unwind(|| PressureProfileX2::new(&[invalid], &[1.0])).is_err());
-        assert!(std::panic::catch_unwind(|| PressureProfileX2::new(&[1.0], &[invalid])).is_err());
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _ = PressureProfileX2::new(&[invalid], &[1.0]);
+            })
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _ = PressureProfileX2::new(&[1.0], &[invalid]);
+            })
+            .is_err()
+        );
     }
     let original = walled_pressure_channel(7, 8, 0.9);
     for failure in 0..5 {

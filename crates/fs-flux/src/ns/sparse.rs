@@ -8,6 +8,7 @@
 //! https://doi.org/10.1017/S0962492904000212.
 
 use super::{FluxParams, FluxSolution, FluxSystem};
+use fs_math::dd::Dd;
 use fs_solver::{FgmresState, op::CsrOp};
 use fs_sparse::precond::{Ilu0, Precond, ilu0};
 use fs_sparse::{Coo, Csr};
@@ -61,6 +62,78 @@ fn equilibrate(matrix: &Csr, rhs: &[f64]) -> (Csr, Vec<f64>) {
         Csr::from_parts(matrix.nrows(), matrix.ncols(), row_ptr, columns, values),
         scaled_rhs,
     )
+}
+
+/// Translate the pressure unknowns, without changing the assembled operator
+/// or the physical traction datum. A large common pressure is an affine load,
+/// not a suitable convergence scale for the much smaller flow-driving load.
+/// Each connected component gets its own origin; a prescribed pressure pin
+/// takes precedence over any momentum row. The largest nonzero constant-
+/// pressure response gives a well-scaled origin without a normal equation.
+fn pressure_origin(system: &FluxSystem<'_>, matrix: &Csr, rhs: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let count = system.pressure_roots.len();
+    let mut offsets = vec![0.0; count];
+    let mut pinned = vec![false; count];
+    let mut largest_response = vec![0.0; count];
+    for row in system.n_u..system.n {
+        let (columns, values) = matrix.row(row);
+        if columns == [row] && values == [1.0] {
+            let component = system.pressure_component[row - system.n_u];
+            if !pinned[component] {
+                offsets[component] = rhs[row];
+                pinned[component] = true;
+            }
+        }
+    }
+    for (row, &right) in rhs.iter().enumerate() {
+        let (columns, values) = matrix.row(row);
+        let mut component = None;
+        let mut response = Dd::from_f64(0.0);
+        let mut mixed = false;
+        for (&column, &value) in columns.iter().zip(values) {
+            if column < system.n_u {
+                continue;
+            }
+            let current = system.pressure_component[column - system.n_u];
+            if component.is_some_and(|previous| previous != current) {
+                mixed = true;
+                break;
+            }
+            component = Some(current);
+            response = response + Dd::from_f64(value);
+        }
+        let Some(component) = component else { continue };
+        let response = response.to_f64();
+        if !mixed && !pinned[component] && response.abs() > largest_response[component] {
+            let offset = right / response;
+            if offset.is_finite() {
+                offsets[component] = offset;
+                largest_response[component] = response.abs();
+            }
+        }
+    }
+    let shifted_rhs: Vec<_> = rhs
+        .iter()
+        .enumerate()
+        .map(|(row, &right)| {
+            let (columns, values) = matrix.row(row);
+            let mut shifted = Dd::from_f64(right);
+            for (&column, &value) in columns.iter().zip(values) {
+                if column >= system.n_u {
+                    shifted = shifted
+                        - Dd::from_f64(value)
+                            * Dd::from_f64(offsets[system.pressure_component[column - system.n_u]]);
+                }
+            }
+            shifted.to_f64()
+        })
+        .collect();
+    if shifted_rhs.iter().any(|value| !value.is_finite()) {
+        // An optional origin must never make an otherwise representable
+        // original system overflow. Retain the original coordinates then.
+        return (rhs.to_vec(), vec![0.0; count]);
+    }
+    (shifted_rhs, offsets)
 }
 
 struct BlockWork {
@@ -178,13 +251,21 @@ impl FluxSystem<'_> {
     /// Per-application block work arrays are allocated once and reused.
     ///
     /// Rows and loads are equilibrated by each row's largest absolute entry.
+    /// A constant pressure origin is removed independently in each connected
+    /// component before iteration and restored in the returned field. The
+    /// translated load measures flow accuracy independently of a large ambient
+    /// traction pressure. This is an affine change of variables, not a new
+    /// pressure boundary condition or a change to the physical pressure datum.
+    /// The returned pressure is translated back again for a final defect check:
+    /// rounding away a necessary pressure difference during restoration cannot
+    /// produce a converged result.
     /// Both the original and row-scaled residuals are independently recomputed
     /// against the original matrix after every restart. Large viscous loads
     /// therefore cannot hide the continuity and strong boundary equations.
     /// Use `FluxSolution::converged` to require both criteria on return.
     /// `max_iters` bounds actual Krylov iterations, including a short final
-    /// restart. Zero budget returns an unconverged initial state for nonzero
-    /// loads. An incomplete-factorization breakdown falls back to identity
+    /// restart. Zero budget cannot reduce a nonzero translated load. An
+    /// incomplete-factorization breakdown falls back to identity
     /// preconditioning; reported residuals never claim unverified convergence.
     /// No dense matrix or dense pressure Schur complement is constructed.
     ///
@@ -199,13 +280,14 @@ impl FluxSystem<'_> {
             params.tol.is_finite() && params.tol > 0.0,
             "positive finite tolerance required"
         );
-        let (scaled_matrix, scaled_rhs) = equilibrate(matrix, rhs);
+        let (shifted_rhs, pressure_offsets) = pressure_origin(self, matrix, rhs);
+        let (scaled_matrix, scaled_rhs) = equilibrate(matrix, &shifted_rhs);
         let preconditioner = FlowPreconditioner(FlowBlocks::new(&scaled_matrix, self.n_u));
         let operator = CsrOp::general(scaled_matrix);
         let mut state = FgmresState::new(&scaled_rhs, 80);
         let mut work = vec![0.0; self.n];
         let (mut original_residual, mut scaled_residual) =
-            residuals(matrix, rhs, &state.x, &mut work);
+            residuals(matrix, &shifted_rhs, &state.x, &mut work);
         let mut inner_tolerance = params.tol;
         while state.iters < params.max_iters
             && (original_residual > params.tol || scaled_residual > params.tol)
@@ -213,7 +295,8 @@ impl FluxSystem<'_> {
             state.restart = 80.min(params.max_iters - state.iters);
             let before = state.iters;
             let report = state.run(&operator, &preconditioner, &scaled_rhs, inner_tolerance, 1);
-            (original_residual, scaled_residual) = residuals(matrix, rhs, &state.x, &mut work);
+            (original_residual, scaled_residual) =
+                residuals(matrix, &shifted_rhs, &state.x, &mut work);
             if state.iters == before
                 || report.diagnosis == Some(fs_solver::StallDiagnosis::Breakdown)
             {
@@ -229,12 +312,32 @@ impl FluxSystem<'_> {
                 );
             }
         }
+        let shifted_residual = original_residual.max(scaled_residual);
+        for (cell, &component) in self.pressure_component.iter().enumerate() {
+            state.x[self.n_u + cell] += pressure_offsets[component];
+        }
+        // Recheck the ACTUALLY RETURNED pressure, not only the more accurately
+        // resolved internal pressure differences. Restoring a large datum can
+        // round a small gradient away. The original-load norm would conceal
+        // that defect, so evaluate the same translated equations again. Reuse
+        // the now-unused equilibrated load instead of allocating another field.
+        let mut returned_shifted = scaled_rhs;
+        returned_shifted.copy_from_slice(&state.x);
+        for (cell, &component) in self.pressure_component.iter().enumerate() {
+            returned_shifted[self.n_u + cell] -= pressure_offsets[component];
+        }
+        let (returned_residual, returned_scaled_residual) =
+            residuals(matrix, &shifted_rhs, &returned_shifted, &mut work);
+        let (original_residual, scaled_residual) = residuals(matrix, rhs, &state.x, &mut work);
         FluxSolution {
             x: state.x,
             n_u: self.n_u,
             iters: state.iters,
             rel_residual: original_residual,
-            scaled_rel_residual: scaled_residual,
+            scaled_rel_residual: scaled_residual
+                .max(shifted_residual)
+                .max(returned_residual)
+                .max(returned_scaled_residual),
         }
     }
 }

@@ -183,6 +183,10 @@ pub struct FluxSolution {
     /// Relative residual after dividing each equation and load by the largest
     /// absolute entry in its matrix row. This protects constraint equations
     /// from being hidden by large viscous momentum loads.
+    /// Sparse solves also retain the maximum relative defect of the equations
+    /// after translating each component's constant pressure origin, so a large
+    /// traction pressure cannot hide a small flow-driving load. The final check
+    /// uses the returned pressure, including rounding during datum restoration.
     pub scaled_rel_residual: f64,
 }
 

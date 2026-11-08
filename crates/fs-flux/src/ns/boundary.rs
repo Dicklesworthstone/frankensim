@@ -353,12 +353,12 @@ impl StokesAssembly<'_, '_> {
         let (relative_residual, scaled_relative_residual) =
             super::sparse::residuals(&self.matrix, &self.rhs, &field.x, &mut residual);
         field.rel_residual = relative_residual;
-        field.scaled_rel_residual = scaled_relative_residual;
+        field.scaled_rel_residual = field.scaled_rel_residual.max(scaled_relative_residual);
         if !field.x.iter().all(|value| value.is_finite()) || !field.converged(self.params.tol) {
             return Err(StokesBoundaryError::NotConverged {
                 iterations: field.iters,
                 relative_residual,
-                scaled_relative_residual,
+                scaled_relative_residual: field.scaled_rel_residual,
             });
         }
         self.report_solution(field)

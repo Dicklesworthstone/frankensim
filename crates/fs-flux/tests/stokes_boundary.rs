@@ -42,6 +42,184 @@ fn separate_domains() -> TriMesh {
     TriMesh::from_mesh2(&mesh)
 }
 
+/// The original RHS norm alone cannot detect a pressure gradient lost when a
+/// large datum is restored. This minimal velocity/pressure system has the exact
+/// equations u-p0+p1=epsilon, p0=P, u=0, hence p1-p0=epsilon. All unused velocity
+/// moments are fixed to zero. Both pressures belong to the SAME fluid component.
+#[test]
+fn sparse_pressure_restoration_refuses_an_unrepresentable_gradient() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 1, 1));
+    let system = FluxSystem::new(&mesh);
+    assert_eq!(system.pressure_component_count(), 1);
+    assert_eq!(system.n - system.n_u, 2);
+    let p0 = system.n_u;
+    let p1 = p0 + 1;
+    let mut matrix = fs_sparse::Coo::new(system.n, system.n);
+    for row in 0..system.n_u {
+        matrix.push(row, row, 1.0);
+    }
+    matrix.push(0, p0, -1.0);
+    matrix.push(0, p1, 1.0);
+    matrix.push(p0, p0, 1.0);
+    matrix.push(p1, 0, 1.0);
+    let matrix = matrix.assemble();
+    let params = FluxParams {
+        tol: 1e-11,
+        ..FluxParams::default()
+    };
+    let datum = 134_217_728.0;
+    for gradient in [0.125, 1e-10] {
+        let mut rhs = vec![0.0; system.n];
+        rhs[0] = gradient;
+        rhs[p0] = datum;
+        let solution = system.solve_sparse(&matrix, &rhs, params);
+        assert!(
+            solution.rel_residual < params.tol,
+            "the large original load hides this gradient defect"
+        );
+        let returned_gradient = solution.x[p1] - solution.x[p0];
+        if gradient == 0.125 {
+            assert!(solution.converged(params.tol));
+            assert_eq!(returned_gradient, gradient);
+        } else {
+            assert_eq!(
+                returned_gradient, 0.0,
+                "this gradient is below the datum's ulp"
+            );
+            assert!(
+                !solution.converged(params.tol),
+                "an internally resolved gradient must not certify a rounded-away returned gradient"
+            );
+            assert!(solution.scaled_rel_residual > 0.5);
+        }
+    }
+}
+
+/// Adding a constant to mechanical pressure changes the natural traction, but
+/// cannot change this exact affine shear flow or its zero divergence. The
+/// ambient load is deliberately much larger than the driving viscous load.
+#[test]
+fn sparse_weak_flow_is_resolved_beneath_large_traction_pressure() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 4, 4));
+    let system = FluxSystem::new(&mesh);
+    let params = FluxParams {
+        nu: 0.7,
+        tol: 1e-6,
+        max_iters: 1200,
+        ..FluxParams::default()
+    };
+    let amplitude = 1e-4;
+    let velocity = |point: [f64; 2]| [amplitude * (0.2 + 1.3 * point[1]), 0.0];
+    let zero = |_: [f64; 2]| [0.0; 2];
+    for datum in [0.0_f64, 65_536.0] {
+        // Keep the requested accuracy above the absolute pressure quantum:
+        // at this datum ulp(p) is about 1.5e-11, below tol * nu * amplitude.
+        // The separate gradient test deliberately crosses that limit and must
+        // refuse; this positive flow fixture must remain representable.
+        let pressure_ulp = f64::from_bits(datum.to_bits() + 1) - datum;
+        assert!(pressure_ulp < params.tol * params.nu * amplitude);
+        let traction = |_: [f64; 2], normal: [f64; 2]| {
+            let shear = params.nu * amplitude * 1.3;
+            [
+                shear * normal[1] - datum * normal[0],
+                shear * normal[0] - datum * normal[1],
+            ]
+        };
+        let boundaries: Vec<_> = (0..mesh.edges.len())
+            .filter(|&edge| mesh.is_boundary(edge))
+            .map(|edge| {
+                if mesh.edges[edge].normal[0] < -0.5 {
+                    StokesBoundary::Velocity {
+                        edge,
+                        value: &velocity,
+                    }
+                } else {
+                    StokesBoundary::TotalTraction {
+                        edge,
+                        value: &traction,
+                    }
+                }
+            })
+            .collect();
+        let assembly = system
+            .assemble_stokes_mixed(params, &zero, &boundaries)
+            .unwrap();
+        let solution = system.solve_sparse(assembly.matrix(), assembly.rhs(), params);
+        assert!(
+            solution.converged(params.tol),
+            "datum={datum}, iterations={}, original={}, translated/scaled={}",
+            solution.iters,
+            solution.rel_residual,
+            solution.scaled_rel_residual
+        );
+        let (error, divergence) = system.velocity_error(&solution.x, &velocity);
+        // Large-datum boundary assembly still has finite f64 precision; this
+        // bound is on physical flow, not on a residual divided by ambient p.
+        assert!(
+            error < 2e-8 && divergence < 2e-8,
+            "datum={datum}, velocity error={error}, divergence={divergence}"
+        );
+        for &pressure in &solution.x[system.n_u..] {
+            assert!(
+                (pressure - datum).abs() < 2e-6,
+                "physical traction pressure was not restored: {pressure} vs {datum}"
+            );
+        }
+    }
+}
+
+/// An open component's ambient pressure cannot set the stopping scale of a
+/// disconnected sealed component, whose own pressure gauge remains pinned.
+#[test]
+fn sparse_large_traction_datum_does_not_hide_disconnected_hydrostatic_balance() {
+    let mesh = separate_domains();
+    let system = FluxSystem::new(&mesh);
+    let params = FluxParams {
+        tol: 1e-9,
+        max_iters: 1200,
+        ..FluxParams::default()
+    };
+    let zero = |_: [f64; 2]| [0.0; 2];
+    let force = |point: [f64; 2]| {
+        if point[0] < 2.0 {
+            [2.0, -3.0]
+        } else {
+            [0.0; 2]
+        }
+    };
+    let datum = 65_536.0;
+    let traction = |_: [f64; 2], normal: [f64; 2]| normal.map(|n| -datum * n);
+    let boundaries: Vec<_> = (0..mesh.edges.len())
+        .filter(|&edge| mesh.is_boundary(edge))
+        .map(|edge| {
+            if mesh.edges[edge].mid[0] < 2.0 || mesh.edges[edge].normal[0] < -0.5 {
+                StokesBoundary::Velocity { edge, value: &zero }
+            } else {
+                StokesBoundary::TotalTraction {
+                    edge,
+                    value: &traction,
+                }
+            }
+        })
+        .collect();
+    let assembly = system
+        .assemble_stokes_mixed(params, &force, &boundaries)
+        .unwrap();
+    let solution = system.solve_sparse(assembly.matrix(), assembly.rhs(), params);
+    assert!(solution.converged(params.tol));
+    let (error, divergence) = system.velocity_error(&solution.x, &zero);
+    assert!(error < 2e-8 && divergence < 2e-8, "{error}, {divergence}");
+    let mean_zero = system.pressure(&solution.x);
+    for (cell, point) in mesh.centroids.iter().enumerate() {
+        if system.pressure_components()[cell] == 0 {
+            let exact = 2.0 * (point[0] - 0.5) - 3.0 * (point[1] - 0.5);
+            assert!((mean_zero[cell] - exact).abs() < 2e-7);
+        } else {
+            assert!((solution.x[system.n_u + cell] - datum).abs() < 2e-6);
+        }
+    }
+}
+
 /// G1: two independent hydrostatic-gradient equilibria need two independent
 /// pressure gauges. Exact affine pressure is represented by its cell averages.
 #[test]
