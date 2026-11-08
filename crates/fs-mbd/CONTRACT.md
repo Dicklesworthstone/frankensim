@@ -8577,3 +8577,40 @@ full inertia, physical coordinate rescaling, common-rigid-motion nullity,
 cross-coupled rank-one free modes under extremely stiff exposure,
 distant origins and common boosts, zero damping, stale geometry, cancellation
 and undeliverable native momentum transfers.
+
+## Finite motion with passive full spatial damping
+
+`spatial_loads::internal_motion::viscous` advances two original finite bodies
+through exact fixed-geometry viscous half sources around one native loaded
+rigid-body step. The endpoint source is prepared from the actual endpoint
+poses, material axes and attachment transport, with the same authored
+`PassiveBushingMatrix`. All six coupled force/couple coordinates and the
+original complete inertia tensors participate. The native free-motion,
+held-force/body-couple, and prepared material-point/world-couple paths remain
+the respective pose and external-work owners.
+
+`step_viscous_connector`, `step_viscous_connector_with_loads` and
+`step_viscous_connector_with_spatial_loads` return actual changed poses and
+momenta, both source receipts, independent viscous dissipation, external
+force/couple work, gravity work/potential change, and whole-step momentum and
+mechanical-energy/heat residuals. The original retained kinetic-storage
+reduction supplies actual quadratic changes; heat is never inferred by
+subtracting observed energies. Each native drift and each viscous source
+passes its own balance gate before the complete original-to-final account.
+Numerical drift defects remain separate from physical dissipation.
+
+The smooth frozen-coefficient composition is second order under time
+refinement. Exact local source stability does not establish changing-geometry
+accuracy or remove the need to refine stiff trajectories. Work consists of
+two bounded six-coordinate preparations and two native body steps, including
+the original bounded spectral scratch and native nonlinear/rotation limits.
+No hidden subdivision, new inertia owner, projection, growing state history,
+joint/contact law or thermal allocation is introduced. Inputs are immutable;
+invalid duration, source refusal, native solve/balance refusal or cancellation
+returns no partially accepted endpoint.
+
+Focused tests cover analytic finite-mass recoil and heat with a three-rung
+position refinement, a full moving six-axis source against independent
+continuous Newton-Euler RK4 dynamics, native zero-law equivalence, common
+boost/world-translation covariance, original rotating material-point work,
+gravity/heat separation, and late cancellation with exact retry.

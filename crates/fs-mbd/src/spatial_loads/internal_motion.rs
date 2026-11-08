@@ -28,6 +28,10 @@ use fs_math::dd::Dd;
 #[path = "internal_motion/network.rs"]
 pub mod network;
 
+/// Finite trajectories under passive full spatial damping.
+#[path = "internal_motion/viscous.rs"]
+pub mod viscous;
+
 #[path = "internal_motion/spatial.rs"]
 mod spatial;
 use spatial::BodyLoads;
