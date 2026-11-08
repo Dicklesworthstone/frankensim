@@ -7,6 +7,9 @@ use fs_flux::ns::newton::{FluxNewtonControls, FluxNewtonError};
 use fs_flux::{FluxParams, FluxSystem, TriMesh};
 use fs_solid::Mesh2;
 
+#[path = "rheology_newton/sdirk2.rs"]
+mod sdirk2;
+
 fn mesh(n: usize) -> TriMesh {
     TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, n, n))
 }

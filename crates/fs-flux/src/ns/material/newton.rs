@@ -10,6 +10,9 @@ use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use std::cell::RefCell;
 
+mod sdirk2;
+pub use sdirk2::MaterialFluxSdirk2Step;
+
 /// Original material response and its analytic derivative at the SAME query.
 /// Temperature, composition, position and reference density are held fixed.
 pub struct MaterialFluxViscosityTangent<G> {
@@ -75,6 +78,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             initial_velocity,
             None,
             None,
+            None,
             convection,
             controls,
             resolve,
@@ -126,6 +130,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             boundary_velocity,
             previous_velocity,
             Some(timestep_s),
+            None,
             None,
             true,
             controls,
@@ -203,6 +208,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             previous_velocity,
             Some(timestep_s),
             older_history,
+            None,
             true,
             controls,
             resolve,
@@ -217,6 +223,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         initial_velocity: &[f64],
         timestep_s: Option<f64>,
         older_history: Option<(&[f64], f64)>,
+        stage_mass: Option<(f64, &[f64])>,
         convection: bool,
         controls: FluxNewtonControls,
         mut resolve: impl FnMut(
@@ -275,7 +282,20 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
                         },
                     }
                 };
-                if let Some((history, effective_timestep)) = &bdf2 {
+                if let Some((stage_timestep, history)) = stage_mass {
+                    self.system.rheology_newton_solve_checked(
+                        self.params,
+                        &tangent,
+                        acceleration,
+                        velocity,
+                        initial_velocity,
+                        convection,
+                        stage_timestep.recip(),
+                        Some(history),
+                        controls,
+                        &|| field.is_valid(),
+                    )
+                } else if let Some((history, effective_timestep)) = &bdf2 {
                     self.system.rheology_newton_solve_checked(
                         self.params,
                         &tangent,

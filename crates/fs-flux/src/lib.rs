@@ -81,12 +81,12 @@ pub use material::{
     MaterialBoundaryLoad, MaterialBoundaryTransport, MaterialBoundaryWrench,
     MaterialBrinkmanDragExchange, MaterialBrinkmanSolution, MaterialFluxError,
     MaterialFluxNewtonStep, MaterialFluxNumerics, MaterialFluxRheologyPoint,
-    MaterialFluxRheologySample, MaterialFluxRheologyStep, MaterialFluxSolution, MaterialFluxSystem,
-    MaterialFluxViscosityTangent, MaterialForchheimerSolution, MaterialNavierStokesBoundary,
-    MaterialNavierStokesRheologyStep, MaterialNavierStokesStep, MaterialStokesBoundary,
-    MaterialStokesCell, MaterialStokesField, MaterialStokesFieldSolution,
-    MaterialStokesFlowControlSolution, MaterialStokesRheologySolution, MaterialStokesSolution,
-    MaterialViscousDissipation,
+    MaterialFluxRheologySample, MaterialFluxRheologyStep, MaterialFluxSdirk2Step,
+    MaterialFluxSolution, MaterialFluxSystem, MaterialFluxViscosityTangent,
+    MaterialForchheimerSolution, MaterialNavierStokesBoundary, MaterialNavierStokesRheologyStep,
+    MaterialNavierStokesStep, MaterialStokesBoundary, MaterialStokesCell, MaterialStokesField,
+    MaterialStokesFieldSolution, MaterialStokesFlowControlSolution, MaterialStokesRheologySolution,
+    MaterialStokesSolution, MaterialViscousDissipation,
 };
 #[cfg(feature = "continuum")]
 pub use ns::adjoint::{FluxAdjointError, FluxAdjointSolution};

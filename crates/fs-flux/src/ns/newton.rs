@@ -1,5 +1,5 @@
-//! Steady and fully implicit BDF1/BDF2 flow with a consistent constitutive Jacobian
-//! and line search.
+//! Steady and fully implicit BDF1/BDF2/SDIRK2 flow with a consistent
+//! constitutive Jacobian and line search.
 //!
 //! Every accepted endpoint solves the original nonlinear momentum equations.
 //! Damping changes the iteration, never the viscosity law or physical timestep.
@@ -9,6 +9,9 @@ use std::cell::RefCell;
 use super::boundary::{StokesBoundary, StokesBoundaryError};
 use super::linearization::{FluxLinearizationError, FluxViscosityTangent, sample};
 use super::{FluxParams, FluxSolution, FluxSystem};
+
+mod sdirk2;
+pub use sdirk2::{FluxSdirk2Error, FluxSdirk2Stage, FluxSdirk2Step};
 
 /// Explicit nonlinear work and acceptance controls.
 #[derive(Clone, Copy, Debug)]

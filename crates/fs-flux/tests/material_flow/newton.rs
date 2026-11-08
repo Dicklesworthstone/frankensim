@@ -9,6 +9,9 @@ use fs_material::fluid_transport::rheology::{
 };
 use fs_material::visco::temperature::{TemperatureShift, TemperatureShiftModel};
 
+#[path = "newton/sdirk2.rs"]
+mod sdirk2;
+
 fn bdf2_couette_moments(mesh: &TriMesh, shear: f64) -> Vec<f64> {
     mesh.edges
         .iter()
