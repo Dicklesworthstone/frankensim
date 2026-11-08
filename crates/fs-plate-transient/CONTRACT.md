@@ -386,3 +386,55 @@ shear/normal amplitudes while Miner spans both windows. It also checks late
 cross-gauge budget/cancellation rollback and rejection of a damped nonperiodic
 block. Findley usage remains separate from finite-life damage and adds no
 stiffness evolution, constitutive return map or inferred repetition count.
+
+## Spatial Maxwell bending memory
+
+`relaxation::PlateRelaxationBranch` assembles passive anisotropic excess bending
+resultants [N m] on the original supported DKT curvature/quadrature. A branch
+owns one positive relaxation time; heterogeneous facets can have zero or
+nonzero tensors, and distinct times remain distinct. The original `PlateModel`
+stiffness is the equilibrium stiffness. Branches add memory forces, not an
+additional equilibrium spring, fitted modal damping, or prestress loss.
+
+`RelaxingPlate` advances `M v_dot + K_eq u + sum(K_j q_j) = f` with
+`q_j_dot = v - q_j/tau_j`. For `du = h*v_bar`, it uses the exact shared
+`PronyRamp` endpoint and interval-mean constitutive force, and midpoint
+momentum. The effective operator is
+`M + h^2*K_eq/4 + sum(h^2*c_j*K_j/2)`, where `c_j` is the exact ramp-mean
+coefficient. The full original consistent mass and all spatial coupling terms
+remain present. Existing sparse LDLT prepares one bounded factor at the fixed
+time step. The warm advance uses existing state workspace and allocates no
+heap or dense matrix. Original support/material geometry remains fixed.
+
+Physical branch heat integrates each original positive curvature Gram channel
+independently of stored energy and applied work. This preserves directional
+null loss and rigid translation without imposing a viscous floor. Initial
+spring displacement/slope history is explicit: zero means a relaxed initial shape; copies
+of the displacement mean an instantaneous change from the original zero shape.
+The supplied interval-mean force does work `f_bar dot du` on the affine
+numerical path. The step returns kinetic/storage changes, physical heat,
+external work and their separate residual; no residual is assigned to heat.
+Kinetic and stored-energy increments use polarized quadratic forms of the
+actual accepted endpoint differences. Heat and source work retain the intended
+affine interval path. If an endpoint increment disappears below its `f64`
+spacing, the resulting discrepancy appears in the balance residual, rather
+than being reported as stored energy that the accepted state does not contain.
+This is second-order structural time integration with exact material evolution
+on each numerical path, not the exact continuous structural trajectory.
+
+Branch, state-scalar, assembly-entry and sparse factor-byte limits bound cold
+preparation. Every solve is checked by its original effective residual. A
+nonpositive effective operator, invalid or overflowing state, budget exhaustion,
+and cancellation refuse. Accepted histories and cumulative work/heat remain
+unchanged on refusal. Cancellation is polled during original-coordinate work
+and around the synchronous bounded sparse factor/solve. This owner does not
+supply changing supports/materials, thermal feedback, contact, generalized-alpha
+numerical damping, or a new trajectory adjoint.
+
+`tests/hereditary_damping.rs` compares the native plate trajectory and physical
+heat to an independently integrated continuous two-time Maxwell ODE, verifies
+second-order refinement, exact held-shape relaxation across `h/tau` from
+`1e-5` to `1e4`, full consistent-mass anisotropic work balance, undamped rigid
+translation, and atomic cancellation/input refusals.
+An additional rounding regression compares the ledger with accepted endpoints
+under sub-ulp motion, unresolved weak relaxation, and velocity-binade rounding.

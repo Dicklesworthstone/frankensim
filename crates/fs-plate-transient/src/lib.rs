@@ -13,6 +13,9 @@ pub use fs_plate::PlateModel;
 mod transient;
 pub use transient::*;
 
+/// Original sparse plate dynamics with anisotropic Maxwell bending memory.
+pub mod relaxation;
+
 /// Atomic native dynamics and source-bound signed DKT surface fatigue.
 pub mod fatigue;
 
