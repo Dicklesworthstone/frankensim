@@ -505,3 +505,249 @@ fn weak_thin_opaque_and_deep_crystal_volumes_keep_physical_heat_limits() {
         0.0
     );
 }
+
+#[test]
+fn one_factor_statistics_preserve_complex_polarization_and_peak_rms_convention() {
+    let mut data = input(
+        [0.2, 0.7, -0.4],
+        [C64::new(1.5, -0.09), C64::new(1.9, -0.23)],
+        0.0,
+    );
+    data.electric = [C64::ONE, C64::new(0.0, 1.0)];
+    let response = solve(data).unwrap();
+    let incident = illumination_field_statistics(
+        [&response],
+        OrientedCrystalFieldSide::Incident,
+        [0.0; 3],
+        || false,
+    )
+    .unwrap();
+    complex_close(
+        incident.electric_coherency_v2_m2[0][1],
+        C64::new(0.0, -0.5),
+        2e-15,
+    );
+    close(incident.electric_coherency_v2_m2[0][0].re, 0.5, 2e-15);
+    close(incident.electric_coherency_v2_m2[1][1].re, 0.5, 2e-15);
+    for (side, depth) in [
+        (OrientedCrystalFieldSide::TotalIncidentSide, -0.3 * LAMBDA),
+        (OrientedCrystalFieldSide::Transmitted, 0.7 * LAMBDA),
+    ] {
+        let point = [0.2 * LAMBDA, 0.0, depth];
+        let expected = response.field(side, point).unwrap();
+        let actual = illumination_field_statistics([&response], side, point, || false).unwrap();
+        assert_eq!(actual.poynting_w_m2, expected.field.poynting_w_m2);
+        assert_eq!(
+            actual.absorbed_power_density_w_m3,
+            expected.absorbed_power_density_w_m3
+        );
+        for i in 0..3 {
+            for j in 0..3 {
+                complex_close(
+                    actual.electric_coherency_v2_m2[i][j],
+                    expected.field.electric_v_m[i].scale(0.5)
+                        * expected.field.electric_v_m[j].conj(),
+                    3e-15,
+                );
+                assert_eq!(
+                    actual.electric_coherency_v2_m2[i][j],
+                    actual.electric_coherency_v2_m2[j][i].conj()
+                );
+            }
+        }
+    }
+    let area = 2e-8;
+    let end = 1.7 * LAMBDA;
+    assert_eq!(
+        illumination_absorption([&response], area, 0.0, end, || false)
+            .unwrap()
+            .1,
+        response.slab_absorbed_power_w(area, 0.0, end).unwrap()
+    );
+}
+
+#[test]
+fn unpolarized_oblique_factors_are_basis_invariant_and_do_not_interfere() {
+    let p: f64 = 0.8;
+    let c = (1.0 - p * p).sqrt();
+    let data = input(
+        [1.0, 2.0, -0.6],
+        [C64::new(1.4, -0.12), C64::new(2.1, -0.42)],
+        p,
+    );
+    let prepare = |electric| {
+        let mut d = data;
+        d.electric = electric;
+        solve(d).unwrap()
+    };
+    let factors = [
+        prepare([C64::from_re(c), C64::ZERO]),
+        prepare([C64::ZERO, C64::ONE]),
+    ];
+    let h = core::f64::consts::FRAC_1_SQRT_2;
+    let rotated = [
+        prepare([C64::from_re(c * h), C64::from_re(h)]),
+        prepare([C64::from_re(-c * h), C64::from_re(h)]),
+    ];
+    let incident = illumination_field_statistics(
+        factors.iter(),
+        OrientedCrystalFieldSide::Incident,
+        [0.0; 3],
+        || false,
+    )
+    .unwrap();
+    close(
+        (0..3)
+            .map(|j| incident.electric_coherency_v2_m2[j][j].re)
+            .sum(),
+        1.0,
+        3e-15,
+    );
+    close(incident.poynting_w_m2[2], c / (MU * C0), 3e-15);
+    let point = [0.0, 0.0, 0.7 * LAMBDA];
+    let stats = |bank: &[AbsorbingCrystalResponse]| {
+        illumination_field_statistics(
+            bank.iter(),
+            OrientedCrystalFieldSide::Transmitted,
+            point,
+            || false,
+        )
+        .unwrap()
+    };
+    let a = stats(&factors);
+    let b = stats(&rotated);
+    for i in 0..3 {
+        for j in 0..3 {
+            complex_close(
+                a.electric_coherency_v2_m2[i][j],
+                b.electric_coherency_v2_m2[i][j],
+                3e-14,
+            );
+        }
+        close(a.poynting_w_m2[i], b.poynting_w_m2[i], 3e-16);
+    }
+    close(
+        a.absorbed_power_density_w_m3,
+        b.absorbed_power_density_w_m3,
+        3e-13 * a.absorbed_power_density_w_m3,
+    );
+    let heat = |bank: &[AbsorbingCrystalResponse]| {
+        illumination_absorption(bank.iter(), 2e-8, 0.1 * LAMBDA, 1.7 * LAMBDA, || false)
+            .unwrap()
+            .1
+    };
+    close(heat(&factors), heat(&rotated), 3e-13 * heat(&factors));
+    let coherent = [prepare([C64::from_re(c), C64::ONE])];
+    assert!((heat(&coherent) - heat(&factors)).abs() > 1e-3 * heat(&factors));
+    let phased = [factors[0], prepare([C64::ZERO, C64::new(0.0, 1.0)])];
+    close(heat(&phased), heat(&factors), 3e-14 * heat(&factors));
+}
+
+#[test]
+fn independent_frequencies_and_directions_keep_original_loss_and_volume_balance() {
+    let mut first = input(
+        [0.2, 0.7, -0.4],
+        [C64::new(1.5, -0.04), C64::new(1.9, -0.18)],
+        0.3,
+    );
+    first.omega *= 0.7;
+    let mut second = input(
+        first.axis,
+        [C64::new(1.8, -0.2), C64::new(2.3, -0.33)],
+        -0.7,
+    );
+    second.omega *= 1.4;
+    second.electric = [C64::new(0.4, -0.2), C64::new(-0.1, 0.6)];
+    let factors = [solve(first).unwrap(), solve(second).unwrap()];
+    let side = OrientedCrystalFieldSide::Transmitted;
+    let point = [0.2 * LAMBDA, 0.0, 0.4 * LAMBDA];
+    let statistics = illumination_field_statistics(factors.iter(), side, point, || false).unwrap();
+    let expected_heat = factors
+        .iter()
+        .map(|r| r.field(side, point).unwrap().absorbed_power_density_w_m3)
+        .sum::<f64>();
+    close(
+        statistics.absorbed_power_density_w_m3,
+        expected_heat,
+        3e-15 * expected_heat,
+    );
+    assert_eq!(
+        illumination_poynting(factors.iter(), side, point, || false).unwrap(),
+        statistics.poynting_w_m2
+    );
+    let area = 7e-8;
+    let start = 0.1 * LAMBDA;
+    let split = 0.7 * LAMBDA;
+    let end = 2.3 * LAMBDA;
+    let absorbed = illumination_absorption(factors.iter(), area, start, end, || false)
+        .unwrap()
+        .1;
+    let split_heat = illumination_absorption(factors.iter(), area, start, split, || false)
+        .unwrap()
+        .1
+        + illumination_absorption(factors.iter(), area, split, end, || false)
+            .unwrap()
+            .1;
+    close(absorbed, split_heat, 3e-14 * absorbed);
+    let flux = |z| illumination_poynting(factors.iter(), side, [0.0, 0.0, z], || false).unwrap()[2];
+    close(absorbed, area * (flux(start) - flux(end)), 3e-13 * absorbed);
+    let power = illumination_power(factors.iter(), || false).unwrap();
+    close(
+        power.incident_w_m2,
+        power.reflected_w_m2 + power.transmitted_w_m2,
+        3e-14 * power.incident_w_m2,
+    );
+}
+
+#[test]
+fn flux_observation_does_not_require_local_heat_density_to_be_representable() {
+    let mut d = input([0.0, 1.0, 0.0], [C64::new(1.5, -0.2); 2], 0.0);
+    d.electric = [C64::from_re(1e154), C64::ZERO];
+    let response = solve(d).unwrap();
+    let side = OrientedCrystalFieldSide::Transmitted;
+    // The same original source has finite E/H and energy flux, while local
+    // dielectric power density exceeds f64. A small physical
+    // volume still has finite integrated watts and needs a usable flux trace.
+    assert!(response.field(side, [0.0; 3]).is_err());
+    assert!(illumination_field_statistics([&response], side, [0.0; 3], || false).is_err());
+    let front = illumination_poynting([&response], side, [0.0; 3], || false).unwrap();
+    let back = illumination_poynting([&response], side, [0.0, 0.0, 1e-6], || false).unwrap();
+    assert!(front.iter().all(|v| v.is_finite()));
+    assert!(front[2] > back[2] && back[2] > 0.0);
+    let (_, heat) = illumination_absorption([&response], 1e-6, 0.0, 1e-6, || false).unwrap();
+    close(heat, 1e-6 * (front[2] - back[2]), 3e-13 * heat);
+}
+
+#[test]
+fn dark_statistics_still_admit_geometry_and_variable_work_has_typed_cancellation() {
+    let empty: [AbsorbingCrystalResponse; 0] = [];
+    let side = OrientedCrystalFieldSide::Transmitted;
+    let dark = illumination_field_statistics(empty.iter(), side, [0.0; 3], || false).unwrap();
+    assert_eq!(dark.electric_coherency_v2_m2, [[C64::ZERO; 3]; 3]);
+    assert_eq!(dark.poynting_w_m2, [0.0; 3]);
+    assert_eq!(dark.absorbed_power_density_w_m3, 0.0);
+    assert_eq!(
+        illumination_absorption(empty.iter(), 2.0, 1.0, 4.0, || false).unwrap(),
+        (6.0, 0.0)
+    );
+    assert!(illumination_field_statistics(empty.iter(), side, [0.0, 0.0, -1.0], || false).is_err());
+    assert!(illumination_poynting(empty.iter(), side, [f64::NAN, 0.0, 0.0], || false).is_err());
+    assert!(illumination_absorption(empty.iter(), 0.0, 0.0, 1.0, || false).is_err());
+    assert!(matches!(
+        illumination_power(empty.iter(), || true),
+        Err(IlluminationError::Cancelled)
+    ));
+    let response = solve(input(
+        [1.0, 2.0, -0.6],
+        [C64::new(1.4, -0.12), C64::new(2.1, -0.42)],
+        0.8,
+    ))
+    .unwrap();
+    let mut polls = 0;
+    let result = illumination_absorption([&response, &response], 2e-8, 0.0, LAMBDA, || {
+        polls += 1;
+        polls == 4
+    });
+    assert!(matches!(result, Err(IlluminationError::Cancelled)));
+    assert_eq!(polls, 4);
+}

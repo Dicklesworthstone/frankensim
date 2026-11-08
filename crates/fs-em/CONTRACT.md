@@ -6863,8 +6863,34 @@ query, boundary solve or depth quadrature occurs in a slab query. A receiving
 thermal owner must identify this physical material/volume and supply its own
 hold interval; the prepared monochromatic source remains frozen.
 
-This is a monochromatic passive reciprocal uniaxial half-space with a lossless
-isotropic incident port. It does not advance temperature, infer magnetic loss,
+`AbsorbingCrystalIllumination` borrows the exact original oriented interface
+and an explicitly mutually uncorrelated bank of its prepared absorbing fields.
+Each factor includes its square-root statistical weight and retains coherent
+ordinary/extraordinary interference, its original frequency, signed incidence,
+and spectral loss. Factors may differ in frequency and direction; their field
+second moments, energy flux and dielectric work add, never their phasors. This
+admits partially polarized and unpolarized light without inventing a mean
+complex field or converting the crystal to scalar intensity transmission.
+The Cartesian electric coherency is `sum(E_i conj(E_j))/2`, with the peak/RMS
+factor applied exactly once. Equal transverse p/s powers at oblique incidence
+use tangential amplitudes proportional to the incidence cosine and one,
+respectively. The bank supplies finite spectral-line mean powers, not a
+bandwidth or PSD inferred from unknown phase; cross-frequency coherence and
+deterministic beat envelopes remain outside this source model.
+
+Construction checks exact interface identity and an authored factor budget.
+The source supplies no implicit field: an empty bank is darkness, with the
+same coordinate and positive-volume admission as a nonempty bank. Observations
+use compensated sums, fixed work per factor and no allocations, material
+queries or repeated boundary solves. The source-bound slab response retains
+the complete illumination, area, both depths, physical volume and analytic
+sum of the original coherent volume integrals. Cancellation is typed and
+polled before, during and after variable work, with no partial observation
+published. Illumination and material remain frozen; a thermal consumer owns
+the physical hold interval and energy deposition.
+
+Each factor uses a monochromatic passive reciprocal uniaxial half-space with a
+lossless isotropic incident port. This lane does not advance temperature, infer magnetic loss,
 support an absorbing incident port or finite lossy stack, introduce a biaxial
 or gain model, or claim a causal transient reservoir. Unresolved/coalesced
 complex modes, ambiguous outgoing branches and unrepresentable source loss or

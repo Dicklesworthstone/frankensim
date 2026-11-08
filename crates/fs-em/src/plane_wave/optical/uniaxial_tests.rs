@@ -274,6 +274,153 @@ fn original_absorbing_axes_feed_coupled_fields_and_physical_heating() {
 }
 
 #[test]
+fn crystal_statistical_illumination_retains_original_spectra_volume_and_source_identity() {
+    use crate::plane_wave::uniaxial::oriented::{
+        OrientedCrystalFieldSide, OrientedUniaxialInterface,
+        absorbing::{AbsorbingCrystalIllumination, CrystalIlluminationError},
+    };
+    let outside = incident(1.0, MU);
+    let (o, e) = axes(
+        [1.4, 1.6],
+        [1.8, 2.0],
+        [0.08, 0.2],
+        Some(MU),
+        [400.0, 800.0],
+        4,
+    );
+    let law = UniaxialOpticalResponse::try_new(&o, &e, SPAN).unwrap();
+    let interface = OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&outside),
+        law,
+        [1.0, 2.0, -0.5],
+    )
+    .unwrap();
+    let factors = [
+        interface
+            .prepare_absorbing_field(
+                frequency(400.0),
+                0.8,
+                [C64::new(0.6, -0.2), C64::new(0.1, 0.7)],
+            )
+            .unwrap(),
+        interface
+            .prepare_absorbing_field_at_tangential_index(
+                frequency(800.0),
+                -0.7,
+                [C64::new(-0.2, 0.4), C64::new(0.3, 0.1)],
+            )
+            .unwrap(),
+    ];
+    let illumination =
+        AbsorbingCrystalIllumination::try_new(&interface, &factors, 2, || false).unwrap();
+    assert!(core::ptr::eq(illumination.source(), &interface));
+    assert!(core::ptr::eq(
+        illumination.factors().as_ptr(),
+        factors.as_ptr()
+    ));
+    assert_eq!(illumination.factor_count(), 2);
+    assert_eq!(illumination.factors()[0].omega_rad_s(), frequency(400.0));
+    assert_eq!(illumination.factors()[1].omega_rad_s(), frequency(800.0));
+    let side = OrientedCrystalFieldSide::Transmitted;
+    let point = [0.0, 0.0, 300e-9];
+    let statistics = illumination
+        .field_statistics(side, point, || false)
+        .unwrap();
+    let expected_density = factors
+        .iter()
+        .map(|f| f.field(side, point).unwrap().absorbed_power_density_w_m3)
+        .sum::<f64>();
+    near(
+        statistics.absorbed_power_density_w_m3,
+        expected_density,
+        3e-15 * expected_density,
+    );
+    assert_eq!(
+        illumination.poynting_w_m2(side, point, || false).unwrap(),
+        statistics.poynting_w_m2
+    );
+    let absorbed = illumination
+        .slab_absorption(2e-8, 100e-9, 900e-9, || false)
+        .unwrap();
+    assert!(core::ptr::eq(absorbed.illumination(), &illumination));
+    assert!(core::ptr::eq(absorbed.source(), &interface));
+    assert_eq!(
+        absorbed.source().crystal_response().material().identity(),
+        law.material().identity()
+    );
+    assert_eq!(absorbed.area_m2(), 2e-8);
+    assert_eq!(absorbed.start_depth_m(), 100e-9);
+    assert_eq!(absorbed.end_depth_m(), 900e-9);
+    assert_eq!(absorbed.volume_m3(), 2e-8 * (900e-9 - 100e-9));
+    let expected_power = factors
+        .iter()
+        .map(|f| {
+            f.slab_absorption(2e-8, 100e-9, 900e-9)
+                .unwrap()
+                .absorbed_power_w()
+        })
+        .sum::<f64>();
+    near(
+        absorbed.absorbed_power_w(),
+        expected_power,
+        3e-15 * expected_power,
+    );
+    let power = illumination.power();
+    near(
+        power.incident_w_m2,
+        power.reflected_w_m2 + power.transmitted_w_m2,
+        3e-14 * power.incident_w_m2,
+    );
+    assert!(matches!(
+        AbsorbingCrystalIllumination::try_new(&interface, &factors, 1, || false),
+        Err(CrystalIlluminationError::Electromagnetic(
+            ReflectionError::Invalid(_)
+        ))
+    ));
+    let equivalent_interface = OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&outside),
+        law,
+        [1.0, 2.0, -0.5],
+    )
+    .unwrap();
+    assert!(matches!(
+        AbsorbingCrystalIllumination::try_new(&equivalent_interface, &factors, 2, || false),
+        Err(CrystalIlluminationError::Electromagnetic(
+            ReflectionError::Invalid(_)
+        ))
+    ));
+    let dark = AbsorbingCrystalIllumination::try_new(&interface, &[], 0, || false).unwrap();
+    assert_eq!(dark.power().incident_w_m2, 0.0);
+    assert_eq!(
+        dark.slab_absorption(2e-8, 0.0, 900e-9, || false)
+            .unwrap()
+            .absorbed_power_w(),
+        0.0
+    );
+    assert!(dark.slab_absorption(0.0, 0.0, 900e-9, || false).is_err());
+    assert!(
+        dark.field_statistics(side, [0.0, 0.0, -1.0], || false)
+            .is_err()
+    );
+    assert!(matches!(
+        AbsorbingCrystalIllumination::try_new(&interface, &factors, 2, || true),
+        Err(CrystalIlluminationError::Cancelled)
+    ));
+    assert!(matches!(
+        illumination.field_statistics(side, point, || true),
+        Err(CrystalIlluminationError::Cancelled)
+    ));
+    assert!(matches!(
+        illumination.poynting_w_m2(side, point, || true),
+        Err(CrystalIlluminationError::Cancelled)
+    ));
+    assert!(matches!(
+        illumination.slab_absorption(2e-8, 0.0, 900e-9, || true),
+        Err(CrystalIlluminationError::Cancelled)
+    ));
+}
+
+#[test]
 fn original_axis_roles_complete_snapshot_and_dispersion_survive_into_refraction() {
     let (o, e) = axes(
         [1.4, 1.6],

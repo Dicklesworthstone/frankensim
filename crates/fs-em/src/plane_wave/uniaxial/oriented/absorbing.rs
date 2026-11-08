@@ -18,7 +18,16 @@ use super::{C0, Incidence, OrientedUniaxialInterface, ReflectionError, Result, p
 use fs_math::{c64::C64, det};
 
 mod kernel;
-pub use kernel::{AbsorbingCrystalField, AbsorbingCrystalMode, AbsorbingCrystalResponse};
+pub use kernel::{
+    AbsorbingCrystalField, AbsorbingCrystalIlluminationPower, AbsorbingCrystalMode,
+    AbsorbingCrystalResponse, AbsorbingCrystalStatistics,
+};
+
+mod illumination;
+pub use illumination::{
+    AbsorbingCrystalIllumination, AbsorbingCrystalIlluminationSlabAbsorption,
+    CrystalIlluminationError,
+};
 
 /// One original material/frequency/illumination snapshot. Point queries have
 /// fixed work, allocate nothing and never resolve source laws or solve the
@@ -100,17 +109,8 @@ impl<'s, 'm> PreparedAbsorbingCrystalField<'s, 'm> {
         start_depth_m: f64,
         end_depth_m: f64,
     ) -> Result<AbsorbingCrystalSlabAbsorption<'_, 's, 'm>> {
-        positive(area_m2)?;
-        if !start_depth_m.is_finite()
-            || !end_depth_m.is_finite()
-            || start_depth_m < 0.0
-            || end_depth_m <= start_depth_m
-        {
-            return Err(ReflectionError::Invalid(
-                "crystal absorption needs a finite positive depth interval",
-            ));
-        }
-        let volume_m3 = positive(area_m2 * (end_depth_m - start_depth_m))?;
+        let volume_m3 = kernel::slab_volume_m3(area_m2, start_depth_m, end_depth_m)
+            .map_err(ReflectionError::Invalid)?;
         let absorbed_power_w = self
             .boundary
             .slab_absorbed_power_w(area_m2, start_depth_m, end_depth_m)

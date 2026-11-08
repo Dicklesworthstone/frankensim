@@ -23,6 +23,22 @@ type Result<T> = core::result::Result<T, &'static str>;
 #[path = "kernel/absorption.rs"]
 mod absorption;
 
+#[path = "kernel/statistics.rs"]
+mod statistics;
+pub use statistics::{AbsorbingCrystalIlluminationPower, AbsorbingCrystalStatistics};
+pub(super) use statistics::{
+    IlluminationError, illumination_absorption, illumination_field_statistics, illumination_power,
+    illumination_poynting, poll_illumination,
+};
+
+pub(super) fn slab_volume_m3(area: f64, start: f64, end: f64) -> Result<f64> {
+    positive(area)?;
+    if !start.is_finite() || !end.is_finite() || start < 0.0 || end <= start {
+        return Err("crystal absorption needs a finite positive depth interval");
+    }
+    positive(area * (end - start))
+}
+
 /// One actual transmitted mode. An absorbing mode is an inhomogeneous wave;
 /// its complex normal wavevector is not classified as a lossless bulk ray.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -83,6 +99,26 @@ impl AbsorbingCrystalResponse {
         point: [f64; 3],
     ) -> Result<AbsorbingCrystalField> {
         use OrientedCrystalFieldSide::*;
+        let field = self.electromagnetic_field(side, point)?;
+        let heat = if matches!(side, Ordinary | Extraordinary | Transmitted) {
+            heating(field.electric_v_m, self.axis, self.loss_f_m, self.omega)?
+        } else {
+            0.0
+        };
+        Ok(AbsorbingCrystalField {
+            field,
+            absorbed_power_density_w_m3: heat,
+        })
+    }
+
+    // Flux observations use this same coherent assembly without requiring
+    // unrelated local dielectric work or electric squared moments to fit.
+    fn electromagnetic_field(
+        &self,
+        side: OrientedCrystalFieldSide,
+        point: [f64; 3],
+    ) -> Result<OrientedCrystalField> {
+        use OrientedCrystalFieldSide::*;
         let mut sum = FieldSum::new(side, point)?;
         let mut add = |e: &Vector, h: &Vector, normal| {
             sum.add_wave(
@@ -120,16 +156,7 @@ impl AbsorbingCrystalResponse {
                 )?;
             }
         }
-        let field = sum.finish()?;
-        let heat = if matches!(side, Ordinary | Extraordinary | Transmitted) {
-            heating(field.electric_v_m, self.axis, self.loss_f_m, self.omega)?
-        } else {
-            0.0
-        };
-        Ok(AbsorbingCrystalField {
-            field,
-            absorbed_power_density_w_m3: heat,
-        })
+        sum.finish()
     }
 }
 
