@@ -4,7 +4,7 @@ use super::{CaloricConductionLayer, OriginalConduction};
 use super::super::capacity::{CapacityCurve, CapacityDrivenExchange, CapacityExchange, CapacityKnot};
 use fs_matdb::MaterialAnswer;
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw, ThermalStorageBasis};
-use crate::thermal::conduction::ResolvedConductionLayer;
+use crate::thermal::conduction::source::ResolvedConductionLayer;
 
 /// One immutable exact exchange proposal and its represented native storage.
 ///
