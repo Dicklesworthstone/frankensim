@@ -780,8 +780,11 @@ pub struct VelocityPressureX2 {
 /// Each face prescribes density (`p = CS2 * rho`) and copies physical velocity
 /// and non-equilibrium stress from its first-interior column. The pressure
 /// difference therefore determines the flow, including reversal: neither face
-/// imposes an inlet velocity. The grid requires non-periodic x, periodic y,
-/// and fluid-only face and first-interior columns, as for [`VelocityPressureX2`].
+/// imposes an inlet velocity. The grid requires non-periodic x. Each face row
+/// and its first-interior neighbor must either both be fluid or both be wall.
+/// Transverse y may be periodic or sealed by complete stationary wall rows.
+/// Use [`PressureProfileX2`] when the reservoir pressure varies with y, as in
+/// a channel with transverse gravity.
 ///
 /// These are lattice pressure densities, not absolute thermodynamic pressures.
 /// Use [`crate::material::MaterialScaling::density_lattice_from_pressure_perturbation`]
@@ -823,17 +826,80 @@ impl PressureX2 {
     }
 }
 
-#[derive(Clone, Copy)]
-enum RegularizedX2 {
-    VelocityPressure(VelocityPressureX2),
-    Pressure(PressureX2),
+/// Spatially varying isothermal pressure on both x faces, indexed by grid y.
+///
+/// The immutable slices hold lattice densities (`p = CS2 * rho`), including
+/// entries for wall rows, and must each have exactly `grid.ny` entries. Wall
+/// rows are masked by the original grid and retain their populations. This
+/// borrowed view introduces no profile allocation or per-step callbacks.
+/// Construct a new view to change prescribed pressures between steps.
+///
+/// Pressure reconstruction, low-Mach limits, force framing, and acoustic
+/// reflection are the same as [`PressureX2`]. A transverse hydrostatic load
+/// must match the solver's discrete force balance; a uniform outlet pressure
+/// cannot represent that load. SI callers must convert pressure perturbations
+/// with one common reference through the material scaling API.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PressureProfileX2<'a> {
+    min_densities: &'a [f64],
+    max_densities: &'a [f64],
 }
 
-impl RegularizedX2 {
-    fn max_density(self) -> f64 {
+impl<'a> PressureProfileX2<'a> {
+    /// Check equally sized, nonempty profiles of positive finite densities.
+    #[must_use]
+    pub fn new(min_densities: &'a [f64], max_densities: &'a [f64]) -> Self {
+        assert!(
+            !min_densities.is_empty() && min_densities.len() == max_densities.len(),
+            "D2Q9 pressure profiles require equal nonempty row counts"
+        );
+        assert!(
+            min_densities
+                .iter()
+                .chain(max_densities)
+                .all(|rho| rho.is_finite() && *rho > 0.0),
+            "D2Q9 pressure-profile densities must be positive and finite"
+        );
+        Self {
+            min_densities,
+            max_densities,
+        }
+    }
+
+    /// Prescribed x-min density at every grid y, including masked wall rows.
+    #[must_use]
+    pub const fn min_densities(self) -> &'a [f64] {
+        self.min_densities
+    }
+
+    /// Prescribed x-max density at every grid y, including masked wall rows.
+    #[must_use]
+    pub const fn max_densities(self) -> &'a [f64] {
+        self.max_densities
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RegularizedX2<'a> {
+    VelocityPressure(VelocityPressureX2),
+    Pressure(PressureX2),
+    PressureProfile(PressureProfileX2<'a>),
+}
+
+impl RegularizedX2<'_> {
+    fn min_density(self, y: usize) -> Option<f64> {
+        match self {
+            Self::VelocityPressure(_) => None,
+            Self::Pressure(boundary) => Some(boundary.min_density),
+            Self::PressureProfile(boundary) => Some(boundary.min_densities[y]),
+        }
+    }
+
+    fn max_density(self, y: usize) -> f64 {
         match self {
             Self::VelocityPressure(boundary) => boundary.outlet_density,
             Self::Pressure(boundary) => boundary.max_density,
+            Self::PressureProfile(boundary) => boundary.max_densities[y],
         }
     }
 }
@@ -2143,15 +2209,33 @@ impl Grid {
         }
     }
 
-    fn validate_regularized_x(&self, boundary: RegularizedX2) {
+    fn validate_regularized_x(&self, boundary: RegularizedX2<'_>) {
         assert!(
             self.nx >= 3,
             "D2Q9 x-open flow requires at least three columns"
         );
-        assert!(
-            !self.periodic_x && self.periodic_y,
-            "D2Q9 x-open flow requires non-periodic x and periodic y"
-        );
+        assert!(!self.periodic_x, "D2Q9 x-open flow requires non-periodic x");
+        let pressure_faces = !matches!(boundary, RegularizedX2::VelocityPressure(_));
+        if let RegularizedX2::PressureProfile(profile) = boundary {
+            assert_eq!(
+                profile.min_densities.len(),
+                self.ny,
+                "D2Q9 pressure-profile length must match grid.ny"
+            );
+        }
+        if !self.periodic_y {
+            assert!(
+                pressure_faces && self.ny >= 3,
+                "D2Q9 non-periodic y pressure flow requires two wall rows and a fluid row"
+            );
+            assert!(
+                (0..self.nx).all(|x| {
+                    self.flags[self.idx(x, 0)] == Cell::Wall
+                        && self.flags[self.idx(x, self.ny - 1)] == Cell::Wall
+                }),
+                "D2Q9 non-periodic y pressure flow requires complete stationary wall rows"
+            );
+        }
         assert!(
             self.fext.len() == self.nx * self.ny
                 && self
@@ -2170,19 +2254,38 @@ impl Grid {
                 }
             }
         }
+        let mut has_open_face = [false; 2];
         for y in 0..self.ny {
-            self.regularized_force(self.idx(self.nx - 1, y), boundary.max_density());
-            if let RegularizedX2::Pressure(pressure) = boundary {
-                self.regularized_force(self.idx(0, y), pressure.min_density);
-            }
-            for x in [0, 1, self.nx - 2, self.nx - 1] {
-                assert_eq!(
-                    self.flags[self.idx(x, y)],
-                    Cell::Fluid,
-                    "D2Q9 open faces and first-interior columns must be fluid"
+            for (side, (face_x, donor_x)) in
+                [(0, 1), (self.nx - 1, self.nx - 2)].into_iter().enumerate()
+            {
+                let face = self.idx(face_x, y);
+                let donor = self.idx(donor_x, y);
+                let fluid = self.flags[face] == Cell::Fluid;
+                assert!(
+                    (fluid && self.flags[donor] == Cell::Fluid)
+                        || (pressure_faces
+                            && self.flags[face] == Cell::Wall
+                            && self.flags[donor] == Cell::Wall),
+                    "D2Q9 pressure face and first-interior row must both be fluid or both wall"
                 );
+                has_open_face[side] |= fluid;
+                if fluid {
+                    let density = if side == 0 {
+                        boundary.min_density(y)
+                    } else {
+                        Some(boundary.max_density(y))
+                    };
+                    if let Some(density) = density {
+                        self.regularized_force(face, density);
+                    }
+                }
             }
         }
+        assert!(
+            has_open_face.into_iter().all(|open| open),
+            "D2Q9 pressure flow requires an open fluid row on each x face"
+        );
     }
 
     fn regularized_force(&self, index: usize, rho: f64) -> [f64; 2] {
@@ -2244,41 +2347,41 @@ impl Grid {
         populations
     }
 
-    fn prepare_regularized_x(&self, post: &mut Vec<[f64; Q]>, boundary: RegularizedX2) {
+    fn prepare_regularized_x(&self, post: &mut Vec<[f64; Q]>, boundary: RegularizedX2<'_>) {
         // Read the same native pulls that streaming will publish. Appended
         // face candidates reuse collision scratch and admit every row before
         // any accepted population is changed, including a late-row refusal.
         post.reserve(2 * self.ny);
         for y in 0..self.ny {
             let inlet = self.idx(0, y);
-            let inlet_source = self.idx(1, y);
-            let outlet_source = self.idx(self.nx - 2, y);
             let outlet = self.idx(self.nx - 1, y);
             let pulled = |x, index| {
                 core::array::from_fn(|q| {
                     self.stationary_pull_population(post, index, q, self.source(x, y, q))
                 })
             };
-            let (inlet_density, inlet_velocity, inlet_stress) =
-                self.regularized_source(inlet_source, &pulled(1, inlet_source));
-            let (_, outlet_velocity, outlet_stress) =
-                self.regularized_source(outlet_source, &pulled(self.nx - 2, outlet_source));
-            let (inlet_density, inlet_velocity) = match boundary {
-                RegularizedX2::VelocityPressure(pair) => (inlet_density, pair.inlet_velocity),
-                RegularizedX2::Pressure(pair) => (pair.min_density, inlet_velocity),
+            let inlet_populations = if self.flags[inlet] == Cell::Wall {
+                self.f[inlet]
+            } else {
+                let source = self.idx(1, y);
+                let (rho, velocity, stress) = self.regularized_source(source, &pulled(1, source));
+                let (rho, velocity) = match boundary {
+                    RegularizedX2::VelocityPressure(pair) => (rho, pair.inlet_velocity),
+                    _ => (
+                        boundary.min_density(y).expect("pressure face density"),
+                        velocity,
+                    ),
+                };
+                self.regularized_face_populations(inlet, rho, velocity, stress)
             };
-            let inlet_populations = self.regularized_face_populations(
-                inlet,
-                inlet_density,
-                inlet_velocity,
-                inlet_stress,
-            );
-            let outlet_populations = self.regularized_face_populations(
-                outlet,
-                boundary.max_density(),
-                outlet_velocity,
-                outlet_stress,
-            );
+            let outlet_populations = if self.flags[outlet] == Cell::Wall {
+                self.f[outlet]
+            } else {
+                let source = self.idx(self.nx - 2, y);
+                let (_, velocity, stress) =
+                    self.regularized_source(source, &pulled(self.nx - 2, source));
+                self.regularized_face_populations(outlet, boundary.max_density(y), velocity, stress)
+            };
             post.extend_from_slice(&[inlet_populations, outlet_populations]);
         }
     }
@@ -2725,7 +2828,7 @@ impl Grid {
     fn step_regularized_x_inner(
         &mut self,
         scratch: &mut Vec<[f64; Q]>,
-        boundary: RegularizedX2,
+        boundary: RegularizedX2<'_>,
         measured_walls: Option<&[bool]>,
     ) -> MomentumExchange2 {
         self.collide_into(scratch);
@@ -2789,6 +2892,22 @@ impl Grid {
         let _ = self.step_regularized_x_inner(scratch, boundary, None);
     }
 
+    /// Advance with a prescribed pressure density at every y on each x face.
+    ///
+    /// This is the spatially resolved counterpart of [`Self::step_pressure_x`].
+    /// Complete transverse wall rows support pressure-driven channels and
+    /// transverse hydrostatics. Wall face/donor pairs retain their populations;
+    /// all fluid candidates are prepared before any grid state changes.
+    pub fn step_pressure_profile_x(
+        &mut self,
+        scratch: &mut Vec<[f64; Q]>,
+        boundary: PressureProfileX2<'_>,
+    ) {
+        let boundary = RegularizedX2::PressureProfile(boundary);
+        self.validate_regularized_x(boundary);
+        let _ = self.step_regularized_x_inner(scratch, boundary, None);
+    }
+
     /// Pressure-driven x-flow step with the original selected-wall impulse.
     ///
     /// The wall mask and prescribed-pressure forcing are admitted before
@@ -2802,6 +2921,23 @@ impl Grid {
     ) -> MomentumExchange2 {
         self.validate_measured_walls(measured_walls);
         let boundary = RegularizedX2::Pressure(boundary);
+        self.validate_regularized_x(boundary);
+        self.step_regularized_x_inner(scratch, boundary, Some(measured_walls))
+    }
+
+    /// Spatial pressure step with the original selected-wall link impulse.
+    ///
+    /// The receipt records stationary bounce-back before face reconstruction.
+    /// Reservoir reconstruction supplies a separate open-boundary momentum
+    /// exchange, including at fluid cells adjacent to transverse walls.
+    pub fn step_pressure_profile_x_with_wall_momentum(
+        &mut self,
+        scratch: &mut Vec<[f64; Q]>,
+        boundary: PressureProfileX2<'_>,
+        measured_walls: &[bool],
+    ) -> MomentumExchange2 {
+        self.validate_measured_walls(measured_walls);
+        let boundary = RegularizedX2::PressureProfile(boundary);
         self.validate_regularized_x(boundary);
         self.step_regularized_x_inner(scratch, boundary, Some(measured_walls))
     }

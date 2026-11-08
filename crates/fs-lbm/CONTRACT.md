@@ -245,3 +245,40 @@ physical second moments without a force/velocity covariance artifact at
 nonuniform density. Unforced transfer arithmetic is unchanged. Existing
 rescaling, reflux, timestep order and low-Mach model limits still apply;
 this does not introduce a variable-density incompressible equation of state.
+
+## Spatial pressure reservoirs and sealed D2Q9 channels
+
+`core2::PressureProfileX2` borrows one positive finite lattice-density value
+per y row at each x face. `Grid::step_pressure_profile_x` and its selected-wall
+receipt variant apply these held pressure profiles through the same native
+regularized reconstruction as `PressureX2`. No callback runs inside a step and
+there is no profile allocation. Uniform profiles reproduce the uniform-pressure
+arithmetic. All candidates reuse collision scratch; its O(ny) extra capacity
+is retained while the caller-visible extent returns to the collision field.
+
+Pressure faces now admit paired stationary-wall face/interior rows. Non-periodic
+y requires complete top and bottom wall rows, and each x face needs at least
+one open fluid row. Velocity/pressure inlet mode retains periodic y and fluid
+face requirements. A profile-length, topology, nonfinite force, or late donor
+refusal leaves grid populations unchanged. Wall populations are never rebuilt
+as pressure cells. Wall receipts retain the original bounce-back link impulse;
+the subsequent reservoir reconstruction is a separate momentum exchange.
+
+Each fluid face prescribes `p = cs² rho`, copies its streamed first-interior
+physical velocity and non-equilibrium stress, and restores the destination's
+own `rho*g + fext` half-source. The pressure profile can therefore sustain
+transverse hydrostatics with the discrete relation
+`rho[y+1]/rho[y] = (1 + g_y/(2 cs²))/(1 - g_y/(2 cs²))`.
+This follows directly by equating opposite Guo half-source populations across
+a streaming link; the continuum exponential alone is not the discrete balance.
+Pressure remains a weakly compressible isothermal lattice quantity. SI loads
+require a shared material pressure reference. These regularized reservoirs
+reflect acoustics and do not supply a characteristic or thermodynamic boundary.
+
+The formulation retains the equilibrium/non-equilibrium split of Guo, Zheng
+and Shi, [Chinese Physics 11 (2002), 366–374](https://doi.org/10.1088/1009-1963/11/4/310),
+with the existing second-order Hermite stress projection of Latt and Chopard,
+[Mathematics and Computers in Simulation 72 (2006), 165–168](https://doi.org/10.1016/j.matcom.2006.05.017).
+Focused `pressure_driven2` regressions cover both signs of hydrostatic gravity,
+the plane Poiseuille pressure/viscosity law, local Guo/stress recovery,
+uniform-profile replay, native wall receipts, scratch reuse and atomic refusal.
