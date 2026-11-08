@@ -34,6 +34,30 @@ pub(crate) struct ComplexSum {
 }
 
 impl ComplexSum {
+    /// Keep multiplication residuals until the complete coherent contraction
+    /// is formed. Compensating already-rounded products cannot recover a dark
+    /// field such as (1+e)(1-e)-1 when e² is below one product's ulp.
+    pub(crate) fn add_product(&mut self, a: fs_math::c64::C64, b: fs_math::c64::C64) {
+        use fs_math::{c64::C64, dd::Dd, eft::two_prod};
+        let product = |x, y| {
+            let (hi, lo) = two_prod(x, y);
+            Dd { hi, lo }
+        };
+        // Complete each complex product before updating the running field.
+        // Its opposing component products could otherwise overflow that sum.
+        let re = product(a.re, b.re) - product(a.im, b.im);
+        let im = product(a.re, b.im) + product(a.im, b.re);
+        self.add(C64::new(re.hi, im.hi));
+        self.add(C64::new(re.lo, im.lo));
+    }
+
+    /// Retain low parts of a prepared directional microphone projection too.
+    pub(crate) fn add_product_parts(&mut self, a: [fs_math::dd::Dd; 2], b: fs_math::c64::C64) {
+        use fs_math::c64::C64;
+        self.add_product(C64::new(a[0].hi, a[1].hi), b);
+        self.add_product(C64::new(a[0].lo, a[1].lo), b);
+    }
+
     pub(crate) fn add(&mut self, z: fs_math::c64::C64) {
         fn component(sum: &mut f64, correction: &mut f64, x: f64) {
             let next = *sum + x;
@@ -286,6 +310,28 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn coherent_product_retains_sub_ulp_source_residual() {
+        use fs_math::c64::C64;
+        let e = 2.0_f64.powi(-27);
+        let mut sum = super::ComplexSum::default();
+        sum.add_product(C64::new(1.0 + e, 2.0 * (1.0 + e)), C64::from_re(1.0 - e));
+        sum.add_product(C64::new(-1.0, -2.0), C64::ONE);
+        assert_eq!(sum.finish(), C64::new(-e * e, -2.0 * e * e));
+    }
+
+    #[test]
+    fn coherent_product_keeps_internal_cancellation_before_large_running_sum() {
+        use fs_math::c64::C64;
+        let large = 2.0_f64.powi(1022);
+        let mut sum = super::ComplexSum::default();
+        sum.add(C64::from_re(3.0 * large));
+        // (large+i*large)(1+i) has zero real part. Adding its real
+        // component products separately would overflow 3*large+large.
+        sum.add_product(C64::new(large, large), C64::new(1.0, 1.0));
+        assert_eq!(sum.finish(), C64::new(3.0 * large, 2.0 * large));
+    }
+
     #[test]
     fn version_is_stamped() {
         assert!(!super::VERSION.is_empty());

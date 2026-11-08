@@ -237,6 +237,20 @@ fn legendre(degree: usize, x: f64) -> f64 {
     if degree == 0 { previous } else { current }
 }
 
+/// G0/G3: directivity and integrated power retain the actual dark-field
+/// product residual, not a rounded zero from two nearly cancelling emitters.
+#[test]
+fn coherent_radiation_product_residual_is_not_silenced() {
+    let e = 2.0_f64.powi(-27);
+    let ids = [SourceId::PointVolumeFlow("a".into()), SourceId::PointVolumeFlow("b".into())];
+    let bank = analytic(&ids, 3, |source, _| C64::from_re(if source == 0 { 1.0 + e } else { -1.0 }));
+    let mut field = [C64::ZERO; 3];
+    let power = bank.evaluate_coherent(&[C64::from_re(1.0-e), C64::ONE], BUDGET, &mut field, || false).unwrap();
+    assert_eq!(field, [C64::from_re(-e*e); 3]);
+    let expected = 4.0 * PI * e.powi(4) / (2.0 * MEDIUM.density * MEDIUM.sound_speed);
+    assert!((power.total_power_w / expected - 1.0).abs() < 1e-12);
+}
+
 /// High angular content is not certified by source self-power at a low grid.
 /// Actual contractions must converge on two refinements; low SH degrees never
 /// remove omitted physical multipoles from total power.

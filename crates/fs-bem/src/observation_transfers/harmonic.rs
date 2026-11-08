@@ -96,7 +96,7 @@ impl StatisticsSum {
     fn add(&mut self, field: [C64; 4]) {
         self.pressure.add(C64::from_re(field[0].norm_sq()));
         for i in 0..3 {
-            self.intensity[i].add(field[0] * field[i + 1].conj());
+            self.intensity[i].add_product(field[0], field[i + 1].conj());
             for j in i..3 {
                 let product = if i == j {
                     C64::from_re(field[i + 1].norm_sq())
@@ -249,7 +249,7 @@ impl PreparedHarmonicObservation {
         for (source, &coefficient) in coefficients.iter().enumerate() {
             let transfer = self.transfers[source * self.receivers.len() + receiver];
             for c in 0..4 {
-                sums[c].add(transfer[c] * coefficient);
+                sums[c].add_product(transfer[c], coefficient);
             }
         }
         let field = sums.map(Sum::finish);
@@ -270,7 +270,7 @@ impl PreparedHarmonicObservation {
     ) -> Result<C64, TransferError> {
         let mut sum = Sum::default();
         for (source, &coefficient) in coefficients.iter().enumerate() {
-            sum.add(self.pressure_transfer(source, receiver) * coefficient);
+            sum.add_product(self.pressure_transfer(source, receiver), coefficient);
         }
         let pressure = sum.finish();
         if !finite(pressure) {
@@ -381,7 +381,7 @@ impl PreparedHarmonicObservation {
         self.shape(patterns.len())?;
         let mut transfers = Vec::with_capacity(self.transfers.len());
         for (pair, &f) in self.transfers.iter().enumerate() {
-            transfers.push(patterns[pair % patterns.len()].observe(
+            transfers.push(patterns[pair % patterns.len()].observe_parts(
                 f[0],
                 [f[1], f[2], f[3]],
                 self.medium,
@@ -403,7 +403,7 @@ impl PreparedHarmonicObservation {
 /// uncertainty remains that of `field`; this is not a coherence certificate.
 pub struct PreparedMicrophoneArray<'a> {
     field: &'a PreparedHarmonicObservation,
-    transfers: Vec<C64>,
+    transfers: Vec<[fs_math::dd::Dd; 2]>,
     sums: Vec<Sum>,
     spectra: Vec<C64>,
 }
@@ -412,12 +412,11 @@ impl PreparedMicrophoneArray<'_> {
         let r = amplitudes.len();
         for i in 0..r {
             for j in i..r {
-                let product = if i == j {
-                    C64::from_re(amplitudes[i].norm_sq())
+                if i == j {
+                    self.sums[i * r + j].add(C64::from_re(amplitudes[i].norm_sq()));
                 } else {
-                    amplitudes[i] * amplitudes[j].conj()
-                };
-                self.sums[i * r + j].add(product);
+                    self.sums[i * r + j].add_product(amplitudes[i], amplitudes[j].conj());
+                }
             }
         }
     }
@@ -460,7 +459,7 @@ impl PreparedMicrophoneArray<'_> {
             for (receiver, amplitude) in amplitudes[..r].iter_mut().enumerate() {
                 let mut sum = Sum::default();
                 for (source, &coefficient) in factor.iter().enumerate() {
-                    sum.add(self.transfers[source * r + receiver] * coefficient);
+                    sum.add_product_parts(self.transfers[source * r + receiver], coefficient);
                 }
                 *amplitude = sum.finish().scale(core::f64::consts::FRAC_1_SQRT_2);
             }
@@ -499,7 +498,9 @@ impl PreparedMicrophoneArray<'_> {
             let scale = det::sqrt(power) * core::f64::consts::FRAC_1_SQRT_2;
             let mut amplitudes = [C64::ZERO; MAX_RECEIVERS];
             for (receiver, amplitude) in amplitudes[..r].iter_mut().enumerate() {
-                *amplitude = self.transfers[source * r + receiver].scale(scale);
+                let mut sum = Sum::default();
+                sum.add_product_parts(self.transfers[source * r + receiver], C64::from_re(scale));
+                *amplitude = sum.finish();
             }
             self.add_mode(&amplitudes[..r]);
         }

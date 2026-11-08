@@ -126,6 +126,61 @@ fn analytic(fields: &[[C64; 4]], sources: usize, receivers: usize) -> PreparedHa
     .unwrap()
 }
 
+/// G0/G3: product rounding must not erase an interference residual before
+/// source summation. The dyadic oracle is exact: (1+e)(1-e)-1 = -e².
+#[test]
+fn coherent_product_residual_survives_fields_statistics_and_microphones() {
+    let e = 2.0_f64.powi(-27);
+    let residual = -e * e;
+    let owner = analytic(
+        &[
+            [C64::new(1.0 + e, 2.0 * (1.0 + e)), C64::ZERO, C64::ZERO, C64::ZERO],
+            [C64::new(-1.0, -2.0), C64::ZERO, C64::ZERO, C64::ZERO],
+        ],
+        2,
+        1,
+    );
+    let drives = [C64::from_re(1.0 - e), C64::ONE];
+    let expected = C64::new(residual, 2.0 * residual);
+    let mut field = [HarmonicField::default()];
+    owner.evaluate_coherent(&drives, &mut field, || false).unwrap();
+    assert_eq!(field[0].pressure_pa, expected);
+    assert_eq!(owner.pressure_field(&drives, 0).unwrap(), expected);
+    let mut statistics = [HarmonicFieldStatistics::default()];
+    owner.evaluate_coherence_modes(&drives, 1, BUDGET, &mut statistics, || false).unwrap();
+    let power = 2.5 * residual * residual;
+    assert!((statistics[0].mean_square_pressure_pa2 / power - 1.0).abs() < 5e-16);
+    let mut microphones = owner.microphones(&[FirstOrder::default()]).unwrap();
+    let observed = microphones.evaluate_coherence_modes(&drives, 1, BUDGET, || false).unwrap()[0];
+    assert!((observed.re / power - 1.0).abs() < 5e-16);
+    assert_eq!(observed.im, 0.0);
+}
+
+/// G3: preparing a directional microphone cannot discard a sub-ulp p/u
+/// projection term which becomes the surviving signal after source cancellation.
+#[test]
+fn microphone_preparation_retains_projection_low_parts() {
+    let sources = [SourceId::StructuralMode("a".into()), SourceId::StructuralMode("b".into())];
+    let receivers = [ReceiverSpec { id: "mic".into(), position_m: [1.0, 0.0, 0.0] }];
+    let weak = 2.0_f64.powi(-54);
+    // With rho=omega=c=1, grad=i*u converts exactly. A cardioid produces
+    // h_a = 1+weak and h_b=-1, so equal coherent inputs leave weak Pa.
+    let owner = PreparedHarmonicObservation::from_samples(
+        1.0,
+        Medium { density: 1.0, sound_speed: 1.0 },
+        &sources,
+        &receivers,
+        ContentHash([4; 32]),
+        vec![C64::from_re(2.0), C64::new(0.0, -2.0 * weak), C64::ZERO, C64::ZERO,
+             C64::from_re(-2.0), C64::ZERO, C64::ZERO, C64::ZERO],
+    ).unwrap();
+    let pattern = FirstOrder::new(0.5, [1.0, 0.0, 0.0]).unwrap();
+    let mut microphones = owner.microphones(&[pattern]).unwrap();
+    let observed = microphones.evaluate_coherence_modes(&[C64::ONE; 2], 1, BUDGET, || false).unwrap()[0];
+    assert!((observed.re / (0.5 * weak * weak) - 1.0).abs() < 5e-16);
+    assert_eq!(observed.im, 0.0);
+}
+
 /// G1: two counterpropagating waves at a quarter standing-wave phase retain
 /// reactive flow while their mean transported energy cancels. A pressure-only
 /// plane-wave power approximation would incorrectly report positive flux.

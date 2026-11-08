@@ -590,10 +590,22 @@ authority-policy receipt move.
 
 Deterministic rectangular observations now retain double-double carrier
 rotations, including their small cosine decrements. The Hz-authored
-`mean_phase_hz` and `product_kernel_hz` methods preserve the radian conversion
-through the clock and centered sum/difference-frequency integration, matching
-the existing proper-complex Hz semantics. Signed frequencies and DC are
-supported by the shared numerical kernel.
+`mean_phase_hz`, `product_kernel_hz`, `proper_product_kernel_hz` and
+`phase_hz_from_clock_dd` methods reduce cycle products before multiplication by
+2*pi. Scalar high/low products and source-clock components are reduced
+separately, so neither the irrational conversion error nor adding a subperiod
+offset to a huge carrier phase creates a false beat. Sum/difference frequencies
+are formed in Hz before the centered Gram calculation; sinc numerators use the
+same cycle reduction. The small-width sinc-1 and disparate-frequency divided
+difference retain their original cancellation-stable formulas. Signed
+frequencies, DC and uniform/triangular sensitivity remain supported; APIs and
+radian-authored clocks are unchanged. This remains bounded, allocation-free DD
+arithmetic, not an arbitrary-null relative-error or interval certificate.
+
+G1/G3 regressions compare an optical-carrier quadrature pair against its
+independent 1 Hz real beat at large epochs, preserve subperiod exposures under
+complete-cycle epoch translations, and retain a DD quarter turn on a huge
+integer-cycle source clock. Complete-cycle exposure zeros are also checked.
 
 Both prepared product types expose `mean_real_product_parts_dd`, accepting
 [real, imaginary] double-double field components. Coalesced low components

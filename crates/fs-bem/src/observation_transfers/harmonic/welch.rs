@@ -82,7 +82,7 @@ impl PreparedHarmonicObservation {
                     let coefficient = peak(view, coefficient)?;
                     let transfer = self.transfers[source * self.receivers.len() + receiver];
                     for component in 0..4 {
-                        sums[component].add(transfer[component] * coefficient);
+                        sums[component].add_product(transfer[component], coefficient);
                     }
                 }
                 let field = sums.map(|sum| sum.finish().scale(core::f64::consts::FRAC_1_SQRT_2));
@@ -135,7 +135,7 @@ impl PreparedMicrophoneArray<'_> {
                 }
                 let coefficient = peak(view, coefficient)?;
                 for (receiver, sum) in sums[..receivers].iter_mut().enumerate() {
-                    sum.add(self.transfers[source * receivers + receiver] * coefficient);
+                    sum.add_product_parts(self.transfers[source * receivers + receiver], coefficient);
                 }
             }
             let mut amplitudes = [C64::ZERO; MAX_RECEIVERS];

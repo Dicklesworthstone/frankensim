@@ -132,15 +132,31 @@ impl FirstOrder {
     /// # Errors
     /// Nonfinite fields, invalid medium, or overflowing output.
     pub fn observe(self,pressure:C64,velocity:[C64;3],medium:Medium)->Result<C64,HelmholtzError> {
+        let out=self.observe_parts(pressure,velocity,medium)?;
+        Ok(C64::new(out[0].to_f64(),out[1].to_f64()))
+    }
+    // Retain projection product/sum residuals until all coherent sources have
+    // been combined by a prepared microphone array.
+    pub(crate) fn observe_parts(self,pressure:C64,velocity:[C64;3],medium:Medium)
+        ->Result<[fs_math::dd::Dd;2],HelmholtzError> {
+        use fs_math::dd::Dd;
         if !medium.density.is_finite() || medium.density<=0. || !medium.sound_speed.is_finite() || medium.sound_speed<=0.
             || !pressure.re.is_finite() || !pressure.im.is_finite()
             || velocity.iter().any(|v|!v.re.is_finite()||!v.im.is_finite()) {
             return Err(bad("invalid first-order receiver field or medium"));
         }
+        let pressure=[Dd::from_f64(pressure.re),Dd::from_f64(pressure.im)];
         if self.fraction==1. {return Ok(pressure);}
-        let axial=(0..3).fold(C64::ZERO,|a,c|a+velocity[c].scale(self.front[c]));
-        let out=pressure.scale(self.fraction)-axial.scale((1.-self.fraction)*medium.density*medium.sound_speed);
-        if !out.re.is_finite() || !out.im.is_finite() {return Err(bad("first-order receiver overflow"));}
+        let mut axial=[Dd::ZERO;2];
+        for (v,front) in velocity.into_iter().zip(self.front) {
+            let front=Dd::from_f64(front);
+            axial[0]=axial[0]+Dd::from_f64(v.re)*front;
+            axial[1]=axial[1]+Dd::from_f64(v.im)*front;
+        }
+        let fraction=Dd::from_f64(self.fraction);
+        let scale=(Dd::ONE-fraction)*Dd::from_f64(medium.density)*Dd::from_f64(medium.sound_speed);
+        let out=[pressure[0]*fraction-axial[0]*scale,pressure[1]*fraction-axial[1]*scale];
+        if out.iter().any(|v|!v.hi.is_finite()||!v.lo.is_finite()) {return Err(bad("first-order receiver overflow"));}
         Ok(out)
     }
 }

@@ -2791,6 +2791,20 @@ weak field between much larger opposing contributions with constant auxiliary
 storage. Sources remain complex amplitudes until the physical quadratic
 observation; no source-power addition replaces interference.
 
+Prepared harmonic p/u, recorded-coherence and far-field radiation contractions
+also retain the low part of each complex transfer-times-source product. This
+preserves weak residuals created by multiplication before opposing sources
+cancel. First-order microphone projection retains pressure/velocity and axis
+dot-product low parts through its source contraction, including pressure and
+velocity cancellation within a single receiver. These paths keep bounded work
+and allocation-free repeated evaluation; they do not restore information lost
+in the original spatial transfer calculation. Analytic regressions cover
+sub-ulp source-product residuals, directional projection, microphone covariance
+and integrated outgoing power.
+Private microphone rows retain 32 bytes per source/receiver pair, at most
+8 MiB under the existing 4096-source and 64-receiver caps. Product allowances
+still count logical complex contractions, not individual EFT operations.
+
 G0/G1/G3 regressions exercise all analytic source kinds and mixed illuminations,
 source ordering, a weak survivor through the prepared scattering owner, an
 analytic Green-layer receiver, a spherical-harmonic dipole node, and signed

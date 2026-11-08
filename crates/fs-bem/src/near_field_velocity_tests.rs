@@ -31,6 +31,19 @@ fn first_order_plane_wave_patterns_and_spherical_proximity_follow_euler() {
         }
     }
 }
+/// G3: a weak physical velocity component survives cancellation along the
+/// microphone axis, regardless of which coordinate carries the quiet term.
+#[test]
+fn directional_microphone_retains_weak_velocity_between_opposite_components() {
+    let axis = 1.0 / 3.0_f64.sqrt();
+    let microphone = FirstOrder::new(0.0, [axis; 3]).unwrap();
+    let air = Medium { density: 1.0, sound_speed: 1.0 };
+    let large = 2.0_f64.powi(54);
+    for velocity in [[large, 1.0, -large], [1.0, large, -large], [large, -large, 1.0]] {
+        let actual = microphone.observe(C64::ZERO, velocity.map(|v| C64::new(v, -2.0*v)), air).unwrap();
+        assert_eq!(actual, C64::new(-axis, 2.0*axis));
+    }
+}
 #[test]
 fn analytic_velocity_matches_spatial_differences_of_the_same_bem_pressure() {
     let body=SpherePanels::from_triangles(triangles()).unwrap();let air=medium();let x=[0.031,0.043,0.027];

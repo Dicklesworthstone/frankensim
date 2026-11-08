@@ -595,7 +595,7 @@ impl PreparedRadiationObservation {
     ) -> Result<C64, TransferError> {
         let mut sum = Sum::default();
         for source in 0..sources {
-            sum.add(columns[source * directions + direction] * drive(source)?);
+            sum.add_product(columns[source * directions + direction], drive(source)?);
         }
         let value = sum.finish();
         if !finite(value) {
