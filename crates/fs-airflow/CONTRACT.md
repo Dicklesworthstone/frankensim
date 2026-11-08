@@ -5034,6 +5034,55 @@ saturation, bounded work, nonconvergence and cancellation. The three Rust
 sources were parsed with the pinned formatter. Native Cargo compilation and
 test execution were not available in this resource-exhausted session.
 
+## Finite-throughput original water/steam condensers and boilers
+
+`conjugate::caloric::exchanger::phase::WaterPhaseHeatExchanger` couples one
+original nonlinear-Cp `ExchangerStream` to a finite positive water/steam mass
+flow with prescribed finite nonnegative UA. The water inlet must be an
+original saturation state, including either pure saturated endpoint, from
+the Gibbs, dense Helmholtz or regional IF97 owner. Its same original pressure
+chart resolves the outlet through the unified p,h inverse; the saturation
+temperature stays fixed while quality changes.
+
+The sensible path reuses `IsobaricHeatCapacityLaw::linear_heat_exchange`
+directly, with exposure `UA / sensible_mass_rate`. All original affine-Cp
+segments and source boundaries retain that owner's native integration and
+bounded inversion. No new caloric quadrature, EOS, latent Cp or temperature
+table is introduced. Co-current and counterflow have the same solution while
+the entire water path is isothermal. The two rates and the UA are finite;
+water is not an inexhaustible reservoir. The retained water enthalpy request
+is compared to both original saturated endpoints BEFORE rounding absolute h.
+Requests that exhaust available liquid or vapor refuse transactionally.
+There is no automatic clamp, subcooling zone or superheating zone.
+
+One signed Q, positive from water to the sensible stream, supplies equal and
+opposite relative enthalpy changes. The report separately audits original
+represented endpoint h and water u+p*v, so pressure-flow work is included
+once. Numerical endpoint rounding is exposed in watts. Each original
+requested-pressure closure defect has a separate caller budget in J/kg;
+their mass-weighted absolute sum is the stated additional allowance on the
+independent water first-law check. The original pressure state is retained,
+without an energy projection.
+
+The signed raw water entropy change uses the original plateau delta_s/delta_h
+and retained Q, preserving small changes before absolute endpoint rounding.
+The sensible side reuses the original Cp/T entropy integral and its existing
+endpoint correction. Raw total entropy production has an explicit caller
+allowance in W/K, defaulting to zero beyond numerical roundoff. The separate
+local thermal audit uses water delta_h/T_sat and reports the corresponding
+original saturation seam adjustment. This pressure-specific primitive never
+becomes a global source entropy or erases a negative raw balance. Neither
+entropy report is clipped. Source inverse work counts and cancellation are
+retained, and all gates precede result publication.
+
+This is steady heat exchange with prescribed quality-independent UA; it does
+not infer a boiling/condensation coefficient, phase slip, pressure loss,
+wall storage or mass mixing. Focused regressions cover independent NTU and
+original latent-energy predictions in both heat directions, nonlinear Cp
+knot crossings with independent datums, dense and regional source retention,
+latent exhaustion below absolute-h resolution, signed source-entropy seam
+admission, finite source support, zero transfer and cancellation.
+
 ## Prescribed mass-flow convection on native conducting surfaces
 
 `implicit::PrescribedMassFlowConvection` borrows an original prepared gas or

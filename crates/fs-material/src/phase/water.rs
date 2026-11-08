@@ -598,6 +598,23 @@ impl IsobaricWater {
         poll(&mut cancelled)?;
         Ok(self.sourced(state))
     }
+    /// Resolve an authored vapor mass fraction on the original saturation pair.
+    ///
+    /// The supplied quality is retained directly, even when its enthalpy change
+    /// is too small to survive rounding at the source enthalpy datum.
+    pub fn state_at_quality(
+        &self,
+        quality: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<WaterState, WaterError> {
+        poll(&mut cancelled)?;
+        if !quality.is_finite() || !(0.0..=1.0).contains(&quality) {
+            return Err(WaterError::Invalid("quality must be finite and in [0,1]"));
+        }
+        poll(&mut cancelled)?;
+        Ok(self.saturated(quality))
+    }
+
     pub fn state_at_specific_enthalpy(
         &self,
         h: f64,

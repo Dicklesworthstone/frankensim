@@ -72,6 +72,55 @@ fn near(a: f64, b: f64, tolerance: f64) {
 }
 
 #[test]
+fn uniform_water_ingress_retains_original_quality_and_inverse_work() {
+    for chart in [
+        WaterFlowChart::from(gibbs(1e6)),
+        dense(20e6, 625.0, 645.0).into(),
+    ] {
+        for quality in [0.0, 1e-30, 0.375, 1.0] {
+            let state = chart.state_at_quality(quality, || false).unwrap();
+            assert_eq!(state.vapor_quality(), Some(quality));
+            let h = state.specific_enthalpy_j_kg();
+            let actual = chart.state_at_specific_enthalpy(h, || false).unwrap();
+            let expected = match chart {
+                WaterFlowChart::Gibbs(source) => {
+                    let solution = source.state_at_specific_enthalpy(h, || false).unwrap();
+                    let iterations = solution.iterations();
+                    (solution.into_state().into(), iterations, 0)
+                }
+                WaterFlowChart::Dense(source) => {
+                    let solution = source.state_at_specific_enthalpy(h, || false).unwrap();
+                    let work = (solution.iterations(), solution.source_evaluations());
+                    (solution.into_state().into(), work.0, work.1)
+                }
+                WaterFlowChart::Regional(_) => unreachable!(),
+            };
+            assert_eq!(actual, expected);
+        }
+        for quality in [-0.1, 1.1, f64::NAN, f64::INFINITY] {
+            assert!(chart.state_at_quality(quality, || false).is_err());
+        }
+        let mut polls = 0;
+        assert!(matches!(
+            chart.state_at_quality(0.5, || {
+                polls += 1;
+                polls == 2
+            }),
+            Err(AcrossWaterFlowError::Flow(WaterFlowError::Cancelled))
+        ));
+        assert!(matches!(
+            chart.state_at_specific_enthalpy(1e6, || true),
+            Err(AcrossWaterFlowError::Flow(WaterFlowError::Cancelled))
+        ));
+    }
+    assert!(
+        WaterFlowChart::from(dense(25e6, 630.0, 675.0))
+            .state_at_quality(0.5, || false)
+            .is_err()
+    );
+}
+
+#[test]
 fn dense_liquid_throttles_into_a_gibbs_two_phase_outlet_with_flow_work_once() {
     let inlet = WaterFlowState::from(
         dense(20e6, 625.0, 645.0)

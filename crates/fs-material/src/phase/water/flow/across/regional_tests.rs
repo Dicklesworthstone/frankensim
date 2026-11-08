@@ -59,6 +59,29 @@ fn near(a: f64, b: f64, tolerance: f64) {
 }
 
 #[test]
+fn uniform_regional_ingress_preserves_original_plateau_and_inverse() {
+    let source = chart(20e6);
+    let uniform = WaterFlowChart::from(source);
+    let native = source.state_at_quality(0.375, || false).unwrap();
+    assert_eq!(
+        uniform.state_at_quality(0.375, || false).unwrap(),
+        native.into()
+    );
+    let h = native.specific_enthalpy_j_kg();
+    let solved = source.state_at_specific_enthalpy(h, || false).unwrap();
+    let work = (solved.iterations(), solved.dense_source_evaluations());
+    assert_eq!(
+        uniform.state_at_specific_enthalpy(h, || false).unwrap(),
+        (solved.into_state().into(), work.0, work.1)
+    );
+    assert!(
+        WaterFlowChart::from(chart(25e6))
+            .state_at_quality(0.5, || false)
+            .is_err()
+    );
+}
+
+#[test]
 fn complete_high_pressure_cycles_include_cold_feed_and_all_source_region_crossings() {
     // G3: these are complete four-device cycles, unlike the earlier hot-inlet
     // steam train. Every heat operation uses one chart across all source pieces.

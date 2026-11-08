@@ -15,6 +15,9 @@
 //! interval-arithmetic certificate. Both watt and UA gates must pass.
 //! Extremely strong exchange that rounds Q onto a thermal pinch is refused;
 //! a finite represented inverse UA cannot then be independently audited.
+//!
+//! [`phase`] supplies finite-throughput original water/steam condensation and
+//! boiling against one of these sensible streams, without a latent-heat Cp.
 
 use std::sync::Arc;
 
@@ -25,6 +28,8 @@ use fs_math::{dd::Dd, det};
 
 mod response;
 pub use response::{ExchangerInletResponse, ExchangerResponseConfig};
+
+pub mod phase;
 
 #[cfg(test)]
 mod tests;
@@ -357,8 +362,9 @@ impl CaloricHeatExchanger {
         config: ExchangerConfig,
     ) -> Result<ExchangerState, ExchangerError> {
         poll(cx)?;
-        let a = endpoint(&self.first, first_out, -heat, config)?;
-        let b = endpoint(&self.second, second_out, heat, config)?;
+        let tolerance = config.heat_tolerance(heat)?;
+        let a = endpoint(&self.first, first_out, -heat, tolerance)?;
+        let b = endpoint(&self.second, second_out, heat, tolerance)?;
         let entropy = (a.entropy + b.entropy).to_f64();
         let entropy_allowance = a.entropy_allowance + b.entropy_allowance;
         if !entropy.is_finite() || !entropy_allowance.is_finite() || entropy < -entropy_allowance {
@@ -945,7 +951,7 @@ fn endpoint(
     stream: &ExchangerStream,
     outlet: f64,
     heat: f64,
-    config: ExchangerConfig,
+    heat_tolerance_w: f64,
 ) -> Result<Endpoint, ExchangerError> {
     let law = &stream.caloric;
     let cp_in = law.specific_heat_cp_j_kg_k(stream.inlet_temperature_k)?;
@@ -961,7 +967,7 @@ fn endpoint(
             + stream.mass_flow_kg_per_s * cp_out * outlet);
     if !roundoff.is_finite()
         || !energy_residual.is_finite()
-        || energy_residual.abs() > config.heat_tolerance(heat)? + roundoff
+        || energy_residual.abs() > heat_tolerance_w + roundoff
     {
         return Err(ExchangerError::Unresolved(
             "original source endpoint energy audit",

@@ -66,6 +66,35 @@ impl WaterFlowChart {
         }
     }
 
+    /// Resolve enthalpy using this chart's original bounded source inverse.
+    ///
+    /// Returns the source state, enthalpy iterations and dense source
+    /// evaluations, respectively. No heat or pressure-work term is added.
+    pub fn state_at_specific_enthalpy(
+        &self,
+        h_j_kg: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(WaterFlowState, usize, usize), AcrossWaterFlowError> {
+        self.enthalpy(h_j_kg, &mut cancelled)
+    }
+
+    /// Resolve a vapor mass fraction on this chart's original saturation pair.
+    /// A chart without a saturation plateau refuses the request.
+    pub fn state_at_quality(
+        &self,
+        quality: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<WaterFlowState, AcrossWaterFlowError> {
+        match self {
+            Self::Gibbs(chart) => Ok(chart
+                .state_at_quality(quality, &mut cancelled)
+                .map_err(WaterFlowError::from)?
+                .into()),
+            Self::Dense(chart) => Ok(chart.state_at_quality(quality, &mut cancelled)?.into()),
+            Self::Regional(chart) => Ok(chart.state_at_quality(quality, &mut cancelled)?.into()),
+        }
+    }
+
     fn enthalpy(
         &self,
         h: f64,

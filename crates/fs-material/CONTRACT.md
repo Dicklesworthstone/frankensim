@@ -11837,6 +11837,14 @@ the original h, u+p*v and s balances.
 
 ## Adiabatic water and steam stream junctions
 
+`WaterFlowChart::state_at_quality` and `state_at_specific_enthalpy` expose the
+same original Gibbs, dense or regional state owners to finite stream devices.
+Quality ingress retains the authored vapor fraction directly, including changes
+too small to resolve at an absolute enthalpy datum. Charts without saturation
+refuse quality requests. Enthalpy ingress preserves the original bounded
+inverse, iteration counts and dense source-evaluation counts; neither ingress
+adds heat, shifts source references or introduces a pressure-work term.
+
 `phase::water::flow::across::mixing` adds `WaterFlowChart::mix_streams` for
 prescribed positive water/steam mass flows on the same exact prepared pressure
 chart. One original p,h inverse closes the conserved mass and enthalpy fluxes.
