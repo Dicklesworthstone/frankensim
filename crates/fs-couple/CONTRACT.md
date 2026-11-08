@@ -6294,6 +6294,49 @@ adapter and its two full-FE integration regressions are authored but unexecuted
 while the complete dependency graph is unavailable; these numerical checks do
 not establish whole-adapter compilation or close the broader MR56 qualification.
 
+### Full-field cavity free modes with original relaxation memory
+
+`StructuralInterior::prepare_relaxation_modes` passes the same complete
+original M/C/K arrays and explicit `MaxwellDampingBranch` channels to
+`fs-modal::relaxation_modes::PreparedMaxwellModes`. Branch strains use original
+[structural displacement, pressure potential] order. K must be relaxed;
+branch stiffness must not already be included. Structural channels describe
+Maxwell material relaxation; potential channels contribute the explicit
+passive admittance k*tau/(1+s*tau) b*b^T. Mixed channels retain the caller's
+declared law. No material fit or tensor-shell constitutive image is inferred.
+
+Repeated `refine` calls retain every original field and branch stress through
+the full rational pencil. Physical pressure is s*psi, including real decay.
+The original B/B^T interface force and flow retain reciprocal exchange.
+Relaxed structural/fluid envelope storage, structural viscous loss, memoryless
+wall loss, and internal-memory storage/heat remain separate. Each branch
+reports |sigma|²/(2*k) storage and |sigma|²/(k*tau) dissipation. Their totals
+are subaccount sums, not additional debits. Binary-normalized DD arithmetic
+avoids unrepresentable intermediate squares and coefficient products.
+The independently evaluated decay residual is
+2*Re(s)*(H_spatial+H_memory)+D_structure+D_wall+D_memory.
+Native original mechanical and branch-history residuals accompany the result.
+
+For n=ns+na and b original branches, the adapter reserves
+160*n+64*b+512 payload bytes and work score 160*n*n+256*n+256*b
+before native preparation. These bounds cover original seeds, output recovery
+and physical observation; borrowed sources, earlier results and allocator
+overhead are excluded. Native matrix/branch preparation retains its own
+bounds. Cancellation and refusal publish no partial result and preserve reuse.
+This is a seeded local simple-mode calculation. Native refusals at s=-1/tau,
+pure material dark modes with zero displacement, unresolved multiplicity and
+unrepresentable physical output remain explicit; no full-spectrum or continuum
+accuracy claim is made.
+
+Eight native tests pass using the actual shared Maxwell numerical owner,
+the original response-contraction module and the exact new memory-energy
+helper. Independent original P1 matrix fixtures cover all three analytic
+fluid-loaded cubic poles, causal wall admittance, gyroscopic handedness with
+mutual relaxation, the zero-memory limit and original energy balances.
+Four complete FE adapter regressions are additionally authored but remain
+unexecuted while the canonical dependency closure is unavailable. The native
+checks do not establish whole-adapter compilation or broader MR56 qualification.
+
 ### Adaptive physical time for retained porous gas/wall compression
 
 `ThermalPorousGasSystem::advance_adaptive` resolves a complete physical stroke

@@ -19,6 +19,8 @@ use fs_modal::quadratic_modes::{
 
 /// Original physical parameter derivatives of a coupled simple mode.
 pub mod parameter;
+/// Free modes retaining explicit original material and wall relaxation channels.
+pub mod relaxation;
 
 /// Shared accuracy, original-coordinate, payload and arithmetic limits.
 pub use fs_modal::quadratic_modes::PoleOptions;

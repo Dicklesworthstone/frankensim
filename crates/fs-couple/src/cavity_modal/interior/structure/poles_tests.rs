@@ -9,6 +9,9 @@ use super::super::poles::{PoleOptions, StructuralInteriorPole, StructuralInterio
 use super::super::time::StructuralInteriorTimeLimits;
 use super::*;
 
+#[path = "poles/relaxation_tests.rs"]
+mod relaxation_tests;
+
 fn options() -> PoleOptions {
     PoleOptions {
         spectral_scale: 4.0,
