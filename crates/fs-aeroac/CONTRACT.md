@@ -1435,6 +1435,60 @@ and coherently mixed source factors, budgets, ideal-wall refusal and
 cancellation. Native execution is required before claiming these Rust
 regressions have passed.
 
+## Directional radiation of complete physical multipoles
+
+`power::PreparedMultipoleRadiatedPower::with_momentum` prepares
+`PreparedMultipoleRadiatedMomentum` from the original Q/F/Lighthill-stress
+owner. It returns the same power P, first angular moment M [W] and outgoing
+wave momentum flux M/c [N] as the original compact momentum result, now
+retaining all Q/F/T interference. The physical far-pressure source amplitude
+is `rho c Q + n.F - i k n.T.n`; T is the original symmetric integrated
+Lighthill stress [N m], with physical shear entries and its complete trace.
+The trace is absorbed coherently into the scalar amplitude before quadratic
+products, leaving a traceless tensor for the analytic contractions.
+
+In normalized sqrt(watt) amplitudes (a, f, T), a colocated source has
+`M = (2/3) Re(a f*) + (4/15) Re(T f*)`. A force/stress pair can reverse
+directional emission through its physical relative phase without changing
+sphere power. Separated scalar/stress, force/stress and stress/stress terms
+use angular moments through rank five. The new rank-five identity is
+`<n^5 exp(-i x n.e)> = -i [(j3/x^2) sym(delta delta e)
+- (j4/x) sym(delta e e e) + j5 e^5]`, with 15 and 10 distinct terms
+in the symmetrized sums. It follows from the same DLMF Legendre integral
+and spherical-Bessel series cited above.
+
+The compact and multipole owners share the rank-three coefficient evaluation
+and momentum-result validation. Small arguments use fixed series; quotient
+identities retain j3/x^2 even when j3 itself underflows. At large arguments,
+j2/x, j3/x and j4/x are kept directly to avoid cancelling adjacent Bessel
+orders. A DD globally coalesced baseline plus separate separation corrections
+retains weak source and trace cancellation. This is not a certified relative
+enclosure at arbitrary nulls; nonfinite DD components or negative numerical
+power refuse instead of being silently repaired.
+
+Preparation retains the original geometry, material, source count and pair
+budget, adding three DD coefficients per distinct-position pair. Coherent
+application computes P and M in one O(N M + M^2) traversal, allocation-free
+and without transcendental calls. Independent sources take O(N) while keeping
+each source's intrinsic Q/F/T coherence. Explicit source factors add both
+power and signed momentum, with the original factor count and pair-product
+budgets. All paths poll cancellation and publish no partial result.
+
+Only the original homogeneous stationary lossless free-space sphere is
+admitted. Ideal-wall owners explicitly refuse the vector extension: scalar
+image-group division does not supply physical-domain momentum or wall recoil.
+This observation does not add applied mechanical force, source feedback,
+mean-flow momentum, unresolved turbulence, finite-source validity or
+measured-SPL authority. MR35 and MR55 remain broader open physical programs.
+
+Seven G1/G3/G4 regression groups in `tests/multipole_momentum.rs` cover
+physical phase and SI normalization, independent direct angular integration
+of all source mixtures, tiny-separation and weak tensor cancellation,
+trace cancellation and the original compact limit, frame/material covariance,
+explicit source coherence, power/momentum bounds, budgets, cancellation and
+wall-domain refusal. Native execution is still required before claiming
+these Rust tests passed.
+
 ## Mixed deterministic, real and proper acoustic source ensembles
 
 `observation::PreparedHarmonicEnsemble` combines an optional deterministic

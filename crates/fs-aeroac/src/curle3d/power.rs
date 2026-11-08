@@ -37,8 +37,8 @@ pub use convected::{
     PreparedConvectedMonopolePower,
 };
 pub use multipole::{
-    CompactMultipolePhasor, MULTIPOLE_IDEAL_BOUNDARY_POWER_SCOPE, MULTIPOLE_POWER_SCOPE,
-    PreparedMultipoleRadiatedPower,
+    CompactMultipolePhasor, MULTIPOLE_IDEAL_BOUNDARY_POWER_SCOPE, MULTIPOLE_MOMENTUM_SCOPE,
+    MULTIPOLE_POWER_SCOPE, PreparedMultipoleRadiatedMomentum, PreparedMultipoleRadiatedPower,
 };
 
 /// Authority of the homogeneous, lossless compact-source power integral.

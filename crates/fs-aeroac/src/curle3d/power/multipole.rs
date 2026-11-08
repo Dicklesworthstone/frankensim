@@ -19,10 +19,14 @@ use super::{
     PreparedCompactRadiatedPower, RadiatedPowerBudget, RadiatedPowerModeBudget, RadiatingSource,
     SourceImage, SourceSum, finish, finite, finite_dd, invalid, nonfinite, poll, validate_power,
 };
+use super::momentum::ThirdMoment;
 use crate::AeroacError;
 use crate::curle3d::quadrupole::QuadrupolePhasor;
 use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::{c64::C64, det, special::SphericalBesselMoments};
+
+mod momentum;
+pub use momentum::{MULTIPOLE_MOMENTUM_SCOPE, PreparedMultipoleRadiatedMomentum};
 
 /// Authority of the lossless complete compact-multipole power integral.
 pub const MULTIPOLE_POWER_SCOPE: &str = "Cycle-average full-sphere power of prescribed compact 3D volume flow [m^3/s], force on fluid [N] and symmetric Lighthill stress moments [N m]; homogeneous stationary lossless free space with all coherent cross terms, but no source-size validation, unresolved turbulence, moving sources, scattering, absorption, mutual loading or measured-SPL qualification.";
@@ -428,37 +432,37 @@ struct TensorPairMoment {
 
 impl TensorPairMoment {
     fn new(x: f64, lower: SphericalBesselMoments) -> Result<Self, AeroacError> {
-        // Upward recurrence at tiny x would lose j3 and j4 to cancellation.
-        // The fixed series has truncation below 1e-39 through |x| = 4.
-        let (j3, j4) = if x.abs() <= 4.0 {
-            let xd = Dd::from_f64(x);
-            let squared = xd * xd;
-            let mut cubic = squared * xd / Dd::from_f64(105.0);
-            let mut quartic = squared * squared / Dd::from_f64(945.0);
-            let (mut j3, mut j4) = (cubic, quartic);
+        let third = ThirdMoment::new(x, lower)?;
+        let j3 = third.j3;
+        // Retain the rank-four series instead of a cancelling recurrence at
+        // tiny separation. Rank three is shared with the original Q/F owner.
+        let j4 = if x <= 4.0 {
+            let squared = Dd::from_f64(x) * Dd::from_f64(x);
+            let mut term = squared * squared / Dd::from_f64(945.0);
+            let mut sum = term;
             for step in 1..=24_u32 {
                 let n = f64::from(step);
-                cubic = -cubic * squared / Dd::from_f64(2.0 * n * (2.0 * n + 7.0));
-                quartic = -quartic * squared / Dd::from_f64(2.0 * n * (2.0 * n + 9.0));
-                j3 = j3 + cubic;
-                j4 = j4 + quartic;
+                term = -term * squared / Dd::from_f64(2.0 * n * (2.0 * n + 9.0));
+                sum = sum + term;
             }
-            (j3, j4)
+            sum
         } else {
-            let inverse = Dd::ONE / Dd::from_f64(x);
-            let j3 = Dd::from_f64(5.0) * inverse * lower.j2 - lower.j1;
-            let j4 = Dd::from_f64(7.0) * inverse * j3 - lower.j2;
-            (j3, j4)
+            Dd::from_f64(7.0) * j3 / Dd::from_f64(x) - lower.j2
         };
         let result = Self {
             j3,
             j4,
-            mixed_third: (lower.j1 + j3) * Dd::from_f64(2.0) / Dd::from_f64(5.0),
+            mixed_third: Dd::from_f64(2.0) * third.isotropic,
             fourth_isotropic_delta: Dd::from_f64(2.0)
                 * (lower.j0_minus_one / Dd::from_f64(15.0)
                     + Dd::from_f64(2.0) * lower.j2 / Dd::from_f64(21.0)
                     + j4 / Dd::from_f64(35.0)),
-            fourth_directional: -Dd::from_f64(4.0) * (lower.j2 + j4) / Dd::from_f64(7.0),
+            fourth_directional: if x <= 4.0 {
+                -Dd::from_f64(4.0) * (lower.j2 + j4) / Dd::from_f64(7.0)
+            } else {
+                // j4 approaches -j2: retain j3/x directly at large x.
+                -Dd::from_f64(4.0) * j3 / Dd::from_f64(x)
+            },
         };
         if [
             result.j3,

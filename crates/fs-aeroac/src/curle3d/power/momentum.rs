@@ -42,9 +42,40 @@ pub struct CompactRadiatedMomentum {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct ThirdMoment {
-    j3: Dd,
-    isotropic: Dd,
+pub(super) struct ThirdMoment {
+    pub(super) j3: Dd,
+    pub(super) isotropic: Dd,
+}
+
+impl ThirdMoment {
+    pub(super) fn new(
+        x: f64,
+        lower: fs_math::special::SphericalBesselMoments,
+    ) -> Result<Self, AeroacError> {
+        let (j3, isotropic) = if x <= 4.0 {
+            // Upward recurrence would cancel tiny j3. The fixed
+            // series has truncation below 1e-39 through x = 4.
+            let xd = Dd::from_f64(x);
+            let squared = xd * xd;
+            let mut term = squared * xd / Dd::from_f64(105.0);
+            let mut sum = term;
+            for step in 1..=24_u32 {
+                let n = f64::from(step);
+                term = -term * squared / Dd::from_f64(2.0 * n * (2.0 * n + 7.0));
+                sum = sum + term;
+            }
+            (sum, (lower.j1 + sum) / Dd::from_f64(5.0))
+        } else {
+            let isotropic = lower.j2 / Dd::from_f64(x);
+            // At large separation j3 approximately equals -j1.
+            // Keep j2/x directly, rather than cancelling j1+j3.
+            (Dd::from_f64(5.0) * isotropic - lower.j1, isotropic)
+        };
+        if !finite_dd(j3) || !finite_dd(isotropic) {
+            return Err(nonfinite("compact momentum angular moments"));
+        }
+        Ok(Self { j3, isotropic })
+    }
 }
 
 /// Original compact-array power plus cached rank-three angular moments.
@@ -94,29 +125,7 @@ impl PreparedCompactRadiatedPower {
                     core::array::from_fn(|axis| a.position_m[axis] - b.position_m[axis]);
                 let x = k * det::hypot(det::hypot(d[0], d[1]), d[2]);
                 let pair = self.pairs[moments.len()];
-                let (j3, isotropic) = if x <= 4.0 {
-                    // Upward recurrence would cancel tiny j3. The fixed
-                    // series has truncation below 1e-39 through x = 4.
-                    let xd = Dd::from_f64(x);
-                    let squared = xd * xd;
-                    let mut term = squared * xd / Dd::from_f64(105.0);
-                    let mut sum = term;
-                    for step in 1..=24_u32 {
-                        let n = f64::from(step);
-                        term = -term * squared / Dd::from_f64(2.0 * n * (2.0 * n + 7.0));
-                        sum = sum + term;
-                    }
-                    (sum, (pair.moments.j1 + sum) / Dd::from_f64(5.0))
-                } else {
-                    let isotropic = pair.moments.j2 / Dd::from_f64(x);
-                    // At large separation j3 approximately equals -j1.
-                    // Keep j2/x directly, rather than cancelling j1+j3.
-                    (Dd::from_f64(5.0) * isotropic - pair.moments.j1, isotropic)
-                };
-                if !finite_dd(j3) || !finite_dd(isotropic) {
-                    return Err(nonfinite("compact momentum angular moments"));
-                }
-                moments.push(ThirdMoment { j3, isotropic });
+                moments.push(ThirdMoment::new(x, pair.moments)?);
             }
         }
         poll(&mut cancelled)?;
@@ -285,34 +294,21 @@ impl PreparedCompactRadiatedMomentum {
     }
 
     fn finish(&self, (power, moment): (Dd, [Dd; 3])) -> Result<CompactRadiatedMomentum, AeroacError> {
-        validate_power(power)?;
-        let power_w = power.to_f64();
-        let power_first_moment_w = moment.map(Dd::to_f64);
-        let c = Dd::from_f64(self.compact.acoustic.sound_speed_m_s());
-        let wave_momentum_flux_n = moment.map(|value| (value / c).to_f64());
-        if !power_w.is_finite()
-            || power_first_moment_w
-                .iter()
-                .chain(&wave_momentum_flux_n)
-                .any(|v| !v.is_finite())
-        {
-            return Err(nonfinite("compact radiated momentum"));
-        }
-        Ok(CompactRadiatedMomentum {
-            power_w,
-            power_first_moment_w,
-            wave_momentum_flux_n,
-            scope: COMPACT_MOMENTUM_SCOPE,
-        })
+        finish_momentum(
+            power,
+            moment,
+            self.compact.acoustic.sound_speed_m_s(),
+            COMPACT_MOMENTUM_SCOPE,
+        )
     }
 }
 
-fn colocated_moment(source: RadiatingSource) -> [Dd; 3] {
+pub(super) fn colocated_moment(source: RadiatingSource) -> [Dd; 3] {
     let two_thirds = Dd::from_f64(2.0) / Dd::from_f64(3.0);
     source.force.map(|force| two_thirds * source.volume.real_product(force))
 }
 
-fn first_moment_correction(
+pub(super) fn first_moment_correction(
     pair: PairMoment,
     third: ThirdMoment,
     a: RadiatingSource,
@@ -336,7 +332,7 @@ fn first_moment_correction(
     })
 }
 
-fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), AeroacError> {
+pub(super) fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), AeroacError> {
     if cancelled() {
         Err(AeroacError::Cancelled {
             what: "compact radiated momentum",
@@ -344,4 +340,34 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), AeroacError> {
     } else {
         Ok(())
     }
+}
+
+pub(super) fn finish_momentum(
+    power: Dd,
+    moment: [Dd; 3],
+    sound_speed_m_s: f64,
+    scope: &'static str,
+) -> Result<CompactRadiatedMomentum, AeroacError> {
+    validate_power(power)?;
+    let c = Dd::from_f64(sound_speed_m_s);
+    let flux = moment.map(|value| value / c);
+    if moment.iter().chain(&flux).any(|value| !finite_dd(*value)) {
+        return Err(nonfinite("compact radiated momentum"));
+    }
+    let result = CompactRadiatedMomentum {
+        power_w: power.to_f64(),
+        power_first_moment_w: moment.map(Dd::to_f64),
+        wave_momentum_flux_n: flux.map(Dd::to_f64),
+        scope,
+    };
+    if !result.power_w.is_finite()
+        || result
+            .power_first_moment_w
+            .iter()
+            .chain(&result.wave_momentum_flux_n)
+            .any(|value| !value.is_finite())
+    {
+        return Err(nonfinite("compact radiated momentum"));
+    }
+    Ok(result)
 }
