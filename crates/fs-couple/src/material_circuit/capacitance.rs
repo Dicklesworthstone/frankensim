@@ -231,7 +231,7 @@ impl MaterialCircuit {
 /// Scalar curves use their declared integral; all reciprocal quadratic storage
 /// uses the SAME native gradient, including coupled electric and magnetic terms.
 /// Fixed buffers bound work and avoid an extra matrix clone or factorization.
-pub(super) fn storage_change(
+pub(crate) fn storage_change(
     graph: &fs_phs::circuit::CircuitGraph,
     curves: &[CapacitorCurve],
     dae: &CircuitDae,

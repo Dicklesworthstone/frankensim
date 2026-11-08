@@ -486,6 +486,76 @@ fn rc(capacitance: f64) -> CircuitGraph {
 }
 
 #[test]
+fn dormant_storage_cannot_hide_planar_joule_heat_or_finite_thermal_deposition() {
+    let (a, ca) = material(1.0, 1.0, 0.0);
+    let (b, cb) = material(3.0, 2.0, 0.0);
+    let (cards, curves) = ([a, b], [ca, cb]);
+    let context = point(300.0);
+    let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+    let bindings = cells(&cards, &curves, &context, &key);
+    let layout = network(&bindings);
+    for sign in [1.0, -1.0] {
+        let mut graph = rc(0.5);
+        graph.node_count = 3;
+        graph.branches.push((2, 0, Branch::Capacitor { farads: 1.0 }));
+        let mut circuit = ConductionCircuit::new(
+            problem(&cards, [ElectricalPropertyBasis::Resistivity; 2], 300.0, 1.0),
+            graph,
+            terminal(),
+            0.0,
+            vec![],
+            vec![sign * 4.0, 1e12],
+            &[],
+            field_controls(),
+            || false,
+        )
+        .unwrap();
+        let mut thermal = initial(&curves, 999.0, None);
+        let mut charge = 4.0;
+        for interval in 1..=3 {
+            // Independent midpoint RC solution, R=4 ohm and C=.5 F.
+            let next_charge = charge * 7.0 / 9.0;
+            let current = (charge - next_charge) / 0.5;
+            let heat = 0.5 * 4.0 * current * current;
+            let next = layout
+                .step_circuit_candidate(
+                    &thermal,
+                    interval as f64 * 0.5,
+                    &circuit,
+                    &[],
+                    &[],
+                    limits(),
+                    field_controls(),
+                    config(),
+                    &[0.0; 2],
+                    || false,
+                )
+                .unwrap();
+            let report = next.report();
+            let electrical = &report.electrical;
+            // This subtraction really loses the active increment in binary64.
+            assert_eq!(electrical.stored_after_j - electrical.stored_before_j, 0.0);
+            near(electrical.stored_change_j, -heat);
+            near(electrical.native.delta_h, -heat);
+            near(electrical.supplied_work_j, 0.0);
+            near(electrical.spatial_current_a, sign * current);
+            near(electrical.heat_j, heat);
+            near(report.deposited_joule_j, heat);
+            near(next.thermal().energy_j() - thermal.energy_j(), heat);
+            near(electrical.energy_residual_j, 0.0);
+            near(report.total_energy_residual_j, 0.0);
+            near(next.circuit().charges_c()[0], sign * next_charge);
+            assert_eq!(next.circuit().charges_c()[1], 1e12);
+            near(circuit.charges_c()[0], sign * charge);
+            let (accepted_thermal, accepted_circuit, _) = next.into_parts();
+            thermal = accepted_thermal;
+            circuit = accepted_circuit;
+            charge = next_charge;
+        }
+    }
+}
+
+#[test]
 fn g1_capacitor_discharges_through_actual_layered_field_and_local_finite_heat() {
     let (a, ca) = material(1.0, 1.0, 0.0);
     let (b, cb) = material_with_electrical_basis(

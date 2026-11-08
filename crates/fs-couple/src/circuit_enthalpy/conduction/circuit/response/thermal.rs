@@ -88,7 +88,7 @@ impl<'t, S> ConductionResponseCircuitEnthalpyCandidate<'t, FieldThermalSource<S>
         tolerance_j: f64,
     ) -> Result<ConductionResponseFieldThermalCandidate<'t, S>, Error> {
         let (thermal, circuit, coupled) = self.into_parts();
-        let supplied = coupled.electrical.circuit.native.supplied;
+        let supplied = coupled.electrical.circuit.supplied_work_j;
         let report = field_storage::close_report_with_internal_heat(
             coupled,
             supplied,

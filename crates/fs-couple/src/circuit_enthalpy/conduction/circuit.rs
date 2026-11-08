@@ -344,12 +344,17 @@ pub struct ConductionCircuitResistorHeat {
 
 /// Original native electrical record, spatial fields and complete heat split.
 /// Spatial terminal work is INTERNAL to this circuit/field accounting boundary;
-/// only native.supplied represents external electrical source work.
+/// only supplied_work_j represents external electrical source work. Total stored
+/// energies are diagnostics; stored_change_j retains small physical increments.
 #[derive(Clone, Debug)]
 pub struct ConductionCircuitStep {
     pub native: StepRecord,
     pub stored_before_j: f64,
     pub stored_after_j: f64,
+    /// Constitutive C/L energy increment, evaluated without subtracting totals.
+    pub stored_change_j: f64,
+    /// Original midpoint input/output port work, independent of spatial work.
+    pub supplied_work_j: f64,
     pub spatial: ConductionThermalStep,
     pub spatial_voltage_v: f64,
     pub spatial_current_a: f64,
@@ -402,8 +407,8 @@ impl<C: PlanarConductorMaterial> ThermalDriver for CircuitFieldCandidate<C> {
             contacts: &[],
             heat_j: self.step.heat_j,
             numerical_dissipation_j: 0.0,
-            stored_change_j: self.step.stored_after_j - self.step.stored_before_j,
-            supplied_j: self.step.native.supplied,
+            stored_change_j: self.step.stored_change_j,
+            supplied_j: self.step.supplied_work_j,
         }
     }
     fn into_parts(self) -> (Self::Model, Self::Step) {
@@ -893,7 +898,9 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
         check(cancel)?;
         let stored_before_j = dae.system.hamiltonian(&x0);
         let stored_after_j = dae.system.hamiltonian(&native.x);
-        if native.x.iter().chain(&native.y).any(|x| !x.is_finite())
+        if native.x.len() != x0.len()
+            || native.y.len() != ports.len()
+            || native.x.iter().chain(&native.y).any(|x| !x.is_finite())
             || [
                 stored_before_j,
                 stored_after_j,
@@ -1021,11 +1028,30 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
                 });
             }
         }
-        let energy_residual_j =
-            finite(stored_after_j - stored_before_j + heat_j - native.supplied)?;
+        // Reuse the original constitutive storage owner. Subtracting two total
+        // Hamiltonians loses active Joule heat beside a large dormant store.
+        // This bounded kernel also compensates the representable midpoint and
+        // sums the coordinate work without allocating or refactorizing.
+        let stored_change_j = crate::material_circuit::capacitance::storage_change(
+            &graph, &[], &dae, &x0, &native.x,
+        )?;
+        let mut source_power = 0.0;
+        let mut source_correction = 0.0;
+        for (&input, &output) in ports.iter().zip(&native.y) {
+            let term = finite(input * output)?;
+            let next = finite(source_power + term)?;
+            source_correction = finite(source_correction + if source_power.abs() >= term.abs() {
+                (source_power - next) + term
+            } else {
+                (term - next) + source_power
+            })?;
+            source_power = next;
+        }
+        let supplied_work_j = finite(dt * finite(source_power + source_correction)?)?;
+        let energy_residual_j = finite(stored_change_j + heat_j - supplied_work_j)?;
         if finite(heat_j - native.dissipated)?.abs() > controls.energy_tolerance_j
-            || finite((stored_after_j - stored_before_j) - native.delta_h)?.abs()
-                > controls.energy_tolerance_j
+            || finite(stored_change_j - native.delta_h)?.abs() > controls.energy_tolerance_j
+            || finite(supplied_work_j - native.supplied)?.abs() > controls.energy_tolerance_j
             || energy_residual_j.abs() > controls.energy_tolerance_j
         {
             return Err(invalid(
@@ -1038,6 +1064,8 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
             native,
             stored_before_j,
             stored_after_j,
+            stored_change_j,
+            supplied_work_j,
             spatial,
             spatial_voltage_v,
             spatial_current_a,

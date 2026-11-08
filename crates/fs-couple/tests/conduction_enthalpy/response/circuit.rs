@@ -12,6 +12,93 @@ const C: f64 = 0.5;
 const L: f64 = 0.05;
 
 #[test]
+fn dormant_storage_preserves_nonlinear_resistance_work_and_thermal_continuation() {
+    let coordinate = ConductorMagnitude::CurrentDensity;
+    let (a, ca) = material(1.0, CP[0], 0.0, 0.1, coordinate, false);
+    let (b, cb) = material(2.0, CP[1], 0.0, 0.2, coordinate, false);
+    let (cards, curves) = ([a, b], [ca, cb]);
+    let context = point(300.0, coordinate);
+    let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+    let bindings = cells(&cards, &curves, &context, &key);
+    let layout = network(&bindings);
+    for sign in [1.0, -1.0] {
+        let mut circuit = ConductionResponseCircuit::new(
+            problem(&cards, coordinate),
+            CircuitGraph {
+                node_count: 3,
+                branches: vec![
+                    (1, 0, Branch::Resistor { ohms: 999.0 }),
+                    (1, 0, Branch::Capacitor { farads: C }),
+                    (2, 0, Branch::Capacitor { farads: 1.0 }),
+                ],
+                transformers: vec![],
+            },
+            ConductionCircuitTerminal {
+                branch: 0,
+                positive: vec![2, 5],
+                negative: vec![0, 3],
+            },
+            0.0,
+            vec![],
+            vec![sign * 3.0, 1e12],
+            &[],
+            limits(),
+            field_controls(),
+            controls(),
+            || false,
+        )
+        .unwrap();
+        let mut thermal = initial(&curves, 999.0, None);
+        let mut charge = 3.0;
+        for interval in 1..=3 {
+            // R(I)=3+.3|I|; eliminate the capacitor's midpoint voltage.
+            let linear = 3.0 + 0.1 / (2.0 * C);
+            let rhs = charge / C;
+            let current = 2.0 * rhs / (linear + (linear * linear + 1.2 * rhs).sqrt());
+            let next_charge = charge - 0.1 * current;
+            let heat = 0.1 * current * current * (3.0 + 0.3 * current);
+            let next = layout
+                .step_response_circuit_candidate(
+                    &thermal,
+                    interval as f64 * 0.1,
+                    &circuit,
+                    &[],
+                    &[],
+                    limits(),
+                    field_controls(),
+                    controls(),
+                    config(),
+                    &[0.0; 2],
+                    || false,
+                )
+                .unwrap();
+            let report = next.report();
+            let electrical = &report.electrical.circuit;
+            assert_eq!(electrical.stored_after_j - electrical.stored_before_j, 0.0);
+            near(electrical.stored_change_j, -heat);
+            near(electrical.native.delta_h, -heat);
+            near(electrical.supplied_work_j, 0.0);
+            near(electrical.heat_j, heat);
+            near(electrical.spatial_current_a, sign * current);
+            near(report.deposited_joule_j, heat);
+            near(next.thermal().energy_j() - thermal.energy_j(), heat);
+            near(report.total_energy_residual_j, 0.0);
+            near(next.circuit().charges_c()[0], sign * next_charge);
+            assert_eq!(next.circuit().charges_c()[1], 1e12);
+            near(circuit.charges_c()[0], sign * charge);
+            near(
+                report.electrical.evaluated[0].conductor.material().query().axes()["operating"],
+                current,
+            );
+            let (accepted_thermal, accepted_circuit, _) = next.into_parts();
+            thermal = accepted_thermal;
+            circuit = accepted_circuit;
+            charge = next_charge;
+        }
+    }
+}
+
+#[test]
 fn stiff_original_source_relaxation_survives_circuit_binding_and_every_continuation() {
     // A strictly passive source with unique I>0: V=I*(3+2000*I).
     // Unrelaxed Picard alternates high/low current even at fixed temperature.

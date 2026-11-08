@@ -129,7 +129,7 @@ impl ConductionThermalNetwork<'_> {
                 &mut cancelled,
             )?
             .into_parts();
-        let supplied_j = coupled.electrical.native.supplied;
+        let supplied_j = coupled.electrical.supplied_work_j;
         let report =
             field_storage::close_report(coupled, supplied_j, controls.total_energy_tolerance_j)
                 .map_err(field_thermal_error)?;

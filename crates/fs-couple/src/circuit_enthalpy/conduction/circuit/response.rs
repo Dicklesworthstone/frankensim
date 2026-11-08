@@ -71,8 +71,8 @@ impl ThermalDriver for ConductionResponseCircuitCandidate {
             contacts: &[],
             heat_j: step.heat_j,
             numerical_dissipation_j: 0.0,
-            stored_change_j: step.stored_after_j - step.stored_before_j,
-            supplied_j: step.native.supplied,
+            stored_change_j: step.stored_change_j,
+            supplied_j: step.supplied_work_j,
         }
     }
     fn into_parts(self) -> (Self::Model, Self::Step) {
