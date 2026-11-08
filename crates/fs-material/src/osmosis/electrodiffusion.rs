@@ -34,6 +34,11 @@ use super::{
     det, diffusive_exchange, finite, layout, nonnegative, positive, shape, thermal_scale,
 };
 
+mod response;
+pub use response::{
+    ElectrodiffusionDirection, ElectrodiffusionDirectionalReport, ElectrodiffusionResponse,
+};
+
 #[cfg(test)]
 mod tests;
 
@@ -43,6 +48,9 @@ pub enum ElectrodiffusionError {
     Material(OsmosisError),
     Invalid(&'static str),
     NonConvergence,
+    /// The requested tangent is unresolved on this conducting support; no
+    /// absent carrier or unavailable donor sensitivity is manufactured.
+    SingularDerivative,
     Cancelled,
 }
 impl core::fmt::Display for ElectrodiffusionError {
@@ -114,6 +122,7 @@ pub struct ElectrodiffusiveMembrane {
     valences: Box<[i32]>,
     permeances: Box<[SolutePermeance]>,
 }
+#[derive(Debug)]
 struct Face {
     left: [f64; MAX_OSMOTIC_SOLUTES],
     right: [f64; MAX_OSMOTIC_SOLUTES],
@@ -463,16 +472,7 @@ impl ElectrodiffusiveMembrane {
 
 /// Stable original exponential-fit donor streams and their positive dJ/dA.
 fn channel_flux(p: f64, a: f64, left: f64, right: f64, force: Option<f64>) -> Result<(f64, f64)> {
-    let drift = finite(p * a, "channel drift coefficient is not representable")?;
-    let exchange = diffusive_exchange(p, drift)?;
-    let forward = finite(
-        exchange + drift.max(0.0),
-        "forward channel coefficient is not representable",
-    )?;
-    let reverse = finite(
-        exchange + (-drift).max(0.0),
-        "reverse channel coefficient is not representable",
-    )?;
+    let (forward, reverse, weight) = channel_coefficients(p, a)?;
     let flux = if left == 0.0 {
         -reverse * right
     } else if right == 0.0 {
@@ -489,14 +489,6 @@ fn channel_flux(p: f64, a: f64, left: f64, right: f64, force: Option<f64>) -> Re
             (reverse * right) * det::expm1(force)
         }
     };
-    let magnitude = a.abs();
-    let weight = if magnitude < 1e-3 {
-        let square = magnitude * magnitude;
-        0.5 - magnitude * (1.0 / 6.0 - square * (1.0 / 180.0 - square / 5040.0))
-    } else {
-        let denominator = -det::expm1(-magnitude);
-        det::exp(-magnitude) * (magnitude - denominator) / (denominator * denominator)
-    };
     let mean = if a >= 0.0 {
         (1.0 - weight) * left + weight * right
     } else {
@@ -506,6 +498,29 @@ fn channel_flux(p: f64, a: f64, left: f64, right: f64, force: Option<f64>) -> Re
         finite(flux, "ionic channel flux is not representable")?,
         finite(p * mean, "ionic current derivative is not representable")?,
     ))
+}
+
+// The original positive streams and -B'(|a|), shared with analytic response.
+fn channel_coefficients(p: f64, a: f64) -> Result<(f64, f64, f64)> {
+    let drift = finite(p * a, "channel drift coefficient is not representable")?;
+    let exchange = diffusive_exchange(p, drift)?;
+    let forward = finite(
+        exchange + drift.max(0.0),
+        "forward channel coefficient is not representable",
+    )?;
+    let reverse = finite(
+        exchange + (-drift).max(0.0),
+        "reverse channel coefficient is not representable",
+    )?;
+    let magnitude = a.abs();
+    let weight = if magnitude < 1e-3 {
+        let square = magnitude * magnitude;
+        0.5 - magnitude * (1.0 / 6.0 - square * (1.0 / 180.0 - square / 5040.0))
+    } else {
+        let denominator = -det::expm1(-magnitude);
+        det::exp(-magnitude) * (magnitude - denominator) / (denominator * denominator)
+    };
+    Ok((forward, reverse, weight))
 }
 
 // Fluxes and dissipation MUST use the same rounded conjugate affinity. Keeping

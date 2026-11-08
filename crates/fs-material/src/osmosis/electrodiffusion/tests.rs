@@ -380,3 +380,413 @@ fn g1_channel_affinity_and_dissipation_use_identical_rounding_at_detailed_balanc
         assert!(flux * force >= 0.0);
     }
 }
+
+#[test]
+fn g1_analytic_response_matches_closed_binary_goldman_derivative_and_one_solve() {
+    let (left, right) = (ideal(vec![3.0, 3.0]), ideal(vec![1.0, 1.0]));
+    let membrane = law(1e-6, vec![1, -1], &[0.7, 0.2]);
+    let mut flux = [0.0; 2];
+    let mut work = 0;
+    let response = membrane
+        .flux_response_into_counted(
+            problem(&left, &right),
+            Default::default(),
+            &mut flux,
+            &mut work,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(work, response.report().potential_evaluations);
+    let mut tangent = [0.0; 2];
+    let report = response
+        .directional_derivative_into(
+            ElectrodiffusionDirection {
+                left_amounts_mol: &[1.0, 1.0],
+                right_amounts_mol: &[-1.0, -1.0],
+                volumes_m3: [0.0; 2],
+                pressure_drop_pa: 13.0,
+            },
+            &mut tangent,
+            || false,
+        )
+        .unwrap();
+    // Differentiate the independent closed-form GHK voltage. The salt sum is
+    // constant, so dJ=-P+P-/(P+-P-)*(cL+cR)*dpsi.
+    let expected_psi = -0.5 / 1.3 - 0.5 / 2.3;
+    let expected_flux = -(0.7 * 0.2 / 0.5) * 4.0 * expected_psi;
+    near(
+        report.dimensionless_potential_derivative.unwrap(),
+        expected_psi,
+        3e-13,
+    );
+    for value in tangent {
+        near(value, expected_flux, 3e-13);
+    }
+    near(report.osmotic_pressure_drop_derivative_pa, 4.0 * RT, 2e-11);
+    near(
+        report.volume_flux_derivative_m_s,
+        1e-6 * (13.0 - 4.0 * RT),
+        2e-17,
+    );
+    near(report.charge_flux_derivative_mol_m2_s, 0.0, 2e-14);
+    assert_eq!(work, response.report().potential_evaluations);
+}
+
+#[test]
+fn g3_original_cross_virial_response_matches_full_inventory_volume_and_load_perturbation() {
+    let mut matrix = vec![0.03; 36];
+    for i in 0..6 {
+        matrix[6 * i + i] = 0.4 + 0.08 * i as f64;
+    }
+    let shared = model(1.0, matrix, 6);
+    let initial_left = [0.84, 0.14, 0.245, 0.28, 0.35, 0.0];
+    let initial_right = [1.04, 1.04, 0.78, 0.91, 0.13, 0.0];
+    let dl = [-0.08, 0.01, 0.02, 0.03, -0.025, 0.0];
+    let dr = dl.map(|n| -n);
+    let volumes = [0.7, 1.3];
+    let dv = [-0.02, 0.02];
+    let left =
+        AqueousSolution::nonideal(Arc::clone(&shared), volumes[0], initial_left.to_vec()).unwrap();
+    let right =
+        AqueousSolution::nonideal(Arc::clone(&shared), volumes[1], initial_right.to_vec()).unwrap();
+    let membrane = law(
+        1e-6,
+        vec![1, -1, 2, 0, -2, 1],
+        &[0.7, 0.2, 0.4, 0.3, 0.0, 0.1],
+    );
+    let mut input = problem(&left, &right);
+    input.trapped_particles_mol = [0.1, 0.03];
+    let mut flux = [0.0; 6];
+    let response = membrane
+        .flux_response_into(input, Default::default(), &mut flux, || false)
+        .unwrap();
+    let mut tangent = [0.0; 6];
+    let actual = response
+        .directional_derivative_into(
+            ElectrodiffusionDirection {
+                left_amounts_mol: &dl,
+                right_amounts_mol: &dr,
+                volumes_m3: dv,
+                pressure_drop_pa: 17.0,
+            },
+            &mut tangent,
+            || false,
+        )
+        .unwrap();
+    let evaluate = |epsilon: f64| {
+        let left = AqueousSolution::nonideal(
+            Arc::clone(&shared),
+            volumes[0] + epsilon * dv[0],
+            initial_left
+                .iter()
+                .zip(dl)
+                .map(|(n, d)| n + epsilon * d)
+                .collect(),
+        )
+        .unwrap();
+        let right = AqueousSolution::nonideal(
+            Arc::clone(&shared),
+            volumes[1] + epsilon * dv[1],
+            initial_right
+                .iter()
+                .zip(dr)
+                .map(|(n, d)| n + epsilon * d)
+                .collect(),
+        )
+        .unwrap();
+        let mut input = problem(&left, &right);
+        input.trapped_particles_mol = [0.1, 0.03];
+        input.pressure_drop_pa = 17.0 * epsilon;
+        let mut flux = [0.0; 6];
+        let report = membrane
+            .flux_into(input, Default::default(), &mut flux, || false)
+            .unwrap();
+        (flux, report)
+    };
+    let epsilon = 1e-5;
+    let (plus, rplus) = evaluate(epsilon);
+    let (minus, rminus) = evaluate(-epsilon);
+    for i in 0..6 {
+        near(tangent[i], (plus[i] - minus[i]) / (2.0 * epsilon), 3e-8);
+    }
+    assert_eq!(tangent[4], 0.0);
+    assert_eq!(tangent[5], 0.0);
+    near(
+        actual.dimensionless_potential_derivative.unwrap(),
+        (psi(rplus) - psi(rminus)) / (2.0 * epsilon),
+        3e-8,
+    );
+    near(
+        actual.volume_flux_derivative_m_s,
+        (rplus.volume_flux_m_s - rminus.volume_flux_m_s) / (2.0 * epsilon),
+        3e-11,
+    );
+    near(
+        actual.osmotic_pressure_drop_derivative_pa,
+        (rplus.osmotic_pressure_drop_pa - rminus.osmotic_pressure_drop_pa) / (2.0 * epsilon),
+        3e-5,
+    );
+    near(actual.charge_flux_derivative_mol_m2_s, 0.0, 3e-14);
+}
+
+#[test]
+fn g1_finite_voltage_derivative_includes_an_exact_absent_ion_without_log_floors() {
+    let (left, right) = (ideal(vec![3.0, 3.0, 0.0]), ideal(vec![1.0, 1.0, 0.0]));
+    let membrane = law(0.0, vec![1, -1, 2], &[0.7, 0.2, 0.3]);
+    let mut flux = [0.0; 3];
+    let response = membrane
+        .flux_response_into(
+            problem(&left, &right),
+            Default::default(),
+            &mut flux,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(flux[2], 0.0);
+    let mut tangent = [0.0; 3];
+    let report = response
+        .directional_derivative_into(
+            ElectrodiffusionDirection {
+                left_amounts_mol: &[0.0, 0.0, 1.0],
+                right_amounts_mol: &[0.0; 3],
+                volumes_m3: [0.0; 2],
+                pressure_drop_pa: 0.0,
+            },
+            &mut tangent,
+            || false,
+        )
+        .unwrap();
+    let a = 2.0 * psi(*response.report());
+    let donor = 0.3 * (-a) / (-a).exp_m1();
+    near(tangent[2], donor, 2e-14);
+    near(tangent[0] - tangent[1] + 2.0 * tangent[2], 0.0, 2e-13);
+    assert!(report.dimensionless_potential_derivative.unwrap() < 0.0);
+    // One-sided salt endpoints likewise have finite original stream derivatives.
+    let (left, right) = (ideal(vec![1.0, 1.0]), ideal(vec![0.0, 0.0]));
+    let membrane = law(0.0, vec![1, -1], &[0.7, 0.2]);
+    let response = membrane
+        .flux_response_into(
+            problem(&left, &right),
+            Default::default(),
+            &mut [0.0; 2],
+            || false,
+        )
+        .unwrap();
+    let report = response
+        .directional_derivative_into(
+            ElectrodiffusionDirection {
+                left_amounts_mol: &[-1.0, -1.0],
+                right_amounts_mol: &[1.0, 1.0],
+                volumes_m3: [0.0; 2],
+                pressure_drop_pa: 0.0,
+            },
+            &mut [0.0; 2],
+            || false,
+        )
+        .unwrap();
+    near(
+        report.dimensionless_potential_derivative.unwrap(),
+        0.5 / 0.2 + 0.5 / 0.7,
+        3e-12,
+    );
+}
+
+#[test]
+fn g0_singular_voltage_allows_fixed_support_water_neutral_tangents_only() {
+    let (left, right) = (ideal(vec![1.0, 2.0]), ideal(vec![0.0, 1.0]));
+    let membrane = law(1e-6, vec![1, 0], &[0.7, 0.2]);
+    let response = membrane
+        .flux_response_into(
+            problem(&left, &right),
+            Default::default(),
+            &mut [0.0; 2],
+            || false,
+        )
+        .unwrap();
+    let mut tangent = [0.0; 2];
+    let report = response
+        .directional_derivative_into(
+            ElectrodiffusionDirection {
+                left_amounts_mol: &[0.0, 1.0],
+                right_amounts_mol: &[0.0, -1.0],
+                volumes_m3: [-0.1, 0.1],
+                pressure_drop_pa: 7.0,
+            },
+            &mut tangent,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(report.dimensionless_potential_derivative, None);
+    assert_eq!(tangent[0], 0.0);
+    near(tangent[1], 0.46, 3e-15);
+    near(
+        report.volume_flux_derivative_m_s,
+        1e-6 * (7.0 - 2.4 * RT),
+        2e-17,
+    );
+    tangent = [17.0, -23.0];
+    assert_eq!(
+        response.directional_derivative_into(
+            ElectrodiffusionDirection {
+                left_amounts_mol: &[-1.0, 0.0],
+                right_amounts_mol: &[1.0, 0.0],
+                volumes_m3: [0.0; 2],
+                pressure_drop_pa: 0.0,
+            },
+            &mut tangent,
+            || false
+        ),
+        Err(ElectrodiffusionError::SingularDerivative)
+    );
+    assert_eq!(tangent, [17.0, -23.0]);
+    let (left, right) = (ideal(vec![0.0, 0.0, 2.0]), ideal(vec![0.0, 0.0, 1.0]));
+    let membrane = law(0.0, vec![1, -1, 0], &[0.7, 0.2, 0.4]);
+    let response = membrane
+        .flux_response_into(
+            problem(&left, &right),
+            Default::default(),
+            &mut [0.0; 3],
+            || false,
+        )
+        .unwrap();
+    let mut tangent = [0.0; 3];
+    let report = response
+        .directional_derivative_into(
+            ElectrodiffusionDirection {
+                left_amounts_mol: &[0.0, 0.0, 0.1],
+                right_amounts_mol: &[0.0, 0.0, -0.1],
+                volumes_m3: [0.0; 2],
+                pressure_drop_pa: 0.0,
+            },
+            &mut tangent,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(report.dimensionless_potential_derivative, None);
+    near(tangent[2], 0.08, 2e-15);
+}
+
+#[test]
+fn g3_charge_scaling_ignores_large_neutral_rates_and_harmless_absent_donor_overflow() {
+    let (left, right) = (
+        ideal(vec![3e-200, 3e-200, 1e100, 0.0]),
+        ideal(vec![1e-200, 1e-200, 1e100, 0.0]),
+    );
+    let membrane = law(
+        0.0,
+        vec![1, -1, 0, 2_000_000_000],
+        &[0.7, 0.2, 1e100, 1e308],
+    );
+    let response = membrane
+        .flux_response_into(
+            problem(&left, &right),
+            Default::default(),
+            &mut [0.0; 4],
+            || false,
+        )
+        .unwrap();
+    let mut tangent = [0.0; 4];
+    let report = response
+        .directional_derivative_into(
+            ElectrodiffusionDirection {
+                left_amounts_mol: &[1e-200, 1e-200, 1e100, 0.0],
+                right_amounts_mol: &[-1e-200, -1e-200, -1e100, 0.0],
+                volumes_m3: [0.0; 2],
+                pressure_drop_pa: 0.0,
+            },
+            &mut tangent,
+            || false,
+        )
+        .unwrap();
+    near(
+        report.dimensionless_potential_derivative.unwrap(),
+        -0.5 / 1.3 - 0.5 / 2.3,
+        3e-12,
+    );
+    near(tangent[2] / 1e200, 2.0, 2e-14);
+    assert_eq!(tangent[3], 0.0);
+    assert!(matches!(
+        response.directional_derivative_into(
+            ElectrodiffusionDirection {
+                left_amounts_mol: &[0.0, 0.0, 0.0, 1.0],
+                right_amounts_mol: &[0.0; 4],
+                volumes_m3: [0.0; 2],
+                pressure_drop_pa: 0.0,
+            },
+            &mut tangent,
+            || false
+        ),
+        Err(ElectrodiffusionError::SingularDerivative)
+    ));
+}
+
+#[test]
+fn g4_response_and_tangent_cancel_without_publishing_and_reuse_original_work() {
+    let (left, right) = (ideal(vec![3.0, 3.0]), ideal(vec![1.0, 1.0]));
+    let membrane = law(1e-6, vec![1, -1], &[0.7, 0.2]);
+    let mut output = [17.0, -23.0];
+    let mut work = 0;
+    let mut polls = 0;
+    let response = membrane
+        .flux_response_into_counted(
+            problem(&left, &right),
+            Default::default(),
+            &mut output,
+            &mut work,
+            || {
+                polls += 1;
+                false
+            },
+        )
+        .unwrap();
+    let total_polls = polls;
+    let expected_work = work;
+    let direction = ElectrodiffusionDirection {
+        left_amounts_mol: &[1.0, 1.0],
+        right_amounts_mol: &[-1.0, -1.0],
+        volumes_m3: [0.0; 2],
+        pressure_drop_pa: 0.0,
+    };
+    let mut tangent = [17.0, -23.0];
+    let mut derivative_polls = 0;
+    let expected = response
+        .directional_derivative_into(direction, &mut tangent, || {
+            derivative_polls += 1;
+            false
+        })
+        .unwrap();
+    tangent = [17.0, -23.0];
+    let mut polls = 0;
+    assert_eq!(
+        response.directional_derivative_into(direction, &mut tangent, || {
+            polls += 1;
+            polls == derivative_polls
+        }),
+        Err(ElectrodiffusionError::Cancelled)
+    );
+    assert_eq!(tangent, [17.0, -23.0]);
+    assert_eq!(
+        response
+            .directional_derivative_into(direction, &mut tangent, || false)
+            .unwrap(),
+        expected
+    );
+    output = [17.0, -23.0];
+    let mut polls = 0;
+    let mut work = 0;
+    assert!(matches!(
+        membrane.flux_response_into_counted(
+            problem(&left, &right),
+            Default::default(),
+            &mut output,
+            &mut work,
+            || {
+                polls += 1;
+                polls == total_polls
+            }
+        ),
+        Err(ElectrodiffusionError::Cancelled)
+    ));
+    assert_eq!(output, [17.0, -23.0]);
+    assert_eq!(work, expected_work);
+}
