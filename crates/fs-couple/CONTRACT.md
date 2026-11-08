@@ -8135,3 +8135,27 @@ against separate field/circuit and two-body caloric equations over consecutive
 intervals. They check both temperature-dependent electrical laws, source work,
 internal transfer, local heat, reactive energy, original source identity,
 ownership refusals, exact work counts, typed failures, cancellation and retry.
+
+## Source-shell relaxation in resolved fluid coupling
+
+`ShellWallAssembly` now admits the MaterialShellImage's explicitly selected
+coating and substrate relaxation owners through the original native moving-wall
+memory equations. Every signed mass-normalized c row and tau is retained verbatim,
+in coating-channel order followed by substrate-channel order. Equal-time and
+zero rows remain distinct histories. Original modal frequencies already contain
+relaxed stiffness; no unrelaxed stiffness, refit or second normalization is added.
+
+The original instantaneous material channels and interface dashpots remain once
+in the full damping matrix. Selected material memories already exclude their loss
+from that projection. Causal preload is explicitly x=c dot q-z in
+wall_relaxation_coordinates_sqrt_j with the same channel order; it is never inferred
+from displacement or silently reset. Native harmonic/causal heat accounting and
+all existing pressure, velocity, field and duct operations use the same interior.
+
+ShellWallControls carries explicit complete relaxation channel, workspace and
+projection limits in addition to existing mapping/native budgets. Binding admits
+the requested drive band against original region, interface, coating and memory
+fit support. Passive continuation does not widen that declared support. Unlowered
+frequency-local coating or constant-loss slices still refuse instead of silently
+losing material storage. Existing conforming geometry/source identity obligations
+and complete-mode admission remain unchanged.

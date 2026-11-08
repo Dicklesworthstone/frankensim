@@ -39,6 +39,8 @@ use fs_plate::{
 use fs_qty::{Density, Dims, DynViscosity, Pressure};
 use fs_rep_mesh::TetComplex;
 
+mod relaxation;
+
 const BAND: [f64; 2] = [20.0, 10_000.0];
 const POINTS: [[f64; 3]; 6] = [
     [0.0, 0.0, 0.0],
@@ -325,6 +327,11 @@ fn controls() -> ShellWallControls {
         maximum_force_ports: 2,
         maximum_modes: 2,
         maximum_damping_channels: 3,
+        relaxation: MovingWallRelaxationLimits {
+            maximum_channels: 32,
+            maximum_workspace_bytes: 1_000_000,
+            maximum_projection_terms: 10_000,
+        },
         maximum_setup_bytes: 1_000_000,
         maximum_setup_work: 10_000_000,
         sample_rate_hz: 48_000,

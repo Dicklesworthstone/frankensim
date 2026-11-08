@@ -11,15 +11,17 @@
 //! The source's cavity selection and orientation are authoritative. It does not
 //! weld vertices, extrapolate a skin offset, invent missing faces, or transfer
 //! nonmatching meshes. Modes with no resolved boundary translation refuse under
-//! the native owner; none are silently removed. The first law envelope is an
-//! instantaneous Kelvin--Voigt substrate and its original linear interfaces.
-//! Frequency-local coating/constant-loss slices and separate material memories
-//! require another causal owner and refuse instead of losing their storage.
+//! the native owner; none are silently removed. Original Kelvin--Voigt/interface
+//! damping and explicitly selected coating/substrate memories enter once in
+//! the SAME resolved harmonic and causal operator. The original source owns
+//! their relaxed basis, passive continuation and finite validity/fit support.
+//! Unlowered frequency-local coating/constant-loss slices still refuse.
 
 use super::{ThermoviscousInterior, ThermoviscousSourceError};
 use crate::shear_shell::MaterialShellImage;
 use fs_exec::CancelGate;
 use fs_feec::acoustics::helmholtz::HelmholtzFe;
+use fs_feec::acoustics::thermoviscous::moving_wall::relaxation::MovingWallRelaxationLimits;
 use fs_feec::acoustics::thermoviscous::moving_wall::{MAX_MOVING_WALL_MODES, MovingWall};
 use fs_feec::acoustics::thermoviscous::{
     ThermoviscousBoundary, ThermoviscousError, ThermoviscousFe, ThermoviscousLimits,
@@ -49,9 +51,15 @@ pub struct ShellWallControls {
     /// Material-factor columns PLUS nonzero interface dashpots, at most 64.
     /// Excess channels refuse; no cross term is dropped or refactored to fit.
     pub maximum_damping_channels: usize,
+    /// Complete original coating PLUS substrate histories and one native
+    /// harmonic cache. Independent of instantaneous damping and causal
+    /// preparation's complete-state limit. Zero channels permits only sources
+    /// with no material history; no row is discarded to meet these limits.
+    pub relaxation: MovingWallRelaxationLimits,
     /// Peak additional numeric/mapping payload, excluding borrowed sources,
     /// the supplied geometry, allocator bookkeeping and native FE assembly.
     /// Admission includes all mode traces, channels and their dense Gram,
+    /// original memory rows/times and one prepared memory matrix/gain bank,
     /// vertex maps, selected facets, modal metadata and bounded scratch.
     pub maximum_setup_bytes: usize,
     /// Conservative deterministic scalar-work score for the complete mapping,
@@ -150,6 +158,33 @@ pub struct ShellFluidInterior<'s, 'c, S = GasState> {
     interior: ThermoviscousInterior<'c, S>,
 }
 
+struct ShellMemory<'a> {
+    modes: usize,
+    rows: &'a [Vec<f64>],
+    times: &'a [f64],
+    band: (f64, f64),
+}
+
+// This ordering is also the original causal state's material-history ordering.
+// Retain each source's own factors, including zero rows and equal-time rows;
+// combining or refactoring them would require transferring its history too.
+fn material_memories(image: &MaterialShellImage) -> [Option<ShellMemory<'_>>; 2] {
+    [
+        image.coating_relaxation().map(|memory| ShellMemory {
+            modes: memory.mode_count(),
+            rows: memory.coupling_rows_per_s(),
+            times: memory.relaxation_times_s(),
+            band: memory.source_band_rad_s(),
+        }),
+        image.substrate_relaxation().map(|memory| ShellMemory {
+            modes: memory.mode_count(),
+            rows: memory.coupling_rows_per_s(),
+            times: memory.relaxation_times_s(),
+            band: memory.source_band_rad_s(),
+        }),
+    ]
+}
+
 impl<'s, 'c> ShellWallAssembly<'s, 'c> {
     /// Assemble the exact source cavity selection on a conforming fluid mesh.
     ///
@@ -166,6 +201,12 @@ impl<'s, 'c> ShellWallAssembly<'s, 'c> {
     /// Interface stiffness is already in the eigenbasis and is not added again.
     /// Source modes are admitted at the caller's clock with zero scalar loss
     /// and observer transfer before attaching the complete original damping.
+    /// Selected original material memories are attached in coating-channel
+    /// order followed by substrate-channel order, with unchanged c rows/times.
+    /// Their relaxed stiffness is already in the original dry frequencies;
+    /// neither unrelaxed stiffness nor a second viscosity is added here.
+    /// Causal preload remains explicit in wall_relaxation_coordinates_sqrt_j:
+    /// x=c.dot(q)-z, in that same order. No source history is inferred or reset.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         image: &'s MaterialShellImage,
@@ -223,18 +264,35 @@ impl<'s, 'c> ShellWallAssembly<'s, 'c> {
             modes as u128,
             controls.maximum_modes.min(MAX_MOVING_WALL_MODES) as u128,
         )?;
-        if image.coating_relaxation().is_some()
-            || image.substrate_relaxation().is_some()
-            || !source.coatings().is_empty()
-            || source
+        if (!source.coatings().is_empty() && image.coating_relaxation().is_none())
+            || (source
                 .regions()
                 .iter()
                 .any(|region| region.constant_loss_reference_omega_rad_s().is_some())
+                && image.substrate_relaxation().is_none())
         {
             return Err(ShellWallError::Invalid(
-                "frequency-local coating/constant-loss slices or separate material memory need their original causal owner",
+                "frequency-local coating/constant-loss slices require their explicitly selected original memory owner",
             ));
         }
+        let memories = material_memories(image);
+        let mut memory_count = 0usize;
+        for memory in memories.iter().flatten() {
+            poll(gate)?;
+            if memory.modes != modes || memory.rows.len() != memory.times.len() {
+                return Err(ShellWallError::Invalid(
+                    "complete original material memory in the same shell basis required",
+                ));
+            }
+            memory_count = memory_count
+                .checked_add(memory.rows.len())
+                .ok_or(ShellWallError::Invalid("material memory extent overflow"))?;
+        }
+        admit(
+            "complete original material histories",
+            memory_count as u128,
+            controls.relaxation.maximum_channels as u128,
+        )?;
         let channel_count = image
             .damping()
             .channel_count()
@@ -257,6 +315,18 @@ impl<'s, 'c> ShellWallAssembly<'s, 'c> {
         let d = geometry.ndof() as u128;
         let v = geometry.positions().len() as u128;
         let p = channel_count as u128;
+        let m = memory_count as u128;
+        let memory_bytes = 8 * m * n + 48 * m + if memory_count == 0 { 0 } else { 16 * n * n };
+        admit(
+            "original material memory cache bytes",
+            memory_bytes,
+            controls.relaxation.maximum_workspace_bytes as u128,
+        )?;
+        admit(
+            "original material memory projection",
+            m * n * n,
+            controls.relaxation.maximum_projection_terms as u128,
+        )?;
         let bytes = 24 * n * d
             + 8 * p * n
             + 8 * n * n
@@ -265,12 +335,14 @@ impl<'s, 'c> ShellWallAssembly<'s, 'c> {
             + (core::mem::size_of::<Option<u32>>() as u128 + 1) * s
             + core::mem::size_of::<Option<usize>>() as u128 * v
             + (core::mem::size_of::<OrientedShellFacet>() as u128 + 12) * f
+            + memory_bytes
             + 4096;
         let work = 64 * (s + t + interfaces.len() as u128 + v)
             + 64 * n * (s + d + f + image.force_ports().len() as u128)
             + 64 * f
                 * (boundary.no_slip_faces.len() as u128 + geometry.tetrahedra().len() as u128 + 1)
-            + 32 * p * n * n;
+            + 32 * (p + m) * n * n
+            + 48 * m * (n + 1);
         admit(
             "shell mapping bytes",
             bytes,
@@ -486,6 +558,24 @@ impl<'s, 'c> ShellWallAssembly<'s, 'c> {
             &mut || gate.is_requested(),
         )?
         .with_moving_wall_damping_channels(channels, &mut || gate.is_requested())?;
+        let fe = if memories.iter().any(Option::is_some) {
+            let mut rows = reserved(memory_count)?;
+            let mut times = reserved(memory_count)?;
+            for memory in memories.iter().flatten() {
+                for (row, &tau) in memory.rows.iter().zip(memory.times) {
+                    poll(gate)?;
+                    let mut copied = reserved(row.len())?;
+                    copied.extend_from_slice(row);
+                    rows.push(copied);
+                    times.push(tau);
+                }
+            }
+            fe.with_moving_wall_relaxation_channels(rows, times, controls.relaxation, &mut || {
+                gate.is_requested()
+            })?
+        } else {
+            fe
+        };
         let mut owned_map = reserved(vertex_map.len())?;
         owned_map.extend_from_slice(vertex_map);
         poll(gate)?;
@@ -578,11 +668,24 @@ impl ShellBinding<'_> {
                     .iter()
                     .map(|i| i.omega_band_rad_s()),
             )
+            .chain(
+                self.image
+                    .source()
+                    .coatings()
+                    .iter()
+                    .map(|film| film.omega_band_rad_s()),
+            )
+            .chain(
+                material_memories(self.image)
+                    .into_iter()
+                    .flatten()
+                    .map(|memory| memory.band),
+            )
         {
             poll(gate)?;
             if omega[0] < band.0 || omega[1] > band.1 {
                 return Err(ShellWallError::Invalid(
-                    "drive band exceeds original shell material or interface support",
+                    "drive band exceeds original shell material, interface or memory-fit support",
                 ));
             }
         }
@@ -603,7 +706,7 @@ impl<'s, 'c, S> ShellFluidInterior<'s, 'c, S> {
 
     /// Continue existing consuming fluid-source attachments, including finite
     /// conductive walls, on this exact assembled interior. All native shell
-    /// modes, traces and damping remain. This releases the wrapper's borrowed
+    /// modes, traces, damping and material histories remain. This releases the wrapper's borrowed
     /// shell metadata; the caller retains its original image and force rows.
     pub fn into_interior(self) -> ThermoviscousInterior<'c, S> {
         self.interior
