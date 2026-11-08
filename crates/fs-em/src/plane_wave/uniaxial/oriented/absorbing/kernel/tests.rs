@@ -944,3 +944,302 @@ fn dark_statistics_still_admit_geometry_and_variable_work_has_typed_cancellation
     assert!(matches!(result, Err(IlluminationError::Cancelled)));
     assert_eq!(polls, 4);
 }
+
+#[test]
+fn coherent_beams_interfere_before_loss_and_preserve_weak_residuals() {
+    let mut data = input([0.0, 0.0, 1.0], [C64::new(1.6, -0.12); 2], 0.6);
+    data.electric = [C64::ZERO, C64::new(0.8, 0.3)];
+    let wave = solve(data).unwrap();
+    let mut reversed = data;
+    reversed.electric = data.electric.map(|value| -value);
+    let opposite = solve(reversed).unwrap();
+    use OrientedCrystalFieldSide::*;
+    for side in [
+        Incident,
+        Reflected,
+        TotalIncidentSide,
+        Ordinary,
+        Extraordinary,
+        Transmitted,
+    ] {
+        let z = if matches!(side, Ordinary | Extraordinary | Transmitted) {
+            0.27 * LAMBDA
+        } else {
+            -0.27 * LAMBDA
+        };
+        let point = [0.13 * LAMBDA, -0.2 * LAMBDA, z];
+        let single = wave.field(side, point).unwrap();
+        let doubled =
+            coherent_illumination_field([&wave, &wave], side, point, || false).unwrap();
+        for j in 0..3 {
+            complex_close(
+                doubled.field.electric_v_m[j],
+                single.field.electric_v_m[j].scale(2.0),
+                5e-15,
+            );
+            complex_close(
+                doubled.field.magnetic_a_m[j],
+                single.field.magnetic_a_m[j].scale(2.0),
+                5e-17,
+            );
+            close(
+                doubled.field.poynting_w_m2[j],
+                4.0 * single.field.poynting_w_m2[j],
+                5e-17,
+            );
+        }
+        close(
+            doubled.absorbed_power_density_w_m3,
+            4.0 * single.absorbed_power_density_w_m3,
+            5e-14 * single.absorbed_power_density_w_m3.max(1.0),
+        );
+        let dark =
+            coherent_illumination_field([&wave, &opposite], side, point, || false).unwrap();
+        for value in dark.field.electric_v_m {
+            assert!(value.abs() < 1e-24);
+        }
+        assert!(dark.absorbed_power_density_w_m3 < 1e-40);
+    }
+    // An unrelated faint coherent component must survive two large opposite
+    // fields. Summing beam powers, or rounding an intermediate field sum,
+    // loses either the dark port or its physically resolved weak signal.
+    let mut strong_data = data;
+    strong_data.electric = data.electric.map(|value| value.scale(1e16));
+    let strong = solve(strong_data).unwrap();
+    strong_data.electric = strong_data.electric.map(|value| -value);
+    let strong_opposite = solve(strong_data).unwrap();
+    let point = [0.0; 3];
+    let expected = wave.field(Transmitted, point).unwrap();
+    let residual = coherent_illumination_field(
+        [&strong, &wave, &strong_opposite],
+        Transmitted,
+        point,
+        || false,
+    )
+    .unwrap();
+    for j in 0..3 {
+        complex_close(
+            residual.field.electric_v_m[j],
+            expected.field.electric_v_m[j],
+            5e-14,
+        );
+        complex_close(
+            residual.field.magnetic_a_m[j],
+            expected.field.magnetic_a_m[j],
+            5e-16,
+        );
+    }
+    close(
+        residual.absorbed_power_density_w_m3,
+        expected.absorbed_power_density_w_m3,
+        2e-13 * expected.absorbed_power_density_w_m3,
+    );
+    let independent =
+        illumination_field_statistics([&wave, &opposite], Transmitted, point, || false).unwrap();
+    close(
+        independent.absorbed_power_density_w_m3,
+        2.0 * expected.absorbed_power_density_w_m3,
+        2e-14 * expected.absorbed_power_density_w_m3,
+    );
+}
+
+#[test]
+fn crossed_absorbing_te_beams_match_fresnel_heat_fringe_and_phase_translation() {
+    let n = C64::new(1.7, -0.18);
+    let p = 0.6;
+    let mut data = input([0.0, 0.0, 1.0], [n; 2], p);
+    data.electric = [C64::ZERO, C64::ONE];
+    let forward = solve(data).unwrap();
+    let k0 = data.omega / C0;
+    let qi = det::sqrt(1.0 - p * p);
+    let q = (n * n - C64::from_re(p * p)).sqrt();
+    let transmission = C64::from_re(2.0 * qi) / (C64::from_re(qi) + q);
+    let side = OrientedCrystalFieldSide::Transmitted;
+    for relative_phase in [0.0, 0.7, core::f64::consts::PI] {
+        let mut other = data;
+        other.incidence = Incidence::TangentialIndex(-p);
+        other.electric[1] =
+            C64::new(det::cos(relative_phase), det::sin(relative_phase));
+        let backward = solve(other).unwrap();
+        for z in [0.0, 0.2 * LAMBDA, 1.3 * LAMBDA] {
+            let propagation = C64::new(det::cos(k0 * q.re * z), -det::sin(k0 * q.re * z))
+                .scale(det::exp(k0 * q.im * z));
+            for fringe_fraction in [0.0, 0.13, 0.25, 0.41, 0.5, 0.73] {
+                let x = fringe_fraction * core::f64::consts::TAU / (k0 * p);
+                let envelope = 2.0 * det::cos(k0 * p * x + 0.5 * relative_phase);
+                let expected_e = transmission
+                    * propagation
+                    * C64::new(det::cos(0.5 * relative_phase), det::sin(0.5 * relative_phase))
+                        .scale(envelope);
+                let intensity = 4.0
+                    * transmission.norm_sq()
+                    * det::exp(2.0 * k0 * q.im * z)
+                    * det::cos(k0 * p * x + 0.5 * relative_phase).powi(2);
+                let expected_heat =
+                    data.omega * (-n.re * n.im) / (MU * C0 * C0) * intensity;
+                let actual = coherent_illumination_field(
+                    [&forward, &backward],
+                    side,
+                    [x, 0.31 * LAMBDA, z],
+                    || false,
+                )
+                .unwrap();
+                complex_close(actual.field.electric_v_m[1], expected_e, 8e-15);
+                close(
+                    actual.absorbed_power_density_w_m3,
+                    expected_heat,
+                    3e-13 * (data.omega * data.loss_f_m[0]),
+                );
+                close(
+                    actual.field.poynting_w_m2[2],
+                    q.re / (2.0 * C0 * MU) * intensity,
+                    1e-16,
+                );
+                close(actual.field.poynting_w_m2[0], 0.0, 1e-17);
+            }
+        }
+        if relative_phase == 0.0 {
+            let node = coherent_illumination_field(
+                [&forward, &backward],
+                side,
+                [core::f64::consts::FRAC_PI_2 / (k0 * p), 0.0, 0.27 * LAMBDA],
+                || false,
+            )
+            .unwrap();
+            // A magnetic antinode has no dielectric work when E cancels.
+            assert!(node.field.magnetic_a_m[2].abs() > 1e-5);
+            assert!(node.absorbed_power_density_w_m3 < 1e-24);
+        }
+    }
+}
+
+#[test]
+fn coherent_noncollinear_crystal_fields_obey_three_dimensional_energy_balance() {
+    let data = input(
+        [0.2, 0.7, -0.4],
+        [C64::new(1.5, -0.09), C64::new(1.9, -0.23)],
+        0.45,
+    );
+    let responses = [
+        (0.45, [1.0, 0.0]),
+        (-0.3, [0.6, 0.8]),
+        (0.7, [-0.8, 0.6]),
+    ]
+    .map(|(p, axis)| {
+        let mut data = data;
+        data.incidence = Incidence::TangentialIndex(p);
+        solve_in_plane(data, axis).unwrap()
+    });
+    let side = OrientedCrystalFieldSide::Transmitted;
+    let at = |point| coherent_illumination_field(responses.iter(), side, point, || false).unwrap();
+    let step = 1e-5 * LAMBDA;
+    for position in [[0.0, 0.0, 0.1], [0.2, -0.3, 0.4], [-0.4, 0.7, 0.9]] {
+        let point = position.map(|value| value * LAMBDA);
+        let actual = at(point);
+        let mut divergence = 0.0;
+        for j in 0..3 {
+            let mut plus = point;
+            let mut minus = point;
+            plus[j] += step;
+            minus[j] -= step;
+            divergence +=
+                (at(plus).field.poynting_w_m2[j] - at(minus).field.poynting_w_m2[j])
+                    / (2.0 * step);
+        }
+        close(
+            actual.absorbed_power_density_w_m3,
+            -divergence,
+            5e-8 * actual.absorbed_power_density_w_m3,
+        );
+        assert_eq!(
+            coherent_illumination_poynting(responses.iter(), side, point, || false).unwrap(),
+            actual.field.poynting_w_m2
+        );
+        let face = [point[0], point[1], 0.0];
+        let inside = at(face);
+        let outside = coherent_illumination_field(
+            responses.iter(),
+            OrientedCrystalFieldSide::TotalIncidentSide,
+            face,
+            || false,
+        )
+        .unwrap();
+        for j in 0..2 {
+            complex_close(
+                outside.field.electric_v_m[j],
+                inside.field.electric_v_m[j],
+                8e-14,
+            );
+            complex_close(
+                outside.field.magnetic_a_m[j],
+                inside.field.magnetic_a_m[j],
+                8e-16,
+            );
+        }
+        close(
+            outside.field.poynting_w_m2[2],
+            inside.field.poynting_w_m2[2],
+            5e-16,
+        );
+        assert_eq!(outside.absorbed_power_density_w_m3, 0.0);
+    }
+    let point = [0.0, 0.0, 0.1 * LAMBDA];
+    let coherent = at(point).absorbed_power_density_w_m3;
+    let independent = responses
+        .iter()
+        .map(|response| response.field(side, point).unwrap().absorbed_power_density_w_m3)
+        .sum::<f64>();
+    assert!((coherent - independent).abs() > 0.1 * independent);
+}
+
+#[test]
+fn coherent_dark_fields_and_cancellation_preserve_observation_admission() {
+    let empty: [AbsorbingCrystalResponse; 0] = [];
+    let side = OrientedCrystalFieldSide::Transmitted;
+    let dark = coherent_illumination_field(empty.iter(), side, [0.0; 3], || false).unwrap();
+    assert_eq!(dark.field.electric_v_m, [C64::ZERO; 3]);
+    assert_eq!(dark.field.magnetic_a_m, [C64::ZERO; 3]);
+    assert_eq!(dark.field.poynting_w_m2, [0.0; 3]);
+    assert_eq!(dark.absorbed_power_density_w_m3, 0.0);
+    assert!(coherent_illumination_field(empty.iter(), side, [0.0, 0.0, -1.0], || false).is_err());
+    assert!(coherent_illumination_poynting(empty.iter(), side, [f64::NAN, 0.0, 0.0], || false).is_err());
+    let response = solve(input(
+        [1.0, 2.0, -0.6],
+        [C64::new(1.4, -0.12), C64::new(2.1, -0.42)],
+        0.8,
+    ))
+    .unwrap();
+    for cancel_at in 1..=5 {
+        let mut polls = 0;
+        let result = coherent_illumination_field([&response, &response], side, [0.0; 3], || {
+            polls += 1;
+            polls == cancel_at
+        });
+        assert!(matches!(result, Err(IlluminationError::Cancelled)));
+        assert_eq!(polls, cancel_at);
+    }
+    for cancel_at in 1..=4 {
+        let mut polls = 0;
+        let result = coherent_illumination_poynting([&response, &response], side, [0.0; 3], || {
+            polls += 1;
+            polls == cancel_at
+        });
+        assert!(matches!(result, Err(IlluminationError::Cancelled)));
+        assert_eq!(polls, cancel_at);
+    }
+}
+
+#[test]
+fn coherent_poynting_does_not_require_representable_dielectric_heat() {
+    let mut data = input([0.0, 0.0, 1.0], [C64::new(1.6, -0.12); 2], 0.6);
+    data.electric = [C64::ZERO, C64::from_re(1e153)];
+    let response = solve(data).unwrap();
+    let side = OrientedCrystalFieldSide::Transmitted;
+    let flux = coherent_illumination_poynting([&response, &response], side, [0.0; 3], || false)
+        .unwrap();
+    assert!(flux.iter().all(|value| value.is_finite()));
+    assert!(flux[2] > 0.0);
+    assert!(
+        coherent_illumination_field([&response, &response], side, [0.0; 3], || false).is_err()
+    );
+}

@@ -1,5 +1,8 @@
-//! Positive-factor electromagnetic statistics and original dielectric work.
-use super::{AbsorbingCrystalResponse, FieldSum, OrientedCrystalFieldSide};
+//! Coherent fields, positive-factor statistics and original dielectric work.
+use super::{
+    AbsorbingCrystalField, AbsorbingCrystalResponse, FieldSum, OrientedCrystalField,
+    OrientedCrystalFieldSide,
+};
 use fs_math::{c64::C64, dd::Dd};
 
 #[derive(Debug)]
@@ -41,6 +44,59 @@ pub(in super::super) fn poll_illumination(cancelled: &mut impl FnMut() -> bool) 
     } else {
         Ok(())
     }
+}
+
+// The public coherent owner has already checked exact source/frequency
+// identity. Keep all waves in one native DD accumulator; the first response
+// supplies their common original loss tensor, not a per-beam heat estimate.
+fn coherent_electromagnetic_field<'a>(
+    responses: impl IntoIterator<Item = &'a AbsorbingCrystalResponse>,
+    side: OrientedCrystalFieldSide,
+    point: [f64; 3],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(OrientedCrystalField, Option<&'a AbsorbingCrystalResponse>)> {
+    poll_illumination(cancelled)?;
+    let mut sum = FieldSum::new(side, point)?;
+    let mut reference = None;
+    for response in responses {
+        poll_illumination(cancelled)?;
+        if reference.is_none() {
+            reference = Some(response);
+        }
+        response.add_waves(side, &mut sum)?;
+    }
+    let field = sum.finish()?;
+    poll_illumination(cancelled)?;
+    Ok((field, reference))
+}
+
+pub(in super::super) fn coherent_illumination_field<'a>(
+    responses: impl IntoIterator<Item = &'a AbsorbingCrystalResponse>,
+    side: OrientedCrystalFieldSide,
+    point: [f64; 3],
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<AbsorbingCrystalField> {
+    let (field, reference) =
+        coherent_electromagnetic_field(responses, side, point, &mut cancelled)?;
+    let result = match reference {
+        Some(response) => response.with_heating(side, field)?,
+        None => AbsorbingCrystalField {
+            field,
+            absorbed_power_density_w_m3: 0.0,
+        },
+    };
+    poll_illumination(&mut cancelled)?;
+    Ok(result)
+}
+
+pub(in super::super) fn coherent_illumination_poynting<'a>(
+    responses: impl IntoIterator<Item = &'a AbsorbingCrystalResponse>,
+    side: OrientedCrystalFieldSide,
+    point: [f64; 3],
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<[f64; 3]> {
+    coherent_electromagnetic_field(responses, side, point, &mut cancelled)
+        .map(|(field, _)| field.poynting_w_m2)
 }
 
 pub(in super::super) fn illumination_power<'a>(

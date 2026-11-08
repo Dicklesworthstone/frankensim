@@ -1264,3 +1264,156 @@ fn coherent_crystal_stack_retains_original_layers_and_matches_the_single_slab_ow
         Err(AngularSpectrumError::Cancelled)
     ));
 }
+
+#[test]
+fn coherent_absorbing_crystal_illumination_retains_source_frequency_and_global_fields() {
+    use crate::plane_wave::uniaxial::oriented::{
+        OrientedCrystalFieldSide, OrientedUniaxialInterface,
+        absorbing::{AbsorbingCrystalCoherentIllumination, CrystalIlluminationError},
+    };
+    let outside = incident(1.0, MU);
+    let (o, e) = axes(
+        [1.4, 1.6],
+        [1.8, 2.0],
+        [0.08, 0.2],
+        Some(MU),
+        [400.0, 800.0],
+        4,
+    );
+    let law = UniaxialOpticalResponse::try_new(&o, &e, SPAN).unwrap();
+    let interface = OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&outside),
+        law,
+        [1.0, 2.0, -0.5],
+    )
+    .unwrap();
+    let omega = frequency(550.0);
+    let electric = [C64::new(0.6, -0.2), C64::new(0.1, 0.7)];
+    let components = [
+        interface
+            .prepare_absorbing_field_at_tangential_index_in_plane(
+                omega,
+                0.5,
+                [1.0, 0.0],
+                electric,
+            )
+            .unwrap(),
+        interface
+            .prepare_absorbing_field_at_tangential_index_in_plane(
+                omega,
+                -0.4,
+                [3.0, 4.0],
+                electric,
+            )
+            .unwrap(),
+    ];
+    let illumination =
+        AbsorbingCrystalCoherentIllumination::try_new(&interface, &components, 2, || false)
+            .unwrap();
+    assert!(core::ptr::eq(illumination.source(), &interface));
+    assert!(core::ptr::eq(
+        illumination.components().as_ptr(),
+        components.as_ptr()
+    ));
+    assert_eq!(illumination.component_count(), 2);
+    assert_eq!(illumination.omega_rad_s(), Some(omega));
+    assert_eq!(
+        illumination.source().crystal_response().material().identity(),
+        law.material().identity()
+    );
+    let side = OrientedCrystalFieldSide::Transmitted;
+    let point = [0.11e-6, -0.07e-6, 0.23e-6];
+    let actual = illumination.field(side, point, || false).unwrap();
+    let first = components[0].field(side, point).unwrap();
+    let second = components[1].field(side, point).unwrap();
+    for j in 0..3 {
+        complex_near(
+            actual.field.electric_v_m[j],
+            first.field.electric_v_m[j] + second.field.electric_v_m[j],
+            5e-15,
+        );
+        complex_near(
+            actual.field.magnetic_a_m[j],
+            first.field.magnetic_a_m[j] + second.field.magnetic_a_m[j],
+            5e-17,
+        );
+    }
+    assert_eq!(
+        illumination.poynting_w_m2(side, point, || false).unwrap(),
+        actual.field.poynting_w_m2
+    );
+    let single =
+        AbsorbingCrystalCoherentIllumination::try_new(&interface, &components[..1], 1, || false)
+            .unwrap();
+    assert_eq!(single.field(side, point, || false).unwrap(), first);
+    assert!(matches!(
+        AbsorbingCrystalCoherentIllumination::try_new(&interface, &components, 1, || false),
+        Err(CrystalIlluminationError::Electromagnetic(
+            ReflectionError::Invalid(_)
+        ))
+    ));
+    let equivalent_interface = OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&outside),
+        law,
+        [1.0, 2.0, -0.5],
+    )
+    .unwrap();
+    assert!(matches!(
+        AbsorbingCrystalCoherentIllumination::try_new(
+            &equivalent_interface,
+            &components,
+            2,
+            || false,
+        ),
+        Err(CrystalIlluminationError::Electromagnetic(
+            ReflectionError::Invalid(_)
+        ))
+    ));
+    // Even one frequency ULP needs a temporal beat/exposure model; proximity
+    // is not permission to invent a common monochromatic carrier.
+    let mixed_frequencies = [
+        interface
+            .prepare_absorbing_field(omega, 0.8, electric)
+            .unwrap(),
+        interface
+            .prepare_absorbing_field(omega.next_up(), 0.8, electric)
+            .unwrap(),
+    ];
+    assert!(matches!(
+        AbsorbingCrystalCoherentIllumination::try_new(
+            &interface,
+            &mixed_frequencies,
+            2,
+            || false,
+        ),
+        Err(CrystalIlluminationError::Electromagnetic(
+            ReflectionError::Invalid(_)
+        ))
+    ));
+    let dark = AbsorbingCrystalCoherentIllumination::try_new(&interface, &[], 0, || false)
+        .unwrap();
+    assert_eq!(dark.omega_rad_s(), None);
+    assert_eq!(
+        dark.field(side, point, || false).unwrap().absorbed_power_density_w_m3,
+        0.0
+    );
+    assert!(dark.field(side, [0.0, 0.0, -1.0], || false).is_err());
+    for cancel_at in 1..=4 {
+        let mut polls = 0;
+        let result =
+            AbsorbingCrystalCoherentIllumination::try_new(&interface, &components, 2, || {
+                polls += 1;
+                polls == cancel_at
+            });
+        assert!(matches!(result, Err(CrystalIlluminationError::Cancelled)));
+        assert_eq!(polls, cancel_at);
+    }
+    assert!(matches!(
+        illumination.field(side, point, || true),
+        Err(CrystalIlluminationError::Cancelled)
+    ));
+    assert!(matches!(
+        illumination.poynting_w_m2(side, point, || true),
+        Err(CrystalIlluminationError::Cancelled)
+    ));
+}

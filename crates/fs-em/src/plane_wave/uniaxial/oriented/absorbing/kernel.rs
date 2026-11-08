@@ -27,7 +27,8 @@ mod absorption;
 mod statistics;
 pub use statistics::{AbsorbingCrystalIlluminationPower, AbsorbingCrystalStatistics};
 pub(super) use statistics::{
-    IlluminationError, illumination_absorption, illumination_field_statistics, illumination_power,
+    IlluminationError, coherent_illumination_field, coherent_illumination_poynting,
+    illumination_absorption, illumination_field_statistics, illumination_power,
     illumination_poynting, poll_illumination,
 };
 
@@ -107,8 +108,16 @@ impl AbsorbingCrystalResponse {
         side: OrientedCrystalFieldSide,
         point: [f64; 3],
     ) -> Result<AbsorbingCrystalField> {
-        use OrientedCrystalFieldSide::*;
         let field = self.electromagnetic_field(side, point)?;
+        self.with_heating(side, field)
+    }
+
+    fn with_heating(
+        &self,
+        side: OrientedCrystalFieldSide,
+        field: OrientedCrystalField,
+    ) -> Result<AbsorbingCrystalField> {
+        use OrientedCrystalFieldSide::*;
         let heat = if matches!(side, Ordinary | Extraordinary | Transmitted) {
             heating(field.electric_v_m, self.axis, self.loss_f_m, self.omega)?
         } else {
@@ -127,8 +136,15 @@ impl AbsorbingCrystalResponse {
         side: OrientedCrystalFieldSide,
         point: [f64; 3],
     ) -> Result<OrientedCrystalField> {
-        use OrientedCrystalFieldSide::*;
         let mut sum = FieldSum::new(side, point)?;
+        self.add_waves(side, &mut sum)?;
+        sum.finish()
+    }
+
+    // All incident directions share one compensated, relative-phase sum.
+    // Do not round each beam's propagated field before combining beams.
+    fn add_waves(&self, side: OrientedCrystalFieldSide, sum: &mut FieldSum) -> Result<()> {
+        use OrientedCrystalFieldSide::*;
         let mut add = |e: &Vector, h: &Vector, normal| {
             sum.add_wave(
                 e,
@@ -165,7 +181,7 @@ impl AbsorbingCrystalResponse {
                 )?;
             }
         }
-        sum.finish()
+        Ok(())
     }
 }
 

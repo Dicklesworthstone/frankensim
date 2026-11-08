@@ -6950,6 +6950,40 @@ polled before, during and after variable work, with no partial observation
 published. Illumination and material remain frozen; a thermal consumer owns
 the physical hold interval and energy deposition.
 
+`AbsorbingCrystalCoherentIllumination` instead declares mutual coherence
+between a borrowed bank of prepared fields from this exact original interface
+and exactly the same positive frequency. Directions, incidence azimuths and
+polarizations may differ. Every selected native wave enters one shared
+compensated relative-phase `FieldSum` before E/H, Poynting flux or anisotropic
+dielectric work is finalized. Ordinary/extraordinary interference and
+interference between incident directions are both retained. Equal in-phase
+beams produce four times the single-beam heat; opposite phases can cancel it.
+Crossed beams produce physical spatial absorption fringes, rather than the
+sum of independently positive single-beam heat sources.
+
+The coherent bank allocates nothing, reuses the original solved Maxwell modes
+and loss tensor, and bounds preparation and each point query by the authored
+component count. Exact interface/frequency identity is checked once on
+construction; even one frequency ULP of difference requires a temporal
+coherence/exposure model and refuses this monochromatic sum. An empty bank is
+darkness with no implied carrier and still applies the original half-space and
+finite-coordinate admission. Cancellation is typed and polled before, during
+and after variable work. Signed Poynting-only queries avoid requiring the
+unrelated dielectric-work magnitude to be representable.
+
+Multi-direction heating generally varies in x and y as well as z, and its
+energy balance includes lateral flux. A thermal consumer must integrate the
+coherent local work over its actual physical volume. The existing area/depth
+single-beam slab integrals cannot be added or reused as a coherent volume
+integral. This owner does not infer temporal bandwidth or mutual coherence
+from an incoherent source bank.
+
+Focused regression cases cover analytic absorbing isotropic TE fringe
+contrast and phase translation, destructive cancellation and a weak residual
+between large cancelling beams, noncollinear anisotropic three-dimensional
+Poynting balance and boundary continuity, and original-source/frequency
+admission, darkness and cancellation.
+
 Each factor uses a monochromatic passive reciprocal uniaxial half-space with a
 lossless isotropic incident port. This lane does not advance temperature, infer magnetic loss,
 support an absorbing incident port or finite lossy stack, introduce a biaxial
