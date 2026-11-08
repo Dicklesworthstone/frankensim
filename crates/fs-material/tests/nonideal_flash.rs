@@ -1,6 +1,8 @@
 //! Original-source multicomponent PT/PH equilibrium; no copied production EOS.
 #[path = "common/nonideal_flash.rs"]
 mod common;
+#[path = "nonideal_flash/discharge.rs"]
+mod discharge;
 #[path = "nonideal_flash/energy_volume.rs"]
 mod energy_volume;
 #[path = "nonideal_flash/driven.rs"]

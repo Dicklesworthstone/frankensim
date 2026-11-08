@@ -1,10 +1,11 @@
-//! Heat-driven mixture equilibrium in a closed, rigid vessel.
+//! Original mixture equilibrium in a finite rigid vessel.
 //!
-//! The original source-bound U,V owner determines pressure, temperature and
-//! phase split together. Mass, composition and vessel volume are fixed. Heat
-//! changes the original total internal energy; latent energy is not an extra
-//! source. This is instantaneous phase equilibrium, not evaporation kinetics,
-//! wall transport, mechanical work, slip or an acoustic closure.
+//! Original U,V and S,V owners determine pressure, temperature and phase split.
+//! Heat changes stored internal energy at fixed mass; admitted stream operations
+//! change inventory at the same physical vessel volume. Transported enthalpy
+//! includes flow work once, and latent energy is not an extra source. This is
+//! instantaneous bulk equilibrium, not evaporation kinetics, wall transport,
+//! selective phase venting, slip or an acoustic closure.
 
 use super::equilibrium::ResolvedThermochemicalPhaseState;
 use super::equilibrium::volume::PhaseEnergyVolumeControls;
@@ -20,6 +21,9 @@ pub mod isentropic;
 
 /// Coupled heat, boundary-work and volume changes through U,V equilibrium.
 pub mod driven;
+
+/// Adiabatic bulk-composition withdrawal with integrated original enthalpy.
+pub mod discharge;
 
 /// One accepted closed-vessel heat increment and its independent source balance.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -43,7 +47,7 @@ pub struct MixtureEquilibriumHeatStep {
     pub eos_evaluation_upper_bound: usize,
 }
 
-/// A fixed mixture inventory and volume with one accepted thermodynamic state.
+/// A finite mixture inventory at fixed volume with one accepted thermodynamic state.
 ///
 /// The retained law includes every species amount and interaction parameter.
 /// Heating may change phase compositions and phase amounts, but never the total
@@ -144,7 +148,7 @@ impl IsochoricMixtureEquilibriumParcel {
     pub const fn state(&self) -> &ResolvedThermochemicalPhaseState {
         &self.state
     }
-    /// Conserved total feed mass [kg].
+    /// Current total feed mass [kg].
     #[must_use]
     pub const fn mass_kg(&self) -> f64 {
         self.mass_kg
@@ -154,7 +158,7 @@ impl IsochoricMixtureEquilibriumParcel {
     pub const fn volume_m3(&self) -> f64 {
         self.volume_m3
     }
-    /// Conserved vessel density [kg/m3]. The source state differs only within
+    /// Current vessel inventory density [kg/m3]. The source state differs only within
     /// the explicitly admitted volume residual; it is not overwritten.
     #[must_use]
     pub fn density_kg_m3(&self) -> f64 {
