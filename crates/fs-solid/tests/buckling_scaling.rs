@@ -1,4 +1,7 @@
-use fs_solid::{SolidError, stability::buckling_loads};
+use fs_solid::{
+    SolidError,
+    stability::{buckling_loads, buckling_loads_cancellable},
+};
 use fs_sparse::{Coo, Csr};
 fn matrix(n: usize, f: impl Fn(usize, usize) -> f64) -> Csr {
     let mut coo = Coo::new(n, n);
@@ -121,4 +124,38 @@ fn malformed_pencils_are_structured_refusals() {
             Err(SolidError::InvalidInput { .. })
         ));
     }
+}
+
+#[test]
+fn component_independent_maps_preserve_odd_three_dimensional_layouts() {
+    let map = [None, Some(0), None];
+    let result = buckling_loads(&diagonal(&[2.0]), &diagonal(&[-1.0]), &map, 1, 10)
+        .expect("one xyz node with one free component is a valid pencil");
+    assert_eq!(result.loads, [2.0]);
+    assert_eq!(result.dof_map, map);
+}
+
+#[test]
+fn cancellation_refuses_before_and_during_numerical_work() {
+    use std::cell::Cell;
+    let k = Csr::identity(20);
+    let g = diagonal(&(1..=20).map(|i| -(i as f64)).collect::<Vec<_>>());
+    for stop_at in [1, 9, 35] {
+        let polls = Cell::new(0);
+        let result = buckling_loads_cancellable(&k, &g, &map(20), 1, 200, &|| {
+            polls.set(polls.get() + 1);
+            polls.get() >= stop_at
+        });
+        assert!(
+            matches!(result, Err(SolidError::Cancelled)),
+            "poll {stop_at}"
+        );
+        assert_eq!(polls.get(), stop_at);
+    }
+    let result = buckling_loads_cancellable(&k, &g, &map(20), 1, 200, &|| false).unwrap();
+    close(result.loads[0], 0.05);
+    assert!(
+        result.iters < 200,
+        "a resolved block stops spending its allowance"
+    );
 }

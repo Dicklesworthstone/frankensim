@@ -26,8 +26,11 @@ use crate::SolidError;
 use crate::linear::{Formulation, LinearProblem};
 use crate::mesh2::{quad_points, shapes_at};
 use fs_la::eigen::{EigenPair, LobpcgState, householder_eigh, lobpcg_run};
-use fs_la::factor::cholesky;
+use fs_la::factor::{FactorRunError, cholesky_cancellable};
 use fs_sparse::{Coo, Csr};
+
+/// Proportional buckling of source-bound three-dimensional prestress assemblies.
+pub mod solid3;
 
 /// Buckling analysis output.
 #[derive(Debug, Clone)]
@@ -196,6 +199,26 @@ pub fn buckling_loads(
     nev: usize,
     steps: usize,
 ) -> Result<BucklingResult, SolidError> {
+    buckling_loads_cancellable(k, kg, dof_map, nev, steps, &|| false)
+}
+
+/// The same physical pencil with cancellation during factorization and between
+/// bounded LOBPCG advances. The map is component-independent: it can represent
+/// planar, three-dimensional, or other displacement DOFs without padding.
+///
+/// The callback returns true to cancel. Cancellation publishes no partial modes.
+/// The dense factor and eigensolver workspace retain `buckling_loads`' caps;
+/// this does not introduce a second numerical solver or a continuum certificate.
+#[allow(clippy::too_many_lines)]
+pub fn buckling_loads_cancellable(
+    k: &Csr,
+    kg: &Csr,
+    dof_map: &[Option<usize>],
+    nev: usize,
+    steps: usize,
+    cancelled: &impl Fn() -> bool,
+) -> Result<BucklingResult, SolidError> {
+    check_cancelled(cancelled)?;
     let invalid = |what: &str| SolidError::InvalidInput { what: what.into() };
     let n = k.nrows();
     if n == 0 || n > 4096 || k.ncols() != n || kg.nrows() != n || kg.ncols() != n {
@@ -203,9 +226,9 @@ pub fn buckling_loads(
             "buckling requires matching nonempty square pencils with at most 4096 DOFs",
         ));
     }
-    if nev == 0 || steps == 0 || !dof_map.len().is_multiple_of(2) {
+    if nev == 0 || steps == 0 {
         return Err(invalid(
-            "buckling requires positive mode/iteration allowances and a planar DOF map",
+            "buckling requires positive mode and iteration allowances",
         ));
     }
     let mut seen = vec![false; n];
@@ -227,18 +250,23 @@ pub fn buckling_loads(
             "requested buckling block exceeds the bounded eigensolver workspace",
         ));
     }
-    let (k_scale, scaled_k) = scaled_symmetric(k)?;
-    let (g_scale, scaled_g) = scaled_symmetric(kg)?;
+    let (k_scale, scaled_k) = scaled_symmetric(k, cancelled)?;
+    let (g_scale, scaled_g) = scaled_symmetric(kg, cancelled)?;
     if k_scale == 0.0 {
         return Err(SolidError::SolveFailed {
             iters: 0,
             rel_residual: f64::INFINITY,
         });
     }
-    let chol = cholesky(&scaled_k.to_dense(), n).map_err(|_| SolidError::SolveFailed {
-        iters: 0,
-        rel_residual: f64::INFINITY,
-    })?;
+    check_cancelled(cancelled)?;
+    let chol =
+        cholesky_cancellable(&scaled_k.to_dense(), n, cancelled).map_err(|error| match error {
+            FactorRunError::Cancelled => SolidError::Cancelled,
+            FactorRunError::Factor(_) => SolidError::SolveFailed {
+                iters: 0,
+                rel_residual: f64::INFINITY,
+            },
+        })?;
     if g_scale == 0.0 {
         return Ok(BucklingResult {
             loads: Vec::new(),
@@ -281,10 +309,23 @@ pub fn buckling_loads(
         out.copy_from_slice(s);
     };
     let (pairs, iters) = if let Some(state) = &mut iterative {
-        let pairs = lobpcg_run(&op, state, steps, true, &|r, out| out.copy_from_slice(r));
+        let mut pairs = Vec::new();
+        for _ in 0..steps {
+            check_cancelled(cancelled)?;
+            let before = state.iters;
+            pairs = lobpcg_run(&op, state, 1, true, &|r, out| out.copy_from_slice(r));
+            check_cancelled(cancelled)?;
+            // The native state is resumable. Stop once its genuine residuals
+            // resolve the requested block, leaving headroom for the original
+            // physical-pencil residual gate after the coordinate transform.
+            if state.iters == before || pairs.iter().all(|pair| transformed_residual(pair) <= 1e-10)
+            {
+                break;
+            }
+        }
         (pairs, state.iters)
     } else {
-        (small_buckling_pairs(n, count, &op)?, 0)
+        (small_buckling_pairs(n, count, &op, cancelled)?, 0)
     };
     let mut loads = Vec::new();
     let mut modes = Vec::new();
@@ -292,11 +333,8 @@ pub fn buckling_loads(
     let mut k_phi = vec![0.0; n];
     let mut g_phi = vec![0.0; n];
     for pair in &pairs {
-        let transformed = if pair.value == 0.0 && pair.residual == 0.0 {
-            0.0
-        } else {
-            pair.residual / pair.value.abs()
-        };
+        check_cancelled(cancelled)?;
+        let transformed = transformed_residual(pair);
         if !pair.value.is_finite()
             || !transformed.is_finite()
             || transformed > 1e-8
@@ -373,6 +411,7 @@ pub fn buckling_loads(
     }
     let mut order: Vec<usize> = (0..loads.len()).collect();
     order.sort_by(|&a, &b| loads[a].total_cmp(&loads[b]));
+    check_cancelled(cancelled)?;
     Ok(BucklingResult {
         loads: order.iter().map(|&i| loads[i]).collect(),
         modes: order.iter().map(|&i| modes[i].clone()).collect(),
@@ -382,10 +421,29 @@ pub fn buckling_loads(
     })
 }
 
+fn check_cancelled(cancelled: &impl Fn() -> bool) -> Result<(), SolidError> {
+    if cancelled() {
+        Err(SolidError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+fn transformed_residual(pair: &EigenPair) -> f64 {
+    if pair.value == 0.0 && pair.residual == 0.0 {
+        0.0
+    } else {
+        pair.residual / pair.value.abs()
+    }
+}
+
 /// Remove physical units without changing sparsity or hiding asymmetry.
-fn scaled_symmetric(matrix: &Csr) -> Result<(f64, Csr), SolidError> {
+fn scaled_symmetric(matrix: &Csr, cancelled: &impl Fn() -> bool) -> Result<(f64, Csr), SolidError> {
     let mut scale = 0.0_f64;
     for row in 0..matrix.nrows() {
+        if row % 256 == 0 {
+            check_cancelled(cancelled)?;
+        }
         for &value in matrix.row(row).1 {
             if !value.is_finite() {
                 return Err(SolidError::InvalidInput {
@@ -398,6 +456,9 @@ fn scaled_symmetric(matrix: &Csr) -> Result<(f64, Csr), SolidError> {
     let mut scaled = matrix.clone();
     if scale > 0.0 {
         for row in 0..matrix.nrows() {
+            if row % 256 == 0 {
+                check_cancelled(cancelled)?;
+            }
             let (columns, values) = matrix.row(row);
             for (&column, &value) in columns.iter().zip(values) {
                 if (value / scale - matrix.get(column, row) / scale).abs() > 64.0 * f64::EPSILON {
@@ -419,11 +480,13 @@ fn small_buckling_pairs(
     n: usize,
     count: usize,
     op: &impl Fn(&[f64], &mut [f64]),
+    cancelled: &impl Fn() -> bool,
 ) -> Result<Vec<EigenPair>, SolidError> {
     let mut matrix = vec![0.0; n * n];
     let mut unit = vec![0.0; n];
     let mut column = vec![0.0; n];
     for j in 0..n {
+        check_cancelled(cancelled)?;
         unit[j] = 1.0;
         op(&unit, &mut column);
         unit[j] = 0.0;
@@ -444,6 +507,7 @@ fn small_buckling_pairs(
         }
     }
     let (values, vectors) = householder_eigh(&matrix, n);
+    check_cancelled(cancelled)?;
     Ok((0..n)
         .rev()
         .take(count)

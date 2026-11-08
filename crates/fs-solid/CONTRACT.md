@@ -5372,6 +5372,21 @@ cancellation, budget and late-jump rollback.
   retained in the result. Exhausted iterations refuse. Small pencils (n ≤ 64)
   whose requested block cannot fit LOBPCG use the native dense symmetric solver;
   invalid shapes, maps, nonfinite coefficients and asymmetry refuse explicitly.
+  The reduced DOF map is component-independent. `buckling_loads_cancellable`
+  polls inside the native Cholesky factorization and between bounded, resumable
+  LOBPCG advances; resolved blocks stop before exhausting their iteration cap.
+  `stability::solid3` exposes `proportional_buckling` on accepted P1 and
+  isoparametric prestress assemblies (TET10/HEX8/HEX20/HEX27), reusing their
+  original elastic and geometric matrices, supports and stress quadrature.
+  It solves `K_e + lambda K_g`, not the already prestressed `K_t + lambda K_g`;
+  its load factor scales the complete reference stress without counting it
+  twice. Results retain the reference assembly identity and original xyz mode
+  mapping, including fully supported nodes. Geometry, mass and constitutive
+  tangent remain frozen. This is not a nonlinear load/temperature path, a
+  mixture of fixed and proportional preloads, or admission of the scaled
+  material state. `tests/buckling3.rs` supplies analytical constrained-tet and
+  Standard/B-bar HEX8 references, while `tests/buckling_scaling.rs` exercises
+  numerical cancellation and odd three-component maps.
   `tests/buckling_scaling.rs` covers load/unit invariance, geometric work, small
   and full blocks, known noncommuting pencils and convergence refusal;
   `lambda_indicator` (Richardson) + `evidence_row`;
