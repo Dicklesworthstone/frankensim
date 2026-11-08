@@ -615,6 +615,42 @@ source phase, and the zero power slope of a finite driven resonance whose
 individual differentiated products exceed f64. This protects representable
 physical totals; it does not certify relative accuracy at arbitrary nulls.
 
+`solve_with_frequency_curvature` extends that same immutable factor to the
+complete second frequency derivative. It solves
+`A*q_ww = F_ww - A_ww*q - 2*A_w*q_w`, where
+`-A_ww = 2*M + 2*i*B*Z_w*B^T + i*w*B*Z_ww*B^T`. Both physical load
+derivatives are mandatory for loaded owners, including explicit zero matrices
+for locally zero derivatives. Source slope and curvature are independently
+authored. The original M/C/K and conjugate port map remain fixed. No finite
+frequency perturbation, additional factor, diagonal approximation or assumed
+Lorentzian line shape enters the calculation.
+
+First and second pencil actions share one factored numerical kernel, retaining
+full mutual load and signed gyroscopic/nonproportional coupling. Each response
+order has its own binary amplitude scale; the second derivative restores two
+physical frequency-unit factors. Published motion obeys
+`v_ww = -i*(2*q_w+w*q_ww)`, including DC. The independent second-equation audit
+reconstructs the published physical curvature and retains separate uncancelled
+source/action envelopes. Its residual is a backward check, not a near-pole
+forward-accuracy certificate. Original port flow and effort include all three
+second-order product-rule terms. Signed source, symmetric viscous and boundary
+power curvatures are contracted independently with the existing binary-scaled
+double-double owner; `harmonic_mean_power_curvature_with_cancel` exposes that
+same contraction to other power-conjugate field owners. This does not infer a
+load's material heat or stored energy from impedance samples.
+
+`HarmonicFrequencyCurvatureControls` admits total additional payload
+`8*n*p+1536*n+768*p` and work `256*(n*n+n*p+p*p)+1024*(n+p)`. Unloaded
+diagonal banks retain linear work `1280*n`; compact loaded factors substitute
+`n*n*p` for `n*n` and add `256*k*k+1024*k`. The prepared factor and caller
+arrays are excluded, and refusals publish no partial result. Focused
+`harmonic_curvature` regressions specify independent scalar quotient rules,
+causal spring/inertance and Maxwell dispersion, DC gyroscopic coupling,
+extreme finite high-Q power, dense/compact agreement at a loaded bare pole,
+linear modal-bank budgets and transactional cancellation/reuse. Pure numerical
+kernel tests additionally exercise the original factored actions and physical
+work without requiring an executor or substituting a numerical solver.
+
 ### `time` (IRP M1.1-W1a; moved from `fs-couple::modal_acoustic_time`)
 
 `ModalAcousticTimeModel` is the generic fixed-rate realization of independent,

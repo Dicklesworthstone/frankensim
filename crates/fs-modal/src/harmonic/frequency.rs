@@ -14,6 +14,16 @@ use crate::quadratic_fraction;
 use fs_exec::Cx;
 use fs_math::c64::C64;
 
+mod action;
+use action::{FrequencyAction, FrequencyOrder, FrequencyPencil, FrequencyPort};
+mod curvature;
+pub use curvature::{
+    HarmonicFrequencyCurvatureControls, HarmonicFrequencyCurvatureResponse,
+    HarmonicPortFrequencyCurvatureResponse,
+};
+mod work;
+pub use work::harmonic_mean_power_curvature_with_cancel;
+
 /// Additional resources for one response plus its same-factor frequency tangent.
 #[derive(Clone, Copy, Debug)]
 pub struct HarmonicFrequencyControls {
@@ -63,13 +73,6 @@ pub struct HarmonicFrequencyResponse {
     /// differentiated equation reconstructed from published physical motion.
     /// This is a backward check, not a near-pole forward-error bound.
     pub relative_derivative_residual: f64,
-}
-
-struct FrequencyAction {
-    // -d(A_hat)/d(mu) applied to a normalized state, divided by 2^exponent.
-    value: Vec<C64>,
-    envelope: Vec<f64>,
-    exponent: i32,
 }
 
 impl PreparedHarmonicResponse {
@@ -306,139 +309,42 @@ impl PreparedHarmonicResponse {
         impedance_derivative: Option<&[C64]>,
         cx: &Cx<'_>,
     ) -> Result<FrequencyAction, HarmonicResponseError> {
+        self.frequency_action_order(state, FrequencyOrder::First(impedance_derivative), cx)
+    }
+
+    fn frequency_action_order(
+        &self,
+        state: &[C64],
+        order: FrequencyOrder<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<FrequencyAction, HarmonicResponseError> {
         let port_scaling = self
             .port_load
             .as_ref()
             .map(|load| load.scaling(&self.coordinate_exponents, cx))
             .transpose()?;
-        let mut exponent = 0;
-        let mu = self.scaled_frequency;
-        let (mu_fraction, mu_exponent) = if mu == 0.0 {
-            (0.0, 0)
-        } else {
-            quadratic_fraction(mu)
-        };
-        if let (Some(load), Some(scaling), Some(slope)) =
-            (&self.port_load, &port_scaling, impedance_derivative)
-        {
-            // At DC the original static solve intentionally ignores finite Z,
-            // but its first derivative still includes that full velocity load.
-            if scaling.minimum_time_exponent != i32::MIN {
-                exponent = exponent.max(scaling.minimum_time_exponent - self.time_exponent);
-            }
-            let headroom = 2 * load.ports.next_power_of_two().ilog2() as i32 + 2;
-            if mu != 0.0 {
-                for a in 0..load.ports {
-                    poll(cx)?;
-                    for b in 0..load.ports {
-                        if scaling.exponents[a] == i32::MIN || scaling.exponents[b] == i32::MIN {
-                            continue;
-                        }
-                        for value in [slope[a * load.ports + b].re, slope[a * load.ports + b].im] {
-                            if value != 0.0 {
-                                exponent = exponent.max(
-                                    scaling.exponents[a]
-                                        + scaling.exponents[b]
-                                        + quadratic_fraction(value).1
-                                        + mu_exponent
-                                        + headroom,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+        let port = self
+            .port_load
+            .as_ref()
+            .zip(port_scaling.as_ref())
+            .map(|(load, scaling)| FrequencyPort {
+                ports: load.ports,
+                force_map: &load.force_map,
+                impedance: &load.impedance,
+                exponents: &scaling.exponents,
+                minimum_time_exponent: scaling.minimum_time_exponent,
+            });
+        FrequencyPencil {
+            n: self.n,
+            layout: self.layout,
+            scaled_frequency: self.scaled_frequency,
+            time_exponent: self.time_exponent,
+            coordinate_exponents: &self.coordinate_exponents,
+            scaled_mass: &self.scaled_mass,
+            scaled_damping: &self.scaled_damping,
+            port,
         }
-        let mut value = vec![C64::ZERO; self.n];
-        let mut envelope = vec![0.0; self.n];
-        for i in 0..self.n {
-            poll(cx)?;
-            let mut correction = C64::ZERO;
-            for j in self.layout.columns(i, self.n) {
-                let q = state[j];
-                if q == C64::ZERO {
-                    continue;
-                }
-                let at = self.layout.index(i, j, self.n);
-                let mass = if mu == 0.0 {
-                    0.0
-                } else {
-                    2.0 * mu * scale(self.scaled_mass[at], -exponent)?
-                };
-                let damping = scale(self.scaled_damping[at], -exponent)?;
-                let coefficient = C64::new(mass, damping);
-                add(&mut value[i], &mut correction, coefficient * q);
-                envelope[i] += coefficient.abs() * q.abs();
-            }
-        }
-        if let (Some(load), Some(scaling), Some(slope)) =
-            (&self.port_load, port_scaling, impedance_derivative)
-        {
-            let p = load.ports;
-            let mut b = vec![0.0; self.n * p];
-            for i in 0..self.n {
-                poll(cx)?;
-                for a in 0..p {
-                    if scaling.exponents[a] != i32::MIN {
-                        b[i * p + a] = scale(
-                            load.force_map[i * p + a],
-                            -self.coordinate_exponents[i] - scaling.exponents[a],
-                        )?;
-                    }
-                }
-            }
-            let mut flow = vec![C64::ZERO; p];
-            let mut flow_envelope = vec![0.0; p];
-            for a in 0..p {
-                poll(cx)?;
-                let mut correction = C64::ZERO;
-                for (i, &q) in state.iter().enumerate() {
-                    add(&mut flow[a], &mut correction, q.scale(b[i * p + a]));
-                    flow_envelope[a] += q.abs() * b[i * p + a].abs();
-                }
-            }
-            let mut effort = vec![C64::ZERO; p];
-            let mut effort_envelope = vec![0.0; p];
-            for a in 0..p {
-                poll(cx)?;
-                if scaling.exponents[a] == i32::MIN {
-                    continue;
-                }
-                let mut correction = C64::ZERO;
-                for c in 0..p {
-                    if scaling.exponents[c] == i32::MIN {
-                        continue;
-                    }
-                    let common = scaling.exponents[a] + scaling.exponents[c] - exponent;
-                    let z = scale_complex(load.impedance[a * p + c], common - self.time_exponent)?;
-                    let dz = if mu == 0.0 {
-                        C64::ZERO
-                    } else {
-                        scale_complex(slope[a * p + c], common + mu_exponent)?.scale(mu_fraction)
-                    };
-                    add(&mut effort[a], &mut correction, z * flow[c]);
-                    add(&mut effort[a], &mut correction, dz * flow[c]);
-                    effort_envelope[a] += (z.abs() + dz.abs()) * flow_envelope[c];
-                }
-            }
-            for i in 0..self.n {
-                poll(cx)?;
-                let mut correction = C64::ZERO;
-                for a in 0..p {
-                    let term = effort[a].scale(b[i * p + a]);
-                    add(&mut value[i], &mut correction, C64::new(-term.im, term.re));
-                    envelope[i] += effort_envelope[a] * b[i * p + a].abs();
-                }
-            }
-        }
-        if value.iter().any(|&z| !finite(z)) || envelope.iter().any(|v| !v.is_finite()) {
-            return Err(invalid("complete frequency action is not representable"));
-        }
-        Ok(FrequencyAction {
-            value,
-            envelope,
-            exponent,
-        })
+        .apply(state, order, || poll(cx))
     }
 
     // Audit A*q_w-F_w-(2wM+iC+iBZBᵀ+iwBZ_wBᵀ)q from the PUBLISHED physical

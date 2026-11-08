@@ -37,6 +37,8 @@ pub use impedance::{HarmonicPortControls, HarmonicPortResponse, admit_passive_po
 mod frequency;
 pub use frequency::{
     HarmonicFrequencyControls, HarmonicFrequencyResponse, HarmonicPortFrequencyResponse,
+    HarmonicFrequencyCurvatureControls, HarmonicFrequencyCurvatureResponse,
+    HarmonicPortFrequencyCurvatureResponse, harmonic_mean_power_curvature_with_cancel,
 };
 mod parameter;
 pub use parameter::{
