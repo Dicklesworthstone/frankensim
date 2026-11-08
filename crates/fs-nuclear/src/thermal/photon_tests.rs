@@ -16,6 +16,7 @@ use fs_la::decay::DecayLimits;
 const EV_J: f64 = 1.602_176_634e-19;
 const INITIAL: f64 = 1e14;
 
+#[path = "photon_tests/temperature.rs"]
 mod temperature;
 
 fn edges() -> Vec<f64> {

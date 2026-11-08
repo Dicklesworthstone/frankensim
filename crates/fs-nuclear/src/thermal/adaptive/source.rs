@@ -128,6 +128,39 @@ impl<'a> Comparison<'a> {
             self.error.nuclear_energy_difference_j.max(difference);
         Ok(())
     }
+
+    pub(super) fn radiation(
+        &mut self,
+        coarse: &RadiationDeposition,
+        first: &RadiationDeposition,
+        second: &RadiationDeposition,
+    ) -> Result<(), FissionThermalError> {
+        if coarse.receiver_energy_j.len() != first.receiver_energy_j.len()
+            || coarse.receiver_energy_j.len() != second.receiver_energy_j.len()
+        {
+            return Err(FissionThermalError::Invalid(
+                "refinement changed radiation receiver coverage",
+            ));
+        }
+        for (&id, &energy) in &coarse.receiver_energy_j {
+            let a = first.receiver_energy_j.get(&id);
+            let b = second.receiver_energy_j.get(&id);
+            let (Some(a), Some(b)) = (a, b) else {
+                return Err(FissionThermalError::Invalid(
+                    "refinement changed radiation receiver identity",
+                ));
+            };
+            self.energy(0.0, energy, finite(*a + *b)?)?;
+        }
+        for (a, b, c) in [
+            (coarse.emitted_j, first.emitted_j, second.emitted_j),
+            (coarse.deposited_j, first.deposited_j, second.deposited_j),
+            (coarse.escaped_j, first.escaped_j, second.escaped_j),
+        ] {
+            self.energy(0.0, a, finite(b + c)?)?;
+        }
+        Ok(())
+    }
     fn neutron(&mut self, start: f64, coarse: f64, fine: f64) -> Result<(), FissionThermalError> {
         let difference =
             self.coordinate(start, coarse, fine, self.tolerances.neutron_population)?;

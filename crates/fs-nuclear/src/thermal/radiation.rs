@@ -101,7 +101,7 @@ impl BoundRadiation {
         heat_j: &mut BTreeMap<CellId, Sum>,
         account: &mut Account,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<(), FissionThermalError> {
+    ) -> Result<RadiationDeposition, FissionThermalError> {
         let mut checkpoint_error = None;
         let deposition = self.response.apply(emitted, tolerance_j, || {
             checkpoint().map_err(|error| {
@@ -151,13 +151,13 @@ pub(super) fn credit_deposition(
     heat_j: &mut BTreeMap<CellId, Sum>,
     account: &mut Account,
     checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-) -> Result<(), FissionThermalError> {
-    for (id, energy_j) in deposition.receiver_energy_j {
+) -> Result<RadiationDeposition, FissionThermalError> {
+    for (&id, &energy_j) in &deposition.receiver_energy_j {
         checkpoint()?;
         heat_j.entry(CellId(id)).or_default().add(energy_j)?;
     }
     account.radiation_deposited.add(deposition.deposited_j)?;
     account.radiation_escaped.add(deposition.escaped_j)?;
     account.radiation_roundoff.add(deposition.roundoff_j)?;
-    Ok(())
+    Ok(deposition)
 }

@@ -5,6 +5,9 @@ use crate::radiation::transport::material::temperature::{
     PhotonMassTemperatureKnot, TemperaturePhotonMassMaterial,
 };
 
+#[path = "temperature/adaptive.rs"]
+mod adaptive;
+
 fn fixed_layers() -> Vec<PhotonSlabLayer> {
     [(1, [0.0, 0.0]), (2, [0.5, 0.5]), (3, [0.25, 0.25])]
         .into_iter()

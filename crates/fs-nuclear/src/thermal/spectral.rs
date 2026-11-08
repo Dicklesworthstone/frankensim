@@ -260,7 +260,7 @@ impl<S: NuclearHeatSource> BoundSpectralRadiation<S> {
         heat_j: &mut BTreeMap<CellId, Sum>,
         account: &mut Account,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<(), FissionThermalError> {
+    ) -> Result<RadiationDeposition, FissionThermalError> {
         let borrowed: Vec<_> = emitted
             .iter()
             .map(|(id, values)| (*id, values.as_slice()))

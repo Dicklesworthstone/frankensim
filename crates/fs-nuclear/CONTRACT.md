@@ -3144,6 +3144,24 @@ temperature feedback. Native timestep refinement remains necessary for this
 first-order coupling; the original spatial/angular transport limitations and
 the exclusion of inferred density/composition changes remain unchanged.
 
+`NuclearHeating::advance_adaptive_to` includes transported radiation in its
+existing componentwise time-error comparison. Each receiver's absorbed joules
+and the emitted/absorbed/escaped interval totals use the existing
+`NuclearTimeTolerances::nuclear_energy_j` allowance. Temperature, stored energy,
+nuclear inventories, reaction counts and original released-energy comparisons
+remain active. Loose thermal scales therefore cannot conceal an inaccurate
+radiation heat partition between receivers.
+
+`last_radiation_deposition` retains the original response result from the last
+accepted native interval, published with its nuclear/thermal transaction after
+crediting radiation once. Direct nuclear heat and ungrouped outward energy stay
+with their original accounts. The adaptive single-interval owner discovers
+CFL/event cuts before source evolution; its coarse result is compared with the
+sum of two actual half-interval results, never continuing cumulative histories.
+These remain local temporal error estimates, separate from conservation
+roundoff and spatial/angular transport accuracy.
+
+
 ## Temporal convergence of external photon absorption
 
 `ExternalPhotonHeating::advance_refined` compares complete native trajectories

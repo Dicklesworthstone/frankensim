@@ -24,7 +24,8 @@ pub struct NuclearTimeTolerances {
     pub temperature_k: f64,
     /// Each isotope/fuel population and interval reaction count, expected nuclei.
     pub nuclei: f64,
-    /// Each delayed-energy reservoir and cell-local released energy channel, J.
+    /// Each delayed-energy reservoir, cell-local released channel and transported
+    /// radiation coordinate (receiver absorption, emitted/absorbed/escaped), J.
     pub nuclear_energy_j: f64,
     /// Each neutron/precursor amplitude, in the point model's normalization.
     pub neutron_population: f64,
@@ -201,6 +202,9 @@ impl<S: AdaptiveNuclearHeatSource> NuclearHeating<S> {
     ///
     /// State and release comparisons are componentwise: a stable total or zero
     /// heat cannot conceal isotope redistribution or neutron/precursor error.
+    /// Radiation compares actual absorbed energy at every receiver and the
+    /// emitted/absorbed/escaped accounts of the native comparison intervals.
+    /// A small temperature change therefore cannot hide a large absorption error.
     /// Native numerical budgets are distinct from these temporal estimates.
     pub fn advance_adaptive_to<'m>(
         &self,
@@ -596,6 +600,25 @@ fn compare<S: AdaptiveNuclearHeatSource>(
             coarse.temperature_k(id)?,
             fine.temperature_k(id)?,
         )?;
+    }
+    // single_interval admits exactly one native interval; event/CFL cuts are
+    // retried before source evolution. The two accepted half-interval results
+    // add once. Their continuing cumulative accounts already share a prefix
+    // and must never be added or subtracted to recover these small releases.
+    match (
+        coarse_source.last_radiation_deposition(),
+        middle_source.last_radiation_deposition(),
+        fine_source.last_radiation_deposition(),
+    ) {
+        (None, None, None) => {}
+        (Some(coarse), Some(first), Some(second)) => {
+            metric.radiation(coarse, first, second)?;
+        }
+        _ => {
+            return Err(FissionThermalError::Invalid(
+                "refinement changed radiation response coverage",
+            ));
+        }
     }
     let mut error = metric.error;
     for (&id, bound) in &initial_source.sources {

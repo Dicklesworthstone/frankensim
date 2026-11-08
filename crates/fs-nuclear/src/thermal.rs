@@ -26,7 +26,7 @@ use crate::decay::DecayError;
 use crate::decay::activation::CaptureActivationError;
 use crate::diffusion::burnup::DiffusionBurnupError;
 use crate::kinetics::KineticsError;
-use crate::radiation::RadiationError;
+use crate::radiation::{RadiationDeposition, RadiationError};
 use crate::{EnergyChannels, FissionError, FissionState};
 
 mod source;
@@ -501,6 +501,7 @@ struct PendingStep<S: NuclearHeatSource> {
     states: Vec<(CellId, S, S::Step)>,
     account: Account,
     audit: FissionHeatingAudit,
+    radiation_deposition: Option<RadiationDeposition>,
     // Response and preparation cache are one unpublished thermal candidate.
     photon_transport: Option<(Arc<BoundSpectralRadiation<S>>, PhotonTemperatureFeedback)>,
 }
@@ -519,6 +520,7 @@ pub struct NuclearHeating<S: NuclearHeatSource> {
     radiation: Option<Arc<BoundRadiation>>,
     spectral_radiation: Option<Arc<BoundSpectralRadiation<S>>>,
     photon_feedback: Option<PhotonTemperatureFeedback>,
+    last_radiation_deposition: Option<Arc<RadiationDeposition>>,
     budget: S::Budget,
     pending: Option<PendingStep<S>>,
     account: Account,
@@ -572,6 +574,7 @@ impl<S: NuclearHeatSource> NuclearHeating<S> {
             radiation: None,
             spectral_radiation: None,
             photon_feedback: None,
+            last_radiation_deposition: None,
             budget,
             pending: None,
             account: Account::default(),
@@ -596,6 +599,14 @@ impl<S: NuclearHeatSource> NuclearHeating<S> {
         self.sources
             .get(&cell)
             .and_then(|bound| bound.last_step.as_ref())
+    }
+
+    /// Actual radiation absorption and escape during the last accepted native
+    /// interval, when a response was bound. These are interval joules, not
+    /// cumulative accounts. Direct local nuclear heat and ungrouped radiation
+    /// remain in their original source accounts and are not included here.
+    pub fn last_radiation_deposition(&self) -> Option<&RadiationDeposition> {
+        self.last_radiation_deposition.as_deref()
     }
     /// Source/coupling account for the last accepted advance, excluding other heat.
     pub fn audit(&self) -> FissionHeatingAudit {
@@ -829,14 +840,15 @@ impl<S: NuclearHeatSource> DepositionObserver for NuclearHeating<S> {
             }
             states.push((id, state, report));
         }
+        let mut radiation_deposition = None;
         if let Some(radiation) = &self.radiation {
-            radiation.deposit(
+            radiation_deposition = Some(radiation.deposit(
                 &emitted_radiation,
                 S::energy_tolerance_j(self.budget),
                 &mut heat_j,
                 &mut account,
                 checkpoint,
-            )?;
+            )?);
         }
         // Only actual grouped emission needs a refreshed opacity response.
         // Nuclear trials, local heat and evaluated spectra above stay with
@@ -865,13 +877,13 @@ impl<S: NuclearHeatSource> DepositionObserver for NuclearHeating<S> {
             .map(|(radiation, _)| radiation)
             .or(self.spectral_radiation.as_ref())
         {
-            radiation.deposit(
+            radiation_deposition = Some(radiation.deposit(
                 &emitted_groups,
                 S::energy_tolerance_j(self.budget),
                 &mut heat_j,
                 &mut account,
                 checkpoint,
-            )?;
+            )?);
         }
         // Combine direct deposition and radiation from every emitter in joules
         // before converting ONCE per physical receiver to the native mean power.
@@ -896,6 +908,7 @@ impl<S: NuclearHeatSource> DepositionObserver for NuclearHeating<S> {
             states,
             account,
             audit,
+            radiation_deposition,
             photon_transport,
         });
         Ok(watts)
@@ -937,6 +950,7 @@ impl<S: NuclearHeatSource> DepositionObserver for NuclearHeating<S> {
         self.time_s = pending.end_s;
         self.account = pending.account;
         self.audit = pending.audit;
+        self.last_radiation_deposition = pending.radiation_deposition.map(Arc::new);
         if let Some((radiation, feedback)) = pending.photon_transport {
             self.spectral_radiation = Some(radiation);
             self.photon_feedback = Some(feedback);
