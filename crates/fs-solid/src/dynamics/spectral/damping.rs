@@ -10,6 +10,9 @@ use fs_exec::Cx;
 use fs_modal::time::{LinearForceTransition, ModalAcousticState};
 use fs_sparse::Csr;
 
+mod harmonic;
+pub use harmonic::HarmonicDampedSpectralSolid;
+
 /// Every original elastic and rigid coordinate, with physical viscous damping.
 ///
 /// The supplied symmetric viscosity C must be diagonal in the complete,
@@ -283,16 +286,44 @@ impl DampedSpectralSolid {
             add(&mut work, &mut work_correction, frame.input_work_j);
             add(&mut heat, &mut heat_correction, frame.viscous_dissipation_j);
         }
+        self.accept_modal_path(q, v, work, heat, step, time_s, cx)
+    }
+
+    // Both affine and harmonic sources supply independently integrated work
+    // and heat. Original-coordinate admission remains one atomic owner.
+    #[allow(clippy::too_many_arguments)]
+    fn accept_modal_path(
+        &mut self,
+        q: Vec<f64>,
+        v: Vec<f64>,
+        work: f64,
+        heat: f64,
+        step: u64,
+        time_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<ExactLinearSolidStep> {
         let displacement = reconstruct(&self.solid.basis, &q, cx)?;
         let velocity = reconstruct(&self.solid.basis, &v, cx)?;
         let (mut cumulative_heat, mut correction) =
             (self.cumulative_dissipated_j, self.dissipation_correction_j);
         add(&mut cumulative_heat, &mut correction, heat);
-        if ![work, heat, cumulative_heat, correction].into_iter().all(f64::is_finite) {
+        if ![work, heat, cumulative_heat, correction]
+            .into_iter()
+            .all(f64::is_finite)
+        {
             return Err(invalid("unrepresentable accumulated damped work or heat"));
         }
         let result = self.solid.accept_force_path_with_dissipation(
-            q, v, displacement, velocity, work, heat, cumulative_heat, step, time_s, cx,
+            q,
+            v,
+            displacement,
+            velocity,
+            work,
+            heat,
+            cumulative_heat,
+            step,
+            time_s,
+            cx,
         )?;
         self.cumulative_dissipated_j = cumulative_heat;
         self.dissipation_correction_j = correction;

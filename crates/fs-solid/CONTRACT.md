@@ -9539,6 +9539,47 @@ Additional regressions cover terminal velocity and rigid heat, tiny high-Q
 loss, impulse history, nonclassical/negative viscosity refusal, cancellation
 and arithmetic rollback, and zero-C conservative bit equivalence.
 
+### Continuous harmonic forcing across the complete damped spectrum
+
+`dynamics::spectral::HarmonicDampedSpectralSolid` propagates a prescribed
+continuous frequency through every original free coordinate, using physical
+cosine/sine force arrays in `free_dofs()` order. The complete M/K/basis and
+classical viscosity admission remain those of `DampedSpectralSolid`. Each mode
+uses the existing `fs-modal::time::PreparedHarmonicForce` motion and power
+owner. Initial transients, exact resonant growth, critical/overdamped decay and
+viscously damped rigid coordinates remain in the trajectory. There is no large
+augmented solid exponential, mode truncation, Nyquist retuning or substitution
+of sampled loads for the continuous forcing law.
+
+`advance` takes quadratures measured from that interval's start. The pure
+`advance_force_phase` rotates them through the same prepared phase, while
+`advance_continuous` updates caller-owned source arrays only after the original
+M/K and cumulative work/heat gates accept the motion. Cancellation, phase
+overflow and other refusals preserve both source arrays and all physical
+accounts. Source jumps do not imply momentum impulses; native impulses retain
+past heat and consume neither a harmonic interval nor source phase. At zero
+forcing frequency the cosine load delegates to held-force propagation, with
+the sine coefficient physically inactive and DC arithmetic preserved bitwise.
+
+Work includes both source quadratures and the initial transient. Viscous heat
+is independently integrated with the shared positive Gramian; it is not
+inferred from energy subtraction or cycle averages. The classical-law
+projection residual retains the same meaning and boundary as the damped
+affine owner. This API supplies one simultaneous frequency with arbitrary
+spatial phase, not independent-tone heat summation. Repeated floating-point
+source rotations accumulate roundoff; callers may form quadratures from an
+absolute clock when that error matters. Temporal/observation resolution and
+spatial/material fidelity remain separate requirements.
+
+Nonzero-frequency preparation admits `96*n^2 + 4096*n` bytes and
+`6*n^3 + 64*n^2 + 32768*n + 8192*sum(s_i)` product terms, where each `s_i`
+halves `max(omega_i*dt, c_i*dt, Omega*dt, 1)` to at most 1/8. These envelopes
+include the underlying damped preparation; warm work retains
+`16*n^2 + 512*n`. `tests/solid_spectral_harmonic.rs` adds G1/G3/G4 regressions
+for 128 coupled consistent-mass coordinates with analytic phase/work/heat,
+exact and near resonance, the damped initial transient, DC rigid drag,
+source/state refusal atomicity, and impulses following harmonic dissipation.
+
 
 ## Exact cubic force histories on the complete elastic spectrum
 
