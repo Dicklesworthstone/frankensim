@@ -32,6 +32,11 @@ CoupledPropAirframeStep (Aitken candidate A).
   engine/propeller speed ratio, constant transmission efficiency and viscous
   bearing loss. `evaluate` takes the actual common propeller speed and output
   command; its torque is the total drive for that coordinate, not per propeller.
+- `ShaftDrive::work_over_angle` integrates an evaluated stage torque over the
+  caller's accepted relative output travel. Engine work, net output work,
+  transmission heat, bearing heat and numerical closure remain separate.
+  Finite starting torque can do work despite zero initial instantaneous power.
+  This is held-torque work, not a nonlinear source integrator or fuel model.
 
 ## Invariants
 

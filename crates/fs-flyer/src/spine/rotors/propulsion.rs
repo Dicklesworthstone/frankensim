@@ -26,6 +26,9 @@ use std::borrow::Cow;
 #[path = "propulsion/dynamic.rs"]
 pub mod dynamic;
 
+#[path = "propulsion/drive.rs"]
+pub mod drive;
+
 #[path = "propulsion/unsteady.rs"]
 pub mod unsteady;
 

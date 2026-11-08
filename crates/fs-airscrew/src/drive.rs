@@ -55,6 +55,25 @@ pub struct DriveOperatingPoint {
     pub power_residual_w: f64,
 }
 
+/// Work of one evaluated drive torque over accepted relative output travel.
+///
+/// Source work is mechanical engine-shaft work before transmission loss. It
+/// must not be replaced by net propeller work when debiting a finite supply:
+/// the bearings can absorb more work than the engine supplies.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DriveWork {
+    /// Nonnegative mechanical engine work before transmission losses [J].
+    pub engine_work_j: f64,
+    /// Signed net drive work at the common propeller coordinate [J].
+    pub prop_work_j: f64,
+    /// Nonnegative work lost in the constant-efficiency transmission [J].
+    pub transmission_heat_j: f64,
+    /// Nonnegative work lost to the sampled viscous bearing torque [J].
+    pub bearing_heat_j: f64,
+    /// Source minus delivered work and physical losses [J], never heat.
+    pub work_residual_j: f64,
+}
+
 impl ShaftDrive {
     /// Prepare a positive rating and speed ratio, efficiency in `[0,1]`, and
     /// nonnegative viscous drag on the TOTAL common propeller coordinate.
@@ -221,6 +240,57 @@ impl ShaftDrive {
             transmission_heat_w: transmission_heat,
             bearing_heat_w: bearing_heat,
             power_residual_w: residual,
+        })
+    }
+
+    /// Integrate the torques evaluated at `omega_prop_rad_s` over an accepted
+    /// nonnegative relative output-angle increment, in radians.
+    ///
+    /// This is the work of a held stage torque, not sampled power times an
+    /// assumed duration. It remains well-defined when the stage starts from
+    /// rest and therefore has zero instantaneous power but finite torque.
+    /// A motion integrator supplies its actual angle increment; this method
+    /// neither advances motion nor resolves changes of the source law during
+    /// the interval. Reverse travel requires a different drive law.
+    ///
+    /// # Errors
+    /// `shaft-drive-invalid` for invalid stage data, negative/nonfinite travel
+    /// or an unrepresentable work transfer.
+    pub fn work_over_angle(
+        &self,
+        omega_prop_rad_s: f64,
+        command: f64,
+        output_angle_rad: f64,
+    ) -> Result<DriveWork, Refusal> {
+        if !output_angle_rad.is_finite() || output_angle_rad < 0.0 {
+            return Err(invalid("require finite nonnegative relative output travel"));
+        }
+        let point = self.evaluate(omega_prop_rad_s, command)?;
+        let source_prop_torque = command * self.unscaled_prop_torque(omega_prop_rad_s);
+        let engine_work = source_prop_torque * output_angle_rad;
+        let prop_work = point.prop_torque_nm * output_angle_rad;
+        let transmission_heat = (1.0 - self.transmission_efficiency) * engine_work;
+        let bearing_heat = (self.prop_viscous_drag_nms * omega_prop_rad_s) * output_angle_rad;
+        let residual = ((engine_work - prop_work) - transmission_heat) - bearing_heat;
+        if ![
+            engine_work,
+            prop_work,
+            transmission_heat,
+            bearing_heat,
+            residual,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
+            || (output_angle_rad > 0.0 && command > 0.0 && engine_work == 0.0)
+        {
+            return Err(invalid("unrepresentable shaft work or loss transfer"));
+        }
+        Ok(DriveWork {
+            engine_work_j: engine_work,
+            prop_work_j: prop_work,
+            transmission_heat_j: transmission_heat,
+            bearing_heat_j: bearing_heat,
+            work_residual_j: residual,
         })
     }
 

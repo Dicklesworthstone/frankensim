@@ -1623,6 +1623,34 @@ Focused analytic source tests and actual aircraft-load regressions establish
 gearing, limits, loss closure, invalid-command refusal and separation of drive
 torque from fixed-speed aerodynamic forces.
 
+`spine::rotors::propulsion::drive::DrivenPropulsion` explicitly binds that
+configured source to the existing native `GearedPropulsion`. The caller
+declares the drive-output/common-gear angle ratio; speed and generalized torque
+both transform by that ratio so source work is invariant. Runtime engineering
+commands replace the trim command at the original two physical motion stages.
+Aerodynamic loads, physical rotor inertia, carrier recoil and the original
+generic motor-port API retain their existing owners.
+
+`DrivenState::remaining_engine_energy_j` is an optional finite supply of usable
+mechanical ENGINE-shaft joules before drivetrain loss, not chemical fuel or an
+electrical storage state. Only accepted midpoint engine work is debited; the
+predictor is not another physical energy withdrawal. Source, net output,
+transmission and bearing work use the native step's actual relative travel.
+Numerical source/gear/supply discrepancies remain separate from physical heat.
+An empty supply removes source torque while retaining bearing and aerodynamic
+loads. Net braking cannot refill this unidirectional source or hide positive
+engine work. A depletion crossing refuses atomically with
+`shaft-energy-exhausted`; no accepted motion is rescaled and no arbitrary
+exhaustion time is inferred. The caller must localize/reduce that interval.
+Source laws retain their existing finite-stage approximation and forward-spin
+domain. This API adds neither historical browser controls nor a measured fuel,
+thermal, windmilling or exact finite-step power-limit model.
+
+`tests/geared_drive.rs` covers independent held-work arithmetic including
+startup, real runtime stages, coordinate-rescaling invariance, source/loss
+closure, finite-supply depletion/empty coasting, net braking with positive
+engine withdrawal, and late refusal without a partial state (G0/G1/G3).
+
 Steady `propcoupling::CoupledStep::power` carries both original BEMT disk
 power splits through the accepted coupling evaluation, including spatial
 disk adapters and `GearedPropulsion` results. Shaft power agrees with the
