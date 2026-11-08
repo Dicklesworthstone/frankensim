@@ -46,6 +46,8 @@ pub mod regional;
 pub mod bulk;
 /// Actual rectangular cross-sections with resolved transverse shear and heat diffusion.
 pub mod rectangular;
+/// Concentric annular passages with both rigid walls and resolved radial diffusion.
+pub mod annular;
 
 use crate::compose::{self, ChainResult, ComposeOptions, InputReflection, PreparedChain, TwoPort};
 use crate::network::NetworkLoad;

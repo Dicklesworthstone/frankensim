@@ -1,5 +1,40 @@
 # fs-duct — Contract
 
+## Thermoviscous propagation through actual annular passages
+
+`fluid::annular::AnnularSection` retains the original concentric inner/outer
+radii and every declared logarithmic radial P1 coordinate. Exact area-weighted
+mass and stiffness integrals resolve cylindrical momentum and thermal
+diffusion with both rigid no-slip/isothermal walls. The section mean follows
+the actual annular measure; an equal-area cylinder or hydraulic-radius loss
+law is not substituted. A zero inner radius belongs to the existing circular
+owner because an axis is not a no-slip wall.
+
+Each frequency queries one coherent original `ThermoviscousFluid` snapshot.
+Separate viscosity and heat diffusion use the native complex tridiagonal
+owner in O(N) work and storage; thermal work is absent exactly when Cp=Cv.
+Well-scaled velocity or complementary wall fields retain weak fractions, and
+compensated area integration produces the native `SegmentWave` and stable
+finite-length `TwoPort` in exp(-i omega t). Actual-area impedance, scattering
+composition, loads and pressure/volume-flow propagation remain native.
+
+Caller-declared transverse phase, radial cell diffusion phase, backward/work
+residual and payload bounds are enforced, alongside the hard 4096-element
+limit and cancellation checkpoints. The conservative plane-pressure envelope
+uses the actual outer radius and both lossless and complex propagation
+wavenumbers. The residuals establish discrete solve and work consistency;
+they do not certify radial discretization or full three-dimensional error.
+Radial refinement and the low-reduced-frequency model remain independent
+admission axes.
+
+Scope is fixed, concentric, fully developed linear Newtonian continuum
+acoustics. End fields, eccentricity, slip, mean flow, moving walls, bulk
+viscosity and axial heat diffusion require their own physical owners. The
+five groups in `tests/annular_thermoviscous.rs` cover exact annular Poiseuille
+and isothermal limits, radial refinement against an independent primitive
+ODE, slit and slowly vanishing inner-wall limits, original scattering power
+and long-duct composition, and material/geometry/budget/cancellation refusals.
+
 ## Purpose and layer
 
 Layer L3 (FLUX). 1D viscothermal duct/horn acoustics
