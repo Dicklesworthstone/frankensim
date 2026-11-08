@@ -2035,3 +2035,54 @@ contacts, rotated/refined cube work counts, translated world datums, large
 body-coordinate depth cancellation, original arithmetic refusal and initial/
 final cancellation. The optimization changes eligible query work, not fluid
 density, material identity, displaced geometry or the mechanical load owner.
+
+## Coupled floating equilibrium and local restoring stiffness
+
+With the `hydrostatic-equilibrium` feature, `solve_floating_equilibrium`
+initializes COM heave and two gravity-horizontal tilt coordinates together.
+The existing fallible finite-difference adapter and Newton-Krylov solver own
+Jacobian actions, linear solves and globalization. Bounded smooth coordinates
+keep every trial and difference stencil inside a caller-declared translation
+and tilt domain. The solver caps both Newton attempts and actual reservoir
+loads, and caches two repeated immutable load coordinates. It never resolves
+material sources again or substitutes a fixed waterline for a finite tank.
+
+Accepted results have zero momentum, retain the original source-derived mass
+and load, and pass independent full world-force and COM-torque norm gates.
+No holding torque is applied. Lateral COM coordinates stay fixed; yaw has no
+independent unknown. This is a local initialization, not physical damping,
+a conservative replacement of a moving state, a global root search or proof
+of stability. Original geometry, tank, source and cancellation failures abort
+without an approximate candidate. The focused regressions cover independent
+heterogeneous-box integration, material substitution, all prescribed density
+models, uniform/immiscible finite inventories, frame covariance and refusal.
+
+`analyze_hydrostatic_stability` is available without the nonlinear feature.
+At a static force/torque-balanced pose, it forms
+`K = -d(L*F_up, torque_roll, torque_pitch)/d(heave/L, roll, pitch)`.
+World rotations are centered on the material COM, and a supplied heading
+defines horizontal roll independently of arbitrary principal-axis ordering.
+Thirteen original reservoir evaluations give central differences at full and
+half steps. Every finite inventory is re-solved at every perturbed pose.
+Entrywise refinement and conservative-symmetry defects must meet combined
+absolute/relative allowances before symmetrization. Unrepresentable world
+heave components refuse instead of silently changing the perturbation axis.
+The same samples compare extrapolated one-sided derivatives: a waterline
+contact kink cannot pass merely because both central averages agree. Smooth
+one-sided curvature cancels under the full/half-step extrapolation; unresolved
+derivative jumps refuse the local Hessian analysis.
+
+The existing allocation-free, bounded symmetric 3x3 eigenvalue kernel owns
+the spectrum. Classification is `Restoring`, `Unstable` or `Marginal`; the
+neutral margin includes the requested absolute resolution, observed matrix
+defects and floating-point spectral resolution. These are local numerical
+estimates, not certified derivative enclosures. Eigenvalue magnitudes depend
+on the chosen positive length scale and are not oscillation frequencies.
+Horizontal drift and yaw, finite-angle capsize, fluid inertia, damping,
+added mass, waves and sloshing remain outside this quasistatic analysis.
+
+`tests/hydrostatic/stability.rs` compares the actual loads with independent
+waterplane/metacentric formulas, an unstable tall body, neutral submergence,
+the finite-tank heave factor `A_tank/(A_tank-A_waterplane)`, and continuous
+stratification. It also checks frame covariance, cancellation, source reuse
+and perturbation resolution.

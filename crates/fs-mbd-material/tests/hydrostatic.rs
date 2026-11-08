@@ -21,6 +21,8 @@ mod equilibrium;
 #[cfg(feature = "hydrostatic-equilibrium")]
 #[path = "hydrostatic/floating_equilibrium.rs"]
 mod floating_equilibrium;
+#[path = "hydrostatic/stability.rs"]
+mod stability;
 use common::{close, density_card, point};
 use fs_ga::{Se3, So3, So3Tangent, Twist, Vec3};
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};

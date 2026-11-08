@@ -27,7 +27,10 @@
 //! owner. Every trial uses the original reservoir load and conserved tank
 //! inventories; an accepted pose needs neither a holding force nor a holding
 //! torque. Its local search is bounded, cancellable and explicitly budgeted.
-//! A force/torque-balanced pose does not itself establish stability.
+//! `analyze_hydrostatic_stability` differentiates the original reservoir loads
+//! in COM heave and world tilt, checking refinement and conservative symmetry
+//! before classifying the local restoring stiffness. It is also available
+//! without the nonlinear feature. A balanced pose may be unstable or neutral.
 //! A gas snapshot is admissible only
 //! as a caller-chosen local constant-density approximation, not its full EOS.
 //!
@@ -42,8 +45,8 @@ mod density_profile;
 mod equilibrium;
 #[cfg(feature = "hydrostatic-equilibrium")]
 mod floating_equilibrium;
-#[cfg(feature = "hydrostatic-equilibrium")]
 mod pose;
+mod stability;
 mod step;
 mod finite_tank;
 mod finite_layered;
@@ -72,6 +75,10 @@ pub use floating_equilibrium::{
     FloatingEquilibrium, FloatingEquilibriumControls, FloatingEquilibriumError,
     MAX_FLOATING_EVALUATIONS, MAX_FLOATING_NEWTON_ITERATIONS,
     solve_floating_equilibrium,
+};
+pub use stability::{
+    HydrostaticStability, HydrostaticStabilityControls, HydrostaticStabilityError,
+    HydrostaticStabilityReport, analyze_hydrostatic_stability,
 };
 pub use geometry::{DisplacedVolume, DisplacementMesh, MAX_DISPLACEMENT_CELLS};
 pub use layered::{HydrostaticLayer, LayeredHydrostaticMedium, MAX_HYDROSTATIC_LAYERS};
