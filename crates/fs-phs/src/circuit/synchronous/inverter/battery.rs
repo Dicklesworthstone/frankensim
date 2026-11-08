@@ -24,6 +24,8 @@ use crate::{
 };
 use fs_math::{dd::Dd, det};
 
+pub mod shaft;
+
 fn sum(values: impl IntoIterator<Item = f64>) -> f64 {
     values
         .into_iter()

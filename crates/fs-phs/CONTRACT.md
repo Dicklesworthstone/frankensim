@@ -179,6 +179,41 @@ oracle, changing-duty motoring and regenerative braking, original saturation
 plus an OCV-knot crossing, and late-cancellation rollback/retry. These added
 native tests have not been executed in the current resource-limited environment.
 
+### Finite elastic load on the battery-driven synchronous machine
+
+`circuit::synchronous::inverter::battery::shaft` appends shaft twist and finite
+load angular momentum to the original battery/inverter/synchronous-machine
+state. All eleven coordinates evolve in one native solve, so load acceleration
+and shaft strain feed back through rotor motion, back EMF, winding current,
+finite bus voltage and chemical charge within the same interval.
+
+The fixed coaxial law `T=k*z+c*(omega_rotor-omega_load)` applies equal/opposite
+rotor/load reactions. Native skew coupling owns spring exchange and a positive
+source row owns shaft damping. Original absolute rotor/stator momenta remain;
+stator recoil is not silently grounded. Changing duty and external
+rotor/stator/load torques preserves stored state and Hamiltonian parameters.
+
+Original battery and inverter interval accounts are reused. Inverter rotor
+work includes external torque minus shaft reaction; the complete solve supplies
+only the three external absolute-speed torque works. Battery, lead, inverter,
+elastic shaft, load kinetic, total storage and all twelve physical loss
+channels have separate balance gates. Spring and load kinetic changes use
+compensated differential quadratic energy. Successful warm steps reuse fixed
+scratch. Refusal restores the complete electrical/mechanical stamp and
+publishes no caller state.
+
+This is a finite coaxial lumped shaft with fixed passive coefficients. Zero
+stiffness/damping are admitted limits; rigid constraints, gear ratios,
+distributed shaft modes, backlash and fracture require their own laws. The
+original averaged inverter and battery support boundaries remain.
+
+Focused tests specify exact two-inertia midpoint motion, convergence to the
+continuous damped oscillator, full dq/circuit/elastic-load transient refinement
+across command steps, and final-cancellation rollback with deterministic retry.
+The independent reference helpers were compiled/executed separately to check
+the physical oracle. The native implementation tests have not been executed
+in the current resource-limited environment.
+
 ## Synchronous PM and reluctance electromechanics
 
 `circuit::synchronous::SynchronousMotor` retains two stator-frame flux linkages,

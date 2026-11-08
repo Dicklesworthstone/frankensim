@@ -12,6 +12,9 @@ use fs_phs::circuit::{
     },
 };
 
+#[path = "battery/shaft.rs"]
+mod shaft;
+
 const LEAD: f64 = 0.2;
 
 fn battery_parameters() -> BatteryParameters {
