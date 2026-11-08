@@ -1,3 +1,41 @@
+## Synchronized transient Rayleigh field and microphone orientation
+
+`baffled_pressure::field::BaffledField` observes pressure and all three fluid
+particle-velocity components on the same accepted source trace and physical
+clock. It composes the original bandlimited differentiating receiver and
+first-order receiver kernels, retaining both the radiating `Q'/(c R)` and
+reactive `Q/R²` velocity terms on each original surface path. Pressure
+cancellation does not erase a surviving vector field. The actual medium
+remains bound to each frame; a prescribed volume flow's velocity is independent
+of fluid density, while its acoustic pressure scales with density.
+
+`FieldFrame::microphone_pressure_pa` applies the original ideal `FirstOrder`
+pressure/velocity projection at any new front orientation without resetting
+history. This is local observation at a stationary point, not moving-receiver
+propagation or sensor-body mechanics. `intensity_w_m2` returns signed
+instantaneous `p*u` after coherent field superposition, including reactive
+energy return; it is neither pressure-squared plane-wave intensity nor an
+independent sound-power or radiation-loading estimate.
+
+The circular-outlet front door shares the original disk quadrature, physical
+volume-flow normalization and spatial-band admission. Every source substep is
+observed before native antialiasing. Pressure and velocity share the explicit
+derivative/fractional-delay latency, including non-dyadic rate alignment.
+All four previews and SI conversions precede every history commit. Warm
+stepping allocates nothing; cold preparation retains seven existing bounded
+FIR banks. No new propagation or source model is introduced. The original
+flat infinite baffle, prescribed small motion, homogeneous inviscid fluid,
+zero prehistory and one-way loading limits remain.
+
+G1/G3 regressions in `baffled_pressure_field_tests.rs` cover independent
+retarded spherical formulas at several frequencies and rate ratios, surviving
+velocity at a pressure null, signed and cycle-averaged energy flux, density
+scaling, outlet parity with the original consumer, and refused-trace rollback.
+These new regressions were not executed during their implementation session:
+the shared execution environment became unavailable after syntax checking and
+source review. No successful native build, full test pass or physical
+validation is claimed by their addition.
+
 ## Simultaneous original shell, interior pressure and exterior radiation
 
 `TensorShellInterior::prepare_with_exterior` couples the original material
