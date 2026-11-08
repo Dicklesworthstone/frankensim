@@ -2,7 +2,9 @@
 //! These establish numerical/source coupling, not measured material validation.
 use fs_evidence::ValidityDomain;
 use fs_exec::CancelGate;
-use fs_lbm::material::transport::tensor::{MaterialThermalTensorError, ThermalMaterialField};
+use fs_lbm::material::transport::tensor::{
+    MaterialThermalTensorError, ThermalMaterialField, TensorMidpointOptions,
+};
 use fs_lbm::material::{
     MaterialSlab, MaterialSlab3, MaterialThermalSlab, MaterialThermalSlab3,
     plan_scaling_from_material,
@@ -172,6 +174,206 @@ fn power(value: f64) -> Vec<f64> {
 }
 fn close(a: f64, b: f64, tolerance: f64) {
     assert!((a - b).abs() <= tolerance, "{a} != {b}");
+}
+
+fn midpoint_options() -> TensorMidpointOptions {
+    TensorMidpointOptions {
+        max_iterations: 32,
+        temperature_tolerance_k: 1e-10,
+        conductivity_relative_tolerance: 1e-12,
+        relaxation: 1.0,
+    }
+}
+
+fn two_cell_slab() -> MaterialSlab {
+    use fs_lbm::thermal::boundary::ThermalWall;
+    let material = FluidTransportState::try_new(1000.0, 2000.0, 1000.0, 1.0).unwrap();
+    let mut slab = plan_scaling_from_material(&material, 0.01, 0.01, 0.1)
+        .unwrap()
+        .thermal_slab(MaterialThermalSlab {
+            nx: 1,
+            ny: 2,
+            bottom_temperature_k: 310.0,
+            top_temperature_k: 300.0,
+            gravity_m_s2: 0.0,
+            expansion_per_k: 0.0,
+            max_cells: 4,
+        })
+        .unwrap();
+    slab.lattice.set_thermal_walls([ThermalWall::Adiabatic; 2]).unwrap();
+    // T=(310,300) K. Equal flux J=0.1*(0.6,0.8) on both cells is
+    // aligned with the FIRST ROTATED material direction, not the wall normal.
+    let w = 1.0 / 6.0;
+    slab.lattice.gpop[1] = [1.0 / 3.0, w + 0.03, w + 0.04, w - 0.03, w - 0.04];
+    slab.lattice.gpop[2] = [0.0, 0.03, 0.04, -0.03, -0.04];
+    slab
+}
+
+#[test]
+fn g1_rotated_nonlinear_diffusion_solves_the_independent_midpoint_equation() {
+    let law = PreparedOrthotropicThermalTransport::try_new(
+        paths([[200.0, 10000.0], [5000.0, 1000.0]], [280.0, 340.0], false),
+        rotated2(),
+    ).unwrap();
+    let mut midpoint = two_cell_slab();
+    let mut lagged = two_cell_slab();
+    let result = midpoint.step_with_material_tensor_diffusion_midpoint(
+        &[0.0; 4], &[[0.0; 2]; 4], 0.01, ThermalMaterialField::Uniform(&law),
+        limits(), midpoint_options(), &CancelGate::new(),
+    ).unwrap();
+    lagged.step_with_material_tensor_diffusion(
+        &[0.0; 4], &[[0.0; 2]; 4], 0.01, ThermalMaterialField::Uniform(&law),
+        limits(), &CancelGate::new(),
+    ).unwrap();
+
+    // Independent two-cell solution. Tensor collision maps the original
+    // aligned flux to J'=(1-s1)J, s1=1/(1/2+3*alpha1). Adiabatic streaming
+    // then transfers g1+ - g2- once. With theta_mean=1/2 and initial contrast
+    // delta=1/2, the endpoint contrast obeys the following scalar equation.
+    // No production tensor inverse, source sampler or collision is the oracle.
+    let rate = |temperature: f64| {
+        let conductivity = 200.0 + 9800.0 * (temperature - 280.0) / 60.0;
+        let alpha = conductivity / 2e6 * (0.01 / 0.01_f64.powi(2));
+        1.0 / (0.5 + 3.0 * alpha)
+    };
+    let predicted = |delta: f64| {
+        1.0 / 3.0 - 0.08
+            + 0.04 * (rate(307.5 + 5.0 * delta) + rate(302.5 - 5.0 * delta))
+    };
+    let (mut lower, mut upper) = (0.0, 0.5);
+    for _ in 0..80 {
+        let delta = 0.5 * (lower + upper);
+        if delta < predicted(delta) { lower = delta; } else { upper = delta; }
+    }
+    let delta = 0.5 * (lower + upper);
+    let temperature = |slab: &MaterialSlab, cell: usize| {
+        slab.temperature_si(slab.lattice.gpop[cell].iter().sum()).unwrap()
+    };
+    close(temperature(&midpoint, 1), 305.0 + 10.0 * delta, 3e-11);
+    close(temperature(&midpoint, 2), 305.0 - 10.0 * delta, 3e-11);
+    assert!((temperature(&lagged, 1) - temperature(&midpoint, 1)).abs() > 0.002);
+    assert!(result.iterations > 1 && result.iterations < 16);
+    assert!(result.temperature_residual_k <= midpoint_options().temperature_tolerance_k);
+    assert!(result.conductivity_relative_residual <= midpoint_options().conductivity_relative_tolerance);
+    for (used, old) in result.step.applied.iter().zip([310.0, 300.0]) {
+        close(used.material.temperature_k(), 0.5 * (old + temperature(&midpoint, used.cell)), 1e-10);
+        assert_eq!(used.material.path_identity(), law.identity());
+        assert!(used.material.conductivity_w_m_k()[0][1].abs() > 1.0);
+    }
+    close(result.step.heat.source_j, 0.0, 0.0);
+    close(result.step.heat.bottom_wall_j, 0.0, 0.0);
+    close(result.step.heat.top_wall_j, 0.0, 0.0);
+    close(result.step.heat.stored_change_j, 0.0, 1e-13);
+}
+
+#[test]
+fn g3_constant_tensor_midpoint_preserves_native_steps_in_both_dimensions() {
+    let law2 = PreparedOrthotropicThermalTransport::try_new(
+        paths([[1000.0; 2], [3000.0; 2]], [280.0, 340.0], false), rotated2(),
+    ).unwrap();
+    let law3 = PreparedOrthotropicThermalTransport::try_new(
+        paths([[1000.0; 2], [1800.0; 2], [3000.0; 2]], [280.0, 340.0], false),
+        [[0.6, 0.0, -0.8], [0.0, 1.0, 0.0], [0.8, 0.0, 0.6]],
+    ).unwrap();
+    let (mut a2, mut b2) = (slab2(), slab2());
+    let (mut a3, mut b3) = (slab3(), slab3());
+    a2.lattice.gpop[13][0] += 0.1;
+    b2.lattice.gpop[13][0] += 0.1;
+    a3.lattice.gpop[13][0] += 0.1;
+    b3.lattice.gpop[13][0] += 0.1;
+    for _ in 0..4 {
+        let a = a2.step_with_material_tensor_diffusion(
+            &power(1e6), &[[1.0, 0.0]; 32], 0.02, ThermalMaterialField::Uniform(&law2),
+            limits(), &CancelGate::new(),
+        ).unwrap();
+        let b = b2.step_with_material_tensor_diffusion_midpoint(
+            &power(1e6), &[[1.0, 0.0]; 32], 0.02, ThermalMaterialField::Uniform(&law2),
+            limits(), midpoint_options(), &CancelGate::new(),
+        ).unwrap();
+        assert_eq!(a.heat, b.step.heat);
+        assert_eq!(a2.lattice.grid.f, b2.lattice.grid.f);
+        assert_eq!(a2.lattice.gpop, b2.lattice.gpop);
+        assert_eq!(b.conductivity_relative_residual, 0.0);
+        let a = a3.step_with_material_tensor_diffusion(
+            &power(1e6), &[[1.0, 0.0, 0.0]; 32], ThermalMaterialField::Uniform(&law3),
+            limits(), &CancelGate::new(),
+        ).unwrap();
+        let b = b3.step_with_material_tensor_diffusion_midpoint(
+            &power(1e6), &[[1.0, 0.0, 0.0]; 32], ThermalMaterialField::Uniform(&law3),
+            limits(), midpoint_options(), &CancelGate::new(),
+        ).unwrap();
+        assert_eq!(a.heat, b.step.heat);
+        assert_eq!(a3.lattice.grid.f, b3.lattice.grid.f);
+        assert_eq!(a3.lattice.gpop, b3.lattice.gpop);
+        assert_eq!(b.conductivity_relative_residual, 0.0);
+    }
+}
+
+#[test]
+fn g4_midpoint_nonconvergence_and_source_refusal_preserve_replay() {
+    let law = PreparedOrthotropicThermalTransport::try_new(
+        paths([[200.0, 10000.0], [5000.0, 1000.0]], [280.0, 340.0], false), rotated2(),
+    ).unwrap();
+    let mut actual = two_cell_slab();
+    let mut replay = two_cell_slab();
+    let mut one = midpoint_options();
+    one.max_iterations = 1;
+    assert!(matches!(actual.step_with_material_tensor_diffusion_midpoint(
+        &[0.0; 4], &[[0.0; 2]; 4], 0.01, ThermalMaterialField::Uniform(&law),
+        limits(), one, &CancelGate::new(),
+    ), Err(MaterialThermalTensorError::NonConvergence { iterations: 1, .. })));
+    for bad in [0.0, f64::NAN, f64::INFINITY] {
+        let mut options = midpoint_options(); options.relaxation = bad;
+        assert!(matches!(actual.step_with_material_tensor_diffusion_midpoint(
+            &[0.0; 4], &[[0.0; 2]; 4], 0.01, ThermalMaterialField::Uniform(&law),
+            limits(), options, &CancelGate::new(),
+        ), Err(MaterialThermalTensorError::InvalidMidpointOptions)));
+    }
+    let narrow = PreparedOrthotropicThermalTransport::try_new(
+        paths([[1000.0; 2], [3000.0; 2]], [300.0, 310.0], false), rotated2(),
+    ).unwrap();
+    assert!(matches!(actual.step_with_material_tensor_diffusion_midpoint(
+        &[0.0, 2e9, 2e9, 0.0], &[[0.0; 2]; 4], 0.01, ThermalMaterialField::Uniform(&narrow),
+        limits(), midpoint_options(), &CancelGate::new(),
+    ), Err(MaterialThermalTensorError::Source { .. })));
+    let cancelled = CancelGate::new(); cancelled.request();
+    assert!(matches!(actual.step_with_material_tensor_diffusion_midpoint(
+        &[0.0; 4], &[[0.0; 2]; 4], 0.01, ThermalMaterialField::Uniform(&law),
+        limits(), midpoint_options(), &cancelled,
+    ), Err(MaterialThermalTensorError::Cancelled)));
+    assert_eq!(actual.lattice.gpop, replay.lattice.gpop);
+    assert_eq!(actual.lattice.grid.f, replay.lattice.grid.f);
+    assert_eq!(actual.lattice.grid.fext, replay.lattice.grid.fext);
+    assert_eq!(actual.lattice.last_wall_exchange(), None);
+    for _ in 0..4 {
+        for slab in [&mut actual, &mut replay] {
+            slab.step_with_material_tensor_diffusion_midpoint(
+                &[0.0; 4], &[[0.0; 2]; 4], 0.01, ThermalMaterialField::Uniform(&law),
+                limits(), midpoint_options(), &CancelGate::new(),
+            ).unwrap();
+        }
+        assert_eq!(actual.lattice.gpop, replay.lattice.gpop);
+        assert_eq!(actual.lattice.grid.f, replay.lattice.grid.f);
+        assert_eq!(actual.lattice.last_wall_exchange(), replay.lattice.last_wall_exchange());
+    }
+}
+
+#[test]
+fn g0_midpoint_recheck_resolves_the_weak_principal_direction() {
+    let law = PreparedOrthotropicThermalTransport::try_new(
+        paths([[10000.0; 2], [0.1, 1.0]], [280.0, 340.0], false), rotated2(),
+    ).unwrap();
+    let mut slab = two_cell_slab();
+    let mut options = midpoint_options();
+    options.max_iterations = 1;
+    options.temperature_tolerance_k = 100.0;
+    options.conductivity_relative_tolerance = 1e-3;
+    assert!(matches!(slab.step_with_material_tensor_diffusion_midpoint(
+        &[0.0; 4], &[[0.0; 2]; 4], 0.01, ThermalMaterialField::Uniform(&law),
+        limits(), options, &CancelGate::new(),
+    ), Err(MaterialThermalTensorError::NonConvergence {
+        conductivity_relative_residual: Some(residual), ..
+    }) if residual > 0.01));
 }
 
 #[test]

@@ -1,5 +1,24 @@
 
 
+## Midpoint material tensor diffusion
+
+The D2Q5/D3Q7 material slabs expose `step_with_material_tensor_diffusion_midpoint`
+for source-bound, rotated K(T). The original native step is solved at the actual
+old/new temperature midpoint with bounded under-relaxed iteration. Temperature
+consistency and a fresh relative check of every principal conductivity must pass;
+a strong axis cannot hide a mismatch on a weak one. The original caloric storage,
+physical source/force conversion, wall exchange and energy acceptance remain
+authoritative. No directional average replaces the tensor.
+
+Each trial uses the original source-step transaction and accepted populations,
+including force frames and advective history. Nonconvergence, source-domain or
+endpoint refusal, and cancellation publish no partial time step. Density/Cp remain
+constant over their source domains. This closes conductivity lag in the stated
+fixed-point equation; it does not claim general second-order time accuracy or
+unconditional stability of the split LBM. G1/G3/G4 integration cases compare an
+independent nonlinear two-cell tensor reference, exact constant-law replay in
+both dimensions, weak-axis admission, and transactional failure/replay.
+
 ## Compact borrowed free-surface impulse staging
 
 `FreeSurface3::prepare_impulse_stencil` retains a mutable borrow of the original native owner while sampling a bounded, strictly increasing wet-cell stencil. Native populations, located retained liquid mass, physical Guo-frame velocity and original cell centers feed the shared population impulse kernel. Gas, inactive/static solid, piston, unresolved interface inventory, excessive speed and unrepresentable states refuse. Staging preserves original populations until the final commit; dropping a stage/candidate or final cancellation leaves the original unchanged. Candidate readback exposes each original mass/position and actual endpoint velocity so a finite receiving owner can independently gate reciprocal angular momentum and work before joint publication. No fluid clock, held force, fill/classification, geometry or unlocated carry is changed.
