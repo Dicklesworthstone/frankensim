@@ -1,4 +1,7 @@
 //! Finite battery, regulated load and all eight material heat receivers.
+#[path = "battery/motor.rs"]
+mod motor;
+
 use super::*;
 use fs_couple::circuit_enthalpy::converter::battery::*;
 use fs_phs::{

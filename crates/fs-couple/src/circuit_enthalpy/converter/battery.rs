@@ -11,6 +11,9 @@
 //! owner adds no OCV(T), reversible entropic battery heat, chemistry fit, aging,
 //! PWM switching loss or protection-event model.
 
+/// Finite winding, rotor and stator storage on the same battery/thermal timeline.
+pub mod motor;
+
 use super::voltage::sum;
 use super::*;
 use fs_math::dd::Dd;

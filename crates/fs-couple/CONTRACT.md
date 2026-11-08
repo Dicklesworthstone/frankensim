@@ -6410,3 +6410,31 @@ integrals, exact twice-frequency resonance and interval subdivision, original
 mesh permutations, correspondence/support/resource refusals and atomic phase
 rollback. These are synthetic implementation references, not experimental
 validation of an electromagnetic device or its emitted sound.
+
+## Finite battery-to-shaft drive with material heating
+
+`circuit_enthalpy::converter::battery::motor::BatteryMotorThermalNetwork` advances
+the original battery/converter/motor nine-state owner and finite material
+enthalpy in one accepted interval. Chemical/polarization/bus charge, both winding
+fluxes, converter bus charges, and finite rotor/stator momenta remain intact.
+Reciprocal converter-to-motor voltage/current exchange supports motoring and
+regeneration; both external shaft torques pair with their absolute speeds, while
+optional regulated auxiliary demand exports electrical work.
+
+Nine original resistance bindings refresh at the actual trial T/phase: converter
+five, battery series/polarization, lead and motor winding. Fixed native bearing
+drag in N m s/rad has a separate explicit receiver. All ten physical heat
+integrals deposit once, including explicitly shared bodies; shaft work and
+auxiliary export remain separate. Independent battery, lead, converter, motor and
+whole-system balances accompany the existing local/global thermal residual.
+Identical resistance tuples reuse bounded native trial results, and every trial
+restarts the same accepted nine coordinates.
+
+Original OCV/C/L, inertias, reciprocal coupling and bearing coefficient remain
+fixed; no temperature-dependent storage, entropic heat, iron/PWM loss or
+protection law is inferred. Endpoint resistance coupling is generally first
+order. Material support, finite SOC, receiver identity, clocks, thermal events,
+budgets and cancellation admit all histories together or publish none.
+`tests/converter_enthalpy/battery/motor.rs` covers ten-channel calorimetry with
+both shaft works and auxiliary export, finite-inertia regeneration, all-nine
+R(T) feedback, shared receivers and atomic refusal/retry.
