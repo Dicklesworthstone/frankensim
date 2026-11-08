@@ -30,6 +30,7 @@ mod response;
 pub use response::{ExchangerInletResponse, ExchangerResponseConfig};
 
 pub mod co_current_water;
+pub mod countercurrent_water;
 pub mod phase;
 
 #[cfg(test)]
@@ -699,8 +700,6 @@ impl Pair<'_> {
         }
 
         let breaks = self.source_breaks(heat, config)?;
-        let mut sum = Dd::ZERO;
-        let mut errors = Dd::ZERO;
         let mut visited = 0usize;
         let mut lower_bound = Dd::ZERO;
         // Inspect every original paired interval before refinement: a pinch
@@ -729,50 +728,16 @@ impl Pair<'_> {
                 complete: false,
             });
         }
-        let mut pending = Vec::new();
-        for interval in breaks.windows(2) {
-            pending.push((interval[0], interval[1]));
-            while let Some((left, right)) = pending.pop() {
-                poll(cx)?;
-                visited += 1;
-                if visited > config.max_quadrature_panels {
-                    return Err(ExchangerError::WorkLimit);
-                }
-                let panel = self.panel(heat, left, right)?;
-                let allocation = tolerance * ((right - left) / heat);
-                if panel.error <= allocation {
-                    sum = sum + Dd::from_f64(panel.ua);
-                    errors = errors + Dd::from_f64(panel.error);
-                    // A partial integral above the rejection ceiling already
-                    // proves that the trial heat is too large. Incomplete
-                    // integrals can tighten the bracket but never pass a gate.
-                    if stop_above.is_some_and(|ceiling| sum.to_f64() - errors.to_f64() > ceiling) {
-                        return Ok(Measure {
-                            ua: sum.to_f64(),
-                            error: errors.to_f64(),
-                            complete: false,
-                        });
-                    }
-                } else {
-                    let middle = left + 0.5 * (right - left);
-                    if middle <= left || middle >= right {
-                        return Err(ExchangerError::Unresolved("UA quadrature precision"));
-                    }
-                    pending.push((middle, right));
-                    pending.push((left, middle));
-                }
-            }
-        }
-        let ua = positive(sum.to_f64(), "integrated conductance")?;
-        let error = errors.to_f64();
-        if !error.is_finite() {
-            return Err(ExchangerError::Unresolved("UA quadrature allowance"));
-        }
-        Ok(Measure {
-            ua,
-            error,
-            complete: true,
-        })
+        integrate_panels(
+            cx,
+            &breaks,
+            heat,
+            tolerance,
+            config.max_quadrature_panels,
+            &mut visited,
+            stop_above,
+            |left, right| self.panel(heat, left, right),
+        )
     }
 
     fn source_breaks(
@@ -899,6 +864,64 @@ impl Pair<'_> {
             complete: true,
         })
     }
+}
+
+/// Existing fixed-order panel traversal. Each source owner retains its own
+/// panel formula and error semantics. Estimated-error callers must not use
+/// `stop_above` as a certified partial-integral rejection.
+#[allow(clippy::too_many_arguments)]
+fn integrate_panels<E: From<ExchangerError>>(
+    cx: &Cx<'_>,
+    breaks: &[f64],
+    heat: f64,
+    tolerance: f64,
+    maximum_panels: usize,
+    visited: &mut usize,
+    stop_above: Option<f64>,
+    mut evaluate: impl FnMut(f64, f64) -> Result<Measure, E>,
+) -> Result<Measure, E> {
+    let (mut sum, mut errors) = (Dd::ZERO, Dd::ZERO);
+    let mut pending = Vec::new();
+    for interval in breaks.windows(2) {
+        pending.push((interval[0], interval[1]));
+        while let Some((left, right)) = pending.pop() {
+            poll(cx)?;
+            *visited += 1;
+            if *visited > maximum_panels {
+                return Err(ExchangerError::WorkLimit.into());
+            }
+            let panel = evaluate(left, right)?;
+            let allocation = tolerance * ((right - left) / heat);
+            if panel.error <= allocation {
+                sum = sum + Dd::from_f64(panel.ua);
+                errors = errors + Dd::from_f64(panel.error);
+                if stop_above.is_some_and(|ceiling| sum.to_f64() - errors.to_f64() > ceiling) {
+                    return Ok(Measure {
+                        ua: sum.to_f64(),
+                        error: errors.to_f64(),
+                        complete: false,
+                    });
+                }
+            } else {
+                let middle = left + 0.5 * (right - left);
+                if middle <= left || middle >= right {
+                    return Err(ExchangerError::Unresolved("UA quadrature precision").into());
+                }
+                pending.push((middle, right));
+                pending.push((left, middle));
+            }
+        }
+    }
+    let ua = positive(sum.to_f64(), "integrated conductance")?;
+    let error = errors.to_f64();
+    if !error.is_finite() {
+        return Err(ExchangerError::Unresolved("UA quadrature allowance").into());
+    }
+    Ok(Measure {
+        ua,
+        error,
+        complete: true,
+    })
 }
 
 fn constant_heat(

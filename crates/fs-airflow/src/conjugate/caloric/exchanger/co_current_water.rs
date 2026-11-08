@@ -63,8 +63,9 @@ impl Default for CoCurrentWaterExchangerConfig {
     }
 }
 
+/// Original source endpoint calorimetry shared by continuous water exchangers.
 #[derive(Clone, Debug, PartialEq)]
-pub struct CoCurrentWaterExchangerState {
+pub struct WaterExchangerState {
     pub sensible_outlet_temperature_k: f64,
     pub water_outlet: WaterState,
     /// One shared Q, positive from water to the sensible stream.
@@ -89,9 +90,12 @@ pub struct CoCurrentWaterExchangerState {
     pub entropy_numerical_allowance_w_per_k: f64,
     /// Native report on the declared tau=1 s auxiliary coordinate. Energy
     /// defects divided by tau are watt defects. This is not exchanger storage.
-    /// None for exactly zero UA or equal inlet temperatures.
+    /// None when no native SSPRK2 trajectory is needed, including duty rating
+    /// and countercurrent quadrature, zero UA or equal inlet temperatures.
     pub integration: Option<AdaptiveSsprk2Report>,
 }
+
+pub use WaterExchangerState as CoCurrentWaterExchangerState;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CoCurrentWaterExchangerError {
@@ -295,7 +299,7 @@ impl CoCurrentWaterHeatExchanger {
         self.finish(cx, heat, sensible_outlet, Some(report), config.endpoint)
     }
 
-    fn finish(
+    pub(super) fn finish(
         &self,
         cx: &Cx<'_>,
         heat: f64,

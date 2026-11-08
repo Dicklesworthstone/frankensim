@@ -5170,12 +5170,65 @@ Source-domain exhaustion, unrepresentable nonzero heat, passive-gap crossing
 and exhausted work refuse. This owner currently admits the continuous original
 Gibbs chart; dense/regional extensions require their own continuous-path
 admission. It models co-current plug flow with prescribed UA and fixed
-composition/pressure on each side. Counterflow, pressure loss, wall inventory
+composition/pressure on each side. Pressure loss, wall inventory
 and boiling/condensation correlations are separate capabilities. The existing
 plateau exchanger remains the exact native fast path for wholly isothermal
 water exchange. Focused regressions compare that plateau solution, independently
 integrated full-path UA duties, accuracy refinement, mass-rate/UA scaling,
 independent Cp datums, source limits, zero exchange and cancellation.
+
+## Continuous countercurrent water/steam exchange across phase boundaries
+
+`conjugate::caloric::exchanger::countercurrent_water::CountercurrentWaterHeatExchanger`
+accepts the same original Gibbs water inlet, finite water mass rate and
+original-Cp sensible stream with independent fixed pressures and temperature
+domains. `solve` finds the reciprocal duty for prescribed total UA;
+`rate_duty` reports required UA for a specified signed water-to-sensible duty.
+Both admit desuperheating/condensing/subcooling and feedwater/boiling/superheating
+without clipping exhausted phase inventory or replacing latent heat by Cp.
+Countercurrent outlet temperature crossover is physical and is admitted when
+the entire local paired-stream gap remains positive.
+
+With duty magnitude Q and sign sigma, the water-direction coordinate q runs
+from zero to Q. Original water enthalpy is `h_w,in-sigma*q/mdot_w`; the opposing
+stream has remaining native heat progress `Q-q`. Required conductance is
+`integral(dq / (sigma*(T_w(q)-T_s(Q-q))))`. Native water p,h inversion and the
+existing Cp `SourcePath` retain their original source support. Every original
+saturation endpoint and Cp knot splits the integral. Both oriented source
+temperatures decrease with q, so cross-endpoint temperature ranges on each
+accepted quarter-panel bound its WHOLE local gap. Endpoint-only pinch tests
+cannot admit an unsampled interior crossing. Unresolved ranges subdivide;
+sampled pinches, inverse-resolution limits and exhausted work refuse.
+
+The original exchanger's fixed-order adaptive traversal is shared, while its
+existing affine-Cp panel/error formulas remain unchanged. Water panels use
+embedded composite-Simpson error ESTIMATES plus a separately reported allowance
+from native inverse residuals, original global inverse-temperature slopes and
+rounding. These are not analytic truncation bounds or interval certificates.
+The minimum admitted temperature gap and numerical duty bracket retain that
+qualification. Monotone original-source ranges supply the early lower-UA
+rejection; estimated partial quadrature does not. The monotone scalar duty
+solve uses both UA and heat-width gates, original finite-throughput brackets,
+per-UA panel/outer-iteration bounds and one water-query budget shared across
+preparation and every accepted or rejected trial.
+
+The existing original endpoint audit is shared as `WaterExchangerState`;
+`CoCurrentWaterExchangerState` remains its public compatibility name. Original
+water `advance_heat` checks stable and represented h and u+p*v changes, the
+original Cp endpoint checks the reciprocal duty, and raw source entropy and
+thermal seam correction remain separate signed accounts. Pressure flow work
+is included once. Countercurrent results have no SSPRK2 trajectory. Final
+native calorimetry retains its own bounded inverses and cancellation, and no
+partial result escapes any failed gate.
+
+Focused tests independently integrate full condensation and boiling duties,
+exercise physical outlet crossover, compare the exact plateau owner, preserve
+mass-rate/UA scaling and independent Cp datums, cross nonlinear Cp knots with
+distinct source domains, reject a positive-endpoint interior pinch, and check
+source exhaustion, query limits, zero exchange and cancellation. The same
+Gibbs-chart, prescribed-UA, fixed-composition and fixed-pressure limits as the
+co-current owner apply; no dense/regional seam continuation, pressure-loss law,
+wall storage or empirical boiling/condensation correlation is inferred.
 
 ## Prescribed mass-flow convection on native conducting surfaces
 

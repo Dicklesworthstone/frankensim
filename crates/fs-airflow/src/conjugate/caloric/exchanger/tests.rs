@@ -1,6 +1,7 @@
 //! Independent calorimetry, NTU and manufactured-Q exchanger regressions.
 
 mod co_current_water;
+mod countercurrent_water;
 mod phase;
 mod response;
 
