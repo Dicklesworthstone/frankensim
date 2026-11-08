@@ -1056,7 +1056,7 @@ pub(crate) struct WaveEdge {
 // (I-S)p - (I+S)R*U = 0. KCL closes the graph, including pressure-release ends.
 // Each current unknown is R_edge*U; multiplying KCL by one graph reference
 // puts every unknown/equation in pressure units before row equilibration.
-fn wave_equations(
+pub(crate) fn wave_equations(
     boundary_y: &[C64],
     pressures: usize,
     edges: &[WaveEdge],

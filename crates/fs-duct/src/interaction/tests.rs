@@ -374,3 +374,173 @@ fn a_doubled_hole_solves_and_shares_the_flow_between_its_two_mouths() {
     let free = solve(&chain, &holes, &ports, None, &gas, omega, interaction(1.0e15), 1.0e12).unwrap();
     assert!(close(free.input_impedance, load.scale(0.5), 1.0e-9));
 }
+
+fn prepared_coupled_hole(block_index: usize, port: CoupledPort, reference: f64) -> PreparedOpenHole {
+    let [a, b, c, d] = port.chimney;
+    let inward = c * port.self_radiation + d;
+    PreparedOpenHole {
+        block_index,
+        axial_position_m: port.position_m,
+        effective_radius_m: port.radius_m,
+        chimney_length_m: 0.0,
+        sigma: 1.0,
+        half_series_impedance: C64::ZERO,
+        open_chimney_impedance: (a * port.self_radiation + b) / inward,
+        closed_return_coordinates: [C64::ONE, C64::ZERO],
+        chimney_u_mouth_over_u_in: inward.recip(),
+        shunt_port_reference_pa_s_m3: reference,
+        orifice_quadratic_coeff_pa_s2_m6: 0.0,
+    }
+}
+
+fn series_resistance(resistance: f64, reference: f64) -> TwoPort {
+    TwoPort::from_abcd([C64::ONE, C64::from_re(resistance), C64::ZERO, C64::ONE], reference).unwrap()
+}
+
+#[test]
+fn the_complete_bore_regularizes_joint_chimney_poles_and_preserves_physical_power() {
+    // G2 whole-instrument oracle. The passive two-mouth load is
+    // Z = z*11^T + (i*Zc*tan(theta) + epsilon)*I, Re(z)>0, epsilon>=0.
+    // Identical lossless chimneys cancel that diagonal reactance, so A Z+B
+    // is rank one at epsilon=0. A real bore resistance between the openings
+    // fixes the dark mouth-flow mode; their isolated admittance cannot do so.
+    // The closed end carries no current. Summing/subtracting the ORIGINAL
+    // chimney and bore equations gives the analytic sum/difference below.
+    let gas = air();
+    let omega = TAU * 700.0;
+    let positions = [0.15, 0.20];
+    let z = mutual_radiation_impedance(&gas, omega, positions[1] - positions[0], interaction(2.0)).unwrap();
+    assert!(z.re > 0.0);
+    let reference = z.abs();
+    let middle_resistance = 0.9 * reference;
+    let through = TwoPort::through(reference).unwrap();
+    let check = |actual: C64, expected: C64, scale: f64| {
+        assert!((actual - expected).abs() <= 2.0e-11 * scale.max(expected.abs()),
+            "{actual:?} vs {expected:?}");
+    };
+    let power = |p: C64, u: C64| 0.5 * (p.re * u.re + p.im * u.im);
+    for cosine in [1.0_f64, 0.5] {
+        let sine = (1.0 - cosine * cosine).sqrt();
+        let characteristic = 1.3 * reference;
+        let a = C64::from_re(cosine);
+        let b = C64::new(0.0, -characteristic * sine);
+        let c = C64::new(0.0, -sine / characteristic);
+        let diagonal_reactance = -b.scale(1.0 / cosine);
+        for relative_resistance in [1.0e-3, 1.0e-7, 1.0e-11, 0.0] {
+            let epsilon = relative_resistance * reference;
+            let ports = positions.map(|position_m| CoupledPort {
+                position_m,
+                radius_m: 0.002,
+                chimney: [a, b, c, a],
+                self_radiation: z + diagonal_reactance + C64::from_re(epsilon),
+            });
+            let holes = [prepared_coupled_hole(1, ports[0], reference),
+                prepared_coupled_hole(3, ports[1], reference)];
+            let bound = 1.0e6;
+            if relative_resistance <= 1.0e-7 {
+                assert!(matches!(couple_with_limit(&ports, &gas, omega, interaction(2.0), bound),
+                    Err(DuctError::Singular)), "the isolated chimney chart must refuse");
+            }
+            // A resistive inlet exercises regular bore admittances. Signed
+            // through runs also put the bore itself exactly at a half/full wave.
+            for inlet_phase in [None, Some(1.0), Some(-1.0)] {
+                let phase = inlet_phase.unwrap_or(1.0);
+                let inlet_resistance = if inlet_phase.is_some() { 0.0 } else { 0.7 * reference };
+                let inlet = if inlet_phase.is_some() {
+                    TwoPort::new([C64::ZERO, C64::from_re(phase), C64::from_re(phase), C64::ZERO], reference).unwrap()
+                } else {
+                    series_resistance(inlet_resistance, reference)
+                };
+                let chain = PreparedChain {
+                    blocks: vec![inlet, through, series_resistance(middle_resistance, reference),
+                        through, series_resistance(0.4 * reference, reference)],
+                    reference_impedance: reference,
+                    min_shear_number: f64::INFINITY,
+                };
+                let solved = solve(&chain, &holes, &ports, None, &gas, omega, interaction(2.0), bound).unwrap();
+                let local = C64::from_re(1.0 / cosine) + c.scale(epsilon);
+                let sum = (local + (c * z).scale(2.0)).recip().scale(phase);
+                let difference = (local + C64::from_re(2.0 * cosine * epsilon / middle_resistance)).recip().scale(phase);
+                let expected_mouth = [(sum + difference).scale(0.5), (sum - difference).scale(0.5)];
+                let expected_pressure = expected_mouth.map(|u| (z * sum + u.scale(epsilon)).scale(cosine));
+                check(solved.input_impedance, C64::from_re(inlet_resistance) + expected_pressure[0].scale(phase), reference);
+                check(solved.bell_pressure, expected_pressure[1], reference);
+                for i in 0..2 {
+                    check(solved.hole_mouth_flows[i], expected_mouth[i], 1.0);
+                }
+                assert_eq!(solved.bell_flow, C64::ZERO);
+                assert!(solved.condition <= bound);
+                if relative_resistance <= 1.0e-7 {
+                    assert!(solved.condition < 1000.0, "rejected chart condition leaked: {}", solved.condition);
+                }
+
+                // Primitive p/U checks and the whole acoustic power ledger;
+                // no admittance from the implementation is used by this oracle.
+                let mouth = &solved.hole_mouth_flows;
+                let inflow = &solved.hole_chimney_inflows;
+                let mouth_pressure: [C64; 2] = core::array::from_fn(|i|
+                    ports[i].self_radiation * mouth[i] + z * mouth[1 - i]);
+                let junction: [C64; 2] = core::array::from_fn(|i| a * mouth_pressure[i] + b * mouth[i]);
+                for i in 0..2 {
+                    check(inflow[i], c * mouth_pressure[i] + a * mouth[i], 1.0);
+                    assert!((power(junction[i], inflow[i]) - power(mouth_pressure[i], mouth[i])).abs()
+                        <= 2.0e-11 * reference);
+                }
+                check(inflow[0] + inflow[1], C64::from_re(phase), 1.0);
+                check(junction[0] - junction[1], inflow[1].scale(middle_resistance), reference);
+                check(solved.input_impedance, junction[0].scale(phase) + C64::from_re(inlet_resistance), reference);
+                check(solved.bell_pressure, junction[1], reference);
+                let radiation = power(mouth_pressure[0], mouth[0]) + power(mouth_pressure[1], mouth[1]);
+                let bore_loss = 0.5 * (inlet_resistance + middle_resistance * inflow[1].abs().powi(2));
+                assert!(radiation >= -2.0e-11 * reference);
+                assert!((0.5 * solved.input_impedance.re - radiation - bore_loss).abs() <= 2.0e-11 * reference);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_genuine_undamped_mouth_flow_mode_still_refuses() {
+    // With a through connection between identical zero-chimney openings,
+    // Z=z*11^T leaves an arbitrary circulating (U,-U) mode. The complete
+    // physical system is now singular: it must not acquire artificial damping.
+    let gas = air();
+    let omega = TAU * 700.0;
+    let positions = [0.15, 0.20];
+    let z = mutual_radiation_impedance(&gas, omega, positions[1] - positions[0], interaction(2.0)).unwrap();
+    let reference = z.abs();
+    let ports = positions.map(|position| zero_chimney_port(position, 0.002, z));
+    let holes = [prepared_coupled_hole(1, ports[0], reference), prepared_coupled_hole(3, ports[1], reference)];
+    let through = TwoPort::through(reference).unwrap();
+    let chain = PreparedChain {
+        blocks: vec![series_resistance(reference, reference), through, through, through,
+            series_resistance(reference, reference)],
+        reference_impedance: reference,
+        min_shear_number: f64::INFINITY,
+    };
+    assert!(matches!(solve(&chain, &holes, &ports, None, &gas, omega, interaction(2.0), 1.0e8),
+        Err(DuctError::Singular)));
+}
+
+#[test]
+fn the_ordinary_loaded_nodal_system_must_respect_the_callers_condition_bound() {
+    let gas = air();
+    let reference = 1.0e6;
+    let port = zero_chimney_port(0.1, 0.002, C64::from_re(100.0 * reference));
+    let hole = prepared_coupled_hole(1, port, reference);
+    let run = series_resistance(reference, reference);
+    let chain = PreparedChain {
+        blocks: vec![run, TwoPort::through(reference).unwrap(), run],
+        reference_impedance: reference,
+        min_shear_number: f64::INFINITY,
+    };
+    let bound = 20.0;
+    assert!(run.admittance(bound).is_ok());
+    assert!(couple_with_limit(&[port], &gas, TAU * 700.0, interaction(2.0), bound).is_ok());
+    // Every component chart passes; only the complete system exceeds the bound.
+    assert!(matches!(solve(&chain, &[hole], &[port], None, &gas, TAU * 700.0, interaction(2.0), bound),
+        Err(DuctError::Singular)));
+    let admitted = solve(&chain, &[hole], &[port], None, &gas, TAU * 700.0, interaction(2.0), 1.0e8).unwrap();
+    assert!(close(admitted.input_impedance, C64::from_re(101.0 * reference), 2.0e-12));
+    assert!(admitted.condition > bound && admitted.condition < 1.0e8);
+}

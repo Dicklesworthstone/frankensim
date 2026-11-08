@@ -27,7 +27,6 @@
 //! and the hole mouth flows use the coupled solution. The nonlinear orifice port reflection of
 //! each hole keeps its independent chimney.
 
-use fs_la::eigen_complex::lu_complex;
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
 use fs_math::det;
@@ -37,6 +36,7 @@ use crate::{Duct, DuctError, LossModel, Segment, Termination, WallModel};
 
 #[cfg(test)]
 mod tests;
+mod retained;
 
 fn bad(what: &'static str) -> DuctError {
     DuctError::BadParameter { what }
@@ -170,20 +170,7 @@ fn couple_with_limit(
     maximum_condition: f64,
 ) -> Result<Coupling, DuctError> {
     let q = ports.len();
-    let (mut m, mut inflow) = (vec![C64::ZERO; q * q], vec![C64::ZERO; q * q]);
-    for i in 0..q {
-        let [a, b, c, d] = ports[i].chimney;
-        m[i * q + i] = a * ports[i].self_radiation + b;
-        inflow[i * q + i] = c * ports[i].self_radiation + d;
-        for j in i + 1..q {
-            // The exterior is reciprocal; evaluate each mutual kernel once.
-            let z = mutual_radiation_impedance(exterior, omega, pair_distance(&ports[i], &ports[j]), interaction)?;
-            m[i * q + j] = a * z;
-            m[j * q + i] = ports[j].chimney[0] * z;
-            inflow[i * q + j] = c * z;
-            inflow[j * q + i] = ports[j].chimney[2] * z;
-        }
-    }
+    let (m, inflow) = chimney_matrices(ports, exterior, omega, interaction)?;
     let (mouth_admittance, condition) = crate::network::inverse_with_limit(&m, q, maximum_condition)?;
     let mut admittance = vec![C64::ZERO; q * q];
     for i in 0..q {
@@ -199,6 +186,39 @@ fn couple_with_limit(
     Ok(Coupling { admittance, mouth_admittance, condition })
 }
 
+/// Original mouth-flow coordinates, without an impedance/admittance division:
+/// `p_junction = (A Z + B) U_mouth`, `U_chimney = (C Z + D) U_mouth`.
+fn chimney_matrices(
+    ports: &[CoupledPort], exterior: &GasState, omega: f64, interaction: OpenHoleInteraction,
+) -> Result<(Vec<C64>, Vec<C64>), DuctError> {
+    let q = ports.len();
+    let (mut m, mut inflow) = (vec![C64::ZERO; q * q], vec![C64::ZERO; q * q]);
+    for i in 0..q {
+        let [a, b, c, d] = ports[i].chimney;
+        m[i * q + i] = a * ports[i].self_radiation + b;
+        inflow[i * q + i] = c * ports[i].self_radiation + d;
+        for j in i + 1..q {
+            // The exterior is reciprocal; evaluate each mutual kernel once.
+            let z = mutual_radiation_impedance(exterior, omega, pair_distance(&ports[i], &ports[j]), interaction)?;
+            m[i * q + j] = a * z;
+            m[j * q + i] = ports[j].chimney[0] * z;
+            inflow[i * q + j] = c * z;
+            inflow[j * q + i] = ports[j].chimney[2] * z;
+        }
+    }
+    if m.iter().chain(&inflow).any(|&z| !finite(z)) {
+        return Err(DuctError::Singular);
+    }
+    Ok((m, inflow))
+}
+
+struct CoupledFields {
+    pressure: Vec<C64>,
+    mouth: Vec<C64>,
+    inflow: Vec<C64>,
+    condition: f64,
+}
+
 /// The coupled solution for a unit input flow.
 pub(crate) struct CoupledSolution {
     pub input_impedance: C64,
@@ -212,8 +232,9 @@ pub(crate) struct CoupledSolution {
 }
 
 /// Solve the bore between openings and the openings through [`couple_with_limit`].
-/// A half-wave run has singular I+S, not necessarily a singular loaded instrument.
-/// Such runs use the existing graph owner's retained scattering constraints.
+/// Singular I+S or A Z+B need not mean a singular loaded instrument. If either
+/// elimination or the final nodal condition fails, retain all bore currents
+/// and mouth flows until the complete physical system has been loaded.
 /// `holes` and `ports` are the open holes in axial order; `bell` is the radiating open end, or
 /// `None` for a closed end.
 #[allow(clippy::too_many_arguments)]
@@ -233,6 +254,9 @@ pub(crate) fn solve(
     }
     if holes.iter().any(|hole| hole.sigma != 1.0) {
         return Err(bad("open-hole interaction needs fully open holes; a vent fraction has no single mouth flow"));
+    }
+    if !maximum_condition.is_finite() || maximum_condition < 1.0 {
+        return Err(bad("open-hole interaction needs a finite condition bound of at least one"));
     }
     let reference = chain.reference_impedance;
     let half = |hole: &PreparedOpenHole| {
@@ -277,54 +301,50 @@ pub(crate) fn solve(
     let mut all: Vec<CoupledPort> = ports.to_vec();
     all.extend(bell);
     let q = all.len();
-    let coupling = couple_with_limit(&all, exterior, omega, interaction, maximum_condition)?;
-    condition = condition.max(coupling.condition);
-    for i in 0..q {
-        for j in 0..q {
-            let at = (i + 1) * nodes + j + 1;
-            ytot[at] = ytot[at] + coupling.admittance[i * q + j];
-        }
-    }
-    let nodal = if keep_waves {
+    let reduced = if keep_waves {
         Err(DuctError::Singular)
     } else {
-        lu_complex(&ytot, nodes).map_err(|_| DuctError::Singular).and_then(|lu| {
-            let mut p = vec![C64::ZERO; nodes];
-            p[0] = C64::ONE;
-            lu.solve(&mut p);
-            if p.iter().all(|v| finite(*v)) { Ok(p) } else { Err(DuctError::Singular) }
+        couple_with_limit(&all, exterior, omega, interaction, maximum_condition).and_then(|coupling| {
+            for i in 0..q {
+                for j in 0..q {
+                    let at = (i + 1) * nodes + j + 1;
+                    ytot[at] = ytot[at] + coupling.admittance[i * q + j];
+                }
+            }
+            // A finite LU solution alone does not qualify the loaded instrument.
+            let (inverse, c) = crate::network::inverse_with_limit(&ytot, nodes, maximum_condition)?;
+            let pressure: Vec<C64> = (0..nodes).map(|i| inverse[i * nodes]).collect();
+            let row = |matrix: &[C64], i: usize| (0..q).fold(C64::ZERO,
+                |sum, j| sum + matrix[i * q + j] * pressure[j + 1]);
+            let inflow: Vec<C64> = (0..q).map(|i| row(&coupling.admittance, i)).collect();
+            let mouth: Vec<C64> = (0..q).map(|i| row(&coupling.mouth_admittance, i)).collect();
+            if inflow.iter().chain(&mouth).any(|&z| !finite(z)) {
+                return Err(DuctError::Singular);
+            }
+            Ok(CoupledFields { pressure, inflow, mouth, condition: condition.max(c).max(coupling.condition) })
         })
     };
-    let p = match nodal {
-        Ok(p) => p,
+    let fields = match reduced {
+        Ok(fields) => fields,
         Err(DuctError::Singular) => {
-            // Only the aperture boundary is stamped here. The graph owner
-            // retains every bore current, so no isolated I+S is inverted.
-            let mut boundary_y = vec![C64::ZERO; nodes * nodes];
-            for i in 0..q { for j in 0..q {
-                boundary_y[(i + 1) * nodes + j + 1] = coupling.admittance[i * q + j];
-            } }
-            let (inverse, c) = crate::network::wave_pressure_inverse(
-                &boundary_y, nodes, &wave_edges, maximum_condition)?;
-            condition = propagation_condition.max(c).max(coupling.condition);
-            (0..nodes).map(|i| inverse[i * nodes]).collect()
+            let mut fields = retained::solve(nodes, &wave_edges, &all, exterior,
+                omega, interaction, maximum_condition)?;
+            // Rejected component charts are not conditions of this physical system.
+            fields.condition = fields.condition.max(propagation_condition);
+            fields
         }
         Err(error) => return Err(error),
     };
-    let junction = &p[1..=q];
-    let row = |matrix: &[C64], i: usize| (0..q).fold(C64::ZERO, |sum, j| sum + matrix[i * q + j] * junction[j]);
-    let inflow: Vec<C64> = (0..q).map(|i| row(&coupling.admittance, i)).collect();
-    let mouth: Vec<C64> = (0..q).map(|i| row(&coupling.mouth_admittance, i)).collect();
     // A passive one-port has a nonnegative input resistance.
-    if p[0].re < -1.0e-9 * p[0].abs() {
+    if fields.pressure[0].re < -1.0e-9 * fields.pressure[0].abs() {
         return Err(bad("coupled radiation is active at this frequency"));
     }
     Ok(CoupledSolution {
-        input_impedance: p[0],
-        bell_pressure: p[m + 1],
-        bell_flow: if bell.is_some() { inflow[m] } else { C64::ZERO },
-        hole_mouth_flows: mouth[..m].to_vec(),
-        hole_chimney_inflows: inflow[..m].to_vec(),
-        condition,
+        input_impedance: fields.pressure[0],
+        bell_pressure: fields.pressure[m + 1],
+        bell_flow: if bell.is_some() { fields.inflow[m] } else { C64::ZERO },
+        hole_mouth_flows: fields.mouth[..m].to_vec(),
+        hole_chimney_inflows: fields.inflow[..m].to_vec(),
+        condition: fields.condition,
     })
 }
