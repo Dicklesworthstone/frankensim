@@ -23,9 +23,10 @@ use super::{
 
 /// One immutable resolved source and the native pressure-dependent inventory.
 ///
-/// The reference pressure and independently authored B remain fixed during
-/// source-temperature continuation. The source's local pressure validity does
-/// not establish this separate barotropic law over every film pressure. Its
+/// The reference pressure remains fixed during source-temperature continuation.
+/// The caller can explicitly supply a new independently authored B. The
+/// source's local pressure validity does not establish this separate
+/// barotropic law over every film pressure. Its
 /// admissible range and temporal refinement remain caller-owned, along with
 /// the thin-gap creeping-flow and negligible-void-mass approximations.
 pub struct MaterialCompressibleCavitatingFilm<'a> {
@@ -183,6 +184,47 @@ impl<'a> MaterialCompressibleCavitatingFilm<'a> {
         q_next: &[f64],
         channel_entrainment_m3_s: &[f64],
         dt_s: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MaterialCompressibleCavitationContinuation<'b>, MaterialCavitationFilmError> {
+        self.advance_with_temperature_source_and_bulk_modulus(
+            source,
+            state,
+            q_next,
+            channel_entrainment_m3_s,
+            dt_s,
+            self.film.bulk_modulus_pa(),
+            cancelled,
+        )
+    }
+
+    /// Continue the original source and compressed mass with an explicitly
+    /// supplied endpoint isothermal bulk modulus in pascals.
+    ///
+    /// The pinned source and pressure-reference requirements of
+    /// [`Self::advance_with_temperature_source`] still apply. Density,
+    /// viscosity and saturation pressure come from that source, while the
+    /// caller supplies `bulk_modulus_pa` from an independent constitutive law.
+    /// Adiabatic source sound speed is never used to infer this isothermal B.
+    ///
+    /// Stored OLD mass is evaluated with the OLD B; endpoint storage, reservoir
+    /// density and pressure-driven mass transport use the NEW B. A changed B
+    /// produces a distinct inventory owner even if all source properties agree.
+    /// Sealed pressure can cross saturation, so the native complementarity
+    /// solve retains mass by rupturing or refilling the film as necessary.
+    /// The dilute-vapor check uses the NEW liquid density at rupture.
+    ///
+    /// This endpoint constitutive split supplies no latent or compressive
+    /// energy budget. Accept the returned source, owner and state together;
+    /// rejected sources, constitutive data or cancellation leave them intact.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_temperature_source_and_bulk_modulus<'b>(
+        &self,
+        source: &'b ResolvedCavitationState,
+        state: &CavitatingFilmState,
+        q_next: &[f64],
+        channel_entrainment_m3_s: &[f64],
+        dt_s: f64,
+        bulk_modulus_pa: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MaterialCompressibleCavitationContinuation<'b>, MaterialCavitationFilmError> {
         if cancelled() {
@@ -198,7 +240,7 @@ impl<'a> MaterialCompressibleCavitatingFilm<'a> {
         validate_vapor_density(material, self.maximum_vapor_density_ratio)?;
         let viscosities =
             vec![material.dynamic_viscosity_pa_s(); self.film.geometry().channel_count()];
-        let next = self.film.advance_with_liquid(
+        let next = self.film.advance_with_liquid_and_bulk_modulus(
             state,
             q_next,
             channel_entrainment_m3_s,
@@ -209,6 +251,7 @@ impl<'a> MaterialCompressibleCavitatingFilm<'a> {
                 ..self.film.liquid()
             },
             &viscosities,
+            bulk_modulus_pa,
             cancelled,
         )?;
         validate_rupture_vapor_density(material, &next.film, self.maximum_vapor_density_ratio)?;

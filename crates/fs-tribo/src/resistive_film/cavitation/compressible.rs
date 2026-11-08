@@ -294,14 +294,59 @@ impl CompressibleCavitatingFilm {
         dt_s: f64,
         liquid: CavitationLiquid,
         channel_viscosities_pa_s: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CompressibleCavitationContinuation, FilmError> {
+        self.advance_with_liquid_and_bulk_modulus(
+            state,
+            q_next,
+            entrainment_m3_s,
+            dt_s,
+            liquid,
+            channel_viscosities_pa_s,
+            self.bulk_modulus_pa,
+            cancelled,
+        )
+    }
+
+    /// Continue retained liquid through an explicitly authored change in its
+    /// isothermal bulk modulus as well as its endpoint liquid properties.
+    ///
+    /// A temperature-dependent modulus must be supplied by the caller's
+    /// constitutive source; sound speed is not an isothermal-modulus law.
+    /// Every OLD cell mass uses the old modulus, reference pressure and density.
+    /// Every endpoint storage and pressure-driven mass flux uses the NEW law.
+    /// For a sealed full cell of unchanged volume this gives
+    /// `p_new = p_ref,new + B_new * (ln(rho_ref,old/rho_ref,new)
+    /// + (p_old-p_ref,old)/B_old)`. If that pressure falls below rupture, the
+    /// original complementarity solve instead changes the retained filling.
+    ///
+    /// Changing the modulus creates a new inventory identity, even when all
+    /// other material data agree. Accept the returned owner and state together;
+    /// neither owner may reinterpret the other's pressure as its own density.
+    /// Geometry, pressure-viscosity coefficient and absolute supplies retain
+    /// their original identities. No caloric or compressive-work claim follows
+    /// from this prescribed endpoint constitutive split.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_liquid_and_bulk_modulus(
+        &self,
+        state: &CavitatingFilmState,
+        q_next: &[f64],
+        entrainment_m3_s: &[f64],
+        dt_s: f64,
+        liquid: CavitationLiquid,
+        channel_viscosities_pa_s: &[f64],
+        bulk_modulus_pa: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CompressibleCavitationContinuation, FilmError> {
         poll(&mut cancelled)?;
         self.inventory.validate_state(state)?;
-        let inventory = self
+        let mut inventory = self
             .inventory
             .prepare_liquid(liquid, channel_viscosities_pa_s)?;
-        let film = Self::compile(inventory, self.bulk_modulus_pa)?;
+        if bulk_modulus_pa != self.bulk_modulus_pa {
+            inventory.owner = Arc::new(());
+        }
+        let film = Self::compile(inventory, bulk_modulus_pa)?;
         let step =
             film.advance_kernel(self, state, q_next, entrainment_m3_s, dt_s, &mut cancelled)?;
         Ok(CompressibleCavitationContinuation { film, step })
@@ -350,7 +395,9 @@ impl CompressibleCavitatingFilm {
             step.old_volume[i] = cell.area_m2
                 * (cell.gap.reference_m - dot(&cell.gap.closure, state.configuration()));
             step.old[i] = previous.from_pressure(state.pressure_pa[i], state.liquid_fraction[i])?;
-            candidate.points[i] = if self.liquid() == previous.liquid() {
+            candidate.points[i] = if self.liquid() == previous.liquid()
+                && self.bulk_modulus_pa == previous.bulk_modulus_pa
+            {
                 step.old[i]
             } else {
                 // Warm-start in the new material's admitted pressure domain.

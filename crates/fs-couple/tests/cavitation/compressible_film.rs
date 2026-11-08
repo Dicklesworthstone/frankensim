@@ -125,7 +125,48 @@ fn sealed_source_heating_raises_pressure_and_cooling_recovers_compressed_mass() 
 }
 
 #[test]
-fn sourced_viscosity_controls_drained_expansion_with_finite_storage_and_retained_supply() {
+fn source_heating_with_changed_stiffness_retains_original_compressed_inventory() {
+    for basis in [LiquidViscosityBasis::Dynamic, LiquidViscosityBasis::Kinematic] {
+        let source = source(basis, false, 0);
+        let cold = source.resolve(300.0);
+        let hot = cold.at_query_point(&source.card, &point(400.0)).unwrap();
+        let old_bulk = 1e8;
+        let new_bulk = 4e7;
+        let pressure = AMBIENT_PA + 2e6;
+        let original = sealed(&cold)
+            .with_isothermal_bulk_modulus("pressure", old_bulk)
+            .unwrap();
+        let state = original.initialize_with_pressure(&[0.0], &[1.0], &[pressure]).unwrap();
+        let mass = 1000.0 * ((pressure - AMBIENT_PA) / old_bulk).exp()
+            * AREA_M2 * INITIAL_GAP_M;
+        let next = original.advance_with_temperature_source_and_bulk_modulus(
+            &hot, &state, &[0.0], &[0.0], 0.1, new_bulk, || false,
+        ).unwrap();
+        near(next.step.state.pressure_pa()[0], AMBIENT_PA + new_bulk
+            * ((1000.0_f64 / 800.0).ln() + (pressure - AMBIENT_PA) / old_bulk));
+        near(next.step.report.liquid_mass_before_kg, mass);
+        near(next.step.report.liquid_mass_after_kg, mass);
+        assert_eq!(next.step.state.liquid_fraction(), &[1.0]);
+        assert_eq!(next.step.channel_mass_flow_kg_s, [0.0]);
+        assert_eq!(next.film.film().bulk_modulus_pa(), new_bulk);
+        assert_eq!(next.film.material(), hot.state());
+        assert!(std::ptr::eq(next.film.source(), &hot));
+        assert_eq!(next.film.pressure_axis(), "pressure");
+        let cooled = next.film.advance_with_temperature_source_and_bulk_modulus(
+            &cold, &next.step.state, &[0.0], &[0.0], 0.1, old_bulk, || false,
+        ).unwrap();
+        near(cooled.step.state.pressure_pa()[0], pressure);
+        near(cooled.step.report.liquid_mass_after_kg, mass);
+        assert_eq!(cooled.film.film().bulk_modulus_pa(), old_bulk);
+        assert!(std::ptr::eq(cooled.film.source(), &cold));
+        assert!(original.advance(&next.step.state, &[0.0], &[0.0], 0.1, || false).is_err());
+        assert_eq!(original.film().bulk_modulus_pa(), old_bulk);
+        assert_eq!(original.material(), cold.state());
+    }
+}
+
+#[test]
+fn sourced_viscosity_and_endpoint_modulus_control_drained_expansion_with_retained_supply() {
     for basis in [
         LiquidViscosityBasis::Dynamic,
         LiquidViscosityBasis::Kinematic,
@@ -134,6 +175,7 @@ fn sourced_viscosity_controls_drained_expansion_with_finite_storage_and_retained
         let cold = source.resolve(300.0);
         let hot = cold.at_query_point(&source.card, &point(400.0)).unwrap();
         let bulk = 2e7;
+        let endpoint_bulk = 7e6;
         let supply = CavitationReservoir {
             pressure_pa: 130_000.0,
             liquid_fraction: 1.0,
@@ -143,10 +185,15 @@ fn sourced_viscosity_controls_drained_expansion_with_finite_storage_and_retained
             .unwrap()
             .with_reservoirs(&[Some(supply)])
             .unwrap();
-        let state = original.initial_state(&[0.0]).unwrap();
+        let initial_pressure = 150_000.0;
+        let state = original
+            .initialize_with_pressure(&[0.0], &[1.0], &[initial_pressure])
+            .unwrap();
         let dt = 1.0;
         let next = original
-            .advance_with_temperature_source(&hot, &state, &[0.0], &[0.0], dt, || false)
+            .advance_with_temperature_source_and_bulk_modulus(
+                &hot, &state, &[0.0], &[0.0], dt, endpoint_bulk, || false,
+            )
             .unwrap();
         let volume = AREA_M2 * INITIAL_GAP_M;
         let mu = if basis == LiquidViscosityBasis::Dynamic {
@@ -157,14 +204,15 @@ fn sourced_viscosity_controls_drained_expansion_with_finite_storage_and_retained
         let conductance = 1e-3 * CHANNEL_GAP_M.powi(3) / (12.0 * mu * 1e-2);
         // Independent closed form: rho*V + dt*G*B*(rho-rho_supply) = m_old.
         // This integrates rho(p)/mu through the passage, not endpoint rho*Q.
-        let rho_supply = 800.0 * ((supply.pressure_pa - AMBIENT_PA) / bulk).exp();
-        let rho = (1000.0 * volume + dt * conductance * bulk * rho_supply)
-            / (volume + dt * conductance * bulk);
-        let pressure = AMBIENT_PA + bulk * (rho / 800.0).ln();
-        let mass_flow = conductance * bulk * (rho - rho_supply);
+        let mass_before = 1000.0 * ((initial_pressure - AMBIENT_PA) / bulk).exp() * volume;
+        let rho_supply = 800.0 * ((supply.pressure_pa - AMBIENT_PA) / endpoint_bulk).exp();
+        let rho = (mass_before + dt * conductance * endpoint_bulk * rho_supply)
+            / (volume + dt * conductance * endpoint_bulk);
+        let pressure = AMBIENT_PA + endpoint_bulk * (rho / 800.0).ln();
+        let mass_flow = conductance * endpoint_bulk * (rho - rho_supply);
         near(next.step.state.pressure_pa()[0], pressure);
         near(next.step.channel_mass_flow_kg_s[0], mass_flow);
-        near(next.step.report.liquid_mass_before_kg, 1000.0 * volume);
+        near(next.step.report.liquid_mass_before_kg, mass_before);
         near(next.step.report.liquid_mass_after_kg, rho * volume);
         near(next.step.report.boundary_mass_out_kg, dt * mass_flow);
         assert!(next.step.report.mass_residual_kg.abs() < 2e-17);
@@ -174,6 +222,7 @@ fn sourced_viscosity_controls_drained_expansion_with_finite_storage_and_retained
         );
         assert_eq!(next.film.film().liquid().ambient_pressure_pa, AMBIENT_PA);
         assert_eq!(next.film.film().liquid().cavitation_pressure_pa, 20_000.0);
+        assert_eq!(next.film.film().bulk_modulus_pa(), endpoint_bulk);
     }
 }
 
@@ -250,6 +299,14 @@ fn source_pressure_reference_and_original_lineage_are_required_before_mass_trans
                 .advance_with_temperature_source(candidate, &state, &[0.0], &[0.0], 0.01, || false,)
                 .is_err()
         );
+        assert!(original.advance_with_temperature_source_and_bulk_modulus(
+            candidate, &state, &[0.0], &[0.0], 0.01, 4e7, || false,
+        ).is_err());
+    }
+    for bulk in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(original.advance_with_temperature_source_and_bulk_modulus(
+            &cold, &state, &[0.0], &[0.0], 0.01, bulk, || false,
+        ).is_err());
     }
     let hot = cold.at_query_point(&source.card, &point(400.0)).unwrap();
     // The source reference-density cap passes, but rho at rupture is lower.
@@ -283,6 +340,11 @@ fn source_pressure_reference_and_original_lineage_are_required_before_mass_trans
         .with_isothermal_bulk_modulus("pressure", 1e8)
         .unwrap();
     let dilute_state = dilute_only.initialize(&[0.0], &[0.2]).unwrap();
+    // The reference density remains admissible while the new rupture density
+    // can violate the explicitly declared negligible-vapor-mass approximation.
+    assert!(dilute_only.advance_with_temperature_source_and_bulk_modulus(
+        &cold, &dilute_state, &[0.0], &[0.0], 0.01, 5e4, || false,
+    ).is_err());
     assert!(
         dilute_only
             .advance_with_temperature_source(&hot, &dilute_state, &[0.0], &[0.0], 0.01, || false,)
@@ -318,7 +380,7 @@ fn constant_source_matches_native_bits_and_late_cancellation_preserves_the_compl
         .unwrap();
     let mut polls = 0;
     let next = original
-        .advance_with_temperature_source(&hot, &state, &[-INITIAL_GAP_M], &[0.0], 0.01, || {
+        .advance_with_temperature_source_and_bulk_modulus(&hot, &state, &[-INITIAL_GAP_M], &[0.0], 0.01, 1e8, || {
             polls += 1;
             false
         })
@@ -330,7 +392,7 @@ fn constant_source_matches_native_bits_and_late_cancellation_preserves_the_compl
     let mut calls = 0;
     assert!(
         original
-            .advance_with_temperature_source(&hot, &state, &[-INITIAL_GAP_M], &[0.0], 0.01, || {
+            .advance_with_temperature_source_and_bulk_modulus(&hot, &state, &[-INITIAL_GAP_M], &[0.0], 0.01, 1e8, || {
                 calls += 1;
                 calls == polls
             },)

@@ -1599,6 +1599,25 @@ Four additional G1/G3/G4 groups check initially compressed sealed expansion,
 cavitated/compressed material cycles, pressure-fed transition against independent
 dimensional quadrature, exact unchanged behavior and late-cancellation refusal.
 
+`CompressibleCavitatingFilm::advance_with_liquid_and_bulk_modulus` also admits an
+explicitly supplied endpoint isothermal bulk modulus. Old compressed inventory
+uses the accepted reference density, pressure and bulk modulus; endpoint storage,
+reservoir density and pressure-driven mass transport use the proposed law.
+Changing B creates a distinct inventory identity even when other material data
+are unchanged. For a sealed full cell with unchanged volume,
+`p_new = p_ref,new + B_new * (ln(rho_ref,old/rho_ref,new)
++ (p_old-p_ref,old)/B_old)`; the existing complementarity solver handles a
+transition below rupture by changing filling, and reverses it on reformation.
+No source sound speed is silently converted to an isothermal modulus.
+The constant-modulus entry point delegates with the accepted B and retains its
+exact unchanged-law behavior. Source/domain/cancellation failures leave the
+accepted owner and state untouched. This prescribed endpoint split supplies no
+caloric, latent-heat or compressive-work claim. Focused test cases cover sealed
+compressed-mass preservation, repeated rupture/reformation, independently
+integrated Barus reservoir transport, and owner/refusal/cancellation behavior.
+Their execution is pending; the implementation session's validation environment
+exhausted its storage and disconnected before compilation completed.
+
 ## Error model
 
 `TriboError` is a total refusal surface for missing identity, non-dry media,
