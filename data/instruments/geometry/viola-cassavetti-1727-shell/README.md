@@ -69,8 +69,9 @@ Each card uses the records of the cello shell cards, with these viola choices:
   32 modes both refused on the coupled stiffness bound. That bound does not depend
   on the time step. At 64 modes it is 8.65e4 rad/s for C3, 1.10e5 for G3, 1.64e5 for
   D4 and 2.17e5 for A4, against guards of 1.36e5 at 48 kHz and 4.07e5 at 144 kHz.
-- **Modes:** 64 bending modes on every string, and 209 body modes, which is every
-  mode the 15 Hz-5 kHz window holds.
+- **Modes:** 64 bending modes on every string, and the lowest 209 of the 261 body modes the 15 Hz-5 kHz
+  window holds on this table with the registered maple (the render's own count at setup: 261; 254 with the
+  audio-band maple). The modes from about 4.05 to 5 kHz are dropped.
 - **String:** speaking length 0.375 m (Guettler) plus the 1/6 afterlength, 0.0625 m
   (Fouilhé and Houssay, SMAC 2013, p. 60), so the span is 0.4375 m and the bridge
   is at station 6/7.
