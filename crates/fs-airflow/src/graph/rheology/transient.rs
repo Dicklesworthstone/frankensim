@@ -287,6 +287,9 @@ pub struct TransientCarreauStep {
     pub boundary_imbalance: VolumetricFlowRate,
     pub reservoir_work_j: f64,
     pub injection_work_j: f64,
+    /// Signed work supplied by authored branch pressure rises on the actual
+    /// midpoint flows. Negative work returns energy to the pressure source.
+    pub branch_head_work_j: f64,
     pub kinetic_energy_change_j: f64,
     pub storage_energy_change_j: f64,
     pub viscous_heat_j: f64,
@@ -296,7 +299,8 @@ pub struct TransientCarreauStep {
     pub radial_work_residual_j: f64,
     /// p_mid*delta_V - change(C*p*p/2), due only to midpoint rounding.
     pub storage_midpoint_work_residual_j: f64,
-    /// External work - kinetic change - storage change - source heat.
+    /// Reservoir + injection + branch-head work - kinetic change - storage
+    /// change - source heat.
     pub physical_work_residual_j: f64,
     /// Physical residual + node residual - radial residual - storage residual.
     pub accounting_residual_j: f64,
@@ -495,6 +499,7 @@ impl TransientCarreauGraph {
         initial: &TransientCarreauState,
         pressures: &[f64],
         layout: &BoundaryLayout,
+        heads: Option<&[Pressure]>,
         duration_s: f64,
         controls: TransientCarreauControls,
         radial: &mut [RadialCarreauWorkspace],
@@ -533,10 +538,18 @@ impl TransientCarreauGraph {
             }
             *solves += 1;
             let branch = &self.graph.branches[edge];
-            let pressure = finite(
-                pressures[branch.from] - pressures[branch.to],
-                "transient pipe pressure",
-            )?;
+            let pressure = if let Some(heads) = heads {
+                let mut load = Sum::default();
+                load.add(pressures[branch.from])?;
+                load.add(-pressures[branch.to])?;
+                load.add(heads[edge].value())?;
+                load.value()?
+            } else {
+                finite(
+                    pressures[branch.from] - pressures[branch.to],
+                    "transient pipe pressure",
+                )?
+            };
             let step = pipe
                 .step_from(
                     &initial.branches[edge],
@@ -629,8 +642,68 @@ impl TransientCarreauGraph {
         controls: TransientCarreauControls,
         cx: &Cx<'_>,
     ) -> Result<TransientCarreauStep, TransientCarreauError> {
+        self.step_impl(
+            state, workspace, boundaries, injections, None, duration_s, controls, cx,
+        )
+    }
+
+    /// Advance with one held physical pressure rise per original branch.
+    /// Positive head drives from the branch's authored `from` node to `to`.
+    /// The original radial momentum equation uses `p_from-p_to+head`, and the
+    /// source supplies `head*Q_mid*duration` on that SAME trajectory. Head work
+    /// remains separate from reservoir/injection work, heat and storage; a
+    /// source can recover energy while inertial flow opposes its pressure rise.
+    ///
+    /// Sealed compliant loops and reservoir-connected networks use the same
+    /// nonlinear Schur solve. These are explicit pressure sources, not an
+    /// inferred pump curve, shaft efficiency or cavitation model. Shape/source,
+    /// storage, solver-budget and cancellation refusal preserve accepted state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_heads(
+        &self,
+        state: &mut TransientCarreauState,
+        workspace: &mut TransientCarreauWorkspace,
+        boundaries: &[FixedPressure],
+        injections: &[FlowInjection],
+        branch_heads: &[Pressure],
+        duration_s: f64,
+        controls: TransientCarreauControls,
+        cx: &Cx<'_>,
+    ) -> Result<TransientCarreauStep, TransientCarreauError> {
+        self.step_impl(
+            state,
+            workspace,
+            boundaries,
+            injections,
+            Some(branch_heads),
+            duration_s,
+            controls,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_impl(
+        &self,
+        state: &mut TransientCarreauState,
+        workspace: &mut TransientCarreauWorkspace,
+        boundaries: &[FixedPressure],
+        injections: &[FlowInjection],
+        heads: Option<&[Pressure]>,
+        duration_s: f64,
+        controls: TransientCarreauControls,
+        cx: &Cx<'_>,
+    ) -> Result<TransientCarreauStep, TransientCarreauError> {
         checkpoint(cx)?;
         controls.validate()?;
+        if heads.is_some_and(|heads| {
+            heads.len() != self.pipes.len() || heads.iter().any(|head| !head.value().is_finite())
+        }) {
+            return Err(GraphError::InvalidInput(
+                "one finite pressure head per original pipe required",
+            )
+            .into());
+        }
         if !Arc::ptr_eq(&self.identity, &state.identity)
             || !Arc::ptr_eq(&self.identity, &workspace.identity)
         {
@@ -686,6 +759,7 @@ impl TransientCarreauGraph {
             state,
             &workspace.pressures,
             &layout,
+            heads,
             duration_s,
             controls,
             &mut workspace.radial,
@@ -726,6 +800,7 @@ impl TransientCarreauGraph {
                     state,
                     &workspace.trial_pressures,
                     &layout,
+                    heads,
                     duration_s,
                     controls,
                     &mut workspace.radial,
@@ -760,6 +835,7 @@ impl TransientCarreauGraph {
             &workspace.pressures,
             &layout,
             boundaries,
+            heads,
             duration_s,
             iterations,
             branch_solves,
@@ -783,6 +859,7 @@ impl TransientCarreauGraph {
         pressures: &[f64],
         layout: &BoundaryLayout,
         boundaries: &[FixedPressure],
+        heads: Option<&[Pressure]>,
         duration_s: f64,
         newton_iterations: usize,
         branch_solves: u64,
@@ -835,10 +912,19 @@ impl TransientCarreauGraph {
         }
         let (mut kinetic, mut heat, mut radial_defect) =
             (Sum::default(), Sum::default(), Sum::default());
+        let mut head_work = Sum::default();
         let mut branches = Vec::with_capacity(self.pipes.len());
         for (edge, report) in result.steps.iter().enumerate() {
             periodic_checkpoint(edge, cx)?;
             let report = report.expect("fully evaluated accepted branch");
+            if let Some(heads) = heads {
+                let work = finite(
+                    (heads[edge].value() * report.midpoint_volume_flow_m3_s) * duration_s,
+                    "branch pressure-head work",
+                )?;
+                head_work.add(work)?;
+                scale.add(work.abs())?;
+            }
             kinetic.add(report.kinetic_energy_change_j)?;
             heat.add(report.viscous_heat_j)?;
             radial_defect.add(report.work_residual_j)?;
@@ -854,6 +940,7 @@ impl TransientCarreauGraph {
         }
         let reservoir_work_j = reservoir.value()?;
         let injection_work_j = injection.value()?;
+        let branch_head_work_j = head_work.value()?;
         let kinetic_energy_change_j = kinetic.value()?;
         let storage_energy_change_j = stored.value()?;
         let viscous_heat_j = heat.value()?;
@@ -864,6 +951,7 @@ impl TransientCarreauGraph {
         for value in [
             reservoir_work_j,
             injection_work_j,
+            branch_head_work_j,
             -kinetic_energy_change_j,
             -storage_energy_change_j,
             -viscous_heat_j,
@@ -902,6 +990,7 @@ impl TransientCarreauGraph {
             boundary_imbalance: VolumetricFlowRate::new(result.boundary_imbalance),
             reservoir_work_j,
             injection_work_j,
+            branch_head_work_j,
             kinetic_energy_change_j,
             storage_energy_change_j,
             viscous_heat_j,

@@ -324,6 +324,16 @@ continuity constraint. Disconnected sealed and reservoir-driven components may
 coexist. A component with neither storage nor prescribed pressure still refuses,
 and steady Carreau solves still require a reservoir in every component.
 
+`TransientCarreauGraph::step_with_heads` adds one explicit held pressure rise
+per original directed branch. The same resolved radial law receives
+`p_from-p_to+head`, so a source can drive circulation in a sealed compliant loop.
+Its signed work is `head*Q_mid*duration` on the accepted trajectory, reported
+separately from reservoir/injection work, viscous heat and kinetic/compliance
+storage. Opposing heads can recover energy from retained fluid inertia. All
+loads participate in the existing coupled pressure solve and original energy
+accounting; this supplies no inferred pump curve, shaft efficiency or cavitation
+law. The ordinary `step` keeps its original zero-head arithmetic path.
+
 The model is a radially resolved, axially developed, laminar, fixed-density
 hydraulic network with lumped incremental compliance. It does not infer a bulk
 modulus or nominal fluid volume, resolve axial acoustic waves/water hammer,
