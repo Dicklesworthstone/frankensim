@@ -1065,3 +1065,26 @@ cycle.
   not collision-resistant, not a content address, and not authority for
   scientific identity; the full `DensityDesign` remains the artifact of
   record.
+
+## Buckling-constrained elastic stiffness allocation
+
+`buckling::BucklingDesignStudy` minimizes caller-declared positive weighted
+element Young's-modulus multipliers inside a positive box, subject to
+`1 - lambda_first / lambda_required <= 0`. Every forward/gradient trial
+re-solves the original fixed-geometry, fixed-load/prescribed-displacement
+continuum and uses total prestress-redistribution sensitivities. Native P1/Q1,
+plane stress/strain and Standard/B-bar semantics remain attached to the problem.
+
+The existing projected augmented-Lagrangian owner supplies bounded resumable
+steps. The study retains matching accepted physics and the lowest-cost accepted
+design meeting the original positive load floor, independently of optimizer
+feasibility tolerance. Unresolved first-mode crossings, native numerical
+failures and cancellation remain explicit stops and cannot install partial
+trial physics. Native factor-size, residual and iteration limits still apply.
+KKT values are discrete smooth-branch diagnostics; the weighted modulus cost
+supplies no mass, density, thickness or section-area law.
+
+`buckling_design` checks an independently known scalar optimum, re-solved
+total constraint derivatives in both formulations, a physical mode crossing
+and transactional cancellation. The `buckling_sizing` example minimizes a
+three-element problem and independently re-solves the retained feasible design.

@@ -76,3 +76,5 @@ pub use stress::{StressReport, stress_aggregate, von_mises, von_mises_derivative
 
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub mod buckling;
