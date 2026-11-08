@@ -176,7 +176,10 @@ fn strain_stress_observation_retains_tensor_shear_storage_and_hanging_fields() {
         close(point.energy_density, scales[stress.cell] * 2.34, 3e-14);
     }
     assert!(op.bulk_strain_stress(&u, points.len() - 1, poll).is_err());
-    assert!(op.bulk_strain_stress(&u[..u.len() - 1], 10_000, poll).is_err());
+    assert!(
+        op.bulk_strain_stress(&u[..u.len() - 1], 10_000, poll)
+            .is_err()
+    );
     assert!(matches!(
         op.bulk_strain_stress(&u, 10_000, || ControlFlow::Break(())),
         Err(ElasticityError3::Cancelled)
@@ -188,7 +191,9 @@ fn strain_stress_observation_retains_tensor_shear_storage_and_hanging_fields() {
     let adaptive = adaptive();
     let u = affine(adaptive.nodes());
     let stresses = adaptive.bulk_stress(&u, 10_000, poll).unwrap();
-    let points = adaptive.bulk_strain_stress(&u, stresses.len(), poll).unwrap();
+    let points = adaptive
+        .bulk_strain_stress(&u, stresses.len(), poll)
+        .unwrap();
     for (point, stress) in points.iter().zip(stresses) {
         assert_eq!(point.response, stress);
         for (actual, expected) in point.strain.iter().zip(expected) {
@@ -197,7 +202,11 @@ fn strain_stress_observation_retains_tensor_shear_storage_and_hanging_fields() {
         assert_eq!(point.strain, point.constitutive_strain);
         close(point.energy_density, 2.34, 3e-14);
     }
-    assert!(adaptive.bulk_strain_stress(&u, points.len() - 1, poll).is_err());
+    assert!(
+        adaptive
+            .bulk_strain_stress(&u, points.len() - 1, poll)
+            .is_err()
+    );
     assert!(matches!(
         adaptive.bulk_strain_stress(&u, 10_000, || ControlFlow::Break(())),
         Err(ElasticityError3::Cancelled)
@@ -237,7 +246,9 @@ fn physical_and_reference_pullbacks_match_state_and_scale_differences() {
     let mut op = cart();
     let scales: Vec<_> = (0..op.cells()).map(|i| 0.5 + 0.02 * i as f64).collect();
     op.set_scales(&scales).unwrap();
-    let u: Vec<_> = (0..op.n()).map(|i| (i % 11) as f64 / 17.0).collect();
+    // Keep the physical primal within the original strain domain; the
+    // perturbation and transpose still test unrestricted algebraic directions.
+    let u: Vec<_> = (0..op.n()).map(|i| (i % 11) as f64 / 170.0).collect();
     let v: Vec<_> = (0..op.n()).map(|i| (i % 7) as f64 / 13.0 - 0.2).collect();
     let points = op.bulk_stress(&u, 10_000, poll).unwrap();
     let d = cotangents(&points);
@@ -312,7 +323,9 @@ fn adaptive_stress_preserves_affine_fields_and_exact_hanging_transpose() {
             close(*a, b, 4e-14);
         }
     }
-    let u: Vec<_> = (0..op.n()).map(|i| (i % 13) as f64 / 19.0).collect();
+    // Smaller cells require smaller displacement amplitudes for the same
+    // physical strain domain, including the reconstructed hanging-node field.
+    let u: Vec<_> = (0..op.n()).map(|i| (i % 13) as f64 / 190.0).collect();
     let v: Vec<_> = (0..op.n()).map(|i| (i % 5) as f64 / 7.0 - 0.2).collect();
     let points = op.bulk_stress(&u, 10_000, poll).unwrap();
     let d = cotangents(&points);
@@ -359,8 +372,13 @@ fn adaptive_affine_stress_preserves_the_full_hanging_field_family_and_masks() {
     let scales: Vec<_> = (0..op.cells()).map(|i| 0.4 + 0.01 * i as f64).collect();
     op.set_scales(&scales).unwrap();
     let offset = affine(op.nodes());
-    let first: Vec<_> = (0..op.n()).map(|i| 0.01 * ((i % 7) as f64 - 3.0)).collect();
-    let second: Vec<_> = (0..op.n()).map(|i| 0.02 * ((i % 5) as f64 - 2.0)).collect();
+    // The entire coefficient ball must fit around the physical affine offset.
+    let first: Vec<_> = (0..op.n())
+        .map(|i| 0.001 * ((i % 7) as f64 - 3.0))
+        .collect();
+    let second: Vec<_> = (0..op.n())
+        .map(|i| 0.002 * ((i % 5) as f64 - 2.0))
+        .collect();
     let baseline = op.bulk_stress(&offset, 10_000, poll).unwrap();
     let budget = baseline.len() * 3;
     let family = op
@@ -425,8 +443,8 @@ fn adaptive_affine_stress_preserves_the_full_hanging_field_family_and_masks() {
             "affine bulk stress point-field allowance exhausted"
         ))
     ));
-    // Legacy laws gain no invented strain ceiling, but malformed or nonfinite
-    // coefficients are still refused before the source-domain fast path.
+    // Original isotropic norm limits survive preparation. Malformed or
+    // nonfinite coefficients are refused before material-domain evaluation.
     op.admit_affine_material_domain(&masked_offset, &[&masked_first, &masked_second], poll)
         .unwrap();
     assert!(op.admit_material_domain(&[], poll).is_err());

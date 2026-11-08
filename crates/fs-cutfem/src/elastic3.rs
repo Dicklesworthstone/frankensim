@@ -32,6 +32,7 @@ use material::{MaterialProvider3, ReferenceMaterial3, engineering_strain};
 
 mod kinematics;
 use kinematics::CellKinematics3;
+mod strain_domain;
 
 /// Small-strain formulation used by bulk, embedded tractions and observations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -666,9 +667,39 @@ impl CutElasticity3 {
         Ok(Diagonal3(d))
     }
 
+    /// Solve a physical load and admit the complete resulting Q1 strain field
+    /// against the original material's domain before publishing the solution.
+    /// Both actual and projected strains are checked for B-bar. Cut-cell
+    /// extension checks can refuse conservatively; no iterate is returned on
+    /// material refusal or cancellation. Admission checkpoints report the final
+    /// accumulated solver iteration count.
+    pub fn solve_physical_controlled(
+        &self,
+        force: &[f64],
+        tolerance: f64,
+        max_iterations: usize,
+        poll_iterations: usize,
+        mut checkpoint: impl FnMut(usize) -> ControlFlow<()>,
+    ) -> Result<ElasticitySolution3, ElasticityError3> {
+        let solution = self.solve_controlled(
+            force,
+            tolerance,
+            max_iterations,
+            poll_iterations,
+            &mut checkpoint,
+        )?;
+        self.admit_material_domain(solution.coefficients(), || {
+            checkpoint(solution.iterations())
+        })?;
+        Ok(solution)
+    }
+
     /// Jacobi-CG with bounded polling and the existing true-Euclidean residual
     /// correction gate. Iteration allowance is cumulative across corrections.
     /// Cancellation is distinct from nonconvergence; neither returns an iterate.
+    /// This is an algebraic solve, also used for adjoints and response directions.
+    /// Use [`Self::solve_physical_controlled`] to admit a physical displacement's
+    /// material domain before returning it.
     pub fn solve_controlled(
         &self,
         force: &[f64],

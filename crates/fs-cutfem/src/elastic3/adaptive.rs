@@ -469,10 +469,38 @@ impl AdaptiveElasticity3 {
         self.raw
             .scale_quadratic_forms(&self.physical_displacements(x)?)
     }
+    /// Solve a physical load and admit its entire reconstructed Q1 strain field
+    /// against the retained material limits before returning master coefficients.
+    /// Hanging-node reconstruction and clamps are identical to the operator.
+    /// Admission checkpoints report the final accumulated solver iteration count;
+    /// cancellation or a material-domain exit publishes no partial solution.
+    pub fn solve_physical_controlled(
+        &self,
+        force: &[f64],
+        tolerance: f64,
+        max_iterations: usize,
+        poll_iterations: usize,
+        mut checkpoint: impl FnMut(usize) -> ControlFlow<()>,
+    ) -> Result<ElasticitySolution3, ElasticityError3> {
+        let solution = self.solve_controlled(
+            force,
+            tolerance,
+            max_iterations,
+            poll_iterations,
+            &mut checkpoint,
+        )?;
+        self.admit_material_domain(solution.coefficients(), || {
+            checkpoint(solution.iterations())
+        })?;
+        Ok(solution)
+    }
+
     /// Solve the reduced operator with the canonical CG recurrence and an explicit
     /// true-residual gate. No physical or master field is returned on a stop.
     /// Identity preconditioning is the initial adaptive path; there is no multigrid
     /// or mesh-independent iteration claim. Budget is shared by all CG batches.
+    /// This is an algebraic solve; physical loads should use
+    /// [`Self::solve_physical_controlled`] to enforce the original strain domain.
     pub fn solve_controlled(
         &self,
         force: &[f64],

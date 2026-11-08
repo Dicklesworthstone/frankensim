@@ -6,6 +6,7 @@
 //! the same projected dilatation as bulk assembly; its stress is constitutive
 //! stress of that assumed strain, not the unprojected displacement strain.
 //! Ghost and Nitsche stabilization affect the solved field but are not material stress.
+use super::strain_domain::FrobeniusStrainBall;
 use super::*;
 
 /// One original bulk quadrature point; point order is cell order followed by
@@ -43,7 +44,7 @@ pub struct BulkStrainStressPoint3 {
 /// One affine displacement family, sampled on the SAME retained bulk points.
 /// For coefficients with Euclidean norm at most one, the reference stress is
 /// `baseline[p].reference_stress + sum_j a[j]*basis_reference_stresses[j][p]`.
-/// Source-bound material strain domains are admitted over this entire ball,
+/// Retained material strain domains are admitted over this entire ball,
 /// not by treating coordinate directions as independent physical states.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AffineBulkStress3 {
@@ -158,34 +159,40 @@ fn admit_material_strain(
     gradients: &[[f64; 3]; 8],
     local: &[f64; 24],
 ) -> Result<(), ElasticityError3> {
-    let Some(source) = cell.material.source_state() else {
-        return Ok(());
-    };
     let strain = mandel_strain(gradients, local);
     let projected = cell.project_mandel_strain(strain, local);
-    admit_strains(source.maximum_absolute_mandel_strain(), &strain, &projected)
+    admit_strains(cell, &strain, &projected)
 }
 
 fn admit_strains(
-    ceiling: f64,
+    cell: &Cell3,
     strain: &[f64; 6],
     projected: &[f64; 6],
 ) -> Result<(), ElasticityError3> {
-    if strain
-        .iter()
-        .any(|v| !v.is_finite() || v.abs() > ceiling)
-    {
+    if !in_material_strain_domain(cell, *strain) {
         return Err(ElasticityError3::Invalid(
             "bulk strain exceeds retained material domain",
         ));
     }
-    if projected.iter().any(|v| !v.is_finite() || v.abs() > ceiling)
-    {
+    if !in_material_strain_domain(cell, *projected) {
         return Err(ElasticityError3::Invalid(
             "projected bulk strain exceeds retained material domain",
         ));
     }
     Ok(())
+}
+
+fn in_material_strain_domain(cell: &Cell3, strain: [f64; 6]) -> bool {
+    if let Some(limit) = cell.material.frobenius_strain_limit() {
+        FrobeniusStrainBall::new(strain, limit).is_some()
+    } else {
+        let limit = cell
+            .material
+            .source_state()
+            .expect("source tensor law")
+            .maximum_absolute_mandel_strain();
+        strain.iter().all(|v| v.is_finite() && v.abs() <= limit)
+    }
 }
 
 fn admit_affine_material_strain(
@@ -195,35 +202,51 @@ fn admit_affine_material_strain(
     basis: impl IntoIterator<Item = [f64; 24]>,
     checkpoint: &mut impl FnMut() -> ControlFlow<()>,
 ) -> Result<(), ElasticityError3> {
-    let Some(source) = cell.material.source_state() else {
-        return Ok(());
-    };
     // Admit both the actual Q1 kinematics and the assumed constitutive strain.
     // Projection must not conceal a displacement-domain exit, and the projected
     // normal components can themselves exceed the original component ceiling.
     let projected = cell.kinematics.is_projected();
     let family_count = if projected { 2 } else { 1 };
+    let offset_strain = mandel_strain(gradients, offset);
     let baseline = [
-        mandel_strain(gradients, offset),
-        if projected {
-            cell.projected_mandel_strain(gradients, offset)
-        } else {
-            [0.0; 6]
-        },
+        offset_strain,
+        cell.project_mandel_strain(offset_strain, offset),
     ];
+    let mut magnitude_balls = if let Some(limit) = cell.material.frobenius_strain_limit() {
+        Some([
+            FrobeniusStrainBall::new(baseline[0], limit),
+            FrobeniusStrainBall::new(baseline[1], limit),
+        ])
+    } else {
+        None
+    };
+    if magnitude_balls
+        .as_ref()
+        .is_some_and(|balls| balls[..family_count].iter().any(Option::is_none))
+    {
+        return Err(ElasticityError3::Invalid(
+            "affine bulk strain ball exceeds retained material domain",
+        ));
+    }
     let mut norm_scale = [[0.0_f64; 6]; 2];
     let mut norm_sum = [[0.0_f64; 6]; 2];
     for local in basis {
         poll(checkpoint)?;
-        let strains = [
-            mandel_strain(gradients, &local),
-            if projected {
-                cell.projected_mandel_strain(gradients, &local)
-            } else {
-                [0.0; 6]
-            },
-        ];
+        let strain = mandel_strain(gradients, &local);
+        let strains = [strain, cell.project_mandel_strain(strain, &local)];
         for family in 0..family_count {
+            if let Some(balls) = &mut magnitude_balls {
+                if !balls[family]
+                    .as_mut()
+                    .expect("admitted offset")
+                    .add(strains[family])
+                {
+                    return Err(ElasticityError3::Invalid(
+                        "affine bulk strain ball exceeds retained material domain",
+                    ));
+                }
+                continue;
+            }
             for k in 0..6 {
                 let value = strains[family][k].abs();
                 if !value.is_finite() {
@@ -241,6 +264,18 @@ fn admit_affine_material_strain(
             }
         }
     }
+    if let Some(balls) = magnitude_balls {
+        if balls[..family_count]
+            .iter()
+            .any(|ball| !ball.as_ref().expect("admitted offset").admitted())
+        {
+            return Err(ElasticityError3::Invalid(
+                "affine bulk strain ball exceeds retained material domain",
+            ));
+        }
+        return Ok(());
+    }
+    let source = cell.material.source_state().expect("source tensor law");
     for family in 0..family_count {
         for k in 0..6 {
             // This is the exact component support formula in real arithmetic;
@@ -383,7 +418,7 @@ impl CutElasticity3 {
         })
     }
 
-    /// Check the retained source-material domain for one physical displacement.
+    /// Check the retained material domain for one physical displacement.
     /// No stress samples or displacement-family buffers are allocated.
     pub fn admit_material_domain(
         &self,
@@ -394,17 +429,19 @@ impl CutElasticity3 {
     }
 
     /// Admit every field `offset + sum_j a[j] * basis[j]`, `||a||_2 <= 1`,
-    /// against the retained source strain ceilings throughout each active Q1 cell.
-    /// Shapes, finite coefficients and scales are checked even for legacy laws;
-    /// no ceiling is invented for a law without a retained source domain.
+    /// against the retained material strain ceilings throughout each active Q1 cell.
+    /// Isotropic cards retain their Frobenius tensor-norm ceiling, including
+    /// shear. Source tensors retain their original per-Mandel-component limits.
+    /// Isotropic uncertain families use a rotation-invariant sufficient bound:
+    /// exact for one direction, potentially conservative at higher rank.
     /// B-bar checks both the actual displacement strain and its projected strain.
     ///
     /// This streams cell-local fields with constant auxiliary storage and no
     /// heap allocation. It shares the stable component support calculation with
     /// `affine_bulk_stress`, but neither evaluates nor stores constitutive stress.
     /// Every Q1 strain component is multiaffine in the three cell coordinates.
-    /// Its coefficient-ball support `abs(offset) + norm(basis)` is separately
-    /// convex, so checking the eight vertices covers the whole cell in real
+    /// Its coefficient-ball support, for either component or tensor norm, is
+    /// separately convex, so checking the eight vertices covers the whole cell in real
     /// arithmetic. B-bar's constant dilatation projection preserves this property.
     /// The check includes the fictitious extension of cut cells and may therefore
     /// conservatively refuse a field whose physical subdomain stays admissible.
@@ -428,7 +465,7 @@ impl CutElasticity3 {
     }
 
     /// Admit every field `sum_j a[j] * basis[j]`, `||a||_2 <= 1`, against
-    /// the retained source strain ceilings. Uses the same streaming whole-ball
+    /// the retained material strain ceilings. Uses the same streaming whole-ball
     /// owner as affine admission with an implicit zero local offset; no global
     /// zero displacement vector, stress output or other heap storage is allocated.
     pub fn admit_load_space_material_domain(
@@ -464,9 +501,6 @@ impl CutElasticity3 {
         }
         for cell in &self.cells {
             poll(&mut checkpoint)?;
-            if cell.material.source_state().is_none() {
-                continue;
-            }
             let local_offset = offset.map_or([0.0; 24], |field| local(cell, field));
             let (lo, hi) = (cell.bounds.lo(), cell.bounds.hi());
             // Integration nodes alone miss material-domain exits near edges and
@@ -499,8 +533,9 @@ impl CutElasticity3 {
     /// tensor and current cell scales. Clamped coefficients are masked exactly
     /// as in the operator. `max_points` admits the output allocation before any
     /// point is evaluated. Every point and publication boundary polls the caller.
-    /// Source-bound samples must remain inside the admitted Mandel strain
-    /// ceiling. No state changes on success, refusal or cancellation.
+    /// Samples must remain inside the original isotropic Frobenius or source
+    /// Mandel-component strain ceiling. No state changes on success, refusal
+    /// or cancellation.
     pub fn bulk_stress(
         &self,
         u: &[f64],
@@ -546,7 +581,8 @@ impl CutElasticity3 {
     /// Recover actual strain, constitutive strain, stress and elastic storage
     /// together, on the original physical bulk quadrature. Tensor shear is
     /// retained explicitly; B-bar's assumed strain is never mislabeled as the
-    /// displacement strain. Both obey the retained source-material domain.
+    /// displacement strain. Both obey the original isotropic Frobenius or
+    /// source Mandel-component strain domain.
     ///
     /// Only the returned point array is allocated. `max_points` admits that
     /// array before evaluation. Input, cell, point and publication boundaries
@@ -594,13 +630,7 @@ impl CutElasticity3 {
                 let (_, gradients) = q1(cell.bounds, position);
                 let strain = mandel_strain(&gradients, &local);
                 let constitutive = cell.project_mandel_strain(strain, &local);
-                if let Some(source) = cell.material.source_state() {
-                    admit_strains(
-                        source.maximum_absolute_mandel_strain(),
-                        &strain,
-                        &constitutive,
-                    )?;
-                }
+                admit_strains(cell, &strain, &constitutive)?;
                 let strain = fs_material::tensor::from_mandel(&strain);
                 let constitutive_strain = fs_material::tensor::from_mandel(&constitutive);
                 let reference_stress = stress(cell, &gradients, &local);
@@ -647,7 +677,8 @@ impl CutElasticity3 {
     /// Each source Mandel-strain component must satisfy
     /// `abs(epsilon_offset) + l2(epsilon_basis) <= source_ceiling`. Independent
     /// coordinate-state checks would miss correlated adverse combinations.
-    /// Legacy operators retain their existing lack of a source-domain ceiling.
+    /// Isotropic cards use their retained full tensor-norm ceiling; a multiple-
+    /// direction family may refuse conservatively under its sufficient norm bound.
     /// No point family escapes on refusal/cancellation; operator state is unchanged.
     pub fn affine_bulk_stress(
         &self,

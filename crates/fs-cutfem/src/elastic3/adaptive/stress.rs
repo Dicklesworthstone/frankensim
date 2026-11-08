@@ -5,7 +5,7 @@ use crate::elastic3::stress::{
 };
 
 impl AdaptiveElasticity3 {
-    /// Check one physical field against the original source-material domain,
+    /// Check one physical field against the original material domain,
     /// with exact hanging reconstruction and homogeneous master clamps.
     pub fn admit_material_domain(
         &self,
@@ -21,7 +21,8 @@ impl AdaptiveElasticity3 {
     /// Reconstruct only the current cell's 24 physical coefficients using the
     /// SAME row owner as `physical_displacements`; no expanded nodal fields or
     /// stress samples are allocated. The native owner checks finite inputs and
-    /// source ceilings, with bounded cancellation and no operator mutation.
+    /// source component or isotropic tensor-norm ceilings, with bounded
+    /// cancellation and no operator mutation.
     pub fn admit_affine_material_domain(
         &self,
         offset: &[f64],
@@ -41,7 +42,7 @@ impl AdaptiveElasticity3 {
 
     /// Admit the complete zero-offset coefficient unit ball with exact hanging
     /// reconstruction and master clamps. No global zero field or reconstructed
-    /// family is allocated; source checks share the affine admission owner.
+    /// family is allocated; material checks share the affine admission owner.
     pub fn admit_load_space_material_domain(
         &self,
         basis: &[&[f64]],
@@ -79,7 +80,7 @@ impl AdaptiveElasticity3 {
     /// original bulk points through the exact hanging-node reconstruction.
     /// Only one cell's physical coefficients are reconstructed at a time;
     /// no expanded global field is allocated. The native observation owner
-    /// enforces source strain limits, output allowance and cancellation.
+    /// enforces retained material strain limits, output allowance and cancellation.
     pub fn bulk_strain_stress(
         &self,
         u: &[f64],
@@ -98,7 +99,7 @@ impl AdaptiveElasticity3 {
     }
 
     /// Apply the same conforming reconstruction to the baseline and every
-    /// coordinate direction, then delegate whole-ball source-domain admission
+    /// coordinate direction, then delegate whole-ball material-domain admission
     /// and stress sampling to the retained native owner. The total point-field
     /// allowance is checked before allocating any reconstructed field family.
     pub fn affine_bulk_stress(

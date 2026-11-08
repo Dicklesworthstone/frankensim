@@ -261,7 +261,8 @@ retains local dilatation; only the constitutive strain uses the same
 physical-cell mean dilatation as the operator. Storage is one half of their
 work-conjugate stress/constitutive-strain contraction, including both shear
 entries and current material scaling. It excludes stabilization and boundary
-work. Both strain families obey the retained source-material domain.
+work. Both strain families obey the original isotropic Frobenius or source
+Mandel-component strain domain.
 
 Every Cartesian stress/strain observation and its stress transpose removes
 a common nodal translation before differentiation. Adaptive strain recovery
@@ -283,19 +284,30 @@ independent physical load cases. For every sourced material and Mandel component
 it checks `abs(epsilon0) + ||epsilon_basis||_2` against the retained strain ceiling,
 which admits the complete coefficient unit ball in real arithmetic. The scaled
 norm avoids squaring large or tiny components; computed admission is numerical,
-not an interval enclosure. Legacy material laws gain no fabricated ceiling.
+not an interval enclosure. Isotropic constructors retain the supplied
+`IsotropicElastic::strain_limit` and enforce it as the full Frobenius tensor
+norm, including both symmetric shear entries. They do not reinterpret it as
+six independent component limits. Rigid translation is subtracted before the
+isotropic strain check; stiffness interpolation never widens this domain.
+For an isotropic affine family, the owner normalizes by that original ceiling
+and accumulates a six-dimensional Gram matrix and offset coupling with constant
+storage. A rotation-invariant spectral-moment bound admits the complete
+coefficient ball without an eigensolve. Admission is exact in real arithmetic
+for a single direction; multiple-direction affine families may conservatively
+refuse. No material limit is applied to algebraic unit basis or adjoint vectors.
 The checked `point_count * (basis_count+1)` allowance precedes output allocation
 and adaptive field reconstruction. The adaptive implementation preserves the
 same hanging-node map and strong-clamp masking for the entire family.
 
 `admit_material_domain`, `admit_affine_material_domain` and
-`admit_load_space_material_domain` expose that same source-strain admission
+`admit_load_space_material_domain` expose that same material-strain admission
 independently of stress output. They check shape, finite coefficients and scales
-before any legacy/source distinction, then stream the eight corners of each
-source-bound cell with constant auxiliary storage and no heap allocation. Q1
+before any legacy/source distinction, then stream the eight corners of every
+cell with constant auxiliary storage and no heap allocation. Q1
 strain components, including B-bar's projected strains, are multiaffine in the
-cell coordinates. Their coefficient-ball support `abs(offset) + norm(basis)`
-is convex in each coordinate separately, so its maximum lies at a vertex.
+cell coordinates. Their coefficient-ball support, under either the component
+or tensor norm, is convex in each coordinate separately, so its maximum lies
+at a vertex. Both actual and projected B-bar strains are checked.
 The bound covers the complete discrete Q1 field, including the fictitious
 extension of cut cells; that extension can make refusal conservative. The
 zero-offset load-space method uses an implicit local zero rather than allocating
@@ -307,6 +319,15 @@ The whole-ball check retains bounded cancellation and leaves operator state
 unchanged on success, refusal or cancellation. Arithmetic remains numerical,
 not an interval enclosure or a continuum-error certificate. Stress observation
 methods still return values only at their retained integration points.
+
+`CutElasticity3::solve_physical_controlled` and
+`AdaptiveElasticity3::solve_physical_controlled` run the existing algebraic
+solver and then enforce the complete material domain before returning a
+physical displacement. A material refusal or cancellation returns no iterate;
+admission checkpoints report the final solver iteration count. The original
+`solve_controlled` stays available for algebraic solves, adjoints and response
+directions whose amplitudes do not represent physical loading. A true residual
+alone is not proof of small-strain material validity.
 
 Output point allowances are checked before allocating the stress array. State,
 cotangents and arithmetic must be finite, and observation/pullback work polls

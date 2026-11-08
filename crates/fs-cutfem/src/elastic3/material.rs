@@ -44,7 +44,11 @@ pub(super) struct PreparedMaterial3 {
 /// Keep the legacy operation tree while general material paths use cached C.
 #[derive(Clone, PartialEq)]
 pub(super) enum ReferenceMaterial3 {
-    Legacy { lame: [f64; 2], bulk: f64 },
+    Legacy {
+        lame: [f64; 2],
+        bulk: f64,
+        strain_limit: f64,
+    },
     Source(Arc<PreparedMaterial3>),
 }
 
@@ -76,6 +80,7 @@ impl ReferenceMaterial3 {
         Ok(Self::Legacy {
             lame: [lambda, mu],
             bulk,
+            strain_limit: card.strain_limit,
         })
     }
 
@@ -216,6 +221,15 @@ impl ReferenceMaterial3 {
         }
     }
 
+    /// The original isotropic card limits the Frobenius tensor norm, not each
+    /// Mandel component independently. Keep that distinction from source tensors.
+    pub(super) fn frobenius_strain_limit(&self) -> Option<f64> {
+        match self {
+            Self::Legacy { strain_limit, .. } => Some(*strain_limit),
+            Self::Source(_) => None,
+        }
+    }
+
     pub(super) fn legacy_lame(&self) -> Option<[f64; 2]> {
         match self {
             Self::Legacy { lame, .. } => Some(*lame),
@@ -228,6 +242,7 @@ impl ReferenceMaterial3 {
             Self::Legacy {
                 lame: [_, shear],
                 bulk,
+                ..
             } => Some((*bulk, *shear)),
             Self::Source(material) if material.state.is_explicitly_isotropic() => {
                 let tensor = material.state.stiffness_mandel_pa();
