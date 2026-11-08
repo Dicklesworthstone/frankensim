@@ -9,7 +9,7 @@
 mod indexed;
 pub use indexed::MaterialParticleCellGrid;
 
-use super::bulk_optics::BulkOpticalLaw;
+use super::bulk_optics::{BulkOpticalLaw, accepted_density_property};
 use super::{MaterialOpticalBinding, MaterialOpticalError};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
@@ -20,7 +20,9 @@ use fs_material::state_point::{
 };
 use fs_math::c64::C64;
 use fs_qty::semantic::{QuantityKind, ValueForm};
-use fs_qty::{Density, QuantitySpec, Temperature};
+#[cfg(test)]
+use fs_qty::Density;
+use fs_qty::{QuantitySpec, Temperature};
 
 use crate::volumes::VolumeGrid;
 use crate::volumes::transport::scattering::ScatteringGrid;
@@ -130,21 +132,9 @@ impl MaterialParticleScattering {
         host_index_n: f64,
     ) -> Result<Self, ParticleScatteringError> {
         MaterialOpticalBinding::validate_bulk_state(accepted, optical)?;
-        let property = accepted
-            .property_by_key(density_property)
+        let property = accepted_density_property(accepted, density_property)
             .ok_or(ParticleScatteringError::Density)?;
-        let requirement = property.requirement();
         let density_kg_m3 = property.value_si();
-        if requirement.quantity() != QuantitySpec::dimensional(Density::DIMS)
-            || requirement.elastic_component().is_some()
-            || requirement.strain_component().is_some()
-            || requirement.stress_component().is_some()
-            || requirement.hardness_test().is_some()
-            || !density_kg_m3.is_finite()
-            || density_kg_m3 <= 0.0
-        {
-            return Err(ParticleScatteringError::Density);
-        }
         if !host_index_n.is_finite() || host_index_n <= 0.0 {
             return Err(ParticleScatteringError::HostIndex);
         }

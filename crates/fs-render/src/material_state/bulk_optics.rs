@@ -123,6 +123,28 @@ pub(super) fn sellmeier(
     ))
 }
 
+/// One accepted scalar-density admission shared by bulk and particle optics.
+#[cfg(feature = "volumes")]
+pub(super) fn accepted_density_property<'a>(
+    accepted: &'a ResolvedMaterialStatePoint,
+    density_property: &fs_matdb::PropertyKey,
+) -> Option<&'a fs_material::state_point::ResolvedScalarProperty> {
+    let property = accepted.property_by_key(density_property)?;
+    let requirement = property.requirement();
+    let density_kg_m3 = property.value_si();
+    if requirement.quantity() != fs_qty::QuantitySpec::dimensional(fs_qty::Density::DIMS)
+        || requirement.elastic_component().is_some()
+        || requirement.strain_component().is_some()
+        || requirement.stress_component().is_some()
+        || requirement.hardness_test().is_some()
+        || !density_kg_m3.is_finite()
+        || density_kg_m3 <= 0.0
+    {
+        return None;
+    }
+    Some(property)
+}
+
 #[cfg(feature = "volumes")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum BulkOpticalLaw {

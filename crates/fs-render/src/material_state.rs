@@ -13,6 +13,9 @@
 pub mod gas_scattering;
 
 mod bulk_optics;
+/// Source-bound bulk absorption samples for the original density opacity renderer.
+#[cfg(feature = "volumes")]
+pub mod absorption;
 mod spectral_optics;
 pub use spectral_optics::MaterialSlabEmissionError;
 /// Thermal lensing from original absolute dispersion and a frozen temperature field.

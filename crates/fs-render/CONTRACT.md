@@ -9827,6 +9827,55 @@ depth behind an overflowing mass sum, thin/opaque backgrounds, flat layout and
 work/input refusal. The targeted native volumes-enabled source build passed
 117 tests, including these eight; this is not a full-workspace or tracer gate.
 
+### Accepted material-state absorption
+
+With both `material-state` and `volumes` enabled,
+`material_state::absorption::MaterialAbsorptionBinding` prepares physical mass
+absorption from the original accepted material state, optical source, and an
+explicit scalar mass-density property. The accepted and optical states must
+agree on material, source card, complete query point, and axis quantity
+conventions. The binding borrows the original accepted bundles and density
+receipt; it does not construct a replacement state or infer a density basis.
+
+Native visible dielectric intensity absorption is divided directly by intrinsic
+material density. Visible conductor and generic spectral complex-index sources
+evaluate their original extinction index at each requested wavelength before
+converting it with `kappa_a = 4*pi*k / (lambda_m*rho_material)`. In particular,
+sampling converted coefficients at source knots and then interpolating them
+would generally change the source law and is not performed. The original
+closed wavelength support and spectral wavelength/property-key interpretation
+remain part of the binding. RGB-derived attenuation is refused.
+
+`MaterialAbsorptionSamples` prepares one through sixteen finite, positive,
+strictly ordered wavelength nodes into a fixed coefficient array. It retains
+the requested wavelength slice and accepted/source/binding identities, and
+`as_density_spectrum` borrows those samples directly into the lean density
+renderer. The coefficient slice can also supply indexed material palettes and
+prepared mass-mixture inputs. Preparation introduces no per-ray constituent
+evaluation, converted field, or interpolated replacement material law.
+Intrinsic material density normalizes the mass coefficient; the rendered
+field's density-unit and length-unit scales remain explicit caller inputs.
+
+Changing material conditions requires refreshing the original accepted and
+optical sources and rebinding. Stale state pairs, absent or incorrectly typed
+density, out-of-support wavelengths, malformed sample nodes, and positive
+coefficients that cannot be represented are refused. Ordinary complex-index
+conversion takes a short arithmetic path; a logarithmic fallback handles
+recoverable intermediate range loss, while representable positive subnormal
+results remain valid. Particle scattering uses the same extracted scalar
+density admission predicate without changing its existing admission or receipt
+semantics.
+
+Five analytic tests cover original-law sampling through actual density opacity,
+temperature/density refresh and stale-state refusal, native dielectric
+absorption and RGB refusal, closed support for lossless sources, and extreme
+coefficient conversion. These material-state tests received pinned Rust parser
+validation and two source/physics reviews; they were not compiled or executed
+because the material-state/tracer dependency closure is unavailable in this
+workspace. The separately executed lean volume tests do not cover this feature
+gate. This bridge adds no measured optical dataset and makes no scattering,
+interface-reflection, or emission inference from absorption alone.
+
 ### Indexed material opacity
 
 `IndexedDensityAbsorptionSpectrum` borrows the original x-fastest density
