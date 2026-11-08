@@ -427,3 +427,413 @@ fn g0_volume_matching_refuses_exhausted_passes_unattainable_plateaus_and_lost_pr
         ));
     });
 }
+
+fn component_options() -> fs_render::free_surface::FreeSurfaceComponentOptions {
+    fs_render::free_surface::FreeSurfaceComponentOptions {
+        max_components: 8,
+        max_crop_cells: 4 * 12 * 12 * 12,
+    }
+}
+
+fn component_volume_options() -> FreeSurfaceVolumeOptions {
+    FreeSurfaceVolumeOptions {
+        max_volume_evaluations: 128,
+        ..volume_options()
+    }
+}
+
+fn component_state(
+    cx: &Cx<'_>,
+    dimensions: [usize; 3],
+    fills: &[([usize; 3], f64)],
+    density: f64,
+) -> FreeSurface3 {
+    let cells: Vec<_> = fills
+        .iter()
+        .map(|&(coordinates, fill_fraction)| FreeSurfaceInitialCell3 {
+            coordinates,
+            fill_fraction,
+            density,
+            velocity: [0.0; 3],
+        })
+        .collect();
+    FreeSurface3::from_cells(
+        dimensions,
+        0.8,
+        [0.0; 3],
+        0.0,
+        ContactModel3::Neutral,
+        &[],
+        &cells,
+        cx,
+    )
+    .unwrap()
+}
+
+fn selected_mesh_volume(mesh: &TriMesh, select: impl Fn([f64; 3]) -> bool) -> f64 {
+    mesh.triangles
+        .iter()
+        .filter(|triangle| {
+            triangle
+                .iter()
+                .all(|&index| select(mesh.vertices[index as usize]))
+        })
+        .map(|triangle| {
+            let [a, b, c] = triangle.map(|index| mesh.vertices[index as usize]);
+            (a[0] * (b[1] * c[2] - b[2] * c[1])
+                + a[1] * (b[2] * c[0] - b[0] * c[2])
+                + a[2] * (b[0] * c[1] - b[1] * c[0]))
+                / 6.0
+        })
+        .sum()
+}
+
+#[test]
+fn g1_component_match_keeps_a_small_drop_that_global_matching_erases() {
+    use fs_render::free_surface::component_volume_matched_free_surface_mesh as reconstruct;
+    with_cx(|cx, _| {
+        let fills = [([3, 5, 5], 1.0), ([8, 5, 5], 0.125)];
+        let state = component_state(cx, [12; 3], &fills, 1.0);
+        let bits = state.grid().state_bits();
+        let mass = state.ledger_mass();
+        let global =
+            volume_matched_free_surface_mesh(&state, options(), volume_options(), cx).unwrap();
+        // The total-volume-only threshold absorbs the small drop into the
+        // larger drop's target; it exceeds every sample of the small drop.
+        assert!(global.report.fill_isovalue > 0.125);
+        let small_ray = Ray {
+            origin: Point3::new(0.0851, 0.0552, 0.0),
+            dir: Vec3::new(0.0, 0.0, 1.0),
+        };
+        assert!(global.mesh.intersect(&small_ray).is_none());
+        let matched = reconstruct(
+            &state,
+            options(),
+            component_volume_options(),
+            component_options(),
+            cx,
+        )
+        .unwrap();
+        assert_eq!(matched.components.len(), 2);
+        assert_eq!(matched.cropped_cells, 54);
+        assert!(matched.mesh.intersect(&small_ray).is_some());
+        for (index, &(cell, fill)) in fills.iter().enumerate() {
+            let report = matched.components[index];
+            assert_eq!(report.seed_cell, cell);
+            assert_eq!(report.occupied_cells, 1);
+            let target = fill * 1e-6;
+            close(report.volume.target_volume_m3, target, 1e-21);
+            close(report.volume.enclosed_volume_m3, target, target * 1e-9);
+            close(
+                report.volume.fill_isovalue,
+                fill * (1.0 - (fill / 4.0).cbrt()),
+                2e-9 * fill,
+            );
+            close(
+                selected_mesh_volume(&matched.mesh, |p| (p[0] < 0.06) == (index == 0)),
+                target,
+                target * 1e-9,
+            );
+        }
+        close(matched.target_volume_m3, 1.125e-6, 1e-21);
+        assert!(matched.residual_m3.abs() <= 1.125e-15);
+        close(mesh_volume(&matched.mesh, [0.0; 3]), 1.125e-6, 1.125e-15);
+        assert_eq!(
+            matched.volume_evaluations,
+            matched
+                .components
+                .iter()
+                .map(|c| c.volume.volume_evaluations)
+                .sum::<usize>()
+        );
+        let replay = reconstruct(
+            &state,
+            options(),
+            component_volume_options(),
+            component_options(),
+            cx,
+        )
+        .unwrap();
+        assert_eq!(matched.mesh.vertices, replay.mesh.vertices);
+        assert_eq!(matched.mesh.triangles, replay.mesh.triangles);
+        assert_eq!(
+            matched.mesh.bvh_fingerprint(),
+            replay.mesh.bvh_fingerprint()
+        );
+        assert_eq!(matched.components, replay.components);
+        let density_scaled = reconstruct(
+            &component_state(cx, [12; 3], &fills, 2.0),
+            options(),
+            component_volume_options(),
+            component_options(),
+            cx,
+        )
+        .unwrap();
+        assert_eq!(matched.mesh.vertices, density_scaled.mesh.vertices);
+        assert_eq!(matched.components, density_scaled.components);
+        assert_eq!(state.grid().state_bits(), bits);
+        assert_eq!(state.ledger_mass(), mass);
+    });
+}
+
+#[test]
+fn g1_component_match_reduces_to_the_original_solver_in_original_si_coordinates() {
+    use fs_render::free_surface::component_volume_matched_free_surface_mesh as reconstruct;
+    with_cx(|cx, _| {
+        let state = single_cell(cx, 0.25, 1.0);
+        for placement in [
+            options(),
+            FreeSurfaceMeshOptions {
+                origin_m: [100.0, -20.0, 30.0],
+                cell_size_m: 0.03,
+                ..options()
+            },
+        ] {
+            let global =
+                volume_matched_free_surface_mesh(&state, placement, volume_options(), cx).unwrap();
+            let component =
+                reconstruct(&state, placement, volume_options(), component_options(), cx).unwrap();
+            assert_eq!(component.components.len(), 1);
+            assert_eq!(component.cropped_cells, 27);
+            assert_eq!(component.components[0].seed_cell, [5; 3]);
+            assert_eq!(component.components[0].volume, global.report);
+            assert_eq!(component.mesh.vertices, global.mesh.vertices);
+            assert_eq!(component.mesh.triangles, global.mesh.triangles);
+            assert_eq!(
+                component.mesh.bvh_fingerprint(),
+                global.mesh.bvh_fingerprint()
+            );
+            assert_eq!(
+                component.enclosed_volume_m3,
+                global.report.enclosed_volume_m3
+            );
+        }
+    });
+}
+
+#[test]
+fn g1_component_crops_mask_other_supports_inside_overlapping_bounds() {
+    use fs_render::free_surface::component_volume_matched_free_surface_mesh as reconstruct;
+    with_cx(|cx, _| {
+        // Three connected arms have a large box containing a separate drop.
+        // Its nodal support is separated from every arm by dry tetrahedra.
+        let mut fills = vec![([3; 3], 1.0)];
+        for coordinate in 4..9 {
+            fills.extend([
+                ([coordinate, 3, 3], 1.0),
+                ([3, coordinate, 3], 1.0),
+                ([3, 3, coordinate], 1.0),
+            ]);
+        }
+        let arms = volume_matched_free_surface_mesh(
+            &component_state(cx, [12; 3], &fills, 1.0),
+            options(),
+            volume_options(),
+            cx,
+        )
+        .unwrap();
+        fills.push(([6; 3], 1.0));
+        let matched = reconstruct(
+            &component_state(cx, [12; 3], &fills, 1.0),
+            options(),
+            component_volume_options(),
+            component_options(),
+            cx,
+        )
+        .unwrap();
+        assert_eq!(matched.components.len(), 2);
+        assert_eq!(matched.components[0].seed_cell, [3; 3]);
+        assert_eq!(matched.components[0].occupied_cells, 16);
+        assert_eq!(matched.components[1].seed_cell, [6; 3]);
+        assert_eq!(matched.cropped_cells, 8 * 8 * 8 + 27);
+        close(
+            matched.components[0].volume.enclosed_volume_m3,
+            16e-6,
+            16e-15,
+        );
+        close(matched.components[1].volume.enclosed_volume_m3, 1e-6, 1e-15);
+        // A one-node support intersects exactly 24 original tetrahedra.
+        assert_eq!(matched.mesh.triangles.len(), arms.mesh.triangles.len() + 24);
+        close(
+            selected_mesh_volume(&matched.mesh, |p| p.iter().all(|&v| v > 0.05 && v < 0.08)),
+            1e-6,
+            1e-15,
+        );
+        close(mesh_volume(&matched.mesh, [0.0; 3]), 17e-6, 17e-15);
+    });
+}
+
+#[test]
+fn g1_component_matched_liquid_uses_native_refracted_distance_and_beer_attenuation() {
+    use fs_render::free_surface::component_volume_matched_free_surface_mesh as reconstruct;
+    with_cx(|cx, _| {
+        let mut fills = Vec::new();
+        for z in 3..9 {
+            for y in 3..9 {
+                for x in 3..9 {
+                    fills.push(([x, y, z], 1.0));
+                    fills.push(([x + 12, y, z], 0.75));
+                }
+            }
+        }
+        let matched = reconstruct(
+            &component_state(cx, [24, 12, 12], &fills, 1.0),
+            FreeSurfaceMeshOptions {
+                max_cells: 24 * 12 * 12,
+                ..options()
+            },
+            component_volume_options(),
+            component_options(),
+            cx,
+        )
+        .unwrap();
+        assert_eq!(matched.components.len(), 2);
+        let level = matched.components[0].volume.fill_isovalue;
+        assert!(level < 0.5);
+        let distance = check_native_liquid_transport(
+            &matched.mesh,
+            cx,
+            (2.5 + level) * 0.01,
+            (9.5 - level) * 0.01,
+        );
+        assert!(distance > 0.06);
+        close(
+            matched.components[0].volume.enclosed_volume_m3,
+            216e-6,
+            216e-15,
+        );
+        close(
+            matched.components[1].volume.enclosed_volume_m3,
+            162e-6,
+            162e-15,
+        );
+    });
+}
+
+#[test]
+fn g0_component_matching_enforces_aggregate_work_and_retains_unresolved_raw_fill() {
+    use fs_render::free_surface::{
+        FreeSurfaceComponentOptions, component_volume_matched_free_surface_mesh as reconstruct,
+    };
+    with_cx(|cx, gate| {
+        let state = component_state(cx, [12; 3], &[([3, 5, 5], 1.0), ([8, 5, 5], 0.125)], 1.0);
+        let matched = reconstruct(
+            &state,
+            options(),
+            component_volume_options(),
+            component_options(),
+            cx,
+        )
+        .unwrap();
+        assert!(matches!(
+            reconstruct(
+                &state,
+                options(),
+                component_volume_options(),
+                FreeSurfaceComponentOptions {
+                    max_components: 1,
+                    ..component_options()
+                },
+                cx,
+            ),
+            Err(FreeSurfaceMeshError::Isosurface(
+                fs_viz::IsoSurfaceError::ComponentBudgetExceeded { limit: 1 }
+            ))
+        ));
+        assert!(matches!(
+            reconstruct(
+                &state,
+                options(),
+                component_volume_options(),
+                FreeSurfaceComponentOptions {
+                    max_crop_cells: 53,
+                    ..component_options()
+                },
+                cx,
+            ),
+            Err(FreeSurfaceMeshError::CropBudgetExceeded {
+                required: 54,
+                maximum: 53
+            })
+        ));
+        // A subnormal total allowance cannot be divided into a positive
+        // allowance for each support. Refuse before consuming any query.
+        assert!(matches!(
+            reconstruct(
+                &state,
+                options(),
+                FreeSurfaceVolumeOptions {
+                    absolute_tolerance_m3: f64::from_bits(1),
+                    relative_tolerance: 0.0,
+                    ..component_volume_options()
+                },
+                component_options(),
+                cx,
+            ),
+            Err(FreeSurfaceMeshError::UnrepresentableVolume)
+        ));
+        let first_passes = matched.components[0].volume.volume_evaluations;
+        assert!(matches!(reconstruct(
+            &state, options(),
+            FreeSurfaceVolumeOptions { max_volume_evaluations: first_passes,
+                ..component_volume_options() },
+            component_options(), cx,
+        ), Err(FreeSurfaceMeshError::VolumeMatchExhausted {
+            volume_evaluations, ..
+        }) if volume_evaluations == first_passes));
+        assert!(matches!(
+            reconstruct(
+                &state,
+                FreeSurfaceMeshOptions {
+                    max_triangles: matched.mesh.triangles.len() - 1,
+                    ..options()
+                },
+                component_volume_options(),
+                component_options(),
+                cx,
+            ),
+            Err(FreeSurfaceMeshError::Isosurface(
+                fs_viz::IsoSurfaceError::TriangleBudgetExceeded { .. }
+            ))
+        ));
+        // This positive accepted fill disappears under half-minus-fill but
+        // must remain a support component. Never return only the large drop.
+        let unresolved = component_state(cx, [12; 3], &[([3, 5, 5], 1.0), ([8, 5, 5], 1e-30)], 1.0);
+        assert!(matches!(
+            reconstruct(
+                &unresolved,
+                options(),
+                component_volume_options(),
+                FreeSurfaceComponentOptions {
+                    max_components: 1,
+                    ..component_options()
+                },
+                cx,
+            ),
+            Err(FreeSurfaceMeshError::Isosurface(
+                fs_viz::IsoSurfaceError::ComponentBudgetExceeded { limit: 1 }
+            ))
+        ));
+        assert!(
+            reconstruct(
+                &unresolved,
+                options(),
+                component_volume_options(),
+                component_options(),
+                cx,
+            )
+            .is_err()
+        );
+        gate.request();
+        assert!(matches!(
+            reconstruct(
+                &state,
+                options(),
+                component_volume_options(),
+                component_options(),
+                cx,
+            ),
+            Err(FreeSurfaceMeshError::Cancelled)
+        ));
+    });
+}

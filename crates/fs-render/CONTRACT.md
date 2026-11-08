@@ -3726,13 +3726,35 @@ The returned report retains target and enclosed volumes, signed residual,
 selected fill threshold and actual volume-query count. Unattainable constant
 fill plateaus, exhausted passes and lost world-coordinate precision refuse.
 
-These are piecewise-linear visualization models: no PLIC, per-cell or
-per-component volume conservation, subcell shape recovery, smooth-normal
-reconstruction, global vertex-link manifold certification, moving-exposure
-sampling or wet-wall closure is claimed. The numerical volume tolerance is not
-a physical shape-error bound. Controls cover analytic single-cell drop volume,
-SI scaling/placement, immutable density-independent replay, actual native
-Snell/Beer paths and work/plateau/precision refusals.
+The `component_volume_matched_free_surface_mesh` entry and its material-flow
+counterpart assign a separate accepted-volume target to each disconnected
+positive-fill support.
+Connectivity uses the native tetrahedral edge graph on raw negative fill,
+before half-minus-fill rounding; equal-zero nodes never join supports. IDs are
+ordered by first original cell and describe only the current finite-resolution
+PL support. They do not infer physical drops or track identities over time.
+Each component uses one masked crop with a full gas-node halo and original
+cell coordinates, so overlapping crop boxes cannot duplicate another support.
+The same private allocation-free solver selects each level, each final crop is
+meshed once, and one combined original TriMesh/BVH is built.
+
+The original total absolute/relative tolerance is shared in proportion to
+accepted component volume, with finite-positive allowances admitted before any
+volume queries. Underflow refuses. Individual physical meshes and the actual
+combined remapped closed mesh must satisfy their component and original total
+allowances. Query and triangle ceilings are aggregate; explicit component-count
+and summed-crop-node limits also bound support allocation and field work. Raw
+positive fills remain labeled even when the half-minus-fill geometric model
+cannot resolve them; unresolved supports refuse the entire result.
+
+These are piecewise-linear visualization models: no PLIC, per-cell volume
+conservation, inferred physical/temporal drop topology, subcell shape recovery,
+smooth-normal reconstruction, global vertex-link manifold certification,
+moving-exposure sampling or wet-wall closure is claimed. The numerical volume
+tolerance is not a physical shape-error bound. Controls cover analytic
+single-cell and detached unequal-drop volumes, masked overlapping crops,
+single-support reduction, SI placement, immutable density-independent replay,
+native Snell/Beer paths, and aggregate work/plateau/precision refusals.
 
 ## Motion-time foundation
 
