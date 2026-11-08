@@ -2925,6 +2925,16 @@ Total attenuation is never treated as absorbed heat. Beam closure and kernel
 roundoff are retained in the original per-joule deposition audit; work,
 storage, cancellation and positive-tail refusal remain enforced.
 
+Isotropic transfer operators are prepared only for groups with internal
+emission or an incoming scattering channel. Purely absorbing boundary beams
+therefore use linear layer work and do not fail on unilluminated grazing
+directions. Actual diffuse, internal and scattered paths retain the original
+angular law and positive-tail checks; no physical scattering is omitted.
+Focused regressions compare a thick collimated path with Beer--Lambert, retain
+the refusal for actual grazing illumination, and check the deterministic work
+account under layer doubling. The existing conservative storage admission is
+unchanged; the work regression is not a wall-clock performance claim.
+
 G1/G3/G4 tests cover normal/oblique thin/thick absorption, ordered multilayer
 calorimetry and reversal, an independent infinite collision-series solution,
 pure scattering with zero heat, lower-group absorption, simultaneous internal

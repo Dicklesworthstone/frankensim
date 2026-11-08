@@ -246,6 +246,79 @@ fn g1_incident_beam_matches_thin_and_thick_oblique_beer_lambert_absorption() {
 }
 
 #[test]
+fn g1_absorbing_beam_does_not_create_unilluminated_grazing_paths() {
+    // A normal ray through tau=100 is representable. The supplied isotropic
+    // ordinate would have tau=100_000, but there is no scattering or internal
+    // emission to put photons on that direction in the first place.
+    let response = prepare_angular_sources(
+        vec![mono(5, 1.0, 100.0, 0.0)],
+        vec![beam(99, PhotonSlabBoundary::Left, 1.0)],
+        vec![PhotonOrdinate {
+            mu: 0.001,
+            weight: 1.0,
+        }],
+    );
+    let result = apply(&response, &[(99, &[7.0])]);
+    let expected_escape = 7.0 * (-100.0_f64).exp();
+    near(result.escaped_j, expected_escape, 1e-13 * expected_escape);
+    near(result.deposited_j, 7.0, 1e-13);
+    assert_eq!(response.max_solve_residual, 0.0);
+
+    // The same grazing directions ARE physical for an internal emitter or
+    // diffuse illumination; their existing positive-tail refusal still applies.
+    for geometry in [
+        PhotonSourceGeometry::UniformLayer { cell_id: 5 },
+        PhotonSourceGeometry::Diffuse {
+            boundary: PhotonSlabBoundary::Left,
+        },
+    ] {
+        assert!(matches!(
+            prepare_slab_response_with_sources(
+                "physical grazing paths".into(),
+                DecayRadiation::Gamma,
+                vec![0.0, 1e-13],
+                vec![mono(5, 1.0, 100.0, 0.0)],
+                vec![PhotonSlabSource {
+                    source_id: 99,
+                    geometry
+                }],
+                vec![PhotonOrdinate {
+                    mu: 0.001,
+                    weight: 1.0
+                }],
+                PhotonSlabLimits::default(),
+                || Ok(()),
+            ),
+            Err(RadiationError::Arithmetic)
+        ));
+    }
+}
+
+#[test]
+fn g3_direct_absorption_preparation_has_linear_layer_work() {
+    // Exact characteristic absorption needs one pass, not an N-by-N
+    // isotropic transfer matrix. The explicit work account is deterministic,
+    // so this checks algorithmic scaling without a machine-dependent timer.
+    let responses = [32, 64].map(|count| {
+        let cells = (0..count)
+            .map(|i| mono(i as u64, 1.0 / count as f64, 0.7, 0.0))
+            .collect();
+        prepare_angular_sources(
+            cells,
+            vec![beam(999, PhotonSlabBoundary::Left, 0.5)],
+            gauss_legendre_4(),
+        )
+    });
+    assert!(responses[1].work <= 2 * responses[0].work);
+    assert!(responses[1].work < 16 * 64);
+    for response in &responses {
+        let result = apply(response, &[(999, &[3.0])]);
+        near(result.escaped_j, 3.0 * (-1.4_f64).exp(), 2e-13);
+        near(result.deposited_j, 3.0 * (-(-1.4_f64).exp_m1()), 2e-13);
+    }
+}
+
+#[test]
 fn g1_beam_layer_heat_and_reversed_illumination_follow_ordered_path_lengths() {
     let cells = vec![
         mono(50, 0.5, 0.6, 0.0),

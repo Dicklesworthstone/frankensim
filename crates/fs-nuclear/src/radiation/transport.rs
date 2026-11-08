@@ -307,6 +307,9 @@ pub fn prepare_slab_response_with_sources(
     let mut heat = vec![0.0; n * groups];
     let mut redistribution = vec![0.0; n * groups * groups];
     let mut kernel_defect = vec![0.0; n * groups];
+    // Only internal or scattered emission uses the isotropic first-flight
+    // operator. A directly absorbed incident beam has no isotropic photons.
+    let mut emitting_groups = vec![false; groups];
     for (cell_index, cell) in cells.iter().enumerate() {
         work.charge(1, &mut checkpoint)?;
         if !cell.thickness_m.is_finite() || cell.thickness_m <= 0.0 || cell.groups.len() != groups {
@@ -328,6 +331,7 @@ pub fn prepare_slab_response_with_sources(
                 for (outgoing, &coefficient) in row.redistribution_per_m.iter().enumerate() {
                     let fraction = ratio(coefficient, row.total_per_m)?;
                     redistribution[(cell_index * groups + group) * groups + outgoing] = fraction;
+                    emitting_groups[outgoing] |= fraction > 0.0;
                     closure.add(fraction)?;
                 }
                 kernel_defect[cell_index * groups + group] = value(closure)?.abs();
@@ -335,6 +339,7 @@ pub fn prepare_slab_response_with_sources(
         }
     }
     let mut seen = BTreeSet::new();
+    let mut internal_emission = false;
     for source in &sources {
         work.charge(1, &mut checkpoint)?;
         if !seen.insert(source.source_id) {
@@ -344,6 +349,7 @@ pub fn prepare_slab_response_with_sources(
             PhotonSourceGeometry::UniformLayer { cell_id } if !indices.contains_key(&cell_id) => {
                 return Err(invalid("uniform sources must name original photon layers"));
             }
+            PhotonSourceGeometry::UniformLayer { .. } => internal_emission = true,
             PhotonSourceGeometry::Collimated { mu, .. }
                 if !mu.is_finite() || mu <= 0.0 || mu > 1.0 =>
             {
@@ -355,6 +361,14 @@ pub fn prepare_slab_response_with_sources(
     let mut plans = Vec::with_capacity(groups);
     let mut first_flight_defect = 0.0_f64;
     for group in 0..groups {
+        if !internal_emission && !emitting_groups[group] {
+            // Besides avoiding an unused quadratic matrix, this keeps absent
+            // grazing rays from rejecting a representable collimated path.
+            // The actual boundary illumination still uses its original exact
+            // beam or diffuse first-flight calculation below.
+            plans.push(None);
+            continue;
+        }
         let (collision, escape, defect) =
             first_flights(&cells, group, &ordinates, &mut work, &mut checkpoint)?;
         first_flight_defect = first_flight_defect.max(defect);
@@ -386,13 +400,13 @@ pub fn prepare_slab_response_with_sources(
             None
         };
         checkpoint()?;
-        plans.push(GroupPlan {
+        plans.push(Some(GroupPlan {
             collision,
             escape,
             first_flight_defect: defect,
             equation,
             factor,
-        });
+        }));
     }
     let mut rows = Vec::with_capacity(sources.len());
     let mut preparation_errors = Vec::with_capacity(sources.len());
@@ -465,7 +479,7 @@ pub fn prepare_slab_response_with_sources(
                 if b.iter().all(|&x| x == 0.0) {
                     continue;
                 }
-                let plan = &mut plans[group];
+                let plan = plans[group].as_mut().ok_or(RadiationError::Arithmetic)?;
                 // Only actual, nonnegative group residuals consume the original
                 // unit-energy row allowance. Reserving equal shares for all
                 // lower groups can reject an uncoupled group solely because
