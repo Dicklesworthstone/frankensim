@@ -1099,3 +1099,27 @@ supplies no mass, density, thickness or section-area law.
 total constraint derivatives in both formulations, a physical mode crossing
 and transactional cancellation. The `buckling_sizing` example minimizes a
 three-element problem and independently re-solves the retained feasible design.
+
+### Complete-mode smooth constraints
+
+`buckling::AggregateBucklingDesignStudy` uses a fixed complete packet of the
+lowest positive modes and a conservative smooth KS lower envelope:
+`min(loads)-ln(mode_count)/sharpness <= KS <= min(loads)`. The inequality is
+`1-KS/lambda_required <= 0`; strict feasible retention requires the selected
+KS value itself to meet the original floor. A finite negative initial envelope
+is an admissible infeasible point, even when all physical loads are positive.
+
+Every trial uses `fs-solid::stability::sensitivity::aggregate` and its single
+total equilibrium adjoint. Repeated/crossing modes inside the packet remain
+admissible. Native packet-boundary, missing-mode, excessive-sharpness,
+residual and cancellation refusals preserve the last fully accepted design.
+The original first-mode API retains its separated-mode policy. Both consumers
+share the original projected AL state, work accounting and feasible archive;
+the fixed physical model and modulus-cost interpretation above remain.
+
+G1/G3 `buckling_aggregate_design` checks the analytic symmetric-column
+optimum under Standard/B-bar, a step landing on and continuing through an
+exact repeated mode, negative-envelope recovery, and packet/cancellation
+transaction boundaries. `buckling_cluster_sizing` demonstrates the complete
+mode constraint and independently re-solves both the retained physical loads
+and conservative envelope.
