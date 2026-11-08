@@ -138,22 +138,28 @@ test).
   measurement primitive for X-Pp1 (`frankensim-irp-v5-instrument-realism-pexfp.342`),
   not its resolved-jet, specimen, Fletcher-comparison or listening obligations.
 - `partials::track_partials` — full-record physical partial trajectories over
-  the shared independent-tone, damped-pole and linear-chirp refiners. Fixed,
-  caller-authored search intervals/rectangles preserve partial identities.
+  the shared independent-tone, damped-pole, linear-chirp and damped-chirp
+  refiners. Fixed caller-authored search domains preserve partial identities.
   Stationary models estimate independent frequencies; ringdown models also
   estimate amplitude decay and can separate equal-frequency, different-decay
   components. Chirped models identify each first- and last-sample frequency
   over the physical `(frame_samples - 1) * timestep_s` span, retaining linear
-  within-frame drift. Each frame retains the original DC, residual and
-  first-sample peak phasors; its exact integer source sample index distinguishes
+  within-frame drift. Damped-chirp models jointly identify both endpoint
+  frequencies and exponential amplitude decay; disjoint decay intervals may
+  separate components with matching frequency trajectories. Each frame retains
+  the original DC, residual and first-sample peak phasors; its exact integer
+  source sample index distinguishes
   changing phase origins without rounding a large epoch to floating seconds.
   End frequency is absent for nonchirped fits and decay is absent outside
-  ringdown fits, rather than silently measured as zero. Successful chirp
-  endpoints predict the next frame using the actual relative sample gap,
+  ringdown and damped-chirp fits, rather than silently measured as zero.
+  Successful chirp endpoints predict the next frame using the actual relative sample gap,
   including shortened terminal hops and unresolved frames. Only those initial
   guesses are clamped to the immutable domains; fitted endpoints must meet the
-  original untruncated-correction gate. A terminal overlapping full frame
-  covers the last sample without padding, attack skips or tail truncation.
+  original untruncated-correction gate. Damped-chirp predictions retain the
+  last fitted decay; each frame independently refits its initial amplitude
+  and phase at the new source origin, retaining exponential envelope loss
+  instead of reporting a window-averaged amplitude. A terminal overlapping full
+  frame covers the last sample without padding, attack skips or tail truncation.
   Unidentifiable, ill-conditioned and unconverged frames retain typed refusals
   and leave the last successful seeds and their source offset unchanged.
   Results stream one frame at a time; frame count and candidate work are
@@ -161,13 +167,16 @@ test).
   is charged to the fit's numeric budget, and callbacks may stop between
   frames. No mode discovery, arbitrary track reassignment, noise-floor rule,
   uncertainty, calibrated level or instrument verdict is inferred. Nonlinear
-  drift, attacks and growth require a local-model/frame-length check; chirped
-  fits do not also identify amplitude decay. `tests/partials.rs` covers
-  inharmonic motion, coherent double decay, unresolved recovery, exact clock
+  drift, attacks and growth require a local-model/frame-length check; the
+  selected local law does not identify dynamics outside its model.
+  `tests/partials.rs` covers inharmonic motion, coherent double decay,
+  unresolved recovery, exact clock
   indices, bounded work/storage, deterministic replay, a three-rung stationary
   pitch-glide residual ladder, linear-chirp endpoints and phase, exact
-  warm-start gaps, bounded prediction and dropout-anchor retention. This
-  supplies native trajectory observations for instrument-plan §7.1/7.2; it
+  warm-start gaps, bounded prediction, dropout-anchor retention, simultaneous
+  drift and decay, local initial amplitudes, and reidentification after a
+  change in the decay law. This supplies native trajectory observations for
+  instrument-plan §7.1/7.2; it
   does not replace the Python grader or establish the struck/plucked Q2 decay
   gate.
 - `fluctuation::fluctuation_strength_frame` — fluctuation strength

@@ -2,8 +2,9 @@ use core::{f64::consts::TAU, ops::ControlFlow};
 use fs_fft::C64;
 use fs_fft::harmonic::{
     ChirpedTone, ChirpedToneBounds, ChirpedToneRefinementBudget, ChirpedToneRefinementError,
-    DampedToneBounds, DampedTonePole, DampedToneRefinementBudget, HarmonicFitBudget,
-    HarmonicFitError, ToneFrequencyBudget, ToneFrequencyError,
+    DampedChirpedTone, DampedChirpedToneBounds, DampedChirpedToneRefinementBudget,
+    DampedChirpedToneRefinementError, DampedToneBounds, DampedTonePole, DampedToneRefinementBudget,
+    HarmonicFitBudget, HarmonicFitError, ToneFrequencyBudget, ToneFrequencyError,
 };
 use fs_psycho::partials::{
     PartialFitFailure, PartialFrame, PartialFrameEstimate, PartialFrameSchedule,
@@ -37,6 +38,16 @@ fn chirp_budget() -> ChirpedToneRefinementBudget {
         absolute_frequency_tolerance_hz: 1e-8,
         max_evaluations: 32,
         min_chirp_reciprocal_condition: 1e-9,
+        fit: tone_budget().fit,
+    }
+}
+
+fn damped_chirp_budget() -> DampedChirpedToneRefinementBudget {
+    DampedChirpedToneRefinementBudget {
+        absolute_frequency_tolerance_hz: 1e-8,
+        absolute_decay_tolerance_per_s: 1e-7,
+        max_evaluations: 80,
+        min_trajectory_reciprocal_condition: 1e-9,
         fit: tone_budget().fit,
     }
 }
@@ -758,4 +769,368 @@ fn chirp_tracker_admits_both_seed_arrays_and_keeps_typed_refusals_and_stop() {
     assert_eq!(summary.resolved_frames, 1);
     assert_eq!(summary.maximum_candidate_evaluations, 64);
     assert!(!summary.completed);
+}
+
+#[test]
+fn damped_chirp_frames_retain_initial_amplitude_phase_and_physical_endpoints() {
+    let n = 513;
+    let dt = 1.0 / 4096.0;
+    let first = [211.37, 603.2];
+    let drift = [20.0, -14.0];
+    let decay = [1.1, 4.6];
+    let phasors = [C64::new(0.8, 0.3), C64::new(0.4, -0.25)];
+    let record: Vec<_> = (0..1301)
+        .map(|j| {
+            let t = j as f64 * dt;
+            0.23 + (0..2)
+                .map(|k| (-decay[k] * t).exp() * chirp_sample(t, first[k], drift[k], phasors[k]))
+                .sum::<f64>()
+        })
+        .collect();
+    let initial = core::array::from_fn::<_, 2, _>(|k| DampedChirpedTone {
+        start_frequency_hz: first[k],
+        end_frequency_hz: first[k] + drift[k] * (n - 1) as f64 * dt,
+        decay_rate_per_s: decay[k],
+    });
+    let bounds = [
+        DampedChirpedToneBounds {
+            start_frequency_hz: [205.0, 225.0],
+            end_frequency_hz: [205.0, 225.0],
+            decay_rate_per_s: [0.5, 2.0],
+        },
+        DampedChirpedToneBounds {
+            start_frequency_hz: [595.0, 610.0],
+            end_frequency_hz: [595.0, 610.0],
+            decay_rate_per_s: [3.5, 6.0],
+        },
+    ];
+    let schedule = PartialFrameSchedule {
+        frame_samples: n,
+        hop_samples: 256,
+        max_frames: 5,
+        first_sample_index: (1_u64 << 53) + 73,
+    };
+    let mut frames = Vec::new();
+    let summary = track_partials(
+        &record,
+        dt,
+        schedule,
+        PartialTrackingModel::DampedChirped {
+            initial_tones: &initial,
+            bounds: &bounds,
+            budget: DampedChirpedToneRefinementBudget {
+                // Incorrect endpoint span, nominal terminal hop or decay
+                // prediction cannot be repaired by a second candidate.
+                max_evaluations: 1,
+                ..damped_chirp_budget()
+            },
+        },
+        |frame| {
+            frames.push(frame.clone());
+            ControlFlow::Continue(())
+        },
+    )
+    .unwrap();
+    assert!(summary.completed);
+    assert_eq!(summary.planned_frames, 5);
+    assert_eq!(summary.resolved_frames, 5);
+    assert_eq!(summary.maximum_candidate_evaluations, 5);
+    for (frame, offset) in frames.iter().zip([0, 256, 512, 768, 788]) {
+        assert_eq!(
+            frame.first_sample_index,
+            schedule.first_sample_index + offset
+        );
+        let estimate = frame.estimate.as_ref().unwrap();
+        let PartialFrameEstimate::DampedChirped(result) = estimate else {
+            panic!("combined model retains its full numerical diagnostics");
+        };
+        assert_eq!(result.evaluations, 1);
+        close(estimate.fit().dc, 0.23, 2e-10);
+        assert!(estimate.fit().residual_rms < 3e-10);
+        assert!(estimate.partial(2).is_none());
+        let t = offset as f64 * dt;
+        let last_t = (offset + (n - 1) as u64) as f64 * dt;
+        for k in 0..2 {
+            let partial = estimate.partial(k).unwrap();
+            close(partial.frequency_hz, first[k] + drift[k] * t, 2e-8);
+            close(
+                partial.end_frequency_hz.unwrap(),
+                first[k] + drift[k] * last_t,
+                2e-8,
+            );
+            close(partial.decay_rate_per_s.unwrap(), decay[k], 1e-7);
+            let rotated = translated_chirp_phasor(t, first[k], drift[k], phasors[k]);
+            let envelope = (-decay[k] * t).exp();
+            close(partial.peak_phasor.re, envelope * rotated.re, 2e-8);
+            close(partial.peak_phasor.im, envelope * rotated.im, 2e-8);
+        }
+    }
+}
+
+#[test]
+fn damped_chirp_frames_refine_changed_decay_after_bounded_endpoint_prediction() {
+    let n = 257;
+    let dt = 1.0 / 2048.0;
+    let phasor = C64::new(0.8, -0.3);
+    let transition = n as f64 * dt;
+    let rotated = translated_chirp_phasor(transition, 170.0, 72.0, phasor);
+    let envelope = (-1.1 * transition).exp();
+    let second_phasor = C64::new(envelope * rotated.re, envelope * rotated.im);
+    let mut record: Vec<_> = (0..n)
+        .map(|j| {
+            let t = j as f64 * dt;
+            0.1 + (-1.1 * t).exp() * chirp_sample(t, 170.0, 72.0, phasor)
+        })
+        .collect();
+    // Continuous amplitude and phase at the transition, but a new local
+    // drift and decay. The first law predicts an endpoint outside the fixed
+    // domain, so the guess is bounded before all three coordinates are refit.
+    record.extend((0..2 * n).map(|j| {
+        let t = j as f64 * dt;
+        0.1 + (-4.6 * t).exp() * chirp_sample(t, 179.0, 4.0, second_phasor)
+    }));
+    let mut frames = Vec::new();
+    let summary = track_partials(
+        &record,
+        dt,
+        PartialFrameSchedule {
+            frame_samples: n,
+            hop_samples: n,
+            max_frames: 3,
+            first_sample_index: 19,
+        },
+        PartialTrackingModel::DampedChirped {
+            initial_tones: &[DampedChirpedTone {
+                start_frequency_hz: 170.0,
+                end_frequency_hz: 179.0,
+                decay_rate_per_s: 1.1,
+            }],
+            bounds: &[DampedChirpedToneBounds {
+                start_frequency_hz: [169.0, 190.0],
+                end_frequency_hz: [170.0, 180.7],
+                decay_rate_per_s: [0.5, 6.0],
+            }],
+            budget: damped_chirp_budget(),
+        },
+        |frame| {
+            frames.push(frame.clone());
+            ControlFlow::Continue(())
+        },
+    )
+    .unwrap();
+    assert_eq!(summary.resolved_frames, 3);
+    for (j, frame) in frames[1..].iter().enumerate() {
+        let estimate = frame.estimate.as_ref().unwrap();
+        let PartialFrameEstimate::DampedChirped(result) = estimate else {
+            panic!("combined model");
+        };
+        if j == 0 {
+            assert!(result.evaluations > 1, "new decay must be measured");
+        } else {
+            assert_eq!(
+                result.evaluations, 1,
+                "accepted decay must warm-start the next frame"
+            );
+        }
+        let t = (j * n) as f64 * dt;
+        let partial = estimate.partial(0).unwrap();
+        close(partial.frequency_hz, 179.0 + 4.0 * t, 2e-8);
+        close(partial.end_frequency_hz.unwrap(), 179.5 + 4.0 * t, 2e-8);
+        close(partial.decay_rate_per_s.unwrap(), 4.6, 1e-7);
+        let rotated = translated_chirp_phasor(t, 179.0, 4.0, second_phasor);
+        let envelope = (-4.6 * t).exp();
+        close(partial.peak_phasor.re, envelope * rotated.re, 2e-8);
+        close(partial.peak_phasor.im, envelope * rotated.im, 2e-8);
+        assert!(estimate.fit().residual_rms < 3e-10);
+    }
+}
+
+#[test]
+fn damped_chirp_dropout_retains_decay_and_the_last_successful_clock_anchor() {
+    let n = 513;
+    let dt = 1.0 / 4096.0;
+    let phasor = C64::new(0.7, 0.2);
+    let mut record: Vec<_> = (0..3 * n)
+        .map(|j| {
+            let t = j as f64 * dt;
+            0.3 + (-2.3 * t).exp() * chirp_sample(t, 213.2, 20.0, phasor)
+        })
+        .collect();
+    record[n..2 * n].fill(3.0);
+    let mut frames = Vec::new();
+    let summary = track_partials(
+        &record,
+        dt,
+        PartialFrameSchedule {
+            frame_samples: n,
+            hop_samples: n,
+            max_frames: 3,
+            first_sample_index: 11,
+        },
+        PartialTrackingModel::DampedChirped {
+            initial_tones: &[DampedChirpedTone {
+                start_frequency_hz: 213.2,
+                end_frequency_hz: 215.7,
+                decay_rate_per_s: 2.3,
+            }],
+            bounds: &[DampedChirpedToneBounds {
+                start_frequency_hz: [205.0, 225.0],
+                end_frequency_hz: [205.0, 225.0],
+                decay_rate_per_s: [1.0, 4.0],
+            }],
+            budget: DampedChirpedToneRefinementBudget {
+                max_evaluations: 1,
+                ..damped_chirp_budget()
+            },
+        },
+        |frame| {
+            frames.push(frame.clone());
+            ControlFlow::Continue(())
+        },
+    )
+    .unwrap();
+    assert!(summary.completed);
+    assert_eq!(summary.resolved_frames, 2);
+    assert!(matches!(
+        frames[1].estimate,
+        Err(PartialFitFailure::DampedChirped(
+            DampedChirpedToneRefinementError::Unidentifiable { .. }
+        ))
+    ));
+    let last = frames[2].estimate.as_ref().unwrap().partial(0).unwrap();
+    let t = (2 * n) as f64 * dt;
+    close(last.frequency_hz, 213.2 + 20.0 * t, 2e-8);
+    close(last.end_frequency_hz.unwrap(), 215.7 + 20.0 * t, 2e-8);
+    close(last.decay_rate_per_s.unwrap(), 2.3, 1e-7);
+    let rotated = translated_chirp_phasor(t, 213.2, 20.0, phasor);
+    let envelope = (-2.3 * t).exp();
+    close(last.peak_phasor.re, envelope * rotated.re, 2e-8);
+    close(last.peak_phasor.im, envelope * rotated.im, 2e-8);
+}
+
+#[test]
+fn damped_chirp_tracker_admits_storage_and_retains_typed_refusals_and_stop() {
+    let n = 257;
+    let dt = 1.0 / 2048.0;
+    let record: Vec<_> = (0..2 * n)
+        .map(|j| {
+            let t = j as f64 * dt;
+            (-1.1 * t).exp() * chirp_sample(t, 170.0, 4.0, C64::new(0.8, -0.3))
+        })
+        .collect();
+    let initial = [DampedChirpedTone {
+        start_frequency_hz: 170.0,
+        end_frequency_hz: 170.5,
+        decay_rate_per_s: 1.1,
+    }];
+    let bounds = [DampedChirpedToneBounds {
+        start_frequency_hz: [165.0, 180.0],
+        end_frequency_hz: [165.0, 180.0],
+        decay_rate_per_s: [0.5, 3.0],
+    }];
+    let schedule = PartialFrameSchedule {
+        frame_samples: n,
+        hop_samples: n,
+        max_frames: 2,
+        first_sample_index: 7,
+    };
+    let required_bytes = 2 * core::mem::size_of::<DampedChirpedTone>();
+    let max_bytes = required_bytes - 1;
+    assert_eq!(
+        track_partials(
+            &record,
+            dt,
+            schedule,
+            PartialTrackingModel::DampedChirped {
+                initial_tones: &initial,
+                bounds: &bounds,
+                budget: DampedChirpedToneRefinementBudget {
+                    fit: HarmonicFitBudget {
+                        max_workspace_bytes: max_bytes,
+                        ..damped_chirp_budget().fit
+                    },
+                    ..damped_chirp_budget()
+                },
+            },
+            |_| panic!("both three-coordinate arrays must be admitted first")
+        ),
+        Err(PartialTrackingError::Fit {
+            first_sample_index: 7,
+            failure: PartialFitFailure::DampedChirped(DampedChirpedToneRefinementError::Fit(
+                HarmonicFitError::BudgetExceeded {
+                    required_bytes,
+                    max_bytes
+                }
+            )),
+        })
+    );
+    assert!(matches!(
+        track_partials(
+            &record,
+            dt,
+            schedule,
+            PartialTrackingModel::DampedChirped {
+                initial_tones: &[DampedChirpedTone {
+                    decay_rate_per_s: 4.0,
+                    ..initial[0]
+                }],
+                bounds: &bounds,
+                budget: damped_chirp_budget(),
+            },
+            |_| panic!("initial decay must reach admission without clamping")
+        ),
+        Err(PartialTrackingError::Fit {
+            failure: PartialFitFailure::DampedChirped(
+                DampedChirpedToneRefinementError::InvalidParameter { .. }
+            ),
+            ..
+        })
+    ));
+    let summary = track_partials(
+        &record,
+        dt,
+        schedule,
+        PartialTrackingModel::DampedChirped {
+            initial_tones: &initial,
+            bounds: &bounds,
+            budget: damped_chirp_budget(),
+        },
+        |frame| {
+            assert!(frame.estimate.is_ok());
+            ControlFlow::Break(())
+        },
+    )
+    .unwrap();
+    assert_eq!(summary.visited_frames, 1);
+    assert_eq!(summary.resolved_frames, 1);
+    assert_eq!(summary.maximum_candidate_evaluations, 160);
+    assert!(!summary.completed);
+    let summary = track_partials(
+        &record[..n],
+        dt,
+        schedule,
+        PartialTrackingModel::DampedChirped {
+            initial_tones: &[DampedChirpedTone {
+                decay_rate_per_s: 1.6,
+                ..initial[0]
+            }],
+            bounds: &bounds,
+            budget: DampedChirpedToneRefinementBudget {
+                max_evaluations: 1,
+                ..damped_chirp_budget()
+            },
+        },
+        |frame| {
+            assert!(matches!(
+                frame.estimate,
+                Err(PartialFitFailure::DampedChirped(
+                    DampedChirpedToneRefinementError::NotConverged { .. }
+                ))
+            ));
+            ControlFlow::Continue(())
+        },
+    )
+    .unwrap();
+    assert!(summary.completed);
+    assert_eq!(summary.resolved_frames, 0);
 }
