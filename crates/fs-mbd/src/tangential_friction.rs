@@ -26,6 +26,9 @@ pub mod mindlin;
 /// Source-capable directional Coulomb friction with full two-body mobility.
 pub mod directional;
 
+/// Native generic two-axis contact using the shared matrix constitutive owner.
+pub use directional::{RigidTangentialControls, RigidTangentialPhase, apply_rigid_tangential};
+
 use crate::{DynamicsError, MassProperties, RigidBodyState, Vec3};
 use fs_contact::tangential::nonsmooth::{
     NonsmoothAudit, NonsmoothContact, NonsmoothContactResult, NonsmoothControls,

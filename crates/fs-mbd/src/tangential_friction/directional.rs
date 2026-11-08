@@ -22,8 +22,12 @@ use fs_tribo::partial_slip::TangentFrame;
 use fs_tribo::tangential::elliptic::{
     EllipticCoulomb, EllipticCoulombState, SymmetricTangentialCompliance,
 };
+use fs_tribo::tangential::matrix::{
+    MatrixTangentialConfig, MatrixTangentialError, advance_with_matrix_compliance,
+};
 use fs_tribo::{
-    FrictionRegime, TangentialSolveConfig, TangentialStep, TangentialStepInput, TriboError,
+    FrictionRegime, TangentialLaw, TangentialSolveConfig, TangentialStep, TangentialStepInput,
+    TriboError,
 };
 
 /// Original coincident contact points, fixed tangent gauge and held normal data.
@@ -58,6 +62,8 @@ pub struct RigidDirectionalAudit {
     pub work_energy_residual_j: f64,
     pub total_energy_residual_j: f64,
     pub contact_work_residual_j: f64,
+    /// Positive endpoint traction work bound. A stored-energy phase may admit
+    /// it only with an independently verified contact storage and heat ledger.
     pub maximum_assisting_work_j: f64,
 }
 
@@ -101,6 +107,105 @@ impl<E: core::fmt::Debug> core::fmt::Display for RigidDirectionalError<E> {
     }
 }
 impl<E: std::error::Error + 'static> std::error::Error for RigidDirectionalError<E> {}
+
+/// Physical endpoint admission for one held-effort contact interval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RigidTangentialPhase {
+    /// Traction must oppose both endpoint velocities. A moving contact cannot
+    /// acquire midpoint stiction without a resolved arrest event.
+    Dissipative,
+    /// A retained layer may return its admitted reversible energy to the bodies.
+    /// Actual storage change and nonnegative heat must close native body work.
+    /// With zero storage at both endpoints, the dissipative gates still apply.
+    StoredEnergy,
+}
+
+/// Native mechanical gates and the original full-matrix constitutive budgets.
+#[derive(Clone, Copy, Debug)]
+pub struct RigidTangentialControls {
+    /// Original body, geometry, momentum, velocity and energy admission gates.
+    pub mechanical: RigidDirectionalControls,
+    /// Bounded solve of the complete two-axis constitutive/body load line.
+    pub coupling: MatrixTangentialConfig,
+    /// Declared dissipative or stored-energy contact work interpretation.
+    pub phase: RigidTangentialPhase,
+}
+
+/// Couple any retained tangential law to the original finite rigid-body pair.
+///
+/// The complete point-arm/inertia mobility supplies C = dt² J M^-1 J^T / 2.
+/// The shared matrix owner receives the unchanged accepted history and physical
+/// matrix, including any native matrix/occupied-branch implementation of the law.
+/// There is no scalar averaging, coefficient resampling or history conversion.
+///
+/// Old and candidate stored energies are checked independently against the
+/// constitutive storage receipt before the original momentum/work owner may
+/// publish both bodies and history. StoredEnergy admits energy return only when
+/// at least one endpoint has actual stored energy; dry arrest/reversal checks
+/// remain active otherwise. Fixed poses, contact frame and normal data belong
+/// to this impulse phase. The enclosing integrator owns frame transport,
+/// normal evolution and time refinement across unresolved intrastep events.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_rigid_tangential<L: TangentialLaw>(
+    bodies: &mut [RigidBodyState],
+    properties: &[MassProperties],
+    contact: RigidDirectionalContact,
+    law: &L,
+    history: &mut L::State,
+    dt_s: f64,
+    controls: RigidTangentialControls,
+    gate: &CancelGate,
+) -> Result<RigidDirectionalReport<L::State>, RigidDirectionalError<MatrixTangentialError>> {
+    poll(gate)?;
+    let stored_before = law.stored_energy_j(history);
+    if !stored_before.is_finite() || stored_before < 0.0 {
+        return Err(RigidDirectionalError::Invalid(
+            "finite nonnegative original contact storage required",
+        ));
+    }
+    apply_rigid_tangential_phase_with(
+        bodies,
+        properties,
+        contact,
+        history,
+        dt_s,
+        controls.mechanical,
+        |state, input, compliance, _mode| {
+            let resolved = advance_with_matrix_compliance(
+                law,
+                state,
+                input,
+                compliance.matrix_m_per_n(),
+                controls.coupling,
+                || gate.is_requested(),
+            )?;
+            let stored_after = law.stored_energy_j(&resolved.contact.state);
+            if !stored_after.is_finite() || stored_after < 0.0 {
+                return Err(MatrixTangentialError::Invalid(
+                    "finite nonnegative candidate contact storage required",
+                ));
+            }
+            for residual in [
+                stored_after - stored_before - resolved.contact.stored_change_j,
+                resolved.contact.closure_residual_j,
+                resolved.body_work_residual_j,
+            ] {
+                if !residual.is_finite() || residual.abs() > controls.mechanical.energy_tolerance_j
+                {
+                    return Err(MatrixTangentialError::Invalid(
+                        "original contact storage and work must close the native energy budget",
+                    ));
+                }
+            }
+            Ok(ResolvedTangential {
+                contact: resolved.contact,
+                enforce_dissipative_traction: controls.phase == RigidTangentialPhase::Dissipative
+                    || stored_before == 0.0 && stored_after == 0.0,
+            })
+        },
+        gate,
+    )
+}
 
 /// Original native directional law with exactly the retained material history.
 #[allow(clippy::too_many_arguments)]
@@ -154,6 +259,44 @@ pub fn apply_rigid_directional_with<S: Clone, E>(
         SymmetricTangentialCompliance,
         EllipticFrictionMode,
     ) -> Result<TangentialStep<S>, E>,
+    gate: &CancelGate,
+) -> Result<RigidDirectionalReport<S>, RigidDirectionalError<E>> {
+    apply_rigid_tangential_phase_with(
+        bodies,
+        properties,
+        contact,
+        history,
+        dt_s,
+        controls,
+        |state, input, compliance, mode| {
+            resolve(state, input, compliance, mode).map(|contact| ResolvedTangential {
+                contact,
+                enforce_dissipative_traction: true,
+            })
+        },
+        gate,
+    )
+}
+
+struct ResolvedTangential<S> {
+    contact: TangentialStep<S>,
+    enforce_dissipative_traction: bool,
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn apply_rigid_tangential_phase_with<S: Clone, E>(
+    bodies: &mut [RigidBodyState],
+    properties: &[MassProperties],
+    contact: RigidDirectionalContact,
+    history: &mut S,
+    dt_s: f64,
+    controls: RigidDirectionalControls,
+    resolve: impl FnOnce(
+        &S,
+        &TangentialStepInput,
+        SymmetricTangentialCompliance,
+        EllipticFrictionMode,
+    ) -> Result<ResolvedTangential<S>, E>,
     gate: &CancelGate,
 ) -> Result<RigidDirectionalReport<S>, RigidDirectionalError<E>> {
     poll(gate)?;
@@ -223,6 +366,8 @@ pub fn apply_rigid_directional_with<S: Clone, E>(
     };
     let resolved =
         resolve(history, &input, compliance, mode).map_err(RigidDirectionalError::Source)?;
+    let enforce_dissipative_traction = resolved.enforce_dissipative_traction;
+    let resolved = resolved.contact;
     poll(gate)?;
     // Native traction is positive work INTO the contact, hence acts negatively on A.
     let force = axes[0]
@@ -326,8 +471,9 @@ pub fn apply_rigid_directional_with<S: Clone, E>(
     {
         return Err(RigidDirectionalError::Audit(audit));
     }
-    if assisting > controls.energy_tolerance_j
-        || initial != [0.0; 2] && resolved.regime == FrictionRegime::Sticking
+    if enforce_dissipative_traction
+        && (assisting > controls.energy_tolerance_j
+            || initial != [0.0; 2] && resolved.regime == FrictionRegime::Sticking)
     {
         return Err(RigidDirectionalError::UnresolvedSlipEvent {
             assisting_work_j: assisting,

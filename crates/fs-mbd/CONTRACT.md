@@ -4338,6 +4338,29 @@ independent unit-impulse columns, equivalent body-frame parameterizations,
 work/heat balance, exact stopping under large common translation, overstep
 refusal and atomic callback/cancellation/geometry failures.
 
+## Generic retained tangential laws on finite rigid bodies
+
+`tangential_friction::apply_rigid_tangential` couples an original `TangentialLaw`
+and its accepted checkpoint to the complete native two-axis point mobility.
+The shared matrix constitutive owner receives the physical `dt² J M^-1 J^T / 2`
+compliance, including cross terms, and owns any native matrix or retained-branch
+dispatch. Source coefficients, material identity and state remain with the law.
+
+`RigidTangentialPhase::Dissipative` retains the existing endpoint opposition
+and resolved-arrest gates. `StoredEnergy` additionally admits a contact layer
+returning stored mechanical energy. The adapter independently checks finite,
+nonnegative old/new storage and its difference against the constitutive receipt;
+actual body work must still close storage change plus nonnegative exported heat.
+Zero storage at both endpoints retains the dry gates even in `StoredEnergy`.
+The original directional callback entry preserves its dissipative semantics.
+
+Both routes share one mobility, impulse, momentum/work audit and cancellation
+publication owner. Exactly the original pair and accepted history commit
+together. Pose/normal evolution and tangent-frame history transport remain
+external to this held-geometry phase. `tests/rigid_tangential.rs` covers coupled
+full inertia, retained Stribeck history, analytic preloaded-layer energy return,
+dry overstep/effort refusals, native-trial cancellation and foreign history.
+
 ## Continuous directional friction trajectories on finite rigid bodies
 
 `tangential_friction::directional::trajectory::apply_rigid_directional_trajectory`
