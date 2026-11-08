@@ -17,6 +17,8 @@ pub mod isochoric;
 
 /// Conservative homogeneous real-gas normal-shock and piston compression.
 pub mod nonideal_shock;
+/// Steady heat exchange between two perfectly mixed phase-equilibrium streams.
+pub mod phase_heat_exchanger;
 /// Adiabatic compressor/expander outlets with original mixture phase equilibrium.
 pub mod phase_machinery;
 

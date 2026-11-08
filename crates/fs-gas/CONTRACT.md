@@ -5370,6 +5370,48 @@ cancellation preserve both original inventories. This backward-Euler interface
 assumes uniform inventories and held conductance, with time refinement required;
 it does not supply spatial heat-exchanger geometry or phase-change kinetics.
 
+## Steady heat exchange between perfectly mixed mixture streams
+
+With `material`, `material::phase_heat_exchanger::exchange_steady_mixture_heat`
+joins two steady, perfectly mixed chambers through an authored total thermal
+conductance `UA` [W/K]. Each chamber retains its own original mixture source,
+fixed pressure, positive mass flow and phase policy. Positive duty `Q` enters
+the left stream. The existing pressure/enthalpy increment owners resolve
+`Delta h_left = Q / mass_flow_left` and
+`Delta h_right = -Q / mass_flow_right`; a bounded safeguarded scalar solve
+closes `Q = UA (T_right_out - T_left_out)`.
+
+The original NASA increments, EOS departures and changing phase amounts carry
+sensible and latent energy together. Independent species enthalpy and entropy
+datums cancel before rounding. Stream enthalpy includes pressure-flow work;
+there is no additional `p Delta v` debit, fitted mixed heat capacity, or latent
+heat source. The returned original PH receipts preserve both source laws and
+the finite phase-screen evidence. Actual `mass_flow * Delta h` from each source
+must close both interface equations and the combined energy balance. The sum
+of original `mass_flow * Delta s` must be nonnegative within a declared numerical
+allowance and is reported without clipping. This total includes irreversibility
+from mixing each inlet into its chamber as well as interface heat transfer.
+
+The signed duty bracket must contain zero. The passive initial-flux bound
+further restricts it, and both resulting endpoints must lie within the original
+source domains. Native PH tolerances are tightened against the power allowance
+and each stream's mass flow. A shared duty-query limit and total PT allowance
+cover both streams, repeated references and all bracket/root trials; each source
+receives only the remaining work allowance. Native source/domain refusal,
+failed balances, exhausted work or final cancellation returns no outlet pair.
+The accepted trial is retained without another flash. Zero conductance or equal
+inlet temperatures returns exact zero duty after one original PT selection per
+stream. Mass flow remains strictly positive even at rest.
+
+This model assumes no shaft work, pressure drop, external heat, wall storage,
+or change in stream kinetic/potential energy. It describes two mixed chambers;
+it does not describe counterflow or parallel-flow plug-flow geometry, predict
+conductance or flow, introduce phase kinetics, or certify global phase stability.
+Focused regressions use independently calculated binary PR phase/caloric
+references, a liquid-to-coexistence transition, the analytic dilute constant-Cp
+limit, unequal and reversed streams, independent large reference-datum shifts,
+exact rest, shared work boundaries, domain refusal and cancellation/replay.
+
 ## Adiabatic equilibrium mixture compressors and expanders
 
 With `material`, `material::phase_machinery::adiabatic_mixture_machine`
