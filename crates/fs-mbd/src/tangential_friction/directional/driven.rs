@@ -189,7 +189,7 @@ pub fn apply_rigid_directional_driven_with<S, E>(
         ));
     }
     let mobility = response::<TriboError>(before, props, arms, axes)?;
-    let initial = old[0].point_velocity_world.sub(old[1].point_velocity_world);
+    let initial = old[0].relative_velocity_world(old[1])?;
     let velocity = [initial.dot(axes[0]), initial.dot(axes[1])];
     let mut free = before;
     let mut point_acceleration = [Vec3::ZERO; 2];
@@ -271,7 +271,7 @@ pub fn apply_rigid_directional_driven_with<S, E>(
     }
     let free_points = points(free, props, arms)?;
     let new = points(after, props, arms)?;
-    let final_rate = new[0].point_velocity_world.sub(new[1].point_velocity_world);
+    let final_rate = new[0].relative_velocity_world(new[1])?;
     let endpoint = [final_rate.dot(axes[0]), final_rate.dot(axes[1])];
     let mut kinetic = 0.0;
     let mut free_work = 0.0;

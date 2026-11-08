@@ -767,8 +767,8 @@ impl<'a> PreparedRigidHertzRollingIsland<'a> {
                 [self.properties[m.bodies[0]], self.properties[m.bodies[1]]],
                 m.arms,
             )?;
-            let point_before = relative_point(m.before);
-            let point_after = relative_point(current);
+            let point_before = relative_point(m.before)?;
+            let point_after = relative_point(current)?;
             let omega_before = relative_spin(m.before);
             let omega_after = relative_spin(current);
             let midpoint = point_before.add(point_after).scale(0.5);
@@ -847,7 +847,7 @@ impl<'a> PreparedRigidHertzRollingIsland<'a> {
                 m.axes,
                 patch.contact_radius_m,
                 patch.sphere_radius_m,
-            );
+            )?;
             let actual =
                 std::array::from_fn(|j| 0.5 * self.dt_s * (m.rates_before[j] + after_rates[j]));
             let expected = native.scaled_motion_m[i];

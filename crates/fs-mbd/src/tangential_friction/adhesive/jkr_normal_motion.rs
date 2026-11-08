@@ -335,7 +335,7 @@ impl<'a> PreparedRigidJkrPair<'a> {
                 residual_m: geometry_residual,
             });
         }
-        let velocity = finite(relative_point(self.reaction_before).dot(self.normal))?;
+        let velocity = finite(relative_point(self.reaction_before)?.dot(self.normal))?;
         Ok(self.motion.initialize(previous, velocity)?)
     }
 
@@ -410,7 +410,7 @@ impl<'a> PreparedRigidJkrPair<'a> {
                 residual_m: geometry_residual,
             });
         }
-        let initial = relative_point(self.reaction_before);
+        let initial = relative_point(self.reaction_before)?;
         let velocity_before = finite(initial.dot(self.normal))?;
         if (state.velocity_m_s() - velocity_before).abs() > self.controls.velocity_tolerance_m_s {
             return Err(RigidJkrError::Invalid(
@@ -502,7 +502,7 @@ impl<'a> PreparedRigidJkrPair<'a> {
             self.contact.binding.arm_b_body,
         ];
         let markers_after = points(after, self.properties, marker_arms)?;
-        let endpoint = relative_point(reaction_after);
+        let endpoint = relative_point(reaction_after)?;
         let velocity_after = finite(endpoint.dot(self.normal))?;
         // Integral (h-t) F(t) dt, not h/2 times the total impulse: branch
         // events and varying forces require the original first time moment.
@@ -542,10 +542,10 @@ impl<'a> PreparedRigidJkrPair<'a> {
         let external_work = finite(external_work.to_f64())?;
         let travel = finite(reaction_travel[0].sub(reaction_travel[1]).dot(self.normal))?;
         let marker_travel_normal = finite(marker_travel[0].sub(marker_travel[1]).dot(self.normal))?;
-        let marker_velocity_residual = (relative_point(self.markers_before).dot(self.normal)
+        let marker_velocity_residual = (relative_point(self.markers_before)?.dot(self.normal)
             - velocity_before)
             .abs()
-            .max((relative_point(markers_after).dot(self.normal) - velocity_after).abs());
+            .max((relative_point(markers_after)?.dot(self.normal) - velocity_after).abs());
         let storage_change =
             finite(step.contact.reversible_energy_j - before_response.reversible_energy_j)?;
         let linear_balance = rounded_components(core::array::from_fn(|i| {

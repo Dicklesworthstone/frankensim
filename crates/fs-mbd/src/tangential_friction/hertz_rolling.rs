@@ -356,9 +356,9 @@ impl<'a> PreparedRigidHertzRollingPair<'a> {
             core.axes,
             parameters.contact_radius_m,
             radius_m,
-        );
+        )?;
         if parameters.normal_force_n > 0.0
-            && relative_point(core.points_before).dot(core.axes[2]).abs()
+            && relative_point(core.points_before)?.dot(core.axes[2]).abs()
                 > controls.mechanical.velocity_tolerance_m_s
         {
             return Err(invalid(
@@ -605,8 +605,8 @@ impl<'a> PreparedRigidHertzRollingPair<'a> {
             self.drive
                 .apply(&self.core, impulse, spin_impulse.add(rolling_impulse), gate)?;
         let after_points = points(after, self.core.pair_properties, self.core.arms)?;
-        let point_before = relative_point(self.core.points_before);
-        let point_after = relative_point(after_points);
+        let point_before = relative_point(self.core.points_before)?;
+        let point_after = relative_point(after_points)?;
         let omega_before = relative_spin(self.core.points_before);
         let omega_after = relative_spin(after_points);
         let midpoint = point_before.add(point_after).scale(0.5);
@@ -672,7 +672,7 @@ impl<'a> PreparedRigidHertzRollingPair<'a> {
             ]);
             spin_residual = (native.spin_moment_nm - resolved.spin_moment_nm).abs();
         }
-        let rate_after = rates(after_points, axes, hp.contact_radius_m, radius);
+        let rate_after = rates(after_points, axes, hp.contact_radius_m, radius)?;
         let actual: [f64; 5] =
             std::array::from_fn(|i| 0.5 * dt * (self.rate_before[i] + rate_after[i]));
         let expected = [
@@ -912,16 +912,21 @@ fn kinematics(
         dt,
     )
 }
-fn rates(p: [PointKinematics; 2], axes: [Vec3; 3], a: f64, r: f64) -> [f64; 5] {
-    let v = relative_point(p);
+fn rates(
+    p: [PointKinematics; 2],
+    axes: [Vec3; 3],
+    a: f64,
+    r: f64,
+) -> Result<[f64; 5], DynamicsError> {
+    let v = relative_point(p)?;
     let omega = relative_spin(p);
-    [
+    Ok([
         v.dot(axes[0]),
         v.dot(axes[1]),
         a * omega.dot(axes[2]),
         r * omega.dot(axes[0]),
         r * omega.dot(axes[1]),
-    ]
+    ])
 }
 fn world(v: [f64; 2], axes: [Vec3; 3]) -> Vec3 {
     axes[0].scale(v[0]).add(axes[1].scale(v[1]))

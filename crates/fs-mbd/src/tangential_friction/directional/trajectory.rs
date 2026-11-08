@@ -154,7 +154,7 @@ pub fn apply_rigid_directional_trajectory_with<S, E>(
         );
     }
     let mobility = response::<TriboError>(before, props, arms, axes)?;
-    let initial = old[0].point_velocity_world.sub(old[1].point_velocity_world);
+    let initial = old[0].relative_velocity_world(old[1])?;
     let velocity = [initial.dot(axes[0]), initial.dot(axes[1])];
     let (resolved, next) = resolve(
         history,
@@ -190,7 +190,7 @@ pub fn apply_rigid_directional_trajectory_with<S, E>(
             .state_after;
     }
     let new = points(after, props, arms)?;
-    let final_rate = new[0].point_velocity_world.sub(new[1].point_velocity_world);
+    let final_rate = new[0].relative_velocity_world(new[1])?;
     let end = [final_rate.dot(axes[0]), final_rate.dot(axes[1])];
     let mut kinetic = 0.0;
     let mut linear = Vec3::ZERO;

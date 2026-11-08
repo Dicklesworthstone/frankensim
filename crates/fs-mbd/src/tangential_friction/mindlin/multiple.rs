@@ -616,15 +616,9 @@ impl<'a> PreparedRigidMindlinIsland<'a> {
             )?;
             maximum_compatibility = maximum_compatibility.max(compatibility.abs());
             let mean_relative = patch.before[0]
-                .point_velocity_world
-                .sub(patch.before[1].point_velocity_world)
+                .relative_velocity_world(patch.before[1])?
                 .scale(0.5)
-                .add(
-                    points[0]
-                        .point_velocity_world
-                        .sub(points[1].point_velocity_world)
-                        .scale(0.5),
-                );
+                .add(points[0].relative_velocity_world(points[1])?.scale(0.5));
             let work = number(-impulse.dot(mean_relative))?;
             let change = number(patch.law.stored_energy_j(&step.state) - patch.stored)?;
             audit(
@@ -747,9 +741,7 @@ fn motion(
     points: [PointKinematics; 2],
     axes: [Vec3; 3],
 ) -> Result<([f64; 3], f64), RigidMindlinIslandError> {
-    let relative = points[0]
-        .point_velocity_world
-        .sub(points[1].point_velocity_world);
+    let relative = points[0].relative_velocity_world(points[1])?;
     let mut rates = [0.0; 3];
     for i in 0..3 {
         rates[i] = number(relative.dot(axes[i]))?;

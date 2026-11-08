@@ -149,8 +149,8 @@ pub(super) fn contact_report(
         ],
         mechanics.arms,
     )?;
-    let relative_before = relative_point(mechanics.before);
-    let relative_after = relative_point(current);
+    let relative_before = relative_point(mechanics.before)?;
+    let relative_after = relative_point(current)?;
     let spin_before = relative_spin(mechanics.before);
     let spin_after = relative_spin(current);
     let midpoint = relative_before.add(relative_after).scale(0.5);

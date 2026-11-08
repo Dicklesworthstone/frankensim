@@ -440,6 +440,73 @@ fn common_transverse_motion_cannot_hide_friction_loss() {
 }
 
 #[test]
+fn common_sliding_drift_preserves_rotational_slip_history_and_heat() {
+    let l = law();
+    let p = patch("rotational-slip", 10.0);
+    let i = interface();
+    let props = [properties(2.0, Vec3::new(1.0, 1.0, 1.0)); 2];
+    let poses =
+        [0.5, -0.5].map(|z| Pose::new(Vec3::new(0.0, 0.0, z), UnitQuaternion::IDENTITY).unwrap());
+    let binding = RigidContactBinding {
+        body_a: 0,
+        body_b: 1,
+        arm_a_body: Vec3::new(0.0, 0.0, -0.5),
+        arm_b_body: Vec3::new(0.0, 0.0, 0.5),
+    };
+    let run = |drift: f64| {
+        // All initial slip comes from rotation. The common drift is along the
+        // slip, so subtracting already rounded point velocities changes it.
+        let momentum = Vec3::new(2.0 * drift, 0.0, 0.0);
+        let mut bodies = [
+            state(poses[0], momentum, Vec3::new(0.0, -2.6, 0.0)),
+            state(poses[1], momentum, Vec3::ZERO),
+        ];
+        let mut history = NonsmoothTangentialState::new(1, 8).unwrap();
+        let report = apply_rigid_friction(
+            &mut bodies,
+            &props,
+            &mut history,
+            &[contact(&l, &p, &i)],
+            &[binding],
+            1.0 / 16.0,
+            controls(),
+            &CancelGate::new(),
+        )
+        .unwrap();
+        (bodies, history, report)
+    };
+    let reference = run(0.0);
+    let drift = 2.0_f64.powi(20);
+    let translated = run(drift);
+    // The 4 N kinetic force gives an exactly representable 1/4 Ns impulse
+    // even after the boost; this tests contact kinematics, not lost momentum.
+    close(reference.2.contacts[0].action.force_n[0], -4.0);
+    close(reference.0[0].linear_momentum_world().x, -0.25);
+    close(reference.2.contacts[0].endpoint_velocity_mps[0], 0.925);
+    assert!(reference.2.friction.physical_heat_j > 0.0);
+    assert_eq!(reference.1, translated.1);
+    assert_eq!(reference.2.contacts, translated.2.contacts);
+    assert_eq!(
+        reference.2.friction.physical_heat_j,
+        translated.2.friction.physical_heat_j
+    );
+    assert_eq!(
+        reference.2.midpoint_impulse_work_j,
+        translated.2.midpoint_impulse_work_j
+    );
+    for k in 0..2 {
+        assert_eq!(
+            translated.0[k].linear_momentum_world().x - 2.0 * drift,
+            reference.0[k].linear_momentum_world().x
+        );
+        assert_eq!(
+            translated.0[k].angular_momentum_body(),
+            reference.0[k].angular_momentum_body()
+        );
+    }
+}
+
+#[test]
 fn geometry_momentum_and_cancellation_refusals_are_atomic() {
     let l = law();
     let p = patch("patch", 100.0);

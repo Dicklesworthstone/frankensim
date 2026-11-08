@@ -169,7 +169,7 @@ impl<'a> PreparedRigidJkrMixedModePair<'a> {
         // Its actual endpoint rates come from the sealed accepted momenta.
         let old_points = points(anchor.bodies, self.properties, self.reaction_arms)
             .map_err(RigidJkrMixedModeError::from)?;
-        let old_relative = relative_point(old_points);
+        let old_relative = relative_point(old_points)?;
         let old_rates = self.axes.map(|axis| old_relative.dot(axis));
         if (0..3).any(|i| {
             !old_rates[i].is_finite()
@@ -184,7 +184,7 @@ impl<'a> PreparedRigidJkrMixedModePair<'a> {
             ..self.contact
         };
         let geometry = capture_geometry(endpoint_bodies, self.properties, contact, self.controls)?;
-        let new_relative = relative_point(geometry.reaction_before);
+        let new_relative = relative_point(geometry.reaction_before)?;
         let rates = geometry.axes.map(|axis| new_relative.dot(axis));
         let new_spin = finite(relative_spin(geometry.reaction_before).dot(geometry.axes[0]))?;
         self.admit_spin([old_spin, new_spin])?;

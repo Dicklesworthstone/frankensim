@@ -278,7 +278,7 @@ impl PreparedRigidHertzPair {
             ));
         }
         let compliance = mobility.map(|row| row.map(|v| v * half_dt_squared));
-        let rate_before = rates(points_before, axes, radius);
+        let rate_before = rates(points_before, axes, radius)?;
         let input = HertzWrenchInput {
             free_displacement_m: [dt_s * rate_before[0], dt_s * rate_before[1]],
             free_spin_angle_rad: dt_s * relative_spin(points_before).dot(axes[2]),
@@ -404,8 +404,8 @@ impl PreparedRigidHertzPair {
         )?;
         let after = native_impulses.bodies_after;
         let points_after = points(after, pair_properties, arms)?;
-        let relative_before = relative_point(points_before);
-        let relative_after = relative_point(points_after);
+        let relative_before = relative_point(points_before)?;
+        let relative_after = relative_point(points_after)?;
         let spin_before = relative_spin(points_before);
         let spin_after = relative_spin(points_after);
         let midpoint = relative_before.add(relative_after).scale(0.5);
@@ -433,7 +433,7 @@ impl PreparedRigidHertzPair {
                 .hypot(native.force_n[1] - resolved.force_n[1]);
             moment_residual = (native.spin_moment_nm - resolved.spin_moment_nm).abs();
         }
-        let rate_after = rates(points_after, axes, radius);
+        let rate_after = rates(points_after, axes, radius)?;
         let expected_after = [
             2.0 * resolved.slip_displacement_m[0] / dt_s - rate_before[0],
             2.0 * resolved.slip_displacement_m[1] / dt_s - rate_before[1],
@@ -547,23 +547,27 @@ pub(super) fn points(
         bodies[1].point_kinematics(properties[1], arms[1])?,
     ])
 }
-pub(super) fn relative_point(points: [PointKinematics; 2]) -> Vec3 {
-    points[0]
-        .point_velocity_world
-        .sub(points[1].point_velocity_world)
+// Cancel common translation before adding rotational slip, including at the
+// native endpoints used to audit friction work and physical heat.
+pub(super) fn relative_point(points: [PointKinematics; 2]) -> Result<Vec3, DynamicsError> {
+    points[0].relative_velocity_world(points[1])
 }
 pub(super) fn relative_spin(points: [PointKinematics; 2]) -> Vec3 {
     points[0]
         .angular_velocity_world
         .sub(points[1].angular_velocity_world)
 }
-fn rates(points: [PointKinematics; 2], axes: [Vec3; 3], radius: f64) -> [f64; 3] {
-    let relative = relative_point(points);
-    [
+fn rates(
+    points: [PointKinematics; 2],
+    axes: [Vec3; 3],
+    radius: f64,
+) -> Result<[f64; 3], DynamicsError> {
+    let relative = relative_point(points)?;
+    Ok([
         relative.dot(axes[0]),
         relative.dot(axes[1]),
         radius * relative_spin(points).dot(axes[2]),
-    ]
+    ])
 }
 pub(super) fn finite(value: f64) -> Result<f64, RigidHertzError> {
     if value.is_finite() {

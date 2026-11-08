@@ -191,7 +191,7 @@ pub fn apply_rigid_friction(
             vector(contact.frame.lateral()),
             vector(contact.frame.normal()),
         ];
-        let relative = a.point_velocity_world.sub(b.point_velocity_world);
+        let relative = a.relative_velocity_world(b)?;
         let relative_spin = a.angular_velocity_world.sub(b.angular_velocity_world);
         free_velocity.push([
             relative.dot(axes[0]),
@@ -280,12 +280,8 @@ pub fn apply_rigid_friction(
             .point_kinematics(properties[binding.body_a], binding.arm_a_body)?;
         let after_b = next[binding.body_b]
             .point_kinematics(properties[binding.body_b], binding.arm_b_body)?;
-        let before_relative = before_a
-            .point_velocity_world
-            .sub(before_b.point_velocity_world);
-        let after_relative = after_a
-            .point_velocity_world
-            .sub(after_b.point_velocity_world);
+        let before_relative = before_a.relative_velocity_world(before_b)?;
+        let after_relative = after_a.relative_velocity_world(after_b)?;
         let before_spin = before_a
             .angular_velocity_world
             .sub(before_b.angular_velocity_world);

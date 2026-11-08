@@ -282,7 +282,7 @@ impl<'a> PreparedRigidAdhesiveIsland<'a> {
                     "attached original contact points must coincide",
                 ));
             }
-            let relative = relative_point(original);
+            let relative = relative_point(original)?;
             if relative.dot(axes[2]).abs() > controls.mechanical.velocity_tolerance_m_s {
                 return Err(RigidAdhesiveIslandError::Invalid(
                     "held adhesive patch requires closed original normal motion",

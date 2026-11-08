@@ -308,7 +308,7 @@ impl<'a> PreparedRigidJkrMixedModePair<'a> {
         gate: &CancelGate,
     ) -> Result<RigidJkrMixedModeState, RigidJkrMixedModeError> {
         poll(gate)?;
-        let velocity = relative_point(self.reaction_before);
+        let velocity = relative_point(self.reaction_before)?;
         let spin = finite(relative_spin(self.reaction_before).dot(self.axes[0]))?;
         self.admit_spin([spin; 2])?;
         let motion = self.motion.initialize(
@@ -353,7 +353,7 @@ impl<'a> PreparedRigidJkrMixedModePair<'a> {
     ) -> Result<RigidJkrMixedModeCandidate, RigidJkrMixedModeError> {
         let (rates_before, spin_before) = self.admit_history(previous, gate)?;
         let old = previous.position_m();
-        let initial = relative_point(self.reaction_before);
+        let initial = relative_point(self.reaction_before)?;
         let mut free = [Vec3::ZERO; 2];
         for i in 0..2 {
             wrenches[i].validate()?;
@@ -432,7 +432,7 @@ impl<'a> PreparedRigidJkrMixedModePair<'a> {
         let work = finite(work.to_f64())?;
         let reaction_after = points(after, self.properties, self.reaction_arms)?;
         let markers_after = points(after, self.properties, self.marker_arms)?;
-        let endpoint = relative_point(reaction_after);
+        let endpoint = relative_point(reaction_after)?;
         let rates_after = self.axes.map(|axis| endpoint.dot(axis));
         let spin_after = finite(relative_spin(reaction_after).dot(self.axes[0]))?;
         // The held mean effort and held external wrenches give affine angular
@@ -468,10 +468,10 @@ impl<'a> PreparedRigidJkrMixedModePair<'a> {
         let external_work = finite(external_work.to_f64())?;
         let relative_travel = reaction_travel[0].sub(reaction_travel[1]);
         let displacement = self.axes.map(|axis| relative_travel.dot(axis));
-        let marker_velocity_residual = (relative_point(self.markers_before).dot(self.axes[0])
+        let marker_velocity_residual = (relative_point(self.markers_before)?.dot(self.axes[0])
             - rates_before[0])
             .abs()
-            .max((relative_point(markers_after).dot(self.axes[0]) - rates_after[0]).abs());
+            .max((relative_point(markers_after)?.dot(self.axes[0]) - rates_after[0]).abs());
         let contact_work = finite(impulse.dot(mean(initial, endpoint)))?;
         let linear_balance =
             rounded_components(core::array::from_fn(|i| linear[i] - external_linear[i]));
@@ -604,7 +604,7 @@ impl<'a> PreparedRigidJkrMixedModePair<'a> {
                 residual_m: geometry_residual,
             });
         }
-        let relative = relative_point(self.reaction_before);
+        let relative = relative_point(self.reaction_before)?;
         let rates = self.axes.map(|axis| relative.dot(axis));
         if (0..3).any(|i| {
             !rates[i].is_finite()

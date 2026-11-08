@@ -302,7 +302,7 @@ pub fn apply_rigid_rolling(
         ));
     }
     let loaded = contact.patch.normal_load_n() > 0.0;
-    let mut maximum_point_speed = magnitude(relative_point(before));
+    let mut maximum_point_speed = magnitude(relative_point(before)?);
     let mut maximum_spin = relative_spin(before).dot(normal).abs();
     if loaded
         && (maximum_point_speed > controls.velocity_tolerance_m_s
@@ -418,7 +418,7 @@ pub fn apply_rigid_rolling(
             // Shear stays constrained. The omitted normal and spin coordinates
             // must also remain admissible between endpoints; two distinct
             // eigenmodes can otherwise cancel only at the accepted endpoint.
-            let point = relative_point(old_points);
+            let point = relative_point(old_points)?;
             let mut unsupported = [0.0; 2];
             for (i, initial) in [point.dot(normal), relative_spin(old_points).dot(normal)]
                 .into_iter()
@@ -471,7 +471,7 @@ pub fn apply_rigid_rolling(
             endpoint_residual =
                 endpoint_residual.max((q_after[axis] - predicted_endpoint[axis]).abs());
         }
-        maximum_point_speed = maximum_point_speed.max(magnitude(relative_point(new_points)));
+        maximum_point_speed = maximum_point_speed.max(magnitude(relative_point(new_points)?));
         maximum_spin = maximum_spin.max(relative_spin(new_points).dot(normal).abs());
         if loaded
             && (maximum_point_speed > controls.velocity_tolerance_m_s
@@ -495,8 +495,8 @@ pub fn apply_rigid_rolling(
             capacity,
         )?);
         let force_work = impulse.dot(
-            relative_point(old_points)
-                .add(relative_point(new_points))
+            relative_point(old_points)?
+                .add(relative_point(new_points)?)
                 .scale(0.5),
         );
         let moment_work = couple.dot(
@@ -637,8 +637,8 @@ fn points(
         bodies[binding.body_b].point_kinematics(properties[binding.body_b], binding.arm_b_body)?,
     ])
 }
-fn relative_point(p: [PointKinematics; 2]) -> Vec3 {
-    p[0].point_velocity_world.sub(p[1].point_velocity_world)
+fn relative_point(p: [PointKinematics; 2]) -> Result<Vec3, DynamicsError> {
+    p[0].relative_velocity_world(p[1])
 }
 fn relative_spin(p: [PointKinematics; 2]) -> Vec3 {
     p[0].angular_velocity_world.sub(p[1].angular_velocity_world)

@@ -22,6 +22,18 @@ the existing endpoint admission tolerances. The public `relative_point_speed`
 entry point validates consumed row/twist scalars and indices before delegating
 to this same reducer; it does not certify geometry or pose correspondence.
 
+The finite-body patch adapters use `PointKinematics::relative_velocity_world`
+for initial slip, endpoint motion and conjugate work. This covers partial slip,
+Hertz and adhesive shear/spin, rolling, directional friction and Mindlin contact,
+including shared-body islands. Common COM translation cancels before either
+rotational point contribution is added; subtracting rounded absolute point
+velocities is not a relative contact query. The checked fixed-work reduction
+propagates the original dynamics refusal before state publication and changes
+neither the friction law nor the body momentum admission gates. The rotational
+slip cases in `tests/tangential_friction.rs` and `tests/hertz_friction.rs` compare
+rest-frame history, traction, recoil and heat under common tangential drift
+using exactly representable impulses and an independent analytic Hertz loss.
+
 ## Physical torque products
 
 The native `Vec3::cross` compensates both floating-point product tails before

@@ -386,7 +386,7 @@ impl<'a> PreparedRigidDmtPair<'a> {
     /// Initialize source history from the ACTUAL normal geometry and native
     /// slip. Only the arbitrary shear-coordinate origins are caller supplied.
     pub fn initialize(&self, shear_position_m: [f64; 2]) -> Result<DmtCoupledState, RigidDmtError> {
-        let velocity = relative_point(self.reaction_before);
+        let velocity = relative_point(self.reaction_before)?;
         Ok(self.load_line.initialize_with_velocity(
             [self.approach_m, shear_position_m[0], shear_position_m[1]],
             [velocity.dot(self.axes[1]), velocity.dot(self.axes[2])],
@@ -420,7 +420,7 @@ impl<'a> PreparedRigidDmtPair<'a> {
         let axes = self.axes;
         let dt = self.dt_s;
         let controls = self.controls;
-        let initial = relative_point(self.reaction_before);
+        let initial = relative_point(self.reaction_before)?;
         let rates_before = axes.map(|axis| initial.dot(axis));
         let old = previous.position_m();
         let geometry_residual = finite(old[0] - self.approach_m)?;
@@ -524,7 +524,7 @@ impl<'a> PreparedRigidDmtPair<'a> {
             self.contact.binding.arm_b_body,
         ];
         let markers_after = points(after, self.properties, marker_arms)?;
-        let endpoint = relative_point(reaction_after);
+        let endpoint = relative_point(reaction_after)?;
         let rates_after = axes.map(|axis| endpoint.dot(axis));
         let delta = core::array::from_fn(|i| dt * (0.5 * rates_before[i] + 0.5 * rates_after[i]));
         let position = core::array::from_fn(|i| old[i] + delta[i]);
@@ -607,10 +607,10 @@ impl<'a> PreparedRigidDmtPair<'a> {
         let angular_residual =
             rounded_components(core::array::from_fn(|i| angular[i] - external_angular[i]));
         let marker_normal = marker_travel[0].sub(marker_travel[1]).dot(axes[0]);
-        let marker_rate_residual = (relative_point(self.markers_before).dot(axes[0])
+        let marker_rate_residual = (relative_point(self.markers_before)?.dot(axes[0])
             - rates_before[0])
             .abs()
-            .max((relative_point(markers_after).dot(axes[0]) - rates_after[0]).abs());
+            .max((relative_point(markers_after)?.dot(axes[0]) - rates_after[0]).abs());
         let audit = RigidDmtAudit {
             displacement_residual_m: core::array::from_fn(|i| {
                 delta[i] - (trial.state().position_m()[i] - old[i])

@@ -193,6 +193,81 @@ fn common_normal_velocity_preserves_pair_friction_loss() {
 }
 
 #[test]
+fn common_sliding_drift_preserves_rotational_slip_and_hertz_heat() {
+    let properties = [MassProperties::new(2.0, Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap(); 2];
+    let poses =
+        [0.5, -0.5].map(|z| Pose::new(Vec3::new(0.0, 0.0, z), UnitQuaternion::IDENTITY).unwrap());
+    let f = Fixture {
+        bodies: [
+            state(
+                poses[0],
+                properties[0],
+                Vec3::ZERO,
+                Vec3::new(0.0, -2.6, 0.0),
+            ),
+            state(poses[1], properties[1], Vec3::ZERO, Vec3::ZERO),
+        ],
+        properties,
+        binding: RigidContactBinding {
+            body_a: 0,
+            body_b: 1,
+            arm_a_body: Vec3::new(0.0, 0.0, -0.5),
+            arm_b_body: Vec3::new(0.0, 0.0, 0.5),
+        },
+        frame: TangentFrame::new([0.0, 0.0, 1.0], [1.0, 0.0, 0.0]).unwrap(),
+        law: law(),
+    };
+    let run = |drift: f64| {
+        let mut bodies = f.bodies.map(|body| {
+            RigidBodyState::new(
+                body.pose(),
+                Vec3::new(2.0 * drift, 0.0, 0.0),
+                body.angular_momentum_body(),
+            )
+            .unwrap()
+        });
+        let report = f.advance(&mut bodies, 1.0 / 16.0, controls()).unwrap();
+        (bodies, report)
+    };
+    let reference = run(0.0);
+    let drift = 2.0_f64.powi(20);
+    let translated = run(drift);
+    // The slip is omega_y * arm_z = 1.3 m/s, independent of the common
+    // translation. W = 1/2 + 1/2 + 1/4 + 1/4, J = -mu*N*dt = -1/4 Ns.
+    close(reference.1.slip_velocity_before_m_s[0], 1.3, 1e-14);
+    close(reference.1.slip_velocity_after_m_s[0], 0.925, 1e-14);
+    close(reference.1.force_impulse_world_ns.x, -0.25, 1e-14);
+    close(reference.1.dissipated_energy_j, 0.278125, 1e-14);
+    assert_eq!(reference.1.contact, translated.1.contact);
+    assert_eq!(
+        reference.1.slip_velocity_before_m_s,
+        translated.1.slip_velocity_before_m_s
+    );
+    assert_eq!(
+        reference.1.slip_velocity_after_m_s,
+        translated.1.slip_velocity_after_m_s
+    );
+    assert_eq!(
+        reference.1.dissipated_energy_j,
+        translated.1.dissipated_energy_j
+    );
+    assert_eq!(
+        reference.1.midpoint_impulse_work_j,
+        translated.1.midpoint_impulse_work_j
+    );
+    for k in 0..2 {
+        assert_eq!(
+            translated.0[k].linear_momentum_world().x - 2.0 * drift,
+            reference.0[k].linear_momentum_world().x
+        );
+        assert_eq!(
+            translated.0[k].angular_momentum_body(),
+            reference.0[k].angular_momentum_body()
+        );
+    }
+}
+
+#[test]
 fn moving_high_static_capacity_uses_kinetic_traction_through_true_arrest() {
     for (slip, spin) in [(1.0, 0.0), (0.0, 1.0)] {
         let mut f = axial(slip, spin);

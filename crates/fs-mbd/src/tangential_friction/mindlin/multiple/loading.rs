@@ -712,15 +712,9 @@ impl<'a> PreparedRigidHertzMindlinIsland<'a> {
             normal_residual = normal_residual.max(residual[0].abs());
             shear_residual = shear_residual.max(residual[1].abs());
             let mean_relative = patch.before[0]
-                .point_velocity_world
-                .sub(patch.before[1].point_velocity_world)
+                .relative_velocity_world(patch.before[1])?
                 .scale(0.5)
-                .add(
-                    points[0]
-                        .point_velocity_world
-                        .sub(points[1].point_velocity_world)
-                        .scale(0.5),
-                );
+                .add(points[0].relative_velocity_world(points[1])?.scale(0.5));
             let work = number(-impulse.dot(mean_relative))?;
             let normal_stored =
                 number(response.reversible_energy_j - patch.history.normal_energy_j())?;
@@ -922,9 +916,7 @@ fn motion(
     points: [PointKinematics; 2],
     axes: [Vec3; 3],
 ) -> Result<([f64; 3], f64), RigidHertzMindlinIslandError> {
-    let relative = points[0]
-        .point_velocity_world
-        .sub(points[1].point_velocity_world);
+    let relative = points[0].relative_velocity_world(points[1])?;
     let rates = [
         number(relative.dot(axes[0]))?,
         number(relative.dot(axes[1]))?,

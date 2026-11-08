@@ -235,7 +235,7 @@ impl<'a> PreparedRigidAdhesiveTransient<'a> {
             vector(contact.frame.normal()),
         ];
         let old = points(before, properties, arms)?;
-        let initial = relative_point(old);
+        let initial = relative_point(old)?;
         let radius = contact.source.patch().parameters().contact_radius_m;
         let attached = if radius == 0.0 {
             None
@@ -296,7 +296,7 @@ impl<'a> PreparedRigidAdhesiveTransient<'a> {
         if let Some(attached) = &self.attached {
             return self.advance_law(attached, &attached.law, gate);
         }
-        let initial = relative_point(self.points_before);
+        let initial = relative_point(self.points_before)?;
         let velocity = [initial.dot(self.axes[0]), initial.dot(self.axes[1])];
         let spin = relative_spin(self.points_before).dot(self.axes[2]);
         poll(gate)?;
@@ -356,7 +356,7 @@ impl<'a> PreparedRigidAdhesiveTransient<'a> {
         let arms = self.arms;
         let axes = self.axes;
         let old = self.points_before;
-        let initial = relative_point(old);
+        let initial = relative_point(old)?;
         let initial_spin = relative_spin(old);
         let velocity = [initial.dot(axes[0]), initial.dot(axes[1])];
         let spin = initial_spin.dot(axes[2]);
@@ -391,7 +391,7 @@ impl<'a> PreparedRigidAdhesiveTransient<'a> {
         let couple = axes[2].scale(path.spin_angular_impulse_nms);
         let after = apply_pair_wrench(before, properties, arms, impulse, couple, gate)?;
         let new = points(after, properties, arms)?;
-        let endpoint = relative_point(new);
+        let endpoint = relative_point(new)?;
         let endpoint_spin = relative_spin(new);
         let mut kinetic = 0.0;
         let mut linear = Vec3::ZERO;

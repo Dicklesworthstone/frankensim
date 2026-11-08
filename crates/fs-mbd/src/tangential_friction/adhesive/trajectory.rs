@@ -212,7 +212,7 @@ pub fn prepare_rigid_adhesive_trajectory(
         vector(contact.frame.normal()),
     ];
     let old = points(before, properties, arms)?;
-    let initial = relative_point(old);
+    let initial = relative_point(old)?;
     let angular_initial = relative_spin(old);
     let velocity = [initial.dot(axes[0]), initial.dot(axes[1])];
     let spin = angular_initial.dot(axes[2]);
@@ -268,7 +268,7 @@ pub fn prepare_rigid_adhesive_trajectory(
     let angular_impulse = axes[2].scale(resolved.spin_angular_impulse_nms);
     let after = apply_pair_wrench(before, properties, arms, impulse, angular_impulse, gate)?;
     let new = points(after, properties, arms)?;
-    let endpoint = relative_point(new);
+    let endpoint = relative_point(new)?;
     let angular_endpoint = relative_spin(new);
     let midpoint = initial.scale(0.5).add(endpoint.scale(0.5));
     let angular_midpoint = angular_initial.scale(0.5).add(angular_endpoint.scale(0.5));

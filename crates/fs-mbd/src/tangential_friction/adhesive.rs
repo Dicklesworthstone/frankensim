@@ -227,7 +227,7 @@ pub fn prepare_rigid_adhesive(
         vector(contact.frame.normal()),
     ];
     let initial = points(before, properties, arms)?;
-    let relative_before = relative_point(initial);
+    let relative_before = relative_point(initial)?;
     let angular_before = relative_spin(initial);
     let slip_before = [relative_before.dot(axes[0]), relative_before.dot(axes[1])];
     let spin_before = angular_before.dot(axes[2]);
@@ -305,7 +305,7 @@ pub fn prepare_rigid_adhesive(
         prepare_pair_wrench(before, properties, arms, impulse, angular_impulse, gate)?;
     let after = native_impulses.bodies_after;
     let endpoint = points(after, properties, arms)?;
-    let relative_after = relative_point(endpoint);
+    let relative_after = relative_point(endpoint)?;
     let angular_after = relative_spin(endpoint);
     let midpoint = relative_before.add(relative_after).scale(0.5);
     let angular_midpoint = angular_before.add(angular_after).scale(0.5);

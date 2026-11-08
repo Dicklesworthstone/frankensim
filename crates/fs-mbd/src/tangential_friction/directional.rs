@@ -205,7 +205,7 @@ pub fn apply_rigid_directional_with<S: Clone, E>(
     let matrix = mobility.map(|row| row.map(|x| x * scale));
     let compliance =
         SymmetricTangentialCompliance::new(matrix).map_err(RigidDirectionalError::Compliance)?;
-    let relative_before = old[0].point_velocity_world.sub(old[1].point_velocity_world);
+    let relative_before = old[0].relative_velocity_world(old[1])?;
     let initial = [relative_before.dot(axes[0]), relative_before.dot(axes[1])];
     let input = TangentialStepInput {
         normal_n: contact.normal_load_n,
@@ -236,7 +236,7 @@ pub fn apply_rigid_directional_with<S: Clone, E>(
             .state_after;
     }
     let new = points(after, properties, arms)?;
-    let relative_after = new[0].point_velocity_world.sub(new[1].point_velocity_world);
+    let relative_after = new[0].relative_velocity_world(new[1])?;
     let final_rate = [relative_after.dot(axes[0]), relative_after.dot(axes[1])];
     let midpoint = relative_before.scale(0.5).add(relative_after.scale(0.5));
     let displacement = [

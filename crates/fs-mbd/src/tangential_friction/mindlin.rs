@@ -255,9 +255,7 @@ pub fn advance_rigid_mindlin_driven(
             "opposed central attachments and A-to-B normal required",
         ));
     }
-    let before_relative = points[0]
-        .point_velocity_world
-        .sub(points[1].point_velocity_world);
+    let before_relative = points[0].relative_velocity_world(points[1])?;
     admit_unmodeled(
         before_relative,
         points[0]
@@ -359,9 +357,7 @@ pub fn advance_rigid_mindlin_driven(
     )?;
     let after_bodies = native.bodies;
     let after_points = native.points;
-    let after_relative = after_points[0]
-        .point_velocity_world
-        .sub(after_points[1].point_velocity_world);
+    let after_relative = after_points[0].relative_velocity_world(after_points[1])?;
     admit_unmodeled(
         after_relative,
         after_points[0]

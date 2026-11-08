@@ -313,7 +313,7 @@ impl PreparedRigidHertzIsland {
                     .expect("captured B"),
             ];
             let radius = prepared.contact_radius_m();
-            let relative = relative_point(prepared.points_before);
+            let relative = relative_point(prepared.points_before)?;
             let normal_rate = relative.dot(prepared.axes[2]);
             if prepared.normal_force_n() > 0.0
                 && normal_rate.abs() > controls.mechanical.velocity_tolerance_m_s

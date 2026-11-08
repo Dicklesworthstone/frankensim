@@ -312,7 +312,7 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
         {
             return Err(invalid("positive original shear/rolling response required"));
         }
-        let initial_point = relative_point(pair.core.points_before);
+        let initial_point = relative_point(pair.core.points_before)?;
         let initial_spin = relative_spin(pair.core.points_before);
         let point_roundoff = 128.0 * f64::EPSILON * magnitude(initial_point);
         let spin_roundoff = 128.0 * f64::EPSILON * magnitude(initial_spin);
@@ -458,7 +458,7 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
             }
             let remaining = dt - elapsed;
             let p = points(current, self.pair.core.pair_properties, self.pair.core.arms)?;
-            let native_rates = rates(p, self.pair.core.axes, self.contact_radius_m(), radius);
+            let native_rates = rates(p, self.pair.core.axes, self.contact_radius_m(), radius)?;
             let u = if stopped { 0.0 } else { native_rates[0] };
             let r = native_rates[4];
             let required_static = finite((b * self.gamma * r - drive_u) / a)?;
@@ -593,7 +593,7 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
                 self.pair.core.axes,
                 self.contact_radius_m(),
                 radius,
-            );
+            )?;
             let excluded_spin = relative_spin(after_points)
                 .dot(self.pair.core.axes[0])
                 .abs()
@@ -609,7 +609,7 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
                 .max(after_rates[2].abs())
                 .max(after_rates[3].abs())
                 .max(
-                    relative_point(after_points)
+                    relative_point(after_points)?
                         .dot(self.pair.core.axes[2])
                         .abs(),
                 );
@@ -703,7 +703,7 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
             self.pair.core.axes,
             self.contact_radius_m(),
             radius,
-        );
+        )?;
         let final_excluded_spin = relative_spin(final_points)
             .dot(self.pair.core.axes[0])
             .abs()
@@ -722,7 +722,7 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
             .max(final_rates[2].abs())
             .max(final_rates[3].abs())
             .max(
-                relative_point(final_points)
+                relative_point(final_points)?
                     .dot(self.pair.core.axes[2])
                     .abs(),
             );
