@@ -22,6 +22,9 @@
 
 /// Original electrical networks coupled to the resolved 3D harmonic field.
 pub mod circuit;
+/// Finite-window heat and mechanical forcing of coherent original AC fields.
+#[cfg(feature = "harmonic-exposure")]
+pub mod coherent_exposure;
 /// Exact finite-interval conductor heat from the original coherent AC field.
 #[cfg(feature = "harmonic-exposure")]
 pub mod exposure;

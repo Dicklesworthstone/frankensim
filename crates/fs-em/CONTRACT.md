@@ -1,5 +1,34 @@
 # fs-em contract
 
+## Coherent finite-window heat and loads from native 3D harmonic induction
+
+With `harmonic-exposure`, `SpatialInduction::prepare_harmonic_exposure` retains
+the already solved original A–phi fields at their actual frequencies. Every
+response must share the exact source owner and prescribed steady velocity.
+Equal frequencies combine in double-double arithmetic before all products;
+distinct frequencies retain both their beat and carrier terms through the
+existing analytic `fs-fft` temporal Gram kernel. Scalar and oriented tensor
+conductor sources remain unchanged, including their resolved skin/proximity
+current distributions. No additional field solve or temporal sampling occurs.
+
+Uniform physical intervals return source-bound per-cell Joule heat and separate
+signed Lorentz work. Original tetrahedral P1 mass weights integrate `J·E` and
+`J×B` without vertex lumping. The same existing consistent load integrator
+exports selected cells' mean nodal forces, native wrench and P1 virtual power;
+duration times those means gives the corresponding impulse. Pair/workspace
+budgets precede allocation, cancellation publishes no partial result, and
+observations never advance accepted histories. Tests in
+`tests/spatial_induction/harmonic/coherent_exposure.rs` compare real space/time
+quadrature, moving and rotated anisotropic conductors, full-cycle recovery,
+coherent cancellation, interval additivity and source/motion refusals.
+
+These are settled AC observations, excluding DC/AC cross terms, switch-on
+transients, nonlinear/hysteretic frequency mixing and mechanical feedback.
+Only the reported physical Joule heat may be deposited; adding the original
+cycle-mean losses again would double count it. No complete finite-window
+source/storage balance, continuum error bound or empirical validation is
+implied by this observation path.
+
 ## Prepared source-temperature trials for coupled induction motion
 
 `SpatialInduction::prepare_materials_trial` retains one source-pinned endpoint

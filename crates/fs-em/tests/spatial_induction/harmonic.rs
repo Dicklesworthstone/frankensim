@@ -2,6 +2,9 @@
 #[path = "harmonic/circuit.rs"]
 mod circuit;
 #[cfg(feature = "harmonic-exposure")]
+#[path = "harmonic/coherent_exposure.rs"]
+mod coherent_exposure;
+#[cfg(feature = "harmonic-exposure")]
 #[path = "harmonic/exposure.rs"]
 mod exposure;
 #[path = "harmonic/loads.rs"]
