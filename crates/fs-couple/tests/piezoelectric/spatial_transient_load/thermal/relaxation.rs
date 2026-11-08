@@ -1,6 +1,8 @@
 //! Source-bound ceramic heat, separate conductor destinations and atomic thermal steps.
 #[path = "relaxation/support_motion.rs"]
 mod support_motion;
+#[path = "relaxation/acoustic.rs"]
+mod acoustic;
 
 use super::*;
 use crate::harmonic::relaxation::fixture as memory_fixture;

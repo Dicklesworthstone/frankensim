@@ -6,6 +6,8 @@
 //! deposition, conduction, Newton iteration and joint energy acceptance.
 //! Explicit ceramic routes also deposit intrinsic material losses into their
 //! original finite caloric inventory, with unchanged source-backed coefficients.
+//! Incident and outgoing guide waves share that same solve. Their signed work
+//! crosses the thermal assembly boundary; it is never deposited as local heat.
 
 mod ceramic;
 pub use ceramic::ThermalCeramicCell;
@@ -21,6 +23,7 @@ use crate::circuit_enthalpy::{
 use crate::material_circuit::MaterialResistor;
 use crate::piezoelectric::spatial::transient::{
     TetPiezoelectricTransient, TetPiezoelectricTransientCandidate, TetPiezoelectricTransientStep,
+    acoustic::{TransientAcousticPort, TransientAcousticPortResponse},
 };
 use crate::piezoelectric::spatial::{TetPiezoelectricControls, TetPiezoelectricError};
 use fs_exec::Cx;
@@ -65,6 +68,9 @@ pub struct SpatialPiezoelectricThermalStep {
     /// Free mechanical coordinates have zero entries. Their work is retained
     /// separately in `native.support_work_j` and included in the joint supply.
     pub midpoint_support_force_n: Vec<[f64; 3]>,
+    /// Incoming/outgoing guide waves and signed work, in input port order.
+    /// This energy crosses the assembly boundary, separately from deposited heat.
+    pub acoustic_ports: Vec<TransientAcousticPortResponse>,
     /// Original material-network heat routes, in the same order as `loads.loads`.
     pub destinations: Vec<ResistorCell>,
     /// Complete original-tetrahedron to ceramic caloric-cell correspondence.
@@ -127,17 +133,20 @@ impl<'model, 'mesh> ThermalDriver for LoadDriver<'model, 'mesh> {
             numerical_dissipation_j: 0.0,
             stored_change_j: native.retained_energy_change_j().to_f64(),
             supplied_j: (native.retained_mechanical_work_j()
-                + self.loads.retained_electrical_source_work_j()).to_f64(),
+                + self.loads.retained_electrical_source_work_j()
+                - Dd::from_f64(native.acoustic_outward_work_j)).to_f64(),
         }
     }
     fn retained_energy_balance_j(&self) -> Dd {
         let native = self.candidate.step();
         native.retained_energy_change_j() - native.retained_mechanical_work_j()
             - self.loads.retained_electrical_source_work_j()
+            + Dd::from_f64(native.acoustic_outward_work_j)
     }
     fn into_parts(self) -> (Self::Model, Self::Step) {
         let mut candidate = Arc::unwrap_or_clone(self.candidate);
         let midpoint_support_force_n = std::mem::take(&mut candidate.midpoint_support_force_n);
+        let acoustic_ports = std::mem::take(&mut candidate.acoustic_ports);
         let (body, native) = candidate.into_parts();
         (
             body,
@@ -145,6 +154,7 @@ impl<'model, 'mesh> ThermalDriver for LoadDriver<'model, 'mesh> {
                 native,
                 loads: self.loads,
                 midpoint_support_force_n,
+                acoustic_ports,
                 destinations: self.destinations,
                 ceramic_destinations: self.ceramic_destinations.to_vec(),
             },
@@ -271,6 +281,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             thermal,
             target_s,
             Some(endpoint_support_velocities_m_s),
+            &[],
             material,
             bindings,
             &[],
@@ -330,6 +341,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             thermal,
             target_s,
             None,
+            &[],
             material,
             bindings,
             ceramic_bindings,
@@ -381,6 +393,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             thermal,
             target_s,
             Some(endpoint_support_velocities_m_s),
+            &[],
             material,
             bindings,
             ceramic_bindings,
@@ -395,12 +408,51 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         )
     }
 
+    /// Receive and emit sound while evolving source-bound load and ceramic heat.
+    /// The original guide traction, electrode currents, consistent inertia and
+    /// intrinsic material memories participate in every joint thermal trial.
+    /// Signed outward acoustic work is an external energy transfer, counted once;
+    /// only resistor and intrinsic material losses enter their finite heat cells.
+    ///
+    /// Use `None` for stationary supports or supply every original support DOF's
+    /// endpoint velocity. Ceramic routes, source domains and thermal feedback
+    /// retain the restrictions of [`Self::step_with_material_thermal_loads_candidate`].
+    /// The guide's fluid owner is fixed during this interval; fluid heating and
+    /// temperature-dependent ceramic tensors require separate coupled models.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_acoustic_thermal_loads_candidate<'thermal>(
+        &self,
+        thermal: &DepositionSimulation<'thermal>,
+        target_s: f64,
+        acoustic_ports: &[TransientAcousticPort<'_>],
+        endpoint_support_velocities_m_s: Option<&[(usize, f64)]>,
+        material: &PreparedMaterialNetwork<'_, '_>,
+        bindings: &[ThermalElectrodeLoad],
+        ceramic_bindings: &[ThermalCeramicCell],
+        temperature_axis: &str,
+        drives: &[ElectrodeDrive],
+        midpoint_nodal_forces_n: &[[f64; 3]],
+        endpoint_nodal_free_charge_c: &[f64],
+        field_controls: TetPiezoelectricControls,
+        thermal_controls: CircuitEnthalpySolve,
+        guess_j: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<SpatialPiezoelectricThermalCandidate<'thermal, 'model, 'mesh>> {
+        self.advance_material_thermal_candidate(
+            thermal, target_s, endpoint_support_velocities_m_s, acoustic_ports,
+            material, bindings, ceramic_bindings, temperature_axis, drives,
+            midpoint_nodal_forces_n, endpoint_nodal_free_charge_c, field_controls,
+            thermal_controls, guess_j, cx,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn advance_material_thermal_candidate<'thermal>(
         &self,
         thermal: &DepositionSimulation<'thermal>,
         target_s: f64,
         endpoint_support_velocities_m_s: Option<&[(usize, f64)]>,
+        acoustic_ports: &[TransientAcousticPort<'_>],
         material: &PreparedMaterialNetwork<'_, '_>,
         bindings: &[ThermalElectrodeLoad],
         ceramic_bindings: &[ThermalCeramicCell],
@@ -476,9 +528,10 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         let original_loads = bind_loads(original.resistors, bindings)?;
         let spatial_candidate = |loads: &[ResistiveElectrodeLoad]| {
             let (mut candidate, loads) = self
-                .advance_loaded_candidate(
+                .advance_loaded_with_acoustic_candidate(
                     dt,
                     endpoint_support_velocities_m_s,
+                    acoustic_ports,
                     drives,
                     loads,
                     midpoint_nodal_forces_n,

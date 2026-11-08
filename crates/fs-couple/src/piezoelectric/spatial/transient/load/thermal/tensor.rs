@@ -511,6 +511,7 @@ impl<'model, 'mesh> ThermalTensorPiezoelectricBody<'model, 'mesh> {
                 Ok(DrivenCoefficients {
                     circuit: TensorDriver { body, step: SpatialPiezoelectricThermalStep {
                         native, loads, midpoint_support_force_n,
+                        acoustic_ports: Vec::new(),
                         destinations: destinations.clone(),
                         ceramic_destinations: ceramic_destinations.clone(),
                     }},

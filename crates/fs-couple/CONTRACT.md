@@ -2884,6 +2884,21 @@ G1/G3/G4 regressions in `tests/piezoelectric/spatial_transient_load/reactive/aco
 compare independent scalar RLC/guide dynamics, stored energy, conductor heat,
 wave work, moving supports, empty-port equivalence and transactional refusals.
 
+`TetPiezoelectricTransient::step_with_acoustic_thermal_loads_candidate` couples
+those guide waves to the original finite resistor and ceramic heat inventories,
+including optional moving supports and retained intrinsic material memories.
+Signed outward acoustic work crosses the assembly boundary and enters the
+joint energy balance exactly once; only conductor and intrinsic material
+losses are deposited as local heat. The thermal report retains each guide's
+wave response. Existing source-domain, caloric-inventory, candidate ownership
+and immutable-solve reuse rules remain in force. Ceramic tensors and guide
+fluid coefficients stay fixed during this path; it does not add thermal
+feedback to reactive circuit storage or to the separate temperature-dependent
+tensor path. The acoustic thermal regressions in
+`tests/piezoelectric/spatial_transient_load/thermal/relaxation/acoustic.rs`
+compare independent motion, field, memory and resistor-temperature equations,
+separate finite heat cells, guide work, moving supports and atomic refusals.
+
 ### Finite-temperature full-tensor spatial piezoelectric dynamics
 
 `spatial::transient::load::thermal::tensor::ThermalTensorPiezoelectricBody` couples the full native 3-D spatial fields and consistent-mass motion to one uniform finite ceramic temperature, with original per-cell tensor orientation and complete source-bound caloric inventory. Temperature proposals refresh the complete affine stress-charge C/e/epsilon source tensors and reassemble the same native operators under original budgets. The model may own refreshed tensors while borrowing unchanged geometry; identical-temperature trials reuse accepted operators. Each changed-temperature trial first solves electrostatics at fixed original displacement/free charge, restores physical momentum/history, and then runs the original shunt/current/support-motion midpoint solve. Signed reversible field/caloric transfer is derived from the full Helmholtz and entropy endpoints; actual resistor Joule heat is deposited only through its original receiver. Independent acceptance checks total field internal energy, kinetic energy, all finite caloric energy and actual external work/heat. Complete source/context/density/inventory checks, declared strain/electric-displacement bounds and a whole-interval caloric-plus-field capacity floor precede coupled Newton publication. This is fixed-reference geometry with one uniform ceramic temperature, fixed zero-voltage grounds and charge/current electrodes; intrinsic memory, nonzero ideal-voltage constraints, expansion, pyroelectric offsets, phase transitions and independent cell temperatures require additional accounted models. Endpoint-temperature coefficients make the thermal feedback generally first order in time. Four focused synthetic regression definitions cover moving/rotated supports, reversible caloric changes, heating-dependent capacitance at conserved charge across mesh refinements, separate finite shunt heating and transactional refusals; native execution remains a separate verification obligation.
