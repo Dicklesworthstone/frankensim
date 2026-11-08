@@ -2,6 +2,9 @@
 //! These checks establish source transport and calculation, not experimental validation.
 #![deny(unsafe_code)]
 
+#[path = "material_electrical_sources/tungsten.rs"]
+mod tungsten;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
