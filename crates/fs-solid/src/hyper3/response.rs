@@ -213,11 +213,57 @@ pub(super) fn with_motion(
     response: HyperTetElementResponse,
     rate: [f64; 9],
 ) -> Result<HyperTetElementMotionResponse, HyperTetError> {
-    let f = response.deformation_gradient;
+    let fields = motion_fields(
+        response.deformation_gradient,
+        rate,
+        response.jacobian,
+        response.reference_volume_m3,
+        response.current_volume_m3,
+        &response.first_piola_pa,
+        &response.cauchy_pa,
+    )
+    .map_err(|what| HyperTetError::MaterialRefused {
+        element: response.element,
+        what: what.into(),
+    })?;
+    Ok(HyperTetElementMotionResponse {
+        response,
+        deformation_gradient_rate_per_s: rate,
+        spatial_velocity_gradient_per_s: fields.spatial_velocity_gradient_per_s,
+        spatial_strain_rate_per_s: fields.spatial_strain_rate_per_s,
+        green_lagrange_strain_rate_per_s: fields.green_lagrange_strain_rate_per_s,
+        jacobian_rate_per_s: fields.jacobian_rate_per_s,
+        current_volume_rate_m3_s: fields.current_volume_rate_m3_s,
+        reference_stress_power_w: fields.reference_stress_power_w,
+        spatial_stress_power_w: fields.spatial_stress_power_w,
+    })
+}
+
+// One tensor calculation shared by native P1 and mixed-quadrature observers.
+// Geometry, material admission and pressure/history ownership stay with callers.
+pub(super) struct MotionFields {
+    pub(super) spatial_velocity_gradient_per_s: [f64; 9],
+    pub(super) spatial_strain_rate_per_s: [f64; 9],
+    pub(super) green_lagrange_strain_rate_per_s: [f64; 9],
+    pub(super) jacobian_rate_per_s: f64,
+    pub(super) current_volume_rate_m3_s: f64,
+    pub(super) reference_stress_power_w: f64,
+    pub(super) spatial_stress_power_w: f64,
+}
+
+pub(super) fn motion_fields(
+    f: [f64; 9],
+    rate: [f64; 9],
+    jacobian: f64,
+    reference_volume_m3: f64,
+    current_volume_m3: f64,
+    first_piola_pa: &[f64; 9],
+    cauchy_pa: &[f64; 9],
+) -> Result<MotionFields, &'static str> {
     let inverse: [f64; 9] = core::array::from_fn(|ij| {
         let (i, j) = (ij / 3, ij % 3);
         let (a, b, c, d) = ((j + 1) % 3, (j + 2) % 3, (i + 1) % 3, (i + 2) % 3);
-        (f[3 * a + c] * f[3 * b + d] - f[3 * a + d] * f[3 * b + c]) / response.jacobian
+        (f[3 * a + c] * f[3 * b + d] - f[3 * a + d] * f[3 * b + c]) / jacobian
     });
     let spatial_velocity_gradient_per_s: [f64; 9] = core::array::from_fn(|ij| {
         (0..3).fold(0.0, |sum, k| {
@@ -233,17 +279,16 @@ pub(super) fn with_motion(
         |a: &[f64; 9]| core::array::from_fn(|ij| f64::midpoint(a[ij], a[3 * (ij % 3) + ij / 3]));
     let spatial_strain_rate_per_s = symmetric(&spatial_velocity_gradient_per_s);
     let green_lagrange_strain_rate_per_s = symmetric(&material_rate);
-    let jacobian_rate_per_s = response.jacobian
+    let jacobian_rate_per_s = jacobian
         * (spatial_velocity_gradient_per_s[0]
             + spatial_velocity_gradient_per_s[4]
             + spatial_velocity_gradient_per_s[8]);
-    let current_volume_rate_m3_s = response.reference_volume_m3 * jacobian_rate_per_s;
+    let current_volume_rate_m3_s = reference_volume_m3 * jacobian_rate_per_s;
     let contraction =
         |a: &[f64; 9], b: &[f64; 9]| a.iter().zip(b).fold(0.0, |sum, (x, y)| x.mul_add(*y, sum));
-    let reference_stress_power_w =
-        response.reference_volume_m3 * contraction(&response.first_piola_pa, &rate);
-    let spatial_stress_power_w = response.current_volume_m3
-        * contraction(&response.cauchy_pa, &spatial_velocity_gradient_per_s);
+    let reference_stress_power_w = reference_volume_m3 * contraction(first_piola_pa, &rate);
+    let spatial_stress_power_w =
+        current_volume_m3 * contraction(cauchy_pa, &spatial_velocity_gradient_per_s);
     if inverse
         .iter()
         .chain(&spatial_velocity_gradient_per_s)
@@ -259,15 +304,9 @@ pub(super) fn with_motion(
         .iter()
         .any(|value| !value.is_finite())
     {
-        return Err(HyperTetError::MaterialRefused {
-            element: response.element,
-            what: "native motion strain rate, volume rate or stress power is not representable"
-                .into(),
-        });
+        return Err("native motion strain rate, volume rate or stress power is not representable");
     }
-    Ok(HyperTetElementMotionResponse {
-        response,
-        deformation_gradient_rate_per_s: rate,
+    Ok(MotionFields {
         spatial_velocity_gradient_per_s,
         spatial_strain_rate_per_s,
         green_lagrange_strain_rate_per_s,
@@ -319,28 +358,8 @@ pub(super) fn recover<L: FiniteStrainPotential>(
         ));
     }
 
-    let cauchy_pa: [f64; 9] = core::array::from_fn(|index| {
-        let (i, j) = (index / 3, index % 3);
-        (0..3).fold(0.0, |sum, k| {
-            first_piola_pa[3 * i + k].mul_add(deformation_gradient[3 * j + k], sum)
-        }) / jacobian
-    });
-
-    // E = sym(H) + H^T H/2, H = F-I, retains small strain without subtracting
-    // nearly equal metric diagonals. Mirror strain only, never material stress.
-    let mut h = deformation_gradient;
-    for i in 0..3 {
-        h[3 * i + i] -= 1.0;
-    }
-    let mut green_lagrange_strain = [0.0; 9];
-    for i in 0..3 {
-        for j in i..3 {
-            let quadratic = (0..3).fold(0.0, |sum, k| h[3 * k + i].mul_add(h[3 * k + j], sum));
-            let strain = 0.5 * (h[3 * i + j] + h[3 * j + i] + quadratic);
-            green_lagrange_strain[3 * i + j] = strain;
-            green_lagrange_strain[3 * j + i] = strain;
-        }
-    }
+    let (cauchy_pa, green_lagrange_strain) =
+        stress_strain_fields(&deformation_gradient, &first_piola_pa, jacobian);
     let current_volume_m3 = geometry.volume * jacobian;
     let potential_j = geometry.volume * potential_density_j_m3;
     if cauchy_pa
@@ -368,4 +387,36 @@ pub(super) fn recover<L: FiniteStrainPotential>(
         potential_density_j_m3,
         potential_j,
     })
+}
+
+// Preserve the full original stress while recovering total geometric strain.
+// This uses the same arithmetic for P1 and mixed quadrature, without smoothing.
+pub(super) fn stress_strain_fields(
+    deformation_gradient: &[f64; 9],
+    first_piola_pa: &[f64; 9],
+    jacobian: f64,
+) -> ([f64; 9], [f64; 9]) {
+    let cauchy_pa: [f64; 9] = core::array::from_fn(|index| {
+        let (i, j) = (index / 3, index % 3);
+        (0..3).fold(0.0, |sum, k| {
+            first_piola_pa[3 * i + k].mul_add(deformation_gradient[3 * j + k], sum)
+        }) / jacobian
+    });
+
+    // E = sym(H) + H^T H/2, H = F-I, retains small strain without subtracting
+    // nearly equal metric diagonals. Mirror strain only, never material stress.
+    let mut h = *deformation_gradient;
+    for i in 0..3 {
+        h[3 * i + i] -= 1.0;
+    }
+    let mut green_lagrange_strain = [0.0; 9];
+    for i in 0..3 {
+        for j in i..3 {
+            let quadratic = (0..3).fold(0.0, |sum, k| h[3 * k + i].mul_add(h[3 * k + j], sum));
+            let strain = 0.5 * (h[3 * i + j] + h[3 * j + i] + quadratic);
+            green_lagrange_strain[3 * i + j] = strain;
+            green_lagrange_strain[3 * j + i] = strain;
+        }
+    }
+    (cauchy_pa, green_lagrange_strain)
 }

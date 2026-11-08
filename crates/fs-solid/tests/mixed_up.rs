@@ -19,6 +19,9 @@ use fs_solver::nonlinear::NewtonKrylovConfig;
 #[path = "mixed_up/reference_density.rs"]
 mod reference_density;
 
+#[path = "mixed_up/motion.rs"]
+mod motion;
+
 fn with_cx(f: impl FnOnce(&Cx<'_>)) {
     let gate = CancelGate::new();
     with_gate(&gate, f);

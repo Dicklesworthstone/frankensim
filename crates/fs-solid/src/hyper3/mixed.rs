@@ -53,6 +53,9 @@ pub mod pressure;
 /// Conservative spatial gravity with the original reference mass inventory.
 pub mod gravity;
 
+/// Pressure-inclusive fields, objective rates and power at native quadrature.
+pub mod response;
+
 #[cfg(test)]
 mod pressure_tests;
 
