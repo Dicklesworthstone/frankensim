@@ -1049,7 +1049,8 @@ offline examples' card route keeps none of them (ruling 7486):
   tension 2.0 N, preload 0.25 N/m and contact loss 2.0 s/m; the kick's 0.12 kg
   beater with a 3 cm felt face (k 1e8 N/m^2.5, alpha 2.5, mu 0.3 s/m) and muffle dashpot 25 N s/m^3
   (no pillow is modelled);
-  the ride's 1.60 mm bow, 2.20 mm bell and 3.0 s 10 kHz T60; flat hi-hat rims and a 5 mm stick
+  the ride's 3.0 s 10 kHz T60; every cymbal's shape (bell radius, rises and the bow's taper, with
+  the crash and ride thicknesses scaled to printed weights, below); flat hi-hat rims and a 5 mm stick
   tip; the open hat's 8 mm rim opening (`drum_cards::OPEN_HAT_OPENING_M`; the recording's pedal
   position is unknown, and the presets' 2 mm was picked by grade, bb1e5abf3).
 - **The kick's microphone** (presets and card route alike, ruling 8318) is a declared overhead
@@ -1121,9 +1122,23 @@ Their crash (`kit::card_crash()`) and ride are CuSn8, `kit::CUSN8` (MB 13551). T
 a Paiste 18" Innovations Medium Crash and the recorded ride a Paiste 20" PST 5 Medium Ride, both
 Paiste's "2002 bronze": the Salamander README names them, and CuSn8 is that alloy. E 115 GPa and
 density 8800 kg/m³ come from the Aurubis (PNA 283) and Matthey (CuSn8 v22E) sheets. Poisson's ratio
-is printed by neither, so B20's declared 0.33 is kept. Every crash and ride mode is 3.5 % higher than
-in B20 (E/ρ +7.0 %). The hi-hat (a Stagg 14" SH, cast B20), the splash and every preset keep
-`kit::BRONZE`.
+is printed by neither, so B20's declared 0.33 is kept. The alloy alone raises every crash and ride
+mode 3.5 % above B20 (E/ρ +7.0 %). The hi-hat (a Stagg 14" SH, cast B20), the splash and every preset
+keep `kit::BRONZE`.
+
+Their crash and ride thicknesses come from printed weights (MB 14574). `kit::shell_mass` integrates
+the declared shape over its curved surface (a uniform bell blended over 2 cm into a bow that thins
+from 1.15 times the edge thickness to it at the rim), and one scale per shell makes it weigh the
+printed weight; the bell radius and rises stay declared:
+- the ride, 2375 g: Bonedo's 2011 test weighs the first generation's PST 5 20" Medium Ride at
+  "knapp 2,4 kg" (other printed weights span 2308-2435 g). 88cccbb78's 1.60 mm bow and 2.20 mm bell
+  (3133 g) become 1.213 mm and 1.668 mm, a scale of 0.758;
+- the crash, 1472 g: one listing's 18" Innovations Medium Crash, one source and one specimen. The
+  preset's 0.95 mm bow and 1.60 mm bell (1568 g) become 0.892 mm and 1.502 mm, a scale of 0.939.
+
+Pure bending modes scale with thickness, by 0.758 on the ride and 0.939 on the crash; modes the
+shell's curvature stiffens fall less, because that membrane stiffness does not shrink with thickness
+relative to the mass.
 
 `--shell-loss` (`shell_loss`) offers each row only on a shell of the row's own alloy:
 - `b20`, `b20-low` and `b20-high` on the hi-hats;

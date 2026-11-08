@@ -862,26 +862,51 @@ pub fn felt_support(c: &CymbalSpec) -> (f64, f64, f64, f64) {
     (0.0065, r1, ks, cs)
 }
 
+/// A cymbal's thickness at radius `x` [m]: the bell, a blend over 2 cm, then the bow thinning
+/// slightly toward the rim (the law `cymbal_shell` builds every shell with).
+fn shell_thickness(c: &CymbalSpec, x: f64) -> f64 {
+    let (rb, tb, tw, r) = (c.bell_radius, c.bell_thickness, c.bow_thickness, c.radius);
+    let bow = tw * (1.15 - 0.15 * x / r);
+    if x <= rb { tb } else if x < rb + 0.02 { let u = (x - rb) / 0.02; tb + (bow - tb) * (3.0 * u * u - 2.0 * u * u * u) } else { bow }
+}
+
+/// A cymbal's rest height above its rim at radius `x` [m]: a slightly convex bow plus a raised
+/// bell (cosine cap), as `cymbal_shell` builds it.
+fn shell_rest_height(c: &CymbalSpec, x: f64) -> f64 {
+    let (rb, r, ab, al) = (c.bell_radius, c.radius, c.bow_rise, c.bell_rise);
+    let u = (1.0 - x / r).max(0.0);
+    let bow = ab * (0.7 * u + 0.3 * u * u);
+    let bell = if x < rb { al * 0.5 * (1.0 + (PI * x / rb).cos()) } else { 0.0 };
+    bow + bell
+}
+
+/// The radius of a cymbal's centre hole [m] (13 mm across).
+const CYMBAL_HOLE_RADIUS_M: f64 = 0.0065;
+
+/// A cymbal shell's mass [kg] in its own alloy (`c.elastic`): the thickness law of `cymbal_shell`
+/// integrated over the curved rest surface, from the centre hole to the rim. It is how a printed
+/// weight sets a card's thicknesses (MB 14574), not the grid's nodal mass, which lumps the
+/// staircase disc in its plane.
+pub fn shell_mass(c: &CymbalSpec) -> f64 {
+    const N: usize = 20_000;
+    let (a, r) = (CYMBAL_HOLE_RADIUS_M, c.radius);
+    let dx = (r - a) / N as f64;
+    let slope = |x: f64| (shell_rest_height(c, x + 1e-7) - shell_rest_height(c, x - 1e-7)) / 2e-7;
+    (0..N).map(|i| {
+        let x = a + (i as f64 + 0.5) * dx;
+        shell_thickness(c, x) * 2.0 * PI * x * (1.0 + slope(x).powi(2)).sqrt() * dx
+    }).sum::<f64>() * c.elastic.2
+}
+
 /// A cymbal shell; `felt` puts it on a stand's felt washers (a hi-hat's top shell hangs from the
 /// clutch on the pull rod instead, so all the pedal force reaches the rims).
 fn cymbal_shell(name: &str, c: &CymbalSpec, felt: bool, elastic: (f64, f64, f64), viscosity: Option<(&PlaneStressViscosity, f64)>) -> Result<Body, String> {
-    let (rb, tb, tw, r) = (c.bell_radius, c.bell_thickness, c.bow_thickness, c.radius);
-    // thickness: bell, a blend over 2 cm, then the bow thinning slightly toward the rim
-    let th = move |x: f64| {
-        let bow = tw * (1.15 - 0.15 * x / r);
-        if x <= rb { tb } else if x < rb + 0.02 { let u = (x - rb) / 0.02; tb + (bow - tb) * (3.0 * u * u - 2.0 * u * u * u) } else { bow }
-    };
-    let (ab, al) = (c.bow_rise, c.bell_rise);
-    // rest height above the rim: a slightly convex bow plus a raised bell (cosine cap)
-    let z = move |x: f64| {
-        let u = (1.0 - x / r).max(0.0);
-        let bow = ab * (0.7 * u + 0.3 * u * u);
-        let bell = if x < rb { al * 0.5 * (1.0 + (PI * x / rb).cos()) } else { 0.0 };
-        bow + bell
-    };
+    let r = c.radius;
+    let th = |x: f64| shell_thickness(c, x);
+    let z = |x: f64| shell_rest_height(c, x);
     let (r0, r1, ks, cs) = felt_support(c);
     let spec = PlateSpec {
-        radius: r, hole: 0.0065, grid: c.grid, edge: Edge::Free, thickness: &th, rest_height: &z,
+        radius: r, hole: CYMBAL_HOLE_RADIUS_M, grid: c.grid, edge: Edge::Free, thickness: &th, rest_height: &z,
         young: elastic.0, poisson: elastic.1, density: elastic.2, tension: 0.0, bending: true,
         nonlinear: Nonlinear::VonKarman, t60: c.t60,
         // felt washers: ~1e5 N/m and ~3 N s/m in all, spread over the clamped annulus
@@ -901,10 +926,21 @@ pub fn crash() -> CymbalSpec {
     CymbalSpec { name: "crash 18", radius: 0.2286, bow_thickness: 0.95e-3, bell_thickness: 1.6e-3, bell_radius: 0.075, bow_rise: 0.025, bell_rise: 0.015, grid: 6.0e-3, t60: [(500.0, 10.0), (10000.0, 2.0)], provenance: None, elastic: BRONZE }
 }
 
-/// The card route's crash: the preset's shell in the recorded crash's alloy, [`CUSN8`].
+/// The card route's crash: the preset's shape in the recorded crash's alloy, [`CUSN8`], its
+/// thicknesses scaled to the printed weight of one Paiste 18" Innovations Medium Crash (MB 14574):
+/// see [`CARD_CRASH_RECEIPT`].
 pub fn card_crash() -> CymbalSpec {
-    CymbalSpec { elastic: CUSN8, provenance: Some(CUSN8_SHELL_RECEIPT), ..crash() }
+    CymbalSpec { bow_thickness: 0.892e-3, bell_thickness: 1.502e-3, elastic: CUSN8, provenance: Some(CARD_CRASH_RECEIPT), ..crash() }
 }
+
+/// The card crash's receipt: its thicknesses from one printed weight, and its alloy.
+pub const CARD_CRASH_RECEIPT: &str = "crash (MB 14574): bow 0.892 mm and bell 1.502 mm, the preset's 0.95 mm and 1.60 mm \
+scaled by 0.939 so that the declared shape weighs 1472 g in CuSn8 (kit::shell_mass), the weight printed for one Paiste 18-inch \
+Innovations Medium Crash (Pocket Percussion's listing: one source, one specimen); the shape stays declared: a uniform bell \
+75 mm in radius blended over 2 cm into a bow that thins from 1.15 times the edge thickness to it at the rim, the preset's \
+25 mm bow and 15 mm bell rises; the 500 Hz and 10 kHz T60s, 10 s and 2 s, stay declared; shell alloy CuSn8, Paiste's 2002 \
+bronze (MB 13551): E 115 GPa and density 8800 kg/m^3 from the Aurubis (PNA 283) and Matthey (CuSn8 v22E) sheets; Poisson's \
+ratio 0.33 declared (printed by neither)";
 
 /// The receipt of a CuSn8 shell: which constants are printed and which are kept declared.
 pub const CUSN8_SHELL_RECEIPT: &str = "shell alloy CuSn8, Paiste's 2002 bronze (MB 13551): E 115 GPa and density 8800 kg/m^3 \
@@ -915,14 +951,20 @@ pub fn ride() -> CymbalSpec {
                  provenance: Some("ride: fitted to a recording (96ccf8f1b), not physics: bow 1.65 mm, bell 2.25 mm, 10 kHz T60 3.2 s"), elastic: BRONZE }
 }
 
-/// The card route's ride (ruling 7486): the preset with 88cccbb78's declared shell, bow 1.60 mm
-/// and bell 2.20 mm, and its 10 kHz loss point, 3.0 s, in the recorded ride's alloy, [`CUSN8`]
-/// (MB 13551). The grid (6.2 mm) is numerics and stays.
+/// The card route's ride (ruling 7486): the preset's shape with its thicknesses scaled to the
+/// recorded ride's printed weight (MB 14574), bow 1.213 mm and bell 1.668 mm, and 88cccbb78's
+/// 10 kHz loss point, 3.0 s, in the recorded ride's alloy, [`CUSN8`] (MB 13551). The grid
+/// (6.2 mm) is numerics and stays.
 pub fn card_ride() -> CymbalSpec {
-    CymbalSpec { bow_thickness: 1.6e-3, bell_thickness: 2.2e-3, t60: [(500.0, 14.0), (10000.0, 3.0)],
-                 provenance: Some("ride (ruling 7486): bow 1.60 mm, bell 2.20 mm and the 10 kHz T60 3.0 s, declared estimates (88cccbb78); \
-shell alloy CuSn8, Paiste's 2002 bronze (MB 13551): E 115 GPa and density 8800 kg/m^3 from the Aurubis (PNA 283) and Matthey \
-(CuSn8 v22E) sheets; Poisson's ratio 0.33 declared (printed by neither)"), elastic: CUSN8, ..ride() }
+    CymbalSpec { bow_thickness: 1.213e-3, bell_thickness: 1.668e-3, t60: [(500.0, 14.0), (10000.0, 3.0)],
+                 provenance: Some("ride (MB 14574): bow 1.213 mm and bell 1.668 mm, 88cccbb78's declared 1.60 mm and 2.20 mm \
+scaled by 0.758 so that the declared shape weighs 2375 g in CuSn8 (kit::shell_mass): Bonedo's 2011 test weighs the first \
+generation's Paiste 20-inch PST 5 Medium Ride at 'knapp 2,4 kg', read as 2350-2400 g; the weights printed elsewhere span \
+2308-2435 g (scales 0.737-0.777); the shape stays declared: a uniform bell 85 mm in radius blended over 2 cm into a bow that \
+thins from 1.15 times the edge thickness to it at the rim, the preset's 22 mm bow and 20 mm bell rises; the 500 Hz and 10 kHz \
+T60s, 14 s and 3.0 s, stay declared estimates (88cccbb78); shell alloy CuSn8, Paiste's 2002 bronze (MB 13551): E 115 GPa and \
+density 8800 kg/m^3 from the Aurubis (PNA 283) and Matthey (CuSn8 v22E) sheets; Poisson's ratio 0.33 declared (printed by \
+neither)"), elastic: CUSN8, ..ride() }
 }
 
 fn pick_oversample(ins: &mut Instrument, max_ratio: f64) -> Result<usize, String> {

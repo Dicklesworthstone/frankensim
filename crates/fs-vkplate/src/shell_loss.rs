@@ -387,10 +387,11 @@ mod tests {
 
     #[test]
     fn the_pairs_are_the_plan_lines_and_the_band_holds_the_row() {
-        // plan lines 12547 and 12922 (weak coupling): crash (10.68 s, 1.19 s), ride (16.92 s, 1.24 s), hi-hat top
+        // plan lines 12547 and 12922 (weak coupling): crash (10.68 s, 1.19 s), ride (16.92 s, 1.24 s at 88cccbb78's
+        // 1.60 mm; 13.65 s, 1.22 s at the card ride's 1.213 mm since MB 14574, the same formulas), hi-hat top
         // (9.39 s, 1.17 s) and bottom (12.45 s, 1.21 s), each at its own free edge; the coupled law moves them a little
         let (hat_top, hat_bottom) = hihat_spec();
-        let shells = [(crash(), [10.68, 1.19]), (card_ride(), [16.92, 1.24]), (hat_top, [9.39, 1.17]), (hat_bottom, [12.45, 1.21])];
+        let shells = [(crash(), [10.68, 1.19]), (card_ride(), [13.65, 1.22]), (hat_top, [9.39, 1.17]), (hat_bottom, [12.45, 1.21])];
         for (spec, plan) in shells {
             let pair = printed_shell_t60(&spec, BRONZE, &row("b20")).unwrap();
             let low = printed_shell_t60(&spec, BRONZE, &row("b20-low")).unwrap();
@@ -418,16 +419,17 @@ mod tests {
 
     #[test]
     fn the_cusn8_rows_are_the_plan_values_on_the_card_crash_and_ride() {
-        // weak coupling, computed before the build (MB 13551): crash 0.95 mm and card ride 1.60 mm at their free edges,
-        // E 115 GPa, rho 8800, c_p 377, alpha 18.5e-6, 20 C; the coupled law moves them a little
+        // weak coupling, computed before the build (MB 13551; edges moved by MB 14574's printed weights): crash
+        // 0.892 mm and card ride 1.213 mm at their free edges, E 115 GPa, rho 8800, c_p 377, alpha 18.5e-6, 20 C (the
+        // same formulas give origin's pins at 0.95 mm and 1.60 mm digit for digit); the coupled law moves them a little
         assert_eq!((card_crash().elastic, card_ride().elastic), (CUSN8, CUSN8));
         let plan = [
-            (card_crash(), "cusn8", [8.463, 7.657]),
-            (card_crash(), "cusn8-eta", [6.354, 1.093]),
-            (card_crash(), "cusn8-low", [9.099, 8.266]),
-            (card_ride(), "cusn8", [22.752, 21.480]),
-            (card_ride(), "cusn8-eta", [12.022, 1.203]),
-            (card_ride(), "cusn8-low", [24.515, 23.198]),
+            (card_crash(), "cusn8", [7.528, 6.762]),
+            (card_crash(), "cusn8-eta", [5.812, 1.073]),
+            (card_crash(), "cusn8-low", [8.090, 7.300]),
+            (card_ride(), "cusn8", [13.403, 12.409]),
+            (card_ride(), "cusn8-eta", [8.784, 1.156]),
+            (card_ride(), "cusn8-low", [14.427, 13.399]),
         ];
         for (spec, label, want) in plan {
             let loss = cusn8(label).unwrap();

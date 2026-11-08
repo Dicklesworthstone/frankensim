@@ -130,9 +130,9 @@ pub fn drum(
     Ok(piece)
 }
 
-/// The ride the examples play: by default `kit::card_ride()`, 88cccbb78's
-/// declared shell (ruling 7486) in the recorded ride's alloy, CuSn8 (MB 13551);
-/// with `preset` the recording-fitted preset, in B20.
+/// The ride the examples play: by default `kit::card_ride()`, the preset's
+/// shape at the recorded ride's printed weight (MB 14574) in its alloy, CuSn8
+/// (MB 13551); with `preset` the recording-fitted preset, in B20.
 pub fn ride(preset: bool) -> CymbalSpec {
     if preset {
         kit::ride()
@@ -142,8 +142,8 @@ pub fn ride(preset: bool) -> CymbalSpec {
 }
 
 /// The crash the examples play: by default `kit::card_crash()`, the preset's
-/// shell in the recorded crash's alloy, CuSn8 (MB 13551); with `preset` the
-/// preset, in B20.
+/// shape at one printed weight of the recorded crash's model (MB 14574) in its
+/// alloy, CuSn8 (MB 13551); with `preset` the preset, in B20.
 pub fn crash(preset: bool) -> CymbalSpec {
     if preset {
         kit::crash()

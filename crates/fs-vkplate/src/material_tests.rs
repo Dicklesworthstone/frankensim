@@ -1637,6 +1637,32 @@ fn g1_the_kick_overhead_hears_the_batter_only_and_says_so() {
 }
 
 #[test]
+fn card_crash_and_ride_weigh_their_printed_weights() {
+    // MB 14574: one listing's 18" Innovations Medium Crash (1472 g) and Bonedo 2011's first-generation
+    // 20" PST 5 Medium Ride (2375 g) set the card shells' thickness scale; their shapes stay declared.
+    let (crash, ride) = (kit::card_crash(), kit::card_ride());
+    let (crash_kg, ride_kg) = (kit::shell_mass(&crash), kit::shell_mass(&ride));
+    assert!((crash_kg / 1.472 - 1.0).abs() < 1.0e-3, "crash {crash_kg} kg");
+    assert!((ride_kg / 2.375 - 1.0).abs() < 1.0e-3, "ride {ride_kg} kg");
+    // origin's thicknesses, the preset's 0.95 mm / 1.60 mm crash and 88cccbb78's 1.60 mm / 2.20 mm ride,
+    // weighed 1568 g and 3133 g: a scale of 0.939 and 0.758
+    let old_crash = kit::shell_mass(&kit::CymbalSpec { bow_thickness: 0.95e-3, bell_thickness: 1.6e-3, ..kit::card_crash() });
+    let old_ride = kit::shell_mass(&kit::CymbalSpec { bow_thickness: 1.6e-3, bell_thickness: 2.2e-3, ..kit::card_ride() });
+    assert!((old_crash / 1.568 - 1.0).abs() < 1.0e-3 && (old_ride / 3.133 - 1.0).abs() < 1.0e-3, "{old_crash} {old_ride}");
+    assert!((crash.bow_thickness / 0.95e-3 - 0.939).abs() < 1.0e-3 && (ride.bow_thickness / 1.6e-3 - 0.758).abs() < 1.0e-3);
+    // the shape is the preset's: only the two thicknesses move
+    let (preset_crash, preset_ride) = (kit::crash(), kit::ride());
+    assert_eq!((crash.radius, crash.bell_radius, crash.bow_rise, crash.bell_rise, crash.grid),
+               (preset_crash.radius, preset_crash.bell_radius, preset_crash.bow_rise, preset_crash.bell_rise, preset_crash.grid));
+    assert_eq!((ride.radius, ride.bell_radius, ride.bow_rise, ride.bell_rise, ride.grid),
+               (preset_ride.radius, preset_ride.bell_radius, preset_ride.bow_rise, preset_ride.bell_rise, preset_ride.grid));
+    assert_eq!(crash.provenance, Some(kit::CARD_CRASH_RECEIPT));
+    assert!(kit::CARD_CRASH_RECEIPT.contains("one source, one specimen") && kit::CARD_CRASH_RECEIPT.contains("1472 g"));
+    let ride_receipt = ride.provenance.unwrap();
+    assert!(ride_receipt.contains("knapp 2,4 kg") && ride_receipt.contains("2308-2435 g") && ride_receipt.contains("2375 g"));
+}
+
+#[test]
 fn g2_card_cymbals_and_hats_take_the_declared_interface_and_presets_say_theirs_was_fitted() {
     let coarse = |c: kit::CymbalSpec| kit::CymbalSpec { grid: c.grid * 3.0, ..c };
     let stick_mu = |p: &kit::Piece| {
@@ -1650,7 +1676,7 @@ fn g2_card_cymbals_and_hats_take_the_declared_interface_and_presets_say_theirs_w
     assert!(fitted.notes.iter().any(|n| n.starts_with("ride: fitted to a recording (96ccf8f1b)")));
     assert_eq!(stick_mu(&fitted), 0.05);
     let ride = kit::card_ride();
-    assert_eq!((ride.bow_thickness, ride.bell_thickness, ride.t60[1], ride.grid), (1.6e-3, 2.2e-3, (10000.0, 3.0), kit::ride().grid));
+    assert_eq!((ride.bow_thickness, ride.bell_thickness, ride.t60[1], ride.grid), (1.213e-3, 1.668e-3, (10000.0, 3.0), kit::ride().grid));
     let card = kit::cymbal_with_interface(&coarse(ride), &hit, &kit::DECLARED_CYMBAL_INTERFACE).unwrap();
     assert!(card.notes.iter().any(|n| n == kit::DECLARED_CYMBAL_INTERFACE.cymbal_receipt));
     assert!(!card.notes.iter().any(|n| n.contains("fitted to a recording")));
