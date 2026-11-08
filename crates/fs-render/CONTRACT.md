@@ -9356,13 +9356,28 @@ refraction, continuous-field interpolation or pixel-area filtering. Regressions
 exercise camera-generated perspective rays, analytic ordered layers, clipped and
 rescaled rays, existing orthographic parity, extreme radiance and refusals.
 
+With `tracer,volumes`, `volumes::opacity::render_transfer_camera` renders one
+borrowed transfer snapshot through `PhysicalCamera` perspective or ideal
+finite-aperture rays. One sample uses pixel/lens centres; larger counts use
+independent uniform pixel/pupil variates from per-pixel Philox streams. Returned
+pixels retain mean emitted linear RGB, mean transmission and stable mean opacity.
+Effective depth represents negative log mean transmission, using thin-opacity
+and thick log-sum evaluation. Misses remain transparent, and normalized
+pupil/radiance averaging applies no exposure or aperture gain. Pixel/sample
+admission and actual whole-image cell-crossing limits fail transactionally with
+cancellation. Existing spectral/weighted-camera refusals remain binding.
+Per-pixel background composition assumes a background constant over the sampled
+footprint; prescribed scalar RGB source/extinction does not infer LTE,
+in-scattering or surface refraction. Physical regressions compare perspective
+slabs and defocused/refocused opaque-strip coverage against analytic references.
+
 render_density_transmittance borrows the original density buffer and uses
 explicit kg/m³ per field unit, metres per grid unit and m²/kg mass absorption.
 It produces monochromatic direct-beam transmission without allocating an
 intermediate coefficient field. No wavelength response, density conversion,
 surface coverage, scattering, refraction or material calibration is inferred.
 
-Both paths admit output pixels, input cells and full cell visits before
+Both orthographic renderers admit output pixels, input cells and full cell visits before
 integration, validate finite geometry/fields, and use the existing integer
 pixel-centre ownership. Transfer opacity uses expm1 for thin cells, optical
 depth and emission use compensated sums, and extreme positive products have

@@ -120,17 +120,28 @@ impl<'g, 'a> TransferRayGrid<'g, 'a> {
         cx: &Cx<'_>,
         ray: Ray,
     ) -> Result<TransferTransportPixel, TransferRayError> {
+        self.transport_counted(cx, ray, u64::MAX)
+            .map(|(pixel, _)| pixel)
+    }
+
+    // Image rendering shares the native per-ray cap and limits each traversal
+    // to the remaining whole-image cell budget. Misses consume no cell visits.
+    pub(super) fn transport_counted(
+        &self,
+        cx: &Cx<'_>,
+        ray: Ray,
+        remaining_cell_visits: u64,
+    ) -> Result<(TransferTransportPixel, u32), TransferRayError> {
         checkpoint(cx)?;
         let (origin, direction, distance) = physical_ray(ray)?;
         let mut integral = TransferIntegral::default();
-        if let Some(mut cells) = CellRay::clip(
-            self.grid,
-            origin,
-            direction,
-            distance,
-            self.max_steps_per_ray,
-        )? {
+        let mut visits = 0;
+        let max_steps = self
+            .max_steps_per_ray
+            .min(u32::try_from(remaining_cell_visits).unwrap_or(u32::MAX));
+        if let Some(mut cells) = CellRay::clip(self.grid, origin, direction, distance, max_steps)? {
             while let Some(segment) = cells.next(cx)? {
+                visits += 1;
                 if segment.length_m > 0.0 {
                     let optical = self.transfer.sample_finite(self.grid.data[segment.cell]);
                     integral.add(optical, segment.length_m)?;
@@ -138,7 +149,7 @@ impl<'g, 'a> TransferRayGrid<'g, 'a> {
             }
         }
         checkpoint(cx)?;
-        Ok(integral.finish())
+        Ok((integral.finish(), visits))
     }
 }
 

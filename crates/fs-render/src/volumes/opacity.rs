@@ -12,6 +12,10 @@ use super::{
 use fs_math::det;
 
 #[cfg(feature = "tracer")]
+mod camera;
+#[cfg(feature = "tracer")]
+pub use camera::{TransferCameraError, TransferCameraSettings, render_transfer_camera};
+#[cfg(feature = "tracer")]
 mod ray;
 #[cfg(feature = "tracer")]
 pub use ray::{TransferRayBudget, TransferRayError, TransferRayGrid};
@@ -32,7 +36,7 @@ pub struct DensityAbsorption {
     pub mass_absorption_m2_kg: f64,
 }
 
-/// Exact direct transfer along one volume ray or orthographic pixel column.
+/// Direct transfer along a volume ray, column, or sampled camera pixel.
 ///
 /// Emission is premultiplied by its physical attenuation. Opacity is evaluated
 /// independently with expm1, so a thin nonzero layer remains measurable even
@@ -64,7 +68,9 @@ impl TransferTransportPixel {
         self.opacity
     }
 
-    /// Integrated dimensionless extinction; infinite means complete extinction.
+    /// Integrated dimensionless extinction along a single ray. For a sampled
+    /// camera pixel this is the effective `-ln(mean transmission)`, not the mean
+    /// ray depth. Infinite means complete extinction in every retained sample.
     #[must_use]
     pub const fn optical_depth(self) -> f64 {
         self.optical_depth
