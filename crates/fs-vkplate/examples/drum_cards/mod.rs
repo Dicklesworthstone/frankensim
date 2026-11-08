@@ -217,3 +217,25 @@ pub fn open_hihat(hits: &[(f64, f64)], preset: bool) -> Result<Piece, String> {
     piece.notes.push(note.into());
     Ok(piece)
 }
+
+/// `hihat` on the card route with its two shells given as (top, bottom), e.g. each with its T60
+/// pair from print (`--shell-loss`). There is no preset form: the flag is refused on `--preset-heads`.
+#[allow(dead_code)] // perform.rs shares this module and plays no hat with given shells
+pub fn hihat_with_shells(gap: f64, pedal_n: f64, hits: &[(f64, f64)], shells: (CymbalSpec, CymbalSpec)) -> Result<Piece, String> {
+    kit::hihat_with_interface_and_specs(
+        gap,
+        pedal_n,
+        hits,
+        kit::DECLARED_HIHAT_RIM_LAW,
+        &kit::DECLARED_CYMBAL_INTERFACE,
+        shells,
+    )
+}
+
+/// `open_hihat` on the card route (the declared opening) with its two shells given as (top, bottom).
+#[allow(dead_code)] // perform.rs shares this module and plays no hat with given shells
+pub fn open_hihat_with_shells(hits: &[(f64, f64)], shells: (CymbalSpec, CymbalSpec)) -> Result<Piece, String> {
+    let mut piece = hihat_with_shells(OPEN_HAT_OPENING_M, 0.0, hits, shells)?;
+    piece.notes.push(OPEN_HAT_OPENING_NOTE.into());
+    Ok(piece)
+}

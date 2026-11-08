@@ -1106,28 +1106,36 @@ pub fn hihat_grid_mu(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from
 
 /// Opposed plates, their shared contacts and microphones in the same gas state.
 pub fn hihat_grid_mu_with_gas(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64, scale: f64, friction: f64, gas: GasState) -> Result<Piece, String> {
-    build_hihat(gap, pedal_n, hits, rim, from, scale, friction, gas, None, &FITTED_CYMBAL_INTERFACE)
+    build_hihat(gap, pedal_n, hits, rim, from, scale, friction, gas, None, &FITTED_CYMBAL_INTERFACE, None)
 }
 
 /// The kit's own hi-hat (contact annulus from 0.8 R, offline grid) with the rim law `rim` and the
 /// stick, rim waviness and rim friction of `iface`. The card route passes DECLARED_HIHAT_RIM_LAW
 /// and DECLARED_CYMBAL_INTERFACE.
 pub fn hihat_with_interface(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, iface: &CymbalInterface) -> Result<Piece, String> {
-    build_hihat(gap, pedal_n, hits, rim, 0.8, 1.0, iface.hat_rim_friction, standard_gas(), None, iface)
+    build_hihat(gap, pedal_n, hits, rim, 0.8, 1.0, iface.hat_rim_friction, standard_gas(), None, iface, None)
+}
+
+/// [`hihat_with_interface`] with the two shells given as (top, bottom) in place of
+/// [`hihat_spec`], e.g. each with its T60 pair from print (`shell_loss`). The shells' geometry
+/// places the rims and the clutch as before; everything else is built as there.
+pub fn hihat_with_interface_and_specs(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, iface: &CymbalInterface, specs: (CymbalSpec, CymbalSpec)) -> Result<Piece, String> {
+    build_hihat(gap, pedal_n, hits, rim, 0.8, 1.0, iface.hat_rim_friction, standard_gas(), None, iface, Some(specs))
 }
 
 /// Material-resolved opposed shells and impactor. Selected material bending
 /// loss replaces surface T60; rim contact, rim friction and support remain
 /// explicitly separate input data.
 pub fn hihat_grid_mu_with_materials(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64, scale: f64, friction: f64, gas: GasState, materials: &KitMaterials) -> Result<Piece, String> {
-    build_hihat(gap, pedal_n, hits, rim, from, scale, friction, gas, Some(materials), &FITTED_CYMBAL_INTERFACE)
+    build_hihat(gap, pedal_n, hits, rim, from, scale, friction, gas, Some(materials), &FITTED_CYMBAL_INTERFACE, None)
 }
 
-fn build_hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64, scale: f64, friction: f64, gas: GasState, materials: Option<&KitMaterials>, iface: &CymbalInterface) -> Result<Piece, String> {
+/// `specs`: the (top, bottom) shells, or `None` for [`hihat_spec`].
+fn build_hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64, scale: f64, friction: f64, gas: GasState, materials: Option<&KitMaterials>, iface: &CymbalInterface, specs: Option<(CymbalSpec, CymbalSpec)>) -> Result<Piece, String> {
     if !gap.is_finite() || gap < 0.0 {
         return Err(format!("hi-hat: rim opening must be finite and nonnegative, got {gap} m"));
     }
-    let (mut ts, mut bs) = hihat_spec();
+    let (mut ts, mut bs) = specs.unwrap_or_else(hihat_spec);
     let Law::Power { k, alpha, mu } = rim;
     let rim = Law::Power { k: k * scale * scale, alpha, mu };
     ts.grid *= scale;
@@ -1220,8 +1228,14 @@ fn build_hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64,
     mic.unbaffled = Some(ts.radius);
     ins.mics.push(mic);
     let os = pick_oversample(&mut ins, 0.6)?;
-    let notes = vec![format!("hi-hat: {} + {} nodes, {pairs} rim contact pairs (friction {friction}), rim opening {:.2} mm, pedal {pedal_n} N, internal {} kHz", ins.bodies[ti].n, ins.bodies[bi].n, gap * 1e3, OUT_RATE * os as f64 / 1000.0),
+    let mut notes = vec![format!("hi-hat: {} + {} nodes, {pairs} rim contact pairs (friction {friction}), rim opening {:.2} mm, pedal {pedal_n} N, internal {} kHz", ins.bodies[ti].n, ins.bodies[bi].n, gap * 1e3, OUT_RATE * os as f64 / 1000.0),
                      iface.hat_receipt.into()];
+    // a shell's receipt joins the notes, once when both shells carry the same one (hihat_spec's carry none)
+    for p in [ts.provenance, bs.provenance].into_iter().flatten() {
+        if !notes.iter().any(|n| n == p) {
+            notes.push(p.to_string());
+        }
+    }
     Ok(Piece { instrument: ins, oversample: os, settle, notes })
 }
 

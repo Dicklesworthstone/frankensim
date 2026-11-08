@@ -20,11 +20,12 @@
 //! (2006, Table 1) measured damping ratios of another snare's batter modes to this batter's
 //! matching shapes (`kit::SKRODZKA_2006_TABLE_1`). It is an upper bound: the measured ratios
 //! already contain loss paths this model carries. It is refused on `--preset-heads`.
-//! `--shell-loss b20`, on crash and ride only (MB 12552), replaces the shell's two declared T60
-//! points with B20 bronze's printed loss at the same frequencies: thermoelastic damping from
-//! fs-material's slab law plus an anelastic loss factor borrowed from cast bells
-//! (`shell_loss`); radiation loss is missing. `b20-low` and `b20-high` are the band's ends and
-//! never post. It is refused on `--preset-heads`.
+//! `--shell-loss b20`, on crash, ride, hihat-closed and hihat-open only (MB 12552), replaces each
+//! shell's two declared T60 points with B20 bronze's printed loss at the same frequencies:
+//! thermoelastic damping from fs-material's slab law plus an anelastic loss factor borrowed from
+//! cast bells (`shell_loss`); radiation loss is missing. A hi-hat's two shells each take the loss
+//! at their own free edge. `b20-low` and `b20-high` are the band's ends and never post. It is
+//! refused on `--preset-heads`.
 //!
 //! The drums' heads and stick come from sourced material cards, and no piece keeps a value fitted
 //! to a recording (see `drum_cards`); `--preset-heads` renders the recording-fitted presets
@@ -155,8 +156,8 @@ fn main() {
         eprintln!("refused: {PORT_FLAG} needs a drum and the vent-capable Rayleigh observer; closed-body tables contain no opening");
         std::process::exit(1)
     }
-    if shell_loss.is_some() && (!matches!(a[1].as_str(), "crash" | "ride") || preset_heads) {
-        eprintln!("refused: {SHELL_LOSS_FLAG} replaces a cymbal shell's declared T60 pair, offered on crash and ride without {} only", drum_cards::PRESET_HEADS_FLAG);
+    if shell_loss.is_some() && (!matches!(a[1].as_str(), "crash" | "ride" | "hihat-closed" | "hihat-open") || preset_heads) {
+        eprintln!("refused: {SHELL_LOSS_FLAG} replaces a cymbal shell's declared T60 pair, offered on crash, ride and the hi-hats without {} only", drum_cards::PRESET_HEADS_FLAG);
         std::process::exit(1)
     }
     let speed = a.get(3).map(|s| s.parse::<f64>().expect("speed")).filter(|v| *v > 0.0);
@@ -195,13 +196,22 @@ fn main() {
     let (crash_shell, crash_line) = shell(kit::crash());
     let (ride_shell, ride_line) = shell(drum_cards::ride(preset_heads));
     let hihat = |gap: f64, pedal_n: f64, v: f64| drum_cards::hihat(gap, pedal_n, &[(0.005, v)], preset_heads);
+    // --shell-loss on a hi-hat: each of its two shells takes the loss at its own free edge, with its own receipt
+    let (hat_shells, hat_lines) = {
+        let (top, bottom) = kit::hihat_spec();
+        let (top, top_line) = shell(top);
+        let (bottom, bottom_line) = shell(bottom);
+        ((top, bottom), top_line.into_iter().chain(bottom_line).collect::<Vec<String>>())
+    };
     let (piece, dur): (Result<Piece, String>, f64) = match a[1].as_str() {
         "kick" => (drum(kit::kick(), true, v(3.0)), 1.2),
         "snare" => (drum(kit::snare(), false, v(4.5)), 1.2),
         "snare-off" => (drum(kit::snare_wires_off(), false, v(4.5)), 1.2),
         "tom-12" => (drum(kit::tom(12.0), false, v(3.5)), 2.0),
         "tom-14" => (drum(kit::tom(14.0), false, v(3.5)), 2.5),
+        "hihat-closed" if shell_loss.is_some() => (drum_cards::hihat_with_shells(0.0, 80.0, &[(0.005, v(2.5))], hat_shells), 0.8),
         "hihat-closed" => (hihat(0.0, 80.0, v(2.5)), 0.8),
+        "hihat-open" if shell_loss.is_some() => (drum_cards::open_hihat_with_shells(&[(0.005, v(2.5))], hat_shells), 2.5),
         "hihat-open" => (drum_cards::open_hihat(&[(0.005, v(2.5))], preset_heads), 2.5),
         "splash" => (cymbal(kit::splash(), (0.005, v(2.0), 0.78, 0.005)), 2.6),
         "crash" => (cymbal(crash_shell, (0.005, v(6.0), 0.95, 0.008)), 5.0),
@@ -217,7 +227,11 @@ fn main() {
         std::process::exit(1)
     });
     if shell_loss.is_some() {
-        p.notes.extend(if a[1] == "crash" { crash_line } else { ride_line });
+        match a[1].as_str() {
+            "crash" => p.notes.extend(crash_line),
+            "ride" => p.notes.extend(ride_line),
+            _ => p.notes.extend(hat_lines),
+        }
     }
     if let Some((alpha, axis)) = mic_pattern {
         for mic in 0..p.instrument.mics.len() {

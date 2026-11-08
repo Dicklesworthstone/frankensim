@@ -1,8 +1,9 @@
 //! A cymbal shell's loss from print (opt-in, MB 12552): B20 bronze's thermoelastic damping plus a
 //! borrowed anelastic loss factor, in place of the two T60 points a preset declares.
 //!
-//! The kit's crash and ride carry two T60 points fitted to a recording; the plate turns them into
-//! its two-term loss (`s0 + s1 beta^2`, proportional to `a + b omega` on a tension-free plate).
+//! The kit's cymbal shells (crash, ride and the hi-hat's two) each carry two declared T60 points
+//! (88cccbb78's estimates; the card ride's 10 kHz point from ruling 7486); the plate turns them
+//! into its two-term loss (`s0 + s1 beta^2`, proportional to `a + b omega` on a tension-free plate).
 //! [`printed_shell_t60`] replaces that pair, at the same two frequencies, with:
 //! - thermoelastic damping from fs-material's insulated-slab law (every odd thermal mode, the
 //!   fixed-strain heat capacity of Norris and Photiadis, `SlabThermoelasticBending::new_coupled`),
@@ -260,7 +261,7 @@ pub fn with_printed_shell_loss(c: &CymbalSpec, elastic: (f64, f64, f64), loss: &
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kit::{BRONZE, card_ride, crash};
+    use crate::kit::{BRONZE, card_ride, crash, hihat_spec};
     use fs_material::visco::slab_ted::slab_relaxation_shape;
 
     fn row(label: &str) -> PrintedShellLoss {
@@ -306,8 +307,11 @@ mod tests {
 
     #[test]
     fn the_pairs_are_the_plan_lines_and_the_band_holds_the_row() {
-        // plan line 12547 (weak coupling): crash (10.68 s, 1.19 s), ride (16.92 s, 1.24 s); the coupled law moves them a little
-        for (spec, plan) in [(crash(), [10.68, 1.19]), (card_ride(), [16.92, 1.24])] {
+        // plan lines 12547 and 12922 (weak coupling): crash (10.68 s, 1.19 s), ride (16.92 s, 1.24 s), hi-hat top
+        // (9.39 s, 1.17 s) and bottom (12.45 s, 1.21 s), each at its own free edge; the coupled law moves them a little
+        let (hat_top, hat_bottom) = hihat_spec();
+        let shells = [(crash(), [10.68, 1.19]), (card_ride(), [16.92, 1.24]), (hat_top, [9.39, 1.17]), (hat_bottom, [12.45, 1.21])];
+        for (spec, plan) in shells {
             let pair = printed_shell_t60(&spec, BRONZE, &row("b20")).unwrap();
             let low = printed_shell_t60(&spec, BRONZE, &row("b20-low")).unwrap();
             let high = printed_shell_t60(&spec, BRONZE, &row("b20-high")).unwrap();
