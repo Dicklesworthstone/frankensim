@@ -39,7 +39,9 @@ use crate::curle3d::moving::{
 use crate::curle3d::statistics::{invalid, nonfinite};
 use fs_math::dd::Dd;
 
+mod field;
 mod paths;
+pub use field::{MOVING_QUADRUPOLE_FIELD_SCOPE, PreparedMovingQuadrupoleFieldSample};
 
 /// Retarded geometry and constant-work pressure coefficients for one source.
 ///

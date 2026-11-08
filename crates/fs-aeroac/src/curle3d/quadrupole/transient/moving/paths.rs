@@ -1,6 +1,6 @@
 //! Native moving receivers and ideal images for the SAME stress-potential Hessian.
 
-use super::PreparedMovingQuadrupoleSample;
+use super::{PreparedMovingQuadrupoleFieldSample, PreparedMovingQuadrupoleSample};
 use crate::AeroacError;
 use crate::curle3d::moving::trajectory::{
     PreparedMovingReceiverSource, PreparedReflectedMovingReceiverSource,
@@ -9,6 +9,25 @@ use crate::curle3d::moving::trajectory::{
 use fs_math::dd::Dd;
 
 impl PreparedMovingReceiverSource<'_> {
+    /// Complete stress field at the original moving receiver event.
+    ///
+    /// Its separate past-stress integral must use this CURRENT receiver
+    /// position throughout the original source history, before emission.
+    pub fn prepare_quadrupole_field_receiver(
+        &self,
+        receiver_time_s: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedMovingQuadrupoleFieldSample, AeroacError> {
+        let propagation = self.prepare_receiver(receiver_time_s, cancelled)?.pressure;
+        let (source, jerk) = self
+            .source()
+            .kinematics_with_jerk_at(propagation.source_time_s())?;
+        let observer = self.observer_at(receiver_time_s)?;
+        let mut pressure = observer.prepare_kinematic_quadrupole(propagation, source, jerk)?;
+        pressure.maximum_mach = pressure.maximum_mach.max(self.receiver().maximum_mach());
+        observer.prepare_kinematic_quadrupole_field(pressure, source, jerk)
+    }
+
     /// Complete accelerating quadrupole pressure at the original moving receiver.
     ///
     /// The same causal pair supplies the admitted root, clearance and clocks.
@@ -34,6 +53,32 @@ impl PreparedMovingReceiverSource<'_> {
 }
 
 impl PreparedReflectedSourceTrajectory<'_> {
+    /// Full original stress field through one admitted ideal image path.
+    ///
+    /// Integrate the ORIGINAL tensor/worldline at the virtual observer returned
+    /// by the existing path geometry. Pass that integral without parity or a
+    /// vector transform; this prepared field applies the velocity map once.
+    pub fn prepare_quadrupole_field_path(
+        &self,
+        path: usize,
+        receiver_time_s: f64,
+        maximum_time_residual_s: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedMovingQuadrupoleFieldSample, AeroacError> {
+        let propagation =
+            self.prepare_path(path, receiver_time_s, maximum_time_residual_s, cancelled)?;
+        let (source, jerk) = self
+            .trajectory()
+            .kinematics_with_jerk_at(propagation.source_time_s())?;
+        let (observer, parity, velocity_map) = self
+            .reflection_observer()
+            .stationary_field_path(path, source.position_m)?;
+        let pressure = observer.prepare_kinematic_quadrupole(propagation, source, jerk)?;
+        observer
+            .prepare_kinematic_quadrupole_field(pressure, source, jerk)?
+            .with_image(parity, velocity_map)
+    }
+
     /// One original ideal image of a moving physical volume-stress source.
     ///
     /// Query the ORIGINAL tensor at this path's own retarded time. The inverse
@@ -62,6 +107,31 @@ impl PreparedReflectedSourceTrajectory<'_> {
 }
 
 impl PreparedReflectedMovingReceiverSource<'_> {
+    /// Full stress field for one image at the current moving microphone event.
+    ///
+    /// The original path's virtual receiver, parity and vector map are retained.
+    /// Past history must be recomputed there for this receiver event; history
+    /// cached at a previous microphone position is not the same physical field.
+    pub fn prepare_quadrupole_field_path(
+        &self,
+        path: usize,
+        receiver_time_s: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedMovingQuadrupoleFieldSample, AeroacError> {
+        let propagation = self
+            .prepare_path(path, receiver_time_s, cancelled)?
+            .pressure;
+        let (source, jerk) = self
+            .source()
+            .kinematics_with_jerk_at(propagation.source_time_s())?;
+        let (observer, parity, velocity_map) = self.force_history_path_at(path, receiver_time_s)?;
+        let mut pressure = observer.prepare_kinematic_quadrupole(propagation, source, jerk)?;
+        pressure.maximum_mach = pressure.maximum_mach.max(self.receiver().maximum_mach());
+        observer
+            .prepare_kinematic_quadrupole_field(pressure, source, jerk)?
+            .with_image(parity, velocity_map)
+    }
+
     /// One complete quadrupole image at the original moving microphone event.
     ///
     /// The image's original causal solve and current virtual receiver supply
@@ -90,7 +160,7 @@ impl PreparedReflectedMovingReceiverSource<'_> {
 }
 
 impl PreparedMovingQuadrupoleSample {
-    fn with_image(mut self, parity: f64, velocity_map: [[f64; 3]; 3]) -> Self {
+    pub(super) fn with_image(mut self, parity: f64, velocity_map: [[f64; 3]; 3]) -> Self {
         for coefficient in self.pressure_coefficients.iter_mut().flatten() {
             *coefficient *= parity;
         }
