@@ -7511,3 +7511,60 @@ an owned field observation without cloning network vectors or recomputing work.
 Existing field/circuit material, topology, residual, storage and cancellation
 admissions remain authoritative. A harmonic trial does not supply transient
 magnetic parameter work or advance accepted history.
+
+## Physical boxes inside original absorbing crystal films
+
+The existing `AbsorbingSlabCoherentIllumination` and
+`AbsorbingSlabIllumination` now integrate their original fields over an
+`AbsorbingCrystalBox` through `box_absorption`. The former retains coherent
+angular interference; the latter adds the expected powers of its already
+declared independent groups, including groups at different original
+frequencies. No statistical model, hidden weight or optical solve is added.
+
+Each original beam retains all four forward/backward eigenwaves and both
+authored incident ports. The coherent and ensemble results borrow the complete
+illumination and original film, and expose physical volume, dielectric watts,
+six signed outward face powers, an independent residual and resource counts.
+Face order is x_min, x_max, y_min, y_max, z_min, z_max. Negative means entry.
+Lateral transport and the residual are never reassigned to material heat.
+The exact DD upper depth must remain within the original film thickness,
+including for dark illumination; a rounded endpoint cannot silently admit
+support outside the film.
+
+The shared native box kernel now retains each wave's original entrance or
+exit anchor and attenuation direction. Fields are attenuated from their
+nearest box endpoint; a fixed z face uses only its actual physical plane.
+Relative phases retain both original anchors. Same-direction products use a
+decaying depth integral from their common near endpoint. Opposite directions
+use the absolute attenuation-rate difference and the remaining factor
+exp(-min(alpha_a,alpha_b)*depth); a backward-selected integral also retains
+its exact upper-end relative phase. No exponentially growing propagation or
+transfer matrix is introduced, even in an opaque two-sided film.
+
+Short boxes retain the existing positive coherent-field rule and analytical
+truncation screen, with backward samples attenuated from the upper box face.
+Exactly common normal propagation remains analytically integrated. Original
+loss channels, independent six-face Poynting contractions, source-bound
+cancellation and representability refusals remain. These screens are not an
+interval or floating-point accuracy certificate; unresolved cancellation
+still refuses rather than clipping negative heat.
+
+Coherent work admits (4 times component_count) squared pairs before exact
+anchored-wave coalescing; an independent bank admits their checked sum.
+The existing source constructors retain those counts and bound empty-group
+traversal. Shared requirements keep query admission identical to cached
+metadata. Storage includes result headers and explicit integration scratch;
+a bank retains seven DD accumulators plus the largest child workspace,
+evaluating groups sequentially. Borrowed sources, allocator overhead and
+ordinary stack locals are excluded. The half-space owner keeps its original
+forward-wave integral path and uses the same updated anchored-mode storage
+accounting. No partial result escapes cancellation or a failed group.
+
+Authored G1/G3 controls cover opaque two-sided films with all six boundary
+powers, the independent TE lateral-work identity, tilted noncollinear
+two-port beams against original local E/H and tensor work, x/y/z partition
+invariance, positive cubic loss at a short standing-wave node, original
+spectral groups, exact work/peak-memory budgets and DD film-support admission.
+Native execution of these new film-box regressions remains unverified.
+The source remains frozen; thermal time stepping, thermo-optic feedback and
+new lateral optical boundaries are outside this electromagnetic observation.

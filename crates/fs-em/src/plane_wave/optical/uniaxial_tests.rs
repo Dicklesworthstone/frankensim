@@ -1497,3 +1497,6 @@ fn coherent_crystal_box_retains_original_material_volume_and_resource_admission(
 
 #[path = "uniaxial_tests/partial_coherence.rs"]
 mod partial_coherence;
+
+#[path = "uniaxial_tests/absorbing_slab_box.rs"]
+mod absorbing_slab_box;

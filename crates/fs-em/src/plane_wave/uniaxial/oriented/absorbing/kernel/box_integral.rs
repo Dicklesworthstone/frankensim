@@ -5,6 +5,8 @@
 //! integrals use the existing DD harmonic-window kernel; depth uses the
 //! original complex absorption integral. Six face fluxes are integrated
 //! independently of dielectric work. No flux residual is deposited as heat.
+//! Finite films retain entrance/exit mode anchors and select a decaying
+//! endpoint for every forward/backward product, including opaque films.
 //!
 //! Short boxes use positive tensor Gauss integration of the COHERENT field,
 //! avoiding cancellation between nearly equal diagonal/cross integrals.
@@ -14,7 +16,7 @@
 use super::{
     AbsorbingCrystalResponse, IlluminationError, absorption, poll_illumination,
 };
-use super::super::{AbsorbingCrystalBox, AbsorbingCrystalBoxLimits};
+use super::super::{AbsorbingCrystalBox, AbsorbingCrystalBoxLimits, slab::AbsorbingSlabResponse};
 use fs_fft::harmonic_window::HarmonicWindow;
 use fs_math::{c64::C64, dd::Dd, decay, det};
 
@@ -28,6 +30,9 @@ const ONE: Complex = [Dd::ONE, Dd::ZERO];
 struct Wave {
     k: [Dd; 3],
     alpha: f64,
+    // Positive attenuation away from the original entrance (+1) or exit (-1).
+    orientation: f64,
+    anchor: Dd,
     fields: Fields,
 }
 
@@ -65,13 +70,25 @@ pub(in super::super) struct BoxIntegral {
     pub(in super::super) workspace_bytes: usize,
 }
 
-/// Shared logical admission for a single original coherent factor. Keeping
-/// this arithmetic here makes ensemble preflight identical to actual queries.
+/// Shared logical admission for an original coherent half-space factor.
 pub(in super::super) fn coherent_box_requirements(
     component_count: usize,
     result_bytes: usize,
 ) -> Result<(usize, usize)> {
-    let mode_count = component_count.checked_mul(2).ok_or(bad("crystal box mode count overflows"))?;
+    let modes = component_count.checked_mul(2).ok_or(bad("crystal box mode count overflows"))?;
+    box_requirements(modes, result_bytes)
+}
+
+/// A finite-film factor retains four incoming-face-anchored waves per beam.
+pub(in super::super) fn slab_box_requirements(
+    component_count: usize,
+    result_bytes: usize,
+) -> Result<(usize, usize)> {
+    let modes = component_count.checked_mul(4).ok_or(bad("film box mode count overflows"))?;
+    box_requirements(modes, result_bytes)
+}
+
+fn box_requirements(mode_count: usize, result_bytes: usize) -> Result<(usize, usize)> {
     let mode_pair_count = mode_count.checked_mul(mode_count).ok_or(bad("crystal box pair count overflows"))?;
     let workspace_bytes = mode_count
         .checked_mul(core::mem::size_of::<Wave>() + core::mem::size_of::<Sample>())
@@ -81,6 +98,28 @@ pub(in super::super) fn coherent_box_requirements(
         .and_then(|n| n.checked_add(core::mem::size_of::<[[Dd; 8]; 2]>()))
         .ok_or(bad("crystal box workspace overflows"))?;
     Ok((mode_pair_count, workspace_bytes))
+}
+
+/// A rounded upper coordinate must not admit support outside the original film.
+pub(in super::super) fn admit_slab_box(region: AbsorbingCrystalBox, thickness: f64) -> Result<()> {
+    let upper = Dd::from_f64(region.origin_m()[2]) + Dd::from_f64(region.extent_m()[2]);
+    if !thickness.is_finite() || thickness <= 0.0 || !finite(upper)
+        || Dd::from_f64(thickness).lt(upper)
+    {
+        return Err(bad("film box extends beyond the original crystal thickness"));
+    }
+    Ok(())
+}
+
+fn original_loss(axis: [f64; 3], weights: [f64; 2], omega: f64) -> Loss {
+    let axis = axis.map(Dd::from_f64);
+    let norm = axis.iter().fold(Dd::ZERO, |sum, &v| sum + v * v);
+    Loss {
+        axis,
+        norm,
+        weight: [weights[0], weights[0], weights[0], weights[1] / norm.to_f64()],
+        omega,
+    }
 }
 
 pub(in super::super) fn coherent_box_absorption<'a>(
@@ -100,16 +139,50 @@ pub(in super::super) fn coherent_box_absorption<'a>(
         return Err(bad("crystal box exceeds its pair work or workspace budget"));
     }
     let reference = responses.clone().next();
-    let axis = reference.map_or([0.0, 0.0, 1.0], |r| r.axis).map(Dd::from_f64);
-    let norm = axis.iter().fold(Dd::ZERO, |sum, &v| sum + v * v);
-    let weights = reference.map_or([0.0; 2], |r| r.loss_f_m);
-    let loss = Loss {
-        axis,
-        norm,
-        weight: [weights[0], weights[0], weights[0], weights[1] / norm.to_f64()],
-        omega: reference.map_or(1.0, |r| r.omega),
-    };
+    let loss = original_loss(
+        reference.map_or([0.0, 0.0, 1.0], |r| r.axis),
+        reference.map_or([0.0; 2], |r| r.loss_f_m),
+        reference.map_or(1.0, |r| r.omega),
+    );
     let waves = coalesce(responses, mode_count, &mut cancelled)?;
+    integrate_box(&waves, mode_count, loss, region, mode_pair_count, workspace_bytes, &mut cancelled)
+}
+
+pub(in super::super) fn coherent_slab_box_absorption<'a>(
+    responses: impl ExactSizeIterator<Item = &'a AbsorbingSlabResponse> + Clone,
+    region: AbsorbingCrystalBox,
+    thickness: f64,
+    limits: AbsorbingCrystalBoxLimits,
+    result_bytes: usize,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<BoxIntegral> {
+    poll_illumination(&mut cancelled)?;
+    admit_slab_box(region, thickness)?;
+    let component_count = responses.len();
+    let (mode_pair_count, workspace_bytes) = slab_box_requirements(component_count, result_bytes)?;
+    if mode_pair_count > limits.maximum_mode_pairs || workspace_bytes > limits.maximum_workspace_bytes {
+        return Err(bad("film box exceeds its pair work or workspace budget"));
+    }
+    let mode_count = component_count * 4; // checked by the shared admission
+    let reference = responses.clone().next();
+    let loss = original_loss(
+        reference.map_or([0.0, 0.0, 1.0], |r| r.axis),
+        reference.map_or([0.0; 2], |r| r.principal_loss_permittivities_f_m()),
+        reference.map_or(1.0, |r| r.omega_rad_s()),
+    );
+    let waves = coalesce_slab(responses, mode_count, &mut cancelled)?;
+    integrate_box(&waves, mode_count, loss, region, mode_pair_count, workspace_bytes, &mut cancelled)
+}
+
+fn integrate_box(
+    waves: &[Wave],
+    mode_count: usize,
+    loss: Loss,
+    region: AbsorbingCrystalBox,
+    mode_pair_count: usize,
+    workspace_bytes: usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<BoxIntegral> {
     let mut samples = Vec::new();
     samples.try_reserve_exact(mode_count).map_err(|_| bad("crystal box field allocation failed"))?;
     let volume = Observation {
@@ -120,19 +193,19 @@ pub(in super::super) fn coherent_box_absorption<'a>(
     let absorbed_power_w = if loss.weight == [0.0; 4] {
         0.0
     } else {
-        measure(&waves, &mut samples, volume, Quantity::Heat(loss.weight), &loss, &mut cancelled)?
+        measure(waves, &mut samples, volume, Quantity::Heat(loss.weight), &loss, cancelled)?
     };
     let mut outward_face_power_w = [0.0; 6];
     for axis in 0..3 {
         for upper in 0..2 {
-            poll_illumination(&mut cancelled)?;
+            poll_illumination(cancelled)?;
             let mut face = volume;
             face.integrated[axis] = false;
             if upper == 1 {
                 face.origin[axis] = face.origin[axis] + Dd::from_f64(face.extent[axis]);
             }
             let watts = measure(
-                &waves, &mut samples, face, Quantity::Flux(axis), &loss, &mut cancelled,
+                waves, &mut samples, face, Quantity::Flux(axis), &loss, cancelled,
             )?;
             outward_face_power_w[2 * axis + upper] = if upper == 0 { -watts } else { watts };
         }
@@ -142,7 +215,7 @@ pub(in super::super) fn coherent_box_absorption<'a>(
     if !residual_w.is_finite() {
         return Err(bad("crystal box power residual is unrepresentable"));
     }
-    poll_illumination(&mut cancelled)?;
+    poll_illumination(cancelled)?;
     Ok(BoxIntegral {
         absorbed_power_w, outward_face_power_w, residual_w, mode_pair_count, workspace_bytes,
     })
@@ -157,45 +230,92 @@ fn finite(value: Dd) -> bool {
 }
 
 fn coalesce<'a>(
-    responses: impl IntoIterator<Item = &'a AbsorbingCrystalResponse>,
+    responses: impl Iterator<Item = &'a AbsorbingCrystalResponse>,
     capacity: usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Vec<Wave>> {
-    let mut waves: Vec<Wave> = Vec::new();
+    let mut waves = Vec::new();
     waves.try_reserve_exact(capacity).map_err(|_| bad("crystal box mode allocation failed"))?;
     for response in responses {
         poll_illumination(cancelled)?;
         for mode in response.transmitted {
-            let k = [
-                Dd::from_f64(response.tangential_wavenumber_rad_m)
-                    * Dd::from_f64(response.incidence_plane_axis[0]),
-                Dd::from_f64(response.tangential_wavenumber_rad_m)
-                    * Dd::from_f64(response.incidence_plane_axis[1]),
-                Dd::from_f64(mode.normal_wavenumber_rad_m.re),
-            ];
-            let fields = core::array::from_fn(|j| {
-                let value = if j < 3 { mode.electric_v_m[j] } else { mode.magnetic_a_m[j - 3] };
-                [Dd::from_f64(value.re), Dd::from_f64(value.im)]
-            });
-            let wave = Wave { k, alpha: -mode.normal_wavenumber_rad_m.im, fields };
-            let mut merged = false;
-            for (index, old) in waves.iter_mut().enumerate() {
-                if index % 32 == 0 { poll_illumination(cancelled)?; }
-                if old.k == wave.k && old.alpha == wave.alpha {
-                    for (left, right) in old.fields.iter_mut().zip(wave.fields) {
-                        *left = [left[0] + right[0], left[1] + right[1]];
-                    }
-                    merged = true;
-                    break;
-                }
-            }
-            if !merged {
-                // All input amplitudes are finite; checking sums below also
-                // rejects a coalesced field outside the DD exponent range.
-                waves.push(wave);
-            }
+            let wave = Wave {
+                k: [
+                    Dd::from_f64(response.tangential_wavenumber_rad_m)
+                        * Dd::from_f64(response.incidence_plane_axis[0]),
+                    Dd::from_f64(response.tangential_wavenumber_rad_m)
+                        * Dd::from_f64(response.incidence_plane_axis[1]),
+                    Dd::from_f64(mode.normal_wavenumber_rad_m.re),
+                ],
+                alpha: -mode.normal_wavenumber_rad_m.im,
+                orientation: 1.0,
+                anchor: Dd::ZERO,
+                fields: original_fields(mode.electric_v_m, mode.magnetic_a_m),
+            };
+            merge_wave(&mut waves, wave, cancelled)?;
         }
     }
+    retain_active(waves, cancelled)
+}
+
+fn coalesce_slab<'a>(
+    responses: impl Iterator<Item = &'a AbsorbingSlabResponse>,
+    capacity: usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<Wave>> {
+    let mut waves = Vec::new();
+    waves.try_reserve_exact(capacity).map_err(|_| bad("film box mode allocation failed"))?;
+    for response in responses {
+        poll_illumination(cancelled)?;
+        let plane = response.incidence_plane_axis();
+        for (index, mode) in response.forward.iter().chain(&response.backward).enumerate() {
+            let orientation = if index < 2 { 1.0 } else { -1.0 };
+            let wave = Wave {
+                k: [
+                    Dd::from_f64(response.tangential_wavenumber_rad_m) * Dd::from_f64(plane[0]),
+                    Dd::from_f64(response.tangential_wavenumber_rad_m) * Dd::from_f64(plane[1]),
+                    Dd::from_f64(mode.normal_wavenumber_rad_m.re),
+                ],
+                alpha: -orientation * mode.normal_wavenumber_rad_m.im,
+                orientation,
+                anchor: if index < 2 { Dd::ZERO } else { Dd::from_f64(response.thickness_m) },
+                fields: original_fields(mode.electric_v_m, mode.magnetic_a_m),
+            };
+            merge_wave(&mut waves, wave, cancelled)?;
+        }
+    }
+    retain_active(waves, cancelled)
+}
+
+fn original_fields(electric: [C64; 3], magnetic: [C64; 3]) -> Fields {
+    core::array::from_fn(|j| {
+        let value = if j < 3 { electric[j] } else { magnetic[j - 3] };
+        [Dd::from_f64(value.re), Dd::from_f64(value.im)]
+    })
+}
+
+fn merge_wave(waves: &mut Vec<Wave>, wave: Wave, cancelled: &mut impl FnMut() -> bool) -> Result<()> {
+    if !wave.alpha.is_finite() || wave.alpha < 0.0 || !finite(wave.anchor)
+        || wave.k.iter().any(|&value| !finite(value))
+    {
+        return Err(bad("crystal box requires finite passive anchored eigenwaves"));
+    }
+    for (index, old) in waves.iter_mut().enumerate() {
+        if index % 32 == 0 { poll_illumination(cancelled)?; }
+        if old.k == wave.k && old.alpha == wave.alpha
+            && old.anchor == wave.anchor && old.orientation == wave.orientation
+        {
+            for (left, right) in old.fields.iter_mut().zip(wave.fields) {
+                *left = [left[0] + right[0], left[1] + right[1]];
+            }
+            return Ok(());
+        }
+    }
+    waves.push(wave);
+    Ok(())
+}
+
+fn retain_active(mut waves: Vec<Wave>, cancelled: &mut impl FnMut() -> bool) -> Result<Vec<Wave>> {
     let mut active = 0;
     for index in 0..waves.len() {
         poll_illumination(cancelled)?;
@@ -259,7 +379,15 @@ fn prepare_samples(
     let mut reference = None;
     for (index, wave) in waves.iter().enumerate() {
         poll_illumination(cancelled)?;
-        let x = exposure(wave.alpha, observation.origin[2]);
+        // A fixed z face is ONE absolute plane. Its unused extent must not
+        // move a backward wave to the opposite, unobserved box endpoint.
+        let near = if wave.orientation < 0.0 && observation.integrated[2] {
+            observation.origin[2] + Dd::from_f64(observation.extent[2])
+        } else {
+            observation.origin[2]
+        };
+        let distance = (near - wave.anchor) * Dd::from_f64(wave.orientation);
+        let x = exposure(wave.alpha, distance);
         let fields = wave.fields.map(|v| attenuation(v, x));
         if reference.is_none() && fields.iter().any(|v| *v != ZERO) {
             reference = Some(index);
@@ -271,9 +399,21 @@ fn prepare_samples(
     for (wave, sample) in waves.iter().zip(samples.iter_mut()) {
         poll_illumination(cancelled)?;
         if sample.fields.iter().all(|v| *v == ZERO) { continue; }
-        let phase = (0..3).fold(Dd::ZERO, |sum, j| {
-            sum + (wave.k[j] - waves[reference].k[j]) * observation.origin[j]
+        let reference = &waves[reference];
+        let transverse = (0..2).fold(Dd::ZERO, |sum, j| {
+            sum + (wave.k[j] - reference.k[j]) * observation.origin[j]
         });
+        let da = observation.origin[2] - wave.anchor;
+        let db = observation.origin[2] - reference.anchor;
+        let beat = wave.k[2] - reference.k[2];
+        let normal = if wave.anchor == reference.anchor {
+            beat * da
+        } else if da.to_f64().abs() <= db.to_f64().abs() {
+            beat * da + reference.k[2] * (reference.anchor - wave.anchor)
+        } else {
+            beat * db + wave.k[2] * (reference.anchor - wave.anchor)
+        };
+        let phase = transverse + normal;
         let phase = rotation(phase)?;
         for (j, value) in sample.fields.iter_mut().enumerate() {
             *value = multiply(*value, phase);
@@ -329,6 +469,35 @@ fn depth_integral(a: f64, b: f64, beat: Dd, width: f64) -> Result<Complex> {
     absorption::cross_integral([a, b], beat, length).map_err(IlluminationError::from)
 }
 
+// Samples retain phase at the observation origin but attenuation at their
+// nearest physical endpoint. For a backward-selected pair, u=L-v contributes
+// exp(+i beat*L) as well as reversing the beat inside the decaying integral.
+fn anchored_depth_integral(a: &Wave, b: &Wave, width: f64) -> Result<Complex> {
+    let beat = a.k[2] - b.k[2];
+    if a.orientation > 0.0 && b.orientation > 0.0 {
+        return depth_integral(a.alpha, b.alpha, beat, width);
+    }
+    let same = a.orientation == b.orientation;
+    let orientation = if same || a.alpha > b.alpha {
+        a.orientation
+    } else if b.alpha > a.alpha {
+        b.orientation
+    } else {
+        1.0 // Equal opposing rates use the same endpoint in BOTH pair orders.
+    };
+    let rates = if same { [a.alpha, b.alpha] } else { [(a.alpha - b.alpha).abs(), 0.0] };
+    let mut integral = depth_integral(
+        rates[0], rates[1], if orientation > 0.0 { beat } else { -beat }, width,
+    )?;
+    if orientation < 0.0 {
+        integral = multiply(integral, rotation(-beat * Dd::from_f64(width))?);
+    }
+    if !same {
+        integral = attenuation(integral, exposure(a.alpha.min(b.alpha), Dd::from_f64(width)));
+    }
+    Ok(integral)
+}
+
 fn depth_scale(waves: &[Wave], observation: Observation) -> f64 {
     if !observation.integrated[2] { return 1.0; }
     let alpha = waves.iter().map(|wave| wave.alpha).fold(f64::INFINITY, f64::min);
@@ -361,7 +530,7 @@ fn pair_kernel(
         }
     }
     if observation.integrated[2] {
-        let axial = depth_integral(a.alpha, b.alpha, a.k[2] - b.k[2], observation.extent[2])?
+        let axial = anchored_depth_integral(a, b, observation.extent[2])?
             .map(|v| v / Dd::from_f64(depth));
         weight = multiply(weight, axial);
     }
@@ -448,7 +617,9 @@ fn short_box(waves: &[Wave], observation: Observation) -> Option<ShortBox> {
     let first = waves.first()?;
     let mut phase = [0.0_f64; 3];
     let mut alpha = 0.0_f64;
-    let common_normal = waves.iter().all(|wave| wave.k[2] == first.k[2] && wave.alpha == first.alpha);
+    let common_normal = waves.iter().all(|wave| {
+        wave.k[2] == first.k[2] && wave.alpha == first.alpha && wave.orientation == first.orientation
+    });
     for wave in waves {
         for axis in 0..3 {
             if observation.integrated[axis] {
@@ -507,7 +678,12 @@ fn short_integral(
                         value + (wave.k[axis] - waves[0].k[axis]) * point[axis]
                     });
                     let phase = rotation(phase)?;
-                    let x = if short.common_normal { 0.0 } else { exposure(wave.alpha, point[2]) };
+                    let distance = if wave.orientation < 0.0 && observation.integrated[2] {
+                        Dd::from_f64(observation.extent[2]) - point[2]
+                    } else {
+                        point[2]
+                    };
+                    let x = if short.common_normal { 0.0 } else { exposure(wave.alpha, distance) };
                     match quantity {
                         Quantity::Heat(_) => {
                             for (sum, value) in projected.iter_mut().zip(sample.projected) {

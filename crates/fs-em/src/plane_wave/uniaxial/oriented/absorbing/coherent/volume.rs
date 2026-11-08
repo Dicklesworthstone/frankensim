@@ -76,7 +76,8 @@ impl AbsorbingCrystalBox {
 /// Admission before allocating or evaluating modal kernels.
 #[derive(Clone, Copy, Debug)]
 pub struct AbsorbingCrystalBoxLimits {
-    /// Bounds (2 * component_count)^2 before equal-wavevector coalescing.
+    /// Bounds (2 * component_count)^2 for a half-space coherent group, or
+    /// (4 * component_count)^2 for a finite film, before anchored-mode coalescing.
     /// A partially coherent factor bank bounds the SUM of these counts,
     /// without introducing pairs between independent factors.
     /// Each pair has at most seven fixed analytic contractions. Short boxes

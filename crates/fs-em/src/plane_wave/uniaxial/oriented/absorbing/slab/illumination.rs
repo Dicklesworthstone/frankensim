@@ -17,6 +17,9 @@ use super::{
 };
 use fs_math::dd::Dd;
 
+mod volume;
+pub use volume::{AbsorbingSlabCoherentBoxAbsorption, AbsorbingSlabIlluminationBoxAbsorption};
+
 type Result<T> = core::result::Result<T, CrystalIlluminationError>;
 
 /// Explicitly mutually coherent prepared beams from the exact original film.
@@ -26,6 +29,8 @@ type Result<T> = core::result::Result<T, CrystalIlluminationError>;
 pub struct AbsorbingSlabCoherentIllumination<'p, 'f, 's, 'm> {
     source: &'f OrientedUniaxialSlab<'s, 'm>,
     components: &'p [PreparedAbsorbingSlabField<'f, 's, 'm>],
+    mode_pair_count: usize,
+    box_workspace_bytes: usize,
 }
 
 impl<'p, 'f, 's, 'm> AbsorbingSlabCoherentIllumination<'p, 'f, 's, 'm> {
@@ -46,6 +51,10 @@ impl<'p, 'f, 's, 'm> AbsorbingSlabCoherentIllumination<'p, 'f, 's, 'm> {
             )
             .into());
         }
+        let (mode_pair_count, box_workspace_bytes) = crystal::slab_box_requirements(
+            components.len(),
+            core::mem::size_of::<AbsorbingSlabCoherentBoxAbsorption<'_, 'p, 'f, 's, 'm>>(),
+        )?;
         let omega = components
             .first()
             .map(|field| field.response().omega_rad_s());
@@ -65,7 +74,7 @@ impl<'p, 'f, 's, 'm> AbsorbingSlabCoherentIllumination<'p, 'f, 's, 'm> {
             }
         }
         crystal::poll_illumination(&mut cancelled)?;
-        Ok(Self { source, components })
+        Ok(Self { source, components, mode_pair_count, box_workspace_bytes })
     }
 
     pub const fn source(&self) -> &'f OrientedUniaxialSlab<'s, 'm> {
@@ -76,6 +85,10 @@ impl<'p, 'f, 's, 'm> AbsorbingSlabCoherentIllumination<'p, 'f, 's, 'm> {
     }
     pub const fn component_count(&self) -> usize {
         self.components.len()
+    }
+    /// Checked four-wave box work before exact anchored-mode coalescing.
+    pub const fn mode_pair_count(&self) -> usize {
+        self.mode_pair_count
     }
     pub fn omega_rad_s(&self) -> Option<f64> {
         self.components
@@ -147,6 +160,9 @@ pub struct AbsorbingSlabIllumination<'g, 'p, 'f, 's, 'm> {
     source: &'f OrientedUniaxialSlab<'s, 'm>,
     groups: &'g [AbsorbingSlabCoherentIllumination<'p, 'f, 's, 'm>],
     component_count: usize,
+    mode_pair_count: usize,
+    group_workspace_bytes: usize,
+    box_workspace_bytes: usize,
 }
 
 impl<'g, 'p, 'f, 's, 'm> AbsorbingSlabIllumination<'g, 'p, 'f, 's, 'm> {
@@ -168,6 +184,8 @@ impl<'g, 'p, 'f, 's, 'm> AbsorbingSlabIllumination<'g, 'p, 'f, 's, 'm> {
             .into());
         }
         let mut component_count = 0usize;
+        let mut mode_pair_count = 0usize;
+        let mut group_workspace_bytes = 0usize;
         for group in groups {
             crystal::poll_illumination(&mut cancelled)?;
             if !core::ptr::eq(source, group.source()) {
@@ -182,12 +200,25 @@ impl<'g, 'p, 'f, 's, 'm> AbsorbingSlabIllumination<'g, 'p, 'f, 's, 'm> {
                 .ok_or(ReflectionError::Invalid(
                     "film illumination exceeds its total component budget",
                 ))?;
+            mode_pair_count = mode_pair_count.checked_add(group.mode_pair_count()).ok_or(
+                ReflectionError::Invalid("film illumination box pair count overflows"),
+            )?;
+            group_workspace_bytes = group_workspace_bytes.max(group.box_workspace_bytes);
         }
+        let box_workspace_bytes = group_workspace_bytes
+            .checked_add(core::mem::size_of::<
+                AbsorbingSlabIlluminationBoxAbsorption<'_, 'g, 'p, 'f, 's, 'm>,
+            >())
+            .and_then(|bytes| bytes.checked_add(core::mem::size_of::<[Dd; 7]>()))
+            .ok_or(ReflectionError::Invalid("film illumination box workspace overflows"))?;
         crystal::poll_illumination(&mut cancelled)?;
         Ok(Self {
             source,
             groups,
             component_count,
+            mode_pair_count,
+            group_workspace_bytes,
+            box_workspace_bytes,
         })
     }
 
@@ -202,6 +233,10 @@ impl<'g, 'p, 'f, 's, 'm> AbsorbingSlabIllumination<'g, 'p, 'f, 's, 'm> {
     }
     pub const fn component_count(&self) -> usize {
         self.component_count
+    }
+    /// Sum of each independent group's checked four-wave box pair count.
+    pub const fn mode_pair_count(&self) -> usize {
+        self.mode_pair_count
     }
 
     /// Cartesian electric coherency, magnetic RMS², energy flux and tensor

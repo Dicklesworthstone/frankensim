@@ -31,7 +31,10 @@ pub(super) mod absorption;
 pub(super) mod kernel;
 pub use absorption::AbsorbingSlabVolumeAbsorption;
 mod illumination;
-pub use illumination::{AbsorbingSlabCoherentIllumination, AbsorbingSlabIllumination};
+pub use illumination::{
+    AbsorbingSlabCoherentBoxAbsorption, AbsorbingSlabCoherentIllumination,
+    AbsorbingSlabIllumination, AbsorbingSlabIlluminationBoxAbsorption,
+};
 pub(super) mod polarization;
 pub use polarization::PreparedAbsorbingSlabPolarization;
 const C0: f64 = 299_792_458.0;
@@ -81,7 +84,7 @@ pub struct AbsorbingSlabResponse {
     /// below floating-point resolution; local tensor heating remains available.
     pub absorbed_power_fraction: f64,
     omega: f64,
-    axis: [f64; 3],
+    pub(super) axis: [f64; 3],
     loss_f_m: [f64; 2],
     plane: [f64; 2],
 }
