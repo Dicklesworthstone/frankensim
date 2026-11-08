@@ -16,6 +16,8 @@ pub(super) struct Endpoint {
     pub(super) displacement: Vec<f64>,
     pub(super) velocity: Vec<f64>,
     pub(super) acceleration: Vec<f64>,
+    /// Native momentum rate, before rounding the returned endpoint velocity.
+    pub(super) midpoint_acceleration: Vec<f64>,
     pub(super) iterations: usize,
     pub(super) force_residual_n: f64,
 }
@@ -71,8 +73,11 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         Ok(result)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn damped_material_endpoint(
-        &self, old: &Csr, force: &[f64], thermal: &[f64], h: f64, b: f64, cx: &Cx<'_>,
+        &self, old: &Csr, force: &[f64], thermal: &[f64],
+        supports: Option<(&TetLinearElasticProblem<'_>, &motion::PrescribedMotion3)>,
+        h: f64, b: f64, cx: &Cx<'_>,
     ) -> Result<Endpoint, TransientError3> {
         check(cx)?;
         let eta = self.config.mass_damping_per_s;
@@ -91,6 +96,9 @@ impl TetTransientRun3<'_, '_, '_, '_> {
                 + 0.5*thermal[i] + 0.5*self.thermal[i]
                 - eta*mass_v[i] - zeta*(0.5*old_v[i] + 0.5*next_v[i])
                 - 0.5*old_q[i] - 0.5*next_q[i] - 0.5*h*next_v[i])?);
+        }
+        if let Some((previous, next)) = supports {
+            self.subtract_midpoint_support_force(previous, next, &mut rhs, cx)?;
         }
         let op = MidpointOperator {
             mass: &self.operators.mass, old, next: &self.operators.stiffness,
@@ -117,6 +125,9 @@ impl TetTransientRun3<'_, '_, '_, '_> {
             if i % 256 == 0 { check(cx)?; }
             rhs[i] = number(force[i] + thermal[i] - ku[i] - cv[i])?;
         }
+        if let Some((_, next)) = supports {
+            self.subtract_support_force(next, &mut rhs, cx)?;
+        }
         let mut remaining = self.config;
         remaining.solve.maximum_iterations = remaining.solve.maximum_iterations
             .checked_sub(first_iterations).ok_or(TransientError3::Budget)?;
@@ -124,7 +135,7 @@ impl TetTransientRun3<'_, '_, '_, '_> {
             solve(&self.operator(1.0, 0.0, cx), &rhs, remaining)?;
         check(cx)?;
         Ok(Endpoint {
-            displacement: q, velocity: v, acceleration,
+            displacement: q, velocity: v, acceleration, midpoint_acceleration: rate,
             iterations: first_iterations.checked_add(second_iterations)
                 .ok_or(TransientError3::Budget)?,
             force_residual_n: first_residual.max(second_residual),

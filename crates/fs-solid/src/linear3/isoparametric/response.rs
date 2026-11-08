@@ -223,6 +223,71 @@ impl TetLinearElasticProblem<'_> {
         cx.checkpoint().map_err(|_| TetElasticError::Cancelled)
     }
 
+    /// Full-coordinate coefficient contributions to storage and supplied work:
+    /// [q1' (K1-K0) q1 / 2, q0' (K1-K0) q1 / 2]. Difference each original
+    /// material tensor before contracting strain; no full matrix is assembled
+    /// and no subtraction of large absolute energies supplies parameter work.
+    /// Native P1 strain and each element's tensor are constant, so the volume
+    /// contraction is exact for this linear-tetrahedron problem type.
+    pub(crate) fn full_stiffness_coefficient_change(
+        &self, previous: &TetLinearElasticProblem<'_>, before: &[f64], after: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<[fs_math::dd::Dd; 2], TetElasticError> {
+        use fs_math::dd::Dd;
+        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        let full = self.nodes_m.len().checked_mul(3).ok_or(TetElasticError::SizeOverflow)?;
+        if self.nodes_m != previous.nodes_m || self.tetrahedra != previous.tetrahedra
+            || before.len() != full || after.len() != full {
+            return Err(TetElasticError::InvalidStressObservation {
+                what: "stiffness work requires the same mesh and full displacement fields",
+            });
+        }
+        self.validate_budget()?;
+        self.materials.validate(self.tetrahedra.len())?;
+        previous.materials.validate(self.tetrahedra.len())?;
+        for (old, new) in before.chunks(256).zip(after.chunks(256)) {
+            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+            if old.iter().chain(new).any(|v| !v.is_finite()) {
+                return Err(TetElasticError::InvalidStressObservation {
+                    what: "nonfinite full stiffness-work displacement",
+                });
+            }
+        }
+        let mut result = [Dd::default(); 2];
+        for (element, tet) in self.tetrahedra.iter().enumerate() {
+            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+            validate_connectivity(element, tet, self.nodes_m.len())?;
+            let geometry = TetGeometry::try_new(element, tet.map(|n| self.nodes_m[n]),
+                self.budget.minimum_scaled_jacobian)?;
+            let b = strain_displacement_matrix(&geometry);
+            let strain = |field: &[f64]| relative_mandel_strain(tet.len(),
+                |d| core::array::from_fn(|i| b[i][d]),
+                |d| field[3 * tet[d / 3] + d % 3]);
+            let old_strain = strain(before);
+            let new_strain = strain(after);
+            let old = previous.materials.at(element);
+            let new = self.materials.at(element);
+            for i in 0..6 {
+                let mut action = Dd::default();
+                for j in 0..6 {
+                    let coefficient = Dd::from_f64(new.stiffness_mandel_pa[i][j])
+                        - Dd::from_f64(old.stiffness_mandel_pa[i][j]);
+                    action = action + coefficient * Dd::from_f64(new_strain[j]);
+                }
+                let scaled = Dd::from_f64(0.5 * geometry.volume) * action;
+                result[0] = result[0] + Dd::from_f64(new_strain[i]) * scaled;
+                result[1] = result[1] + Dd::from_f64(old_strain[i]) * scaled;
+            }
+        }
+        if result.iter().any(|value| !value.hi.is_finite() || !value.lo.is_finite()) {
+            return Err(TetElasticError::InvalidStressObservation {
+                what: "nonfinite full stiffness coefficient work",
+            });
+        }
+        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        Ok(result)
+    }
+
     /// Actual transposed element actions, including all free/fixed cross rows.
     /// The seed is zero on fixed rows when used by the support-motion adjoint.
     /// Transpose the relative strain map and canonical material entries, rather

@@ -5,15 +5,23 @@
 `TetTransientRun3::advance_thermal_with_supports_candidate` and
 `advance_thermal_with_support_accelerations_candidate` join changing thermal
 eigenstrain to the existing full consistent-mass support/Newmark equations.
-They retain the same fixed components, complete stiffness and reference inertia;
-refreshed source identities and thermal fields remain bound to the returned run.
-Changed stiffness with prescribed supports explicitly refuses.
+They retain the same fixed components and reference inertia; refreshed source
+identities, thermal fields and complete stiffness remain bound to the returned
+run. Changing stiffness rebuilds the native reduced operator and retains full
+free/support coupling, including consistent mass and both endpoint stiffnesses.
+Stiffness-proportional damping uses the positive midpoint operator
+`eta*M + zeta*(K_old+K_next)/2`. Its support work uses the reaction conjugate to
+that original midpoint equation; physical endpoint acceleration and reactions
+are separately recovered for observation and subsequent advancement.
 
 The full endpoint thermal load enters reactions and the free equation.
 Numerical work pairs the mean of accepted and candidate thermal forces with the
 same full displacement as external and support work. Physical shifted elastic
 storage separately balances signed thermal material work, external work,
-support work and declared Rayleigh loss. No reciprocal heat debit is inferred.
+support work, signed tensor-parameter work and declared Rayleigh loss. Full
+coefficient work differences the original material tensors before strain
+products, including fully prescribed bodies, without assembling a full matrix.
+No reciprocal heat debit is inferred.
 Ordinary later support steps consume the newly accepted field and reactions.
 
 Both endpoint conventions share native support admission and predictors.
@@ -21,7 +29,9 @@ Cancellation, source, strain, displacement, energy and resource refusals leave
 the input checkpoint intact. Focused regressions in `transient_supports3`
 cover an independent damped free-component equation, heating and cooling,
 deterministic replay, fully prescribed motion, retained thermal reaction/work
-and refused candidates.
+and refused candidates. Changing-tensor regressions add an independent damped
+two-coordinate equation, softening/stiffening, ordinary-step continuation and
+fully constrained parameter work at zero boundary displacement.
 
 ## Thermal strain rates in native viscous tensile fracture
 

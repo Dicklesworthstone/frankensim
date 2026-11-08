@@ -3,9 +3,11 @@
 //! Partitioning the full equation gives
 //! M_ff a_f + C_ff v_f + K_ff u_f = f_f + fT_f
 //!     - M_fc a_c - C_fc v_c - K_fc u_c.
-//! The support acceleration follows the same Newmark predictors as the free
-//! state. Thus the full trapezoidal work identity includes reaction work, with
-//! no fictitious force or omission of consistent-mass coupling.
+//! Support acceleration follows the declared Newmark predictors. Fixed material
+//! uses the full trapezoidal work identity. Changing stiffness-proportional
+//! damping retains the native midpoint momentum rate and its conjugate support
+//! reaction, separately from physical endpoint acceleration/reaction. Neither
+//! path omits consistent-mass coupling or introduces a fictitious force.
 
 use super::*;
 
@@ -82,7 +84,7 @@ impl<'g, 'm> TetLoadCase3<'g, 'm> {
     /// `advance_with_support_accelerations`, a thermal/support candidate, or a
     /// corresponding history adapter.
     /// The constraint set stays fixed. The thermal candidate APIs additionally
-    /// admit changing eigenstrain while the complete stiffness stays fixed.
+    /// admit changing eigenstrain and stiffness at fixed reference inertia.
     /// Prescribed motion is absolute in the reference world's Cartesian axes;
     /// no accelerating-frame or velocity-integration convention is inferred.
     /// Existing displacement, element, solve and cancellation bounds apply.
@@ -344,6 +346,39 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         check(cx)
     }
 
+    /// Free-row contribution of prescribed motion to the native material
+    /// midpoint equation. Keep M_fc, both endpoint K_fc and Cbar_fc intact.
+    pub(super) fn subtract_midpoint_support_force(
+        &self,
+        previous_problem: &TetLinearElasticProblem<'_>,
+        next: &PrescribedMotion3,
+        rhs: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), TransientError3> {
+        let previous = self.prescribed.as_ref().ok_or(TransientError3::Invalid(
+            "material midpoint requires the accepted support motion",
+        ))?;
+        let mut motion = previous.motion.clone();
+        for &d in self.problem.fixed_dofs {
+            check(cx)?;
+            motion[1][d] = number(0.5 * previous.motion[1][d] + 0.5 * next.motion[1][d])?;
+            motion[2][d] = number(0.5 * previous.motion[2][d] + 0.5 * next.motion[2][d])?;
+        }
+        let old = previous_problem.apply_full_kinematics(&motion,
+            self.nodal_reference_density.as_deref(), cx)?;
+        motion[0].copy_from_slice(&next.motion[0]);
+        let new = self.problem.apply_full_kinematics(&motion,
+            self.nodal_reference_density.as_deref(), cx)?;
+        for (i, &d) in self.free_dofs().iter().enumerate() {
+            if i % 256 == 0 { check(cx)?; }
+            rhs[i] = number(rhs[i] - new.ma[d]
+                - self.config.mass_damping_per_s * new.mv[d]
+                - self.config.stiffness_damping_s * (0.5 * old.kv[d] + 0.5 * new.kv[d])
+                - 0.5 * old.ku[d] - 0.5 * new.ku[d])?;
+        }
+        check(cx)
+    }
+
     /// Refresh reactions for a private force/acceleration switch without
     /// another support-state copy. Displacement, velocity and energy stay fixed.
     pub(super) fn load_jump_supports(
@@ -459,14 +494,17 @@ impl TetTransientRun3<'_, '_, '_, '_> {
 
     /// Full work identity. The original numerical state is untouched until the
     /// caller also accepts its effective-equation residual and energy allowance.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn supported_accounting(
         &self,
         next: &mut PrescribedMotion3,
         reduced: [&[f64]; 3],
         load: &TetLoadCase3<'_, '_>,
+        previous_problem: Option<&TetLinearElasticProblem<'_>>,
+        midpoint_acceleration: Option<&[f64]>,
         h: f64,
         cx: &Cx<'_>,
-    ) -> Result<energy::StepEnergy, TransientError3> {
+    ) -> Result<(energy::StepEnergy, Dd), TransientError3> {
         let previous = self.prescribed.as_ref().ok_or(TransientError3::Invalid(
             "missing previous prescribed support state",
         ))?;
@@ -493,25 +531,56 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         }
         let displacement = |d: usize| Dd::from_f64(h)
             * (Dd::from_f64(0.5 * old[1][d]) + Dd::from_f64(0.5 * endpoint.motion[1][d]));
+        // With changing stiffness-proportional damping, endpoint accelerations
+        // are physical observations, not the midpoint momentum rate. Reaction
+        // WORK must use that original rate and Cbar, including free/fixed mass
+        // coupling; averaging endpoint reactions would invent boundary work.
+        let old_actions = if let Some(rate) = midpoint_acceleration {
+            let old_problem = previous_problem.ok_or(TransientError3::Invalid(
+                "material support work requires its original stiffness",
+            ))?;
+            if rate.len() != self.free_dofs().len() {
+                return Err(TransientError3::Invalid("material support momentum rate mismatch"));
+            }
+            midpoint[0].copy_from_slice(&old[0]);
+            for &d in self.problem.fixed_dofs {
+                check(cx)?;
+                midpoint[2][d] = number(0.5 * old[2][d] + 0.5 * endpoint.motion[2][d])?;
+            }
+            for (i, &d) in self.free_dofs().iter().enumerate() {
+                if i % 256 == 0 { check(cx)?; }
+                midpoint[2][d] = rate[i];
+            }
+            let actions = old_problem.apply_full_kinematics(&midpoint,
+                self.nodal_reference_density.as_deref(), cx)?;
+            midpoint[0].copy_from_slice(&endpoint.motion[0]);
+            Some(actions)
+        } else { None };
         let actions = self.problem.apply_full_kinematics(&midpoint,
             self.nodal_reference_density.as_deref(), cx)?;
+        let damping_force = |d: usize| number(
+            self.config.mass_damping_per_s * actions.mv[d]
+                + self.config.stiffness_damping_s * old_actions.as_ref()
+                    .map_or(actions.kv[d], |old| 0.5 * old.kv[d] + 0.5 * actions.kv[d]),
+        );
         let mut damping = Dd::default();
         for d in 0..full {
             if d % 256 == 0 {
                 check(cx)?;
             }
-            let cv = number(
-                self.config.mass_damping_per_s * actions.mv[d]
-                    + self.config.stiffness_damping_s * actions.kv[d],
-            )?;
+            let cv = damping_force(d)?;
             damping = damping + Dd::from_f64(midpoint[1][d]) * Dd::from_f64(cv);
         }
         let damping = energy::retained(Dd::from_f64(h) * damping)?;
         let mut mechanical = Dd::default();
+        let mut mean_force = old_actions.as_ref().map(|_| vec![Dd::default(); full]);
         for forces in [&self.full_force[..], load.nodal_forces_n()] {
             for &(d, f) in forces {
                 check(cx)?;
                 mechanical = mechanical + Dd::from_f64(0.5 * f) * displacement(d);
+                if let Some(mean) = &mut mean_force {
+                    mean[d] = mean[d] + Dd::from_f64(0.5 * f);
+                }
             }
         }
         let mut thermal = Dd::default();
@@ -531,14 +600,28 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         let mut support = Dd::default();
         for &d in self.problem.fixed_dofs {
             check(cx)?;
-            let average = Dd::from_f64(0.5 * previous.reactions[d])
-                + Dd::from_f64(0.5 * endpoint.reactions[d]);
+            let average = if let Some(old_actions) = &old_actions {
+                Dd::from_f64(actions.ma[d]) + Dd::from_f64(damping_force(d)?)
+                    + Dd::from_f64(0.5 * old_actions.ku[d]) + Dd::from_f64(0.5 * actions.ku[d])
+                    - Dd::from_f64(0.5 * previous.thermal[d]) - Dd::from_f64(0.5 * next.thermal[d])
+                    - mean_force.as_ref().expect("material midpoint force workspace")[d]
+            } else {
+                Dd::from_f64(0.5 * previous.reactions[d])
+                    + Dd::from_f64(0.5 * endpoint.reactions[d])
+            };
             support = support + average * displacement(d);
         }
         let kinetic_change = energy::full_change(self.problem, true, &old[1], &endpoint.motion[1],
             self.nodal_reference_density.as_deref(), cx)?;
-        let strain_change = energy::full_change(self.problem, false, &old[0], &endpoint.motion[0],
+        let mut strain_change = energy::full_change(previous_problem.unwrap_or(self.problem),
+            false, &old[0], &endpoint.motion[0],
             self.nodal_reference_density.as_deref(), cx)?;
+        let stiffness_work = if let Some(before) = previous_problem {
+            let [change, work] = self.problem.full_stiffness_coefficient_change(
+                before, &old[0], &endpoint.motion[0], cx)?;
+            strain_change = energy::retained(strain_change + change)?;
+            energy::retained(work)?
+        } else { Dd::default() };
         let account = energy::StepEnergy {
             kinetic: endpoint.kinetic, strain: endpoint.strain, kinetic_change, strain_change,
             mechanical: energy::retained(mechanical)?, support: energy::retained(support)?,
@@ -546,6 +629,6 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         };
         check(cx)?;
         next.reactions = endpoint.reactions;
-        Ok(account)
+        Ok((account, stiffness_work))
     }
 }

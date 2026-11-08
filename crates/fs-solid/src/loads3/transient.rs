@@ -453,17 +453,19 @@ impl TetTransientRun3<'_, '_, '_, '_> {
 
     fn advance_with_thermal_impl(&mut self, load_next: &TetLoadCase3<'_, '_>,
         mut next_supports: Option<motion::PrescribedMotion3>, thermal_next: Option<&[f64]>,
-        stiffness_before: Option<&Csr>, h_s: f64, cx: &Cx<'_>) -> Result<TransientStep3, TransientError3> {
+        material_before: Option<(&Csr, &TetLinearElasticProblem<'_>)>,
+        h_s: f64, cx: &Cx<'_>) -> Result<TransientStep3, TransientError3> {
         check(cx)?;
+        let stiffness_before = material_before.map(|(matrix, _)| matrix);
+        let problem_before = material_before.map(|(_, problem)| problem);
         if thermal_next.is_some_and(|field| field.len() != self.thermal.len()) {
             return Err(TransientError3::Invalid("thermal endpoint requires matching fields"));
         }
         if self.prescribed.is_some() != next_supports.is_some() {
             return Err(TransientError3::Invalid("prescribed motion requires an explicit matching support endpoint"));
         }
-        if stiffness_before.is_some_and(|matrix| matrix.nrows() != self.free_dofs().len())
-            || (stiffness_before.is_some() && next_supports.is_some()) {
-            return Err(TransientError3::Invalid("changing stiffness requires fixed mass and stationary zero supports"));
+        if stiffness_before.is_some_and(|matrix| matrix.nrows() != self.free_dofs().len()) {
+            return Err(TransientError3::Invalid("changing stiffness requires the original free-DOF map"));
         }
         if self.state.step >= self.config.maximum_steps { return Err(TransientError3::Budget); }
         let next_time = self.state.time_s + h_s;
@@ -477,9 +479,11 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         let eta = self.config.mass_damping_per_s; let zeta = self.config.stiffness_damping_s;
         let thermal_force = thermal_next.unwrap_or(&self.thermal);
         let changing_damping = stiffness_before.filter(|_| zeta != 0.0);
-        let (q, v, a, iterations, force_residual_n) = if let Some(previous) = changing_damping {
-            let endpoint = self.damped_material_endpoint(previous, &force, thermal_force, h_s, b, cx)?;
+        let (q, v, a, midpoint_acceleration, iterations, force_residual_n) = if let Some(previous) = changing_damping {
+            let endpoint = self.damped_material_endpoint(previous, &force, thermal_force,
+                problem_before.zip(next_supports.as_ref()), h_s, b, cx)?;
             (endpoint.displacement, endpoint.velocity, endpoint.acceleration,
+                Some(endpoint.midpoint_acceleration),
                 endpoint.iterations, endpoint.force_residual_n)
         } else {
             // Preserve the original arithmetic for all previously admitted runs.
@@ -499,7 +503,7 @@ impl TetTransientRun3<'_, '_, '_, '_> {
                 if i % 256 == 0 { check(cx)?; }
                 q.push(number(qp[i]+b*a[i])?); v.push(number(vp[i]+0.5*h_s*a[i])?);
             }
-            (q, v, a, iterations, force_residual_n)
+            (q, v, a, None, iterations, force_residual_n)
         };
         let mut average_v = Vec::with_capacity(n);
         for i in 0..n {
@@ -515,8 +519,9 @@ impl TetTransientRun3<'_, '_, '_, '_> {
                 return Err(TransientError3::Invalid("candidate exceeds displacement allowance"));
             }
         }
-        let mut account = if let Some(supports) = &mut next_supports {
-            self.supported_accounting(supports, [&q, &v, &a], load_next, h_s, cx)?
+        let (mut account, mut stiffness_work) = if let Some(supports) = &mut next_supports {
+            self.supported_accounting(supports, [&q, &v, &a], load_next,
+                problem_before, midpoint_acceleration.as_deref(), h_s, cx)?
         } else {
             let (kinetic, strain) = self.energy(&q, &v, cx)?;
             let damping_loss = if let Some(previous) = changing_damping {
@@ -530,7 +535,7 @@ impl TetTransientRun3<'_, '_, '_, '_> {
                 }
                 energy::retained(Dd::from_f64(h_s) * loss)?
             };
-            energy::StepEnergy {
+            (energy::StepEnergy {
                 kinetic, strain,
                 kinetic_change: energy::sparse_change(&self.operators.mass, &self.state.velocity, &v, cx)?,
                 strain_change: energy::sparse_change(stiffness_before.unwrap_or(&self.operators.stiffness),
@@ -540,14 +545,14 @@ impl TetTransientRun3<'_, '_, '_, '_> {
                 thermal: energy::source_work(&self.state.displacement, &q,
                     &self.thermal, thermal_force, cx)?,
                 damping: damping_loss,
-            }
+            }, Dd::default())
         };
-        let stiffness_work = if let Some(previous) = stiffness_before {
+        if let Some(previous) = stiffness_before.filter(|_| next_supports.is_none()) {
             let [change, work] = energy::coefficient_change(previous, &self.operators.stiffness,
                 &self.state.displacement, &q, cx)?;
             account.strain_change = energy::retained(account.strain_change + change)?;
-            work
-        } else { Dd::default() };
+            stiffness_work = work;
+        }
         let kinetic = account.kinetic;
         let strain = account.strain;
         let quadratic_energy_j = number(kinetic + strain)?;

@@ -64,7 +64,7 @@ impl<'g, 'm> TetTransientRun3<'g, 'm, '_, '_> {
     /// Endpoint acceleration is recovered with the actual endpoint operators;
     /// both solves share the original iteration limit. This entry point requires
     /// stationary zero supports; the explicit thermal/support candidates admit
-    /// support motion at unchanged stiffness. Mass changes refuse. This remains
+    /// support motion with the same material update. Mass changes refuse. This remains
     /// the explicitly supplied Rayleigh model, not a newly inferred broadband
     /// or temperature-dependent loss law.
     ///
@@ -89,10 +89,13 @@ impl<'g, 'm> TetTransientRun3<'g, 'm, '_, '_> {
     /// have zero endpoint displacement; Newmark supplies their velocity and
     /// acceleration. The accepted support and free states publish together.
     ///
-    /// Every element's complete stiffness and reference inertia must remain
-    /// unchanged. Source identities and thermal strain may change. Reactions use
+    /// Reference inertia remains unchanged; source identities, thermal strain
+    /// and complete stiffness may change. Reactions use
     /// the actual endpoint thermal load; support work, external force work and
-    /// signed thermal material work remain separate. No heat feedback is inferred.
+    /// signed thermal/stiffness material work remain separate. Changing
+    /// stiffness uses the native passive midpoint Rayleigh law and its discrete
+    /// support reaction for work; endpoint reactions remain physical observations.
+    /// No heat feedback is inferred.
     #[allow(clippy::too_many_arguments)]
     pub fn advance_thermal_with_supports_candidate<'p, 's>(
         &self, problem: &'p TetLinearElasticProblem<'s>, thermal: TetThermalStrainField<'_>,
@@ -111,7 +114,8 @@ impl<'g, 'm> TetTransientRun3<'g, 'm, '_, '_> {
     /// accelerations [m/s²]. Omitted fixed components have zero acceleration;
     /// their accepted displacement and velocity continue through the original
     /// Newmark map. This retains the direct-acceleration convention without
-    /// differencing sampled support displacements. Stiffness and inertia stay fixed.
+    /// differencing sampled support displacements. Reference inertia stays fixed;
+    /// changing stiffness follows the same midpoint material/support equations.
     #[allow(clippy::too_many_arguments)]
     pub fn advance_thermal_with_support_accelerations_candidate<'p, 's>(
         &self, problem: &'p TetLinearElasticProblem<'s>, thermal: TetThermalStrainField<'_>,
@@ -159,11 +163,6 @@ impl<'g, 'm> TetTransientRun3<'g, 'm, '_, '_> {
                 .zip(after.stiffness_mandel_pa().iter().flatten())
                 .any(|(a,b)| a.to_bits() != b.to_bits());
         }
-        if stiffness_changed && next_supports.is_some() {
-            return Err(TransientError3::Invalid(
-                "thermal refresh with prescribed supports requires unchanged stiffness",
-            ));
-        }
         // Existing assembly checks full source identity, counts, constraints,
         // geometry/quality and bounds before any source is retained.
         let load = problem.assemble_thermal_load(thermal, cx)?;
@@ -205,7 +204,7 @@ impl<'g, 'm> TetTransientRun3<'g, 'm, '_, '_> {
         }
         let native = candidate.advance_with_thermal_impl(
             load_next, next_supports, Some(&load.reduced_force_n),
-            stiffness_changed.then_some(&self.operators.stiffness), h_s, cx)?;
+            stiffness_changed.then_some((&self.operators.stiffness, self.problem)), h_s, cx)?;
         candidate.thermal_strains = Some(captured);
         let after = candidate.recover_response(mesh_frame, maximum_strain, cx)?;
         let mut work = Dd::default();
