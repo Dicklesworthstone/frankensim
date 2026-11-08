@@ -10,8 +10,11 @@
 //! and explicitly refuse here. Numerically unresolved boundary systems also
 //! refuse; positive propagating output flux must remain representable.
 //! The existing half-space owner retains its original critical-mode
-//! support. This owner supplies no absorbing anisotropy, multilayer crystal
-//! stack, spatially varying axis or causal time-domain reservoir.
+//! support. The response methods here require transparent crystal laws;
+//! super::absorbing::slab adds source-preserving prepare_absorbing_field
+//! methods to this same owner for finite absorbing crystals. Neither path
+//! supplies a multilayer crystal stack, a spatially varying axis or a causal
+//! time-domain reservoir.
 
 use super::{DielectricResponse, Incidence, OrientedUniaxialInterface, ReflectionError, positive};
 use fs_material::field_storage::linear_magnetic_permeability;

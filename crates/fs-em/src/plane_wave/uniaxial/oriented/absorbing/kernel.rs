@@ -199,10 +199,10 @@ pub(super) struct Input {
 }
 
 #[derive(Clone, Copy)]
-struct Mode {
-    z: C64,
-    e: Vector,
-    h: Vector,
+pub(super) struct Mode {
+    pub(super) z: C64,
+    pub(super) e: Vector,
+    pub(super) h: Vector,
 }
 
 /// Passive coordinate rotation around the unchanged interface normal. The
@@ -254,60 +254,37 @@ pub(super) fn solve_in_plane(
     Ok(response)
 }
 
-pub(super) fn solve(data: Input) -> Result<AbsorbingCrystalResponse> {
+/// Unweighted outgoing Maxwell modes, shared by a half-space and a finite film.
+#[derive(Clone, Copy)]
+pub(super) struct Eigenbasis {
+    pub(super) scale: f64,
+    pub(super) i: f64,
+    pub(super) p: f64,
+    pub(super) qi: f64,
+    pub(super) modes: [Mode; 2],
+}
+
+pub(super) fn eigenbasis(data: Input) -> Result<Eigenbasis> {
     let axis = transparent::unit(data.axis)?;
     positive(data.omega)?;
     positive(data.ni)?;
     positive(data.mui)?;
     positive(data.mut_)?;
-    if data
-        .indices
-        .iter()
-        .any(|&n| !finite(n) || n.re <= 0.0 || n.im > 0.0)
-        || data.loss_f_m.iter().any(|v| !v.is_finite() || *v < 0.0)
-        || data.electric.iter().any(|&v| !finite(v))
-        || data
-            .indices
-            .iter()
-            .zip(data.loss_f_m)
-            .any(|(n, loss)| (n.im == 0.0) != (loss == 0.0))
-    {
-        return Err("absorbing crystal requires passive original axes and finite illumination");
+    if data.indices.iter().any(|&n| !finite(n) || n.re <= 0.0 || n.im > 0.0) {
+        return Err("absorbing crystal requires passive principal indices");
     }
     if data.indices.iter().all(|n| n.im == 0.0) {
-        // Preserve the established transparent arithmetic and exact critical
-        // support when the original source supplies exactly zero extinction.
-        let r = transparent::solve(transparent::Input {
-            omega: data.omega,
-            ni: data.ni,
-            no: data.indices[0].re,
-            ne: data.indices[1].re,
-            mui: data.mui,
-            mut_: data.mut_,
-            axis: data.axis,
-            incidence: data.incidence,
-            electric: data.electric,
+        let b = transparent::eigenbasis(transparent::Input {
+            omega: data.omega, ni: data.ni, no: data.indices[0].re,
+            ne: data.indices[1].re, mui: data.mui, mut_: data.mut_,
+            axis: data.axis, incidence: data.incidence, electric: data.electric,
         })?;
-        return Ok(AbsorbingCrystalResponse {
-            tangential_wavenumber_rad_m: r.tangential_wavenumber_rad_m,
-            incident_normal_wavenumber_rad_m: r.incident_normal_wavenumber_rad_m,
-            incident_electric_v_m: r.incident_electric_v_m,
-            incident_magnetic_a_m: r.incident_magnetic_a_m,
-            reflected_electric_v_m: r.reflected_electric_v_m,
-            reflected_magnetic_a_m: r.reflected_magnetic_a_m,
-            transmitted: r.transmitted.map(|m| AbsorbingCrystalMode {
-                normal_wavenumber_rad_m: m.normal_wavenumber_rad_m,
-                electric_v_m: m.electric_v_m,
-                magnetic_a_m: m.magnetic_a_m,
-                normal_power_w_m2: m.normal_power_w_m2,
-            }),
-            incident_normal_power_w_m2: r.incident_normal_power_w_m2,
-            reflected_power_fraction: r.reflected_power_fraction,
-            transmitted_power_fraction: r.transmitted_power_fraction,
-            omega: data.omega,
-            axis,
-            loss_f_m: data.loss_f_m,
-            incidence_plane_axis: [1.0, 0.0],
+        if b.modes.iter().any(|m| m.kind == super::super::super::kernel::UniaxialWaveKind::Critical) {
+            return Err("coalesced critical crystal modes require a generalized slab basis");
+        }
+        return Ok(Eigenbasis {
+            scale: b.scale, i: b.i, p: b.p, qi: b.qi,
+            modes: b.modes.map(|m| Mode { z: m.z, e: m.e, h: m.h }),
         });
     }
     let scale = binary_scale(data.indices.iter().fold(data.ni, |s, n| s.max(n.abs())));
@@ -379,7 +356,66 @@ pub(super) fn solve(data: Input) -> Result<AbsorbingCrystalResponse> {
         }
         outgoing.ok_or("absorbing extraordinary mode has no resolved outgoing branch")?
     };
-    let mut modes = [ordinary, extraordinary];
+    Ok(Eigenbasis { scale, i, p, qi, modes: [ordinary, extraordinary] })
+}
+
+pub(super) fn solve(data: Input) -> Result<AbsorbingCrystalResponse> {
+    let axis = transparent::unit(data.axis)?;
+    positive(data.omega)?;
+    positive(data.ni)?;
+    positive(data.mui)?;
+    positive(data.mut_)?;
+    if data
+        .indices
+        .iter()
+        .any(|&n| !finite(n) || n.re <= 0.0 || n.im > 0.0)
+        || data.loss_f_m.iter().any(|v| !v.is_finite() || *v < 0.0)
+        || data.electric.iter().any(|&v| !finite(v))
+        || data
+            .indices
+            .iter()
+            .zip(data.loss_f_m)
+            .any(|(n, loss)| (n.im == 0.0) != (loss == 0.0))
+    {
+        return Err("absorbing crystal requires passive original axes and finite illumination");
+    }
+    if data.indices.iter().all(|n| n.im == 0.0) {
+        // Preserve the established transparent arithmetic and exact critical
+        // support when the original source supplies exactly zero extinction.
+        let r = transparent::solve(transparent::Input {
+            omega: data.omega,
+            ni: data.ni,
+            no: data.indices[0].re,
+            ne: data.indices[1].re,
+            mui: data.mui,
+            mut_: data.mut_,
+            axis: data.axis,
+            incidence: data.incidence,
+            electric: data.electric,
+        })?;
+        return Ok(AbsorbingCrystalResponse {
+            tangential_wavenumber_rad_m: r.tangential_wavenumber_rad_m,
+            incident_normal_wavenumber_rad_m: r.incident_normal_wavenumber_rad_m,
+            incident_electric_v_m: r.incident_electric_v_m,
+            incident_magnetic_a_m: r.incident_magnetic_a_m,
+            reflected_electric_v_m: r.reflected_electric_v_m,
+            reflected_magnetic_a_m: r.reflected_magnetic_a_m,
+            transmitted: r.transmitted.map(|m| AbsorbingCrystalMode {
+                normal_wavenumber_rad_m: m.normal_wavenumber_rad_m,
+                electric_v_m: m.electric_v_m,
+                magnetic_a_m: m.magnetic_a_m,
+                normal_power_w_m2: m.normal_power_w_m2,
+            }),
+            incident_normal_power_w_m2: r.incident_normal_power_w_m2,
+            reflected_power_fraction: r.reflected_power_fraction,
+            transmitted_power_fraction: r.transmitted_power_fraction,
+            omega: data.omega,
+            axis,
+            loss_f_m: data.loss_f_m,
+            incidence_plane_axis: [1.0, 0.0],
+        });
+    }
+    let Eigenbasis { scale, i, p, qi, mut modes } = eigenbasis(data)?;
     let amplitude = positive(
         data.electric
             .iter()
@@ -517,7 +553,7 @@ fn make_mode(
     Ok(Mode { z, e, h })
 }
 
-fn heating(electric: Vector, axis: [f64; 3], loss: [f64; 2], omega: f64) -> Result<f64> {
+pub(super) fn heating(electric: Vector, axis: [f64; 3], loss: [f64; 2], omega: f64) -> Result<f64> {
     let a = axis.map(Dd::from_f64);
     let norm = a.iter().fold(Dd::ZERO, |s, &v| s + v * v);
     let dot = [false, true].map(|imaginary| {

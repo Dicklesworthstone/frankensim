@@ -7,15 +7,19 @@
 //! Polarizations interfere before Poynting flux and dielectric heating are
 //! evaluated. Scalar real permeability carries no magnetic loss here.
 //!
-//! This is one homogeneous, reciprocal, uniaxial half-space with a lossless
-//! incident port. There is no absorbing incident port, finite lossy stack,
-//! gain, biaxial/Jordan model, causal pulse reservoir or thermal time step.
+//! The half-space owner is homogeneous, reciprocal and uniaxial with a
+//! lossless incident port. The slab module adds a finite absorbing film with
+//! a second lossless port. Neither supplies gain, an absorbing incident port,
+//! a multilayer stack, a biaxial/Jordan model, a causal pulse reservoir or a
+//! thermal time step.
 //! Spatial energy-flow reference: Passler, Jeannin and Paarmann (2020),
 //! <https://arxiv.org/abs/2002.03832>. The time/phase signs here remain the
 //! native exp(+i omega t-i k.r) convention.
 
 use super::{C0, Incidence, OrientedUniaxialInterface, ReflectionError, Result, positive};
 use fs_math::{c64::C64, det};
+
+pub mod slab;
 
 mod kernel;
 pub use kernel::{

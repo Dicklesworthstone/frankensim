@@ -463,3 +463,136 @@ fn si_conductor_refresh_keeps_source_wavelength_roles_distinct_from_fixed_bindin
     );
     assert!(response.complex_index(WL_FREQUENCY_NM / 8400.0).is_ok());
 }
+
+#[test]
+fn absorbing_crystal_slab_retains_original_sources_and_both_faces() {
+    use fs_em::plane_wave::{
+        UniaxialOpticalResponse,
+        uniaxial::oriented::{
+            OrientedUniaxialInterface,
+            slab::{OrientedUniaxialSlab, SlabRegion},
+        },
+    };
+
+    let mut claims = ClaimSet::new();
+    for (prefix, indices, extinction) in [
+        ("ordinary", [1.4, 1.6], 0.08),
+        ("extraordinary", [1.8, 2.0], 0.2),
+    ] {
+        for (i, index) in indices.into_iter().enumerate() {
+            claims
+                .insert_claim(claim(
+                    PropertyKey::new(format!("{prefix}_n_{i}"), Dims::NONE),
+                    index,
+                    index,
+                ))
+                .unwrap();
+            claims
+                .insert_claim(claim(
+                    PropertyKey::with_quantity(
+                        format!("{prefix}_k_{i}"),
+                        SPECTRAL_CONDUCTOR_K_QUANTITY,
+                    ),
+                    extinction,
+                    extinction,
+                ))
+                .unwrap();
+        }
+    }
+    claims
+        .insert_claim(claim(PropertyKey::new(MU_NAME, MU), M, M))
+        .unwrap();
+    let original_card = card(claims);
+    let original = resolve(&original_card);
+    let bindings = |prefix: &str| {
+        [0usize, 1].map(|i| SpectralComplexIndexKnot {
+            wavelength_nm: [8000.0, 14_000.0][i],
+            real_index_property: PropertyKey::new(format!("{prefix}_n_{i}"), Dims::NONE),
+            extinction_index_property: PropertyKey::with_quantity(
+                format!("{prefix}_k_{i}"),
+                SPECTRAL_CONDUCTOR_K_QUANTITY,
+            ),
+        })
+    };
+    let ordinary =
+        SpectralComplexIndexStatePoint::try_from_resolved(original.clone(), &bindings("ordinary"))
+            .unwrap();
+    let extraordinary =
+        SpectralComplexIndexStatePoint::try_from_resolved(original, &bindings("extraordinary"))
+            .unwrap();
+    let crystal = UniaxialOpticalResponse::try_new(&ordinary, &extraordinary, 6.1e-6).unwrap();
+    let outside = material(1.0 / (M * C0 * C0), M);
+    let exit = material(1.2 * 1.2 / (0.8 * M * C0 * C0), 0.8 * M);
+    let entrance = OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&outside),
+        crystal,
+        [1.0, 2.0, 3.0],
+    )
+    .unwrap();
+    let slab =
+        OrientedUniaxialSlab::try_new(&entrance, DielectricResponse::Lossless(&exit), 5e-6)
+            .unwrap();
+    let omega = WL_FREQUENCY_NM / 10_000.0;
+    let electric = [C64::new(0.6, -0.2), C64::new(0.1, 0.7)];
+    let expected_loss = crystal
+        .principal_permittivities_f_m(omega)
+        .unwrap()
+        .map(|epsilon| -epsilon.im);
+    assert!(expected_loss.iter().all(|loss| *loss > 0.0));
+
+    // Exercise both public entry points, including a non-axis-aligned
+    // incidence plane with global Cartesian incident polarization.
+    let prepared_fields = [
+        slab.prepare_absorbing_field(omega, 0.8, electric).unwrap(),
+        slab.prepare_absorbing_field_at_tangential_index_in_plane(
+            omega,
+            0.4,
+            [3.0, 4.0],
+            electric,
+        )
+        .unwrap(),
+    ];
+    for prepared in &prepared_fields {
+        assert!(core::ptr::eq(prepared.source(), &slab));
+        assert!(core::ptr::eq(prepared.source().entrance_interface(), &entrance));
+        assert!(core::ptr::eq(prepared.source().exit_response().material(), &exit));
+        let retained_crystal = prepared.source().entrance_interface().crystal_response();
+        assert!(core::ptr::eq(retained_crystal.ordinary_source(), &ordinary));
+        assert!(core::ptr::eq(
+            retained_crystal.extraordinary_source(),
+            &extraordinary
+        ));
+        assert_eq!(prepared.response().omega_rad_s(), omega);
+        assert_eq!(
+            prepared.response().principal_loss_permittivities_f_m(),
+            expected_loss
+        );
+        assert!(prepared.response().absorbed_power_fraction > 0.0);
+        assert!(
+            prepared
+                .field_at(SlabRegion::Crystal, [0.0, 0.0, 0.5 * slab.thickness_m()])
+                .unwrap()
+                .absorbed_power_density_w_m3
+                > 0.0
+        );
+
+        for (z, left, right) in [
+            (0.0, SlabRegion::TotalIncidentSide, SlabRegion::Crystal),
+            (slab.thickness_m(), SlabRegion::Crystal, SlabRegion::Transmitted),
+        ] {
+            let point = [0.3e-6, -0.2e-6, z];
+            let a = prepared.field_at(left, point).unwrap();
+            let b = prepared.field_at(right, point).unwrap();
+            for j in 0..2 {
+                complex_near(a.field.electric_v_m[j], b.field.electric_v_m[j], 3e-12);
+                complex_near(a.field.magnetic_a_m[j], b.field.magnetic_a_m[j], 3e-14);
+            }
+            near(a.field.poynting_w_m2[2], b.field.poynting_w_m2[2], 3e-14);
+        }
+    }
+    // Preparing a film must still obey the original finite spectral support.
+    assert!(
+        slab.prepare_absorbing_field(WL_FREQUENCY_NM / 7000.0, 0.8, electric)
+            .is_err()
+    );
+}
