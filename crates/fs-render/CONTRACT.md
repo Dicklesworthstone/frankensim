@@ -3640,6 +3640,26 @@ this model. `tests/camera/rectangular.rs` compares signed lobes, physical
 normalization and rotated Fresnel fields against independent separable
 integrals; the pupil unit test integrates spectral power over complete tails.
 
+`Aperture::try_rectangular_pair(width_m, height_m, center_separation_m,
+rotation_rad)` admits two identical nonoverlapping rectangular openings on
+one coherent pupil reference. The complete pupil span divided by the smaller
+opening dimension may not exceed 1024. The circumscribed radius includes the
+separation; transmitting area includes only the two openings. Geometric
+samples select each opening with equal probability. Focused propagation is
+the signed single-rectangle sinc product times the Young cosine factor,
+normalized by total open area. Finite defocus restores both the translated
+quadratic phase and shifted spatial frequency for each opening, then sums
+complex amplitudes before squaring. Each component keeps its own radius for
+numerical conditioning. Full-support mixture proposals retain the same
+source-independent sampling contract across focused, defocused, layered and
+dispersive paths. Coherent/Jones point, pixel and exposure owners share that
+transfer. The touching-opening limit equals a single rectangle of twice the
+width; overlap, zero-width openings and unresolved scalar wavelengths refuse.
+Render continuity includes both component dimensions and separation. The
+pair tests check physical samples, signed Young fringes, absolute Fresnel
+phase, normalization and the touching limit; all existing scalar/paraxial,
+phase and visibility restrictions continue to apply.
+
 `PhysicalCamera::with_in_focus_diffraction(FocusedDiffraction)` opts the
 cinematic spectral tracer into scalar, paraxial, incoherent pupil imaging.
 It requires a nonzero circular, annular, rectangular or regular 3–64-blade aperture,

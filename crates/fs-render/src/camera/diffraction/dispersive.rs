@@ -773,7 +773,8 @@ impl PhysicalCamera {
         let maximum_phase = self.dispersive_proposal_phase(wavelengths_nm, reference_nm)?;
         let (q, proposal) = match &self.aperture.kind {
             super::super::ApertureKind::RegularPolygon { .. }
-            | super::super::ApertureKind::Rectangular { .. } => self
+            | super::super::ApertureKind::Rectangular { .. }
+            | super::super::ApertureKind::RectangularPair { .. } => self
                 .aperture
                 .polygon_pupil()
                 .ok_or(CameraError::InvalidDiffraction)?

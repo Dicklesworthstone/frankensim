@@ -9987,6 +9987,7 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
     update_continuity_f64(hasher, camera.focus_distance_m());
     let aperture = camera.aperture();
     let rectangular_dimensions = aperture.rectangular_dimensions_m();
+    let pair_dimensions = aperture.rectangular_pair_dimensions_m();
     let aperture_tag = if aperture.is_pinhole() {
         0
     } else if aperture.is_annular() {
@@ -9995,6 +9996,8 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
         2
     } else if rectangular_dimensions.is_some() {
         4
+    } else if pair_dimensions.is_some() {
+        5
     } else {
         1
     };
@@ -10010,6 +10013,9 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
     if let Some(dimensions) = rectangular_dimensions {
         // Equal diagonals do not imply equal geometric or diffracted images.
         // Append dimensions only for rectangles, retaining old-shape bytes.
+        update_continuity_f64s(hasher, dimensions);
+    }
+    if let Some(dimensions) = pair_dimensions {
         update_continuity_f64s(hasher, dimensions);
     }
     let exposure = camera.exposure_metadata();
@@ -17545,6 +17551,38 @@ mod tests {
         assert_ne!(wide_identity, identity(narrow));
         assert_ne!(wide_identity, identity(circle));
         assert_eq!(wide_identity, identity(wide));
+    }
+
+    #[test]
+    fn g0_paired_pupils_rekey_equal_outer_shapes() {
+        use crate::camera::CameraProjection;
+        let identity = |aperture: Aperture| {
+            let camera = PhysicalCamera::try_look_at(
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(0.0, 0.0, 1.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                CameraProjection::try_focal_sensor(0.05, 0.024).unwrap(),
+                1.0,
+                aperture,
+            )
+            .unwrap();
+            let mut hasher = DomainHasher::new("org.frankensim.render.paired-camera-test.v1");
+            update_physical_camera_continuity(&mut hasher, &camera);
+            hasher.finalize()
+        };
+        let first =
+            Aperture::try_rectangular_pair(1.0 / 1024.0, 2.0 / 1024.0, 7.0 / 1024.0, 0.0)
+                .unwrap();
+        let second =
+            Aperture::try_rectangular_pair(2.0 / 1024.0, 2.0 / 1024.0, 6.0 / 1024.0, 0.0)
+                .unwrap();
+        let filled = Aperture::try_rectangular(8.0 / 1024.0, 2.0 / 1024.0, 0.0).unwrap();
+        assert_eq!(first.radius_m().to_bits(), second.radius_m().to_bits());
+        assert_eq!(first.radius_m().to_bits(), filled.radius_m().to_bits());
+        let original = identity(first.clone());
+        assert_ne!(original, identity(second));
+        assert_ne!(original, identity(filled));
+        assert_eq!(original, identity(first));
     }
 
     #[test]

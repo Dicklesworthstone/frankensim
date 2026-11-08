@@ -196,7 +196,7 @@ impl<'a> PolygonPupil<'a> {
         (q, density)
     }
 
-    fn proposal_density(&self, q: [f64; 2]) -> f64 {
+    pub(super) fn proposal_density(&self, q: [f64; 2]) -> f64 {
         if let Some([a, b]) = self.rectangle_half_axes {
             let x = dot(q, a) / PROPOSAL_SCALE;
             let y = dot(q, b) / PROPOSAL_SCALE;

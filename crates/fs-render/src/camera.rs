@@ -551,6 +551,16 @@ enum ApertureKind {
         half_axes: [[f64; 2]; 2],
         vertices: Vec<[f64; 2]>,
     },
+    RectangularPair {
+        radius_m: f64,
+        component_radius_m: f64,
+        dimensions_m: [f64; 2],
+        center_separation_m: f64,
+        rotation_rad: f64,
+        half_axes: [[f64; 2]; 2],
+        half_offset: [f64; 2],
+        vertices: Vec<[f64; 2]>,
+    },
 }
 
 impl Aperture {
@@ -713,6 +723,70 @@ impl Aperture {
         }
     }
 
+    /// Two identical, uniformly transmitting rectangular openings, separated
+    /// along their local width axis and rotated together counterclockwise.
+    /// Width, height and centre-to-centre separation are in metres. Separation
+    /// must be at least the width; equality is the continuous double-width
+    /// rectangle limit. Both openings share one coherent pupil phase.
+    ///
+    /// The complete span divided by the smaller opening dimension may not
+    /// exceed 1024. Wave admission uses each opening's smaller dimension;
+    /// opaque space between openings never increases transmitting area.
+    pub fn try_rectangular_pair(
+        width_m: f64,
+        height_m: f64,
+        center_separation_m: f64,
+        rotation_rad: f64,
+    ) -> Result<Self, CameraError> {
+        let component = Self::try_rectangular(width_m, height_m, rotation_rad)?;
+        let span = width_m + center_separation_m;
+        let area = (width_m * height_m) * 2.0;
+        if !center_separation_m.is_finite()
+            || center_separation_m < width_m
+            || !span.is_finite()
+            || !area.is_finite()
+            || span.max(height_m) / width_m.min(height_m) > Self::MAX_RECTANGULAR_ASPECT_RATIO
+        {
+            return Err(CameraError::InvalidAperture);
+        }
+        let ApertureKind::Rectangular {
+            radius_m: component_radius_m,
+            dimensions_m,
+            rotation_rad,
+            half_axes,
+            vertices,
+        } = component.kind
+        else {
+            return Err(CameraError::InvalidAperture);
+        };
+        let half_offset = half_axes[0].map(|v| v * (center_separation_m / width_m));
+        Ok(Self {
+            kind: ApertureKind::RectangularPair {
+                radius_m: det::hypot(0.5 * span, 0.5 * height_m),
+                component_radius_m,
+                dimensions_m,
+                center_separation_m,
+                rotation_rad,
+                half_axes,
+                half_offset,
+                vertices,
+            },
+        })
+    }
+
+    /// Full opening width, height and centre separation [m], before rotation.
+    #[must_use]
+    pub const fn rectangular_pair_dimensions_m(&self) -> Option<[f64; 3]> {
+        match &self.kind {
+            ApertureKind::RectangularPair {
+                dimensions_m,
+                center_separation_m,
+                ..
+            } => Some([dimensions_m[0], dimensions_m[1], *center_separation_m]),
+            _ => None,
+        }
+    }
+
     /// Whether this is the exact pinhole limit.
     #[must_use]
     pub const fn is_pinhole(&self) -> bool {
@@ -727,7 +801,8 @@ impl Aperture {
             ApertureKind::Circular { radius_m }
             | ApertureKind::Annular { radius_m, .. }
             | ApertureKind::RegularPolygon { radius_m, .. }
-            | ApertureKind::Rectangular { radius_m, .. } => *radius_m,
+            | ApertureKind::Rectangular { radius_m, .. }
+            | ApertureKind::RectangularPair { radius_m, .. } => *radius_m,
         }
     }
 
@@ -772,6 +847,9 @@ impl Aperture {
                 inner_radius_m,
             } => (PI * (radius_m - inner_radius_m)) * (radius_m + inner_radius_m),
             ApertureKind::Rectangular { dimensions_m, .. } => dimensions_m[0] * dimensions_m[1],
+            ApertureKind::RectangularPair { dimensions_m, .. } => {
+                (dimensions_m[0] * dimensions_m[1]) * 2.0
+            }
             ApertureKind::RegularPolygon {
                 radius_m, vertices, ..
             } => {
@@ -798,7 +876,8 @@ impl Aperture {
             ApertureKind::Pinhole
             | ApertureKind::Circular { .. }
             | ApertureKind::Annular { .. }
-            | ApertureKind::Rectangular { .. } => None,
+            | ApertureKind::Rectangular { .. }
+            | ApertureKind::RectangularPair { .. } => None,
         }
     }
 
@@ -807,7 +886,8 @@ impl Aperture {
     pub const fn rotation_rad(&self) -> Option<f64> {
         match &self.kind {
             ApertureKind::RegularPolygon { rotation_rad, .. }
-            | ApertureKind::Rectangular { rotation_rad, .. } => Some(*rotation_rad),
+            | ApertureKind::Rectangular { rotation_rad, .. }
+            | ApertureKind::RectangularPair { rotation_rad, .. } => Some(*rotation_rad),
             ApertureKind::Pinhole
             | ApertureKind::Circular { .. }
             | ApertureKind::Annular { .. } => None,
@@ -821,6 +901,22 @@ impl Aperture {
                 let coordinates = [2.0 * sample.u - 1.0, 2.0 * sample.v - 1.0];
                 core::array::from_fn(|axis| {
                     coordinates[0] * half_axes[0][axis] + coordinates[1] * half_axes[1][axis]
+                })
+            }
+            ApertureKind::RectangularPair {
+                half_axes,
+                half_offset,
+                ..
+            } => {
+                let (sign, local_u) = if sample.u < 0.5 {
+                    (-1.0, 2.0 * sample.u)
+                } else {
+                    (1.0, 2.0 * sample.u - 1.0)
+                };
+                core::array::from_fn(|axis| {
+                    sign * half_offset[axis]
+                        + (2.0 * local_u - 1.0) * half_axes[0][axis]
+                        + (2.0 * sample.v - 1.0) * half_axes[1][axis]
                 })
             }
             ApertureKind::Circular { radius_m } => {

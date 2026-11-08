@@ -237,7 +237,9 @@ impl PhysicalCamera {
         #[cfg(not(feature = "tracer"))]
         let phase = self.layered_maximum_phase(reference_nm)?;
         let (q, proposal) = match &self.aperture.kind {
-            ApertureKind::RegularPolygon { .. } | ApertureKind::Rectangular { .. } => self
+            ApertureKind::RegularPolygon { .. }
+            | ApertureKind::Rectangular { .. }
+            | ApertureKind::RectangularPair { .. } => self
                 .aperture
                 .polygon_pupil()
                 .ok_or(CameraError::InvalidDiffraction)?
@@ -361,7 +363,9 @@ impl PhysicalCamera {
             ApertureKind::Annular { .. } => {
                 Ok(AnnularPupil::new(self.aperture.obscuration_ratio(), phase).density(radius))
             }
-            ApertureKind::RegularPolygon { .. } | ApertureKind::Rectangular { .. } => self
+            ApertureKind::RegularPolygon { .. }
+            | ApertureKind::Rectangular { .. }
+            | ApertureKind::RectangularPair { .. } => self
                 .aperture
                 .polygon_pupil()
                 .ok_or(CameraError::InvalidDiffraction)?

@@ -14,6 +14,8 @@ use fs_render::motion::{ShotTimeBounds, ShutterConvention, ShutterDistribution, 
 
 const TOLERANCE: f64 = 2.0e-12;
 
+#[path = "camera/paired.rs"]
+mod paired;
 #[path = "camera/rectangular.rs"]
 mod rectangular;
 
@@ -111,6 +113,7 @@ fn coherent_pupil_amplitude_matches_original_camera_density() {
         Aperture::try_regular_polygon(radius, 3, 0.0).unwrap(),
         Aperture::try_regular_polygon(radius, 4, core::f64::consts::FRAC_PI_4).unwrap(),
         Aperture::try_rectangular(1.6 * radius, 0.6 * radius, 0.37).unwrap(),
+        Aperture::try_rectangular_pair(0.4 * radius, 0.6 * radius, radius, 0.37).unwrap(),
     ] {
         let area = aperture.transmitting_area_m2().unwrap();
         let focused = axial_camera(aperture.clone(), focus)
