@@ -49,18 +49,19 @@ impl std::error::Error for WindowError {}
 
 /// Instantaneous `exp(-i 2 pi f t)` on an explicitly retained source clock.
 ///
-/// Signed Hz and DC are admitted. This uses the same Hz conversion and DD
-/// phase reduction as the finite-window moments, so sampled fields and their
-/// analytic observations share one convention. The returned real/imaginary
+/// Signed Hz and DC are admitted. Reduce the retained cycle count before
+/// conversion to radians, so the approximation to 2*pi cannot accumulate a
+/// spurious phase on a large absolute source clock. The returned real/imaginary
 /// parts retain small cancellation residuals until the final field reduction.
 pub fn phase_hz_from_clock_dd(frequency_hz: f64, time_s: Dd) -> Result<[Dd; 2], WindowError> {
+    if !frequency_hz.is_finite() {
+        return Err(WindowError::InvalidFrequency);
+    }
     if !time_s.hi.is_finite() || !time_s.lo.is_finite() {
         return Err(WindowError::InvalidWindow);
     }
     let time = checked(Dd::from_pair(time_s.hi, time_s.lo))?;
-    let phase = checked(angular_frequency(frequency_hz)? * time)?;
-    let (real, imaginary) = proper_phase(phase);
-    Ok([checked(real)?, checked(imaginary)?])
+    phase_cycles(Dd::from_f64(frequency_hz), time, 1.0)
 }
 
 /// Nonnegative, unit-integral temporal sensitivity of a detector.
@@ -145,11 +146,20 @@ impl HarmonicWindow {
         self.mean_phase_extended(Dd::from_f64(omega))
     }
 
-    /// Mean phase for a frequency authored in cycles/second. Convert to rad/s
-    /// in double-double precision before applying the physical source clock.
-    /// This avoids an independently rounded carrier shifting a resolved beat.
+    /// Mean phase for a frequency authored in cycles/second. Reduce exact
+    /// cycle products before conversion to radians, retaining the original
+    /// source clock without accumulating the error in the 2*pi constant.
     pub fn mean_phase_hz(self, frequency_hz: f64) -> Result<C64, WindowError> {
-        self.mean_phase_extended(angular_frequency(frequency_hz)?)
+        if !frequency_hz.is_finite() {
+            return Err(WindowError::InvalidFrequency);
+        }
+        let frequency = Dd::from_f64(frequency_hz);
+        let scale = self.centered_transform_hz(frequency)?;
+        let [real, imaginary] = self.rotation_hz(frequency)?;
+        Ok(C64::new(
+            checked(real * scale)?.to_f64(),
+            checked(imaginary * scale)?.to_f64(),
+        ))
     }
 
     fn mean_phase_extended(self, omega: Dd) -> Result<C64, WindowError> {
@@ -242,18 +252,32 @@ impl HarmonicWindow {
 
     /// Deterministic real-product kernel for frequencies authored in Hz.
     ///
-    /// Retains the Hz-to-radian conversion through both carrier rotations and
-    /// the centered sum/difference Gram weights. Separately rounded carriers
-    /// can otherwise turn a slow beat into a different physical frequency.
+    /// Forms sum/difference frequencies in Hz and reduces clock cycles before
+    /// converting to radians. Separately converted carriers can otherwise
+    /// corrupt a resolved beat or drift in phase on a large source epoch.
     pub fn product_kernel_hz(
         self,
         frequency_a_hz: f64,
         frequency_b_hz: f64,
     ) -> Result<HarmonicProduct, WindowError> {
-        self.product_kernel_extended(
-            angular_frequency(frequency_a_hz)?,
-            angular_frequency(frequency_b_hz)?,
-        )
+        if !frequency_a_hz.is_finite() || !frequency_b_hz.is_finite() {
+            return Err(WindowError::InvalidFrequency);
+        }
+        let a = Dd::from_f64(frequency_a_hz);
+        let b = Dd::from_f64(frequency_b_hz);
+        let (cos_cos, sin_sin) = match self.profile {
+            HarmonicWindowProfile::Uniform => self.rectangular_gram_hz(a, b, 2.0)?,
+            HarmonicWindowProfile::Triangular => {
+                let (c, s) = self.rectangular_gram_hz(a, b, 4.0)?;
+                (checked(c * c + s * s)?, checked(Dd::from_f64(2.0) * c * s)?)
+            }
+        };
+        Ok(HarmonicProduct {
+            rotation_a: self.rotation_hz(a)?,
+            rotation_b: self.rotation_hz(b)?,
+            cos_cos,
+            sin_sin,
+        })
     }
 
     fn product_kernel_extended(
@@ -347,7 +371,7 @@ impl HarmonicWindow {
     /// Separately rounding `TAU*f_a` and `TAU*f_b` can corrupt a resolved beat
     /// between close carriers; rounding the difference before clock evaluation
     /// can also discard the phase of a much smaller component. This method
-    /// retains both operations through the same difference-only kernel.
+    /// retains the difference and reduces its cycles before radian conversion.
     pub fn proper_product_kernel_hz(
         self,
         frequency_a_hz: f64,
@@ -357,7 +381,12 @@ impl HarmonicWindow {
             return Err(WindowError::InvalidFrequency);
         }
         let difference = checked(Dd::from_f64(frequency_a_hz) - Dd::from_f64(frequency_b_hz))?;
-        self.proper_difference_kernel(checked(difference * TAU_DD)?)
+        let scale = checked(Dd::from_f64(0.5) * self.centered_transform_hz(difference)?)?;
+        let [real, imaginary] = self.rotation_hz(difference)?;
+        Ok(ProperHarmonicProduct {
+            real: checked(real * scale)?,
+            imaginary: checked(imaginary * scale)?,
+        })
     }
 
     #[allow(clippy::float_cmp)] // Exact zero is the normalized DD identity.
@@ -398,6 +427,80 @@ impl HarmonicWindow {
                 half_sinc * half_sinc
             }
         }
+    }
+
+    fn centered_transform_hz(self, frequency: Dd) -> Result<Dd, WindowError> {
+        match self.profile {
+            HarmonicWindowProfile::Uniform => self.sinc_hz(frequency, 2.0),
+            HarmonicWindowProfile::Triangular => {
+                let half_sinc = self.sinc_hz(frequency, 4.0)?;
+                checked(half_sinc * half_sinc)
+            }
+        }
+    }
+
+    // The divisor is 2 for a rectangular interval and 4 for each half-width
+    // interval whose convolution gives the triangular profile. It is applied
+    // after the cycle product, preserving subnormal authored frequencies/times.
+    fn width_hz(self, frequency: Dd, divisor: f64) -> Result<Dd, WindowError> {
+        checked(self.half_width_extended(frequency)? * (TAU_DD * Dd::from_f64(2.0 / divisor)))
+    }
+
+    fn sinc_hz(self, frequency: Dd, divisor: f64) -> Result<Dd, WindowError> {
+        let width = self.width_hz(frequency, divisor)?;
+        if width.hi.abs() <= 0.5 {
+            Ok(Dd::ONE + sinc_minus_one(width))
+        } else {
+            let phase = phase_cycles(frequency, Dd::from_f64(self.duration_s), divisor)?;
+            checked(-phase[1] / width)
+        }
+    }
+
+    fn rectangular_gram_hz(
+        self,
+        frequency_a: Dd,
+        frequency_b: Dd,
+        divisor: f64,
+    ) -> Result<(Dd, Dd), WindowError> {
+        let difference = checked(frequency_a - frequency_b)?;
+        let sum = checked(frequency_a + frequency_b)?;
+        let a = self.width_hz(frequency_a, divisor)?;
+        let b = self.width_hz(frequency_b, divisor)?;
+        let d = self.width_hz(difference, divisor)?;
+        let s = self.width_hz(sum, divisor)?;
+        if d.hi.abs().max(s.hi.abs()) <= 0.5 {
+            // Retain the sinc-1 difference that resolves a short shutter's
+            // small positive sine energy. Only the large-phase path changes.
+            return rectangular_gram_parts(a, b, d, s);
+        }
+        let d = self.sinc_hz(difference, divisor)?;
+        let s = self.sinc_hz(sum, divisor)?;
+        let (small, large, fs, fl) = if a.hi.abs() <= b.hi.abs() {
+            (a, b, frequency_a, frequency_b)
+        } else {
+            (b, a, frequency_b, frequency_a)
+        };
+        let ratio = small / large;
+        let half = Dd::from_f64(0.5);
+        let sin_sin = if ratio.hi.abs() < 1e-4 {
+            let time = Dd::from_f64(self.duration_s);
+            let cs = phase_cycles(fs, time, divisor)?[0];
+            let cl = phase_cycles(fl, time, divisor)?[0];
+            ratio * (self.sinc_hz(fl, divisor)? * cs - self.sinc_hz(fs, divisor)? * cl)
+                / (Dd::ONE - ratio * ratio)
+        } else {
+            half * (d - s)
+        };
+        Ok((checked(half * (d + s))?, checked(sin_sin)?))
+    }
+
+    fn rotation_hz(self, frequency: Dd) -> Result<[Dd; 2], WindowError> {
+        let a = phase_cycles(frequency, Dd::from_f64(self.start_s), 1.0)?;
+        let b = phase_cycles(frequency, Dd::from_f64(self.duration_s), 2.0)?;
+        Ok([
+            checked(a[0] * b[0] - a[1] * b[1])?,
+            checked(a[0] * b[1] + a[1] * b[0])?,
+        ])
     }
 
     fn half_width_extended(self, omega: Dd) -> Result<Dd, WindowError> {
@@ -621,6 +724,30 @@ fn rotate(a: [Dd; 2], r: [Dd; 2]) -> Result<(Dd, Dd), WindowError> {
     let [ar, ai] = a;
     let [rr, ri] = r;
     Ok((checked(ar * rr - ai * ri)?, checked(ar * ri + ai * rr)?))
+}
+
+// Exp(-i*2*pi*f*t/divisor), where divisor is an exact power of two (1, 2, 4).
+// Each scalar product is an exact two-product before range reduction. Reduce
+// its high/low components independently: adding a subperiod clock offset to a
+// huge carrier product first would erase it, even in DD. Radian-authored inputs
+// deliberately do not use this cycle identity or change their physical clock.
+#[allow(clippy::float_cmp)] // Exact zero skips a mathematically absent product.
+fn phase_cycles(frequency: Dd, time: Dd, divisor: f64) -> Result<[Dd; 2], WindowError> {
+    let remainder = |x: f64| x - (x / divisor).trunc() * divisor;
+    let mut cycles = Dd::ZERO;
+    for f in [frequency.hi, frequency.lo] {
+        for t in [time.hi, time.lo] {
+            if f == 0.0 || t == 0.0 {
+                continue;
+            }
+            let product = checked(Dd::from_f64(f) * Dd::from_f64(t))?;
+            cycles = cycles + Dd::from_pair(remainder(product.hi), remainder(product.lo));
+        }
+    }
+    let cycles = Dd::from_pair(remainder(cycles.hi), remainder(cycles.lo));
+    let phase = checked(cycles * (TAU_DD * Dd::from_f64(1.0 / divisor)))?;
+    let (real, imaginary) = proper_phase(phase);
+    Ok([checked(real)?, checked(imaginary)?])
 }
 
 // Exp(-i*x), retaining the small real decrement near ±1 instead of rounding
@@ -1353,6 +1480,99 @@ mod tests {
                 let phase = phase_hz_from_clock_dd(frequency, quarter).unwrap();
                 close(phase[0].to_f64(), 0.0, 2e-15);
                 close(phase[1].to_f64(), imaginary, 2e-15);
+            }
+        }
+    }
+
+    #[test]
+    fn g3_hz_phase_reduces_cycles_before_the_irrational_conversion() {
+        for power in [40, 80, 120, 600] {
+            for sign in [-1.0, 1.0] {
+                let epoch = Dd::from_f64(sign * 2.0_f64.powi(power));
+                let full_cycles = phase_hz_from_clock_dd(4096.0, epoch).unwrap();
+                assert_eq!(full_cycles, [Dd::ONE, Dd::ZERO]);
+                // The quarter turn must not be added to an enormous radian
+                // phase before range reduction. It remains physically real
+                // even when neither f64 nor the DD carrier sum can retain it.
+                let quarter = Dd::from_pair(epoch.hi, 1.0 / 16384.0);
+                for (frequency, imaginary) in [(4096.0, -1.0), (-4096.0, 1.0)] {
+                    let phase = phase_hz_from_clock_dd(frequency, quarter).unwrap();
+                    close(phase[0].to_f64(), 0.0, 2e-30);
+                    close(phase[1].to_f64(), imaginary, 2e-30);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g1_hz_optical_carrier_beats_remain_on_the_original_clock() {
+        let carrier = 1e15;
+        let duration = 0.001;
+        let half_beat = PI * duration;
+        for power in [20, 30, 40, 50, 80] {
+            let start = 0.7 * 2.0_f64.powi(power);
+            for profile in [
+                HarmonicWindowProfile::Uniform,
+                HarmonicWindowProfile::Triangular,
+            ] {
+                let window = HarmonicWindow::with_profile(start, duration, profile).unwrap();
+                let kernel = window.product_kernel_hz(carrier + 1.0, carrier).unwrap();
+                // A quadrature pair eliminates the sum frequency identically:
+                // cos(a)cos(b)+sin(a)sin(b)=cos(a-b). The remaining 1 Hz beat
+                // can be integrated without any high carrier in the oracle.
+                let actual = kernel.mean_real_product_dd(C64::ONE, C64::ONE).unwrap()
+                    + kernel
+                        .mean_real_product_dd(C64::new(0.0, 1.0), C64::new(0.0, 1.0))
+                        .unwrap();
+                let envelope = match profile {
+                    HarmonicWindowProfile::Uniform => half_beat.sin() / half_beat,
+                    HarmonicWindowProfile::Triangular => {
+                        ((0.5 * half_beat).sin() / (0.5 * half_beat)).powi(2)
+                    }
+                };
+                let expected = (TAU * (start.fract() + 0.5 * duration)).cos() * envelope;
+                close(actual.to_f64(), expected, 3e-15);
+                let proper = window
+                    .proper_product_kernel_hz(carrier + 1.0, carrier)
+                    .unwrap()
+                    .mean_real_product(C64::ONE, C64::ONE)
+                    .unwrap();
+                close(2.0 * proper, expected, 3e-15);
+            }
+        }
+    }
+
+    #[test]
+    fn g3_hz_complete_cycles_and_subperiod_exposures_are_epoch_invariant() {
+        let carrier = 1e15;
+        for profile in [
+            HarmonicWindowProfile::Uniform,
+            HarmonicWindowProfile::Triangular,
+        ] {
+            // Both profiles integrate an integer number of these cycles to
+            // zero, regardless of the absolute source-clock epoch.
+            let full = HarmonicWindow::with_profile(0.125, 2.0_f64.powi(30), profile).unwrap();
+            assert_eq!(full.mean_phase_hz(carrier).unwrap(), C64::ZERO);
+            for power in [30, 60, 100] {
+                let late =
+                    HarmonicWindow::with_profile(2.0_f64.powi(power), 2.0_f64.powi(-60), profile)
+                        .unwrap();
+                let early = HarmonicWindow::with_profile(0.0, late.duration_s(), profile).unwrap();
+                // The integral-duration epoch adds only complete cycles to
+                // both integer-Hz sources. Retain even subperiod interference.
+                assert_eq!(
+                    late.mean_phase_hz(carrier).unwrap(),
+                    early.mean_phase_hz(carrier).unwrap()
+                );
+                let a = C64::new(0.7, -0.4);
+                let b = C64::new(-0.2, 0.9);
+                let observe = |w: HarmonicWindow| {
+                    w.product_kernel_hz(carrier, carrier + 1.0)
+                        .unwrap()
+                        .mean_real_product_dd(a, b)
+                        .unwrap()
+                };
+                assert_eq!(observe(late), observe(early));
             }
         }
     }
