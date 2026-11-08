@@ -5,6 +5,8 @@
 //! An accepted temperature can drive fs-render thermal emission independently.
 //! Observing that light must not debit radiative cooling a second time.
 
+/// Series electrical assembly on original spatial thermal cells.
+pub mod filament;
 /// Held-current and held-voltage histories on the original physical clock.
 pub mod history;
 

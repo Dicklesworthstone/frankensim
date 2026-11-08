@@ -1,6 +1,8 @@
 //! Manufactured source laws exercise native electrothermal feedback.
 //! These fixtures are numerical verification, not measured filament data.
 
+#[path = "incandescent/filament.rs"]
+mod filament;
 #[path = "incandescent/history.rs"]
 mod history;
 #[path = "incandescent/phase_transport.rs"]

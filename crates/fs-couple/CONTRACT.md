@@ -1,3 +1,26 @@
+## Spatial series filaments on native material and heat networks
+
+`incandescent::filament::PreparedSeriesFilament` assembles one original
+`MaterialOhmicNode` per declared thermal cell. Each node receives its own
+endpoint temperature and liquid fraction and deposits its Joule power into that
+cell exactly once. Signed current control fixes a common current; signed voltage
+control enforces equal segment currents and the sum of original voltage drops.
+Heterogeneous material cards and caloric charts remain separate.
+
+Preparation admits complete electrical source paths, exact original caloric
+objects, fixed source conditions, segment centerline lengths and L*A volumes.
+The retained graph may be reused only with the same cell identifiers, material,
+mass and geometry. The caller's existing prepared heat network still owns axial
+conduction, contacts, radiation, storage, nonlinear solution and physical time.
+This assembly adds no second thermal solver or independent radiation debit.
+
+Three native regression groups cover heterogeneous signed-drive operation with
+axial heat exchange, differing latent fractions at constant temperature, and
+source/cell/geometry/work/cancellation refusal. Formatting and source/API checks
+passed; integration execution remains pending missing constellation dependencies.
+Geometry is fixed, and the authored verification laws are not measured filament
+data. General electrical topology remains with the existing circuit owners.
+
 ## Phase-consistent incandescent cooling and adaptive histories
 
 `PreparedIncandescentSource` now accepts the original phase thermal environment
