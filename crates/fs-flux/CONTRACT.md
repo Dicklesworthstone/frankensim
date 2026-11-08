@@ -4544,6 +4544,14 @@ solvent molar volume. Mechanical pressure has an independent linear volume
 response, admitting prescribed pressure, hydrostatic columns and compliant
 chambers without counting osmotic pressure twice.
 
+Ideal and nonideal networks, finite concentration films and fast-ion Donnan
+swelling cancel a common pressure reference BEFORE adding the individual
+chamber responses. The same pressure difference supplies mechanical work.
+Consequently an arbitrary common gauge cannot erase a physically resolved
+restoring force. Metamorphic regressions repeat actual compliant osmotic
+motion under large common pressure offsets and require identical accepted
+inventories, and identical pressure work where reported.
+
 At a proposed water transfer, the original exponentially fitted membrane
 coefficients reduce all backward-Euler solute equations analytically to
 positive, conservative endpoint inventories. A bounded scalar solve closes
@@ -5752,6 +5760,39 @@ reports voltage, conserved inventories and ideal-plus-mechanical energy.
 Focused regressions cover linear and nonlinear analytical solutions,
 counterion-only limits, multivalent charge conservation, stiff hydraulics,
 orientation, energy decay, volume depletion, workspace limits and atomic retry.
+
+
+### Adaptive finite-bath Donnan advancement
+
+`DonnanOsmoticPair::advance` uses an optional `DonnanAdvanceWorkspace` with
+three prepared state snapshots. Each trial compares one backward-Euler step
+with two actual representable half intervals and retains the conservative fine
+endpoint. Both solvent volumes and EVERY mobile ion amount on both sides enter
+the local temporal-error norm, including initially absent species. Unequal
+rounded halves use their first-order Richardson factor. The estimate does not
+certify global temporal error or fast-ion model validity.
+
+Explicit maximum/minimum steps, accepted/rejected work limits and existing
+inner root/charge limits bound work. Algebraic tolerances only tighten the
+caller's caps; absolute water/charge allowances and relative charge accuracy
+are distributed over the requested window. Charge tolerances retain the
+original equilibrium owner's charge-scale semantics. An unresolvable terminal
+interval or accuracy below the admitted step floor refuses; the clock is never
+advanced without integrating transport.
+
+Success reports accepted/rejected steps, all attempted implicit/root work,
+accepted-half-step mechanical work and original-to-final water/species balances.
+Refused ionic solves retain the original limited work-reporting semantics.
+Failure or late cancellation restores the complete original inventories,
+equilibrium diagnostics and clock. Reused successful advancement allocates no
+memory. Single-step callers incur no extra snapshot storage.
+
+Regressions cover analytic compliant relaxation and temporal refinement,
+amount-controlled ionic repartition with loose water tolerances, counterion-only
+square-root swelling without a salt floor, whole-window rollback/retry,
+workspace limits and temporal-floor refusal. The `donnan_swelling` example now
+uses this adaptive owner while retaining independent finite-bath equilibrium
+and energy oracles.
 
 
 ## Sourced contact-line friction and hysteresis

@@ -9,9 +9,14 @@
 //!
 //! Each step is backward Euler with a safeguarded scalar water solve. Root
 //! tolerances control the accepted balance/transfer, not temporal truncation
-//! error; callers refine the step to resolve the transient. All mutable
-//! workspace is prepared once. Failure or cancellation publishes neither
-//! inventories, equilibrium diagnostics, nor time.
+//! error. Optional [`DonnanOsmoticPair::advance`] controls local temporal error
+//! with conservative step doubling on water and every mobile ion amount. All
+//! mutable workspace is prepared once. Failure or cancellation publishes
+//! neither inventories, equilibrium diagnostics, nor time.
+
+/// Prepared local temporal error control for finite Donnan relaxation.
+pub mod adaptive;
+pub use adaptive::{DonnanAdvanceControls, DonnanAdvanceReport, DonnanAdvanceWorkspace};
 
 use super::{OsmoticCompartment, OsmoticNetworkError};
 use fs_material::osmosis::donnan::{
@@ -25,6 +30,8 @@ pub enum DonnanWaterError {
     Network(OsmoticNetworkError),
     Ions(DonnanError),
     InventoryBalance { species: usize, residual_mol: f64 },
+    /// Temporal accuracy needs a step below the caller's admitted minimum.
+    TemporalAccuracy { step_s: f64, scaled_error: f64 },
 }
 impl core::fmt::Display for DonnanWaterError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -588,3 +595,7 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<()> {
 #[cfg(test)]
 #[path = "donnan/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "donnan/adaptive_tests.rs"]
+mod adaptive_tests;

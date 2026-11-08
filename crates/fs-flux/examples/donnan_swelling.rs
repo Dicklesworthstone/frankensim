@@ -8,7 +8,7 @@
 //! Linear chamber compliance arrests swelling; no infinite salt reservoir,
 //! arbitrary ionic reflection factor or imposed electric potential is used.
 
-use fs_flux::osmosis::donnan::{DonnanOsmoticPair, DonnanStepControls};
+use fs_flux::osmosis::donnan::{DonnanAdvanceControls, DonnanOsmoticPair};
 use fs_flux::osmosis::{OsmoticCompartment, OsmoticPressureVolume};
 use fs_material::osmosis::donnan::{DonnanPotential, IdealDonnan};
 use fs_material::osmosis::{HydraulicPermeance, IdealDiluteSolution};
@@ -112,36 +112,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         HydraulicPermeance::new(1e-11)?,
         1 << 20,
     )?;
+    let mut workspace = pair.adaptive_workspace(1 << 20)?;
+    let controls = DonnanAdvanceControls {
+        maximum_step_s: 1000.0,
+        relative_tolerance: 1e-6,
+        absolute_water_tolerance_m3: 1e-17,
+        absolute_amount_tolerance_mol: 1e-13,
+        ..DonnanAdvanceControls::default()
+    };
     let initial_energy = free_energy(&pair);
     let mut pressure_work = 0.0;
     let mut maximum_water_residual = 0.0_f64;
     let mut maximum_ion_residual = 0.0_f64;
     let mut maximum_charge_residual = 0.0_f64;
     let mut maximum_energy_increase = 0.0_f64;
+    let mut accepted_steps = 0;
+    let mut rejected_steps = 0;
+    let mut maximum_scaled_error = 0.0_f64;
     let mut previous_energy = initial_energy;
     println!("Ideal fast-ion Donnan swelling; illustrative uncalibrated coefficients");
     println!("  time_s    left_mL     right_mL    potential_mV  osmotic_drop_Pa");
     print_state(&pair);
     for end in [100.0, 1000.0, 5000.0, 12000.0, 24000.0] {
-        while pair.time_s() < end {
-            let report = pair.step(
-                (end - pair.time_s()).min(5.0),
-                DonnanStepControls::default(),
-                || false,
-            )?;
-            pressure_work += report.pressure_work_into_solution_j;
-            maximum_water_residual =
-                maximum_water_residual.max(report.water_balance_residual_m3.abs());
-            for &residual in &report.solute_balance_residual_mol[..report.species_count] {
-                maximum_ion_residual = maximum_ion_residual.max(residual.abs());
-            }
-            for &residual in &report.equilibrium.charge_residual_mol {
-                maximum_charge_residual = maximum_charge_residual.max(residual.abs());
-            }
-            let energy = free_energy(&pair);
-            maximum_energy_increase = maximum_energy_increase.max(energy - previous_energy);
-            previous_energy = energy;
+        let report = pair.advance(end - pair.time_s(), controls, &mut workspace, || false)?;
+        accepted_steps += report.accepted_steps;
+        rejected_steps += report.rejected_steps;
+        maximum_scaled_error = maximum_scaled_error.max(report.maximum_scaled_error);
+        pressure_work += report.pressure_work_into_solution_j;
+        maximum_water_residual = maximum_water_residual.max(report.water_balance_residual_m3.abs());
+        for &residual in &report.solute_balance_residual_mol[..report.species_count] {
+            maximum_ion_residual = maximum_ion_residual.max(residual.abs());
         }
+        for &residual in &report.endpoint.equilibrium.charge_residual_mol {
+            maximum_charge_residual = maximum_charge_residual.max(residual.abs());
+        }
+        let energy = free_energy(&pair);
+        maximum_energy_increase = maximum_energy_increase.max(energy - previous_energy);
+        previous_energy = energy;
         print_state(&pair);
     }
     let left = pair.compartments()[0].solution().solvent_volume_m3();
@@ -152,10 +159,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Mixing plus chamber energy change: {:.9e} J",
         free_energy(&pair) - initial_energy
     );
-    println!("Largest per-step energy increase: {maximum_energy_increase:.3e} J");
+    println!("Largest per-window energy increase: {maximum_energy_increase:.3e} J");
     println!("Mechanical work into solutions: {pressure_work:.9e} J");
     println!(
-        "Maximum step residuals: water={maximum_water_residual:.3e} m³, ion={maximum_ion_residual:.3e} mol, charge={maximum_charge_residual:.3e} mol equivalents"
+        "Maximum window residuals: water={maximum_water_residual:.3e} m³, ion={maximum_ion_residual:.3e} mol, endpoint charge={maximum_charge_residual:.3e} mol equivalents"
+    );
+    println!(
+        "Adaptive steps: accepted={accepted_steps}, rejected={rejected_steps}, maximum scaled local error={maximum_scaled_error:.6}"
     );
     Ok(())
 }
