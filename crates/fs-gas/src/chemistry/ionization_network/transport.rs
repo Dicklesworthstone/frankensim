@@ -24,7 +24,12 @@ use fs_thermochem::kinetics::atomic_ionization::photoionization::{
 };
 use fs_thermochem::kinetics::atomic_ionization::radiative_recombination::AtomicRadiativeRecombinationV1;
 
+mod evolution;
 mod field;
+pub use evolution::{
+    NetworkRadiationBalance, NetworkRadiationCellResult, NetworkRadiationResult,
+    advance_network_radiation_transport,
+};
 
 /// One original gas mixture and all explicitly modeled adjacent-stage sources.
 #[derive(Clone, Copy, Debug)]

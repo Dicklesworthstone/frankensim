@@ -8472,6 +8472,39 @@ Geometry is fixed, propagation is quasi-static, and the caller owns discrete
 spectral/angular resolution. This entry does not supply excited-state channels,
 scattering, secondary nonthermal electrons, diffuse emission or light-travel time.
 
+## Evolving mixed ionization networks under finite beams
+
+`chemistry::ionization_network::transport::advance_network_radiation_transport`
+uses that same prepared shared-opacity field at every radiation stage. An
+explicit-midpoint update applies all source increments simultaneously to one
+population vector and Maxwellian electron pool. Thus a newly created He+ stage
+can absorb in a later stage of the same exposure, and changing upstream mixtures
+alter downstream illumination. Exact absence of electrons is supported using
+the combined physical photoelectron energy, without a seed or channel-order
+temperature artifact. Both boundary directions and oblique incidence remain
+supported throughout the evolution.
+
+Symmetric composition surrounds the common photon step with the existing dark
+network's impact ionization, three-body capture, escaping radiative capture,
+and optional original thermal exchange/held work. No maintained local photon
+field is also supplied to that kernel. One full/two-half comparison controls
+populations, both temperatures, original channel ledgers, direct signed energy
+and every integrated incoming/absorbed/outgoing beam count. All trial buffers
+and source tables are reused; global radiation work and rate-query budgets
+include rejected trials. Negative populations and unsupported trial temperatures
+reduce the step; they are never clipped. No unconditional stiffness, global
+time error or empirical accuracy claim follows from the local estimate.
+
+Publication independently checks channel absorption against transported photons,
+preserves source-retained endpoints and canonical channel accounts, and audits
+actual chemical/electron/heavy storage against direct radiation and held work.
+Gross radiation-energy comparison has an explicitly reported roundoff allowance;
+this does not relax actual gas conservation. Empty columns transmit their whole
+exposure, zero duration preserves identity, and failures publish no partial
+result. Volumes and geometry are fixed and propagation is quasi-static. All
+spontaneous recombination photons escape this entry; it does not yet transport
+diffuse recombination between multiple co-located absorbing charge stages.
+
 ## External illumination during diffuse ionization evolution
 
 `chemistry::diffuse_recombination::evolution::advance_diffuse_recombination_with_illumination`
