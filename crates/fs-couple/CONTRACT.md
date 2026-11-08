@@ -6457,3 +6457,12 @@ budgets and cancellation admit all histories together or publish none.
 `tests/converter_enthalpy/battery/motor.rs` covers ten-channel calorimetry with
 both shaft works and auxiliary export, finite-inertia regeneration, all-nine
 R(T) feedback, shared receivers and atomic refusal/retry.
+
+
+## Complete cooling for the finite battery-to-shaft drive
+
+`circuit_enthalpy::converter::battery::motor::heat::BatteryMotorHeatNetwork` consumes the existing prepared `HeatAssembly` on the original nine-state battery/converter/motor and finite enthalpy timeline. Thermal contacts, integrated layers, closed radiation, prescribed reservoir exchange and finite coolant links resolve at each actual candidate state before the same nine resistance bindings and native drive solve. Cells, topology and full accepted source samples remain owned by that assembly; no additional electrical or thermal integrator is introduced. The ordinary material-network entry point shares those internals and retains its prior API through default sample parameters.
+
+All ten drive-loss integrals deposit once. Finite coolant exchange remains internal to the combined caloric inventory; prescribed cooling remains signed external heat. Existing closed-radiation balance admission excludes its numerical net from external supply. Unowned graph resistors, electrical contacts, unsupported sources, numerical-budget refusals and cancellation publish no drive or caloric history. Fixed-storage, fixed-bearing and endpoint-resistance accuracy limitations remain unchanged.
+
+`tests/converter_enthalpy/battery/motor/heat.rs` checks an independent eleven-cell caloric solution across continued drive steps, native-correlation coolant feedback into all nine resistances and solved motor current, separate reservoir heat, exact bare-network parity, and late typed-refusal/cancellation atomicity. The coolant provider is a manufactured fixture using the existing correlation owner and the same finite-link seam as downstream source-resolved airflow assemblies; it does not establish empirical motor or coolant validity.

@@ -1,4 +1,7 @@
 //! Complete battery-to-shaft power and its ten physical heat receivers.
+#[path = "motor/heat.rs"]
+mod heat;
+
 use super::*;
 use fs_couple::circuit_enthalpy::converter::battery::motor::*;
 use fs_phs::circuit::{

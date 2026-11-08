@@ -13,7 +13,11 @@
 //! This owner adds no PWM loss, iron loss, reversible battery heat, temperature
 //! dependent storage, control or protection law.
 
+/// Source-owned contacts, radiation, reservoir cooling and finite coolant paths.
+pub mod heat;
+
 use super::*;
+use crate::circuit_enthalpy::CircuitThermalCoefficients;
 use fs_phs::circuit::{
     converter::battery_fed::motor::{BatteryMotorDrive, BatteryMotorStep},
     motor::{DcMotor, DcMotorParameters},
@@ -82,8 +86,8 @@ impl MaterialBatteryMotorDrive {
 }
 
 #[derive(Clone, Debug)]
-pub struct BatteryMotorThermalSample {
-    pub network: MaterialNetworkSample,
+pub struct BatteryMotorThermalSample<S = MaterialNetworkSample> {
+    pub network: S,
     pub channels: Arc<[ConverterChannelMaterial; BATTERY_MOTOR_RESISTIVE_CHANNELS]>,
     pub bearing_cell: CellId,
     /// Explicit fixed native coefficient, with no inferred material authority.
@@ -91,19 +95,19 @@ pub struct BatteryMotorThermalSample {
 }
 
 /// All nine native coordinates and thermal history publish together.
-pub struct BatteryMotorEnthalpyCandidate<'t> {
+pub struct BatteryMotorEnthalpyCandidate<'t, S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'t>,
     drive: MaterialBatteryMotorDrive,
-    report: CircuitEnthalpyReport<BatteryMotorThermalSample, BatteryMotorStep>,
+    report: CircuitEnthalpyReport<BatteryMotorThermalSample<S>, BatteryMotorStep>,
 }
-impl<'t> BatteryMotorEnthalpyCandidate<'t> {
+impl<'t, S> BatteryMotorEnthalpyCandidate<'t, S> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
     pub fn drive(&self) -> &MaterialBatteryMotorDrive {
         &self.drive
     }
-    pub fn report(&self) -> &CircuitEnthalpyReport<BatteryMotorThermalSample, BatteryMotorStep> {
+    pub fn report(&self) -> &CircuitEnthalpyReport<BatteryMotorThermalSample<S>, BatteryMotorStep> {
         &self.report
     }
     pub fn into_parts(
@@ -111,10 +115,14 @@ impl<'t> BatteryMotorEnthalpyCandidate<'t> {
     ) -> (
         DepositionSimulation<'t>,
         MaterialBatteryMotorDrive,
-        CircuitEnthalpyReport<BatteryMotorThermalSample, BatteryMotorStep>,
+        CircuitEnthalpyReport<BatteryMotorThermalSample<S>, BatteryMotorStep>,
     ) {
         (self.thermal, self.drive, self.report)
     }
+}
+
+fn drive_error<E: From<ConverterThermalError>>(error: Error) -> CircuitEnthalpyError<E> {
+    error.map_source(E::from)
 }
 
 fn drive_resistances(
@@ -285,37 +293,61 @@ impl BatteryMotorThermalNetwork<'_> {
         cancelled: impl FnMut() -> bool,
     ) -> Result<MaterialBatteryMotorDrive, Error> {
         let cancel = RefCell::new(cancelled);
-        check(&cancel)?;
-        self.admit_bearing(thermal)?;
+        self.bind_resolved(
+            thermal,
+            native,
+            state,
+            |fixed| {
+                let network = self.network();
+                let prepared = network
+                    .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
+                    .map_err(material)?;
+                let sample = prepared
+                    .resolve(thermal, || (*cancel.borrow_mut())())
+                    .map_err(material)?;
+                resolve_channels(
+                    self.cells,
+                    self.channels,
+                    thermal,
+                    &sample.source,
+                    fixed,
+                    None,
+                    false,
+                    &cancel,
+                )
+            },
+            &cancel,
+        )
+    }
+
+    fn bind_resolved<E: From<ConverterThermalError>>(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        native: &BatteryMotorDrive,
+        state: [f64; 9],
+        resolve: impl FnOnce(
+            [f64; BATTERY_MOTOR_RESISTIVE_CHANNELS],
+        ) -> Result<
+            [ConverterChannelMaterial; BATTERY_MOTOR_RESISTIVE_CHANNELS],
+            CircuitEnthalpyError<E>,
+        >,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<MaterialBatteryMotorDrive, CircuitEnthalpyError<E>> {
+        check(cancel).map_err(drive_error)?;
+        self.admit_bearing(thermal).map_err(drive_error)?;
         if state.iter().any(|v| !v.is_finite()) || !native.system().hamiltonian(&state).is_finite()
         {
-            return Err(invalid(
+            return Err(drive_error(invalid(
                 "battery motor drive needs nine finite original storage coordinates",
-            ));
+            )));
         }
-        let network = self.network();
-        let prepared = network
-            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
-            .map_err(material)?;
-        let sample = prepared
-            .resolve(thermal, || (*cancel.borrow_mut())())
-            .map_err(material)?;
         let electrical = native.electrical();
-        let channels = Arc::new(resolve_channels(
-            self.cells,
-            self.channels,
-            thermal,
-            &sample.source,
-            drive_resistances(
-                electrical.parameters(),
-                electrical.battery_parameters(),
-                electrical.lead_resistance_ohm(),
-                native.motor_parameters(),
-            ),
-            None,
-            false,
-            &cancel,
-        )?);
+        let channels = Arc::new(resolve(drive_resistances(
+            electrical.parameters(),
+            electrical.battery_parameters(),
+            electrical.lead_resistance_ohm(),
+            native.motor_parameters(),
+        ))?);
         let (converter_parameters, battery_parameters, lead, motor_parameters) =
             drive_parameters_at(
                 electrical.parameters(),
@@ -330,8 +362,9 @@ impl BatteryMotorThermalNetwork<'_> {
             electrical.modulation(),
             lead,
             motor_parameters,
-        )?;
-        check(&cancel)?;
+        )
+        .map_err(drive_error)?;
+        check(cancel).map_err(drive_error)?;
         Ok(MaterialBatteryMotorDrive {
             time_s: thermal.time_s(),
             curve: electrical.battery_curve().clone(),
@@ -366,48 +399,95 @@ impl BatteryMotorThermalNetwork<'_> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         super::super::super::admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
-        self.admit_bearing(thermal)?;
+        let network = self.network();
+        let prepared = network
+            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
+            .map_err(material)?;
+        self.step_resolved_candidate(
+            thermal,
+            target_s,
+            drive,
+            modulation,
+            shaft_torque_nm,
+            auxiliary_load,
+            electrical_controls,
+            controls,
+            initial_energy_increments_j,
+            |trial, fixed, original| {
+                let coefficients = prepared
+                    .resolve(trial, || (*cancel.borrow_mut())())
+                    .map_err(material)?;
+                let channels = resolve_channels(
+                    self.cells,
+                    self.channels,
+                    trial,
+                    &coefficients.source,
+                    fixed,
+                    original,
+                    false,
+                    &cancel,
+                )?;
+                Ok((coefficients, channels))
+            },
+            &cancel,
+        )
+    }
+
+    // Only source/transport composition varies. Native integration, heat
+    // deposition and acceptance remain identical for every heat provider.
+    #[allow(clippy::too_many_arguments)]
+    fn step_resolved_candidate<'t, S, E: From<ConverterThermalError>>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        drive: &MaterialBatteryMotorDrive,
+        modulation: BridgeModulation,
+        shaft_torque_nm: &[f64; 2],
+        auxiliary_load: Option<RegulatedPowerLoad>,
+        electrical_controls: PowerLoadControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        resolve: impl Fn(
+            &DepositionSimulation<'t>,
+            [f64; BATTERY_MOTOR_RESISTIVE_CHANNELS],
+            Option<&[ConverterChannelMaterial; BATTERY_MOTOR_RESISTIVE_CHANNELS]>,
+        ) -> Result<
+            (
+                CircuitThermalCoefficients<S>,
+                [ConverterChannelMaterial; BATTERY_MOTOR_RESISTIVE_CHANNELS],
+            ),
+            CircuitEnthalpyError<E>,
+        >,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<BatteryMotorEnthalpyCandidate<'t, S>, CircuitEnthalpyError<E>> {
+        check(cancel).map_err(drive_error)?;
+        super::super::super::admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
+        self.admit_bearing(thermal).map_err(drive_error)?;
         let dt = finite(target_s - thermal.time_s())?;
         if drive.time_s.to_bits() != thermal.time_s().to_bits()
             || self.bearing_cell != drive.bearing_cell
             || dt <= 0.0
             || shaft_torque_nm.iter().any(|v| !v.is_finite())
         {
-            return Err(invalid(
+            return Err(drive_error(invalid(
                 "battery motor and heat need the same positive interval, receivers and finite torques",
-            ));
+            )));
         }
-        let network = self.network();
-        let prepared = network
-            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
-            .map_err(material)?;
-        let accepted = prepared
-            .resolve(thermal, || (*cancel.borrow_mut())())
-            .map_err(material)?;
         let fixed = drive_resistances(
             drive.converter_parameters,
             drive.battery_parameters,
             drive.lead_resistance_ohm,
             drive.motor_parameters,
         );
-        let initial = resolve_channels(
-            self.cells,
-            self.channels,
-            thermal,
-            &accepted.source,
-            fixed,
-            None,
-            false,
-            &cancel,
-        )?;
+        let (_, initial) = resolve(thermal, fixed, None)?;
         if initial
             .iter()
             .zip(drive.channels.iter())
             .any(|(a, b)| !same_channel(a, b))
         {
-            return Err(invalid(
+            return Err(drive_error(invalid(
                 "battery motor must retain all nine accepted resistance sources",
-            ));
+            )));
         }
         let cache = RefCell::new(
             None::<(
@@ -422,23 +502,12 @@ impl BatteryMotorThermalNetwork<'_> {
             controls,
             initial_energy_increments_j,
             |trial, remaining| {
-                check(&cancel)?;
+                check(cancel).map_err(drive_error)?;
                 if remaining == 0 {
                     return Err(CircuitEnthalpyError::CircuitBudget);
                 }
-                let coefficients = prepared
-                    .resolve(trial, || (*cancel.borrow_mut())())
-                    .map_err(material)?;
-                let channels = Arc::new(resolve_channels(
-                    self.cells,
-                    self.channels,
-                    trial,
-                    &coefficients.source,
-                    fixed,
-                    Some(&drive.channels),
-                    false,
-                    &cancel,
-                )?);
+                let (coefficients, channels) = resolve(trial, fixed, Some(&drive.channels))?;
+                let channels = Arc::new(channels);
                 let (converter_parameters, battery_parameters, lead, motor_parameters) =
                     drive_parameters_at(
                         drive.converter_parameters,
@@ -469,9 +538,11 @@ impl BatteryMotorThermalNetwork<'_> {
                         modulation,
                         lead,
                         motor_parameters,
-                    )?
+                    )
+                    .map_err(drive_error)?
                     .prepare_controlled(dt, electrical_controls, || (*cancel.borrow_mut())())
-                    .map_err(electrical)?;
+                    .map_err(electrical)
+                    .map_err(drive_error)?;
                     let mut next = [0.0; 9];
                     let step = original
                         .step_controlled(
@@ -481,12 +552,13 @@ impl BatteryMotorThermalNetwork<'_> {
                             &mut next,
                             || (*cancel.borrow_mut())(),
                         )
-                        .map_err(electrical)?;
+                        .map_err(electrical)
+                        .map_err(drive_error)?;
                     (next, step)
                 };
                 let (heat, total, net_external_work_j) =
-                    drive_account(&step, controls.total_energy_tolerance_j)?;
-                check(&cancel)?;
+                    drive_account(&step, controls.total_energy_tolerance_j).map_err(drive_error)?;
+                check(cancel).map_err(drive_error)?;
                 if !reused {
                     *cache.borrow_mut() = Some((bits, next, step.clone()));
                 }
@@ -540,9 +612,9 @@ impl BatteryMotorThermalNetwork<'_> {
                     let heat = finite(heat.to_f64())?;
                     let power = finite(heat / duration)?;
                     if heat > 0.0 && power == 0.0 {
-                        return Err(invalid(
+                        return Err(drive_error(invalid(
                             "battery motor heat cannot be represented as a rate",
-                        ));
+                        )));
                     }
                     powers.insert(cell, power);
                 }
@@ -550,7 +622,7 @@ impl BatteryMotorThermalNetwork<'_> {
             },
             || (*cancel.borrow_mut())(),
         )?;
-        check(&cancel)?;
+        check(cancel).map_err(drive_error)?;
         Ok(BatteryMotorEnthalpyCandidate {
             thermal,
             drive,
