@@ -1,0 +1,91 @@
+frankensim.matdb-source.v1
+observation	wh-khaya-shell	African mahogany (Khaya spp.) clear straight-grained wood, for the back and ribs of a guitar whose maker prints dyed mahogany without a species	FPL-GTR-282 chapter 5: Table 5-5a bending MOE 9700 MPa times 1.10 gives E_L = 10670 MPa; Table 5-1 ratios E_R/E_L 0.111, G_LR/E_L 0.088, G_LT/E_L 0.059, G_RT/E_L 0.021; Table 5-2 nu_LR 0.297; density 496.6216 kg/m3 at 12 percent moisture is the seed pack mahogany-african-fpl-gtr282's (Table 5-5a green-volume SG 0.42 through the Handbook's shrinkage rule, Table 4-4 volumetric shrinkage 8.8 percent). Absolute values are those ratios times E_L	The maker's capture of 2011-09-03 names dyed mahogany for back and sides without a species (2018: dyed sapele; the 2020 shop files the model under laminada, without parts); Khaya, not true mahogany (Swietenia macrophylla), is a CHOICE made because the only measured Swietenia loss factor found (Sotomayor 2018, Rev. Mex. Cienc. For. 9(48), Table 1, zeta_vt 0.015 with zeta_vt = delta/2 as printed) is ambiguous by a factor pi (eta 0.0095 as printed, 0.030 with zeta = delta/(2 pi)); solid wood, a laminate is NOT modelled (no ply stack was found). Axis convention: material axis 1 = L (grain), axis 2 = R (across the growth rings, in the plane of a quartersawn plate), thickness = T, so shear_modulus_12 = G_LR, shear_modulus_13 = G_LT and shear_modulus_23 = G_RT, poisson_ratio_12 = nu_LR (strain along R per strain along L under stress along L). Moduli are static or quasi-static handbook values at about 12 percent moisture content, used here at audio frequency; the validity band omega 0 to 2 pi 2000 rad/s and T 280 to 320 K is the band in which this use is DECLARED by the pack author, not a measured band (wood storage moduli typically rise a few percent per decade of frequency). Loss: five dimensionless loss factors loss_factor_1 (L), loss_factor_2 (R), loss_factor_12 (L-R shear), loss_factor_13 (L-T shear) and loss_factor_23 (R-T shear) in the material axes, valid for 2 pi 50 to 2 pi 1000 rad/s (a band declared by the pack author, not measured), for the constant-loss-factor shell path; and the nine Kelvin-Voigt viscosities built from the same loss factors as eta x stiffness / omega_ref with omega_ref = 2 pi 200 rad/s (1256.64 rad/s): plane_stress_viscosity_11, _22, _66 and the through-thickness shears are eta_L, eta_R, eta_LR, eta_LT, eta_RT times the corresponding stiffness over omega_ref, the Poisson cross term _12 uses the ARITHMETIC mean of eta_L and eta_R times Q12 / omega_ref (the Adams-Bacon split of the stiffness by loss channel, so both realisations agree on every entry), and the 16 and 26 entries are zero by the orthotropic axes. Wood's loss factor is nearly constant, so the pack states omega_ref as constant_loss_reference_omega, and the shell reduction applies each loss factor at every mode's own frequency; read as Kelvin-Voigt, the same viscosities would make the loss factor proportional to frequency. The loss factors are measured on other specimens and are NOT a measurement of the Esteso guitar.
+observation	laudares-khaya-loss	Khaya ivorensis, untreated control of Laudares et al. (2023), with the hardwood-median directional loss ratios of Bremaud, Gril and Thibaut (2011)	Laudares et al. (2023) Table 6, untreated control (NT, TS): logarithmic decrement 31.2 x 10^-3 (sd 4.1), so eta_L = 0.0312 / pi = 0.009931; ASTM E1876 impulse excitation in free-free flexure of 5 (T) x 25 (R) x 180 (L) mm specimens, first mode 426.7 Hz (Table 4), apparent density 767 kg/m3 (Table 5), equilibrium moisture 11.0 percent (Table 3), conditioned at 20 C and 65 percent RH; plantation trees about 30 years old, Seropedica RJ, Brazil. Directional ratios, Bremaud, Gril and Thibaut (2011) Table 4 hardwoods median row: tan dG23/tan d3 = 2.27, tan d2/tan d3 = 2.92, tan dG13/tan d3 = 2.14, tan d1/tan d3 = 2.68: eta_R = 0.026616, eta_LR = 0.021253, eta_LT = 0.022544; eta_RT taken equal to eta_LT	eta_L MEASURED on Khaya ivorensis along the grain only; the four other loss factors are a SURROGATE (the median of hardwoods, not Khaya). The specimens' density (767 kg/m3) is far above the Handbook's Khaya (496.6 kg/m3 here): stiffness and density are the Handbook's, the loss is the Brazilian plantation wood's. The pack it replaces on the classical card (Brazilian rosewood with padauk loss) has eta_L 0.0048: report Q with both.
+scalar	density	wh-khaya-shell	density	496.621622	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	280	320	K
+validity	density	omega	0	12566.37	rad/s
+scalar	young_modulus_1	wh-khaya-shell	young_modulus_1	1.067e+10	Pa	constant
+uncertainty	young_modulus_1	unstated	-	-	-	-
+validity	young_modulus_1	T	280	320	K
+validity	young_modulus_1	omega	0	12566.37	rad/s
+scalar	young_modulus_2	wh-khaya-shell	young_modulus_2	1.18437e+09	Pa	constant
+uncertainty	young_modulus_2	unstated	-	-	-	-
+validity	young_modulus_2	T	280	320	K
+validity	young_modulus_2	omega	0	12566.37	rad/s
+scalar	poisson_ratio_12	wh-khaya-shell	poisson_ratio_12	0.297	1	constant
+uncertainty	poisson_ratio_12	unstated	-	-	-	-
+validity	poisson_ratio_12	T	280	320	K
+validity	poisson_ratio_12	omega	0	12566.37	rad/s
+scalar	shear_modulus_12	wh-khaya-shell	shear_modulus_12	938960000	Pa	constant
+uncertainty	shear_modulus_12	unstated	-	-	-	-
+validity	shear_modulus_12	T	280	320	K
+validity	shear_modulus_12	omega	0	12566.37	rad/s
+scalar	shear_modulus_13	wh-khaya-shell	shear_modulus_13	629530000	Pa	constant
+uncertainty	shear_modulus_13	unstated	-	-	-	-
+validity	shear_modulus_13	T	280	320	K
+validity	shear_modulus_13	omega	0	12566.37	rad/s
+scalar	shear_modulus_23	wh-khaya-shell	shear_modulus_23	224070000	Pa	constant
+uncertainty	shear_modulus_23	unstated	-	-	-	-
+validity	shear_modulus_23	T	280	320	K
+validity	shear_modulus_23	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_11	laudares-khaya-loss	plane_stress_viscosity_11	85159.3807	Pa*s	constant
+uncertainty	plane_stress_viscosity_11	unstated	-	-	-	-
+validity	plane_stress_viscosity_11	T	280	320	K
+validity	plane_stress_viscosity_11	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_22	laudares-khaya-loss	plane_stress_viscosity_22	25333.2126	Pa*s	constant
+uncertainty	plane_stress_viscosity_22	unstated	-	-	-	-
+validity	plane_stress_viscosity_22	T	280	320	K
+validity	plane_stress_viscosity_22	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_66	laudares-khaya-loss	plane_stress_viscosity_66	15880.191	Pa*s	constant
+uncertainty	plane_stress_viscosity_66	unstated	-	-	-	-
+validity	plane_stress_viscosity_66	T	280	320	K
+validity	plane_stress_viscosity_66	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_12	laudares-khaya-loss	plane_stress_viscosity_12	5165.70672	Pa*s	constant
+uncertainty	plane_stress_viscosity_12	unstated	-	-	-	-
+validity	plane_stress_viscosity_12	T	280	320	K
+validity	plane_stress_viscosity_12	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_16	laudares-khaya-loss	plane_stress_viscosity_16	0	Pa*s	constant
+uncertainty	plane_stress_viscosity_16	unstated	-	-	-	-
+validity	plane_stress_viscosity_16	T	280	320	K
+validity	plane_stress_viscosity_16	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_26	laudares-khaya-loss	plane_stress_viscosity_26	0	Pa*s	constant
+uncertainty	plane_stress_viscosity_26	unstated	-	-	-	-
+validity	plane_stress_viscosity_26	T	280	320	K
+validity	plane_stress_viscosity_26	omega	0	12566.37	rad/s
+scalar	transverse_shear_viscosity_13	laudares-khaya-loss	transverse_shear_viscosity_13	11293.7234	Pa*s	constant
+uncertainty	transverse_shear_viscosity_13	unstated	-	-	-	-
+validity	transverse_shear_viscosity_13	T	280	320	K
+validity	transverse_shear_viscosity_13	omega	0	12566.37	rad/s
+scalar	transverse_shear_viscosity_23	laudares-khaya-loss	transverse_shear_viscosity_23	4019.79984	Pa*s	constant
+uncertainty	transverse_shear_viscosity_23	unstated	-	-	-	-
+validity	transverse_shear_viscosity_23	T	280	320	K
+validity	transverse_shear_viscosity_23	omega	0	12566.37	rad/s
+scalar	transverse_shear_viscosity_13_23	laudares-khaya-loss	transverse_shear_viscosity_13_23	0	Pa*s	constant
+uncertainty	transverse_shear_viscosity_13_23	unstated	-	-	-	-
+validity	transverse_shear_viscosity_13_23	T	280	320	K
+validity	transverse_shear_viscosity_13_23	omega	0	12566.37	rad/s
+scalar	loss_factor_1	laudares-khaya-loss	loss_factor_1	0.00993126845	1	constant
+uncertainty	loss_factor_1	unstated	-	-	-	-
+validity	loss_factor_1	T	280	320	K
+validity	loss_factor_1	omega	314.159265	6283.18531	rad/s
+scalar	loss_factor_2	laudares-khaya-loss	loss_factor_2	0.0266157994	1	constant
+uncertainty	loss_factor_2	unstated	-	-	-	-
+validity	loss_factor_2	T	280	320	K
+validity	loss_factor_2	omega	314.159265	6283.18531	rad/s
+scalar	loss_factor_12	laudares-khaya-loss	loss_factor_12	0.0212529145	1	constant
+uncertainty	loss_factor_12	unstated	-	-	-	-
+validity	loss_factor_12	T	280	320	K
+validity	loss_factor_12	omega	314.159265	6283.18531	rad/s
+scalar	loss_factor_13	laudares-khaya-loss	loss_factor_13	0.0225439794	1	constant
+uncertainty	loss_factor_13	unstated	-	-	-	-
+validity	loss_factor_13	T	280	320	K
+validity	loss_factor_13	omega	314.159265	6283.18531	rad/s
+scalar	loss_factor_23	laudares-khaya-loss	loss_factor_23	0.0225439794	1	constant
+uncertainty	loss_factor_23	unstated	-	-	-	-
+validity	loss_factor_23	T	280	320	K
+validity	loss_factor_23	omega	314.159265	6283.18531	rad/s
+scalar	constant_loss_reference_omega	laudares-khaya-loss	constant_loss_reference_omega	1256.63706	rad/s	constant
+uncertainty	constant_loss_reference_omega	unstated	-	-	-	-
+validity	constant_loss_reference_omega	T	280	320	K
+validity	constant_loss_reference_omega	omega	0	12566.37	rad/s

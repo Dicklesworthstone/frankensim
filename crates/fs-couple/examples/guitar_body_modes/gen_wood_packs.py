@@ -1,6 +1,7 @@
 """Write the three shell-ready wood packs (spruce top/braces, rosewood back/ribs, cedar back bars) of the Esteso
 guitar body from the committed FPL-GTR-282 seed packs, Bremaud, Gril and Thibaut (2011) Table 4 and the committed
-Sitka-spruce loss pack (Qiu 2026).
+Sitka-spruce loss pack (Qiu 2026), and a fourth, African mahogany (Khaya) for back and ribs, whose eta_L is measured
+(Laudares et al. 2023).
 
 Stiffness: handbook values (static, about 12 percent moisture) used at audio frequency.
 Loss: directional loss factors eta_c (measured on other specimens) are turned into the nine Kelvin-Voigt viscosities the shell owner
@@ -50,6 +51,9 @@ LOSS_ROWS = {
     "resonance spruce": dict(eta_L=6.8e-3, G23=2.32, E2=3.36, G13=2.22, E1=2.92),
     "softwoods": dict(eta_L=7.1e-3, G23=2.14, E2=3.08, G13=2.16, E1=2.90),
     "padauk": dict(eta_L=4.8e-3, G23=2.13, E2=3.5, G13=2.1, E1=3.1),
+    # "Hardwoods Median 0.66 20.5 163 8.1 13.7 15.4 2.27 2.92 (*) 11.7 7.8 2.14 2.68" (the (*) marks tan d2/tan d3 as a mean of
+    # tangential-plane data and radial-plane estimates)
+    "hardwoods": dict(eta_L=8.1e-3, G23=2.27, E2=2.92, G13=2.14, E1=2.68),
 }
 
 # FPL-GTR-282 Table 4-3b shrinkage green to ovendry, Brazilian rosewood: radial 2.9, tangential 4.6, volumetric 8.5 percent
@@ -117,7 +121,7 @@ def fmt(v):
     return "%.9g" % v
 
 
-def write_pack(pack_id, obs_main, rows, citation, extra_obs=(), fpl_only=True):
+def write_pack(pack_id, obs_main, rows, citation, extra_obs=(), fpl_only=True, redistribution=None):
     d = SEED + pack_id
     os.makedirs(d, exist_ok=True)
     lines = ["frankensim.matdb-source.v1"]
@@ -136,7 +140,8 @@ def write_pack(pack_id, obs_main, rows, citation, extra_obs=(), fpl_only=True):
     man = [
         "frankensim.matdb-manifest.v1",
         "pack_id\t" + pack_id,
-        ("redistribution\tpermitted\tUnited States Government work (USDA Forest Service Forest Products Laboratory) and published scientific facts with attribution retained (Bremaud, Gril and Thibaut 2011 ratios; Qiu et al. 2026 loss factors, CC BY 4.0); retain the report number, chapter, table numbers, and URL" if fpl_only else "redistribution\tpermitted\tPublished scientific facts (numbers) with attribution retained: Wood Handbook FPL-GTR-282 is a United States Government work, public domain in the United States; Bremaud, Gril and Thibaut (2011) ratios are transcribed facts; retain the citations"),
+        ("redistribution\tpermitted\t" + redistribution if redistribution is not None else
+         "redistribution\tpermitted\tUnited States Government work (USDA Forest Service Forest Products Laboratory) and published scientific facts with attribution retained (Bremaud, Gril and Thibaut 2011 ratios; Qiu et al. 2026 loss factors, CC BY 4.0); retain the report number, chapter, table numbers, and URL" if fpl_only else "redistribution\tpermitted\tPublished scientific facts (numbers) with attribution retained: Wood Handbook FPL-GTR-282 is a United States Government work, public domain in the United States; Bremaud, Gril and Thibaut (2011) ratios are transcribed facts; retain the citations"),
         "citation\t" + citation,
         ("license\tPublished-Scientific-Facts-Attribution-Retained"),
         "source\tprimary\tproperties.tsv\tmaterial-tsv-v1",
@@ -242,4 +247,34 @@ write_pack(
                 "median softwood row: tan delta_L 7.1 (units of 1e-3), tan dG23/tan d3 = 2.14, tan d2/tan d3 = 3.08, tan dG13/tan d3 = 2.16, tan d1/tan d3 = 2.90: eta_L = 0.0071, eta_R = 0.02059, eta_LR = 0.015336, eta_LT = 0.015194; eta_RT taken equal to eta_LT",
                 "SURROGATE: no cedar loss measurement is used.")],
     fpl_only=True,
+)
+
+# ------------------------------------------------------------------ African mahogany (Khaya: FPL stiffness and density; measured eta_L of
+# Laudares et al. 2023; Bremaud hardwood-median directional loss ratios). For the back and ribs of the classical card, whose maker
+# capture of 2011-09-03 says dyed mahogany without a species (MB 15005, 15099).
+khaya = read_scalars("mahogany-african-fpl-gtr282")
+ELk = khaya["young_modulus_longitudinal"] * 1e6
+kv = dict(density=khaya["density"], young_modulus_1=ELk, young_modulus_2=khaya["er_over_el"] * ELk, poisson_ratio_12=khaya["nu_lr"],
+          shear_modulus_12=khaya["glr_over_el"] * ELk, shear_modulus_13=khaya["glt_over_el"] * ELk, shear_modulus_23=khaya["grt_over_el"] * ELk)
+# Laudares et al. 2023 Table 6, untreated control (NT, TS): logarithmic decrement 31.2 x 10^-3 (sd 4.1); eta = delta / pi (light damping)
+DELTA_KHAYA = 31.2e-3
+e_kh = etas("hardwoods", DELTA_KHAYA / math.pi)
+vis_kh = viscosities(kv["young_modulus_1"], kv["young_modulus_2"], kv["poisson_ratio_12"], kv["shear_modulus_12"], kv["shear_modulus_13"], kv["shear_modulus_23"], e_kh)
+print("khaya eta_L = %.4f / pi = %.6f; eta" % (DELTA_KHAYA, DELTA_KHAYA / math.pi), e_kh)
+obs_kh = {k: "wh-khaya-shell" for k in kv}
+obs_kh.update({k: "laudares-khaya-loss" for k in VISC_ORDER})
+write_pack(
+    "guitar-mahogany-african-fpl-gtr282-laudares2023-shell",
+    ("wh-khaya-shell", "African mahogany (Khaya spp.) clear straight-grained wood, for the back and ribs of a guitar whose maker prints dyed mahogany without a species",
+     "FPL-GTR-282 chapter 5: Table 5-5a bending MOE 9700 MPa times 1.10 gives E_L = %.0f MPa; Table 5-1 ratios E_R/E_L %.3f, G_LR/E_L %.3f, G_LT/E_L %.3f, G_RT/E_L %.3f; Table 5-2 nu_LR %.3f; density %.4f kg/m3 at 12 percent moisture is the seed pack mahogany-african-fpl-gtr282's (Table 5-5a green-volume SG 0.42 through the Handbook's shrinkage rule, Table 4-4 volumetric shrinkage 8.8 percent). Absolute values are those ratios times E_L"
+     % (ELk / 1e6, khaya["er_over_el"], khaya["glr_over_el"], khaya["glt_over_el"], khaya["grt_over_el"], khaya["nu_lr"], khaya["density"]),
+     "The maker's capture of 2011-09-03 names dyed mahogany for back and sides without a species (2018: dyed sapele; the 2020 shop files the model under laminada, without parts); Khaya, not true mahogany (Swietenia macrophylla), is a CHOICE made because the only measured Swietenia loss factor found (Sotomayor 2018, Rev. Mex. Cienc. For. 9(48), Table 1, zeta_vt 0.015 with zeta_vt = delta/2 as printed) is ambiguous by a factor pi (eta 0.0095 as printed, 0.030 with zeta = delta/(2 pi)); solid wood, a laminate is NOT modelled (no ply stack was found). " + COMMON),
+    rows_for(obs_kh, kv, vis_kh, e_kh),
+    "Forest Products Laboratory (2021), Wood Handbook, FPL-GTR-282, Chapter 5, Tables 5-1, 5-2 and 5-5a (Mahogany, African, Khaya spp.); https://research.fs.usda.gov/treesearch/62200; Laudares FAL, Nascimento AM, Oliveira RN, dos Santos RR, Moura FDG (2023) Avaliacao das propriedades acusticas de mogno africano (Khaya ivorensis) submetido a tratamento termico em estufa e autoclave, Materia (Rio de Janeiro) 28(1), doi:10.1590/1517-7076-RMAT-2023-0035, Tables 3 to 6; Bremaud, Gril and Thibaut (2011) doi:10.1007/s00226-010-0393-8 Table 4 hardwoods median row; derived by the pack author",
+    extra_obs=[("laudares-khaya-loss", "Khaya ivorensis, untreated control of Laudares et al. (2023), with the hardwood-median directional loss ratios of Bremaud, Gril and Thibaut (2011)",
+                "Laudares et al. (2023) Table 6, untreated control (NT, TS): logarithmic decrement 31.2 x 10^-3 (sd 4.1), so eta_L = 0.0312 / pi = %.6f; ASTM E1876 impulse excitation in free-free flexure of 5 (T) x 25 (R) x 180 (L) mm specimens, first mode 426.7 Hz (Table 4), apparent density 767 kg/m3 (Table 5), equilibrium moisture 11.0 percent (Table 3), conditioned at 20 C and 65 percent RH; plantation trees about 30 years old, Seropedica RJ, Brazil. Directional ratios, Bremaud, Gril and Thibaut (2011) Table 4 hardwoods median row: tan dG23/tan d3 = 2.27, tan d2/tan d3 = 2.92, tan dG13/tan d3 = 2.14, tan d1/tan d3 = 2.68: eta_R = %.6f, eta_LR = %.6f, eta_LT = %.6f; eta_RT taken equal to eta_LT"
+                % (e_kh["L"], e_kh["R"], e_kh["LR"], e_kh["LT"]),
+                "eta_L MEASURED on Khaya ivorensis along the grain only; the four other loss factors are a SURROGATE (the median of hardwoods, not Khaya). The specimens' density (767 kg/m3) is far above the Handbook's Khaya (%.1f kg/m3 here): stiffness and density are the Handbook's, the loss is the Brazilian plantation wood's. The pack it replaces on the classical card (Brazilian rosewood with padauk loss) has eta_L 0.0048: report Q with both." % khaya["density"])],
+    fpl_only=False,
+    redistribution="Published scientific facts (numbers) with attribution retained: Wood Handbook FPL-GTR-282 is a United States Government work, public domain in the United States; Laudares et al. (2023) is published open access under CC BY 4.0; Bremaud, Gril and Thibaut (2011) ratios are transcribed facts; retain the citations",
 )
