@@ -21,10 +21,13 @@
 //! This explicit n=1 law supplies no sub-yield creep, nonlinear rate exponent,
 //! dynamic recovery, finite deformation, evolving texture or fitted alloy data.
 
+mod power;
+pub use power::PowerLawOverstressHill48;
+
 use super::oriented::OrientedHill48;
 use super::{
     EnergyTolerances, Hill48, HillEnergyIncrement, HillError, HillResponse, HillState,
-    LinearRateReturn, positive,
+    LinearRateReturn, RateReturn, positive,
 };
 use crate::plastic::energy::StoredEnergy;
 use crate::{MaterialAdmissibility, SmallStrainLaw, Tangent6, Voigt};
@@ -172,7 +175,7 @@ impl LinearOverstressHill48 {
             .spatial_response(self.local_law().response_with_rate(
                 &self.backbone.local_strain(strain),
                 state,
-                Some(&self.prepared),
+                Some(RateReturn::Linear(&self.prepared)),
             )?)
     }
 
@@ -219,7 +222,7 @@ impl LinearOverstressHill48 {
             old_state,
             &self.backbone.local_strain(strain),
             tolerances,
-            Some(&self.prepared),
+            Some(RateReturn::Linear(&self.prepared)),
         )?;
         increment.strain = *strain;
         increment.response = self.backbone.spatial_response(increment.response)?;
@@ -239,7 +242,7 @@ impl SmallStrainLaw for LinearOverstressHill48 {
         let local = self.local_law().returned_with_rate(
             &self.backbone.local_strain(strain),
             state,
-            Some(&self.prepared),
+            Some(RateReturn::Linear(&self.prepared)),
         );
         let stress = local.map_or([f64::NAN; 6], |trial| {
             self.backbone.spatial_stress(&trial.stress_pa)
@@ -261,7 +264,7 @@ impl SmallStrainLaw for LinearOverstressHill48 {
             .returned_with_rate(
                 &self.backbone.local_strain(strain),
                 state,
-                Some(&self.prepared),
+                Some(RateReturn::Linear(&self.prepared)),
             )
             .map_or_else(|_| state.clone(), |trial| trial.state)
     }

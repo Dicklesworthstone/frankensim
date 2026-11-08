@@ -22018,3 +22018,36 @@ Regression definitions independently construct actual shell volumes and volume-p
 ## Original conductivity interval means
 
 `ConductivityCurve::mean_conductivity_w_m_k` evaluates the mean of its original bounded piecewise-affine conductivity over a supported interval, retaining every crossed source knot. Equal endpoints return the point law; reversing an interval traverses the same ordered knots and gives identical arithmetic. Positive convex segment-mean accumulation avoids first forming a dimensional integral that can overflow or underflow even when the mean is representable. No table is copied and the original finite knot bound controls work. This canonical method supplies the directional source adapter in the native tensor conduction owner. Two tests compiled from the actual production curve and original error type passed for crossed knots, support refusal, symmetry and extreme representability.
+
+### Nonlinear anisotropic Hill rate dependence
+
+`plastic::hill::rate::PowerLawOverstressHill48` selects
+`alpha_dot=(s0/eta)*max((q(sigma-X)-Y-R(alpha))/s0,0)^n`, with independent
+positive eta [Pa s], s0 [Pa], physical dt [s] and finite n>=1. Alpha remains
+the native Hill work-conjugate multiplier. Fixed axes, linear/Voce isotropic
+hardening and energetic Prager translation retain their existing owners.
+The n=1 case delegates to the existing linear law exactly.
+
+The original five-mode return solves one monotone scalar equation, with
+analytic kinetic bounds and dimensionless logarithms. Its exact tangent uses
+the nonlinear resistance derivative and the positive remainder
+`f_rate*(1-1/n)`; neither a secant tangent nor a second material update is
+used. Stress-only line searches avoid tangent assembly. Endpoints may retain
+static overstress, and subsequent positive-duration holds relax that history.
+
+Physical dissipation is `(Y+f_rate)*delta_alpha`. Kinetic coefficients store
+no energy; original hardening storage and material integration loss remain
+separate. A bounded scalar solve or unrepresentable state refuses the whole
+candidate. Five authored regressions cover prescribed anisotropic multiplier
+and slope, variable-duration reversal/relaxation, rotated full tangents,
+exact n=1 and isotropic J2 correspondence, and stress-unit covariance.
+Independent arithmetic checks are implementation evidence, not measured
+material calibration. No sub-yield creep, backstress recovery, evolving
+texture, finite-strain forming or damage is supplied by this law.
+
+Both timed Hill laws implement the existing `NativeSectionEnergyLaw` with their
+actual physical duration. Isothermal layered plane-stress sections and shell
+energy/motion consumers retain the original rate history, yield/viscous heat,
+and hardening storage; native mechanical and inertia clocks must agree.
+Two independent shear-section load/hold/reversal regressions verify the
+linear and nonlinear accounts without a second relaxation during auditing.

@@ -21,6 +21,7 @@ use crate::plastic::chaboche::ChabocheJ2;
 use crate::plastic::energy::{EnergyError, EnergyTolerances, IncrementEnergy, StoredEnergy};
 use crate::plastic::hill::Hill48;
 use crate::plastic::hill::oriented::OrientedHill48;
+use crate::plastic::hill::rate::{LinearOverstressHill48, PowerLawOverstressHill48};
 use crate::plastic::hill::source::ResolvedHill48;
 use crate::plastic::rate::{LinearOverstressJ2, PowerLawOverstressJ2, VoceOverstressJ2};
 use crate::plastic::tabulated::TabulatedJ2;
@@ -115,7 +116,14 @@ native_energy!(
 // belongs at the section boundary.
 macro_rules! native_hill_energy {
     ($law:ty) => {
+        native_hill_energy!($law, |_| None);
+    };
+    ($law:ty, $duration:expr) => {
         impl NativeSectionEnergyLaw for $law {
+            fn physical_duration_s(&self) -> Option<f64> {
+                let duration: fn(&$law) -> Option<f64> = $duration;
+                duration(self)
+            }
             fn native_energy_increment(
                 &self,
                 old_strain: &Voigt,
@@ -135,6 +143,8 @@ macro_rules! native_hill_energy {
 }
 native_hill_energy!(Hill48);
 native_hill_energy!(OrientedHill48);
+native_hill_energy!(LinearOverstressHill48, |law| Some(law.duration_s()));
+native_hill_energy!(PowerLawOverstressHill48, |law| Some(law.duration_s()));
 
 // These explicit isothermal implementations keep thermal expansion/entropy
 // out of the mechanical-only account. Primary strain hardening is kinetic:

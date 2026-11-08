@@ -307,3 +307,109 @@ fn g0_hill_energy_refuses_inadmissible_old_or_substituted_new_history() {
     refuse_forged_history(law.clone());
     refuse_forged_history(OrientedHill48::new(law, rotation([0.0, 0.0, 1.0], 0.42)).unwrap());
 }
+
+fn check_timed_section<L: NativeSectionEnergyLaw<State = HillState>>(
+    law: L,
+    eta: f64,
+    scale: f64,
+    exponent: f64,
+    dt: f64,
+) {
+    assert_eq!(law.physical_duration_s(), Some(dt));
+    let section = section(law, 2);
+    let mut accepted = section.initial_state();
+    let mu = E / (2.0 * (1.0 + NU));
+    let r = (2.0 * coefficients().n).sqrt();
+    let a = r * r * mu + H;
+    let (mut old_alpha, mut old_plastic, mut old_gamma) = (0.0, 0.0, 0.0);
+    for gamma in [0.012, 0.012, -0.012, -0.012] {
+        // Independent single-shear balance with engineering plastic shear
+        // gamma_p=r*alpha on a positive path, signed increments on reversal.
+        let trial = mu * (gamma - old_plastic);
+        let excess = (r * trial.abs() - Y - H * old_alpha).max(0.0);
+        let resistance = |da: f64| {
+            if exponent == 1.0 {
+                eta / dt * da
+            } else {
+                scale * (eta * da / (dt * scale)).powf(1.0 / exponent)
+            }
+        };
+        let (mut lo, mut hi) = (0.0, excess / a);
+        for _ in 0..100 {
+            let mid = 0.5 * (lo + hi);
+            if a * mid + resistance(mid) < excess {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let da = 0.5 * (lo + hi);
+        let alpha = old_alpha + da;
+        let plastic = old_plastic + trial.signum() * r * da;
+        let tau = mu * (gamma - plastic);
+        let next = section
+            .evaluate([0.0, 0.0, gamma, 0.0, 0.0, 0.0], &accepted)
+            .unwrap();
+        let energy = section
+            .audit_energy(&accepted, &next.state, gates(), 1e-10)
+            .unwrap();
+        assert!(da > 0.0 && energy.physical_dissipation_j_m2 > 0.0);
+        near(next.resultants[2], 0.2 * tau, 3e-11);
+        near(
+            energy.physical_dissipation_j_m2,
+            0.2 * (Y + resistance(da)) * da,
+            2e-12,
+        );
+        near(
+            energy.generalized_work_j_m2,
+            0.2 * tau * (gamma - old_gamma),
+            2e-12,
+        );
+        near(energy.balance_residual_j_m2, 0.0, 1e-10);
+        near(
+            energy.final_state.elastic_j_m2,
+            0.2 * 0.5 * mu * (gamma - plastic).powi(2),
+            2e-12,
+        );
+        near(
+            energy.final_state.hardening_j_m2,
+            0.2 * 0.5 * H * alpha * alpha,
+            2e-12,
+        );
+        for point in &next.state.points {
+            near(point.history.alpha, alpha, 3e-13);
+            near(2.0 * point.history.plastic_strain[3], plastic, 3e-13);
+        }
+        if gamma == old_gamma {
+            assert_eq!(energy.generalized_work_j_m2, 0.0);
+            assert!(energy.final_state.total_j_m2() < energy.initial.total_j_m2());
+        }
+        // Auditing the same accepted interval must not relax it a second time.
+        assert_eq!(
+            section
+                .evaluate([0.0, 0.0, gamma, 0.0, 0.0, 0.0], &accepted)
+                .unwrap(),
+            next
+        );
+        accepted = next.state;
+        old_alpha = alpha;
+        old_plastic = plastic;
+        old_gamma = gamma;
+    }
+}
+
+#[test]
+fn linear_hill_sections_retain_timed_shear_history_heat_and_duration() {
+    use fs_material::plastic::hill::rate::LinearOverstressHill48;
+    let (eta, dt) = (80.0, 0.1);
+    let law = LinearOverstressHill48::new(native(), eta, dt).unwrap();
+    check_timed_section(law, eta, 1.0, 1.0, dt);
+}
+
+#[test]
+fn nonlinear_hill_sections_relax_reverse_and_close_original_native_energy() {
+    use fs_material::plastic::hill::rate::PowerLawOverstressHill48;
+    let (eta, scale, exponent, dt) = (80.0, 2.0, 3.5, 0.1);
+    let law = PowerLawOverstressHill48::new(native(), eta, scale, exponent, dt).unwrap();
+    check_timed_section(law, eta, scale, exponent, dt);
+}

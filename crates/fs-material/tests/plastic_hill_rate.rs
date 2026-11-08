@@ -410,3 +410,6 @@ fn stress_scaling_preserves_history_and_invalid_physical_intervals_refuse() {
     invalid.plastic_strain = [0.001; 6];
     assert!(reference.validate_history(&strain, &invalid).is_err());
 }
+
+#[path = "plastic_hill_rate/power.rs"]
+mod power;

@@ -38,7 +38,7 @@
 mod calibration;
 /// Fixed material orientation without changing the local history convention.
 pub mod oriented;
-/// Explicit-time associative linear overstress on the same anisotropic return.
+/// Explicit-time associative linear or power-law overstress on the anisotropic return.
 pub mod rate;
 /// Original material-card support for the directional constitutive parameters.
 pub mod source;
@@ -180,6 +180,79 @@ struct LinearRateReturn {
     modulus_pa: f64,
     scale: f64,
     ratios: [f64; 5],
+}
+
+/// Prepared nonlinear kinetics; only stress ratios enter the scalar solve.
+#[derive(Clone, Debug, PartialEq)]
+struct PowerRateReturn {
+    modulus_pa: f64,
+    stress_scale_pa: f64,
+    inverse_exponent: f64,
+    log_modulus_ratio: f64,
+}
+
+impl PowerRateReturn {
+    // f/q = (s0/q)^(1-p) * ((eta/dt)/S * z)^p, p=1/n,
+    // z=S*delta_alpha/q. Its derivative in z is p*(f/q)/z.
+    fn normalized(&self, z: f64, q: f64) -> (f64, f64) {
+        let value = det::exp(
+            (1.0 - self.inverse_exponent) * log_ratio(self.stress_scale_pa, q)
+                + self.inverse_exponent * (self.log_modulus_ratio + det::ln(z)),
+        );
+        (value, self.inverse_exponent * (value / z))
+    }
+
+    // The rate-only solution is an upper bound on the coupled increment.
+    fn kinetic_bound(&self, resistance_ratio: f64, q: f64) -> f64 {
+        det::exp(
+            (det::ln(resistance_ratio)
+                - (1.0 - self.inverse_exponent) * log_ratio(self.stress_scale_pa, q))
+                / self.inverse_exponent
+                - self.log_modulus_ratio,
+        )
+    }
+
+    fn overstress(&self, increment: f64) -> f64 {
+        if increment == 0.0 {
+            return 0.0;
+        }
+        let exponent = self.inverse_exponent
+            * (log_ratio(self.modulus_pa, self.stress_scale_pa) + det::ln(increment));
+        let value = self.stress_scale_pa * det::exp(exponent);
+        if value > 0.0 && value.is_finite() {
+            value
+        } else {
+            // The intermediate dimensionless power may under/overflow even
+            // when its final dimensional product remains representable.
+            det::exp(det::ln(self.stress_scale_pa) + exponent)
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RateReturn<'a> {
+    Linear(&'a LinearRateReturn),
+    Power(&'a PowerRateReturn),
+}
+
+impl RateReturn<'_> {
+    fn overstress(self, increment: f64) -> f64 {
+        match self {
+            Self::Linear(rate) => rate.modulus_pa * increment,
+            Self::Power(rate) => rate.overstress(increment),
+        }
+    }
+}
+
+// Prefer dimensionless division for stress-unit covariance. Log subtraction is
+// only the fallback when the quotient itself cannot be represented.
+fn log_ratio(numerator: f64, denominator: f64) -> f64 {
+    let ratio = numerator / denominator;
+    if positive(ratio) {
+        det::ln(ratio)
+    } else {
+        det::ln(numerator) - det::ln(denominator)
+    }
 }
 
 struct PlasticTangent {
@@ -735,11 +808,17 @@ impl Hill48 {
         &self,
         strain: &Voigt,
         state: &HillState,
-        rate: Option<&LinearRateReturn>,
+        rate: Option<RateReturn<'_>>,
     ) -> Result<HillTrial, HillError> {
         let (return_scale, return_ratios, incremental_hardening) = match rate {
-            Some(rate) => (rate.scale, rate.ratios, self.hardening + rate.modulus_pa),
-            None => (self.return_scale, self.return_ratios, self.hardening),
+            Some(RateReturn::Linear(rate)) => {
+                (rate.scale, rate.ratios, self.hardening + rate.modulus_pa)
+            }
+            _ => (self.return_scale, self.return_ratios, self.hardening),
+        };
+        let power = match rate {
+            Some(RateReturn::Power(rate)) => Some(rate),
+            _ => None,
         };
         let elastic = self.admit(strain, state)?;
         let trial = self.relative_modes(&elastic, state);
@@ -773,9 +852,9 @@ impl Hill48 {
         }
 
         // In mode i, xi_i = y*xi_trial_i / (y + (2mu+C)*lambda_i*dl),
-        // where y=y0+(H+eta/dt)*dl+Delta_R_Voce for selected linear kinetics.
-        // Its denominator derivative H+eta/dt+(2mu+C)*lambda_i+R'_Voce
-        // is always strictly positive. eta/dt is zero in the native law.
+        // where y=y0+H*dl+Delta_R_Voce+f_rate(dl). Linear kinetics folds
+        // eta/dt into the modal slopes; power-law kinetics retains f_rate and
+        // its exact derivative separately. Every denominator is increasing.
         // Thus sum_i [sqrt(lambda_i)*xi_trial_i/denominator_i]^2 = 1.
         // Normalize stresses and moduli independently before solving for
         // z = return_scale*dl/q_trial. This retains stress-unit covariance.
@@ -786,17 +865,25 @@ impl Hill48 {
                 "yield-to-trial ratio is not representable",
             ));
         }
-        // return_scale bounds every denominator derivative from above;
-        // the minimum linear modal ratio bounds it from below, also for Voce.
-        let mut lower = (q_trial - y0) / q_trial;
+        // S bounds the non-kinetic denominator derivative from above and
+        // the smallest modal ratio bounds it from below. Nonlinear resistance
+        // is positive and increasing but has an infinite initial slope for
+        // n>1. Bound it analytically instead of sampling that singular slope:
+        // z<=D/2 and f(z)/q<=D/2 ensure a lower bound, D=(q-y0)/q.
+        let driving_ratio = (q_trial - y0) / q_trial;
         let minimum = return_ratios.iter().copied().fold(f64::INFINITY, f64::min);
-        let mut upper = lower / minimum;
-        if !positive(upper) {
+        let mut lower = driving_ratio;
+        let mut upper = driving_ratio / minimum;
+        if let Some(power) = power {
+            upper = upper.min(power.kinetic_bound(driving_ratio, q_trial));
+            lower = (0.5 * driving_ratio).min(power.kinetic_bound(0.5 * driving_ratio, q_trial));
+        }
+        if !positive(upper) || lower > upper {
             return Err(HillError::Numerical(
                 "scalar return bracket is not representable",
             ));
         }
-        let mut z = lower;
+        let mut z = if lower > 0.0 { lower } else { upper };
         let mut normalized = [0.0; 5];
         let mut denominators = [0.0; 5];
         let mut derivative_ratios = return_ratios;
@@ -810,20 +897,32 @@ impl Hill48 {
             )
         };
         let mut saturation_increment_ratio = 0.0;
+        let mut kinetic_increment_ratio = 0.0;
         let mut solved = false;
         let mut residual = f64::INFINITY;
         for _ in 0..MAX_RETURN_ITERATIONS {
+            let mut slope_ratio = 0.0;
             if self.saturation_pa > 0.0 {
                 let increment = (q_trial / return_scale) * z;
                 saturation_increment_ratio =
                     hardening::strength(remaining, self.saturation_rate_per_strain, increment)
                         / q_trial;
-                let slope_ratio =
+                slope_ratio =
                     initial_slope * det::exp(-self.saturation_rate_per_strain * increment);
+            }
+            if let Some(power) = power {
+                let (resistance, derivative) = power.normalized(z, q_trial);
+                kinetic_increment_ratio = resistance;
+                slope_ratio += derivative;
+            }
+            if self.saturation_pa > 0.0 || power.is_some() {
                 derivative_ratios = return_ratios.map(|ratio| ratio + slope_ratio);
             }
             for i in 0..5 {
-                denominators[i] = radius_ratio + return_ratios[i] * z + saturation_increment_ratio;
+                denominators[i] = radius_ratio
+                    + return_ratios[i] * z
+                    + saturation_increment_ratio
+                    + kinetic_increment_ratio;
                 normalized[i] = unit[i] / denominators[i];
             }
             let value = norm(&normalized);
@@ -868,8 +967,10 @@ impl Hill48 {
                 "plastic increment or accumulation is not representable",
             ));
         }
-        let yield_ratio =
-            radius_ratio + (incremental_hardening / return_scale) * z + saturation_increment_ratio;
+        let yield_ratio = radius_ratio
+            + (incremental_hardening / return_scale) * z
+            + saturation_increment_ratio
+            + kinetic_increment_ratio;
         let ratios: [f64; 5] = core::array::from_fn(|i| yield_ratio / denominators[i]);
         let returned: [f64; 5] = core::array::from_fn(|i| trial[i] * ratios[i]);
         let offset = self.modes.tensor(&core::array::from_fn(|i| {
@@ -904,8 +1005,8 @@ impl Hill48 {
             tangent: Some(PlasticTangent {
                 return_scale,
                 // Differentiation uses y-dl*y', not the old yield radius or
-                // a secant slope. The concave Voce increment adds a positive
-                // remainder; its shared series avoids cancellation near yield.
+                // a secant slope. Concave Voce and power-law resistance add
+                // positive remainders; the Voce series avoids cancellation.
                 radius_ratio: radius_ratio
                     + if self.saturation_pa == 0.0 {
                         0.0
@@ -915,7 +1016,10 @@ impl Hill48 {
                             self.saturation_rate_per_strain,
                             increment,
                         ) / q_trial
-                    },
+                    }
+                    + power.map_or(0.0, |rate| {
+                        (1.0 - rate.inverse_exponent) * kinetic_increment_ratio
+                    }),
                 denominators,
                 normalized,
                 ratios,
@@ -1002,7 +1106,7 @@ impl Hill48 {
         &self,
         strain: &Voigt,
         state: &HillState,
-        rate: Option<&LinearRateReturn>,
+        rate: Option<RateReturn<'_>>,
     ) -> Result<HillResponse, HillError> {
         let trial = self.returned_with_rate(strain, state, rate)?;
         let tangent = self.returned_tangent(&trial)?;
@@ -1086,7 +1190,7 @@ impl Hill48 {
         old_state: &HillState,
         strain: &Voigt,
         tolerances: EnergyTolerances,
-        rate: Option<&LinearRateReturn>,
+        rate: Option<RateReturn<'_>>,
     ) -> Result<HillEnergyIncrement, HillError> {
         if !positive(tolerances.energy_j_m3) || !positive(tolerances.yield_pa) {
             return Err(HillError::Parameters(
@@ -1107,7 +1211,7 @@ impl Hill48 {
             previous.validate_committed_history(old_strain, old_state, tolerances.yield_pa)?;
         }
         let response = self.response_with_rate(strain, old_state, rate)?;
-        let overstress = rate.map_or(0.0, |value| value.modulus_pa * response.plastic_increment);
+        let overstress = rate.map_or(0.0, |value| value.overstress(response.plastic_increment));
         let consistency_residual = response.yield_residual_pa - overstress;
         if !overstress.is_finite() || !consistency_residual.is_finite() {
             return Err(HillError::Numerical(
