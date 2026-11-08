@@ -20,6 +20,12 @@ use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_material::relaxation::RelaxationState;
 use fs_math::c64::C64;
 
+mod power;
+pub use power::{
+    JOINT_RADIATED_POWER_SCOPE, JointRadiatedPowerBand, JointRadiatedPowerBandBudget,
+    JointRadiatedPowerBin, PreparedJointRadiatedPower,
+};
+
 /// Bounds both original source layouts and the SINGLE joint transform.
 #[derive(Clone, Copy, Debug)]
 pub struct JointSourceRecordingBudget {

@@ -3689,3 +3689,31 @@ geometry and rotated receivers, source/clock refusal, both rollback paths and
 exact retry. Pinned formatting and independent source/API/physics review passed.
 These Rust regressions are authored, not claimed executed: the real dependency
 build exceeded the bounded shared validation environment.
+
+## Coherent recorded sound-power spectra
+
+`RecordedJointSourceSpectrum::prepare_radiated_power` binds the original two
+source layouts, material, clock and Welch factors to the existing analytic
+`PreparedMultipoleRadiatedPower`. Each factor retains every volume/force/stress
+cross term before spatial power integration. Native peak-bin scaling is applied
+once. Results give complete-bin watts and one-sided W/Hz; repeated prepared
+evaluation reuses one source workspace without allocation or angular quadrature.
+`radiated_power_band` sums explicitly selected complete interior bins in DD,
+admits the whole source-pair/factor/bin workload before allocation, and retains
+one spatial operator at a time. DC and even-length Nyquist refuse; the odd last
+bin remains physical. Cancellation publishes no partial band and permits retry.
+
+The native `RecordedExteriorSurfaceSpectrum` delegates both operations to its
+same privately retained joint record. The scope is stationary homogeneous
+lossless free-space radiation, with the original disjoint-source, compact-cell,
+finite exterior-volume, sampling, window and leakage limits. Band summation
+does not reconstruct cross-frequency phases, missing cells, absorption,
+scattering, source feedback or statistical confidence.
+
+Five focused integration tests passed through a native exact-source leaf using
+the original FFT/GeneralFft/Welch, acquisition/clock, material and analytic power
+owners: coherent Q/trace cancellation, separated mixed-source sphere flux,
+overlapping-window derivative Parseval, odd/even endpoint treatment, and bounded
+cancellation/retry. SIMD dispatch used the original scalar kernels. Unrelated
+CFD, molecular and receiver adapters were omitted from this leaf; full-workspace
+and native CFD extraction integration are not claimed executed.

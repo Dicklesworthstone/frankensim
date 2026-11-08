@@ -21,8 +21,10 @@ use super::{
 use crate::AeroacError;
 use crate::curle3d::array::recorded::SourceSampleClock;
 use crate::curle3d::array::recorded::joint::{
-    JointSourceRecordingBudget, JointSourceWelchStream, RecordedJointSourceSpectrum,
+    JointRadiatedPowerBand, JointRadiatedPowerBandBudget, JointSourceRecordingBudget,
+    JointSourceWelchStream, PreparedJointRadiatedPower, RecordedJointSourceSpectrum,
 };
+use crate::curle3d::power::RadiatedPowerBudget;
 use crate::curle3d::quadrupole::PreparedQuadrupoleObserver;
 use crate::curle3d::{CoherenceBudget, CompactFieldStatistics, PreparedCompactSourceObserver};
 use crate::material::MaterialAeroacError;
@@ -394,6 +396,32 @@ impl RecordedExteriorSurfaceSpectrum {
     }
     pub fn quadrupole_source_positions_m(&self) -> &[[f64; 3]] {
         self.recorded.quadrupole_source_positions_m()
+    }
+
+    /// Full-sphere lossless power from this SAME native surface/volume record.
+    /// The original source partition, positions, clock and measured coherence
+    /// enter one analytic multipole power operator. No microphone or separate
+    /// source reconstruction is needed; the finite exterior-volume scope remains.
+    pub fn prepare_radiated_power(
+        &self,
+        bin: usize,
+        budget: RadiatedPowerBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedJointRadiatedPower<'_>, AeroacError> {
+        self.recorded.prepare_radiated_power(bin, budget, cancelled)
+    }
+
+    /// Integrate complete native interior bins with every surface/stress cross term.
+    /// The joint owner bounds the complete sweep and returns W/Hz rows plus W.
+    /// This is a stationary spectral observation, without absorption or inferred
+    /// contributions from unselected exterior cells or unresolved source physics.
+    pub fn radiated_power_band(
+        &self,
+        bins: core::ops::Range<usize>,
+        budget: JointRadiatedPowerBandBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<JointRadiatedPowerBand, AeroacError> {
+        self.recorded.radiated_power_band(bins, budget, cancelled)
     }
 
     pub fn prepare_observers(
