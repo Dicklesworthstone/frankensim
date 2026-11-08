@@ -1117,6 +1117,23 @@ Their drums (`kick snare snare-off tom-12 tom-14`) are built from the sourced ca
 Their cymbals and hi-hat take `kit::DECLARED_CYMBAL_INTERFACE` (and the hi-hat
 `DECLARED_HIHAT_RIM_LAW`), and their ride is `kit::card_ride()`.
 
+Their crash (`kit::card_crash()`) and ride are CuSn8, `kit::CUSN8` (MB 13551). The recorded crash is
+a Paiste 18" Innovations Medium Crash and the recorded ride a Paiste 20" PST 5 Medium Ride, both
+Paiste's "2002 bronze": the Salamander README names them, and CuSn8 is that alloy. E 115 GPa and
+density 8800 kg/m³ come from the Aurubis (PNA 283) and Matthey (CuSn8 v22E) sheets. Poisson's ratio
+is printed by neither, so B20's declared 0.33 is kept. Every crash and ride mode is 3.5 % higher than
+in B20 (E/ρ +7.0 %). The hi-hat (a Stagg 14" SH, cast B20), the splash and every preset keep
+`kit::BRONZE`.
+
+`--shell-loss` (`shell_loss`) offers each row only on a shell of the row's own alloy:
+- `b20`, `b20-low` and `b20-high` on the hi-hats;
+- `cusn8` on the crash and ride: CuSn8's thermoelastic damping alone, from the sheets' conductivity
+  67 W/(m K), specific heat 377 J/(kg K) and expansion 18.5e-6/K (a 20-300 °C mean). No anelastic
+  loss is printed for CuSn8.
+- `cusn8-eta`: adds the cast bells' borrowed anelastic factor (van Houten 1997), which is another
+  alloy's loss.
+- `cusn8-low`: Kemper's 62 W/(m K), the band's long end. It never posts.
+
 `--preset-heads` (anywhere on the command line) renders the recording-fitted presets instead, and
 adds "heads: PRESET, recording-fitted T60 (opt-in --preset-heads); not a sourced head loss" to the
 drums' notes.

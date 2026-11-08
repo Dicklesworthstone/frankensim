@@ -23,8 +23,14 @@
 //! conductivity: thicker regions lose less (as 1/h^2 above the peak), trace-free (twisting)
 //! bending loses nothing thermoelastically, and the membrane strain of a shallow shell's lowest
 //! modes loses far less than bending.
+//!
+//! Each row holds one alloy's thermal data and is offered only on a shell of that alloy
+//! ([`with_printed_shell_loss`] refuses another): the `b20` rows on the B20 hi-hat, the `cusn8`
+//! rows (MB 13551) on the card route's CuSn8 crash and ride. `cusn8` is CuSn8's thermoelastic
+//! damping alone, from the alloy's printed constants; `cusn8-eta` adds the cast bells' borrowed
+//! anelastic factor, another alloy's loss.
 
-use crate::kit::{CymbalSpec, edge_thickness};
+use crate::kit::{CymbalSpec, edge_thickness, BRONZE, CUSN8};
 use fs_material::visco::slab_ted::SlabThermoelasticBending;
 use std::f64::consts::PI;
 
@@ -55,6 +61,16 @@ pub const VAN_HOUTEN_1997_BELLS: [f64; 4] = [1.4e-4, 1.3e-4, 2.6e-4, 1.6e-4];
 /// (GZ-SnBz 12, Boehm and Wachtel 1969), 0.209 cm^2/s at 273 K and 0.234 at 373 K. A
 /// different alloy: less tin conducts better, so for B20 an upper bound. ([K, m^2/s] pairs)
 pub const TPRC_12_25_SN_DIFFUSIVITY: [(f64, f64); 2] = [(273.0, 0.209e-4), (373.0, 0.234e-4)];
+/// CuSn8 (EN CW453K, UNS C52100) thermal conductivity at 20 C, printed by Aurubis (PNA 283) and
+/// Matthey (CuSn8 v22E) [W/(m K)].
+pub const CUSN8_CONDUCTIVITY: f64 = 67.0;
+/// Kemper's CuSn8 sheet, read only as a search excerpt (its PDF path did not answer): 62 W/(m K),
+/// the lower printed conductivity [W/(m K)].
+pub const KEMPER_CUSN8_CONDUCTIVITY: f64 = 62.0;
+/// CuSn8 specific heat, printed by Aurubis and Matthey [J/(kg K)].
+pub const CUSN8_SPECIFIC_HEAT: f64 = 377.0;
+/// CuSn8 linear expansion, Aurubis: a mean over 20-300 C, not the 20 C value [1/K].
+pub const CUSN8_EXPANSION: f64 = 18.5e-6;
 /// The recording's room temperature, declared: no session temperature is printed [K].
 pub const DECLARED_TEMPERATURE_K: f64 = 293.15;
 /// The bells' own thermoelastic loss as a share of the smallest printed bell loss, at its hum
@@ -78,6 +94,9 @@ pub enum Conduction {
 pub struct PrintedShellLoss {
     /// The `--shell-loss` value that selects it.
     pub label: &'static str,
+    /// The alloy whose thermal data the row holds, and its elastic values (E Pa, nu, rho
+    /// kg/m^3): the row is offered only on a shell of that alloy.
+    pub alloy: (&'static str, (f64, f64, f64)),
     /// Heat conduction through the thickness.
     pub conduction: Conduction,
     /// Linear thermal expansion [1/K].
@@ -86,7 +105,7 @@ pub struct PrintedShellLoss {
     pub specific_heat_j_kg_k: f64,
     /// Absolute temperature [K].
     pub temperature_k: f64,
-    /// Anelastic (non-thermoelastic) loss factor, constant in frequency.
+    /// Anelastic (non-thermoelastic) loss factor, constant in frequency; zero when none is carried.
     pub anelastic_loss_factor: f64,
     /// The sources and what the row leaves out; joins the cymbal's notes.
     pub receipt: &'static str,
@@ -154,6 +173,7 @@ pub fn b20(label: &str) -> Option<PrintedShellLoss> {
     let (lo, hi) = VAN_HOUTEN_1997_BELLS.iter().fold((f64::INFINITY, 0.0f64), |(l, h), &x| (l.min(x), h.max(x)));
     let row = |label, conduction, expansion_per_k, anelastic_loss_factor, receipt| PrintedShellLoss {
         label,
+        alloy: ("B20", BRONZE),
         conduction,
         expansion_per_k,
         specific_heat_j_kg_k: BELL_BRONZE_SPECIFIC_HEAT,
@@ -170,6 +190,56 @@ pub fn b20(label: &str) -> Option<PrintedShellLoss> {
     }
 }
 
+/// The receipt of the CuSn8 correctness row (`--shell-loss cusn8`).
+pub const CUSN8_RECEIPT: &str = "cymbal shell loss from print, cusn8 (opt-in, MB 13551): the declared T60 pair \
+replaced at its two frequencies by CuSn8's thermoelastic damping alone (fs-material's insulated-slab law, cylindrical \
+bending at the free edge), from the alloy's printed constants: conductivity 67 W/(m K) at 20 C (Aurubis PNA 283, Matthey \
+CuSn8 v22E), specific heat 377 J/(kg K) (both sheets), expansion 18.5e-6/K, a mean over 20-300 C (Aurubis), with the \
+shell's own CuSn8 E 115 GPa and density 8800 kg/m^3 (Poisson's ratio 0.33 declared). No anelastic loss is carried: none \
+is printed for CuSn8. Temperature 20 C, declared. Radiation loss missing. For its conductivity the thermoelastic part is \
+an upper bound: thinnest region, cylindrical bending for every shape (twisting loses nothing thermoelastically), membrane \
+strain treated as bending";
+/// The receipt of the opt-in row with the borrowed bell loss (`--shell-loss cusn8-eta`).
+pub const CUSN8_ETA_RECEIPT: &str = "cymbal shell loss from print, cusn8-eta (opt-in, MB 13551, by the count rule): \
+cusn8's thermoelastic damping (conductivity 67 W/(m K), specific heat 377 J/(kg K), expansion 18.5e-6/K; E 115 GPa, \
+density 8800 kg/m^3) plus the anelastic loss factor 1.725e-4, the mean of four cast bells measured in vacuum (van Houten, \
+Schoofs and van Campen 1997, band 1.3e-4 to 2.6e-4), borrowed: another alloy's loss (cast bells of unstated composition, \
+not wrought CuSn8), carried past its printed 3 kHz; it holds those bells' own thermoelastic loss, possibly counted twice \
+up to 9.4 % of it. Temperature 20 C, declared. Radiation loss missing";
+/// The receipt of the CuSn8 band end (`--shell-loss cusn8-low`, never posts).
+pub const CUSN8_LOW_RECEIPT: &str = "cymbal shell loss from print, cusn8-low band end (never posts): as cusn8 with \
+the conductivity 62 W/(m K) of Kemper's CuSn8 sheet (read only as a search excerpt), the lower printed value, so the \
+longer decay. Radiation loss missing";
+
+/// The CuSn8 row selected by a `--shell-loss` value: `cusn8` (CuSn8's thermoelastic damping alone,
+/// the correctness row), `cusn8-eta` (plus the borrowed bell loss, by the count rule) or
+/// `cusn8-low` (Kemper's lower conductivity, a band end that never posts).
+#[must_use]
+pub fn cusn8(label: &str) -> Option<PrintedShellLoss> {
+    let row = |label, conductivity, anelastic_loss_factor, receipt| PrintedShellLoss {
+        label,
+        alloy: ("CuSn8", CUSN8),
+        conduction: Conduction::Conductivity(conductivity),
+        expansion_per_k: CUSN8_EXPANSION,
+        specific_heat_j_kg_k: CUSN8_SPECIFIC_HEAT,
+        temperature_k: DECLARED_TEMPERATURE_K,
+        anelastic_loss_factor,
+        receipt,
+    };
+    match label {
+        "cusn8" => Some(row("cusn8", CUSN8_CONDUCTIVITY, 0.0, CUSN8_RECEIPT)),
+        "cusn8-eta" => Some(row("cusn8-eta", CUSN8_CONDUCTIVITY, van_houten_mean(), CUSN8_ETA_RECEIPT)),
+        "cusn8-low" => Some(row("cusn8-low", KEMPER_CUSN8_CONDUCTIVITY, 0.0, CUSN8_LOW_RECEIPT)),
+        _ => None,
+    }
+}
+
+/// Any printed-loss row by its `--shell-loss` value: [`b20`] or [`cusn8`].
+#[must_use]
+pub fn row(label: &str) -> Option<PrintedShellLoss> {
+    b20(label).or_else(|| cusn8(label))
+}
+
 fn check(loss: &PrintedShellLoss, elastic: (f64, f64, f64)) -> Result<(), String> {
     let (e, nu, rho) = elastic;
     let conduction = match loss.conduction {
@@ -179,10 +249,11 @@ fn check(loss: &PrintedShellLoss, elastic: (f64, f64, f64)) -> Result<(), String
     if !(positive(e) && positive(rho) && nu.is_finite() && nu > -1.0 && nu < 0.5) {
         return Err(format!("shell loss {}: elastic values (E {e} Pa, nu {nu}, rho {rho} kg/m^3) are not an isotropic solid", loss.label));
     }
+    let eta = loss.anelastic_loss_factor;
     if !(positive(conduction) && positive(loss.expansion_per_k) && positive(loss.specific_heat_j_kg_k)
-        && positive(loss.temperature_k) && positive(loss.anelastic_loss_factor) && loss.anelastic_loss_factor < 1.0)
+        && positive(loss.temperature_k) && eta.is_finite() && (0.0..1.0).contains(&eta))
     {
-        return Err(format!("shell loss {}: conduction, expansion, specific heat and temperature must be positive and finite, and the anelastic loss factor in (0, 1)", loss.label));
+        return Err(format!("shell loss {}: conduction, expansion, specific heat and temperature must be positive and finite, and the anelastic loss factor in [0, 1)", loss.label));
     }
     Ok(())
 }
@@ -238,11 +309,20 @@ pub fn printed_shell_t60(c: &CymbalSpec, elastic: (f64, f64, f64), loss: &Printe
 }
 
 /// The shell `c` with its T60 pair from print and the row's receipt as its provenance, and one
-/// receipt line with the numbers (what each point holds and the pair it replaces).
+/// receipt line with the numbers (what each point holds and the pair it replaces). The shell's
+/// own alloy (`c.elastic`) must be the row's.
 ///
 /// # Errors
-/// As [`printed_shell_t60`].
-pub fn with_printed_shell_loss(c: &CymbalSpec, elastic: (f64, f64, f64), loss: &PrintedShellLoss) -> Result<(CymbalSpec, String), String> {
+/// A row of another alloy than the shell's; otherwise as [`printed_shell_t60`].
+pub fn with_printed_shell_loss(c: &CymbalSpec, loss: &PrintedShellLoss) -> Result<(CymbalSpec, String), String> {
+    let (alloy, elastic) = loss.alloy;
+    if c.elastic != elastic {
+        let (e, _, rho) = c.elastic;
+        return Err(format!(
+            "shell loss {} holds {alloy}'s thermal data; the {} shell is another alloy (E {:.0} GPa, rho {rho:.0} kg/m^3)",
+            loss.label, c.name, e / 1e9,
+        ));
+    }
     let t60 = printed_shell_t60(c, elastic, loss)?;
     let h = edge_thickness(c);
     let mut parts = Vec::with_capacity(2);
@@ -251,7 +331,7 @@ pub fn with_printed_shell_loss(c: &CymbalSpec, elastic: (f64, f64, f64), loss: &
         parts.push(format!("{t:.3} s at {f:.0} Hz (thermoelastic {ted:.3e} + anelastic {:.3e})", loss.anelastic_loss_factor));
     }
     let line = format!(
-        "{}: shell loss {} at the free edge, {:.3} mm: T60 {}; replaces the declared {} s at {:.0} Hz and {} s at {:.0} Hz; shell dimensions: {}",
+        "{}: shell loss {} at the free edge, {:.3} mm: T60 {}; replaces the declared {} s at {:.0} Hz and {} s at {:.0} Hz; shell: {}",
         c.name, loss.label, h * 1e3, parts.join(", "), c.t60[0].1, c.t60[0].0, c.t60[1].1, c.t60[1].0,
         c.provenance.unwrap_or("the preset's"),
     );
@@ -261,7 +341,7 @@ pub fn with_printed_shell_loss(c: &CymbalSpec, elastic: (f64, f64, f64), loss: &
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kit::{BRONZE, card_ride, crash, hihat_spec};
+    use crate::kit::{BRONZE, CUSN8, card_crash, card_ride, crash, hihat_spec};
     use fs_material::visco::slab_ted::slab_relaxation_shape;
 
     fn row(label: &str) -> PrintedShellLoss {
@@ -326,7 +406,7 @@ mod tests {
     #[test]
     fn the_spec_keeps_its_shape_and_names_its_receipt() {
         let c = crash();
-        let (printed, line) = with_printed_shell_loss(&c, BRONZE, &row("b20")).unwrap();
+        let (printed, line) = with_printed_shell_loss(&c, &row("b20")).unwrap();
         assert_eq!(printed.bow_thickness, c.bow_thickness);
         assert_eq!(printed.radius, c.radius);
         assert_eq!(printed.grid, c.grid);
@@ -334,6 +414,53 @@ mod tests {
         assert_ne!(printed.t60, c.t60);
         assert!(line.contains("replaces the declared 10 s at 500 Hz and 2 s at 10000 Hz"), "{line}");
         assert!(B20_RECEIPT.contains("Radiation loss missing") && B20_RECEIPT.contains("possibly counted twice"));
+    }
+
+    #[test]
+    fn the_cusn8_rows_are_the_plan_values_on_the_card_crash_and_ride() {
+        // weak coupling, computed before the build (MB 13551): crash 0.95 mm and card ride 1.60 mm at their free edges,
+        // E 115 GPa, rho 8800, c_p 377, alpha 18.5e-6, 20 C; the coupled law moves them a little
+        assert_eq!((card_crash().elastic, card_ride().elastic), (CUSN8, CUSN8));
+        let plan = [
+            (card_crash(), "cusn8", [8.463, 7.657]),
+            (card_crash(), "cusn8-eta", [6.354, 1.093]),
+            (card_crash(), "cusn8-low", [9.099, 8.266]),
+            (card_ride(), "cusn8", [22.752, 21.480]),
+            (card_ride(), "cusn8-eta", [12.022, 1.203]),
+            (card_ride(), "cusn8-low", [24.515, 23.198]),
+        ];
+        for (spec, label, want) in plan {
+            let loss = cusn8(label).unwrap();
+            assert_eq!(super::row(label), Some(loss));
+            let (printed, line) = with_printed_shell_loss(&spec, &loss).unwrap();
+            for i in 0..2 {
+                assert_eq!(printed.t60[i].0, spec.t60[i].0);
+                assert!((printed.t60[i].1 / want[i] - 1.0).abs() < 0.03, "{} {label}: {:?} vs plan {want:?}", spec.name, printed.t60);
+            }
+            assert_eq!(printed.elastic, CUSN8);
+            assert!(line.contains(&format!("shell loss {label} ")), "{line}");
+        }
+        // the TED-only row carries no anelastic loss; the band end conducts less, so it decays slower; the bell loss shortens
+        let t = |label: &str| printed_shell_t60(&card_crash(), CUSN8, &cusn8(label).unwrap()).unwrap();
+        assert_eq!(cusn8("cusn8").unwrap().anelastic_loss_factor, 0.0);
+        for i in 0..2 {
+            assert!(t("cusn8-eta")[i].1 < t("cusn8")[i].1 && t("cusn8")[i].1 < t("cusn8-low")[i].1);
+        }
+        assert!(CUSN8_RECEIPT.contains("Radiation loss missing") && CUSN8_RECEIPT.contains("No anelastic loss"));
+        assert!(CUSN8_ETA_RECEIPT.contains("borrowed") && CUSN8_ETA_RECEIPT.contains("possibly counted twice"));
+        assert!(cusn8("b20").is_none() && super::row("cusn9").is_none());
+    }
+
+    #[test]
+    fn a_row_refuses_a_shell_of_another_alloy() {
+        let (hat_top, _) = hihat_spec();
+        let refused = with_printed_shell_loss(&card_crash(), &row("b20")).err().expect("b20 refused on the CuSn8 crash");
+        assert!(refused.contains("holds B20's thermal data") && refused.contains("crash 18"), "{refused}");
+        assert!(with_printed_shell_loss(&card_ride(), &row("b20-low")).is_err());
+        let refused = with_printed_shell_loss(&hat_top, &cusn8("cusn8").unwrap()).err().expect("cusn8 refused on the B20 hat");
+        assert!(refused.contains("holds CuSn8's thermal data") && refused.contains("hi-hat top 14"), "{refused}");
+        assert!(with_printed_shell_loss(&crash(), &cusn8("cusn8-eta").unwrap()).is_err());
+        assert!(with_printed_shell_loss(&hat_top, &row("b20")).is_ok());
     }
 
     #[test]

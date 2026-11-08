@@ -131,12 +131,24 @@ pub fn drum(
 }
 
 /// The ride the examples play: by default `kit::card_ride()`, 88cccbb78's
-/// declared shell (ruling 7486); with `preset` the recording-fitted preset.
+/// declared shell (ruling 7486) in the recorded ride's alloy, CuSn8 (MB 13551);
+/// with `preset` the recording-fitted preset, in B20.
 pub fn ride(preset: bool) -> CymbalSpec {
     if preset {
         kit::ride()
     } else {
         kit::card_ride()
+    }
+}
+
+/// The crash the examples play: by default `kit::card_crash()`, the preset's
+/// shell in the recorded crash's alloy, CuSn8 (MB 13551); with `preset` the
+/// preset, in B20.
+pub fn crash(preset: bool) -> CymbalSpec {
+    if preset {
+        kit::crash()
+    } else {
+        kit::card_crash()
     }
 }
 
@@ -171,7 +183,7 @@ pub fn hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)], preset: bool) -> Resul
     }
 }
 
-/// A preset-bronze cymbal struck once at its edge, at `speed` m/s, by the
+/// A cymbal struck once at its edge, at `speed` m/s, by the
 /// hickory card's shaft at the declared shoulder station, the wood crushing
 /// across its grain. The edge is taken fully rounded (half its thickness).
 /// There is no default speed: a shaft strike is rendered as a ladder of speeds
@@ -187,7 +199,7 @@ pub fn shaft_cymbal(spec: &kit::CymbalSpec, speed: Option<f64>) -> Result<Piece,
         &hickory_point(gas.temperature)?,
         SHOULDER_STATION_M,
         0.5 * kit::edge_thickness(spec),
-        (kit::BRONZE.0, kit::BRONZE.1),
+        (spec.elastic.0, spec.elastic.1),
     )?;
     kit::cymbal_struck_by(
         spec,

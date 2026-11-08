@@ -22,6 +22,12 @@ pub const HIHAT_STICK_TIP_RADIUS_M: f64 = 0.004;
 const MYLAR: (f64, f64, f64) = (4.0e9, 0.38, 1390.0);
 /// B20 cymbal bronze (E Pa, nu, rho kg/m^3): handbook values, not a measured specimen.
 pub const BRONZE: (f64, f64, f64) = (1.05e11, 0.33, 8600.0);
+/// CuSn8 (EN CW453K, UNS C52100), Paiste's "2002 bronze" (E Pa, nu, rho kg/m^3): E 115 GPa and
+/// density 8.8 g/cm^3 as printed by Aurubis (PNA 283) and Matthey (CuSn8 v22E, 8.79); Poisson's
+/// ratio is printed by neither, so B20's declared 0.33 is kept. The Salamander recordings' crash (a
+/// Paiste 18" Innovations Medium Crash) and ride (a Paiste 20" PST 5 Medium Ride) are CuSn8
+/// (MB 13441, 13551): sheet values, not a measured specimen.
+pub const CUSN8: (f64, f64, f64) = (1.15e11, 0.33, 8800.0);
 
 pub struct Piece {
     pub instrument: Instrument,
@@ -738,6 +744,9 @@ pub struct CymbalSpec {
     /// Where the shell's dimensions or loss points come from, when a receipt is owed; it joins the
     /// notes of every cymbal built from the spec.
     pub provenance: Option<&'static str>,
+    /// The shell's alloy (E Pa, nu, rho kg/m^3) when no material pack is bound: [`BRONZE`] for
+    /// every preset, [`CUSN8`] for the card route's crash and ride.
+    pub elastic: (f64, f64, f64),
 }
 
 /// The stick and rim constants a cymbal or hi-hat is played with (ruling 7486).
@@ -885,23 +894,35 @@ fn cymbal_shell(name: &str, c: &CymbalSpec, felt: bool, elastic: (f64, f64, f64)
 }
 
 pub fn splash() -> CymbalSpec {
-    CymbalSpec { name: "splash 8", radius: 0.1016, bow_thickness: 0.68e-3, bell_thickness: 1.5e-3, bell_radius: 0.039, bow_rise: 0.008, bell_rise: 0.014, grid: 4.5e-3, t60: [(500.0, 6.8), (10000.0, 3.1)], provenance: None }
+    CymbalSpec { name: "splash 8", radius: 0.1016, bow_thickness: 0.68e-3, bell_thickness: 1.5e-3, bell_radius: 0.039, bow_rise: 0.008, bell_rise: 0.014, grid: 4.5e-3, t60: [(500.0, 6.8), (10000.0, 3.1)], provenance: None, elastic: BRONZE }
 }
 
 pub fn crash() -> CymbalSpec {
-    CymbalSpec { name: "crash 18", radius: 0.2286, bow_thickness: 0.95e-3, bell_thickness: 1.6e-3, bell_radius: 0.075, bow_rise: 0.025, bell_rise: 0.015, grid: 6.0e-3, t60: [(500.0, 10.0), (10000.0, 2.0)], provenance: None }
+    CymbalSpec { name: "crash 18", radius: 0.2286, bow_thickness: 0.95e-3, bell_thickness: 1.6e-3, bell_radius: 0.075, bow_rise: 0.025, bell_rise: 0.015, grid: 6.0e-3, t60: [(500.0, 10.0), (10000.0, 2.0)], provenance: None, elastic: BRONZE }
 }
+
+/// The card route's crash: the preset's shell in the recorded crash's alloy, [`CUSN8`].
+pub fn card_crash() -> CymbalSpec {
+    CymbalSpec { elastic: CUSN8, provenance: Some(CUSN8_SHELL_RECEIPT), ..crash() }
+}
+
+/// The receipt of a CuSn8 shell: which constants are printed and which are kept declared.
+pub const CUSN8_SHELL_RECEIPT: &str = "shell alloy CuSn8, Paiste's 2002 bronze (MB 13551): E 115 GPa and density 8800 kg/m^3 \
+from the Aurubis (PNA 283) and Matthey (CuSn8 v22E) sheets; Poisson's ratio 0.33 declared (printed by neither)";
 
 pub fn ride() -> CymbalSpec {
     CymbalSpec { name: "ride 20", radius: 0.254, bow_thickness: 1.65e-3, bell_thickness: 2.25e-3, bell_radius: 0.085, bow_rise: 0.022, bell_rise: 0.020, grid: 6.2e-3, t60: [(500.0, 14.0), (10000.0, 3.2)],
-                 provenance: Some("ride: fitted to a recording (96ccf8f1b), not physics: bow 1.65 mm, bell 2.25 mm, 10 kHz T60 3.2 s") }
+                 provenance: Some("ride: fitted to a recording (96ccf8f1b), not physics: bow 1.65 mm, bell 2.25 mm, 10 kHz T60 3.2 s"), elastic: BRONZE }
 }
 
 /// The card route's ride (ruling 7486): the preset with 88cccbb78's declared shell, bow 1.60 mm
-/// and bell 2.20 mm, and its 10 kHz loss point, 3.0 s. The grid (6.2 mm) is numerics and stays.
+/// and bell 2.20 mm, and its 10 kHz loss point, 3.0 s, in the recorded ride's alloy, [`CUSN8`]
+/// (MB 13551). The grid (6.2 mm) is numerics and stays.
 pub fn card_ride() -> CymbalSpec {
     CymbalSpec { bow_thickness: 1.6e-3, bell_thickness: 2.2e-3, t60: [(500.0, 14.0), (10000.0, 3.0)],
-                 provenance: Some("ride (ruling 7486): bow 1.60 mm, bell 2.20 mm and the 10 kHz T60 3.0 s, declared estimates (88cccbb78)"), ..ride() }
+                 provenance: Some("ride (ruling 7486): bow 1.60 mm, bell 2.20 mm and the 10 kHz T60 3.0 s, declared estimates (88cccbb78); \
+shell alloy CuSn8, Paiste's 2002 bronze (MB 13551): E 115 GPa and density 8800 kg/m^3 from the Aurubis (PNA 283) and Matthey \
+(CuSn8 v22E) sheets; Poisson's ratio 0.33 declared (printed by neither)"), elastic: CUSN8, ..ride() }
 }
 
 fn pick_oversample(ins: &mut Instrument, max_ratio: f64) -> Result<usize, String> {
@@ -1020,7 +1041,7 @@ pub fn edge_thickness(c: &CymbalSpec) -> f64 {
 
 fn build_cymbal(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], gas: GasState, materials: Option<&KitMaterials>, iface: &CymbalInterface, striker: Option<Striker>) -> Result<Piece, String> {
     let mut ins = instrument(OUT_RATE, gas, materials)?;
-    let elastic = materials.map_or(BRONZE, |m| elastic_values(m.primary()));
+    let elastic = materials.map_or(c.elastic, |m| elastic_values(m.primary()));
     let mut body = cymbal_body(c.name, c, elastic, materials.and_then(KitMaterials::primary_bending_loss))?;
     body.origin = [0.0, 0.0, 0.0];
     let n = body.n;
@@ -1066,7 +1087,7 @@ fn build_cymbal(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], gas: GasState, ma
 }
 
 pub fn hihat_spec() -> (CymbalSpec, CymbalSpec) {
-    let top = CymbalSpec { name: "hi-hat top 14", radius: 0.1778, bow_thickness: 0.85e-3, bell_thickness: 1.4e-3, bell_radius: 0.055, bow_rise: 0.015, bell_rise: 0.01, grid: 5.5e-3, t60: [(500.0, 8.0), (10000.0, 1.5)], provenance: None };
+    let top = CymbalSpec { name: "hi-hat top 14", radius: 0.1778, bow_thickness: 0.85e-3, bell_thickness: 1.4e-3, bell_radius: 0.055, bow_rise: 0.015, bell_rise: 0.01, grid: 5.5e-3, t60: [(500.0, 8.0), (10000.0, 1.5)], provenance: None, elastic: BRONZE };
     let bottom = CymbalSpec { name: "hi-hat bottom 14", bow_thickness: 1.1e-3, ..top };
     (top, bottom)
 }
@@ -1144,8 +1165,8 @@ fn build_hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64,
     bs.bow_rise = -bs.bow_rise;
     bs.bell_rise = -bs.bell_rise;
     let mut ins = instrument(OUT_RATE, gas, materials)?;
-    let primary = materials.map_or(BRONZE, |m| elastic_values(m.primary()));
-    let secondary = materials.map_or(BRONZE, |m| elastic_values(m.secondary()));
+    let primary = materials.map_or(ts.elastic, |m| elastic_values(m.primary()));
+    let secondary = materials.map_or(bs.elastic, |m| elastic_values(m.secondary()));
     let mut top = cymbal_shell(ts.name, &ts, false, primary, materials.and_then(KitMaterials::primary_bending_loss))?;
     top.origin = [0.0, 0.0, 0.0];
     let mut bot = cymbal_shell(bs.name, &bs, false, secondary, materials.and_then(KitMaterials::secondary_bending_loss))?;

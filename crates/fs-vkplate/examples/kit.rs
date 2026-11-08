@@ -26,6 +26,11 @@
 //! cast bells (`shell_loss`); radiation loss is missing. A hi-hat's two shells each take the loss
 //! at their own free edge. `b20-low` and `b20-high` are the band's ends and never post. It is
 //! refused on `--preset-heads`.
+//! The card route's crash and ride are CuSn8 (`kit::CUSN8`, the recorded Paiste cymbals' alloy,
+//! MB 13551), so a row is offered only on a shell of its own alloy: `b20` rows on the B20
+//! hi-hats, `cusn8` rows on the crash and ride. `--shell-loss cusn8` is CuSn8's printed
+//! thermoelastic damping alone; `cusn8-eta` adds the cast bells' borrowed anelastic factor;
+//! `cusn8-low` is a band end (Kemper's lower conductivity) and never posts.
 //!
 //! The drums' heads and stick come from sourced material cards, and no piece keeps a value fitted
 //! to a recording (see `drum_cards`); `--preset-heads` renders the recording-fitted presets
@@ -53,8 +58,10 @@ const PORT_RADIATION_FLAG: &str = "--port-radiation";
 const MIC_FIRST_ORDER_FLAG: &str = "--mic-first-order";
 /// Opt-in (MB 7247), snare-off only: `--head-mode-damping skrodzka2006`.
 const HEAD_MODE_DAMPING_FLAG: &str = "--head-mode-damping";
-/// Opt-in (MB 12552), crash and ride only: `--shell-loss b20|b20-low|b20-high`.
+/// Opt-in (MB 12552, 13551), cymbals only: `--shell-loss b20|b20-low|b20-high` on the hi-hats,
+/// `--shell-loss cusn8|cusn8-eta|cusn8-low` on the crash and ride.
 const SHELL_LOSS_FLAG: &str = "--shell-loss";
+const SHELL_LOSS_ROWS: &str = "b20|b20-low|b20-high|cusn8|cusn8-eta|cusn8-low";
 
 fn main() {
     let preset_heads = std::env::args().any(|a| a == drum_cards::PRESET_HEADS_FLAG);
@@ -115,8 +122,8 @@ fn main() {
         }
     });
     let shell_loss = all.iter().position(|a| a == SHELL_LOSS_FLAG).map(|i| {
-        all.get(i + 1).and_then(|s| fs_vkplate::shell_loss::b20(s)).unwrap_or_else(|| {
-            eprintln!("usage: {SHELL_LOSS_FLAG} b20|b20-low|b20-high");
+        all.get(i + 1).and_then(|s| fs_vkplate::shell_loss::row(s)).unwrap_or_else(|| {
+            eprintln!("usage: {SHELL_LOSS_FLAG} {SHELL_LOSS_ROWS}");
             std::process::exit(2)
         })
     });
@@ -149,7 +156,7 @@ fn main() {
         .map(|(_, a)| a.clone())
         .collect();
     if a.len() < 3 {
-        eprintln!("usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads] [--observer TABLE.tsv] [--port RADIUS_M [--port-flow-loss K] [--port-radiation]] [--mic-first-order ALPHA FX FY FZ] [--head-mode-damping skrodzka2006] [--shell-loss b20|b20-low|b20-high]");
+        eprintln!("usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads] [--observer TABLE.tsv] [--port RADIUS_M [--port-flow-loss K] [--port-radiation]] [--mic-first-order ALPHA FX FY FZ] [--head-mode-damping skrodzka2006] [--shell-loss {SHELL_LOSS_ROWS}]");
         std::process::exit(2);
     }
     if port_radius.is_some() && (!matches!(a[1].as_str(), "kick" | "snare" | "snare-off" | "tom-12" | "tom-14") || observer.is_some()) {
@@ -182,25 +189,27 @@ fn main() {
     let grid: f64 = std::env::var("FS_KIT_GRID").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let cy = |s: kit::CymbalSpec| kit::CymbalSpec { grid: s.grid * grid, ..s };
     let cymbal = |s: kit::CymbalSpec, hit: (f64, f64, f64, f64)| drum_cards::cymbal(&cy(s), &[hit], preset_heads);
-    // --shell-loss: the crash's or ride's shell with its T60 pair from print (fs_vkplate::shell_loss);
-    // without the flag the shell is returned as it came
-    let shell = |s: kit::CymbalSpec| match &shell_loss {
-        None => (s, None),
-        Some(loss) => fs_vkplate::shell_loss::with_printed_shell_loss(&s, kit::BRONZE, loss)
+    // --shell-loss: the played cymbal's shell with its T60 pair from print (fs_vkplate::shell_loss), refused on a
+    // shell of another alloy than the row's; every other shell, and every shell without the flag, is returned as it came
+    let played = a[1].as_str();
+    let shell = |s: kit::CymbalSpec, on: bool| match &shell_loss {
+        Some(loss) if on => fs_vkplate::shell_loss::with_printed_shell_loss(&s, loss)
             .map(|(spec, line)| (spec, Some(line)))
             .unwrap_or_else(|e| {
                 eprintln!("refused: {e}");
                 std::process::exit(1)
             }),
+        _ => (s, None),
     };
-    let (crash_shell, crash_line) = shell(kit::crash());
-    let (ride_shell, ride_line) = shell(drum_cards::ride(preset_heads));
+    let (crash_shell, crash_line) = shell(drum_cards::crash(preset_heads), played == "crash");
+    let (ride_shell, ride_line) = shell(drum_cards::ride(preset_heads), played == "ride");
     let hihat = |gap: f64, pedal_n: f64, v: f64| drum_cards::hihat(gap, pedal_n, &[(0.005, v)], preset_heads);
     // --shell-loss on a hi-hat: each of its two shells takes the loss at its own free edge, with its own receipt
     let (hat_shells, hat_lines) = {
+        let on = matches!(played, "hihat-closed" | "hihat-open");
         let (top, bottom) = kit::hihat_spec();
-        let (top, top_line) = shell(top);
-        let (bottom, bottom_line) = shell(bottom);
+        let (top, top_line) = shell(top, on);
+        let (bottom, bottom_line) = shell(bottom, on);
         ((top, bottom), top_line.into_iter().chain(bottom_line).collect::<Vec<String>>())
     };
     let (piece, dur): (Result<Piece, String>, f64) = match a[1].as_str() {
@@ -215,7 +224,7 @@ fn main() {
         "hihat-open" => (drum_cards::open_hihat(&[(0.005, v(2.5))], preset_heads), 2.5),
         "splash" => (cymbal(kit::splash(), (0.005, v(2.0), 0.78, 0.005)), 2.6),
         "crash" => (cymbal(crash_shell, (0.005, v(6.0), 0.95, 0.008)), 5.0),
-        "crash-shaft" => (drum_cards::shaft_cymbal(&cy(kit::crash()), speed), 5.0),
+        "crash-shaft" => (drum_cards::shaft_cymbal(&cy(kit::card_crash()), speed), 5.0),
         "ride" => (cymbal(ride_shell, (0.005, v(2.5), 0.6, 0.004)), 4.0),
         other => {
             eprintln!("unknown piece {other}");
