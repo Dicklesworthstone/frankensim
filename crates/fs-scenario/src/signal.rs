@@ -10,7 +10,7 @@ use std::fmt;
 
 #[path = "signal/chirp.rs"]
 mod chirp;
-pub use chirp::LinearChirp;
+pub use chirp::{DEFAULT_MAXIMUM_CYCLES_PER_STEP, LinearChirp};
 
 /// Smooth histories have no finite breakpoint set. Net-flux admission uses
 /// this many equal panels (endpoints included) on each function's declared

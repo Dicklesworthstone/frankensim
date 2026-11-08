@@ -225,6 +225,16 @@ flagships.
   refuses. These are numerical estimates, not interval enclosures.
   Analytic first/second derivatives feed translating and tilting frames;
   nonzero changing sweeps refuse second derivatives at their rate-change knots.
+  `LinearChirp::resolved_step_end` limits a proposed physical interval by an
+  explicit maximum cycles-per-step allowance and its next frequency-slope join.
+  The interval duration times its maximum instantaneous frequency must fit the
+  allowance; `DEFAULT_MAXIMUM_CYCLES_PER_STEP` is 1/16. Rising sweeps use an
+  analytic quadratic limit, including sweeps starting at DC, rather than a
+  tiny step chosen from a distant final frequency. Falling sweeps and both
+  endpoint tails retain their actual frequency. DC and zero amplitude need no
+  frequency subdivision. Returned endpoints are fixed points when admitted
+  again; unrepresentable positive advances refuse. This is source-resolution
+  control, not antialias filtering or a solution-error/bandwidth certificate.
   Solid, compressible-pressure and moving-heat event owners retain those knots.
   Moving-heat travel limits use the full interval's maximum frequency, including
   continuing tails; polynomial-only power and design-control paths refuse

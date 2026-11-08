@@ -11,6 +11,10 @@ const TAU: Dd = Dd {
     lo: 2.449_293_598_294_706_4e-16,
 };
 
+/// Default source resolution: at least sixteen steps per instantaneous cycle.
+/// This is a temporal resolution policy, not a solver-error or band-limit claim.
+pub const DEFAULT_MAXIMUM_CYCLES_PER_STEP: f64 = 1.0 / 16.0;
+
 /// A continuous cosine excitation with linearly changing instantaneous hertz.
 ///
 /// `y(t) = offset + amplitude*cos(phase(t))`. On the authored sweep interval,
@@ -162,6 +166,150 @@ impl LinearChirp {
         Ok(self
             .instantaneous_frequency_hz(start)?
             .max(self.instantaneous_frequency_hz(end)?))
+    }
+
+    /// Limit a forward step on the original physical clock to resolve this source.
+    ///
+    /// For nonzero amplitude, the returned interval satisfies `duration * maximum_frequency <=
+    /// maximum_cycles_per_step`, using the maximum instantaneous hertz over
+    /// that interval and conservative floating-point admission. A changing
+    /// sweep also stops at its next join; pure tones, DC and zero amplitude do
+    /// not acquire artificial joins. Zero amplitude imposes no frequency cap.
+    /// Both endpoint tones continue unchanged.
+    /// An accepted endpoint is a fixed point: passing it back with the same
+    /// start and allowance returns it exactly.
+    ///
+    /// A rising sweep uses an analytic quadratic limit, including a sweep
+    /// starting at DC. It does not impose the frequency of a distant proposed
+    /// endpoint on the entire step. This operation is allocation-free and
+    /// constant-work on success. It does not sample, reset or filter the source,
+    /// and supplies neither a band-limit certificate nor a solver-error bound.
+    ///
+    /// # Errors
+    /// [`ScenarioError::Evaluate`] for nonfinite, reversed or unrepresentable
+    /// intervals, an allowance outside `(0, 0.5)`, or a clock that cannot admit
+    /// a represented positive advance at the requested source resolution.
+    pub fn resolved_step_end(
+        &self,
+        start_s: f64,
+        proposed_end_s: f64,
+        maximum_cycles_per_step: f64,
+    ) -> Result<f64, ScenarioError> {
+        if !start_s.is_finite()
+            || !proposed_end_s.is_finite()
+            || proposed_end_s <= start_s
+            || !(proposed_end_s - start_s).is_finite()
+        {
+            return Err(invalid("chirp resolution needs a finite forward interval"));
+        }
+        if !maximum_cycles_per_step.is_finite()
+            || maximum_cycles_per_step <= 0.0
+            || maximum_cycles_per_step >= 0.5
+        {
+            return Err(invalid(
+                "chirp step allowance must be finite and in (0, 0.5) cycles",
+            ));
+        }
+        if self.amplitude.value == 0.0 {
+            return Ok(proposed_end_s);
+        }
+        let changing = self.frequency_start_hz != self.frequency_end_hz;
+        let mut end = proposed_end_s;
+        if changing {
+            if start_s < self.t_start_s {
+                end = end.min(self.t_start_s);
+            } else if start_s < self.t_end_s {
+                end = end.min(self.t_end_s);
+            }
+        }
+        if self.step_is_resolved(start_s, end, maximum_cycles_per_step) {
+            return Ok(end);
+        }
+
+        let frequency = self.resolution_frequency_upper(start_s);
+        let duration = if self.frequency_end_hz > self.frequency_start_hz
+            && start_s >= self.t_start_s
+            && start_s < self.t_end_s
+        {
+            // Solve f(start)*dt + slope*dt^2 = allowance. Characteristic
+            // times avoid squaring f(start), subtracting nearly equal roots,
+            // or forming a slope that can overflow/underflow on a wide sweep.
+            let sweep = (self.t_end_s - self.t_start_s).next_down();
+            let delta = (self.frequency_end_hz - self.frequency_start_hz)
+                .next_up()
+                .min(self.frequency_end_hz);
+            let quadratic = (det::sqrt(maximum_cycles_per_step) * det::sqrt(sweep)
+                / det::sqrt(delta))
+            .min(f64::MAX);
+            if frequency == 0.0 {
+                quadratic
+            } else {
+                let linear = (maximum_cycles_per_step / frequency).min(f64::MAX);
+                if linear <= quadratic {
+                    let ratio = linear / quadratic;
+                    linear * (2.0 / (1.0 + det::sqrt(1.0 + 4.0 * ratio * ratio)))
+                } else {
+                    let ratio = quadratic / linear;
+                    quadratic * (2.0 / (ratio + det::sqrt(ratio * ratio + 4.0)))
+                }
+            }
+        } else {
+            (maximum_cycles_per_step / frequency).min(f64::MAX)
+        };
+        if !duration.is_finite() || duration <= 0.0 {
+            return Err(invalid(
+                "chirp resolution cannot represent a positive step duration",
+            ));
+        }
+        // Leave a few ulps for the independent admission arithmetic, then
+        // account for rounding when adding the duration to an absolute clock.
+        let duration = duration.min(end - start_s) * (1.0 - 16.0 * f64::EPSILON);
+        end = (start_s + duration).min(end);
+        for _ in 0..4 {
+            if !end.is_finite() || end <= start_s {
+                break;
+            }
+            if self.step_is_resolved(start_s, end, maximum_cycles_per_step) {
+                return Ok(end);
+            }
+            end = end.next_down();
+        }
+        Err(invalid(
+            "chirp resolution cannot admit an advance on the represented clock",
+        ))
+    }
+
+    fn step_is_resolved(&self, start: f64, end: f64, allowance: f64) -> bool {
+        let at = if self.frequency_end_hz > self.frequency_start_hz {
+            end
+        } else {
+            start
+        };
+        let frequency = self.resolution_frequency_upper(at);
+        frequency == 0.0 || ((end - start).next_up() * frequency).next_up() <= allowance
+    }
+
+    // Evaluate the nonnegative affine frequency from its lower endpoint using
+    // outward elementary operations. Avoid cancellation near a descending
+    // sweep's low-frequency end, and retain exact constant-frequency tails.
+    fn resolution_frequency_upper(&self, time: f64) -> f64 {
+        if time <= self.t_start_s || self.frequency_start_hz == self.frequency_end_hz {
+            return self.frequency_start_hz;
+        }
+        if time >= self.t_end_s {
+            return self.frequency_end_hz;
+        }
+        let low = self.frequency_start_hz.min(self.frequency_end_hz);
+        let high = self.frequency_start_hz.max(self.frequency_end_hz);
+        let elapsed = if self.frequency_end_hz > self.frequency_start_hz {
+            time - self.t_start_s
+        } else {
+            self.t_end_s - time
+        };
+        let duration = (self.t_end_s - self.t_start_s).next_down();
+        let fraction = (elapsed.next_up() / duration).next_up().min(1.0);
+        let delta = (high - low).next_up().min(high);
+        (low + (delta * fraction).next_up()).next_up().min(high)
     }
 
     /// Sample the same continuous excitation at a finite physical time.
@@ -327,6 +475,124 @@ mod tests {
         assert!(
             (actual - expected).abs() <= tolerance,
             "{actual:e} != {expected:e}"
+        );
+    }
+
+    fn resolved(source: &LinearChirp, start: f64, proposed: f64, allowance: f64) -> f64 {
+        let end = source
+            .resolved_step_end(start, proposed, allowance)
+            .unwrap();
+        assert!(start < end && end <= proposed);
+        assert!((end - start) * source.max_frequency_hz(start, end).unwrap() <= allowance);
+        assert_eq!(
+            source.resolved_step_end(start, end, allowance).unwrap(),
+            end
+        );
+        end
+    }
+
+    #[test]
+    fn g1_resolved_steps_follow_rising_falling_and_endpoint_frequencies() {
+        let allowance = DEFAULT_MAXIMUM_CYCLES_PER_STEP;
+        let rising = chirp(0.0, 10.0, 2.0, 12.0, 0.4);
+        let end = resolved(&rising, 0.5, 8.0, allowance);
+        // f(t) = 2+t. The endpoint-frequency rule gives
+        // dt*(2.5+dt) = allowance, not the integrated mean frequency.
+        let expected = 2.0 * allowance / (2.5 + (2.5 * 2.5 + 4.0 * allowance).sqrt());
+        close(end - 0.5, expected, 2e-14);
+
+        let falling = chirp(1.0, 5.0, 5.0, 1.0, -0.2);
+        for (start, proposed, frequency) in [(-2.0, 0.0, 5.0), (2.0, 8.0, 4.0), (5.0, 8.0, 1.0)] {
+            let end = resolved(&falling, start, proposed, allowance);
+            close(end - start, allowance / frequency, 2e-14);
+        }
+
+        let slow = chirp(1.0, 2.0, 0.01, 0.02, 0.0);
+        assert_eq!(resolved(&slow, -1.0, 3.0, allowance), 1.0);
+        assert_eq!(resolved(&slow, 1.0, 3.0, allowance), 2.0);
+        assert_eq!(resolved(&slow, 2.0, 3.0, allowance), 3.0);
+    }
+
+    #[test]
+    fn g1_dc_start_uses_the_local_quadratic_without_distant_frequency_subdivision() {
+        let allowance = DEFAULT_MAXIMUM_CYCLES_PER_STEP;
+        // The second/third cases have an unrepresentable f_end/duration;
+        // their local resolved times and frequencies are representable.
+        for (duration, final_hz, expected) in [
+            (1e12, 1e6, 250.0),
+            (1e300, 1e-200, 2.5e249),
+            (1e-300, 1e308, 2.5e-305),
+        ] {
+            let source = chirp(0.0, duration, 0.0, final_hz, 0.0);
+            let end = resolved(&source, 0.0, duration, allowance);
+            close(end / expected, 1.0, 2e-13);
+            assert!(end > 1e3 * (allowance / final_hz));
+        }
+    }
+
+    #[test]
+    fn g3_resolved_tone_dc_and_zero_amplitude_keep_the_original_clock() {
+        let tone = chirp(1.0, 2.0, 0.1, 0.1, 0.31);
+        let before = tone.eval(3.0).unwrap();
+        assert_eq!(resolved(&tone, 0.0, 3.0, 0.49), 3.0);
+        assert_eq!(tone.eval(3.0).unwrap(), before);
+        let very_slow = chirp(0.0, 1.0, f64::from_bits(1), f64::from_bits(1), 0.31);
+        assert!(
+            resolved(&very_slow, 0.0, f64::MAX, DEFAULT_MAXIMUM_CYCLES_PER_STEP) > 0.99 * f64::MAX
+        );
+        let dc = chirp(1.0, 2.0, 0.0, 0.0, 0.31);
+        assert_eq!(
+            resolved(&dc, -100.0, 100.0, DEFAULT_MAXIMUM_CYCLES_PER_STEP),
+            100.0
+        );
+        let zero = LinearChirp::new(
+            1.0,
+            2.0,
+            1e9,
+            2e9,
+            0.31,
+            QtyAny::dimensionless(7.0),
+            QtyAny::dimensionless(0.0),
+        )
+        .unwrap();
+        assert_eq!(
+            zero.resolved_step_end(-100.0, 100.0, DEFAULT_MAXIMUM_CYCLES_PER_STEP)
+                .unwrap(),
+            100.0
+        );
+        assert_eq!(zero.eval(100.0).unwrap(), QtyAny::dimensionless(7.0));
+    }
+
+    #[test]
+    fn g0_resolved_steps_refuse_invalid_allowances_and_nonadvancing_clocks() {
+        let source = chirp(0.0, 1.0, 4.0, 4.0, 0.0);
+        for allowance in [0.0, -0.1, 0.5, 1.0, f64::NAN, f64::INFINITY] {
+            assert!(source.resolved_step_end(0.0, 1.0, allowance).is_err());
+        }
+        for (start, end) in [
+            (f64::NAN, 1.0),
+            (0.0, f64::INFINITY),
+            (1.0, 1.0),
+            (2.0, 1.0),
+            (-f64::MAX, f64::MAX),
+        ] {
+            assert!(
+                source
+                    .resolved_step_end(start, end, DEFAULT_MAXIMUM_CYCLES_PER_STEP)
+                    .is_err()
+            );
+        }
+        let epoch = 2.0_f64.powi(60);
+        assert!(
+            source
+                .resolved_step_end(epoch, epoch.next_up(), DEFAULT_MAXIMUM_CYCLES_PER_STEP)
+                .is_err()
+        );
+        let below_range = chirp(0.0, 1.0, f64::MAX, f64::MAX, 0.0);
+        assert!(
+            below_range
+                .resolved_step_end(0.0, 1.0, f64::from_bits(1))
+                .is_err()
         );
     }
 

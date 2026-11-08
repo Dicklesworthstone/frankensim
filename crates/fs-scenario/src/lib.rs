@@ -88,7 +88,7 @@ pub use sensor::{
     SensorSetBudget, SensorSetError, SensorSetPlan, compile_sensor_set,
     compile_sensor_set_with_budget, plan_sensor_set,
 };
-pub use signal::{ChebProfile, Interp, LinearChirp, TimeSignal};
+pub use signal::{ChebProfile, DEFAULT_MAXIMUM_CYCLES_PER_STEP, Interp, LinearChirp, TimeSignal};
 
 use core::fmt;
 
