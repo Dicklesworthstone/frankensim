@@ -529,9 +529,8 @@ fn absorbing_crystal_slab_retains_original_sources_and_both_faces() {
         [1.0, 2.0, 3.0],
     )
     .unwrap();
-    let slab =
-        OrientedUniaxialSlab::try_new(&entrance, DielectricResponse::Lossless(&exit), 5e-6)
-            .unwrap();
+    let slab = OrientedUniaxialSlab::try_new(&entrance, DielectricResponse::Lossless(&exit), 5e-6)
+        .unwrap();
     let omega = WL_FREQUENCY_NM / 10_000.0;
     let electric = [C64::new(0.6, -0.2), C64::new(0.1, 0.7)];
     let expected_loss = crystal
@@ -544,18 +543,19 @@ fn absorbing_crystal_slab_retains_original_sources_and_both_faces() {
     // incidence plane with global Cartesian incident polarization.
     let prepared_fields = [
         slab.prepare_absorbing_field(omega, 0.8, electric).unwrap(),
-        slab.prepare_absorbing_field_at_tangential_index_in_plane(
-            omega,
-            0.4,
-            [3.0, 4.0],
-            electric,
-        )
-        .unwrap(),
+        slab.prepare_absorbing_field_at_tangential_index_in_plane(omega, 0.4, [3.0, 4.0], electric)
+            .unwrap(),
     ];
     for prepared in &prepared_fields {
         assert!(core::ptr::eq(prepared.source(), &slab));
-        assert!(core::ptr::eq(prepared.source().entrance_interface(), &entrance));
-        assert!(core::ptr::eq(prepared.source().exit_response().material(), &exit));
+        assert!(core::ptr::eq(
+            prepared.source().entrance_interface(),
+            &entrance
+        ));
+        assert!(core::ptr::eq(
+            prepared.source().exit_response().material(),
+            &exit
+        ));
         let retained_crystal = prepared.source().entrance_interface().crystal_response();
         assert!(core::ptr::eq(retained_crystal.ordinary_source(), &ordinary));
         assert!(core::ptr::eq(
@@ -578,7 +578,11 @@ fn absorbing_crystal_slab_retains_original_sources_and_both_faces() {
 
         for (z, left, right) in [
             (0.0, SlabRegion::TotalIncidentSide, SlabRegion::Crystal),
-            (slab.thickness_m(), SlabRegion::Crystal, SlabRegion::Transmitted),
+            (
+                slab.thickness_m(),
+                SlabRegion::Crystal,
+                SlabRegion::Transmitted,
+            ),
         ] {
             let point = [0.3e-6, -0.2e-6, z];
             let a = prepared.field_at(left, point).unwrap();
@@ -595,4 +599,281 @@ fn absorbing_crystal_slab_retains_original_sources_and_both_faces() {
         slab.prepare_absorbing_field(WL_FREQUENCY_NM / 7000.0, 0.8, electric)
             .is_err()
     );
+    check_absorbing_film_illumination(&slab, omega, electric);
+}
+
+// G0/G1/G3: source-bound positive factors preserve film interference, original
+// tensor work and the distinction between coherent and independent light.
+fn check_absorbing_film_illumination(
+    slab: &fs_em::plane_wave::uniaxial::oriented::slab::OrientedUniaxialSlab<'_, '_>,
+    omega: f64,
+    electric: [C64; 2],
+) {
+    use fs_em::plane_wave::uniaxial::oriented::{
+        absorbing::{
+            CrystalIlluminationError,
+            slab::{AbsorbingSlabCoherentIllumination as Group, AbsorbingSlabIllumination as Bank},
+        },
+        slab::{OrientedUniaxialSlab, SlabRegion},
+    };
+    let fields = [
+        slab.prepare_absorbing_field(omega, 0.8, electric).unwrap(),
+        slab.prepare_absorbing_field(omega, 0.8, electric).unwrap(),
+        slab.prepare_absorbing_field(omega, 0.8, electric.map(|value| -value))
+            .unwrap(),
+    ];
+    let constructive = Group::try_new(slab, &fields[..2], 2, || false).unwrap();
+    let destructive = Group::try_new(slab, &fields[1..], 2, || false).unwrap();
+    let independent = [
+        Group::try_new(slab, &fields[1..2], 1, || false).unwrap(),
+        Group::try_new(slab, &fields[2..], 1, || false).unwrap(),
+    ];
+    let bank = Bank::try_new(slab, &independent, 2, 2, || false).unwrap();
+    assert!(core::ptr::eq(constructive.source(), slab));
+    assert!(core::ptr::eq(bank.source(), slab));
+    assert_eq!(constructive.omega_rad_s(), Some(omega));
+    assert_eq!(constructive.component_count(), 2);
+    assert_eq!(bank.group_count(), 2);
+    assert_eq!(bank.component_count(), 2);
+
+    for (region, z) in [
+        (SlabRegion::Incident, -0.4e-6),
+        (SlabRegion::Reflected, -0.4e-6),
+        (SlabRegion::TotalIncidentSide, -0.4e-6),
+        (SlabRegion::Crystal, 0.37 * slab.thickness_m()),
+        (SlabRegion::Transmitted, 1.4 * slab.thickness_m()),
+    ] {
+        let point = [0.3e-6, -0.2e-6, z];
+        let single = fields[0].field_at(region, point).unwrap();
+        let bright = constructive.field_at(region, point, || false).unwrap();
+        let dark = destructive.field_at(region, point, || false).unwrap();
+        let mixed = bank.field_statistics(region, point, || false).unwrap();
+        let flux = bank.poynting_w_m2(region, point, || false).unwrap();
+        for i in 0..3 {
+            complex_near(
+                bright.field.electric_v_m[i],
+                single.field.electric_v_m[i].scale(2.0),
+                3e-12,
+            );
+            complex_near(
+                bright.field.magnetic_a_m[i],
+                single.field.magnetic_a_m[i].scale(2.0),
+                3e-14,
+            );
+            assert!(dark.field.electric_v_m[i].abs() < 3e-12);
+            assert!(dark.field.magnetic_a_m[i].abs() < 3e-14);
+            near(
+                bright.field.poynting_w_m2[i],
+                4.0 * single.field.poynting_w_m2[i],
+                3e-13,
+            );
+            near(
+                mixed.poynting_w_m2[i],
+                2.0 * single.field.poynting_w_m2[i],
+                3e-13,
+            );
+            assert_eq!(flux[i], mixed.poynting_w_m2[i]);
+            near(
+                mixed.magnetic_rms_squared_a2_m2[i],
+                single.field.magnetic_a_m[i].norm_sq(),
+                3e-14,
+            );
+            for j in 0..3 {
+                complex_near(
+                    mixed.electric_coherency_v2_m2[i][j],
+                    single.field.electric_v_m[i] * single.field.electric_v_m[j].conj(),
+                    3e-12,
+                );
+            }
+        }
+        let heat = single.absorbed_power_density_w_m3;
+        near(
+            bright.absorbed_power_density_w_m3,
+            4.0 * heat,
+            3e-11 * heat.max(1.0),
+        );
+        near(
+            mixed.absorbed_power_density_w_m3,
+            2.0 * heat,
+            3e-11 * heat.max(1.0),
+        );
+        assert!(dark.absorbed_power_density_w_m3 < 1e-20 * heat.max(1.0));
+    }
+
+    // Equal transverse p/s powers are unpolarized at oblique incidence. A
+    // complex unitary factor change to circular components preserves all
+    // statistics after the anisotropic film, without cohering the factors.
+    let p = [C64::from_re(0.8), C64::ZERO];
+    let s = [C64::ZERO, C64::ONE];
+    let linear = [p, s].map(|e| slab.prepare_absorbing_field(omega, 0.8, e).unwrap());
+    let circular = [[p[0], C64::new(0.0, 1.0)], [C64::new(0.0, 0.8), s[1]]].map(|e| {
+        slab.prepare_absorbing_field(
+            omega,
+            0.8,
+            e.map(|value| value.scale(core::f64::consts::FRAC_1_SQRT_2)),
+        )
+        .unwrap()
+    });
+    let linear_groups: [_; 2] =
+        core::array::from_fn(|i| Group::try_new(slab, &linear[i..i + 1], 1, || false).unwrap());
+    let circular_groups: [_; 2] =
+        core::array::from_fn(|i| Group::try_new(slab, &circular[i..i + 1], 1, || false).unwrap());
+    let linear_bank = Bank::try_new(slab, &linear_groups, 2, 2, || false).unwrap();
+    let circular_bank = Bank::try_new(slab, &circular_groups, 2, 2, || false).unwrap();
+    for z in [0.0, 0.3 * slab.thickness_m(), slab.thickness_m()] {
+        let a = linear_bank
+            .field_statistics(SlabRegion::Crystal, [0.0, 0.0, z], || false)
+            .unwrap();
+        let b = circular_bank
+            .field_statistics(SlabRegion::Crystal, [0.0, 0.0, z], || false)
+            .unwrap();
+        for i in 0..3 {
+            for j in 0..3 {
+                complex_near(
+                    a.electric_coherency_v2_m2[i][j],
+                    b.electric_coherency_v2_m2[i][j],
+                    4e-12,
+                );
+            }
+            near(
+                a.magnetic_rms_squared_a2_m2[i],
+                b.magnetic_rms_squared_a2_m2[i],
+                4e-14,
+            );
+            near(a.poynting_w_m2[i], b.poynting_w_m2[i], 4e-13);
+        }
+        near(
+            a.absorbed_power_density_w_m3,
+            b.absorbed_power_density_w_m3,
+            4e-11 * a.absorbed_power_density_w_m3.max(1.0),
+        );
+    }
+
+    // Different directions and incidence planes retain their global phase and
+    // the same fixed optic axis. Contract the total E independently in that
+    // original loss tensor, instead of adding independently positive heat.
+    let crossed = [
+        slab.prepare_absorbing_field_at_tangential_index_in_plane(omega, 0.4, [3.0, 4.0], electric)
+            .unwrap(),
+        slab.prepare_absorbing_field_at_tangential_index_in_plane(
+            omega,
+            -0.3,
+            [4.0, -3.0],
+            electric.map(|value| value * C64::new(0.3, 0.7)),
+        )
+        .unwrap(),
+    ];
+    let group = Group::try_new(slab, &crossed, 2, || false).unwrap();
+    let axis = slab.entrance_interface().optic_axis();
+    let loss = crossed[0].response().principal_loss_permittivities_f_m();
+    let mut interferes = false;
+    for x in [-2e-6, 0.0, 3e-6] {
+        let point = [x, 0.7e-6, 0.6 * slab.thickness_m()];
+        let a = crossed[0].field_at(SlabRegion::Crystal, point).unwrap();
+        let b = crossed[1].field_at(SlabRegion::Crystal, point).unwrap();
+        let actual = group
+            .field_at(SlabRegion::Crystal, point, || false)
+            .unwrap();
+        let e: [C64; 3] =
+            core::array::from_fn(|i| a.field.electric_v_m[i] + b.field.electric_v_m[i]);
+        let dot = (0..3).fold(C64::ZERO, |sum, i| sum + e[i].scale(axis[i]));
+        let norm = axis.iter().map(|v| v * v).sum::<f64>();
+        let parallel = dot.norm_sq() / norm;
+        let perpendicular = e.iter().map(|value| value.norm_sq()).sum::<f64>() - parallel;
+        let expected_heat = 0.5 * omega * (loss[0] * perpendicular + loss[1] * parallel);
+        near(
+            actual.absorbed_power_density_w_m3,
+            expected_heat,
+            4e-11 * expected_heat.max(1.0),
+        );
+        for i in 0..3 {
+            complex_near(actual.field.electric_v_m[i], e[i], 3e-12);
+        }
+        interferes |=
+            (expected_heat - a.absorbed_power_density_w_m3 - b.absorbed_power_density_w_m3).abs()
+                > 1e-3 * expected_heat;
+    }
+    assert!(interferes);
+
+    let other_frequency = [slab
+        .prepare_absorbing_field(f64::from_bits(omega.to_bits() + 1), 0.8, electric)
+        .unwrap()];
+    let mismatched = [
+        slab.prepare_absorbing_field(omega, 0.8, electric).unwrap(),
+        slab.prepare_absorbing_field(f64::from_bits(omega.to_bits() + 1), 0.8, electric)
+            .unwrap(),
+    ];
+    assert!(Group::try_new(slab, &mismatched, 2, || false).is_err());
+    let spectral_groups = [
+        Group::try_new(slab, &fields[..1], 1, || false).unwrap(),
+        Group::try_new(slab, &other_frequency, 1, || false).unwrap(),
+    ];
+    let spectral = Bank::try_new(slab, &spectral_groups, 2, 2, || false).unwrap();
+    let point = [0.1e-6, 0.2e-6, 0.5 * slab.thickness_m()];
+    let expected = fields[0]
+        .field_at(SlabRegion::Crystal, point)
+        .unwrap()
+        .absorbed_power_density_w_m3
+        + other_frequency[0]
+            .field_at(SlabRegion::Crystal, point)
+            .unwrap()
+            .absorbed_power_density_w_m3;
+    near(
+        spectral
+            .field_statistics(SlabRegion::Crystal, point, || false)
+            .unwrap()
+            .absorbed_power_density_w_m3,
+        expected,
+        3e-11 * expected,
+    );
+
+    let other_slab = OrientedUniaxialSlab::try_new(
+        slab.entrance_interface(),
+        slab.exit_response(),
+        slab.thickness_m(),
+    )
+    .unwrap();
+    assert!(Group::try_new(&other_slab, &fields[..1], 1, || false).is_err());
+    assert!(Bank::try_new(&other_slab, &independent, 2, 2, || false).is_err());
+    assert!(Group::try_new(slab, &fields[..2], 1, || false).is_err());
+    assert!(Bank::try_new(slab, &independent, 1, 2, || false).is_err());
+    assert!(Bank::try_new(slab, &independent, 2, 1, || false).is_err());
+    assert!(matches!(
+        bank.field_statistics(SlabRegion::Crystal, point, || true),
+        Err(CrystalIlluminationError::Cancelled)
+    ));
+    assert!(matches!(
+        constructive.field_at(SlabRegion::Crystal, point, || true),
+        Err(CrystalIlluminationError::Cancelled)
+    ));
+    assert!(
+        bank.field_statistics(SlabRegion::Crystal, point, || false)
+            .is_ok()
+    );
+    let empty = Group::try_new(slab, &[], 0, || false).unwrap();
+    let dark = Bank::try_new(slab, &[], 0, 0, || false).unwrap();
+    assert_eq!(empty.omega_rad_s(), None);
+    assert_eq!(
+        empty
+            .field_at(SlabRegion::Crystal, point, || false)
+            .unwrap()
+            .absorbed_power_density_w_m3,
+        0.0
+    );
+    assert_eq!(
+        dark.field_statistics(SlabRegion::Crystal, point, || false)
+            .unwrap()
+            .electric_coherency_v2_m2,
+        [[C64::ZERO; 3]; 3]
+    );
+    for (region, invalid) in [
+        (SlabRegion::Crystal, [0.0, 0.0, -1.0]),
+        (SlabRegion::Transmitted, [0.0; 3]),
+        (SlabRegion::Incident, [0.0, 0.0, 1.0]),
+        (SlabRegion::Crystal, [f64::NAN, 0.0, 0.0]),
+    ] {
+        assert!(empty.field_at(region, invalid, || false).is_err());
+        assert!(dark.field_statistics(region, invalid, || false).is_err());
+        assert!(dark.poynting_w_m2(region, invalid, || false).is_err());
+    }
 }

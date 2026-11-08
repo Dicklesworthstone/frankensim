@@ -139,60 +139,86 @@ pub(in super::super) fn illumination_field_statistics<'a>(
 ) -> Result<AbsorbingCrystalStatistics> {
     poll_illumination(&mut cancelled)?;
     FieldSum::new(side, point)?;
-    let mut electric = [[[Dd::ZERO; 2]; 3]; 3];
-    let mut magnetic = [Dd::ZERO; 3];
-    let mut poynting = [Dd::ZERO; 3];
-    let mut heat = Dd::ZERO;
+    let mut sum = StatisticsSum::new();
     for response in responses {
         poll_illumination(&mut cancelled)?;
-        let value = response.field(side, point)?;
+        sum.add(response.field(side, point)?);
+    }
+    let result = sum.finish()?;
+    poll_illumination(&mut cancelled)?;
+    Ok(result)
+}
+
+/// Shared positive-factor contraction for original half-space and film fields.
+/// Each input already contains all interference within ONE coherent factor.
+/// Factors add second moments; this accumulator never adds their phasors.
+pub(in super::super) struct StatisticsSum {
+    electric: [[[Dd; 2]; 3]; 3],
+    magnetic: [Dd; 3],
+    poynting: [Dd; 3],
+    heat: Dd,
+}
+
+impl StatisticsSum {
+    pub(in super::super) const fn new() -> Self {
+        Self {
+            electric: [[[Dd::ZERO; 2]; 3]; 3],
+            magnetic: [Dd::ZERO; 3],
+            poynting: [Dd::ZERO; 3],
+            heat: Dd::ZERO,
+        }
+    }
+
+    pub(in super::super) fn add(&mut self, value: AbsorbingCrystalField) {
         for i in 0..3 {
             for j in i..3 {
                 let product =
                     half_product(value.field.electric_v_m[i], value.field.electric_v_m[j]);
                 for part in 0..2 {
-                    electric[i][j][part] = electric[i][j][part] + product[part];
+                    self.electric[i][j][part] = self.electric[i][j][part] + product[part];
                 }
             }
             let h = value.field.magnetic_a_m[i];
-            magnetic[i] = magnetic[i] + half_product(h, h)[0];
-            poynting[i] = poynting[i] + Dd::from_f64(value.field.poynting_w_m2[i]);
+            self.magnetic[i] = self.magnetic[i] + half_product(h, h)[0];
+            self.poynting[i] = self.poynting[i] + Dd::from_f64(value.field.poynting_w_m2[i]);
         }
-        heat = heat + Dd::from_f64(value.absorbed_power_density_w_m3);
+        self.heat = self.heat + Dd::from_f64(value.absorbed_power_density_w_m3);
     }
-    let mut electric_coherency_v2_m2 = [[C64::ZERO; 3]; 3];
-    for i in 0..3 {
-        for j in i..3 {
-            let [re, im] = electric[i][j].map(Dd::to_f64);
-            let value = C64::new(re, if i == j { 0.0 } else { im });
-            if !re.is_finite() || !im.is_finite() || i == j && re < 0.0 {
-                return Err("crystal electric coherency is unrepresentable".into());
-            }
-            electric_coherency_v2_m2[i][j] = value;
-            if i != j {
-                electric_coherency_v2_m2[j][i] = value.conj();
+
+    pub(in super::super) fn finish(self) -> Result<AbsorbingCrystalStatistics> {
+        let mut electric_coherency_v2_m2 = [[C64::ZERO; 3]; 3];
+        for i in 0..3 {
+            for j in i..3 {
+                let [re, im] = self.electric[i][j].map(Dd::to_f64);
+                let value = C64::new(re, if i == j { 0.0 } else { im });
+                if !re.is_finite() || !im.is_finite() || i == j && re < 0.0 {
+                    return Err("crystal electric coherency is unrepresentable".into());
+                }
+                electric_coherency_v2_m2[i][j] = value;
+                if i != j {
+                    electric_coherency_v2_m2[j][i] = value.conj();
+                }
             }
         }
+        let magnetic_rms_squared_a2_m2 = self.magnetic.map(Dd::to_f64);
+        let poynting_w_m2 = self.poynting.map(Dd::to_f64);
+        let absorbed_power_density_w_m3 = self.heat.to_f64();
+        if magnetic_rms_squared_a2_m2
+            .iter()
+            .any(|v| !v.is_finite() || *v < 0.0)
+            || poynting_w_m2.iter().any(|v| !v.is_finite())
+            || !absorbed_power_density_w_m3.is_finite()
+            || absorbed_power_density_w_m3 < 0.0
+        {
+            return Err("crystal field statistics are unrepresentable".into());
+        }
+        Ok(AbsorbingCrystalStatistics {
+            electric_coherency_v2_m2,
+            magnetic_rms_squared_a2_m2,
+            poynting_w_m2,
+            absorbed_power_density_w_m3,
+        })
     }
-    let magnetic_rms_squared_a2_m2 = magnetic.map(Dd::to_f64);
-    let poynting_w_m2 = poynting.map(Dd::to_f64);
-    let absorbed_power_density_w_m3 = heat.to_f64();
-    if magnetic_rms_squared_a2_m2
-        .iter()
-        .any(|v| !v.is_finite() || *v < 0.0)
-        || poynting_w_m2.iter().any(|v| !v.is_finite())
-        || !absorbed_power_density_w_m3.is_finite()
-        || absorbed_power_density_w_m3 < 0.0
-    {
-        return Err("crystal field statistics are unrepresentable".into());
-    }
-    poll_illumination(&mut cancelled)?;
-    Ok(AbsorbingCrystalStatistics {
-        electric_coherency_v2_m2,
-        magnetic_rms_squared_a2_m2,
-        poynting_w_m2,
-        absorbed_power_density_w_m3,
-    })
 }
 
 pub(in super::super) fn illumination_poynting<'a>(

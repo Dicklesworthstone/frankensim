@@ -27,7 +27,7 @@ mod absorption;
 mod statistics;
 pub use statistics::{AbsorbingCrystalIlluminationPower, AbsorbingCrystalStatistics};
 pub(super) use statistics::{
-    IlluminationError, coherent_illumination_field, coherent_illumination_poynting,
+    IlluminationError, StatisticsSum, coherent_illumination_field, coherent_illumination_poynting,
     illumination_absorption, illumination_field_statistics, illumination_power,
     illumination_poynting, poll_illumination,
 };
@@ -270,21 +270,41 @@ pub(super) fn eigenbasis(data: Input) -> Result<Eigenbasis> {
     positive(data.ni)?;
     positive(data.mui)?;
     positive(data.mut_)?;
-    if data.indices.iter().any(|&n| !finite(n) || n.re <= 0.0 || n.im > 0.0) {
+    if data
+        .indices
+        .iter()
+        .any(|&n| !finite(n) || n.re <= 0.0 || n.im > 0.0)
+    {
         return Err("absorbing crystal requires passive principal indices");
     }
     if data.indices.iter().all(|n| n.im == 0.0) {
         let b = transparent::eigenbasis(transparent::Input {
-            omega: data.omega, ni: data.ni, no: data.indices[0].re,
-            ne: data.indices[1].re, mui: data.mui, mut_: data.mut_,
-            axis: data.axis, incidence: data.incidence, electric: data.electric,
+            omega: data.omega,
+            ni: data.ni,
+            no: data.indices[0].re,
+            ne: data.indices[1].re,
+            mui: data.mui,
+            mut_: data.mut_,
+            axis: data.axis,
+            incidence: data.incidence,
+            electric: data.electric,
         })?;
-        if b.modes.iter().any(|m| m.kind == super::super::super::kernel::UniaxialWaveKind::Critical) {
+        if b.modes
+            .iter()
+            .any(|m| m.kind == super::super::super::kernel::UniaxialWaveKind::Critical)
+        {
             return Err("coalesced critical crystal modes require a generalized slab basis");
         }
         return Ok(Eigenbasis {
-            scale: b.scale, i: b.i, p: b.p, qi: b.qi,
-            modes: b.modes.map(|m| Mode { z: m.z, e: m.e, h: m.h }),
+            scale: b.scale,
+            i: b.i,
+            p: b.p,
+            qi: b.qi,
+            modes: b.modes.map(|m| Mode {
+                z: m.z,
+                e: m.e,
+                h: m.h,
+            }),
         });
     }
     let scale = binary_scale(data.indices.iter().fold(data.ni, |s, n| s.max(n.abs())));
@@ -356,7 +376,13 @@ pub(super) fn eigenbasis(data: Input) -> Result<Eigenbasis> {
         }
         outgoing.ok_or("absorbing extraordinary mode has no resolved outgoing branch")?
     };
-    Ok(Eigenbasis { scale, i, p, qi, modes: [ordinary, extraordinary] })
+    Ok(Eigenbasis {
+        scale,
+        i,
+        p,
+        qi,
+        modes: [ordinary, extraordinary],
+    })
 }
 
 pub(super) fn solve(data: Input) -> Result<AbsorbingCrystalResponse> {
@@ -415,7 +441,13 @@ pub(super) fn solve(data: Input) -> Result<AbsorbingCrystalResponse> {
             incidence_plane_axis: [1.0, 0.0],
         });
     }
-    let Eigenbasis { scale, i, p, qi, mut modes } = eigenbasis(data)?;
+    let Eigenbasis {
+        scale,
+        i,
+        p,
+        qi,
+        mut modes,
+    } = eigenbasis(data)?;
     let amplitude = positive(
         data.electric
             .iter()
