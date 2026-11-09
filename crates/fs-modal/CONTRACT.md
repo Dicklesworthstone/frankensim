@@ -494,6 +494,42 @@ budgets and cancellation refuse atomically. This remains local continuation
 of one selected positive peak and its isolated crossings; it does not infer
 a free-pole decay rate, constitutive loss factor or global feature completeness.
 
+### `harmonic::resonance`: coupled signed-power surveys
+
+`survey_power_extrema` and its complete parameter-derivative entry find the
+signed maxima and minima resolved by an authored increasing frequency grid.
+They cache each original P/P_omega grid sample once. A shared generic grid
+scanner also serves the existing complex-transfer survey; strict slope
+reversals and their intervening stationary samples identify candidates without
+double counting. Band endpoints lack two-sided evidence and are excluded.
+
+Every candidate retains the existing numerical sign-search owner and original
+power resolver. One final curvature or complete mixed jet per candidate is
+reserved after discovery and before refinement. The global evaluation ceiling
+includes the grid, all refinements and every final jet. A separate positive
+extremum cap refuses truncation before refinement. Original evaluator errors,
+cancellation, unresolved stationary intervals, inconsistent final observations
+and wrongly oriented/degenerate curvature publish no partial collection.
+
+`PowerParameterSurvey` reports each original extremum's local frequency and
+total observed-power sensitivities, retaining the full source, material and
+attachment direction. Only first derivatives are requested during refinement;
+the complete jet is evaluated once at each resolved extremum. Signed and zero
+powers retain their meaning. Temporary candidates store index pairs into one
+ordered sample cache, so storage is O(grid+extrema), with constant refinement
+scratch. No new numerical root engine, physical factor or dense derivative
+operator is introduced.
+
+Native regressions compare two coupled absorbed-power peaks and the intervening
+minimum against an independent normal-coordinate rational response, including
+a complete physical scaling direction. Signed/zero grid extrema, 2^+/-700 power
+units, exact sample caching and total callback limits, candidate caps, source
+errors, final-jet/cancellation refusals, degenerate curvature and poles are
+checked. A deliberately insufficient grid demonstrates the stated resolution
+boundary: these surveys do not certify global spectral completeness, assign
+free modes, or differentiate peak switching. Net boundary work keeps its
+authored physical interpretation.
+
 ### `harmonic::resonance`: physical peak, notch and linewidth sensitivity
 
 `refine_transfer_extremum_with_parameter_derivative` and its callback entry retain the original observed response and first-derivative sign search, then request one complete H/H_omega/H_omegaomega/H_theta/H_omega_theta jet at the resolved frequency. The implicit derivative of `Re(conj(H)*H_omega)=0` differentiates either a strict peak or a strict notch, including a simple exact transfer zero. Total complex response, log-magnitude and phase derivatives follow the moving extremum; log-magnitude and phase are explicitly absent at an exact zero. Signed curvature and stationarity diagnostics expose the remaining local conditioning and search resolution. Zero or wrongly oriented curvature refuses without an arbitrary curvature floor.

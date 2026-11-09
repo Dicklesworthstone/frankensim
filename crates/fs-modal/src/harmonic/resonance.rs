@@ -45,11 +45,14 @@ mod projection;
 pub use parameter_projection::{HarmonicReceiverParameterJet, HarmonicTransferFieldParameterJet};
 pub use power::{
     HarmonicPowerCurvatureSample, HarmonicPowerParameterJet, HarmonicPowerSample, PowerExtremum,
-    PowerExtremumKind, PowerExtremumParameterResponse, refine_power_bandwidth,
-    refine_power_bandwidth_with_cancel, refine_power_bandwidth_with_parameter_derivative,
+    PowerExtremumKind, PowerExtremumParameterResponse, PowerParameterSurvey, PowerSurvey,
+    refine_power_bandwidth, refine_power_bandwidth_with_cancel,
+    refine_power_bandwidth_with_parameter_derivative,
     refine_power_bandwidth_with_parameter_derivative_with_cancel, refine_power_extremum,
     refine_power_extremum_with_cancel, refine_power_extremum_with_parameter_derivative,
-    refine_power_extremum_with_parameter_derivative_with_cancel,
+    refine_power_extremum_with_parameter_derivative_with_cancel, survey_power_extrema,
+    survey_power_extrema_with_cancel, survey_power_extrema_with_parameter_derivative,
+    survey_power_extrema_with_parameter_derivative_with_cancel,
 };
 
 impl HarmonicTransferSample {

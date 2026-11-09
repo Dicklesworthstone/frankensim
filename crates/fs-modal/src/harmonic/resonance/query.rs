@@ -19,7 +19,7 @@ pub struct HarmonicTransferSample {
 impl HarmonicTransferSample {
     // Only its sign is used. Independent normalization avoids overflow from
     // squaring a high-Q response or multiplying its still larger derivative.
-    fn slope(self) -> f64 {
+    pub(super) fn slope(self) -> f64 {
         let a = component_scale(self.amplitude);
         let d = component_scale(self.angular_derivative);
         if a == 0.0 || d == 0.0 {
@@ -213,47 +213,11 @@ pub fn survey_transfer_extrema_with_cancel<E>(
     evaluate: impl FnMut(f64) -> Result<HarmonicTransferSample, E>,
 ) -> Result<TransferSurvey, ResonanceError<E>> {
     let mut query = Query::new(controls, cancelled, evaluate)?;
-    if frequencies_rad_s.len() < 2
-        || frequencies_rad_s.iter().any(|w| !w.is_finite() || *w < 0.0)
-        || frequencies_rad_s.windows(2).any(|w| w[0] >= w[1])
-        || maximum_extrema == 0
-    {
-        return Err(ResonanceError::Invalid(
-            "ordered nonnegative frequency grid and positive extremum capacity required",
-        ));
-    }
-    if frequencies_rad_s.len() > controls.maximum_evaluations {
-        return Err(ResonanceError::EvaluationBudget {
-            maximum_evaluations: controls.maximum_evaluations,
-        });
-    }
-    query.grid.reserve_exact(frequencies_rad_s.len());
-    for &frequency in frequencies_rad_s {
-        let sample = query.sample(frequency, HarmonicTransferSample::slope)?;
-        query.grid.push(sample);
-    }
-
-    // A zero slope alone is not evidence of an extremum. Skip it until two
-    // strictly oriented neighbours establish either a peak or a notch. This
-    // retains exact antiresonances and avoids double-counting a grid maximum.
-    let mut previous: Option<usize> = None;
-    let mut brackets = Vec::new();
-    for index in 0..query.grid.len() {
-        query.poll()?;
-        let point = query.grid[index];
-        if point.level == 0.0 {
-            continue;
-        }
-        if let Some(left) = previous
-            && query.grid[left].level.is_sign_positive() != point.level.is_sign_positive()
-        {
-            if brackets.len() == maximum_extrema {
-                return Err(ResonanceError::ExtremumBudget { maximum_extrema });
-            }
-            brackets.push((left, index));
-        }
-        previous = Some(index);
-    }
+    let brackets = query.survey_brackets(
+        frequencies_rad_s,
+        maximum_extrema,
+        HarmonicTransferSample::slope,
+    )?;
 
     let mut extrema = Vec::with_capacity(brackets.len());
     for (left, right) in brackets {
@@ -445,7 +409,7 @@ pub(super) struct Query<F, C, S> {
     // Only survey input samples are cached. Ordinary local refinement stays
     // allocation-free; survey memory is O(grid points + returned extrema),
     // independent of the number of source evaluations during refinement.
-    grid: Vec<Point<S>>,
+    pub(super) grid: Vec<Point<S>>,
 }
 
 impl<F, C, S, E> Query<F, C, S>
@@ -480,6 +444,78 @@ where
         };
         query.poll()?;
         Ok(query)
+    }
+
+    /// Cache the authored grid once and identify its strictly oriented candidates.
+    /// Only index pairs are retained in the temporary candidate list. Original
+    /// samples remain in one ordered cache, shared by every local refinement.
+    pub(super) fn survey_brackets(
+        &mut self,
+        frequencies_rad_s: &[f64],
+        maximum_extrema: usize,
+        level: impl Fn(S) -> f64 + Copy,
+    ) -> Result<Vec<(usize, usize)>, ResonanceError<E>> {
+        if frequencies_rad_s.len() < 2
+            || frequencies_rad_s.iter().any(|w| !w.is_finite() || *w < 0.0)
+            || frequencies_rad_s.windows(2).any(|w| w[0] >= w[1])
+            || maximum_extrema == 0
+        {
+            return Err(ResonanceError::Invalid(
+                "ordered nonnegative frequency grid and positive extremum capacity required",
+            ));
+        }
+        if frequencies_rad_s.len()
+            > self
+                .controls
+                .maximum_evaluations
+                .saturating_sub(self.evaluations)
+        {
+            return Err(ResonanceError::EvaluationBudget {
+                maximum_evaluations: self.controls.maximum_evaluations,
+            });
+        }
+        self.grid.reserve_exact(frequencies_rad_s.len());
+        for &frequency in frequencies_rad_s {
+            let sample = self.sample(frequency, level)?;
+            self.grid.push(sample);
+        }
+
+        // A stationary grid sample needs strict evidence on both sides.
+        // Skipping zero slopes retains exact notches without double counting.
+        let mut previous: Option<usize> = None;
+        let mut brackets = Vec::new();
+        for index in 0..self.grid.len() {
+            self.poll()?;
+            let point = self.grid[index];
+            if point.level == 0.0 {
+                continue;
+            }
+            if let Some(left) = previous
+                && self.grid[left].level.is_sign_positive() != point.level.is_sign_positive()
+            {
+                if brackets.len() == maximum_extrema {
+                    return Err(ResonanceError::ExtremumBudget { maximum_extrema });
+                }
+                brackets.push((left, index));
+            }
+            previous = Some(index);
+        }
+        Ok(brackets)
+    }
+
+    /// Reserve final original jets after a survey has discovered its candidates.
+    /// Admission is atomic: grid sampling already consumed the same total cap,
+    /// and a refused reservation leaves the first-callback limit unchanged.
+    pub(super) fn reserve_evaluations(&mut self, count: usize) -> Result<(), ResonanceError<E>> {
+        self.poll()?;
+        let cap = self.controls.maximum_evaluations;
+        if count > cap.saturating_sub(self.evaluations) {
+            return Err(ResonanceError::EvaluationBudget {
+                maximum_evaluations: cap,
+            });
+        }
+        self.controls.maximum_evaluations -= count;
+        Ok(())
     }
 
     pub(super) fn poll(&mut self) -> Result<(), ResonanceError<E>> {

@@ -20,6 +20,13 @@ pub use bandwidth::{
     refine_power_bandwidth_with_parameter_derivative_with_cancel,
 };
 
+mod survey;
+pub use survey::{
+    PowerParameterSurvey, PowerSurvey, survey_power_extrema, survey_power_extrema_with_cancel,
+    survey_power_extrema_with_parameter_derivative,
+    survey_power_extrema_with_parameter_derivative_with_cancel,
+};
+
 /// Actual signed cycle-mean power and its complete fixed-parameter slope.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HarmonicPowerSample {
@@ -78,7 +85,8 @@ pub struct PowerExtremum {
     /// Nonzero original curvature with the required maximum/minimum sign.
     pub angular_second_derivative: f64,
     pub bracket_rad_s: (f64, f64),
-    /// All original evaluator calls, including the one final complete sample.
+    /// Local first-derivative refinement calls plus the final complete sample.
+    /// In surveys, cached input-grid calls belong to the survey total.
     pub evaluations: usize,
 }
 
@@ -162,6 +170,15 @@ pub fn refine_power_extremum_with_parameter_derivative_with_cancel<E>(
     poll(&mut cancelled)?;
     let jet = evaluate_jet(search.frequency).map_err(ResonanceError::Evaluation)?;
     poll(&mut cancelled)?;
+    let result = resolve_parameter(search, jet)?;
+    poll(&mut cancelled)?;
+    Ok(result)
+}
+
+fn resolve_parameter<E>(
+    search: Search,
+    jet: HarmonicPowerParameterJet,
+) -> Result<PowerExtremumParameterResponse, ResonanceError<E>> {
     if !jet.parameter_derivative.is_finite() || !jet.angular_parameter_derivative.is_finite() {
         return Err(ResonanceError::Invalid(
             "finite complete physical power parameter jet required",
@@ -197,7 +214,6 @@ pub fn refine_power_extremum_with_parameter_derivative_with_cancel<E>(
     .map_err(|_| {
         ResonanceError::Invalid("total physical power extremum derivative is not representable")
     })?;
-    poll(&mut cancelled)?;
     Ok(PowerExtremumParameterResponse {
         extremum,
         angular_frequency_derivative_rad_s: frequency_derivative,
