@@ -89,6 +89,7 @@ pub struct ThermalPressureLoadedValve {
     equilibrium: ThermalValveEquilibrium,
     observation_nodes_m: Vec<[f64; 3]>,
     nodal_reference_density_kg_m3: Option<Vec<f64>>,
+    tet10_corner_reference_density_kg_m3: Option<Vec<[f64; 4]>>,
     mesh_frame: ContentHash,
     identity: ContentHash,
 }
@@ -113,12 +114,21 @@ impl ThermalPressureLoadedValve {
         &self.observation_nodes_m
     }
 
-    /// Original explicit P1 inventory, in reference mesh vertex order [kg/m³].
-    /// Scalar material-density reductions return None. Retaining the entire
-    /// field distinguishes distributions with identical reduced mass matrices.
+    /// Original Tet4 P1 inventory, in reference mesh vertex order [kg/m³].
+    /// Other density representations return None. Retaining the entire field
+    /// distinguishes distributions with identical reduced mass matrices.
     #[must_use]
     pub fn nodal_reference_density_kg_m3(&self) -> Option<&[f64]> {
         self.nodal_reference_density_kg_m3.as_deref()
+    }
+
+    /// Original Tet10 P1 inventory, in element/corner order [kg/m³].
+    /// Values interpolate in reference barycentric coordinates and may jump
+    /// between cells. Scalar and Tet4 nodal-density reductions return None.
+    /// The complete profile is retained even where supports hide its moments.
+    #[must_use]
+    pub fn tet10_corner_reference_density_kg_m3(&self) -> Option<&[[f64; 4]]> {
+        self.tet10_corner_reference_density_kg_m3.as_deref()
     }
 
     /// Coordinate frame of the retained source mesh and tensor fields.
@@ -185,7 +195,7 @@ pub fn reduce_pressure_loaded_valve(
 ) -> Result<ThermalPressureLoadedValve, ReduceError> {
     reduce_with_reference_density(
         request, thermal, equilibrium_nodal_forces_n, nodal_load_per_pa_m2,
-        controls, None, cx,
+        controls, None, None, cx,
     )
 }
 
@@ -220,7 +230,48 @@ pub fn reduce_pressure_loaded_valve_with_nodal_reference_density(
     }
     reduce_with_reference_density(
         request, thermal, equilibrium_nodal_forces_n, nodal_load_per_pa_m2,
-        controls, Some(reference_density_kg_m3), cx,
+        controls, Some(reference_density_kg_m3), None, cx,
+    )
+}
+
+/// Thermal pressure reduction with the native Tet10 P1 corner-density field.
+///
+/// Each original element supplies four positive reference densities [kg/m³];
+/// cell interfaces may be discontinuous. The native consistent mass integrates
+/// their full correlation with the quadratic shapes and curved Jacobian.
+/// Nontrivial curved profiles require at least six mass Duffy points per
+/// direction. This entry point admits Tet10 requests only; it does not infer
+/// ten-node density interpolation or collapse the field to cell means.
+///
+/// Thermal equilibrium, signed prestress, static compliance and pressure work
+/// use their existing owners. Heating may change constitutive material density
+/// without replacing this closed body's frozen reference inventory. The full
+/// element/corner profile remains available for identity and modal rebinding.
+#[allow(clippy::too_many_arguments)]
+pub fn reduce_pressure_loaded_valve_with_tet10_reference_density(
+    request: &ValveCardRequest<'_, TetMaterialField<'_>>,
+    corner_reference_density_kg_m3: &[[f64; 4]],
+    thermal: TetThermalStrainField<'_>,
+    equilibrium_nodal_forces_n: &[(usize, f64)],
+    nodal_load_per_pa_m2: &[[f64; 3]],
+    controls: ThermalValveControls,
+    cx: &Cx<'_>,
+) -> Result<ThermalPressureLoadedValve, ReduceError> {
+    poll(cx)?;
+    if !matches!(request.element_order, ValveElementOrder::Tet10 { .. }) {
+        return Err(ReduceError::Invalid {
+            what: "thermal corner reference-density reduction requires Tet10 cells",
+        });
+    }
+    reduce_with_reference_density(
+        request,
+        thermal,
+        equilibrium_nodal_forces_n,
+        nodal_load_per_pa_m2,
+        controls,
+        None,
+        Some(corner_reference_density_kg_m3),
+        cx,
     )
 }
 
@@ -232,6 +283,7 @@ fn reduce_with_reference_density(
     nodal_load_per_pa_m2: &[[f64; 3]],
     controls: ThermalValveControls,
     reference_density_kg_m3: Option<&[f64]>,
+    tet10_corner_reference_density_kg_m3: Option<&[[f64; 4]]>,
     cx: &Cx<'_>,
 ) -> Result<ThermalPressureLoadedValve, ReduceError> {
     poll(cx)?;
@@ -306,14 +358,25 @@ fn reduce_with_reference_density(
                 budget,
                 quadrature,
             };
-            let tangent = problem.solve_thermal_tangent_with_nodal_forces(
-                thermal,
-                equilibrium_nodal_forces_n,
-                controls.solve,
-                controls.mesh_frame,
-                controls.maximum_absolute_mandel_strain,
-                cx,
-            )?;
+            let tangent = match tet10_corner_reference_density_kg_m3 {
+                Some(density) => problem.solve_thermal_tangent_with_reference_density(
+                    thermal,
+                    density,
+                    equilibrium_nodal_forces_n,
+                    controls.solve,
+                    controls.mesh_frame,
+                    controls.maximum_absolute_mandel_strain,
+                    cx,
+                )?,
+                None => problem.solve_thermal_tangent_with_nodal_forces(
+                    thermal,
+                    equilibrium_nodal_forces_n,
+                    controls.solve,
+                    controls.mesh_frame,
+                    controls.maximum_absolute_mandel_strain,
+                    cx,
+                )?,
+            };
             let nodes = displaced_quadratic_nodes(
                 &problem,
                 tangent.response().displacement_m(),
@@ -352,12 +415,15 @@ fn reduce_with_reference_density(
         }
     }
     let nodal_reference_density_kg_m3 = reference_density_kg_m3.map(<[f64]>::to_vec);
+    let tet10_corner_reference_density_kg_m3 =
+        tet10_corner_reference_density_kg_m3.map(<[[f64; 4]]>::to_vec);
     poll(cx)?;
     Ok(ThermalPressureLoadedValve {
         valve,
         equilibrium,
         observation_nodes_m,
         nodal_reference_density_kg_m3,
+        tet10_corner_reference_density_kg_m3,
         mesh_frame: controls.mesh_frame,
         identity: identity.finalize(),
     })

@@ -13983,3 +13983,16 @@ continuation, free relaxation on large DD clocks, B-bar admission, and
 source/continuity/budget/cancellation refusal. They were authored and reviewed
 but not formatted, compiled or run after the execution environment became
 unavailable.
+
+### Frozen graded density in Tet10 thermal valve motion
+
+`QuadraticTetProblem::solve_thermal_tangent_with_reference_density` and
+`reduce_pressure_loaded_valve_with_tet10_reference_density` retain the native
+positive P1 reference-density field as four corner values per original Tet10
+cell. The same consistent mass enters the thermal prestress pencil and modal
+motion; curved graded cells retain the native six-point mass-quadrature floor.
+The complete cell/corner profile binds the prestress identity and must remain
+identical during modal rebinding, including density moments hidden by supports.
+Heating may change constitutive metadata without replacing this frozen matter
+inventory. This does not introduce ten-node density interpolation, density
+averaging, a new constitutive law, or a new integration rule.

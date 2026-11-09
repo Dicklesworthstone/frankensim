@@ -209,6 +209,8 @@ impl ThermalValveModalMotion {
             || old_pencil.mass != new_pencil.mass
             || self.valve.nodal_reference_density_kg_m3()
                 != next.nodal_reference_density_kg_m3()
+            || self.valve.tet10_corner_reference_density_kg_m3()
+                != next.tet10_corner_reference_density_kg_m3()
             || self.valve.equilibrium().displacement_m().len() != next.equilibrium().displacement_m().len()
         {
             return Err(ThermalValveMotionError::Invalid("source transfer requires the same reference mesh, frame, supports, density profile and consistent mass"));

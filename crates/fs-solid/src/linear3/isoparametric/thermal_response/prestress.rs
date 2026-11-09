@@ -67,6 +67,38 @@ impl QuadraticPrestressedAssembly {
         self.identity
     }
 
+    // Called only after the native Tet10 graded mass operator admits the
+    // complete positive corner field. Constrained mass entries cannot retain
+    // every profile moment, so bind the original inventory explicitly.
+    pub(in crate::linear3) fn bind_tet10_reference_density(
+        mut self,
+        corner_density_kg_m3: &[[f64; 4]],
+        cx: &Cx<'_>,
+    ) -> Result<Self, TetElasticError> {
+        let mut profile = DomainHasher::new("org.frankensim.fs-solid.tet10-reference-density.v1");
+        hash_usize(&mut profile, corner_density_kg_m3.len())?;
+        for (element, density) in corner_density_kg_m3.iter().enumerate() {
+            if element % 4096 == 0 {
+                checkpoint(cx)?;
+            }
+            for value in density {
+                profile.update(&value.to_bits().to_le_bytes());
+            }
+        }
+        let profile = profile.finalize();
+        let mut identity = DomainHasher::new("org.frankensim.fs-solid.tet10-density-prestress.v1");
+        identity.update(self.identity.as_bytes());
+        identity.update(profile.as_bytes());
+        let mut configuration =
+            DomainHasher::new("org.frankensim.fs-solid.tet10-density-prestress-configuration.v1");
+        configuration.update(self.configuration_identity.as_bytes());
+        configuration.update(profile.as_bytes());
+        checkpoint(cx)?;
+        self.identity = identity.finalize();
+        self.configuration_identity = configuration.finalize();
+        Ok(self)
+    }
+
     // Original geometry, source tensors, quadrature, formulation and supports;
     // thermal strains, dead loads and prescribed values are the affine load path.
     pub(crate) const fn configuration_identity(&self) -> ContentHash {

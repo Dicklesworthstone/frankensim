@@ -647,6 +647,7 @@ impl QuadraticTetProblem<'_> {
             thermal_strains.into(),
             None,
             None,
+            None,
             config,
             mesh_frame,
             maximum_absolute_mandel_strain,
@@ -671,6 +672,42 @@ impl QuadraticTetProblem<'_> {
     ) -> Result<super::QuadraticPrestressedAssembly, TetElasticError> {
         self.solve_thermal_tangent_impl(
             thermal_strains.into(),
+            None,
+            Some(nodal_forces_n),
+            None,
+            config,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
+            cx,
+        )
+    }
+
+    /// Thermal/dead-load tangent with a frozen positive P1 reference-density
+    /// profile in original element/corner order [kg/m³].
+    ///
+    /// The native graded Tet10 mass operator retains every density moment;
+    /// equilibrium and signed geometric stiffness retain their original owners.
+    /// Pass an empty force slice for thermal loading alone. The four values
+    /// per cell may jump across interfaces and are interpolated in reference
+    /// barycentric coordinates, independently of the quadratic displacement.
+    /// Nontrivial curved profiles require the native mass rule of at least six
+    /// Duffy points per direction. Density is validated before equilibrium is solved.
+    /// The complete admitted profile binds both pencil and configuration
+    /// identities, including density hidden by constrained vibration DOFs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_thermal_tangent_with_reference_density<'t>(
+        &self,
+        thermal_strains: impl Into<QuadraticThermalStrainField<'t>>,
+        corner_density_kg_m3: &[[f64; 4]],
+        nodal_forces_n: &[(usize, f64)],
+        config: super::TetStaticSolveConfig,
+        mesh_frame: fs_blake3::ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<super::QuadraticPrestressedAssembly, TetElasticError> {
+        self.solve_thermal_tangent_impl(
+            thermal_strains.into(),
+            Some(corner_density_kg_m3),
             Some(nodal_forces_n),
             None,
             config,
@@ -699,6 +736,7 @@ impl QuadraticTetProblem<'_> {
     ) -> Result<super::QuadraticPrestressedAssembly, TetElasticError> {
         self.solve_thermal_tangent_impl(
             thermal_strains.into(),
+            None,
             Some(nodal_forces_n),
             Some((prescribed_m, maximum_prescribed_displacement_m)),
             config,
@@ -712,6 +750,7 @@ impl QuadraticTetProblem<'_> {
     fn solve_thermal_tangent_impl(
         &self,
         thermal_strains: QuadraticThermalStrainField<'_>,
+        corner_density_kg_m3: Option<&[[f64; 4]]>,
         nodal_forces_n: Option<&[(usize, f64)]>,
         prescribed: Option<(&[(usize, f64)], f64)>,
         config: super::TetStaticSolveConfig,
@@ -719,6 +758,11 @@ impl QuadraticTetProblem<'_> {
         maximum_absolute_mandel_strain: f64,
         cx: &Cx<'_>,
     ) -> Result<super::QuadraticPrestressedAssembly, TetElasticError> {
+        let reference_pencil = corner_density_kg_m3
+            .map(|density| {
+                self.assemble_with_thermal_materials(Some(thermal_strains), Some(density), cx)
+            })
+            .transpose()?;
         let response = self.solve_thermal_response_impl(
             thermal_strains,
             nodal_forces_n,
@@ -728,8 +772,11 @@ impl QuadraticTetProblem<'_> {
             maximum_absolute_mandel_strain,
             cx,
         )?;
-        let pencil = self.assemble_with_thermal_materials(Some(thermal_strains), None, cx)?;
-        super::isoparametric::thermal_response::prestress::assemble::<10, 30, _>(
+        let pencil = match reference_pencil {
+            Some(pencil) => pencil,
+            None => self.assemble_with_thermal_materials(Some(thermal_strains), None, cx)?,
+        };
+        let tangent = super::isoparametric::thermal_response::prestress::assemble::<10, 30, _>(
             self.nodes_m,
             self.elements,
             self.materials,
@@ -755,7 +802,11 @@ impl QuadraticTetProblem<'_> {
             },
             maximum_absolute_mandel_strain,
             cx,
-        )
+        )?;
+        match corner_density_kg_m3 {
+            Some(density) => tangent.bind_tet10_reference_density(density, cx),
+            None => Ok(tangent),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

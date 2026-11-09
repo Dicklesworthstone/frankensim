@@ -14,6 +14,7 @@ use fs_solid::reduce::thermal::motion::ThermalValveModalMotion;
 use fs_solid::reduce::thermal::{
     ThermalPressureLoadedValve, ThermalValveControls, reduce_pressure_loaded_valve,
     reduce_pressure_loaded_valve_with_nodal_reference_density,
+    reduce_pressure_loaded_valve_with_tet10_reference_density,
 };
 use fs_solid::reduce::{OrificeSpec, ValveCardRequest, ValveElementOrder};
 
@@ -266,4 +267,165 @@ fn inadmissible_source_observer_budget_and_cancellation_preserve_the_accepted_pr
     });
     assert_eq!(old.model().states(), state);
     assert_eq!(old.accepted_steps(), 1);
+}
+
+fn tet10_valve(
+    young: f64,
+    material_density: f64,
+    expansion: f64,
+    density: &[[f64; 4]],
+    cx: &Cx<'_>,
+) -> ThermalPressureLoadedValve {
+    use fs_solid::linear3::tet10::TetQuadrature;
+    let nodes = [
+        NODES[0],
+        NODES[1],
+        NODES[2],
+        NODES[3],
+        [0.5, 0.0, 0.0],
+        [0.5, 0.5, 0.0],
+        [0.0, 0.5, 0.0],
+        [0.0, 0.0, 0.5],
+        [0.5, 0.0, 0.5],
+        [0.0, 0.5, 0.5],
+    ];
+    let elements = [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]];
+    let material = TetElasticMaterial::try_new(material_density, young, 0.25, [7; 32]).unwrap();
+    let thermal = TetThermalStrainState::try_new(
+        300.0 + 1000.0 * expansion,
+        300.0,
+        [expansion, expansion, expansion, 0.0, 0.0, 0.0],
+        [7; 32],
+        ContentHash([9; 32]),
+        0.1,
+    )
+    .unwrap();
+    let fixed: Vec<_> = (0..30).filter(|&dof| dof != 11).collect();
+    let mut pressure = [[0.0; 3]; 10];
+    pressure[3][2] = 0.03;
+    let request = ValveCardRequest {
+        nodes_m: &nodes,
+        tetrahedra: &TETS,
+        element_order: ValveElementOrder::Tet10 {
+            elements: &elements,
+            quadrature: TetQuadrature {
+                stiffness_points_per_dir: 3,
+                mass_points_per_dir: 4,
+            },
+        },
+        fixed_dofs: &fixed,
+        material: TetMaterialField::Uniform(&material),
+        orifice: OrificeSpec {
+            face_nodes: &[1, 2, 3],
+            opening_axis: [0.0, 0.0, 1.0],
+            width_axis: [0.0, 1.0, 0.0],
+            opposing_plane_offset_m: -0.1,
+        },
+        window_hz: (0.1, 100.0),
+        retained_compliance_floor: 0.999,
+        loss_factor: 0.0,
+        source_id: "manufactured/tet10-graded-thermal-motion",
+    };
+    reduce_pressure_loaded_valve_with_tet10_reference_density(
+        &request,
+        density,
+        TetThermalStrainField::Uniform(&thermal),
+        &[],
+        &pressure,
+        ThermalValveControls {
+            solve: TetStaticSolveConfig::default(),
+            mesh_frame: FRAME,
+            maximum_absolute_mandel_strain: 0.1,
+            maximum_nodal_displacement_m: 0.02,
+        },
+        cx,
+    )
+    .unwrap()
+}
+
+#[test]
+fn tet10_graded_reference_mass_survives_thermal_reduction_and_motion_transfer() {
+    with_cx(|cx| {
+        let density = [[3.0, 5.0, 7.0, 9.0]];
+        let source = tet10_valve(1000.0, 6.0, 0.0, &density, cx);
+        // N_3 = lambda_3*(2*lambda_3-1). Exact barycentric moments give
+        // integral rho*N_3^2 = (sum(rho)+2*rho_3)/2520 = 1/60 kg.
+        // C_zz*integral(4*lambda_3-1)^2 = 1.2*E/10 = 120 N/m.
+        let mass = 1.0 / 60.0;
+        close(source.equilibrium().pencil().mass.get(0, 0), mass, 1e-14);
+        close(source.equilibrium().pencil().total_mass_kg, 1.0, 1e-14);
+        close(source.valve().source_modes()[0].lambda, 120.0 / mass, 1e-8);
+        assert_eq!(source.nodal_reference_density_kg_m3(), None);
+        assert_eq!(
+            source.tet10_corner_reference_density_kg_m3(),
+            Some(density.as_slice())
+        );
+        // Altering current constitutive density alone cannot refresh inertia.
+        let resampled = tet10_valve(1000.0, 4.0, 0.0, &density, cx);
+        assert_eq!(
+            source.equilibrium().pencil().mass,
+            resampled.equilibrium().pencil().mass
+        );
+        assert_eq!(
+            source.valve().source_modes()[0].lambda.to_bits(),
+            resampled.valve().source_modes()[0].lambda.to_bits()
+        );
+        let observation = observations(&source);
+        let mut run = ThermalValveModalMotion::new(
+            source,
+            RATE,
+            &[ModalAcousticState {
+                displacement_m_sqrt_kg: 3e-4,
+                velocity_m_sqrt_kg_per_s: 4e-3,
+            }],
+            &observation,
+            ModalAcousticTimeBudget::audible_reference(),
+            cx,
+        )
+        .unwrap();
+        run.step_pressure(0.4, cx).unwrap();
+        let before = run.nodal_motion(cx).unwrap();
+        let hot = tet10_valve(1600.0, 4.0, 0.001, &density, cx);
+        // All other DOFs are fixed. The uniform thermal load has zero work
+        // against this corner basis; its stress is -2*E*expansion*I and adds
+        // -2*E*expansion/10 to the signed tangent.
+        close(hot.equilibrium().pencil().stiffness.get(0, 0), 191.68, 1e-9);
+        close(hot.valve().source_modes()[0].lambda, 191.68 / mass, 1e-8);
+        let observation = observations(&hot);
+        let (updated, transfer) = run
+            .rebind_candidate(hot, &observation, controls(), cx)
+            .unwrap();
+        let after = updated.nodal_motion(cx).unwrap();
+        close(
+            after.displacement_m[3][2],
+            before.displacement_m[3][2],
+            1e-12,
+        );
+        close(
+            mass * after.velocity_m_s[3][2],
+            mass * before.velocity_m_s[3][2],
+            1e-13,
+        );
+        assert_eq!(updated.accepted_steps(), run.accepted_steps());
+        assert!(transfer.kinetic_residual_j < 1e-20);
+        let identity = updated.valve().identity();
+        let states = updated.model().states().to_vec();
+        // Swapping two other corners leaves the analytic supported mass and
+        // total inventory equal, but changes the original material profile.
+        for changed in [[[5.0, 3.0, 7.0, 9.0]], [[9.0, 7.0, 5.0, 3.0]]] {
+            let next = tet10_valve(1600.0, 4.0, 0.001, &changed, cx);
+            if changed[0][3] == density[0][3] {
+                close(next.equilibrium().pencil().mass.get(0, 0), mass, 1e-14);
+            }
+            assert_ne!(next.identity(), identity);
+            let observation = observations(&next);
+            assert!(
+                updated
+                    .rebind_candidate(next, &observation, controls(), cx)
+                    .is_err()
+            );
+        }
+        assert_eq!(updated.model().states(), states);
+        assert_eq!(updated.valve().identity(), identity);
+    });
 }

@@ -8,7 +8,8 @@ use fs_modal::eigh_gen_dense;
 use fs_solid::linear3::tet10::{QuadraticTetProblem, TET10_EDGES, TetQuadrature};
 use fs_solid::linear3::{
     QuadraticThermalStrainField, TetAssemblyBudget, TetElasticAssembly, TetElasticError,
-    TetElasticMaterial, TetMaterialField, TetThermalStrainState,
+    TetElasticMaterial, TetMaterialField, TetStaticSolveConfig, TetThermalStrainField,
+    TetThermalStrainState,
 };
 
 const NODES: [[f64; 3]; 10] = [
@@ -345,6 +346,143 @@ fn invalid_density_budget_and_cancellation_refuse_without_a_partial_assembly() {
         gate.request();
         assert!(matches!(
             p.assemble_with_reference_density(&GRADED, cx),
+            Err(TetElasticError::Cancelled)
+        ));
+    });
+}
+
+fn zero_thermal(material: &TetElasticMaterial) -> TetThermalStrainState {
+    TetThermalStrainState::try_new(
+        300.0,
+        300.0,
+        [0.0; 6],
+        material.material_state_identity,
+        ContentHash([91; 32]),
+        0.01,
+    )
+    .unwrap()
+}
+
+#[test]
+fn thermal_tangent_retains_native_density_moments_and_dead_load_stress() {
+    with_cx(|cx, _| {
+        let material = material();
+        let fixed: Vec<_> = (0..30).filter(|i| !(21..24).contains(i)).collect();
+        let p = problem(&NODES, &material, &fixed, 4);
+        let state = zero_thermal(&material);
+        let field = TetThermalStrainField::Uniform(&state);
+        let forces = [(21, 1200.0)];
+        let scalar = p
+            .solve_thermal_tangent_with_nodal_forces(
+                field,
+                &forces,
+                TetStaticSolveConfig::default(),
+                ContentHash([92; 32]),
+                0.01,
+                cx,
+            )
+            .unwrap();
+        let graded = p
+            .solve_thermal_tangent_with_reference_density(
+                field,
+                &GRADED,
+                &forces,
+                TetStaticSolveConfig::default(),
+                ContentHash([92; 32]),
+                0.01,
+                cx,
+            )
+            .unwrap();
+        let native = p.assemble_with_reference_density(&GRADED, cx).unwrap();
+        assert_eq!(graded.pencil().mass, native.mass);
+        assert_eq!(
+            graded.pencil().total_mass_kg.to_bits(),
+            native.total_mass_kg.to_bits()
+        );
+        assert_eq!(
+            graded.response().displacement_m(),
+            scalar.response().displacement_m()
+        );
+        assert_eq!(graded.geometric_stiffness(), scalar.geometric_stiffness());
+        assert_eq!(graded.pencil().stiffness, scalar.pencil().stiffness);
+        assert!(
+            graded
+                .geometric_stiffness()
+                .to_dense()
+                .iter()
+                .any(|&k| k != 0.0)
+        );
+        let modes = |a: &TetElasticAssembly| {
+            eigh_gen_dense(&a.stiffness.to_dense(), &a.mass.to_dense(), 3).unwrap()
+        };
+        // Exact P1-weighted midside mass is 1.25 times the cell-mean mass.
+        // Equilibrium and initial stress are density independent here.
+        for (after, before) in modes(graded.pencil()).iter().zip(modes(scalar.pencil())) {
+            close(after.lambda / before.lambda, 0.8);
+        }
+        let uniform = p
+            .solve_thermal_tangent_with_reference_density(
+                field,
+                &[[material.density_kg_m3; 4]],
+                &forces,
+                TetStaticSolveConfig::default(),
+                ContentHash([92; 32]),
+                0.01,
+                cx,
+            )
+            .unwrap();
+        assert_eq!(uniform.pencil().mass, scalar.pencil().mass);
+        assert_eq!(uniform.pencil().stiffness, scalar.pencil().stiffness);
+        // An explicit frozen inventory is distinct from implicitly using a
+        // material sample, even while their current mass operators coincide.
+        assert_ne!(uniform.identity(), scalar.identity());
+    });
+}
+
+#[test]
+fn graded_thermal_tangent_preserves_native_refusals_before_equilibrium() {
+    with_cx(|cx, gate| {
+        let material = material();
+        let state = zero_thermal(&material);
+        let field = TetThermalStrainField::Uniform(&state);
+        let fixed: Vec<_> = (0..30).filter(|i| !(21..24).contains(i)).collect();
+        let solve = |p: &QuadraticTetProblem<'_>, density: &[[f64; 4]]| {
+            p.solve_thermal_tangent_with_reference_density(
+                field,
+                density,
+                &[],
+                TetStaticSolveConfig::default(),
+                ContentHash([92; 32]),
+                0.01,
+                cx,
+            )
+        };
+        let p = problem(&NODES, &material, &fixed, 4);
+        assert!(matches!(
+            solve(&p, &[]),
+            Err(TetElasticError::MaterialCountMismatch { .. })
+        ));
+        for rho in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                solve(&p, &[[rho; 4]]),
+                Err(TetElasticError::InvalidMaterial { .. })
+            ));
+        }
+        let mut curved = NODES;
+        curved[4][2] += 0.03;
+        for points in [4, 5] {
+            assert!(matches!(
+                solve(&problem(&curved, &material, &fixed, points), &GRADED),
+                Err(TetElasticError::QuadratureInadmissible { .. })
+            ));
+        }
+        let p = problem(&curved, &material, &fixed, 6);
+        let native = p.assemble_with_reference_density(&GRADED, cx).unwrap();
+        let accepted = solve(&p, &GRADED).unwrap();
+        assert_eq!(accepted.pencil().mass, native.mass);
+        gate.request();
+        assert!(matches!(
+            solve(&p, &GRADED),
             Err(TetElasticError::Cancelled)
         ));
     });
