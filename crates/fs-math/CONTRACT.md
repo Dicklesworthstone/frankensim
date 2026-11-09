@@ -140,7 +140,17 @@ floating-point POLICY: FMA contraction, subnormals, NaN, ULP budgets
   components, including when Smith's intermediate ratio underflows; the
   ordinary-scale operation tree is unchanged. Focused regressions span
   2^-1074 through 2^1023, full-scale cancellation, and mixed-scale phasors.
-  principal sqrt via stable half-angle formulas (both half-planes
+  Multiplication compensates both component sums with the second product's
+  FMA residual: conjugate power stays real and small quadratures exposed by
+  destructive cancellation survive. This is allocation-free Kahan A3, with
+  componentwise accuracy in the absence of underflow/overflow, not a correctly
+  rounded or range-extended product. The final components remain f64; source
+  banks that need product residuals across many sources still accumulate
+  complete products in their existing extended-precision owner. Exact dyadic
+  G0/G3 regressions cover cancellation, conjugate products, phase rotation,
+  scale changes and IEEE edge behavior. The strict-core golden is unchanged;
+  no new cross-ISA execution or throughput claim is made.
+  Principal sqrt via stable half-angle formulas (both half-planes
   tested). The shared complex home going forward; fs-fft's private
   mini-type migration is recorded cleanup.
 - `eft::{two_sum, quick_two_sum, two_prod}` — error-free transformations:

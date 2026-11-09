@@ -147,9 +147,31 @@ impl core::ops::Mul for C64 {
     type Output = C64;
     fn mul(self, o: C64) -> C64 {
         C64 {
-            re: self.re.mul_add(o.re, -(self.im * o.im)),
-            im: self.re.mul_add(o.im, self.im * o.re),
+            re: sum_products(self.re, o.re, -self.im, o.im),
+            im: sum_products(self.re, o.im, self.im, o.re),
         }
+    }
+}
+
+/// Kahan's compensated ab + cd: retain the rounded second product's residual
+/// before it can masquerade as a weak physical quadrature. A single FMA alone
+/// can give z * conj(z) a nonzero imaginary part, or erase ac - bd entirely.
+/// See Jeannerod et al., "Error bounds on complex floating-point multiplication
+/// with an FMA", algorithm A3 (https://doi.org/10.1090/mcom/3123).
+///
+/// The finite, non-over/underflowing case has componentwise relative accuracy;
+/// this does not turn the final f64 into a product expansion for a later sum.
+/// Keep the original IEEE result for nonfinite residuals and exact products
+/// (including signed zeros). No allocation or extended-precision slow path.
+#[inline]
+fn sum_products(a: f64, b: f64, c: f64, d: f64) -> f64 {
+    let product = c * d;
+    let sum = a.mul_add(b, product);
+    let error = c.mul_add(d, -product);
+    if error.is_finite() && error != 0.0 {
+        sum + error
+    } else {
+        sum
     }
 }
 
