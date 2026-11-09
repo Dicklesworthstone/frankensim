@@ -7,6 +7,8 @@
 
 /// Simultaneous selective streams and additional heat on real-gas graphs.
 pub mod network;
+/// Source-bound fugacity-driven Maxwell--Stefan transport in the mass frame.
+pub mod diffusion;
 
 use super::{
     GasEnergyError, GasEnergySolve, IsochoricRealGasParcel, poll, positive, updated_point,
@@ -360,3 +362,4 @@ impl IsochoricRealGasParcel {
 
 #[cfg(test)]
 mod tests;
+

@@ -14,7 +14,7 @@ pub mod diffusion;
 pub mod effusion;
 /// Shared-snapshot selective transport on branching and cyclic volume networks.
 pub mod network;
-mod entropy;
+pub(in crate::thermochemical_gas) mod entropy;
 
 use super::{ClosedGasParcel, Composition, CompositionBasis, GasEnergyError, GasEnergySolve,
     GasMassTransferSolve, SpeciesId, ThermochemicalGasModel, MAX_FROZEN_IDEAL_GAS_COMPONENTS_V1,
@@ -269,3 +269,4 @@ impl ClosedGasParcel {
 
 #[cfg(test)]
 mod tests;
+

@@ -18,7 +18,7 @@ use fs_thermochem::{Nasa9StandardStateModelV1, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_
 use std::collections::BTreeMap;
 
 #[derive(Debug)]
-pub(super) enum Error {
+pub(in crate::thermochemical_gas) enum Error {
     Invalid(&'static str),
     Parcel { id: u64, error: GasEnergyError },
     Cancelled,
@@ -83,15 +83,41 @@ fn same_source(a: &Nasa9StandardStateModelV1, b: &Nasa9StandardStateModelV1) -> 
             .eq(b.regions().iter().map(|r| r.card_identity()))
 }
 fn amount(parcel: &ClosedGasParcel, index: usize) -> Result<f64, Error> {
-    let mixture = parcel.model().thermodynamics();
-    let molar_mass = parcel
-        .state()
-        .thermodynamics()
-        .properties()
-        .molar_mass()
-        .value();
+    inventory_amount(ClosedGasInventory::from(parcel), index)
+}
+
+/// Borrowed physical inventory for the original ideal-reference audit. Real-gas
+/// owners add their ORIGINAL EOS departures separately; this view neither
+/// evaluates an ideal EOS nor changes a parcel's physical density or volume.
+#[derive(Clone, Copy)]
+pub(in crate::thermochemical_gas) struct ClosedGasInventory<'a> {
+    pub model: &'a crate::thermochemical_gas::ThermochemicalGasModel,
+    pub mass_kg: f64,
+    pub molar_mass_kg_mol: f64,
+    pub volume_m3: f64,
+    pub temperature_k: f64,
+}
+impl<'a> From<&'a ClosedGasParcel> for ClosedGasInventory<'a> {
+    fn from(parcel: &'a ClosedGasParcel) -> Self {
+        Self {
+            model: parcel.model(),
+            mass_kg: parcel.mass_kg(),
+            molar_mass_kg_mol: parcel
+                .state()
+                .thermodynamics()
+                .properties()
+                .molar_mass()
+                .value(),
+            volume_m3: parcel.volume_m3(),
+            temperature_k: parcel.state().state().temperature,
+        }
+    }
+}
+fn inventory_amount(parcel: ClosedGasInventory<'_>, index: usize) -> Result<f64, Error> {
+    let mixture = parcel.model.thermodynamics();
+    let molar_mass = parcel.molar_mass_kg_mol;
     let fraction = mixture.mole_composition().fractions()[index];
-    let value = (parcel.mass_kg() / molar_mass) * fraction;
+    let value = (parcel.mass_kg / molar_mass) * fraction;
     if value.is_finite() && value >= 0.0 && (fraction == 0.0 || value > 0.0) {
         Ok(value)
     } else {
@@ -101,7 +127,7 @@ fn amount(parcel: &ClosedGasParcel, index: usize) -> Result<f64, Error> {
     }
 }
 // ln(a/b), including nearly equal positive values and overflowing raw ratios.
-pub(super) fn log_ratio(a: f64, b: f64) -> f64 {
+pub(in crate::thermochemical_gas) fn log_ratio(a: f64, b: f64) -> f64 {
     if a == b {
         return 0.0;
     }
@@ -207,7 +233,7 @@ pub(super) fn closed_entropy_change<'a>(
 /// Original-to-final inventory and caloric differences in one source-qualified
 /// traversal. Constant energy/entropy references cancel per conserved species;
 /// their bounded mass residuals remain separate physical acceptance accounts.
-pub(super) struct ClosedGasChanges {
+pub(in crate::thermochemical_gas) struct ClosedGasChanges {
     pub total_mass_residual_kg: f64,
     pub maximum_species_mass_residual_kg: f64,
     pub energy_change_j: f64,
@@ -226,6 +252,26 @@ pub(super) fn closed_inventory_change<'a>(
 fn closed_changes<'a, const ENERGY: bool>(
     states: impl IntoIterator<Item = (u64, &'a ClosedGasParcel, &'a ClosedGasParcel)>,
     mass_tolerance_kg: f64,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ClosedGasChanges, Error> {
+    closed_inventory_views::<ENERGY>(
+        states.into_iter().map(|(id, old, next)| {
+            (
+                id,
+                ClosedGasInventory::from(old),
+                ClosedGasInventory::from(next),
+            )
+        }),
+        mass_tolerance_kg,
+        cancelled,
+    )
+}
+
+/// The original source-relative ideal caloric/mixing audit on borrowed physical
+/// inventories. Density-chart residual energy and entropy remain with the EOS.
+pub(in crate::thermochemical_gas) fn closed_inventory_views<'a, const ENERGY: bool>(
+    states: impl IntoIterator<Item = (u64, ClosedGasInventory<'a>, ClosedGasInventory<'a>)>,
+    mass_tolerance_kg: f64,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ClosedGasChanges, Error> {
     check(&mut cancelled)?;
@@ -238,21 +284,21 @@ fn closed_changes<'a, const ENERGY: bool>(
     let mut mass = Accumulator::default();
     for row in states {
         check(&mut cancelled)?;
-        if rows.len() == MAX_SNAPSHOT_PARCELS || row.1.volume_m3() != row.2.volume_m3() {
+        if rows.len() == MAX_SNAPSHOT_PARCELS || row.1.volume_m3 != row.2.volume_m3 {
             return Err(Error::Invalid(
                 "bounded entropy audit requires unchanged parcel volumes",
             ));
         }
         if ENERGY {
-            mass.add(row.2.mass_kg() - row.1.mass_kg())?;
+            mass.add(row.2.mass_kg - row.1.mass_kg)?;
         }
         rows.push(row);
     }
     let mut references: BTreeMap<SpeciesId, Vec<Reference<'a>>> = BTreeMap::new();
     for &(_, old, _) in &rows {
-        for (index, model) in old.model().thermodynamics().components().iter().enumerate() {
+        for (index, model) in old.model.thermodynamics().components().iter().enumerate() {
             check(&mut cancelled)?;
-            let n = amount(old, index)?;
+            let n = inventory_amount(old, index)?;
             if n == 0.0 {
                 continue;
             }
@@ -260,8 +306,8 @@ fn closed_changes<'a, const ENERGY: bool>(
             if !group.iter().any(|r| same_source(r.model, model)) {
                 group.push(Reference {
                     model,
-                    temperature_k: old.state().state().temperature,
-                    volume_m3: old.volume_m3(),
+                    temperature_k: old.temperature_k,
+                    volume_m3: old.volume_m3,
                     amount_mol: n,
                     mass_change: Accumulator::default(),
                 });
@@ -271,8 +317,8 @@ fn closed_changes<'a, const ENERGY: bool>(
     let mut entropy = Accumulator::default();
     let mut energy = Accumulator::default();
     for &(id, old, next) in &rows {
-        let before = old.model().thermodynamics().components();
-        let after = next.model().thermodynamics().components();
+        let before = old.model.thermodynamics().components();
+        let after = next.model.thermodynamics().components();
         let (mut i, mut j) = (0, 0);
         while i < before.len() || j < after.len() {
             check(&mut cancelled)?;
@@ -284,12 +330,12 @@ fn closed_changes<'a, const ENERGY: bool>(
             };
             let (model, n0, n1) = match ordering {
                 std::cmp::Ordering::Less => {
-                    let result = (&before[i], amount(old, i)?, 0.0);
+                    let result = (&before[i], inventory_amount(old, i)?, 0.0);
                     i += 1;
                     result
                 }
                 std::cmp::Ordering::Greater => {
-                    let result = (&after[j], 0.0, amount(next, j)?);
+                    let result = (&after[j], 0.0, inventory_amount(next, j)?);
                     j += 1;
                     result
                 }
@@ -297,7 +343,11 @@ fn closed_changes<'a, const ENERGY: bool>(
                     if !same_source(&before[i], &after[j]) {
                         return Err(Error::Invalid("closed species entropy source changed"));
                     }
-                    let result = (&before[i], amount(old, i)?, amount(next, j)?);
+                    let result = (
+                        &before[i],
+                        inventory_amount(old, i)?,
+                        inventory_amount(next, j)?,
+                    );
                     i += 1;
                     j += 1;
                     result
@@ -316,9 +366,9 @@ fn closed_changes<'a, const ENERGY: bool>(
                 reference,
                 n0,
                 n1,
-                old.state().state().temperature,
-                next.state().state().temperature,
-                old.volume_m3(),
+                old.temperature_k,
+                next.temperature_k,
+                old.volume_m3,
                 id,
             )? {
                 entropy.add(term)?;
@@ -328,8 +378,8 @@ fn closed_changes<'a, const ENERGY: bool>(
                 // reference removed before arithmetic. The first difference
                 // preserves adjacent-temperature sensible storage even when
                 // absolute formation energies dwarf it.
-                let t0 = old.state().state().temperature;
-                let t1 = next.state().state().temperature;
+                let t0 = old.temperature_k;
+                let t1 = next.temperature_k;
                 let du = |a, b| {
                     reference
                         .model

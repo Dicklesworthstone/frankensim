@@ -22159,6 +22159,56 @@ limits, actual reference ratios, variable means, source receipts/population,
 transactional refusals, scale invariance and near-unity ratio conditioning.
 These are synthetic implementation checks, not measured component-life evidence.
 
+### Fugacity-driven real-gas molecular diffusion
+
+`nonideal::energy::parcel::transfer::species::diffusion` binds the original
+Peng–Robinson/NASA catalog to the existing Maxwell–Stefan friction owner and
+explicit selected binary material claims. Both physical density/composition
+traces are evaluated at the same declared central temperature; no PT root is
+reselected and no ideal p/(RT) density enters. Original critical constants,
+interaction pairs, calorics, transport and source packs must match. Common
+positive species support is required; one-sided logarithmic zeros refuse.
+
+With g_i=Delta ln(x_i p phi_i)/distance, the mass-frame force is
+d_i=x_i g_i−Y_i sum_j(x_j g_j). Finite differences are not assumed to obey
+Gibbs–Duhem. Removing a mass-proportional force leaves d unchanged. Scaled
+mass ratios, mean mass and the mechanical-gauge cancellation remain
+double-double, including the independent force-power reduction. The reported
+raw/reduced forces, original row and mass-frame residuals, positive pair
+friction and reconstructed constrained chemical power remain separate.
+Friction entropy is not deposited as additional heat.
+
+Every selected binary MS claim is pinned and refreshed at actual endpoint and
+central T/p. This rung supports T/p-only coefficient laws; original data must
+qualify their composition-independent use over the intended mixtures.
+Composition/humidity-dependent coefficient claims refuse. PR chemical
+potentials do not supply dense-fluid diffusivity, infer ideal pD scaling or
+promote pure-gas measurements into mixed-gas authority.
+
+The network samples every face from one unchanged inventory, shares dense
+scratch among equal-size catalogs, and invokes the original simultaneous
+partial-enthalpy/PR reconstruction once per affected parcel. Actual final source
+support and authored T/p limits are rechecked. The original closed-species
+caloric/entropy audit is reused through borrowed physical inventory views, with
+the original PR density-chart departures added once. Whole-system mass,
+species, source-relative U and actual S must pass before publishing any endpoint.
+The ideal-gas audit retains its original formulas and reduction order.
+
+This is first-order explicit transport with a caller-bounded local isothermal
+approximation. It supplies no Soret/Fourier/thermal-transpiration model, bulk
+momentum, flash, phase-stability theorem, implicit stability or global/spatial
+error bound. Homogeneous mechanical/caloric admission alone does not establish
+stable single-phase equilibrium.
+
+Six exact production constitutive tests passed natively against the genuine
+current fs-thermochem/fs-math owners: binary mass-frame and ternary friction
+identities, non-dyadic large mechanical-gauge invariance, trace forces, an
+independent dense PR/binary oracle, and refusal/cancellation. Five material-face
+and finite-network regression groups cover original sources, conservation,
+reference/order invariance and atomic refusal; they remain unexecuted because
+the full dependency build is blocked before fs-material. All changed Rust
+sources parsed; this is not a full crate type-check.
+
 ### Source-conjugate gas thermodiffusion
 
 `thermochemical_gas::energy::parcel::transfer::species::diffusion::thermal` prepares an original NASA species catalog and complete pinned binary-diffusivity, mass-specific heat-of-transport and zero-diffusive-flux conductivity sources. Actual traces and the central face requery those same claims. Only owned canonical temperature/pressure dependence is admitted. A reusable Maxwell–Stefan workspace supplies the mass-average molecular flux; centered heat-of-transport coefficients couple Soret forcing to reciprocal heat. Original NASA enthalpy/entropy increments form divided caloric enthalpies, so heat added to existing donor-enthalpy transport includes the finite-distance caloric correction without subtracting arbitrary formation references. Common exact zeros stay absent, positive trace species are retained, and one-sided logarithmic zeros refuse.

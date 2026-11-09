@@ -144,13 +144,13 @@ pub struct GasThermodiffusionFlux {
 }
 
 #[derive(Clone, Debug)]
-struct PinnedScalar<'a> {
+pub(in crate::thermochemical_gas) struct PinnedScalar<'a> {
     card: &'a MaterialCard,
     property: &'static str,
     reference: ResolvedMaterialStatePoint,
 }
 impl<'a> PinnedScalar<'a> {
-    fn new(
+    pub(in crate::thermochemical_gas) fn new(
         source: GasThermodiffusionMaterial<'a>,
         property: &'static str,
         dims: Dims,
@@ -204,14 +204,14 @@ impl<'a> PinnedScalar<'a> {
         })
     }
 
-    fn at(&self, t: f64, p: f64) -> Result<ResolvedMaterialStatePoint, GasEnergyError> {
+    pub(in crate::thermochemical_gas) fn at(&self, t: f64, p: f64) -> Result<ResolvedMaterialStatePoint, GasEnergyError> {
         let point = updated_point(&self.reference.query(), t, p)?;
         self.reference
             .at_query_point(self.card, &point)
             .map_err(source_error)
     }
 
-    fn sample(
+    pub(in crate::thermochemical_gas) fn sample(
         &self,
         temperatures: [f64; 2],
         pressures: [f64; 2],
@@ -754,3 +754,4 @@ fn checked(value: Dd) -> Result<f64, GasEnergyError> {
 
 #[cfg(test)]
 mod tests;
+
