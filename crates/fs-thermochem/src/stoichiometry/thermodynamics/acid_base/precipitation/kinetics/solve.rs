@@ -169,15 +169,15 @@ impl Workspace<'_> {
         let donor = if growing { initial.dissolved } else { initial.solid };
         let activity_uncertainty = start.spread + start.log_roundoff;
         if let Some(log_omega) = start.log_omega {
+            // Distance to equilibrium bounds ALL subsequent autonomous motion
+            // on either side of saturation, even when the force sign is known.
+            // A qualified trace must not re-enter an ill-conditioned extent
+            // residual solely because its accepted root lies just below unity.
+            let radius = (log_omega.abs() + activity_uncertainty) / self.minimum_log_slope();
+            if let Some(error_norm) = root_displacement_error_norm(initial, radius, controls) {
+                return Ok(Stage { phase: initial, blocked: false, exhausted: false, error_norm });
+            }
             if log_omega.abs() <= activity_uncertainty {
-                // Distance to equilibrium bounds ALL subsequent autonomous
-                // motion, including continuation from a stiff trace state.
-                // This is a numerical displacement allowance, not a claim
-                // that the finite-rate state reached exact equilibrium.
-                let radius = (log_omega.abs() + activity_uncertainty) / self.minimum_log_slope();
-                if let Some(error_norm) = root_displacement_error_norm(initial, radius, controls) {
-                    return Ok(Stage { phase: initial, blocked: false, exhausted: false, error_norm });
-                }
                 // A strict, short request can admit much less motion than
                 // the distance to equilibrium. Use the WHOLE remaining window,
                 // so many accepted tiny stages cannot silently accumulate it.

@@ -478,28 +478,49 @@ fn stiff_precipitation_publishes_and_continues_positive_dissolved_traces() {
         }
 
         if label == "cation-limited salt" {
-            // Also start directly at the independent saturation reference:
-            // its force is within numerical activity uncertainty, unlike a
-            // just-accepted implicit root that can retain a resolved drive.
-            let at_reference = advanced
-                .solution()
-                .with_dissolved_analytical_totals(
-                    Amount::new(reference),
-                    &[Amount::new(0.02 + 2.0 * reference)],
-                    &[],
-                    || false,
-                )
-                .unwrap();
-            let maintained = at_reference.advance(Time::new(1.0), control, || false).unwrap();
-            near(maintained.solution().dissolved_cation().value() / reference, 1.0, 5e-8);
-            near(
-                maintained.solution().state().log_saturation_ratio().unwrap().value().exp(),
-                1.0,
-                5e-8,
-            );
-            assert_eq!(maintained.solution().component_total(), at_reference.component_total());
-            assert_eq!(maintained.solution().family_totals(), at_reference.family_totals());
-            assert!(std::ptr::eq(maintained.solution().model().source(), original.model().source()));
+            // Both resolved signs and the uncertain zero have less remaining
+            // physical motion than these strict phase/extent budgets allow.
+            // A raw force residual is ill-conditioned at this positive trace.
+            let mut trace_control = control;
+            trace_control.relative_tolerance = Dimensionless::new(1e-8);
+            trace_control.amount_absolute_tolerance = Amount::new(0.0);
+            trace_control.extent_absolute_tolerance = Amount::new(1e-30);
+            for factor in [1.0 - 1e-10, 1.0, 1.0 + 1e-10] {
+                let incoming = reference * factor;
+                let at_reference = advanced
+                    .solution()
+                    .with_dissolved_analytical_totals(
+                        Amount::new(incoming),
+                        &[Amount::new(0.02 + 2.0 * incoming)],
+                        &[],
+                        || false,
+                    )
+                    .unwrap();
+                let maintained =
+                    at_reference.advance(Time::new(1.0), trace_control, || false).unwrap();
+                let endpoint = maintained.solution();
+                near(endpoint.dissolved_cation().value() / reference, 1.0, 5e-8);
+                near(
+                    endpoint.dissolved_cation().value() / at_reference.dissolved_cation().value(),
+                    1.0,
+                    trace_control.relative_tolerance.value(),
+                );
+                near(
+                    endpoint.solid_amount().value() / at_reference.solid_amount().value(),
+                    1.0,
+                    trace_control.relative_tolerance.value(),
+                );
+                near(endpoint.state().log_saturation_ratio().unwrap().value().exp(), 1.0, 5e-8);
+                assert_eq!(endpoint.component_total(), at_reference.component_total());
+                assert_eq!(endpoint.family_totals(), at_reference.family_totals());
+                assert!(std::ptr::eq(endpoint.model().source(), original.model().source()));
+                assert!(
+                    maintained.kinetics().transferred_to_solution().value().abs()
+                        <= trace_control.extent_absolute_tolerance.value()
+                );
+                let error = maintained.kinetics().maximum_accepted_error_norm();
+                assert!(error.is_finite() && (0.0..=1.0).contains(&error));
+            }
         }
     }
 }
