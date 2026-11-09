@@ -70,8 +70,8 @@ impl<'a> DielectricResponse<'a> {
     /// the cached native frequency and response must already be admitted.
     /// Optical derivatives retain Cauchy, Sellmeier, linear wavelength tables
     /// or the original IAPWS water law; endpoints and nonsmooth knots refuse.
-    /// Frequency-prepared molecular gas sources refuse until their derivative
-    /// owner is supplied; a monochromatic value is never treated as a constant law.
+    /// Frequency-prepared molecular gases retain their original fixed-density
+    /// Lorentz--Lorenz derivatives at the SAME admitted interior frequency.
     pub fn bulk_dispersion(self, omega_rad_s: f64) -> Result<BulkWaveDispersion<'a>> {
         let omega = positive(omega_rad_s)?;
         let optical = match self {
@@ -79,6 +79,7 @@ impl<'a> DielectricResponse<'a> {
             Self::OpticalMaterial(source) => Some(source.frequency_jet(omega)?),
             Self::SpectralOptical(source) => Some(source.frequency_jet(omega)?),
             Self::WaterOptical(source) => Some(source.frequency_jet(omega)?),
+            Self::MolecularGasOptical(source) => Some(source.frequency_jet(omega)?),
             _ => None,
         };
         if let Some(jet) = optical {

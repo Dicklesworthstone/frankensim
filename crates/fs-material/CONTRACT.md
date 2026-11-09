@@ -18502,6 +18502,36 @@ is retained. The original wavelength-independent depolarization and nonabsorbing
 dilute independent-molecule assumptions remain. No measured dataset, resonance
 model, gas absorption or unbounded extrapolation is inferred.
 
+`MolecularRefractionWavelength::refractive_index_jet` also supplies analytic
+first and second wavelength derivatives at fixed original partial number
+densities. It differentiates each original Cauchy law through the full nonlinear
+Lorentz–Lorenz mixture, retaining weak dispersion even when the phase index
+rounds to unity. The scalar and spatial refraction paths do not pay for this
+additional jet. Constant-polarizability and vacuum limits have zero curvature.
+
+## Atmospheric-air phase, group and state refraction
+
+`air_refraction` owns the historical NIST Toolbox Ciddor equations A21–A41.
+Inputs explicitly retain water-vapor mole fraction, dry-air CO2, absolute
+pressure, temperature and vacuum wavelength. Admitted support is 300–1700 nm,
+233.15–373.15 K, 60–120 kPa, water fraction 0–0.2 and CO2 0–2000 µmol/mol.
+This numerical envelope is not phase-stability or uncertainty evidence; the
+state owner must exclude condensation, droplets and incompatible constituents.
+
+Stack-owned wavelength preparation supplies phase and group indices, spectral
+curvature, and complete pressure/temperature first and second derivatives at
+fixed composition. It retains the source compressibility law and never changes
+the fluid equation of state. Queries allocate nothing and never extrapolate.
+`AirRefractiveSample::absolute_from_relative` applies the phase/group product
+rule when the relative source uses the same vacuum-wavelength coordinate;
+missing relative dispersion remains unavailable. Absorption, scattering and
+moving-medium effects require separate sources.
+
+Focused controls compare 14 published NIST dry/moist-air table entries,
+independent spectral/state differences, source-domain corners and the relative
+index conversion. These validate this implementation of the named formulation,
+not a new experimental accuracy claim.
+
 ## Coherent fluid-coupled elastic plate stacks
 
 `ElasticPlateStack` composes up to 64 ordered original isotropic elastic plates

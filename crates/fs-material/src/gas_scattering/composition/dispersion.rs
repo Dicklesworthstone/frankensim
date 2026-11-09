@@ -7,8 +7,11 @@
 //! Gas Cauchy fits: <https://doi.org/10.1016/0010-2180(81)90124-3>.
 //! Group index differentiates the full Lorentz–Lorenz mixture, as required by
 //! Ciddor and Hill, <https://doi.org/10.1364/AO.38.001663>.
+//! The wavelength jet also retains its ordinary second derivative at fixed
+//! partial densities, so bulk GVD does not confuse density and spectral curvature.
 
 use super::*;
+use fs_math::dd::Dd;
 
 /// A sourced Cauchy refractivity fit at the original molecular number density.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -171,6 +174,17 @@ pub struct MolecularRefractionWavelength<'a> {
     basis: PartialDensityBasis,
 }
 
+/// Analytic wavelength derivatives of the SAME nonlinear molecular mixture.
+/// Partial densities and all original molecular source coefficients stay fixed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CompositionRefractiveIndexJet {
+    pub index: CompositionRefractiveIndex,
+    /// `[lambda dn/dlambda, lambda² d²n/dlambda²]`, both dimensionless.
+    /// The second entry is an ordinary second derivative, not a repeated
+    /// logarithmic derivative. `omega d²(omega*n/c0)/domega²` is its ratio to c0.
+    pub scaled_wavelength_derivatives: [f64; 2],
+}
+
 impl MolecularRefractionModel {
     /// Attach one explicit spectral source to every original component, in its
     /// exact order. References must match completely; species are never inferred
@@ -324,6 +338,70 @@ impl MolecularRefractionWavelength<'_> {
             lorentz_lorenz: l,
             derivative_lorentz_lorenz: first,
             second_derivative_lorentz_lorenz: second,
+        })
+    }
+
+    /// Differentiate the full Lorentz--Lorenz sum at fixed original partial
+    /// densities. This additional O(components) pass allocates nothing and is
+    /// only paid by dispersion consumers; scalar/spatial index queries keep
+    /// their existing work. No finite differences or effective gas fit enter.
+    pub fn refractive_index_jet(
+        &self,
+        partial_densities: &[f64],
+    ) -> Result<CompositionRefractiveIndexJet, GasScatteringError> {
+        let index = self.refractive_index(partial_densities)?;
+        let lambda = self.wavelength_nm * 1.0e-3;
+        let inverse_square = 1.0 / (lambda * lambda);
+        let inverse_fourth = inverse_square * inverse_square;
+        let mut first_l = Dd::ZERO;
+        let mut second_l = Dd::ZERO;
+        for ((&density, coefficient), component) in partial_densities
+            .iter()
+            .zip(self.coefficients())
+            .zip(&self.model.components)
+        {
+            if density == 0.0 || coefficient.log_wavelength_derivative == 0.0 {
+                continue;
+            }
+            let shape = component
+                .dispersion
+                .ok_or(GasScatteringError::Unrepresentable)?;
+            let b = shape.b_um2 * inverse_square;
+            let c = shape.c_um4 * inverse_fourth;
+            let slope = -2.0 * b - 4.0 * c;
+            let curvature = 6.0 * b + 20.0 * c;
+            let r = shape.reference.refractivity
+                + shape.b_um2 * (inverse_square - shape.reference_inverse_square)
+                + shape.c_um4
+                    * (inverse_fourth
+                        - shape.reference_inverse_square * shape.reference_inverse_square);
+            let n = 1.0 + r;
+            // For f(n)=(n²-1)/(n²+2), f''/f'=(2-3n²)/(n(n²+2)).
+            // Reuse the prepared lambda*K' in its ORIGINAL density basis:
+            // lambda²*K'' = lambda*K' [lambda²*n''/(lambda*n') + (f''/f')lambda*n'].
+            // This avoids squaring tiny molecular volumes or normalizing a
+            // mixture into fractions, including at vacuum/trace composition.
+            let second_coefficient = coefficient.log_wavelength_derivative
+                * (curvature / slope + (2.0 - 3.0 * n * n) / (n * (n * n + 2.0)) * slope);
+            if !second_coefficient.is_finite() {
+                return Err(GasScatteringError::Unrepresentable);
+            }
+            first_l = first_l
+                + Dd::from_f64(density) * Dd::from_f64(coefficient.log_wavelength_derivative);
+            second_l = second_l + Dd::from_f64(density) * Dd::from_f64(second_coefficient);
+        }
+        let first = Dd::from_f64(index.derivative_lorentz_lorenz);
+        let second = Dd::from_f64(index.second_derivative_lorentz_lorenz);
+        let scaled_wavelength_derivatives = [
+            (first * first_l).to_f64(),
+            (first * second_l + second * first_l * first_l).to_f64(),
+        ];
+        if scaled_wavelength_derivatives.iter().any(|v| !v.is_finite()) {
+            return Err(GasScatteringError::Unrepresentable);
+        }
+        Ok(CompositionRefractiveIndexJet {
+            index,
+            scaled_wavelength_derivatives,
         })
     }
 }

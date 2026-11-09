@@ -140,6 +140,110 @@ fn g1_spectral_group_derivative_obeys_the_full_nonlinear_mixture_and_both_densit
 }
 
 #[test]
+fn g1_spectral_curvature_recovers_cauchy_and_differentiates_the_original_mixture() {
+    let (reference, shapes) = fixture();
+    let model = reference.with_dispersion(&shapes).unwrap();
+    let numbers = [7.0e25, 2.0e25];
+    let masses: [f64; 2] = core::array::from_fn(|i| {
+        numbers[i] * model.components()[i].molar_mass_kg_mol() / AVOGADRO_PER_MOL
+    });
+    for lambda in [400.0, 550.0, 760.0] {
+        let spectral = model
+            .at_wavelength(lambda, PartialDensityBasis::MoleculesPerM3)
+            .unwrap();
+        // At its original pure number density, Lorentz--Lorenz must invert
+        // exactly to the source Cauchy law, including its ordinary curvature.
+        let pure = spectral.refractive_index_jet(&[2.5e25, 0.0]).unwrap();
+        let x = (lambda * 1e-3).powi(-2);
+        near(
+            pure.scaled_wavelength_derivatives[0],
+            -4e-6 * x - 4e-7 * x * x,
+            2e-18,
+        );
+        near(
+            pure.scaled_wavelength_derivatives[1],
+            12e-6 * x + 20e-7 * x * x,
+            2e-18,
+        );
+        let number = spectral.refractive_index_jet(&numbers).unwrap();
+        let mass = model
+            .at_wavelength(lambda, PartialDensityBasis::MassKgPerM3)
+            .unwrap()
+            .refractive_index_jet(&masses)
+            .unwrap();
+        for i in 0..2 {
+            near(
+                number.scaled_wavelength_derivatives[i],
+                mass.scaled_wavelength_derivatives[i],
+                3e-18,
+            );
+        }
+        // Independent five-point differentiation of phase REFRACTIVITY keeps
+        // subtraction of the unit vacuum index out of the curvature oracle.
+        let h = 0.2;
+        let r = |offset: f64| {
+            model
+                .refractive_index(
+                    &numbers,
+                    PartialDensityBasis::MoleculesPerM3,
+                    lambda + offset * h,
+                )
+                .unwrap()
+                .refractivity
+        };
+        let slope = (r(-2.0) - 8.0 * r(-1.0) + 8.0 * r(1.0) - r(2.0)) / (12.0 * h);
+        let curvature =
+            (-r(-2.0) + 16.0 * r(-1.0) - 30.0 * r(0.0) + 16.0 * r(1.0) - r(2.0)) / (12.0 * h * h);
+        near(
+            number.scaled_wavelength_derivatives[0],
+            lambda * slope,
+            5e-14,
+        );
+        near(
+            number.scaled_wavelength_derivatives[1],
+            lambda * lambda * curvature,
+            3e-11,
+        );
+        assert_eq!(number.index, spectral.refractive_index(&numbers).unwrap());
+    }
+}
+
+#[test]
+fn g0_spectral_curvature_retains_vacuum_frozen_and_trace_composition_limits() {
+    let (reference, shapes) = fixture();
+    let model = reference.with_dispersion(&shapes).unwrap();
+    let constant = reference
+        .at_wavelength(550.0, PartialDensityBasis::MoleculesPerM3)
+        .unwrap();
+    assert_eq!(
+        constant
+            .refractive_index_jet(&[2e25, 1e25])
+            .unwrap()
+            .scaled_wavelength_derivatives,
+        [0.0; 2]
+    );
+    let spectral = model
+        .at_wavelength(550.0, PartialDensityBasis::MoleculesPerM3)
+        .unwrap();
+    let vacuum = spectral.refractive_index_jet(&[0.0; 2]).unwrap();
+    assert_eq!(vacuum.index.phase_index, 1.0);
+    assert_eq!(vacuum.scaled_wavelength_derivatives, [0.0; 2]);
+    let trace = spectral.refractive_index_jet(&[1e-20, 1e-20]).unwrap();
+    assert_eq!(trace.index.phase_index, 1.0);
+    assert_eq!(trace.index.group_index, 1.0);
+    assert!(trace.scaled_wavelength_derivatives[0] < 0.0);
+    assert!(trace.scaled_wavelength_derivatives[1] > 0.0);
+    for densities in [
+        &[][..],
+        &[-1.0, 1.0],
+        &[f64::NAN, 1.0],
+        &[f64::INFINITY, 1.0],
+    ] {
+        assert!(spectral.refractive_index_jet(densities).is_err());
+    }
+}
+
+#[test]
 fn g0_spectral_source_support_order_and_identity_are_explicit() {
     let (reference, shapes) = fixture();
     let original = shapes[0].reference();

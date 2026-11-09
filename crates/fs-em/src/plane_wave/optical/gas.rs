@@ -47,6 +47,8 @@ pub enum MolecularGasOpticalSource<'a> {
 /// Preparation is bounded by the material owner's component cap and allocates
 /// nothing. All subsequent queries use cached epsilon and exact frequency
 /// admission, so each angular mode reuses the same molecular evaluation.
+/// Local group delay/GVD additionally reuse the cached source derivatives;
+/// two-sided frequency derivatives require an interior point of the source band.
 #[derive(Clone, Copy, Debug)]
 pub struct MolecularGasOpticalResponse<'a> {
     source: MolecularGasOpticalSource<'a>,
@@ -55,6 +57,7 @@ pub struct MolecularGasOpticalResponse<'a> {
     wavelength_nm: f64,
     phase_index: f64,
     group_index: f64,
+    scaled_wavelength_derivatives: [f64; 2],
     permeability_h_m: f64,
     permittivity_f_m: C64,
 }
@@ -83,6 +86,7 @@ impl<'a> MolecularGasOpticalResponse<'a> {
             wavelength_nm,
             sample.phase_index,
             sample.phase_index,
+            [0.0; 2],
         )
     }
 
@@ -109,7 +113,7 @@ impl<'a> MolecularGasOpticalResponse<'a> {
         let wavelength_nm = wavelength(omega_rad_s, model.wavelength_range_nm())?;
         let sample = model
             .at_wavelength(wavelength_nm, basis)
-            .and_then(|spectral| spectral.refractive_index(partial_densities))
+            .and_then(|spectral| spectral.refractive_index_jet(partial_densities))
             .map_err(|_| {
                 bad("molecular partial densities or wavelength are outside their source domain")
             })?;
@@ -122,8 +126,9 @@ impl<'a> MolecularGasOpticalResponse<'a> {
             magnetic,
             omega_rad_s,
             wavelength_nm,
-            sample.phase_index,
-            sample.group_index,
+            sample.index.phase_index,
+            sample.index.group_index,
+            sample.scaled_wavelength_derivatives,
         )
     }
 
@@ -134,6 +139,7 @@ impl<'a> MolecularGasOpticalResponse<'a> {
         wavelength_nm: f64,
         phase_index: f64,
         group_index: f64,
+        scaled_wavelength_derivatives: [f64; 2],
     ) -> Result<Self, ReflectionError> {
         let permeability_h_m = linear_magnetic_permeability(magnetic)?;
         let scale = positive((VACUUM_SPEED_M_S * det::sqrt(permeability_h_m)).recip())?;
@@ -146,6 +152,7 @@ impl<'a> MolecularGasOpticalResponse<'a> {
             wavelength_nm,
             phase_index,
             group_index,
+            scaled_wavelength_derivatives,
             permeability_h_m,
             permittivity_f_m,
         })
@@ -187,6 +194,29 @@ impl<'a> MolecularGasOpticalResponse<'a> {
     pub fn permittivity_f_m(self, omega_rad_s: f64) -> Result<C64, ReflectionError> {
         self.admit_frequency(omega_rad_s)?;
         Ok(self.permittivity_f_m)
+    }
+
+    pub(in crate::plane_wave) fn frequency_jet(
+        self,
+        omega: f64,
+    ) -> Result<super::frequency::OpticalFrequencyJet, ReflectionError> {
+        self.admit_frequency(omega)?;
+        let band = match self.source {
+            MolecularGasOpticalSource::FixedComposition(_) => [380.0, 780.0],
+            MolecularGasOpticalSource::PartialDensities { model, .. } => {
+                model.wavelength_range_nm()
+            }
+        };
+        super::frequency::interior(omega, FREQUENCY_WAVELENGTH_NM, band)?;
+        let scale = positive((VACUUM_SPEED_M_S * det::sqrt(self.permeability_h_m)).recip())?;
+        let [first, second] = self.scaled_wavelength_derivatives;
+        super::frequency::finish(
+            C64::from_re(self.phase_index),
+            scale,
+            C64::from_re(first),
+            C64::from_re(second),
+            C64::from_re(self.group_index),
+        )
     }
 
     fn admit_frequency(self, omega: f64) -> Result<(), ReflectionError> {

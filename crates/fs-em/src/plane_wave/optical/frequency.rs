@@ -30,7 +30,7 @@ fn invalid(message: &'static str) -> ReflectionError {
     ReflectionError::Invalid(message)
 }
 
-fn interior(omega: f64, constant: f64, bounds: [f64; 2]) -> Result<f64> {
+pub(super) fn interior(omega: f64, constant: f64, bounds: [f64; 2]) -> Result<f64> {
     let wavelength = dispersion::wavelength_from_frequency(omega, constant, bounds)
         .ok_or_else(|| invalid("optical dispersion is outside its original source band"))?;
     if omega <= constant / bounds[1] || omega >= constant / bounds[0] {
@@ -93,7 +93,7 @@ fn line<const N: usize>(
     Ok(selected)
 }
 
-fn finish(
+pub(super) fn finish(
     index: C64,
     scale: f64,
     wavelength_first: C64,

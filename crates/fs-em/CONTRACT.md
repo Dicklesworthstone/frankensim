@@ -7452,7 +7452,8 @@ Synthetic fixtures are implementation evidence, not experimental device validati
 
 The bulk dispersion owner accepts original visible and finite-band optical
 responses: Cauchy and Sellmeier phase laws, tabulated dielectrics, complex-index
-conductors, and the explicitly lossless IAPWS water response. Original phase
+conductors, explicitly lossless IAPWS water, and original molecular-gas optical
+responses. Original phase
 and absorption samples, fitted bands, interpolation-gap policies, material
 snapshots and absolute permeability remain authoritative. Index laws are not
 replaced by fits or a monochromatic constant. The native Maxwell carrier root
@@ -7464,6 +7465,13 @@ exactly zero local GVD within a linear wavelength segment. Dielectric intensity
 absorption is differentiated before conversion to extinction: constant alpha
 has exactly zero attenuation slope/curvature even though extinction varies.
 Water curvature comes from the original material owner at fixed T and density.
+Molecular-gas derivatives retain the original Cauchy component laws and nonlinear
+Lorentz–Lorenz mixing at fixed actual partial number densities. Preparation
+caches the wavelength jet; bulk queries at the exact prepared carrier supply
+group delay, GVD and GDD without refitting, allocation or frequency differences.
+Vacuum and nondispersive composition have exactly zero GVD. Original source-band
+endpoints remain valid for monochromatic transport but refuse two-sided
+dispersion; no gas absorption or equation-of-state update is inferred.
 Band endpoints and unequal adjacent table slopes refuse two-sided derivatives;
 smooth knots remain admitted. These are local original-law derivatives, not
 measured derivative accuracy, a causal reservoir or broadband-pulse error bounds.

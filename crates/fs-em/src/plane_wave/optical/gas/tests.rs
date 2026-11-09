@@ -199,6 +199,198 @@ fn beam_limits() -> AngularSpectrumLimits {
 }
 
 #[test]
+fn g1_molecular_bulk_jet_retains_cauchy_group_delay_and_gvd_in_both_density_bases() {
+    let (_, model) = fixture();
+    let numbers = [2.5e25, 0.0];
+    let masses = [
+        numbers[0] / AVOGADRO_PER_MOL * model.components()[0].molar_mass_kg_mol(),
+        0.0,
+    ];
+    for mu in [MU, 2.3 * MU] {
+        let magnetic = magnetic(mu);
+        for lambda in [400.0, 550.0, 1550.0] {
+            let omega = FREQUENCY_WAVELENGTH_NM / lambda;
+            let x = (lambda * 1e-3).powi(-2);
+            let xr = 0.55_f64.powi(-2);
+            let n = 1.0 + R[0] + B[0] * (x - xr) + C[0] * (x * x - xr * xr);
+            let first = -2.0 * B[0] * x - 4.0 * C[0] * x * x;
+            let second = 6.0 * B[0] * x + 20.0 * C[0] * x * x;
+            let ng = n - first;
+            for (densities, basis) in [
+                (&numbers[..], PartialDensityBasis::MoleculesPerM3),
+                (&masses[..], PartialDensityBasis::MassKgPerM3),
+            ] {
+                let response = MolecularGasOpticalResponse::try_lossless_partial_densities(
+                    &model, densities, basis, &magnetic, omega,
+                )
+                .unwrap();
+                let jet = DielectricResponse::MolecularGasOptical(response)
+                    .bulk_dispersion(omega)
+                    .unwrap();
+                near(
+                    jet.wavenumber_rad_m().re * VACUUM_SPEED_M_S / omega,
+                    n,
+                    8e-16,
+                );
+                near(jet.group_slowness_s_m() * VACUUM_SPEED_M_S, ng, 8e-16);
+                near(
+                    jet.group_velocity_dispersion_s2_m() * omega * VACUUM_SPEED_M_S,
+                    second,
+                    3e-18,
+                );
+                assert_eq!(jet.wavenumber_rad_m().im, 0.0);
+                assert_eq!(jet.wavenumber_derivative_s_m().im, 0.0);
+                assert_eq!(jet.wavenumber_second_derivative_s2_m().im, 0.0);
+                let [e1, e2] = jet.scaled_permittivity_derivatives_f_m();
+                let scale = mu * VACUUM_SPEED_M_S.powi(2);
+                near(e1.re * scale, -2.0 * n * first, 3e-18);
+                near(
+                    e2.re * scale,
+                    2.0 * (first * first + n * (second + 2.0 * first)),
+                    3e-18,
+                );
+                for length in [0.0, 0.7, 10_000.0] {
+                    let path = jet.propagation(length).unwrap();
+                    near(path.group_delay_s, ng / VACUUM_SPEED_M_S * length, 2e-20);
+                    near(
+                        path.group_delay_dispersion_s2,
+                        second / (omega * VACUUM_SPEED_M_S) * length,
+                        2e-36,
+                    );
+                    near(path.transfer.abs(), 1.0, 3e-16);
+                    assert_eq!(path.log_amplitude_derivative_s, 0.0);
+                    assert_eq!(path.log_amplitude_second_derivative_s2, 0.0);
+                    if length > 0.0 {
+                        assert!(path.group_delay_s > path.phase_delay_s);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_molecular_bulk_jet_differentiates_the_nonlinear_mixture_without_erasing_trace_dispersion() {
+    let (_, model) = fixture();
+    let magnetic = magnetic(MU);
+    let numbers = [7e25, 2e25];
+    let lambda = 510.0;
+    let omega = FREQUENCY_WAVELENGTH_NM / lambda;
+    let response = MolecularGasOpticalResponse::try_lossless_partial_densities(
+        &model,
+        &numbers,
+        PartialDensityBasis::MoleculesPerM3,
+        &magnetic,
+        omega,
+    )
+    .unwrap();
+    let jet = DielectricResponse::MolecularGasOptical(response)
+        .bulk_dispersion(omega)
+        .unwrap();
+    let expected_group = molecular_reference(numbers, lambda, true).1;
+    near(
+        jet.group_slowness_s_m() * VACUUM_SPEED_M_S,
+        expected_group,
+        8e-16,
+    );
+    // Differentiate omega*n directly through an independent molecular formula.
+    let h = 0.002;
+    let k = |offset: f64| {
+        let ratio = 1.0 + offset * h;
+        ratio * molecular_reference(numbers, lambda / ratio, true).0
+    };
+    let curvature =
+        (-k(-2.0) + 16.0 * k(-1.0) - 30.0 * k(0.0) + 16.0 * k(1.0) - k(2.0)) / (12.0 * h * h);
+    near(
+        jet.group_velocity_dispersion_s2_m() * omega * VACUUM_SPEED_M_S,
+        curvature,
+        3e-10,
+    );
+    let trace = [1e-20, 1e-20];
+    let response = MolecularGasOpticalResponse::try_lossless_partial_densities(
+        &model,
+        &trace,
+        PartialDensityBasis::MoleculesPerM3,
+        &magnetic,
+        omega,
+    )
+    .unwrap();
+    assert_eq!(response.phase_index(), 1.0);
+    assert_eq!(response.group_index(), 1.0);
+    assert!(
+        DielectricResponse::MolecularGasOptical(response)
+            .bulk_dispersion(omega)
+            .unwrap()
+            .group_velocity_dispersion_s2_m()
+            > 0.0
+    );
+}
+
+#[test]
+fn g0_molecular_bulk_jet_keeps_frozen_vacuum_frequency_and_source_band_boundaries() {
+    let (gas, model) = fixture();
+    let magnetic = magnetic(MU);
+    let omega = FREQUENCY_WAVELENGTH_NM / 550.0;
+    let response =
+        MolecularGasOpticalResponse::try_lossless_fixed_composition(&gas, &magnetic, omega)
+            .unwrap();
+    let jet = DielectricResponse::MolecularGasOptical(response)
+        .bulk_dispersion(omega)
+        .unwrap();
+    assert_eq!(jet.group_velocity_dispersion_s2_m(), 0.0);
+    near(
+        jet.group_slowness_s_m() * VACUUM_SPEED_M_S,
+        response.phase_index(),
+        3e-16,
+    );
+    assert_eq!(jet.scaled_permittivity_derivatives_f_m(), [C64::ZERO; 2]);
+    let vacuum = [0.0; 2];
+    let response = MolecularGasOpticalResponse::try_lossless_partial_densities(
+        &model,
+        &vacuum,
+        PartialDensityBasis::MoleculesPerM3,
+        &magnetic,
+        omega,
+    )
+    .unwrap();
+    let law = DielectricResponse::MolecularGasOptical(response);
+    let jet = law.bulk_dispersion(omega).unwrap();
+    assert_eq!(jet.group_velocity_dispersion_s2_m(), 0.0);
+    assert_eq!(jet.group_slowness_s_m(), VACUUM_SPEED_M_S.recip());
+    for wrong in [omega.next_up(), omega.next_down(), 0.0, f64::NAN] {
+        assert!(law.bulk_dispersion(wrong).is_err());
+    }
+    for lambda in model.wavelength_range_nm() {
+        let frequency = FREQUENCY_WAVELENGTH_NM / lambda;
+        let response = MolecularGasOpticalResponse::try_lossless_partial_densities(
+            &model,
+            &vacuum,
+            PartialDensityBasis::MoleculesPerM3,
+            &magnetic,
+            frequency,
+        )
+        .unwrap();
+        assert!(response.permittivity_f_m(frequency).is_ok());
+        assert!(
+            DielectricResponse::MolecularGasOptical(response)
+                .bulk_dispersion(frequency)
+                .is_err()
+        );
+    }
+    for lambda in [380.0, 780.0] {
+        let frequency = FREQUENCY_WAVELENGTH_NM / lambda;
+        let response =
+            MolecularGasOpticalResponse::try_lossless_fixed_composition(&gas, &magnetic, frequency)
+                .unwrap();
+        assert!(
+            DielectricResponse::MolecularGasOptical(response)
+                .bulk_dispersion(frequency)
+                .is_err()
+        );
+    }
+}
+
+#[test]
 fn g1_original_gas_phase_group_and_explicit_mu_reach_maxwell() {
     let (gas, model) = fixture();
     let total = gas.gas().density / gas.molar_mass_kg_mol() * AVOGADRO_PER_MOL;
