@@ -220,6 +220,54 @@ impl FlowField {
         )
     }
 
+    /// Combine an independently supplied bulk viscosity with explicit SGS on
+    /// the original closed material-momentum update.
+    ///
+    /// Molecular stress is `2 mu dev(D) + zeta div(u) I`, where the original
+    /// transport sources supply mu and `bulk_viscosity_pa_s` supplies zeta at
+    /// the same state. Only its molecular dissipation enters enthalpy. The
+    /// selected SGS adds `2 rho nu_t dev(D)` using actual `rho = M/V`; its
+    /// modeled transfer remains in the separate SGS ledger. The independent
+    /// bulk coefficient never enters the closure or its molecular shear cap.
+    ///
+    /// The original nonlinear stress solve, reconstruction, force/projection
+    /// and accepted mass-route transport are shared with the other entries.
+    /// This retains the same first-order frozen-source split, exploratory
+    /// policy, wall/symmetry scope and exact zero-model molecular control.
+    ///
+    /// # Errors
+    /// Invalid or unrepresentable bulk/shear coefficients, source, model,
+    /// applicability, native-work, caloric or cancellation failure publishes
+    /// no candidate and leaves all inputs unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_material_momentum_with_bulk_viscosity_and_sgs(
+        &self,
+        domain: &VoxelDomain,
+        input: MaterialMomentumAdvanceInput<'_>,
+        viscosity: MaterialMomentumViscosityInput<'_>,
+        bulk_viscosity_pa_s: &[f64],
+        sgs: FvSgsConfig,
+        controls: MaterialMomentumAdvanceControls,
+        viscosity_controls: MaterialViscosityControls,
+        gate: &CancelGate,
+    ) -> Result<ViscousMaterialMomentumAdvance, ChtError> {
+        poll(gate)?;
+        sgs.validate()?;
+        self.advance_viscous_material(
+            domain,
+            [FlowFace::Wall; 6],
+            None,
+            None,
+            input,
+            viscosity,
+            Some(bulk_viscosity_pa_s),
+            Some(sgs),
+            controls,
+            viscosity_controls,
+            gate,
+        )
+    }
+
     /// Evolve actual material inertia through one opposed reservoir pair,
     /// retaining native molecular stress, heat, pressure work and mass routes.
     ///

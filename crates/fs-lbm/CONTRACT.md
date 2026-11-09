@@ -2454,3 +2454,26 @@ Two focused regression groups compare explicit local SI-to-lattice rates and
 original source samples on D3Q19/D3Q27, then check conducting-wall heat accounts,
 late source refusal, final cancellation and exact retry. Their execution is not
 claimed by this implementation checkpoint.
+
+### Independently authored bulk viscosity with material SGS
+
+`FlowField::advance_material_momentum_with_bulk_viscosity_and_sgs` supplies
+the same predictor with an explicit original molecular bulk field. Molecular
+stress is `2 mu dev(D) + zeta div(u) I` and its physical heat is
+`2 mu dev(D):dev(D) + zeta div(u)^2`. The added SGS stress remains purely
+deviatoric and uses actual cell M/V; its modeled transfer stays separate from
+enthalpy. Original molecular shear viscosity alone sets the SGS applicability
+limit, so a large bulk coefficient cannot hide a shear-ratio violation.
+
+The original source, reconstruction, nonlinear momentum solve, force/pressure
+update and accepted mass-route transport each run once. All-zero closure
+coefficients recover the existing explicit-bulk path exactly. The closed
+wall/symmetry scope, frozen molecular-state split and independent energy/work
+gates remain. Active pressure mouths still require their own boundary-consistent
+closure and work partition before they can be admitted.
+
+Three focused regression groups cover independent graded longitudinal decay,
+a solenoidal circulation mode whose response is independent of bulk viscosity,
+and zero-model/refusal behavior. Source parsing, scoped formatting and scalar
+analytic energy checks passed; native execution remains subject to the
+dependency build limitation recorded above.
