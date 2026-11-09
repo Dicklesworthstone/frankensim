@@ -9,6 +9,9 @@
 //! Ordered segments share the current thermal time. This frozen-source impulse
 //! split adds no conducting link, temperature feedback, mixed-mode instability
 //! or body impulse. Intervening transport belongs to the original thermal owner.
+//! [`timed`] carries plastic heat through that original physical-time transport.
+
+pub mod timed;
 
 use super::{JkrSnapHeat, JkrSnapHeatControls, JkrSnapHeatError, Receiver};
 use fs_blake3::ContentHash;

@@ -25,6 +25,7 @@ use std::collections::BTreeMap;
 /// Native rigid-body motion and event-timed snap heat in one accepted candidate.
 pub mod native;
 mod normal_motion;
+mod power;
 /// Retained rolling cycles with separate normal-snap and spring-release heating.
 pub mod rolling;
 /// Preserve original snap and caloric history across prescribed source temperature changes.

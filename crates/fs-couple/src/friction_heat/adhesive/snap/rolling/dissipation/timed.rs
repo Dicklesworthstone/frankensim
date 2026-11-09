@@ -14,17 +14,15 @@
 /// Actual driven finite-body motion and thermal transport on one accepted clock.
 pub mod native;
 
+use super::super::super::power::{SurfacePower, sum_audits};
 use super::{
     JkrRollingDissipationHeat, JkrRollingDissipationHeatReport, JkrRollingSnapHeatError,
     JkrRollingSnapHeatStamp, JkrRollingSnapSegment, JkrSnapHeatError,
 };
 use fs_contact::normal_patch::adhesive::rolling::events::JkrRollingEventReport;
 use fs_math::dd::Dd;
-use fs_thermal::enthalpy::{
-    CellId, DepositionError, DepositionObserver, DepositionSimulation, EnergyAudit, Event,
-};
+use fs_thermal::enthalpy::{DepositionError, DepositionSimulation, EnergyAudit};
 use fs_tribo::{DissipationStep, WorkLedger};
-use std::collections::BTreeMap;
 
 /// Reuses the original impulse, explicit-transport and whole-interval gates.
 /// `heat.maximum_segments` must admit the normal and rolling source segments.
@@ -152,16 +150,15 @@ impl<'s> JkrRollingDissipationHeat<'s> {
         let mut rolling_loss = WorkLedger::default();
         rolling_loss.record(loss)?;
         history.rolling_loss_ledger.record(loss)?;
-        let observer = RollingPower {
-            owner: &history,
+        let admit = |thermal: &DepositionSimulation<'_>| history.snap.admit_receivers(thermal);
+        let observer = SurfacePower::new(
+            history.snap.receivers.map(|receiver| receiver.cell),
             start,
             end,
-            powers: [
-                finite(loss.surface_a_heat_j() / dt_s)?,
-                finite(loss.surface_b_heat_j() / dt_s)?,
-            ],
-            injected: [Dd::ZERO; 2],
-        };
+            dt_s,
+            loss,
+            &admit,
+        )?;
         let remaining = controls
             .maximum_transport_substeps
             .checked_sub(initial_events.substeps)
@@ -271,116 +268,6 @@ impl<'s> JkrRollingDissipationHeat<'s> {
     }
 }
 
-#[derive(Clone)]
-struct RollingPower<'a, 's> {
-    owner: &'a JkrRollingDissipationHeat<'s>,
-    start: f64,
-    end: f64,
-    powers: [f64; 2],
-    injected: [Dd; 2],
-}
-impl RollingPower<'_, '_> {
-    fn finish(
-        self,
-        expected: DissipationStep,
-        tolerance: f64,
-    ) -> Result<([Dd; 2], f64, Dd), JkrRollingSnapHeatError> {
-        let a = self.injected[0] - Dd::from_f64(expected.surface_a_heat_j());
-        let b = self.injected[1] - Dd::from_f64(expected.surface_b_heat_j());
-        let partition = Dd::from_f64(expected.surface_a_heat_j())
-            + Dd::from_f64(expected.surface_b_heat_j())
-            + Dd::from_f64(expected.other_work_j())
-            - Dd::from_f64(expected.total_work_j());
-        let residual = finite((a + b + partition).to_f64())?;
-        let absolute = a.abs() + b.abs() + partition.abs();
-        if residual.abs() > tolerance || finite(absolute.to_f64())? > tolerance {
-            return Err(
-                JkrSnapHeatError::TransferBalance(residual.abs().max(absolute.to_f64())).into(),
-            );
-        }
-        Ok((self.injected, residual, absolute))
-    }
-}
-impl DepositionObserver for RollingPower<'_, '_> {
-    type Error = JkrRollingSnapHeatError;
-    fn requires_step_interval(&self) -> bool {
-        self.powers.iter().any(|p| *p != 0.0)
-    }
-    fn step_sources(
-        &mut self,
-        thermal: &DepositionSimulation<'_>,
-        start_s: f64,
-        dt_s: f64,
-        end_s: f64,
-        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
-        checkpoint()?;
-        self.owner.snap.admit_receivers(thermal)?;
-        if start_s < self.start || end_s > self.end || end_s <= start_s || dt_s <= 0.0 {
-            return Err(invalid(
-                "rolling source interval differs from native thermal interval",
-            ));
-        }
-        let mut sources = BTreeMap::new();
-        for (side, power) in self.powers.into_iter().enumerate() {
-            if power != 0.0 {
-                self.injected[side] =
-                    self.injected[side] + Dd::from_f64(power) * Dd::from_f64(dt_s);
-                finite(self.injected[side].to_f64())?;
-                sources.insert(self.owner.snap.receivers[side].cell, power);
-            }
-        }
-        Ok(sources)
-    }
-    fn event(&mut self, _: &Event, thermal: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
-        self.owner.snap.admit_receivers(thermal)?;
-        Ok(())
-    }
-    fn step(
-        &mut self,
-        _: f64,
-        _: f64,
-        _: &BTreeMap<CellId, f64>,
-        thermal: &DepositionSimulation<'_>,
-        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<(), Self::Error> {
-        checkpoint()?;
-        self.owner.snap.admit_receivers(thermal)?;
-        Ok(())
-    }
-}
-
-fn sum_audits(audits: [EnergyAudit; 3]) -> Result<EnergyAudit, JkrRollingSnapHeatError> {
-    let mut values = [Dd::ZERO; 5];
-    let mut substeps = 0usize;
-    let mut events = 0usize;
-    for a in audits {
-        for (sum, value) in values.iter_mut().zip([
-            a.incoming_mass_kg,
-            a.incoming_energy_j,
-            a.external_heat_j,
-            a.stored_energy_change_j,
-            a.residual_j,
-        ]) {
-            *sum = *sum + Dd::from_f64(finite(value)?);
-        }
-        substeps = substeps
-            .checked_add(a.substeps)
-            .ok_or(DepositionError::Arithmetic)?;
-        events = events
-            .checked_add(a.events)
-            .ok_or(DepositionError::Arithmetic)?;
-    }
-    Ok(EnergyAudit {
-        incoming_mass_kg: finite(values[0].to_f64())?,
-        incoming_energy_j: finite(values[1].to_f64())?,
-        external_heat_j: finite(values[2].to_f64())?,
-        stored_energy_change_j: finite(values[3].to_f64())?,
-        residual_j: finite(values[4].to_f64())?,
-        substeps,
-        events,
-    })
-}
 fn invalid(message: &'static str) -> JkrRollingSnapHeatError {
     JkrSnapHeatError::Invalid(message).into()
 }

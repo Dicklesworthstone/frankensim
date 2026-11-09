@@ -11814,3 +11814,15 @@ by 0.1413% and 0.1530%; halving the time-step ceiling changed them by less
 than 1.5e-13 and 2.8e-9 relative. These are case-specific numerical
 comparisons, not general accuracy bounds or experimental qualification.
 The complete workspace was not executed.
+
+## Physical-time transport of calibrated torsion heat
+
+`friction_heat::adhesive::snap::torsion::timed` advances the complete original torsion heat owner and finite calorics over a positive physical interval. The accepted contact and thermal clocks must match exactly. Original scheduled events at interval start precede the prescribed normal/area stage and its normal and retained-spring release. The source-regenerated monotone twist step then supplies only its plastic loss as interval-average power, with the independent declared torsional partition.
+
+The existing native thermal solver owns conduction, reservoir cooling, ordinary sources, scheduled changes, caloric domains and bounded transport work. A private surface-power observer now serves both rolling and torsion. It retains the original receiver admission and compensated per-cell integration over actual accepted durations; changing clocks or rounded average watts must pass the explicit transfer gate, without an endpoint correction. The rolling extraction preserves the original arithmetic and callback order.
+
+Original relative thermal audits and independently checked contact-transfer defects close the combined account without subtracting large rounded formation enthalpies. Absolute source, caloric and transport defects remain separate. All three loss ledgers, complete retained contact state, finite cells and accepted end time publish together after the final checkpoint. A late budget, domain, clock/history or cancellation refusal discards the whole interval.
+
+This is a prescribed-normal, frozen-source split with interval-average plastic power. The original homogeneous torsion law and mode-III applicability ceiling remain in force. Temporal refinement is required for within-step dynamics; reciprocal mixed-mode stability, resolved within-step twist and temperature feedback are separate physics.
+
+Three focused integration cases compare against independent discrete conduction/cooling modes, verify original normal and fold spring release before a scheduled cooling change, and exercise transport/caloric/cancellation/stale-clock rollback with exact retry. Pinned formatting and recursive Rust syntax/module-path checks passed. Integration compilation and execution remain unavailable under this session's runner and memory/disk limits.

@@ -1,5 +1,8 @@
 //! G1/G3/G4: retained twist release, plastic loss and original finite calorics.
 
+#[path = "torsion/timed.rs"]
+mod timed;
+
 use super::{MASS, close, controls, curves, source, thermal};
 use core::f64::consts::PI;
 use fs_contact::normal_patch::adhesive::{
