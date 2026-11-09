@@ -13580,17 +13580,26 @@ comparisons, scale restoration, resource/cancellation refusals and exact
 versus coarse subnormal factors. This is not a 100k-continuum performance
 claim.
 
-## Retained finite J2 plasticity on mixed P2/P1 tetrahedra
+## Retained finite inelasticity on mixed P2/P1 tetrahedra
 
 `hyper3::mixed::plastic::MixedPlasticTetSolid` advances isothermal,
-rate-independent finite J2 loading on the existing quadratic-displacement,
+quasistatic finite inelastic loading on the existing quadratic-displacement,
 continuous-linear-pressure tetrahedra. Uniform, per-element and per-quadrature
-`FiniteJ2Material` bindings borrow the original native or source-resolved law.
-Every quadrature point retains its original inverse plastic metric and
-accumulated plastic strain. Linear, Voce and tabulated energetic hardening use
+`MixedFiniteInelasticMaterial` bindings borrow the original law. The blanket
+`FiniteJ2Material` implementation retains existing native/source-resolved J2
+callers; explicit Perzyna, Norton, combined and recovering owners keep their
+original kinetics. Every quadrature point retains the complete native associated
+state, including the metric, permanent flow counters and independently recovering
+resistance when selected. Linear, Voce and tabulated energetic hardening use
 the same native return map and analytic logarithm derivative as displacement
 plasticity; no bulk modulus is replaced and no large bulk penalty is subtracted
 from an already rounded full stress or tangent.
+
+`duration_s()` reports the common original kinetic interval, or `None` for a
+fully rate-independent field. Every kinetic point must declare the same finite,
+positive interval; a heterogeneous field cannot silently mix physical clocks.
+Newton trials and accepted-state inspections reuse the same old complete state
+and never advance recovery or flow independently of the accepted endpoint.
 
 `OriginalMaterial` preserves the original log-squared bulk law on its locally
 convex branch. `ExactIncompressible` explicitly imposes the existing weak volume
@@ -13601,12 +13610,17 @@ deformation and reconstructed volume retain the material's original bounds.
 
 One `advance` is one physical endpoint: solver `load_steps` must equal one and
 Newton/line-search trials always use the same accepted histories. Native mixed
-equilibrium, old/new yield admissibility, independently re-evaluated storage,
+equilibrium, native old/new state admission, independently re-evaluated storage,
 reduced-potential consistency, pressure-constraint work, support/dead-load work,
 and the caller's signed endpoint-work-defect allowance must all pass before
 publishing a successor. Failure or cancellation leaves the original state
-available for retry or forking. Plastic dissipation, flow potential, bulk
-storage and numerical endpoint defects remain separate result fields.
+available for retry or forking. Native admission preserves legitimate Perzyna
+overstress and creep stress; equilibrium yield is enforced only by owners that
+select it. Plastic/viscous dissipation, combined creep dissipation, flow
+potential, bulk storage and numerical endpoint defects remain separate result
+fields. `inelastic_dissipation_j()` sums only the two physical heat channels.
+The native sole-Norton convention reports its creep heat in the historically
+plastic-named channel, consistently with the existing displacement owner.
 
 `tests/mixed_plastic.rs` checks coaxial finite loading, free unloading, reverse
 yielding, permanent deformation and pressure against independent scalar
@@ -13614,10 +13628,12 @@ Hencky/J2 equations at moderate and very high bulk modulus and at exact
 incompressibility. It also checks quadrature bindings and transactional
 refusal/cancellation/replay. `tests/mixed_plastic/bending.rs` adds a bounded
 non-affine two-mesh plastic cantilever diagnostic and compares high finite bulk
-response to exact incompressibility. These manufactured cases are numerical
+response to exact incompressibility. `tests/mixed_inelastic.rs` adds finite-time
+relaxation against independent scalar kinetic equations, complete recovery
+memory, shared-clock admission and rejected-step/retry cases. These manufactured cases are numerical
 evidence, not material calibration, a universal inf-sup theorem, continuum
 convergence, or an injectivity certificate between quadrature points. This
-adapter does not yet add inertia, creep, thermal evolution, porous/ductile
+adapter does not yet add inertia, thermal evolution, porous/ductile
 damage, contact, or follower loads to mixed plasticity; their existing owners
 remain separate.
 

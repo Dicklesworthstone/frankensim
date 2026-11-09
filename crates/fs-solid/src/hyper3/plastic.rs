@@ -20,9 +20,10 @@
 //! moderate. Accurate bending in strongly plastic or nearly incompressible
 //! regimes requires a mixed/stabilized formulation and mesh evidence; an affine
 //! patch does not establish that accuracy. [`super::mixed::plastic`] supplies
-//! the native P2/P1 mixed, rate-independent J2 successor with original bulk
-//! compliance or explicit exact incompressibility. The rate/thermal extensions
-//! here retain their displacement-only formulation. [`dynamics`] adds endpoint inertia
+//! the native P2/P1 mixed successor for J2, Perzyna, Norton and combined or
+//! recovering laws, with original bulk compliance or exact incompressibility.
+//! Thermal evolution here retains its displacement-only formulation.
+//! [`dynamics`] adds endpoint inertia
 //! on this same solve. [`thermal`] adds changing temperature and exact native
 //! thermoelastic/plastic accounts. Contact, follower loads and cyclic kinematic
 //! hardening are outside these paths.

@@ -1,8 +1,9 @@
-//! Retained finite J2 plasticity on the native P2/P1 mixed tetrahedra.
+//! Retained finite inelasticity on the native P2/P1 mixed tetrahedra.
 //!
-//! The original material owns the isochoric return, hardening and consistent
-//! tangent. Each quadrature point keeps its own accepted plastic metric and
-//! accumulated flow. Newton trials borrow that same history; only a complete
+//! The original material owns the isochoric return, kinetics, hardening and
+//! consistent tangent. Each quadrature point keeps its complete native history,
+//! including independent recovering resistance when selected. Newton trials
+//! borrow that same history and physical interval; only a complete
 //! converged, work-checked endpoint publishes new displacement, pressure and
 //! history together. Original source-resolved laws remain borrowed intact.
 //!
@@ -10,17 +11,20 @@
 //! original bulk energy at the pressure-reconstructed volume, `U(J(p))`.
 //! Continuous P1 pressure enforces volume weakly; substituting `U(det F)` would
 //! restore a displacement penalty and change this mixed formulation. Explicit
-//! exact incompressibility has no bulk storage. Flow potential, physical plastic
-//! heat, pressure-constraint work and signed endpoint quadrature error remain
-//! separate. This is an isothermal, rate-independent quasistatic path, with
-//! the original finite J2 limits and local convex bulk branch. Mesh stability,
-//! locking accuracy and injectivity require their own numerical evidence.
+//! exact incompressibility has no bulk storage. Flow potential, physical
+//! inelastic heat, pressure-constraint work and endpoint quadrature error remain
+//! separate. This is an isothermal quasistatic path for rate-independent J2,
+//! Perzyna overstress, Norton creep and their native combined/recovering laws.
+//! All kinetic points share one original physical interval. The original
+//! finite-history limits and local convex bulk branch remain enforced. Mesh
+//! stability, locking accuracy and injectivity require their own evidence.
 
 use std::sync::Arc;
 
 use fs_exec::Cx;
 use fs_material::hyper::mixed::{MixedFiniteStrainPotential, VolumetricTreatment};
-use fs_material::plastic::finite::{FiniteJ2, FiniteJ2Error, FiniteJ2Material, FiniteJ2State};
+use fs_material::plastic::finite::mixed::MixedFiniteInelasticMaterial;
+use fs_material::plastic::finite::{FiniteJ2, FiniteJ2Error};
 
 use super::element::PreparedMixedMesh;
 use super::{
@@ -34,7 +38,7 @@ const IDENTITY: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
 /// Original laws without property averaging or replacement of their sources.
 #[derive(Debug)]
-pub enum MixedPlasticLawField<'a, L: FiniteJ2Material = FiniteJ2> {
+pub enum MixedPlasticLawField<'a, L: MixedFiniteInelasticMaterial = FiniteJ2> {
     /// One original material for all points; histories are still distinct.
     Uniform(&'a L),
     /// One original material per tetrahedron.
@@ -43,19 +47,19 @@ pub enum MixedPlasticLawField<'a, L: FiniteJ2Material = FiniteJ2> {
     PerQuadrature(&'a [L]),
 }
 
-impl<L: FiniteJ2Material> Copy for MixedPlasticLawField<'_, L> {}
-impl<L: FiniteJ2Material> Clone for MixedPlasticLawField<'_, L> {
+impl<L: MixedFiniteInelasticMaterial> Copy for MixedPlasticLawField<'_, L> {}
+impl<L: MixedFiniteInelasticMaterial> Clone for MixedPlasticLawField<'_, L> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<L: FiniteJ2Material> MixedPlasticLawField<'_, L> {
-    fn at(&self, element: usize, point: usize, points: usize) -> &FiniteJ2 {
+impl<L: MixedFiniteInelasticMaterial> MixedPlasticLawField<'_, L> {
+    fn at(&self, element: usize, point: usize, points: usize) -> &L {
         match self {
-            Self::Uniform(law) => law.finite_j2(),
-            Self::PerElement(laws) => laws[element].finite_j2(),
-            Self::PerQuadrature(laws) => laws[element * points + point].finite_j2(),
+            Self::Uniform(law) => law,
+            Self::PerElement(laws) => &laws[element],
+            Self::PerQuadrature(laws) => &laws[element * points + point],
         }
     }
 }
@@ -75,8 +79,12 @@ pub struct MixedPlasticTetEnergy {
     pub stored_before_j: f64,
     /// Total returned physical storage, J.
     pub stored_after_j: f64,
-    /// Native yield dissipation for this increment, excluding numerical defects.
+    /// Native plastic/viscous channel, excluding numerical defects. In the
+    /// native sole-Norton convention this is creep heat; combined laws retain
+    /// creep in its independent channel below.
     pub plastic_dissipation_j: f64,
+    /// Physical creep heat from the native combined creep/plastic channel.
+    pub creep_dissipation_j: f64,
     /// Integrated native flow potential, distinct from stored energy.
     pub flow_potential_j: f64,
     /// Bulk-free reduced potential used during Newton, J.
@@ -93,9 +101,17 @@ pub struct MixedPlasticTetEnergy {
     pub support_endpoint_work_j: f64,
     /// External endpoint work minus internal endpoint work, J.
     pub equilibrium_work_residual_j: f64,
-    /// Internal endpoint work minus storage change and physical yield loss, J.
+    /// Internal endpoint work minus storage change and total physical heat, J.
     /// Signed first-order quadrature defect; never added to material heat.
     pub endpoint_work_defect_j: f64,
+}
+
+impl MixedPlasticTetEnergy {
+    /// Complete physical inelastic heat. Neither the incremental flow potential
+    /// nor signed endpoint integration defects are caloric dissipation.
+    pub fn inelastic_dissipation_j(&self) -> f64 {
+        self.plastic_dissipation_j + self.creep_dissipation_j
+    }
 }
 
 /// Native numerical/material refusal or an explicit physical-work gate.
@@ -178,10 +194,11 @@ fn gate(
 /// Immutable accepted mixed configuration and complete original plastic history.
 /// Reference geometry is prepared once and shared by accepted successors.
 #[derive(Debug)]
-pub struct MixedPlasticTetSolid<'a, L: FiniteJ2Material = FiniteJ2> {
+pub struct MixedPlasticTetSolid<'a, L: MixedFiniteInelasticMaterial = FiniteJ2> {
     nodes_m: &'a [[f64; 3]],
     elements: &'a [[usize; 10]],
     material: MixedPlasticLawField<'a, L>,
+    duration_s: Option<f64>,
     volumetric: VolumetricTreatment,
     mesh: Arc<PreparedMixedMesh>,
     budget: TetAssemblyBudget,
@@ -189,7 +206,7 @@ pub struct MixedPlasticTetSolid<'a, L: FiniteJ2Material = FiniteJ2> {
     maximum_quadrature_points: usize,
     displacement_m: Vec<[f64; 3]>,
     pressure_pa: Vec<f64>,
-    states: Vec<FiniteJ2State>,
+    states: Vec<L::State>,
     deformation: Vec<[f64; 9]>,
     first_piola_pa: Vec<[f64; 9]>,
     remainder_energy_j: f64,
@@ -198,16 +215,16 @@ pub struct MixedPlasticTetSolid<'a, L: FiniteJ2Material = FiniteJ2> {
 
 /// A complete proposed endpoint. Dropping it preserves the previous solid.
 #[derive(Debug)]
-pub struct MixedPlasticTetStep<'a, L: FiniteJ2Material = FiniteJ2> {
+pub struct MixedPlasticTetStep<'a, L: MixedFiniteInelasticMaterial = FiniteJ2> {
     /// Displacement, pressure, material binding and accepted histories together.
     pub solid: MixedPlasticTetSolid<'a, L>,
     /// Native pressure/displacement equilibrium and reactions.
     pub equilibrium: MixedUpSolution,
-    /// Independently evaluated physical storage, yield loss and work.
+    /// Independently evaluated physical storage, inelastic heat and work.
     pub energy: MixedPlasticTetEnergy,
 }
 
-impl<'a, L: FiniteJ2Material> MixedPlasticTetSolid<'a, L> {
+impl<'a, L: MixedFiniteInelasticMaterial> MixedPlasticTetSolid<'a, L> {
     /// Prepare the virgin, stress-free reference configuration.
     /// Finite compliance retains the original bulk modulus; exact
     /// incompressibility is an explicit alternative with no bulk penalty.
@@ -250,12 +267,25 @@ impl<'a, L: FiniteJ2Material> MixedPlasticTetSolid<'a, L> {
         }
         let mut states = Vec::with_capacity(count);
         let mut first_piola_pa = Vec::with_capacity(count);
+        let mut duration_s = None;
         let mut remainder_energy_j = 0.0;
         let mut bulk_energy_j = 0.0;
         for (e, element) in mesh.elements.iter().enumerate() {
             for (q, point) in element.points.iter().enumerate() {
                 checkpoint(cx)?;
                 let law = material.at(e, q, mesh.points_per_element);
+                if let Some(duration) = law.duration_s() {
+                    if !duration.is_finite()
+                        || duration <= 0.0
+                        || duration_s.is_some_and(|old| old != duration)
+                    {
+                        return Err(invalid(
+                            "every kinetic quadrature point must share one finite positive physical duration",
+                        )
+                        .into());
+                    }
+                    duration_s = Some(duration);
+                }
                 let state = law.initial_state();
                 let source = |source| MixedPlasticTetError::Material {
                     element: e,
@@ -289,6 +319,7 @@ impl<'a, L: FiniteJ2Material> MixedPlasticTetSolid<'a, L> {
             nodes_m,
             elements,
             material,
+            duration_s,
             volumetric,
             pressure_pa: vec![0.0; mesh.pressure_nodes.len()],
             mesh,
@@ -316,9 +347,16 @@ impl<'a, L: FiniteJ2Material> MixedPlasticTetSolid<'a, L> {
     pub fn pressure_pa(&self) -> &[f64] {
         &self.pressure_pa
     }
-    /// Complete histories in element-major native Duffy order.
-    pub fn quadrature_states(&self) -> &[FiniteJ2State] {
+    /// Complete native histories in element-major Duffy order, including
+    /// separately recovering resistance for the native recovery owners.
+    pub fn quadrature_states(&self) -> &[L::State] {
         &self.states
+    }
+    /// Shared original physical interval for explicit kinetics, or `None` for
+    /// a completely rate-independent field. Only an accepted advance consumes
+    /// an interval; inspection and Newton trials never age the accepted state.
+    pub const fn duration_s(&self) -> Option<f64> {
+        self.duration_s
     }
     /// Accepted original deformation gradient at each quadrature point.
     pub fn deformation_gradients(&self) -> &[[f64; 9]] {
@@ -473,6 +511,7 @@ impl<'a, L: FiniteJ2Material> MixedPlasticTetSolid<'a, L> {
                 energy.remainder_after_j += w * stored;
                 energy.bulk_after_j += w * mixed.bulk_stored_pa;
                 energy.plastic_dissipation_j += w * response.plastic_dissipation_j_m3;
+                energy.creep_dissipation_j += w * response.creep_dissipation_j_m3;
                 energy.flow_potential_j += w * response.flow_potential_j_m3;
                 energy.incremental_remainder_potential_j += w * mixed.remainder_potential_pa;
                 energy.mixed_potential_j += w * mixed.potential_pa;
@@ -505,7 +544,7 @@ impl<'a, L: FiniteJ2Material> MixedPlasticTetSolid<'a, L> {
             - energy.internal_endpoint_work_j;
         energy.endpoint_work_defect_j = energy.internal_endpoint_work_j
             - (energy.stored_after_j - energy.stored_before_j)
-            - energy.plastic_dissipation_j;
+            - energy.inelastic_dissipation_j();
         for (quantity, value) in [
             (
                 "assembled mixed potential",
@@ -530,6 +569,7 @@ impl<'a, L: FiniteJ2Material> MixedPlasticTetSolid<'a, L> {
         if ![
             energy.stored_after_j,
             energy.plastic_dissipation_j,
+            energy.creep_dissipation_j,
             energy.flow_potential_j,
         ]
         .iter()
@@ -545,6 +585,7 @@ impl<'a, L: FiniteJ2Material> MixedPlasticTetSolid<'a, L> {
             nodes_m: self.nodes_m,
             elements: self.elements,
             material: self.material,
+            duration_s: self.duration_s,
             volumetric: self.volumetric,
             mesh: Arc::clone(&self.mesh),
             budget: self.budget,
