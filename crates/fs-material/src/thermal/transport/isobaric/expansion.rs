@@ -10,6 +10,10 @@
 #[path = "expansion/conduction.rs"]
 pub mod conduction;
 
+/// Explicit liquid applicability of the same original caloric/expansion path.
+#[path = "expansion/liquid.rs"]
+pub mod liquid;
+
 use super::IsobaricHeatCapacityLaw;
 use crate::thermal::transport::{
     ThermalTransportError,
@@ -155,6 +159,14 @@ impl<'a> IsobaricFreeExpansion<'a> {
             .expansion()
             .at_temperature_with_tangent(temperature)?;
         let volume_slope = tangent.relative_volume_derivative_per_k();
+        self.specific_volume_derivative_from_tangent(volume_slope, cp)
+    }
+
+    fn specific_volume_derivative_from_tangent(
+        &self,
+        volume_slope: f64,
+        cp: f64,
+    ) -> Result<f64, ThermalTransportError> {
         let reference_density = self.density.reference_density_answer().evidence.value.value;
         let derivative = (volume_slope / reference_density) / cp;
         if !derivative.is_finite() || (volume_slope != 0.0 && derivative == 0.0) {

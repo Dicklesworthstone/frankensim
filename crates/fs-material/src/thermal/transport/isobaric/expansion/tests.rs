@@ -348,3 +348,6 @@ fn incompatible_or_pressure_unqualified_sources_cannot_supply_expansion_work() {
 
 #[path = "tests/conduction.rs"]
 mod conduction;
+
+#[path = "tests/liquid.rs"]
+mod liquid;

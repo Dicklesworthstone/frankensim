@@ -329,6 +329,35 @@ impl PreparedFreeExpansion {
         self.tangent_on_segment(geometry, segment)
     }
 
+    /// Exact one-sided tangent in the declared direction of temperature travel.
+    /// Heating uses the original right segment and cooling the original left
+    /// at a source knot. An outward direction at either endpoint refuses.
+    /// The cached original segment slope is used directly, including when no
+    /// floating-point temperature lies inside that segment; no endpoint
+    /// difference, perturbation or smoothing of the source is introduced.
+    pub fn at_temperature_with_directional_tangent(
+        &self,
+        temperature_k: f64,
+        increasing_temperature: bool,
+    ) -> Result<FreeExpansionGeometryTangent, ThermalTransportError> {
+        let (geometry, index) = self.sample_with_index(temperature_k)?;
+        let at_knot = self.knots[index].temperature == temperature_k;
+        if at_knot
+            && ((!increasing_temperature && index == 0)
+                || (increasing_temperature && index + 1 == self.knots.len()))
+        {
+            return Err(ThermalTransportError::Invalid(
+                "temperature direction leaves the original expansion source",
+            ));
+        }
+        let segment = if at_knot && increasing_temperature {
+            index
+        } else {
+            index - 1
+        };
+        self.tangent_on_segment(geometry, segment)
+    }
+
     /// Evaluate the original expansion path where its thermal tangent is
     /// two-sided. Source endpoints and genuine changes of source slope refuse;
     /// a redundant knot with the same slopes remains admissible. This does not
