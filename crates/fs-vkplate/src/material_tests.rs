@@ -1422,6 +1422,43 @@ fn snare_scale_six_row_strands(wire: &Body) -> f64 {
 }
 
 #[test]
+fn card_snare_takes_its_coils_printed_strand_count() {
+    use crate::coil::{CANOPUS_VINTAGE, CANOPUS_VINTAGE_STRANDS, COIL_ENDS_NOTE};
+    // Canopus prints 20 strands for its Vintage Snare Wire, the cards' coil (MB 14839); the preset
+    // keeps its fitted 18, and the length and spacing stay declared.
+    assert_eq!(CANOPUS_VINTAGE_STRANDS, 20);
+    let preset = kit::snare();
+    let card = kit::card_drum(&preset).unwrap();
+    let (p, c) = (preset.wires.unwrap(), card.wires.unwrap());
+    assert_eq!((p.strands, c.strands), (18, 20));
+    assert_eq!(c.coil, CANOPUS_VINTAGE);
+    assert_eq!((c.length, c.spacing), (p.length, p.spacing));
+    assert_eq!((c.length, c.spacing), (0.36, 0.004));
+    assert!(kit::card_drum(&kit::snare_wires_off()).unwrap().wires.is_none());
+    assert!(card.provenance.contains("20 strands, the count Canopus prints for its Vintage Snare Wire"));
+    assert!(card.provenance.contains("0.36 m length and 4 mm spacing are declared (the maker prints neither)"));
+    assert!(card.provenance.contains("the per-strand 2.0 N tension and 0.25 N/m preload are kept, so the total tension and preload of the wires rise 11 % (20/18)"));
+    assert_eq!((c.tension, c.preload_per_m), (2.0, 0.25));
+    let mut other = kit::snare();
+    other.wires = other.wires.map(|w| kit::Wires { coil: crate::coil::CoilGeometry { pitch_m: 3.0e-3, ..w.coil }, ..w });
+    match kit::card_drum(&other) {
+        Err(e) => assert!(e.contains("another coil than Canopus Vintage"), "{e}"),
+        Ok(_) => panic!("card_drum took wires of another coil"),
+    }
+    assert!(!COIL_ENDS_NOTE.contains("strand count, spacing"));
+    // The snare line names the count's source on the card route and calls the preset's declared.
+    let film = pack("declared film", 1390.0, 4e9, Some(0.38));
+    let stick = pack("declared striker", 800.0, 12e9, Some(0.3));
+    let cards = snare_wire_binding(binding(&film, &film, &stick)).unwrap();
+    for (mut spec, line) in [(card, "snare: 20 strands (the count Canopus prints for the coil, MB 14839) in "), (preset, "snare: 18 strands (declared) in ")] {
+        spec.grid *= 6.0;
+        let piece = kit::drum_with_materials(&spec, &[], standard_gas(), &cards).unwrap();
+        assert_eq!(piece.notes.iter().filter(|n| n.starts_with(line)).count(), 1, "{line}");
+        assert!(piece.notes.iter().any(|n| n == COIL_ENDS_NOTE));
+    }
+}
+
+#[test]
 fn g1_card_snare_wires_are_coils_of_the_sourced_steel_and_say_what_is_declared() {
     use crate::coil::{CANOPUS_VINTAGE, COIL_ENDS_NOTE, CoilWire};
     let film = pack("declared film", 1390.0, 4e9, Some(0.38));

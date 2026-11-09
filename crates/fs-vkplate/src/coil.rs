@@ -34,9 +34,11 @@
 //! contact of the wire's surface, curved along the helix, its stiffness computed from the two
 //! cards. It holds while the contact is small against the film: up to about 0.1 N per turn.
 //!
-//! Not sourced, and stated in every coil's notes: the strand count, spacing, length, tension,
-//! preload and contact loss (see `kit::Wires`). The ends are pinned with no strand-end or cord
-//! damping, so the lowest coil modes keep their long material decay.
+//! Not sourced, and stated in every coil's notes: the spacing, length, tension, preload and
+//! contact loss (see `kit::Wires`), and the strand count except where it is Canopus's printed
+//! [`CANOPUS_VINTAGE_STRANDS`] (the card route); the kit's snare line says which. The ends are
+//! pinned with no strand-end or cord damping, so the lowest coil modes keep their long material
+//! decay.
 
 use crate::GasState;
 use crate::air_loss::{oscillating_cylinder, sliding_cylinder};
@@ -79,6 +81,12 @@ pub const CANOPUS_VINTAGE: CoilGeometry = CoilGeometry {
     pitch_m: 3.4e-3,
     source: "Canopus Vintage Snare Wire, canopusdrums.com/jp/product/vintage-snare-wire/",
 };
+
+/// The strand count of Canopus's Vintage Snare Wire. Its English page prints "20 strand snare wire
+/// available from 10 inch to 14 inch" (canopusdrums.com/en/product/vintage-snarewire/), and the
+/// maker's store gives "Spec: 20 Strands" for the 14-inch CPSL-14NP and CPSL-14DR (MB 14839).
+/// The maker prints neither the strands' length nor their spacing.
+pub const CANOPUS_VINTAGE_STRANDS: i32 = 20;
 
 impl CoilGeometry {
     /// Mean coil diameter D = outer - wire [m].
@@ -477,4 +485,4 @@ impl CoilWire {
 }
 
 /// Every coil states what is still declared and what is absent.
-pub const COIL_ENDS_NOTE: &str = "snare wires, declared not sourced: strand count, spacing, length, tension, preload and contact loss (kit::Wires; the card route keeps 88cccbb78's, ruling 7486); ends pinned with no strand-end or cord damping, so the lowest coil modes ring long and 63-125 Hz is too loud";
+pub const COIL_ENDS_NOTE: &str = "snare wires, declared not sourced: spacing, length, tension, preload and contact loss (kit::Wires; the card route keeps 88cccbb78's, ruling 7486), and the strand count where the snare line says declared; ends pinned with no strand-end or cord damping, so the lowest coil modes ring long and 63-125 Hz is too loud";

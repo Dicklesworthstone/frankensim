@@ -45,7 +45,9 @@ pub struct Head {
 }
 
 /// Snare wires: coiled steel strands under the resonant head, pressed up into it by the strainer.
-/// Strand count, spacing, length, tension, preload and contact are declared, not sourced. Without
+/// Spacing, length, tension, preload and contact are declared, not sourced. So is the strand
+/// count, except on the card route, which takes the count printed for its coil
+/// (`crate::coil::CANOPUS_VINTAGE_STRANDS`; see `card_drum`). Without
 /// a sourced wire (`KitMaterials::with_snare_wire`) each strand is a plain string of the fitted
 /// `mass_per_m` and `t60` (FITTED_WIRES_RECEIPT); with one it is the coil `coil` of that steel
 /// (`crate::coil`), and `mass_per_m` and `t60` are unused. Strands projected onto the same
@@ -499,7 +501,12 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
                 }
             }
         }
-        notes.push(format!("snare: {} strands in {} resolved rows of {n} nodes, {} contact points; coincident strands share motion with summed mass, stiffness, preload and contact force", wr.strands, rows.len(), ins.contacts.len()));
+        let count = if coil.is_some() && wr.coil == crate::coil::CANOPUS_VINTAGE && wr.strands == crate::coil::CANOPUS_VINTAGE_STRANDS {
+            "the count Canopus prints for the coil, MB 14839"
+        } else {
+            "declared"
+        };
+        notes.push(format!("snare: {} strands ({count}) in {} resolved rows of {n} nodes, {} contact points; coincident strands share motion with summed mass, stiffness, preload and contact force", wr.strands, rows.len(), ins.contacts.len()));
         settle = 0.25;
     }
     let (m, law, foot) = match materials {
@@ -683,7 +690,7 @@ const CARD_DRUMS: [CardDrum; 4] = [
         name: "snare 14x6",
         tensions: (1646.0, 1646.0 * 2080.0 / 1330.0),
         strike_xy: (0.06, 0.02),
-        provenance: "drum (card route, ruling 7486): tensions tuned to the recording's pitch, lowest mode 150.4 Hz (Salamander snare2OFF_OH_F_1/_P_2, the snare's own line, 0.10-0.50 s; the late-tail 134.3 Hz line is probably the rack tom ringing, inferred, since no stroke exists with the tom muted); strike point (60, 20) mm, a declared playing-position estimate (88cccbb78); stick Hunt-Crossley loss 0.2 s/m and the wires' tension 2.0 N, preload 0.25 N/m and contact loss 2.0 s/m are declared estimates (88cccbb78); the wires' contact stiffness is computed from the cards (Hertz, elliptical, helix; ruling 7520)",
+        provenance: "drum (card route, ruling 7486): tensions tuned to the recording's pitch, lowest mode 150.4 Hz (Salamander snare2OFF_OH_F_1/_P_2, the snare's own line, 0.10-0.50 s; the late-tail 134.3 Hz line is probably the rack tom ringing, inferred, since no stroke exists with the tom muted); strike point (60, 20) mm, a declared playing-position estimate (88cccbb78); stick Hunt-Crossley loss 0.2 s/m and the wires' tension 2.0 N, preload 0.25 N/m and contact loss 2.0 s/m are declared estimates (88cccbb78); the wires' contact stiffness is computed from the cards (Hertz, elliptical, helix; ruling 7520); 20 strands, the count Canopus prints for its Vintage Snare Wire, the cards' coil (MB 14839; the recorded wires are not named, so that product is assumed); the strands' 0.36 m length and 4 mm spacing are declared (the maker prints neither); the per-strand 2.0 N tension and 0.25 N/m preload are kept, so the total tension and preload of the wires rise 11 % (20/18)",
     },
     CardDrum {
         name: "kick 18x18",
@@ -712,7 +719,10 @@ const CARD_DRUMS: [CardDrum; 4] = [
 /// stick's loss is `DECLARED_STICK_LOSS_S_M`, which the card route passes to the hickory card.
 /// The wires' contact stiffness is computed from the steel and film cards once the steel is
 /// bound (`coil::turn_contact`); 88cccbb78's 2e7 N/m^1.5 here only reaches strings without one.
-/// The wires-off snare is the snare without wires. Refuses a spec it has no card values for.
+/// The wires take the strand count their coil's maker prints, Canopus's 20 for the Vintage Snare
+/// Wire (`crate::coil::CANOPUS_VINTAGE_STRANDS`, MB 14839); their length and spacing stay declared.
+/// The wires-off snare is the snare without wires. Refuses a spec it has no card values for, and
+/// wires of another coil, whose count is not printed here.
 pub fn card_drum(preset: &DrumSpec) -> Result<DrumSpec, String> {
     let card_name = if preset.name == "snare 14x6, wires off" { "snare 14x6" } else { preset.name };
     let card = CARD_DRUMS.iter().find(|c| c.name == card_name)
@@ -720,7 +730,10 @@ pub fn card_drum(preset: &DrumSpec) -> Result<DrumSpec, String> {
     let mut s = DrumSpec { strike_xy: card.strike_xy, provenance: card.provenance, ..*preset };
     s.batter.tension = card.tensions.0;
     s.reso.tension = card.tensions.1;
-    s.wires = preset.wires.map(|w| Wires { tension: 2.0, preload_per_m: 0.25, contact: Law::Power { k: 2.0e7, alpha: 1.5, mu: 2.0 }, ..w });
+    if preset.wires.is_some_and(|w| w.coil != crate::coil::CANOPUS_VINTAGE) {
+        return Err(format!("card_drum: {:?} has wires of another coil than Canopus Vintage, whose strand count is the only one printed here", preset.name));
+    }
+    s.wires = preset.wires.map(|w| Wires { strands: crate::coil::CANOPUS_VINTAGE_STRANDS, tension: 2.0, preload_per_m: 0.25, contact: Law::Power { k: 2.0e7, alpha: 1.5, mu: 2.0 }, ..w });
     if card_name == "kick 18x18" {
         // a felt beater face of 3 cm radius, power-law felt stiffening with compression (about
         // 5 mm of felt compression at 180 N), and the muffle dashpot against the lower part of the

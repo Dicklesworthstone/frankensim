@@ -765,8 +765,17 @@ only while the ellipse is small against its 76 um: the semi-axes are 2.2 x
 turn. Above about 0.1 N per turn the law is outside its range. The contact's
 loss, 2.0 s/m, is declared.
 
-Still declared, not sourced, and printed with every coil: strand count,
-spacing, length, tension, preload and the contact loss (`kit::Wires`). The
+Still declared, not sourced, and printed with every coil: spacing, length,
+tension, preload and the contact loss (`kit::Wires`). The card route's strand
+count is the one Canopus prints for the Vintage wire, 20
+(`coil::CANOPUS_VINTAGE_STRANDS`, MB 14839): its English page says "20 strand
+snare wire available from 10 inch to 14 inch", and the maker's store gives
+"Spec: 20 Strands" for the 14-inch CPSL-14NP and CPSL-14DR. The recorded snare
+is a drum its owner built, and its wires are named nowhere, so that product is
+assumed, as for the coil. The maker prints no length and no spacing. The
+per-strand tension and preload are kept, so the total tension and preload of the
+wires rise 11 % (20/18). The presets keep 18 strands, and the kit's snare line
+says which count is printed. The
 presets' tension, preload and contact law were adopted in a kit retuning
 graded against the recording (96ccf8f1b); the card route's are 88cccbb78's
 declared estimates (ruling 7486, `kit::card_drum`), but for the computed
@@ -1073,7 +1082,7 @@ use head T60s; the cymbals' and hi-hat's T60 pairs still do.
 
 Film and bronze properties are handbook values; head tensions are tuned; the stick's effective
 tip mass (6-7 g), its Hertz constant (hickory on the target), the felt beater law (a 32 g crown in
-point contact), strike points, snare-wire count, spacing, length, tension and preload (and, for the fitted strings, mass and T60), felt washer stiffness and
+point contact), strike points, snare-wire count (the card route's is printed: see Snare wires), spacing, length, tension and preload (and, for the fitted strings, mass and T60), felt washer stiffness and
 loss, and the hi-hat rim contact law, rest gap and waviness are declared estimates in
 `src/kit.rs`. The lumped cavity has no cavity modes; there is no shell, hoop or rim
 vibration, no in-plane (membrane) slip between hi-hat plates (only the bending slip rubs), and each piece is simulated alone (a kit
