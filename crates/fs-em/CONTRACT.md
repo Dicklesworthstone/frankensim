@@ -7568,3 +7568,29 @@ spectral groups, exact work/peak-memory budgets and DD film-support admission.
 Native execution of these new film-box regressions remains unverified.
 The source remains frozen; thermal time stepping, thermo-optic feedback and
 new lateral optical boundaries are outside this electromagnetic observation.
+
+### Cached polarized fields through absorbing crystal stacks
+
+`PreparedAbsorbingStackPolarization::field_at` reuses its two original global
+tangential Maxwell basis solves for arbitrary complex Ex/Ey peak amplitudes.
+The selected layer's four electric and magnetic eigenwaves combine before
+the native compensated propagation, signed Poynting contraction and tensor
+heating. Reflection, transmission and incident-side standing fields retain
+their original physical face coordinates. Each query takes fixed work and
+storage, with no allocation, layer traversal, material query or boundary solve.
+The existing layer-integrated heat query retains its electric-only work.
+
+`field_statistics` accepts explicitly independent positive Jones factors at
+that same prepared frequency and direction. Each factor includes its own
+square-root statistical weight; the shared native accumulator adds Cartesian
+electric coherency, magnetic RMS squared, signed flux and local heat without
+inventing an ensemble phasor. This represents unpolarized and partially
+polarized illumination. Empty/zero factors are dark, but region admission
+still applies. The caller bounds factor count; cancellation is checked before,
+between and after factors, and no partial observation escapes a refusal.
+There is no inferred bandwidth, temporal coherence or thermal state update.
+
+Focused G1/G3/G0 controls cover arbitrary-axis elliptical fields and Maxwell
+continuity, an independent matched-isotropic circular/unpolarized limit,
+complex unitary factorization invariance, opposite-phase independent factors,
+layer heat, darkness, invalid geometry, factor budgets and cancellation.

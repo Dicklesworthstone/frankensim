@@ -1,15 +1,17 @@
-//! Cached polarization-dependent loss in the original ordered crystal layers.
+//! Cached polarization-dependent fields and loss in ordered crystal layers.
 //!
 //! Two global tangential basis fields share one material-frequency resolution.
-//! Each later query combines only the selected layer's electric eigenwaves
-//! before evaluating its original tensor loss. The other layers' reflections
-//! remain present in those waves; no stack copy or new boundary solve is needed.
+//! Later queries combine anchored eigenwaves before propagation and tensor
+//! loss. Independent positive factors add second moments, never phasors.
+//! The other layers' reflections remain present in those waves; no stack
+//! copy or new boundary solve is needed.
 
 use super::super::super::slab::kernel::{finite, flux};
 use super::super::slab::polarization::combine;
+use super::super::{AbsorbingCrystalField, AbsorbingCrystalStatistics, kernel as crystal};
 use super::{
-    AbsorbingStackLayerField, AbsorbingStackResponse, Incidence, OrientedUniaxialStack,
-    PreparedAbsorbingStackField, Result, bad, kernel, poll, unit_axis,
+    AbsorbingStackLayerField, AbsorbingStackResponse, FieldSum, Incidence, OrientedUniaxialStack,
+    PreparedAbsorbingStackField, Result, StackRegion, WaveGeometry, bad, kernel, poll, unit_axis,
 };
 use fs_math::c64::C64;
 
@@ -46,6 +48,51 @@ impl<'f, 's, 'm> PreparedAbsorbingStackPolarization<'f, 's, 'm> {
         incident_power(
             [&self.basis[0].response, &self.basis[1].response],
             electric_v_m,
+        )
+    }
+
+    /// Full Cartesian peak E/H, signed cycle-mean Poynting vector and local
+    /// tensor heat for arbitrary nonzero Jones amplitudes in global Ex/Ey.
+    /// The selected layer's four anchored waves combine BEFORE propagation;
+    /// this preserves ellipticity, cross-polarized reflection and standing
+    /// waves. Exterior observations retain their original side of each face.
+    /// Fixed work and storage: no allocation, stack traversal or source solve.
+    pub fn field_at(
+        &self,
+        electric_v_m: [C64; 2],
+        region: StackRegion,
+        point_m: [f64; 3],
+    ) -> Result<AbsorbingCrystalField> {
+        field_at(
+            [&self.basis[0].response, &self.basis[1].response],
+            electric_v_m,
+            region,
+            point_m,
+        )
+    }
+
+    /// Partially polarized illumination at this prepared frequency/direction.
+    /// Each Jones factor includes its square-root statistical weight in peak
+    /// V/m and is explicitly uncorrelated with the others, even at the same
+    /// frequency. Factors add coherency, signed flux and heat; their complex
+    /// fields never interfere. No bandwidth, phase averaging or RMS factor
+    /// is inferred. Empty/zero factors are dark and still validate geometry.
+    /// Work is O(factors), with fixed storage and cancellation per factor.
+    pub fn field_statistics(
+        &self,
+        factors_v_m: &[[C64; 2]],
+        maximum_factors: usize,
+        region: StackRegion,
+        point_m: [f64; 3],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<AbsorbingCrystalStatistics> {
+        field_statistics(
+            [&self.basis[0].response, &self.basis[1].response],
+            factors_v_m,
+            maximum_factors,
+            region,
+            point_m,
+            &mut cancelled,
         )
     }
 
@@ -177,6 +224,14 @@ fn layer_power(
     start: f64,
     end: f64,
 ) -> Result<f64> {
+    combined_layer(basis, coefficients, false)?.absorbed_power_w(area, start, end)
+}
+
+fn combined_layer(
+    basis: [&AbsorbingStackLayerField; 2],
+    coefficients: [C64; 2],
+    include_magnetic: bool,
+) -> Result<AbsorbingStackLayerField> {
     admit_coefficients(coefficients)?;
     let [a, b] = basis;
     if a.entrance_z_m != b.entrance_z_m
@@ -195,8 +250,7 @@ fn layer_power(
         ));
     }
     let mut layer = *a;
-    // Only E enters dielectric work. The fixed-size temporary is consumed by
-    // this loss query; magnetic amplitudes need no recombination or evaluation.
+    // Heat-only queries retain their original electric-only cost.
     for j in 0..2 {
         layer.forward[j].electric_v_m = combine(
             a.forward[j].electric_v_m,
@@ -208,8 +262,153 @@ fn layer_power(
             b.backward[j].electric_v_m,
             coefficients,
         )?;
+        if include_magnetic {
+            layer.forward[j].magnetic_a_m = combine(
+                a.forward[j].magnetic_a_m,
+                b.forward[j].magnetic_a_m,
+                coefficients,
+            )?;
+            layer.backward[j].magnetic_a_m = combine(
+                a.backward[j].magnetic_a_m,
+                b.backward[j].magnetic_a_m,
+                coefficients,
+            )?;
+        }
     }
-    layer.absorbed_power_w(area, start, end)
+    Ok(layer)
+}
+
+fn admit_point(
+    response: &AbsorbingStackResponse,
+    region: StackRegion,
+    point: [f64; 3],
+) -> Result<()> {
+    if point.iter().any(|v| !v.is_finite()) {
+        return Err(bad("finite absorbing stack field point required"));
+    }
+    let valid = if let StackRegion::Layer(index) = region {
+        let layer = response
+            .layers
+            .get(index)
+            .ok_or_else(|| bad("unknown absorbing stack polarization layer"))?;
+        (layer.entrance_z_m..=layer.exit_z_m).contains(&point[2])
+    } else if region == StackRegion::Transmitted {
+        point[2] >= response.thickness_m
+    } else {
+        point[2] <= 0.0
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(bad("absorbing stack point is outside its selected region"))
+    }
+}
+
+fn field_at(
+    basis: [&AbsorbingStackResponse; 2],
+    coefficients: [C64; 2],
+    region: StackRegion,
+    point: [f64; 3],
+) -> Result<AbsorbingCrystalField> {
+    admit_coefficients(coefficients)?;
+    let [a, b] = basis;
+    admit_point(a, region, point)?;
+    if let StackRegion::Layer(index) = region {
+        let layer = combined_layer([&a.layers[index], &b.layers[index]], coefficients, true)?;
+        let mut sum = layer.field_sum(point)?;
+        layer.add_waves(&mut sum, a.tangential_wavenumber_rad_m, a.plane)?;
+        let field = sum.finish().map_err(bad)?;
+        let heat = crystal::heating(field.electric_v_m, layer.axis, layer.loss_f_m, layer.omega)
+            .map_err(bad)?;
+        return Ok(AbsorbingCrystalField {
+            field,
+            absorbed_power_density_w_m3: heat,
+        });
+    }
+    let mut sum = FieldSum::at_point(point).map_err(bad)?;
+    let mut add = |ea, eb, ha, hb, normal, anchor| {
+        sum.add_wave(
+            &combine(ea, eb, coefficients)?,
+            &combine(ha, hb, coefficients)?,
+            WaveGeometry {
+                tangential_wavenumber_rad_m: a.tangential_wavenumber_rad_m,
+                incidence_plane_axis: a.plane,
+                normal_wavenumber_rad_m: normal,
+                anchor_z_m: anchor,
+            },
+        )
+        .map_err(bad)
+    };
+    if matches!(
+        region,
+        StackRegion::Incident | StackRegion::TotalIncidentSide
+    ) {
+        add(
+            a.incident_electric_v_m,
+            b.incident_electric_v_m,
+            a.incident_magnetic_a_m,
+            b.incident_magnetic_a_m,
+            C64::from_re(a.incident_normal_wavenumber_rad_m),
+            0.0,
+        )?;
+    }
+    if matches!(
+        region,
+        StackRegion::Reflected | StackRegion::TotalIncidentSide
+    ) {
+        add(
+            a.reflected_electric_v_m,
+            b.reflected_electric_v_m,
+            a.reflected_magnetic_a_m,
+            b.reflected_magnetic_a_m,
+            C64::from_re(-a.incident_normal_wavenumber_rad_m),
+            0.0,
+        )?;
+    }
+    if region == StackRegion::Transmitted {
+        add(
+            a.transmitted_electric_v_m,
+            b.transmitted_electric_v_m,
+            a.transmitted_magnetic_a_m,
+            b.transmitted_magnetic_a_m,
+            a.exit_normal_wavenumber_rad_m,
+            a.thickness_m,
+        )?;
+    }
+    Ok(AbsorbingCrystalField {
+        field: sum.finish().map_err(bad)?,
+        absorbed_power_density_w_m3: 0.0,
+    })
+}
+
+fn field_statistics(
+    basis: [&AbsorbingStackResponse; 2],
+    factors: &[[C64; 2]],
+    maximum_factors: usize,
+    region: StackRegion,
+    point: [f64; 3],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<AbsorbingCrystalStatistics> {
+    poll(cancelled)?;
+    if factors.len() > maximum_factors {
+        return Err(bad(
+            "stack polarization exceeds its independent-factor budget",
+        ));
+    }
+    admit_point(basis[0], region, point)?;
+    let mut sum = crystal::StatisticsSum::new();
+    for &coefficients in factors {
+        poll(cancelled)?;
+        if coefficients != [C64::ZERO; 2] {
+            sum.add(field_at(basis, coefficients, region, point)?);
+        }
+    }
+    let result = sum.finish().map_err(|error| match error {
+        crystal::IlluminationError::Cancelled => super::AngularSpectrumError::Cancelled,
+        crystal::IlluminationError::Electromagnetic(message) => bad(message),
+    })?;
+    poll(cancelled)?;
+    Ok(result)
 }
 
 #[cfg(test)]
