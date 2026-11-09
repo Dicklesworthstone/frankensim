@@ -3,6 +3,8 @@
 mod affine;
 #[path = "thermal_relaxation/expansion.rs"]
 mod expansion;
+#[path = "thermal_relaxation/harmonic.rs"]
+mod harmonic;
 use super::*;
 use fs_couple::tensor_material::solid::source::SolidMaterialSource;
 use fs_couple::tensor_material::solid::thermal::relaxation::{

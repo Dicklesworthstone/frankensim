@@ -9176,3 +9176,46 @@ direction, cancellation and reuse. They passed in the bounded native lane using
 complete original fs-orbit and fs-phs, actual fs-la/FFT numerical modules, and
 original PHS-adapter/tangent source. This is not a full fs-couple
 Cargo/workspace/DSR gate.
+
+
+## Coherent tensor-solid harmonic heating on the original thermal residual
+
+`tensor_material::solid::thermal::harmonic::heat_assembly_candidate` observes
+one `ViscoHarmonicMaterialSpectrumObserver` over the actual thermal interval
+and deposits each original element's Kelvin/Maxwell heat once into its explicit
+whole-element caloric receiver. Carrier, beat and equal-frequency interference
+remain in the original quadrature account. The original `HeatAssembly` and
+`cell_driver_candidate` own nonlinear transport, contacts, reservoirs,
+radiation, source evaluation, thermal residuals and final acceptance. Repeated
+thermal trials reuse the same material observation.
+
+Each element retains its reference mass/volume, source identity and exact caloric
+law. Complete nonthermal queries and selected source claims remain pinned.
+Original tensor, relaxation, Kelvin and density source laws must be independent
+of the evolving temperature: source axes are checked even when two sampled
+values coincide. The explicit fully-solid temperature interval and original
+source selections are re-admitted at actual proposed endpoints. Unsupported
+source changes, incomplete/duplicate routing, strain excess, changed inventory,
+late provider refusal and cancellation publish no candidate or partial state.
+
+The report retains the original material field, element heat, native thermal
+audit, source sample, heat-handoff residual, other external heat and separate
+caloric and constitutive-plus-caloric balances. Stored spring energy, signed
+stress work and numerical defects are never deposited as heat. The combined
+account encloses constitutive and caloric storage only; it does not establish
+kinetic-energy or external-force-work balance.
+
+Exact interval heat supplies an interval-mean source to native backward Euler.
+Time refinement is required for beat-driven thermal transport; fixed mechanical
+coefficients, stationary reference geometry and explicit source-temperature
+independence bound this model. Startup memory, thermal expansion and changing
+mechanical coefficients require their existing transient/coupled owners.
+
+Four integration tests in
+`tests/tensor_material_source/thermal_relaxation/harmonic.rs` cover independent
+real Maxwell/Kelvin heat-work-storage quadrature, two-cell Fourier conduction
+across consecutive beat windows, temperature-dependent and flat-but-authored
+source refusal, original strain/receiver/inventory admission, late provider
+failure, cancellation and retry. Formatting and source/API checks passed;
+these solid/thermal integration tests were not executed in the available
+runtime/constellation environment, so no full coupled-runtime gate is claimed.

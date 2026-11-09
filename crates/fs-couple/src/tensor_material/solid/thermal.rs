@@ -13,6 +13,8 @@
 pub mod relaxation;
 /// Original sparse spatial dynamics and element heat, without modal projection.
 pub mod spatial;
+/// Coherent original-quadrature harmonic heat on the finite enthalpy residual.
+pub mod harmonic;
 
 use super::{SolidError, SolidStep, TensorSolidHistory};
 use fs_exec::CancelGate;
