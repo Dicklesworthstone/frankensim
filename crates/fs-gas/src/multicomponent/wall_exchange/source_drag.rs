@@ -1,20 +1,25 @@
-//! Actual-state constitutive drag on a fixed gas amount and prescribed wall.
+//! Actual-state resistance on a fixed gas amount and prescribed or finite wall.
 //!
 //! Each elementary map uses the existing exact frozen resistance owner. Its
 //! coefficient comes from the original source at a forward predicted midpoint
-//! on the exact mechanical energy path. Step doubling controls slip and sensible
-//! heating errors; a midpoint ordering guard rejects stiff, collapsing-rate
+//! on the exact mechanical energy path. Step doubling controls relative slip and
+//! total slip-heating errors; a midpoint ordering guard rejects stiff, collapsing-rate
 //! predictors. The error estimates are numerical estimates, not certified bounds.
 
+use super::recoil::mechanics;
 use super::{
-    Cell, MixtureGas, Time, WallCellReport, WallContact, WallControl, WallDrag, WallExchangeError,
-    WallUpdate, drag, nonnegative, poll, positive,
+    Cell, MixtureGas, RecoilLaw, SlidingSupport, Time, WallCellReport, WallContact, WallControl,
+    WallDrag, WallExchangeError, WallUpdate, drag, nonnegative, poll, positive,
 };
+use crate::multicomponent::Primitive;
+
+mod recoil;
+pub use recoil::{SourceCoupledRecoilUpdate, exchange_cell_with_source_recoil};
 
 /// Accuracy and whole-interval work limits for actual-state wall resistance.
 ///
 /// Relative velocity accuracy uses entering wall-relative slip, never a large
-/// laboratory boost. Heating accuracy uses physical slip loss, never a species
+/// laboratory boost. Heating accuracy uses total physical slip loss, never a species
 /// formation-energy datum. These are separate from the physical balance budget.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SourceCoupledDragControl {
@@ -22,7 +27,7 @@ pub struct SourceCoupledDragControl {
     pub absolute_slip_tolerance_m_s: f64,
     /// Positive relative allowance against entering slip, at most 1e-2.
     pub relative_slip_tolerance: f64,
-    /// Positive absolute allowance on sensible-heating error estimates [J].
+    /// Positive absolute allowance on total slip-heating error estimates [J].
     pub absolute_heating_tolerance_j: f64,
     /// Positive relative allowance against actual slip heating, at most 1e-2.
     pub relative_heating_tolerance: f64,
@@ -117,6 +122,37 @@ pub fn exchange_cell_with_source_drag(
     control: WallControl,
     source_control: SourceCoupledDragControl,
     mut resolve: impl FnMut(Cell<'_>, &mut dyn FnMut() -> bool) -> Result<WallDrag, WallExchangeError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<SourceCoupledDragUpdate, WallExchangeError> {
+    exchange_cell_with_source_drag_admitted(
+        gas,
+        state,
+        volume_m3,
+        duration,
+        contact,
+        control,
+        source_control,
+        |state, _, cancelled| resolve(state, cancelled),
+        cancelled,
+    )
+}
+
+/// Native binding seam: the original gas admission is reused by its transport
+/// owner rather than repeating the same caloric inversion for every stage.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exchange_cell_with_source_drag_admitted(
+    gas: &MixtureGas,
+    state: Cell<'_>,
+    volume_m3: f64,
+    duration: Time,
+    contact: WallContact,
+    control: WallControl,
+    source_control: SourceCoupledDragControl,
+    mut resolve: impl FnMut(
+        Cell<'_>,
+        Primitive,
+        &mut dyn FnMut() -> bool,
+    ) -> Result<WallDrag, WallExchangeError>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<SourceCoupledDragUpdate, WallExchangeError> {
     poll(&mut cancelled)?;
@@ -141,19 +177,100 @@ pub fn exchange_cell_with_source_drag(
         gas,
         state,
         density: primitive.density,
-        wall,
+        wall: WallMotion::Prescribed(wall),
         volume: volume_m3,
     };
+    let (current, report) = advance(
+        &path,
+        dt,
+        source_control,
+        &mut |cell, primitive, _, cancelled| resolve(cell, primitive, cancelled),
+        &mut cancelled,
+    )?;
+    let endpoint = path.cell(current.momentum)?;
+    let change = current.momentum - state.momentum;
+    let work_density = wall * change;
+    let work = work_density * volume_m3;
+    let impulse = -change * volume_m3;
+    let heating = path.heating(state.momentum, current.momentum)?;
+    let residual = ((endpoint.energy - state.energy) - work_density) * volume_m3;
+    let heat_allowance = source_control.absolute_heating_tolerance_j
+        + source_control.relative_heating_tolerance * heating;
+    if ![
+        current.momentum,
+        endpoint.energy,
+        work,
+        impulse,
+        heating,
+        residual,
+        heat_allowance,
+        report.estimated_slip_error_m_s,
+        report.estimated_heating_error_j,
+    ]
+    .into_iter()
+    .all(f64::is_finite)
+        || heating < 0.0
+    {
+        return Err(WallExchangeError::Invalid(
+            "source-coupled wall mechanical balance",
+        ));
+    }
+    if residual.abs() > control.tolerance(work.abs()) {
+        return Err(WallExchangeError::Balance {
+            energy_residual_j: residual,
+            thermal_residual_j: 0.0,
+        });
+    }
+    poll(&mut cancelled)?;
+    Ok(SourceCoupledDragUpdate {
+        gas: WallUpdate {
+            momentum: current.momentum,
+            energy: endpoint.energy,
+            contact: WallContact {
+                drag: current.law,
+                ..contact
+            },
+            report: WallCellReport {
+                elapsed: duration,
+                wall_impulse_ns: impulse,
+                mechanical_work_to_gas_j: work,
+                drag_heating_j: heating,
+                heat_to_gas_j: 0.0,
+                wall_energy_change_j: 0.0,
+                external_heat_to_gas_j: 0.0,
+                energy_residual_j: residual,
+                thermal_residual_j: 0.0,
+                iterations: 0,
+            },
+        },
+        source: report,
+    })
+}
+
+/// One bounded positive-slip integration owner for prescribed and finite inertia.
+fn advance(
+    path: &Path<'_>,
+    dt: f64,
+    source_control: SourceCoupledDragControl,
+    resolve: &mut impl FnMut(
+        Cell<'_>,
+        Primitive,
+        f64,
+        &mut dyn FnMut() -> bool,
+    ) -> Result<WallDrag, WallExchangeError>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Stage, SourceCoupledDragReport), WallExchangeError> {
+    let initial_slip = path.slip(path.state.momentum)?;
     let mut report = SourceCoupledDragReport::default();
     let mut current = Stage {
-        momentum: state.momentum,
+        momentum: path.state.momentum,
         law: evaluate(
-            &path,
-            state.momentum,
+            path,
+            path.state.momentum,
             source_control,
             &mut report,
-            &mut resolve,
-            &mut cancelled,
+            resolve,
+            cancelled,
         )?,
     };
     let slip_allowance = source_control.absolute_slip_tolerance_m_s
@@ -166,7 +283,7 @@ pub fn exchange_cell_with_source_drag(
     let mut elapsed = 0.0;
     let mut step = dt;
     while elapsed < dt && initial_slip != 0.0 {
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         if report.attempted_steps >= source_control.maximum_attempted_steps {
             return Err(work_error(report));
         }
@@ -179,62 +296,62 @@ pub fn exchange_cell_with_source_drag(
             ));
         }
         let Some(coarse) = midpoint(
-            &path,
+            path,
             current,
             step,
             source_control,
             &mut report,
-            &mut resolve,
-            &mut cancelled,
+            resolve,
+            cancelled,
         )?
         else {
             step *= 0.5;
             continue;
         };
         let Some(half) = midpoint(
-            &path,
+            path,
             current,
             0.5 * step,
             source_control,
             &mut report,
-            &mut resolve,
-            &mut cancelled,
+            resolve,
+            cancelled,
         )?
         else {
             step *= 0.5;
             continue;
         };
         let Some(fine) = midpoint(
-            &path,
+            path,
             half,
             0.5 * step,
             source_control,
             &mut report,
-            &mut resolve,
-            &mut cancelled,
+            resolve,
+            cancelled,
         )?
         else {
             step *= 0.5;
             continue;
         };
         let defect = fine.momentum - coarse.momentum;
-        let slip_error = (defect / path.density).abs() / 3.0;
+        let slip_error = path.slip_change(defect).abs() / 3.0;
         // Difference of two slip-energy losses, factored so weak heat changes
         // are not erased by subtracting almost equal full kinetic energies.
-        let mean_slip = path.slip(current.momentum)
+        let mean_slip = path.slip(current.momentum)?
             + 0.5
-                * ((fine.momentum - current.momentum) / path.density
-                    + (coarse.momentum - current.momentum) / path.density);
-        let heat_error = (defect * mean_slip * volume_m3).abs() / 3.0;
-        let heating = path.heating(current.momentum, fine.momentum);
+                * (path.slip_change(fine.momentum - current.momentum)
+                    + path.slip_change(coarse.momentum - current.momentum));
+        let heat_error = (defect * mean_slip * path.volume).abs() / 3.0;
+        let heating = path.heating(current.momentum, fine.momentum)?;
         let fraction = step / dt;
         let slip_progress =
-            ((fine.momentum - current.momentum) / path.density).abs() / initial_slip.abs();
+            path.slip_change(fine.momentum - current.momentum).abs() / initial_slip.abs();
         // The energy fraction is evaluated as a ratio of slip changes, avoiding
         // construction of a potentially overflowing initial extensive energy.
         let heat_progress = slip_progress
-            * (path.slip(current.momentum).abs() / initial_slip.abs()
-                + path.slip(fine.momentum).abs() / initial_slip.abs());
+            * (path.slip(current.momentum)?.abs() / initial_slip.abs()
+                + path.slip(fine.momentum)?.abs() / initial_slip.abs());
         // Half the allowance follows time and half follows monotone physical
         // relaxation. Both fractions sum to at most one over the whole interval,
         // so a rapid initial transient can be resolved without resetting budgets
@@ -274,94 +391,84 @@ pub fn exchange_cell_with_source_drag(
             step = (2.0 * step).min(dt - elapsed);
         }
     }
-    let endpoint = path.cell(current.momentum)?;
-    gas.primitive(endpoint, &mut cancelled)?;
-    // Admit the actual returned state again, including identity/zero-time cases.
     current.law = evaluate(
-        &path,
+        path,
         current.momentum,
         source_control,
         &mut report,
-        &mut resolve,
-        &mut cancelled,
+        resolve,
+        cancelled,
     )?;
-    let change = current.momentum - state.momentum;
-    let work_density = wall * change;
-    let work = work_density * volume_m3;
-    let impulse = -change * volume_m3;
-    let heating = path.heating(state.momentum, current.momentum);
-    let residual = ((endpoint.energy - state.energy) - work_density) * volume_m3;
+    let heating = path.heating(path.state.momentum, current.momentum)?;
     let heat_allowance = source_control.absolute_heating_tolerance_j
         + source_control.relative_heating_tolerance * heating;
-    if ![
-        current.momentum,
-        endpoint.energy,
-        work,
-        impulse,
-        heating,
-        residual,
-        heat_allowance,
-        report.estimated_slip_error_m_s,
-        report.estimated_heating_error_j,
-    ]
-    .into_iter()
-    .all(f64::is_finite)
-        || heating < 0.0
-    {
-        return Err(WallExchangeError::Invalid(
-            "source-coupled wall mechanical balance",
-        ));
-    }
-    if report.estimated_slip_error_m_s > slip_allowance
+    if !nonnegative(heat_allowance)
+        || !nonnegative(report.estimated_slip_error_m_s)
+        || !nonnegative(report.estimated_heating_error_j)
+        || report.estimated_slip_error_m_s > slip_allowance
         || report.estimated_heating_error_j > heat_allowance
     {
         return Err(work_error(report));
     }
-    if residual.abs() > control.tolerance(work.abs()) {
-        return Err(WallExchangeError::Balance {
-            energy_residual_j: residual,
-            thermal_residual_j: 0.0,
-        });
-    }
-    poll(&mut cancelled)?;
-    Ok(SourceCoupledDragUpdate {
-        gas: WallUpdate {
-            momentum: current.momentum,
-            energy: endpoint.energy,
-            contact: WallContact {
-                drag: current.law,
-                ..contact
-            },
-            report: WallCellReport {
-                elapsed: duration,
-                wall_impulse_ns: impulse,
-                mechanical_work_to_gas_j: work,
-                drag_heating_j: heating,
-                heat_to_gas_j: 0.0,
-                wall_energy_change_j: 0.0,
-                external_heat_to_gas_j: 0.0,
-                energy_residual_j: residual,
-                thermal_residual_j: 0.0,
-                iterations: 0,
-            },
-        },
-        source: report,
-    })
+    Ok((current, report))
+}
+
+#[derive(Clone, Copy)]
+enum WallMotion {
+    Prescribed(f64),
+    Recoil {
+        support: SlidingSupport,
+        gas_heat_fraction: f64,
+    },
 }
 
 struct Path<'a> {
     gas: &'a MixtureGas,
     state: Cell<'a>,
     density: f64,
-    wall: f64,
+    wall: WallMotion,
     volume: f64,
 }
 
 impl Path<'_> {
+    fn motion(&self, momentum: f64) -> Result<mechanics::Motion, WallExchangeError> {
+        let WallMotion::Recoil { support, .. } = self.wall else {
+            return Err(WallExchangeError::Invalid(
+                "recoil path requires finite support",
+            ));
+        };
+        mechanics::at_momentum(
+            self.state.momentum,
+            self.density,
+            self.state.momentum / self.density,
+            self.volume,
+            support,
+            momentum,
+        )
+    }
+
+    fn wall_velocity(&self, momentum: f64) -> Result<f64, WallExchangeError> {
+        match self.wall {
+            WallMotion::Prescribed(wall) => Ok(wall),
+            WallMotion::Recoil { .. } => Ok(self.motion(momentum)?.support_velocity_m_s),
+        }
+    }
+
     fn cell(&self, momentum: f64) -> Result<Cell<'_>, WallExchangeError> {
-        // Anchor every trial to the entering actual impulse; repeated rounded
-        // work additions must not drift the source's temperature path.
-        let energy = self.state.energy + self.wall * (momentum - self.state.momentum);
+        // Every trial is anchored to original actual impulse. Prescribed work
+        // and finite recoil both use their original mechanical accounting owner.
+        let energy = match self.wall {
+            WallMotion::Prescribed(wall) => {
+                self.state.energy + wall * (momentum - self.state.momentum)
+            }
+            WallMotion::Recoil {
+                gas_heat_fraction, ..
+            } => {
+                let motion = self.motion(momentum)?;
+                let wall_heating = motion.dissipation_j - gas_heat_fraction * motion.dissipation_j;
+                self.state.energy + (motion.work_to_gas_j - wall_heating) / self.volume
+            }
+        };
         if !momentum.is_finite() || !energy.is_finite() {
             return Err(WallExchangeError::Invalid("source-coupled wall state"));
         }
@@ -372,29 +479,82 @@ impl Path<'_> {
         })
     }
 
-    fn slip(&self, momentum: f64) -> f64 {
-        momentum / self.density - self.wall
+    fn slip(&self, momentum: f64) -> Result<f64, WallExchangeError> {
+        Ok(momentum / self.density - self.wall_velocity(momentum)?)
     }
 
-    fn heating(&self, initial: f64, final_momentum: f64) -> f64 {
-        let change = final_momentum - initial;
-        -change * (self.slip(initial) + 0.5 * (change / self.density)) * self.volume
+    fn slip_change(&self, momentum_change: f64) -> f64 {
+        let gas_change = momentum_change / self.density;
+        match self.wall {
+            WallMotion::Prescribed(_) => gas_change,
+            WallMotion::Recoil { support, .. } => {
+                gas_change + (momentum_change * self.volume) / support.mass_kg
+            }
+        }
+    }
+
+    fn heating(&self, initial: f64, final_momentum: f64) -> Result<f64, WallExchangeError> {
+        match self.wall {
+            WallMotion::Prescribed(_) => {
+                let change = final_momentum - initial;
+                Ok(-change * (self.slip(initial)? + 0.5 * self.slip_change(change)) * self.volume)
+            }
+            WallMotion::Recoil { support, .. } => {
+                // Local physical loss is evaluated by the same original owner;
+                // do not subtract almost equal cumulative dissipation receipts.
+                Ok(mechanics::at_momentum(
+                    initial,
+                    self.density,
+                    initial / self.density,
+                    self.volume,
+                    SlidingSupport {
+                        velocity_m_s: self.wall_velocity(initial)?,
+                        ..support
+                    },
+                    final_momentum,
+                )?
+                .dissipation_j)
+            }
+        }
     }
 
     fn frozen(&self, state: Stage, dt: f64) -> Result<f64, WallExchangeError> {
         let cell = self.cell(state.momentum)?;
-        // Original exact exponential/Darcy/Riccati mechanics is the only
-        // frozen resistance integrator, including weak and stiff limits.
-        Ok(drag::advance(
-            state.law,
-            cell.momentum,
-            cell.energy,
-            self.density,
-            cell.momentum / self.density,
-            self.volume,
-            dt,
-        )?
-        .momentum)
+        match self.wall {
+            WallMotion::Prescribed(_) => Ok(drag::advance(
+                state.law,
+                cell.momentum,
+                cell.energy,
+                self.density,
+                cell.momentum / self.density,
+                self.volume,
+                dt,
+            )?
+            .momentum),
+            WallMotion::Recoil {
+                support,
+                gas_heat_fraction,
+            } => {
+                let (linear_rate_per_s, quadratic_per_m) = state.law.resistance_coefficients();
+                Ok(mechanics::advance(
+                    cell.momentum,
+                    self.density,
+                    cell.momentum / self.density,
+                    self.volume,
+                    dt,
+                    SlidingSupport {
+                        velocity_m_s: self.wall_velocity(cell.momentum)?,
+                        ..support
+                    },
+                    RecoilLaw {
+                        linear_rate_per_s,
+                        quadratic_per_m,
+                        gas_heat_fraction,
+                    },
+                )?
+                .momentum)
+            }
+        }
     }
 }
 
@@ -411,7 +571,12 @@ fn midpoint(
     dt: f64,
     control: SourceCoupledDragControl,
     report: &mut SourceCoupledDragReport,
-    resolve: &mut impl FnMut(Cell<'_>, &mut dyn FnMut() -> bool) -> Result<WallDrag, WallExchangeError>,
+    resolve: &mut impl FnMut(
+        Cell<'_>,
+        Primitive,
+        f64,
+        &mut dyn FnMut() -> bool,
+    ) -> Result<WallDrag, WallExchangeError>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Option<Stage>, WallExchangeError> {
     let middle = path.frozen(entering, 0.5 * dt)?;
@@ -423,9 +588,9 @@ fn midpoint(
         },
         dt,
     )?;
-    let start_slip = path.slip(entering.momentum).abs();
-    let middle_slip = path.slip(middle).abs();
-    let end_slip = path.slip(momentum).abs();
+    let start_slip = path.slip(entering.momentum)?.abs();
+    let middle_slip = path.slip(middle)?.abs();
+    let end_slip = path.slip(momentum)?.abs();
     let roundoff = 16.0 * f64::EPSILON * start_slip;
     if middle_slip > start_slip + roundoff || end_slip > middle_slip + roundoff {
         return Ok(None);
@@ -441,7 +606,12 @@ fn evaluate(
     momentum: f64,
     control: SourceCoupledDragControl,
     report: &mut SourceCoupledDragReport,
-    resolve: &mut impl FnMut(Cell<'_>, &mut dyn FnMut() -> bool) -> Result<WallDrag, WallExchangeError>,
+    resolve: &mut impl FnMut(
+        Cell<'_>,
+        Primitive,
+        f64,
+        &mut dyn FnMut() -> bool,
+    ) -> Result<WallDrag, WallExchangeError>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<WallDrag, WallExchangeError> {
     poll(cancelled)?;
@@ -452,12 +622,13 @@ fn evaluate(
     let state = path.cell(momentum)?;
     // The public callback can be a constant law; original caloric admission is
     // still required for every constitutive stage, not only the final endpoint.
-    path.gas.primitive(state, &mut *cancelled)?;
-    let law = resolve(state, cancelled)?;
+    let primitive = path.gas.primitive(state, &mut *cancelled)?;
+    let wall_velocity = path.wall_velocity(momentum)?;
+    let law = resolve(state, primitive, wall_velocity, cancelled)?;
     law.validate()?;
-    if law.moving_velocity().unwrap_or(0.0) != path.wall {
+    if law.moving_velocity().unwrap_or(0.0) != wall_velocity {
         return Err(WallExchangeError::Invalid(
-            "source changed prescribed wall velocity",
+            "source changed mechanical wall velocity",
         ));
     }
     poll(cancelled)?;

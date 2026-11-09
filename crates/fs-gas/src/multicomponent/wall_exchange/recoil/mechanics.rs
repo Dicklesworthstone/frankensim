@@ -2,7 +2,7 @@
 
 use super::{RecoilLaw, SlidingSupport, WallExchangeError, nonnegative, positive};
 
-pub(super) struct Motion {
+pub(in crate::multicomponent::wall_exchange) struct Motion {
     pub momentum: f64,
     pub support_velocity_m_s: f64,
     pub gas_impulse_ns: f64,
@@ -13,7 +13,7 @@ pub(super) struct Motion {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn advance(
+pub(in crate::multicomponent::wall_exchange) fn advance(
     momentum: f64,
     density: f64,
     velocity: f64,
@@ -69,6 +69,44 @@ pub(super) fn advance(
         };
         density * (center + gas_weight * slip * factor)
     };
+    at_momentum(momentum, density, velocity, volume, support, next_momentum)
+}
+
+/// One actual-impulse owner for frozen and source-aware recoil endpoints.
+/// Every candidate is anchored to its entering support and gas amount. Neither
+/// support rounding nor a numerical integration defect becomes an energy source.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::multicomponent::wall_exchange) fn at_momentum(
+    momentum: f64,
+    density: f64,
+    velocity: f64,
+    volume: f64,
+    support: SlidingSupport,
+    next_momentum: f64,
+) -> Result<Motion, WallExchangeError> {
+    let mass = density * volume;
+    let slip = velocity - support.velocity_m_s;
+    if !positive(density)
+        || !positive(volume)
+        || !positive(mass)
+        || !positive(support.mass_kg)
+        || !support.velocity_m_s.is_finite()
+        || !slip.is_finite()
+        || !momentum.is_finite()
+        || !next_momentum.is_finite()
+    {
+        return Err(WallExchangeError::Invalid(
+            "finite-support momentum endpoint",
+        ));
+    }
+    let reduced_mass = if mass <= support.mass_kg {
+        mass / (1.0 + mass / support.mass_kg)
+    } else {
+        support.mass_kg / (1.0 + support.mass_kg / mass)
+    };
+    if !positive(reduced_mass) {
+        return Err(WallExchangeError::Invalid("finite-support reduced mass"));
+    }
     // Retain actual accepted gas impulse, then give the support its opposite.
     // Endpoint rounding is audited rather than hidden in an energy correction.
     let impulse = (next_momentum - momentum) * volume;

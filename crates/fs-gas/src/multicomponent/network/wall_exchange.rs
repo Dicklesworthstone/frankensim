@@ -437,6 +437,8 @@ impl<'law> NetworkWallOperator<'law> {
                         Some(supports) => supports
                             .prepare(
                                 index,
+                                branch_index,
+                                self.transport.as_mut(),
                                 &self.gas,
                                 state,
                                 shape.mesh.volumes()[i],
@@ -450,7 +452,7 @@ impl<'law> NetworkWallOperator<'law> {
                         None => None,
                     },
                 };
-                let motion = match motion {
+                let mut motion = match motion {
                     Some(motion) => Some(motion),
                     None => match self.transport.as_mut() {
                         Some(transport) => transport.advance_drag(
@@ -466,6 +468,26 @@ impl<'law> NetworkWallOperator<'law> {
                         None => None,
                     },
                 };
+                if let (Some(motion), Some(transport)) = (&mut motion, &mut self.transport)
+                    && transport.couples_drag(branch_index)
+                {
+                    // Both prescribed motion and finite recoil have finished
+                    // their physical work/heat partition. Resolve this actual
+                    // gas state and current wall motion before thermal exchange;
+                    // retain the original wall's deposited heat coordinate.
+                    motion.contact = transport.resolve(
+                        &self.gas,
+                        branch_index,
+                        Cell {
+                            momentum: motion.momentum,
+                            energy: motion.energy,
+                            ..state
+                        },
+                        shape.mesh.volumes()[i],
+                        motion.contact,
+                        cancelled,
+                    )?;
+                }
                 let thermal_state = motion.map_or(state, |motion| Cell {
                     momentum: motion.momentum,
                     energy: motion.energy,

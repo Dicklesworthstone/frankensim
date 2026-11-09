@@ -1,8 +1,8 @@
 //! Finite per-cell support inertia on the original network source transaction.
 
 use super::{
-    NetworkWallOperator, WallContact, WallControl, WallDrag, WallExchangeError, WallThermal,
-    allocated, poll, positive, sum,
+    DevelopedWallTransport, NetworkWallOperator, WallContact, WallControl, WallDrag,
+    WallExchangeError, WallThermal, allocated, poll, positive, sum,
 };
 use crate::multicomponent::wall_exchange::{
     MaterialWallCaloric, RecoilControl, RecoilLaw, RecoilUpdate, SlidingSupport,
@@ -100,15 +100,6 @@ impl NetworkWallOperator<'_> {
             for (cell, support) in input.iter().copied().enumerate() {
                 poll(&mut cancelled)?;
                 if let Some(support) = support {
-                    if self
-                        .transport
-                        .as_ref()
-                        .is_some_and(|transport| transport.couples_drag(branch))
-                    {
-                        return Err(WallExchangeError::Invalid(
-                            "source-coupled wall drag requires prescribed wall motion",
-                        ));
-                    }
                     if self
                         .shared_supports
                         .as_ref()
@@ -255,6 +246,8 @@ impl FiniteSupports {
     pub(super) fn prepare(
         &mut self,
         index: usize,
+        branch: usize,
+        transport: Option<&mut DevelopedWallTransport>,
         gas: &MixtureGas,
         state: Cell<'_>,
         volume: f64,
@@ -273,27 +266,36 @@ impl FiniteSupports {
             wall: controls,
             momentum_tolerance_ns: self.momentum_tolerance_ns,
         };
-        let mut motion = if law.gas_heat_fraction == 1.0 {
-            let mut motion = exchange_cell_with_recoil(
+        let conductance = if law.gas_heat_fraction == 1.0 {
+            None
+        } else {
+            Some(friction_wall_conductance(contact, wall)?)
+        };
+        let mut thermal = contact.thermal;
+        let wall = if conductance.is_some() {
+            // Deposit friction only. The existing network owner applies its
+            // material-conduction and heat exchange after the mechanical stage.
+            set_finite_conductance(&mut thermal, 0.0)?;
+            wall
+        } else {
+            thermal = WallThermal::Adiabatic;
+            None
+        };
+        let mut motion = match transport.filter(|transport| transport.couples_drag(branch)) {
+            Some(transport) => transport.advance_recoil(
                 gas,
+                branch,
                 state,
                 volume,
                 duration,
                 support,
-                law,
-                WallThermal::Adiabatic,
+                law.gas_heat_fraction,
+                WallContact { thermal, ..contact },
+                wall,
                 balance,
                 &mut *cancelled,
-            )?;
-            motion.gas.contact.thermal = contact.thermal;
-            motion
-        } else {
-            let conductance = friction_wall_conductance(contact, wall)?;
-            let mut thermal = contact.thermal;
-            set_finite_conductance(&mut thermal, 0.0)?;
-            // Only deposit friction here. The existing network owner still
-            // applies its own material-conduction treatment in the next stage.
-            let mut motion = match wall {
+            )?,
+            None => match wall {
                 Some(wall) => exchange_cell_with_recoil_and_heat_storage(
                     gas,
                     state,
@@ -317,10 +319,13 @@ impl FiniteSupports {
                     balance,
                     &mut *cancelled,
                 )?,
-            };
-            set_finite_conductance(&mut motion.gas.contact.thermal, conductance)?;
-            motion
+            },
         };
+        if let Some(conductance) = conductance {
+            set_finite_conductance(&mut motion.gas.contact.thermal, conductance)?;
+        } else {
+            motion.gas.contact.thermal = contact.thermal;
+        }
         motion.gas.contact.drag = at_velocity(contact.drag, motion.support.velocity_m_s);
         let initial = self.accepted[index].ok_or(WallExchangeError::Invalid(
             "finite support lost its accepted inventory",
@@ -513,26 +518,7 @@ fn set_finite_conductance(thermal: &mut WallThermal, value: f64) -> Result<(), W
 }
 
 pub(super) fn coefficients(drag: WallDrag) -> RecoilLaw {
-    let (linear_rate_per_s, quadratic_per_m) = match drag {
-        WallDrag::None => (0.0, 0.0),
-        WallDrag::Linear { rate_per_s } | WallDrag::MovingLinear { rate_per_s, .. } => {
-            (rate_per_s, 0.0)
-        }
-        WallDrag::Darcy {
-            friction_factor,
-            hydraulic_diameter_m,
-        }
-        | WallDrag::MovingDarcy {
-            friction_factor,
-            hydraulic_diameter_m,
-            ..
-        } => (0.0, 0.5 * friction_factor / hydraulic_diameter_m),
-        WallDrag::LinearQuadratic {
-            linear_rate_per_s,
-            quadratic_per_m,
-            ..
-        } => (linear_rate_per_s, quadratic_per_m),
-    };
+    let (linear_rate_per_s, quadratic_per_m) = drag.resistance_coefficients();
     RecoilLaw {
         linear_rate_per_s,
         quadratic_per_m,

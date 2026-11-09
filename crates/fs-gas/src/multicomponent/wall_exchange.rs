@@ -15,8 +15,9 @@ mod drag;
 mod source_drag;
 pub use source_drag::{
     SourceCoupledDragControl, SourceCoupledDragReport, SourceCoupledDragUpdate,
-    exchange_cell_with_source_drag,
+    SourceCoupledRecoilUpdate, exchange_cell_with_source_drag, exchange_cell_with_source_recoil,
 };
+pub(crate) use source_drag::exchange_cell_with_source_drag_admitted;
 mod gas;
 mod recoil;
 pub use recoil::{
@@ -156,6 +157,24 @@ impl WallDrag {
             | Self::MovingDarcy { wall_velocity_m_s, .. }
             | Self::LinearQuadratic { wall_velocity_m_s, .. } => Some(wall_velocity_m_s),
             _ => None,
+        }
+    }
+
+    /// The original authored resistance, expressed on relative gas velocity.
+    /// Finite-support recoil scales its duration by the reduced mass itself.
+    pub(crate) fn resistance_coefficients(self) -> (f64, f64) {
+        match self {
+            Self::None => (0.0, 0.0),
+            Self::Linear { rate_per_s } | Self::MovingLinear { rate_per_s, .. } => {
+                (rate_per_s, 0.0)
+            }
+            Self::Darcy { friction_factor, hydraulic_diameter_m }
+            | Self::MovingDarcy { friction_factor, hydraulic_diameter_m, .. } => {
+                (0.0, 0.5 * friction_factor / hydraulic_diameter_m)
+            }
+            Self::LinearQuadratic { linear_rate_per_s, quadratic_per_m, .. } => {
+                (linear_rate_per_s, quadratic_per_m)
+            }
         }
     }
 }

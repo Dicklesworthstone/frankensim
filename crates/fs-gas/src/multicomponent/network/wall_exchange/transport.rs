@@ -4,9 +4,13 @@ use super::{NetworkWallOperator, WallContact, WallDrag, WallExchangeError, WallT
 use crate::multicomponent::dissipation::TransportLaw;
 use crate::multicomponent::dissipation::evolve::fractions;
 use crate::multicomponent::wall_exchange::{
-    SourceCoupledDragControl, WallControl, WallUpdate, exchange_cell_with_source_drag,
+    MaterialWallCaloric, RecoilControl, RecoilUpdate, SlidingSupport, SourceCoupledDragControl,
+    WallControl, WallUpdate, exchange_cell_with_source_drag_admitted,
+    exchange_cell_with_source_recoil,
 };
-use crate::multicomponent::{Cell, MAX_SPECIES, Mesh1d, MixtureGas, allocated, positive};
+use crate::multicomponent::{
+    Cell, MAX_SPECIES, Mesh1d, MixtureGas, Primitive, allocated, positive,
+};
 use fs_qty::{Length, Pressure, Temperature, Time};
 
 mod annular;
@@ -429,10 +433,12 @@ impl NetworkWallOperator<'_> {
     /// thermal ports retain their own authored conductances. No simultaneous
     /// thermoviscous heat integration or unsteady profile memory is inferred.
     ///
-    /// Selected walls must be stationary or have a prescribed constant axial
-    /// velocity. Finite independent/shared supports on selected branches refuse
-    /// in either binding order; their coupled recoil equations are not replaced
-    /// by a prescribed-wall solve. Supports on unselected branches are retained.
+    /// Stationary/prescribed walls and independent finite supports are admitted.
+    /// An independent support retains its original reduced-mass recoil, authored
+    /// slip-heat partition and finite wall storage. Every coefficient query uses
+    /// the actual candidate support velocity. Shared inertial supports on
+    /// selected branches refuse in either binding order: their vector-coupled
+    /// equations cannot use one independent scalar relaxation per gas cell.
     pub fn with_source_coupled_drag(
         mut self,
         control: SourceCoupledDragControl,
@@ -455,18 +461,16 @@ impl NetworkWallOperator<'_> {
                 "source-coupled wall drag binds once to selected branches",
             ));
         }
-        for (branch, (model, shape)) in transport.branches.iter().zip(&self.branches).enumerate() {
+        for (branch, model) in transport.branches.iter().enumerate() {
             poll(&mut cancelled)?;
             if model.is_some()
-                && (self.supports.as_ref().is_some_and(|supports| {
-                    supports.any_selected(shape.start, shape.mesh.cell_count())
-                }) || self
+                && self
                     .shared_supports
                     .as_ref()
-                    .is_some_and(|supports| supports.has_branch(branch)))
+                    .is_some_and(|supports| supports.has_branch(branch))
             {
                 return Err(WallExchangeError::Invalid(
-                    "source-coupled wall drag requires prescribed wall motion",
+                    "source-coupled wall drag cannot use shared inertial supports",
                 ));
             }
         }
@@ -533,7 +537,7 @@ impl DevelopedWallTransport {
         if self.branches[branch].is_none() {
             return Ok(None);
         }
-        let mut update = exchange_cell_with_source_drag(
+        let update = exchange_cell_with_source_drag_admitted(
             gas,
             state,
             volume,
@@ -541,30 +545,72 @@ impl DevelopedWallTransport {
             contact,
             controls,
             source_control,
-            |candidate, checkpoint| {
-                self.resolve(gas, branch, candidate, volume, contact, &mut || {
-                    checkpoint()
-                })
+            |candidate, primitive, checkpoint| {
+                self.resolve_admitted(
+                    gas,
+                    branch,
+                    candidate,
+                    primitive,
+                    volume,
+                    contact,
+                    &mut || checkpoint(),
+                )
                 .map(|resolved| resolved.drag)
             },
             &mut *cancelled,
         )?
         .gas;
-        // The mechanical source owns no thermal storage. Refresh only the
-        // actual endpoint film/drag before the original thermal owner takes over.
-        update.contact = self.resolve(
-            gas,
-            branch,
-            Cell {
-                momentum: update.momentum,
-                energy: update.energy,
-                ..state
-            },
-            volume,
-            contact,
-            cancelled,
-        )?;
         Ok(Some(update))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn advance_recoil(
+        &mut self,
+        gas: &MixtureGas,
+        branch: usize,
+        state: Cell<'_>,
+        volume: f64,
+        duration: Time,
+        support: SlidingSupport,
+        gas_heat_fraction: f64,
+        contact: WallContact,
+        wall: Option<&MaterialWallCaloric<'_>>,
+        controls: RecoilControl,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<RecoilUpdate, WallExchangeError> {
+        let source_control = self.source_coupled_drag.ok_or(WallExchangeError::Invalid(
+            "source-coupled recoil lost its accuracy controls",
+        ))?;
+        let update = exchange_cell_with_source_recoil(
+            gas,
+            state,
+            volume,
+            duration,
+            support,
+            gas_heat_fraction,
+            contact,
+            wall,
+            controls,
+            source_control,
+            |candidate, support, primitive, checkpoint| {
+                let contact = WallContact {
+                    drag: super::recoil::at_velocity(contact.drag, support.velocity_m_s),
+                    ..contact
+                };
+                self.resolve_admitted(
+                    gas,
+                    branch,
+                    candidate,
+                    primitive,
+                    volume,
+                    contact,
+                    &mut || checkpoint(),
+                )
+                .map(|resolved| resolved.drag)
+            },
+            &mut *cancelled,
+        )?;
+        Ok(update.recoil)
     }
 
     pub(super) fn resolve(
@@ -572,6 +618,26 @@ impl DevelopedWallTransport {
         gas: &MixtureGas,
         branch: usize,
         state: Cell<'_>,
+        volume: f64,
+        contact: WallContact,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<WallContact, WallExchangeError> {
+        if self.branches[branch].is_none() {
+            return Ok(contact);
+        }
+        let primitive = gas.primitive(state, &mut *cancelled)?;
+        self.resolve_admitted(gas, branch, state, primitive, volume, contact, cancelled)
+    }
+
+    // Only the original gas owner supplies this state. Adaptive mechanics has
+    // already decoded/admitted each trial; repeat no caloric inversion here.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_admitted(
+        &mut self,
+        gas: &MixtureGas,
+        branch: usize,
+        state: Cell<'_>,
+        primitive: Primitive,
         volume: f64,
         mut contact: WallContact,
         cancelled: &mut impl FnMut() -> bool,
@@ -585,7 +651,6 @@ impl DevelopedWallTransport {
                 "wall transport changed its original source",
             ));
         }
-        let primitive = gas.primitive(state, &mut *cancelled)?;
         let mut mole_fractions = [0.0; MAX_SPECIES];
         let x = &mut mole_fractions[..gas.species_count()];
         fractions(gas, state.partial_densities, x)?;

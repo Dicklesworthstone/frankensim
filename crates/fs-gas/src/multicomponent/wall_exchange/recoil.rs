@@ -11,7 +11,7 @@ use super::{
     nonnegative, poll, positive,
 };
 
-mod mechanics;
+pub(super) mod mechanics;
 mod shared;
 pub use shared::{
     SharedRecoilCell, SharedRecoilCellUpdate, SharedRecoilControl, SharedRecoilHeatCell,
@@ -169,6 +169,46 @@ fn exchange_caloric_with_recoil(
     control: RecoilControl,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<RecoilUpdate, WallExchangeError> {
+    let initial_contact = prepare_contact(
+        thermal,
+        wall,
+        law.gas_heat_fraction,
+        control,
+        &mut cancelled,
+    )?;
+    let initial = gas.primitive(initial_momentum, initial_energy, &mut cancelled)?;
+    let motion = mechanics::advance(
+        initial_momentum,
+        initial.density,
+        initial.velocity,
+        volume_m3,
+        duration.value(),
+        support,
+        law,
+    )?;
+    complete_motion(
+        gas,
+        initial_energy,
+        volume_m3,
+        duration,
+        support,
+        law.gas_heat_fraction,
+        initial_contact,
+        wall,
+        control,
+        motion,
+        &mut cancelled,
+    )
+}
+
+/// One original wall-storage admission for frozen and live-source recoil.
+pub(super) fn prepare_contact(
+    thermal: WallThermal,
+    wall: Option<&MaterialWallCaloric<'_>>,
+    gas_heat_fraction: f64,
+    control: RecoilControl,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<WallContact, WallExchangeError> {
     poll(&mut cancelled)?;
     control.wall.validate()?;
     let mut initial_contact = WallContact {
@@ -189,9 +229,9 @@ fn exchange_caloric_with_recoil(
         initial_contact = wall.bind_contact(initial_contact)?;
     }
     if !positive(control.momentum_tolerance_ns)
-        || !law.gas_heat_fraction.is_finite()
-        || !(0.0..=1.0).contains(&law.gas_heat_fraction)
-        || (law.gas_heat_fraction < 1.0
+        || !gas_heat_fraction.is_finite()
+        || !(0.0..=1.0).contains(&gas_heat_fraction)
+        || (gas_heat_fraction < 1.0
             && wall.is_none()
             && !matches!(thermal, WallThermal::Lumped { .. }))
     {
@@ -199,22 +239,31 @@ fn exchange_caloric_with_recoil(
             "recoil momentum budget or finite-wall heat partition",
         ));
     }
-    let initial = gas.primitive(initial_momentum, initial_energy, &mut cancelled)?;
-    let motion = mechanics::advance(
-        initial_momentum,
-        initial.density,
-        initial.velocity,
-        volume_m3,
-        duration.value(),
-        support,
-        law,
-    )?;
+    Ok(initial_contact)
+}
+
+/// Deposit the accepted physical slip loss through the existing original
+/// caloric owner and audit actual complete gas, support and wall endpoints.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn complete_motion(
+    gas: &impl WallGasCaloric,
+    initial_energy: f64,
+    volume_m3: f64,
+    duration: Time,
+    support: SlidingSupport,
+    gas_heat_fraction: f64,
+    initial_contact: WallContact,
+    wall: Option<&MaterialWallCaloric<'_>>,
+    control: RecoilControl,
+    motion: mechanics::Motion,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<RecoilUpdate, WallExchangeError> {
     if motion.momentum_residual_ns.abs() > control.momentum_tolerance_ns {
         return Err(WallExchangeError::Invalid(
             "finite-support momentum residual exceeds budget",
         ));
     }
-    let gas_heating = law.gas_heat_fraction * motion.dissipation_j;
+    let gas_heating = gas_heat_fraction * motion.dissipation_j;
     let wall_heating = motion.dissipation_j - gas_heating;
     let mut contact = initial_contact;
     if let Some(wall) = wall {
@@ -223,7 +272,7 @@ fn exchange_caloric_with_recoil(
         temperature_k,
         heat_capacity_j_per_k,
         conductance_w_per_k,
-    } = thermal
+    } = initial_contact.thermal
     {
         let next = temperature_k + wall_heating / heat_capacity_j_per_k;
         contact.thermal = WallThermal::Lumped {

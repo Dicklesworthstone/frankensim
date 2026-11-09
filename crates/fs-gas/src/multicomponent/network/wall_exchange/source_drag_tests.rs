@@ -1,5 +1,7 @@
 //! G1 original-source thermoviscous relaxation and G4 native publication.
 
+mod recoil;
+
 use super::*;
 use crate::multicomponent::dissipation::{
     ConstantTransport, DissipationError, TransportCoefficients, TransportLaw,
@@ -374,7 +376,7 @@ fn source_refusal_and_final_cancellation_preserve_complete_native_transaction() 
 }
 
 #[test]
-fn finite_supports_refuse_only_selected_branches_in_both_binding_orders() {
+fn independent_supports_bind_both_orders_and_shared_supports_refuse_selected_branches() {
     let gas = gas(1, false, 0.0);
     let network = network(&gas, &[0.4, 0.4]);
     let make = || {
@@ -397,14 +399,14 @@ fn finite_supports_refuse_only_selected_branches_in_both_binding_orders() {
             .with_finite_supports(selected(), 1e-10, || false)
             .unwrap()
             .with_source_coupled_drag(source_controls(), || false)
-            .is_err()
+            .is_ok()
     );
     assert!(
         make()
             .with_source_coupled_drag(source_controls(), || false)
             .unwrap()
             .with_finite_supports(selected(), 1e-10, || false)
-            .is_err()
+            .is_ok()
     );
     assert!(
         make()

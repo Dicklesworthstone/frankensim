@@ -4140,6 +4140,55 @@ smooth sharp-decrease refusal/refinement, source-domain exit, bounded work
 and cancellation. Thermal-contact splitting and radial boundary-layer memory
 remain separate owners.
 
+### Live material resistance with independent support recoil
+
+`exchange_cell_with_source_recoil` shares the source-coupled scalar driver
+with prescribed-wall drag and retains the original independent recoil owner.
+For gas mass m, support mass M, reduced mass mr = m*M/(m+M), entering slip s0
+and actual gas impulse I, the original mechanics owner determines:
+
+- support velocity U = U0 - I/M;
+- gas work W = I*(U0 - I/(2*M));
+- total physical slip loss D = -I*(s0 + I/(2*mr));
+- gas energy E = E0 + (W - (D - f*D))/V for the fixed authored gas fraction f.
+
+Every trial is anchored to the original gas/support state through that same
+accepted-impulse calculation. The original gas primitive and candidate support
+are passed to the constitutive callback; its returned drag must use that
+support velocity. The callback cannot change support mass or heat fraction.
+Slip defects include both bodies' response, and heating estimates control
+total reduced-mass loss before partition, including an all-wall heat share.
+Actual represented support momentum and complete energy remain independently
+audited; rounding residuals are never repaired by an impulse or heat source.
+
+The original recoil completion deposits D - f*D through the authored constant
+capacity or original `MaterialWallCaloric` integral/native energy coordinate,
+then runs the original thermal-contact owner. Internal-energy or explicitly
+negligible-expansion admission remains required for material support storage.
+The thermal material amount belongs to the authored inertia and is not added
+to it again. The final gas/support state is admitted by the original resolver
+after thermal completion, with that query charged to the same whole-call
+source budget. No endpoint is returned after refusal or cancellation.
+
+The network binding admits independent supports in either binding order and
+uses their existing trial/accepted `SupportExchange` accounting. Transport is
+queried in the actual moving-support frame; after mechanical work and friction
+heat partition, the common source seam refreshes the local gas film before
+ordinary caloric/conduction exchange. The original admitted gas primitive is
+reused in each constitutive stage, avoiding a duplicate caloric inversion.
+Shared finite inertia still requires its collective vector owner and is
+refused on selected source-coupled branches. Shared thermal inventories retain
+their original separate conductances and heat solve.
+
+G1/G3/G4 regressions compare an independent temperature-proportional-viscosity
+reduced-mass solution over light/moderate/heavy supports, opposing slip, frame
+boosts and gas heat fractions 0/0.5/1. Constant linear/Darcy/combined resistance
+recovers the original recoil result. Original nonlinear wall storage,
+post-partition gas-film refresh, final thermal source refusal, late cancellation
+and deterministic complete-network retry are covered. The source controller
+does not adapt the subsequent thermal-contact equation or claim a global
+second-order coupled thermal method.
+
 ## Wall sources composed with molecular and reacting networks
 
 ### Current material state in developed pipe-wall losses
@@ -4206,9 +4255,10 @@ impulses, physical slip heat, drive work, finite-wall energy, cancellation and
 whole-network retry remain on the existing transaction. Adaptive source work
 limits apply independently to each selected cell and source interval.
 
-This first binding admits stationary and prescribed-motion walls. A selected
-independent or shared inertial support is refused in either binding order;
-unselected branches retain their existing support owners. The scalar
+The binding admits stationary walls, prescribed motion and independent finite
+supports with their original frictional heat partition and material storage.
+A shared inertial support on a selected branch is refused in either binding
+order; unselected branches retain their existing support owners. The scalar
 mechanical solve is second order for smooth live coefficients, while the
 separate backward-Euler thermal contact and outer coupled system retain their
 existing order limitations. Conductivity is refreshed after mechanical

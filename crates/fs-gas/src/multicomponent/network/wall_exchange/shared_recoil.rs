@@ -92,7 +92,7 @@ impl NetworkWallOperator<'_> {
                 .is_some_and(|transport| transport.couples_drag(branch))
             {
                 return Err(WallExchangeError::Invalid(
-                    "source-coupled wall drag requires prescribed wall motion",
+                    "source-coupled wall drag cannot use shared inertial supports",
                 ));
             }
             let count = shape.mesh.cell_count();
