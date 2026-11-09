@@ -1,4 +1,5 @@
 use super::*;
+use fs_fft::harmonic_window::HarmonicWindowProfile;
 
 fn with_factor<T>(
     omega: &[f64],
@@ -6,11 +7,11 @@ fn with_factor<T>(
     proper: bool,
     f: impl FnOnce(&Temporal<'_>) -> T,
 ) -> T {
-    let mut scratch = UniformHarmonicBandWorkspace::new();
+    let mut scratch = HarmonicBandWorkspace::new();
     let factor = if proper {
-        window.prepare_uniform_band_rad_s_in(omega, &mut scratch)
+        window.prepare_band_rad_s_in(omega, &mut scratch)
     } else {
-        window.prepare_uniform_real_band_rad_s_in(omega, &mut scratch)
+        window.prepare_real_band_rad_s_in(omega, &mut scratch)
     }
     .unwrap()
     .unwrap();
@@ -121,6 +122,39 @@ fn real_cubic_null_keeps_signed_momentum_rate_and_full_carrier() {
     assert!(backwards.1[5].to_f64() < 0.0);
 }
 
+#[test]
+fn triangular_dark_stress_and_momentum_rate_keep_detector_weight_and_sign() {
+    // For triangular sensitivity on [0,T], <t^4>=31*T^4/240 and
+    // <t^3>=3*T^3/16. These are weighted rates, not endpoint changes/T.
+    let fields = [1.0, -2.0, 1.0].map(|a| wave(C64::from_re(a)));
+    let carrier = 2.0_f64.powi(49);
+    for duration in [1e-6_f64, 1e-9, 1e-12] {
+        for backwards in [false, true] {
+            let window = HarmonicWindow::with_profile(
+                if backwards { -duration } else { 0.0 },
+                duration,
+                HarmonicWindowProfile::Triangular,
+            )
+            .unwrap();
+            let (dyad, momentum) = point(
+                &fields,
+                &[carrier + 1.0, carrier + 2.0, carrier + 3.0],
+                window,
+                true,
+            );
+            relative(
+                stress_from_dyad(dyad)[2].to_f64(),
+                -31.0 * duration.powi(4) / 480.0,
+            );
+            relative(momentum[2].to_f64(), 31.0 * duration.powi(4) / 480.0);
+            relative(
+                momentum[5].to_f64(),
+                (if backwards { -1.0 } else { 1.0 }) * 3.0 * duration.powi(3) / 8.0,
+            );
+        }
+    }
+}
+
 fn simpson(k: usize, n: usize) -> f64 {
     if k == 0 || k == n {
         1.0
@@ -184,31 +218,41 @@ fn general_fields() -> [[C64; 6]; 3] {
 fn full_signed_tensors_match_independent_real_time_and_proper_phase_ensemble() {
     let fields = general_fields();
     let omega = [1.0, 2.0, 3.0];
-    let window = HarmonicWindow::new(0.17, 0.12).unwrap();
-    for proper in [false, true] {
-        let phases = if proper {
-            [C64::ONE, -C64::ONE, C64::new(0.0, 1.0), C64::new(0.0, -1.0)]
-        } else {
-            [C64::ONE; 4]
-        };
-        let mut expected = [0.0; 12];
-        let steps = 512;
-        for phase in phases {
-            for k in 0..=steps {
-                let t = window.start_s() + window.duration_s() * k as f64 / steps as f64;
-                let (value, rate) = sample(&fields, &omega, t, 0.0, phase);
-                for (sum, value) in expected.iter_mut().zip(physical(value, rate)) {
-                    *sum += simpson(k, steps) * value / (12.0 * steps as f64);
+    for profile in [
+        HarmonicWindowProfile::Uniform,
+        HarmonicWindowProfile::Triangular,
+    ] {
+        let window = HarmonicWindow::with_profile(0.17, 0.12, profile).unwrap();
+        for proper in [false, true] {
+            let phases = if proper {
+                [C64::ONE, -C64::ONE, C64::new(0.0, 1.0), C64::new(0.0, -1.0)]
+            } else {
+                [C64::ONE; 4]
+            };
+            let mut expected = [0.0; 12];
+            let steps = 512;
+            for phase in phases {
+                for k in 0..=steps {
+                    let t = window.start_s() + window.duration_s() * k as f64 / steps as f64;
+                    let (value, rate) = sample(&fields, &omega, t, 0.0, phase);
+                    for (sum, value) in expected.iter_mut().zip(physical(value, rate)) {
+                        let sensitivity = if profile == HarmonicWindowProfile::Triangular {
+                            4.0 * (k.min(steps - k) as f64 / steps as f64)
+                        } else {
+                            1.0
+                        };
+                        *sum += sensitivity * simpson(k, steps) * value / (12.0 * steps as f64);
+                    }
                 }
             }
-        }
-        let (stress, momentum) = point(&fields, &omega, window, proper);
-        for (actual, expected) in stress.into_iter().chain(momentum).zip(expected) {
-            assert!(
-                (actual.to_f64() - expected).abs() < 3e-13,
-                "{} != {expected}",
-                actual.to_f64()
-            );
+            let (stress, momentum) = point(&fields, &omega, window, proper);
+            for (actual, expected) in stress.into_iter().chain(momentum).zip(expected) {
+                assert!(
+                    (actual.to_f64() - expected).abs() < 3e-13,
+                    "{} != {expected}",
+                    actual.to_f64()
+                );
+            }
         }
     }
 }
@@ -261,59 +305,71 @@ fn continuous_odd_opposite_modes_and_unpaired_nyquist_keep_physical_measure() {
 fn nonzero_carrier_retains_original_spatial_gram_and_momentum_storage() {
     let fields = general_fields();
     let omega = [1.0, 2.0, 3.0];
-    let window = HarmonicWindow::new(0.17, 0.12).unwrap();
-    let k = 0.7_f64;
-    let (sin, cos) = (k / 2.0).sin_cos();
-    let cc = 0.5 * (1.0 + k.sin() / k);
-    let ss = 0.5 * (1.0 - k.sin() / k);
-    let carriers = cell::CarrierFields::from_temporal_test_parts(
-        fields
-            .iter()
-            .map(|field| {
-                vec![field.map(|z| {
-                    let source = [
-                        Dd::from_f64(z.re) * Dd::from_f64(cos)
-                            + Dd::from_f64(z.im) * Dd::from_f64(sin),
-                        Dd::from_f64(z.re) * Dd::from_f64(sin)
-                            - Dd::from_f64(z.im) * Dd::from_f64(cos),
-                    ];
-                    [
-                        source,
-                        source.map(|v| v * Dd::from_f64(cc)),
-                        source.map(|v| v * Dd::from_f64(ss)),
-                    ]
-                })]
-            })
-            .collect(),
-    );
-    let grid = AngularSpectrumGrid {
-        width: 1,
-        height: 1,
-        spacing_m: [1.0; 2],
-    };
-    let modal: Vec<_> = fields.iter().map(|field| vec![*field]).collect();
-    let (dyad, flow) = with_factor(&omega, window, false, |t| {
-        t.cell(grid, &modal, Some(&carriers), &mut || false)
-            .unwrap()
-    });
-    let mut expected = [0.0; 12];
-    let steps = 160;
-    for time in 0..=steps {
-        for x in 0..=steps {
-            let t = window.start_s() + window.duration_s() * time as f64 / steps as f64;
-            let (value, rate) = sample(&fields, &omega, t, k * x as f64 / steps as f64, C64::ONE);
-            let weight = simpson(time, steps) * simpson(x, steps) / (9.0 * (steps * steps) as f64);
-            for (sum, value) in expected.iter_mut().zip(physical(value, rate)) {
-                *sum += weight * value;
+    for profile in [
+        HarmonicWindowProfile::Uniform,
+        HarmonicWindowProfile::Triangular,
+    ] {
+        let window = HarmonicWindow::with_profile(0.17, 0.12, profile).unwrap();
+        let k = 0.7_f64;
+        let (sin, cos) = (k / 2.0).sin_cos();
+        let cc = 0.5 * (1.0 + k.sin() / k);
+        let ss = 0.5 * (1.0 - k.sin() / k);
+        let carriers = cell::CarrierFields::from_temporal_test_parts(
+            fields
+                .iter()
+                .map(|field| {
+                    vec![field.map(|z| {
+                        let source = [
+                            Dd::from_f64(z.re) * Dd::from_f64(cos)
+                                + Dd::from_f64(z.im) * Dd::from_f64(sin),
+                            Dd::from_f64(z.re) * Dd::from_f64(sin)
+                                - Dd::from_f64(z.im) * Dd::from_f64(cos),
+                        ];
+                        [
+                            source,
+                            source.map(|v| v * Dd::from_f64(cc)),
+                            source.map(|v| v * Dd::from_f64(ss)),
+                        ]
+                    })]
+                })
+                .collect(),
+        );
+        let grid = AngularSpectrumGrid {
+            width: 1,
+            height: 1,
+            spacing_m: [1.0; 2],
+        };
+        let modal: Vec<_> = fields.iter().map(|field| vec![*field]).collect();
+        let (dyad, flow) = with_factor(&omega, window, false, |t| {
+            t.cell(grid, &modal, Some(&carriers), &mut || false)
+                .unwrap()
+        });
+        let mut expected = [0.0; 12];
+        let steps = 160;
+        for time in 0..=steps {
+            for x in 0..=steps {
+                let t = window.start_s() + window.duration_s() * time as f64 / steps as f64;
+                let (value, rate) =
+                    sample(&fields, &omega, t, k * x as f64 / steps as f64, C64::ONE);
+                let sensitivity = if profile == HarmonicWindowProfile::Triangular {
+                    4.0 * (time.min(steps - time) as f64 / steps as f64)
+                } else {
+                    1.0
+                };
+                let weight = sensitivity * simpson(time, steps) * simpson(x, steps)
+                    / (9.0 * (steps * steps) as f64);
+                for (sum, value) in expected.iter_mut().zip(physical(value, rate)) {
+                    *sum += weight * value;
+                }
             }
         }
-    }
-    for (actual, expected) in dyad.into_iter().chain(flow).zip(expected) {
-        assert!(
-            (actual.to_f64() - expected).abs() < 3e-11,
-            "{} != {expected}",
-            actual.to_f64()
-        );
+        for (actual, expected) in dyad.into_iter().chain(flow).zip(expected) {
+            assert!(
+                (actual.to_f64() - expected).abs() < 3e-11,
+                "{} != {expected}",
+                actual.to_f64()
+            );
+        }
     }
 }
 

@@ -34,12 +34,29 @@ fn point_mean(
     epoch: Dd,
     conductivity: f64,
 ) -> ScaledDd {
+    point_window(
+        frequencies,
+        amplitudes,
+        proper,
+        HarmonicWindow::new(0.0, duration).unwrap(),
+        epoch,
+        conductivity,
+    )
+}
+fn point_window(
+    frequencies: &[f64],
+    amplitudes: &[[Dd; 2]],
+    proper: bool,
+    window: HarmonicWindow,
+    epoch: Dd,
+    conductivity: f64,
+) -> ScaledDd {
     let quadrature = quad(AngularSpectrumHeatAreaQuadrature::PeriodicCell);
     let volume = admit_volume(grid(1), 1.0, quadrature, &mut || false).unwrap();
     positive_bank(
         frequencies,
         proper,
-        HarmonicWindow::new(0.0, duration).unwrap(),
+        window,
         epoch,
         quadrature,
         volume,
@@ -58,24 +75,31 @@ fn point_mean(
 }
 
 #[test]
-fn proper_volume_heat_keeps_fourth_order_temporal_dark_leakage() {
-    let carrier = 2.0_f64.powi(49);
-    let omega = [carrier, carrier + 1.0, carrier + 2.0];
-    let amplitudes = [1.0, -2.0, 1.0].map(|a| [Dd::from_f64(a), Dd::ZERO]);
-    for duration in [1e-6, 1e-9, 1e-12] {
-        let heat = point_mean(
-            &omega,
-            &amplitudes,
-            true,
-            duration,
-            Dd::from_f64(-0.5 * duration),
-            1.0,
-        );
-        close(
-            heat.physical().unwrap().to_f64(),
-            duration.powi(4) / 160.0,
-            2e-12,
-        );
+fn volume_heat_keeps_real_and_proper_fourth_order_temporal_dark_leakage() {
+    for proper in [false, true] {
+        let carrier = if proper { 2.0_f64.powi(49) } else { 1.0 };
+        let omega = [carrier, carrier + 1.0, carrier + 2.0];
+        let amplitudes = [1.0, -2.0, 1.0].map(|a| [Dd::from_f64(a), Dd::ZERO]);
+        for (profile, denominator) in [
+            (HarmonicWindowProfile::Uniform, 80.0),
+            (HarmonicWindowProfile::Triangular, 240.0),
+        ] {
+            for duration in [1e-6, 1e-9, 1e-12] {
+                let heat = point_window(
+                    &omega,
+                    &amplitudes,
+                    proper,
+                    HarmonicWindow::with_profile(0.0, duration, profile).unwrap(),
+                    Dd::from_f64(-0.5 * duration),
+                    1.0,
+                );
+                close(
+                    heat.physical().unwrap().to_f64(),
+                    duration.powi(4) / (denominator * if proper { 2.0 } else { 1.0 }),
+                    2e-12,
+                );
+            }
+        }
     }
 }
 
@@ -86,38 +110,43 @@ fn real_odd_periodic_cell_keeps_both_spatial_quadratures_and_opposite_modes() {
     let duration = 1e-9;
     let quadrature = quad(AngularSpectrumHeatAreaQuadrature::ContinuousPeriodicCell);
     let volume = admit_volume(grid(3), 1.0, quadrature, &mut || false).unwrap();
-    for imaginary in [false, true] {
-        let value = positive_bank(
-            &frequencies,
-            false,
-            HarmonicWindow::new(0.0, duration).unwrap(),
-            Dd::from_f64(-duration / 2.0),
-            quadrature,
-            volume,
-            None,
-            1,
-            |_| ScaledDd::from_f64(1.0),
-            |_, _| [ScaledDd::from_f64(1.0), ScaledDd::ZERO],
-            |group, _, _| {
-                let mut result = vec![[[ScaledDd::ZERO; 2]; 3]; 3];
-                let a = ScaledDd::from_f64(amplitudes[group]);
-                if imaginary {
-                    result[1][0][1] = a;
-                    result[2][0][1] = -a;
-                } else {
-                    result[1][0][0] = a;
-                    result[2][0][0] = a;
-                }
-                Ok(result)
-            },
-            &mut || false,
-        )
-        .unwrap()
-        .physical()
-        .unwrap()
-        .to_f64();
-        // 2 cos(kx) or 2 sin(kx), squared spatial mean=2; area=3.
-        close(value, 3.0 * duration.powi(4) / 40.0, 5e-12);
+    for (profile, denominator) in [
+        (HarmonicWindowProfile::Uniform, 40.0),
+        (HarmonicWindowProfile::Triangular, 120.0),
+    ] {
+        for imaginary in [false, true] {
+            let value = positive_bank(
+                &frequencies,
+                false,
+                HarmonicWindow::with_profile(0.0, duration, profile).unwrap(),
+                Dd::from_f64(-duration / 2.0),
+                quadrature,
+                volume,
+                None,
+                1,
+                |_| ScaledDd::from_f64(1.0),
+                |_, _| [ScaledDd::from_f64(1.0), ScaledDd::ZERO],
+                |group, _, _| {
+                    let mut result = vec![[[ScaledDd::ZERO; 2]; 3]; 3];
+                    let a = ScaledDd::from_f64(amplitudes[group]);
+                    if imaginary {
+                        result[1][0][1] = a;
+                        result[2][0][1] = -a;
+                    } else {
+                        result[1][0][0] = a;
+                        result[2][0][0] = a;
+                    }
+                    Ok(result)
+                },
+                &mut || false,
+            )
+            .unwrap()
+            .physical()
+            .unwrap()
+            .to_f64();
+            // 2 cos(kx) or 2 sin(kx), squared spatial mean=2; area=3.
+            close(value, 3.0 * duration.powi(4) / denominator, 5e-12);
+        }
     }
 }
 
@@ -160,62 +189,73 @@ fn phased_off_center_real_rectangle_matches_independent_time_and_space_integral(
     let response = omega.map(|w| C64::new(1.0, -0.3 * w).scale(1.0 / (1.0 + 0.09 * w * w)));
     let start = 0.73;
     let duration = 0.04;
-    let actual = positive_bank(
-        &omega,
-        false,
-        HarmonicWindow::new(0.0, duration).unwrap(),
-        Dd::from_f64(start),
-        quadrature,
-        volume,
-        Some(&rectangle),
-        1,
-        |_| ScaledDd::from_f64(0.7),
-        |group, _| parts(response[group]),
-        |group, _, cancelled| {
-            let raw = coefficients[group]
-                .map(|a| {
-                    let mut field = [[Dd::ZERO; 2]; 6];
-                    field[0] = [Dd::from_f64(a.re), Dd::from_f64(a.im)];
-                    field
-                })
-                .to_vec();
-            rectangle.centered_electric(raw, cancelled)
-        },
-        &mut || false,
-    )
-    .unwrap()
-    .physical()
-    .unwrap()
-    .to_f64();
-    let (nt, nx, ny) = (80, 80, 40);
-    let origin = aperture.origin_m();
-    let extent = aperture.extent_m();
-    let mut oracle = 0.0;
-    for it in 0..=nt {
-        let time = start + duration * it as f64 / nt as f64;
-        for ix in 0..=nx {
-            let x = origin[0] + extent[0] * ix as f64 / nx as f64;
-            for iy in 0..=ny {
-                let y = origin[1] + extent[1] * iy as f64 / ny as f64;
-                let mut electric = 0.0;
-                for group in 0..3 {
-                    for mode in 0..2 {
-                        let phase =
-                            omega[group] * time - (k[mode] + carrier[0]) * x - carrier[1] * y;
-                        let amplitude = coefficients[group][mode] * response[group];
-                        electric += amplitude.re * phase.cos() - amplitude.im * phase.sin();
+    for profile in [
+        HarmonicWindowProfile::Uniform,
+        HarmonicWindowProfile::Triangular,
+    ] {
+        let actual = positive_bank(
+            &omega,
+            false,
+            HarmonicWindow::with_profile(0.0, duration, profile).unwrap(),
+            Dd::from_f64(start),
+            quadrature,
+            volume,
+            Some(&rectangle),
+            1,
+            |_| ScaledDd::from_f64(0.7),
+            |group, _| parts(response[group]),
+            |group, _, cancelled| {
+                let raw = coefficients[group]
+                    .map(|a| {
+                        let mut field = [[Dd::ZERO; 2]; 6];
+                        field[0] = [Dd::from_f64(a.re), Dd::from_f64(a.im)];
+                        field
+                    })
+                    .to_vec();
+                rectangle.centered_electric(raw, cancelled)
+            },
+            &mut || false,
+        )
+        .unwrap()
+        .physical()
+        .unwrap()
+        .to_f64();
+        let (nt, nx, ny) = (80, 80, 40);
+        let origin = aperture.origin_m();
+        let extent = aperture.extent_m();
+        let mut oracle = 0.0;
+        for it in 0..=nt {
+            let time = start + duration * it as f64 / nt as f64;
+            for ix in 0..=nx {
+                let x = origin[0] + extent[0] * ix as f64 / nx as f64;
+                for iy in 0..=ny {
+                    let y = origin[1] + extent[1] * iy as f64 / ny as f64;
+                    let mut electric = 0.0;
+                    for group in 0..3 {
+                        for mode in 0..2 {
+                            let phase =
+                                omega[group] * time - (k[mode] + carrier[0]) * x - carrier[1] * y;
+                            let amplitude = coefficients[group][mode] * response[group];
+                            electric += amplitude.re * phase.cos() - amplitude.im * phase.sin();
+                        }
                     }
+                    let sensitivity = if profile == HarmonicWindowProfile::Triangular {
+                        4.0 * (it.min(nt - it) as f64 / nt as f64)
+                    } else {
+                        1.0
+                    };
+                    oracle += sensitivity
+                        * simpson_weight(it, nt)
+                        * simpson_weight(ix, nx)
+                        * simpson_weight(iy, ny)
+                        * electric
+                        * electric;
                 }
-                oracle += simpson_weight(it, nt)
-                    * simpson_weight(ix, nx)
-                    * simpson_weight(iy, ny)
-                    * electric
-                    * electric;
             }
         }
+        oracle *= 0.7 * aperture.area_m2() / (27.0 * (nt * nx * ny) as f64);
+        close(actual, oracle, 3e-10);
     }
-    oracle *= 0.7 * aperture.area_m2() / (27.0 * (nt * nx * ny) as f64);
-    close(actual, oracle, 3e-10);
 }
 
 #[test]
@@ -447,11 +487,11 @@ fn sampled_partial_cells_keep_authored_depth_weights_and_reuse_original_planes()
 }
 
 #[test]
-fn unsupported_profiles_keep_original_spectrum_and_dd_epoch_law() {
+fn unsupported_bands_keep_original_spectrum_and_dd_epoch_law() {
     let window =
         HarmonicWindow::with_profile(0.0, 0.07, HarmonicWindowProfile::Triangular).unwrap();
     assert!(
-        temporal_modes(window, &[1.0, 2.0, 3.0], true)
+        temporal_modes(window, &[1.0, 20.0, 30.0], true)
             .unwrap()
             .is_none()
     );

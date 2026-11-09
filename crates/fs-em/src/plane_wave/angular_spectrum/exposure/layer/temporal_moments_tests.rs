@@ -30,7 +30,7 @@ fn proper_dark_flux_and_storage_retain_sign_and_ignore_the_common_carrier() {
             let mut previous = None;
             for carrier in [0.0, 562_949_953_421_312.0] {
                 let frequencies = [carrier + 1.0, carrier + 2.0, carrier + 3.0];
-                let mut workspace = UniformHarmonicBandWorkspace::new();
+                let mut workspace = HarmonicBandWorkspace::new();
                 let factor = PositiveLayerMoments::prepare(
                     window,
                     &frequencies,
@@ -77,7 +77,7 @@ fn actual_real_storage_resolves_fifth_order_rate_and_both_time_directions() {
         for backwards in [false, true] {
             let window =
                 HarmonicWindow::new(if backwards { -duration } else { 0.0 }, duration).unwrap();
-            let mut workspace = UniformHarmonicBandWorkspace::new();
+            let mut workspace = HarmonicBandWorkspace::new();
             let factor = PositiveLayerMoments::prepare(
                 window,
                 &frequencies,
@@ -147,61 +147,73 @@ fn full_vector_flux_and_storage_match_independent_real_phase_quadrature() {
             C64::new(0.2, -0.5),
         ],
     ];
-    let window = HarmonicWindow::new(0.17, 0.12).unwrap();
-    for proper in [false, true] {
-        let mut workspace = UniformHarmonicBandWorkspace::new();
-        let factor = PositiveLayerMoments::prepare(
-            window,
-            &frequencies,
-            proper,
-            &mut workspace,
-            &mut || false,
-        )
-        .unwrap()
-        .unwrap();
-        let projected = factor.project_field(|i| fields[i], &mut || false).unwrap();
-        let moments = projected.moments(&factor, &mut || false).unwrap();
-        let rate = projected
-            .storage_rate(&factor, 0.7, 1.3, &mut || false)
+    for profile in [
+        HarmonicWindowProfile::Uniform,
+        HarmonicWindowProfile::Triangular,
+    ] {
+        let window = HarmonicWindow::with_profile(0.17, 0.12, profile).unwrap();
+        for proper in [false, true] {
+            let mut workspace = HarmonicBandWorkspace::new();
+            let factor = PositiveLayerMoments::prepare(
+                window,
+                &frequencies,
+                proper,
+                &mut workspace,
+                &mut || false,
+            )
+            .unwrap()
             .unwrap();
-        let phases = [
-            C64::ONE,
-            C64::new(0.0, 1.0),
-            C64::from_re(-1.0),
-            C64::new(0.0, -1.0),
-        ];
-        let phases = &phases[..if proper { 4 } else { 1 }];
-        let mut expected = [0.0; 10];
-        let steps = 1024;
-        for phase in phases {
-            for k in 0..=steps {
-                let time = window.start_s() + window.duration_s() * k as f64 / steps as f64;
-                let weight = (if k == 0 || k == steps {
-                    1.0
-                } else if k % 2 == 0 {
-                    2.0
-                } else {
-                    4.0
-                }) / (3.0 * steps as f64 * phases.len() as f64);
-                let values: [(f64, f64); 6] = core::array::from_fn(|c| {
-                    scalar(&fields.map(|field| field[c]), &frequencies, time, *phase)
-                });
-                for c in 0..6 {
-                    expected[c] += weight * values[c].0 * values[c].0;
-                    expected[9] +=
-                        weight * (if c < 3 { 0.7 } else { 1.3 }) * values[c].0 * values[c].1;
-                }
-                for c in 0..3 {
-                    let (u, v) = ((c + 1) % 3, (c + 2) % 3);
-                    expected[c + 6] +=
-                        weight * (values[u].0 * values[v + 3].0 - values[v].0 * values[u + 3].0);
+            let projected = factor.project_field(|i| fields[i], &mut || false).unwrap();
+            let moments = projected.moments(&factor, &mut || false).unwrap();
+            let rate = projected
+                .storage_rate(&factor, 0.7, 1.3, &mut || false)
+                .unwrap();
+            let phases = [
+                C64::ONE,
+                C64::new(0.0, 1.0),
+                C64::from_re(-1.0),
+                C64::new(0.0, -1.0),
+            ];
+            let phases = &phases[..if proper { 4 } else { 1 }];
+            let mut expected = [0.0; 10];
+            let steps = 1024;
+            for phase in phases {
+                for k in 0..=steps {
+                    let time = window.start_s() + window.duration_s() * k as f64 / steps as f64;
+                    let sensitivity = if profile == HarmonicWindowProfile::Triangular {
+                        4.0 * (k.min(steps - k) as f64 / steps as f64)
+                    } else {
+                        1.0
+                    };
+                    let weight = sensitivity
+                        * (if k == 0 || k == steps {
+                            1.0
+                        } else if k % 2 == 0 {
+                            2.0
+                        } else {
+                            4.0
+                        })
+                        / (3.0 * steps as f64 * phases.len() as f64);
+                    let values: [(f64, f64); 6] = core::array::from_fn(|c| {
+                        scalar(&fields.map(|field| field[c]), &frequencies, time, *phase)
+                    });
+                    for c in 0..6 {
+                        expected[c] += weight * values[c].0 * values[c].0;
+                        expected[9] +=
+                            weight * (if c < 3 { 0.7 } else { 1.3 }) * values[c].0 * values[c].1;
+                    }
+                    for c in 0..3 {
+                        let (u, v) = ((c + 1) % 3, (c + 2) % 3);
+                        expected[c + 6] += weight
+                            * (values[u].0 * values[v + 3].0 - values[v].0 * values[u + 3].0);
+                    }
                 }
             }
+            for c in 0..9 {
+                assert!((moments[c].to_f64() - expected[c]).abs() < 3e-13);
+            }
+            assert!((rate.to_f64() - expected[9]).abs() < 3e-13);
         }
-        for c in 0..9 {
-            assert!((moments[c].to_f64() - expected[c]).abs() < 3e-13);
-        }
-        assert!((rate.to_f64() - expected[9]).abs() < 3e-13);
     }
 }
 
@@ -235,7 +247,7 @@ fn original_reservoir_work_retains_restoring_and_kinetic_storage() {
             }
         });
         for proper in [false, true] {
-            let mut workspace = UniformHarmonicBandWorkspace::new();
+            let mut workspace = HarmonicBandWorkspace::new();
             let factor = PositiveLayerMoments::prepare(
                 window,
                 &frequencies,
@@ -319,7 +331,7 @@ fn retained_filter_components_preserve_a_signed_reservoir_storage_residual() {
     // whose proper real product is the signed rate -alpha*epsilon²/2.
     assert_eq!(fields[0] * filters[0] + fields[1] * filters[1], C64::ZERO);
     let window = HarmonicWindow::new(-0.5e-30, 1e-30).unwrap();
-    let mut workspace = UniformHarmonicBandWorkspace::new();
+    let mut workspace = HarmonicBandWorkspace::new();
     let factor =
         PositiveLayerMoments::prepare(window, &[1.0, 2.0, 3.0], true, &mut workspace, &mut || {
             false
@@ -346,10 +358,10 @@ fn retained_filter_components_preserve_a_signed_reservoir_storage_residual() {
 fn signed_projection_cancels_transactionally_and_retains_exact_fallback_admission() {
     let frequencies = [1.0, 2.0, 3.0];
     let window = HarmonicWindow::new(0.17, 0.12).unwrap();
-    let mut workspace = UniformHarmonicBandWorkspace::new();
+    let mut workspace = HarmonicBandWorkspace::new();
     for window in [
         HarmonicWindow::new(0.0, 1.0).unwrap(),
-        HarmonicWindow::with_profile(0.17, 0.12, HarmonicWindowProfile::Triangular).unwrap(),
+        HarmonicWindow::with_profile(0.17, 1.0, HarmonicWindowProfile::Triangular).unwrap(),
     ] {
         assert!(
             PositiveLayerMoments::prepare(window, &frequencies, false, &mut workspace, &mut || {

@@ -3,11 +3,13 @@
 //! Each depth reconstructs its original frequency planes once. A bounded
 //! positive temporal factor acts before spatial products. Continuous supports
 //! retain complex Fourier quadratures; they are never replaced by samples.
+//! Normalized windows retain their uniform or triangular sensitivity. Physical
+//! heat intervals continue to use the uniform measure on the accepted interval.
 
 use super::*;
 use fs_fft::harmonic_window::{
-    MAX_UNIFORM_HARMONIC_BAND_MODES, MAX_UNIFORM_HARMONIC_BAND_TONES, UniformHarmonicBandRef,
-    UniformHarmonicBandWorkspace, phase_rad_s_dd_from_clock_dd,
+    HarmonicBandRef, HarmonicBandWorkspace, MAX_UNIFORM_HARMONIC_BAND_MODES,
+    MAX_UNIFORM_HARMONIC_BAND_TONES, phase_rad_s_dd_from_clock_dd,
 };
 use rectangle::Electric;
 
@@ -530,9 +532,9 @@ fn temporal_modes(
     proper: bool,
 ) -> Result<Option<usize>, AngularSpectrumError> {
     (if proper {
-        window.uniform_band_mode_count_rad_s(frequencies)
+        window.band_mode_count_rad_s(frequencies)
     } else {
-        window.uniform_real_band_mode_count_rad_s(frequencies)
+        window.real_band_mode_count_rad_s(frequencies)
     })
     .map_err(|_| bad("integrated heat temporal band is unrepresentable"))
 }
@@ -639,7 +641,7 @@ fn positive_bank<F: FnMut() -> bool>(
     cancelled: &mut F,
 ) -> Result<ScaledDd, AngularSpectrumError> {
     poll(cancelled)?;
-    let mut scratch = UniformHarmonicBandWorkspace::new();
+    let mut scratch = HarmonicBandWorkspace::new();
     let mut negative = [0.0; MAX_UNIFORM_HARMONIC_BAND_TONES];
     if frequencies.len() > negative.len() {
         return Err(bad("integrated heat temporal band exceeds fixed scratch"));
@@ -651,9 +653,9 @@ fn positive_bank<F: FnMut() -> bool>(
     // their ORIGINAL complex spatial convention, including continuous real
     // quadratures. No complex conjugation of the Fourier envelope is hidden.
     let factor = if proper {
-        window.prepare_uniform_band_rad_s_in(&negative[..frequencies.len()], &mut scratch)
+        window.prepare_band_rad_s_in(&negative[..frequencies.len()], &mut scratch)
     } else {
-        window.prepare_uniform_real_band_rad_s_in(&negative[..frequencies.len()], &mut scratch)
+        window.prepare_real_band_rad_s_in(&negative[..frequencies.len()], &mut scratch)
     }
     .map_err(|_| bad("integrated heat temporal preparation is unrepresentable"))?
     .ok_or_else(|| bad("integrated heat positive factor was not admitted"))?;
@@ -772,7 +774,7 @@ fn positive_bank<F: FnMut() -> bool>(
 }
 
 fn project_spatial_parts(
-    factor: &UniformHarmonicBandRef<'_>,
+    factor: &HarmonicBandRef<'_>,
     source: &mut [[Dd; 2]],
     proper: bool,
     continuous: bool,

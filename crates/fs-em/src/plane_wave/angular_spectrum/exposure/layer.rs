@@ -4,10 +4,10 @@
 //! not a switch-on transient. Ohmic and each original polarization reservoir dissipate
 //! after all spatial and temporal interference. Boundary power loss also
 //! contains the signed change of electromagnetic/polarization storage.
-//! Short uniform bands evaluate nonnegative field populations and reservoir
+//! Admitted uniform and triangular bands evaluate field populations and reservoir
 //! heat through shared orthogonal temporal modes. Native angular frequencies
 //! and the distinction between real fields and proper factors are retained;
-//! a real band admits its full carrier, not just its slow beat. Wider/shaped
+//! a real band admits its full carrier, not just its slow beat. Wider
 //! windows keep the original pair law. Signed flux and reversible storage
 //! use cross products of the same temporal modes, without a positivity clamp.
 //! The factor is not a null-relative error certificate and adds no material
@@ -16,8 +16,8 @@
 use super::*;
 use crate::plane_wave::layers::FIELD_PREPARATION_WORKSPACE_BYTES;
 use fs_fft::harmonic_window::{
-    MAX_UNIFORM_HARMONIC_BAND_MODES, MAX_UNIFORM_HARMONIC_BAND_TONES, UniformHarmonicBandRef,
-    UniformHarmonicBandWorkspace,
+    HarmonicBandRef, HarmonicBandWorkspace, MAX_UNIFORM_HARMONIC_BAND_MODES,
+    MAX_UNIFORM_HARMONIC_BAND_TONES,
 };
 
 mod reservoir;
@@ -193,7 +193,7 @@ fn positive_band_tones(frequencies: usize, proper: bool) -> Option<usize> {
 }
 
 struct PositiveLayerMoments<'w> {
-    factor: UniformHarmonicBandRef<'w>,
+    factor: HarmonicBandRef<'w>,
     frequencies: usize,
     proper: bool,
     derivative_frequencies: [Dd; MAX_UNIFORM_HARMONIC_BAND_TONES],
@@ -204,7 +204,7 @@ impl<'w> PositiveLayerMoments<'w> {
         window: HarmonicWindow,
         frequencies: &[f64],
         proper: bool,
-        workspace: &'w mut UniformHarmonicBandWorkspace,
+        workspace: &'w mut HarmonicBandWorkspace,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Option<Self>, AngularSpectrumError> {
         let Some(_) = positive_band_tones(frequencies.len(), proper) else {
@@ -212,9 +212,9 @@ impl<'w> PositiveLayerMoments<'w> {
         };
         poll(cancelled)?;
         let factor = if proper {
-            window.prepare_uniform_band_rad_s_in(frequencies, workspace)
+            window.prepare_band_rad_s_in(frequencies, workspace)
         } else {
-            window.prepare_uniform_real_band_rad_s_in(frequencies, workspace)
+            window.prepare_real_band_rad_s_in(frequencies, workspace)
         }
         .map_err(|_| bad("film exposure positive temporal factor is unrepresentable"))?;
         poll(cancelled)?;
@@ -705,7 +705,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         // The factor is reused across every spatial point and original loss
         // reservoir. Its bounded stack workspace adds no query allocation.
         let mut positive_workspace =
-            positive_band_tones(f, proper).map(|_| UniformHarmonicBandWorkspace::new());
+            positive_band_tones(f, proper).map(|_| HarmonicBandWorkspace::new());
         let positive = if let Some(workspace) = positive_workspace.as_mut() {
             PositiveLayerMoments::prepare(window, &bank.frequencies, proper, workspace, cancelled)?
         } else {
@@ -1122,4 +1122,3 @@ mod tests {
         assert!((heat + storage - electrical_work).to_f64().abs() < 2e-14);
     }
 }
-

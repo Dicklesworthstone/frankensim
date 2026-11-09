@@ -8694,3 +8694,31 @@ Native regression definitions cover an analytic nonuniform continuum field,
 both signs, multiple resolutions, original source states, relaxation, budgets,
 domain refusal and continuation. Resolution remains caller-owned: a fixed
 quadrature rule is not an error certificate or empirical material validation.
+
+## Profile-aware EM temporal field products
+
+Normalized Uniform and Triangular detector windows now use their actual shared
+positive temporal field factor in interior E/H populations, local reservoir heat,
+signed Poynting/storage rates, retained point-heat observations, volume/rectangle
+heat observations, and exterior Maxwell stress and field momentum. Proper factors
+retain the physical one-half law and original coherence; real fields retain their
+carrier, spatial quadratures and DD source epoch. Ineligible bandwidths or tone
+counts retain the existing pairwise fallback. General exterior E/H/Poynting and
+finite-aperture joint kernels remain separate owners.
+
+A triangular observation is the normalized weighted mean of the physical
+quantity. It is not an unweighted interval integral or an endpoint storage
+difference divided by duration. Existing physical heat intervals remain Uniform.
+The shared profile preparation exposes its fixed scratch payload (6,872 bytes on
+x86_64); the exterior stress workspace includes it. Existing volume fixed-stack
+exclusions and original source/mode/heap bounds remain explicit.
+
+Validation: 34 focused production numerical tests pass with warnings denied:
+18 interior/retained-heat tests, eight exterior stress/momentum tests and eight
+integrated-heat tests. They include independent weighted field/ensemble oracles,
+deep real/proper nulls, signed storage and momentum rates, dispersive reservoir
+transfer, translated rectangles and continuous spatial/carrier products. An
+old-source 1 ps triangular null probe reproduced a real result about 3.3e10 times
+too large and an incorrectly zero proper result. Validation used actual numerical
+leaf sources with narrow outer metadata adapters; the full material/field/FFT
+pipeline and native workspace suite were not run in this environment.

@@ -45,6 +45,12 @@ pub use workspace::{UniformHarmonicBandRef, UniformHarmonicBandWorkspace};
 pub const MAX_UNIFORM_HARMONIC_BAND_TONES: usize = 64;
 /// Maximum retained temporal degree plus one, including the constant mode.
 pub const MAX_UNIFORM_HARMONIC_BAND_MODES: usize = 17;
+/// Additional fixed preparation payload for the supported window profiles.
+///
+/// This bounds the triangular basis and its two recurrence vectors; it is
+/// separate from [`HarmonicBandWorkspace`] and adds no heap allocation.
+/// Scalar locals, compiler temporaries and call-stack overhead are excluded.
+pub const HARMONIC_BAND_PREPARATION_SCRATCH_BYTES: usize = triangular::PREPARATION_SCRATCH_BYTES;
 const HALF: Dd = Dd { hi: 0.5, lo: 0.0 };
 
 /// Cached orthogonal temporal factors using the negative-time convention.

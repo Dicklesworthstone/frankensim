@@ -4,7 +4,7 @@
 //! Debye/Lorentz friction channels are sums of squared REAL reservoir fields; their
 //! sum/difference tones are prepared by the shared analytic spectrum owner.
 //! Reversible electromagnetic/polarization storage is deliberately separate.
-//! Admitted short uniform shutters retain the original positive reservoir
+//! Admitted uniform and triangular shutters retain the original positive reservoir
 //! factors instead of recovering a weak heat residual from bright signed tones.
 
 use super::*;
@@ -60,7 +60,7 @@ pub struct AngularSpectrumExposureHeatSpectrumLimits {
 /// The prepared owner retains its original DD reservoir fields and source-bank
 /// boundaries within the already admitted preparation workspace. Instantaneous
 /// queries sum each coherent reservoir field before its real/proper square;
-/// short uniform window observations reuse its positive temporal factor.
+/// admitted uniform and triangular observations reuse its positive temporal factor.
 /// Neither query allocates, reconstructs a field FFT or solves a material.
 /// The exported spectrum retains the original signed sum/difference tones.
 pub struct AngularSpectrumExposureLayerHeatSpectrum<'p, 'e, 'b, 's, 'm> {
@@ -488,9 +488,9 @@ fn positive_heat_mean(
             *frequency = line.omega;
         }
         let admitted = if proper {
-            window.uniform_band_mode_count_rad_s(&frequencies[..lines.len()])
+            window.band_mode_count_rad_s(&frequencies[..lines.len()])
         } else {
-            window.uniform_real_band_mode_count_rad_s(&frequencies[..lines.len()])
+            window.real_band_mode_count_rad_s(&frequencies[..lines.len()])
         }
         .map_err(|_| bad("retained heat temporal factor is unrepresentable"))?;
         if admitted.is_some() {
@@ -501,7 +501,7 @@ fn positive_heat_mean(
     if !any_positive {
         return Ok(None);
     }
-    let mut workspace = UniformHarmonicBandWorkspace::new();
+    let mut workspace = HarmonicBandWorkspace::new();
     let mut heat = Dd::ZERO;
     for source in banks.chunks_exact(reservoirs_per_source) {
         poll(cancelled)?;

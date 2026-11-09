@@ -68,12 +68,21 @@ fn retained_local_heat_resolves_real_and_proper_short_shutter_nulls() {
             C64::ONE,
             Dd::ONE,
         );
-        for duration in [1e-9_f64, 1e-12] {
-            let window = HarmonicWindow::new(-0.5 * duration, duration).unwrap();
-            let actual = positive_heat_mean(&banks, &fields, 1, window, &mut || false)
-                .unwrap()
-                .unwrap();
-            relative(actual, duration.powi(4) / if proper { 160.0 } else { 80.0 });
+        for (profile, denominator) in [
+            (HarmonicWindowProfile::Uniform, 80.0),
+            (HarmonicWindowProfile::Triangular, 240.0),
+        ] {
+            for duration in [1e-9_f64, 1e-12] {
+                let window =
+                    HarmonicWindow::with_profile(-0.5 * duration, duration, profile).unwrap();
+                let actual = positive_heat_mean(&banks, &fields, 1, window, &mut || false)
+                    .unwrap()
+                    .unwrap();
+                relative(
+                    actual,
+                    duration.powi(4) / (denominator * if proper { 2.0 } else { 1.0 }),
+                );
+            }
         }
     }
 }
@@ -112,19 +121,21 @@ fn retained_heat_keeps_independent_sources_reservoirs_and_authored_sigma() {
         );
     }
     let duration = 1e-9_f64;
-    let actual = positive_heat_mean(
-        &banks,
-        &fields,
-        2,
-        HarmonicWindow::new(-0.5 * duration, duration).unwrap(),
-        &mut || false,
-    )
-    .unwrap()
-    .unwrap();
-    relative(
-        actual,
-        (sigma + 4.0) * duration.powi(4) * (1.0 / 80.0 + 1.0 / 160.0),
-    );
+    for (profile, denominator) in [
+        (HarmonicWindowProfile::Uniform, 80.0),
+        (HarmonicWindowProfile::Triangular, 240.0),
+    ] {
+        let actual = positive_heat_mean(
+            &banks,
+            &fields,
+            2,
+            HarmonicWindow::with_profile(-0.5 * duration, duration, profile).unwrap(),
+            &mut || false,
+        )
+        .unwrap()
+        .unwrap();
+        relative(actual, (sigma + 4.0) * duration.powi(4) * 1.5 / denominator);
+    }
 }
 
 #[test]
@@ -200,7 +211,7 @@ fn retained_heat_cancel_resumes_and_unsupported_windows_select_original_spectrum
     );
     for window in [
         HarmonicWindow::new(0.0, 2.0).unwrap(),
-        HarmonicWindow::with_profile(0.0, 1e-9, HarmonicWindowProfile::Triangular).unwrap(),
+        HarmonicWindow::with_profile(0.0, 2.0, HarmonicWindowProfile::Triangular).unwrap(),
     ] {
         assert_eq!(
             positive_heat_mean(&banks, &fields, 1, window, &mut || false).unwrap(),

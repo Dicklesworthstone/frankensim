@@ -3,11 +3,13 @@
 //! All inputs use the shared exp(-i omega t) convention. Spatial cosine/sine
 //! and carrier Gram representations are linear in those same amplitudes, so
 //! temporal projection commutes with the original continuous cell integral.
+//! Uniform and triangular observations use their actual normalized sensitivity;
+//! a weighted momentum rate is not an unweighted endpoint change divided by time.
 
 use super::*;
 use fs_fft::harmonic_window::{
-    MAX_UNIFORM_HARMONIC_BAND_MODES, MAX_UNIFORM_HARMONIC_BAND_TONES, UniformHarmonicBandRef,
-    UniformHarmonicBandWorkspace,
+    HARMONIC_BAND_PREPARATION_SCRATCH_BYTES, HarmonicBandRef, HarmonicBandWorkspace,
+    MAX_UNIFORM_HARMONIC_BAND_MODES, MAX_UNIFORM_HARMONIC_BAND_TONES,
 };
 
 type Modes = [[Dd; 2]; MAX_UNIFORM_HARMONIC_BAND_MODES];
@@ -20,14 +22,14 @@ struct Projected {
 // The carrier path retains four projections. Include return temporaries,
 // source/derivative arrays, temporal preparation and the projection owner's
 // own fixed input scratch conservatively. No heap is added to an observation.
-pub(in super::super) const WORKSPACE_BYTES: usize = core::mem::size_of::<
-    UniformHarmonicBandWorkspace,
->() + 6 * core::mem::size_of::<Projected>()
+pub(in super::super) const WORKSPACE_BYTES: usize = core::mem::size_of::<HarmonicBandWorkspace>()
+    + HARMONIC_BAND_PREPARATION_SCRATCH_BYTES
+    + 6 * core::mem::size_of::<Projected>()
     + 4 * core::mem::size_of::<[[Dd; 2]; MAX_UNIFORM_HARMONIC_BAND_TONES]>()
     + core::mem::size_of::<[Dd; MAX_UNIFORM_HARMONIC_BAND_TONES]>();
 
 struct Temporal<'a> {
-    factor: UniformHarmonicBandRef<'a>,
+    factor: HarmonicBandRef<'a>,
     derivative_frequencies: [Dd; MAX_UNIFORM_HARMONIC_BAND_TONES],
     proper: bool,
     stress: bool,
@@ -225,11 +227,11 @@ pub(in super::super) fn try_accumulate(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Option<([Dd; 6], [Dd; 6])>, AngularSpectrumError> {
     poll(cancelled)?;
-    let mut scratch = UniformHarmonicBandWorkspace::new();
+    let mut scratch = HarmonicBandWorkspace::new();
     let factor = if proper {
-        window.prepare_uniform_band_rad_s_in(&bank.frequencies, &mut scratch)
+        window.prepare_band_rad_s_in(&bank.frequencies, &mut scratch)
     } else {
-        window.prepare_uniform_real_band_rad_s_in(&bank.frequencies, &mut scratch)
+        window.prepare_real_band_rad_s_in(&bank.frequencies, &mut scratch)
     }
     .map_err(|_| bad("exterior temporal factor is unrepresentable"))?;
     let Some(factor) = factor else {

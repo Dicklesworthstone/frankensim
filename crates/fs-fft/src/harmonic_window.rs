@@ -13,9 +13,9 @@ use fs_math::{c64::C64, dd::Dd, det};
 
 mod band;
 pub use band::{
-    HarmonicBandRef, HarmonicBandWorkspace, MAX_UNIFORM_HARMONIC_BAND_MODES,
-    MAX_UNIFORM_HARMONIC_BAND_TONES, PreparedHarmonicBand, PreparedUniformHarmonicBand,
-    UniformHarmonicBandRef, UniformHarmonicBandWorkspace,
+    HARMONIC_BAND_PREPARATION_SCRATCH_BYTES, HarmonicBandRef, HarmonicBandWorkspace,
+    MAX_UNIFORM_HARMONIC_BAND_MODES, MAX_UNIFORM_HARMONIC_BAND_TONES, PreparedHarmonicBand,
+    PreparedUniformHarmonicBand, UniformHarmonicBandRef, UniformHarmonicBandWorkspace,
 };
 mod spectrum;
 pub use spectrum::{

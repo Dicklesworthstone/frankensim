@@ -26,6 +26,11 @@ use super::{Dd, MAX_UNIFORM_HARMONIC_BAND_MODES};
 const TERMS: usize = 20;
 const HEIGHT: usize = MAX_UNIFORM_HARMONIC_BAND_MODES + TERMS - 1;
 
+// Basis construction keeps its result and two bounded recurrence vectors.
+// Count the mode metadata as well as the 6,864-byte numerical payload.
+pub(super) const PREPARATION_SCRATCH_BYTES: usize =
+    core::mem::size_of::<Basis>() + 2 * core::mem::size_of::<[Dd; HEIGHT]>();
+
 /// beta[0] is unused. Constants are DD roundings of exact rationals obtained
 /// from the displayed moments: P0=1, P1=x; P_(n+1)=x*P_n-beta_n*P_(n-1);
 /// h_n=sum_(i,j) P_n[i]*P_n[j]*mu_(i+j), beta_n=h_n/h_(n-1).
