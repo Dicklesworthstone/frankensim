@@ -228,7 +228,7 @@ function pairDetail(doc, p) {
       ' · ', h('a', { href: `${link('f', doc.id, 'grades')}` }, 'see the measures')));
   }
   if (p.kind === 'refused' && p.refused) {
-    out.push(h('div.note.warn', null, h('b', null, 'The grader refused this render. '), String(p.refused.reason || ''),
+    out.push(h('div.note.warn', null, h('b', null, 'The grader gave no count. '), String(p.refused.reason || ''),
       p.refused.render_sha ? h('span.small.muted', null, ` (render ${p.refused.render_sha})`) : null));
   }
   if (p.kind === 'listening' && p.no_reference) out.push(h('div.note', null, h('b', null, 'No recording to grade against. '), p.no_reference));
