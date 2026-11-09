@@ -24,6 +24,8 @@ pub mod pole_response;
 pub mod rand_nla;
 /// Reusable dense solves for repeated small nonlinear systems.
 pub mod prepared_lu;
+/// Admitted physical subspaces and work-conjugate operator projections.
+pub mod subspace;
 pub use prepared_lu::{LuWorkspace, LuWorkspaceError};
 /// Reusable linear-work structured solves with adjacent partial pivoting.
 pub mod tridiagonal;

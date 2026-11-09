@@ -1168,3 +1168,27 @@ homogeneous path. General ingrowth, cyclic return and count coefficients keep
 their existing conservative representability checks. Native regressions cover
 large and subunit inventories, net self-return, interval composition, continuing
 production, cancellation and unchanged refusal of unrepresented non-scalar tails.
+
+
+## Work-conjugate constrained subspaces
+
+`subspace::LinearSubspace` admits the original physical lift N using the original
+homogeneous constraint rows A, positive coordinate scales S, the represented
+A*N residual, and the scaled column Gram matrix. Explicit dimensions and
+bounded cancellation precede publication. Independent-row rank and nullspace
+completeness remain with the original factorization/domain owner; this module
+does not replace QR or select a rank.
+
+The immutable map supplies physical displacements N*z, work-conjugate forces
+N^T*f, and full N^T*L*N operators using the shared double-double arithmetic.
+Signed and nonsymmetric stiffness/damping survive unchanged. A separate
+symmetric-input congruence requires exact original symmetry and evaluates each
+paired entry once. Fully locked and empty spaces retain their exact empty
+reduced operators; unrepresentable products refuse instead of losing work.
+
+Eight native G0/G1/G3 regressions cover analytical geared energies and modal
+ratios, virtual work and reaction annihilation, signed row rescaling, gyroscopic
+and negative stiffness, full/locked/empty spaces, admission, range loss and
+cancellation. They execute this production source with the original fs-math
+owner. Full workspace and native QR integration remain separate checks; these
+numerical residual gates are not certified forward-error enclosures.
