@@ -225,3 +225,6 @@ fn source_and_tube_admission_refuse_while_explicit_insulation_stays_exact() {
     ));
     assert_eq!(old, saved);
 }
+
+#[path = "tube/laminar.rs"]
+mod laminar;

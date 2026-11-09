@@ -5368,6 +5368,12 @@ exterior interface explicitly refuses rectangular four-wall sections because
 it cannot validate their integrated wetted geometry. No empirical local law,
 surface store or replacement heat integrator is introduced.
 
+### Whole-tube laminar selection on finite gas heat owners
+
+`ForcedTubeGasSurface::laminar()` explicitly selects the original Sieder-Tate laminar whole-tube mean for the existing finite piston/body and fixed-volume gas/body heat owners. A positive exchange covers the full physical heated area pi D L, permitting only geometric floating-point roundoff; zero area remains exact insulation. The original homogeneous bulk gas represents the caller's arithmetic-mean inlet/outlet bulk state, while only the same source's actual wall viscosity enters the correction. The whole heated length and source/laminar/thermal-entry limits remain active at every nonlinear trial. No downstream section profile, axial flow solution or automatic turbulent fallback is inferred. Both original energy stores, piston work where present, body phase change, wall feedback and entropy accounting stay with their existing native solvers.
+
+The explicit laminar wrapper and default turbulent interface share the same material resolution and coupling routines. Focused regressions cover an independent whole-tube mean and source/geometry admission, reciprocal piston/body heat including latent enthalpy, and fixed-volume wall feedback with energy and entropy balance. These are implementation and conservation checks, not empirical gas-validation evidence.
+
 ## Pump drive input and coolant heating
 
 Fixed-speed liquid cooling pumps may bind an independently sourced `PumpDriveCurve`
