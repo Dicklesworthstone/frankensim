@@ -41,6 +41,22 @@ struct Pair {
 }
 
 impl InductionStorage {
+    // The exact positive leakage part of the saturated winding elimination.
+    // This reuses its original flux/angle work, kinetic energy and tangent.
+    pub(super) fn reduced_leakage(
+        p: InductionMotorParameters,
+        inverse_sum: f64,
+    ) -> Result<Self, PhsError> {
+        let mut storage = Self::new(p)?;
+        if !inverse_sum.is_finite() || inverse_sum <= 0.0 {
+            return Err(invalid("induction reduced leakage is unrepresentable"));
+        }
+        storage.kr = 0.0;
+        storage.ks = 0.0;
+        storage.km = inverse_sum;
+        Ok(storage)
+    }
+
     pub(super) fn new(p: InductionMotorParameters) -> Result<Self, PhsError> {
         let ls = p.stator_leakage_inductance_h;
         let lr = p.rotor_leakage_inductance_h;

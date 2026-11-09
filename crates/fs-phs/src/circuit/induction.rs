@@ -24,19 +24,27 @@
 //! bearing heat retain loss ownership for thermal coupling. `into_system`
 //! exposes the original states for native finite-bus/converter composition.
 //!
+//! [`InductionMotor::with_magnetizing_curve`] retains an original reversible,
+//! isotropic magnetizing saturation law in these same flux coordinates. Its
+//! energy, current and torque remain one constitutive law, including the radial
+//! cross-saturation between the two axes; no fitted torque correction is used.
+//!
 //! This is a numerical reduced model with sinusoidal balanced windings,
-//! constant referred inductances/resistances and finite rotor/stator inertia.
-//! It does not resolve cage-bar skin effect, slots, core saturation/hysteresis,
-//! temperature dependence, harmonics, neutral current, or a 3D field solve.
+//! constant referred leakages/resistances and finite rotor/stator inertia.
+//! It does not resolve cage-bar skin effect, slots, hysteresis, temperature
+//! dependence, harmonics, neutral current, or a 3D field solve.
 
 use crate::{
     PhsError, PortHamiltonian, PreparedStepError, PreparedStepRecord, ResistanceWitness,
-    SolveBudget, StepWorkspace,
+    SolveBudget, StepWorkspace, Storage,
 };
 use fs_math::det;
 
 mod storage;
 use storage::{InductionStorage, rotate};
+mod saturation;
+use super::inductance::InductorFluxCurve;
+use saturation::SaturatedStorage;
 
 /// Reuse the same physical three-phase/power-invariant two-axis convention.
 pub use super::synchronous::phase_voltage_to_alpha_beta;
@@ -48,6 +56,7 @@ pub struct InductionMotorParameters {
     /// Uncoupled referred rotor leakage [H], strictly positive.
     pub rotor_leakage_inductance_h: f64,
     /// Referred magnetizing inductance [H], nonnegative. Zero decouples windings.
+    /// For a curve-bound model this is only its zero-flux differential reference.
     pub magnetizing_inductance_h: f64,
     pub stator_resistance_ohm: f64,
     /// Shorted cage resistance referred to the stator [ohm].
@@ -76,6 +85,7 @@ pub struct InductionOperatingPoint {
 
 pub struct InductionMotor {
     parameters: InductionMotorParameters,
+    magnetizing_curve: Option<InductorFluxCurve>,
     system: PortHamiltonian,
 }
 
@@ -108,6 +118,36 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), PreparedStepError> {
 impl InductionMotor {
     pub fn new(parameters: InductionMotorParameters) -> Result<Self, PhsError> {
         let storage = InductionStorage::new(parameters)?;
+        Self::assemble(parameters, None, Box::new(storage))
+    }
+
+    /// Admit an original radial magnetizing law I_m(psi_m), with both axes in
+    /// the same power-invariant normalization as the original winding fluxes.
+    /// The curve must be odd-symmetric: an isotropic magnetic energy cannot
+    /// assign different laws to opposite directions. Its positive magnitude
+    /// support is closed; no extrapolation or hysteretic loss is inferred.
+    ///
+    /// The original positive leakages are retained. The returned parameter's
+    /// magnetizing inductance is replaced by the zero-flux differential value
+    /// as reference metadata; the curve owns all saturated constitutive work.
+    /// Every Newton query and all flux/angle split corners must be supported.
+    /// Warm queries, analytic tangent actions and steps allocate nothing.
+    pub fn with_magnetizing_curve(
+        mut parameters: InductionMotorParameters,
+        curve: InductorFluxCurve,
+    ) -> Result<Self, PhsError> {
+        parameters.magnetizing_inductance_h = curve
+            .differential_inductance_h(0.0)
+            .map_err(|_| invalid("induction magnetizing law has no zero-flux inductance"))?;
+        let storage = SaturatedStorage::new(parameters, &curve)?;
+        Self::assemble(parameters, Some(curve), Box::new(storage))
+    }
+
+    fn assemble(
+        parameters: InductionMotorParameters,
+        magnetizing_curve: Option<InductorFluxCurve>,
+        storage: Box<dyn Storage>,
+    ) -> Result<Self, PhsError> {
         let p = parameters;
         let losses = [
             p.stator_resistance_ohm,
@@ -145,9 +185,13 @@ impl InductionMotor {
         ports[5] = 1.0;
         ports[5 * 4 + 2] = 1.0;
         ports[6 * 4 + 3] = 1.0;
-        let system = PortHamiltonian::new(7, 4, skew, resistance, ports, Box::new(storage))?
+        let system = PortHamiltonian::new(7, 4, skew, resistance, ports, storage)?
             .with_resistance_witness(witness)?;
-        Ok(Self { parameters, system })
+        Ok(Self {
+            parameters,
+            magnetizing_curve,
+            system,
+        })
     }
 
     pub const fn parameters(&self) -> InductionMotorParameters {
@@ -155,6 +199,11 @@ impl InductionMotor {
     }
     pub fn system(&self) -> &PortHamiltonian {
         &self.system
+    }
+
+    /// Original immutable magnetizing source, if saturation was supplied.
+    pub fn magnetizing_curve(&self) -> Option<&InductorFluxCurve> {
+        self.magnetizing_curve.as_ref()
     }
 
     /// Compose the four work-conjugate ports `[v_s_alpha,v_s_beta,tau_r,tau_s]`
@@ -177,13 +226,36 @@ impl InductionMotor {
         let p = self.parameters;
         let (s, c) = det::sin_cos(f64::from(p.pole_pairs) * relative_angle_rad);
         let rotor_ab = rotate(s, c, rotor_current_dq_a);
-        let stator_dq = rotate(-s, c, stator_current_alpha_beta_a);
         let mut state = [0.0; 7];
-        for i in 0..2 {
-            state[i] = p.stator_leakage_inductance_h * stator_current_alpha_beta_a[i]
-                + p.magnetizing_inductance_h * (stator_current_alpha_beta_a[i] + rotor_ab[i]);
-            state[2 + i] = p.rotor_leakage_inductance_h * rotor_current_dq_a[i]
-                + p.magnetizing_inductance_h * (rotor_current_dq_a[i] + stator_dq[i]);
+        if let Some(curve) = &self.magnetizing_curve {
+            let magnetizing_current = [
+                stator_current_alpha_beta_a[0] + rotor_ab[0],
+                stator_current_alpha_beta_a[1] + rotor_ab[1],
+            ];
+            let magnitude = det::hypot(magnetizing_current[0], magnetizing_current[1]);
+            let flux = curve.flux_wb(magnitude).map_err(|_| {
+                invalid("induction magnetizing current is outside its original law")
+            })?;
+            let magnetizing_flux = if magnitude == 0.0 {
+                [0.0; 2]
+            } else {
+                magnetizing_current.map(|v| (v / magnitude) * flux)
+            };
+            let magnetizing_flux_dq = rotate(-s, c, magnetizing_flux);
+            for i in 0..2 {
+                state[i] = p.stator_leakage_inductance_h * stator_current_alpha_beta_a[i]
+                    + magnetizing_flux[i];
+                state[2 + i] =
+                    p.rotor_leakage_inductance_h * rotor_current_dq_a[i] + magnetizing_flux_dq[i];
+            }
+        } else {
+            let stator_dq = rotate(-s, c, stator_current_alpha_beta_a);
+            for i in 0..2 {
+                state[i] = p.stator_leakage_inductance_h * stator_current_alpha_beta_a[i]
+                    + p.magnetizing_inductance_h * (stator_current_alpha_beta_a[i] + rotor_ab[i]);
+                state[2 + i] = p.rotor_leakage_inductance_h * rotor_current_dq_a[i]
+                    + p.magnetizing_inductance_h * (rotor_current_dq_a[i] + stator_dq[i]);
+            }
         }
         state[4] = relative_angle_rad;
         state[5] = p.rotor_inertia_kg_m2 * shaft_speed_rad_s[0];
@@ -275,6 +347,11 @@ impl PreparedInductionMotor {
     }
     pub fn operating_point(&self, state: &[f64; 7]) -> Result<InductionOperatingPoint, PhsError> {
         self.model.operating_point(state)
+    }
+
+    /// Original immutable magnetizing source retained through resistance changes.
+    pub fn magnetizing_curve(&self) -> Option<&InductorFluxCurve> {
+        self.model.magnetizing_curve()
     }
 
     /// Rebind stator and referred rotor resistance without rebuilding magnetic

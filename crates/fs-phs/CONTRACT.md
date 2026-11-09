@@ -48,10 +48,39 @@ Invalid replacements preserve both old coefficients. Source-bound thermal
 coupling can therefore reuse one native workspace throughout its endpoint
 trials; it remains responsible for the material law and joint heat admission.
 This is a numerical reduced induction-machine lane with sinusoidal balanced
-windings and constant referred inductances/resistances. It does not resolve
-slot/bar harmonics, cage-bar skin effect, saturation/hysteresis, temperature
-feedback, neutral current or 3D field geometry, and makes no experimental
-validation claim. The deferred whole-machine induction flagship remains open.
+windings and constant referred leakages/resistances. The linear constructor
+retains its optimized constant-magnetization path. Neither lane resolves
+slot/bar harmonics, cage-bar skin effect, hysteresis, temperature-dependent
+magnetization, neutral current or 3D field geometry, or claims experimental
+validation. The deferred whole-machine induction flagship remains open.
+
+### Reversible radial magnetizing saturation
+
+`InductionMotor::with_magnetizing_curve` accepts an odd-symmetric original
+`InductorFluxCurve` for magnetizing current versus magnetizing linkage in the
+same power-invariant basis. Both axes share its radial law, so current, torque
+and cross-axis incremental response derive from one isotropic energy. With
+`a=Llr/(Lls+Llr)`, `b=Lls/(Lls+Llr)`, `ell=Lls*Llr/(Lls+Llr)` and
+`y=a*lambda_s+b*R*lambda_r`, the exact elimination is `y=psi_m+ell*i_m`.
+Transforming the original knots once admits the energy
+`|lambda_s-R*lambda_r|²/(2*(Lls+Llr)) + integral_0^|y| I_m(u) du`, without an
+inner constitutive solve or a secant-inductance approximation.
+
+The seven original states, both shaft reactions and separate physical heat
+owners remain unchanged. Symmetric radial integral chords, trigonometric
+angle work and analytic endpoint actions retain exact discrete constitutive
+work; independent polarized endpoint energy retains small changes beside a
+finite bias. Source queries, all four split corners and Newton trials must
+stay within the original bounded support. A continuous tangent refuses actual
+source kinks and support endpoints. There is no extrapolation or inferred
+hysteretic heat. `magnetizing_curve()` retains the immutable original source
+through preparation and resistance rebinding; returned magnetizing-inductance
+metadata is only the zero-flux differential reference. The prepared warm path
+allocates nothing. `tests/circuit_induction_saturation.rs` checks independent
+original-source energy/current/torque, rotation equivariance, radial and angular
+limits, knot-crossing work and tangents, linear-source equivalence, source
+refusal/retry, resistance feedback and continuous trajectory/work/heat
+refinement. These are numerical G0/G1 checks, not machine validation data.
 
 ## Original-flux synchronous saturation
 
