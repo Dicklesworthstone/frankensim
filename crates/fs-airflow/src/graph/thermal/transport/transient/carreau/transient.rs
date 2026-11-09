@@ -496,6 +496,11 @@ impl TransientRegionalCarreauTransport {
                 })?;
                 thermal_checkpoint(cx)?;
                 let forcing = drive.borrow();
+                self.regional.series.validate_ports(
+                    cx,
+                    &forcing.boundaries,
+                    &forcing.injections,
+                )?;
                 if forcing
                     .branch_head_laws
                     .as_ref()

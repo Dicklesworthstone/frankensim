@@ -6890,3 +6890,50 @@ checks and independent API/physics review passed. These four groups and this
 cross-crate adapter remain uncompiled and unexecuted in this environment; the
 five original-topology/native-thermal tests reported above did execute. No full
 Cargo/DSR or experimental fin-validation result is claimed.
+
+
+## Axial Carreau sections without artificial junction inventory
+
+`RegionalCarreauTransport::new_with_series_splices` accepts an explicit
+`Option<CellId>` for every original hydraulic node. `Some` retains the existing
+finite junction inventory; `None` declares a zero-volume continuation of exactly
+two original pipe sections. Their source law and radius must agree. The already
+bound native cell centrelines must meet and have opposite outward directions
+within arithmetic roundoff. Branch lengths, real volumes, fixed reference masses,
+original caloric identity and local rheological support retain their existing
+admission. No sentinel cell, inferred mixing volume or additional heat capacity
+is introduced. The original constructor remains the all-finite-inventory case.
+
+The hydraulic node remains an original pressure unknown. Only thermal topology
+is condensed: one native conservative upwind transfer connects the two real
+pipe cells and reverses its donor with the original signed rate. Incident mass
+rates first meet the original fixed-mass roundoff bound, `64*EPSILON*max(in,out)`,
+using the actual reference-density-scaled flows. The link carries one admitted
+original incident rate; it is never averaged or repaired. The unchanged native
+transport owner independently rechecks continuity at every remaining real cell.
+A splice cannot carry prescribed pressure or injection ports, even at zero
+injection. External streams still require actual finite junction cells.
+
+Steady local-temperature feedback and retained transient radial histories use
+the same binding. Scheduled/adaptive/thermal-feedback drives receive the same
+port admission before momentum advances; equipment source identity, routed
+losses, viscous heat, kinetic energy and pressure work retain their existing
+owners. Failed geometry, source, flow, port or cancellation admission returns
+no replacement physical state. `node_cells()` lists only finite junctions in
+hydraulic order; `node_cell_bindings()` and `node_cell(node)` expose the precise
+optional hydraulic mapping. Existing all-finite bindings keep their original
+mapping and transport order.
+
+This enables axial residence and thermoviscous refinement with only authored
+physical inventory. Each section still uses the original developed-flow model;
+axial momentum/kinetic convection, radial temperature gradients and entrance or
+junction losses are not inferred. Time and axial mesh refinement remain required.
+
+Three focused regression groups specify an independent four-inventory nonlinear
+caloric/viscosity hot-front and reversal oracle, split-versus-whole original
+radial-history/work/mass invariance in both directions, and geometry/port/
+continuity refusal without inventory mutation. Pinned Rust 2024 formatting and
+source/API review passed. These new integration regressions remain uncompiled
+and unexecuted because the restored workspace lacks the original dependency
+constellation and numerical build recipe; no replacement harness or full Cargo
+result is claimed.

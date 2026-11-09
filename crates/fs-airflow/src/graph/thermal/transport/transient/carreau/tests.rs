@@ -1,5 +1,7 @@
 //! Independent serial finite-volume enthalpy and original local-viscosity checks.
 
+mod series;
+
 use super::*;
 use crate::graph::rheology::CarreauPipeBranch;
 use crate::graph::tests::with_cx;
