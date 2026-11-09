@@ -5,7 +5,15 @@ recording or mode frequency. cello_bridge_19g.py then sets the bridge to its pub
 data/instruments/geometry/cello-castelbarco-1697-shell (check_cello_shell.py reproduces it byte for byte).
 
 usage: python3 -I cello_specimen.py CANNONE_DIR OUT_DIR [instrument=viola] [fholes=RASTER_RUNS.tsv] [bar_slide_mm=MM]   (OUT_DIR must not exist)
-       python3 -I cello_specimen.py CANNONE_DIR OUT_DIR fholes=RASTER_RUNS.tsv outline=MEASURED_OUTLINE.tsv fhstop=print|photo
+       python3 -I cello_specimen.py CANNONE_DIR OUT_DIR fholes=RASTER_RUNS.tsv outline=MEASURED_OUTLINE.tsv fhstop=print|photo [fhole_walls=WALLS.tsv fhole_conductance=TABLE.tsv]
+
+fhole_walls=WALLS.tsv fhole_conductance=TABLE.tsv (optional, both together, outline= only; without them every output byte is as before): the f-holes'
+neck for gen_violin_shell_assembly.py neck=bem. WALLS.tsv (frankensim.specimen-fhole-walls.v1, written by cello_fhole_walls.py from this specimen) holds the
+DECLARED bores (no CT of this cello exists: each hole's bore is the mean normal thickness of top-plate-maps.tsv along its traced ring, the pair's by the
+parallel straight-bore rule); TABLE.tsv (frankensim.specimen-fhole-conductance.v1) is crates/fs-bem/examples/fhole_conductance.rs's output on this
+specimen's raster and those walls. Both are checked against this specimen's raster (cells, areas, bores) and copied in as top-plate-fhole-walls.tsv and
+top-plate-fhole-conductance.tsv; dimensions.tsv gains the three bore rows the generator reads, and PROVENANCE.tsv the rows f_hole_bores and
+f_hole_conductance.
 
 outline=MEASURED_OUTLINE.tsv (optional, needs fholes= and fhstop=, refuses bar_slide_mm=; without it every output byte is as before): the plan outlines are the
 Castelbarco's own, measured on the LOC photographs (outline-measured-loc-photographs.tsv: z above the bottom of the back, left / right x of the back and of the
@@ -79,10 +87,15 @@ import numpy as np
 SRC = sys.argv[1].rstrip("/") + "/"
 OUT = sys.argv[2].rstrip("/") + "/"
 TRACE, VIOLA, BAR_SLIDE, OUTLINE, FHSTOP, GIB = None, False, None, None, None, None
+FH_WALLS, FH_COND = None, None
 for arg in sys.argv[3:]:
     key, eq, value = arg.partition("=")
     if key == "fholes" and eq and value and TRACE is None:
         TRACE = value
+    elif key == "fhole_walls" and eq and value and FH_WALLS is None:
+        FH_WALLS = value
+    elif key == "fhole_conductance" and eq and value and FH_COND is None:
+        FH_COND = value
     elif key == "outline" and eq and value and OUTLINE is None:
         OUTLINE = value
     elif key == "fhstop" and value in ("print", "photo") and FHSTOP is None:
@@ -99,7 +112,11 @@ for arg in sys.argv[3:]:
     elif key == "gibson" and eq and value and GIB is None:
         GIB = value
     else:
-        raise SystemExit("refusing: %r; the options are one fholes=RASTER_RUNS.tsv, one bar_slide_mm=MM, one outline=MEASURED_OUTLINE.tsv, one fhstop=print|photo instrument=viola and (viola only) gibson=POINTS.tsv" % arg)
+        raise SystemExit("refusing: %r; the options are one fholes=RASTER_RUNS.tsv, one bar_slide_mm=MM, one outline=MEASURED_OUTLINE.tsv, one fhstop=print|photo, (outline= only) one fhole_walls=WALLS.tsv with one fhole_conductance=TABLE.tsv, instrument=viola and (viola only) gibson=POINTS.tsv" % arg)
+if (FH_WALLS is None) != (FH_COND is None):
+    raise SystemExit("refusing: fhole_walls= and fhole_conductance= go together (the conductance table was computed through those walls)")
+if FH_WALLS and not OUTLINE:
+    raise SystemExit("refusing: fhole_walls= and fhole_conductance= are outline= options (the walls and the conductance are the measured-outline specimen's)")
 if GIB and not VIOLA:
     raise SystemExit("refusing: gibson=POINTS.tsv is the viola's (Stradivari 'Gibson' viola, Hargrave 1986)")
 if TRACE and VIOLA:
@@ -1155,12 +1172,75 @@ write("string-contacts.tsv", "frankensim.specimen-string-contacts.v1", ["string"
       ["%s", "%s", "%.2f", "%.3f", "%.3f", "%.1f", "%.1f"])
 prov("strings_at_bridge", " ".join("%s (%.2f, %.2f)" % (r[0], r[3], r[4]) for r in rows_s), "JOH / CAN", "JOH string spacing at bridge %g (equal gaps, C on the bass-bar side, -x); y = the top of the scaled silhouette at that x (notch depth not modelled); slopes not used by the generator" % STR_SPAN)
 
+# ------------------------------------------------------------------ the f-holes' neck (fhole_walls= fhole_conductance=)
+NECK_DIMS, NECK_PROV, NECK_FILES = [], [], []
+if FH_WALLS:
+    def _rows(path, magic):
+        lines_ = open(path, encoding="utf-8").read().splitlines()
+        if not lines_ or lines_[0] != magic:
+            raise SystemExit("refusing: %s is not a %s table" % (path, magic))
+        return lines_[1].split("\t"), [l.split("\t") for l in lines_[2:] if l.strip()]
+
+    _wh, _wr = _rows(FH_WALLS, "frankensim.specimen-fhole-walls.v1")
+    _ch, _cr = _rows(FH_COND, "frankensim.specimen-fhole-conductance.v1")
+    if _wh != ["hole", "quantity", "value", "unit", "note"]:
+        raise SystemExit("refusing: %s: unexpected columns %s" % (FH_WALLS, _wh))
+    _w = {(r[0], r[1]): r[2] for r in _wr}
+    _c = {r[0]: dict(zip(_ch, r)) for r in _cr}
+    _configs = ("pair", "hole1-at-pair-bore", "hole2-at-pair-bore", "hole1-at-own-bore", "hole2-at-own-bore")
+    if sorted(_c) != sorted(_configs):
+        raise SystemExit("refusing: %s must hold the rows %s" % (FH_COND, ", ".join(_configs)))
+    # the raster as written above: cells per hole and the rows' offset from the solver's grid (rows at k/2 + 0.25 mm)
+    _runs = [(h_, float("%.2f" % z_), float("%.2f" % xa_), float("%.2f" % xb_)) for h_, z_, xa_, xb_ in fh_rows]
+    _cells = {h_: int(round(sum(b_ - a_ for hh, _, a_, b_ in _runs if hh == h_) / 0.5)) for h_ in (1, 2)}
+    _off = sorted({round((z_ - 0.25) % 0.5, 6) % 0.5 for _, z_, _, _ in _runs})
+    if len(_off) != 1:
+        raise SystemExit("refusing: the raster rows are not on one 0.5 mm grid (offsets %s)" % _off)
+    for h_ in (1, 2):
+        if abs(float(_w[(str(h_), "area-0p5mm")]) - 0.25 * _cells[h_]) > 1e-6:
+            raise SystemExit("refusing: %s: hole %d area %s mm2, this raster's %d cells give %.2f" % (FH_WALLS, h_, _w[(str(h_), "area-0p5mm")], _cells[h_], 0.25 * _cells[h_]))
+    _want = {"pair": (_cells[1] + _cells[2], ("0", "bore-pair")), "hole1-at-pair-bore": (_cells[1], ("0", "bore-pair")), "hole2-at-pair-bore": (_cells[2], ("0", "bore-pair")),
+             "hole1-at-own-bore": (_cells[1], ("1", "bore")), "hole2-at-own-bore": (_cells[2], ("2", "bore"))}
+    for name_, (cells_, bore_) in _want.items():
+        if int(_c[name_]["cells"]) != cells_ or abs(float(_c[name_]["thickness_mm"]) - float(_w[bore_])) > 1e-9:
+            raise SystemExit("refusing: %s row %s is %s cells through %s mm; this raster and the walls give %d cells through %s mm" % (
+                FH_COND, name_, _c[name_]["cells"], _c[name_]["thickness_mm"], cells_, _w[bore_]))
+    _bore_note = ("DECLARED, not measured (no CT of this cello exists): the mean normal thickness of this specimen's top-plate-maps.tsv "
+                  "(thickness_top: JOH front) along the hole's traced ring, as the shell generator reads t_holes but per hole (top-plate-fhole-walls.tsv)")
+    NECK_DIMS = [("top-plate", "f-hole-%d" % h_, "bore", "%.9g" % (float(_w[(str(h_), "bore")]) / 1000), "m", "unstated", "declared", "johannsson-cello-1-1", _bore_note)
+                 for h_ in (1, 2)]
+    NECK_DIMS.append(("top-plate", "f-holes", "bore-pair", "%.9g" % (float(_w[("0", "bore-pair")]) / 1000), "m", "unstated", "declared", "johannsson-cello-1-1",
+                      "one straight bore for both holes that keeps their parallel bore conductance: (A1 + A2) / (A1/t1 + A2/t2), A the 0.5 mm raster areas; "
+                      "from the two declared bores above"))
+    _p = _c["pair"]
+    _layers = max(1, int(round(float(_p["thickness_mm"]) / (0.5 / 8))))
+    NECK_PROV = [
+        ("f_hole_bores", "hole 1 %s mm, hole 2 %s mm, pair %s mm (the dimensions.tsv bore rows)" % (_w[("1", "bore")], _w[("2", "bore")], _w[("0", "bore-pair")]),
+         "DECLARED / JOH front",
+         "no CT of this cello exists: each hole's bore is the mean normal thickness of this specimen's top-plate-maps.tsv along the hole's traced ring, "
+         "as the shell generator reads t_holes but per hole (top-plate-fhole-walls.tsv, written by cello_fhole_walls.py); the pair bore keeps the holes' "
+         "parallel straight-bore conductance, (A1 + A2) / (A1/t1 + A2/t2), A the 0.5 mm raster areas %s and %s mm2" % (_w[("1", "area-0p5mm")], _w[("2", "area-0p5mm")])),
+        ("f_hole_conductance", "pair %s mm, the Richardson limit of subdivisions 1, 2, 4 and 8 (%s, %s, %s, %s mm; orders %s and %s, step %s mm); each hole alone "
+         "at the pair bore %s and %s mm, at its own bore %s and %s mm" % (
+             _p["K_mm"], _p["K_m1_mm"], _p["K_m2_mm"], _p["K_m4_mm"], _p["K_m8_mm"], _p["order_first"], _p["order_last"], _p["step_mm"],
+             _c["hole1-at-pair-bore"]["K_mm"], _c["hole2-at-pair-bore"]["K_mm"], _c["hole1-at-own-bore"]["K_mm"], _c["hole2-at-own-bore"]["K_mm"]),
+         "COMPUTED (fs_bem::plate_aperture)",
+         "top-plate-fhole-conductance.tsv, written by crates/fs-bem/examples/fhole_conductance.rs (99327c3ab) from this specimen's raster moved %.2f mm in z "
+         "onto the solver's grid (rows at k/2 + 0.25 mm; a translation, and the solve depends on cell offsets only) and the bores above; the pair's %d cells "
+         "are %d at subdivision 8 through %d layers; the example's budgets 2^22 cells, 2^26 padded FFT points and 2^26 duct voxels, tolerance 1e-10; "
+         "the plate of the solve is flat, rigid and infinite; nothing is fitted to a sound, a frequency or a page" % (
+             0.0 - _off[0], int(_p["cells"]), 64 * int(_p["cells"]), _layers))]
+    NECK_FILES = [("top-plate-fhole-walls.tsv", open(FH_WALLS, "rb").read()), ("top-plate-fhole-conductance.tsv", open(FH_COND, "rb").read())]
+
 # ------------------------------------------------------------------ dimensions the generator reads
-POST_ROW = (("johannsson-viola-medium", "soundpost thickness 6.5 mm (hansjohannsson.com/resources/mesviola.html, Medium column)") if VIOLA else
+POST_ROW =(("johannsson-viola-medium", "soundpost thickness 6.5 mm (hansjohannsson.com/resources/mesviola.html, Medium column)") if VIOLA else
             ("johannsson-cello-1-1", "soundpost thickness 11 mm (hansjohannsson.com/resources/mescello.html, 1/1 column)"))
 write("dimensions.tsv", "frankensim.specimen-dimensions.v1", ["part", "feature", "quantity", "value_si", "unit", "sigma_si", "route", "source_id", "note"],
-      [("soundpost", "section", "equivalent-diameter-mean", "%.6f" % (POST_D / 1000), "m", "unstated", "published-maker-table") + POST_ROW],
+      [("soundpost", "section", "equivalent-diameter-mean", "%.6f" % (POST_D / 1000), "m", "unstated", "published-maker-table") + POST_ROW] + NECK_DIMS,
       ["%s"] * 9)
+for name_, bytes_ in NECK_FILES:
+    with open(OUT + name_, "xb") as f:
+        f.write(bytes_)
 if OUTLINE:
     def _rep(item, old, new):
         i_ = [p[0] for p in PROV].index(item)
@@ -1195,6 +1275,7 @@ if GIB:
         ("gibson_rib_height", "36.3125 mm", "hargrave-strad-1986-09-gibson-viola p. 116", "REPLACES Johannsson's 38.0: the mean of the eight printed rib heights (neck root 35.5/35.5, upper corner 35.75/36.75, lower corner 36.5/37, endpin 36.5/36.5)"),
         ("gibson_rib_wall", "1.0 mm", "hargrave-strad-1986-09-gibson-viola p. 115", "REPLACES Johannsson's 1.2: measured in the C bout through the f hole, 'approximately 1 mm'"),
         ("gibson_back_edge", "4.75 mm", "hargrave-strad-1986-09-gibson-viola p. 116", "REPLACES Johannsson's 4.0 as the back's edge thickness: the printed value at the upper and lower bouts (corners 4.75-5, centre bouts 4.8-5, button 4.5-5); the back interior stays Johannsson/Cannone")]
+PROV += NECK_PROV
 with open(OUT + "PROVENANCE.tsv", "x", encoding="utf-8") as f:
     f.write("item\tvalue\tsource\tnote\n")
     for r in PROV:

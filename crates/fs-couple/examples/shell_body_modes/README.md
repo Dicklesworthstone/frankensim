@@ -63,7 +63,10 @@ Tools next to this file (Python; run with `uv run --python 3.12 --with triangle 
   ASSUMPTION is a `PROVENANCE.tsv` row), `cello_bridge_19g.py SPECIMEN_DIR NEW_DIR` sets its bridge to the published 19 g,
   `cello_fhole_ring_check.py SPECIMEN_DIR` prints each f-hole's clearance from the rib ring, and `cello_shell_card.py CARD
   ASSEMBLE_SHELL_OUTPUT OUT_CARD` rebuilds a card's body and cavity records from `assemble-shell`'s output.
-  `check_cello_shell.py WORK_DIR` reproduces the cello directory byte for byte from them.
+  `cello_fhole_walls.py SPECIMEN_DIR OUT_DIR` writes an outline specimen's DECLARED f-hole bores (its own thickness map
+  along each traced ring; no CT of the cello exists) and the raster on the grid `crates/fs-bem/examples/fhole_conductance.rs`
+  reads; `cello_specimen.py ... fhole_walls= fhole_conductance=` carries the walls and that example's conductance into the
+  specimen for `neck=bem`. `check_cello_shell.py WORK_DIR` reproduces the cello directory byte for byte from them.
 - `check_shell_assembly.py TABLE name=kg/m3 ...` prints per component the facet-against-director alignment,
   triangle quality and mass, every tie's gap (about 1e-9 m when the generator is right) and the cavity volume, and
   refuses (as the owner's code does) a component that is not edge-connected, a vertex with several fans, or neighbouring

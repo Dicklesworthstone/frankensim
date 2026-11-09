@@ -1,0 +1,8 @@
+frankensim.specimen-fhole-walls.v1
+hole	quantity	value	unit	note
+1	area-0p5mm	1512.75	mm2	the raster's 0.5 mm cells
+1	bore	4.39926	mm	DECLARED, not measured: mean normal thickness of top-plate-maps.tsv along the hole's traced ring (the shell generator's PlateField t over f_hole_rings at 7.5 mm spacing, 57 points; min 3.900, max 4.658 mm)
+2	area-0p5mm	1456.50	mm2	the raster's 0.5 mm cells
+2	bore	4.42334	mm	DECLARED, not measured: mean normal thickness of top-plate-maps.tsv along the hole's traced ring (the shell generator's PlateField t over f_hole_rings at 7.5 mm spacing, 57 points; min 3.900, max 4.659 mm)
+0	bore-pair	4.41104	mm	one bore for both holes with their parallel straight-bore conductance: (A1 + A2) / (A1/t1 + A2/t2), A the 0.5 mm raster areas
+0	thickness-at-holes-pooled	4.4113	mm	the generator's t_holes (both rings pooled), as in the table's neck meta

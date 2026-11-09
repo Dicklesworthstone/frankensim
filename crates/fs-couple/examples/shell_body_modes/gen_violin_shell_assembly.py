@@ -1316,6 +1316,16 @@ def main():
                   "one bore for both holes (top-plate-fhole-walls.tsv: hole 1's walls run vertical, flaring wider toward the cavity, hole 2's square to the arched surface); "
                   "the areas carry u-inplane-scale (about 4 percent of area if the reduced volume's pitch is right), the plate mesh may include varnish, and the wood-gap-wood cells beside the "
                   "openings (top-plate-fhole-walls.tsv) are unresolved")
+        if [r[6] for r in table("dimensions.tsv")[1] if r[:3] == ["top-plate", "f-holes", "bore-pair"]] == ["declared"]:
+            # a specimen without a scan (the cello): its bores are declared from its own thickness map, and its raster may sit off the solver's grid
+            offsets = sorted({round((z - 0.25) % 0.5, 6) % 0.5 for _, z, _, _ in fh_runs})
+            if len(offsets) != 1:
+                raise SystemExit("the f-hole raster rows are not on one 0.5 mm grid (offsets %s)" % offsets)
+            caveat = ("the bores are DECLARED, not measured (no CT of this specimen): each hole's is the mean normal thickness of top-plate-maps.tsv along its traced ring, and the pair's "
+                      "keeps their parallel straight-bore conductance (top-plate-fhole-walls.tsv; PROVENANCE.tsv rows f_hole_bores and f_hole_conductance); the solve read the raster "
+                      "moved %.2f mm in z onto its own grid (a translation; the solve depends on cell offsets only), %d cells at subdivision 8 through %d layers; the plate of the solve is "
+                      "flat, rigid and infinite with a half-space of air on each side: the arching, the finite body and the cavity side of each hole are not in it") % (
+                0.0 - offsets[0], 64 * cells, max(1, int(round(neck_len / (0.5 / 8)))))
     # the neck radius that gives the conductance with the library's flanged end correction 0.8216 r at both ends: K = pi r^2 / (L + 2 x 0.8216 r)
     r_eq = (1.6432 * k_tot + math.sqrt((1.6432 * k_tot) ** 2 + 4 * math.pi * k_tot * neck_len)) / (2 * math.pi)
     f_rigid = 343.0 / (2 * math.pi) * math.sqrt(k_tot * 1e-3 / (vol_inner * 1e-9))

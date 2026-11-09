@@ -59,6 +59,21 @@ ASSUMPTION. `specimen.tsv` gives the identity and the source ids of
   ends are equidistant from the top plate's ends (83.4 mm, inside Goldblatt's 80 to 85 mm).
 - **`PROVENANCE-outline-r24.tsv`**: the provenance of that body's specimen, with the landmark map and its check
   rows. The specimen tables themselves are not kept: check N24 makes them again.
+- **`top-plate-fhole-walls-outline-r24.tsv`**: the f-holes' bores of that specimen, DECLARED and not measured
+  (no CT of this cello exists). Each hole's bore is the mean normal thickness of the specimen's
+  `top-plate-maps.tsv` along its traced ring (4.39926 and 4.42334 mm), and the pair's keeps the holes' parallel
+  straight-bore conductance (4.41104 mm). Written by `cello_fhole_walls.py`, which also writes the raster the
+  solve reads: the specimen's rows moved -0.15 mm in z onto the solver's grid, a translation that changes no
+  conductance.
+- **`top-plate-fhole-conductance-outline-r24.tsv`**: the output of `crates/fs-bem/examples/fhole_conductance.rs`
+  on that raster and those walls: both holes together 100.968172 mm, the Richardson limit of subdivisions 1 to 8
+  (760128 cells and 71 layers at subdivision 8). It is computed and not fitted. The plate of the solve is flat,
+  rigid and infinite.
+- **`shell-assembly-h12.5-outline-r24-bem.tsv`**: the measured-outline table with that conductance as its neck
+  (`neck=bem`, the specimen made with `fhole_walls=` and `fhole_conductance=`). It differs from
+  `shell-assembly-h12.5-outline-r24.tsv`, whose neck is the equivalent-ellipse estimate of 107.13 mm, only in its
+  `neck` meta row and its `cavity` row (neck radius 55.37 mm in place of 58.60 mm, length 4.411 mm). The body
+  profiles `assemble-shell` writes from the two tables are the same; only the cavity record differs.
 - **`cello-{C,G,D,A}.assembly`**: the `assemble-shell` options, one bridge per
   string. Their comments name the table by its earlier file name,
   `cello-h12.5-s8-v5.tsv`.
@@ -98,8 +113,9 @@ $py $s/gen_violin_shell_assembly.py "$w/specimen" "$w/table.tsv" 12.5 neck=ellip
   fanfix=move crossing_snap_mm=2.5 bridge_dp_mm=0.5 rib_layers=24 instrument=cello
 ```
 
-Check N24 reproduces `PROVENANCE-outline-r24.tsv` on any architecture and the table
-`shell-assembly-h12.5-outline-r24.tsv` on Linux x86-64 (md5 acec5e667a6035f18b6f3f544bd662b5). On the body alone
+Check N24 reproduces `PROVENANCE-outline-r24.tsv`, `top-plate-fhole-walls-outline-r24.tsv` and the solver's raster on
+any architecture, and the tables `shell-assembly-h12.5-outline-r24.tsv` (md5 acec5e667a6035f18b6f3f544bd662b5) and
+`shell-assembly-h12.5-outline-r24-bem.tsv` (md5 babb46607d79881925866e273983ae0e) on Linux x86-64. On the body alone
 (`shell_body_modes`, 256 modes, 15 to 5000 Hz, the registered spruce and maple packs) this body's lowest
 open-sound-hole mode is at 82.87 Hz where the live pages' body has 82.12 Hz, its in-vacuo modes 1 to 100 lie
 1.3 percent lower (median), and its highest purely bridge mode below 1 kHz is at 785 Hz (779 Hz): a body with
