@@ -503,3 +503,32 @@ The candidate provides no adjoint, interval enclosure, general cone solve, or
 PSD nonuniqueness classification. Its principal consumer here is the active
 normal-contact Delassus problem, while contact geometry, restitution and global
 energy admission remain owned by `fs-contact` and `fs-mbd`.
+
+
+## Refined source-owned central directional actions
+
+`finite_difference::central` supplies a bounded numerical directional
+Jacobian action about a caller-owned immutable reference. The source receives
+coordinate offsets and retains all physical-domain, chart and cancellation
+admission. Both signs are queried at successive halved steps; publication
+requires componentwise absolute-plus-relative agreement. The returned
+successive-stencil disagreement is an estimate, not a derivative-error bound
+or proof that a source is smooth.
+
+Direction normalization uses component division rather than an overflowing
+reciprocal. Compensated subtraction and scaling retain small resolved actions;
+nonfinite values, erased nonzero offsets or unrepresentable nonzero actions
+refuse. Exact zero directions validate controls and cancellation without
+querying the source. Source errors, malformed outputs and work exhaustion
+return without a partial action. Every attempted source call consumes the
+explicit evaluation budget, and cancellation is checked after convergence.
+No one-sided fallback, clipping, extrapolation or replacement source exists.
+
+Six source-level regressions exercise nonlinear analytic actions and actual
+refinement, direction amplitudes from 1e-300 to 1e300, exact-zero behavior,
+original-source refusals and budgets, final cancellation, and invalid or
+erased numerical data. The six native cases passed against the real fs-math
+owner before the execution workspace disconnected. The final explicit
+nonzero-action-underflow assertion and guard were added during source review
+after that outage and remain unexecuted. These are numerical conformance
+checks, not empirical or interval validation.

@@ -5,6 +5,9 @@
 //! tangents or adjoints. The caller owns the coordinate scale, domain and work
 //! budget; the existing nonlinear owner still owns iteration/globalization.
 
+/// Refined central actions for source-owned anchored residuals.
+pub mod central;
+
 use crate::NonlinearProblem;
 use std::cell::{Cell, RefCell};
 
