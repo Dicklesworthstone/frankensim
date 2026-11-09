@@ -481,3 +481,5 @@ fn g1_spectral_pixels_apply_source_survival_once_and_preserve_conditional_camera
         ));
     });
 }
+
+mod transient;

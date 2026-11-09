@@ -32,6 +32,8 @@ pub mod area_lights;
 pub mod exposure;
 #[cfg(feature = "volumes")]
 pub mod participating;
+/// Retarded calibrated point fixtures on native CIE/QE paths.
+pub mod point_lights;
 mod sequential;
 pub use sequential::TransientSequentialPixelSample;
 

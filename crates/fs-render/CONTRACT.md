@@ -10533,6 +10533,36 @@ exact native trace budgets, and chromatic analyzed-lens timing at a real
 molecular vertex. They were parsed and independently source/API/math reviewed;
 renderer execution was unavailable in this editing environment.
 
+## Retarded point-fixture CIE and quantum-efficiency pixels
+
+`camera::raster::transient::point_lights` connects the admitted point histories
+to the original physical-camera integrators. Twenty-four instantaneous and
+finite-shutter entry points cover CIE/XYZ and multi-channel QE observations,
+ideal rays and complete timed sequential-lens beams, and clear, molecular and
+discovered-image source owners. QE channels reuse the same four spectral
+paths, original wavelength support and photon-energy conversion.
+
+Shared point collectors now accept the original launch, pixel payload and
+typed transport error without changing their existing public default types.
+Surface, camera-flight and source-survival counters retain their three
+original Philox domains and connection ordinals. Per-lane fixture radiance,
+connection/search work, molecular events, flight draws and source candidates
+survive payload mapping into shutter-energy/electron observations.
+
+Timed lens observations install the configured detector row before the lens
+and use the complete qualified DD lens prefix. Clipped lanes retain their
+proposal mass, zero contribution and zero scene work; they are never replaced.
+Clock admission precedes optional lens lanes. An original source/history
+failure retains its lane and refuses the complete pixel. No extra source
+survival, delta-light MIS weight or fabricated group delay is introduced.
+Mean and integrated exposure products use the existing native finish helpers.
+
+Four additional fixtures cover independent chromatic CIE/QE radiometry,
+steady bit parity, full-lens clock/analyzer/lane replay, clipped mass,
+molecular collisions, deduplicated images, all three random domains, and
+finite-shutter energy/electron work. All changed Rust was parsed and
+independently source/API reviewed; these renderer fixtures were not executed.
+
 ## Retarded molecular finite-area source connections
 
 With `volumes`, `camera::transient::area_lights::participating::TransientCurvedRayleighAreaLightCameraScene`

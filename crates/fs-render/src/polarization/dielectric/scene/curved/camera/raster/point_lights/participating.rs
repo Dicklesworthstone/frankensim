@@ -7,8 +7,9 @@
 //! draws. All four wavelengths retain separate source work and budgets.
 
 use super::{
-    CAMERA_WAVELENGTHS, CameraRadianceError, CurvedCameraRaster, CurvedPixelSample,
-    PointLightPixelSample, PointLightRasterError, unit,
+    CAMERA_WAVELENGTHS, CameraRadianceError, CameraRadianceSample, CurvedCameraRaster,
+    CurvedPixelSample, CurvedRasterError, PointLaneSamples, PointLightPixelSample,
+    PointLightRasterError, unit,
 };
 use crate::charts::Ray;
 use crate::polarization::dielectric::scene::curved::camera::point_lights::PointLightCameraError;
@@ -25,19 +26,19 @@ mod images;
 /// The source counters include candidates with an exactly zero ratio weight;
 /// these are legitimate samples, not failed or retried connections.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RayleighPointLightPixelSample {
-    point_lights: PointLightPixelSample,
+pub struct RayleighPointLightPixelSample<P = CurvedPixelSample> {
+    point_lights: PointLightPixelSample<P>,
     volume_events: [u32; CAMERA_WAVELENGTHS],
     free_flight_draws: [u32; CAMERA_WAVELENGTHS],
     source_free_flight_draws: [u32; CAMERA_WAVELENGTHS],
     source_candidates: [u32; CAMERA_WAVELENGTHS],
 }
 
-impl RayleighPointLightPixelSample {
-    pub const fn point_light_sample(&self) -> &PointLightPixelSample {
+impl<P> RayleighPointLightPixelSample<P> {
+    pub const fn point_light_sample(&self) -> &PointLightPixelSample<P> {
         &self.point_lights
     }
-    pub const fn pixel_sample(&self) -> &CurvedPixelSample {
+    pub const fn pixel_sample(&self) -> &P {
         self.point_lights.pixel_sample()
     }
     pub const fn volume_events(&self) -> &[u32; CAMERA_WAVELENGTHS] {
@@ -51,6 +52,19 @@ impl RayleighPointLightPixelSample {
     }
     pub const fn source_candidates(&self) -> &[u32; CAMERA_WAVELENGTHS] {
         &self.source_candidates
+    }
+
+    pub(in super::super) fn try_map_pixel<Q, E>(
+        self,
+        map: impl FnOnce(P) -> Result<Q, E>,
+    ) -> Result<RayleighPointLightPixelSample<Q>, E> {
+        Ok(RayleighPointLightPixelSample {
+            point_lights: self.point_lights.try_map_pixel(map)?,
+            volume_events: self.volume_events,
+            free_flight_draws: self.free_flight_draws,
+            source_free_flight_draws: self.source_free_flight_draws,
+            source_candidates: self.source_candidates,
+        })
     }
 }
 
@@ -119,6 +133,34 @@ impl CurvedCameraRaster<'_> {
             usize,
         ) -> Result<RayleighPointLightCameraSample, PointLightCameraError>,
     ) -> Result<RayleighPointLightPixelSample, PointLightRasterError> {
+        self.sample_rayleigh_point_with_launch(
+            seed,
+            pixel,
+            sample,
+            |cx, (ray, wavelength), samples| trace(cx, ray, wavelength, samples.lane),
+            |trace| {
+                self.sample_pixel_with_transport(
+                    cx,
+                    seed,
+                    pixel,
+                    sample,
+                    |cx, ray, wavelength, lane| trace(cx, (ray, wavelength), lane),
+                )
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub(in super::super) fn sample_rayleigh_point_with_launch<P, E, L>(
+        &self,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+        mut trace: impl FnMut(&Cx<'_>, L, PointLaneSamples) -> Result<RayleighPointLightCameraSample, E>,
+        integrate: impl FnOnce(
+            &mut dyn FnMut(&Cx<'_>, L, usize) -> Result<CameraRadianceSample, CameraRadianceError>,
+        ) -> Result<P, CurvedRasterError>,
+    ) -> Result<RayleighPointLightPixelSample<P>, PointLightRasterError<E>> {
         let mut fixture_radiance_w_m2_sr_nm = [0.0; CAMERA_WAVELENGTHS];
         let mut connections = [0; CAMERA_WAVELENGTHS];
         let mut trace_evaluations = [0; CAMERA_WAVELENGTHS];
@@ -129,31 +171,35 @@ impl CurvedCameraRaster<'_> {
         let mut source_free_flight_draws = [0; CAMERA_WAVELENGTHS];
         let mut source_candidates = [0; CAMERA_WAVELENGTHS];
         let mut failure = None;
-        let pixel_result = self.sample_pixel_with_transport(
-            cx,
-            seed,
-            pixel,
-            sample,
-            |cx, ray, wavelength, lane| {
-                let traced = match trace(cx, ray, wavelength, lane) {
-                    Ok(traced) => traced,
-                    Err(error) => {
-                        failure = Some((lane, error));
-                        return Err(CameraRadianceError::NumericalRange);
-                    }
-                };
-                fixture_radiance_w_m2_sr_nm[lane] = traced.fixture_radiance_w_m2_sr_nm();
-                connections[lane] = u64::from(traced.connections());
-                trace_evaluations[lane] = u64::from(traced.trace_evaluations());
-                field_evaluations[lane] = traced.field_evaluations();
-                query_work[lane] = traced.query_work();
-                volume_events[lane] = traced.volume_events();
-                free_flight_draws[lane] = traced.free_flight_draws();
-                source_free_flight_draws[lane] = traced.source_free_flight_draws();
-                source_candidates[lane] = traced.source_candidates();
-                Ok(*traced.radiance_sample())
-            },
-        );
+        let key = [seed as u32, (seed >> 32) as u32];
+        let pixel_result = integrate(&mut |cx, launch, lane| {
+            let traced = match trace(
+                cx,
+                launch,
+                PointLaneSamples {
+                    key,
+                    pixel,
+                    sample,
+                    lane,
+                },
+            ) {
+                Ok(traced) => traced,
+                Err(error) => {
+                    failure = Some((lane, error));
+                    return Err(CameraRadianceError::NumericalRange);
+                }
+            };
+            fixture_radiance_w_m2_sr_nm[lane] = traced.fixture_radiance_w_m2_sr_nm();
+            connections[lane] = u64::from(traced.connections());
+            trace_evaluations[lane] = u64::from(traced.trace_evaluations());
+            field_evaluations[lane] = traced.field_evaluations();
+            query_work[lane] = traced.query_work();
+            volume_events[lane] = traced.volume_events();
+            free_flight_draws[lane] = traced.free_flight_draws();
+            source_free_flight_draws[lane] = traced.source_free_flight_draws();
+            source_candidates[lane] = traced.source_candidates();
+            Ok(*traced.radiance_sample())
+        });
         if let Some((lane, error)) = failure {
             return Err(PointLightRasterError::Transport { lane, error });
         }
