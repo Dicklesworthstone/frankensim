@@ -2813,6 +2813,17 @@ The force-controlled pull-off stiffness is half its zero-load value. Arbitrary
 vector rolling, spin, sliding, changing normal area, detachment release, finite
 rotation, material calibration and heat allocation require their own owners.
 
+## Changing an explicitly prescribed adhesive rolling radius
+
+`AdhesiveRollingContact::refresh_contact_radius` retains the exact elastic
+fraction and accumulated angle under the original material and critical-shift
+calibration. Only the supplied attached radius changes; the original small-shift
+screen is rechecked. The signed spring-energy increment is evaluated from the
+stiffness coefficients and retained memory, preserving weak work that subtracting
+rounded absolute energies could erase. This parameter work is separate from
+irreversible rolling loss. The immutable proposal permits atomic source/history
+publication and does not select a normal contact law or infer a heat partition.
+
 ## Bonded adhesive torsion with calibrated yield
 
 `adhesive::torsion::AdhesiveTorsionContact` supplies circular full-stick

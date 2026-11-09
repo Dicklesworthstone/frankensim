@@ -169,3 +169,203 @@ fn changed_normal_state_or_source_cannot_discard_or_rebind_rolling_memory() {
     assert_eq!(no_op.rolling().applied_work_j, 0.0);
     assert_eq!(no_op.rolling().irreversible_loss_j, 0.0);
 }
+
+#[test]
+fn prescribed_normal_loading_retains_rolling_memory_and_accounts_for_both_stores() {
+    let normal = normal("rolling-A");
+    let initial_response = normal.evaluate_force_controlled(0.0).unwrap();
+    let source =
+        SourceJkrRollingContact::new(normal.clone(), initial_response.indentation_m, controls())
+            .unwrap();
+    let initial = source
+        .advance(
+            &source.initial_state(),
+            2.5 * source.law().critical_rolling_angle_rad(),
+        )
+        .unwrap()
+        .state();
+    let target = 0.8 * normal.envelope().maximum_indentation_m;
+    let step = source.advance_normal(&initial, target).unwrap();
+    let next = step.source();
+    let end = next.normal_response();
+    let w = normal.normal_state().adhesion_energy_j_per_m2();
+    let e = normal.normal_state().elastic().reduced_modulus_pa();
+    let r = normal.effective_radius_m();
+    let fc = 1.5 * PI * w * r;
+    let a0 = (4.5 * PI * w * r * r / e).cbrt();
+    let primary_stiffness = 4.0 * fc / r * (end.contact_radius_m / a0).powf(1.5);
+    close(next.law().stiffness_n_per_m(), primary_stiffness);
+    close(
+        step.rolling_parameter_work_j(),
+        0.5 * (primary_stiffness - source.law().stiffness_n_per_m())
+            * initial.elastic_shift_m().powi(2),
+    );
+    assert!(step.rolling_parameter_work_j() > 0.0);
+    assert_eq!(step.state().elastic_shift_m(), initial.elastic_shift_m());
+    assert_eq!(
+        step.state().accumulated_angle_rad(),
+        initial.accumulated_angle_rad()
+    );
+    assert_eq!(next.normal_source(), source.normal_source());
+    assert_eq!(next.controls(), source.controls());
+    assert_eq!(end.authority, InputAuthority::SyntheticFixture);
+
+    // Independent full normal potential at a prescribed radius and indentation.
+    let potential = |a: f64, delta: f64| {
+        let hertz = a * a / r;
+        e * a * (delta - hertz / 3.0).powi(2)
+            + (4.0 / 45.0) * e * a * hertz * hertz
+            - PI * w * a * a
+    };
+    let normal_change = potential(end.contact_radius_m, end.indentation_m)
+        - potential(
+            initial_response.contact_radius_m,
+            initial_response.indentation_m,
+        );
+    close(step.normal_contact_work_j(), normal_change);
+    close(
+        step.applied_work_j(),
+        normal_change + step.rolling_storage_after_j() - step.rolling_storage_before_j(),
+    );
+    assert!(matches!(
+        next.advance(&initial, 0.0),
+        Err(SourceJkrRollingError::StateMismatch)
+    ));
+
+    // The complete prior plastic offset survives; unloading does not manufacture
+    // a fresh stress-free contact simply because the normal load changed.
+    let unload = next
+        .advance(&step.state(), -next.law().critical_rolling_angle_rad())
+        .unwrap();
+    close(unload.state().elastic_shift_m(), 0.0);
+    assert_eq!(unload.rolling().irreversible_loss_j, 0.0);
+    close(
+        unload.rolling().applied_work_j,
+        -step.rolling_storage_after_j(),
+    );
+    let return_step = next
+        .advance_normal(&step.state(), initial_response.indentation_m)
+        .unwrap();
+    assert_eq!(return_step.source(), &source);
+    assert_eq!(return_step.state(), initial);
+    close(
+        return_step.normal_contact_work_j(),
+        -step.normal_contact_work_j(),
+    );
+    assert_eq!(
+        return_step.rolling_parameter_work_j(),
+        -step.rolling_parameter_work_j()
+    );
+    close(return_step.applied_work_j(), -step.applied_work_j());
+}
+
+#[test]
+fn attached_tensile_area_continuation_preserves_work_under_subdivision() {
+    let normal = normal("rolling-A");
+    let delta0 = normal
+        .evaluate_force_controlled(0.0)
+        .unwrap()
+        .indentation_m;
+    let source = SourceJkrRollingContact::new(normal.clone(), delta0, controls()).unwrap();
+    let state = source
+        .advance(
+            &source.initial_state(),
+            -0.5 * source.law().critical_rolling_angle_rad(),
+        )
+        .unwrap()
+        .state();
+    let delta1 = normal
+        .evaluate_force_controlled(0.5 * normal.force_controlled_pull_off_n())
+        .unwrap()
+        .indentation_m;
+    let delta2 = normal
+        .evaluate_force_controlled(normal.force_controlled_pull_off_n())
+        .unwrap()
+        .indentation_m;
+    let direct = source.advance_normal(&state, delta2).unwrap();
+    let first = source.advance_normal(&state, delta1).unwrap();
+    let second = first
+        .source()
+        .advance_normal(&first.state(), delta2)
+        .unwrap();
+    assert_eq!(second.source(), direct.source());
+    assert_eq!(second.state(), direct.state());
+    close(
+        first.normal_contact_work_j() + second.normal_contact_work_j(),
+        direct.normal_contact_work_j(),
+    );
+    close(
+        first.rolling_parameter_work_j() + second.rolling_parameter_work_j(),
+        direct.rolling_parameter_work_j(),
+    );
+    close(
+        first.applied_work_j() + second.applied_work_j(),
+        direct.applied_work_j(),
+    );
+    assert!(direct.source().normal_response().normal_force_n < 0.0);
+    close(
+        direct.source().law().stiffness_n_per_m(),
+        0.5 * source.law().stiffness_n_per_m(),
+    );
+    assert!(direct.rolling_parameter_work_j() < 0.0);
+    let continued = direct.source().advance(&direct.state(), 0.0).unwrap();
+    assert!(continued.rolling().endpoint_moment_n_m > 0.0);
+    assert_eq!(continued.rolling().irreversible_loss_j, 0.0);
+}
+
+#[test]
+fn normal_continuation_refuses_detachment_and_inapplicable_area_atomically() {
+    let normal_source = normal("rolling-A");
+    let delta = 0.8 * normal_source.envelope().maximum_indentation_m;
+    let source =
+        SourceJkrRollingContact::new(normal_source.clone(), delta, controls()).unwrap();
+    let state = source
+        .advance(
+            &source.initial_state(),
+            source.law().critical_rolling_angle_rad(),
+        )
+        .unwrap()
+        .state();
+    let saved = source.clone();
+    for target in [
+        f64::NAN,
+        f64::INFINITY,
+        1.01 * normal_source.envelope().maximum_indentation_m,
+        1.01 * normal_source.minimum_attached_indentation_m(),
+    ] {
+        assert!(source.advance_normal(&state, target).is_err());
+    }
+    let wrong =
+        SourceJkrRollingContact::new(normal("other-rolling-A"), delta, controls()).unwrap();
+    assert!(matches!(
+        wrong.advance_normal(&state, delta),
+        Err(SourceJkrRollingError::StateMismatch)
+    ));
+    let fold = normal_source.minimum_attached_indentation_m();
+    let radius = normal_source
+        .evaluate_attached(fold)
+        .unwrap()
+        .contact_radius_m;
+    let limited = SourceJkrRollingContact::new(
+        normal_source,
+        delta,
+        JkrRollingControls {
+            critical_rolling_displacement_m: 0.015 * radius,
+            maximum_critical_displacement_to_contact_radius: 0.01,
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        limited.advance_normal(&limited.initial_state(), fold),
+        Err(SourceJkrRollingError::Rolling(
+            fs_tribo::rolling_loss::adhesive::AdhesiveRollingError::OutsideSmallShift { .. }
+        ))
+    ));
+    assert_eq!(source, saved);
+    let no_op = source.advance_normal(&state, delta).unwrap();
+    assert_eq!(no_op.source(), &source);
+    assert_eq!(no_op.state(), state);
+    assert_eq!(no_op.normal_contact_work_j(), 0.0);
+    assert_eq!(no_op.rolling_parameter_work_j(), 0.0);
+    assert_eq!(no_op.applied_work_j(), 0.0);
+}

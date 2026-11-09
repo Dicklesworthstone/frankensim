@@ -253,8 +253,14 @@ fn ruptured_bonds_allow_fast_separation_and_reclosure_without_dashpot_work() {
             assert_eq!(step.viscous_dissipated_j_m2, 0.0);
             assert_eq!(step.equilibrium.energy.dissipated, 0.0);
             assert!(step.equilibrium.point.failed());
-            assert_eq!(step.equilibrium.point.dissipated_j_m2(), failed.dissipated_j_m2());
-            assert_eq!(step.equilibrium.point.mixed_mode_history(), failed.mixed_mode_history());
+            assert_eq!(
+                step.equilibrium.point.dissipated_j_m2(),
+                failed.dissipated_j_m2()
+            );
+            assert_eq!(
+                step.equilibrium.point.mixed_mode_history(),
+                failed.mixed_mode_history()
+            );
             assert_eq!(
                 step.branch_tangent_pa_m,
                 step.equilibrium.branch_tangent_pa_m
@@ -280,7 +286,9 @@ fn ruptured_bonds_allow_fast_separation_and_reclosure_without_dashpot_work() {
             close(tangent[0][0], expected_tangent, 1e-13);
             for (i, row) in tangent.iter().enumerate() {
                 for (j, &entry) in row.iter().enumerate() {
-                    if i != 0 || j != 0 { assert_eq!(entry, 0.0); }
+                    if i != 0 || j != 0 {
+                        assert_eq!(entry, 0.0);
+                    }
                 }
             }
         }
@@ -336,7 +344,10 @@ fn complete_rupture_ramp_retains_the_analytic_logarithmic_viscous_work() {
     // mean(1-d) = onset*failure*ln(failure/onset)/((failure-onset)*end).
     // Very small initiation fractions must not set a timestep-dependent
     // fracture threshold or erase the nonnegative logarithmic contribution.
-    for stiffness in [1e9, 1e12, 1e24] {
+    // The final two admitted laws have representable work and path length,
+    // but squaring the normalized softening increment overflows. The result
+    // must retain the same closed-form integral, not refuse or drop its loss.
+    for stiffness in [1e9, 1e12, 1e24, 1e160, 1e300] {
         let law = BilinearCohesive::new(stiffness, 1.0, 1e-3, stiffness, 0.01)
             .unwrap()
             .with_viscosity(CohesiveViscosity::new(1e6, 1e6, 1.0).unwrap());

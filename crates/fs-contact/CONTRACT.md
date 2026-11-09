@@ -4458,6 +4458,26 @@ checks, point-force ODE convergence and reversal, tangent-frame covariance,
 the original normal/torsion limit, combined hidden-turn refusal and atomic
 inertia, budget, source and cancellation guards.
 
+## Prescribed normal loading with retained rolling memory
+
+`normal_patch::adhesive::rolling::SourceJkrRollingContact::advance_normal`
+continues the original attached JKR approach at held rolling angle. The same
+material and interface sources, reduced radius, critical shift and small-shift
+limits remain authoritative. Canonical contact radius changes rolling stiffness
+and yield moment through the original `a^(3/2)` law while the complete
+double-double elastic/plastic history survives. Immutable source receipts are
+shared rather than copied on every proposal.
+
+Original exact JKR path work and signed rolling spring-energy change have
+separate accounts. A shrinking patch returns spring energy to the prescribed
+normal controller; it does not create rolling loss or heat. Targets below the
+attached fold or outside the original small-shift envelope refuse without
+publishing a successor. Focused cases in `tests/adhesive_rolling.rs` exercise
+normal-load dependence, tensile attachment, unloading after yield, reversible
+and subdivided paths, and rejected history/geometry changes. This remains a
+prescribed, one-way normal-area approximation: reciprocal mixed-mode rolling
+equilibrium, detachment, temperature changes and frame transport are not supplied.
+
 ## Explicit rough-surface adhesive populations
 
 `normal_patch::adhesive::asperity::SourceJkrAsperityContact` sums a declared,

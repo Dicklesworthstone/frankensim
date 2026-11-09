@@ -386,9 +386,19 @@ fn softening_average(
         }
         (onset / (failure - onset)) * ((failure - r0) / r0 + (failure / r0) * sum)
     } else {
+        let direction = d.map(|value| value / l);
+        let projection = dot(u, direction);
         let end_radius = norm(core::array::from_fn(|i| u[i] + d[i]))?;
-        let radial_change = (2.0 * ud + dd) / (end_radius + 1.0);
-        let logarithm = det::ln(1.0 + (l + radial_change) / (1.0 + ud / l));
+        // The softening interval can span an enormous failure/onset ratio
+        // while its physical work stays finite. Normalize the radial change
+        // before forming it: d.d can overflow even when |d| is representable.
+        // This is the same scaled integral used by the vector-traction owner.
+        let radial_rate = (l + 2.0 * projection) / (end_radius + 1.0);
+        let logarithm = if l >= 1.0 {
+            det::ln(l) + det::ln(1.0 / l + (1.0 + radial_rate) / (1.0 + projection))
+        } else {
+            det::ln(1.0 + l * (1.0 + radial_rate) / (1.0 + projection))
+        };
         // For long ramps, integral(1/r) can be far smaller than 1/r0. Do not
         // subtract one from it and then cancel failure/r0: that erases the
         // logarithmic work at large failure/onset ratios.

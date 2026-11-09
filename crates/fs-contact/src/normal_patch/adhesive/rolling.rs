@@ -9,16 +9,21 @@
 //! This is a scalar fixed-axis, frozen-normal-state approximation. The selected
 //! elastic/perfectly plastic continuation is explicit, not an inferred atomistic
 //! law. Rolling storage is distinct from irreversible loss and normal JKR
-//! storage. A changing normal area, temperature, detachment or rolling axis
-//! needs a separate history/work transfer; rebuilding this owner cannot adopt
-//! its predecessor's history. No net-normal-load friction cutoff is applied.
+//! storage. `advance_normal` explicitly follows a prescribed attached JKR path
+//! at held rolling angle, retains the original memory and returns the signed
+//! work needed to change rolling stiffness. It does not add reciprocal normal
+//! loading or solve a relaxed mixed-mode contact area. Temperature, detachment
+//! or a changing rolling axis need other history/work owners; rebuilding this
+//! owner cannot adopt its predecessor's history. No net-load cutoff is applied.
 
 use super::{JkrError, JkrResponse, SourceJkrSphereContact};
 use fs_blake3::{ContentHash, DomainHasher};
+use fs_math::dd::Dd;
 use fs_tribo::rolling_loss::adhesive::{
     AdhesiveRollingContact, AdhesiveRollingError, AdhesiveRollingParameters, AdhesiveRollingState,
     AdhesiveRollingStep,
 };
+use std::sync::Arc;
 
 /// Independent rolling calibration and small-shift approximation ceiling.
 /// Neither field is inferred from bulk elasticity or work of adhesion.
@@ -88,13 +93,59 @@ impl SourceJkrRollingStep {
     }
 }
 
+/// Original-source attached normal continuation with held rolling memory.
+/// This is an immutable proposal; publishing source and state together commits it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourceJkrRollingNormalStep {
+    source: SourceJkrRollingContact,
+    state: SourceJkrRollingState,
+    normal_contact_work_j: f64,
+    rolling_storage_before_j: f64,
+    rolling_storage_after_j: f64,
+    rolling_parameter_work_j: f64,
+    applied_work_j: f64,
+}
+impl SourceJkrRollingNormalStep {
+    pub const fn source(&self) -> &SourceJkrRollingContact {
+        &self.source
+    }
+    pub const fn state(&self) -> SourceJkrRollingState {
+        self.state
+    }
+    /// Original integral F_JKR d(delta), with no branch jump or rolling work.
+    pub const fn normal_contact_work_j(&self) -> f64 {
+        self.normal_contact_work_j
+    }
+    pub const fn rolling_storage_before_j(&self) -> f64 {
+        self.rolling_storage_before_j
+    }
+    pub const fn rolling_storage_after_j(&self) -> f64 {
+        self.rolling_storage_after_j
+    }
+    /// Signed change of rolling spring storage at fixed elastic shift. The
+    /// prescribed normal controller supplies or receives this work, never heat.
+    pub const fn rolling_parameter_work_j(&self) -> f64 {
+        self.rolling_parameter_work_j
+    }
+    /// Normal contact work plus signed rolling parameter work, J.
+    pub const fn applied_work_j(&self) -> f64 {
+        self.applied_work_j
+    }
+    pub fn into_parts(self) -> (SourceJkrRollingContact, SourceJkrRollingState) {
+        (self.source, self.state)
+    }
+}
+
 /// Frozen original JKR geometry plus one explicitly selected rolling law.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SourceJkrRollingContact {
-    normal: SourceJkrSphereContact,
+    // Source bundles own material strings/vectors. A normal-area proposal must
+    // share these immutable receipts, not deep-copy them at every time step.
+    normal: Arc<SourceJkrSphereContact>,
     response: JkrResponse,
     law: AdhesiveRollingContact,
     identity: ContentHash,
+    controls: JkrRollingControls,
 }
 impl SourceJkrRollingContact {
     /// Evaluate the original attached branch at signed approach, then retain
@@ -116,27 +167,20 @@ impl SourceJkrRollingContact {
             maximum_critical_displacement_to_contact_radius: controls
                 .maximum_critical_displacement_to_contact_radius,
         })?;
-        let mut hash = DomainHasher::new("org.frankensim.fs-contact.jkr-rolling.v1");
-        hash.update(normal.identity().as_bytes());
-        for value in [
-            indentation_m,
-            controls.critical_rolling_displacement_m,
-            controls.maximum_critical_displacement_to_contact_radius,
-        ] {
-            hash.update(&value.to_bits().to_le_bytes());
-        }
+        let identity = identity(&normal, indentation_m, controls);
         Ok(Self {
-            normal,
+            normal: Arc::new(normal),
             response,
             law,
-            identity: hash.finalize(),
+            identity,
+            controls,
         })
     }
 
     pub const fn identity(&self) -> ContentHash {
         self.identity
     }
-    pub const fn normal_source(&self) -> &SourceJkrSphereContact {
+    pub fn normal_source(&self) -> &SourceJkrSphereContact {
         &self.normal
     }
     /// Original normal response. Its storage is NOT included in rolling storage.
@@ -145,6 +189,9 @@ impl SourceJkrRollingContact {
     }
     pub const fn law(&self) -> &AdhesiveRollingContact {
         &self.law
+    }
+    pub const fn controls(&self) -> JkrRollingControls {
+        self.controls
     }
     pub fn initial_state(&self) -> SourceJkrRollingState {
         SourceJkrRollingState {
@@ -177,10 +224,80 @@ impl SourceJkrRollingContact {
             rolling,
         })
     }
+
+    /// Prescribe one attached normal-approach segment at fixed rolling angle,
+    /// source, calibration and frame. Split reversals into separate calls.
+    /// Actual area changes stiffness without resetting elastic/plastic memory.
+    /// Original JKR work and signed rolling-storage work stay separate; neither
+    /// creates loss. A target below the attached fold refuses without release.
+    /// No reciprocal normal loading, mixed-mode relaxation or thermal transfer
+    /// is supplied. Bounded arithmetic shares the original immutable receipts.
+    pub fn advance_normal(
+        &self,
+        state: &SourceJkrRollingState,
+        indentation_m: f64,
+    ) -> Result<SourceJkrRollingNormalStep, SourceJkrRollingError> {
+        self.check(state)?;
+        let response = self.normal.evaluate_attached(indentation_m)?;
+        let refresh = self
+            .law
+            .refresh_contact_radius(&state.constitutive, response.contact_radius_m)?;
+        let normal_contact_work_j = self
+            .normal
+            .reversible_work_between(self.response.indentation_m, indentation_m)?;
+        let rolling_storage_before_j = refresh.storage_before_j();
+        let rolling_storage_after_j = refresh.storage_after_j();
+        let rolling_parameter_work_j = refresh.storage_change_j();
+        let applied_work_j =
+            (Dd::from_f64(normal_contact_work_j) + Dd::from_f64(rolling_parameter_work_j)).to_f64();
+        if !applied_work_j.is_finite() {
+            return Err(AdhesiveRollingError::Unrepresentable {
+                field: "normal and rolling parameter work",
+            }
+            .into());
+        }
+        let (law, constitutive) = refresh.into_parts();
+        let identity = identity(&self.normal, indentation_m, self.controls);
+        Ok(SourceJkrRollingNormalStep {
+            source: Self {
+                normal: self.normal.clone(),
+                response,
+                law,
+                identity,
+                controls: self.controls,
+            },
+            state: SourceJkrRollingState {
+                identity,
+                constitutive,
+            },
+            normal_contact_work_j,
+            rolling_storage_before_j,
+            rolling_storage_after_j,
+            rolling_parameter_work_j,
+            applied_work_j,
+        })
+    }
     fn check(&self, state: &SourceJkrRollingState) -> Result<(), SourceJkrRollingError> {
         if state.identity != self.identity {
             return Err(SourceJkrRollingError::StateMismatch);
         }
         Ok(())
     }
+}
+
+fn identity(
+    normal: &SourceJkrSphereContact,
+    indentation_m: f64,
+    controls: JkrRollingControls,
+) -> ContentHash {
+    let mut hash = DomainHasher::new("org.frankensim.fs-contact.jkr-rolling.v1");
+    hash.update(normal.identity().as_bytes());
+    for value in [
+        indentation_m,
+        controls.critical_rolling_displacement_m,
+        controls.maximum_critical_displacement_to_contact_radius,
+    ] {
+        hash.update(&value.to_bits().to_le_bytes());
+    }
+    hash.finalize()
 }

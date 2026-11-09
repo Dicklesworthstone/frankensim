@@ -9,11 +9,13 @@
 //! a universal microscopic law for contact migration or a calibrated material.
 //!
 //! The normal owner supplies one attached JKR radius and its applicability.
-//! Normal area, source conditions and the rolling axis remain fixed. Rolling
-//! storage must not be discarded on detachment or changed-area rebinding; those
-//! operations, arbitrary vector rolling, spin, sliding and heat allocation are
-//! outside this owner. One signed scalar increment is a monotone physical path.
-//! Its exact elastic/yield split is allocation-free and independent of step size.
+//! Source conditions and the rolling axis remain fixed. An explicit held-angle
+//! radius refresh preserves the complete elastic/plastic history and returns
+//! its signed storage change as parameter work. It does not solve the reciprocal
+//! normal force or turn that reversible work into heat. Detachment, arbitrary
+//! vector rolling, spin, sliding and heat allocation remain outside this owner.
+//! One signed scalar increment is a monotone physical path. Its exact
+//! elastic/yield split is allocation-free and independent of step size.
 
 use core::f64::consts::PI;
 use fs_math::{dd::Dd, det};
@@ -80,6 +82,39 @@ pub struct AdhesiveRollingStep {
     /// Applied moment work, positive into the contact: change of storage + loss.
     pub applied_work_j: f64,
     pub plastic_rolling_increment_m: f64,
+}
+
+/// Held-angle change of the original contact radius, with unchanged calibration.
+/// Elastic fraction and accumulated angle retain their full double-double bits.
+/// No angular increment or plastic flow occurs during this prescribed update.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdhesiveRollingRefresh {
+    law: AdhesiveRollingContact,
+    state: AdhesiveRollingState,
+    storage_before_j: f64,
+    storage_after_j: f64,
+    storage_change_j: f64,
+}
+impl AdhesiveRollingRefresh {
+    pub const fn law(&self) -> &AdhesiveRollingContact {
+        &self.law
+    }
+    pub const fn state(&self) -> AdhesiveRollingState {
+        self.state
+    }
+    pub const fn storage_before_j(&self) -> f64 {
+        self.storage_before_j
+    }
+    pub const fn storage_after_j(&self) -> f64 {
+        self.storage_after_j
+    }
+    /// Signed parameter work at fixed elastic shift, separate from rolling loss.
+    pub const fn storage_change_j(&self) -> f64 {
+        self.storage_change_j
+    }
+    pub fn into_parts(self) -> (AdhesiveRollingContact, AdhesiveRollingState) {
+        (self.law, self.state)
+    }
 }
 
 /// Frozen normal patch with exact scalar return and separate storage/loss.
@@ -195,6 +230,49 @@ impl AdhesiveRollingContact {
             return Err(AdhesiveRollingError::StateMismatch);
         }
         Ok(())
+    }
+
+    /// Prescribe a new attached radius while holding angle and elastic shift.
+    /// The normal owner must establish the new JKR area. Every other source
+    /// coefficient, the critical shift and the small-shift ceiling are retained.
+    ///
+    /// With U=k(a) xi²/2, the required work is (k_new-k_old) xi²/2. A decrease
+    /// returns energy to the prescribed-area controller; it is not dissipation.
+    /// This one-way update does not supply the reciprocal normal effort from
+    /// dU/da or a mixed-mode radius equilibrium. Failed admission changes nothing.
+    pub fn refresh_contact_radius(
+        &self,
+        old: &AdhesiveRollingState,
+        contact_radius_m: f64,
+    ) -> Result<AdhesiveRollingRefresh, AdhesiveRollingError> {
+        self.admit(old)?;
+        let law = Self::new(AdhesiveRollingParameters {
+            contact_radius_m,
+            ..self.parameters
+        })?;
+        let state = AdhesiveRollingState {
+            parameters: law.parameters,
+            elastic_fraction: old.elastic_fraction,
+            angle: old.angle,
+        };
+        let storage_before_j = self.stored_energy_j(old)?;
+        let storage_after_j = law.stored_energy_j(&state)?;
+        // Difference of the coefficients before multiplying by the retained
+        // history avoids subtracting two nearly equal rounded total energies.
+        let storage_change_j = finite(
+            ((Dd::from_f64(law.yield_energy) - Dd::from_f64(self.yield_energy))
+                * old.elastic_fraction
+                * old.elastic_fraction)
+                .to_f64(),
+            "contact-radius storage change",
+        )?;
+        Ok(AdhesiveRollingRefresh {
+            law,
+            state,
+            storage_before_j,
+            storage_after_j,
+            storage_change_j,
+        })
     }
 
     /// Advance an explicitly prescribed fixed-axis rolling increment [rad].
@@ -436,5 +514,117 @@ mod tests {
         let mut p = parameters();
         p.contact_radius_m = 0.0;
         assert!(AdhesiveRollingContact::new(p).is_err());
+    }
+
+    #[test]
+    fn g1_radius_refresh_preserves_plastic_memory_and_primary_load_dependence() {
+        let model = AdhesiveRollingContact::new(parameters()).unwrap();
+        let angle = model.critical_rolling_angle_rad();
+        let loaded = model.advance(&model.initial_state(), 2.5 * angle).unwrap();
+        let refresh = model
+            .refresh_contact_radius(&loaded.state, 4.0 * parameters().contact_radius_m)
+            .unwrap();
+        // Equation 25: k is proportional to a^(3/2), while xi_c is unchanged.
+        close(
+            refresh.law().stiffness_n_per_m(),
+            8.0 * model.stiffness_n_per_m(),
+        );
+        close(
+            refresh.law().critical_moment_n_m(),
+            8.0 * model.critical_moment_n_m(),
+        );
+        assert_eq!(refresh.state.elastic_fraction, loaded.state.elastic_fraction);
+        assert_eq!(refresh.state.angle, loaded.state.angle);
+        close(refresh.storage_before_j(), loaded.storage_after_j);
+        close(refresh.storage_after_j(), 8.0 * loaded.storage_after_j);
+        close(refresh.storage_change_j(), 7.0 * loaded.storage_after_j);
+
+        // Continued unloading starts at the old plastic offset, not at zero.
+        let unload = refresh
+            .law()
+            .advance(&refresh.state(), -0.5 * angle)
+            .unwrap();
+        close(
+            unload.state.elastic_shift_m(),
+            0.5 * parameters().critical_rolling_displacement_m,
+        );
+        assert_eq!(unload.irreversible_loss_j, 0.0);
+        close(unload.storage_change_j, -0.75 * refresh.storage_after_j());
+        balance(&unload, -0.5 * angle);
+
+        let reverse = refresh
+            .law()
+            .refresh_contact_radius(&refresh.state(), parameters().contact_radius_m)
+            .unwrap();
+        assert_eq!(reverse.state(), loaded.state);
+        assert_eq!(reverse.law(), &model);
+        assert_eq!(reverse.storage_change_j(), -refresh.storage_change_j());
+    }
+
+    #[test]
+    fn g3_radius_refresh_retains_sub_ulp_memory_and_is_path_additive() {
+        let model = AdhesiveRollingContact::new(parameters()).unwrap();
+        let angle = model.critical_rolling_angle_rad();
+        let start = model
+            .advance(&model.initial_state(), 0.5 * angle)
+            .unwrap()
+            .state;
+        let loaded = model.advance(&start, angle * 1e-20).unwrap().state;
+        assert_ne!(loaded, start);
+        assert_eq!(loaded.accumulated_angle_rad(), start.accumulated_angle_rad());
+        let radius = parameters().contact_radius_m;
+        let direct = model.refresh_contact_radius(&loaded, 1.8 * radius).unwrap();
+        let first = model.refresh_contact_radius(&loaded, 1.3 * radius).unwrap();
+        let second = first
+            .law()
+            .refresh_contact_radius(&first.state(), 1.8 * radius)
+            .unwrap();
+        assert_eq!(second.state(), direct.state());
+        close(
+            first.storage_change_j() + second.storage_change_j(),
+            direct.storage_change_j(),
+        );
+        let restored = direct
+            .law()
+            .refresh_contact_radius(&direct.state(), radius)
+            .unwrap();
+        assert_eq!(restored.state(), loaded);
+        assert_ne!(restored.state(), start);
+        let no_op = model.refresh_contact_radius(&loaded, radius).unwrap();
+        assert_eq!(no_op.state(), loaded);
+        assert_eq!(no_op.law(), &model);
+        assert_eq!(no_op.storage_change_j(), 0.0);
+    }
+
+    #[test]
+    fn g0_radius_refresh_refuses_detachment_unowned_history_and_small_shift() {
+        let p = parameters();
+        let model = AdhesiveRollingContact::new(p).unwrap();
+        let state = model
+            .advance(&model.initial_state(), model.critical_rolling_angle_rad())
+            .unwrap()
+            .state;
+        let saved = state;
+        for radius in [0.0, -p.contact_radius_m, f64::NAN, f64::INFINITY] {
+            assert!(model.refresh_contact_radius(&state, radius).is_err());
+        }
+        assert!(matches!(
+            model.refresh_contact_radius(
+                &state,
+                0.5 * p.critical_rolling_displacement_m
+                    / p.maximum_critical_displacement_to_contact_radius
+            ),
+            Err(AdhesiveRollingError::OutsideSmallShift { .. })
+        ));
+        let other = AdhesiveRollingContact::new(AdhesiveRollingParameters {
+            work_of_adhesion_j_m2: 2.0 * p.work_of_adhesion_j_m2,
+            ..p
+        })
+        .unwrap();
+        assert_eq!(
+            other.refresh_contact_radius(&state, p.contact_radius_m),
+            Err(AdhesiveRollingError::StateMismatch)
+        );
+        assert_eq!(state, saved);
     }
 }
