@@ -179,6 +179,39 @@ Stefan-rate reconstruction, independent gas/liquid energy and species balances,
 wind-speed response from a carrier-only atmosphere, adaptive heater events,
 source exhaustion without claim switching, cancellation and atomic refusal.
 
+### Original molecular sources around spherical liquid droplets
+
+`mass_transfer::evaporation::droplet::SourceSphericalDropletFilm` pins one
+explicit binary molecular-diffusivity claim and volatile species. Every phase
+or heat/phase interval samples that same claim at the actual initial bulk gas
+temperature and total pressure. The original spherical geometry supplies D/r;
+no viscosity, thermal-diffusivity analogy, forced-convection correlation or
+flat-plate dilute cutoff is introduced. Current active gas constituents must
+belong to the authored pair, a represented positive carrier must remain, and
+each call's liquid binding must retain the pinned volatile identity. An absent
+initial vapor needs no artificial seed. Molecular source contexts admit only
+canonical temperature and pressure coordinates.
+
+The adapter delegates original droplet phase and reciprocal sensible-heat
+owners, retaining IF97 or other original liquid calorics/density, NASA gas
+calorics, selected interface kinetics, Stefan flow, finite inventory and all
+mass/energy accounts. The original first-order interval freezes initial area
+and D/r, including the heat-then-phase split. Actual final gas and size are
+qualified against the same selected claim before publication; a source exit
+refuses even if another claim covers the endpoint. Initial/final source-film
+samples expose those actual coordinates and receipts. The refreshed final D/r
+is a next-interval diagnostic, not a second transfer or an implicit correction.
+Geometry remains allocation-free; material-source resolution retains its
+existing receipt allocation behavior, without an additional film map or roster.
+Cancellation and source/phase refusal publish no partial physical candidate.
+
+Added tests cover actual T/p and size response, original source identity,
+carrier-only and nondilute binary states, volatile/context/source refusals,
+original phase/heat candidate equivalence, next-interval refresh and late
+same-claim exhaustion. The original IF97/NASA integration uses unchanged
+checked-in NASA coefficients and explicitly manufactured diffusivity data;
+it establishes conservative interoperability, not experimental drying accuracy.
+
 ## Original coolant inlet, wall, flow and conductance linearization
 
 `CaloricAirPath::linearize` prepares the complete inlet/wall temperature

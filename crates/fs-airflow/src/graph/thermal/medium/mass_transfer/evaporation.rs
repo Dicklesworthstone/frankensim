@@ -13,6 +13,9 @@
 //! underlying phase owner retains its Stefan correction; this does not extend
 //! the plate correlation to strong blowing, droplets, turbulence or plumes.
 
+/// Original binary diffusivity feeding isolated spherical droplet exchange.
+pub mod droplet;
+
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 

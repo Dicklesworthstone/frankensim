@@ -1,5 +1,8 @@
 //! G0/G1 source feedback, original coupled conservation and transactional refusal.
 //! Reuse the existing molecular-film NASA9/material fixture unchanged.
+#[path = "droplet/tests.rs"]
+mod droplet;
+
 use super::*;
 use crate::graph::thermal::medium::mass_transfer::evaporation::{
     EvaporationFilmError, SourceLaminarPlateEvaporationFilms,
