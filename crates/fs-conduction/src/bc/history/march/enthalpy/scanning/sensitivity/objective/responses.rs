@@ -12,7 +12,7 @@ pub mod peaks;
 
 use super::{ScanObservable, ScanObjectiveBudget, ScanObjectiveEvaluation, ScanObservation,
     ScanObjectiveSampling, ScanSensitivityError, ScanStepLinearization, ScanningEnthalpyRun,
-    MovingHeatScheduleGradient, ScanRadiationScheduleGradient, EnthalpyStepConfig,
+    MovingHeatScheduleGradient, ScanRadiationScheduleGradient, ScanPrescribedTemperatureGradient, EnthalpyStepConfig,
     LinearConfig, ReverseState, evaluate_with_tape, finite, invalid, poll};
 use fs_exec::Cx;
 
@@ -28,7 +28,7 @@ pub struct ScanResponse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScanResponseBudget {
     pub max_responses: usize,
-    /// Responses times (all authored source/radiation controls plus mesh vertices).
+    /// Responses times (all authored source/radiation/bath controls plus vertices).
     /// A scalar shape cap, not a global allocator or byte bound.
     pub max_gradient_entries: usize,
     /// Objective endpoints plus sum(response.endpoint + 1), admitted before
@@ -45,6 +45,8 @@ pub struct ScanResponseEvaluation {
     pub sources: Vec<MovingHeatScheduleGradient>,
     /// Original patch order; empty when no radiation is attached.
     pub radiation: Vec<ScanRadiationScheduleGradient>,
+    /// Authored Dirichlet histories; static partition values remain fixed.
+    pub prescribed_temperatures: Vec<ScanPrescribedTemperatureGradient>,
     pub initial_specific_enthalpy: Vec<f64>,
     pub transpose_iterations: usize,
     pub max_transpose_relative_residual: f64,
@@ -71,7 +73,7 @@ pub fn evaluate_scan_objective_with_responses(
         return Err(invalid("scan response count exceeds its explicit allowance"));
     }
     let vertices = run.conduction().temperature().len();
-    let entries_per_response = vertices.checked_add(super::radiation::control_count(cx, &run)?)
+    let entries_per_response = vertices.checked_add(super::schedule_control_count(cx, &run)?)
         .ok_or_else(|| invalid("scan response gradient size overflow"))?;
     if entries_per_response.checked_mul(responses.len())
         .is_none_or(|n| n > response_budget.max_gradient_entries)
@@ -123,6 +125,7 @@ fn pull_response(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,
     poll(cx, response.endpoint)?;
     Ok(ScanResponseEvaluation { response, value,
         sources: reverse.sources.ok_or_else(|| invalid("missing scan response sweep"))?,
-        radiation: reverse.radiation, initial_specific_enthalpy: reverse.seed,
+        radiation: reverse.radiation, prescribed_temperatures: reverse.prescribed_temperatures,
+        initial_specific_enthalpy: reverse.seed,
         transpose_iterations: reverse.iterations, max_transpose_relative_residual: reverse.residual })
 }

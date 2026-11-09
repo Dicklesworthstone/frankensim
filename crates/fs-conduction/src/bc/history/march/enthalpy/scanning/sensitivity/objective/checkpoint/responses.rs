@@ -158,7 +158,8 @@ pub(crate) fn evaluate_observations_checkpointed<O: ScanObservationSpec>(
         poll(cx, point_results.len())?;
         point_results.push(ScanResponseEvaluation { response, value,
             sources: reverse.sources.ok_or_else(|| invalid("missing checkpointed point response sweep"))?,
-            radiation: reverse.radiation, initial_specific_enthalpy: reverse.seed, transpose_iterations: reverse.iterations,
+            radiation: reverse.radiation, prescribed_temperatures: reverse.prescribed_temperatures,
+            initial_specific_enthalpy: reverse.seed, transpose_iterations: reverse.iterations,
             max_transpose_relative_residual: reverse.residual });
     }
     let mut peak_results = Vec::with_capacity(peaks.len());
@@ -168,7 +169,8 @@ pub(crate) fn evaluate_observations_checkpointed<O: ScanObservationSpec>(
         peak_results.push(ScanPeakEvaluation { peak: peak.clone(), value,
             sampled_maximum: maximum, smoothing_gap: gap, maximum_smoothing_gap: bound, sample_count,
             sources: reverse.sources.ok_or_else(|| invalid("missing checkpointed peak response sweep"))?,
-            radiation: reverse.radiation, initial_specific_enthalpy: reverse.seed, transpose_iterations: reverse.iterations,
+            radiation: reverse.radiation, prescribed_temperatures: reverse.prescribed_temperatures,
+            initial_specific_enthalpy: reverse.seed, transpose_iterations: reverse.iterations,
             max_transpose_relative_residual: reverse.residual });
     }
     poll(cx, endpoints.len())?;
@@ -176,7 +178,8 @@ pub(crate) fn evaluate_observations_checkpointed<O: ScanObservationSpec>(
         objective: ScanObjectiveEvaluation { value: measured.value, predictions: measured.predictions,
             standardized_residuals: measured.residuals,
             sources: objective.sources.ok_or_else(|| invalid("missing checkpointed objective sweep"))?,
-            radiation: objective.radiation, initial_specific_enthalpy: objective.seed, final_step: replay.final_step,
+            radiation: objective.radiation, prescribed_temperatures: objective.prescribed_temperatures,
+            initial_specific_enthalpy: objective.seed, final_step: replay.final_step,
             endpoint_count: endpoints.len(), transpose_iterations: objective.iterations,
             max_transpose_relative_residual: objective.residual },
         responses: point_results, peaks: peak_results, work: replay.work,

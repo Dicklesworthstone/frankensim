@@ -292,6 +292,10 @@ pub struct ThermalBoundary {
     face_region: Vec<Option<usize>>,
     /// Prescribed vertices, ascending by vertex id.
     dirichlet: Vec<(usize, f64)>,
+    /// Original owning region for each prescribed vertex, in the same order.
+    /// Retained from the primal tie-break so schedule derivatives cannot count
+    /// a shared vertex once per incident face or assign it to a losing region.
+    dirichlet_regions: Vec<usize>,
     adiabatic_remainder: usize,
     surface_conduction: Vec<SurfaceHeatConduction>,
 }
@@ -335,6 +339,12 @@ impl ThermalBoundary {
     #[must_use]
     pub fn dirichlet(&self) -> &[(usize, f64)] {
         &self.dirichlet
+    }
+
+    /// Each prescribed vertex and the region selected by the primal builder.
+    pub(crate) fn prescribed_regions(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.dirichlet.iter().zip(&self.dirichlet_regions)
+            .map(|(&(vertex, _), &region)| (vertex, region))
     }
 
     /// How many boundary faces fell to the declared adiabatic remainder.
@@ -658,12 +668,15 @@ impl<'m> ThermalBoundaryBuilder<'m> {
             .enumerate()
             .filter_map(|(v, a)| a.map(|(_, value)| (v, value)))
             .collect();
+        let dirichlet_regions = assigned.iter()
+            .filter_map(|a| a.map(|(region, _)| region)).collect();
 
         Ok(ThermalBoundary {
             names: self.names,
             conditions: self.conditions,
             face_region: self.face_region,
             dirichlet,
+            dirichlet_regions,
             adiabatic_remainder: untagged.len(),
             surface_conduction: Vec::new(),
         })

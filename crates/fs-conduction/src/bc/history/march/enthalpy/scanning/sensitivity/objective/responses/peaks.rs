@@ -14,7 +14,7 @@
 use super::{ScanResponse, ScanResponseBudget, ScanResponseEvaluation, pull_response};
 use super::super::{ScanObservable, ScanObjectiveBudget, ScanObjectiveEvaluation, ScanObservation,
     ScanObjectiveSampling, ScanSensitivityError, ScanStepLinearization, ScanningEnthalpyRun,
-    MovingHeatScheduleGradient, ScanRadiationScheduleGradient, EnthalpyStepConfig,
+    MovingHeatScheduleGradient, ScanRadiationScheduleGradient, ScanPrescribedTemperatureGradient, EnthalpyStepConfig,
     LinearConfig, ReverseState, add, evaluate_with_tape, finite, invalid, poll, zeros};
 use fs_exec::Cx;
 use super::super::spatial::ScanObservationSpec;
@@ -75,6 +75,8 @@ pub struct ScanPeakEvaluation {
     pub sources: Vec<MovingHeatScheduleGradient>,
     /// Original patch order; empty when no radiation is attached.
     pub radiation: Vec<ScanRadiationScheduleGradient>,
+    /// Authored Dirichlet histories; static partition values remain fixed.
+    pub prescribed_temperatures: Vec<ScanPrescribedTemperatureGradient>,
     pub initial_specific_enthalpy: Vec<f64>,
     pub transpose_iterations: usize,
     pub max_transpose_relative_residual: f64,
@@ -133,7 +135,7 @@ pub(crate) fn admit_rows(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,
         .filter(|&n| n <= response_budget.max_responses)
         .ok_or_else(|| invalid("combined scan point/peak response allowance exceeded"))?;
     let vertices = run.conduction().temperature().len();
-    let entries = vertices.checked_add(super::super::radiation::control_count(cx, run)?)
+    let entries = vertices.checked_add(super::super::schedule_control_count(cx, run)?)
         .ok_or_else(|| invalid("scan peak gradient shape overflow"))?;
     if entries.checked_mul(count).is_none_or(|n| n > response_budget.max_gradient_entries) {
         return Err(invalid("combined scan point/peak gradients exceed their retained scalar allowance"));
@@ -242,6 +244,7 @@ fn pull_peak(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,
     Ok(ScanPeakEvaluation { peak: peak.clone(), value, sampled_maximum: maximum,
         smoothing_gap: gap, maximum_smoothing_gap: bound, sample_count,
         sources: reverse.sources.ok_or_else(|| invalid("missing scan peak sweep"))?,
-        radiation: reverse.radiation, initial_specific_enthalpy: reverse.seed,
+        radiation: reverse.radiation, prescribed_temperatures: reverse.prescribed_temperatures,
+        initial_specific_enthalpy: reverse.seed,
         transpose_iterations: reverse.iterations, max_transpose_relative_residual: reverse.residual })
 }

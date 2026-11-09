@@ -289,3 +289,6 @@ fn g0_spatial_observation_cannot_be_retargeted_to_an_equal_sized_mesh() {
 
 #[path = "scan_objective/radiation.rs"]
 mod radiation_controls;
+
+#[path = "scan_objective/baths.rs"]
+mod prescribed_controls;
