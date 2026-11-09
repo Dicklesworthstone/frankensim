@@ -25,6 +25,7 @@ use fs_geom::Point3;
 use fs_rand::philox::philox4x32_10;
 
 use super::super::transport::{BeamError, BeamMedium, PolarizationFrame, PolarizedBeam};
+use super::super::transport::microsurface::SmithWalkSettings;
 use super::{
     DielectricStackBinding, Interaction, MAX_POLARIZED_PATH_EVENTS, PathTermination, SceneError,
     SurfaceBinding, admit_bindings, admit_coating_stacks, depolarizing_reflectance, sample_boundary,
@@ -205,6 +206,18 @@ pub(super) enum CurvedTraceEvent<'a> {
         pdf: f64,
         delta: bool,
     },
+}
+
+// Internal dispatch distinguishes ordinary directional proposals from hidden
+// Smith paths. The latter must never acquire a fictitious marginal PDF.
+enum CurvedTransportEvent<'a> {
+    Surface(CurvedTraceEvent<'a>),
+    MicrosurfaceDeparture(&'a CurvedPathResult),
+}
+
+struct SmithSurfaceSampler<'a> {
+    settings: SmithWalkSettings,
+    samples: &'a mut dyn FnMut(u32, u32) -> [f64; 3],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -620,10 +633,50 @@ impl<'a> CurvedPolarizedScene<'a> {
         beam: PolarizedBeam,
         initial_medium: usize,
         settings: CurvedTraceSettings,
-        mut samples: impl FnMut(u32) -> [f64; 3],
+        samples: impl FnMut(u32) -> [f64; 3],
         radiance_brushing: bool,
         thermal_sources: &SpatialSources<'_>,
         mut observe_event: impl FnMut(CurvedTraceEvent<'_>) -> Result<(), CurvedSceneError>,
+        max_volume_events: u32,
+        flight: impl FnMut(usize, f64, Ray) -> Result<Option<CurvedVolumeFlight>, CurvedSceneError>,
+        scatter: impl FnMut(
+            usize,
+            &CurvedPathResult,
+            [f64; 2],
+            f64,
+        ) -> Result<Option<PolarizedBeam>, CurvedSceneError>,
+        transport_segment: impl FnMut(
+            &mut CurvedPathResult,
+            Ray,
+            f64,
+        ) -> Result<(), CurvedSceneError>,
+    ) -> Result<(CurvedPathResult, u32), CurvedSceneError> {
+        self.trace_with_flights_events_and_smith(
+            cx, beam, initial_medium, settings, samples, radiance_brushing,
+            thermal_sources,
+            |event| match event {
+                CurvedTransportEvent::Surface(event) => observe_event(event),
+                // This entry never installs a Smith sampler. In particular,
+                // source-connection/MIS consumers cannot observe its path law.
+                CurvedTransportEvent::MicrosurfaceDeparture(_) => {
+                    Err(CurvedSceneError::NumericalRange)
+                }
+            },
+            max_volume_events, flight, scatter, transport_segment, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn trace_with_flights_events_and_smith(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedTraceSettings,
+        mut samples: impl FnMut(u32) -> [f64; 3],
+        radiance_brushing: bool,
+        thermal_sources: &SpatialSources<'_>,
+        mut observe_event: impl FnMut(CurvedTransportEvent<'_>) -> Result<(), CurvedSceneError>,
         max_volume_events: u32,
         mut flight: impl FnMut(usize, f64, Ray) -> Result<Option<CurvedVolumeFlight>, CurvedSceneError>,
         mut scatter: impl FnMut(
@@ -637,6 +690,7 @@ impl<'a> CurvedPolarizedScene<'a> {
             Ray,
             f64,
         ) -> Result<(), CurvedSceneError>,
+        mut microsurface: Option<SmithSurfaceSampler<'_>>,
     ) -> Result<(CurvedPathResult, u32), CurvedSceneError> {
         cx.checkpoint()?;
         if settings.max_surface_events == 0
@@ -865,9 +919,9 @@ impl<'a> CurvedPolarizedScene<'a> {
             // Emission belongs to the arriving path, before this surface's
             // reflection/transmission proposal or termination. Departure
             // witnesses prevent the same physical encounter being counted twice.
-            observe_event(CurvedTraceEvent::Arrival(&result))?;
+            observe_event(CurvedTransportEvent::Surface(CurvedTraceEvent::Arrival(&result)))?;
             let incoming_beam = result.beam;
-            let (proposal_event, pdf, delta) = match binding.interaction {
+            let proposal = match binding.interaction {
                 Interaction::Detector { reference_axis } => {
                     result.beam = result.beam.with_reference_axis(reference_axis)?;
                     result.termination = PathTermination::Detected;
@@ -902,7 +956,7 @@ impl<'a> CurvedPolarizedScene<'a> {
                         _ => result.beam.sample_depolarizing_diffuse(witness.normal, rho, [draw[0], draw[1]])?,
                     };
                     result.beam = next.beam;
-                    (DielectricEvent::Reflection, next.pdf_solid_angle, false)
+                    Some((DielectricEvent::Reflection, next.pdf_solid_angle, false))
                 }
                 Interaction::CoatedDiffuse { medium, reflectance, coating } => {
                     if result.medium != medium {
@@ -914,7 +968,7 @@ impl<'a> CurvedPolarizedScene<'a> {
                         .map_err(|_| BeamError::Dielectric(crate::dielectric::DielectricError::InvalidWavelength))?;
                     let next = result.beam.sample_coated_diffuse(witness.normal, coating, rho, samples(event))?;
                     result.beam = next.beam;
-                    (next.event, next.pdf, next.delta)
+                    Some((next.event, next.pdf, next.delta))
                 }
                 Interaction::SmoothConductor { optics, medium } => {
                     if result.medium != medium {
@@ -930,7 +984,7 @@ impl<'a> CurvedPolarizedScene<'a> {
                         .reflect_conductor(witness.normal, &self.conductors[optics])
                         .map_err(SceneError::from)?
                         .beam;
-                    (DielectricEvent::Reflection, 1.0, true)
+                    Some((DielectricEvent::Reflection, 1.0, true))
                 }
                 Interaction::RoughConductor {
                     optics,
@@ -945,22 +999,32 @@ impl<'a> CurvedPolarizedScene<'a> {
                         }
                         .into());
                     }
-                    let draw = samples(event);
-                    let Some(next) = result
-                        .beam
-                        .sample_rough_conductor(
-                            witness.normal,
-                            &self.conductors[optics],
-                            surface,
-                            [draw[0], draw[1]],
-                        )
-                        .map_err(SceneError::from)?
-                    else {
-                        result.termination = PathTermination::RejectedMicrofacet;
-                        break;
-                    };
-                    result.beam = next.beam;
-                    (next.event, next.pdf, next.delta)
+                    if let Some(smith) = &mut microsurface {
+                        result.beam = result.beam.sample_smith_conductor(
+                            cx, witness.normal, &self.conductors[optics], surface,
+                            smith.settings, |facet| (smith.samples)(event, facet),
+                        ).map_err(SceneError::from)?.beam();
+                        // All facet Mueller factors are already in the beam.
+                        // This joint path has no supplied marginal direction PDF.
+                        None
+                    } else {
+                        let draw = samples(event);
+                        let Some(next) = result
+                            .beam
+                            .sample_rough_conductor(
+                                witness.normal,
+                                &self.conductors[optics],
+                                surface,
+                                [draw[0], draw[1]],
+                            )
+                            .map_err(SceneError::from)?
+                        else {
+                            result.termination = PathTermination::RejectedMicrofacet;
+                            break;
+                        };
+                        result.beam = next.beam;
+                        Some((next.event, next.pdf, next.delta))
+                    }
                 }
                 Interaction::BrushedConductor {
                     optics,
@@ -1000,7 +1064,7 @@ impl<'a> CurvedPolarizedScene<'a> {
                         break;
                     };
                     result.beam = next.beam;
-                    (next.event, next.pdf, next.delta)
+                    Some((next.event, next.pdf, next.delta))
                 }
                 interaction @ (Interaction::Dielectric {
                     outside, inside, ..
@@ -1046,20 +1110,24 @@ impl<'a> CurvedPolarizedScene<'a> {
                         result.medium_identity = self.medium_identity(target);
                     }
                     result.beam = next.beam;
-                    (next.event, next.pdf, next.delta)
+                    Some((next.event, next.pdf, next.delta))
                 }
             };
             let outgoing = witness.normal.dot(result.beam.ray().dir);
             if !outgoing.is_finite() || outgoing == 0.0 {
                 return Err(CurvedSceneError::InvalidContact);
             }
-            observe_event(CurvedTraceEvent::Departure {
-                path: &result,
-                incoming_beam,
-                event: proposal_event,
-                pdf,
-                delta,
-            })?;
+            if let Some((proposal_event, pdf, delta)) = proposal {
+                observe_event(CurvedTransportEvent::Surface(CurvedTraceEvent::Departure {
+                    path: &result,
+                    incoming_beam,
+                    event: proposal_event,
+                    pdf,
+                    delta,
+                }))?;
+            } else {
+                observe_event(CurvedTransportEvent::MicrosurfaceDeparture(&result))?;
+            }
             departure = Some(GradientDeparture {
                 witness,
                 side: if outgoing > 0.0 {

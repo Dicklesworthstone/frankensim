@@ -17,9 +17,10 @@
 //! discrete refraction together. No bundle-area Jacobian, source inverse-square
 //! factor or additional Fresnel probability belongs in this radiance estimator.
 //! Native GGX dielectric/conductor weights already include the solid-angle
-//! Jacobian, geometric cosine and masking. Their original single-scattering
-//! approximation is retained, including exact-zero rejected microfacets. No
-//! inter-facet multiple scattering or acceptance-conditioned resampling is added.
+//! Jacobian, geometric cosine and masking. The default path retains their
+//! single-scattering approximation, including exact-zero rejected microfacets.
+//! [`SmithCameraScene`] explicitly selects complete internal conductor
+//! reflections in a separate path-only estimator with its own facet budget.
 //! Body-locked brushing uses the native effective radiance law, including
 //! authored normal tilt: F_mueller*G2/G1(wo) under its native VNDF proposal. The
 //! forward-power owner instead uses the importance adjoint with its shading-
@@ -93,6 +94,10 @@ pub use analyzer::{CameraAnalyzer, SpectralCameraAnalyzer};
 
 // Complete reciprocal lens state on the original surface and molecular paths.
 mod sequential;
+
+/// Complete Smith conductor walks through original reciprocal camera paths.
+pub mod microsurface;
+pub use microsurface::SmithCameraScene;
 
 /// Physical camera and spectral pixel integration over these native paths.
 pub mod raster;

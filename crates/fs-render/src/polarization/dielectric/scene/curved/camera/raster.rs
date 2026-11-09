@@ -35,6 +35,8 @@ use fs_rand::philox::philox4x32_10;
 
 // Passive analyzers share the original packet/raster and detector owners.
 mod analyzer;
+// Path-only Smith transport shares these same geometric and optical samples.
+mod microsurface;
 
 /// Spectral pixel integration with native curved molecular scattering.
 #[cfg(feature = "volumes")]
