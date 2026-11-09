@@ -2329,6 +2329,33 @@ rarefied transport or a resolved Knudsen layer. It supplies no nonisothermal
 molecular heat accommodation, curvature correction, nucleation or spray model.
 The original material, gas-film, geometry and pure-liquid validity checks remain.
 
+`ParallelFilmEvaporation` borrows one original liquid law and an immutable
+slice of `EvaporationPatch { area_m2, mass_transfer_coefficient_m_s }`. Its one
+inventory uses the returned total area. All patches share the actual liquid
+temperature, gas pressures, representative film temperature and selected
+interface kinetics; each retains its own molecular coefficient. The result is
+the compensated area-mean of independently closed nonlinear patch fluxes and
+temperature tangents. Coefficients are never averaged before finite kinetics.
+Latent heat and recession derive from the same represented mean mass and the
+original common latent heat/density. Zero-area patches contribute no evaluation;
+zero coefficients seal individual patches. Finite nonnegative inputs and
+positive represented total area are required. Uniform coefficients preserve
+the original single-film arithmetic and require only one flux evaluation.
+
+The object-safe `EvaporationLaw::evaluate_film` hook receives already-admitted
+source properties, so adding patches does not multiply original material
+lookups. Public flux queries, scalar implicit heat/phase steps and both initial
+and endpoint network rates dispatch through it. `KineticEvaporation` delegates
+this hook with the selected kinetics, preserving patch physics in either wrapper
+order. Both adapters retain all original thermal capabilities. Construction and
+evaluation allocate no memory; heterogeneous evaluation is bounded by the patch
+slice. Callers retain geometry/connectivity, distinct-face admission, work bounds
+and the one original mass/energy account. No local gas field or second inventory
+is introduced. Added regressions cover independent per-patch Stefan/kinetic
+equations in both directions, changing surface temperature, tangent and wrapper
+composition, one material query per state, uniform fast-path equality, original
+thermal delegation, scalar/network heat balance and cached inventory retries.
+
 `enthalpy::evaporation` connects the continuum liquid/gas-film owner to the
 actual `DepositionSimulation` cell mass and original caloric enthalpy.
 `evaporate_cell` changes these two coordinates atomically and leaves the clock,

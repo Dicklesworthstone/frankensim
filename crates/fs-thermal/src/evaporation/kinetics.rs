@@ -101,6 +101,16 @@ impl<L: EvaporationLaw + ?Sized> EvaporationLaw for KineticEvaporation<'_, L> {
     fn interface_kinetics(&self) -> InterfaceKinetics {
         self.kinetics
     }
+    fn evaluate_film(
+        &self,
+        admitted_properties: EvaporationProperties,
+        surface_temperature_k: f64,
+        film: GasFilm,
+        kinetics: InterfaceKinetics,
+    ) -> Result<SurfaceFlux, EvaporationError> {
+        self.source
+            .evaluate_film(admitted_properties, surface_temperature_k, film, kinetics)
+    }
 }
 
 impl<L: EvaporationLaw + ThermalLaw + ?Sized> ThermalLaw for KineticEvaporation<'_, L> {

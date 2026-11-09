@@ -28,6 +28,9 @@
 /// Explicit interfacial accommodation in series with the original Stefan film.
 pub mod kinetics;
 pub use kinetics::{InterfaceKinetics, KineticEvaporation};
+/// Parallel exposed patches sharing one original liquid inventory.
+pub mod parallel;
+pub use parallel::{EvaporationPatch, ParallelFilmEvaporation};
 
 /// Molar gas constant from the exact SI defining constants [J/(mol K)].
 pub const MOLAR_GAS_CONSTANT: f64 = 8.314_462_618_153_24;
@@ -90,6 +93,23 @@ pub trait EvaporationLaw {
     /// accommodation is explicit data and must not be inferred from a name.
     fn interface_kinetics(&self) -> InterfaceKinetics {
         InterfaceKinetics::Equilibrium
+    }
+    /// Evaluate transport using properties already admitted by [`properties`].
+    ///
+    /// The supplied properties and temperature belong to this original source;
+    /// implementations must retain their latent heat, density and caloric datum.
+    /// `kinetics` is explicit so a borrowed kinetic wrapper can preserve another
+    /// wrapper's film geometry in either order. The default retains the original
+    /// single-film arithmetic. Geometry wrappers can sum several parallel films
+    /// without repeating an expensive material-property lookup for every patch.
+    fn evaluate_film(
+        &self,
+        admitted_properties: EvaporationProperties,
+        surface_temperature_k: f64,
+        film: GasFilm,
+        kinetics: InterfaceKinetics,
+    ) -> Result<SurfaceFlux, EvaporationError> {
+        flux_with_kinetics(admitted_properties, surface_temperature_k, film, kinetics)
     }
 }
 
@@ -234,7 +254,10 @@ fn log_carrier_ratio(a: f64, b: f64, difference: f64) -> f64 {
     }
 }
 
-pub(crate) fn flux(p: EvaporationProperties, film: GasFilm) -> Result<SurfaceFlux, EvaporationError> {
+pub(crate) fn flux(
+    p: EvaporationProperties,
+    film: GasFilm,
+) -> Result<SurfaceFlux, EvaporationError> {
     film.validate()?;
     if p.saturation_pressure_pa >= film.total_pressure_pa {
         return Err(EvaporationError::Boiling {
@@ -293,14 +316,14 @@ pub(crate) fn flux_with_kinetics(
 }
 
 /// Signed transfer through the selected interface and the original Stefan film.
-/// Bounded work, with no state mutation or allocation. Equilibrium interfaces
-/// retain the original constant-work evaluation and arithmetic.
+/// Bounded work, with no state mutation or allocation. The default equilibrium
+/// interface retains the original constant-work evaluation and arithmetic.
 pub fn surface_flux<L: EvaporationLaw + ?Sized>(
     law: &L,
     surface_temperature_k: f64,
     film: GasFilm,
 ) -> Result<SurfaceFlux, EvaporationError> {
-    flux_with_kinetics(
+    law.evaluate_film(
         properties(law, surface_temperature_k)?,
         surface_temperature_k,
         film,
@@ -383,7 +406,14 @@ pub fn advance_surface<L: EvaporationLaw + ?Sized>(
     checkpoint: impl FnMut() -> Result<(), EvaporationError>,
 ) -> Result<SurfaceStep, EvaporationError> {
     advance_surface_with_heat(
-        law, film, liquid, duration_s, 0.0, config, temperature, checkpoint,
+        law,
+        film,
+        liquid,
+        duration_s,
+        0.0,
+        config,
+        temperature,
+        checkpoint,
     )
 }
 
@@ -443,7 +473,9 @@ pub fn advance_surface_with_heat<L: EvaporationLaw + ?Sized>(
         evaluations += 1;
         let t = temperature(h)?;
         let p = properties(law, t)?;
-        let rate = flux_with_kinetics(p, t, film, law.interface_kinetics())?.mass_flux_kg_m2_s;
+        let rate = law
+            .evaluate_film(p, t, film, law.interface_kinetics())?
+            .mass_flux_kg_m2_s;
         let raw_dm = checked(rate * liquid.area_m2 * duration_s)?;
         let mass = checked(liquid.mass_kg - raw_dm)?;
         let dm = liquid.mass_kg - mass;
@@ -467,7 +499,10 @@ pub fn advance_surface_with_heat<L: EvaporationLaw + ?Sized>(
         let tolerance = checked(
             config.absolute_energy_tolerance_j
                 + config.relative_tolerance
-                    * sensible.abs().max(e.latent.abs()).max(supplied_heat_j.abs()),
+                    * sensible
+                        .abs()
+                        .max(e.latent.abs())
+                        .max(supplied_heat_j.abs()),
         )?;
         Ok(e.residual.abs() <= tolerance)
     };
@@ -543,8 +578,8 @@ pub fn advance_surface_with_heat<L: EvaporationLaw + ?Sized>(
         return Err(EvaporationError::InventoryLimit {
             maximum_duration_s: (duration_s
                 * (liquid.mass_kg / initial.raw_dm.max(endpoint.raw_dm)))
-                .next_down()
-                .max(0.0),
+            .next_down()
+            .max(0.0),
         });
     }
     if endpoint.raw_dm != 0.0 && endpoint.dm == 0.0 {

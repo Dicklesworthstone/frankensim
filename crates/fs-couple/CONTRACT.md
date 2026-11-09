@@ -9061,6 +9061,41 @@ two-capacity decay, total-source ownership, external radiation, latent-only
 accuracy control and atomic budget/source/cancellation refusal. They are
 source/formatter checked; native execution remains unverified in this session.
 
+## Multiple evaporating faces on one native liquid cell
+
+The shared `liquid_gas::evaporation::multiple` transaction accepts distinct
+measured Cartesian gas faces of one occupied VOF liquid cell. Every original
+face passes native adjacency, exposure and per-face area admission; a repeated
+liquid/gas face refuses. Canonical `(liquid, gas)` ordering makes input order
+irrelevant. The input work ceiling counts faces, while physical inventory,
+caloric inversion, donor allowance, mass selection and native receipts remain
+one per liquid cell. Different cells retain the original common-atmosphere
+species and caloric account.
+
+Faces of a cell must retain the same original phase-law object and volatile
+binding. Their coefficients remain separate in the original
+`ParallelFilmEvaporation` owner, which sums actual per-face Stefan and finite
+interface-kinetic fluxes at the temperature used by the phase solve. Averaging
+mass-transfer coefficients before a nonlinear kinetic resistance is excluded.
+The physical area is the sum of admitted face areas and may exceed one cell
+face. A singleton retains its original law and arithmetic; zero-area groups
+retain zero exposure.
+
+Optional sensible heat uses the sum of face conductances against the one
+liquid/gas temperature difference, with compatible original heat controls.
+After that reciprocal heat stage, every phase film uses the actual heated
+state. One summed native mass/enthalpy transaction refreshes material sources,
+and one native flow step advances time. Existing momentum, conduction, reactive
+and gas-plumbing compositions share this owner. No extra liquid inventory,
+per-face gas reconstruction, phase heat or native timestep is introduced.
+
+The original frozen-rate/time-splitting and fixed-volume common-gas assumptions
+remain. This does not add spatial gas fields, overlapping sub-face geometry,
+nucleation, interface exhaustion or overflow remapping. Four focused regressions
+cover a two/three-face native corner, nonlinear heterogeneous kinetic rates in
+both directions, actual post-heat rates, independent whole-system mass/energy,
+one donor allowance, canonical ordering, and atomic geometry/source refusal.
+
 ## Shared finite gas with distinct enthalpy bodies
 
 `finite_gas_thermal::bodies::FiniteGasBodiesEnvironment` advances one original

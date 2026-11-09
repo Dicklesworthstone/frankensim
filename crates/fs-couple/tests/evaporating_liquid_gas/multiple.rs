@@ -10,6 +10,9 @@ use super::*;
 #[path = "multiple/heat.rs"]
 mod heat;
 
+#[path = "multiple/faces.rs"]
+mod faces;
+
 #[path = "multiple/momentum.rs"]
 mod momentum;
 

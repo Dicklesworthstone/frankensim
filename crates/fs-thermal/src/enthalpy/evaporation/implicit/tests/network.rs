@@ -633,3 +633,117 @@ fn inventory_retry_uses_the_selected_initial_and_endpoint_kinetic_rates() {
     close(maximum_duration_s, expected_limit, expected_limit * 2e-13);
     assert_eq!(old.cells()[&CellId(1)].mass_kg, 0.1);
 }
+
+#[test]
+fn parallel_film_hook_reaches_the_original_network_endpoint_after_heating() {
+    use crate::evaporation::{
+        EvaporationPatch, InterfaceKinetics, KineticEvaporation, ParallelFilmEvaporation,
+    };
+    let patches = [
+        EvaporationPatch {
+            area_m2: 0.002,
+            mass_transfer_coefficient_m_s: 1e-4,
+        },
+        EvaporationPatch {
+            area_m2: 0.008,
+            mass_transfer_coefficient_m_s: 0.2,
+        },
+    ];
+    let parallel = ParallelFilmEvaporation::try_new(&VARYING, &patches).unwrap();
+    let alpha = 1e-5;
+    let law = KineticEvaporation::try_new(
+        &parallel,
+        InterfaceKinetics::HertzKnudsen {
+            accommodation_coefficient: alpha,
+        },
+    )
+    .unwrap();
+    let duration = 1000.0;
+    let expected_dm: f64 = patches
+        .iter()
+        .map(|patch| {
+            let bath = GasFilm {
+                mass_transfer_coefficient_m_s: patch.mass_transfer_coefficient_m_s,
+                ..film(0.0)
+            };
+            kinetic_flux_reference(4500.0, 305.0, alpha, bath) * patch.area_m2 * duration
+        })
+        .sum();
+    let supplied_heat = 0.1 * CP * 5.0 + expected_dm * (LATENT - 2000.0 * 5.0);
+    let old = simulation(
+        &CALORIC,
+        vec![cell(1, 0.1, 300.0, 0.0, supplied_heat / duration)],
+        None,
+        vec![],
+    );
+    let bindings = [binding(1, &law, film(0.0))];
+    let (next, (), report) = old
+        .solve_implicit_evaporating_network_step(
+            &bindings,
+            duration,
+            EvaporationNetworkImplicitControls::default(),
+            empty_network,
+            || Ok(()),
+        )
+        .unwrap();
+    close(next.temperature_k(CellId(1)).unwrap(), 305.0, 2e-8);
+    close(
+        report.physical.surfaces[&CellId(1)].transferred_mass_kg,
+        expected_dm,
+        2e-12,
+    );
+    assert!(report.physical.energy_residual_j.abs() < 1e-6);
+    assert!(report.physical.mass_balance_residual_kg.abs() < 1e-14);
+    assert_eq!(old.cells()[&CellId(1)].mass_kg, 0.1);
+}
+
+#[test]
+fn parallel_film_hook_also_controls_the_cached_initial_inventory_retry() {
+    use crate::evaporation::{
+        EvaporationPatch, InterfaceKinetics, KineticEvaporation, ParallelFilmEvaporation,
+    };
+    let patches = [
+        EvaporationPatch {
+            area_m2: 0.002,
+            mass_transfer_coefficient_m_s: 1e-4,
+        },
+        EvaporationPatch {
+            area_m2: 0.008,
+            mass_transfer_coefficient_m_s: 0.2,
+        },
+    ];
+    let alpha = 1e-5;
+    let selected = KineticEvaporation::try_new(
+        &CONSTANT,
+        InterfaceKinetics::HertzKnudsen {
+            accommodation_coefficient: alpha,
+        },
+    )
+    .unwrap();
+    let parallel = ParallelFilmEvaporation::try_new(&selected, &patches).unwrap();
+    let rate: f64 = patches
+        .iter()
+        .map(|patch| {
+            let bath = GasFilm {
+                mass_transfer_coefficient_m_s: patch.mass_transfer_coefficient_m_s,
+                ..film(0.0)
+            };
+            kinetic_flux_reference(4000.0, 300.0, alpha, bath) * patch.area_m2
+        })
+        .sum();
+    let expected_limit = 0.1 / rate;
+    let old = simulation(&CALORIC, vec![cell(1, 0.1, 300.0, 0.0, 0.0)], None, vec![]);
+    let bindings = [binding(1, &parallel, film(0.0))];
+    let step =
+        EvaporatingNetworkBackwardEulerStep::new(&old, &bindings, 2.0 * expected_limit, || Ok(()))
+            .unwrap();
+    let result = step.evaluate(&[0.0], empty_network, || Ok(()));
+    let Err(ThermalEvaporationError::Surface(EvaporationError::InventoryLimit {
+        maximum_duration_s,
+    })) = result
+    else {
+        panic!("parallel patch inventory must refuse before any endpoint publication");
+    };
+    close(maximum_duration_s, expected_limit, expected_limit * 2e-11);
+    assert_eq!(old.cells()[&CellId(1)].mass_kg, 0.1);
+}

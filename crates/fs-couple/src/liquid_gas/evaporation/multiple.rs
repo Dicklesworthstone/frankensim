@@ -7,6 +7,8 @@
 
 use std::collections::BTreeMap;
 
+mod faces;
+
 use fs_lbm::material::free_surface::enthalpy::{
     FreeSurfaceMassExchangeSample, FreeSurfaceMassProjection,
 };
@@ -18,6 +20,7 @@ use fs_material::evaporation::gas::chamber::{
     GasLiquidChamberSolve, GasLiquidChamberStep, GasLiquidChamberSurface,
     GasLiquidChamberSurfaceStep, advance_chamber_with_gas_mass_selection,
 };
+use fs_thermal::evaporation::{EvaporationLaw, ParallelFilmEvaporation};
 
 use super::momentum::{self, multiple::DistributedPhaseMomentumReport};
 use super::{
@@ -170,11 +173,13 @@ impl Total {
 /// Exchange all measured native patches with ONE common finite gas, then
 /// advance native flow once over its retained timestep.
 ///
-/// Every patch must name a different occupied liquid cell and an exposed
-/// Cartesian face. The same native pure liquid requires one volatile identity
-/// and one constant gas/liquid datum binding throughout. Multiple faces of a
-/// single cell must first be reduced by a geometry/flux owner; treating each
-/// face as a second liquid inventory refuses here.
+/// Every patch names a distinct exposed Cartesian liquid/gas face. Several
+/// faces may share one occupied liquid cell, whose original mass, enthalpy and
+/// phase law remain unique. Each face retains its own mass-transfer coefficient;
+/// the original parallel-film owner sums its nonlinear Stefan/interface rate
+/// at the actual phase temperature. All faces of a cell must reference the same
+/// original phase-law object. The same native pure liquid requires one volatile
+/// identity and one constant gas/liquid datum binding throughout.
 ///
 /// The original chamber evaluates all frozen rates against the same gas and
 /// checks gross vapor withdrawals before any opposing evaporation is credited.
@@ -441,21 +446,29 @@ pub(super) fn advance_native_with_momentum_and_flow<'s, 'm, 'catalog, 'surface>(
             "distributed native exchange needs positive bounded work and finite balance budgets",
         ));
     }
-    let mut binding = None;
-    let mut ordered = BTreeMap::new();
-    for (surface, heat) in surfaces {
+    let ordered = faces::prepare(liquid, surfaces, heat_controls.is_some(), gate)?;
+    let binding = ordered
+        .first_key_value()
+        .expect("positive face count admitted")
+        .1
+        .surface
+        .binding;
+    // These wrappers borrow canonical patch rosters, but never own a second
+    // liquid inventory. Preserve the exact original singleton arithmetic.
+    let mut parallel = Vec::with_capacity(ordered.len());
+    for cell in ordered.values() {
         poll(gate)?;
-        let common = *binding.get_or_insert(surface.binding);
-        if surface.binding != common
-            || heat.is_some() != heat_controls.is_some()
-            || ordered.insert(surface.liquid, (surface, heat)).is_some()
+        parallel.push(if cell.patches.len() == 1
+            || cell.patches.iter().all(|patch| patch.area_m2 == 0.0)
         {
-            return Err(Error::Invalid(
-                "native patches need unique liquid cells and one volatile/datum binding",
-            ));
-        }
+            None
+        } else {
+            Some(
+                ParallelFilmEvaporation::try_new(cell.surface.law, &cell.patches)
+                    .map_err(GasEvaporationError::from)?,
+            )
+        });
     }
-    let binding = binding.expect("positive surface count admitted");
 
     let chart_error = RefCell::new(None);
     let temperature = |h| {
@@ -473,9 +486,16 @@ pub(super) fn advance_native_with_momentum_and_flow<'s, 'm, 'catalog, 'surface>(
     } else {
         0
     });
-    for (index, (&coordinates, (surface, heat))) in ordered.iter().enumerate() {
+    for (index, ((&coordinates, cell), parallel)) in ordered.iter().zip(&parallel).enumerate() {
         poll(gate)?;
-        liquid.admit_interface_gas_patch(coordinates, surface.gas, surface.area_m2)?;
+        let surface = cell.surface;
+        let law: &dyn EvaporationLaw = parallel
+            .as_ref()
+            .map_or(surface.law, |law| law as &dyn EvaporationLaw);
+        let area_m2 = parallel
+            .as_ref()
+            .map_or(surface.area_m2, ParallelFilmEvaporation::area_m2);
+        let heat = cell.heat(area_m2)?;
         let initial = liquid.project_interface_mass_exchange(coordinates, 0.0)?;
         let h0 = liquid
             .specific_enthalpy_at(coordinates)
@@ -491,12 +511,12 @@ pub(super) fn advance_native_with_momentum_and_flow<'s, 'm, 'catalog, 'surface>(
         });
         sources.push(GasLiquidChamberSurface {
             id,
-            law: surface.law,
+            law,
             binding: surface.binding,
             liquid: LiquidSurfaceState {
                 mass_kg: initial.initial_mass_kg,
                 specific_enthalpy_j_kg: h0,
-                area_m2: surface.area_m2,
+                area_m2,
             },
             temperature_from_enthalpy: &temperature,
             mass_transfer_coefficient_m_s: surface.mass_transfer_coefficient_m_s,
@@ -504,8 +524,8 @@ pub(super) fn advance_native_with_momentum_and_flow<'s, 'm, 'catalog, 'surface>(
         if let Some((coefficient, controls)) = heat {
             source_heat.push(GasLiquidChamberHeatSurface {
                 surface: *sources.last().expect("inserted original source"),
-                heat_transfer_coefficient_w_m2_k: *coefficient,
-                heat_controls: *controls,
+                heat_transfer_coefficient_w_m2_k: coefficient,
+                heat_controls: controls,
             });
         }
     }
@@ -705,7 +725,7 @@ pub(super) fn advance_native_with_momentum_and_flow<'s, 'm, 'catalog, 'surface>(
                 &next_liquid,
                 &next_gas,
                 catalog,
-                ordered[&input.coordinates].0,
+                ordered[&input.coordinates].surface,
                 controls.chamber.surface,
                 [
                     liquid.liquid_temperature_at_specific_enthalpy_k(input.initial_h_j_kg)?,
