@@ -229,6 +229,87 @@ fn transmitted_evanescent_beam_decays_and_carries_no_spurious_normal_power() {
 }
 
 #[test]
+fn transmitted_evanescent_tail_preserves_all_maxwell_components_and_probes() {
+    use fs_em::plane_wave::angular_spectrum::{
+        AngularSpectrumObservation, AngularSpectrumProbeLimits,
+    };
+
+    // G1/G3: physically large incident fields remain finite at the face, and
+    // all six Maxwell components have representable tails after exp(-800)
+    // itself has underflowed. The source is lossless, so decay creates no heat.
+    let dense = material(4.0, 1.0);
+    let sparse = material(1.0, 1.0);
+    let stack =
+        PlanarDielectricLayers::try_new(&dense, DielectricResponse::Lossless(&sparse), 1.0, &[])
+            .unwrap();
+    let beam = PlanarAngularSpectrum::prepare_modes_with_carrier(
+        &stack,
+        AngularSpectrumGrid {
+            width: 1,
+            height: 1,
+            spacing_m: [1.0, 1.0],
+        },
+        [1.5, 0.0],
+        &[[C64::new(1e100, -2e100), C64::new(-0.5e100, 3e100)]],
+        limits(),
+        || false,
+    )
+    .unwrap();
+    let face = beam.field(Side::Transmitted, 0.0, || false).unwrap();
+    let cosine = (1.0_f64 - 0.75 * 0.75).sqrt();
+    let alpha = -stack
+        .response(cosine, Polarization::Te)
+        .unwrap()
+        .exit_normal_wavenumber_rad_m
+        .im;
+    for (exposure, surviving) in [
+        (720.0, 2.032_230_802_424_293_2e-213),
+        (800.0, 3.667_874_584_177_687e-248),
+    ] {
+        let depth = exposure / alpha;
+        let field = beam.field(Side::Transmitted, depth, || false).unwrap();
+        let probe = beam
+            .probe_fields(
+                &[AngularSpectrumObservation {
+                    side: Side::Transmitted,
+                    distance_from_face_m: depth,
+                    position_m: [0.0, 0.0],
+                }],
+                AngularSpectrumProbeLimits {
+                    maximum_points: 1,
+                    maximum_mode_evaluations: 1,
+                    maximum_workspace_bytes: 4 << 20,
+                },
+                || false,
+            )
+            .unwrap();
+        for (actual, original) in field.electric_v_per_m()[0]
+            .iter()
+            .chain(&field.magnetic_a_per_m()[0])
+            .zip(
+                face.electric_v_per_m()[0]
+                    .iter()
+                    .chain(&face.magnetic_a_per_m()[0]),
+            )
+        {
+            for (actual, original) in [actual.re, actual.im]
+                .into_iter()
+                .zip([original.re, original.im])
+            {
+                let expected = (original / 1e100) * surviving;
+                if expected == 0.0 {
+                    assert_eq!(actual, 0.0);
+                } else {
+                    assert!((actual / expected - 1.0).abs() < 5e-13);
+                }
+            }
+        }
+        assert_eq!(probe[0].electric_v_per_m, field.electric_v_per_m()[0]);
+        assert_eq!(probe[0].magnetic_a_per_m, field.magnetic_a_per_m()[0]);
+    }
+}
+
+#[test]
 fn critical_refraction_preserves_longitudinal_tm_and_finite_te_fields_through_films() {
     // G1: this negative Nyquist mode's admitted cosine rounds to exactly 3/4.
     // Both it and epsilon=7/16 are dyadic, so the outgoing discriminant is

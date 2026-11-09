@@ -3916,7 +3916,15 @@ propagation, enforces k.E=0, and obtains H=(k cross E)/(omega mu). It returns
 all six complex field components and physical cycle-mean Poynting flux.
 Incident, reflected, their coherent sum, and transmitted fields have explicit
 face/distance conventions. Film-induced evanescent fields decay without a
-growing transfer matrix. The original film recursion retains transmitted
+growing transfer matrix. Transmitted field reconstruction applies late decay
+to the actual six Maxwell amplitudes, splitting an underflowing exponential
+before multiplication. A representable evanescent or absorbing field is not
+erased because its unit-amplitude transfer has rounded to zero. The ordinary
+normal-attenuation multiplication order is unchanged; one phase and at most
+two attenuation factors are cached per mode for all components. Uniform planes,
+nonuniform probes, coherence and exposure reuse this field owner. Focused
+G1/G3 regressions cover subnormal/zero unit transfers, physical component tails,
+depth composition and ordinary-path parity. The original film recursion retains transmitted
 power-conjugate H alongside E, relative to the original incident admittance.
 Transmitted fields use these two tangential traces without dividing by kz.
 At exact critical refraction, the finite longitudinal TM electric field and

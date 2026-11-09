@@ -33,8 +33,8 @@ use fs_fft::{C64 as FftComplex, Fft};
 use fs_material::field_storage::{linear_electric_permittivity, linear_magnetic_permeability};
 use fs_math::{c64::C64, dd::Dd, det};
 use modes::{
-    basis, cartesian, fields, fields_from_tangential, finite, incident_cosine, normal_flux,
-    polarized, propagation,
+    FieldPropagation, basis, cartesian, fields, fields_from_tangential, finite, incident_cosine,
+    normal_flux, polarized, propagation,
 };
 
 mod absorption;
@@ -756,7 +756,7 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
             )?;
         }
         if side == AngularSpectrumSide::Transmitted {
-            let phase = propagation(mode.exit_kz, distance_from_face_m)
+            let phase = FieldPropagation::new(mode.exit_kz, distance_from_face_m)
                 .ok_or_else(|| bad("propagation phase is unrepresentable"))?;
             let (em, hm) = fields_from_tangential(
                 mode.kx,
@@ -767,8 +767,8 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
                 mode.transmitted_h_te_tm,
             )
             .ok_or_else(|| bad("longitudinal or magnetic field is unrepresentable"))?;
-            e = em.map(|value| value * phase);
-            h = hm.map(|value| value * phase);
+            e = em.map(|value| phase.apply(value));
+            h = hm.map(|value| phase.apply(value));
         }
         Ok((e, h))
     }

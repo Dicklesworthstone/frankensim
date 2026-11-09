@@ -64,18 +64,52 @@ pub(super) fn cartesian(te_tm: [C64; 2], p: [f64; 2]) -> [C64; 2] {
 /// The decaying branch is used for transmitted fields. Negative distance is
 /// permitted only for lossless incident waves; growing evanescent waves refuse.
 pub(in crate::plane_wave) fn propagation(kz: C64, distance: f64) -> Option<C64> {
+    let (phase, decay) = propagation_phase(kz, distance)?;
+    Some(phase.scale(det::exp(decay)))
+}
+
+fn propagation_phase(kz: C64, distance: f64) -> Option<(C64, f64)> {
     let decay = kz.im * distance;
     let phase = kz.re * distance;
     if decay.is_nan() || decay > 0.0 || !phase.is_finite() {
         return None;
     }
-    let amplitude = det::exp(decay);
     // Keep the product residual until argument reduction. Optical paths can
     // accumulate millions of cycles even for metre-scale authored geometry.
     // This retains the supplied binary64 operands, not their physical uncertainty.
     let (sine, cosine) = det::sin_cos_dd(Dd::from_f64(kz.re) * Dd::from_f64(distance));
-    let value = C64::new(cosine.to_f64(), -sine.to_f64()).scale(amplitude);
-    finite(value).then_some(value)
+    let phase = C64::new(cosine.to_f64(), -sine.to_f64());
+    finite(phase).then_some((phase, decay))
+}
+
+/// One phase/decay preparation shared by all six Maxwell field components.
+/// A unit-amplitude transfer may underflow before its product with a physical
+/// field does. Split only that late attenuation, as in fs_math::decay, while
+/// retaining the original multiplication order on the ordinary path.
+pub(super) struct FieldPropagation {
+    transfer: C64,
+    final_attenuation: f64,
+}
+
+impl FieldPropagation {
+    pub(super) fn new(kz: C64, distance: f64) -> Option<Self> {
+        let (phase, decay) = propagation_phase(kz, distance)?;
+        let amplitude = det::exp(decay);
+        let (amplitude, final_attenuation) = if amplitude < f64::MIN_POSITIVE {
+            let half = det::exp(0.5 * decay);
+            (half, half)
+        } else {
+            (amplitude, 1.0)
+        };
+        Some(Self {
+            transfer: phase.scale(amplitude),
+            final_attenuation,
+        })
+    }
+
+    pub(super) fn apply(&self, value: C64) -> C64 {
+        (value * self.transfer).scale(self.final_attenuation)
+    }
 }
 
 /// Transversality determines Ez; Faraday determines the entire H. The caller
@@ -266,6 +300,61 @@ mod tests {
                 expected.scale(det::exp(-1e-4 * distance)),
             );
         }
+    }
+
+    #[test]
+    fn physical_fields_retain_deep_evanescent_and_absorbing_tails() {
+        // G1: independent high-precision exp(-x)*1e100. The first raw
+        // exponential is subnormal; the second has already rounded to zero.
+        for (exposure, surviving) in [
+            (720.0, 2.032_230_802_424_293_2e-213),
+            (800.0, 3.667_874_584_177_687e-248),
+        ] {
+            for phase_rate in [0.0, 0.125] {
+                let transfer = FieldPropagation::new(C64::new(phase_rate, -1.0), exposure).unwrap();
+                let actual = transfer.apply(C64::new(1e100, -3e100));
+                let (sine, cosine) = (phase_rate * exposure).sin_cos();
+                let expected = C64::new(surviving, -3.0 * surviving) * C64::new(cosine, -sine);
+                assert!((actual.re / expected.re - 1.0).abs() < 3e-13);
+                assert!((actual.im / expected.im - 1.0).abs() < 3e-13);
+            }
+        }
+        assert_eq!(
+            FieldPropagation::new(C64::new(0.0, -1.0), 744.1)
+                .unwrap()
+                .apply(C64::from_re(0.4))
+                .re,
+            f64::from_bits(1),
+        );
+        assert_eq!(
+            FieldPropagation::new(C64::new(0.0, -1.0), 1e300)
+                .unwrap()
+                .apply(C64::new(1e100, -3e100)),
+            C64::ZERO,
+        );
+        assert!(FieldPropagation::new(C64::new(0.0, -1.0), -1.0).is_none());
+    }
+
+    #[test]
+    fn physical_propagation_keeps_ordinary_bits_and_depth_composition() {
+        // G3: the normal-attenuation path retains the original multiplication
+        // order. Deep decay composes without erasing a representable field.
+        let input = C64::new(0.7, -0.4);
+        for kz in [C64::ZERO, C64::from_re(3.0), C64::new(1.2, -0.3)] {
+            for distance in [0.0, 0.3, 100.0] {
+                assert_eq!(
+                    FieldPropagation::new(kz, distance).unwrap().apply(input),
+                    input * propagation(kz, distance).unwrap(),
+                );
+            }
+        }
+        let kz = C64::new(0.125, -1.0);
+        let initial = C64::new(1e100, -3e100);
+        let first = FieldPropagation::new(kz, 400.0).unwrap().apply(initial);
+        let split = FieldPropagation::new(kz, 400.0).unwrap().apply(first);
+        let whole = FieldPropagation::new(kz, 800.0).unwrap().apply(initial);
+        assert!((split.re / whole.re - 1.0).abs() < 4e-14);
+        assert!((split.im / whole.im - 1.0).abs() < 4e-14);
     }
 
     #[test]
