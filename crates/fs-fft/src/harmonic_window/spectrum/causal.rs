@@ -6,6 +6,13 @@
 
 use super::*;
 
+mod state;
+pub use state::{
+    HarmonicDecayIntervalLimits, HarmonicDecayMoments, HarmonicPhaseInterval,
+    MAX_HARMONIC_DECAY_TONES, PreparedHarmonicDecayInterval,
+    phase_angular_interval_from_clock_dd,
+};
+
 /// Two integrals over the same accepted interval, in observable-units * s.
 ///
 /// For f(t), source start t0, duration h and nonnegative decay lambda:

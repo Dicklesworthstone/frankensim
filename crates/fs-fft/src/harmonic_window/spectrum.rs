@@ -8,6 +8,11 @@ use super::*;
 
 mod causal;
 pub use causal::HarmonicCausalIntegral;
+pub use causal::{
+    HarmonicDecayIntervalLimits, HarmonicDecayMoments, HarmonicPhaseInterval,
+    MAX_HARMONIC_DECAY_TONES, PreparedHarmonicDecayInterval,
+    phase_angular_interval_from_clock_dd,
+};
 mod increment;
 mod ripple;
 

@@ -1311,3 +1311,32 @@ sum tones, source-clock preservation at a large epoch, fixed/cached equivalence,
 workspace reuse after refusal, finite proper power for amplitude 1.5e154,
 and subnormal real/cross components. The full workspace Cargo/DSR gate remains
 unavailable.
+
+## Causal original-state harmonic decay moments
+
+`PreparedHarmonicDecayInterval` advances the original scalar equation
+`q_dot + q/tau = Re(sum drive_n exp(-i omega_n t))`, retaining the supplied
+initial state, original positive relaxation time and signed angular source
+frequencies. The normalized DD source clock and physical duration remain
+separate. Endpoint state, direct endpoint increment, mean total-state square
+and independently contracted mixed work are returned. Optional checked
+integrals defer the duration multiplication when its result would underflow.
+
+Up to 64 authored tones are admitted before allocation. Equal and conjugate
+real carriers combine before quadratic products. Short intervals use the
+original ODE polynomial with positive shifted-Legendre squared modes and an
+explicit analytic remainder admission. Longer intervals use closed DD
+pair/decay moments and refuse unresolved cancellation. Large retained states
+are decayed without first rounding a tiny exponential factor. Preparation and
+queries poll cancellation and admit explicit payload/work bounds; queries do
+not allocate. Existing settled causal-product arithmetic remains unchanged.
+
+There is no settled-memory reset, negative-energy clamp, sampled time grid or
+interval/null-relative floating-point certificate. Exponent-range refusals and
+the accuracy of the original deterministic transcendental functions remain.
+Nine G1/G3/G4 regression tests specify independent real ODE integration,
+cosine-peak startup, tiny direct increments, subdivision and large DD clocks,
+coherent duplicate/conjugate carriers, stiff decay, budgets and cancellation.
+They were authored and reviewed but not compiled or run: the execution
+environment became unavailable. Independent equation checks are not native
+Rust test evidence.

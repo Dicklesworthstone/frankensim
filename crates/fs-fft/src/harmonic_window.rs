@@ -26,6 +26,11 @@ pub use spectrum::{
 pub use spectrum::{
     AngularHarmonicSpectrumTerm, HarmonicCausalIntegral, HarmonicSpectrumTermLimits,
 };
+pub use spectrum::{
+    HarmonicDecayIntervalLimits, HarmonicDecayMoments, HarmonicPhaseInterval,
+    MAX_HARMONIC_DECAY_TONES, PreparedHarmonicDecayInterval,
+    phase_angular_interval_from_clock_dd,
+};
 
 /// A rejected observation window or unrepresentable moment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
