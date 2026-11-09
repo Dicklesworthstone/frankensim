@@ -13801,3 +13801,22 @@ translated trajectory, affine tangent/adjoint and rollback regression sources.
 The field, geometry, tensor and scales stay fixed during the trajectory; evolving
 temperature, moving supports and geometric-prestress dynamics require their own
 explicit integration and are not silently approximated here.
+
+
+## Material-aware support vibration with physical port loading
+
+`ViscoElements::prepare_supported_harmonic_response_with_port_impedance` combines
+the original consistent inertia, dispersive storage and loss with complete
+`-i omega B Z B^T` loading before the native free/support partition. Force-map
+rows use all represented original DOFs, including every moving support. Global
+support labels, original material frequency bands and complete-cycle strain
+admission retain the existing source authority.
+
+Responses report full physical-port flow, effort and absorbed boundary work
+separately from Kelvin/Maxwell material heat and signed actuator work. Reactions
+include every cross-support inertia, material and physical-load term. Structural
+and port budgets remain separately admitted; failed load cases do not mutate the
+cached factor or hereditary material state. The original material observer can
+independently observe the same complete displacement field. Focused Tet4 cases
+compare direct loaded equations, reaction, original-quadrature material heat and
+port power across frequency, and retain domain, strain and cancellation refusals.

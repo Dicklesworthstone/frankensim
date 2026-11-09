@@ -7,9 +7,11 @@
 //! support. Full-source admission and binary scaling belong to the same owner
 //! as the unconstrained harmonic solve.
 
+use super::impedance::PreparedPortImpedance;
 use super::{
-    HarmonicResponseControls, HarmonicResponseError, MatrixLayout, PreparedHarmonicResponse,
-    admit_size, finite, invalid, poll, scale, scale_complex, symmetric_entry,
+    HarmonicPortControls, HarmonicPortResponse, HarmonicResponseControls, HarmonicResponseError,
+    MatrixLayout, PreparedHarmonicResponse, admit_size, finite, invalid, poll, scale,
+    scale_complex, symmetric_entry,
 };
 use crate::quadratic_fraction;
 use fs_exec::Cx;
@@ -35,7 +37,11 @@ pub struct SupportedHarmonicResponse {
     /// Cycle average `Re(v^H D v)/2`, D=(C+C^T)/2, on ALL original coordinates.
     /// Cross-support loss is retained; skew gyroscopic coupling creates no heat.
     pub average_viscous_power_w: f64,
-    /// Applied plus support power minus viscous power [W], accumulated without
+    /// Full physical-port flow, opposing effort and net absorbed boundary work.
+    /// Includes motion of prescribed coordinates and all mutual load entries.
+    /// Its physical owner determines heat, radiation and storage semantics.
+    pub port_load: Option<HarmonicPortResponse>,
+    /// Applied plus support power minus viscous and absorbed port power [W], accumulated without
     /// assigning a missing work term from the balance. Signed roundoff remains.
     pub power_balance_residual_w: f64,
 }
@@ -82,7 +88,70 @@ impl PreparedSupportedHarmonicResponse {
         controls: HarmonicResponseControls,
         cx: &Cx<'_>,
     ) -> Result<Self, HarmonicResponseError> {
+        Self::prepare(
+            mass,
+            damping,
+            stiffness,
+            n,
+            support_dofs,
+            angular_frequency_rad_s,
+            controls,
+            cx,
+            None,
+        )
+    }
+
+    /// Prepare prescribed supports and a complete physical effort/flow load.
+    ///
+    /// The original full-coordinate pencil is
+    /// A = K - omega^2 M - i omega C - i omega B Z B^T. The real n*ports
+    /// force map B is also the transpose velocity map, INCLUDING prescribed
+    /// supports. Every mutual and nonreciprocal entry in Z remains intact.
+    /// Load assembly precedes support elimination and free-block factorization,
+    /// so physical loading can resolve a singular bare free resonance.
+    ///
+    /// Structural admission and payload match `try_new`; the separate port
+    /// controls bound the original physical-load copies, projection and PSD
+    /// admission. The Hermitian part of Z must be pointwise numerically PSD.
+    /// The caller owns its frequency support and broadband physical validity.
+    /// A finite velocity impedance contributes zero at DC. No load dynamics,
+    /// actuator model, radiation/heat split or causal realization is inferred.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_with_port_impedance(
+        mass: &[f64],
+        damping: &[f64],
+        stiffness: &[f64],
+        n: usize,
+        support_dofs: &[usize],
+        force_map: &[f64],
+        ports: usize,
+        impedance: &[C64],
+        angular_frequency_rad_s: f64,
+        controls: HarmonicResponseControls,
+        port_controls: HarmonicPortControls,
+        cx: &Cx<'_>,
+    ) -> Result<Self, HarmonicResponseError> {
         poll(cx)?;
+        Self::admit(n, support_dofs, controls)?;
+        let load = PreparedPortImpedance::new(n, force_map, ports, impedance, port_controls, cx)?;
+        Self::prepare(
+            mass,
+            damping,
+            stiffness,
+            n,
+            support_dofs,
+            angular_frequency_rad_s,
+            controls,
+            cx,
+            Some(load),
+        )
+    }
+
+    fn admit(
+        n: usize,
+        support_dofs: &[usize],
+        controls: HarmonicResponseControls,
+    ) -> Result<(), HarmonicResponseError> {
         admit_size(n, controls)?;
         if support_dofs.iter().any(|&i| i >= n)
             || support_dofs.windows(2).any(|pair| pair[0] >= pair[1])
@@ -103,6 +172,23 @@ impl PreparedSupportedHarmonicResponse {
                 cap: controls.maximum_payload_bytes,
             });
         }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        mass: &[f64],
+        damping: &[f64],
+        stiffness: &[f64],
+        n: usize,
+        support_dofs: &[usize],
+        angular_frequency_rad_s: f64,
+        controls: HarmonicResponseControls,
+        cx: &Cx<'_>,
+        port_load: Option<PreparedPortImpedance>,
+    ) -> Result<Self, HarmonicResponseError> {
+        poll(cx)?;
+        Self::admit(n, support_dofs, controls)?;
         let original = PreparedHarmonicResponse::prepare(
             mass,
             damping,
@@ -112,7 +198,7 @@ impl PreparedSupportedHarmonicResponse {
             controls,
             cx,
             None,
-            None,
+            port_load,
             MatrixLayout::Dense,
             false,
         )?;
@@ -330,6 +416,20 @@ impl PreparedSupportedHarmonicResponse {
         // All contractions use the same a^3 2^(2e) power scale. Apply the
         // peak-phasor factor 1/2 by an exact binary exponent decrement.
         let power_exponent = 2 * exponent + 3 * p.time_exponent - 1;
+        let port_load = p
+            .port_load
+            .as_ref()
+            .map(|load| load.response(&velocity, cx))
+            .transpose()?;
+        // Keep the original compensated mechanical contraction before restoring
+        // source units. Boundary work is independently observed by its original
+        // physical owner; never assign it from the remaining balance.
+        let mechanical_balance = restore(input + support - heat, power_exponent)?;
+        let power_balance_residual_w = if let Some(load) = &port_load {
+            number(Dd::from_f64(mechanical_balance) - Dd::from_f64(load.average_absorbed_power_w))?
+        } else {
+            mechanical_balance
+        };
         let result = SupportedHarmonicResponse {
             displacement,
             velocity,
@@ -338,7 +438,8 @@ impl PreparedSupportedHarmonicResponse {
             average_input_power_w: restore(input, power_exponent)?,
             average_support_power_w: restore(support, power_exponent)?,
             average_viscous_power_w: restore(heat, power_exponent)?,
-            power_balance_residual_w: restore(input + support - heat, power_exponent)?,
+            port_load,
+            power_balance_residual_w,
         };
         poll(cx)?;
         Ok(result)

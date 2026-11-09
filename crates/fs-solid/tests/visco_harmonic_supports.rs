@@ -1,6 +1,8 @@
 //! Original tensor-Prony base excitation with independent mechanical/heat oracles.
 //! The declared tensors are manufactured numerical fixtures, not measured data.
 
+mod impedance;
+
 use fs_exec::Cx;
 use fs_fft::harmonic_window::HarmonicWindow;
 use fs_material::visco::{Mandel6, PronyBranch, TensorProny};

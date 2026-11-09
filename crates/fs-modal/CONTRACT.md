@@ -1678,3 +1678,26 @@ coefficient-size formula or understating simultaneous storage.
 affine work/heat against independent ODE integration across damping regimes,
 analytic rigid drag, high-frequency admission, preserved model binding,
 aggregate budgets and cooperative preparation cancellation.
+
+
+## Physical port loading on prescribed harmonic supports
+
+`PreparedSupportedHarmonicResponse::try_with_port_impedance` assembles the complete
+original `K - omega^2 M - i omega C - i omega B Z B^T` before prescribed-support
+elimination. The original real force map also supplies `B^T v`, including every
+moving support row; mutual, reactive and nonreciprocal impedance entries remain.
+Only the free principal block is factored, allowing physical load to resolve an
+otherwise singular bare free resonance. Empty and all-prescribed maps remain
+valid; finite velocity impedance vanishes at DC.
+
+The original port owner admits Hermitian-PSD load data and separately bounds its
+payload and projection work. It observes full flow, opposing effort and absorbed
+boundary power independently. Reactions retain the loaded original equations;
+applied work plus signed support work balances intrinsic viscous heat plus port
+absorption. Boundary work is never assigned from the balance or reclassified as
+material heat. Structural payload, binary scaling, source residual, factor reuse
+and cancellation retain the existing supported-solve contract. The load's owner
+must supply frequency validity and any radiation, heat or storage interpretation.
+Regression cases cover nonreciprocal mutual loading, moving-support port flow,
+free-resonance regularization by a physical load, static/empty/all-support limits,
+independent work accounting, refusals and cancellation.

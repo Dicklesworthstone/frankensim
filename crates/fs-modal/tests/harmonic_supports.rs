@@ -1,5 +1,7 @@
 //! G1/G3 prescribed harmonic supports: cross inertia, phase, reactions and work.
 
+mod impedance;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_math::c64::C64;

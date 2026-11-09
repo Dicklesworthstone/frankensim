@@ -4,11 +4,12 @@
 //! including all free/support cross terms. The same original material points
 //! then admit the complete displacement cycle before a response is published.
 
-use super::{ViscoElements, ViscoHarmonicError, checkpoint};
+use super::{HarmonicBoundary, ViscoElements, ViscoHarmonicError, checkpoint};
 use fs_exec::Cx;
 use fs_math::c64::C64;
 use fs_modal::harmonic::{
-    HarmonicResponseControls, HarmonicResponseError, PreparedSupportedHarmonicResponse,
+    HarmonicPortControls, HarmonicPortResponse, HarmonicResponseControls, HarmonicResponseError,
+    PreparedSupportedHarmonicResponse,
 };
 
 /// Original-coordinate material response and separately evaluated actuator work.
@@ -31,7 +32,11 @@ pub struct ViscoSupportedHarmonicResponse {
     /// Original Kelvin and Maxwell heat on ALL represented coordinates [W].
     /// Cross-support constitutive loss is retained without modal refitting.
     pub average_material_heat_w: f64,
-    /// Applied power plus support power minus independently computed heat [W].
+    /// Full physical-port flow, opposing effort and absorbed boundary work.
+    /// The load's original owner determines whether that work is radiated,
+    /// dissipated or stored; it is not added to intrinsic material heat.
+    pub port_load: Option<HarmonicPortResponse>,
+    /// Applied plus support power minus material heat and absorbed port work [W].
     pub power_balance_residual_w: f64,
 }
 
@@ -69,6 +74,58 @@ impl ViscoElements {
         support_dofs: &[usize],
         omega_rad_s: f64,
         controls: HarmonicResponseControls,
+        cx: &Cx<'_>,
+    ) -> Result<ViscoSupportedHarmonicOperator<'_>, ViscoHarmonicError> {
+        self.prepare_supported_harmonic_response_impl(support_dofs, omega_rad_s, controls, None, cx)
+    }
+
+    /// Prescribed support vibration with a complete physical effort/flow load.
+    ///
+    /// The full original-coordinate real force map B also supplies B^T*v,
+    /// including support velocity. Z maps those flows to opposing efforts under
+    /// exp(-i omega t). The original material pencil and -i*omega*B*Z*B^T
+    /// are assembled before support elimination and free-block factorization.
+    /// Self/mutual and reactive entries remain; no radiation or joint damping
+    /// is replaced by a scalar modal loss or counted as intrinsic material heat.
+    ///
+    /// Force-map rows follow `equilibrium().free_dofs`, which must still retain
+    /// each moving support. The same structural budget covers source conversion
+    /// and the supported solver; `port_controls` separately covers the original
+    /// physical-load projection and pointwise Hermitian-PSD admission. Source
+    /// frequency bands and the entire displacement cycle remain independently
+    /// admitted. The caller supplies the load's physical units and validity.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_supported_harmonic_response_with_port_impedance(
+        &self,
+        support_dofs: &[usize],
+        omega_rad_s: f64,
+        force_map: &[f64],
+        ports: usize,
+        impedance: &[C64],
+        controls: HarmonicResponseControls,
+        port_controls: HarmonicPortControls,
+        cx: &Cx<'_>,
+    ) -> Result<ViscoSupportedHarmonicOperator<'_>, ViscoHarmonicError> {
+        self.prepare_supported_harmonic_response_impl(
+            support_dofs,
+            omega_rad_s,
+            controls,
+            Some(HarmonicBoundary {
+                force_map,
+                ports,
+                impedance,
+                controls: port_controls,
+            }),
+            cx,
+        )
+    }
+
+    fn prepare_supported_harmonic_response_impl(
+        &self,
+        support_dofs: &[usize],
+        omega_rad_s: f64,
+        controls: HarmonicResponseControls,
+        boundary: Option<HarmonicBoundary<'_>>,
         cx: &Cx<'_>,
     ) -> Result<ViscoSupportedHarmonicOperator<'_>, ViscoHarmonicError> {
         checkpoint(cx)?;
@@ -126,19 +183,37 @@ impl ViscoElements {
             })?);
         }
         let [mass, damping, storage] = self.harmonic_pencil(omega_rad_s, cx)?;
-        let response = PreparedSupportedHarmonicResponse::try_new(
-            &mass,
-            &damping,
-            &storage,
-            n,
-            &support_rows,
-            omega_rad_s,
-            HarmonicResponseControls {
-                maximum_payload_bytes: controls.maximum_payload_bytes - source_bytes,
-                ..controls
-            },
-            cx,
-        )?;
+        let solve_controls = HarmonicResponseControls {
+            maximum_payload_bytes: controls.maximum_payload_bytes - source_bytes,
+            ..controls
+        };
+        let response = if let Some(boundary) = boundary {
+            PreparedSupportedHarmonicResponse::try_with_port_impedance(
+                &mass,
+                &damping,
+                &storage,
+                n,
+                &support_rows,
+                boundary.force_map,
+                boundary.ports,
+                boundary.impedance,
+                omega_rad_s,
+                solve_controls,
+                boundary.controls,
+                cx,
+            )?
+        } else {
+            PreparedSupportedHarmonicResponse::try_new(
+                &mass,
+                &damping,
+                &storage,
+                n,
+                &support_rows,
+                omega_rad_s,
+                solve_controls,
+                cx,
+            )?
+        };
         let free_dofs = response
             .free_dofs()
             .iter()
@@ -208,6 +283,7 @@ impl<'a> ViscoSupportedHarmonicOperator<'a> {
             average_input_power_w: response.average_input_power_w,
             average_support_power_w: response.average_support_power_w,
             average_material_heat_w: response.average_viscous_power_w,
+            port_load: response.port_load,
             power_balance_residual_w: response.power_balance_residual_w,
         })
     }
