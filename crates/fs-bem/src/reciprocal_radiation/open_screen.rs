@@ -918,13 +918,44 @@ impl<'a> PreparedScreen<'a> {
             .iter()
             .map(|d| d.map_or(C64::ZERO, |i| x[i]))
             .collect();
-        let weak = self.weak_image(admittance, &jump)?;
-        let absorption = 0.5 / (medium.density * medium.sound_speed)
-            * (0..n).map(|i| (x[i].conj() * weak[i]).re).sum::<f64>();
+        let mut wall_work = crate::ComplexSum::default();
+        match admittance {
+            Admittance::Rigid => {}
+            Admittance::Local { beta, .. } => {
+                // Use the SAME interpolated law/pressure and quadrature as
+                // weak_image, but integrate its conductive work directly.
+                // Contracting the rounded reactive weak image would erase
+                // weak physical loss, or invent loss on a reactive sheet.
+                for (facet, samples) in self.facets.iter().zip(&self.samples) {
+                    poll(cancelled)?;
+                    for sample in samples {
+                        let conductance = (0..3)
+                            .map(|a| beta[facet.ids[a]].re * sample.shape[a])
+                            .sum::<f64>();
+                        let pressure = (0..3).fold(C64::ZERO, |p, a| {
+                            p + jump[facet.ids[a]].scale(sample.shape[a])
+                        });
+                        wall_work.add(C64::from_re(
+                            conductance * pressure.norm_sq() * sample.weight,
+                        ));
+                    }
+                }
+            }
+            Admittance::NonLocal { .. } => {
+                let weak = self.weak_image(admittance, &jump)?;
+                for i in 0..n {
+                    wall_work.add_product(x[i].conj(), weak[i]);
+                }
+            }
+        }
+        let absorption = 0.5 / (medium.density * medium.sound_speed) * wall_work.finish().re;
         let driving = 0.5
             * (0..n)
                 .map(|i| (x[i] * drive_work[i].conj()).re)
                 .sum::<f64>();
+        if !absorption.is_finite() || !driving.is_finite() {
+            return Err(bad("nonfinite open boundary work"));
+        }
         if real_frequency
             && !admittance.declared_active()
             && absorption < -1e-10 * driving.abs().max(f64::MIN_POSITIVE)

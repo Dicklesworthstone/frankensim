@@ -140,6 +140,52 @@ impl Admittance<'_> {
         }
         Ok(out)
     }
+    /// Mean accepted wall work for peak pressure phasors. A local wall uses
+    /// its ORIGINAL conductance: Re(conj(p) beta p) = Re(beta) |p|^2.
+    /// Forming beta*p first rounds the reactive current and can manufacture
+    /// loss or erase a high-Q wall's much smaller physical dissipation.
+    /// Nonlocal laws retain their complete weighted work pairing; their
+    /// Hermitian dissipative part cannot be inferred from diagonal entries.
+    fn absorbed_power(
+        self,
+        pressure: &[C64],
+        areas: &[f64],
+        rho_c: f64,
+    ) -> Result<f64, HelmholtzError> {
+        self.validate(pressure.len())?;
+        if pressure.len() != areas.len() || pressure.iter().any(|&p| !finite(p))
+            || !rho_c.is_finite() || rho_c <= 0.0 {
+            return Err(bad("wall work requires finite pressure, matching areas and positive impedance"));
+        }
+        let scale = 0.5 / rho_c;
+        let mut work = ComplexSum::default();
+        let mut apparent = 0.0;
+        match self {
+            Self::Rigid => {}
+            Self::Local { beta, .. } => {
+                for ((&p, &b), &area) in pressure.iter().zip(beta).zip(areas) {
+                    let power = b.re * p.norm_sq() * area * scale;
+                    work.add(C64::from_re(power));
+                    apparent += power.abs();
+                }
+            }
+            Self::NonLocal { .. } => {
+                let image = self.image(pressure)?;
+                for ((&p, y), &area) in pressure.iter().zip(image).zip(areas) {
+                    work.add_product(p, y.conj().scale(area * scale));
+                    apparent += p.abs() * y.abs() * area * scale;
+                }
+            }
+        }
+        let power = work.finish().re;
+        if !power.is_finite()
+            || !apparent.is_finite()
+            || (!self.declared_active() && power < -1e-10 * apparent.max(f64::MIN_POSITIVE))
+        {
+            return Err(bad("boundary failed its discrete passive-work check"));
+        }
+        Ok(power)
+    }
     pub(crate) fn stamp(self) -> u64 {
         let mut hash = 0xcbf29ce484222325u64;
         let mut word = |v: u64| {
@@ -727,20 +773,8 @@ fn finish_scattering(
         .zip(&incident)
         .map(|(&a, &b)| a + b)
         .collect();
-    let y = law.image(&total)?;
     let rho_c = solution.radiation.medium.density * solution.radiation.medium.sound_speed;
-    let mut absorbed = 0.0;
-    let mut apparent = 0.0;
-    for ((&p, y), &area) in total.iter().zip(y).zip(surface.areas()) {
-        absorbed += (p.conj() * y).re * area / (2.0 * rho_c);
-        apparent += p.abs() * y.abs() * area / (2.0 * rho_c);
-    }
-    if !absorbed.is_finite()
-        || !apparent.is_finite()
-        || (!law.declared_active() && absorbed < -1e-10 * apparent.max(f64::MIN_POSITIVE))
-    {
-        return Err(bad("scattering wall failed passive-work check"));
-    }
+    let absorbed = law.absorbed_power(&total, surface.areas(), rho_c)?;
     Ok(ScatteringSolution {
         scattered: solution.radiation,
         incident_pressure_pa: incident,
@@ -901,24 +935,15 @@ pub(crate) fn finish_boundary(
     solution: RadiationSolution,
     bc: SurfaceBc<'_>,
 ) -> Result<BoundarySolution, HelmholtzError> {
-    let absorbed = bc.admittance.image(&solution.pressure)?;
-    let scale = 0.5 / (solution.medium.density * solution.medium.sound_speed);
-    let mut power = 0.0;
-    let mut apparent = 0.0;
-    let mut driving = 0.0;
-    for i in 0..absorbed.len() {
-        power += (solution.pressure[i] * absorbed[i].conj()).re * surface.areas()[i] * scale;
-        apparent += solution.pressure[i].abs() * absorbed[i].abs() * surface.areas()[i] * scale;
-        driving +=
-            0.5 * (solution.pressure[i] * bc.drive_velocity[i].conj()).re * surface.areas()[i];
+    let rho_c = solution.medium.density * solution.medium.sound_speed;
+    let power = bc.admittance.absorbed_power(&solution.pressure, surface.areas(), rho_c)?;
+    let mut driving = ComplexSum::default();
+    for ((&p, &v), &area) in solution.pressure.iter().zip(bc.drive_velocity).zip(surface.areas()) {
+        driving.add_product(p, v.conj().scale(0.5 * area));
     }
-    if !power.is_finite()
-        || !driving.is_finite()
-        || (!bc.admittance.declared_active() && power < -1e-10 * apparent.max(f64::MIN_POSITIVE))
-    {
-        return Err(bad(
-            "nonlocal boundary failed its discrete passive-work check",
-        ));
+    let driving = driving.finish().re;
+    if !driving.is_finite() {
+        return Err(bad("nonfinite boundary driving work"));
     }
     Ok(BoundarySolution {
         radiation: solution,
@@ -1243,4 +1268,62 @@ pub fn solve_radiation_bc_iterative(
 > {
     PreparedIterativeBoundary::new(surface, k, medium, bc.admittance, formulation, options, gate)?
         .solve(bc.drive_velocity, gate)
+}
+
+#[cfg(test)]
+mod wall_work_tests {
+    use super::*;
+
+    #[test]
+    fn local_loss_is_independent_of_reactance_and_source_clock() {
+        let pressure = [C64::new(0.41, -0.73), C64::new(1.3, 0.21), C64::new(-0.6, 0.8)];
+        let areas = [0.21, 1.3, 2.1];
+        let rho_c = 412.0;
+        for loss in [0.0, 1e-20, 1e-12, 0.25] {
+            let conductance = [loss, 0.3 * loss, 2.0 * loss];
+            let expected = pressure.iter().zip(conductance).zip(areas)
+                .map(|((&p, b), area)| b * (p.re * p.re + p.im * p.im) * area / (2.0 * rho_c))
+                .sum::<f64>();
+            for reactance in [0.0, 1.3, -7.1, 1e5] {
+                let beta = conductance.map(|b| C64::new(b, reactance));
+                let law = Admittance::Local { beta: &beta, declared_active: false };
+                for phase in [C64::ONE, C64::new(0.0, 1.0), C64::new(0.6, 0.8), C64::new(-0.8, 0.6)] {
+                    let rotated = pressure.map(|p| p * phase);
+                    let actual = law.absorbed_power(&rotated, &areas, rho_c).unwrap();
+                    if loss == 0.0 {
+                        assert_eq!(actual, 0.0, "a reactive wall has no cycle-mean loss");
+                    } else {
+                        assert!(actual > 0.0);
+                        assert!((actual / expected - 1.0).abs() < 8e-15, "{actual:e} != {expected:e}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wall_work_retains_nonlocal_interference_and_declared_active_gain() {
+        struct Difference;
+        impl BoundaryOperator for Difference {
+            fn len(&self) -> usize { 2 }
+            fn fingerprint(&self) -> u64 { 0 }
+            fn apply(&self, p: &[C64], out: &mut [C64]) -> Result<(), HelmholtzError> {
+                out[0] = p[0] - p[1];
+                out[1] = -out[0];
+                Ok(())
+            }
+        }
+        let law = Admittance::NonLocal { operator: &Difference, declared_active: false };
+        assert_eq!(law.absorbed_power(&[C64::ONE; 2], &[1.0; 2], 1.0).unwrap(), 0.0);
+        assert_eq!(law.absorbed_power(&[C64::ONE, -C64::ONE], &[1.0; 2], 1.0).unwrap(), 2.0);
+        let beta = [C64::new(-1e-20, 1.3)];
+        let active = Admittance::Local { beta: &beta, declared_active: true };
+        let expected = -12.5e-20;
+        let actual = active.absorbed_power(&[C64::new(3.0, 4.0)], &[1.0], 1.0).unwrap();
+        assert!((actual / expected - 1.0).abs() < 1e-15);
+        assert!(Admittance::Local { beta: &beta, declared_active: false }
+            .absorbed_power(&[C64::ONE], &[1.0], 1.0).is_err());
+        assert!(Admittance::Rigid.absorbed_power(&[C64::new(f64::INFINITY, 0.0)], &[1.0], 1.0).is_err());
+        assert!(Admittance::Rigid.absorbed_power(&[C64::ONE], &[1.0], f64::INFINITY).is_err());
+    }
 }

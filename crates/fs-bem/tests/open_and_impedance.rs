@@ -1385,6 +1385,105 @@ impl BoundaryOperator for MeanLaw {
     }
 }
 #[test]
+fn impedance_bc_high_q_wall_work() {
+    let medium = Medium { density: 1.2, sound_speed: 343.0 };
+    let rho_c = medium.density * medium.sound_speed;
+    let surface = SpherePanels::icosphere(1.0, 0).unwrap();
+    let drive: Vec<_> = surface.normals().iter()
+        .map(|n| C64::new(0.003 * (1.0 + 0.4 * n[2]), 0.002 * n[0])).collect();
+    let check = |pressure: &[C64], beta: &[C64], actual: f64| {
+        let expected = pressure.iter().zip(beta).zip(surface.areas())
+            .map(|((&p, b), &a)| b.re * (p.re * p.re + p.im * p.im) * a / (2.0 * rho_c))
+            .sum::<f64>();
+        if expected == 0.0 { assert_eq!(actual, 0.0); }
+        else { assert!((actual / expected - 1.0).abs() < 5e-14, "{actual:e} != {expected:e}"); }
+    };
+    let closure = |solution: &bc::BoundarySolution| {
+        let outgoing = solution.radiation.power_diagnostics.surface_power.re;
+        let scale = solution.driving_power_w.abs() + outgoing.abs();
+        assert!((solution.driving_power_w - outgoing - solution.absorbed_power_w).abs() <= 2e-12 * scale);
+    };
+    for loss in [0.0, 1e-20, 0.08] {
+        let beta: Vec<_> = surface.normals().iter()
+            .map(|n| C64::new(loss * (1.0 + 0.3 * n[0]), 1.3 + 0.2 * n[2])).collect();
+        let law = Admittance::Local { beta: &beta, declared_active: false };
+        let owner = bc::PreparedBoundary::new(&surface, 0.7, medium, law, Formulation::BurtonMiller).unwrap();
+        let mut previous = None::<[f64; 2]>;
+        for phase in [C64::ONE, C64::new(0.6, 0.8)] {
+            let driven: Vec<_> = drive.iter().map(|&v| v * phase).collect();
+            let radiation = owner.solve(&driven).unwrap();
+            check(&radiation.radiation.pressure, &beta, radiation.absorbed_power_w);
+            closure(&radiation);
+            let incident = bc::IncidentTraces::from_field(&surface, 0.7, medium,
+                bc::IncidentField::PlaneWave(PlaneWave { direction: [0.6, 0.0, 0.8], amplitude_pa: phase }), 1e-5).unwrap();
+            let scattering = owner.scatter(&incident).unwrap();
+            check(&scattering.total_pressure_pa(), &beta, scattering.absorbed_power_w);
+            let powers = [radiation.absorbed_power_w, scattering.absorbed_power_w];
+            if let Some(previous) = previous {
+                for (a, b) in powers.into_iter().zip(previous) {
+                    assert!((a - b).abs() <= 1e-12 * a.abs());
+                }
+            }
+            previous = Some(powers);
+        }
+        // The same finalizers also serve the existing FMM/GMRES owner.
+        let gate = CancelGate::new_clock_free();
+        let iterative = bc::PreparedIterativeBoundary::new(&surface, 0.7, medium, law,
+            Formulation::BurtonMiller, &iterative_options(), &gate).unwrap();
+        let (radiation, report, _) = iterative.solve(&drive, &gate).unwrap();
+        assert!(report.converged_euclidean());
+        check(&radiation.radiation.pressure, &beta, radiation.absorbed_power_w);
+        closure(&radiation);
+        let incident = bc::IncidentTraces::from_field(&surface, 0.7, medium,
+            bc::IncidentField::PlaneWave(PlaneWave { direction: [0.6, 0.0, 0.8], amplitude_pa: C64::ONE }), 1e-5).unwrap();
+        let (scattering, report, _) = iterative.scatter(&incident, &gate).unwrap();
+        assert!(report.converged_euclidean());
+        check(&scattering.total_pressure_pa(), &beta, scattering.absorbed_power_w);
+    }
+}
+
+#[test]
+fn open_impedance_high_q_wall_work() {
+    let medium = Medium { density: 1.2, sound_speed: 343.0 };
+    let rho_c = medium.density * medium.sound_speed;
+    let surface = disc(2, 12);
+    let owner = PreparedScreen::new(&surface, 0.7, options(0), || false).unwrap();
+    for loss in [0.0, 1e-20, 0.08] {
+        let beta: Vec<_> = surface.vertices().iter()
+            .map(|x| C64::new(loss * (1.0 + 0.2 * x[0]), 1.3 + 0.3 * x[1])).collect();
+        for phase in [C64::ONE, C64::new(0.6, 0.8)] {
+            let drive: Vec<_> = surface.vertices().iter()
+                .map(|x| C64::new(0.003 * (1.0 + 0.4 * x[0]), 0.002 * x[1]) * phase).collect();
+            let solution = owner.solve(0.7, medium, SurfaceBc { drive_velocity: &drive,
+                admittance: Admittance::Local { beta: &beta, declared_active: false } }, || false).unwrap();
+            let jump = solution.pressure_jump_pa();
+            let mut integral = 0.0;
+            for ids in surface.triangles() {
+                let [a, b, c] = ids.map(|i| surface.vertices()[i]);
+                let area = 0.5 * ((b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0])).abs();
+                // Exact integral of the cubic barycentric polynomial beta_R
+                // times |P1 pressure|^2, independent of the production rule:
+                // integral(lambda_i lambda_j lambda_k)=A*{1/10,1/30,1/60}.
+                for i in 0..3 { for j in 0..3 { for k in 0..3 {
+                    let weight = if i == j && j == k { 0.1 }
+                        else if i == j || j == k || i == k { 1.0 / 30.0 }
+                        else { 1.0 / 60.0 };
+                    let p = jump[ids[j]];
+                    let q = jump[ids[k]];
+                    integral += area * weight * beta[ids[i]].re * (p.re * q.re + p.im * q.im);
+                } } }
+            }
+            let expected = integral / (2.0 * rho_c);
+            if loss == 0.0 { assert_eq!(solution.absorbed_power_w, 0.0); }
+            else { assert!((solution.absorbed_power_w / expected - 1.0).abs() < 5e-13); }
+            let outgoing = solution.radiated_power_w().unwrap();
+            let scale = solution.driving_power_w.abs() + outgoing.abs();
+            assert!((solution.driving_power_w - outgoing - solution.absorbed_power_w).abs() <= 2e-12 * scale);
+        }
+    }
+}
+
+#[test]
 fn impedance_bc_passivity() {
     let start = Instant::now();
     let medium = Medium::air();

@@ -3363,6 +3363,21 @@ integration test is included but remains unrun without the constellation.
 
 ## Measured source work and explicit wall absorption
 
+Local Robin absorption uses the original real normalized admittance,
+`Re(beta) |p|^2 / (2 rho c)`, before reactive-current rounding. Closed P0
+surfaces and their dense/iterative source and scattering finalizers share this
+work evaluation; scattering uses total incident-plus-scattered pressure.
+Open P1 screens integrate the same identity at their original triangle
+quadrature points with the original interpolated admittance and pressure jump.
+This retains weak physical loss beside a large reactance and gives exactly
+zero cycle-mean absorption for a reactive local law. Nonlocal operators retain
+their complete weighted work pairing, including cross terms. Declared active
+gain stays signed; no negative power is clipped. This improves evaluation of
+the existing discrete laws, without changing their spatial or constitutive
+accuracy claims. `wall_work_tests`, `impedance_bc_high_q_wall_work`, and
+`open_impedance_high_q_wall_work` exercise phase invariance, weak loss,
+nonlocal interference, and source/radiation/wall energy closure.
+
 `BoundaryPortImpedance::input_power_welch_bin` and
 `PreparedMolecularResponse::power_welch_bin` accept original-kind/order
 source histories through the shared exact-frequency Welch peak-bin view.
