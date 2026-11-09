@@ -24327,8 +24327,35 @@ Six authored regression groups cover known full-tensor eigenpairs, an
 independent noncommuting-support oracle, frame covariance and degenerate
 isotropic parity, stiff/matched limits, source bounds, and an independent
 two-sided welded-interface oracle. This is lossless normal-wave bulk physics;
-it adds no oblique anisotropic branches, anisotropic coating propagation,
-attenuation, source calibration or experimental qualification.
+it adds no oblique anisotropic branches, attenuation, source calibration or
+experimental qualification.
+
+### Resolved normal anisotropic coatings
+
+`elastic::acoustic::interface::normal::coating` binds original incident and
+coating characteristics to a nonnegative thickness and the existing passive
+backing. Each checked frame maps the same physical surface axes into its own
+original material axes. Native Christoffel modes propagate with their original
+speeds and full tensor strain/traction; the existing double-double phase owner
+retains phase-product and rear-distance low bits. One row-scaled native 12x12
+solve caches reflection, all six interior amplitudes and independent rear
+velocity. Weak stiff-support motion and original positive Gram-channel work
+remain observable separately from cancelling wave traces.
+
+Prepared coherent drives and depth queries allocate nothing. Whole-halfspace
+and whole-layer Mandel norm bounds enforce both original source domains,
+including internal standing-wave strain peaks between safe face samples.
+Front continuity, rear support fields and independent normal fluxes must close.
+Exactly zero thickness delegates to the original supported incident half-space
+and has no invented coating field. Preparation remains bounded and cancellable.
+
+Six authored test groups cover an independent full-tensor Cartesian continuum
+reference with interior strain, the quarter-wave transformer and original
+isotropic owner, independent material-frame rotations, exact absent-layer
+behavior, stiff-support work, and internal strain/domain/cancellation limits.
+The coating is lossless; only the supplied backing absorbs work. This adds no
+oblique anisotropic propagation, multilayer recursion, bulk damping, finite
+lateral geometry or experimental material qualification.
 
 ## Source-backed conduction through finite molecular-channel walls
 

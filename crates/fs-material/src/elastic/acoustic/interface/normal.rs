@@ -23,6 +23,9 @@ use super::super::DirectionalElasticWaves;
 use super::surface::tensor::complex_dot;
 use super::*;
 
+/// Resolved finite normal-wave coatings with the original anisotropic materials.
+pub mod coating;
+
 mod surface;
 mod welded;
 pub use surface::{NormalElasticSurfaceResponse, PreparedNormalElasticSurface};
