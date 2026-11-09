@@ -12625,3 +12625,39 @@ and error types, and injects late source/budget/cancellation refusals. These new
 regressions were source-reviewed but not executed in this implementation
 session because the execution environment became unavailable; compilation,
 runtime acceptance and experimental validation are not claimed here.
+
+## Actual-cell temperature continuation of loaded adhesive angular contacts
+
+The rolling-dissipation and torsion heat owners expose attached, same-time
+native temperature continuations. The exact original receiver identities,
+material caloric objects, accepted time, source history and caller stamp are
+admitted before either bulk temperature is read from its actual finite cell.
+The independently supplied interface temperature drives its original adhesion
+query. Original ordered cards, source applicability and angular calibration
+remain bound through the sealed normal, angular and lifecycle continuations.
+
+The native state and heat/source binding publish together after the final
+caller checkpoint and cancellation check. Full spring history and all three
+normal-release, angular-release and plastic-loss ledgers survive exactly, as
+do their partitions, outside destinations, receiver bindings and clocks.
+The next native motion uses the refreshed source and retained pair geometry.
+No old loss is deposited again, and this coefficient update changes neither
+body momentum nor caloric enthalpy.
+
+Reports retain the original source temperature report, both observed bulk
+temperatures, prescribed interface temperature and a named external driver for
+signed normal-plus-angular parameter work. A finite nonnegative bound limits
+its absolute total. The mechanical JKR potential is not a caloric entropy
+model, so storage work is not silently removed from the receivers or declared
+irreversible heat. Thermal branch changes, coupled area stability, changing
+yield calibration and closed thermoelastic feedback remain outside this
+attached-endpoint operation.
+
+Four new focused native/thermal cases cover independent E/G/W expectations,
+all three nonzero prior ledgers, retained memory and actual thermal/body state,
+subsequent native advancement, stale history, wrong cards/clock, invalid or
+exceeded work controls and final-publication cancellation. Pinned formatting,
+recursive parsing and independent source review passed. These new cross-crate
+tests were not compiled or executed because the session's dependency build
+was blocked by exhausted memory/disk; the separate 20-test production angular
+leaf harness passed and does not substitute for integrated execution.

@@ -10,8 +10,13 @@
 //! split adds no conducting link, temperature feedback, mixed-mode instability
 //! or body impulse. Intervening transport belongs to the original thermal owner.
 //! [`timed`] carries plastic heat through that original physical-time transport.
+//! [`temperature`] continues loaded twist at actual receiver-cell temperatures,
+//! preserving its history and assigning signed parameter work explicitly.
 
 pub mod timed;
+
+/// Actual thermal-cell temperatures continue loaded torsional material response.
+pub mod temperature;
 
 use super::{JkrSnapHeat, JkrSnapHeatControls, JkrSnapHeatError, Receiver};
 use fs_blake3::ContentHash;

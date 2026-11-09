@@ -1,4 +1,6 @@
 //! Original normal snap work, material calorics and native heat impulses.
+#[path = "adhesive_snap_heat/angular_temperature.rs"]
+mod angular_temperature;
 #[path = "../../fs-contact/tests/source_point/common.rs"]
 mod common;
 #[path = "adhesive_snap_heat/rolling.rs"]

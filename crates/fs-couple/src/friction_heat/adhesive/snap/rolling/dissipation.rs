@@ -11,6 +11,8 @@
 //! The partition is supplied explicitly; it is not a solved contact conduction
 //! law. Temperature feedback and transport between physical events are separate.
 //! [`timed`] transports rolling heat over the actual thermal interval.
+//! [`temperature`] continues the loaded source at receiver-cell temperatures
+//! with an explicit external parameter-work account and unchanged heat ledgers.
 
 use super::{
     JkrRollingSnapHeat, JkrRollingSnapHeatCandidate, JkrRollingSnapHeatError,
@@ -30,6 +32,9 @@ pub mod native;
 
 /// Plastic rolling power with native conduction, cooling and scheduled events.
 pub mod timed;
+
+/// Actual thermal-cell temperatures continue loaded rolling material response.
+pub mod temperature;
 
 /// Original snap receiver binding plus an explicit destination for plastic
 /// rolling loss. The new ledger begins at this binding; previously accumulated
