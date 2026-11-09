@@ -110,3 +110,100 @@ fn passive_exterior_memory_joins_the_same_impact_and_rollback() {
     let state=a.mechanics.state().to_vec();let cancelled=CancelGate::new_clock_free();cancelled.request();
     assert!(a.mechanics.step(&a.force,&cancelled).is_err());assert_eq!(a.mechanics.state(),state);
 }
+fn rim_nodes(film:&fs_plate::shell::head::TensionedDisk)->Vec<usize> {
+    let mut fixed:Vec<_>=model::rim(film).iter().flat_map(|&(a,b)|[a,b]).collect();
+    fixed.sort_unstable(); fixed.dedup(); fixed
+}
+fn pet_pack()->super::film_loss::FilmLoss {
+    super::film_loss::FilmLoss::load(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/../fs-vkplate/packs/head-film-pet-mylar-dupont-matsuzawa1959.fsmatpk")).unwrap()
+}
+#[test]
+fn the_film_loss_acts_on_the_bending_share_of_the_timpani_head() {
+    // The timpani card's simply supported head (w = 0, free slope): each mode's bending share phi^T K_b phi / lambda
+    // against the simply supported plate's own: D k^2 (1 - 2 (1 - nu) / (k a)^2) / (T + D k^2), k^2 = rho h omega^2 / T
+    // at the mode's in-vacuo frequency. The (1 - 2 (1 - nu) / (k a)^2) is the curved free-slope edge's Gaussian-
+    // curvature energy, (1 - nu) / a times the edge integral of (dw/dn)^2, taken off D times the integral of
+    // (lap w)^2. On the same head at 24 radial intervals (48 azimuths, as the card) every retained mode agrees
+    // within 3 % and (0,1) and the (1,1) pair within 2 %; the card's own 6 radial intervals (u-head-mesh) are coarse
+    // for curvature, so its shares are bounded and printed, and they are the ones the model's loss uses.
+    use fs_plate::shell::{head::TensionedDisk, profile::ProfileBudget};
+    let s=Spec::load(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/../../data/instruments/descriptions/timpani/timpani-2b.fsk")).unwrap();
+    let ratios=|radial:usize|->Vec<f64> {
+        let mut head=s.head; head.radial_intervals=radial;
+        let film=TensionedDisk::new(head,ProfileBudget {max_nodes:2048,max_triangles:4096,max_feature_evaluations:100_000}).unwrap();
+        let modes=fs_modal::slice_window(&film.model.k,&film.model.m,
+            ((std::f64::consts::TAU*s.head_band_hz[0]).powi(2),(std::f64::consts::TAU*s.head_band_hz[1]).powi(2)),
+            &fs_plate::SliceOptions::default()).unwrap().modes;
+        let shares=super::film_loss::bending_shares(&film,&modes,&rim_nodes(&film)).unwrap();
+        let d=head.young_pa*head.thickness_m.powi(3)/(12.0*(1.0-head.poisson*head.poisson));
+        modes.iter().zip(&shares).enumerate().map(|(n,(mode,share))| {
+            let k2=head.density_kg_m3*head.thickness_m*mode.lambda/head.tension_n_m;
+            let plate=d*k2*(1.0-2.0*(1.0-head.poisson)/(k2*head.radius_m*head.radius_m))/(head.tension_n_m+d*k2);
+            eprintln!("radial {radial}: mode {n}: {:.3} Hz, bending share {share:.6e}, simply supported plate {plate:.6e}, ratio {:.4}",
+                mode.lambda.sqrt()/std::f64::consts::TAU,share/plate);
+            assert!(*share>0.0 && *share<2e-3,"radial {radial} mode {n}: share {share}");
+            share/plate
+        }).collect()
+    };
+    let card=ratios(s.head.radial_intervals);
+    assert_eq!((s.head.radial_intervals,s.head.azimuths,card.len()),(6,48,17));
+    let fine=ratios(24);
+    assert_eq!(fine.len(),17);
+    for (n,ratio) in fine.iter().enumerate() {
+        assert!((ratio-1.0).abs()<if n<3 {0.02} else {0.03},"mode {n}: ratio {ratio} at 24 radial intervals");
+    }
+}
+#[test]
+fn without_the_flag_the_head_keeps_the_cards_ratio_and_with_it_the_loss_is_bending_only() {
+    let gate=CancelGate::new_clock_free();
+    let mut s=uniform();
+    assert!(s.head_damping_ratio>0.0);
+    let m=Model::new(&s,1,&gate).unwrap();
+    let card:Vec<f64>=m.modes.iter().map(|mode|2.0*s.head_damping_ratio*mode.lambda.sqrt()).collect();
+    assert_eq!(m.head_damping_per_s,card);
+    s.head_damping_ratio=0.0;
+    let m=Model::new(&s,1,&gate).unwrap();
+    assert!(m.head_damping_per_s.iter().all(|d|*d==0.0));
+    let pet=pet_pack();
+    s.head_film_loss=Some(std::sync::Arc::new(pet_pack()));
+    let m=Model::new(&s,1,&gate).unwrap();
+    let shares=super::film_loss::bending_shares(&m.film,&m.modes,&rim_nodes(&m.film)).unwrap();
+    assert_eq!(m.head_damping_per_s.len(),m.modes.len());
+    for ((rate,mode),share) in m.head_damping_per_s.iter().zip(&m.modes).zip(&shares) {
+        let omega=mode.lambda.sqrt();
+        assert_eq!(*rate,pet.tan_delta(omega/std::f64::consts::TAU).unwrap()*share*omega);
+        // Far below the whole stiffness's tan delta * omega: the prestress carries none of it.
+        assert!(*rate>0.0 && *rate<1e-2*pet.tan_delta(omega/std::f64::consts::TAU).unwrap()*omega);
+    }
+    s.head_damping_ratio=0.001;
+    assert_eq!(Model::new(&s,1,&gate).err().unwrap().to_string(),super::film_loss::VISCOUS_RATIO_REFUSAL);
+}
+#[test]
+fn film_loss_receipts_and_flags_are_explicit() {
+    let gate=CancelGate::new_clock_free();
+    let mut s=uniform(); s.head_damping_ratio=0.0;
+    let m=Model::new(&s,1,&gate).unwrap();
+    let (rates,lines)=pet_pack().damping(&m.film,&m.modes,&rim_nodes(&m.film)).unwrap();
+    assert_eq!((rates.len(),lines.len()),(m.modes.len(),m.modes.len()));
+    for (n,line) in lines.iter().enumerate() {
+        for part in [format!("mode {n} in vacuo"),"bending share".into(),"tan delta".into(),"293.15 K".into(),
+            "on bending only (prestress carries no loss)".into(),"head-film-pet-mylar-dupont-matsuzawa1959.fsmatpk".into(),
+            "measured on another film than this head".into()] {
+            assert!(line.contains(&part),"{line} lacks {part}");
+        }
+    }
+    let pack=concat!(env!("CARGO_MANIFEST_DIR"),"/../fs-vkplate/packs/head-film-pet-mylar-dupont-matsuzawa1959.fsmatpk");
+    let mut args:Vec<String>=["a.fsk","1","--head-film-loss",pack,"--wav-float32"].map(String::from).to_vec();
+    assert!(super::film_loss::option(&mut args).unwrap().is_some());
+    assert!(super::audio::float32_option(&mut args).unwrap());
+    assert_eq!(args,["a.fsk","1"]);
+    assert!(super::film_loss::option(&mut args).unwrap().is_none());
+    assert!(!super::audio::float32_option(&mut args).unwrap());
+    let mut missing:Vec<String>=["a.fsk","1","--head-film-loss"].map(String::from).to_vec();
+    assert!(super::film_loss::option(&mut missing).is_err());
+    let mut twice:Vec<String>=["--wav-float32","--wav-float32"].map(String::from).to_vec();
+    assert!(super::audio::float32_option(&mut twice).is_err());
+    assert!(pet_pack().tan_delta(10.0).is_err()); // below the curve's 20 Hz band
+}

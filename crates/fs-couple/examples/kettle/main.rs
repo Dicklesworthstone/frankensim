@@ -11,25 +11,30 @@ mod boundary;
 mod audio;
 mod tuning;
 mod execution;
+mod film_loss;
 #[cfg(test)]
 mod tests;
 
 fn main() -> Result<(), Error> {
     let mut args:Vec<_>=std::env::args().skip(1).collect();
-    if args.len()<2 {return Err("usage: kettle SPEC.fsk COUNT [--wav ...] [--edge-tensioner M K C STRAIN] [--edge-force SAMPLE N]".into());}
-    let spec=spec::Spec::load(&args[0])?;
+    if args.len()<2 {return Err("usage: kettle SPEC.fsk COUNT [--wav ...] [--edge-tensioner M K C STRAIN] [--edge-force SAMPLE N] [--head-film-loss PACK] [--wav-float32]".into());}
+    let mut spec=spec::Spec::load(&args[0])?;
     let reciprocal=audio::reciprocal::option(&mut args)?;
     let execution=execution::option(&mut args)?;
     let tensioner=tuning::option(&mut args,spec.maximum_slope)?;
+    if let Some(loss)=film_loss::option(&mut args)? {spec.head_film_loss=Some(std::sync::Arc::new(loss));}
+    let float32=audio::float32_option(&mut args)?;
     if args.len()!=2 && args.len()!=11 {return Err("usage: kettle SPEC.fsk COUNT [--wav FULL_SCALE_PA MIN_HZ MAX_HZ INTERVALS ORDER X_M Y_M Z_M] plus explicit edge options".into());}
     if reciprocal.is_some() && args.len()!=11 {return Err("--reciprocal-air requires --wav; it does not alter CSV mechanics".into());}
+    if float32 && args.len()!=11 {return Err("--wav-float32 requires --wav".into());}
     let steps: u64 = args[1].parse()?;
     if steps > 10_000_000 { return Err("at most ten million requested mechanical steps".into()); }
     let gate = CancelGate::new_clock_free();
     eprintln!("nonlinear execution: max_substep_depth={}, max_solve_attempts_per_tick={}, Newton_backtracking_halvings={}; unchanged output clock and physical limits, no real-time qualification",
         execution.substeps.max_depth,execution.substeps.max_attempts,execution.backtracking_halvings);
     if args.len()==11 {
-        let settings=audio::Settings::read(&args[2..],&spec)?;
+        let mut settings=audio::Settings::read(&args[2..],&spec)?;
+        settings.float32=float32;
         if steps==0 || steps>480_000 { return Err("audio count must be 1..480000 output frames".into()); }
         let ticks=steps.checked_mul(u64::from(spec.rate_hz/audio::OUTPUT_RATE)).ok_or("audio clock overflow")?;
         let mut baked=None;

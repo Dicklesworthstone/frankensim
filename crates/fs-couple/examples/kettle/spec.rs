@@ -21,6 +21,9 @@ pub struct Spec {
     // Reference stress/strain, loading/unloading powers, crush, densification, history.
     pub felt: [f64; 7],
     pub creep: Vec<[f64; 2]>,
+    /// Opt-in film loss on the head's bending share (`--head-film-loss`);
+    /// never read from the card, so a card alone keeps its viscous_ratio.
+    pub head_film_loss: Option<std::sync::Arc<super::film_loss::FilmLoss>>,
 }
 fn scalars<const N: usize>(row: &[&str]) -> Result<[f64; N], Error> {
     if row.len() != N { return Err("wrong number of physical values".into()); }
@@ -87,6 +90,7 @@ impl Spec {
             maximum_slope: scalars::<1>(row("maximum_slope")?)?[0], air: scalars(row("air")?)?,
             air_mesh: counts("air_mesh")?, air_maximum_hz: scalars::<1>(row("air_maximum_hz")?)?[0],
             rate_hz: rate[0].parse()?, mallet: scalars(row("mallet")?)?, felt: scalars(row("felt")?)?, creep,
+            head_film_loss: None,
         };
         result.validate()?;
         Ok(result)
@@ -114,6 +118,9 @@ impl Spec {
             || !self.air_maximum_hz.is_finite() || self.air_maximum_hz <= 0.0
             || self.air_maximum_hz / f64::from(self.rate_hz) >= 0.45
         { return Err("invalid material, clock, slope, mesh or spectral budget".into()); }
+        if self.head_film_loss.is_some() && self.head_damping_ratio != 0.0 {
+            return Err(super::film_loss::VISCOUS_RATIO_REFUSAL.into());
+        }
         fs_plate::PlateSection::isotropic(h.young_pa, h.poisson, h.thickness_m, h.density_kg_m3)?;
         if self.mallet.iter().chain(&self.felt).any(|v| !v.is_finite())
             || self.mallet[..3].iter().any(|v| *v <= 0.0) || self.mallet[3] < 0.0

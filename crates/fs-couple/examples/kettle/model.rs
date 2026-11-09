@@ -23,6 +23,9 @@ pub struct Model {
     pub tip_weight: f64,
     pub pickup: Vec<f64>,
     pub force: Vec<f64>,
+    /// The head modes' viscous coefficients [1/s] as built (2 zeta omega).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub head_damping_per_s: Vec<f64>,
     tensioner: Option<super::tuning::Tensioner>,
     edge_port: Option<(usize,f64)>,
 }
@@ -111,7 +114,15 @@ impl Model {
         fixed.sort_unstable(); fixed.dedup();
         let budget=MembraneReductionBudget {max_modes:32,max_nodes:2048,max_facet_pairs:2_000_000,
             max_solve_entries:16_000_000,relative_tolerance:1e-6};
-        let mut damping:Vec<_>=modes.iter().map(|m|2.0*spec.head_damping_ratio*m.lambda.sqrt()).collect();
+        let mut damping:Vec<_>=match &spec.head_film_loss {
+            None=>modes.iter().map(|m|2.0*spec.head_damping_ratio*m.lambda.sqrt()).collect(),
+            Some(loss)=>{
+                let (rates,lines)=loss.damping(&film,&modes,&fixed)?;
+                for line in lines {eprintln!("{line}");}
+                rates
+            },
+        };
+        let head_damping_per_s=damping.clone();
         let potential=match &tensioner {
             Some(t)=>{
                 let law=fs_couple::render::plate::impact::dilation::DilationPotential::from_disk(&film,&modes,t.config,budget)?;
@@ -149,7 +160,8 @@ impl Model {
         if tensioner.is_some()!=edge_port.is_some() {return Err("lost edge force coordinate during composition".into());}
         let force = vec![0.0;cavity.total_modes()];
         let pickup = fs_couple::render::plate::impact::linear::wire::film_shapes(&film,&modes,&[[m[5],m[6]]])?.remove(0);
-        Ok(Self { mechanics: execution.prepare(reference)?, cavity, air, film, modes, tip_weight, pickup, force, tensioner, edge_port })
+        Ok(Self { mechanics: execution.prepare(reference)?, cavity, air, film, modes, tip_weight, pickup, force,
+            head_damping_per_s, tensioner, edge_port })
     }
     /// Exact-sample force assignment enters the SAME accepted mechanical tick.
     /// Force scratch is restored on both success and refusal; sample/history

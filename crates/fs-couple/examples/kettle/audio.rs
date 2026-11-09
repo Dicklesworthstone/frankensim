@@ -3,7 +3,8 @@
 use super::{boundary::Boundary, model::Model, spec::Spec, Error};
 use fs_bem::{helmholtz::{Medium, Formulation, PreparedCbieGeometry, solve_radiation_batch,
     exterior_pressure_at_points_integrated}, panel3d::SpherePanels};
-use fs_couple::{pcm_wav::{decimate::Decimator, encode_pcm16_wav_interleaved},
+use fs_couple::{pcm_wav::{decimate::Decimator, encode_pcm16_wav_interleaved,
+    high_resolution::{Encoding, encode_pressure_wav}},
     render::plate::impact::{audio::ImpactSource, radiation::{self, fit}}};
 use fs_exec::CancelGate;
 use fs_math::{c64::C64, det};
@@ -25,7 +26,20 @@ pub struct Settings {
     pub intervals: usize,
     pub order: usize,
     pub receiver_m: [f64;3],
+    /// `--wav-float32`: the same pressure as IEEE float32 at the same full
+    /// scale, so the tail below 16-bit resolution survives. Off: 16-bit PCM.
+    pub float32: bool,
 }
+/// Removes `--wav-float32` from the arguments; true when it was given once.
+/// # Errors
+/// The flag given more than once.
+pub fn float32_option(args: &mut Vec<String>) -> Result<bool, Error> {
+    let given = args.iter().filter(|a| *a == FLOAT32_FLAG).count();
+    if given > 1 { return Err(format!("{FLOAT32_FLAG} is given more than once").into()); }
+    args.retain(|a| a != FLOAT32_FLAG);
+    Ok(given == 1)
+}
+pub const FLOAT32_FLAG: &str = "--wav-float32";
 impl Settings {
     pub fn read(args: &[String], spec: &Spec) -> Result<Self, Error> {
         if args.len()!=9 || args[0]!="--wav" {
@@ -33,7 +47,7 @@ impl Settings {
         }
         let s=Self { full_scale_pa:args[1].parse()?, band_hz:[args[2].parse()?,args[3].parse()?],
             intervals:args[4].parse()?,order:args[5].parse()?,
-            receiver_m:[args[6].parse()?,args[7].parse()?,args[8].parse()?] };
+            receiver_m:[args[6].parse()?,args[7].parse()?,args[8].parse()?], float32:false };
         s.validate(spec)?; Ok(s)
     }
     pub fn validate(self, spec: &Spec) -> Result<(), Error> {
@@ -254,8 +268,15 @@ pub fn render(model:&mut Model,bake:&Bake,spec:&Spec,settings:Settings,frames:us
         if !p.is_finite() { return Err("exterior pressure overflow".into()); }
         decimator.commit(); pressure.push(p);
     }
-    let (wav,clips)=encode_pcm16_wav_interleaved(&pressure,OUTPUT_RATE,1,settings.full_scale_pa)?;
-    if clips!=0 { return Err(format!("{clips} PCM clips: increase the explicit full-scale Pa; no clipped WAV is published").into()); }
+    let wav=if settings.float32 {
+        let wav=encode_pressure_wav(&pressure,OUTPUT_RATE,1,settings.full_scale_pa,Encoding::Float32)?;
+        eprintln!("kettle WAV encoding: IEEE float32 ({FLOAT32_FLAG}), full scale {} Pa = 1.0",settings.full_scale_pa);
+        wav
+    } else {
+        let (wav,clips)=encode_pcm16_wav_interleaved(&pressure,OUTPUT_RATE,1,settings.full_scale_pa)?;
+        if clips!=0 { return Err(format!("{clips} PCM clips: increase the explicit full-scale Pa; no clipped WAV is published").into()); }
+        wav
+    };
     eprintln!("kettle WAV: frames={frames}, rate_hz={OUTPUT_RATE}, full_scale_pa={}, peak_pa={}, propagation_delay_s={}, anti_alias_delay_frames={}; stationary finite-point pressure, not measured-instrument or real-time certification",
         settings.full_scale_pa,pressure.iter().map(|p|p.abs()).fold(0.0_f64,f64::max),bake.delay_s,decimator.delay_output_frames());
     Ok(wav)
