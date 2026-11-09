@@ -6,14 +6,19 @@
 //! approximation to the original constant-property mean duct relation.
 
 use super::*;
-use crate::graph::thermal::medium::convection::deposition::ConvectionSourceError;
+use crate::graph::thermal::medium::convection::deposition::{
+    ConvectionSourceError,
+    source::{SurfaceConvectionMaterialSample, material_at},
+};
 use fs_conduction::transient::deposition::backward_euler::BoundaryConductances;
 use fs_convection::developing::{
     CircularDuctSection, RectangularDuctSection, TurbulentCircularDuctSection,
+    TurbulentTubePropertyCorrection,
     evaluate_circular_duct_section, evaluate_rectangular_duct_section,
     evaluate_turbulent_circular_duct_section,
 };
-use fs_convection::{CorrelationError, NusseltEvaluation, ThermalConductivity};
+use fs_convection::{CorrelationError, HeatTransferCoefficient, NusseltEvaluation, ThermalConductivity};
+use fs_evidence::Evidence;
 use fs_material::fluid_transport::ThermalFluidTransportState;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -44,6 +49,15 @@ pub enum DevelopingDuct {
     TurbulentCircular {
         diameter: Length,
     },
+    /// The same developing turbulent circular section, with the explicit
+    /// Gnielinski liquid correction (Pr_bulk/Pr_wall)^0.11. Only the native
+    /// liquid graph owner admits this selection. Reservoir bulk properties
+    /// still supply Re, Pr and conductivity; the SAME source supplies wall
+    /// Pr at the actual fluid-facing surface, including a conjugate solution.
+    /// A held section correction does not resolve an axial property profile.
+    TurbulentCircularLiquidWall {
+        diameter: Length,
+    },
     /// Simultaneously developing rectangular inlet, using the original
     /// Shah-London CWT table slice. Its aspect ratio must be 0.5 and the
     /// actual source Prandtl number must be 0.72; neither is adjusted to fit.
@@ -59,7 +73,8 @@ pub enum DevelopingDuct {
 impl DevelopingDuct {
     fn metrics(self) -> Result<DuctMetrics, GraphDevelopingConvectionError> {
         let (diameter, area, perimeter, aspect) = match self {
-            Self::Circular { diameter } | Self::TurbulentCircular { diameter } => {
+            Self::Circular { diameter } | Self::TurbulentCircular { diameter }
+                | Self::TurbulentCircularLiquidWall { diameter } => {
                 let d = diameter.value();
                 (
                     d,
@@ -97,6 +112,14 @@ impl DevelopingDuct {
     }
 }
 
+// The original source owner supplies this capability, never a material name
+// or a gas-mixture heuristic. It cannot be selected by a duct binding.
+#[derive(Clone, Copy)]
+pub(in super::super) enum DevelopingFluid {
+    Liquid,
+    Gas,
+}
+
 #[derive(Clone, Copy)]
 struct DuctMetrics {
     diameter: Length,
@@ -113,7 +136,8 @@ struct DuctMetrics {
 pub enum DevelopingSectionEvaluation {
     /// Circular Hausen mean and its conservative finite section.
     Circular(CircularDuctSection),
-    /// Corrected Gnielinski means and a section from their shared heated inlet.
+    /// Original Gnielinski K=1 means and their actual section, including any
+    /// explicitly selected liquid wall-property correction on that section.
     TurbulentCircular(TurbulentCircularDuctSection),
     /// Original rectangular table means and their conservative finite section.
     Rectangular(RectangularDuctSection),
@@ -144,16 +168,17 @@ impl DevelopingSectionEvaluation {
             Self::Rectangular(s) => s.downstream(),
         }
     }
-    fn coefficient(&self, conductivity: f64, diameter: Length) -> Result<f64, CorrelationError> {
+    fn coefficient(&self, conductivity: f64, diameter: Length)
+        -> Result<Evidence<HeatTransferCoefficient>, CorrelationError>
+    {
         let conductivity = ThermalConductivity::new(conductivity);
         match self {
-            Self::Circular(s) => Ok(s.heat_transfer_coefficient(conductivity, diameter)?.value.value()),
-            Self::TurbulentCircular(s) => Ok(s
-                .heat_transfer_coefficient(conductivity, diameter)?.value.value()),
-            Self::Rectangular(s) => Ok(s
-                .heat_transfer_coefficient(conductivity, diameter)?
-                .value
-                .value()),
+            Self::Circular(s) => s.heat_transfer_coefficient(conductivity, diameter),
+            Self::TurbulentCircular(s) if s.property_correction().is_some() => {
+                s.heat_transfer_coefficient_with_sensitivities(conductivity, diameter)
+            }
+            Self::TurbulentCircular(s) => s.heat_transfer_coefficient(conductivity, diameter),
+            Self::Rectangular(s) => s.heat_transfer_coefficient(conductivity, diameter),
         }
     }
 }
@@ -209,6 +234,14 @@ pub struct DevelopingConvectionSample<M> {
     pub heat_into_fluid_w: f64,
     pub material: M,
     pub thermal: ThermalFluidTransportState,
+    /// The original liquid queried at the ACTUAL fluid-facing wall when the
+    /// explicit correction is selected. This diagnostic source has no mass,
+    /// caloric state or density admission as a second stored fluid cell.
+    pub surface: Option<SurfaceConvectionMaterialSample<M>>,
+    /// Actual section coefficient and model evidence. A corrected turbulent
+    /// section includes its original analytic input partials, including
+    /// Pr_wall; these are not total derivatives through the material source.
+    pub coefficient: Evidence<HeatTransferCoefficient>,
     pub section: DevelopingSectionEvaluation,
 }
 
@@ -276,9 +309,10 @@ pub(in super::super) fn evaluate<M: ThermalFluidTransport>(
     flow: GraphFlow<'_>,
     bindings: &[GraphDevelopingSection],
     maximum_sections: usize,
+    fluid: DevelopingFluid,
     mut resolve: impl FnMut(Temperature) -> Result<M, SourceGraphError>,
 ) -> Result<ResolvedDevelopingConvection<M>, GraphDevelopingConvectionError> {
-    let geometry = admit_sections(core, cx, thermal, bindings, maximum_sections)?;
+    let geometry = admit_sections(core, cx, thermal, bindings, maximum_sections, fluid)?;
     let mut links = BTreeMap::new();
     let mut reservoirs = BTreeMap::new();
     let mut samples = Vec::with_capacity(geometry.len());
@@ -304,6 +338,7 @@ fn admit_sections<'a>(
     thermal: &DepositionSimulation<'_>,
     bindings: &'a [GraphDevelopingSection],
     maximum_sections: usize,
+    fluid: DevelopingFluid,
 ) -> Result<Vec<Geometry<'a>>, GraphDevelopingConvectionError> {
     let source = GraphDevelopingConvectionError::Source;
     poll(cx).map_err(source)?;
@@ -318,11 +353,17 @@ fn admit_sections<'a>(
     // Admit every whole-wall patch before calling any external material source.
     for binding in bindings {
         poll(cx).map_err(source)?;
-        if matches!(binding.duct, DevelopingDuct::TurbulentCircular { .. })
+        if matches!(binding.duct, DevelopingDuct::TurbulentCircularLiquidWall { .. })
+            && !matches!(fluid, DevelopingFluid::Liquid)
+        {
+            return Err(invalid("liquid wall-property correction requires the original liquid graph owner"));
+        }
+        if matches!(binding.duct, DevelopingDuct::TurbulentCircular { .. }
+            | DevelopingDuct::TurbulentCircularLiquidWall { .. })
             && binding.property_temperature != ConvectionPropertyTemperature::Reservoir
         {
             return Err(invalid(
-                "developing turbulent tubes require actual bulk properties with explicit K=1",
+                "developing turbulent tubes require actual bulk properties with their explicit wall-property selection",
             ));
         }
         if !cells.insert(binding.fluid_cell) {
@@ -424,6 +465,15 @@ fn evaluate_surface<M: ThermalFluidTransport>(
         return Err(invalid("developing source must match requested temperature and transport state"));
     }
     core.admit_density(binding.fluid_cell, transport).map_err(source)?;
+    let surface = if matches!(binding.duct, DevelopingDuct::TurbulentCircularLiquidWall { .. }) {
+        poll(cx).map_err(source)?;
+        Some(material_at(binding.fluid_cell, surface_temperature, || {
+            resolve(Temperature::new(surface_temperature))
+        }).map_err(GraphDevelopingConvectionError::Convection)?)
+    } else { None };
+    let correction = surface.as_ref().map(|wall| TurbulentTubePropertyCorrection::Liquid {
+        wall_prandtl: wall.thermal.transport().prandtl(),
+    });
     let evaluate_flow = |rate: f64| {
         let start = if rate < 0.0 { binding.reverse_start.value() }
             else { binding.forward_start.value() };
@@ -435,10 +485,14 @@ fn evaluate_surface<M: ThermalFluidTransport>(
             return Err(invalid("positive developing distance cannot underflow to a new entrance"));
         }
         match g.duct.aspect {
-            None if matches!(binding.duct, DevelopingDuct::TurbulentCircular { .. }) => {
+            None if matches!(binding.duct, DevelopingDuct::TurbulentCircular { .. }
+                | DevelopingDuct::TurbulentCircularLiquidWall { .. }) => {
                 evaluate_turbulent_circular_duct_section(
                     reynolds, transport.prandtl(), start_ratio, end_ratio,
-                ).map(DevelopingSectionEvaluation::TurbulentCircular)
+                ).and_then(|section| match correction {
+                    Some(correction) => section.with_property_correction(correction),
+                    None => Ok(section),
+                }).map(DevelopingSectionEvaluation::TurbulentCircular)
             }
             None => evaluate_circular_duct_section(
                 reynolds, transport.prandtl(), start_ratio, end_ratio,
@@ -462,7 +516,7 @@ fn evaluate_surface<M: ThermalFluidTransport>(
     let coefficient = section.coefficient(
         transport.thermal_conductivity_w_m_k(), g.duct.diameter,
     ).map_err(|error| native(ConvectionSourceError::Material(error.into())))?;
-    let conductance_w_k = g.wall_area * coefficient;
+    let conductance_w_k = g.wall_area * coefficient.value.value();
     let difference = surface_temperature - g.fluid_temperature;
     let heat_into_fluid_w = conductance_w_k * difference;
     if !positive(conductance_w_k) || !difference.is_finite() || !heat_into_fluid_w.is_finite()
@@ -475,6 +529,7 @@ fn evaluate_surface<M: ThermalFluidTransport>(
         fluid_cell: binding.fluid_cell, wall: binding.wall,
         wall_temperature_k: surface_temperature, fluid_temperature_k: g.fluid_temperature,
         property_temperature_k, length_m: g.length, area_m2: g.wall_area,
-        conductance_w_k, heat_into_fluid_w, material, thermal: snapshot, section,
+        conductance_w_k, heat_into_fluid_w, material, thermal: snapshot, surface,
+        coefficient, section,
     })
 }

@@ -407,6 +407,7 @@ impl<'a, 'card> LiquidGraphSources<'a, 'card> {
                 GraphDevelopingConvectionError::Source(error),
             ))?;
         prepared.resolve(&self.core, cx, thermal, flow, admission, config,
+            convection::developing::DevelopingFluid::Liquid,
             |t| self.law.at_temperature(t).map_err(SourceGraphError::Liquid))
     }
 
@@ -461,6 +462,7 @@ impl<'a, 'card> LiquidGraphSources<'a, 'card> {
             .map_err(GraphDevelopingConvectionError::Source)?;
         let convection = convection::developing::evaluate(
             &self.core, cx, thermal, flow, bindings, maximum_sections,
+            convection::developing::DevelopingFluid::Liquid,
             |t| self.law.at_temperature(t).map_err(SourceGraphError::Liquid),
         )?;
         Ok(GraphDevelopingHeat { admission, convection })

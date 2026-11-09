@@ -538,3 +538,6 @@ fn g1_developing_links_and_reservoirs_share_native_momentum_advection_and_energy
     });
     }
 }
+
+#[path = "developing/liquid_wall.rs"]
+mod liquid_wall;

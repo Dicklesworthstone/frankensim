@@ -533,3 +533,6 @@ fn g0_g4_developing_surface_budget_geometry_and_crossing_fail_without_advancing_
         near(initial.temperature_k(CellId(6)).unwrap(), 400.0);
     });
 }
+
+#[path = "developing/liquid_wall.rs"]
+mod liquid_wall;

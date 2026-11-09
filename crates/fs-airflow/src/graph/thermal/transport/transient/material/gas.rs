@@ -479,6 +479,7 @@ impl<'a> GasGraphSources<'a> {
                 GraphDevelopingConvectionError::Source(error),
             ))?;
         prepared.resolve(&self.core, cx, thermal, flow, admission, config,
+            convection::developing::DevelopingFluid::Gas,
             |t| resolve_gas(self.source, t))
     }
 
@@ -532,6 +533,7 @@ impl<'a> GasGraphSources<'a> {
             .map_err(GraphDevelopingConvectionError::Source)?;
         let convection = convection::developing::evaluate(
             &self.core, cx, thermal, flow, bindings, maximum_sections,
+            convection::developing::DevelopingFluid::Gas,
             |t| resolve_gas(self.source, t),
         )?;
         Ok(GraphDevelopingHeat { admission, convection })

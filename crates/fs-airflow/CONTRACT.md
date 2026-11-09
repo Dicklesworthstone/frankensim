@@ -5974,3 +5974,15 @@ Reference: S. W. Churchill, "Friction-factor equation spans all fluid-flow
 regimes" (1977), equations (5), (18), converted from the paper's friction
 convention to Darcy friction:
 <https://files.engineering.com/files/85c0f3a6-a102-4a22-9d35-f15858c0dd2b/CEM_-_Friction-factor_equation_%281977%29.pdf>.
+
+## Liquid wall properties in native developing graph convection
+
+`DevelopingDuct::TurbulentCircularLiquidWall` explicitly selects Gnielinski's `(Pr_bulk/Pr_wall)^0.11` correction for the original turbulent circular section. The original `TurbulentCircular` path retains K=1. Only the native liquid graph owner admits the new selection; gas names, compositions and numerical Prandtl values never establish liquid eligibility.
+
+Both prescribed-wall and finite-wall paths keep the original bulk material state for Re, Pr, conductivity, density admission and the accepted native flow. The same fixed-pressure/composition liquid owner is additionally queried at the actual fluid-facing wall temperature. Its retained source snapshot supplies wall Prandtl number, including Cp and conductivity, rather than substituting wall viscosity alone. This query introduces no mass, caloric store, hydraulic density replacement or independent heat source.
+
+Every original signed flow endpoint still admits the same physical entrance distance and corrected section; a trajectory crossing zero cannot hide outside the forced-flow domain. Full wetted-area geometry and the original source and correlation bounds remain active. Samples retain both cumulative K=1 means, the actual corrected section and coefficient evidence, the actual wall source, and the correction's independent analytic input partials. Those partials are not total derivatives through the material or graph.
+
+The existing conjugate normal-path solve re-queries this same corrected section at each actual surface trial and publishes only its combined reciprocal conductance to the native wall/fluid link. The bare film hA remains diagnostic. Locally changing bulk or wall properties remains a held-section approximation; it does not resolve axial wall spreading or a nonisothermal boundary-layer history, and corrected model discrepancy remains unbounded.
+
+Focused regressions cover independently evaluated section heat, original wall-source coordinates, signed entrances, preserved K=1 behavior, source support and gas refusal, accepted native momentum/advection/storage balance, and conjugate surface/reciprocal heat balance in heating, cooling and equilibrium. They do not establish physical calibration.

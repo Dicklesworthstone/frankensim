@@ -106,6 +106,18 @@ fn g1_g4_developing_gas_retains_film_calorics_and_native_endpoint_mach() {
         assert!(links.is_empty());
         near(boundaries.reservoir_w_k[&CellId(2)], conductance);
 
+        // The liquid correction is selected by the original source owner,
+        // never inferred from a gas name, composition or a matching Pr value.
+        let mut liquid_only = sections;
+        liquid_only[0].duct = DevelopingDuct::TurbulentCircularLiquidWall {
+            diameter: Length::new(diameter),
+        };
+        liquid_only[0].property_temperature = ConvectionPropertyTemperature::Reservoir;
+        let refused = owner.evaluate_developing_sections(
+            cx, &initial, &resolved.sources, &report, &liquid_only, 1,
+        ).unwrap_err();
+        assert!(refused.to_string().contains("original liquid graph owner"));
+
         // A zero average cannot hide the native trajectory's Mach violation;
         // the original source/flow owner refuses before forced-card evaluation.
         let bounded = GasGraphSources::try_new(

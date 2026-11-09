@@ -33,7 +33,9 @@ struct PreparedSection<'a, 'm> {
 /// Native liquid/gas owners admit the original duct geometry and full signed
 /// flow envelope at every proposed endpoint. Geometry is resolved once before
 /// surface trials, and each trial uses the SAME section evaluator as the
-/// ordinary developing path.
+/// ordinary developing path. An explicitly selected liquid wall correction
+/// therefore queries the same fluid at every actual surface trial; its bulk
+/// properties and native storage remain at the original fluid-cell state.
 pub struct PreparedGraphDevelopingConjugateLinks<'a, 'm> {
     links: Vec<PreparedSection<'a, 'm>>,
     sections: Vec<GraphDevelopingSection>,
@@ -152,6 +154,7 @@ impl<'a, 'm> PreparedGraphDevelopingConjugateLinks<'a, 'm> {
         flow: GraphFlow<'_>,
         admission: GraphSourceAdmission,
         config: LayerConductionConfig,
+        fluid: DevelopingFluid,
         mut resolve: impl FnMut(Temperature) -> Result<M, SourceGraphError>,
     ) -> Result<ResolvedGraphDevelopingConjugateHeat<M>, GraphConjugateError> {
         let source =
@@ -165,7 +168,7 @@ impl<'a, 'm> PreparedGraphDevelopingConjugateLinks<'a, 'm> {
                 .wall
                 .temperatures(thermal, prepared.binding.wall_layer)?;
         }
-        let geometry = admit_sections(core, cx, thermal, &self.sections, self.maximum_sections)
+        let geometry = admit_sections(core, cx, thermal, &self.sections, self.maximum_sections, fluid)
             .map_err(GraphConjugateError::Developing)?;
         let mut samples = Vec::with_capacity(self.links.len());
         let mut conductances_w_k = BTreeMap::new();
