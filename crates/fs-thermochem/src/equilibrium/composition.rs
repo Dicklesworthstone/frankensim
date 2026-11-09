@@ -446,6 +446,8 @@ impl IdealGasEquilibriumV1 {
     }
     /// Adiabatic fixed-pressure products for a common reactant inlet temperature.
     /// Formation energy is already in h; no second heat-release term is added.
+    /// Positive feed species also admit the original source path from their
+    /// inlet temperature to the complete product-temperature bracket.
     pub fn equilibrate_hp(
         &self,
         pressure: Pressure,
@@ -455,6 +457,21 @@ impl IdealGasEquilibriumV1 {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<IdealGasEquilibriumSolutionV1, CompositionEquilibriumErrorV1> {
         let h = self.feed_enthalpy(inlet_temperature, feed, &mut cancelled)?;
+        controls.validate()?;
+        let minimum = controls.minimum_temperature_k.min(inlet_temperature.value());
+        let maximum = controls.maximum_temperature_k.max(inlet_temperature.value());
+        for (id, amount) in feed {
+            poll(&mut cancelled)?;
+            if amount.value() == 0.0 {
+                continue;
+            }
+            // feed_enthalpy already admitted identities, uniqueness and amounts.
+            // Product-only species need support in the solve bracket, not at
+            // an inlet temperature at which they are physically absent.
+            let i = self.elemental.species().binary_search(id)
+                .map_err(|_| CompositionEquilibriumErrorV1::UnknownFeedSpecies(id.clone()))?;
+            admit_source_temperature_range(&self.models[i], minimum, maximum)?;
+        }
         self.equilibrate_hp_enthalpy(pressure, feed, h, controls, cancelled)
     }
     /// Core fixed-pressure solve for an explicit total-enthalpy target [J].
@@ -557,6 +574,30 @@ impl EquilibriumEnthalpySolveV1 {
         Ok(())
     }
 }
+// Original-source continuity is shared by HP inlet/product paths and the SP/UV
+// inverse owners. Endpoint evaluations alone cannot admit a chart seam or gap.
+fn admit_source_temperature_range(
+    model: &Nasa9StandardStateModelV1,
+    minimum_temperature_k: f64,
+    maximum_temperature_k: f64,
+) -> Result<(), CompositionEquilibriumErrorV1> {
+    use CompositionEquilibriumErrorV1 as E;
+    let lower = model
+        .region_for_temperature(minimum_temperature_k)
+        .ok_or(E::Invalid("equilibrium lower temperature lacks source support"))?
+        .0;
+    let upper = model
+        .region_for_temperature(maximum_temperature_k)
+        .ok_or(E::Invalid("equilibrium upper temperature lacks source support"))?
+        .0;
+    if lower != upper && model.caloric_reference.is_none() {
+        return Err(E::Invalid(
+            "cross-region equilibrium path requires explicit caloric continuity",
+        ));
+    }
+    Ok(())
+}
+
 fn allocated<T: Clone>(len: usize, value: T) -> Result<Vec<T>, CompositionEquilibriumErrorV1> {
     let mut result = Vec::new();
     result

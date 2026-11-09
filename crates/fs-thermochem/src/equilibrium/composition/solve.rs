@@ -764,20 +764,9 @@ impl Workspace {
         maximum_temperature_k: f64,
     ) -> Result<(), E> {
         for &i in &self.active {
-            let model = &owner.models[i];
-            let lower = model
-                .region_for_temperature(minimum_temperature_k)
-                .ok_or(E::Invalid("equilibrium lower temperature lacks source support"))?
-                .0;
-            let upper = model
-                .region_for_temperature(maximum_temperature_k)
-                .ok_or(E::Invalid("equilibrium upper temperature lacks source support"))?
-                .0;
-            if lower != upper && model.caloric_reference.is_none() {
-                return Err(E::Invalid(
-                    "cross-region equilibrium path requires explicit caloric continuity",
-                ));
-            }
+            admit_source_temperature_range(
+                &owner.models[i], minimum_temperature_k, maximum_temperature_k,
+            )?;
         }
         Ok(())
     }
