@@ -9899,8 +9899,74 @@ the original numerical modules without substitute implementations; it is not
 a full-workspace or DSR verdict.
 
 The declared piecewise coefficients and finite source spectrum carry no smooth
-modulation or waveform-truncation error bound. This motion/orbit extension does
-not add a physical work/heat ledger, nonlinear bearing law or eigenvalue enclosure.
+modulation or waveform-truncation error bound. The accounted counterparts below
+add physical work and heat to these same trajectories. Nonlinear bearing laws
+and eigenvalue enclosures remain separate capabilities.
+
+## Work, storage and heat of forced Maxwell rotor cycles
+
+`periodic::{prepare_maxwell_forced_power_cycle,
+prepare_maxwell_harmonic_power_cycle, prepare_maxwell_fourier_power_cycle}`
+prepare the original full-state motion together with independently integrated
+physical work channels. `PreparedRotorMaxwellPowerCycle::advance` handles
+arbitrary initial displacement, velocity and branch memory; `periodic_orbit`
+accounts the native orbit's already-computed trajectory without a second
+propagation. Original fixed-point, closure, resolvent and Floquet diagnostics
+remain available through the motion owner.
+
+Each `RotorMaxwellSegmentWork` separates applied generalized-force work,
+signed `integral v^T C v dt`, signed circulatory `integral v^T K_skew q dt`,
+kinetic storage, relaxed symmetric-K storage, every original
+`Delta(sigma_j^2/(2 k_j))`, and each independently integrated branch heat
+`integral sigma_j^2/(k_j tau_j) dt`. Dark branches and equal relaxation rates
+retain their original identities. Gyroscopic force remains in motion and
+contributes no heat; negative active-bearing and circulatory work remains
+signed work. A negative numerical Maxwell heat refuses rather than clipping.
+
+C and relaxed K may change at declared boundaries with continuous q/v/sigma.
+Outgoing stiffness work is `q^T(K_next-K_old)q/2`, including the final-to-first
+period seam. Cycle endpoint storage uses the first segment's coefficients on
+both sides. The complete balance is storage change plus C/circulatory work
+plus branch heat, minus applied work and stiffness-switch work. Each segment,
+the sum of absolute segment defects, and the complete cycle must independently
+satisfy the caller's absolute energy allowance. `RotorMaxwellCyclePower`
+retains all channels, per-branch heats, storage changes and mean powers.
+
+Native motion and work assembly share the extracted original
+`MaxwellGenerator`. The existing pHS quadratic-flow integral owner observes
+the complete joint physical/source state; the existing source-phase congruence
+then condenses source coordinates into one affine slot. DC/tone, tone/tone and
+initial-memory interference remains present. Separate steady-tone powers are
+not substituted for the switched transient. Original mechanical storage,
+source insertion, switch-work and energy gates are reused without a separate
+trajectory integrator or material-memory reduction.
+
+The original fixed M/G, signed spin, branch strain vectors, stiffnesses and
+relaxation times remain required. Changing these branch storage laws needs
+separately accounted parameter work. The returned heat has no inferred thermal
+destination or temperature law. Closure is a numerical energy account, not an
+interval trajectory enclosure, passivity proof or orbit-attraction guarantee.
+Smooth coefficient modulation and finite Fourier truncation still require
+their own convergence evidence.
+
+With s segments, b branches and h tones, cold work is
+O(s*(3+b)*(2n+b+1+2h)^3); retained forms and warm accounting are
+O(s*(3+b)*(2n+b+1)^2). Complete native motion, concurrent quadratic workspace,
+retained forms and result storage are admitted before preparation. At the
+original hard limits the joint generator has at most 193 coordinates, within
+the shared 256-coordinate quadratic owner. Factors/forms are immutable after
+preparation and cancellation publishes no partial account.
+
+All six new physical groups pass natively: independent dark-memory and coupled
+decay heats; resonant periodic phasor consumption at source scales
+1e-60, 1, 1e60; full-mass/gyro/circulatory coordinate invariance; switched Fourier
+transients against an independent original-coordinate RK4 work/heat reference
+with seam work and harmonic cross terms; zero-branch equivalence with the
+existing mechanical power owner; and admission/cancellation/replay.
+The focused actual-source validation totals 71 passes including the motion,
+lossless-Fourier and notch/peak sensitivity regressions. DSR and RCH are
+unavailable in this environment; these local Cargo runs are a bounded native
+fallback, not a full-workspace or DSR gate.
 
 ## Resolved lossless motion at cancelling cycle boundaries
 

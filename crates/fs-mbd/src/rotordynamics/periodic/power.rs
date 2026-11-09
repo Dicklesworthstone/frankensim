@@ -400,7 +400,7 @@ fn prepare_power_cycle<'a>(
 // The source coordinate is normalized reciprocally to its force column. Its
 // observation retains the original physical force, never a mass-solved force.
 #[allow(clippy::too_many_arguments)] // one shared column assembly for DC/cosine/sine
-fn insert_source(
+pub(super) fn insert_source(
     generator: &mut [f64],
     observation: &mut [f64],
     e: usize,
@@ -429,7 +429,7 @@ fn insert_source(
 
 // B maps [physical_state, common_source_scale] to the complete initial
 // physical/source state. B^T W B includes ALL source-source cross terms.
-fn condense_sources(
+pub(super) fn condense_sources(
     form: &[f64],
     d: usize,
     phases: &[f64],
@@ -614,7 +614,7 @@ impl PreparedRotorPowerCycle<'_> {
 
 // The symmetric quadratic form is storage even when K itself is not symmetric.
 // Polarization resolves small changes beside a large unchanged configuration.
-fn storage_change(matrix: &[f64], before: &[f64], after: &[f64]) -> Dd {
+pub(super) fn storage_change(matrix: &[f64], before: &[f64], after: &[f64]) -> Dd {
     let n = before.len();
     let half = Dd::from_f64(0.5);
     let mut result = Dd::ZERO;
@@ -629,7 +629,7 @@ fn storage_change(matrix: &[f64], before: &[f64], after: &[f64]) -> Dd {
     }
     result
 }
-fn switch_work(before: &[f64], after: &[f64], q: &[f64]) -> Dd {
+pub(super) fn switch_work(before: &[f64], after: &[f64], q: &[f64]) -> Dd {
     let mut result = Dd::ZERO;
     for i in 0..q.len() {
         for j in 0..q.len() {
@@ -643,12 +643,12 @@ fn switch_work(before: &[f64], after: &[f64], q: &[f64]) -> Dd {
     }
     result
 }
-fn rounded(value: Dd) -> Result<f64, RotorError> {
+pub(super) fn rounded(value: Dd) -> Result<f64, RotorError> {
     finite(value.hi)?;
     finite(value.lo)?;
     finite(value.to_f64())
 }
-fn represented(value: Dd) -> Result<f64, RotorError> {
+pub(super) fn represented(value: Dd) -> Result<f64, RotorError> {
     let result = rounded(value)?;
     if result == 0.0 && value != Dd::ZERO {
         Err(RotorError::Invalid("power coordinate scaling underflow"))
@@ -656,7 +656,7 @@ fn represented(value: Dd) -> Result<f64, RotorError> {
         Ok(result)
     }
 }
-fn admit_energy_tolerance(tolerance: f64) -> Result<(), RotorError> {
+pub(super) fn admit_energy_tolerance(tolerance: f64) -> Result<(), RotorError> {
     if !tolerance.is_finite() || tolerance < 0.0 {
         Err(RotorError::Invalid(
             "finite nonnegative cycle energy allowance required",
@@ -665,7 +665,7 @@ fn admit_energy_tolerance(tolerance: f64) -> Result<(), RotorError> {
         Ok(())
     }
 }
-fn check_energy(residual_j: f64, tolerance_j: f64) -> Result<(), RotorCyclePowerError> {
+pub(super) fn check_energy(residual_j: f64, tolerance_j: f64) -> Result<(), RotorCyclePowerError> {
     if residual_j.abs() > tolerance_j {
         Err(RotorCyclePowerError::Energy {
             residual_j,

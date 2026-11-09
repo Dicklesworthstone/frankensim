@@ -10,9 +10,9 @@
 //! these affine maps do not label that exchange as material heat.
 
 use super::{
-    AffineSegmentMap, CycleForcing, MAX_ROTOR_PERIODIC_SEGMENTS, MassSolve, RotorError,
-    RotorFloquetBudget, RotorPeriodicSegment, affine_segment_flow, finite, forcing as affine,
-    multiply, poll, product_three, restore_entry,
+    AffineSegmentMap, CycleForcing, MAX_ROTOR_PERIODIC_SEGMENTS, MassSolve, RotorBearingModel,
+    RotorError, RotorFloquetBudget, RotorPeriodicSegment, affine_segment_flow, finite,
+    forcing as affine, multiply, poll, product_three, restore_entry,
 };
 use crate::rotordynamics::relaxation::{MAX_ROTOR_MAXWELL_BRANCHES, MaxwellDampingBranch};
 use fs_la::eigen_complex::{EigError, eig_with_cancel};
@@ -22,6 +22,7 @@ mod forcing;
 pub use forcing::{RotorMaxwellPeriodicOrbit, prepare_maxwell_forced_cycle};
 mod harmonic;
 pub use harmonic::{prepare_maxwell_fourier_cycle, prepare_maxwell_harmonic_cycle};
+pub mod power;
 
 #[cfg(test)]
 mod tests;
@@ -220,39 +221,16 @@ fn prepare(
         boundary_times.push(finite(period.to_f64())?);
     }
     let period_seconds = finite(period.to_f64())?;
-    let mass = MassSolve::new(reference, &mut cancelled)?;
-    // One common invertible balance for every segment:
-    // z = [S q, T S v, T sigma_j/sqrt(k_j)], S_ii = sqrt(M_ii).
-    // The reciprocal memory/velocity couplings then share sqrt(k_j) b_j.
-    // Branch energy is sigma_j^2/(2 k_j); no effective damping is introduced.
-    let mut state_scale = mass.scale.clone();
-    for &scale in &mass.scale {
-        state_scale.push(product_three(period_seconds, scale, 1.0)?);
-    }
-    let mut coupling = Vec::with_capacity(branches.len());
-    let mut maximum_mass_residual = 0.0_f64;
-    for branch in branches {
-        poll(&mut cancelled)?;
-        let root_k = det::sqrt(branch.stiffness);
-        let stress_scale = finite(period_seconds / root_k)?;
-        if stress_scale == 0.0 {
-            return Err(RotorError::Invalid(
-                "periodic memory coordinate scale underflow",
-            ));
-        }
-        state_scale.push(stress_scale);
-        let original: Vec<_> = branch.strain.iter().copied().map(Dd::from_f64).collect();
-        let (acceleration, residual) =
-            mass.solve_rhs(&branch.strain, &original, 1.0, tolerance, &mut cancelled)?;
-        maximum_mass_residual = maximum_mass_residual.max(residual);
-        let mut force = Vec::with_capacity(n);
-        let mut strain = Vec::with_capacity(n);
-        for i in 0..n {
-            force.push(product_three(-acceleration[i], root_k, 1.0)?);
-            strain.push(restore_entry(branch.strain[i], mass.scale[i], root_k)?);
-        }
-        coupling.push((force, strain));
-    }
+    let assembly = MaxwellGenerator::new(
+        reference,
+        branches,
+        period_seconds,
+        tolerance,
+        &mut cancelled,
+    )?;
+    let mass = &assembly.mass;
+    let state_scale = &assembly.state_scale;
+    let mut maximum_mass_residual = assembly.maximum_mass_residual;
     let mut monodromy = vec![0.0; d * d];
     for i in 0..d {
         monodromy[i * d + i] = 1.0;
@@ -263,51 +241,19 @@ fn prepare(
     let mut segment_maps = Vec::with_capacity(if retain_segments { segments.len() } else { 0 });
     for (index, segment) in segments.iter().enumerate() {
         poll(&mut cancelled)?;
-        let (mechanical, residual) = mass.segment_generator(
-            segment,
-            spin_rad_s,
-            period_seconds,
-            tolerance,
-            &mut cancelled,
-        )?;
+        let (generator, residual, memory_residual) =
+            assembly.segment(segment, spin_rad_s, tolerance, &mut cancelled)?;
         maximum_mass_residual = maximum_mass_residual.max(residual);
-        let mut generator = vec![0.0; d * d];
-        for i in 0..2 * n {
-            generator[i * d..i * d + 2 * n]
-                .copy_from_slice(&mechanical[i * 2 * n..(i + 1) * 2 * n]);
-        }
+        maximum_memory_residual = maximum_memory_residual.max(memory_residual);
         let h = segment.duration_seconds;
-        for (j, (branch, (force, strain))) in branches.iter().zip(&coupling).enumerate() {
-            poll(&mut cancelled)?;
-            let row = 2 * n + j;
-            generator[row * d + row] = finite(-h / branch.relaxation_time_s)?;
-            if generator[row * d + row] == 0.0 {
-                return Err(RotorError::Invalid("periodic memory relaxation underflow"));
-            }
-            for i in 0..n {
-                generator[(n + i) * d + row] = product_three(force[i], h, 1.0)?;
-                generator[row * d + n + i] = product_three(strain[i], h, 1.0)?;
-            }
-        }
-        maximum_memory_residual = maximum_memory_residual.max(memory_residual(
-            &mass,
-            branches,
-            &generator,
-            &state_scale,
-            h,
-            period_seconds,
-            tolerance,
-            &mut cancelled,
-        )?);
         let (flow, force_residual) = match forces {
             CycleForcing::Homogeneous => (
                 affine_segment_flow(&generator, &zero, d, dense_budget, &mut cancelled)?,
                 0.0,
             ),
             CycleForcing::Held(rows) => {
-                let (mut column, residual) = mass.force_column(
-                    rows[index], h, period_seconds, tolerance, &mut cancelled,
-                )?;
+                let (mut column, residual) =
+                    mass.force_column(rows[index], h, period_seconds, tolerance, &mut cancelled)?;
                 // Applied generalized force acts on the original momentum
                 // rows. Memory responds through the complete coupled flow.
                 column.resize(d, 0.0);
@@ -317,21 +263,38 @@ fn prepare(
                 )
             }
             CycleForcing::Harmonic { rows, order } => harmonic::segment_flow(
-                &mass, &generator, d, rows[index], order, boundary_times[index],
-                h, period_seconds, tolerance, dense_budget, &mut cancelled,
+                &mass,
+                &generator,
+                d,
+                rows[index],
+                order,
+                boundary_times[index],
+                h,
+                period_seconds,
+                tolerance,
+                dense_budget,
+                &mut cancelled,
             )?,
             CycleForcing::Fourier { rows, orders } => harmonic::fourier_segment_flow(
-                &mass, &generator, d, rows[index], orders, boundary_times[index],
-                h, period_seconds, tolerance, dense_budget, &mut cancelled,
+                &mass,
+                &generator,
+                d,
+                rows[index],
+                orders,
+                boundary_times[index],
+                h,
+                period_seconds,
+                tolerance,
+                dense_budget,
+                &mut cancelled,
             )?,
         };
         maximum_mass_residual = maximum_mass_residual.max(force_residual);
         // Chronological affine composition preserves all original stresses:
         // b_next = E_segment b + b_segment, P_next = E_segment P.
         if forced {
-            offset = affine::apply_affine(
-                &flow.transition, &flow.offset, &offset, d, &mut cancelled,
-            )?;
+            offset =
+                affine::apply_affine(&flow.transition, &flow.offset, &offset, d, &mut cancelled)?;
         }
         monodromy = multiply(&flow.transition, &monodromy, d, &mut cancelled)?;
         if retain_segments {
@@ -360,7 +323,11 @@ fn prepare(
         spectral_radius = spectral_radius.max(magnitude);
     }
     let growth_rate_per_s = finite(det::ln(spectral_radius) / period_seconds)?;
-    let balanced_monodromy = if retain_segments { monodromy.clone() } else { Vec::new() };
+    let balanced_monodromy = if retain_segments {
+        monodromy.clone()
+    } else {
+        Vec::new()
+    };
     let mut physical_offset = Vec::with_capacity(d);
     for i in 0..d {
         poll(&mut cancelled)?;
@@ -387,13 +354,119 @@ fn prepare(
             maximum_mass_residual,
             maximum_memory_residual,
         },
-        state_scale,
+        state_scale: assembly.state_scale,
         monodromy: balanced_monodromy,
         offset,
         physical_offset,
         segment_maps,
         boundary_times,
     })
+}
+
+// Shared original hereditary assembly for both native motion and physical work.
+// The same balanced generator prevents an accounting-only model from drifting
+// away from the stresses actually carried through the cycle.
+struct MaxwellGenerator<'a> {
+    mass: MassSolve<'a>,
+    branches: &'a [MaxwellDampingBranch],
+    period: f64,
+    state_scale: Vec<f64>,
+    coupling: Vec<(Vec<f64>, Vec<f64>)>,
+    maximum_mass_residual: f64,
+}
+
+impl<'a> MaxwellGenerator<'a> {
+    fn new(
+        model: &'a RotorBearingModel,
+        branches: &'a [MaxwellDampingBranch],
+        period: f64,
+        tolerance: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, RotorError> {
+        let mass = MassSolve::new(model, cancelled)?;
+        let n = model.dofs();
+        // z = [S q, T S v, T sigma_j/sqrt(k_j)], S_ii = sqrt(M_ii).
+        // Branch energy stays sigma_j^2/(2 k_j), not equivalent damping.
+        let mut state_scale = mass.scale.clone();
+        for &scale in &mass.scale {
+            state_scale.push(product_three(period, scale, 1.0)?);
+        }
+        let mut coupling = Vec::with_capacity(branches.len());
+        let mut maximum_mass_residual = 0.0_f64;
+        for branch in branches {
+            poll(cancelled)?;
+            let root_k = det::sqrt(branch.stiffness);
+            let stress_scale = finite(period / root_k)?;
+            if stress_scale == 0.0 {
+                return Err(RotorError::Invalid(
+                    "periodic memory coordinate scale underflow",
+                ));
+            }
+            state_scale.push(stress_scale);
+            let original: Vec<_> = branch.strain.iter().copied().map(Dd::from_f64).collect();
+            let (acceleration, residual) =
+                mass.solve_rhs(&branch.strain, &original, 1.0, tolerance, cancelled)?;
+            maximum_mass_residual = maximum_mass_residual.max(residual);
+            let mut force = Vec::with_capacity(n);
+            let mut strain = Vec::with_capacity(n);
+            for i in 0..n {
+                force.push(product_three(-acceleration[i], root_k, 1.0)?);
+                strain.push(restore_entry(branch.strain[i], mass.scale[i], root_k)?);
+            }
+            coupling.push((force, strain));
+        }
+        Ok(Self {
+            mass,
+            branches,
+            period,
+            state_scale,
+            coupling,
+            maximum_mass_residual,
+        })
+    }
+
+    fn segment(
+        &self,
+        segment: &RotorPeriodicSegment<'_>,
+        spin_rad_s: f64,
+        tolerance: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<f64>, f64, f64), RotorError> {
+        let n = self.mass.model.dofs();
+        let d = self.state_scale.len();
+        let (mechanical, mass_residual) =
+            self.mass
+                .segment_generator(segment, spin_rad_s, self.period, tolerance, cancelled)?;
+        let mut generator = vec![0.0; d * d];
+        for i in 0..2 * n {
+            generator[i * d..i * d + 2 * n]
+                .copy_from_slice(&mechanical[i * 2 * n..(i + 1) * 2 * n]);
+        }
+        let h = segment.duration_seconds;
+        for (j, (branch, (force, strain))) in self.branches.iter().zip(&self.coupling).enumerate() {
+            poll(cancelled)?;
+            let row = 2 * n + j;
+            generator[row * d + row] = finite(-h / branch.relaxation_time_s)?;
+            if generator[row * d + row] == 0.0 {
+                return Err(RotorError::Invalid("periodic memory relaxation underflow"));
+            }
+            for i in 0..n {
+                generator[(n + i) * d + row] = product_three(force[i], h, 1.0)?;
+                generator[row * d + n + i] = product_three(strain[i], h, 1.0)?;
+            }
+        }
+        let memory_residual = memory_residual(
+            &self.mass,
+            self.branches,
+            &generator,
+            &self.state_scale,
+            h,
+            self.period,
+            tolerance,
+            cancelled,
+        )?;
+        Ok((generator, mass_residual, memory_residual))
+    }
 }
 
 // Reconstruct from original M, b, k, tau and the actual coordinate scales.

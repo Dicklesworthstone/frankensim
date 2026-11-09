@@ -35,6 +35,11 @@ pub use fourier::{MAX_ROTOR_FORCE_TONES, RotorFourierForce, prepare_fourier_cycl
 /// Exact signed work and stiffness-modulation power on original forced cycles.
 pub mod power;
 mod relaxation;
+pub use relaxation::power::{
+    PreparedRotorMaxwellPowerCycle, RotorMaxwellCyclePower, RotorMaxwellSegmentWork,
+    prepare_maxwell_forced_power_cycle, prepare_maxwell_fourier_power_cycle,
+    prepare_maxwell_harmonic_power_cycle,
+};
 pub use relaxation::{
     PreparedRotorMaxwellCycle, RotorMaxwellFloquetResponse, RotorMaxwellPeriodicOrbit,
     RotorMaxwellPeriodicTrajectory, RotorMaxwellState, periodic_maxwell_floquet,
