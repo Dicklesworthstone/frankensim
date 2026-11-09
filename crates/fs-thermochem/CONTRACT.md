@@ -4418,3 +4418,30 @@ This native law supplies reacting calorics only. The material/thermal adapter ow
 `composition::volume::energy_path::isochoric::EquilibriumIsochoricCaloricV1` binds the original TV/UV Gibbs owner to fixed conserved element ratios and feed mass/volume. Its storage coordinate is `(U-U_cold)/feed_mass`, with zero at the admitted lower-temperature equilibrium. Pressure and molecular count respond to heat; the Newton tangent is the original reacting Cv, never frozen Cp-R. The complete continuous source bracket, hot TV state and exact advertised upper specific-energy endpoint pass the original bounded inverse before construction succeeds.
 
 Every query restores one bounded original numerical/source anchor. Numerical history and failed trials do not change accepted constitutive values; refusals clear publication. Direct local U/S changes retain small increments far from the cold datum, while actual and requested energy changes and original volume/energy residuals remain separately observable. Fixed conserved density is distinguished from the native response density carrying its admitted residuals. This law supplies no time integration, transport model, finite-rate chemistry, pressure controller or flow-enthalpy datum. Native regressions cover reacting U/Cv/pressure/mixing entropy, dissociation and extensive scaling, repeatability, formation offsets, source bounds, work ceilings and cancellation.
+
+
+## Pure-fluid isobaric sensible and latent calorics
+
+`eos::peng_robinson::saturation::isobaric::PengRobinsonIsobaricCaloricV1`
+binds an accepted pure-fluid coexistence point to the original PR component
+and ideal-reference NASA source. Pressure remains the accepted saturation
+pressure. Saturated-liquid enthalpy is zero; the inclusive latent interval
+selects quality at constant temperature, with zero dT/dh and nonzero latent
+volume response. Temperature alone at coexistence refuses an undetermined
+phase amount. Sensible branches retain original stable roots and EOS Cp.
+
+Continuous source admission, positive ideal Cv, nonnegative original PR alpha
+curvature, and separated subcritical coexistence bound this fluid-only path.
+Source-relative NASA and finite PR departure increments cancel formation and
+entropy datums before rounding. Local changes retain source entropy separately
+from the caloric latent integral Delta h/T and expose the original H-T Delta S
+closure residual. No source data are fitted or normalized.
+
+Every inverse starts from immutable endpoints with bounded PT work, simultaneous
+energy/temperature convergence and final cancellation admission. Unsupported
+sources, critical/multicomponent domains and unrepresentable nonzero phase
+amounts refuse. Five exact-production-source native G1/G3/G4 regressions passed
+for independent Maxwell latent data, sensible inversion and derivatives, datum
+invariance and small heat, cross-phase H/S/reversal, and domain/work/cancellation
+boundaries. This is a constitutive closure; heat integration, phase kinetics and
+a global multicomponent flash certificate remain outside its claim.
