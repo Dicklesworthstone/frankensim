@@ -159,7 +159,11 @@ vec3 blackbodyRadiance(float tK) {
   vec4 a = texelFetch(uBlackbody, ivec2(i0, 0), 0);
   vec4 b = texelFetch(uBlackbody, ivec2(i1, 0), 0);
   vec4 c = mix(a, b, fract(x));
-  return c.rgb * c.a * uGlowScale;
+  // Planck luminance grows ~exp(-c2/lambda T): x3.8 from 1337 K to 1445 K, x1000+ by 2250 K. A
+  // camera would stop down; compress the relative luminance (Reinhard, knee at 3x the gold melting
+  // point brightness) so hue still tracks temperature but white-hot metal does not flood the frame.
+  float L = c.a / (1.0 + c.a / 3.0);
+  return c.rgb * L * uGlowScale;
 }
 vec3 thermalFalseColor(float tK) {
   // Perceptually ordered "inferno"-style ramp from 77 K (LN2) to 1500 K.
@@ -997,6 +1001,7 @@ export class PocketWatchScene {
   private cssWidth = 960;
   private cssHeight = 640;
   private currentPreset: CameraPreset = "overview";
+  private userAdjustedView = false;
   private cameraTween: {
     fromPos: THREE.Vector3;
     toPos: THREE.Vector3;
@@ -1028,7 +1033,7 @@ export class PocketWatchScene {
     this.renderer.toneMapping = THREE.NeutralToneMapping;
     this.renderer.toneMappingExposure = 1.0;
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x05070b);
@@ -1070,7 +1075,7 @@ export class PocketWatchScene {
       uHalfSpan: { value: GRID_HALF_SPAN_MM },
     };
 
-    this.camera = new THREE.PerspectiveCamera(34, 1.0, 0.5, 450);
+    this.camera = new THREE.PerspectiveCamera(34, 1.0, 0.5, 1200);
     this.camera.position.set(0, -34, 66);
 
     // Half-float HDR post chain (RenderPass -> UnrealBloomPass -> OutputPass). MSAA lives on the HDR
@@ -1099,10 +1104,11 @@ export class PocketWatchScene {
     this.controls.rotateSpeed = 0.8;
     this.controls.zoomSpeed = 0.9;
     this.controls.minDistance = 4;
-    this.controls.maxDistance = 180;
+    this.controls.maxDistance = 480; // portrait phones frame the whole watch from ~260 mm
     this.controls.target.set(0, -2, 0);
     this.controls.addEventListener("start", () => {
       this.cameraTween = null;
+      this.userAdjustedView = true;
     });
 
     // Museum-grade chiaroscuro horological lighting (balanced to prevent metallic blowout)
@@ -1349,7 +1355,7 @@ export class PocketWatchScene {
 
   /** DPR ceiling per quality tier. */
   private static dprCap(tier: QualityTier): number {
-    return tier === "high" ? 2 : tier === "medium" ? 1.5 : 1.25;
+    return tier === "high" ? 2 : 1.5;
   }
 
   /** Current renderer pixel ratio (used by the adaptive-resolution governor). */
@@ -1405,8 +1411,13 @@ export class PocketWatchScene {
   }
 
   /** Re-fit the current camera preset to the unobstructed region. */
-  public reframe(animate: boolean): void {
-    this.applyCameraPreset(this.currentPreset, animate && !this.reducedMotion);
+  public reframe(animate: boolean, fitInsets?: ViewInsets): void {
+    this.applyCameraPreset(this.currentPreset, animate && !this.reducedMotion, fitInsets);
+  }
+
+  /** True while the camera still sits where a preset put it (the user has not orbited or zoomed). */
+  public isAtPreset(): boolean {
+    return !this.userAdjustedView;
   }
 
   private applyViewOffset(): void {
@@ -3320,7 +3331,8 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
     let maxNodeTempK = Math.max(this.maxShellTempK, this.maxGridTempK);
     for (const n of snap.nodes) if (n.temperatureK > maxNodeTempK) maxNodeTempK = n.temperatureK;
     const incandescenceFactor = Math.max(0, Math.min(1, (maxNodeTempK - 900.0) / 550.0));
-    this.bloomPass.strength = 0.1 + Math.max(incandescenceFactor * 0.22, tools.torchPower * 0.12);
+    this.bloomPass.strength = 0.06 + Math.max(incandescenceFactor * 0.14, tools.torchPower * 0.08);
+    this.bloomPass.radius = 0.22;
     // Bloom only runs when something actually emits (flame or >900 K metal); phones on the low
     // tier keep it for the flame only.
     this.bloomPass.enabled =
@@ -3339,7 +3351,7 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
       flameScale * (0.94 + Math.cos(performance.now() * 0.062) * 0.07),
       flameScale,
     );
-    this.torchPointLight.intensity = tools.torchPower * 2.2 + incandescenceFactor * 0.9;
+    this.torchPointLight.intensity = tools.torchPower * 2.2 + incandescenceFactor * 0.45;
 
     this.ln2Group.visible = tools.ln2Rate > 0.01 || this.activeTool === "ln2";
     this.ln2Group.position.set(tools.ln2PosMm[0], tools.ln2PosMm[1], tools.ln2PosMm[2]);
@@ -3780,10 +3792,17 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
    * Frame a camera preset so its subject (bounding radius in mm) fits the part of the canvas that
    * is not covered by UI chrome, from a fixed viewing direction.
    */
-  private applyCameraPreset(preset: CameraPreset, animate: boolean): void {
+  private applyCameraPreset(preset: CameraPreset, animate: boolean, fitInsets?: ViewInsets): void {
     this.currentPreset = preset;
-    const presets: Record<string, { target: [number, number, number]; dir: [number, number, number]; radius: number }> = {
-      overview: { target: [0, 1.5, 0], dir: [0, -0.46, 0.89], radius: 37 },
+    this.userAdjustedView = false;
+    const fi = fitInsets ?? this.viewInsets;
+    // radius = vertical half-extent to keep in view (mm); rx = horizontal half-extent when it differs
+    // (the bow and crown make the watch taller than wide, which matters on portrait phones).
+    const presets: Record<
+      string,
+      { target: [number, number, number]; dir: [number, number, number]; radius: number; rx?: number }
+    > = {
+      overview: { target: [0, 1.5, 0], dir: [0, -0.46, 0.89], radius: 37, rx: 30.5 },
       tourbillon: { target: [0, -11, 0.5], dir: [0, -0.5, 0.87], radius: 8.6 },
       barrel: { target: [0, 9.5, 0.5], dir: [0, -0.55, 0.84], radius: 10.5 },
       escapement: { target: [-1.6, -11.2, 0.2], dir: [-0.3, -0.62, 0.72], radius: 4.4 },
@@ -3792,12 +3811,13 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
     };
     const p = presets[preset] ?? presets.overview!;
     const dir = new THREE.Vector3(...p.dir).normalize();
-    const vw = Math.max(80, this.cssWidth - this.viewInsets.left - this.viewInsets.right);
-    const vh = Math.max(80, this.cssHeight - this.viewInsets.top - this.viewInsets.bottom);
+    const vw = Math.max(80, this.cssWidth - fi.left - fi.right);
+    const vh = Math.max(80, this.cssHeight - fi.top - fi.bottom);
     const tanHalf = Math.tan(THREE.MathUtils.degToRad(this.camera.fov * 0.5));
-    // Half-extent of the visible window at unit distance, in world units per unit distance.
-    const halfMin = (tanHalf * Math.min(vw, vh)) / this.cssHeight;
-    const dist = (p.radius / Math.max(1e-3, halfMin)) * 1.04;
+    // Half-extents of the visible window at unit distance (world units per unit distance).
+    const halfW = (tanHalf * vw) / this.cssHeight;
+    const halfH = (tanHalf * vh) / this.cssHeight;
+    const dist = Math.max((p.rx ?? p.radius) / Math.max(1e-3, halfW), p.radius / Math.max(1e-3, halfH)) * 1.04;
     const target = new THREE.Vector3(...p.target);
     const pos = target.clone().addScaledVector(dir, dist);
     if (!animate) {

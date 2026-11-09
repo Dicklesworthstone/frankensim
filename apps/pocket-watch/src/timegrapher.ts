@@ -33,6 +33,8 @@ export interface TimegrapherReadings {
   readonly beatErrorMs: number | null;
   readonly beats: number;
   readonly spanS: number;
+  /** No beat for more than a second of lab time: the balance has stopped. */
+  readonly stopped: boolean;
 }
 
 export class HorologicalTimegrapher {
@@ -201,12 +203,20 @@ export class HorologicalTimegrapher {
     this.fit = { a: solve(0), b: solve(1), c: solve(2), tMean };
   }
 
-  public readings(): TimegrapherReadings {
+  public readings(labT: number): TimegrapherReadings {
     if (this.fitDirty) this.solveFit();
     const pts = this.windowPoints();
     const span = pts.length > 1 ? pts[pts.length - 1]!.t - pts[0]!.t : 0;
-    if (!this.fit) {
-      return { source: this.points.length ? this.sourceKind : "readout", rateSDay: null, beatErrorMs: null, beats: pts.length, spanS: span };
+    const stopped = this.hasRef && labT - this.lastBeatT > 1.0;
+    if (!this.fit || stopped) {
+      return {
+        source: this.points.length ? this.sourceKind : "readout",
+        rateSDay: null,
+        beatErrorMs: null,
+        beats: pts.length,
+        spanS: span,
+        stopped,
+      };
     }
     return {
       source: this.sourceKind,
@@ -214,6 +224,7 @@ export class HorologicalTimegrapher {
       beatErrorMs: Math.abs(this.fit.c) * 1000,
       beats: pts.length,
       spanS: span,
+      stopped: false,
     };
   }
 
@@ -241,7 +252,7 @@ export class HorologicalTimegrapher {
     this.lastLabT = snap.labTimeS;
     const W = this.cssW;
     const H = this.cssH;
-    const padL = 34;
+    const padL = 40;
     const padR = 8;
     const padT = 8;
     const padB = 18;
@@ -296,12 +307,11 @@ export class HorologicalTimegrapher {
     ctx.font = '500 9.5px "JetBrains Mono", ui-monospace, monospace';
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
-    ctx.fillText(`+${scaleMs}`, padL - 5, padT + 4);
-    ctx.fillText("0", padL - 5, padT + plotH / 2);
-    ctx.fillText(`−${scaleMs}`, padL - 5, padT + plotH - 4);
+    ctx.fillText(`+${scaleMs}`, padL - 6, padT + 5);
+    ctx.fillText("0 ms", padL - 6, padT + plotH / 2);
+    ctx.fillText(`−${scaleMs}`, padL - 6, padT + plotH - 5);
     ctx.textAlign = "left";
     ctx.textBaseline = "alphabetic";
-    ctx.fillText("ms", 4, padT + 8);
 
     // Fitted tick / tock lines (their separation is the beat error, their slope the rate).
     if (this.fit && pts.length > 1) {

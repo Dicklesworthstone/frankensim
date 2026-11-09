@@ -12,8 +12,32 @@ import {
   PocketWatchScene,
   type ActiveToolMode,
   type CameraPreset,
+  type QualityTier,
   type VectorFieldLayer,
+  type ViewInsets,
 } from "./watchScene";
+
+/** Must match the html.is-compact rules in styles.css (short landscape screens stay "wide"). */
+const COMPACT_QUERY = "(max-width: 999px) and (min-height: 561px)";
+const STORE_COACH = "fs-pocket-watch.coach.v1";
+const STORE_QUALITY = "fs-pocket-watch.quality";
+const STORE_INSPECTOR = "fs-pocket-watch.inspector";
+
+type Vec3 = [number, number, number];
+type PanelName = "bench" | "experiments" | "movement" | "metrology";
+type SheetState = "peek" | "half" | "full";
+
+/**
+ * Engine methods that newer builds add. Each one is feature-detected so the front end runs on any
+ * engine build; absent methods fall back to what the snapshot already carries.
+ */
+interface OptionalEngineApi {
+  escapement_state?: () => Float64Array;
+  timegrapher_drain?: () => Float64Array;
+  grid_n?: () => number;
+  grid_half_span_mm?: () => number;
+  ambient_temperature_k?: () => number;
+}
 
 function $<T extends Element = HTMLElement>(sel: string): T {
   const el = document.querySelector<T>(sel);
@@ -21,54 +45,155 @@ function $<T extends Element = HTMLElement>(sel: string): T {
   return el;
 }
 
+function $$<T extends Element = HTMLElement>(sel: string): T[] {
+  return Array.from(document.querySelectorAll<T>(sel));
+}
+
+function storeGet(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function storeSet(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    /* private mode or blocked storage: the preference just isn't remembered */
+  }
+}
+
+function setText(el: Element, text: string): void {
+  if (el.textContent !== text) el.textContent = text;
+}
+
+function setAttr(el: Element, name: string, value: string): void {
+  if (el.getAttribute(name) !== value) el.setAttribute(name, value);
+}
+
+function signed(v: number, digits: number): string {
+  const s = Math.abs(v).toFixed(digits);
+  return `${v < 0 && Number(s) !== 0 ? "−" : "+"}${s}`;
+}
+
+/** Keep a range input's filled-track percentage in sync with its value. */
+function syncRangeFill(input: HTMLInputElement): void {
+  const min = Number(input.min || 0);
+  const max = Number(input.max || 1);
+  const pct = ((Number(input.value) - min) / Math.max(1e-9, max - min)) * 100;
+  input.style.setProperty("--fill", `${Math.max(0, Math.min(100, pct)).toFixed(1)}%`);
+}
+
+function setRange(input: HTMLInputElement, value: number): void {
+  input.value = String(value);
+  syncRangeFill(input);
+}
+
+function detectQualityTier(): QualityTier {
+  const q = new URLSearchParams(window.location.search).get("quality");
+  if (q === "high" || q === "medium" || q === "low") return q;
+  const coarse = window.matchMedia("(pointer: coarse)").matches;
+  const minSide = Math.min(window.screen.width, window.screen.height);
+  const cores = navigator.hardwareConcurrency || 4;
+  const mem = (navigator as unknown as { deviceMemory?: number }).deviceMemory ?? 8;
+  if (coarse && minSide < 600) return "low"; // phones
+  if (coarse || cores <= 4 || mem <= 4) return "medium"; // tablets, small laptops
+  return "high";
+}
+
 async function boot(): Promise<void> {
-  await initWasm();
+  const splash = $("#boot-splash");
+  const bootStatus = $("#boot-status");
+  try {
+    await initWasm();
+  } catch (err) {
+    setText(bootStatus, "This browser could not start the WebAssembly physics engine.");
+    console.error(err);
+    return;
+  }
+  setText(bootStatus, "Lighting the bench…");
+
+  const root = document.documentElement;
+  const shell = $("#app-shell");
   const sim = new PocketWatchSim();
+  const ext = sim as unknown as OptionalEngineApi;
+  const hasEscState = typeof ext.escapement_state === "function";
+  const hasDrain = typeof ext.timegrapher_drain === "function";
   const micAudio = new VirtualMicrophoneAudio();
   const timegrapher = new HorologicalTimegrapher();
 
-  // Interactive tool & simulation state
+  const reducedMotionMq = window.matchMedia("(prefers-reduced-motion: reduce)");
+  const compactMq = window.matchMedia(COMPACT_QUERY);
+  let isCompact = compactMq.matches;
+  root.classList.toggle("is-compact", isCompact);
+
+  const detectedTier = detectQualityTier();
+  const storedQuality = storeGet(STORE_QUALITY);
+  const qualityChoice = storedQuality === "high" || storedQuality === "medium" || storedQuality === "low" ? storedQuality : "auto";
+  let tier: QualityTier = qualityChoice === "auto" ? detectedTier : qualityChoice;
+  const applyTierClass = (): void => {
+    root.classList.remove("tier-high", "tier-medium", "tier-low");
+    root.classList.add(`tier-${tier}`);
+  };
+  applyTierClass();
+
+  // ---------------------------------------------------------------------------------------------
+  // Tool & environment state
   let activeToolMode: ActiveToolMode = "inspect";
   let torchPower = 0.0;
-  let torchPosMm: [number, number, number] = [0.0, -24.0, 2.0];
+  let torchPosMm: Vec3 = [0.0, -24.0, 2.0];
   let ln2Rate = 0.0;
-  let ln2PosMm: [number, number, number] = [0.0, -16.0, 3.0];
+  let ln2PosMm: Vec3 = [0.0, -16.0, 3.0];
   let oilRate = 0.0;
-  let oilPosMm: [number, number, number] = [0.0, -11.0, 2.0];
+  let oilPosMm: Vec3 = [0.0, -11.0, 2.0];
   let magnetOn = false;
   let magnetDistMm = 28.0;
-  let magnetPosMm: [number, number, number] = [28.0, -11.0, 2.5];
+  let magnetPosMm: Vec3 = [28.0, -11.0, 2.5];
   let airPower = 0.0;
-  let airPosMm: [number, number, number] = [0.0, -20.0, 3.0];
+  let airPosMm: Vec3 = [0.0, -20.0, 3.0];
   let ambientPressureAtm = 1.0;
-  let gravityGVec: [number, number, number] = [0.0, -1.0, 0.0];
-  let gravityLabel = "1.0G 6h";
-  let micPosMm: [number, number, number] = [0.0, -11.0, 11.0];
+  let gravityGVec: Vec3 = [0.0, -1.0, 0.0];
+  let gravityLabel = "1.0 g · 6h down";
+  let micPosMm: Vec3 = [0.0, -11.0, 11.0];
   let micGain = 1.4;
   let slowMo = false;
   let simPaused = false;
 
-  // DOM References
-  const appShell = $("#app-shell");
-  const leftDock = $("#left-dock");
-  const rightDock = $("#right-dock");
+  // ---------------------------------------------------------------------------------------------
+  // DOM
   const canvasViewport = $<HTMLCanvasElement>("#viewport-canvas");
   const canvasScope = $<HTMLCanvasElement>("#canvas-oscilloscope");
   const canvasTimegrapher = $<HTMLCanvasElement>("#canvas-timegrapher");
   const tbodyLedger = $<HTMLElement>("#node-ledger-body");
+  const topBar = $("#top-bar");
+  const toolRail = $("#tool-rail");
+  const inspector = $("#inspector");
+  const inspectorBody = $("#inspector-body");
+  const viewDock = $("#view-dock");
+  const btnViewMenu = $<HTMLButtonElement>("#btn-view-menu");
 
   const hudWatchTime = $("#hud-watch-time");
   const hudLabTime = $("#hud-lab-time");
   const hudTimeDrift = $("#hud-time-drift");
   const hudRateSDay = $("#hud-rate-s-day");
+  const hudAmp = $("#hud-amp");
+  const hudBeatError = $("#hud-beat-error");
   const hudStatusPill = $("#hud-status-pill");
+  const statusHead = hudStatusPill.querySelector(".status-head")!;
+  const statusDetail = hudStatusPill.querySelector(".status-detail")!;
   const hudDigest = $("#hud-digest");
+  const hudPerf = $("#hud-perf");
   const btnPauseSim = $<HTMLButtonElement>("#btn-pause-sim");
   const btnTheaterMode = $<HTMLButtonElement>("#btn-theater-mode");
+  const btnInspectorToggle = $<HTMLButtonElement>("#btn-inspector-toggle");
   const btnStopPerturbations = $<HTMLButtonElement>("#btn-stop-perturbations");
 
   const stageToolBanner = $("#stage-tool-banner");
+  const stageBannerTitle = $("#stage-banner-title");
   const stageBannerText = $("#stage-banner-text");
+  const bannerIconUse = $<SVGUseElement>("#banner-icon-use");
   const btnBannerOrbit = $<HTMLButtonElement>("#btn-banner-orbit");
   const btnBannerStop = $<HTMLButtonElement>("#btn-banner-stop");
 
@@ -84,6 +209,7 @@ async function boot(): Promise<void> {
   const chkInvarSpring = $<HTMLInputElement>("#chk-invar-spring");
   const chkSlowMo = $<HTMLInputElement>("#chk-slow-mo");
   const chkThermalOverlay = $<HTMLInputElement>("#chk-thermal-overlay");
+  const selQuality = $<HTMLSelectElement>("#sel-quality");
 
   const sliderTorchPower = $<HTMLInputElement>("#slider-torch-power");
   const lblTorchPower = $("#lbl-torch-power");
@@ -93,86 +219,203 @@ async function boot(): Promise<void> {
   const lblOilRate = $("#lbl-oil-rate");
   const chkMagnetOn = $<HTMLInputElement>("#chk-magnet-on");
   const sliderMagnetDist = $<HTMLInputElement>("#slider-magnet-dist");
+  const lblMagnetDist = $("#lbl-magnet-dist");
   const lblBField = $("#lbl-b-field");
   const lblRemanence = $("#lbl-remanence");
   const sliderAirPower = $<HTMLInputElement>("#slider-air-power");
   const lblAirPower = $("#lbl-air-power");
   const sliderPressureAtm = $<HTMLInputElement>("#slider-pressure-atm");
+  const lblPressure = $("#lbl-pressure");
   const lblChamberEnv = $("#lbl-chamber-env");
   const btnShock500g = $<HTMLButtonElement>("#btn-shock-500g");
 
-  const btnToggleAudio = $<HTMLButtonElement>("#btn-toggle-audio");
   const sliderMicGain = $<HTMLInputElement>("#slider-mic-gain");
+  const lblMicGain = $("#lbl-mic-gain");
   const lblMicSpl = $("#lbl-mic-spl");
 
   const tgRate = $("#tg-rate");
   const tgAmp = $("#tg-amp");
   const tgBeatErr = $("#tg-beat-err");
+  const tgSource = $("#tg-source");
 
   const ovCaseTemp = $("#ov-case-temp");
   const ovGoldMelt = $("#ov-gold-melt");
   const ovFouledGold = $("#ov-fouled-gold");
   const ovBField = $("#ov-b-field");
 
-  const updatePerturbationBannerAndBadges = (): void => {
-    const anyPerturbActive =
-      torchPower > 0.01 ||
-      ln2Rate > 0.01 ||
-      oilRate > 0.01 ||
-      magnetOn ||
-      airPower > 0.01 ||
-      Math.abs(ambientPressureAtm - 1.0) > 0.05;
-    btnStopPerturbations.classList.toggle("hidden", !anyPerturbActive);
+  const escSource = $("#esc-source");
+  const escNote = $("#esc-note");
+  const escFields = {
+    impulse: $("#esc-impulse"),
+    eff: $("#esc-eff"),
+    lift: $("#esc-lift"),
+    q: $("#esc-q"),
+    torque: $("#esc-torque"),
+    friction: $("#esc-friction"),
+    air: $("#esc-air"),
+    reserve: $("#esc-reserve"),
+  };
+  const contactEls = $$<HTMLElement>(".contact[data-bit]");
+  const chrSens = $("#chr-sens");
+  const chrInterval = $("#chr-interval");
+  const chrCosc = $("#chr-cosc");
+  const chrDrag = $("#chr-drag");
 
-    // Highlight active subtool parameter box
-    document.querySelectorAll(".subtool-box").forEach((b) => b.classList.remove("is-focused"));
-    if (activeToolMode === "torch" || torchPower > 0.01) {
-      $("#subtool-torch").classList.add("is-focused");
+  const ffOverlay = $("#ff-overlay");
+  const ffTitle = $("#ff-title");
+  const ffDetail = $("#ff-detail");
+  const ffBarFill = $("#ff-bar-fill");
+  const coach = $("#coach");
+  const helpDialog = $<HTMLDialogElement>("#help-dialog");
+  const announcer = $("#sr-announcer");
+
+  const boundEls = new Map<string, HTMLElement[]>();
+  for (const el of $$<HTMLElement>("[data-bind]")) {
+    const key = el.dataset.bind ?? "";
+    const list = boundEls.get(key) ?? [];
+    list.push(el);
+    boundEls.set(key, list);
+  }
+  const bindText = (key: string, text: string): void => {
+    for (const el of boundEls.get(key) ?? []) setText(el, text);
+  };
+  const announce = (msg: string): void => {
+    announcer.textContent = "";
+    window.setTimeout(() => (announcer.textContent = msg), 30);
+  };
+
+  const allRanges = $$<HTMLInputElement>('input[type="range"]');
+  for (const r of allRanges) {
+    syncRangeFill(r);
+    r.addEventListener("input", () => syncRangeFill(r));
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Scene
+  const scene = new PocketWatchScene(
+    canvasViewport,
+    {
+      onTargetMoved(tool, posMm) {
+        dismissCoach();
+        if (tool === "torch") {
+          torchPosMm = posMm;
+          if (torchPower < 0.05) {
+            torchPower = 0.78;
+            setRange(sliderTorchPower, torchPower);
+          }
+        } else if (tool === "ln2") {
+          ln2PosMm = posMm;
+          if (ln2Rate < 0.05) {
+            ln2Rate = 0.8;
+            setRange(sliderLn2Rate, ln2Rate);
+          }
+        } else if (tool === "oil") {
+          oilPosMm = posMm;
+          if (oilRate < 0.05) {
+            oilRate = 0.65;
+            setRange(sliderOilRate, oilRate);
+          }
+        } else if (tool === "magnet") {
+          magnetOn = true;
+          chkMagnetOn.checked = true;
+          magnetPosMm = posMm;
+          magnetDistMm = Math.round(Math.max(8, Math.min(80, Math.hypot(posMm[0] + 2.2, posMm[1] + 11.0))));
+          setRange(sliderMagnetDist, magnetDistMm);
+        } else if (tool === "air") {
+          airPosMm = posMm;
+          if (airPower < 0.05) {
+            airPower = 0.85;
+            setRange(sliderAirPower, airPower);
+          }
+        } else if (tool === "mic") {
+          micPosMm = posMm;
+        }
+        syncToolsToSim();
+      },
+    },
+    { tier, reducedMotion: reducedMotionMq.matches },
+  );
+
+  if (typeof ext.grid_half_span_mm === "function") {
+    const h = ext.grid_half_span_mm();
+    if (Number.isFinite(h)) scene.setGridHalfSpanMm(h);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Perturbation state -> engine, banner and badges
+  const anyPerturbationActive = (): boolean =>
+    torchPower > 0.01 ||
+    ln2Rate > 0.01 ||
+    oilRate > 0.01 ||
+    magnetOn ||
+    airPower > 0.01 ||
+    Math.abs(ambientPressureAtm - 1.0) > 0.05 ||
+    Math.abs(gravityGVec[0]) + Math.abs(gravityGVec[1] + 1) + Math.abs(gravityGVec[2]) > 0.01;
+
+  const TOOL_META: Record<Exclude<ActiveToolMode, "inspect">, { icon: string; tone: string; name: string; wide: string; compact: string }> = {
+    torch: { icon: "#i-flame", tone: "torch", name: "Blowtorch", wide: "Drag on the watch to aim the 2250 K flame · right-drag to orbit", compact: "Drag to aim the flame · two fingers to orbit" },
+    ln2: { icon: "#i-snow", tone: "cryo", name: "Liquid nitrogen", wide: "Drag on the watch to pour 77 K nitrogen · right-drag to orbit", compact: "Drag to pour · two fingers to orbit" },
+    oil: { icon: "#i-drop", tone: "oil", name: "Watch oil", wide: "Drag on the watch to place the oiler · right-drag to orbit", compact: "Drag to place the oiler · two fingers to orbit" },
+    magnet: { icon: "#i-magnet", tone: "magnet", name: "NdFeB magnet", wide: "Drag on the watch to sweep the magnet · right-drag to orbit", compact: "Drag to move the magnet · two fingers to orbit" },
+    air: { icon: "#i-wind", tone: "air", name: "Air jet", wide: "Drag on the watch to aim the jet · right-drag to orbit", compact: "Drag to aim the jet · two fingers to orbit" },
+    mic: { icon: "#i-mic", tone: "mic", name: "Microphone", wide: "Drag on the watch to place the microphone · right-drag to orbit", compact: "Drag to place the mic · two fingers to orbit" },
+  };
+
+  const updatePerturbationBannerAndBadges = (): void => {
+    const anyActive = anyPerturbationActive();
+    btnStopPerturbations.classList.toggle("hidden", !anyActive);
+
+    const focus: Record<string, boolean> = {
+      torch: activeToolMode === "torch" || torchPower > 0.01,
+      ln2: activeToolMode === "ln2" || ln2Rate > 0.01,
+      oil: activeToolMode === "oil" || oilRate > 0.01,
+      magnet: activeToolMode === "magnet" || magnetOn,
+      air: activeToolMode === "air" || airPower > 0.01,
+      chamber: Math.abs(ambientPressureAtm - 1.0) > 0.05 || Math.abs(gravityGVec[1] + 1) + Math.abs(gravityGVec[0]) + Math.abs(gravityGVec[2]) > 0.01,
+    };
+    for (const [k, on] of Object.entries(focus)) {
+      $(`#subtool-${k}`).classList.toggle("is-focused", on);
     }
-    if (activeToolMode === "ln2" || ln2Rate > 0.01) {
-      $("#subtool-ln2").classList.add("is-focused");
-    }
-    if (activeToolMode === "oil" || oilRate > 0.01) {
-      $("#subtool-oil").classList.add("is-focused");
-    }
-    if (activeToolMode === "magnet" || magnetOn) {
-      $("#subtool-magnet").classList.add("is-focused");
-    }
-    if (activeToolMode === "air" || airPower > 0.01) {
-      $("#subtool-air").classList.add("is-focused");
+    const live: Record<string, boolean> = {
+      torch: torchPower > 0.01,
+      ln2: ln2Rate > 0.01,
+      oil: oilRate > 0.01,
+      magnet: magnetOn,
+      air: airPower > 0.01,
+    };
+    for (const b of $$<HTMLButtonElement>(".tool-btn[data-tool]")) {
+      b.classList.toggle("is-live", !!live[b.dataset.tool ?? ""] && b.dataset.tool !== activeToolMode);
     }
 
     canvasViewport.classList.toggle("tool-cursor", activeToolMode !== "inspect");
 
-    if (activeToolMode !== "inspect" || anyPerturbActive) {
+    if (activeToolMode !== "inspect") {
+      const meta = TOOL_META[activeToolMode];
+      const pct =
+        activeToolMode === "torch" ? torchPower : activeToolMode === "ln2" ? ln2Rate : activeToolMode === "oil" ? oilRate : activeToolMode === "air" ? airPower : -1;
+      setText(stageBannerTitle, pct >= 0 ? `${meta.name} · ${Math.round(pct * 100)}%` : meta.name);
+      setText(stageBannerText, isCompact ? meta.compact : meta.wide);
+      bannerIconUse.setAttribute("href", meta.icon);
+      stageToolBanner.dataset.tone = meta.tone;
+      btnBannerOrbit.classList.remove("hidden");
+      btnBannerStop.classList.toggle("hidden", !anyActive);
       stageToolBanner.classList.remove("hidden");
-      btnBannerOrbit.classList.toggle("hidden", activeToolMode === "inspect");
-      btnBannerStop.classList.toggle("hidden", !anyPerturbActive);
-
-      if (activeToolMode === "torch") {
-        stageBannerText.textContent = `🔥 Blowtorch Engaged (${Math.round(torchPower * 100)}%) — Drag across the 3D watch to aim the 2250 K flame jet`;
-      } else if (activeToolMode === "ln2") {
-        stageBannerText.textContent = `❄️ Cryogenic LN₂ Engaged (${Math.round(ln2Rate * 100)}%) — Drag across the 3D watch to pour 77 K liquid nitrogen`;
-      } else if (activeToolMode === "oil") {
-        stageBannerText.textContent = `💧 Precision Oiler Engaged (${Math.round(oilRate * 100)}%) — Drag across the 3D watch to deposit Pennzane oil`;
-      } else if (activeToolMode === "magnet") {
-        stageBannerText.textContent = `🧲 NdFeB Super-Magnet Engaged — Drag across the 3D watch to sweep the 1.32 T magnetic field`;
-      } else if (activeToolMode === "air") {
-        stageBannerText.textContent = `💨 Air Shear Nozzle Engaged (${Math.round(airPower * 100)}%) — Drag across the 3D watch to blow molten gold & oil`;
-      } else if (activeToolMode === "mic") {
-        stageBannerText.textContent = `🎙️ 3D Acoustic Probe Mode — Drag across the 3D watch to position the condenser microphone`;
-      } else {
-        const activeNames: string[] = [];
-        if (torchPower > 0.01) activeNames.push(`🔥 Blowtorch ${Math.round(torchPower * 100)}%`);
-        if (ln2Rate > 0.01) activeNames.push(`❄️ LN₂ ${Math.round(ln2Rate * 100)}%`);
-        if (oilRate > 0.01) activeNames.push(`💧 Oil ${Math.round(oilRate * 100)}%`);
-        if (magnetOn) activeNames.push(`🧲 Magnet (${magnetDistMm.toFixed(0)} mm)`);
-        if (airPower > 0.01) activeNames.push(`💨 Air Jet ${Math.round(airPower * 100)}%`);
-        if (Math.abs(ambientPressureAtm - 1.0) > 0.05) {
-          activeNames.push(`🌍 ${ambientPressureAtm.toFixed(2)} atm`);
-        }
-        stageBannerText.textContent = `Active Perturbation: ${activeNames.join(" + ")} · Orbiting 3D camera`;
-      }
+    } else if (anyActive) {
+      const names: string[] = [];
+      if (torchPower > 0.01) names.push(`torch ${Math.round(torchPower * 100)}%`);
+      if (ln2Rate > 0.01) names.push(`LN₂ ${Math.round(ln2Rate * 100)}%`);
+      if (oilRate > 0.01) names.push(`oil ${Math.round(oilRate * 100)}%`);
+      if (magnetOn) names.push(`magnet at ${magnetDistMm.toFixed(0)} mm`);
+      if (airPower > 0.01) names.push(`air ${Math.round(airPower * 100)}%`);
+      if (Math.abs(ambientPressureAtm - 1.0) > 0.05) names.push(`${ambientPressureAtm.toFixed(2)} atm`);
+      if (focus.chamber && Math.abs(ambientPressureAtm - 1.0) <= 0.05) names.push(gravityLabel);
+      setText(stageBannerTitle, "Perturbations running");
+      setText(stageBannerText, names.join(" · "));
+      bannerIconUse.setAttribute("href", "#i-sparkle");
+      stageToolBanner.dataset.tone = "gold";
+      btnBannerOrbit.classList.add("hidden");
+      btnBannerStop.classList.remove("hidden");
+      stageToolBanner.classList.remove("hidden");
     } else {
       stageToolBanner.classList.add("hidden");
     }
@@ -187,63 +430,334 @@ async function boot(): Promise<void> {
     sim.set_ambient_pressure_atm(ambientPressureAtm);
     sim.set_gravity_vector(gravityGVec[0], gravityGVec[1], gravityGVec[2]);
     sim.set_microphone(micPosMm[0], micPosMm[1], micPosMm[2], micGain);
+    setText(lblMagnetDist, `${magnetDistMm.toFixed(0)} mm`);
+    setText(lblPressure, `${ambientPressureAtm.toFixed(2)} atm`);
+    setText(lblMicGain, `${micGain.toFixed(2)}×`);
     updatePerturbationBannerAndBadges();
   };
-
-  const scene = new PocketWatchScene(canvasViewport, {
-    onTargetMoved(tool, posMm) {
-      if (tool === "torch") {
-        torchPosMm = posMm;
-        if (torchPower < 0.05) {
-          torchPower = 0.78;
-          sliderTorchPower.value = "0.78";
-        }
-      } else if (tool === "ln2") {
-        ln2PosMm = posMm;
-        if (ln2Rate < 0.05) {
-          ln2Rate = 0.80;
-          sliderLn2Rate.value = "0.80";
-        }
-      } else if (tool === "oil") {
-        oilPosMm = posMm;
-        if (oilRate < 0.05) {
-          oilRate = 0.65;
-          sliderOilRate.value = "0.65";
-        }
-      } else if (tool === "magnet") {
-        magnetOn = true;
-        chkMagnetOn.checked = true;
-        magnetPosMm = posMm;
-        magnetDistMm = Math.round(
-          Math.max(8, Math.min(80, Math.hypot(posMm[0] + 2.2, posMm[1] + 11.0))),
-        );
-        sliderMagnetDist.value = String(magnetDistMm);
-      } else if (tool === "air") {
-        airPosMm = posMm;
-        if (airPower < 0.05) {
-          airPower = 0.85;
-          sliderAirPower.value = "0.85";
-        }
-      } else if (tool === "mic") {
-        micPosMm = posMm;
-      }
-      syncToolsToSim();
-    },
-  });
   syncToolsToSim();
 
+  // ---------------------------------------------------------------------------------------------
+  // Layout: inspector panel / bottom sheet, focus mode, view insets for camera framing
+  let layoutDirty = true;
+  let reframeOnLayout = true;
+  // Chrome changed size (sheet snap, inspector toggle, rotation): refit the camera preset, unless
+  // the user has orbited or zoomed since, in which case only the projection window moves.
+  let refitPending = false;
+  let sheetState: SheetState = "peek";
+  let inspectorOpen = (storeGet(STORE_INSPECTOR) ?? (window.innerWidth >= 1100 ? "open" : "closed")) === "open";
+  let theater = false;
+  const insetsCur: ViewInsets = { left: 0, right: 0, top: 0, bottom: 0 };
+  const insetsTarget: ViewInsets = { left: 0, right: 0, top: 0, bottom: 0 };
+
+  const setInspectorOpen = (open: boolean, persist = true): void => {
+    inspectorOpen = open;
+    shell.dataset.inspector = open ? "open" : "closed";
+    setAttr(btnInspectorToggle, "aria-expanded", String(open));
+    setAttr(btnInspectorToggle, "aria-pressed", String(open));
+    if (persist) storeSet(STORE_INSPECTOR, open ? "open" : "closed");
+    layoutDirty = true;
+    refitPending = true;
+  };
+  setInspectorOpen(inspectorOpen, false);
+
+  const setSheet = (state: SheetState): void => {
+    sheetState = state;
+    shell.dataset.sheet = state;
+    layoutDirty = true;
+    refitPending = true;
+  };
+
+  const sheetVisibleHeight = (state: SheetState): number => {
+    const h = inspector.offsetHeight;
+    if (state === "full") return h;
+    if (state === "half") return Math.min(h, window.innerHeight * 0.5);
+    return peekHeight;
+  };
+  // Peek = drag handle + tab row, measured so CSS and the camera framing agree.
+  let peekHeight = 60;
+  const measurePeek = (): void => {
+    const handle = $("#sheet-handle");
+    const head = inspector.querySelector<HTMLElement>(".inspector-head")!;
+    const h = Math.round(handle.offsetHeight + head.offsetHeight);
+    if (h > 20 && h !== peekHeight) {
+      peekHeight = h;
+      root.style.setProperty("--peek-h", `${h}px`);
+    }
+  };
+
+  const computeLayout = (): void => {
+    const W = shell.clientWidth;
+    const H = shell.clientHeight;
+    const tb = topBar.getBoundingClientRect();
+    root.style.setProperty("--topbar-bottom", `${Math.round(tb.bottom)}px`);
+    const top = tb.bottom + 6;
+    if (isCompact) {
+      measurePeek();
+      const toolbarH = toolRail.offsetHeight;
+      const visible = sheetVisibleHeight(sheetState === "full" ? "half" : sheetState);
+      insetsTarget.top = top;
+      insetsTarget.bottom = toolbarH + visible + 8;
+      insetsTarget.left = 0;
+      insetsTarget.right = 0;
+      root.style.removeProperty("--stage-cx");
+    } else {
+      const rail = toolRail.getBoundingClientRect();
+      insetsTarget.top = theater ? Math.min(top, 24) : top;
+      insetsTarget.left = theater ? 0 : rail.right + 6;
+      const edge = Math.max(0, W - inspector.getBoundingClientRect().right);
+      insetsTarget.right = inspectorOpen && !theater ? inspector.offsetWidth + edge + 8 : 0;
+      const dockH = viewDock.offsetHeight;
+      root.style.setProperty("--dock-h", `${dockH}px`);
+      insetsTarget.bottom = theater ? 0 : dockH + 20;
+      const cx = insetsTarget.left + (W - insetsTarget.left - insetsTarget.right) / 2;
+      root.style.setProperty("--stage-cx", `${Math.round(cx)}px`);
+    }
+    // Never let the chrome squeeze the stage below a usable window.
+    const minH = H * 0.32;
+    if (H - insetsTarget.top - insetsTarget.bottom < minH) {
+      insetsTarget.bottom = Math.max(0, H - insetsTarget.top - minH);
+    }
+  };
+
+  const stepInsets = (dt: number): void => {
+    if (layoutDirty) {
+      computeLayout();
+      layoutDirty = false;
+      if (reframeOnLayout) {
+        Object.assign(insetsCur, insetsTarget);
+        scene.setViewInsets({ ...insetsCur });
+        scene.reframe(false);
+        reframeOnLayout = false;
+        refitPending = false;
+        return;
+      }
+      if (refitPending) {
+        refitPending = false;
+        if (scene.isAtPreset()) scene.reframe(true, { ...insetsTarget });
+      }
+    }
+    const k = reducedMotionMq.matches ? 1 : 1 - Math.exp(-dt * 10);
+    let moved = false;
+    for (const key of ["left", "right", "top", "bottom"] as const) {
+      const d = insetsTarget[key] - insetsCur[key];
+      if (Math.abs(d) > 0.25) {
+        insetsCur[key] += Math.abs(d) < 1 ? d : d * k;
+        moved = true;
+      }
+    }
+    if (moved) scene.setViewInsets({ ...insetsCur });
+  };
+
+  if (typeof ResizeObserver !== "undefined") {
+    const ro = new ResizeObserver(() => (layoutDirty = true));
+    ro.observe(shell);
+    ro.observe(topBar);
+    ro.observe(viewDock);
+  }
+  window.addEventListener("resize", () => {
+    layoutDirty = true;
+    refitPending = true;
+  });
+  inspector.addEventListener("transitionend", () => (layoutDirty = true));
+  compactMq.addEventListener("change", () => {
+    isCompact = compactMq.matches;
+    root.classList.toggle("is-compact", isCompact);
+    shell.classList.remove("view-open");
+    setAttr(btnViewMenu, "aria-expanded", "false");
+    layoutDirty = true;
+    reframeOnLayout = true;
+    updatePerturbationBannerAndBadges();
+  });
+
+  const toggleTheaterMode = (): void => {
+    theater = !shell.classList.contains("theater-mode");
+    shell.classList.toggle("theater-mode", theater);
+    setAttr(btnTheaterMode, "aria-pressed", String(theater));
+    layoutDirty = true;
+    refitPending = true;
+  };
+  btnTheaterMode.addEventListener("click", toggleTheaterMode);
+  btnInspectorToggle.addEventListener("click", () => {
+    if (theater) toggleTheaterMode();
+    setInspectorOpen(!inspectorOpen);
+  });
+  $("#btn-inspector-close").addEventListener("click", () => setInspectorOpen(false));
+
+  // Tabs (roving tabindex, arrow keys)
+  const tabs = $$<HTMLButtonElement>('[role="tab"][data-panel]');
+  let currentPanel: PanelName = "bench";
+  const panelVisible = (name: PanelName): boolean =>
+    currentPanel === name && !theater && (isCompact ? sheetState !== "peek" : inspectorOpen);
+
+  const setPanel = (name: PanelName, reveal = true): void => {
+    currentPanel = name;
+    for (const t of tabs) {
+      const on = t.dataset.panel === name;
+      setAttr(t, "aria-selected", String(on));
+      t.tabIndex = on ? 0 : -1;
+      const panel = document.getElementById(t.getAttribute("aria-controls") ?? "");
+      if (panel) panel.hidden = !on;
+    }
+    if (reveal) {
+      if (isCompact) {
+        if (sheetState === "peek") setSheet("half");
+      } else if (!inspectorOpen) {
+        setInspectorOpen(true);
+      }
+    }
+    inspectorBody.scrollTop = 0;
+  };
+
+  for (const t of tabs) {
+    t.addEventListener("click", () => {
+      const name = (t.dataset.panel ?? "bench") as PanelName;
+      if (isCompact && name === currentPanel && sheetState !== "peek") {
+        setSheet("peek");
+        return;
+      }
+      setPanel(name, true);
+    });
+    t.addEventListener("keydown", (ev) => {
+      const i = tabs.indexOf(t);
+      let j = -1;
+      if (ev.key === "ArrowRight" || ev.key === "ArrowDown") j = (i + 1) % tabs.length;
+      else if (ev.key === "ArrowLeft" || ev.key === "ArrowUp") j = (i - 1 + tabs.length) % tabs.length;
+      else if (ev.key === "Home") j = 0;
+      else if (ev.key === "End") j = tabs.length - 1;
+      if (j >= 0) {
+        ev.preventDefault();
+        const next = tabs[j]!;
+        setPanel((next.dataset.panel ?? "bench") as PanelName, true);
+        next.focus();
+      }
+    });
+  }
+
+  const revealSubtool = (id: string): void => {
+    const box = document.getElementById(id);
+    if (!box || !panelVisible("bench")) return;
+    const top =
+      box.getBoundingClientRect().top - inspectorBody.getBoundingClientRect().top + inspectorBody.scrollTop - 12;
+    inspectorBody.scrollTo({ top, behavior: reducedMotionMq.matches ? "auto" : "smooth" });
+  };
+
+  // Bottom sheet drag (handle + tab header)
+  {
+    let startY = 0;
+    let startOffset = 0;
+    let dragging = false;
+    let pid = -1;
+    let suppressClick = false;
+    const samples: { t: number; y: number }[] = [];
+    const currentOffset = (): number => {
+      const m = new DOMMatrixReadOnly(getComputedStyle(inspector).transform);
+      return m.m42;
+    };
+    const offsets = (): Record<SheetState, number> => {
+      const h = inspector.offsetHeight;
+      return { full: 0, half: h - sheetVisibleHeight("half"), peek: h - sheetVisibleHeight("peek") };
+    };
+    const onDown = (ev: PointerEvent): void => {
+      if (!isCompact || (ev.pointerType === "mouse" && ev.button !== 0)) return;
+      startY = ev.clientY;
+      startOffset = currentOffset();
+      pid = ev.pointerId;
+      dragging = false;
+      samples.length = 0;
+      samples.push({ t: performance.now(), y: ev.clientY });
+    };
+    const onMove = (ev: PointerEvent): void => {
+      if (ev.pointerId !== pid) return;
+      const dy = ev.clientY - startY;
+      if (!dragging && Math.abs(dy) > 7) {
+        dragging = true;
+        inspector.classList.add("is-dragging");
+        (ev.currentTarget as HTMLElement).setPointerCapture(pid);
+      }
+      if (!dragging) return;
+      const o = offsets();
+      const y = Math.max(o.full - 24, Math.min(o.peek + 12, startOffset + dy));
+      inspector.style.transform = `translateY(${y}px)`;
+      samples.push({ t: performance.now(), y: ev.clientY });
+      if (samples.length > 6) samples.shift();
+    };
+    const onUp = (ev: PointerEvent): void => {
+      if (ev.pointerId !== pid) return;
+      pid = -1;
+      if (!dragging) return;
+      dragging = false;
+      suppressClick = true;
+      window.setTimeout(() => (suppressClick = false), 60);
+      const first = samples[0]!;
+      const last = samples[samples.length - 1]!;
+      const v = (last.y - first.y) / Math.max(1, last.t - first.t); // px/ms
+      const projected = currentOffset() + v * 160;
+      const o = offsets();
+      let best: SheetState = "peek";
+      let bestD = Infinity;
+      for (const s of ["peek", "half", "full"] as const) {
+        const d = Math.abs(o[s] - projected);
+        if (d < bestD) {
+          bestD = d;
+          best = s;
+        }
+      }
+      inspector.classList.remove("is-dragging");
+      inspector.style.transform = "";
+      setSheet(best);
+    };
+    for (const el of [$("#sheet-handle"), inspector.querySelector<HTMLElement>(".inspector-head")!]) {
+      el.addEventListener("pointerdown", onDown);
+      el.addEventListener("pointermove", onMove);
+      el.addEventListener("pointerup", onUp);
+      el.addEventListener("pointercancel", onUp);
+    }
+    inspector.addEventListener(
+      "click",
+      (ev) => {
+        if (suppressClick) {
+          ev.stopPropagation();
+          ev.preventDefault();
+        }
+      },
+      true,
+    );
+    $("#sheet-handle").addEventListener("click", () => {
+      if (!isCompact) return;
+      setSheet(sheetState === "peek" ? "half" : sheetState === "half" ? "full" : "peek");
+    });
+  }
+
+  // View menu (compact)
+  const setViewMenu = (open: boolean): void => {
+    shell.classList.toggle("view-open", open);
+    setAttr(btnViewMenu, "aria-expanded", String(open));
+  };
+  btnViewMenu.addEventListener("click", () => {
+    const open = !shell.classList.contains("view-open");
+    if (open && sheetState !== "peek") setSheet("peek");
+    setViewMenu(open);
+  });
+  canvasViewport.addEventListener("pointerdown", () => {
+    if (shell.classList.contains("view-open")) setViewMenu(false);
+  });
+
+  // ---------------------------------------------------------------------------------------------
+  // Vector fields & camera
   const ALL_VEC_LAYERS: VectorFieldLayer[] = ["heat", "convection", "magnetic", "acoustic", "stress"];
   const btnVecAll = $<HTMLButtonElement>("#btn-vec-all");
 
   const syncVectorFieldButtons = (): void => {
     let allOn = true;
-    document.querySelectorAll<HTMLButtonElement>("[data-vec-field]").forEach((btn) => {
-      const layer = btn.dataset.vecField as VectorFieldLayer;
-      const isOn = scene.isVectorFieldVisible(layer);
+    for (const btn of $$<HTMLButtonElement>("[data-vec-field]")) {
+      const isOn = scene.isVectorFieldVisible(btn.dataset.vecField as VectorFieldLayer);
       btn.classList.toggle("active", isOn);
+      setAttr(btn, "aria-pressed", String(isOn));
       if (!isOn) allOn = false;
-    });
+    }
     btnVecAll.classList.toggle("active", allOn);
+    setAttr(btnVecAll, "aria-pressed", String(allOn));
   };
 
   const setVectorField = (layer: VectorFieldLayer, visible: boolean): void => {
@@ -251,557 +765,836 @@ async function boot(): Promise<void> {
     syncVectorFieldButtons();
   };
 
-  document.querySelectorAll<HTMLButtonElement>("[data-vec-field]").forEach((btn) => {
+  for (const btn of $$<HTMLButtonElement>("[data-vec-field]")) {
     btn.addEventListener("click", () => {
-      const layer = btn.dataset.vecField as VectorFieldLayer;
-      scene.toggleVectorField(layer);
+      scene.toggleVectorField(btn.dataset.vecField as VectorFieldLayer);
       syncVectorFieldButtons();
     });
-  });
+  }
 
-  btnVecAll.addEventListener("click", () => {
+  const toggleAllFields = (): void => {
     const anyOff = ALL_VEC_LAYERS.some((l) => !scene.isVectorFieldVisible(l));
-    for (const l of ALL_VEC_LAYERS) {
-      scene.setVectorFieldVisible(l, anyOff);
-    }
+    for (const l of ALL_VEC_LAYERS) scene.setVectorFieldVisible(l, anyOff);
     syncVectorFieldButtons();
-  });
+  };
+  btnVecAll.addEventListener("click", toggleAllFields);
+
+  const applyCameraPreset = (preset: CameraPreset): void => {
+    // Fit against the layout the chrome is heading to (e.g. a sheet that is about to collapse),
+    // not the one it is leaving.
+    computeLayout();
+    layoutDirty = false;
+    Object.assign(insetsCur, insetsTarget);
+    scene.setViewInsets({ ...insetsCur });
+    for (const b of $$<HTMLButtonElement>(".cam-btn")) {
+      const on = b.dataset.cam === preset;
+      b.classList.toggle("active", on);
+      setAttr(b, "aria-pressed", String(on));
+    }
+    scene.setCameraPreset(preset);
+  };
+
+  for (const btn of $$<HTMLButtonElement>(".cam-btn")) {
+    btn.addEventListener("click", () => {
+      applyCameraPreset((btn.dataset.cam ?? "overview") as CameraPreset);
+      if (isCompact) setViewMenu(false);
+    });
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Tools
+  const toolButtons = $$<HTMLButtonElement>(".tool-btn[data-tool]");
 
   const selectToolMode = (mode: ActiveToolMode, autoArm = true): void => {
     activeToolMode = mode;
-    document.querySelectorAll<HTMLButtonElement>(".tool-btn").forEach((b) => {
-      b.classList.toggle("active", b.dataset.tool === mode);
-    });
+    for (const b of toolButtons) {
+      const on = b.dataset.tool === mode;
+      b.classList.toggle("active", on);
+      setAttr(b, "aria-checked", String(on));
+      b.tabIndex = on ? 0 : -1;
+    }
     scene.setToolMode(mode);
+    if (mode !== "inspect") dismissCoach();
 
-    // Auto-arm a sensible working intensity when selecting a perturbation tool
-    // so clicking the tool button immediately activates the physical apparatus!
+    // Selecting a perturbation tool arms a sensible working intensity right away.
     if (autoArm) {
       if (mode === "torch" && torchPower < 0.05) {
         torchPower = 0.78;
-        sliderTorchPower.value = "0.78";
+        setRange(sliderTorchPower, torchPower);
       } else if (mode === "ln2" && ln2Rate < 0.05) {
-        ln2Rate = 0.80;
-        sliderLn2Rate.value = "0.80";
+        ln2Rate = 0.8;
+        setRange(sliderLn2Rate, ln2Rate);
       } else if (mode === "oil" && oilRate < 0.05) {
         oilRate = 0.65;
-        sliderOilRate.value = "0.65";
+        setRange(sliderOilRate, oilRate);
       } else if (mode === "magnet" && !magnetOn) {
         magnetOn = true;
         chkMagnetOn.checked = true;
       } else if (mode === "air" && airPower < 0.05) {
         airPower = 0.85;
-        sliderAirPower.value = "0.85";
+        setRange(sliderAirPower, airPower);
       }
     }
     syncToolsToSim();
+
+    if (mode === "mic") {
+      if (panelVisible(currentPanel) && currentPanel !== "metrology") setPanel("metrology", false);
+    } else if (mode !== "inspect") {
+      if (panelVisible(currentPanel) && currentPanel !== "bench") setPanel("bench", false);
+      window.requestAnimationFrame(() => revealSubtool(`subtool-${mode}`));
+    }
   };
 
-  const applyCameraPreset = (preset: CameraPreset): void => {
-    document.querySelectorAll<HTMLButtonElement>(".cam-btn").forEach((b) => {
-      b.classList.toggle("active", b.dataset.cam === preset);
+  for (const btn of toolButtons) {
+    btn.tabIndex = btn.classList.contains("active") ? 0 : -1;
+    btn.addEventListener("click", () => selectToolMode((btn.dataset.tool ?? "inspect") as ActiveToolMode, true));
+    btn.addEventListener("keydown", (ev) => {
+      const i = toolButtons.indexOf(btn);
+      let j = -1;
+      if (ev.key === "ArrowDown" || ev.key === "ArrowRight") j = (i + 1) % toolButtons.length;
+      else if (ev.key === "ArrowUp" || ev.key === "ArrowLeft") j = (i - 1 + toolButtons.length) % toolButtons.length;
+      if (j >= 0) {
+        ev.preventDefault();
+        const next = toolButtons[j]!;
+        selectToolMode((next.dataset.tool ?? "inspect") as ActiveToolMode, true);
+        next.focus();
+      }
     });
-    scene.setCameraPreset(preset);
+  }
+
+  const setChipGroupActive = (selector: string, chip: Element | null): void => {
+    for (const c of $$(selector)) {
+      const on = c === chip;
+      c.classList.toggle("active", on);
+      setAttr(c, "aria-pressed", String(on));
+    }
   };
 
   const stopAllPerturbations = (): void => {
     torchPower = 0.0;
-    sliderTorchPower.value = "0";
+    setRange(sliderTorchPower, 0);
     ln2Rate = 0.0;
-    sliderLn2Rate.value = "0";
+    setRange(sliderLn2Rate, 0);
     oilRate = 0.0;
-    sliderOilRate.value = "0";
+    setRange(sliderOilRate, 0);
     magnetOn = false;
     chkMagnetOn.checked = false;
     magnetDistMm = 28.0;
-    sliderMagnetDist.value = "28";
+    setRange(sliderMagnetDist, 28);
     magnetPosMm = [28.0, -11.0, 2.5];
     airPower = 0.0;
-    sliderAirPower.value = "0";
+    setRange(sliderAirPower, 0);
     ambientPressureAtm = 1.0;
-    sliderPressureAtm.value = "1";
+    setRange(sliderPressureAtm, 1);
     gravityGVec = [0.0, -1.0, 0.0];
-    gravityLabel = "1.0G 6h";
-    document.querySelectorAll("[data-gravity-vec]").forEach((c, idx) => {
-      c.classList.toggle("active", idx === 0);
-    });
+    gravityLabel = "1.0 g · 6h down";
+    setChipGroupActive("[data-gravity-vec]", document.querySelector("[data-gravity-vec]"));
     selectToolMode("inspect", false);
   };
-
-  // Bind Tool Selector Buttons
-  document.querySelectorAll<HTMLButtonElement>(".tool-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const mode = (btn.dataset.tool ?? "inspect") as ActiveToolMode;
-      selectToolMode(mode, true);
-    });
-  });
 
   btnStopPerturbations.addEventListener("click", stopAllPerturbations);
   btnBannerStop.addEventListener("click", stopAllPerturbations);
   btnBannerOrbit.addEventListener("click", () => selectToolMode("inspect", false));
 
-  // Bind Camera Presets
-  document.querySelectorAll<HTMLButtonElement>(".cam-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const preset = (btn.dataset.cam ?? "overview") as CameraPreset;
-      applyCameraPreset(preset);
-    });
-  });
-
-  // Pause / Resume & Theater Studio Mode
-  const togglePause = (): void => {
-    simPaused = !simPaused;
-    btnPauseSim.textContent = simPaused ? "▶ Resume" : "⏸ Pause";
-    btnPauseSim.classList.toggle("active", simPaused);
+  // ---------------------------------------------------------------------------------------------
+  // Pause, audio, wind, reset, shock
+  const pauseIcon = btnPauseSim.querySelector("use")!;
+  const setPaused = (paused: boolean): void => {
+    simPaused = paused;
+    setAttr(btnPauseSim, "aria-pressed", String(paused));
+    setAttr(btnPauseSim, "aria-label", paused ? "Resume simulation" : "Pause simulation");
+    btnPauseSim.title = paused ? "Resume simulation (Space)" : "Pause simulation (Space)";
+    pauseIcon.setAttribute("href", paused ? "#i-play" : "#i-pause");
   };
+  const togglePause = (): void => setPaused(!simPaused);
   btnPauseSim.addEventListener("click", togglePause);
 
-  const toggleTheaterMode = (): void => {
-    const isTheater = appShell.classList.toggle("theater-mode");
-    btnTheaterMode.classList.toggle("active", isTheater);
-    btnTheaterMode.textContent = isTheater ? "⤡ Exit Studio" : "⤢ Studio View";
-    setTimeout(() => scene.resize(), 60);
-    setTimeout(() => scene.resize(), 240);
+  const audioButtons = $$<HTMLButtonElement>('[data-action="toggle-audio"]');
+  const syncAudioButtons = (): void => {
+    const on = micAudio.isRunning();
+    for (const b of audioButtons) {
+      setAttr(b, "aria-pressed", String(on));
+      const use = b.querySelector("use");
+      if (b.id === "btn-toggle-audio") {
+        use?.setAttribute("href", on ? "#i-sound" : "#i-mute");
+        setAttr(b, "aria-label", on ? "Mute the virtual microphone" : "Listen to the virtual microphone");
+      } else {
+        use?.setAttribute("href", on ? "#i-mute" : "#i-sound");
+        const lbl = b.querySelector(".audio-label");
+        if (lbl) setText(lbl, on ? "Mute" : "Listen");
+      }
+    }
   };
-  btnTheaterMode.addEventListener("click", toggleTheaterMode);
-
-  // Mobile Segmented Tab Navigation
-  const setMobileTab = (tabName: string): void => {
-    document.querySelectorAll<HTMLButtonElement>(".mob-tab-btn").forEach((b) => {
-      b.classList.toggle("active", b.dataset.mobileTab === tabName);
+  for (const b of audioButtons) {
+    b.addEventListener("click", async () => {
+      await micAudio.toggle(sim);
+      syncAudioButtons();
+      announce(micAudio.isRunning() ? "Microphone audio on" : "Microphone audio muted");
     });
-    document.querySelectorAll<HTMLElement>(".panel-card[data-mobile-group]").forEach((card) => {
-      card.classList.toggle("mobile-tab-active", card.dataset.mobileGroup === tabName);
-    });
-    const isMetrology = tabName === "metrology";
-    leftDock.classList.toggle("mobile-dock-hidden", isMetrology);
-    rightDock.classList.toggle("mobile-dock-hidden", !isMetrology);
-    setTimeout(() => scene.resize(), 40);
-  };
-  setMobileTab("perturb");
+  }
 
-  document.querySelectorAll<HTMLButtonElement>(".mob-tab-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      setMobileTab(btn.dataset.mobileTab ?? "perturb");
-    });
-  });
-
-  // Crown Winding & Reset
-  $("#btn-wind-crown").addEventListener("click", () => {
+  const windCrown = (): void => {
     sim.wind_crown(1.5);
-  });
+    announce("Crown wound one and a half turns");
+  };
+  const shock = (): void => {
+    sim.trigger_mechanical_shock(500.0);
+    announce("500 g drop shock delivered");
+  };
+  $("#btn-wind-crown").addEventListener("click", windCrown);
+  btnShock500g.addEventListener("click", shock);
 
   const resetWatchAll = (): void => {
+    cancelFastForward();
     stopAllPerturbations();
     sim.reset();
     sim.set_compensated_hairspring(chkInvarSpring.checked);
+    syncToolsToSim();
     timegrapher.reset();
   };
-
   $("#btn-reset-watch").addEventListener("click", resetWatchAll);
 
-  // Architecture & View Toggles
-  sliderExploded.addEventListener("input", () => {
-    scene.setExplodedFactor(Number(sliderExploded.value));
-  });
-  chkOpenCase.addEventListener("change", () => {
-    scene.setOpenCaseMode(chkOpenCase.checked);
-  });
-  chkInvarSpring.addEventListener("change", () => {
-    sim.set_compensated_hairspring(chkInvarSpring.checked);
-  });
-  chkSlowMo.addEventListener("change", () => {
-    slowMo = chkSlowMo.checked;
-  });
-  chkThermalOverlay.addEventListener("change", () => {
-    scene.setThermalOverlayMode(chkThermalOverlay.checked);
+  for (const b of $$<HTMLButtonElement>("[data-action]")) {
+    const a = b.dataset.action;
+    if (a === "shock") b.addEventListener("click", shock);
+    else if (a === "wind") b.addEventListener("click", windCrown);
+    else if (a === "reset") b.addEventListener("click", () => {
+      resetWatchAll();
+      announce("Watch reset to 20 °C");
+    });
+  }
+
+  // Display toggles
+  sliderExploded.addEventListener("input", () => scene.setExplodedFactor(Number(sliderExploded.value)));
+  chkOpenCase.addEventListener("change", () => scene.setOpenCaseMode(chkOpenCase.checked));
+  chkInvarSpring.addEventListener("change", () => sim.set_compensated_hairspring(chkInvarSpring.checked));
+  chkSlowMo.addEventListener("change", () => (slowMo = chkSlowMo.checked));
+  chkThermalOverlay.addEventListener("change", () => scene.setThermalOverlayMode(chkThermalOverlay.checked));
+  selQuality.value = qualityChoice;
+  selQuality.addEventListener("change", () => {
+    const v = selQuality.value;
+    storeSet(STORE_QUALITY, v);
+    tier = v === "high" || v === "medium" || v === "low" ? v : detectedTier;
+    scene.setQualityTier(tier);
+    applyTierClass();
   });
 
-  // Perturbation Sliders
+  // Perturbation controls
   sliderTorchPower.addEventListener("input", () => {
     torchPower = Number(sliderTorchPower.value);
     syncToolsToSim();
   });
-
-  document.querySelectorAll<HTMLButtonElement>("[data-torch-aim]").forEach((chip) => {
+  for (const chip of $$<HTMLButtonElement>("[data-torch-aim]")) {
     chip.addEventListener("click", () => {
-      document.querySelectorAll("[data-torch-aim]").forEach((c) => c.classList.remove("active"));
-      chip.classList.add("active");
+      setChipGroupActive("[data-torch-aim]", chip);
       const parts = (chip.dataset.torchAim ?? "0,-24,2").split(",").map(Number);
       torchPosMm = [parts[0] ?? 0, parts[1] ?? -24, parts[2] ?? 2];
       if (torchPower < 0.05) {
         torchPower = 0.78;
-        sliderTorchPower.value = "0.78";
+        setRange(sliderTorchPower, torchPower);
       }
       syncToolsToSim();
     });
-  });
-
+  }
   sliderLn2Rate.addEventListener("input", () => {
     ln2Rate = Number(sliderLn2Rate.value);
     syncToolsToSim();
   });
-
   sliderOilRate.addEventListener("input", () => {
     oilRate = Number(sliderOilRate.value);
     syncToolsToSim();
   });
-
   $("#btn-flood-oil").addEventListener("click", () => {
     oilPosMm = [0.0, -11.0, 2.0];
-    sim.set_oil_pour(1.0, 0.0, -11.0, 2.0);
-    for (let i = 0; i < 16; i++) {
-      sim.step(0.05);
-    }
-    sim.set_oil_pour(oilRate, oilPosMm[0], oilPosMm[1], oilPosMm[2]);
+    startFastForward(
+      "Flooding the hairspring",
+      [{ steps: 16, before: () => sim.set_oil_pour(1.0, 0.0, -11.0, 2.0) }],
+      () => sim.set_oil_pour(oilRate, oilPosMm[0], oilPosMm[1], oilPosMm[2]),
+    );
   });
-
   $("#btn-clean-oil").addEventListener("click", () => {
     oilRate = 0.0;
-    sliderOilRate.value = "0";
+    setRange(sliderOilRate, 0);
     sim.set_oil_pour(0.0, oilPosMm[0], oilPosMm[1], oilPosMm[2]);
     sim.clean_excess_oil();
     updatePerturbationBannerAndBadges();
   });
-
   chkMagnetOn.addEventListener("change", () => {
     magnetOn = chkMagnetOn.checked;
     magnetPosMm = [magnetDistMm, -11.0, 2.5];
     syncToolsToSim();
   });
-
   sliderMagnetDist.addEventListener("input", () => {
     magnetDistMm = Number(sliderMagnetDist.value);
     magnetPosMm = [magnetDistMm, -11.0, 2.5];
     syncToolsToSim();
   });
-
   $("#btn-degauss").addEventListener("click", () => {
     magnetOn = false;
     chkMagnetOn.checked = false;
     syncToolsToSim();
     sim.trigger_degauss();
   });
-
-  // Compressed Air Shear Nozzle, Bell-Jar Pressure, 3D Gravity & 500G Shock Controls
   sliderAirPower.addEventListener("input", () => {
     airPower = Number(sliderAirPower.value);
     syncToolsToSim();
   });
-
   sliderPressureAtm.addEventListener("input", () => {
     ambientPressureAtm = Number(sliderPressureAtm.value);
     syncToolsToSim();
   });
-
-  btnShock500g.addEventListener("click", () => {
-    sim.trigger_mechanical_shock(500.0);
-  });
-
-  document.querySelectorAll<HTMLButtonElement>("[data-gravity-vec]").forEach((chip) => {
+  for (const chip of $$<HTMLButtonElement>("[data-gravity-vec]")) {
     chip.addEventListener("click", () => {
-      document.querySelectorAll("[data-gravity-vec]").forEach((c) => c.classList.remove("active"));
-      chip.classList.add("active");
-      const raw = (chip.dataset.gravityVec ?? "0,-1,0,1.0G 6h").split(",");
+      setChipGroupActive("[data-gravity-vec]", chip);
+      const raw = (chip.dataset.gravityVec ?? "0,-1,0,1.0 g").split(",");
       gravityGVec = [Number(raw[0] ?? 0), Number(raw[1] ?? -1), Number(raw[2] ?? 0)];
-      gravityLabel = raw[3] ?? "1.0G";
+      gravityLabel = raw[3] ?? "1.0 g";
       syncToolsToSim();
     });
-  });
+  }
 
-  // 3D Virtual Microphone Controls
-  btnToggleAudio.addEventListener("click", async () => {
-    const running = await micAudio.toggle(sim);
-    btnToggleAudio.textContent = running ? "🔇 Mute 48 kHz Mic" : "🔊 Enable 48 kHz Mic";
-  });
-
+  // Microphone
   sliderMicGain.addEventListener("input", () => {
     micGain = Number(sliderMicGain.value);
     syncToolsToSim();
   });
-
-  document.querySelectorAll<HTMLButtonElement>("[data-mic-pos]").forEach((chip) => {
+  for (const chip of $$<HTMLButtonElement>("[data-mic-pos]")) {
     chip.addEventListener("click", () => {
-      document.querySelectorAll("[data-mic-pos]").forEach((c) => c.classList.remove("active"));
-      chip.classList.add("active");
+      setChipGroupActive("[data-mic-pos]", chip);
       const parts = (chip.dataset.micPos ?? "0,-11,11").split(",").map(Number);
       micPosMm = [parts[0] ?? 0, parts[1] ?? -11, parts[2] ?? 11];
       syncToolsToSim();
     });
-  });
+  }
 
-  // Guided Multiphysics Scenarios
-  document.querySelectorAll<HTMLButtonElement>("[data-preset]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      if (simPaused) togglePause();
-      document.querySelectorAll(".preset-btn").forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      const preset = btn.dataset.preset;
-      switch (preset) {
-        case "chronometer":
-          resetWatchAll();
-          applyCameraPreset("overview");
-          break;
+  // ---------------------------------------------------------------------------------------------
+  // Fast-forward queue: long experiments advance lab time in time-budgeted chunks per frame so the
+  // page stays responsive and you watch the physics unfold instead of waiting on a frozen tab.
+  interface FfPhase {
+    steps: number;
+    dt?: number;
+    before?: () => void;
+  }
+  interface FfJob {
+    title: string;
+    phases: FfPhase[];
+    phase: number;
+    stepInPhase: number;
+    done: number;
+    total: number;
+    labS: number;
+    totalLabS: number;
+    after?: () => void;
+  }
+  let ff: FfJob | null = null;
+  let heavyPollNow = false;
 
-        case "thermal-drift":
-          stopAllPerturbations();
-          sim.reset();
-          torchPosMm = [0.0, -22.0, 2.0];
-          torchPower = 0.42;
-          sliderTorchPower.value = "0.42";
-          syncToolsToSim();
-          for (let i = 0; i < 30; i++) sim.step(0.05);
-          applyCameraPreset("tourbillon");
-          break;
+  function startFastForward(title: string, phases: FfPhase[], after?: () => void): void {
+    cancelFastForward();
+    const total = phases.reduce((n, p) => n + p.steps, 0);
+    const totalLabS = phases.reduce((n, p) => n + p.steps * (p.dt ?? 0.05), 0);
+    ff = { title, phases, phase: 0, stepInPhase: 0, done: 0, total, labS: 0, totalLabS, after };
+    if (simPaused) setPaused(false);
+    setText(ffTitle, title);
+    ffOverlay.classList.remove("hidden");
+    announce(`${title}: fast-forwarding ${totalLabS.toFixed(1)} seconds of lab time`);
+  }
 
-        case "melt-gold":
-          stopAllPerturbations();
-          sim.reset();
-          torchPosMm = [0.0, -25.0, 1.5];
-          torchPower = 1.0;
-          sliderTorchPower.value = "1.0";
-          syncToolsToSim();
-          for (let i = 0; i < 125; i++) sim.step(0.05);
-          applyCameraPreset("overview");
-          break;
+  function cancelFastForward(): void {
+    if (!ff) return;
+    ff = null;
+    ffOverlay.classList.add("hidden");
+  }
 
-        case "melt-then-ln2": {
-          const curSnap = decodeWatchSnapshot(sim.snapshot());
-          if (curSnap.nodes[3]!.plasticSlump < 0.08) {
-            sim.set_blowtorch(1.0, 0.0, -25.0, 1.5);
-            for (let i = 0; i < 140; i++) sim.step(0.05);
-          }
-          torchPower = 0.0;
-          sliderTorchPower.value = "0";
-          ln2PosMm = [0.0, -18.0, 2.0];
-          ln2Rate = 1.0;
-          sliderLn2Rate.value = "1.0";
-          syncToolsToSim();
-          for (let i = 0; i < 90; i++) sim.step(0.05);
-          applyCameraPreset("overview");
-          break;
-        }
-
-        case "cryo-freeze":
-          stopAllPerturbations();
-          sim.reset();
-          ln2PosMm = [0.0, -11.0, 3.0];
-          ln2Rate = 1.0;
-          sliderLn2Rate.value = "1.0";
-          syncToolsToSim();
-          for (let i = 0; i < 85; i++) sim.step(0.05);
-          applyCameraPreset("tourbillon");
-          break;
-
-        case "oil-flood":
-          stopAllPerturbations();
-          sim.reset();
-          oilPosMm = [0.0, -11.0, 2.0];
-          oilRate = 0.85;
-          sliderOilRate.value = "0.85";
-          syncToolsToSim();
-          for (let i = 0; i < 25; i++) sim.step(0.05);
-          applyCameraPreset("tourbillon");
-          break;
-
-        case "magnet-attack":
-          stopAllPerturbations();
-          magnetOn = true;
-          chkMagnetOn.checked = true;
-          magnetDistMm = 13.0;
-          sliderMagnetDist.value = "13";
-          magnetPosMm = [13.0, -11.0, 2.5];
-          syncToolsToSim();
-          setVectorField("magnetic", true);
-          applyCameraPreset("tourbillon");
-          break;
-
-        case "air-blow-gold":
-          stopAllPerturbations();
-          sim.reset();
-          sim.set_blowtorch(1.0, 0.0, -25.0, 1.5);
-          for (let i = 0; i < 120; i++) sim.step(0.05);
-          sim.set_blowtorch(0.0, 0.0, -25.0, 1.5);
-          airPosMm = [0.0, -24.0, 2.5];
-          airPower = 0.92;
-          sliderAirPower.value = "0.92";
-          syncToolsToSim();
-          for (let i = 0; i < 30; i++) sim.step(0.05);
-          setVectorField("convection", true);
-          applyCameraPreset("overview");
-          break;
-
-        case "vacuum-chamber":
-          stopAllPerturbations();
-          sim.reset();
-          ambientPressureAtm = 0.0;
-          sliderPressureAtm.value = "0";
-          syncToolsToSim();
-          for (let i = 0; i < 45; i++) sim.step(0.05);
-          setVectorField("convection", true);
-          applyCameraPreset("tourbillon");
-          break;
-
-        case "shock-centrifuge":
-          stopAllPerturbations();
-          sim.reset();
-          gravityGVec = [0.0, -4.0, 0.0];
-          gravityLabel = "4.0G Centr";
-          syncToolsToSim();
-          sim.trigger_mechanical_shock(500.0);
-          for (let i = 0; i < 15; i++) sim.step(0.05);
-          setVectorField("stress", true);
-          applyCameraPreset("overview");
-          break;
+  const runFastForward = (): void => {
+    const job = ff;
+    if (!job) return;
+    const budgetMs = isCompact ? 9 : 13;
+    const t0 = performance.now();
+    do {
+      const ph = job.phases[job.phase];
+      if (!ph) break;
+      if (job.stepInPhase === 0 && ph.before) ph.before();
+      if (job.stepInPhase < ph.steps) {
+        const dt = ph.dt ?? 0.05;
+        sim.step(dt);
+        job.stepInPhase++;
+        job.done++;
+        job.labS += dt;
       }
-    });
+      if (job.stepInPhase >= ph.steps) {
+        job.phase++;
+        job.stepInPhase = 0;
+      }
+    } while (performance.now() - t0 < budgetMs);
+    heavyPollNow = true;
+    const frac = job.total > 0 ? job.done / job.total : 1;
+    ffBarFill.style.width = `${(frac * 100).toFixed(1)}%`;
+    setText(ffDetail, `${job.labS.toFixed(1)} / ${job.totalLabS.toFixed(1)} s lab time`);
+    if (job.phase >= job.phases.length) {
+      ff = null;
+      ffOverlay.classList.add("hidden");
+      job.after?.();
+      announce(`${job.title} complete`);
+    }
+  };
+  $("#btn-ff-cancel").addEventListener("click", () => {
+    cancelFastForward();
+    announce("Stopped; the watch continues in real time from here");
   });
 
-  // Global Keyboard Shortcuts (guarded against inputs)
+  // ---------------------------------------------------------------------------------------------
+  // Guided experiments
+  const runPreset = (preset: string): void => {
+    dismissCoach();
+    cancelFastForward();
+    switch (preset) {
+      case "chronometer":
+        resetWatchAll();
+        applyCameraPreset("overview");
+        break;
+
+      case "thermal-drift":
+        resetWatchAll();
+        torchPosMm = [0.0, -22.0, 2.0];
+        torchPower = 0.42;
+        setRange(sliderTorchPower, torchPower);
+        syncToolsToSim();
+        applyCameraPreset("tourbillon");
+        startFastForward("Thermal rate drift", [{ steps: 30 }]);
+        break;
+
+      case "melt-gold":
+        resetWatchAll();
+        torchPosMm = [0.0, -25.0, 1.5];
+        torchPower = 1.0;
+        setRange(sliderTorchPower, torchPower);
+        syncToolsToSim();
+        applyCameraPreset("overview");
+        startFastForward("Melting the 18k case", [{ steps: 125 }]);
+        break;
+
+      case "melt-then-ln2": {
+        const curSnap = decodeWatchSnapshot(sim.snapshot());
+        const phases: FfPhase[] = [];
+        if ((curSnap.nodes[3]?.plasticSlump ?? 0) < 0.08) {
+          phases.push({
+            steps: 140,
+            before: () => {
+              torchPosMm = [0.0, -25.0, 1.5];
+              torchPower = 1.0;
+              setRange(sliderTorchPower, torchPower);
+              syncToolsToSim();
+            },
+          });
+        }
+        phases.push({
+          steps: 90,
+          before: () => {
+            torchPower = 0.0;
+            setRange(sliderTorchPower, 0);
+            ln2PosMm = [0.0, -18.0, 2.0];
+            ln2Rate = 1.0;
+            setRange(sliderLn2Rate, ln2Rate);
+            syncToolsToSim();
+          },
+        });
+        applyCameraPreset("overview");
+        startFastForward("Melt, then quench with LN₂", phases);
+        break;
+      }
+
+      case "cryo-freeze":
+        resetWatchAll();
+        ln2PosMm = [0.0, -11.0, 3.0];
+        ln2Rate = 1.0;
+        setRange(sliderLn2Rate, ln2Rate);
+        syncToolsToSim();
+        applyCameraPreset("tourbillon");
+        startFastForward("Cryogenic shrink", [{ steps: 85 }]);
+        break;
+
+      case "oil-flood":
+        resetWatchAll();
+        oilPosMm = [0.0, -11.0, 2.0];
+        oilRate = 0.85;
+        setRange(sliderOilRate, oilRate);
+        syncToolsToSim();
+        applyCameraPreset("tourbillon");
+        startFastForward("Flooding the hairspring", [{ steps: 25 }]);
+        break;
+
+      case "magnet-attack":
+        stopAllPerturbations();
+        magnetOn = true;
+        chkMagnetOn.checked = true;
+        magnetDistMm = 13.0;
+        setRange(sliderMagnetDist, 13);
+        magnetPosMm = [13.0, -11.0, 2.5];
+        syncToolsToSim();
+        setVectorField("magnetic", true);
+        applyCameraPreset("tourbillon");
+        break;
+
+      case "air-blow-gold":
+        resetWatchAll();
+        applyCameraPreset("overview");
+        startFastForward(
+          "Blowing molten gold",
+          [
+            {
+              steps: 120,
+              before: () => {
+                torchPosMm = [0.0, -25.0, 1.5];
+                torchPower = 1.0;
+                setRange(sliderTorchPower, torchPower);
+                syncToolsToSim();
+              },
+            },
+            {
+              steps: 30,
+              before: () => {
+                torchPower = 0.0;
+                setRange(sliderTorchPower, 0);
+                airPosMm = [0.0, -24.0, 2.5];
+                airPower = 0.92;
+                setRange(sliderAirPower, airPower);
+                syncToolsToSim();
+                setVectorField("convection", true);
+              },
+            },
+          ],
+        );
+        break;
+
+      case "vacuum-chamber":
+        resetWatchAll();
+        ambientPressureAtm = 0.0;
+        setRange(sliderPressureAtm, 0);
+        syncToolsToSim();
+        setVectorField("convection", true);
+        applyCameraPreset("tourbillon");
+        startFastForward("Evacuating the bell jar", [{ steps: 45 }]);
+        break;
+
+      case "shock-centrifuge": {
+        resetWatchAll();
+        gravityGVec = [0.0, -4.0, 0.0];
+        gravityLabel = "4.0 g · centrifuge";
+        setChipGroupActive("[data-gravity-vec]", document.querySelector('[data-gravity-vec^="0,-4,0"]'));
+        syncToolsToSim();
+        sim.trigger_mechanical_shock(500.0);
+        setVectorField("stress", true);
+        applyCameraPreset("overview");
+        startFastForward("Drop shock under 4 g", [{ steps: 15 }]);
+        break;
+      }
+    }
+  };
+
+  for (const btn of $$<HTMLButtonElement>("[data-preset]")) {
+    btn.addEventListener("click", () => {
+      if (simPaused) setPaused(false);
+      for (const b of $$(".preset-btn")) {
+        const on = b === btn;
+        b.classList.toggle("active", on);
+        setAttr(b, "aria-pressed", String(on));
+      }
+      // Let the watch be seen: drop the sheet on small screens (before the preset frames the camera).
+      if (isCompact) setSheet("peek");
+      runPreset(btn.dataset.preset ?? "chronometer");
+    });
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Coach & help
+  function dismissCoach(): void {
+    if (coach.classList.contains("hidden")) return;
+    coach.classList.add("hidden");
+    storeSet(STORE_COACH, "done");
+  }
+  $("#btn-coach-dismiss").addEventListener("click", dismissCoach);
+  $("#btn-coach-experiments").addEventListener("click", () => {
+    dismissCoach();
+    setPanel("experiments", true);
+  });
+
+  const openHelp = (): void => {
+    if (!helpDialog.open) helpDialog.showModal();
+  };
+  $("#btn-help").addEventListener("click", openHelp);
+  $("#btn-help-close").addEventListener("click", () => helpDialog.close());
+  helpDialog.addEventListener("click", (ev) => {
+    if (ev.target === helpDialog) helpDialog.close(); // backdrop click
+  });
+
+  // ---------------------------------------------------------------------------------------------
+  // Keyboard shortcuts (ignored while typing or with modifiers)
   window.addEventListener("keydown", (ev) => {
-    const tag = (ev.target as HTMLElement | null)?.tagName;
+    if (helpDialog.open) return;
+    const target = ev.target as HTMLElement | null;
+    const tag = target?.tagName;
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
     if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+    if (target?.getAttribute("role") === "tab" && ev.key.startsWith("Arrow")) return;
 
     const key = ev.key.toLowerCase();
-    if (key === "1" || ev.key === "Escape") {
-      selectToolMode("inspect", false);
-    } else if (key === "2") {
-      selectToolMode("torch", true);
-    } else if (key === "3") {
-      selectToolMode("ln2", true);
-    } else if (key === "4") {
-      selectToolMode("oil", true);
-    } else if (key === "5") {
-      selectToolMode("magnet", true);
-    } else if (key === "6") {
-      selectToolMode("air", true);
-    } else if (key === "7") {
-      selectToolMode("mic", false);
-    } else if (key === "h") {
-      scene.toggleVectorField("heat");
+    if (ev.key === "Escape") {
+      if (shell.classList.contains("view-open")) setViewMenu(false);
+      else if (activeToolMode !== "inspect") selectToolMode("inspect", false);
+      else if (isCompact && sheetState !== "peek") setSheet("peek");
+      else if (theater) toggleTheaterMode();
+      return;
+    }
+    if (ev.key === "?") {
+      openHelp();
+      return;
+    }
+    const toolKeys: Record<string, ActiveToolMode> = { "1": "inspect", "2": "torch", "3": "ln2", "4": "oil", "5": "magnet", "6": "air", "7": "mic" };
+    const tool = toolKeys[key];
+    if (tool) {
+      selectToolMode(tool, tool !== "inspect" && tool !== "mic");
+      return;
+    }
+    const fieldKeys: Record<string, VectorFieldLayer> = { h: "heat", c: "convection", b: "magnetic", a: "acoustic", g: "stress" };
+    const field = fieldKeys[key];
+    if (field) {
+      scene.toggleVectorField(field);
       syncVectorFieldButtons();
-    } else if (key === "c") {
-      scene.toggleVectorField("convection");
-      syncVectorFieldButtons();
-    } else if (key === "b") {
-      scene.toggleVectorField("magnetic");
-      syncVectorFieldButtons();
-    } else if (key === "a") {
-      scene.toggleVectorField("acoustic");
-      syncVectorFieldButtons();
-    } else if (key === "g") {
-      scene.toggleVectorField("stress");
-      syncVectorFieldButtons();
-    } else if (key === "v") {
-      btnVecAll.click();
-    } else if (key === "s") {
-      sim.trigger_mechanical_shock(500.0);
-    } else if (key === "x") {
-      stopAllPerturbations();
-    } else if (key === "w") {
-      sim.wind_crown(1.5);
-    } else if (key === "r") {
-      resetWatchAll();
-    } else if (key === "f") {
-      toggleTheaterMode();
+      return;
+    }
+    if (key === "v") toggleAllFields();
+    else if (key === "s") shock();
+    else if (key === "x") stopAllPerturbations();
+    else if (key === "w") windCrown();
+    else if (key === "r") resetWatchAll();
+    else if (key === "f") toggleTheaterMode();
+    else if (key === "i") {
+      if (isCompact) setSheet(sheetState === "peek" ? "half" : "peek");
+      else setInspectorOpen(!inspectorOpen);
     } else if (ev.code === "Space") {
       ev.preventDefault();
       togglePause();
     }
   });
 
-  // Main 60 FPS Simulation & Render Loop
-  let lastFrameMs = performance.now();
+  // ---------------------------------------------------------------------------------------------
+  // HUD
+  let contactAccum = 0;
+  let lastEsc: Float64Array | null = null;
   let frameCounter = 0;
 
+  const parseStatus = (label: string): [string, string] => {
+    const [head, detail] = label.split(" — ");
+    const cap = (s: string): string => (s ? s.charAt(0) + s.slice(1).toLowerCase() : "");
+    return [cap(head ?? label), cap(detail ?? "")];
+  };
+
   const updateHud = (snap: WatchSnapshot): void => {
-    hudWatchTime.textContent = formatHorologicalTime(snap.watchDisplayedTimeS);
-    hudLabTime.textContent = formatHorologicalTime(snap.labTimeS);
+    setText(hudWatchTime, formatHorologicalTime(snap.watchDisplayedTimeS));
+    setText(hudLabTime, formatHorologicalTime(snap.labTimeS));
     const driftS = snap.watchDisplayedTimeS - snap.labTimeS;
-    hudTimeDrift.textContent = `${driftS >= 0 ? "+" : ""}${driftS.toFixed(2)} s`;
-    hudTimeDrift.style.color =
-      Math.abs(driftS) < 0.25 ? "#52eba8" : driftS < 0 ? "#ffc56e" : "#ff8295";
+    setText(hudTimeDrift, `${signed(driftS, 2)} s`);
+    setAttr(hudTimeDrift, "data-tone", Math.abs(driftS) < 0.5 ? "ok" : Math.abs(driftS) < 5 ? "warn" : "bad");
 
-    const effRate = 0.35 * snap.measuredRateSPerDay + 0.65 * snap.theoreticalRateSPerDay;
-    const rateStr = `${effRate >= 0 ? "+" : ""}${effRate.toFixed(1)} s/d`;
-    const dRateDt = sim.rate_sensitivity_s_day_per_k();
-    hudRateSDay.textContent = `${rateStr} (${dRateDt.toFixed(1)} s/d/K)`;
-    tgRate.textContent = rateStr;
-    tgAmp.textContent = `${snap.balanceAmplitudeDeg.toFixed(0)}°`;
-    tgBeatErr.textContent = `${snap.measuredBeatErrorMs.toFixed(1)} ms`;
+    const tg = timegrapher.readings(snap.labTimeS);
+    // A stopped balance has no rate or beat error; say so instead of extrapolating a fit.
+    const stopped = tg.stopped || (snap.statusCode >= 2 && tg.rateSDay === null);
+    const blendRate = 0.35 * snap.measuredRateSPerDay + 0.65 * snap.theoreticalRateSPerDay;
+    const rate = tg.rateSDay ?? blendRate;
+    const beatErr = tg.beatErrorMs ?? snap.measuredBeatErrorMs;
+    const rateStr = stopped
+      ? "stopped"
+      : `${signed(rate, Math.abs(rate) >= 100 ? 0 : 1)}${Math.abs(rate) >= 10_000 ? "" : " s/d"}`;
+    setText(hudRateSDay, rateStr);
+    setAttr(
+      hudRateSDay,
+      "data-tone",
+      stopped ? "bad" : rate >= -4 && rate <= 6 ? "ok" : Math.abs(rate) < 60 ? "warn" : "bad",
+    );
+    const amp = snap.balanceAmplitudeDeg;
+    setText(hudAmp, `${amp.toFixed(0)}°`);
+    setAttr(hudAmp, "data-tone", amp >= 220 && amp <= 320 ? "ok" : amp >= 150 ? "warn" : "bad");
+    const beatStr = stopped ? "—" : `${beatErr.toFixed(1)} ms`;
+    setText(hudBeatError, beatStr);
+    setAttr(hudBeatError, "data-tone", stopped ? "bad" : beatErr < 0.6 ? "ok" : beatErr < 1.5 ? "warn" : "bad");
+    setText(tgRate, rateStr);
+    setText(tgAmp, `${amp.toFixed(0)}°`);
+    setText(tgBeatErr, beatStr);
+    setText(
+      tgSource,
+      tg.source === "impacts" ? "lock impacts" : tg.source === "crossings" ? "balance timing" : "engine readout",
+    );
 
-    const statusText = simPaused ? "PAUSED — INSPECTING 3D CALIBRE" : sim.status_label();
-    hudStatusPill.textContent = statusText;
-    hudStatusPill.className =
-      "status-pill " +
-      (simPaused
-        ? "status-warn"
-        : snap.statusCode === 0
-          ? "status-ok"
-          : snap.statusCode === 1
-            ? "status-warn"
-            : "status-danger");
+    const label = sim.status_label();
+    const [head, detail] = simPaused ? ["Paused", "Simulation frozen"] : parseStatus(label);
+    setText(statusHead, head);
+    setText(statusDetail, detail);
+    hudStatusPill.title = simPaused ? "Paused" : label;
+    const cls =
+      "status-pill " + (simPaused ? "status-warn" : snap.statusCode === 0 ? "status-ok" : snap.statusCode === 1 ? "status-warn" : "status-danger");
+    if (hudStatusPill.className !== cls) hudStatusPill.className = cls;
 
-    if (frameCounter % 12 === 0) {
-      hudDigest.textContent = sim.state_digest_hex().slice(0, 16) + "…";
-    }
-
+    const reserveH = lastEsc ? (lastEsc[13] ?? snap.mainspringWind * 42) : snap.mainspringWind * 42;
     const reservePct = Math.round(snap.mainspringWind * 100);
-    const reserveHours = (snap.mainspringWind * 42.0).toFixed(1);
-    hudPowerReservePct.textContent = `${reservePct}% · ${reserveHours} h`;
+    setText(hudPowerReservePct, `${reservePct}% · ${reserveH.toFixed(1)} h`);
     hudPowerReserveBar.style.width = `${reservePct}%`;
-    hudBarrelTorque.textContent = `${(snap.mainspringTorqueNm * 1000).toFixed(2)} mN·m`;
-    hudBalanceAmp.textContent = `${snap.balanceAmplitudeDeg.toFixed(1)}°`;
-    hudPivotClearance.textContent = `${snap.minPivotClearanceUm.toFixed(2)} µm`;
-    hudTotalBeats.textContent = String(Math.floor(snap.totalBeats));
+    setText(hudBarrelTorque, `${(snap.mainspringTorqueNm * 1000).toFixed(2)} mN·m`);
+    setText(hudBalanceAmp, `${amp.toFixed(1)}°`);
+    setText(hudPivotClearance, `${snap.minPivotClearanceUm.toFixed(2)} µm`);
+    setText(hudTotalBeats, Math.floor(snap.totalBeats).toLocaleString("en-US"));
 
-    lblTorchPower.textContent = `${Math.round(torchPower * 100)}% (${snap.blowtorchHeatingPowerW.toFixed(0)} W)`;
-    lblLn2Rate.textContent = `${Math.round(ln2Rate * 100)}% (${snap.ln2BoilingPowerW.toFixed(0)} W)`;
-    lblOilRate.textContent = `${snap.nodes[9]!.oilFilmUm.toFixed(1)} µm film`;
-    lblBField.textContent = `${snap.bFieldEscapementMt.toFixed(1)} mT`;
-    lblRemanence.textContent = `${snap.remanentMagnetizationMt.toFixed(1)} mT`;
-    lblAirPower.textContent = `${Math.round(airPower * 100)}% (${Math.round(airPower * 120)} m/s)`;
-    lblChamberEnv.textContent = `${ambientPressureAtm.toFixed(2)} atm · ${gravityLabel}`;
-    const splDb = sim.mic_spl_db();
-    const sone = sim.mic_loudness_sone();
-    const acum = sim.mic_sharpness_acum();
-    lblMicSpl.textContent = `${splDb.toFixed(1)} dB · ${sone.toFixed(2)} sone · ${acum.toFixed(2)} acum`;
+    setText(lblTorchPower, `${Math.round(torchPower * 100)}% · ${snap.blowtorchHeatingPowerW.toFixed(0)} W`);
+    setText(lblLn2Rate, `${Math.round(ln2Rate * 100)}% · ${snap.ln2BoilingPowerW.toFixed(0)} W`);
+    setText(lblOilRate, `${(snap.nodes[9]?.oilFilmUm ?? 0).toFixed(1)} µm film`);
+    setText(lblBField, `${snap.bFieldEscapementMt.toFixed(1)} mT`);
+    setText(lblRemanence, `${snap.remanentMagnetizationMt.toFixed(1)} mT`);
+    setText(lblAirPower, `${Math.round(airPower * 100)}% · ${Math.round(airPower * 120)} m/s`);
+    setText(lblChamberEnv, `${ambientPressureAtm.toFixed(2)} atm · ${gravityLabel.split(" · ")[0] ?? gravityLabel}`);
 
-    // Stage bottom overlay
-    const n6h = snap.nodes[3]!;
-    ovCaseTemp.textContent = `${n6h.temperatureK.toFixed(1)} K (${(n6h.temperatureK - 273.15).toFixed(1)} °C)`;
-    ovGoldMelt.textContent = `${(n6h.meltFraction * 100).toFixed(1)}% (slump ${(n6h.plasticSlump * 100).toFixed(0)}%)`;
-
-    let totalLiqAu = 0;
-    let totalSolidAu = 0;
-    for (let i = 4; i < 12; i++) {
-      totalLiqAu += snap.nodes[i]!.moltenGoldG;
-      totalSolidAu += snap.nodes[i]!.frozenGoldG;
+    const n6h = snap.nodes[3];
+    if (n6h) {
+      const caseT = `${n6h.temperatureK.toFixed(1)} K · ${(n6h.temperatureK - 273.15).toFixed(1)} °C`;
+      const melt = `${(n6h.meltFraction * 100).toFixed(1)}% · slump ${(n6h.plasticSlump * 100).toFixed(0)}%`;
+      setText(ovCaseTemp, caseT);
+      setText(ovGoldMelt, melt);
+      bindText("caseTemp", caseT);
+      bindText("goldMelt", melt);
     }
-    ovFouledGold.textContent = `${totalLiqAu.toFixed(3)} g / ${totalSolidAu.toFixed(3)} g`;
-    ovBField.textContent = `${snap.bFieldEscapementMt.toFixed(1)} mT (rem ${snap.remanentMagnetizationMt.toFixed(1)} mT)`;
+    let liq = 0;
+    let sol = 0;
+    for (let i = 4; i < 12; i++) {
+      liq += snap.nodes[i]?.moltenGoldG ?? 0;
+      sol += snap.nodes[i]?.frozenGoldG ?? 0;
+    }
+    const gold = `${liq.toFixed(3)} / ${sol.toFixed(3)} g`;
+    const bField = `${snap.bFieldEscapementMt.toFixed(1)} mT · rem ${snap.remanentMagnetizationMt.toFixed(1)}`;
+    setText(ovFouledGold, gold);
+    setText(ovBField, bField);
+    bindText("fouledGold", gold);
+    bindText("bField", bField);
 
-    if (frameCounter % 3 === 0) {
-      renderNodeLedgerTable(tbodyLedger, snap);
+    if (panelVisible("metrology")) {
+      setText(
+        lblMicSpl,
+        `${sim.mic_spl_db().toFixed(1)} dB SPL · ${sim.mic_loudness_sone().toFixed(2)} sone · ${sim.mic_sharpness_acum().toFixed(2)} acum`,
+      );
+    }
+
+    if (panelVisible("movement")) {
+      if (frameCounter % 4 === 0) setText(hudDigest, `${sim.state_digest_hex().slice(0, 16)}…`);
+      setText(chrSens, `${signed(sim.rate_sensitivity_s_day_per_k(), 2)} s/d/K`);
+      const lo = sim.rate_interval_lo_s_day();
+      const hi = sim.rate_interval_hi_s_day();
+      const dg = Math.max(Math.abs(lo), Math.abs(hi)) >= 100 ? 0 : 1;
+      setText(chrInterval, `${signed(lo, dg)} … ${signed(hi, dg)} s/d`);
+      setText(chrCosc, sim.cosc_e_value().toFixed(2));
+      setText(chrDrag, `${sim.balance_aero_drag_s_inv().toExponential(2)} s⁻¹`);
+      if (lastEsc) {
+        const v = lastEsc;
+        setText(escFields.impulse, `${(v[7] ?? 0).toFixed(2)} µJ`);
+        setText(escFields.eff, `${((v[8] ?? 0) * 100).toFixed(0)}%`);
+        setText(escFields.lift, `${(v[9] ?? 0).toFixed(1)}°`);
+        setText(escFields.q, (v[10] ?? 0).toFixed(0));
+        setText(escFields.torque, `${(v[11] ?? 0).toFixed(2)} µN·m`);
+        setText(escFields.friction, `${(v[14] ?? 0).toFixed(1)} nN·m`);
+        setText(escFields.air, `${((v[15] ?? 0) * 100).toFixed(0)}%`);
+        setText(escFields.reserve, `${(v[13] ?? 0).toFixed(1)} h`);
+      }
+      for (const el of contactEls) {
+        el.classList.toggle("on", (contactAccum & (1 << Number(el.dataset.bit))) !== 0);
+      }
+    }
+    contactAccum = 0;
+    frameCounter++;
+  };
+
+  if (!hasEscState) {
+    escNote.classList.remove("hidden");
+    setText(escSource, "not reported");
+    $("#esc-kv").classList.add("hidden");
+    $(".contacts").classList.add("hidden");
+  } else {
+    setText(escSource, "engine live");
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Adaptive resolution: hold the frame rate by trading pixels, never physics.
+  const gov = { ema: 16.7, slowSince: 0, fastSince: 0, lastChange: 0, fps: 60 };
+  const governDpr = (frameMs: number, now: number): void => {
+    if (frameMs > 250) return; // tab switch or breakpoint
+    gov.ema += (frameMs - gov.ema) * 0.06;
+    gov.fps = 1000 / gov.ema;
+    if (now - gov.lastChange < 1500) return;
+    if (gov.ema > 23.5) {
+      gov.fastSince = 0;
+      if (!gov.slowSince) gov.slowSince = now;
+      if (now - gov.slowSince > 1200) {
+        const before = scene.getPixelRatio();
+        const after = scene.setPixelRatio(before - 0.15);
+        if (after !== before) layoutDirty = true;
+        gov.lastChange = now;
+        gov.slowSince = 0;
+      }
+    } else if (gov.ema < 17.8) {
+      gov.slowSince = 0;
+      if (!gov.fastSince) gov.fastSince = now;
+      if (now - gov.fastSince > 5000) {
+        scene.setPixelRatio(scene.getPixelRatio() + 0.1);
+        gov.lastChange = now;
+        gov.fastSince = 0;
+      }
+    } else {
+      gov.slowSince = 0;
+      gov.fastSince = 0;
     }
   };
 
-  const tick = (nowMs: number): void => {
-    const rawDtS = Math.min(0.05, Math.max(0.001, (nowMs - lastFrameMs) / 1000));
-    lastFrameMs = nowMs;
-    frameCounter++;
+  // ---------------------------------------------------------------------------------------------
+  // Main loop
+  let rafId = 0;
+  let lastFrameMs = performance.now();
+  let lastHudMs = 0;
+  let lastHeavyMs = -1e9;
+  let lastPlotMs = 0;
+  let lastLedgerMs = 0;
+  let firstFrame = true;
 
-    if (!simPaused) {
-      const simDt = slowMo ? rawDtS * 0.15 : rawDtS;
-      sim.step(simDt);
-      micAudio.pumpSilentScopeBlock(sim);
+  const tick = (nowMs: number): void => {
+    rafId = window.requestAnimationFrame(tick);
+    const rawMs = nowMs - lastFrameMs;
+    lastFrameMs = nowMs;
+    const dtReal = Math.min(0.05, Math.max(0.001, rawMs / 1000));
+    governDpr(rawMs, nowMs);
+
+    if (ff) {
+      runFastForward();
+    } else if (!simPaused) {
+      sim.step(slowMo ? dtReal * 0.15 : dtReal);
+    }
+    if (!simPaused || ff) micAudio.pump(sim, dtReal);
+
+    if (hasDrain) {
+      const drained = ext.timegrapher_drain!();
+      if (drained.length >= 3) timegrapher.ingestImpacts(drained);
+    }
+    const snap = decodeWatchSnapshot(sim.snapshot());
+    if (!hasDrain) timegrapher.ingestBalance(snap.labTimeS, snap.balanceAngleRad, snap.balanceOmegaRadS);
+    if (hasEscState) {
+      lastEsc = ext.escapement_state!();
+      const mask = lastEsc[6] ?? 0;
+      scene.setEscapementContacts(mask);
+      contactAccum |= mask;
     }
 
-    const snap = decodeWatchSnapshot(sim.snapshot());
-    updateHud(snap);
-    micAudio.renderOscilloscope(canvasScope, micPosMm);
-    timegrapher.update(snap, canvasTimegrapher);
+    // The continuum fields (case shell, spatial grid, mainspring coils) are polled at 25 Hz; the
+    // scene keeps the last upload on the GPU and only re-uploads when the data actually changed.
+    const heavy = heavyPollNow || nowMs - lastHeavyMs >= 40;
+    if (heavy) {
+      lastHeavyMs = nowMs;
+      heavyPollNow = false;
+    }
+    stepInsets(dtReal);
     scene.renderFrame(snap, {
       torchPower,
       torchPosMm,
@@ -816,17 +1609,61 @@ async function boot(): Promise<void> {
       ambientPressureAtm,
       gravityGVec,
       micPosMm,
-      caseShellData: sim.case_shell_snapshot(),
-      spatialGridData: sim.spatial_grid_snapshot(),
-      mainspringCoilsMm: sim.mainspring_coils_mm(),
+      caseShellData: heavy ? sim.case_shell_snapshot() : undefined,
+      spatialGridData: heavy ? sim.spatial_grid_snapshot() : undefined,
+      mainspringCoilsMm: heavy ? sim.mainspring_coils_mm() : undefined,
       clickLeverAngleRad: sim.click_lever_angle_rad(),
       crownWheelAngleRad: sim.crown_wheel_angle_rad(),
     });
 
-    requestAnimationFrame(tick);
+    if (nowMs - lastHudMs >= 100) {
+      lastHudMs = nowMs;
+      updateHud(snap);
+      setText(hudPerf, `${gov.fps.toFixed(0)} fps · ${scene.getPixelRatio().toFixed(2)}× · ${tier}`);
+    }
+    if (panelVisible("metrology")) {
+      if (nowMs - lastPlotMs >= 33) {
+        lastPlotMs = nowMs;
+        micAudio.renderOscilloscope(canvasScope, micPosMm);
+        timegrapher.draw(canvasTimegrapher, snap);
+      }
+      if (nowMs - lastLedgerMs >= 250) {
+        lastLedgerMs = nowMs;
+        renderNodeLedgerTable(tbodyLedger, snap);
+      }
+    }
+
+    if (firstFrame) {
+      firstFrame = false;
+      splash.classList.add("is-done");
+      window.setTimeout(() => splash.remove(), 700);
+      if (storeGet(STORE_COACH) !== "done") coach.classList.remove("hidden");
+    }
   };
 
-  requestAnimationFrame(tick);
+  // Pause everything while the page is hidden: no GPU work, no audio, no physics catch-up burst.
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      if (rafId) window.cancelAnimationFrame(rafId);
+      rafId = 0;
+      void micAudio.suspend();
+    } else if (!rafId) {
+      lastFrameMs = performance.now();
+      void micAudio.resume();
+      rafId = window.requestAnimationFrame(tick);
+    }
+  });
+
+  if (import.meta.env.DEV) {
+    // Dev-only handle for console / automated checks.
+    (window as unknown as { __pocketWatch?: unknown }).__pocketWatch = { sim, scene, timegrapher, micAudio };
+  }
+
+  setPanel("bench", false);
+  syncVectorFieldButtons();
+  syncAudioButtons();
+  updatePerturbationBannerAndBadges();
+  rafId = window.requestAnimationFrame(tick);
 }
 
 void boot();

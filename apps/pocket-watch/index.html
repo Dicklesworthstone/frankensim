@@ -3,584 +3,660 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <title>Chronomètre Souverain · Calibre FS-1903 Tourbillon — FrankenSim Multiphysics Horology Lab</title>
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#05070b" />
+    <meta
+      name="description"
+      content="A 1-minute tourbillon pocket watch simulated from physical law: heat it, freeze it, oil it, magnetize it and listen to it tick."
+    />
+    <title>Chronomètre Souverain · FrankenSim</title>
   </head>
   <body>
-    <div id="app-shell">
-      <!-- Top Horological Metrology Header -->
-      <header id="top-bar">
-        <div class="brand-block">
-          <div class="brand-kicker">
-            <span class="kicker-dot"></span>
-            FRANKENSIM MULTIPHYSICS CONTINUUM · CALIBRE FS-1903
-          </div>
-          <h1 class="brand-title">
-            CHRONOMÈTRE SOUVERAIN
-            <span class="brand-sub">1-Minute Tourbillon · 21 Ruby Jewels · 18k Gold</span>
-          </h1>
+    <!-- Icon sprite: original line icons, 24 px grid, stroked with currentColor. -->
+    <svg xmlns="http://www.w3.org/2000/svg" class="sprite" aria-hidden="true" focusable="false">
+      <defs>
+        <symbol id="i-logo" viewBox="0 0 24 24"><circle cx="12" cy="13.6" r="7.6" /><path d="M12 3.2v2.8M10 3.2h4M12 13.6V9.4M12 13.6l2.9 1.8" /></symbol>
+        <symbol id="i-orbit" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.6" /><ellipse cx="12" cy="12" rx="9.4" ry="4.1" transform="rotate(-24 12 12)" /><path d="M18.6 5.6l1.7-.5-.3 1.8" /></symbol>
+        <symbol id="i-flame" viewBox="0 0 24 24"><path d="M12 2.8c.6 3.3 5.2 5.4 5.2 10.4a5.2 5.2 0 0 1-10.4 0c0-2.4 1.1-3.9 2.5-5.2.2 1.7 1 2.8 2.1 3.3-.4-3-.1-6 .6-8.5z" /><path d="M12 20.4a2.2 2.2 0 0 1-2.2-2.3c0-1.5 1.4-2.4 2.2-3.6.8 1.2 2.2 2.1 2.2 3.6a2.2 2.2 0 0 1-2.2 2.3z" /></symbol>
+        <symbol id="i-snow" viewBox="0 0 24 24"><path d="M12 2.5v19M3.8 7.25l16.4 9.5M3.8 16.75l16.4-9.5" /><path d="M9.4 4.1 12 6.4l2.6-2.3M9.4 19.9 12 17.6l2.6 2.3M4.2 10.4l3.3-1.1-.7-3.4M19.8 13.6l-3.3 1.1.7 3.4M4.2 13.6l3.3 1.1-.7 3.4M19.8 10.4l-3.3-1.1.7-3.4" /></symbol>
+        <symbol id="i-drop" viewBox="0 0 24 24"><path d="M12 3s6.2 6.5 6.2 10.9a6.2 6.2 0 0 1-12.4 0C5.8 9.5 12 3 12 3z" /><path d="M9 14.3a3.1 3.1 0 0 0 2.7 2.8" /></symbol>
+        <symbol id="i-magnet" viewBox="0 0 24 24"><path d="M5.5 3.5h4v8.2a2.5 2.5 0 0 0 5 0V3.5h4v8.2a6.5 6.5 0 0 1-13 0z" /><path d="M5.5 7.6h4M14.5 7.6h4" /></symbol>
+        <symbol id="i-wind" viewBox="0 0 24 24"><path d="M3 8.2h10.6a2.6 2.6 0 1 0-2.6-2.6" /><path d="M3 12.2h15.2a3 3 0 1 1-3 3" /><path d="M3 16.2h6.4" /></symbol>
+        <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5.6 11a6.4 6.4 0 0 0 12.8 0M12 17.4V21M8.6 21h6.8" /></symbol>
+        <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13.2 2.6 5 13.6h6.2l-1.2 7.8 8-11h-6.2z" /></symbol>
+        <symbol id="i-crown" viewBox="0 0 24 24"><path d="M19.8 12.6a7.9 7.9 0 1 1-2.5-6.4" /><path d="M19.9 3.6v4.2h-4.2" /><rect x="10" y="9.6" width="4" height="5.2" rx="1.2" /><path d="M11.3 9.6v5.2M12.7 9.6v5.2" /></symbol>
+        <symbol id="i-reset" viewBox="0 0 24 24"><path d="M4.2 12.6a7.9 7.9 0 1 0 2.5-6.4" /><path d="M4.1 3.6v4.2h4.2" /></symbol>
+        <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6.2" y="6.2" width="11.6" height="11.6" rx="2.2" /></symbol>
+        <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 5.6v12.8M15 5.6v12.8" /></symbol>
+        <symbol id="i-play" viewBox="0 0 24 24"><path d="M7.6 5.4v13.2L18.4 12z" /></symbol>
+        <symbol id="i-sound" viewBox="0 0 24 24"><path d="M4 9.5h3.4L12 5.6v12.8l-4.6-3.9H4z" /><path d="M15.4 9.1a4 4 0 0 1 0 5.8M18 6.6a7.6 7.6 0 0 1 0 10.8" /></symbol>
+        <symbol id="i-mute" viewBox="0 0 24 24"><path d="M4 9.5h3.4L12 5.6v12.8l-4.6-3.9H4z" /><path d="m15.8 9.6 4.8 4.8M20.6 9.6l-4.8 4.8" /></symbol>
+        <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M9.6 9.4a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2.2-2.4 3.8M12 17.1v.1" /></symbol>
+        <symbol id="i-sidebar" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.6" /><path d="M14.6 4.5v15M16.8 8.4h1.6M16.8 11h1.6" /></symbol>
+        <symbol id="i-focus" viewBox="0 0 24 24"><path d="M4 9V5.6A1.6 1.6 0 0 1 5.6 4H9M15 4h3.4A1.6 1.6 0 0 1 20 5.6V9M20 15v3.4a1.6 1.6 0 0 1-1.6 1.6H15M9 20H5.6A1.6 1.6 0 0 1 4 18.4V15" /></symbol>
+        <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.6 12S6.1 5.6 12 5.6 21.4 12 21.4 12 17.9 18.4 12 18.4 2.6 12 2.6 12z" /><circle cx="12" cy="12" r="2.8" /></symbol>
+        <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.2 6.2l11.6 11.6M17.8 6.2 6.2 17.8" /></symbol>
+        <symbol id="i-heat" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.4" /><path d="M12 3.5v4M12 16.5v4M3.5 12h4M16.5 12h4M6 6l2.6 2.6M15.4 15.4 18 18M6 18l2.6-2.6M15.4 8.6 18 6" /></symbol>
+        <symbol id="i-flow" viewBox="0 0 24 24"><path d="M3.5 17.4c2.4 0 2.4-2.9 4.9-2.9s2.4 2.9 4.9 2.9 2.4-2.9 4.9-2.9c.9 0 1.5.4 1.9.8" /><path d="M8 11V4m0 0L5.6 6.4M8 4l2.4 2.4M15.5 11V6.2m0 0-2 2m2-2 2 2" /></symbol>
+        <symbol id="i-field" viewBox="0 0 24 24"><path d="M12 3.6v16.8" /><path d="M12 3.6c-5.2 2.1-5.2 14.7 0 16.8M12 3.6c5.2 2.1 5.2 14.7 0 16.8" /><path d="M12 3.6C3 4.8 3 19.2 12 20.4M12 3.6c9 1.2 9 15.6 0 16.8" opacity=".55" /></symbol>
+        <symbol id="i-wave" viewBox="0 0 24 24"><path d="M2.8 12h2.4l2-5.2 3 10.4 3-14 3 12.4 2-6.2 1 2.6h2" /></symbol>
+        <symbol id="i-stress" viewBox="0 0 24 24"><path d="M12 3.4v13.2m0 0-4-4m4 4 4-4" /><path d="M5 20.6h14" /></symbol>
+        <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M11 3.4l1.9 5.2 5.2 1.9-5.2 1.9L11 17.6l-1.9-5.2-5.2-1.9 5.2-1.9z" /><path d="M18.4 15.6l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z" /></symbol>
+        <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7.2h9.6M18.4 7.2H20M4 16.8h3.6M12.4 16.8H20" /><circle cx="16" cy="7.2" r="2.4" /><circle cx="10" cy="16.8" r="2.4" /></symbol>
+        <symbol id="i-flask" viewBox="0 0 24 24"><path d="M9.4 3.4h5.2M10.4 3.4v5.4L5 18.2A1.8 1.8 0 0 0 6.6 21h10.8a1.8 1.8 0 0 0 1.6-2.8l-5.4-9.4V3.4" /><path d="M7.4 14.6h9.2" /></symbol>
+        <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.8" /><circle cx="12" cy="12" r="6.4" /><path d="M12 2.8v2.8M12 18.4v2.8M2.8 12h2.8M18.4 12h2.8M5.5 5.5l2 2M16.5 16.5l2 2M5.5 18.5l2-2M16.5 7.5l2-2" /></symbol>
+        <symbol id="i-chart" viewBox="0 0 24 24"><path d="M3.5 19.6h17" /><path d="M5 15.4l4-5 3.5 3.4L19 6.4" /><circle cx="9" cy="10.4" r=".6" /><circle cx="12.5" cy="13.8" r=".6" /></symbol>
+        <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6.5 14.8 5.5-5.6 5.5 5.6" /></symbol>
+        <symbol id="i-fast" viewBox="0 0 24 24"><path d="M4 6.4v11.2L11.6 12zM12.4 6.4v11.2L20 12z" /></symbol>
+        <symbol id="i-thermo" viewBox="0 0 24 24"><path d="M10 13.8V5a2 2 0 0 1 4 0v8.8a4 4 0 1 1-4 0z" /><path d="M12 9v7" /></symbol>
+        <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 3.6 3 8.4l9 4.8 9-4.8z" /><path d="m3 12.2 9 4.8 9-4.8M3 16l9 4.8 9-4.8" opacity=".6" /></symbol>
+      </defs>
+    </svg>
+
+    <div id="app-shell" data-sheet="peek" data-inspector="open">
+      <canvas
+        id="viewport-canvas"
+        role="img"
+        aria-label="Interactive 3D model of the tourbillon pocket watch. Drag to orbit, scroll or pinch to zoom."
+      ></canvas>
+
+      <!-- Boot splash: replaced by the first rendered frame -->
+      <div id="boot-splash" role="status" aria-live="polite">
+        <div class="boot-mark" aria-hidden="true"><svg><use href="#i-logo" /></svg></div>
+        <p class="boot-title">Chronomètre Souverain</p>
+        <p class="boot-sub" id="boot-status">Assembling the calibre…</p>
+      </div>
+
+      <!-- Top bar: identity, chronometry HUD, global actions -->
+      <header id="top-bar" class="glass">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"><svg><use href="#i-logo" /></svg></span>
+          <span class="brand-text">
+            <span class="brand-name">Chronomètre Souverain</span>
+            <span class="brand-sub">FS-1903 · 1-minute tourbillon · 18,000 vph</span>
+          </span>
         </div>
 
-        <div class="clocks-strip" role="region" aria-label="Chronometer Telemetry">
-          <div class="clock-card">
-            <span class="clock-label">MECHANICAL HANDS</span>
-            <span id="hud-watch-time" class="clock-value">10:10:30.0</span>
+        <dl class="hud" aria-label="Chronometry">
+          <div class="hud-item">
+            <dt>Watch</dt>
+            <dd id="hud-watch-time" class="mono">10:10:30.0</dd>
           </div>
-          <div class="clock-card hide-xs">
-            <span class="clock-label">ATOMIC REFERENCE</span>
-            <span id="hud-lab-time" class="clock-value muted">10:10:30.0</span>
+          <div class="hud-item hud-lab">
+            <dt>Reference</dt>
+            <dd id="hud-lab-time" class="mono muted">10:10:30.0</dd>
           </div>
-          <div class="clock-card">
-            <span class="clock-label">CUMULATIVE DRIFT (Δt)</span>
-            <span id="hud-time-drift" class="clock-value accent">+0.00 s</span>
+          <div class="hud-item">
+            <dt>Drift</dt>
+            <dd id="hud-time-drift" class="mono" data-tone="ok">+0.00 s</dd>
           </div>
-          <div class="clock-card">
-            <span class="clock-label">INSTANT RATE</span>
-            <span id="hud-rate-s-day" class="clock-value">+0.0 s/d</span>
+          <div class="hud-item">
+            <dt>Rate</dt>
+            <dd id="hud-rate-s-day" class="mono">+0.0 s/d</dd>
           </div>
-        </div>
+          <div class="hud-item">
+            <dt>Amplitude</dt>
+            <dd id="hud-amp" class="mono">285°</dd>
+          </div>
+          <div class="hud-item hud-be">
+            <dt>Beat error</dt>
+            <dd id="hud-beat-error" class="mono">0.0 ms</dd>
+          </div>
+        </dl>
 
-        <div class="status-block">
-          <div class="header-actions">
-            <div id="hud-status-pill" class="status-pill status-ok" role="status" aria-live="polite">
-              RUNNING — CHRONOMETER CERTIFIED
-            </div>
-            <button
-              id="btn-pause-sim"
-              class="btn-icon-pill"
-              type="button"
-              title="Pause or resume multiphysics simulation (Space)"
-              aria-label="Pause simulation"
-            >
-              ⏸ Pause
-            </button>
-            <button
-              id="btn-theater-mode"
-              class="btn-icon-pill hide-mobile"
-              type="button"
-              title="Toggle fullscreen 3D studio view (F)"
-              aria-label="Toggle studio theater view"
-            >
-              ⤢ Studio View
-            </button>
+        <div class="top-actions">
+          <div id="hud-status-pill" class="status-pill status-ok" role="status" title="Running — chronometer certified">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span class="status-head">Running</span>
+            <span class="status-detail">Chronometer certified</span>
           </div>
-          <div class="digest-line hide-xs">
-            STATE LEDGER BLAKE3 <code id="hud-digest">initializing…</code>
-          </div>
+          <button id="btn-pause-sim" class="icon-btn" type="button" aria-pressed="false" aria-label="Pause simulation" title="Pause simulation (Space)">
+            <svg aria-hidden="true"><use href="#i-pause" /></svg>
+          </button>
+          <button id="btn-toggle-audio" class="icon-btn" type="button" data-action="toggle-audio" aria-pressed="false" aria-label="Listen to the virtual microphone" title="Listen: 48 kHz virtual microphone">
+            <svg aria-hidden="true"><use href="#i-mute" /></svg>
+          </button>
+          <button id="btn-help" class="icon-btn" type="button" aria-haspopup="dialog" aria-label="Help and shortcuts" title="Help and shortcuts (?)">
+            <svg aria-hidden="true"><use href="#i-help" /></svg>
+          </button>
+          <button id="btn-theater-mode" class="icon-btn hide-compact" type="button" aria-pressed="false" aria-label="Focus mode: hide panels" title="Focus mode (F)">
+            <svg aria-hidden="true"><use href="#i-focus" /></svg>
+          </button>
+          <button id="btn-inspector-toggle" class="icon-btn hide-compact" type="button" aria-controls="inspector" aria-expanded="true" aria-label="Toggle inspector" title="Inspector (I)">
+            <svg aria-hidden="true"><use href="#i-sidebar" /></svg>
+          </button>
         </div>
       </header>
 
-      <!-- Main Interactive Workspace -->
-      <main id="workspace">
-        <!-- Left Dock: Horological Controls, Perturbation Bench & Guided Scenarios -->
-        <aside id="left-dock" class="dock-panel" aria-label="Laboratory Controls">
-          <!-- Card 1: Perturbation Bench (Default active on mobile tab "perturb") -->
-          <section class="panel-card mobile-tab-active" data-mobile-group="perturb">
-            <div class="section-header">
-              <h2>1. Interactive 3D Perturbation Bench</h2>
-              <button
-                id="btn-stop-perturbations"
-                class="btn-stop-all hidden"
-                type="button"
-                title="Turn off blowtorch, LN2, oil pour, and magnet (Shortcut: X)"
-              >
-                ⏹ Stop Active Perturbation
-              </button>
-            </div>
-            <p class="helper-note">
-              Click any tool below to engage it and drag directly across the 3D watch, or fine-tune intensity with the sliders.
-            </p>
-            <div class="tool-selector" role="radiogroup" aria-label="Active 3D Tool">
-              <button data-tool="inspect" class="tool-btn active" type="button">
-                <span class="tool-icon">🔍</span>
-                <span class="tool-meta">
-                  <b>Orbit / Inspect</b>
-                  <small>Rotate &amp; zoom 3D watch</small>
-                </span>
-                <kbd>1</kbd>
-              </button>
-              <button data-tool="torch" class="tool-btn tool-torch" type="button">
-                <span class="tool-icon">🔥</span>
-                <span class="tool-meta">
-                  <b>Blowtorch</b>
-                  <small>2250 K oxy-butane jet</small>
-                </span>
-                <kbd>2</kbd>
-              </button>
-              <button data-tool="ln2" class="tool-btn tool-ln2" type="button">
-                <span class="tool-icon">❄️</span>
-                <span class="tool-meta">
-                  <b>Pour LN₂</b>
-                  <small>77 K cryogenic quench</small>
-                </span>
-                <kbd>3</kbd>
-              </button>
-              <button data-tool="oil" class="tool-btn tool-oil" type="button">
-                <span class="tool-icon">💧</span>
-                <span class="tool-meta">
-                  <b>Watch Oil</b>
-                  <small>Pennzane EHL film</small>
-                </span>
-                <kbd>4</kbd>
-              </button>
-              <button data-tool="magnet" class="tool-btn tool-magnet" type="button">
-                <span class="tool-icon">🧲</span>
-                <span class="tool-meta">
-                  <b>NdFeB Magnet</b>
-                  <small>1.32 T dipole gradient</small>
-                </span>
-                <kbd>5</kbd>
-              </button>
-              <button data-tool="air" class="tool-btn tool-air" type="button">
-                <span class="tool-icon">💨</span>
-                <span class="tool-meta">
-                  <b>Air Shear Jet</b>
-                  <small>Blows Au/oil &amp; cools</small>
-                </span>
-                <kbd>6</kbd>
-              </button>
-              <button data-tool="mic" class="tool-btn tool-mic" type="button">
-                <span class="tool-icon">🎙️</span>
-                <span class="tool-meta">
-                  <b>3D Acoustic Mic</b>
-                  <small>Position probe in 3D</small>
-                </span>
-                <kbd>7</kbd>
+      <!-- Tool rail (desktop: left edge; compact: thumb toolbar at the bottom) -->
+      <nav id="tool-rail" class="glass" aria-label="Bench tools">
+        <div class="tool-group" role="radiogroup" aria-label="Active tool">
+          <button data-tool="inspect" class="tool-btn active" type="button" role="radio" aria-checked="true" data-tone="neutral">
+            <svg aria-hidden="true"><use href="#i-orbit" /></svg>
+            <span class="tool-label">Orbit</span>
+            <span class="tool-tip" aria-hidden="true"><b>Orbit &amp; inspect</b><kbd>1</kbd></span>
+          </button>
+          <button data-tool="torch" class="tool-btn" type="button" role="radio" aria-checked="false" data-tone="torch">
+            <svg aria-hidden="true"><use href="#i-flame" /></svg>
+            <span class="tool-label">Torch</span>
+            <span class="tool-tip" aria-hidden="true"><b>Blowtorch · 2250 K</b><kbd>2</kbd></span>
+          </button>
+          <button data-tool="ln2" class="tool-btn" type="button" role="radio" aria-checked="false" data-tone="cryo">
+            <svg aria-hidden="true"><use href="#i-snow" /></svg>
+            <span class="tool-label">LN₂</span>
+            <span class="tool-tip" aria-hidden="true"><b>Liquid nitrogen · 77 K</b><kbd>3</kbd></span>
+          </button>
+          <button data-tool="oil" class="tool-btn" type="button" role="radio" aria-checked="false" data-tone="oil">
+            <svg aria-hidden="true"><use href="#i-drop" /></svg>
+            <span class="tool-label">Oil</span>
+            <span class="tool-tip" aria-hidden="true"><b>Watch oil · Pennzane</b><kbd>4</kbd></span>
+          </button>
+          <button data-tool="magnet" class="tool-btn" type="button" role="radio" aria-checked="false" data-tone="magnet">
+            <svg aria-hidden="true"><use href="#i-magnet" /></svg>
+            <span class="tool-label">Magnet</span>
+            <span class="tool-tip" aria-hidden="true"><b>NdFeB magnet · 1.32 T</b><kbd>5</kbd></span>
+          </button>
+          <button data-tool="air" class="tool-btn" type="button" role="radio" aria-checked="false" data-tone="air">
+            <svg aria-hidden="true"><use href="#i-wind" /></svg>
+            <span class="tool-label">Air</span>
+            <span class="tool-tip" aria-hidden="true"><b>Compressed-air jet</b><kbd>6</kbd></span>
+          </button>
+          <button data-tool="mic" class="tool-btn" type="button" role="radio" aria-checked="false" data-tone="mic">
+            <svg aria-hidden="true"><use href="#i-mic" /></svg>
+            <span class="tool-label">Mic</span>
+            <span class="tool-tip" aria-hidden="true"><b>Place the microphone</b><kbd>7</kbd></span>
+          </button>
+        </div>
+        <div class="rail-sep" aria-hidden="true"></div>
+        <div class="tool-group rail-actions">
+          <button class="tool-btn" type="button" data-action="shock" data-tone="danger" aria-label="500 g drop shock">
+            <svg aria-hidden="true"><use href="#i-bolt" /></svg>
+            <span class="tool-tip" aria-hidden="true"><b>500 g drop shock</b><kbd>S</kbd></span>
+          </button>
+          <button class="tool-btn" type="button" data-action="wind" data-tone="gold" aria-label="Wind the crown">
+            <svg aria-hidden="true"><use href="#i-crown" /></svg>
+            <span class="tool-tip" aria-hidden="true"><b>Wind crown +1.5 turns</b><kbd>W</kbd></span>
+          </button>
+          <button class="tool-btn" type="button" data-action="reset" data-tone="neutral" aria-label="Reset the watch">
+            <svg aria-hidden="true"><use href="#i-reset" /></svg>
+            <span class="tool-tip" aria-hidden="true"><b>Reset to 20 °C</b><kbd>R</kbd></span>
+          </button>
+        </div>
+      </nav>
+
+      <!-- Contextual tool banner -->
+      <div id="stage-tool-banner" class="stage-banner glass hidden" role="status" aria-live="polite">
+        <span class="banner-icon" aria-hidden="true"><svg><use id="banner-icon-use" href="#i-flame" /></svg></span>
+        <span class="banner-copy">
+          <strong id="stage-banner-title">Blowtorch</strong>
+          <span id="stage-banner-text">Drag on the watch to aim the flame</span>
+        </span>
+        <span class="banner-actions">
+          <button id="btn-banner-orbit" class="pill-btn" type="button">Orbit <kbd>Esc</kbd></button>
+          <button id="btn-banner-stop" class="pill-btn pill-danger" type="button">Stop <kbd>X</kbd></button>
+        </span>
+      </div>
+
+      <!-- Live readouts over the stage (desktop) -->
+      <div id="stage-readouts" aria-label="Live multiphysics readouts">
+        <div class="readout">
+          <span>6h case temperature</span>
+          <strong id="ov-case-temp" class="mono">293.2 K · 20.0 °C</strong>
+        </div>
+        <div class="readout">
+          <span>Case melt φ<sub>liq</sub></span>
+          <strong id="ov-gold-melt" class="mono">0.0%</strong>
+        </div>
+        <div class="readout">
+          <span>Gold in movement (liq / solid)</span>
+          <strong id="ov-fouled-gold" class="mono">0.000 / 0.000 g</strong>
+        </div>
+        <div class="readout">
+          <span>Escapement |B|</span>
+          <strong id="ov-b-field" class="mono">0.0 mT</strong>
+        </div>
+      </div>
+
+      <!-- View dock: camera presets + physics field overlays -->
+      <button id="btn-view-menu" class="icon-btn glass fab" type="button" aria-controls="view-dock" aria-expanded="false" aria-label="View and field overlays">
+        <svg aria-hidden="true"><use href="#i-layers" /></svg>
+      </button>
+      <div id="view-dock" class="glass">
+        <div id="camera-bar" class="seg" role="group" aria-label="Camera">
+          <button data-cam="overview" class="cam-btn active" type="button" aria-pressed="true">Watch</button>
+          <button data-cam="tourbillon" class="cam-btn" type="button" aria-pressed="false">Tourbillon</button>
+          <button data-cam="escapement" class="cam-btn" type="button" aria-pressed="false">Escapement</button>
+          <button data-cam="barrel" class="cam-btn" type="button" aria-pressed="false">Barrel</button>
+          <button data-cam="side" class="cam-btn" type="button" aria-pressed="false">Profile</button>
+        </div>
+        <div class="dock-sep" aria-hidden="true"></div>
+        <div id="vector-field-bar" class="field-row" role="group" aria-label="Physics field overlays">
+          <button data-vec-field="heat" class="vec-btn" type="button" aria-pressed="false" data-tone="torch" title="Heat flux q = −k∇T (H)">
+            <svg aria-hidden="true"><use href="#i-heat" /></svg><span>Heat</span>
+          </button>
+          <button data-vec-field="convection" class="vec-btn" type="button" aria-pressed="false" data-tone="air" title="Buoyant plume, wall jet and Marangoni flow (C)">
+            <svg aria-hidden="true"><use href="#i-flow" /></svg><span>Flow</span>
+          </button>
+          <button data-vec-field="magnetic" class="vec-btn" type="button" aria-pressed="false" data-tone="magnet" title="Magnetic flux density B (B)">
+            <svg aria-hidden="true"><use href="#i-field" /></svg><span>B-field</span>
+          </button>
+          <button data-vec-field="acoustic" class="vec-btn" type="button" aria-pressed="false" data-tone="mic" title="Acoustic intensity (A)">
+            <svg aria-hidden="true"><use href="#i-wave" /></svg><span>Sound</span>
+          </button>
+          <button data-vec-field="stress" class="vec-btn" type="button" aria-pressed="false" data-tone="gold" title="Stress, train torque and gravity (G)">
+            <svg aria-hidden="true"><use href="#i-stress" /></svg><span>Stress</span>
+          </button>
+          <button class="vec-btn btn-vec-all" id="btn-vec-all" type="button" aria-pressed="false" data-tone="neutral" title="All fields (V)">
+            <svg aria-hidden="true"><use href="#i-sparkle" /></svg><span>All</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Inspector (desktop: right panel; compact: bottom sheet) -->
+      <aside id="inspector" class="glass" aria-label="Inspector">
+        <div id="sheet-handle" class="sheet-handle" aria-hidden="true"><span></span></div>
+        <div class="inspector-head">
+          <div class="tabs" role="tablist" aria-label="Inspector sections">
+            <button role="tab" id="tab-bench" data-panel="bench" aria-controls="panel-bench" aria-selected="true" type="button">
+              <svg aria-hidden="true"><use href="#i-sliders" /></svg><span>Bench</span>
+            </button>
+            <button role="tab" id="tab-experiments" data-panel="experiments" aria-controls="panel-experiments" aria-selected="false" tabindex="-1" type="button">
+              <svg aria-hidden="true"><use href="#i-flask" /></svg><span>Experiments</span>
+            </button>
+            <button role="tab" id="tab-movement" data-panel="movement" aria-controls="panel-movement" aria-selected="false" tabindex="-1" type="button">
+              <svg aria-hidden="true"><use href="#i-gear" /></svg><span>Movement</span>
+            </button>
+            <button role="tab" id="tab-metrology" data-panel="metrology" aria-controls="panel-metrology" aria-selected="false" tabindex="-1" type="button">
+              <svg aria-hidden="true"><use href="#i-chart" /></svg><span>Metrology</span>
+            </button>
+          </div>
+          <button id="btn-inspector-close" class="icon-btn small hide-compact" type="button" aria-label="Collapse inspector" title="Collapse (I)">
+            <svg aria-hidden="true"><use href="#i-close" /></svg>
+          </button>
+        </div>
+
+        <div class="inspector-body" id="inspector-body">
+          <!-- BENCH -->
+          <section role="tabpanel" id="panel-bench" class="panel" aria-labelledby="tab-bench">
+            <div class="panel-intro">
+              <p>Pick a tool, then drag across the watch to aim it. Every response (melting, freezing, rate change) is solved by the engine, not scripted.</p>
+              <button id="btn-stop-perturbations" class="btn btn-danger btn-sm hidden" type="button" title="Turn every perturbation off (X)">
+                <svg aria-hidden="true"><use href="#i-stop" /></svg>Stop all
               </button>
             </div>
 
-            <!-- Blowtorch Controls -->
-            <div id="subtool-torch" class="subtool-box torch-box">
-              <div class="subtool-title">
-                <span>🔥 Blowtorch Plume (<i>T</i><sub>m,Au</sub> = 1337 K)</span>
-                <strong id="lbl-torch-power">0% (0 W)</strong>
+            <div id="subtool-torch" class="subtool" data-tone="torch">
+              <div class="subtool-head">
+                <span class="subtool-icon" aria-hidden="true"><svg><use href="#i-flame" /></svg></span>
+                <span class="subtool-name">Blowtorch <small>oxy-butane, 2250 K</small></span>
+                <strong id="lbl-torch-power" class="mono">0% · 0 W</strong>
               </div>
-              <input
-                id="slider-torch-power"
-                type="range"
-                min="0"
-                max="1"
-                step="0.01"
-                value="0"
-                aria-label="Blowtorch power"
-              />
-              <div class="target-chips">
-                <span>Quick Aim:</span>
-                <button data-torch-aim="0,-24,2" class="chip active" type="button">6h Case &amp; Tourbillon</button>
-                <button data-torch-aim="0,24,2" class="chip" type="button">12h Crown &amp; Barrel</button>
-                <button data-torch-aim="-24,0,2" class="chip" type="button">9h Case Flank</button>
+              <label class="field">
+                <span class="field-label">Power</span>
+                <input id="slider-torch-power" type="range" min="0" max="1" step="0.01" value="0" aria-label="Blowtorch power" />
+              </label>
+              <div class="chips" role="group" aria-label="Quick aim">
+                <span class="chips-label">Aim</span>
+                <button data-torch-aim="0,-24,2" class="chip active" type="button" aria-pressed="true">6h case</button>
+                <button data-torch-aim="0,24,2" class="chip" type="button" aria-pressed="false">12h crown</button>
+                <button data-torch-aim="-24,0,2" class="chip" type="button" aria-pressed="false">9h flank</button>
+              </div>
+              <p class="note">Gold melts at <i>T</i><sub>m</sub> = 1337 K.</p>
+            </div>
+
+            <div id="subtool-ln2" class="subtool" data-tone="cryo">
+              <div class="subtool-head">
+                <span class="subtool-icon" aria-hidden="true"><svg><use href="#i-snow" /></svg></span>
+                <span class="subtool-name">Liquid nitrogen <small>77.36 K pour</small></span>
+                <strong id="lbl-ln2-rate" class="mono">0% · 0 W</strong>
+              </div>
+              <label class="field">
+                <span class="field-label">Pour rate</span>
+                <input id="slider-ln2-rate" type="range" min="0" max="1" step="0.01" value="0" aria-label="Liquid nitrogen pour rate" />
+              </label>
+            </div>
+
+            <div id="subtool-oil" class="subtool" data-tone="oil">
+              <div class="subtool-head">
+                <span class="subtool-icon" aria-hidden="true"><svg><use href="#i-drop" /></svg></span>
+                <span class="subtool-name">Watch oil <small>Pennzane SHF X-2000</small></span>
+                <strong id="lbl-oil-rate" class="mono">0.0 µm film</strong>
+              </div>
+              <label class="field">
+                <span class="field-label">Pour rate</span>
+                <input id="slider-oil-rate" type="range" min="0" max="1" step="0.01" value="0" aria-label="Watch oil pour rate" />
+              </label>
+              <div class="btn-row">
+                <button id="btn-flood-oil" class="btn btn-sm" type="button">Flood hairspring</button>
+                <button id="btn-clean-oil" class="btn btn-sm" type="button">Ultrasonic clean</button>
               </div>
             </div>
 
-            <!-- Liquid Nitrogen Controls -->
-            <div id="subtool-ln2" class="subtool-box ln2-box">
-              <div class="subtool-title">
-                <span>❄️ Cryogenic Liquid Nitrogen (77.36 K)</span>
-                <strong id="lbl-ln2-rate">0% (0 W)</strong>
+            <div id="subtool-magnet" class="subtool" data-tone="magnet">
+              <div class="subtool-head">
+                <span class="subtool-icon" aria-hidden="true"><svg><use href="#i-magnet" /></svg></span>
+                <span class="subtool-name">NdFeB N42 magnet <small><i>B</i><sub>r</sub> = 1.32 T</small></span>
+                <strong id="lbl-b-field" class="mono">0.0 mT</strong>
               </div>
-              <input
-                id="slider-ln2-rate"
-                type="range"
-                min="0"
-                max="1"
-                step="0.01"
-                value="0"
-                aria-label="Liquid nitrogen pour rate"
-              />
-            </div>
-
-            <!-- Watch Oil Controls -->
-            <div id="subtool-oil" class="subtool-box oil-box">
-              <div class="subtool-title">
-                <span>💧 Horological Oil (<code>pennzane-shf-x-2000</code>)</span>
-                <strong id="lbl-oil-rate">1.6 µm EHL</strong>
-              </div>
-              <input
-                id="slider-oil-rate"
-                type="range"
-                min="0"
-                max="1"
-                step="0.01"
-                value="0"
-                aria-label="Watch oil pour rate"
-              />
-              <div class="btn-row mini">
-                <button id="btn-flood-oil" class="btn btn-mini" type="button">Flood Hairspring</button>
-                <button id="btn-clean-oil" class="btn btn-mini" type="button">Ultrasonic Clean</button>
+              <label class="switch">
+                <input id="chk-magnet-on" type="checkbox" role="switch" />
+                <span class="switch-track" aria-hidden="true"></span>
+                <span>Engage magnet</span>
+              </label>
+              <label class="field">
+                <span class="field-label">Distance <output id="lbl-magnet-dist" class="mono">28 mm</output></span>
+                <input id="slider-magnet-dist" type="range" min="8" max="80" step="1" value="28" aria-label="Magnet distance from the escapement in millimetres" />
+              </label>
+              <div class="btn-row split">
+                <span class="note">Remanence <b id="lbl-remanence" class="mono">0.0 mT</b></span>
+                <button id="btn-degauss" class="btn btn-sm" type="button">AC degauss</button>
               </div>
             </div>
 
-            <!-- Super-Magnet Controls -->
-            <div id="subtool-magnet" class="subtool-box magnet-box">
-              <div class="subtool-title">
-                <span>🧲 Sintered NdFeB N42 Magnet (<i>B</i><sub>r</sub> = 1.32 T)</span>
-                <strong id="lbl-b-field">0.0 mT</strong>
+            <div id="subtool-air" class="subtool" data-tone="air">
+              <div class="subtool-head">
+                <span class="subtool-icon" aria-hidden="true"><svg><use href="#i-wind" /></svg></span>
+                <span class="subtool-name">Compressed-air jet <small>M ≈ 0.35</small></span>
+                <strong id="lbl-air-power" class="mono">0% · 0 m/s</strong>
               </div>
-              <div class="control-row">
-                <label class="check-label">
-                  <input id="chk-magnet-on" type="checkbox" />
-                  <span>Engage Magnet</span>
-                </label>
-                <input
-                  id="slider-magnet-dist"
-                  type="range"
-                  min="8"
-                  max="80"
-                  step="1"
-                  value="28"
-                  title="Magnet distance from escapement (mm)"
-                  aria-label="Magnet distance in millimeters"
-                />
-              </div>
-              <div class="btn-row mini">
-                <span class="rem-label">Remanence <i>M</i><sub>rem</sub>: <b id="lbl-remanence">0.0 mT</b></span>
-                <button id="btn-degauss" class="btn btn-mini" type="button">⚡ Fire AC Degauss Coil</button>
-              </div>
+              <label class="field">
+                <span class="field-label">Power</span>
+                <input id="slider-air-power" type="range" min="0" max="1" step="0.01" value="0" aria-label="Compressed air jet power" />
+              </label>
             </div>
 
-            <!-- Compressed Air Shear Nozzle Controls -->
-            <div id="subtool-air" class="subtool-box air-box">
-              <div class="subtool-title">
-                <span>💨 Compressed Air Nozzle (<i>M</i> ≈ 0.35 Shear Jet)</span>
-                <strong id="lbl-air-power">0% (0 m/s)</strong>
+            <div id="subtool-chamber" class="subtool" data-tone="neutral">
+              <div class="subtool-head">
+                <span class="subtool-icon" aria-hidden="true"><svg><use href="#i-stress" /></svg></span>
+                <span class="subtool-name">Chamber <small>pressure, gravity, shock</small></span>
+                <strong id="lbl-chamber-env" class="mono">1.00 atm · 1.0 g</strong>
               </div>
-              <input
-                id="slider-air-power"
-                type="range"
-                min="0"
-                max="1"
-                step="0.01"
-                value="0"
-                aria-label="Compressed air nozzle power"
-              />
-            </div>
-
-            <!-- Bell-Jar Vacuum, 3D Gravity & 500G Shock Chamber -->
-            <div id="subtool-chamber" class="subtool-box chamber-box">
-              <div class="subtool-title">
-                <span>🌍 Bell-Jar Pressure, 3D Gravity &amp; Shock</span>
-                <strong id="lbl-chamber-env">1.00 atm · 1.0 G (6h)</strong>
+              <label class="field">
+                <span class="field-label">Bell-jar pressure <output id="lbl-pressure" class="mono">1.00 atm</output></span>
+                <input id="slider-pressure-atm" type="range" min="0" max="5" step="0.05" value="1" aria-label="Ambient chamber pressure in atmospheres" />
+              </label>
+              <div class="chips" role="group" aria-label="Gravity and pose">
+                <span class="chips-label">Pose</span>
+                <button data-gravity-vec="0,-1,0,1.0 g · 6h down" class="chip active" type="button" aria-pressed="true">6h down</button>
+                <button data-gravity-vec="1,0,0,1.0 g · 3h" class="chip" type="button" aria-pressed="false">3h flank</button>
+                <button data-gravity-vec="0,0,-1,1.0 g · dial up" class="chip" type="button" aria-pressed="false">Dial up</button>
+                <button data-gravity-vec="0,0,0,0 g · free fall" class="chip" type="button" aria-pressed="false">0 g</button>
+                <button data-gravity-vec="0,-4,0,4.0 g · centrifuge" class="chip" type="button" aria-pressed="false">4 g</button>
               </div>
-              <div class="control-row">
-                <label for="slider-pressure-atm">Bell-Jar Air</label>
-                <input
-                  id="slider-pressure-atm"
-                  type="range"
-                  min="0"
-                  max="5"
-                  step="0.05"
-                  value="1"
-                  aria-label="Ambient chamber pressure in atmospheres"
-                />
-                <button id="btn-shock-500g" class="btn btn-mini btn-shock" type="button" title="Deliver a 500G bench drop shock (Shortcut: S)">
-                  💥 500G Shock
+              <div class="btn-row">
+                <button id="btn-shock-500g" class="btn btn-sm btn-danger-soft" type="button" title="500 g bench-drop shock (S)">
+                  <svg aria-hidden="true"><use href="#i-bolt" /></svg>500 g drop shock
                 </button>
               </div>
-              <div class="target-chips">
-                <span>Pose / G:</span>
-                <button data-gravity-vec="0,-1,0,1.0G 6h" class="chip active" type="button">1G 6h Down</button>
-                <button data-gravity-vec="1,0,0,1.0G 3h" class="chip" type="button">1G 3h Flank</button>
-                <button data-gravity-vec="0,0,-1,0G Flat" class="chip" type="button">Dial Up Flat</button>
-                <button data-gravity-vec="0,0,0,0.0G Space" class="chip" type="button">0G Space</button>
-                <button data-gravity-vec="0,-4,0,4.0G Centr" class="chip" type="button">4G Centrifuge</button>
+            </div>
+          </section>
+
+          <!-- EXPERIMENTS -->
+          <section role="tabpanel" id="panel-experiments" class="panel" aria-labelledby="tab-experiments" hidden>
+            <div class="panel-intro">
+              <p>Guided set-ups. Long ones fast-forward lab time while you watch; you can stop them at any point.</p>
+            </div>
+            <div class="preset-list">
+              <button data-preset="chronometer" class="preset-btn active" type="button" aria-pressed="true">
+                <span class="preset-top"><b>Pristine chronometer</b><span class="tag" data-tone="ok">Nominal</span></span>
+                <span class="preset-desc">20 °C, 285° amplitude: the COSC reference state.</span>
+              </button>
+              <button data-preset="thermal-drift" class="preset-btn" type="button" aria-pressed="false">
+                <span class="preset-top"><b>Thermal rate drift</b><span class="tag" data-tone="torch">Thermoelastic</span></span>
+                <span class="preset-desc">A gentle flame warms balance and hairspring (∂E/∂T &lt; 0), so the watch loses.</span>
+                <span class="preset-ff mono">fast-forward 1.5 s</span>
+              </button>
+              <button data-preset="melt-gold" class="preset-btn" type="button" aria-pressed="false">
+                <span class="preset-top"><b>Melt the 18k case</b><span class="tag" data-tone="torch">Phase change</span></span>
+                <span class="preset-desc">A 2250 K jet liquefies the 6h case; molten gold runs into the tourbillon.</span>
+                <span class="preset-ff mono">fast-forward 6.3 s</span>
+              </button>
+              <button data-preset="melt-then-ln2" class="preset-btn" type="button" aria-pressed="false">
+                <span class="preset-top"><b>Quench with LN₂</b><span class="tag" data-tone="cryo">Solidification</span></span>
+                <span class="preset-desc">77 K nitrogen on slumped gold freezes it in place.</span>
+                <span class="preset-ff mono">fast-forward up to 11.5 s</span>
+              </button>
+              <button data-preset="cryo-freeze" class="preset-btn" type="button" aria-pressed="false">
+                <span class="preset-top"><b>Cryogenic shrink</b><span class="tag" data-tone="cryo">Cryogenic</span></span>
+                <span class="preset-desc">An LN₂ bath freezes the oil and pinches brass-to-steel clearances.</span>
+                <span class="preset-ff mono">fast-forward 4.3 s</span>
+              </button>
+              <button data-preset="oil-flood" class="preset-btn" type="button" aria-pressed="false">
+                <span class="preset-top"><b>Flood the hairspring</b><span class="tag" data-tone="oil">Capillary</span></span>
+                <span class="preset-desc">An oil meniscus bridges the outer coils: the rate jumps, then viscous stall.</span>
+                <span class="preset-ff mono">fast-forward 1.3 s</span>
+              </button>
+              <button data-preset="magnet-attack" class="preset-btn" type="button" aria-pressed="false">
+                <span class="preset-top"><b>Magnet lock-up</b><span class="tag" data-tone="magnet">Ferromagnetic</span></span>
+                <span class="preset-desc">A dipole gradient skews the beat error and can pin the steel lever.</span>
+              </button>
+              <button data-preset="air-blow-gold" class="preset-btn" type="button" aria-pressed="false">
+                <span class="preset-top"><b>Blow molten gold</b><span class="tag" data-tone="air">Aero shear</span></span>
+                <span class="preset-desc">Melt the case, then an air jet pushes liquid gold across the bridges.</span>
+                <span class="preset-ff mono">fast-forward 7.5 s</span>
+              </button>
+              <button data-preset="vacuum-chamber" class="preset-btn" type="button" aria-pressed="false">
+                <span class="preset-top"><b>Bell-jar vacuum</b><span class="tag" data-tone="ok">No air drag</span></span>
+                <span class="preset-desc">Remove the air: no Stokes–Stuart drag, so the amplitude climbs.</span>
+                <span class="preset-ff mono">fast-forward 2.3 s</span>
+              </button>
+              <button data-preset="shock-centrifuge" class="preset-btn" type="button" aria-pressed="false">
+                <span class="preset-top"><b>Drop shock + 4 g</b><span class="tag" data-tone="gold">Inertial</span></span>
+                <span class="preset-desc">A 500 g Incabloc jewel impact under a 4 g centrifuge load.</span>
+                <span class="preset-ff mono">fast-forward 0.8 s</span>
+              </button>
+            </div>
+          </section>
+
+          <!-- MOVEMENT -->
+          <section role="tabpanel" id="panel-movement" class="panel" aria-labelledby="tab-movement" hidden>
+            <div class="card">
+              <div class="card-head">
+                <h3>Mainspring barrel</h3>
+                <span id="hud-power-reserve-pct" class="badge mono">88% · 37.0 h</span>
+              </div>
+              <div class="meter" role="presentation"><div id="hud-power-reserve-bar" class="meter-fill" style="width: 88%"></div></div>
+              <dl class="kv">
+                <div><dt>Barrel torque</dt><dd id="hud-barrel-torque" class="mono">8.20 mN·m</dd></div>
+                <div><dt>Balance amplitude</dt><dd id="hud-balance-amp" class="mono">285.0°</dd></div>
+                <div><dt>Pivot clearance</dt><dd id="hud-pivot-clearance" class="mono">4.50 µm</dd></div>
+                <div><dt>Beats</dt><dd id="hud-total-beats" class="mono">0</dd></div>
+              </dl>
+              <div class="btn-row">
+                <button id="btn-wind-crown" class="btn btn-gold" type="button" title="Wind the crown (W)">
+                  <svg aria-hidden="true"><use href="#i-crown" /></svg>Wind +1.5 turns
+                </button>
+                <button id="btn-reset-watch" class="btn" type="button" title="Restore the pristine 20 °C state (R)">
+                  <svg aria-hidden="true"><use href="#i-reset" /></svg>Reset
+                </button>
               </div>
             </div>
-          </section>
 
-          <!-- Card 2: Guided Multiphysics Scenarios (Mobile tab "scenarios") -->
-          <section class="panel-card" data-mobile-group="scenarios">
-            <div class="section-header">
-              <h2>2. Guided Multiphysics Experiments</h2>
-              <span class="badge">1-Click Presets</span>
+            <div class="card" id="esc-card">
+              <div class="card-head">
+                <h3>Swiss lever escapement</h3>
+                <span id="esc-source" class="badge">engine</span>
+              </div>
+              <div class="contacts" role="group" aria-label="Active escapement contacts">
+                <span class="contact" data-bit="0">Entry pallet</span>
+                <span class="contact" data-bit="1">Exit pallet</span>
+                <span class="contact" data-bit="2">Impulse pin</span>
+                <span class="contact" data-bit="3">Banking</span>
+                <span class="contact" data-bit="4">Guard dart</span>
+              </div>
+              <dl class="kv" id="esc-kv">
+                <div><dt>Impulse / beat</dt><dd id="esc-impulse" class="mono">—</dd></div>
+                <div><dt>Efficiency</dt><dd id="esc-eff" class="mono">—</dd></div>
+                <div><dt>Lift angle</dt><dd id="esc-lift" class="mono">—</dd></div>
+                <div><dt>Balance Q</dt><dd id="esc-q" class="mono">—</dd></div>
+                <div><dt>Escape torque</dt><dd id="esc-torque" class="mono">—</dd></div>
+                <div><dt>Pivot friction</dt><dd id="esc-friction" class="mono">—</dd></div>
+                <div><dt>Air damping share</dt><dd id="esc-air" class="mono">—</dd></div>
+                <div><dt>Power reserve</dt><dd id="esc-reserve" class="mono">—</dd></div>
+              </dl>
+              <p id="esc-note" class="note hidden">This engine build does not report escapement state yet; contacts and impulse appear when it does.</p>
             </div>
-            <div class="preset-grid">
-              <button data-preset="chronometer" class="preset-btn active" type="button">
-                <div class="preset-top">
-                  <b>1. Pristine Chronometer (20 °C)</b>
-                  <span class="preset-tag tag-ok">Nominal</span>
-                </div>
-                <span>18,000 vph · 285° balance amp · ±0.0 s/d COSC reference</span>
-              </button>
-              <button data-preset="thermal-drift" class="preset-btn" type="button">
-                <div class="preset-top">
-                  <b>2. Thermal Expansion Time Drift</b>
-                  <span class="preset-tag tag-flame">Thermoelastic</span>
-                </div>
-                <span>Gentle torch warms balance &amp; hairspring (∂E/∂T &lt; 0) → loses time</span>
-              </button>
-              <button data-preset="melt-gold" class="preset-btn" type="button">
-                <div class="preset-top">
-                  <b>3. Melt 18k Gold Case Into Gears</b>
-                  <span class="preset-tag tag-flame">Phase Change</span>
-                </div>
-                <span>2250 K torch liquefies 6h gold case; molten gold fouls tourbillon</span>
-              </button>
-              <button data-preset="melt-then-ln2" class="preset-btn" type="button">
-                <div class="preset-top">
-                  <b>4. Quench Melted Gold with LN₂</b>
-                  <span class="preset-tag tag-cryo">Solidification</span>
-                </div>
-                <span>Pour 77 K liquid nitrogen onto slumped liquid gold → freezes in place</span>
-              </button>
-              <button data-preset="cryo-freeze" class="preset-btn" type="button">
-                <div class="preset-top">
-                  <b>5. Deep LN₂ Cryo-Shrink &amp; Oil Freeze</b>
-                  <span class="preset-tag tag-cryo">Cryogenic</span>
-                </div>
-                <span>77 K bath freezes Pennzane oil &amp; pinches brass-to-steel clearances</span>
-              </button>
-              <button data-preset="oil-flood" class="preset-btn" type="button">
-                <div class="preset-top">
-                  <b>6. Flood Hairspring with Watch Oil</b>
-                  <span class="preset-tag tag-gold">Capillary EHL</span>
-                </div>
-                <span>Capillary meniscus bridges outer coils (+fast rate → viscous stall)</span>
-              </button>
-              <button data-preset="magnet-attack" class="preset-btn" type="button">
-                <div class="preset-top">
-                  <b>7. NdFeB Super-Magnet Lockup</b>
-                  <span class="preset-tag tag-mag">Ferromagnetic</span>
-                </div>
-                <span>Dipole gradient skews beat error &amp; pins steel lever pallet fork</span>
-              </button>
-              <button data-preset="air-blow-gold" class="preset-btn" type="button">
-                <div class="preset-top">
-                  <b>8. Blow Molten Gold with Air Jet</b>
-                  <span class="preset-tag tag-cryo">Aero Shear</span>
-                </div>
-                <span>Compressed air nozzle blows liquid gold waves across the bridges</span>
-              </button>
-              <button data-preset="vacuum-chamber" class="preset-btn" type="button">
-                <div class="preset-top">
-                  <b>9. Bell-Jar Vacuum Chronometry (0 atm)</b>
-                  <span class="preset-tag tag-ok">Zero Aero Drag</span>
-                </div>
-                <span>Evacuates air → zero Stokes-Stuart drag → balance surges &gt;310°</span>
-              </button>
-              <button data-preset="shock-centrifuge" class="preset-btn" type="button">
-                <div class="preset-top">
-                  <b>10. 500G Drop Shock &amp; 4G Centrifuge</b>
-                  <span class="preset-tag tag-gold">Inertial G-Load</span>
-                </div>
-                <span>500G Incabloc jewel impact + 4G centrifuge load &amp; stress field</span>
-              </button>
-            </div>
-          </section>
 
-          <!-- Card 3: Crown Winding & Calibre Architecture (Mobile tab "calibre") -->
-          <section class="panel-card" data-mobile-group="calibre">
-            <div class="section-header">
-              <h2>3. Mainspring Barrel &amp; Calibre Stack</h2>
-              <span id="hud-power-reserve-pct" class="badge">88% · 37.0 h</span>
+            <div class="card">
+              <div class="card-head"><h3>Chronometry</h3></div>
+              <dl class="kv">
+                <div><dt>Thermal sensitivity</dt><dd id="chr-sens" class="mono">—</dd></div>
+                <div><dt>Rate interval</dt><dd id="chr-interval" class="mono">—</dd></div>
+                <div><dt>COSC E value</dt><dd id="chr-cosc" class="mono">—</dd></div>
+                <div><dt>Balance air drag</dt><dd id="chr-drag" class="mono">—</dd></div>
+              </dl>
             </div>
-            <div class="meter-bar-wrap" title="18-Turn Mainspring Barrel Power Reserve">
-              <div id="hud-power-reserve-bar" class="meter-bar-fill" style="width: 88%"></div>
-            </div>
-            <div class="kv-grid compact">
-              <div><span>Barrel Torque</span><strong id="hud-barrel-torque">8.20 mN·m</strong></div>
-              <div><span>Balance Amp</span><strong id="hud-balance-amp">285.0°</strong></div>
-              <div><span>Pivot Clearance</span><strong id="hud-pivot-clearance">4.50 µm</strong></div>
-              <div><span>Escapement Beats</span><strong id="hud-total-beats">0</strong></div>
-            </div>
-            <div class="btn-row">
-              <button
-                id="btn-wind-crown"
-                class="btn btn-gold"
-                type="button"
-                title="Wind the 18k gold crown (Shortcut: W)"
-              >
-                ⟳ Wind Crown (+1.5 Turns)
-              </button>
-              <button
-                id="btn-reset-watch"
-                class="btn btn-secondary"
-                type="button"
-                title="Restore pristine 20°C chronometer state (Shortcut: R)"
-              >
-                ↺ Reset Watch
-              </button>
-            </div>
-            <div class="control-row">
-              <label for="slider-exploded">Exploded Calibre Stack</label>
-              <input id="slider-exploded" type="range" min="0" max="1" step="0.01" value="0" />
-            </div>
-            <div class="toggle-grid">
-              <label class="check-label">
-                <input id="chk-open-case" type="checkbox" checked />
-                <span>Exhibition Cutaway</span>
+
+            <div class="card">
+              <div class="card-head"><h3>Display</h3></div>
+              <label class="field">
+                <span class="field-label">Exploded view</span>
+                <input id="slider-exploded" type="range" min="0" max="1" step="0.01" value="0" aria-label="Exploded view" />
               </label>
-              <label class="check-label">
-                <input id="chk-invar-spring" type="checkbox" />
-                <span>Invar Fe-36Ni Spring</span>
+              <div class="switch-grid">
+                <label class="switch"><input id="chk-open-case" type="checkbox" role="switch" checked /><span class="switch-track" aria-hidden="true"></span><span>Open case (no crystal)</span></label>
+                <label class="switch"><input id="chk-thermal-overlay" type="checkbox" role="switch" /><span class="switch-track" aria-hidden="true"></span><span>Infrared false colour</span></label>
+                <label class="switch"><input id="chk-invar-spring" type="checkbox" role="switch" /><span class="switch-track" aria-hidden="true"></span><span>Invar Fe-36Ni hairspring</span></label>
+                <label class="switch"><input id="chk-slow-mo" type="checkbox" role="switch" /><span class="switch-track" aria-hidden="true"></span><span>Slow motion 0.15×</span></label>
+              </div>
+              <label class="field select-field">
+                <span class="field-label">Render quality</span>
+                <select id="sel-quality" aria-label="Render quality">
+                  <option value="auto">Auto</option>
+                  <option value="high">High</option>
+                  <option value="medium">Medium</option>
+                  <option value="low">Low</option>
+                </select>
               </label>
-              <label class="check-label">
-                <input id="chk-slow-mo" type="checkbox" />
-                <span>0.15× Slow-Motion</span>
+              <p class="note mono digest">state BLAKE3 <code id="hud-digest">…</code> · <span id="hud-perf">— fps</span></p>
+            </div>
+          </section>
+
+          <!-- METROLOGY -->
+          <section role="tabpanel" id="panel-metrology" class="panel" aria-labelledby="tab-metrology" hidden>
+            <div class="card">
+              <div class="card-head">
+                <h3>Timegrapher <small>18,000 vph</small></h3>
+                <span id="tg-source" class="badge">—</span>
+              </div>
+              <div class="tg-metrics">
+                <div><span>Rate</span><strong id="tg-rate" class="mono">+0.0 s/d</strong></div>
+                <div><span>Amplitude</span><strong id="tg-amp" class="mono">285°</strong></div>
+                <div><span>Beat error</span><strong id="tg-beat-err" class="mono">0.0 ms</strong></div>
+              </div>
+              <canvas id="canvas-timegrapher" class="plot" aria-label="Beat deviation chart: tick and tock beats against the nominal 0.2 second grid" role="img"></canvas>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <h3>Virtual microphone</h3>
+                <button class="btn btn-sm btn-gold" type="button" data-action="toggle-audio" aria-pressed="false">
+                  <svg aria-hidden="true"><use href="#i-sound" /></svg><span class="audio-label">Listen</span>
+                </button>
+              </div>
+              <div class="chips" role="group" aria-label="Microphone position">
+                <span class="chips-label">Probe</span>
+                <button data-mic-pos="0,-11,11" class="chip active" type="button" aria-pressed="true">Tourbillon</button>
+                <button data-mic-pos="0,11.5,12" class="chip" type="button" aria-pressed="false">Barrel</button>
+                <button data-mic-pos="0,0,24" class="chip" type="button" aria-pressed="false">Dial</button>
+                <button data-mic-pos="0,-25,45" class="chip" type="button" aria-pressed="false">Room</button>
+              </div>
+              <label class="field">
+                <span class="field-label">Preamp gain <output id="lbl-mic-gain" class="mono">1.40×</output></span>
+                <input id="slider-mic-gain" type="range" min="0.1" max="3.5" step="0.05" value="1.4" aria-label="Microphone preamp gain" />
               </label>
-              <label class="check-label">
-                <input id="chk-thermal-overlay" type="checkbox" />
-                <span>False-Color IR Map</span>
-              </label>
+              <canvas id="canvas-oscilloscope" class="plot scope" aria-label="Oscilloscope of the microphone signal, triggered on each beat" role="img"></canvas>
+              <p class="note mono" id="lbl-mic-spl">— dB SPL</p>
+            </div>
+
+            <div class="card compact-only">
+              <div class="card-head"><h3>Stage readouts</h3></div>
+              <dl class="kv">
+                <div><dt>6h case</dt><dd class="mono" data-bind="caseTemp">—</dd></div>
+                <div><dt>Case melt</dt><dd class="mono" data-bind="goldMelt">—</dd></div>
+                <div><dt>Gold in movement</dt><dd class="mono" data-bind="fouledGold">—</dd></div>
+                <div><dt>Escapement |B|</dt><dd class="mono" data-bind="bField">—</dd></div>
+              </dl>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <h3>Thermal &amp; phase ledger</h3>
+                <span class="badge mono">fs-matdb seed-v1</span>
+              </div>
+              <div class="table-wrap">
+                <table id="node-ledger-table">
+                  <thead>
+                    <tr><th scope="col">Part</th><th scope="col">Temperature</th><th scope="col">Phase / gold</th><th scope="col">Films</th></tr>
+                  </thead>
+                  <tbody id="node-ledger-body"></tbody>
+                </table>
+              </div>
             </div>
           </section>
-        </aside>
+        </div>
+      </aside>
 
-        <!-- Center Interactive 3D Viewport -->
-        <section id="center-stage" aria-label="Interactive 3D Pocket Watch Viewport">
-          <div id="canvas-container">
-            <canvas id="viewport-canvas"></canvas>
+      <!-- Fast-forward progress for guided experiments -->
+      <div id="ff-overlay" class="glass hidden" role="status" aria-live="polite">
+        <span class="ff-icon" aria-hidden="true"><svg><use href="#i-fast" /></svg></span>
+        <span class="ff-copy">
+          <strong id="ff-title">Fast-forwarding</strong>
+          <span id="ff-detail" class="mono">0.0 / 0.0 s lab time</span>
+          <span class="ff-bar"><span id="ff-bar-fill"></span></span>
+        </span>
+        <button id="btn-ff-cancel" class="pill-btn" type="button">Stop here</button>
+      </div>
 
-            <!-- Top Floating Camera Bar -->
-            <div id="camera-bar" role="toolbar" aria-label="Camera Presets">
-              <span class="cam-label">VIEW:</span>
-              <button data-cam="overview" class="cam-btn active" type="button">Full Watch</button>
-              <button data-cam="tourbillon" class="cam-btn" type="button">6h Tourbillon</button>
-              <button data-cam="escapement" class="cam-btn" type="button">Ruby Escapement</button>
-              <button data-cam="barrel" class="cam-btn" type="button">12h Barrel &amp; Train</button>
-              <button data-cam="side" class="cam-btn" type="button">Coaxial Profile</button>
-            </div>
+      <!-- First-run coach -->
+      <div id="coach" class="glass hidden" role="dialog" aria-modal="false" aria-labelledby="coach-title">
+        <p class="coach-kicker">Welcome to the bench</p>
+        <h2 id="coach-title">A pocket watch you can break with physics</h2>
+        <ol class="coach-steps">
+          <li><span class="coach-ic" aria-hidden="true"><svg><use href="#i-orbit" /></svg></span><span><b>Look closer.</b> <span class="only-fine">Drag to orbit, scroll to zoom, right-drag to pan.</span><span class="only-touch">Drag to orbit, pinch to zoom.</span></span></li>
+          <li><span class="coach-ic" aria-hidden="true"><svg><use href="#i-flame" /></svg></span><span><b>Pick a tool</b> and drag across the watch to aim it: heat, freeze, oil, magnetize or blow air.</span></li>
+          <li><span class="coach-ic" aria-hidden="true"><svg><use href="#i-sound" /></svg></span><span><b>Listen and measure.</b> The timegrapher and microphone read the escapement live.</span></li>
+        </ol>
+        <div class="btn-row">
+          <button id="btn-coach-experiments" class="btn btn-gold" type="button"><svg aria-hidden="true"><use href="#i-flask" /></svg>Try an experiment</button>
+          <button id="btn-coach-dismiss" class="btn" type="button">Explore freely</button>
+        </div>
+      </div>
 
-            <!-- Floating 3D Superimposed Physics Vector Fields Bar -->
-            <div id="vector-field-bar" role="toolbar" aria-label="3D Physics Vector Field Overlays">
-              <span class="cam-label">3D FIELDS:</span>
-              <button data-vec-field="heat" class="vec-btn vec-heat" type="button" title="Toggle 3D Heat Flux Vector Field q = -k∇T (Shortcut: H)">
-                🔥 Heat Flux
-              </button>
-              <button data-vec-field="convection" class="vec-btn vec-conv" type="button" title="Toggle 3D Buoyant Plume, Wall-Jet & Marangoni Flow Vectors (Shortcut: C)">
-                🌊 Convection
-              </button>
-              <button data-vec-field="magnetic" class="vec-btn vec-mag" type="button" title="Toggle 3D Magnetic Flux Density Vector Field B(r) (Shortcut: B)">
-                🧲 Magnetic B
-              </button>
-              <button data-vec-field="acoustic" class="vec-btn vec-ac" type="button" title="Toggle 3D Acoustic Wave & Poynting Intensity Vectors (Shortcut: A)">
-                🔊 Acoustic
-              </button>
-              <button data-vec-field="stress" class="vec-btn vec-stress" type="button" title="Toggle 3D Viscoplastic Stress, Train Torque & Gravity Vectors (Shortcut: G)">
-                ⚙️ Stress &amp; G
-              </button>
-              <button id="btn-vec-all" class="vec-btn vec-all" type="button" title="Toggle all 3D physics vector fields (Shortcut: V)">
-                ✨ All
-              </button>
-            </div>
-
-            <!-- Contextual Active Tool / Scenario Banner on 3D Stage -->
-            <div id="stage-tool-banner" class="stage-banner hidden" role="status" aria-live="polite">
-              <span id="stage-banner-text">🔥 Blowtorch Active — Drag on the 3D watch to aim the flame jet</span>
-              <div class="banner-actions">
-                <button id="btn-banner-orbit" class="banner-pill" type="button">🔍 Orbit Mode (Esc)</button>
-                <button id="btn-banner-stop" class="banner-pill banner-pill-danger" type="button">⏹ Stop Tool (X)</button>
-              </div>
-            </div>
-
-            <!-- Bottom Floating Multiphysics Telemetry Overlay -->
-            <div id="stage-hud-overlay">
-              <div class="hud-chip">
-                <span>6h Gold Case <i>T</i></span>
-                <strong id="ov-case-temp">293.2 K (20.0 °C)</strong>
-              </div>
-              <div class="hud-chip">
-                <span>Case Melt φ<sub>liq</sub></span>
-                <strong id="ov-gold-melt">0.0%</strong>
-              </div>
-              <div class="hud-chip">
-                <span>Fouled Gold (Liq / Solid)</span>
-                <strong id="ov-fouled-gold">0.000 g / 0.000 g</strong>
-              </div>
-              <div class="hud-chip">
-                <span>Escapement |<b>B</b>|</span>
-                <strong id="ov-b-field">0.0 mT</strong>
-              </div>
-            </div>
-          </div>
-
-          <!-- Mobile Segmented Navigation Bar (Visible on tablets/phones <= 960px) -->
-          <nav id="mobile-tab-bar" aria-label="Laboratory Panels">
-            <button data-mobile-tab="perturb" class="mob-tab-btn active" type="button">
-              <span>🔥</span> Perturb
-            </button>
-            <button data-mobile-tab="scenarios" class="mob-tab-btn" type="button">
-              <span>⚡</span> Scenarios
-            </button>
-            <button data-mobile-tab="calibre" class="mob-tab-btn" type="button">
-              <span>⚙️</span> Calibre
-            </button>
-            <button data-mobile-tab="metrology" class="mob-tab-btn" type="button">
-              <span>📈</span> Metrology
-            </button>
-          </nav>
-        </section>
-
-        <!-- Right Dock: Virtual Microphone, Timegrapher & 12-Node Material Matrix -->
-        <aside id="right-dock" class="dock-panel" aria-label="Acoustic &amp; Thermodynamic Telemetry">
-          <section class="panel-card" data-mobile-group="metrology">
-            <div class="section-header">
-              <h2>4. 3D Virtual Microphone &amp; Modal Audio</h2>
-              <button id="btn-toggle-audio" class="btn btn-gold btn-sm" type="button">
-                🔊 Enable 48 kHz Mic
-              </button>
-            </div>
-            <p class="helper-note">
-              Synthesizes physical contact impulses (<i>unlock</i>, <i>ruby pallet slide</i>, <i>tooth lock</i>, <i>ratchet clicks</i>, <i>torch roar</i>, <i>LN₂ Leidenfrost sizzle</i>) across 12 structural modes.
-            </p>
-            <div class="mic-controls">
-              <div class="target-chips">
-                <span>Mic Probe:</span>
-                <button data-mic-pos="0,-11,11" class="chip active" type="button">Tourbillon (11 mm)</button>
-                <button data-mic-pos="0,11.5,12" class="chip" type="button">Barrel (12 mm)</button>
-                <button data-mic-pos="0,0,24" class="chip" type="button">Dial (24 mm)</button>
-                <button data-mic-pos="0,-25,45" class="chip" type="button">Ambient (45 mm)</button>
-              </div>
-              <div class="control-row">
-                <label for="slider-mic-gain">Preamp Gain</label>
-                <input id="slider-mic-gain" type="range" min="0.1" max="3.5" step="0.05" value="1.4" />
-                <span id="lbl-mic-spl" class="mono-val">42.0 dB</span>
-              </div>
-            </div>
-            <canvas id="canvas-oscilloscope" width="360" height="82"></canvas>
+      <dialog id="help-dialog" aria-labelledby="help-title">
+        <div class="dialog-head">
+          <h2 id="help-title">Controls</h2>
+          <button class="icon-btn small" type="button" id="btn-help-close" aria-label="Close help"><svg aria-hidden="true"><use href="#i-close" /></svg></button>
+        </div>
+        <div class="help-grid">
+          <section>
+            <h3>Gestures</h3>
+            <ul class="help-list">
+              <li><span>Orbit</span><span>drag · one finger</span></li>
+              <li><span>Zoom</span><span>scroll · pinch</span></li>
+              <li><span>Pan</span><span>right-drag · two fingers</span></li>
+              <li><span>Aim a tool</span><span>drag · one finger</span></li>
+              <li><span>Orbit while aiming</span><span>right-drag · two fingers</span></li>
+            </ul>
           </section>
-
-          <section class="panel-card" data-mobile-group="metrology">
-            <div class="section-header">
-              <h2>5. Horological Timegrapher (18,000 vph)</h2>
-              <span class="badge">Lift 52.0°</span>
-            </div>
-            <div class="tg-metrics">
-              <div class="tg-metric">
-                <span>RATE</span>
-                <strong id="tg-rate">+0.0 s/d</strong>
-              </div>
-              <div class="tg-metric">
-                <span>AMPLITUDE</span>
-                <strong id="tg-amp">285°</strong>
-              </div>
-              <div class="tg-metric">
-                <span>BEAT ERROR</span>
-                <strong id="tg-beat-err">0.0 ms</strong>
-              </div>
-            </div>
-            <canvas id="canvas-timegrapher" width="360" height="114"></canvas>
+          <section>
+            <h3>Keyboard</h3>
+            <ul class="help-list keys">
+              <li><span>Tools</span><span><kbd>1</kbd>–<kbd>7</kbd></span></li>
+              <li><span>Back to orbit</span><span><kbd>Esc</kbd></span></li>
+              <li><span>Stop perturbations</span><span><kbd>X</kbd></span></li>
+              <li><span>Shock · wind · reset</span><span><kbd>S</kbd> <kbd>W</kbd> <kbd>R</kbd></span></li>
+              <li><span>Fields: heat, flow, B, sound, stress, all</span><span><kbd>H</kbd> <kbd>C</kbd> <kbd>B</kbd> <kbd>A</kbd> <kbd>G</kbd> <kbd>V</kbd></span></li>
+              <li><span>Pause</span><span><kbd>Space</kbd></span></li>
+              <li><span>Inspector · focus mode</span><span><kbd>I</kbd> <kbd>F</kbd></span></li>
+              <li><span>This help</span><span><kbd>?</kbd></span></li>
+            </ul>
           </section>
+        </div>
+        <p class="note">The movement, its materials and every perturbation run in a Rust/WebAssembly multiphysics engine (heat, phase change, oil films, magnetism, escapement dynamics, acoustics). The picture is drawn from its state each frame.</p>
+      </dialog>
 
-          <section class="panel-card" data-mobile-group="metrology">
-            <div class="section-header">
-              <h2>6. 12-Node Enthalpy &amp; Phase Ledger</h2>
-              <span class="badge"><code>fs-matdb</code> seed-v1</span>
-            </div>
-            <div class="node-table-wrap">
-              <table id="node-ledger-table">
-                <thead>
-                  <tr>
-                    <th>Component Node</th>
-                    <th>Temp (K / °C)</th>
-                    <th>Phase / Au</th>
-                    <th>Tribology</th>
-                  </tr>
-                </thead>
-                <tbody id="node-ledger-body"></tbody>
-              </table>
-            </div>
-          </section>
-        </aside>
-      </main>
+      <div id="sr-announcer" class="sr-only" aria-live="polite"></div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>
