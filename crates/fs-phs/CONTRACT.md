@@ -4182,3 +4182,29 @@ Focused native tests check independently differentiated oscillator/Maxwell laws,
 coupled inertia and gyroscopic damping, changing conjugate ports, equal-time and
 initially uncoupled arms, branch reparameterization, weak inverse-mass remainders,
 capacity/cancellation/reuse and complete coordinate-unit covariance at 2^+/-400.
+
+## Source-resolved heat in held nonlinear propagation
+
+PreparedNonlinearZoh can retain original ResistanceWitness channels and publish
+their integrated positive losses with state and mean output in one transaction.
+Each source uses the existing PositiveHeat factor on the complete generator and
+the same accepted initial effort Q*x0 + DG(U). Its nonlinear endpoint equation,
+physical state, total resistance, supplied work and total-loss acceptance gate
+are unchanged. This is not endpoint quadrature or heat inferred from a storage
+deficit. The original source rows and their exact represented nullspaces survive.
+
+Channels are read-only observations and need not partition R; their physical
+meaning and non-overlap at a thermal boundary belong to the caller. The owner
+retains at most the existing 256-channel reference cap, admits complete explicit
+byte/work/dimension budgets, and polls cancellation around each bounded cold
+positive-integral preparation and warm channel. Warm calls reuse all scratch.
+Refusal leaves state, output and channel-heat buffers untouched, including after
+a successful nonlinear trial followed by failed source accounting.
+
+Only a quadratic storage with held input gives an exact continuous physical
+trajectory. Nonlinear motion and source heat use the original exponential
+discrete gradient and require time refinement. Four focused native groups cover
+cross-coupled resistance, a 1e-12 history with 5e-25 J heat, independent
+same-trajectory quadrature, continuous nonlinear refinement, solver/cancellation
+refusal, budget/shape admission and retry. These source tests do not claim full
+impact-host or workspace verification.

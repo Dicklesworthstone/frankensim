@@ -94,6 +94,10 @@ impl crate::ConstitutiveDiscreteGradient for Remainder<'_> {
     }
 }
 
+mod channels;
+#[cfg(test)]
+mod channel_tests;
+
 enum Power {
     Held(PositiveHeat),
     Tones(TonePower),
@@ -113,6 +117,7 @@ struct Model {
     dt: f64,
     flow: PreparedQuadraticFlow,
     power: Power,
+    channels: Vec<PositiveHeat>,
     sources: usize,
     forward: Vec<f64>,
     inverse: Vec<f64>,
@@ -199,7 +204,7 @@ impl PreparedNonlinearZoh {
         budget: LinearSplitBudget,
     ) -> Result<Self, PhsError> {
         Self::prepare_owned(
-            system, dt, budget, None,
+            system, dt, budget, None, &[],
             DenseExponentialBudget {
                 max_dimension: MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
                 max_dense_bytes: usize::MAX,
@@ -214,6 +219,7 @@ impl PreparedNonlinearZoh {
         dt: f64,
         budget: LinearSplitBudget,
         tones: Option<TonePreparation<'_>>,
+        held_channels: &[ResistanceWitness],
         dense_budget: DenseExponentialBudget,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, PreparedStepError> {
@@ -318,6 +324,9 @@ impl PreparedNonlinearZoh {
         } else {
             Power::Held(PositiveHeat::new(&system, &split, dt, &system.r)?)
         };
+        let channels = channels::prepare(
+            &system, &split, dt, held_channels, cancelled,
+        )?;
         let heat_coordinate_len = match &power {
             Power::Held(_) => heat_dimension,
             Power::Tones(power) => power.coordinate_len(),
@@ -338,6 +347,7 @@ impl PreparedNonlinearZoh {
                 dt,
                 flow,
                 power,
+                channels,
                 sources,
                 forward,
                 inverse,
@@ -356,7 +366,7 @@ impl PreparedNonlinearZoh {
                 effort: vec![0.0; n],
                 derivative: vec![0.0; n],
                 heat_coordinates: vec![0.0; heat_coordinate_len],
-                heat: vec![0.0; 1 + tones.map_or(0, |t| t.channels.len())],
+                heat: vec![0.0; 1 + tones.map_or(held_channels.len(), |t| t.channels.len())],
                 lu: LuWorkspace::new(n).map_err(|_| refuse("nonlinear LU capacity"))?,
                 evaluation: Evaluation {
                     midpoint: vec![0.0; n],
@@ -655,7 +665,7 @@ impl PreparedNonlinearTones {
         }
         let inner = PreparedNonlinearZoh::prepare_owned(
             system, duration, split_budget,
-            Some(TonePreparation { frequencies: &unique, affine, channels }),
+            Some(TonePreparation { frequencies: &unique, affine, channels }), &[],
             dense_budget, cancelled,
         )?;
         let phase = unique.iter().map(|omega| det::sin_cos(omega * duration)).collect();
@@ -1193,6 +1203,14 @@ fn solve(
                 &model.system, &s.effort, &s.evaluation.input[..m],
                 &mut s.derivative, &mut s.heat_coordinates,
             )?;
+            s.heat[0] = dissipated;
+            for (channel, value) in model.channels.iter().zip(&mut s.heat[1..]) {
+                poll(cancelled)?;
+                *value = channel.evaluate_with_effort_into(
+                    &model.system, &s.effort, &s.evaluation.input[..m],
+                    &mut s.derivative, &mut s.heat_coordinates,
+                )?;
+            }
             let supplied = model.dt * (0..m)
                 .map(|p| s.evaluation.input[p] * s.output[p]).sum::<f64>();
             (supplied, dissipated)
