@@ -852,21 +852,41 @@ impl Storage for RelaxationStorage {
     fn quadratic_part(&self) -> Option<linear_exact::QuadraticPart> {
         let base = self.base.quadratic_part()?;
         let n = self.base_dim.checked_add(self.couplings.len())?;
-        if base.matrix.len()!=self.base_dim.checked_mul(self.base_dim)? {return None;}
-        let mut matrix = vec![0.0;n.checked_mul(n)?];
-        for i in 0..self.base_dim {for j in 0..self.base_dim {
-            matrix[i*n+j] = base.matrix[i*self.base_dim+j];
-        }}
-        for (arm,coupling) in self.couplings.iter().enumerate() {
-            let RelaxationCoupling::Linear(b) = coupling else { return None; };
-            let z = self.base_dim+arm;
-            for i in 0..self.base_dim {
-                for j in 0..self.base_dim {matrix[i*n+j]+=b[i]*b[j];}
-                matrix[i*n+z]=-b[i];matrix[z*n+i]=-b[i];
-            }
-            matrix[z*n+z]=1.0;
+        if base.matrix.len() != self.base_dim.checked_mul(self.base_dim)? {
+            return None;
         }
-        Some(linear_exact::QuadraticPart {matrix,exact:base.exact})
+        let mut matrix = vec![0.0; n.checked_mul(n)?];
+        for i in 0..self.base_dim {
+            for j in 0..self.base_dim {
+                matrix[i * n + j] = base.matrix[i * self.base_dim + j];
+            }
+        }
+        let mut exact = base.exact;
+        for (arm, coupling) in self.couplings.iter().enumerate() {
+            let z = self.base_dim + arm;
+            match coupling {
+                RelaxationCoupling::Linear(b) => {
+                    for i in 0..self.base_dim {
+                        for j in 0..self.base_dim {
+                            matrix[i * n + j] += b[i] * b[j];
+                        }
+                        matrix[i * n + z] = -b[i];
+                        matrix[z * n + i] = -b[i];
+                    }
+                }
+                RelaxationCoupling::Mapped { strain, .. } => {
+                    if !strain.is_quadratic_strain() {
+                        return None;
+                    }
+                    // Keep free memory recovery in the exact linear block. The
+                    // complete k*epsilon(x)^2/2 - sqrt(k)*epsilon(x)*z remains in
+                    // the ORIGINAL implicit storage and stable polynomial work.
+                    exact = false;
+                }
+            }
+            matrix[z * n + z] = 1.0;
+        }
+        Some(linear_exact::QuadraticPart { matrix, exact })
     }
 
     fn hamiltonian(&self, x: &[f64]) -> f64 {

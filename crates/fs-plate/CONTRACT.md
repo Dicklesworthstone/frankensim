@@ -2845,3 +2845,24 @@ The full shell fixture in `harmonic/ports/tests/curvature.rs` compares the
 actual accepted one-mode shell and supported reactions with an independently
 differentiated scalar Maxwell equation. Its full equilibrium/eigen-window
 constructor is outside bounded numerical verification.
+
+## Stable work of the original nonlinear film
+
+MembraneReduction::linear_stiffness_matrix borrows the complete original
+projected tension/bending pencil, including its admitted off-diagonal terms.
+stretching_midpoint_energy_remainder evaluates the original positive condensed
+facet energy's quartic work from quadratic strain increments. Every mixed
+modal pair and plane-stress metric survives, including represented-midpoint
+rounding. Linear storage is excluded so its original time owner can account
+for that block once.
+
+The operation uses fixed three-component two-word scratch, O(facets*modal_pairs)
+work and no heap allocation or fourth-order tensor. It changes no potential,
+gradient, geometry, history or time law. Invalid shapes/nonfinite arithmetic
+refuse.
+
+Three native tests passed against the actual original facet/reduction/force
+source and real fs-math: independent polynomial work with signed mixed
+coordinates, near-coincident increments down to 2^-24, midpoint rounding,
+original off-diagonal stiffness and malformed input. This bounded source run
+does not claim full mesh-construction or fs-couple runtime verification.

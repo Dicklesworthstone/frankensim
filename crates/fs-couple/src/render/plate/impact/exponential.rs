@@ -1,14 +1,15 @@
-//! Exact coupled linear propagation inside the original string/contact model.
+//! Exact coupled linear propagation inside the original string/film/contact model.
 //!
 //! The retained EI/tension modes, reciprocal volume springs and full viscous
 //! matrix form one quadratic block. fs-phs::PreparedNonlinearZoh propagates that
 //! block without midpoint frequency warping and solves the original stretching
-//! and elastic-contact remainder implicitly. This is a different numerical
-//! discretization of the SAME Hamiltonian, not a new string law or fitted filter.
+//! and elastic-contact remainder implicitly. The same solve retains condensed
+//! membrane stretching and its complete proportional material history. This is
+//! a discretization of the SAME Hamiltonian, not a new law or fitted filter.
 //!
 //! Nonlinear/contact accuracy still requires time and modal refinement. Only
 //! the quadratic held-input limit is exact. Nonlinear drag,
-//! shell/support potentials and nonlinear mapped-strain memory are not admitted
+//! shell/support potentials and undeclared or nonquadratic strain maps are not admitted
 //! by this entry point. Cold linear Maxwell and passive radiation attachments
 //! retain their complete original storage and interconnection. The felt entry
 //! retains the original WoolFelt potential,
@@ -18,7 +19,7 @@
 use super::{
     BodyPotential, ImpactBody, ImpactConfig, ImpactError, ImpactFrame, ImpactSystem,
     MAX_IMPACT_MODES, MechanicalStorage, VolumeSpring, audio::ImpactSource, damping::ViscousDamper,
-    felt::FeltPad, invalid, string::StringPotential,
+    felt::FeltPad, invalid, membrane::MembranePotential, string::StringPotential,
 };
 use fs_dcontact::Obstacle;
 
@@ -52,6 +53,7 @@ pub(super) struct MechanicalSplit {
     source: Rc<MechanicalStorage>,
     quadratic: QuadraticStorage,
     strings: Vec<StringRemainder>,
+    films: Vec<(usize, MembranePotential)>,
 }
 impl MechanicalSplit {
     pub(super) fn new(source: Rc<MechanicalStorage>) -> Result<Self, ImpactError> {
@@ -71,14 +73,28 @@ impl MechanicalSplit {
             matrix[coordinate * dim + coordinate] = 1.0;
         }
         let mut strings = Vec::new();
+        let mut films = Vec::new();
         let mut start = 0;
         for body in &source.bodies {
+            if let BodyPotential::Membrane(film) = body {
+                let reduction = film.reduction();
+                let count = reduction.mode_count();
+                let stiffness = reduction.linear_stiffness_matrix();
+                for i in 0..count {
+                    for j in 0..count {
+                        matrix[2 * (start + i) * dim + 2 * (start + j)] = stiffness[i * count + j];
+                    }
+                }
+                films.push((start, film.clone()));
+                start += count;
+                continue;
+            }
             let (omega, nonlinear) = match body {
                 BodyPotential::Linear(omega) => (omega.as_slice(), None),
                 BodyPotential::String(string) => (string.omegas(), Some(string)),
                 _ => {
                     return Err(invalid(
-                        "exponential impact admits original fixed-end strings and linear bodies only",
+                        "exponential impact admits original fixed-end strings, condensed films and linear bodies",
                     ));
                 }
             };
@@ -115,6 +131,7 @@ impl MechanicalSplit {
         Ok(Self {
             source,
             strings,
+            films,
             quadratic: QuadraticStorage::new(matrix, dim).map_err(owner)?,
         })
     }
@@ -129,7 +146,7 @@ impl Storage for MechanicalSplit {
     fn quadratic_part(&self) -> Option<QuadraticPart> {
         Some(QuadraticPart {
             matrix: self.quadratic.matrix().to_vec(),
-            exact: self.strings.is_empty() && self.source.pads.is_empty(),
+            exact: self.strings.is_empty() && self.films.is_empty() && self.source.pads.is_empty(),
         })
     }
     fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
@@ -171,6 +188,24 @@ impl Storage for MechanicalSplit {
             )?;
             result = result + Dd::from_f64(complete) - Dd::from_f64(linear);
         }
+        for (start, film) in &self.films {
+            let reduction = film.reduction();
+            let count = reduction.mode_count();
+            for mode in 0..count {
+                let coordinate = 2 * (start + mode);
+                qa[mode] = a[coordinate];
+                qb[mode] = b[coordinate];
+                qm[mode] = mid[coordinate];
+            }
+            // The original projected linear matrix is already in Q above.
+            // Add only stable condensed stretching work, never H_total-H_linear.
+            result = result
+                + Dd::from_f64(reduction.stretching_midpoint_energy_remainder(
+                    &qa[..count],
+                    &qb[..count],
+                    &qm[..count],
+                )?);
+        }
         let histories = self.source.histories.borrow();
         for (pad, history) in self.source.pads.iter().zip(histories.iter()) {
             result = result
@@ -182,12 +217,13 @@ impl Storage for MechanicalSplit {
 
 /// The original impact state and acceptance gates with an exponential linear block.
 ///
-/// Original state order, strings, signed contacts, volume energies and full
+/// Original state order, strings, films, signed contacts, volume energies and full
 /// damping survive preparation. The dense owner's complete-state capacity is
 /// enforced before assembly; no modes are discarded to fit it. Accepted state
 /// is read-only through Deref, so a coarser exponential clock cannot accidentally
-/// advance through the midpoint owner. Cold preparation allocates; warm storage
-/// callbacks and the existing exponential owner reuse bounded scratch.
+/// advance through the midpoint owner. Cold preparation allocates; the existing
+/// exponential owner reuses bounded scratch. Original mapped-strain callbacks
+/// retain their bounded temporary derivative vectors.
 pub struct ExponentialImpactSystem {
     inner: ImpactSystem,
     flow: PreparedNonlinearZoh,
@@ -196,13 +232,17 @@ pub struct ExponentialImpactSystem {
     histories: Vec<WoolFeltState>,
 }
 impl ExponentialImpactSystem {
-    /// Prepare held-force evolution of original linear/string bodies with
+    /// Prepare held-force evolution of original linear/string/film bodies with
     /// elastic contacts and reciprocal fluid-volume springs.
     ///
     /// Every body frequency and the complete coupled quadratic spectrum must
     /// fit the original 0.9*pi sampled-band guard. The midpoint one-cent bound
     /// is inapplicable to the exact linear block. Nonlinear harmonics and contact
-    /// transients still require a sufficiently refined physical clock.
+    /// transients still require a sufficiently refined physical clock. Source-bound
+    /// films must retain their complete strain/history tangent envelope, original
+    /// material band and dt/tau limit through with_proportional_relaxation. Its
+    /// existing zero-arm spectrum admits a bounded lossless film without adding
+    /// history states. A bare film has no such frequency bound and refuses.
     pub fn new(
         bodies: Vec<ImpactBody>,
         contacts: Vec<Obstacle>,
@@ -227,16 +267,18 @@ impl ExponentialImpactSystem {
     }
 
     /// Prepare the original nonlinear felt and all of its Kelvin arms together
-    /// with linear/string bodies, reciprocal volumes and spatial damping.
+    /// with linear/string/film bodies, reciprocal volumes and spatial damping.
     ///
+    /// Nonlinear films require the same bounded proportional material preparation
+    /// as new(), including an explicit zero-arm spectrum for a lossless film.
     /// Kelvin recovery and original body modes use the existing exact linear
     /// block. The original nonlinear felt effort stays in its implicit
     /// discrete-gradient equation; irreversible conditioning commits only after
     /// the same mechanical energy and validity gates. No held-stress substep,
     /// lagged contact force or extra heat account is introduced.
     ///
-    /// The complete state, including every Kelvin arm, must fit the dense
-    /// owner's unchanged capacity. The material and contact time discretization
+    /// The complete state, including every Kelvin arm and film history, must
+    /// fit the dense owner's unchanged capacity. The material and contact time discretization
     /// still require refinement; exact free recovery does not certify impact
     /// duration, conditioning transitions or nonlinear harmonics.
     pub fn new_with_felt(
@@ -251,6 +293,14 @@ impl ExponentialImpactSystem {
         if gate.is_requested() {
             return Err(ImpactError::Cancelled);
         }
+        if bodies.iter().any(|body| {
+            matches!(&body.potential,
+            BodyPotential::Membrane(film) if film.memory_configuration().is_none())
+        }) {
+            return Err(invalid(
+                "exponential nonlinear films require their original declared strain/history envelope",
+            ));
+        }
         let modes = bodies
             .iter()
             .try_fold(0usize, |n, b| n.checked_add(b.potential.count()))
@@ -259,9 +309,19 @@ impl ExponentialImpactSystem {
             .iter()
             .try_fold(0usize, |n, pad| n.checked_add(pad.creep.len()))
             .ok_or_else(|| invalid("exponential felt memory count overflows"))?;
+        let film_memory = bodies
+            .iter()
+            .try_fold(0usize, |n, body| {
+                n.checked_add(match &body.potential {
+                    BodyPotential::Membrane(film) => film.relaxation_state_count(),
+                    _ => 0,
+                })
+            })
+            .ok_or_else(|| invalid("exponential film memory count overflows"))?;
         let states = modes
             .checked_mul(2)
             .and_then(|n| n.checked_add(memory))
+            .and_then(|n| n.checked_add(film_memory))
             .ok_or_else(|| invalid("exponential impact state count overflows"))?;
         if !PreparedNonlinearZoh::fits_reference_capacity(states, modes) {
             return Err(invalid(
@@ -271,14 +331,14 @@ impl ExponentialImpactSystem {
         if bodies.iter().any(|body| {
             !matches!(
                 &body.potential,
-                BodyPotential::Linear(_) | BodyPotential::String(_)
+                BodyPotential::Linear(_) | BodyPotential::String(_) | BodyPotential::Membrane(_)
             )
         }) || contacts
             .iter()
             .any(|contact| contact.internal_loss() != 0.0)
         {
             return Err(invalid(
-                "exponential impact requires fixed-end strings/linear bodies and elastic contacts",
+                "exponential impact requires fixed-end strings, condensed films or linear bodies and elastic contacts",
             ));
         }
         let inner = ImpactSystem::assemble_with_dampers(
@@ -302,6 +362,9 @@ impl ExponentialImpactSystem {
             return Err(invalid(
                 "complete exponential impact state exceeds its original owner dimensions or capacity",
             ));
+        }
+        if let Some(memory) = &inner.relaxation {
+            memory.admit_exponential_band(inner.config.dt_s)?;
         }
         let propagation = inner.system.share_storage();
         let flow = PreparedNonlinearZoh::new_owned(

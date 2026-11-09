@@ -118,6 +118,19 @@ impl Memory {
         }
         Ok(Some(bound))
     }
+    /// Sample the complete declared nonlinear strain/history tangent envelope.
+    /// The exact linear block does not resolve frequencies created by strain.
+    pub(super) fn admit_exponential_band(&self, dt: f64) -> Result<(), ImpactError> {
+        if !self.supports.is_empty() || !self.films.is_empty() {
+            let omega_dt = self.joint_omega_bound * dt;
+            if !omega_dt.is_finite() || omega_dt >= 0.9 * core::f64::consts::PI {
+                return Err(invalid(
+                    "complete nonlinear material envelope exceeds the exponential sampled band",
+                ));
+            }
+        }
+        Ok(())
+    }
     pub(super) fn commit_radiation_bound(&mut self,bound:f64) {self.joint_omega_bound=bound;}
     fn observe(&self, state: &[f64]) -> RelaxationObservation {
         let mut result = RelaxationObservation { states:self.rates.len(), ..Default::default() };

@@ -4050,3 +4050,32 @@ nonsymmetric R is retained without positivity repair or the symmetric
 effort/input derivatives; the source owner does not infer that chain.
 A focused actual-source regression preserves weak net work amid opposing
 `2^54` terms and checks the original nonsymmetric resistance algebra.
+
+## Nonlinear material memory in exact-linear propagation
+
+The original Maxwell storage exposes a quadratic split for explicitly declared
+at-most-quadratic strain maps. It retains the base storage's complete Q and
+each original normalized memory's z²/2. The full
+k*epsilon(x)²/2-sqrt(k)*epsilon(x)*z coupling remains in the existing implicit
+nonlinear remainder; complete storage is marked nonquadratic. No tangent
+linearization, frozen strain, constitutive update or memory elimination is
+introduced. Linear projection arms keep their original Q arithmetic and exact
+flag.
+
+The existing mapped polynomial work, complete gradient and continuous tangent
+remain authoritative, including geometric stress curvature and every
+mechanical/history cross derivative. PreparedNonlinearZoh propagates only its
+declared linear block exactly and integrates the same positive R along its
+accepted held-remainder trajectory. The ordinary discrete-gradient path and
+its heat are unchanged. Strain maps without an explicit quadratic declaration
+still refuse this split.
+Caller-owned material bands, strain/history domains, nonlinear refinement and
+the existing complete-state/cache limits remain binding.
+
+Three new native groups and the original linear-Q bit/energy/force parity test
+passed with actual pHS numerical owners. They cover exact held-strain recovery
+through dt/tau=20, independent coupled two-mode/two-arm response, positive
+heat and signed work with a 40/80/160-step refinement ladder, opaque-map
+refusal, cancellation and retry. The retained finest-response gate is 3e-5;
+native execution exited zero. This bounded source run does not claim a full
+workspace or physical membrane-host test.

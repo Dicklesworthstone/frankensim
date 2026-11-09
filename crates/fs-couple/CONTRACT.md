@@ -11464,7 +11464,7 @@ Geometry, material domains and source parameters remain authoritative. The
 opt-in exact linear block removes midpoint decay/phase error from original
 linear modes and Kelvin recovery; nonlinear contact and conditioning still
 require temporal refinement. This route does not yet admit nonlinear contact
-drag, shell/support potentials, nonlinear mapped-strain memory, or thermal feedback.
+drag, shell/support potentials, undeclared or nonquadratic strain maps, or thermal feedback.
 It does not certify a rendered waveform or measured felt calibration.
 
 Seven focused native source tests passed with pinned nightly-2026-07-06:
@@ -12203,7 +12203,7 @@ admission. Pinned Rust parsing and formatting passed. Full fs-couple execution
 of these four groups remains outstanding; no numerical or replacement-host
 substitute is claimed as runtime verification.
 
-Nonlinear mapped-strain memory, shell/support body potentials, nonlinear
+Shell/support body potentials, undeclared or nonquadratic strain maps, nonlinear
 contact drag and thermal feedback remain outside this entry. A passive
 authored acoustic pole model still requires separate geometry validation.
 Exact linear propagation does not remove nonlinear contact, source/model,
@@ -12914,3 +12914,43 @@ and accuracy-floor refusal. The new Rust source and these tests have received
 bounded source/API review only in this session: executor availability
 prevented parser/formatter, compiler and native FEM/thermal test execution.
 No passing integration-test claim is made.
+
+## Nonlinear membrane damping in the original exponential impact solve
+
+ExponentialImpactSystem constructors now admit the existing MembranePotential
+with its original bounded proportional material preparation.
+The same fs-plate condensed film supplies the complete projected linear
+tension/bending matrix and original nonlinear stretching energy. Uniform
+proportional material spectra automatically retain every original mixed-pair
+Maxwell history through ImpactSystem::with_body_relaxation. Existing felt,
+elastic contact, reciprocal volumes, spatial damping and passive radiation
+continue to use their original owners and the same accepted state transaction.
+
+The quadratic block contains the complete film pencil and every normalized
+memory's z²/2. The original nonlinear strain/history coupling remains implicit
+in PreparedNonlinearZoh; no lagged strain or separately advanced material state
+is substituted. A stable original facet-work callback preserves tiny stretching
+work without subtracting large total energies. Original mapped callbacks still
+use their bounded temporary derivative vectors; allocation-free complete
+impact execution is not claimed.
+
+All film histories count against the unchanged dense capacity before assembly.
+Source-bound films retain their complete strain/history tangent envelope and
+material band, additionally checked against the original 0.9*pi sampled limit.
+Bare films without this original complete envelope refuse; the existing
+explicit zero-arm spectrum admits bounded lossless films without dummy states.
+Original dt/tau<=2, slope/history/energy, duplicate intrinsic loss, radiation
+coupling and transactional cancellation gates remain. Exact linear propagation
+does not certify nonlinear transients or permit coarser source data.
+
+Three complete film integration groups are authored: independent
+Duffing-Maxwell response/heat refinement, signed mixed-mode acoustic loading
+with rollback, and complete-state/source admission. They remain unrun because
+the full original impact dependency closure is unavailable in the bounded
+native build. The separately exercised original film-work and native mapped
+pHS seams do not stand in for that full integration run.
+
+The physical scope remains the original moderate-slope, statically relaxed
+in-plane film with a common proportional spectrum. This does not supply
+heterogeneous viscoelastic condensation, finite-strain 3-D tissue, wrinkling,
+in-plane inertia, shell/support exact propagation or thermal feedback.

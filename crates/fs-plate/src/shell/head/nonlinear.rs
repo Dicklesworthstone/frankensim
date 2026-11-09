@@ -15,6 +15,7 @@
 //! hereditary laws; constitutive histories and time evolution belong to callers.
 //! Mesh/mode convergence and material calibration still matter.
 mod tangent;
+mod energy;
 mod strain;
 use crate::{ModePair, PlateError, PlateMesh, PlateModel, PlateSection};
 
