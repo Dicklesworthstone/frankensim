@@ -21,7 +21,7 @@ use fs_material::relaxation::RelaxationState;
 #[path = "molecular/near_field.rs"]
 mod adaptive;
 #[path = "molecular/kernels.rs"]
-mod kernels;
+pub(super) mod kernels;
 /// All mutual reflections among source-owned molecular gas bodies.
 #[path = "molecular/multiple.rs"]
 pub mod multiple;
@@ -495,7 +495,7 @@ impl MolecularTransmissionField<'_, '_> {
     }
 }
 
-fn admit_products(terms: usize, points: usize, maximum: u64) -> Result<(), HelmholtzError> {
+pub(super) fn admit_products(terms: usize, points: usize, maximum: u64) -> Result<(), HelmholtzError> {
     if maximum == 0
         || (terms as u64)
             .checked_mul(points as u64)

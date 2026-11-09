@@ -2,6 +2,63 @@
 use super::*;
 use crate::near_field::{Geometry, Observation, VectorObservation};
 
+pub(super) fn region_geometry<'a>(
+    surfaces: [&'a SpherePanels; 2],
+    region: CoreShellRegion,
+    points: &[[f64; 3]],
+    clearance: f64,
+    gate: &CancelGate,
+) -> Result<[Geometry<'a>; 2], HelmholtzError> {
+    let outer = match region {
+        CoreShellRegion::Exterior => {
+            Geometry::new_iterative(surfaces[0], points, clearance, gate)?
+        }
+        CoreShellRegion::Shell | CoreShellRegion::Core => {
+            Geometry::new_interior(surfaces[0], points, clearance)?
+        }
+    };
+    poll(gate)?;
+    let core = match region {
+        CoreShellRegion::Core => {
+            Geometry::new_interior(surfaces[1], points, clearance)?
+        }
+        CoreShellRegion::Exterior | CoreShellRegion::Shell => {
+            Geometry::new_iterative(surfaces[1], points, clearance, gate)?
+        }
+    };
+    poll(gate)?;
+    Ok([outer, core])
+}
+
+/// Shared representation topology. Signs follow the ORIGINAL outward mesh
+/// normals; eliminating a transparent surface never alters region admission.
+pub(super) struct Contribution {
+    pub boundary: usize,
+    pub region: usize,
+    pub sign: f64,
+    pub scattered: bool,
+}
+pub(super) fn region_plan(
+    region: CoreShellRegion,
+    offsets: [Option<usize>; 2],
+) -> ([Option<Contribution>; 2], bool) {
+    let [outer, core] = offsets.map(|offset| offset.is_some());
+    let term = |boundary, region, sign, scattered| Some(Contribution { boundary, region, sign, scattered });
+    match region {
+        CoreShellRegion::Exterior => {
+            let boundary = if outer { 0 } else { 1 };
+            ([if outer || core { term(boundary, 0, 1.0, true) } else { None }, None], true)
+        }
+        CoreShellRegion::Shell if outer => (
+            [term(0, 1, -1.0, false), if core { term(1, 1, 1.0, false) } else { None }], false,
+        ),
+        CoreShellRegion::Shell => ([if core { term(1, 0, 1.0, true) } else { None }, None], true),
+        CoreShellRegion::Core if core => ([term(1, 2, -1.0, false), None], false),
+        CoreShellRegion::Core if outer => ([term(0, 2, -1.0, false), None], false),
+        CoreShellRegion::Core => ([None, None], true),
+    }
+}
+
 impl CoreShellScatteredField<'_, '_> {
     /// Observe the complete field in one declared physical region. Winding
     /// and face/edge distance enforce the region using the original meshes.
@@ -23,127 +80,35 @@ impl CoreShellScatteredField<'_, '_> {
         poll(gate)?;
         options.validate()?;
         let owner = self.interface;
-        let outer = match region {
-            CoreShellRegion::Exterior => {
-                Geometry::new_iterative(owner.surfaces[0], points_m, minimum_clearance_m, gate)?
-            }
-            CoreShellRegion::Shell | CoreShellRegion::Core => {
-                Geometry::new_interior(owner.surfaces[0], points_m, minimum_clearance_m)?
-            }
-        };
-        poll(gate)?;
-        let core = match region {
-            CoreShellRegion::Core => {
-                Geometry::new_interior(owner.surfaces[1], points_m, minimum_clearance_m)?
-            }
-            CoreShellRegion::Exterior | CoreShellRegion::Shell => {
-                Geometry::new_iterative(owner.surfaces[1], points_m, minimum_clearance_m, gate)?
-            }
-        };
-        poll(gate)?;
+        let geometries = region_geometry(owner.surfaces, region, points_m, minimum_clearance_m, gate)?;
+        let (contributions, add_incident) = region_plan(region, owner.offsets);
         let mut remaining = options.maximum_kernel_evaluations;
-        let mut result = zero_observation(points_m.len());
-        let has_outer = owner.offsets[0].is_some();
-        let has_core = owner.offsets[1].is_some();
-        let mut add_incident = false;
-        match region {
-            CoreShellRegion::Exterior => {
-                if has_outer || has_core {
-                    let boundary = owner.radiating_interface();
-                    let geometry = if boundary == 0 { &outer } else { &core };
-                    result = self.observe_geometry(
-                        geometry,
-                        boundary,
-                        0,
-                        &self.scattered.pressure,
-                        &self.scattered.velocity,
-                        1.0,
-                        options,
-                        &mut remaining,
-                        gate,
-                    )?;
-                }
-                add_incident = true;
+        let mut result = None;
+        for contribution in contributions.into_iter().flatten() {
+            let (pressure, velocity) = if contribution.scattered {
+                (&self.scattered.pressure, &self.scattered.velocity)
+            } else {
+                let trace = self.traces[contribution.boundary].as_ref().expect("active interface");
+                (&trace.pressure, &trace.velocity)
+            };
+            let observed = self.observe_geometry(
+                &geometries[contribution.boundary],
+                contribution.boundary,
+                contribution.region,
+                pressure,
+                velocity,
+                contribution.sign,
+                options,
+                &mut remaining,
+                gate,
+            )?;
+            if let Some(total) = &mut result {
+                accumulate(total, observed)?;
+            } else {
+                result = Some(observed);
             }
-            CoreShellRegion::Shell if has_outer => {
-                let trace = self.traces[0].as_ref().expect("active outer interface");
-                result = self.observe_geometry(
-                    &outer,
-                    0,
-                    1,
-                    &trace.pressure,
-                    &trace.velocity,
-                    -1.0,
-                    options,
-                    &mut remaining,
-                    gate,
-                )?;
-                if has_core {
-                    let trace = self.traces[1].as_ref().expect("active core interface");
-                    let contribution = self.observe_geometry(
-                        &core,
-                        1,
-                        1,
-                        &trace.pressure,
-                        &trace.velocity,
-                        1.0,
-                        options,
-                        &mut remaining,
-                        gate,
-                    )?;
-                    accumulate(&mut result, contribution)?;
-                }
-            }
-            CoreShellRegion::Shell => {
-                // With a transparent outer interface the shell is the original
-                // exterior medium; retain its analytic incident field exactly.
-                if has_core {
-                    result = self.observe_geometry(
-                        &core,
-                        1,
-                        0,
-                        &self.scattered.pressure,
-                        &self.scattered.velocity,
-                        1.0,
-                        options,
-                        &mut remaining,
-                        gate,
-                    )?;
-                }
-                add_incident = true;
-            }
-            CoreShellRegion::Core if has_core => {
-                let trace = self.traces[1].as_ref().expect("active core interface");
-                result = self.observe_geometry(
-                    &core,
-                    1,
-                    2,
-                    &trace.pressure,
-                    &trace.velocity,
-                    -1.0,
-                    options,
-                    &mut remaining,
-                    gate,
-                )?;
-            }
-            CoreShellRegion::Core if has_outer => {
-                // Removing a matched core boundary leaves one homogeneous
-                // interior. Do not reconstruct an artificial second surface.
-                let trace = self.traces[0].as_ref().expect("active outer interface");
-                result = self.observe_geometry(
-                    &outer,
-                    0,
-                    2,
-                    &trace.pressure,
-                    &trace.velocity,
-                    -1.0,
-                    options,
-                    &mut remaining,
-                    gate,
-                )?;
-            }
-            CoreShellRegion::Core => add_incident = true,
         }
+        let mut result = result.unwrap_or_else(|| zero_observation(points_m.len()));
         if add_incident {
             for (index, &point) in points_m.iter().enumerate() {
                 poll(gate)?;
@@ -204,7 +169,7 @@ impl CoreShellScatteredField<'_, '_> {
     }
 }
 
-fn zero_observation(count: usize) -> VectorObservation {
+pub(super) fn zero_observation(count: usize) -> VectorObservation {
     VectorObservation {
         scalar: Observation {
             pressure: vec![C64::ZERO; count],
@@ -215,7 +180,7 @@ fn zero_observation(count: usize) -> VectorObservation {
     }
 }
 
-fn accumulate(
+pub(super) fn accumulate(
     target: &mut VectorObservation,
     other: VectorObservation,
 ) -> Result<(), HelmholtzError> {
@@ -234,7 +199,7 @@ fn accumulate(
     validate_observation(target)
 }
 
-fn validate_observation(field: &VectorObservation) -> Result<(), HelmholtzError> {
+pub(super) fn validate_observation(field: &VectorObservation) -> Result<(), HelmholtzError> {
     if field
         .scalar
         .pressure

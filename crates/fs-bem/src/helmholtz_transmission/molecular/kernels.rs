@@ -1,7 +1,7 @@
 //! Analytic continuation of the original factored transmission differences.
 use super::*;
 
-pub(super) fn difference(
+pub(in crate::helmholtz::transmission) fn difference(
     outside: DampedWaveNumber,
     inside: DampedWaveNumber,
     x: [f64; 3],
@@ -63,7 +63,7 @@ pub(super) fn difference(
     ]
 }
 
-pub(super) fn self_contrast(
+pub(in crate::helmholtz::transmission) fn self_contrast(
     outside: DampedWaveNumber,
     inside: DampedWaveNumber,
     area: f64,

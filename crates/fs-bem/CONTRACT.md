@@ -4038,3 +4038,52 @@ the original source caps. The deepest 1ps odd null is tested with a
 conditioning-aware 5e-8 relative tolerance; no arbitrary-null relative error
 certificate is claimed. The narrow execution isolates unrelated solver and
 adapter boundaries and does not substitute for the full BEM/Cargo/DSR suite.
+
+## Source-owned molecular refraction through a curved shell and core
+
+`helmholtz::transmission::nested::MolecularCoreShellFluidInterface` extends
+the native two-interface solve to three original `RelaxationState` owners,
+ordered exterior, shell, core. Each distinct owner is evaluated once at the
+actual angular frequency and retained by reference. Mean pressures must agree.
+Its outgoing `relaxing_wavenumber` supplies complex phase and attenuation in
+every local, cross-surface and receiver kernel. Momentum remains the original
+real `rho*omega`; the pressure coordinate is `w=i*rho0*c_eq0*v_n`. No extra
+Stokes--Kirchhoff term, complex-density substitution or attenuation multiplier
+is added to this inviscid-momentum/relaxing-compression model.
+
+Both real and molecular owners now use the same nested contrast assembly,
+factorization and correction solve. The molecular path uses the existing
+cancellation-stable complex kernel differences and self terms. The shell's
+opposite boundary normals retain the complete coupled reflection problem:
+`-T_outer + T_core`, rather than independent isolated-inclusion responses.
+Exactly equal adjacent density AND complex wavenumber removes that interface;
+equal equilibrium sound speed alone does not authorize removal. Removed
+surfaces still enforce the original geometric region and clearance rules.
+
+The resulting `MolecularCoreShellScatteredField::pressure_velocity_at`
+uses the native adaptive complex pressure/gradient receiver in the explicitly
+declared exterior, shell or core. A shared representation plan chooses physical
+region, boundary sign and total versus scattered traces for both solver owners.
+The shell uses its own molecular response on both surfaces. One work allowance
+covers the complete observation, row-payload admission conservatively includes
+all contributing surfaces, and absolute quadrature discrepancies add. These
+discrepancies do not bound mesh, constitutive or coherent-cancellation error.
+With no active interface, the original incident field is evaluated directly.
+
+Active interfaces expose the same continuous physical pressure and outward
+normal velocity, plus signed panel work and its panel-dot roundoff interval.
+`enclosed_absorbed_power_w` returns `-Re(work)` for the source-free volume
+enclosed by an active interface; `shell_absorbed_power_w` returns
+`Re(work_core-work_outer)`. Values retain spatial error and are never clipped
+to passivity. A removed boundary returns no artificial heat partition.
+Absorbing-exterior work is not relabeled lossless far-field radiation power.
+
+The native `molecular_nested` regressions cover independent complex spherical
+continuity/reflection and core/shell work under mesh refinement, empty-reservoir
+recovery of the real nested solve, one/both transparent interface reductions,
+original source identity, and pressure/source/region/storage/work/cancellation
+refusals. The separate spherical oracle uses four continuity equations per
+mode and real-density Euler momentum; its manufactured reservoir fixtures are
+not measured air data. The original convex outer mesh, one separated core,
+retained closed/outward triangles, source-free interior, constant-panel
+discretization and dense-memory scope remain in force.
