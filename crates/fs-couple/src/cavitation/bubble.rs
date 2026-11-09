@@ -9,6 +9,10 @@
 //! temperature stay frozen; no latent heat is manufactured from the total
 //! volume of a bubble that also contains noncondensable gas.
 
+/// Original finite gas calorics on the same radial and acoustic trajectory.
+#[cfg(feature = "caloric-cavitation")]
+pub mod caloric;
+
 use fs_aeroac::AeroacError;
 use fs_aeroac::curle3d::moving::{CompactSourceStrength, TimedCompactSource};
 use fs_aeroac::monopole::{CompactMonopoleObserver, MonopoleLimits, MonopoleSample};
@@ -189,7 +193,7 @@ impl<'a, F: CavitationProperties + ?Sized, M: SphericalBubbleModel> MaterialBubb
         &self,
         pressure: M::Pressure,
     ) -> Result<TimedCompactSource, MaterialBubbleError> {
-        compact_source_from_observation(&self.observe(pressure)?)
+        Ok(compact_source_from_observation(&self.observe(pressure)?)?)
     }
 
     /// Advance the native physical history atomically, without an observer.
@@ -291,7 +295,7 @@ impl<'a, F: CavitationProperties + ?Sized, M: SphericalBubbleModel> MaterialBubb
 
 fn compact_source_from_observation(
     observation: &BubbleObservation,
-) -> Result<TimedCompactSource, MaterialBubbleError> {
+) -> Result<TimedCompactSource, AeroacError> {
     let source_time_s = observation.state.time_s();
     let volume_flow_m3_s = observation.volume_rate_m3_s;
     let volume_flow_rate_m3_s2 = observation.volume_acceleration_m3_s2;
@@ -301,8 +305,7 @@ fn compact_source_from_observation(
     {
         return Err(AeroacError::NonFinite {
             what: "accepted bubble compact source",
-        }
-        .into());
+        });
     }
     Ok(TimedCompactSource {
         source_time_s,

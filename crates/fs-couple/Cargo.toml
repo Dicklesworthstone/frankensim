@@ -119,6 +119,8 @@ layered-wave-heating = ["fs-em/plane-wave"]
 ionized-wave-heating = ["fs-em/plane-wave", "dep:fs-gas"]
 # Bounded single-bubble dynamics coupled to native compact acoustic observation.
 cavitation = ["dep:fs-flux", "fs-flux/cavitation"]
+# Finite source-backed gas heating inside nonlinear radial bubble dynamics.
+caloric-cavitation = ["cavitation", "fs-flux/caloric-cavitation"]
 # Frontier rod-motion composition; native conformance remains explicitly gated.
 rod-dynamics = []
 # Spatial shock loads are explicit opt-in compositions of the original gas owners.
@@ -135,9 +137,17 @@ required-features = ["rod-dynamics"]
 name = "cavitation"
 required-features = ["cavitation"]
 
+[[example]]
+name = "caloric_cavitation"
+required-features = ["caloric-cavitation"]
+
 [[test]]
 name = "cavitation"
 required-features = ["cavitation"]
+
+[[test]]
+name = "caloric_bubble"
+required-features = ["caloric-cavitation"]
 
 [[test]]
 name = "stokes_motion"

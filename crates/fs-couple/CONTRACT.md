@@ -9038,3 +9038,50 @@ invariance, newly arriving species, topology refusal and terminal cancellation.
 Native crate execution remains pending after the dependency build exhausted disk
 space. Following executor recovery, recovered files match the original
 implementation after Rustfmt; formatting and whitespace checks pass.
+
+## Finite gas calorics in spherical cavitation sound
+
+With the opt-in `caloric-cavitation` feature,
+`cavitation::bubble::caloric::MaterialCaloricBubble` binds the original
+liquid source to the native `fs-flux` caloric radial owner. The original finite
+noncondensable gas supplies mass, composition, temperature, pressure and
+temperature-dependent heat capacity. Explicit signed heat and pressure
+histories drive the same joint gas/radius trajectory. The adapter does not
+replace gas calorics with a fitted exponent or evolve a second state.
+
+Native borrowing proposals permit admission of compact sources and observers
+before publishing gas, radius, wall velocity and physical time together. A
+failed observer, source export or final cancellation drops that proposal.
+The endpoint exports native `Q = V'` and analytic `Q' = V''`, including the
+heat-driven pressure derivative in Keller--Miksis. The existing observer uses
+the original liquid rho/c, signed monopole pressure and causal arrival time;
+an observer from a different medium refuses. Acoustic observation adds no
+second radiation damping. Exported histories can use the existing coherent
+receiver-clock renderer under its bandwidth and compactness requirements.
+
+Liquid coefficients, liquid temperature and equilibrium vapor pressure remain
+frozen. Gas heat is an explicit external port; it does not silently heat a
+finite liquid or supply latent heat. This spatially uniform ideal-gas model
+does not resolve gas thermal boundary layers, vapor mass kinetics, shock
+collapse, erosion, translating bubbles or interacting clouds. The gas/liquid
+density, vapor-pressure fraction and gas wall-Mach limits are the native
+owner's additional admission conditions.
+
+`tests/caloric_bubble.rs` specifies both native radial equations through the
+adapter, material/query retention, caloric heat-dependent motion and sound,
+the analytic heat-pressure-rate source, independent source caloric energy,
+causal microphone pressure, and late observer/cancellation rollback with
+deterministic retry. These are manufactured model and composition regressions,
+not measured validation. The execution environment became unavailable during
+dependency compilation, so compilation and runtime validation of this new
+opt-in route remain unconfirmed; no passing-test or performance claim is made.
+
+Running `cargo run -p fs-couple --features caloric-cavitation --example
+caloric_cavitation -- crates/fs-material/examples/material_gas_spring/mixture-a.tsv
+2500 100` compares the same finite caller-authored gas under adiabatic evolution and
+explicit `h A (T_liquid-T_gas)` exchange during a smooth compression pulse.
+The liquid properties come from the original IF97 water owner. Output retains
+radius, gas temperature/pressure, causal microphone pressure, cumulative heat
+and gas work, plus an independently source-integrated final energy residual.
+The example's gas and heat-transfer coefficient are explicitly synthetic;
+neither this example nor the lumped heat law supplies measured bubble accuracy.
