@@ -30,6 +30,8 @@ use fs_thermal::enthalpy::{
 };
 use std::collections::BTreeSet;
 
+mod schott;
+
 const ID: ContentHash = ContentHash([213; 32]);
 const CELL: CellId = CellId(1);
 const MATERIAL: MaterialId = MaterialId(7);

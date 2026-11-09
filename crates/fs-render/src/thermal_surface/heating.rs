@@ -128,6 +128,10 @@ pub enum SurfaceHeatingError {
     MaterialSource(fs_material::state_point::MaterialStatePointError),
     #[cfg(feature = "material-state")]
     MaterialOptics(crate::material_state::MaterialOpticalError),
+    #[cfg(feature = "material-state")]
+    MaterialThermoOptic(
+        crate::material_state::thermo_optic::binding::MaterialThermoOpticBindingError,
+    ),
     Heating(OpticalHeatingError),
     Thermal(DepositionError),
     TemperatureDomain {

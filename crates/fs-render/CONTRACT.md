@@ -8801,6 +8801,20 @@ The existing material optical binding admits the resulting glass; other state
 coordinates, claim selection and quantity conventions remain fixed. Declared
 temperature bounds further restrict queries without certifying source coverage.
 
+`MaterialSlabLaw::try_schott_with_reference_absorption` selects the original
+shared SCHOTT law instead of refreshing phase-index claims at each temperature.
+Its spectral source stays at T0, including explicitly frozen absorption. A
+separate accepted mechanical reference supplies the exact card, complete query
+and selected physical requirements; only those requirements are re-resolved
+at the native receiver's actual temperature. Optical claims may therefore be
+valid only at T0 while the independent thermal law supports a wider interval.
+No supplied mechanical requirement is dropped, and its original domain remains
+binding. The original reference phase is corrected once through
+`MaterialThermoOpticBinding`, preserving thermal cycles and independent source
+identities. Optical plus mechanical requirement counts share the existing
+distinct-law budget. This mode reaches the same native emission and radiative
+exchange below; the separately frozen illumination/deposition owner is unchanged.
+
 `NativeCoatingEmission::try_material_incoherent_slab` and
 `IsothermalCoatingStack::MaterialIncoherentSlab` feed the existing finite-band
 emission and native exchange owners. Material resolution occurs outside optical

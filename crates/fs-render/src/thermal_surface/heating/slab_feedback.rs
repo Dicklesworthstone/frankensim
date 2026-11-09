@@ -1,10 +1,14 @@
-//! Original dielectric claims on the accepted native slab temperature clock.
+//! Original dielectric sources on the accepted native slab temperature clock.
 
 use super::{SurfaceHeatingError, invalid};
 use crate::material_state::MaterialOpticalBinding;
+use crate::material_state::thermo_optic::binding::MaterialThermoOpticBinding;
 use fs_blake3::{ContentHash, DomainHasher};
-use fs_matdb::MaterialCard;
-use fs_material::state_point::{MaterialStatePointError, SpectralOpticalStatePoint};
+use fs_matdb::{MaterialCard, QueryPoint};
+use fs_material::state_point::{
+    MaterialStatePointError, ResolvedMaterialStatePoint, SpectralOpticalStatePoint,
+};
+use fs_material::thermo_optic::SchottThermoOpticLaw;
 use fs_qty::QuantitySpec;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use std::sync::Arc;
@@ -17,6 +21,9 @@ use std::sync::Arc;
 /// remain fixed. No temperature fit, emissivity fit or extrapolation is added.
 /// Tabulated phase index and analytic Sellmeier dispersion retain their native
 /// parameterizations and independent absorption spectra.
+/// Alternatively, an explicit SCHOTT mode retains phase and absorption sources
+/// at the thermal law's reference temperature and refreshes only the separately
+/// supplied mechanical state. Its absorption is deliberately fixed at reference.
 ///
 /// This is the weakly absorbing, real-interface incoherent slab model, not a
 /// coherent complex-index film. Geometry, opposite-medium index, isothermal
@@ -29,6 +36,7 @@ pub struct MaterialSlabLaw {
     temperature_axis: String,
     temperature_bounds_k: (f64, f64),
     max_knot_span_nm: Option<f64>,
+    thermo_optic: Option<MaterialThermoOpticBinding>,
     identity: ContentHash,
 }
 
@@ -106,12 +114,80 @@ impl MaterialSlabLaw {
             temperature_axis: temperature_axis.into(),
             temperature_bounds_k,
             max_knot_span_nm,
+            thermo_optic: None,
             identity: hash.finalize(),
         };
         // Validate original card/pins, all auxiliary claims, native optics and
         // spectral support before publishing the immutable temperature law.
         law.at_temperature(initial)?;
         Ok(law)
+    }
+
+    /// Use the shared SCHOTT phase law on the accepted native temperature clock,
+    /// with explicitly frozen reference absorption and smooth bare surfaces.
+    ///
+    /// `optical` supplies the original phase/absorption claims at the law's T0.
+    /// `reference_state` is the independently resolved physical state of that
+    /// same card and complete condition. Its selected requirements are retained
+    /// and re-resolved at every actual receiver temperature. A narrow mechanical
+    /// bundle therefore permits optical measurements valid only at T0; no
+    /// reference requirement is silently removed to extend source support.
+    ///
+    /// The original phase law is corrected exactly once. Later temperature
+    /// dependence of the source's phase or absorption claims is not queried in
+    /// this mode. The SCHOTT interval bounds thermal queries; mechanical source
+    /// validity is independently enforced at each endpoint. No density-driven
+    /// geometry change or phase-mixture model is inferred.
+    ///
+    /// Tabulated/Sellmeier gap conventions match [`Self::try_new`]. The property
+    /// budget charges the sum of optical and mechanical reference requirements,
+    /// conservatively retaining duplicates; native consumers charge a shared
+    /// law once. Spectral/angular quadrature reuses the prepared native glass.
+    pub fn try_schott_with_reference_absorption(
+        card: Arc<MaterialCard>,
+        optical: SpectralOpticalStatePoint,
+        reference_state: &ResolvedMaterialStatePoint,
+        law: SchottThermoOpticLaw,
+        temperature_axis: &str,
+        max_knot_span_nm: Option<f64>,
+        max_source_properties: usize,
+    ) -> Result<Self, SurfaceHeatingError> {
+        let requirements = optical
+            .resolved()
+            .properties()
+            .len()
+            .checked_add(reference_state.properties().len())
+            .ok_or(SurfaceHeatingError::Budget)?;
+        if requirements > max_source_properties {
+            return Err(SurfaceHeatingError::Budget);
+        }
+        let [minimum_k, maximum_k] = law.temperature_range_k();
+        let mut source = Self::try_new(
+            card,
+            optical,
+            temperature_axis,
+            (minimum_k, maximum_k),
+            max_knot_span_nm,
+            max_source_properties,
+        )?;
+        let reference_binding = source.bind_source(reference_state, &source.original)?;
+        let thermal = MaterialThermoOpticBinding::try_new(
+            reference_binding,
+            reference_state,
+            law,
+            temperature_axis,
+        )
+        .map_err(SurfaceHeatingError::MaterialThermoOptic)?;
+        let mut hash = DomainHasher::new("org.frankensim.render.material-schott-reference-slab.v1");
+        hash.update(source.identity.as_bytes());
+        hash.update(reference_binding.identity().as_bytes());
+        hash.update(law.identity().as_bytes());
+        source.identity = hash.finalize();
+        source.thermo_optic = Some(thermal);
+        // Revalidate the selected physical requirements and their pinned claims
+        // on this exact card, even when the original optics are only valid at T0.
+        source.at_temperature(law.reference_temperature_k())?;
+        Ok(source)
     }
 
     /// Complete original source, including its retained selected-claim receipts.
@@ -129,21 +205,34 @@ impl MaterialSlabLaw {
 
     pub(super) fn budget_size(&self) -> usize {
         self.original.resolved().properties().len()
+            + self
+                .thermo_optic
+                .as_ref()
+                .map_or(0, |source| source.reference_state().properties().len())
     }
 
     fn source_at_temperature(
         &self,
         temperature_k: f64,
     ) -> Result<SpectralOpticalStatePoint, SurfaceHeatingError> {
+        let point = self.query_at_temperature(self.original.resolved(), temperature_k)?;
+        self.original
+            .at_query_point(&self.card, &point)
+            .map_err(SurfaceHeatingError::MaterialSource)
+    }
+
+    fn query_at_temperature(
+        &self,
+        original: &ResolvedMaterialStatePoint,
+        temperature_k: f64,
+    ) -> Result<QueryPoint, SurfaceHeatingError> {
         let (lo, hi) = self.temperature_bounds_k;
         if !temperature_k.is_finite() || temperature_k < lo || temperature_k > hi {
             return Err(invalid(
                 "material slab temperature lies outside its declared support",
             ));
         }
-        let point = self
-            .original
-            .resolved()
+        original
             .query()
             .with(&self.temperature_axis, temperature_k)
             .map_err(|source| {
@@ -151,24 +240,42 @@ impl MaterialSlabLaw {
                     property: format!("axis:{}", self.temperature_axis),
                     source,
                 })
-            })?;
-        self.original
-            .at_query_point(&self.card, &point)
-            .map_err(SurfaceHeatingError::MaterialSource)
+            })
     }
 
     /// Resolve one smooth, bare optical snapshot at the requested temperature.
     /// It can feed the existing tracer or native slab emission; later spectral
     /// and directional queries reuse this snapshot without material queries.
+    /// The explicitly selected SCHOTT mode refreshes mechanical requirements
+    /// and corrects its original reference phase while holding absorption fixed.
     pub fn at_temperature(
         &self,
         temperature_k: f64,
     ) -> Result<MaterialOpticalBinding, SurfaceHeatingError> {
+        if let Some(source) = &self.thermo_optic {
+            let reference = source.reference_state();
+            let point = self.query_at_temperature(reference, temperature_k)?;
+            let accepted = reference
+                .at_query_point(&self.card, &point)
+                .map_err(SurfaceHeatingError::MaterialSource)?;
+            let observed = source
+                .at_material_state(&accepted)
+                .map_err(SurfaceHeatingError::MaterialThermoOptic)?;
+            return Ok(*observed.binding());
+        }
         let source = self.source_at_temperature(temperature_k)?;
-        let binding = match &source {
+        self.bind_source(source.resolved(), &source)
+    }
+
+    fn bind_source(
+        &self,
+        accepted: &ResolvedMaterialStatePoint,
+        source: &SpectralOpticalStatePoint,
+    ) -> Result<MaterialOpticalBinding, SurfaceHeatingError> {
+        let binding = match source {
             SpectralOpticalStatePoint::TabulatedDielectric(optical) => {
                 MaterialOpticalBinding::try_spectral_tabulated_dielectric(
-                    optical.resolved(),
+                    accepted,
                     optical,
                     self.max_knot_span_nm
                         .ok_or_else(|| invalid("missing slab index gap"))?,
@@ -178,7 +285,7 @@ impl MaterialSlabLaw {
             }
             SpectralOpticalStatePoint::DielectricSellmeier(optical) => {
                 MaterialOpticalBinding::try_spectral_sellmeier(
-                    optical.resolved(),
+                    accepted,
                     optical,
                     None,
                     self.identity,
