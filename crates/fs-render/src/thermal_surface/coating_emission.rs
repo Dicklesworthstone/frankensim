@@ -1139,6 +1139,11 @@ fn hash_ior(hash: &mut DomainHasher, ior: DielectricIor) {
             hash.update(&[5]);
             hash.update(law.content_identity().as_bytes());
         }
+        #[cfg(feature = "material-state")]
+        DielectricIor::ThermoOptic(law) => {
+            hash.update(&[6]);
+            hash.update(law.content_identity().as_bytes());
+        }
     }
 }
 

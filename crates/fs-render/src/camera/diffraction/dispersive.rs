@@ -466,7 +466,9 @@ mod tests {
                     #[cfg(feature = "material-state")]
                     DielectricIor::Water(_) => unreachable!("fixture contains no water law"),
                     #[cfg(feature = "material-state")]
-                    DielectricIor::Air(_) | DielectricIor::AirRelativeSellmeier(_) => {
+                    DielectricIor::Air(_)
+                    | DielectricIor::AirRelativeSellmeier(_)
+                    | DielectricIor::ThermoOptic(_) => {
                         unreachable!("fixture contains no air law")
                     }
                 };

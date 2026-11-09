@@ -1227,6 +1227,11 @@ impl Material {
                         hasher.update(&[15]);
                         hasher.update(law.content_identity().as_bytes());
                     }
+                    #[cfg(feature = "material-state")]
+                    DielectricIor::ThermoOptic(law) => {
+                        hasher.update(&[16]);
+                        hasher.update(law.content_identity().as_bytes());
+                    }
                 }
                 match glass.absorption_ref().parameters() {
                     BeerLambertParameters::Clear => hasher.update(&[0]),
@@ -10275,6 +10280,11 @@ fn update_continuity_ior(hasher: &mut DomainHasher, ior: &DielectricIor) {
         #[cfg(feature = "material-state")]
         DielectricIor::AirRelativeSellmeier(law) => {
             hasher.update(&[5]);
+            hasher.update(law.content_identity().as_bytes());
+        }
+        #[cfg(feature = "material-state")]
+        DielectricIor::ThermoOptic(law) => {
+            hasher.update(&[6]);
             hasher.update(law.content_identity().as_bytes());
         }
     }

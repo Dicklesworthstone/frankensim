@@ -132,6 +132,11 @@ impl CoherentDielectricCoating {
                 hasher.update(b"coherent-dielectric-coating.air-relative-sellmeier.v1");
                 hasher.update(law.content_identity().as_bytes());
             }
+            #[cfg(feature = "material-state")]
+            DielectricIor::ThermoOptic(law) => {
+                hasher.update(b"coherent-dielectric-coating.schott-thermo-optic.v1");
+                hasher.update(law.content_identity().as_bytes());
+            }
         }
         hasher.update(&self.thickness_m.to_bits().to_le_bytes());
         hasher.update(self.source.identity().as_bytes());

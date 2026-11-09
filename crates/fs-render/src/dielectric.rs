@@ -35,6 +35,11 @@ mod air;
 #[cfg(feature = "material-state")]
 pub use air::{AirRelativeSellmeierIor, AirRelativeWavelength, CiddorAirIor};
 
+#[cfg(feature = "material-state")]
+mod thermo_optic;
+#[cfg(feature = "material-state")]
+pub use thermo_optic::SchottThermoOpticIor;
+
 #[cfg(test)]
 mod absorption_band_tests;
 #[cfg(test)]
@@ -548,6 +553,9 @@ pub enum DielectricIor {
     /// and wavelength-coordinate conversion, without refitting the source law.
     #[cfg(feature = "material-state")]
     AirRelativeSellmeier(AirRelativeSellmeierIor),
+    /// Original reference glass plus its source-bounded SCHOTT temperature law.
+    #[cfg(feature = "material-state")]
+    ThermoOptic(SchottThermoOpticIor),
 }
 
 impl DielectricIor {
@@ -566,6 +574,8 @@ impl DielectricIor {
             Self::Air(ior) => ior.wavelength_bounds_nm(),
             #[cfg(feature = "material-state")]
             Self::AirRelativeSellmeier(ior) => ior.wavelength_bounds_nm(),
+            #[cfg(feature = "material-state")]
+            Self::ThermoOptic(ior) => ior.wavelength_bounds_nm(),
         }
     }
 
@@ -581,6 +591,8 @@ impl DielectricIor {
             Self::Air(ior) => ior.eval(wavelength_nm),
             #[cfg(feature = "material-state")]
             Self::AirRelativeSellmeier(ior) => ior.eval(wavelength_nm),
+            #[cfg(feature = "material-state")]
+            Self::ThermoOptic(ior) => ior.eval(wavelength_nm),
         }
     }
 
@@ -597,6 +609,8 @@ impl DielectricIor {
             Self::Air(ior) => ior.group_index(wavelength_nm),
             #[cfg(feature = "material-state")]
             Self::AirRelativeSellmeier(ior) => ior.group_index(wavelength_nm),
+            #[cfg(feature = "material-state")]
+            Self::ThermoOptic(ior) => ior.group_index(wavelength_nm),
         }
     }
 
@@ -611,6 +625,10 @@ impl DielectricIor {
             Self::Water(ior) => ior.is_dispersive(),
             #[cfg(feature = "material-state")]
             Self::Air(_) | Self::AirRelativeSellmeier(_) => true,
+            // Thermal coefficients may introduce dispersion even for a
+            // constant reference; conservatively retain wavelength paths.
+            #[cfg(feature = "material-state")]
+            Self::ThermoOptic(_) => true,
         }
     }
 }

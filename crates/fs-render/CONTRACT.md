@@ -2268,6 +2268,30 @@ angular power integrals; native scalar/polarized controls exercise shared use.
 
 ## Material thermo-optic refraction
 
+With `material-state`, `SchottThermoOpticIor` also carries the original
+`fs-material::thermo_optic::SchottThermoOpticLaw` through homogeneous native
+glass. Cauchy, Sellmeier, tabulated and explicitly air-corrected Sellmeier
+reference laws retain their exact coefficients, source coordinates and
+reference atmosphere. The shared material owner evaluates the frozen
+temperature correction and its analytic spectral derivative; no heated-index
+fit or finite difference enters transport. `schott_glass_at_temperature`
+retains reference absorption and admits its common source band.
+
+The same phase law reaches Snell/Fresnel surfaces, nested media, thin and
+sequential lenses, coherent films and native bulk paths; group propagation
+uses the separately evaluated group index. Temperature refreshes start from
+the immutable reference, so a thermal cycle restores the same optical state.
+The original thermal source, reference dispersion and frozen T enter native
+material, scene, lens and film identities. Phase-only queries remain usable at
+tabulated kinks while undefined group derivatives refuse. The source bands and
+temperature bounds are not extrapolated; applying a second thermal correction
+to an already heated law refuses. Endpoint admission and checked queries are
+not a whole-band interval certificate. This composition supplies no thermal
+expansion, evolving absorption, stress optics or new measurement authority.
+G1/G3 tests cover independently differentiated TIE-19 response, critical-angle
+motion, lens power, Airy film reflection, bulk phase/group/Beer propagation,
+air-reference separation and temperature-cycle identity.
+
 With `material-state`, `silica_refraction::corning7980_glass` binds NASA CHARMS
 Corning 7980 fused-silica coefficients directly to the native Sellmeier glass
 owner. Lenses, surface refraction, polarization and group propagation retain

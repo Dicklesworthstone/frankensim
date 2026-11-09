@@ -22,7 +22,7 @@ use fs_material::thermo_optic::{
     PreparedThermoOptic, SchottThermoOpticLaw, ThermoOpticError, ThermoOpticSample,
 };
 
-use crate::dielectric::{DielectricError, DielectricGlass};
+use crate::dielectric::{DielectricError, DielectricGlass, GlassProvenance, SchottThermoOpticIor};
 use crate::gradient_index::bundle::{IndexHessian, IndexJet, SecondOrderIndexField};
 use crate::gradient_index::thermal::TemperatureField;
 use crate::gradient_index::{
@@ -35,6 +35,26 @@ pub mod conduction;
 pub mod nonlinear_conduction;
 /// Original transient P1 temperature snapshots on their tetrahedral elements.
 pub mod transient;
+
+/// Bind a uniform accepted temperature to the same material law used by smooth
+/// thermal fields. The result enters original lenses, surface/nested-medium
+/// transport, films and bulk phase/group propagation without a spectral refit.
+///
+/// Reference absorption is retained verbatim and intersects the thermal law's
+/// source band. It is not a temperature-dependent absorption measurement. The
+/// result is a caller-authored composition; its native identity binds the exact
+/// reference dispersion, material-law source and frozen temperature. Changes
+/// of geometry, surface state or material-card claim selection remain explicit.
+pub fn schott_glass_at_temperature(
+    reference: &DielectricGlass,
+    law: &SchottThermoOpticLaw,
+    temperature_k: f64,
+) -> Result<DielectricGlass, ThermoOpticFieldError> {
+    let ior = SchottThermoOpticIor::try_new(*reference.ior(), *law, temperature_k)?;
+    let glass = DielectricGlass::new(ior, *reference.absorption_ref(), GlassProvenance::Custom);
+    glass.wavelength_bounds_nm()?;
+    Ok(glass)
+}
 
 /// Temperature and the analytic gradient of that same immutable reconstruction.
 #[derive(Clone, Copy, Debug, PartialEq)]
