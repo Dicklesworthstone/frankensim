@@ -17,6 +17,7 @@ use super::super::{ScanObservable, ScanObjectiveBudget, ScanObjectiveEvaluation,
     MovingHeatScheduleGradient, ScanRadiationScheduleGradient, ScanPrescribedTemperatureGradient, EnthalpyStepConfig,
     LinearConfig, ReverseState, add, evaluate_with_tape, finite, invalid, poll, zeros};
 use fs_exec::Cx;
+use crate::interface::ContactResistanceGradient;
 use super::super::spatial::ScanObservationSpec;
 
 /// A maximum over a fixed vertex set and an inclusive range of retained times.
@@ -77,6 +78,9 @@ pub struct ScanPeakEvaluation {
     pub radiation: Vec<ScanRadiationScheduleGradient>,
     /// Authored Dirichlet histories; static partition values remain fixed.
     pub prescribed_temperatures: Vec<ScanPrescribedTemperatureGradient>,
+    /// Whole-law multipliers in native canonical interface order; empty when
+    /// no live contact model is attached. Source/trace metadata remain native.
+    pub contact_resistance_multipliers: Vec<ContactResistanceGradient>,
     pub initial_specific_enthalpy: Vec<f64>,
     pub transpose_iterations: usize,
     pub max_transpose_relative_residual: f64,
@@ -245,6 +249,7 @@ fn pull_peak(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,
         smoothing_gap: gap, maximum_smoothing_gap: bound, sample_count,
         sources: reverse.sources.ok_or_else(|| invalid("missing scan peak sweep"))?,
         radiation: reverse.radiation, prescribed_temperatures: reverse.prescribed_temperatures,
+        contact_resistance_multipliers: reverse.contact_resistance_multipliers,
         initial_specific_enthalpy: reverse.seed,
         transpose_iterations: reverse.iterations, max_transpose_relative_residual: reverse.residual })
 }

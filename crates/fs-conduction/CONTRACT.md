@@ -3804,13 +3804,25 @@ authority.
   pointwise model. Fixed geometry, source claims and prescribed pressure remain
   unchanged. Endpoint adjoints bind the accepted complete contact residual and
   use one transpose for source, history, radiation and whole-law resistance
-  multipliers. Contact feedback remains active in whole-scan source and radiation
-  derivatives; aggregate objective APIs do not yet return contact-law controls.
+  multipliers. Whole-scan objectives, point responses and smooth peak responses
+  also retain these complete-law controls in canonical interface order. The
+  common reverse sweep sums the original endpoint contractions without another
+  timestep factor or transpose; source identity, mapped status and trace count
+  must remain unchanged. Full-tape and checkpointed paths use the same ordered
+  accumulation. Scalar allowances count each original named interface once,
+  including fixed interfaces and delegated pieces within an attached live model.
+  Separate fixed-only interfaces remain fixed design inputs on this scan API.
   `tests/temperature_contact_enthalpy/scanning.rs` and
   `tests/phase_contact/scanning.rs` cover moving deposition, independent total
   energy and latent-contact balances, supported radiation, control derivatives,
   reverse propagation through melting and atomic refusal. Native execution of
   these additions remains unverified while the pinned dependency build fails.
+
+  `tests/phase_contact/scanning/history_controls.rs` adds full-history contact-law
+  finite differences for phase-aware matching, pointwise and delegated
+  nonmatching traces; it checks point and peak limits, exact checkpoint identity,
+  both held-event conventions and exact scalar admission. These tests are
+  authored regressions, not claimed native passes in the blocked build lane.
 
   Geometry and energetic internal
   variables are frozen; there is no material motion, expansion, pressure work,

@@ -6,7 +6,8 @@
 //! lost. Sampled source and radiative reservoir gradients are contracted into
 //! the original authored constant/ramp/table/Chebyshev values on the same side
 //! of every event. Each patch's shared emissivity receives the whole-history
-//! derivative from those same physical transpose solves.
+//! derivative from those same physical transpose solves. The same duals also
+//! differentiate multipliers of each complete attached contact resistance law.
 //!
 //! The default evaluator retains its full bounded tape; `checkpoint` adds an
 //! explicit segmented replay policy. Neither differentiates adaptive grids,
@@ -26,12 +27,14 @@ pub mod loss;
 pub mod value;
 mod radiation;
 pub use radiation::ScanRadiationScheduleGradient;
-mod baths;
+pub(in crate::bc::history::march::enthalpy) mod baths;
 pub use baths::ScanPrescribedTemperatureGradient;
+mod contacts;
 
 use super::{ScanSensitivityBudget, ScanSensitivityError, ScanStepLinearization};
 use super::super::{ScanStep, ScanningEnthalpyRun};
 use crate::bc::history::march::moving::sensitivity::schedule::MovingHeatScheduleGradient;
+use crate::interface::ContactResistanceGradient;
 use crate::{ConductionError, LinearConfig};
 use crate::transient::enthalpy::EnthalpyStepConfig;
 use fs_exec::Cx;
@@ -102,7 +105,8 @@ pub struct ScanObjectiveBudget {
     /// Endpoints times sources times mesh vertices.
     pub max_retained_source_vertices: usize,
     /// All authored source values/widths, radiative reservoir values and
-    /// emissivities, and prescribed-temperature row values. Knots stay fixed.
+    /// emissivities, prescribed-temperature row values, and one resistance
+    /// multiplier per named interface in the attached contact model. Knots stay fixed.
     pub max_schedule_controls: usize,
     /// Total radiation-feedback allowance divided among all retained endpoints.
     pub max_retained_radiation_entries: usize,
@@ -126,6 +130,11 @@ pub struct ScanObjectiveEvaluation {
     /// Authored prescribed-temperature rows in original history order.
     /// Static partition values remain fixed, so an unscheduled bath adds no row.
     pub prescribed_temperatures: Vec<ScanPrescribedTemperatureGradient>,
+    /// Multipliers shared over the whole trajectory, in the native contact
+    /// owner's canonical interface order. Empty without an attached live model.
+    /// Each row retains its original source and trace metadata; dJ/ds is at s=1
+    /// for the entire R(T, phase, ...) law, including its state feedback.
+    pub contact_resistance_multipliers: Vec<ContactResistanceGradient>,
     /// Sensitivity to the input run's initial specific enthalpy, in vertex order.
     pub initial_specific_enthalpy: Vec<f64>,
     /// Original last endpoint report, not a replacement or smoothed trajectory.
@@ -145,7 +154,9 @@ pub struct ScanObjectiveEvaluation {
 /// different path, power schedule, footprint, event side or material history.
 /// Both nonlinear conductivity and attached radiation use the existing exact
 /// endpoint tangents. Radiative reservoirs, fixed patch emissivities and authored
-/// prescribed-temperature values are returned alongside source controls. Other
+/// prescribed-temperature values are returned alongside source controls. Each
+/// named interface's complete resistance law also has one shared multiplier,
+/// using its original state feedback and canonical source identity. Other
 /// background/boundary data and static prescribed values remain fixed inputs.
 ///
 /// Retains at most the explicitly admitted endpoint count and source-node shape
@@ -203,6 +214,7 @@ fn evaluate_with_tape<R, O: ScanObservationSpec>(
         standardized_residuals: measured.residuals,
         sources: reverse.sources.ok_or_else(|| invalid("missing scan reverse sweep"))?,
         radiation: reverse.radiation, prescribed_temperatures: reverse.prescribed_temperatures,
+        contact_resistance_multipliers: reverse.contact_resistance_multipliers,
         initial_specific_enthalpy: reverse.seed, final_step, endpoint_count: count,
         transpose_iterations: reverse.iterations, max_transpose_relative_residual: reverse.residual }, extra))
 }
@@ -273,13 +285,14 @@ struct ReverseState {
     sources: Option<Vec<MovingHeatScheduleGradient>>,
     radiation: Vec<ScanRadiationScheduleGradient>,
     prescribed_temperatures: Vec<ScanPrescribedTemperatureGradient>,
+    contact_resistance_multipliers: Vec<ContactResistanceGradient>,
     iterations: usize,
     residual: f64,
 }
 impl ReverseState {
     fn new(vertices: usize) -> Result<Self, ScanSensitivityError> {
         Ok(Self { seed: zeros(vertices)?, sources: None, radiation: Vec::new(),
-            prescribed_temperatures: Vec::new(),
+            prescribed_temperatures: Vec::new(), contact_resistance_multipliers: Vec::new(),
             iterations: 0, residual: 0.0 })
     }
 
@@ -347,9 +360,12 @@ impl ReverseState {
         }
         let radiation = radiation::pullback(cx, run, binding.end_time_s(), sampling, gradient.radiation)?;
         radiation::accumulate(cx, &mut self.radiation, radiation)?;
-        let baths = baths::pullback(cx, run, binding.end_time_s(), sampling,
+        let baths = baths::pullback(cx, run.run.problem.boundary, binding.end_time_s(),
+            sampling == ScanObjectiveSampling::EventLeft,
             &gradient.storage.transport.prescribed_temperature)?;
         baths::accumulate(cx, &mut self.prescribed_temperatures, baths)?;
+        contacts::accumulate(cx, run, &mut self.contact_resistance_multipliers,
+            gradient.contact_resistance_multipliers)?;
         self.seed = gradient.storage.transport.previous_specific_enthalpy;
         Ok(())
     }
@@ -358,7 +374,9 @@ impl ReverseState {
 fn schedule_control_count(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>)
     -> Result<usize, ScanSensitivityError>
 {
-    radiation::control_count(cx, run)?.checked_add(baths::control_count(cx, run)?)
+    let existing = radiation::control_count(cx, run)?.checked_add(baths::control_count(cx, run.run.problem.boundary)?)
+        .ok_or_else(|| invalid("scan authored-control count overflow"))?;
+    existing.checked_add(contacts::control_count(cx, run)?)
         .ok_or_else(|| invalid("scan authored-control count overflow"))
 }
 

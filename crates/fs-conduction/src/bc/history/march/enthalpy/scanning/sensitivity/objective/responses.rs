@@ -15,6 +15,7 @@ use super::{ScanObservable, ScanObjectiveBudget, ScanObjectiveEvaluation, ScanOb
     MovingHeatScheduleGradient, ScanRadiationScheduleGradient, ScanPrescribedTemperatureGradient, EnthalpyStepConfig,
     LinearConfig, ReverseState, evaluate_with_tape, finite, invalid, poll};
 use fs_exec::Cx;
+use crate::interface::ContactResistanceGradient;
 
 /// A response in its original physical units at one supplied endpoint and vertex.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +29,7 @@ pub struct ScanResponse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScanResponseBudget {
     pub max_responses: usize,
-    /// Responses times (all authored source/radiation/bath controls plus vertices).
+    /// Responses times (all authored source/radiation/bath/contact controls plus vertices).
     /// A scalar shape cap, not a global allocator or byte bound.
     pub max_gradient_entries: usize,
     /// Objective endpoints plus sum(response.endpoint + 1), admitted before
@@ -47,6 +48,9 @@ pub struct ScanResponseEvaluation {
     pub radiation: Vec<ScanRadiationScheduleGradient>,
     /// Authored Dirichlet histories; static partition values remain fixed.
     pub prescribed_temperatures: Vec<ScanPrescribedTemperatureGradient>,
+    /// Whole-law multipliers in native canonical interface order; empty when
+    /// no live contact model is attached. Source/trace metadata remain native.
+    pub contact_resistance_multipliers: Vec<ContactResistanceGradient>,
     pub initial_specific_enthalpy: Vec<f64>,
     pub transpose_iterations: usize,
     pub max_transpose_relative_residual: f64,
@@ -126,6 +130,7 @@ fn pull_response(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,
     Ok(ScanResponseEvaluation { response, value,
         sources: reverse.sources.ok_or_else(|| invalid("missing scan response sweep"))?,
         radiation: reverse.radiation, prescribed_temperatures: reverse.prescribed_temperatures,
+        contact_resistance_multipliers: reverse.contact_resistance_multipliers,
         initial_specific_enthalpy: reverse.seed,
         transpose_iterations: reverse.iterations, max_transpose_relative_residual: reverse.residual })
 }

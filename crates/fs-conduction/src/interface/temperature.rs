@@ -378,6 +378,12 @@ pub struct TemperatureContacts<'m, 'c> {
 }
 
 impl<'m, 'c> TemperatureContacts<'m, 'c> {
+    /// Number of original named interfaces, including fixed and mapped traces.
+    /// A split or delegated trace counts once, matching the canonical native
+    /// resistance-control layout without evaluating a thermal state.
+    #[must_use]
+    pub fn surface_count(&self) -> usize { self.reference.surface_count() }
+
     /// Bind all contact faces, with an explicit total face-pair work/storage cap.
     /// At most 64 named interfaces are admitted. These count limits do not
     /// measure source-card storage, allocator overhead or peak process memory.

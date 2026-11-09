@@ -159,6 +159,7 @@ pub(crate) fn evaluate_observations_checkpointed<O: ScanObservationSpec>(
         point_results.push(ScanResponseEvaluation { response, value,
             sources: reverse.sources.ok_or_else(|| invalid("missing checkpointed point response sweep"))?,
             radiation: reverse.radiation, prescribed_temperatures: reverse.prescribed_temperatures,
+            contact_resistance_multipliers: reverse.contact_resistance_multipliers,
             initial_specific_enthalpy: reverse.seed, transpose_iterations: reverse.iterations,
             max_transpose_relative_residual: reverse.residual });
     }
@@ -170,6 +171,7 @@ pub(crate) fn evaluate_observations_checkpointed<O: ScanObservationSpec>(
             sampled_maximum: maximum, smoothing_gap: gap, maximum_smoothing_gap: bound, sample_count,
             sources: reverse.sources.ok_or_else(|| invalid("missing checkpointed peak response sweep"))?,
             radiation: reverse.radiation, prescribed_temperatures: reverse.prescribed_temperatures,
+            contact_resistance_multipliers: reverse.contact_resistance_multipliers,
             initial_specific_enthalpy: reverse.seed, transpose_iterations: reverse.iterations,
             max_transpose_relative_residual: reverse.residual });
     }
@@ -179,6 +181,7 @@ pub(crate) fn evaluate_observations_checkpointed<O: ScanObservationSpec>(
             standardized_residuals: measured.residuals,
             sources: objective.sources.ok_or_else(|| invalid("missing checkpointed objective sweep"))?,
             radiation: objective.radiation, prescribed_temperatures: objective.prescribed_temperatures,
+            contact_resistance_multipliers: objective.contact_resistance_multipliers,
             initial_specific_enthalpy: objective.seed, final_step: replay.final_step,
             endpoint_count: endpoints.len(), transpose_iterations: objective.iterations,
             max_transpose_relative_residual: objective.residual },

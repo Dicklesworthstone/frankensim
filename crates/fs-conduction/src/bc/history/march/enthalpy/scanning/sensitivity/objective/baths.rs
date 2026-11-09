@@ -5,10 +5,8 @@
 //! scheduled region at a shared vertex. No heat-load seed or extra transpose is
 //! substituted for the prescribed-temperature multiplier.
 
-use super::{
-    ScanObjectiveSampling, ScanSensitivityError, ScanningEnthalpyRun, add, finite, invalid, poll,
-    zeros,
-};
+use super::{ScanSensitivityError, add, finite, invalid, poll, zeros};
+use crate::bc::history::ThermalBoundaryHistory;
 use crate::bc::history::march::moving::sensitivity::schedule::{count, pull_signal};
 use fs_exec::Cx;
 use fs_scenario::bc::{BcKind, BcValue};
@@ -24,12 +22,12 @@ pub struct ScanPrescribedTemperatureGradient {
     pub values_k: Vec<f64>,
 }
 
-pub(super) fn control_count(
+pub(in crate::bc::history::march::enthalpy) fn control_count(
     cx: &Cx<'_>,
-    run: &ScanningEnthalpyRun<'_, '_, '_>,
+    boundary: &ThermalBoundaryHistory<'_>,
 ) -> Result<usize, ScanSensitivityError> {
     let mut total = 0usize;
-    for (i, (_, history)) in run.run.problem.boundary.rows.iter().enumerate() {
+    for (i, (_, history)) in boundary.rows.iter().enumerate() {
         poll(cx, i)?;
         if history.row.kind != BcKind::Dirichlet {
             continue;
@@ -50,15 +48,14 @@ pub(super) fn control_count(
     Ok(total)
 }
 
-pub(super) fn pullback(
+pub(in crate::bc::history::march::enthalpy) fn pullback(
     cx: &Cx<'_>,
-    run: &ScanningEnthalpyRun<'_, '_, '_>,
+    history: &ThermalBoundaryHistory<'_>,
     time_s: f64,
-    sampling: ScanObjectiveSampling,
+    before: bool,
     nodal: &[f64],
 ) -> Result<Vec<ScanPrescribedTemperatureGradient>, ScanSensitivityError> {
     poll(cx, 0)?;
-    let history = run.run.problem.boundary;
     if nodal.len() != history.mesh().vertex_count() {
         return Err(invalid(
             "scan prescribed-temperature gradient changed its original mesh",
@@ -79,7 +76,6 @@ pub(super) fn pullback(
         region_seeds[region] = finite(region_seeds[region] + finite(nodal[vertex])?)?;
     }
     let mut output = Vec::new();
-    let left = sampling == ScanObjectiveSampling::EventLeft;
     for (i, (region, scheduled)) in history.rows.iter().enumerate() {
         poll(cx, i)?;
         if scheduled.row.kind != BcKind::Dirichlet {
@@ -90,7 +86,7 @@ pub(super) fn pullback(
         let seed = region_seeds[*region];
         let values_k = match &scheduled.row.value {
             Some(BcValue::Uniform(_)) => vec![seed],
-            Some(BcValue::Signal(signal)) => pull_signal(cx, signal, time_s, left, seed)?,
+            Some(BcValue::Signal(signal)) => pull_signal(cx, signal, time_s, before, seed)?,
             _ => {
                 return Err(invalid(
                     "scan prescribed-temperature row has no scalar history",
@@ -109,7 +105,7 @@ pub(super) fn pullback(
     Ok(output)
 }
 
-pub(super) fn accumulate(
+pub(in crate::bc::history::march::enthalpy) fn accumulate(
     cx: &Cx<'_>,
     total: &mut Vec<ScanPrescribedTemperatureGradient>,
     values: Vec<ScanPrescribedTemperatureGradient>,

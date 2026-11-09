@@ -3,6 +3,9 @@
 //! integrates the declared P1 source and solves one independent contact
 //! quadratic; it does not call a production transport solver or tangent.
 
+#[path = "scanning/history_controls.rs"]
+mod history_controls;
+
 use super::*;
 use fs_conduction::bc::history::ThermalBoundaryHistory;
 use fs_conduction::bc::history::march::{HeatSourceHistory, ThermalHistoryProblem};
