@@ -53,6 +53,49 @@ impl BinaryMiscibilityAdvection {
     pub const fn maximum_relative_volume_divergence(&self) -> f64 {
         self.maximum_relative_volume_divergence
     }
+
+    /// Shared admission for isothermal and enthalpy-carrying transport.
+    pub(super) fn admit(&self, network: &BinaryMiscibilityNetwork) -> Result<()> {
+        if !Arc::ptr_eq(&network.owner, &self.network.owner) && network.owner != self.network.owner
+        {
+            return Err(Error::Invalid(
+                "advection requires its original field model and graph",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn donor_rates_s(&self) -> &[[f64; 2]] {
+        &self.donor_rates_s
+    }
+
+    /// Both thermal and isothermal fields use the SAME donor-volume CFL law.
+    pub(super) fn substeps(
+        &self,
+        duration_s: f64,
+        controls: BinaryMiscibilityAdvectionControls,
+    ) -> Result<usize> {
+        if !positive(duration_s)
+            || !positive(controls.maximum_courant)
+            || controls.maximum_courant > 1.0
+            || !(1..=1_000_000).contains(&controls.maximum_substeps)
+            || !nonnegative(controls.amount_balance_tolerance_mol)
+        {
+            return Err(Error::Invalid(
+                "positive time, CFL in (0,1], bounded substeps and finite conservation allowance required",
+            ));
+        }
+        let required = (duration_s * self.maximum_outgoing_rate_s / controls.maximum_courant)
+            .ceil()
+            .max(1.0);
+        if !required.is_finite() || required > controls.maximum_substeps as f64 {
+            return Err(Error::AdvectionWorkLimit {
+                required_substeps: required as usize,
+                maximum_substeps: controls.maximum_substeps,
+            });
+        }
+        Ok(required as usize)
+    }
 }
 
 /// Bounded work and conservation accuracy for a complete transport interval.
@@ -272,37 +315,14 @@ impl BinaryMiscibilityNetwork {
     ) -> Result<BinaryMiscibilityAdvectionCandidate> {
         poll(&mut cancelled)?;
         self.admit(initial)?;
-        if !Arc::ptr_eq(&self.owner, &flow.network.owner) && self.owner != flow.network.owner {
-            return Err(Error::Invalid(
-                "advection requires its original field model and graph",
-            ));
-        }
-        if !positive(duration_s)
-            || !positive(controls.maximum_courant)
-            || controls.maximum_courant > 1.0
-            || !(1..=1_000_000).contains(&controls.maximum_substeps)
-            || !nonnegative(controls.amount_balance_tolerance_mol)
-        {
-            return Err(Error::Invalid(
-                "positive time, CFL in (0,1], bounded substeps and finite conservation allowance required",
-            ));
-        }
+        flow.admit(self)?;
+        let substeps = flow.substeps(duration_s, controls)?;
         let elapsed_s = finite(initial.elapsed_s + duration_s, "advection elapsed time")?;
         if elapsed_s <= initial.elapsed_s {
             return Err(Error::Arithmetic(
                 "advection time increment is unrepresentable",
             ));
         }
-        let required = (duration_s * flow.maximum_outgoing_rate_s / controls.maximum_courant)
-            .ceil()
-            .max(1.0);
-        if !required.is_finite() || required > controls.maximum_substeps as f64 {
-            return Err(Error::AdvectionWorkLimit {
-                required_substeps: required as usize,
-                maximum_substeps: controls.maximum_substeps,
-            });
-        }
-        let substeps = required as usize;
         let before = self.free_energy_j(initial, &mut cancelled)?;
         let mut state = initial.clone();
         let mut changes = vec![[Sum::default(); 2]; self.owner.cells.len()];

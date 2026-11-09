@@ -14,6 +14,9 @@
 //! credit; whole-window species, energy and entropy checks precede publication.
 //! The sweep is first order. The adaptive owner compares one sweep with two
 //! half sweeps using both composition and temperature.
+//! [`advection`] carries both species and original parcel enthalpy through a
+//! prescribed closed volume flow; [`transport`] composes that stirring with
+//! the molecular/heat sweep over one shared physical interval.
 
 use super::{
     BinaryMiscibilityError, BinaryMiscibilityNetwork, BinaryMiscibilityState, Sum, finite,
@@ -30,7 +33,11 @@ use fs_thermochem::solution::caloric::{
 use std::sync::Arc;
 
 pub mod adaptive;
+/// Conservative stirring with original parcel enthalpy and local temperature recovery.
+pub mod advection;
 mod solve;
+/// Atomic advection, molecular diffusion and heat exchange over one physical interval.
+pub mod transport;
 
 /// Explicit face data in the original network's canonical face order.
 #[derive(Clone, Copy, Debug, PartialEq)]

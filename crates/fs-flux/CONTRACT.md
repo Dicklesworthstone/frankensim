@@ -8501,7 +8501,38 @@ tests were not compiled or executed in this constrained environment.
 
 Each canonical face uses two implicit scalar exchanges: an entropy-conjugate chemical/enthalpy exchange with frozen original kinetic mobility and transported partial enthalpy plus authored Soret heat, then Fourier heat exchange. Both recover local temperatures through original pure and mixing calorics. Conductivity is the zero-diffusive-flux value, and the same signed heat-of-transport coefficient supplies reciprocal Dufour heat. Original D(T,x) claims are sampled at actual endpoint temperatures/compositions and the mean face outside scalar roots. Completed stages and final fields retain original source support. Exact physical zero coefficients are admitted; positive unrepresentable mobilities refuse.
 
-Every proposal checks whole-field component amounts, per-cell capacity, total enthalpy and actual entropy before publishing. The first-order split has adaptive step doubling with independent composition and temperature tolerances, accepts the two-half-step result, and applies the original conservation/entropy allowance again to the whole requested interval. Cancellation, exhausted work, source refusal or failed numerical admission leaves the input unchanged. Conductivity and heat of transport are explicitly authored fixed face data; this owner does not infer experimental coefficients, model pressure/volume work, or couple advection/mechanics.
+Every proposal checks whole-field component amounts, per-cell capacity, total enthalpy and actual entropy before publishing. The first-order split has adaptive step doubling with independent composition and temperature tolerances, accepts the two-half-step result, and applies the original conservation/entropy allowance again to the whole requested interval. Cancellation, exhausted work, source refusal or failed numerical admission leaves the input unchanged. Conductivity and heat of transport are explicitly authored fixed face data; this owner does not infer experimental coefficients or model pressure/volume work or mechanics. Prescribed advection is provided by the extension below.
+
+### Enthalpy-carrying spatial miscibility transport
+
+`miscibility::nonisothermal::advection` uses the SAME prepared directional
+volume flow, original geometry and donor-volume CFL admission as isothermal
+miscibility. Every stream carries both independently represented species and
+the original donor parcel's total homogeneous enthalpy, including nonideal
+mixing. Every debit has the same opposite credit. All faces sample the preceding
+substep synchronously, and bounded inverses of the original caloric model
+recover local temperatures. Temperature is not volume-averaged and no second
+mixing-heat source is added. Opposing streams remain distinct even when their
+net volume rate vanishes. Exact zero flow performs no caloric inverse.
+
+`miscibility::nonisothermal::transport` composes this advection with the original
+chemical/Fourier/Soret-Dufour sweep over ONE physical interval. It retains both
+original stage reports and total per-face species/enthalpy transfers. Every
+complete candidate independently checks species, cell capacity, total enthalpy
+and actual entropy using the original whole-interval allowances. Caloric
+inverse tolerances share the energy budget across cells/substeps. The original
+material diffusivity is qualified at actual local temperatures/compositions
+after every advection substep and throughout the original diffusion stages.
+Failures, late cancellation and unsupported caloric states publish no field.
+
+The scheme is first order in time and donor-cell in space. CFL bounds establish
+positivity, not temporal/spatial accuracy. The existing kappa=0, convex-law,
+positive-common-support and equal-fixed-partial-volume scope remains explicit;
+there is no momentum feedback, inferred stirring power or viscous heating.
+Focused regressions compare independent unequal-Cp parcel balances, both signs
+of nonideal mixing heat, directed circulation, unequal-volume analytic donor
+decay, complete species/energy receipts, zero-operator limits, macro-time
+refinement, finite work and cancellation/replay.
 
 ### Compatible molecular stress with variable viscosity
 
