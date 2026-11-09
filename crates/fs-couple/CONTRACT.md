@@ -8041,6 +8041,47 @@ mesh permutations, correspondence/support/resource refusals and atomic phase
 rollback. These are synthetic implementation references, not experimental
 validation of an electromagnetic device or its emitted sound.
 
+## Source-bound rotor damping and finite material heat
+
+`circuit_enthalpy::rotor` binds explicit pure-viscous interface channels to the
+original rotor and caloric material network. Each `MaterialRotorDamper` retains
+its original `InterfaceSystemCard`/`ResolvedLinearInterface`, ordered receiving
+material cells, physical slip row, temperature side and authored two-body heat
+partition. Exact source pins and fixed context survive endpoint T refresh.
+Elastic interface coefficients, constant-loss anchors and unsupported frequency
+bands refuse; no missing viscosity or heat partition is inferred.
+
+Each thermal trial assembles `C_baseline + sum c(T) b b^T` and uses the native
+`RotorBearingModel`/`RotorMidpoint` equations. Each channel's physical work is
+independently `h*c(T)*(b.v_mid)^2`; it enters the two original caloric stores
+once, with double-double aggregation for shared receivers. Arbitrary baseline C
+and K_skew work are contracted directly as signed external exchanges. They are
+never obtained by subtracting heat from total damping work or by projecting C.
+Original symmetric-K storage is measured from actual endpoint configurations;
+full M/K/G, spin and geometry stay fixed, so no hidden parameter work is added.
+
+The existing `MaterialNetwork` and `cell_driver_candidate` retain caloric,
+conduction, reservoir, event, nonlinear and local/global energy ownership.
+Accepted motion, endpoint source bundles and thermal history publish together.
+Immutable network binding prevents silent changes on continuation. Source,
+receiver, clock, step/trial budget, numerical and cancellation failures publish
+no half-state. A fresh native trial costs O(n³ + channels*n²), within the
+existing 32-coordinate rotor bound and an explicit 256-channel cap. One
+exact-coefficient native motion result is cached in O(channels+n) storage;
+identical ordered c(T) tuples reuse it while source resolution, independent
+work checks and trial accounting remain fresh.
+
+This is the original midpoint mechanical discretization with endpoint material
+and thermal feedback, generally first order as a coupled method. The caller
+supplies a timestep ceiling and qualifies the physical response bandwidth;
+tight energy residuals do not prove time accuracy, broadband material validity,
+passivity of active baseline operators, thermal expansion or moving geometry.
+`tests/rotor_enthalpy.rs` defines independent coupled c(T)/finite-heat solutions,
+active baseline supply despite zero net damping, full mutual mass/gyro/K_skew
+work, shared receivers and atomic source-domain/anchor/cancellation refusal.
+These are synthetic constitutive fixtures; native execution is reported
+separately from parsing and static source review.
+
 ## Finite battery-to-shaft drive with material heating
 
 `circuit_enthalpy::converter::battery::motor::BatteryMotorThermalNetwork` advances

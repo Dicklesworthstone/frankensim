@@ -42,6 +42,8 @@ pub mod spatial_induction;
 pub mod piezoelectric;
 /// Reciprocal rotor actuation, winding resistance and finite motor/bridge heat.
 pub mod motor;
+/// Source-bound passive rotor channels, signed operator work and finite material heat.
+pub mod rotor;
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
