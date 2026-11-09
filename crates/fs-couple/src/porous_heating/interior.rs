@@ -1,9 +1,11 @@
-//! Full-volume harmonic absorption on the original finite thermal timeline.
+//! Volume and mechanical-wall absorption on the original thermal timeline.
 //!
 //! Every original acoustic tetrahedron maps explicitly to one existing thermal
 //! control volume. The prepared equivalent-fluid operator supplies its physical
-//! density and compressional loss forms; no boundary loss or numerical residual
-//! becomes heat. These watts already include volume and peak-to-mean scaling.
+//! density and compressional loss forms. Optional mechanical-wall receivers use
+//! the original resistance and Maxwell loss forms; pressure-transfer work,
+//! unspecified boundary loss and numerical residuals never become heat. These
+//! watts already include their physical measure and peak-to-mean scaling.
 //!
 //! The map is caller-authored: equal volumes do not establish spatial overlap.
 //! Each destination must represent that complete physical element and its own
@@ -13,7 +15,7 @@
 //! ceases to hold. No acoustic startup or temperature feedback is inferred.
 
 use fs_feec::acoustics::helmholtz::heterogeneous::{
-    HeterogeneousError, PreparedEquivalentFluid,
+    HeterogeneousError, MechanicalWallPhasors, PreparedEquivalentFluid,
 };
 use fs_math::{c64::C64, dd::Dd};
 use fs_thermal::enthalpy::{
@@ -34,6 +36,19 @@ pub struct InteriorHeatCell<'t> {
     pub caloric: &'t dyn ThermalLaw,
 }
 
+/// Existing thermally lumped wall destination, in original mechanical-wall order.
+#[derive(Clone, Copy)]
+pub struct InteriorWallHeatCell<'t> {
+    pub cell: CellId,
+    /// The exact caloric object used by this destination's native timeline.
+    pub caloric: &'t dyn ThermalLaw,
+    /// Complete acoustic contact area represented by this cell [m²].
+    ///
+    /// Must equal the original FE trace area. This is distinct from the native
+    /// cell's exposed convection area, which may include both faces and edges.
+    pub acoustic_area_m2: f64,
+}
+
 /// Physical absorbed powers for one original element and destination.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InteriorCellHeating {
@@ -51,6 +66,24 @@ impl InteriorCellHeating {
     #[must_use]
     pub fn absorbed_power_w(&self) -> f64 {
         self.density_dissipation_w + self.compressional_dissipation_w
+    }
+}
+
+/// Independently evaluated heat from one original mechanical wall patch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InteriorWallHeating {
+    pub cell: CellId,
+    pub wall: usize,
+    pub area_m2: f64,
+    pub mass_kg: f64,
+    pub resistance_dissipation_w: f64,
+    pub relaxation_dissipation_w: f64,
+}
+
+impl InteriorWallHeating {
+    #[must_use]
+    pub fn absorbed_power_w(&self) -> f64 {
+        self.resistance_dissipation_w + self.relaxation_dissipation_w
     }
 }
 
@@ -79,8 +112,8 @@ impl From<DepositionError> for InteriorHeatingError {
     }
 }
 
-struct BoundCell<'t> {
-    heat: InteriorCellHeating,
+struct CellBinding<'t> {
+    cell: CellId,
     caloric: &'t dyn ThermalLaw,
     geometry: CellGeometry,
     material: MaterialId,
@@ -89,6 +122,70 @@ struct BoundCell<'t> {
     segment_id: u64,
     storage_basis: ThermalStorageBasis,
     caloric_identity: Option<[u8; 32]>,
+}
+
+impl<'t> CellBinding<'t> {
+    fn try_new(
+        thermal: &DepositionSimulation<'_>,
+        id: CellId,
+        caloric: &'t dyn ThermalLaw,
+    ) -> Result<Self, InteriorHeatingError> {
+        let cell = thermal
+            .cells()
+            .get(&id)
+            .ok_or(InteriorHeatingError::Invalid(
+                "interior acoustic destination is not active",
+            ))?;
+        if !thermal.uses_material_law(cell.material_id, caloric) {
+            return Err(InteriorHeatingError::Invalid(
+                "interior heat needs the original native caloric object",
+            ));
+        }
+        Ok(Self {
+            cell: id,
+            caloric,
+            geometry: cell.geometry,
+            material: cell.material_id,
+            mass_kg: cell.mass_kg,
+            body_id: cell.body_id,
+            segment_id: cell.segment_id,
+            storage_basis: thermal.material_storage_basis(cell.material_id)?,
+            caloric_identity: thermal.material_caloric_identity(cell.material_id)?,
+        })
+    }
+
+    fn validate(&self, thermal: &DepositionSimulation<'_>) -> Result<(), InteriorHeatingError> {
+        let cell = thermal
+            .cells()
+            .get(&self.cell)
+            .ok_or(InteriorHeatingError::Invalid(
+                "interior acoustic destination is no longer active",
+            ))?;
+        if cell.geometry != self.geometry
+            || cell.material_id != self.material
+            || cell.mass_kg != self.mass_kg
+            || cell.body_id != self.body_id
+            || cell.segment_id != self.segment_id
+            || !thermal.uses_material_law(cell.material_id, self.caloric)
+            || thermal.material_storage_basis(cell.material_id)? != self.storage_basis
+            || thermal.material_caloric_identity(cell.material_id)? != self.caloric_identity
+        {
+            return Err(InteriorHeatingError::Invalid(
+                "interior heat binding changed geometry, mass or original caloric law",
+            ));
+        }
+        Ok(())
+    }
+}
+
+struct BoundCell<'t> {
+    heat: InteriorCellHeating,
+    binding: CellBinding<'t>,
+}
+
+struct BoundWall<'t> {
+    heat: InteriorWallHeating,
+    binding: CellBinding<'t>,
 }
 
 /// Cached physical sources retaining the original operator and pressure field.
@@ -100,6 +197,8 @@ pub struct InteriorAcousticHeating<'p, 'f, 'c, 't> {
     prepared: &'p PreparedEquivalentFluid<'f, 'c>,
     pressure_pa: &'p [C64],
     cells: Vec<BoundCell<'t>>,
+    wall_phasors: Option<&'p [MechanicalWallPhasors]>,
+    walls: Vec<BoundWall<'t>>,
     sources_w: BTreeMap<CellId, f64>,
 }
 
@@ -108,6 +207,8 @@ pub struct InteriorAcousticHeating<'p, 'f, 'c, 't> {
 pub struct InteriorHeatingEnergy {
     pub density_dissipation_j: f64,
     pub compressional_dissipation_j: f64,
+    pub wall_resistance_dissipation_j: f64,
+    pub wall_relaxation_dissipation_j: f64,
     /// Already included once in the native thermal external-heat report.
     pub deposited_j: f64,
 }
@@ -120,6 +221,8 @@ pub struct InteriorHeatingStep<'t> {
     pub acoustic: InteriorHeatingEnergy,
     /// Acoustic heat only, in original tetrahedron order.
     pub cell_energy_j: Vec<(CellId, f64)>,
+    /// Mechanical heat only, in original wall-patch order.
+    pub wall_energy_j: Vec<(CellId, f64)>,
 }
 
 fn finite(value: f64) -> Result<f64, InteriorHeatingError> {
@@ -130,8 +233,19 @@ fn finite(value: f64) -> Result<f64, InteriorHeatingError> {
     }
 }
 
+fn same_measure(a: f64, b: f64) -> bool {
+    a.is_finite()
+        && b.is_finite()
+        && a > 0.0
+        && b > 0.0
+        && (a - b).abs() <= 512.0 * f64::EPSILON * a.abs().max(b.abs())
+}
+
 impl<'p, 'f, 'c, 't> InteriorAcousticHeating<'p, 'f, 'c, 't> {
-    /// Bind the complete pressure space and every original element exactly once.
+    /// Bind bulk absorption from every original element exactly once.
+    ///
+    /// Mechanical-wall absorption is included only by
+    /// [`Self::try_new_with_mechanical_walls`], with explicit wall receivers.
     ///
     /// The pressure may come from the prepared solve or an externally composed
     /// coherent field on this same space and frequency. This adapter evaluates
@@ -153,9 +267,7 @@ impl<'p, 'f, 'c, 't> InteriorAcousticHeating<'p, 'f, 'c, 't> {
     ) -> Result<Self, InteriorHeatingError> {
         checkpoint()?;
         let count = prepared.geometry().tetrahedra().len();
-        if maximum_cells == 0
-            || maximum_cells > MAX_INTERIOR_HEATING_CELLS
-            || count > maximum_cells
+        if maximum_cells == 0 || maximum_cells > MAX_INTERIOR_HEATING_CELLS || count > maximum_cells
         {
             return Err(DepositionError::Budget("interior acoustic heating cells").into());
         }
@@ -185,18 +297,8 @@ impl<'p, 'f, 'c, 't> InteriorAcousticHeating<'p, 'f, 'c, 't> {
                     "interior acoustic destinations must be distinct",
                 ));
             }
-            let cell = thermal.cells().get(&route.cell).ok_or(
-                InteriorHeatingError::Invalid("interior acoustic destination is not active"),
-            )?;
-            let native_volume = cell.geometry.volume_m3;
-            let tolerance = 512.0 * f64::EPSILON * native_volume.abs().max(power.volume_m3.abs());
-            if !native_volume.is_finite()
-                || native_volume <= 0.0
-                || !power.volume_m3.is_finite()
-                || power.volume_m3 <= 0.0
-                || (native_volume - power.volume_m3).abs() > tolerance
-                || !thermal.uses_material_law(cell.material_id, route.caloric)
-            {
+            let binding = CellBinding::try_new(thermal, route.cell, route.caloric)?;
+            if !same_measure(binding.geometry.volume_m3, power.volume_m3) {
                 return Err(InteriorHeatingError::Invalid(
                     "interior heat needs the complete original volume and caloric object",
                 ));
@@ -215,25 +317,117 @@ impl<'p, 'f, 'c, 't> InteriorAcousticHeating<'p, 'f, 'c, 't> {
                 ));
             }
             sources_w.insert(route.cell, watts);
-            cells.push(BoundCell {
-                heat,
-                caloric: route.caloric,
-                geometry: cell.geometry,
-                material: cell.material_id,
-                mass_kg: cell.mass_kg,
-                body_id: cell.body_id,
-                segment_id: cell.segment_id,
-                storage_basis: thermal.material_storage_basis(cell.material_id)?,
-                caloric_identity: thermal.material_caloric_identity(cell.material_id)?,
-            });
+            cells.push(BoundCell { heat, binding });
         }
         checkpoint()?;
         Ok(Self {
             prepared,
             pressure_pa,
             cells,
+            wall_phasors: None,
+            walls: Vec::new(),
             sources_w,
         })
+    }
+
+    /// Bind bulk and mechanical-wall absorption to distinct native receivers.
+    ///
+    /// Supply the complete coherent wall state from the same original operator,
+    /// frequency and drive as `pressure_pa`, including its retained Maxwell
+    /// extensions. The supplied field's equations are not recertified here.
+    /// Every original wall maps once, in original order, to a separate cell whose
+    /// mass equals the FE surface mass times its actual integrated trace area.
+    /// The caller owns spatial/material correspondence and the justification for
+    /// one temperature through each complete wall patch; area/mass agreement
+    /// alone does not establish that correspondence. Native exposed area remains
+    /// unchanged and need not equal the one-sided acoustic contact area.
+    ///
+    /// Wall heat is recomputed from the original positive resistance and Maxwell
+    /// forms, never from pressure work or a balance residual. No second area,
+    /// volume or peak-to-mean factor is applied. The budget counts both volume
+    /// and wall destinations before either loss evaluation begins.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_mechanical_walls(
+        prepared: &'p PreparedEquivalentFluid<'f, 'c>,
+        pressure_pa: &'p [C64],
+        wall_phasors: &'p [MechanicalWallPhasors],
+        thermal: &DepositionSimulation<'_>,
+        destinations: &[InteriorHeatCell<'t>],
+        wall_destinations: &[InteriorWallHeatCell<'t>],
+        maximum_cells: usize,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, InteriorHeatingError> {
+        checkpoint()?;
+        let wall_count = prepared.wall_count();
+        let count = prepared
+            .geometry()
+            .tetrahedra()
+            .len()
+            .checked_add(wall_count);
+        if maximum_cells == 0
+            || maximum_cells > MAX_INTERIOR_HEATING_CELLS
+            || count.is_none_or(|count| count > maximum_cells)
+        {
+            return Err(DepositionError::Budget("interior acoustic heating cells").into());
+        }
+        if wall_destinations.len() != wall_count || wall_phasors.len() != wall_count {
+            return Err(InteriorHeatingError::Invalid(
+                "interior wall heat needs every original wall state and destination",
+            ));
+        }
+        let mut source = Self::try_new(
+            prepared,
+            pressure_pa,
+            thermal,
+            destinations,
+            maximum_cells,
+            &mut checkpoint,
+        )?;
+        let mut refusal = None;
+        let powers = prepared.wall_dissipation(wall_phasors, &mut || match checkpoint() {
+            Ok(()) => false,
+            Err(error) => {
+                refusal = Some(error);
+                true
+            }
+        });
+        if let Some(error) = refusal {
+            return Err(error.into());
+        }
+        source.walls.reserve(wall_count);
+        for (wall, (route, power)) in wall_destinations.iter().zip(powers?).enumerate() {
+            checkpoint()?;
+            if source.sources_w.contains_key(&route.cell) {
+                return Err(InteriorHeatingError::Invalid(
+                    "interior volume and wall destinations must be distinct",
+                ));
+            }
+            let binding = CellBinding::try_new(thermal, route.cell, route.caloric)?;
+            if !same_measure(route.acoustic_area_m2, power.area_m2)
+                || !same_measure(binding.mass_kg, power.mass_kg)
+            {
+                return Err(InteriorHeatingError::Invalid(
+                    "wall heat needs the complete original acoustic area and wall mass",
+                ));
+            }
+            let heat = InteriorWallHeating {
+                cell: route.cell,
+                wall,
+                area_m2: power.area_m2,
+                mass_kg: power.mass_kg,
+                resistance_dissipation_w: power.resistance_dissipation_w,
+                relaxation_dissipation_w: power.relaxation_dissipation_w,
+            };
+            let watts = finite(heat.absorbed_power_w())?;
+            if heat.resistance_dissipation_w < 0.0 || heat.relaxation_dissipation_w < 0.0 {
+                return Err(InteriorHeatingError::Invalid("wall heat must be passive"));
+            }
+            source.sources_w.insert(route.cell, watts);
+            source.walls.push(BoundWall { heat, binding });
+        }
+        source.wall_phasors = Some(wall_phasors);
+        checkpoint()?;
+        Ok(source)
     }
 
     #[must_use]
@@ -251,29 +445,29 @@ impl<'p, 'f, 'c, 't> InteriorAcousticHeating<'p, 'f, 'c, 't> {
         self.cells.iter().map(|cell| &cell.heat)
     }
 
+    /// Cached original mechanical-wall powers, separate from volume heat.
+    pub fn walls(&self) -> impl ExactSizeIterator<Item = &InteriorWallHeating> {
+        self.walls.iter().map(|wall| &wall.heat)
+    }
+
+    #[must_use]
+    pub const fn wall_phasors(&self) -> Option<&'p [MechanicalWallPhasors]> {
+        self.wall_phasors
+    }
+
     fn validate(
         &self,
         thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), InteriorHeatingError> {
-        for bound in &self.cells {
+        for binding in self
+            .cells
+            .iter()
+            .map(|bound| &bound.binding)
+            .chain(self.walls.iter().map(|bound| &bound.binding))
+        {
             checkpoint()?;
-            let cell = thermal.cells().get(&bound.heat.cell).ok_or(
-                InteriorHeatingError::Invalid("interior acoustic destination is no longer active"),
-            )?;
-            if cell.geometry != bound.geometry
-                || cell.material_id != bound.material
-                || cell.mass_kg != bound.mass_kg
-                || cell.body_id != bound.body_id
-                || cell.segment_id != bound.segment_id
-                || !thermal.uses_material_law(cell.material_id, bound.caloric)
-                || thermal.material_storage_basis(cell.material_id)? != bound.storage_basis
-                || thermal.material_caloric_identity(cell.material_id)? != bound.caloric_identity
-            {
-                return Err(InteriorHeatingError::Invalid(
-                    "interior heat binding changed geometry, mass or original caloric law",
-                ));
-            }
+            binding.validate(thermal)?;
         }
         Ok(())
     }
@@ -284,7 +478,8 @@ impl<'p, 'f, 'c, 't> InteriorAcousticHeating<'p, 'f, 'c, 't> {
         InteriorHeatingObserver {
             owner: self,
             cell_energy: vec![Dd::ZERO; self.cells.len()],
-            mechanisms: [Dd::ZERO; 2],
+            wall_energy: vec![Dd::ZERO; self.walls.len()],
+            mechanisms: [Dd::ZERO; 4],
         }
     }
 
@@ -307,12 +502,14 @@ impl<'p, 'f, 'c, 't> InteriorAcousticHeating<'p, 'f, 'c, 't> {
         self.validate(&thermal, &mut checkpoint)?;
         let acoustic = observer.energy()?;
         let cell_energy_j = observer.cell_energy_j()?;
+        let wall_energy_j = observer.wall_energy_j()?;
         checkpoint()?;
         Ok(InteriorHeatingStep {
             thermal,
             heat_report,
             acoustic,
             cell_energy_j,
+            wall_energy_j,
         })
     }
 }
@@ -326,15 +523,23 @@ impl<'p, 'f, 'c, 't> InteriorAcousticHeating<'p, 'f, 'c, 't> {
 pub struct InteriorHeatingObserver<'a, 'p, 'f, 'c, 't> {
     owner: &'a InteriorAcousticHeating<'p, 'f, 'c, 't>,
     cell_energy: Vec<Dd>,
-    mechanisms: [Dd; 2],
+    wall_energy: Vec<Dd>,
+    mechanisms: [Dd; 4],
 }
 
 impl InteriorHeatingObserver<'_, '_, '_, '_, '_> {
     pub fn energy(&self) -> Result<InteriorHeatingEnergy, InteriorHeatingError> {
-        let deposited = self.cell_energy.iter().copied().fold(Dd::ZERO, |a, b| a + b);
+        let deposited = self
+            .cell_energy
+            .iter()
+            .chain(&self.wall_energy)
+            .copied()
+            .fold(Dd::ZERO, |a, b| a + b);
         Ok(InteriorHeatingEnergy {
             density_dissipation_j: finite(self.mechanisms[0].to_f64())?,
             compressional_dissipation_j: finite(self.mechanisms[1].to_f64())?,
+            wall_resistance_dissipation_j: finite(self.mechanisms[2].to_f64())?,
+            wall_relaxation_dissipation_j: finite(self.mechanisms[3].to_f64())?,
             deposited_j: finite(deposited.to_f64())?,
         })
     }
@@ -345,6 +550,15 @@ impl InteriorHeatingObserver<'_, '_, '_, '_, '_> {
             .iter()
             .zip(&self.cell_energy)
             .map(|(cell, energy)| Ok((cell.heat.cell, finite(energy.to_f64())?)))
+            .collect()
+    }
+
+    pub fn wall_energy_j(&self) -> Result<Vec<(CellId, f64)>, InteriorHeatingError> {
+        self.owner
+            .walls
+            .iter()
+            .zip(&self.wall_energy)
+            .map(|(wall, energy)| Ok((wall.heat.cell, finite(energy.to_f64())?)))
             .collect()
     }
 }
@@ -380,6 +594,16 @@ impl DepositionObserver for InteriorHeatingObserver<'_, '_, '_, '_, '_> {
             for (sum, power) in self.mechanisms.iter_mut().zip([
                 cell.heat.density_dissipation_w,
                 cell.heat.compressional_dissipation_w,
+            ]) {
+                *sum = *sum + Dd::from_f64(finite(power * dt)?);
+            }
+        }
+        for (wall, energy) in self.owner.walls.iter().zip(&mut self.wall_energy) {
+            checkpoint()?;
+            *energy = *energy + Dd::from_f64(finite(wall.heat.absorbed_power_w() * dt)?);
+            for (sum, power) in self.mechanisms[2..].iter_mut().zip([
+                wall.heat.resistance_dissipation_w,
+                wall.heat.relaxation_dissipation_w,
             ]) {
                 *sum = *sum + Dd::from_f64(finite(power * dt)?);
             }

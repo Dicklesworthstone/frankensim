@@ -4,9 +4,9 @@
 equivalent-fluid tetrahedron to one explicit existing thermal control volume.
 It evaluates the prepared operator's positive local density and compressional
 loss forms from the retained coherent pressure coefficients, once at preparation.
-These are physical volume-integrated cycle-mean watts. Boundary absorption,
-outgoing power and numerical residuals are excluded; no second volume, density,
-porosity or peak-to-mean factor is applied.
+These are physical volume-integrated cycle-mean watts. The bulk-only constructor
+excludes boundary absorption, outgoing power and numerical residuals; no second
+volume, density, porosity or peak-to-mean factor is applied.
 
 The complete original-order map requires unique active destinations, matching
 original integrated volumes, and the exact borrowed native caloric object.
@@ -30,6 +30,41 @@ state or coherent drive changes; the mechanism split supplies no independent
 fluid/skeleton temperature model or transient acoustic startup. Native tests in
 `porous_heating/interior/tests.rs` specify independent affine-field loss
 integrals, authored-event accounting, observer composition, bindings and rollback.
+
+### Original mechanical-wall absorption on the same thermal timeline
+
+`InteriorAcousticHeating::try_new_with_mechanical_walls` extends that bulk path
+with explicit receivers for every original mechanical wall patch. Each supplied
+wall state retains its solved Maxwell extensions, so tiny physical relaxation
+loss is not reconstructed by subtracting rounded displacement and memory.
+The original consistent trace forms supply separate positive resistance and
+relaxation watts; signed pressure exchange, external traction work and numerical
+balance residuals never become heat sources.
+
+`InteriorWallHeatCell` declares the exact native caloric object and complete
+one-sided acoustic area represented by its thermally lumped receiver. That area
+must match the original FE trace integration, including curved/high-order
+geometry, and the native thermal mass must match original surface density times
+that area. Volume and wall receivers are all distinct and count against the same
+bounded budget. The native total surface area, which can include both wall faces
+and edges, remains independent and unchanged. The caller owns actual spatial
+and material correspondence and the justification for a single wall temperature;
+matching area and mass alone does not establish those physical assumptions.
+
+Preparation evaluates each original volume/wall loss form once and retains the
+original pressure operator, pressure field and complete wall-state slice. All
+four irreversible mechanisms and original-order volume/wall cell energies have
+separate Joule accounts on the same accepted thermal substeps. Their sum is
+included once in native external heat, alongside authored sources, conduction,
+reservoirs and events. Binding checks and native transactional rollback cover
+both kinds of receiver. Bulk-only construction remains explicit and deposits no
+wall work. This remains frozen harmonic heating; no coherent field recertification,
+wall-temperature feedback or new solid thermal law is inferred.
+
+`porous_heating/interior/tests/walls.rs` specifies actual coupled pressure/wall
+states against independent triangle/Maxwell heat integrals, native energy and
+event accounting, contact-driven timestep admission, split observer history,
+zero-drive parity, complete area/mass/caloric binding, and late refusal rollback.
 
 ## Optional local material tangents in finite-solid motion
 
