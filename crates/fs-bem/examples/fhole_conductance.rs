@@ -81,21 +81,29 @@ fn wall_value(text: &str, hole: &str, quantity: &str) -> Result<String> {
     }
 }
 
+/// The options of one ladder rung through `thickness_m` [m] at `subdivision`. The FFT and voxel budgets are 2^26:
+/// the cello outline specimen's `pair` ladder at subdivision 8 pads to exactly 16384 x 4096 = 2^26 FFT points and
+/// fills about 54 M duct voxels through its 4.4 mm bore, over the 2^25 these budgets were before. Every il Cannone
+/// ladder fits inside 2^25, so raising them does not change its table.
+fn ladder_options(thickness_m: f64, subdivision: usize) -> PlateApertureOptions {
+    PlateApertureOptions {
+        thickness: thickness_m,
+        subdivision,
+        tolerance: 1e-10,
+        max_cells: 1 << 22,
+        max_fft_points: 1 << 26,
+        max_voxels: 1 << 26,
+        workers: 16,
+        ..PlateApertureOptions::default()
+    }
+}
+
 /// One ladder: conductances [m] at subdivisions 1, 2, 4, 8, the observed orders of the first and last triples, the
 /// Richardson limit and its extrapolation step [m].
 fn ladder(raster: &ApertureRaster, thickness_m: f64) -> Result<([f64; 4], f64, f64, f64, f64)> {
     let mut k = [0.0; 4];
     for (slot, subdivision) in k.iter_mut().zip([1, 2, 4, 8]) {
-        let options = PlateApertureOptions {
-            thickness: thickness_m,
-            subdivision,
-            tolerance: 1e-10,
-            max_cells: 1 << 22,
-            max_fft_points: 1 << 25,
-            max_voxels: 1 << 25,
-            workers: 16,
-            ..PlateApertureOptions::default()
-        };
+        let options = ladder_options(thickness_m, subdivision);
         let started = std::time::Instant::now();
         let r = plate_aperture_conductance(raster, &options)
             .map_err(|e| format!("refused at subdivision {subdivision}: {e:?}"))?;
@@ -161,4 +169,65 @@ fn main() -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use fs_bem::plate_aperture::PlateApertureError;
+
+    use super::*;
+
+    const CELL_M: f64 = CELL_MM * 1e-3;
+
+    /// `plate_aperture_conductance` under the ladder options at subdivision 1, through `layers` raster cells of
+    /// plate (so the duct takes exactly that many layers), stopped after one outer iteration. The rasters are
+    /// synthetic: each sits on one budget edge.
+    fn solve(open: Vec<(i64, i64)>, layers: f64) -> std::result::Result<(), PlateApertureError> {
+        let raster = ApertureRaster { cell: CELL_M, open };
+        let options = PlateApertureOptions {
+            max_iterations: 1,
+            ..ladder_options(CELL_M * layers, 1)
+        };
+        plate_aperture_conductance(&raster, &options).map(|_| ())
+    }
+
+    /// Two cells 16384 x 2048 cells apart pad to 32768 x 4096 = 2^27 FFT points, one power of two over the budget.
+    #[test]
+    fn fft_budget_refuses_one_power_of_two_over() {
+        assert_eq!(
+            solve(vec![(0, 0), (16383, 2047)], 1.0),
+            Err(PlateApertureError::Budget {
+                what: "padded FFT grid points",
+                required: 1 << 27,
+                maximum: 1 << 26
+            })
+        );
+    }
+
+    /// Two cells 8192 x 2048 cells apart pad to exactly 16384 x 4096 = 2^26 FFT points, which the FFT budget admits
+    /// (the cello `pair` ladder's grid at subdivision 8): the refusal that follows is the voxel budget's, at one
+    /// layer over it (2 cells x (2^25 + 1) layers). Both checks run before anything is allocated.
+    #[test]
+    fn fft_budget_admits_its_edge_and_voxel_budget_refuses_one_layer_over() {
+        assert_eq!(
+            solve(vec![(0, 0), (8191, 2047)], f64::from((1 << 25) + 1)),
+            Err(PlateApertureError::Budget {
+                what: "duct voxels",
+                required: (1 << 26) + 2,
+                maximum: 1 << 26
+            })
+        );
+    }
+
+    /// An 8 x 8 cell aperture through 2^20 layers fills exactly 2^26 duct voxels, which the voxel budget admits: the
+    /// solve starts (one outer iteration, so it stops unconverged). Together with the edge admitted above, a
+    /// budget that refused everything fails here.
+    #[test]
+    fn voxel_budget_admits_its_edge() {
+        let block: Vec<(i64, i64)> = (0..8).flat_map(|i| (0..8).map(move |j| (i, j))).collect();
+        match solve(block, f64::from(1 << 20)) {
+            Ok(()) | Err(PlateApertureError::NotConverged { .. }) => {}
+            Err(e) => panic!("the voxel budget's edge was refused: {e:?}"),
+        }
+    }
 }
