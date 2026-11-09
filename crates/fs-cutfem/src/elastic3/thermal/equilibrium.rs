@@ -52,8 +52,9 @@ pub struct ThermoelasticEquilibriumSettings3 {
     pub moment_origin_m: [f64; 3],
 }
 
-/// Compatible accepted equilibrium and preparations on the committed native
-/// material owner. Moving this packet does not copy geometry or constraints.
+/// Compatible equilibrium and preparations on the queried native material owner.
+/// A surrounding material transaction owns acceptance of proposed source states.
+/// Moving this packet does not copy geometry or constraints.
 ///
 /// The complete RHS includes source free strain, independent external forces
 /// and optional embedded lifting. Strong reactions have sign K_full u-rhs_full;
@@ -174,9 +175,9 @@ fn admit_selected_supports(
     poll(completed, checkpoint)
 }
 
-/// The shared candidate evaluation on either original displacement space.
-/// The caller's material transaction publishes this owned result and its source
-/// together only after a final cancellation check.
+/// Shared equilibrium evaluation on either original displacement space.
+/// A surrounding material transaction, when present, owns publication of this
+/// result and its source after its final cancellation check.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::elastic3) fn resolve_candidate(
     owner: EquilibriumOwner3<'_>,
@@ -237,6 +238,35 @@ pub(in crate::elastic3) fn resolve_candidate(
 }
 
 impl CutElasticity3 {
+    /// Solve the current source-owned thermal equilibrium without changing it.
+    ///
+    /// Reuses the original complete load, controlled solve, absolute free-force
+    /// gate, total/elastic strain admission and reference mass/prestress owners.
+    /// Returned preparations bind to this current material state; no source
+    /// query, material refresh, ownership rotation or geometry copy occurs.
+    ///
+    /// This entry can evaluate a candidate inside a material-decision callback.
+    /// The enclosing transaction owns acceptance; a packet returned from a
+    /// rejected candidate has stale native preparations against the restored
+    /// operator. The settings' refresh limits are unused by this nonmutating
+    /// solve; its independent solve, point, DOF and preparation bounds apply.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_thermoelastic_equilibrium(
+        &self,
+        load: ReferenceLoad3<'_>,
+        nodal_force: Option<&[f64]>,
+        prescribed: Option<&dyn Fn([f64; 3], [f64; 3]) -> [f64; 3]>,
+        settings: ThermoelasticEquilibriumSettings3,
+        mut checkpoint: impl FnMut(usize) -> ControlFlow<()>,
+    ) -> Result<ThermoelasticEquilibrium3, ElasticityError3> {
+        admit_settings(self.n(), self.n(), nodal_force, settings, &mut checkpoint)?;
+        resolve_candidate(
+            EquilibriumOwner3::Cartesian(self),
+            ThermalCoordinateMap3 { rows: None, fixed: &self.fixed },
+            load, nodal_force, prescribed, settings, checkpoint,
+        )
+    }
+
     /// Change the complete source-temperature field and solve its compatible
     /// equilibrium as one atomic native material operation.
     ///

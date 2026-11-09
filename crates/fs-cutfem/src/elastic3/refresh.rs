@@ -34,6 +34,19 @@ impl Default for MaterialRefreshLimits3 {
     }
 }
 
+/// Outcome of a valid native material trial.
+///
+/// Rejection returns owned scratch for a coupling iteration while restoring the
+/// original material caches and exact preparation token. Any native preparation
+/// contained in rejected scratch belongs to the rejected candidate and is stale
+/// against the restored operator. Acceptance keeps the candidate owner and its
+/// returned preparations only after the final cancellation check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MaterialRefreshDecision3<R> {
+    Accept(R),
+    Reject(R),
+}
+
 struct CellRefresh3 {
     material: ReferenceMaterial3,
     kinematics: CellKinematics3,
@@ -96,15 +109,38 @@ impl<O: MaterialRefreshOwner3> Drop for MaterialRefreshGuard3<'_, O> {
     }
 }
 
-/// Shared single-owner transaction; native raw/adaptive methods expose it with
-/// their own immutable operator type, retaining all existing native consumers.
+/// Existing accepting callbacks retain their concrete native error type.
 pub(in crate::elastic3) fn refresh_material_owner<O: MaterialRefreshOwner3, R>(
     owner: &mut O,
     field: ElasticMaterialField3<'_>,
     limits: MaterialRefreshLimits3,
     attempt: impl FnOnce(&O) -> Result<R, ElasticityError3>,
-    mut checkpoint: impl FnMut() -> ControlFlow<()>,
+    checkpoint: impl FnMut() -> ControlFlow<()>,
 ) -> Result<R, ElasticityError3> {
+    let decision = refresh_material_owner_with_decision(
+        owner, field, limits,
+        |candidate| attempt(candidate).map(MaterialRefreshDecision3::Accept),
+        checkpoint,
+    )?;
+    // This adapter constructs only Accept; extracting its payload introduces
+    // no extra cancellation boundary or independent publication decision.
+    match decision {
+        MaterialRefreshDecision3::Accept(value) | MaterialRefreshDecision3::Reject(value) => Ok(value),
+    }
+}
+
+/// Shared single-owner decision transaction on either native displacement space.
+pub(in crate::elastic3) fn refresh_material_owner_with_decision<O, R, E>(
+    owner: &mut O,
+    field: ElasticMaterialField3<'_>,
+    limits: MaterialRefreshLimits3,
+    attempt: impl FnOnce(&O) -> Result<MaterialRefreshDecision3<R>, E>,
+    mut checkpoint: impl FnMut() -> ControlFlow<()>,
+) -> Result<MaterialRefreshDecision3<R>, E>
+where
+    O: MaterialRefreshOwner3,
+    E: From<ElasticityError3>,
+{
     let mut poll = || {
         if checkpoint().is_break() {
             Err(ElasticityError3::Cancelled)
@@ -123,10 +159,14 @@ pub(in crate::elastic3) fn refresh_material_owner<O: MaterialRefreshOwner3, R>(
         rollback: true,
     };
     trial.previous.swap_with(trial.owner.material_refresh_raw_mut());
-    let result = attempt(&*trial.owner)?;
+    let decision = attempt(&*trial.owner)?;
     poll()?;
-    trial.rollback = false;
-    Ok(result)
+    if matches!(&decision, MaterialRefreshDecision3::Accept(_)) {
+        trial.rollback = false;
+    }
+    // A rejected payload moves to the caller only after this guard has restored
+    // the accepted caches/token. Native and caller errors retain the same guard.
+    Ok(decision)
 }
 
 fn invalid(reason: &'static str) -> ElasticityError3 {
@@ -247,6 +287,34 @@ impl CutElasticity3 {
         checkpoint: impl FnMut() -> ControlFlow<()>,
     ) -> Result<R, ElasticityError3> {
         refresh_material_owner(self, field, limits, attempt, checkpoint)
+    }
+
+    /// Evaluate a native material trial and explicitly accept or reject it.
+    ///
+    /// Both valid decisions pass a final checkpoint. Accept keeps the candidate
+    /// material owner and returns its owned payload. Reject restores the prior
+    /// caches and exact token before returning its owned scratch; preparations
+    /// inside that scratch are stale against the restored operator. This lets
+    /// coupling iterations inspect rejected physical proposals without exposing
+    /// a half-accepted material field.
+    ///
+    /// Native admission/staging/cancellation errors convert through E::from.
+    /// Callback errors retain E unchanged; errors and unwinding callback or
+    /// final-checkpoint panics restore the original owner. R cannot borrow the
+    /// candidate view. Reference inventory, geometry, constraints and scales are
+    /// fixed. External callback side effects are outside this transaction, as
+    /// specified by [Self::refresh_material_field_with].
+    pub fn refresh_material_field_with_decision<R, E>(
+        &mut self,
+        field: ElasticMaterialField3<'_>,
+        limits: MaterialRefreshLimits3,
+        attempt: impl FnOnce(&Self) -> Result<MaterialRefreshDecision3<R>, E>,
+        checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<MaterialRefreshDecision3<R>, E>
+    where
+        E: From<ElasticityError3>,
+    {
+        refresh_material_owner_with_decision(self, field, limits, attempt, checkpoint)
     }
 
     fn stage_material_refresh(

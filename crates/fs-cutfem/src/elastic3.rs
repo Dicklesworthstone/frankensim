@@ -33,7 +33,7 @@ use material::{MaterialProvider3, ReferenceMaterial3, engineering_strain};
 mod kinematics;
 use kinematics::CellKinematics3;
 mod refresh;
-pub use refresh::MaterialRefreshLimits3;
+pub use refresh::{MaterialRefreshDecision3, MaterialRefreshLimits3};
 mod strain_domain;
 
 /// Small-strain formulation used by bulk, embedded tractions and observations.

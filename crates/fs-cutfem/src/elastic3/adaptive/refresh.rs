@@ -1,6 +1,9 @@
 //! The original master-space constraints survive a native material refresh.
 use super::*;
-use crate::elastic3::refresh::{MaterialRefreshOwner3, refresh_material_owner};
+use crate::elastic3::refresh::{
+    MaterialRefreshDecision3, MaterialRefreshOwner3, refresh_material_owner,
+    refresh_material_owner_with_decision,
+};
 
 impl MaterialRefreshOwner3 for AdaptiveElasticity3 {
     fn material_refresh_raw(&self) -> &CutElasticity3 {
@@ -50,5 +53,29 @@ impl AdaptiveElasticity3 {
         checkpoint: impl FnMut() -> ControlFlow<()>,
     ) -> Result<R, ElasticityError3> {
         refresh_material_owner(self, field, limits, attempt, checkpoint)
+    }
+
+    /// Explicitly accept or reject a trial on this complete adaptive owner.
+    /// The callback retains the original master solve and hanging reconstruction.
+    /// A valid Reject returns owned scratch after restoring the accepted caches
+    /// and exact token; candidate-bound preparations in that scratch are stale.
+    /// Both decisions pass a final checkpoint. Native errors convert through
+    /// E::from, callback errors retain their type, and cancellation or unwinding
+    /// callback/checkpoint panic restores the old owner.
+    ///
+    /// [CutElasticity3::refresh_material_field_with_decision] defines the full
+    /// transaction scope. Geometry, reduction, scales and reference mass stay
+    /// fixed; caller side effects and independent peers remain separate owners.
+    pub fn refresh_material_field_with_decision<R, E>(
+        &mut self,
+        field: ElasticMaterialField3<'_>,
+        limits: MaterialRefreshLimits3,
+        attempt: impl FnOnce(&Self) -> Result<MaterialRefreshDecision3<R>, E>,
+        checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<MaterialRefreshDecision3<R>, E>
+    where
+        E: From<ElasticityError3>,
+    {
+        refresh_material_owner_with_decision(self, field, limits, attempt, checkpoint)
     }
 }

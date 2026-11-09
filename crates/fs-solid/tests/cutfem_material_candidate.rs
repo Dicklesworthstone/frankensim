@@ -447,3 +447,6 @@ fn adaptive_rejection_and_unwind_restore_native_bindings_after_reduced_solves() 
     assert_eq!(op.fixed(), fixed.as_slice());
     assert_eq!(op.physical_displacements(&field).unwrap(), reconstructed);
 }
+
+#[path = "cutfem_material_candidate/decision.rs"]
+mod decision;

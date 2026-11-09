@@ -15,6 +15,32 @@ use crate::elastic3::thermal::{
 use crate::elastic3::{ElasticMaterialField3, ElasticityError3};
 
 impl AdaptiveElasticity3 {
+    /// Solve the current native thermal state through the original hanging map.
+    /// Both physical and independent DOF allowances precede native allocations.
+    /// Load, physical admission, force gates, inertia and optional prestress use
+    /// the same owners as the atomic refresh entry; no material token changes.
+    ///
+    /// This supports evaluation inside a material-decision callback. Acceptance
+    /// remains with the enclosing transaction; rejected native preparations are
+    /// stale against the restored operator. See
+    /// [crate::elastic3::CutElasticity3::solve_thermoelastic_equilibrium] for scope and settings.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_thermoelastic_equilibrium(
+        &self,
+        load: ReferenceLoad3<'_>,
+        nodal_force: Option<&[f64]>,
+        prescribed: Option<&dyn Fn([f64; 3], [f64; 3]) -> [f64; 3]>,
+        settings: ThermoelasticEquilibriumSettings3,
+        mut checkpoint: impl FnMut(usize) -> ControlFlow<()>,
+    ) -> Result<ThermoelasticEquilibrium3, ElasticityError3> {
+        admit_settings(self.n(), self.raw.n(), nodal_force, settings, &mut checkpoint)?;
+        resolve_candidate(
+            EquilibriumOwner3::Adaptive(self),
+            ThermalCoordinateMap3 { rows: Some(&self.rows), fixed: &self.fixed },
+            load, nodal_force, prescribed, settings, checkpoint,
+        )
+    }
+
     /// Atomically refresh native source materials and solve compatible thermal
     /// equilibrium through the SAME original hanging-node map and transpose.
     /// Independent force/displacement entries use original master coordinates;
