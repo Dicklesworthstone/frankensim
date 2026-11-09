@@ -1,4 +1,7 @@
 //! Original source laws and independent energy balances; synthetic gas data.
+#[path = "molecular_heating/finite_window.rs"]
+mod finite_window;
+
 use fs_bem::{
     helmholtz::laplace::complex::ComplexOptions,
     observation_transfers::{

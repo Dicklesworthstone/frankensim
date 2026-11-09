@@ -16,6 +16,8 @@
 
 /// Independent frequencies sharing one original finite gas inventory.
 pub mod spectrum;
+/// Phase-resolved molecular heat over finite physical time intervals.
+pub mod finite_window;
 
 use crate::{
     cavity_phs::piston::thermal::{HeatExchangeSolve, feedback},
