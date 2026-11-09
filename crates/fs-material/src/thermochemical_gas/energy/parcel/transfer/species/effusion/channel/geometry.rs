@@ -9,10 +9,12 @@
 //!
 //! The model assumes quiescent Maxwellian reservoirs, nonadsorbing diffuse
 //! walls, and collisionless trajectories. The thermal consumer additionally
-//! owns a stationary, isothermal, fully accommodating wall. Neither arbitrary
-//! incidence/drift nor specular reflection can reuse these probabilities.
+//! owns a stationary, isothermal wall and qualifies its energy accommodation.
+//! Neither arbitrary incidence/drift nor specular reflection can reuse these
+//! probabilities.
 
 mod clausing;
+pub use clausing::accommodation::{AccommodationResolution, MolecularAccommodation};
 pub use clausing::{ClausingControls, ClausingResolution};
 
 use super::super::{GasEnergyError, invalid, positive};
@@ -134,6 +136,23 @@ impl CylindricalMolecularGeometry {
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, GasEnergyError> {
         clausing::resolve(self, controls, cancelled)
+    }
+
+    /// Compose constant per-encounter energy accommodation with all repeated
+    /// diffuse wall collisions. The coefficient does not change scattering
+    /// angles or mass transport. Interior coefficients refine the geometry and
+    /// both energy weights together; exact endpoint laws retain this geometry.
+    ///
+    /// A material consumer owns qualification of this coefficient over its
+    /// original gas catalog and caloric support and binds the returned pair.
+    /// The wall is stationary and isothermal, with no adsorption or reactions.
+    pub fn resolve_thermal_accommodation(
+        self,
+        coefficient: f64,
+        controls: ClausingControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(Self, MolecularAccommodation), GasEnergyError> {
+        clausing::accommodation::resolve(self, coefficient, controls, cancelled)
     }
 
     /// `None` identifies the original Santeler approximation. A retained report

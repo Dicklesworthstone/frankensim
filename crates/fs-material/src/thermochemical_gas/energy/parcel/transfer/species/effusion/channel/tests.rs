@@ -304,3 +304,191 @@ fn resolved_geometry_drives_original_species_and_accommodation_energy() {
         -flux.wall.heat_into_gas_w.iter().sum::<f64>(),
     );
 }
+
+fn accommodation_controls() -> ClausingControls {
+    ClausingControls {
+        initial_rings: 8,
+        maximum_rings: 512,
+        maximum_iterations: 256,
+        absolute_tolerance: 1e-6,
+        relative_tolerance: 1e-4,
+    }
+}
+
+#[test]
+fn elastic_diffuse_walls_keep_all_gross_paths_but_query_no_wall_calorics() {
+    let left = pure(0.028, 3.5, 0.001, 0.0, 400.0, 110_000.0);
+    let right = pure(0.028, 3.5, 0.001, 0.0, 900.0, 80_000.0);
+    let original = channel(&left, 2.0 * DIAMETER);
+    let elastic = original
+        .clone()
+        .with_thermal_accommodation(
+            0.0,
+            accommodation_controls(),
+            "synthetic diffuse elastic wall",
+            || false,
+        )
+        .unwrap();
+    let full = original
+        .sample(&left, &right, AREA, 650.0, || false)
+        .unwrap();
+    let flux = elastic
+        .sample(&left, &right, AREA, f64::NAN, || false)
+        .unwrap();
+    assert_eq!(flux.transmitted, full.transmitted);
+    assert_eq!(flux.wall.reflected_species, full.wall.reflected_species);
+    assert!(flux.wall.reflected_species[0].mass_rate_kg_s[0] > 0.0);
+    assert_eq!(flux.wall.heat_into_gas_w, [0.0; 2]);
+    assert_eq!(flux.wall.heat_into_wall_w, 0.0);
+    elastic
+        .admit_wall_for_parcel(&left, f64::NAN, || false)
+        .unwrap();
+    let vacuum = elastic
+        .sample_to_vacuum(&left, AREA, f64::NAN, || false)
+        .unwrap();
+    assert!(vacuum.wall.reflected_species[0].mass_rate_kg_s > 0.0);
+    assert_eq!(vacuum.wall.heat_into_gas_w, 0.0);
+    assert_eq!(vacuum.wall.heat_into_escaped_w, 0.0);
+    assert_eq!(vacuum.wall.heat_into_wall_w, 0.0);
+    assert_eq!(
+        vacuum.escaped_energy_rate_w,
+        vacuum.transmitted.energy_rate_w
+    );
+}
+
+#[test]
+fn unit_collision_accommodation_preserves_the_original_full_wall_results() {
+    let left = pure(0.028, 3.5, 0.001, 0.0, 400.0, 110_000.0);
+    let right = pure(0.028, 3.5, 0.001, 0.0, 900.0, 80_000.0);
+    let original = channel(&left, 2.0 * DIAMETER);
+    let full = original
+        .clone()
+        .with_thermal_accommodation(
+            1.0,
+            accommodation_controls(),
+            "synthetic fully accommodating wall",
+            || false,
+        )
+        .unwrap();
+    assert_eq!(original.geometry(), full.geometry());
+    assert_eq!(full.thermal_accommodation().unwrap().coefficient(), 1.0);
+    assert_eq!(
+        full.thermal_accommodation_provenance(),
+        Some("synthetic fully accommodating wall")
+    );
+    assert_eq!(
+        original
+            .sample(&left, &right, AREA, 650.0, || false)
+            .unwrap(),
+        full.sample(&left, &right, AREA, 650.0, || false).unwrap(),
+    );
+    assert_eq!(
+        original
+            .sample_to_vacuum(&left, AREA, 650.0, || false)
+            .unwrap(),
+        full.sample_to_vacuum(&left, AREA, 650.0, || false).unwrap(),
+    );
+}
+
+#[test]
+fn repeated_collision_heat_consumes_original_nonlinear_calorics_without_changing_mass() {
+    let temperatures = [400.0, 600.0];
+    let pressures = [110_000.0, 80_000.0];
+    let tw = 900.0;
+    let alpha = 0.25;
+    let mut baseline = None;
+    for datum in [0.0, 1e24] {
+        let left = pure(0.028, 3.5, 0.001, datum, temperatures[0], pressures[0]);
+        let right = pure(0.028, 3.5, 0.001, datum, temperatures[1], pressures[1]);
+        let partial = channel(&left, 3.0 * DIAMETER)
+            .with_thermal_accommodation(
+                alpha,
+                accommodation_controls(),
+                "synthetic common per-hit thermalization",
+                || false,
+            )
+            .unwrap();
+        let full =
+            DiffuseMolecularChannel::try_new(partial.mouth().clone(), partial.geometry().clone())
+                .unwrap();
+        let flux = partial.sample(&left, &right, AREA, tw, || false).unwrap();
+        let whole = full.sample(&left, &right, AREA, tw, || false).unwrap();
+        assert_eq!(flux.transmitted, whole.transmitted);
+        assert_eq!(flux.wall.reflected_species, whole.wall.reflected_species);
+        let model = partial.thermal_accommodation().unwrap();
+        let hr = model.reflected_heat_probability();
+        let ht = model.transmitted_heat_probability();
+        assert!(hr > alpha * partial.geometry().reflected_probability());
+        assert!(ht > alpha * partial.geometry().wall_transmitted_probability());
+        // Independent NASA fixture: e_cross/R = 3T + 0.0005 T² + datum.
+        let source_heat = [0, 1].map(|side| {
+            let t = temperatures[side];
+            incident_moles(pressures[side], t, 0.028) * R * (tw - t) * (3.0 + 0.0005 * (tw + t))
+        });
+        for side in 0..2 {
+            near(
+                flux.wall.heat_into_gas_w[side],
+                hr * source_heat[side] + ht * source_heat[1 - side],
+            );
+            assert!(flux.wall.heat_into_gas_w[side] > alpha * whole.wall.heat_into_gas_w[side]);
+            assert!(flux.wall.heat_into_gas_w[side] < whole.wall.heat_into_gas_w[side]);
+        }
+        near(
+            flux.wall.heat_into_wall_w,
+            -(hr + ht) * source_heat.iter().sum::<f64>(),
+        );
+        if let Some(old) = baseline {
+            assert_eq!(flux.wall, old);
+        }
+        baseline = Some(flux.wall);
+    }
+}
+
+#[test]
+fn partial_accommodation_requires_explicit_physical_input_and_preserves_refusals() {
+    let gas = pure(0.028, 3.5, 0.0, 0.0, 400.0, 100_000.0);
+    let original = channel(&gas, DIAMETER);
+    for alpha in [-0.1, 1.1, f64::NAN] {
+        assert!(
+            original
+                .clone()
+                .with_thermal_accommodation(
+                    alpha,
+                    accommodation_controls(),
+                    "synthetic surface",
+                    || false,
+                )
+                .is_err()
+        );
+    }
+    assert!(
+        original
+            .clone()
+            .with_thermal_accommodation(0.25, accommodation_controls(), " ", || false,)
+            .is_err()
+    );
+    assert!(matches!(
+        original.clone().with_thermal_accommodation(
+            0.25,
+            accommodation_controls(),
+            "synthetic surface",
+            || true,
+        ),
+        Err(GasEnergyError::Cancelled)
+    ));
+    let partial = original
+        .with_thermal_accommodation(0.25, accommodation_controls(), "synthetic surface", || {
+            false
+        })
+        .unwrap();
+    assert!(
+        partial
+            .sample(&gas, &gas, AREA, f64::NAN, || false)
+            .is_err()
+    );
+    assert!(
+        partial
+            .admit_wall_for_parcel(&gas, 199.0, || false)
+            .is_err()
+    );
+}

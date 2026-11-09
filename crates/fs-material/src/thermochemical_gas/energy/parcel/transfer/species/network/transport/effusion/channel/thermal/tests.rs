@@ -4,7 +4,9 @@ use super::*;
 use crate::thermal::transport::volumetric::{
     PreparedVolumetricThermalTransport, VOLUMETRIC_HEAT_CAPACITY_DIMS, VolumetricThermalPathQuery,
 };
-use crate::thermochemical_gas::energy::parcel::transfer::species::effusion::channel::CylindricalMolecularGeometry;
+use crate::thermochemical_gas::energy::parcel::transfer::species::effusion::channel::{
+    ClausingControls, CylindricalMolecularGeometry,
+};
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSelection, ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim,
@@ -127,6 +129,74 @@ pub(super) fn link(channel: &DiffuseMolecularChannel) -> FiniteChannelNetworkLin
 
 pub(super) fn endpoints(gases: &BTreeMap<u64, ClosedGasParcel>) -> BTreeMap<u64, GasEnergySolve> {
     gases.keys().map(|&id| (id, energy())).collect()
+}
+
+#[test]
+fn repeated_collision_accommodation_drives_both_gases_and_one_finite_wall() {
+    use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
+    let source = material(1e6, 0.0, [200.0, 1800.0]);
+    let law = FixedVolumeThermalLaw::try_new(&source, 1000.0, 200.0)
+        .unwrap()
+        .with_sensible_entropy();
+    let walls = BTreeMap::from([(
+        9,
+        FixedVolumeChannelWall::try_new_isochoric(&law, 1e-6, 900.0).unwrap(),
+    )]);
+    let path = channel(2e-8)
+        .with_thermal_accommodation(
+            0.25,
+            ClausingControls {
+                initial_rings: 8,
+                maximum_rings: 512,
+                maximum_iterations: 256,
+                absolute_tolerance: 1e-6,
+                relative_tolerance: 1e-4,
+            },
+            "synthetic common per-collision energy accommodation",
+            || false,
+        )
+        .unwrap();
+    let gases = BTreeMap::from([
+        (0, gas(400.0, 100_000.0, 0.0)),
+        (1, gas(400.0, 100_000.0, 0.0)),
+    ]);
+    let accepted = step_candidate(
+        &gases,
+        &walls,
+        GasTransportPaths::default(),
+        &[link(&path)],
+        0.001,
+        &endpoints(&gases),
+        controls(),
+        || false,
+    )
+    .unwrap();
+    let model = path.thermal_accommodation().unwrap();
+    let probability = model.reflected_heat_probability() + model.transmitted_heat_probability();
+    let incident =
+        0.001 * 1e-6 * 100_000.0 / (2.0 * core::f64::consts::PI * 0.028 * R * 400.0).sqrt();
+    let heat = incident * 2.0 * R * 500.0 * probability;
+    for id in [0, 1] {
+        let n = gases[&id].mass_kg() / 0.028;
+        near(
+            accepted.parcels()[&id].mass_kg(),
+            gases[&id].mass_kg(),
+            1e-18,
+        );
+        near(
+            accepted.parcels()[&id].state().state().temperature,
+            400.0 + heat / (1.5 * R * n),
+            3e-8,
+        );
+    }
+    near(
+        accepted.walls()[&9].temperature_k(),
+        900.0 - 2.0 * heat,
+        1e-10,
+    );
+    near(accepted.step().wall_energy_change_j, -2.0 * heat, 1e-9);
+    assert!(accepted.step().energy_residual_j.abs() <= controls().exchange.energy_tolerance_j);
+    assert!(accepted.step().total_entropy_change_j_k > 0.0);
 }
 
 #[test]

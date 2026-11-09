@@ -2,14 +2,16 @@
 //!
 //! The vacuum supplies no incident beam or thermodynamic state. Of each source
 //! incident beam, `tau0` escapes directly, `tau-tau0` escapes after wall
-//! accommodation and `1-tau` returns to the SAME original reservoir at the wall
-//! temperature. Each wall-hit molecule changes its energy by
-//! `e_i(Twall)-e_i(Tgas)`, where `e_i(T)=h_i(T)-R*T/(2*M_i)` [J/kg].
+//! scattering and `1-tau` returns to the SAME original reservoir. Full thermal
+//! accommodation gives each wall-hit molecule energy change
+//! `e_i(Twall)-e_i(Tgas)`, where `e_i(T)=h_i(T)-R*T/(2*M_i)` [J/kg]. The optional
+//! partial-accommodation law instead weights this change by the resolved
+//! probability of thermalization over ALL collisions before that exit.
 //!
 //! Returned-molecule heat enters the finite gas. The heat added to escaping
 //! molecules belongs to the outward energy ledger, not the gas caloric solve.
 //! Opposite wall heat closes both exchanges without inventing wall storage.
-//! This inherits the parent channel's collisionless, fully accommodating,
+//! This inherits the parent channel's collisionless, qualified accommodation,
 //! stationary-wall assumptions and estimated geometric transmission. No pump
 //! work, vacuum temperature, receiver inventory or closed-system entropy claim
 //! is supplied.
@@ -157,7 +159,9 @@ impl DiffuseMolecularChannel {
             poll(&mut cancelled)?;
             return Ok(result);
         }
-        self.admit_wall_temperature(wall_temperature_k)?;
+        if self.wall_heat_active() {
+            self.admit_wall_temperature(wall_temperature_k)?;
+        }
         let temperature = gas.state().state().temperature;
         let (mut into_gas, mut into_escaped) = (Dd::ZERO, Dd::ZERO);
         for row in &transmitted.species {

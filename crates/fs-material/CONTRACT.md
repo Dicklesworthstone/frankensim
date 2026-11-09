@@ -22990,3 +22990,38 @@ startup, spatial convergence and temperature feedback are not inferred.
 frequency-dependent transverse relaxation, all ordered anisotropic planes,
 finite-beat heating, equal-frequency cancellation, source-clock invariance,
 original full-strain admission, payload bounds and cancellation reuse.
+
+
+### Partial energy accommodation over repeated diffuse molecular collisions
+
+`DiffuseMolecularChannel::with_thermal_accommodation` binds an explicitly
+qualified common per-encounter total-energy coefficient to its original mouth,
+source species and circular geometry. Diffuse angles remain unchanged. An N-hit
+path thermalizes `1-(1-alpha)^N`: separate transmitted and returned heat weights
+come from a discounted Clausing resolvent, not an alpha multiplier on fully
+accommodating heat. Geometry and both weights refine on the same rings. One
+shared compensated CG implementation solves symmetry-reduced systems with
+O(N) storage, bounded work and cancellation. Small alpha uses positive heat;
+near-unit alpha uses retained-energy complements. Exact zero/unit and zero-length
+limits preserve supplied geometry. Reports expose residuals, refinement changes
+and estimates excluding roundoff, not a certified continuum enclosure.
+
+The existing beam-wall helper uses these retained weights with original NASA
+relative energies. Held/finite walls, reciprocal gases and vacuum escape share
+that implementation. Gross returned molecules still spend the original
+withdrawal inventory at alpha=0; an elastic diffuse wall performs no wall caloric
+query. The builder binds weights to their matching geometry. The coefficient
+requires caller qualification over every catalog species and physical support;
+it is not inferred from a bulk material or momentum coefficient. Stationary,
+velocity-independent diffuse walls, collisionless flight and negligible
+residence storage remain assumptions.
+
+The collision energy definition follows Chiggiato, arXiv:1501.07162, section
+2.2.2; repeated-history weights compose it with the Clausing kernel. Six new
+native geometry tests and all twelve existing geometry tests pass using actual
+production geometry and real fs-math through a minimal error/cancellation
+driver. Tests include independent collision-count enumeration, E[N]=2L/D at
+small alpha, tiny nonzero heat, exact limits, refinement/scaling, work refusals
+and cancellation. Seven additional material/finite-wall consumer test groups
+are authored but unexecuted under the shared build-capacity limit. Formatting
+and whitespace checks pass; full crate integration and DSR remain outstanding.

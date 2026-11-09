@@ -4,7 +4,7 @@ use super::super::tests::{channel, endpoints, material};
 use super::*;
 use crate::thermal::transport::volumetric::timeline::FixedVolumeThermalLaw;
 use crate::thermochemical_gas::energy::parcel::transfer::species::{
-    effusion::channel::CylindricalMolecularGeometry,
+    effusion::channel::{ClausingControls, CylindricalMolecularGeometry},
     network::{SpeciesNetworkError, transport::effusion::EffusionNetworkLink},
 };
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
@@ -25,6 +25,117 @@ fn link(channel: &DiffuseMolecularChannel) -> FiniteVacuumChannelLink<'_> {
 
 fn incident_moles(t: f64, p: f64) -> f64 {
     DT * AREA * p / (2.0 * core::f64::consts::PI * M * R * t).sqrt()
+}
+
+#[test]
+fn partial_accommodation_changes_finite_wall_storage_and_escaped_energy_once() {
+    let source = material(1e6, 0.0, [200.0, 1800.0]);
+    let law = FixedVolumeThermalLaw::try_new(&source, 1000.0, 200.0)
+        .unwrap()
+        .with_sensible_entropy();
+    let walls = BTreeMap::from([(
+        9,
+        FixedVolumeChannelWall::try_new_isochoric(&law, 1e-6, 900.0).unwrap(),
+    )]);
+    let path = channel(2e-8)
+        .with_thermal_accommodation(
+            0.25,
+            ClausingControls {
+                initial_rings: 8,
+                maximum_rings: 512,
+                maximum_iterations: 256,
+                absolute_tolerance: 1e-6,
+                relative_tolerance: 1e-4,
+            },
+            "synthetic shared per-collision energy accommodation",
+            || false,
+        )
+        .unwrap();
+    let gases = BTreeMap::from([(0, gas(400.0, 100_000.0, 0.0))]);
+    let result = step_candidate(
+        &gases,
+        &walls,
+        GasTransportPaths::default(),
+        &[link(&path)],
+        DT,
+        &endpoints(&gases),
+        controls(),
+        || false,
+    )
+    .unwrap();
+    let model = path.thermal_accommodation().unwrap();
+    let incident = incident_moles(400.0, 100_000.0);
+    let tau = path.geometry().transmission_probability();
+    let returned_heat = incident * model.reflected_heat_probability() * 2.0 * R * 500.0;
+    let escaped_heat = incident * model.transmitted_heat_probability() * 2.0 * R * 500.0;
+    let n0 = gases[&0].mass_kg() / M;
+    let n1 = n0 - tau * incident;
+    let tg =
+        (1.5 * R * n0 * 400.0 - tau * incident * 2.0 * R * 400.0 + returned_heat) / (1.5 * R * n1);
+    near(result.parcels()[&0].state().state().temperature, tg, 3e-8);
+    near(
+        result.step().gas.audit.escaped_energy_j,
+        tau * incident * 2.0 * R * 400.0 + escaped_heat,
+        1e-11,
+    );
+    near(
+        result.walls()[&9].temperature_k(),
+        900.0 - returned_heat - escaped_heat,
+        1e-10,
+    );
+    near(
+        result.step().wall_energy_change_j,
+        -returned_heat - escaped_heat,
+        1e-9,
+    );
+    assert!(result.step().energy_residual_j.abs() <= controls().exchange.energy_tolerance_j);
+}
+
+#[test]
+fn elastic_channel_keeps_finite_wall_unchanged_outside_gas_caloric_support() {
+    let source = material(1e6, 0.0, [1800.0, 2000.0]);
+    let law = FixedVolumeThermalLaw::try_new(&source, 1000.0, 1800.0)
+        .unwrap()
+        .with_sensible_entropy();
+    let walls = BTreeMap::from([(
+        9,
+        FixedVolumeChannelWall::try_new_isochoric(&law, 1e-6, 1900.0).unwrap(),
+    )]);
+    let path = channel(2e-8)
+        .with_thermal_accommodation(
+            0.0,
+            ClausingControls::default(),
+            "synthetic exactly elastic wall",
+            || false,
+        )
+        .unwrap();
+    let gases = BTreeMap::from([(0, gas(400.0, 100_000.0, 0.0))]);
+    let result = step_candidate(
+        &gases,
+        &walls,
+        GasTransportPaths::default(),
+        &[link(&path)],
+        DT,
+        &endpoints(&gases),
+        controls(),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(
+        result.walls()[&9].specific_energy_j_kg(),
+        walls[&9].specific_energy_j_kg()
+    );
+    assert_eq!(result.step().wall_energy_change_j, 0.0);
+    assert_eq!(result.step().wall_entropy_change_j_k, 0.0);
+    assert!(result.step().gas.outlets[0].wall.reflected_species[0].mass_kg > 0.0);
+    near(
+        result.step().gas.exchange.boundaries[0]
+            .transfer
+            .outgoing_mass_kg,
+        incident_moles(400.0, 100_000.0) * M,
+        1e-18,
+    );
+    assert!(result.parcels()[&0].mass_kg() < gases[&0].mass_kg());
 }
 
 #[test]

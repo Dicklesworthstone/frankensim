@@ -1,13 +1,14 @@
-//! Finite circular molecular channels with diffuse, fully accommodating walls.
+//! Finite circular molecular channels with diffuse thermal wall scattering.
 //!
 //! The original aperture law supplies transmitted species and their source
-//! molecular energies. A molecule that hits the isothermal channel wall instead
-//! leaves with that same species' molecular energy at the wall temperature.
-//! Returned molecules also exchange heat with their original reservoir. Merely
-//! multiplying aperture conductance by a Clausing factor misses both effects.
+//! molecular energies. The default fully accommodating wall re-emits a wall-hit
+//! molecule with that species' molecular energy at the wall temperature. An
+//! optional per-collision accommodation probability retains the full repeated-
+//! collision thermal history. Returned molecules also exchange heat with their
+//! original reservoir; a conductance multiplier alone misses both effects.
 //!
 //! The model assumes stationary Maxwellian reservoirs, collisionless flight,
-//! velocity-independent diffuse reflection, complete internal-mode accommodation,
+//! velocity-independent diffuse reflection, equilibrated reservoir internal modes,
 //! no adsorption/reaction, and negligible flight time and channel gas storage.
 //! It supplies no outgoing angular/momentum law or moving-wall work. Santeler's
 //! transmission approximation and the optional ring-resolved Clausing solution
@@ -16,13 +17,16 @@
 //! Superconducting Devices*, section 2.2.2, <https://arxiv.org/abs/1501.07162>.
 
 mod geometry;
-pub use geometry::{ClausingControls, ClausingResolution, CylindricalMolecularGeometry};
+pub use geometry::{
+    AccommodationResolution, ClausingControls, ClausingResolution, CylindricalMolecularGeometry,
+    MolecularAccommodation,
+};
 /// Molecular escape through the same diffuse channel into a true vacuum.
 pub mod vacuum;
 
 use super::{
     ClosedGasParcel, EffusiveFlux, EffusiveInterface, GasEnergyError, R, SpeciesId, invalid, poll,
-    positive, positive_product_ratio, signed_product, source_error,
+    positive, positive_product_ratio, signed_product, source_error, valid_provenance,
 };
 use fs_math::dd::Dd;
 use fs_qty::Temperature;
@@ -37,6 +41,7 @@ use fs_thermochem::Nasa9StandardStateModelV1;
 pub struct DiffuseMolecularChannel {
     mouth: EffusiveInterface,
     geometry: CylindricalMolecularGeometry,
+    accommodation: Option<(MolecularAccommodation, String)>,
 }
 
 impl DiffuseMolecularChannel {
@@ -55,7 +60,51 @@ impl DiffuseMolecularChannel {
                 "diffuse channel needs unit-transmission matching mouths and no stronger collision qualification",
             ));
         }
-        Ok(Self { mouth, geometry })
+        Ok(Self {
+            mouth,
+            geometry,
+            accommodation: None,
+        })
+    }
+
+    /// Resolve partial thermal accommodation on this SAME circular geometry.
+    ///
+    /// The authored coefficient is the probability that each wall collision
+    /// equilibrates translational AND internal energy with the stationary wall.
+    /// The complementary event changes only direction, diffusely, preserving
+    /// molecular speed and internal state. This common coefficient must cover
+    /// every original gas species and be independent of incident energy, angle
+    /// and prior collisions throughout the caller's physical qualification.
+    /// It is not a momentum-accommodation coefficient or an inferred bulk
+    /// material property. A real surface needs independent constitutive data.
+    ///
+    /// Repeated collisions give each path weight `1-(1-alpha)^N`; multiplying
+    /// the fully accommodating heat by alpha would miss that history. The
+    /// Interior coefficients refine geometry and heat weights together; exact
+    /// zero/unit coefficients retain the supplied geometry and its estimates.
+    /// Construction performs the solve once; subsequent caloric/flux sampling
+    /// reuses its immutable probabilities without further geometric solves.
+    pub fn with_thermal_accommodation(
+        mut self,
+        coefficient: f64,
+        controls: ClausingControls,
+        provenance: impl Into<String>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, GasEnergyError> {
+        poll(&mut cancelled)?;
+        let provenance = provenance.into();
+        if !valid_provenance(&provenance) {
+            return Err(invalid(
+                "partial molecular accommodation needs bounded explicit surface qualification",
+            ));
+        }
+        let (geometry, accommodation) =
+            self.geometry
+                .resolve_thermal_accommodation(coefficient, controls, &mut cancelled)?;
+        self.geometry = geometry;
+        self.accommodation = Some((accommodation, provenance));
+        poll(&mut cancelled)?;
+        Ok(self)
     }
 
     pub const fn mouth(&self) -> &EffusiveInterface {
@@ -63,6 +112,35 @@ impl DiffuseMolecularChannel {
     }
     pub const fn geometry(&self) -> &CylindricalMolecularGeometry {
         &self.geometry
+    }
+
+    /// Resolved partial-accommodation weights; None retains full accommodation.
+    pub fn thermal_accommodation(&self) -> Option<&MolecularAccommodation> {
+        self.accommodation.as_ref().map(|(model, _)| model)
+    }
+    pub fn thermal_accommodation_provenance(&self) -> Option<&str> {
+        self.accommodation
+            .as_ref()
+            .map(|(_, source)| source.as_str())
+    }
+
+    fn heat_probabilities(&self) -> [f64; 2] {
+        match self.thermal_accommodation() {
+            Some(model) => [
+                model.reflected_heat_probability(),
+                model.transmitted_heat_probability(),
+            ],
+            None => [
+                self.geometry.reflected_probability(),
+                self.geometry.wall_transmitted_probability(),
+            ],
+        }
+    }
+
+    fn wall_heat_active(&self) -> bool {
+        self.heat_probabilities()
+            .into_iter()
+            .any(|weight| weight > 0.0)
     }
 
     /// Preserve both the original mouth qualification and the full channel's
@@ -86,9 +164,9 @@ impl DiffuseMolecularChannel {
     /// The original gas, collision and species sources remain authoritative.
     /// Only species present in this parcel need a caloric path from the gas
     /// temperature to the wall temperature. An absent catalog species does not
-    /// narrow an active source's wall range. A zero-length channel admits its
-    /// gas but never queries an inactive wall; callers skip geometrically
-    /// closed channels entirely.
+    /// narrow an active source's wall range. A zero-length or exactly elastic
+    /// channel admits its gas but never queries an inactive thermal wall;
+    /// callers skip geometrically closed channels entirely.
     pub fn admit_wall_for_parcel(
         &self,
         parcel: &ClosedGasParcel,
@@ -96,7 +174,7 @@ impl DiffuseMolecularChannel {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(), GasEnergyError> {
         self.admit_parcel(parcel, &mut cancelled)?;
-        if self.geometry.length_m() == 0.0 {
+        if !self.wall_heat_active() {
             return poll(&mut cancelled);
         }
         self.admit_wall_temperature(wall_temperature_k)?;
@@ -199,7 +277,9 @@ impl DiffuseMolecularChannel {
         if transmitted.species.is_empty() || self.geometry.length_m() == 0.0 {
             return Ok(result);
         }
-        self.admit_wall_temperature(wall_temperature_k)?;
+        if self.wall_heat_active() {
+            self.admit_wall_temperature(wall_temperature_k)?;
+        }
         let temperatures = gases.map(|gas| gas.state().state().temperature);
         let mut heat = [Dd::ZERO; 2];
         for row in &transmitted.species {
@@ -293,7 +373,18 @@ impl DiffuseMolecularChannel {
             }
         };
         let reflected_mass_kg = scaled(self.geometry.reflected_probability())?;
-        let accommodated_mass_kg = scaled(self.geometry.wall_transmitted_probability())?;
+        let [reflected_heat, transmitted_heat] = self.heat_probabilities();
+        // Elastic diffuse scattering still returns a GROSS molecular inventory.
+        // Only its thermal exchange vanishes; never discard the return budget.
+        if reflected_heat == 0.0 && transmitted_heat == 0.0 {
+            return Ok(BeamWallExchange {
+                reflected_mass_kg,
+                heat_into_source_j: 0.0,
+                heat_into_transmitted_j: 0.0,
+            });
+        }
+        let accommodated_return_mass_kg = scaled(reflected_heat)?;
+        let accommodated_mass_kg = scaled(transmitted_heat)?;
         let molar_mass = original.molar_mass().value();
         let dh = original
             .molar_enthalpy_change(
@@ -310,7 +401,7 @@ impl DiffuseMolecularChannel {
         }
         Ok(BeamWallExchange {
             reflected_mass_kg,
-            heat_into_source_j: signed_product(reflected_mass_kg, de)?,
+            heat_into_source_j: signed_product(accommodated_return_mass_kg, de)?,
             heat_into_transmitted_j: signed_product(accommodated_mass_kg, de)?,
         })
     }

@@ -11,6 +11,8 @@
 use super::super::super::poll;
 use super::{CylindricalMolecularGeometry, GasEnergyError, det, invalid, positive};
 
+pub(super) mod accommodation;
+
 /// Explicit accuracy and work budgets. At least three nested grids are used.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ClausingControls {
@@ -160,13 +162,14 @@ struct Grid {
     end: Vec<f64>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct GridSolution {
     wall_transmitted: f64,
     reflected: f64,
     residual_l1: f64,
     linear_estimate: f64,
     iterations: usize,
+    half_escape: Vec<f64>,
 }
 
 impl Grid {
@@ -272,97 +275,123 @@ impl Grid {
         let rhs: Vec<_> = (0..half)
             .map(|i| 0.5 * (self.end[rings - 1 - i] - self.end[i]))
             .collect();
-        let mut solution = vec![0.0; half];
-        let mut residual = rhs.clone();
-        let mut direction = residual.clone();
-        let mut product = vec![0.0; half];
-        let mut rho = dot(&residual, &residual);
-        for iteration in 0..=maximum_iterations {
-            let estimated = 8.0 * self.delta * compensated(residual.iter().map(|x| x.abs()));
-            if estimated <= target || iteration == maximum_iterations {
-                // Never accept a recursively updated CG residual as final proof.
-                self.apply(&solution, &mut product, cancelled)?;
-                for i in 0..half {
-                    residual[i] = rhs[i] - product[i];
-                }
-                let residual_l1 = 2.0 * compensated(residual.iter().map(|x| x.abs()));
-                let linear_estimate = 4.0 * self.delta * residual_l1;
-                if linear_estimate <= target {
-                    if solution.iter().any(|x| !x.is_finite() || x.abs() > 0.5) {
-                        return Err(invalid(
-                            "Clausing exit probabilities left their physical bounds",
-                        ));
-                    }
-                    // Integrate the two positive wall paths separately, retaining
-                    // O(h) heat exchange even when total transmission rounds to 1.
-                    let transmitted = 4.0
-                        * self.delta
-                        * compensated((0..half).map(|i| {
-                            self.end[i] * (0.5 + solution[i])
-                                + self.end[rings - 1 - i] * (0.5 - solution[i])
-                        }));
-                    let reflected = 4.0
-                        * self.delta
-                        * compensated((0..half).map(|i| {
-                            self.end[i] * (0.5 - solution[i])
-                                + self.end[rings - 1 - i] * (0.5 + solution[i])
-                        }));
-                    let normalization = wall_hit / (transmitted + reflected);
-                    if !positive(normalization)
-                        || (normalization - 1.0).abs() > 64.0 * rings as f64 * f64::EPSILON
-                    {
-                        return Err(invalid(
-                            "Clausing integrated wall probability balance failed",
-                        ));
-                    }
-                    let wall_transmitted = transmitted * normalization;
-                    let reflected = reflected * normalization;
-                    if ![wall_transmitted, reflected]
-                        .iter()
-                        .all(|x| positive(*x) && *x <= wall_hit)
-                    {
-                        return Err(invalid(
-                            "Clausing wall path probabilities are not representable",
-                        ));
-                    }
-                    return Ok(GridSolution {
-                        wall_transmitted,
-                        reflected,
-                        residual_l1,
-                        linear_estimate,
-                        iterations: iteration,
-                    });
-                }
-                if iteration == maximum_iterations {
-                    return Err(invalid("Clausing linear solve budget exhausted"));
-                }
-                direction.copy_from_slice(&residual);
-                rho = dot(&residual, &residual);
-            }
-            self.apply(&direction, &mut product, cancelled)?;
-            let denominator = dot(&direction, &product);
-            let alpha = rho / denominator;
-            if !positive(rho) || !positive(denominator) || !positive(alpha) {
-                return Err(invalid("Clausing conjugate-gradient arithmetic failed"));
-            }
-            for i in 0..half {
-                solution[i] += alpha * direction[i];
-                residual[i] -= alpha * product[i];
-            }
-            let next_rho = dot(&residual, &residual);
-            let beta = next_rho / rho;
-            if !beta.is_finite() || beta < 0.0 {
-                return Err(invalid(
-                    "Clausing conjugate-gradient residual is not representable",
-                ));
-            }
-            for i in 0..half {
-                direction[i] = residual[i] + beta * direction[i];
-            }
-            rho = next_rho;
+        let solved = conjugate_gradient(
+            &rhs,
+            maximum_iterations,
+            target / (8.0 * self.delta),
+            |input, output| self.apply(input, output, cancelled),
+        )?;
+        let solution = solved.values;
+        let residual_l1 = 2.0 * solved.residual_l1;
+        let linear_estimate = 4.0 * self.delta * residual_l1;
+        if solution.iter().any(|x| !x.is_finite() || x.abs() > 0.5) {
+            return Err(invalid(
+                "Clausing exit probabilities left their physical bounds",
+            ));
         }
-        Err(invalid("Clausing linear solve budget exhausted"))
+        // Integrate both positive paths: 1-transmission loses tiny wall heat.
+        let transmitted = 4.0
+            * self.delta
+            * compensated((0..half).map(|i| {
+                self.end[i] * (0.5 + solution[i]) + self.end[rings - 1 - i] * (0.5 - solution[i])
+            }));
+        let reflected = 4.0
+            * self.delta
+            * compensated((0..half).map(|i| {
+                self.end[i] * (0.5 - solution[i]) + self.end[rings - 1 - i] * (0.5 + solution[i])
+            }));
+        let normalization = wall_hit / (transmitted + reflected);
+        if !positive(normalization)
+            || (normalization - 1.0).abs() > 64.0 * rings as f64 * f64::EPSILON
+        {
+            return Err(invalid(
+                "Clausing integrated wall probability balance failed",
+            ));
+        }
+        let wall_transmitted = transmitted * normalization;
+        let reflected = reflected * normalization;
+        if ![wall_transmitted, reflected]
+            .iter()
+            .all(|x| positive(*x) && *x <= wall_hit)
+        {
+            return Err(invalid(
+                "Clausing wall path probabilities are not representable",
+            ));
+        }
+        Ok(GridSolution {
+            wall_transmitted,
+            reflected,
+            residual_l1,
+            linear_estimate,
+            iterations: solved.iterations,
+            half_escape: solution,
+        })
     }
+}
+
+struct LinearSolution {
+    values: Vec<f64>,
+    residual_l1: f64,
+    iterations: usize,
+}
+
+fn conjugate_gradient(
+    rhs: &[f64],
+    maximum_iterations: usize,
+    target_l1: f64,
+    mut apply: impl FnMut(&[f64], &mut [f64]) -> Result<(), GasEnergyError>,
+) -> Result<LinearSolution, GasEnergyError> {
+    let half = rhs.len();
+    let mut solution = vec![0.0; half];
+    let mut residual = rhs.to_vec();
+    let mut direction = residual.clone();
+    let mut product = vec![0.0; half];
+    let mut rho = dot(&residual, &residual);
+    for iteration in 0..=maximum_iterations {
+        let estimated = compensated(residual.iter().map(|x| x.abs()));
+        if estimated <= target_l1 || iteration == maximum_iterations {
+            // Never accept a recursively updated CG residual as final proof.
+            apply(&solution, &mut product)?;
+            for i in 0..half {
+                residual[i] = rhs[i] - product[i];
+            }
+            let residual_l1 = compensated(residual.iter().map(|x| x.abs()));
+            if residual_l1 <= target_l1 {
+                return Ok(LinearSolution {
+                    values: solution,
+                    residual_l1,
+                    iterations: iteration,
+                });
+            }
+            if iteration == maximum_iterations {
+                return Err(invalid("Clausing linear solve budget exhausted"));
+            }
+            direction.copy_from_slice(&residual);
+            rho = dot(&residual, &residual);
+        }
+        apply(&direction, &mut product)?;
+        let denominator = dot(&direction, &product);
+        let alpha = rho / denominator;
+        if !positive(rho) || !positive(denominator) || !positive(alpha) {
+            return Err(invalid("Clausing conjugate-gradient arithmetic failed"));
+        }
+        for i in 0..half {
+            solution[i] += alpha * direction[i];
+            residual[i] -= alpha * product[i];
+        }
+        let next_rho = dot(&residual, &residual);
+        let beta = next_rho / rho;
+        if !beta.is_finite() || beta < 0.0 {
+            return Err(invalid(
+                "Clausing conjugate-gradient residual is not representable",
+            ));
+        }
+        for i in 0..half {
+            direction[i] = residual[i] + beta * direction[i];
+        }
+        rho = next_rho;
+    }
+    Err(invalid("Clausing linear solve budget exhausted"))
 }
 
 fn dot(left: &[f64], right: &[f64]) -> f64 {
