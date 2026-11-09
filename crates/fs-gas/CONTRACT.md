@@ -1,3 +1,39 @@
+## Distributed acceleration in the native multicomponent network
+
+`MixtureNetwork1d::step_with_body_forces` and
+`step_with_body_forces_and_boundaries` apply one original `BodyForce` law
+per retained branch, including cellwise acceleration/force density and absolute-time
+linear histories. Exact mechanical half maps surround the original simultaneous
+SSP RK2 branch/plenum transport. The first accelerated field supplies every
+characteristic port and the SSP convex average; the second source uses actual
+transported mass. Source work is represented impulse paired with midpoint velocity,
+with original species calorics, Mach admission and interior-history speed extrema.
+Full-interval CFL and all retries belong to the common network clock. A shortened
+trial restarts all branches and plenums from accepted storage and reevaluates the
+history on the shorter physical intervals.
+
+Accepted branch reports retain axial source impulse/work and representation
+defects. The network sums energy only: `body_force_work_j` is subtracted once
+in its first law, separately from exterior enthalpy and compact-volume pressure
+work. `body_force_energy_residual_j` remains visible and is never heat or a
+residual correction. Internal finite-port species/energy exchanges remain exact
+opposites; unrelated branch axes are not summed into a fictitious global momentum.
+Prescribed reservoirs and moving compact volumes use the existing boundary laws.
+Plenums remain stationary perfectly mixed owners, and their supports retain port
+impulses; no moving-frame plenum momentum model is implied.
+
+Active forcing reuses each branch's original lazy source buffer and bounded
+construction-time receipts. Zero forcing uses original transport arithmetic even
+after those buffers have been used. State, volume, clocks and accepted reports
+publish only at the existing common commit point. This is the estimated native
+source/transport composition, not a well-balanced hydrostatic scheme or a
+continuous peak certificate for general histories. The explicit entropy-admitted
+network entry points remain separate until complete source endpoint entropy is
+accounted. Focused regressions cover analytic periodic histories/work, actual
+stage mass with finite ports, simultaneous reservoirs/compression, hidden CFL
+peaks, zero-force replay and late cancellation. Native compilation/execution was
+unavailable during this implementation; these regressions are not claimed passed.
+
 ## Physical-time acceleration and force-density histories
 
 The original BodyForce owner now admits uniform and per-cell linear histories

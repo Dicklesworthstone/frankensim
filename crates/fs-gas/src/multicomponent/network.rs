@@ -31,7 +31,9 @@ use fs_qty::Time;
 mod coupled;
 mod exchange;
 mod entropy;
+mod forcing;
 mod step;
+pub use forcing::NetworkBodyForces;
 
 /// Reversible adiabatic compact-volume changes with explicit boundary work.
 pub mod moving;
@@ -189,8 +191,14 @@ pub struct NetworkStepReport {
     pub boundary_change: NetworkTotals,
     /// Mechanical work done ON all plenums [J], separate from transported energy.
     pub boundary_work_on_gas_j: f64,
-    /// `after - before - boundary_change - boundary_work`, per species and in the
-    /// original energy gauges. Mechanical work changes energy only.
+    /// Mechanical work of distributed branch body sources [J].
+    /// Axial impulses remain in the individual accepted branch reports.
+    pub body_force_work_j: f64,
+    /// Represented source energy increments minus conjugate source work [J].
+    /// Diagnostic only; never removed from the full conservation residual.
+    pub body_force_energy_residual_j: f64,
+    /// `after - before - boundary_change - boundary_work - body_force_work`,
+    /// per species and in the original energy gauges. Work changes energy only.
     pub conservation_residual: NetworkTotals,
 }
 
@@ -207,6 +215,7 @@ struct NetworkWorkspace {
     stages_a: Vec<Stage>,
     stages_b: Vec<Stage>,
     branch_before: Vec<Totals>,
+    branch_sources: Vec<forcing::BranchSource>,
     branch_report_candidate: Vec<StepReport>,
     port_exchange_candidate: Vec<PortExchange>,
     plenum_work_candidate: Vec<PlenumBoundaryWork>,
@@ -320,6 +329,7 @@ impl MixtureNetwork1d {
             stages_a: allocated(branches.len(), empty_stage())?,
             stages_b: allocated(branches.len(), empty_stage())?,
             branch_before: allocated(branches.len(), empty_totals(n))?,
+            branch_sources: allocated(branches.len(), forcing::BranchSource::default())?,
             branch_report_candidate: allocated(branches.len(), empty_report(n))?,
             port_exchange_candidate: allocated(connections.len(), empty_exchange(n))?,
             plenum_work_candidate: allocated(plenums.len(), PlenumBoundaryWork::default())?,

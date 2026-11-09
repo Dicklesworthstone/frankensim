@@ -5,7 +5,7 @@ use super::super::{
 };
 use super::{
     Accumulator, BranchEnd, MixtureNetwork1d, NetworkStepReport, NetworkTotals, PlenumBoundaryWork,
-    PortExchange,
+    PortExchange, NetworkBodyForces,
 };
 use crate::multicomponent::dissipation::entropy::EntropyTracker;
 use fs_qty::Time;
@@ -223,9 +223,30 @@ impl MixtureNetwork1d {
         controls: StepControl,
         volume_rates: Option<&[f64]>,
         reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+        entropy: Option<&mut EntropyTracker>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<NetworkStepReport, Error> {
+        self.step_forcing_impl(
+            maximum_duration, controls, volume_rates, reservoirs, None, entropy, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn step_forcing_impl(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        volume_rates: Option<&[f64]>,
+        reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+        forces: Option<NetworkBodyForces<'_>>,
         mut entropy: Option<&mut EntropyTracker>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<NetworkStepReport, Error> {
+        if forces.is_some() && entropy.is_some() {
+            return Err(Error::Invalid(
+                "forced network entropy requires complete source endpoint accounting",
+            ));
+        }
         poll(&mut cancelled)?;
         if !positive(maximum_duration.value())
             || !positive(controls.cfl)
@@ -324,6 +345,7 @@ impl MixtureNetwork1d {
                 reconstruction,
                 volume_rates,
                 reservoirs,
+                forces,
                 entropy.as_deref_mut(),
                 &mut cancelled,
             ) {
@@ -386,12 +408,14 @@ impl MixtureNetwork1d {
         reconstruction: Reconstruction,
         volume_rates: Option<&[f64]>,
         reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+        forces: Option<NetworkBodyForces<'_>>,
         mut entropy: Option<&mut EntropyTracker>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, Error> {
         if let Some(account) = entropy.as_deref_mut() {
             account.begin_network_attempt();
         }
+        self.work.branch_sources.fill(super::forcing::BranchSource::default());
         // Admit actual, represented geometry before evaluating either stage.
         for (i, plenum) in self.plenums.iter().enumerate() {
             poll(cancelled)?;
@@ -412,12 +436,20 @@ impl MixtureNetwork1d {
                 work_on_gas_j: 0.0,
             };
         }
-        let a = self.evaluate(false, reconstruction, volume_rates, reservoirs, cancelled)?;
+        let mut source_rate = match forces {
+            Some(forces) => self.force_half(forces, dt, cfl, false, cancelled)?,
+            None => 0.0,
+        };
+        let forced = forces.is_some();
+        let a = self.evaluate(false, forced, reconstruction, volume_rates, reservoirs, cancelled)?;
         admit_cfl(a, dt, cfl)?;
-        self.forward_stage(false, dt, volume_rates, None, cancelled)?;
-        let b = self.evaluate(true, reconstruction, volume_rates, reservoirs, cancelled)?;
+        self.forward_stage(false, forced, dt, volume_rates, None, cancelled)?;
+        let b = self.evaluate(true, forced, reconstruction, volume_rates, reservoirs, cancelled)?;
         admit_cfl(b, dt, cfl)?;
-        self.forward_stage(true, dt, volume_rates, entropy.as_deref_mut(), cancelled)?;
+        self.forward_stage(true, forced, dt, volume_rates, entropy.as_deref_mut(), cancelled)?;
+        if let Some(forces) = forces {
+            source_rate = source_rate.max(self.force_half(forces, dt, cfl, true, cancelled)?);
+        }
         if let Some(account) = entropy {
             let stages = self.branches.iter().enumerate().filter_map(|(index, branch)| {
                 let mask = self.entropy_exterior_ends(index);
@@ -429,12 +461,13 @@ impl MixtureNetwork1d {
             });
             account.admit_network_transport_step(self.gas(), dt, stages, cancelled)?;
         }
-        Ok(a.max(b))
+        Ok(a.max(b).max(source_rate))
     }
 
     fn evaluate(
         &mut self,
         second: bool,
+        forced: bool,
         reconstruction: Reconstruction,
         volume_rates: Option<&[f64]>,
         reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
@@ -480,6 +513,9 @@ impl MixtureNetwork1d {
             };
             let q = if second {
                 &branch.work.stage[index * m..(index + 1) * m]
+            } else if forced {
+                &branch.body_force_stage.as_ref()
+                    .expect("admitted network force buffer")[index * m..(index + 1) * m]
             } else {
                 &branch.states[index * m..(index + 1) * m]
             };
@@ -546,6 +582,8 @@ impl MixtureNetwork1d {
         for (index, branch) in self.branches.iter_mut().enumerate() {
             let current = if second {
                 branch.work.stage.as_slice()
+            } else if forced {
+                branch.body_force_stage.as_deref().expect("admitted network force buffer")
             } else {
                 branch.states.as_slice()
             };
@@ -612,6 +650,7 @@ impl MixtureNetwork1d {
     fn forward_stage(
         &mut self,
         second: bool,
+        forced: bool,
         dt: f64,
         volume_rates: Option<&[f64]>,
         mut entropy: Option<&mut EntropyTracker>,
@@ -622,12 +661,19 @@ impl MixtureNetwork1d {
         let mut advanced = [0.0; MAX_COMPONENTS];
         let mut cell_index = 0;
         for branch in &mut self.branches {
+            // The SSP convex average must use the first accelerated field.
+            // Accepted storage stays untouched until the common publication.
+            let initial = if forced {
+                branch.body_force_stage.as_deref().expect("admitted network force buffer")
+            } else {
+                branch.states.as_slice()
+            };
             for i in 0..branch.cell_count() {
                 poll(cancelled)?;
                 let q = if second {
                     &branch.work.stage[i * m..(i + 1) * m]
                 } else {
-                    &branch.states[i * m..(i + 1) * m]
+                    &initial[i * m..(i + 1) * m]
                 };
                 forward(
                     q,
@@ -647,7 +693,7 @@ impl MixtureNetwork1d {
                 if second {
                     let candidate = &mut branch.work.candidate[i * m..(i + 1) * m];
                     for k in 0..m {
-                        candidate[k] = 0.5 * branch.states[i * m + k] + 0.5 * advanced[k];
+                        candidate[k] = 0.5 * initial[i * m + k] + 0.5 * advanced[k];
                     }
                     let primitive = branch.gas.decode(
                         candidate,
@@ -808,6 +854,7 @@ impl MixtureNetwork1d {
             let mut residual = [0.0; MAX_COMPONENTS];
             let branch_after = totals(&branch.work.candidate, branch.mesh.volumes(), n, cancelled)?;
             let branch_before = self.work.branch_before[index];
+            let source_change = self.work.branch_sources[index].change();
             let impulse = factor * (a.area_force + b.area_force);
             for k in 0..m {
                 left[k] = factor * al * (a.left[k] + b.left[k]);
@@ -816,7 +863,9 @@ impl MixtureNetwork1d {
                 residual[k] = branch_after.get(k)
                     - branch_before.get(k)
                     - end[k]
-                    - if k == n { impulse } else { 0.0 };
+                    - if k == n { impulse } else { 0.0 }
+                    - if k == n { source_change.impulse }
+                        else if k == n + 1 { source_change.work } else { 0.0 };
             }
             if !end[..m]
                 .iter()
@@ -825,6 +874,7 @@ impl MixtureNetwork1d {
                 .chain(&residual[..m])
                 .all(|x| x.is_finite())
                 || !impulse.is_finite()
+                || !source_change.energy_residual.is_finite()
             {
                 return Err(Error::Invalid(
                     "non-finite mixture branch balance in network",
@@ -832,7 +882,8 @@ impl MixtureNetwork1d {
             }
             self.work.branch_report_candidate[index] = StepReport {
                 elapsed: Time::new(dt),
-                maximum_cfl: dt * a.signal_rate.max(b.signal_rate),
+                maximum_cfl: dt * a.signal_rate.max(b.signal_rate)
+                    .max(self.work.branch_sources[index].maximum_rate),
                 halvings,
                 hll_fallback_faces: a.fallbacks + b.fallbacks,
                 limited_cells: a.limited + b.limited,
@@ -843,7 +894,7 @@ impl MixtureNetwork1d {
                 left_boundary_change: Totals::from_values(&left[..m], n),
                 right_boundary_change: Totals::from_values(&right[..m], n),
                 area_momentum_impulse: impulse,
-                source_change: crate::body_force::ForceChange::default(),
+                source_change,
                 conservation_residual: Totals::from_values(&residual[..m], n),
             };
             after.add(&branch_after.species_masses[..n], branch_after.energy)?;
@@ -897,6 +948,10 @@ impl MixtureNetwork1d {
             .plenum_work_candidate
             .iter()
             .map(|x| x.work_on_gas_j));
+        let body_force_work_j = sum(self.work.branch_sources.iter().map(|source| source.change().work));
+        let body_force_energy_residual_j = sum(
+            self.work.branch_sources.iter().map(|source| source.change().energy_residual),
+        );
         let mut species_masses = [0.0; MAX_SPECIES];
         for (k, value) in species_masses[..n].iter_mut().enumerate() {
             *value = after.species_masses[k]
@@ -906,9 +961,11 @@ impl MixtureNetwork1d {
         let conservation_residual = NetworkTotals {
             species_masses,
             species_count: n,
-            energy: after.energy - before.energy - boundary_change.energy - boundary_work_on_gas_j,
+            energy: after.energy - before.energy - boundary_change.energy
+                - boundary_work_on_gas_j - body_force_work_j,
         };
         if !conservation_residual.energy.is_finite()
+            || !body_force_work_j.is_finite() || !body_force_energy_residual_j.is_finite()
             || !conservation_residual.species_masses[..n]
                 .iter()
                 .all(|x| x.is_finite())
@@ -928,6 +985,8 @@ impl MixtureNetwork1d {
             after,
             boundary_change,
             boundary_work_on_gas_j,
+            body_force_work_j,
+            body_force_energy_residual_j,
             conservation_residual,
         })
     }

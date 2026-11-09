@@ -10,6 +10,7 @@ use crate::multicomponent::{
 use fs_qty::{Length, Time};
 
 mod entropy;
+mod forcing;
 mod reservoir;
 
 fn walls() -> Boundaries {
