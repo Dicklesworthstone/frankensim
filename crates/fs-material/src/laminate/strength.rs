@@ -21,8 +21,9 @@
 //! surface, out-of-plane/interlaminar failure, delamination, buckling, fatigue,
 //! fracture energy or post-failure stiffness. Exceedance never removes material.
 
-use super::thermal::LaminateThermalError;
+use super::thermal::beam::PreparedLaminateBeam;
 use super::thermal::source::{LaminateThermalSourceError, ResolvedLaminateThermal};
+use super::thermal::{LaminateThermalError, LayerThermalStress};
 use crate::state_point::{
     MaterialPropertySelection, MaterialStatePointError, ResolvedMaterialStatePoint,
     ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point,
@@ -267,6 +268,9 @@ pub enum LaminateStrengthError {
     Thermal(LaminateThermalError),
     /// Original elastic/thermal sources refused the requested temperatures.
     ThermalSource(LaminateThermalSourceError),
+    /// Stress recovery and strength do not share the exact prepared thermal
+    /// snapshot. Numerically equal mechanics cannot establish source identity.
+    ThermalSnapshotMismatch,
     /// Cancellation occurred before the complete result was available.
     Cancelled,
 }
@@ -397,6 +401,32 @@ impl PreparedLaminateStrength {
             .prepared()
             .layer_stress(layer, membrane, gradient_per_m)
             .map_err(LaminateStrengthError::Thermal)?;
+        self.assess_stresses(layer, stress)
+    }
+
+    /// Assess the actual free-sided beam stresses, not a global affine plate
+    /// substitute. The beam must share this snapshot's original prepared Arc;
+    /// clone `thermal().prepared()` when preparing the beam. Recomputed or
+    /// independently cloned preparations refuse even if their numbers match.
+    pub fn assess_beam_layer(
+        &self,
+        beam: &PreparedLaminateBeam,
+        layer: usize,
+        eps0: f64,
+        kappa: f64,
+    ) -> Result<LayerStrengthAssessment, LaminateStrengthError> {
+        admit_beam(&self.thermal, beam)?;
+        let stress = beam
+            .layer_stress(layer, eps0, kappa)
+            .map_err(LaminateStrengthError::Thermal)?;
+        self.assess_stresses(layer, stress)
+    }
+
+    fn assess_stresses(
+        &self,
+        layer: usize,
+        stress: LayerThermalStress,
+    ) -> Result<LayerStrengthAssessment, LaminateStrengthError> {
         let prepared = &self.layers[layer];
         let assess = |s| {
             prepared
@@ -418,6 +448,43 @@ impl PreparedLaminateStrength {
         &self,
         membrane: [f64; 3],
         gradient_per_m: [f64; 3],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<LaminateStrengthAssessment, LaminateStrengthError> {
+        self.assess_from(
+            |layer| self.assess_layer(layer, membrane, gradient_per_m),
+            cancelled,
+        )
+    }
+
+    /// Governing original layer face under the narrow-strip beam closure.
+    /// Strengths remain at this exact temperature/source snapshot; width and
+    /// beam-axis choices affect mechanics but cannot replace its source state.
+    /// This assessment reports exceedance without damage or stiffness changes.
+    pub fn assess_beam(
+        &self,
+        beam: &PreparedLaminateBeam,
+        eps0: f64,
+        kappa: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<LaminateStrengthAssessment, LaminateStrengthError> {
+        if cancelled() {
+            return Err(LaminateStrengthError::Cancelled);
+        }
+        admit_beam(&self.thermal, beam)?;
+        self.assess_from(
+            |layer| {
+                let stress = beam
+                    .layer_stress(layer, eps0, kappa)
+                    .map_err(LaminateStrengthError::Thermal)?;
+                self.assess_stresses(layer, stress)
+            },
+            cancelled,
+        )
+    }
+
+    fn assess_from(
+        &self,
+        mut recover: impl FnMut(usize) -> Result<LayerStrengthAssessment, LaminateStrengthError>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<LaminateStrengthAssessment, LaminateStrengthError> {
         let mut worst: Option<LaminateStrengthAssessment> = None;
@@ -425,7 +492,7 @@ impl PreparedLaminateStrength {
             if cancelled() {
                 return Err(LaminateStrengthError::Cancelled);
             }
-            let faces = self.assess_layer(layer, membrane, gradient_per_m)?;
+            let faces = recover(layer)?;
             for (face, assessment) in [
                 (LaminaFace::Bottom, faces.bottom),
                 (LaminaFace::Top, faces.top),
@@ -446,6 +513,21 @@ impl PreparedLaminateStrength {
             return Err(LaminateStrengthError::Cancelled);
         }
         Ok(worst.expect("source-bound laminate has at least one layer"))
+    }
+}
+
+// Mechanical coefficients alone do not bind temperature or the complete source
+// path: constant E and zero CTE can coexist with temperature-dependent strength.
+// Arc identity is exact and allocation-free; callers keep the resolved snapshot
+// and clone its prepared Arc through strength preparation/temperature refresh.
+fn admit_beam(
+    thermal: &ResolvedLaminateThermal,
+    beam: &PreparedLaminateBeam,
+) -> Result<(), LaminateStrengthError> {
+    if core::ptr::eq(thermal.prepared().as_ref(), beam.source()) {
+        Ok(())
+    } else {
+        Err(LaminateStrengthError::ThermalSnapshotMismatch)
     }
 }
 

@@ -28,10 +28,11 @@
 //! <https://docs.software.vt.edu/abaqusv2025/English/SIMACAEMATRefMap/simamat-c-failuremeasures.htm>.
 
 use super::{
-    LaminaFace, LaminaMaximumStress, LaminateStrengthError, PreparedLaminateStrength, invalid,
-    rotate,
+    LaminaFace, LaminaMaximumStress, LaminateStrengthError, PreparedLaminateStrength, admit_beam,
+    invalid, rotate,
 };
 use crate::laminate::thermal::source::{LaminateThermalSourceError, ResolvedLaminateThermal};
+use crate::laminate::thermal::{LayerThermalStress, beam::PreparedLaminateBeam};
 use crate::state_point::{
     MaterialPropertySelection, MaterialStatePointError, ResolvedMaterialStatePoint,
     ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point,
@@ -370,6 +371,30 @@ impl PreparedLaminateTsaiWu {
             .prepared()
             .layer_stress(layer, membrane, gradient_per_m)
             .map_err(LaminateStrengthError::Thermal)?;
+        self.assess_stresses(layer, stress)
+    }
+
+    /// Assess original material-axis strengths and interaction using the actual
+    /// free-sided beam face stresses from this exact prepared thermal snapshot.
+    pub fn assess_beam_layer(
+        &self,
+        beam: &PreparedLaminateBeam,
+        layer: usize,
+        eps0: f64,
+        kappa: f64,
+    ) -> Result<LayerTsaiWuAssessment, LaminateStrengthError> {
+        admit_beam(&self.thermal, beam)?;
+        let stress = beam
+            .layer_stress(layer, eps0, kappa)
+            .map_err(LaminateStrengthError::Thermal)?;
+        self.assess_stresses(layer, stress)
+    }
+
+    fn assess_stresses(
+        &self,
+        layer: usize,
+        stress: LayerThermalStress,
+    ) -> Result<LayerTsaiWuAssessment, LaminateStrengthError> {
         let prepared = &self.layers[layer];
         let assess = |s| {
             prepared
@@ -389,6 +414,42 @@ impl PreparedLaminateTsaiWu {
         &self,
         membrane: [f64; 3],
         gradient_per_m: [f64; 3],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<LaminateTsaiWuAssessment, LaminateStrengthError> {
+        self.assess_from(
+            |layer| self.assess_layer(layer, membrane, gradient_per_m),
+            cancelled,
+        )
+    }
+
+    /// Governing beam layer face using the existing Tsai-Wu radial utilization.
+    /// All source and temperature identity rules are the same as the original
+    /// maximum-stress beam assessment. No failure-mode or degradation law is added.
+    pub fn assess_beam(
+        &self,
+        beam: &PreparedLaminateBeam,
+        eps0: f64,
+        kappa: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<LaminateTsaiWuAssessment, LaminateStrengthError> {
+        if cancelled() {
+            return Err(LaminateStrengthError::Cancelled);
+        }
+        admit_beam(&self.thermal, beam)?;
+        self.assess_from(
+            |layer| {
+                let stress = beam
+                    .layer_stress(layer, eps0, kappa)
+                    .map_err(LaminateStrengthError::Thermal)?;
+                self.assess_stresses(layer, stress)
+            },
+            cancelled,
+        )
+    }
+
+    fn assess_from(
+        &self,
+        mut recover: impl FnMut(usize) -> Result<LayerTsaiWuAssessment, LaminateStrengthError>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<LaminateTsaiWuAssessment, LaminateStrengthError> {
         let mut worst: Option<LaminateTsaiWuAssessment> = None;
@@ -396,7 +457,7 @@ impl PreparedLaminateTsaiWu {
             if cancelled() {
                 return Err(LaminateStrengthError::Cancelled);
             }
-            let faces = self.assess_layer(layer, membrane, gradient_per_m)?;
+            let faces = recover(layer)?;
             for (face, assessment) in [
                 (LaminaFace::Bottom, faces.bottom),
                 (LaminaFace::Top, faces.top),
