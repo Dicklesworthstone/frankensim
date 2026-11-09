@@ -35,7 +35,10 @@ pub enum HeldInternalEffort {
 }
 
 impl HeldInternalEffort {
-    fn in_first_frame(self, first: RigidBodyState) -> Result<[f64; 6], DynamicsError> {
+    pub(in crate::spatial_loads) fn in_first_frame(
+        self,
+        first: RigidBodyState,
+    ) -> Result<[f64; 6], DynamicsError> {
         let authored = match self {
             Self::MaterialFirst(value) | Self::World(value) => value,
         };

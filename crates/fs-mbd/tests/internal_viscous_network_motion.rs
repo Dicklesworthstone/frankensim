@@ -1,5 +1,8 @@
 //! G1/G3 moving passive graphs: continuous modes, material frames and actual heat.
 
+#[path = "internal_viscous_network_motion/driven.rs"]
+mod driven;
+
 use fs_mbd::spatial_loads::internal_impulse::{
     InternalWrenchImpulseControls,
     viscous::{

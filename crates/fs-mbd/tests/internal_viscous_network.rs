@@ -1,5 +1,8 @@
 //! Physical graph sources: shared-body recoil, stiffness, null modes and refinement.
 
+#[path = "internal_viscous_network/driven.rs"]
+mod driven;
+
 use fs_mbd::spatial_loads::internal_impulse::{
     InternalWrenchImpulseControls,
     network::InternalWrenchNetworkError,

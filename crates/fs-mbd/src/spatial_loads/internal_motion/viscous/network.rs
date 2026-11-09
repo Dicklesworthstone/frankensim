@@ -1,5 +1,9 @@
 //! Moving shared-body damping networks with original native work and heat.
 
+/// Simultaneous held internal actuation and full spatial damping.
+#[path = "network/driven.rs"]
+pub mod driven;
+
 use super::{
     BodyLoads, Change, Dd, DynamicsError, ExternalLoadAccount, HeldExternalLoads, HeldSpatialLoads,
     InternalWrenchStepError, LoadChange, MassProperties, RigidBodyState, RigidKineticEnergyChange,

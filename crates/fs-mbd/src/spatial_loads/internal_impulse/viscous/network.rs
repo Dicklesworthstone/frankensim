@@ -10,6 +10,10 @@
 //! Geometry, inertia, damping and time interval are bound at preparation.
 //! No clock, pose, thermal state, spring or constraint is advanced here.
 
+/// Simultaneous held internal actuation and full spatial damping.
+#[path = "network/driven.rs"]
+pub mod driven;
+
 use super::super::{
     InternalWrenchImpulse, InternalWrenchImpulseError, WideVec, add, cross, dd, finite,
     finite_vector,

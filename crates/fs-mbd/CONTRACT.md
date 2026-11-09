@@ -9562,3 +9562,52 @@ Attached motion uses the original shared finite-inertia angular solve and checks
 The normal, stiffness, spring-release, plastic-loss and body-work channels remain distinct, with compensated incremental accounting and independent stage gates. Poses and frames stay held; this retains the original homogeneous twist law and explicit mode-III/adhesion applicability ceiling. It does not supply reciprocal mixed-mode area stability, annular recruitment, normal body integration or a caloric destination.
 
 Four focused integration cases cover the independently derived fold-storage ratio, exact driven/changing-area native replay, detached force/torque work and fresh recontact, and seven atomic refusals followed by deterministic retry. Pinned `rustfmt --check` passed. These integration cases were not compiled or executed in this constrained session; no new runtime-verification claim is made.
+
+## Simultaneous driven spatial damping on finite graphs
+
+The original viscous-network module now exposes a separate
+`network::driven::PreparedDrivenViscousNetwork` source. Every native body
+retains its six kinetic coordinates and every connector retains its original
+material-frame full passive matrix. The original transported native wrench
+columns produce the work-conjugate map B. The complete system
+`y' = B f - B C B^T y`, `H = y.y/2` goes through the existing exact pHS
+ZOH owner; cycles, parallel links, isolated bodies and undamped directions
+need no inverse edge mobility, rank cutoff or ordered pair approximation.
+The existing sparse palindromic passive source is unchanged.
+
+Each original connector has an independently integrated positive source-square
+heat observer on that same complete trajectory. Signed held-actuator work is
+reported per connector and in total. Supply and recovery remain work; neither
+numerical drift nor an energy-account remainder becomes heat. Per-link heat
+and work sums must agree with the full pHS integrals. Integrated net efforts
+enter the existing simultaneous native impulse network once, preserving original
+force/couple transport, full inertias and actual native P/L/work admission.
+Initial kinetic-coordinate reconstruction and actual endpoint relative twists
+are checked against the source trajectory before publication.
+
+The moving graph entry reuses the original loaded native body motion between
+two complete graph half sources. Material-held effort follows the first body;
+world-held effort is re-expressed at actual endpoint geometry. Applied loads,
+gravity storage, signed actuator work, material heat and native drift defects
+remain separate. Every source, each body drift and the complete original-to-final
+account must pass. Borrowed input states, laws and efforts never change on
+refusal or cancellation.
+
+Explicit body, connector, peak-byte and preparation-work caps cover all retained
+source observers and both moving preparations before allocation. Both the doubled
+body dimension and the state-plus-input integral dimension must fit the original
+256-coordinate pHS bound. Warm source calls use cached contractions, with no
+exponential or factorization; the original native event and returned body/link
+banks allocate bounded linear storage. Moving geometry still needs independent
+temporal refinement. No contact constraint, spring model, thermal destination or
+generic DrivenBody description binding is inferred.
+
+Six fixed-source regression groups passed natively in an isolated build of the
+actual source and original numerical dependencies. They check analytic cyclic modes and
+terminal slip, simultaneous positive/recovered work on parallel links, full
+tensor pair parity, an independent native-coordinate force/torque/heat ODE,
+weak loss beside a stronger source, and atomic source/budget refusals. Three
+moving groups specify original loaded-pair parity, second-order positions with
+exact fixed-geometry graph rates, and complete-step refusal/retry. Pinned Rust
+formatting passed. The focused source run is not full workspace integration;
+full moving/thermal integration execution remains outstanding.
