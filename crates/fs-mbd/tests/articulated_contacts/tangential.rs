@@ -9,6 +9,9 @@ use fs_tribo::layer_contact::ThirdBodyLayerContact;
 use fs_tribo::mindlin::{MindlinDeresiewiczPoint, MindlinPointParameters};
 use fs_tribo::{FrictionLaw, TangentialLaw, TangentialSolveConfig, TangentialStepInput};
 
+#[path = "tangential/flow.rs"]
+mod flow;
+
 fn config() -> ArticulatedTangentialConfig {
     ArticulatedTangentialConfig {
         solve: TangentialSolveConfig {

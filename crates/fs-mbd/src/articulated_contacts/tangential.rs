@@ -20,6 +20,9 @@
 #[path = "tangential/planar.rs"]
 pub mod planar;
 
+/// Continuous Coulomb arrest, holding and breakaway on native articulated ports.
+pub mod flow;
+
 use super::{
     ArticulatedContactError, ArticulatedContactSystem, ContactCounterpart, EventResponse,
     EventWorkspace, LinkContactPoint, Prepared, finite, magnitude, poll, prepare_point,
@@ -139,42 +142,7 @@ pub fn advance_articulated_tangential<L: TangentialLaw>(
         return Err(ArticulatedContactError::Invalid("negative contact storage"));
     }
     let mut workspace = EventWorkspace::new(systems, &mut cancelled)?;
-    let axis = unit_normal(contact.tangent_world)?;
-    let (first, world_point) = prepare_point(contact.point, axis, &workspace.before)?;
-    let (second, other_point, plane_speed) = match contact.other {
-        ContactCounterpart::Body(point) => {
-            if point.system_index == contact.point.system_index
-                && point.link_index == contact.point.link_index
-            {
-                return Err(ArticulatedContactError::Invalid(
-                    "shear requires distinct links",
-                ));
-            }
-            let (term, position) = prepare_point(point, axis.scale(-1.0), &workspace.before)?;
-            (Some(term), position, 0.0)
-        }
-        ContactCounterpart::PrescribedPlane {
-            point_world,
-            velocity_world,
-        } => {
-            vector(point_world)?;
-            vector(velocity_world)?;
-            (None, point_world, finite(axis.dot(velocity_world))?)
-        }
-    };
-    if magnitude(world_point - other_point) > config.geometry_tolerance_m {
-        return Err(ArticulatedContactError::Invalid(
-            "shear material points do not coincide",
-        ));
-    }
-    let row = Prepared {
-        first,
-        second,
-        axis_world: axis,
-        world_point,
-        plane_speed,
-        minimum_speed: None,
-    };
+    let row = prepare_row(contact, &workspace, config.geometry_tolerance_m)?;
     let before_speed = finite(row.velocity(&workspace.before))?;
     let rows = [row];
     let mobility = workspace.delassus(systems, &rows, &mut cancelled)?[0];
@@ -278,6 +246,49 @@ pub fn advance_articulated_tangential<L: TangentialLaw>(
         linear_momentum_residual: mechanics.linear_momentum_residual,
         angular_momentum_residual: mechanics.angular_momentum_residual,
         endpoint_velocity_residual_m_s: mechanics.endpoint_velocity_residual,
+    })
+}
+
+fn prepare_row(
+    contact: ArticulatedTangentialContact,
+    workspace: &EventWorkspace,
+    geometry_tolerance_m: f64,
+) -> Result<Prepared, ArticulatedContactError> {
+    let axis = unit_normal(contact.tangent_world)?;
+    let (first, world_point) = prepare_point(contact.point, axis, &workspace.before)?;
+    let (second, other_point, plane_speed) = match contact.other {
+        ContactCounterpart::Body(point) => {
+            if point.system_index == contact.point.system_index
+                && point.link_index == contact.point.link_index
+            {
+                return Err(ArticulatedContactError::Invalid(
+                    "shear requires distinct links",
+                ));
+            }
+            let (term, position) = prepare_point(point, axis.scale(-1.0), &workspace.before)?;
+            (Some(term), position, 0.0)
+        }
+        ContactCounterpart::PrescribedPlane {
+            point_world,
+            velocity_world,
+        } => {
+            vector(point_world)?;
+            vector(velocity_world)?;
+            (None, point_world, finite(axis.dot(velocity_world))?)
+        }
+    };
+    if magnitude(world_point - other_point) > geometry_tolerance_m {
+        return Err(ArticulatedContactError::Invalid(
+            "shear material points do not coincide",
+        ));
+    }
+    Ok(Prepared {
+        first,
+        second,
+        axis_world: axis,
+        world_point,
+        plane_speed,
+        minimum_speed: None,
     })
 }
 

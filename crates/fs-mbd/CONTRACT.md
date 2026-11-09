@@ -3272,6 +3272,35 @@ normal/Coulomb groups pass natively using the original mechanics, contact and
 numerical solver bodies. This focused source-selected validation excludes
 unrelated runtime consumers and does not establish a full Cargo/DSR gate.
 
+### Continuous articulated dry friction and exact arrest
+
+`articulated_contacts::tangential::flow::advance_articulated_dry_friction`
+resolves up to six simultaneous scalar guide/contact ports with the original
+`fs-contact` continuous static/kinetic owner. Source-declared Coulomb laws and
+normal loads supply both capacities; complete native `J M^-1 J^T` retains joint,
+rotational and shared-body recoil. Exact zero-crossing events end sliding
+segments. Resting coordinates resolve their coupled static reactions together,
+including breakaway under held drives, with the original ambiguity refusal.
+There is no capture-speed threshold or midpoint velocity reflection at arrest.
+
+Continuous signed travel, unsigned distance, per-port friction work and held
+actuator work survive every event. Integrated drive and friction impulses apply
+once to the original ABA mechanics. Its existing momentum/energy audit now
+accepts explicit source work without relabeling it as negative contact storage
+or negative heat; other event consumers retain exactly zero source work.
+Prescribed-plane work remains a separate physical boundary account. Canonical
+contact IDs make caller permutation deterministic, and cancellation, dependent
+mobility or a physical/work limit returns no partial native candidate.
+
+The source law, normal loads, body/joint geometry and projection are held for
+the phase. Returned travel is not an SE(3) pose update; changing geometry and
+loads still require outer refinement. The scalar ports do not approximate a
+two-axis Coulomb disk, and no normal constraint or thermal partition is inferred.
+Analytic regressions in `tests/articulated_contacts/tangential/flow.rs` exercise
+off-centre arrest, driven rest versus tiny slip, coupled static recoil,
+finite-body and moving-support work, original prismatic/revolute response,
+deterministic retry and atomic refusal.
+
 ### Two-axis stateful articulated shear
 
 `articulated_contacts::tangential::planar::advance_articulated_planar_tangential`

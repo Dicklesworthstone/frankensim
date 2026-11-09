@@ -481,12 +481,27 @@ impl EventWorkspace {
     }
 
     fn apply<S: ContactSystem>(
-        mut self,
+        self,
         systems: &[S],
         prepared: &[Prepared],
         law: EventResponse<'_>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<EventResult<S::Response>, ArticulatedContactError> {
+        self.apply_with_source_work(systems, prepared, law, 0.0, cancelled)
+    }
+
+    // A continuous driven friction phase applies the integrated drive and
+    // friction impulses together. Its source work is integrated along the
+    // actual relative path; it is neither negative storage nor negative heat.
+    fn apply_with_source_work<S: ContactSystem>(
+        mut self,
+        systems: &[S],
+        prepared: &[Prepared],
+        law: EventResponse<'_>,
+        source_work: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<EventResult<S::Response>, ArticulatedContactError> {
+        finite(source_work)?;
         let mut plane_work_sum = MomentumWork::default();
         let mut support_work_sum = MomentumWork::default();
         let mut external_linear = VectorSum::default();
@@ -535,8 +550,10 @@ impl EventWorkspace {
         let mut responses = Vec::with_capacity(systems.len());
         let mut after = Vec::with_capacity(systems.len());
         let mut energy_change_sum = MomentumWork::default();
-        let mut energy_scale =
-            plane_work.abs() + law.dissipated_energy.abs() + law.stored_energy_change.abs();
+        let mut energy_scale = plane_work.abs()
+            + law.dissipated_energy.abs()
+            + law.stored_energy_change.abs()
+            + source_work.abs();
         let mut linear_change = VectorSum::default();
         let mut angular_change = VectorSum::default();
         let mut linear_scale = linear_impulse_scale + magnitude(external_linear.value()?);
@@ -646,8 +663,9 @@ impl EventWorkspace {
         let mut boundary_work_sum = plane_work_sum;
         boundary_work_sum.merge(support_work_sum);
         let boundary_work = finite(boundary_work_sum.total().to_f64())?;
-        let stored_and_mechanical_sum =
-            energy_change_sum.difference(boundary_work_sum) + Dd::from_f64(law.stored_energy_change);
+        let stored_and_mechanical_sum = energy_change_sum.difference(boundary_work_sum)
+            + Dd::from_f64(law.stored_energy_change)
+            - Dd::from_f64(source_work);
         let stored_and_mechanical_work = finite(stored_and_mechanical_sum.to_f64())?;
         let energy_balance_residual =
             finite((stored_and_mechanical_sum + Dd::from_f64(law.dissipated_energy)).to_f64())?;
