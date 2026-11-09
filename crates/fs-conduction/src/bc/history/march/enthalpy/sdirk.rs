@@ -3,6 +3,8 @@
 //! This owner changes only time quadrature. Storage, source k, material contact
 //! and reflected radiation retain their original spatial residuals and source
 //! identities. Stage carry is internal numerical history, never external heat.
+//! Optional moving absorbed-power sources retain their original normalized P1
+//! projection, sampled separately at each physical stage time.
 
 use super::{EnthalpyHistoryRun, EnthalpyStepConfig, HeterogeneousEnthalpyError,
     conduction, invalid, poll};
@@ -16,6 +18,7 @@ use super::radiation::enclosure::MaterialEnclosureHistoryBinding;
 use super::radiation::material::{MaterialAmbientHistoryBinding, MaterialRadiationRegionHistory};
 use super::super::events::{self, HistoryEventStep,
     adaptive::{AdaptiveHistoryConfig, AdaptiveHistoryStep, admit_proposal, select_step_with_recovery}};
+use super::super::moving::{MovingHeatSource, assembly, motion::ScanMotionLimit};
 use crate::interface::temperature::TemperatureContacts;
 use crate::interface::temperature::enthalpy::ContactEnthalpyNewtonConfig;
 use crate::transient::enthalpy::heterogeneous::EnthalpyRadiation;
@@ -23,7 +26,7 @@ use crate::transient::enthalpy::sdirk::{
     EnthalpySdirk2Input, EnthalpySdirk2Stage, EnthalpySdirk2Step, SDIRK2_GAMMA,
 };
 use crate::{MaterialEnclosureRadiationPatch, MaterialPointwiseAmbientRadiation,
-    MaterialPointwiseEnclosureRadiation};
+    MaterialPointwiseEnclosureRadiation, ScalarField};
 use fs_exec::Cx;
 use fs_scenario::signal::TimeSignal;
 
@@ -39,6 +42,8 @@ pub struct Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
     run: EnthalpyHistoryRun<'h, 'm, 'c>,
     contacts: Option<(TemperatureContacts<'m, 'i>, ContactEnthalpyNewtonConfig)>,
     radiation: Option<MaterialRadiationHistory<'h, 'c>>,
+    moving_sources: Vec<MovingHeatSource>,
+    motion_limit: Option<ScanMotionLimit>,
 }
 
 enum MaterialRadiationHistory<'h, 'c> {
@@ -50,13 +55,76 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
     pub(super) fn from_parts(run: EnthalpyHistoryRun<'h, 'm, 'c>,
         contacts: Option<(TemperatureContacts<'m, 'i>, ContactEnthalpyNewtonConfig)>,
         radiation: Option<MaterialEnclosureHistoryBinding<'h, 'c>>) -> Self
-    { Self { run, contacts, radiation: radiation.map(MaterialRadiationHistory::Enclosure) } }
+    { Self { run, contacts, radiation: radiation.map(MaterialRadiationHistory::Enclosure),
+        moving_sources: Vec::new(), motion_limit: None } }
+
+    // Transfer an already admitted scan, including an evolved accepted state.
+    // The public attachment API correctly refuses an already evolved history.
+    pub(super) fn from_scanning(
+        run: EnthalpyHistoryRun<'h, 'm, 'c>,
+        contacts: Option<(TemperatureContacts<'m, 'i>, ContactEnthalpyNewtonConfig)>,
+        moving_sources: Vec<MovingHeatSource>, motion_limit: Option<ScanMotionLimit>,
+    ) -> Self {
+        Self { run, contacts, radiation: None, moving_sources, motion_limit }
+    }
 
     pub(super) fn from_material_ambient(
         run: EnthalpyHistoryRun<'h, 'm, 'c>, radiation: MaterialAmbientHistoryBinding<'c>,
     ) -> Self {
-        Self { run, contacts: None, radiation: Some(MaterialRadiationHistory::Ambient(radiation)) }
+        Self { run, contacts: None, radiation: Some(MaterialRadiationHistory::Ambient(radiation)),
+            moving_sources: Vec::new(), motion_limit: None }
     }
+
+    /// Attach independently normalized moving absorbed-power sources before the
+    /// first accepted interval. Original background generation, phase materials,
+    /// contact laws and radiation remain active. Every SDIRK stage samples its
+    /// own physical position and power; no endpoint field is reused across stages.
+    /// Native stage/interval source accounts include the complete summed field.
+    ///
+    /// # Errors
+    /// Advanced history, duplicate attachment, source/work-domain refusal or
+    /// cancellation. Attachment takes no physical step and changes no caloric state.
+    pub fn with_moving_sources(
+        mut self, cx: &Cx<'_>, sources: Vec<MovingHeatSource>, max_sources: usize,
+    ) -> Result<Self, HeterogeneousEnthalpyError> {
+        poll(cx, 0).map_err(conduction)?;
+        if self.run.accepted_steps != 0 || !self.moving_sources.is_empty() {
+            return Err(invalid("attach moving sources once, before the first SDIRK2 history interval"));
+        }
+        let mesh = self.run.problem.boundary.mesh();
+        assembly::admit(cx, mesh, &sources, max_sources).map_err(conduction)?;
+        let background = self.run.problem.source.at(self.run.time_s, mesh.vertex_count())
+            .map_err(conduction)?;
+        assembly::project(cx, mesh, &background, &sources, self.run.time_s, false, |_| {})
+            .map_err(conduction)?;
+        poll(cx, sources.len()).map_err(conduction)?;
+        self.moving_sources = sources;
+        Ok(self)
+    }
+
+    /// Original source declarations, immutable across stage trials and resumes.
+    #[must_use]
+    pub fn moving_sources(&self) -> &[MovingHeatSource] { &self.moving_sources }
+
+    /// Resolve moving footprints independently of the thermal error estimate.
+    /// Select before the first interval. All sources participate, including
+    /// zero-power travel. Event/adaptive intervals shorten; direct endpoints
+    /// refuse if they exceed the motion bound or cross an unresolved path knot.
+    pub fn set_motion_limit(&mut self, cx: &Cx<'_>, policy: ScanMotionLimit)
+        -> Result<(), HeterogeneousEnthalpyError>
+    {
+        poll(cx, self.run.accepted_steps).map_err(conduction)?;
+        if self.run.accepted_steps != 0 || self.moving_sources.is_empty() {
+            return Err(invalid("SDIRK2 motion policy requires attached sources and an unadvanced history"));
+        }
+        assembly::admit_motion(cx, &self.moving_sources, policy).map_err(conduction)?;
+        self.motion_limit = Some(policy);
+        Ok(())
+    }
+
+    /// Selected footprint-relative motion resolution, when explicitly supplied.
+    #[must_use]
+    pub const fn motion_limit(&self) -> Option<ScanMotionLimit> { self.motion_limit }
 
     /// Attach independent material black reservoirs to an unadvanced original
     /// history, including a retained native phase-aware contact history.
@@ -126,17 +194,23 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
     /// Advance one complete SDIRK2 interval, sampling authored schedules at
     /// `start + gamma*dt` and the requested endpoint. Both samples use right
     /// limits. Caller-supplied intervals are not automatically event-split.
+    /// An attached motion policy refuses intervals exceeding source resolution.
     /// Source, nonlinear, heat-balance or cancellation refusal publishes nothing.
     pub fn advance_to(&mut self, cx: &Cx<'_>, time_s: f64, config: EnthalpyStepConfig)
         -> Result<EnthalpySdirk2Step, HeterogeneousEnthalpyError>
     {
         self.admit_one(cx)?;
+        if self.motion_endpoint(cx, self.run.time_s, time_s)? < time_s {
+            return Err(invalid("explicit SDIRK2 interval exceeds the moving-source resolution; shorten it or use event/adaptive stepping"));
+        }
         let solved = self.solve(cx, &self.run.specific_h, self.run.time_s, time_s, config, false)?;
         self.publish(cx, time_s, &solved.second_stage)?;
         Ok(solved)
     }
 
-    /// End at the next source, boundary or radiative-bath knot. The final stage uses
+    /// End at the next source, scan-position, boundary or radiative-bath knot,
+    /// additionally capped by any attached footprint-relative motion policy.
+    /// The final stage uses
     /// the exact interval-end left limit, preserving short held heat pulses.
     pub fn advance_event_step(&mut self, cx: &Cx<'_>, target_s: f64,
         max_step_s: f64, config: EnthalpyStepConfig)
@@ -158,6 +232,8 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
     /// The full coarse/fine discrepancy is used, with the original conservative
     /// unequal-half inflation. It is deliberately not divided by the smooth
     /// second-order factor three: phase and source knots may reduce regularity.
+    /// A moving-source cap can shorten a trial below the nominal minimum, like
+    /// an event; the same phase-error acceptance still applies to that interval.
     /// This is local control, not a global or phase-transition-time certificate.
     /// `endpoint_solves` counts SDIRK2 interval solves; each has two implicit
     /// stage solves. Native nonlinear nonconvergence and residual/energy
@@ -253,16 +329,37 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
     {
         let reservoirs = self.material_enclosure_ambient_temperature().into_iter()
             .chain(self.material_ambient_patches().into_iter().flatten()
-                .map(|patch| &patch.ambient_temperature));
-        events::next_endpoint(cx, self.run.problem.boundary, &self.run.problem.source,
-            reservoirs, self.run.time_s, target, cap).map_err(conduction)
+                .map(|patch| &patch.ambient_temperature))
+            .chain(self.moving_sources.iter().flat_map(MovingHeatSource::signals));
+        let end = events::next_endpoint(cx, self.run.problem.boundary, &self.run.problem.source,
+            reservoirs, self.run.time_s, target, cap).map_err(conduction)?;
+        self.motion_endpoint(cx, self.run.time_s, end)
+    }
+
+    fn motion_endpoint(&self, cx: &Cx<'_>, start: f64, end: f64)
+        -> Result<f64, HeterogeneousEnthalpyError>
+    {
+        assembly::motion_endpoint(cx, &self.moving_sources, self.motion_limit, start, end)
+            .map_err(conduction)
+    }
+
+    fn source_at(&self, cx: &Cx<'_>, time_s: f64, before: bool)
+        -> Result<ScalarField, HeterogeneousEnthalpyError>
+    {
+        let mesh = self.run.problem.boundary.mesh();
+        let background = if before {
+            events::source_before(&self.run.problem.source, time_s, mesh.vertex_count())
+        } else { self.run.problem.source.at(time_s, mesh.vertex_count()) }.map_err(conduction)?;
+        if self.moving_sources.is_empty() { return Ok(background); }
+        assembly::project(cx, mesh, &background, &self.moving_sources, time_s, before, |_| {})
+            .map_err(conduction)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn solve(&self, cx: &Cx<'_>, old: &[f64], from: f64, to: f64,
         config: EnthalpyStepConfig, before: bool) -> Result<EnthalpySdirk2Step, HeterogeneousEnthalpyError>
     {
-        let solved = self.with_stage_inputs(cx, old, from, to, before,
+        let solved = self.with_stage_inputs(cx, from, to, before,
             |inputs, dt| self.run.storage.advance_sdirk2(cx, inputs, old, dt, config))?;
         Ok(solved?)
     }
@@ -272,7 +369,7 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         &self, cx: &Cx<'_>, old: &[f64], from: f64, to: f64,
         config: EnthalpyStepConfig, before: bool, entropy_tolerance_j_k: f64,
     ) -> Result<(EnthalpySdirk2Step, EnthalpyEntropyBalance), EntropyAdaptiveHistoryError> {
-        let solved = self.with_stage_inputs(cx, old, from, to, before,
+        let solved = self.with_stage_inputs(cx, from, to, before,
             |inputs, dt| self.run.storage.advance_sdirk2_with_entropy(
                 cx, inputs, old, dt, config, entropy_tolerance_j_k))?;
         Ok(solved?)
@@ -281,7 +378,7 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
     /// One schedule sampler supplies either native finish mode. Every local
     /// boundary/radiation owner stays alive throughout its actual stage solves.
     fn with_stage_inputs<R>(
-        &self, cx: &Cx<'_>, old: &[f64], from: f64, to: f64, before: bool,
+        &self, cx: &Cx<'_>, from: f64, to: f64, before: bool,
         solve: impl for<'a> FnOnce([EnthalpySdirk2Input<'a>; 2], f64) -> R,
     ) -> Result<R, HeterogeneousEnthalpyError> {
         let dt = to - from;
@@ -295,9 +392,8 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         let first_boundary = history.at(cx, stage_time).map_err(conduction)?;
         let second_boundary = if before { events::boundary_before(cx, history, to) }
             else { history.at(cx, to) }.map_err(conduction)?;
-        let first_source = self.run.problem.source.at(stage_time, old.len()).map_err(conduction)?;
-        let second_source = if before { events::source_before(&self.run.problem.source, to, old.len()) }
-            else { self.run.problem.source.at(to, old.len()) }.map_err(conduction)?;
+        let first_source = self.source_at(cx, stage_time, false)?;
+        let second_source = self.source_at(cx, to, before)?;
         let first_problem = self.run.conduction_problem(&first_boundary, &first_source)?;
         let second_problem = self.run.conduction_problem(&second_boundary, &second_source)?;
         let contacts = self.contacts.as_ref().map(|(owner, config)| (owner, *config));

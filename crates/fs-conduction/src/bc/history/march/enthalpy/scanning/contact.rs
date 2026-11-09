@@ -61,6 +61,35 @@ impl ScanContactBinding<'_, '_> {
 }
 
 impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
+    /// Continue this scan with native second-order SDIRK2 time integration.
+    /// Accepted h/T/f, clock, step budget, source declarations and motion policy
+    /// transfer unchanged, including after physical steps have been accepted.
+    /// Coupled Newton contacts retain their complete original source laws and
+    /// policy. Each new stage samples the retained moving sources at its own time.
+    ///
+    /// # Errors
+    /// Area-mean scan radiation and temperature-only iterated contacts cannot
+    /// supply the native SDIRK full-enthalpy stage residual. They refuse explicitly
+    /// instead of being dropped or replaced with a different physical convention.
+    pub fn into_sdirk2(self)
+        -> Result<super::super::sdirk::Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'c>, HeterogeneousEnthalpyError>
+    {
+        if self.radiation.is_some() {
+            return Err(invalid("SDIRK2 scan continuation requires pointwise radiation; area-mean scan radiation cannot be transferred"));
+        }
+        let contacts = match self.contacts {
+            None => None,
+            Some(binding) => match binding.coupling {
+                ScanContactCoupling::Newton(config) => Some((binding.contacts, config)),
+                ScanContactCoupling::Legacy(_) => return Err(invalid(
+                    "SDIRK2 scan continuation requires coupled enthalpy Newton contacts")),
+            },
+        };
+        Ok(super::super::sdirk::Sdirk2EnthalpyHistoryRun::from_scanning(
+            self.run, contacts, self.sources, self.motion_limit,
+        ))
+    }
+
     /// Retain the complete fixed and source-backed contact set for this scan.
     /// Moving deposition, background heating, original phase charts, boundary
     /// histories and optional ambient radiation participate in each contact trial.

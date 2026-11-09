@@ -3779,6 +3779,20 @@ authority.
   response derivatives with physical finite differences and check checkpoint
   identity, held-event sides and exact scalar allowances.
 
+  The same shared reverse sweep returns authored prescribed-temperature row
+  gradients through the original constrained-row multipliers. Boundary
+  construction retains the actual winning region at each prescribed vertex;
+  adjacent faces never multiply one bath contribution, and a lower-index static
+  region still takes precedence over a scheduled region. Each selected region
+  seed is contracted into its original uniform/constant, ramp, table or
+  Chebyshev values with the original event side. Static partition data remain
+  fixed inputs. Full-tape, point, peak and checkpointed results retain these
+  gradients without another physical or transpose solve; scalar allowances
+  include every returned bath control. Value-only paths retain valid physical
+  signals independently of derivative support. `tests/scan_objective/baths.rs`
+  checks coupled nonlinear-conductivity/radiation finite differences, replay
+  identity, shared-vertex precedence, held-event causality and exact budgets.
+
   A scan can also retain the original `TemperatureContacts` owner through
   `with_contacts` or `with_contacts_newton`. Each moving-source trial updates
   live contact temperatures and, for coupled Newton, independently bound liquid
@@ -5163,6 +5177,31 @@ stage solves. Native nonlinear nonconvergence and endpoint residual/energy
 refusals now bisect within the same attempt/step limits. Source-domain,
 material, budget and cancellation refusals propagate immediately; exhausted
 physical recovery retains its original typed refusal.
+
+`Sdirk2EnthalpyHistoryRun::with_moving_sources` adds immutable normalized
+absorbed-power footprints alongside the original background heat, phase
+contacts and material ambient/enclosure radiation. Both actual stages and
+adaptive half intervals sample their own source position and power. The native
+`source_w` and `source_j` accounts include the complete field exactly once.
+Backward-Euler scanning and SDIRK2 share source admission, superposition and
+footprint-motion limiting through the original moving-source owner; the scan
+continues to retain its per-source deposition observations. Path and power
+knots join the original boundary/reservoir events, and optional motion limits
+include zero-power travel. Direct overlong intervals refuse; event/adaptive
+intervals shorten while retaining the original phase, energy and entropy gates.
+
+An accepted `ScanningEnthalpyRun` can transfer directly through `into_sdirk2`
+with its source declarations, motion policy, caloric state, clock and lifetime
+budget intact. Original Newton contact laws transfer with their policy.
+Area-mean scan radiation and iterated-only contact policies refuse because the
+native stage owner cannot preserve those conventions; no physics is silently
+dropped or replaced. Moving geometry, optical absorption and whole-scan SDIRK2
+adjoints are outside this integration. Focused regressions in
+`tests/phase_contact/history/enclosure/scanning_sdirk.rs` use independent P1
+source loads, latent-contact equations and gray-reflection equations to check
+stage sampling, held events, motion-limited adaptive entropy, continuation and
+transactional refusal. Their native execution remains unverified: the pinned
+`asupersync` build was killed before `fs-conduction` compiled.
 
 Five new native history tests compare original P1 conductivity moments and
 source-clock quadrature with independent scalar stages; preserve graded

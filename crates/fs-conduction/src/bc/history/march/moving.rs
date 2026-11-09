@@ -18,6 +18,9 @@ pub mod sensitivity;
 /// Exact segment rates of continuous absorbed-power schedules.
 pub mod slew;
 
+// Shared source composition for trajectory owners; projection remains here.
+pub(super) mod assembly;
+
 use super::{events, invalid, poll};
 use crate::{ConductionError, ConductionMesh, ScalarField, COMPONENT_POWER_DIMS};
 use fs_exec::Cx;

@@ -18,7 +18,7 @@ mod contact;
 use super::{EnthalpyHistoryRun, EnthalpyStepConfig, EnthalpyStepSolution,
     HeterogeneousEnthalpyError, conduction, invalid, poll};
 use super::adaptive::{PhaseErrorTolerance, phase_error};
-use super::super::{events, moving::MovingHeatSource};
+use super::super::{events, moving::{MovingHeatSource, assembly}};
 use super::super::moving::motion::ScanMotionLimit;
 use super::super::events::adaptive::{AdaptiveHistoryConfig, AdaptiveHistoryStep,
     admit_proposal, select_step};
@@ -107,12 +107,10 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
         -> Result<Self, HeterogeneousEnthalpyError>
     {
         poll(cx, 0).map_err(conduction)?;
-        if run.accepted_steps() != 0 || sources.is_empty() || sources.len() > max_sources {
-            return Err(invalid("scanning requires an unadvanced run and a nonempty source set within its explicit cap"));
+        if run.accepted_steps() != 0 {
+            return Err(invalid("scanning requires an unadvanced run"));
         }
-        sources.len().checked_mul(run.problem.boundary.mesh().vertex_count())
-            .and_then(|v| v.checked_add(sources.len().checked_mul(run.problem.boundary.mesh().element_count())?))
-            .ok_or_else(|| invalid("combined moving-source work count overflows"))?;
+        assembly::admit(cx, run.problem.boundary.mesh(), &sources, max_sources).map_err(conduction)?;
         if let Some(radiation) = &radiation {
             radiation.config.validate().map_err(conduction)?;
             admit_histories(cx, run.problem.boundary, run.time_s(), &radiation.patches).map_err(conduction)?;
@@ -147,9 +145,7 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
         if self.run.accepted_steps() != 0 {
             return Err(invalid("scan motion policy must be selected before the first accepted step"));
         }
-        policy.validate().map_err(conduction)?;
-        for source in &self.sources { source.admit_motion_limit(cx, policy).map_err(conduction)?; }
-        poll(cx, self.sources.len()).map_err(conduction)?;
+        assembly::admit_motion(cx, &self.sources, policy).map_err(conduction)?;
         self.motion_limit = Some(policy);
         Ok(())
     }
@@ -227,15 +223,10 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
         Ok(selected)
     }
 
-    fn motion_endpoint(&self, cx: &Cx<'_>, start: f64, mut end: f64)
+    fn motion_endpoint(&self, cx: &Cx<'_>, start: f64, end: f64)
         -> Result<f64, HeterogeneousEnthalpyError>
     {
-        if let Some(policy) = self.motion_limit {
-            for source in &self.sources {
-                end = source.motion_limited_endpoint(cx, start, end, policy).map_err(conduction)?;
-            }
-        }
-        Ok(end)
+        assembly::motion_endpoint(cx, &self.sources, self.motion_limit, start, end).map_err(conduction)
     }
 
     fn admit(&self, cx: &Cx<'_>, target: f64) -> Result<(), HeterogeneousEnthalpyError> {
@@ -259,28 +250,13 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
         let background = if left {
             events::source_before(&self.run.problem.source, time, mesh.vertex_count())
         } else { self.run.problem.source.at(time, mesh.vertex_count()) }.map_err(conduction)?;
-        let mut field = Vec::new();
-        field.try_reserve_exact(mesh.vertex_count()).map_err(|_| invalid("scan field allocation refused"))?;
-        for i in 0..mesh.vertex_count() {
-            if i % 256 == 0 { poll(cx, i).map_err(conduction)?; }
-            field.push(background.at(i));
-        }
         let mut deposition = Vec::with_capacity(self.sources.len());
-        for source in &self.sources {
-            poll(cx, deposition.len()).map_err(conduction)?;
-            let sample = if left { source.before(cx, mesh, time) } else { source.at(cx, mesh, time) }
-                .map_err(conduction)?;
-            for (i, value) in field.iter_mut().enumerate() {
-                if i % 256 == 0 { poll(cx, i).map_err(conduction)?; }
-                *value += sample.source.at(i);
-                crate::require_finite("combined moving heat source", *value).map_err(conduction)?;
-            }
+        let source = assembly::project(cx, mesh, &background, &self.sources, time, left, |sample| {
             deposition.push(ScanDeposition { center_m: sample.center_m,
                 absorbed_power_w: sample.absorbed_power_w, delivered_power_w: sample.delivered_power_w,
                 active_vertices: sample.active_vertices });
-        }
-        poll(cx, field.len()).map_err(conduction)?;
-        Ok((ScalarField::Nodal(field), deposition))
+        }).map_err(conduction)?;
+        Ok((source, deposition))
     }
 
     fn solve(&self, cx: &Cx<'_>, old: &[f64], start: f64, end: f64,
