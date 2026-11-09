@@ -12072,3 +12072,36 @@ signed raw R; and weak net work amid opposing `2^54` terms. Conditioning-scale
 variation is not a physical coordinate-unit conversion. These fixed-order
 gradients do not establish harmonic-tail convergence, stability, passivity or
 a heat destination.
+
+### Complete forced structural/interior resonance parameter jets
+
+`StructuralInterior::prepare` now exposes
+`PreparedStructuralInterior::solve_with_frequency_parameter_derivative`
+through the existing resonance module. One original coupled factor supplies
+all four derivative orders for structural displacement/velocity, pressure
+potential/pressure, reciprocal fluid force and displaced flow. Original
+structural/acoustic M/K, viscous/gyroscopic C, wall damping and both opposite
+interface-direction blocks are supplied through the same physical direction
+assembly as the pole owner. Complete complex force/flow source jets retain
+frequency, curvature, parameter and mixed phase/amplitude laws.
+
+Pressure remains the velocity of pressure potential: every derivative of
+p=-i*omega*psi is retained. Interface recovery includes both B and B_theta,
+including the mixed B_theta times frequency-tangent terms. Separate structural
+input, acoustic input, signed fluid-to-structure exchange, structural heat and
+wall heat expose all five power orders. Symmetric damping and its direction
+supply heat; gyroscopic and reciprocal skew work never becomes dissipation.
+Borrowed field jets feed the shared coherent receiver, peak/notch and linewidth
+sensitivity queries without a new resonance solver.
+
+The adapter reserves 24*n*n+1536*n+2048 additional bytes and work score
+2048*n*n+4096*n before physical assembly/recovery. Coordinates and topology
+stay fixed; the caller supplies constitutive/geometry directions. This entry
+covers the memoryless complete interior pencil; additional exterior loads
+refuse unless their complete physical law is supplied through another owner.
+No finite parameter interval, continuum convergence or forward error near a
+pole is certified. Focused native tests execute the actual recovery and modal
+owners against independent complete equations, changing interfaces, DC,
+dilation and five-order balances. The original tetrahedral FE regression is
+also defined in `resonance_tests.rs`; the bounded native verification does not
+execute its full geometry/assembly dependency closure.

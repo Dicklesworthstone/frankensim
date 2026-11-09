@@ -107,6 +107,83 @@ pub fn harmonic_mean_power_curvature_with_cancel(
     total.value()
 }
 
+/// Complete frequency/parameter jet of signed mean physical work.
+///
+/// Both fields use the same nonempty power-conjugate coordinate ordering and
+/// peak phasor convention. The returned derivatives are partial derivatives:
+/// omega at fixed physical parameter, theta at fixed omega. All product-rule
+/// terms, including the two distinct mixed cross terms, are retained.
+/// Boundary work does not identify a load's stored energy or material heat.
+///
+/// The five contractions use binary-normalized double-double products before
+/// final range recovery. Work is linear in the coordinate count, with constant
+/// scratch, no allocation, and a cancellation checkpoint per coordinate.
+pub fn harmonic_mean_power_parameter_jet_with_cancel(
+    flow: super::super::resonance::HarmonicTransferFieldParameterJet<'_>,
+    effort: super::super::resonance::HarmonicTransferFieldParameterJet<'_>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<super::super::resonance::HarmonicPowerParameterJet, HarmonicResponseError> {
+    use super::super::resonance::{HarmonicPowerParameterJet, HarmonicPowerSample};
+
+    if cancelled() {
+        return Err(HarmonicResponseError::Cancelled);
+    }
+    let f = [
+        flow.values,
+        flow.angular_derivative,
+        flow.angular_second_derivative,
+        flow.parameter_derivative,
+        flow.angular_parameter_derivative,
+    ];
+    let e = [
+        effort.values,
+        effort.angular_derivative,
+        effort.angular_second_derivative,
+        effort.parameter_derivative,
+        effort.angular_parameter_derivative,
+    ];
+    let n = f[0].len();
+    if n == 0 || f.iter().chain(&e).any(|values| values.len() != n) {
+        return Err(invalid(
+            "matching nonempty power-conjugate parameter jets required",
+        ));
+    }
+    let [mut value, mut first, mut second, mut parameter, mut mixed] =
+        core::array::from_fn::<_, 5, _>(|_| PowerSum::default());
+    for i in 0..n {
+        if cancelled() {
+            return Err(HarmonicResponseError::Cancelled);
+        }
+        if f.iter().chain(&e).any(|values| !finite(values[i])) {
+            return Err(invalid("finite physical power parameter jets required"));
+        }
+        value.half_inner(f[0][i], e[0][i], 1.0)?;
+        first.half_inner(f[1][i], e[0][i], 1.0)?;
+        first.half_inner(f[0][i], e[1][i], 1.0)?;
+        second.half_inner(f[2][i], e[0][i], 1.0)?;
+        second.half_inner(f[1][i], e[1][i], 2.0)?;
+        second.half_inner(f[0][i], e[2][i], 1.0)?;
+        parameter.half_inner(f[3][i], e[0][i], 1.0)?;
+        parameter.half_inner(f[0][i], e[3][i], 1.0)?;
+        mixed.half_inner(f[4][i], e[0][i], 1.0)?;
+        mixed.half_inner(f[1][i], e[3][i], 1.0)?;
+        mixed.half_inner(f[3][i], e[1][i], 1.0)?;
+        mixed.half_inner(f[0][i], e[4][i], 1.0)?;
+    }
+    if cancelled() {
+        return Err(HarmonicResponseError::Cancelled);
+    }
+    Ok(HarmonicPowerParameterJet {
+        sample: HarmonicPowerSample {
+            average_power_w: value.value()?,
+            angular_derivative: first.value()?,
+        },
+        angular_second_derivative: second.value()?,
+        parameter_derivative: parameter.value()?,
+        angular_parameter_derivative: mixed.value()?,
+    })
+}
+
 #[cfg(test)]
 #[path = "work_tests.rs"]
 mod tests;

@@ -26,7 +26,7 @@ pub struct StructuralInteriorPoleDirection<'d> {
 }
 
 impl StructuralInteriorPoleDirection<'_> {
-    pub(in super::super) fn assemble(
+    pub(in crate::cavity_modal::interior::structure) fn assemble(
         &self,
         ns: usize,
         na: usize,

@@ -2197,3 +2197,17 @@ ODEs, analytic duplicate/DC detuning, relative tiny near-DC heat derivatives,
 scalar/32nd-source agreement, unequal-step multimode clock reversal, unit rescaling
 and resource/law/refusal reuse. The six existing coherent power-control tests also
 pass on this source. Gradients remain finite-arithmetic estimates, not enclosures.
+
+## Complete physical power parameter jets
+
+`harmonic_mean_power_parameter_jet_with_cancel` contracts original
+power-conjugate peak phasors into P, P_omega, P_omegaomega, P_theta and
+P_omega_theta. It includes all source/flow/effort product rules, including
+both distinct mixed cross terms. Binary-normalized double-double products
+are accumulated before recovering each physical result. Work is O(n), with
+constant scratch, no allocation and a cancellation checkpoint per coordinate.
+Shapes must be complete, nonempty and finite; refusal returns no partial jet.
+Signed boundary work does not identify constitutive heat or stored energy.
+G1/G3 tests in `harmonic_physical_power_parameter_jet.rs` check independent
+resistive heat with a changing reactive/source law and cancelling products
+above the ordinary floating-point range.

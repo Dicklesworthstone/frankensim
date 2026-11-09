@@ -9,6 +9,13 @@ use super::{
     PreparedStructuralInterior, StructuralInterior, StructuralInteriorError,
     StructuralInteriorResponse, invalid, poll, response,
 };
+mod parameter;
+pub use parameter::{
+    StructuralInteriorDerivativeFields, StructuralInteriorFrequencyParameterResponse,
+    StructuralInteriorParameterDirection, StructuralInteriorPowerParameterJet,
+    StructuralInteriorResponseField, StructuralInteriorSourceParameterJet,
+};
+
 use fs_exec::Cx;
 use fs_math::c64::C64;
 use fs_modal::harmonic::resonance::HarmonicTransferSample;

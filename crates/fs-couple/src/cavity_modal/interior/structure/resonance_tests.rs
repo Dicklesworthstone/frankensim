@@ -440,3 +440,217 @@ fn zero_primary_drive_keeps_source_tangent_and_refusals_preserve_the_factor() {
         assert_eq!(ordinary.energy, replay.energy);
     });
 }
+
+#[test]
+fn original_fe_interface_direction_reaches_forced_fields_and_mixed_work() {
+    use super::super::resonance::{
+        StructuralInteriorParameterDirection, StructuralInteriorResponseField as Field,
+        StructuralInteriorSourceParameterJet,
+    };
+    use fs_modal::harmonic::HarmonicFrequencyParameterControls;
+
+    let (complex, points) = single_tet();
+    let medium = Medium {
+        density_kg_m3: 1.2,
+        sound_speed_m_s: 2.0,
+    };
+    let geometry = HelmholtzFe::new(&complex, &points, 1, medium).unwrap();
+    let interior = uniform(&geometry, medium);
+    let mass = dense(&[1.0], 1);
+    let stiffness = dense(&[10.0], 1);
+    let damping = dense(&[0.8], 1);
+    let limits = HarmonicFrequencyParameterControls {
+        maximum_additional_payload_bytes: 16 * 1024 * 1024,
+        maximum_work: 4_000_000_000,
+    };
+    with_cx(|cx| {
+        let make = |scale: f64| {
+            StructuralInterior::new(
+                &interior,
+                StructuralMatrices {
+                    mass: &mass,
+                    stiffness: &stiffness,
+                    damping: Some(&damping),
+                },
+                &[vec![([0, 1, 2], [scale, -0.4 * scale, 0.7 * scale])]],
+                &[ResistiveBoundary {
+                    faces: vec![[0, 1, 3]],
+                    admittance_m_pa_s: 0.08,
+                }],
+                controls(),
+                cx,
+            )
+            .unwrap()
+        };
+        let model = make(1.0);
+        let omega = 2.1;
+        let prepared = model.prepare_angular(omega, cx).unwrap();
+        let force = [C64::new(0.8, 0.3)];
+        let flow = [C64::new(0.02, -0.01), C64::ZERO, C64::ZERO, C64::ZERO];
+        let source = StructuralInteriorSourceParameterJet::fixed(StructuralInteriorSources {
+            structural_force: &force,
+            inward_flow_load: &flow,
+        });
+        let zero_structure = [0.0];
+        let zero_fluid = vec![0.0; model.pressure_dofs().pow(2)];
+        let direction = StructuralInteriorParameterDirection {
+            structural_mass: &zero_structure,
+            structural_damping: &zero_structure,
+            structural_stiffness: &zero_structure,
+            acoustic_mass: &zero_fluid,
+            acoustic_stiffness: &zero_fluid,
+            wall_damping: &zero_fluid,
+            coupling: model.coupling(),
+        };
+        let result = prepared
+            .solve_with_frequency_parameter_derivative(source, direction, limits, cx)
+            .unwrap();
+        let original = prepared.solve(&force, &flow, cx).unwrap();
+        let step = 1e-5;
+        let low_model = make(1.0 - step);
+        let high_model = make(1.0 + step);
+        let low = low_model
+            .prepare_angular(omega, cx)
+            .unwrap()
+            .solve_with_frequency_derivative(&force, &flow, None, frequency_controls(), cx)
+            .unwrap();
+        let high = high_model
+            .prepare_angular(omega, cx)
+            .unwrap()
+            .solve_with_frequency_derivative(&force, &flow, None, frequency_controls(), cx)
+            .unwrap();
+        for (kind, original, low, high, low_w, high_w) in [
+            (
+                Field::StructuralDisplacement,
+                original.structural_displacement.as_slice(),
+                low.response.structural_displacement.as_slice(),
+                high.response.structural_displacement.as_slice(),
+                low.structural_displacement_derivative_per_rad_s.as_slice(),
+                high.structural_displacement_derivative_per_rad_s.as_slice(),
+            ),
+            (
+                Field::StructuralVelocity,
+                original.structural_velocity.as_slice(),
+                low.response.structural_velocity.as_slice(),
+                high.response.structural_velocity.as_slice(),
+                low.structural_velocity_derivative_per_rad_s.as_slice(),
+                high.structural_velocity_derivative_per_rad_s.as_slice(),
+            ),
+            (
+                Field::PressurePotential,
+                original.pressure_potential_pa_s.as_slice(),
+                low.response.pressure_potential_pa_s.as_slice(),
+                high.response.pressure_potential_pa_s.as_slice(),
+                low.pressure_potential_derivative_pa_s_per_rad_s.as_slice(),
+                high.pressure_potential_derivative_pa_s_per_rad_s.as_slice(),
+            ),
+            (
+                Field::Pressure,
+                original.pressure_pa.as_slice(),
+                low.response.pressure_pa.as_slice(),
+                high.response.pressure_pa.as_slice(),
+                low.pressure_derivative_pa_per_rad_s.as_slice(),
+                high.pressure_derivative_pa_per_rad_s.as_slice(),
+            ),
+            (
+                Field::FluidForce,
+                original.fluid_force.as_slice(),
+                low.response.fluid_force.as_slice(),
+                high.response.fluid_force.as_slice(),
+                low.fluid_force_derivative_per_rad_s.as_slice(),
+                high.fluid_force_derivative_per_rad_s.as_slice(),
+            ),
+            (
+                Field::DisplacedFlow,
+                original.displaced_flow_m3_s.as_slice(),
+                low.response.displaced_flow_m3_s.as_slice(),
+                high.response.displaced_flow_m3_s.as_slice(),
+                low.displaced_flow_derivative_m3_s_per_rad_s.as_slice(),
+                high.displaced_flow_derivative_m3_s_per_rad_s.as_slice(),
+            ),
+        ] {
+            let jet = result.field_parameter_jet(kind);
+            for i in 0..original.len() {
+                close_complex(jet.values[i], original[i], 2e-11);
+                close_complex(
+                    jet.parameter_derivative[i],
+                    (high[i] - low[i]).scale(0.5 / step),
+                    2e-7,
+                );
+                close_complex(
+                    jet.angular_parameter_derivative[i],
+                    (high_w[i] - low_w[i]).scale(0.5 / step),
+                    3e-7,
+                );
+            }
+        }
+        for (jet, low, high, low_w, high_w) in [
+            (
+                result.power.structural_input,
+                low.response.average_structural_input_power_w,
+                high.response.average_structural_input_power_w,
+                low.power_derivative.structural_input_w_per_rad_s,
+                high.power_derivative.structural_input_w_per_rad_s,
+            ),
+            (
+                result.power.acoustic_input,
+                low.response.average_acoustic_input_power_w,
+                high.response.average_acoustic_input_power_w,
+                low.power_derivative.acoustic_input_w_per_rad_s,
+                high.power_derivative.acoustic_input_w_per_rad_s,
+            ),
+            (
+                result.power.fluid_to_structure,
+                low.response.average_fluid_to_structure_power_w,
+                high.response.average_fluid_to_structure_power_w,
+                low.power_derivative.fluid_to_structure_w_per_rad_s,
+                high.power_derivative.fluid_to_structure_w_per_rad_s,
+            ),
+            (
+                result.power.structural_dissipation,
+                low.response.average_structural_dissipation_w,
+                high.response.average_structural_dissipation_w,
+                low.power_derivative.structural_dissipation_w_per_rad_s,
+                high.power_derivative.structural_dissipation_w_per_rad_s,
+            ),
+            (
+                result.power.wall_dissipation,
+                low.response.average_wall_dissipation_w,
+                high.response.average_wall_dissipation_w,
+                low.power_derivative.wall_dissipation_w_per_rad_s,
+                high.power_derivative.wall_dissipation_w_per_rad_s,
+            ),
+        ] {
+            assert!((jet.parameter_derivative - (high - low) * (0.5 / step)).abs() < 2e-7);
+            assert!(
+                (jet.angular_parameter_derivative - (high_w - low_w) * (0.5 / step)).abs() < 3e-7
+            );
+        }
+        for balance in [
+            result.power.structural_balance().unwrap(),
+            result.power.acoustic_balance().unwrap(),
+        ] {
+            assert!(balance.sample.average_power_w.abs() < 2e-11);
+            assert!(balance.sample.angular_derivative.abs() < 2e-11);
+            assert!(balance.angular_second_derivative.abs() < 2e-10);
+            assert!(balance.parameter_derivative.abs() < 2e-11);
+            assert!(balance.angular_parameter_derivative.abs() < 2e-10);
+        }
+        let too_small = HarmonicFrequencyParameterControls {
+            maximum_additional_payload_bytes: 0,
+            ..limits
+        };
+        assert!(matches!(
+            prepared.solve_with_frequency_parameter_derivative(source, direction, too_small, cx),
+            Err(StructuralInteriorError::Harmonic(
+                HarmonicResponseError::Budget { .. }
+            ))
+        ));
+        let replay = prepared.solve(&force, &flow, cx).unwrap();
+        assert_eq!(
+            original.structural_displacement,
+            replay.structural_displacement
+        );
+        assert_eq!(original.pressure_pa, replay.pressure_pa);
+    });
+}

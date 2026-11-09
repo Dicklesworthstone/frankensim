@@ -37,30 +37,30 @@ mod refinement;
 pub use impedance::{HarmonicPortControls, HarmonicPortResponse, admit_passive_port_impedance};
 mod frequency;
 pub use frequency::{
-    HarmonicFrequencyControls, HarmonicFrequencyResponse, HarmonicPortFrequencyResponse,
-    HarmonicFrequencyCurvatureControls, HarmonicFrequencyCurvatureResponse,
-    HarmonicPortFrequencyCurvatureResponse, harmonic_mean_power_curvature_with_cancel,
+    HarmonicFrequencyControls, HarmonicFrequencyCurvatureControls,
+    HarmonicFrequencyCurvatureResponse, HarmonicFrequencyResponse,
+    HarmonicPortFrequencyCurvatureResponse, HarmonicPortFrequencyResponse,
+    harmonic_mean_power_curvature_with_cancel, harmonic_mean_power_parameter_jet_with_cancel,
 };
 mod parameter;
 pub use parameter::{
     HarmonicFrequencyParameterControls, HarmonicFrequencyParameterResponse,
-    HarmonicPortFrequencyParameterDirection, HarmonicPortFrequencyParameterResponse,
-    HarmonicParameterControls, HarmonicParameterResponse, HarmonicPortParameterDirection,
+    HarmonicParameterControls, HarmonicParameterResponse, HarmonicPortFrequencyParameterDirection,
+    HarmonicPortFrequencyParameterResponse, HarmonicPortParameterDirection,
     HarmonicPortParameterResponse, harmonic_mean_power_derivative_with_cancel,
 };
 mod interference;
 pub use interference::{
     HarmonicEnsembleControls, HarmonicFactorStatistics, HarmonicForceFactor, HarmonicForceTone,
     HarmonicImpedanceSample, HarmonicInterferenceControls, HarmonicInterferenceLoad,
-    HarmonicInterferenceMoments, MAX_ENSEMBLE_FORCE_TONES, MAX_INTERFERENCE_FACTORS,
-    MAX_INTERFERENCE_TONES, PreparedHarmonicInterference, PreparedHarmonicInterferenceEnsemble,
-    HarmonicReceiverOptimumError, HarmonicReceiverOptimumLimits,
-    HarmonicReceiverOptimumRequest, HarmonicReceiverOptimumSolution,
-    PreparedHarmonicReceiverOptimum,
-    HarmonicReceiverControlEvaluation, HarmonicReceiverControlLimits,
-    MAX_RECEIVER_CONTROL_SOURCES, PreparedHarmonicReceiverControl,
-    HarmonicReceiver, HarmonicReceiverControls, HarmonicReceiverPairMoments,
-    HarmonicReceiverQuantity, MAX_INTERFERENCE_RECEIVERS, PreparedHarmonicReceivers,
+    HarmonicInterferenceMoments, HarmonicReceiver, HarmonicReceiverControlEvaluation,
+    HarmonicReceiverControlLimits, HarmonicReceiverControls, HarmonicReceiverOptimumError,
+    HarmonicReceiverOptimumLimits, HarmonicReceiverOptimumRequest, HarmonicReceiverOptimumSolution,
+    HarmonicReceiverPairMoments, HarmonicReceiverQuantity, MAX_ENSEMBLE_FORCE_TONES,
+    MAX_INTERFERENCE_FACTORS, MAX_INTERFERENCE_RECEIVERS, MAX_INTERFERENCE_TONES,
+    MAX_RECEIVER_CONTROL_SOURCES, PreparedHarmonicInterference,
+    PreparedHarmonicInterferenceEnsemble, PreparedHarmonicReceiverControl,
+    PreparedHarmonicReceiverOptimum, PreparedHarmonicReceivers,
 };
 mod supports;
 pub use supports::{PreparedSupportedHarmonicResponse, SupportedHarmonicResponse};
