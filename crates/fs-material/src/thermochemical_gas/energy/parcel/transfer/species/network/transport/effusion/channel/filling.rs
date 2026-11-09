@@ -5,12 +5,13 @@
 //! the original evacuated-volume caloric owner. That energy determines the new
 //! receiver temperature; there is no seed gas, pressure floor or vacuum state.
 //! The next call uses the ordinary two-gas finite-wall transaction, including
-//! the receiver's actual return beam. All three finite endpoints are atomic.
+//! the receiver's actual return beam. Gas and every finite wall endpoint are atomic.
 //!
 //! This is a first-order, quasistatic stage with well-mixed ideal gases, rigid
 //! fixed volumes, a stationary diffuse channel and negligible flight time. The
 //! fixed vessels absorb molecular momentum without boundary work. Their motion,
-//! angular momentum, spatial filling transient and other heat paths are absent.
+//! angular momentum and spatial filling transient are absent. Original sourced
+//! conduction may connect the channel wall to other finite material inventories.
 
 /// Error-controlled startup and reciprocal evolution with the same finite wall.
 pub mod trajectory;
@@ -18,7 +19,8 @@ pub mod trajectory;
 pub use super::super::filling::EffusionReceiver;
 use super::thermal::{
     self, FiniteChannelError, FiniteChannelNetworkLink, FiniteChannelNetworkStep,
-    FixedVolumeChannelWall,
+    FixedVolumeChannelWall, FiniteChannelWallStep,
+    conduction::ChannelWallConduction,
     vacuum::{self, FiniteVacuumChannelLink, FiniteVacuumChannelStep},
 };
 use crate::thermochemical_gas::energy::{
@@ -79,7 +81,7 @@ pub struct FiniteChannelFillBalance {
     pub energy_residual_j: f64,
     pub gas_entropy_change_j_k: f64,
     pub wall_entropy_change_j_k: f64,
-    /// Complete closed gas-pair plus finite-wall storage entropy change.
+    /// Complete closed gas-pair plus all finite-wall storage entropy change.
     pub total_entropy_change_j_k: f64,
 }
 
@@ -140,6 +142,27 @@ impl<'l, 'p> FiniteChannelFillCandidate<'l, 'p> {
     }
 }
 
+/// Atomic finite receiver and every original material wall in its assembly.
+#[derive(Clone, Debug)]
+pub struct FiniteChannelFillAssemblyCandidate<'l, 'p> {
+    donor: ClosedGasParcel,
+    receiver: EffusionReceiver,
+    walls: BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>>,
+    step: FiniteChannelFillStep,
+}
+impl<'l, 'p> FiniteChannelFillAssemblyCandidate<'l, 'p> {
+    pub const fn donor(&self) -> &ClosedGasParcel { &self.donor }
+    pub const fn receiver(&self) -> &EffusionReceiver { &self.receiver }
+    pub const fn walls(&self) -> &BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>> { &self.walls }
+    pub const fn step(&self) -> &FiniteChannelFillStep { &self.step }
+    pub fn into_parts(self) -> (
+        ClosedGasParcel, EffusionReceiver,
+        BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>>, FiniteChannelFillStep,
+    ) {
+        (self.donor, self.receiver, self.walls, self.step)
+    }
+}
+
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
     if cancelled() {
         Err(Error::Cancelled)
@@ -173,8 +196,9 @@ fn endpoint(id: u64, error: GasEnergyError) -> Error {
 fn first_fill<'l, 'p>(
     donor: &ClosedGasParcel,
     receiver: &EvacuatedGasVolume,
-    wall: &FixedVolumeChannelWall<'l, 'p>,
+    walls: &BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>>,
     link: FiniteChannelFillLink<'_>,
+    conduction: &[ChannelWallConduction<'_, '_>],
     duration_s: f64,
     donor_solve: GasEnergySolve,
     receiver_solve: GasEnergySolve,
@@ -184,14 +208,14 @@ fn first_fill<'l, 'p>(
     (
         ClosedGasParcel,
         EffusionReceiver,
-        FixedVolumeChannelWall<'l, 'p>,
+        BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>>,
         FiniteChannelFirstFill,
     ),
     Error,
 > {
-    let (mut gases, mut walls, transport) = vacuum::step_candidate(
+    let (mut gases, walls, transport) = vacuum::step_candidate_with_conduction(
         &BTreeMap::from([(link.donor, donor.clone())]),
-        &BTreeMap::from([(link.wall, wall.clone())]),
+        walls,
         GasTransportPaths::default(),
         &[FiniteVacuumChannelLink {
             id: link.id,
@@ -200,6 +224,7 @@ fn first_fill<'l, 'p>(
             area_m2: link.area_m2,
             wall: link.wall,
         }],
+        conduction,
         duration_s,
         &BTreeMap::from([(link.donor, donor_solve)]),
         controls,
@@ -270,13 +295,10 @@ fn first_fill<'l, 'p>(
     let next_donor = gases
         .remove(&link.donor)
         .ok_or(Error::Invalid("original thermal channel lost its donor"))?;
-    let next_wall = walls.remove(&link.wall).ok_or(Error::Invalid(
-        "original thermal channel lost its material wall",
-    ))?;
     Ok((
         next_donor,
         next_receiver,
-        next_wall,
+        walls,
         FiniteChannelFirstFill {
             transport,
             fill,
@@ -303,8 +325,36 @@ pub fn step_candidate<'l, 'p>(
     donor_solve: GasEnergySolve,
     receiver_solve: GasEnergySolve,
     controls: GasTransportSolve,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<FiniteChannelFillCandidate<'l, 'p>, Error> {
+    let (donor, receiver, mut walls, step) = step_candidate_with_conduction(
+        donor, receiver, &BTreeMap::from([(link.wall, wall.clone())]), link, &[],
+        duration_s, donor_solve, receiver_solve, controls, cancelled,
+    )?.into_parts();
+    let wall = walls.remove(&link.wall)
+        .ok_or(Error::Invalid("finite filling lost its original single wall"))?;
+    Ok(FiniteChannelFillCandidate { donor, receiver, wall, step })
+}
+
+/// Fill or continue the actual receiver while its finite material assembly conducts.
+///
+/// The original vacuum/reciprocal transactions pool all molecular and conductive
+/// heat before one material inversion. Captured species and energy retain the
+/// original evacuated-volume caloric owner; auxiliary wall heat is never added
+/// to the receiver's molecular energy. Every original wall publishes atomically.
+#[allow(clippy::too_many_arguments)]
+pub fn step_candidate_with_conduction<'l, 'p>(
+    donor: &ClosedGasParcel,
+    receiver: &EffusionReceiver,
+    walls: &BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>>,
+    link: FiniteChannelFillLink<'_>,
+    conduction: &[ChannelWallConduction<'_, '_>],
+    duration_s: f64,
+    donor_solve: GasEnergySolve,
+    receiver_solve: GasEnergySolve,
+    controls: GasTransportSolve,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<FiniteChannelFillAssemblyCandidate<'l, 'p>, Error> {
     poll(&mut cancelled)?;
     if link.donor == link.receiver
         || !duration_s.is_finite()
@@ -322,13 +372,17 @@ pub fn step_candidate<'l, 'p>(
         ));
     }
     receiver_solve.validate().map_err(receiver_error)?;
-    let (next_donor, next_receiver, next_wall, transfer) = match receiver {
+    if !walls.contains_key(&link.wall) {
+        return Err(Error::Invalid("finite filling references an absent channel wall"));
+    }
+    let (next_donor, next_receiver, next_walls, transfer) = match receiver {
         EffusionReceiver::Evacuated(empty) => {
-            let (gas, receiver, wall, first) = first_fill(
+            let (gas, receiver, walls, first) = first_fill(
                 donor,
                 empty,
-                wall,
+                walls,
                 link,
+                conduction,
                 duration_s,
                 donor_solve,
                 receiver_solve,
@@ -338,14 +392,14 @@ pub fn step_candidate<'l, 'p>(
             (
                 gas,
                 receiver,
-                wall,
+                walls,
                 FiniteChannelFillTransfer::Initial(first),
             )
         }
         EffusionReceiver::Filled(gas) => {
-            let (mut gases, mut walls, report) = thermal::step_candidate(
+            let (mut gases, walls, report) = thermal::step_candidate_with_conduction(
                 &BTreeMap::from([(link.donor, donor.clone()), (link.receiver, gas.clone())]),
-                &BTreeMap::from([(link.wall, wall.clone())]),
+                walls,
                 GasTransportPaths::default(),
                 &[FiniteChannelNetworkLink {
                     id: link.id,
@@ -354,6 +408,7 @@ pub fn step_candidate<'l, 'p>(
                     area_m2: link.area_m2,
                     wall: link.wall,
                 }],
+                conduction,
                 duration_s,
                 &BTreeMap::from([(link.donor, donor_solve), (link.receiver, receiver_solve)]),
                 controls,
@@ -370,9 +425,7 @@ pub fn step_candidate<'l, 'p>(
                         .remove(&link.receiver)
                         .ok_or(Error::Invalid("finite channel lost receiver"))?,
                 ),
-                walls
-                    .remove(&link.wall)
-                    .ok_or(Error::Invalid("finite channel lost wall"))?,
+                walls,
                 FiniteChannelFillTransfer::Exchange(report),
             )
         }
@@ -382,26 +435,26 @@ pub fn step_candidate<'l, 'p>(
     if link.area_m2 > 0.0 {
         if let Some(gas) = next_receiver.gas() {
             link.channel
-                .admit_wall_for_parcel(gas, next_wall.temperature_k(), &mut cancelled)
+                .admit_wall_for_parcel(gas, next_walls[&link.wall].temperature_k(), &mut cancelled)
                 .map_err(|error| endpoint(link.receiver, error))?;
         }
     }
-    let balance = audit_pair(
+    let balance = audit_assembly(
         donor,
         receiver,
-        wall,
+        walls,
         &next_donor,
         &next_receiver,
-        &next_wall,
+        &next_walls,
         link,
         controls,
         &mut cancelled,
     )?;
     poll(&mut cancelled)?;
-    Ok(FiniteChannelFillCandidate {
+    Ok(FiniteChannelFillAssemblyCandidate {
         donor: next_donor,
         receiver: next_receiver,
-        wall: next_wall,
+        walls: next_walls,
         step: FiniteChannelFillStep {
             duration_s,
             transfer,
@@ -413,25 +466,20 @@ pub fn step_candidate<'l, 'p>(
 // Shared by one physical stage and the complete accepted trajectory. The
 // original empty volume contributes no invented thermodynamic state.
 #[allow(clippy::too_many_arguments)]
-fn audit_pair(
+fn audit_assembly(
     donor: &ClosedGasParcel,
     receiver: &EffusionReceiver,
-    wall: &FixedVolumeChannelWall<'_, '_>,
+    walls: &BTreeMap<u64, FixedVolumeChannelWall<'_, '_>>,
     next_donor: &ClosedGasParcel,
     next_receiver: &EffusionReceiver,
-    next_wall: &FixedVolumeChannelWall<'_, '_>,
+    next_walls: &BTreeMap<u64, FixedVolumeChannelWall<'_, '_>>,
     link: FiniteChannelFillLink<'_>,
     controls: GasTransportSolve,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<FiniteChannelFillBalance, Error> {
     poll(cancelled)?;
-    if wall.mass_kg().to_bits() != next_wall.mass_kg().to_bits()
-        || wall.volume_m3().to_bits() != next_wall.volume_m3().to_bits()
-        || wall.law().identity() != next_wall.law().identity()
-    {
-        return Err(Error::Invalid(
-            "finite filling changed its original material wall",
-        ));
+    if !walls.keys().eq(next_walls.keys()) {
+        return Err(Error::Invalid("finite filling changed its original wall identities"));
     }
     let gas = match (receiver.gas(), next_receiver.gas()) {
         (Some(before), Some(after)) => entropy::closed_inventory_change(
@@ -461,23 +509,26 @@ fn audit_pair(
         entropy::Error::Parcel { id, error } => endpoint(id, error),
         entropy::Error::Cancelled => Error::Cancelled,
     })?;
-    let wall_energy = (Dd::from_f64(next_wall.specific_energy_j_kg())
-        - Dd::from_f64(wall.specific_energy_j_kg()))
-        * Dd::from_f64(wall.mass_kg());
-    let wall_entropy = wall
-        .law()
-        .specific_entropy_change_j_kg_k(
-            wall.specific_energy_j_kg(),
-            next_wall.specific_energy_j_kg(),
-        )
-        .map_err(|error| {
-            physical(FiniteChannelError::WallDomain {
-                id: link.wall,
-                error,
-            })
-        })?
-        .ok_or(Error::Invalid("finite wall entropy law became unavailable"))?;
-    let wall_entropy = Dd::from_f64(wall_entropy) * Dd::from_f64(wall.mass_kg());
+    let mut wall_energy = Dd::ZERO;
+    let mut wall_entropy = Dd::ZERO;
+    for (&id, wall) in walls {
+        poll(cancelled)?;
+        let next_wall = &next_walls[&id];
+        if wall.mass_kg().to_bits() != next_wall.mass_kg().to_bits()
+            || wall.volume_m3().to_bits() != next_wall.volume_m3().to_bits()
+            || wall.law().identity() != next_wall.law().identity()
+        {
+            return Err(Error::Invalid("finite filling changed an original material inventory"));
+        }
+        wall_energy = wall_energy
+            + (Dd::from_f64(next_wall.specific_energy_j_kg())
+                - Dd::from_f64(wall.specific_energy_j_kg())) * Dd::from_f64(wall.mass_kg());
+        let ds = wall.law().specific_entropy_change_j_kg_k(
+            wall.specific_energy_j_kg(), next_wall.specific_energy_j_kg(),
+        ).map_err(|error| physical(FiniteChannelError::WallDomain { id, error }))?
+            .ok_or(Error::Invalid("finite wall entropy law became unavailable"))?;
+        wall_entropy = wall_entropy + Dd::from_f64(ds) * Dd::from_f64(wall.mass_kg());
+    }
     let balance = FiniteChannelFillBalance {
         total_mass_residual_kg: gas.total_mass_residual_kg,
         maximum_species_mass_residual_kg: gas.maximum_species_mass_residual_kg,
@@ -510,6 +561,37 @@ fn audit_pair(
     }
     poll(cancelled)?;
     Ok(balance)
+}
+
+/// One original-to-final storage allowance per wall, independent of step count.
+fn audit_wall_history<'r>(
+    walls: &BTreeMap<u64, FixedVolumeChannelWall<'_, '_>>,
+    next_walls: &BTreeMap<u64, FixedVolumeChannelWall<'_, '_>>,
+    reports: impl Iterator<Item = &'r FiniteChannelWallStep>,
+    tolerance_j: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), Error> {
+    let mut heat = BTreeMap::<u64, Dd>::new();
+    for row in reports {
+        poll(cancelled)?;
+        if !walls.contains_key(&row.id) {
+            return Err(Error::Invalid("finite filling history lost an original wall"));
+        }
+        let sum = heat.entry(row.id).or_insert(Dd::ZERO);
+        *sum = *sum + Dd::from_f64(row.heat_into_wall_j);
+    }
+    for (&id, wall) in walls {
+        poll(cancelled)?;
+        let next = next_walls.get(&id)
+            .ok_or(Error::Invalid("finite filling history lost a wall endpoint"))?;
+        let stored = (Dd::from_f64(next.specific_energy_j_kg())
+            - Dd::from_f64(wall.specific_energy_j_kg())) * Dd::from_f64(wall.mass_kg());
+        let residual_j = (stored - heat.get(&id).copied().unwrap_or(Dd::ZERO)).to_f64();
+        if !residual_j.is_finite() || residual_j.abs() > tolerance_j {
+            return Err(physical(FiniteChannelError::WallEnergyBalance { id, residual_j }));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 //! G1/G3/G4: original thermal beam capture, finite-wall storage and exact vacuum.
 
+mod conduction;
 mod trajectory;
 use super::super::super::tests::{controls, energy, gas, interface, near};
 use super::super::thermal::tests::material;

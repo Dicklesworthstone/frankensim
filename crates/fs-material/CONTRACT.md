@@ -23734,7 +23734,7 @@ cancellation, complete strain admission and dispersive plane-stress recovery.
 
 Donor, receiver and material wall are immutable until one candidate passes the original gross-withdrawal, caloric, transport and active species wall-support gates. Common and species-specific accommodation use the same channel helper. Actual source-relative gas storage plus finite material storage must close under the fixed species/mass/energy budgets. Original gas entropy, including newly occupied volume and mixing, plus the material's authored sensible entropy must satisfy the complete closed-system entropy budget. No entropy or thermal state is assigned to the initial vacuum.
 
-This is an explicitly first-order quasistatic step for well-mixed ideal gases in fixed rigid vessels, a stationary diffuse channel and negligible flight time. Fixed vessel supports absorb momentum without boundary work; moving/rotating receivers, spatial filling transients and additional heat paths require their own owners. Six focused tests cover wall-controlled first-fill temperature and pressure, reciprocal continuation, closed/elastic limits, species fractionation and accommodation, caloric reference invariance, and atomic late source/inventory/cancellation refusal. Full material-owner test execution remains pending the complete dependency build.
+This is an explicitly first-order quasistatic step for well-mixed ideal gases in fixed rigid vessels, a stationary diffuse channel and negligible flight time. Fixed vessel supports absorb momentum without boundary work. The conducting-assembly extension below supplies original material heat paths between finite walls; moving/rotating receivers and spatial filling transients still require their own owners. Six focused tests cover wall-controlled first-fill temperature and pressure, reciprocal continuation, closed/elastic limits, species fractionation and accommodation, caloric reference invariance, and atomic late source/inventory/cancellation refusal. Full material-owner test execution remains pending the complete dependency build.
 
 ## Original gas candidates in the adaptive network owner
 
@@ -23964,8 +23964,10 @@ physical reports are not accepted history. Cancellation remains typed through
 the pressure prelude, every physical probe, and final publication. The clock
 guard rejects a startup interval swallowed by the represented remaining
 duration and requires startup plus continuation to equal the authored window.
-A closed path retains the exactly empty receiver and unchanged donor/wall for
-the complete window with one inactive evaluation.
+For this single-wall entry point, a closed path retains the exactly empty
+receiver and unchanged donor/wall for the complete window with one inactive
+evaluation. The conducting-assembly extension below instead evolves its
+active material heat paths while preserving the evacuated receiver.
 
 The whole accepted window reuses the parent's original gas-plus-wall mass,
 source-relative energy, and entropy audit with one fixed physical budget.
@@ -24652,3 +24654,44 @@ regressions cover point parity, an independent nonlinear two-species integral,
 source holes/nonpositive paths/context, and query refusal. The latter tests
 were parsed and reviewed but remain unexecuted under the current dependency
 and storage constraints.
+
+## Conducting finite-wall assemblies during molecular receiver filling
+
+`channel::filling::step_candidate_with_conduction` extends the original
+exact-vacuum receiver owner to a map of finite material walls and the original
+`ChannelWallConduction` links. The existing single-wall API delegates with an
+empty conduction graph. First capture uses the native finite-wall vacuum
+transaction; a filled receiver uses the native reciprocal transaction. Both
+sample molecular and conductive heat together before one inversion per wall.
+
+Captured energy contains only the original transmitted molecules and their
+accommodation heat. Conductive heat into an auxiliary wall is not added to the
+receiver. Every original material inventory, including walls without a molecular
+passage, contributes its actual storage and sensible entropy to the closed
+donor/receiver/wall audit. Source identity, mass basis and final conductivity
+support remain those of the original material owners.
+
+`filling::trajectory::advance_candidate_with_conduction` carries the complete
+wall map through the existing positive-capture startup comparison and native
+adaptive history. It controls gas state, source-relative chamber energy,
+individual wall storage, gross molecular transfers and separate signed
+molecular/conductive heat. Accepted histories alone enter fixed whole-window
+mass, energy and entropy checks; each wall's stored change is also compared
+with its accepted net heat under one original-to-final allowance.
+
+A closed molecular passage may still have active wall conduction. That path
+uses the existing vacuum thermal history with zero molecular escape and leaves
+the receiver exactly evacuated. Its distinct `ClosedPath` report contains no
+invented first-fill event, vacuum temperature or seed inventory. All gas and
+wall endpoints publish atomically after the final audit and cancellation check.
+
+The existing well-mixed, fixed-volume, quasistatic and uniform-wall assumptions
+remain binding. Conduction connects separate inventories; it does not resolve
+temperature variation along a bore or the spatial collisionless filling
+transient. Local step-doubling estimates do not certify global model accuracy.
+
+Five focused G1/G3/G4 test groups specify independent nonlinear storage and
+entropy, continuous gas/two-wall refinement, accepted-history replay, analytic
+closed-port conductive relaxation, original-source/work/cancellation refusal,
+and unchanged single-wall delegation. These are numerical implementation
+fixtures, not empirical validation of the declared material or flow regime.

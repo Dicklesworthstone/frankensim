@@ -1,4 +1,4 @@
-//! Adaptive filling from exact vacuum through the original finite thermal wall.
+//! Adaptive filling from exact vacuum through the original finite wall assembly.
 //!
 //! The startup estimator compares a full capture with a half capture followed
 //! immediately by reciprocal flow. Only that refined pair is accepted. The
@@ -8,22 +8,27 @@
 //!
 //! Gas state, source-relative chamber energy, nonlinear wall storage, gross
 //! transmitted/returned species and each signed accommodation heat are compared.
-//! The complete donor/receiver/wall window then spends one fixed physical budget.
+//! The complete donor/receiver/all-wall window spends one fixed physical budget.
+//! A closed passage can retain exact vacuum while the original walls conduct.
 //! These are local temporal estimates for the parent's quasistatic rigid-volume
 //! model, not a resolution of the initial non-Maxwellian filling transient.
 
 use super::{
     ClosedGasParcel, Dd, EffusionReceiver, EvacuatedGasVolume, FiniteChannelError,
-    FiniteChannelFillBalance, FiniteChannelFillCandidate, FiniteChannelFillError,
+    FiniteChannelFillBalance, FiniteChannelFillAssemblyCandidate, FiniteChannelFillError,
     FiniteChannelFillLink, FiniteChannelFillStep, FiniteChannelFillTransfer,
     FiniteChannelFirstFill, FiniteChannelNetworkLink, FiniteChannelNetworkStep,
-    FixedVolumeChannelWall, GasEnergySolve, GasTransportPaths, GasTransportSolve, R, SpeciesId,
-    audit_pair, positive_product_ratio, step_candidate, thermal,
+    FixedVolumeChannelWall, FiniteChannelWallStep, ChannelWallConduction,
+    GasEnergySolve, GasTransportPaths, GasTransportSolve, R, SpeciesId,
+    audit_assembly, audit_wall_history, positive_product_ratio, step_candidate_with_conduction,
+    thermal, vacuum, FiniteVacuumChannelLink,
 };
 use super::super::thermal::trajectory::{self as native, FiniteChannelAdvanceError};
 use super::super::super::trajectory::MAX_EFFUSION_RETAINED_ROWS;
 pub use super::super::thermal::trajectory::EffusionAdvanceControls;
 use fs_qty::Temperature;
+use super::super::thermal::conduction::ChannelWallConductionStep;
+use super::super::thermal::vacuum::trajectory::FiniteVacuumChannelAdvanceStep;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -94,6 +99,52 @@ impl<'l, 'p> FiniteChannelFillAdvanceCandidate<'l, 'p> {
         FiniteChannelFillAdvanceStep,
     ) {
         (self.donor, self.receiver, self.wall, self.step)
+    }
+}
+
+/// Native accepted history distinguishes actual capture from an exactly closed
+/// passage. The latter has no invented first molecule or receiver temperature.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FiniteChannelFillAssemblyAdvanceStep {
+    Filling(FiniteChannelFillAdvanceStep),
+    ClosedPath {
+        thermal: FiniteVacuumChannelAdvanceStep,
+        balance: FiniteChannelFillBalance,
+    },
+}
+impl FiniteChannelFillAssemblyAdvanceStep {
+    pub const fn balance(&self) -> &FiniteChannelFillBalance {
+        match self {
+            Self::Filling(step) => &step.balance,
+            Self::ClosedPath { balance, .. } => balance,
+        }
+    }
+    pub const fn duration_s(&self) -> f64 {
+        match self {
+            Self::Filling(step) => step.duration_s,
+            Self::ClosedPath { thermal, .. } => thermal.duration_s,
+        }
+    }
+}
+
+/// Donor, exact or filled receiver, and the complete original wall assembly.
+#[derive(Clone, Debug)]
+pub struct FiniteChannelFillAssemblyAdvanceCandidate<'l, 'p> {
+    donor: ClosedGasParcel,
+    receiver: EffusionReceiver,
+    walls: BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>>,
+    step: FiniteChannelFillAssemblyAdvanceStep,
+}
+impl<'l, 'p> FiniteChannelFillAssemblyAdvanceCandidate<'l, 'p> {
+    pub const fn donor(&self) -> &ClosedGasParcel { &self.donor }
+    pub const fn receiver(&self) -> &EffusionReceiver { &self.receiver }
+    pub const fn walls(&self) -> &BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>> { &self.walls }
+    pub const fn step(&self) -> &FiniteChannelFillAssemblyAdvanceStep { &self.step }
+    pub fn into_parts(self) -> (
+        ClosedGasParcel, EffusionReceiver,
+        BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>>, FiniteChannelFillAssemblyAdvanceStep,
+    ) {
+        (self.donor, self.receiver, self.walls, self.step)
     }
 }
 
@@ -209,7 +260,7 @@ fn pressure_limit(
 }
 
 fn pair(
-    candidate: &FiniteChannelFillCandidate<'_, '_>,
+    candidate: &FiniteChannelFillAssemblyCandidate<'_, '_>,
     link: FiniteChannelFillLink<'_>,
 ) -> Result<BTreeMap<u64, ClosedGasParcel>, Error> {
     let receiver = candidate.receiver().gas()
@@ -274,6 +325,14 @@ fn energy_error(
 enum Stage<'a> {
     Initial(&'a FiniteChannelFirstFill),
     Exchange(&'a FiniteChannelNetworkStep),
+}
+impl<'a> Stage<'a> {
+    fn heat(self) -> (&'a [FiniteChannelWallStep], &'a [ChannelWallConductionStep]) {
+        match self {
+            Self::Initial(first) => (&first.transport.walls, &first.transport.conduction),
+            Self::Exchange(step) => (&step.walls, &step.conduction),
+        }
+    }
 }
 fn stage(step: &FiniteChannelFillStep) -> Stage<'_> {
     match &step.transfer {
@@ -351,7 +410,9 @@ fn stream_error(
     a.record(coarse, link, cancelled)?;
     b.record(first, link, cancelled)?;
     b.record(second, link, cancelled)?;
-    let mut error = 0.0_f64;
+    let mut error = native::heat_error(
+        coarse.heat(), first.heat(), second.heat(), controls, cancelled,
+    )?;
     for key in a.masses.keys().chain(b.masses.keys()) {
         if cancelled() { return Err(FiniteChannelAdvanceError::Cancelled); }
         let x = a.masses.get(key).copied().unwrap_or(Dd::ZERO).to_f64();
@@ -373,6 +434,7 @@ fn rows(report: Stage<'_>) -> usize {
         Stage::Initial(first) => (
             &first.transport.gas.exchange,
             1 + first.captured_species_kg.len() + first.transport.walls.len()
+                + first.transport.conduction.len()
                 + first.transport.gas.outlets.iter().map(|row| {
                     1 + row.transmitted.species.len() + row.wall.reflected_species.len()
                         + row.escaped_species.len()
@@ -380,7 +442,7 @@ fn rows(report: Stage<'_>) -> usize {
         ),
         Stage::Exchange(step) => (
             &step.exchange,
-            step.walls.len() + step.channels.iter().map(|row| {
+            step.walls.len() + step.conduction.len() + step.channels.iter().map(|row| {
                 1 + row.transmitted.species.len() + row.wall.reflected_species.len()
             }).sum::<usize>(),
         ),
@@ -398,8 +460,8 @@ struct Trial {
 ///
 /// One work/accuracy policy covers startup and continuation. Original gas and
 /// material sources, gross withdrawals, fixed geometry and caloric support are
-/// binding at every probe. All three finite endpoints publish together only
-/// after the original-to-final closed mass/energy/entropy audit succeeds.
+/// binding at every probe. All gas and finite material endpoints publish together
+/// only after the original-to-final closed mass/energy/entropy audit succeeds.
 #[allow(clippy::too_many_arguments)]
 pub fn advance_candidate<'l, 'p, C: FnMut() -> bool>(
     donor: &ClosedGasParcel,
@@ -411,18 +473,53 @@ pub fn advance_candidate<'l, 'p, C: FnMut() -> bool>(
     receiver_solve: GasEnergySolve,
     physical_controls: GasTransportSolve,
     controls: EffusionAdvanceControls,
-    mut cancelled: C,
+    cancelled: C,
 ) -> Result<FiniteChannelFillAdvanceCandidate<'l, 'p>, Error> {
+    let (donor, receiver, mut walls, step) = advance_candidate_with_conduction(
+        donor, receiver, &BTreeMap::from([(link.wall, wall.clone())]), link, &[],
+        duration_s, donor_solve, receiver_solve, physical_controls, controls, cancelled,
+    )?.into_parts();
+    let wall = walls.remove(&link.wall)
+        .ok_or(Error::Invalid("finite filling lost its original single wall"))?;
+    let FiniteChannelFillAssemblyAdvanceStep::Filling(step) = step else {
+        return Err(Error::Invalid("single-wall filling produced conductive-only history"));
+    };
+    Ok(FiniteChannelFillAdvanceCandidate { donor, receiver, wall, step })
+}
+
+/// Fill from exact vacuum while all original finite walls conduct and evolve.
+///
+/// Positive capture uses the original startup comparison and continuing native
+/// history driver. A closed passage instead advances its real conductive wall
+/// assembly with the original vacuum driver, leaving the receiver exactly empty.
+/// Both paths retain one complete closed-system mass/energy/entropy budget.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_candidate_with_conduction<'l, 'p, C: FnMut() -> bool>(
+    donor: &ClosedGasParcel,
+    receiver: &EvacuatedGasVolume,
+    walls: &BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>>,
+    link: FiniteChannelFillLink<'_>,
+    conduction: &[ChannelWallConduction<'_, '_>],
+    duration_s: f64,
+    donor_solve: GasEnergySolve,
+    receiver_solve: GasEnergySolve,
+    physical_controls: GasTransportSolve,
+    controls: EffusionAdvanceControls,
+    mut cancelled: C,
+) -> Result<FiniteChannelFillAssemblyAdvanceCandidate<'l, 'p>, Error> {
     poll(&mut cancelled)?;
     controls.validate()
         .map_err(|_| Error::Invalid("invalid finite thermal filling controls"))?;
     if !duration_s.is_finite() || duration_s <= 0.0 || link.donor == link.receiver {
         return Err(Error::Invalid("positive finite filling time and distinct chambers required"));
     }
+    let original_walls = walls;
+    let wall = walls.get(&link.wall)
+        .ok_or(Error::Invalid("finite filling references an absent channel wall"))?;
     let empty = EffusionReceiver::Evacuated(receiver.clone());
     let first_step = |dt, cancelled: &mut C| {
-        step_candidate(
-            donor, &empty, wall, link, dt, donor_solve, receiver_solve,
+        step_candidate_with_conduction(
+            donor, &empty, walls, link, conduction, dt, donor_solve, receiver_solve,
             physical_controls, cancelled,
         ).map_err(|e| fill(e, dt))
     };
@@ -437,16 +534,47 @@ pub fn advance_candidate<'l, 'p, C: FnMut() -> bool>(
             span = ceiling;
         }
         None => {
-            let (donor, receiver, wall, first_fill) =
+            if !conduction.is_empty() {
+                let (mut gases, next_walls, history) =
+                    vacuum::trajectory::advance_candidate_with_conduction(
+                        &BTreeMap::from([(link.donor, donor.clone())]), walls,
+                        GasTransportPaths::default(), &[FiniteVacuumChannelLink {
+                            id: link.id, parcel: link.donor, channel: link.channel,
+                            area_m2: link.area_m2, wall: link.wall,
+                        }], conduction, duration_s,
+                        &BTreeMap::from([(link.donor, donor_solve)]),
+                        physical_controls, controls, &mut cancelled,
+                    ).map_err(advance)?.into_parts();
+                let next_donor = gases.remove(&link.donor)
+                    .ok_or(Error::Invalid("closed filling path lost its donor"))?;
+                if history.balance.gas.escaped_mass_kg != 0.0 {
+                    return Err(Error::Invalid("closed filling path emitted molecular inventory"));
+                }
+                let balance = audit_assembly(
+                    donor, &empty, walls, &next_donor, &empty, &next_walls, link,
+                    physical_controls, &mut cancelled,
+                ).map_err(|error| fill(error, duration_s))?;
+                audit_wall_history(
+                    walls, &next_walls,
+                    history.accepted_steps.iter().flat_map(|step| step.walls.iter()),
+                    physical_controls.exchange.energy_tolerance_j, &mut cancelled,
+                ).map_err(|error| fill(error, duration_s))?;
+                poll(&mut cancelled)?;
+                return Ok(FiniteChannelFillAssemblyAdvanceCandidate {
+                    donor: next_donor, receiver: empty, walls: next_walls,
+                    step: FiniteChannelFillAssemblyAdvanceStep::ClosedPath { thermal: history, balance },
+                });
+            }
+            let (donor, receiver, walls, first_fill) =
                 first_step(duration_s, &mut cancelled)?.into_parts();
             if receiver.gas().is_some() {
                 return Err(Error::Invalid("inactive channel created receiver inventory"));
             }
             let balance = first_fill.balance;
             poll(&mut cancelled)?;
-            return Ok(FiniteChannelFillAdvanceCandidate {
-                donor, receiver, wall,
-                step: FiniteChannelFillAdvanceStep {
+            return Ok(FiniteChannelFillAssemblyAdvanceCandidate {
+                donor, receiver, walls,
+                step: FiniteChannelFillAssemblyAdvanceStep::Filling(FiniteChannelFillAdvanceStep {
                     duration_s,
                     attempted_steps: 1,
                     accepted_intervals: 1,
@@ -456,7 +584,7 @@ pub fn advance_candidate<'l, 'p, C: FnMut() -> bool>(
                     first_reciprocal: None,
                     continuation: Vec::new(),
                     balance,
-                },
+                }),
             });
         }
         _ => {}
@@ -471,8 +599,8 @@ pub fn advance_candidate<'l, 'p, C: FnMut() -> bool>(
         walls: &BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>>,
         dt, cancelled: &mut C,
     | -> Result<native::ThermalStepParts<'l, 'p, Trial>, FiniteChannelError> {
-        let (gases, walls, step) = thermal::step_candidate(
-            gases, walls, GasTransportPaths::default(), &links, dt, &endpoints,
+        let (gases, walls, step) = thermal::step_candidate_with_conduction(
+            gases, walls, GasTransportPaths::default(), &links, conduction, dt, &endpoints,
             physical_controls, &mut *cancelled,
         )?.into_parts();
         let energy = energies(donor, &gases, link, cancelled)?;
@@ -494,13 +622,13 @@ pub fn advance_candidate<'l, 'p, C: FnMut() -> bool>(
             let first_gas = pair(&first, link)?;
             count(&mut attempted, controls)?;
             let (gas, wall, fine) = evaluate(
-                &first_gas, &BTreeMap::from([(link.wall, first.wall().clone())]),
+                &first_gas, first.walls(),
                 half, &mut cancelled,
             ).map_err(|e| physical(e, half, half))?;
             let error = native::gas_error(&coarse_gas, &gas, controls, &mut cancelled)
                 .map_err(advance)?
                 .max(native::wall_error(
-                    &BTreeMap::from([(link.wall, coarse.wall().clone())]), &wall,
+                    coarse.walls(), &wall,
                     controls, &mut cancelled,
                 ).map_err(advance)?)
                 .max(energy_error(
@@ -588,16 +716,21 @@ pub fn advance_candidate<'l, 'p, C: FnMut() -> bool>(
         current.remove(&link.receiver)
             .ok_or(Error::Invalid("filled receiver identity missing"))?,
     );
-    let next_wall = walls.remove(&link.wall)
-        .ok_or(Error::Invalid("filled wall identity missing"))?;
-    let balance = audit_pair(
-        donor, &empty, wall, &next_donor, &next_receiver, &next_wall,
+    let balance = audit_assembly(
+        donor, &empty, original_walls, &next_donor, &next_receiver, &walls,
         link, physical_controls, &mut cancelled,
     ).map_err(|e| fill(e, duration_s))?;
+    audit_wall_history(
+        original_walls, &walls,
+        stage(&first_fill).heat().0.iter()
+            .chain(first_reciprocal.walls.iter())
+            .chain(continuation.iter().flat_map(|step: &FiniteChannelNetworkStep| step.walls.iter())),
+        physical_controls.exchange.energy_tolerance_j, &mut cancelled,
+    ).map_err(|e| fill(e, duration_s))?;
     poll(&mut cancelled)?;
-    Ok(FiniteChannelFillAdvanceCandidate {
-        donor: next_donor, receiver: next_receiver, wall: next_wall,
-        step: FiniteChannelFillAdvanceStep {
+    Ok(FiniteChannelFillAssemblyAdvanceCandidate {
+        donor: next_donor, receiver: next_receiver, walls,
+        step: FiniteChannelFillAssemblyAdvanceStep::Filling(FiniteChannelFillAdvanceStep {
             duration_s,
             attempted_steps: attempted,
             accepted_intervals: accepted,
@@ -607,6 +740,6 @@ pub fn advance_candidate<'l, 'p, C: FnMut() -> bool>(
             first_reciprocal: Some(first_reciprocal),
             continuation,
             balance,
-        },
+        }),
     })
 }

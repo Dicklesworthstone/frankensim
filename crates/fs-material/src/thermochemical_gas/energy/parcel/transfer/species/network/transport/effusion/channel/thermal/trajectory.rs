@@ -283,7 +283,7 @@ pub(in super::super) fn wall_error<'l, 'p>(
 
 /// Separate directions and mechanisms before reducing a heat account. In
 /// particular a wall cooled by gas and heated by conduction may barely move.
-pub(super) fn heat_error(
+pub(in super::super) fn heat_error(
     coarse: (&[FiniteChannelWallStep], &[ChannelWallConductionStep]),
     first: (&[FiniteChannelWallStep], &[ChannelWallConductionStep]),
     second: (&[FiniteChannelWallStep], &[ChannelWallConductionStep]),
