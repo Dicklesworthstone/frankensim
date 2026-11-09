@@ -227,7 +227,9 @@ pub use unsteady::{
     Boussinesq, ConjugateMarch, FlowStepRecord, MaterialEndpointConfig, MaterialEndpointMarch,
     MaterialEndpointStepReport, UnsteadyConfig, UnsteadyFlow, march_conjugate,
     march_conjugate_implicit_buoyancy, march_conjugate_with_sgs,
-    march_conjugate_with_sgs_implicit_buoyancy, simple_unsteady, simple_unsteady_with_sgs,
+    march_conjugate_with_sgs_implicit_buoyancy, simple_unsteady,
+    simple_unsteady_with_pressure_schedule, simple_unsteady_with_sgs,
+    simple_unsteady_with_sgs_and_pressure_schedule,
 };
 
 /// Semantics version of the conjugate pipeline: covers voxel indexing, face
@@ -249,7 +251,9 @@ pub use unsteady::{
 /// solver increments and internal nonlinear proposals remain numerical work.
 /// Version 10 centers SIMPLE pressure independently in each connected fluid
 /// component, retaining its native opening work and checkpoint coordinates.
-pub const CHT_SEMANTICS_VERSION: u32 = 10;
+/// Version 11 adds endpoint modulation of authored reservoir pressure
+/// differences on the retained native BE/BDF2 momentum timeline.
+pub const CHT_SEMANTICS_VERSION: u32 = 11;
 
 /// Structured refusal from any stage of the conjugate pipeline.
 #[derive(Debug, Clone, PartialEq)]

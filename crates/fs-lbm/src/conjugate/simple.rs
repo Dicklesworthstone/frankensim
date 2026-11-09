@@ -438,10 +438,11 @@ pub struct SimpleConfig {
     /// Each vector covers the complete plane, including inactive solid faces;
     /// only fluid-exposed values load momentum. Every value must be finite.
     ///
-    /// A profile is fixed during a solve and follows the native static-pressure
-    /// opening (or the explicitly selected traction-mouth model). It does not
-    /// prescribe velocity, alter material density, interpolate a continuous
-    /// exterior field or supply a pressure-dependent thermodynamic EOS.
+    /// The authored profile follows the native static-pressure opening (or
+    /// the explicitly selected traction-mouth model). It is held fixed unless
+    /// a transient pressure-schedule entry modulates its component-relative
+    /// differences. It does not prescribe velocity, alter material density,
+    /// interpolate an exterior field or supply a thermodynamic EOS.
     pub pressure_profiles_pa: [Option<Vec<f64>>; 6],
     /// External velocity carried by incoming fluid at each Pressure/Outlet
     /// face, in world axes and m/s. None retains zero incoming tangential
@@ -900,6 +901,9 @@ pub(super) struct Solver<'a> {
     pressure: Vec<f64>,
     /// Component-local numerical datums restored only for physical readback.
     pressure_reference_pa: PressureReferences,
+    /// Endpoint modulation of authored reservoir pressure differences.
+    /// The fixed component datums and all momentum time levels are retained.
+    pressure_scale: f64,
     /// SIMPLEC `d` per face (0 for non-unknown faces until set).
     d: [Vec<f64>; 3],
     /// Krylov iterations spent on momentum and pressure correction.
@@ -1264,6 +1268,7 @@ impl<'a> Solver<'a> {
             vel,
             pressure: vec![0.0; domain.cell_count()],
             pressure_reference_pa: config.pressure_reference_pa(domain),
+            pressure_scale: 1.0,
             d,
             momentum_krylov: 0,
             pressure_krylov: 0,
@@ -1588,6 +1593,54 @@ impl<'a> Solver<'a> {
                 };
             }
         }
+    }
+
+    /// Modulate only the prescribed reservoir head, retaining the pressure
+    /// datum, native velocity history, profile shape and opening topology.
+    /// Admission walks the exposed planes without allocating or rediscovering
+    /// connected components. A rejected sample leaves the old factor intact.
+    pub(super) fn scale_pressure(&mut self, scale: f64, gate: &CancelGate) -> Result<(), ChtError> {
+        poll(gate)?;
+        finite("unsteady.pressure_schedule", scale)?;
+        if scale == self.pressure_scale {
+            return Ok(());
+        }
+        for side in 0..6 {
+            if self.config.faces[side].prescribed_pressure().is_none() {
+                continue;
+            }
+            let axis = side / 2;
+            let count = self.n[(axis + 1) % 3] * self.n[(axis + 2) % 3];
+            for index in 0..count {
+                if index.is_multiple_of(256) {
+                    poll(gate)?;
+                }
+                let cell = SimpleConfig::pressure_profile_cell(self.domain, side, index);
+                if !self.domain.is_fluid(cell) {
+                    continue;
+                }
+                let reference = self.pressure_reference_pa.at(cell);
+                let pressure = self
+                    .config
+                    .pressure_at(side, self.n, self.domain.coords(cell))
+                    .expect("admitted pressure opening");
+                let difference = (pressure - reference) * scale;
+                finite("unsteady.pressure_difference_pa", 2.0 * difference)?;
+                finite("unsteady.reservoir_pressure_pa", reference + difference)?;
+            }
+        }
+        poll(gate)?;
+        self.pressure_scale = scale;
+        Ok(())
+    }
+
+    /// Prescribed pressure in the same local coordinates as the momentum rows.
+    fn boundary_pressure_difference(&self, side: usize, cell: usize) -> f64 {
+        let pressure = self
+            .config
+            .pressure_at(side, self.n, self.domain.coords(cell))
+            .expect("pressure-opening topology");
+        (pressure - self.pressure_reference_pa.at(cell)) * self.pressure_scale
     }
 
     /// Secant step of the fan operating point, taken only on a settled
@@ -2414,12 +2467,9 @@ impl<'a> Solver<'a> {
             let drop = match comp.kind[index] {
                 Kind::Outlet(_) => {
                     let plus = f[a] != 0;
-                    let boundary = self
-                        .config
-                        .pressure_at(2 * a + usize::from(plus), self.n, f)
-                        .expect("pressure-opening topology");
                     let interior = cell_of(self.n, if plus { minus_cell } else { plus_cell });
-                    let pressure = boundary - self.pressure_reference_pa.at(interior);
+                    let pressure =
+                        self.boundary_pressure_difference(2 * a + usize::from(plus), interior);
                     if pressure == 0.0 {
                         if plus {
                             2.0 * self.pressure[cell_of(self.n, minus_cell)]

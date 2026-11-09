@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::conjugate::{
-    EnergyConfig, ThermalFace, ThermalSetup, UnsteadyConfig, simple_unsteady, solve_energy,
+    EnergyConfig, ThermalFace, ThermalSetup, UnsteadyConfig, simple_unsteady,
+    simple_unsteady_with_pressure_schedule, solve_energy,
 };
 
 fn fluid() -> FluidProperties {
@@ -176,6 +177,224 @@ fn pressure_opening_drives_the_original_transient_momentum_owner() {
     let shifted = simple_unsteady(&domain, &fluid(), &shifted, &time, |_| 1.0, &gate).unwrap();
     assert_eq!(started.records, shifted.records);
     assert_eq!(started.flow.velocity_m_s, shifted.flow.velocity_m_s);
+}
+
+fn pressure_plug(axis: usize) -> (VoxelDomain, SimpleConfig) {
+    let (domain, mut config) = channel(1, axis, 0.5, 0.0);
+    let transverse = (axis + 1) % 3;
+    config.faces[2 * transverse] = FvBoundary::Symmetry;
+    config.faces[2 * transverse + 1] = FvBoundary::Symmetry;
+    (domain, config)
+}
+
+#[test]
+fn scheduled_pressure_retains_native_be_bdf2_inertia_and_reverses_on_all_axes() {
+    let gate = CancelGate::new();
+    for axis in 0..3 {
+        for scheme in [TimeScheme::BackwardEuler, TimeScheme::Bdf2] {
+            let (domain, config) = pressure_plug(axis);
+            let mut time = UnsteadyConfig::new(0.125, 4);
+            time.scheme = scheme;
+            time.inner_tolerance = 1e-10;
+            time.inner_iterations = 400;
+            time.probe = Some(0);
+            let flow = simple_unsteady_with_pressure_schedule(
+                &domain,
+                &fluid(),
+                &config,
+                &time,
+                |_| 1.0,
+                |t| if t <= 0.25 { 1.0 } else { -4.0 },
+                &gate,
+            )
+            .unwrap();
+            // Symmetry sides admit an exact uniform plug. Its native pressure
+            // gradient supplies du/dt = dp/(rho L); convection and shear vanish.
+            // This recurrence checks the actual solved face field and inertia.
+            let mut previous = 0.0;
+            let mut older = 0.0;
+            for (step, record) in flow.records.iter().enumerate() {
+                let factor = if step < 2 { 1.0 } else { -4.0 };
+                let impulse = time.time_step_s * (0.5 / 2.0) * factor;
+                let expected = match scheme {
+                    TimeScheme::Bdf2 if step > 0 => (2.0 * previous - 0.5 * older + impulse) / 1.5,
+                    _ => previous + impulse,
+                };
+                let mut velocity = [0.0; 3];
+                velocity[axis] = expected;
+                for (actual, expected) in record.probe_velocity_m_s.iter().zip(velocity) {
+                    assert!(
+                        (actual - expected).abs() < 2e-9,
+                        "axis={axis}, scheme={scheme:?}, step={step}: {record:?}"
+                    );
+                }
+                // rho=1, physical volume=2: K = rho V u^2/2 = u^2,
+                // including the original opening half-cell masses.
+                assert!((record.kinetic_energy_j - expected * expected).abs() < 2e-9);
+                older = previous;
+                previous = expected;
+            }
+            assert!(previous < 0.0);
+            let q = flow
+                .flow
+                .field
+                .boundary_outflow(&domain, Face3::ALL[2 * axis + 1]);
+            assert!((q - previous).abs() < 2e-9);
+            assert!(flow.flow.report.max_divergence_m3_s < 1e-10);
+            for c in 0..domain.cell_count() {
+                let at = domain.coords(c);
+                let x = domain.center(at[0], at[1], at[2])[axis];
+                let pressure = 0.5 - (-4.0) * (0.5 / 2.0) * x;
+                assert!((flow.flow.pressure_pa[c] - pressure).abs() < 2e-8);
+            }
+        }
+    }
+}
+
+#[test]
+fn oscillatory_pressure_native_flow_refines_in_time_and_conserves_volume() {
+    let gate = CancelGate::new();
+    let (domain, config) = pressure_plug(0);
+    let omega = core::f64::consts::TAU;
+    for scheme in [TimeScheme::BackwardEuler, TimeScheme::Bdf2] {
+        let mut errors = Vec::new();
+        for steps in [24, 48, 96] {
+            let mut time = UnsteadyConfig::new(0.75 / steps as f64, steps);
+            time.scheme = scheme;
+            time.inner_tolerance = 1e-11;
+            time.inner_iterations = 400;
+            time.probe = Some(0);
+            let flow = simple_unsteady_with_pressure_schedule(
+                &domain,
+                &fluid(),
+                &config,
+                &time,
+                |_| 1.0,
+                |t| (omega * t).cos(),
+                &gate,
+            )
+            .unwrap();
+            // du/dt = (dp/rho L) cos(omega t), u(0)=0. At t=3/4
+            // period, u=-dp/(rho L omega), after actual flow reversal.
+            let expected = -0.25 / omega;
+            let actual = flow.records.last().unwrap().probe_velocity_m_s[0];
+            errors.push((actual - expected).abs());
+            assert!(flow.records.iter().any(|r| r.probe_velocity_m_s[0] > 0.01));
+            assert!(actual < 0.0);
+            assert!(flow.flow.report.max_divergence_m3_s < 1e-10);
+            assert!(flow.mean_field.max_divergence(&domain) < 1e-10);
+        }
+        let minimum_ratio = match scheme {
+            TimeScheme::BackwardEuler => 1.9,
+            TimeScheme::Bdf2 => 3.3,
+        };
+        assert!(
+            errors.windows(2).all(|e| e[0] / e[1] > minimum_ratio),
+            "scheme={scheme:?}: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn pressure_schedule_keeps_profiles_component_gauges_and_constant_schedule_parity() {
+    let gate = CancelGate::new();
+    let (domain, config) = separated_pressure_channels(0, [0.0; 2], [0.5, -0.25]);
+    let (_, shifted) =
+        separated_pressure_channels(0, [1_048_576.0, -1_099_511_627_776.0], [0.5, -0.25]);
+    let mut time = UnsteadyConfig::new(0.1, 4);
+    time.inner_tolerance = 1e-9;
+    time.inner_iterations = 400;
+    let original = simple_unsteady(&domain, &fluid(), &config, &time, |_| 1.0, &gate).unwrap();
+    let constant = simple_unsteady_with_pressure_schedule(
+        &domain,
+        &fluid(),
+        &config,
+        &time,
+        |_| 1.0,
+        |_| 1.0,
+        &gate,
+    )
+    .unwrap();
+    assert_eq!(constant, original);
+    let samples = core::cell::RefCell::new(Vec::new());
+    let schedule = |t| if t <= 0.2 { 1.0 } else { -2.0 };
+    let driven = simple_unsteady_with_pressure_schedule(
+        &domain,
+        &fluid(),
+        &config,
+        &time,
+        |_| 1.0,
+        |t| {
+            samples.borrow_mut().push(t);
+            schedule(t)
+        },
+        &gate,
+    )
+    .unwrap();
+    let offset = simple_unsteady_with_pressure_schedule(
+        &domain,
+        &fluid(),
+        &shifted,
+        &time,
+        |_| 1.0,
+        schedule,
+        &gate,
+    )
+    .unwrap();
+    assert_eq!(
+        *samples.borrow(),
+        (1..=time.steps)
+            .map(|step| step as f64 * time.time_step_s)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(driven.records, offset.records);
+    assert_eq!(driven.flow.velocity_m_s, offset.flow.velocity_m_s);
+    assert_eq!(driven.flow.field, offset.flow.field);
+    assert_eq!(driven.flow.report, offset.flow.report);
+    assert_eq!(driven.mean_field, offset.mean_field);
+    assert!(driven.flow.report.max_divergence_m3_s < 1e-10);
+}
+
+#[test]
+fn pressure_schedule_refuses_nonfinite_overflow_and_cancellation_without_mutating_inputs() {
+    let gate = CancelGate::new();
+    let (domain, config) = channel(1, 0, 4.0, 0.0);
+    let original = config.clone();
+    let mut time = UnsteadyConfig::new(0.1, 2);
+    time.inner_tolerance = 1e-9;
+    time.inner_iterations = 400;
+    for (sample, field) in [
+        (f64::NAN, "unsteady.pressure_schedule"),
+        (f64::INFINITY, "unsteady.pressure_schedule"),
+        (f64::NEG_INFINITY, "unsteady.pressure_schedule"),
+        (f64::MAX, "unsteady.pressure_difference_pa"),
+    ] {
+        let result = simple_unsteady_with_pressure_schedule(
+            &domain,
+            &fluid(),
+            &config,
+            &time,
+            |_| 1.0,
+            |t| if t <= 0.1 { 1.0 } else { sample },
+            &gate,
+        );
+        assert!(matches!(result, Err(ChtError::InvalidInput { field: got, .. }) if got == field));
+        assert_eq!(config, original);
+    }
+    let result = simple_unsteady_with_pressure_schedule(
+        &domain,
+        &fluid(),
+        &config,
+        &time,
+        |_| 1.0,
+        |_| {
+            gate.request();
+            1.0
+        },
+        &gate,
+    );
+    assert!(matches!(result, Err(ChtError::Cancelled)));
+    assert_eq!(config, original);
 }
 
 #[test]

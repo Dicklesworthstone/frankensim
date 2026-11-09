@@ -214,11 +214,7 @@ impl Solver<'_> {
                     poll(gate)?;
                 }
                 if self.domain.is_fluid(c) && self.domain.neighbor(c, face).is_none() {
-                    let pressure = self
-                        .config
-                        .pressure_at(face, self.n, self.domain.coords(c))
-                        .expect("admitted pressure mouth")
-                        - self.pressure_reference_pa.at(c);
+                    let pressure = self.boundary_pressure_difference(face, c);
                     power[face] = finite_value(
                         "pressure_heat.reservoir_work",
                         power[face] - pressure * field.outward(self.domain, c, face),

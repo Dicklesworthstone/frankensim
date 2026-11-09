@@ -1,3 +1,31 @@
+## Scheduled differential pressure in native transient flow
+
+`simple_unsteady_with_pressure_schedule` and its explicit SGS companion sample
+one finite signed factor at each native time-step endpoint. Every authored
+Pressure/Outlet value, including spatial profiles, becomes
+`p_ref + factor * (p_authored - p_ref)`, using the existing fixed reference of
+its own connected fluid component. Factor one preserves the original march;
+zero removes reservoir head and negative values reverse it. This is scalar
+modulation of the differential profile, not independent per-port pressure
+control or thermodynamic evolution of a common pressure datum.
+
+The original solver retains its BE/BDF2 velocity history, face inertia,
+pressure projection, physical half-cell opening masses and backflow rules.
+Internal fan curves, body loads and tangential reservoir velocities keep their
+original owners. No per-step allocation or topology traversal is added:
+changed samples only admit the original exposed pressure planes. Invalid or
+unrepresentable samples and cancellation return no partial march and leave
+caller-owned data unchanged. Discontinuous schedules require time steps aligned
+with their authored transitions. This flow-only entry does not advance heat.
+
+Four native regression definitions exercise all-axis pressure-driven inertia
+and reversal with BE/BDF2, oscillatory temporal refinement and conservation,
+spatial profiles with independent large component offsets and constant-one
+parity, and rejected samples/cancellation. The changed Rust sources passed the
+pinned compiler toolchain's syntax/format parser. Native execution remains
+pending: the shared filesystem is full and no cached LBM test binary or complete
+dependency outputs are available. No executed convergence claim is made here.
+
 ## Independent pressure datums in disconnected finite-volume flow
 
 The native SIMPLE owner centers pressure independently in each face-connected

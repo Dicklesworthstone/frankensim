@@ -471,7 +471,63 @@ pub fn simple_unsteady(
     inlet_schedule: impl Fn(f64) -> f64,
     gate: &CancelGate,
 ) -> Result<UnsteadyFlow, ChtError> {
-    simple_unsteady_inner(domain, fluid, config, unsteady, None, inlet_schedule, gate)
+    simple_unsteady_inner(
+        domain,
+        fluid,
+        config,
+        unsteady,
+        None,
+        inlet_schedule,
+        |_| 1.0,
+        gate,
+    )
+}
+
+/// March from rest with a time-dependent differential reservoir pressure.
+///
+/// At each step's end time, the finite signed `pressure_schedule(t)` modulates
+/// every authored Pressure/Outlet value, including spatial profiles, as
+/// `p_face(t) = p_reference + factor(t) * (p_face_authored - p_reference)`.
+/// Each disconnected fluid component retains its original reference, chosen
+/// from its first exposed reservoir. Thus the schedule changes pressure
+/// differences without multiplying an atmospheric or other common offset.
+///
+/// A factor of one exactly reproduces [`simple_unsteady`]. Zero equalizes the
+/// prescribed reservoir pressures in each component; a negative factor
+/// reverses their head. Existing inertia, viscosity, body loads and internal
+/// fans still determine the actual flow, including backflow. The same native
+/// solver, BE/BDF2 velocity history and pressure projection persist throughout
+/// the march. The callback is sampled once per endpoint, never inside a
+/// nonlinear sweep; resolve authored jumps with the time grid.
+///
+/// This is one scalar modulation of the authored differential profile, not
+/// independent per-port control or thermodynamic common-mode pressure evolution.
+/// Reservoir tangential velocities and other loads retain their own controls.
+/// Energy and coupled thermal marches are not advanced by this flow-only entry.
+///
+/// # Errors
+/// The refusals of [`simple_unsteady`], a non-finite schedule sample, or an
+/// unrepresentable scaled pressure difference or reservoir pressure. No partial
+/// march is returned on refusal or cancellation; caller-owned inputs are unchanged.
+pub fn simple_unsteady_with_pressure_schedule(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    config: &SimpleConfig,
+    unsteady: &UnsteadyConfig,
+    inlet_schedule: impl Fn(f64) -> f64,
+    pressure_schedule: impl Fn(f64) -> f64,
+    gate: &CancelGate,
+) -> Result<UnsteadyFlow, ChtError> {
+    simple_unsteady_inner(
+        domain,
+        fluid,
+        config,
+        unsteady,
+        None,
+        inlet_schedule,
+        pressure_schedule,
+        gate,
+    )
 }
 
 /// March transient flow with an explicitly selected Smagorinsky/WALE closure.
@@ -502,10 +558,44 @@ pub fn simple_unsteady_with_sgs(
         unsteady,
         Some(sgs),
         inlet_schedule,
+        |_| 1.0,
         gate,
     )
 }
 
+/// Combine the original transient SGS closure with differential-pressure forcing.
+///
+/// Pressure, sampling and rollback semantics are those of
+/// [`simple_unsteady_with_pressure_schedule`]. The original
+/// [`simple_unsteady_with_sgs`] closure, resolved-gradient update and regime
+/// restrictions continue to apply; pressure modulation adds no new SGS model.
+///
+/// # Errors
+/// The refusals of both original entries, including invalid pressure samples.
+#[allow(clippy::too_many_arguments)]
+pub fn simple_unsteady_with_sgs_and_pressure_schedule(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    config: &SimpleConfig,
+    unsteady: &UnsteadyConfig,
+    sgs: FvSgsConfig,
+    inlet_schedule: impl Fn(f64) -> f64,
+    pressure_schedule: impl Fn(f64) -> f64,
+    gate: &CancelGate,
+) -> Result<UnsteadyFlow, ChtError> {
+    simple_unsteady_inner(
+        domain,
+        fluid,
+        config,
+        unsteady,
+        Some(sgs),
+        inlet_schedule,
+        pressure_schedule,
+        gate,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn simple_unsteady_inner(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
@@ -513,6 +603,7 @@ fn simple_unsteady_inner(
     unsteady: &UnsteadyConfig,
     sgs: Option<FvSgsConfig>,
     inlet_schedule: impl Fn(f64) -> f64,
+    pressure_schedule: impl Fn(f64) -> f64,
     gate: &CancelGate,
 ) -> Result<UnsteadyFlow, ChtError> {
     admit(domain, fluid, config)?;
@@ -523,11 +614,12 @@ fn simple_unsteady_inner(
     }
     for step in 1..=unsteady.steps {
         poll(gate)?;
-        marcher.step(
-            step,
-            inlet_schedule(step as f64 * unsteady.time_step_s),
-            gate,
-        )?;
+        let time_s = step as f64 * unsteady.time_step_s;
+        let inflow = inlet_schedule(time_s);
+        marcher
+            .solver
+            .scale_pressure(pressure_schedule(time_s), gate)?;
+        marcher.step(step, inflow, gate)?;
         marcher.solver.advance_time();
     }
     marcher.finish(fluid, gate)
