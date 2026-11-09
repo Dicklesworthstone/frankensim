@@ -1522,6 +1522,59 @@ This is the native first-order implicit donor advection scope. Species diffusion
 reactions, mixing heat, thermodynamic composition feedback and a higher-order
 advection scheme remain with their respective future/material owners.
 
+## Thermal evolution coupled to resolved Carreau film momentum
+
+With `implicit-enthalpy-coupling`,
+`film::transient::thermal::ThermalCarreauFilm` binds the retained original
+wall-normal velocity to the original identity-bearing caloric timeline.
+Ordered fluid cells must form the same straight, uniform wall-normal mesh:
+each cell retains volume `A*dy`, mass `rho*A*dy`, the same original caloric
+material and the same accepted time. Existing solid or wall cells may share
+the native thermal timeline. No capacity, conductivity or liquid phase
+occupancy is inferred from a viscosity law.
+
+Each native backward-Euler thermal residual, derivative probe and independent
+final evaluation restarts the SAME accepted momentum profile. Interior shear
+face temperatures interpolate the original native caloric cell temperatures;
+the callback supplies the actual wall and free-surface fluid-side traces
+from its original interface/conduction model. A solid bulk temperature is not
+automatically an interface temperature. Those endpoint source temperatures
+are held during the original midpoint momentum solve. This composition is
+first order in coupled time, even though momentum at a prescribed fixed
+temperature retains its midpoint scheme.
+
+The original local viscous-loss partition supplies each fluid cell's heat
+exactly once. Signed body, moving-wall and free-surface work remain mechanical
+exchange; neither kinetic-energy change nor algebraic defects are deposited
+as heat. Original native thermal acceptance precedes a separate combined
+`delta(thermal + kinetic) - other heat - mechanical work` gate. Other thermal
+power is measured directly by the native owner before viscous heat is added;
+the combined account uses the independently measured stored-energy change.
+Reports retain actual deposited heat, its partition residual, kinetic change,
+mechanical work and thermal/nonlinear residuals separately.
+
+The owner reuses its momentum trial arrays, temperature buffer and local heat
+buffer. Every thermal trial resets only the original accepted velocity/time;
+rejected Newton candidates do not become physical histories. Endpoint and
+aggregate momentum constitutive budgets bound nonlinear work. Native thermal
+and Krylov allocations remain. Cancellation is latched for the whole advance.
+No accepted velocity, thermal state or time changes unless all final gates
+pass; an explicit `into_parts` handoff permits native events and later rebinding.
+
+This is a locally parallel, fixed-thickness, fixed-reference-density liquid
+film. The thermal source must remain in its admitted liquid domain.
+Streamwise transport, evolving interfaces, thermal expansion and phase
+occupancy are not introduced by this coupling. Nonlinear convergence alone
+does not establish temporal or spatial accuracy.
+
+Focused regression sources exercise viscous self-heating and source feedback,
+an independent two-cell conduction/bath balance, refinement against independent
+coupled momentum/thermal integration, and joint refusal/cancellation/retry.
+The execution environment became unavailable before this extension could be
+compiled or its new tests executed. The final reconstructed sources received
+bounded source and ownership review only; preceding film test results apply
+to the earlier prescribed-temperature and local-heat implementation.
+
 ## Resolved transient Carreau films
 
 `set_face_temperatures` admits an explicitly supplied wall-normal temperature

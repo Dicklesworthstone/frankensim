@@ -24,6 +24,9 @@ use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
 use super::{FilmError, FilmMaterial, ShearedFilm};
 
 mod carreau;
+/// Original thermal storage coupled to resolved film momentum and local heat.
+#[cfg(feature = "implicit-enthalpy-coupling")]
+pub use carreau::thermal;
 pub use carreau::{
     TransientCarreauControls, TransientCarreauError, TransientCarreauFilm,
     TransientCarreauFilmSpec, TransientCarreauStep,

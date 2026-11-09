@@ -14,6 +14,10 @@ use fs_material::MaterialError;
 use fs_material::fluid_transport::rheology::ThermalCarreauYasuda;
 use fs_material::fluid_transport::rheology::pipe::{CarreauPipeControls, PreparedCarreau};
 
+/// Native caloric evolution with this same resolved momentum history.
+#[cfg(feature = "implicit-enthalpy-coupling")]
+pub mod thermal;
+
 use super::{
     FilmDrive, FilmMaterial, FilmStep, FilmStepLimits, MAX_FILM_CELLS, TransientFilm,
     TransientFilmError, filled, finite, poll, positive, stage_cell_heat,
