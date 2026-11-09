@@ -3,6 +3,9 @@ use super::*;
 use fs_flux::ns::linearization::FluxViscosityTangent;
 use fs_flux::ns::newton::{FluxNewtonControls, FluxNewtonError};
 
+#[path = "mixed_newton.rs"]
+mod mixed;
+
 #[test]
 fn consistent_sgs_tangent_resolves_stiff_flow_within_a_bounded_newton_budget() {
     let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 4, 4));

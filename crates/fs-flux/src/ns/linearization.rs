@@ -6,7 +6,7 @@
 
 use std::cell::RefCell;
 
-use super::boundary::AdmittedBoundary;
+use super::boundary::{AdmittedBoundary, OpenBoundaryPolicy};
 use super::{
     FluxParams, FluxSystem, convection_boundary_trace, convection_edge_quadrature, viscous_normal,
 };
@@ -201,9 +201,10 @@ impl FluxSystem<'_> {
         )
     }
 
-    // Mixed Stokes boundaries share every volume/interface derivative. Their
-    // prescribed total traction and Navier resistance do not depend on the
-    // bulk viscosity, so only velocity-Dirichlet faces add constitutive terms.
+    // Mixed boundaries share every volume/interface derivative. Prescribed
+    // total traction and Navier resistance do not depend on bulk viscosity;
+    // only velocity-Dirichlet faces add constitutive boundary terms. Convective
+    // derivatives retain each admitted incoming trace and backflow policy.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub(super) fn linearize_rheology_admitted(
         &self,
@@ -227,7 +228,6 @@ impl FluxSystem<'_> {
             || (inverse_timestep > 0.0 && previous_velocity.is_none())
             || previous_velocity
                 .is_some_and(|u| u.len() != self.n_u || u.iter().any(|v| !v.is_finite()))
-            || (admitted.is_some() && convection)
         {
             return Err(FluxLinearizationError::Invalid(
                 "finite full state, positive penalty and valid steady/BDF1 history required",
@@ -292,8 +292,7 @@ impl FluxSystem<'_> {
         }
         let mut constrained = vec![false; self.n_u];
         for (edge, geometry) in mesh.edges.iter().enumerate() {
-            if geometry.tris.1 == usize::MAX
-                && admitted.is_none_or(|data| !data.is_traction(edge))
+            if geometry.tris.1 == usize::MAX && admitted.is_none_or(|data| !data.is_traction(edge))
             {
                 constrained[2 * edge] = true;
                 constrained[2 * edge + 1] = true;
@@ -360,8 +359,7 @@ impl FluxSystem<'_> {
             let (c0, c1) = edge.tris;
             if c1 == usize::MAX
                 && admitted.is_some_and(|data| {
-                    data.is_traction(edge_index)
-                        || data.tangential_resistance(edge_index).is_some()
+                    data.is_traction(edge_index) || data.tangential_resistance(edge_index).is_some()
                 })
             {
                 continue;
@@ -375,8 +373,8 @@ impl FluxSystem<'_> {
                     if first.derivative == 0.0 {
                         continue;
                     }
-                    let prescribed =
-                        admitted.map_or_else(|| boundary(point), |data| data.velocity(edge_index, q));
+                    let prescribed = admitted
+                        .map_or_else(|| boundary(point), |data| data.velocity(edge_index, q));
                     if prescribed.iter().any(|v| !v.is_finite()) {
                         return Err(FluxLinearizationError::Invalid(
                             "nonfinite boundary velocity",
@@ -454,7 +452,7 @@ impl FluxSystem<'_> {
             }
         }
         let nonsmooth_upwind_points = if convection {
-            self.add_convecting_derivative(&mut jacobian, state, boundary, &constrained)?
+            self.add_convecting_derivative(&mut jacobian, state, boundary, admitted, &constrained)?
         } else {
             0
         };
@@ -490,6 +488,7 @@ impl FluxSystem<'_> {
         jacobian: &mut Coo,
         state: &[f64],
         boundary: &dyn Fn([f64; 2]) -> [f64; 2],
+        admitted: Option<&AdmittedBoundary>,
         constrained: &[bool],
     ) -> Result<usize, FluxLinearizationError> {
         let mesh = self.mesh;
@@ -518,8 +517,17 @@ impl FluxSystem<'_> {
         for (edge_id, edge) in mesh.edges.iter().enumerate() {
             let (a, b) = (mesh.verts[edge.verts.0], mesh.verts[edge.verts.1]);
             let (c0, c1) = edge.tris;
-            let prescribed =
-                (c1 == usize::MAX).then(|| edge_gauss_pub(a, b).map(|(point, _)| boundary(point)));
+            let policy = admitted.and_then(|data| data.open_policy(edge_id));
+            let reservoir = admitted.and_then(|data| data.reservoir_velocity(edge_id));
+            let slip = admitted
+                .and_then(|data| data.tangential_resistance(edge_id))
+                .is_some();
+            let prescribed = (c1 == usize::MAX && policy.is_none() && !slip).then(|| {
+                let points = edge_gauss_pub(a, b);
+                core::array::from_fn(|q| {
+                    admitted.map_or_else(|| boundary(points[q].0), |data| data.velocity(edge_id, q))
+                })
+            });
             // At the moving split the primal flux is zero, so Leibniz's
             // endpoint contribution vanishes. Integrate the derivative on
             // these SAME polynomial pieces, with the fixed boundary trace.
@@ -528,20 +536,35 @@ impl FluxSystem<'_> {
             {
                 let u0 = self.linearization_velocity(state, c0, point);
                 let normal = dot(u0, edge.normal);
-                let other = if c1 == usize::MAX {
-                    convection_boundary_trace(prescribed.expect("boundary samples"), fraction)
-                } else {
+                // Differentiate the ORIGINAL flux with respect to its
+                // advecting normal velocity. The frozen matrix already owns
+                // its derivative with respect to the transported velocity.
+                let incoming = if c1 != usize::MAX {
                     self.linearization_velocity(state, c1, point)
+                } else if slip || (policy.is_some() && reservoir.is_none()) {
+                    if policy == Some(OpenBoundaryPolicy::DissipativeBackflow) {
+                        // max(u.n,0) u has zero incoming derivative.
+                        [0.0; 2]
+                    } else {
+                        // Natural traction and prescribed-normal slip use
+                        // the interior trace on BOTH signs, without clipping.
+                        u0
+                    }
+                } else {
+                    convection_boundary_trace(
+                        reservoir.or(prescribed).expect("admitted incoming trace"),
+                        fraction,
+                    )
                 };
-                if other.iter().any(|v| !v.is_finite()) {
+                if incoming.iter().any(|v| !v.is_finite()) {
                     return Err(FluxLinearizationError::Invalid(
                         "nonfinite convective trace",
                     ));
                 }
-                if normal == 0.0 && u0 != other {
+                if normal == 0.0 && u0 != incoming {
                     switches += 1;
                 }
-                let upwind = if normal >= 0.0 { u0 } else { other };
+                let upwind = if normal >= 0.0 { u0 } else { incoming };
                 let sides = if c1 == usize::MAX { 1 } else { 2 };
                 for side in 0..sides {
                     let cell = if side == 0 { c0 } else { c1 };

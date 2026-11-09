@@ -15,14 +15,23 @@
 
 use super::{PlanarSgs, PlanarSgsError, PlanarSgsField, SgsModel};
 use crate::ns::FluxParams;
+use crate::ns::boundary::NavierStokesBoundary;
 use crate::ns::linearization::FluxViscosityTangent;
-use crate::ns::newton::{FluxNewtonControls, FluxNewtonError, FluxNewtonStep};
+use crate::ns::newton::{FluxMixedNewtonStep, FluxNewtonControls, FluxNewtonError, FluxNewtonStep};
 
 /// Accepted native Newton flow and SGS diagnostics at the same endpoint.
 pub struct PlanarSgsNewtonStep {
     /// Original velocity/pressure, consistent residual and nonlinear work.
     pub step: FluxNewtonStep,
     /// Instantaneous modeled transfer; no extra heat is added to the flow.
+    pub sgs: PlanarSgsField,
+}
+
+/// Accepted mixed-boundary Newton flow and its instantaneous SGS diagnostics.
+pub struct PlanarSgsMixedNewtonStep {
+    /// Original pressure datum, physical reactions, boundary policies and work.
+    pub step: FluxMixedNewtonStep,
+    /// Modeled transfer evaluated at this same accepted velocity.
     pub sgs: PlanarSgsField,
 }
 
@@ -133,6 +142,96 @@ impl PlanarSgs<'_, '_> {
             controls,
         )?;
         self.newton_endpoint(step)
+    }
+
+    /// Resolve steady Smagorinsky flow with velocity, slip and open boundaries.
+    ///
+    /// Reuses the SAME exact stress/convection Newton owner. Literal traction,
+    /// dissipative backflow and reservoir inflow retain their original distinct
+    /// meanings. Boundary reactions use accepted effective viscosity; no heat
+    /// source is introduced. The Smagorinsky-only tangent, zero-strain
+    /// semismooth selection and Estimated planar scope remain unchanged.
+    pub fn solve_steady_mixed_newton(
+        &self,
+        params: FluxParams,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        initial_velocity: &[f64],
+        controls: FluxNewtonControls,
+    ) -> Result<PlanarSgsMixedNewtonStep, PlanarSgsError> {
+        let tangents = self.smagorinsky_tangents()?;
+        let step = self.system.solve_navier_stokes_mixed_rheology_newton(
+            params,
+            &|cell, _, rate| self.newton_response(&tangents, cell, rate),
+            force,
+            boundaries,
+            initial_velocity,
+            controls,
+        )?;
+        self.mixed_newton_endpoint(step)
+    }
+
+    /// Fully implicit BDF1 Smagorinsky momentum on admitted mixed boundaries.
+    /// Previous velocity is immutable; all external data belong to the endpoint.
+    pub fn bdf1_mixed_newton_step(
+        &self,
+        params: FluxParams,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        timestep_s: f64,
+        controls: FluxNewtonControls,
+    ) -> Result<PlanarSgsMixedNewtonStep, PlanarSgsError> {
+        self.bdf2_mixed_newton_variable_step(
+            params,
+            force,
+            boundaries,
+            previous_velocity,
+            None,
+            timestep_s,
+            controls,
+        )
+    }
+
+    /// Unequal-step BDF2 Smagorinsky momentum with original mixed-boundary work.
+    ///
+    /// The older velocity is paired with its actual previous interval. The
+    /// native owner admits ratios in (0,2], and None is BDF1 startup. The mass
+    /// history is combined once; velocity, viscosity and convection converge
+    /// together at the endpoint. Neither history nor boundary law is modified.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bdf2_mixed_newton_variable_step(
+        &self,
+        params: FluxParams,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: f64,
+        controls: FluxNewtonControls,
+    ) -> Result<PlanarSgsMixedNewtonStep, PlanarSgsError> {
+        let tangents = self.smagorinsky_tangents()?;
+        let step = self
+            .system
+            .bdf2_navier_stokes_mixed_rheology_newton_variable_step(
+                params,
+                &|cell, _, rate| self.newton_response(&tangents, cell, rate),
+                force,
+                boundaries,
+                previous_velocity,
+                older_history,
+                timestep_s,
+                controls,
+            )?;
+        self.mixed_newton_endpoint(step)
+    }
+
+    fn mixed_newton_endpoint(
+        &self,
+        step: FluxMixedNewtonStep,
+    ) -> Result<PlanarSgsMixedNewtonStep, PlanarSgsError> {
+        let sgs = self.field(&step.solution.field.x[..self.system.n_u])?;
+        Ok(PlanarSgsMixedNewtonStep { step, sgs })
     }
 
     // Prepared once per solve, not recomputed at every DG quadrature point.

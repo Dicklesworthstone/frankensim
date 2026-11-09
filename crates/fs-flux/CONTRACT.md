@@ -10118,3 +10118,46 @@ environment became unavailable. The previous local core parsed with rustfmt;
 the connector-reconstructed final sources have bounded static review only.
 This is not a native FEM/material compilation or runtime validation claim.
 
+
+## Consistent Newton SGS with mixed boundaries
+
+`PlanarSgs::solve_steady_mixed_newton`, `bdf1_mixed_newton_step`, and
+`bdf2_mixed_newton_variable_step` connect the Smagorinsky constitutive
+tangent to the existing bounded Newton/line-search owner with velocity,
+Navier-slip, open-traction and reservoir boundaries. The native
+`FluxSystem` methods also expose the same mixed-boundary Newton path for
+general admitted scalar viscosity tangents.
+
+The Jacobian differentiates both transported and advecting velocity using
+the original face flux: natural traction retains interior momentum on
+either flow direction; dissipative backflow differentiates
+`max(u.n,0)u`; reservoirs supply their retained incoming trace;
+prescribed-normal slip retains its original interior transport. Boundary
+samples are admitted once and reused throughout Newton and endpoint
+reporting. The same accepted velocity, viscosity, mass history and boundary
+policy determine pressure datums, stress reactions, advective transport
+and SGS diagnostics. Steady components retain their original velocity/slip
+support requirement; physical transient mass can anchor all-open components.
+Unequal-step BDF2 uses the original history owner and actual intervals,
+admitting new/previous ratios in (0,2]. Neither history is modified.
+
+The Smagorinsky-only SGS tangent, zero-strain semismooth selection and
+`Estimated` planar qualifications remain. WALE/Vreman refuse the
+unsupported scalar Newton tangent. No additional cancellation context,
+wall model, generated turbulent fluctuations, heat deposition, global
+uniqueness or whole-solver backflow stability is implied.
+
+All 21 selected planar/steady/Newton regressions passed in a focused
+original-source Rust build. Five new groups check the directional
+Jacobian against the independent public primal assembly across twelve
+boundary/viscosity combinations, including face-flow reversal; fifteen
+analytic steady/BDF1/unequal-step BDF2 pressure/traction/virtual-work cases;
+exact disabled-SGS agreement; pressure-driven open flow with independent
+endpoint residual and frozen-SGS negative control; and all-open transient
+acceleration with steady/history/unsupported-model refusals. In the
+pressure-driven fixture, Newton reached residual 3.8253e-14 in seven
+iterations with six backtracks; the original Picard path exhausted thirty
+iterations at residual 0.9934. This is fixture-specific convergence evidence,
+not a general runtime or turbulence-validation claim. The original
+numerical kernels were compiled without numerical stubs; material/flow-control
+adapter tests and full Cargo/workspace validation were not run.

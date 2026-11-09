@@ -38,7 +38,7 @@ use fs_lbm::sgs3::eddy_viscosity;
 use std::cell::RefCell;
 
 mod newton;
-pub use newton::PlanarSgsNewtonStep;
+pub use newton::{PlanarSgsMixedNewtonStep, PlanarSgsNewtonStep};
 
 /// Admission, arithmetic or native nonlinear-solve refusal.
 #[derive(Clone, Debug, PartialEq)]

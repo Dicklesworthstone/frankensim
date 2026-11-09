@@ -1056,7 +1056,7 @@ control code renders BITWISE identical audio through the render API.
 ## No-claim boundaries
 
 - **The legacy `rans-rung` relaxation is a frozen-turbulence screen**:
-  its `solve_steady_channel` entry keeps supplied k and modified dissipation
+  its `solve` entry keeps supplied k and modified dissipation
   fixed while relaxing mean velocity and temperature. It is not a transported
   two-equation solution. The separate `advance_launder_sharma` entry now owns
   the bounded physical-time mechanical channel described below; neither entry

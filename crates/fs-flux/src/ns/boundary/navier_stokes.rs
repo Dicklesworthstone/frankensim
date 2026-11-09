@@ -1509,7 +1509,7 @@ impl<'m> FluxSystem<'m> {
         )
     }
 
-    fn admit_navier_stokes_boundaries_with_velocity_anchors(
+    pub(in crate::ns) fn admit_navier_stokes_boundaries_with_velocity_anchors(
         &self,
         params: FluxParams,
         boundaries: &[NavierStokesBoundary<'_>],

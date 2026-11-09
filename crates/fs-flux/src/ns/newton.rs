@@ -10,6 +10,9 @@ use super::boundary::{AdmittedBoundary, StokesBoundary, StokesBoundaryError};
 use super::linearization::{FluxLinearizationError, FluxViscosityTangent, rheology_residual, sample};
 use super::{FluxParams, FluxSolution, FluxSystem};
 
+mod mixed;
+pub use mixed::FluxMixedNewtonStep;
+
 mod sdirk2;
 pub use sdirk2::{FluxSdirk2Error, FluxSdirk2Stage, FluxSdirk2Step};
 
