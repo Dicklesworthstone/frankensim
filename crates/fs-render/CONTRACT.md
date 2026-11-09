@@ -2292,6 +2292,19 @@ G1/G3 tests cover independently differentiated TIE-19 response, critical-angle
 motion, lens power, Airy film reflection, bulk phase/group/Beer propagation,
 air-reference separation and temperature-cycle identity.
 
+`thermo_optic::binding::MaterialThermoOpticBinding` carries this same law
+through accepted material observations. Its original dielectric binding must
+match the supplied reference state at exactly the law's reference temperature.
+Every successor retains the same card, complete coordinate meanings and all
+non-temperature coordinates, and reads the explicitly named typed static
+absolute-temperature axis. The resulting ordinary `MaterialOpticalBinding`
+carries the actual accepted-state identity into native tracer materials and
+slab emission. Source identity includes the original binding and thermal law;
+surface finish and reference absorption remain fixed explicit assumptions.
+Heating/cooling always reevaluates the immutable original reference. An `Arc`
+shares that source across endpoints; wavelength queries allocate nothing.
+This does not admit dielectric volumes from open regional exterior meshes.
+
 With `material-state`, `silica_refraction::corning7980_glass` binds NASA CHARMS
 Corning 7980 fused-silica coefficients directly to the native Sellmeier glass
 owner. Lenses, surface refraction, polarization and group propagation retain

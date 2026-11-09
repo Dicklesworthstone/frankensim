@@ -29,6 +29,8 @@ use crate::gradient_index::{
     GradientIndexError, GradientIndexField, GradientIndexSample, HomogeneousIndexField,
 };
 
+/// Accepted material endpoints retaining one original reference optical source.
+pub mod binding;
 /// Original solved planar conduction profiles as thermal-lensing snapshots.
 pub mod conduction;
 /// Original temperature-dependent conductivity profiles, without source-knot smoothing.
