@@ -320,6 +320,58 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
         self.resolve_at_temperature(None, gas, body.temperature_k(), body)
     }
 
+    /// Resolve the coefficient for an original fixed-volume body/gas wall trial.
+    ///
+    /// This is the common source callback for one body or several bodies sharing
+    /// a finite gas inventory. `wall_temperature` is the current wall proposal,
+    /// not a new caloric state; the enthalpy owner retains phase and latent heat.
+    /// Each trial keeps the supplied gas's actual pressure, composition and
+    /// source identities, while a film-property query carries no extra storage.
+    ///
+    /// A positive patch must cover the complete exposed body surface. The
+    /// returned value is h, not h*A, so the original body owner applies area
+    /// exactly once and admits the physical coefficient through its Biot check.
+    /// An explicitly zero-area patch returns zero without inventing a film law.
+    pub fn resolve_isochoric_coefficient(
+        self,
+        gas: &M::State,
+        body_surface_area_m2: f64,
+        wall_temperature: Temperature,
+    ) -> Result<
+        ConvectionCoefficient<FilmGasConvectionSample<M::State, Temperature>>,
+        MaterialConvectionError,
+    > {
+        self.resolve_isochoric_coefficient_with(None, gas, body_surface_area_m2, wall_temperature)
+    }
+
+    fn resolve_isochoric_coefficient_with(
+        self,
+        flow: Option<mass_flow::MassFlowInput>,
+        gas: &M::State,
+        body_surface_area_m2: f64,
+        wall_temperature: Temperature,
+    ) -> Result<
+        ConvectionCoefficient<FilmGasConvectionSample<M::State, Temperature>>,
+        MaterialConvectionError,
+    > {
+        let (law, _) = self.bind_flow(flow, gas)?;
+        let area = law.area()?;
+        if !body_surface_area_m2.is_finite()
+            || body_surface_area_m2 <= 0.0
+            || (area != 0.0 && area != body_surface_area_m2)
+        {
+            return Err(invalid(
+                "isochoric film convection must cover the complete body surface or be explicitly insulated",
+            ));
+        }
+        let sample = self.resolve_at_temperature(
+            flow, gas, wall_temperature.value(), wall_temperature,
+        )?;
+        let coefficient_w_per_m2_k = sample.source.interface.evaluation.as_ref()
+            .map_or(0.0, |value| value.coefficient.value.value());
+        Ok(ConvectionCoefficient { coefficient_w_per_m2_k, source: sample.source })
+    }
+
     pub(super) fn resolve_at_temperature<W>(
         self,
         flow: Option<mass_flow::MassFlowInput>,
@@ -610,10 +662,9 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
             )));
         }
         environment.advance_with_wall_convection(cx, body, wall, |gas, temperature_k| {
-            let sample = self.resolve_at_temperature(flow, gas, temperature_k, Temperature::new(temperature_k))?;
-            let coefficient_w_per_m2_k = sample.source.interface.evaluation.as_ref()
-                .map_or(0.0, |value| value.coefficient.value.value());
-            Ok(ConvectionCoefficient { coefficient_w_per_m2_k, source: sample.source })
+            self.resolve_isochoric_coefficient_with(
+                flow, gas, body.surface_area_m2, Temperature::new(temperature_k),
+            )
         })
     }
 }

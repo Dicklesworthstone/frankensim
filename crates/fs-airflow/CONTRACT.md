@@ -2478,6 +2478,19 @@ Focused `isochoric_wall` regressions cover the coupled property states, full
 Rayleigh contrast, energy closure, melting, partial-area/Biot refusal and
 cancellation.
 
+`FilmGasSurface::resolve_isochoric_coefficient` and its prescribed-mass-flow
+counterpart expose that same source/coverage admission to
+`FiniteGasBodiesEnvironment::advance_with_wall_convection`. Distinct bodies
+can select different natural, forced or mixed surface laws while sharing one
+finite gas endpoint. Each body retains its own queried and accepted wall/film
+temperatures; all use the actual bulk pressure, composition and source claims.
+Prescribed mass flow derives velocity from bulk density even when transport
+properties use film density. The original thermal owners apply area and debit
+reciprocal heat once. Focused regressions compare the single-body limit,
+simultaneous hot/cold bodies, canonical input ordering, conservation, source
+identity, mass-flux conversion, and atomic source/coverage refusal. This adds
+no resolved flow, open mass/enthalpy flux or extra finite heat store.
+
 ### Natural convection in finite gas and coupled surface networks
 
 `medium::convection::finite_gas::NaturalGasSurface` evaluates the shared

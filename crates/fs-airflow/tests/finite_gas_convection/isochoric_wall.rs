@@ -12,8 +12,160 @@ use fs_convection::{HorizontalPlateFacing, NaturalConvectionGeometry};
 use fs_couple::finite_gas_thermal::{
     FiniteGasThermalReport, WallConvectionError, WallConvectionSolve,
 };
+use fs_couple::finite_gas_thermal::bodies::{
+    FiniteGasBodiesEnvironment, FiniteGasBodiesError, FiniteGasBody,
+};
 use fs_material::fluid_transport::FluidTransport;
 use fs_material::phase::UniformEnthalpyStep;
+use fs_qty::Temperature;
+
+fn shared_environment<'a>(gas: &'a IsochoricGasParcel) -> FiniteGasBodiesEnvironment<'a> {
+    FiniteGasBodiesEnvironment {
+        gas,
+        gas_heat_j: 0.0,
+        gas_solve: controls().gas,
+        exchange: HeatExchangeSolve { heat_bracket_j: [-20.0, 20.0], ..exchange() },
+        maximum_gas_temperature_increment_k: 100.0,
+        maximum_bodies: 2,
+    }
+}
+
+#[test]
+fn g1_shared_body_film_recovers_the_original_single_body_solution() {
+    scope(|cx, _| {
+        let old = gas(400.0);
+        let curve = source::body_curve();
+        let boundary = uniform_boundary();
+        let thermal = UniformEnthalpyStepInput { duration_s: 0.2, ..body(&curve, 260000.0) };
+        let surface = FilmGasSurface {
+            model: old.model(),
+            law: natural(NaturalConvectionGeometry::VerticalPlate),
+        };
+        let one = surface.isochoric_body_candidate(
+            cx, &uniform_environment(&old, &boundary), thermal, wall_solve(),
+        ).unwrap();
+        let bodies = [FiniteGasBody { id: 7, environment: &boundary, input: thermal }];
+        let many = shared_environment(&old).advance_with_wall_convection(
+            cx, &bodies, wall_solve(), |body, gas, temperature_k| {
+                surface.resolve_isochoric_coefficient(
+                    gas, body.input.surface_area_m2, Temperature::new(temperature_k),
+                )
+            },
+        ).unwrap();
+        near(many.gas().state().state().temperature,
+            one.report.next_gas.state().state().temperature, 1e-8);
+        near(many.bodies()[0].state.temperature_k(), one.state.temperature_k(), 1e-8);
+        near(many.bodies()[0].report.solid_to_gas_heat_j, one.report.solid_to_gas_heat_j, 1e-9);
+        near(many.bodies()[0].report.convection.coefficient_w_per_m2_k,
+            one.report.convection.coefficient_w_per_m2_k, 1e-8);
+    });
+}
+
+#[test]
+fn g1_shared_gas_keeps_distinct_natural_and_forced_films_and_reciprocal_heat() {
+    scope(|cx, _| {
+        let old = IsochoricGasParcel::new(source::model_transport(0.75, true),
+            source::point(400.0, 100000.0), 0.003).unwrap();
+        let saved = old.clone();
+        let curve = source::body_curve();
+        let boundary = uniform_boundary();
+        let bodies = [
+            FiniteGasBody { id: 29, environment: &boundary,
+                input: UniformEnthalpyStepInput { duration_s: 0.1, ..body(&curve, 50000.0) } },
+            FiniteGasBody { id: 7, environment: &boundary,
+                input: UniformEnthalpyStepInput { duration_s: 0.1, ..body(&curve, 260000.0) } },
+        ];
+        let natural = FilmGasSurface { model: old.model(),
+            law: natural(NaturalConvectionGeometry::VerticalPlate) };
+        let forced = FilmGasSurface { model: old.model(), law: FilmGasHeatLaw::Forced(surface()) }
+            .with_prescribed_mass_flow(0.01, 0.01).unwrap();
+        let environment = shared_environment(&old);
+        let solve = |bodies: &[FiniteGasBody<'_>]| {
+            environment.advance_with_wall_convection(cx, bodies, wall_solve(), |body, gas, t| {
+                if body.id == 7 {
+                    natural.resolve_isochoric_coefficient(gas, body.input.surface_area_m2, Temperature::new(t))
+                } else {
+                    forced.resolve_isochoric_coefficient(gas, body.input.surface_area_m2, Temperature::new(t))
+                }
+            }).unwrap()
+        };
+        let next = solve(&bodies);
+        let reordered = solve(&[bodies[1], bodies[0]]);
+        assert_eq!(next.gas(), reordered.gas());
+        assert_eq!(next.report(), reordered.report());
+        let gas = next.gas().state();
+        let mut total_body_heat = 0.0;
+        let mut total_transfer = 0.0;
+        for (i, next_body) in next.bodies().iter().enumerate() {
+            let original = bodies.iter().find(|body| body.id == next_body.report.id).unwrap();
+            let wall = &next_body.report.convection.source;
+            let film = wall.source.property_gas.as_ref().unwrap();
+            assert_eq!(&wall.source.interface.gas, gas);
+            assert_eq!(&wall.endpoint_source.interface.gas, gas);
+            assert_eq!(film.state().pressure, gas.state().pressure);
+            assert_eq!(film.source_packs(), gas.source_packs());
+            assert_eq!(film.thermodynamics().receipt().declared_fraction_bits(),
+                gas.thermodynamics().receipt().declared_fraction_bits());
+            near(film.state().temperature,
+                0.5 * (wall.temperature_k + gas.state().temperature), 1e-12);
+            near(wall.endpoint_source.interface.body.value(), next_body.state.temperature_k(), 1e-12);
+            assert!(wall.temperature_residual_k.abs() <= wall_solve().temperature_tolerance_k);
+            assert!(wall.boundary_residual_j.abs() <= environment.exchange.source_tolerance_j / 2.0);
+            let heat = original.input.mass_kg
+                * (next_body.state.specific_enthalpy_j_kg() - original.input.initial.specific_enthalpy_j_kg());
+            near(heat + next_body.report.solid_to_gas_heat_j, 0.0, 1e-7);
+            near(next_body.report.solid_to_gas_heat_j,
+                original.input.duration_s * original.input.surface_area_m2
+                    * next_body.report.convection.coefficient_w_per_m2_k
+                    * (next_body.state.temperature_k() - gas.state().temperature), 1e-9);
+            assert_eq!(next_body.report.solid_to_gas_heat_j > 0.0, original.id == 7);
+            assert_eq!(next_body.state, reordered.bodies()[i].state);
+            if original.id == 29 {
+                let flow = wall.source.prescribed_mass_flow.as_ref().unwrap();
+                near(flow.speed_m_s, 0.01 / (gas.state().density * 0.01), 1e-12);
+                assert!((flow.speed_m_s - 0.01 / (film.state().density * 0.01)).abs() > 1e-3);
+            }
+            total_body_heat += heat;
+            total_transfer += next_body.report.solid_to_gas_heat_j;
+        }
+        let gas_heat = old.mass_kg()
+            * (gas.specific_internal_energy_j_kg() - old.state().specific_internal_energy_j_kg());
+        near(gas_heat, total_transfer, 1e-7);
+        near(total_body_heat + gas_heat, 0.0, 1e-7);
+        assert!(next.report().absolute_energy_defect_j <= environment.exchange.energy_tolerance_j);
+        assert_eq!(old, saved);
+    });
+}
+
+#[test]
+fn g4_shared_film_refuses_partial_coverage_and_foreign_sources_atomically() {
+    scope(|cx, _| {
+        let old = gas(400.0);
+        let saved = old.clone();
+        let curve = source::body_curve();
+        let boundary = uniform_boundary();
+        let bodies = [FiniteGasBody { id: 7, environment: &boundary,
+            input: UniformEnthalpyStepInput { duration_s: 0.1, ..body(&curve, 260000.0) } }];
+        let foreign = source::model_transport(0.0, true);
+        for surface in [
+            FilmGasSurface { model: old.model(), law: FilmGasHeatLaw::Forced(ForcedGasSurface {
+                area_m2: 0.01, ..surface()
+            }) },
+            FilmGasSurface { model: &foreign, law: FilmGasHeatLaw::Forced(surface()) },
+        ] {
+            let result = shared_environment(&old).advance_with_wall_convection(
+                cx, &bodies, wall_solve(), |body, gas, t| {
+                    surface.resolve_isochoric_coefficient(gas, body.input.surface_area_m2, Temperature::new(t))
+                },
+            );
+            assert!(matches!(result, Err(FiniteGasBodiesError::Body {
+                id: 7, error: ConvectionError::Convection(WallConvectionError::Source(_)),
+            })));
+            assert_eq!(old, saved);
+            assert_eq!(bodies[0].input.initial, curve.state_at_specific_enthalpy(260000.0).unwrap());
+        }
+    });
+}
 
 fn wall_solve() -> WallConvectionSolve {
     WallConvectionSolve {

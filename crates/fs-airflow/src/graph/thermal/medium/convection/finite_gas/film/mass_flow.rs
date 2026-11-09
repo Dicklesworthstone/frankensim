@@ -114,6 +114,24 @@ impl<M: FilmGasSource> PrescribedMassFlowGasSurface<'_, M> {
             .resolve_at_temperature(Some(self.flow), gas, body.temperature_k(), body)
     }
 
+    /// Resolve a single- or shared-body wall trial with the original bulk-density
+    /// mass-flow conversion. Film density never determines stream velocity.
+    /// Complete exposed-area admission and the coefficient/source meaning are
+    /// shared with [`FilmGasSurface::resolve_isochoric_coefficient`].
+    pub fn resolve_isochoric_coefficient(
+        self,
+        gas: &M::State,
+        body_surface_area_m2: f64,
+        wall_temperature: Temperature,
+    ) -> Result<
+        ConvectionCoefficient<FilmGasConvectionSample<M::State, Temperature>>,
+        MaterialConvectionError,
+    > {
+        self.surface.resolve_isochoric_coefficient_with(
+            Some(self.flow), gas, body_surface_area_m2, wall_temperature,
+        )
+    }
+
     /// Propose the same reciprocal gas/body heat and piston motion step.
     #[allow(clippy::too_many_arguments)]
     pub fn finite_body_candidate<G: PistonGas<State = M::State>>(
