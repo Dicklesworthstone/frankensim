@@ -10277,8 +10277,19 @@ branch system is diagonalized once through the existing Jacobi eigensolver.
 Work integrates stress times strain rate; dashpot heat is integrated
 independently. State admission checks the constitutive stress, finite values,
 positive storage and numerical energy balance before mutation. At most 64
-strictly positive branches are admitted, or an empty elastic spectrum.
-Instantaneous stress jumps have zero viscous heat.
+nonnegative branches are admitted, including empty or entirely zero-weight
+elastic spectra. Instantaneous stress jumps have zero viscous heat.
+
+Zero-modulus arms retained by `fit_prony_history` keep their original order
+and state coordinates. They are excluded from the energy eigensystem and add
+no stiffness, stress, storage or heat. Their kinematic histories integrate the
+same stress-controlled strain rate by analytic convolution, including coincident
+relaxation rates; no small positive modulus or endpoint-strain approximation is
+substituted. Prescribed-strain and stress control can therefore alternate on the
+original fitted `PronyState`, even after its absent-arm coordinates become
+nonzero. G1 regressions cover fit-to-load-control, an independent convolution
+quadrature, load reversals and long holds, with no fitted-material validation
+claim inferred from these synthetic checks.
 
 Total strain integrates the same modal rate used for work, avoiding stress
 subtraction divided by a weak equilibrium modulus. Whole-ramp strain bounds sum

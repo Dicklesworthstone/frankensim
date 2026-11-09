@@ -59,13 +59,15 @@ pub struct StressRampResponse {
 }
 
 /// Stress control sharing the original PronyState and its work/heat ledger.
-/// Admission allows at most 64 strictly positive branches, or a pure elastic
-/// law with no branches. Zero-weight branches remain valid in the original
-/// GeneralizedMaxwell but are refused by this singularity-sensitive transform.
+/// Admission allows at most 64 nonnegative branches, including an elastic
+/// spectrum. Only positive-modulus branches enter the energy eigensystem.
+/// Zero-modulus coordinates retain their original order and exact driven
+/// relaxation history, but contribute no stress, storage or heat.
 #[derive(Debug, Clone)]
 pub struct StressControlledMaxwell {
     law: GeneralizedMaxwell,
     e0: f64,
+    active: Vec<usize>,
     weights: Vec<f64>,
     rates: Vec<f64>,
     modes: Vec<f64>,
@@ -77,17 +79,27 @@ impl StressControlledMaxwell {
             law.e_inf,
             "stress control needs positive finite equilibrium modulus",
         )?;
-        let n = law.terms.len();
-        require(n <= 64, "stress control admits at most 64 Maxwell branches")?;
+        require(
+            law.terms.len() <= 64,
+            "stress control admits at most 64 Maxwell branches",
+        )?;
         let mut e0 = law.e_inf;
-        let mut weights = Vec::with_capacity(n);
-        let mut branch_rates = Vec::with_capacity(n);
-        for &(e, tau) in &law.terms {
-            positive(e, "stress control requires strictly positive branch moduli")?;
+        let mut active = Vec::with_capacity(law.terms.len());
+        let mut weights = Vec::with_capacity(law.terms.len());
+        let mut branch_rates = Vec::with_capacity(law.terms.len());
+        for (index, &(e, tau)) in law.terms.iter().enumerate() {
+            require(
+                e.is_finite() && e >= 0.0,
+                "stress control requires finite nonnegative branch moduli",
+            )?;
             positive(
                 tau,
                 "stress control requires positive finite relaxation times",
             )?;
+            if e == 0.0 {
+                continue;
+            }
+            active.push(index);
             e0 += e;
             weights.push(positive(
                 e.sqrt() / tau.sqrt(),
@@ -95,11 +107,13 @@ impl StressControlledMaxwell {
             )?);
             branch_rates.push(positive(1.0 / tau, "unrepresentable Maxwell branch rate")?);
         }
+        let n = active.len();
         positive(e0, "unrepresentable instantaneous Maxwell modulus")?;
         if n == 0 {
             return Ok(Self {
                 law: law.clone(),
                 e0,
+                active,
                 weights,
                 rates: vec![],
                 modes: vec![],
@@ -120,12 +134,12 @@ impl StressControlledMaxwell {
                 .terms
                 .iter()
                 .enumerate()
-                .filter(|(j, _)| *j != i)
+                .filter(|(j, _)| *j != active[i])
                 .fold(law.e_inf, |sum, (_, &(e, _))| sum + e);
             matrix[i * n + i] = normalized[i] * (other / e0);
             for j in 0..i {
-                let entry = -((law.terms[i].0 / e0).sqrt() * normalized[i].sqrt())
-                    * ((law.terms[j].0 / e0).sqrt() * normalized[j].sqrt());
+                let entry = -((law.terms[active[i]].0 / e0).sqrt() * normalized[i].sqrt())
+                    * ((law.terms[active[j]].0 / e0).sqrt() * normalized[j].sqrt());
                 matrix[i * n + j] = entry;
                 matrix[j * n + i] = entry;
             }
@@ -173,6 +187,7 @@ impl StressControlledMaxwell {
         Ok(Self {
             law: law.clone(),
             e0,
+            active,
             weights,
             rates,
             modes,
@@ -200,7 +215,7 @@ impl StressControlledMaxwell {
             "stress ramp needs finite stress and nonnegative finite duration",
         )?;
         require(
-            state.q.len() == n
+            state.q.len() == self.law.terms.len()
                 && state.q.iter().all(|q| q.is_finite())
                 && state.strain.is_finite()
                 && state.stress.is_finite()
@@ -249,9 +264,14 @@ impl StressControlledMaxwell {
             strain = state.strain + delta_strain;
             reconstruction_scale +=
                 self.law.e_inf * state.strain.abs() + self.law.e_inf * delta_strain.abs();
-            for (&(e, _), q) in self.law.terms.iter().zip(&mut q) {
+            for (&(e, tau), q) in self.law.terms.iter().zip(&mut q) {
                 reconstruction_scale += e * q.abs() + e * delta_strain.abs();
-                *q += delta_strain;
+                *q = if dt == 0.0 {
+                    *q + delta_strain
+                } else {
+                    // No active spring: stress and strain are both affine.
+                    PronyRamp::new(dt / tau).apply(*q, delta_strain).0
+                };
             }
             strain_bounds = [state.strain.min(strain), state.strain.max(strain)];
             rate_bounds = if dt > 0.0 {
@@ -260,7 +280,7 @@ impl StressControlledMaxwell {
                 [f64::NEG_INFINITY, f64::INFINITY]
             };
         } else {
-            let mut next = vec![(0.0, 0.0); n];
+            let mut next = vec![(0.0, 0.0, 0.0); n];
             let elastic_increment = delta_stress / self.e0;
             let mut increment = elastic_increment;
             let mut increment_bounds = [elastic_increment.min(0.0), elastic_increment.max(0.0)];
@@ -269,7 +289,7 @@ impl StressControlledMaxwell {
                 let mut initial = 0.0;
                 let mut initial_magnitude = 0.0;
                 for j in 0..n {
-                    let term = self.modes[j * n + i] * (self.weights[j] * state.q[j]);
+                    let term = self.modes[j * n + i] * (self.weights[j] * state.q[self.active[j]]);
                     initial += term;
                     initial_magnitude += term.abs();
                 }
@@ -283,6 +303,7 @@ impl StressControlledMaxwell {
                 next[i] = (
                     end,
                     ramp.decay * initial_magnitude + (ramp.ramp * delta).abs(),
+                    initial,
                 );
                 heat += loss / self.rates[i];
                 let (zeroth, first, parts) =
@@ -304,16 +325,34 @@ impl StressControlledMaxwell {
                 rates[0] += a.min(b);
                 rates[1] += a.max(b);
             }
-            for (j, q) in q.iter_mut().enumerate() {
+            for (j, &original) in self.active.iter().enumerate() {
                 let mut value = 0.0;
                 let mut magnitude = 0.0;
-                for (i, &(end, scale)) in next.iter().enumerate() {
+                for (i, &(end, scale, _)) in next.iter().enumerate() {
                     let mode = self.modes[j * n + i];
                     value += mode * end;
                     magnitude += mode.abs() * scale;
                 }
-                *q = value / self.weights[j];
-                reconstruction_scale += (magnitude / self.weights[j]) * self.law.terms[j].0;
+                q[original] = value / self.weights[j];
+                reconstruction_scale += (magnitude / self.weights[j]) * self.law.terms[original].0;
+            }
+            // A calibrated NNLS ladder can contain exactly absent arms.
+            // Their coordinates have no physical energy, but the original
+            // PronyState still owns them. Integrate q'=strain'-q/tau against
+            // the SAME modal strain rate so later strain control sees the
+            // original history; do not add an artificial positive modulus.
+            for (original, &(modulus, tau)) in self.law.terms.iter().enumerate() {
+                if modulus != 0.0 {
+                    continue;
+                }
+                let ramp = PronyRamp::new(dt / tau);
+                let mut value = ramp.apply(state.q[original], elastic_increment).0;
+                for (i, &(_, _, initial)) in next.iter().enumerate() {
+                    let (decaying, driven) = convolved_relaxation(tau, self.rates[i], dt);
+                    value += self.forcing[i]
+                        * (decaying * initial + driven * (self.forcing[i] * delta_stress));
+                }
+                q[original] = value;
             }
             // Integrate the same strain rate used by external work. Recovering
             // strain from (stress - branch stress)/E_inf loses creep accuracy
@@ -426,6 +465,66 @@ impl StressControlledMaxwell {
         };
         Ok(response)
     }
+}
+
+// Integrate exp(-(dt-t)/tau) against exp(-rate*t) and against
+// (1-exp(-rate*t))/(rate*dt). These are the two terms of the original
+// modal strain-rate trajectory. No rate separation is assumed: coincident
+// relaxation rates use their analytic divided-difference limit.
+fn convolved_relaxation(tau: f64, rate: f64, dt: f64) -> (f64, f64) {
+    let average = |x| if x == 0.0 { 1.0 } else { -det::expm1(-x) / x };
+    let r = dt / tau;
+    let s = rate * dt;
+    if r.is_infinite() && s.is_infinite() {
+        return (0.0, (tau / dt) / rate);
+    }
+    if r.is_infinite() {
+        let decay = det::exp(-s);
+        let a = if decay == 0.0 {
+            0.0
+        } else {
+            (tau * decay) / (1.0 - rate * tau)
+        };
+        return (a, (average(s) - a / dt) * tau);
+    }
+    if s.is_infinite() {
+        let decay = det::exp(-r);
+        let a = if decay == 0.0 {
+            0.0
+        } else {
+            (decay / rate) / (1.0 - (1.0 / rate) / tau)
+        };
+        return (a, (average(r) - a / dt) / rate);
+    }
+    let small = r.min(s);
+    let large = r.max(s);
+    let difference = large - small;
+    let half_decay = det::exp(-0.5 * small);
+    let phi = average(difference);
+    let decaying = ((dt * half_decay) * half_decay) * phi;
+    let driven = if large < 0.1 {
+        // (phi1(-r)-phi1(-s))/(s-r), including both rates zero.
+        // h_k(r,s)=r*h_(k-1)+s^k keeps the symmetric polynomial
+        // positive. The next term is below 2e-24 on this interval.
+        let (mut h, mut power, mut coefficient, mut value) = (1.0, 1.0, 0.5, 0.5);
+        for k in 1..=12 {
+            power *= s;
+            h = r * h + power;
+            coefficient /= -(k as f64 + 2.0);
+            value += coefficient * h;
+        }
+        dt * value
+    } else {
+        // Subtract from phi1 at the smaller rate, so the numerator is
+        // separated from zero even when the two rates nearly coincide.
+        let numerator = average(small) - (half_decay * half_decay) * phi;
+        if r >= s {
+            numerator * tau
+        } else {
+            numerator / rate
+        }
+    };
+    (decaying, driven)
 }
 
 // Integrals of y(t) and (t/dt)y(t), plus the separate initial and forcing

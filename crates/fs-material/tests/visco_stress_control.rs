@@ -36,6 +36,160 @@ fn same_state(a: &PronyState, b: &PronyState) {
 }
 
 #[test]
+fn g1_fitted_zero_weight_ladder_runs_creep_without_invented_loss() {
+    use fs_material::visco::history_fit::{
+        PronyHistoryFitBudget, PronyHistorySample, fit_prony_history,
+    };
+    let strains = [0.0, 0.04, 0.04, -0.03, 0.02, 0.02, -0.01, 0.0];
+    let samples: Vec<_> = strains
+        .iter()
+        .enumerate()
+        .map(|(i, &strain)| PronyHistorySample {
+            time_s: i as f64 * 0.2,
+            strain,
+            stress_pa: 3.0 * strain,
+            stress_error_pa: 0.01,
+        })
+        .collect();
+    let fit = fit_prony_history(
+        &samples,
+        &[0.1, 1.0, 10.0],
+        PronyHistoryFitBudget {
+            max_samples: samples.len(),
+            max_branches: 3,
+        },
+    )
+    .unwrap();
+    // NNLS keeps the authored ladder even when the observations identify no
+    // relaxation strength. Those zero arms must not obstruct load control.
+    assert_eq!(fit.model.terms.len(), 3);
+    assert!(fit.model.terms.iter().all(|term| term.0 == 0.0));
+    let control = StressControlledMaxwell::new(&fit.model).unwrap();
+    assert_eq!(control.law(), &fit.model);
+    let mut state = fit.model.state();
+    let mut strain_driven = state.clone();
+    for (stress, dt) in [(0.12, 0.0), (0.12, 0.3), (-0.09, 0.8), (0.0, 2.0)] {
+        let report = control.step(&mut state, stress, dt).unwrap();
+        fit.model
+            .step(&mut strain_driven, stress / fit.model.e_inf, dt);
+        close(state.strain, strain_driven.strain, 3e-14);
+        for (actual, expected) in state.q.iter().zip(&strain_driven.q) {
+            close(*actual, *expected, 3e-14);
+        }
+        assert!((state.work - strain_driven.work).abs() < 3e-15);
+        assert_eq!(report.incremental_dissipated_j_m3, 0.0);
+        assert_eq!(state.dissipated, 0.0);
+    }
+}
+
+#[test]
+fn g1_absent_arms_retain_exact_history_through_load_reversal_and_equal_rates() {
+    let creep_time = 20.0 / 3.0;
+    let law = GeneralizedMaxwell::new(
+        3.0,
+        vec![(0.0, creep_time), (7.0, 2.0), (0.0, 0.05), (0.0, 1000.0)],
+    )
+    .unwrap();
+    let reduced = GeneralizedMaxwell::new(3.0, vec![(7.0, 2.0)]).unwrap();
+    let control = StressControlledMaxwell::new(&law).unwrap();
+    let reference = StressControlledMaxwell::new(&reduced).unwrap();
+    let mut initial = law.state();
+    let mut physical = reduced.state();
+    law.step(&mut initial, 0.07, 0.2);
+    reduced.step(&mut physical, 0.07, 0.2);
+    assert!(initial.q.iter().all(|q| *q > 0.0));
+    for (target, dt) in [(0.3, 1e-5), (-0.18, 0.1), (0.0, 1.0)] {
+        let mut state = initial.clone();
+        let mut truth = physical.clone();
+        let report = control.step(&mut state, target, dt).unwrap();
+        let expected = reference.step(&mut truth, target, dt).unwrap();
+        close(state.strain, truth.strain, 5e-13);
+        close(state.q[1], truth.q[0], 5e-13);
+        close(
+            report.incremental_work_j_m3,
+            expected.incremental_work_j_m3,
+            5e-13,
+        );
+        close(
+            report.incremental_dissipated_j_m3,
+            expected.incremental_dissipated_j_m3,
+            5e-13,
+        );
+        // Independent Simpson integration of q'=epsilon'-q/tau. The actual
+        // stress-controlled strain is exponential, so a strain-endpoint ramp
+        // update of an absent arm would fail this check.
+        let stress_rate = (target - initial.stress) / dt;
+        for index in [0, 2, 3] {
+            let tau = law.terms[index].1;
+            let mut integral = 0.0;
+            let intervals = 20_000;
+            for k in 0..=intervals {
+                let t = dt * k as f64 / intervals as f64;
+                let active_q = initial.q[1] * (-t / creep_time).exp()
+                    + (stress_rate * 2.0 / 3.0) * -(-t / creep_time).exp_m1();
+                let strain_rate = (stress_rate + 7.0 * active_q / 2.0) / 10.0;
+                let weight = if k == 0 || k == intervals {
+                    1.0
+                } else if k % 2 == 0 {
+                    2.0
+                } else {
+                    4.0
+                };
+                integral += weight * (-(dt - t) / tau).exp() * strain_rate;
+            }
+            let exact =
+                initial.q[index] * (-dt / tau).exp() + dt * integral / (3.0 * intervals as f64);
+            close(state.q[index], exact, 3e-10);
+        }
+        let mut split = initial.clone();
+        for k in 1..=37 {
+            control
+                .step(
+                    &mut split,
+                    initial.stress + (target - initial.stress) * k as f64 / 37.0,
+                    dt / 37.0,
+                )
+                .unwrap();
+        }
+        for (&a, &b) in split.q.iter().zip(&state.q) {
+            close(a, b, 2e-11);
+        }
+        // Returning to the existing prescribed-strain owner keeps the same
+        // branch order, storage, dissipation and constitutive stress.
+        law.step(&mut state, -0.02, 0.4);
+        reduced.step(&mut truth, -0.02, 0.4);
+        close(state.stress, truth.stress, 5e-13);
+        close(state.work, truth.work, 5e-13);
+        close(state.dissipated, truth.dissipated, 5e-13);
+    }
+}
+
+#[test]
+fn g0_absent_arms_preserve_long_hold_limits_and_zero_duration_noops() {
+    let law =
+        GeneralizedMaxwell::new(3.0, vec![(0.0, 1e-200), (7.0, 1e-200), (0.0, 1e200)]).unwrap();
+    let control = StressControlledMaxwell::new(&law).unwrap();
+    let mut state = law.state();
+    control.step(&mut state, 1.0, 0.0).unwrap();
+    let before = state.clone();
+    control.step(&mut state, 1.0, 0.0).unwrap();
+    same_state(&state, &before);
+    control.step(&mut state, 1.0, 1e200).unwrap();
+    close(state.strain, 1.0 / 3.0, 3e-14);
+    assert_eq!(state.q[0], 0.0);
+    // The active creep transient is instantaneous on the slow, absent arm's
+    // clock. Its original coordinate retains that strain then relaxes once.
+    close(state.q[2], (-1.0_f64).exp() / 3.0, 5e-14);
+    close(state.work, stored(&law, &state) + state.dissipated, 5e-14);
+    let before = state.clone();
+    state.q[0] = f64::NAN;
+    let invalid = state.clone();
+    assert!(control.step(&mut state, 0.0, 1.0).is_err());
+    same_state(&state, &invalid);
+    assert!(before.q.iter().all(|q| q.is_finite()));
+}
+
+#[test]
 fn g1_standard_linear_solid_creep_and_zero_load_recovery_match_closed_form() {
     let law = GeneralizedMaxwell::new(3.0, vec![(7.0, 2.0)]).unwrap();
     let control = StressControlledMaxwell::new(&law).unwrap();
@@ -367,7 +521,7 @@ fn g0_bad_parameters_and_malformed_states_refuse_without_mutation() {
         },
         GeneralizedMaxwell {
             e_inf: 1.0,
-            terms: vec![(0.0, 1.0)],
+            terms: vec![(-1.0, 1.0)],
         },
         GeneralizedMaxwell {
             e_inf: 1.0,
