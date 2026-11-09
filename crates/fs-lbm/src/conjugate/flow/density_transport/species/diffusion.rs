@@ -44,6 +44,8 @@ pub use enthalpy::boundary::{
     SpeciesBoundaryEnthalpyTransfer,
 };
 pub use enthalpy::adaptive::{
+    AdaptiveCoupledBoundarySpeciesEnthalpyDiffusionControls,
+    AdaptiveCoupledBoundarySpeciesEnthalpyDiffusionStep,
     AdaptiveSpeciesEnthalpyDiffusionControls, AdaptiveSpeciesEnthalpyDiffusionReport,
     AdaptiveSpeciesEnthalpyDiffusionStep, SpeciesEnthalpyDiffusionModel,
 };

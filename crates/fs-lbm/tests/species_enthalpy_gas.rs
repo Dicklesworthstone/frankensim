@@ -320,3 +320,6 @@ mod adaptive;
 
 #[path = "species_enthalpy_gas/boundary.rs"]
 mod boundary;
+
+#[path = "species_enthalpy_gas/boundary_adaptive.rs"]
+mod boundary_adaptive;

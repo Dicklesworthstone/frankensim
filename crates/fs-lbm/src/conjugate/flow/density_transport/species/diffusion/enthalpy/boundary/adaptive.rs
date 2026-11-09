@@ -33,6 +33,8 @@ pub struct AdaptiveBoundarySpeciesEnthalpyDiffusionStep<const N: usize> {
     pub estimated_specific_enthalpy_error_j_kg: f64,
     pub estimated_boundary_transfer_error_kg: [f64; N],
     pub estimated_boundary_enthalpy_error_j: f64,
+    /// Maximum concentration/enthalpy/transfer error ratio, including the
+    /// inner-relaxation adequacy guard for competing reservoir maps.
     pub maximum_error_ratio: f64,
     pub refinements: usize,
     /// Includes every attempted coarse/fine solve, including rejected ones.
@@ -41,6 +43,7 @@ pub struct AdaptiveBoundarySpeciesEnthalpyDiffusionStep<const N: usize> {
 }
 
 struct Trial<const N: usize> {
+    maximum_pair_relaxation: f64,
     h: Vec<f64>,
     heat: Vec<f64>,
     report: SpeciesEnthalpyDiffusionReport,
@@ -71,6 +74,10 @@ impl MaterialAdvectionStep {
     /// sum those magnitudes across faces, then divide by three. Opposing
     /// reservoirs cannot cancel unresolved exchange. Retained low parts, not
     /// rounded absolute h or scalar heat receipts, supply every caloric estimate.
+    /// Competing reservoir/interior maps also require full-inner relaxation at
+    /// most one half: saturated coarse/fine maps can otherwise agree exactly
+    /// while assigning all exchange to the first face. Native inner refinement
+    /// resolves this competition; isolated exact stiff maps remain admissible.
     ///
     /// The accepted fine inventories/receipts are unmodified. Original work
     /// limits cover all attempted resolutions; storage includes retained coarse
@@ -146,6 +153,7 @@ impl MaterialAdvectionStep {
                         maximum_enthalpy_defect_j,
                         gate,
                     )?;
+                let maximum_pair_relaxation = result.step.species.report.maximum_pair_relaxation;
                 let SpeciesEnthalpyDiffusionStep {
                     species,
                     specific_enthalpy_j_kg,
@@ -155,6 +163,7 @@ impl MaterialAdvectionStep {
                 Ok((
                     species,
                     Trial {
+                        maximum_pair_relaxation,
                         h: specific_enthalpy_j_kg,
                         heat: diffusive_enthalpy_change_j,
                         report,
@@ -219,8 +228,20 @@ impl MaterialAdvectionStep {
                 }
                 estimated_energy = energy.value();
                 nonnegative(estimated_energy)?;
-                Ok(maximum_ratio
-                    .max(estimated_energy / accuracy.absolute_boundary_enthalpy_tolerance_j))
+                maximum_ratio = maximum_ratio
+                    .max(estimated_energy / accuracy.absolute_boundary_enthalpy_tolerance_j);
+                // The native report is one half-map probability. Compose two
+                // maps without subtracting a tiny rate from one; the resulting
+                // rate covers one full inner splitting interval. Both native
+                // solves have already admitted these faces and diffusivities.
+                let half_map = fine.maximum_pair_relaxation;
+                let inner = half_map.mul_add(1.0 - half_map, half_map);
+                if inner > 0.5
+                    && super::boundary_maps_compete(domain, diffusivity_m2_s, boundaries, gate)?
+                {
+                    maximum_ratio = maximum_ratio.max(2.0 * inner);
+                }
+                Ok(maximum_ratio)
             },
         )?;
         Ok(AdaptiveBoundarySpeciesEnthalpyDiffusionStep {

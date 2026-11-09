@@ -181,6 +181,8 @@ pub use flow::{
     BoundarySpeciesEnthalpyDiffusionStep, SpeciesBoundaryEnthalpyDiffusionReport,
     SpeciesBoundaryEnthalpyTransfer, BoundaryThermochemicalSpeciesDiffusionStep,
     GasSpeciesEnthalpyBoundarySource,
+    AdaptiveCoupledBoundarySpeciesEnthalpyDiffusionControls,
+    AdaptiveCoupledBoundarySpeciesEnthalpyDiffusionStep,
     AdaptiveSpeciesEnthalpyDiffusionControls, AdaptiveSpeciesEnthalpyDiffusionReport,
     AdaptiveSpeciesEnthalpyDiffusionStep, SpeciesEnthalpyDiffusionModel,
     GasSpeciesDiffusivity, GasSpeciesEnthalpyField, GasSpeciesEnthalpySource,

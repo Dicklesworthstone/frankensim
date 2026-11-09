@@ -20,6 +20,8 @@ pub use species::{
     BoundarySpeciesEnthalpyDiffusionStep, SpeciesBoundaryEnthalpyDiffusionReport,
     SpeciesBoundaryEnthalpyTransfer, BoundaryThermochemicalSpeciesDiffusionStep,
     GasSpeciesEnthalpyBoundarySource,
+    AdaptiveCoupledBoundarySpeciesEnthalpyDiffusionControls,
+    AdaptiveCoupledBoundarySpeciesEnthalpyDiffusionStep,
     AdaptiveSpeciesEnthalpyDiffusionControls, AdaptiveSpeciesEnthalpyDiffusionReport,
     AdaptiveSpeciesEnthalpyDiffusionStep, SpeciesEnthalpyDiffusionModel,
     GasSpeciesDiffusivity, GasSpeciesEnthalpyField, GasSpeciesEnthalpySource,

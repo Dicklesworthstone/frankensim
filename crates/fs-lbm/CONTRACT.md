@@ -2555,3 +2555,61 @@ a solenoidal circulation mode whose response is independent of bulk viscosity,
 and zero-model/refusal behavior. Source parsing, scoped formatting and scalar
 analytic energy checks passed; native execution remains subject to the
 dependency build limitation recorded above.
+
+## Adaptive enthalpy and species exchange through reservoirs
+
+`diffuse_species_with_enthalpy_and_boundaries_coupled_adaptive` reuses the original
+state-refreshed exponential-midpoint integrator and positive native
+reservoir/interior maps. Each half-interval predictor supplies the midpoint
+caloric and transport fields; the full corrector starts from the same original
+substep inventory. Only accepted correctors contribute physical boundary heat
+or species receipts. Preparations, face queries and pair updates from predictors
+and rejected resolutions still consume the whole-call resource allowances.
+
+`SpeciesEnthalpyDiffusionModel` has an explicit boundary partial-enthalpy
+callback with the original canonical descriptor and input index. Closed models
+retain a default refusal for an active unbound boundary law.
+`GasSpeciesEnthalpyBoundarySource` implements that contract using its exact
+reservoir/physical-face-temperature binding. Each preparation recovers original
+gas temperature from composition and total enthalpy, refreshes admitted
+temperature-dependent binary diffusion and transport, and reports its actual
+caloric residual. The accepted endpoint source image is returned for reuse.
+
+The independent controls in
+`AdaptiveCoupledBoundarySpeciesEnthalpyDiffusionControls` require field accuracy in
+K, absolute J/kg and every constituent fraction, plus integrated per-face
+accuracy in kg and J. The specific-enthalpy estimate compares both represented
+endpoints and retained interval heat divided by carrier mass, so a large
+formation datum cannot erase unresolved heat below the stored-h precision. Each boundary compares signed and both gross transfer
+histories; the maximum of those three coarse/fine differences is summed over
+faces and divided by three. Thus opposing reservoirs and heat reversals cannot
+hide unresolved exchange behind a stationary endpoint or zero net domain heat.
+These remain smooth second-order estimates, not certified model-error bounds.
+
+Original low components survive both energy and constituent history
+accumulation across the complete interval. The initial-to-final mass and
+enthalpy audits subtract those retained external transfers before rounding;
+formation-reference scale does not relax the absolute joule allowance.
+Returned signed and positive/negative NET-map heat is already in the endpoint
+enthalpy. Face conductances report the last accepted corrector midpoint,
+whereas transfer histories cover the entire interval.
+
+Two independent stiffness checks prevent false coarse/fine agreement.
+Changing sampled diffusivity or relative partial enthalpies must resolve the
+full OUTER face relaxation to at most one half, regardless of inner sweep
+count. When reservoirs share a cell or compete with active interior maps,
+the full INNER relaxation must also be at most one half, even for constant
+coefficients: otherwise the first saturated map can incorrectly claim all
+exchange. The topology check is linear in authored boundary count and allocates
+nothing. Isolated exact maps and explicitly resolved fixed-law inner sweeps
+retain their stiff paths. The existing frozen-coefficient adaptive reservoir
+entry uses the same allocation-free competition check and its native inner
+refinement controller. This guard resolves sampled saturation, not an
+unsampled constitutive discontinuity.
+
+Boundary histories, native scratch, final readbacks and at most three live
+source preparations are covered by checked storage allowances before their
+allocations. Cancellation and any source, mass, caloric, work, storage or
+refinement refusal publish no partial physical result. The caller continues
+to own external reservoir storage, the supplied physical interface temperature
+and any pressure/volume evolution.

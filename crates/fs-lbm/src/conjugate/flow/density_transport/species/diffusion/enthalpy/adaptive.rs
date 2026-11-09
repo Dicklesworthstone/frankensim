@@ -6,12 +6,22 @@
 //! fine solution. Source discontinuities and phase corners require resolution
 //! and are not covered by a certified error bound.
 
-use super::super::{MAX_MATERIAL_SPECIES, ratio};
+use super::super::{
+    MAX_MATERIAL_SPECIES, SpeciesBoundaryDiffusionReport, SpeciesDiffusionBoundary, ratio,
+};
+use super::boundary::BoundaryEnthalpyAccount;
 use super::{
     CancelGate, ChtError, EnergySum, MaterialAdvectionStep, SpeciesDiffusionControls,
     SpeciesEnthalpyDiffusionStep, VoxelDomain, nonnegative, poll, poll_every, refuse,
 };
 use std::cell::Cell;
+
+mod boundary;
+pub use boundary::{
+    AdaptiveCoupledBoundarySpeciesEnthalpyDiffusionControls,
+    AdaptiveCoupledBoundarySpeciesEnthalpyDiffusionStep,
+};
+use boundary::{BoundaryHistory, BoundaryOptions};
 
 /// One original caloric/transport owner for the complete supplied state.
 /// Preparations must own their state-dependent data, retain the same species
@@ -39,6 +49,23 @@ pub trait SpeciesEnthalpyDiffusionModel<const N: usize> {
         axis: usize,
         gate: &CancelGate,
     ) -> Result<[f64; N], ChtError>;
+    /// Original partial specific enthalpies at a declared physical reservoir face.
+    /// The descriptor and its canonical index refer to the SAME supplied boundary
+    /// list. A model must explicitly bind this thermal law; reservoir composition
+    /// alone does not supply a face temperature or an extra heat source.
+    fn boundary_partial_enthalpy_j_kg(
+        &self,
+        _prepared: &Self::Prepared,
+        _domain: &VoxelDomain,
+        _boundary_index: usize,
+        _boundary: &SpeciesDiffusionBoundary<N>,
+        gate: &CancelGate,
+    ) -> Result<[f64; N], ChtError> {
+        poll(gate)?;
+        Err(refuse(
+            "adaptive reservoirs require an original boundary partial-enthalpy law",
+        ))
+    }
     /// Conservative owned payload of one preparation, including its fixed
     /// value. Borrowed original source tables are caller-owned and additional.
     fn maximum_prepared_bytes(&self, cells: usize) -> Option<usize>;
@@ -64,6 +91,7 @@ pub struct AdaptiveSpeciesEnthalpyDiffusionControls<const N: usize> {
     pub maximum_source_evaluations: usize,
     pub absolute_temperature_tolerance_k: f64,
     /// Absolute J/kg only: formation energy never scales the thermal tolerance.
+    /// Compare both represented endpoints and retained interval heat / mass.
     pub absolute_specific_enthalpy_tolerance_j_kg: f64,
     pub absolute_mass_fraction_tolerance: [f64; N],
     pub relative_mass_fraction_tolerance: f64,
@@ -106,6 +134,12 @@ pub struct AdaptiveSpeciesEnthalpyDiffusionReport<const N: usize> {
     /// relative partial enthalpies. Admission requires at most one half;
     /// identical original coefficients retain their exact stiff fast path.
     pub maximum_changing_source_relaxation: f64,
+    /// Full-INNER relaxation where a reservoir competes with another reservoir
+    /// or an interior map on its cell. Admission requires at most one half,
+    /// even for unchanged sources: saturated maps can misassign external heat.
+    /// Explicitly resolved inner sweeps and isolated exact maps retain their
+    /// stiff fast paths; changing sources independently require the outer cap.
+    pub maximum_competing_boundary_relaxation: f64,
     pub absolute_mass_defect_kg: [f64; N],
     pub stored_enthalpy_change_j: f64,
     pub transported_enthalpy_change_j: f64,
@@ -151,11 +185,30 @@ impl Work {
     }
 }
 
+struct FrozenBoundary<const N: usize> {
+    mass: SpeciesBoundaryDiffusionReport<N>,
+    account: BoundaryEnthalpyAccount<N>,
+}
+
+struct FrozenSolve<const N: usize> {
+    step: SpeciesEnthalpyDiffusionStep<N>,
+    increments: Vec<EnergySum>,
+    boundary: Option<FrozenBoundary<N>>,
+}
+
+struct Refined<const N: usize, P> {
+    step: AdaptiveSpeciesEnthalpyDiffusionStep<N, P>,
+    boundary: Option<BoundaryHistory<N>>,
+    boundary_mass_error: [f64; N],
+    boundary_heat_error: f64,
+}
+
 struct Trial<const N: usize> {
     species: Vec<[f64; N]>,
     h: Vec<f64>,
     temperature: Vec<f64>,
     heat: Vec<EnergySum>,
+    boundary: Option<BoundaryHistory<N>>,
     mass_defect: [f64; N],
     stored: f64,
     transported: f64,
@@ -164,6 +217,7 @@ struct Trial<const N: usize> {
     endpoint_caloric: f64,
     maximum_stage_caloric: f64,
     maximum_source_relaxation: f64,
+    maximum_boundary_relaxation: f64,
     total_defect: f64,
 }
 
@@ -295,40 +349,86 @@ fn frozen<const N: usize, M: SpeciesEnthalpyDiffusionModel<N>>(
     work: &mut Work,
     gate: &CancelGate,
     comparison: Option<(&M::Prepared, &Cell<bool>)>,
-) -> Result<(SpeciesEnthalpyDiffusionStep<N>, Vec<EnergySum>), ChtError> {
+    boundary: Option<BoundaryOptions<'_, N>>,
+) -> Result<FrozenSolve<N>, ChtError> {
     let mut solver = controls.solver;
     solver.maximum_storage_bytes = storage;
     solver.maximum_pair_updates = solver
         .maximum_pair_updates
         .checked_sub(work.pair_updates)
         .ok_or_else(|| refuse("adaptive diffusion total pair budget exhausted"))?;
-    let result = carrier.diffuse_species_with_enthalpy_accounted(
-        domain,
-        species,
-        h,
-        model.diffusivity_m2_s(state),
-        dt,
-        |cells, axis| {
-            poll(gate)?;
+    let interior = |cells, axis| {
+        poll(gate)?;
+        work.source(false)?;
+        let partial = model.face_partial_enthalpy_j_kg(state, domain, cells, axis, gate)?;
+        if let Some((start, changed)) = comparison
+            && !changed.get()
+        {
             work.source(false)?;
-            let partial = model.face_partial_enthalpy_j_kg(state, domain, cells, axis, gate)?;
-            if let Some((start, changed)) = comparison
-                && !changed.get()
-            {
+            let original = model.face_partial_enthalpy_j_kg(start, domain, cells, axis, gate)?;
+            changed.set(changed_contrasts(original, partial)?);
+        }
+        Ok(partial)
+    };
+    let result = if let Some(boundary) = boundary {
+        let (open, mut account) = carrier.diffuse_species_with_enthalpy_and_boundaries_accounted(
+            domain,
+            species,
+            h,
+            model.diffusivity_m2_s(state),
+            boundary.boundaries,
+            dt,
+            interior,
+            |index| {
+                poll(gate)?;
                 work.source(false)?;
-                let original =
-                    model.face_partial_enthalpy_j_kg(start, domain, cells, axis, gate)?;
-                changed.set(changed_contrasts(original, partial)?);
-            }
-            Ok(partial)
-        },
-        solver,
-        controls.maximum_enthalpy_defect_j,
-        gate,
-    )?;
+                let face = &boundary.boundaries[index];
+                let partial =
+                    model.boundary_partial_enthalpy_j_kg(state, domain, index, face, gate)?;
+                if let Some((start, changed)) = comparison
+                    && !changed.get()
+                {
+                    work.source(false)?;
+                    let original =
+                        model.boundary_partial_enthalpy_j_kg(start, domain, index, face, gate)?;
+                    changed.set(changed_contrasts(original, partial)?);
+                }
+                Ok(partial)
+            },
+            solver,
+            controls.maximum_enthalpy_defect_j,
+            gate,
+        )?;
+        let increments = core::mem::take(&mut account.increments);
+        FrozenSolve {
+            step: open.step,
+            increments,
+            boundary: Some(FrozenBoundary {
+                mass: open.boundary,
+                account,
+            }),
+        }
+    } else {
+        let (step, increments) = carrier.diffuse_species_with_enthalpy_accounted(
+            domain,
+            species,
+            h,
+            model.diffusivity_m2_s(state),
+            dt,
+            interior,
+            solver,
+            controls.maximum_enthalpy_defect_j,
+            gate,
+        )?;
+        FrozenSolve {
+            step,
+            increments,
+            boundary: None,
+        }
+    };
     work.pair_updates = work
         .pair_updates
-        .checked_add(result.0.species.report.pair_updates)
+        .checked_add(result.step.species.report.pair_updates)
         .ok_or_else(|| refuse("adaptive diffusion total pair extent overflows"))?;
     work.component_updates = work
         .pair_updates
@@ -352,6 +452,7 @@ fn integrate<const N: usize, M: SpeciesEnthalpyDiffusionModel<N>>(
     storage: usize,
     work: &mut Work,
     gate: &CancelGate,
+    boundary: Option<BoundaryOptions<'_, N>>,
 ) -> Result<(Trial<N>, M::Prepared), ChtError> {
     if substeps == 0 || substeps as u64 > (1u64 << 53) {
         return Err(refuse("adaptive thermal substep count is unrepresentable"));
@@ -361,19 +462,27 @@ fn integrate<const N: usize, M: SpeciesEnthalpyDiffusionModel<N>>(
     let mut species = initial_species.to_vec();
     let mut h = initial_h.to_vec();
     let mut heat = vec![EnergySum::default(); h.len()];
+    let mut boundary_history = boundary.map(|b| BoundaryHistory::new(b.boundaries));
     let mut current = None;
     let mut substep_defect = EnergySum::default();
     let mut mass_defect = [EnergySum::default(); N];
     let mut endpoint_caloric = original_caloric;
     let mut maximum_stage_caloric = original_caloric;
     let mut maximum_source_relaxation: f64 = 0.0;
+    let mut maximum_boundary_relaxation: f64 = 0.0;
     for _ in 0..substeps {
         poll(gate)?;
         let start = current.as_ref().unwrap_or(original);
-        let (predictor, predictor_heat) = frozen(
+        let FrozenSolve {
+            step: predictor,
+            increments: predictor_heat,
+            boundary: predictor_boundary,
+        } = frozen(
             carrier, domain, model, start, &species, &h, half, controls, storage, work, gate, None,
+            boundary,
         )?;
         drop(predictor_heat);
+        drop(predictor_boundary);
         work.source(true)?;
         let midpoint = model.prepare(
             domain,
@@ -408,10 +517,40 @@ fn integrate<const N: usize, M: SpeciesEnthalpyDiffusionModel<N>>(
         let comparison = (!changed.get() && start_relaxation > 0.5).then_some((start, &changed));
         // The predictor locates properties only. Its heat is not another source
         // and its state is NEVER the starting state of this full corrector.
-        let (corrected, corrected_heat) = frozen(
+        let FrozenSolve {
+            step: corrected,
+            increments: corrected_heat,
+            boundary: corrected_boundary,
+        } = frozen(
             carrier, domain, model, &midpoint, &species, &h, dt, controls, storage, work, gate,
-            comparison,
+            comparison, boundary,
         )?;
+        match (&mut boundary_history, corrected_boundary) {
+            (Some(history), Some(current)) => {
+                history.accumulate(&current.mass, &current.account, gate)?
+            }
+            (None, None) => {}
+            _ => return Err(refuse("adaptive reservoir account lost its original owner")),
+        }
+        if let Some(options) = boundary {
+            // Fixed laws can still alias when a saturated map consumes the
+            // inventory before another face can exchange it. Resolve the INNER
+            // splitting interval; unlike source refresh, more native sweeps do
+            // resolve this competition. The predictor spans only dt/2.
+            let start_inner = outer_relaxation(predictor.species.report.maximum_pair_relaxation, 4);
+            let midpoint_inner =
+                outer_relaxation(corrected.species.report.maximum_pair_relaxation, 2);
+            if start_inner > maximum_boundary_relaxation
+                && options.competing_maps(domain, model.diffusivity_m2_s(start), gate)?
+            {
+                maximum_boundary_relaxation = start_inner;
+            }
+            if midpoint_inner > maximum_boundary_relaxation
+                && options.competing_maps(domain, model.diffusivity_m2_s(&midpoint), gate)?
+            {
+                maximum_boundary_relaxation = midpoint_inner;
+            }
+        }
         if changed.get() {
             maximum_source_relaxation =
                 maximum_source_relaxation
@@ -479,8 +618,16 @@ fn integrate<const N: usize, M: SpeciesEnthalpyDiffusionModel<N>>(
             mass_change[k].add(error);
         }
     }
-    let mass_defect =
-        core::array::from_fn(|k| mass_defect[k].value() + mass_change[k].value().abs());
+    let external_mass = boundary_history
+        .as_ref()
+        .map(BoundaryHistory::external_mass)
+        .unwrap_or([EnergySum::default(); N]);
+    let mass_defect = core::array::from_fn(|k| {
+        let mut residual = mass_change[k];
+        residual.add(-external_mass[k].sum);
+        residual.add(-external_mass[k].correction);
+        mass_defect[k].value() + residual.value().abs()
+    });
     for k in 0..N {
         nonnegative(mass_defect[k])?;
         if mass_defect[k] > controls.solver.maximum_mass_defect_kg[k] {
@@ -489,8 +636,19 @@ fn integrate<const N: usize, M: SpeciesEnthalpyDiffusionModel<N>>(
             ));
         }
     }
-    let interval_defect =
-        interval_defect.value() + stored.value().abs() + transported.value().abs();
+    let external = boundary_history
+        .as_ref()
+        .map(BoundaryHistory::external_energy)
+        .unwrap_or_default();
+    let mut stored_residual = stored;
+    let mut transported_residual = transported;
+    for residual in [&mut stored_residual, &mut transported_residual] {
+        residual.add(-external.sum);
+        residual.add(-external.correction);
+    }
+    let interval_defect = interval_defect.value()
+        + stored_residual.value().abs()
+        + transported_residual.value().abs();
     let total_defect =
         substep_defect.value() + interval_defect + original_caloric + endpoint_caloric;
     nonnegative(total_defect)?;
@@ -509,6 +667,7 @@ fn integrate<const N: usize, M: SpeciesEnthalpyDiffusionModel<N>>(
             h,
             temperature,
             heat,
+            boundary: boundary_history,
             mass_defect,
             stored: stored.value(),
             transported: transported.value(),
@@ -517,6 +676,7 @@ fn integrate<const N: usize, M: SpeciesEnthalpyDiffusionModel<N>>(
             endpoint_caloric,
             maximum_stage_caloric,
             maximum_source_relaxation,
+            maximum_boundary_relaxation,
             total_defect,
         },
         endpoint,
@@ -562,6 +722,96 @@ impl MaterialAdvectionStep {
         controls: AdaptiveSpeciesEnthalpyDiffusionControls<N>,
         gate: &CancelGate,
     ) -> Result<AdaptiveSpeciesEnthalpyDiffusionStep<N, M::Prepared>, ChtError> {
+        self.diffuse_species_with_enthalpy_refined(
+            domain,
+            species_mass_kg,
+            specific_enthalpy_j_kg,
+            duration_s,
+            model,
+            controls,
+            gate,
+            None,
+        )
+        .map(|result| result.step)
+    }
+
+    /// Refresh original cell and face laws while advancing reservoir exchange.
+    ///
+    /// Reuses the closed midpoint/refinement algorithm and original positive
+    /// reservoir maps. Accepted physical histories retain every face's signed
+    /// and gross species/enthalpy transfers; independent transfer tolerances
+    /// prevent opposing boundaries from hiding behind stationary endpoint fields.
+    /// Predictors and rejected trials consume work, but never external heat.
+    ///
+    /// The model must bind the supplied boundary descriptors to its original
+    /// physical face caloric law. Coefficients are refreshed at each midpoint.
+    /// Source-changing stiff boundary rates obey the SAME full-outer relaxation
+    /// guard as interior rates. Competing boundary/interior maps additionally
+    /// resolve full-inner relaxation, even for fixed coefficients: identical
+    /// saturated trials can otherwise allocate all exchange to the first face.
+    /// Final mass/energy audits subtract retained actual
+    /// external transfers before rounding. Returned heat is already in h.
+    /// Accuracy remains estimated; the caller owns external reservoir storage,
+    /// thermal interface closure and any pressure/volume evolution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn diffuse_species_with_enthalpy_and_boundaries_coupled_adaptive<
+        const N: usize,
+        M: SpeciesEnthalpyDiffusionModel<N>,
+    >(
+        &self,
+        domain: &VoxelDomain,
+        species_mass_kg: &[[f64; N]],
+        specific_enthalpy_j_kg: &[f64],
+        boundaries: &[SpeciesDiffusionBoundary<N>],
+        duration_s: f64,
+        model: &M,
+        controls: AdaptiveCoupledBoundarySpeciesEnthalpyDiffusionControls<N>,
+        gate: &CancelGate,
+    ) -> Result<AdaptiveCoupledBoundarySpeciesEnthalpyDiffusionStep<N, M::Prepared>, ChtError> {
+        let options = BoundaryOptions {
+            boundaries,
+            mass_tolerance: controls.absolute_boundary_transfer_tolerance_kg,
+            heat_tolerance: controls.absolute_boundary_enthalpy_tolerance_j,
+        };
+        let result = self.diffuse_species_with_enthalpy_refined(
+            domain,
+            species_mass_kg,
+            specific_enthalpy_j_kg,
+            duration_s,
+            model,
+            controls.integrator,
+            gate,
+            Some(options),
+        )?;
+        let (boundary, thermal_boundary) = result
+            .boundary
+            .ok_or_else(|| refuse("accepted reservoir trajectory lost its external account"))?
+            .finish(gate)?;
+        poll(gate)?;
+        Ok(AdaptiveCoupledBoundarySpeciesEnthalpyDiffusionStep {
+            step: result.step,
+            boundary,
+            thermal_boundary,
+            estimated_boundary_transfer_error_kg: result.boundary_mass_error,
+            estimated_boundary_enthalpy_error_j: result.boundary_heat_error,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn diffuse_species_with_enthalpy_refined<
+        const N: usize,
+        M: SpeciesEnthalpyDiffusionModel<N>,
+    >(
+        &self,
+        domain: &VoxelDomain,
+        species_mass_kg: &[[f64; N]],
+        specific_enthalpy_j_kg: &[f64],
+        duration_s: f64,
+        model: &M,
+        controls: AdaptiveSpeciesEnthalpyDiffusionControls<N>,
+        gate: &CancelGate,
+        boundary: Option<BoundaryOptions<'_, N>>,
+    ) -> Result<Refined<N, M::Prepared>, ChtError> {
         poll(gate)?;
         let transport = self.accepted_mass_transport(gate)?;
         let cells = domain.cell_count();
@@ -623,7 +873,20 @@ impl MaterialAdvectionStep {
                 "adaptive initial species do not partition the accepted carrier",
             ));
         }
-        let storage = solver_storage(model, cells, controls.solver.maximum_storage_bytes)?;
+        let extra = if let Some(boundary) = boundary {
+            boundary.validate()?;
+            boundary
+                .retained_bytes()
+                .ok_or_else(|| refuse("adaptive reservoir history storage extent overflows"))?
+        } else {
+            0
+        };
+        let remaining = controls
+            .solver
+            .maximum_storage_bytes
+            .checked_sub(extra)
+            .ok_or_else(|| refuse("adaptive reservoir history exceeds storage budget"))?;
+        let storage = solver_storage(model, cells, remaining)?;
         let mut work = Work {
             pair_updates: 0,
             component_updates: 0,
@@ -656,6 +919,7 @@ impl MaterialAdvectionStep {
             storage,
             &mut work,
             gate,
+            boundary,
         )?;
         // Comparison needs the copied T/h/Y, not another live source image.
         // Drop it before a fine solve to preserve the three-preparation bound.
@@ -679,6 +943,7 @@ impl MaterialAdvectionStep {
                 storage,
                 &mut work,
                 gate,
+                boundary,
             )?;
             let mut temperature_error: f64 = 0.0;
             let mut h_error: f64 = 0.0;
@@ -690,7 +955,18 @@ impl MaterialAdvectionStep {
                     continue;
                 }
                 let t = (fine.temperature[c] - coarse.temperature[c]).abs() / 3.0;
-                let h = (fine.h[c] - coarse.h[c]).abs() / 3.0;
+                // The physical storage budget may intentionally admit rounding
+                // below a large formation datum. It must not erase the separate
+                // time-error estimate: compare retained transported heat too.
+                let mut heat_delta = fine.heat[c];
+                heat_delta.add(-coarse.heat[c].sum);
+                heat_delta.add(-coarse.heat[c].correction);
+                let heat_delta = heat_delta.value().abs();
+                nonnegative(heat_delta)?;
+                let h = (fine.h[c] - coarse.h[c])
+                    .abs()
+                    .max(heat_delta / self.mass_kg[c])
+                    / 3.0;
                 temperature_error = temperature_error.max(t);
                 h_error = h_error.max(h);
                 maximum_error_ratio = maximum_error_ratio
@@ -709,7 +985,23 @@ impl MaterialAdvectionStep {
                     maximum_error_ratio = maximum_error_ratio.max(value / tolerance);
                 }
             }
-            if maximum_error_ratio <= 1.0 && fine.maximum_source_relaxation <= 0.5 {
+            let (boundary_mass_error, boundary_heat_error, boundary_ratio) =
+                match (&coarse.boundary, &fine.boundary, boundary) {
+                    (Some(coarse), Some(fine), Some(options)) => {
+                        coarse.compare(fine, options, gate)?
+                    }
+                    (None, None, None) => ([0.0; N], 0.0, 0.0),
+                    _ => {
+                        return Err(refuse(
+                            "adaptive reservoir comparison lost its physical history",
+                        ));
+                    }
+                };
+            maximum_error_ratio = maximum_error_ratio.max(boundary_ratio);
+            if maximum_error_ratio <= 1.0
+                && fine.maximum_source_relaxation <= 0.5
+                && fine.maximum_boundary_relaxation <= 0.5
+            {
                 let changes = fine.heat.iter().map(|sum| sum.value()).collect();
                 let report = AdaptiveSpeciesEnthalpyDiffusionReport {
                     duration_s,
@@ -724,6 +1016,7 @@ impl MaterialAdvectionStep {
                     estimated_mass_fraction_error: species_error,
                     maximum_error_ratio,
                     maximum_changing_source_relaxation: fine.maximum_source_relaxation,
+                    maximum_competing_boundary_relaxation: fine.maximum_boundary_relaxation,
                     absolute_mass_defect_kg: fine.mass_defect,
                     stored_enthalpy_change_j: fine.stored,
                     transported_enthalpy_change_j: fine.transported,
@@ -735,20 +1028,25 @@ impl MaterialAdvectionStep {
                     absolute_enthalpy_defect_j: fine.total_defect,
                 };
                 poll(gate)?;
-                return Ok(AdaptiveSpeciesEnthalpyDiffusionStep {
-                    state: endpoint,
-                    species_mass_kg: fine.species,
-                    specific_enthalpy_j_kg: fine.h,
-                    temperature_k: fine.temperature,
-                    diffusive_enthalpy_change_j: changes,
-                    report,
+                return Ok(Refined {
+                    step: AdaptiveSpeciesEnthalpyDiffusionStep {
+                        state: endpoint,
+                        species_mass_kg: fine.species,
+                        specific_enthalpy_j_kg: fine.h,
+                        temperature_k: fine.temperature,
+                        diffusive_enthalpy_change_j: changes,
+                        report,
+                    },
+                    boundary: fine.boundary,
+                    boundary_mass_error,
+                    boundary_heat_error,
                 });
             }
             drop(endpoint);
             coarse = fine;
         }
         Err(refuse(
-            "adaptive thermal diffusion accuracy or source relaxation is unresolved at its refinement limit",
+            "adaptive thermal diffusion accuracy, source relaxation or boundary competition is unresolved at its refinement limit",
         ))
     }
 }

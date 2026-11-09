@@ -13,6 +13,8 @@ use super::{
     poll, poll_every,
 };
 
+mod adaptive;
+
 /// Exact native boundary order paired with explicit physical face temperatures.
 ///
 /// The full original canonical gas bank evaluates every partial enthalpy,

@@ -85,6 +85,39 @@ pub(super) struct BoundaryEnthalpyAccount<const N: usize> {
     pub(super) mass_into_domain: [EnergySum; N],
 }
 
+/// Inspect the already-admitted canonical boundary list without allocating
+/// topology or re-querying constitutive laws. Adjacent entries suffice for
+/// shared-cell reservoirs because the original owner requires (cell, face)
+/// order. A positive-D fluid neighbor supplies a competing interior map.
+pub(super) fn boundary_maps_compete<const N: usize>(
+    domain: &VoxelDomain,
+    diffusivity: &[f64],
+    boundaries: &[SpeciesDiffusionBoundary<N>],
+    gate: &CancelGate,
+) -> Result<bool, ChtError> {
+    let mut previous_active = None;
+    for (index, boundary) in boundaries.iter().enumerate() {
+        poll_every(gate, index)?;
+        let cell = boundary.cell;
+        if diffusivity[cell] == 0.0 {
+            continue;
+        }
+        if previous_active == Some(cell) {
+            return Ok(true);
+        }
+        previous_active = Some(cell);
+        for face in 0..6 {
+            if domain
+                .neighbor(cell, face)
+                .is_some_and(|n| domain.is_fluid(n) && diffusivity[n] > 0.0)
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 struct BoundaryCaloricFace<const N: usize> {
     input_index: usize,
     cell: usize,
