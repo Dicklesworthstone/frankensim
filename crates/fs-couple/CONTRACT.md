@@ -52,6 +52,35 @@ normal evolution is claimed. Focused tests cover static common-motion work,
 powered spin/arrest, thermal breakaway and discrete-mode disagreement,
 independent coupled motion/power/caloric refinement, and atomic retry.
 
+## Scenario temperature instruments on accepted finite-cell heat
+
+`scenario_sensor::TemperatureSensorObserver` connects original compiled scenario
+instruments to `DepositionSimulation` through its existing `DepositionObserver`
+contract. An explicit entity-labelled state-slot map selects distinct active
+persistent cell IDs. Quantity, entity and dimension admission prevent pressure
+rows, unrelated entities, duplicate cells and map-order changes from silently
+becoming temperature probes. The caller still owns geometric correspondence and
+patch weights; this adapter does not infer a point location or camera footprint.
+
+Every native accepted substep supplies its original caloric-law temperatures,
+physical duration and endpoint clock. The scenario's shared mount operator and
+declared instantaneous/first-order response evolve on an affine reconstruction
+of those temperatures. The same original law supplies temperatures through
+latent-heat plateaus. Original boundary/contact events preserve sensor memory.
+The observer adds no heat, conductance or time restriction and composes with
+other physical owners through `CoupledObservers` on the same thermal timeline.
+
+Initial response is explicit. Stale clocks or starting temperatures, invalid
+support, material refusal and cancellation abort the existing thermal candidate
+and its cloned instrument history. Cell sampling and field evaluation poll at
+most every 256 entries; event checks retain the original bounded synchronous
+event-hook semantics. Storage is linear in the admitted sensor state dimension,
+with no growing history log. This is a passive observation of finite-cell heat,
+not thermal sensor back-reaction, continuum sampling accuracy, stochastic noise,
+calibration validation or a transient assimilation of uncertain sensor memory.
+`tests/scenario_sensor.rs` exercises real heating, mount bias, lag, patch probes,
+source-event timing, native-clock rounding, restart, phase plateaus and rollback.
+
 ## Canonical magnetic scenario boundaries
 
 `scenario_magnetic::magnetic_flux_boundary_at` and `solve_magnetic_flux3`

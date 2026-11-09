@@ -462,7 +462,7 @@ flagships.
   authority fields, and placement-candidate status.
   `ScenarioSensor::compile` produces a private-field
   `CompiledSensorOperator`: the declared dense restriction with mount gain
-  applied, the retained affine offset, propagated first-order placement
+  applied, the retained affine offset and declared dynamics, propagated first-order placement
   variance, physical instrument variance when present, entity/location, flags,
   and content identity. `predict` and `compare` use that exact compiled row, so
   a virtual QoI and predicted-versus-measured comparison cannot silently use
@@ -474,6 +474,19 @@ flagships.
   test-only: it constructs that checked observation and runs the real
   `fs_assimilate::assimilate` Joseph update, so no L3 production dependency
   points upward into L4.
+  `sensor::transient::SensorState` executes that same compiled operator on an
+  accepted simulation clock. Initialization names both the current field and
+  initial instrument reading; instantaneous instruments require equilibrium.
+  The held and affine endpoint methods integrate the declared first-order
+  response exactly for their stated input reconstruction, retain the supplied
+  endpoint clock bit-for-bit, and return unpublished candidates. The affine
+  start target is retained from the accepted state. Mount gain and offset are
+  applied once by the shared steady/transient evaluation loop. Deterministic
+  `fs-math` exponentials and a small-argument ramp series avoid loss of the
+  response on short solver steps. Invalid clocks, non-finite fields, response
+  overflow and cancellation publish no candidate; the accepted state remains
+  reusable. No noise is drawn and uncertain sensor memory is not assimilated
+  as though it were deterministic.
   `compile_sensor_set` is the explicit all-or-nothing catalog boundary for an
   ordered collection. It preflights an exact `SensorSetPlan`, proves exact-name
   uniqueness, resolves every authored `EntityRef`, retains requested/current
@@ -880,6 +893,11 @@ individually bounded but do not poll internally in sensor-set schema v1. A
 request observed at a set checkpoint drops private scratch and returns no
 partial set.
 
+Transient sensor steps perform one bounded dense operator evaluation, polling
+before admission, every 256 components, and before publication. They allocate
+no field or response scratch and retain the original compiled operator by
+reference. A returned state is a candidate until its owning solver accepts it.
+
 Sensor-extension encode/decode is synchronous and non-preemptible. Input is
 hard-capped at 64 MiB; sensor, support, state, and text counts are checked
 before their allocations; output length is checked and exactly reserved before
@@ -1062,7 +1080,11 @@ control code renders BITWISE identical audio through the render API.
   pre-cancellation refusal; canonical scenario-bound sensor-extension
   round-trip; generic ledger persistence across a real reopen; future/tag/
   count/tamper/truncation/trailing/noncanonical refusal; and a JSONL
-  instrumented-temperature handoff row.
+  instrumented-temperature handoff row. Transient coverage includes analytical
+  step and ramp responses, split-interval equivalence, mounting on patch
+  averages, explicit initial disequilibrium, instantaneous and virtual probes,
+  short-step response resolution, exact endpoint clocks, invalid input, and
+  cancellation during prediction and immediately before publication.
 
 ## No-claim boundaries
 
@@ -1166,9 +1188,12 @@ control code renders BITWISE identical audio through the render API.
   gradient bound, integrate an IR-camera footprint, validate a mount/contact
   model, authenticate a certificate/date/provider, or establish calibration
   validity. `CompiledSensorOperator::predict` is the steady affine reading; the
-  retained first-order time constant is not silently advanced. Nonlinear
+  retained first-order time constant is not silently advanced by that steady
+  API; `sensor::transient` explicitly evolves it on accepted endpoint fields.
+  Affine or held reconstruction is an assumption about the unresolved input
+  between those endpoints, not a solver trajectory accuracy certificate. Nonlinear
   observation operators, missing/censored/saturated/delayed/correlated sensor
-  pathologies, transient filtering, transform-covariance propagation, corpus
+  pathologies, transform-covariance propagation, corpus
   admission, and placement optimization remain owning-layer work. The
   owner-neutral observation parts are structurally consumable by
   `fs-assimilate`; the test-only consumer exercises the handoff but gives no

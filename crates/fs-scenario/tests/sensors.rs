@@ -101,6 +101,212 @@ fn physical_sensor(
 }
 
 #[test]
+fn declared_first_order_sensor_evolves_on_the_accepted_clock() {
+    use fs_scenario::sensor::transient::SensorState;
+
+    let sensor = physical_sensor(
+        "lagged-temperature",
+        SensorKind::Thermocouple,
+        entities().region,
+        KindExpectation::Domain,
+        ObservationSupport::point(1, 0).unwrap(),
+        SensorMount::declared_ideal("ideal").unwrap(),
+        PlacementUncertainty::declared_exact("fixed").unwrap(),
+        false,
+    )
+    .compile()
+    .unwrap();
+    let initial = SensorState::new(&sensor, 0.0, &[0.0], 0.0, &mut || false).unwrap();
+    let held = initial
+        .step_held_to_candidate(0.25, &[10.0], &mut || false)
+        .unwrap();
+    let affine = initial
+        .step_affine_to_candidate(0.25, &[10.0], &mut || false)
+        .unwrap();
+    let expected_decay = (-1.0_f64).exp();
+    assert!((held.reading() - 10.0 * (1.0 - expected_decay)).abs() < 2.0e-14);
+    assert!((affine.reading() - 10.0 * expected_decay).abs() < 2.0e-14);
+    assert_eq!(initial.reading(), 0.0);
+    assert_eq!(held.equilibrium_reading(), sensor.predict(&[10.0]).unwrap());
+    assert_eq!(held.operator().sensor_identity(), sensor.sensor_identity());
+    assert_eq!(held.operator().dynamics().time_constant_s(), Some(0.25));
+    let cooling = SensorState::new(&sensor, 0.0, &[10.0], 10.0, &mut || false)
+        .unwrap()
+        .step_held_to_candidate(10.0, &[0.0], &mut || false)
+        .unwrap();
+    assert!((cooling.reading() / (10.0 * (-40.0_f64).exp()) - 1.0).abs() < 3.0e-15);
+
+    let split_held = initial
+        .step_held_to_candidate(0.125, &[10.0], &mut || false)
+        .unwrap()
+        .step_held_to_candidate(0.25, &[10.0], &mut || false)
+        .unwrap();
+    let split_affine = initial
+        .step_affine_to_candidate(0.125, &[5.0], &mut || false)
+        .unwrap()
+        .step_affine_to_candidate(0.25, &[10.0], &mut || false)
+        .unwrap();
+    assert!((held.reading() - split_held.reading()).abs() < 2.0e-14);
+    assert!((affine.reading() - split_affine.reading()).abs() < 2.0e-14);
+    let end = split_affine
+        .step_affine_to_candidate(0.3, &[12.0], &mut || false)
+        .unwrap();
+    assert_eq!(end.time_s().to_bits(), 0.3_f64.to_bits());
+
+    // Native physical dt and rounded endpoint differences need not have the
+    // same bits. Use the actual native dt while retaining its endpoint clock.
+    let at_two = SensorState::new(&sensor, 0.2, &[0.0], 0.0, &mut || false).unwrap();
+    let native_end = 0.2_f64 + 0.1;
+    assert_ne!(native_end - 0.2, 0.1);
+    let native = at_two
+        .step_affine_interval_candidate(native_end, 0.1, &[10.0], &mut || false)
+        .unwrap();
+    let from_zero = initial
+        .step_affine_to_candidate(0.1, &[10.0], &mut || false)
+        .unwrap();
+    assert_eq!(native.reading(), from_zero.reading());
+    assert_eq!(native.time_s().to_bits(), native_end.to_bits());
+    assert!(
+        at_two
+            .step_affine_interval_candidate(native_end, 0.11, &[10.0], &mut || false)
+            .is_err()
+    );
+}
+
+#[test]
+fn transient_patch_uses_the_same_mount_and_retains_initial_disequilibrium() {
+    use fs_scenario::sensor::transient::SensorState;
+
+    let sensor = physical_sensor(
+        "mounted-temperature",
+        SensorKind::IrCameraRegion,
+        entities().surface,
+        KindExpectation::Boundary,
+        ObservationSupport::patch_average(
+            2,
+            vec![ObservationTerm::new(0, 0.25), ObservationTerm::new(1, 0.75)],
+        )
+        .unwrap(),
+        SensorMount::affine(2.0, 3.0, "mount").unwrap(),
+        PlacementUncertainty::declared_exact("fixed").unwrap(),
+        false,
+    )
+    .compile()
+    .unwrap();
+    let initial = SensorState::new(&sensor, 0.0, &[10.0, 20.0], 38.0, &mut || false).unwrap();
+    let candidate = initial
+        .step_affine_to_candidate(0.25, &[20.0, 40.0], &mut || false)
+        .unwrap();
+    assert_eq!(initial.equilibrium_reading(), 38.0);
+    assert_eq!(candidate.equilibrium_reading(), 73.0);
+    assert!((candidate.reading() - (38.0 + 35.0 * (-1.0_f64).exp())).abs() < 3.0e-14);
+
+    let cold = SensorState::new(&sensor, 0.0, &[10.0, 20.0], 0.0, &mut || false).unwrap();
+    let warming = cold
+        .step_held_to_candidate(0.25, &[10.0, 20.0], &mut || false)
+        .unwrap();
+    assert!((warming.reading() - 38.0 * (1.0 - (-1.0_f64).exp())).abs() < 3.0e-14);
+    let fixed = initial
+        .step_affine_to_candidate(100.0, &[10.0, 20.0], &mut || false)
+        .unwrap();
+    assert_eq!(fixed.reading(), 38.0);
+}
+
+#[test]
+fn instantaneous_sensor_cannot_invent_retained_lag() {
+    use fs_scenario::sensor::transient::SensorState;
+
+    let sensor = ScenarioSensor::new(
+        "instantaneous",
+        SensorKind::Thermocouple,
+        SensorLocation::new(
+            EntityRef::new(entities().region, KindExpectation::Domain),
+            [0.0; 3],
+            PlacementUncertainty::declared_exact("fixed").unwrap(),
+        )
+        .unwrap(),
+        ObservationSupport::point(1, 0).unwrap(),
+        SensorMount::declared_ideal("ideal").unwrap(),
+        SensorDynamics::declared_instantaneous("ideal response").unwrap(),
+        SensorCalibration::virtual_sensor("simulation probe").unwrap(),
+        false,
+    )
+    .unwrap()
+    .compile()
+    .unwrap();
+    assert!(SensorState::new(&sensor, 0.0, &[300.0], 0.0, &mut || false).is_err());
+    let initial = SensorState::new(&sensor, 0.0, &[300.0], 300.0, &mut || false).unwrap();
+    let candidate = initial
+        .step_affine_to_candidate(0.1, &[350.0], &mut || false)
+        .unwrap();
+    assert_eq!(candidate.reading(), 350.0);
+    assert!(candidate.operator().is_virtual());
+}
+
+#[test]
+fn transient_sensor_resolves_short_ramps_and_refuses_invalid_or_cancelled_steps() {
+    use fs_scenario::sensor::transient::{SensorState, SensorTransientError};
+
+    let sensor = physical_sensor(
+        "bounded-response",
+        SensorKind::Thermocouple,
+        entities().region,
+        KindExpectation::Domain,
+        ObservationSupport::point(512, 0).unwrap(),
+        SensorMount::declared_ideal("ideal").unwrap(),
+        PlacementUncertainty::declared_exact("fixed").unwrap(),
+        false,
+    )
+    .compile()
+    .unwrap();
+    let field = vec![0.0; 512];
+    let initial = SensorState::new(&sensor, 0.0, &field, 0.0, &mut || false).unwrap();
+    let mut endpoint = field.clone();
+    endpoint[0] = 1.0;
+    let short = initial
+        .step_affine_to_candidate(1.0e-12, &endpoint, &mut || false)
+        .unwrap();
+    assert!((short.reading() - 2.0e-12).abs() < 3.0e-24);
+    for time in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            initial
+                .step_affine_to_candidate(time, &endpoint, &mut || false)
+                .is_err()
+        );
+    }
+    assert!(
+        initial
+            .step_affine_to_candidate(1.0, &[], &mut || false)
+            .is_err()
+    );
+    endpoint[1] = f64::NAN;
+    assert!(
+        initial
+            .step_affine_to_candidate(1.0, &endpoint, &mut || false)
+            .is_err()
+    );
+    endpoint[1] = 0.0;
+    for stop_at in [1, 3, 4] {
+        let mut polls = 0;
+        let result = initial.step_affine_to_candidate(1.0, &endpoint, &mut || {
+            polls += 1;
+            polls == stop_at
+        });
+        assert_eq!(result, Err(SensorTransientError::Cancelled));
+    }
+    assert_eq!(initial.time_s(), 0.0);
+    assert_eq!(initial.reading(), 0.0);
+    assert_eq!(initial.equilibrium_reading(), 0.0);
+    assert!(
+        initial
+            .step_affine_to_candidate(1.0, &endpoint, &mut || false)
+            .unwrap()
+            .reading()
+            > 0.0
+    );
+}
+
+#[test]
 fn every_sensor_family_has_a_closed_quantity_and_entity_contract() {
     let e = entities();
     let exact = PlacementUncertainty::declared_exact("fixture-location").expect("placement");

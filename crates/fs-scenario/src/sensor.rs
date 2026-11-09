@@ -23,6 +23,9 @@ use crate::entity::{
 use crate::ir::write_ir;
 use crate::scenario::Scenario;
 
+/// Retained sensor dynamics on an accepted simulation clock.
+pub mod transient;
+
 /// Schema version bound into every scenario-sensor identity.
 pub const SENSOR_SCHEMA_VERSION: u32 = 1;
 
@@ -984,6 +987,7 @@ impl ScenarioSensor {
             local_position_m: self.location.local_position_m,
             operator,
             offset,
+            dynamics: self.dynamics.clone(),
             placement_variance,
             instrument_variance: self.calibration.instrument_variance(),
             virtual_sensor: self.calibration.is_virtual(),
@@ -2106,6 +2110,7 @@ pub struct CompiledSensorOperator {
     local_position_m: [f64; 3],
     operator: Vec<f64>,
     offset: f64,
+    dynamics: SensorDynamics,
     placement_variance: f64,
     instrument_variance: Option<f64>,
     virtual_sensor: bool,
@@ -2161,6 +2166,12 @@ impl CompiledSensorOperator {
         self.offset
     }
 
+    /// Declared response model, retained separately from the steady operator.
+    #[must_use]
+    pub const fn dynamics(&self) -> &SensorDynamics {
+        &self.dynamics
+    }
+
     /// Placement contribution to reading variance.
     #[must_use]
     pub const fn placement_variance(&self) -> f64 {
@@ -2193,24 +2204,38 @@ impl CompiledSensorOperator {
     /// Refuses dimension mismatch, non-finite state values, or finite-input
     /// overflow.
     pub fn predict(&self, state: &[f64]) -> Result<f64, SensorError> {
+        self.predict_with_checkpoint(state, &mut || Ok(()))
+    }
+
+    fn predict_with_checkpoint<E: From<SensorError>>(
+        &self,
+        state: &[f64],
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<f64, E> {
         if state.len() != self.operator.len() {
             return Err(SensorError::StateDimensionMismatch {
                 expected: self.operator.len(),
                 actual: state.len(),
-            });
+            }
+            .into());
         }
         let mut value = self.offset;
-        for (weight, component) in self.operator.iter().zip(state) {
+        for (index, (weight, component)) in self.operator.iter().zip(state).enumerate() {
+            if index % 256 == 0 {
+                checkpoint()?;
+            }
             if !component.is_finite() {
                 return Err(SensorError::NonFiniteField {
                     field: "sensor state",
-                });
+                }
+                .into());
             }
             value = weight.mul_add(*component, value);
             if !value.is_finite() {
                 return Err(SensorError::NonFiniteComputation {
                     operation: "sensor prediction",
-                });
+                }
+                .into());
             }
         }
         Ok(value)
