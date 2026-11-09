@@ -324,12 +324,81 @@ fn evanescent_layer_transmits_interference_power_and_reaches_opaque_limit() {
             2e-12 * analytic.abs(),
         );
         assert!(t > 0.0 && t < 1.0);
-        assert!(r.field_at(0.5 * h).unwrap().normal_flux_w_m2 > 0.0);
+        let expected_flux = 0.5 * z0.re * (0.002 * analytic.abs()).powi(2);
+        assert!(expected_flux > 0.0);
+        for fraction in [0.0, 0.17, 0.5, 0.77, 1.0] {
+            // Relative accuracy is measured against the transmitted flux,
+            // including h=40: incident-power tolerances hide lost tunneling.
+            close(
+                r.field_at(fraction * h).unwrap().normal_flux_w_m2,
+                expected_flux,
+                3e-12 * expected_flux,
+            );
+        }
+        // A two-sided coherent drive also transports evanescent interference
+        // power. Separate the analytic transmission/cross terms before
+        // subtracting the two large reflected/incident exterior powers.
+        let left = C64::from_re(0.002);
+        let right = C64::new(0.0007, -0.0009);
+        let mut incoming = single(0, 2, left);
+        incoming[1][2] = right;
+        let coherent = p.drive(incoming).unwrap();
+        let reflected = reflection.scale(1.0 - decay * decay)
+            / (C64::ONE - (reflection * reflection).scale(decay * decay));
+        let expected_coherent = 0.5
+            * z0.re
+            * (analytic.norm_sq() * (left.norm_sq() - right.norm_sq())
+                + 2.0 * ((analytic * left).conj() * (reflected * right)).re);
+        assert!(expected_coherent != 0.0);
+        for fraction in [0.0, 0.17, 0.5, 0.77, 1.0] {
+            close(
+                coherent.field_at(fraction * h).unwrap().normal_flux_w_m2,
+                expected_coherent,
+                5e-12 * expected_coherent.abs(),
+            );
+        }
         transmitted.push(t);
     }
     assert!(transmitted.windows(2).all(|w| w[0] > w[1]));
     assert!(transmitted[0] > 0.99);
     assert!(transmitted[3] < 1e-50, "transmitted={transmitted:?}");
+}
+
+#[test]
+fn opaque_coherent_p_sv_flux_retains_modal_orthogonality_at_every_depth() {
+    let outer = material(2500.0, 4000.0, 2000.0, 43);
+    let layer = material(3000.0, 8000.0, 4500.0, 44);
+    // Both exterior P/SV channels propagate, while all layer modes decay.
+    // At h=160, roundoff in a nominally zero P/SV power coupling would
+    // dominate the much smaller physically transmitted shear power.
+    let cosine = (1.0 - (4000.0_f64 * 0.000245).powi(2)).sqrt();
+    for h in [80.0, 160.0] {
+        let p = IsotropicElasticLayer::new(&outer, &layer, &outer, h)
+            .unwrap()
+            .prepare_incidence(ElasticSide::First, ElasticMode::P, cosine, 1000.0)
+            .unwrap();
+        assert!(
+            p.layer_normal_slownesses_s_m()
+                .unwrap()
+                .iter()
+                .all(|q| { q.re == 0.0 && q.im > 0.0 })
+        );
+        let mut incoming = single(0, 0, C64::new(0.001, 0.0004));
+        incoming[0][1] = C64::new(-0.0006, 0.0008);
+        let response = p.drive(incoming).unwrap();
+        // Independent propagating exterior modal powers have no subtraction
+        // against the much larger incoming/reflected power on the first face.
+        let transmitted: f64 = response.exterior.outgoing_normal_power_w_m2[1].iter().sum();
+        assert!(transmitted > 0.0);
+        assert!(transmitted / response.exterior.total_incoming_power_w_m2 < 1e-40);
+        for fraction in [0.0, 0.17, 0.5, 0.77, 1.0] {
+            close(
+                response.field_at(fraction * h).unwrap().normal_flux_w_m2,
+                transmitted,
+                3e-11 * transmitted,
+            );
+        }
+    }
 }
 
 #[test]

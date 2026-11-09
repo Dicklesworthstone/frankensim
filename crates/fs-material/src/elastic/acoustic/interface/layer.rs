@@ -12,8 +12,9 @@
 //! even/odd cosine/sinc basis retains the second solution at q=0. This avoids
 //! both growing transfer matrices and a singular pair of coincident waves.
 //! The basis change is algebraic, not a physical cutoff or thin-plate model.
-//! Interior power is reconstructed from the TOTAL velocity and traction;
-//! interfering evanescent waves can transmit power without any absorption.
+//! Interior power retains the Hermitian modal velocity/traction products
+//! before rounding total fields; even exponentially small interference between
+//! evanescent waves can transmit power without any absorption.
 //!
 //! This extends the parent's bonded solid boundary equations. The distinction
 //! between evanescence and finite-plate transmission is also discussed for
@@ -58,6 +59,8 @@ pub struct ElasticLayerField {
     pub traction_pa: [C64; 3],
     pub strain_mandel: [C64; 6],
     /// `-Re(v* . traction)/2` [W/m^2], including all interference terms.
+    /// Evaluated before rounding the total fields, preserving transmitted
+    /// power even below their floating-point cancellation resolution.
     pub normal_flux_w_m2: f64,
 }
 
@@ -104,6 +107,8 @@ struct ModeBasis {
     waves: [ElasticWaveTrace; 2],
     cosine: C64,
     k0: f64,
+    flux_scale: f64,
+    parity: f64,
     regularized: bool,
     // R contains the even-q polynomial; L is the opposite parity divided by
     // the normal cosine. For SV the parity roles are interchanged. L is
@@ -566,6 +571,18 @@ fn prepare_basis(
             waves,
             cosine: wave_cosine,
             k0,
+            // The Hermitian power scale is fixed by the prepared phase, not
+            // the query depth or coherent drive. Cache roots/attenuation once.
+            flux_scale: if full_phase.abs() <= 0.5 {
+                det::sqrt(impedances[kind.min(1)]) * core::f64::consts::FRAC_1_SQRT_2
+            } else if wave_cosine.im == 0.0 {
+                det::sqrt(waves[0].normal_power_factor_pa_s_m)
+            } else {
+                det::sqrt(impedances[kind.min(1)])
+                    * det::sqrt(wave_cosine.im)
+                    * det::exp(-0.5 * full_phase.im)
+            },
+            parity,
             regular,
             regularized: full_phase.abs() <= 0.5,
         });
@@ -585,8 +602,16 @@ fn layer_field(
     });
     let velocity_m_s = core::array::from_fn(|i| values[i]);
     let traction_pa = core::array::from_fn(|i| values[3 + i]);
-    let normal_flux_w_m2 =
-        -0.5 * real_sum((0..3).map(|i| (velocity_m_s[i].conj() * traction_pa[i]).re));
+    // Keep the Hermitian modal power before rounding the summed fields. An
+    // opaque layer's counter-decaying wave can be smaller than one ulp of the
+    // total velocity/traction while its interference power remains finite.
+    let normal_flux_w_m2 = basis
+        .into_iter()
+        .enumerate()
+        .fold(Dd::ZERO, |power, (mode, basis)| {
+            power + basis.normal_flux([coefficients[2 * mode], coefficients[2 * mode + 1]])
+        })
+        .to_f64();
     if values.iter().any(|&v| !finite(v)) || !normal_flux_w_m2.is_finite() {
         return Err(invalid("elastic layer field is unrepresentable"));
     }
@@ -599,6 +624,33 @@ fn layer_field(
 }
 
 impl ModeBasis {
+    // Lossless isotropic P, SV and SH branches at a common tangential
+    // slowness are flux-orthogonal. Each branch has a Hermitian 2x2 power
+    // block; evaluating nominally zero cross-branch products would leak
+    // roundoff from large reactive fields into exponentially small flux.
+    fn normal_flux(self, coefficients: [C64; 2]) -> Dd {
+        // Regular cosine/sinc: zero self powers, (Z/2) Re(a* b), even at q=0.
+        // Propagating waves: +/-Z*cos(theta)/2 diagonal powers, no cross power.
+        // Evanescent pair: zero self powers, parity*Z*Im(cos(theta)) times
+        // exp(-kappa*h) Im(a* b). SV has opposite parity to P and SH.
+        // Scale before squaring, as the exterior modal-power owner does.
+        // Dd keeps nearly cancelling coefficient products through the final
+        // modal sum; increasing precision after summing total fields cannot.
+        let [a, b] = coefficients.map(|value| {
+            [
+                Dd::from_f64(value.re) * Dd::from_f64(self.flux_scale),
+                Dd::from_f64(value.im) * Dd::from_f64(self.flux_scale),
+            ]
+        });
+        if self.regularized {
+            a[0] * b[0] + a[1] * b[1]
+        } else if self.cosine.im == 0.0 {
+            (a[0] * a[0] + a[1] * a[1]) - (b[0] * b[0] + b[1] * b[1])
+        } else {
+            Dd::from_f64(self.parity) * (a[0] * b[1] - a[1] * b[0])
+        }
+    }
+
     fn phase(self, distance: f64) -> C64 {
         let phase = self.cosine.scale(self.k0 * distance);
         if phase.im > 0.0 {
