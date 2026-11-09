@@ -18,6 +18,9 @@
 /// Adaptive finite-pair trajectories through the same physical transaction.
 pub mod trajectory;
 
+/// Simultaneous apertures sharing finite moving-gas inventories.
+pub mod network;
+
 use crate::liquid_gas::evaporation::momentum::{
     MovingGasParcel,
     boundary::{MovingGasBoundaryError, MovingGasBoundarySolve, MovingGasBoundaryStep},

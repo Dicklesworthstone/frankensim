@@ -1,6 +1,7 @@
 //! G0/G1/G3/G4: original finite gases, molecular moments and full U + K closure.
 //! Synthetic NASA/transport sources are analytic fixtures, not measured gases.
 mod trajectory;
+mod network;
 use super::{
     MolecularExchangeCandidate, MolecularExchangeControls, MolecularExchangeError,
     MolecularExchangeSurface, step_candidate,

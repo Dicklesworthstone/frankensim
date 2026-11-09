@@ -8862,3 +8862,32 @@ Five native regression groups cover independent simultaneous-capacity solutions,
 opposing latent transfers, gas-source/radiation ownership, original single-body
 parity and transactional refusals, and dense-gas departure-energy conservation.
 They are source/formatter checked; native execution remains unverified here.
+
+
+## Simultaneous finite moving-gas molecular networks
+
+`molecular_exchange::network::step_candidate` composes bounded ID-keyed moving
+gas inventories and disjoint molecular apertures in one transaction. Every
+aperture samples the original snapshot. Gross outgoing species are pooled per
+gas and admitted against its original inventory before any incoming mass can
+be credited. Each gas then receives one existing source-relative caloric and
+momentum reconstruction. Link ordering is canonical by ID. A zero-area link
+leaves its source and drift inactive; isolated gases retain their original state.
+
+Apertures may have distinct prescribed velocities. Their molecular energy and
+vector momentum are transformed analytically into an explicit common energy
+frame. Actual species, total mass, momentum, reciprocal stream energy, rounded
+pooled energy and final common/inertial-frame energy accounts must close before
+all final endpoints are published. Source catalogs, final states and drift
+support remain admitted by the original owners. Active apertures incident on
+one gas must retain the same original catalog; a shared species identity cannot
+substitute a different caloric source in another connected or disconnected part.
+
+This is a frozen-rate, first-order fixed-volume interface operator. It does not
+supply container motion, in-flight particle storage, other-wall forces, or a
+closed-system passivity claim. The existing pair and pair-trajectory APIs remain
+unchanged. Seven focused regression groups cover pair parity, three-gas balance,
+canonical ordering, shared withdrawal, orientation, Galilean/caloric-reference
+invariance, newly arriving species, topology refusal and terminal cancellation.
+Native execution and final formatting of recovered blobs remain pending because
+the pinned dependency build exhausted disk space and the executor disconnected.
