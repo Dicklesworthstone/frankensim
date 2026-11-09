@@ -25,7 +25,7 @@ fn g1_planar_mixture_pressure_outlets_preserve_species_shear_and_energy_on_every
     for side in SIDES {
         for reconstruction in [Reconstruction::FirstOrder, Reconstruction::Muscl] {
             let mut choked: Option<Vec<f64>> = None;
-            for pressure in [1.0, 0.8, 0.01, 1e-12] {
+            for pressure in [1.0, 0.8, 0.01, 1e-12, 0.0] {
                 let mut velocity = [0.2, -0.3];
                 velocity[side.axis()] = if pressure == 1.0 {
                     0.4 * side.sign()
@@ -121,7 +121,7 @@ fn g4_planar_mixture_pressure_outlet_refuses_invalid_data_backflow_and_reservoir
             || false,
         )
     };
-    for pressure in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+    for pressure in [-1.0, f64::NAN, f64::INFINITY] {
         assert!(matches!(
             make(pressure, BoundarySide::XMax),
             Err(Error::Invalid(_))

@@ -708,9 +708,9 @@ fn admit_boundaries(boundaries: Boundaries) -> Result<(), Error> {
                 }
             }
             if let Boundary::PressureOutlet { pressure_pa } = boundary {
-                if !positive(pressure_pa) {
+                if !pressure_pa.is_finite() || pressure_pa < 0.0 {
                     return Err(Error::Invalid(
-                        "pressure outlet needs positive absolute pressure",
+                        "pressure outlet needs nonnegative absolute pressure",
                     ));
                 }
             }

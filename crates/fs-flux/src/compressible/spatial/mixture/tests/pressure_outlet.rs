@@ -21,7 +21,7 @@ fn g1_volumetric_pressure_outlets_preserve_species_both_shears_and_energy_on_eve
     for side in BoundarySide::ALL {
         for reconstruction in [Reconstruction::FirstOrder, Reconstruction::Muscl] {
             let mut choked: Option<Vec<f64>> = None;
-            for pressure in [1.0, 0.8, 0.01, 1e-12] {
+            for pressure in [1.0, 0.8, 0.01, 1e-12, 0.0] {
                 let mut velocity = [0.2, -0.3, 0.1];
                 velocity[side.axis()] = if pressure == 1.0 {
                     0.4 * side.sign()
@@ -144,7 +144,7 @@ fn g4_volumetric_mixture_pressure_outlet_refuses_invalid_pressure_and_reverse_fl
             || false,
         )
     };
-    for pressure in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+    for pressure in [-1.0, f64::NAN, f64::INFINITY] {
         assert!(matches!(make(pressure), Err(Error::Invalid(_))));
     }
     let input = ReservoirBoundary {

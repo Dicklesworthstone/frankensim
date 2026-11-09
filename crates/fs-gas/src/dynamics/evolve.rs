@@ -14,11 +14,13 @@ pub enum Boundary {
     Transmissive,
     /// Stationary impermeable adiabatic wall, with exactly zero mass/energy flux.
     Reflecting,
-    /// Positive absolute static backpressure [Pa] at a stationary open end.
+    /// Nonnegative absolute static backpressure [Pa] at a stationary open end.
     /// The source-owned outgoing shock/rarefaction selects the face state,
     /// including sonic discharge and departing supersonic characteristics.
     /// Backflow refuses because pressure alone supplies no entering gas state.
     /// This boundary is not nonreflecting; use a reservoir when inflow is needed.
+    /// Zero denotes exterior vacuum with an admitted positive-density sonic
+    /// face; it does not supply internal vacuum or rarefied exterior dynamics.
     PressureOutlet { pressure_pa: f64 },
     /// Incoming acoustic characteristic relative to a mean pressure [Pa] and
     /// signed axial velocity [m/s]. Outgoing sound and entropy are taken from
@@ -1271,9 +1273,9 @@ fn validate_reservoirs(
         for (boundary, normal) in [(left, -1.0), (right, 1.0)] {
             poll(cancelled)?;
             if let Boundary::PressureOutlet { pressure_pa } = boundary {
-                if !positive(pressure_pa) {
+                if !pressure_pa.is_finite() || pressure_pa < 0.0 {
                     return Err(Error::Invalid(
-                        "pressure outlet needs positive absolute pressure",
+                        "pressure outlet needs nonnegative absolute pressure",
                     ));
                 }
             }

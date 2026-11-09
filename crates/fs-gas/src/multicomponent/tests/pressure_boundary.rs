@@ -83,6 +83,29 @@ fn variable_caloric_pressure_outlets_share_reservoir_outflow_and_species_balance
 }
 
 #[test]
+fn vacuum_discharge_preserves_each_species_and_matches_low_backpressure() {
+    let source = standard(0.0);
+    let mut vacuum = flow(source.clone(), 12, ends(0.0), |_| ([0.4, 0.6], 0.0, 1.0));
+    let mut low_pressure = flow(source, 12, ends(1e-12), |_| ([0.4, 0.6], 0.0, 1.0));
+    for _ in 0..4 {
+        let report = vacuum
+            .step(Time::new(0.001), StepControl::default(), || false)
+            .unwrap();
+        low_pressure
+            .step(Time::new(0.001), StepControl::default(), || false)
+            .unwrap();
+        assert_eq!(vacuum.states, low_pressure.states);
+        let loss = report.boundary_change.mass();
+        assert!(loss < 0.0);
+        for (i, fraction) in [0.4, 0.6].into_iter().enumerate() {
+            near(report.boundary_change.species_masses[i], fraction * loss);
+            near(report.conservation_residual.species_masses[i], 0.0);
+        }
+        near(report.conservation_residual.energy, 0.0);
+    }
+}
+
+#[test]
 fn mixture_pressure_history_and_refusals_preserve_the_accepted_field() {
     let mut gas_flow = flow(standard(0.0), 12, ends(1.0), |_| ([0.4, 0.6], 0.0, 1.0));
     let original = gas_flow.states.clone();
@@ -97,7 +120,7 @@ fn mixture_pressure_history_and_refusals_preserve_the_accepted_field() {
     near(rest.boundary_change.mass(), 0.0);
     near(rest.boundary_change.energy, 0.0);
     let original = gas_flow.states.clone();
-    for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+    for invalid in [-1.0, f64::NAN, f64::INFINITY] {
         assert!(gas_flow.set_boundaries(ends(invalid), || false).is_err());
         assert_eq!(gas_flow.boundaries(), ends(1.0));
     }

@@ -30,6 +30,8 @@ pub enum RealGasBoundary {
     /// Rankine--Hugoniot relation, expansion follows the native isentrope,
     /// and a fan crossing the face is sampled at sonic discharge. Backflow
     /// is refused because pressure alone supplies no exterior thermal state.
+    /// Zero backpressure denotes exterior vacuum, with a positive-density
+    /// sonic face supported by the original source and authored path bounds.
     PressureOutlet {
         pressure_pa: f64,
         control: RealGasWallControl,
@@ -516,9 +518,9 @@ fn admit_boundaries(
                     control,
                 } => {
                     control.validate(gas)?;
-                    if !positive(pressure_pa) {
+                    if !pressure_pa.is_finite() || pressure_pa < 0.0 {
                         return Err(RealGasFlowError::Invalid(
-                            "real-gas outlet pressure must be positive and finite",
+                            "real-gas outlet pressure must be nonnegative and finite",
                         ));
                     }
                 }

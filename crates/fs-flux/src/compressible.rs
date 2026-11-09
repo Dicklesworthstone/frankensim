@@ -163,10 +163,12 @@ pub enum BoundaryCondition {
     Transmissive,
     /// Impermeable, adiabatic slip wall with zero mass and energy flux.
     Reflecting,
-    /// Positive absolute backpressure [Pa] on an outgoing gas characteristic.
+    /// Nonnegative absolute backpressure [Pa] on an outgoing gas characteristic.
     /// The original EOS supplies the shock/expansion and sonic face state;
     /// the interior supplies composition, entropy and tangential velocity.
     /// Reverse flow refuses because pressure alone does not define an inlet.
+    /// Zero denotes exterior vacuum with a source-supported positive-density
+    /// sonic face; internal vacuum and rarefied exterior flow are not supplied.
     PressureOutlet {
         /// Externally maintained absolute pressure [Pa].
         pressure_pa: f64,
@@ -191,10 +193,10 @@ impl AxisBoundaries {
         if let Self::Ends { lower, upper } = self {
             for condition in [lower, upper] {
                 if let BoundaryCondition::PressureOutlet { pressure_pa } = condition
-                    && !positive(pressure_pa)
+                    && (!pressure_pa.is_finite() || pressure_pa < 0.0)
                 {
                     return Err(E::invalid(
-                        "pressure outlet needs positive finite absolute pressure",
+                        "pressure outlet needs nonnegative finite absolute pressure",
                     ));
                 }
             }

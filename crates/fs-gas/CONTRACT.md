@@ -6192,13 +6192,25 @@ reduction and final cancellation with both molecular bindings reusable.
 ## Pressure-only outgoing gas boundaries
 
 The opt-in `FrozenGas::pressure_outlet_flux`, `pressure_outlet_normal_flux`
-and `pressure_outlet_spatial_flux` APIs impose a positive absolute downstream
+and `pressure_outlet_spatial_flux` APIs impose a nonnegative absolute downstream
 pressure on the same original caloric wave owner used by compact reservoirs.
 A compressive shock follows the source Hugoniot; an expansion follows the source
 entropy and acoustic invariant. The boundary samples the wave at the stationary
 face: a departing wave retains the interior state, and a straddling expansion
 uses its supported sonic state even when the unused far-field tail is colder
 than the source domain.
+
+Exactly zero downstream pressure denotes exterior vacuum for frozen,
+evolving-species and native real-gas pressure outlets. The boundary still uses
+a positive-pressure, positive-density sonic face on the original caloric/EOS
+source, or the unchanged interior trace when all waves already depart.
+`FrozenGas::nozzle_exit` likewise accepts zero backpressure and retains the
+source-owned stagnation-enthalpy sonic throat. The vacuum branch precedes any
+entropy pressure ratio, so it never evaluates a logarithm or an EOS at zero
+pressure. If the authored source interval ends before the required sonic
+state, evaluation refuses; a cold endpoint cannot replace the sonic state.
+No entering vacuum gas state, internal vacuum, exterior expansion solution or
+rarefied-flow model is supplied.
 
 The outgoing contact supplies density, temperature and all tangential velocities.
 Pressure traction and advected total enthalpy, including every kinetic component,
@@ -6217,7 +6229,11 @@ Focused G1 regressions compare subsonic compression and expansion, sonic limitin
 and supersonic departure against independent gamma-law relations and variable-Cp
 entropy/invariant integrals. G3 covers normal reversal, formation-reference
 invariance, both shear components and primitive/conserved parity. G4 covers
-backflow, invalid data, source precision and cancellation.
+backflow, invalid data, source precision and cancellation. Vacuum regressions
+extend the independent sonic relations, compare nozzle mass flow against the
+stagnation choking relation, retain low-positive-backpressure saturation,
+exercise unsupported-source refusal and check conservative RK discharge for
+frozen and evolving-species fields.
 
 ## Heat exchange during driven phase-mixture volume changes
 
@@ -8893,7 +8909,9 @@ sampled at `u=a`; reducing backpressure beyond that point does not increase
 discharge. The bracket grows locally and stops when pressure or sonic discharge
 is reached, rather than requiring an arbitrarily cold remote tail. Fully
 outgoing waves retain the interior flux, while sufficiently strong backpressure
-can drive a compression shock into an initially supersonic outlet.
+can drive a compression shock into an initially supersonic outlet. Exactly zero
+external pressure uses this same positive-density sonic limit; native EOS
+evaluation never requires a zero-pressure or zero-density state.
 
 `RealGasWallControl` supplies the explicit homogeneous source paths and work
 bounds; its compression momentum tolerance also gates the outlet pressure

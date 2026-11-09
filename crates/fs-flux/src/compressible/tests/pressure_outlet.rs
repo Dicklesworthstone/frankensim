@@ -151,10 +151,10 @@ fn g1_planar_pressure_outlet_chokes_and_accounts_for_every_outgoing_face() {
             let mut velocity = [0.2, -0.3];
             velocity[side.axis()] = 0.0;
             let mut choked: Option<Vec<State>> = None;
-            // Both pressures are beyond the sonic expansion. The far-field
-            // temperature at the lower pressure is outside the source domain;
-            // the sampled face remains valid and must be unchanged.
-            for pressure in [0.01, 1e-12] {
+            // All pressures, including vacuum, are beyond the sonic expansion.
+            // The far-field tail leaves the source domain; the sampled face
+            // remains valid and must be unchanged.
+            for pressure in [0.01, 1e-12, 0.0] {
                 let mut flow = field(
                     gas(0.0),
                     grid,
@@ -217,7 +217,7 @@ fn g4_planar_pressure_outlet_invalid_pressure_backflow_and_late_cancel_are_atomi
             || false,
         )
     };
-    for pressure in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+    for pressure in [-1.0, f64::NAN, f64::INFINITY] {
         assert!(matches!(
             make(pressure, BoundarySide::XMax),
             Err(Error::Invalid(_))

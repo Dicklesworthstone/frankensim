@@ -34,6 +34,9 @@ impl RealGas {
     /// nonlinear shock motion near sonic discharge. The caller must supply
     /// a continuous classical homogeneous branch, as for the physical wall.
     /// This does not infer phase stability or a reservoir stagnation law.
+    /// Zero backpressure denotes exterior vacuum and samples the same
+    /// positive-density sonic face. The original source must cover that face;
+    /// no internal vacuum or exterior rarefied expansion is supplied.
     pub fn pressure_outlet_flux(
         &self,
         inside: Conserved,
@@ -62,7 +65,7 @@ impl RealGas {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<FaceFlux, RealGasFlowError> {
         poll(cancelled)?;
-        if !matches!(normal, -1.0 | 1.0) || !positive(pressure) {
+        if !matches!(normal, -1.0 | 1.0) || !pressure.is_finite() || pressure < 0.0 {
             return Err(RealGasFlowError::Invalid(
                 "invalid real-gas pressure outlet",
             ));

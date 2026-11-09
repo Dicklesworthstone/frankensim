@@ -31,13 +31,21 @@ pub(crate) fn pressure_outlet_state<L: CaloricLaw>(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<PortState, Error<L::Error>> {
     poll(cancelled)?;
-    if !positive(backpressure) {
+    if !backpressure.is_finite() || backpressure < 0.0 {
         return Err(Error::Invalid(
-            "pressure outlet needs positive absolute pressure",
+            "pressure outlet needs nonnegative absolute pressure",
         ));
     }
     if inside.velocity >= inside.sound_speed && backpressure <= inside.pressure {
         return port(inside, false, inside.velocity + inside.sound_speed);
+    }
+    if backpressure == 0.0 {
+        // Vacuum is a downstream condition, not a zero-density source state.
+        // The face lies in the positive-pressure sonic part of the expansion
+        // fan. Reuse its source-bounded solve without evaluating ln(p/0) or
+        // extending the unused exterior fan below the caloric interval.
+        let (state, signal) = cold_outflow(gas, inside, cancelled)?;
+        return port(state, false, signal);
     }
     let wave = match pressure_wave(gas, inside, backpressure, cancelled) {
         Ok(wave) => wave,

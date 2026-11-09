@@ -30,13 +30,15 @@ pub struct ReservoirBoundary {
     pub pressure_pa: f64,
 }
 
-/// Positive absolute backpressure on a side carrying outgoing gas.
+/// Nonnegative absolute backpressure on a side carrying outgoing gas.
 ///
 /// The original gas source supplies the shock or expansion and samples it at
 /// the stationary face. The interior supplies entropy and both shear velocities.
 /// If the contact reverses, the step refuses because pressure alone cannot
 /// specify incoming temperature or composition; use a reservoir for reversal.
 /// A fixed backpressure is not a nonreflecting or molecular boundary condition.
+/// Zero denotes exterior vacuum with a source-supported positive-density sonic
+/// face. Exterior expansion, internal vacuum and rarefied flow are not resolved.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PressureOutletBoundary {
     /// One physical side whose topology is explicitly open.
@@ -155,10 +157,11 @@ impl Reservoirs {
             if result.states[index].is_some()
                 || result.outlets[index].is_some()
                 || condition != Some(BoundaryCondition::Transmissive)
-                || !positive(input.pressure_pa)
+                || !input.pressure_pa.is_finite()
+                || input.pressure_pa < 0.0
             {
                 return Err(Error::Invalid(
-                    "pressure outlet needs a unique open side and positive absolute pressure",
+                    "pressure outlet needs a unique open side and nonnegative absolute pressure",
                 ));
             }
             result.outlets[index] = Some(input);

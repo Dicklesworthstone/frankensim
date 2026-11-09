@@ -40,6 +40,8 @@ fn g1_pressure_outlet_matches_mixture_shock_fan_and_sonic_fluxes() {
             (0.6, 1.2),
             (0.0, 0.02),
             (0.0, 1e-12),
+            (0.0, 0.0),
+            (2.0, 0.0),
             (2.0, 0.8),
             (2.0, 1.1),
         ] {
@@ -181,7 +183,7 @@ fn g1_near_vacuum_mixture_outlets_admit_the_sonic_face_without_a_cold_conservati
     let inside = gas.conserved(&densities, 0.0, 1.0).unwrap();
     let bath = gas.conserved(&[0.0, 2e-12, 0.0], 0.0, 1e-12).unwrap();
     for normal in [-1.0, 1.0] {
-        for backpressure in [0.01, 1e-12] {
+        for backpressure in [0.01, 1e-12, 0.0] {
             let mut flux = [f64::NAN; 5];
             let receipt = gas
                 .pressure_outlet_flux(inside.as_cell(), normal, backpressure, &mut flux, || false)
@@ -241,11 +243,19 @@ fn g1_near_vacuum_mixture_outlets_admit_the_sonic_face_without_a_cold_conservati
     let restricted = MixtureGas::new(gas.source().clone(), domain, || false).unwrap();
     let inside = restricted.conserved(&densities, 0.0, 1.0).unwrap();
     let mut refused = [37.0; 5];
-    assert!(matches!(
-        restricted.pressure_outlet_flux(inside.as_cell(), 1.0, 1e-12, &mut refused, || false,),
-        Err(Error::CharacteristicPath(_))
-    ));
-    assert_eq!(refused, [37.0; 5]);
+    for backpressure in [1e-12, 0.0] {
+        assert!(matches!(
+            restricted.pressure_outlet_flux(
+                inside.as_cell(),
+                1.0,
+                backpressure,
+                &mut refused,
+                || false,
+            ),
+            Err(Error::CharacteristicPath(_))
+        ));
+        assert_eq!(refused, [37.0; 5]);
+    }
 }
 
 #[test]
@@ -353,7 +363,7 @@ fn g0_backflow_invalid_axes_and_unresolved_shear_leave_outputs_untouched() {
         (1.0, 2.0),
         (-1.0, 2.0),
         (0.0, 0.8),
-        (1.0, 0.0),
+        (1.0, -1.0),
         (1.0, f64::NAN),
         (1.0, f64::INFINITY),
     ] {

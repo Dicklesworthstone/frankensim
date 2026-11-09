@@ -706,7 +706,7 @@ fn g0_spatial_geometry_source_and_extensive_admission() {
 }
 
 #[test]
-fn g0_pressure_boundary_enum_reuses_existing_spatial_outlet_and_rejects_overrides() {
+fn g0_vacuum_boundary_enum_reuses_existing_spatial_outlet_and_rejects_overrides() {
     let grid = CartesianGrid::new(2, 3, 4, 0.1, 0.2, 0.3).unwrap();
     for side in BoundarySide::ALL {
         for reconstruction in [Reconstruction::FirstOrder, Reconstruction::Muscl] {
@@ -716,7 +716,7 @@ fn g0_pressure_boundary_enum_reuses_existing_spatial_outlet_and_rejects_override
             let state = State::from_primitive(&source, 1.0, velocity, 1.0).unwrap();
             let outlet = PressureOutletBoundary {
                 side,
-                pressure_pa: 0.8,
+                pressure_pa: 0.0,
             };
             let topology = |condition| {
                 let pair = AxisBoundaries::Ends {
@@ -1016,7 +1016,7 @@ fn g4_pressure_outlet_admission_backflow_and_cancellation_are_atomic() {
     assert!(make(PERIODIC, &[], &[outlet]).is_err());
     assert!(make(WALLS, &[], &[outlet]).is_err());
     assert!(make(topology, &[], &[outlet, outlet]).is_err());
-    for pressure_pa in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+    for pressure_pa in [-1.0, f64::NAN, f64::INFINITY] {
         assert!(
             make(
                 topology,

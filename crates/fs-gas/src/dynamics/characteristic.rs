@@ -83,7 +83,7 @@ impl FrozenGas {
         ))
     }
 
-    /// Outgoing Euler flux selected by a positive absolute backpressure [Pa].
+    /// Outgoing Euler flux selected by a nonnegative absolute backpressure [Pa].
     ///
     /// The original caloric source supplies compression shocks and isentropic
     /// expansions. A fan crossing the boundary is sampled at its sonic state;
@@ -91,6 +91,9 @@ impl FrozenGas {
     /// normal is -1 or +1; flux stays oriented along the increasing coordinate.
     /// Backflow is refused because pressure alone cannot supply entering gas
     /// temperature or entropy. A fixed pressure is not a nonreflecting outlet.
+    /// Zero backpressure denotes exterior vacuum: the positive-density sonic
+    /// face must remain within the original caloric source. This does not
+    /// resolve the exterior expansion, an internal vacuum, or rarefied flow.
     pub fn pressure_outlet_flux(
         &self,
         interior: Conserved,
@@ -292,6 +295,8 @@ impl FrozenGas {
     /// Returns the throat state, whose velocity is the positive exit speed,
     /// and whether the throat is sonic (choked). Even at equal pressures the
     /// donor must carry temperature and sound speed from this gas source.
+    /// Zero backpressure denotes vacuum and still requires a source-supported
+    /// positive-density sonic throat; the exterior expansion is not resolved.
     pub fn nozzle_exit(
         &self,
         donor: Primitive,

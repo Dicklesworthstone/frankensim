@@ -309,8 +309,9 @@ fn g1_pressure_outlet_samples_sonic_fans_and_departing_supersonic_waves() {
     let pressure = (sonic / sound).powf(7.0);
     for normal in [-1.0, 1.0] {
         let inside = gas.conserved(1.0, normal * 0.2, 1.0).unwrap();
-        // The second target's unused far-field tail is below the source Tmin.
-        for backpressure in [0.1, 1e-12] {
+        // The tiny-pressure target's unused tail is below the source Tmin;
+        // vacuum must select the same positive-density sonic face.
+        for backpressure in [0.1, 1e-12, 0.0] {
             let flux = gas
                 .pressure_outlet_flux(inside, normal, backpressure, || false)
                 .unwrap();
@@ -320,7 +321,7 @@ fn g1_pressure_outlet_samples_sonic_fans_and_departing_supersonic_waves() {
             assert!((flux.energy - flux.mass * enthalpy).abs() < 6e-9);
         }
         let supersonic = gas.conserved(1.0, normal * 3.0 * sound, 1.0).unwrap();
-        for backpressure in [0.1, 2.0] {
+        for backpressure in [0.0, 0.1, 2.0] {
             let flux = gas
                 .pressure_outlet_flux(supersonic, normal, backpressure, || false)
                 .unwrap();
@@ -330,6 +331,58 @@ fn g1_pressure_outlet_samples_sonic_fans_and_departing_supersonic_waves() {
             assert!((flux.energy - (supersonic.energy + 1.0) * velocity).abs() < 1e-10);
         }
     }
+}
+
+#[test]
+fn g1_vacuum_nozzle_matches_independent_stagnation_sonic_relations() {
+    let gas = gas(0.0, 0.0);
+    let donor = gas
+        .primitive(gas.conserved(2.0, 0.0, 6.0).unwrap(), || false)
+        .unwrap();
+    // A converging reservoir nozzle conserves stagnation enthalpy. Its
+    // T*/T0=2/(gamma+1) differs from the unsteady outlet fan's squared ratio.
+    let ratio = 2.0_f64 / 2.4;
+    let temperature = 3.0 * ratio;
+    let pressure = 6.0 * ratio.powf(3.5);
+    let density = pressure / temperature; // R_specific = 1
+    let velocity = (1.4 * temperature).sqrt();
+    let (exit, choked) = gas.nozzle_exit(donor, 0.0, || false).unwrap();
+    assert!(choked);
+    assert!((exit.temperature - temperature).abs() < 2e-9);
+    assert!((exit.pressure - pressure).abs() < 2e-9);
+    assert!((exit.velocity - velocity).abs() < 2e-9);
+    assert!((exit.density * exit.velocity - density * velocity).abs() < 2e-9);
+    assert_eq!(
+        gas.nozzle_exit(donor, 0.1 * pressure, || false).unwrap(),
+        (exit, true)
+    );
+    assert!((3.5 * exit.temperature + 0.5 * exit.velocity.powi(2) - 3.5 * 3.0).abs() < 2e-9);
+}
+
+#[test]
+fn g4_vacuum_discharge_refuses_unsupported_sonic_states_and_cancellation() {
+    let base = gas(0.0, 0.0);
+    let restricted = FrozenGas::new(
+        base.source().clone(),
+        crate::dynamics::CaloricDomain::new(Temperature::new(2.8), Temperature::new(50.0)),
+        || false,
+    )
+    .unwrap();
+    let state = restricted.conserved(2.0, 0.0, 6.0).unwrap();
+    let donor = restricted.primitive(state, || false).unwrap();
+    // The actual sonic face, not only an unused remote vacuum tail, would
+    // leave this declared source path. It cannot be replaced by Tmin.
+    assert!(restricted.pressure_outlet_flux(state, 1.0, 0.0, || false).is_err());
+    assert!(restricted.nozzle_exit(donor, 0.0, || false).is_err());
+    assert_eq!(
+        restricted.pressure_outlet_flux(state, 1.0, 0.0, || true),
+        Err(Error::Cancelled)
+    );
+    assert_eq!(restricted.nozzle_exit(donor, 0.0, || true), Err(Error::Cancelled));
+    // Vacuum supplies no incoming thermodynamic state when a strongly inward
+    // characteristic cannot be turned into supported outward sonic discharge.
+    let incoming = base.conserved(1.0, -20.0, 1.0).unwrap();
+    assert!(base.pressure_outlet_flux(incoming, 1.0, 0.0, || false).is_err());
 }
 
 #[test]
@@ -380,7 +433,7 @@ fn g1_pressure_outlet_retains_variable_heat_capacity_and_energy_reference() {
 fn g4_pressure_outlet_refuses_backflow_invalid_data_and_cancellation() {
     let gas = gas(0.0, 0.0);
     let inside = gas.conserved(1.0, 0.2, 1.0).unwrap();
-    for pressure in [0.0, -1.0, f64::NAN, f64::INFINITY, 2.0] {
+    for pressure in [-1.0, f64::NAN, f64::INFINITY, 2.0] {
         assert!(matches!(
             gas.pressure_outlet_flux(inside, 1.0, pressure, || false),
             Err(Error::Invalid(_))

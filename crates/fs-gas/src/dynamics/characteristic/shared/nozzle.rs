@@ -15,13 +15,33 @@ pub(crate) fn state<L: CaloricLaw>(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Primitive, bool), WallError<L::Error>> {
     poll(cancelled)?;
-    if !positive(backpressure) || backpressure > donor.pressure || donor.velocity != 0.0 {
+    if !backpressure.is_finite()
+        || backpressure < 0.0
+        || backpressure > donor.pressure
+        || donor.velocity != 0.0
+    {
         return Err(WallError::Invalid(
             "stationary nozzle donor or backpressure",
         ));
     }
     if backpressure == donor.pressure {
         return Ok((donor, false));
+    }
+    if backpressure == 0.0 {
+        // A converging throat discharging into vacuum is choked. The source
+        // still has to cover the positive-density sonic throat; its cold
+        // endpoint cannot stand in for an unsupported sonic state.
+        let (speed, limit, sonic) = inlet_limit(gas, donor, cancelled)?;
+        if !sonic {
+            return Err(WallError::CaloricPath("nozzle exceeds cold source path"));
+        }
+        return Ok((
+            Primitive {
+                velocity: speed,
+                ..limit
+            },
+            true,
+        ));
     }
     // At fixed temperature the original source supplies R*ln(p0/pb), with
     // its cancellation-safe pressure difference. Resolve the pressure DROP,

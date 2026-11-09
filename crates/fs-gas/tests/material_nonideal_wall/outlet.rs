@@ -70,7 +70,7 @@ fn fully_outgoing_supersonic_waves_leave_the_interior_flux_unchanged() {
     let gas = gas([0.0; 2]);
     let q = state(&gas, 600.0, 400.0);
     let p = gas.primitive(q, || false).unwrap();
-    for pressure in [0.01 * p.pressure, p.pressure, 1.01 * p.pressure] {
+    for pressure in [0.0, 0.01 * p.pressure, p.pressure, 1.01 * p.pressure] {
         flux_close(
             gas.pressure_outlet_flux(q, 1.0, Pressure::new(pressure), controls(), || false)
                 .unwrap(),
@@ -154,6 +154,10 @@ fn sonic_discharge_saturates_for_lower_backpressure_and_matches_the_dilute_limit
         .unwrap();
     flux_close(a, physical(&gas, expected), 4e-7);
     flux_close(b, a, 2e-8);
+    let vacuum = gas
+        .pressure_outlet_flux(q, 1.0, Pressure::new(0.0), control, || false)
+        .unwrap();
+    flux_close(vacuum, a, 2e-8);
 }
 
 #[test]
@@ -282,6 +286,10 @@ fn pressure_only_boundary_refuses_backflow_and_unsupported_source_paths() {
         gas.pressure_outlet_flux(q, 1.0, Pressure::new(0.1 * p.pressure), short, || false)
             .is_err()
     );
+    assert!(
+        gas.pressure_outlet_flux(q, 1.0, Pressure::new(0.0), short, || false)
+            .is_err()
+    );
 }
 
 #[test]
@@ -311,6 +319,10 @@ fn sonic_face_remains_supported_when_the_remote_fan_is_below_the_source_temperat
         .pressure_outlet_flux(q, 1.0, Pressure::new(0.01 * p.pressure), control, || false)
         .unwrap();
     flux_close(first, lower, 2e-8);
+    let vacuum = gas
+        .pressure_outlet_flux(q, 1.0, Pressure::new(0.0), control, || false)
+        .unwrap();
+    flux_close(vacuum, first, 2e-8);
     assert!(first.mass > q.momentum);
 }
 

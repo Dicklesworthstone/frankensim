@@ -143,11 +143,31 @@ fn declared_outlets_match_public_characteristic_ports_at_both_rk_stages() {
 }
 
 #[test]
+fn vacuum_ends_match_choked_low_pressure_discharge_with_conservative_rk_steps() {
+    for reconstruction in [Reconstruction::FirstOrder, Reconstruction::Muscl] {
+        let mut vacuum = uniform(ends(0.0, 0.0));
+        let mut low_pressure = uniform(ends(1e-12, 1e-12));
+        let controls = StepControl { reconstruction, ..StepControl::default() };
+        for _ in 0..4 {
+            let report = vacuum.step(Time::new(0.001), controls, || false).unwrap();
+            let low = low_pressure.step(Time::new(0.001), controls, || false).unwrap();
+            assert_eq!(vacuum.states(), low_pressure.states());
+            assert_eq!(report.boundary_change, low.boundary_change);
+            assert!(report.boundary_change.mass < 0.0);
+            assert!(report.boundary_change.energy < 0.0);
+            close(report.conservation_residual.mass, 0.0);
+            close(report.conservation_residual.momentum, 0.0);
+            close(report.conservation_residual.energy, 0.0);
+        }
+    }
+}
+
+#[test]
 fn invalid_pressure_backflow_and_cancelled_changes_publish_nothing() {
     let mut flow = uniform(ends(1.0, 1.0));
     let states = flow.states().to_vec();
     let boundaries = flow.boundaries();
-    for pressure in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+    for pressure in [-1.0, f64::NAN, f64::INFINITY] {
         assert!(flow.set_boundaries(ends(pressure, 1.0), || false).is_err());
         assert!(flow.set_boundaries(ends(1.0, pressure), || false).is_err());
         assert_eq!(flow.boundaries(), boundaries);

@@ -7029,13 +7029,21 @@ normal runtime build.
 
 ## Source-owned pressure outlets in Cartesian compressible flow
 
-`BoundaryCondition::PressureOutlet { pressure_pa }` supplies positive finite
+`BoundaryCondition::PressureOutlet { pressure_pa }` supplies nonnegative finite
 absolute backpressure to frozen and evolving-species Euler fields in two and
 three dimensions. The original `FrozenGas` or `MixtureGas` characteristic owner
 resolves outgoing compression, expansion, sonic fan sampling and supersonic
 departure. Interior composition, entropy and tangential velocities follow the
 departing gas. Pressure alone cannot supply incoming thermodynamics: reversal
 refuses without publishing state, time, loads or a successful report.
+
+Exactly zero backpressure denotes exterior vacuum. The existing source closure
+must still admit the positive-pressure, positive-density sonic face, or retain
+the interior trace when all waves already depart. No zero-density/zero-pressure
+EOS state is constructed, and an unsupported sonic source interval still
+refuses. Pressure alone supplies no incoming vacuum state. This does not
+resolve an internal vacuum, the exterior expansion or rarefied flow.
+The same rule applies to the legacy spatial `PressureOutletBoundary` adapter.
 
 First-order and MUSCL paths use the same source closure. Every species, all
 momentum components, pressure traction and full referenced energy share the

@@ -12,7 +12,7 @@ use crate::multicomponent::{
 };
 
 impl MixtureGas {
-    /// Outgoing species/normal-momentum/energy flux at a positive absolute
+    /// Outgoing species/normal-momentum/energy flux at a nonnegative absolute
     /// backpressure [Pa]. The original local composition supplies compression
     /// shocks, isentropic fans and sonic sampling. Departing supersonic waves
     /// leave the interior trace unchanged. A fixed pressure is not a
@@ -23,6 +23,9 @@ impl MixtureGas {
     /// entering composition nor thermodynamics. Output has `species_count()+2`
     /// entries and remains unchanged on every refusal or cancellation.
     /// Successful evaluation allocates no heap workspace or new caloric owner.
+    /// Zero backpressure denotes exterior vacuum; the positive-density sonic
+    /// face must be supported by the incident species' original caloric laws.
+    /// Exterior expansion, internal vacuum and rarefied flow are not resolved.
     pub fn pressure_outlet_flux(
         &self,
         interior: Cell<'_>,
