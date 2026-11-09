@@ -20,6 +20,9 @@ pub mod caloric;
 
 mod nonideal;
 
+/// Explicit temperature-qualified activity and excess/reference heat source.
+pub use nonideal::thermal::VirialSolubilityThermalModel;
+
 use super::{FiniteSolubilityError, FiniteSolubilitySolution};
 use crate::osmosis::{
     AqueousSolution, IdealDiluteSolution, MAX_OSMOTIC_SOLUTES, OsmosisError,
@@ -72,6 +75,7 @@ pub struct KineticSolubilitySolution {
     models: Arc<[SolubilityKineticsV1]>,
     steps: Box<[SolubilityKineticStepV1]>,
     calibration: Option<Arc<nonideal::Calibration>>,
+    thermal_nonideal: Option<Arc<VirialSolubilityThermalModel>>,
 }
 impl KineticSolubilitySolution {
     /// Prepare 1..=64 distinct neutral solutes sharing one original solvent.
@@ -170,7 +174,55 @@ impl KineticSolubilitySolution {
             models,
             steps: steps.into_boxed_slice(),
             calibration: None,
+            thermal_nonideal: None,
         })
+    }
+
+    /// Bind an explicit temperature-dependent activity and caloric family to
+    /// these SAME original phase laws and actual stocks. Its current fixed-T
+    /// slice must equal any already bound virial source. Supplying a family is
+    /// an explicit thermal qualification; a fixed-temperature fit alone never
+    /// acquires extrapolation or excess-heat authority.
+    ///
+    /// The complete original caloric source, temperature support and interaction
+    /// family remain shared through transport, dilution and accepted heat steps.
+    /// Existing family bindings cannot be replaced. Rebinding an equal family
+    /// retains the original Arc identity used by the thermal core.
+    pub fn with_thermal_nonideal_thermodynamics(
+        self,
+        source: Arc<VirialSolubilityThermalModel>,
+    ) -> Result<Self> {
+        if let Some(original) = &self.thermal_nonideal {
+            if original != &source {
+                return Err(invalid("cannot replace the original nonideal thermal source"));
+            }
+            return Ok(self);
+        }
+        let caloric = source.caloric();
+        if caloric.components().len() != self.models.len()
+            || caloric
+                .components()
+                .iter()
+                .zip(self.models.iter())
+                .any(|(thermal, kinetic)| thermal.law() != kinetic.law())
+            || caloric.solvent_molar_volume_m3_mol()
+                != self.solution.solvent_molar_volume_m3_mol()
+            || caloric.solvent_heat_capacity().species() != self.solvent()
+        {
+            return Err(invalid(
+                "nonideal thermal family requires the same original pair laws and solvent convention",
+            ));
+        }
+        let slice = source.at_temperature(Temperature::new(self.solution.temperature_k()))?;
+        let mut bound = self.with_nonideal_thermodynamics(slice)?;
+        bound.thermal_nonideal = Some(source);
+        Ok(bound)
+    }
+
+    /// Original explicit thermal activity/heat family, if one was admitted.
+    /// A fixed-temperature virial binding does not imply this source.
+    pub const fn thermal_nonideal_source(&self) -> Option<&Arc<VirialSolubilityThermalModel>> {
+        self.thermal_nonideal.as_ref()
     }
 
     /// Actual dissolved-particle view; the equilibrium target is not substituted.
@@ -199,6 +251,11 @@ impl KineticSolubilitySolution {
                     self.calibration
                         .as_ref()
                         .map_or(0, |data| data.heap_bytes()),
+                )
+                .saturating_add(
+                    self.thermal_nonideal
+                        .as_ref()
+                        .map_or(0, |source| source.heap_bytes()),
                 ),
             |bytes, model| bytes.saturating_add(model.law().heap_bytes()),
         )
@@ -256,6 +313,7 @@ impl KineticSolubilitySolution {
                 != source.solution.solvent_molar_volume_m3_mol()
             || self.solution.nonideal_model() != source.solution.nonideal_model()
             || self.calibration != source.calibration
+            || self.thermal_nonideal != source.thermal_nonideal
         {
             return Err(invalid("incompatible kinetic source or thermal state"));
         }
@@ -364,9 +422,25 @@ impl KineticSolubilitySolution {
     /// Actual stocks remain unchanged. The caller owns heat/thermostat accounting
     /// and must ensure each declared film coefficient applies at the new
     /// temperature. Particle reference stocks and their area response are retained.
-    /// An explicitly bound virial model admits only its original temperature;
-    /// changing that fixed source requires new thermodynamic data.
+    /// An explicitly bound fixed-temperature virial model admits only its
+    /// original temperature. An original thermal family may instead supply the
+    /// new fixed-T slice inside its declared support, without moving either
+    /// phase or changing reference particle geometry. This prescribed change
+    /// does not account for heat; use `advance_with_heat` for a closed balance.
     pub fn with_temperature(&self, temperature: Temperature) -> Result<Self> {
+        if let Some(source) = &self.thermal_nonideal {
+            if temperature.value().to_bits() == self.solution.temperature_k().to_bits() {
+                return Ok(self.clone());
+            }
+            return Self::prepare(
+                temperature,
+                self.solution.solvent_molar_volume_m3_mol(),
+                Volume::new(self.solution.solvent_volume_m3()),
+                Arc::clone(&self.models),
+                self.steps.iter().map(|step| *step.state()),
+            )?
+            .with_thermal_nonideal_thermodynamics(Arc::clone(source));
+        }
         if self.calibration.is_some() {
             if temperature.value().to_bits() != self.solution.temperature_k().to_bits() {
                 return Err(invalid(

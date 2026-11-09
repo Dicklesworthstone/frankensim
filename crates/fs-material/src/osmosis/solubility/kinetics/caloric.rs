@@ -12,7 +12,7 @@ use fs_thermochem::solution::solubility::caloric::{
     SolubilityCaloricErrorV1,
     kinetics::{
         SolubilityThermalKineticControlsV1, SolubilityThermalKineticOutcomeV1,
-        SolubilityThermalKineticsV1,
+        SolubilityThermalInteractionV1, SolubilityThermalKineticsV1,
     },
 };
 use std::sync::Arc;
@@ -69,8 +69,11 @@ impl KineticSolubilitySolution {
     /// Every original law, conductance, surface geometry, growth policy and
     /// solvent convention must match. Refusal or cancellation leaves this
     /// material untouched.
-    /// Explicitly bound virial phases refuse: the ideal caloric owner supplies
-    /// neither their excess heat nor temperature-dependent interactions.
+    /// Nonideal phases require their original explicitly qualified thermal
+    /// family, including excess heat and the pure-solid reference correction.
+    /// A fixed-T-only virial fit still refuses. The SAME family Arc is attached
+    /// to the original core thermal owner; a different interaction or caloric
+    /// source cannot silently replace it.
     /// The returned aqueous view uses the accepted dissolved amounts at the
     /// solved temperature, without equilibrium projection. Its zero-time phase
     /// receipts refresh target diagnostics; the window's heat and temporal
@@ -86,7 +89,7 @@ impl KineticSolubilitySolution {
         if cancelled() {
             return Err(SolubilityCaloricErrorV1::Cancelled.into());
         }
-        if self.solution().nonideal_model().is_some() {
+        if self.solution().nonideal_model().is_some() && self.thermal_nonideal_source().is_none() {
             return Err(KineticSolubilityHeatError::Material(super::invalid(
                 "nonideal heat evolution requires original excess calorics and temperature-dependent interactions",
             )));
@@ -98,6 +101,26 @@ impl KineticSolubilitySolution {
         {
             return Err(KineticSolubilityHeatError::SourceMismatch);
         }
+        let prepared;
+        let model = if let Some(source) = self.thermal_nonideal_source() {
+            if model.caloric() != source.caloric() {
+                return Err(KineticSolubilityHeatError::SourceMismatch);
+            }
+            let interactions: Arc<dyn SolubilityThermalInteractionV1> = source.clone();
+            if model
+                .interaction_source()
+                .is_some_and(|original| !Arc::ptr_eq(original, &interactions))
+            {
+                return Err(KineticSolubilityHeatError::SourceMismatch);
+            }
+            prepared = model.with_interactions(interactions)?;
+            &prepared
+        } else {
+            if model.interaction_source().is_some() {
+                return Err(KineticSolubilityHeatError::SourceMismatch);
+            }
+            model
+        };
         let count = self.last_steps().len();
         let mut phases = [*self.last_steps()[0].state(); MAX_OSMOTIC_SOLUTES];
         for (phase, step) in phases.iter_mut().zip(self.last_steps()) {
@@ -111,13 +134,16 @@ impl KineticSolubilitySolution {
         )?;
         let balance = model.advance(&initial, duration, heat_input_j, controls, &mut cancelled)?;
         let endpoint = balance.final_state();
-        let solution = Self::prepare(
+        let mut solution = Self::prepare(
             endpoint.temperature(),
             self.solution().solvent_molar_volume_m3_mol(),
             endpoint.solvent_volume(),
             Arc::clone(&self.models),
             endpoint.phases().iter().copied(),
         )?;
+        if let Some(source) = self.thermal_nonideal_source() {
+            solution = solution.with_thermal_nonideal_thermodynamics(Arc::clone(source))?;
+        }
         if cancelled() {
             return Err(SolubilityCaloricErrorV1::Cancelled.into());
         }

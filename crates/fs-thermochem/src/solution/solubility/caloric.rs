@@ -207,6 +207,30 @@ impl SolubilityCaloricModelV1 {
         })
     }
 
+    /// Conservatively charge the complete retained source, including shared
+    /// Arc storage, actual vector capacities and original phase-Cp payloads.
+    /// The tiny public handle's inline storage is excluded.
+    pub fn heap_bytes(&self) -> usize {
+        self.owner.components.iter().fold(
+            core::mem::size_of::<CaloricOwner>()
+                .saturating_add(2 * core::mem::size_of::<usize>())
+                .saturating_add(core::mem::align_of::<CaloricOwner>())
+                .saturating_add(
+                    self.owner.components.capacity()
+                        .saturating_mul(core::mem::size_of::<SolubilityCaloricComponentV1>()),
+                )
+                .saturating_add(self.owner.solvent_cp.heap_bytes()),
+            |bytes, component| {
+                bytes
+                    .saturating_add(component.law.heap_bytes())
+                    .saturating_add(
+                        component.common_phase_cp.as_ref()
+                            .map_or(0, MolarHeatCapacityCurveV1::heap_bytes),
+                    )
+            },
+        )
+    }
+
     pub fn solvent_molar_volume_m3_mol(&self) -> f64 {
         self.owner.solvent_molar_volume_m3_mol
     }

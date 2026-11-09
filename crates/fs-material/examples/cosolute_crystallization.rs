@@ -1,23 +1,35 @@
 //! A neutral cosolute changes saturation, then dilution redissolves the crystals.
 //!
 //! Run: cargo run -p fs-material --example cosolute_crystallization
+//! Add `-- --heat` for an explicitly temperature-qualified interaction family
+//! with adiabatic crystal growth and prescribed heating/cooling.
 //! Values are authored demonstration coefficients, not measurements for a named
 //! substance. The second species has zero phase-transfer conductance, so its
 //! dissolved stock changes neither during crystallization nor during imposed
 //! dilution. Its actual concentration still changes the first species' activity.
-//! The fixed-temperature model supplies no excess calorics or heat balance.
+//! The default fixed-temperature model supplies no heat balance; the thermal
+//! mode separately declares the interaction temperature law and reference Cp.
 
 use std::sync::Arc;
 
 use fs_material::osmosis::{
-    nonideal::VirialSolutionModel, solubility::kinetics::KineticSolubilitySolution,
+    nonideal::VirialSolutionModel,
+    solubility::kinetics::{KineticSolubilitySolution, VirialSolubilityThermalModel},
 };
 use fs_qty::{Amount, AmountConcentration, Temperature, Time, Volume, VolumetricFlowRate};
 use fs_thermochem::{
-    SpeciesId,
-    solution::solubility::{
-        IdealSolubilityV1,
-        kinetics::{PrecipitationPolicyV1, SolubilityKineticStateV1, SolubilityKineticsV1},
+    MolarThermalQuantityV1, SpeciesId,
+    solution::{
+        caloric::{MolarHeatCapacityCurveV1, PureLiquidHeatCapacityV1},
+        solubility::{
+            IdealSolubilityV1,
+            caloric::{
+                SolubilityCaloricComponentV1, SolubilityCaloricModelV1,
+                SolubilityCaloricSolveV1,
+                kinetics::{SolubilityThermalKineticControlsV1, SolubilityThermalKineticsV1},
+            },
+            kinetics::{PrecipitationPolicyV1, SolubilityKineticStateV1, SolubilityKineticsV1},
+        },
     },
 };
 
@@ -99,6 +111,9 @@ fn advance(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().any(|argument| argument == "--heat") {
+        return thermal_demo();
+    }
     let mut ideal = initial()?;
     let original_virial = Arc::new(VirialSolutionModel::new(
         300.0,
@@ -133,5 +148,81 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     print_state("immediately_after_dilution", &interacting, None)?;
     let work = advance(&mut interacting, 1000.0)?;
     print_state("after_dilution_and_1000_s", &interacting, Some(work))?;
+    Ok(())
+}
+
+fn thermal_demo() -> Result<(), Box<dyn std::error::Error>> {
+    let original = initial()?;
+    let reference_t = Temperature::new(300.0);
+    let knots = |capacity| {
+        [280.0, 330.0]
+            .map(|t| (Temperature::new(t), MolarThermalQuantityV1::new(capacity)))
+            .to_vec()
+    };
+    // These are the explicitly declared REFERENCE phase capacities. The
+    // interaction potential adds its consistent mixture/reference calorics;
+    // they are not independent measured effective mixture heat capacities.
+    let components = original.models().iter().map(|model| {
+        SolubilityCaloricComponentV1::new(
+            model.law().clone(),
+            MolarHeatCapacityCurveV1::new(model.law().solute().clone(), reference_t, knots(80.0))?,
+        )
+    }).collect::<Result<Vec<_>, _>>()?;
+    let caloric = SolubilityCaloricModelV1::new(
+        18e-6,
+        PureLiquidHeatCapacityV1::new(original.solvent().clone(), reference_t, knots(75.0))?,
+        components,
+    )?;
+    let reference = Arc::new(VirialSolutionModel::new(
+        300.0, 18e-6, 1.0, vec![150.0, 150.0],
+        vec![0.002, 0.004, 0.004, 0.002],
+    )?);
+    let family = Arc::new(VirialSolubilityThermalModel::new(
+        caloric.clone(), reference,
+        // C [K m³/mol] in B(T)=B_ref+C*(1/T-1/T_ref).
+        vec![0.2, 0.6, 0.6, 0.1],
+        [Temperature::new(290.0), Temperature::new(315.0)],
+    )?);
+    let thermal = SolubilityThermalKineticsV1::new(caloric, original.models().to_vec())?;
+    let mut bath = original.with_thermal_nonideal_thermodynamics(family)?;
+    let controls = SolubilityThermalKineticControlsV1 {
+        root: SolubilityCaloricSolveV1 {
+            temperature_bracket: [Temperature::new(290.0), Temperature::new(315.0)],
+            temperature_tolerance_k: 1e-9,
+            energy_tolerance_j: 1e-6,
+            maximum_iterations: 128,
+        },
+        initial_step: Time::new(5.0),
+        minimum_step: Time::new(1e-5),
+        maximum_step: Time::new(10.0),
+        relative_tolerance: 1e-5,
+        amount_absolute_tolerance_mol: 1e-11,
+        temperature_absolute_tolerance_k: 1e-7,
+        maximum_attempts: 8192,
+    };
+    let mut elapsed = 0.0;
+    println!("stage,time_s,temperature_K,dissolved_mol,solid_mol,cosolute_mol,conditional_saturation_mol_m3,osmotic_pressure_Pa,window_heat_J,window_enthalpy_change_J,energy_residual_J,accepted_steps");
+    for (label, seconds, heat) in [
+        ("adiabatic_growth", 60.0, 0.0),
+        ("adiabatic_relaxation", 120.0, 0.0),
+        ("prescribed_heating", 120.0, 2500.0),
+        ("prescribed_cooling", 240.0, -2500.0),
+    ] {
+        let step = bath.advance_with_heat(&thermal, Time::new(seconds), heat, controls, || false)?;
+        let (next, balance) = step.into_parts();
+        bath = next;
+        elapsed += seconds;
+        let state = bath.last_steps()[0].state();
+        let aqueous = bath.solution();
+        let concentration: Vec<_> = aqueous.solute_moles().iter()
+            .map(|amount| amount / aqueous.solvent_volume_m3()).collect();
+        println!(
+            "{label},{elapsed:.3},{:.9},{:.12e},{:.12e},{:.12e},{:.9},{:.9},{heat:.9},{:.12e},{:.12e},{}",
+            aqueous.temperature_k(), state.dissolved().value(), state.solid().value(),
+            aqueous.solute_moles()[1], bath.conditional_saturation(0, &concentration)?.value(),
+            aqueous.osmotic_pressure_pa()?, balance.enthalpy_change_j(),
+            balance.energy_residual_j(), balance.accepted_steps(),
+        );
+    }
     Ok(())
 }

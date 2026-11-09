@@ -14309,11 +14309,11 @@ Complete dissolved-plus-solid component and solvent conservation must be checked
 separately before cancelling common reference terms across a closed network.
 
 Cloning, compatible copying, transported inventories and dilution retain the
-bound model and actual phase stocks. A fixed-temperature virial source supplies
-neither temperature-dependent interactions nor excess calorics: temperature
-changes and the ideal `advance_with_heat` adapter explicitly refuse for bound
-nonideal phases. Numerical source applicability remains separate from measured
-material authority.
+bound model and actual phase stocks. A fixed-temperature-only virial source
+supplies neither temperature-dependent interactions nor excess calorics, so
+temperature changes and `advance_with_heat` refuse unless the explicit thermal
+family below has been admitted. Numerical source applicability remains separate
+from measured material authority.
 
 Focused native tests check unchanged binary particle trajectories, positive and
 negative cosolute shifts, two-solute refinement against independent continuous
@@ -14322,6 +14322,66 @@ reference invariance, trace roots, domain refusal and atomic rollback.
 `cargo run -p fs-material --example cosolute_crystallization` demonstrates
 cosolute-induced growth followed by complete redissolution after prescribed
 dilution. Its coefficients are explicitly authored demonstration data.
+
+### Temperature-dependent activities and crystallization heat
+
+`kinetics::VirialSolubilityThermalModel` explicitly binds the original caloric
+model to a symmetric interaction family
+`B(T)=B_ref+C*(1/T-1/T_ref)`, with `C` in K m³/mol, one declared temperature
+interval and the original concentration box. The supplied reference slice is
+retained exactly. Convexity checks on both endpoint matrices qualify the affine
+inverse-temperature family; they do not establish empirical mixture validity.
+All pure-pair saturation curves must stay inside the original concentration
+support throughout the thermal interval.
+
+The original solid caloric datum is retained. The calibrated AQUEOUS excess
+potential is `RT*[n^T B(T) n/(2V)-sum(n_i B_ii(T) csat_i(T))]`. Its consistent
+additional enthalpy is
+`R*n^T C n/(2V)+sum(n_i csat_i(T)*(B_ii(T)*delta_H_i(T)-R*C_ii))`.
+The linear reference correction is required even for constant nonzero B when
+the original saturation changes with temperature. Baseline phase Cp curves
+therefore remain reference calorics of this explicit potential; the effective
+mixture Cp and dissolution heat include the new correction. Already measured
+effective mixture heat capacities cannot be added again as reference Cp.
+No temperature-dependent common energy datum is silently cancelled as heat.
+
+Source preparation uses exact extrema of original piecewise-linear Cp curves
+and bounded interval arithmetic across 32 temperature subintervals to require
+positive effective dissolved Cp throughout the interval. The corrected
+derivative includes `csat_i*[B_ii*(delta_H_i^2/(R*T^2)+delta_Cp_i)
+-2*C_ii*delta_H_i/T^2]`. Original solid and solvent Cp remain positive.
+A source whose thermal branch cannot be qualified refuses; sampled endpoint
+Cp alone is insufficient. Direct saturation-log and Kirchhoff increments
+retain neighboring-temperature changes in the reference heat, while symmetric
+bilinear increments retain small mixture work without subtracting large
+absolute enthalpies.
+
+`KineticSolubilitySolution::with_thermal_nonideal_thermodynamics` attaches this
+family to the SAME actual phase owner. Original pair laws, reference calorics,
+solvent convention and current fixed-temperature slice must match. Cloning,
+dilution, transported dissolved inventories and explicitly supported temperature
+changes retain the original immutable family. A different thermal slope cannot
+replace it merely because its current B matrix happens to agree. Preparation
+memory includes the retained caloric source and its actual vector capacities.
+
+The existing `advance_with_heat` adapter passes that SAME family Arc to the
+original thermochemical thermal owner and reconstructs the accepted aqueous
+view at the solved temperature. The native controller advances conditional
+phases at the stage's current temperature and then closes heat at frozen final
+stocks. Its existing full/two-half comparison controls the first-order split;
+the positive frozen-stock capacity qualifies the scalar heat root. No separate
+phase solver, adaptive timeline or replacement kinetic state is introduced.
+Whole-window heat is checked directly from original/final phases and temperature.
+Fixed-temperature-only fits still refuse heat evolution.
+
+Regression sources cover Gibbs--Helmholtz consistency, constant-B reference
+heat, interior thermal instability, adjacent-temperature and trace increments,
+independent coupled ODE refinement, particle geometry, retained source identity
+and transactional refusal. `cargo run -p fs-material --example
+cosolute_crystallization -- --heat` adds adiabatic growth and prescribed
+heating/cooling using explicitly authored reference and interaction data.
+Thermal windows retain fixed solvent volume and do not simultaneously solve
+spatial heat/mass transfer, pressure-dependent solubility or ionic precipitation.
 
 ### Finite-rate thermal material evolution
 

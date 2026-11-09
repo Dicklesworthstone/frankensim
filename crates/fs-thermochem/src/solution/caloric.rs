@@ -92,6 +92,10 @@ impl PureLiquidHeatCapacityV1 {
     pub fn temperature_domain(&self) -> [Temperature; 2] {
         self.curve.temperature_domain()
     }
+    /// Original species and source-knot allocation, excluding inline fields.
+    pub fn heap_bytes(&self) -> usize {
+        self.curve.heap_bytes()
+    }
     /// Original positive pure-liquid molar Cp at this temperature [J/(mol K)].
     /// Uses the retained piecewise-linear source without extrapolation.
     pub fn heat_capacity_at(

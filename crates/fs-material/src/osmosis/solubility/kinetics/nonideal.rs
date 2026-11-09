@@ -19,6 +19,8 @@ use fs_thermochem::{
 };
 use std::sync::Arc;
 
+pub mod thermal;
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Calibration {
     pure_saturation: Box<[f64]>,
