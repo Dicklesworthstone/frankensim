@@ -129,6 +129,47 @@ impl MaterialOpticalMixtureGrid<'_> {
             incident_power_w,
             config,
         )?;
+        self.partition_scattered_absorption(cx, wavelengths_nm, scattering, budget)
+    }
+
+    /// Score native continuous absorption ONCE and partition that same report.
+    ///
+    /// Scattering free flights retain conservative Beer heat in every traversed
+    /// cell, even without a scattering event. Original constituent absorption
+    /// fractions and cell error multipliers are shared with collision capture;
+    /// neither histories nor thermal sources are sampled a second time.
+    /// The retained native report labels its estimator, and `into_heating`
+    /// applies the same receiving-cell uncertainty and unresolved-power gates.
+    #[allow(clippy::too_many_arguments)]
+    pub fn deposit_continuous_absorption_power_by_component<const N: usize>(
+        &self,
+        cx: &Cx<'_>,
+        origin: Point3,
+        unit_direction: Vec3,
+        wavelengths_nm: &[f64; N],
+        incident_power_w: &[f64; N],
+        config: ScatteringDepositionConfig,
+        budget: ConstituentDepositionBudget,
+    ) -> Result<ConstituentScatteringDeposition<N>, MaterialOpticalMixtureError> {
+        checkpoint(cx)?;
+        let scattering = self.medium().deposit_continuous_absorption_power(
+            cx,
+            origin,
+            unit_direction,
+            wavelengths_nm,
+            incident_power_w,
+            config,
+        )?;
+        self.partition_scattered_absorption(cx, wavelengths_nm, scattering, budget)
+    }
+
+    fn partition_scattered_absorption<const N: usize>(
+        &self,
+        cx: &Cx<'_>,
+        wavelengths_nm: &[f64; N],
+        scattering: ScatteringPowerDeposition<N>,
+        budget: ConstituentDepositionBudget,
+    ) -> Result<ConstituentScatteringDeposition<N>, MaterialOpticalMixtureError> {
         if scattering.medium_identity != self.medium().content_identity() {
             return Err(VolumeTransportError::SourceIdentity.into());
         }

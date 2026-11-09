@@ -2,7 +2,9 @@
 
 use super::super::*;
 use crate::material_state::optical_mixture::deposition::ConstituentDepositionBudget;
-use crate::volumes::transport::scattering::deposition::ScatteringDepositionConfig;
+use crate::volumes::transport::scattering::deposition::{
+    AbsorptionEstimator, ScatteringDepositionConfig,
+};
 
 fn scattering_config(histories: u32) -> ScatteringDepositionConfig {
     ScatteringDepositionConfig {
@@ -24,6 +26,15 @@ fn partition_budget() -> ConstituentDepositionBudget {
 
 #[test]
 fn g1_constituent_scattering_retains_native_histories_and_scales_cell_means_and_errors() {
+    check_native_history_partition(AbsorptionEstimator::Collision);
+}
+
+#[test]
+fn g1_continuous_constituent_heat_retains_native_histories_and_correlated_error_shares() {
+    check_native_history_partition(AbsorptionEstimator::Continuous);
+}
+
+fn check_native_history_partition(estimator: AbsorptionEstimator) {
     with_cx(|cx, _| {
         let a = particles(cx, 0, 300.0);
         let b = particles(cx, 1, 300.0);
@@ -51,34 +62,55 @@ fn g1_constituent_scattering_retains_native_histories_and_scales_cell_means_and_
         let origin = Point3::new(1.0, 1.0, -0.25);
         let direction = Vec3::new(0.0, 0.0, 1.0);
         let config = scattering_config(256);
-        let native = field
-            .medium()
-            .deposit_multiple_scattering_power(cx, origin, direction, &wavelengths, &powers, config)
-            .unwrap();
-        let partition = field
-            .deposit_multiple_scattering_power_by_component(
+        let native = match estimator {
+            AbsorptionEstimator::Collision => field.medium().deposit_multiple_scattering_power(
                 cx,
                 origin,
                 direction,
                 &wavelengths,
                 &powers,
                 config,
-                partition_budget(),
-            )
-            .unwrap();
-        let replay = field
-            .deposit_multiple_scattering_power_by_component(
+            ),
+            AbsorptionEstimator::Continuous => field.medium().deposit_continuous_absorption_power(
                 cx,
                 origin,
                 direction,
                 &wavelengths,
                 &powers,
                 config,
-                partition_budget(),
-            )
-            .unwrap();
+            ),
+        }
+        .unwrap();
+        let run = || {
+            match estimator {
+                AbsorptionEstimator::Collision => field
+                    .deposit_multiple_scattering_power_by_component(
+                        cx,
+                        origin,
+                        direction,
+                        &wavelengths,
+                        &powers,
+                        config,
+                        partition_budget(),
+                    ),
+                AbsorptionEstimator::Continuous => field
+                    .deposit_continuous_absorption_power_by_component(
+                        cx,
+                        origin,
+                        direction,
+                        &wavelengths,
+                        &powers,
+                        config,
+                        partition_budget(),
+                    ),
+            }
+            .unwrap()
+        };
+        let partition = run();
+        let replay = run();
         assert_eq!(partition, replay);
         assert_eq!(partition.scattering(), &native);
+        assert_eq!(native.absorption_estimator, estimator);
         assert_eq!(partition.mixture_identity(), field.content_identity());
         assert_eq!(native.sampled_histories, [256, 256, 0]);
         assert!(
@@ -457,6 +489,15 @@ mod thermal_bridge {
 
     #[test]
     fn g1_scattered_constituent_heat_advances_distinct_native_thermal_cells() {
+        check_native_constituent_heating(AbsorptionEstimator::Collision);
+    }
+
+    #[test]
+    fn g1_continuous_constituent_heat_advances_distinct_native_thermal_cells() {
+        check_native_constituent_heating(AbsorptionEstimator::Continuous);
+    }
+
+    fn check_native_constituent_heating(estimator: AbsorptionEstimator) {
         with_cx(|cx, _| {
             let a = particles(cx, 0, 300.0);
             let b = particles(cx, 1, 300.0);
@@ -479,23 +520,43 @@ mod thermal_bridge {
                 grid_budget(),
             )
             .unwrap();
-            let report = field
-                .deposit_multiple_scattering_power_by_component(
-                    cx,
-                    Point3::new(1.0, 1.0, -0.25),
-                    Vec3::new(0.0, 0.0, 1.0),
-                    &[430.0, 650.0],
-                    &[0.01, 0.02],
-                    scattering_config(1024),
-                    ConstituentDepositionBudget {
-                        max_rows: 4,
-                        max_component_evaluations: 8,
-                    },
-                )
-                .unwrap();
-            assert!(report.cells().iter().all(|row| {
-                row.standard_error_w().iter().all(Option::is_some)
-            }));
+            let origin = Point3::new(1.0, 1.0, -0.25);
+            let direction = Vec3::new(0.0, 0.0, 1.0);
+            let config = scattering_config(1024);
+            let budget = ConstituentDepositionBudget {
+                max_rows: 4,
+                max_component_evaluations: 8,
+            };
+            let report = match estimator {
+                AbsorptionEstimator::Collision => field
+                    .deposit_multiple_scattering_power_by_component(
+                        cx,
+                        origin,
+                        direction,
+                        &[430.0, 650.0],
+                        &[0.01, 0.02],
+                        config,
+                        budget,
+                    ),
+                AbsorptionEstimator::Continuous => field
+                    .deposit_continuous_absorption_power_by_component(
+                        cx,
+                        origin,
+                        direction,
+                        &[430.0, 650.0],
+                        &[0.01, 0.02],
+                        config,
+                        budget,
+                    ),
+            }
+            .unwrap();
+            assert_eq!(report.scattering().absorption_estimator, estimator);
+            assert!(
+                report
+                    .cells()
+                    .iter()
+                    .all(|row| { row.standard_error_w().iter().all(Option::is_some) })
+            );
             let tol = tolerance(&report);
             let bindings: Vec<_> = report
                 .cells()
@@ -513,7 +574,7 @@ mod thermal_bridge {
                 })
                 .collect();
             let initial = thermal();
-            let mut heating = report
+            let heating = report
                 .into_heating(&bindings, &initial, tol, || Ok(()))
                 .unwrap();
             let source_a = heating.sources_w()[&CellId(11)];
@@ -521,9 +582,9 @@ mod thermal_bridge {
             assert!(source_a > 0.0 && source_b > 0.0);
             let native_absorbed = heating.deposition().absorbed.mean_w.iter().sum::<f64>();
             close(source_a + source_b, native_absorbed);
-            let (after, _, audit) = initial
+            let (after, accepted, audit) = initial
                 .advance_observed(
-                    &mut heating,
+                    &heating,
                     1.0,
                     StepConfig {
                         max_dt_s: 0.1,
@@ -532,11 +593,19 @@ mod thermal_bridge {
                     || Ok(()),
                 )
                 .unwrap();
-            close(after.temperature_k(CellId(11)).unwrap(), 300.0 + source_a / 1000.0);
-            close(after.temperature_k(CellId(22)).unwrap(), 300.0 + source_b / 1000.0);
+            close(
+                after.temperature_k(CellId(11)).unwrap(),
+                300.0 + source_a / 1000.0,
+            );
+            close(
+                after.temperature_k(CellId(22)).unwrap(),
+                300.0 + source_b / 1000.0,
+            );
             close(audit.external_heat_j, source_a + source_b);
-            close(heating.energy().thermal_input_j, source_a + source_b);
-            assert!(heating.energy().diffuse_escape_j.iter().any(|v| *v > 0.0));
+            close(accepted.energy().thermal_input_j, source_a + source_b);
+            assert!(accepted.energy().diffuse_escape_j.iter().any(|v| *v > 0.0));
+            assert_eq!(accepted.deposition(), heating.deposition());
+            assert_eq!(heating.energy().thermal_input_j, 0.0);
         });
     }
 
@@ -602,13 +671,7 @@ mod thermal_bridge {
                     let bindings: Vec<_> = report
                         .cells()
                         .iter()
-                        .map(|row| {
-                            (
-                                row.optical_cell_index(),
-                                row.component_index(),
-                                CellId(11),
-                            )
-                        })
+                        .map(|row| (row.optical_cell_index(), row.component_index(), CellId(11)))
                         .collect();
                     assert!(matches!(
                         report.into_heating(&bindings, &initial, tol, || Ok(())),
@@ -625,4 +688,85 @@ mod thermal_bridge {
             assert_eq!(initial.temperature_k(CellId(22)).unwrap(), 300.0);
         });
     }
+}
+
+#[test]
+fn g1_continuous_constituent_heat_retains_thin_beer_absorption_without_a_collision() {
+    with_cx(|cx, _| {
+        let a = particles(cx, 0, 300.0);
+        let b = particles(cx, 1, 300.0);
+        let components = [
+            MaterialOpticalComponent::Particles(&a),
+            MaterialOpticalComponent::Particles(&b),
+        ];
+        let composition = composition(&[0.25, 0.75]);
+        let recipe =
+            MaterialOpticalMixture::try_new(cx, &components, &composition, mixture_budget())
+                .unwrap();
+        let wavelengths = [430.0, 650.0];
+        let largest_extinction = wavelengths
+            .iter()
+            .map(|&wavelength| {
+                recipe.absorption_spectrum().at(wavelength).unwrap()
+                    + recipe
+                        .scattering_optics()
+                        .scattering
+                        .at(wavelength)
+                        .unwrap()
+            })
+            .fold(0.0_f64, f64::max);
+        let density = [1e-10 / largest_extinction];
+        let absorption =
+            wavelengths.map(|wavelength| recipe.absorption_spectrum().at(wavelength).unwrap());
+        let field = MaterialOpticalMixtureGrid::try_new(
+            cx,
+            VolumeGrid::new([1; 3], &density, [0.0; 3], [1.0; 3]),
+            palette(cx, vec![recipe], &[0]),
+            None,
+            None,
+            0.01,
+            grid_budget(),
+        )
+        .unwrap();
+        let report = field
+            .deposit_continuous_absorption_power_by_component(
+                cx,
+                Point3::new(0.5, 0.5, -0.25),
+                Vec3::new(0.0, 0.0, 1.0),
+                &wavelengths,
+                &[1.0, 2.0],
+                scattering_config(2),
+                partition_budget(),
+            )
+            .unwrap();
+        assert_eq!(report.scattering().sampled_histories, [2, 2]);
+        assert_eq!(report.scattering().diffuse_escape.mean_w, [0.0; 2]);
+        assert_eq!(report.scattering().absorbed.standard_error_w, [0.0; 2]);
+        assert_eq!(report.cells().len(), 2);
+        for lane in 0..2 {
+            let expected = [1.0, 2.0][lane] * -(-density[0] * absorption[lane]).exp_m1();
+            assert!(expected > 0.0);
+            assert!((report.scattering().absorbed.mean_w[lane] / expected - 1.0).abs() < 2e-12);
+            let mut total = 0.0;
+            for row in report.cells() {
+                let (particle, weight) = if row.component_index() == 0 {
+                    (&a, 0.25)
+                } else {
+                    (&b, 0.75)
+                };
+                let share = weight
+                    * particle
+                        .spectrum()
+                        .absorption
+                        .at(wavelengths[lane])
+                        .unwrap()
+                    / absorption[lane];
+                assert!((row.absorbed_power_w()[lane] / (expected * share) - 1.0).abs() < 2e-12);
+                assert_eq!(row.standard_error_w()[lane], Some(0.0));
+                assert_eq!(row.source_identity(), particle.binding_identity());
+                total += row.absorbed_power_w()[lane];
+            }
+            assert!(((total + report.partition_residual_w()[lane]) / expected - 1.0).abs() < 2e-12);
+        }
+    });
 }

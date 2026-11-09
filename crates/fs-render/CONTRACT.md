@@ -6642,12 +6642,18 @@ net radiative-equilibrium solve.
 ### Constituent absorption after multiple scattering
 
 `MaterialOpticalMixtureGrid::deposit_multiple_scattering_power_by_component`
-runs the original native estimator once and partitions its retained cell heat
-by the same fixed spectral absorption shares used for beam deposition.
-`ConstituentScatteringDeposition` retains the complete unchanged native report,
-including ballistic and diffuse escape, unresolved radiation, correlated
-whole-history totals, sample counts, work counts, seed and source configuration.
-The partition introduces no retracing, additional random draws or thermal debit.
+runs the original native collision estimator once and partitions its retained
+cell heat by the same fixed spectral absorption shares used for beam deposition.
+`deposit_continuous_absorption_power_by_component` instead scores Beer heat
+through native scattering free flights and uses that SAME constituent partition.
+A traversed weakly absorbing cell can therefore contribute without a sampled
+collision. `ConstituentScatteringDeposition` retains the complete unchanged
+native report, including estimator identity, ballistic and diffuse escape,
+unresolved radiation, correlated whole-history totals, sample counts, work
+counts, seed and source configuration. The partition introduces no retracing,
+additional random draws or thermal debit. Both reports can move directly through
+the existing `into_heating` adapter with the original receiving-error and
+unresolved-power admission gates.
 
 Rows retain native sparse cell order and original component/source identities.
 At a fixed cell and wavelength, every history's constituent heat is the same
