@@ -12,10 +12,36 @@
 //! <https://doc.comsol.com/6.4/doc/com.comsol.help.aco/aco_ug_pressure.05.100.html>.
 
 use super::{
-    HeterogeneousError, HeterogeneousHelmholtzFe, MAX_QUADRATURE_ORDER, duffy_quadrature, invalid,
-    poll,
+    HelmholtzFe, HeterogeneousError, HeterogeneousHelmholtzFe, MAX_QUADRATURE_ORDER,
+    PreparedEquivalentFluid, duffy_quadrature, invalid, poll,
 };
 use fs_math::{c64::C64, dd::Dd};
+
+/// Keep the original source binding while sharing geometry-only projections.
+/// A lossy owner includes its frozen frequency and complete mechanical walls;
+/// equal geometry alone never authorizes reuse with a different preparation.
+#[derive(Clone, Copy)]
+pub(super) enum PressureSourceOwner<'m, 'f, 'c> {
+    Heterogeneous(&'m HeterogeneousHelmholtzFe<'f, 'c>),
+    Equivalent(&'m PreparedEquivalentFluid<'f, 'c>),
+}
+
+impl<'f, 'c> PressureSourceOwner<'_, 'f, 'c> {
+    pub(super) fn geometry(self) -> &'f HelmholtzFe<'c> {
+        match self {
+            Self::Heterogeneous(model) => model.geometry,
+            Self::Equivalent(prepared) => prepared.geometry(),
+        }
+    }
+
+    pub(super) fn matches(self, other: PressureSourceOwner<'_, '_, '_>) -> bool {
+        match (self, other) {
+            (Self::Heterogeneous(a), PressureSourceOwner::Heterogeneous(b)) => core::ptr::eq(a, b),
+            (Self::Equivalent(a), PressureSourceOwner::Equivalent(b)) => core::ptr::eq(a, b),
+            _ => false,
+        }
+    }
+}
 
 /// Bound on simultaneously driven volume-source columns. The exact trajectory
 /// owner's augmented-state limit applies additionally to its preparations.
@@ -39,9 +65,11 @@ pub(super) fn admit_count(count: usize) -> Result<(), HeterogeneousError> {
 /// as supplied: it is not normalized, clipped or replaced by a point source.
 /// Preparation samples the callback once; every subsequent drive reuses the
 /// same original-basis load. Its model borrow prevents cross-wiring a source
-/// onto a different material/geometry owner.
+/// onto a different material/geometry owner. The same projection is available
+/// on a real heterogeneous model or one exact prepared lossy equivalent fluid;
+/// those bindings are distinct, even when they borrow the same geometry.
 pub struct VolumeVelocitySource<'m, 'f, 'c> {
-    pub(super) model: &'m HeterogeneousHelmholtzFe<'f, 'c>,
+    owner: PressureSourceOwner<'m, 'f, 'c>,
     pub(super) load: Vec<f64>,
     integral: f64,
 }
@@ -57,7 +85,14 @@ impl VolumeVelocitySource<'_, '_, '_> {
         &self,
         model: &HeterogeneousHelmholtzFe<'_, '_>,
     ) -> Result<(), HeterogeneousError> {
-        if !core::ptr::eq(self.model, model) {
+        self.validate_owner(PressureSourceOwner::Heterogeneous(model))
+    }
+
+    pub(super) fn validate_owner(
+        &self,
+        owner: PressureSourceOwner<'_, '_, '_>,
+    ) -> Result<(), HeterogeneousError> {
+        if !self.owner.matches(owner) {
             return Err(
                 invalid("volume source belongs to another spatial/material operator").into(),
             );
@@ -101,8 +136,25 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         density_per_m3: &mut impl FnMut(usize, [f64; 3]) -> Result<f64, E>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<VolumeVelocitySource<'m, 'f, 'c>, E> {
+        VolumeVelocitySource::prepare(
+            PressureSourceOwner::Heterogeneous(self),
+            quadrature_order,
+            density_per_m3,
+            cancelled,
+        )
+    }
+}
+
+impl<'m, 'f, 'c> VolumeVelocitySource<'m, 'f, 'c> {
+    pub(super) fn prepare<E: From<HeterogeneousError>>(
+        owner: PressureSourceOwner<'m, 'f, 'c>,
+        quadrature_order: usize,
+        density_per_m3: &mut impl FnMut(usize, [f64; 3]) -> Result<f64, E>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, E> {
         poll(cancelled)?;
-        if quadrature_order < self.geometry.order + 2 || quadrature_order > MAX_QUADRATURE_ORDER {
+        let geometry = owner.geometry();
+        if quadrature_order < geometry.order + 2 || quadrature_order > MAX_QUADRATURE_ORDER {
             return Err(HeterogeneousError::from(invalid(
                 "volume source quadrature order outside admitted range",
             ))
@@ -110,30 +162,29 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         }
         // Preserve the existing affine projection; a curved element must
         // never use its corner tetrahedron's constant volume measure.
-        let metrics = if self.geometry.is_curved() {
+        let metrics = if geometry.is_curved() {
             None
         } else {
-            Some(&self.geometry.affine_geometry)
+            Some(&geometry.affine_geometry)
         };
         let quadrature = duffy_quadrature(quadrature_order);
-        let mut load = vec![Dd::from_f64(0.0); self.ndof()];
+        let mut load = vec![Dd::from_f64(0.0); geometry.ndof()];
         let mut integral = Dd::from_f64(0.0);
-        for (element, vertices) in self.geometry.tetrahedra().iter().enumerate() {
+        for (element, vertices) in geometry.tetrahedra().iter().enumerate() {
             poll(cancelled)?;
-            let dofs = self.geometry.space.element_dofs(element);
+            let dofs = geometry.space.element_dofs(element);
             for &(barycentric, weight) in &quadrature {
                 poll(cancelled)?;
                 let (position, jacobian) = if let Some(metrics) = &metrics {
                     let mut position = [0.0; 3];
                     for (&vertex, &bary) in vertices.iter().zip(&barycentric) {
                         for (axis, coordinate) in position.iter_mut().enumerate() {
-                            *coordinate += bary * self.geometry.positions[vertex as usize][axis];
+                            *coordinate += bary * geometry.positions[vertex as usize][axis];
                         }
                     }
                     (position, 6.0 * metrics.vol_signed[element].abs())
                 } else {
-                    let point = self
-                        .geometry
+                    let point = geometry
                         .geometry_point(element, barycentric)
                         .map_err(HeterogeneousError::from)?;
                     (point.position_m, point.determinant_m3)
@@ -150,7 +201,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 for &(global, shape) in &dofs {
                     load[global] = load[global]
                         + Dd::from_f64(weighted)
-                            * Dd::from_f64(shape.eval(barycentric, self.geometry.order));
+                            * Dd::from_f64(shape.eval(barycentric, geometry.order));
                 }
             }
         }
@@ -163,7 +214,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         }
         poll(cancelled)?;
         Ok(VolumeVelocitySource {
-            model: self,
+            owner,
             load,
             integral,
         })

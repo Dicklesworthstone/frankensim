@@ -17,7 +17,9 @@
 use super::super::super::HelmholtzFe;
 use super::super::super::pressure_release::PressureReleaseConstraints;
 use super::super::MAX_QUADRATURE_ORDER;
+use super::super::source::PressureSourceOwner;
 use super::super::time::mechanical::{MechanicalBoundary, traction::WallTractionProfile};
+use super::super::{BoundaryVelocitySource, VolumeVelocitySource};
 use super::frequency::coupled::{
     CoupledPencil, MechanicalHarmonicLimits, MechanicalWallAccounting, MechanicalWallPhasors,
     MechanicalWallPower, WallTraction,
@@ -31,6 +33,8 @@ use super::{
 use crate::highorder::simplex::duffy_quadrature;
 use fs_math::{c64::C64, dd::Dd};
 use fs_sparse::{Coo, Csr};
+
+mod sources;
 
 /// Coherent effective material response at the exact preparation frequency.
 ///
@@ -128,8 +132,15 @@ impl EquivalentFluidElementPower {
 #[derive(Clone, Debug)]
 pub struct EquivalentFluidPressureField {
     pub pressure_pa: Vec<C64>,
-    /// Signed work of imposed fluid velocity [W], separate from wall traction.
+    /// Total signed work of imposed boundary velocity and volume injection [W],
+    /// separate from mechanical wall traction. Includes the two subtotals below.
     pub input_power_w: f64,
+    /// Signed work of prepared quadratic boundary sources [W], already included
+    /// in input_power_w. Coherent sources may individually absorb power.
+    pub boundary_source_power_w: f64,
+    /// Signed work of distributed volume sources [W], already included in
+    /// input_power_w. This source work is distinct from material absorption.
+    pub volume_source_power_w: f64,
     pub boundary_dissipation_w: f64,
     pub density_dissipation_w: f64,
     pub compressional_dissipation_w: f64,
@@ -612,6 +623,29 @@ impl<'f, 'c> PreparedEquivalentFluid<'f, 'c> {
         tractions: &[(&PreparedEquivalentFluidTraction<'_, 'f, 'c>, C64)],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<EquivalentFluidPressureField, HeterogeneousError> {
+        self.solve_with_sources(inward_velocity, &[], &[], tractions, cancelled)
+    }
+
+    /// Resolve simultaneous linear boundary velocity, original prepared
+    /// quadratic boundary motion, distributed volume injection and independent
+    /// mechanical wall traction through the SAME complete fluid/wall factor.
+    ///
+    /// Prepared boundary amplitudes are inward velocity [m/s], volume amplitudes
+    /// are volume flow [m^3/s], and wall traction is outward pressure [Pa]. All
+    /// are complex peak phasors in exp(+i omega t). Their original load columns
+    /// add before solving, retaining coherent interference and signed source
+    /// work without normalization, clipping or material/source resampling.
+    /// Every prepared source must belong to THIS exact owner, even at zero
+    /// amplitude. Boundary sources cannot overlap pressure-release faces.
+    /// The original source-count, complete-state and cancellation limits apply.
+    pub fn solve_with_sources(
+        &self,
+        inward_velocity: &[VelocityTrace],
+        boundary_sources: &[(&BoundaryVelocitySource<'_, '_, '_>, C64)],
+        volume_sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64)],
+        tractions: &[(&PreparedEquivalentFluidTraction<'_, 'f, 'c>, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<EquivalentFluidPressureField, HeterogeneousError> {
         poll(cancelled)?;
         super::super::source::admit_count(tractions.len())?;
         let mut columns = Vec::with_capacity(tractions.len());
@@ -624,13 +658,24 @@ impl<'f, 'c> PreparedEquivalentFluid<'f, 'c> {
             }
             columns.push((&source.column, amplitude));
         }
-        PreparedHeterogeneous::admit_velocity_faces_for(
-            &self.pressure_release,
-            inward_velocity,
-            cancelled,
-        )?;
-        let load =
-            HeterogeneousHelmholtzFe::velocity_load_for(self.geometry, inward_velocity, cancelled)?;
+        let load = if boundary_sources.is_empty() && volume_sources.is_empty() {
+            // Keep the original unprepared-drive path and its arithmetic.
+            PreparedHeterogeneous::admit_velocity_faces_for(
+                &self.pressure_release,
+                inward_velocity,
+                cancelled,
+            )?;
+            HeterogeneousHelmholtzFe::velocity_load_for(self.geometry, inward_velocity, cancelled)?
+        } else {
+            PreparedHeterogeneous::project_sources_for_owner(
+                PressureSourceOwner::Equivalent(self),
+                &self.pressure_release,
+                inward_velocity,
+                boundary_sources,
+                volume_sources,
+                cancelled,
+            )?
+        };
         let (mut solved, traction_power) = self
             .pencil
             .solve_with_tractions(&load, &columns, cancelled)?;
@@ -644,6 +689,12 @@ impl<'f, 'c> PreparedEquivalentFluid<'f, 'c> {
                 + Dd::from_f64(pressure.im) * Dd::from_f64(source.im);
         }
         let input_power_w = 0.5 * work.to_f64();
+        let (boundary_source_power_w, volume_source_power_w) = PreparedHeterogeneous::source_power(
+            &solved.pressure,
+            boundary_sources,
+            volume_sources,
+            cancelled,
+        )?;
         let boundary_dissipation_w =
             0.5 * quadratic_nonnegative(&self.boundary_conductance, &solved.pressure, cancelled)?;
         let element_power = self.element_dissipation(&solved.pressure, cancelled)?;
@@ -670,6 +721,8 @@ impl<'f, 'c> PreparedEquivalentFluid<'f, 'c> {
         Ok(EquivalentFluidPressureField {
             pressure_pa: solved.pressure,
             input_power_w,
+            boundary_source_power_w,
+            volume_source_power_w,
             boundary_dissipation_w,
             density_dissipation_w,
             compressional_dissipation_w,

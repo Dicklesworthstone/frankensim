@@ -12,6 +12,7 @@
 //! a structural displacement, material law, or radiation model.
 
 use super::super::tri_quadrature;
+use super::source::PressureSourceOwner;
 use super::{HeterogeneousError, HeterogeneousHelmholtzFe, MAX_QUADRATURE_ORDER, invalid, poll};
 use fs_math::{c64::C64, dd::Dd};
 use std::collections::BTreeSet;
@@ -38,8 +39,10 @@ pub(super) fn admit_count(count: usize) -> Result<(), HeterogeneousError> {
 /// integrates the signed shape as supplied, with no area normalization. The
 /// model borrow prevents reusing a column with another material/geometry owner.
 /// Repeated drives reuse this projection and its work-conjugate observation.
+/// Sources prepared on a lossy equivalent fluid retain that exact preparation;
+/// a source from a real heterogeneous model is not interchangeable with it.
 pub struct BoundaryVelocitySource<'m, 'f, 'c> {
-    pub(super) model: &'m HeterogeneousHelmholtzFe<'f, 'c>,
+    owner: PressureSourceOwner<'m, 'f, 'c>,
     pub(super) load: Vec<f64>,
     pub(super) faces: Vec<[u32; 3]>,
     integral_m2: f64,
@@ -74,7 +77,14 @@ impl BoundaryVelocitySource<'_, '_, '_> {
         &self,
         model: &HeterogeneousHelmholtzFe<'_, '_>,
     ) -> Result<(), HeterogeneousError> {
-        if !core::ptr::eq(self.model, model) {
+        self.validate_owner(PressureSourceOwner::Heterogeneous(model))
+    }
+
+    pub(super) fn validate_owner(
+        &self,
+        owner: PressureSourceOwner<'_, '_, '_>,
+    ) -> Result<(), HeterogeneousError> {
+        if !self.owner.matches(owner) {
             return Err(
                 invalid("boundary source belongs to another spatial/material operator").into(),
             );
@@ -147,15 +157,32 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         quadrature_order: usize,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<BoundaryVelocitySource<'m, 'f, 'c>, HeterogeneousError> {
+        BoundaryVelocitySource::prepare(
+            PressureSourceOwner::Heterogeneous(self),
+            traces,
+            quadrature_order,
+            cancelled,
+        )
+    }
+}
+
+impl<'m, 'f, 'c> BoundaryVelocitySource<'m, 'f, 'c> {
+    pub(super) fn prepare(
+        owner: PressureSourceOwner<'m, 'f, 'c>,
+        traces: &[([u32; 3], [f64; 6])],
+        quadrature_order: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, HeterogeneousError> {
         poll(cancelled)?;
+        let geometry = owner.geometry();
         if traces.is_empty() {
             return Err(invalid("nonempty quadratic boundary source required").into());
         }
-        if quadrature_order < self.geometry.order + 2 || quadrature_order > MAX_QUADRATURE_ORDER {
+        if quadrature_order < geometry.order + 2 || quadrature_order > MAX_QUADRATURE_ORDER {
             return Err(invalid("quadratic source quadrature order outside admitted range").into());
         }
         let quadrature = tri_quadrature(quadrature_order);
-        let mut load = vec![Dd::from_f64(0.0); self.ndof()];
+        let mut load = vec![Dd::from_f64(0.0); geometry.ndof()];
         let mut integral = Dd::from_f64(0.0);
         let mut faces = BTreeSet::new();
         for &(face, values) in traces {
@@ -168,7 +195,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 )
                 .into());
             }
-            let rule = self.geometry.face_rule(face, &quadrature)?;
+            let rule = geometry.face_rule(face, &quadrature)?;
             if !rule.area.is_finite() || rule.area <= 0.0 {
                 return Err(invalid("unrepresentable quadratic source face geometry").into());
             }
@@ -212,7 +239,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         }
         poll(cancelled)?;
         Ok(BoundaryVelocitySource {
-            model: self,
+            owner,
             load,
             faces: faces.into_iter().collect(),
             integral_m2,

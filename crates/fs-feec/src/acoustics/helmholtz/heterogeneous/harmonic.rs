@@ -2,6 +2,7 @@
 
 use super::super::pressure_release::PressureReleaseConstraints;
 use super::super::tri_quadrature;
+use super::source::PressureSourceOwner;
 use super::{
     BoundaryVelocitySource, HeterogeneousError, HeterogeneousHelmholtzFe,
     SpatialBoundaryAdmittance, VolumeVelocitySource, finite, invalid, poll,
@@ -727,13 +728,31 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         volume_sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64)],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<C64>, HeterogeneousError> {
+        Self::project_sources_for_owner(
+            PressureSourceOwner::Heterogeneous(model),
+            pressure_release,
+            inward_velocity,
+            boundary_sources,
+            volume_sources,
+            cancelled,
+        )
+    }
+
+    pub(super) fn project_sources_for_owner(
+        owner: PressureSourceOwner<'_, '_, '_>,
+        pressure_release: &PressureReleaseConstraints,
+        inward_velocity: &[VelocityTrace],
+        boundary_sources: &[(&BoundaryVelocitySource<'_, '_, '_>, C64)],
+        volume_sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<C64>, HeterogeneousError> {
         poll(cancelled)?;
         Self::admit_velocity_faces_for(pressure_release, inward_velocity, cancelled)?;
         super::boundary_source::admit_count(boundary_sources.len())?;
         super::source::admit_count(volume_sources.len())?;
         for &(source, amplitude) in boundary_sources {
             poll(cancelled)?;
-            source.validate(model)?;
+            source.validate_owner(owner)?;
             if !finite(amplitude) {
                 return Err(invalid("finite harmonic boundary-velocity amplitude required").into());
             }
@@ -751,12 +770,16 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         }
         for &(source, amplitude) in volume_sources {
             poll(cancelled)?;
-            source.validate(model)?;
+            source.validate_owner(owner)?;
             if !finite(amplitude) {
                 return Err(invalid("finite harmonic volume-flow amplitude required").into());
             }
         }
-        let mut load = model.velocity_load(inward_velocity, cancelled)?;
+        let mut load = HeterogeneousHelmholtzFe::velocity_load_for(
+            owner.geometry(),
+            inward_velocity,
+            cancelled,
+        )?;
         for (row, value) in load.iter_mut().enumerate() {
             poll(cancelled)?;
             let mut real = Dd::from_f64(value.re);
@@ -780,29 +803,46 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         volume_sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64)],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), HeterogeneousError> {
+        let (boundary, volume) = Self::source_power(
+            &field.pressure_pa,
+            boundary_sources,
+            volume_sources,
+            cancelled,
+        )?;
+        field.boundary_source_power_w = boundary;
+        field.volume_source_power_w = volume;
+        Ok(())
+    }
+
+    pub(super) fn source_power(
+        pressure_pa: &[C64],
+        boundary_sources: &[(&BoundaryVelocitySource<'_, '_, '_>, C64)],
+        volume_sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(f64, f64), HeterogeneousError> {
         let mut work = Dd::from_f64(0.0);
         for &(source, amplitude) in boundary_sources {
             poll(cancelled)?;
-            let pressure = source.harmonic_pressure(&field.pressure_pa);
+            let pressure = source.harmonic_pressure(pressure_pa);
             work = work
                 + Dd::from_f64(pressure.re) * Dd::from_f64(amplitude.re)
                 + Dd::from_f64(pressure.im) * Dd::from_f64(amplitude.im);
         }
-        field.boundary_source_power_w = 0.5 * work.to_f64();
+        let boundary_source_power_w = 0.5 * work.to_f64();
         work = Dd::from_f64(0.0);
         for &(source, amplitude) in volume_sources {
             poll(cancelled)?;
-            let pressure = source.harmonic_pressure(&field.pressure_pa);
+            let pressure = source.harmonic_pressure(pressure_pa);
             work = work
                 + Dd::from_f64(pressure.re) * Dd::from_f64(amplitude.re)
                 + Dd::from_f64(pressure.im) * Dd::from_f64(amplitude.im);
         }
-        field.volume_source_power_w = 0.5 * work.to_f64();
-        if !field.boundary_source_power_w.is_finite() || !field.volume_source_power_w.is_finite() {
+        let volume_source_power_w = 0.5 * work.to_f64();
+        if !boundary_source_power_w.is_finite() || !volume_source_power_w.is_finite() {
             return Err(invalid("harmonic prepared-source work overflow").into());
         }
         poll(cancelled)?;
-        Ok(())
+        Ok((boundary_source_power_w, volume_source_power_w))
     }
 
     fn admit_velocity_faces(

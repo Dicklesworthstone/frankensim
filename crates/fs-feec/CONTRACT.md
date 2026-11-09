@@ -1798,6 +1798,33 @@ dispersive stored-energy law nor a causal transient realization. Mean flow,
 elastic porous-frame waves, negative-parameter media and experimental material
 qualification remain outside this numerical formulation.
 
+### Original distributed sources in lossy fluid volumes
+
+`PreparedEquivalentFluid` prepares the existing `VolumeVelocitySource` and
+`BoundaryVelocitySource` owners through the same original volume/face projection
+loops as the real heterogeneous solver. Volume shapes retain physical positions,
+original tetrahedron indices and full pressure-basis loads; quadratic boundary
+motion retains all six nodal values and the original curved metric. Signed
+shapes are not normalized or reduced to their integral. Each source borrows its
+exact prepared frequency/material/wall owner; shared geometry alone does not
+permit cross-wiring, even at zero amplitude.
+
+`solve_with_sources` coherently combines raw inward velocity, prepared quadratic
+boundary motion, distributed volume injection and original wall tractions in the
+retained full pressure/motion/memory factor. Boundary amplitudes are peak m/s,
+volume amplitudes are peak m^3/s and traction amplitudes are peak Pa, all in
+`exp(+i omega t)`. Independently evaluated boundary/volume source work remains
+signed and is already included once in total fluid input work. It is never
+material heat. Native bulk, Robin and mechanical dissipation remain separate.
+Empty prepared-source slices preserve the original raw-drive arithmetic; warm
+solves invoke no source or material callbacks. Original support, source-count,
+quadrature, finite-value and cancellation admission remains in force.
+
+`tests/equivalent_fluid_sources.rs` specifies uniform complex compliance and
+signed coherent work, zero-net spatial injection, midside boundary excitation
+with all wall memories, curved volume/face moments, the original lossless source
+limit, strict owner binding and cancellation without partial publication.
+
 ### Reciprocal mechanical walls in complex equivalent-fluid volumes
 
 `PreparedEquivalentFluid::new_with_coupled_mechanical_walls` retains original
