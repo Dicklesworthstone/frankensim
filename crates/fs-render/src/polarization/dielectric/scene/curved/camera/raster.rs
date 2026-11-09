@@ -49,6 +49,9 @@ pub mod point_lights;
 /// Spectral pixels with finite-area refractive light and emitter-hit MIS.
 pub mod area_lights;
 
+/// Full Smith glass pixels with original environment source/work receipts.
+pub mod environment;
+
 /// Source-bounded multichannel detector signals, including infrared bands.
 pub mod sensor;
 mod sequential;

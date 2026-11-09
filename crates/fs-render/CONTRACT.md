@@ -13248,3 +13248,48 @@ were authored for both-side glass/eta composition, equal-index bare/coated
 path-only measures and per-side infinity admission, but were not run because
 the sibling workspace dependencies and DSR/RCH were unavailable. They do not
 constitute full native geometry, optics, GRIN or workspace validation.
+
+### Native pixels with full rough-glass direct lighting
+
+The original `CurvedCameraRaster` now exposes ordinary and resolved-sequential
+pixel entry points for full Smith dielectric point, finite-area and environment
+lighting. All six adapters use the original four hero wavelengths, raster/pupil
+sampling, wavelength-specific rays, reciprocal lens Stokes seed and native XYZ
+integration. Passive analyzers enter before transport (before the lens for a
+resolved lens); lens geometry factors remain in the raster owner exactly once.
+The original source/visibility/optical budgets are retained independently in each
+spectral lane. No new light integrator or camera radiometric convention is added.
+
+Point and area adapters reuse both original native lane-accounting owners and
+their generic pixel receipts, retaining per-lane source radiance and work for
+ordinary and sequential lenses. Environment pixels retain each complete native
+`EnvironmentCameraSample`, including its endpoint partition and source/query
+work. Clipped sequential wavelengths keep
+zero work and their original proposal mass; environment receipts are `None`
+there. Original transport errors retain their concrete type and failed lane;
+any failed live lane refuses the whole pixel.
+
+Seeded light wrappers retain their own optical/source counter domains. Four
+lanes occupy the low Philox key's top two bits; original source binding/channel
+addresses occupy the high key, and original fixed low-key domains remain
+distinct below the lane bits. This prevents a lane address from cancelling a
+source binding or thermal channel. Pixel/sample occupy the complete 64-bit
+path address. Variable facet/source work cannot shift pupil, wavelength or
+another lane's draws. Replay is independent of pixel scheduling.
+
+Verification: four compiled integration probes passed using all six actual new
+adapter methods, the original point and area lane-accounting owners, and the
+actual environment receipt code. Explicit spectral/lens/source signature fixtures exercise
+four-lane receipts and keys, exact error/lane propagation, deterministic replay,
+analyzer placement, clipped-lane work and reciprocal-beam handoff. They do not
+establish resolved geometry, physical lens or full native image convergence;
+full workspace/DSR execution remains unavailable.
+
+A native regression protects the previously observed point-binding and
+area-channel lane alias. Two additional focused checks execute the actual
+three seeded wrapper callback bodies and original Smith/Philox helpers:
+they reproduce the old alias and verify distinct effective counter/key
+addresses and blocks across four lanes, 64 source bindings, both area channels
+and three seeds (5,520 addressed draws). All three checks and the four raster
+adapter probes pass. This verifies address separation, not statistical or
+physical convergence of an image.

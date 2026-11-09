@@ -24,6 +24,7 @@ use fs_rand::philox::philox4x32_10;
 #[cfg(feature = "volumes")]
 pub mod participating;
 mod sequential;
+mod smith_dielectric;
 
 /// Keep the original physical-camera or source-transport failure with its lane.
 #[derive(Debug)]
