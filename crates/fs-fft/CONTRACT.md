@@ -1346,3 +1346,29 @@ Rust test evidence.
 Product-spectrum preparation and proper-field pair contraction preserve the physical factor of one half when an unnormalized intermediate would overflow. Finite ordinary DD component sums retain their existing contraction order, including representable subnormal sums. Only overflowing intermediates move the half into individual products, scaling the larger operand to preserve a small partner. The exact half-weight modal cross path also combines subnormal components before rounding away each half. Native clocks, real sum tones, signed cross moments, source statistics and admission limits are unchanged; truly unrepresentable physical results remain refusals. `harmonic_window/spectrum/normalization_tests.rs` covers finite proper power, real difference/sum signs, signed pair fallback, tiny products and genuine overflow.
 
 Instantaneous native angular phases are exposed by `phase_rad_s_from_clock_dd` and `phase_rad_s_dd_from_clock_dd`. Both retain the DD source epoch and negative-time convention without a finite-shutter surrogate or rounded Hz conversion. The DD-frequency entry also preserves authored difference-frequency low parts. Signed frequencies, DC, invalid inputs, small cosine residuals and sub-ulp epochs have focused regressions; the existing deterministic radian reduction and finite-range refusals remain authoritative.
+
+## Retained source epochs for complete observation windows
+
+`HarmonicWindow::from_clock_dd` and `with_profile_from_clock_dd` retain a
+normalized DD source epoch independently of the positive finite duration.
+`start_clock_dd` returns that epoch; `start_s` remains its rounded binary64
+accessor. Existing constructors retain their source units and window profiles.
+All original radian/Hz phase, deterministic/proper pair and positive temporal
+band paths now consume the retained epoch. Start and interval rotations remain
+separate; an interval need not advance the rounded timestamp. Invalid source
+parts, nonpositive duration and unrepresentable physical endpoints refuse.
+
+The coherent optical shutter exposes `try_from_clock_dd` and `start_clock_dd`.
+Original EM aperture center/first-moment and integrated heat handoffs retain
+both epoch parts. Single/multitone tensor-Prony energy and causal observation
+handoffs also preserve that same source epoch. No new source coherence,
+material history, temporal sampling or shutter profile is inferred.
+
+Ninety-eight actual shared harmonic tests pass with warnings denied, including
+six new groups for source normalization/admission, independent fractional-cycle
+Hz phases, real/proper products, native-radian field-phase translation, owned
+and borrowed positive bands, and spectrum interval partition/continuation.
+These exercise uniform and triangular profiles and clocks whose low component
+is smaller than one f64 step. Downstream handoff types and source paths were
+inspected; complete optical, EM and material integration execution remains
+unrun. DD arithmetic is not an arbitrary-null relative-error certificate.

@@ -76,9 +76,23 @@ impl CoherentDiffractionShutter {
         Ok(Self(HarmonicWindow::new(start_s, duration_s)?))
     }
 
+    /// Retain the entrance-pupil source epoch below one binary64 clock step.
+    /// The original optical beats and shutter duration keep their own phases.
+    pub fn try_from_clock_dd(
+        start_s: Dd,
+        duration_s: f64,
+    ) -> Result<Self, CoherentDiffractionError> {
+        Ok(Self(HarmonicWindow::from_clock_dd(start_s, duration_s)?))
+    }
+
     #[must_use]
     pub fn start_s(self) -> f64 {
         self.0.start_s()
+    }
+
+    #[must_use]
+    pub fn start_clock_dd(self) -> Dd {
+        self.0.start_clock_dd()
     }
 
     #[must_use]

@@ -128,7 +128,7 @@ impl HarmonicEnergyWindow {
     pub(crate) fn new(omega: f64, window: HarmonicWindow) -> Result<Self, WindowError> {
         let gram = window.product_kernel(omega, omega)?.centered_gram_dd();
         let w = Dd::from_f64(omega);
-        let start = phase(w * Dd::from_f64(window.start_s()))?;
+        let start = phase(w * window.start_clock_dd())?;
         // Apply half before multiplying the larger factor, as the shared
         // temporal owner does. Keep start/width rotations separate even when
         // adding the duration to a large timestamp would round it away.

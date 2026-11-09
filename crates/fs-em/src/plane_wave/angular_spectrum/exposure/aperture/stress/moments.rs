@@ -321,7 +321,7 @@ impl MomentKernel for ProperKernel {
     fn prepare_first(window: HarmonicWindow, a: Dd, b: Dd) -> Result<Self, AngularSpectrumError> {
         let difference = a - b;
         let moment = centered_sine_moment(difference, window.duration_s())?;
-        let start = difference * Dd::from_f64(window.start_s());
+        let start = difference * window.start_clock_dd();
         let half_width = half_product(difference, window.duration_s());
         if !finite_dd(start) || !finite_dd(half_width) {
             return Err(bad("first-moment phase is unrepresentable"));

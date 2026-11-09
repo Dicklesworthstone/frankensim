@@ -58,7 +58,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             quadrature,
             channel,
             local,
-            Dd::from_f64(window.start_s()),
+            window.start_clock_dd(),
             Dd::ONE,
             limits,
             &mut cancelled,

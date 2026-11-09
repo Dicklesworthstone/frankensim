@@ -116,7 +116,7 @@ impl<'a> TensorPronyHarmonicSpectrum<'a> {
             }.into());
         }
         self.prepare_causal_window_from_clock_dd_with_checkpoint(
-            Dd::from_f64(window.start_s()), window.duration_s(), checkpoint,
+            window.start_clock_dd(), window.duration_s(), checkpoint,
         )
     }
 

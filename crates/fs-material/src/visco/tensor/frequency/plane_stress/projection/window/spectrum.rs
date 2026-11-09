@@ -34,7 +34,7 @@ fn project_parts(row: &[f64; 6], strain: &StrainParts, spectrum: Spectrum) -> Ch
 
 impl HarmonicEnergySpectrum {
     pub(crate) fn new(frequencies: &[f64], window: HarmonicWindow) -> Result<Self, WindowError> {
-        Self::at_clock(frequencies, window, Dd::from_f64(window.start_s()))
+        Self::at_clock(frequencies, window, window.start_clock_dd())
     }
 
     pub(crate) fn new_at_clock(
@@ -44,7 +44,7 @@ impl HarmonicEnergySpectrum {
             return Err(WindowError::InvalidWindow);
         }
         let start_s = Dd::from_pair(start_s.hi, start_s.lo);
-        Self::at_clock(frequencies, HarmonicWindow::new(start_s.hi, duration_s)?, start_s)
+        Self::at_clock(frequencies, HarmonicWindow::from_clock_dd(start_s, duration_s)?, start_s)
     }
 
     fn at_clock(frequencies: &[f64], window: HarmonicWindow, start_s: Dd) -> Result<Self, WindowError> {

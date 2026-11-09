@@ -123,6 +123,8 @@ pub enum HarmonicWindowProfile {
 }
 
 /// A normalized observation on `[start_s, start_s + duration_s]` in seconds.
+/// The source epoch and positive duration remain independently represented;
+/// DD-clock constructors retain source phase below one binary64 clock step.
 ///
 /// Every returned mean is integral(w(t) * quantity(t) dt), where w has unit
 /// integral. Multiplication by duration gives a sensitivity-weighted exposure.
@@ -130,7 +132,7 @@ pub enum HarmonicWindowProfile {
 /// a mean storage rate equal to the endpoint storage difference divided by T.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HarmonicWindow {
-    start_s: f64,
+    start_s: Dd,
     duration_s: f64,
     profile: HarmonicWindowProfile,
 }
@@ -139,6 +141,13 @@ impl HarmonicWindow {
     /// Admit a uniform interval without rounding a short duration into its start.
     pub fn new(start_s: f64, duration_s: f64) -> Result<Self, WindowError> {
         Self::with_profile(start_s, duration_s, HarmonicWindowProfile::Uniform)
+    }
+
+    /// Uniform observation on an explicitly retained source clock. A short
+    /// duration need not advance the rounded absolute timestamp. Kernels apply
+    /// epoch and interval rotations separately, preserving both quantities.
+    pub fn from_clock_dd(start_s: Dd, duration_s: f64) -> Result<Self, WindowError> {
+        Self::with_profile_from_clock_dd(start_s, duration_s, HarmonicWindowProfile::Uniform)
     }
 
     /// Admit an explicitly shaped, normalized detector sensitivity.
@@ -150,10 +159,31 @@ impl HarmonicWindow {
         duration_s: f64,
         profile: HarmonicWindowProfile,
     ) -> Result<Self, WindowError> {
-        if !start_s.is_finite()
+        Self::with_profile_from_clock_dd(Dd::from_f64(start_s), duration_s, profile)
+    }
+
+    /// An explicitly shaped observation retaining both parts of its original
+    /// source epoch. Normalization admits equivalent noncanonical DD pairs;
+    /// nonfinite clocks, nonpositive duration and unrepresentable ends refuse.
+    pub fn with_profile_from_clock_dd(
+        start_s: Dd,
+        duration_s: f64,
+        profile: HarmonicWindowProfile,
+    ) -> Result<Self, WindowError> {
+        if !start_s.hi.is_finite()
+            || !start_s.lo.is_finite()
             || !duration_s.is_finite()
             || duration_s <= 0.0
-            || !(start_s + duration_s).is_finite()
+        {
+            return Err(WindowError::InvalidWindow);
+        }
+        let start_s = Dd::from_pair(start_s.hi, start_s.lo);
+        let end_s = start_s + Dd::from_f64(duration_s);
+        if !start_s.hi.is_finite()
+            || !start_s.lo.is_finite()
+            || !end_s.hi.is_finite()
+            || !end_s.lo.is_finite()
+            || !end_s.to_f64().is_finite()
         {
             return Err(WindowError::InvalidWindow);
         }
@@ -164,9 +194,16 @@ impl HarmonicWindow {
         })
     }
 
-    /// Beginning of the observation, in seconds on the source clock.
+    /// Rounded beginning of the observation in seconds. For phase evaluation
+    /// or continuation, retain both parts with [`Self::start_clock_dd`].
     #[must_use]
     pub const fn start_s(self) -> f64 {
+        self.start_s.hi
+    }
+
+    /// Original normalized DD source epoch, without rounding its low part.
+    #[must_use]
+    pub const fn start_clock_dd(self) -> Dd {
         self.start_s
     }
 
@@ -450,7 +487,7 @@ impl HarmonicWindow {
         } else {
             checked(difference * Dd::from_f64(0.5 * self.duration_s))?
         };
-        let start = checked(difference * Dd::from_f64(self.start_s))?;
+        let start = checked(difference * self.start_s)?;
         // Keep start and half-width as separate rotations, just as in the
         // deterministic path: even their DD sum can lose a tiny duration on
         // an enormous clock. Preserve cos-1 as well as sinc-1 near cancellation.
@@ -539,7 +576,7 @@ impl HarmonicWindow {
     }
 
     fn rotation_hz(self, frequency: Dd) -> Result<[Dd; 2], WindowError> {
-        let a = phase_cycles(frequency, Dd::from_f64(self.start_s), 1.0)?;
+        let a = phase_cycles(frequency, self.start_s, 1.0)?;
         let b = phase_cycles(frequency, Dd::from_f64(self.duration_s), 2.0)?;
         Ok([
             checked(a[0] * b[0] - a[1] * b[1])?,
@@ -557,7 +594,7 @@ impl HarmonicWindow {
     }
 
     fn rotation(self, omega: Dd, half_width: Dd) -> Result<[Dd; 2], WindowError> {
-        let start = checked(omega * Dd::from_f64(self.start_s))?;
+        let start = checked(omega * self.start_s)?;
         // Preserve a short duration on a large clock and small cosine
         // decrements near cancellation through the full quadratic contraction.
         let (sr, si) = proper_phase(start);
@@ -936,6 +973,220 @@ mod tests {
             phase_rad_s_from_clock_dd(f64::MAX, Dd::from_f64(2.0)),
             Err(WindowError::Unrepresentable)
         ));
+    }
+
+    #[test]
+    fn g0_window_clock_normalizes_pairs_and_rejects_invalid_endpoints() {
+        let raw = Dd { hi: 1.0, lo: 0.75 };
+        let value = HarmonicWindow::from_clock_dd(raw, 0.25).unwrap();
+        assert_eq!(value.start_clock_dd(), Dd::from_f64(1.75));
+        assert_eq!(value.start_s(), 1.75);
+        assert_eq!(value.duration_s(), 0.25);
+        assert_eq!(value, HarmonicWindow::new(1.75, 0.25).unwrap());
+        for clock in [
+            Dd {
+                hi: f64::NAN,
+                lo: 0.0,
+            },
+            Dd {
+                hi: 0.0,
+                lo: f64::INFINITY,
+            },
+            Dd {
+                hi: f64::MAX,
+                lo: f64::MAX,
+            },
+        ] {
+            assert_eq!(
+                HarmonicWindow::from_clock_dd(clock, 0.25),
+                Err(WindowError::InvalidWindow)
+            );
+        }
+        for duration in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                HarmonicWindow::from_clock_dd(Dd::ONE, duration),
+                Err(WindowError::InvalidWindow)
+            );
+        }
+        assert_eq!(
+            HarmonicWindow::from_clock_dd(Dd::from_f64(f64::MAX), f64::MAX),
+            Err(WindowError::InvalidWindow)
+        );
+        // The epoch and shutter remain separate even when adding the duration
+        // would not advance either the rounded clock or its retained low part.
+        assert!(HarmonicWindow::from_clock_dd(Dd::from_pair(1e100, 1.0), 1e-100).is_ok());
+    }
+
+    #[test]
+    fn g1_dd_clock_preserves_fractional_cycles_for_actual_shutter_profiles() {
+        let epoch = Dd::from_pair(2.0_f64.powi(53), 0.125);
+        for profile in [
+            HarmonicWindowProfile::Uniform,
+            HarmonicWindowProfile::Triangular,
+        ] {
+            let window = HarmonicWindow::with_profile_from_clock_dd(epoch, 0.25, profile).unwrap();
+            let local = HarmonicWindow::with_profile(0.125, 0.25, profile).unwrap();
+            assert_eq!(window.start_clock_dd(), epoch);
+            assert_eq!(window.start_s(), 2.0_f64.powi(53));
+            let actual = window.mean_phase_hz(1.0).unwrap();
+            let expected = local.mean_phase_hz(1.0).unwrap();
+            close(actual.re, expected.re, 2e-30);
+            close(actual.im, expected.im, 2e-30);
+            let rounded = HarmonicWindow::with_profile(window.start_s(), 0.25, profile)
+                .unwrap()
+                .mean_phase_hz(1.0)
+                .unwrap();
+            assert!((actual.re - rounded.re).abs() > 0.6);
+            if profile == HarmonicWindowProfile::Uniform {
+                close(actual.re, 0.0, 2e-30);
+                close(
+                    actual.im,
+                    -2.0 * 2.0_f64.sqrt() / core::f64::consts::PI,
+                    3e-16,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g3_real_and_proper_hz_products_keep_original_dd_epoch() {
+        let epoch = Dd::from_pair(2.0_f64.powi(53), 0.125);
+        let a = [Dd::from_f64(0.3), Dd::from_f64(-0.7)];
+        let b = [Dd::from_f64(0.8), Dd::from_f64(0.2)];
+        for profile in [
+            HarmonicWindowProfile::Uniform,
+            HarmonicWindowProfile::Triangular,
+        ] {
+            let window = HarmonicWindow::with_profile_from_clock_dd(epoch, 0.07, profile).unwrap();
+            let local = HarmonicWindow::with_profile(0.125, 0.07, profile).unwrap();
+            let real = |w: HarmonicWindow| {
+                w.product_kernel_hz(1.0, 3.0)
+                    .unwrap()
+                    .mean_real_product_parts_dd(a, b)
+                    .unwrap()
+            };
+            let proper = |w: HarmonicWindow| {
+                w.proper_product_kernel_hz(1.0, 3.0)
+                    .unwrap()
+                    .mean_real_product_parts_dd(a, b)
+                    .unwrap()
+            };
+            close((real(window) - real(local)).to_f64(), 0.0, 2e-29);
+            close((proper(window) - proper(local)).to_f64(), 0.0, 2e-29);
+        }
+    }
+
+    #[test]
+    fn g3_native_radian_window_matches_original_field_phase_translation() {
+        let epoch = Dd::from_pair(2.0_f64.powi(40), 2.0_f64.powi(-18));
+        let a = [Dd::from_f64(0.3), Dd::from_f64(-0.7)];
+        let b = [Dd::from_f64(0.8), Dd::from_f64(0.2)];
+        let rotate = |value: [Dd; 2], omega| {
+            let p = phase_rad_s_from_clock_dd(omega, epoch).unwrap();
+            [
+                value[0] * p[0] - value[1] * p[1],
+                value[0] * p[1] + value[1] * p[0],
+            ]
+        };
+        let (a0, b0) = (rotate(a, 2.0), rotate(b, 3.0));
+        for profile in [
+            HarmonicWindowProfile::Uniform,
+            HarmonicWindowProfile::Triangular,
+        ] {
+            let window = HarmonicWindow::with_profile_from_clock_dd(epoch, 0.17, profile).unwrap();
+            let local = HarmonicWindow::with_profile(0.0, 0.17, profile).unwrap();
+            let actual = window
+                .product_kernel(2.0, 3.0)
+                .unwrap()
+                .mean_real_product_parts_dd(a, b)
+                .unwrap();
+            let expected = local
+                .product_kernel(2.0, 3.0)
+                .unwrap()
+                .mean_real_product_parts_dd(a0, b0)
+                .unwrap();
+            close((actual - expected).to_f64(), 0.0, 3e-28);
+            let actual = window
+                .proper_product_kernel(2.0, 3.0)
+                .unwrap()
+                .mean_real_product_parts_dd(a, b)
+                .unwrap();
+            let expected = local
+                .proper_product_kernel(2.0, 3.0)
+                .unwrap()
+                .mean_real_product_parts_dd(a0, b0)
+                .unwrap();
+            close((actual - expected).to_f64(), 0.0, 3e-28);
+        }
+    }
+
+    #[test]
+    fn g3_borrowed_and_owned_bands_preserve_dd_source_clock() {
+        let epoch = Dd::from_pair(2.0_f64.powi(53), 0.125);
+        let window = HarmonicWindow::from_clock_dd(epoch, 1e-3).unwrap();
+        let local = HarmonicWindow::new(0.125, 1e-3).unwrap();
+        let fields = [[1.0, 0.3], [-2.0, 0.7], [1.0, -0.2]].map(|a| a.map(Dd::from_f64));
+        let frequencies = [1.0, 2.0, 3.0];
+        let mut scratch = UniformHarmonicBandWorkspace::new();
+        let real = window
+            .prepare_uniform_real_band_hz_in(&frequencies, &mut scratch)
+            .unwrap()
+            .unwrap();
+        let actual = real.mean_square_parts_dd(&fields).unwrap();
+        let expected = local
+            .prepare_uniform_real_band_hz(&frequencies)
+            .unwrap()
+            .unwrap()
+            .mean_square_parts_dd(&fields)
+            .unwrap();
+        close((actual - expected).to_f64(), 0.0, 3e-28);
+        let proper = window
+            .prepare_uniform_band_hz_in(&frequencies, &mut scratch)
+            .unwrap()
+            .unwrap();
+        let actual = proper
+            .mean_square_parts_dd_scaled(&fields, Dd::from_f64(0.5))
+            .unwrap();
+        let expected = local
+            .prepare_uniform_band_hz(&frequencies)
+            .unwrap()
+            .unwrap()
+            .mean_square_parts_dd_scaled(&fields, Dd::from_f64(0.5))
+            .unwrap();
+        close((actual - expected).to_f64(), 0.0, 3e-28);
+    }
+
+    #[test]
+    fn g3_spectrum_mean_agrees_with_precise_interval_and_partitioned_observations() {
+        let source = PreparedHarmonicProductSpectrum::from_angular_terms(
+            [AngularHarmonicSpectrumTerm {
+                angular_frequency_rad_s: Dd::from_f64(0.7),
+                peak_amplitude: [Dd::from_f64(0.3), Dd::from_f64(-0.2)],
+            }],
+            HarmonicSpectrumTermLimits {
+                maximum_terms: 1,
+                maximum_workspace_bytes: 1024,
+            },
+        )
+        .unwrap();
+        let start = Dd::from_pair(2.0_f64.powi(53), 0.125);
+        let dt = 0.25;
+        let whole = source
+            .mean(HarmonicWindow::from_clock_dd(start, 2.0 * dt).unwrap())
+            .unwrap();
+        let first = source
+            .mean(HarmonicWindow::from_clock_dd(start, dt).unwrap())
+            .unwrap();
+        let second = source
+            .mean(HarmonicWindow::from_clock_dd(start + Dd::from_f64(dt), dt).unwrap())
+            .unwrap();
+        close(whole, 0.5 * (first + second), 3e-15);
+        let energy = source
+            .causal_integral_from_clock_dd(start, 2.0 * dt, 0.0)
+            .unwrap()
+            .integral_dd();
+        close(whole * 2.0 * dt, energy.to_f64(), 3e-15);
+        assert!((first - second).abs() > 1e-3);
     }
 
     // G1 independent integration of REAL signals, with platform trigonometry

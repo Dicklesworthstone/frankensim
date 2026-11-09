@@ -671,12 +671,20 @@ fn center_translated_fields_dd(
         }
         let (mut start, mut half_width) = (Dd::ZERO, Dd::ZERO);
         for (frequency, origin, extent, displacement) in [
-            (kx(i), x, width, translation[0]),
-            (ky(i), y, height, translation[1]),
-            (Dd::from_f64(-omega), window.start_s(), window.duration_s(), 0.0),
+            (kx(i), Dd::from_f64(x), width, translation[0]),
+            (ky(i), Dd::from_f64(y), height, translation[1]),
+            (
+                Dd::from_f64(-omega),
+                window.start_clock_dd(),
+                window.duration_s(),
+                0.0,
+            ),
         ] {
-            let origin = if displacement == 0.0 { Dd::from_f64(origin) }
-                else { Dd::from_f64(origin) + Dd::from_f64(displacement) };
+            let origin = if displacement == 0.0 {
+                origin
+            } else {
+                origin + Dd::from_f64(displacement)
+            };
             start = start + frequency * origin;
             // Halve the larger operand to retain representable products when
             // either the interval or frequency is subnormal.
