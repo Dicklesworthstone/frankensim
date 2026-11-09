@@ -14,6 +14,7 @@
 //! is neither a smoothing nor a classical derivative across that transition.
 
 use super::{NonsmoothTangentialError as E, poll};
+use crate::tangential::linearization::scaled_return_tangent;
 use fs_exec::CancelGate;
 use fs_solver::NonlinearProblem;
 use fs_tribo::partial_slip::{PartialSlipLaw, PartialSlipStep};
@@ -27,71 +28,8 @@ pub(super) fn impulse_tangent(
     ell: f64,
     dt: f64,
 ) -> Result<Block, E> {
-    let p = law.parameters();
-    let hard = p.partial_slip_hardening_fraction;
-    let fractions = [
-        p.partial_slip_onset_fraction * (1.0 - hard),
-        1.0 - p.partial_slip_onset_fraction * (1.0 - hard),
-    ];
-    let mut block = [[0.0; 3]; 3];
-    for (region, weight) in [1.0 - hard, hard].into_iter().enumerate() {
-        let stiffness = [
-            p.tangential_stiffness_n_per_m * weight,
-            p.tangential_stiffness_n_per_m * weight,
-            p.torsional_stiffness_nm_per_rad * weight,
-        ];
-        let plastic = step.region_plastic_increment[region];
-        let mut diagonal = stiffness;
-        let mut normal = [0.0; 3];
-        if plastic.iter().any(|&v| v != 0.0) {
-            let capacity = [
-                step.capacity.kinetic_force_n,
-                step.capacity.kinetic_force_n,
-                step.capacity.kinetic_torque_nm,
-            ]
-            .map(|v| v * fractions[region]);
-            let elastic = [
-                step.next_state.region_elastic_displacement_m()[region][0],
-                step.next_state.region_elastic_displacement_m()[region][1],
-                step.next_state.region_elastic_twist_rad()[region],
-            ];
-            let mut q = [0.0; 3];
-            let mut numerator = 0.0;
-            let mut denominator = 0.0;
-            for j in 0..3 {
-                q[j] = stiffness[j] * elastic[j] / capacity[j];
-                numerator += q[j] * (plastic[j] * capacity[j]);
-                denominator += q[j] * q[j];
-            }
-            let lambda = numerator / denominator;
-            if !lambda.is_finite() || lambda < 0.0 {
-                return Err(E::Invalid("unrepresentable regional return multiplier"));
-            }
-            for j in 0..3 {
-                diagonal[j] =
-                    stiffness[j] / (1.0 + (lambda / capacity[j]) * (stiffness[j] / capacity[j]));
-                normal[j] = diagonal[j].sqrt() * q[j] / capacity[j];
-            }
-            let norm = normal[0].hypot(normal[1]).hypot(normal[2]);
-            if !norm.is_finite() || norm <= 0.0 {
-                return Err(E::Invalid("unrepresentable regional return tangent"));
-            }
-            normal = normal.map(|v| v / norm);
-        }
-        // Scale square roots, rather than forming dt^2 or ell^2 separately.
-        let scales = [dt, dt, dt / ell];
-        let root: [f64; 3] = std::array::from_fn(|j| scales[j] * diagonal[j].sqrt());
-        for i in 0..3 {
-            for j in 0..3 {
-                let identity = if i == j { 1.0 } else { 0.0 };
-                block[i][j] += root[i] * root[j] * (identity - normal[i] * normal[j]);
-            }
-        }
-    }
-    if block.iter().flatten().any(|v| !v.is_finite()) {
-        return Err(E::Invalid("unrepresentable contact impulse tangent"));
-    }
-    Ok(block)
+    let scales = [dt, dt, dt / ell];
+    scaled_return_tangent(law, step, scales, scales).map_err(E::Invalid)
 }
 
 struct Linearization {

@@ -771,6 +771,20 @@ its physical wrench. Common material-frame spin passes through unchanged;
 the relative-slip regularization must not damp this rigid transport. Prepare,
 rollback and restart preserve the same frame/history transaction.
 
+The smooth fixed-branch tangent uses one original constitutive response and
+the same analytic regional return stiffness as the nonsmooth solver. Its full
+chain rule retains shear/spin coupling and the radial creepage derivative.
+The existing probe scales declare a local tangent-creepage ball and spin
+interval; they no longer select finite-difference stencils. A conservative
+1-Lipschitz screen checks each region's yield and static/kinetic reloading
+decision throughout that neighborhood. An unresolved boundary refuses even
+when the aggregate state label is unchanged. These are floating-point local
+screens, not interval differentiability certificates. Small-slip evaluation
+retains the cubic regularization response without subtractive cancellation.
+G1/G3 regressions compare all nine derivatives in elastic, partial-slip and
+gross-slide states, retained frame/spin transport and reversal, tiny-radius
+invariance, the subscale limit and stationary kinetic-boundary refusal.
+
 ## Invariants
 
 - Broad-phase candidacy is conservative over the query window: a pair

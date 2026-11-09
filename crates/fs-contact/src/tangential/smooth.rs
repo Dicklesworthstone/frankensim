@@ -5,9 +5,10 @@
 //! [`fs_tribo::partial_slip`]; it neither reimplements nor promotes that law.
 //! The regularization is a declared, bounded kinematic preprocessing map.  It
 //! is C-infinity but does **not** remove the constituent law's branch events,
-//! so derivatives are available only when all finite-difference probes retain
-//! one explicitly reported branch.
+//! so classical derivatives are supplied only when both original regions stay
+//! inside one branch throughout the declared local kinematic neighborhood.
 
+use super::linearization::{Block, scaled_return_tangent};
 use core::fmt;
 
 use fs_tribo::partial_slip::{
@@ -54,7 +55,7 @@ impl SmoothAuthorityPolicy {
     }
 }
 
-/// Units-explicit smoothing and derivative-probe controls.
+/// Units-explicit smoothing and local derivative-admission controls.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SmoothRegularization {
     /// Positive dimensionless deadzone scale for the tangent-plane
@@ -67,9 +68,13 @@ pub struct SmoothRegularization {
     pub creepage_scale: f64,
     /// Positive scale for relative torsional spin, in rad/s.
     pub torsional_spin_scale_rad_per_s: f64,
-    /// Positive central-difference creepage probe, dimensionless.
+    /// Positive radius of the tangent-creepage neighborhood, dimensionless.
+    /// The analytic derivative is independent of this radius; a neighborhood
+    /// reaching a regional yield or reloading boundary refuses. No finite
+    /// difference or additional constitutive evaluation uses this value.
     pub tangent_probe_creepage: f64,
-    /// Positive central-difference spin probe, in rad/s.
+    /// Positive radius of the torsional-spin neighborhood, in rad/s.
+    /// Admitted simultaneously with the tangent-creepage ball above.
     pub tangent_probe_spin_rad_per_s: f64,
 }
 
@@ -303,12 +308,18 @@ impl SmoothTangentialAdapter {
         })
     }
 
-    /// Returns a central finite-difference tangent only within one law branch,
-    /// holding the contact frame and physical common spin fixed.
+    /// Return the analytic interior tangent, with frame and common spin fixed.
     ///
-    /// This deliberately refuses if the base or either probe has a different
-    /// [`PartialSlipStateKind`].  It is a local numerical derivative, not a
-    /// global differentiability claim across stick/slip events.
+    /// One original constitutive update supplies both regions' exact elastic /
+    /// return-map stiffness. The chain rule includes the complete radial
+    /// creepage and scalar-spin smoothing derivatives. No perturbed history is
+    /// evaluated, and vanishing finite-difference stencils cannot erase stiffness.
+    ///
+    /// Each region's trial utilization and kinetic-reloading decision must stay
+    /// on its original branch throughout the declared neighborhood. The
+    /// smoothing maps are 1-Lipschitz, which supplies a conservative local
+    /// screen without inferring smoothness from the aggregate stick/slip label.
+    /// This floating-point screen is not an interval differentiability proof.
     #[allow(clippy::too_many_arguments)]
     pub fn fixed_branch_tangent(
         &self,
@@ -319,28 +330,26 @@ impl SmoothTangentialAdapter {
         query: &SmoothTangentialQuery,
     ) -> Result<FixedBranchTangent, SmoothTangentialError> {
         let base = self.prepare_preview(law, patch, interface, state, query)?;
+        // At zero reference speed, nonzero creepage is outside the original
+        // law's domain; there is no open three-coordinate derivative domain.
+        positive(query.kinematics.rolling_speed_mps, "tangent rolling speed")?;
+        self.admit_derivative_neighborhood(law, state, &base)?;
+        let dt = query.kinematics.dt_s;
+        let translation_scale = dt * query.kinematics.rolling_speed_mps;
+        let stiffness = scaled_return_tangent(
+            law,
+            &base.partial_slip_step,
+            [1.0; 3],
+            [translation_scale, translation_scale, dt],
+        )
+        .map_err(|field| SmoothTangentialError::InvalidDerived { field })?;
+        let smoothing = self.smoothing_derivative(query.kinematics)?;
         let mut derivative = [[0.0; 3]; 3];
-        for column in 0..3 {
-            let step = if column < 2 {
-                self.regularization.tangent_probe_creepage
-            } else {
-                self.regularization.tangent_probe_spin_rad_per_s
-            };
-            let positive =
-                self.preview_perturbed(law, patch, interface, state, query, column, step)?;
-            let negative =
-                self.preview_perturbed(law, patch, interface, state, query, column, -step)?;
-            if positive.branch != base.branch || negative.branch != base.branch {
-                return Err(SmoothTangentialError::NoDerivativeOnBranchChange {
-                    base: base.branch,
-                    positive: positive.branch,
-                    negative: negative.branch,
-                });
-            }
-            let plus = positive.residual.components();
-            let minus = negative.residual.components();
-            for row in 0..3 {
-                derivative[row][column] = (plus[row] - minus[row]) / (2.0 * step);
+        for row in 0..3 {
+            for column in 0..3 {
+                for k in 0..3 {
+                    derivative[row][column] -= stiffness[row][k] * smoothing[k][column];
+                }
                 finite(derivative[row][column], "fixed_branch_tangent")?;
             }
         }
@@ -354,6 +363,122 @@ impl SmoothTangentialAdapter {
             ],
             output_units: ["N", "N", "N m"],
         })
+    }
+
+    fn admit_derivative_neighborhood(
+        &self,
+        law: &PartialSlipLaw,
+        state: &SmoothTangentialState,
+        base: &SmoothTangentialReceipt,
+    ) -> Result<(), SmoothTangentialError> {
+        let p = law.parameters();
+        let step = &base.partial_slip_step;
+        let kinematics = base.regularized_kinematics;
+        let increment = [
+            kinematics.creepage[0] * kinematics.rolling_speed_mps * kinematics.dt_s,
+            kinematics.creepage[1] * kinematics.rolling_speed_mps * kinematics.dt_s,
+            kinematics.torsional_spin_rad_per_s * kinematics.dt_s,
+        ];
+        let tangent_radius = self.regularization.tangent_probe_creepage
+            * kinematics.rolling_speed_mps
+            * kinematics.dt_s;
+        let spin_radius = self.regularization.tangent_probe_spin_rad_per_s * kinematics.dt_s;
+        let hard = p.partial_slip_hardening_fraction;
+        let weak_capacity = p.partial_slip_onset_fraction * (1.0 - hard);
+        for (region, weight) in [1.0 - hard, hard].into_iter().enumerate() {
+            let stiffness = [
+                p.tangential_stiffness_n_per_m * weight,
+                p.tangential_stiffness_n_per_m * weight,
+                p.torsional_stiffness_nm_per_rad * weight,
+            ];
+            let capacity = [
+                step.capacity.static_force_n,
+                step.capacity.static_force_n,
+                step.capacity.static_torque_nm,
+            ]
+            .map(|c| c * [weak_capacity, 1.0 - weak_capacity][region]);
+            let elastic = [
+                step.next_state.region_elastic_displacement_m()[region][0],
+                step.next_state.region_elastic_displacement_m()[region][1],
+                step.next_state.region_elastic_twist_rad()[region],
+            ];
+            let trial: [f64; 3] =
+                std::array::from_fn(|j| elastic[j] + step.region_plastic_increment[region][j]);
+            let q: [f64; 3] = std::array::from_fn(|j| stiffness[j] * trial[j] / capacity[j]);
+            let norm = q[0].hypot(q[1]).hypot(q[2]);
+            let radius = (stiffness[0] / capacity[0] * tangent_radius)
+                .hypot(stiffness[2] / capacity[2] * spin_radius);
+            let mut lower = 1.0;
+            let mut upper = 1.0;
+            if state.checkpoint.law_checkpoint.state().sliding_regions()[region]
+                && p.static_mu != p.kinetic_mu
+            {
+                // Recover the already transported old strain from the actual
+                // original return, without duplicating its frame transport.
+                let old_effort: [f64; 3] =
+                    std::array::from_fn(|j| stiffness[j] * (trial[j] - increment[j]));
+                let terms: [f64; 3] = std::array::from_fn(|j| old_effort[j] * increment[j]);
+                let loading: f64 = terms.iter().sum();
+                let loading_radius = old_effort[0].hypot(old_effort[1]) * tangent_radius
+                    + old_effort[2].abs() * spin_radius
+                    + 256.0 * f64::EPSILON * terms.iter().map(|v| v.abs()).sum::<f64>();
+                finite(loading, "regional loading work")?;
+                finite(loading_radius, "regional loading neighborhood")?;
+                let ratio = p.kinetic_mu / p.static_mu;
+                if loading > loading_radius {
+                    lower = ratio;
+                    upper = ratio;
+                } else if loading >= -loading_radius {
+                    // Both static reload and kinetic continuation are possible.
+                    // Admit only if they select the same regional return.
+                    lower = ratio;
+                }
+            }
+            finite(norm, "regional trial utilization")?;
+            finite(radius, "regional derivative neighborhood")?;
+            let roundoff = 256.0 * f64::EPSILON * norm.max(upper);
+            let yielding = step.region_plastic_increment[region]
+                .iter()
+                .any(|&v| v != 0.0);
+            let inside = if yielding {
+                norm - radius > upper + roundoff
+            } else {
+                norm + radius < lower - roundoff
+            };
+            if !inside {
+                return Err(SmoothTangentialError::NoDerivativeOnBranchChange {
+                    region,
+                    branch: base.branch,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn smoothing_derivative(
+        &self,
+        k: PartialSlipKinematics,
+    ) -> Result<Block, SmoothTangentialError> {
+        let magnitude = k.creepage[0].hypot(k.creepage[1]);
+        finite(magnitude, "creepage magnitude")?;
+        let mut result = [[0.0; 3]; 3];
+        if magnitude > 0.0 {
+            let unit = k.creepage.map(|v| v / magnitude);
+            let ratio = magnitude / self.regularization.creepage_scale;
+            let radial = ratio.tanh().powi(2);
+            let transverse = regularized_ratio(ratio);
+            for i in 0..2 {
+                for j in 0..2 {
+                    result[i][j] = (radial - transverse) * unit[i] * unit[j];
+                }
+                result[i][i] += transverse;
+            }
+        }
+        result[2][2] = (k.torsional_spin_rad_per_s
+            / self.regularization.torsional_spin_scale_rad_per_s)
+            .tanh()
+            .powi(2);
+        Ok(result)
     }
 
     /// Commits a prepared receipt exactly once, producing an immutable new state.
@@ -498,30 +623,6 @@ impl SmoothTangentialAdapter {
         })
     }
 
-    fn preview_perturbed(
-        &self,
-        law: &PartialSlipLaw,
-        patch: &NormalPatchView,
-        interface: &PartialSlipInterface,
-        state: &SmoothTangentialState,
-        query: &SmoothTangentialQuery,
-        coordinate: usize,
-        delta: f64,
-    ) -> Result<SmoothTangentialReceipt, SmoothTangentialError> {
-        let mut perturbed = query.clone();
-        match coordinate {
-            0 => perturbed.kinematics.creepage[0] += delta,
-            1 => perturbed.kinematics.creepage[1] += delta,
-            2 => perturbed.kinematics.torsional_spin_rad_per_s += delta,
-            _ => {
-                return Err(SmoothTangentialError::InvalidInput {
-                    field: "tangent coordinate",
-                });
-            }
-        }
-        self.prepare_preview(law, patch, interface, state, &perturbed)
-    }
-
     fn regularize_kinematics(
         &self,
         mut kinematics: PartialSlipKinematics,
@@ -531,9 +632,9 @@ impl SmoothTangentialAdapter {
         // not rotation covariant, so it would make the world-frame
         // receipt depend on the caller's tangent-frame choice.
         let magnitude = kinematics.creepage[0].hypot(kinematics.creepage[1]);
-        let regular_magnitude = regularize(magnitude, self.regularization.creepage_scale)?;
+        finite(magnitude, "creepage magnitude")?;
         if magnitude > 0.0 {
-            let factor = regular_magnitude / magnitude;
+            let factor = regularized_ratio(magnitude / self.regularization.creepage_scale);
             kinematics.creepage[0] *= factor;
             kinematics.creepage[1] *= factor;
         }
@@ -674,20 +775,11 @@ pub struct SmoothResidual {
     pub energy_closure_residual_j: f64,
 }
 
-impl SmoothResidual {
-    fn components(self) -> [f64; 3] {
-        [
-            self.tangent_force_n[0],
-            self.tangent_force_n[1],
-            self.torsional_moment_nm,
-        ]
-    }
-}
-
-/// Fixed-branch numerical tangent of [`SmoothResidual`] components.
+/// Analytic fixed-branch tangent of [`SmoothResidual`] components.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FixedBranchTangent {
-    /// Branch shared by the base and all six probes.
+    /// Aggregate branch at the original response; both regional branches have
+    /// passed the declared neighborhood screen independently.
     pub branch: PartialSlipStateKind,
     /// Rows `(F_long, F_lat, M_normal)` versus columns `(creep_long, creep_lat, spin)`.
     pub derivative: [[f64; 3]; 3],
@@ -795,14 +887,13 @@ pub enum SmoothTangentialError {
     DuplicateWorkKey,
     /// The explicit bounded exactly-once ledger cannot accept another key.
     WorkKeyCapacityExceeded { max: usize },
-    /// Central probes crossed a constitutive branch, so no derivative is supplied.
+    /// A regional yield/reloading boundary intersects the declared derivative
+    /// neighborhood, or its separation is unresolved in floating arithmetic.
     NoDerivativeOnBranchChange {
-        /// Branch at the unperturbed point.
-        base: PartialSlipStateKind,
-        /// Branch at the positive probe.
-        positive: PartialSlipStateKind,
-        /// Branch at the negative probe.
-        negative: PartialSlipStateKind,
+        /// Weaker region is 0; harder region is 1.
+        region: usize,
+        /// Aggregate branch at the unperturbed point.
+        branch: PartialSlipStateKind,
     },
     /// A candidate was forged or based on a different same-version state.
     ReceiptDoesNotMatchState,
@@ -873,9 +964,28 @@ impl From<PartialSlipError> for SmoothTangentialError {
 fn regularize(value: f64, scale: f64) -> Result<f64, SmoothTangentialError> {
     finite(value, "kinematics")?;
     positive(scale, "regularization scale")?;
-    let output = value - scale * (value / scale).tanh();
+    let ratio = value / scale;
+    let output = if ratio.abs() < 0.01 {
+        value * regularized_ratio(ratio)
+    } else {
+        value - scale * ratio.tanh()
+    };
     finite(output, "regularized kinematics")?;
     Ok(output)
+}
+
+// 1 - tanh(x)/x. Near zero, direct subtraction destroys the cubic slip
+// response and its transverse derivative. The omitted x^10 term is below
+// 3e-18 relative for |x| < .01. The even limit at zero is exactly zero.
+fn regularized_ratio(ratio: f64) -> f64 {
+    if ratio.abs() < 0.01 {
+        let square = ratio * ratio;
+        square
+            * (1.0 / 3.0
+                + square * (-2.0 / 15.0 + square * (17.0 / 315.0 - square * (62.0 / 2835.0))))
+    } else {
+        1.0 - ratio.tanh() / ratio
+    }
 }
 
 fn neg3(value: [f64; 3]) -> [f64; 3] {

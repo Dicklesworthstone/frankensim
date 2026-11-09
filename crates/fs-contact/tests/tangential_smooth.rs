@@ -268,6 +268,197 @@ fn fixed_branch_tangent_agrees_with_independent_centered_difference() {
 }
 
 #[test]
+fn analytic_tangent_resolves_all_shear_spin_entries_and_retained_history() {
+    let adapter = adapter(0.1);
+    let law = law();
+    let patch = patch(NormalPatchAuthority::SyntheticFixture);
+    let interface = interface(NormalPatchAuthority::SyntheticFixture);
+    let initial = state(&adapter);
+    let check = |state: &fs_contact::tangential::smooth::SmoothTangentialState,
+                 query: &SmoothTangentialQuery,
+                 expected: PartialSlipStateKind| {
+        let tangent = adapter
+            .fixed_branch_tangent(&law, &patch, &interface, state, query)
+            .unwrap();
+        assert_eq!(tangent.branch, expected);
+        for column in 0..3 {
+            let h = 1e-5;
+            let evaluate = |sign: f64| {
+                let mut perturbed = query.clone();
+                if column < 2 {
+                    perturbed.kinematics.creepage[column] += sign * h;
+                } else {
+                    perturbed.kinematics.torsional_spin_rad_per_s += sign * h;
+                }
+                let response = adapter
+                    .prepare(&law, &patch, &interface, state, &perturbed)
+                    .unwrap();
+                assert_eq!(response.branch, expected);
+                [
+                    response.residual.tangent_force_n[0],
+                    response.residual.tangent_force_n[1],
+                    response.residual.torsional_moment_nm,
+                ]
+            };
+            let plus = evaluate(1.0);
+            let minus = evaluate(-1.0);
+            for row in 0..3 {
+                let reference = (plus[row] - minus[row]) / (2.0 * h);
+                let actual = tangent.derivative[row][column];
+                assert!(
+                    (actual - reference).abs() < 2e-6 * reference.abs().max(1.0),
+                    "{expected:?} [{row},{column}]: analytic {actual}, difference {reference}"
+                );
+            }
+        }
+    };
+    for (creepage, spin, branch) in [
+        ([0.2, 0.1], 0.4, PartialSlipStateKind::Sticking),
+        ([0.8, -0.35], 1.2, PartialSlipStateKind::PartialSlip),
+        ([2.4, 0.7], 6.0, PartialSlipStateKind::GrossSlide),
+    ] {
+        check(&initial, &query(0, "interior", creepage, spin), branch);
+    }
+    let loaded = adapter
+        .prepare(
+            &law,
+            &patch,
+            &interface,
+            &initial,
+            &query(0, "loaded", [0.8, -0.35], 1.2),
+        )
+        .unwrap();
+    let retained = adapter.commit(&initial, &loaded).unwrap();
+    let mut continuation = query(1, "continuation", [0.2, -0.1], 0.5);
+    continuation.frame = frame().rotated(0.3).unwrap();
+    continuation.kinematics.contact_spin_rad_per_s = 11.0;
+    check(&retained, &continuation, PartialSlipStateKind::PartialSlip);
+    let reversed = query(1, "reversal", [-0.2, 0.1], -0.3);
+    check(&retained, &reversed, PartialSlipStateKind::Sticking);
+}
+
+#[test]
+fn analytic_tangent_is_independent_of_tiny_admitted_neighborhoods() {
+    let mut first = None;
+    for radius in [1e-5, 1e-12, 1e-100] {
+        let adapter = SmoothTangentialAdapter::new(
+            "smooth-adapter-v1",
+            "fixture/smooth-config",
+            SmoothRegularization {
+                creepage_scale: 1e-4,
+                torsional_spin_scale_rad_per_s: 1e-4,
+                tangent_probe_creepage: radius,
+                tangent_probe_spin_rad_per_s: radius,
+            },
+            SmoothAuthorityPolicy::test_only(),
+        )
+        .unwrap();
+        let state = state(&adapter);
+        let tangent = adapter
+            .fixed_branch_tangent(
+                &law(),
+                &patch(NormalPatchAuthority::SyntheticFixture),
+                &interface(NormalPatchAuthority::SyntheticFixture),
+                &state,
+                &query(0, "independent", [0.1, 0.02], 0.01),
+            )
+            .unwrap();
+        assert!(tangent.derivative[0][0] < -99.0);
+        assert!(tangent.derivative[2][2] < -0.099);
+        if let Some(reference) = &first {
+            assert_eq!(
+                &tangent, reference,
+                "the radius must not alter the derivative"
+            );
+        } else {
+            first = Some(tangent);
+        }
+    }
+}
+
+#[test]
+fn subscale_slip_retains_cubic_response_and_analytic_derivative() {
+    let adapter = adapter(1e-3);
+    let initial = state(&adapter);
+    let small = query(0, "subscale", [1e-11, 0.0], 2e-11);
+    let law = law();
+    let patch = patch(NormalPatchAuthority::SyntheticFixture);
+    let interface = interface(NormalPatchAuthority::SyntheticFixture);
+    let response = adapter
+        .prepare(&law, &patch, &interface, &initial, &small)
+        .unwrap();
+    let tangent = adapter
+        .fixed_branch_tangent(&law, &patch, &interface, &initial, &small)
+        .unwrap();
+    // x-e*tanh(x/e) = x^3/(3e^2) + O(x^5/e^4). Direct subtraction
+    // used to round this physically nonzero regularized slip to zero.
+    let shear = -100.0 * 1e-33 / (3.0 * 1e-6);
+    let torque = -0.1 * 8e-33 / (3.0 * 1e-6);
+    assert!((response.residual.tangent_force_n[0] / shear - 1.0).abs() < 2e-14);
+    assert!((response.residual.torsional_moment_nm / torque - 1.0).abs() < 2e-14);
+    for (actual, expected) in [
+        (tangent.derivative[0][0], -1e-14),
+        (tangent.derivative[1][1], -1e-14 / 3.0),
+        (tangent.derivative[2][2], -4e-17),
+    ] {
+        assert!(
+            (actual / expected - 1.0).abs() < 2e-14,
+            "analytic small-slip derivative {actual}, expected {expected}"
+        );
+    }
+    let origin = adapter
+        .fixed_branch_tangent(
+            &law,
+            &patch,
+            &interface,
+            &initial,
+            &query(0, "zero-slip", [0.0; 2], 0.0),
+        )
+        .unwrap();
+    assert_eq!(origin.derivative, [[0.0; 3]; 3]);
+}
+
+#[test]
+fn kinetic_pause_boundary_refuses_even_when_old_probes_would_round_away() {
+    let adapter = SmoothTangentialAdapter::new(
+        "smooth-adapter-v1",
+        "fixture/smooth-config",
+        SmoothRegularization {
+            creepage_scale: 1e-4,
+            torsional_spin_scale_rad_per_s: 1e-4,
+            tangent_probe_creepage: 1e-100,
+            tangent_probe_spin_rad_per_s: 1e-100,
+        },
+        SmoothAuthorityPolicy::test_only(),
+    )
+    .unwrap();
+    let initial = state(&adapter);
+    let law = law();
+    let patch = patch(NormalPatchAuthority::SyntheticFixture);
+    let interface = interface(NormalPatchAuthority::SyntheticFixture);
+    let loaded = adapter
+        .prepare(
+            &law,
+            &patch,
+            &interface,
+            &initial,
+            &query(0, "load", [0.8, 0.0], 0.0),
+        )
+        .unwrap();
+    let retained = adapter.commit(&initial, &loaded).unwrap();
+    let paused = query(1, "pause", [0.0; 2], 0.0);
+    let response = adapter
+        .prepare(&law, &patch, &interface, &retained, &paused)
+        .unwrap();
+    assert_eq!(response.branch, PartialSlipStateKind::Sticking);
+    assert!(matches!(
+        adapter.fixed_branch_tangent(&law, &patch, &interface, &retained, &paused),
+        Err(SmoothTangentialError::NoDerivativeOnBranchChange { region: 0, .. })
+    ));
+    assert_eq!(adapter.rollback(&response).unwrap(), retained);
+}
+
+#[test]
 fn regularization_refines_toward_the_delegated_law() {
     let coarse = adapter(0.1);
     let fine = adapter(1.0e-4);
