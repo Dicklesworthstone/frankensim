@@ -10,6 +10,7 @@
 
 use super::{C64, Dd, Drive, Field, Slab, finite};
 
+#[path = "layers/supported.rs"]
 pub(crate) mod supported;
 
 #[derive(Clone, Copy, Debug)]
