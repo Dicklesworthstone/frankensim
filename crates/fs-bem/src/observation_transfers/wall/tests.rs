@@ -924,3 +924,324 @@ fn transmitting_treatment_reaches_dense_and_iterative_receiver_fields() {
         assert!((actual - expected).abs() < 1e-8 * expected.abs());
     }
 }
+
+fn relaxing_wall_source(time_scale: f64, active: bool) -> fs_material::relaxation::RelaxationState {
+    use fs_material::gas::{GasSpec, GasState};
+    use fs_material::relaxation::{RelaxingMedium, input::read_relaxation};
+    // A manufactured molecular reservoir, not a measured-air fit. Its original
+    // source parser retains the species, temperature range and collision law.
+    let input = if active {
+        format!(
+            "declared 1 synthetic 1 vibration 1 900 1 power {} 293.15 0 200 500",
+            101_325.0 * 0.001 * time_scale,
+        )
+    } else {
+        "declared 1 synthetic 0".into()
+    };
+    let law = read_relaxation(&mut input.split_ascii_whitespace()).unwrap();
+    let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
+    let medium = RelaxingMedium::new(gas, vec![(law.species()[0].species.clone(), 1.0)]).unwrap();
+    law.evaluate(&medium).unwrap()
+}
+
+fn molecular_wall_state(
+    source: &fs_material::relaxation::RelaxationState,
+) -> (Medium, ThermoviscousFluidState) {
+    use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
+    let fluid = source.gas().thermoviscous_state().unwrap();
+    (
+        Medium {
+            density: source.gas().density,
+            sound_speed: source.gas().sound_speed,
+        },
+        fluid,
+    )
+}
+
+#[test]
+fn molecular_layer_walls_keep_original_refraction_heat_and_transmitted_power() {
+    let source = relaxing_wall_source(1.0, true);
+    let (medium, fluid) = molecular_wall_state(&source);
+    let receiving = FluidAcousticState::try_new(1.6, 300.0).unwrap();
+    let porous = porous_law();
+    let wall = LocalWall::LayeredTransmitting {
+        fluid,
+        receiving_fluid: receiving,
+        layers: vec![
+            LocalWallLayer::RelaxingFluid {
+                relaxation: source.clone(),
+                thickness_m: 0.03,
+            },
+            LocalWallLayer::RelaxingPorous {
+                law: porous.clone(),
+                relaxation: source.clone(),
+                thickness_m: 0.025,
+            },
+        ],
+    };
+    let boundary =
+        LocalBoundary::try_new(medium, vec![LocalWall::Rigid, wall.clone()], vec![1, 0, 1])
+            .unwrap();
+    let LocalWall::LayeredTransmitting { layers, .. } = &wall else {
+        unreachable!()
+    };
+    let rigid_backed = LocalBoundary::try_new(
+        medium,
+        vec![LocalWall::LayeredRigid {
+            fluid,
+            layers: layers.clone(),
+        }],
+        vec![0],
+    )
+    .unwrap();
+    assert_eq!(
+        boundary.supported_band_hz(),
+        porous.reference_card().valid_hz
+    );
+    for frequency in [200.0, 700.0, 1500.0] {
+        let omega = TAU * frequency;
+        let sources = [
+            Layer::RelaxingFluid {
+                relaxation: &source,
+                thickness_m: 0.03,
+            },
+            Layer::RelaxingPorous {
+                law: &porous,
+                relaxation: &source,
+                thickness_m: 0.025,
+            },
+        ];
+        let original_rigid = RigidBackedLayers::new(&fluid, omega, &sources).unwrap();
+        let native_rigid = PorousLayersBoundary::new(&original_rigid).unwrap();
+        assert_eq!(
+            rigid_backed.normalized_admittance(omega, || false).unwrap()[0],
+            native_rigid.normalized_admittance().unwrap()
+        );
+        assert_eq!(
+            rigid_backed.pressure_reflection(omega, || false).unwrap()[0],
+            native_rigid.pressure_reflection()
+        );
+        let original = TransmittingLayers::new(&fluid, &receiving, omega, &sources).unwrap();
+        let native = PorousTransmittingBoundary::new(&original).unwrap();
+        let beta = boundary.normalized_admittance(omega, || false).unwrap();
+        assert_eq!(
+            beta,
+            vec![
+                native.normalized_admittance(),
+                C64::ZERO,
+                native.normalized_admittance()
+            ]
+        );
+        let reflection = original.scattering(1.0).unwrap().pressure_reflection.conj();
+        assert_eq!(
+            boundary.pressure_reflection(omega, || false).unwrap(),
+            vec![reflection, C64::ONE, reflection]
+        );
+        let native_power = original
+            .normal_surface_power(
+                fs_material::porous::layers::LayerAbsorptionBudget { max_layers: 2 },
+                || false,
+            )
+            .unwrap();
+        let (power, count) = boundary.power_coefficients(omega, 2, || false).unwrap();
+        assert_eq!(count, 2); // Original layers per distinct law, not per panel.
+        assert_eq!(
+            power[0].irreversible_conductance,
+            native_power.absorbed_conductance
+        );
+        assert_eq!(
+            power[0].transmitted_conductance,
+            native_power.transmitted_conductance
+        );
+        assert!(power[0].irreversible_conductance > 0.0);
+        assert!(power[0].transmitted_conductance > 0.0);
+        assert!(
+            (beta[0].re - power[0].irreversible_conductance - power[0].transmitted_conductance)
+                .abs()
+                < 3e-13
+        );
+    }
+    assert!(
+        boundary
+            .normalized_admittance(TAU * 100.0, || false)
+            .is_err()
+    );
+    assert!(
+        boundary
+            .power_coefficients(TAU * 700.0, 1, || false)
+            .is_err()
+    );
+    assert!(matches!(
+        boundary.power_coefficients(TAU * 700.0, 2, || true),
+        Err(TransferError::Cancelled)
+    ));
+    let mut mismatched = wall;
+    // An equilibrium tuple from an unrelated fluid cannot replace this source.
+    let gas = *source.gas();
+    let other = fs_material::gas::GasState::try_new(
+        &fs_material::gas::GasSpec::dry_air_ussa1976(),
+        gas.temperature + 1.0,
+        gas.pressure,
+    )
+    .unwrap();
+    let LocalWall::LayeredTransmitting { fluid, .. } = &mut mismatched else {
+        unreachable!()
+    };
+    use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
+    *fluid = other.thermoviscous_state().unwrap();
+    let other_medium = Medium {
+        density: other.density,
+        sound_speed: other.sound_speed,
+    };
+    assert!(LocalBoundary::try_new(other_medium, vec![mismatched], vec![0]).is_err());
+}
+
+#[test]
+fn molecular_wall_matches_independent_slab_and_preserves_reservoir_identity() {
+    let source = relaxing_wall_source(1.0, true);
+    let changed = relaxing_wall_source(4.0, true);
+    let absent = relaxing_wall_source(1.0, false);
+    let (medium, fluid) = molecular_wall_state(&source);
+    let thickness = 0.04;
+    let bind = |source: &fs_material::relaxation::RelaxationState| {
+        LocalBoundary::try_new(
+            medium,
+            vec![LocalWall::LayeredTransmitting {
+                fluid,
+                receiving_fluid: fluid.acoustic(),
+                layers: vec![LocalWallLayer::RelaxingFluid {
+                    relaxation: source.clone(),
+                    thickness_m: thickness,
+                }],
+            }],
+            vec![0],
+        )
+        .unwrap()
+    };
+    let boundary = bind(&source);
+    let changed_boundary = bind(&changed);
+    let absent_boundary = bind(&absent);
+    assert_eq!(source.gas(), changed.gas());
+    assert_ne!(boundary.content_hash(), changed_boundary.content_hash());
+    assert_ne!(boundary.content_hash(), absent_boundary.content_hash());
+    assert_eq!(boundary.content_hash(), bind(&source).content_hash());
+    for frequency in [200.0, 700.0, 1500.0] {
+        let omega = TAU * frequency;
+        let bulk = source
+            .caloric_response(omega)
+            .unwrap()
+            .bulk_modulus_pa
+            .conj();
+        let k = (C64::from_re(medium.density) / bulk).sqrt().scale(omega);
+        let impedance = C64::from_re(omega * medium.density) / k;
+        let phase = k.scale(thickness);
+        let sin = C64::new(
+            phase.re.sin() * phase.im.cosh(),
+            phase.re.cos() * phase.im.sinh(),
+        );
+        let cos = C64::new(
+            phase.re.cos() * phase.im.cosh(),
+            -phase.re.sin() * phase.im.sinh(),
+        );
+        let i_sin = C64::new(-sin.im, sin.re);
+        let ratio = impedance.scale(1.0 / (medium.density * medium.sound_speed));
+        let p = cos + i_sin * ratio;
+        let v = cos + i_sin / ratio;
+        let expected = ((p - v) / (p + v)).conj();
+        let actual = boundary.pressure_reflection(omega, || false).unwrap()[0];
+        assert!((actual - expected).abs() < 3e-14);
+        assert!(
+            (actual
+                - changed_boundary
+                    .pressure_reflection(omega, || false)
+                    .unwrap()[0])
+                .abs()
+                > 1e-5
+        );
+        assert_eq!(
+            absent_boundary
+                .pressure_reflection(omega, || false)
+                .unwrap()[0],
+            C64::ZERO
+        );
+        let (lossless, _) = absent_boundary
+            .power_coefficients(omega, 1, || false)
+            .unwrap();
+        assert_eq!(lossless[0].irreversible_conductance, 0.0);
+    }
+}
+
+#[test]
+fn molecular_layers_reach_dense_and_iterative_native_microphone_fields() {
+    let source_material = relaxing_wall_source(1.0, true);
+    let (medium, fluid) = molecular_wall_state(&source_material);
+    let surface = SpherePanels::icosphere(0.025, 0).unwrap();
+    let boundary = LocalBoundary::try_new(
+        medium,
+        vec![LocalWall::LayeredTransmitting {
+            fluid,
+            receiving_fluid: fluid.acoustic(),
+            layers: vec![
+                LocalWallLayer::RelaxingFluid {
+                    relaxation: source_material.clone(),
+                    thickness_m: 0.03,
+                },
+                LocalWallLayer::RelaxingPorous {
+                    law: porous_law(),
+                    relaxation: source_material,
+                    thickness_m: 0.025,
+                },
+            ],
+        }],
+        vec![0; surface.areas().len()],
+    )
+    .unwrap();
+    let scattering = ScatteringObservation::new(
+        &surface,
+        medium,
+        &[source()],
+        &[receiver()],
+        TAU * 1600.0,
+        1e-3,
+        Options::default(),
+        || false,
+    )
+    .unwrap();
+    let omega = TAU * 700.0;
+    let rigid = scattering.frequency_sample(omega, || false).unwrap();
+    let dense =
+        LocalBoundaryObservation::for_scattering(scattering, boundary.clone(), Some(window()))
+            .unwrap();
+    let reference = dense.physical_frequency_sample(omega, || false).unwrap();
+    assert!((reference[0] - rigid[0]).abs() > 1e-3 * rigid[0].abs());
+    let gate = fs_exec::CancelGate::new_clock_free();
+    let iterative = IterativeBoundaryObservation::for_scattering(
+        &surface,
+        medium,
+        &[source()],
+        &[receiver()],
+        boundary,
+        IterativeObservationOptions {
+            highest_omega: TAU * 1600.0,
+            minimum_clearance_m: 1e-3,
+            receiver_quadrature: Options::default(),
+            lower_window: Some(window()),
+            solver: helmholtz::IterativeOptions {
+                tol: 1e-10,
+                restart: 60,
+                max_iters: 600,
+                fmm_order: 7,
+                leaf_capacity: 64,
+                ..helmholtz::IterativeOptions::default()
+            },
+        },
+        &gate,
+    )
+    .unwrap();
+    let result = iterative.physical_frequency_sample(omega, &gate).unwrap();
+    assert!(result.sources[0].solve.converged_euclidean());
+    assert!(result.sources[0].accepted_power_w() > 0.0);
+    for (&actual, &expected) in result.transfer.iter().zip(&reference) {
+        assert!((actual - expected).abs() < 1e-8 * expected.abs());
+    }
+}

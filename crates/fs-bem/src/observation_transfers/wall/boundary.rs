@@ -9,6 +9,7 @@ use fs_material::porous::{
         absorption::{LayerAbsorptionBudget, LayerAbsorptionError},
     },
 };
+use fs_material::relaxation::RelaxationState;
 use fs_phs::WallPin;
 
 /// An owned layer in a locally reacting treatment, ordered from
@@ -27,6 +28,21 @@ pub enum LocalWallLayer {
         fluid: FluidAcousticState,
         thickness_m: f64,
     },
+    /// Free gas with its original molecular dispersion and compression loss.
+    /// No pore drag or viscothermal propagation is inferred. The layer owner
+    /// retains the exact lossless limit when no reservoirs are active.
+    RelaxingFluid {
+        relaxation: RelaxationState,
+        thickness_m: f64,
+    },
+    /// Original porous skeleton with molecular calorics coupled to pore heat
+    /// diffusion. Its equilibrium gas must match the wall's incident/pore
+    /// snapshot, and the skeleton's original frequency band remains binding.
+    RelaxingPorous {
+        law: PorousFluidLaw,
+        relaxation: RelaxationState,
+        thickness_m: f64,
+    },
 }
 
 impl LocalWallLayer {
@@ -41,6 +57,22 @@ impl LocalWallLayer {
             },
             Self::FluidLayer { fluid, thickness_m } => Layer::FluidLayer {
                 fluid,
+                thickness_m: *thickness_m,
+            },
+            Self::RelaxingFluid {
+                relaxation,
+                thickness_m,
+            } => Layer::RelaxingFluid {
+                relaxation,
+                thickness_m: *thickness_m,
+            },
+            Self::RelaxingPorous {
+                law,
+                relaxation,
+                thickness_m,
+            } => Layer::RelaxingPorous {
+                law,
+                relaxation,
                 thickness_m: *thickness_m,
             },
         }
@@ -211,7 +243,9 @@ impl LocalBoundary {
                     }
                     let mut band = (0.0_f64, f64::INFINITY);
                     for layer in layers {
-                        if let LocalWallLayer::Porous { law, .. } = layer {
+                        if let LocalWallLayer::Porous { law, .. }
+                        | LocalWallLayer::RelaxingPorous { law, .. } = layer
+                        {
                             let source_band = law.reference_card().valid_hz;
                             band.0 = band.0.max(source_band.0);
                             band.1 = band.1.min(source_band.1);
@@ -650,6 +684,24 @@ impl LocalBoundary {
                                     ],
                                 );
                             }
+                            LocalWallLayer::RelaxingFluid {
+                                relaxation,
+                                thickness_m,
+                            } => {
+                                hash.update(&[3]);
+                                hash_scalars(&mut hash, &[*thickness_m]);
+                                hash_relaxation_source(&mut hash, relaxation);
+                            }
+                            LocalWallLayer::RelaxingPorous {
+                                law,
+                                relaxation,
+                                thickness_m,
+                            } => {
+                                hash.update(&[4]);
+                                hash_scalars(&mut hash, &[*thickness_m]);
+                                hash_porous_source(&mut hash, law);
+                                hash_relaxation_source(&mut hash, relaxation);
+                            }
                         }
                     }
                 }
@@ -831,5 +883,40 @@ fn hash_porous_source(hash: &mut DomainHasher, law: &PorousFluidLaw) {
 fn hash_scalars(hash: &mut DomainHasher, values: &[f64]) {
     for value in values {
         hash.update(&value.to_bits().to_le_bytes());
+    }
+}
+
+// Original equilibrium state and every evaluated molecular reservoir determine
+// the wall response. Equal rho/c alone cannot identify dispersive treatments.
+fn hash_relaxation_source(hash: &mut DomainHasher, source: &RelaxationState) {
+    let gas = source.gas();
+    hash_scalars(
+        hash,
+        &[
+            gas.temperature,
+            gas.pressure,
+            gas.density,
+            gas.sound_speed,
+            gas.dynamic_viscosity,
+            gas.thermal_conductivity,
+            gas.gamma,
+            gas.specific_gas_constant,
+            gas.specific_heat_cp,
+            gas.prandtl,
+            gas.characteristic_impedance,
+            gas.water_mole_fraction,
+            source.frozen_cv_j_kg_k(),
+        ],
+    );
+    hash.update(&(source.processes().len() as u64).to_le_bytes());
+    for process in source.processes() {
+        let name = process.species.as_str();
+        hash.update(&(name.len() as u64).to_le_bytes());
+        hash.update(name.as_bytes());
+        hash.update(&(process.index as u64).to_le_bytes());
+        hash_scalars(
+            hash,
+            &[process.heat_capacity_j_kg_k, process.relaxation_time_s],
+        );
     }
 }

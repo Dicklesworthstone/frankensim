@@ -1937,8 +1937,9 @@ porous source support and the original fluid bulk modulus, binds its hash.
 Porous saturating-fluid density and sound speed must match the exterior medium.
 
 `LocalWall::LayeredRigid` carries ordered `LocalWallLayer` porous sources,
-shared-fluid gaps and explicitly sourced lossless fluid layers into both dense
-and iterative observations. `RigidBackedLayers` owns their coherent propagation;
+shared-fluid gaps, explicitly sourced lossless fluid layers and original molecular
+reservoirs into both dense and iterative observations. `RigidBackedLayers` owns
+their coherent propagation;
 `PorousLayersBoundary` supplies its normal-incidence Robin coefficient and the
 single phasor conversion. Every constituent porous source, including one with
 zero thickness, constrains the common supported frequency band. The original
@@ -1962,6 +1963,22 @@ accepts outgoing power with zero irreversible loss. This is a locally reacting
 planar outgoing load behind each patch; no second 3-D receiving field, lateral
 treatment propagation, curvature correction or elastic mode conversion is
 inferred. Ordinary receiver/FIR evaluation performs no layer-loss integration.
+
+`LocalWallLayer::RelaxingFluid` owns the original `RelaxationState` for a free
+gas layer: its frequency-dependent bulk modulus supplies coherent dispersion,
+interface mismatch and positive molecular compression loss without adding pore
+drag or viscothermal propagation. `RelaxingPorous` couples that same original
+caloric source to the porous law's native heat-diffusion response. Its equilibrium
+gas must match the incident/pore fluid snapshot and its original porous support
+constrains every observation, including zero-thickness layers. Both variants
+borrow their retained sources directly into the existing layer solver; there is
+no interpolation, fitted attenuation or second constitutive evaluation owner.
+The original gas tuple, frozen heat capacity and every reservoir's species,
+index, heat capacity and relaxation time bind wall identity. Zero reservoirs
+retain the exact lossless-fluid limit. The existing explicit power partition
+integrates molecular/pore loss separately from outgoing backing-fluid energy,
+once per distinct law rather than per panel. These layers keep the same local
+normal-incidence approximation and single phasor conversion described above.
 
 `LocalBoundaryObservation::for_scattering` extends the existing prescribed
 point-flow observer with these walls; `for_surface` consumes the original
@@ -2445,7 +2462,10 @@ harmonic intensity and microphone statistics consume the same Robin solutions.
 Mechanical-wall FIR uses the existing observer. Porous laws with a positive
 lower support remain in-band harmonic/reaction inputs: DC and this owner's FIR
 bake refuse because its artifact has no lower-band window. Their original
-equivalent-fluid pore model is retained; molecular pore relaxation is not added.
+equivalent-fluid pore model is retained. Molecular pore relaxation requires the
+explicit original `LocalWallLayer::RelaxingPorous` source; ordinary porous layers
+do not acquire an inferred relaxation law. Free molecular layers similarly use
+the explicit `RelaxingFluid` source through the same local-wall table.
 
 `prepare_response` returns `PreparedMolecularResponse` with the complete
 work-conjugate source impedance and matched `PreparedHarmonicObservation`.
