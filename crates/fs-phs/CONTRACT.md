@@ -1291,6 +1291,29 @@ matched-boundary linewidth, coherent reflected-wave peak shifts, actual reaction
 force peaks, displacement/effort consistency, cancellation/replay and rejection
 of reflection dips. All ordinary-query limits above still apply.
 
+### Coherent antiresonance and recovery bandwidth
+
+`search_antiresonance` and `HarmonicModel::driven_antiresonance` resolve one
+caller-isolated decreasing-to-increasing minimum of the original coherent
+observation. They share the resonance owner's numerical sign brackets, total
+query budget, cancellation, residual accounting and crossing refinement. A
+scaled double-double `Re(conj(H) H_omega)` admits exact cancellation without
+`H_omega/H`, squared-amplitude overflow or a phase assigned to a zero. The
+reported response and tangent are actual evaluated values: a finite bracket
+does not certify exact cancellation, depth or uniqueness. Native queries retain
+all original descriptor, material-memory and load states and reuse one factor
+for response and tangent. A silent receiver need not imply zero internal energy.
+
+Optional positive absolute `recovery_power` declares the selected original
+`|observation|^2` level and requires both recovery crossings inside the supplied
+interval. Its width is not a modal Q or material heat. Silent/flat/wrong-sign
+observations, missing edges, source refusals and exhausted budgets return no
+partial result. Recovery queries skip unneeded tangent solves. Eight focused
+native tests cover exact and damped minima, `1e-120..1e120` source scales, total
+coherent source slopes, query/residual accounting, refusals/cancellation, and a
+damped host with a lossless absorber whose observed host cancellation retains
+0.01 J of internal energy.
+
 ### Physical parameter motion of observed resonance peaks
 
 `HarmonicModel::driven_resonance_with_parameter_derivative` differentiates one

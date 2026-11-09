@@ -1,5 +1,5 @@
-//! Local driven resonance and conventional half-power bandwidth of the original
-//! complete system. A pole frequency alone does not locate an observed peak.
+//! Local driven resonance, antiresonance and crossing search in the original
+//! complete system. A pole frequency alone does not locate an observed extremum.
 //!
 //! The caller supplies an interval isolating the desired peak, a fixed physical
 //! excitation and a frequency-independent real observation. Analytic response
@@ -13,6 +13,10 @@
 use super::{HarmonicError, HarmonicModel, finite, poll};
 use fs_math::{c64::C64, dd::Dd};
 
+mod antiresonance;
+pub use antiresonance::{
+    AntiresonanceControls, AntiresonanceRecovery, DrivenAntiresonance, search_antiresonance,
+};
 pub(in crate::harmonic) mod sensitivity;
 pub use sensitivity::{DrivenResonanceParameterResponse, HalfPowerBandwidthDerivative};
 mod survey;
@@ -54,7 +58,7 @@ pub struct ResonanceControls {
 /// A numerical frequency bracket resolved to the caller's requested width.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ResonanceFrequency {
-    /// Evaluated peak or midpoint estimate [rad/s].
+    /// Evaluated extremum or crossing midpoint estimate [rad/s].
     pub angular_frequency_rad_s: f64,
     /// Final sign/crossing bracket [rad/s], not an interval-arithmetic certificate.
     pub bracket_rad_s: (f64, f64),
@@ -99,7 +103,7 @@ pub struct DrivenResonance {
 pub enum DrivenResonanceError {
     /// Invalid controls, observation, excitation or unrepresentable arithmetic.
     Invalid(&'static str),
-    /// The caller's interval does not resolve the requested maximum/crossing.
+    /// The caller's interval does not resolve the requested extremum/crossing.
     NotBracketed(&'static str),
     /// Caller-declared total evaluation capacity was exhausted.
     EvaluationLimit {
@@ -132,7 +136,7 @@ impl From<HarmonicError> for DrivenResonanceError {
 pub enum ResonanceSearchError<E> {
     /// Invalid controls or nonfinite/unrepresentable source observations.
     Invalid(&'static str),
-    /// The supplied interval does not bracket the selected peak or crossing.
+    /// The supplied interval does not bracket the selected extremum or crossing.
     NotBracketed(&'static str),
     /// The total number of source evaluations reached the caller's cap.
     EvaluationLimit {
@@ -183,6 +187,25 @@ struct Sample {
     value: C64,
     derivative: C64,
     slope: f64,
+}
+
+#[derive(Clone, Copy)]
+enum StationaryKind {
+    Maximum,
+    Minimum,
+}
+
+impl StationaryKind {
+    fn left_slope(self, slope: f64) -> bool {
+        match self {
+            Self::Maximum => slope > 0.0,
+            Self::Minimum => slope < 0.0,
+        }
+    }
+
+    fn right_slope(self, slope: f64) -> bool {
+        self.left_slope(-slope)
+    }
 }
 
 impl HarmonicModel {
@@ -286,97 +309,22 @@ impl HarmonicModel {
 pub fn search_resonance<E, C, F>(
     interval_rad_s: (f64, f64),
     controls: ResonanceControls,
-    mut cancelled: C,
+    cancelled: C,
     evaluate: F,
 ) -> Result<DrivenResonance, ResonanceSearchError<E>>
 where
     C: FnMut() -> bool,
     F: FnMut(f64, bool, &mut C) -> Result<(C64, C64, f64), E>,
 {
-    search_poll(&mut cancelled)?;
     let (low, high) = interval_rad_s;
-    if !low.is_finite()
-        || !high.is_finite()
-        || low <= 0.0
-        || high <= low
-        || !controls.absolute_frequency_tolerance_rad_s.is_finite()
-        || controls.absolute_frequency_tolerance_rad_s <= 0.0
-        || !controls.relative_frequency_tolerance.is_finite()
-        || !(0.0..1.0).contains(&controls.relative_frequency_tolerance)
-        || !(3..=4096).contains(&controls.maximum_evaluations)
-    {
-        return Err(ResonanceSearchError::Invalid(
-            "positive ordered interval and bounded resolution controls required",
-        ));
-    }
-    let mut search = Search {
-        evaluate,
-        controls,
-        cancelled,
-        evaluations: 0,
-        residual: 0.0,
-    };
+    let mut search = Search::new(interval_rad_s, controls, cancelled, evaluate)?;
     let outer_low = search.sample(low, true)?;
     let outer_high = search.sample(high, true)?;
-    let mut left = outer_low;
-    let mut right = outer_high;
-    if left.slope <= 0.0 || right.slope >= 0.0 {
-        return Err(ResonanceSearchError::NotBracketed(
-            "a peak requires increasing then decreasing nonzero response",
-        ));
-    }
-    let mut stationary: Option<Sample> = None;
-    let peak_sample = loop {
-        let frequency_resolved = search.resolved(left.omega, right.omega);
-        if !frequency_resolved && let Some(middle) = stationary {
-            // Reuse the exactly stationary evaluated response while its
-            // two sign endpoints contract; do not refactor its frequency.
-            let a = search.sample(interior_midpoint(left.omega, middle.omega)?, true)?;
-            let b = search.sample(interior_midpoint(middle.omega, right.omega)?, true)?;
-            if a.slope <= 0.0 || b.slope >= 0.0 {
-                return Err(ResonanceSearchError::NotBracketed(
-                    "stationary response does not retain a resolved maximum bracket",
-                ));
-            }
-            left = a;
-            right = b;
-            continue;
-        }
-        let omega = if frequency_resolved {
-            f64::midpoint(left.omega, right.omega)
-        } else {
-            interior_midpoint(left.omega, right.omega)?
-        };
-        let middle = if let Some(sample) = stationary.filter(|sample| sample.omega == omega) {
-            sample
-        } else {
-            search.sample(omega, true)?
-        };
-        // A pole also changes the sign of d(log |H|)/domega, but its slope
-        // diverges instead of tending to zero. For H ~ 1/(omega - pole),
-        // |slope(midpoint)| * bracket_width >= 2; a finite maximum tends to
-        // zero as its bracket contracts. Require a conservative 1/8 local
-        // variation before accepting it, independently of response units.
-        // This is a resolution check, not a forward-amplitude error bound.
-        if frequency_resolved && middle.slope.abs() * (right.omega - left.omega) <= 0.125 {
-            break middle;
-        }
-        if middle.omega <= left.omega || middle.omega >= right.omega {
-            return Err(ResonanceSearchError::FrequencyResolution);
-        }
-        if middle.slope > 0.0 {
-            left = middle;
-        } else if middle.slope < 0.0 {
-            right = middle;
-        } else {
-            // An exactly zero rounded slope is not a zero-width frequency
-            // certificate. Retain an actual smaller sign bracket around it.
-            stationary = Some(middle);
-        }
-    };
+    let (peak_sample, bracket_rad_s) =
+        search.stationary(outer_low, outer_high, StationaryKind::Maximum)?;
     let peak = ResonanceFrequency {
         angular_frequency_rad_s: peak_sample.omega,
-        bracket_rad_s: (left.omega, right.omega),
+        bracket_rad_s,
     };
     let half_power = if controls.measure_half_power_bandwidth {
         let target = peak_sample.value.abs() * core::f64::consts::FRAC_1_SQRT_2;
@@ -433,6 +381,37 @@ where
     C: FnMut() -> bool,
     F: FnMut(f64, bool, &mut C) -> Result<(C64, C64, f64), E>,
 {
+    fn new(
+        interval_rad_s: (f64, f64),
+        controls: ResonanceControls,
+        mut cancelled: C,
+        evaluate: F,
+    ) -> Result<Self, ResonanceSearchError<E>> {
+        search_poll(&mut cancelled)?;
+        let (low, high) = interval_rad_s;
+        if !low.is_finite()
+            || !high.is_finite()
+            || low <= 0.0
+            || high <= low
+            || !controls.absolute_frequency_tolerance_rad_s.is_finite()
+            || controls.absolute_frequency_tolerance_rad_s <= 0.0
+            || !controls.relative_frequency_tolerance.is_finite()
+            || !(0.0..1.0).contains(&controls.relative_frequency_tolerance)
+            || !(3..=4096).contains(&controls.maximum_evaluations)
+        {
+            return Err(ResonanceSearchError::Invalid(
+                "positive ordered interval and bounded resolution controls required",
+            ));
+        }
+        Ok(Self {
+            evaluate,
+            controls,
+            cancelled,
+            evaluations: 0,
+            residual: 0.0,
+        })
+    }
+
     fn resolved(&self, low: f64, high: f64) -> bool {
         high - low
             <= self
@@ -442,6 +421,15 @@ where
     }
 
     fn sample(&mut self, omega: f64, derivative: bool) -> Result<Sample, ResonanceSearchError<E>> {
+        self.sample_kind(omega, derivative, StationaryKind::Maximum)
+    }
+
+    fn sample_kind(
+        &mut self,
+        omega: f64,
+        derivative: bool,
+        kind: StationaryKind,
+    ) -> Result<Sample, ResonanceSearchError<E>> {
         search_poll(&mut self.cancelled)?;
         if self.evaluations == self.controls.maximum_evaluations {
             return Err(ResonanceSearchError::EvaluationLimit {
@@ -462,30 +450,131 @@ where
             ));
         }
         self.residual = self.residual.max(residual);
-        if derivative && value == C64::ZERO {
+        if derivative && matches!(kind, StationaryKind::Maximum) && value == C64::ZERO {
             return Err(ResonanceSearchError::NotBracketed(
                 "a silent observation or exact antiresonance is not a resonance peak",
             ));
         }
-        let logarithmic_slope = if derivative { (slope / value).re } else { 0.0 };
-        if !logarithmic_slope.is_finite() || !value.abs().is_finite() {
+        let stationary_slope = if !derivative {
+            0.0
+        } else {
+            match kind {
+                StationaryKind::Maximum => (slope / value).re,
+                StationaryKind::Minimum => {
+                    // Only the sign of d|H|^2/domega = 2 Re(conj(H) H')
+                    // is needed. Scale each vector before the DD dot product
+                    // to retain that sign without squaring large/small physical
+                    // units or dividing by H at an exact destructive zero.
+                    let a = value.re.abs().max(value.im.abs());
+                    let b = slope.re.abs().max(slope.im.abs());
+                    if a == 0.0 || b == 0.0 {
+                        0.0
+                    } else {
+                        (Dd::from_f64(value.re / a) * Dd::from_f64(slope.re / b)
+                            + Dd::from_f64(value.im / a) * Dd::from_f64(slope.im / b))
+                        .to_f64()
+                    }
+                }
+            }
+        };
+        if !stationary_slope.is_finite() || !value.abs().is_finite() {
             return Err(ResonanceSearchError::Invalid(
-                "observed amplitude or logarithmic slope is not representable",
+                "observed amplitude or stationary slope is not representable",
             ));
         }
         Ok(Sample {
             omega,
             value,
             derivative: slope,
-            slope: logarithmic_slope,
+            slope: stationary_slope,
         })
+    }
+
+    fn stationary(
+        &mut self,
+        mut left: Sample,
+        mut right: Sample,
+        kind: StationaryKind,
+    ) -> Result<(Sample, (f64, f64)), ResonanceSearchError<E>> {
+        if !kind.left_slope(left.slope) || !kind.right_slope(right.slope) {
+            return Err(ResonanceSearchError::NotBracketed(match kind {
+                StationaryKind::Maximum => {
+                    "a peak requires increasing then decreasing nonzero response"
+                }
+                StationaryKind::Minimum => {
+                    "a notch requires strictly decreasing then increasing squared amplitude"
+                }
+            }));
+        }
+        let mut stationary: Option<Sample> = None;
+        loop {
+            let frequency_resolved = self.resolved(left.omega, right.omega);
+            if !frequency_resolved && let Some(middle) = stationary {
+                // Reuse the evaluated stationary response as its two genuine
+                // sign endpoints contract. Never infer a zero-width bracket.
+                let a =
+                    self.sample_kind(interior_midpoint(left.omega, middle.omega)?, true, kind)?;
+                let b =
+                    self.sample_kind(interior_midpoint(middle.omega, right.omega)?, true, kind)?;
+                if !kind.left_slope(a.slope) || !kind.right_slope(b.slope) {
+                    return Err(ResonanceSearchError::NotBracketed(
+                        "stationary response does not retain a strict extremum bracket",
+                    ));
+                }
+                left = a;
+                right = b;
+                continue;
+            }
+            let omega = if frequency_resolved {
+                f64::midpoint(left.omega, right.omega)
+            } else {
+                interior_midpoint(left.omega, right.omega)?
+            };
+            let middle = if let Some(sample) = stationary.filter(|sample| sample.omega == omega) {
+                sample
+            } else {
+                self.sample_kind(omega, true, kind)?
+            };
+            // A pole also reverses a peak's log-amplitude slope, but for
+            // H ~ 1/(omega-pole), |slope|*bracket_width >= 2. Keep the existing
+            // finite-peak resolution gate. A notch instead uses a zero-safe
+            // power slope: its reported value is the actual evaluated H, not
+            // an inferred zero or a certificate of the notch's depth.
+            let amplitude_resolved = match kind {
+                StationaryKind::Maximum => middle.slope.abs() * (right.omega - left.omega) <= 0.125,
+                StationaryKind::Minimum => true,
+            };
+            if frequency_resolved && amplitude_resolved {
+                return Ok((middle, (left.omega, right.omega)));
+            }
+            if middle.omega <= left.omega || middle.omega >= right.omega {
+                return Err(ResonanceSearchError::FrequencyResolution);
+            }
+            if kind.left_slope(middle.slope) {
+                left = middle;
+            } else if kind.right_slope(middle.slope) {
+                right = middle;
+            } else {
+                stationary = Some(middle);
+            }
+        }
     }
 
     fn crossing(
         &mut self,
+        outside: Sample,
+        inside: Sample,
+        target: f64,
+    ) -> Result<ResonanceFrequency, ResonanceSearchError<E>> {
+        self.crossing_kind(outside, inside, target, StationaryKind::Maximum)
+    }
+
+    fn crossing_kind(
+        &mut self,
         mut outside: Sample,
         mut inside: Sample,
         target: f64,
+        kind: StationaryKind,
     ) -> Result<ResonanceFrequency, ResonanceSearchError<E>> {
         loop {
             let low = outside.omega.min(inside.omega);
@@ -496,8 +585,12 @@ where
                     bracket_rad_s: (low, high),
                 });
             }
-            let sample = self.sample(interior_midpoint(low, high)?, false)?;
-            if sample.value.abs() < target {
+            let sample = self.sample_kind(interior_midpoint(low, high)?, false, kind)?;
+            let beyond = match kind {
+                StationaryKind::Maximum => sample.value.abs() < target,
+                StationaryKind::Minimum => sample.value.abs() > target,
+            };
+            if beyond {
                 outside = sample;
             } else {
                 inside = sample;
