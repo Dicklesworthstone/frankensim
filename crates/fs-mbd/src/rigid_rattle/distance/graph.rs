@@ -52,6 +52,12 @@ pub use driven_joints::{
 mod spatial;
 pub use spatial::{advance_spatial_articulated_graph, advance_spatial_driven_joint_graph};
 
+#[path = "graph/impulses.rs"]
+mod impulses;
+pub use impulses::{
+    GraphBodyImpulse, GraphImpulseControls, GraphImpulseResponse, apply_articulated_graph_impulses,
+};
+
 #[path = "graph/planes.rs"]
 mod planes;
 pub use planes::PointPlaneJoint;
