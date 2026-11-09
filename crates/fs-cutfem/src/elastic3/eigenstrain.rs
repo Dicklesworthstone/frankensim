@@ -20,7 +20,7 @@
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
-use fs_material::tensor::{contract, from_mandel, to_mandel};
+use fs_material::tensor::{from_mandel, to_mandel};
 use fs_solver::op::LinearOp;
 
 use super::material::{ReferenceMaterial3, engineering_strain};
@@ -28,14 +28,21 @@ use super::strain_domain::FrobeniusStrainBall;
 use super::{Cell3, CutElasticity3, ElasticityError3, q1};
 
 mod equilibrium;
+mod prestress;
 mod reaction;
+mod response;
 mod sensitivity;
+
+pub use prestress::PreparedPrestress3;
+use response::physical_response;
 
 pub(super) struct CellEigenstrain3 {
     /// Unscaled bulk and Nitsche load, including strongly constrained entries.
     pub(super) force: [f64; 24],
     /// Original tensor-shear samples, in exactly the retained bulk-rule order.
     pub(super) bulk_strains: Vec<[f64; 6]>,
+    /// Original free strain at each selected Nitsche point, before projection.
+    pub(super) surface_strains: Vec<[f64; 6]>,
     /// Unscaled eigenstress in exactly the selected Nitsche surface order.
     pub(super) surface_stresses: Vec<[f64; 6]>,
     /// Physical-volume average of the original free dilatation.
@@ -269,8 +276,10 @@ impl CutElasticity3 {
             for component in 0..3 {
                 force[component] = -(1..8).map(|a| force[3 * a + component]).sum::<f64>();
             }
+            let mut surface_strains = Vec::new();
             let mut surface_stresses = Vec::new();
             if let Some(data) = &self.embedded {
+                surface_strains = Vec::with_capacity(data.selected_points(id).len());
                 surface_stresses = Vec::with_capacity(data.selected_points(id).len());
                 let surface = cell.rules.surface().expect("retained Nitsche surface");
                 for &index in data.selected_points(id) {
@@ -280,6 +289,7 @@ impl CutElasticity3 {
                     poll(&mut checkpoint)?;
                     let stress =
                         material_stress(cell, project_free(cell, to_mandel(&strain), mean_trace));
+                    surface_strains.push(strain);
                     surface_stresses.push(stress);
                     let n = point.normal;
                     let traction = [
@@ -301,6 +311,7 @@ impl CutElasticity3 {
             cells.push(CellEigenstrain3 {
                 force,
                 bulk_strains,
+                surface_strains,
                 surface_stresses,
                 mean_trace,
             });
@@ -480,49 +491,27 @@ impl CutElasticity3 {
                 cell.rules.bulk().iter().zip(&free.bulk_strains)
             {
                 poll(&mut checkpoint)?;
-                let (_, gradients) = q1(cell.bounds, position);
-                let strain = super::stress::mandel_strain(&gradients, &local);
-                let assumed = cell.project_mandel_strain(strain, &local);
-                for total in [strain, assumed] {
-                    if FrobeniusStrainBall::new(total, maximum_kinematic_strain).is_none() {
-                        return Err(ElasticityError3::Invalid(
-                            "total strain exceeds small-deformation budget; finite-deformation model required",
-                        ));
-                    }
-                }
-                let eigen = to_mandel(&free_strain);
-                let projected_free = project_free(cell, eigen, free.mean_trace);
-                let elastic = std::array::from_fn(|i| strain[i] - eigen[i]);
-                let constitutive = std::array::from_fn(|i| assumed[i] - projected_free[i]);
-                material_domain(cell, elastic)?;
-                material_domain(cell, constitutive)?;
-                let reference_stress = material_stress(cell, constitutive);
-                let stress = reference_stress.map(|s| self.scales[id] * s);
-                let constitutive_elastic_strain = from_mandel(&constitutive);
-                let energy_density = 0.5 * contract(&constitutive_elastic_strain, &stress);
-                if reference_stress
-                    .iter()
-                    .chain(&stress)
-                    .any(|v| !v.is_finite())
-                    || !energy_density.is_finite()
-                    || energy_density < 0.0
-                {
-                    return Err(ElasticityError3::Invalid(
-                        "unrepresentable eigenstrain response",
-                    ));
-                }
+                let point = physical_response(
+                    cell,
+                    &local,
+                    position,
+                    free_strain,
+                    free.mean_trace,
+                    self.scales[id],
+                    maximum_kinematic_strain,
+                )?;
                 if COLLECT {
                     response.push(EigenstrainResponse3 {
                         cell: id,
                         position,
                         weight,
-                        strain: from_mandel(&strain),
+                        strain: point.strain,
                         free_strain,
-                        elastic_strain: from_mandel(&elastic),
-                        constitutive_elastic_strain,
-                        reference_stress,
-                        stress,
-                        energy_density,
+                        elastic_strain: point.elastic_strain,
+                        constitutive_elastic_strain: point.constitutive_elastic_strain,
+                        reference_stress: point.reference_stress,
+                        stress: point.stress,
+                        energy_density: point.energy_density,
                     });
                 }
             }

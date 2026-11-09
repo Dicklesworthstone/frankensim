@@ -14,6 +14,7 @@ use crate::elastic3::eigenstrain::{EigenstrainResponse3, PreparedEigenstrain3};
 use crate::elastic3::stress::BulkStressPullback3;
 
 mod equilibrium;
+mod prestress;
 
 fn checkpoint(poll: &mut impl FnMut() -> ControlFlow<()>) -> Result<(), ElasticityError3> {
     if poll().is_break() {

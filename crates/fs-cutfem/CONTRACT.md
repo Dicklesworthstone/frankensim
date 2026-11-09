@@ -801,3 +801,31 @@ quadrature-site peaks, thickness/shear strain limits, controlled/ordinary solve
 parity, original lattice ownership and transactional cancellation. These are
 G0/G1/G3 checks of the stated small-strain model, not finite-rotation, plasticity
 or experimental validation.
+
+
+## Signed thermal initial-stress stiffness
+
+`CutElasticity3::prepare_eigenstrain_prestress` and its adaptive counterpart freeze
+`G_ai,bj = delta_ij integral grad(N_a)^T sigma_0 grad(N_b)` on the original cut rules.
+The stress is recovered from actual minus prescribed free strain before applying
+the retained tensor, with the original B-bar projection and current scales.
+Selected weak supports include both symmetric geometric Nitsche flux terms. The
+original elastic penalty and ghost coefficients stay frozen in K_e; no extra
+geometric penalty, ghost stress or artificial inertia is invented.
+
+`PreparedPrestress3` condenses strong/hanging constraints once and shares scalar
+upper-triangular node pairs across xyz. Actions, signed diagonals, bilinear work
+and read-only sparse entries reuse that cache without new source evaluations.
+It binds exact geometry/material/support coordinates and stiffness-scale bits;
+changed scales or a rebuilt operator require preparation again. Bulk-plus-surface
+point work and retained/current-cell pair storage are bounded and cancellable.
+Both bulk observations and prestress now share one physical response kernel;
+selected surface free strain is retained to avoid subtracting large stresses.
+
+`eigenstrain3_prestress` adds seven regression sources for free expansion, tension
+and compression, coupled tensors, nonuniform/B-bar correlation, adaptive virtual
+work, geometric Nitsche flux, surface admission and refusal/rollback boundaries.
+This is conservative reference-geometry initial stress at an admitted supplied
+state. The caller must separately establish equilibrium; finite-strain dP/dF,
+follower loads, coercivity and complete buckling/stability certification are not
+inferred. In particular, negative geometric stiffness is retained, not clipped.
