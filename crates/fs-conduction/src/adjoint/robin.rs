@@ -15,6 +15,8 @@
 pub(crate) mod nonlinear;
 pub use nonlinear::MeanFluxFeedback;
 pub(super) mod goal;
+mod flux;
+pub use flux::{PrescribedFluxControls, PrescribedFluxGradient};
 
 use std::collections::BTreeSet;
 

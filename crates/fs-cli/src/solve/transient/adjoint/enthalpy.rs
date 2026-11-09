@@ -429,7 +429,7 @@ pub(in crate::solve::transient) fn finish(
     let contact_workspace = temperature_contacts.map(|_| contact_storage_bytes(
         n, elements, max_contact_pairs, linear.restart,
     )).transpose()?.unwrap_or(0);
-    let flux_workspace = flux_controls::storage_bytes(spec, n)?;
+    let flux_workspace = flux_controls::storage_bytes(spec, n, problem.mesh.boundary().len())?;
     let combined_feedback_entries = max_feedback_entries
         .checked_add(convection::feedback_entries(n, convection_ports)?)
         .ok_or_else(|| bad("combined enthalpy boundary-feedback allowance overflows"))?;

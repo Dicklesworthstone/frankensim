@@ -3,7 +3,7 @@
 
 use std::time::Instant;
 
-use fs_conduction::adjoint::robin::MeanFluxFeedback;
+use fs_conduction::adjoint::{PrescribedFluxControls, PrescribedFluxGradient};
 use fs_conduction::{ConductionProblem, ScalarField, ThermalBc};
 use fs_exec::Cx;
 use fs_project::{ProjectSpec, ThermalBoundaryCondition, TransientBoundaryTarget};
@@ -25,9 +25,10 @@ struct PowerControl {
     duty: f64,
 }
 
-/// Retained trace factors, fixed-node indices, temporary zero feedback matrix
-/// and bounded output metadata. This is an admission estimate, not peak RSS.
-pub(in crate::solve::transient) fn storage_bytes(spec: &ProjectSpec, nodes: usize) -> Result<usize, SolveRefusal> {
+/// Sparse original-face factors, fixed-node indices and bounded output metadata.
+/// This is an admission estimate, not peak RSS; no dense zero-feedback basis.
+pub(in crate::solve::transient) fn storage_bytes(spec: &ProjectSpec, nodes: usize,
+    boundary_faces: usize) -> Result<usize, SolveRefusal> {
     let fluxes = spec.cooling.as_ref().and_then(|cooling| cooling.conduction.as_ref())
         .map_or(0, |setup| setup.boundaries.iter().filter(|boundary|
             matches!(boundary.condition, ThermalBoundaryCondition::HeatFlux { .. })).count());
@@ -40,10 +41,8 @@ pub(in crate::solve::transient) fn storage_bytes(spec: &ProjectSpec, nodes: usiz
         .ok_or_else(|| bad("transient boundary-load metadata count overflows"))?;
     if count == 0 { return Ok(0); }
     if count > 64 { return Err(bad("transient boundary-load adjoints exceed 64 boundary controls")); }
-    nodes.checked_mul(count).and_then(|v| v.checked_mul(2))
-        .and_then(|v| v.checked_add(nodes))
-        .and_then(|v| count.checked_mul(count).and_then(|b| v.checked_add(b)))
-        .and_then(|v| v.checked_mul(std::mem::size_of::<f64>()))
+    nodes.checked_mul(std::mem::size_of::<usize>())
+        .and_then(|v| boundary_faces.checked_mul(128).and_then(|b| v.checked_add(b)))
         .and_then(|v| metadata.checked_mul(4096).and_then(|b| v.checked_add(b)))
         .and_then(|v| v.checked_add(512))
         .filter(|&v| isize::try_from(v).is_ok())
@@ -53,8 +52,7 @@ pub(in crate::solve::transient) fn storage_bytes(spec: &ProjectSpec, nodes: usiz
 pub(super) struct Controls {
     rows: Vec<Control>,
     powers: Vec<PowerControl>,
-    trace: Option<MeanFluxFeedback>,
-    fixed: Vec<usize>,
+    trace: Option<PrescribedFluxControls>,
     steps: usize,
 }
 
@@ -66,7 +64,7 @@ impl Controls {
         poll(cx, deadline)?;
         let setup = spec.cooling.as_ref().and_then(|cooling| cooling.conduction.as_ref())
             .ok_or_else(|| bad("transient heat-flux controls lost their declaration"))?;
-        storage_bytes(spec, problem.mesh.vertex_count())?;
+        storage_bytes(spec, problem.mesh.vertex_count(), problem.mesh.boundary().len())?;
         let mut rows = Vec::new();
         for boundary in &setup.boundaries {
             poll(cx, deadline)?;
@@ -156,21 +154,13 @@ impl Controls {
                 duty: power.duty });
         }
         if rows.is_empty() {
-            return Ok(Self { rows, powers, trace: None, fixed: Vec::new(), steps: 0 });
+            return Ok(Self { rows, powers, trace: None, steps: 0 });
         }
         let names: Vec<_> = rows.iter().map(|row| row.target.as_str()).collect();
-        let entries = problem.mesh.vertex_count().checked_mul(names.len())
-            .and_then(|v| v.checked_mul(2))
-            .ok_or_else(|| bad("prescribed heat-flux trace allowance overflows"))?;
-        // Zero feedback retains only the existing owner's G_i basis. The
-        // physical state feedback is already present in the supplied dual.
-        let trace = MeanFluxFeedback::new(
-            cx, problem.mesh, problem.boundary, &names,
-            &vec![0.0; names.len() * names.len()], entries,
-        ).map_err(lower)?;
-        let fixed = problem.boundary.dirichlet().iter().map(|&(vertex, _)| vertex).collect();
+        let trace = PrescribedFluxControls::new(cx, problem.mesh, problem.boundary,
+            &names, problem.mesh.boundary().len()).map_err(lower)?;
         poll(cx, deadline)?;
-        Ok(Self { rows, powers, trace: Some(trace), fixed, steps: 0 })
+        Ok(Self { rows, powers, trace: Some(trace), steps: 0 })
     }
 
     /// `load_weights` already contains the full timestep convention: capacity
@@ -181,17 +171,16 @@ impl Controls {
     ) -> Result<(), SolveRefusal> {
         poll(cx, deadline)?;
         if let Some(trace) = &self.trace {
-            if load_weights.len() != trace.vertex_count()
-                || self.fixed.iter().any(|&vertex| load_weights.get(vertex) != Some(&0.0))
-            {
-                return Err(bad("heat-flux controls require the complete masked nodal-load multiplier"));
-            }
-            let values = trace.flux_pullback(cx, load_weights).map_err(lower)?;
+            // The native owner checks length, finiteness and zero fixed-node
+            // weights, and includes the outward-load minus exactly once.
+            let values = trace.pullback(cx, load_weights).map_err(lower)?;
             if values.len() != self.rows.len() {
                 return Err(bad("heat-flux controls lost their physical trace ordering"));
             }
             for (row, value) in self.rows.iter_mut().zip(values) {
-                row.derivative = finite(row.derivative - value)?;
+                let PrescribedFluxGradient::Normal(value) = value
+                    else { return Err(bad("project scalar heat flux changed its native coordinate")); };
+                row.derivative = finite(row.derivative + value)?;
             }
         }
         self.steps = self.steps.checked_add(1)

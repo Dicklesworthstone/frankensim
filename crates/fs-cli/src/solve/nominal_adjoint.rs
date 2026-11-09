@@ -460,29 +460,36 @@ fn boundary_pullback(cx: &Cx<'_>, solved: &RungSolved, lambda: &[f64])
     let data = solved.adjoint_data.as_ref().ok_or_else(|| bad("missing boundary operator"))?;
     let mut result: BTreeMap<String, [f64; 3]> = data.boundary.region_names().iter()
         .map(|name| (name.clone(), [0.0; 3])).collect();
+    let flux_names: Vec<_> = data.boundary.region_names().iter()
+        .zip(data.boundary.conditions()).filter_map(|(name, condition)|
+            matches!(condition, ThermalBc::Neumann { .. } | ThermalBc::NeumannVector { .. })
+                .then_some(name.as_str())).collect();
+    if !flux_names.is_empty() {
+        use fs_conduction::adjoint::{PrescribedFluxControls, PrescribedFluxGradient};
+        let controls = PrescribedFluxControls::new(cx, mesh, &data.boundary,
+            &flux_names, mesh.boundary().len()).map_err(lower)?;
+        for (name, gradient) in flux_names.iter().zip(controls.pullback(cx, lambda)
+            .map_err(lower)?)
+        {
+            // ProjectSpec's HeatFlux coordinate is scalar. Unselected vector
+            // forcing stays in the complete primal/dual but has no project row.
+            if let PrescribedFluxGradient::Normal(value) = gradient {
+                result.get_mut(*name).expect("retained flux name")[2] = value;
+            }
+        }
+    }
     for (slot, face) in mesh.boundary().iter().enumerate() {
         if slot % 512 == 0 { poll(cx)?; }
         let Some(region) = data.boundary.region_for(slot) else { continue; };
         let vertices = face.vertices.map(|v| v as usize);
-        let [a, b, c] = vertices.map(|v| mesh.positions()[v]);
-        let u = [b[0]-a[0], b[1]-a[1], b[2]-a[2]];
-        let v = [c[0]-a[0], c[1]-a[1], c[2]-a[2]];
-        let cross = [u[1]*v[2]-u[2]*v[1], u[2]*v[0]-u[0]*v[2], u[0]*v[1]-u[1]*v[0]];
-        let area = finite(0.5 * fs_math::det::sqrt(cross.iter().map(|x| x*x).sum()))?;
         let (h, reference) = match &data.boundary.conditions()[region] {
             ThermalBc::Robin { htc: ScalarField::Uniform(h), t_ref: ScalarField::Uniform(t) } => (*h, *t),
-            ThermalBc::Neumann { .. } => (0.0, 0.0),
-            ThermalBc::Dirichlet { .. } => continue,
+            ThermalBc::Neumann { .. } | ThermalBc::NeumannVector { .. }
+                | ThermalBc::Dirichlet { .. } => continue,
             _ => return Err(bad("native adjoint requires uniform boundary coefficients")),
         };
-        let bars = if matches!(&data.boundary.conditions()[region], ThermalBc::Neumann { .. }) {
-            // Unused Robin contractions must not manufacture an overflow for a
-            // well-defined flux derivative.
-            [0.0, 0.0, finite(-(area / 3.0) * vertices.iter().map(|&v| lambda[v]).sum::<f64>())?]
-        } else {
-            contractions::boundary(area, vertices.map(|v| lambda[v]),
-                vertices.map(|v| solved.solution.temperature[v]), h, reference)
-        };
+        let bars = contractions::boundary(face.area, vertices.map(|v| lambda[v]),
+            vertices.map(|v| solved.solution.temperature[v]), h, reference);
         let total = result.get_mut(&data.boundary.region_names()[region]).expect("retained boundary name");
         for i in 0..3 { total[i] = finite(total[i] + bars[i])?; }
     }

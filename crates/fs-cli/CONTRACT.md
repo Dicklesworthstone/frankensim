@@ -4743,3 +4743,20 @@ above adds closed/open area-mean enclosure feedback for prescribed/scheduled
 boundaries. Contact with total enthalpy, ambient radiation, natural convection
 or transported air and material/contact-scale trajectory controls remain
 outside this product composition.
+
+## Shared original-face prescribed-flux gradients
+
+Steady nominal and transient capacity/enthalpy heat-flux controls now consume
+`fs_conduction::adjoint::PrescribedFluxControls`. The original physical
+nodal-load multiplier supplies state feedback and timestep scaling. Fixed-node
+masking and the outward-flux sign are retained, including inward surface power,
+per-source duties, and trajectories whose initial peak has no future sensitivity.
+
+Transient controls retain sparse face factors instead of allocating full nodal
+basis vectors for every region and a dense zero feedback matrix. Forward and
+reverse memory admission use the same face-based estimate. Existing schedule,
+radiation and physical-law admission remains in force. The project HeatFlux
+schema still authors scalar normal flux; native world-vector derivatives are
+available through the conduction owner without adding a second project schema.
+Pinned Rust syntax and scoped diff checks passed; compilation and native CLI
+regressions were not run in this session.
