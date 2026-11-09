@@ -13,7 +13,12 @@ use fs_phs::PortHamiltonian;
 pub mod continuation;
 
 mod dissipative;
-pub use dissipative::DissipativeAutonomousHamiltonian;
+pub use dissipative::{
+    DissipativeAutonomousHamiltonian, DissipativeAutonomousParameterDirection,
+    DissipativeAutonomousPowerObjective, DissipativeAutonomousSensitivityError,
+    PreparedDissipativeAutonomousAdjoint, PreparedDissipativeAutonomousPowerAdjoint,
+    PreparedDissipativeAutonomousSensitivity,
+};
 
 mod sensitivity;
 pub use sensitivity::{

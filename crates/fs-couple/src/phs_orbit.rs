@@ -107,7 +107,10 @@ mod autonomous;
 /// Full-state parameter branches of the original self-excited pHS.
 pub use autonomous::continuation as autonomous_continuation;
 pub use autonomous::{
-    AutonomousPortFeedback, DissipativeAutonomousHamiltonian, PhsAutonomousControls, PhsAutonomousLevel,
+    AutonomousPortFeedback, DissipativeAutonomousHamiltonian, DissipativeAutonomousParameterDirection,
+    DissipativeAutonomousPowerObjective, DissipativeAutonomousSensitivityError,
+    PreparedDissipativeAutonomousAdjoint, PreparedDissipativeAutonomousPowerAdjoint,
+    PreparedDissipativeAutonomousSensitivity, PhsAutonomousControls, PhsAutonomousLevel,
     PhsAutonomousParameterDirection, PhsAutonomousSensitivityError,
     PhsAutonomousStability, PreparedPhsAutonomousAdjoint, PreparedPhsAutonomousSensitivity,
     PreparedPhsAutonomousPowerAdjoint,

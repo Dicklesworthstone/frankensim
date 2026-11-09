@@ -19,6 +19,13 @@ use fs_phs::{PortHamiltonian, harmonic::equilibrium::LinearizationError};
 
 type Result<T> = core::result::Result<T, DissipativeError>;
 
+mod sensitivity;
+pub use sensitivity::{
+    DissipativeAutonomousParameterDirection, DissipativeAutonomousPowerObjective,
+    DissipativeAutonomousSensitivityError, PreparedDissipativeAutonomousAdjoint,
+    PreparedDissipativeAutonomousPowerAdjoint, PreparedDissipativeAutonomousSensitivity,
+};
+
 struct Scratch {
     effort: Vec<f64>,
     resistance: Vec<f64>,
@@ -47,10 +54,10 @@ struct Scratch {
 /// nothing in this adapter; source callbacks retain their own resource behavior.
 /// Native solver controls bound additional numerical work and memory.
 ///
-/// This owner exposes no parameter-sensitivity/adjoint preparation: the existing
-/// storage/feedback-only wrappers do not describe D's direct parameter law and
-/// must not be used as derivatives of this source. Smooth, read-only sources are
-/// required; hidden history, corners and hybrid events are unsupported.
+/// Its source-bound sensitivity owner includes original storage, J/R/G,
+/// feedback and independent D parameter laws in waveform, natural-frequency
+/// and physical power/work gradients. Smooth, read-only sources are required;
+/// hidden history, corners and hybrid events are unsupported.
 pub struct DissipativeAutonomousHamiltonian<'a> {
     system: &'a PortHamiltonian,
     feedback: &'a dyn AutonomousPortFeedback,

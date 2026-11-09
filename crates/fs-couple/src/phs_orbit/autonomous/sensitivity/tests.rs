@@ -7,6 +7,9 @@ use fs_phs::QuadraticStorage;
 mod automatic_power;
 #[path = "power/tests.rs"]
 mod power;
+// Reuse this independent physical cycle fixture for the complete original D law.
+#[path = "../dissipative/sensitivity/tests.rs"]
+mod nonlinear_loss;
 
 // An active saturating physical-port source feeds a passive rotating pair and
 // two passive relaxation stores. Neither material resistance nor stored energy
