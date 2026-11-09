@@ -4347,3 +4347,41 @@ interior latent points retain stored-energy response with zero temperature
 response. The additional native throughflow regression distinguishes those
 three cases. It is source-reviewed and parsed, not a completed full-runtime
 execution claim.
+
+## Physical boundary drives on the original equilibrium thermal response
+
+`ImplicitConductionChain::prepare_driven_thermal_impedance` and the same
+method on `ThermalOperatingPoint` compile bath-temperature, inlet-enthalpy and
+common fractional mass-flow inputs around the original accepted operating
+field. The original constitutive endpoint, nonsymmetric continuous energy
+tangent, row-scaled complex LU and complete original-row residual gates are
+shared. One frequency factor accepts many combinations of physical drives.
+
+An inlet contributes its actual scheduled mass rate times the supplied
+enthalpy phasor. A common fractional change of every prescribed connection
+contributes the native net advective watts, using the original datum-reduced
+fluxes and continuity-roundoff convention. It preserves fixed mass and any
+admitted frozen stationary composition. Independent valve changes require
+their own continuity/species solve. A stopped pump remains stopped; peak
+fractional amplitudes reaching a zero-flow or reversal corner refuse.
+
+Ordinary ambient/reservoir temperature inputs use the original conductance
+at fixed cell energy. A complete nonlinear boundary without an explicit
+bath-input derivative refuses that selected drive; its original state tangent
+still participates in heat and inlet/pump responses. Bath temperatures must
+remain positive, and retained original inlet laws admit peak enthalpy extrema.
+These are branch/domain checks, not finite-amplitude linear-error bounds.
+
+All inputs use peak exp(-i omega t) phasors and original IDs. Missing physical
+inputs mean zero; heat phasors are additional prescribed watts, with nominal
+source feedback already in the tangent. Compensated deterministic input
+assembly checks cancellation, finite representability and explicit resources.
+The added preparation requires 64*n*n+512*n+128*k numerical bytes and
+64*(n+k) input work allowance beyond the original dense-work bound. No clock,
+event, material inventory, flow history or heat/work credit advances.
+
+Six G1/G3/G4 regressions specify directed combined forcing, original mass and
+bath geometry, frozen schedules, latent energy with zero temperature response,
+formation-datum invariance and input/domain/budget/cancellation refusals.
+They are source-reviewed but not compiled or executed in this session because
+the development executor is disconnected.

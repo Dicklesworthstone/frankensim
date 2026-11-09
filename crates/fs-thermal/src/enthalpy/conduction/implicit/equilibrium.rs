@@ -112,6 +112,19 @@ impl ThermalOperatingPoint<'_, '_, '_> {
         self.report
     }
 
+    /// Reuse this exact operating field for physical bath, inlet-enthalpy and
+    /// continuity-preserving common-pump drives on the original tangent.
+    pub fn prepare_driven_thermal_impedance(
+        &self,
+        budget: ThermalImpedanceBudget,
+        maximum_inlets: usize,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<super::harmonic::driven::DrivenThermalImpedanceModel<'_>, ThermalImpedanceError> {
+        self.owner.prepare_driven_thermal_impedance(
+            &self.state, budget, maximum_inlets, checkpoint,
+        )
+    }
+
     /// Reuse this exact source-bound operating point for small-signal response.
     /// The harmonic owner's support, resource and residual gates remain active.
     pub fn prepare_thermal_impedance(

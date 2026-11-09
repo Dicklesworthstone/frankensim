@@ -22,6 +22,9 @@ mod conservation;
 /// Closed component response with conserved original stored energy.
 #[path = "harmonic/isolated.rs"]
 pub mod isolated;
+/// Original bath, inlet-enthalpy and common-pump input response.
+#[path = "harmonic/driven.rs"]
+pub mod driven;
 
 /// Added dense resources, excluding native graph maps and allocator overhead.
 /// Native preparation keeps its graph budgets; at most 1024 cells are admitted.
@@ -114,8 +117,20 @@ impl ImplicitConductionChain<'_> {
         &self,
         thermal: &DepositionSimulation<'_>,
         budget: ThermalImpedanceBudget,
-        mut checkpoint: impl FnMut() -> core::result::Result<(), DepositionError>,
+        checkpoint: impl FnMut() -> core::result::Result<(), DepositionError>,
     ) -> Result<ThermalImpedanceModel> {
+        self.prepare_thermal_impedance_and_endpoint(thermal, budget, checkpoint)
+            .map(|(model, _)| model)
+    }
+
+    // Physical input preparation consumes this same original endpoint; no
+    // duplicate constitutive solve or separately sampled operating field.
+    fn prepare_thermal_impedance_and_endpoint(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        budget: ThermalImpedanceBudget,
+        mut checkpoint: impl FnMut() -> core::result::Result<(), DepositionError>,
+    ) -> Result<(ThermalImpedanceModel, Endpoint)> {
         checkpoint()?;
         let n = self.ids.len();
         let square = n as u128 * n as u128;
@@ -193,14 +208,14 @@ impl ImplicitConductionChain<'_> {
             .iter()
             .map(|&id| thermal.temperature_k(id))
             .collect::<core::result::Result<Vec<_>, _>>()?;
-        Ok(ThermalImpedanceModel {
+        Ok((ThermalImpedanceModel {
             ids: self.ids.clone(),
             time_s: thermal.time_s,
             temperatures_k,
             temperature_per_energy_k_j: slopes,
             outward_tangent_per_s: tangent,
             budget,
-        })
+        }, endpoint))
     }
 }
 
