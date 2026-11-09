@@ -144,6 +144,8 @@ impl ImplicitConductionChain<'_> {
                 });
             }
             let cell = &thermal.cells[&id];
+            self.laws[&cell.material_id]
+                .admit_harmonic_operating_point(cell.specific_h_j_kg)?;
             let [lo, hi] = self.laws[&cell.material_id].enthalpy_bounds_j_kg();
             if cell.specific_h_j_kg <= lo || cell.specific_h_j_kg >= hi {
                 return Err(invalid(

@@ -281,6 +281,42 @@ fn stationary_schedule_uses_frozen_rates_inlets_mass_and_clock() {
 }
 
 #[test]
+fn original_latent_corners_allow_steady_storage_but_refuse_two_sided_harmonics() {
+    let law = Law {
+        nonlinear_k: false,
+        plateau: true,
+    };
+    for h in [300.0, 400.0, 500.0] {
+        let (thermal, conduction) = setup(&law, &[h], None, vec![]);
+        let flow = throughflow(1, 1.0, h);
+        let system = ImplicitConductionChain::new(
+            &thermal,
+            &conduction,
+            &[(MaterialId(0), &law)],
+            || Ok(()),
+        )
+        .unwrap()
+        .with_implicit_advection(&thermal, &flow, || Ok(()))
+        .unwrap();
+        let point = system
+            .solve_operating_point(
+                &thermal,
+                stationary_controls(),
+                &mut ImplicitConductionWorkspace::new(1).unwrap(),
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(point.specific_enthalpies_j_kg(), &[h]);
+        let response = point.prepare_thermal_impedance(impedance_budget(), || Ok(()));
+        if h == 400.0 {
+            assert!(response.is_ok());
+        } else {
+            assert!(response.is_err());
+        }
+    }
+}
+
+#[test]
 fn stopped_and_closed_flows_do_not_invent_an_energy_reference() {
     let law = Law {
         nonlinear_k: false,

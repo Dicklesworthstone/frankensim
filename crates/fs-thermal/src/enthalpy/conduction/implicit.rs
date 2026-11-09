@@ -144,6 +144,19 @@ pub trait ImplicitConductionLaw {
         Ok(None)
     }
 
+    /// Admit a two-sided local harmonic operating point on the original law.
+    /// A finite-step one-sided tangent at a phase boundary need not define a
+    /// harmonic derivative. Owners with known corners must refuse them here.
+    /// The default preserves the existing caller obligation to choose a smooth
+    /// branch; it is not a differentiability certificate. Time stepping and
+    /// stationary root finding do not use this additional response gate.
+    fn admit_harmonic_operating_point(
+        &self,
+        _specific_h_j_kg: f64,
+    ) -> Result<(), DepositionError> {
+        Ok(())
+    }
+
     /// Resolve temperature and any declared phase observable on this SAME
     /// caloric chart. Owners can override this to share one original inverse.
     /// Requesting phase error control without an observable refuses explicitly.

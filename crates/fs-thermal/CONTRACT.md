@@ -4274,3 +4274,17 @@ frozen schedules and mass, closed/zero-flow refusal, budget/cancellation and
 unsupported reconstruction. Those full-owner tests are added but unexecuted
 here because the real runtime dependency compilation is resource-blocked; no
 full-crate, continuum, stability or forward-error certification is claimed.
+
+
+### Source-declared harmonic phase corners
+
+`ImplicitConductionLaw::admit_harmonic_operating_point` lets the original
+material refuse known derivative corners before ordinary or closed-component
+harmonic preparation. Finite time stepping and stationary solves retain their
+original one-sided constitutive tangents. The default preserves the caller's
+existing differentiable-branch obligation and does not certify smoothness.
+The pure-fluid PR adapter rejects its exact saturated-liquid/vapor endpoints;
+interior latent points retain stored-energy response with zero temperature
+response. The additional native throughflow regression distinguishes those
+three cases. It is source-reviewed and parsed, not a completed full-runtime
+execution claim.

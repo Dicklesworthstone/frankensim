@@ -24368,3 +24368,54 @@ describe declared material heat paths between inventories, not spatially
 resolved temperature variation along one molecular bore. Geometry and wall
 mass remain fixed; expansion work, phase change, adsorption and finite flight
 time remain outside this channel model.
+
+### Shared reacting reservoir outflow quadrature and caloric reference
+
+The existing reacting `EquilibriumGasReservoir` retains a native opaque caloric
+anchor at each accepted physical state. Its finite withdrawal energy uses the
+original direct current-minus-anchor source integral; the immutable birth
+isentrope and elemental ratios remain unchanged. The finite exported stagnation
+enthalpy still accounts for flow work and nozzle kinetic energy exactly once.
+
+`blowdown::midpoint` is the common bounded implicit mass equation
+`dm = dt*mdot(m_old-dm/2)`. The original rocket caller delegates to it and keeps
+its original initial/midpoint/final flow and reservoir admission. Safeguarded
+Newton proposals use an optional actual rate derivative; the measured mass
+residual accepts the result. The outgoing fraction is at most one half and
+excess duration refuses with a midpoint-rule retry bound, without clipping.
+Exact zero rate preserves mass without a trial; final cancellation refuses.
+`blowdown::prepared` shares the original birth-SP workspace, density inversion
+and finite-energy candidate with other flow consumers. An intervening throat
+query cannot be published as the remaining tank: final inventory is resampled.
+
+
+### Pure-fluid PR isobaric latent thermal storage
+
+`thermochemical_gas::nonideal::equilibrium::isobaric` binds the original pure
+PR/NASA source and accepted saturation to the existing ThermalLaw enthalpy
+coordinate. Saturated-liquid h is zero; sensible branches use original stable
+PR responses. The inclusive latent interval selects phase amount at constant T,
+with zero dT/dh and nonzero specific-volume derivative. Temperature alone at
+coexistence cannot select the amount. The global inverse-temperature bound
+uses the original analytic NASA Cv floor and native nonnegative alpha-curvature
+proof; critical, multicomponent and unproved domains refuse.
+
+Complete phase states publish through the original material owner with source
+receipts and its distinct isochoric response. Thermal entropy integrates dh/T;
+a separate original-source entropy query and visible H-T Delta S residual retain
+accepted coexistence error. Direct local H and reciprocal-temperature mean
+gates refuse unresolved intervals without clamping. The implicit adapter
+borrows this exact caloric law, exposes phase fraction for time control and
+requires authored bulk k(T), explicitly independent of quality on the plateau.
+It does not infer morphology or average phase transport. Fixed-pressure
+expansion belongs to enthalpy; reference geometry is not a rigid-volume lock.
+
+One-sided latent endpoints remain usable for finite stepping. The explicit
+native harmonic admission refuses both exact derivative corners, while
+interior latent storage keeps zero temperature response and finite energy
+response. No second heat integrator, phase kinetics or open-flow source datum
+is added. Five original-material regressions cover phase publication, latent
+heating/cooling, derivatives, datum invariance and refusals. They and the added
+native harmonic-corner consumer regression are authored but unexecuted behind
+the runtime build limit; final source files parse and received independent
+source review. The underlying five PR caloric tests executed successfully.

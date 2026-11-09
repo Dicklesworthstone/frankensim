@@ -52,6 +52,13 @@ impl ConductivityLaw for Law {
     }
 }
 impl ImplicitConductionLaw for Law {
+    fn admit_harmonic_operating_point(&self, h: f64) -> Result<(), DepositionError> {
+        if self.plateau && (h == 300.0 || h == 500.0) {
+            Err(DepositionError::MaterialDomain)
+        } else {
+            Ok(())
+        }
+    }
     fn caloric_law(&self) -> &dyn ThermalLaw {
         self
     }

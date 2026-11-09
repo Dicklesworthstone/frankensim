@@ -11,6 +11,8 @@
 pub mod parcel;
 /// Explicit homogeneous-equilibrium pressure, entropy and acoustic response.
 pub mod acoustics;
+/// Original pure-fluid sensible/latent enthalpy on the finite thermal timeline.
+pub mod isobaric;
 
 use fs_qty::{Density, Pressure, Temperature};
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
@@ -458,6 +460,19 @@ impl ThermochemicalPengRobinsonModel {
             };
             (phase, homogeneous.pressure())
         };
+        self.publish_pure_equilibrium_phase(temperature, pressure, density, phase)
+    }
+
+    // One source publication owner for density-constrained and isobaric paths.
+    // The already selected native roots/phase amount are retained unchanged.
+    fn publish_pure_equilibrium_phase(
+        &self,
+        temperature: Temperature,
+        pressure: Pressure,
+        density: f64,
+        phase: PureFluidEquilibriumPhase,
+    ) -> Result<PureFluidEquilibriumState, E> {
+        let molar_mass = self.mechanics().molar_mass().value();
         let reference = self
             .source()
             .thermodynamics()
@@ -466,7 +481,7 @@ impl ThermochemicalPengRobinsonModel {
         let properties = reference.properties();
         let u = (properties.u().value() + phase.residual_u()) / molar_mass;
         let h = (properties.h().value() + phase.residual_h()) / molar_mass;
-        let s = (properties.s().value() + phase.residual_s(t)) / molar_mass;
+        let s = (properties.s().value() + phase.residual_s(temperature.value())) / molar_mass;
         let tangent = phase.complete_cv(properties.cv().value())? / molar_mass;
         if ![u, h, s].into_iter().all(f64::is_finite) || !positive(tangent) {
             return Err(E::Invalid(
