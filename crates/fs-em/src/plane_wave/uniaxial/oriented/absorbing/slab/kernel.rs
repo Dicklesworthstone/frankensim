@@ -1,7 +1,7 @@
 //! Fixed-size matching of the original complex Maxwell modes at both faces.
 use super::super::super::{
     kernel::{cross, unit},
-    slab::kernel::{exit_basis, finite, flux, positive, solve_boundary, tangential},
+    slab::kernel::{exit_basis_from_incidence, finite, flux, positive, solve_boundary, tangential},
 };
 use super::super::kernel::{Input, eigenbasis};
 use super::{AbsorbingSlabResponse, AbsorbingSlabWave, C0, Vector};
@@ -106,7 +106,6 @@ pub(super) fn solve_from_both_sides(
     let ih =
         cross([C64::from_re(p), C64::ZERO, C64::from_re(qi)], ie).map(|v| v.scale(incident_hscale));
     let incoming_left = flux(ie, ih);
-    let port_p = p * basis.scale;
     let reflected = [
         Wave {
             normal_wavenumber_rad_m: C64::from_re(-kscale * qi),
@@ -156,7 +155,8 @@ pub(super) fn solve_from_both_sides(
             UniaxialWaveKind::Propagating,
         )
     } else {
-        let basis = exit_basis(data.omega, port_p, exit_index, exit_mu)?;
+        let basis =
+            exit_basis_from_incidence(data.omega, data.ni, data.incidence, exit_index, exit_mu)?;
         let kind = basis[0].wave_kind;
         (
             basis.map(|w| Wave {

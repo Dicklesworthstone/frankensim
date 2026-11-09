@@ -1,6 +1,8 @@
 //! Fixed-size two-face Maxwell matching with bounded propagation factors.
 use super::super::super::kernel::{UniaxialWaveKind, binary_scale, outgoing_root};
-use super::super::kernel::{Eigenbasis, FieldSum, Input as ModeInput, WaveGeometry, eigenbasis};
+use super::super::kernel::{
+    Eigenbasis, FieldSum, Input as ModeInput, WaveGeometry, eigenbasis, incident_coordinates,
+};
 use super::super::spectrum::{UniaxialSpectrumField, rotate};
 use super::super::{Incidence, ResolvedFrequency};
 use crate::plane_wave::angular_spectrum::{AngularSpectrumError, modes::propagation};
@@ -283,9 +285,10 @@ pub(super) fn solve(
             magnetic_a_m: [C64::ZERO, C64::from_re(-i * incident_hscale), C64::ZERO],
         },
     ];
-    let exit = exit_basis(
+    let exit = exit_basis_from_incidence(
         f.omega,
-        p * basis.scale,
+        f.ni,
+        incidence,
         positive(data.exit_index)?,
         positive(data.exit_mu_h_m)?,
     )?;
@@ -448,6 +451,42 @@ pub(in super::super) fn crystal_basis(
     Ok((basis, forward, backward))
 }
 
+/// Resolve an exterior mode from the ORIGINAL incident coordinate. In
+/// particular, a positive cosine must not be replaced by its rounded sine:
+/// that loses shallow normal propagation and can change the critical side.
+pub(in super::super) fn exit_basis_from_incidence(
+    omega: f64,
+    incident_index: f64,
+    incidence: Incidence,
+    index: f64,
+    mu: f64,
+) -> Result<[SlabWave; 2]> {
+    let cosine = match incidence {
+        Incidence::Cosine(value) => value,
+        Incidence::TangentialIndex(p) => return exit_basis(omega, p, index, mu),
+    };
+    positive(incident_index)?;
+    if cosine == 1.0 {
+        // Do not scale a normal-incidence exit by an unrelated large entrance
+        // index; the original zero tangential coordinate is exact.
+        return exit_basis(omega, 0.0, index, mu);
+    }
+    let scale = binary_scale(positive(index)?.max(incident_index));
+    let n = positive(index / scale)?;
+    let (p, p_squared, incident_normal) =
+        incident_coordinates(incident_index, scale, positive(incident_index / scale)?, incidence)?;
+    let (q, kind) = if index == incident_index {
+        // Keep the original positive cosine even below the precision of its
+        // square. Equal phase indices share the same normal wavevector;
+        // their original permeabilities may still differ.
+        (C64::from_re(incident_normal), UniaxialWaveKind::Propagating)
+    } else {
+        let nd = Dd::from_f64(n);
+        outgoing_root(nd * nd - p_squared)?
+    };
+    exit_fields(omega, scale, p, n, q, kind, mu)
+}
+
 pub(in super::super) fn exit_basis(omega: f64, p: f64, index: f64, mu: f64) -> Result<[SlabWave; 2]> {
     let scale = binary_scale(index.max(p.abs()));
     let n = positive(index / scale)?;
@@ -457,6 +496,20 @@ pub(in super::super) fn exit_basis(omega: f64, p: f64, index: f64, mu: f64) -> R
     let pd = Dd::from_f64(p / scale);
     let nd = Dd::from_f64(n);
     let (q, kind) = outgoing_root(nd * nd - pd * pd)?;
+    exit_fields(omega, scale, p / scale, n, q, kind, mu)
+}
+
+// One original isotropic E/H port basis, shared by both admitted incident
+// coordinate forms. Inputs p, n and q share the same power-of-two scale.
+fn exit_fields(
+    omega: f64,
+    scale: f64,
+    p: f64,
+    n: f64,
+    q: C64,
+    kind: UniaxialWaveKind,
+    mu: f64,
+) -> Result<[SlabWave; 2]> {
     let h = positive(scale / (mu * C0))?;
     let kz = q.scale(positive((omega / C0) * scale)?);
     if !finite(kz) || q.re != 0.0 && kz.re == 0.0 || q.im != 0.0 && kz.im == 0.0 {
@@ -467,12 +520,12 @@ pub(in super::super) fn exit_basis(omega: f64, p: f64, index: f64, mu: f64) -> R
             wave_kind: kind,
             normal_wavenumber_rad_m: kz,
             electric_v_m: [C64::ZERO, C64::ONE, C64::ZERO],
-            magnetic_a_m: [-q.scale(h), C64::ZERO, C64::from_re((p / scale) * h)],
+            magnetic_a_m: [-q.scale(h), C64::ZERO, C64::from_re(p * h)],
         },
         SlabWave {
             wave_kind: kind,
             normal_wavenumber_rad_m: kz,
-            electric_v_m: [q.scale(1.0 / n), C64::ZERO, C64::from_re(-(p / scale) / n)],
+            electric_v_m: [q.scale(1.0 / n), C64::ZERO, C64::from_re(-p / n)],
             magnetic_a_m: [C64::ZERO, C64::from_re(n * h), C64::ZERO],
         },
     ])

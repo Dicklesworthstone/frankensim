@@ -1695,3 +1695,157 @@ fn g1_oriented_group_transport_retains_original_sources_and_the_exact_prepared_c
         assert!(interface.group_velocity_response(frequency(wavelength), 0.8, electric).is_err());
     }
 }
+
+#[test]
+fn original_sources_preserve_matched_extraordinary_power_at_grazing_incidence() {
+    use crate::plane_wave::uniaxial::oriented::OrientedUniaxialInterface;
+    use fs_math::det;
+
+    let outside = incident(1.5, MU);
+    let omega = frequency(550.0);
+    // Match the ACTUAL incident law, including its native permittivity-to-index
+    // rounding. A separately rounded nominal 1.5 is a different cutoff.
+    let epsilon = DielectricResponse::Lossless(&outside)
+        .lossless_permittivity(omega)
+        .unwrap();
+    let ni = (C0 * det::sqrt(MU)) * det::sqrt(epsilon);
+    let (ordinary, extraordinary) = axes([1.0; 2], [ni; 2], [0.0; 2], Some(MU), [400.0, 800.0], 0);
+    let crystal = UniaxialOpticalResponse::try_new(&ordinary, &extraordinary, SPAN).unwrap();
+    let interface = OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&outside),
+        crystal,
+        [0.0, 0.0, 1.0],
+    )
+    .unwrap();
+    assert!(core::ptr::eq(
+        interface.crystal_response().extraordinary_source(),
+        &extraordinary,
+    ));
+    for cosine in [1e-10, 1e-16, 1e-20] {
+        let result = interface
+            .response(omega, cosine, [C64::from_re(cosine), C64::ZERO])
+            .unwrap();
+        let transmitted = result.transmitted[1];
+        let kz = (omega / C0) * cosine;
+        assert_eq!(transmitted.wave_kind, UniaxialWaveKind::Propagating);
+        near(transmitted.normal_wavenumber_rad_m.re, kz, 4e-14 * kz);
+        assert_eq!(transmitted.normal_wavenumber_rad_m.im, 0.0);
+        assert!(transmitted.normal_power_w_m2 > 0.0);
+        near(
+            result.transmitted_power_fraction,
+            4.0 * ni / ((ni + 1.0) * (ni + 1.0)),
+            4e-14,
+        );
+        near(
+            result.reflected_power_fraction + result.transmitted_power_fraction,
+            1.0,
+            4e-14,
+        );
+    }
+}
+
+#[test]
+fn original_homogeneous_sources_keep_grazing_phase_through_slabs_and_stacks() {
+    use crate::plane_wave::uniaxial::oriented::{
+        OrientedUniaxialInterface,
+        slab::{OrientedUniaxialSlab, SlabRegion},
+        stack::{OrientedUniaxialStack, StackRegion, UniaxialStackLayer, UniaxialStackLimits},
+    };
+    use fs_math::det;
+
+    let outside = incident(1.5, MU);
+    let epsilon = DielectricResponse::Lossless(&outside)
+        .lossless_permittivity(frequency(550.0))
+        .unwrap();
+    let ni = (C0 * det::sqrt(MU)) * det::sqrt(epsilon);
+    let (ordinary, extraordinary) = axes([ni; 2], [ni; 2], [0.0; 2], Some(MU), [400.0, 800.0], 0);
+    let crystal = UniaxialOpticalResponse::try_new(&ordinary, &extraordinary, SPAN).unwrap();
+    let entrance = OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&outside),
+        crystal,
+        [1.0, 2.0, 3.0],
+    )
+    .unwrap();
+    for wavelength in [450.0, 650.0] {
+        let omega = frequency(wavelength);
+        for cosine in [1e-8, 1e-10, 1e-12] {
+            let kz = (omega / C0) * ni * cosine;
+            // Keep a finite, measurable normal phase at every grazing cosine.
+            let first_depth = 0.23 / kz;
+            let second_depth = 0.37 / kz;
+            let depth = first_depth + second_depth;
+            let electric = [C64::new(0.7 * cosine, -0.2 * cosine), C64::new(0.3, 0.4)];
+            let slab = OrientedUniaxialSlab::try_new(
+                &entrance,
+                DielectricResponse::Lossless(&outside),
+                depth,
+            )
+            .unwrap();
+            let layers = [
+                UniaxialStackLayer::try_new(crystal, [1.0, 2.0, 3.0], first_depth).unwrap(),
+                UniaxialStackLayer::try_new(crystal, [2.0, -1.0, 1.0], second_depth).unwrap(),
+            ];
+            let stack = OrientedUniaxialStack::try_new(
+                DielectricResponse::Lossless(&outside),
+                DielectricResponse::Lossless(&outside),
+                &layers,
+                UniaxialStackLimits {
+                    maximum_layers: 2,
+                    maximum_workspace_bytes: 50_000,
+                },
+            )
+            .unwrap();
+            let a = slab.response(omega, cosine, electric).unwrap();
+            let b = stack.response(omega, cosine, electric, || false).unwrap();
+            for (kind, normal, reflected, transmitted) in [
+                (
+                    a.exit_wave_kind,
+                    a.exit_normal_wavenumber_rad_m,
+                    a.reflected_power_fraction,
+                    a.transmitted_power_fraction,
+                ),
+                (
+                    b.exit_wave_kind,
+                    b.exit_normal_wavenumber_rad_m,
+                    b.reflected_power_fraction,
+                    b.transmitted_power_fraction,
+                ),
+            ] {
+                assert_eq!(kind, UniaxialWaveKind::Propagating);
+                near(normal.re, kz, 4e-14 * kz);
+                assert_eq!(normal.im, 0.0);
+                near(reflected, 0.0, 4e-12);
+                near(transmitted, 1.0, 4e-12);
+            }
+            for (index, layer) in b.layers.iter().enumerate() {
+                let z = 0.5 * (layer.entrance_z_m + layer.exit_z_m);
+                let field_a = a.field_at(SlabRegion::Crystal, [0.0, 0.0, z]).unwrap();
+                let field_b = b
+                    .field_at(StackRegion::Layer(index), [0.0, 0.0, z])
+                    .unwrap();
+                let phase = C64::new(det::cos(kz * z), -det::sin(kz * z));
+                for component in 0..3 {
+                    let expected_e = a.incident_electric_v_m[component] * phase;
+                    let expected_h = a.incident_magnetic_a_m[component] * phase;
+                    complex_near(field_a.electric_v_m[component], expected_e, 4e-12);
+                    complex_near(field_b.electric_v_m[component], expected_e, 4e-12);
+                    complex_near(field_a.magnetic_a_m[component], expected_h, 4e-14);
+                    complex_near(field_b.magnetic_a_m[component], expected_h, 4e-14);
+                }
+            }
+            // A caller-authored tangential index exactly at ni is critical;
+            // it does not carry the positive cosine retained above.
+            assert!(
+                slab.response_at_tangential_index(omega, ni, electric)
+                    .is_err()
+            );
+            assert!(
+                stack
+                    .response_at_tangential_index(omega, ni, electric, || false)
+                    .is_err()
+            );
+            assert!(slab.response(omega, 0.0, electric).is_err());
+            assert!(stack.response(omega, 0.0, electric, || false).is_err());
+        }
+    }
+}

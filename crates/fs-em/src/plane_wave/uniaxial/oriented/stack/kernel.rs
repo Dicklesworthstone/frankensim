@@ -4,7 +4,7 @@ use super::super::kernel::{FieldSum, Input as ModeInput, WaveGeometry};
 use super::super::{Incidence, slab::SlabWave};
 use super::super::super::kernel::UniaxialWaveKind;
 use super::super::slab::kernel::{
-    combine, crystal_basis, exit_basis, finite, flux, positive, solve_boundary, tangential,
+    combine, crystal_basis, exit_basis_from_incidence, finite, flux, positive, solve_boundary, tangential,
 };
 use super::super::spectrum::{UniaxialSpectrumField, rotate};
 use crate::plane_wave::angular_spectrum::modes::propagation;
@@ -237,17 +237,18 @@ pub(super) fn solve(
     let mut work=Vec::new();
     work.try_reserve_exact(data.layers.len()).map_err(|_| bad("uniaxial stack workspace allocation failed"))?;
     let mut first=None;
-    let mut conserved_p=0.0;
     for layer in &data.layers {
         poll(cancelled)?;
         let [x,y,z]=layer.axis;
         let (basis,forward,backward)=crystal_basis(ModeInput {
             omega:data.omega,ni:data.ni,no:layer.no,ne:layer.ne,mui:data.mui,mut_:layer.mu,
             axis:[x*plane[0]+y*plane[1],y*plane[0]-x*plane[1],z],
-            incidence:if first.is_none() {incidence} else {Incidence::TangentialIndex(conserved_p)},
+            // Every layer retains the SAME original incident index and
+            // coordinate. Replacing cosine by rounded p loses shallow flux.
+            incidence,
             electric,
         }).map_err(bad)?;
-        if first.is_none() { conserved_p=basis.p*basis.scale; first=Some(basis); }
+        if first.is_none() { first=Some(basis); }
         let mut phases=[[C64::ZERO;2];2];
         for j in 0..2 {
             phases[0][j]=propagation(forward[j].normal_wavenumber_rad_m,layer.thickness)
@@ -283,7 +284,7 @@ pub(super) fn solve(
             electric_v_m:[C64::from_re(q/n),C64::ZERO,C64::from_re(p/n)],
             magnetic_a_m:[C64::ZERO,C64::from_re(-n*hscale),C64::ZERO]},
     ];
-    let exit=exit_basis(data.omega,conserved_p,data.nt,data.mut_).map_err(bad)?;
+    let exit=exit_basis_from_incidence(data.omega,data.ni,incidence,data.nt,data.mut_).map_err(bad)?;
     let mut next=trace(exit);
     for layer in work.iter_mut().rev() {
         poll(cancelled)?;

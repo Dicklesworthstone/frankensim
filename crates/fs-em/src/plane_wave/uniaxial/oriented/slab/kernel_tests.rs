@@ -425,3 +425,83 @@ fn original_slab_exit_retains_a_late_evanescent_field_without_fictitious_heat() 
     assert_eq!(r.transmitted_power_fraction, 0.0);
     assert_eq!(tail.poynting_w_m2[2], 0.0);
 }
+
+#[test]
+fn grazing_exit_retains_the_authored_cosine_and_critical_side() {
+    for cosine in [1e-8, 1e-10, 1e-20, 1e-160] {
+        for permeability in [0.7 * MU, MU, 1.3 * MU] {
+            let waves = exit_basis_from_incidence(
+                C0, 1.5, Incidence::Cosine(cosine), 1.5, permeability,
+            )
+            .unwrap();
+            for wave in waves {
+                assert_eq!(wave.wave_kind, UniaxialWaveKind::Propagating);
+                near(wave.normal_wavenumber_rad_m.re, 1.5 * cosine, 4e-15 * 1.5 * cosine);
+                assert_eq!(wave.normal_wavenumber_rad_m.im, 0.0);
+                assert!(flux(wave.electric_v_m, wave.magnetic_a_m) > 0.0);
+            }
+        }
+    }
+    // Binary64 0.6 lies just below the exact critical cosine 3/5 for
+    // ni=5/4, nt=1. Its rounded tangential index is nevertheless exactly 1.
+    // The next cosine float propagates; explicitly authored p=1 is critical.
+    for (cosine, expected) in [
+        (0.6_f64, UniaxialWaveKind::Evanescent),
+        (0.6_f64.next_up(), UniaxialWaveKind::Propagating),
+    ] {
+        let waves =
+            exit_basis_from_incidence(C0, 1.25, Incidence::Cosine(cosine), 1.0, MU).unwrap();
+        assert_eq!(waves[0].wave_kind, expected);
+        if expected == UniaxialWaveKind::Evanescent {
+            assert!(waves[0].normal_wavenumber_rad_m.im < 0.0);
+        } else {
+            assert!(waves[0].normal_wavenumber_rad_m.re > 0.0);
+        }
+    }
+    let critical =
+        exit_basis_from_incidence(C0, 1.25, Incidence::TangentialIndex(1.0), 1.0, MU).unwrap();
+    assert_eq!(critical[0].wave_kind, UniaxialWaveKind::Critical);
+    assert_eq!(critical[0].normal_wavenumber_rad_m, C64::ZERO);
+    assert!(exit_basis_from_incidence(C0, 1.5, Incidence::Cosine(0.0), 1.5, MU).is_err());
+}
+
+#[test]
+fn grazing_homogeneous_slab_keeps_unit_transmission_and_actual_phase() {
+    let data = input(1.5, 1.5, 1.5, 1.5, 0.7, [0.3, 0.5, -0.7]);
+    for cosine in [1e-8, 1e-10, 1e-12] {
+        for electric in [
+            [C64::ZERO, C64::new(0.7, -0.2)],
+            [C64::new(0.7 * cosine, -0.2 * cosine), C64::ZERO],
+            [C64::new(0.7 * cosine, -0.2 * cosine), C64::new(-0.4, 0.3)],
+        ] {
+            let response = solve(data, Incidence::Cosine(cosine), electric).unwrap();
+            let normal = data.crystal.ni * cosine;
+            assert_eq!(response.exit_wave_kind, UniaxialWaveKind::Propagating);
+            near(response.exit_normal_wavenumber_rad_m.re, normal, 4e-15 * normal);
+            assert!(response.reflected_power_fraction < 2e-24);
+            near(response.transmitted_power_fraction, 1.0, 2e-12);
+            for (region, z) in [
+                (SlabRegion::Crystal, data.thickness_m / 3.0),
+                (SlabRegion::Transmitted, data.thickness_m),
+            ] {
+                let field = response.field_at(region, [0.0, 0.0, z]).unwrap();
+                let transfer = phase(normal * z);
+                for (actual, incident) in [
+                    (field.electric_v_m, response.incident_electric_v_m),
+                    (field.magnetic_a_m, response.incident_magnetic_a_m),
+                ] {
+                    for j in 0..3 {
+                        complex_near(
+                            actual[j],
+                            incident[j] * transfer,
+                            5e-12 * incident[j].abs().max(1e-300),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let electric = [C64::ONE, C64::ONE];
+    assert!(solve(data, Incidence::Cosine(0.0), electric).is_err());
+    assert!(solve(data, Incidence::TangentialIndex(data.crystal.ni), electric).is_err());
+}

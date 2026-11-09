@@ -150,3 +150,52 @@ fn critical_exit_and_internal_critical_refusal_and_cancellation_are_explicit() {
     assert!(r.field_at(StackRegion::Layer(0),[0.0,0.0,0.8]).is_err());
     assert!(r.field_at(StackRegion::Incident,[0.0,0.0,0.1]).is_err());
 }
+
+#[test]
+fn grazing_homogeneous_stack_keeps_original_incidence_in_every_layer() {
+    for count in [1, 2, 5] {
+        let rows: Vec<_> = (0..count)
+            .map(|j| (1.5, 1.5, 0.21, [0.3 + j as f64, 0.5, -0.7]))
+            .collect();
+        let data = fixture(1.5, 1.5, &rows);
+        for cosine in [1e-8, 1e-10, 1e-12] {
+            let electric = [C64::new(0.7 * cosine, -0.2 * cosine), C64::new(-0.4, 0.3)];
+            let response = solve(
+                &data, Incidence::Cosine(cosine), electric, [1.0, 0.0], &mut || false,
+            )
+            .unwrap();
+            let normal = data.ni * cosine;
+            assert_eq!(response.exit_wave_kind, UniaxialWaveKind::Propagating);
+            close(response.exit_normal_wavenumber_rad_m.re, normal, 4e-15 * normal);
+            assert!(response.reflected_power_fraction < 2e-24);
+            close(response.transmitted_power_fraction, 1.0, 5e-12);
+            let compare = |field: UniaxialSpectrumField, z: f64| {
+                let transfer = C64::new((normal * z).cos(), -(normal * z).sin());
+                for (actual, incident) in [
+                    (field.electric_v_m, response.incident_electric_v_m),
+                    (field.magnetic_a_m, response.incident_magnetic_a_m),
+                ] {
+                    for j in 0..3 {
+                        zclose(actual[j], incident[j] * transfer,
+                            5e-12 * incident[j].abs().max(1e-300));
+                    }
+                }
+            };
+            for (j, layer) in response.layers.iter().enumerate() {
+                for wave in &layer.forward {
+                    assert_eq!(wave.wave_kind, UniaxialWaveKind::Propagating);
+                    close(wave.normal_wavenumber_rad_m.re, normal, 4e-15 * normal);
+                }
+                let z = 0.5 * layer.entrance_z_m + 0.5 * layer.exit_z_m;
+                compare(response.field_at(StackRegion::Layer(j), [0.0, 0.0, z]).unwrap(), z);
+            }
+            compare(
+                response.field_at(StackRegion::Transmitted, [0.0, 0.0, response.thickness_m]).unwrap(),
+                response.thickness_m,
+            );
+        }
+        let electric = [C64::ONE, C64::ONE];
+        assert!(solve(&data, Incidence::Cosine(0.0), electric, [1.0, 0.0], &mut || false).is_err());
+        assert!(solve(&data, Incidence::TangentialIndex(data.ni), electric, [1.0, 0.0], &mut || false).is_err());
+    }
+}

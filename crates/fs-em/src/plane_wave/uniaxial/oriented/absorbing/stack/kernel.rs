@@ -8,7 +8,7 @@
 use super::super::super::{
     Incidence, OrientedCrystalField,
     kernel::FieldSum,
-    slab::kernel::{exit_basis, finite, flux, positive, solve_boundary, tangential},
+    slab::kernel::{exit_basis_from_incidence, finite, flux, positive, solve_boundary, tangential},
 };
 use super::super::{
     AbsorbingCrystalField,
@@ -318,7 +318,8 @@ pub(super) fn solve(
             UniaxialWaveKind::Propagating,
         )
     } else {
-        let exit = exit_basis(data.omega, p * basis.scale, data.nt, data.mut_).map_err(bad)?;
+        let exit =
+            exit_basis_from_incidence(data.omega, data.ni, incidence, data.nt, data.mut_).map_err(bad)?;
         let kind = exit[0].wave_kind;
         (
             exit.map(|wave| Wave {
