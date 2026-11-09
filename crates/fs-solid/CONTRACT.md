@@ -14256,39 +14256,85 @@ held physical frequency. `solve` accepts peak force phasors in ALL original
 node-major displacement coordinates, including support entries. It retains the
 original full consistent reference mass, mixed material/geometric tangent,
 follower-pressure or conservative-gravity tangent already in that equilibrium,
-pressure ordering, and admitted gauge. Pressure has no mass. Supports have zero
-incremental displacement about their original absolute static motion.
+pressure ordering, and admitted gauge. Pressure has no mass. `solve` keeps zero
+incremental support displacement. `solve_with_support_motion` additionally
+accepts finite peak displacement phasors on strictly increasing original
+prescribed DOFs; omitted supports have zero increment. These are perturbations
+about the original absolute static motion, not a new equilibrium or support map.
 
-Finite compliance uses the original condensed stiffness and `dp=R du`. Exact
-incompressibility projects force through the COMPLETE retained nullspace, then
+Finite compliance uses the original condensed stiffness and `dp=R du`. Moving
+supports add `p_g=H^-1 B_support g`, using the ORIGINAL pressure-compliance LDLT
+factor retained from vibration preparation under its original factor-byte cap.
+There is no second pressure factorization at a frequency or a forcing solve.
+Exact incompressibility projects force through the COMPLETE retained nullspace, then
 recovers pressure from the original forced momentum equation using one reused
 native QR factor. Constraint-blocked loading can therefore produce nonzero
 pressure with zero displacement; summing modal pressure shapes alone would miss
 this contribution. A zero-dimensional admissible space remains a pressure-only
-solve. No modes are discarded and no bulk penalty or physical damping is added.
+solve for fixed supports. For moving supports, the SAME scaled `B_free^T/s=Q1 R`
+factor gives the minimum-Euclidean-norm lift `u0=Q1 R^-T(-B_support g/s)`; native
+fs-la LU owns the small triangular-factor solve. The existing homogeneous
+harmonic factor then solves for the correction in `u_free=u0+Z q`. All original
+weak volume equations, including a gauge row omitted from QR, must accept the
+complete displacement. Incompatible prescribed volume is refused even when the
+independent equations have a solution. A zero-dimensional homogeneous space can
+still move through this unique compatible lift. No modes are discarded and no
+bulk penalty, normal equations, pressure inertia or physical damping is added.
+The exact-constraint Galerkin mass and stiffness each compute one triangle and
+mirror it after qualifying the original source's conservative symmetry. The
+finite-compliance mass and completed Schur stiffness likewise qualify both
+triangles before canonical storage. This preserves exact stored symmetry
+without accepting a materially skew source or weakening the native harmonic
+owner's symmetry gate. Physical residuals still use the original full operators.
 Native harmonic admission refuses singular lossless poles.
 
 Returned displacement, velocity and pressure use original physical coordinates.
 Support reactions are `(Kuu-omega² M)du + Kup dp - authored_force`; full support
 mass coupling is retained and an authored support force is subtracted once.
+The complete dynamic action on the prescribed displacement and constraint lift
+enters the free right-hand side, including `-omega² M_free,support g`, pressure
+coupling and all original conservative load tangents. A static support force or
+unlifted nullspace projection cannot substitute for this base excitation.
 Every original pressure equation, including the gauge row, and every free
 momentum equation must meet their respective backward-error budgets before
-publication. Reported cycle-mean input power is signed numerical external work,
-not material heat or a passivity certificate.
+publication. Each physical equation block uses `max(abs(residual))` divided by
+the maximum row sum of absolute uncancelled terms, matching the original mixed
+vibration owner. Momentum and weak volume are normalized separately without an
+absolute unit floor. An individually zero-action row cannot reject a valid
+hydrostatic pressure response merely because both its residual and denominator
+are floating-point noise; every row still contributes to the block audit.
+Reported cycle-mean input power is `Re(F^H v)/2`, including applied
+support-coordinate loads. Support power is separately `Re(R_support^H
+v_support)/2`, positive for work supplied BY the support ON the solid. Their sum
+is the signed lossless power-balance residual. These are independently computed
+external work terms, not material heat or a passivity certificate. The nested
+native harmonic response describes the homogeneous correction only; its force
+and power do not replace the complete physical account when supports move.
 
 `HarmonicResponseControls` counts free displacement coordinates BEFORE exact
 constraint reduction. Its payload cap covers the adapter, QR, native harmonic
-factor/preparation, and one physical response; the borrowed original matrices
-retain their original budgets and are excluded from this extra payload count.
-Native QR is bounded by the original 128-free-displacement cap and polled before
-and after; sparse audits and physical-vector work poll cancellation. The source
+factor/preparation, affine lifting, and one physical response; the borrowed
+original matrices and finite-compliance factor retain their original budgets
+and are excluded from this extra payload count. With n free displacements,
+m independent exact pressures, r=n-m (r=n for finite bulk), nu original
+displacements and np pressures, the bound is `144*r²+128*r` native bytes plus
+`8*r²+24*n*m+48*m²+256*(nu+np+n)+4096` adapter bytes. Native QR and the triangular
+factor LU are bounded by the original 128-free-displacement cap and polled
+before and after; the original sparse pressure solves retain their native
+synchronous semantics with polls around each call. Sparse audits and
+physical-vector work poll cancellation. The source
 equilibrium and prepared factors remain immutable after all refusals.
 
 This is a frozen-equilibrium small-perturbation response, not finite-amplitude
 material admission, nonlinear transient motion, evolving source/history,
-moving incremental supports, thermoelastic recoupling or physical damping.
-`tests/mixed_up/harmonic.rs` defines four G1/G3 native regression groups for the
+support-actuator dynamics, thermoelastic recoupling or physical damping.
+`tests/mixed_up/harmonic.rs` defines G1/G3 native regression groups for the
 loaded finite-bulk analytic response, hydrostatic force with zero motion,
 graded inertia with pressure gauge and support reactions, and zero-dimensional
-constraints plus budgets/cancellation. These are discrete implementation
+constraints plus budgets/cancellation. Moving-support regressions compare the
+complete original mixed KKT solve against finite-bulk and exact affine-lift
+responses, including graded cross-support inertia, DC and nonzero frequency,
+zero-dimensional motion, signed actuator work, gauge-preserving rigid
+translation, incompatible volume, support-map admission and cancellation.
+These are discrete implementation
 checks, not continuum convergence or physical calibration.

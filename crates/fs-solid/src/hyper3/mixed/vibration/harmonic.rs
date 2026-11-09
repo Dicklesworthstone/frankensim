@@ -8,18 +8,19 @@
 //!
 //! The response is a lossless, frozen-equilibrium linear perturbation under
 //! exp(-i omega t). It is not a finite-amplitude constitutive admission, startup
-//! trajectory, evolving thermal/history solve or damping model. Original
-//! supports have zero incremental motion. Singular lossless poles refuse.
+//! trajectory, evolving thermal/history solve or damping model. Prescribed
+//! support increments lift BOTH momentum and the original weak pressure
+//! equations. Singular lossless poles and incompatible volume motion refuse.
 
 use fs_exec::Cx;
-use fs_la::factor::{Qr, qr};
+use fs_la::factor::{Lu, Qr, lu, qr};
 use fs_material::hyper::cards::HyperelasticMaterial;
 use fs_material::hyper::mixed::MixedFiniteStrainPotential;
 use fs_math::c64::C64;
 use fs_modal::harmonic::{
     HarmonicResponse, HarmonicResponseControls, HarmonicResponseError, PreparedHarmonicResponse,
 };
-use fs_sparse::Csr;
+use fs_sparse::{Csr, LdltFactor};
 
 use super::super::{MixedUpError, checkpoint};
 use super::MixedUpVibration;
@@ -63,7 +64,7 @@ fn finite(value: C64) -> bool {
 /// Peak perturbations about the retained static equilibrium, in original units.
 #[derive(Clone, Debug)]
 pub struct MixedHarmonicResponse {
-    /// Original node-major xyz ordering, including zero increments at supports.
+    /// Original node-major xyz ordering, including prescribed support increments.
     pub displacement_m: Vec<C64>,
     pub velocity_m_s: Vec<C64>,
     /// Original equilibrium.pressure_nodes order; the original gauge has zero
@@ -74,14 +75,25 @@ pub struct MixedHarmonicResponse {
     /// An authored force at a support is subtracted exactly once.
     pub support_reaction_n: Vec<(usize, C64)>,
     /// Original free momentum and ALL weak pressure equations, respectively.
+    /// Each block uses max(abs(residual)) / max(row sum of abs(terms)). The
+    /// force and volume blocks have separate physical scales, without a unit
+    /// floor; rows whose physical action vanishes do not amplify roundoff.
     pub momentum_relative_residual: f64,
     pub pressure_relative_residual: f64,
     /// Re(F^H v)/2 from the original full force and velocity [W]. This is
     /// signed numerical work; no dissipation or material heat is inferred.
     pub average_input_power_w: f64,
+    /// Re(R_support^H v_support)/2 [W], signed work supplied BY the supports
+    /// ON the solid. Applied support-coordinate forces are counted above.
+    pub average_support_power_w: f64,
+    /// Applied plus support power [W]. This lossless model has no heat term;
+    /// signed numerical imbalance is retained, never reassigned to damping.
+    pub power_balance_residual_w: f64,
     /// Native solve in free-displacement coordinates for finite compliance,
     /// or complete Z coordinates for the exact constraint. None means Z has
-    /// zero columns: pressure balances force with no admissible motion.
+    /// zero columns: only the prescribed affine constraint lift can move.
+    /// With moving supports this describes the homogeneous correction, whose
+    /// force and power are not the complete original physical work account.
     pub projected_response: Option<HarmonicResponse>,
 }
 
@@ -96,11 +108,20 @@ struct PhysicalPencil<'a> {
 enum Reduction<'a> {
     Finite {
         pressure_response: &'a [f64],
+        pressure_factor: &'a LdltFactor,
     },
     Exact {
         basis: &'a [f64],
         pressure_indices: &'a [usize],
     },
+}
+
+struct PressureRecovery {
+    qr: Qr,
+    // Native LU of QR's small upper factor, used for R^T y=b. No normal
+    // equations, pressure penalty or separately invented triangular solver.
+    upper: Lu,
+    scale: f64,
 }
 
 /// Reusable native factor and pressure recovery at one physical frequency.
@@ -109,7 +130,7 @@ pub struct PreparedMixedHarmonic<'a> {
     physical: PhysicalPencil<'a>,
     reduction: Reduction<'a>,
     factor: Option<PreparedHarmonicResponse>,
-    pressure_factor: Option<(Qr, f64)>,
+    pressure_factor: Option<PressureRecovery>,
     omega: f64,
     coordinates: usize,
     momentum_tolerance: f64,
@@ -138,6 +159,7 @@ impl<L: HyperelasticMaterial + MixedFiniteStrainPotential> MixedUpVibration<'_, 
             },
             Reduction::Finite {
                 pressure_response: &self.pressure_response_pa_per_m,
+                pressure_factor: &self.pressure_factor,
             },
             &self.stiffness_n_m,
             &self.mass_kg,
@@ -218,8 +240,8 @@ fn prepare<'a>(
         .into());
     }
     // Native dense factor + solve: 144*r²+128*r bytes. Extra payload covers
-    // zero damping input, QR input/factor/scratch, both real pressure solves,
-    // lifting, full physical outputs and all reaction pairs. QR is bounded by
+    // zero damping input, QR input/factor/scratch, native R factor/solve,
+    // affine lifting, full physical outputs and all reaction pairs. QR/LU are bounded by
     // the original <=128-free-displacement owner and polled around its call.
     let extra = r
         .checked_mul(r)
@@ -227,6 +249,11 @@ fn prepare<'a>(
         .and_then(|v| {
             n.checked_mul(m)
                 .and_then(|q| q.checked_mul(24))
+                .and_then(|q| v.checked_add(q))
+        })
+        .and_then(|v| {
+            m.checked_mul(m)
+                .and_then(|q| q.checked_mul(48))
                 .and_then(|q| v.checked_add(q))
         })
         .and_then(|v| {
@@ -278,7 +305,20 @@ fn prepare<'a>(
                 return Err(invalid("original pressure recovery lost rank"));
             }
         }
-        Some((factor, scale))
+        let mut upper = Vec::with_capacity(m * m);
+        for i in 0..m {
+            checkpoint(cx)?;
+            for j in 0..m {
+                upper.push(factor.r(i, j));
+            }
+        }
+        let upper = lu(&upper, m).map_err(|_| invalid("original pressure lift lost rank"))?;
+        checkpoint(cx)?;
+        Some(PressureRecovery {
+            qr: factor,
+            upper,
+            scale,
+        })
     } else {
         None
     };
@@ -319,6 +359,27 @@ impl PreparedMixedHarmonic<'_> {
     /// The original equilibrium, materials, quadrature, supports and factors
     /// remain immutable; no partial response is published after a refusal.
     pub fn solve(&self, force_n: &[C64], cx: &Cx<'_>) -> Result<MixedHarmonicResponse> {
+        self.solve_with_support_motion(force_n, &[], cx)
+    }
+
+    /// Force and base excitation about the SAME retained equilibrium.
+    ///
+    /// `support_motion_m` contains strictly increasing original displacement
+    /// DOFs which are already prescribed by the source problem. Omitted
+    /// supports have zero increment. Entries are peak displacement phasors
+    /// [m], not absolute static positions, velocities or accelerations.
+    ///
+    /// Finite bulk response retains H^-1 B_support g. Exact incompressibility
+    /// first lifts B_free u0 = -B_support g, then solves in the COMPLETE
+    /// homogeneous nullspace. All pressure equations, including a removed
+    /// gauge row, must remain compatible. Full K and M act on this lift; a
+    /// static support load or projection of force alone is insufficient.
+    pub fn solve_with_support_motion(
+        &self,
+        force_n: &[C64],
+        support_motion_m: &[(usize, C64)],
+        cx: &Cx<'_>,
+    ) -> Result<MixedHarmonicResponse> {
         checkpoint(cx)?;
         let PhysicalPencil {
             free,
@@ -341,15 +402,125 @@ impl PreparedMixedHarmonic<'_> {
                 return Err(invalid("nonfinite force phasor"));
             }
         }
+        let mut previous = None;
+        for &(dof, value) in support_motion_m {
+            checkpoint(cx)?;
+            if dof >= nu
+                || free.binary_search(&dof).is_ok()
+                || previous.is_some_and(|p| p >= dof)
+                || !finite(value)
+            {
+                return Err(invalid(
+                    "finite support phasors on strictly increasing original prescribed DOFs required",
+                ));
+            }
+            previous = Some(dof);
+        }
+        let mut displacement_m = vec![C64::ZERO; nu];
+        for &(dof, value) in support_motion_m {
+            displacement_m[dof] = value;
+        }
+        let mut pressure_pa = vec![C64::ZERO; np];
+        if !support_motion_m.is_empty() {
+            match self.reduction {
+                Reduction::Finite {
+                    pressure_factor, ..
+                } => {
+                    // B_support g is a pressure-equation RHS [m^3]. The
+                    // original positive H=-Kpp maps it to pressure [Pa].
+                    let mut real = vec![0.0; np];
+                    let mut imaginary = vec![0.0; np];
+                    for p in 0..np {
+                        checkpoint(cx)?;
+                        let mut rhs = C64::ZERO;
+                        let (columns, values) = tangent.row(nu + p);
+                        for (&dof, &value) in columns.iter().zip(values) {
+                            if dof < nu {
+                                rhs = rhs + displacement_m[dof].scale(value);
+                            }
+                        }
+                        if !finite(rhs) {
+                            return Err(invalid("support pressure right hand side overflow"));
+                        }
+                        real[p] = rhs.re;
+                        imaginary[p] = rhs.im;
+                    }
+                    pressure_factor.solve_in_place(&mut real);
+                    checkpoint(cx)?;
+                    pressure_factor.solve_in_place(&mut imaginary);
+                    checkpoint(cx)?;
+                    for p in 0..np {
+                        pressure_pa[p] = C64::new(real[p], imaginary[p]);
+                    }
+                }
+                Reduction::Exact {
+                    pressure_indices, ..
+                } => {
+                    let recovery = self
+                        .pressure_factor
+                        .as_ref()
+                        .ok_or_else(|| invalid("missing original pressure factor"))?;
+                    let m = pressure_indices.len();
+                    let mut real = vec![0.0; n];
+                    let mut imaginary = vec![0.0; n];
+                    for (i, &p) in pressure_indices.iter().enumerate() {
+                        checkpoint(cx)?;
+                        let mut rhs = C64::ZERO;
+                        let (columns, values) = tangent.row(nu + p);
+                        for (&dof, &value) in columns.iter().zip(values) {
+                            if dof < nu {
+                                rhs = rhs - displacement_m[dof].scale(value);
+                            }
+                        }
+                        real[i] = rhs.re / recovery.scale;
+                        imaginary[i] = rhs.im / recovery.scale;
+                        if !real[i].is_finite() || !imaginary[i].is_finite() {
+                            return Err(invalid("support constraint right hand side overflow"));
+                        }
+                    }
+                    // B_free^T/scale = Q1 R. Thus the minimum Euclidean
+                    // norm particular displacement is Q1 R^-T rhs/scale.
+                    recovery.upper.solve_transpose(&mut real[..m]);
+                    checkpoint(cx)?;
+                    recovery.upper.solve_transpose(&mut imaginary[..m]);
+                    recovery.qr.apply_q(&mut real);
+                    checkpoint(cx)?;
+                    recovery.qr.apply_q(&mut imaginary);
+                    checkpoint(cx)?;
+                    for (i, &dof) in free.iter().enumerate() {
+                        displacement_m[dof] = C64::new(real[i], imaginary[i]);
+                    }
+                }
+            }
+        }
+        let omega2 = self.omega * self.omega;
         let mut projected_force = vec![C64::ZERO; r];
         for (i, &dof) in free.iter().enumerate() {
             checkpoint(cx)?;
+            let mut rhs = force_n[dof];
+            if !support_motion_m.is_empty() {
+                let (columns, values) = tangent.row(dof);
+                for (&col, &value) in columns.iter().zip(values) {
+                    let motion = if col < nu {
+                        displacement_m[col]
+                    } else {
+                        pressure_pa[col - nu]
+                    };
+                    rhs = rhs - motion.scale(value);
+                }
+                let (columns, values) = mass.row(dof);
+                for (&col, &value) in columns.iter().zip(values) {
+                    rhs = rhs + displacement_m[col].scale(omega2 * value);
+                }
+                if !finite(rhs) {
+                    return Err(invalid("lifted harmonic right hand side overflow"));
+                }
+            }
             match self.reduction {
-                Reduction::Finite { .. } => projected_force[i] = force_n[dof],
+                Reduction::Finite { .. } => projected_force[i] = rhs,
                 Reduction::Exact { basis, .. } => {
                     for j in 0..r {
-                        projected_force[j] =
-                            projected_force[j] + force_n[dof].scale(basis[i * r + j]);
+                        projected_force[j] = projected_force[j] + rhs.scale(basis[i * r + j]);
                     }
                 }
             }
@@ -359,33 +530,36 @@ impl PreparedMixedHarmonic<'_> {
             .as_ref()
             .map(|factor| factor.solve(&projected_force, cx))
             .transpose()?;
-        let mut displacement_m = vec![C64::ZERO; nu];
         if let Some(response) = &projected_response {
             for (i, &dof) in free.iter().enumerate() {
                 checkpoint(cx)?;
-                displacement_m[dof] = match self.reduction {
+                let correction = match self.reduction {
                     Reduction::Finite { .. } => response.displacement[i],
                     Reduction::Exact { basis, .. } => (0..r).fold(C64::ZERO, |sum, j| {
                         sum + response.displacement[j].scale(basis[i * r + j])
                     }),
                 };
+                displacement_m[dof] = displacement_m[dof] + correction;
             }
         }
-        let omega2 = self.omega * self.omega;
-        let mut pressure_pa = vec![C64::ZERO; np];
         match self.reduction {
-            Reduction::Finite { pressure_response } => {
+            Reduction::Finite {
+                pressure_response, ..
+            } => {
                 for p in 0..np {
                     checkpoint(cx)?;
-                    pressure_pa[p] = free.iter().enumerate().fold(C64::ZERO, |sum, (j, &dof)| {
-                        sum + displacement_m[dof].scale(pressure_response[p * n + j])
-                    });
+                    pressure_pa[p] =
+                        free.iter()
+                            .enumerate()
+                            .fold(pressure_pa[p], |sum, (j, &dof)| {
+                                sum + displacement_m[dof].scale(pressure_response[p * n + j])
+                            });
                 }
             }
             Reduction::Exact {
                 pressure_indices, ..
             } => {
-                let (factor, scale) = self
+                let recovery = self
                     .pressure_factor
                     .as_ref()
                     .ok_or_else(|| invalid("missing original pressure factor"))?;
@@ -394,9 +568,15 @@ impl PreparedMixedHarmonic<'_> {
                 for &dof in free {
                     checkpoint(cx)?;
                     let mut rhs = force_n[dof];
-                    for &col in free {
-                        rhs = rhs - displacement_m[col].scale(tangent.get(dof, col));
-                        rhs = rhs + displacement_m[col].scale(omega2 * mass.get(dof, col));
+                    let (columns, values) = tangent.row(dof);
+                    for (&col, &value) in columns.iter().zip(values) {
+                        if col < nu {
+                            rhs = rhs - displacement_m[col].scale(value);
+                        }
+                    }
+                    let (columns, values) = mass.row(dof);
+                    for (&col, &value) in columns.iter().zip(values) {
+                        rhs = rhs + displacement_m[col].scale(omega2 * value);
                     }
                     if !finite(rhs) {
                         return Err(invalid("pressure momentum right hand side overflow"));
@@ -404,11 +584,11 @@ impl PreparedMixedHarmonic<'_> {
                     real.push(rhs.re);
                     imaginary.push(rhs.im);
                 }
-                let real = factor.solve_ls(&real);
-                let imaginary = factor.solve_ls(&imaginary);
+                let real = recovery.qr.solve_ls(&real);
+                let imaginary = recovery.qr.solve_ls(&imaginary);
                 checkpoint(cx)?;
                 for ((&p, real), imaginary) in pressure_indices.iter().zip(real).zip(imaginary) {
-                    pressure_pa[p] = C64::new(real / scale, imaginary / scale);
+                    pressure_pa[p] = C64::new(real / recovery.scale, imaginary / recovery.scale);
                 }
             }
         }
@@ -420,8 +600,8 @@ impl PreparedMixedHarmonic<'_> {
                 }
             }
         }
-        let mut momentum_relative_residual = 0.0_f64;
-        let mut pressure_relative_residual = 0.0_f64;
+        let (mut momentum_residual_norm, mut momentum_scale) = (0.0_f64, 0.0_f64);
+        let (mut pressure_residual_norm, mut pressure_scale) = (0.0_f64, 0.0_f64);
         let mut support_reaction_n = Vec::with_capacity(nu - n);
         for row in 0..nu + np {
             checkpoint(cx)?;
@@ -449,19 +629,31 @@ impl PreparedMixedHarmonic<'_> {
             if !finite(residual) || !magnitude.is_finite() {
                 return Err(invalid("original mixed equation or reaction overflow"));
             }
-            let relative = if magnitude == 0.0 {
-                0.0
-            } else {
-                residual.abs() / magnitude
-            };
             if row >= nu {
-                pressure_relative_residual = pressure_relative_residual.max(relative);
+                pressure_residual_norm = pressure_residual_norm.max(residual.abs());
+                pressure_scale = pressure_scale.max(magnitude);
             } else if free.binary_search(&row).is_ok() {
-                momentum_relative_residual = momentum_relative_residual.max(relative);
+                momentum_residual_norm = momentum_residual_norm.max(residual.abs());
+                momentum_scale = momentum_scale.max(magnitude);
             } else {
                 support_reaction_n.push((row, residual));
             }
         }
+        // Match the original mixed vibration owner: separately normalized
+        // physical equation blocks, not ratios on nearly zero individual rows.
+        // A pressure-only traction can have exactly zero force/displacement on
+        // some rows; their floating-point noise is measured against the same
+        // original force scale as the other free rows, never an absolute floor.
+        let momentum_relative_residual = if momentum_scale == 0.0 {
+            0.0
+        } else {
+            momentum_residual_norm / momentum_scale
+        };
+        let pressure_relative_residual = if pressure_scale == 0.0 {
+            0.0
+        } else {
+            pressure_residual_norm / pressure_scale
+        };
         for (equation, relative, limit) in [
             (
                 "free momentum",
@@ -495,6 +687,15 @@ impl PreparedMixedHarmonic<'_> {
             }
             velocity_m_s.push(velocity);
         }
+        let mut average_support_power_w = 0.0;
+        for &(dof, reaction) in &support_reaction_n {
+            checkpoint(cx)?;
+            average_support_power_w += 0.5 * (reaction.conj() * velocity_m_s[dof]).re;
+        }
+        let power_balance_residual_w = average_input_power_w + average_support_power_w;
+        if !average_support_power_w.is_finite() || !power_balance_residual_w.is_finite() {
+            return Err(invalid("mixed harmonic support power overflow"));
+        }
         checkpoint(cx)?;
         Ok(MixedHarmonicResponse {
             displacement_m,
@@ -504,6 +705,8 @@ impl PreparedMixedHarmonic<'_> {
             momentum_relative_residual,
             pressure_relative_residual,
             average_input_power_w,
+            average_support_power_w,
+            power_balance_residual_w,
             projected_response,
         })
     }

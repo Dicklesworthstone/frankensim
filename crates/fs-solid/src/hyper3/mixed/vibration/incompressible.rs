@@ -117,6 +117,11 @@ fn project(
     r: usize,
     cx: &Cx<'_>,
 ) -> Result<Vec<f64>, MixedUpError> {
+    // The original conservative source must qualify before we use its
+    // symmetric bilinear form. Independently accumulating both projected
+    // triangles creates roundoff asymmetry which the native harmonic owner
+    // correctly refuses. Form each qualified Galerkin coefficient once.
+    symmetric_dense(matrix, n)?;
     let mut action = vec![0.0; n * r];
     for i in 0..n {
         checkpoint(cx)?;
@@ -129,11 +134,12 @@ fn project(
     let mut reduced = vec![0.0; r * r];
     for i in 0..r {
         checkpoint(cx)?;
-        for j in 0..r {
+        for j in i..r {
             for k in 0..n {
                 reduced[i * r + j] =
                     basis[k * r + i].mul_add(action[k * r + j], reduced[i * r + j]);
             }
+            reduced[j * r + i] = reduced[i * r + j];
         }
     }
     symmetric_dense(&reduced, r)?;

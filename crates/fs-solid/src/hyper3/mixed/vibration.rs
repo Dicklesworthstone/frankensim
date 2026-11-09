@@ -19,9 +19,9 @@
 //! curved geometry and nonlinear coefficients still require quadrature and
 //! mesh convergence. This route is not an inf-sup or continuum-stability proof.
 
-pub mod incompressible;
 /// Full forced response with pressure recovery and original support reactions.
 pub mod harmonic;
+pub mod incompressible;
 
 use super::gravity::HeldMixedGravity;
 use super::pressure::UniformBoundaryPressure;
@@ -37,7 +37,7 @@ use fs_material::hyper::Hyperelastic;
 use fs_material::hyper::cards::HyperelasticMaterial;
 use fs_material::hyper::mixed::{MixedFiniteStrainPotential, VolumetricTreatment};
 use fs_modal::{ModalError, ModePair, eigh_gen_dense};
-use fs_sparse::{Coo, Csr, DirectOrdering, Inertia, LdltOptions, SymbolicLdlt};
+use fs_sparse::{Coo, Csr, DirectOrdering, Inertia, LdltFactor, LdltOptions, SymbolicLdlt};
 
 /// Explicit modal accuracy and extra storage admission. Original mixed mesh,
 /// quadrature, Newton, assembly and sparse-factor budgets remain in force.
@@ -49,7 +49,7 @@ pub struct MixedVibrationSettings {
     pub maximum_mass_assembly_bytes: usize,
     /// Conservative pressure reduction (finite-compliance condensation or
     /// exact-constraint nullspace), dense work and retained modal payload.
-    /// Excludes the original mixed assembly and native sparse factor,
+    /// Excludes the original mixed assembly and retained native sparse factor,
     /// which retain their own budgets; this is not an OS memory/RSS limit.
     pub maximum_condensation_bytes: usize,
     /// Relative backward-error gate for pressure elimination and recovered
@@ -114,6 +114,9 @@ pub struct MixedUpVibration<'a, L: HyperelasticMaterial + MixedFiniteStrainPoten
     equilibrium: MixedUpSolution,
     free_dofs: Vec<usize>,
     mixed_tangent: Csr,
+    // Retain the admitted H=-Kpp factor for inhomogeneous pressure forcing.
+    // Its storage remains under problem.settings.maximum_factor_bytes.
+    pressure_factor: LdltFactor,
     pressure_response_pa_per_m: Vec<f64>,
     stiffness_n_m: Vec<f64>,
     mass_kg: Vec<f64>,
@@ -297,6 +300,19 @@ fn symmetric_dense(matrix: &[f64], n: usize) -> Result<(), MixedUpError> {
                     "mixed vibration pencil is not symmetric to roundoff",
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+// Conservative source qualification precedes canonical triangle storage.
+// Schur products can differ across triangles by accumulation roundoff; a
+// materially asymmetric source must still refuse, never be silently averaged.
+fn canonical_symmetric_dense(matrix: &mut [f64], n: usize) -> Result<(), MixedUpError> {
+    symmetric_dense(matrix, n)?;
+    for i in 0..n {
+        for j in 0..i {
+            matrix[i * n + j] = matrix[j * n + i];
         }
     }
     Ok(())
@@ -487,7 +503,7 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> PreparedMixedUpPr
                 mass_kg.push(reference_mass.operator.matrix().get(row, col));
             }
         }
-        symmetric_dense(&mass_kg, n)?;
+        canonical_symmetric_dense(&mut mass_kg, n)?;
         let equilibrium = match initial {
             None => prepared.solve(cx)?,
             Some((u, p)) => prepared.solve_from(u, p, cx)?,
@@ -582,7 +598,6 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> PreparedMixedUpPr
                 response[p * n + column] = value;
             }
         }
-        drop(factor);
         drop(symbolic);
         for (row, &dof) in free_dofs.iter().enumerate() {
             checkpoint(cx)?;
@@ -596,7 +611,7 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> PreparedMixedUpPr
                 }
             }
         }
-        symmetric_dense(&stiffness_n_m, n)?;
+        canonical_symmetric_dense(&mut stiffness_n_m, n)?;
         checkpoint(cx)?;
         let displacement_modes =
             eigh_gen_dense(&stiffness_n_m, &mass_kg, n).map_err(MixedVibrationError::Modal)?;
@@ -672,6 +687,7 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> PreparedMixedUpPr
             equilibrium,
             free_dofs,
             mixed_tangent: full,
+            pressure_factor: factor,
             pressure_response_pa_per_m: response,
             stiffness_n_m,
             mass_kg,
