@@ -14047,3 +14047,14 @@ solutions followed by native history continuation. Rustfmt and bounded source
 review completed; these Cx-backed tests remain unexecuted because the original
 runtime dependency closure is unavailable. Evolving free strain and material
 coefficients require their original separate owners.
+
+## Coherent nodal continuity for causal material histories
+
+Causal solid observation combines equal-frequency full nodal phasors before
+phase evaluation and tolerance scaling, then adds the fixed bias to the
+resolved coherent field. Cancelled authored amplitudes cannot erase a retained
+bias or hide an actual nodal jump. This check includes prescribed supports and
+rigid translations, whose discontinuities need not appear in constitutive
+strains. The explicit nodal-work bound includes the bounded carrier grouping.
+`cancelled_rigid_carriers_preserve_bias_without_hiding_nodal_jumps` exercises
+both refusal of a new rigid offset and preservation of an already accepted one.

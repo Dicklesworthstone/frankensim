@@ -104,7 +104,8 @@ impl ViscoElements {
     /// Work includes each point's original material causal-window work bound,
     /// 4096*(F+1)*sum(branches+1) source preparation,
     /// 512*(F+1)*sum(points*local_dofs) original constitutive/compatible strain
-    /// recovery, and 256*(F+1)*full_dofs nodal reconstruction, for authored F.
+    /// recovery, and F² + 256*(F+1)*full_dofs coherent nodal reconstruction,
+    /// for authored F.
     pub fn prepare_harmonic_material_causal_observer(
         &self,
         frequencies: &[f64],
@@ -126,7 +127,7 @@ impl ViscoElements {
             + core::mem::size_of::<ViscoHarmonicMaterialCausalStep<'_>>() as u128
             + 128 * f
             + 8 * self.full_dofs as u128;
-        let mut work = 256 * (f + 1) * self.full_dofs as u128;
+        let mut work = f * f + 256 * (f + 1) * self.full_dofs as u128;
         for element in &self.elements {
             checkpoint(cx)?;
             let b = element.law.branches().len() as u128;
@@ -262,8 +263,25 @@ impl<'a> ViscoHarmonicMaterialCausalObserver<'a> {
         {
             return Err(invalid("causal material evolution needs finite full nodal fields and a positive advancing DD interval").into());
         }
-        let phases = self
+        // A cancelled authored carrier must not enlarge the continuity
+        // tolerance or erase the fixed bias before the cancellation resolves.
+        // This also checks rigid/support motions, whose jumps cannot be found
+        // by the constitutive strain checks at integration points.
+        let mut coherent_frequencies = Vec::with_capacity(self.frequencies.len());
+        let groups: Vec<_> = self
             .frequencies
+            .iter()
+            .map(|&omega| {
+                coherent_frequencies
+                    .iter()
+                    .position(|&w| w == omega)
+                    .unwrap_or_else(|| {
+                        coherent_frequencies.push(omega);
+                        coherent_frequencies.len() - 1
+                    })
+            })
+            .collect();
+        let phases = coherent_frequencies
             .iter()
             .map(|&omega| {
                 phase_angular_interval_from_clock_dd(omega, accepted.time_s, duration_s)
@@ -273,23 +291,31 @@ impl<'a> ViscoHarmonicMaterialCausalObserver<'a> {
         let mut endpoint = Vec::with_capacity(self.source.full_dofs);
         for dof in 0..self.source.full_dofs {
             checkpoint(cx)?;
-            let mut start = Dd::from_f64(bias[dof]);
-            let mut end = start;
-            let mut scale = bias[dof].abs().max(old.displacement_m[dof].abs());
-            for (tone, phase) in displacements.iter().zip(&phases) {
-                let z = tone[dof];
-                scale = scale.max(z.re.abs()).max(z.im.abs());
-                start = start + Dd::from_f64(z.re) * phase.start[0]
-                    - Dd::from_f64(z.im) * phase.start[1];
-                end = end + Dd::from_f64(z.re) * phase.end[0] - Dd::from_f64(z.im) * phase.end[1];
+            let mut grouped = [[Dd::ZERO; 2]; MAX_HARMONIC_MATERIAL_LINES];
+            for (tone, &group) in displacements.iter().zip(&groups) {
+                grouped[group][0] = grouped[group][0] + Dd::from_f64(tone[dof].re);
+                grouped[group][1] = grouped[group][1] + Dd::from_f64(tone[dof].im);
             }
+            let mut start = Dd::ZERO;
+            let mut end = Dd::ZERO;
+            let mut scale = bias[dof].abs().max(old.displacement_m[dof].abs());
+            for (z, phase) in grouped.iter().zip(&phases) {
+                scale = scale
+                    .max(z[0].hi.abs() + z[0].lo.abs())
+                    .max(z[1].hi.abs() + z[1].lo.abs());
+                start = start + z[0] * phase.start[0] - z[1] * phase.start[1];
+                end = end + z[0] * phase.end[0] - z[1] * phase.end[1];
+            }
+            start = start + Dd::from_f64(bias[dof]);
+            end = end + Dd::from_f64(bias[dof]);
             let difference = (start - Dd::from_f64(old.displacement_m[dof]))
                 .to_f64()
                 .abs();
-            let tolerance = 128.0 * f64::EPSILON * (2 * self.frequencies.len() + 2) as f64;
+            let tolerance = 128.0 * f64::EPSILON * (2 * phases.len() + 2) as f64;
             if !start.to_f64().is_finite()
                 || !end.to_f64().is_finite()
                 || !difference.is_finite()
+                || !scale.is_finite()
                 || (scale == 0.0 && difference != 0.0)
                 || (scale > 0.0 && difference / scale > tolerance)
             {

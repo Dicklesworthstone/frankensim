@@ -40,6 +40,9 @@ pub use section::TensorPronyShellSection;
 mod material;
 use material::PreparedFacet;
 pub use material::{
+    TensorShellMaterialCausalBudget, TensorShellMaterialCausalField,
+    TensorShellMaterialCausalHistory, TensorShellMaterialCausalObserver,
+    TensorShellMaterialCausalPoint, TensorShellMaterialCausalStep,
     TensorShellMaterialBudget, TensorShellMaterialField, TensorShellMaterialObserver,
     TensorShellMaterialPoint, TensorShellMaterialSpectrumField, TensorShellMaterialSpectrumObserver,
     TensorShellMaterialSpectrumPoint,

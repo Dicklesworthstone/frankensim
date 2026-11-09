@@ -19,6 +19,54 @@ fn real_affine(nodes: &[[f64; 3]], strain: [f64; 6]) -> Vec<f64> {
         .collect()
 }
 
+#[test]
+fn cancelled_rigid_carriers_preserve_bias_without_hiding_nodal_jumps() {
+    with_cx(|cx, _| {
+        let source = solid(tet_mesh(), law(), cx);
+        let observer = source
+            .prepare_harmonic_material_causal_observer(&[7.0, 7.0], causal_budget(), cx)
+            .unwrap();
+        let translation: Vec<_> = (0..12)
+            .map(|i| if i % 3 == 0 { 0.001 } else { 0.0 })
+            .collect();
+        let positive: Vec<_> = (0..12)
+            .map(|i| C64::from_re(if i % 3 == 0 { 1.0e150 } else { 0.0 }))
+            .collect();
+        let negative: Vec<_> = positive.iter().map(|z| -*z).collect();
+        let banks = [positive.as_slice(), negative.as_slice()];
+
+        // These are rigid translations: no integration-point strain gate can
+        // detect the discontinuity. Cancelled carrier magnitudes must not hide
+        // the fixed displacement jump in the original full nodal coordinates.
+        let zero = source
+            .state(cx)
+            .unwrap()
+            .bind_harmonic_clock(Dd::ZERO)
+            .unwrap();
+        let zero_energy = zero.history().energy();
+        assert!(
+            observer
+                .advance_window(&zero, &banks, &translation, 0.25, cx)
+                .is_err()
+        );
+        assert_eq!(zero.history().displacement_m(), &[0.0; 12]);
+        assert_eq!(zero.history().energy(), zero_energy);
+
+        // With the translation already accepted, the same cancellation must
+        // retain its exact bias, rather than erase it in an enormous AC sum.
+        let mut moved = source.state(cx).unwrap();
+        moved.step_internal_force(&translation, 0.125, cx).unwrap();
+        let moved = moved.bind_harmonic_clock(Dd::ZERO).unwrap();
+        let step = observer
+            .advance_window(&moved, &banks, &translation, 0.25, cx)
+            .unwrap();
+        assert_eq!(step.history.history().displacement_m(), translation);
+        assert_eq!(step.field.material_heat_j, 0.0);
+        assert_eq!(step.field.stored_energy_change_j, 0.0);
+        assert_eq!(step.field.stress_work_j, 0.0);
+    });
+}
+
 // Original Maxwell ODE solution: the forced particular strain plus the
 // exponentially decaying difference from its ACTUAL initial spring strain.
 // These real functions do not call the harmonic material or window owners.

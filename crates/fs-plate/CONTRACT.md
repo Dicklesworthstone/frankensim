@@ -2687,3 +2687,37 @@ Four focused regression groups exercise moving translations/rotations on an
 offset rotated laminate, original-quadrature material heat and independent port
 work, original-label/empty/all-support limits, source/material/load refusals,
 repeatability and original cancellation behavior.
+
+## Causal harmonic memory on the original layered shell
+
+`TensorPronyShell::prepare_material_causal_observer` prepares the original
+CST/DKT facet maps, layer orientations and signed reference-surface geometry
+with the original coupled plane-stress material controller. The observer is
+independent of the carrier bank: `start_relaxed` begins an undeformed virgin
+history at an explicit DD clock, and `advance_window` may change frequencies
+or hold the accepted displacement with an empty bank without resetting memory.
+
+Each layer retains six vertex/face histories and six original positive
+triangle/thickness quadrature histories. The private virgin initialization and
+linear original evolution preserve the bilinear spatial memory field; full
+transient strain bounds at the vertices and faces therefore admit the complete
+layer. Only the six physical quadrature volumes enter energy totals. Original
+reaction work, positive material heat and direct storage increments remain
+independent quantities, including during startup and held-displacement
+relaxation.
+
+The candidate includes endpoint strain/stress and strain bounds at every
+physical point, full original nodal displacement, advancing DD time, all
+original branch states and cumulative work/heat. Original observer/source
+identity, whole-field continuity, explicit payload/work ceilings and
+cancellation remain transactional. Equal-frequency nodal phasors combine
+before phase evaluation and continuity scaling, including material-null
+drilling coordinates.
+
+This slice uses fixed material/temperature, stationary original supports and
+the mixed controller's zero-Kelvin domain. Initial preload, arbitrary injected
+spatial memory, changing thermal coefficients, kinetic/drilling energy and
+dynamic force-equilibrium certification are not inferred. Focused cases in
+`tests/shell_prony_laminate_harmonic/causal.rs` cover original ramp/spatial
+references, partitioned and changed-bank continuation, layer-face admission,
+coherent nodal continuity, source binding and atomic cancellation.

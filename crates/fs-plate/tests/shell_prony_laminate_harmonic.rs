@@ -1,5 +1,7 @@
 //! Offset and oriented layer physics in the original full-coordinate shell.
 
+#[path = "shell_prony_laminate_harmonic/causal.rs"]
+mod causal;
 #[path = "shell_prony_laminate_harmonic/spectrum.rs"]
 mod spectrum;
 #[path = "shell_prony_laminate_harmonic/supports.rs"]

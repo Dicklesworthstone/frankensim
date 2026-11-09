@@ -6,6 +6,12 @@ use super::{
 };
 use fs_material::visco::{TensorPronyHarmonic, TensorPronyHarmonicPoint};
 
+mod causal;
+pub use causal::{
+    TensorShellMaterialCausalBudget, TensorShellMaterialCausalField,
+    TensorShellMaterialCausalHistory, TensorShellMaterialCausalObserver,
+    TensorShellMaterialCausalPoint, TensorShellMaterialCausalStep,
+};
 mod spectrum;
 pub use spectrum::{
     TensorShellMaterialSpectrumField, TensorShellMaterialSpectrumObserver,
