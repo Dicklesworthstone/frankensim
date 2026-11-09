@@ -56,6 +56,7 @@ pub fn propose_rigid_hertz_trajectory_heat<'m, P, E>(
         controls,
         energy_guess_j,
         temperature_guess_k,
+        |temperature| refresh_source(contact, temperature),
         |source, duration| {
             let prepared = PreparedRigidHertzTrajectory::new(
                 bodies,

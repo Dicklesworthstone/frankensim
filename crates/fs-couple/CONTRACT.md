@@ -30,6 +30,35 @@ boundaries can also feed the original induction owner. Focused native
 regressions cover rotated pure gauges, exact nonzero uniform B/H and energy
 from affine line averages, shared-edge conflict and interior-face refusal.
 
+## Source-resolved speed-dependent Hertz friction and heat
+
+`friction_heat::hertz::rate_dependent` connects the original full local-speed
+curve to finite-body recoil and the original finite-cell thermal owner.
+`propose_rigid_hertz_rate_heat` refreshes every typed curve parameter from the
+same pinned ordered-interface claims at the trial common-face temperature.
+The original Hertz pressure integral evaluates that complete `FrictionLaw` at
+each local spatial/time speed. Prepared native response and the existing
+Newton/finite-cell transaction are reused; only integrated physical loss enters
+heat. The original exact and curved Coulomb entries retain their existing
+default source and report types.
+
+`propose_rigid_hertz_rate_heat_march` reuses the same full-versus-two-half-phase
+controller and compensated whole-span kinetic/caloric/source balance. Accepted
+receipts retain the complete curve parameters and source identity. Source
+support, closed-normal geometry, independent native work, thermal acceptance,
+work budgets and cancellation remain mandatory. A late failure leaves the
+original bodies and thermal owner available for exact retry.
+
+Four focused tests in `tests/articulated_friction_heat/hertz/rate_dependent.rs`
+check analytic affine sliding/spin arrest and thermal roots, an independent
+Stribeck Hertz moment from its radial beta-integral series, continuous mixed
+motion and three-cell thermal feedback, and source-domain/late-failure/retry
+behavior. Spatial-pressure, native-time and thermal-window errors remain
+separate refinement axes. Each phase holds its solved-temperature parameters;
+the march resolves their evolution. Poses, load, radius and footprint stay held.
+No centre-speed fit, source reselection, drive, new friction history or thermal
+store is introduced.
+
 ## Time-resolved Hertz friction and finite-cell cooling
 
 `friction_heat::hertz::march` composes the original exact or curved native,

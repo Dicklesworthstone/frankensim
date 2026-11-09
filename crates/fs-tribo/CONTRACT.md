@@ -21,10 +21,20 @@ arrest or coasting. Genuine Coulomb retains its original exact-ray path; proven
 rest, unloaded motion and fully clipped zero traction retain exact stationary
 or coasting behavior. No coefficient floor or substitute curve is used.
 
+For an original affine or Stribeck viscous term, the safe stage bound uses
+`|w(q)| <= b0 + b1|q|`, with `b0 = N*mu_zero*sqrt(1+k*k)` (mu_static for
+Stribeck), `k = 3*pi/16`, and `b1 = N*slope_per_speed` for affine
+strengthening or `N*viscous_per_speed` for Stribeck. The 1.25 mass-radius stage
+bound contracts this upper bound as motion decays; every stage still evaluates
+the original local-speed pressure law. The strict 12-second small-patch affine
+spin regression closes against analytic stopping time, travel and heat in
+42,406 evaluations within the unchanged 400,001-evaluation budget that the
+global bound previously exhausted.
+
 Time error estimates exclude spatial pressure-quadrature error. Callers refine
 these two axes separately. Load, radius, mobility and source/environment remain
 fixed; driven stick/slip, source evolution and normal motion retain their owners.
-Eleven focused law tests cover analytic affine and zero-asymptote stopping/travel,
+Twelve focused law tests cover analytic affine and zero-asymptote stopping/travel,
 25 e-fold viscous decay, independently constructed full-mobility modal exponentials
 and integrated heat, clipped translation entering its true finite-stop domain,
 original clipped-pressure/time integration, live spatial refinement, Coulomb

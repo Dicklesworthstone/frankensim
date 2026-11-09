@@ -177,9 +177,10 @@ pub(crate) struct CircularTransientLaw<F> {
     pub maximum_mass_radius: f64,
     /// A genuine positive lower power bound that holds only near rest.
     pub conditional_extinction: Option<CircularTransientExtinction>,
-    /// Optional original-law bound `|w(q)| <= bound * |q|` [N s/m].
-    /// It prevents asymptotic viscous decay from collapsing the safe timestep.
-    pub linear_wrench_norm_bound: Option<f64>,
+    /// Optional original-law bound `|w(q)| <= bounds[0] + bounds[1] * |q|`,
+    /// with units [N, N s/m]. It resolves viscous decay without retaining a
+    /// distant high-speed effort bound near rest.
+    pub affine_wrench_norm_bounds: Option<[f64; 2]>,
     pub quadrature: CircularTransientQuadrature,
     pub evaluate: F,
 }
@@ -247,7 +248,7 @@ impl AdhesiveWrenchContact {
                 power_norm_bounds: [2.0 / root_thirteen, root_thirteen / 3.0],
                 maximum_mass_radius: f64::INFINITY,
                 conditional_extinction: None,
-                linear_wrench_norm_bound: None,
+                affine_wrench_norm_bounds: None,
                 quadrature: CircularTransientQuadrature::BogackiShampine,
                 evaluate: |velocity, spin| {
                     let native = self
@@ -419,7 +420,7 @@ where
         }
         // Every positive embedded stage stays within h*beta of its initial
         // mass-metric state, strictly before any possible zero crossing.
-        let safe_step = metric.safe_step(q, work.law.linear_wrench_norm_bound)?;
+        let safe_step = metric.safe_step(q, work.law.affine_wrench_norm_bounds)?;
         let h = next_step.min(safe_step).min(remaining);
         if !h.is_finite()
             || h <= 0.0

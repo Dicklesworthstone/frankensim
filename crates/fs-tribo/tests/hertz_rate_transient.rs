@@ -861,3 +861,97 @@ fn partially_clipped_spin_uses_original_active_pressure_region_through_time() {
         "fixture must retain its clipped outer region"
     );
 }
+
+#[test]
+fn small_patch_long_affine_spin_meets_original_thermal_accuracy_and_work_budget() {
+    // Original12s thermal trial at300K: broad tangential mobility and a much
+    // smaller radius-scaled spin mobility make the global energy-ball mu_max
+    // pessimistic near arrest. It previously exhausted400001 evaluations.
+    // Every physical tolerance and work budget below matches that trial.
+    let radius = (0.001 / PI).sqrt();
+    let (normal, mu0, slope, spin) = (10.0, 0.4, 3.0, 3.0);
+    let inverse_spin_inertia = 1.0 / 0.12 + 1.0 / 0.25;
+    let mobility = radius * radius * inverse_spin_inertia;
+    let input = HertzRelaxationInput {
+        velocity_m_s: [0.0; 2],
+        spin_rate_rad_s: spin,
+        dt_s: 12.0,
+        scaled_mobility_per_kg: [
+            [
+                1.0 / 2.0 + 1.0 / 3.0 + 0.2 * 0.2 / 0.10 + 0.15 * 0.15 / 0.20,
+                0.0,
+                0.0,
+            ],
+            [
+                0.0,
+                1.0 / 2.0 + 1.0 / 3.0 + 0.2 * 0.2 / 0.08 + 0.15 * 0.15 / 0.15,
+                0.0,
+            ],
+            [0.0, 0.0, mobility],
+        ],
+    };
+    let controls = HertzTransientControls {
+        maximum_step_s: 0.02,
+        minimum_step_s: 1e-15,
+        maximum_attempts: 100_000,
+        maximum_evaluations: 400_001,
+        scaled_rate_tolerance_m_s: 1e-11,
+        scaled_impulse_tolerance_ns: 1e-10,
+        scaled_travel_tolerance_m: 1e-10,
+        heat_tolerance_j: 1e-12,
+        stopping_time_tolerance_s: 1e-7,
+    };
+    let config = HertzWrenchConfig {
+        energy_tolerance_j: 2e-11,
+        maximum_force_n: 100.0,
+        maximum_spin_moment_nm: 10.0,
+        ..config()
+    };
+    let patch = HertzFrictionPatch::new(
+        normal,
+        radius,
+        FrictionLaw::VelocityDependent {
+            static_mu: 0.8,
+            mu_zero: mu0,
+            slope_per_speed: slope,
+        },
+    )
+    .unwrap();
+    let r = patch
+        .advance_transient(&input, config, grid(1), controls, || false)
+        .unwrap();
+    let initial = radius * spin;
+    let alpha = mobility * normal * mu0 * K;
+    let beta = mobility * normal * slope * 0.4;
+    let stop = (1.0 + beta * initial / alpha).ln() / beta;
+    let scaled_travel =
+        (initial + alpha / beta) * (-(-beta * stop).exp_m1()) / beta - alpha * stop / beta;
+    assert_eq!(r.trajectory.velocity_after_m_s, [0.0; 2]);
+    assert_eq!(r.trajectory.spin_rate_after_rad_s, 0.0);
+    close(
+        r.trajectory.spin_angular_impulse_nms,
+        -spin / inverse_spin_inertia,
+        1e-12,
+    );
+    close(
+        radius * r.trajectory.spin_increment_rad,
+        scaled_travel,
+        controls.scaled_travel_tolerance_m,
+    );
+    close(
+        r.trajectory.dissipated_energy_j,
+        0.5 * spin * spin / inverse_spin_inertia,
+        controls.heat_tolerance_j,
+    );
+    let bracket = r.trajectory.stopping_time_bracket_s.unwrap();
+    assert!(
+        bracket[0] - 2e-9 <= stop && stop <= bracket[1] + 2e-9,
+        "{bracket:?}, exact {stop}"
+    );
+    assert!(r.trajectory.work_residual_j.abs() <= config.energy_tolerance_j);
+    assert!(r.trajectory.evaluations < controls.maximum_evaluations);
+    eprintln!(
+        "small-patch affine spin12s: {} accepted, {} rejected, {} evaluations",
+        r.trajectory.accepted_steps, r.trajectory.rejected_steps, r.trajectory.evaluations
+    );
+}

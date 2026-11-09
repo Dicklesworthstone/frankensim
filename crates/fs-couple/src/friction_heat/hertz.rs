@@ -36,21 +36,28 @@ use std::cell::Cell;
 pub mod march;
 /// Source-resolved simultaneous Hertz patches on one finite body/heat island.
 pub mod multiple;
+/// Original local-speed friction curves with finite-cell thermal feedback.
+pub mod rate_dependent;
 /// Original finite-body stopping trajectories and their finite-cell heat.
 pub mod trajectory;
 /// Curved original Hertz trajectories with finite-body thermal feedback.
 pub mod transient;
 
 /// The original ordered interface source and caller-owned closed normal patch.
-#[derive(Clone, Copy)]
-pub struct RigidHertzHeatContact<'a> {
+pub struct RigidHertzHeatContact<'a, S = SourceThermalCoulomb> {
     pub binding: RigidContactBinding,
     pub frame: TangentFrame,
-    pub source: &'a SourceThermalCoulomb,
+    pub source: &'a S,
     pub normal_force_n: f64,
     pub contact_radius_m: f64,
     /// Explicit original source coordinate, never inferred from N or patch area.
     pub nominal_pressure_pa: Option<f64>,
+}
+impl<S> Copy for RigidHertzHeatContact<'_, S> {}
+impl<S> Clone for RigidHertzHeatContact<'_, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 /// Endpoint bulk conductivities and other heat from the original material owner.
@@ -76,10 +83,10 @@ pub struct RigidHertzHeatControls {
 }
 
 #[derive(Debug)]
-pub enum RigidHertzHeatError<E, M = RigidHertzError> {
+pub enum RigidHertzHeatError<E, M = RigidHertzError, F = SourceHertzWrenchError> {
     Invalid(&'static str),
     Mechanical(M),
-    FrictionSource(SourceHertzWrenchError),
+    FrictionSource(F),
     Thermal(DepositionError),
     Source(E),
     Newton(NewtonError),
@@ -97,29 +104,31 @@ impl<E, M> From<SourceHertzWrenchError> for RigidHertzHeatError<E, M> {
         Self::FrictionSource(e)
     }
 }
-impl<E, M> From<DepositionError> for RigidHertzHeatError<E, M> {
+impl<E, M, F> From<DepositionError> for RigidHertzHeatError<E, M, F> {
     fn from(e: DepositionError) -> Self {
         Self::Thermal(e)
     }
 }
-impl<E, M> From<NewtonError> for RigidHertzHeatError<E, M> {
+impl<E, M, F> From<NewtonError> for RigidHertzHeatError<E, M, F> {
     fn from(e: NewtonError) -> Self {
         Self::Newton(e)
     }
 }
-impl<E: core::fmt::Debug, M: core::fmt::Debug> core::fmt::Display for RigidHertzHeatError<E, M> {
+impl<E: core::fmt::Debug, M: core::fmt::Debug, F: core::fmt::Debug> core::fmt::Display
+    for RigidHertzHeatError<E, M, F>
+{
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "Hertz friction/heat: {self:?}")
     }
 }
-impl<E: std::error::Error + 'static, M: core::fmt::Debug> std::error::Error
-    for RigidHertzHeatError<E, M>
+impl<E: std::error::Error + 'static, M: core::fmt::Debug, F: core::fmt::Debug> std::error::Error
+    for RigidHertzHeatError<E, M, F>
 {
 }
 
 /// Publish the two original body indices and thermal endpoint together.
 /// Accepted bodies and the thermal owner remain borrowed throughout this solve.
-pub struct HeatedRigidHertzCandidate<'m, P, M = RigidHertzReport> {
+pub struct HeatedRigidHertzCandidate<'m, P, M = RigidHertzReport, F = SourceHertzWrench> {
     pub binding: RigidContactBinding,
     /// Original binding's A/B order; every other body is unaffected.
     pub bodies_after: [RigidBodyState; 2],
@@ -127,7 +136,7 @@ pub struct HeatedRigidHertzCandidate<'m, P, M = RigidHertzReport> {
     pub thermal: DepositionSimulation<'m>,
     pub heat: FrictionHeatNetworkReport,
     /// The unchanged source owner and actual endpoint coefficient-use receipts.
-    pub friction_source: SourceHertzWrench,
+    pub friction_source: F,
     pub source: P,
     pub nonlinear: NewtonReport,
     pub trials: usize,
@@ -145,9 +154,9 @@ pub(super) struct HertzHeatMechanics<M> {
     pub total_energy_residual_j: f64,
 }
 
-struct Staged<P, M> {
+struct Staged<P, M, F> {
     mechanical: HertzHeatMechanics<M>,
-    friction_source: SourceHertzWrench,
+    friction_source: F,
     source: P,
 }
 
@@ -189,6 +198,7 @@ pub fn propose_rigid_hertz_heat<'m, P, E>(
         controls,
         energy_guess_j,
         temperature_guess_k,
+        |temperature| refresh_source(contact, temperature),
         |source, duration| {
             let prepared = PreparedRigidHertzPair::new(
                 bodies,
@@ -222,8 +232,8 @@ pub fn propose_rigid_hertz_heat<'m, P, E>(
 /// One source/geometry/nonlinear/thermal transaction for original native
 /// mechanical owners. A trial always restarts the same accepted native pair.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub(super) fn solve_rigid_hertz_heat<'m, P, E, S, M, ME>(
-    contact: RigidHertzHeatContact<'_>,
+pub(super) fn solve_rigid_hertz_heat<'m, P, E, C, S, M, ME, F, FE>(
+    contact: RigidHertzHeatContact<'_, C>,
     thermal: &DepositionSimulation<'m>,
     route: &FrictionHeatRoute,
     accepted_time_s: f64,
@@ -231,11 +241,12 @@ pub(super) fn solve_rigid_hertz_heat<'m, P, E, S, M, ME>(
     controls: RigidHertzHeatControls,
     energy_guess_j: &[f64],
     temperature_guess_k: f64,
-    prepare: impl FnOnce(&SourceHertzWrench, f64) -> Result<(S, [f64; 3]), ME>,
-    mechanics: impl Fn(&S, &SourceHertzWrench) -> Result<HertzHeatMechanics<M>, ME>,
+    refresh: impl Fn(f64) -> Result<F, FE>,
+    prepare: impl FnOnce(&F, f64) -> Result<(S, [f64; 3]), ME>,
+    mechanics: impl Fn(&S, &F) -> Result<HertzHeatMechanics<M>, ME>,
     resolve: impl Fn(&DepositionSimulation<'m>, f64) -> Result<RigidHertzHeatSource<P>, E>,
     gate: &CancelGate,
-) -> Result<HeatedRigidHertzCandidate<'m, P, M>, RigidHertzHeatError<E, ME>> {
+) -> Result<HeatedRigidHertzCandidate<'m, P, M, F>, RigidHertzHeatError<E, ME, FE>> {
     let checkpoint = || {
         if gate.is_requested() {
             Err(DepositionError::Cancelled)
@@ -285,12 +296,8 @@ pub(super) fn solve_rigid_hertz_heat<'m, P, E, S, M, ME>(
     // Both owners advance over the same representable clock interval. At a
     // nonzero accepted time this subtraction need not reproduce requested dt.
     let duration_s = target - accepted_time_s;
-    let initial_source = contact.source.hertz_at(
-        temperature_guess_k,
-        contact.nominal_pressure_pa,
-        contact.normal_force_n,
-        contact.contact_radius_m,
-    )?;
+    let initial_source =
+        refresh(temperature_guess_k).map_err(RigidHertzHeatError::FrictionSource)?;
     let (prepared, point) =
         prepare(&initial_source, duration_s).map_err(RigidHertzHeatError::Mechanical)?;
     validate_geometry(
@@ -316,12 +323,8 @@ pub(super) fn solve_rigid_hertz_heat<'m, P, E, S, M, ME>(
         let temperature = temperature_guess_k + x[cells] / controls.temperature_scale_j_per_k;
         let endpoint = |endpoint: &DepositionSimulation<'m>, temperatures: &[f64]| {
             let temperature = temperatures[0];
-            let friction_source = contact.source.hertz_at(
-                temperature,
-                contact.nominal_pressure_pa,
-                contact.normal_force_n,
-                contact.contact_radius_m,
-            )?;
+            let friction_source =
+                refresh(temperature).map_err(RigidHertzHeatError::FrictionSource)?;
             let mechanical =
                 mechanics(&prepared, &friction_source).map_err(RigidHertzHeatError::Mechanical)?;
             let RigidHertzHeatSource {
@@ -405,9 +408,21 @@ pub(super) fn solve_rigid_hertz_heat<'m, P, E, S, M, ME>(
     })
 }
 
-pub(super) fn validate_geometry(
-    point: [f64; 3],
+pub(super) fn refresh_source(
     contact: RigidHertzHeatContact<'_>,
+    temperature_k: f64,
+) -> Result<SourceHertzWrench, SourceHertzWrenchError> {
+    contact.source.hertz_at(
+        temperature_k,
+        contact.nominal_pressure_pa,
+        contact.normal_force_n,
+        contact.contact_radius_m,
+    )
+}
+
+pub(super) fn validate_geometry<S>(
+    point: [f64; 3],
+    contact: RigidHertzHeatContact<'_, S>,
     route: &FrictionHeatRoute,
     tolerance: f64,
 ) -> Result<(), &'static str> {
@@ -440,9 +455,9 @@ pub(super) fn validate_geometry(
 fn norm(v: [f64; 3]) -> f64 {
     det::hypot(det::hypot(v[0], v[1]), v[2])
 }
-fn numerical<E, M>(
-    error: FiniteDifferenceError<RigidHertzHeatError<E, M>>,
-) -> RigidHertzHeatError<E, M> {
+fn numerical<E, M, F>(
+    error: FiniteDifferenceError<RigidHertzHeatError<E, M, F>>,
+) -> RigidHertzHeatError<E, M, F> {
     match error {
         FiniteDifferenceError::Source(e) => e,
         FiniteDifferenceError::Invalid(s) => RigidHertzHeatError::Invalid(s),

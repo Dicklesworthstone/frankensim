@@ -212,11 +212,25 @@ impl HertzFrictionPatch {
             local_speed_bound_m_s,
             upper_norm,
         )?;
-        let linear_wrench_norm_bound = if self.law.zero_speed_kinetic_coefficient()? == 0.0 {
-            self.affine_slope()
-                .filter(|slope| *slope > 0.0)
-                .map(|slope| checked(normal * slope * (1.0 + BOUND_ROUNDOFF)))
-                .transpose()?
+        // The exact viscous pressure term is -N*b*diag(1,1,2/5)*q. The dry
+        // term is Coulomb for affine laws, or bounded by mu_static for
+        // Stribeck. Both give |w|<=b0+b1*|q| without replacing the curve.
+        let viscous_slope = match self.law {
+            FrictionLaw::Stribeck {
+                viscous_per_speed, ..
+            } => Some(viscous_per_speed),
+            _ => self.affine_slope(),
+        };
+        let affine_wrench_norm_bounds = if let Some(slope) = viscous_slope.filter(|s| *s > 0.0) {
+            Some([
+                checked(
+                    normal
+                        * self.law.zero_speed_kinetic_coefficient()?
+                        * upper_norm
+                        * (1.0 + BOUND_ROUNDOFF),
+                )?,
+                checked(normal * slope * (1.0 + BOUND_ROUNDOFF))?,
+            ])
         } else {
             None
         };
@@ -239,7 +253,7 @@ impl HertzFrictionPatch {
                 ],
                 maximum_mass_radius,
                 conditional_extinction,
-                linear_wrench_norm_bound,
+                affine_wrench_norm_bounds,
                 quadrature: CircularTransientQuadrature::Rk4Doubling,
                 evaluate: |velocity: [f64; 2], spin: f64| {
                     let speed = det::hypot(velocity[0], velocity[1]) + radius * spin.abs();
@@ -260,11 +274,11 @@ impl HertzFrictionPatch {
                             "spatial Hertz response exceeded its admitted wrench bound",
                         ));
                     }
-                    if let Some(bound) = linear_wrench_norm_bound {
+                    if let Some([offset, slope]) = affine_wrench_norm_bounds {
                         let rate = det::hypot(det::hypot(velocity[0], velocity[1]), radius * spin);
-                        if wrench_norm > bound * rate {
+                        if wrench_norm > offset + slope * rate {
                             return Err(HertzWrenchError::Invalid(
-                                "viscous Hertz response exceeded its original linear bound",
+                                "Hertz response exceeded its original affine norm bound",
                             ));
                         }
                     }

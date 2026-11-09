@@ -139,15 +139,16 @@ impl Metric {
         }
         Ok(Some((time, travel)))
     }
-    pub fn safe_step(&self, q: [f64; 3], linear_bound: Option<f64>) -> Result<f64, Error> {
+    pub fn safe_step(&self, q: [f64; 3], affine_bounds: Option<[f64; 2]>) -> Result<f64, Error> {
         let (lower, upper) = self.radius(q)?;
         let mut speed = self.maximum_speed;
-        if let Some(bound) = linear_bound {
-            // |w|<=b|q| implies |y'|<=lambda_max(W)*b*|y| in mass
-            // coordinates. Every positive stage stays in the 1.25-radius
-            // ball under this step; unlike a constant force bound, the local
-            // rate bound shrinks with genuine asymptotic viscous motion.
-            let local = (1.25 * self.root_upper * bound) * (self.root_upper * upper);
+        if let Some([offset, slope]) = affine_bounds {
+            // |w|<=b0+b1|q| gives |y'|<=sqrt(lambda_max)*b0+
+            // lambda_max*b1*|y| in mass coordinates. Positive stages stay
+            // in the 1.25-radius ball. Retain the original pure-viscosity
+            // operation tree; its offset is exactly zero.
+            let local = (1.25 * self.root_upper * slope) * (self.root_upper * upper)
+                + self.root_upper * offset;
             if local > 0.0 {
                 speed = speed.min(local);
             }

@@ -8,7 +8,11 @@
 //! authoritative. In particular, rest still conducts without creating heat.
 
 use super::*;
+use fs_contact::interface_binding::thermal_friction::rate_dependent::SourceHertzFrictionError;
 use fs_math::dd::Dd;
+use fs_mbd::tangential_friction::hertz::rate_dependent::{
+    RigidHertzRateTransientError, RigidHertzRateTransientReport,
+};
 use fs_mbd::tangential_friction::hertz::trajectory::{
     RigidHertzTrajectoryError, RigidHertzTrajectoryReport,
 };
@@ -27,6 +31,7 @@ pub enum HertzHeatMarchModel {
 pub enum HertzHeatMarchMotion {
     InvariantDirection(RigidHertzTrajectoryReport),
     Curved(RigidHertzTransientReport),
+    RateDependent(RigidHertzRateTransientReport),
 }
 impl HertzHeatMarchMotion {
     fn travel(&self, radius: f64) -> [f64; 3] {
@@ -35,14 +40,18 @@ impl HertzHeatMarchMotion {
                 m.relaxation.slip_increment_m,
                 m.relaxation.spin_increment_rad,
             ),
-            Self::Curved(m) => (m.transient.slip_increment_m, m.transient.spin_increment_rad),
+            Self::Curved(m)
+            | Self::RateDependent(RigidHertzRateTransientReport { mechanical: m, .. }) => {
+                (m.transient.slip_increment_m, m.transient.spin_increment_rad)
+            }
         };
         [slip[0], slip[1], radius * spin]
     }
     fn uncertainty(&self, radius: f64) -> [f64; 2] {
         match self {
             Self::InvariantDirection(_) => [0.0; 2],
-            Self::Curved(m) => [
+            Self::Curved(m)
+            | Self::RateDependent(RigidHertzRateTransientReport { mechanical: m, .. }) => [
                 m.transient.estimated_scaled_travel_error_m
                     + norm([
                         m.transient.tail_slip_bound_m[0],
@@ -91,23 +100,23 @@ pub struct HertzHeatMarchDefect {
     pub dissipated_j: f64,
     pub normalized: f64,
 }
-pub struct HertzHeatMarchPhase<P> {
+pub struct HertzHeatMarchPhase<P, F = SourceHertzWrench> {
     pub start_s: f64,
     pub end_s: f64,
     pub mechanical: HertzHeatMarchMotion,
     pub heat: FrictionHeatNetworkReport,
-    pub friction_source: SourceHertzWrench,
+    pub friction_source: F,
     pub source: P,
     pub nonlinear: NewtonReport,
     pub trials: usize,
 }
 /// Publish these original A/B momenta and the final thermal owner together.
 /// No intermediate or discarded trial can modify the borrowed input owners.
-pub struct HeatedRigidHertzMarchCandidate<'m, P> {
+pub struct HeatedRigidHertzMarchCandidate<'m, P, F = SourceHertzWrench> {
     pub binding: RigidContactBinding,
     pub bodies_after: [RigidBodyState; 2],
     pub thermal: DepositionSimulation<'m>,
-    pub phases: Vec<HertzHeatMarchPhase<P>>,
+    pub phases: Vec<HertzHeatMarchPhase<P, F>>,
     pub attempts: usize,
     pub rejected_attempts: usize,
     pub thermal_trials: usize,
@@ -127,6 +136,7 @@ pub enum HertzHeatMarchError<E> {
     Invalid(&'static str),
     InvariantDirection(RigidHertzHeatError<E, RigidHertzTrajectoryError>),
     Curved(RigidHertzHeatError<E, RigidHertzTransientError>),
+    RateDependent(RigidHertzHeatError<E, RigidHertzRateTransientError, SourceHertzFrictionError>),
     Dynamics(DynamicsError),
     Cancelled,
     Budget(&'static str),
@@ -145,16 +155,16 @@ impl<E: core::fmt::Debug> core::fmt::Display for HertzHeatMarchError<E> {
 }
 impl<E: std::error::Error + 'static> std::error::Error for HertzHeatMarchError<E> {}
 
-struct Stage<'m, P> {
+pub(super) struct Stage<'m, P, F> {
     bodies: [RigidBodyState; 2],
     thermal: DepositionSimulation<'m>,
-    receipt: HertzHeatMarchPhase<P>,
+    receipt: HertzHeatMarchPhase<P, F>,
 }
-fn stage<'m, P, M>(
-    c: HeatedRigidHertzCandidate<'m, P, M>,
+pub(super) fn stage<'m, P, M, F>(
+    c: HeatedRigidHertzCandidate<'m, P, M, F>,
     start_s: f64,
     motion: fn(M) -> HertzHeatMarchMotion,
-) -> Stage<'m, P> {
+) -> Stage<'m, P, F> {
     Stage {
         bodies: c.bodies_after,
         thermal: c.thermal,
@@ -200,6 +210,64 @@ pub fn propose_rigid_hertz_heat_march<'m, P, E>(
     resolve: impl Fn(&DepositionSimulation<'m>, f64) -> Result<RigidHertzHeatSource<P>, E>,
     gate: &CancelGate,
 ) -> Result<HeatedRigidHertzMarchCandidate<'m, P>, HertzHeatMarchError<E>> {
+    propose_hertz_heat_phases(
+        bodies,
+        properties,
+        contact,
+        thermal,
+        duration_s,
+        phase_controls,
+        controls,
+        temperature_guess_k,
+        |b, props, pair, h, dt, local, energy, guess| {
+            let start = h.time_s();
+            Ok(match model {
+                HertzHeatMarchModel::InvariantDirection => stage(
+                    trajectory::propose_rigid_hertz_trajectory_heat(
+                        b, props, pair, h, route, start, dt, local, energy, guess, &resolve, gate,
+                    )
+                    .map_err(HertzHeatMarchError::InvariantDirection)?,
+                    start,
+                    HertzHeatMarchMotion::InvariantDirection,
+                ),
+                HertzHeatMarchModel::Curved(path) => stage(
+                    transient::propose_rigid_hertz_transient_heat(
+                        b, props, pair, h, route, start, dt, local, path, energy, guess, &resolve,
+                        gate,
+                    )
+                    .map_err(HertzHeatMarchError::Curved)?,
+                    start,
+                    HertzHeatMarchMotion::Curved,
+                ),
+            })
+        },
+        gate,
+    )
+}
+
+/// One checkpoint/refinement/physical-acceptance owner for every Hertz curve.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(super) fn propose_hertz_heat_phases<'m, P, E, C, F>(
+    bodies: &[RigidBodyState],
+    properties: &[MassProperties],
+    contact: RigidHertzHeatContact<'_, C>,
+    thermal: &DepositionSimulation<'m>,
+    duration_s: f64,
+    phase_controls: RigidHertzHeatControls,
+    controls: HertzHeatMarchControls,
+    temperature_guess_k: f64,
+    advance_phase: impl Fn(
+        &[RigidBodyState; 2],
+        &[MassProperties; 2],
+        RigidHertzHeatContact<'_, C>,
+        &DepositionSimulation<'m>,
+        f64,
+        RigidHertzHeatControls,
+        &[f64],
+        f64,
+    ) -> Result<Stage<'m, P, F>, HertzHeatMarchError<E>>,
+    gate: &CancelGate,
+) -> Result<HeatedRigidHertzMarchCandidate<'m, P, F>, HertzHeatMarchError<E>> {
     let poll = || {
         if gate.is_requested() {
             Err(HertzHeatMarchError::Cancelled)
@@ -298,47 +366,8 @@ pub fn propose_rigid_hertz_heat_march<'m, P, E>(
                 let mut local = phase_controls;
                 local.maximum_trials = local.maximum_trials.min(remaining);
                 let start = h.time_s();
-                let out = match model {
-                    HertzHeatMarchModel::InvariantDirection => stage(
-                        trajectory::propose_rigid_hertz_trajectory_heat(
-                            b,
-                            &props,
-                            pair,
-                            h,
-                            route,
-                            start,
-                            stop - start,
-                            local,
-                            &zero_energy,
-                            guess,
-                            &resolve,
-                            gate,
-                        )
-                        .map_err(HertzHeatMarchError::InvariantDirection)?,
-                        start,
-                        HertzHeatMarchMotion::InvariantDirection,
-                    ),
-                    HertzHeatMarchModel::Curved(path) => stage(
-                        transient::propose_rigid_hertz_transient_heat(
-                            b,
-                            &props,
-                            pair,
-                            h,
-                            route,
-                            start,
-                            stop - start,
-                            local,
-                            path,
-                            &zero_energy,
-                            guess,
-                            &resolve,
-                            gate,
-                        )
-                        .map_err(HertzHeatMarchError::Curved)?,
-                        start,
-                        HertzHeatMarchMotion::Curved,
-                    ),
-                };
+                let out =
+                    advance_phase(b, &props, pair, h, stop - start, local, &zero_energy, guess)?;
                 if out.thermal.time_s() != stop || out.receipt.trials > remaining {
                     return Err(HertzHeatMarchError::Invalid(
                         "phase clock or trial budget disagrees",
@@ -471,12 +500,12 @@ fn vector(v: Vec3) -> [f64; 3] {
     [v.x, v.y, v.z]
 }
 #[allow(clippy::too_many_arguments)]
-fn compare<P, E>(
+fn compare<P, E, F>(
     old: [RigidBodyState; 2],
     thermal: &DepositionSimulation<'_>,
-    coarse: &Stage<'_, P>,
-    first: &Stage<'_, P>,
-    fine: &Stage<'_, P>,
+    coarse: &Stage<'_, P, F>,
+    first: &Stage<'_, P, F>,
+    fine: &Stage<'_, P, F>,
     radius: f64,
     tolerance: HertzHeatMarchTolerance,
     gate: &CancelGate,
