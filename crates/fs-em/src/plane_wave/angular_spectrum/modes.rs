@@ -12,7 +12,7 @@ pub(super) fn finite(z: C64) -> bool {
 /// number scale, and subtracting the larger transverse component first keeps
 /// the cancellation in the compensated products. No light-cone tolerance or
 /// clipping admits grazing/evanescent input.
-pub(super) fn incident_cosine(k: f64, kx: f64, ky: f64) -> Option<f64> {
+pub(in crate::plane_wave) fn incident_cosine(k: f64, kx: f64, ky: f64) -> Option<f64> {
     let (a, b) = if kx.abs() >= ky.abs() {
         (kx.abs(), ky.abs())
     } else {

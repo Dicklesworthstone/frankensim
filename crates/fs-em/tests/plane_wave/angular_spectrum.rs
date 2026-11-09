@@ -14,6 +14,7 @@ mod aplanatic;
 mod carrier_correlation;
 mod oversampled;
 mod probes;
+mod transverse;
 
 fn limits() -> AngularSpectrumLimits {
     AngularSpectrumLimits {

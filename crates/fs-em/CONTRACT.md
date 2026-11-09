@@ -7708,6 +7708,33 @@ full native lossy/dispersive spectral sweeps, subdivision and opaque limits.
 The fixtures verify numerical physics for authored laws, not experimental
 coating qualification.
 
+### Coherent transverse dispersion and lateral reflection shifts
+
+`PlanarDielectricLayers::transverse_dispersion` returns original reflected E and
+transmitted E/H amplitudes with analytic first and second derivatives in signed
+transverse angular wavenumber, at fixed prepared frequency. It retains the
+original stack, polarization and entrance/exit phase references. It uses only
+the admitted monochromatic material values, so no frequency-derivative law or
+extra spectral fit is required. The existing compensated angular-spectrum
+light-cone check, bounded slab matrices, entire critical-film functions and
+normalized E/H jet recurrence are shared with their original owners.
+
+Under exp(+i omega t - i k_parallel x), the logarithmic phase gradient gives
+the local +d arg(H)/dk_parallel displacement along the interface; phase
+curvature and log-amplitude filtering derivatives are retained separately.
+This is the narrow-spectrum Goos–Hänchen/Artmann interpretation, not an exact
+finite-width centroid, transverse spin-Hall effect or exterior propagation
+distance. Full finite-beam interference remains with `PlanarAngularSpectrum`.
+Exact zero amplitudes have no logarithmic shift, exact critical exits refuse,
+internal critical films remain regular, and underflowed transmission jets are
+unavailable while the reflected jet remains usable. Queries allocate no heap
+storage and take bounded O(layers) work without angular differencing.
+
+Five focused tests cover closed-form signed TIR shifts and curvature, native
+lossy coating and critical-film angular sweeps, geometrical exit displacement,
+mirror/zero/underflow limits, and convergence of an actual finite TE angular-
+spectrum beam's entrance-plane intensity centroid to the local phase shift.
+
 ### Native AC circuits on physical solid-conductor electrodes
 
 `harmonic::terminals::SpatialHarmonicTerminalFrequency` prepares the complete

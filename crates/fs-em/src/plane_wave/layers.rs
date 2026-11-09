@@ -39,6 +39,11 @@ pub use frequency::{LayerAmplitudeDerivative, LayeredFrequencyResponse, LayeredR
 mod dispersion;
 pub use dispersion::LayeredFrequencyDispersion;
 
+mod transverse;
+pub use transverse::{
+    LayeredTransverseDispersion, TransverseAmplitudeDispersion, TransverseLogarithmicDispersion,
+};
+
 mod illumination;
 pub use illumination::{
     CoherentLayerIllumination, IlluminationBudget, IncoherentLayerCascade, LayerIlluminationPower,

@@ -169,34 +169,7 @@ impl<'m> PlanarDielectricLayers<'m> {
                 ei,
                 et,
             )?;
-            let mut head = [
-                matrix[0][0] * state[0] + matrix[0][1] * state[1],
-                matrix[1][0] * state[0] + matrix[1][1] * state[1],
-            ];
-            let normalization = positive(maximum(head[0].value).max(maximum(head[1].value)))?;
-            head = head.map(|value| value.divide_real(normalization));
-            if head.into_iter().any(|value| !value.is_finite()) {
-                return Err(bad("coherent film frequency jet is unrepresentable"));
-            }
-            if let Some(tail) = transmitted {
-                let gain = Jet::constant(divided(slab.scale, normalization))
-                    * ((state[0] + state[1]) / (head[0] + head[1]));
-                let next = tail.map(|value| gain * value);
-                if gain.value == C64::ZERO
-                    || tail
-                        .into_iter()
-                        .zip(next)
-                        .any(|(old, new)| old.value != C64::ZERO && new.value == C64::ZERO)
-                {
-                    transmitted = None;
-                } else {
-                    if next.into_iter().any(|value| !value.is_finite()) {
-                        return Err(bad("coherent film transmission jet is unrepresentable"));
-                    }
-                    transmitted = Some(next);
-                }
-            }
-            state = head;
+            (state, transmitted) = propagate_jets(slab, matrix, state, transmitted)?;
         }
         let reflection = reflection_jet(state);
         let reflected = FresnelAmplitudeDispersion::try_from_scaled(
@@ -236,50 +209,50 @@ impl<'m> PlanarDielectricLayers<'m> {
     }
 }
 
-// Frequency-local scalar algebra. First/second are omega*H' and omega²*H'',
-// ordinary derivatives, not factorial-scaled Taylor coefficients.
+// Scalar jets in a dimensionless parameter (frequency/omega or k_parallel/k_i).
+// First/second are ordinary derivatives, not factorial-scaled coefficients.
 #[derive(Clone, Copy)]
-struct Jet {
-    value: C64,
+pub(super) struct Jet {
+    pub(super) value: C64,
     first: C64,
     second: C64,
 }
 impl Jet {
-    const fn constant(value: C64) -> Self {
+    pub(super) const fn constant(value: C64) -> Self {
         Self {
             value,
             first: C64::ZERO,
             second: C64::ZERO,
         }
     }
-    fn new(value: C64, derivatives: [C64; 2]) -> Self {
+    pub(super) fn new(value: C64, derivatives: [C64; 2]) -> Self {
         Self {
             value,
             first: derivatives[0],
             second: derivatives[1],
         }
     }
-    fn derivatives(self) -> [C64; 2] {
+    pub(super) fn derivatives(self) -> [C64; 2] {
         [self.first, self.second]
     }
-    fn scale(self, value: f64) -> Self {
+    pub(super) fn scale(self, value: f64) -> Self {
         Self {
             value: self.value.scale(value),
             first: self.first.scale(value),
             second: self.second.scale(value),
         }
     }
-    fn divide_real(self, value: f64) -> Self {
+    pub(super) fn divide_real(self, value: f64) -> Self {
         Self {
             value: divided(self.value, value),
             first: divided(self.first, value),
             second: divided(self.second, value),
         }
     }
-    fn root_at(self, root: C64) -> Self {
+    pub(super) fn root_at(self, root: C64) -> Self {
         Self::new(root, root_derivatives(root, self.derivatives()))
     }
-    fn is_finite(self) -> bool {
+    pub(super) fn is_finite(self) -> bool {
         [self.value, self.first, self.second]
             .into_iter()
             .all(finite)
@@ -362,13 +335,52 @@ fn admittance_jets(
     Ok(state)
 }
 
-fn reflection_jet([a, b]: [Jet; 2]) -> Jet {
+pub(super) fn reflection_jet([a, b]: [Jet; 2]) -> Jet {
     let denominator = a.value + b.value;
     let first = ((a.first * b.value - a.value * b.first).scale(2.0) / denominator) / denominator;
     let second = ((a.second * b.value - a.value * b.second).scale(2.0) / denominator
         - (first * (a.first + b.first)).scale(2.0))
         / denominator;
     Jet::new((a.value - b.value) / denominator, [first, second])
+}
+
+// Both derivatives follow the original homogeneous E/H recurrence. Holding
+// its carrier normalization fixed is a local gauge, independent of whether
+// the physical parameter varies frequency or transverse wave number.
+pub(super) fn propagate_jets(
+    slab: Slab,
+    matrix: [[Jet; 2]; 2],
+    state: [Jet; 2],
+    mut transmitted: Option<[Jet; 2]>,
+) -> Result<([Jet; 2], Option<[Jet; 2]>)> {
+    let mut head = [
+        matrix[0][0] * state[0] + matrix[0][1] * state[1],
+        matrix[1][0] * state[0] + matrix[1][1] * state[1],
+    ];
+    let normalization = positive(maximum(head[0].value).max(maximum(head[1].value)))?;
+    head = head.map(|value| value.divide_real(normalization));
+    if head.into_iter().any(|value| !value.is_finite()) {
+        return Err(bad("coherent film derivative jet is unrepresentable"));
+    }
+    if let Some(tail) = transmitted {
+        let gain = Jet::constant(divided(slab.scale, normalization))
+            * ((state[0] + state[1]) / (head[0] + head[1]));
+        let next = tail.map(|value| gain * value);
+        if gain.value == C64::ZERO
+            || tail
+                .into_iter()
+                .zip(next)
+                .any(|(old, new)| old.value != C64::ZERO && new.value == C64::ZERO)
+        {
+            transmitted = None;
+        } else {
+            if next.into_iter().any(|value| !value.is_finite()) {
+                return Err(bad("coherent film transmission jet is unrepresentable"));
+            }
+            transmitted = Some(next);
+        }
+    }
+    Ok((head, transmitted))
 }
 
 fn slab_jets(
@@ -387,12 +399,24 @@ fn slab_jets(
         Polarization::Tm => Jet::new(medium.epsilon_ratio, et) * qi / Jet::new(C64::ONE, ei),
     };
     let depth = Jet::new(C64::from_re(depth), [C64::from_re(depth), C64::ZERO]);
+    slab_jets_from_normal(slab, q_squared, a, depth, polarization)
+}
+
+// Entire propagator shared by frequency and spatial dispersion. The supplied
+// depth and admittance jets retain the corresponding physical constraint.
+pub(super) fn slab_jets_from_normal(
+    slab: Slab,
+    q_squared: Jet,
+    a: Jet,
+    depth: Jet,
+    polarization: Polarization,
+) -> Result<[[Jet; 2]; 2]> {
     let imaginary_depth = Jet::constant(C64::new(0.0, 1.0)) * depth;
     let u = imaginary_depth * a;
     let v = imaginary_depth * q_squared / a;
     let w = depth * depth * q_squared;
     if !w.is_finite() || !u.is_finite() || !v.is_finite() || u.value == C64::ZERO {
-        return Err(bad("film phase frequency jet is unrepresentable"));
+        return Err(bad("film phase derivative jet is unrepresentable"));
     }
     let original_u = match polarization {
         Polarization::Te => slab.matrix[0][1],
@@ -434,7 +458,7 @@ fn slab_jets(
         }
     }
     if matrix.iter().flatten().any(|value| !value.is_finite()) {
-        return Err(bad("film matrix frequency jet is unrepresentable"));
+        return Err(bad("film matrix derivative jet is unrepresentable"));
     }
     Ok(matrix)
 }
