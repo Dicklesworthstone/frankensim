@@ -1144,6 +1144,20 @@ cancellation and both original basis-column balance audits remain mandatory.
 Independent high-precision block-exponential references, reversed state labels,
 tiny sinks and interval-composition regressions exercise this admitted path.
 
+Stiff three-state cycles retain low arithmetic parts through the original
+positive uniformization, event/source series and semigroup composition using
+the shared `fs_math::dd::Dd` primitive. This bounded path is selected when
+scaling can amplify binary64 rounding beyond the requested admission target.
+Generator construction and scalar damping also retain low parts; final maps
+round once before the unchanged balance and range audits. Nanosecond singlet
+decay can therefore coexist with weak pumping and millisecond-to-second
+exposures without physical lifetime subdivision, population normalization or
+tolerance changes. Initial and uniform-source residence use the same history.
+The extra arithmetic is charged to the original work budget, with bounded
+cancellation. Independent high-precision matrix references, analytic weak-pump
+limits and interval composition cover the numerical claim; this is not a
+certified floating-point error enclosure or physical coefficient calibration.
+
 ## Representable late reaction survivors
 
 `ReactionPlan::apply` scales noncyclic same-node survival through the shared

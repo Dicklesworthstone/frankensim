@@ -41,6 +41,9 @@ pub mod source;
 #[path = "reaction/exchange.rs"]
 mod exchange;
 
+#[path = "reaction/small.rs"]
+mod small;
+
 /// An expected number of products per removal of a parent. Repeated endpoints
 /// add, self-products are allowed, and a parent with no edges is a finite sink.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -427,6 +430,17 @@ impl ReactionPlan {
             limits,
             &mut cancelled,
         )?;
+        if small::needs_extended_precision(&plan, &cyclic) {
+            return small::prepare(
+                plan,
+                shift,
+                time,
+                limits,
+                with_source,
+                with_source_integrals,
+                &mut cancelled,
+            );
+        }
         let mu = shift * time;
         let mut scaled = vec![0.0; n * n];
         let mut scaled_removal = vec![0.0; n];
