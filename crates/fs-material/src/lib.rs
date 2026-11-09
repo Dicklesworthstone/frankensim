@@ -126,6 +126,8 @@ pub mod tensor;
 pub mod thermal;
 /// Source-bounded absolute phase, group and thermal derivatives for dielectrics.
 pub mod thermo_optic;
+/// Original NIST Ciddor atmospheric-air dispersion and pressure/temperature response.
+pub mod air_refraction;
 /// Original NASA CHARMS Corning 7980 silica phase/group and thermal refraction.
 pub mod silica_refraction;
 /// Source-line Corning 7980 stress birefringence on original Cauchy stress.
