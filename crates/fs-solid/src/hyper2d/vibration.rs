@@ -7,7 +7,9 @@
 //! deformation changes that original mass inventory.
 //!
 //! The existing fs-modal dense owner returns the complete signed spectrum and
-//! residual intervals on at most 128 free coordinates. Negative and null
+//! residual intervals on at most 128 free coordinates. The [`windows`] adapter
+//! uses the same native equilibrium and sparse pencil beyond that limit, with
+//! explicit window/factor budgets and complete-in-window counts. Negative and null
 //! eigenvalues are retained; neither an absolute value nor a frequency clamp
 //! turns an unstable or unresolved mode into a stable vibration.
 //!
@@ -25,6 +27,9 @@ use fs_modal::{ModalError, ModePair, eigh_gen_dense};
 use fs_sparse::Csr;
 
 pub use crate::hyper3::vibration::{MAX_DENSE_FREE_DOFS, VibrationSettings};
+
+/// Sparse signed spectral windows without the complete dense basis limit.
+pub mod windows;
 
 /// The SAME constitutive reduction governs equilibrium and vibration.
 #[derive(Clone, Copy, Debug)]
@@ -89,6 +94,15 @@ impl std::error::Error for PlaneVibrationError {
 /// positions remain borrowed together. Modes use the retained free-DOF order
 /// and zero increments on prescribed coordinates. K and M are row-major.
 pub struct PlaneVibration<'p, 'm> {
+    state: PlaneVibrationState<'p, 'm>,
+    stiffness_n_m: Vec<f64>,
+    mass_kg: Vec<f64>,
+    modes: Vec<ModePair>,
+}
+
+// Both spectral routes retain one original equilibrium/source state. Only
+// their free-coordinate representation and native spectral owner differ.
+struct PlaneVibrationState<'p, 'm> {
     problem: &'p HyperProblem<'m>,
     formulation: PlaneVibrationFormulation,
     reference_thickness_m: f64,
@@ -98,9 +112,6 @@ pub struct PlaneVibration<'p, 'm> {
     equilibrium: NewtonReport,
     reactions_n: Vec<(usize, f64)>,
     free_dofs: Vec<usize>,
-    stiffness_n_m: Vec<f64>,
-    mass_kg: Vec<f64>,
-    modes: Vec<ModePair>,
 }
 
 fn invalid(what: &str) -> SolidError {
@@ -213,6 +224,69 @@ impl<'m> HyperProblem<'m> {
         if !tolerance.is_finite() || tolerance <= 0.0 || tolerance >= 1.0 {
             return Err(invalid("modal residual tolerance must be finite and in (0,1)").into());
         }
+        let (state, tangent) = self.equilibrate_for_vibration(
+            formulation,
+            reference_thickness_m,
+            density,
+            initial,
+            settings.spectrum.maximum_free_dofs.min(MAX_DENSE_FREE_DOFS),
+            settings.maximum_mass_assembly_bytes,
+            cx,
+        )?;
+        let n = state.free_dofs.len();
+        let mass_kg = restrict(state.reference_mass.matrix(), &state.free_dofs, 1.0, cx)?;
+        let stiffness_n_m = restrict(&tangent, &state.free_dofs, reference_thickness_m, cx)?;
+        checkpoint(cx)?;
+        let modes =
+            eigh_gen_dense(&stiffness_n_m, &mass_kg, n).map_err(PlaneVibrationError::Modal)?;
+        checkpoint(cx)?;
+        if modes.len() != n {
+            return Err(invalid("modal owner returned an incomplete plane basis").into());
+        }
+        let scale = modes
+            .iter()
+            .map(|mode| mode.lambda.abs())
+            .fold(0.0, f64::max);
+        for (index, mode) in modes.iter().enumerate() {
+            if mode.phi.len() != n
+                || mode.phi.iter().any(|v| !v.is_finite())
+                || !mode.lambda.is_finite()
+                || !mode.residual.is_finite()
+                || mode.residual < 0.0
+                || !mode.interval.0.is_finite()
+                || !mode.interval.1.is_finite()
+                || mode.residual > tolerance * scale
+            {
+                return Err(PlaneVibrationError::UnresolvedMode {
+                    index,
+                    eigenvalue_per_s2: mode.lambda,
+                    residual_per_s2: mode.residual,
+                });
+            }
+        }
+        Ok(PlaneVibration {
+            state,
+            stiffness_n_m,
+            mass_kg,
+            modes,
+        })
+    }
+
+    // One mechanical route feeds dense and sparse spectra. Its original source
+    // laws, absolute support targets, mass admission and complete tangent remain
+    // identical; the spectral caller only supplies its coordinate-size cap.
+    #[allow(clippy::too_many_arguments)]
+    fn equilibrate_for_vibration<'p>(
+        &'p self,
+        formulation: PlaneVibrationFormulation,
+        reference_thickness_m: f64,
+        density: PlaneReferenceDensity<'p>,
+        initial: Option<&[[f64; 2]]>,
+        maximum_free_dofs: usize,
+        maximum_mass_assembly_bytes: usize,
+        cx: &Cx<'_>,
+    ) -> Result<(PlaneVibrationState<'p, 'm>, Csr), PlaneVibrationError> {
+        checkpoint(cx)?;
         self.validate_materials_with(|| checkpoint(cx))?;
         for (element, _) in self.mesh.elems.iter().enumerate() {
             checkpoint(cx)?;
@@ -250,8 +324,10 @@ impl<'m> HyperProblem<'m> {
             .ok_or_else(|| invalid("plane vibration displacement count overflows"))?;
         let free_dofs: Vec<_> = (0..ndofs).filter(|d| !fixed.contains_key(d)).collect();
         let n = free_dofs.len();
-        if n == 0 || n > settings.spectrum.maximum_free_dofs || n > MAX_DENSE_FREE_DOFS {
-            return Err(invalid("plane dense vibration requires 1..=128 bounded free DOFs").into());
+        if n == 0 || n > maximum_free_dofs {
+            return Err(
+                invalid("plane vibration requires a nonempty admitted free-DOF set").into(),
+            );
         }
         // Admit and assemble the original consistent inertia before Newton.
         let reference_mass = match density {
@@ -259,20 +335,19 @@ impl<'m> HyperProblem<'m> {
                 self.mesh,
                 reference_thickness_m,
                 values,
-                settings.maximum_mass_assembly_bytes,
+                maximum_mass_assembly_bytes,
                 cx,
             ),
             PlaneReferenceDensity::Nodal(values) => ReferenceMass::from_plane_nodal_density(
                 self.mesh,
                 reference_thickness_m,
                 values,
-                settings.maximum_mass_assembly_bytes,
+                maximum_mass_assembly_bytes,
                 cx,
             )
             .map(|(mass, _)| mass),
         }
         .map_err(inertia_error)?;
-        let mass_kg = restrict(reference_mass.matrix(), &free_dofs, 1.0, cx)?;
         let (displacement_m, equilibrium) = match formulation {
             PlaneVibrationFormulation::PlaneStress(local) => match initial {
                 Some(u) => self.solve_plane_stress_from(u, local, cx),
@@ -299,7 +374,6 @@ impl<'m> HyperProblem<'m> {
                 self.mean_dilatation_residual_and_tangent(&u, 1.0, cx)
             }
         }?;
-        let stiffness_n_m = restrict(&tangent, &free_dofs, reference_thickness_m, cx)?;
         let reactions_n: Vec<_> = fixed
             .keys()
             .map(|&d| (d, residual[d] * reference_thickness_m))
@@ -308,77 +382,50 @@ impl<'m> HyperProblem<'m> {
             return Err(invalid("unrepresentable plane support reaction").into());
         }
         checkpoint(cx)?;
-        let modes =
-            eigh_gen_dense(&stiffness_n_m, &mass_kg, n).map_err(PlaneVibrationError::Modal)?;
-        checkpoint(cx)?;
-        if modes.len() != n {
-            return Err(invalid("modal owner returned an incomplete plane basis").into());
-        }
-        let scale = modes
-            .iter()
-            .map(|mode| mode.lambda.abs())
-            .fold(0.0, f64::max);
-        for (index, mode) in modes.iter().enumerate() {
-            if mode.phi.len() != n
-                || mode.phi.iter().any(|v| !v.is_finite())
-                || !mode.lambda.is_finite()
-                || !mode.residual.is_finite()
-                || mode.residual < 0.0
-                || !mode.interval.0.is_finite()
-                || !mode.interval.1.is_finite()
-                || mode.residual > tolerance * scale
-            {
-                return Err(PlaneVibrationError::UnresolvedMode {
-                    index,
-                    eigenvalue_per_s2: mode.lambda,
-                    residual_per_s2: mode.residual,
-                });
-            }
-        }
-        Ok(PlaneVibration {
-            problem: self,
-            formulation,
-            reference_thickness_m,
-            density,
-            reference_mass,
-            displacement_m,
-            equilibrium,
-            reactions_n,
-            free_dofs,
-            stiffness_n_m,
-            mass_kg,
-            modes,
-        })
+        Ok((
+            PlaneVibrationState {
+                problem: self,
+                formulation,
+                reference_thickness_m,
+                density,
+                reference_mass,
+                displacement_m,
+                equilibrium,
+                reactions_n,
+                free_dofs,
+            },
+            tangent,
+        ))
     }
 }
 
 impl<'p, 'm> PlaneVibration<'p, 'm> {
     pub fn problem(&self) -> &HyperProblem<'m> {
-        self.problem
+        self.state.problem
     }
     pub const fn formulation(&self) -> PlaneVibrationFormulation {
-        self.formulation
+        self.state.formulation
     }
     pub const fn reference_thickness_m(&self) -> f64 {
-        self.reference_thickness_m
+        self.state.reference_thickness_m
     }
     pub const fn reference_density(&self) -> PlaneReferenceDensity<'p> {
-        self.density
+        self.state.density
     }
     pub fn reference_mass_kg(&self) -> f64 {
-        self.reference_mass.reference_mass_kg()
+        self.state.reference_mass.reference_mass_kg()
     }
     pub fn displacement_m(&self) -> &[[f64; 2]] {
-        &self.displacement_m
+        &self.state.displacement_m
     }
     pub fn equilibrium_report(&self) -> &NewtonReport {
-        &self.equilibrium
+        &self.state.equilibrium
     }
     pub fn reactions_n(&self) -> &[(usize, f64)] {
-        &self.reactions_n
+        &self.state.reactions_n
     }
     pub fn free_dofs(&self) -> &[usize] {
-        &self.free_dofs
+        &self.state.free_dofs
     }
     pub fn stiffness_n_m(&self) -> &[f64] {
         &self.stiffness_n_m
@@ -398,7 +445,8 @@ impl<'p, 'm> PlaneVibration<'p, 'm> {
         acceleration_m_s2: &[[f64; 2]],
         cx: &Cx<'_>,
     ) -> Result<Vec<f64>, PlaneVibrationError> {
-        self.reference_mass
+        self.state
+            .reference_mass
             .action(acceleration_m_s2.as_flattened(), cx)
             .map_err(inertia_error)
             .map_err(Into::into)
