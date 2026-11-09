@@ -42,14 +42,28 @@ pub struct StokesFlowControlSolution<S = StokesSolution> {
 /// another full flow system. Both original equation residuals and each integral
 /// flow constraint are checked before a result is returned.
 pub struct PreparedStokesFlowControl<'a, 'm> {
+    response: PreparedStokesPressureResponse<'a, 'm>,
+    row_scales: Vec<f64>,
+    pressure_factor: Lu,
+}
+
+/// Cached native pressure responses for finite external hydraulic loads.
+///
+/// All original natural-traction edges may belong to controlled ports. The
+/// mobility can be singular: a common pressure shift changes pressure without
+/// changing flow, and a sealed component with one port has zero net mobility.
+/// The external pressure/flow laws, rather than an artificial datum edge, set
+/// the pressure. Preparation never inverts or regularizes the mobility.
+///
+/// The original assembled operator must still be solvable. Mesh, coefficients,
+/// forcing, wall motion and history remain frozen exactly as for flow control.
+pub struct PreparedStokesPressureResponse<'a, 'm> {
     assembly: StokesAssembly<'a, 'm>,
     ports: Vec<Vec<usize>>,
     baseline: Vec<f64>,
     baseline_flows: Vec<f64>,
     responses: Vec<Vec<f64>>,
     mobility: Vec<f64>,
-    row_scales: Vec<f64>,
-    pressure_factor: Lu,
 }
 
 impl<'a, 'm> StokesAssembly<'a, 'm> {
@@ -78,6 +92,53 @@ impl<'a, 'm> StokesAssembly<'a, 'm> {
         self,
         ports: &[&[usize]],
     ) -> Result<PreparedStokesFlowControl<'a, 'm>, StokesBoundaryError> {
+        let response = self.prepare_port_response(ports, true)?;
+        let count = response.ports.len();
+        let mut scaled = vec![0.0; response.mobility.len()];
+        let mut row_scales = Vec::with_capacity(count);
+        for i in 0..count {
+            let scale = response.mobility[i * count..(i + 1) * count]
+                .iter()
+                .fold(0.0_f64, |largest, value| largest.max(value.abs()));
+            if !scale.is_finite() || scale == 0.0 {
+                return Err(StokesBoundaryError::SingularSystem);
+            }
+            row_scales.push(scale);
+            for j in 0..count {
+                scaled[i * count + j] = response.mobility[i * count + j] / scale;
+            }
+        }
+        let pressure_factor =
+            lu(&scaled, count).map_err(|_| StokesBoundaryError::SingularSystem)?;
+        Ok(PreparedStokesFlowControl {
+            response,
+            row_scales,
+            pressure_factor,
+        })
+    }
+
+    /// Prepare pressure responses without requiring invertible port mobility.
+    ///
+    /// Port geometry and original checked linear solves retain exactly the
+    /// same admission as prescribed-flow control. Every traction edge may be
+    /// controlled; finite reservoir laws select absolute pressure. No pressure
+    /// gauge, fixed flow target or artificial uncontrolled edge is introduced.
+    ///
+    /// # Errors
+    /// Refuses invalid, repeated or non-traction port edges and failures of the
+    /// original linear system. A singular mobility by itself is not a failure.
+    pub fn prepare_pressure_response(
+        self,
+        ports: &[&[usize]],
+    ) -> Result<PreparedStokesPressureResponse<'a, 'm>, StokesBoundaryError> {
+        self.prepare_port_response(ports, false)
+    }
+
+    fn prepare_port_response(
+        self,
+        ports: &[&[usize]],
+        require_uncontrolled_datum: bool,
+    ) -> Result<PreparedStokesPressureResponse<'a, 'm>, StokesBoundaryError> {
         if ports.is_empty() || ports.iter().any(|port| port.is_empty()) {
             return Err(invalid("at least one nonempty controlled port required"));
         }
@@ -118,10 +179,11 @@ impl<'a, 'm> StokesAssembly<'a, 'm> {
                 pressure_datum[self.system.pressure_component[geometry.tris.0]] = true;
             }
         }
-        if controlled_components
-            .iter()
-            .zip(&pressure_datum)
-            .any(|(&controlled, &datum)| controlled && !datum)
+        if require_uncontrolled_datum
+            && controlled_components
+                .iter()
+                .zip(&pressure_datum)
+                .any(|(&controlled, &datum)| controlled && !datum)
         {
             return Err(invalid(
                 "each controlled component needs an uncontrolled traction pressure datum",
@@ -147,37 +209,21 @@ impl<'a, 'm> StokesAssembly<'a, 'm> {
             responses.push(checked_solve(&self, &load)?.x);
         }
         let mut mobility = vec![0.0; entries];
-        let mut scaled = vec![0.0; entries];
-        let mut row_scales = Vec::with_capacity(count);
         for (i, port) in ports.iter().enumerate() {
             for (j, response) in responses.iter().enumerate() {
                 mobility[i * count + j] = port_flow(&self, port, response);
-            }
-            let scale = mobility[i * count..(i + 1) * count]
-                .iter()
-                .fold(0.0_f64, |largest, value| largest.max(value.abs()));
-            if !scale.is_finite() || scale == 0.0 {
-                return Err(StokesBoundaryError::SingularSystem);
-            }
-            row_scales.push(scale);
-            for j in 0..count {
-                scaled[i * count + j] = mobility[i * count + j] / scale;
             }
         }
         if mobility.iter().any(|value| !value.is_finite()) {
             return Err(invalid("unrepresentable hydraulic port response"));
         }
-        let pressure_factor =
-            lu(&scaled, count).map_err(|_| StokesBoundaryError::SingularSystem)?;
-        Ok(PreparedStokesFlowControl {
+        Ok(PreparedStokesPressureResponse {
             assembly: self,
             ports: ports.iter().map(|port| port.to_vec()).collect(),
             baseline,
             baseline_flows,
             responses,
             mobility,
-            row_scales,
-            pressure_factor,
         })
     }
 }
@@ -198,11 +244,11 @@ impl PreparedStokesFlowControl<'_, '_> {
         outward_volume_rates_m2_s: &[f64],
         absolute_tolerance_m2_s: f64,
     ) -> Result<StokesFlowControlSolution, StokesBoundaryError> {
-        let count = self.ports.len();
+        let count = self.response.ports.len();
         admit_flow_targets(count, outward_volume_rates_m2_s, absolute_tolerance_m2_s)?;
         let mut pressures: Vec<_> = outward_volume_rates_m2_s
             .iter()
-            .zip(&self.baseline_flows)
+            .zip(&self.response.baseline_flows)
             .zip(&self.row_scales)
             .map(|((&target, &base), &scale)| (target - base) / scale)
             .collect();
@@ -216,10 +262,10 @@ impl PreparedStokesFlowControl<'_, '_> {
                 .iter()
                 .enumerate()
                 .map(|(i, &target)| {
-                    let mut residual = Dd::from_f64(target) - Dd::from_f64(self.baseline_flows[i]);
+                    let mut residual = Dd::from_f64(target) - Dd::from_f64(self.response.baseline_flows[i]);
                     for (j, &pressure) in pressures.iter().enumerate() {
                         residual = residual
-                            - Dd::from_f64(self.mobility[i * count + j]) * Dd::from_f64(pressure);
+                            - Dd::from_f64(self.response.mobility[i * count + j]) * Dd::from_f64(pressure);
                     }
                     residual.to_f64() / self.row_scales[i]
                 })
@@ -232,10 +278,10 @@ impl PreparedStokesFlowControl<'_, '_> {
         if pressures.iter().any(|value| !value.is_finite()) {
             return Err(invalid("unrepresentable controlled port pressure"));
         }
-        let flow = self.report_pressures(&pressures)?;
+        let flow = self.response.report_pressures(&pressures)?;
         let (flows, maximum_flow_residual_m2_s) = checked_port_flows(
-            &self.assembly,
-            &self.ports,
+            &self.response.assembly,
+            &self.response.ports,
             outward_volume_rates_m2_s,
             absolute_tolerance_m2_s,
             &flow.field.x,
@@ -248,6 +294,16 @@ impl PreparedStokesFlowControl<'_, '_> {
         })
     }
 
+    /// Kinetic energy in the original retained density metric.
+    ///
+    /// # Errors
+    /// Preserves the original assembly's velocity and energy admission.
+    pub fn kinetic_energy(&self, velocity: &[f64]) -> Result<f64, StokesBoundaryError> {
+        self.response.kinetic_energy(velocity)
+    }
+}
+
+impl PreparedStokesPressureResponse<'_, '_> {
     // Every cached port solve uses the same compensated superposition,
     // original-equation check and pressure-aware boundary reactions.
     fn report_pressures(&self, pressures: &[f64]) -> Result<StokesSolution, StokesBoundaryError> {
@@ -349,21 +405,23 @@ impl<'a> FlowControl<'a> {
         &self,
         assembly: StokesAssembly<'_, '_>,
     ) -> Result<(StokesSolution, Vec<f64>), StokesBoundaryError> {
-        let prepared = assembly.prepare_flow_control(self.ports)?;
         match self.law {
             PortLaw::Flow {
                 targets,
                 absolute_tolerance_m2_s,
             } => {
-                let solved = prepared.solve(targets, absolute_tolerance_m2_s)?;
+                let solved = assembly
+                    .prepare_flow_control(self.ports)?
+                    .solve(targets, absolute_tolerance_m2_s)?;
                 Ok((solved.flow, solved.pressure_offsets_m2_s2))
             }
             PortLaw::Resistance {
                 loads,
                 absolute_pressure_tolerance_m2_s2,
             } => {
-                let solved =
-                    prepared.solve_resistance_ports(loads, absolute_pressure_tolerance_m2_s2)?;
+                let solved = assembly
+                    .prepare_pressure_response(self.ports)?
+                    .solve_resistance_ports(loads, absolute_pressure_tolerance_m2_s2)?;
                 Ok((solved.flow, solved.pressure_offsets_m2_s2))
             }
         }

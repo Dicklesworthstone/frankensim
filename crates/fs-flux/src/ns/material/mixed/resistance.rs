@@ -39,8 +39,8 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
     /// pressure, mechanical reactions and external R*Q² loss. Port velocity
     /// profiles remain unknown. Signed flow reversal is preserved.
     ///
-    /// Each connected controlled component needs an uncontrolled traction
-    /// datum. The law is linear hydraulic resistance, without external inertia,
+    /// Every traction port may be controlled; reservoir laws select pressure.
+    /// The law is linear hydraulic resistance, without external inertia,
     /// compliance, turbulence or automatic thermal deposition. It does not
     /// update the material's thermodynamic pressure or temperature.
     ///
@@ -150,7 +150,7 @@ pub(super) fn solve_resistance_assembly<S>(
         })
         .collect();
     let prepared = assembly
-        .prepare_flow_control(ports)
+        .prepare_pressure_response(ports)
         .map_err(MaterialFluxError::Boundary)?;
     let solved = prepared
         .solve_resistance_ports(&native, tolerance_pa / density)

@@ -152,7 +152,7 @@ impl<'s, 'm, G> MaterialStokesField<'s, 'm, G> {
     /// reference stay fixed through the histories; reservoirs are held per
     /// interval. This fixed-layer model does not advect density or material
     /// interfaces, update temperature, or infer compliance from transport data.
-    /// Each controlled component retains an uncontrolled traction datum.
+    /// Every traction port may be controlled; reservoir laws select pressure.
     ///
     /// # Errors
     /// Preserves source snapshots and immutable histories on every refusal;
@@ -199,7 +199,7 @@ impl<'s, 'm, G> MaterialStokesField<'s, 'm, G> {
     /// normalizes every port, while each cell retains its OWN dynamic viscosity.
     /// Source snapshots, bulk heat and reactions are retained without re-query.
     /// External R*Q² heat remains separate. Each controlled component retains
-    /// an uncontrolled traction datum; this does not advect material layers.
+    /// reservoir-selected pressure; this does not advect material layers.
     ///
     /// # Errors
     /// Preserves native port/equation refusals and physical output checks.

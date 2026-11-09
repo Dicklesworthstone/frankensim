@@ -14,8 +14,8 @@ adjoints.
 
 ## Laminar flow through external hydraulic resistances
 
-`PreparedStokesFlowControl::solve_resistance_ports` couples the resolved native
-flow to `p_i = p_reservoir_i + R_i Q_outward_i` at each prepared port. Pressure
+`PreparedStokesPressureResponse::solve_resistance_ports` couples the resolved
+native flow to `p_i = p_reservoir_i + R_i Q_outward_i` at each prepared port. Pressure
 is an increment to the original total traction; tangential traction remains
 unchanged. The full cached port-response matrix couples every port, so only a
 small dense system is factored for new reservoir/resistance loads. It rechecks
@@ -34,8 +34,9 @@ histories and prepared caches remain immutable on success or refusal.
 G1/G3 tests in `stokes_boundary/flow_control.rs` and `material_flow/density.rs`
 compare reversible transient plug momentum and pressure work, an independent
 full-field Robin assembly with interacting ports, and exact layered Couette
-stress/heat. Scope remains fixed-mesh linear Stokes with an uncontrolled
-traction datum per controlled component. The external law has no compliance,
+stress/heat. Scope remains fixed-mesh linear Stokes; every traction port may
+now be controlled, with pressure selected by the reservoir laws. The external
+resistance law itself has no compliance,
 inertia, turbulence or automatic thermal deposition; frozen nonlinear operators
 remain frozen. This does not claim full hydraulic-network or FSI closure.
 
@@ -10079,4 +10080,41 @@ earlier original-material dependency build was blocked by asupersync SIGKILL,
 and the later numerical stirring build lost the execution environment. These
 claims do not promote material execution or the ten new numerical stirring
 tests to passing status.
+
+## Laminar devices connected entirely to external hydraulic loads
+
+`StokesAssembly::prepare_pressure_response` retains the checked original
+operator, baseline field and full native pressure responses without inverting
+the port mobility. Every natural-traction edge in a component may belong to a
+controlled port. A common pressure shift leaves volume flow unchanged, so a
+singular mobility is physically expected; a single port on an otherwise
+impermeable component can have zero mobility.
+
+Finite resistance and BDF-eliminated RCR/inertance loads factor only
+`I - diag(R) M`. Their reservoir laws select the uniform pressure level while
+the original traction shape, tangential traction and pressure reactions remain
+intact. No pressure pin, regularization or dummy open edge is introduced.
+The original continuum operator must still be solvable: the reduced method
+does not stabilize a singular free rigid-motion mode. Actual singular coupled
+systems and invalid geometry/loads still refuse without publishing a result.
+
+Prescribed-flow control remains a separate typed cache with its original
+uncontrolled-datum and invertible-mobility requirements. Its finite-resistance
+method forwards to the same pressure-response owner for compatibility. Linear,
+nonlinear convective/rheological and SI material load entries all use the
+relaxed pressure-response preparation. Original endpoint momentum residuals
+and laws evaluated from the accepted integrated native fluxes remain enforced.
+External loss/storage and the signed BDF energy defect remain separate from
+bulk fluid heat.
+
+Four focused production-reduction tests cover rank-deficient and zero
+mobility, common and disconnected pressure shifts, series resistance, reversal,
+conservation/power and actual coupled singularity/refusal. Native FEM tests
+cover both ends of an inertial channel, a single sealed-volume port and two
+RCR states with unequal-step history. Material regressions cover reference
+density invariance and both ports on the original convective Carreau source
+path. These new tests were authored but not executed before the execution
+environment became unavailable. The previous local core parsed with rustfmt;
+the connector-reconstructed final sources have bounded static review only.
+This is not a native FEM/material compilation or runtime validation claim.
 

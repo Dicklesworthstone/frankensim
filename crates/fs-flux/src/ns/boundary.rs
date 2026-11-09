@@ -39,7 +39,8 @@ mod transient;
 pub mod thermal_dilation;
 pub(crate) use flow_control::solve_windkessel_assembly;
 pub use flow_control::{
-    PreparedStokesFlowControl, StokesFlowControlSolution, StokesResistancePort,
+    PreparedStokesFlowControl, PreparedStokesPressureResponse, StokesFlowControlSolution,
+    StokesResistancePort,
     StokesResistanceSolution, StokesWindkesselBalance, StokesWindkesselHistory,
     StokesWindkesselPort, StokesWindkesselSolution,
 };

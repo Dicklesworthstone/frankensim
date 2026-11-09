@@ -3,6 +3,8 @@
 use super::*;
 use fs_flux::StokesResistancePort;
 
+#[path = "flow_control/all_ports.rs"]
+mod all_ports;
 #[path = "flow_control/windkessel.rs"]
 mod windkessel;
 
@@ -401,6 +403,14 @@ fn redundant_pressure_control_or_a_strong_velocity_port_is_refused() {
     ));
     assert!(matches!(
         assembly().prepare_flow_control(&[&inlet, &inlet]),
+        Err(StokesBoundaryError::DuplicateEdge { .. })
+    ));
+    assert!(matches!(
+        assembly().prepare_pressure_response(&[&wall]),
+        Err(StokesBoundaryError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        assembly().prepare_pressure_response(&[&inlet, &inlet]),
         Err(StokesBoundaryError::DuplicateEdge { .. })
     ));
 }

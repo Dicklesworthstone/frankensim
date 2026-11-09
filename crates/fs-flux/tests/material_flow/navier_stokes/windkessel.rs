@@ -8,7 +8,7 @@ use fs_material::fluid_transport::rheology::{
 use fs_material::visco::temperature::{TemperatureShift, TemperatureShiftModel};
 
 #[test]
-fn carreau_windkessel_preserves_accepted_sources_convection_and_si_power() {
+fn all_port_carreau_windkessel_preserves_sources_convection_and_si_power() {
     let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
     let system = FluxSystem::new(&mesh);
     let (dt, old_dt) = (0.03, 0.02);
@@ -28,8 +28,8 @@ fn carreau_windkessel_preserves_accepted_sources_convection_and_si_power() {
     let previous: Vec<_> = base_moments.iter().map(|v| 0.7 * v).collect();
     let older: Vec<_> = base_moments.iter().map(|v| 0.4 * v).collect();
     let snapshots = (previous.clone(), older.clone());
-    let recent_x = [0.3];
-    let old_x = [0.4];
+    let recent_x = [0.1, 0.3];
+    let old_x = [0.2, 0.4];
     let history = MaterialStokesWindkesselHistory {
         velocity: &previous,
         compliance_pressures_pa: &recent_x,
@@ -79,7 +79,7 @@ fn carreau_windkessel_preserves_accepted_sources_convection_and_si_power() {
                 ));
                 let (q, rp, rd, compliance, inertance, added_pressure) =
                     (0.55, 0.3, 2.1, 0.6, 0.4, 1.4);
-                let x = (q - compliance * (a1 * recent_x[0] + a2 * old_x[0]) / dt)
+                let x = (q - compliance * (a1 * recent_x[1] + a2 * old_x[1]) / dt)
                     / (compliance * a0 / dt + 1.0 / rd);
                 let load = MaterialStokesWindkesselPort {
                     reservoir_pressure_pa: added_pressure
@@ -90,6 +90,18 @@ fn carreau_windkessel_preserves_accepted_sources_convection_and_si_power() {
                     distal_resistance_pa_s_per_m2: rd,
                     compliance_m2_per_pa: compliance,
                     inertance_pa_s2_per_m2: inertance,
+                };
+                // The inlet is connected to a second RCR load. Its reservoir
+                // is chosen from the original law at p_left=0 and Q_left=-q;
+                // no separate natural-traction datum edge remains.
+                let left_x = (-q - 0.8 * (a1 * recent_x[0] + a2 * old_x[0]) / dt)
+                    / (0.8 * a0 / dt + 1.0 / 2.0);
+                let left_load = MaterialStokesWindkesselPort {
+                    reservoir_pressure_pa: 0.2 * q + 0.1 * 0.55 * derivative - left_x,
+                    proximal_resistance_pa_s_per_m2: 0.2,
+                    distal_resistance_pa_s_per_m2: 2.0,
+                    compliance_m2_per_pa: 0.8,
+                    inertance_pa_s2_per_m2: 0.1,
                 };
                 let force = |p| {
                     let u = target(p);
@@ -107,6 +119,7 @@ fn carreau_windkessel_preserves_accepted_sources_convection_and_si_power() {
                         0.3 * mu * n[0] - pressure * n[1],
                     ]
                 };
+                let mut inlet = Vec::new();
                 let mut outlet = Vec::new();
                 let boundaries: Vec<_> = mesh
                     .edges
@@ -116,6 +129,8 @@ fn carreau_windkessel_preserves_accepted_sources_convection_and_si_power() {
                     .map(|(edge, geometry)| {
                         if geometry.normal[0] > 0.5 {
                             outlet.push(edge);
+                        } else if geometry.normal[0] < -0.5 {
+                            inlet.push(edge);
                         }
                         if geometry.normal[0].abs() > 0.5 {
                             MaterialNavierStokesBoundary::Open {
@@ -142,8 +157,8 @@ fn carreau_windkessel_preserves_accepted_sources_convection_and_si_power() {
                     .bdf2_navier_stokes_mixed_rheology_variable_step_windkessel_ports(
                         &force,
                         &boundaries,
-                        &[&outlet],
-                        &[load],
+                        &[&inlet, &outlet],
+                        &[left_load, load],
                         history,
                         old,
                         dt,
@@ -181,32 +196,37 @@ fn carreau_windkessel_preserves_accepted_sources_convection_and_si_power() {
                     3e-9,
                 );
                 near(step.solution.kinetic_energy_j_per_m(), 0.16 * density, 3e-9);
-                near(result.pressure_offsets_pa[0], added_pressure, 5e-8);
-                near(result.outward_volume_rates_m2_s[0], q, 4e-9);
-                near(result.balances[0].compliance_pressure_pa, x, 4e-9);
+                near(result.pressure_offsets_pa[0], 0.0, 5e-8);
+                near(result.outward_volume_rates_m2_s[0], -q, 4e-9);
+                near(result.outward_volume_rates_m2_s.iter().sum(), 0.0, 4e-9);
+                near(result.balances[0].compliance_pressure_pa, left_x, 4e-9);
+                near(result.balances[0].power_balance_residual_w_per_m, 0.0, 5e-8);
+                near(result.pressure_offsets_pa[1], added_pressure, 5e-8);
+                near(result.outward_volume_rates_m2_s[1], q, 4e-9);
+                near(result.balances[1].compliance_pressure_pa, x, 4e-9);
                 near(
-                    result.balances[0].compliance_energy_j_per_m,
+                    result.balances[1].compliance_energy_j_per_m,
                     0.5 * compliance * x * x,
                     4e-9,
                 );
                 near(
-                    result.balances[0].proximal_dissipation_w_per_m,
+                    result.balances[1].proximal_dissipation_w_per_m,
                     rp * q * q,
                     4e-9,
                 );
                 near(
-                    result.balances[0].distal_dissipation_w_per_m,
+                    result.balances[1].distal_dissipation_w_per_m,
                     x * x / rd,
                     4e-9,
                 );
-                near(result.balances[0].power_balance_residual_w_per_m, 0.0, 5e-8);
+                near(result.balances[1].power_balance_residual_w_per_m, 0.0, 5e-8);
                 if power_index == 1.0 {
                     let fixed = owner
                         .bdf2_navier_stokes_mixed_variable_step_windkessel_ports(
                             &force,
                             &boundaries,
-                            &[&outlet],
-                            &[load],
+                            &[&inlet, &outlet],
+                            &[left_load, load],
                             history,
                             old,
                             dt,
@@ -215,15 +235,15 @@ fn carreau_windkessel_preserves_accepted_sources_convection_and_si_power() {
                             1e-10,
                         )
                         .unwrap();
-                    near(fixed.outward_volume_rates_m2_s[0], q, 4e-9);
-                    near(fixed.pressure_offsets_pa[0], added_pressure, 5e-8);
+                    near(fixed.outward_volume_rates_m2_s[1], q, 4e-9);
+                    near(fixed.pressure_offsets_pa[1], added_pressure, 5e-8);
                 }
                 let refused = owner
                     .bdf2_navier_stokes_mixed_rheology_variable_step_windkessel_ports(
                         &force,
                         &boundaries,
-                        &[&outlet],
-                        &[load],
+                        &[&inlet, &outlet],
+                        &[left_load, load],
                         history,
                         old,
                         dt,
@@ -237,8 +257,8 @@ fn carreau_windkessel_preserves_accepted_sources_convection_and_si_power() {
                 assert!(matches!(refused, Err(MaterialFluxError::Material(_))));
                 assert_eq!(previous, snapshots.0);
                 assert_eq!(older, snapshots.1);
-                assert_eq!(recent_x, [0.3]);
-                assert_eq!(old_x, [0.4]);
+                assert_eq!(recent_x, [0.1, 0.3]);
+                assert_eq!(old_x, [0.2, 0.4]);
             }
         }
     }

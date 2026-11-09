@@ -59,7 +59,7 @@ impl FluxSystem<'_> {
     /// Eliminating x and history gives one nonnegative endpoint resistance per
     /// port. The existing native pressure responses solve all ports together,
     /// retaining resolved profiles, cross-port coupling and original tractions.
-    /// Each controlled component still needs an uncontrolled traction datum.
+    /// Every traction port may be controlled; reservoir laws select pressure.
     /// Parameters and the compliance reference are fixed through the histories;
     /// reservoir increments are endpoint data held over the current interval.
     /// Pressure power refers to the added -p*n load; original traction work is
@@ -134,7 +134,7 @@ pub(crate) fn solve_windkessel_assembly(
         absolute_flow_tolerance_m2_s,
     )?;
     let relative_tolerance = assembly.params.tol;
-    let prepared = assembly.prepare_flow_control(ports)?;
+    let prepared = assembly.prepare_pressure_response(ports)?;
     let solved = prepared.solve_resistance_ports(&equivalent, absolute_pressure_tolerance_m2_s2)?;
     let energy = prepared.kinetic_energy(&solved.flow.field.x)?;
     report_windkessel_ports(

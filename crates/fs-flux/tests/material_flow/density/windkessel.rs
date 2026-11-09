@@ -307,3 +307,106 @@ fn layered_windkessel_preserves_viscosity_sources_and_external_storage() {
     near(solved.balances[0].power_balance_residual_w_per_m, 0.0, 3e-8);
     assert_eq!((lower.queries.get(), upper.queries.get()), calls);
 }
+
+
+/// Both reservoir connections retain SI normalization even when the source
+/// densities differ from the common numerical reference density.
+#[test]
+fn all_port_resistances_preserve_si_pressure_inertia_and_source_ownership() {
+    use fs_flux::MaterialStokesResistancePort;
+
+    let (length, height, dt, previous_q) = (2.0, 1.5, 0.1, 0.2);
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(length, height, 2, 2));
+    let system = FluxSystem::new(&mesh);
+    let traction = |_: [f64; 2], normal: [f64; 2]| normal.map(|n| -3.0 * n);
+    let mut ports = [Vec::new(), Vec::new()];
+    let boundaries: Vec<_> = (0..mesh.edges.len())
+        .filter(|&edge| mesh.is_boundary(edge))
+        .map(|edge| {
+            let normal = mesh.edges[edge].normal;
+            if normal[1].abs() > 0.5 {
+                MaterialStokesBoundary::NavierSlip {
+                    edge,
+                    value: &no_slip,
+                    tangential_resistance_pa_s_per_m: 0.0,
+                }
+            } else {
+                ports[usize::from(normal[0] > 0.0)].push(edge);
+                MaterialStokesBoundary::TotalTraction { edge, value: &traction }
+            }
+        })
+        .collect();
+    let previous = flow_control_history(&mesh, &|_| [previous_q / height, 0.0]);
+    for density in [2.0, 7.0] {
+        let source = Counted {
+            material: transport(density, 0.4),
+            queries: Cell::new(0),
+        };
+        let uniform =
+            MaterialFluxSystem::new(&system, &source, MaterialFluxNumerics::default()).unwrap();
+        for reference_density in [0.25, 11.0] {
+            let reference = transport(reference_density, 0.9);
+            let binding =
+                MaterialFluxSystem::new(&system, &reference, MaterialFluxNumerics::default())
+                    .unwrap();
+            let field = binding.bind_stokes_materials(vec![&source; mesh.tris.len()]).unwrap();
+            let calls = source.queries.get();
+            for drive in [-30.0, 30.0] {
+                let loads = [
+                    MaterialStokesResistancePort {
+                        reservoir_pressure_pa: drive,
+                        resistance_pa_s_per_m2: 3.0,
+                    },
+                    MaterialStokesResistancePort {
+                        reservoir_pressure_pa: 0.0,
+                        resistance_pa_s_per_m2: 7.0,
+                    },
+                ];
+                let homogeneous = uniform.bdf2_stokes_mixed_variable_step_resistance_ports(
+                    &zero_force, &boundaries, &[&ports[0], &ports[1]], &loads,
+                    &previous, None, dt, 1e-9,
+                ).unwrap();
+                let layered = field.bdf2_stokes_mixed_variable_step_resistance_ports(
+                    &zero_force, &boundaries, &[&ports[0], &ports[1]], &loads,
+                    &previous, None, dt, 1e-9,
+                ).unwrap();
+                let fluid_inertance = density * length / height;
+                let q = (fluid_inertance * previous_q / dt + drive)
+                    / (fluid_inertance / dt + 10.0);
+                for (flows, pressures, energy, heat, losses) in [
+                    (
+                        &homogeneous.outward_volume_rates_m2_s,
+                        &homogeneous.pressure_offsets_pa,
+                        homogeneous.flow.kinetic_energy_j_per_m(),
+                        homogeneous.flow.viscous_dissipation().total_power_w_per_m(),
+                        &homogeneous.resistance_dissipation_w_per_m,
+                    ),
+                    (
+                        &layered.outward_volume_rates_m2_s,
+                        &layered.pressure_offsets_pa,
+                        layered.flow.kinetic_energy_j_per_m(),
+                        layered.flow.viscous_dissipation().total_power_w_per_m(),
+                        &layered.resistance_dissipation_w_per_m,
+                    ),
+                ] {
+                    near(flows[0], -q, 3e-9);
+                    near(flows[1], q, 3e-9);
+                    near(flows.iter().sum(), 0.0, 3e-9);
+                    near(pressures[0], drive - 3.0 * q, 3e-8);
+                    near(pressures[1], 7.0 * q, 3e-8);
+                    near(energy, 0.5 * fluid_inertance * q * q, 3e-9);
+                    near(heat, 0.0, 1e-15);
+                    near(losses.iter().sum(), 10.0 * q * q, 3e-9);
+                    let fluid_change =
+                        0.5 * fluid_inertance * (q * q - previous_q * previous_q) / dt;
+                    let bdf_loss = 0.5 * fluid_inertance * (q - previous_q).powi(2) / dt;
+                    near(drive * q, fluid_change + bdf_loss + losses.iter().sum::<f64>(), 3e-8);
+                }
+                for cell in 0..mesh.tris.len() {
+                    assert!(std::ptr::eq(&field.samples()[cell], &layered.flow.samples()[cell]));
+                }
+            }
+            assert_eq!(source.queries.get(), calls);
+        }
+    }
+}

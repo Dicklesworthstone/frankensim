@@ -95,8 +95,8 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
     ///
     /// Reservoir increments are held over each interval. The external parameters,
     /// compliance reference, port ordering and fluid density remain fixed through
-    /// supplied histories. Each controlled component needs an uncontrolled
-    /// traction datum. Storage/losses remain separate from resolved fluid heat;
+    /// supplied histories. Every traction port may be controlled; reservoir
+    /// laws select pressure. Storage/losses remain separate from resolved fluid heat;
     /// no thermal state, thermodynamic pressure or phase model is advanced.
     ///
     /// # Errors

@@ -97,7 +97,8 @@ pub use ns::adjoint::{FluxAdjointError, FluxAdjointSolution};
 pub use ns::boundary::{
     BoundaryLoad, BoundaryReactionOwner, BoundaryReactions, BoundaryTransport, BoundaryWrench,
     DiscreteBoundaryReaction, NavierStokesBoundary, NavierStokesControls, NavierStokesStep,
-    OpenBoundaryPolicy, PreparedStokesFlowControl, StokesAssembly, StokesBoundary,
+    OpenBoundaryPolicy, PreparedStokesFlowControl, PreparedStokesPressureResponse, StokesAssembly,
+    StokesBoundary,
     StokesBoundaryError, StokesFlowControlSolution, StokesPressureReference, StokesResistancePort,
     StokesResistanceSolution, StokesRheologyControls, StokesRheologyNewtonSolution,
     StokesRheologySolution, StokesSolution, StokesWindkesselBalance, StokesWindkesselHistory,
