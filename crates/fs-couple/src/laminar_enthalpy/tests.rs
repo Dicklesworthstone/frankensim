@@ -2,6 +2,7 @@
 
 mod adaptive;
 mod buoyancy;
+mod driven;
 
 use super::*;
 use fs_alloc::{ArenaConfig, ArenaPool};

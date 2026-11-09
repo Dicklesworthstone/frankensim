@@ -97,67 +97,91 @@ impl<'s, 'mesh, 'source, F: FluidTransport + ?Sized> LaminarEnthalpy<'s, 'mesh, 
             controls,
             energy_guess_j,
             |temperatures, duration_s| {
-                let (flow, forces) = self
-                    .flow
-                    .bdf1_navier_stokes_mixed_rheology_with_cell_forces(
-                        input.force_density,
-                        input.boundaries,
-                        input.history.velocity_m_s,
-                        duration_s,
-                        controls.momentum,
-                        |point, reference| {
-                            if cx.checkpoint().is_err() {
-                                return Err(material_error(
-                                    "coupled buoyancy/enthalpy operation cancelled",
-                                ));
-                            }
-                            let temperature = temperatures[point.cell];
-                            let source =
-                                resolve_material(point, temperature, self.flow.material())?;
-                            let original = thermal_source(source, temperature)?;
-                            let projected =
-                                BoussinesqMaterial::try_new(original, reference, config)?;
-                            let departure = projected.resolved_transport().density_kg_m3()
-                                - reference.density_kg_m3();
-                            let force = config.gravity_m_s2.map(|g| departure * g);
-                            if force.iter().enumerate().any(|(axis, f)| {
-                                !f.is_finite()
-                                    || (*f == 0.0
-                                        && departure != 0.0
-                                        && config.gravity_m_s2[axis] != 0.0)
-                            }) {
-                                return Err(material_error(
-                                    "source-density buoyancy is unrepresentable",
-                                ));
-                            }
-                            let state = ThermalFluidTransportState::try_new(
-                                *projected.reference_storage_transport(),
-                                temperature,
-                                None,
-                            )?;
-                            Ok((
-                                LaminarThermalMaterial {
-                                    source: projected,
-                                    state,
-                                },
-                                force,
-                            ))
-                        },
-                    )?;
-                let report = buoyancy_report(
+                self.resolve_boussinesq_flow(
                     cx,
-                    self.system,
-                    &flow,
-                    forces,
-                    self.flow.transport(),
+                    input,
                     config,
-                    self.binding.depth_m(),
+                    controls,
+                    temperatures,
                     duration_s,
-                )?;
-                Ok((flow, Some(report)))
+                    &resolve_material,
+                )
             },
             exchange,
         )
+    }
+    // Ordinary and driven endpoints retain the SAME original projection path.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub(super) fn resolve_boussinesq_flow<G: ThermalFluidTransport>(
+        &self,
+        cx: &Cx<'_>,
+        input: LaminarEnthalpyInput<'_>,
+        config: BoussinesqConfig<2>,
+        controls: LaminarEnthalpyControls,
+        temperatures: &[f64],
+        duration_s: f64,
+        resolve_material: &impl Fn(MaterialFluxRheologyPoint, f64, &F) -> Result<G, MaterialError>,
+    ) -> Result<
+        (
+            MaterialNavierStokesRheologyStep<
+                LaminarThermalMaterial<LaminarBoussinesqProjection<G>>,
+            >,
+            Option<LaminarBuoyancyReport>,
+        ),
+        MaterialFluxError,
+    > {
+        let (flow, forces) = self
+            .flow
+            .bdf1_navier_stokes_mixed_rheology_with_cell_forces(
+                input.force_density,
+                input.boundaries,
+                input.history.velocity_m_s,
+                duration_s,
+                controls.momentum,
+                |point, reference| {
+                    if cx.checkpoint().is_err() {
+                        return Err(material_error(
+                            "coupled buoyancy/enthalpy operation cancelled",
+                        ));
+                    }
+                    let temperature = temperatures[point.cell];
+                    let source = resolve_material(point, temperature, self.flow.material())?;
+                    let original = thermal_source(source, temperature)?;
+                    let projected = BoussinesqMaterial::try_new(original, reference, config)?;
+                    let departure =
+                        projected.resolved_transport().density_kg_m3() - reference.density_kg_m3();
+                    let force = config.gravity_m_s2.map(|g| departure * g);
+                    if force.iter().enumerate().any(|(axis, f)| {
+                        !f.is_finite()
+                            || (*f == 0.0 && departure != 0.0 && config.gravity_m_s2[axis] != 0.0)
+                    }) {
+                        return Err(material_error("source-density buoyancy is unrepresentable"));
+                    }
+                    let state = ThermalFluidTransportState::try_new(
+                        *projected.reference_storage_transport(),
+                        temperature,
+                        None,
+                    )?;
+                    Ok((
+                        LaminarThermalMaterial {
+                            source: projected,
+                            state,
+                        },
+                        force,
+                    ))
+                },
+            )?;
+        let report = buoyancy_report(
+            cx,
+            self.system,
+            &flow,
+            forces,
+            self.flow.transport(),
+            config,
+            self.binding.depth_m(),
+            duration_s,
+        )?;
+        Ok((flow, Some(report)))
     }
 }
 

@@ -14113,3 +14113,45 @@ worst planar two-body balance defect was below 1.4e-13 J. Full crate compilation
 and the newly authored integration regressions have not been executed in this
 environment. These checks do not establish mesh/time accuracy, uniqueness,
 global convergence or empirical material validation.
+
+### Endpoint mechanical sources in original laminar enthalpy coupling
+
+LaminarEnthalpy::advance_driven and advance_boussinesq_driven resolve an owned
+LaminarMechanicalDrive from each actual native caloric candidate and explicit
+LaminarDriveQuery. The same immutable snapshot supplies spatial force,
+prescribed fluid/wall/reservoir velocity and literal supplied traction to the
+original BDF1 momentum owner; its material and thermal callbacks observe that
+same source. Original boundary kinds, SI slip coefficients, constitutive
+projection, pressure datums, objective strain, quadrature and sign-split
+enthalpy flux remain native. No spatial interpolation, second momentum solve,
+lagged thermal actuation, or replacement caloric law is introduced. Boundary
+kind changes and source discontinuities are caller-authored events; source
+callbacks must be pure and valid on nonlinear derivative probes.
+
+The prior held-input and Boussinesq APIs share the extracted original thermal
+residual/acceptance core and original constitutive helpers. The accepted
+LaminarDrivenExchange retains the exact mechanical source object, query and
+thermal payload. Changed routes are checked against the actual endpoint
+boundary kinds and original finite receivers. Every source, native solve,
+heat, route, work or cancellation refusal leaves both input histories intact.
+
+The optional mechanical receipt independently evaluates additional body-force
+work with the original six-point triangle quadrature and accepted BDM basis,
+and supplied open-traction work with the original edge quadrature. Native
+retained boundary transport supplies signed outward carried kinetic energy and
+separate numerical upwind loss. Extrusion depth and actual duration convert
+all observations to joules. Buoyancy retains its own source-density receipt;
+none of these mechanical quantities is deposited as heat. Generalized work
+on arbitrary prescribed-velocity/Navier-slip boundaries is explicitly None,
+since the original public reaction interface supplies rigid virtual work
+rather than that functional. Added dissipative-backflow stress work is likewise
+unclaimed when present. These selected exchanges do not certify complete
+mechanical energy or passivity.
+
+Focused native regressions are authored for an endpoint-temperature actuator
+with an independent uniform-acceleration and linear-pressure solution, both
+ordinary and original bounded-density Boussinesq coupling, independent signed
+body/open-traction/buoyancy work, separate 24 J original caloric heating,
+retained original source identity, and source/late-cancellation rollback.
+The changed Rust files pass the pinned parser/formatter. Native FEM/thermal
+compilation and integration test execution remain unverified in this session.
