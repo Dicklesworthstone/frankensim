@@ -1,3 +1,18 @@
+# CONTRACT: fs-lbm
+
+> **Layout (restored 2026-11-09).** This contract is an index plus part files. A file larger than
+> 1 MiB (1,048,576 bytes) comes back with empty content from the GitHub contents API; a writer using
+> that API then saw an empty file and replaced the whole contract with its one new section.
+> That happened to this file once, at 23b90dcc17 (2026-11-07 02:15), when it was 1,050,479 bytes; the
+> text written before that cut was absent from then until this restore and is now in the parts.
+>
+> - Earlier contract text is in `contracts/part-NN.md`, unchanged. A higher part number is newer;
+>   inside a part, sections keep the order they had in the single file.
+> - Sections written since the cut are below, exactly as they were.
+> - When this file passes 600 KB, move its oldest sections into a new highest-numbered part and add
+>   its row to the table. No file here may exceed 900 KB.
+> - The ten required sections are in the parts named under their headings at the end of this file.
+
 ## Native full rigid-frame evolution
 
 `ForcedGrid3::try_new_with_rigid_frame_preserving_velocity` attaches the full
@@ -4891,3 +4906,51 @@ refusal with deterministic retry. Pinned nightly rustfmt parsed the modified
 production and new tests, and focused whitespace checks passed. These new Rust
 tests have not been compiled or executed in this session; no full-crate or
 runtime validation is claimed.
+
+## Parts
+
+| Part | Bytes | `##` sections | First section | Last section |
+|---|---|---|---|---|
+| [`contracts/part-03.md`](contracts/part-03.md) | 449342 | 52 | Physical backward Euler with original tensor conductivity laws | Steady conjugate heat transfer (`conjugate`, bead rc-root-q61wp.34) |
+| [`contracts/part-02.md`](contracts/part-02.md) | 447310 | 41 | D3Q19 sparse-sweep performance evidence model (bead 712t) | Finite-inertia planar wall rotors |
+| [`contracts/part-01.md`](contracts/part-01.md) | 154492 | 48 | Rigid wall momentum on the original thermal VOF trajectory | Supplied heat drives conservative liquid slab expansion |
+
+## Purpose and layer
+
+Full text: [`contracts/part-03.md`](contracts/part-03.md), under the same heading.
+
+## Public types and semantics
+
+Full text: [`contracts/part-03.md`](contracts/part-03.md), under the same heading.
+
+## Invariants
+
+Full text: [`contracts/part-03.md`](contracts/part-03.md), under the same heading.
+
+## Error model
+
+Full text: [`contracts/part-03.md`](contracts/part-03.md), under the same heading.
+
+## Determinism class
+
+Full text: [`contracts/part-03.md`](contracts/part-03.md), under the same heading.
+
+## Cancellation behavior
+
+Full text: [`contracts/part-03.md`](contracts/part-03.md), under the same heading.
+
+## Unsafe boundary
+
+Full text: [`contracts/part-03.md`](contracts/part-03.md), under the same heading.
+
+## Feature flags
+
+Full text: [`contracts/part-03.md`](contracts/part-03.md), under the same heading.
+
+## Conformance tests
+
+Full text: [`contracts/part-03.md`](contracts/part-03.md), under the same heading.
+
+## No-claim boundaries
+
+Full text: [`contracts/part-03.md`](contracts/part-03.md), under the same heading.
