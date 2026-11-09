@@ -337,3 +337,5 @@ fn matched_prepared_grazing_boundary_preserves_zero_fields_and_incident_admittan
         complex_near(second[2], h[2].scale(2.0), 2e-14 * h[2].abs());
     }
 }
+
+mod spatial;

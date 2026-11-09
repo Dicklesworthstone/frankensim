@@ -36,6 +36,12 @@ pub(in crate::plane_wave::uniaxial) fn normal_derivatives(data: Input) -> Result
     Ok([first.finish()?, second.finish()?])
 }
 
+/// Retain original DD [kz', kz''] for coherent relative spatial phase jets.
+/// Public normal derivatives still round these same values once.
+pub(in crate::plane_wave::uniaxial) fn normal_frequency_jet(data: Input) -> Result<[Z; 2]> {
+    frequency_derivatives(data, None)
+}
+
 /// Scaled derivatives [omega*q', omega²*q''] of q=c0*kz/(omega*scale).
 /// Vector boundary differentiation supplies the exact native dimensionless
 /// root, avoiding a rounded dimensional-wavenumber round trip and subtraction

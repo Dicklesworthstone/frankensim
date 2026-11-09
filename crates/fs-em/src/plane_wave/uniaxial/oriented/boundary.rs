@@ -5,6 +5,7 @@
 //! fields are differentiated analytically at the physical interface.
 
 use super::super::UniaxialMode;
+use super::super::dispersion::kernel::Z;
 use super::super::dispersion::material_derivatives;
 use super::{
     OrientedCrystalFrequencyDispersion, OrientedCrystalResponse, OrientedUniaxialInterface,
@@ -13,7 +14,10 @@ use super::{
 use crate::plane_wave::dispersion::{
     FresnelAmplitudeDispersion, FresnelLogarithmicDispersion, IncidenceFrequencyConstraint,
 };
-use fs_math::c64::C64;
+use fs_math::{c64::C64, dd::Dd};
+
+mod spatial;
+pub use spatial::OrientedCrystalPointFrequencyDispersion;
 
 /// Full Cartesian peak-field jet at one carrier frequency.
 ///
@@ -130,6 +134,11 @@ pub struct OrientedCrystalBoundaryFrequencyDispersion<'s, 'm> {
     incident: OrientedCrystalVectorFrequencyJet,
     reflected: OrientedCrystalVectorFrequencyJet,
     transmitted: [OrientedCrystalVectorFrequencyJet; 2],
+    tangential_derivatives: [Dd; 2],
+    // An unrepresentable incident phase jet need not invalidate the boundary
+    // fields or transmitted spatial queries. The incident-side point query
+    // reports this cached refusal without reevaluating the source.
+    incident_normal_derivatives: core::result::Result<[Z; 2], &'static str>,
 }
 
 impl<'s, 'm> OrientedCrystalBoundaryFrequencyDispersion<'s, 'm> {
@@ -297,8 +306,39 @@ impl<'s, 'm> PreparedOrientedCrystalField<'s, 'm> {
                 derivatives,
             )
         };
+        let incident_bulk = derivatives
+            .incident_wavenumber
+            .ok_or(ReflectionError::Invalid(
+                "original incident bulk frequency derivatives were not retained",
+            ))?;
+        let tangential_derivatives = if constraint == IncidenceFrequencyConstraint::FixedAngle {
+            let sine = Dd::from_f64(self.boundary_witness.basis.p)
+                / Dd::from_f64(self.boundary_witness.basis.i);
+            incident_bulk.map(|value| Dd::from_f64(value) * sine)
+        } else {
+            [Dd::ZERO; 2]
+        };
+        let incident_normal_derivatives = super::super::dispersion::kernel::normal_frequency_jet(
+            super::super::dispersion::kernel::Input {
+                omega: original.omega,
+                indices: [original.ni; 3],
+                relative_permittivity_derivatives: [derivatives.relative_permittivity[0]; 3],
+                principal_wavenumber_derivatives: [[
+                    incident_bulk[0],
+                    incident_bulk[1] * original.omega,
+                ]; 2],
+                incidence: self.incidence,
+                axis: [0.0, 0.0, 1.0],
+                mode: UniaxialMode::Ordinary,
+                kind: super::super::UniaxialWaveKind::Propagating,
+                normal_wavenumber: C64::from_re(self.boundary.incident_normal_wavenumber_rad_m),
+                constraint,
+            },
+        );
         Ok(OrientedCrystalBoundaryFrequencyDispersion {
             normal,
+            tangential_derivatives,
+            incident_normal_derivatives,
             incident: field(
                 self.boundary.incident_electric_v_m,
                 self.boundary.incident_magnetic_a_m,

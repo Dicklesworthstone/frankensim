@@ -184,6 +184,8 @@ fn prepare_normal<'s, 'm>(
 pub(super) struct MaterialDerivatives {
     pub(super) relative_permittivity: [[f64; 2]; 3],
     pub(super) principal_wavenumber: [[f64; 2]; 2],
+    /// Original incident [K', K''] in [s/m, s²/m], when requested.
+    pub(super) incident_wavenumber: Option<[f64; 2]>,
 }
 
 // One source evaluation supplies both eigenbranches. This is also used by the
@@ -195,20 +197,28 @@ pub(super) fn material_derivatives(
     constraint: IncidenceFrequencyConstraint,
 ) -> Result<MaterialDerivatives> {
     let jets = crystal.transparent_frequency_jets(omega)?;
-    let incident_relative = if constraint == IncidenceFrequencyConstraint::FixedAngle {
-        let bulk = incident.bulk_dispersion(omega)?;
-        relative_permittivity(
-            bulk.permittivity_f_m(),
-            bulk.scaled_permittivity_derivatives_f_m(),
-        )?
-    } else {
-        [0.0; 2]
-    };
+    let (incident_relative, incident_wavenumber) =
+        if constraint == IncidenceFrequencyConstraint::FixedAngle {
+            let bulk = incident.bulk_dispersion(omega)?;
+            (
+                relative_permittivity(
+                    bulk.permittivity_f_m(),
+                    bulk.scaled_permittivity_derivatives_f_m(),
+                )?,
+                Some([
+                    bulk.wavenumber_derivative_s_m().re,
+                    bulk.wavenumber_second_derivative_s2_m().re,
+                ]),
+            )
+        } else {
+            ([0.0; 2], None)
+        };
     let ordinary = relative_permittivity(jets[0].epsilon, jets[0].epsilon_derivatives)?;
     let extraordinary = relative_permittivity(jets[1].epsilon, jets[1].epsilon_derivatives)?;
     Ok(MaterialDerivatives {
         relative_permittivity: [incident_relative, ordinary, extraordinary],
         principal_wavenumber: jets.map(|jet| [jet.first_s_m.re, jet.second_scaled_s_m.re]),
+        incident_wavenumber,
     })
 }
 

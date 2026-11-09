@@ -27,7 +27,10 @@ mod dispersion;
 pub use dispersion::OrientedCrystalFrequencyDispersion;
 
 mod boundary;
-pub use boundary::{OrientedCrystalBoundaryFrequencyDispersion, OrientedCrystalVectorFrequencyJet};
+pub use boundary::{
+    OrientedCrystalBoundaryFrequencyDispersion, OrientedCrystalPointFrequencyDispersion,
+    OrientedCrystalVectorFrequencyJet,
+};
 
 mod group;
 pub use group::OrientedCrystalGroupResponse;

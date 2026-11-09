@@ -12,7 +12,9 @@ pub(super) mod boundary;
 
 #[path = "propagation.rs"]
 mod propagation;
-pub(super) use propagation::{FieldSum, WaveGeometry, field};
+pub(super) use propagation::{
+    FieldSum, FrequencyWave, WaveGeometry, field, field_frequency_derivatives,
+};
 pub use propagation::{OrientedCrystalField, OrientedCrystalFieldSide};
 
 /// Actual transmitted field of one outgoing eigenmode at the interface.

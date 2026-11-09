@@ -7070,6 +7070,40 @@ The transmitted boundary query coherently sums both modal jets; separate normal
 propagation is still explicit. No single modal-average delay is assigned to an
 interfering vector field.
 
+The prepared boundary owner also exposes `field_frequency_dispersion(side,
+point_m)` for all six original selections: incident, reflected, their coherent
+sum, either transmitted eigenmode, and both transmitted modes. Its
+`carrier_field()` returns the original Cartesian E/H and coherent Poynting
+exactly; `vector_frequency_jet()` supplies complete local first/second Cartesian
+field derivatives. The original half-space, source and phase conventions remain.
+
+Preparation retains original incident bulk derivatives and private DD normal
+jets. Public rounded normal outputs are unchanged. Fixed-angle point queries
+follow the original signed incident transverse derivative; fixed dimensional
+kx has exactly zero transverse derivatives. Reflected normal derivatives change
+sign. Repeated point queries perform no material evaluation, root/boundary
+solve or allocation.
+
+The native propagation owner factors common complex phase and its derivatives
+before coherent interference. DD modal derivative differences are formed before
+spatial products; the least-decaying active wave supplies the fixed reference.
+All three amplitude orders determine activity, so zero carrier excitation does
+not discard a derivative wave. Weighted frequency polynomials precede common
+attenuation, reusing native weak-decay and late-tail helpers. Nonfinite
+pre-decay polynomials and relative underflow of a lower-order field still needed
+by a common-phase product refuse explicitly. The incident curvature retains
+the original bulk owner's physical K'' representation.
+
+Two additional source fixtures cover all six selections, both constraints,
+signed propagating and evanescent cases, independent original-frequency
+evaluations, exact carrier/Poynting parity and physical/scaled derivative units.
+They also cover derivative-only tails after carrier extinction, weighted late
+tails, zero reflected carriers with nonzero derivative fields, and original
+domain/half-space refusal. Changed Rust passed parsing and independent
+source/API/math review; these two fixtures were not executed here. This adds
+local field derivatives, not a broadband pulse, slab-transfer or
+Poynting-derivative model.
+
 Eight numerical controls and four original-source fixtures cover independent
 derivatives under both constraints, Maxwell continuity, weak slopes, zero modal
 excitation, native carrier identity, prepared/direct parity, source support,

@@ -15,7 +15,7 @@ use super::{
 use crate::plane_wave::dispersion::{
     BulkPropagation, IncidenceFrequencyConstraint, propagation_at_distance,
 };
-use fs_math::c64::C64;
+use fs_math::{c64::C64, dd::Dd};
 
 #[cfg(test)]
 mod tests;
@@ -31,6 +31,7 @@ pub struct OrientedCrystalFrequencyDispersion<'s, 'm> {
     constraint: IncidenceFrequencyConstraint,
     boundary: OrientedCrystalResponse,
     normal_derivatives: [[C64; 2]; 2],
+    pub(super) normal_derivative_jets: [[dispersion_kernel::Z; 2]; 2],
 }
 
 impl<'s, 'm> OrientedCrystalFrequencyDispersion<'s, 'm> {
@@ -214,13 +215,14 @@ pub(super) fn prepare_with_derivatives<'s, 'm>(
         ));
     }
     let mut normal_derivatives = [[C64::ZERO; 2]; 2];
+    let mut normal_derivative_jets = [[dispersion_kernel::Z::real(Dd::ZERO); 2]; 2];
     for (index, mode) in [UniaxialMode::Ordinary, UniaxialMode::Extraordinary]
         .into_iter()
         .enumerate()
     {
         let carrier = boundary.transmitted[index];
-        normal_derivatives[index] =
-            dispersion_kernel::normal_derivatives(dispersion_kernel::Input {
+        normal_derivative_jets[index] =
+            dispersion_kernel::normal_frequency_jet(dispersion_kernel::Input {
                 omega: original.omega,
                 indices: [original.ni, original.no, original.ne],
                 relative_permittivity_derivatives: derivatives.relative_permittivity,
@@ -233,6 +235,14 @@ pub(super) fn prepare_with_derivatives<'s, 'm>(
                 constraint,
             })
             .map_err(ReflectionError::Invalid)?;
+        normal_derivatives[index] = [
+            normal_derivative_jets[index][0]
+                .finish()
+                .map_err(ReflectionError::Invalid)?,
+            normal_derivative_jets[index][1]
+                .finish()
+                .map_err(ReflectionError::Invalid)?,
+        ];
     }
     Ok(OrientedCrystalFrequencyDispersion {
         source,
@@ -240,5 +250,6 @@ pub(super) fn prepare_with_derivatives<'s, 'm>(
         constraint,
         boundary,
         normal_derivatives,
+        normal_derivative_jets,
     })
 }

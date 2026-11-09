@@ -2,6 +2,9 @@
 use super::{OrientedCrystalResponse, Result, Vector};
 use fs_math::{c64::C64, dd::Dd, decay, det};
 
+mod frequency;
+pub(super) use frequency::{FrequencyWave, field_frequency_derivatives};
+
 /// Components selected at one physical point. The interface is z=0, with the
 /// original incident medium at z<0 and the transparent crystal at z>0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -358,39 +361,57 @@ fn relative_rotation(
 }
 
 fn attenuated(wave: Wave<'_>, distance: Dd) -> Result<Fields> {
-    let leading = -wave.normal.im * distance.hi;
-    // Positive overflow means complete extinction, not an invalid DD product.
-    // Otherwise retain the authored distance residual until exposure rounds.
-    let exposure = if leading.is_infinite() {
-        leading
-    } else {
-        (Dd::from_f64(-wave.normal.im) * distance).to_f64()
-    };
-    if !(exposure >= 0.0) {
-        return Err("crystal evanescent field must decay into its half-space");
-    }
-    let remaining = decay::remaining_fraction(exposure);
-    // expm1 retains weak attenuation in cancellation-sensitive fields; the
-    // shared decay owner retains a late tail whose fraction underflows first.
-    let factor = if exposure < 0.5 {
-        Dd::ONE + Dd::from_f64(det::expm1(-exposure))
-    } else {
-        Dd::from_f64(remaining)
-    };
-    Ok(core::array::from_fn(|j| {
+    let exposure = attenuation_exposure(wave.normal.im, distance)?;
+    let values = core::array::from_fn(|j| {
         let value = if j < 3 {
             wave.electric[j]
         } else {
             wave.magnetic[j - 3]
         };
-        [value.re, value.im].map(|v| {
+        [value.re, value.im].map(Dd::from_f64)
+    });
+    Ok(attenuated_fields(values, exposure))
+}
+
+fn attenuation_exposure(normal_imaginary: f64, distance: Dd) -> Result<f64> {
+    let leading = -normal_imaginary * distance.hi;
+    // Positive overflow means complete extinction, not an invalid DD product.
+    // Otherwise retain the authored distance residual until exposure rounds.
+    let exposure = if leading.is_infinite() {
+        leading
+    } else {
+        (Dd::from_f64(-normal_imaginary) * distance).to_f64()
+    };
+    if !(exposure >= 0.0) {
+        return Err("crystal evanescent field must decay into its half-space");
+    }
+    Ok(exposure)
+}
+
+// Shared by native carriers and weighted spatial frequency polynomials.
+// Keep DD interference residuals through weak attenuation; late tails use the
+// same original signed decay owner independently on the retained DD parts.
+fn attenuated_fields(values: Fields, exposure: f64) -> Fields {
+    let remaining = decay::remaining_fraction(exposure);
+    let factor = if exposure < 0.5 {
+        Dd::ONE + Dd::from_f64(det::expm1(-exposure))
+    } else {
+        Dd::from_f64(remaining)
+    };
+    values.map(|value| {
+        value.map(|v| {
             if remaining >= f64::MIN_POSITIVE {
-                Dd::from_f64(v) * factor
+                v * factor
             } else {
-                Dd::from_f64(decay::attenuate(v, exposure))
+                let leading = Dd::from_f64(decay::attenuate(v.hi, exposure));
+                if v.lo == 0.0 {
+                    leading
+                } else {
+                    leading + Dd::from_f64(decay::attenuate(v.lo, exposure))
+                }
             }
         })
-    }))
+    })
 }
 
 fn phasor(phase: Dd) -> Result<Complex> {
