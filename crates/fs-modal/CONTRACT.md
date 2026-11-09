@@ -2211,3 +2211,28 @@ Signed boundary work does not identify constitutive heat or stored energy.
 G1/G3 tests in `harmonic_physical_power_parameter_jet.rs` check independent
 resistive heat with a changing reactive/source law and cancelling products
 above the ordinary floating-point range.
+
+### Forced response on the general quadratic source pencil
+
+`quadratic_modes::forced` consumes the original admitted
+`PreparedQuadraticModes` and factors its same compensated polynomial at
+s=-i*omega. It retains SPD M, signed/nonsymmetric C and K, and the original
+binary coordinate/time scaling. Physical forces use the dual scale; repeated
+load cases reuse one native cancellable complex LU. DC gives local static
+compliance, while true singular resonance refuses without a damping floor.
+
+Original separate force actions independently gate each published
+displacement. Shared `evaluate_harmonic_balance` reports signed applied,
+ideal-reaction, inertial, velocity-operator and stiffness powers. Active and
+circulatory work is not classified as heat; a particular response does not
+imply decay of unstable transients. Residuals are backward checks, not
+forward-response bounds near resonance. Explicit factor/work/payload gates
+and cancellation are transactional. The existing passive harmonic API retains
+its admission policy.
+
+Shared compensated polynomial arithmetic prevents a separately rounded
+squared frequency from erasing original binary detuning. Six full-owner
+regressions and two arithmetic tests cover static and damped response,
+active/signed operators, nonsymmetric and gyroscopic work, represented narrow
+detuning, extreme force scaling and atomic refusal. These new tests are
+source-reviewed but unexecuted while the development executor is disconnected.
