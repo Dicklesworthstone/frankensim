@@ -7,10 +7,10 @@
 //! zero current or during both-off dead time. Both-on commands describe actual
 //! finite-resistance shoot-through and must remain inside authored device limits.
 //!
-//! The original inductor flux and two bus charges remain the only storage.
-//! Node capacitance, gate charge, reverse recovery, avalanche and finite gate
-//! transitions are absent. This is a quasi-static conduction lane: refine its
-//! steps to resolve changing diode branches and stiff near-zero-current motion.
+//! The base lane retains only the original inductor flux and two bus charges.
+//! [`capacitance`] adds explicit device charge and stored switch-node voltages.
+//! Gate charge, reverse recovery, avalanche and finite gate transitions are
+//! absent. Refine steps to resolve diode branches and the actual RC dynamics.
 //! No default device data, efficiency factor or unobserved switching loss is used.
 
 use super::power_load::{
@@ -22,6 +22,9 @@ use fs_math::dd::Dd;
 
 /// Original finite battery and motor shafts with these same device laws.
 pub mod battery_motor;
+
+/// Finite output-capacitor charge and energy through physical commutation.
+pub mod capacitance;
 
 mod cycle;
 pub use cycle::PreparedCommutatedSwitchCycle;
@@ -167,6 +170,24 @@ pub struct HalfBridgePoint {
     loss: Dd,
 }
 
+/// Conduction at a physically stored switch-node voltage. The difference
+/// `high.terminal_current_a - low.terminal_current_a` is the current delivered
+/// to the node; its capacitor and connected branches own the node KCL. This
+/// evaluation never replaces that voltage with an algebraic equilibrium.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HalfBridgeNodePoint {
+    pub switch_node_voltage_v: f64,
+    pub high: DeviceConductionPoint,
+    pub low: DeviceConductionPoint,
+    /// Incremental terminal conductance of the high device at its actual Vds.
+    pub d_high_current_d_drain_source_voltage_s: f64,
+    /// Incremental terminal conductance of the low device at its actual Vds.
+    pub d_low_current_d_drain_source_voltage_s: f64,
+    high_current: Dd,
+    low_current: Dd,
+    loss: Dd,
+}
+
 /// Reusable bounded static KCL owner. High current enters from the bus; low
 /// current leaves to the return; I_high−I_low=current drawn from the node.
 #[derive(Clone, Copy, Debug)]
@@ -273,6 +294,51 @@ impl HalfBridgeConduction {
             ));
         }
         Ok(())
+    }
+
+    /// Evaluate the original channel and diode laws at an independent stored
+    /// node voltage. Actual voltage/current support is enforced for both
+    /// devices, including both-off and both-on commands. No current clipping,
+    /// node reset, capacitive loss or energy debit is introduced here.
+    pub fn evaluate_at_node(
+        &self,
+        bus_voltage_v: f64,
+        switch_node_voltage_v: f64,
+    ) -> Result<HalfBridgeNodePoint, PhsError> {
+        if !bus_voltage_v.is_finite() || !switch_node_voltage_v.is_finite() {
+            return Err(invalid(
+                "finite half-bridge bus and stored node voltages required",
+            ));
+        }
+        self.evaluate_at_node_dd(
+            Dd::from_f64(bus_voltage_v),
+            Dd::from_f64(switch_node_voltage_v),
+        )
+    }
+
+    fn evaluate_at_node_dd(
+        &self,
+        bus_voltage_v: Dd,
+        switch_node_voltage_v: Dd,
+    ) -> Result<HalfBridgeNodePoint, PhsError> {
+        number(bus_voltage_v)?;
+        let node = number(switch_node_voltage_v)?;
+        let (high, high_current, high_slope, high_loss) =
+            self.device_point(0, bus_voltage_v - switch_node_voltage_v)?;
+        let (low, low_current, low_slope, low_loss) =
+            self.device_point(1, switch_node_voltage_v)?;
+        self.support(0, high)?;
+        self.support(1, low)?;
+        Ok(HalfBridgeNodePoint {
+            switch_node_voltage_v: node,
+            high,
+            low,
+            d_high_current_d_drain_source_voltage_s: high_slope,
+            d_low_current_d_drain_source_voltage_s: low_slope,
+            high_current,
+            low_current,
+            loss: high_loss + low_loss,
+        })
     }
 
     /// Enumerate four affine diode active sets and admit only a solution of the

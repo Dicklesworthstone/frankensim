@@ -3848,3 +3848,46 @@ Hamiltonian Hessian gives the state gradient; it is not a replacement
 dissipation model or passivity certificate. Physical harmonic consumers
 exercise nonlinear memory, nonsymmetric raw R and weak derivatives between
 opposing strong entries.
+
+## Device output capacitance and finite switch-node commutation
+
+`circuit::converter::commutation::capacitance` adds four explicitly authored,
+constant positive device output capacitances to the finite-resistance channel
+and body-diode laws. `CapacitiveCommutationParameters` constructs five original
+coordinates: inductor flux, input/output total bus electrode charges, and
+input/output switch-node charges. For each leg the complete grounded matrix is
+`[[Cb+Ch,-Ch],[-Ch,Ch+Cl]]`. The existing `CapacitanceBlock` admits and inverts
+that reciprocal positive-definite matrix; the original native quadratic storage
+and stepper advance all coordinates together. Bare `Cb*Vbus` charges from the
+three-state lane cannot be copied into the new total electrode coordinates.
+Initial node voltages must be supplied explicitly.
+
+`HalfBridgeConduction::evaluate_at_node` shares the original channel/diode laws,
+exact branch tangents and operating bounds without imposing algebraic node KCL.
+The native charge equations own displacement current. Gate edges retain every
+charge and voltage; there is no topology reset, invented regularizer, default
+capacitance, Coss loss debit or separate device stepping loop.
+`PreparedCapacitiveCommutatedSwitchCycle` uses one native workspace and bounded
+shared gate/duration caches. Held or original-interval voltage/load commands
+retain finite terminal impedance, actual regulated-load delivery and current
+limits. Every initial, discrete and endpoint device point must remain inside
+its authored support. Failure or cancellation publishes neither states nor
+reported mean output.
+
+`CapacitiveConverterAccount` reports the original inductor, two bare bus
+capacitors and four device capacitors separately. Their signed storage changes
+must close against the complete native storage change. Winding, channel and
+body-diode heats remain nine distinct dissipative terms; terminal resistor heat,
+source work and delivered/curtailed load work have independent accounts.
+Accepted discrete-effort work and heat are accumulated with compensated
+arithmetic and checked both locally and over the complete gate program.
+
+This lane models constant linear output capacitance and finite conduction,
+not a voltage-dependent Coss or recovery/gate-charge model. Temperature-dependent
+storage, avalanche, gate-driver energy and empirical device qualification
+require separately owned laws. Small physical RC time scales require temporal
+refinement: native energy closure does not certify continuous-time accuracy or
+resolve a transient on an arbitrarily coarse interval. The focused native
+regressions compare independent analytic RC trajectories and individual heat
+integrals, including nanofarad/nanosecond similarity, gate-edge continuity,
+known-node slopes, and atomic refusals.
