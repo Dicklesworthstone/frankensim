@@ -21,6 +21,9 @@ mod scattering;
 pub use scattering::{
     PreparedScreenScatteringReceivers, ScreenScattering, ScreenScatteringLimits,
 };
+/// Pressure-release finite screens use a single-layer density, not a pressure
+/// jump or the infinite-admittance limit of an impermeable sheet.
+pub mod soft;
 mod complex;
 pub use complex::{ScreenComplexLimits, ScreenComplexOperator, ScreenComplexValueLimits};
 mod molecular;

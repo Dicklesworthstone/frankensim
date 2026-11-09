@@ -420,6 +420,21 @@ pub(crate) fn rayleigh_single_layer_rows(
     k:f64, triangles:&[Triangle], points:&[Point], options:Options,
     cancelled:&mut impl FnMut()->bool,
 ) -> Result<(Vec<RayleighSingleLayer>,usize),HelmholtzError> {
+    constant_single_layer_rows(k,triangles,points,options,true,cancelled)
+}
+/// The original adaptive P0 Green and gradient integrals without the baffled
+/// Rayleigh owner's 2/area normalization. Geometry/clearance admission belongs
+/// to the source owner; both screen sides use this same free-space kernel.
+pub(crate) fn single_layer_rows(
+    k:f64, triangles:&[Triangle], points:&[Point], options:Options,
+    cancelled:&mut impl FnMut()->bool,
+) -> Result<(Vec<RayleighSingleLayer>,usize),HelmholtzError> {
+    constant_single_layer_rows(k,triangles,points,options,false,cancelled)
+}
+fn constant_single_layer_rows(
+    k:f64, triangles:&[Triangle], points:&[Point], options:Options,
+    normalized_half_space:bool, cancelled:&mut impl FnMut()->bool,
+) -> Result<(Vec<RayleighSingleLayer>,usize),HelmholtzError> {
     options.validate()?;
     let count=triangles.len().checked_mul(points.len())
         .filter(|count|count.checked_mul(80).is_some_and(|work|work<=options.maximum_kernel_evaluations))
@@ -433,7 +448,9 @@ pub(crate) fn rayleigh_single_layer_rows(
         let integral=integrate_fields_cancellable(k,point,triangle,[0.,0.,1.],0,&mut work,true,cancelled)?;
         // The half-space kernel is 2G. Normalize with the supplied triangle's
         // actual area so the retained coherent cell volume flow is unchanged.
-        let scale=4./norm(cross(sub(triangle[1],triangle[0]),sub(triangle[2],triangle[0])));
+        let scale=if normalized_half_space {
+            4./norm(cross(sub(triangle[1],triangle[0]),sub(triangle[2],triangle[0])))
+        } else {1.};
         let row=RayleighSingleLayer {
             value:integral.s.scale(scale), gradient:integral.gradient.s.map(|v|v.scale(scale)),
             error_value:integral.error_s*scale, error_gradient:integral.gradient.error_s.map(|e|e*scale),

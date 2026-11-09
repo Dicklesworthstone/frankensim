@@ -3762,3 +3762,48 @@ noise, distortion, experimental accuracy or calibration uncertainty bounds.
 Independent first-order differential-response fixtures verify complex response,
 near-field pressure/velocity projection, mixed-factor/window/lag moments, quiet
 DD cancellation and waveform/PCM block partition behavior (plan M2.6).
+
+### Finite pressure-release screen diffraction
+
+`reciprocal_radiation::open_screen::soft::PreparedSoftScreen` adds the
+complementary sound-soft boundary on the original `OpenPanels` geometry.
+It solves the P0 Galerkin single-layer equation `S*sigma=-p_incident` in
+weak form with `G=exp(ikr)/(4*pi*r)` and `exp(-i omega t)`. Pressure is
+continuous and zero on both faces; `sigma=-[d_n p]` [Pa/m] is a derivative
+jump density. Every triangle, including a free-edge-only triangle, remains
+an unknown. It is not the infinite-admittance limit of the existing
+pressure-jump sheet. The physical inverse-square-root edge density is
+resolved by a caller-declared mesh/edge ladder, never clamped to zero.
+The screen equation and piecewise-constant Galerkin construction follow
+Chandler-Wilde et al., Numer. Math. 147 (2021), 785–837,
+doi:10.1007/s00211-021-01182-y.
+
+Analytic Laplace triangle moments and the original smooth Green remainder
+give the real operator. The same outgoing angular Gram identity supplies
+its imaginary part and scattered power. These are one discrete operator;
+neither passivity clipping nor a fitted diffraction coefficient is used.
+One reusable frequency factorization serves all coherent incident cases,
+including plane waves and physical volume, force and stress sources.
+Disconnected open components retain every mutual interaction. Static and
+dynamic facet pairs run in fixed 32-pair tiles per executed worker (at most
+64); matrix entries and worker-count results retain serial arithmetic.
+Explicit cache/frequency/source/receiver/work limits precede allocation.
+
+The prepared receiver bank reuses the original adaptive constant-triangle
+Green and analytic-gradient integration with its independent component
+gates. It returns total or scattered pressure and Euler velocity on either
+side, including reactive velocity, interference and pressure nulls, without
+repeating a solve or quadrature. Exact face/edge/source clearances apply.
+The finite-panel, longest-edge wavelength and angular-resolution ceilings
+remain; this is a dense, stationary, homogeneous lossless-fluid model.
+No finite thickness, independently coated faces, moving medium, elastic
+sheet, automatic mesh convergence or compact-hole-array qualification is
+claimed. A small backward residual or outgoing-work identity does not bound
+boundary discretization, angular integration or source-model error.
+
+The five focused `soft::tests` cover a three-rung independent static-disc
+capacity/axial-field limit, optical theorem and finer far-field power,
+finite-source reciprocity and superposition, total Euler-gradient agreement,
+live free-edge density, resource/cancellation refusals, and worker/replay
+determinism. Full-crate integration requires the complete pinned workspace.
+
