@@ -7948,3 +7948,24 @@ its half-height quality factor need not equal a pole-decay quality factor.
 An exactly critical exit half-space retains the existing Fresnel derivative
 refusal, and no finite-band pulse, inferred material law or completeness claim
 is added.
+
+### Resonance of the original transmitted energy flux
+
+The shared `PowerFractionDispersion` owner differentiates the original normal
+Poynting-flux fraction using both coherent E and H fields, including incident
+and exit admittance dispersion. Double-double products retain phase
+cancellation. The half-space Fresnel owner and both first/second-order layered
+field owners expose the same reflected/transmitted power-fraction slopes.
+Original positive carrier fractions remain authoritative; absorption heat and
+an optical phase are not inferred from a power ratio.
+
+`LayeredResonanceObservation::TransmittedPowerFraction` resolves a peak and
+optional half-height bandwidth of the ACTUAL native transmitted flux. The
+shared peak search receives the phase-free observation `sqrt(T)`, with exact
+analytic slope `T'/(2 sqrt(T))`; its squared observation is the power fraction.
+This retains changing source/port admittances, which can move the flux peak
+away from a transmitted-electric-field maximum. Strictly positive resolved
+transmission is required at derivative samples. Underflow keeps the original
+unavailable-field refusal, and zero-flux samples do not invent a square-root
+tangent. Existing source domains, incidence constraints, budgets and
+cancellation remain active.

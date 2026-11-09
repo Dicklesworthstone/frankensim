@@ -9,7 +9,7 @@
 //! parent plane-wave owner. Phase/group-delay definitions and their limits:
 //! <https://ocw.mit.edu/courses/6-977-ultrafast-optics-spring-2005/d99af77c9cdca438616ee745ba41e548_chapter2.pdf>.
 
-use super::{BulkPropagation, BulkWaveDispersion, Result, invalid, propagation_at_distance};
+use super::{BulkPropagation, BulkWaveDispersion, PowerFractionDispersion, Result, invalid, propagation_at_distance};
 use crate::plane_wave::{
     InterfaceReflection, PlanarDielectricInterface, Polarization, WaveMedium, finite,
     normalized_interface_pair,
@@ -152,6 +152,36 @@ impl<'a> InterfaceFrequencyDispersion<'a> {
     }
     pub const fn transmitted_conjugate_h(self) -> FresnelAmplitudeDispersion {
         self.amplitudes[2]
+    }
+
+    /// Original reflected normal power fraction and its analytic slope.
+    pub fn reflected_power_fraction(self) -> Result<PowerFractionDispersion> {
+        let r = self.amplitudes[0];
+        PowerFractionDispersion::from_fields(
+            self.carrier.reflected_power_fraction,
+            r.omega,
+            r.amplitude,
+            r.amplitude,
+            r.scaled_derivatives[0],
+            r.scaled_derivatives[0],
+        )
+        .ok_or_else(|| invalid("reflected Poynting-flux tangent is unrepresentable"))
+    }
+
+    /// Original transmitted normal flux, including the complete frequency
+    /// dependence of both port admittances. Re(E conj(H)) supplies its slope.
+    pub fn transmitted_power_fraction(self) -> Result<PowerFractionDispersion> {
+        let e = self.amplitudes[1];
+        let h = self.amplitudes[2];
+        PowerFractionDispersion::from_fields(
+            self.carrier.transmitted_power_fraction,
+            e.omega,
+            e.amplitude,
+            h.amplitude,
+            e.scaled_derivatives[0],
+            h.scaled_derivatives[0],
+        )
+        .ok_or_else(|| invalid("transmitted Poynting-flux tangent is unrepresentable"))
     }
 
     /// Complex d(k_z)/domega [s/m] for the original transmitted branch and

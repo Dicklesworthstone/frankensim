@@ -26,6 +26,8 @@ use super::{
 use fs_math::{c64::C64, dd::Dd};
 
 mod interface;
+mod power;
+pub use power::PowerFractionDispersion;
 pub use interface::{
     FresnelAmplitudeDispersion, FresnelLogarithmicDispersion, IncidenceFrequencyConstraint,
     InterfaceFrequencyDispersion,

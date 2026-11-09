@@ -12,7 +12,7 @@ use super::{LayeredReflection, PlanarDielectricLayers, Slab, bad, divided, maxim
 use crate::plane_wave::{
     Polarization, ReflectionError, WaveMedium,
     dispersion::{
-        FresnelAmplitudeDispersion, IncidenceFrequencyConstraint, normal_squared_derivatives,
+        FresnelAmplitudeDispersion, IncidenceFrequencyConstraint, PowerFractionDispersion, normal_squared_derivatives,
         root_derivatives,
     },
     finite, positive,
@@ -62,6 +62,29 @@ impl<'s, 'm> LayeredFrequencyDispersion<'s, 'm> {
     /// The same propagation-underflow refusal applies to both exit fields.
     pub fn transmitted_conjugate_h(self) -> Option<FresnelAmplitudeDispersion> {
         self.transmitted.map(|value| value[1])
+    }
+
+    /// Original reflected normal power fraction and its first frequency slope.
+    pub fn reflected_power_fraction(self) -> Result<PowerFractionDispersion> {
+        let r = self.reflected;
+        PowerFractionDispersion::from_fields(
+            self.carrier.reflected_power_fraction, self.source.omega,
+            r.amplitude(), r.amplitude(),
+            r.scaled_derivatives()[0], r.scaled_derivatives()[0],
+        ).ok_or_else(|| bad("reflected film Poynting-flux tangent is unrepresentable"))
+    }
+
+    /// Original transmitted normal flux, including both port admittance slopes.
+    /// Unavailable transmitted field jets retain None; no zero slope is inferred.
+    /// This accessor reports the first derivative, even though this owner also
+    /// retains second derivatives of the underlying electric/magnetic fields.
+    pub fn transmitted_power_fraction(self) -> Result<Option<PowerFractionDispersion>> {
+        let Some([e, h]) = self.transmitted else { return Ok(None); };
+        PowerFractionDispersion::from_fields(
+            self.carrier.transmitted_power_fraction, self.source.omega,
+            e.amplitude(), h.amplitude(),
+            e.scaled_derivatives()[0], h.scaled_derivatives()[0],
+        ).map(Some).ok_or_else(|| bad("transmitted film Poynting-flux tangent is unrepresentable"))
     }
 }
 
