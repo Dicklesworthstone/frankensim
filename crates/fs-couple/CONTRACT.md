@@ -12576,3 +12576,52 @@ interval, work budgets and late cancellation. Original caloric support,
 phase/source ownership and transactional publication remain binding. These
 checks establish numerical model/accounting targets, not measured-material
 authority or a spatial/time/quadrature error certificate.
+
+## Complete thermal assemblies for thermally live actuator supports
+
+`circuit_enthalpy::motion::support::step_heat_assembly_candidate` and
+`PreparedHeatNetwork::field_motion_support_candidate` connect the original
+thermally live axial support to the complete existing `HeatAssembly`. The plain
+material-network and electrical-contact entrypoints retain their existing API
+and share the same implementation. Defaulted report/sample type parameters
+preserve their original payload while complete providers retain their own
+source observations and typed errors.
+
+At every proposed finite-enthalpy endpoint, the original prepared assembly
+resolves its bulk links, source-bound thermal and electrical contacts, closed
+radiation, integrated/directional transport, and any composed coolant or
+prescribed-reservoir sources. Its original material/caloric inventory and
+electrical heat destinations admit the support; no independent heat map or
+constitutive state is invented. That same endpoint feeds the existing section
+Helmholtz/entropy law and native reciprocal field/body descriptor. Per-layer
+reversible heat, bulk Joule heat and each interface's A/B heat partition enter
+the original finite cells once.
+
+The physical balance encloses caloric, support internal, field and kinetic
+energy. Authored source/reservoir exchange remains external. Finite links and
+closed radiation remain internal; the enclosure's numerical net power is
+explicitly excluded from external heat and remains visible in the enclosing
+energy residual. No balancing heat, stored-energy correction or second
+mechanical/thermal solver is introduced. Source refusal, circuit-budget
+exhaustion and cancellation return no thermal, electrical or mechanical
+endpoint; retries start from the same accepted owners.
+
+The original restrictions persist: wholly solid source-compatible layers,
+fixed reference inventory/inertia, constant enclosed field coefficients,
+affine modulus/declared expansion, fixed electrical geometry and generally
+first-order endpoint-temperature coupling. Thermal link geometry, interface
+pressure, exposed patch area and radiative view factors remain authored over
+the interval. Support motion does not infer remeshing, changing contact,
+coolant volume, phase transfer, arcing or nonlinear E/J constitutive response.
+
+The focused `circuit_enthalpy_motion::support` regression definitions exercise
+source-dependent thermal contact plus native radiosity, per-cell heat and an
+independent total internal-energy account, transport changes reaching native
+gap/momentum, and exact reduction to the original contact-support path when
+extra heat mechanisms are absent. A complete-provider test composes the native
+`fs-convection` coefficient with a prescribed fluid reservoir, checks its
+external heat separately from closed radiation, retains the provider's sample
+and error types, and injects late source/budget/cancellation refusals. These new
+regressions were source-reviewed but not executed in this implementation
+session because the execution environment became unavailable; compilation,
+runtime acceptance and experimental validation are not claimed here.
