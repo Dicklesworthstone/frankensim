@@ -25,6 +25,9 @@ use crate::MaterialError;
 use fs_qty::Temperature;
 use fs_thermochem::water::if97::{If97SaturationPair, saturation_pressure_derivative};
 
+/// Matched liquid enthalpy and transport for resolved cavitation heat fields.
+pub mod liquid;
+
 /// One immutable original saturation pair and its allocation-free first jet.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SaturatedWaterVapor {
