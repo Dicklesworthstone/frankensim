@@ -1,7 +1,7 @@
 //! G1/G3/G4: independent beam/storage balances and atomic finite-wall feedback.
-use super::*;
-use super::super::tests::{channel, endpoints, material};
 use super::super::super::super::tests::{controls, gas, interface, near};
+use super::super::tests::{channel, endpoints, material};
+use super::*;
 use crate::thermal::transport::volumetric::timeline::FixedVolumeThermalLaw;
 use crate::thermochemical_gas::energy::parcel::transfer::species::{
     effusion::channel::CylindricalMolecularGeometry,
@@ -45,9 +45,16 @@ fn hot_and_cold_finite_walls_match_independent_gas_escape_and_nonlinear_storage(
             FixedVolumeChannelWall::try_new_isochoric(&law, 1e-6, tw).unwrap(),
         )]);
         let result = step_candidate(
-            &gases, &walls, GasTransportPaths::default(), &[link(&path)], DT,
-            &endpoints(&gases), controls(), || false,
-        ).unwrap();
+            &gases,
+            &walls,
+            GasTransportPaths::default(),
+            &[link(&path)],
+            DT,
+            &endpoints(&gases),
+            controls(),
+            || false,
+        )
+        .unwrap();
         let returned_heat = (1.0 - tau) * incident * 2.0 * R * (tw - 400.0);
         let delta_u = -tau * incident * 2.0 * R * 400.0 + returned_heat;
         let n1 = n0 - tau * incident;
@@ -56,8 +63,7 @@ fn hot_and_cold_finite_walls_match_independent_gas_escape_and_nonlinear_storage(
         let qwall = -2.0 * R * incident * (1.0 - direct) * (tw - 400.0);
         // Independent inversion of V*[a*(T1-T0)+b/2*(T1²-T0²)].
         let c0 = 1e6 + 1000.0 * tw;
-        let tw1 = tw + (2.0 * qwall / 1e-6)
-            / ((c0 * c0 + 2.0 * 1000.0 * qwall / 1e-6).sqrt() + c0);
+        let tw1 = tw + (2.0 * qwall / 1e-6) / ((c0 * c0 + 2.0 * 1000.0 * qwall / 1e-6).sqrt() + c0);
         near(result.parcels()[&0].mass_kg(), n1 * M, 1e-18);
         near(result.parcels()[&0].state().state().temperature, tg, 3e-8);
         near(result.step().gas.audit.escaped_energy_j, escaped, 1e-11);
@@ -78,41 +84,73 @@ fn hot_and_cold_finite_walls_match_independent_gas_escape_and_nonlinear_storage(
 fn accepted_finite_wall_temperature_drives_the_next_molecular_stage() {
     let source = material(1e6, 0.0, [200.0, 1800.0]);
     let law = FixedVolumeThermalLaw::try_new(&source, 1000.0, 200.0)
-        .unwrap().with_sensible_entropy();
+        .unwrap()
+        .with_sensible_entropy();
     let walls = BTreeMap::from([(
-        9, FixedVolumeChannelWall::try_new_isochoric(&law, 1e-8, 900.0).unwrap(),
+        9,
+        FixedVolumeChannelWall::try_new_isochoric(&law, 1e-8, 900.0).unwrap(),
     )]);
     let path = channel(2e-8);
     let gases = BTreeMap::from([(0, gas(400.0, 100_000.0, 0.0))]);
     let first = step_candidate(
-        &gases, &walls, GasTransportPaths::default(), &[link(&path)], DT,
-        &endpoints(&gases), controls(), || false,
-    ).unwrap();
+        &gases,
+        &walls,
+        GasTransportPaths::default(),
+        &[link(&path)],
+        DT,
+        &endpoints(&gases),
+        controls(),
+        || false,
+    )
+    .unwrap();
     let second = step_candidate(
-        first.parcels(), first.walls(), GasTransportPaths::default(), &[link(&path)], DT,
-        &endpoints(first.parcels()), controls(), || false,
-    ).unwrap();
+        first.parcels(),
+        first.walls(),
+        GasTransportPaths::default(),
+        &[link(&path)],
+        DT,
+        &endpoints(first.parcels()),
+        controls(),
+        || false,
+    )
+    .unwrap();
     let held = native::step_candidate(
-        first.parcels(), GasTransportPaths::default(),
+        first.parcels(),
+        GasTransportPaths::default(),
         &[VacuumChannelNetworkLink {
-            id: 7, parcel: 0, channel: &path, area_m2: AREA, wall_temperature_k: 900.0,
-        }], DT, &endpoints(first.parcels()), controls(), || false,
-    ).unwrap();
+            id: 7,
+            parcel: 0,
+            channel: &path,
+            area_m2: AREA,
+            wall_temperature_k: 900.0,
+        }],
+        DT,
+        &endpoints(first.parcels()),
+        controls(),
+        || false,
+    )
+    .unwrap();
     assert!(first.walls()[&9].temperature_k() < 900.0);
     assert!(second.walls()[&9].temperature_k() < first.walls()[&9].temperature_k());
-    assert!(second.parcels()[&0].state().state().temperature
-        < held.parcels()[&0].state().state().temperature);
-    assert_eq!(second.step().gas.outlets[0].wall_temperature_k,
-        first.walls()[&9].temperature_k());
+    assert!(
+        second.parcels()[&0].state().state().temperature
+            < held.parcels()[&0].state().state().temperature
+    );
+    assert_eq!(
+        second.step().gas.outlets[0].wall_temperature_k,
+        first.walls()[&9].temperature_k()
+    );
 }
 
 #[test]
 fn shared_wall_pools_opposing_outlet_heat_before_inversion_in_canonical_order() {
     let source = material(1000.0, 0.0, [499.0, 501.0]);
     let law = FixedVolumeThermalLaw::try_new(&source, 1000.0, 500.0)
-        .unwrap().with_sensible_entropy();
+        .unwrap()
+        .with_sensible_entropy();
     let walls = BTreeMap::from([(
-        9, FixedVolumeChannelWall::try_new_isochoric(&law, 1e-6, 500.0).unwrap(),
+        9,
+        FixedVolumeChannelWall::try_new_isochoric(&law, 1e-6, 500.0).unwrap(),
     )]);
     let path = channel(1e-8);
     let gases = BTreeMap::from([
@@ -120,11 +158,24 @@ fn shared_wall_pools_opposing_outlet_heat_before_inversion_in_canonical_order() 
         (1, gas(200.0, 100_000.0, 0.0)),
     ]);
     let a = link(&path);
-    let b = FiniteVacuumChannelLink { id: 8, parcel: 1, ..a };
-    let run = |links: &[FiniteVacuumChannelLink<'_>]| step_candidate(
-        &gases, &walls, GasTransportPaths::default(), links, DT,
-        &endpoints(&gases), controls(), || false,
-    ).unwrap();
+    let b = FiniteVacuumChannelLink {
+        id: 8,
+        parcel: 1,
+        ..a
+    };
+    let run = |links: &[FiniteVacuumChannelLink<'_>]| {
+        step_candidate(
+            &gases,
+            &walls,
+            GasTransportPaths::default(),
+            links,
+            DT,
+            &endpoints(&gases),
+            controls(),
+            || false,
+        )
+        .unwrap()
+    };
     let forward = run(&[a, b]);
     let reverse = run(&[b, a]);
     assert_eq!(forward.parcels(), reverse.parcels());
@@ -132,7 +183,10 @@ fn shared_wall_pools_opposing_outlet_heat_before_inversion_in_canonical_order() 
     assert_eq!(forward.step().walls.len(), 1);
     near(forward.walls()[&9].temperature_k(), 500.0, 1e-8);
     for outlet in &forward.step().gas.outlets {
-        assert!(law.temperature_k(outlet.wall.heat_into_wall_j / walls[&9].mass_kg()).is_err());
+        assert!(
+            law.temperature_k(outlet.wall.heat_into_wall_j / walls[&9].mass_kg())
+                .is_err()
+        );
     }
 }
 
@@ -140,23 +194,36 @@ fn shared_wall_pools_opposing_outlet_heat_before_inversion_in_canonical_order() 
 fn source_reference_shifts_leave_finite_gas_and_wall_trajectories_unchanged() {
     let source = material(1e6, 0.0, [200.0, 1800.0]);
     let law = FixedVolumeThermalLaw::try_new(&source, 1000.0, 200.0)
-        .unwrap().with_sensible_entropy();
+        .unwrap()
+        .with_sensible_entropy();
     let walls = BTreeMap::from([(
-        9, FixedVolumeChannelWall::try_new_isochoric(&law, 1e-6, 900.0).unwrap(),
+        9,
+        FixedVolumeChannelWall::try_new_isochoric(&law, 1e-6, 900.0).unwrap(),
     )]);
     let mut previous = None;
     for datum in [0.0, 1e20] {
         let path = DiffuseMolecularChannel::try_new(
             interface(datum),
             CylindricalMolecularGeometry::try_new(1e-8, 2e-8, 1e-4, "synthetic channel").unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
         let gases = BTreeMap::from([(0, gas(400.0, 100_000.0, datum))]);
         let result = step_candidate(
-            &gases, &walls, GasTransportPaths::default(), &[link(&path)], DT,
-            &endpoints(&gases), controls(), || false,
-        ).unwrap();
-        let values = [result.parcels()[&0].state().state().temperature,
-            result.walls()[&9].temperature_k(), result.step().wall_energy_change_j];
+            &gases,
+            &walls,
+            GasTransportPaths::default(),
+            &[link(&path)],
+            DT,
+            &endpoints(&gases),
+            controls(),
+            || false,
+        )
+        .unwrap();
+        let values = [
+            result.parcels()[&0].state().state().temperature,
+            result.walls()[&9].temperature_k(),
+            result.step().wall_energy_change_j,
+        ];
         if let Some(old) = previous {
             for (value, original) in values.into_iter().zip(old) {
                 near(value, original, 1e-10);
@@ -171,19 +238,34 @@ fn source_reference_shifts_leave_finite_gas_and_wall_trajectories_unchanged() {
 fn inactive_and_ballistic_outlets_do_not_query_an_unexposed_wall_domain() {
     let source = material(1e6, 0.0, [1800.0, 2000.0]);
     let law = FixedVolumeThermalLaw::try_new(&source, 1000.0, 1800.0)
-        .unwrap().with_sensible_entropy();
+        .unwrap()
+        .with_sensible_entropy();
     let walls = BTreeMap::from([(
-        9, FixedVolumeChannelWall::try_new_isochoric(&law, 1e-6, 1900.0).unwrap(),
+        9,
+        FixedVolumeChannelWall::try_new_isochoric(&law, 1e-6, 1900.0).unwrap(),
     )]);
     let gases = BTreeMap::from([(0, gas(600.0, 150_000.0, 0.0))]);
     for (length, area) in [(0.0, AREA), (1e-8, 0.0)] {
         let path = channel(length);
-        let outlet = FiniteVacuumChannelLink { area_m2: area, ..link(&path) };
+        let outlet = FiniteVacuumChannelLink {
+            area_m2: area,
+            ..link(&path)
+        };
         let result = step_candidate(
-            &gases, &walls, GasTransportPaths::default(), &[outlet], DT,
-            &endpoints(&gases), controls(), || false,
-        ).unwrap();
-        assert_eq!(result.walls()[&9].specific_energy_j_kg(), walls[&9].specific_energy_j_kg());
+            &gases,
+            &walls,
+            GasTransportPaths::default(),
+            &[outlet],
+            DT,
+            &endpoints(&gases),
+            controls(),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(
+            result.walls()[&9].specific_energy_j_kg(),
+            walls[&9].specific_energy_j_kg()
+        );
         assert_eq!(result.step().wall_energy_change_j, 0.0);
         assert_eq!(result.step().wall_entropy_change_j_k, 0.0);
         if area == 0.0 {
@@ -198,9 +280,11 @@ fn inactive_and_ballistic_outlets_do_not_query_an_unexposed_wall_domain() {
 fn all_paths_share_gross_inventory_and_failures_leave_gas_and_wall_unchanged() {
     let source = material(1e6, 0.0, [200.0, 1800.0]);
     let law = FixedVolumeThermalLaw::try_new(&source, 1000.0, 200.0)
-        .unwrap().with_sensible_entropy();
+        .unwrap()
+        .with_sensible_entropy();
     let walls = BTreeMap::from([(
-        9, FixedVolumeChannelWall::try_new_isochoric(&law, 1e-6, 900.0).unwrap(),
+        9,
+        FixedVolumeChannelWall::try_new_isochoric(&law, 1e-6, 900.0).unwrap(),
     )]);
     let path = channel(2e-8);
     let gases = BTreeMap::from([
@@ -210,35 +294,81 @@ fn all_paths_share_gross_inventory_and_failures_leave_gas_and_wall_unchanged() {
     let original = gases.clone();
     let old_wall = walls[&9].specific_energy_j_kg();
     let native_paths = [EffusionNetworkLink {
-        id: 99, parcels: [0, 1], interface: path.mouth(), area_m2: AREA,
+        id: 99,
+        parcels: [0, 1],
+        interface: path.mouth(),
+        area_m2: AREA,
     }];
     let fraction = incident_moles(400.0, 100_000.0) * M / gases[&0].mass_kg();
     let mut limited = controls();
     limited.exchange.maximum_species_fraction = 1.5 * fraction;
-    assert!(matches!(step_candidate(
-        &gases, &walls,
-        GasTransportPaths { effusion: &native_paths, ..GasTransportPaths::default() },
-        &[link(&path)], DT, &endpoints(&gases), limited, || false,
-    ), Err(FiniteChannelError::Transport(GasTransportError::Exchange(
-        SpeciesNetworkError::Withdrawal { .. }
-    )))));
+    assert!(matches!(
+        step_candidate(
+            &gases,
+            &walls,
+            GasTransportPaths {
+                effusion: &native_paths,
+                ..GasTransportPaths::default()
+            },
+            &[link(&path)],
+            DT,
+            &endpoints(&gases),
+            limited,
+            || false,
+        ),
+        Err(FiniteChannelError::Transport(GasTransportError::Exchange(
+            SpeciesNetworkError::Withdrawal { .. }
+        )))
+    ));
     let tiny_wall = BTreeMap::from([(
-        9, FixedVolumeChannelWall::try_new_isochoric(&law, 1e-11, 900.0).unwrap(),
+        9,
+        FixedVolumeChannelWall::try_new_isochoric(&law, 1e-11, 900.0).unwrap(),
     )]);
-    assert!(matches!(step_candidate(
-        &gases, &tiny_wall, GasTransportPaths::default(), &[link(&path)], DT,
-        &endpoints(&gases), controls(), || false,
-    ), Err(FiniteChannelError::WallDomain { .. } | FiniteChannelError::WallOvershoot { .. })));
+    assert!(matches!(
+        step_candidate(
+            &gases,
+            &tiny_wall,
+            GasTransportPaths::default(),
+            &[link(&path)],
+            DT,
+            &endpoints(&gases),
+            controls(),
+            || false,
+        ),
+        Err(FiniteChannelError::WallDomain { .. } | FiniteChannelError::WallOvershoot { .. })
+    ));
     let mut calls = 0;
     step_candidate(
-        &gases, &walls, GasTransportPaths::default(), &[link(&path)], DT,
-        &endpoints(&gases), controls(), || { calls += 1; false },
-    ).unwrap();
+        &gases,
+        &walls,
+        GasTransportPaths::default(),
+        &[link(&path)],
+        DT,
+        &endpoints(&gases),
+        controls(),
+        || {
+            calls += 1;
+            false
+        },
+    )
+    .unwrap();
     let mut cancelled_calls = 0;
-    assert!(matches!(step_candidate(
-        &gases, &walls, GasTransportPaths::default(), &[link(&path)], DT,
-        &endpoints(&gases), controls(), || { cancelled_calls += 1; cancelled_calls == calls },
-    ), Err(FiniteChannelError::Cancelled)));
+    assert!(matches!(
+        step_candidate(
+            &gases,
+            &walls,
+            GasTransportPaths::default(),
+            &[link(&path)],
+            DT,
+            &endpoints(&gases),
+            controls(),
+            || {
+                cancelled_calls += 1;
+                cancelled_calls == calls
+            },
+        ),
+        Err(FiniteChannelError::Cancelled)
+    ));
     assert_eq!(gases, original);
     assert_eq!(walls[&9].specific_energy_j_kg(), old_wall);
 }

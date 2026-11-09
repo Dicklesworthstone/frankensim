@@ -10,12 +10,13 @@
 //! velocity-independent diffuse reflection, complete internal-mode accommodation,
 //! no adsorption/reaction, and negligible flight time and channel gas storage.
 //! It supplies no outgoing angular/momentum law or moving-wall work. Santeler's
-//! transmission approximation is an estimate, not a certified accuracy bound.
+//! transmission approximation and the optional ring-resolved Clausing solution
+//! retain explicit numerical estimates, not certified accuracy bounds.
 //! Molecular energy accommodation follows Chiggiato, *Vacuum Technology for
 //! Superconducting Devices*, section 2.2.2, <https://arxiv.org/abs/1501.07162>.
 
 mod geometry;
-pub use geometry::CylindricalMolecularGeometry;
+pub use geometry::{ClausingControls, ClausingResolution, CylindricalMolecularGeometry};
 /// Molecular escape through the same diffuse channel into a true vacuum.
 pub mod vacuum;
 

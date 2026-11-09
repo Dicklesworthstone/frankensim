@@ -12,6 +12,9 @@
 //! owns a stationary, isothermal, fully accommodating wall. Neither arbitrary
 //! incidence/drift nor specular reflection can reuse these probabilities.
 
+mod clausing;
+pub use clausing::{ClausingControls, ClausingResolution};
+
 use super::super::{GasEnergyError, invalid, positive};
 use fs_math::det;
 
@@ -33,6 +36,7 @@ pub struct CylindricalMolecularGeometry {
     wall_hit: f64,
     reflected: f64,
     wall_transmitted: f64,
+    resolution: Option<ClausingResolution>,
 }
 
 impl CylindricalMolecularGeometry {
@@ -114,7 +118,28 @@ impl CylindricalMolecularGeometry {
             wall_hit,
             reflected,
             wall_transmitted,
+            resolution: None,
         })
+    }
+
+    /// Resolve the diffuse-wall Clausing equation on successively refined axial
+    /// rings, retaining the original geometry and collision qualification.
+    ///
+    /// The returned probabilities feed every existing channel consumer. The
+    /// refinement estimate is numerical evidence, not a certified enclosure or
+    /// an extension of the physical diffuse/collisionless applicability domain.
+    pub fn resolve_transmission(
+        self,
+        controls: ClausingControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, GasEnergyError> {
+        clausing::resolve(self, controls, cancelled)
+    }
+
+    /// `None` identifies the original Santeler approximation. A retained report
+    /// identifies the actual ring refinement used for these probabilities.
+    pub const fn resolution(&self) -> Option<&ClausingResolution> {
+        self.resolution.as_ref()
     }
 
     pub const fn diameter_m(&self) -> f64 {
@@ -129,7 +154,8 @@ impl CylindricalMolecularGeometry {
     pub fn provenance(&self) -> &str {
         &self.provenance
     }
-    /// Estimated Santeler transmission, identical from either entrance.
+    /// Reciprocal transmission: Santeler by default, or the explicitly resolved
+    /// Clausing value when `resolution()` is present.
     pub const fn transmission_probability(&self) -> f64 {
         self.transmission
     }
@@ -141,11 +167,11 @@ impl CylindricalMolecularGeometry {
     pub const fn wall_hit_probability(&self) -> f64 {
         self.wall_hit
     }
-    /// Estimated probability of returning to the entrance reservoir.
+    /// Probability of returning to the entrance under the selected geometry law.
     pub const fn reflected_probability(&self) -> f64 {
         self.reflected
     }
-    /// Estimated probability of transmission following at least one wall hit.
+    /// Probability of transmission after wall impact under the selected law.
     pub const fn wall_transmitted_probability(&self) -> f64 {
         self.wall_transmitted
     }

@@ -22717,8 +22717,8 @@ Six focused regression groups cover independent monatomic beam/nonlinear-wall
 balances, thermal feedback, shared-wall pooling and input ordering, caloric
 reference shifts, inactive walls, shared inventory, overshoot and cancellation.
 Native Cargo execution did not reach these modules: the dependency build ran
-out of workspace space and the executor disconnected. The recovered source and
-tests have been reviewed, but final Rustfmt and native execution remain pending.
+out of workspace space and the executor disconnected. The recovered source and tests match the original implementation after Rustfmt.
+Formatting and whitespace checks pass; full native crate execution remains pending.
 
 ## Coherent multitone tensor-Prony material energy
 
@@ -22745,3 +22745,46 @@ spatial error or empirical source validation are not inferred by this observer.
 The physical regression definitions compare independent real Maxwell ODE fields
 and quadrature, beat heat, coherent cancellation, one-tone parity, source-clock
 translations, original domain refusal and cancellation/reuse.
+
+
+## Refined diffuse cylindrical-channel transmission
+
+`species::effusion::channel::CylindricalMolecularGeometry::resolve_transmission`
+solves the diffuse-wall Clausing equation on nested axial rings. Exact integrated
+ring-to-ring and ring-to-end view factors retain reciprocity without angular
+quadrature or random sampling. Positive factorizations preserve thin-ring and
+distant-ring probabilities. Compensated conjugate gradients solve the
+antisymmetric half system with O(N) storage and O(N^2) work per iteration.
+Geometry is resolved once; ordinary species and thermal sampling reuses the
+retained probabilities and performs no additional geometry solve.
+
+Explicit `ClausingControls` bound ring count (at most 2048), iterations and
+absolute/relative probability tolerances. At least three nested grids are used,
+except for the exact zero-length aperture. The original operator recomputes its
+final residual before acceptance. `ClausingResolution` separates the observed
+grid change from both discrete solve estimates. The latter excludes floating-
+point roundoff; the combined refinement estimate is not a rigorous continuum
+error enclosure. Exhausted budgets and cancellation refuse without publishing
+partial geometry. Probability normalization is admitted only within rounding
+allowance. No measured performance or empirical wall-model validation is claimed.
+
+The original diameter, length, collision qualification, provenance, direct view
+factor and total wall-hit probability remain unchanged. Separate positive
+returned and wall-transmitted probabilities preserve wall heat even when total
+transmission rounds to one. `DiffuseMolecularChannel` and its existing closed,
+vacuum and finite-wall consumers use these same probabilities. The default
+constructor retains the documented Santeler estimate; resolution is explicit.
+Physical assumptions remain stationary Maxwellian entrance reservoirs,
+collisionless flight, diffuse nonadsorbing walls and the consumer's declared
+thermal accommodation. No outgoing momentum distribution is inferred.
+
+Equations and diameter-normalized reference values follow Matuda (2015),
+DOI 10.3131/jvsj2.58.311, and Gomez-Goni/Lobo, DOI 10.1116/1.1568746.
+Twelve native tests of the unmodified production geometry modules, linked to
+original `fs-math` with a minimal error/cancellation envelope, passed using the
+pinned nightly. Seven new cases cover independent reference transmission
+(absolute discrepancy below 1e-5 at L/D=1,2,5,10), view-factor conservation,
+refinement, tiny and zero lengths, scaling, determinism, budgets and cancellation;
+five existing geometry tests also passed. A source-backed species/accommodation
+consumer regression is added but awaits the full material crate build. These
+focused tests do not establish full `fs-material` or `fs-couple` integration.

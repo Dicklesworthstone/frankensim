@@ -12,12 +12,8 @@
 //! temperature or entropy. Reported wall entropy is a material storage change,
 //! not total entropy production of the unmodeled escaped gas.
 
-use super::{
-    FiniteChannelError, FiniteChannelWallStep, FixedVolumeChannelWall, check,
-};
-use super::super::vacuum::{
-    self as native, VacuumChannelNetworkLink, VacuumChannelNetworkStep,
-};
+use super::super::vacuum::{self as native, VacuumChannelNetworkLink, VacuumChannelNetworkStep};
+use super::{FiniteChannelError, FiniteChannelWallStep, FixedVolumeChannelWall, check};
 use crate::thermochemical_gas::energy::{
     GasEnergySolve,
     parcel::{
@@ -131,9 +127,11 @@ pub fn step_candidate<'l, 'p>(
         ))?;
         let range = ranges.entry(link.wall).or_insert([wall.temperature_k(); 2]);
         if link.area_m2 > 0.0 && link.channel.geometry().length_m() > 0.0 {
-            let gas = parcels.get(&link.parcel).ok_or(FiniteChannelError::Invalid(
-                "finite vacuum channel references an absent gas",
-            ))?;
+            let gas = parcels
+                .get(&link.parcel)
+                .ok_or(FiniteChannelError::Invalid(
+                    "finite vacuum channel references an absent gas",
+                ))?;
             let temperature = gas.state().state().temperature;
             range[0] = range[0].min(temperature);
             range[1] = range[1].max(temperature);

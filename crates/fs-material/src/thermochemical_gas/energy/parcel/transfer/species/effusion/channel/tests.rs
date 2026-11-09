@@ -242,3 +242,65 @@ fn channel_requires_matching_unit_transmission_mouths() {
         );
     }
 }
+
+#[test]
+fn resolved_geometry_drives_original_species_and_accommodation_energy() {
+    let mass = 0.004;
+    let temperature = 400.0;
+    let pressures = [100_000.0, 70_000.0];
+    let left = pure(mass, 2.5, 0.0, 0.0, temperature, pressures[0]);
+    let right = pure(mass, 2.5, 0.0, 0.0, temperature, pressures[1]);
+    let geometry = channel(&left, DIAMETER)
+        .geometry()
+        .clone()
+        .resolve_transmission(
+            ClausingControls {
+                initial_rings: 32,
+                maximum_rings: 1024,
+                maximum_iterations: 256,
+                absolute_tolerance: 3e-5,
+                relative_tolerance: 0.0,
+            },
+            || false,
+        )
+        .unwrap();
+    assert!((geometry.transmission_probability() - 18.0 / 35.0).abs() > 4e-5);
+    let law =
+        DiffuseMolecularChannel::try_new(interface(left.model().clone(), 1.0), geometry.clone())
+            .unwrap();
+    assert_eq!(law.geometry().resolution(), geometry.resolution());
+    let wall_temperature = 900.0;
+    let flux = law
+        .sample(&left, &right, AREA, wall_temperature, || false)
+        .unwrap();
+    let q = pressures.map(|p| incident_moles(p, temperature, mass));
+    let change = 2.0 * R * (wall_temperature - temperature);
+    near(
+        flux.transmitted.species[0].left_to_right.molar_rate_mol_s,
+        q[0] * geometry.transmission_probability(),
+    );
+    near(
+        flux.transmitted.species[0].right_to_left.molar_rate_mol_s,
+        q[1] * geometry.transmission_probability(),
+    );
+    for side in 0..2 {
+        near(
+            flux.wall.reflected_species[0].mass_rate_kg_s[side],
+            q[side] * mass * geometry.reflected_probability(),
+        );
+        near(
+            flux.wall.heat_into_gas_w[side],
+            (q[side] * geometry.reflected_probability()
+                + q[1 - side] * geometry.wall_transmitted_probability())
+                * change,
+        );
+    }
+    near(
+        flux.wall.heat_into_wall_w,
+        -(q[0] + q[1]) * geometry.wall_hit_probability() * change,
+    );
+    near(
+        flux.wall.heat_into_wall_w,
+        -flux.wall.heat_into_gas_w.iter().sum::<f64>(),
+    );
+}

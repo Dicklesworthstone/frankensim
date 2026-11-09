@@ -9003,5 +9003,6 @@ closed-system passivity claim. The existing pair and pair-trajectory APIs remain
 unchanged. Seven focused regression groups cover pair parity, three-gas balance,
 canonical ordering, shared withdrawal, orientation, Galilean/caloric-reference
 invariance, newly arriving species, topology refusal and terminal cancellation.
-Native execution and final formatting of recovered blobs remain pending because
-the pinned dependency build exhausted disk space and the executor disconnected.
+Native crate execution remains pending after the dependency build exhausted disk
+space. Following executor recovery, recovered files match the original
+implementation after Rustfmt; formatting and whitespace checks pass.
