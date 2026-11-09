@@ -13,6 +13,9 @@
 //! lanes. Constant positive device capacitances are required: nonlinear C(V),
 //! temperature-dependent storage, recovery charge and gate-drive energy are
 //! not inferred. Small RC time scales require explicit temporal refinement.
+//!
+//! The `charge` module admits complete original nonlinear device Q(V) laws
+//! and their coupled electrode storage without reducing them to constant C.
 
 use super::{
     CommutationInterval, CommutationParameters, DeviceConductionPoint, DeviceGateState,
@@ -35,6 +38,8 @@ use fs_math::dd::Dd;
 
 /// Original finite battery and motor shafts with continuing device capacitor charge.
 pub mod battery_motor;
+/// Original voltage-dependent device charge and exact electrode storage.
+pub mod charge;
 mod plan;
 mod standalone;
 use plan::{GatePlan, GateStep};

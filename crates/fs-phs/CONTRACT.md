@@ -3903,6 +3903,32 @@ regressions compare independent analytic RC trajectories and individual heat
 integrals, including nanofarad/nanosecond similarity, gate-edge continuity,
 known-node slopes, and atomic refusals.
 
+## Original nonlinear device charge at coupled bridge electrodes
+
+`commutation::capacitance::charge` retains four complete original
+`CapacitorChargeCurve` laws, including their source knots, piecewise voltage/charge
+law, stored-energy integrals and finite support. Per leg, total bus charge is
+`Cb*Vbus + Qhigh(Vbus−Vnode)` and node charge is
+`Qlow(Vnode)−Qhigh(Vbus−Vnode)`. Initialization uses that same law; charges
+from a different capacitor law are not interchangeable. Neither sampled
+differential capacitance nor `0.5*C(V)*V²` substitutes for the original energy.
+
+The strictly monotone high-device-charge equation inverts the two coupled
+electrode coordinates by bounded original-knot searches and an affine-cell solve.
+The storage-owned discrete gradient traces the entire electrode-charge chord,
+integrates affine efforts in each active cell, and supplies its analytic
+end-state Jacobian. Directional cell selection handles source knots; continuous
+tangents refuse genuine kinks and finite source endpoints. Supported endpoints
+do not suffice when the intervening charge chord leaves the nonlinear source
+domain. The caller authors 1..=65,536 active cells per leg/chord; exhausted work
+or unresolved intersections refuse.
+
+Independent winding, bus and original device energy integrals supply the
+physical storage partition and stable midpoint remainder. Actual electrode
+support magnitudes size numerical coordinate probes. No curve resampling,
+extrapolation, parameter-change work, extra loss map or new dynamic integrator
+is introduced.
+
 ## Finite battery and motor shafts with device capacitor charge
 
 `commutation::capacitance::battery_motor::PreparedCapacitiveBatteryMotorCycle`
