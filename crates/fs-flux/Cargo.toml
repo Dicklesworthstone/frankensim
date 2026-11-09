@@ -140,6 +140,11 @@ path = "examples/finite_rate_ionic_swelling.rs"
 required-features = ["continuum"]
 
 [[example]]
+name = "crystal_diffusion"
+path = "examples/crystal_diffusion.rs"
+required-features = ["continuum"]
+
+[[example]]
 name = "shock_box"
 path = "examples/shock_box.rs"
 required-features = ["experimental-compressible"]

@@ -5337,6 +5337,46 @@ at equal ideal osmolarity, long-step conservation, concentration-boundary roots,
 unsupported combined-law admission and atomic failure/cancellation.
 
 
+## Neutral crystals coupled to Maxwell--Stefan diffusion
+
+`OsmoticNetwork::with_kinetic_solution_diffusion` couples finite neutral crystal
+stocks to the original stationary-solvent `SolutionMaxwellStefan` transport.
+Original material kinetic half-stages surround each native molecular stage.
+Only actual dissolved molecules cross faces; crystals remain local and retain
+their original fixed-area or evolving-particle laws. The existing full/two-half
+adaptive timeline controls the complete coupled temporal error. Existing
+explicit, implicit binary and implicit multisolute engines remain available.
+
+Every kinetic compartment must share identical original ordered solubility
+laws and pure-solid reference, with the same solvent, temperature and molar
+volume. Rate coefficients, particle reference stocks and growth policies may
+differ. The explicit common virial model must have exactly zero interactions,
+so its transport chemical potentials match the admitted ideal saturation law.
+Its concentration support remains binding. Ordinary dissolved-only cells may
+join the same network; isolated reacting cells are also supported. Original
+material-backed molecular faces requalify their endpoint sources after phase
+exchange. No saturation coefficient is substituted for molecular diffusivity.
+
+Whole-window conservation sums dissolved AND solid changes. The free-energy
+report uses the original thermochemical solid-relative potential, retaining the
+saturation reference through phase conversion. An increase beyond the original
+absolute physical budget refuses before publishing inventories or time. This
+is an isothermal chemical-work account, not dissolution heat or a caloric
+temperature trajectory. No water exchange, ionic/electrical constraint,
+instantaneous-equilibrium solid projection, nonideal saturation, nucleation or
+crystal transport is admitted. Constant-source explicit and specialized binary
+advances reuse prepared storage; implicit multisolute/source-query allocation
+costs retain their existing separate accounting.
+
+Focused cases compare coupled trajectories with an independent continuous
+three-stock RK4 oracle, check phase conservation and actual osmotic particles,
+exercise implicit multisolute transport, and check free-energy decrease and
+atomic cancellation. `examples/crystal_diffusion.rs` connects independently
+selected saturation/particle source models to two finite baths and reports
+their concentration, crystal stock, evolving conductance and chemical work.
+Its coefficients are explicitly authored demonstration data.
+
+
 ## Nonideal solution diffusion in finite stationary-solvent networks
 
 `osmosis::OsmoticNetwork::with_solution_diffusion` evolves finite solute

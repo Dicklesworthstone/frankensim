@@ -108,7 +108,8 @@ pub enum OsmoticNetworkError {
     DiffusionStep(diffusion::SolutionDiffusionStepRefusal),
     /// Actual closed-window species inventory failed its absolute molar budget.
     DiffusionBalance { species: usize, residual_mol: f64 },
-    /// Closed fixed-volume mixing free energy increased beyond its whole-window budget.
+    /// Closed fixed-volume free energy increased beyond its whole-window budget.
+    /// Kinetic crystals use the original solid-relative chemical reference.
     DiffusionFreeEnergy { change_j: f64, maximum_j: f64 },
     /// Closed coupled transport failed its absolute solvent-volume budget.
     CoupledWaterBalance { residual_m3: f64, maximum_m3: f64 },
@@ -637,7 +638,9 @@ pub struct OsmoticStepReport {
     pub solute_balance_residual_mol: [f64; MAX_OSMOTIC_SPECIES],
     /// Number of active entries in the amount balance.
     pub species_count: usize,
-    /// Reference-cancelled original-to-final mixing free-energy change [J].
+    /// Reference-cancelled original-to-final free-energy change [J].
+    /// With kinetic solids this uses their original solid-relative chemical
+    /// potential and includes dissolution/precipitation as well as mixing.
     /// Some only for fixed-volume solution diffusion; membrane water work is
     /// not silently dropped from a mixed mechanical/chemical energy account.
     pub diffusion_free_energy_change_j: Option<f64>,
@@ -1028,11 +1031,11 @@ impl OsmoticNetwork {
         for i in 0..self.species.len() {
             report.solute_balance_residual_mol[i] = amounts_after[i] - amounts_before[i];
         }
-        if self
+        let kinetic_phases = self
             .cells
             .iter()
-            .any(|cell| cell.kinetic_solubility.is_some())
-        {
+            .any(|cell| cell.kinetic_solubility.is_some());
+        if kinetic_phases {
             // Retain independent solid tails in the balance, even when adding
             // one to a large dissolved stock rounds to the same total. Sum
             // actual endpoint changes rather than subtracting large totals.
@@ -1070,16 +1073,21 @@ impl OsmoticNetwork {
             // Sum actual endpoint changes, avoiding subtraction of two large
             // inventory totals. The same absolute budget covers the complete
             // window, independent of accepted/rejected stage counts.
-            report.solute_balance_residual_mol.fill(0.0);
-            let mut correction = [0.0; MAX_OSMOTIC_SPECIES];
-            for (old, next) in self.cells.iter().zip(&self.work) {
-                poll(&mut cancelled)?;
-                for i in 0..self.species.len() {
-                    compensated_add(
-                        &mut report.solute_balance_residual_mol[i],
-                        &mut correction[i],
-                        next.solution.solute_moles()[i] - old.solution.solute_moles()[i],
-                    );
+            // Kinetic networks already accumulated BOTH phase changes above.
+            // Replacing that account with dissolved-only changes would mistake
+            // actual dissolution for creation of a transported component.
+            if !kinetic_phases {
+                report.solute_balance_residual_mol.fill(0.0);
+                let mut correction = [0.0; MAX_OSMOTIC_SPECIES];
+                for (old, next) in self.cells.iter().zip(&self.work) {
+                    poll(&mut cancelled)?;
+                    for i in 0..self.species.len() {
+                        compensated_add(
+                            &mut report.solute_balance_residual_mol[i],
+                            &mut correction[i],
+                            next.solution.solute_moles()[i] - old.solution.solute_moles()[i],
+                        );
+                    }
                 }
             }
             for i in 0..self.species.len() {
@@ -1320,19 +1328,32 @@ fn sweep_all(
         );
     }
     match physical {
-        Some(physical) => diffusion::sweep(
-            cells,
-            links,
-            implicit,
-            multicomponent,
-            salt,
-            electrical,
-            implicit_electrical,
-            dt,
-            physical,
-            evaluations,
-            cancelled,
-        ),
+        Some(physical) => {
+            let kinetic_phases = cells.iter().any(|cell| cell.kinetic_solubility.is_some());
+            if kinetic_phases {
+                advance_phases(cells, 0.5 * dt, phase_evaluations, cancelled)?;
+            }
+            diffusion::sweep(
+                cells,
+                links,
+                implicit,
+                multicomponent,
+                salt,
+                electrical,
+                implicit_electrical,
+                dt,
+                physical,
+                evaluations,
+                cancelled,
+            )?;
+            if kinetic_phases {
+                advance_phases(cells, 0.5 * dt, phase_evaluations, cancelled)?;
+                // Reaction changes the actual source query point after the
+                // molecular stage; stale pair samples cannot qualify it.
+                diffusion::qualify_sources(cells, links, cancelled)?;
+            }
+            Ok(())
+        }
         None => {
             advance_phases(cells, 0.5 * dt, phase_evaluations, cancelled)?;
             sweep(cells, membranes, dt, controls, evaluations, cancelled)?;

@@ -180,6 +180,15 @@ impl OsmoticNetwork {
         controls: ElectroneutralDiffusionControls,
         maximum_workspace_bytes: usize,
     ) -> Result<Self, OsmoticNetworkError> {
+        if self
+            .cells
+            .iter()
+            .any(OsmoticCompartment::has_phase_inventory)
+        {
+            return Err(OsmoticNetworkError::Invalid(
+                "neutral solid inventories do not admit ionic diffusion",
+            ));
+        }
         controls.admit()?;
         if self.time_s != 0.0
             || self.diffusion.is_empty()

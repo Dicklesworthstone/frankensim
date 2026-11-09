@@ -112,6 +112,7 @@ impl OsmoticNetwork {
             &mut links,
             controls.diffusion,
             maximum_workspace_bytes,
+            false,
         )?;
         let mut network = Self::new(species, cells, membranes, maximum_workspace_bytes - bytes)?;
         network.workspace_bytes += bytes;

@@ -323,6 +323,10 @@ impl SolutionMaxwellStefan {
     pub fn species(&self) -> &[SpeciesId] {
         &self.species
     }
+    /// Original solvent identity, independent of canonical species sorting.
+    pub fn solvent(&self) -> &SpeciesId {
+        &self.owner.species()[self.original_to_canonical[0]]
+    }
     pub fn thermodynamics(&self) -> &VirialSolutionModel {
         &self.thermodynamics
     }

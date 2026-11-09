@@ -21,6 +21,7 @@ mod implicit_electroneutral;
 mod implicit_salt;
 mod ionic_coordinates;
 mod multicomponent;
+mod solubility;
 pub(crate) use electroneutral::ElectroneutralDiffusion;
 pub use electroneutral::{
     ElectroneutralDiffusionControls, ElectroneutralDiffusionReport, IonicDiffusionConnection,
@@ -325,6 +326,7 @@ impl OsmoticNetwork {
             &mut links,
             controls,
             maximum_workspace_bytes,
+            false,
         )?;
         let remaining = maximum_workspace_bytes - required;
         let mut network = Self::new(species, cells, Vec::new(), remaining)?;
@@ -342,8 +344,11 @@ pub(super) fn prepare_solution_diffusion(
     links: &mut Vec<SolutionDiffusionLink>,
     controls: SolutionDiffusionControls,
     maximum_workspace_bytes: usize,
+    kinetic_phases: bool,
 ) -> Result<usize, OsmoticNetworkError> {
-    if cells.iter().any(OsmoticCompartment::has_phase_inventory) {
+    if cells.iter().any(|cell| {
+        cell.solubility.is_some() || (cell.kinetic_solubility.is_some() && !kinetic_phases)
+    }) {
         return Err(OsmoticNetworkError::Invalid(
             "solution diffusion does not evolve solid phase inventories or their free energy",
         ));
@@ -643,14 +648,8 @@ pub(super) fn sweep(
         // Old flux samples do not qualify a newly proposed physical state.
         link.qualify_sources(volumes, [&next_left[..n], &next_right[..n]], cancelled)?;
         poll(cancelled)?;
-        cells[link.left]
-            .solution
-            .replace_inventories(volumes[0], &next_left[..n])
-            .map_err(source)?;
-        cells[link.right]
-            .solution
-            .replace_inventories(volumes[1], &next_right[..n])
-            .map_err(source)?;
+        cells[link.left].replace_inventories(volumes[0], &next_left[..n])?;
+        cells[link.right].replace_inventories(volumes[1], &next_right[..n])?;
     }
     qualify_sources(cells, links, cancelled)
 }
@@ -681,6 +680,12 @@ pub(super) fn free_energy_change(
     candidate: &[OsmoticCompartment],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, OsmoticNetworkError> {
+    if original
+        .iter()
+        .any(|cell| cell.kinetic_solubility.is_some())
+    {
+        return solubility::free_energy_change(original, candidate, cancelled);
+    }
     let mut sum = 0.0;
     let mut correction = 0.0;
     for (before, after) in original.iter().zip(candidate) {
