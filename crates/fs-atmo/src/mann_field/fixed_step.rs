@@ -440,6 +440,25 @@ impl FixedStepMannField {
             cancelled,
         )
     }
+    /// Exact density-weighted finite-footprint observations of these accepted
+    /// quadratures, with the same physical time and source identity. See
+    /// [`HomogeneousMannField::sample_anelastic_filtered_moments`].
+    pub fn sample_anelastic_filtered_moments(
+        &self,
+        point_m: [f64; 3],
+        observation: &filter::anelastic::MannAnelasticBoxMoments,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<filter::anelastic::MannFavreMoments, Refusal> {
+        filter::anelastic::sample(
+            self.model(),
+            self.time_s(),
+            core::array::from_fn(|i| self.amplitudes[i].as_slice()),
+            point_m,
+            observation,
+            cancelled,
+        )
+    }
+
     fn sample_with_gains(
         &self,
         point_m: [f64; 3],

@@ -684,3 +684,54 @@ gradients, exact wall/support zeros and edge smoothness, degenerate Fourier
 limits, source advection and both OU checkpoint histories, strength scaling,
 and invalid/unrepresentable queries. These test the prescribed kinematic
 construction and its integration with the existing clocks.
+
+## Exact density-weighted spatial mass and momentum
+
+`mann_field::filter::anelastic::MannAnelasticBoxMoments` observes the existing
+exponential-density Mann perturbation over a fixed box, skew parallelepiped,
+face or line. Both temporal owners expose
+`sample_anelastic_filtered_moments`; the complete translated footprint must
+remain inside the retained density domain, with atmospheric +z interpreted as
+its height. Original modes, quadratures, physical clock and source identity
+remain authoritative.
+
+`MannFavreMoments` returns mean density [kg/m³], mean mass flux [kg/(m² s)],
+Favre velocity and its analytic spatial gradient, complete central Favre stress
+[m²/s²], convective momentum flux [Pa], and represented kinetic-energy density
+[J/m³]. The definitions are `u_tilde = average(rho*u)/average(rho)` and
+`tau = average(rho*(u-u_tilde)*(u-u_tilde))/average(rho)`. They retain momentum
+carried by fluctuations that a mean velocity alone cannot represent.
+Pressure, viscous stress and thermal energy are excluded.
+
+Preparation reuses the existing bounded complex-exponential integral and
+central-covariance kernel. A density-feature Gram projection avoids subtracting
+nearly equal raw second moments on tiny footprints. Stress is positive
+semidefinite in exact arithmetic; small roundoff is not clipped. Constant
+density preserves original mean and stress arithmetic exactly. Zero vertical
+extent also reuses the original quadratic observer with the correct density
+scale and product-rule gradient.
+
+Nonconstant-density preparation retains four f64 coefficients per unordered
+mode pair plus original linear gains, with explicit pair and actual numerical
+capacity limits. It also evaluates n+1 density-feature pairs. Preparation and
+sampling are O(n²); successful queries allocate no storage or draw noise.
+Preparation uses 20 KiB of fixed feature scratch plus the existing kernel's
+bounded temporaries; sampling uses 12 KiB of modal-vector scratch.
+Refused/cancelled observations cannot change either temporal owner.
+
+Six new physical groups cover independently refined spatial integration at
+oblique boxes, gradients and filtered mass continuity, tiny-footprint stresses
+through 1e-12 m, manufactured density-contrast limits, volume partition and
+closed-surface conservation, constant-density/point equivalence, source binding,
+budgets, cancellation and both clocks' replay. All 88 atmospheric unit tests
+and all 47 integration tests passed in the complete native atmospheric build
+with real pinned dependencies and no numerical stubs. Full workspace/runtime
+validation was not run.
+
+This observes the represented kinematic outer-flow field. It adds no wall
+condition, buoyancy evolution, thermodynamic feedback, unresolved-band energy
+or new SGS constitutive model. Favre definitions follow NASA/TM-2001-210716,
+Appendix A:
+https://ntrs.nasa.gov/api/citations/20010067781/downloads/20010067781.pdf.
+The anelastic background constraint is described by the ERF governing equations:
+https://erf.readthedocs.io/en/latest/theory/GoverningEquations.html.

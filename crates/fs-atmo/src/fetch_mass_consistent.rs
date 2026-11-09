@@ -287,6 +287,14 @@ impl ExponentialDensityProfile {
         Ok(density)
     }
 
+    pub(crate) const fn reference_density_kg_m3(&self) -> f64 {
+        self.reference_density_kg_m3
+    }
+
+    pub(crate) const fn inverse_scale_height_per_m(&self) -> f64 {
+        self.inverse_scale_height_per_m
+    }
+
     /// Compose an optional original horizontal mean with density-weighted turbulence.
     /// For q = rho_ref * curl(psi), u' = q/rho has
     /// du'_i/dh = (rho_ref/rho) * dv_i/dh + k*u'_i. Consequently

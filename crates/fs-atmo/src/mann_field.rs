@@ -700,6 +700,26 @@ impl HomogeneousMannField {
         )
     }
 
+    /// Exact finite-footprint mass, Favre velocity and turbulent momentum of
+    /// this realization under an explicit exponential density profile. The
+    /// complete translated footprint must fit inside its density domain.
+    /// No wall correction, thermodynamic feedback, clock advance or draws.
+    pub fn sample_anelastic_filtered_moments(
+        &self,
+        point_m: [f64; 3],
+        observation: &filter::anelastic::MannAnelasticBoxMoments,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<filter::anelastic::MannFavreMoments, Refusal> {
+        filter::anelastic::sample(
+            &self.model,
+            self.tick() as f64 / TICK_HZ,
+            core::array::from_fn(|i| self.paths[i].amplitudes()),
+            point_m,
+            observation,
+            cancelled,
+        )
+    }
+
     fn sample_with_gains(
         &self,
         point_m: [f64; 3],

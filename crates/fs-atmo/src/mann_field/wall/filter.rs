@@ -73,7 +73,7 @@ fn sinc_minus_one(x: f64) -> f64 {
 // Return (real, imaginary, real minus one) of exp(-|Re z|) sinh(z)/z.
 // Retain both the gain and increment: deep-box gains can be tiny, while
 // tiny-footprint increments must not be lost by subtracting two rounded ones.
-fn scaled_edge_gain(real: f64, imaginary: f64) -> [f64; 3] {
+pub(in crate::mann_field) fn scaled_edge_gain(real: f64, imaginary: f64) -> [f64; 3] {
     let alpha = real.abs();
     if alpha == 0.0 {
         let delta = sinc_minus_one(imaginary);

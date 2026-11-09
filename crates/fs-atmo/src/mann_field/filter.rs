@@ -15,6 +15,9 @@ use super::{
 /// Exact second moments and subfilter stresses of the finite Fourier field.
 pub mod moments;
 
+/// Exact density-weighted mass, momentum and stress of the anelastic field.
+pub mod anelastic;
+
 /// Prepared scalar gains, bound to the complete immutable source model.
 /// Preparation is O(modes), sampling allocates nothing and draws no randomness.
 /// Numerical gain storage is at most 8*MAX_MODES bytes (plus fixed metadata).

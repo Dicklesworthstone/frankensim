@@ -112,7 +112,10 @@ fn edge_covariance(a: Complex, b: Complex) -> Result<Covariance, Refusal> {
 const PRODUCT: [[(usize, usize, f64); 2]; 2] =
     [[(0, 0, 1.0), (1, 1, -1.0)], [(0, 1, 1.0), (1, 0, 1.0)]];
 
-fn pair_covariance(a: [Complex; 3], b: [Complex; 3]) -> Result<Covariance, Refusal> {
+pub(in crate::mann_field) fn pair_covariance(
+    a: [Complex; 3],
+    b: [Complex; 3],
+) -> Result<Covariance, Refusal> {
     let mut mean_a = [1.0, 0.0];
     let mut mean_b = [1.0, 0.0];
     let mut covariance = [[0.0; 2]; 2];
