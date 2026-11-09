@@ -276,7 +276,7 @@ fn count_evaluations(rates: &solve::Rates, evaluations: &mut usize) -> Result<()
     Ok(())
 }
 
-fn admit_time(duration: f64, time: MulticomponentMiscibilityTimeControl) -> Result<()> {
+pub(super) fn admit_time(duration: f64, time: MulticomponentMiscibilityTimeControl) -> Result<()> {
     if !positive(duration)
         || !positive(time.initial_step_s)
         || !positive(time.minimum_step_s)
@@ -296,7 +296,7 @@ fn admit_time(duration: f64, time: MulticomponentMiscibilityTimeControl) -> Resu
     Ok(())
 }
 
-fn retryable(error: &MulticomponentMiscibilityError) -> bool {
+pub(super) fn retryable(error: &MulticomponentMiscibilityError) -> bool {
     matches!(
         error,
         MulticomponentMiscibilityError::Positivity { .. }
@@ -304,7 +304,7 @@ fn retryable(error: &MulticomponentMiscibilityError) -> bool {
     )
 }
 
-fn factor(error: f64) -> f64 {
+pub(super) fn factor(error: f64) -> f64 {
     if error == 0.0 {
         2.0
     } else {
@@ -312,7 +312,7 @@ fn factor(error: f64) -> f64 {
     }
 }
 
-fn error_ratio(
+pub(super) fn error_ratio(
     a: &MulticomponentMiscibilityField,
     b: &MulticomponentMiscibilityField,
     time: MulticomponentMiscibilityTimeControl,

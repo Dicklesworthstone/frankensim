@@ -10008,3 +10008,51 @@ unrelated chemistry/molecular wrappers were excluded. Only the new planar
 molecular-admission assertion was omitted from this inviscid build. The source
 gas adapters separately passed 18 actual-source boundary tests. Full crate,
 workspace, molecular/chemistry integration and DSR verification remain pending.
+
+### Prescribed stirring of multicomponent liquids
+
+`miscibility::multicomponent::advection` transports every original component
+through a closed prescribed volume flow. Forward and reverse streams remain
+independent, so zero net face volume does not suppress physical mixing.
+Synchronous donor updates carry each amount and its signed low word; no
+dependent species is reconstructed. Prepared volume continuity, outgoing-volume
+CFL, bounded substeps, common owner identity and the original whole-interval
+species/capacity/free-energy checks govern publication.
+
+The original convex homogeneous law makes donor mixing dissipative within its
+actual numerical allowance. This does not identify chemical free-energy loss
+with heat or mechanical stirring work. Unequal molecular masses remain in the
+molar/volume frame. No interface work, momentum feedback, local thermal evolution
+or variable diffusivity source is implied. Donor transport is first order and
+requires spatial refinement.
+
+`multicomponent::transport` applies advection then the complete original
+Maxwell–Stefan operator over ONE physical interval. The second stage consumes
+the full first-stage composition. Separate stage receipts, combined species
+transfers, whole-window balances and a stage-energy accounting residual remain
+available. The stricter stage allowance applies again to the complete endpoint.
+
+`multicomponent::transport::adaptive` controls the complete composed operator,
+including splitting error. Every coarse/fine trial has exactly one donor step;
+its CFL cap prevents internal subcycles from aliasing the error estimate.
+Independent component amounts and low words enter the same temporal norm as
+molecular-only evolution. Only accepted fine paths contribute to advection,
+diffusion and total physical transfer receipts. Requested endpoints and short
+final remainders are retained. The suggested next step remains CFL-bounded even
+when a short final interval is below an otherwise incompatible minimum step.
+
+Prepared arrays and substep scratch are reused, and donor mole fractions are
+resolved through the original model once at the final endpoint. The workspace
+admission additionally charges 512 fixed bytes per face for prepared flow and
+simultaneously live nested report headers, independently of species count.
+
+Validation status: ten new numerical stirring regression groups were authored
+and source-reviewed, covering independent circulation/counterflow solutions,
+unequal volumes/masses, same-interval coupling, complete receipts, CFL aliasing,
+time/work/cancellation refusal, replay and final remainders. They have NOT
+completed execution. Initial compile import errors were fixed, then the focused
+test build was SIGKILLed; a reduced per-package code-generation-concurrency
+attempt was followed by loss of the execution environment. Reviewed source was
+recovered through GitHub without a new successful compile or test run. The last
+completed numerical result remains 107 passing tests BEFORE this extension.
+

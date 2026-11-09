@@ -33,6 +33,11 @@ mod solve;
 /// Composition accuracy over complete physical intervals with bounded work.
 pub mod adaptive;
 
+/// Conservative prescribed volume flow for every original component.
+pub mod advection;
+/// Same-interval stirring and full molecular mixing, with coupled adaptation.
+pub mod transport;
+
 /// Original liquid material properties retained through accepted endpoints.
 #[cfg(any(feature = "continuum", feature = "experimental-miscibility-material"))]
 pub mod material;
@@ -80,6 +85,17 @@ pub enum MulticomponentMiscibilityError {
     FreeEnergy {
         change_j: f64,
         tolerance_j: f64,
+    },
+    /// Prescribed flow must preserve the original closed cell volumes.
+    VolumeDivergence {
+        cell: usize,
+        inflow_m3_s: f64,
+        outflow_m3_s: f64,
+        relative_residual: f64,
+    },
+    AdvectionWorkLimit {
+        required_substeps: usize,
+        maximum_substeps: usize,
     },
     Cancelled,
 }
@@ -262,7 +278,7 @@ impl MulticomponentMiscibilityNetwork {
             .and_then(|v| matrix_slots.checked_mul(8).and_then(|w| v.checked_add(w)))
             .and_then(|v| (n * n).checked_mul(128).and_then(|w| v.checked_add(w)))
             .and_then(|v| cells.len().checked_mul(64).and_then(|w| v.checked_add(w)))
-            .and_then(|v| faces.len().checked_mul(64).and_then(|w| v.checked_add(w)))
+            .and_then(|v| faces.len().checked_mul(512).and_then(|w| v.checked_add(w)))
             .and_then(|v| v.checked_add(32 * 1024 + core::mem::size_of::<Owner>()))
             .ok_or(MulticomponentMiscibilityError::Arithmetic(
                 "multicomponent workspace size",
