@@ -786,3 +786,46 @@ Existing CFD motivation: OpenFOAM's DFSEM inlet source explicitly corrects
 flow rate,
 https://api.openfoam.com/2506/turbulentDFSEMInletFvPatchVectorField_8C_source.html .
 This projection is distinct from its rescaling implementation.
+
+
+## Finite-volume turbulent inlet plane
+
+`mann_field::inflow::finite_volume::{MannInflowPlane, MannInflowDensity}`
+prepares a complete conforming tensor subdivision of the original constrained
+patch. Caller-authored, strictly increasing dimensionless edge arrays both
+span `[-1,1]`; nonuniform and skew faces are supported. Dimensions, physical
+face centers/half edges/areas and explicit first-coordinate-fast indexing let
+a solver map each sample to its boundary cells.
+
+Each face uses the existing analytic Mann box filter. Outputs contain mean
+physical density [kg/m³], Favre turbulent velocity [m/s], vector and signed
+normal mean turbulent mass flux [kg/(m² s)]. Constant density preserves the
+original filtered velocity arithmetic. Exponential density uses the existing
+finite-domain anelastic field and bounded analytic density integral:
+`q'=rho_ref*<v>` and `u'_F=q'/<rho>`. The entire patch must lie in the
+profile's declared height interval. Summed area-weighted turbulent flux
+recovers the original whole-patch zero constraint to representable roundoff;
+no face residual or variance correction is applied.
+
+Preparation and refresh cost O(faces*modes). The explicit byte bound includes
+face metadata, all modal gains and both accepted/trial sample arrays; actual
+capacities are checked. Refresh allocates nothing, polls cancellation between
+faces and before publication, reads either original clock's accepted frame,
+and atomically replaces every sample, integral and physical time. Failure
+retains prior accepted data.
+
+The caller adds mean velocity and a thermodynamic state. Choosing the first
+edge along the lowest tangential Cartesian axis matches native NSF reservoir
+cell order. A uniform mean produces prescribed target mass flow
+`sum(area*mean_density)*dot(mean_velocity,normal)`. This target is distinct
+from a compressible solver's actual streamed mass. Unresolved momentum/energy
+flux, buoyancy and wall effects retain the original field's limits; they are
+not reconstructed by a face state.
+
+Six physical regression groups cover independent skew-face quadrature,
+density contrasts, constant-density identity, refinement conservation,
+both clocks/replay, cancellation and late numerical rollback, capacities/
+admission, and Cartesian reservoir mapping. The complete native atmospheric
+suite passes 150 tests (100 unit and 50 integration), with original current
+crate sources and real pinned numerical dependencies. Full Cargo/workspace
+validation remains blocked by missing constellation siblings.
