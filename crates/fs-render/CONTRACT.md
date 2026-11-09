@@ -8897,12 +8897,27 @@ identities. Optical plus mechanical requirement counts share the existing
 distinct-law budget. This mode reaches the same native emission, radiative
 exchange and material-slab illumination below.
 
+`MaterialSlabLaw::try_schott_with_absorption_source` instead retains an
+independent `SpectralDielectricAbsorptionStatePoint` from the same reference
+condition. Only its original wavelength, intensity-absorption and auxiliary
+claims are refreshed at each accepted temperature; reference phase claims
+remain at T0. `MaterialThermoOpticBinding::at_material_state_with_absorption`
+composes that current spectrum with the original thermal phase law into one
+native material binding. Complete card/query/quantity agreement is required.
+The nine original loss knots retain their interpolation and finite band,
+including for an all-zero spectrum; phase and absorption support intersect.
+Native Beer attenuation, slab illumination, emission and radiative exchange
+therefore use the same sourced alpha(T) and n(T), without a second loss fit or
+thermal debit. All three source bundles count toward the distinct-law property
+budget, and both original loss policy and current source identity distinguish
+cache entries. Wavelength queries reuse inline prepared absorption storage.
+
 `StatefulMaterialSlabIlluminationSource` enters `SurfaceOpticalHeating` through
 `CoatingSurfaceSource::MaterialIncoherentSlab`. One isothermal native cell
 supplies the accepted temperature and receives the complete positive slab
-absorption. The original source law updates phase and absorption together, or
-the explicitly selected SCHOTT mode updates phase with frozen reference
-absorption. Both real-index interfaces, refracted Beer path lengths and the
+absorption. The original source law updates phase and absorption together; SCHOTT mode
+retains reference phase claims and uses either explicitly frozen loss or
+independently refreshed current absorption. Both real-index interfaces, refracted Beer path lengths and the
 complete incoherent internal-reflection series use that same glass snapshot.
 Independent s/p powers are summed before polarization mixing. Exterior media,
 positive normal thickness and interception geometry stay fixed; reflected and

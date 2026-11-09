@@ -30,6 +30,7 @@ use fs_thermal::enthalpy::{
 };
 use std::collections::BTreeSet;
 
+mod absorption;
 mod illumination;
 mod schott;
 

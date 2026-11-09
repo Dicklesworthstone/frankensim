@@ -43,7 +43,7 @@ fn reference_fixture(
     (card, original, mechanical)
 }
 
-fn thermal_law(maximum_k: f64) -> SchottThermoOpticLaw {
+pub(super) fn thermal_law(maximum_k: f64) -> SchottThermoOpticLaw {
     // Manufactured coefficients make index feedback observable; these are
     // equation-verification data, not a claim about an actual infrared glass.
     SchottThermoOpticLaw::try_new(

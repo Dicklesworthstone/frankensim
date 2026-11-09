@@ -5,14 +5,18 @@
 //! of the accepted material and recomputes the native glass from that original
 //! reference. The resulting ordinary material binding feeds existing closed
 //! tracer primitives and slab emission with the exact accepted-state identity.
-//! Reference absorption and surface finish are explicitly held fixed. This
-//! supplies no absorption-temperature law, expansion, phase transition, or
+//! Reference absorption is held fixed unless an independently resolved current
+//! absorption source is explicitly composed at an endpoint. Surface finish
+//! stays fixed. This supplies no fitted absorption law, expansion, phase transition, or
 //! permission to treat an open regional surface as a closed dielectric volume.
 
 use super::{SchottThermoOpticLaw, ThermoOpticFieldError, schott_glass_at_temperature};
+use crate::dielectric::{BeerLambertAbsorption, DielectricError, DielectricGlass};
 use crate::material_state::{MaterialOpticalBinding, OpticalAppearance};
 use fs_blake3::DomainHasher;
-use fs_material::state_point::ResolvedMaterialStatePoint;
+use fs_material::state_point::{
+    ResolvedMaterialStatePoint, SpectralDielectricAbsorptionStatePoint,
+};
 use fs_qty::QuantitySpec;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use std::sync::Arc;
@@ -91,6 +95,48 @@ impl MaterialThermoOpticBinding {
             reference: Arc::clone(&self.reference),
             binding,
         })
+    }
+
+    /// Compose the reference thermal phase law with an independently sourced
+    /// intensity-absorption spectrum at the exact accepted material condition.
+    ///
+    /// The absorption owner retains its original wavelength/alpha claims and
+    /// interpolation, without requiring phase-index claims at this temperature.
+    /// Both spectra keep their own support, including an all-zero absorption
+    /// spectrum. Only their intersection is available to native transport.
+    ///
+    /// This returns one ordinary material observation; the caller retains the
+    /// absorption source and refreshes its original pins for the next endpoint.
+    /// It does not change this object's explicit reference-absorption policy or
+    /// accumulate any thermal correction. No wavelength query resolves material
+    /// claims or allocates: the nine original loss knots enter native storage.
+    pub fn at_material_state_with_absorption(
+        &self,
+        accepted: &ResolvedMaterialStatePoint,
+        absorption: &SpectralDielectricAbsorptionStatePoint,
+    ) -> Result<MaterialOpticalBinding, MaterialThermoOpticBindingError> {
+        MaterialOpticalBinding::validate_bulk_state(accepted, absorption.resolved())
+            .map_err(|_| MaterialThermoOpticBindingError::AbsorptionStateMismatch)?;
+        let mut binding = observe(&self.reference, accepted)?;
+        let OpticalAppearance::Dielectric { glass, surface } = binding.appearance else {
+            return Err(MaterialThermoOpticBindingError::ReferenceAppearance);
+        };
+        let knots = absorption
+            .absorption_samples()
+            .map(|sample| (sample.wavelength_m * 1.0e9, sample.absorption_per_m));
+        let loss = BeerLambertAbsorption::try_from_spectral_extinction_in_band(&knots)
+            .map_err(MaterialThermoOpticBindingError::Absorption)?;
+        let glass = DielectricGlass::with_ior(*glass.ior(), loss, glass.provenance());
+        glass
+            .wavelength_bounds_nm()
+            .map_err(MaterialThermoOpticBindingError::Absorption)?;
+        let mut source =
+            DomainHasher::new("org.frankensim.render.material-thermo-optic-absorption.v1");
+        source.update(binding.optical_state_identity.as_bytes());
+        source.update(absorption.identity().as_bytes());
+        binding.optical_state_identity = source.finalize();
+        binding.appearance = OpticalAppearance::Dielectric { glass, surface };
+        Ok(binding)
     }
 
     /// Native observation carrying the actual accepted material-state identity.
@@ -178,6 +224,10 @@ pub enum MaterialThermoOpticBindingError {
     TemperatureAxis,
     ReferenceTemperature,
     ReferenceAppearance,
+    /// Current absorption must share the accepted card, complete query and units.
+    AbsorptionStateMismatch,
+    /// Original loss samples or their intersection with phase support refused.
+    Absorption(DielectricError),
     Optical(ThermoOpticFieldError),
 }
 
@@ -191,6 +241,7 @@ impl core::error::Error for MaterialThermoOpticBindingError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Optical(error) => Some(error),
+            Self::Absorption(error) => Some(error),
             _ => None,
         }
     }
