@@ -9652,3 +9652,38 @@ complex Airy absorption with endpoint-domain atomicity. Source/API, independent
 scalar formula and pinned formatter checks were completed; these native
 integration tests remain unexecuted in this environment because the dependency
 build was killed before the physics crates were reached.
+
+## Evaporation into distinct native gas regions
+
+`liquid_gas::evaporation::multiple::regions` binds original native phase or
+phase/sensible-heat faces to explicit finite gas parcel IDs. Each region uses
+its actual pressure, temperature, vapor inventory and original gas calorics;
+its liquid cells share the original chamber donor account. All regions prepare
+against the same unchanged liquid. One combined native mass/enthalpy transaction
+refreshes the original material, followed by exactly one native flow step.
+The existing single-atmosphere and regional paths share source preparation and
+native caloric accounting; momentum re-admission and flow callbacks remain with
+their existing single-atmosphere owners.
+
+All faces of one liquid cell and each exposed native gas coordinate require one
+region. The native pure liquid retains one volatile identity and caloric datum
+across all regions. Distinct faces of a cell keep their nonlinear parallel-film
+rates and one inventory. Canonical region/cell ordering is independent of input
+face enumeration. The total original face count bounds work. Per-region and
+whole-interval absolute mass/energy gates prevent opposing source defects from
+cancelling. Unused gas nodes remain unchanged; source refusal, native refusal
+or cancellation publishes neither the liquid nor any regional gas.
+
+The heat variant runs each region's original reciprocal sensible-heat then
+phase stage before the one native batch. Latent/carried vapor energy and
+sensible heat are each counted once. This is first-order splitting with
+prescribed regional membership and fixed external gas volumes. It adds no
+regional pressure traction, inter-region gas transport, moving gas momentum,
+volume work, resolved gas CFD or exhausted-cell/topology remapping.
+
+Four focused native regression groups cover different humidity at identical
+liquid temperature, signed per-region species/energy accounts, reciprocal heat,
+permutation invariance, one clock, inactive nodes, invalid regional mappings,
+source refusal and retry. They are added but unexecuted under the existing
+pinned dependency/resource build block; formatter checks do not establish a
+native compile or runtime result.

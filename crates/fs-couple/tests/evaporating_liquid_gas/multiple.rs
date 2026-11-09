@@ -13,6 +13,9 @@ mod heat;
 #[path = "multiple/faces.rs"]
 mod faces;
 
+#[path = "multiple/regions.rs"]
+mod regions;
+
 #[path = "multiple/momentum.rs"]
 mod momentum;
 
