@@ -45,7 +45,9 @@ impl ThermalLaw for Liquid {
         a: f64,
         b: f64,
     ) -> Result<Option<f64>, DepositionError> {
-        Ok(Some(4000.0 * ((300.0 + b / 4000.0) / (300.0 + a / 4000.0)).ln()))
+        Ok(Some(
+            4000.0 * ((300.0 + b / 4000.0) / (300.0 + a / 4000.0)).ln(),
+        ))
     }
 }
 fn film(vapor: f64, transfer: f64) -> GasFilm {
@@ -95,16 +97,18 @@ fn g1_manufactured_interface_pressure_closes_both_nonlinear_fluxes() {
             let law = KineticEvaporation::try_new(&source, model).unwrap();
             let expected = k(factor, 300.0) * (ps - pi);
             let logarithm = ((100_000.0_f64 - pv) / (100_000.0 - pi)).ln();
-            let transfer = expected * MOLAR_GAS_CONSTANT * 300.0
-                / (0.018 * 100_000.0 * logarithm);
+            let transfer = expected * MOLAR_GAS_CONSTANT * 300.0 / (0.018 * 100_000.0 * logarithm);
             let actual = surface_flux(&law, 300.0, film(pv, transfer)).unwrap();
             near(actual.mass_flux_kg_m2_s, expected, 3e-14);
             near(actual.latent_heat_flux_w_m2, expected * 2.4e6, 3e-14);
-            near(actual.outward_normal_velocity_m_s, -expected / 1000.0, 3e-14);
+            near(
+                actual.outward_normal_velocity_m_s,
+                -expected / 1000.0,
+                3e-14,
+            );
             let recovered_pi = ps - actual.mass_flux_kg_m2_s / k(factor, 300.0);
             near(recovered_pi, pi, 1e-13);
-            let independent_film = transfer * 0.018 * 100_000.0
-                / (MOLAR_GAS_CONSTANT * 300.0)
+            let independent_film = transfer * 0.018 * 100_000.0 / (MOLAR_GAS_CONSTANT * 300.0)
                 * ((100_000.0 - pv) / (100_000.0 - recovered_pi)).ln();
             near(independent_film, actual.mass_flux_kg_m2_s, 1e-13);
         }
@@ -123,9 +127,17 @@ fn g1_limits_preserve_film_and_kinetic_resistance() {
         let diffusion = film(pv, 1e-10);
         let equilibrium = surface_flux(&source, 300.0, diffusion).unwrap();
         let limited = surface_flux(&fast, 300.0, diffusion).unwrap();
-        near(limited.mass_flux_kg_m2_s, equilibrium.mass_flux_kg_m2_s, 1e-11);
+        near(
+            limited.mass_flux_kg_m2_s,
+            equilibrium.mass_flux_kg_m2_s,
+            1e-11,
+        );
         let molecular = surface_flux(&slow, 300.0, film(pv, 1.0)).unwrap();
-        near(molecular.mass_flux_kg_m2_s, k(1e-12, 300.0) * (4000.0 - pv), 3e-10);
+        near(
+            molecular.mass_flux_kg_m2_s,
+            k(1e-12, 300.0) * (4000.0 - pv),
+            3e-10,
+        );
         assert!(
             molecular.mass_flux_kg_m2_s.abs()
                 < surface_flux(&source, 300.0, film(pv, 1.0))
@@ -156,8 +168,8 @@ fn g1_temperature_tangent_includes_the_kinetic_prefactor_derivative() {
                     let dt = 0.002;
                     let before = surface_flux(&law, 300.0 - dt, bath).unwrap();
                     let after = surface_flux(&law, 300.0 + dt, bath).unwrap();
-                    let reference = (after.mass_flux_kg_m2_s - before.mass_flux_kg_m2_s)
-                        / (2.0 * dt);
+                    let reference =
+                        (after.mass_flux_kg_m2_s - before.mass_flux_kg_m2_s) / (2.0 * dt);
                     let exact = surface_flux(&law, 300.0, bath).unwrap();
                     near(exact.mass_flux_derivative_kg_m2_s_k, reference, 2e-5);
                     if slope == 0.0 {
@@ -227,10 +239,7 @@ fn g0_equilibrium_and_seals_have_distinct_tangents() {
             sealed()
         );
     }
-    assert_eq!(
-        surface_flux(&law, 300.0, film(0.0, 0.0)).unwrap(),
-        sealed()
-    );
+    assert_eq!(surface_flux(&law, 300.0, film(0.0, 0.0)).unwrap(), sealed());
 }
 
 #[test]

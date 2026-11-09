@@ -11,6 +11,9 @@ mod idle;
 #[path = "plateau_tests.rs"]
 mod plateau;
 
+#[path = "films_tests.rs"]
+mod films;
+
 use super::*;
 use crate::evaporation::gas::tests::{
     Phase, binding, catalog, controls as phase_controls, gas, liquid, temperature,

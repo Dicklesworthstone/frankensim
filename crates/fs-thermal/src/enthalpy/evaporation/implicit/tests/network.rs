@@ -595,7 +595,10 @@ fn finite_interface_kinetics_reaches_the_original_shared_heat_network() {
         2e-12,
     );
     assert_eq!(next.cells()[&CellId(2)].mass_kg, 0.1);
-    assert_eq!(report.physical.surfaces[&CellId(2)].transferred_mass_kg, 0.0);
+    assert_eq!(
+        report.physical.surfaces[&CellId(2)].transferred_mass_kg,
+        0.0
+    );
     assert!(report.physical.energy_residual_j.abs() < 1e-6);
     assert!(report.physical.mass_balance_residual_kg.abs() < 1e-14);
     assert_eq!(old.time_s(), 0.0);
@@ -615,20 +618,11 @@ fn inventory_retry_uses_the_selected_initial_and_endpoint_kinetic_rates() {
     .unwrap();
     let rate = kinetic_flux_reference(4000.0, 300.0, alpha, film(0.0)) * 0.01;
     let expected_limit = 0.1 / rate;
-    let old = simulation(
-        &CALORIC,
-        vec![cell(1, 0.1, 300.0, 0.0, 0.0)],
-        None,
-        vec![],
-    );
+    let old = simulation(&CALORIC, vec![cell(1, 0.1, 300.0, 0.0, 0.0)], None, vec![]);
     let bindings = [binding(1, &law, film(0.0))];
-    let step = EvaporatingNetworkBackwardEulerStep::new(
-        &old,
-        &bindings,
-        2.0 * expected_limit,
-        || Ok(()),
-    )
-    .unwrap();
+    let step =
+        EvaporatingNetworkBackwardEulerStep::new(&old, &bindings, 2.0 * expected_limit, || Ok(()))
+            .unwrap();
     let result = step.evaluate(&[0.0], empty_network, || Ok(()));
     let Err(ThermalEvaporationError::Surface(EvaporationError::InventoryLimit {
         maximum_duration_s,

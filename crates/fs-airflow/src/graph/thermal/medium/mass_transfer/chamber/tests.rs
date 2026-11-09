@@ -1,4 +1,7 @@
 //! Manufactured original-source gas fixtures; no empirical material claim.
+#[path = "../evaporation/tests.rs"]
+mod evaporation;
+
 use super::*;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{

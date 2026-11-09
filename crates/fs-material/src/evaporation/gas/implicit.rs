@@ -44,7 +44,7 @@ use super::{
 
 mod endpoint;
 mod solve;
-pub use solve::solve_deposition_with_gas;
+pub use solve::{solve_deposition_with_gas, solve_deposition_with_gas_and_films};
 
 /// Physical time accuracy on a shared finite-gas/thermal event-free window.
 pub mod adaptive;

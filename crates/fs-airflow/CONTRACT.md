@@ -108,6 +108,46 @@ attached laminar, dilute weak-transfer and frozen-strip approximations remain;
 no turbulence, Stefan/Soret correction, nucleation, moving velocity field or
 additional gas-side heat law is inferred.
 
+### Live original gas films in liquid evaporation
+
+`mass_transfer::evaporation::SourceLaminarPlateEvaporationFilms` binds those
+same molecular-diffusivity, mixture-transport and plate/strip owners to the
+original simultaneous liquid/thermal/finite-gas endpoint and adaptive event
+timeline. Each selected native cell retains its liquid law, volatile identity,
+caloric binding, admitted enthalpy interval and sensible heat coefficient.
+The prepared binary source is immutable; every actual nonlinear and adaptive
+trial refreshes its selected diffusivity at current total pressure and the
+explicit bulk or mean liquid/gas film temperature. The actual current mixture
+supplies viscosity and density. An original source-domain exit refuses even
+when another source claim could cover the trial.
+
+Only mass-transfer coefficient and representative film temperature are
+replaced. The coupled owner retains its exact total and volatile partial
+pressures and validates the complete active surface roster after each callback.
+Its Stefan/interface law, mass balance, latent energy, upstream vapor enthalpy,
+reciprocal sensible heat and original gas caloric reconstruction remain the
+only physical owners. The source adapter adds no heat or vapor seed. Source
+failures preserve their typed cause and publish no thermal or gas endpoint.
+The adaptive timeline re-evaluates the same sources in coarse/fine/rejected
+trials, accepts only fine physical transfers and clips at native events.
+
+Bindings may be sparse; unbound interfaces retain their authored films. Bound
+cells must be active at preparation and remain present. Unbound births retain
+the original timeline semantics. The source context admits only canonical T/p
+axes; foreign active gas species, zero carrier, nonplanar declarations, strong
+vapor loading, stagnant flow and correlation-domain exits are unsupported.
+Planarity, attached thin flow, continuum validity and weak normal transfer
+remain caller declarations. Both bulk vapor fraction and saturation pressure
+fraction must satisfy the existing authored ceiling in (0,0.05]; this policy
+does not validate a high-blowing boundary layer. There is no new droplet,
+turbulent, plume, gas-velocity or resolved liquid-interface-temperature model.
+
+Focused G0/G1 tests exercise live original pressure/composition/temperature
+queries, retained selected claims, both signed phase directions, a direct
+Stefan-rate reconstruction, independent gas/liquid energy and species balances,
+wind-speed response from a carrier-only atmosphere, adaptive heater events,
+source exhaustion without claim switching, cancellation and atomic refusal.
+
 ## Original coolant inlet, wall, flow and conductance linearization
 
 `CaloricAirPath::linearize` prepares the complete inlet/wall temperature

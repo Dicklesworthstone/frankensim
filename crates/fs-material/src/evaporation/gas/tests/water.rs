@@ -82,6 +82,123 @@ fn original_gas() -> ThermochemicalGasModel {
     .unwrap()
 }
 
+#[test]
+fn finite_interface_kinetics_preserve_original_water_and_nasa_gas_accounts() {
+    use fs_thermal::evaporation::{InterfaceKinetics, KineticEvaporation, MOLAR_GAS_CONSTANT};
+
+    let source = original_gas();
+    let water = original_water();
+    // An explicit illustrative accommodation, not a fitted water coefficient.
+    // A small value makes interface resistance visible next to this gas film.
+    let accommodation = 1e-5;
+    let kinetic = KineticEvaporation::try_new(
+        &water,
+        InterfaceKinetics::HertzKnudsen {
+            accommodation_coefficient: accommodation,
+        },
+    )
+    .unwrap();
+    assert!(std::ptr::eq(kinetic.source(), &water));
+    assert_eq!(
+        kinetic.properties(300.0).unwrap(),
+        water.properties(300.0).unwrap()
+    );
+    let vapor = SpeciesId::new("H2O").unwrap();
+    let nitrogen = SpeciesId::new("N2").unwrap();
+    let binding = GasLiquidBinding {
+        species: vapor.clone(),
+        liquid_enthalpy_offset_j_kg: source
+            .species_specific_enthalpy_j_kg(&vapor, 300.0)
+            .unwrap()
+            - water.vapor_specific_enthalpy_j_kg(300.0).unwrap(),
+    };
+    let liquid = LiquidSurfaceState {
+        mass_kg: 0.02,
+        area_m2: 0.01,
+        specific_enthalpy_j_kg: water.liquid_state(300.0).unwrap().specific_enthalpy_j_kg(),
+    };
+    let mut solve = controls();
+    solve.gas.gas.minimum_temperature_k = 280.0;
+    solve.gas.gas.maximum_temperature_k = 340.0;
+    solve.gas.gas.energy_tolerance_j_kg = 1e-6;
+    solve.gas.energy_tolerance_j = 1e-7;
+    solve.maximum_temperature_increment_k = 1.0;
+    solve.latent_compatibility_tolerance_j_kg = 5.0;
+    for (x, gas_t) in [(0.01, 300.0), (0.05, 310.0)] {
+        let atmosphere = ClosedGasParcel::new(
+            source
+                .with_composition(
+                    Composition::new(CompositionBasis::MoleFraction, vec![x, 1.0 - x]).unwrap(),
+                )
+                .unwrap(),
+            point(gas_t, 100_000.0),
+            0.01,
+        )
+        .unwrap();
+        let run = |law: &dyn EvaporationLaw| {
+            advance_surface_with_gas(
+                law,
+                &binding,
+                liquid,
+                &atmosphere,
+                &source,
+                |h| water.temperature_at_specific_enthalpy_k(h),
+                0.005,
+                0.5,
+                solve,
+                || false,
+            )
+            .unwrap()
+        };
+        let equilibrium = run(&water);
+        let limited = run(&kinetic);
+        let transfer = limited.step().transferred_mass_kg;
+        assert!(transfer * equilibrium.step().transferred_mass_kg > 0.0);
+        assert!(transfer.abs() < 0.5 * equilibrium.step().transferred_mass_kg.abs());
+        let p = water.properties(300.0).unwrap();
+        let kinetic_limit = accommodation
+            * (p.molar_mass_kg_mol / (2.0 * std::f64::consts::PI * MOLAR_GAS_CONSTANT * 300.0))
+                .sqrt()
+            * (p.saturation_pressure_pa - atmosphere.species_partial_pressure_pa(&vapor).unwrap());
+        assert!(transfer.abs() < (0.5 * liquid.area_m2 * kinetic_limit).abs());
+        near(
+            atmosphere.species_mass_kg(&vapor).unwrap() + liquid.mass_kg,
+            limited.gas().species_mass_kg(&vapor).unwrap() + limited.liquid().mass_kg,
+            solve.gas.mass_tolerance_kg,
+        );
+        near(
+            limited.gas().species_mass_kg(&nitrogen).unwrap(),
+            atmosphere.species_mass_kg(&nitrogen).unwrap(),
+            solve.gas.mass_tolerance_kg,
+        );
+        near(
+            limited.step().energy_residual_j,
+            0.0,
+            solve.gas.energy_tolerance_j,
+        );
+        near(
+            limited.step().liquid_enthalpy_change_j + limited.step().gas_internal_energy_change_j,
+            0.0,
+            solve.gas.energy_tolerance_j,
+        );
+        assert_eq!(
+            limited.step().surface_temperature_k[1] < 300.0,
+            transfer > 0.0
+        );
+        // Upstream gas sensible enthalpy is still carried once on condensation.
+        if transfer < 0.0 {
+            near(
+                limited.step().energy_into_gas_j,
+                transfer
+                    * source
+                        .species_specific_enthalpy_j_kg(&vapor, gas_t)
+                        .unwrap(),
+                solve.gas.energy_tolerance_j,
+            );
+        }
+    }
+}
+
 fn original_water() -> WaterEvaporation {
     let chart = IsobaricWater::new(
         Pressure::new(100_000.0),

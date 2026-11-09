@@ -188,8 +188,7 @@ fn finish(
     }
     // Implicit differentiation of j_k=j_f includes K'(T_s)=-K/(2 T_s).
     let derivative = checked(
-        effective
-            * (p.saturation_pressure_derivative_pa_k - 0.5 * (kinetic_pressure_drop / t)),
+        effective * (p.saturation_pressure_derivative_pa_k - 0.5 * (kinetic_pressure_drop / t)),
     )?;
     Ok(SurfaceFlux {
         mass_flux_kg_m2_s: checked(mass)?,
@@ -252,9 +251,7 @@ pub(super) fn flux(
     if gap == 0.0 {
         return finish(p, t, scale, conductance, carrier_far, 0.0, 0.0);
     }
-    let equilibrium_mass = checked(
-        scale * log_carrier_ratio(carrier_far, carrier_surface, gap),
-    )?;
+    let equilibrium_mass = checked(scale * log_carrier_ratio(carrier_far, carrier_surface, gap))?;
     if equilibrium_mass == 0.0 {
         return Err(EvaporationError::Unrepresentable(
             "nonzero vapor-pressure drive underflows to zero film flux",
@@ -292,10 +289,8 @@ pub(super) fn flux(
             (1.0 - fraction, fraction)
         };
         let carrier = kinetic_fraction * carrier_far + film_fraction * carrier_surface;
-        let film_mass = checked(
-            scale * log_carrier_ratio(carrier_far, carrier, gap * film_fraction),
-        )?
-        .abs();
+        let film_mass =
+            checked(scale * log_carrier_ratio(carrier_far, carrier, gap * film_fraction))?.abs();
         let kinetic_mass = product(conductance, magnitude, kinetic_fraction);
         if kinetic_mass.is_finite() {
             let residual = if kinetic_limited {
@@ -305,7 +300,11 @@ pub(super) fn flux(
             };
             let tolerance = 32.0 * f64::EPSILON * film_mass.max(kinetic_mass);
             if residual.abs() <= tolerance {
-                let mass = if kinetic_limited { kinetic_mass } else { film_mass };
+                let mass = if kinetic_limited {
+                    kinetic_mass
+                } else {
+                    film_mass
+                };
                 if mass == 0.0 {
                     return Err(EvaporationError::Unrepresentable(
                         "nonzero interfacial transfer underflows",
@@ -328,8 +327,8 @@ pub(super) fn flux(
             }
             let tangent = scale / carrier;
             let largest = conductance.max(tangent);
-            let change = ((residual / largest) / magnitude)
-                / (1.0 + conductance.min(tangent) / largest);
+            let change =
+                ((residual / largest) / magnitude) / (1.0 + conductance.min(tangent) / largest);
             let newton = fraction - change;
             if newton.is_finite() && newton > lower && newton < upper {
                 fraction = newton;

@@ -66,10 +66,25 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
         catalog: &'catalog ThermochemicalGasModel,
         target_s: f64,
         controls: ImplicitGasControls,
+        resolve_films: &mut impl FnMut(
+            &DepositionSimulation<'m>,
+            &ClosedGasParcel,
+            &mut BTreeMap<CellId, GasFilm>,
+        ) -> Result<(), ImplicitGasError>,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, ImplicitGasError> {
         checkpoint()?;
         controls.validate(target_s - initial.time_s())?;
+        if initial
+            .pending_events()
+            .first()
+            .is_some_and(|event| event.time_s < target_s)
+        {
+            return Err(DepositionError::InvalidInput(
+                "process pending events or split implicit step at the next event",
+            )
+            .into());
+        }
         if surfaces.len() > initial.cells().len() {
             return Err(ImplicitGasError::Invalid(
                 "select one or more active liquid cells",
@@ -126,7 +141,7 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
                     )?,
                 });
         }
-        let initial_films = films(&ordered, gas, &species)?;
+        let initial_films = films(&ordered, initial, gas, &species, resolve_films, checkpoint)?;
         let bindings: Vec<_> = ordered
             .iter()
             .map(|(&id, surface)| EvaporatingCellBinding {
@@ -220,6 +235,11 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
             &ClosedGasParcel,
         )
             -> Result<BoundaryExchangeStepCoefficients<T>, ImplicitGasError>,
+        resolve_films: &mut impl FnMut(
+            &DepositionSimulation<'m>,
+            &ClosedGasParcel,
+            &mut BTreeMap<CellId, GasFilm>,
+        ) -> Result<(), ImplicitGasError>,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Trial<'m, T>, ImplicitGasError> {
         checkpoint()?;
@@ -230,7 +250,7 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
             ));
         }
         if self.species.is_empty() {
-            return self.evaluate_at_gas(coordinates, self.gas, resolve, checkpoint);
+            return self.evaluate_at_gas(coordinates, self.gas, resolve, resolve_films, checkpoint);
         }
         let t = finite(
             self.gas.state().state().temperature
@@ -262,7 +282,7 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
             self.gas
                 .at_model_mass_temperature(self.gas.model().clone(), self.gas.mass_kg(), t)?
         };
-        self.evaluate_at_gas(&coordinates[..n], &gas, resolve, checkpoint)
+        self.evaluate_at_gas(&coordinates[..n], &gas, resolve, resolve_films, checkpoint)
     }
 
     pub(super) fn evaluate_at_gas<T>(
@@ -275,6 +295,11 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
             &ClosedGasParcel,
         )
             -> Result<BoundaryExchangeStepCoefficients<T>, ImplicitGasError>,
+        resolve_films: &mut impl FnMut(
+            &DepositionSimulation<'m>,
+            &ClosedGasParcel,
+            &mut BTreeMap<CellId, GasFilm>,
+        ) -> Result<(), ImplicitGasError>,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Trial<'m, T>, ImplicitGasError> {
         checkpoint()?;
@@ -304,7 +329,16 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
         let mut heat_total = Total::default();
         let thermal = self.step.evaluate_with_vapor_enthalpy(
             thermal_coordinates,
-            |_| films(&self.surfaces, gas, &self.species),
+            |thermal| {
+                films(
+                    &self.surfaces,
+                    thermal,
+                    gas,
+                    &self.species,
+                    resolve_films,
+                    &mut || (poll.borrow_mut())(),
+                )
+            },
             |thermal, liquids, _| {
                 (poll.borrow_mut())()?;
                 let mut heat = resolve(thermal, liquids, gas)?;
@@ -585,20 +619,26 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
     }
 }
 
-fn films(
+fn films<'m>(
     surfaces: &BTreeMap<CellId, ImplicitGasSurface<'_>>,
+    thermal: &DepositionSimulation<'m>,
     gas: &ClosedGasParcel,
     species: &BTreeMap<SpeciesId, Volatile>,
+    resolve: &mut impl FnMut(
+        &DepositionSimulation<'m>,
+        &ClosedGasParcel,
+        &mut BTreeMap<CellId, GasFilm>,
+    ) -> Result<(), ImplicitGasError>,
+    checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<BTreeMap<CellId, GasFilm>, ImplicitGasError> {
-    if species.is_empty() {
-        return Ok(BTreeMap::new());
-    }
+    checkpoint()?;
     let state = gas.state().state();
     let mut partial_pressures = BTreeMap::new();
     for id in species.keys() {
+        checkpoint()?;
         partial_pressures.insert(id.clone(), gas.species_partial_pressure_pa(id)?);
     }
-    Ok(surfaces
+    let mut films: BTreeMap<_, _> = surfaces
         .iter()
         .map(|(&id, surface)| {
             (
@@ -611,7 +651,27 @@ fn films(
                 },
             )
         })
-        .collect())
+        .collect();
+    resolve(thermal, gas, &mut films)?;
+    checkpoint()?;
+    if !films.keys().eq(surfaces.keys()) {
+        return Err(ImplicitGasError::Invalid(
+            "film resolver must preserve the exact active liquid cell roster",
+        ));
+    }
+    for (&id, film) in &films {
+        checkpoint()?;
+        let species = &surfaces[&id].binding.species;
+        if film.total_pressure_pa != state.pressure
+            || film.vapor_partial_pressure_pa != partial_pressures[species]
+        {
+            return Err(ImplicitGasError::Invalid(
+                "film resolver must preserve the original gas total and volatile partial pressures",
+            ));
+        }
+        film.validate().map_err(GasEvaporationError::from)?;
+    }
+    Ok(films)
 }
 
 fn finite(value: f64) -> Result<f64, ImplicitGasError> {

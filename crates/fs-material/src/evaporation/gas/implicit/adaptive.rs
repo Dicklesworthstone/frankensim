@@ -11,7 +11,7 @@ use super::*;
 use fs_thermal::enthalpy::EnergyAudit;
 use fs_thermal::enthalpy::conduction::implicit::adaptive::ConductionTimeOrder;
 use fs_thermal::enthalpy::evaporation::implicit::AdaptiveEvaporationControls;
-use fs_thermal::evaporation::SurfaceStep;
+use fs_thermal::evaporation::{GasFilm, SurfaceStep};
 use fs_thermochem::SpeciesId;
 use std::collections::BTreeSet;
 
@@ -276,6 +276,45 @@ pub fn advance_deposition_with_gas_adaptive<'m, 'catalog, T>(
     ) -> Result<BoundaryExchangeStepCoefficients<T>, ImplicitGasError>,
     checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<AdaptiveImplicitGasCandidate<'m, 'catalog, T>, AdaptiveImplicitGasError> {
+    advance_deposition_with_gas_adaptive_and_films(
+        thermal,
+        surfaces,
+        gas,
+        catalog,
+        target_s,
+        controls,
+        resolve_heat,
+        |_, _, _| Ok(()),
+        checkpoint,
+    )
+}
+
+/// Advance the same event-free adaptive window with source-resolved films.
+///
+/// Every coarse, fine and fresh final endpoint re-evaluates film temperature
+/// and conductance from its own thermal/gas state. The resolver has the same
+/// pressure/roster restrictions as `solve_deposition_with_gas_and_films`.
+/// Discarded comparisons publish neither physical transfers nor source history.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn advance_deposition_with_gas_adaptive_and_films<'m, 'catalog, T>(
+    thermal: &DepositionSimulation<'m>,
+    surfaces: &[ImplicitGasSurface<'_>],
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    target_s: f64,
+    controls: AdaptiveImplicitGasControls,
+    resolve_heat: impl FnMut(
+        &DepositionSimulation<'m>,
+        &BTreeMap<CellId, LiquidSurfaceState>,
+        &ClosedGasParcel,
+    ) -> Result<BoundaryExchangeStepCoefficients<T>, ImplicitGasError>,
+    resolve_films: impl FnMut(
+        &DepositionSimulation<'m>,
+        &ClosedGasParcel,
+        &mut BTreeMap<CellId, GasFilm>,
+    ) -> Result<(), ImplicitGasError>,
+    checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<AdaptiveImplicitGasCandidate<'m, 'catalog, T>, AdaptiveImplicitGasError> {
     advance_window(
         thermal,
         surfaces,
@@ -285,6 +324,7 @@ pub fn advance_deposition_with_gas_adaptive<'m, 'catalog, T>(
         controls,
         false,
         resolve_heat,
+        resolve_films,
         checkpoint,
     )
 }
@@ -303,6 +343,11 @@ pub(super) fn advance_window<'m, 'catalog, T>(
         &BTreeMap<CellId, LiquidSurfaceState>,
         &ClosedGasParcel,
     ) -> Result<BoundaryExchangeStepCoefficients<T>, ImplicitGasError>,
+    mut resolve_films: impl FnMut(
+        &DepositionSimulation<'m>,
+        &ClosedGasParcel,
+        &mut BTreeMap<CellId, GasFilm>,
+    ) -> Result<(), ImplicitGasError>,
     mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<AdaptiveImplicitGasCandidate<'m, 'catalog, T>, AdaptiveImplicitGasError> {
     checkpoint()?;
@@ -473,6 +518,7 @@ pub(super) fn advance_window<'m, 'catalog, T>(
             controls,
             &mut work,
             &mut resolve_heat,
+            &mut resolve_films,
             &mut checkpoint,
         )?
         .into_parts();
@@ -485,6 +531,7 @@ pub(super) fn advance_window<'m, 'catalog, T>(
             controls,
             &mut work,
             &mut resolve_heat,
+            &mut resolve_films,
             &mut checkpoint,
         )?
         .into_parts();
@@ -497,6 +544,7 @@ pub(super) fn advance_window<'m, 'catalog, T>(
             controls,
             &mut work,
             &mut resolve_heat,
+            &mut resolve_films,
             &mut checkpoint,
         )?
         .into_parts();
@@ -664,6 +712,11 @@ fn solve_interval<'m, 'catalog, T>(
         &BTreeMap<CellId, LiquidSurfaceState>,
         &ClosedGasParcel,
     ) -> Result<BoundaryExchangeStepCoefficients<T>, ImplicitGasError>,
+    resolve_films: &mut impl FnMut(
+        &DepositionSimulation<'m>,
+        &ClosedGasParcel,
+        &mut BTreeMap<CellId, GasFilm>,
+    ) -> Result<(), ImplicitGasError>,
     checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<ImplicitGasCandidate<'m, 'catalog, T>, AdaptiveImplicitGasError> {
     checkpoint()?;
@@ -691,8 +744,16 @@ fn solve_interval<'m, 'catalog, T>(
         solve.phase.gas.gas.maximum_iterations =
             solve.phase.gas.gas.maximum_iterations.min(gas_iterations);
     }
-    let next = solve_deposition_with_gas(
-        thermal, surfaces, gas, catalog, target_s, solve, resolve, checkpoint,
+    let next = solve_deposition_with_gas_and_films(
+        thermal,
+        surfaces,
+        gas,
+        catalog,
+        target_s,
+        solve,
+        resolve,
+        resolve_films,
+        checkpoint,
     )?;
     work.iterations = add_count(work.iterations, next.report().newton_iterations)?;
     work.evaluations = add_count(work.evaluations, next.report().residual_evaluations)?;

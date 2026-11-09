@@ -6,6 +6,7 @@ use super::endpoint::Prepared;
 use super::*;
 use fs_solver::NewtonKrylovState;
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
+use fs_thermal::evaporation::GasFilm;
 use std::cell::{Cell, RefCell};
 
 /// Solve one event-free thermal/finite-gas interval on the original owners.
@@ -29,11 +30,58 @@ pub fn solve_deposition_with_gas<'m, 'catalog, T>(
     catalog: &'catalog ThermochemicalGasModel,
     target_s: f64,
     controls: ImplicitGasControls,
+    resolve_heat: impl FnMut(
+        &DepositionSimulation<'m>,
+        &BTreeMap<CellId, LiquidSurfaceState>,
+        &ClosedGasParcel,
+    ) -> Result<BoundaryExchangeStepCoefficients<T>, ImplicitGasError>,
+    checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<ImplicitGasCandidate<'m, 'catalog, T>, ImplicitGasError> {
+    solve_deposition_with_gas_and_films(
+        thermal,
+        surfaces,
+        gas,
+        catalog,
+        target_s,
+        controls,
+        resolve_heat,
+        |_, _, _| Ok(()),
+        checkpoint,
+    )
+}
+
+/// Solve the same joint endpoint with live, source-owned gas-film transport.
+///
+/// `resolve_films` runs on the original state, every uncached physical trial,
+/// and the fresh reconstructed-gas recheck. It may replace each selected film's
+/// representative temperature and binary mass-transfer coefficient. The exact
+/// cell roster and the original gas's total and volatile partial pressures are
+/// immutable: changing them refuses instead of breaking the finite-gas account.
+/// No coefficient is inferred from a sensible heat-transfer coefficient.
+///
+/// The thermal view carries trial h/T and the interval's original masses; the
+/// gas view carries the trial temperature, pressure and species inventory.
+/// Callbacks must preserve accepted external history during speculative work.
+/// The returned heat payload belongs to the fresh final evaluation. Physical
+/// state, caloric sources, conservation gates and work budgets are unchanged.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn solve_deposition_with_gas_and_films<'m, 'catalog, T>(
+    thermal: &DepositionSimulation<'m>,
+    surfaces: &[ImplicitGasSurface<'_>],
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    target_s: f64,
+    controls: ImplicitGasControls,
     mut resolve_heat: impl FnMut(
         &DepositionSimulation<'m>,
         &BTreeMap<CellId, LiquidSurfaceState>,
         &ClosedGasParcel,
     ) -> Result<BoundaryExchangeStepCoefficients<T>, ImplicitGasError>,
+    mut resolve_films: impl FnMut(
+        &DepositionSimulation<'m>,
+        &ClosedGasParcel,
+        &mut BTreeMap<CellId, GasFilm>,
+    ) -> Result<(), ImplicitGasError>,
     mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<ImplicitGasCandidate<'m, 'catalog, T>, ImplicitGasError> {
     checkpoint()?;
@@ -44,10 +92,12 @@ pub fn solve_deposition_with_gas<'m, 'catalog, T>(
         catalog,
         target_s,
         controls,
+        &mut resolve_films,
         &mut checkpoint,
     )?;
     let poll = RefCell::new(&mut checkpoint);
     let source = RefCell::new(&mut resolve_heat);
+    let films = RefCell::new(&mut resolve_films);
     let evaluations = Cell::new(0usize);
 
     // The physical zero-coordinate endpoint supplies the represented initial
@@ -55,9 +105,12 @@ pub fn solve_deposition_with_gas<'m, 'catalog, T>(
     // vapor or an independently advanced heat/gas state.
     spend_evaluation(&evaluations, controls.thermal.maximum_evaluations)?;
     let zero = prepared.project(&vec![0.0; prepared.dimension()]);
-    let predictor = prepared.evaluate(&zero, &mut *source.borrow_mut(), &mut || {
-        (poll.borrow_mut())()
-    })?;
+    let predictor = prepared.evaluate(
+        &zero,
+        &mut *source.borrow_mut(),
+        &mut *films.borrow_mut(),
+        &mut || (poll.borrow_mut())(),
+    )?;
     let guess = prepared.project(&prepared.initial_guess(&predictor));
     let zero_residual = predictor.residual_j();
     drop(predictor);
@@ -84,9 +137,12 @@ pub fn solve_deposition_with_gas<'m, 'catalog, T>(
                 }
             }
             spend_evaluation(&evaluations, controls.thermal.maximum_evaluations)?;
-            let trial = prepared.evaluate(&coordinates, &mut *source.borrow_mut(), &mut || {
-                (poll.borrow_mut())()
-            })?;
+            let trial = prepared.evaluate(
+                &coordinates,
+                &mut *source.borrow_mut(),
+                &mut *films.borrow_mut(),
+                &mut || (poll.borrow_mut())(),
+            )?;
             let residual = trial.residual_j();
             let mut entries = cache.borrow_mut();
             if entries.len() == 2 {
@@ -130,9 +186,12 @@ pub fn solve_deposition_with_gas<'m, 'catalog, T>(
 
     let coordinates = prepared.project(&solver.x);
     spend_evaluation(&evaluations, controls.thermal.maximum_evaluations)?;
-    let trial = prepared.evaluate(&coordinates, &mut *source.borrow_mut(), &mut || {
-        (poll.borrow_mut())()
-    })?;
+    let trial = prepared.evaluate(
+        &coordinates,
+        &mut *source.borrow_mut(),
+        &mut *films.borrow_mut(),
+        &mut || (poll.borrow_mut())(),
+    )?;
     prepared.check_balance(&trial)?;
     let gas = prepared.reconstruct(&trial, &mut || (poll.borrow_mut())())?;
     drop(trial);
@@ -145,6 +204,7 @@ pub fn solve_deposition_with_gas<'m, 'catalog, T>(
         &coordinates[..prepared.thermal_dimension()],
         gas.gas(),
         &mut *source.borrow_mut(),
+        &mut *films.borrow_mut(),
         &mut || (poll.borrow_mut())(),
     )?;
     prepared.accept(

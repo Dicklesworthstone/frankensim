@@ -30,6 +30,9 @@ pub mod chamber;
 /// Original laminar plate/strip physics with explicitly authored transport.
 pub mod laminar_plate;
 
+/// Source-resolved liquid evaporation on the original coupled thermal timeline.
+pub mod evaporation;
+
 use fs_matdb::{MatDbError, QueryPoint};
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransportState, ThermalFluidTransport};

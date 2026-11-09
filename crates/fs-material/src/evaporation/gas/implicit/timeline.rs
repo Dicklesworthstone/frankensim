@@ -15,6 +15,7 @@ use crate::thermochemical_gas::energy::parcel::transfer::species::boundary::admi
 use fs_thermal::enthalpy::{
     DepositionObserver, EnergyAudit, Event, StepConfig, ThermalStorageBasis,
 };
+use fs_thermal::evaporation::GasFilm;
 
 /// Advance the joint heat/phase/gas solution through native deposition events.
 ///
@@ -51,6 +52,47 @@ pub fn advance_deposition_with_gas_timeline<'m, 'catalog, T>(
     ) -> Result<BoundaryExchangeStepCoefficients<T>, ImplicitGasError>,
     checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<AdaptiveImplicitGasCandidate<'m, 'catalog, T>, AdaptiveImplicitGasError> {
+    advance_deposition_with_gas_timeline_and_films(
+        thermal,
+        surfaces,
+        gas,
+        catalog,
+        target_s,
+        controls,
+        resolve_heat,
+        |_, _, _| Ok(()),
+        checkpoint,
+    )
+}
+
+/// Advance native heat, phase and gas with live transport through native events.
+///
+/// The film resolver sees only active selected surfaces. Future births are not
+/// queried, and each event changes exposure before the following interval.
+/// Coarse/fine comparisons and final reconstructed-gas checks all resolve their
+/// own film temperature and conductance, under the same pressure/identity rules
+/// as `solve_deposition_with_gas_and_films`. Callbacks must retain left limits
+/// at authored discontinuities and never commit speculative source history.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn advance_deposition_with_gas_timeline_and_films<'m, 'catalog, T>(
+    thermal: &DepositionSimulation<'m>,
+    surfaces: &[ImplicitGasSurface<'_>],
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    target_s: f64,
+    controls: AdaptiveImplicitGasControls,
+    resolve_heat: impl FnMut(
+        &DepositionSimulation<'m>,
+        &BTreeMap<CellId, LiquidSurfaceState>,
+        &ClosedGasParcel,
+    ) -> Result<BoundaryExchangeStepCoefficients<T>, ImplicitGasError>,
+    resolve_films: impl FnMut(
+        &DepositionSimulation<'m>,
+        &ClosedGasParcel,
+        &mut BTreeMap<CellId, GasFilm>,
+    ) -> Result<(), ImplicitGasError>,
+    checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<AdaptiveImplicitGasCandidate<'m, 'catalog, T>, AdaptiveImplicitGasError> {
     adaptive::advance_window(
         thermal,
         surfaces,
@@ -60,6 +102,7 @@ pub fn advance_deposition_with_gas_timeline<'m, 'catalog, T>(
         controls,
         true,
         resolve_heat,
+        resolve_films,
         checkpoint,
     )
 }

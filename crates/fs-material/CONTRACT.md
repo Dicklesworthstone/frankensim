@@ -14410,6 +14410,17 @@ evaporation rate, saturation pressure, calorics or heat account. No Kelvin or
 Poynting correction is introduced. Literal source values and the original
 adapter's narrower temperature interval are checked through this entry point.
 
+The shared `fs_thermal::evaporation::KineticEvaporation` adapter may borrow this
+same water source and select finite Hertz--Knudsen or small-drift Schrage
+interface kinetics. The explicit accommodation probability changes only the
+interfacial resistance, solved in series with the nonlinear Stefan film. All
+water properties, source limits, caloric references and thermal hooks continue
+to delegate to the original source. Finite-gas regressions exercise both phase
+directions with original IF97/NASA-9 calorics, unchanged nitrogen inventory,
+joint water mass/energy closure, and upstream vapor sensible heat. Their
+authored accommodation is illustrative, not fitted water data. The local
+equal-interface-temperature and continuum-film limitations remain explicit.
+
 ### Finite atmosphere and shared thermal history
 
 `evaporation::gas::advance_surface_with_gas` couples the signed Stefan-film
@@ -14797,6 +14808,40 @@ advance boundary, retaining their left-limit value on the preceding interval's
 endpoint. Native boundary events enforce this ordering directly. This adds
 scheduled integration, not boiling, dry-out, moving
 interfaces or a new phase constitutive law.
+
+### Live molecular transport inside the coupled evaporation endpoint
+
+`implicit::solve_deposition_with_gas_and_films` permits a source-owned resolver
+to update representative film temperature and binary mass-transfer coefficient
+from the actual thermal and finite-gas trial. The original state, every uncached
+physical residual and both fresh final checks use that resolver, including the
+check after the original gas caloric reconstruction. Pressure and vapor partial
+pressure remain the exact original gas values, and the callback must preserve
+the exact active cell roster. Neither a manufactured humidity nor a stale
+atmosphere can substitute for the finite inventory in this ingress.
+
+The matching `adaptive::advance_deposition_with_gas_adaptive_and_films` and
+`timeline::advance_deposition_with_gas_timeline_and_films` resolve transport
+independently on each coarse and fine trial. Future cells are queried only
+after their native birth. Source history remains immutable during speculative
+evaluation; source discontinuities retain the existing event/left-limit rules.
+Only accepted fine states contribute transfer accounts. Original callbacks,
+static-film entry points, finite-gas sources, nonlinear budgets and whole-window
+conservation checks share the same implementation. A no-op resolver preserves
+the original endpoint and work report exactly.
+
+The resolver supplies transport, not an independent heat or phase update.
+Sensible film heat and carried vapor enthalpy retain their existing owners.
+The source-backed laminar plate/strip adapter in `fs-airflow` uses this ingress
+to refresh original binary diffusivity and gas viscosity/density with evolving
+temperature, pressure and composition, under that correlation's admitted
+laminar dilute-vapor regime. The generic callback adds no turbulence, droplet,
+nonideal gas, multicomponent cross-diffusion or strong-blowing model.
+
+G0/G1 regressions compare signed endpoint rates against the returned liquid
+and gas, preserve carrier inventory and the original energy accounts, exercise
+adaptive and birth timelines, and reject altered gas pressures, changed rosters,
+invalid coefficients and a late source refusal without publishing either state.
 
 ### Condensate onset and complete dry-out at a prescribed wall
 

@@ -354,40 +354,7 @@ fn evaluate(
         ));
     }
     let vapor = &surface.binding.species;
-    let pair = &binding.source.species;
-    if pair[0] == pair[1] || !pair.contains(vapor) {
-        return Err(GasFilmError::Invalid(
-            "surface vapor must belong to two distinct binary-film species",
-        ));
-    }
-    let carrier = if &pair[0] == vapor { &pair[1] } else { &pair[0] };
-    let species = gas.model().thermodynamics().components();
-    let fractions = gas.model().thermodynamics().mole_composition().fractions();
-    if fractions.len() != species.len() {
-        return Err(GasFilmError::Invalid("gas composition and species roster disagree"));
-    }
-    let mut has_carrier = false;
-    let mut vapor_fraction = 0.0;
-    for (component, &fraction) in species.iter().zip(fractions) {
-        poll(cancelled)?;
-        if !fraction.is_finite() || fraction < 0.0 || fraction > 1.0 {
-            return Err(GasFilmError::Invalid("invalid current gas mole fraction"));
-        }
-        // An available but zero-inventory source is not an active carrier.
-        // The canonical gas owner may retain it or omit it without changing
-        // this binary-film admission.
-        if fraction == 0.0 { continue; }
-        if !pair.contains(component.species()) {
-            return Err(GasFilmError::Invalid("gas contains a foreign active binary-film species"));
-        }
-        has_carrier |= component.species() == carrier;
-        if component.species() == vapor { vapor_fraction = fraction; }
-    }
-    if !has_carrier {
-        return Err(GasFilmError::Invalid(
-            "binary gas film requires a positive carrier inventory",
-        ));
-    }
+    let vapor_fraction = binary_vapor_fraction(&binding.source, vapor, gas, cancelled)?;
     let bulk = gas.state().state();
     let surface_temperature = (surface.deposit_temperature)(
         surface.state.deposit.specific_enthalpy_j_kg,
@@ -425,6 +392,64 @@ fn evaluate(
             maximum_vapor_mole_fraction: ceiling,
         });
     }
+    evaluate_original_film(binding, vapor, surface_temperature, gas, previous, cancelled)
+        .map(|(_, coefficient, selected)| (coefficient, selected))
+}
+
+// The liquid and solid adapters share chemical admission and original
+// transport evaluation. Their different equilibrium/kinetic laws remain with
+// their respective phase owners.
+pub(super) fn binary_vapor_fraction(
+    source: &BinaryDiffusionMaterial<'_>,
+    vapor: &SpeciesId,
+    gas: &ClosedGasParcel,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<f64, GasFilmError> {
+    poll(cancelled)?;
+    let pair = &source.species;
+    if pair[0] == pair[1] || !pair.contains(vapor) {
+        return Err(GasFilmError::Invalid(
+            "surface vapor must belong to two distinct binary-film species",
+        ));
+    }
+    let carrier = if &pair[0] == vapor { &pair[1] } else { &pair[0] };
+    let species = gas.model().thermodynamics().components();
+    let fractions = gas.model().thermodynamics().mole_composition().fractions();
+    if fractions.len() != species.len() {
+        return Err(GasFilmError::Invalid("gas composition and species roster disagree"));
+    }
+    let mut has_carrier = false;
+    let mut vapor_fraction = 0.0;
+    for (component, &fraction) in species.iter().zip(fractions) {
+        poll(cancelled)?;
+        if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+            return Err(GasFilmError::Invalid("invalid current gas mole fraction"));
+        }
+        // A catalog entry with zero inventory is not an active constituent.
+        if fraction == 0.0 { continue; }
+        if !pair.contains(component.species()) {
+            return Err(GasFilmError::Invalid("gas contains a foreign active binary-film species"));
+        }
+        has_carrier |= component.species() == carrier;
+        if component.species() == vapor { vapor_fraction = fraction; }
+    }
+    if !has_carrier {
+        return Err(GasFilmError::Invalid(
+            "binary gas film requires a positive carrier inventory",
+        ));
+    }
+    Ok(vapor_fraction)
+}
+
+pub(super) fn evaluate_original_film(
+    binding: &LaminarPlateFilmBinding<'_>,
+    vapor: &SpeciesId,
+    surface_temperature: f64,
+    gas: &ClosedGasParcel,
+    previous: Option<&ResolvedMaterialStatePoint>,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<(f64, f64, ResolvedMaterialStatePoint), GasFilmError> {
+    let bulk = gas.state().state();
     let temperature = match binding.property_temperature {
         ChamberFilmTemperature::Bulk => bulk.temperature,
         ChamberFilmTemperature::MeanSurfaceAndBulk =>
@@ -460,7 +485,7 @@ fn evaluate(
     let result = super::evaluate(
         fluid, &binding.source, vapor, conditions, previous, &mut checkpoint,
     )?;
-    Ok((result.mass_transfer_coefficient_m_s(), result.diffusion.material))
+    Ok((temperature, result.mass_transfer_coefficient_m_s(), result.diffusion.material))
 }
 
 #[cfg(test)]
