@@ -37,6 +37,10 @@ pub enum AngularSpectrumFactorStatistics {
 /// the ensemble's compensated accumulation and the final output. Other
 /// borrowed banks/beam owners, earlier outputs and allocator overhead are
 /// outside this logical numerical-storage bound.
+/// Available headroom independently admits original-field temporal projections
+/// for each bank in source order. Their bounded work, fixed scratch and one
+/// retained admission flag per bank stay within these same limits. Tight legacy
+/// budgets and unsupported spans retain that bank's original pair law.
 #[derive(Clone, Copy, Debug)]
 pub struct AngularSpectrumExposureEnsembleLimits {
     pub maximum_factors: usize,
@@ -79,6 +83,9 @@ pub struct AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
     point_frequency_pairs: usize,
     workspace_bytes: usize,
     field_fft_work: u64,
+    positive_field_banks: Vec<bool>,
+    field_projection_terms: usize,
+    field_workspace_bytes: usize,
 }
 
 impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
@@ -204,6 +211,17 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
                 "exposure ensemble exceeds its work or workspace budget",
             ));
         }
+        let (positive_field_banks, field_projection_terms, field_scratch) =
+            temporal_fields::admit_banks(
+                n,
+                factors.len() + usize::from(mean.is_some()),
+                banks(mean, factors, statistics)
+                    .map(|(bank, proper)| (bank.frequency_count(), proper)),
+                limits.maximum_point_frequency_pairs - point_frequency_pairs,
+                limits.maximum_workspace_bytes - workspace_bytes,
+                &mut cancelled,
+            )?;
+        let field_workspace_bytes = workspace_bytes + field_scratch;
         Ok(Self {
             anchor,
             mean,
@@ -214,6 +232,9 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
             point_frequency_pairs,
             workspace_bytes,
             field_fft_work,
+            positive_field_banks,
+            field_projection_terms,
+            field_workspace_bytes,
         })
     }
 
@@ -242,11 +263,23 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
     pub fn point_line_pairs(&self) -> usize {
         self.point_line_pairs
     }
+    /// Original pair/carrier work. Adding `field_projection_terms()` remains
+    /// within the same authored `maximum_point_frequency_pairs` limit.
     pub fn point_frequency_pairs(&self) -> usize {
         self.point_frequency_pairs
     }
+    /// Original common-owner workspace, unchanged for layer/stress/force owners.
     pub fn workspace_bytes(&self) -> usize {
         self.workspace_bytes
+    }
+    /// Actual exterior field-query peak including optional projection scratch
+    /// and all retained per-bank admission flags, including fallback banks.
+    pub fn field_workspace_bytes(&self) -> usize {
+        self.field_workspace_bytes
+    }
+    /// Additional admitted projection work; banks share scratch but not phases.
+    pub fn field_projection_terms(&self) -> usize {
+        self.field_projection_terms
     }
     pub fn field_fft_work(&self) -> u64 {
         self.field_fft_work
@@ -313,7 +346,24 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
             sums.push([Dd::ZERO; 9]);
         }
         let mut normal_power = Dd::ZERO;
-        for (bank, proper) in self.banks() {
+        for (index, (bank, proper)) in self.banks().enumerate() {
+            let mut workspace = self
+                .positive_field_banks
+                .get(index)
+                .copied()
+                .unwrap_or(false)
+                .then(temporal_fields::Workspace::new);
+            let positive = if let Some(workspace) = workspace.as_mut() {
+                temporal_fields::PositiveFields::prepare(
+                    window,
+                    &bank.frequencies,
+                    proper,
+                    workspace,
+                    &mut cancelled,
+                )?
+            } else {
+                None
+            };
             if proper {
                 normal_power = normal_power
                     + accumulate_bank(
@@ -321,6 +371,7 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
                         side,
                         distance_from_face_m,
                         true,
+                        positive.as_ref(),
                         |a, b| window.proper_product_kernel(a, b),
                         proper_product,
                         ProperHarmonicProduct::mean_real_product_parts_dd,
@@ -334,6 +385,7 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
                         side,
                         distance_from_face_m,
                         false,
+                        positive.as_ref(),
                         |a, b| window.product_kernel(a, b),
                         product,
                         HarmonicProduct::mean_real_product_parts_dd,
@@ -394,11 +446,13 @@ pub(super) fn banks<'e, 'b, 's, 'm>(
 
 // Monomorphized for deterministic/proper products: no statistical-mode branch
 // in the spatial/frequency contraction, and no second Maxwell implementation.
+#[allow(clippy::too_many_arguments)]
 fn accumulate_bank<P: Copy>(
     bank: &AngularSpectrumExposure<'_, '_, '_>,
     side: ExposureSide,
     distance: f64,
     proper: bool,
+    positive: Option<&temporal_fields::PositiveFields<'_>>,
     kernel: impl Fn(f64, f64) -> Result<P, fs_fft::harmonic_window::WindowError>,
     product: impl Fn(P, C64, C64) -> Result<Dd, MomentError>,
     product_parts: impl Fn(P, [Dd; 2], [Dd; 2]) -> Result<Dd, fs_fft::harmonic_window::WindowError>,
@@ -411,16 +465,18 @@ fn accumulate_bank<P: Copy>(
     }
     let f = bank.frequency_count();
     let mut kernels = Vec::new();
-    kernels
-        .try_reserve_exact(f * f)
-        .map_err(|_| bad("exposure ensemble kernel allocation failed"))?;
-    for &a in &bank.frequencies {
-        for &b in &bank.frequencies {
-            poll(cancelled)?;
-            kernels.push(
-                kernel(a, b)
-                    .map_err(|_| bad("exposure ensemble temporal kernel is unrepresentable"))?,
-            );
+    if positive.is_none() {
+        kernels
+            .try_reserve_exact(f * f)
+            .map_err(|_| bad("exposure ensemble kernel allocation failed"))?;
+        for &a in &bank.frequencies {
+            for &b in &bank.frequencies {
+                poll(cancelled)?;
+                kernels
+                    .push(kernel(a, b).map_err(|_| {
+                        bad("exposure ensemble temporal kernel is unrepresentable")
+                    })?);
+            }
         }
     }
     let mut fields = Vec::new();
@@ -432,30 +488,39 @@ fn accumulate_bank<P: Copy>(
     }
     let normal_power = {
         let carrier = bank.carrier_fields(&fields, proper, cancelled)?;
-        integrate_cell_power(
-            bank.anchor.grid(),
-            &fields,
-            carrier.as_ref(),
-            &kernels,
-            product_parts,
-            cancelled,
-        )?
+        if let Some(positive) = positive {
+            positive.cell_normal_power(bank.anchor.grid(), &fields, carrier.as_ref(), cancelled)?
+        } else {
+            integrate_cell_power(
+                bank.anchor.grid(),
+                &fields,
+                carrier.as_ref(),
+                &kernels,
+                product_parts,
+                cancelled,
+            )?
+        }
     };
     for (group, field) in fields.iter_mut().enumerate() {
         bank.synthesize_frequency_field(group, field, cancelled)?;
     }
     for (point, sum) in sums.iter_mut().enumerate() {
         poll(cancelled)?;
-        let value = integrate_point_dd(f, &kernels, |i| fields[i][point], &product, cancelled)
-            .map_err(|error| match error {
-                MomentError::Cancelled => AngularSpectrumError::Cancelled,
-                MomentError::Product(_) => {
-                    bad("exposure ensemble field product is unrepresentable")
-                }
-                MomentError::Unrepresentable => {
-                    bad("exposure ensemble second moment is unrepresentable")
-                }
-            })?;
+        let value = if let Some(positive) = positive {
+            positive.point(|i| fields[i][point], cancelled)?
+        } else {
+            integrate_point_dd(f, &kernels, |i| fields[i][point], &product, cancelled).map_err(
+                |error| match error {
+                    MomentError::Cancelled => AngularSpectrumError::Cancelled,
+                    MomentError::Product(_) => {
+                        bad("exposure ensemble field product is unrepresentable")
+                    }
+                    MomentError::Unrepresentable => {
+                        bad("exposure ensemble second moment is unrepresentable")
+                    }
+                },
+            )?
+        };
         for (sum, value) in sum.iter_mut().zip(value) {
             *sum = *sum + value;
         }

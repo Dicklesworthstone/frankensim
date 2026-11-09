@@ -28,17 +28,16 @@ pub use interferometer::{
 
 mod aperture;
 mod cell;
+mod temporal_fields;
 pub use aperture::{
-    AngularSpectrumExposureApertureArm, AngularSpectrumApertureInterferenceLimits,
-    PreparedAngularSpectrumApertureInterferometer,
     AngularSpectrumApertureControlLimits, AngularSpectrumApertureEnergyGradient,
-    AngularSpectrumExposureApertureLimits, AngularSpectrumExposureApertureJonesProjection,
-    AngularSpectrumExposureApertureJonesSpectrum,
-    AngularSpectrumExposureApertureMoments,
+    AngularSpectrumApertureInterferenceLimits, AngularSpectrumExposureApertureArm,
+    AngularSpectrumExposureApertureJonesProjection, AngularSpectrumExposureApertureJonesSpectrum,
+    AngularSpectrumExposureApertureLimits, AngularSpectrumExposureApertureMoments,
     AngularSpectrumExposureApertureProjection, AngularSpectrumExposureApertureProjectionReading,
     AngularSpectrumExposureApertureReading, AngularSpectrumExposureApertureStress,
-    AngularSpectrumExposureApertureWrench,
-    PreparedAngularSpectrumApertureEnergyControl,
+    AngularSpectrumExposureApertureWrench, PreparedAngularSpectrumApertureEnergyControl,
+    PreparedAngularSpectrumApertureInterferometer,
 };
 
 mod stress;
@@ -66,16 +65,16 @@ pub use ensemble::{
 
 mod layer;
 pub use layer::{
-    AngularSpectrumExposureHeatChannel, AngularSpectrumExposureHeatSpectrumLimits,
-    AngularSpectrumExposureLayerDissipation, AngularSpectrumExposureLayerField,
-    AngularSpectrumExposureLayerEnergyDensity, AngularSpectrumExposureLayerEnergyLimits,
-    PreparedAngularSpectrumExposureLayerEnergy,
     AngularSpectrumEnergyVolumeLimits, AngularSpectrumEnergyVolumeSample,
-    AngularSpectrumExposureLayerVolumeEnergy, PreparedAngularSpectrumExposureLayerVolumeEnergy,
+    AngularSpectrumExposureHeatChannel, AngularSpectrumExposureHeatSpectrumLimits,
+    AngularSpectrumExposureLayerDissipation, AngularSpectrumExposureLayerEnergyDensity,
+    AngularSpectrumExposureLayerEnergyLimits, AngularSpectrumExposureLayerField,
     AngularSpectrumExposureLayerHeatLoadSpectrum, AngularSpectrumExposureLayerHeatSpectrum,
-    AngularSpectrumExposureLayerLimits, AngularSpectrumHeatAreaQuadrature,
-    AngularSpectrumHeatDepthSample, AngularSpectrumHeatVolumeQuadrature, AngularSpectrumHeatWindowLimits,
+    AngularSpectrumExposureLayerLimits, AngularSpectrumExposureLayerVolumeEnergy,
+    AngularSpectrumHeatAreaQuadrature, AngularSpectrumHeatDepthSample,
+    AngularSpectrumHeatVolumeQuadrature, AngularSpectrumHeatWindowLimits,
     AngularSpectrumIntegratedHeatLimits, PreparedAngularSpectrumExposureLayer,
+    PreparedAngularSpectrumExposureLayerEnergy, PreparedAngularSpectrumExposureLayerVolumeEnergy,
 };
 
 /// Whole-line-bank bounds for a query. Pair work counts N*F² for N spatial
@@ -85,6 +84,11 @@ pub use layer::{
 /// original beam's complete workspace, all retained frequency fields, temporal
 /// kernels, a compensated accumulation plane and the output. Other borrowed
 /// beams, earlier outputs and allocator overhead are outside this bound.
+/// Remaining pair-work and workspace headroom optionally reserve bounded
+/// field-first temporal projections. They cost at most 4*N*(F+1)*17 vector
+/// terms and fixed scratch reported by `field_workspace_bytes()`. Uniform and
+/// triangular windows use this path when their full real or proper band fits;
+/// insufficient legacy headroom retains the original pair law.
 #[derive(Clone, Copy, Debug)]
 pub struct AngularSpectrumExposureLimits {
     pub maximum_lines: usize,
@@ -143,6 +147,8 @@ pub struct AngularSpectrumExposure<'b, 's, 'm> {
     workspace_bytes: usize,
     field_fft_work: u64,
     point_frequency_pairs: usize,
+    field_projection_terms: usize,
+    field_workspace_bytes: usize,
     carrier_cell: Option<cell::CarrierCell>,
 }
 
@@ -303,6 +309,20 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
         {
             return Err(bad("exposure exceeds its work or workspace budget"));
         }
+        let field_projection_terms = temporal_fields::admit(
+            n,
+            f,
+            false,
+            limits.maximum_point_frequency_pairs - point_frequency_pairs,
+            limits.maximum_workspace_bytes - workspace_bytes,
+        )
+        .unwrap_or(0);
+        let field_workspace_bytes = workspace_bytes
+            + if field_projection_terms == 0 {
+                0
+            } else {
+                temporal_fields::WORKSPACE_BYTES
+            };
         let carrier_cell = (f != 0 && anchor.carrier_rad_m != [0.0; 2])
             .then(|| cell::CarrierCell::prepare(anchor, &mut cancelled))
             .transpose()?;
@@ -316,6 +336,8 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
             workspace_bytes,
             field_fft_work,
             point_frequency_pairs,
+            field_projection_terms,
+            field_workspace_bytes,
             carrier_cell,
         })
     }
@@ -331,12 +353,26 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
     pub fn angular_frequencies_rad_s(&self) -> &[f64] {
         &self.frequencies
     }
+    /// Original common-owner workspace, reused by layer/stress/force queries.
+    /// Exterior field queries additionally reserve the bounded scratch reported
+    /// by `field_workspace_bytes()` without changing those owners' costs.
     pub fn workspace_bytes(&self) -> usize {
         self.workspace_bytes
+    }
+    /// Actual admitted exterior field-query peak, including optional factor scratch.
+    pub fn field_workspace_bytes(&self) -> usize {
+        self.field_workspace_bytes
+    }
+    /// Additional bounded field projections, reserved from the original pair-work
+    /// limit. Zero selects the original pair path; the FFT/line work is unchanged.
+    pub fn field_projection_terms(&self) -> usize {
+        self.field_projection_terms
     }
     pub fn field_fft_work(&self) -> u64 {
         self.field_fft_work
     }
+    /// Original pair/carrier work, excluding optional field projection terms.
+    /// Their sum stays within `maximum_point_frequency_pairs`.
     pub fn point_frequency_pairs(&self) -> usize {
         self.point_frequency_pairs
     }
@@ -393,18 +429,33 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
             return Err(bad("field distance must be finite and nonnegative"));
         }
         let f = self.frequencies.len();
+        let mut temporal_workspace =
+            (self.field_projection_terms != 0).then(temporal_fields::Workspace::new);
+        let positive = if let Some(workspace) = temporal_workspace.as_mut() {
+            temporal_fields::PositiveFields::prepare(
+                window,
+                &self.frequencies,
+                false,
+                workspace,
+                &mut cancelled,
+            )?
+        } else {
+            None
+        };
         let mut kernels = Vec::new();
-        kernels
-            .try_reserve_exact(f * f)
-            .map_err(|_| bad("exposure kernel allocation failed"))?;
-        for &a in &self.frequencies {
-            for &b in &self.frequencies {
-                poll(&mut cancelled)?;
-                kernels.push(
-                    window
-                        .product_kernel(a, b)
-                        .map_err(|_| bad("exposure temporal kernel is unrepresentable"))?,
-                );
+        if positive.is_none() {
+            kernels
+                .try_reserve_exact(f * f)
+                .map_err(|_| bad("exposure kernel allocation failed"))?;
+            for &a in &self.frequencies {
+                for &b in &self.frequencies {
+                    poll(&mut cancelled)?;
+                    kernels.push(
+                        window
+                            .product_kernel(a, b)
+                            .map_err(|_| bad("exposure temporal kernel is unrepresentable"))?,
+                    );
+                }
             }
         }
         let mut fields = Vec::new();
@@ -421,16 +472,25 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
         }
         let normal_power_w = {
             let carrier = self.carrier_fields(&fields, false, &mut cancelled)?;
-            integrate_cell_power(
-                self.anchor.grid(),
-                &fields,
-                carrier.as_ref(),
-                &kernels,
-                HarmonicProduct::mean_real_product_parts_dd,
-                &mut cancelled,
-            )?
-            .to_f64()
-        };
+            if let Some(positive) = &positive {
+                positive.cell_normal_power(
+                    self.anchor.grid(),
+                    &fields,
+                    carrier.as_ref(),
+                    &mut cancelled,
+                )?
+            } else {
+                integrate_cell_power(
+                    self.anchor.grid(),
+                    &fields,
+                    carrier.as_ref(),
+                    &kernels,
+                    HarmonicProduct::mean_real_product_parts_dd,
+                    &mut cancelled,
+                )?
+            }
+        }
+        .to_f64();
         for (group, field) in fields.iter_mut().enumerate() {
             self.synthesize_frequency_field(group, field, &mut cancelled)?;
         }
@@ -441,14 +501,21 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
             .map_err(|_| bad("exposure result allocation failed"))?;
         for point in 0..n {
             poll(&mut cancelled)?;
-            let values = integrate_point(f, &kernels, |i| fields[i][point], &mut cancelled)
-                .map_err(|error| match error {
-                    MomentError::Cancelled => AngularSpectrumError::Cancelled,
-                    MomentError::Product(_) => bad("exposure field product is unrepresentable"),
-                    MomentError::Unrepresentable => {
-                        bad("exposure second moment is unrepresentable")
-                    }
-                })?;
+            let values = if let Some(positive) = &positive {
+                positive
+                    .point(|i| fields[i][point], &mut cancelled)?
+                    .map(Dd::to_f64)
+            } else {
+                integrate_point(f, &kernels, |i| fields[i][point], &mut cancelled).map_err(
+                    |error| match error {
+                        MomentError::Cancelled => AngularSpectrumError::Cancelled,
+                        MomentError::Product(_) => bad("exposure field product is unrepresentable"),
+                        MomentError::Unrepresentable => {
+                            bad("exposure second moment is unrepresentable")
+                        }
+                    },
+                )?
+            };
             points.push(AngularSpectrumExposurePoint {
                 electric_mean_squared_v2_m2: [values[0], values[1], values[2]],
                 magnetic_mean_squared_a2_m2: [values[3], values[4], values[5]],
@@ -899,7 +966,11 @@ mod tests {
 
     #[test]
     fn continuous_cells_pair_every_odd_axis_mode_with_its_signed_opposite() {
-        let odd = AngularSpectrumGrid { width: 3, height: 5, spacing_m: [1.0; 2] };
+        let odd = AngularSpectrumGrid {
+            width: 3,
+            height: 5,
+            spacing_m: [1.0; 2],
+        };
         assert_eq!(opposite_mode(odd, 1), Some(2));
         assert_eq!(opposite_mode(odd, 2), Some(1));
         assert_eq!(opposite_mode(odd, 7), Some(11));
@@ -907,7 +978,11 @@ mod tests {
             let partner = opposite_mode(odd, point).unwrap();
             assert_eq!(opposite_mode(odd, partner), Some(point));
         }
-        let even = AngularSpectrumGrid { width: 4, height: 2, spacing_m: [1.0; 2] };
+        let even = AngularSpectrumGrid {
+            width: 4,
+            height: 2,
+            spacing_m: [1.0; 2],
+        };
         assert_eq!(opposite_mode(even, 2), None);
         assert_eq!(opposite_mode(even, 4), None);
         assert_eq!(opposite_mode(even, 1), Some(3));
@@ -1180,5 +1255,3 @@ mod tests {
         ));
     }
 }
-
-

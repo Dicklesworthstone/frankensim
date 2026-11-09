@@ -8816,3 +8816,39 @@ all work/memory refusals before reconstruction, zero-weight validation, and late
 cancellation/reuse. The adapter preserves the callable owner shape but does not
 execute the native Maxwell/material/FFT pipeline. That full pipeline and the
 native workspace suite remain unrun here.
+
+## Positive original exterior field observations
+
+Deterministic and ensemble exterior field observations now optionally project
+the original E/H vectors before all six field populations and all three signed
+Poynting components. Uniform and Triangular normalized windows retain their
+actual sensitivity, real carriers and proper half-factors. Continuous cell
+watts retain the original opposite-mode, unpaired-Nyquist and nonzero-carrier
+laws. Physical area multiplies the completed compensated spatial sum; spatial
+cosine/sine fluxes combine before their half-weight, retaining finite aggregate
+subnormal power. No material law or finite-aperture model is added.
+
+Preparation reserves optional4*N*(F+1)*17 vector projection terms and50,008 bytes
+of fixed logical payload from the existing authored work/workspace headroom.
+The ensemble also budgets one retained admission flag for every original bank
+when any bank is selected. Banks are selected independently in original order.
+Exact headroom admits; insufficient headroom and unsupported spans keep the
+original pair law. The original common-owner workspace/pair getters retain their
+layer/stress/force meaning; new field_workspace_bytes()/field_projection_terms()
+report the additional field-query reservation. Their applicable totals fit the
+same original limits. Scalar locals, compiler temporaries and allocator/stack
+overhead remain excluded from logical payload accounting.
+
+Admitted banks reuse each original frequency reconstruction and synthesis once,
+allocate no extra query heap, and skip the quadratic temporal-kernel table.
+The numerical improvement is therefore conditional on field projection admission;
+tight legacy budgets retain the original cancellation limits.
+
+Validation: nine committed actual-helper regressions pass with warnings denied,
+including independent weighted vector/spatial oracles, real/proper deep nulls,
+signed backflow, exact/one-below admission, independent mixed banks, cancellation,
+and both spatial subnormal aggregation cases. Three additional scratch checks
+compile and execute the verbatim deterministic/ensemble dispatch bodies with
+counted manufactured frequency fields, confirming reuse and fallback. Actual
+math/cell helpers were executed; native material/FFT constructors and the full
+workspace suite were not. The finite-aperture observer remains a separate owner.
