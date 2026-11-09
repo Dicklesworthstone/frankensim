@@ -10,8 +10,10 @@
 //! cell sharing a surface face remains valid: its participation in centered
 //! face reconstruction does not make its volume an enclosed source. Selected
 //! exterior cells do not complete an infinite volume; extent and spatial
-//! refinement remain necessary. No viscosity, SGS stress, body-force dipoles,
-//! moving geometry, CFD feedback or automatic sound-validity claim is added.
+//! refinement remain necessary. Molecular entry points retain the original
+//! configured viscous/SGS source stress, evaluated once for both mechanisms.
+//! No missing SGS closure, body-force dipoles, moving geometry, CFD feedback
+//! or automatic sound-validity claim is added.
 
 use super::super::PreparedCompressibleVolume3;
 use super::{
@@ -34,6 +36,7 @@ use fs_math::dd::Dd;
 
 /// Accepted real source histories for complete causal molecular observation.
 pub mod history;
+mod molecular;
 
 /// Independent, explicit caps for both samplers and their joint spectrum.
 /// Peak numerical storage is bounded by the SUM of these three byte caps;
@@ -380,7 +383,7 @@ fn admit_exterior(
 /// Pressure interpretation requires a receiver OUTSIDE the closed control box.
 /// These preparation/evaluation methods enforce that domain; raw spectrum
 /// access is for physical-channel analysis, not an interior-pressure claim.
-/// Finite selected exterior extent and all inviscid source limits remain.
+/// Finite selected exterior extent and the selected source limits remain.
 pub struct RecordedExteriorSurfaceSpectrum {
     grid: CartesianGrid,
     control_box: PermeableBox3,

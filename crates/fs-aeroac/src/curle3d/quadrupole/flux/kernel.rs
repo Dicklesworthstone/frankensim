@@ -1,4 +1,4 @@
-//! Instantaneous inviscid source arithmetic, independent of the flow integrator.
+//! Instantaneous source tensor arithmetic, independent of the flow integrator.
 
 use super::super::kernel::reynolds_moment;
 use fs_math::dd::Dd;
@@ -62,6 +62,69 @@ pub(super) fn inviscid_moment(
     moment.iter().all(|x| x.is_finite()).then_some(moment)
 }
 
+/// Full configured tensor with viscous cancellation before final rounding.
+///
+/// The six stress entries are xx, yy, zz, xy, xz, yz, without an engineering
+/// shear factor. Q = [rho u u + (p-p0-c0^2(rho-rho0)) I - R tau R^T] dV.
+/// An exactly zero supplied stress retains the original Euler arithmetic.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn molecular_moment(
+    reference_density: f64,
+    sound_speed: f64,
+    reference_pressure: f64,
+    density: f64,
+    pressure: f64,
+    volume: f64,
+    velocity: [f64; 3],
+    stress: [f64; 6],
+    rotation: [[f64; 3]; 3],
+) -> Option<[f64; 6]> {
+    if [
+        reference_density, sound_speed, reference_pressure, density, pressure, volume,
+        density * volume,
+    ].iter().any(|x| !x.is_finite() || *x <= 0.0)
+        || velocity.iter().chain(&stress).any(|x| !x.is_finite())
+    {
+        return None;
+    }
+    if stress.iter().all(|&x| x == 0.0) {
+        return inviscid_moment(
+            reference_density, sound_speed, reference_pressure, density, pressure, volume, velocity,
+        );
+    }
+    let full = [
+        [stress[0], stress[3], stress[4]],
+        [stress[3], stress[1], stress[5]],
+        [stress[4], stress[5], stress[2]],
+    ];
+    let density_difference = Dd::from_f64(density) - Dd::from_f64(reference_density);
+    let pressure_difference = Dd::from_f64(pressure) - Dd::from_f64(reference_pressure);
+    let c = Dd::from_f64(sound_speed);
+    let dv = Dd::from_f64(volume);
+    let mass = Dd::from_f64(density) * dv;
+    let isotropic = (pressure_difference - (density_difference * c) * c) * dv;
+    let mut result = [0.0; 6];
+    for (entry, (i, j)) in [(0, 0), (1, 1), (2, 2), (0, 1), (0, 2), (1, 2)]
+        .into_iter()
+        .enumerate()
+    {
+        let mut rotated = Dd::from_f64(0.0);
+        for a in 0..3 {
+            for b in 0..3 {
+                rotated = rotated
+                    + (Dd::from_f64(rotation[i][a]) * Dd::from_f64(full[a][b]))
+                        * Dd::from_f64(rotation[j][b]);
+            }
+        }
+        let mut moment = (mass * Dd::from_f64(velocity[i])) * Dd::from_f64(velocity[j]);
+        if i == j {
+            moment = moment + isotropic;
+        }
+        result[entry] = (moment - rotated * dv).to_f64();
+    }
+    result.iter().all(|x| x.is_finite()).then_some(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,6 +134,30 @@ mod tests {
             (actual - expected).abs() <= 4e-14 * (1.0 + expected.abs()),
             "{actual:e} != {expected:e}"
         );
+    }
+
+    #[test]
+    fn g0_full_viscous_tensor_keeps_small_residuals_before_rounding() {
+        let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let actual = molecular_moment(
+            1.0, 343.0, 100000.0, 1.0, 100001.0, 1.0, [1e8, 0.0, 0.0],
+            [1e16, 0.0, 0.0, 0.0, 0.0, 0.0], identity,
+        ).unwrap();
+        assert_eq!(actual, [1.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
+        let zero = molecular_moment(
+            1.0, 343.0, 100000.0, 1.2, 100013.0, 0.003, [2.0, -3.0, 4.0],
+            [0.0; 6], identity,
+        ).unwrap();
+        assert_eq!(
+            zero,
+            inviscid_moment(
+                1.0, 343.0, 100000.0, 1.2, 100013.0, 0.003, [2.0, -3.0, 4.0],
+            ).unwrap(),
+        );
+        assert!(molecular_moment(
+            1.0, 343.0, 100000.0, 1.0, 100001.0, 1.0, [0.0; 3],
+            [f64::NAN; 6], identity,
+        ).is_none());
     }
 
     #[test]

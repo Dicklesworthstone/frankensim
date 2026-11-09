@@ -8861,6 +8861,54 @@ unverified in the disk-constrained implementation environment. This closure
 retains the existing exploratory SGS and engineering-bound qualifications;
 it adds no experimental-validation, positivity or entropy theorem.
 
+
+## Accepted-state stress observations for acoustic sources
+
+The frozen and evolving-composition spatial `MolecularEuler3d` owners expose
+`stress_field`, returning the shared borrowed `StressField3d` from
+`compressible::spatial::molecular`. This evaluates the original accepted endpoint
+once with its actual transport law, caloric/species owner, velocity gradients,
+compatible stress discretization, explicit bulk viscosity, wall/reservoir
+conditions and any explicitly selected SGS closure. The mixture entry passes
+the caller's original `DissipationControl` to that operator. No constitutive law,
+SGS completion or velocity gradient is inferred in the acoustic consumer.
+
+The view reads original source-decoded primitives and exact conserved momentum
+density. `face_traction_pa(axis, coordinates)` returns the actual native
+`tau[:,axis]` in Pa, opposite to the viscous conservative momentum flux.
+Its axis is the positive Cartesian direction; the physical outward sign is
+applied by the surface consumer. It contains neither inviscid pressure nor
+advective momentum, and thermal/species energy flux is never treated as force.
+The same face buffers supply advancement and observation, including all three
+global momentum components of a multicomponent face.
+
+`cell_stress_pa` averages the opposing face columns to the cell center and
+symmetrizes the off-diagonal pairs, returning xx, yy, zz, xy, xz, yz in Pa.
+These are undoubled physical shear entries. Reconstruction is exact for affine
+stress and second order in smooth resolved interiors; walls, material jumps
+and modeled SGS retain their native limitations. Surface loading can use the
+unaveraged face traction. Source consumers apply their original rotation and
+physical volume or face-area quadrature, with the Lighthill sign `-tau_ij`
+and FW-H loading sign `-tau_ij n_j`.
+
+Observation reuses prepared native field storage and allocates no additional
+field buffers; original provider-owned evaluation costs retain their contracts.
+The view's borrow prevents a step or another evaluation while it is live.
+Flow cells, physical clock, last accepted interval reports, boundary impulses
+and accepted Lagrangian closure histories are unchanged. A Lagrangian endpoint
+fit is uncommitted and the original filter is restored on success or failure.
+A failed/cancelled query returns no view, though reusable constitutive caches
+may change. The returned stress is instantaneous at the held accepted time,
+not the preceding step's integrated load.
+
+The accompanying `fs-aeroac` owner tests specify independent affine full-stress
+and bulk-viscosity identities, all-axis face signs, rigid-motion and zero-law
+limits, smooth periodic shear refinement, original multicomponent composition,
+stationary tensor rotation, accepted-clock sampling and final-cancellation
+publication. They establish the resolved extraction contract; unresolved sound
+generation and completeness of the selected acoustic source region remain
+separate physical modeling choices.
+
 ## Pressure-continuous cavitation populations
 
 Both original radial owners expose `linearization_at_radius`: gas pressure,

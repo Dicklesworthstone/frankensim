@@ -2,7 +2,9 @@
 //!
 //! A closed control box supplies, with its normal pointing OUT of the box,
 //! `Q = rho (u.n) dA / rho0` and
-//! `F = [(p-p0) n + rho u (u.n)] dA`.
+//! `F = [(p-p0) n + rho u (u.n) - tau.n] dA`.
+//! Euler constructors omit tau; molecular constructors retain the original
+//! configured molecular/bulk and selected SGS face stress.
 //! These equivalent volume/force sources use the existing compact Green
 //! operators and source-major `[Q,Fx,Fy,Fz]` Welch channels. They preserve
 //! source phase and full near/far pressure and vector velocity. A permeable
@@ -13,16 +15,18 @@
 //! this reconstruction require spatial refinement; they are not the native
 //! Riemann solver's dissipative numerical flux. No whole-box compactness is
 //! assumed, but each face's wavelength/range resolution remains the caller's
-//! responsibility. Sampling is O(faces), allocates no adapter storage, and
+//! responsibility. Surface reconstruction is O(faces); molecular sampling also
+//! evaluates the original full-grid stress operator once. Neither path allocates
+//! adapter storage, and both
 //! publishes all channels at the same actual accepted flow time.
 //!
-//! Scope is INVISCID, stationary Cartesian geometry and a quiescent homogeneous
+//! Scope is stationary Cartesian geometry and a quiescent homogeneous
 //! exterior reference. The surface represents sources INSIDE the box. The
 //! FW-H volume term OUTSIDE the box is still required when non-negligible;
 //! hydrodynamic disturbances crossing the surface can otherwise create false
 //! sound. Never add enclosed Lighthill volume stresses a second time. Only an
 //! exterior acoustic observer may identify c0^2 rho' with microphone pressure.
-//! No viscosity, SGS stress, moving geometry, wake correction, resampling,
+//! No missing SGS closure, moving geometry, wake correction, resampling,
 //! source derivatives, radiation feedback or measured-SPL claim is inferred.
 //!
 //! Reference: Lockard & Casper (2005), equations (1)-(6),
@@ -38,6 +42,7 @@ use fs_math::dd::Dd;
 
 /// Native joint recording of this surface and selected exterior volume stresses.
 pub mod exterior;
+mod molecular;
 
 /// Half-open original cell box. Its six bounding planes form the source surface.
 /// A real cell must exist on BOTH sides of every face: periodic wrapping,
@@ -50,7 +55,8 @@ pub struct PermeableBox3 {
 
 #[derive(Clone, Copy, Debug)]
 pub struct PermeableSurfaceControls3 {
-    /// Bounds retained geometry and the two native EOS decodes per face/sample.
+    /// Bounds retained geometry and surface traversal; Euler sampling decodes
+    /// two native states per face. Molecular sampling reuses full-grid primitives.
     pub maximum_faces: usize,
     /// Numerical geometry, source, trial and ambient-composition storage.
     /// Original flow/EOS owners and allocator metadata are separate.
@@ -90,6 +96,7 @@ pub struct PreparedPermeableSurface3 {
     sources: Vec<[f64; 4]>,
     trial: Vec<[f64; 4]>,
     time_s: Option<f64>,
+    with_viscous_stress: bool,
 }
 
 impl PermeableBox3 {
@@ -295,6 +302,7 @@ impl PreparedPermeableSurface3 {
             sources: allocated(count, [0.0; 4])?,
             trial: allocated(count, [0.0; 4])?,
             time_s: None,
+            with_viscous_stress: false,
         };
         admit_bytes(result.workspace_bytes(), maximum)?;
         result
@@ -370,12 +378,17 @@ impl PreparedPermeableSurface3 {
     pub const fn config(&self) -> CompressibleVolumeConfig3 {
         self.config
     }
+    /// Whether sampling retains the original configured viscous/SGS traction.
+    /// This source selection is immutable for the lifetime of the sampler.
+    pub const fn includes_viscous_stress(&self) -> bool {
+        self.with_viscous_stress
+    }
     /// Begin one joint spectrum with the CURRENT accepted physical sample.
     /// The supplied clock must place that sample at index zero. All original
     /// face Q/F channels share one window/transform; no independent-face power
     /// approximation or extra source derivative is introduced.
     ///
-    /// This preserves the stationary inviscid FW-H source scope above. It
+    /// This preserves the selected stationary FW-H source scope above. It
     /// does not add omitted exterior volume stresses, antialias adaptive CFD,
     /// or validate disturbances crossing the permeable surface as sound.
     pub fn begin_recording(
@@ -452,7 +465,7 @@ impl PreparedPermeableSurface3 {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(), CompressibleVolumeError3> {
         poll(&mut cancelled)?;
-        if self.frozen_source() != Some(flow.gas()) {
+        if self.with_viscous_stress || self.frozen_source() != Some(flow.gas()) {
             return Err(CompressibleVolumeError3::SourceMismatch);
         }
         self.admit_sample(flow.grid(), flow.boundaries(), flow.time().value())?;
@@ -472,7 +485,7 @@ impl PreparedPermeableSurface3 {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(), CompressibleVolumeError3> {
         poll(&mut cancelled)?;
-        if self.mixture_source() != Some(flow.gas()) {
+        if self.with_viscous_stress || self.mixture_source() != Some(flow.gas()) {
             return Err(CompressibleVolumeError3::SourceMismatch);
         }
         self.admit_sample(flow.grid(), flow.boundaries(), flow.time().value())?;
@@ -524,7 +537,7 @@ impl PreparedPermeableSurface3 {
                 cell(face.adjacent_cells[0], cancelled)?,
                 cell(face.adjacent_cells[1], cancelled)?,
             ];
-            self.trial[i] = surface_flux(face, self.config, states)?;
+            self.trial[i] = surface_flux(face, self.config, states, None)?;
         }
         poll(cancelled)?;
         std::mem::swap(&mut self.sources, &mut self.trial);
@@ -537,6 +550,7 @@ fn surface_flux(
     face: &PermeableFace3,
     config: CompressibleVolumeConfig3,
     states: [(Primitive, [f64; 3]); 2],
+    viscous_traction_pa: Option<[f64; 3]>,
 ) -> Result<[f64; 4], CompressibleVolumeError3> {
     let axis = face.side.axis();
     let half_area = Dd::from_f64(face.area_m2) * Dd::from_f64(0.5 * face.side.sign());
@@ -561,7 +575,18 @@ fn surface_flux(
             .iter()
             .zip(loading)
             .fold(Dd::from_f64(0.0), |sum, (&r, f)| sum + Dd::from_f64(r) * f);
-        out[d + 1] = (sum * half_area).to_f64();
+        let mut force = sum * half_area;
+        if let Some(traction) = viscous_traction_pa {
+            // The native face already owns tau[:,axis]. Rotate that physical
+            // vector and apply the OUTWARD sign and full area once. Keep its
+            // subtraction in DD before publishing the final force component.
+            let tau = row.iter().zip(traction).fold(Dd::from_f64(0.0), |sum, (&r, t)| {
+                sum + Dd::from_f64(r) * Dd::from_f64(t)
+            });
+            let area = Dd::from_f64(face.area_m2) * Dd::from_f64(face.side.sign());
+            force = force - tau * area;
+        }
+        out[d + 1] = force.to_f64();
     }
     if out.iter().any(|v| !v.is_finite()) {
         return Err(invalid("unrepresentable permeable mass/momentum source"));

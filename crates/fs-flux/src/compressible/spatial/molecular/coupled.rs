@@ -554,6 +554,43 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         self.molecular.law()
     }
 
+    /// Borrow actual accepted-endpoint primitives and viscous face tractions.
+    /// Uses the original full molecular/SGS operator, including authored bulk
+    /// viscosity and walls. No flow, clock, accepted closure history or published
+    /// interval load changes. Caches may change; failed queries publish no view.
+    pub fn stress_field(
+        &mut self,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<StressField3d<'_>, MolecularError> {
+        poll(&mut cancelled)?;
+        #[cfg(feature = "experimental-sgs")]
+        if let Some(mut filter) = self.molecular.sgs.as_mut()
+            .and_then(sgs::SubgridTransport::take_lagrangian_filter)
+        {
+            let result = (|| {
+                let trial = self.molecular.sgs.as_mut()
+                    .expect("selected Lagrangian SGS owner")
+                    .prepare_lagrangian_with_walls(
+                        &mut filter, &self.accepted, &self.molecular.walls, &mut cancelled,
+                    )?;
+                let result = self.molecular.prepare_stress_field(&self.accepted, &mut cancelled);
+                drop(trial);
+                result
+            })();
+            self.molecular.sgs.as_mut().expect("retained Lagrangian SGS owner")
+                .restore_lagrangian_filter(filter, None);
+            result?;
+        } else {
+            self.molecular.prepare_stress_field(&self.accepted, &mut cancelled)?;
+        }
+        #[cfg(not(feature = "experimental-sgs"))]
+        self.molecular.prepare_stress_field(&self.accepted, &mut cancelled)?;
+        Ok(StressField3d::frozen(
+            &self.molecular.grid, self.molecular.boundaries, self.accepted.time.value(),
+            &self.molecular.work.primitive, &self.molecular.work.flux, &self.accepted.states,
+        ))
+    }
+
     /// Required additional storage for the accepted field's complete stress curl.
     pub fn required_vorticity_workspace_bytes(&self) -> Result<usize, MolecularError> {
         self.molecular.required_vorticity_workspace_bytes()

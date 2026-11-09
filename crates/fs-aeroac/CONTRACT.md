@@ -13,7 +13,7 @@ mass/momentum sample once; `record_sample` appends subsequent original accepted
 samples. A changed reference, source order, geometry or off-clock time refuses
 before acceptance. There is no implicit adaptive-time resampling, missing
 prehistory, per-face power addition, source derivative or additional CFD step.
-The original stationary inviscid FW-H scope remains: exterior volume sources
+The selected stationary FW-H source scope remains: exterior volume sources
 may still be needed, and enclosed sources must not be counted a second time.
 
 Geometry is included in the explicit transform memory cap. Accepted sampling
@@ -31,35 +31,54 @@ a resource-limited real-source build stopped in asupersync before fs-couple.
 closed stationary Cartesian FW-H surface from the original frozen-gas or
 evolving-mixture flow owner. Each original face supplies volume source
 `Q=rho*(u.n)*dA/rho0` and force source
-`F=[(p-p0)*n+rho*u*(u.n)]*dA`. Conserved momentum and the original EOS provide
-the physical terms; pressure loading includes convective momentum transport.
-Each adjacent cell's flux is formed before centered face interpolation.
+`F=[(p-p0)*n+rho*u*(u.n)-tau.n]*dA`. Euler constructors omit tau; molecular
+constructors retain the actual configured molecular/bulk and selected SGS
+traction. Conserved momentum and the original EOS provide the physical
+advective and pressure terms, with each adjacent cell's flux formed before
+centered face interpolation. The viscous term comes directly from the original
+conservative face, without cell-stress averaging or another gradient estimate.
+The FW-H convention follows Lockard and Casper (2005), equations (1)-(6):
+<https://ntrs.nasa.gov/api/citations/20050182105/downloads/20050182105.pdf>.
 
 The complete face bank retains physical midpoint positions, areas, outward
-orientation, source order and proper stationary frame rotation. Its actual
-accepted-time `[Q,Fx,Fy,Fz]` histories feed the existing coherent compact-field
-and Welch owners. All faces and channels retain their phases before pressure,
-vector velocity or intensity is formed. Preparation checks the explicit
-ambient rho0/p0/c0 against the original EOS; a mixture requires its original
-species-ordered ambient partial-density vector. No reference composition is
-guessed, and no separate propagation speed is fitted.
+orientation, source order and proper stationary frame rotation. Native
+`tau[:,axis]` is read in the positive grid-axis direction, rotated once, and
+subtracted with the outward sign and full physical face area. Subtraction
+remains in double-double arithmetic until the final force component, so a
+small residual is not erased by first rounding a large inviscid loading.
+Exact original conserved momentum supplies the unchanged mass source.
+The absent-stress branch preserves the original Euler arithmetic.
 
-Sampling uses bounded O(faces) work and reusable adapter storage. It publishes
-all channels and the native clock atomically, so a failed or cancelled sample
-preserves the preceding accepted observation. The selected box requires an
-actual cell on both sides of every face; ghosts and periodic wrapping are not
-invented. Source, geometry, workspace, medium and strictly increasing sample
-clock admission remain explicit.
+Actual accepted-time `[Q,Fx,Fy,Fz]` histories feed the existing coherent
+compact-field and Welch owners. All faces and channels retain their phases
+before pressure, vector velocity or intensity is formed. Preparation checks
+the explicit ambient rho0/p0/c0 against the original EOS; a mixture requires
+its original species-ordered ambient partial-density vector. No reference
+composition is guessed, and no separate propagation speed is fitted.
 
-Scope is inviscid stationary geometry and a quiescent homogeneous exterior
-reference. Face reconstruction and surface quadrature require spatial
-refinement. The FW-H exterior volume term remains necessary wherever exterior
-stresses are significant; enclosed volume stresses must not be added twice.
-No moving-surface, viscous/SGS, wake correction or measured source qualification
-is implied. Five focused tests cover density/momentum/rotation factors,
+Surface reconstruction uses bounded O(faces) work and reusable adapter
+storage. Molecular entry points additionally evaluate the original full-grid
+stress once, reusing its allocated native caches. All channels and the native
+clock publish atomically, so failed/cancelled sampling preserves the preceding
+accepted observation. The retained `includes_viscous_stress` mode refuses
+sampling through the other source lane. No accepted flow state, closure
+history, interval report or boundary impulse changes. The selected box
+requires an actual cell on both sides of every face; ghosts and periodic
+wrapping are not invented. Source, geometry, workspace, medium and strictly
+increasing clock admission remain explicit.
+
+Scope is stationary geometry and a quiescent homogeneous exterior reference.
+Face reconstruction and surface quadrature require spatial refinement. The
+FW-H exterior volume term remains necessary wherever exterior stresses are
+significant; enclosed volume stresses must not be added twice. No moving
+surface, missing SGS closure, wake correction or measured source qualification
+is inferred. Existing tests specify physical density/momentum/rotation,
 independent monopole recovery and exterior-wave cancellation, original mixture
-calorics, transactional refusals, and accepted history through coherent Welch
-pressure/velocity observation against a direct DFT.
+calorics, transactional refusals and coherent history observation against a
+direct DFT. Added molecular cases cover all-six-face viscous signs/rotation/
+areas, constant-stress closed-surface cancellation, exact zero-law recovery,
+a 1 N residual after cancellation of 1e16 N loads, and original species with
+later accepted molecular sampling.
 
 ## Full moving volume, force and stress arrays
 
@@ -2716,51 +2735,76 @@ measured-SPL, developed-turbulence or unresolved-noise qualification.
 ## Resolved compressible volume-stress sources
 
 With `compressible-volume`, `curle3d::quadrupole::flux::PreparedCompressibleVolume3`
-extracts instantaneous sources from accepted `fs-flux` `Euler3d` or
-`MixtureEuler3d` cells. One prepared layout retains the complete original EOS,
-including the mixture species axis and caloric references, the native Cartesian
-grid/boundaries, and a nonempty increasing selection of cell indices. Native
-cell centers and volumes are in SI; an explicit stationary proper rotation and
-origin map them to the propagation frame. Velocity is absolute in that frame;
-no mean flow, reference temperature or alternate gamma is inferred.
+extracts instantaneous sources from accepted `fs-flux` `Euler3d`,
+`MixtureEuler3d`, or their original spatial `MolecularEuler3d` owners. One
+prepared layout retains the complete original EOS, including the mixture
+species axis and caloric references, the native Cartesian grid/boundaries, and
+a nonempty increasing selection of cell indices. Native cell centers and
+volumes are in SI; an explicit stationary proper rotation and origin map them
+to the propagation frame. Velocity is absolute in that frame; no mean flow,
+reference temperature or alternate gamma is inferred.
 
-The six moments are the resolved inviscid Lighthill terms
+The Euler constructors retain the resolved inviscid Lighthill moments
 `Q_ij = [rho u_i u_j + ((p-p0)-c0^2(rho-rho0)) delta_ij] dV`.
+The molecular constructors `from_molecular_frozen` and
+`from_molecular_mixture` additionally subtract `(R tau R^T) dV`, using the
+original configured native stress, including authored bulk viscosity,
+source-dependent shear viscosity and any explicitly selected SGS closure.
+The six entries are xx, yy, zz, xy, xz, yz, without an engineering-shear factor.
 The retained `FluidAcousticState` supplies rho0/c0 and the caller supplies the
 positive absolute p0 of that same ambient medium. That medium can differ from
 the source gas; p0 is not guessed from its composition. Every sample decodes
 pressure through its original source owner. Double-double arithmetic retains
-the pressure-density difference before addition to the diagonal moments;
-trace, signed isotropic stress and physical cross stresses are preserved.
-The complete tensor convention follows NASA report 19770026218, equations
-(8)-(9): <https://ntrs.nasa.gov/api/citations/19770026218/downloads/19770026218.pdf>.
+the full Reynolds, pressure-density and rotated viscous contributions together
+until the final molecular moment is rounded; an exactly zero stress preserves
+the original Euler arithmetic. The trace, signed isotropic
+stress and physical cross stresses are preserved. The full tensor convention
+follows NASA report 19770026218, equations (8)-(9):
+<https://ntrs.nasa.gov/api/citations/19770026218/downloads/19770026218.pdf>.
 
-Both constructors publish the initial accepted source sample. Later extraction
+Molecular sampling borrows one original `StressField3d` evaluation at the
+accepted endpoint. The native operator owns all caloric inversions, actual
+transport data, velocity gradients, wall/reservoir conditions and configured
+closure contributions. Opposing conservative face tractions are averaged to
+cell centers and off-diagonal pairs are symmetrized. This reconstruction is
+exact for affine stress and second order for smooth resolved interiors;
+material jumps, walls and modeled SGS retain their native limitations.
+No acoustic-side constitutive law or duplicate gradient field is introduced.
+This is an instantaneous stress, not the preceding time step's integrated
+load. Original accepted flow, clock, interval reports, boundary loads and
+Lagrangian closure history remain unchanged; reusable constitutive caches may
+change. Mixture observations pass the supplied original dissipation controls.
+
+All constructors publish the initial accepted source sample. Later extraction
 requires the same full source/grid binding and a strictly later native accepted
-time. All selected moments are staged before a final cancellation check and
-buffer swap; refusal changes neither the accepted source sample nor its time,
-and never changes the flow. There is no caller-supplied replacement clock.
-`record_sample` forwards the accepted positions, moments and time to the
-original `QuadrupoleWelchStream`; that owner refuses a nonuniform cadence rather
-than resampling. Source positions/order remain bound through propagation.
+time. The retained `includes_viscous_stress` selection prevents using an Euler
+sampling method on a molecular sampler, or a molecular method on an Euler
+sampler. All selected moments are staged before a final cancellation check and
+buffer swap; refusal changes neither the accepted source sample nor its time.
+There is no caller-supplied replacement clock. `record_sample` forwards
+accepted positions, moments and time to the original `QuadrupoleWelchStream`;
+that owner refuses a nonuniform cadence rather than resampling. Source
+positions/order remain bound through propagation.
 
 Prepared numerical payload comprises indices, positions and two six-moment
 buffers (nominally 128 bytes/cell on 64-bit hosts); actual vector capacities are
-admitted against the caller's bound. Original immutable EOS metadata is separate.
-The adapter sample loop reallocates no buffers, polls at bounded cell boundaries,
-and retains source-owned caloric work/cancellation controls. Kernel regressions
-cover isentropic cancellation, signed isotropic trace, full-tensor rotation,
-physical scaling and domain/overflow refusals. Native-owner fixtures exercise
-both original solvers, source/grid/clock/budget and cancellation transactions,
-and an actual Euler history through joint recording and the acoustic observer
-against an independent direct DFT.
+admitted against the caller's bound. Original immutable EOS metadata and
+existing native transport storage are separate. Sampling allocates no adapter
+field buffers. Source-owned constitutive and cancellation work remains in the
+native operator. Existing kernel and owner regressions cover inviscid
+cancellation, original source/clock/rotation, and an accepted Euler history
+through coherent recording against a direct DFT. Added molecular owner cases
+specify independent full affine shear/bulk stress, positive-axis face signs,
+rigid-motion/dilatation/zero-law limits, smooth periodic shear convergence,
+full tensor rotation, evolving species and final-cancellation atomicity.
 
-This is not complete viscous/LES Lighthill stress: molecular and unresolved SGS
-stresses, applied body-force dipoles and missing source-volume contributions are
-not inferred. Products of cell averages do not reconstruct unresolved products.
-Periodic fields supply only the selected physical box, with no implicit image
-sum. Cell quadrature and source-region truncation require their own refinement;
-wall scattering, noise calibration and measured-SPL qualification remain absent.
+Euler entry points remain explicitly inviscid. Molecular entry points include
+the original configured resolved stress, without inferring missing SGS noise,
+applied body-force dipoles or missing source-volume contributions. Products of
+cell averages do not reconstruct unresolved products. Periodic fields supply
+only the selected physical box, with no implicit image sum. Cell quadrature
+and source-region truncation require their own refinement; wall scattering,
+noise calibration and measured-SPL qualification remain absent.
 
 ## Coherent recorded force and volume-stress sound
 
@@ -3727,14 +3771,26 @@ a second time. Original gas/species, grid, boundaries, frame, acoustic reference
 source order and uniform recording clock remain bound. No CFD step, source
 kernel, area/volume multiplier or source derivative is added.
 
+The `from_molecular_frozen`/`from_molecular_mixture` constructors and matching
+sample methods evaluate ONE original `StressField3d` per physical frame.
+The same accepted primitives, exact conserved momentum and face stresses supply
+both surface `-tau.n dA` and exterior-volume `-tau dV`. Source identity,
+geometry, immutable stress mode and native/recording clocks are admitted before
+the shared evaluation. This preserves matching viscous terms across the FW-H
+partition without paying for a second full-grid constitutive/gradient pass.
+Native transport controls, walls and selected SGS remain in their original
+owner, and no accepted flow or closure history is advanced.
+
+
 Every unsuccessful sample restores both accepted source histories and the
 joint recording. A failed second extractor restores only the already committed
 surface; a rejected spectral push restores both caches. The original Welch
 transaction retains its prior factors, and no fallible action follows a
 successful push. Warm observation adds no adapter allocation. Three explicit
 byte caps bound both native caches and the joint recording; geometry is charged
-to its recording allowance, source counts bound extraction, and one native work
-budget covers all `4*S + 6*V` channels. No dense covariance or full history is
+to its recording allowance, source counts bound local extraction, and one native
+Welch work budget covers all `4*S + 6*V` channels. The original CFD owner retains
+the storage and constitutive work of a full-grid molecular evaluation. No dense covariance or full history is
 constructed.
 
 `RecordedExteriorSurfaceSpectrum` retains the original control box and frame.
@@ -3742,8 +3798,9 @@ Its preparation/evaluation checks use the actual frame inverse and reject
 inside, on-surface and roundoff-near-surface receivers. The original mixed
 propagator additionally requires identical receiver, frequency, medium,
 molecular law and ideal boundary domains. The source scope remains stationary,
-inviscid, resolved and finite in its selected exterior extent; viscous
-source stress, SGS sound, missing exterior volume, moving geometry and source
+resolved and finite in its selected exterior extent. Euler entry points retain
+inviscid stress; molecular entry points include the original configured viscous
+and SGS stress. Missing SGS sound, exterior volume, moving geometry and source
 feedback are not inferred. Spatial, temporal and source-model qualification
 remain necessary.
 
@@ -3753,8 +3810,12 @@ and propagation/binding refusals. Native-source regressions use actual frozen
 and ten-species mixture histories, joint batch factors/full fields, exterior
 geometry and rotated receivers, source/clock refusal, both rollback paths and
 exact retry. Pinned formatting and independent source/API/physics review passed.
-These Rust regressions are authored, not claimed executed: the real dependency
-build exceeded the bounded shared validation environment.
+These original Rust regressions were authored without a complete dependency
+build in their introduction session. Added molecular groups specify exact
+single-evaluation acquisition through an instrumented original transport law,
+coherent factors, source-mode refusal, disjoint exterior selection, both
+rollback paths, exact zero-law recovery and changing-composition source
+agreement. Their execution status is reported with the associated change.
 
 ## Coherent recorded sound-power spectra
 

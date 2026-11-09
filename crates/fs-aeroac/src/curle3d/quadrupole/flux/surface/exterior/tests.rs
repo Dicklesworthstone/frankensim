@@ -612,3 +612,5 @@ fn native_mixture_species_and_ambient_reference_share_one_accepted_history() {
     let expected = batch(&history, species);
     assert_factors(stream.finish().unwrap().spectrum(), &expected);
 }
+
+mod molecular;

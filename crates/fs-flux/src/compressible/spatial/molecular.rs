@@ -28,6 +28,8 @@ mod reservoir;
 mod timed;
 mod vorticity;
 pub use vorticity::{StressVorticityBudget3d, StressVorticityWorkspace3d};
+mod stress_observation;
+pub use stress_observation::StressField3d;
 
 /// Explicit local or periodic dynamic subgrid transport for low-Mach studies.
 #[cfg(feature = "experimental-sgs")]

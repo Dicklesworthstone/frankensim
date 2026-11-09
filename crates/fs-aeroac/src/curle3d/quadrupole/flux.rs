@@ -1,4 +1,4 @@
-//! Resolved inviscid Lighthill sources from the original compressible solvers.
+//! Resolved Lighthill sources from the original compressible solvers.
 //!
 //! Each selected, stationary Cartesian cell supplies
 //! `Q_ij = [rho u_i u_j + ((p-p0)-c0^2(rho-rho0)) delta_ij] dV`.
@@ -7,10 +7,12 @@
 //! The explicit acoustic medium supplies rho0 and c0; p0 must describe that
 //! same medium. It is not guessed from the (possibly different) source gas.
 //!
-//! These are instantaneous resolved INVISCID terms, not the full stress of a
-//! viscous or LES solution. Molecular stress, unresolved SGS stress, applied
-//! body-force dipoles, boundary scattering and contributions outside the
-//! selected volume are absent. Transform the stress histories on their actual
+//! The Euler constructors retain these inviscid terms. Molecular constructors
+//! subtract the original configured viscous/SGS stress, including explicit bulk
+//! viscosity, reconstructed from the native conservative face tractions. They
+//! cannot subsequently accept an inviscid sample that silently drops stress.
+//! Applied body-force dipoles, boundary scattering and contributions outside
+//! the selected volume are absent. Transform stress histories on their actual
 //! accepted clocks before using a frequency-domain observer. Cell averaging
 //! loses unresolved velocity products and does not qualify an LES noise model.
 //!
@@ -25,6 +27,7 @@ use fs_flux::compressible::spatial::{Boundaries3d, CartesianGrid, Euler3d, Froze
 use fs_material::fluid_acoustics::FluidAcousticState;
 
 mod kernel;
+mod molecular;
 /// Closed stationary permeable-surface mass and momentum sources.
 pub mod surface;
 
@@ -60,6 +63,8 @@ pub enum CompressibleVolumeError3 {
     },
     Frozen(fs_flux::compressible::Error),
     Mixture(fs_flux::compressible::spatial::mixture::Error),
+    Molecular(fs_flux::compressible::molecular::MolecularError),
+    Dissipation(fs_flux::compressible::spatial::mixture::molecular::DissipationError),
     Cancelled,
 }
 impl core::fmt::Display for CompressibleVolumeError3 {
@@ -95,6 +100,7 @@ pub struct PreparedCompressibleVolume3 {
     moments: Vec<[f64; 6]>,
     trial: Vec<[f64; 6]>,
     time_s: Option<f64>,
+    with_viscous_stress: bool,
 }
 
 impl PreparedCompressibleVolume3 {
@@ -221,6 +227,7 @@ impl PreparedCompressibleVolume3 {
             moments: allocated(cells.len(), [0.0; 6])?,
             trial: allocated(cells.len(), [0.0; 6])?,
             time_s: None,
+            with_viscous_stress: false,
         };
         admit_bytes(result.workspace_bytes(), maximum)?;
         result.cells.copy_from_slice(cells);
@@ -279,6 +286,11 @@ impl PreparedCompressibleVolume3 {
     pub const fn config(&self) -> CompressibleVolumeConfig3 {
         self.config
     }
+    /// Whether the immutable source selection includes actual configured
+    /// viscous/SGS stress. The sampling method must preserve this choice.
+    pub const fn includes_viscous_stress(&self) -> bool {
+        self.with_viscous_stress
+    }
     pub fn workspace_bytes(&self) -> usize {
         self.cells.capacity() * size_of::<usize>()
             + self.positions.capacity() * size_of::<[f64; 3]>()
@@ -306,7 +318,7 @@ impl PreparedCompressibleVolume3 {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(), CompressibleVolumeError3> {
         poll(&mut cancelled)?;
-        if self.frozen_source() != Some(flow.gas()) {
+        if self.with_viscous_stress || self.frozen_source() != Some(flow.gas()) {
             return Err(CompressibleVolumeError3::SourceMismatch);
         }
         self.admit_sample(flow.grid(), flow.boundaries(), flow.time().value())?;
@@ -330,7 +342,7 @@ impl PreparedCompressibleVolume3 {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(), CompressibleVolumeError3> {
         poll(&mut cancelled)?;
-        if self.mixture_source() != Some(flow.gas()) {
+        if self.with_viscous_stress || self.mixture_source() != Some(flow.gas()) {
             return Err(CompressibleVolumeError3::SourceMismatch);
         }
         self.admit_sample(flow.grid(), flow.boundaries(), flow.time().value())?;

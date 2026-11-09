@@ -358,3 +358,5 @@ fn g1_native_flow_history_reaches_coherent_acoustic_bin_without_clock_or_phase_r
         );
     }
 }
+
+pub(super) mod molecular;

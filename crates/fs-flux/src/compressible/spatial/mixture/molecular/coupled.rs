@@ -272,6 +272,46 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
     pub const fn flow(&self) -> &MixtureEuler3d {
         &self.accepted
     }
+
+    /// Borrow actual accepted-endpoint primitives and viscous face tractions.
+    /// The source's Maxwell--Stefan/Fourier/full-stress operator and explicitly
+    /// configured SGS/walls are evaluated once under the supplied numerical
+    /// controls. Accepted state, clock, closure history and step loads stay put.
+    /// Failure returns no view; reusable constitutive caches may change.
+    pub fn stress_field(
+        &mut self,
+        controls: DissipationControl,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<crate::compressible::spatial::molecular::StressField3d<'_>, DissipationError> {
+        poll(&mut cancelled)?;
+        #[cfg(feature = "experimental-sgs")]
+        if let Some(mut filter) = self.molecular.sgs.as_mut()
+            .and_then(sgs::SubgridTransport::take_lagrangian_filter)
+        {
+            let result = (|| {
+                let trial = self.molecular.sgs.as_mut()
+                    .expect("selected Lagrangian mixture SGS owner")
+                    .prepare_lagrangian_with_walls(
+                        &mut filter, &self.accepted, &self.molecular.walls, &mut cancelled,
+                    )?;
+                let result = self.molecular.prepare_stress_field(&self.accepted, controls, &mut cancelled);
+                drop(trial);
+                result
+            })();
+            self.molecular.sgs.as_mut().expect("retained Lagrangian mixture SGS owner")
+                .restore_lagrangian_filter(filter, None);
+            result?;
+        } else {
+            self.molecular.prepare_stress_field(&self.accepted, controls, &mut cancelled)?;
+        }
+        #[cfg(not(feature = "experimental-sgs"))]
+        self.molecular.prepare_stress_field(&self.accepted, controls, &mut cancelled)?;
+        Ok(crate::compressible::spatial::molecular::StressField3d::mixture(
+            &self.molecular.grid, self.molecular.boundaries, self.accepted.time.value(),
+            &self.molecular.work.primitive, &self.molecular.work.flux,
+            &self.accepted.states, self.accepted.gas.species_count(),
+        ))
+    }
     /// Atomically refresh all prepared exterior profiles on both split fields.
     /// Prepare their topology/storage on the Euler field before composition.
     /// The callback and original caloric admission run once per face; the

@@ -29,6 +29,7 @@ mod driving;
 mod inertia;
 mod reservoir;
 mod stabilized;
+mod stress_observation;
 pub(super) mod timed;
 pub use adaptive::{AdaptiveDissipationControl, AdaptiveMolecularReport};
 pub use coupled::{
