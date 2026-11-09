@@ -3116,6 +3116,39 @@ capacity accounting. All 30 tests of the real constitutive module and genuine
 fs-qty/fs-blake3 dependencies passed. This is a focused native module result,
 not a full workspace gate or experimental transport qualification.
 
+### Analytic directional diffusion response
+
+The mass- and molar-frame driving-force APIs also expose analytic tangent
+evaluations for one dimensionless parameter. The caller supplies derivatives
+of composition, thermodynamic driving forces, total concentration and every
+binary diffusivity in the same original canonical order. Species and molecular
+masses stay fixed. Derivative composition closes the simplex tangent plane;
+force derivatives close Gibbs–Duhem and pair derivatives are finite symmetric
+with zero diagonal. Physical source differentiability, validity and one-sided
+paths at exact-zero composition remain explicit caller responsibilities.
+
+The tangent differentiates the original equations,
+`A z' = -c d' - c' d - A' z`, with the same reference-frame constraint.
+It evaluates both right-hand sides through the original scalar owner and
+reuses its exact matrix factors. A separate check reconstructs every
+differentiated physical row from the published value and derivative fluxes.
+The caller's original row/frame controls apply independently to both solves.
+No finite difference, concentration floor, source extrapolation or entropy
+derivative is inferred.
+
+The dedicated workspace adds two O(N) retained primal arrays; ordinary scalar
+storage and its operation tree are unchanged. All allocated capacities are
+reported, cancellation publishes no partial result, and successful evaluation
+does not allocate. The tangent operation has its own evaluator version 1.
+
+Six focused native groups cover a nonideal binary analytical derivative,
+manufactured original-row responses through 128 species in both frames with
+exact absence and positive traces, an independent interior finite-difference
+convergence ladder, zero/trace limits, derivative/source refusals, linearity,
+cancellation and storage reuse. All 36 real-module tests passed with genuine
+fs-qty/fs-blake3 dependencies. This is constitutive verification, not a coupled
+nonlinear-solver or physical-source qualification.
+
 ## Source-bound dilute-gas collision transport
 
 `transport::kinetic::KineticGasTransportV1` retains the exact original NASA

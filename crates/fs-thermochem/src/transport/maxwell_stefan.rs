@@ -17,6 +17,12 @@
 
 mod composition;
 mod factorization;
+mod tangent;
+pub use tangent::{
+    MAXWELL_STEFAN_TANGENT_EVALUATOR_VERSION_V1, MaxwellStefanDirectionV1,
+    MaxwellStefanMolarTangentEvaluationV1, MaxwellStefanTangentEvaluationV1,
+    MaxwellStefanTangentWorkspaceV1,
+};
 
 use crate::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
 use fs_qty::{AmountConcentration, MolarMass, Pressure, Temperature};
