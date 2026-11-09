@@ -245,7 +245,9 @@ pub use unsteady::{
 /// Version 9 admits only positive Kelvin at physical thermal boundaries,
 /// initial states and returned scalar/axis-aligned thermal endpoints. Signed
 /// solver increments and internal nonlinear proposals remain numerical work.
-pub const CHT_SEMANTICS_VERSION: u32 = 9;
+/// Version 10 centers SIMPLE pressure independently in each connected fluid
+/// component, retaining its native opening work and checkpoint coordinates.
+pub const CHT_SEMANTICS_VERSION: u32 = 10;
 
 /// Structured refusal from any stage of the conjugate pipeline.
 #[derive(Debug, Clone, PartialEq)]

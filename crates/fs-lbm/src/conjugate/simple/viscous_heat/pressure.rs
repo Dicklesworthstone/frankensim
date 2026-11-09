@@ -218,7 +218,7 @@ impl Solver<'_> {
                         .config
                         .pressure_at(face, self.n, self.domain.coords(c))
                         .expect("admitted pressure mouth")
-                        - self.pressure_reference_pa;
+                        - self.pressure_reference_pa.at(c);
                     power[face] = finite_value(
                         "pressure_heat.reservoir_work",
                         power[face] - pressure * field.outward(self.domain, c, face),

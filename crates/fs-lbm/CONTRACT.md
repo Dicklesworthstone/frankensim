@@ -1,3 +1,29 @@
+## Independent pressure datums in disconnected finite-volume flow
+
+The native SIMPLE owner centers pressure independently in each face-connected
+fluid component. Its first exposed pressure reservoir, in native face/plane
+order, selects the numerical datum; a component reaching a face fan retains
+that fan's ambient zero. Solids and unrelated components cannot choose its
+datum. Pressure differences drive the original momentum and pressure-correction
+equations. Reported cell pressure restores each component's authored reference,
+while pressure-work heat uses the same local reference as momentum.
+
+A large constant offset in a separate duct therefore cannot launch a spurious
+startup flow, erase a small driving head, or overflow pressure admission across
+regions that exchange no fluid. Connected/common-datum cases retain scalar
+reference storage. Connectivity is resolved at initialization; no new
+per-step graph traversal, pressure solve or matrix is introduced. Native
+momentum checkpoints retain the reference map and rebase their pressure guess
+when a changed phase mask joins or splits components.
+
+Five focused regression definitions cover all-axis Poiseuille flow with
+independent offsets, exact rest at unequal component pressures, pressure-work
+and physical-heat invariance, checkpoint restoration/topology changes, and
+fan-ambient ownership. Execution of these new regressions is pending because
+the development executor became unavailable. These are incompressible
+mechanical-pressure coordinates, not a gas EOS or a new pressure boundary law.
+Result-changing conjugate semantics advance to version 10.
+
 ## Source-owned nonisothermal turbulent species mixing
 
 `FvFlow::diffuse_turbulent_gas_species` connects the original momentum eddy

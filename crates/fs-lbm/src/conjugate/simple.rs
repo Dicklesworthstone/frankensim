@@ -494,40 +494,95 @@ pub struct SimpleConfig {
 }
 
 impl SimpleConfig {
-    // Work on pressure differences so atmospheric-sized common offsets do not
-    // enter the small momentum/correction residuals. A face fan draws from its
-    // declared ambient zero and therefore retains that numerical datum.
-    fn pressure_reference_pa(&self, domain: &VoxelDomain) -> f64 {
-        if self.fan.is_some() {
-            0.0
+    // Each disconnected fluid region has its own numerical pressure datum.
+    // Atmospheric-sized offsets in one region must not enter another's small
+    // momentum/correction residuals. A face fan retains its ambient zero.
+    fn pressure_reference_pa(&self, domain: &VoxelDomain) -> PressureReferences {
+        let n = domain.dims();
+        let pressure = |cell: usize, side: usize| {
+            self.faces[side].prescribed_pressure().and_then(|uniform| {
+                let at = domain.coords(cell);
+                let index = match side / 2 {
+                    0 => at[1] + n[1] * at[2],
+                    1 => at[0] + n[0] * at[2],
+                    _ => at[0] + n[0] * at[1],
+                };
+                // Shape admission follows datum selection. A malformed
+                // profile is refused there, never indexed out of bounds here.
+                self.pressure_profiles_pa[side]
+                    .as_ref()
+                    .map_or(Some(uniform), |values| values.get(index).copied())
+                    .map(|value| ((side, index), value))
+            })
+        };
+        if self.faces.iter().all(|face| face.prescribed_pressure().is_none()) {
+            return PressureReferences::Uniform(0.0);
+        }
+        // The ordinary all-fluid domain has only one connected component.
+        // Retain its original face-first datum and allocation-free storage.
+        if (0..domain.cell_count()).all(|cell| domain.is_fluid(cell)) {
+            if self.fan.is_some() {
+                return PressureReferences::Uniform(0.0);
+            }
+            for side in 0..6 {
+                let cell = Self::pressure_profile_cell(domain, side, 0);
+                if let Some((_, value)) = pressure(cell, side) {
+                    return PressureReferences::Uniform(value);
+                }
+            }
+            return PressureReferences::Uniform(0.0);
+        }
+
+        let mut visited = vec![false; domain.cell_count()];
+        let mut values = vec![0.0; domain.cell_count()];
+        let mut component = Vec::new();
+        let mut first_reference = None;
+        let mut uniform = true;
+        for start in 0..domain.cell_count() {
+            if visited[start] || !domain.is_fluid(start) {
+                continue;
+            }
+            component.clear();
+            component.push(start);
+            visited[start] = true;
+            let mut cursor = 0;
+            let mut chosen: Option<((usize, usize), f64)> = None;
+            let mut fan_ambient = false;
+            while cursor < component.len() {
+                let cell = component[cursor];
+                cursor += 1;
+                for side in 0..6 {
+                    if let Some(neighbor) = domain.neighbor(cell, side) {
+                        if domain.is_fluid(neighbor) && !visited[neighbor] {
+                            visited[neighbor] = true;
+                            component.push(neighbor);
+                        }
+                    } else {
+                        fan_ambient |= self.fan.is_some_and(|fan| fan.face as usize == side);
+                        if let Some(candidate) = pressure(cell, side)
+                            && chosen.is_none_or(|previous| candidate.0 < previous.0)
+                        {
+                            chosen = Some(candidate);
+                        }
+                    }
+                }
+            }
+            // A fan uses physical pressure relative to its own ambient zero.
+            // Only components that meet that fan inherit this fixed datum.
+            let reference = if fan_ambient {
+                0.0
+            } else {
+                chosen.map_or(0.0, |x| x.1)
+            };
+            uniform &= *first_reference.get_or_insert(reference) == reference;
+            for &cell in &component {
+                values[cell] = reference;
+            }
+        }
+        if uniform {
+            PressureReferences::Uniform(first_reference.unwrap_or(0.0))
         } else {
-            self.faces
-                .iter()
-                .enumerate()
-                .find_map(|(side, face)| {
-                    face.prescribed_pressure().and_then(|uniform| {
-                        self.pressure_profiles_pa[side]
-                            .as_ref()
-                            .map_or(Some(uniform), |profile| {
-                                let n = domain.dims();
-                                let axis = side / 2;
-                                // Shape admission follows this datum selection.
-                                // Never interpret excess malformed entries as cells.
-                                profile
-                                    .iter()
-                                    .take(n[(axis + 1) % 3] * n[(axis + 2) % 3])
-                                    .enumerate()
-                                    .find_map(|(index, &pressure)| {
-                                        domain
-                                            .is_fluid(Self::pressure_profile_cell(
-                                                domain, side, index,
-                                            ))
-                                            .then_some(pressure)
-                                    })
-                            })
-                    })
-                })
-                .unwrap_or(0.0)
+            PressureReferences::ByCell(values)
         }
     }
 
@@ -561,7 +616,11 @@ impl SimpleConfig {
         })
     }
 
-    fn admit_pressure_data(&self, domain: &VoxelDomain, reference: f64) -> Result<(), ChtError> {
+    fn admit_pressure_data(
+        &self,
+        domain: &VoxelDomain,
+        reference: &PressureReferences,
+    ) -> Result<(), ChtError> {
         let n = domain.dims();
         for (side, face) in self.faces.iter().enumerate() {
             if let Some(profile) = &self.pressure_profiles_pa[side] {
@@ -582,18 +641,25 @@ impl SimpleConfig {
                 }
                 for (index, &pressure) in profile.iter().enumerate() {
                     finite("simple.pressure_profiles_pa", pressure)?;
-                    if domain.is_fluid(Self::pressure_profile_cell(domain, side, index)) {
+                    let cell = Self::pressure_profile_cell(domain, side, index);
+                    if domain.is_fluid(cell) {
                         finite(
                             "simple.pressure_difference_pa",
-                            2.0 * (pressure - reference),
+                            2.0 * (pressure - reference.at(cell)),
                         )?;
                     }
                 }
             } else if let Some(pressure) = face.prescribed_pressure() {
-                finite(
-                    "simple.pressure_difference_pa",
-                    2.0 * (pressure - reference),
-                )?;
+                let axis = side / 2;
+                for index in 0..n[(axis + 1) % 3] * n[(axis + 2) % 3] {
+                    let cell = Self::pressure_profile_cell(domain, side, index);
+                    if domain.is_fluid(cell) {
+                        finite(
+                            "simple.pressure_difference_pa",
+                            2.0 * (pressure - reference.at(cell)),
+                        )?;
+                    }
+                }
             }
         }
         Ok(())
@@ -774,6 +840,42 @@ struct MomentumResidual {
     absolute_force_n: f64,
 }
 
+/// Numerical coordinates only: every active face inside one fluid component
+/// sees the same reference. The usual common-datum case retains scalar storage.
+#[derive(Debug, Clone, PartialEq)]
+enum PressureReferences {
+    Uniform(f64),
+    ByCell(Vec<f64>),
+}
+
+impl PressureReferences {
+    fn at(&self, cell: usize) -> f64 {
+        match self {
+            Self::Uniform(value) => *value,
+            Self::ByCell(values) => values[cell],
+        }
+    }
+
+    #[cfg(feature = "enthalpy-coupling")]
+    fn admit(&self, cells: usize) -> Result<(), ChtError> {
+        match self {
+            Self::Uniform(value) => finite("simple.momentum_pressure_reference_pa", *value),
+            Self::ByCell(values) => {
+                if values.len() != cells {
+                    return Err(ChtError::InvalidInput {
+                        field: "simple.momentum_pressure_reference_pa",
+                        reason: "retained component references must match the native domain".into(),
+                    });
+                }
+                for &value in values {
+                    finite("simple.momentum_pressure_reference_pa", value)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 pub(super) struct Solver<'a> {
     domain: &'a VoxelDomain,
     config: &'a SimpleConfig,
@@ -796,8 +898,8 @@ pub(super) struct Solver<'a> {
     vel: [Vec<f64>; 3],
     /// Iterated pressure differences from `pressure_reference_pa`.
     pressure: Vec<f64>,
-    /// Fixed numerical datum restored only when reporting physical pressure.
-    pressure_reference_pa: f64,
+    /// Component-local numerical datums restored only for physical readback.
+    pressure_reference_pa: PressureReferences,
     /// SIMPLEC `d` per face (0 for non-unknown faces until set).
     d: [Vec<f64>; 3],
     /// Krylov iterations spent on momentum and pressure correction.
@@ -858,7 +960,7 @@ pub(super) struct Solver<'a> {
 pub(super) struct MomentumState {
     velocity: [Vec<f64>; 3],
     pressure: Vec<f64>,
-    pressure_reference_pa: f64,
+    pressure_reference_pa: PressureReferences,
 }
 
 #[cfg(feature = "enthalpy-coupling")]
@@ -1510,7 +1612,8 @@ impl<'a> Solver<'a> {
             .cells
             .iter()
             .map(|&c| {
-                (self.pressure[c] + self.pressure_reference_pa) * self.domain.face_area(c, axis)
+                (self.pressure[c] + self.pressure_reference_pa.at(c))
+                    * self.domain.face_area(c, axis)
             })
             .sum::<f64>()
             / fan.area.max(f64::MIN_POSITIVE);
@@ -1678,7 +1781,7 @@ impl<'a> Solver<'a> {
         MomentumState {
             velocity: self.vel.clone(),
             pressure: self.pressure.clone(),
-            pressure_reference_pa: self.pressure_reference_pa,
+            pressure_reference_pa: self.pressure_reference_pa.clone(),
         }
     }
 
@@ -1697,12 +1800,19 @@ impl<'a> Solver<'a> {
                 reason: "retained momentum must match the native staggered domain".into(),
             });
         }
-        finite(
-            "simple.momentum_pressure_reference_pa",
-            state.pressure_reference_pa,
-        )?;
-        self.config
-            .admit_pressure_data(self.domain, state.pressure_reference_pa)?;
+        state.pressure_reference_pa.admit(self.domain.cell_count())?;
+        // A changed phase mask can join or split fluid components. Retain the
+        // new topology's common datum on every connected face, and rebase the
+        // pressure guess without first restoring a large absolute pressure.
+        for (cell, &pressure) in state.pressure.iter().enumerate() {
+            let rebased = pressure + (state.pressure_reference_pa.at(cell)
+                - self.pressure_reference_pa.at(cell));
+            finite("simple.momentum_pressure", rebased)?;
+            finite(
+                "simple.momentum_pressure",
+                rebased + self.pressure_reference_pa.at(cell),
+            )?;
+        }
         // Opening a formerly constrained face retains its exact zero speed.
         // Closing one is admissible only if it already satisfies the new
         // constraint. Never clip a live velocity and silently delete its
@@ -1721,7 +1831,13 @@ impl<'a> Solver<'a> {
         }
         self.vel.clone_from(&state.velocity);
         self.pressure.clone_from(&state.pressure);
-        self.pressure_reference_pa = state.pressure_reference_pa;
+        for (cell, pressure) in self.pressure.iter_mut().enumerate() {
+            let difference = state.pressure_reference_pa.at(cell)
+                - self.pressure_reference_pa.at(cell);
+            if difference != 0.0 {
+                *pressure += difference;
+            }
+        }
         self.guard_finite()
     }
 
@@ -1887,7 +2003,10 @@ impl<'a> Solver<'a> {
             && self
                 .pressure
                 .iter()
-                .all(|p| p.is_finite() && (*p + self.pressure_reference_pa).is_finite());
+                .enumerate()
+                .all(|(cell, p)| {
+                    p.is_finite() && (*p + self.pressure_reference_pa.at(cell)).is_finite()
+                });
         if finite {
             Ok(())
         } else {
@@ -2299,7 +2418,8 @@ impl<'a> Solver<'a> {
                         .config
                         .pressure_at(2 * a + usize::from(plus), self.n, f)
                         .expect("pressure-opening topology");
-                    let pressure = boundary - self.pressure_reference_pa;
+                    let interior = cell_of(self.n, if plus { minus_cell } else { plus_cell });
+                    let pressure = boundary - self.pressure_reference_pa.at(interior);
                     if pressure == 0.0 {
                         if plus {
                             2.0 * self.pressure[cell_of(self.n, minus_cell)]
@@ -2678,7 +2798,7 @@ pub(super) fn admit(
             FvBoundary::Symmetry | FvBoundary::Outlet => {}
         }
     }
-    config.admit_pressure_data(domain, config.pressure_reference_pa(domain))?;
+    config.admit_pressure_data(domain, &config.pressure_reference_pa(domain))?;
     if let Some(fan) = config.fan
         && !matches!(config.faces[fan.face as usize], FvBoundary::Inlet { .. })
     {
@@ -2792,8 +2912,9 @@ impl Solver<'_> {
                 self.pressure[c] = 0.0;
                 continue;
             }
-            if self.pressure_reference_pa != 0.0 {
-                self.pressure[c] += self.pressure_reference_pa;
+            let reference = self.pressure_reference_pa.at(c);
+            if reference != 0.0 {
+                self.pressure[c] += reference;
             }
             let at = domain.coords(c);
             for a in 0..3 {

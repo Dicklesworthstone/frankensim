@@ -637,7 +637,7 @@ fn spatial_pressure_balances_hydrostatic_force_without_changing_channel_flow() {
         for cell in 0..domain.cell_count() {
             let at = domain.coords(cell);
             rest.pressure[cell] =
-                hydrostatic(domain.center(at[0], at[1], at[2])) - rest.pressure_reference_pa;
+                hydrostatic(domain.center(at[0], at[1], at[2])) - rest.pressure_reference_pa.at(cell);
         }
         for component in 0..3 {
             assert_eq!(rest.momentum(component, false, &gate).unwrap().rms, 0.0);
@@ -798,4 +798,197 @@ fn spatial_pressure_refuses_incompatible_shape_role_values_and_cancellation() {
         simple_flow(&domain, &fluid(), &valid, &gate),
         Err(ChtError::Cancelled)
     ));
+}
+
+
+fn separated_pressure_channels(
+    axis: usize,
+    offsets: [f64; 2],
+    heads: [f64; 2],
+) -> (VoxelDomain, SimpleConfig) {
+    use crate::conjugate::Voxel;
+
+    let split = (axis + 1) % 3;
+    let mut widths = [vec![1.0], vec![1.0], vec![1.0]];
+    widths[axis] = vec![0.25; 8];
+    widths[split] = vec![0.5; 5];
+    let mut domain = VoxelDomain::graded(widths).unwrap();
+    for cell in 0..domain.cell_count() {
+        let at = domain.coords(cell);
+        if at[split] == 2 {
+            domain.set(at[0], at[1], at[2], Voxel::Solid(0));
+        }
+    }
+    let mut faces = [FvBoundary::Symmetry; 6];
+    faces[2 * axis] = FvBoundary::Outlet;
+    faces[2 * axis + 1] = FvBoundary::Outlet;
+    faces[2 * split] = FvBoundary::wall();
+    faces[2 * split + 1] = FvBoundary::wall();
+    let mut config = SimpleConfig::new(faces);
+    config.tolerance = 1e-10;
+    config.pressure_tolerance = 1e-12;
+    config.pressure_profiles_pa[2 * axis] = Some(vec![
+        offsets[0] + heads[0], offsets[0] + heads[0], 0.0,
+        offsets[1] + heads[1], offsets[1] + heads[1],
+    ]);
+    config.pressure_profiles_pa[2 * axis + 1] = Some(vec![
+        offsets[0], offsets[0], 0.0, offsets[1], offsets[1],
+    ]);
+    (domain, config)
+}
+
+/// G1/G3: disconnected Poiseuille flows depend on their own pressure heads,
+/// including heads small compared with an unrelated component's datum.
+#[test]
+fn disconnected_pressure_components_preserve_small_heads_on_all_axes() {
+    let gate = CancelGate::new();
+    let offsets = [1_048_576.0, -1_099_511_627_776.0];
+    for axis in 0..3 {
+        let (domain, base_config) = separated_pressure_channels(axis, [0.0; 2], [0.5, -0.25]);
+        let (_, shifted_config) = separated_pressure_channels(axis, offsets, [0.5, -0.25]);
+        let base = simple_flow(&domain, &fluid(), &base_config, &gate).unwrap();
+        let shifted = simple_flow(&domain, &fluid(), &shifted_config, &gate).unwrap();
+        assert_eq!(shifted.velocity_m_s, base.velocity_m_s);
+        assert_eq!(shifted.field, base.field);
+        assert_eq!(shifted.report, base.report);
+        let split = (axis + 1) % 3;
+        let mut flow = [0.0; 2];
+        for cell in 0..domain.cell_count() {
+            if !domain.is_fluid(cell) {
+                assert_eq!(shifted.pressure_pa[cell], 0.0);
+                continue;
+            }
+            let at = domain.coords(cell);
+            let region = usize::from(at[split] > 2);
+            let pressure_error =
+                shifted.pressure_pa[cell] - offsets[region] - base.pressure_pa[cell];
+            assert!(pressure_error.abs() <= 2.0 * f64::EPSILON * offsets[region].abs());
+            if domain.neighbor(cell, 2 * axis + 1).is_none() {
+                flow[region] += shifted.field.outward(&domain, cell, 2 * axis + 1);
+            }
+        }
+        // Each H=1, L=2, mu=1/4 duct has two transverse cells. The native
+        // midpoint discretization gives Q=dp H^3/(12 mu L)*(1+2/2^2).
+        assert!((flow[0] - 0.125).abs() < 1e-8, "{axis}: {flow:?}");
+        assert!((flow[1] + 0.0625).abs() < 1e-8, "{axis}: {flow:?}");
+    }
+}
+
+/// G0/G3: a pressure difference between disconnected regions does no work
+/// and must not enter admission, momentum or the pressure residual.
+#[test]
+fn unequal_disconnected_constant_pressures_start_and_remain_at_rest() {
+    let gate = CancelGate::new();
+    for offsets in [[-1_048_576.0, 1_048_576.0], [-f64::MAX, f64::MAX]] {
+        let (domain, config) = separated_pressure_channels(0, offsets, [0.0; 2]);
+        let rest = simple_flow(&domain, &fluid(), &config, &gate).unwrap();
+        assert!(rest.velocity_m_s.iter().all(|v| *v == [0.0; 3]));
+        assert_eq!(rest.report.inflow_m3_s, 0.0);
+        assert_eq!(rest.report.outflow_m3_s, 0.0);
+        for cell in 0..domain.cell_count() {
+            let at = domain.coords(cell);
+            let expected = if at[1] == 2 { 0.0 } else { offsets[usize::from(at[1] > 2)] };
+            assert_eq!(rest.pressure_pa[cell], expected);
+        }
+    }
+}
+
+/// G3: each source's pressure-flow work retains the same numerical datum as
+/// its native momentum equations; large offsets cannot become viscous heat.
+#[test]
+fn disconnected_pressure_work_and_heat_ignore_independent_offsets() {
+    use super::viscous_heat::{ViscousHeatControls, creeping_flow_with_pressure_work_heat};
+
+    let (domain, mut config) = separated_pressure_channels(0, [0.0; 2], [0.5, -0.25]);
+    config.tolerance = 1e-11;
+    config.momentum_tolerance = 1e-10;
+    let mu = vec![100.0; domain.cell_count()];
+    let controls = ViscousHeatControls { maximum_reynolds: 0.1, power_tolerance_w: 1e-8 };
+    let gate = CancelGate::new();
+    let (flow, heat) =
+        creeping_flow_with_pressure_work_heat(&domain, &fluid(), &mu, &config, controls, &gate)
+            .unwrap();
+    let mut supply = 0.0;
+    for y in [0, 1] {
+        supply += 0.5 * flow.field.flux_x(0, y, 0);
+    }
+    for y in [3, 4] {
+        supply -= 0.25 * flow.field.flux_x(0, y, 0);
+    }
+    assert!(supply > 0.0);
+    assert!((supply - heat.supplied_pressure_power_w).abs() < 1e-10);
+    assert!((supply - heat.heat_w).abs() < controls.power_tolerance_w);
+    for profile in config.pressure_profiles_pa.iter_mut().flatten() {
+        for (row, pressure) in profile.iter_mut().enumerate() {
+            if row < 2 {
+                *pressure += 1_099_511_627_776.0;
+            } else if row > 2 {
+                *pressure -= 1_099_511_627_776.0;
+            }
+        }
+    }
+    let (shifted, shifted_heat) =
+        creeping_flow_with_pressure_work_heat(&domain, &fluid(), &mu, &config, controls, &gate)
+            .unwrap();
+    assert_eq!(shifted.velocity_m_s, flow.velocity_m_s);
+    assert_eq!(shifted_heat.cell_heat_w, heat.cell_heat_w);
+    assert_eq!(shifted_heat.pressure_power_w, heat.pressure_power_w);
+    assert!(shifted_heat.residual_w.abs() < controls.power_tolerance_w);
+}
+
+#[cfg(feature = "enthalpy-coupling")]
+#[test]
+fn component_pressure_checkpoint_retains_datums_and_rebases_joined_regions() {
+    use crate::conjugate::Voxel;
+
+    let (domain, config) = separated_pressure_channels(0, [1024.0, -2048.0], [0.5, -0.25]);
+    let fluid = fluid();
+    let gate = CancelGate::new();
+    let mut solver = Solver::new(&domain, &fluid, &config);
+    for _ in 0..5 {
+        solver.sweep(&gate).unwrap();
+    }
+    let state = solver.momentum_state();
+    let mut restored = Solver::new(&domain, &fluid, &config);
+    restored.restore_momentum(&state).unwrap();
+    assert_eq!(restored.pressure, solver.pressure);
+    assert_eq!(restored.pressure_reference_pa, solver.pressure_reference_pa);
+    assert_eq!(restored.vel, solver.vel);
+
+    // Opening the original divider changes only previously fixed zero faces.
+    // The new connected pressure field must use one common coordinate chart.
+    let mut joined = domain.clone();
+    for x in 0..8 {
+        joined.set(x, 2, 0, Voxel::Fluid);
+    }
+    let mut restored = Solver::new(&joined, &fluid, &config);
+    restored.restore_momentum(&state).unwrap();
+    assert!(matches!(restored.pressure_reference_pa, PressureReferences::Uniform(_)));
+    for cell in 0..domain.cell_count() {
+        if domain.is_fluid(cell) {
+            let before = state.pressure[cell] + state.pressure_reference_pa.at(cell);
+            let after = restored.pressure[cell] + restored.pressure_reference_pa.at(cell);
+            assert!((before - after).abs() <= 4.0 * f64::EPSILON * before.abs());
+        }
+    }
+}
+
+#[test]
+fn fan_ambient_does_not_choose_an_unconnected_reservoir_datum() {
+    use crate::conjugate::Voxel;
+
+    let (mut domain, mut config) = separated_pressure_channels(0, [0.0, 1_048_576.0], [0.0; 2]);
+    for y in [3, 4] {
+        domain.set(0, y, 0, Voxel::Solid(0));
+    }
+    config.faces[0] = FvBoundary::Inlet { velocity: [0.1, 0.0, 0.0] };
+    config.pressure_profiles_pa[0] = None;
+    config.fan = Some(FanInlet {
+        face: Face3::XMin,
+        curve: FanCurve::new(&[(0.0, 1.0), (1.0, 0.0)]).unwrap(),
+    });
+    admit(&domain, &fluid(), &config).unwrap();
+    let references = config.pressure_reference_pa(&domain);
+    assert_eq!(references.at(domain.index(0, 0, 0)), 0.0);
+    assert_eq!(references.at(domain.index(1, 3, 0)), 1_048_576.0);
 }

@@ -946,7 +946,7 @@ impl Solver<'_> {
             add(
                 &mut pressure_constraint_power_w,
                 (if self.pressure_work_axis.is_some() {
-                    pressure_pa[c] - self.pressure_reference_pa
+                    pressure_pa[c] - self.pressure_reference_pa.at(c)
                 } else { pressure_pa[c] }) * outward,
             )?;
         }
