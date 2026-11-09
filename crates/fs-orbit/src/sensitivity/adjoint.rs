@@ -1,4 +1,4 @@
-//! Implicit objective gradients through the original forced harmonic balance.
+//! Implicit objective gradients through the original square harmonic balance.
 
 use super::{
     ForcedParameterPoint, ForcedSensitivityDirection, ForcedSensitivityError,
@@ -71,20 +71,34 @@ impl PreparedForcedSensitivity {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PreparedForcedAdjoint<'_>> {
         poll(&mut cancelled)?;
-        let n = self.pack.coeff_len();
-        if self.pack.omega_slot.is_some()
-            || self.phase.is_some()
-            || self.amplitude.is_some()
+        if self.pack.omega_slot.is_some() || self.phase.is_some() || self.amplitude.is_some() {
+            return Err(invalid("forced adjoint requires a fixed forcing clock"));
+        }
+        self.prepare_square_adjoint(objective_gradient, objective_scale, cancelled)
+    }
+
+    // The autonomous facade appends q_omega and retains its original phase row.
+    // Both facades use this SAME square factor, refinement and physical checks.
+    pub(super) fn prepare_square_adjoint(
+        &mut self,
+        objective_gradient: &[f64],
+        objective_scale: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedForcedAdjoint<'_>> {
+        poll(&mut cancelled)?;
+        let nc = self.pack.coeff_len();
+        let n = self.scales.columns.len();
+        if self.amplitude.is_some()
             || objective_gradient.len() != n
             || objective_gradient.iter().any(|v| !v.is_finite())
             || !positive(objective_scale)
         {
             return Err(invalid(
-                "forced adjoint needs a complete finite real objective gradient and positive objective scale",
+                "square adjoint needs a complete finite real objective gradient and positive objective scale",
             ));
         }
         let SensitivityFactor::Square(factor) = &self.factor else {
-            return Err(invalid("forced adjoint requires the original square LU"));
+            return Err(invalid("objective adjoint requires the original square LU"));
         };
         let rhs = objective_gradient
             .iter()
@@ -98,7 +112,7 @@ impl PreparedForcedSensitivity {
         for iteration in 0..=3 {
             poll(&mut cancelled)?;
             if solution.iter().any(|v| !v.is_finite()) {
-                return Err(invalid("finite forced objective adjoint required"));
+                return Err(invalid("finite objective adjoint required"));
             }
             relative_residual = transpose_residual(
                 &self.normalized,
@@ -121,19 +135,34 @@ impl PreparedForcedSensitivity {
             .map(|(&value, &unit)| scaled(value, objective_scale, unit))
             .collect::<Result<Vec<_>>>()?;
         let mut dual_residual: f64 = 0.0;
+        let normalized_phase_weight = if self.phase.is_some() {
+            scaled(weights[nc], 1.0, objective_scale)?
+        } else {
+            0.0
+        };
         for matrix in [&self.coarse_jacobian, &self.fine_jacobian] {
             let mut norm = 0.0;
             for col in 0..n {
                 poll(&mut cancelled)?;
                 let mut defect = Dd::from_f64(-objective_gradient[col]);
-                for row in 0..n {
+                for row in 0..nc {
                     defect =
                         defect + Dd::from_f64(matrix[row * n + col]) * Dd::from_f64(weights[row]);
                 }
-                norm = det::hypot(
-                    norm,
-                    scaled(defect.to_f64(), self.scales.columns[col], objective_scale)?,
-                );
+                let mut normalized_defect = Dd::from_f64(scaled(
+                    defect.to_f64(),
+                    self.scales.columns[col],
+                    objective_scale,
+                )?);
+                if let Some(phase) = &self.phase {
+                    // Raw Jacobian caches contain ORIGINAL balance rows only.
+                    // Keep the dimensionless phase row in its admitted chart;
+                    // forming phase_X in reciprocal state units can overflow.
+                    normalized_defect = normalized_defect
+                        + Dd::from_f64(phase.scaled_derivative(col, self.scales.columns[col]))
+                            * Dd::from_f64(normalized_phase_weight);
+                }
+                norm = det::hypot(norm, normalized_defect.to_f64());
             }
             dual_residual = dual_residual.max(norm);
         }
@@ -182,16 +211,17 @@ impl PreparedForcedAdjoint<'_> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ForcedObjectiveGradient> {
         admit_objective_direction(direction, explicit_derivative, &mut cancelled)?;
+        let nc = self.prepared.pack.coeff_len();
         let mut columns = Vec::with_capacity(2);
         for samples in [self.prepared.coarse.samples, self.prepared.fine.samples] {
             poll(&mut cancelled)?;
-            let mut column = vec![f64::NAN; self.weights.len()];
+            let mut column = vec![f64::NAN; nc];
             let point = ForcedParameterPoint {
                 parameter: direction.parameter,
                 angular_frequency: self.prepared.omega,
                 harmonics: self.prepared.pack.n_harm,
                 aft_samples: samples,
-                coefficients: &self.prepared.coefficients,
+                coefficients: &self.prepared.coefficients[..nc],
             };
             if !residual_direction(point, &mut column) || column.iter().any(|v| !v.is_finite()) {
                 return Err(ForcedSensitivityError::DirectionRefused { samples });
@@ -258,7 +288,9 @@ impl PreparedForcedAdjoint<'_> {
     ) -> Result<ForcedObjectiveGradient> {
         let mut values = [Dd::from_f64(explicit); 2];
         let mut direction_sampling_defect = 0.0;
-        for row in 0..self.weights.len() {
+        // The authored phase reference is fixed, so its direct parameter
+        // partial is zero. Its weight still participates in the dual solve.
+        for row in 0..self.prepared.pack.coeff_len() {
             poll(cancelled)?;
             let weight = Dd::from_f64(self.weights[row]);
             values[0] = values[0] - weight * Dd::from_f64(coarse[row]);
@@ -340,7 +372,9 @@ fn transpose_residual(
             (residual / magnitude).to_f64().abs()
         };
         if !relative.is_finite() || !correction[col].is_finite() {
-            return Err(invalid("forced adjoint transpose residual must be finite"));
+            return Err(invalid(
+                "objective adjoint transpose residual must be finite",
+            ));
         }
         maximum = maximum.max(relative);
     }

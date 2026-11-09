@@ -466,3 +466,368 @@ fn refused_unresolved_and_cancelled_directions_leave_original_factor_reusable() 
         .unwrap();
     problem.verify(&orbit, &result, true);
 }
+
+fn near(actual: f64, expected: f64, tolerance: f64) {
+    assert!(
+        (actual - expected).abs() < tolerance * (1.0 + expected.abs()),
+        "{actual:.17e} vs {expected:.17e}"
+    );
+}
+
+// Observation mixes the offset, oscillating coordinates and SECOND-harmonic
+// material memory. Its mean square uses all real Fourier-coordinate partials.
+fn cycle_objective(problem: &MemoryCycle, orbit: &HbOrbit) -> (f64, Vec<f64>) {
+    let weights = [0.6, 1.0, -0.4, 0.7, 0.2];
+    let mut value = 0.2 * orbit.omega * orbit.omega + 0.07 * problem.p * problem.p;
+    let mut gradient = vec![0.0; 35];
+    for n in 0..=3 {
+        let mut observed = C64::ZERO;
+        for j in 0..5 {
+            observed = observed + orbit.coeffs[j][n].scale(weights[j] / problem.states[j]);
+        }
+        value += if n == 0 {
+            observed.re * observed.re
+        } else {
+            2.0 * (observed.re * observed.re + observed.im * observed.im)
+        };
+        for j in 0..5 {
+            let weight = weights[j] / problem.states[j];
+            if n == 0 {
+                gradient[j] = 2.0 * weight * observed.re;
+            } else {
+                let re = 5 + (n - 1) * 10 + j;
+                gradient[re] = 4.0 * weight * observed.re;
+                gradient[re + 5] = 4.0 * weight * observed.im;
+            }
+        }
+    }
+    (value, gradient)
+}
+
+fn contract_waveform(gradient: &[f64], response: &AutonomousOrbitSensitivity) -> f64 {
+    let mut total = 0.0;
+    for j in 0..5 {
+        total += gradient[j] * response.coeffs[j][0].re;
+        for n in 1..=3 {
+            let re = 5 + (n - 1) * 10 + j;
+            total += gradient[re] * response.coeffs[j][n].re
+                + gradient[re + 5] * response.coeffs[j][n].im;
+        }
+    }
+    total
+}
+
+#[test]
+fn autonomous_objective_keeps_material_frequency_and_complete_physical_units() {
+    for (converted, phase) in [(false, 0.37), (true, -1.1)] {
+        let problem = MemoryCycle::new(converted);
+        let orbit = problem.orbit(phase);
+        let frequency_calls = Cell::new(0);
+        let mut prepared = PreparedAutonomousSensitivity::new(
+            &problem,
+            &orbit,
+            &reference(&orbit),
+            controls(),
+            &problem.scales(),
+            |point, out| {
+                frequency_calls.set(frequency_calls.get() + 1);
+                problem.frequency_column(point, out)
+            },
+            || false,
+        )
+        .unwrap();
+        let counts = (
+            problem.island_calls.get(),
+            problem.tangent_calls.get(),
+            frequency_calls.get(),
+        );
+        let forward = prepared
+            .solve(
+                problem.parameter_unit,
+                |point, out| problem.parameter_column(point, out),
+                || false,
+            )
+            .unwrap();
+        let (_, mut gradient) = cycle_objective(&problem, &orbit);
+        let objective_unit = if converted { 1e7 } else { 1.0 };
+        for value in &mut gradient {
+            *value *= objective_unit;
+        }
+        let q_omega = 0.4 * orbit.omega * objective_unit;
+        let q_p = 0.14 * problem.p * objective_unit / problem.parameter_unit;
+        let chain = q_p
+            + contract_waveform(&gradient, &forward)
+            + q_omega * forward.angular_frequency_derivative;
+        let adjoint = prepared
+            .prepare_adjoint(&gradient, q_omega, objective_unit, || false)
+            .unwrap();
+        assert_eq!(adjoint.residual_weights().len(), 35);
+        assert!(adjoint.relative_residual() < 1e-12 && adjoint.dual_residual() < 1e-10);
+        let calls = Cell::new(0);
+        let result = adjoint
+            .gradient(
+                problem.parameter_unit,
+                q_p,
+                |point, out| {
+                    calls.set(calls.get() + 1);
+                    assert_eq!(point.coefficients.len(), 35);
+                    assert_eq!(out.len(), 35); // No synthetic phase row or omega slot.
+                    problem.parameter_column(point, out)
+                },
+                || false,
+            )
+            .unwrap();
+        assert_eq!(calls.get(), 2);
+        near(
+            result.derivative * problem.parameter_unit / objective_unit,
+            chain * problem.parameter_unit / objective_unit,
+            5e-11,
+        );
+        let step = 1e-5;
+        let mut low = MemoryCycle::new(converted);
+        let mut high = MemoryCycle::new(converted);
+        low.p -= step;
+        high.p += step;
+        let independently_resolved = (cycle_objective(&high, &high.orbit(phase)).0
+            - cycle_objective(&low, &low.orbit(phase)).0)
+            / (2.0 * step);
+        near(
+            result.derivative * problem.parameter_unit / objective_unit,
+            independently_resolved,
+            3e-9,
+        );
+        assert_eq!(
+            counts,
+            (
+                problem.island_calls.get(),
+                problem.tangent_calls.get(),
+                frequency_calls.get()
+            )
+        );
+    }
+}
+
+// Independently align the analytic family to the ORIGINAL full-waveform
+// Parseval hyperplane. This is not a new HB solve or the production phase owner.
+fn aligned_cycle(problem: &MemoryCycle, reference: &HbOrbit, mut phase: f64) -> HbOrbit {
+    for _ in 0..8 {
+        let candidate = problem.orbit(phase);
+        let (mut defect, mut slope) = (0.0, 0.0);
+        for j in 0..5 {
+            for n in 1..=3 {
+                let r = reference.coeffs[j][n].scale(1.0 / problem.states[j]);
+                let c = candidate.coeffs[j][n].scale(1.0 / problem.states[j]);
+                defect += n as f64 * (r.re * c.im - r.im * c.re);
+                slope += (n * n) as f64 * (r.re * c.re + r.im * c.im);
+            }
+        }
+        phase -= defect / slope;
+    }
+    problem.orbit(phase)
+}
+
+#[test]
+fn phase_sensitive_objective_retains_the_original_gauge_weight_and_dual_row() {
+    let problem = MemoryCycle::new(true);
+    let phase = 0.63;
+    let orbit = problem.orbit(phase);
+    let mut prepared = PreparedAutonomousSensitivity::new(
+        &problem,
+        &orbit,
+        &reference(&orbit),
+        controls(),
+        &problem.scales(),
+        |point, out| problem.frequency_column(point, out),
+        || false,
+    )
+    .unwrap();
+    let forward = prepared
+        .solve(
+            problem.parameter_unit,
+            |point, out| problem.parameter_column(point, out),
+            || false,
+        )
+        .unwrap();
+    let mut gradient = vec![0.0; 35];
+    gradient[6] = 1.0 / problem.states[1];
+    gradient[23] = 0.4 / problem.states[3];
+    let adjoint = prepared
+        .prepare_adjoint(&gradient, 0.0, 1.0, || false)
+        .unwrap();
+    assert!(adjoint.phase_weight().abs() > 1e-3);
+    assert!(adjoint.dual_residual() < 1e-10);
+    let result = adjoint
+        .gradient(
+            problem.parameter_unit,
+            0.0,
+            |point, out| problem.parameter_column(point, out),
+            || false,
+        )
+        .unwrap();
+    near(
+        result.derivative * problem.parameter_unit,
+        contract_waveform(&gradient, &forward) * problem.parameter_unit,
+        5e-11,
+    );
+    let step = 1e-5;
+    let mut low = MemoryCycle::new(true);
+    let mut high = MemoryCycle::new(true);
+    low.p -= step;
+    high.p += step;
+    let objective = |p: &MemoryCycle| {
+        let candidate = aligned_cycle(p, &orbit, phase);
+        candidate.coeffs[1][1].re / p.states[1] + 0.4 * candidate.coeffs[3][2].im / p.states[3]
+    };
+    near(
+        result.derivative * problem.parameter_unit,
+        (objective(&high) - objective(&low)) / (2.0 * step),
+        3e-9,
+    );
+}
+
+#[test]
+fn frequency_objective_uses_the_unknown_clock_and_cached_local_island_partial() {
+    let problem = MemoryCycle::new(true);
+    let orbit = problem.orbit(-0.4);
+    let mut prepared = PreparedAutonomousSensitivity::new(
+        &problem,
+        &orbit,
+        &reference(&orbit),
+        controls(),
+        &problem.scales(),
+        |point, out| problem.frequency_column(point, out),
+        || false,
+    )
+    .unwrap();
+    let counts = (problem.island_calls.get(), problem.tangent_calls.get());
+    let mut adjoint = prepared
+        .prepare_adjoint(&[0.0; 35], 1e3, 1e3, || false)
+        .unwrap();
+    let result = adjoint
+        .gradient_island_direction(
+            problem.parameter_unit,
+            0.0,
+            |_, x, out| {
+                out.fill(0.0);
+                out[1] = -x[2] / problem.states[2] * problem.equations[1] / problem.parameter_unit;
+                out[2] = x[1] / problem.states[1] * problem.equations[2] / problem.parameter_unit;
+                true
+            },
+            || false,
+        )
+        .unwrap();
+    let w = problem.internal_frequency();
+    let denominator = 0.49 + 4.0 * w * w;
+    let correction = 1.0 + 3.2 * problem.p * problem.p * 0.49 * w / denominator.powi(2);
+    let expected = 1.0 / ((1.0 + 0.15 * problem.p) * correction);
+    near(
+        result.derivative * problem.parameter_unit / 1e3,
+        expected,
+        5e-11,
+    );
+    assert_eq!(
+        counts,
+        (problem.island_calls.get(), problem.tangent_calls.get())
+    );
+}
+
+#[test]
+fn autonomous_objective_refusals_keep_complete_balance_sampling_and_factor_reuse() {
+    let problem = MemoryCycle::new(false);
+    let orbit = problem.orbit(0.4);
+    let mut prepared = PreparedAutonomousSensitivity::new(
+        &problem,
+        &orbit,
+        &reference(&orbit),
+        controls(),
+        &problem.scales(),
+        |point, out| problem.frequency_column(point, out),
+        || false,
+    )
+    .unwrap();
+    for (length, frequency, scale) in [(34, 1.0, 1.0), (35, f64::NAN, 1.0), (35, 1.0, 0.0)] {
+        assert!(matches!(
+            prepared.prepare_adjoint(&vec![0.0; length], frequency, scale, || false),
+            Err(ForcedSensitivityError::Invalid(_))
+        ));
+    }
+    assert!(matches!(
+        prepared.prepare_adjoint(&[f64::NAN; 35], 1.0, 1.0, || false),
+        Err(ForcedSensitivityError::Invalid(_))
+    ));
+    assert!(matches!(
+        prepared.prepare_adjoint(&[0.0; 35], 1.0, 1.0, || true),
+        Err(ForcedSensitivityError::Cancelled)
+    ));
+    let mut adjoint = prepared
+        .prepare_adjoint(&[0.0; 35], 1.0, 1.0, || false)
+        .unwrap();
+    assert!(matches!(
+        adjoint.gradient(
+            1.0,
+            0.0,
+            |_, out| {
+                out[0] = 0.0;
+                true
+            },
+            || false
+        ),
+        Err(ForcedSensitivityError::DirectionRefused { .. })
+    ));
+    assert!(matches!(
+        adjoint.gradient(
+            1.0,
+            0.0,
+            |point, out| {
+                out.fill(0.0);
+                if point.aft_samples == 64 {
+                    out[0] = 0.1;
+                }
+                true
+            },
+            || false
+        ),
+        Err(ForcedSensitivityError::DerivativeUnresolved { .. })
+    ));
+    assert!(matches!(
+        adjoint.gradient(
+            1.0,
+            f64::INFINITY,
+            |_, _| panic!("invalid explicit objective derivative"),
+            || false
+        ),
+        Err(ForcedSensitivityError::Invalid(_))
+    ));
+    let calls = Cell::new(0);
+    assert!(matches!(
+        adjoint.gradient_island_direction(
+            1.0,
+            0.0,
+            |_, _, out| {
+                calls.set(calls.get() + 1);
+                out.fill(0.0);
+                true
+            },
+            || calls.get() == 3
+        ),
+        Err(ForcedSensitivityError::Cancelled)
+    ));
+    assert_eq!(calls.get(), 3);
+    let result = adjoint
+        .gradient(
+            1.0,
+            0.0,
+            |point, out| problem.parameter_column(point, out),
+            || false,
+        )
+        .unwrap();
+    let mut low = MemoryCycle::new(false);
+    let mut high = MemoryCycle::new(false);
+    low.p -= 1e-5;
+    high.p += 1e-5;
+    near(
+        result.derivative,
+        (high.orbit(0.4).omega - low.orbit(0.4).omega) / 2e-5,
+        3e-9,
+    );
+}

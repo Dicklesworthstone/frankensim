@@ -1162,3 +1162,41 @@ G1/G3 regressions check Parseval and every real coefficient, independent state,
 equation and objective units, nonlinear dissipated-power gradients against
 independently resolved parameter changes, value-only and gradient-only aliasing,
 complete callbacks, cancellation and refusal/retry without baseline callbacks.
+
+## Autonomous harmonic objective adjoints
+
+`PreparedAutonomousSensitivity::prepare_adjoint` supplies objective gradients
+through an isolated self-excited cycle's complete waveform and unknown frequency.
+It accepts every ordinary real coefficient partial and a separate objective
+frequency partial at fixed coefficients. The original square bordered system
+`[R_X R_omega; phase_X 0]` is transposed without dropping a balance equation,
+freezing frequency, regularizing the neutral direction or creating another
+factorization. The shared LU, bounded residual refinement and independent
+physical dual checks serve both forced and autonomous objectives. Because the
+raw Jacobian caches intentionally omit the dimensionless phase row, autonomous
+dual verification explicitly restores its action in the original scaled chart;
+the frequency dual equation includes the supplied objective frequency partial.
+
+`PreparedAutonomousAdjoint` exposes the physical balance weights and the separate
+fixed-reference phase weight. Its complete residual and local-island parameter
+entries follow the forward autonomous sensitivity conventions: callbacks hold
+coefficients and omega fixed, write only the original balance rows, and include
+all direct material, source and frequency-port parameter terms. The fixed phase
+reference has zero direct parameter partial. Returned derivatives are
+`q_p - lambda_R^T R_p` in original objective/parameter units, with the solved
+frequency response already included. Explicit objective parameter partials are
+supplied separately and must not count the frequency chain twice. Complete
+balance-direction and contracted-gradient sampling changes remain independently
+bounded, including directions orthogonal to the objective weights.
+
+The existing payload/work admission covers the added coefficient-sized storage;
+no original source, state tangent, frequency-column or phase callback is repeated.
+Refusal and cancellation leave the original factor and cached trajectories
+reusable. Phase-sensitive objectives refer to the authored fixed phase chart.
+Conservative families with an amplitude closure remain outside this square
+adjoint entry; isolation, finite conditioning and harmonic order retain their
+original limits, and no stability or infinite-tail certificate is inferred.
+G1/G3 tests compare physical objectives with independent analytic memory cycles
+and forward contractions, including changing mass/time scales, all state and
+objective units, a frequency-only objective, a nonzero phase weight verified by
+independently phase-aligned cycles, complete direction sampling and refusal/retry.
