@@ -702,6 +702,54 @@ initialization uses the shared compensated contraction.
 simultaneous signed source work, weak cancellation, large fixed storage, analytic
 oscillator continuation, weak negative K, original momentum and refusal/zero events.
 
+### Exact transient calibration of coupled mechanical damping
+
+`LinearMechanicalSystem::prepare_damping_sensitivity` binds one complete
+dimensional C direction and one decay-rate direction `d(1/tau)/dtheta` for
+every original Maxwell arm. Consistent mass, relaxed stiffness, arm stiffness,
+strain projections and physical force map remain fixed. Off-diagonal and
+gyroscopic directions are retained; a signed local derivative need not itself
+be PSD. The admitted base system retains its original passive-domain contract.
+Equal-time and mechanically uncoupled memories remain independent coordinates.
+
+The observer uses the native canonical state `[q,M*v,sqrt(k)*viscous_strain]`.
+Its analytic generator direction has momentum block `-C_theta*M^-1` and each
+history row `rho_theta*(sqrt(k)*b^T*q-z)`, with `rho=1/tau`. The existing native
+upper-block exponential evaluates the Frechet action of the complete held-input
+operator. Both the initial-state contribution and force acting throughout the
+interval are retained. No perturbed trajectory, eigensystem derivative, damping
+ratio, mode truncation or additional physical integrator supplies the result.
+Diagonal storage equilibration and numerical direction normalization preserve
+original physical units; the result is smooth at critical damping and free
+coordinates without pole separation or critical-band switching.
+
+The complete doubled dimension is `N=2*(state_dim+port_dim) <= 256`. Explicit
+limits cover `12*N^2*sizeof(f64)` bytes and `96*N^3` multiply-add terms before
+allocation, including source assembly and the native exponential. Preparation
+polls cancellation during source/map assembly and before/after that bounded
+numerical operation. It does not impose an irrelevant physical energy envelope
+on derivative coordinates. A changed source, direction or clock needs a new
+immutable preparation; no accepted state, memory or forcing clock is retained.
+
+`PreparedMechanicalDampingSensitivity::advance_into` propagates authored state
+and held-input derivatives; `pullback_into` writes the original state/input
+cotangents and returns the local parameter contribution for a reverse sweep.
+Warm methods allocate nothing and use compensated contractions. Canonical
+momentum derivatives use the source's original inverse-mass velocity observation.
+Physical initial-condition/force dependence must be included explicitly; changing
+mass, branch stiffness, projections, or a nonlinear/temperature-changing law is
+outside this fixed-source derivative. These motion actions are not derivatives
+of an independently integrated heat receipt or a passivity certificate for a
+finite parameter update. Output buffers are candidate scratch on arithmetic
+refusal; source state remains untouched.
+
+`tests/mechanical_damping_sensitivity.rs` checks analytic free/critical limits,
+an independent coupled physical variational ODE with consistent inertia,
+nonproportional/skew damping and three original memories, exact subdivision,
+complete state/force/parameter reverse actions, physical-coordinate unit changes,
+bounded refusal/cancellation/replay, and recovery of one shared physical damping
+and relaxation parameter from the actual native transient trajectory.
+
 ### Physical mechanical changes with retained Maxwell histories
 
 `LinearMechanicalSystem::prepare_state_transfer` binds two admitted original

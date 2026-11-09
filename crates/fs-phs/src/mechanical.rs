@@ -16,6 +16,8 @@ use fs_math::det;
 
 mod impulse;
 pub use impulse::{MechanicalImpulse, MechanicalImpulseControls};
+mod sensitivity;
+pub use sensitivity::{MechanicalDampingDirection, PreparedMechanicalDampingSensitivity};
 mod transfer;
 pub use transfer::{
     MechanicalCoordinateMap, MechanicalStateTransfer, MechanicalTransferControls,
