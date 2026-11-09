@@ -8,8 +8,9 @@
 
 use super::{
     DensityMomentumAssembly, DensityMomentumControls, DensityMomentumStep, DensityTransportCell,
-    FluxParams, FluxSystem, MaterialFluxNumerics, MaterialNavierStokesBoundary, Result,
-    StokesAssembly, admit_transport_buffers, allocate, invalid, poll, positive,
+    FluxParams, FluxSystem, MaterialFluxNumerics, MaterialNavierStokesBoundary,
+    PreparedDensityMomentum, Result, StokesAssembly, admit_transport_buffers, allocate, invalid,
+    poll, positive,
 };
 use crate::ns::transport::density::ssprk2::{DensitySspRk2Controls, DensitySspRk2Report};
 
@@ -87,10 +88,9 @@ impl<'m> FluxSystem<'m> {
     /// their original meanings. There are no density-stage momentum solves.
     ///
     /// Only the frozen-advector density/inventory ODE has second-order time
-    /// integration here. Density uses this system's configured donor-cell or
-    /// bounded linear reconstruction. Specific-inventory spatial mixing, the
-    /// native BDF1 momentum map and its frozen-advector nonlinear coupling
-    /// remain first order. No new EOS,
+    /// integration here. Density and specific inventories use this system's
+    /// configured reconstruction. The native BDF1 momentum map and its
+    /// frozen-advector nonlinear coupling remain first order. No new EOS,
     /// diffusion, phase source, moving geometry or nonlinear adjoint is supplied.
     ///
     /// Original per-owner storage caps include the ENTIRE density stage
@@ -112,6 +112,48 @@ impl<'m> FluxSystem<'m> {
         controls: DensityMomentumSspRk2Controls,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DensityMomentumSspRk2Assembly<'a, 'm, N>> {
+        let (mut prepared, density_stages) = self.prepare_density_momentum_ssprk2_bdf1(
+            numerics,
+            force_density,
+            boundaries,
+            advector,
+            previous_velocity,
+            cells,
+            inflow,
+            timestep_s,
+            controls,
+            &mut cancelled,
+        )?;
+        let weights = core::mem::take(&mut prepared.current_weights);
+        let momentum = prepared.assemble(
+            &|cell, point| dynamic_viscosity(cell, point, &prepared.cells[cell]),
+            weights,
+        )?;
+        poll(&mut cancelled)?;
+        Ok(DensityMomentumSspRk2Assembly {
+            momentum: prepared.into_assembly(momentum),
+            density_stages,
+        })
+    }
+
+    // Transport and all nonconstitutive momentum data have one owner for both
+    // the original linear-viscosity and nonlinear SGS entry points. Retain the
+    // actual RK-weighted flux; rebuilding it from final cells would break the
+    // mass/momentum and kinetic identities over the macro interval.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_density_momentum_ssprk2_bdf1<'a, const N: usize>(
+        &'a self,
+        numerics: MaterialFluxNumerics,
+        force_density: &dyn Fn(usize, [f64; 2], &DensityTransportCell<N>) -> [f64; 2],
+        boundaries: &[MaterialNavierStokesBoundary<'_>],
+        advector: &[f64],
+        previous_velocity: &'a [f64],
+        cells: &'a [DensityTransportCell<N>],
+        inflow: &[Option<DensityTransportCell<N>>],
+        timestep_s: f64,
+        controls: DensityMomentumSspRk2Controls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(PreparedDensityMomentum<'a, 'm, N>, DensitySspRk2Report<N>)> {
         poll(&mut cancelled)?;
         let maximum_substeps = controls.maximum_substeps;
         let controls = controls.momentum;
@@ -160,9 +202,8 @@ impl<'m> FluxSystem<'m> {
             work.prepare_mass_flux(controls.maximum_transport_storage_bytes, &mut cancelled)?;
         drop(work);
         drop(plan);
-        let momentum = self.assemble_transported_density_momentum_bdf1(
+        let prepared = self.prepare_transported_density_momentum_bdf1(
             params,
-            dynamic_viscosity,
             force_density,
             boundaries,
             previous_velocity,
@@ -174,10 +215,7 @@ impl<'m> FluxSystem<'m> {
             controls,
             &mut cancelled,
         )?;
-        Ok(DensityMomentumSspRk2Assembly {
-            momentum,
-            density_stages,
-        })
+        Ok((prepared, density_stages))
     }
 
     /// Prepare and solve [`Self::assemble_density_momentum_ssprk2_bdf1`]

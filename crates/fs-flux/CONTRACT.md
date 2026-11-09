@@ -9528,3 +9528,35 @@ external compliance charges. Their full FEM/material runtime execution remains
 pending at the pinned-asupersync build gate; the six shared exact-source scalar
 BDF/RCR tests passed. These checks support the stated numerical model, not
 experimental qualification of an authored external compliance.
+
+## SSPRK2 inventory transport with nonlinear native SGS momentum
+
+With `experimental-sgs`,
+`FluxSystem::density_momentum_ssprk2_bdf1_sgs_step` returns
+`DensityMomentumSspRk2SgsStep`. It advances density and every carried inventory
+through the original configured reconstruction and bounded dyadic SSPRK2
+transport, then solves the original nonlinear molecular-plus-Smagorinsky, WALE
+or Vreman momentum endpoint.
+
+The actual RK-weighted compatible H(div) mass flux, final positive density and
+specific inventories, original old inertia and macro interval remain fixed
+through the constitutive iteration. The flux is never reconstructed from the
+final density or an intermediate Picard velocity. Molecular source queries
+receive that final transported material state and the current candidate strain;
+force and boundary data are sampled once. Retained endpoint samples and
+molecular heating, modeled SGS transfer and numerical dissipation remain
+separate. Transport, source, nonlinear-budget or cancellation refusal publishes
+no partial candidate and does not modify caller histories.
+
+Only the frozen-advector density/inventory ODE has second-order time
+integration. Momentum remains BDF1; the existing planar Estimated SGS scope
+and model-form limitations remain. This composition supplies no new closure,
+EOS, species diffusion or automatic heat deposition.
+
+Three focused regression groups are authored for an independent analytic
+two-cell RK exchange, final-state material/closure sampling, bounded
+complementary inventories, native discrete kinetic accounting, the exact
+zero-SGS limit, and transactional refusal/cancellation. Scoped pinned formatting
+and whitespace checks passed. Native execution remains pending because the
+pinned asupersync dependency exceeded this execution environment's available
+build resources before the changed crate could compile.

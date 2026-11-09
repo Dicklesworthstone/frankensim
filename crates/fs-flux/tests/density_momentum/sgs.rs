@@ -6,6 +6,9 @@ use fs_flux::ns::boundary::conservative::sgs::{
 use fs_flux::ns::sgs::SgsModel;
 use std::cell::{Cell as Counter, RefCell};
 
+#[path = "sgs/ssprk2.rs"]
+mod ssprk2;
+
 fn nonlinear() -> StokesRheologyControls {
     StokesRheologyControls {
         maximum_iterations: 120,

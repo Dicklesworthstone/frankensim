@@ -12,15 +12,17 @@
 //! automatic thermal deposition. Isotropic modeled pressure is absorbed in the
 //! incompressible mechanical pressure; only deviatoric SGS stress is added.
 
+use super::ssprk2::DensityMomentumSspRk2Controls;
 use super::{
-    DensityMomentumControls, DensityMomentumError, DensityMomentumStep, allocate, observe_step,
-    poll,
+    DensityMomentumControls, DensityMomentumError, DensityMomentumStep, PreparedDensityMomentum,
+    allocate, observe_step, poll,
 };
 use crate::material::{MaterialFluxNumerics, MaterialNavierStokesBoundary};
 use crate::ns::FluxSystem;
 use crate::ns::boundary::{StokesBoundaryError, StokesRheologyControls};
 use crate::ns::sgs::{PlanarSgsError, SgsModel};
 use crate::ns::transport::density::DensityTransportCell;
+use crate::ns::transport::density::ssprk2::DensitySspRk2Report;
 use fs_lbm::sgs3::eddy_viscosity;
 use std::cell::RefCell;
 
@@ -95,7 +97,17 @@ pub struct DensityMomentumSgsStep<const N: usize> {
     pub nonlinear_residual: f64,
 }
 
-impl FluxSystem<'_> {
+/// One accepted SSPRK2 density/inventory endpoint and native nonlinear SGS flow.
+pub struct DensityMomentumSspRk2SgsStep<const N: usize> {
+    /// Original BDF1 momentum, physical pressure and accepted constitutive
+    /// diagnostics. Momentum retains first-order time integration.
+    pub momentum: DensityMomentumSgsStep<N>,
+    /// Actual RK work and weighted physical inventory report. `transport` is
+    /// identical to `momentum.step.transport`.
+    pub density_stages: DensitySspRk2Report<N>,
+}
+
+impl<'m> FluxSystem<'m> {
     /// Solve native conservative BDF1 momentum with nonlinear molecular and SGS
     /// stress at the same accepted velocity.
     ///
@@ -139,6 +151,99 @@ impl FluxSystem<'_> {
         nonlinear: StokesRheologyControls,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DensityMomentumSgsStep<N>> {
+        self.admit_density_momentum_sgs(config, nonlinear, &mut cancelled)?;
+        let prepared = self.prepare_density_momentum_bdf1(
+            numerics,
+            force_density,
+            boundaries,
+            advector,
+            previous_velocity,
+            cells,
+            inflow,
+            timestep_s,
+            controls,
+            &mut cancelled,
+        )?;
+        self.solve_prepared_density_momentum_sgs(
+            prepared,
+            config,
+            molecular_dynamic_viscosity,
+            nonlinear,
+            cancelled,
+        )
+    }
+
+    /// Advance density and all carried inventories with conservative SSPRK2,
+    /// then solve one native BDF1 macro momentum endpoint with nonlinear
+    /// molecular rheology and Smagorinsky, WALE or Vreman stress.
+    ///
+    /// The original RK owner dyadically subcycles when required by its stage
+    /// Courant limit. It uses this system's configured density/inventory
+    /// reconstruction, positive density, bounded specific inventories and fixed
+    /// volume advector/exterior donors. Its actual RK-weighted mass flux, original
+    /// inertia and final transported density feed every constitutive assembly;
+    /// the flux is never rebuilt from the final cells or a Picard velocity.
+    /// No momentum solves or SGS heat deposits occur inside density stages.
+    ///
+    /// The molecular source, full-gradient SGS kernels, retained endpoint
+    /// samples and separated physical/numerical transfer rates have the same
+    /// contract as [`Self::density_momentum_bdf1_sgs_step`]. Every molecular
+    /// query sees the SAME final density and specific inventories throughout
+    /// nonlinear iteration, with the current candidate strain rate. Force and
+    /// boundary data are sampled once before that iteration.
+    ///
+    /// Only the frozen-advector density/inventory ODE is second order in time.
+    /// Momentum retains its original first-order BDF1 map and the planar SGS
+    /// screening limits. Failure in RK transport, source evaluation or nonlinear
+    /// convergence, and cancellation, publish no partial coupled candidate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn density_momentum_ssprk2_bdf1_sgs_step<const N: usize>(
+        &self,
+        numerics: MaterialFluxNumerics,
+        config: DensityMomentumSgsConfig<'_>,
+        molecular_dynamic_viscosity: &dyn Fn(usize, [f64; 2], &DensityTransportCell<N>, f64) -> f64,
+        force_density: &dyn Fn(usize, [f64; 2], &DensityTransportCell<N>) -> [f64; 2],
+        boundaries: &[MaterialNavierStokesBoundary<'_>],
+        advector: &[f64],
+        previous_velocity: &[f64],
+        cells: &[DensityTransportCell<N>],
+        inflow: &[Option<DensityTransportCell<N>>],
+        timestep_s: f64,
+        controls: DensityMomentumSspRk2Controls,
+        nonlinear: StokesRheologyControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<DensityMomentumSspRk2SgsStep<N>> {
+        self.admit_density_momentum_sgs(config, nonlinear, &mut cancelled)?;
+        let (prepared, density_stages) = self.prepare_density_momentum_ssprk2_bdf1(
+            numerics,
+            force_density,
+            boundaries,
+            advector,
+            previous_velocity,
+            cells,
+            inflow,
+            timestep_s,
+            controls,
+            &mut cancelled,
+        )?;
+        Ok(DensityMomentumSspRk2SgsStep {
+            momentum: self.solve_prepared_density_momentum_sgs(
+                prepared,
+                config,
+                molecular_dynamic_viscosity,
+                nonlinear,
+                cancelled,
+            )?,
+            density_stages,
+        })
+    }
+
+    fn admit_density_momentum_sgs(
+        &self,
+        config: DensityMomentumSgsConfig<'_>,
+        nonlinear: StokesRheologyControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<()> {
         poll(&mut cancelled)?;
         config.model.validate().map_err(|_| {
             PlanarSgsError::InvalidInput("finite nonnegative SGS coefficient required")
@@ -175,18 +280,19 @@ impl FluxSystem<'_> {
             )
             .into());
         }
-        let prepared = self.prepare_density_momentum_bdf1(
-            numerics,
-            force_density,
-            boundaries,
-            advector,
-            previous_velocity,
-            cells,
-            inflow,
-            timestep_s,
-            controls,
-            &mut cancelled,
-        )?;
+        Ok(())
+    }
+
+    // One nonlinear endpoint owner for either accepted density integrator.
+    // Its conservative transport data stay frozen through all Picard updates.
+    fn solve_prepared_density_momentum_sgs<'a, const N: usize>(
+        &'a self,
+        prepared: PreparedDensityMomentum<'a, 'm, N>,
+        config: DensityMomentumSgsConfig<'_>,
+        molecular_dynamic_viscosity: &dyn Fn(usize, [f64; 2], &DensityTransportCell<N>, f64) -> f64,
+        nonlinear: StokesRheologyControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<DensityMomentumSgsStep<N>> {
         let cancelled = RefCell::new(cancelled);
         let failure = RefCell::new(None);
         let retained = RefCell::new(allocate(
@@ -260,7 +366,7 @@ impl FluxSystem<'_> {
                 )
             })
         };
-        let solved = self.solve_mixed_picard(previous_velocity, nonlinear, &assemble, &|| {
+        let solved = self.solve_mixed_picard(prepared.old_velocity, nonlinear, &assemble, &|| {
             failure.borrow().is_none()
         });
         if let Some(error) = failure.into_inner() {
@@ -279,7 +385,7 @@ impl FluxSystem<'_> {
             let powers = [output.molecular_heating_w_m3, output.modeled_transfer_w_m3];
             let mut contribution = [0.0; 2];
             for i in 0..2 {
-                contribution[i] = (powers[i] * self.mesh.areas[cell]) * controls.depth_m;
+                contribution[i] = (powers[i] * self.mesh.areas[cell]) * prepared.controls.depth_m;
                 if !contribution[i].is_finite() || (powers[i] > 0.0 && contribution[i] == 0.0) {
                     return Err(PlanarSgsError::UnrepresentableDissipation { cell }.into());
                 }
