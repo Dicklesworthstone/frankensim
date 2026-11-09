@@ -208,7 +208,7 @@ fn g1_full_glass_area_detectors_keep_both_source_sides_native_partition_and_phot
                     },
                 )
                 .unwrap(),
-            ),
+            ).unwrap(),
             SurfaceEmitter::new(
                 10,
                 RadianceSpectrum::try_new(vec![(LAMBDA_MIN, 7.0), (LAMBDA_MAX, 3.0)]).unwrap(),

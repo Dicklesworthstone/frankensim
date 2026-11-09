@@ -52,6 +52,9 @@ pub mod area_lights;
 /// Full Smith glass pixels with original environment source/work receipts.
 pub mod environment;
 
+/// Complete Smith thermal emission and reflection in native CIE/QE pixels.
+pub mod thermal;
+
 /// Source-bounded multichannel detector signals, including infrared bands.
 pub mod sensor;
 mod sequential;

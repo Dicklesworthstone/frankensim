@@ -188,7 +188,8 @@ fn independently_prepared_emitters_keep_their_own_spectral_weights() {
             PhotometricAreaEmitter::try_new(4, blue.flux_lm(), 1.0, blue.spectrum().clone(), EmissionSidedness::Front).unwrap(),
             PhotometricAreaEmitter::try_new(2, red.flux_lm(), 1.0, red.spectrum().clone(), EmissionSidedness::Front).unwrap(),
         ];
-        let prepared = PreparedAreaGrid::new(PhotometricMedium::Scattering(&grid), &sources,
+        let prepared = PreparedAreaGrid::new(PhotometricMedium::Scattering(&grid),
+            sources.iter().map(|source| (source.primitive_index(), source)), sources.len(),
             GridEnclosureBudget::default(), cx).unwrap();
         let a = [point(-0.5), point(0.0), point(2.0)];
         let b = [point(0.0); 3];
@@ -205,7 +206,8 @@ fn independently_prepared_emitters_keep_their_own_spectral_weights() {
         assert!(matches!(prepared.photopic_transfer(cx, 3, a, b),
             Err(AreaOcclusionError::Reference(AreaReferenceError::InvalidGeometry))));
         let changed = [1.0, 4.0, 2.0, 8.0]; let other = medium(cx, &changed);
-        let next = PreparedAreaGrid::new(PhotometricMedium::Scattering(&other), &sources,
+        let next = PreparedAreaGrid::new(PhotometricMedium::Scattering(&other),
+            sources.iter().map(|source| (source.primitive_index(), source)), sources.len(),
             GridEnclosureBudget::default(), cx).unwrap();
         assert_ne!(prepared.identity(), next.identity());
     });

@@ -28,6 +28,8 @@ mod surface;
 pub use surface::DiffuseThermalEmitter;
 mod coating;
 pub use coating::CoatingThermalEmitter;
+/// Kirchhoff emission consistent with complete rough conductor reflection.
+pub mod smith;
 #[cfg(feature = "material-state")]
 pub use spatial::AxialGasTemperatureField;
 

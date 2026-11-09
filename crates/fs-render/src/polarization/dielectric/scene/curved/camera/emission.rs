@@ -88,6 +88,23 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
         self.observe_weighted(path, 1.0)
     }
 
+    /// An explicit source owner supplies already weighted physical radiance.
+    /// Preserve its failure until `finish`; never return a partial estimate.
+    pub(super) fn add_radiance(
+        &mut self,
+        contribution: Result<f64, CameraRadianceError>,
+    ) -> Result<(), CurvedSceneError> {
+        contribution.and_then(finite_nonnegative).and_then(|value| {
+            if value != 0.0 {
+                self.radiance = finite_nonnegative(self.radiance + value)?;
+            }
+            Ok(())
+        }).map_err(|error| {
+            self.error = Some(error);
+            CurvedSceneError::NumericalRange
+        })
+    }
+
     pub(super) fn observe_event(
         &mut self,
         event: CurvedTraceEvent<'_>,

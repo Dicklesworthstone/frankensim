@@ -251,8 +251,31 @@ impl<'a, 's, 'm> SmithCameraScene<'a, 's, 'm> {
         initial_medium: usize,
         settings: CurvedTraceSettings,
         surface_samples: impl FnMut(u32) -> [f64; 3],
+        facet_samples: impl FnMut(u32, u32) -> [f64; 3],
+        dielectric_samples: Option<&mut dyn FnMut(u32, u32) -> [f64; 4]>,
+    ) -> Result<CameraRadianceSample, CameraRadianceError> {
+        self.sample_launched_with_emission(
+            cx, beam, initial_medium, settings, surface_samples, facet_samples,
+            dielectric_samples, |_, _| Ok(0.0),
+        )
+    }
+
+    /// Explicit source adapters can add independently sampled physical radiance
+    /// at original arrivals without duplicating the path or changing its law.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn sample_launched_with_emission(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedTraceSettings,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
         mut facet_samples: impl FnMut(u32, u32) -> [f64; 3],
         mut dielectric_samples: Option<&mut dyn FnMut(u32, u32) -> [f64; 4]>,
+        mut extra_emission: impl FnMut(
+            &super::super::CurvedPathResult,
+            f64,
+        ) -> Result<f64, CameraRadianceError>,
     ) -> Result<CameraRadianceSample, CameraRadianceError> {
         let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
         let mut emission = SurfaceEmission::new(self.camera, initial_index);
@@ -268,6 +291,10 @@ impl<'a, 's, 'm> SmithCameraScene<'a, 's, 'm> {
                 true,
                 &self.camera.spatial_volume_emitters,
                 |event| match event {
+                    CurvedTransportEvent::Surface(super::super::CurvedTraceEvent::Arrival(path)) => {
+                        emission.observe(path)?;
+                        emission.add_radiance(extra_emission(path, initial_index))
+                    }
                     CurvedTransportEvent::Surface(event) => emission.observe_event(event),
                     CurvedTransportEvent::MicrosurfaceDeparture(path) => {
                         // LTE source accumulation needs the new Mueller prefix even

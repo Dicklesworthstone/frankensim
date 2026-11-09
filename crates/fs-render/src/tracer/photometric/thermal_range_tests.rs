@@ -80,6 +80,7 @@ fn reflected_thermal_nee_obeys_calibrated_physical_range() {
                 point,
                 volume_emission::Receiver::Surface {
                     material: &material,
+                    boundary_origin: None,
                     frame: SurfaceFrame {
                         oriented: normal,
                         geometric: normal,

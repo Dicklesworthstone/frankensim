@@ -553,6 +553,7 @@ mod tests {
 
     struct WithoutNeighborhood(SphereChart);
     impl Chart for WithoutNeighborhood {
+        fn name(&self) -> &'static str { "sphere-without-neighborhood" }
         fn eval(&self, point: Point3, cx: &Cx<'_>) -> fs_geom::ChartSample {
             self.0.eval(point, cx)
         }

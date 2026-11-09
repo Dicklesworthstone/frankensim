@@ -130,7 +130,7 @@ fn panel(x: f64, z: f64, half: f64) -> Primitive {
             vec![[0, 2, 1], [0, 3, 2]],
         )),
         material: Material::Lambertian {
-            reflectance: lift_rgb([0.0; 3]).unwrap(),
+            reflectance: lift_rgb([0.0; 3]),
         },
         emission: None,
     }

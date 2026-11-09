@@ -377,7 +377,7 @@ fn g1_original_gray_infrared_sensor_keeps_photon_weights_two_sides_and_temperatu
                                 2e-11,
                             );
                         }
-                        pixel.photoelectron_rate_per_m2_sr()
+                        *pixel.photoelectron_rate_per_m2_sr()
                     },
                 )
                 .unwrap();
