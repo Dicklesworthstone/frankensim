@@ -6047,3 +6047,44 @@ read-only query lets a composing heat owner require zero body-node radiation
 before eliminating a distinct conducting surface. It does not change the
 original emissivity model, source support, Biot admission or radiation
 temperature; relocating radiation requires its own physical surface balance.
+
+## Typed scalar thermal scenarios on the original boundary and history owners
+
+`ThermalBc::from_scenario_row_at_in_frames` consumes canonical typed scalar
+Dirichlet temperature, outward Neumann heat-flux density and Robin heat-transfer
+coefficient through `BoundaryCondition::thermal_at`. Exact dimensions and
+physical semantics are checked before lowering: semantic temperatures must be
+absolute, even-parity quantities, never temperature differences. The original
+native boundary owner retains flux signs, coefficient positivity and the
+separately supplied Robin reference temperature. Legacy scalar/time-signal
+rows retain their existing behavior. The steady entry still refuses to invent
+a time for a typed history, including a fixed scalar with a time-dependent frame.
+
+`ThermalBoundaryHistory::new_in_frames` and `from_boundary_in_frames` borrow
+the original frame tree for the trajectory. The existing constructors retain
+the implicit world tree. At most 256 frame rows are admitted. Source and frame
+tables are not cloned at endpoints; the same immutable exterior-face partition,
+shared Dirichlet precedence, surface conduction and original material/thermal
+steppers remain authoritative. Coordinate frames validate at actual physical
+time even when source values clamp or wrap, and do not move the bound mesh.
+
+The existing event clock now visits held/linear typed-table knots and used
+ancestor translation/tilt knots; fixed scalars add no source knots. Refuse and Clamp tails retain their
+policies; exact held left values are taken only after quantity, domain and
+physical-time frame checks. Periodic typed tables remain usable for explicit
+endpoint sampling, but event stepping requires a finite unrolled schedule and
+otherwise refuses without advancing state. Existing accepted-step budgets,
+cancellation, energy closure and atomic publication are unchanged. The shared
+history boundary feeds the original linear/nonlinear, radiation and enthalpy
+paths; no new time integrator or constitutive law is introduced.
+
+Focused regressions extend the original boundary-history and thermal-event
+targets. They specify frame-bound partition preservation, native-operator
+equivalence for all three typed thermal boundary families, a 120 W/m² inward
+pulse on a 1 m² exterior face delivering 15 J, ancestor-frame event clipping,
+and cancellation/tail/budget refusal with accepted-state preservation. Scenario
+tests specify canonical replay and semantic admission. These new thermal tests
+have not executed, and the new source has not been typechecked or formatted by
+Rust tools: the execution environment disconnected during dependency
+compilation before edits. Source review is the available evidence; no passing
+runtime or physical-validation claim is made.

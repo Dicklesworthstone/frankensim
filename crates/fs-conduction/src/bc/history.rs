@@ -1,9 +1,9 @@
 //! Scenario time histories on an explicitly tagged thermal boundary.
 //!
-//! Signal interpolation, endpoint clamping and dimensional validation remain
-//! owned by fs-scenario. Spatial profiles and typed payloads remain refused:
-//! this consumes the scalar/time-signal vocabulary admitted for Thermal rows,
-//! not a second scenario schema or an implicit spatial sampling rule.
+//! Signal and typed-scalar interpolation, declared tails and quantity/frame
+//! validation remain owned by fs-scenario. Spatial profiles remain refused:
+//! this consumes its existing thermal vocabulary without a second schema or
+//! an implicit spatial sampling rule. Frames do not move the mesh partition.
 //!
 //! Sampling preserves the original face partition, boundary kinds, static nodal
 //! data and lowest-declared-region precedence at shared Dirichlet vertices.
@@ -17,10 +17,15 @@ use super::{ThermalBc, ThermalBoundary, ThermalBoundaryBuilder};
 use crate::{ConductionError, TEMPERATURE_DIMS};
 use crate::mesh::ConductionMesh;
 use fs_exec::Cx;
+use fs_qty::QtyAny;
+use fs_scenario::FrameTree;
+use fs_scenario::scalar::ScalarEvaluationError;
 use fs_scenario::bc::{BcKind, BcValue, BoundaryCondition};
 use fs_scenario::scenario::Environment;
 use fs_scenario::signal::TimeSignal;
+use std::borrow::Cow;
 use std::collections::BTreeSet;
+use std::ops::ControlFlow;
 
 impl ThermalBc {
     /// Lower a scenario row at an explicitly selected time in seconds.
@@ -28,7 +33,8 @@ impl ThermalBc {
     /// Uniform rows retain their steady semantics. A signal uses its declared
     /// interpolation and clamping; the steady entry point still refuses to
     /// choose an implicit instant. `t_ref` has the same kelvin/ambient semantics
-    /// as [`Self::from_scenario_row`].
+    /// as [`Self::from_scenario_row`]. Typed scalars use the implicit world tree;
+    /// use [`Self::from_scenario_row_at_in_frames`] for declared non-world frames.
     ///
     /// # Errors
     /// Nonfinite time, invalid scenario row/signal, incompatible dimensions, or
@@ -39,6 +45,26 @@ impl ThermalBc {
         t_ref: Option<f64>,
         time_s: f64,
     ) -> Result<Self, ConductionError> {
+        Self::from_scenario_row_at_in_frames(
+            row, environment, t_ref, &FrameTree::new(), time_s,
+            &mut || ControlFlow::Continue(()),
+        )
+    }
+
+    /// Sample a thermal row using its original immutable frame tree.
+    /// Source values can clamp or wrap; frames always use physical time.
+    /// Typed temperatures preserve absolute-temperature semantics, while the
+    /// native owner retains outward flux signs and the separate Robin ambient.
+    /// The checkpoint is polled around sampling and by the scalar/frame owner.
+    pub fn from_scenario_row_at_in_frames(
+        row: &BoundaryCondition,
+        environment: &Environment,
+        t_ref: Option<f64>,
+        frames: &FrameTree,
+        time_s: f64,
+        checkpoint: &mut impl FnMut() -> ControlFlow<()>,
+    ) -> Result<Self, ConductionError> {
+        check(checkpoint)?;
         crate::require_finite("boundary evaluation time", time_s)?;
         let mut violations = Vec::new();
         row.check(&mut violations);
@@ -47,17 +73,14 @@ impl ThermalBc {
                 region: row.region.clone(), what: first.what, fix: first.fix,
             });
         }
-        let Some(BcValue::Signal(signal)) = &row.value else {
-            return Self::from_scenario_row(row, environment, t_ref);
+        let value = match &row.value {
+            Some(BcValue::Signal(signal)) => signal.eval(time_s)
+                .map_err(|error| row_error(row, error.to_string()))?,
+            Some(BcValue::Typed(_)) => typed_value(row, frames, time_s, checkpoint)?,
+            _ => super::uniform_value(row)?,
         };
-        let value = signal.eval(time_s).map_err(|error| row_error(row, error.to_string()))?;
-        // Do not clone the time table just to replace it with one scalar.
-        let sampled = BoundaryCondition {
-            region: row.region.clone(), physics: row.physics, kind: row.kind,
-            value: Some(BcValue::Uniform(value)), compatibility: row.compatibility,
-            frame: row.frame,
-        };
-        Self::from_scenario_row(&sampled, environment, t_ref)
+        check(checkpoint)?;
+        Self::from_scenario_value(row, environment, t_ref, value)
     }
 }
 
@@ -72,7 +95,9 @@ pub struct ThermalRegionHistory {
 }
 
 impl ThermalRegionHistory {
-    fn at(&self, environment: &Environment, time_s: f64) -> Result<ThermalBc, ConductionError> {
+    fn at(&self, cx: &Cx<'_>, environment: &Environment, frames: &FrameTree,
+        time_s: f64) -> Result<ThermalBc, ConductionError>
+    {
         let reference = match &self.reference_temperature {
             None => None,
             Some(signal) => {
@@ -90,7 +115,9 @@ impl ThermalRegionHistory {
                 Some(value.value)
             }
         };
-        ThermalBc::from_scenario_row_at(&self.row, environment, reference, time_s)
+        ThermalBc::from_scenario_row_at_in_frames(
+            &self.row, environment, reference, frames, time_s, &mut || checkpoint(cx),
+        )
     }
 }
 
@@ -105,6 +132,7 @@ pub struct ThermalBoundaryHistory<'m> {
     mesh: &'m ConductionMesh,
     partition: ThermalBoundary,
     environment: Environment,
+    frames: Cow<'m, FrameTree>,
     rows: Vec<(usize, ThermalRegionHistory)>,
     initial_time_s: f64,
 }
@@ -125,7 +153,22 @@ impl<'m> ThermalBoundaryHistory<'m> {
     ) -> Result<Self, ConductionError> {
         poll(cx, 0)?;
         let mesh = builder.mesh;
-        Self::bind(cx, mesh, builder.finish()?, environment, histories, initial_time_s)
+        Self::bind(cx, mesh, builder.finish()?, environment,
+            Cow::Owned(FrameTree::new()), histories, initial_time_s)
+    }
+
+    /// Attach typed histories with an explicitly borrowed scenario frame tree.
+    /// Its immutable borrow lasts for the trajectory; no motion table is copied.
+    /// Scalar frames validate coordinate declarations but never retarget faces.
+    pub fn new_in_frames(
+        cx: &Cx<'_>, builder: ThermalBoundaryBuilder<'m>,
+        environment: &Environment, frames: &'m FrameTree,
+        histories: Vec<ThermalRegionHistory>, initial_time_s: f64,
+    ) -> Result<Self, ConductionError> {
+        poll(cx, 0)?;
+        let mesh = builder.mesh;
+        Self::bind(cx, mesh, builder.finish()?, environment,
+            Cow::Borrowed(frames), histories, initial_time_s)
     }
 
     /// Attach histories to the original already-lowered face partition.
@@ -135,6 +178,25 @@ impl<'m> ThermalBoundaryHistory<'m> {
         cx: &Cx<'_>, mesh: &'m ConductionMesh, boundary: &ThermalBoundary,
         environment: &Environment, histories: Vec<ThermalRegionHistory>,
         initial_time_s: f64,
+    ) -> Result<Self, ConductionError> {
+        Self::bind_boundary(cx, mesh, boundary, environment,
+            Cow::Owned(FrameTree::new()), histories, initial_time_s)
+    }
+
+    /// Bind the original partition and explicit frame tree to one trajectory.
+    pub fn from_boundary_in_frames(
+        cx: &Cx<'_>, mesh: &'m ConductionMesh, boundary: &ThermalBoundary,
+        environment: &Environment, frames: &'m FrameTree,
+        histories: Vec<ThermalRegionHistory>, initial_time_s: f64,
+    ) -> Result<Self, ConductionError> {
+        Self::bind_boundary(cx, mesh, boundary, environment,
+            Cow::Borrowed(frames), histories, initial_time_s)
+    }
+
+    fn bind_boundary(
+        cx: &Cx<'_>, mesh: &'m ConductionMesh, boundary: &ThermalBoundary,
+        environment: &Environment, frames: Cow<'m, FrameTree>,
+        histories: Vec<ThermalRegionHistory>, initial_time_s: f64,
     ) -> Result<Self, ConductionError> {
         poll(cx, 0)?;
         if boundary.face_region.len() != mesh.boundary().len() {
@@ -150,16 +212,22 @@ impl<'m> ThermalBoundaryHistory<'m> {
             adiabatic_remainder: boundary.adiabatic_remainder != 0,
         }.finish()?;
         partition.surface_conduction = boundary.surface_conduction.clone();
-        Self::bind(cx, mesh, partition, environment, histories, initial_time_s)
+        Self::bind(cx, mesh, partition, environment, frames, histories, initial_time_s)
     }
 
     fn bind(
         cx: &Cx<'_>, mesh: &'m ConductionMesh, partition: ThermalBoundary,
-        environment: &Environment, histories: Vec<ThermalRegionHistory>,
-        initial_time_s: f64,
+        environment: &Environment, frames: Cow<'m, FrameTree>,
+        histories: Vec<ThermalRegionHistory>, initial_time_s: f64,
     ) -> Result<Self, ConductionError> {
         poll(cx, 0)?;
         crate::require_finite("initial boundary time", initial_time_s)?;
+        if frames.frames.len() > 256 {
+            return Err(ConductionError::Config {
+                parameter: "thermal history frames",
+                what: "scalar histories admit at most 256 frame rows".into(),
+            });
+        }
         let mut seen = BTreeSet::new();
         let mut rows = Vec::with_capacity(histories.len());
         for (at, history) in histories.into_iter().enumerate() {
@@ -174,14 +242,14 @@ impl<'m> ThermalBoundaryHistory<'m> {
             if !partition.face_region.contains(&Some(index)) {
                 return Err(row_error(&history.row, "history region contains no boundary faces".into()));
             }
-            let sampled = history.at(environment, initial_time_s)?;
+            let sampled = history.at(cx, environment, &frames, initial_time_s)?;
             if sampled.tag() != partition.conditions[index].tag() {
                 return Err(row_error(&history.row, "history changes the declared boundary kind".into()));
             }
             rows.push((index, history));
         }
         poll(cx, rows.len())?;
-        Ok(Self { mesh, partition, environment: environment.clone(), rows, initial_time_s })
+        Ok(Self { mesh, partition, environment: environment.clone(), frames, rows, initial_time_s })
     }
 
     /// The original mesh; a time-dependent row cannot retarget its faces.
@@ -204,7 +272,7 @@ impl<'m> ThermalBoundaryHistory<'m> {
         let mut conditions = self.partition.conditions.clone();
         for (at, (index, history)) in self.rows.iter().enumerate() {
             poll(cx, at)?;
-            conditions[*index] = history.at(&self.environment, time_s)?;
+            conditions[*index] = history.at(cx, &self.environment, &self.frames, time_s)?;
         }
         poll(cx, self.rows.len())?;
         // The existing finish owns shared-vertex precedence. Reuse it rather
@@ -218,6 +286,31 @@ impl<'m> ThermalBoundaryHistory<'m> {
         poll(cx, self.rows.len())?;
         Ok(boundary)
     }
+}
+
+fn typed_value(
+    row: &BoundaryCondition, frames: &FrameTree, time_s: f64,
+    checkpoint: &mut impl FnMut() -> ControlFlow<()>,
+) -> Result<QtyAny, ConductionError> {
+    let sample = row.thermal_at(frames, time_s, checkpoint).map_err(|error| match error {
+        ScalarEvaluationError::Cancelled => ConductionError::Cancelled {
+            stage: "thermal-boundary-history", at: 0,
+        },
+        other => row_error(row, other.to_string()),
+    })?;
+    let dims = sample.contract.dims()
+        .ok_or_else(|| row_error(row, "thermal scalar must have homogeneous dimensions".into()))?;
+    Ok(QtyAny::new(sample.value, dims))
+}
+
+fn checkpoint(cx: &Cx<'_>) -> ControlFlow<()> {
+    if cx.checkpoint().is_err() { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+}
+
+fn check(checkpoint: &mut impl FnMut() -> ControlFlow<()>) -> Result<(), ConductionError> {
+    if checkpoint().is_break() {
+        Err(ConductionError::Cancelled { stage: "thermal-boundary-history", at: 0 })
+    } else { Ok(()) }
 }
 
 fn row_error(row: &BoundaryCondition, what: String) -> ConductionError {

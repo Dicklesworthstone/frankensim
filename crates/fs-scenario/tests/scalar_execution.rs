@@ -305,3 +305,90 @@ fn g0_pressure_admission_and_execution_do_not_confuse_stress_or_amplitudes_with_
     assert!(matches!(row.pressure_at(&FrameTree::new(), 0.5, &mut || ControlFlow::Continue(())),
         Err(ScalarEvaluationError::Unsupported(_))));
 }
+
+fn thermal_row(
+    kind: fs_scenario::BcKind, contract: QuantityContract, parity: OrientationParity,
+) -> fs_scenario::BoundaryCondition {
+    use fs_scenario::{BcValue, BoundaryCondition, Physics};
+    use fs_scenario::payload::Payload;
+    let dims = contract.dims().unwrap();
+    BoundaryCondition {
+        region: format!("thermal-{kind:?}"), physics: Physics::Thermal, kind,
+        frame: WORLD.0, compatibility: None,
+        value: Some(BcValue::Typed(Payload::Scalar(ScalarPayload::new(
+            PayloadMeta::new(contract, PayloadId::new("basis/scalar").unwrap(), WORLD,
+                parity, ReferenceSemantics::Continuous).unwrap(),
+            SampleSource::table(
+                [0.0, 1.0, 2.0].map(|t| QtyAny::new(t, TIME)).to_vec(),
+                [300.0, 340.0, 320.0].map(|v| QtyAny::new(v, dims)).to_vec(),
+                TableInterpolation::Linear, OutsideDomainPolicy::Periodic,
+            ).unwrap(),
+        ).unwrap()))),
+    }
+}
+
+#[test]
+fn g3_thermal_scalar_rows_round_trip_with_the_original_table_policy() {
+    use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+    use fs_scenario::{BcKind, Environment, Scenario};
+    let absolute = QuantityContract::Semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature, ValueForm::Static));
+    let mut scenario = Scenario::new("typed-thermal", 17, Environment::earth_lab());
+    for (kind, contract) in [
+        (BcKind::Dirichlet, absolute),
+        (BcKind::Neumann, QuantityContract::Dimensions(Dims([0, 1, -3, 0, 0, 0]))),
+        (BcKind::Robin, QuantityContract::Dimensions(Dims([0, 1, -3, -1, 0, 0]))),
+    ] {
+        scenario.base_bcs.push(thermal_row(kind, contract, OrientationParity::Even));
+    }
+    assert!(scenario.validate().is_empty());
+    let ir = fs_scenario::ir::write_ir(&scenario);
+    let parsed = fs_scenario::ir::parse_ir(&ir).unwrap();
+    assert_eq!(parsed.scenario().base_bcs, scenario.base_bcs);
+    for row in &parsed.scenario().base_bcs {
+        for (time, expected) in [(-1.5, 320.0), (0.0, 300.0), (0.5, 320.0), (1.0, 340.0), (2.0, 320.0), (2.5, 320.0)] {
+            let sample = row.thermal_at(&scenario.frames, time,
+                &mut || ControlFlow::Continue(())).unwrap();
+            assert_eq!(sample.value, expected);
+        }
+    }
+}
+
+#[test]
+fn g0_thermal_execution_refuses_temperature_intervals_odd_parity_and_cancelled_publication() {
+    use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+    use fs_scenario::BcKind;
+    let temperature = QuantityContract::Dimensions(Dims([0, 0, 0, 1, 0, 0]));
+    for (contract, parity) in [
+        (QuantityContract::Semantic(SemanticType::new(
+            QuantityKind::TemperatureDifference, ValueForm::Static)), OrientationParity::Even),
+        (temperature, OrientationParity::Odd),
+    ] {
+        let row = thermal_row(BcKind::Dirichlet, contract, parity);
+        let mut findings = Vec::new();
+        row.check(&mut findings);
+        let expected_code = if parity == OrientationParity::Odd {
+            "bc-thermal-parity"
+        } else { "bc-thermal-semantics" };
+        assert!(findings.iter().any(|finding| finding.code == expected_code));
+        assert!(matches!(row.thermal_at(&FrameTree::new(), 0.5,
+            &mut || ControlFlow::Continue(())), Err(ScalarEvaluationError::Unsupported(_))));
+    }
+    let row = thermal_row(BcKind::Dirichlet, temperature, OrientationParity::Even);
+    let mut calls = 0;
+    row.thermal_at(&FrameTree::new(), 0.5, &mut || {
+        calls += 1;
+        ControlFlow::Continue(())
+    }).unwrap();
+    for stop in 1..=calls {
+        let mut at = 0;
+        assert_eq!(row.thermal_at(&FrameTree::new(), 0.5, &mut || {
+            at += 1;
+            if at == stop { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+        }), Err(ScalarEvaluationError::Cancelled));
+    }
+    let mut wrong_frame = row.clone();
+    wrong_frame.frame = 9;
+    assert!(matches!(wrong_frame.thermal_at(&FrameTree::new(), 0.5,
+        &mut || ControlFlow::Continue(())), Err(ScalarEvaluationError::Unsupported(_))));
+}

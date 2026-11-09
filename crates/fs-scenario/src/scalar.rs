@@ -37,7 +37,72 @@ pub(crate) fn pressure_contract(contract: QuantityContract) -> bool {
     }
 }
 
+/// Thermal quantity contracts share the boundary vocabulary's dimensions.
+/// Absolute temperature cannot be replaced by a same-dimension interval.
+pub(crate) fn thermal_contract(kind: BcKind, contract: QuantityContract) -> bool {
+    use crate::bc::{Expectation, expectation};
+    let expected = match expectation(Physics::Thermal, kind) {
+        Expectation::Value(dims) | Expectation::ValueOrScalar(dims) => dims,
+        _ => return false,
+    };
+    match contract {
+        QuantityContract::Dimensions(dims) => dims == expected,
+        QuantityContract::Semantic(semantic) => {
+            kind == BcKind::Dirichlet
+                && semantic.kind() == QuantityKind::AbsoluteTemperature
+                && semantic.form() == ValueForm::Static
+        }
+        QuantityContract::Heterogeneous => false,
+    }
+}
+
 impl BoundaryCondition {
+    /// Sample typed temperature, normal heat-flux density or heat-transfer
+    /// coefficient at explicit physical time. A temperature difference cannot
+    /// prescribe an absolute temperature. The receiver owns the normal-flux
+    /// sign and supplies a separate Robin reference temperature; neither is
+    /// inferred from the scalar or its frame. This does not move the patch.
+    ///
+    /// The ordinary scalar owner retains table/tail policies, frame validation,
+    /// even parity and cancellation without copying the declared history.
+    pub fn thermal_at(
+        &self,
+        frames: &FrameTree,
+        time_s: f64,
+        checkpoint: &mut impl FnMut() -> ControlFlow<()>,
+    ) -> Result<ScalarSample, ScalarEvaluationError> {
+        use ScalarEvaluationError as E;
+        if checkpoint().is_break() {
+            return Err(E::Cancelled);
+        }
+        if self.physics != Physics::Thermal
+            || !matches!(self.kind, BcKind::Dirichlet | BcKind::Neumann | BcKind::Robin)
+        {
+            return Err(E::Unsupported(
+                "thermal scalar requires Thermal/Dirichlet, Neumann or Robin",
+            ));
+        }
+        if self.region.is_empty() || self.compatibility.is_some() {
+            return Err(E::Unsupported(
+                "thermal scalar requires a named patch and no mass-flow compatibility tag",
+            ));
+        }
+        let Some(BcValue::Typed(Payload::Scalar(value))) = &self.value else {
+            return Err(E::Unsupported("typed thermal boundary requires a scalar payload"));
+        };
+        if value.meta().frame().0 != self.frame {
+            return Err(E::Unsupported(
+                "thermal payload and boundary must declare the same frame",
+            ));
+        }
+        if !thermal_contract(self.kind, value.meta().contract()) {
+            return Err(E::Unsupported(
+                "thermal scalar requires absolute K, normal W/m^2 or W/(m^2 K), matching its boundary kind",
+            ));
+        }
+        value.scalar_at(frames, time_s, checkpoint)
+    }
+
     /// Sample a typed fluid pressure outlet, retaining its original contract.
     ///
     /// The scalar owner supplies fixed/held/linear histories, declared table

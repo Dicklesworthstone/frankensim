@@ -135,3 +135,64 @@ fn g0_history_evaluation_honors_cancellation_without_changing_the_template() {
     with_cancelled_cx(|cx| assert!(matches!(history.at(cx, 1.0), Err(ConductionError::Cancelled { .. }))));
     with_cx(|cx| assert_eq!(history.at(cx, 1.0).unwrap().conditions()[0], ThermalBc::dirichlet(350.0).unwrap()));
 }
+
+#[test]
+fn g3_typed_temperature_reuses_the_partition_and_explicit_physical_frames() {
+    use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+    use fs_scenario::{Frame, FrameId, FrameMotion, FrameTree, WORLD};
+    use fs_scenario::payload::{OrientationParity, OutsideDomainPolicy, Payload, PayloadId,
+        PayloadMeta, QuantityContract, ReferenceSemantics, SampleSource, ScalarPayload,
+        TableInterpolation};
+    use std::ops::ControlFlow;
+
+    let mesh = mesh();
+    let env = Environment::earth_lab();
+    let mut frames = FrameTree::new();
+    frames.add(Frame { id: FrameId(1), name: "heater-coordinates".into(), parent: WORLD,
+        motion: FrameMotion::Translating {
+            direction: [1.0, 0.0, 0.0],
+            displacement: ramp(0.0, 2.0, Dims([1, 0, 0, 0, 0, 0])),
+        } });
+    let payload = ScalarPayload::new(
+        PayloadMeta::new(QuantityContract::Semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature, ValueForm::Static)),
+            PayloadId::new("basis/scalar").unwrap(), FrameId(1),
+            OrientationParity::Even, ReferenceSemantics::Continuous).unwrap(),
+        SampleSource::table(
+            [0.0, 2.0].map(|t| QtyAny::new(t, Dims([0, 0, 1, 0, 0, 0]))).to_vec(),
+            [300.0, 400.0].map(|v| QtyAny::new(v, TEMPERATURE_DIMS)).to_vec(),
+            TableInterpolation::Linear, OutsideDomainPolicy::Refuse,
+        ).unwrap(),
+    ).unwrap();
+    let row = BoundaryCondition { region: "left".into(), physics: Physics::Thermal,
+        kind: BcKind::Dirichlet, value: Some(BcValue::Typed(Payload::Scalar(payload))),
+        compatibility: None, frame: 1 };
+    assert!(ThermalBc::from_scenario_row(&row, &env, None).is_err());
+    assert!(ThermalBc::from_scenario_row_at(&row, &env, None, 1.0).is_err());
+    assert_eq!(ThermalBc::from_scenario_row_at_in_frames(
+        &row, &env, None, &frames, 1.0, &mut || ControlFlow::Continue(()),
+    ).unwrap(), ThermalBc::dirichlet(350.0).unwrap());
+    let histories = vec![ThermalRegionHistory { row, reference_temperature: None }];
+    let history = with_cx(|cx| ThermalBoundaryHistory::new_in_frames(
+        cx, left(&mesh), &env, &frames, histories.clone(), 0.0,
+    ).unwrap());
+    with_cx(|cx| {
+        let original = left(&mesh).finish().unwrap();
+        let rebound = ThermalBoundaryHistory::from_boundary_in_frames(
+            cx, &mesh, &original, &env, &frames, histories, 0.0,
+        ).unwrap();
+        let sampled = history.at(cx, 1.0).unwrap();
+        assert_eq!(sampled, rebound.at(cx, 1.0).unwrap());
+        assert!(sampled.dirichlet().iter().all(|&(_, t)| t == 350.0));
+        assert!(!sampled.dirichlet().is_empty());
+        for face in 0..mesh.boundary().len() {
+            assert_eq!(sampled.region_for(face), original.region_for(face));
+        }
+        assert!(history.at(cx, 3.0).is_err());
+        assert_eq!(history.at(cx, 0.0).unwrap(), original);
+    });
+    with_cancelled_cx(|cx| assert!(matches!(history.at(cx, 1.0),
+        Err(ConductionError::Cancelled { .. }))));
+    with_cx(|cx| assert_eq!(history.at(cx, 1.0).unwrap().conditions()[0],
+        ThermalBc::dirichlet(350.0).unwrap()));
+}

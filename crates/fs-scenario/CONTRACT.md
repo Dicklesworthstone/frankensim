@@ -1871,3 +1871,26 @@ control to wall state, infer temperature-dependent material properties,
 supply thermal/buoyancy feedback, contact resistance, radiation, phase change
 or axial heat removal. No full-workspace, empirical conjugate turbulent heat
 transfer or three-dimensional turbulence validation is claimed.
+
+## Typed scalar thermal boundary execution
+
+`Thermal/Dirichlet`, `Neumann` and `Robin` admit the existing scalar payload
+alongside legacy values. `BoundaryCondition::thermal_at` uses the ordinary
+scalar evaluator with exact per-kind dimensions, matching boundary/payload
+frames, even parity and no mass-flow compatibility tag. Semantic Dirichlet
+values must be `AbsoluteTemperature/Static`; temperature differences refuse.
+Flux and transfer coefficients retain dimension-only W/m² and W/(m² K), since
+the semantic registry has no such kinds. Sources retain fixed/held/linear
+interpolation and Refuse/Clamp/Periodic tails, with frame evaluation at physical
+time and the existing 256-frame limit. No table is copied during sampling.
+
+`fs-conduction` consumes this sample through its original mesh-bound thermal
+boundary and transient owners, preserving outward heat-flux signs, separately
+declared Robin reference temperature and native energy accounting. Its event
+scheduler clips finite typed-table and used frame-motion knots, takes exact
+held left values and explicitly refuses periodic event schedules unless
+unrolled; explicit endpoint sampling retains periodic behavior. The canonical
+wire schema is unchanged. Focused source regressions cover semantic admission,
+replay, native backward-Euler equivalence and a physically integrated surface
+pulse. These new thermal changes are source-reviewed only: the execution
+environment disconnected before Rust formatting, typechecking or test execution.
