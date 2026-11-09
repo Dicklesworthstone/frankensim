@@ -2121,3 +2121,40 @@ review passed. Native compilation and execution of this extension remain
 unverified: real-graph builds exhausted memory upstream in `asupersync`
 before reaching LBM. No test-pass or performance claim is made for those
 unexecuted cases.
+
+## Analytic full-gradient local SGS response
+
+`sgs3::eddy_viscosity_tangent` returns the original Smagorinsky, WALE or
+Vreman viscosity plus all nine analytic derivatives with respect to
+`G[i][j]=d(u_i)/d(x_j)`. `vreman_eddy_viscosity_tangent` additionally
+retains three directional filter widths, assigned to derivative coordinates.
+Both return `SgsViscosityTangent { viscosity, derivative }`.
+The original primal closure supplies the viscosity bit-for-bit. Fixed-size
+invariant differentiation introduces no allocation or production finite
+differences. WALE retains the full gradient's strain and rotation dependence;
+Vreman retains compensated weighted minors and exponent-scaled arithmetic.
+
+Derivatives have dimensions of length squared, with coefficients and filter
+widths held fixed. A stress Jacobian must include BOTH terms of
+`d(2 nu_t S)=2 nu_t dS+2 S(dnu_t/dG:dG)`; the returned viscosity derivative
+alone is not the stress Jacobian. Overflow or underflow of an otherwise
+nonzero derivative explicitly refuses instead of clipping.
+
+At Smagorinsky zero strain, all-zero WALE gradient and Vreman zero/rank-one
+states, the response uses a documented zero generalized-derivative
+selection. These are not claims of classical differentiability: a retained
+rank-one Vreman example has nonzero one-sided derivatives. At nonzero WALE
+gradients with zero traceless symmetric square, the ordinary derivative is
+zero. No new nonlinear convergence, turbulent-flow validation, wall-function
+or transition claim is introduced.
+
+Twenty native numerical tests passed on pinned nightly: ten original
+closure tests plus ten tangent groups covering all nine entries against
+independent centered differences, exact primal equality, isotropic rotation
+covariance, parity and homogeneity, unit/filter scaling, WALE near-wall cubic
+behavior, anisotropic Vreman axes/aspect ratios/rank limits, complete modeled
+stress response, disabled models and unrepresentable derivatives. The build
+compiled the complete original `fs_math` crate and the actual
+`model.rs`, `vreman.rs` and `tangent.rs` sources without runtime
+adapters, numerical stubs or substituted kernels. This establishes the
+numerical slice, not full `fs-lbm` or downstream solver integration.

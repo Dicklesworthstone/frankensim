@@ -105,7 +105,7 @@ pub fn vreman_eddy_viscosity(
 
 // Exact decomposition of a finite positive float, including subnormals.
 // x = mantissa * 2^exponent, with 1 <= mantissa < 2.
-fn parts(x: f64) -> (f64, i32) {
+pub(super) fn parts(x: f64) -> (f64, i32) {
     let bits = x.to_bits();
     let exponent = ((bits >> 52) & 0x7ff) as i32;
     if exponent == 0 {
@@ -116,7 +116,7 @@ fn parts(x: f64) -> (f64, i32) {
     }
 }
 
-fn power_of_two(exponent: i32) -> f64 {
+pub(super) fn power_of_two(exponent: i32) -> f64 {
     if exponent >= -1022 {
         f64::from_bits(((exponent + 1023) as u64) << 52)
     } else {
@@ -124,7 +124,7 @@ fn power_of_two(exponent: i32) -> f64 {
     }
 }
 
-fn product_parts<const N: usize>(factors: [f64; N]) -> (f64, i32) {
+pub(super) fn product_parts<const N: usize>(factors: [f64; N]) -> (f64, i32) {
     let mut mantissa = 1.0;
     let mut exponent = 0;
     for value in factors {
@@ -136,7 +136,7 @@ fn product_parts<const N: usize>(factors: [f64; N]) -> (f64, i32) {
     (mantissa, exponent + carry)
 }
 
-fn positive_product(factors: [f64; 3], extra_exponent: i32) -> Result<f64, SgsError> {
+pub(super) fn positive_product(factors: [f64; 3], extra_exponent: i32) -> Result<f64, SgsError> {
     let (mantissa, exponent) = product_parts(factors);
     let exponent = exponent + extra_exponent;
     if !(-1075..=1023).contains(&exponent) {

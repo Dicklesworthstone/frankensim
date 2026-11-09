@@ -19,6 +19,8 @@ mod model;
 pub use model::{SgsConfig, SgsError, SgsModel, SgsUse, eddy_viscosity, smagorinsky_viscosity};
 mod vreman;
 pub use vreman::vreman_eddy_viscosity;
+mod tangent;
+pub use tangent::{SgsViscosityTangent, eddy_viscosity_tangent, vreman_eddy_viscosity_tangent};
 
 /// Nonlocal Germano--Lilly viscosity with an explicit periodic test filter.
 pub mod dynamic;
