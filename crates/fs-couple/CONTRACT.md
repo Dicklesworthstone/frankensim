@@ -9967,3 +9967,23 @@ bodies: ten tests passed, comprising six original Prony spectrum controls and
 four contraction controls. Full `fs-couple` Cargo integration tests were not run
 in the disk-constrained session; syntax/static checks and independent complex
 work-balance calculations are distinct from that missing execution.
+
+## Axisymmetric spatial electrothermal feedback
+
+`circuit_enthalpy::conduction::axisymmetric` advances the original finite
+enthalpy history with source-resolved meridional conduction at the same
+thermal endpoint. Native swept-cell Joule heat enters that residual once;
+the original material Fourier links remain active. Voltage, total-current,
+regulated-power and distributed-current-density drives refresh the original
+conductivity at each receiver's temperature and declared liquid fraction.
+The returned candidate contains both accepted owners and their common
+electrical-work/thermal-energy accounting.
+
+Original cell routes must match the complete swept volume and constant-density
+caloric chart. The volume-only entry point refuses contact-bearing electrical
+owners until an explicit source-refresh and surface heat partition is supplied.
+No radial thermal mesh, expansion law or second heat integrator is inferred.
+See [axisymmetric electrothermal semantics](docs/axisymmetric-electrothermal.md)
+for source, geometry, budget and continuation details. Focused manufactured
+regressions cover sector scaling, unequal radial volumes, Fourier transfer,
+temperature/latent-phase feedback, compliance, refusal and atomic retry.

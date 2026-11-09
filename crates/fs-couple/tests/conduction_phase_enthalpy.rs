@@ -1,5 +1,7 @@
 //! Confined phase change uses one sourced field, circuit and total enthalpy.
 //! All numbers below are synthetic constitutive data, not empirical metals.
+#[path = "conduction_phase_enthalpy/axisymmetric.rs"]
+mod axisymmetric;
 #[path = "circuit_enthalpy/common.rs"]
 mod common;
 #[path = "conduction_phase_enthalpy/dielectric.rs"]

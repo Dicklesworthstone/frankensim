@@ -5,6 +5,8 @@
 //! backward-Euler enthalpy residual. No uniform-resistor approximation, second
 //! heat integrator, or independent material-name lookup is introduced.
 
+/// Axisymmetric source-bound current and finite thermal feedback.
+pub mod axisymmetric;
 /// Spatial conductor terminals coupled to native circuit storage and finite heat.
 pub mod circuit;
 /// Source-refreshed surface conduction and explicit two-sided Joule heating.
@@ -676,8 +678,20 @@ impl ConductionThermalNetwork<'_> {
         routes: &[CellId],
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<Vec<C>, Error> {
+        self.materials_from_sources(problem.conductors(), sample, routes, cancel)
+    }
+
+    // Source refresh is independent of planar versus swept geometry. Both
+    // field owners retain the original cards, electrical axes and phase law.
+    fn materials_from_sources<C: PlanarConductorMaterial>(
+        &self,
+        originals: &[C],
+        sample: &MaterialNetworkSample,
+        routes: &[CellId],
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<Vec<C>, Error> {
         self.materials_at_with(
-            problem.conductors(),
+            originals,
             sample,
             routes,
             cancel,
