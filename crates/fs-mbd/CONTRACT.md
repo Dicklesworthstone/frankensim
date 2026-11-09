@@ -1290,6 +1290,50 @@ cancellation or refusal publishes no partial candidate. The five regressions in
 finite-torque reversal, planar ODE refinement with changing spin, original full
 inertia and finite-rotation bearing virtual work, and refusal/late cancellation.
 
+`ElasticEccentricRotor::current_spin_motor` binds the same original current,
+terminal-voltage, back-EMF and electrical-source owner to the actual eccentric
+full body. Shaft-axis actuation and scalar source coordinate zero must be
+explicit. For a source impulse `j e_z` at fixed pose, the original tensor gives
+`delta omega_z = j (I_body^-1)_zz`; its effective scalar source inertia is
+`1/(I_body^-1)_zz`, not generally `I_zz`. The body's other angular momentum
+components stay fixed during that source, while transverse angular velocity
+and complete tensor kinetic coupling remain in the native impulse receipt.
+This scalar inertia applies only to electrical source response and never
+replaces the original body's trajectory inertia.
+
+Two electrical half sources surround the original elastic native trajectory.
+Each source reads actual incoming body-frame shaft speed, selects a current
+through the original voltage/current/power gates, and applies its accepted
+shaft impulse exactly once through `RigidBodyState::apply_momentum_impulse`.
+Actual angular transfer, actual endpoint shaft rate and full-body kinetic work
+must agree with the source within explicit allowances. Actual endpoint speed,
+terminal voltage and source power also pass the original drive gates independently
+of those transfer tolerances. Swallowed angular impulses refuse. The middle step
+owns all physical pose motion, reciprocal bearing reaction, full-inertia free
+rotation, gravity and separately supplied
+external shaft torque. Scalar source displacement is solely a work quadrature;
+it is not a second shaft angle or an extra elapsed physical interval.
+
+The final balance reduces the original body's full endpoint kinetic increment,
+gravity and bearing storage changes, original winding/bridge heat, source
+return/draw, and external shaft work. Neither numerical mechanical error nor
+source transfer error becomes electrical heat. Source draw and return remain
+separate, including reversal, and every original electrical receipt is retained.
+Explicit total-energy allowance and final cancellation admission precede return.
+Preparation and a complete step use bounded scalar native solves and the
+existing body/bearing owner, without a new nonlinear solver or inertia model.
+
+The symmetric composition is second order for smooth held-current operation.
+Active curtailment, controller transitions and continuous-time voltage/power
+peaks require time refinement: electrical source-stage endpoint limits are not
+a bound over the intervening nonlinear body trajectory. Finite inductance,
+battery storage, thermal feedback and velocity-dependent bearings remain
+outside this owner. Six regressions in `tests/rigid_rotor_eccentric_drive.rs`
+cover original nonprincipal mobility and tensor work, analytic power-limited
+startup, stall heat and regeneration, reciprocal eccentric-orbit refinement,
+zero-current native equivalence, final cancellation and unresolved body impulse
+refusal.
+
 Focused regressions use independent Jeffcott amplitude/phase, gyroscopic circular
 mode splitting, dense coordinate congruence, cross-coupled/active work and
 original force residuals. A manufactured nonsymmetric rotor has an exact

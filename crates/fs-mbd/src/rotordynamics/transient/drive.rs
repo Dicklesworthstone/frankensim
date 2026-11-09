@@ -438,7 +438,10 @@ impl RotorCurrentDrive {
         Ok(())
     }
 
-    fn admit_speed(self, speed_rad_s: f64) -> Result<(), RotorDriveError> {
+    pub(in crate::rotordynamics) fn admit_speed(
+        self,
+        speed_rad_s: f64,
+    ) -> Result<(), RotorDriveError> {
         if speed_rad_s < self.minimum_speed_rad_s || speed_rad_s > self.maximum_speed_rad_s {
             return Err(RotorDriveError::SpeedDomain {
                 speed_rad_s,
@@ -449,7 +452,11 @@ impl RotorCurrentDrive {
         Ok(())
     }
 
-    fn voltage(self, speed: f64, current: f64) -> Result<f64, RotorError> {
+    pub(in crate::rotordynamics) fn voltage(
+        self,
+        speed: f64,
+        current: f64,
+    ) -> Result<f64, RotorError> {
         finite(
             (Dd::from_f64(self.torque_constant_nm_per_a) * Dd::from_f64(speed)
                 + Dd::from_f64(self.winding_resistance_ohm) * Dd::from_f64(current))
@@ -457,7 +464,10 @@ impl RotorCurrentDrive {
         )
     }
 
-    fn source_power(self, terminal_power: f64) -> Result<f64, RotorError> {
+    pub(in crate::rotordynamics) fn source_power(
+        self,
+        terminal_power: f64,
+    ) -> Result<f64, RotorError> {
         finite(if terminal_power >= 0.0 {
             terminal_power / self.motoring_efficiency
         } else {

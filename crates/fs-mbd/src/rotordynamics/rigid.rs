@@ -44,6 +44,11 @@ pub use eccentric::{
     ElasticEccentricRotor, ElasticEccentricRotorError, ElasticEccentricRotorLoads,
     ElasticEccentricRotorStep,
 };
+mod eccentric_drive;
+pub use eccentric_drive::{
+    EccentricRotorCurrentCommand, EccentricRotorCurrentStep, EccentricRotorDriveControl,
+    EccentricRotorDriveError, EccentricRotorElectricalSource, ElasticEccentricCurrentMotor,
+};
 
 /// Bound on supplied bearing and unbalance stations per rigid rotor query.
 pub const MAX_ROTOR_STATIONS: usize = 256;
