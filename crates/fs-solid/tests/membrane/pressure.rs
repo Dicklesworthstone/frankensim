@@ -1,5 +1,5 @@
 use super::*;
-use fs_solid::membrane::vibration::VibrationSettings;
+use fs_solid::membrane::{MembranePressure, vibration::VibrationSettings};
 
 #[test]
 fn follower_pressure_tracks_current_area_and_rigid_rotation() {
@@ -320,5 +320,218 @@ fn pressure_solve_refuses_free_perimeter_and_cancelled_work() {
     assert!(
         p.solve_with_pressure(&zero, 100.0, &prescribed(1.02), &zero, settings(), || false)
             .is_ok()
+    );
+}
+
+/// G1/G3: exact P1 traction and its first spatial moment, including signed
+/// pressure and a rigidly rotated/translated current surface.
+#[test]
+fn material_pressure_profile_preserves_force_and_moment() {
+    let mesh = Mesh2 {
+        nodes: vec![[0.0, 0.0], [2.0, 0.0], [0.0, 1.0]],
+        elems: vec![vec![0, 1, 2]],
+        patches: vec![],
+    };
+    let p = MembranePatch::try_new(
+        mesh,
+        vec![sheet(8000.0, 8000.0, 4000.0, 0.2)],
+        vec![0.0],
+        domain(),
+        budget(),
+        || false,
+    )
+    .unwrap();
+    let samples = [[3.0, 9.0, -3.0]];
+    let pressure = MembranePressure::TriangleLinear(&samples);
+    let zero = [[0.0; 3]; 3];
+    let force = p.pressure_load_n(&zero, pressure, || false).unwrap();
+    // Integrating p=3+3*x-6*y over x/2+y<=1 gives Fz=3,
+    // integral y*p=1/2 and integral x*p=3. Uniform averaging loses this moment.
+    for (actual, expected) in force.iter().zip([1.0, 1.5, 0.5]) {
+        assert_eq!(*actual, [0.0, 0.0, expected]);
+    }
+    let cross = |a: [f64; 3], b: [f64; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let (sin, cos) = 0.61_f64.sin_cos();
+    let rotate = |x: [f64; 3]| [x[0], cos * x[1] - sin * x[2], sin * x[1] + cos * x[2]];
+    let translation = [0.7, -0.4, 0.2];
+    let positions: Vec<_> = p
+        .mesh()
+        .nodes
+        .iter()
+        .map(|x| {
+            let rotated = rotate([x[0], x[1], 0.0]);
+            std::array::from_fn::<_, 3, _>(|i| rotated[i] + translation[i])
+        })
+        .collect();
+    let displacement: Vec<_> = positions
+        .iter()
+        .zip(&p.mesh().nodes)
+        .map(|(x, r)| [x[0] - r[0], x[1] - r[1], x[2]])
+        .collect();
+    let rotated = p
+        .pressure_load_n(&displacement, pressure, || false)
+        .unwrap();
+    let mut moment = [0.0; 3];
+    let mut resultant = [0.0; 3];
+    for ((x, actual), original) in positions.iter().zip(&rotated).zip(&force) {
+        let expected = rotate(*original);
+        let torque = cross(*x, *actual);
+        for i in 0..3 {
+            close(actual[i], expected[i], 1e-14, 1e-13);
+            resultant[i] += actual[i];
+            moment[i] += torque[i];
+        }
+    }
+    let expected_force = rotate([0.0, 0.0, 3.0]);
+    let expected_moment = rotate([0.5, -3.0, 0.0]);
+    let translated_moment = cross(translation, expected_force);
+    for i in 0..3 {
+        close(resultant[i], expected_force[i], 1e-14, 1e-13);
+        close(
+            moment[i],
+            expected_moment[i] + translated_moment[i],
+            1e-14,
+            1e-13,
+        );
+    }
+    let constant = [[7.0; 3]];
+    let field = MembranePressure::TriangleLinear(&constant);
+    assert_eq!(
+        p.pressure_load_n(&displacement, field, || false).unwrap(),
+        p.pressure_load_n(&displacement, 7.0, || false).unwrap()
+    );
+    assert_eq!(
+        p.pressure_tangent_apply(&displacement, &zero, field, || false)
+            .unwrap(),
+        p.pressure_tangent_apply(&displacement, &zero, 7.0, || false)
+            .unwrap()
+    );
+    assert_eq!(
+        p.pressure_work_j(&zero, &displacement, field, || false)
+            .unwrap(),
+        p.pressure_work_j(&zero, &displacement, 7.0, || false)
+            .unwrap()
+    );
+    for bad in [vec![], vec![[1.0; 3]; 2], vec![[1.0, f64::NAN, 2.0]]] {
+        let invalid = MembranePressure::TriangleLinear(&bad);
+        assert!(p.pressure_load_n(&zero, invalid, || false).is_err());
+        assert!(
+            p.pressure_tangent_apply(&zero, &zero, invalid, || false)
+                .is_err()
+        );
+        assert!(p.pressure_work_j(&zero, &zero, invalid, || false).is_err());
+    }
+    assert!(matches!(
+        p.pressure_load_n(&zero, pressure, || true),
+        Err(MembraneError::Cancelled)
+    ));
+}
+
+/// G1/G3: exact follower derivative and drift quadrature for distinct original
+/// facet traces. Nonuniform material loading is not a conservative cavity law.
+#[test]
+fn material_pressure_profile_tangent_and_path_work_match_independent_quadrature() {
+    let p = patch(8000.0, 2000.0, 500.0, 0.2, 0.37);
+    let samples = [
+        [3.0, 9.0, -3.0],
+        [-2.0, 6.0, 1.0],
+        [9.0, 0.0, 4.0],
+        [3.0, -7.0, 2.0],
+    ];
+    let pressure = MembranePressure::TriangleLinear(&samples);
+    let before = displaced();
+    let direction = [
+        [0.003, -0.002, 0.004],
+        [0.001, 0.0, 0.002],
+        [0.0, -0.001, 0.003],
+        [-0.002, 0.001, 0.0],
+        [0.001, 0.002, -0.001],
+    ];
+    let at = |s: f64| {
+        before
+            .iter()
+            .zip(&direction)
+            .map(|(u, d)| std::array::from_fn::<_, 3, _>(|i| u[i] + s * d[i]))
+            .collect::<Vec<_>>()
+    };
+    let after = at(1.0);
+    let h = 1e-5;
+    let lo = p.pressure_load_n(&at(-h), pressure, || false).unwrap();
+    let hi = p.pressure_load_n(&at(h), pressure, || false).unwrap();
+    let tangent = p
+        .pressure_tangent_apply(&before, &direction, pressure, || false)
+        .unwrap();
+    for ((lo, hi), exact) in lo
+        .iter()
+        .flatten()
+        .zip(hi.iter().flatten())
+        .zip(tangent.iter().flatten())
+    {
+        close((hi - lo) / (2.0 * h), *exact, 1e-12, 1e-8);
+    }
+    // Two-point Gauss is exact for the quadratic current-area force along the
+    // straight path. It also resolves unequal nodal pressure, unlike p_mean*Q.
+    let mut quadrature = 0.0;
+    for s in [0.5 - (1.0_f64 / 12.0).sqrt(), 0.5 + (1.0_f64 / 12.0).sqrt()] {
+        let force = p.pressure_load_n(&at(s), pressure, || false).unwrap();
+        quadrature += 0.5
+            * force
+                .iter()
+                .flatten()
+                .zip(direction.iter().flatten())
+                .map(|(f, d)| f * d)
+                .sum::<f64>();
+    }
+    let work = p
+        .pressure_work_j(&before, &after, pressure, || false)
+        .unwrap();
+    close(work, quadrature, 1e-17, 1e-13);
+    close(
+        p.pressure_work_j(&after, &before, pressure, || false)
+            .unwrap(),
+        -work,
+        1e-17,
+        1e-13,
+    );
+    let force = p.pressure_load_n(&before, pressure, || false).unwrap();
+    let power: f64 = force
+        .iter()
+        .flatten()
+        .zip(direction.iter().flatten())
+        .map(|(f, d)| f * d)
+        .sum();
+    let differential = p
+        .pressure_work_j(&at(-h), &at(h), pressure, || false)
+        .unwrap()
+        / (2.0 * h);
+    close(differential, power, 1e-12, 1e-8);
+
+    // The outer rim stays fixed through this closed loop of the center node.
+    let localized = [[0.0, 6.0, 0.0], [0.0; 3], [0.0; 3], [0.0; 3]];
+    let mut corners = vec![vec![[0.0; 3]; 5]; 5];
+    corners[1][0][0] = 0.01;
+    corners[2][0] = [0.01, 0.0, 0.002];
+    corners[3][0][2] = 0.002;
+    let cycle: f64 = corners
+        .windows(2)
+        .map(|pair| {
+            p.pressure_work_j(
+                &pair[0],
+                &pair[1],
+                MembranePressure::TriangleLinear(&localized),
+                || false,
+            )
+            .unwrap()
+        })
+        .sum();
+    assert!(
+        cycle.abs() > 1e-7,
+        "nonuniform fixed-rim work cannot be treated as p*dV"
     );
 }

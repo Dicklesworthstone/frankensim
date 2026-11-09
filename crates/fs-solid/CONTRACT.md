@@ -1890,6 +1890,44 @@ energy for light/heavy sheet inventories across 560 orders of mass ratio.
 No measured-material, real-time throughput or continuum-error qualification
 is inferred from these manufactured cases.
 
+## Spatially resolved follower pressure on nonlinear membranes
+
+`MembranePressure::TriangleLinear` borrows three signed pressure-jump samples
+for each original triangle, in that triangle's original node order. Samples
+remain fixed in material/barycentric coordinates during a call; a spatial fluid
+or hydrostatic source must resample its Eulerian field between calls. Different
+triangle traces are admitted. No pressure interpolation from a foreign mesh,
+EOS, fluid inertia or constitutive pressure derivative is inferred.
+
+The original pressure owner integrates the P1 pressure and displacement bases
+exactly: each local nodal force is the current oriented doubled-area vector
+times `(2*p_i+p_j+p_k)/24`. Its matrix-free tangent differentiates that same
+area vector. Straight-drift work integrates its quadratic area evolution
+analytically with the same nodal pressure weights. This retains pressure moments
+and local virtual work which replacing a field by its mean would discard.
+Nonuniform material pressure can perform nonzero work on a closed displacement
+loop even with a stationary outer perimeter. Only a uniform fixed-perimeter
+load has the existing conservative pressure-volume interpretation.
+
+`pressure_load_n`, `pressure_tangent_apply`, `pressure_work_j`, and both
+native `step_with_pressure` methods accept the new pressure type or a scalar
+through `From<f64>`. Constant triangle triples retain the original uniform
+arithmetic. Dynamics admits the immutable field before trial work, then reuses
+its prepared pressure and drift storage through both current-area kicks.
+All original inertia images, support coupling, pressure-work accounts, material
+damping and transactional publication remain shared.
+
+G1/G3 regressions define exact force and moment under rigid motion, independent
+tangent differences and Gauss path-work quadrature, a nonconservative fixed-rim
+loop, a nonlinear loaded pyramid with lumped and consistent inertia, signed
+material loss, uniform parity and source/cancellation rollback. The two
+pressure-kernel regressions compiled and passed against the actual production
+`pressure.rs`, with geometry-only fixture containers replacing the surrounding
+material setup. The full membrane and damped-motion integration regressions
+are authored but have not been executed against the complete fs-solid dependency
+closure in this environment. This evidence does not establish that broader
+integration, continuum convergence or a stability certificate.
+
 ## Nonlinear source-bound membrane motion
 
 `membrane::dynamics::MembraneMotion::new` advances the original total-Lagrangian

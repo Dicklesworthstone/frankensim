@@ -453,6 +453,7 @@ mod equilibrium;
 pub use equilibrium::{MembraneSolveSettings, MembraneSolution};
 
 mod pressure;
+pub use pressure::MembranePressure;
 
 /// Nonlinear motion with source-owned elasticity and reference inertia.
 pub mod dynamics;

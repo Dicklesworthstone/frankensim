@@ -12,7 +12,7 @@
 //! defects, separately bounded by the caller. No nonlinear stability, bandwidth,
 //! continuum convergence or audio-render qualification follows from acceptance.
 
-use super::{InverseMass, MembraneError, MembraneMotion, kinetic, poll};
+use super::{InverseMass, MembraneError, MembraneMotion, MembranePressure, kinetic, poll};
 use crate::membrane::viscosity::{MembraneViscosity, MembraneViscosityError};
 use fs_math::det;
 use fs_solver::op::LinearOp;
@@ -236,16 +236,18 @@ impl<'model, 'patch> DampedMembraneMotion<'model, 'patch> {
     /// original elastic map. Pressure does work only during its geometric
     /// drift, not during the two fixed-geometry damping stages. That work is
     /// reported separately and never counted as material heat. Current-area
-    /// traction, free-perimeter path work and support impulses retain
+    /// traction, material P1 samples, path work and support impulses retain
     /// [`MembraneMotion::step_with_pressure`]'s semantics and limitations.
-    pub fn step_with_pressure(
+    pub fn step_with_pressure<'p>(
         &mut self,
         dt_s: f64,
         dead_load_n: &[[f64; 3]],
-        pressure_pa: f64,
+        pressure: impl Into<MembranePressure<'p>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DampedMembraneStep> {
         poll(&mut cancelled)?;
+        let pressure = pressure.into();
+        pressure.validate(self.motion.patch.elements.len(), &mut cancelled)?;
         let next_time = self.motion.time_s + dt_s;
         if !dt_s.is_finite()
             || dt_s <= 0.0
@@ -253,7 +255,6 @@ impl<'model, 'patch> DampedMembraneMotion<'model, 'patch> {
             || 0.25 * dt_s == 0.0
             || !next_time.is_finite()
             || next_time == self.motion.time_s
-            || !pressure_pa.is_finite()
             || !crate::membrane::finite_vectors(dead_load_n, self.motion.displacement_m.len())
         {
             return Err(invalid(
@@ -264,9 +265,9 @@ impl<'model, 'patch> DampedMembraneMotion<'model, 'patch> {
         self.trial_element_dissipated_j.fill(0.0);
         let mut mass_solves = 0;
         let first = self.damping_stage(0.5 * dt_s, &mut mass_solves, &mut cancelled)?;
-        let elastic =
-            self.trial
-                .step_with_pressure(dt_s, dead_load_n, pressure_pa, &mut cancelled)?;
+        let elastic = self
+            .trial
+            .step_with_pressure(dt_s, dead_load_n, pressure, &mut cancelled)?;
         let last = self.damping_stage(0.5 * dt_s, &mut mass_solves, &mut cancelled)?;
         let dissipated_j = first.heat + last.heat;
         let energy_defect_j = first.defect + elastic.energy_defect_j + last.defect;

@@ -14,10 +14,14 @@
 //! does not establish nonlinear stability or mesh/time convergence. Moving
 //! supports, contact, and material history are not included. Held signed
 //! pressure uses current-area forces at both kicks and exact work over the
-//! resolved straight drift. On a free perimeter this force is nonconservative;
-//! no symplectic or path-independent pressure-work claim applies there.
+//! resolved straight drift. Nonuniform material profiles or a free perimeter
+//! can be nonconservative; no symplectic or path-independent pressure-work claim
+//! applies in those cases.
 
-use super::{MembraneError, MembranePatch, finite_vectors, inertia::MembraneMassImage, poll};
+use super::{
+    MembraneError, MembranePatch, MembranePressure, finite_vectors, inertia::MembraneMassImage,
+    poll,
+};
 use fs_solver::op::LinearOp;
 use fs_time::{MomentumVerletError, verlet_momentum_step_with_displacement};
 use std::cell::{Cell, RefCell};
@@ -432,37 +436,42 @@ impl<'a> MembraneMotion<'a> {
         self.step_with_pressure(dt_s, dead_load_n, 0.0, cancelled)
     }
 
-    /// Advance the same original momentum map with held signed pressure [Pa].
+    /// Advance the same original momentum map with held material pressure [Pa].
     /// Positive pressure acts along the current reference-oriented normal,
     /// initially +z. It is a pressure difference, not an absolute gas pressure.
     ///
     /// Both endpoint kicks assemble the original current-area traction,
     /// including loads at prescribed nodes in the support impulse. Work is
     /// integrated exactly along the resolved straight drift, retaining changing
-    /// face areas and increments below the absolute-position ULP. With moving
-    /// perimeter nodes this is path-dependent work; the positional-force Verlet
-    /// map remains second order and reversible, but is not claimed symplectic.
-    /// A fixed perimeter recovers the native conservative pressure-volume load.
+    /// face areas and increments below the absolute-position ULP. Samples in
+    /// `MembranePressure::TriangleLinear` are held in each original triangle's
+    /// material coordinates; a spatial fluid field must be resampled by its owner.
+    /// Nonuniform profiles or moving perimeter nodes can give path-dependent
+    /// work. The positional-force Verlet map remains second order and reversible,
+    /// but is not claimed symplectic in those cases. Only uniform pressure on a
+    /// fixed perimeter recovers the native conservative pressure-volume load.
     ///
     /// Pressure may change between calls. No gas inventory, acoustic stiffness,
     /// fluid inertia, or pressure-dependent material state is inferred. Pressure
     /// assembly and work reuse prepared O(nodes) storage; a rejected step leaves
-    /// the complete accepted mechanical state unchanged. Zero pressure follows
-    /// the original unloaded arithmetic path.
-    pub fn step_with_pressure(
+    /// the complete accepted mechanical state unchanged. A scalar zero pressure
+    /// follows the original unloaded arithmetic path.
+    pub fn step_with_pressure<'p>(
         &mut self,
         dt_s: f64,
         dead_load_n: &[[f64; 3]],
-        pressure_pa: f64,
+        pressure: impl Into<MembranePressure<'p>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MembraneStep, MembraneError> {
         poll(&mut cancelled)?;
+        let pressure_load = pressure.into();
+        pressure_load.validate(self.patch.elements.len(), &mut cancelled)?;
+        let has_pressure = !pressure_load.is_zero();
         let next_time = self.time_s + dt_s;
         if !dt_s.is_finite()
             || dt_s == 0.0
             || !next_time.is_finite()
             || next_time == self.time_s
-            || !pressure_pa.is_finite()
             || !finite_vectors(dead_load_n, self.displacement_m.len())
         {
             return Err(MembraneError::Invalid(
@@ -510,10 +519,10 @@ impl<'a> MembraneMotion<'a> {
                 }
                 trial_gradient
             };
-            if pressure_pa != 0.0 {
+            if has_pressure {
                 if let Err(error) =
                     self.patch
-                        .pressure_load_into_n(u, pressure_pa, pressure, &mut || {
+                        .pressure_load_into_n(u, pressure_load, pressure, &mut || {
                             (control.borrow_mut())()
                         })
                 {
@@ -523,7 +532,7 @@ impl<'a> MembraneMotion<'a> {
             }
             for (out, &dof) in output.iter_mut().zip(&self.free) {
                 let mut applied = dead_load_n[dof / 3][dof % 3];
-                if pressure_pa != 0.0 {
+                if has_pressure {
                     applied += pressure[dof / 3][dof % 3];
                 }
                 *out = applied - gradient[dof / 3][dof % 3];
@@ -532,7 +541,7 @@ impl<'a> MembraneMotion<'a> {
             for (dof, &held) in self.fixed.iter().enumerate() {
                 if held {
                     let mut applied = dead_load_n[dof / 3][dof % 3];
-                    if pressure_pa != 0.0 {
+                    if has_pressure {
                         applied += pressure[dof / 3][dof % 3];
                     }
                     reactions[dof % 3] += gradient[dof / 3][dof % 3] - applied;
@@ -574,7 +583,7 @@ impl<'a> MembraneMotion<'a> {
             .zip(displacement)
             .map(|(&dof, &increment)| dead_load_n[dof / 3][dof % 3] * increment)
             .sum();
-        let pressure_work_j = if pressure_pa == 0.0 {
+        let pressure_work_j = if !has_pressure {
             0.0
         } else {
             self.pressure_scratch.fill([0.0; 3]);
@@ -584,7 +593,7 @@ impl<'a> MembraneMotion<'a> {
             self.patch.pressure_work_from_increment_j(
                 &self.displacement_m,
                 &self.pressure_scratch,
-                pressure_pa,
+                pressure_load,
                 &mut cancelled,
             )?
         };

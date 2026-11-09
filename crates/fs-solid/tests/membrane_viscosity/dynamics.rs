@@ -1,5 +1,6 @@
 //! Independent nonlinear material-loss checks; all coefficients are synthetic.
 use super::*;
+use fs_solid::membrane::MembranePressure;
 use fs_solid::membrane::dynamics::{
     ConsistentMassBudget, MembraneMotion,
     viscosity::{DampedMembraneMotion, MembraneDampingBudget, MembraneDampingError},
@@ -515,4 +516,100 @@ fn source_work_time_and_energy_refusals_publish_no_partial_motion_or_heat() {
     assert_eq!(accepted(motion.motion()), state);
     assert_eq!(motion.cumulative_dissipated_j(), 0.0);
     assert!(motion.element_dissipated_j().iter().all(|q| *q == 0.0));
+}
+
+/// G1/G3/G4: a resolved signed profile drives original nonlinear material
+/// damping, preserving its physical heat and full consistent-mass reactions.
+#[test]
+fn material_pressure_profile_drives_damped_motion_and_rolls_back_with_heat() {
+    let (p, laws) = patch([20_000.0, 20_000.0, 20_000.0, 0.0, 0.0, 0.0], 0.002, 0.0);
+    let viscosity = MembraneViscosity::new(&p, laws, (0.0, 1000.0), || false).unwrap();
+    let loads = [[0.0; 3], [0.0, 0.0, 0.7], [0.0; 3]];
+    let dt = 0.04;
+    for consistent in [false, true] {
+        let mass = if consistent { 0.5 } else { 1.0 };
+        for samples in [[-3.0, 7.0, 1.0], [2.0, -4.0, 8.0]] {
+            let field = [samples];
+            let pressure = MembranePressure::TriangleLinear(&field);
+            // x_b=(1.08,0,z), x_c=(0,1,0), with only b_z free.
+            let force_z = 1.08 * (samples[0] + 2.0 * samples[1] + samples[2]) / 24.0;
+            let total_weight = samples.iter().sum::<f64>() / 6.0;
+            let mut z = 0.2;
+            let mut v = -0.3;
+            let mut motion = DampedMembraneMotion::new(
+                &viscosity,
+                scalar_motion(&p, z, v, consistent),
+                budget(),
+                || false,
+            )
+            .unwrap();
+            for _ in 0..4 {
+                let expected = scalar_step(z, v, mass, dt, 0.7 + force_z);
+                let step = motion
+                    .step_with_pressure(dt, &loads, pressure, || false)
+                    .unwrap();
+                close(motion.motion().displacement_m()[1][2], expected.z);
+                close(motion.motion().velocity_m_s()[1][2], expected.v);
+                close(step.pressure_work_j, force_z * (expected.z - z));
+                close(step.dead_load_work_j, 0.7 * (expected.z - z));
+                close(step.dissipated_j, expected.heat);
+                close(step.energy_defect_j, expected.defect);
+                close(
+                    step.support_impulse_n_s[2],
+                    expected.v - v - dt * (0.7 + 1.08 * total_weight),
+                );
+                close(
+                    step.support_impulse_n_s[0],
+                    0.5 * dt * total_weight * (z + expected.z),
+                );
+                close(step.support_impulse_n_s[1], 0.0);
+                z = expected.z;
+                v = expected.v;
+            }
+            let before = accepted(motion.motion());
+            let before_heat = motion.cumulative_dissipated_j();
+            let before_cells = motion.element_dissipated_j().to_vec();
+            let bad = [[1.0, f64::NAN, 0.0]];
+            assert!(
+                motion
+                    .step_with_pressure(dt, &loads, MembranePressure::TriangleLinear(&bad), || {
+                        false
+                    })
+                    .is_err()
+            );
+            assert_eq!(accepted(motion.motion()), before);
+            assert_eq!(motion.cumulative_dissipated_j(), before_heat);
+            assert_eq!(motion.element_dissipated_j(), before_cells);
+            let mut probe =
+                DampedMembraneMotion::new(&viscosity, motion.motion().clone(), budget(), || false)
+                    .unwrap();
+            let mut polls = 0;
+            let expected = probe
+                .step_with_pressure(dt, &loads, pressure, || {
+                    polls += 1;
+                    false
+                })
+                .unwrap();
+            for stop in [polls - 1, polls] {
+                let mut count = 0;
+                assert!(
+                    motion
+                        .step_with_pressure(dt, &loads, pressure, || {
+                            count += 1;
+                            count == stop
+                        })
+                        .is_err()
+                );
+                assert_eq!(accepted(motion.motion()), before);
+                assert_eq!(motion.cumulative_dissipated_j(), before_heat);
+                assert_eq!(motion.element_dissipated_j(), before_cells);
+            }
+            assert_eq!(
+                motion
+                    .step_with_pressure(dt, &loads, pressure, || false)
+                    .unwrap(),
+                expected
+            );
+        }
+    }
 }

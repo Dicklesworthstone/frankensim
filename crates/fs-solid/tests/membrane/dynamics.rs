@@ -1,6 +1,9 @@
 //! G1/G3 nonlinear motion: an independent Duffing period, work and momentum.
 use super::*;
-use fs_solid::membrane::dynamics::MembraneMotion;
+use fs_solid::membrane::{
+    MembranePressure,
+    dynamics::{ConsistentMassBudget, MembraneMotion},
+};
 
 fn initial(stretch: f64, amplitude: f64) -> Vec<[f64; 3]> {
     let mut u = vec![[0.0; 3]; 5];
@@ -574,4 +577,157 @@ fn refused_trials_leave_motion_energy_and_checkpoint_unchanged() {
     let mut invalid_velocity = zero;
     invalid_velocity[1][2] = 1.0;
     assert!(MembraneMotion::new(&p, &fixed, &u, &invalid_velocity, 0.0, || false).is_err());
+}
+
+/// G1/G3: a distributed pressure profile drives the same full nonlinear
+/// momentum map and retains all supported loads under both reference masses.
+#[test]
+fn material_pressure_profile_drives_nonlinear_motion_with_complete_support_impulses() {
+    let p = patch(8000.0, 8000.0, 4000.0, 0.2, 0.0);
+    let stretch = 1.02_f64;
+    let side = 0.1 * stretch;
+    let q0 = 0.006;
+    let v0 = -0.04;
+    let dt = 1e-5;
+    let zero = [[0.0; 3]; 5];
+    let mut velocity = zero;
+    velocity[0][2] = v0;
+    let displacement = initial(stretch, q0);
+    let fixed = prescribed(stretch);
+    let samples = [
+        [-200.0, 100.0, 300.0],
+        [400.0, -50.0, -100.0],
+        [-150.0, 200.0, 50.0],
+        [100.0, 0.0, -20.0],
+    ];
+    let pressure = MembranePressure::TriangleLinear(&samples);
+    // Exact triangle integrals: sum(2*p_center+p_left+p_right)=780;
+    // total sums weighted by the four normal signs are (-70,270,630).
+    let force = side * side * 780.0 / 24.0;
+    let restoring = |q: f64| {
+        2.0 * 8000.0 * (stretch * stretch - 1.0) * q + 4.0 * 8000.0 * q.powi(3) / 0.1_f64.powi(2)
+    };
+    for consistent in [false, true] {
+        let mut motion = if consistent {
+            MembraneMotion::new_with_consistent_inertia(
+                &p,
+                &fixed,
+                &displacement,
+                &velocity,
+                0.0,
+                ConsistentMassBudget {
+                    max_nodes_per_axis: 5,
+                },
+                || false,
+            )
+            .unwrap()
+        } else {
+            MembraneMotion::new(&p, &fixed, &displacement, &velocity, 0.0, || false).unwrap()
+        };
+        let mass = p.nodal_mass_kg()[0] * if consistent { 0.5 } else { 1.0 };
+        let half = v0 + 0.5 * dt * (force - restoring(q0)) / mass;
+        let q1 = q0 + dt * half;
+        let v1 = half + 0.5 * dt * (force - restoring(q1)) / mass;
+        let step = motion
+            .step_with_pressure(dt, &zero, pressure, || false)
+            .unwrap();
+        close(motion.displacement_m()[0][2], q1, 1e-16, 1e-13);
+        close(motion.velocity_m_s()[0][2], v1, 1e-13, 1e-12);
+        close(step.pressure_work_j, force * dt * half, 1e-18, 1e-12);
+        let mean_q = 0.5 * (q0 + q1);
+        let total_load = [
+            -70.0 * side * mean_q / 6.0,
+            270.0 * side * mean_q / 6.0,
+            630.0 * side * side / 6.0,
+        ];
+        for axis in 0..3 {
+            let momentum_change = if axis == 2 {
+                p.nodal_mass_kg()[0] * (v1 - v0)
+            } else {
+                0.0
+            };
+            close(
+                step.support_impulse_n_s[axis],
+                momentum_change - dt * total_load[axis],
+                1e-14,
+                1e-10,
+            );
+        }
+        motion
+            .step_with_pressure(-dt, &zero, pressure, || false)
+            .unwrap();
+        close(motion.displacement_m()[0][2], q0, 1e-16, 1e-13);
+        close(motion.velocity_m_s()[0][2], v0, 1e-12, 1e-12);
+    }
+}
+
+/// G0/G3/G4: scalar parity and refusal/retry include the whole P1 field.
+#[test]
+fn material_pressure_profile_rejects_bad_sources_and_late_cancellation_atomically() {
+    let p = ballistic_patch();
+    let zero = [[0.0; 3]; 5];
+    let original = MembraneMotion::new(&p, &[], &zero, &zero, 0.0, || false).unwrap();
+    let constant = [[12.0; 3]; 4];
+    let pressure = MembranePressure::TriangleLinear(&constant);
+    let dt = 1e-5;
+    let mut scalar = original.clone();
+    let mut field = original.clone();
+    let mut polls = 0;
+    let expected = scalar
+        .step_with_pressure(dt, &zero, 12.0, || false)
+        .unwrap();
+    assert_eq!(
+        field
+            .step_with_pressure(dt, &zero, pressure, || {
+                polls += 1;
+                false
+            })
+            .unwrap(),
+        expected
+    );
+    assert_eq!(field.displacement_m(), scalar.displacement_m());
+    assert_eq!(field.velocity_m_s(), scalar.velocity_m_s());
+    for bad in [
+        vec![],
+        vec![[1.0; 3]; 3],
+        vec![[1.0; 3]; 5],
+        vec![[1.0, f64::NAN, 2.0]; 4],
+        vec![[f64::MAX; 3]; 4],
+    ] {
+        let mut motion = original.clone();
+        assert!(
+            motion
+                .step_with_pressure(dt, &zero, MembranePressure::TriangleLinear(&bad), || false)
+                .is_err()
+        );
+        assert_eq!(motion.displacement_m(), original.displacement_m());
+        assert_eq!(motion.velocity_m_s(), original.velocity_m_s());
+        assert_eq!(motion.time_s(), 0.0);
+        assert_eq!(
+            motion
+                .step_with_pressure(dt, &zero, pressure, || false)
+                .unwrap(),
+            expected
+        );
+    }
+    for stop in [1, polls - 1, polls] {
+        let mut motion = original.clone();
+        let mut count = 0;
+        assert!(matches!(
+            motion.step_with_pressure(dt, &zero, pressure, || {
+                count += 1;
+                count == stop
+            }),
+            Err(MembraneError::Cancelled)
+        ));
+        assert_eq!(motion.displacement_m(), original.displacement_m());
+        assert_eq!(motion.velocity_m_s(), original.velocity_m_s());
+        assert_eq!(motion.time_s(), 0.0);
+        assert_eq!(
+            motion
+                .step_with_pressure(dt, &zero, pressure, || false)
+                .unwrap(),
+            expected
+        );
+    }
 }
