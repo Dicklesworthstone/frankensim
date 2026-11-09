@@ -7,10 +7,12 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "build:cf": "tsc --noEmit && vite build --base /chronometer/ --outDir dist-cf/chronometer --emptyOutDir && cp cloudflare/_headers dist-cf/_headers",
+    "deploy:cf": "npm run build:cf && npx wrangler deploy --config cloudflare/wrangler.jsonc",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
     "test": "node --test test/watchEngine.test.mjs",
-    "wasm": "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_frankensim_watch cargo lbuild --offline --manifest-path engine-watch/Cargo.toml --target wasm32-unknown-unknown --release && wasm-bindgen --target web --out-dir src/wasm-pkg ${TMPDIR:-/tmp}/rch_target_frankensim_watch/wasm32-unknown-unknown/release/fs_pocket_watch.wasm"
+    "wasm": "RUSTFLAGS=\"--force-warn=dead_code\" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_frankensim_watch /Users/jemanuel/.cargo/bin/cargo lbuild --offline --manifest-path engine-watch/Cargo.toml --target wasm32-unknown-unknown --release && wasm-bindgen --target web --out-dir src/wasm-pkg ${TMPDIR:-/tmp}/rch_target_frankensim_watch/wasm32-unknown-unknown/release/fs_pocket_watch.wasm"
   },
   "devDependencies": {
     "@types/three": "^0.186.0",

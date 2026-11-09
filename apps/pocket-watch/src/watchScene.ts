@@ -9,7 +9,13 @@ import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPa
 import type { WatchSnapshot } from "./snapshotLayout";
 
 export type ActiveToolMode = "inspect" | "torch" | "ln2" | "oil" | "magnet" | "mic";
-export type CameraPreset = "overview" | "tourbillon" | "escapement" | "profile";
+export type CameraPreset =
+  | "overview"
+  | "tourbillon"
+  | "barrel"
+  | "side"
+  | "escapement"
+  | "profile";
 
 export interface SceneCallbacks {
   onTargetMoved: (tool: ActiveToolMode, posMm: [number, number, number]) => void;
@@ -2428,10 +2434,13 @@ export class PocketWatchScene {
     } else if (preset === "tourbillon") {
       this.camera.position.set(0, -22, 22);
       this.controls.target.set(0, -11, 0.5);
+    } else if (preset === "barrel") {
+      this.camera.position.set(0, -6, 28);
+      this.controls.target.set(0, 9.5, 0.5);
     } else if (preset === "escapement") {
       this.camera.position.set(-6, -18, 13);
       this.controls.target.set(-1.5, -10.8, 0.2);
-    } else if (preset === "profile") {
+    } else if (preset === "side" || preset === "profile") {
       this.camera.position.set(46, -24, 18);
       this.controls.target.set(0, -2, 0);
     }

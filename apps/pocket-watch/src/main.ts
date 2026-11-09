@@ -376,7 +376,8 @@ async function boot(): Promise<void> {
 
     const effRate = 0.35 * snap.measuredRateSPerDay + 0.65 * snap.theoreticalRateSPerDay;
     const rateStr = `${effRate >= 0 ? "+" : ""}${effRate.toFixed(1)} s/d`;
-    hudRateSDay.textContent = rateStr;
+    const dRateDt = sim.rate_sensitivity_s_day_per_k();
+    hudRateSDay.textContent = `${rateStr} (${dRateDt.toFixed(1)} s/d/K)`;
     tgRate.textContent = rateStr;
     tgAmp.textContent = `${snap.balanceAmplitudeDeg.toFixed(0)}°`;
     tgBeatErr.textContent = `${snap.measuredBeatErrorMs.toFixed(1)} ms`;
@@ -409,7 +410,10 @@ async function boot(): Promise<void> {
     lblOilRate.textContent = `${snap.nodes[9]!.oilFilmUm.toFixed(1)} µm film`;
     lblBField.textContent = `${snap.bFieldEscapementMt.toFixed(1)} mT`;
     lblRemanence.textContent = `${snap.remanentMagnetizationMt.toFixed(1)} mT`;
-    lblMicSpl.textContent = `${micAudio.lastRmsSplDb.toFixed(1)} dB`;
+    const splDb = sim.mic_spl_db();
+    const sone = sim.mic_loudness_sone();
+    const acum = sim.mic_sharpness_acum();
+    lblMicSpl.textContent = `${splDb.toFixed(1)} dB · ${sone.toFixed(2)} sone · ${acum.toFixed(2)} acum`;
 
     // Stage bottom overlay
     const n6h = snap.nodes[3]!;

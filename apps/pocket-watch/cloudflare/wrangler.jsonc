@@ -1,0 +1,18 @@
+// Static Chronomètre Souverain (Calibre FS-1903 Tourbillon) under frankensim.org/chronometer,
+// served by an assets-only Cloudflare Worker.
+// Build first:  npm run build:cf
+// then:         npx wrangler deploy --config cloudflare/wrangler.jsonc
+// Everything outside /chronometer keeps going to the existing origin.
+{
+  "name": "frankensim-chronometer",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "../dist-cf",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "none"
+  },
+  "routes": [
+    { "pattern": "frankensim.org/chronometer", "zone_name": "frankensim.org" },
+    { "pattern": "frankensim.org/chronometer/*", "zone_name": "frankensim.org" }
+  ]
+}

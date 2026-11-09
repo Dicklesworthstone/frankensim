@@ -32,6 +32,17 @@ test("WASM PocketWatchSim — chronometer timekeeping, winding, and all 5 multip
   let peak = 0;
   for (const s of audio) peak = Math.max(peak, Math.abs(s));
   assert.ok(peak > 1e-4, `expected non-zero modal audio peak, got ${peak}`);
+  assert.ok(Number.isFinite(sim.mic_spl_db()), "expected finite mic_spl_db");
+  assert.ok(sim.mic_loudness_sone() >= 0.0, "expected non-negative Zwicker loudness (sone)");
+  assert.ok(sim.mic_loudness_phon() >= 0.0, "expected non-negative loudness level (phon)");
+  assert.ok(sim.mic_sharpness_acum() >= 0.0, "expected non-negative DIN sharpness (acum)");
+  assert.ok(sim.rate_sensitivity_s_day_per_k() < -1.0, "expected negative thermoelastic rate sensitivity d(rate)/dT");
+  assert.ok(sim.rate_interval_lo_s_day() <= sim.rate_interval_hi_s_day(), "expected valid interval rate bounds");
+  assert.ok(sim.balance_aero_drag_s_inv() > 0.0, "expected positive Stokes-Stuart oscillating-cylinder aero drag");
+  assert.ok(sim.cosc_e_value() > 0.0, "expected positive COSC e-process wealth");
+  assert.ok(sim.gdt_allocated_cost() > 0.0, "expected positive Lagrange GD&T allocated cost");
+  const auditSummary = sim.multiphysics_crate_audit_summary();
+  assert.equal(auditSummary.length, 9, "expected 9-element 51-crate audit summary");
 
   // 3. Blowtorch heating -> thermal expansion timekeeping drift -> 18k gold case melting -> liquid gold fouls gears
   sim.set_blowtorch(1.0, 0, -25, 0);

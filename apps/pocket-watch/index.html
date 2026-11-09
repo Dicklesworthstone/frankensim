@@ -109,7 +109,7 @@
             <!-- Blowtorch Controls -->
             <div class="subtool-box torch-box">
               <div class="subtool-title">
-                <span>🔥 Oxy-Butane Blowtorch (<code>gold-pure-nbs-c447</code> $T_m=1337\text{ K}$)</span>
+                <span>🔥 Oxy-Butane Blowtorch (<code>gold-pure-nbs-c447</code> <i>T</i><sub>m</sub> = 1337 K)</span>
                 <strong id="lbl-torch-power">0% (0 W)</strong>
               </div>
               <input id="slider-torch-power" type="range" min="0" max="1" step="0.01" value="0" />
@@ -124,7 +124,7 @@
             <!-- Liquid Nitrogen Controls -->
             <div class="subtool-box ln2-box">
               <div class="subtool-title">
-                <span>❄️ Cryogenic Liquid Nitrogen ($\text{LN}_2$, $77.36\text{ K}$)</span>
+                <span>❄️ Cryogenic Liquid Nitrogen (LN<sub>2</sub>, 77.36 K)</span>
                 <strong id="lbl-ln2-rate">0% (0 W)</strong>
               </div>
               <input id="slider-ln2-rate" type="range" min="0" max="1" step="0.01" value="0" />
@@ -146,7 +146,7 @@
             <!-- Super-Magnet Controls -->
             <div class="subtool-box magnet-box">
               <div class="subtool-title">
-                <span>🧲 Sintered $\text{NdFeB N42}$ Magnet ($B_r = 1.32\text{ T}$)</span>
+                <span>🧲 Sintered NdFeB N42 Magnet (<i>B</i><sub>r</sub> = 1.32 T)</span>
                 <strong id="lbl-b-field">0.0 mT</strong>
               </div>
               <div class="control-row">
@@ -157,7 +157,7 @@
                 <input id="slider-magnet-dist" type="range" min="8" max="80" step="1" value="28" title="Magnet distance from escapement (mm)" />
               </div>
               <div class="btn-row mini">
-                <span class="rem-label">Remanence $M_{\text{rem}}$: <b id="lbl-remanence">0.0 mT</b></span>
+                <span class="rem-label">Remanence <i>M</i><sub>rem</sub>: <b id="lbl-remanence">0.0 mT</b></span>
                 <button id="btn-degauss" class="btn btn-mini">⚡ Fire AC Degauss Coil</button>
               </div>
             </div>
@@ -217,11 +217,11 @@
             <!-- Floating Multiphysics Telemetry Overlay -->
             <div id="stage-hud-overlay">
               <div class="hud-chip">
-                <span>6h Gold Case $T$:</span>
+                <span>6h Gold Case <i>T</i>:</span>
                 <strong id="ov-case-temp">293.2 K (20.0 °C)</strong>
               </div>
               <div class="hud-chip">
-                <span>Gold Melt $\phi_{\text{liq}}$:</span>
+                <span>Gold Melt φ<sub>liq</sub>:</span>
                 <strong id="ov-gold-melt">0.0%</strong>
               </div>
               <div class="hud-chip">
@@ -229,7 +229,7 @@
                 <strong id="ov-fouled-gold">0.00 g / 0.00 g</strong>
               </div>
               <div class="hud-chip">
-                <span>Escapement $|\mathbf{B}|$:</span>
+                <span>Escapement |<b>B</b>|:</span>
                 <strong id="ov-b-field">0.0 mT</strong>
               </div>
             </div>
