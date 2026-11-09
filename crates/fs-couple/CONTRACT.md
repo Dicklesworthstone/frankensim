@@ -9189,9 +9189,12 @@ adapter, material/query retention, caloric heat-dependent motion and sound,
 the analytic heat-pressure-rate source, independent source caloric energy,
 causal microphone pressure, and late observer/cancellation rollback with
 deterministic retry. These are manufactured model and composition regressions,
-not measured validation. The execution environment became unavailable during
-dependency compilation, so compilation and runtime validation of this new
-opt-in route remain unconfirmed; no passing-test or performance claim is made.
+not measured validation. All seven caloric adapter tests now pass in a
+focused original-source build, including exact native/adapted trajectory
+agreement and late rollback. The example below completed 100 samples in each
+branch; its accumulated original-law balance residuals were 1.765e-18 J
+(adiabatic) and 6.657e-18 J (heat exchange). These are synthetic model results,
+not full workspace/DSR, experimental accuracy or performance measurements.
 
 Running `cargo run -p fs-couple --features caloric-cavitation --example
 caloric_cavitation -- crates/fs-material/examples/material_gas_spring/mixture-a.tsv
@@ -9368,3 +9371,47 @@ The changed source passed rustfmt/whitespace checks and review against the
 original DG/event APIs and balance identities. These DG tests and the new
 example have NOT been executed in the constrained dependency environment;
 no hydraulic runtime, full-workspace or performance result is claimed.
+
+## Source-driven liquid thermal diffusion in bubbly acoustics
+
+`ThermalDiluteBubblyLiquid::new_with_conducting_liquid` and
+`ThermalPolydisperseBubblyLiquid::new_with_conducting_liquid` prepare the native
+coupled spherical gas/liquid diffusion model from the retained liquid source's
+`ThermalFluidTransport` view. In particular, `SaturatedWaterCavitation` delegates
+that view to its original IF97 transport state. Temperature, density and
+viscosity must match the original acoustic/cavitation snapshot, including for
+empty populations. Each occupied class keeps its original gas, actual radius,
+number density and KM tangent. A class split with unchanged total number
+weight leaves dispersion and all loss channels invariant.
+
+The same native bubble response drives susceptibility, coherent scattering,
+Foldy dispersion, source amplitude admission and existing scalar/duct-wave
+operations. Thermal damping is not fitted and acoustic radiation is not added
+a second time. Prepared models are stored once in original class order;
+queries allocate nothing, query no material sources and do no equilibrium
+root solves. `thermal_bubbles()` now exposes a zero-allocation exact-size
+iterator over the retained base gas preparations, rather than a borrowed slice.
+
+`ConductingLiquidPopulationLimits` bounds liquid thermal penetration
+`sqrt(2 D_l/omega)` relative to the original population's mean spacing and
+bounds actual peak interface temperature relative to its equilibrium value.
+The permitted ceilings are 0.1 and 0.05 respectively. These conservative model
+admissions do not prove spatial separation for an arbitrary unseen cloud.
+Frozen liquid mechanics, isolated thermal fields, small acoustic amplitude,
+noncondensable gas, negligible latent heat and the original scattering bounds
+remain required. A failed preparation or query leaves accepted owners usable.
+
+Diagnostics report combined conductive loss and its independently computed
+gas and surrounding-liquid contributions, separate from liquid viscosity.
+`BubblyAbsorption` now includes `liquid_thermal_w_m3`; each channel uses the
+actual local peak pressure squared. Coherent scattering attenuation is not
+converted into heat. The response additionally exposes the largest liquid
+diffusion parameter and admitted fractional interface-temperature amplitude.
+The existing `cavitation` example compares fixed-temperature and conducting
+interfaces using original dry-air and IF97-water material evaluations.
+
+All seven tests in the actual thermal-population test file passed in a focused
+original-source build: independent modal/interface reconstruction, original
+scalar duct impedance, number/class weighting, heat-channel closure, IF97
+source retention, and material/thermal-domain/cancellation refusals. The broad
+DG/duct-chain dependency closure and full workspace/DSR were not executed.

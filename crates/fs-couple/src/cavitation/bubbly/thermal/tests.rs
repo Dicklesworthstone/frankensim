@@ -165,6 +165,7 @@ fn thermal_population_matches_independent_diffusion_dispersion_and_pressure_volu
             response.mean_absorption_w_m3(0.0).unwrap(),
             BubblyAbsorption {
                 gas_thermal_w_m3: 0.0,
+                liquid_thermal_w_m3: 0.0,
                 liquid_viscous_w_m3: 0.0
             }
         );
@@ -375,4 +376,278 @@ fn empty_thermal_population_is_exact_liquid_and_failed_queries_leave_accepted_ow
         ThermalPolydisperseBubblyLiquid::new(&original, &states[..1], limits, &mut || false)
             .is_err()
     );
+}
+
+#[derive(Clone, Copy)]
+struct ConductingTestLiquid {
+    material: CavitationState,
+    thermal: ThermalFluidTransportState,
+}
+
+impl CavitationProperties for ConductingTestLiquid {
+    fn cavitation_state(&self) -> Result<CavitationState, MaterialError> {
+        Ok(self.material)
+    }
+}
+
+impl fs_material::fluid_transport::FluidTransport for ConductingTestLiquid {
+    fn transport_state(
+        &self,
+    ) -> Result<fs_material::fluid_transport::FluidTransportState, MaterialError> {
+        Ok(self.thermal.transport())
+    }
+}
+
+impl ThermalFluidTransport for ConductingTestLiquid {
+    fn thermal_transport_state(&self) -> Result<ThermalFluidTransportState, MaterialError> {
+        Ok(self.thermal)
+    }
+}
+
+fn conducting_material(conductivity: f64) -> ConductingTestLiquid {
+    ConductingTestLiquid {
+        material: liquid(),
+        thermal: ThermalFluidTransportState::try_new(
+            fs_material::fluid_transport::FluidTransportState::try_new(
+                1000.0,
+                4200.0,
+                conductivity,
+                0.001,
+            )
+            .unwrap(),
+            300.0,
+            None,
+        )
+        .unwrap(),
+    }
+}
+
+fn liquid_limits() -> ConductingLiquidPopulationLimits {
+    ConductingLiquidPopulationLimits {
+        maximum_penetration_to_spacing: 0.1,
+        maximum_fractional_interface_temperature: 0.01,
+    }
+}
+
+#[test]
+fn conducting_liquid_population_preserves_class_weights_and_closes_both_heat_channels() {
+    let material = conducting_material(0.02);
+    let member = class(1e-4, 1e-5);
+    let half =
+        BubblePopulationClass::try_new(*member.bubble(), 0.5 * member.number_density_per_m3())
+            .unwrap();
+    let mono =
+        DiluteBubblyLiquid::from_population_class(&material, member, acoustic_limits()).unwrap();
+    let split = PolydisperseBubblyLiquid::new(
+        &material,
+        BubblePopulation::try_new(liquid(), vec![half, half], 2).unwrap(),
+        acoustic_limits(),
+    )
+    .unwrap();
+    let monothermal = ThermalDiluteBubblyLiquid::new_with_conducting_liquid(
+        &mono,
+        gas_for(&member),
+        thermal_limits(),
+        liquid_limits(),
+    )
+    .unwrap();
+    let population = ThermalPolydisperseBubblyLiquid::new_with_conducting_liquid(
+        &split,
+        &gases(split.population()),
+        thermal_limits(),
+        liquid_limits(),
+        &mut || false,
+    )
+    .unwrap();
+    assert_eq!(monothermal.liquid_thermal_state(), Some(material.thermal));
+    assert!(core::ptr::eq(population.original().source(), &material));
+    assert_eq!(population.thermal_bubbles().len(), 2);
+    let omega = 10_000.0;
+    let amplitude = 0.1;
+    let single = monothermal.response(omega, amplitude).unwrap();
+    let many = population.response(omega, amplitude).unwrap();
+    near_complex(
+        single.acoustic().wavenumber_per_m(),
+        many.acoustic().wavenumber_per_m(),
+        1e-14,
+    );
+    let heat = many.mean_absorption_w_m3(amplitude).unwrap();
+    assert!(heat.gas_thermal_w_m3 > 0.0);
+    assert!(heat.liquid_thermal_w_m3 > 0.0);
+    assert!(heat.liquid_viscous_w_m3 > 0.0);
+    near(
+        heat.gas_thermal_w_m3 + heat.liquid_thermal_w_m3,
+        many.diagnostics()
+            .thermal_loss_per_pressure_squared_w_m3_pa2
+            * amplitude
+            * amplitude,
+        5e-13,
+    );
+    let single_heat = single.mean_absorption_w_m3(amplitude).unwrap();
+    near(single_heat.gas_thermal_w_m3, heat.gas_thermal_w_m3, 1e-14);
+    near(
+        single_heat.liquid_thermal_w_m3,
+        heat.liquid_thermal_w_m3,
+        1e-14,
+    );
+    let half_heat = many.mean_absorption_w_m3(amplitude * 0.5).unwrap();
+    near(
+        half_heat.liquid_thermal_w_m3,
+        0.25 * heat.liquid_thermal_w_m3,
+        1e-14,
+    );
+    assert!(many.diagnostics().maximum_fractional_interface_temperature > 0.0);
+
+    // Independent gas eigenmode sum, then interface heat-flux continuity and
+    // the original mass balance. No call to the native thermal exponent.
+    let gas = gas_for(&member).unwrap();
+    let r = member.linearization().unwrap().equilibrium_radius_m;
+    let x = omega * r * r * gas.density * gas.specific_heat_cp / gas.thermal_conductivity;
+    let fixed_wall = modal_exponent(gas.gamma, x);
+    let f = (C64::from_re(gas.gamma) / fixed_wall - C64::ONE).scale(1.0 / (gas.gamma - 1.0));
+    let yg = C64::new(0.0, -x / 3.0) * f.scale(gas.thermal_conductivity);
+    let a = (0.5 * omega * r * r / material.thermal.transport().thermal_diffusivity_m2_s()).sqrt();
+    let yl = C64::new(1.0 + a, -a).scale(material.thermal.transport().thermal_conductivity_w_m_k());
+    let kappa = C64::from_re(gas.gamma) / (C64::ONE + (f * yl / (yg + yl)).scale(gas.gamma - 1.0));
+    let stiffness =
+        kappa.scale(3.0 * gas.pressure) - C64::new(2.0 * 0.072 / r, 4.0 * 0.001 * omega);
+    let inertia = C64::from_re(1000.0 * r * r * omega * omega) / C64::new(1.0, -omega * r / 1500.0);
+    let chi = -(stiffness - inertia).recip();
+    let expected_squared = C64::from_re((omega / 1500.0).powi(2))
+        - chi.scale(
+            4.0 * core::f64::consts::PI
+                * member.number_density_per_m3()
+                * 1000.0
+                * r.powi(3)
+                * omega
+                * omega,
+        );
+    let wave = many.acoustic().wavenumber_per_m();
+    near_complex(wave * wave, expected_squared, 3e-9);
+    let imposed = ThermalDiluteBubblyLiquid::new(&mono, Some(gas), thermal_limits())
+        .unwrap()
+        .response(omega, amplitude)
+        .unwrap();
+    assert!(
+        (single.acoustic().wavenumber_per_m() - imposed.acoustic().wavenumber_per_m()).abs() > 1e-8
+    );
+}
+
+#[test]
+fn conducting_liquid_uses_original_if97_water_transport() {
+    use fs_material::cavitation::SaturatedWaterCavitation;
+    use fs_thermochem::water::if97::If97SaturationPair;
+    let water = SaturatedWaterCavitation::try_new(
+        If97SaturationPair::at_temperature(fs_qty::Temperature::new(293.15)).unwrap(),
+        0.072,
+    )
+    .unwrap();
+    let state = water.cavitation_state().unwrap();
+    let template = class(1e-4, 1e-5);
+    let bubble = KellerMiksisBubble::try_new(
+        state,
+        BubbleGas::equilibrium(state, 1e-4, 101_325.0, 1.0).unwrap(),
+        template.bubble().compressibility_limits(),
+    )
+    .unwrap();
+    let source = DiluteBubblyLiquid::new(&water, bubble, 1e-5, acoustic_limits()).unwrap();
+    let gas = GasState::try_new(
+        &GasSpec::dry_air_ussa1976(),
+        293.15,
+        bubble.gas().pressure_at_radius(1e-4).unwrap(),
+    )
+    .unwrap();
+    let thermal = ThermalDiluteBubblyLiquid::new_with_conducting_liquid(
+        &source,
+        Some(gas),
+        thermal_limits(),
+        liquid_limits(),
+    )
+    .unwrap();
+    assert!(core::ptr::eq(thermal.original().source(), &water));
+    assert_eq!(
+        thermal.liquid_thermal_state().unwrap(),
+        water.liquid_transport().thermal_transport_state().unwrap()
+    );
+    let response = thermal.response(10_000.0, 0.1).unwrap();
+    assert!(
+        response
+            .mean_absorption_w_m3(0.1)
+            .unwrap()
+            .liquid_thermal_w_m3
+            > 0.0
+    );
+}
+
+#[test]
+fn conducting_liquid_refuses_stale_sources_overlapping_layers_and_large_temperature_excursions() {
+    let material = conducting_material(0.02);
+    let original =
+        PolydisperseBubblyLiquid::new(&material, distribution(), acoustic_limits()).unwrap();
+    let gas = gases(original.population());
+    let thermal = ThermalPolydisperseBubblyLiquid::new_with_conducting_liquid(
+        &original,
+        &gas,
+        thermal_limits(),
+        liquid_limits(),
+        &mut || false,
+    )
+    .unwrap();
+    let accepted = thermal.response(10_000.0, 0.1).unwrap();
+    assert!(matches!(
+        thermal.response(1e-8, 0.1),
+        Err(BubblyLiquidError::OutsideModel {
+            quantity: "liquid thermal penetration / mean spacing",
+            ..
+        })
+    ));
+    let strict = ConductingLiquidPopulationLimits {
+        maximum_fractional_interface_temperature: accepted
+            .diagnostics()
+            .maximum_fractional_interface_temperature
+            * 0.5,
+        ..liquid_limits()
+    };
+    let bounded = ThermalPolydisperseBubblyLiquid::new_with_conducting_liquid(
+        &original,
+        &gas,
+        thermal_limits(),
+        strict,
+        &mut || false,
+    )
+    .unwrap();
+    assert!(matches!(
+        bounded.response(10_000.0, 0.1),
+        Err(BubblyLiquidError::OutsideModel {
+            quantity: "fractional interface temperature",
+            ..
+        })
+    ));
+    assert!(
+        ThermalPolydisperseBubblyLiquid::new_with_conducting_liquid(
+            &original,
+            &gas,
+            thermal_limits(),
+            liquid_limits(),
+            &mut || true,
+        )
+        .is_err()
+    );
+    assert_eq!(thermal.response(10_000.0, 0.1).unwrap(), accepted);
+
+    let mut stale = material;
+    stale.thermal =
+        ThermalFluidTransportState::try_new(material.thermal.transport(), 301.0, None).unwrap();
+    let stale_population =
+        PolydisperseBubblyLiquid::new(&stale, distribution(), acoustic_limits()).unwrap();
+    assert!(matches!(
+        ThermalPolydisperseBubblyLiquid::new_with_conducting_liquid(
+            &stale_population,
+            &gas,
+            thermal_limits(),
+            liquid_limits(),
+            &mut || false,
+        ),
+        Err(BubblyLiquidError::MaterialMismatch)
+    ));
 }

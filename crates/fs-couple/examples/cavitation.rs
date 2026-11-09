@@ -7,13 +7,16 @@
 //! compressibility; the compact observer adds no second radiation loss.
 //! A final pressure sweep preserves nucleus gas inventories and number counts
 //! while updating equilibrium radii and coherent acoustic propagation.
-//! A gas-diffusion spectrum then separates thermal absorption from scattering
-//! using dry-air transport evaluated at each nucleus's actual gas pressure.
+//! A gas/liquid diffusion spectrum then separates gas conduction, liquid
+//! conduction and viscous absorption from scattering, using original IF97
+//! water and dry-air transport at each nucleus's actual gas pressure.
 
 use fs_aeroac::curle3d::moving::{MovingCompactLimits, MovingCompactObserver};
 use fs_aeroac::monopole::MonopoleLimits;
 use fs_couple::cavitation::bubble::MaterialBubble;
-use fs_couple::cavitation::bubbly::thermal::ThermalPolydisperseBubblyLiquid;
+use fs_couple::cavitation::bubbly::thermal::{
+    ConductingLiquidPopulationLimits, ThermalPolydisperseBubblyLiquid,
+};
 use fs_couple::cavitation::bubbly::{BubblyLiquidLimits, PolydisperseBubblyLiquid};
 use fs_couple::cavitation::cluster::MaterialBubbleCluster;
 use fs_couple::cavitation::{
@@ -259,22 +262,39 @@ fn pressure_sweep(water: &SaturatedWaterCavitation) -> Result<(), Box<dyn std::e
         },
         &mut || false,
     )?;
-    println!("Dry-air heat diffusion at fixed interface temperature and reference liquid pressure");
+    let conducting = ThermalPolydisperseBubblyLiquid::new_with_conducting_liquid(
+        &original,
+        &gas_states,
+        ThermalBubbleLimits {
+            maximum_gas_wavenumber_radius: 0.1,
+            maximum_gas_liquid_density_ratio: 0.01,
+            maximum_vapor_pressure_fraction: 0.1,
+        },
+        ConductingLiquidPopulationLimits {
+            maximum_penetration_to_spacing: 0.1,
+            maximum_fractional_interface_temperature: 0.01,
+        },
+        &mut || false,
+    )?;
+    println!("Dry-air and IF97-water heat diffusion at the reference liquid pressure");
     println!(
-        "omega_rad_s isothermal_c diffusive_c isothermal_attenuation diffusive_attenuation gas_heat_W_m3 liquid_heat_W_m3"
+        "omega_rad_s isothermal_c fixed_wall_c conducting_liquid_c fixed_wall_attenuation conducting_liquid_attenuation gas_conduction_W_m3 liquid_conduction_W_m3 liquid_viscosity_W_m3"
     );
     for omega in [100.0, 1000.0, 10_000.0, 30_000.0] {
         let isothermal = original.response(omega, 0.01)?;
-        let response = thermal.response(omega, 0.01)?;
+        let fixed_wall = thermal.response(omega, 0.01)?;
+        let response = conducting.response(omega, 0.01)?;
         let k = response.acoustic().wavenumber_per_m();
         let heat = response.mean_absorption_w_m3(0.01)?;
         println!(
-            "{omega:.1} {:.6} {:.6} {:.6e} {:.6e} {:.6e} {:.6e}",
+            "{omega:.1} {:.6} {:.6} {:.6} {:.6e} {:.6e} {:.6e} {:.6e} {:.6e}",
             omega / isothermal.wavenumber_per_m().re,
+            omega / fixed_wall.acoustic().wavenumber_per_m().re,
             omega / k.re,
-            isothermal.wavenumber_per_m().im,
+            fixed_wall.acoustic().wavenumber_per_m().im,
             k.im,
             heat.gas_thermal_w_m3,
+            heat.liquid_thermal_w_m3,
             heat.liquid_viscous_w_m3,
         );
     }
