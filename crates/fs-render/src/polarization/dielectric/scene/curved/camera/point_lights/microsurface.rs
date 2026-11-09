@@ -240,6 +240,7 @@ impl<'v, 'a, 's, 'm, 'l> SmithPointLightCameraScene<'v, 'a, 's, 'm, 'l> {
                 Some(SmithSurfaceSampler {
                     settings: self.microsurface,
                     samples: &mut facet_samples,
+                    dielectric_samples: None,
                 }),
             )
             .map(|(path, _)| path);

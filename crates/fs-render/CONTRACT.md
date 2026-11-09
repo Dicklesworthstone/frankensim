@@ -12627,3 +12627,40 @@ uses the actual complete non-tracer camera/diffraction/coherent source graph,
 original geometry vectors and actual math/harmonic code, with narrow Cx/Ray/
 ShutterInterval boundary carriers. Full tracer/material-dispersion, moving-camera
 and workspace/DSR integration are outside this executed validation.
+
+### Complete opaque Smith finite-area camera connections
+
+`area_lights::camera::SmithAreaLightCameraScene` borrows an admitted area-light
+camera and opts rough/brushed conductors into complete Smith continuation and
+fixed-direction reflection evaluation. Each selected receiver/source pair must
+share one homogeneous medium. It samples each original area/face selection and
+emitting side with its native area PDF, then launches the unique straight
+source-to-contact direction. `BundleConnectionTarget::try_direct_surface_receiver`
+retains the original receiving contact and physical bundle projection while
+every intervening native surface blocks this direct proposal, including smooth
+mirrors, lossless interfaces and rough scattering surfaces.
+
+The estimator assigns the represented DIRECT source endpoints entirely to area
+sampling. Only the immediately following continuation hit of the same original
+source object, selected face set, physical side and medium is suppressed.
+An intervening surface retires this partition, so reflected/refracted source
+chains retain their complete continuation contribution. Primary surface
+emission, unselected sources/faces/sides and LTE on all camera segments remain
+with the original camera emission owner. Existing source admission preserves
+the exact calibrated spectral/polarization owner or directional thermal/coating
+snapshot and rejects overlapping duplicate source selections.
+
+The fixed-direction full Smith factor is stochastic; it and the hidden-walk
+joint density are never used as outgoing PDFs or nonlinear MIS inputs.
+Independent counter domains separate continuing facets, area samples, bindings
+and source polarization channels. Native source s/p replay, complex per-facet
+Fresnel/Mueller transfer, Beer attenuation, local refractive-index scaling and
+work receipts remain unchanged. Analyzed and resolved real-lens beams retain
+their original reciprocal Stokes seed. Bounded geometry, source replay or
+facet exhaustion refuses the entire sample, as does cancellation.
+
+This direct source proposal does not cover GRIN legs, refractive/mirror images
+or dielectric microsurface multiple scattering; such geometric source chains
+remain on the original continuation path. Tilted brushed normals retain the
+existing empirical shading law, not resolved groove geometry or a new thermal
+emissivity model.

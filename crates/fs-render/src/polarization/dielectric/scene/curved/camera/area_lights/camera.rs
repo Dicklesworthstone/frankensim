@@ -50,6 +50,9 @@ use fs_math::det;
 
 mod receiver;
 mod sequential;
+/// Complete opaque Smith reflection with a direct finite-area source partition.
+pub mod microsurface;
+pub use microsurface::SmithAreaLightCameraScene;
 pub(in super::super) use receiver::{SurfaceReceiver, receiver_media};
 #[cfg(feature = "volumes")]
 pub(super) use receiver::directional_contribution;

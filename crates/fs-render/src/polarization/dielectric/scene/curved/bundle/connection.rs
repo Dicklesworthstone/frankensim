@@ -76,6 +76,7 @@ enum ReceiverKind {
     Detector,
     Diffuse,
     Surface,
+    DirectSurface,
     Volume { medium: usize },
 }
 
@@ -155,6 +156,24 @@ impl BundleConnectionTarget {
         Ok(result)
     }
 
+    /// Receive a direct connection at an original continuous surface.
+    /// Every intervening native surface, including a dielectric or smooth
+    /// conductor, blocks this proposal before scattering. The caller owns any
+    /// complementary paths containing those additional surface events.
+    /// Selected receiver admission and physical tangent-plane projection are
+    /// identical to `try_surface_receiver`; geometry and work stay native.
+    pub fn try_direct_surface_receiver(
+        object_id: u64,
+        position_m: Point3,
+        section_normal: Vec3,
+        position_tolerance_m: f64,
+    ) -> Result<Self, BundleConnectionError> {
+        let mut result =
+            Self::try_surface_receiver(object_id, position_m, section_normal, position_tolerance_m)?;
+        result.kind = ReceiverKind::DirectSurface;
+        Ok(result)
+    }
+
     /// Receive a source connection at a point in an original scene medium.
     /// `section_normal` defines only the numerical shooting section, oriented
     /// toward the source. The native geometry remains authoritative before it;
@@ -197,7 +216,7 @@ impl BundleConnectionTarget {
     }
 
     pub const fn is_surface_receiver(self) -> bool {
-        matches!(self.kind, ReceiverKind::Surface)
+        matches!(self.kind, ReceiverKind::Surface | ReceiverKind::DirectSurface)
     }
 
     pub const fn is_volume_receiver(self) -> bool {
@@ -216,6 +235,7 @@ impl BundleConnectionTarget {
             ReceiverKind::Detector => None,
             ReceiverKind::Diffuse => Some(super::BundleReceiver::Diffuse(self.object_id)),
             ReceiverKind::Surface => Some(super::BundleReceiver::Surface(self.object_id)),
+            ReceiverKind::DirectSurface => Some(super::BundleReceiver::DirectSurface(self.object_id)),
             ReceiverKind::Volume { medium } => Some(super::BundleReceiver::Volume {
                 medium,
                 position_m: self.position_m,
@@ -725,7 +745,7 @@ fn arrival(
         ReceiverKind::Diffuse => {
             path.termination() == PathTermination::Opaque && path.is_diffuse_receiver()
         }
-        ReceiverKind::Surface => {
+        ReceiverKind::Surface | ReceiverKind::DirectSurface => {
             path.termination() == PathTermination::Opaque && path.is_surface_receiver()
         }
         ReceiverKind::Volume { medium } => {

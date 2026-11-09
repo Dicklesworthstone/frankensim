@@ -69,6 +69,8 @@ impl BundleSurfaceSource {
 pub(crate) enum BundleReceiver {
     Diffuse(u64),
     Surface(u64),
+    /// Receive only a direct leg: every other surface is a blocker.
+    DirectSurface(u64),
     Volume {
         medium: usize,
         position_m: Point3,
@@ -849,7 +851,7 @@ impl CurvedPolarizedScene<'_> {
             let incoming_medium = result.medium;
             let outgoing_tag = match binding.interaction {
                 interaction
-                    if matches!(receiver, Some(BundleReceiver::Surface(id))
+                    if matches!(receiver, Some(BundleReceiver::Surface(id) | BundleReceiver::DirectSurface(id))
                         if id == instance.object_id()) =>
                 {
                     let cosine = witness.normal.dot(arriving.dir);
@@ -885,6 +887,14 @@ impl CurvedPolarizedScene<'_> {
                     result.termination = PathTermination::Opaque;
                     result.surface_receiver = true;
                     7
+                }
+                _ if matches!(receiver, Some(BundleReceiver::DirectSurface(_))) => {
+                    // A direct source proposal contains no intervening surface
+                    // event, even a lossless dielectric or a perfect mirror.
+                    // Retain this completed native contact and all query/field
+                    // work as a resolved blocked leg; do not invent a branch.
+                    result.termination = PathTermination::Opaque;
+                    1
                 }
                 Interaction::Detector { reference_axis } => {
                     PolarizationFrame::try_new(arriving.dir, reference_axis)?;

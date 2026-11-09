@@ -218,6 +218,9 @@ enum CurvedTransportEvent<'a> {
 struct SmithSurfaceSampler<'a> {
     settings: SmithWalkSettings,
     samples: &'a mut dyn FnMut(u32, u32) -> [f64; 3],
+    // Full glass changes the BSDF and therefore needs an explicit opt-in.
+    // Opaque light-connection strategies leave this absent.
+    dielectric_samples: Option<&'a mut dyn FnMut(u32, u32) -> [f64; 4]>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
