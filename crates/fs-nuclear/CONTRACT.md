@@ -3217,3 +3217,46 @@ cleared on the returned source. Cancellation, physical-domain and numerical-
 account failures refuse the entire call immediately. No failed trial publishes
 thermal state, source accounts or cached response. Zero-duration calls preserve
 native event semantics without inventing a refinement ladder.
+
+
+## Radioactive neutron sources on the original spatial history
+
+`diffusion::decay::DecayNeutronState` binds original radioactive inventories and
+explicit parent-wide neutron group yields to existing spatial neutron cells.
+One prepared reaction operator advances the complete block
+`[A_neutron, Y diag(lambda); 0, A_decay]`, including daughter ingrowth, emission,
+transport, capture, multiplication and leakage during the same interval.
+Integrated decay events and neutron residence come from that same propagation;
+neither endpoint activity nor uniform injection of an interval's total emission
+replaces the actual birth history. Stable-nuclide yields must be zero, and
+branching already included in a parent-wide yield is not applied again.
+
+The existing decay owner retains source populations, branch events and raw
+energy exports. The original diffusion owner retains reaction, interface,
+fluence, precursor and leakage accounts. Their extensive defects are summed
+without cancellation, including aggregate source allowances. Prepared maps are
+shared only across identical intervals and propagation limits. Refusal or
+cancellation publishes neither component's proposed state or cumulative history.
+
+`diffusion::decay::energy::DecayNeutronEnergyState` transfers emitted neutron
+kinetic energy out of the parent's original outward radiation allocation. It
+attaches the existing neutron kinetic owner to the accepted spatial report;
+there is no second neutron propagation. Stored neutron energy, deposited heat,
+remaining outward radiation, escape and signed prompt reaction Q stay disjoint.
+The raw source release is diagnostic and must not be added again to the combined
+cell exports. Binding begins new combined export counters while preserving
+supplied source histories and resident neutrons.
+
+G0/G1/G3/G4 tests cover analytic parent and daughter emission with simultaneous
+capture/leakage, true birth-time versus uniform-source behavior, split intervals
+and restart, stable/zero-duration/source-free limits, disjoint energy balances,
+invalid model/energy bindings, work limits and late cancellation. These prove
+the admitted equations and accounting, not evaluated-isotope calibration.
+
+The joint system retains the existing 64-node bound. Sources are stationary
+closed radioactive chains; incident neutrons do not deplete these source
+inventories, and target coefficients remain the prescribed diffusion background.
+The original diffusion approximation and frozen-coefficient assumptions apply.
+The kinetic energy layer retains its existing exclusion of fission and abstract
+delayed-precursor energy models. Parent-wide expected spectra do not infer
+sampled branch/energy correlations, angular transport or nuclear-data uncertainty.

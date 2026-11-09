@@ -364,7 +364,7 @@ impl DecayInventory {
 
     // All numerical propagators share the same physical event/energy ledger.
     // Produced counts are a separately authored influx, not daughter transfers.
-    fn account_evolution(
+    pub(crate) fn account_evolution(
         &self,
         evolved: fs_la::decay::DecayAdvance,
         duration_s: f64,

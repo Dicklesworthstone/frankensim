@@ -37,6 +37,8 @@ use crate::{Accumulator, FissionError, nonnegative, positive, sum};
 
 /// Composition-dependent neutron/depletion coupling on this same geometry.
 pub mod burnup;
+/// Radioactive nuclide chains emitting into this same spatial neutron history.
+pub mod decay;
 /// Uniform external injection through the same integrated reaction history.
 pub mod source;
 /// Explicit delayed-precursor material flow and outflow.
@@ -753,7 +755,7 @@ impl DiffusionState {
         }
         self.model.check_limits(budget.limits)?;
         let mut accounts = Accounts::new(self.model.nodes)?;
-        let mut injected = source::injected_counts(
+        let injected = source::injected_counts(
             sources,
             self.model.neutron_nodes,
             self.model.nodes,
@@ -790,6 +792,40 @@ impl DiffusionState {
         let integrals = prepared
             .plan
             .integrals(&initial, &injected, &mut checkpoint)?;
+        self.account_evolution(
+            duration_s,
+            DiffusionEvolution {
+                initial,
+                final_counts: evolved.populations,
+                removals: evolved.removals,
+                integrals,
+                injected,
+                accounts,
+            },
+            budget,
+            Some(prepared),
+            checkpoint,
+        )
+    }
+
+    // Native sources and coupled radioactive inventories use the same physical
+    // event, residence, flux and conservation accounts after their one solve.
+    fn account_evolution(
+        &self,
+        duration_s: f64,
+        evolution: DiffusionEvolution,
+        budget: DiffusionBudget,
+        prepared: Option<Arc<PreparedDiffusion>>,
+        mut checkpoint: impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<(Self, DiffusionStep), DiffusionError> {
+        let DiffusionEvolution {
+            initial,
+            final_counts,
+            removals,
+            integrals,
+            mut injected,
+            mut accounts,
+        } = evolution;
         let groups = self.model.groups().len();
         let families = self.model.delayed_groups().len();
         let neutron_nodes = self.model.neutron_nodes;
@@ -934,7 +970,7 @@ impl DiffusionState {
             let incoming = accounts.incoming[node];
             let outgoing = accounts.outgoing[node];
             let residual = checked(sum(&[
-                evolved.populations[node],
+                final_counts[node],
                 -initial[node],
                 -injected[node],
                 outgoing.hi,
@@ -948,7 +984,7 @@ impl DiffusionState {
             // physical channels obtained from the population-integral map.
             accounts
                 .error
-                .add(checked(sum(&[evolved.removals[node], -outgoing.hi, -outgoing.lo]))?.abs())?;
+                .add(checked(sum(&[removals[node], -outgoing.hi, -outgoing.lo]))?.abs())?;
         }
         let mut neutron_balance = Accumulator::new(0.0);
         let mut precursor_balance = Accumulator::new(0.0);
@@ -958,7 +994,7 @@ impl DiffusionState {
             } else {
                 &mut precursor_balance
             };
-            account_add(account, evolved.populations[node], &mut accounts.error)?;
+            account_add(account, final_counts[node], &mut accounts.error)?;
             account_add(account, -initial[node], &mut accounts.error)?;
         }
         for (kind, sign) in [
@@ -1032,14 +1068,14 @@ impl DiffusionState {
             }
             mean_fluxes.push(GroupFlux::new(Arc::clone(self.model.groups()), mean)?);
         }
-        let mut neutron_counts = evolved.populations;
+        let mut neutron_counts = final_counts;
         let precursor_counts = neutron_counts.split_off(neutron_nodes);
         let injected_precursor_counts = injected.split_off(neutron_nodes);
         let next = Self {
             model: Arc::clone(&self.model),
             neutron_counts,
             precursor_counts,
-            prepared: Some(prepared),
+            prepared,
         };
         checkpoint()?;
         Ok((
@@ -1106,7 +1142,9 @@ pub struct DiffusionStep {
     pub leakage_counts: Vec<f64>,
     /// Actual precursor disappearances, cell-major then family.
     pub delayed_decays: Vec<f64>,
-    /// Uniform external injection totals, in the corresponding state order.
+    /// Integrated external births, in the corresponding state order. Native
+    /// prescribed sources are uniform; a coupled radioactive source retains
+    /// its actual within-interval birth history.
     pub injected_neutron_counts: Vec<f64>,
     pub injected_precursor_counts: Vec<f64>,
     /// Directed transfer-major then delayed-family counts.
@@ -1183,6 +1221,15 @@ struct Accounts {
     outgoing: Vec<Accumulator>,
     totals: [Accumulator; 13],
     error: Accumulator,
+}
+
+struct DiffusionEvolution {
+    initial: Vec<f64>,
+    final_counts: Vec<f64>,
+    removals: Vec<f64>,
+    integrals: Vec<f64>,
+    injected: Vec<f64>,
+    accounts: Accounts,
 }
 
 impl Accounts {

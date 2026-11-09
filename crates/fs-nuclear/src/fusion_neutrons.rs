@@ -502,7 +502,7 @@ impl NeutronKineticState {
     // Attach energy to an already accepted native history. The activation owner
     // supplies its coupled neutron/burnup step here; no neutron propagator is
     // run again and no fixed macroscopic coefficient replaces its finite stock.
-    fn account_accepted_diffusion(
+    pub(crate) fn account_accepted_diffusion(
         &self,
         neutrons: DiffusionState,
         diffusion: DiffusionStep,
