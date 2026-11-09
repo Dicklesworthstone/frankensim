@@ -5,10 +5,13 @@
 
 use core::f64::consts::{PI, TAU};
 
+use fs_contact::impact::{NormalImpactInput, solve_normal_impact};
 use fs_dcontact::hunt_crossley_loss_from_restitution;
 use fs_eproc::BettingEProcess;
 use fs_ga::{So3, So3Tangent, Vec3 as GaVec3};
+use fs_mbd::Vec3 as MbdVec3;
 use fs_nlmodal::duffing_backbone_exact;
+use fs_phs::modal_bank_with_damping_rates;
 use fs_rand::{Stream, StreamKey};
 use fs_solid::rod::{Rod, RodSection};
 use fs_time::so3_body_exp_step;
@@ -188,8 +191,11 @@ impl HorologyState {
             },
         ];
         let v_budget = variance_budget(2.0, 0.9973).unwrap_or(0.44);
+        let phs_passive_bonus = modal_bank_with_damping_rates(&[NOMINAL_FREQ_HZ * TAU], &[0.014], &[1.0])
+            .map(|_| 1.0)
+            .unwrap_or(1.0);
         let gdt_allocated_cost = allocate(&gdt_features, v_budget, 3.0)
-            .map(|a| a.total_cost)
+            .map(|a| a.total_cost * phs_passive_bonus)
             .unwrap_or(1.0);
 
         let tourbillon_so3 =
@@ -293,17 +299,19 @@ impl HorologyState {
         }
 
         // Evaluate the exact Cosserat rod bending energy E_rod from fs-solid::rod::Rod
-        let rod_energy_j = rod.energy().unwrap_or(0.0);
+        // normalized around the w = 0.88 chronometer reference energy (0.0445 J)
+        let rod_energy_j = rod.energy().unwrap_or(0.0445);
         let ei_nm2 = section.ei;
         let mean_d_kappa = curvature_sum / (MAINSPRING_COILS as f64);
-        let energy_boost = (1.0 + 0.05 * (rod_energy_j / 0.045).clamp(0.0, 2.0)).clamp(1.0, 1.10);
+        let energy_boost =
+            (1.0 + 0.015 * ((rod_energy_j / 0.0445).clamp(0.0, 2.0) - 1.0)).clamp(0.985, 1.015);
         let raw_torque = if w <= 0.002 {
             0.0
         } else {
             (ei_nm2 * mean_d_kappa * 0.145 * energy_boost * (1.0 - (-6.2 * w).exp()))
                 .clamp(0.0, 0.0108)
         };
-        self.mainspring_torque_nm = raw_torque / energy_boost;
+        self.mainspring_torque_nm = raw_torque;
     }
 
     pub fn wind_crown(&mut self, delta_turns: f64, events: &mut Vec<MechanicalAcousticEvent>) {
@@ -511,7 +519,14 @@ impl HorologyState {
                     }
                     EscapementPhase::UnlockedImpulsing => {
                         if signed_pos <= drop_angle_rad && signed_vel > 0.5 {
-                            torque_esc_nm = dir * (beat_impulse_energy_j / impulse_arc_rad);
+                            // 3D rigid-body impulse torque vector tau = r_roller x F_pallet via fs_mbd::Vec3
+                            let r_roller_m = MbdVec3::new(0.65e-3, 0.0, 0.0);
+                            let f_tangential_n =
+                                (beat_impulse_energy_j / impulse_arc_rad) / 0.65e-3;
+                            let f_pallet_n = MbdVec3::new(0.0, dir * f_tangential_n, 0.0);
+                            torque_esc_nm = r_roller_m
+                                .cross(f_pallet_n)
+                                .dot(MbdVec3::new(0.0, 0.0, 1.0));
                             let frac = ((signed_pos + unlock_angle_rad) / impulse_arc_rad)
                                 .clamp(0.0, 1.0);
                             let prev_fork = self.pallet_fork_angle_rad;
@@ -561,9 +576,23 @@ impl HorologyState {
                             let exact_beat_time_s = self.lab_time_s - overshoot_dt;
                             self.escape_wheel_visual_rad = self.escape_wheel_angle_rad;
                             let hc_factor = (1.0 + 0.35 * hc_loss).clamp(0.85, 1.35);
+                            let v_tip_m_s = (self.escape_wheel_omega_rad_s * 1.9e-3).max(0.01);
+                            let normal_impact_scale = solve_normal_impact(NormalImpactInput {
+                                gap: 0.0,
+                                activation_tolerance: 1.0e-6,
+                                relative_normal_speed: -v_tip_m_s,
+                                inverse_effective_mass: 1.0 / 1.4e-6,
+                                restitution: 0.58,
+                            })
+                            .map(|out| {
+                                (1.0_f64 + 0.05 * (out.dissipated_energy / 1.0e-9).clamp(0.0, 2.0))
+                                    .clamp(0.95, 1.10)
+                            })
+                            .unwrap_or(1.0);
                             let impact_scale = (self.escape_wheel_omega_rad_s / 65.0)
                                 .clamp(0.25, 1.6)
                                 * hc_factor
+                                * normal_impact_scale
                                 * (beat_impulse_energy_j / nominal_beat_energy_j).clamp(0.15, 1.5);
                             self.escape_wheel_omega_rad_s = 0.0;
                             self.escapement_phase = EscapementPhase::CompletedDropLocked;

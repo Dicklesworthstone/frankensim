@@ -15,6 +15,7 @@
 
 use fs_blake3::DomainHasher;
 pub use fs_conduction::STEFAN_BOLTZMANN_W_M2_K4 as STEFAN_BOLTZMANN;
+pub use fs_matdb::{LawId, MATDB_SCHEMA_VERSION};
 pub use fs_material::creep::plastic::{NortonJ2, NortonJ2State};
 pub use fs_material::creep::{CreepState, NortonCreep, NortonCreepParameters};
 pub use fs_material::elastic::IsotropicElastic;
@@ -24,6 +25,7 @@ use fs_render::conductor::{
     ConductorOptics, ConductorSource, fresnel_conductor,
 };
 use fs_render::dielectric::CauchyIor;
+pub use fs_thermal::enthalpy::{DepositionError, ThermalLaw, ThermalStorageBasis};
 
 /// Reference ambient laboratory temperature $T_0 = 293.15\text{ K}$ ($20.0^\circ\text{C}$).
 pub const T_REF_K: f64 = 293.15;
@@ -348,6 +350,30 @@ impl MaterialCard {
         }
         let quad = -6.5e-8 * dt * dt;
         (1.0 + self.thermoelastic_beta_per_k * dt + quad).clamp(0.10, 1.18)
+    }
+
+    /// Canonical `fs_matdb::LawId` and `MATDB_SCHEMA_VERSION` for this material card.
+    #[must_use]
+    pub fn matdb_law_identity(&self) -> (LawId, u32) {
+        (LawId(self.matdb_pack_id.to_string()), MATDB_SCHEMA_VERSION)
+    }
+}
+
+impl ThermalLaw for MaterialCard {
+    fn storage_basis(&self) -> ThermalStorageBasis {
+        ThermalStorageBasis::Enthalpy
+    }
+
+    fn temperature_k(&self, specific_h_j_kg: f64) -> Result<f64, DepositionError> {
+        Ok(self.temperature_and_melt_from_enthalpy(specific_h_j_kg).0)
+    }
+
+    fn bulk_density_kg_m3(&self, _specific_h_j_kg: f64) -> Result<Option<f64>, DepositionError> {
+        Ok(Some(self.density_kg_m3))
+    }
+
+    fn maximum_temperature_slope(&self) -> f64 {
+        1.0 / self.cp_j_kg_k.max(1.0)
     }
 }
 

@@ -8,6 +8,10 @@ export class PocketWatchSim {
     free(): void;
     [Symbol.dispose](): void;
     /**
+     * Stokes-Stuart oscillating-cylinder aerodynamic drag on the balance wheel ($\text{s}^{-1}$) (`fs-vkplate::air_loss`).
+     */
+    balance_aero_drag_s_inv(): number;
+    /**
      * Return the 64x8 (512-node) 3D Thermo-Elasto-Viscoplastic + Surface-Tension Case Shell snapshot
      * (`512 * 6 = 3072` `f32`s): `[x_mm, y_mm, z_mm, thickness_mm, temperature_k, melt_fraction]`
      * for each 3D Lagrangian node `(it, iz)` on the Bassine 18k gold case.
@@ -22,17 +26,59 @@ export class PocketWatchSim {
      */
     click_lever_angle_rad(): number;
     /**
+     * Anytime-valid COSC chronometer compliance e-process value $E_t$ (`fs-eproc`).
+     */
+    cosc_e_value(): number;
+    /**
      * Return the keyless works crown wheel rotation angle ($\text{rad}$).
      */
     crown_wheel_angle_rad(): number;
+    /**
+     * Lagrange cost-optimal GD&T manufacturing tolerance allocation cost (`fs-toleralloc`).
+     */
+    gdt_allocated_cost(): number;
     /**
      * Return the 18 discretized elastica mainspring coil radii ($\text{mm}$) inside the barrel.
      */
     mainspring_coils_mm(): Float32Array;
     /**
+     * ISO 532-1 loudness level in phon at the 3D virtual microphone (`fs-psycho`).
+     */
+    mic_loudness_phon(): number;
+    /**
+     * ISO 532-1 Zwicker stationary loudness in sone at the 3D virtual microphone (`fs-psycho`).
+     */
+    mic_loudness_sone(): number;
+    /**
+     * DIN 45692 psychoacoustic sharpness in acum at the 3D virtual microphone (`fs-psycho`).
+     */
+    mic_sharpness_acum(): number;
+    /**
+     * Sound Pressure Level ($\text{dB SPL re } 20\text{ }\mu\text{Pa}$) at the 3D virtual microphone (`fs-psycho`).
+     */
+    mic_spl_db(): number;
+    /**
+     * Multi-crate spectral, topological, regime, UQ, and port-Hamiltonian coupling audit summary
+     * exercising `fs-couple`, `fs-regime`, `fs-cheb`, `fs-fft`, `fs-orbit`, `fs-asbuilt`,
+     * `fs-rep-sdf`, `fs-rep-mesh`, `fs-topo`, `fs-vfit`, `fs-uq`, and `fs-viz`.
+     */
+    multiphysics_crate_audit_summary(): Float64Array;
+    /**
      * Construct a new, chronometer-calibrated Patek-style Tourbillon pocket watch at $293.15\text{ K}$.
      */
     constructor();
+    /**
+     * Upper bound of certified interval rate enclosure ($\text{s/day}$) (`fs-ivl`).
+     */
+    rate_interval_hi_s_day(): number;
+    /**
+     * Lower bound of certified interval rate enclosure ($\text{s/day}$) (`fs-ivl`).
+     */
+    rate_interval_lo_s_day(): number;
+    /**
+     * Exact forward-mode AD thermoelastic rate sensitivity $\partial r / \partial T$ ($\text{s/day/K}$) (`fs-ad`).
+     */
+    rate_sensitivity_s_day_per_k(): number;
     /**
      * Render `frames` mono audio samples at $48\text{ kHz}$ from the 3D virtual microphone
      * and return them as a `Vec<f32>` (converted to `Float32Array` across `wasm-bindgen`).
@@ -103,12 +149,23 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_pocketwatchsim_free: (a: number, b: number) => void;
+    readonly pocketwatchsim_balance_aero_drag_s_inv: (a: number) => number;
     readonly pocketwatchsim_case_shell_snapshot: (a: number) => [number, number];
     readonly pocketwatchsim_clean_excess_oil: (a: number) => void;
     readonly pocketwatchsim_click_lever_angle_rad: (a: number) => number;
+    readonly pocketwatchsim_cosc_e_value: (a: number) => number;
     readonly pocketwatchsim_crown_wheel_angle_rad: (a: number) => number;
+    readonly pocketwatchsim_gdt_allocated_cost: (a: number) => number;
     readonly pocketwatchsim_mainspring_coils_mm: (a: number) => [number, number];
+    readonly pocketwatchsim_mic_loudness_phon: (a: number) => number;
+    readonly pocketwatchsim_mic_loudness_sone: (a: number) => number;
+    readonly pocketwatchsim_mic_sharpness_acum: (a: number) => number;
+    readonly pocketwatchsim_mic_spl_db: (a: number) => number;
+    readonly pocketwatchsim_multiphysics_crate_audit_summary: (a: number) => [number, number];
     readonly pocketwatchsim_new: () => number;
+    readonly pocketwatchsim_rate_interval_hi_s_day: (a: number) => number;
+    readonly pocketwatchsim_rate_interval_lo_s_day: (a: number) => number;
+    readonly pocketwatchsim_rate_sensitivity_s_day_per_k: (a: number) => number;
     readonly pocketwatchsim_render_audio_block: (a: number, b: number) => [number, number];
     readonly pocketwatchsim_reset: (a: number) => void;
     readonly pocketwatchsim_set_blowtorch: (a: number, b: number, c: number, d: number, e: number) => void;

@@ -2,12 +2,23 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const __wbg_pocketwatchsim_free: (a: number, b: number) => void;
+export const pocketwatchsim_balance_aero_drag_s_inv: (a: number) => number;
 export const pocketwatchsim_case_shell_snapshot: (a: number) => [number, number];
 export const pocketwatchsim_clean_excess_oil: (a: number) => void;
 export const pocketwatchsim_click_lever_angle_rad: (a: number) => number;
+export const pocketwatchsim_cosc_e_value: (a: number) => number;
 export const pocketwatchsim_crown_wheel_angle_rad: (a: number) => number;
+export const pocketwatchsim_gdt_allocated_cost: (a: number) => number;
 export const pocketwatchsim_mainspring_coils_mm: (a: number) => [number, number];
+export const pocketwatchsim_mic_loudness_phon: (a: number) => number;
+export const pocketwatchsim_mic_loudness_sone: (a: number) => number;
+export const pocketwatchsim_mic_sharpness_acum: (a: number) => number;
+export const pocketwatchsim_mic_spl_db: (a: number) => number;
+export const pocketwatchsim_multiphysics_crate_audit_summary: (a: number) => [number, number];
 export const pocketwatchsim_new: () => number;
+export const pocketwatchsim_rate_interval_hi_s_day: (a: number) => number;
+export const pocketwatchsim_rate_interval_lo_s_day: (a: number) => number;
+export const pocketwatchsim_rate_sensitivity_s_day_per_k: (a: number) => number;
 export const pocketwatchsim_render_audio_block: (a: number, b: number) => [number, number];
 export const pocketwatchsim_reset: (a: number) => void;
 export const pocketwatchsim_set_blowtorch: (a: number, b: number, c: number, d: number, e: number) => void;

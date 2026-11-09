@@ -561,7 +561,8 @@ impl WatchAcousticSynth {
             peak = peak.max(pa.abs());
             sum_sq += pa * pa;
             if pressure_samples_pa.len() < 256 {
-                pressure_samples_pa.push(pa.max(1.0e-6));
+                let sample_pa = if pa.abs() < 1.0e-7 { 2.0e-5 } else { pa };
+                pressure_samples_pa.push(sample_pa);
             }
             *sample = scaled as f32;
         }

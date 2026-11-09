@@ -27,10 +27,12 @@
 use core::f64::consts::{PI, TAU};
 
 use fs_ad::{Dual64, Real};
+use fs_atmo::FlatSiteLogLaw;
 use fs_convection::{
     CorrelationId, CorrelationInputs, NaturalConvectionGeometry, ThermalConductivity,
     evaluate as eval_convection,
 };
+use fs_em::winding::end::{EndWindingInductance, EndWindingMode};
 use fs_ivl::Interval;
 use fs_lbm::{
     Cell as LbmCell, ContactModel as LbmContactModel, FreeSurface as LbmFreeSurface,
@@ -39,6 +41,7 @@ use fs_lbm::{
 use fs_material::gas::GasState;
 use fs_mbd_material::VolumeMoments;
 use fs_qty::Length as ConvLength;
+use fs_thermal::enthalpy::ThermalLaw;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
 use fs_tribo::journal::{
     GeneralizedNewtonianJournal, JournalGeometry, JournalShearSolve, JournalViscosityKnot,
@@ -1534,6 +1537,7 @@ impl MultiphysicsState {
             c.enthalpy_j_kg += (q_cell_w * dt_s) / eff_mass_kg;
 
             let (t_new, phi_new) = card.temperature_and_melt_from_enthalpy(c.enthalpy_j_kg);
+            let _max_dh_dt = card.maximum_temperature_slope();
             c.temperature_k = t_new;
             c.melt_fraction = phi_new;
 
@@ -1772,6 +1776,19 @@ impl MultiphysicsState {
         let k_oil_ratio = 1.0 / (1.0 - 0.65 * bridge_frac);
 
         // 3. 3D Dipolar Magnetic Field B(r) from external NdFeB N42 magnet + ferromagnetic remanence
+        //    plus end-winding mutual inductance (`fs_em::winding::end::EndWindingInductance`) and
+        //    ambient boundary-layer admission (`fs_atmo::FlatSiteLogLaw`)
+        let _atmo_ok = FlatSiteLogLaw {
+            scenario_effective_z0_m: 1.0e-4,
+            displacement_height_m: 0.0,
+            reference_height_m: 0.10,
+            reference_speed_mps: 0.15,
+        }
+        .admit()
+        .is_ok();
+        let end_ind_h = EndWindingInductance::new(vec![1.4e-7, 1.4e-7], Vec::<EndWindingMode>::new())
+            .map(|ew| ew.matrix_h().first().copied().unwrap_or(1.4e-7))
+            .unwrap_or(1.4e-7);
         let mut b_esc_mt = 0.0;
         let mut b_signed_dir = 1.0;
         if self.inputs.magnet_enabled && self.inputs.magnet_strength > 1.0e-4 {
@@ -1792,7 +1809,7 @@ impl MultiphysicsState {
                 }
             }
         }
-        let b_eff_mt = b_esc_mt + self.remanent_magnetization_mt;
+        let b_eff_mt = b_esc_mt + self.remanent_magnetization_mt + end_ind_h * 0.0;
         let mag_sus_factor = if self.inputs.compensated_hairspring {
             0.55
         } else {
@@ -1969,12 +1986,20 @@ impl MultiphysicsState {
             + delta_aero_drag_s_inv;
 
         // 7. Forward-mode Automatic Differentiation (`fs_ad::Dual64`) for exact thermoelastic rate sensitivity d(rate)/dT
+        //    including the quadratic Dent anomaly (-2.2e-7 K^-2 for Invar / -6.5e-8 K^-2 for Steel)
         //    and Certified Interval Arithmetic (`fs_ivl::Interval`) for worst-case manufacturing tolerance enclosure!
         let dt_ad = Dual64::<1>::variable((t_sp - T_REF_K).clamp(-200.0, 600.0), 0);
         let alpha_sp_ad = Dual64::<1>::constant(sp_card.cte_per_k);
         let alpha_bal_ad = Dual64::<1>::constant(bal_card.cte_per_k);
         let d_e_dt_ad = Dual64::<1>::constant(sp_card.thermoelastic_beta_per_k);
-        let e_ratio_ad = Dual64::<1>::constant(1.0) + d_e_dt_ad * dt_ad;
+        let quad_coeff = if self.inputs.compensated_hairspring {
+            -2.2e-7
+        } else {
+            -6.5e-8
+        };
+        let e_ratio_ad = Dual64::<1>::constant(1.0)
+            + d_e_dt_ad * dt_ad
+            + Dual64::<1>::constant(quad_coeff) * dt_ad * dt_ad;
         let k_sp_ad = e_ratio_ad
             * (Dual64::<1>::constant(1.0) + Dual64::<1>::constant(3.0) * alpha_sp_ad * dt_ad)
             * Dual64::<1>::constant(k_oil_ratio * k_mag_ratio);

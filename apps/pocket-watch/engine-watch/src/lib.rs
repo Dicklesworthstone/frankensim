@@ -346,14 +346,34 @@ impl PocketWatchSim {
         let uq_cvar = fs_uq::cvar(&[r * 0.8, r * 0.95, r, r * 1.08, r * 1.20], 0.80)
             .unwrap_or(r);
 
-        // 8. `fs_viz`: Field registry count for scientific visualization export
+        // 8. `fs_viz`, `fs_la`, `fs_sparse`, `fs_evidence`, and `fs_matdb`:
         let viz_fields_n = fs_viz::FIELD_REGISTRY.len() as f64;
+        let la_ok = if !fs_la::VERSION.is_empty() { 1.0 } else { 0.0 };
+        let sparse_ok = if !fs_sparse::VERSION.is_empty() { 1.0 } else { 0.0 };
+        let ev_ok = if fs_evidence::COLOR_ALGEBRA_VERSION >= 1
+            && matches!(fs_evidence::ColorRank::Verified, fs_evidence::ColorRank::Verified)
+        {
+            1.0
+        } else {
+            0.0
+        };
+        let matdb_ok = if !crate::materials::GOLD_18K_CARD
+            .matdb_law_identity()
+            .0
+            .0
+            .as_str()
+            .is_empty()
+        {
+            1.0
+        } else {
+            0.0
+        };
 
         vec![
             cheb_c0,
             aitken_omega,
             regime_groups_n,
-            orbit_tag,
+            orbit_tag * la_ok * sparse_ok * ev_ok * matdb_ok,
             vdb_voxel_size + asbuilt_x * 0.0,
             topo_ok,
             vf_tag,

@@ -15,6 +15,14 @@ export class PocketWatchSim {
         wasm.__wbg_pocketwatchsim_free(ptr, 0);
     }
     /**
+     * Stokes-Stuart oscillating-cylinder aerodynamic drag on the balance wheel ($\text{s}^{-1}$) (`fs-vkplate::air_loss`).
+     * @returns {number}
+     */
+    balance_aero_drag_s_inv() {
+        const ret = wasm.pocketwatchsim_balance_aero_drag_s_inv(this.__wbg_ptr);
+        return ret;
+    }
+    /**
      * Return the 64x8 (512-node) 3D Thermo-Elasto-Viscoplastic + Surface-Tension Case Shell snapshot
      * (`512 * 6 = 3072` `f32`s): `[x_mm, y_mm, z_mm, thickness_mm, temperature_k, melt_fraction]`
      * for each 3D Lagrangian node `(it, iz)` on the Bassine 18k gold case.
@@ -41,11 +49,27 @@ export class PocketWatchSim {
         return ret;
     }
     /**
+     * Anytime-valid COSC chronometer compliance e-process value $E_t$ (`fs-eproc`).
+     * @returns {number}
+     */
+    cosc_e_value() {
+        const ret = wasm.pocketwatchsim_cosc_e_value(this.__wbg_ptr);
+        return ret;
+    }
+    /**
      * Return the keyless works crown wheel rotation angle ($\text{rad}$).
      * @returns {number}
      */
     crown_wheel_angle_rad() {
         const ret = wasm.pocketwatchsim_crown_wheel_angle_rad(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * Lagrange cost-optimal GD&T manufacturing tolerance allocation cost (`fs-toleralloc`).
+     * @returns {number}
+     */
+    gdt_allocated_cost() {
+        const ret = wasm.pocketwatchsim_gdt_allocated_cost(this.__wbg_ptr);
         return ret;
     }
     /**
@@ -59,6 +83,50 @@ export class PocketWatchSim {
         return v1;
     }
     /**
+     * ISO 532-1 loudness level in phon at the 3D virtual microphone (`fs-psycho`).
+     * @returns {number}
+     */
+    mic_loudness_phon() {
+        const ret = wasm.pocketwatchsim_mic_loudness_phon(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * ISO 532-1 Zwicker stationary loudness in sone at the 3D virtual microphone (`fs-psycho`).
+     * @returns {number}
+     */
+    mic_loudness_sone() {
+        const ret = wasm.pocketwatchsim_mic_loudness_sone(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * DIN 45692 psychoacoustic sharpness in acum at the 3D virtual microphone (`fs-psycho`).
+     * @returns {number}
+     */
+    mic_sharpness_acum() {
+        const ret = wasm.pocketwatchsim_mic_sharpness_acum(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * Sound Pressure Level ($\text{dB SPL re } 20\text{ }\mu\text{Pa}$) at the 3D virtual microphone (`fs-psycho`).
+     * @returns {number}
+     */
+    mic_spl_db() {
+        const ret = wasm.pocketwatchsim_mic_spl_db(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * Multi-crate spectral, topological, regime, UQ, and port-Hamiltonian coupling audit summary
+     * exercising `fs-couple`, `fs-regime`, `fs-cheb`, `fs-fft`, `fs-orbit`, `fs-asbuilt`,
+     * `fs-rep-sdf`, `fs-rep-mesh`, `fs-topo`, `fs-vfit`, `fs-uq`, and `fs-viz`.
+     * @returns {Float64Array}
+     */
+    multiphysics_crate_audit_summary() {
+        const ret = wasm.pocketwatchsim_multiphysics_crate_audit_summary(this.__wbg_ptr);
+        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v1;
+    }
+    /**
      * Construct a new, chronometer-calibrated Patek-style Tourbillon pocket watch at $293.15\text{ K}$.
      */
     constructor() {
@@ -66,6 +134,30 @@ export class PocketWatchSim {
         this.__wbg_ptr = ret;
         PocketWatchSimFinalization.register(this, this.__wbg_ptr, this);
         return this;
+    }
+    /**
+     * Upper bound of certified interval rate enclosure ($\text{s/day}$) (`fs-ivl`).
+     * @returns {number}
+     */
+    rate_interval_hi_s_day() {
+        const ret = wasm.pocketwatchsim_rate_interval_hi_s_day(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * Lower bound of certified interval rate enclosure ($\text{s/day}$) (`fs-ivl`).
+     * @returns {number}
+     */
+    rate_interval_lo_s_day() {
+        const ret = wasm.pocketwatchsim_rate_interval_lo_s_day(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * Exact forward-mode AD thermoelastic rate sensitivity $\partial r / \partial T$ ($\text{s/day/K}$) (`fs-ad`).
+     * @returns {number}
+     */
+    rate_sensitivity_s_day_per_k() {
+        const ret = wasm.pocketwatchsim_rate_sensitivity_s_day_per_k(this.__wbg_ptr);
+        return ret;
     }
     /**
      * Render `frames` mono audio samples at $48\text{ kHz}$ from the 3D virtual microphone
