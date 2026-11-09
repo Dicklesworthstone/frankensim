@@ -4756,3 +4756,42 @@ reciprocity, power/current mapping and nonpublication) and
 equilibrium/direction, half-volume forces, atomic refusals and instantaneous
 speed limits). `superfluid_superleak` demonstrates the sourced 1.8 K helium
 reference and prints the native conservation reports.
+
+## Condensed harmonic modal wall fields
+
+`ModalGalerkin::into_viscothermal_harmonic` evaluates the SAME uniform-cylinder,
+thin-boundary-layer modal wall law as `with_viscothermal`. It retains the
+original signed pressure and tangential-velocity Gram channels, kinetic port
+lift, positive Zwikker–Kosten poles, material source and every acoustic mode.
+The independent wall histories are eliminated at `s=-i*omega` using their
+exact scalar equations. Dense factorization covers only the original
+`[q, canonical p]` coordinates; it does not cover an acoustic-plus-wall square
+matrix. Every response reconstructs every wall-history phasor in the original
+ordering and invokes the original independent viscous/thermal heat owner.
+
+The public prepared model and frequency factor admit arbitrary coherent inward
+modal flows on the source's physical ports. They expose nodal and port pressure,
+the complete reconstructed state, cycle-mean storage, signed supplied work and
+separate physical wall heat. One equilibrated cancellable complex LU serves all
+drives at the same frequency. Componentwise condensed-equation and restored
+memory residuals must meet the authored tolerance; no pole, signed mutual
+coupling, mode, or negative coefficient is clipped to obtain an answer.
+
+The `HarmonicBudget` dimension bounds the acoustic solve here. Its byte and
+work bounds also account for pole preparation, retained channels and complete
+response vectors. The original physical band and thin-layer admission are
+shared with the explicit time-domain wall owner; frequencies outside that band
+refuse. Harmonic memory count can exceed the explicit time propagator and
+generic full-state harmonic caps because it is never represented by a dense
+square. The base acoustic mesh retains its original spatial admission.
+
+G1/G2/G3 tests in
+`modal::time_domain::viscothermal::harmonic::tests` compare every state block,
+port pressure, stored energy and dissipated power with the original complete
+harmonic system; verify reciprocal coupled ports and independent heat/work
+closure; refine spatial response against the exact Bessel cylinder and refine
+the original pole axis; and retain 1,142 physical states through a 54-dimensional
+factor. This is exact algebraic elimination of the admitted discretization,
+not a continuum error certificate, new thermoviscous closure, transient engine,
+azimuthal-mode extension, molecular-relaxation combination, or a performance
+claim across machines.

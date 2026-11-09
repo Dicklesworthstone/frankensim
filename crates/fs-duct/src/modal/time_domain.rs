@@ -42,8 +42,9 @@ mod molecular;
 pub use molecular::ModalMolecularBudget;
 mod viscothermal;
 pub use viscothermal::{
-    ModalViscothermalAdmission, ModalViscothermalBudget, ModalViscothermalHeat,
-    ModalViscothermalResolution,
+    ModalViscothermalAdmission, ModalViscothermalBudget, ModalViscothermalFactor,
+    ModalViscothermalHarmonic, ModalViscothermalHeat, ModalViscothermalResolution,
+    ModalViscothermalResponse,
 };
 
 /// Actual boundary on every retained far-end mode.

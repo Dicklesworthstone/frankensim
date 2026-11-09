@@ -31,6 +31,9 @@ use crate::modal::bessel_j0_certified;
 use fs_math::{c64::C64, det};
 use fs_phs::{ResistanceWitness, ZkDiffusive, ZkDiffusiveTerm};
 
+mod harmonic;
+pub use harmonic::{ModalViscothermalFactor, ModalViscothermalHarmonic, ModalViscothermalResponse};
+
 /// Independently refinable wall diffusion and explicit thin-layer domain.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ModalViscothermalResolution {
@@ -90,6 +93,96 @@ pub(super) struct ViscothermalSource {
 
 fn invalid(what: &'static str) -> ModalTimeError {
     ModalTimeError::Invalid(what)
+}
+
+/// One physical admission shared by explicit histories and their exact
+/// frequency-domain elimination. Neither route substitutes scalar mode loss.
+fn prepare_law(
+    source: &ModalGalerkinSource,
+    resolution: ModalViscothermalResolution,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(ZkDiffusive, ModalViscothermalAdmission), ModalTimeError> {
+    cancelled_at(cancelled, 0)?;
+    if source.viscothermal.is_some() || source.molecular.is_some() {
+        return Err(invalid(
+            "modal viscothermal walls need the original molecular-free lossless source",
+        ));
+    }
+    let radius = source.profile.constant_radius_m().ok_or_else(|| {
+        invalid("modal viscothermal walls require an exactly cylindrical profile")
+    })?;
+    let gas = source.gas();
+    if source
+        .regional_gases()
+        .is_some_and(|gases| gases.iter().any(|g| g != gas))
+        || source
+            .gas_field()
+            .is_some_and(|field| field.uniform_state().is_none())
+    {
+        return Err(invalid(
+            "modal viscothermal walls require uniform original gas",
+        ));
+    }
+    let limit = resolution.maximum_boundary_layer_ratio;
+    let band = resolution.band_rad_s;
+    if !limit.is_finite()
+        || limit <= 0.0
+        || limit > 0.1
+        || band.iter().any(|f| !f.is_finite() || *f <= 0.0)
+        || band[0] >= band[1]
+    {
+        return Err(invalid(
+            "modal viscothermal wall band or thin-layer domain is invalid",
+        ));
+    }
+    let diffusivity = gas.dynamic_viscosity / gas.density * 1.0_f64.max(1.0 / gas.prandtl);
+    let radial_ratio = det::sqrt(2.0 * diffusivity / band[0])
+        * (1.0 + source.radial_eigenvalues.last().copied().unwrap_or(0.0))
+        / radius;
+    let acoustic_ratio = det::sqrt(2.0 * diffusivity * band[1]) / gas.sound_speed;
+    if !radial_ratio.is_finite()
+        || !acoustic_ratio.is_finite()
+        || radial_ratio > limit
+        || acoustic_ratio > limit
+    {
+        return Err(invalid(
+            "retained modal wall scales leave the declared thin-boundary-layer domain",
+        ));
+    }
+    let model = ZkDiffusive::new(
+        radius,
+        gas.density,
+        gas.dynamic_viscosity,
+        gas.gamma,
+        gas.prandtl,
+        resolution.poles,
+        band,
+        resolution.maximum_diffusive_relative_error,
+    )?;
+    cancelled_at(cancelled, 0)?;
+    let memories = source
+        .elements
+        .checked_mul(model.series_terms().len())
+        .and_then(|s| {
+            source
+                .nodes
+                .len()
+                .checked_mul(model.shunt_terms().len())
+                .and_then(|t| s.checked_add(t))
+        })
+        .ok_or_else(|| invalid("modal wall memory extent overflow"))?;
+    let states = (2 * source.coordinates())
+        .checked_add(memories)
+        .ok_or_else(|| invalid("complete modal wall state extent overflow"))?;
+    Ok((
+        model,
+        ModalViscothermalAdmission {
+            resolution,
+            radial_boundary_layer_ratio: radial_ratio,
+            acoustic_boundary_layer_ratio: acoustic_ratio,
+            states,
+        },
+    ))
 }
 
 /// Exact wall Gram factors on the admitted cylinder. A pressure channel is one
@@ -296,79 +389,14 @@ impl ModalGalerkin {
         budget: ModalViscothermalBudget,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, ModalTimeError> {
-        cancelled_at(&mut cancelled, 0)?;
-        if self.source.viscothermal.is_some() || self.source.molecular.is_some() {
-            return Err(invalid(
-                "modal viscothermal walls need the original molecular-free lossless source",
-            ));
-        }
+        let (model, admission) = prepare_law(&self.source, resolution, &mut cancelled)?;
         let source = &self.source;
-        let radius = source.profile.constant_radius_m().ok_or_else(|| {
-            invalid("modal viscothermal walls require an exactly cylindrical profile")
-        })?;
+        let radius = source.profile.inlet_radius();
         let gas = source.gas();
-        if source
-            .regional_gases()
-            .is_some_and(|gases| gases.iter().any(|g| g != gas))
-            || source
-                .gas_field()
-                .is_some_and(|field| field.uniform_state().is_none())
-        {
-            return Err(invalid(
-                "modal viscothermal walls require uniform original gas",
-            ));
-        }
-        let limit = resolution.maximum_boundary_layer_ratio;
-        let band = resolution.band_rad_s;
-        if !limit.is_finite()
-            || limit <= 0.0
-            || limit > 0.1
-            || band.iter().any(|f| !f.is_finite() || *f <= 0.0)
-            || band[0] >= band[1]
-        {
-            return Err(invalid(
-                "modal viscothermal wall band or thin-layer domain is invalid",
-            ));
-        }
-        let diffusivity = gas.dynamic_viscosity / gas.density * 1.0_f64.max(1.0 / gas.prandtl);
-        let radial_ratio = det::sqrt(2.0 * diffusivity / band[0])
-            * (1.0 + source.radial_eigenvalues.last().copied().unwrap_or(0.0))
-            / radius;
-        let acoustic_ratio = det::sqrt(2.0 * diffusivity * band[1]) / gas.sound_speed;
-        if !radial_ratio.is_finite()
-            || !acoustic_ratio.is_finite()
-            || radial_ratio > limit
-            || acoustic_ratio > limit
-        {
-            return Err(invalid(
-                "retained modal wall scales leave the declared thin-boundary-layer domain",
-            ));
-        }
         let n = source.coordinates();
         let nodes = source.nodes.len();
         let elements = source.elements;
-        let model = ZkDiffusive::new(
-            radius,
-            gas.density,
-            gas.dynamic_viscosity,
-            gas.gamma,
-            gas.prandtl,
-            resolution.poles,
-            band,
-            resolution.maximum_diffusive_relative_error,
-        )?;
-        cancelled_at(&mut cancelled, 0)?;
-        let memories = elements
-            .checked_mul(model.series_terms().len())
-            .and_then(|s| {
-                nodes
-                    .checked_mul(model.shunt_terms().len())
-                    .and_then(|t| s.checked_add(t))
-            })
-            .ok_or_else(|| invalid("modal wall memory extent overflow"))?;
-        let states = (2 * n)
-            .checked_add(memories)
-            .ok_or_else(|| invalid("complete modal wall state extent overflow"))?;
+        let states = admission.states;
         let ports = source.port_count();
         let block = states
             .checked_add(ports)
@@ -458,12 +486,7 @@ impl ModalGalerkin {
         self.system = system;
         self.source.viscothermal = Some(ViscothermalSource {
             model,
-            admission: ModalViscothermalAdmission {
-                resolution,
-                radial_boundary_layer_ratio: radial_ratio,
-                acoustic_boundary_layer_ratio: acoustic_ratio,
-                states,
-            },
+            admission,
             velocity,
             pressure,
             states,
