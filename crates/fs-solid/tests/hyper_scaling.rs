@@ -190,6 +190,126 @@ fn g3_loaded_elasticity_preserves_strain_on_small_and_large_specimens() {
 }
 
 #[test]
+fn g1_large_prescribed_compression_reaches_the_same_affine_state_on_layered_meshes() {
+    with_cx(|cx| {
+        let (mu, lambda, axial, lateral): (f64, f64, f64, f64) = (2.0, 5.0, 0.55, 0.65);
+        let material =
+            Hyperelastic::new(HyperelasticModel::NeoHookean { mu, lambda }, 4.0).unwrap();
+        let prescribed = |x: f64, y: f64| [(axial - 1.0) * x, (lateral - 1.0) * y];
+        let local = PlaneStressSettings::default();
+        for triangles in [false, true] {
+            let mesh = if triangles {
+                Mesh2::triangles(2.0, 1.0, 4, 4)
+            } else {
+                Mesh2::quads(2.0, 1.0, 4, 4)
+            };
+            let problem = HyperProblem {
+                mesh: &mesh,
+                material: &material,
+                dirichlet: vec![
+                    (Patch::Left, &prescribed),
+                    (Patch::Right, &prescribed),
+                    (Patch::Bottom, &prescribed),
+                    (Patch::Top, &prescribed),
+                ],
+                traction: vec![],
+                settings: NewtonSettings {
+                    tol: 2e-9,
+                    max_iters: 40,
+                    load_steps: 1,
+                    max_backtracks: 30,
+                },
+            };
+            for formulation in [
+                Formulation::PlaneStrain,
+                Formulation::MeanDilatation,
+                Formulation::PlaneStress,
+                Formulation::IncompressiblePlaneStress,
+            ] {
+                if triangles && matches!(formulation, Formulation::MeanDilatation) {
+                    continue;
+                }
+                let result = match formulation {
+                    Formulation::PlaneStrain => problem.solve(),
+                    Formulation::MeanDilatation => problem.solve_mean_dilatation(cx),
+                    Formulation::PlaneStress => problem.solve_plane_stress(local, cx),
+                    Formulation::IncompressiblePlaneStress => {
+                        problem.solve_incompressible_plane_stress(local, cx)
+                    }
+                };
+                let (motion, report) = result.unwrap_or_else(|error| {
+                    panic!("{formulation:?}, triangles={triangles}: {error}")
+                });
+                assert!(*report.histories[0].last().unwrap() < problem.settings.tol);
+                // A boundary-only update would cross the adjacent undeformed
+                // layer in BOTH directions. The complete deformation is affine
+                // and orientation-preserving, with a nonzero interior motion.
+                for (actual, &[x, y]) in motion.iter().zip(&mesh.nodes) {
+                    let expected = prescribed(x, y);
+                    for i in 0..2 {
+                        assert!((actual[i] - expected[i]).abs() < 3e-8);
+                    }
+                }
+                for patch in [Patch::Left, Patch::Right, Patch::Bottom, Patch::Top] {
+                    for node in mesh.patch_nodes(patch) {
+                        assert_eq!(
+                            motion[node],
+                            prescribed(mesh.nodes[node][0], mesh.nodes[node][1])
+                        );
+                    }
+                }
+
+                // Independent constant-stress reference, including the actual
+                // relaxed thickness of each plane-stress formulation.
+                let thickness = match formulation {
+                    Formulation::PlaneStrain | Formulation::MeanDilatation => 1.0,
+                    Formulation::PlaneStress => {
+                        let mut lo = 1.0;
+                        let mut hi = (axial * lateral).recip();
+                        for _ in 0..70 {
+                            let t = 0.5 * (lo + hi);
+                            if mu * (t * t - 1.0) + lambda * (axial * lateral * t).ln() > 0.0 {
+                                hi = t;
+                            } else {
+                                lo = t;
+                            }
+                        }
+                        0.5 * (lo + hi)
+                    }
+                    Formulation::IncompressiblePlaneStress => (axial * lateral).recip(),
+                };
+                let px = if matches!(formulation, Formulation::IncompressiblePlaneStress) {
+                    mu * (axial - thickness * thickness / axial)
+                } else {
+                    mu * (axial - axial.recip())
+                        + lambda * (axial * lateral * thickness).ln() / axial
+                };
+                let flat: Vec<_> = motion.iter().flatten().copied().collect();
+                let residual = match formulation {
+                    Formulation::PlaneStrain => problem.unconstrained_residual(&flat, 1.0),
+                    Formulation::MeanDilatation => problem
+                        .mean_dilatation_residual_and_tangent(&flat, 1.0, cx)
+                        .map(|(residual, _)| residual),
+                    Formulation::PlaneStress => problem
+                        .plane_stress_residual_and_tangent(&flat, 1.0, local, cx)
+                        .map(|(residual, _)| residual),
+                    Formulation::IncompressiblePlaneStress => problem
+                        .incompressible_plane_stress_residual_and_tangent(&flat, 1.0, local, cx)
+                        .map(|(residual, _)| residual),
+                }
+                .unwrap();
+                let right_reaction: f64 = mesh
+                    .patch_nodes(Patch::Right)
+                    .iter()
+                    .map(|&node| residual[2 * node])
+                    .sum();
+                assert!((right_reaction - px).abs() < 3e-8 * px.abs());
+            }
+        }
+    });
+}
+
+#[test]
 fn g0_zero_load_and_invalid_controls_cannot_manufacture_convergence() {
     let mesh = Mesh2::quads(1.0, 1.0, 1, 1);
     let material = Hyperelastic::new(

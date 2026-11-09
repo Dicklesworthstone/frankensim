@@ -11,6 +11,10 @@
 //! (det F ≤ 0 on a trial state) absorbed by step halving, plus load
 //! stepping — the battery drives a buckling-adjacent fixture through
 //! exactly this recipe.
+//! Prescribed motion enters the same Newton direction through `K_fp du_p`;
+//! free and prescribed updates backtrack together. While boundary motion is
+//! pending, an admissible step need not decrease energy: the moving support
+//! does work. Force convergence is accepted only at the exact target supports.
 //! Equilibrium and the Newton equation use relative residuals, so changing
 //! the common scale of stiffness and dead traction cannot erase deformation.
 //! Reference and current P1/Q1 maps must preserve orientation at every corner;
@@ -107,8 +111,9 @@ fn checkpoint(projection: Projection<'_, '_>) -> Result<(), SolidError> {
 #[derive(Debug, Clone, Copy)]
 pub struct NewtonSettings {
     /// Relative free-force residual tolerance, strictly between zero and one.
-    /// Each load step uses the larger of its initial free residual norm and
-    /// its applied free-load norm. There is no implicit force-unit floor.
+    /// Each static load step uses the largest of its initial free residual,
+    /// applied free load and linearized prescribed-motion force norms.
+    /// There is no implicit force-unit floor.
     pub tol: f64,
     /// Iteration cap per load step.
     pub max_iters: usize,
@@ -529,8 +534,13 @@ impl HyperProblem<'_> {
             #[allow(clippy::cast_precision_loss)]
             let load = step as f64 / self.settings.load_steps as f64;
             let fixed = self.fixed_dofs(load)?;
-            for (&dof, &val) in &fixed {
-                u[dof] = val;
+            // With no free motion, the target itself is the complete state;
+            // admit it directly as before. Otherwise a boundary-only jump can
+            // invert the first element layer even for a valid affine squeeze.
+            if fixed.len() == u.len() {
+                for (&dof, &val) in &fixed {
+                    u[dof] = val;
+                }
             }
             let mut applied = vec![0.0; u.len()];
             self.for_traction(load, |dof, value| {
@@ -558,12 +568,50 @@ impl HyperProblem<'_> {
             let mut converged = false;
             for _ in 0..self.settings.max_iters {
                 checkpoint(projection)?;
-                let (resid, tangent) =
-                    self.assemble_with_projection(&u, load, &fixed, projection)?;
-                let rnorm = norm(&resid);
-                if !rnorm.is_finite() {
+                let pending_any = fixed.iter().any(|(&dof, &target)| u[dof] != target);
+                let pending: BTreeMap<_, _> = if pending_any {
+                    fixed
+                        .iter()
+                        .map(|(&dof, &target)| (dof, target - u[dof]))
+                        .collect()
+                } else {
+                    BTreeMap::new()
+                };
+                if pending.values().any(|value| !value.is_finite()) {
                     return Err(SolidError::InvalidInput {
-                        what: "Newton free-force residual is not finite".into(),
+                        what: "prescribed finite-strain motion must be finite and representable"
+                            .into(),
+                    });
+                }
+                let no_constraints = BTreeMap::new();
+                let (mut resid, tangent) = self.assemble_with_projection(
+                    &u,
+                    load,
+                    if pending_any { &no_constraints } else { &fixed },
+                    projection,
+                )?;
+                for &dof in fixed.keys() {
+                    resid[dof] = 0.0;
+                }
+                // The current free residual is the convergence/Armijo quantity;
+                // its boundary linearization belongs only to the Newton RHS.
+                let mut lifted_residual = pending_any.then(|| resid.clone());
+                let tangent = if let Some(rhs) = &mut lifted_residual {
+                    eliminate_prescribed_increment(tangent, rhs, &pending)
+                } else {
+                    tangent
+                };
+                let newton_residual = lifted_residual.as_deref().unwrap_or(&resid);
+                let rnorm = norm(&resid);
+                let drive_norm = if pending_any {
+                    norm(newton_residual)
+                } else {
+                    rnorm
+                };
+                if !rnorm.is_finite() || !drive_norm.is_finite() {
+                    return Err(SolidError::InvalidInput {
+                        what: "Newton free-force residual or prescribed-motion drive is not finite"
+                            .into(),
                     });
                 }
                 let momentum_scale = match projection {
@@ -575,7 +623,7 @@ impl HyperProblem<'_> {
                 if let Some(scale) = momentum_scale {
                     force_scale = scale;
                 } else if history.is_empty() {
-                    force_scale = force_scale.max(rnorm);
+                    force_scale = force_scale.max(rnorm).max(drive_norm);
                 }
                 let relative = if rnorm == 0.0 {
                     0.0
@@ -583,7 +631,7 @@ impl HyperProblem<'_> {
                     rnorm / force_scale
                 };
                 history.push(relative);
-                if relative < self.settings.tol {
+                if !pending_any && relative < self.settings.tol {
                     converged = true;
                     break;
                 }
@@ -605,40 +653,48 @@ impl HyperProblem<'_> {
                         }
                     }
                 }
-                if stiffness_scale == 0.0 {
+                if stiffness_scale == 0.0 && drive_norm != 0.0 {
                     return Err(SolidError::SolveFailed {
                         iters: 0,
                         rel_residual: 1.0,
                     });
                 }
-                let b: Vec<f64> = resid.iter().map(|r| -r / rnorm).collect();
-                let op = normalized_newton_operator(tangent, stiffness_scale, &fixed);
-                let mut st = MinresState::new(&op, &b);
-                while st.iters < 20_000 && st.rel_residual() >= 1e-10 {
-                    checkpoint(projection)?;
-                    let before = st.iters;
-                    let allowance = (20_000 - before).min(32);
-                    let _ = st.run(&op, 1e-10, allowance);
-                    if st.iters == before {
-                        break;
+                let mut direction = vec![0.0; u.len()];
+                if drive_norm != 0.0 {
+                    let b: Vec<f64> = newton_residual.iter().map(|r| -r / drive_norm).collect();
+                    let op = normalized_newton_operator(tangent, stiffness_scale, &fixed);
+                    let mut st = MinresState::new(&op, &b);
+                    while st.iters < 20_000 && st.rel_residual() >= 1e-10 {
+                        checkpoint(projection)?;
+                        let before = st.iters;
+                        let allowance = (20_000 - before).min(32);
+                        let _ = st.run(&op, 1e-10, allowance);
+                        if st.iters == before {
+                            break;
+                        }
+                    }
+                    // Recurrence convergence alone cannot admit the actual
+                    // lifted Newton equation, including its support coupling.
+                    let mut defect = vec![0.0; b.len()];
+                    op.apply(&st.x, &mut defect);
+                    for (value, rhs) in defect.iter_mut().zip(&b) {
+                        *value -= rhs;
+                    }
+                    let linear_relative = norm(&defect) / norm(&b);
+                    if !linear_relative.is_finite() || linear_relative > 1e-6 {
+                        return Err(SolidError::SolveFailed {
+                            iters: st.iters,
+                            rel_residual: linear_relative,
+                        });
+                    }
+                    let displacement_scale = drive_norm / stiffness_scale;
+                    for (value, &x) in direction.iter_mut().zip(&st.x) {
+                        *value = x * displacement_scale;
                     }
                 }
-                // The Lanczos recurrence is only an estimate. Every formulation
-                // must satisfy the actual normalized Newton equation as well.
-                let mut defect = vec![0.0; b.len()];
-                op.apply(&st.x, &mut defect);
-                for (value, rhs) in defect.iter_mut().zip(&b) {
-                    *value -= rhs;
+                for (&dof, &value) in &pending {
+                    direction[dof] = value;
                 }
-                let linear_relative = norm(&defect) / norm(&b);
-                if !linear_relative.is_finite() || linear_relative > 1e-6 {
-                    return Err(SolidError::SolveFailed {
-                        iters: st.iters,
-                        rel_residual: linear_relative,
-                    });
-                }
-                let displacement_scale = rnorm / stiffness_scale;
-                let direction: Vec<f64> = st.x.iter().map(|x| x * displacement_scale).collect();
                 // Armijo backtracking on the potential energy; material
                 // refusals (det F ≤ 0) halve the step.
                 let slope: f64 = resid.iter().zip(&direction).map(|(r, d)| r * d).sum();
@@ -650,15 +706,24 @@ impl HyperProblem<'_> {
                 let mut taken = false;
                 for _ in 0..self.settings.max_backtracks {
                     checkpoint(projection)?;
-                    let trial: Vec<f64> = u
+                    let mut trial: Vec<f64> = u
                         .iter()
                         .zip(&direction)
                         .map(|(ui, di)| ui + alpha * di)
                         .collect();
+                    // A full accepted step installs the exact target bits;
+                    // rounded subtraction/addition cannot leave a tiny pending
+                    // support increment and keep the solver in the work phase.
+                    if alpha == 1.0 {
+                        for (&dof, &target) in &fixed {
+                            trial[dof] = target;
+                        }
+                    }
                     if let Some(e1) = self.try_energy_with_projection(&trial, load, projection)?
                         && e1.is_finite()
                     {
-                        let mut acceptable = slope < 0.0 && e1 <= e0 + 1e-4 * alpha * slope;
+                        let mut acceptable =
+                            pending_any || (slope < 0.0 && e1 <= e0 + 1e-4 * alpha * slope);
                         // At an indefinite tangent use residual globalization;
                         // near energy roundoff also demand actual force progress.
                         // Neither gate introduces a dimensional unit floor.
@@ -1075,6 +1140,33 @@ impl crate::continuation::PathResidual for HyperProblem<'_> {
     }
 }
 
+// Eliminate supports only after retaining their consistent contribution to
+// the free equations: K_ff du_f = -(r_f + K_fp du_p). The original full
+// tangent is needed only while a boundary increment remains pending.
+fn eliminate_prescribed_increment(
+    tangent: fs_sparse::Csr,
+    residual: &mut [f64],
+    pending: &BTreeMap<usize, f64>,
+) -> fs_sparse::Csr {
+    let mut constrained = Coo::new(tangent.nrows(), tangent.ncols());
+    for (row, rhs) in residual.iter_mut().enumerate() {
+        if pending.contains_key(&row) {
+            *rhs = 0.0;
+            constrained.push(row, row, 1.0);
+            continue;
+        }
+        let (columns, values) = tangent.row(row);
+        for (&column, &coefficient) in columns.iter().zip(values) {
+            if let Some(&increment) = pending.get(&column) {
+                *rhs = coefficient.mul_add(increment, *rhs);
+            } else {
+                constrained.push(row, column, coefficient);
+            }
+        }
+    }
+    constrained.assemble()
+}
+
 fn normalized_newton_operator(
     mut tangent: fs_sparse::Csr,
     stiffness_scale: f64,
@@ -1112,6 +1204,28 @@ fn norm(v: &[f64]) -> f64 {
 mod tests {
     use super::*;
     use fs_material::hyper::{FibreInvariants, HyperelasticModel, OgdenTerm, Volumetric};
+
+    /// G0: the known support increment enters the SAME tangent with its actual
+    /// sign; reaction rows cannot become extra applied forces or solve rows.
+    #[test]
+    fn prescribed_increment_elimination_retains_free_force_and_symmetric_operator() {
+        let mut coo = Coo::new(3, 3);
+        for (row, values) in [[4.0, -2.0, 1.0], [-2.0, 6.0, -3.0], [1.0, -3.0, 5.0]]
+            .into_iter()
+            .enumerate()
+        {
+            for (column, value) in values.into_iter().enumerate() {
+                coo.push(row, column, value);
+            }
+        }
+        let pending = BTreeMap::from([(1, -0.25)]);
+        let mut residual = [2.0, 100.0, -1.0];
+        let tangent = eliminate_prescribed_increment(coo.assemble(), &mut residual, &pending);
+        assert_eq!(residual, [2.5, 0.0, -0.25]);
+        let mut action = [0.0; 3];
+        CsrOp::symmetric(tangent).apply(&[2.0, -8.0, 3.0], &mut action);
+        assert_eq!(action, [11.0, -8.0, 17.0]);
+    }
 
     /// G0/G1: quadrature-positive elasticity must not authorize a folded body,
     /// including when every displacement is prescribed and the free residual
