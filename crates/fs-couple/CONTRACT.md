@@ -1,5 +1,18 @@
+# CONTRACT: fs-couple
 
+> **Layout (restored 2026-11-09).** This contract is an index plus part files. A file larger than
+> 1 MiB (1,048,576 bytes) comes back with empty content from the GitHub contents API; a writer using
+> that API then saw an empty file and replaced the whole contract with its one new section.
+> This file was cut to a single section 18 times between 2026-10-30 and 2026-11-09; the text written before 2026-11-05 19:45 (2.3 MB) was absent from then until this restore.
+>
+> - All earlier contract text is in `contracts/part-NN.md`, unchanged. A higher part number is newer;
+>   inside a part, sections are newest first, as they were in the single file.
+> - Add a new section under "New sections" below, newest first.
+> - When this file passes 600 KB, move the sections under "New sections" into a new
+>   highest-numbered part and add its row to the table. No file here may exceed 900 KB.
+> - The ten required sections are in the parts named under their headings below.
 
+## New sections (newest first)
 
 ### Adaptive laminar enthalpy and external hydraulic continuation
 
@@ -49,3 +62,56 @@ All seven changed Rust files passed the pinned parser, formatter and
 or accounting blocker. Full native FEM/thermal compilation and these native
 integration test executions remain unverified in the current partial restored
 environment; no runtime pass is inferred from those checks.
+
+## Parts
+
+| Part | Bytes | `##` sections | First (newest) section | Last (oldest) section |
+|---|---|---|---|---|
+| [`contracts/part-08.md`](contracts/part-08.md) | 449466 | 145 | Driven full-curve Hertz friction with original thermal sources | CST/DKT hereditary material memory on the original modal basis |
+| [`contracts/part-07.md`](contracts/part-07.md) | 442691 | 141 | Thermal porous follower pressure through enthalpy feedback | Electrical contact heat in thermally live actuator supports |
+| [`contracts/part-06.md`](contracts/part-06.md) | 446940 | 130 | Complete material and acoustic memory in exponential impact | Shared material cavitation, films and bubble acoustic history |
+| [`contracts/part-05.md`](contracts/part-05.md) | 420894 | 27 | Finite solvent heat during gas absorption and exsolution | Conformance tests |
+| [`contracts/part-04.md`](contracts/part-04.md) | 449410 | 65 | No-claim boundaries | Live gas changes through the shared acoustic port |
+| [`contracts/part-03.md`](contracts/part-03.md) | 444523 | 95 | Finite thermochemical feedback through the complete acoustic load | Nonlinear spatial current with complete material heat exchange |
+| [`contracts/part-02.md`](contracts/part-02.md) | 425077 | 113 | Source-resolved Hertz islands on shared finite thermal cells — v0 | Complete sliding-film layer heat on the impact clock |
+| [`contracts/part-01.md`](contracts/part-01.md) | 285661 | 57 | Generalized-Newtonian film resistance in impact mechanics | Native joint friction with finite-cell thermal feedback |
+
+## Purpose and layer
+
+Full text: [`contracts/part-05.md`](contracts/part-05.md), under the same heading.
+
+## Public types and semantics
+
+Full text: [`contracts/part-05.md`](contracts/part-05.md), under the same heading.
+
+## Invariants
+
+Full text: [`contracts/part-05.md`](contracts/part-05.md), under the same heading.
+
+## Error model
+
+Full text: [`contracts/part-05.md`](contracts/part-05.md), under the same heading.
+
+## Determinism class
+
+Full text: [`contracts/part-05.md`](contracts/part-05.md), under the same heading.
+
+## Cancellation behavior
+
+Full text: [`contracts/part-05.md`](contracts/part-05.md), under the same heading.
+
+## Unsafe boundary
+
+Full text: [`contracts/part-05.md`](contracts/part-05.md), under the same heading.
+
+## Feature flags
+
+Full text: [`contracts/part-05.md`](contracts/part-05.md), under the same heading.
+
+## Conformance tests
+
+Full text: [`contracts/part-05.md`](contracts/part-05.md), under the same heading.
+
+## No-claim boundaries
+
+Full text: [`contracts/part-04.md`](contracts/part-04.md), under the same heading.

@@ -1,4 +1,18 @@
+# fs-material — CONTRACT
 
+> **Layout (restored 2026-11-09).** This contract is an index plus part files. A file larger than
+> 1 MiB (1,048,576 bytes) comes back with empty content from the GitHub contents API; a writer using
+> that API then saw an empty file and replaced the whole contract with its one new section.
+> This file was cut to a single section 8 times between 2026-11-05 and 2026-11-09; the last cut (2026-11-09 12:27) removed 1.7 MB.
+>
+> - All earlier contract text is in `contracts/part-NN.md`, unchanged. A higher part number is newer;
+>   inside a part, sections are newest first, as they were in the single file.
+> - Add a new section under "New sections" below, newest first.
+> - When this file passes 600 KB, move the sections under "New sections" into a new
+>   highest-numbered part and add its row to the table. No file here may exceed 900 KB.
+> - The ten required sections are in the parts named under their headings below.
+
+## New sections (newest first)
 
 ## Causal pressure-driven molecular compressibility
 
@@ -84,3 +98,52 @@ not supply concentrated-electrolyte activities, omitted complexes, competing
 solids, heat or kinetic rates. Neutral-complex particle counting, dilution,
 analytical dosing, source refusal and transactional cancellation are covered by
 focused native regressions using explicitly authored Gibbs test data.
+
+## Parts
+
+| Part | Bytes | `##` sections | First (newest) section | Last (oldest) section |
+|---|---|---|---|---|
+| [`contracts/part-04.md`](contracts/part-04.md) | 435615 | 108 | Original strain domains in checked solid consumers | No-claim boundaries |
+| [`contracts/part-03.md`](contracts/part-03.md) | 447617 | 94 | Authority-separated multi-case identifiability schema (bead I10.1) | Radial material conduction and finite thermal feedback |
+| [`contracts/part-02.md`](contracts/part-02.md) | 450128 | 89 | Implicit spatial freezing with original source tangents | Concentric annular Carreau transport |
+| [`contracts/part-01.md`](contracts/part-01.md) | 363756 | 116 | Physical viscous stress and shear traction | Original equilibrium factors for mechanical projection consumers |
+
+## Purpose and layer
+
+Full text: [`contracts/part-04.md`](contracts/part-04.md), under the same heading.
+
+## Public types and semantics
+
+Full text: [`contracts/part-04.md`](contracts/part-04.md), under the same heading.
+
+## Invariants
+
+Full text: [`contracts/part-04.md`](contracts/part-04.md), under the same heading.
+
+## Error model
+
+Full text: [`contracts/part-04.md`](contracts/part-04.md), under the same heading.
+
+## Determinism class
+
+Full text: [`contracts/part-04.md`](contracts/part-04.md), under the same heading.
+
+## Cancellation behavior
+
+Full text: [`contracts/part-04.md`](contracts/part-04.md), under the same heading.
+
+## Unsafe boundary
+
+Full text: [`contracts/part-04.md`](contracts/part-04.md), under the same heading.
+
+## Feature flags
+
+Full text: [`contracts/part-04.md`](contracts/part-04.md), under the same heading.
+
+## Conformance tests
+
+Full text: [`contracts/part-04.md`](contracts/part-04.md), under the same heading.
+
+## No-claim boundaries
+
+Full text: [`contracts/part-04.md`](contracts/part-04.md), under the same heading.
