@@ -334,6 +334,90 @@ fn loss_factor_row_is_optional_and_alone_decays_each_mode_at_pi_eta_f() {
     }
 }
 
+/// The optional `bar_self_radiation on` row: absent is off; anything but `on` is refused; and it pairs only
+/// with a loss measured in vacuum, so the 1 atm Howell row (whose value holds the beam's air share) and the
+/// in-air rosewood law are refused with it, while the near-vacuum Howell row and no loss row pass.
+#[test]
+fn bar_self_radiation_row_is_optional_and_needs_a_vacuum_loss() {
+    let path =
+        root().join("data/instruments/descriptions/xylophone/orff-soprano-blank-rucz2021.bar");
+    let text = std::fs::read_to_string(path).expect("the shipped blank card");
+    let with = |rows: &str| Card::parse(&format!("{text}\n{rows}\n"), &root());
+    assert!(!with("").expect("no row").bar_self_radiation);
+    assert!(
+        with("bar_self_radiation\ton")
+            .expect("the row")
+            .bar_self_radiation
+    );
+    for bad in [
+        "bar_self_radiation\toff",
+        "bar_self_radiation\ton\ton",
+        "bar_self_radiation",
+    ] {
+        assert!(with(bad).is_err(), "{bad} must be refused");
+    }
+    let bars = root().join("data/instruments/descriptions/bars");
+    let loss = |name: &str| {
+        Loss::read(&std::fs::read_to_string(bars.join(name)).expect("a shipped loss file"))
+            .expect("it reads")
+    };
+    for in_air in [
+        "aluminium-loss-howell1974-2024t4.tsv",
+        "rosewood-loss-fit3-test.tsv",
+    ] {
+        assert!(
+            render::self_radiation_loss(Some(&loss(in_air)))
+                .err()
+                .is_some_and(|e| e.contains("vacuum")),
+            "{in_air} holds air and must be refused"
+        );
+    }
+    render::self_radiation_loss(Some(&loss("aluminium-loss-howell1974-2024t4-vacuum.tsv")))
+        .expect("the near-vacuum row pairs");
+    render::self_radiation_loss(None).expect("no loss row pairs");
+}
+
+/// `render::bar_modes` with self-radiation: a positive W adds W/omega to the loss row's damping ratio, so the
+/// mode's amplitude decays W faster per second; a negative W (below the BEM's resolution) adds nothing; and
+/// without the row every ratio is the loss row's to the bit, as are the rigid coordinates' zeros.
+#[test]
+fn bar_self_radiation_adds_positive_w_over_omega_and_nothing_below_zero() {
+    let pair = |f: f64| {
+        let lambda = (bar::TAU * f).powi(2);
+        fs_modal::ModePair {
+            lambda,
+            phi: Vec::new(),
+            residual: 0.0,
+            interval: (lambda, lambda),
+        }
+    };
+    let modes = [pair(262.815), pair(2422.946)];
+    let loss = Loss::read(
+        &std::fs::read_to_string(root().join(
+            "data/instruments/descriptions/bars/aluminium-loss-howell1974-2024t4-vacuum.tsv",
+        ))
+        .expect("the shipped vacuum row"),
+    )
+    .expect("it reads");
+    let transfers = [C64::ZERO; 2];
+    let off = render::bar_modes(&modes, Some(&loss), None, &transfers, 1);
+    let on = render::bar_modes(&modes, Some(&loss), Some(&[-4.75e-3, 4.346]), &transfers, 1);
+    assert_eq!((off.len(), on.len()), (3, 3));
+    for (m, mode) in modes.iter().zip(&off) {
+        assert_eq!(
+            mode.damping_ratio.to_bits(),
+            loss.ratio(bar::hz(m)).to_bits()
+        );
+    }
+    assert_eq!(
+        on[0].damping_ratio.to_bits(),
+        off[0].damping_ratio.to_bits()
+    );
+    let added = (on[1].damping_ratio - off[1].damping_ratio) * on[1].angular_frequency_rad_s;
+    assert!((added / 4.346 - 1.0).abs() < 1e-12, "{added} 1/s");
+    assert_eq!(on[2].damping_ratio.to_bits(), 0.0_f64.to_bits());
+}
+
 #[test]
 fn arc_profile_is_flat_in_the_middle_and_full_thickness_outside_the_cut() {
     let p = Profile::Arc {

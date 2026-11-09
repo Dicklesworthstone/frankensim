@@ -46,6 +46,9 @@ pub struct Loss {
     a0: f64,
     a1: Option<f64>,
     a2: f64,
+    /// Every `observation` row of the loss file has an id ending in `-vacuum`: the value was measured with
+    /// the air pumped out and holds no air share. Only such a loss pairs with `bar_self_radiation on`.
+    pub in_vacuum: bool,
 }
 
 impl Loss {
@@ -56,10 +59,17 @@ impl Loss {
             Some(eta) if eta > 0.0 && eta <= 0.1 => Some(pi * eta),
             Some(eta) => return Err(format!("loss_factor {eta} must lie in (0, 0.1]")),
         };
+        let observations: Vec<&str> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("observation\t"))
+            .map(|rest| rest.split('\t').next().unwrap_or(""))
+            .collect();
         Ok(Loss {
             a0: scalar(text, "fluid_damping_gamma_b")? / 2.0,
             a1,
             a2: 2.0 * pi * pi * scalar(text, "viscoelastic_constant_eta")?,
+            in_vacuum: !observations.is_empty()
+                && observations.iter().all(|id| id.ends_with("-vacuum")),
         })
     }
 
@@ -104,21 +114,45 @@ pub fn strike_budget() -> ModalAcousticTimeBudget {
     }
 }
 
+/// `bar_self_radiation on` adds each mode's own radiation to the loss row, so the loss must hold no air: an
+/// in-air loss (any whose observation is not `-vacuum`, the 1 atm Howell row among them) is refused, or the
+/// air would count twice. With no loss row the card is the lossless diagnostic plus radiation, and passes.
+pub fn self_radiation_loss(loss: Option<&Loss>) -> Result<(), String> {
+    match loss {
+        Some(l) if !l.in_vacuum => Err("bar_self_radiation on needs a loss row measured in vacuum (an \
+             observation id ending in -vacuum): an in-air loss already holds the bar's air share, so the air \
+             would count twice"
+            .into()),
+        _ => Ok(()),
+    }
+}
+
 /// The bar's modal oscillators: every band mode with its loss and receiver transfer, then the rigid
-/// free-body coordinates (zero frequency, no direct radiation).
+/// free-body coordinates (zero frequency, no direct radiation). With `self_radiation` (the card's
+/// `bar_self_radiation on`), each band mode's damping ratio also gains max(W, 0)/omega for its own radiated
+/// power W per unit modal velocity (`radiation::Transfers::self_radiation`): a negative W is below the BEM's
+/// resolution and adds nothing. Without it, every ratio is the loss row's to the bit.
 pub fn bar_modes(
     modes: &[ModePair],
     loss: Option<&Loss>,
+    self_radiation: Option<&[f64]>,
     transfers: &[C64],
     rigid: usize,
 ) -> Vec<ModalAcousticMode> {
     let mut out: Vec<_> = modes
         .iter()
         .zip(transfers)
-        .map(|(m, p)| ModalAcousticMode {
-            angular_frequency_rad_s: TAU * hz(m),
-            damping_ratio: loss.map_or(0.0, |l| l.ratio(hz(m))),
-            pressure_per_modal_velocity: *p,
+        .enumerate()
+        .map(|(i, (m, p))| {
+            let material = loss.map_or(0.0, |l| l.ratio(hz(m)));
+            ModalAcousticMode {
+                angular_frequency_rad_s: TAU * hz(m),
+                damping_ratio: match self_radiation {
+                    None => material,
+                    Some(w) => material + w[i].max(0.0) / (TAU * hz(m)),
+                },
+                pressure_per_modal_velocity: *p,
+            }
         })
         .collect();
     out.extend((0..rigid).map(|_| ModalAcousticMode {

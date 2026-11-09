@@ -170,7 +170,7 @@ fn observer_cost(card: &Card) -> Result<(), Error> {
     );
     let band = observer::band(card, medium, &surface, &shapes, &s, &transfers)?;
     observer::report_band(card, &band);
-    let modes = render::bar_modes(&s.modes, None, &transfers.pressure, s.rigid.len());
+    let modes = render::bar_modes(&s.modes, None, None, &transfers.pressure, s.rigid.len());
     let direct = render::DirectBody::new(card, modes)?;
     let own_hz: Vec<f64> = s.modes.iter().map(bar::hz).collect();
     observer::report_fits(card, direct.model(), &band, &transfers.pressure, &own_hz);
@@ -250,8 +250,18 @@ fn run(card: &Card, out: &Path) -> Result<(), Error> {
     // An outside card's refusal is its Debug text, which quotes its fields: escaped for the JSON string
     // (backslash first, then the double quote) the row still parses. `inside` has neither and is unchanged.
     let validity = validity.replace('\\', "\\\\").replace('"', "\\\"");
+    // Under `bar_self_radiation on`: every band mode's W in 1/s, negatives included, and the floor they set
+    // (the largest negative |W|; a positive W of that size is no better resolved). Absent, the record is
+    // as before, byte for byte.
+    let self_radiation = if card.bar_self_radiation {
+        let w = &r.transfers.self_radiation;
+        let floor = w.iter().fold(0.0_f64, |m, &x| m.max(-x));
+        format!(",\"bar_self_radiation_per_s\":{w:?},\"bar_self_radiation_floor_per_s\":{floor}")
+    } else {
+        String::new()
+    };
     let record = format!(
-        "{{\"suite\":\"bar-strike\",\"case\":\"strike-render\",\"bar\":\"{}\",\"mallet_mass_kg\":{},\"mallet_speed_m_s\":{},\"k_n_per_m_alpha\":{},\"alpha\":{},\"contact_time_s\":{},\"peak_force_n\":{},\"contact_card_validity\":\"{validity}\",\"strike_x_m\":{},\"loss\":\"{}\",\"rms_pa\":{rms},\"peak_pa\":{peak},\"clipped_samples\":{clipped},\"wav_blake3\":\"{hash}\",\"sample_rate_hz\":{},\"full_scale_pa\":{},\"resonator_isolated_hz\":{resonator},\"supports\":false,\"mallet_shaft\":false,\"acceptance\":false,\"elapsed_s\":{}}}",
+        "{{\"suite\":\"bar-strike\",\"case\":\"strike-render\",\"bar\":\"{}\",\"mallet_mass_kg\":{},\"mallet_speed_m_s\":{},\"k_n_per_m_alpha\":{},\"alpha\":{},\"contact_time_s\":{},\"peak_force_n\":{},\"contact_card_validity\":\"{validity}\",\"strike_x_m\":{},\"loss\":\"{}\"{self_radiation},\"rms_pa\":{rms},\"peak_pa\":{peak},\"clipped_samples\":{clipped},\"wav_blake3\":\"{hash}\",\"sample_rate_hz\":{},\"full_scale_pa\":{},\"resonator_isolated_hz\":{resonator},\"supports\":false,\"mallet_shaft\":false,\"acceptance\":false,\"elapsed_s\":{}}}",
         card.name,
         mallet.mass_kg,
         mallet.speed_m_s,
@@ -361,17 +371,20 @@ pub fn strike(card: &Card, s: &Structure) -> Result<Strike, String> {
         .map_err(|e| format!("gas record: {e:?}"))?;
     let medium = Medium::from(&gas);
     let read = |p: &Path| std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()));
+    let loss = card
+        .loss_path
+        .as_ref()
+        .map(|p| read(p).and_then(|text| render::Loss::read(&text)))
+        .transpose()?;
+    if card.bar_self_radiation {
+        render::self_radiation_loss(loss.as_ref())?;
+    }
 
     let started = Instant::now();
     let (surface, shapes) = radiation::surface_and_shapes(card, &s.mesh, &s.modes)?;
     let transfers = radiation::modal_transfers(card, medium, &surface, &shapes, &s.modes)?;
     let radiation_wall_s = started.elapsed().as_secs_f64();
 
-    let loss = card
-        .loss_path
-        .as_ref()
-        .map(|p| read(p).and_then(|text| render::Loss::read(&text)))
-        .transpose()?;
     let contact =
         ContactLawCard::parse(&card.mallet_contact_pack, &read(&card.mallet_contact_path)?)
             .map_err(|e| format!("mallet contact card: {e:?}"))?;
@@ -387,7 +400,21 @@ pub fn strike(card: &Card, s: &Structure) -> Result<Strike, String> {
     let node = bar::strike_node(card, &s.mesh);
     let mut projection: Vec<f64> = s.modes.iter().map(|m| -m.phi[3 * node + 2]).collect();
     projection.extend_from_slice(&s.rigid);
-    let modes = render::bar_modes(&s.modes, loss.as_ref(), &transfers.pressure, s.rigid.len());
+    let self_radiation = if card.bar_self_radiation {
+        if !transfers.self_radiation.iter().all(|w| w.is_finite()) {
+            return Err("non-finite bar self-radiation".into());
+        }
+        Some(transfers.self_radiation.as_slice())
+    } else {
+        None
+    };
+    let modes = render::bar_modes(
+        &s.modes,
+        loss.as_ref(),
+        self_radiation,
+        &transfers.pressure,
+        s.rigid.len(),
+    );
 
     let mut started = Instant::now();
     let mut resonator_isolated_hz = None;

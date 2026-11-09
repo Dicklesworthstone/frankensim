@@ -104,6 +104,10 @@ pub struct Card {
     /// The optional rows `observer broadband`, `observer_fit_order` and `observer_held_out_budget`: the
     /// receiver is the engine's broadband modal observer. Absent, the narrow-band receiver, as ever.
     pub observer: Option<ObserverRow>,
+    /// The optional row `bar_self_radiation on`: each band mode's own radiated power, from the receiver's
+    /// Burton-Miller solve, joins its loss as max(W, 0) (`render::bar_modes`). Its loss row must be
+    /// measured in vacuum (`render::self_radiation_loss`). Absent, off, as every card before it.
+    pub bar_self_radiation: bool,
     /// Printed modal frequencies of the same bar, for the report only (never used to build the bar).
     pub reference_vertical_hz: Vec<f64>,
     pub resonator: Option<Resonator>,
@@ -360,6 +364,11 @@ impl Card {
                     })
                 }
                 Ok(_) => return Err("observer must be `broadband`".into()),
+            },
+            bar_self_radiation: match rows.get("bar_self_radiation") {
+                Err(_) => false,
+                Ok([on]) if on == "on" => true,
+                Ok(_) => return Err("bar_self_radiation must be `on`".into()),
             },
             reference_vertical_hz: rows
                 .get("reference_vertical_hz")

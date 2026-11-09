@@ -141,6 +141,12 @@ pub fn surface_and_fields_at(
 pub struct Transfers {
     /// Receiver pressure per unit generalized modal velocity, exp(-iwt), Pa s/(m sqrt(kg)).
     pub pressure: Vec<C64>,
+    /// Each mode's own radiated power per unit generalized modal velocity, the same solve's
+    /// `radiated_power` (1/2 Re SUM p conj(v) A over the bar's panels). With mass-normalized shapes it is the
+    /// mode's amplitude decay rate from radiation, in 1/s. Below the BEM's resolution a weak radiator comes
+    /// out negative (about -5e-3/s on a 323 mm aluminium bar's fundamental, whose true value is near 1e-6/s),
+    /// so `render::bar_modes` adds max(W, 0) and only under the card's `bar_self_radiation on`.
+    pub self_radiation: Vec<f64>,
     pub panels: usize,
     /// Smallest panels-per-wavelength over the modes (the BEM refuses below its floor).
     pub min_panels_per_wavelength: f64,
@@ -155,7 +161,7 @@ pub fn modal_transfers(
     modes: &[ModePair],
 ) -> Result<Transfers, String> {
     let next = AtomicUsize::new(0);
-    let results: Vec<Mutex<Option<Result<(C64, f64), String>>>> =
+    let results: Vec<Mutex<Option<Result<(C64, f64, f64), String>>>> =
         modes.iter().map(|_| Mutex::new(None)).collect();
     let threads = std::thread::available_parallelism()
         .map_or(4, |n| n.get())
@@ -179,7 +185,7 @@ pub fn modal_transfers(
                     );
                     let out = match solved {
                         Ok(s) => exterior_pressure_at_points(surface, &s[0], medium, &[card.receiver_m])
-                            .map(|p| (p[0], s[0].panels_per_wavelength))
+                            .map(|p| (p[0], s[0].panels_per_wavelength, s[0].radiated_power))
                             .map_err(|e| format!("receiver pressure at {f:.1} Hz: {e:?}")),
                         Err(HelmholtzError::TooCoarse { .. }) => Err(format!(
                             "BEM surface is too coarse at {f:.1} Hz: lower band_hz or refine the mesh"
@@ -194,6 +200,7 @@ pub fn modal_transfers(
         }
     });
     let mut pressure = Vec::with_capacity(modes.len());
+    let mut self_radiation = Vec::with_capacity(modes.len());
     let mut min_ppw = f64::INFINITY;
     for slot in results {
         let solved = slot
@@ -205,9 +212,11 @@ pub fn modal_transfers(
         }
         min_ppw = min_ppw.min(solved.1);
         pressure.push(solved.0);
+        self_radiation.push(solved.2);
     }
     Ok(Transfers {
         pressure,
+        self_radiation,
         panels: surface.centroids().len(),
         min_panels_per_wavelength: min_ppw,
     })

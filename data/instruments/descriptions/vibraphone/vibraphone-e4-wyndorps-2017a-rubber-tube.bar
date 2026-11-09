@@ -1,0 +1,44 @@
+frankensim.bar-card.v1
+# Vibraphone E4, pilot: a bar of a builder's F3-F6 vibraphone design in EN AW-2017A aluminium over the builder's as-built resonator tube, its undercut solved in the engine to the tuning rule, a marimba mallet as a declared stand-in. The bar's own radiation damping joins its loss (bar_self_radiation on), over the near-vacuum loss row.
+name	vibraphone-e4-wyndorps-2017a-rubber-tube
+source	Bar outline: the Wyndorps DIY vibraphone pages, www.wyndorps.de, page "Macro Geometrie", bar-set drawing (media/images/plattensatz.jpg, read twice at two image sizes, both reads agree): E4 bar 303 mm long and 50.8 mm (2 in) wide, the drawing's labels in whole millimetres (read uncertainty 0.5 mm). Builder design data for an instrument on an M55-type frame with bars cut to the American lengths of an F3-F6 set, not a maker's spec sheet. Thickness 12.0 mm on every bar, the low end of the builder's measured 12.0 to 12.33 mm (no per-bar value printed). Alloy EN AW-2017A as the builder names it: E 72500 MPa, G 27200 MPa, nu 0.33 and density 2790 kg/m3 from the Euralliage 2017A sheet, through the pack named below. Tube: the builder's resonator-unit CAD (media/files/resonanzrohreinheit.zip, PETG parts and parts list, "M55 resonance tube unit"), part E4-lower, 241 mm long.
+note	NOT in the source: the undercut. No undercut is printed, so the arc is solved in the engine, modes only, to put f1 at equal temperament on A4 = 442 Hz with f2 = 4 f1, the tuning rule a maker uses (442 Hz is the tuning the maker prints for its M55-type vibraphones, "Tuning: 442 Hertz" on the Musser M55 page: a current specification, the recording's instrument and year are not named, and when any such instrument moved from 440 is not verified); the solve starts from the solved 4:1 cut of the marimba E4 card, its half reach and middle thickness carried as fractions of that bar's length and thickness. The shape comes from the tuning rule, not from a measured bar. The solved cut: half reach 74.794 mm, middle 5.491 mm, giving f1 331.126 Hz (+0.000 c from 331.126 Hz), f2/f1 4.00001 and f3/f1 8.97830. NOT in the source either: the tube's bore and air column, both INFERRED from the CAD part: radius 26.5 mm, the part's second-largest cylinder (its outer radius less a 1.5 mm wall), and air column 241 mm, the length of the lower part. The tube is taken as built, so its stop is not re-solved; alone, its first resonance is 332.6 Hz against the note's 331.1 Hz. The bar-to-tube gap is not printed (searched: US 5977465, US 2008/0105105, US 3138986, a 2022 conference paper on bar-resonator coupling, the builder's pages), so it is 12.7 mm, the xylophone cards' stand-in, the 1/2 in end of Flynt's printed 1/4 to 1/2 in, below the plane of the uncut lower face. Mallet: the marimba cards' rubber-mallet rows (Chaigne and Doutaut 1997, rubber on padouk), a declared stand-in on aluminium; vibraphone mallets are usually cord- or yarn-wrapped, and the recording's mallet is unstated. Strike fraction, receiver, band, windows and mesh carried from the marimba card of the same note. Fan valves: not modelled; the recording's notes carry no envelope modulation at one rate common to all of them, so its motor was off. Not the recording's instrument: Iowa's vibraphone (sustain mf, C4-B4) names no model and its sets run C3 to F6, while this bar and tube come from a builder's F3-F6 design. The tube is a closed-open column of four odd modes, every one under this card's band that the open-end law takes (ka under 1.5), coupled through the bar's own boundary elements at each tube mode's frequency; its wall doesn't scatter, the mouth's sound doesn't reflect off the bar on its way out, and there are no neighbouring bars or frame. Its mouth, 53 mm across inside, is wider than this bar. Loss: the loss factor 8.340e-5 on every bar mode, Howell's clean 2024-T4 aluminium beam 56 at 5.6e-4 atm (NASA TM X-2852, 1974, Table III), NOT a 2017A bar and NOT a vibraphone bar, measured with the air pumped out. The bar's own radiation comes back from the engine (bar_self_radiation on): each band mode's radiated power from the same Burton-Miller solve that gives the receiver, W per unit modal velocity, its amplitude decay rate in 1/s, added to the loss as max(W, 0). A negative W is below the boundary-element resolution and adds nothing; the most negative W on this bar sets the floor, and the render's record prints every W and the floor. The near-vacuum loss alone decays f1 at 0.75 dB/s (T60 80 s). Viscous air loss is declared out, not modelled. The recording's f1, with its tube on, decays at 2.71 to 3.07 dB/s (T60 20 to 22 s, 2 strikes). Not modelled: the support cords and felts, and the mallet's contact loss; nothing is adjusted to close the gap.
+length_m	0.303
+width_m	0.0508
+thickness_m	0.012
+profile	arc
+profile_arc	0.4329598094185091	0.005490714317059884	0
+wood_density	data/matdb/seed-v1/aluminium-en-aw-2017a-euralliage/properties.tsv
+wood_youngs_longitudinal	data/matdb/seed-v1/aluminium-en-aw-2017a-euralliage/properties.tsv
+wood_ratios	data/matdb/seed-v1/aluminium-en-aw-2017a-euralliage/properties.tsv
+mesh_counts	56	6	3
+mesh_rungs	1
+band_hz	4480.0
+windows	10
+strike_fraction	0.5426621160409557
+receiver_m	0.09082582725636706	0.2	1
+bem_stride	1
+gas	crates/fs-couple/examples/dry-air-20c.gas
+loss	data/instruments/descriptions/bars/aluminium-loss-howell1974-2024t4-vacuum.tsv
+# SELF-RADIATION: bar_self_radiation on adds each band mode's own radiated power per unit modal velocity, W from the receiver's Burton-Miller solve, as max(W, 0) to the loss row's damping; the loss row is the near-vacuum one, so the air counts once. The same term as the C4 tube page, whose tube coupling the engine refused without it.
+bar_self_radiation	on
+mallet_contact_pack	contact-rubber-mallet-on-padouk-bar-chaigne-doutaut1997
+mallet_contact	data/matdb/seed-v1/contact-rubber-mallet-on-padouk-bar-chaigne-doutaut1997/contact.tsv
+mallet_properties	data/matdb/seed-v1/mallet-rubber-padouk-bar-chaigne-doutaut1997/properties.tsv
+mallet_speed_m_s	1.0
+duration_s	4.0
+substeps	32
+rate_hz	48000
+full_scale_pa	2.0
+# MODE CERTIFICATE: maximum_relative_halfwidth 1e-6. At the earlier card's 1e-7 the seventh scan of the engine cut solve (reach 74.794 mm, middle 5.491 mm), after six scans that certified at 1e-7, was refused in window 1 at all four window counts, on the mode at 331.126 Hz, f1 on that cut: relative half-widths 8.78e-7, 3.58e-6, 2.17e-7 and 1.25e-6 at 10, 11, 12 and 13 windows (FS-MODAL-HALFWIDTH-EXCEEDED), the worst 3.58e-6. A relative half-width is the eigenvalue's, so at f1 the worst is 5.9e-4 Hz, 0.0031 c, and the 1e-6 row bounds it at 1.7e-4 Hz, 0.00087 c: a certificate tolerance more than two orders of magnitude below audibility. It sets no sound. 1e-6 is the next decade, as on the C4 card.
+maximum_relative_halfwidth	1e-6
+tube	closed_open
+tube_radius_m	0.0265
+tube_air_length_m	0.241000
+tube_gap_m	0.0127
+tube_modes	4
+# RECEIVER: the broadband observer (e6313e19d): one delay and an order-16 rational fit of the boundary-element transfer from each bar mode to the receiver, checked on held-out frequencies against a 5 % budget. It hears the bar during the mallet's contact and with its travel time; the narrow-band law it replaces passed the contact force as a pulse.
+observer	broadband
+observer_fit_order	16
+observer_held_out_budget	0.05
+observer_rigid_rows	on
