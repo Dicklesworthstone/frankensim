@@ -138,6 +138,20 @@ impl FrozenGas {
     ) -> Result<Conserved, Error> {
         Ok(self.state_at(density, velocity, pressure)?.0)
     }
+    /// Resolve the original caloric primitive at a known density and pressure.
+    ///
+    /// Velocity is zero; callers that already hold a primitive trace can use
+    /// its source-owned sound speed without a conservative-state construction
+    /// or caloric inversion. The same density, temperature-domain and positive
+    /// heat-capacity admission as the native Riemann traces applies.
+    pub fn primitive_from_density_pressure(
+        &self,
+        density: f64,
+        pressure: f64,
+    ) -> Result<Primitive, Error> {
+        self.from_rho_u_p(density, 0.0, pressure)
+    }
+
     pub(super) fn state_at(
         &self,
         density: f64,
@@ -242,9 +256,7 @@ impl FrozenGas {
         if !positive(pressure) {
             return Err(Error::Invalid("unrepresentable EOS pressure"));
         }
-        let p = self
-            .source
-            .evaluate_heat_capacities(Temperature::new(t))?;
+        let p = self.source.evaluate_heat_capacities(Temperature::new(t))?;
         let gamma = p.mass_specific_cp().value() / p.mass_specific_cv().value();
         let a2 = gamma * self.gas_constant * t;
         if !positive(p.mass_specific_cv().value()) || !positive(a2) {
@@ -302,9 +314,7 @@ impl FrozenGas {
             } else {
                 hi = t;
             }
-            let p = self
-                .source
-                .evaluate_heat_capacities(Temperature::new(t))?;
+            let p = self.source.evaluate_heat_capacities(Temperature::new(t))?;
             let cv = p.mass_specific_cv().value();
             if !positive(cv) {
                 return Err(Error::CaloricPath("nonpositive trial Cv"));

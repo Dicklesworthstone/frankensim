@@ -16,6 +16,9 @@ pub type ForceControl3d = crate::compressible::body_force::ForceControl;
 /// Accepted three-dimensional body impulse and mechanical work.
 pub type ForceChange3d = crate::compressible::body_force::ForceChange<3>;
 
+/// One borrowed source transaction, shared by ALE and its split consumers.
+pub(super) type Context<'a, 'b> = (BodyForce3d<'a>, ForceControl3d, &'b mut ForcingWorkspace3d);
+
 /// Reused original-state buffer for symmetric forcing; no per-attempt allocation.
 /// Numerical capacity is 40 bytes/cell, excluding fixed metadata/allocator overhead.
 pub struct ForcingWorkspace3d {
@@ -60,6 +63,127 @@ impl Euler3d {
         }
         Ok(work)
     }
+}
+
+/// Acoustic admission uses laboratory Mach and face-relative transport speeds.
+pub(super) fn moving_acoustic_rate(
+    primitive: Primitive,
+    grid: &CartesianGrid,
+    cell: usize,
+    motion: MeshMotion,
+) -> Result<f64, Error> {
+    let coordinate = grid.coordinates(cell);
+    let rate: f64 = (0..3)
+        .map(|axis| {
+            let lower = motion.velocity(grid, axis, coordinate[axis]);
+            let upper = motion.velocity(grid, axis, coordinate[axis] + 1);
+            ((primitive.velocity[axis] - lower)
+                .abs()
+                .max((primitive.velocity[axis] - upper).abs())
+                + primitive.sound_speed)
+                / grid.spacing[axis]
+        })
+        .sum();
+    if !rate.is_finite() {
+        return Err(Error::Invalid("forced moving relative CFL overflow"));
+    }
+    Ok(rate)
+}
+
+pub(super) fn admit_moving_field(
+    gas: &FrozenGas,
+    grid: &CartesianGrid,
+    states: &[State],
+    controls: ForceControl3d,
+    motion: MeshMotion,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, Error> {
+    let mut rate = 0.0_f64;
+    for (cell, state) in states.iter().enumerate() {
+        let primitive = state.primitive(gas, &mut *cancelled)?;
+        controls.admit_velocity::<Error>(primitive.velocity, primitive.sound_speed)?;
+        rate = rate.max(moving_acoustic_rate(primitive, grid, cell, motion)?);
+    }
+    Ok(rate)
+}
+
+/// Native source half-kicks surround the original extensive moving-volume RK.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn attempt_moving(
+    gas: &FrozenGas,
+    original_grid: &CartesianGrid,
+    next_grid: &CartesianGrid,
+    boundaries: Boundaries3d,
+    motion: MeshMotion,
+    states: &[State],
+    work: &mut Workspace,
+    forcing_work: &mut ForcingWorkspace3d,
+    force: BodyForce3d<'_>,
+    controls: ForceControl3d,
+    dt: f64,
+    cfl: f64,
+    reconstruction: Reconstruction,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(StageStats, ForceChange3d), Error> {
+    for (cell, (source, target)) in states.iter().zip(&mut forcing_work.original).enumerate() {
+        if cell % 64 == 0 {
+            poll(cancelled)?;
+        }
+        *target = *source;
+    }
+    let (first, _) = kick_field(
+        gas,
+        original_grid,
+        &mut forcing_work.original,
+        force,
+        controls,
+        0.5 * dt,
+        false,
+        cancelled,
+    )?;
+    // The moving spatial sweep admits every first-kicked and intermediate
+    // cell, plus reconstructed traces, without a second caloric inversion.
+    let mut stats = moving::attempt_with_control(
+        gas,
+        original_grid,
+        next_grid,
+        boundaries,
+        motion,
+        &forcing_work.original,
+        work,
+        dt,
+        cfl,
+        reconstruction,
+        Some(controls),
+        cancelled,
+    )?;
+    let (second, _) = kick_field(
+        gas,
+        next_grid,
+        &mut work.candidate,
+        force,
+        controls,
+        0.5 * dt,
+        false,
+        cancelled,
+    )?;
+    let endpoint_rate =
+        admit_moving_field(gas, next_grid, &work.candidate, controls, motion, cancelled)?;
+    check_cfl::<Error>(endpoint_rate * dt, cfl)?;
+    stats.rate = stats.rate.max(endpoint_rate);
+    let source = ForceChange3d {
+        impulse: std::array::from_fn(|axis| first.impulse[axis] + second.impulse[axis]),
+        work: first.work + second.work,
+    };
+    if !source
+        .impulse
+        .into_iter()
+        .chain([source.work])
+        .all(f64::is_finite)
+    {
+        return Err(Error::Invalid("unrepresentable moving body-force source"));
+    }
+    Ok((stats, source))
 }
 
 #[allow(clippy::too_many_arguments)]

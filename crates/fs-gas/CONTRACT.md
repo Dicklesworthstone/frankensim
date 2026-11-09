@@ -9895,3 +9895,16 @@ exact rest, pressure crossing, work exhaustion, final cancellation, and fresh
 receiving entropy plus prepared-path replacement refusal.
 
 Six pair regressions and four native caloric-anchor regressions were authored and source-reviewed. They had not been compiled or executed at publication; focused native validation follows executor recovery.
+
+
+### Source-owned primitives for mechanical trace admission
+
+`FrozenGas::primitive_from_density_pressure` exposes the original frozen EOS
+primitive at a caller-supplied density and pressure, with zero velocity. It
+shares the native Riemann trace's density, temperature-domain and positive
+heat-capacity admission, including its source-owned sound speed. A spatial
+consumer that already holds a reconstructed velocity can therefore admit its
+physical Mach number without constructing conservative energy and invoking a
+caloric inversion. This adds no equation of state, approximate heat capacity,
+normalization, or retained numerical state. The moving forced spatial tests in
+`fs-flux` exercise the accessor through actual reconstructed-face admission.

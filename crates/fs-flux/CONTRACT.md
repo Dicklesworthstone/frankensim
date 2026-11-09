@@ -11749,3 +11749,29 @@ and timed-stage implementations with original source kernels. Molecular and
 reactive orchestration, material-wall wrappers and unrelated dependency owners
 were not compiled or executed; prepared split-copy behavior is verified at its
 shared storage seam. This is not a full workspace Cargo/DSR gate.
+
+
+### Held body forcing on moving frozen-gas volumes
+
+`spatial::Euler3d::step_moving_with_forcing` surrounds conservative ALE transport
+with the original mechanical source half-kicks. Acceleration acts on actual
+stage mass; force density acts on the actual old/new physical volume. The
+native source law supplies all three impulses and represented kinetic work,
+including its original Coriolis behavior, without a separate thermal source.
+`StepReport.source_change` keeps this exchange separate from boundary transfer.
+
+Forced accepted, kicked, RK and reconstructed physical states obey the authored
+laboratory Mach bound. Acoustic transport uses actual mesh-relative waves and
+admits the final kicked endpoint. The reconstructed trace consumes source-owned
+sound speed through `FrozenGas::primitive_from_density_pressure`, without a
+conservative energy construction and caloric inversion. Prepared force and RK
+buffers are reused; refusals restart the complete K/2--ALE--K/2 proposal.
+Cells, geometry, clock, reports and loads publish after the final checkpoint.
+Zero-force and zero-motion cases delegate to their existing native entries.
+
+Cellwise coefficients are held in original cell order through each attempted
+interval, not resampled at moving coordinates. Existing one-axis affine
+geometry and boundary admission remain authoritative. Five native tests cover
+exact vector impulse/work, boost/relative-CFL behavior, actual-volume force
+quadrature on all axes, zero identities, reconstructed/final-kick Mach refusal,
+and middle/final cancellation with exact replay.
