@@ -5,6 +5,8 @@ mod sdirk;
 mod ambient_sdirk;
 #[path = "enclosure/scanning_sdirk.rs"]
 mod scanning_sdirk;
+#[path = "enclosure/sdirk_parameters.rs"]
+mod sdirk_parameters;
 use super::*;
 use fs_conduction::radiation::OpenDiffuseEnclosure;
 use fs_evidence::ValidityDomain;

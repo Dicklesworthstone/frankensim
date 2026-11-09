@@ -5247,8 +5247,28 @@ slope. The retained stage linearizations can be swept backward over a bounded
 caller-owned trajectory without retaining Newton or Krylov iteration history.
 Each transpose retains its independently recomputed residual and work count.
 
+`pullback_with_parameters` and `pullback_stages_with_parameters` retain those
+same two thermal transposes while exposing original physical controls at each
+stage. Whole-law contact resistance multipliers use the retained native fixed
+or evolving interface operator. Fixed gray/spectral radiation and material
+ambient/enclosure emissivity controls keep their original scalar, curve or
+surface coordinates and source identities. Each stage contracts a*lambda on
+its own free rows, reversing that sign for outward radiation; prescribed-row
+multipliers never enter physical heat controls. The native reflected-radiation
+contraction is reused without another thermal solve or extra tableau factor.
+Contact trace work and combined radiation workspace have separate explicit
+allowances. Independent stage owners stay separate; shared declarations may
+sum their corresponding stage contributions without another time weight.
+
+`tests/material_ambient_radiation/adjoint/sdirk_parameters.rs` and
+`tests/phase_contact/history/enclosure/sdirk_parameters.rs` exercise independent
+latent-stage equations, original emissivity ordinates and reservoirs, changing
+prescribed masks, coupled contact/reflection, energy invariance, retained fixed
+interfaces and bounded refusal. These regressions are authored but remain
+unexecuted under the unchanged native dependency build blocker.
+
 These are derivatives of the admitted discrete solve on a fixed time grid,
-fixed reference geometry and fixed material/source models. Chart or material
+fixed reference geometry and retained material/source selection. Chart or material
 corners require the existing smoothness admission; the method does not invent
 a derivative at a refused kink. Automatic history tapes, differentiation of
 adaptive/event decisions, geometry and caloric-chart parameter gradients are
