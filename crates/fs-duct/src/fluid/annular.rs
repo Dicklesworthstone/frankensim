@@ -32,6 +32,8 @@ use fs_math::{c64::C64, dd::Dd, det};
 
 /// Original radial velocity/thermal fields and local irreversible acoustic heat.
 pub mod field;
+/// Coherent finite-segment fields and exact axial integrals of radial heat.
+pub mod excitation;
 /// Molecular heat storage solved together with the original annular wall diffusion.
 pub mod molecular;
 

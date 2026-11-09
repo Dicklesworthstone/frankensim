@@ -209,7 +209,7 @@ impl<'g, 'm, M: ThermoviscousFluid + ?Sized> PreparedAnnularFields<'g, 'm, M> {
         &self.wave
     }
 
-    fn cell_loss_roots(&self, cell: usize) -> Result<[C64; 2], DuctError> {
+    pub(super) fn cell_loss_roots(&self, cell: usize) -> Result<[C64; 2], DuctError> {
         let stiffness = self
             .section
             .stiffness_edges
@@ -231,6 +231,10 @@ impl<'g, 'm, M: ThermoviscousFluid + ?Sized> PreparedAnnularFields<'g, 'm, M> {
             return Err(bad("annular radial cell heat is unrepresentable"));
         }
         Ok(coefficients)
+    }
+
+    pub(super) fn total_loss_roots(&self) -> [C64; 2] {
+        self.total_loss_roots.map(C64::from_re)
     }
 
     /// Actual ring cross-sectional area [m²], retaining both physical radii.

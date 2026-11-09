@@ -52,28 +52,10 @@ pub struct PorousLayer<'a> {
     two_port: TwoPort,
 }
 
-/// Coherent, cycle-averaged power of a porous slab under two-sided excitation.
-/// Pressure phasors are peak amplitudes, so power contains the factor 1/2.
-/// Right-port volume flow points INTO the layer, opposite to the axial flow.
-#[derive(Debug, Clone, Copy)]
-pub struct PorousLayerPower {
-    /// Outgoing pressure-wave amplitudes at the left and right faces [Pa].
-    pub outgoing_pressure_pa: [C64; 2],
-    /// Total pressure at each face [Pa], including both incident fields.
-    pub pressure_pa: [C64; 2],
-    /// Volume flow into each face [m3/s], on the full exposed area.
-    pub inward_volume_flow_m3_s: [C64; 2],
-    /// Total power in the two prescribed incoming waves [W].
-    pub incident_power_w: f64,
-    /// Total power in the two coherently combined outgoing waves [W].
-    pub outgoing_power_w: f64,
-    /// Net acoustic power delivered to the layer [W]. This is the signed
-    /// incoming-minus-outgoing balance, retaining floating-point roundoff;
-    /// it is never clipped or confused with transmission to the other face.
-    /// The rigid-frame JCA(L) model dissipates it through pore viscosity and
-    /// heat exchange; this result does not partition heat between constituents.
-    pub absorbed_power_w: f64,
-}
+/// Original coherent boundary account, shared with every native two-port.
+/// The rigid-frame material dissipates its net work through pore viscosity and
+/// heat exchange; this account does not partition heat between constituents.
+pub use crate::compose::TwoPortPower as PorousLayerPower;
 
 impl<'a> PorousLayer<'a> {
     /// Prepare one bounded JCA(L) material query and a stable propagation block.
@@ -250,47 +232,7 @@ fn power_for_port(
     two_port: TwoPort,
     incident_pressure_pa: [C64; 2],
 ) -> Result<PorousLayerPower, DuctError> {
-    if !incident_pressure_pa.into_iter().all(finite) {
-        return Err(bad("porous layer incident pressure must be finite"));
-    }
-    let s = two_port.scattering;
-    let incident = incident_pressure_pa;
-    let outgoing = [
-        s[0] * incident[0] + s[1] * incident[1],
-        s[2] * incident[0] + s[3] * incident[1],
-    ];
-    let reference = two_port.reference_impedance;
-    let pressure = std::array::from_fn(|i| incident[i] + outgoing[i]);
-    let flow = std::array::from_fn(|i| (incident[i] - outgoing[i]).scale(1.0 / reference));
-    let amplitude_scale = 1.0 / reference.sqrt();
-    let incident_power = 0.5
-        * incident
-            .into_iter()
-            .map(|p| p.scale(amplitude_scale).norm_sq())
-            .sum::<f64>();
-    let outgoing_power = 0.5
-        * outgoing
-            .into_iter()
-            .map(|p| p.scale(amplitude_scale).norm_sq())
-            .sum::<f64>();
-    let absorbed = incident_power - outgoing_power;
-    if !outgoing.into_iter().all(finite)
-        || !pressure.into_iter().all(finite)
-        || !flow.into_iter().all(finite)
-        || !incident_power.is_finite()
-        || !outgoing_power.is_finite()
-        || !absorbed.is_finite()
-    {
-        return Err(bad("porous layer field or power is unrepresentable"));
-    }
-    Ok(PorousLayerPower {
-        outgoing_pressure_pa: outgoing,
-        pressure_pa: pressure,
-        inward_volume_flow_m3_s: flow,
-        incident_power_w: incident_power,
-        outgoing_power_w: outgoing_power,
-        absorbed_power_w: absorbed,
-    })
+    two_port.power_for_incident_pressure(incident_pressure_pa)
 }
 
 #[cfg(test)]

@@ -23,6 +23,9 @@ use fs_phs::WallPin;
 use crate::WallModel;
 use crate::hole_lengths::HoleLengths;
 
+mod excitation;
+pub use excitation::TwoPortPower;
+
 pub const MAX_COMPOSITION_BLOCKS: usize = 131_072;
 pub const MAX_COMPOSITION_MODES: usize = 32;
 pub const DEFAULT_MAX_CONDITION: f64 = 1e12;

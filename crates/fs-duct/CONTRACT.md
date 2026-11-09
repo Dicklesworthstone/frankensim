@@ -68,6 +68,34 @@ limits and h refinement, physical volume-flow recovery, both heat mechanisms
 against the local coherent-wave power gradient, Cp=Cv, source retention,
 one-query reuse, invalid fields, budget admission and cancellation.
 
+### Finite coherent annular fields and thermal-cell integrals
+
+`PreparedAnnularFields::prepare_excitation` connects these retained radial
+fields to the original stable finite-length two-port. Both incident pressure
+waves combine coherently; the actual pressure, volume flow, local velocity and
+temperature retain their standing-wave pattern. Forward and backward waves
+are anchored at opposite faces, so opaque passages use only decaying
+exponentials. The shared `compose::TwoPortPower` boundary account also remains
+the original porous-layer/stack account through its `PorousLayerPower` name.
+
+`dissipation_between` integrates the original radial shear and heat-conduction
+forms over an axial interval; `cell_dissipation_between` restricts that volume
+to one original radial ring. The shared positive two-wave integral retains
+interference and the cubic heat near pressure/velocity nodes in very short
+cells. Each query performs constant work without allocations, material
+queries, acoustic solves or axial quadrature. Radial and axial partitions sum
+to the original whole-segment heat. These watts already include the original
+volume measure and peak-to-mean scaling and can feed finite thermal cells;
+the signed boundary-power balance is an independent diagnostic, not a heat
+source. No wall/fluid heat partition or temperature feedback is inferred.
+
+The original fully developed, plane-pressure and radial-resolution envelope
+still applies. `tests/annular_excitation.rs` compares physical radial viscous
+and thermal gradients with an independent axial quadrature, checks original
+face fields and partitioned power, resolves subwavelength node heat, covers
+opaque two-sided propagation and reversal, and verifies one-query source
+reuse, zero thermal coupling and physical-domain refusals.
+
 ## Purpose and layer
 
 Layer L3 (FLUX). 1D viscothermal duct/horn acoustics
