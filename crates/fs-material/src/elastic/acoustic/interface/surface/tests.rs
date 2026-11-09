@@ -317,7 +317,9 @@ fn g1_passive_support_matches_normal_scalar_reflection_and_loss() {
         (C64::ZERO, C64::ZERO),
     ] {
         let prepared = IsotropicElasticSurface::new(&state, support(normal, tangent))
-            .unwrap().prepare_incidence(ElasticMode::P, 1.0).unwrap();
+            .unwrap()
+            .prepare_incidence(ElasticMode::P, 1.0)
+            .unwrap();
         for (index, mode) in MODES.into_iter().enumerate() {
             let z = if index == 0 { normal } else { tangent };
             let reference = if index == 0 { zp } else { zs };
@@ -325,7 +327,11 @@ fn g1_passive_support_matches_normal_scalar_reflection_and_loss() {
             let modal = if index == 0 { -cartesian } else { cartesian };
             let coefficients = prepared.velocity_coefficients(mode).unwrap();
             for (output, coefficient) in coefficients.into_iter().enumerate() {
-                close(coefficient, if output == index { modal } else { C64::ZERO }, 3e-14);
+                close(
+                    coefficient,
+                    if output == index { modal } else { C64::ZERO },
+                    3e-14,
+                );
             }
             let mut incoming = [C64::ZERO; 3];
             incoming[index] = C64::new(0.002, -0.001);
@@ -347,14 +353,27 @@ fn g1_oblique_support_sh_reflection_uses_the_normal_wave_impedance() {
     let z = C64::new(1.2e6, -4.0e6);
     for cosine in [1.0, 0.9, 0.5, 0.01] {
         let prepared = IsotropicElasticSurface::new(&state, support(C64::from_re(1e7), z))
-            .unwrap().prepare_incidence(ElasticMode::Sh, cosine).unwrap();
+            .unwrap()
+            .prepare_incidence(ElasticMode::Sh, cosine)
+            .unwrap();
         let reference = C64::from_re(2500.0 * 2000.0 * cosine);
         let expected = (reference - z) / (reference + z);
-        close(prepared.velocity_coefficients(ElasticMode::Sh).unwrap()[2], expected, 3e-14);
-        let response = prepared.drive([C64::ZERO, C64::ZERO, C64::from_re(0.003)]).unwrap();
+        close(
+            prepared.velocity_coefficients(ElasticMode::Sh).unwrap()[2],
+            expected,
+            3e-14,
+        );
+        let response = prepared
+            .drive([C64::ZERO, C64::ZERO, C64::from_re(0.003)])
+            .unwrap();
         assert!(response.absorbed_normal_power_w_m2 > 0.0);
-        assert!((response.total_incoming_power_w_m2 - response.total_reflected_power_w_m2
-            - response.absorbed_normal_power_w_m2).abs() < 2e-13);
+        assert!(
+            (response.total_incoming_power_w_m2
+                - response.total_reflected_power_w_m2
+                - response.absorbed_normal_power_w_m2)
+                .abs()
+                < 2e-13
+        );
     }
 }
 
@@ -369,18 +388,30 @@ fn g0_coherent_support_reflection_closes_work_across_critical_angles() {
         for mode in [ElasticMode::P, ElasticMode::Sv] {
             for cosine in [1.0, 0.95, 0.87, 0.86, 0.5, 0.05] {
                 let prepared = IsotropicElasticSurface::new(&state, support(normal, tangent))
-                    .unwrap().prepare_incidence(mode, cosine).unwrap();
+                    .unwrap()
+                    .prepare_incidence(mode, cosine)
+                    .unwrap();
                 let incoming = core::array::from_fn(|i| {
                     if prepared.incoming_mode(MODES[i]).is_some() {
                         C64::new((i + 1) as f64 * 0.001, (3 - i) as f64 * -0.0007)
-                    } else { C64::ZERO }
+                    } else {
+                        C64::ZERO
+                    }
                 });
                 let response = prepared.drive(incoming).unwrap();
                 let power = response.total_incoming_power_w_m2;
-                assert!((power - response.total_reflected_power_w_m2
-                    - response.absorbed_normal_power_w_m2).abs() < 3e-12 * power);
-                assert!((response.boundary_normal_flux_w_m2
-                    - response.absorbed_normal_power_w_m2).abs() < 3e-12 * power);
+                assert!(
+                    (power
+                        - response.total_reflected_power_w_m2
+                        - response.absorbed_normal_power_w_m2)
+                        .abs()
+                        < 3e-12 * power
+                );
+                assert!(
+                    (response.boundary_normal_flux_w_m2 - response.absorbed_normal_power_w_m2)
+                        .abs()
+                        < 3e-12 * power
+                );
                 let mut loss = 0.0;
                 for axis in 0..3 {
                     let z = if axis == 2 { normal } else { tangent };
@@ -388,8 +419,7 @@ fn g0_coherent_support_reflection_closes_work_across_critical_angles() {
                     close(response.boundary_traction_pa[axis], -z * velocity, 1e-9);
                     loss += 0.5 * z.re * velocity.norm_sq();
                 }
-                assert!((loss - response.absorbed_normal_power_w_m2).abs()
-                    <= 2e-14 * loss);
+                assert!((loss - response.absorbed_normal_power_w_m2).abs() <= 2e-14 * loss);
                 if resistance == 0.0 {
                     assert_eq!(response.absorbed_normal_power_w_m2, 0.0);
                 } else {
@@ -406,10 +436,16 @@ fn g1_stiff_support_retains_wall_motion_and_absorption_below_reflection_roundoff
     let impedance = 1e30;
     let reference = 1e7;
     let input = 0.001;
-    let prepared = IsotropicElasticSurface::new(&state,
-        support(C64::from_re(impedance), C64::from_re(impedance)))
-        .unwrap().prepare_incidence(ElasticMode::P, 1.0).unwrap();
-    let response = prepared.drive([C64::from_re(input), C64::ZERO, C64::ZERO]).unwrap();
+    let prepared = IsotropicElasticSurface::new(
+        &state,
+        support(C64::from_re(impedance), C64::from_re(impedance)),
+    )
+    .unwrap()
+    .prepare_incidence(ElasticMode::P, 1.0)
+    .unwrap();
+    let response = prepared
+        .drive([C64::from_re(input), C64::ZERO, C64::ZERO])
+        .unwrap();
     let velocity = 2.0 * input * (reference / impedance) / (1.0 + reference / impedance);
     let loss = 0.5 * impedance * velocity * velocity;
     assert!((response.boundary_velocity_m_s[2].re / velocity - 1.0).abs() < 2e-14);
@@ -420,7 +456,11 @@ fn g1_stiff_support_retains_wall_motion_and_absorption_below_reflection_roundoff
 
 #[test]
 fn g0_support_admission_rejects_active_and_nonfinite_values() {
-    for bad in [C64::from_re(-1.0), C64::new(f64::NAN, 0.0), C64::new(0.0, f64::INFINITY)] {
+    for bad in [
+        C64::from_re(-1.0),
+        C64::new(f64::NAN, 0.0),
+        C64::new(0.0, f64::INFINITY),
+    ] {
         assert!(ElasticSurfaceImpedance::new(bad, C64::ZERO).is_err());
         assert!(ElasticSurfaceImpedance::new(C64::ZERO, bad).is_err());
     }

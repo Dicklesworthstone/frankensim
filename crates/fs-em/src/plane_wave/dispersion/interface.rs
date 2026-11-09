@@ -64,7 +64,10 @@ impl FresnelAmplitudeDispersion {
         divide_real(self.scaled_derivatives[0], self.omega)
     }
     pub fn second_derivative_s2(self) -> C64 {
-        divide_real(divide_real(self.scaled_derivatives[1], self.omega), self.omega)
+        divide_real(
+            divide_real(self.scaled_derivatives[1], self.omega),
+            self.omega,
+        )
     }
     /// None at an exact Fresnel/Brewster zero or an unrepresentable logarithmic
     /// quotient. Complex amplitude derivatives remain available at a zero;
@@ -158,32 +161,44 @@ impl<'a> PlanarDielectricInterface<'a> {
         }
         let medium = WaveMedium::new(
             carrier.transmitted_permittivity_f_m,
-            transmitted.permeability_h_m(), epsilon, incident.permeability_h_m(),
+            transmitted.permeability_h_m(),
+            epsilon,
+            incident.permeability_h_m(),
         )?;
         let ei = incident_derivatives.map(|value| divide_real(value, epsilon));
-        let et = transmitted.scaled_permittivity_derivatives_f_m()
+        let et = transmitted
+            .scaled_permittivity_derivatives_f_m()
             .map(|value| divide_real(value, epsilon));
-        let derivatives = boundary_derivatives(
-            medium, incidence_cosine, polarization, constraint, ei, et,
-        )?;
+        let derivatives =
+            boundary_derivatives(medium, incidence_cosine, polarization, constraint, ei, et)?;
         let values = [
             carrier.reflected_tangential_e,
             carrier.transmitted_tangential_e,
             carrier.transmitted_conjugate_h,
         ];
         let amplitudes = core::array::from_fn(|index| FresnelAmplitudeDispersion {
-            amplitude: values[index], omega: omega_rad_s,
-            scaled_derivatives: if index == 2 { derivatives.map(core::ops::Neg::neg) }
-                else { derivatives },
+            amplitude: values[index],
+            omega: omega_rad_s,
+            scaled_derivatives: if index == 2 {
+                derivatives.map(core::ops::Neg::neg)
+            } else {
+                derivatives
+            },
         });
-        if amplitudes.iter().any(|jet|
-            !finite(jet.derivative_s()) || !finite(jet.second_derivative_s2()))
+        if amplitudes
+            .iter()
+            .any(|jet| !finite(jet.derivative_s()) || !finite(jet.second_derivative_s2()))
         {
             return Err(invalid("Fresnel frequency derivatives are unrepresentable"));
         }
         Ok(InterfaceFrequencyDispersion {
-            incident, transmitted, cosine: incidence_cosine, polarization,
-            constraint, carrier, amplitudes,
+            incident,
+            transmitted,
+            cosine: incidence_cosine,
+            polarization,
+            constraint,
+            carrier,
+            amplitudes,
         })
     }
 }
@@ -213,27 +228,42 @@ fn boundary_derivatives(
     let (di, dt) = match constraint {
         IncidenceFrequencyConstraint::FixedAngle => (
             [ei[0].scale(cosine * cosine), ei[1].scale(cosine * cosine)],
-            core::array::from_fn(|index|
-                et[index].scale(medium.mu_ratio) - ei[index].scale(sine_squared)),
+            core::array::from_fn(|index| {
+                et[index].scale(medium.mu_ratio) - ei[index].scale(sine_squared)
+            }),
         ),
         IncidenceFrequencyConstraint::FixedTransverseWavenumber => {
             // k_parallel²/omega² contributes +2 s² and -6 s².
             let transverse = [2.0 * sine_squared, -6.0 * sine_squared];
-            (core::array::from_fn(|index| ei[index] + C64::from_re(transverse[index])),
-             core::array::from_fn(|index|
-                 et[index].scale(medium.mu_ratio) + C64::from_re(transverse[index])))
+            (
+                core::array::from_fn(|index| ei[index] + C64::from_re(transverse[index])),
+                core::array::from_fn(|index| {
+                    et[index].scale(medium.mu_ratio) + C64::from_re(transverse[index])
+                }),
+            )
         }
     };
     let di = root_derivatives(qi, di);
     let dt = root_derivatives(qt, dt);
     let (a, b, da, db) = match polarization {
-        Polarization::Te => (qi.scale(medium.mu_ratio), qt,
-            di.map(|value| value.scale(medium.mu_ratio)), dt),
-        Polarization::Tm => (qt, medium.epsilon_ratio * qi,
-            [ei[0] * qt + dt[0],
-             ei[1] * qt + (ei[0] * dt[0]).scale(2.0) + dt[1]],
-            [et[0] * qi + medium.epsilon_ratio * di[0],
-             et[1] * qi + (et[0] * di[0]).scale(2.0) + medium.epsilon_ratio * di[1]]),
+        Polarization::Te => (
+            qi.scale(medium.mu_ratio),
+            qt,
+            di.map(|value| value.scale(medium.mu_ratio)),
+            dt,
+        ),
+        Polarization::Tm => (
+            qt,
+            medium.epsilon_ratio * qi,
+            [
+                ei[0] * qt + dt[0],
+                ei[1] * qt + (ei[0] * dt[0]).scale(2.0) + dt[1],
+            ],
+            [
+                et[0] * qi + medium.epsilon_ratio * di[0],
+                et[1] * qi + (et[0] * di[0]).scale(2.0) + medium.epsilon_ratio * di[1],
+            ],
+        ),
     };
     let scale = a.re.abs().max(a.im.abs()).max(b.re.abs()).max(b.im.abs());
     let (a, b, denominator, _) = normalized_interface_pair(a, b)?;
@@ -243,7 +273,8 @@ fn boundary_derivatives(
     // never divides by r and weak transmitted E/H are not lost by subtraction.
     let first = ((da[0] * b - a * db[0]).scale(2.0) / denominator) / denominator;
     let second = ((da[1] * b - a * db[1]).scale(2.0) / denominator
-        - (first * (da[0] + db[0])).scale(2.0)) / denominator;
+        - (first * (da[0] + db[0])).scale(2.0))
+        / denominator;
     if !finite(first) || !finite(second) {
         return Err(invalid("Fresnel frequency derivatives are unrepresentable"));
     }
@@ -254,5 +285,8 @@ fn boundary_derivatives(
 
 fn root_derivatives(root: C64, squared_derivatives: [C64; 2]) -> [C64; 2] {
     let first = (squared_derivatives[0] / root).scale(0.5);
-    [first, (squared_derivatives[1].scale(0.5) - first * first) / root]
+    [
+        first,
+        (squared_derivatives[1].scale(0.5) - first * first) / root,
+    ]
 }

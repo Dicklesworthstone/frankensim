@@ -19362,7 +19362,7 @@ and early refusal with the parcel unchanged.
 
 `porous::diffusive::PorousDiffusive` retains the original `PorousFluidLaw` and one coherent thermoviscous fluid snapshot. High-frequency storage is `alpha_inf*rho/phi` and `K_s/phi`, with the original static Darcy drag and positive viscous/thermal relaxation arms. Analytic positive measures are discretized by bounded midpoint quadrature; thermal relaxation includes its isolated real pole. Cp=Cv removes only thermal memory. Fluid substitution keeps intrinsic permeability and actual adiabatic modulus. Admission checks both complex response and each nonzero real loss against the original JCA/JCAL law on 129 logarithmic frequencies inside the card's support. Reported maxima are sampled discrepancies, not continuous-band bounds. This frozen rigid-frame realization supplies coefficients rather than an integrator; it does not qualify elastic-frame waves, mean flow, phase change, or source accuracy outside its declared band.
 
-## Free and clamped elastic surface reflection
+## Free, clamped and passive-support elastic surface reflection
 
 `elastic::acoustic::interface::surface::IsotropicElasticSurface` retains one
 original explicitly isotropic elastic state. `TractionFree` imposes zero
@@ -19385,8 +19385,23 @@ G0/G1/G3/G4 regressions compare free/clamped analytical coefficients, normal
 reflection phase and clamp reaction, coherent power unitarity, supercritical
 conversion, common material scaling, original domain limits and cancellation.
 This is an infinite bulk-wave surface model, not a flexural plate-edge law,
-Rayleigh-wave source, compliant support, rough surface, attenuation model or
+Rayleigh-wave source, nonlocal support, rough surface, bulk attenuation model or
 experimental qualification of the source material.
+
+`ElasticSurfaceCondition::Impedance` adds a passive local support with separate
+normal and isotropic tangential specific impedances [Pa s/m], evaluated by the
+caller at the original frequency. In the same exp(-i omega t) convention,
+`traction = -Z velocity`; nonnegative resistance absorbs power and either
+reactance sign retains phase. The same P/SV solve and an independent SH solve
+preserve oblique mode conversion and outgoing evanescence. Bounded boundary
+coordinates reconstruct weak wall motion beside stiff supports from both
+coherent traces. Absorption is positive local `sum Re(Z_i)|v_i|²/2`, separate
+from the independently evaluated surface flux and reflected-power deficit.
+G0/G1/G3 cases cover matched normal termination, oblique SH coefficients,
+coherent supercritical reflection, purely reactive supports, weak resistance,
+stiff-support absorption below reflection roundoff and invalid active loads.
+This extension supplies no causal time-domain realization, spatially nonlocal
+support, anisotropic boundary tensor or measured support-law qualification.
 
 ## Nonideal passive plant residence
 

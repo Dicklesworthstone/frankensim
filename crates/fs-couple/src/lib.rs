@@ -96,6 +96,8 @@ pub mod radioactive {
 }
 
 pub mod acoustic_realize;
+/// Original local support mechanics coupled to coherent elastic-wave reflection.
+pub mod elastic_reflection;
 /// Compact outlet radiation reaction through the original impedance-wall field.
 pub mod compact_wall_radiation;
 pub mod air_path;

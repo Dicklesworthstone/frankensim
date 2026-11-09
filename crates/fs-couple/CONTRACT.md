@@ -6745,6 +6745,26 @@ The circular modal mouth observer applies the original material gas law to each 
 
 Native brass `modal_baffle` and `observer_gas` compose using the authored exterior gas while retaining bore/lip dynamics and all mouth-mode flows. Scope remains a fixed circular aperture in an infinite rigid baffle. Focused regression definitions cover signed-mode pressure, original-owner parity, padding alignment, aggregate work limits, the actual three-mode brass render and callback partition equality. Native compilation and execution remain pending because the session executor is unavailable.
 
+## Elastic reflection coupled to local support mechanics
+
+`elastic_reflection::OscillatorSupportedSurface` retains the original elastic
+material state, two explicit `fs-phs::WallPin` supports and their common angular
+frequency. The original wall impedance supplies normal and isotropic tangential
+boundary response under `exp(-i omega t)`; `fs-material` owns P/SV/SH reflection,
+mode conversion, coherent boundary traces, strain limits and positive support
+work. Preparation reuses the native bounded solve and cancellation points.
+Repeated coherent drives allocate nothing and perform no new factorization.
+
+Each drive also returns support displacement and cycle-mean kinetic and spring
+energy per unit surface area from the same physical velocity. The native
+absorbed power remains the sole loss account; reactive storage is not heat.
+Lossless resonance admits zero impedance without a resistance floor. The
+reduced support is stationary, linear and locally reacting; its authored mass,
+stiffness and damping do not assert measured material fidelity, resolved layers,
+nonlocal shell response or a transient trajectory. G1/G3 regressions compare
+independent normal reflection, resonant absorption, reactive work/storage,
+coherent mode conversion, material contrast and support-mass changes.
+
 ## Compact outlet reaction from an impedance wall
 
 `compact_wall_radiation::PreparedCompactWallRadiation` closes original finite-pressure or prescribed-flow network sources against the complete exterior impedance of one or more unflanged compact circular outlets. Each diagonal retains `fs-duct`'s native unflanged radiation impedance, every off-diagonal retains the original 3D monopole mutual impedance, and every pair, including the finite diagonal self return, receives the original spherical impedance-wall response. These use the same fluid, frequency, peak phasor and physical volume-flow units. Reciprocal pairs are evaluated once; all reflected preparations share one aggregate work allowance and retain their native error diagnostics. Cancellation or refusal publishes no partial matrix.
