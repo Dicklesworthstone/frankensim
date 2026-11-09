@@ -43,6 +43,9 @@ mod stepper;
 /// Gas and liquid heat diffusion through the original compressible bubble.
 #[path = "cavitation/thermal.rs"]
 pub mod thermal;
+/// Pure saturated-water vapor with phase mass, latent heat and liquid inertia.
+#[path = "cavitation/vapor.rs"]
+pub mod vapor;
 
 pub use cluster::{
     BubbleCluster, BubbleClusterError, BubbleClusterLimits, BubbleClusterNumerics,
@@ -540,8 +543,26 @@ fn rayleigh_plesset_acceleration(
         - (pressure - liquid.saturation_pressure_pa()
             + 2.0 * liquid.surface_tension_n_m() / radius)
         - 4.0 * liquid.dynamic_viscosity_pa_s() * velocity / radius;
+    radial_liquid_acceleration(liquid, radius, velocity, 0.0, driving_pressure)
+}
+
+// One incompressible spherical-liquid momentum kernel. The liquid velocity at
+// the interface is U_l; Rdot = U_l + stefan_slip. Bernoulli then gives
+// R U_l' + 3 U_l^2/2 + 2 stefan_slip U_l = (p_l-p_inf)/rho_l.
+// Phase-changing owners supply their complete normal-stress driving pressure,
+// including recoil. The original impermeable interface has exactly zero slip.
+fn radial_liquid_acceleration(
+    liquid: CavitationState,
+    radius: f64,
+    liquid_velocity: f64,
+    stefan_slip: f64,
+    driving_pressure: f64,
+) -> Result<f64, CavitationError> {
     finite(
-        (driving_pressure / liquid.liquid_density_kg_m3() - 1.5 * velocity * velocity) / radius,
+        (driving_pressure / liquid.liquid_density_kg_m3()
+            - 1.5 * liquid_velocity * liquid_velocity
+            - 2.0 * stefan_slip * liquid_velocity)
+            / radius,
         "wall acceleration",
     )
 }

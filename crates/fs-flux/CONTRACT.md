@@ -9846,3 +9846,14 @@ relaxation, accepted-only ternary receipts, positivity-driven refinement and
 rate reuse, work/accuracy/cancellation refusals, independent positive-trace low
 words, and exact short-remainder endpoints.
 
+
+
+## Phase-changing saturated-water vapor bubbles
+
+`cavitation::vapor::SaturatedVaporBubble` evolves geometric radius, liquid interface velocity and saturation temperature on the original fixed-stack adaptive radial integrator. It binds `SaturatedWaterCavitation` and the original `SaturatedWaterVapor` material jet; no ideal-gas vapor EOS or fitted evaporation coefficient replaces IF97. Positive interfacial mass flux j satisfies `Rdot = U_l + j/rho_l`. The common incompressible liquid momentum kernel retains both this Stefan slip and vapor recoil `j^2(1/rho_v-1/rho_l)`. The impermeable gas-bubble path remains its zero-slip specialization.
+
+Vapor occupies the geometric sphere with `m_v=rho_v(T)V` and `U_v=m_v u_v(T)`. The explicit liquid-side heat port obeys the leading thermal interface law `dU_v=Q_l dt+h_l dm_v-p_v dV`. The original saturation mass and energy equations form a two-by-two scalar solve for temperature rate and mass flux; neither heat nor mass flux is numerically differentiated. Signed transfer mass, heat, liquid enthalpy, vapor pressure work and an omitted-interface-energy scale are integrated on the same adaptive stages. Independent original-source mass and reference-invariant energy checks admit each whole window before a borrowing proposal can commit. Original-datum accounts remain separately visible.
+
+The physical acoustic source is displaced-liquid flow `Q_l=4 pi R^2 U_l` and its analytic derivative, not geometric bubble volume rate when phase exchange is present. Stage checks cover radius, actual phase density ratio, liquid/interface/vapor Mach, vapor pressure-relaxation scale, actual original liquid density/viscosity/sound-speed drift, pressure departures, omitted interface enthalpy scales and flat-interface saturation corrections. Surface tension remains explicitly frozen for the declared interface environment. These are applicability screens; the model does not claim an exact nonequilibrium-interface error bound.
+
+This lane assumes a spatially uniform, locally saturated pure vapor and an incompressible frozen bulk liquid. It does not supply noncondensable gas, kinetic phase resistance, nucleation, resolved liquid conduction, finite liquid thermal storage, Kelvin equilibrium, shock/collapse jets or phase-changing Keller-Miksis dynamics. Source: Sullivan et al., JFM 948 (2022), Eq. 2.1, with the opposite mass-flux sign convention. All 87 focused native cavitation tests passed, including five new groups covering stationary equilibrium, independent differential balances and recoil, nonlinear heating/cooling, refinement/analytic liquid-flow derivative, and failed/cancelled proposal rollback.
