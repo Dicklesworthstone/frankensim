@@ -7591,6 +7591,38 @@ verify closed-form TIR delay/GDD and binary-exact magnetic Brewster cancellation
 and recover the original reflected angular-spectrum beam derivatives at fixed
 transverse carrier. Synthetic source fixtures are not measured-material validation.
 
+
+### Refracted normal propagation and local dispersion
+
+`InterfaceFrequencyDispersion` retains the original transmitted normal
+wavenumber's first and second angular-frequency derivatives.
+`transmitted_propagation(normal_distance_m)` reuses the native bounded complex
+exponential and phase reduction to return the carrier transfer, phase/group
+delay, GDD, and attenuation slope/curvature through the same homogeneous
+half-space. The fixed-angle or fixed-transverse-wavenumber frequency path is
+the one explicitly selected for the interface. There is no extra material
+query, finite differencing, allocation, or fitted refractive law.
+
+These are derivatives of exp(-i*k_z*z) at fixed transverse observation
+coordinate. At fixed transverse wavenumber in transparent media, the group
+slope is n_group/(c0*cos(theta_t)); even nondispersive media retain geometric
+normal-transfer GVD. Nondispersive fixed-angle GVD is exactly zero. The exact
+normal-incidence limit reuses the original bulk cancellation safeguards.
+Other angles use ordinary f64 derivative contractions, without a relative
+error guarantee where weak attenuation or curvature terms nearly cancel.
+
+Fresnel factors and their delay remain separate, so no boundary contribution
+is counted twice. Evanescent transfer retains decay and its frequency
+derivatives, without assigning normal transmitted power or a ray velocity.
+Exact critical branches retain the existing derivative refusal. This local
+transfer does not supply arbitrary point-to-point travel time, signal-front
+speed, finite-film residence time, or a broadband pulse error bound.
+Four added G1/G3 cases in `tests/plane_wave_dispersion.rs` specify analytic
+Snell/path limits, transparent and absorbing dispersive native frequency
+comparisons, TIR attenuation, and original angular-spectrum transfer and
+distance composition. Native execution of these additions remains pending
+after the implementation environment exhausted storage; no test pass is claimed.
+
 ### Native AC circuits on physical solid-conductor electrodes
 
 `harmonic::terminals::SpatialHarmonicTerminalFrequency` prepares the complete

@@ -9,7 +9,7 @@
 //! parent plane-wave owner. Phase/group-delay definitions and their limits:
 //! <https://ocw.mit.edu/courses/6-977-ultrafast-optics-spring-2005/d99af77c9cdca438616ee745ba41e548_chapter2.pdf>.
 
-use super::{BulkWaveDispersion, Result, invalid};
+use super::{BulkPropagation, BulkWaveDispersion, Result, invalid, propagation_at_distance};
 use crate::plane_wave::{
     InterfaceReflection, PlanarDielectricInterface, Polarization, WaveMedium, finite,
     normalized_interface_pair,
@@ -102,6 +102,7 @@ pub struct InterfaceFrequencyDispersion<'a> {
     constraint: IncidenceFrequencyConstraint,
     carrier: InterfaceReflection,
     amplitudes: [FresnelAmplitudeDispersion; 3],
+    transmitted_normal_derivatives: [C64; 2],
 }
 
 impl<'a> InterfaceFrequencyDispersion<'a> {
@@ -131,6 +132,44 @@ impl<'a> InterfaceFrequencyDispersion<'a> {
     }
     pub const fn transmitted_conjugate_h(self) -> FresnelAmplitudeDispersion {
         self.amplitudes[2]
+    }
+
+    /// Complex d(k_z)/domega [s/m] for the original transmitted branch and
+    /// declared frequency constraint. Its real part is the normal-transfer
+    /// phase slope, not the slowness along an arbitrary geometric ray.
+    pub const fn transmitted_normal_wavenumber_derivative_s_m(self) -> C64 {
+        self.transmitted_normal_derivatives[0]
+    }
+
+    /// Complex d²(k_z)/domega² [s²/m]. Even nondispersive material has normal
+    /// propagation dispersion at fixed nonzero transverse wavenumber.
+    pub const fn transmitted_normal_wavenumber_second_derivative_s2_m(self) -> C64 {
+        self.transmitted_normal_derivatives[1]
+    }
+
+    /// Propagate the transmitted carrier from z=0 to a nonnegative normal
+    /// distance [m], with analytic group delay, GDD and attenuation derivatives.
+    /// The transfer is exp(-i k_z z); its delays hold the transverse observation
+    /// coordinate fixed and retain this interface's frequency constraint.
+    ///
+    /// No Fresnel amplitude is included: its independent logarithmic delay
+    /// belongs to `transmitted_tangential_e` or `transmitted_conjugate_h`.
+    /// At fixed transverse wavenumber, a transparent transmitted medium gives
+    /// d(k_z)/domega = n_group/(c0*cos(theta_t)). Fixed incident angle follows
+    /// a different spectral path. Neither path infers arbitrary point-to-point
+    /// ray travel time, pulse-front speed or finite-film residence time.
+    /// Evanescent/absorbing branches keep their complex derivatives; their
+    /// phase slopes are not signal or energy velocities.
+    /// Away from normal incidence, f64 evaluation has no relative-error
+    /// guarantee when derivative terms nearly cancel. The exact normal limit
+    /// retains the original bulk owner's specialized cancellation safeguards.
+    pub fn transmitted_propagation(self, normal_distance_m: f64) -> Result<BulkPropagation> {
+        propagation_at_distance(
+            self.carrier.transmitted_normal_wavenumber_rad_m,
+            self.incident.angular_frequency_rad_s(),
+            self.transmitted_normal_derivatives,
+            normal_distance_m,
+        )
     }
 }
 
@@ -169,8 +208,37 @@ impl<'a> PlanarDielectricInterface<'a> {
         let et = transmitted
             .scaled_permittivity_derivatives_f_m()
             .map(|value| divide_real(value, epsilon));
-        let derivatives =
+        let (derivatives, normal_root_derivatives) =
             boundary_derivatives(medium, incidence_cosine, polarization, constraint, ei, et)?;
+        let omega = omega_rad_s;
+        let reference_slowness = incident.wavenumber_rad_m().re / omega;
+        // The boundary kernel differentiates h=k_z/omega in a CONSTANT
+        // incident reference scale. Thus k_z'=h+omega*h' and
+        // k_z''=2*h'+omega*h''. Never differentiate a rounded Snell angle or
+        // form omega². The nondispersive fixed-angle second derivative is
+        // exactly zero, while fixed-k_parallel retains geometric dispersion.
+        let transmitted_normal_derivatives = if incidence_cosine == 1.0 {
+            // Normal incidence is exactly the original bulk path. Keep its
+            // constitutive cancellation safeguards (e.g. weak Ohmic loss and
+            // optical constant-alpha/linear-index limits) unchanged.
+            [
+                transmitted.wavenumber_derivative_s_m(),
+                transmitted.wavenumber_second_derivative_s2_m(),
+            ]
+        } else {
+            [
+                divide_real(carrier.transmitted_normal_wavenumber_rad_m, omega)
+                    + normal_root_derivatives[0].scale(reference_slowness),
+                divide_real(
+                    (normal_root_derivatives[0].scale(2.0) + normal_root_derivatives[1])
+                        .scale(reference_slowness),
+                    omega,
+                ),
+            ]
+        };
+        if transmitted_normal_derivatives.iter().any(|&value| !finite(value)) {
+            return Err(invalid("refracted propagation derivatives are unrepresentable"));
+        }
         let values = [
             carrier.reflected_tangential_e,
             carrier.transmitted_tangential_e,
@@ -199,6 +267,7 @@ impl<'a> PlanarDielectricInterface<'a> {
             constraint,
             carrier,
             amplitudes,
+            transmitted_normal_derivatives,
         })
     }
 }
@@ -218,7 +287,7 @@ fn boundary_derivatives(
     constraint: IncidenceFrequencyConstraint,
     ei: [C64; 2],
     et: [C64; 2],
-) -> Result<[C64; 2]> {
+) -> Result<([C64; 2], [C64; 2])> {
     let qi = C64::from_re(cosine);
     let qt = medium.normal(cosine)?;
     if qt == C64::ZERO {
@@ -280,7 +349,7 @@ fn boundary_derivatives(
     }
     // t_E=1+r and t_H=1-r have the same/opposite derivatives, but each
     // carrier value above still comes from its independent native numerator.
-    Ok([first, second])
+    Ok(([first, second], dt))
 }
 
 fn root_derivatives(root: C64, squared_derivatives: [C64; 2]) -> [C64; 2] {

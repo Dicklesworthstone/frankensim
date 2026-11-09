@@ -484,3 +484,180 @@ fn g3_fixed_transverse_fresnel_jet_reaches_the_original_reflected_beam() {
     complex_near(jet.derivative_s(), first, 2e-8 / omega);
     complex_near(jet.second_derivative_s2(), second, 3e-6 / omega / omega);
 }
+
+#[test]
+fn g1_refracted_normal_delay_keeps_snell_geometry_and_frequency_constraint() {
+    use IncidenceFrequencyConstraint::{FixedAngle, FixedTransverseWavenumber};
+    let incident = source_with_storage(0.0, 2.0 * E, M);
+    let transmitted = source_with_storage(0.0, 5.0 * E, 0.8 * M);
+    let interface = PlanarDielectricInterface::try_new(
+        &incident, DielectricResponse::Lossless(&transmitted),
+    ).unwrap();
+    let cosine = 0.6_f64;
+    let incident_slowness = (2.0 * E * M).sqrt();
+    let transmitted_slowness = (5.0 * E * 0.8 * M).sqrt();
+    let sine_t = incident_slowness / transmitted_slowness * (1.0 - cosine * cosine).sqrt();
+    let cosine_t = (1.0 - sine_t * sine_t).sqrt();
+    let normal_slowness = transmitted_slowness * cosine_t;
+    let distance = 0.23;
+    for omega in [1e4, OMEGA0, 1e15] {
+        for polarization in [Polarization::Te, Polarization::Tm] {
+            let angle = interface.frequency_dispersion(omega, cosine, polarization, FixedAngle).unwrap();
+            let fixed_k = interface.frequency_dispersion(
+                omega, cosine, polarization, FixedTransverseWavenumber,
+            ).unwrap();
+            // Snell's conserved tangential wave vector supplies the carrier.
+            near(angle.carrier().transmitted_normal_wavenumber_rad_m.re,
+                omega * normal_slowness, 5e-15 * omega * normal_slowness);
+            near(angle.transmitted_normal_wavenumber_derivative_s_m().re,
+                normal_slowness, 5e-15 * normal_slowness);
+            assert_eq!(angle.transmitted_normal_wavenumber_second_derivative_s2_m(), C64::ZERO);
+            let expected_first = transmitted_slowness / cosine_t;
+            let expected_second = -expected_first * sine_t * sine_t / (omega * cosine_t * cosine_t);
+            near(fixed_k.transmitted_normal_wavenumber_derivative_s_m().re,
+                expected_first, 6e-15 * expected_first);
+            near(fixed_k.transmitted_normal_wavenumber_second_derivative_s2_m().re,
+                expected_second, 1e-14 * expected_second.abs());
+            let propagated = fixed_k.transmitted_propagation(distance).unwrap();
+            near(propagated.group_delay_s, distance * expected_first, 6e-15 * distance * expected_first);
+            near(propagated.group_delay_dispersion_s2, distance * expected_second,
+                1e-14 * distance * expected_second.abs());
+            assert_eq!(propagated.log_amplitude_derivative_s, 0.0);
+            assert_eq!(propagated.log_amplitude_second_derivative_s2, 0.0);
+        }
+    }
+}
+
+#[test]
+fn g1_refracted_jets_follow_original_dispersive_snell_branches() {
+    use IncidenceFrequencyConstraint::{FixedAngle, FixedTransverseWavenumber};
+    let ambient = source(0.03 * OMEGA0);
+    let incident_resonance = lorentz(source(0.0));
+    let relaxation = debye(ambient.clone(), 0.2, 0.01);
+    let resonance = lorentz(ambient.clone());
+    for incident in [DielectricResponse::Lossless(&ambient), DielectricResponse::Lorentz(&incident_resonance)] {
+        for transmitted in [DielectricResponse::Debye(&relaxation), DielectricResponse::Lorentz(&resonance),
+            DielectricResponse::Lorentz(&incident_resonance)] {
+            let interface = PlanarDielectricInterface::try_new_with_incident_response(incident, transmitted).unwrap();
+            for omega in [0.4 * OMEGA0, 0.8 * OMEGA0] {
+                for cosine in [0.4_f64, 0.9, 1.0] {
+                    let k_parallel = interface.response(omega, 1.0, Polarization::Te).unwrap()
+                        .incident_normal_wavenumber_rad_m * (1.0 - cosine * cosine).sqrt();
+                    for constraint in [FixedAngle, FixedTransverseWavenumber] {
+                        let jet = interface.frequency_dispersion(omega, cosine, Polarization::Tm, constraint).unwrap();
+                        let step = 1e-4 * omega;
+                        let waves = core::array::from_fn(|index| {
+                            let frequency = omega + (index as f64 - 2.0) * step;
+                            let c = if constraint == FixedAngle { cosine } else {
+                                let k = interface.response(frequency, 1.0, Polarization::Tm).unwrap()
+                                    .incident_normal_wavenumber_rad_m;
+                                (1.0 - (k_parallel / k).powi(2)).sqrt()
+                            };
+                            interface.response(frequency, c, Polarization::Tm).unwrap()
+                                .transmitted_normal_wavenumber_rad_m
+                        });
+                        let [first, second] = differentiate_samples(waves, step);
+                        complex_near(jet.transmitted_normal_wavenumber_derivative_s_m(), first,
+                            3e-8 * waves[2].abs() / omega);
+                        complex_near(jet.transmitted_normal_wavenumber_second_derivative_s2_m(), second,
+                            8e-6 * waves[2].abs() / omega / omega);
+                        if cosine == 1.0 {
+                            // The exact normal limit keeps the original bulk
+                            // owner's weak-loss and optical cancellations.
+                            let bulk = transmitted.bulk_dispersion(omega).unwrap();
+                            assert_eq!(jet.transmitted_normal_wavenumber_derivative_s_m(),
+                                bulk.wavenumber_derivative_s_m());
+                            assert_eq!(jet.transmitted_normal_wavenumber_second_derivative_s2_m(),
+                                bulk.wavenumber_second_derivative_s2_m());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_total_internal_reflection_retains_decay_dispersion_without_ray_delay() {
+    use IncidenceFrequencyConstraint::{FixedAngle, FixedTransverseWavenumber};
+    let incident = source_with_storage(0.0, 1.0, 1.0);
+    let transmitted = source_with_storage(0.0, 0.25, 1.0);
+    let interface = PlanarDielectricInterface::try_new(
+        &incident, DielectricResponse::Lossless(&transmitted),
+    ).unwrap();
+    let omega = OMEGA0;
+    let kappa = 0.5_f64.sqrt();
+    let distance = 2.0 / omega;
+    for constraint in [FixedAngle, FixedTransverseWavenumber] {
+        let jet = interface.frequency_dispersion(omega, 0.5, Polarization::Tm, constraint).unwrap();
+        let (first, second) = if constraint == FixedAngle {
+            (-kappa, 0.0)
+        } else {
+            (0.25 / kappa, 0.25 * 0.75 / (omega * kappa.powi(3)))
+        };
+        complex_near(jet.transmitted_normal_wavenumber_derivative_s_m(), C64::new(0.0, first), 3e-15);
+        complex_near(jet.transmitted_normal_wavenumber_second_derivative_s2_m(),
+            C64::new(0.0, second), 3e-15 / omega);
+        let propagation = jet.transmitted_propagation(distance).unwrap();
+        near(propagation.transfer.re, (-omega * kappa * distance).exp(), 2e-15);
+        assert_eq!(propagation.transfer.im, 0.0);
+        assert_eq!(propagation.phase_delay_s, 0.0);
+        assert_eq!(propagation.group_delay_s, 0.0);
+        assert_eq!(propagation.group_delay_dispersion_s2, 0.0);
+        near(propagation.log_amplitude_derivative_s, first * distance, 5e-15 * distance);
+        near(propagation.log_amplitude_second_derivative_s2, second * distance, 5e-15 * distance / omega);
+        let identity = jet.transmitted_propagation(0.0).unwrap();
+        assert_eq!(identity.transfer, C64::ONE);
+        assert_eq!(identity.group_delay_s, 0.0);
+        for invalid_distance in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(jet.transmitted_propagation(invalid_distance).is_err());
+        }
+    }
+}
+
+#[test]
+fn g3_refracted_normal_transfer_matches_original_beam_and_composes() {
+    let ambient = source(0.03 * OMEGA0);
+    let resonance = lorentz(ambient.clone());
+    let transmitted = DielectricResponse::Lorentz(&resonance);
+    let interface = PlanarDielectricInterface::try_new(&ambient, transmitted).unwrap();
+    let omega = 0.7 * OMEGA0;
+    let cosine = 0.8_f64;
+    let ki = interface.response(omega, 1.0, Polarization::Te).unwrap().incident_normal_wavenumber_rad_m;
+    let carrier = [ki * (1.0 - cosine * cosine).sqrt(), 0.0];
+    let distance = 0.17;
+    let limits = AngularSpectrumLimits {
+        maximum_grid_points: 4, maximum_workspace_bytes: 100_000, maximum_fft_work: 10_000,
+    };
+    let grid = AngularSpectrumGrid { width: 2, height: 2, spacing_m: [1.0, 1.0] };
+    let step = omega * 1e-4;
+    let fields: [C64; 5] = core::array::from_fn(|index| {
+        let frequency = omega + (index as f64 - 2.0) * step;
+        let stack = PlanarDielectricLayers::try_new(&ambient, transmitted, frequency, &[]).unwrap();
+        let beam = PlanarAngularSpectrum::prepare_with_carrier(
+            &stack, grid, carrier, &[[C64::ZERO, C64::ONE]; 4], limits, || false,
+        ).unwrap();
+        let surface = beam.field(AngularSpectrumSide::Transmitted, 0.0, || false).unwrap();
+        let exit = beam.field(AngularSpectrumSide::Transmitted, distance, || false).unwrap();
+        exit.electric_v_per_m()[0][1] / surface.electric_v_per_m()[0][1]
+    });
+    let jet = interface.frequency_dispersion(omega, cosine, Polarization::Te,
+        IncidenceFrequencyConstraint::FixedTransverseWavenumber).unwrap();
+    let propagation = jet.transmitted_propagation(distance).unwrap();
+    complex_near(propagation.transfer, fields[2], 3e-15);
+    let logarithms = fields.map(|value| {
+        let ratio = value / fields[2];
+        C64::new(ratio.abs().ln(), ratio.im.atan2(ratio.re))
+    });
+    let [first, second] = differentiate_samples(logarithms, step);
+    near(propagation.group_delay_s, -first.im, 2e-8 / omega);
+    near(propagation.group_delay_dispersion_s2, -second.im, 5e-6 / omega / omega);
+    near(propagation.log_amplitude_derivative_s, first.re, 2e-8 / omega);
+    near(propagation.log_amplitude_second_derivative_s2, second.re, 5e-6 / omega / omega);
+    let part = jet.transmitted_propagation(distance * 0.4).unwrap();
+    let rest = jet.transmitted_propagation(distance * 0.6).unwrap();
+    complex_near(part.transfer * rest.transfer, propagation.transfer, 3e-15);
+    near(part.group_delay_s + rest.group_delay_s, propagation.group_delay_s, 1e-24);
+    near(part.group_delay_dispersion_s2 + rest.group_delay_dispersion_s2,
+        propagation.group_delay_dispersion_s2, 1e-32);
+}

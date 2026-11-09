@@ -50,7 +50,11 @@ pub struct BulkWaveDispersion<'a> {
 }
 
 /// Exact carrier transfer plus local derivatives of that same propagation.
-/// These are field-amplitude quantities; power transmission is `|transfer|²`.
+/// These are field-amplitude quantities. For a propagating mode in one uniform
+/// medium, `|transfer|²` is the power attenuation factor. An evanescent transfer
+/// is not a normal-power transmission coefficient.
+/// The preparing owner declares the coordinate: a bulk propagation distance,
+/// or normal distance with an explicit refracted transverse-frequency path.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BulkPropagation {
     /// `exp(-i k distance)` from the existing native propagation owner.
@@ -216,31 +220,42 @@ impl<'a> BulkWaveDispersion<'a> {
     /// reduction. Delays and GDD describe this original branch locally, not
     /// an invented constant-index or second-order replacement medium.
     pub fn propagation(self, distance_m: f64) -> Result<BulkPropagation> {
-        if !distance_m.is_finite() || distance_m < 0.0 {
-            return Err(invalid("bulk propagation requires finite nonnegative distance"));
-        }
-        let transfer = super::angular_spectrum::modes::propagation(self.wave_number, distance_m)
-            .ok_or_else(|| invalid("bulk propagation is unrepresentable"))?;
-        let phase_delay_s = (self.wave_number.re / self.omega) * distance_m;
-        let group_delay_s = self.first.re * distance_m;
-        let group_delay_dispersion_s2 = self.second.re * distance_m;
-        let log_amplitude_derivative_s = self.first.im * distance_m;
-        let log_amplitude_second_derivative_s2 = self.second.im * distance_m;
-        if ![
-            phase_delay_s, group_delay_s, group_delay_dispersion_s2,
-            log_amplitude_derivative_s, log_amplitude_second_derivative_s2,
-        ].iter().all(|value| value.is_finite()) {
-            return Err(invalid("bulk propagation delay is unrepresentable"));
-        }
-        Ok(BulkPropagation {
-            transfer,
-            phase_delay_s,
-            group_delay_s,
-            group_delay_dispersion_s2,
-            log_amplitude_derivative_s,
-            log_amplitude_second_derivative_s2,
-        })
+        propagation_at_distance(self.wave_number, self.omega, [self.first, self.second], distance_m)
     }
+}
+
+// Shared native carrier propagation for bulk and refracted normal coordinates.
+// The caller owns the frequency path of the two ordinary k derivatives.
+fn propagation_at_distance(
+    wave_number: C64,
+    omega: f64,
+    [first, second]: [C64; 2],
+    distance_m: f64,
+) -> Result<BulkPropagation> {
+    if !distance_m.is_finite() || distance_m < 0.0 {
+        return Err(invalid("bulk propagation requires finite nonnegative distance"));
+    }
+    let transfer = super::angular_spectrum::modes::propagation(wave_number, distance_m)
+        .ok_or_else(|| invalid("bulk propagation is unrepresentable"))?;
+    let phase_delay_s = (wave_number.re / omega) * distance_m;
+    let group_delay_s = first.re * distance_m;
+    let group_delay_dispersion_s2 = second.re * distance_m;
+    let log_amplitude_derivative_s = first.im * distance_m;
+    let log_amplitude_second_derivative_s2 = second.im * distance_m;
+    if ![
+        phase_delay_s, group_delay_s, group_delay_dispersion_s2,
+        log_amplitude_derivative_s, log_amplitude_second_derivative_s2,
+    ].iter().all(|value| value.is_finite()) {
+        return Err(invalid("bulk propagation delay is unrepresentable"));
+    }
+    Ok(BulkPropagation {
+        transfer,
+        phase_delay_s,
+        group_delay_s,
+        group_delay_dispersion_s2,
+        log_amplitude_derivative_s,
+        log_amplitude_second_derivative_s2,
+    })
 }
 
 // Optical phase and attenuation are already the original vacuum-referenced N.
