@@ -76,12 +76,12 @@ pub fn prepare_maxwell_forced_cycle(
 impl PreparedRotorMaxwellCycle {
     /// Original [q, q_dot, sigma] offset b in x_next = P x + b.
     pub fn forcing_offset(&self) -> &[f64] {
-        &self.physical_offset
+        &self.flow.physical_offset
     }
 
     /// Fixed physical boundary times [s], from zero through one full period.
     pub fn boundary_times_seconds(&self) -> &[f64] {
-        &self.boundary_times
+        &self.flow.boundary_times
     }
 
     /// Solve the full original-memory affine periodic equation (I-P)x=b.
@@ -113,15 +113,15 @@ impl PreparedRotorMaxwellCycle {
                 "periodic memory orbit tolerance must be in (0,1)",
             ));
         }
-        let d = self.state_scale.len();
+        let d = self.flow.state_scale.len();
         let (balanced, resolvent_gain_estimate) = affine::solve_periodic_initial(
-            &self.monodromy,
-            &self.offset,
+            &self.flow.monodromy,
+            &self.flow.offset,
             maximum_resolvent_gain,
             &mut cancelled,
         )?;
         let mut original = Vec::with_capacity(d);
-        for (&value, &scale) in balanced.iter().zip(&self.state_scale) {
+        for (&value, &scale) in balanced.iter().zip(&self.flow.state_scale) {
             poll(&mut cancelled)?;
             original.push(restore_entry(finite(value)?, scale, 1.0)?);
         }
@@ -133,7 +133,7 @@ impl PreparedRotorMaxwellCycle {
         };
         let relative_fixed_point_residual = affine::affine_residual(
             &self.report.monodromy,
-            &self.physical_offset,
+            &self.flow.physical_offset,
             &original,
             &original,
             |_| Ok(0.0),
@@ -147,7 +147,7 @@ impl PreparedRotorMaxwellCycle {
         let mut peak = 0.0_f64;
         for state in &trajectory.boundary_states {
             poll(&mut cancelled)?;
-            for value in self.encode(
+            for value in self.flow.encode(
                 &state_values(state, self.report.dofs, self.report.memory_states)?,
                 &mut cancelled,
             )? {
@@ -163,7 +163,7 @@ impl PreparedRotorMaxwellCycle {
         for i in 0..d {
             poll(&mut cancelled)?;
             let difference = (Dd::from_f64(last[i]) - Dd::from_f64(original[i]))
-                * Dd::from_f64(self.state_scale[i]);
+                * Dd::from_f64(self.flow.state_scale[i]);
             closure = closure.max(finite(difference.to_f64().abs())?);
         }
         let relative_closure_residual = if peak == 0.0 {

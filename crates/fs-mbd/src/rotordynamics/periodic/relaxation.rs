@@ -26,6 +26,12 @@ mod harmonic;
 pub use harmonic::{prepare_maxwell_fourier_cycle, prepare_maxwell_harmonic_cycle};
 mod kinetics;
 pub use kinetics::RotorMaxwellKinetics;
+mod interval;
+use interval::Forcing;
+pub use interval::{
+    PreparedRotorMaxwellInterval, RotorIntervalForcing, RotorMaxwellIntervalResponse,
+    RotorMaxwellIntervalTrajectory, prepare_maxwell_interval,
+};
 pub mod power;
 
 #[cfg(test)]
@@ -77,7 +83,8 @@ pub struct RotorMaxwellState {
 /// Original physical state at the start and every coefficient boundary.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RotorMaxwellPeriodicTrajectory {
-    /// Physical boundary times, beginning at zero and ending at one period.
+    /// Physical boundary times. Cycles begin at zero; open intervals retain
+    /// their authored absolute start and end times.
     pub boundary_times_seconds: Vec<f64>,
     /// Continuous [q, q_dot, sigma] values; a switch does not reset stresses.
     pub boundary_states: Vec<RotorMaxwellState>,
@@ -94,12 +101,20 @@ pub struct RotorMaxwellPeriodicTrajectory {
 #[derive(Clone, Debug)]
 pub struct PreparedRotorMaxwellCycle {
     report: RotorMaxwellFloquetResponse,
+    flow: MaxwellFlow,
+}
+
+// One retained flow owner serves periodic analysis and open physical windows.
+// Only the periodic wrapper adds a spectrum or fixed-point solve.
+#[derive(Clone, Debug)]
+struct MaxwellFlow {
     state_scale: Vec<f64>,
     monodromy: Vec<f64>,
     offset: Vec<f64>,
     physical_offset: Vec<f64>,
     segment_maps: Vec<AffineSegmentMap>,
     boundary_times: Vec<f64>,
+    phase_times: Vec<Dd>,
 }
 
 /// Analyze a homogeneous periodic rotor with its original Maxwell memories.
@@ -181,11 +196,42 @@ fn prepare(
     retain_segments: bool,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<PreparedRotorMaxwellCycle, RotorError> {
+    let interval = prepare_flow(
+        spin_rad_s,
+        0.0,
+        segments,
+        branches,
+        kinetics,
+        Forcing::periodic(forces),
+        tolerance,
+        budget,
+        retain_segments,
+        true,
+        &mut cancelled,
+    )?;
+    interval.into_cycle(budget, retain_segments, &mut cancelled)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_flow(
+    spin_rad_s: f64,
+    start_seconds: f64,
+    segments: &[RotorPeriodicSegment<'_>],
+    branches: &[MaxwellDampingBranch],
+    kinetics: Option<RotorMaxwellKinetics<'_>>,
+    forces: Forcing<'_>,
+    tolerance: f64,
+    budget: RotorFloquetBudget,
+    retain_segments: bool,
+    spectrum: bool,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<PreparedRotorMaxwellInterval, RotorError> {
     poll(&mut cancelled)?;
     if segments.is_empty()
         || segments.len() > MAX_ROTOR_PERIODIC_SEGMENTS
         || branches.len() > MAX_ROTOR_MAXWELL_BRANCHES
         || !spin_rad_s.is_finite()
+        || !start_seconds.is_finite()
         || !tolerance.is_finite()
         || tolerance <= 0.0
         || tolerance >= 1.0
@@ -197,23 +243,31 @@ fn prepare(
     let reference = segments[0].model;
     let n = reference.dofs();
     let d = 2 * n + branches.len();
-    forces.admit(n, segments.len())?;
+    forces.shape.admit(n, segments.len())?;
     if let Some(kinetics) = kinetics {
         kinetics.validate(segments.len(), branches, &mut cancelled)?;
     }
-    let forced = forces.source_coordinates() != 0;
-    let dense_budget = budget.admit_states(
+    let forced = forces.shape.source_coordinates() != 0;
+    let admission = if spectrum {
+        RotorFloquetBudget::admit_states
+    } else {
+        RotorFloquetBudget::admit_interval_states
+    };
+    let dense_budget = admission(
+        budget,
         d,
         segments.len(),
-        forces.source_coordinates(),
-        forces.exponentials_per_segment(),
+        forces.shape.source_coordinates(),
+        forces.shape.exponentials_per_segment(),
         retain_segments,
     )?;
     // Reuse the fixed-speed owner's physical branch admission. This does not
     // eliminate or merge any branch and performs no spectral computation.
     reference.at_speed_with_maxwell_memory(spin_rad_s, branches, &mut cancelled)?;
     let mut boundary_times = Vec::with_capacity(segments.len() + 1);
-    boundary_times.push(0.0);
+    boundary_times.push(start_seconds);
+    let mut phase_times = Vec::with_capacity(segments.len() + 1);
+    phase_times.push(Dd::from_f64(start_seconds));
     let mut period = Dd::ZERO;
     for segment in segments {
         poll(&mut cancelled)?;
@@ -228,9 +282,35 @@ fn prepare(
             ));
         }
         period = period + Dd::from_f64(segment.duration_seconds);
-        boundary_times.push(finite(period.to_f64())?);
+        let exact_time = Dd::from_f64(start_seconds) + period;
+        let time = finite(exact_time.to_f64())?;
+        if !spectrum {
+            let rounding = exact_time - Dd::from_f64(time);
+            let relative =
+                finite((rounding / Dd::from_f64(segment.duration_seconds)).to_f64())?.abs();
+            if time <= boundary_times[boundary_times.len() - 1] || relative > tolerance {
+                return Err(RotorError::Invalid(
+                    "absolute interval time resolution exceeds the supplied tolerance",
+                ));
+            }
+        }
+        boundary_times.push(time);
+        // Legacy cycles retain their original rounded relative-time phase.
+        // Open windows keep exact authored start+elapsed phase internally.
+        phase_times.push(if spectrum {
+            Dd::from_f64(time)
+        } else {
+            exact_time
+        });
     }
     let period_seconds = finite(period.to_f64())?;
+    forces.admit_phases(
+        &boundary_times,
+        &phase_times,
+        segments,
+        tolerance,
+        &mut cancelled,
+    )?;
     let assembly = MaxwellGenerator::new(
         reference,
         branches,
@@ -257,7 +337,7 @@ fn prepare(
         maximum_mass_residual = maximum_mass_residual.max(residual);
         maximum_memory_residual = maximum_memory_residual.max(memory_residual);
         let h = segment.duration_seconds;
-        let (flow, force_residual) = match forces {
+        let (flow, force_residual) = match forces.shape {
             CycleForcing::Homogeneous => (
                 affine_segment_flow(&generator, &zero, d, dense_budget, &mut cancelled)?,
                 0.0,
@@ -273,32 +353,39 @@ fn prepare(
                     residual,
                 )
             }
-            CycleForcing::Harmonic { rows, order } => harmonic::segment_flow(
-                &mass,
-                &generator,
-                d,
-                rows[index],
-                order,
-                boundary_times[index],
-                h,
-                period_seconds,
-                tolerance,
-                dense_budget,
-                &mut cancelled,
-            )?,
-            CycleForcing::Fourier { rows, orders } => harmonic::fourier_segment_flow(
-                &mass,
-                &generator,
-                d,
-                rows[index],
-                orders,
-                boundary_times[index],
-                h,
-                period_seconds,
-                tolerance,
-                dense_budget,
-                &mut cancelled,
-            )?,
+            CycleForcing::Harmonic { rows, order } => {
+                super::harmonic::segment_flow_for_states_with_clock(
+                    &mass,
+                    &generator,
+                    d,
+                    rows[index],
+                    forces.clock(0, order),
+                    phase_times[index],
+                    h,
+                    period_seconds,
+                    tolerance,
+                    dense_budget,
+                    &mut cancelled,
+                )?
+            }
+            CycleForcing::Fourier { rows, orders } => {
+                super::fourier::segment_flow_for_states_with_clocks(
+                    &mass,
+                    &generator,
+                    d,
+                    rows[index],
+                    orders
+                        .iter()
+                        .enumerate()
+                        .map(|(index, &order)| forces.clock(index, order)),
+                    phase_times[index],
+                    h,
+                    period_seconds,
+                    tolerance,
+                    dense_budget,
+                    &mut cancelled,
+                )?
+            }
         };
         maximum_mass_residual = maximum_mass_residual.max(force_residual);
         // Chronological affine composition preserves all original stresses:
@@ -312,33 +399,7 @@ fn prepare(
             segment_maps.push(flow);
         }
     }
-    let complex: Vec<_> = monodromy
-        .iter()
-        .map(|&value| C64::new(value, 0.0))
-        .collect();
-    let multipliers = eig_with_cancel(&complex, d, budget.max_qr_sweeps_per_window, &mut cancelled)
-        .map_err(|error| match error {
-            EigError::Cancelled => RotorError::Cancelled,
-            other => RotorError::PeriodicSpectrum(other),
-        })?;
-    let mut spectral_radius = 0.0_f64;
-    for value in &multipliers {
-        finite(value.re)?;
-        finite(value.im)?;
-        let magnitude = finite(det::hypot(value.re, value.im))?;
-        if magnitude == 0.0 {
-            return Err(RotorError::Invalid(
-                "periodic memory multiplier is unresolved or underflowed",
-            ));
-        }
-        spectral_radius = spectral_radius.max(magnitude);
-    }
-    let growth_rate_per_s = finite(det::ln(spectral_radius) / period_seconds)?;
-    let balanced_monodromy = if retain_segments {
-        monodromy.clone()
-    } else {
-        Vec::new()
-    };
+    let balanced_monodromy = monodromy.clone();
     let mut physical_offset = Vec::with_capacity(d);
     for i in 0..d {
         poll(&mut cancelled)?;
@@ -352,26 +413,86 @@ fn prepare(
         }
     }
     poll(&mut cancelled)?;
-    Ok(PreparedRotorMaxwellCycle {
-        report: RotorMaxwellFloquetResponse {
+    Ok(PreparedRotorMaxwellInterval {
+        report: RotorMaxwellIntervalResponse {
             spin_rad_s,
-            period_seconds,
+            start_seconds,
+            duration_seconds: period_seconds,
             dofs: n,
             memory_states: branches.len(),
-            monodromy,
-            multipliers,
-            spectral_radius,
-            growth_rate_per_s,
+            transition: monodromy,
             maximum_mass_residual,
             maximum_memory_residual,
         },
-        state_scale: assembly.state_scale,
-        monodromy: balanced_monodromy,
-        offset,
-        physical_offset,
-        segment_maps,
-        boundary_times,
+        flow: MaxwellFlow {
+            state_scale: assembly.state_scale,
+            monodromy: balanced_monodromy,
+            offset,
+            physical_offset,
+            segment_maps,
+            boundary_times,
+            phase_times,
+        },
     })
+}
+
+impl PreparedRotorMaxwellInterval {
+    fn into_cycle(
+        self,
+        budget: RotorFloquetBudget,
+        retain_segments: bool,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedRotorMaxwellCycle, RotorError> {
+        let Self { report, mut flow } = self;
+        let d = flow.state_scale.len();
+        let complex: Vec<_> = flow
+            .monodromy
+            .iter()
+            .map(|&value| C64::new(value, 0.0))
+            .collect();
+        let multipliers = eig_with_cancel(
+            &complex,
+            d,
+            budget.max_qr_sweeps_per_window,
+            &mut *cancelled,
+        )
+        .map_err(|error| match error {
+            EigError::Cancelled => RotorError::Cancelled,
+            other => RotorError::PeriodicSpectrum(other),
+        })?;
+        let mut spectral_radius = 0.0_f64;
+        for value in &multipliers {
+            finite(value.re)?;
+            finite(value.im)?;
+            let magnitude = finite(det::hypot(value.re, value.im))?;
+            if magnitude == 0.0 {
+                return Err(RotorError::Invalid(
+                    "periodic memory multiplier is unresolved or underflowed",
+                ));
+            }
+            spectral_radius = spectral_radius.max(magnitude);
+        }
+        let growth_rate_per_s = finite(det::ln(spectral_radius) / report.duration_seconds)?;
+        if !retain_segments {
+            flow.monodromy = Vec::new();
+        }
+        poll(cancelled)?;
+        Ok(PreparedRotorMaxwellCycle {
+            report: RotorMaxwellFloquetResponse {
+                spin_rad_s: report.spin_rad_s,
+                period_seconds: report.duration_seconds,
+                dofs: report.dofs,
+                memory_states: report.memory_states,
+                monodromy: report.transition,
+                multipliers,
+                spectral_radius,
+                growth_rate_per_s,
+                maximum_mass_residual: report.maximum_mass_residual,
+                maximum_memory_residual: report.maximum_memory_residual,
+            },
+            flow,
+        })
+    }
 }
 
 // Shared original hereditary assembly for both native motion and physical work.
@@ -604,6 +725,27 @@ impl PreparedRotorMaxwellCycle {
         &self,
         initial: &RotorMaxwellState,
         relative_residual_tolerance: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<RotorMaxwellPeriodicTrajectory, RotorError> {
+        self.flow.advance(
+            &self.report.monodromy,
+            self.report.dofs,
+            self.report.memory_states,
+            initial,
+            relative_residual_tolerance,
+            cancelled,
+        )
+    }
+}
+
+impl MaxwellFlow {
+    fn advance(
+        &self,
+        physical_transition: &[f64],
+        n: usize,
+        memories: usize,
+        initial: &RotorMaxwellState,
+        relative_residual_tolerance: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<RotorMaxwellPeriodicTrajectory, RotorError> {
         poll(&mut cancelled)?;
@@ -615,7 +757,7 @@ impl PreparedRotorMaxwellCycle {
                 "periodic memory trajectory tolerance must be in (0,1)",
             ));
         }
-        let values = state_values(initial, self.report.dofs, self.report.memory_states)?;
+        let values = state_values(initial, n, memories)?;
         let d = self.state_scale.len();
         let mut balanced = self.encode(&values, &mut cancelled)?;
         let mut states = Vec::with_capacity(self.segment_maps.len() + 1);
@@ -634,25 +776,19 @@ impl PreparedRotorMaxwellCycle {
                 physical.push(restore_entry(*value, *scale, 1.0)?);
             }
             balanced = self.encode(&physical, &mut cancelled)?;
-            let n = self.report.dofs;
             states.push(RotorMaxwellState {
                 displacement: physical[..n].to_vec(),
                 velocity: physical[n..2 * n].to_vec(),
                 branch_stress: physical[2 * n..].to_vec(),
             });
         }
-        let final_values = state_values(
-            &states[states.len() - 1],
-            self.report.dofs,
-            self.report.memory_states,
-        )?;
+        let final_values = state_values(&states[states.len() - 1], n, memories)?;
         let relative_map_residual = affine::affine_residual(
-            &self.report.monodromy,
+            physical_transition,
             &self.physical_offset,
             &values,
             &final_values,
             |row| {
-                let n = self.report.dofs;
                 affine::row_activity(states.iter().map(|state| {
                     if row < n {
                         state.displacement[row]

@@ -36,15 +36,18 @@ pub use fourier::{MAX_ROTOR_FORCE_TONES, RotorFourierForce, prepare_fourier_cycl
 pub mod power;
 mod relaxation;
 pub use relaxation::power::{
-    PreparedRotorMaxwellPowerCycle, RotorMaxwellCyclePower, RotorMaxwellSegmentWork,
-    prepare_maxwell_forced_power_cycle, prepare_maxwell_fourier_power_cycle,
-    prepare_maxwell_harmonic_power_cycle,
+    PreparedRotorMaxwellPowerCycle, PreparedRotorMaxwellPowerInterval, RotorMaxwellCyclePower,
+    RotorMaxwellIntervalPower, RotorMaxwellSegmentWork, prepare_maxwell_forced_power_cycle,
+    prepare_maxwell_fourier_power_cycle, prepare_maxwell_harmonic_power_cycle,
+    prepare_maxwell_power_interval,
 };
 pub use relaxation::{
-    PreparedRotorMaxwellCycle, RotorMaxwellFloquetResponse, RotorMaxwellKinetics,
-    RotorMaxwellPeriodicOrbit, RotorMaxwellPeriodicTrajectory, RotorMaxwellState,
-    periodic_maxwell_floquet, prepare_maxwell_cycle, prepare_maxwell_forced_cycle,
-    prepare_maxwell_fourier_cycle, prepare_maxwell_harmonic_cycle,
+    PreparedRotorMaxwellCycle, PreparedRotorMaxwellInterval, RotorIntervalForcing,
+    RotorMaxwellFloquetResponse, RotorMaxwellIntervalResponse, RotorMaxwellIntervalTrajectory,
+    RotorMaxwellKinetics, RotorMaxwellPeriodicOrbit, RotorMaxwellPeriodicTrajectory,
+    RotorMaxwellState, periodic_maxwell_floquet, prepare_maxwell_cycle,
+    prepare_maxwell_forced_cycle, prepare_maxwell_fourier_cycle, prepare_maxwell_harmonic_cycle,
+    prepare_maxwell_interval,
 };
 
 /// Prescribed physical loading on the original coordinates of each cycle segment.
@@ -166,11 +169,14 @@ pub struct RotorPeriodicSegment<'a> {
 /// Work conservatively reserves 80 dense products per segment exponential,
 /// and additionally mass solves, chronological products and bounded complex QR.
 /// Fourier forcing reserves one held-source exponential plus one per tone.
+/// Open-interval preparation uses the same limits without QR work or sweep
+/// admission; it does not compute a Floquet spectrum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RotorFloquetBudget {
     /// Supplied segment count ceiling, in 1..=MAX_ROTOR_PERIODIC_SEGMENTS.
     pub max_segments: usize,
     /// Native QR sweeps per active window, in 1..=ROTOR_QR_SWEEPS_PER_WINDOW.
+    /// Ignored by open-interval preparation, which performs no spectral solve.
     pub max_qr_sweeps_per_window: usize,
     /// Aggregate live dense payload ceiling in bytes.
     pub max_dense_bytes: usize,
@@ -214,11 +220,50 @@ impl RotorFloquetBudget {
         exponentials_per_segment: usize,
         retain_segments: bool,
     ) -> Result<DenseExponentialBudget, RotorError> {
+        self.admit_states_with_spectrum(
+            d,
+            segments,
+            source_coordinates,
+            exponentials_per_segment,
+            retain_segments,
+            true,
+        )
+    }
+
+    fn admit_interval_states(
+        self,
+        d: usize,
+        segments: usize,
+        source_coordinates: usize,
+        exponentials_per_segment: usize,
+        retain_segments: bool,
+    ) -> Result<DenseExponentialBudget, RotorError> {
+        self.admit_states_with_spectrum(
+            d,
+            segments,
+            source_coordinates,
+            exponentials_per_segment,
+            retain_segments,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // one shared physical-work admission
+    fn admit_states_with_spectrum(
+        self,
+        d: usize,
+        segments: usize,
+        source_coordinates: usize,
+        exponentials_per_segment: usize,
+        retain_segments: bool,
+        spectrum: bool,
+    ) -> Result<DenseExponentialBudget, RotorError> {
         if self.max_segments == 0
             || self.max_segments > MAX_ROTOR_PERIODIC_SEGMENTS
             || segments > self.max_segments
-            || self.max_qr_sweeps_per_window == 0
-            || self.max_qr_sweeps_per_window > ROTOR_QR_SWEEPS_PER_WINDOW
+            || (spectrum
+                && (self.max_qr_sweeps_per_window == 0
+                    || self.max_qr_sweeps_per_window > ROTOR_QR_SWEEPS_PER_WINDOW))
         {
             return Err(RotorError::PeriodicBudget("segment or QR sweep admission"));
         }
@@ -244,10 +289,15 @@ impl RotorFloquetBudget {
         let cube = (d as u64).pow(3);
         let exponential_work =
             (e as u64).pow(3) * 84 * segments as u64 * exponentials_per_segment as u64;
-        let work = exponential_work
-            + cube
-                * (64 * (self.max_qr_sweeps_per_window as u64 + 1)
-                    + if retain_segments { 32 } else { 0 });
+        let spectrum_work = if spectrum {
+            64 * self.max_qr_sweeps_per_window as u64
+        } else {
+            0
+        };
+        // Keep the original fixed mass/assembly allowance in either path;
+        // interval propagation omits only the unused spectral iteration work.
+        let work =
+            exponential_work + cube * (64 + spectrum_work + if retain_segments { 32 } else { 0 });
         if bytes > self.max_dense_bytes || work > self.max_multiply_terms {
             return Err(RotorError::PeriodicBudget(
                 "dense byte or whole-cycle work admission",
