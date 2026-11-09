@@ -27,12 +27,12 @@
 # its position is not published, the dimensions row is DERIVED from the 16.0 mm tenon socket and the 32.0 mm bulb, with the bracket 18 to
 # 30 mm in unknowns.tsv (u-hole-7-position); it is open in a1, b-flat1 and b1 and closed in f1.
 # The window's mass is Ernoult and Fabre's (Acta Acustica united with Acustica 103, 2017, 106-116): each card's row `window wall-cut 4
-# cheeks parallel ramp 0.00051 18.6210 mass ernoult-fabre-2017` takes their closed form (eqs. 16, 18 and 23, fitted to 444 finite-element
+# cheeks parallel ramp 0.00050428 18.6210 mass ernoult-fabre-2017` takes their closed form (eqs. 16, 18 and 23, fitted to 444 finite-element
 # windows within 5 %) for the cut in the 6.650 mm wall of the 9.76 mm bore: W 4.6 mm, H 12.0 mm between parallel cheeks, ears rising at
 # 18.62 degrees. Their value is at the edge plane, 55.38 mm of bore; the card's junction is at the window centre, 2.3 mm upstream, with that
 # bore already in the network, so the window carries 53.08 mm. Their model has the edge in the window plane; the ramp's straight rise to the
-# edge 0.51 mm above the bore (windway exit 1.06 - step 0.8 + edge thickness 0.25 mm, so the edge inherits u-windway-height, bounds 0 to
-# 1.25 mm) is not in it and is not added. The row also solves the 3-D potential flow through the same cut (parallel cheeks, the labium ramp
+# edge 0.504 mm above the bore (windway exit 1.054 - step 0.8 + edge thickness 0.25 mm, so the edge inherits u-windway-height, bounds 0
+# to 1.25 mm) is not in it and is not added. The row also solves the 3-D potential flow through the same cut (parallel cheeks, the labium ramp
 # straight up to the edge and then rising 6.065 mm over the side walls' 18.0 mm beyond the window, 22.6 - 4.6 mm, the closed bore behind it,
 # free space outside: fs_bem::wall_window, a staircase of cut cells at 4, 8 and 16 axial cells, extrapolated at the order the three rungs
 # show) and prints it in the provenance as the comparison only: its inner end correction is checked against Dalmont 2002 within 3 %, its
@@ -47,8 +47,11 @@
 # comes out of the window mass, so the outer mass is not counted twice. It replaces mouth_loss_rel 0.02: the flue row's last field is 0.
 # The uniform cut-up piston on the same cylinder (`mouth_reaction window-cylinder-piston`, static mass 61.4 at the geometry before the
 # Ernoult-Fabre window and the oval head) is the shape bracket, reported with the landing renders, not rendered here.
-# The windway HEIGHT is not published for this alto. The recipe uses 1.8 mm / 1.7 = 1.06 mm (the opening height of the Berlin Bressan alto e
-# divided by the opening-to-exit area ratio of Bouterse's copy), with the bounds 0.5 to 1.8 mm in unknowns.tsv; the flue width is the window width.
+# The windway HEIGHT is not published for this alto. The cards take 0.98 x 440/409 = 1.05428 mm: the exit height F. Blanc measured on the
+# original head of a Zen-On Pol Bressan alto, a modern A440 copy and not alto d- (thesis 2009, sec. 6.2.1; ledger
+# blanc-2009-zenon-recorder-windway-exit), brought to alto d-'s size. Until 2026-11-08 the recipe used 1.8 mm / 1.7 = 1.06 mm (the opening
+# height of the Berlin Bressan alto e divided by the opening-to-exit area ratio of Bouterse's copy). The bounds stay 0.5 to 1.8 mm in
+# unknowns.tsv; the flue width is the window width.
 # The viscous windway law uses that exit height over the 61.5 mm windway length (an upper bound on the resistance of a tapering windway). The jet
 # card is the repository interim slot-jet card, chosen BEFORE any render because a windway jet is a slot jet (as for the tin whistle, whose
 # measured register ladder it reproduces).
@@ -59,11 +62,11 @@
 # crescendos (recorder-<fingering>-crescendo) are blown with NO pressure chosen: a linear ramp from 3 Pa to 600 Pa at 100 Pa/s (their ramps
 # ran at up to 500 Pa/s), the protocol of that paper. The fingerings are Bouterse's f1 (0 1 2 3 4 5 6 7), a1 (0 1 2 3 4 5), b-flat1 (0 1 2 3 4 . 6),
 # b1 (0 1 2 3 . 5 6). The gesture of the held notes is 50 ms attack, hold, 10.5 ms release.
-# Labium offset +0.1455 mm on the pipe side, DERIVED: the edge underside sits step - h/2 = 0.8 - 0.53 = 0.27 mm on the bore side of the jet
-# centreline, and the jet splits at the middle of the 0.25 mm edge face, where the dividing streamline of a jet meeting a flat face ends; the
-# face ends bracket it (+0.02 to +0.27 mm) and the windway-height bounds move it from -0.225 to +0.425 mm. Jet angle zero: the 0.3 mm rise of
+# Labium offset +0.14786 mm on the pipe side, DERIVED: the edge underside sits step - h/2 = 0.8 - 0.527 = 0.273 mm on the bore side of the
+# jet centreline, and the jet splits at the middle of the 0.25 mm edge face, where the dividing streamline of a jet meeting a flat face ends;
+# the face ends bracket it (+0.023 to +0.273 mm) and the windway-height bounds move it from -0.225 to +0.425 mm. Jet angle zero: the 0.3 mm rise of
 # the windway roof moves the jet 0.01 to 0.02 mm at the edge, inside that bracket.
-# Unknown or authored: the windway height and shape, onset ramp (50 ms), jet
+# Unknown or authored: the windway shape and alto d-'s own windway height (the cards take another recorder's), onset ramp (50 ms), jet
 # displacement gain (90, as in the flue gates), hole undercutting, hole 7, the thumb-hole venting that gives the second and third registers (not
 # modelled, so only fingerings of the first register are rendered), hole 7's position, the labium edge height. The binary must contain the
 # jet-island phase fix (fs-couple 1718d79fb or later), the computed window (the commit that adds this row), the one-sample channel line

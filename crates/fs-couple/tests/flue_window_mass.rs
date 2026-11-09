@@ -643,11 +643,11 @@ fn recorder_window_takes_ernoult_fabre_and_keeps_the_computed_mass_for_compariso
 fn ernoult_fabre_refuses_outside_its_geometry() {
     let base = recorder_a1();
     let refused = |text: &str| parse(text).is_err();
-    let row = "window wall-cut 4 cheeks parallel ramp 0.00051 18.6210 mass ernoult-fabre-2017";
+    let row = "window wall-cut 4 cheeks parallel ramp 0.00050428 18.6210 mass ernoult-fabre-2017";
     assert!(base.contains(row));
-    assert!(refused(&base.replace(row, "window wall-cut 4 cheeks radial ramp 0.00051 18.6210 mass ernoult-fabre-2017")));
-    assert!(refused(&base.replace(row, "window wall-cut 4 cheeks parallel ramp 0.00051 3.0 mass ernoult-fabre-2017")));
-    assert!(refused(&base.replace(row, "window wall-cut 4 cheeks parallel ramp 0.00051 18.6210 mass ernoult-fabre")));
+    assert!(refused(&base.replace(row, "window wall-cut 4 cheeks radial ramp 0.00050428 18.6210 mass ernoult-fabre-2017")));
+    assert!(refused(&base.replace(row, "window wall-cut 4 cheeks parallel ramp 0.00050428 3.0 mass ernoult-fabre-2017")));
+    assert!(refused(&base.replace(row, "window wall-cut 4 cheeks parallel ramp 0.00050428 18.6210 mass ernoult-fabre")));
     // Their closed end is flush with the window's upstream edge.
     assert!(refused(&base.replace(
         "duct_section 1 2 0.0023000 0.0098200",

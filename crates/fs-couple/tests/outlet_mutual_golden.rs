@@ -3,7 +3,9 @@
 //! each cut to a 2048-sample window with its first gesture event only, render
 //! the pressure bits recorded on the code before `outlet_mutual pritchard`
 //! (FNV-1a 64 of the little-endian f64 bits, printed by this file's first
-//! version on that code); without the row the same window renders other bits.
+//! version on that code; the recorder card's were recorded again on 2026-11-09
+//! at ca28955c9, when the card took the measured windway height); without the
+//! row the same window renders other bits.
 use fs_couple::flue_loop::network::outlet_mutual::OutletMutualForm;
 use fs_couple::flue_loop::network::performance::file::FlueFilePerformance;
 use fs_couple::pcm_wav::observation::PressureRenderer;
@@ -17,9 +19,10 @@ const RECORDER_A1: &str = include_str!("../../../data/instruments/descriptions/r
 const LAST_OUTLET: &str = "outlet 21 -0.0863000 0\n";
 const FREE: &str = "\noutlet_mutual free-field\n";
 const WINDOW: usize = 2048;
-/// Digests recorded before `pritchard` existed.
+/// Digests recorded before `pritchard` existed; recorder-a1's again on 2026-11-09 at
+/// ca28955c9 for the card at the measured windway height (h 1.05428 mm).
 const GOLDEN: [(&str, u64); 3] =
-    [("flute-d4", 0x8027_0d04_9e43_fb48), ("flute-g4", 0x1acd_072d_973e_4078), ("recorder-a1", 0xd456_972d_cf4e_966c)];
+    [("flute-d4", 0x8027_0d04_9e43_fb48), ("flute-g4", 0x1acd_072d_973e_4078), ("recorder-a1", 0x480a_2b02_aa03_de52)];
 
 fn gate() -> CancelGate { CancelGate::new_clock_free() }
 
