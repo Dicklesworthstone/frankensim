@@ -7662,6 +7662,38 @@ comparisons, TIR attenuation, and original angular-spectrum transfer and
 distance composition. Native execution of these additions remains pending
 after the implementation environment exhausted storage; no test pass is claimed.
 
+### Coherent coating and etalon frequency dispersion
+
+`PlanarDielectricLayers::second_order_frequency_dispersion` extends the same
+original-source frequency jets to finite coherent films. Its reflected E and
+transmitted E/H derivatives include material dispersion, propagation and repeated internal
+reflection; transmission phase refers to the actual exit face. The original
+stack, geometry, frequency, polarization and explicit fixed-angle or fixed-
+transverse-wavenumber constraint remain attached. The native carrier response
+and positive film-loss calculation are unchanged. Queries perform bounded
+O(layers) work without heap allocation or numerical frequency differencing.
+
+The existing bounded homogeneous E/H slab matrices anchor the carrier. Their
+local derivatives hold numerical normalization factors fixed and use the
+entire cosine/sinc functions of squared normal phase. A fixed Taylor band
+retains finite internal critical-layer derivatives without dividing by zero
+normal wavenumber or introducing an evanescent-branch cusp. The same normalized
+tail recurrence avoids growing transfer exponentials and nearly-unit reflection
+subtraction. Native opaque attenuation limits retain their front-interface jet;
+transmitted jets are unavailable after propagation or composed-gain underflow,
+since a rounded zero field does not establish zero derivatives. The existing
+first-order `frequency_dispersion` and driven-resonance APIs retain their cheaper
+specialized tangent path, sharing the same near-critical sinc polynomial.
+Critical exits and unsupported original material jets refuse; no phase is
+assigned to exact zero amplitudes. These local signed delays/GDD do not supply
+an incoherent-film phase, broadband pulse model or absorption derivative.
+
+Focused G1/G3 tests recover bulk and empty-stack limits, the Airy-series etalon
+dwell time, propagating/evanescent crossing of an exact internal critical film,
+full native lossy/dispersive spectral sweeps, subdivision and opaque limits.
+The fixtures verify numerical physics for authored laws, not experimental
+coating qualification.
+
 ### Native AC circuits on physical solid-conductor electrodes
 
 `harmonic::terminals::SpatialHarmonicTerminalFrequency` prepares the complete

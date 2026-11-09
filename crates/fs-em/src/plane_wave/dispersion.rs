@@ -30,6 +30,7 @@ pub use interface::{
     FresnelAmplitudeDispersion, FresnelLogarithmicDispersion, IncidenceFrequencyConstraint,
     InterfaceFrequencyDispersion,
 };
+pub(super) use interface::{normal_squared_derivatives, root_derivatives};
 
 type Result<T> = core::result::Result<T, ReflectionError>;
 

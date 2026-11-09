@@ -7,7 +7,7 @@ use fs_em::plane_wave::{
         AngularSpectrumGrid, AngularSpectrumLimits, AngularSpectrumSide, PlanarAngularSpectrum,
     },
     dispersion::IncidenceFrequencyConstraint,
-    layers::PlanarDielectricLayers,
+    layers::{DielectricLayer, PlanarDielectricLayers},
 };
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
@@ -483,6 +483,419 @@ fn g3_fixed_transverse_fresnel_jet_reaches_the_original_reflected_beam() {
     complex_near(jet.amplitude(), fields[2], 2e-15);
     complex_near(jet.derivative_s(), first, 2e-8 / omega);
     complex_near(jet.second_derivative_s2(), second, 3e-6 / omega / omega);
+}
+
+fn check_layer_frequency_sweep(
+    incident: DielectricResponse<'_>,
+    exit: DielectricResponse<'_>,
+    layers: &[DielectricLayer<'_>],
+    omega: f64,
+    cosine: f64,
+    polarization: Polarization,
+    constraint: IncidenceFrequencyConstraint,
+) {
+    let stack =
+        PlanarDielectricLayers::try_new_with_incident_response(incident, exit, omega, layers)
+            .unwrap();
+    let jet = stack
+        .second_order_frequency_dispersion(cosine, polarization, constraint)
+        .unwrap();
+    let first_order = stack
+        .frequency_dispersion(cosine, polarization, constraint)
+        .unwrap();
+    assert!(std::ptr::eq(jet.source(), &stack));
+    assert_eq!(jet.carrier(), stack.response(cosine, polarization).unwrap());
+    let reference =
+        PlanarDielectricInterface::try_new_with_incident_response(incident, exit).unwrap();
+    let ki = reference
+        .response(omega, 1.0, polarization)
+        .unwrap()
+        .incident_normal_wavenumber_rad_m;
+    let k_parallel = ki * ((1.0 - cosine) * (1.0 + cosine)).sqrt();
+    let step = omega * 1e-4;
+    let fields: [[C64; 3]; 5] = core::array::from_fn(|index| {
+        let frequency = omega + (index as f64 - 2.0) * step;
+        let c = if constraint == IncidenceFrequencyConstraint::FixedAngle {
+            cosine
+        } else {
+            let k = reference
+                .response(frequency, 1.0, polarization)
+                .unwrap()
+                .incident_normal_wavenumber_rad_m;
+            (1.0 - (k_parallel / k).powi(2)).sqrt()
+        };
+        let sampled = PlanarDielectricLayers::try_new_with_incident_response(
+            incident, exit, frequency, layers,
+        )
+        .unwrap()
+        .response(c, polarization)
+        .unwrap();
+        [
+            sampled.reflected_tangential_e,
+            sampled.transmitted_tangential_e,
+            sampled.transmitted_conjugate_h,
+        ]
+    });
+    for (index, amplitude) in [
+        jet.reflected_tangential_e(),
+        jet.transmitted_tangential_e().unwrap(),
+        jet.transmitted_conjugate_h().unwrap(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let [first, second] = differentiate_samples(fields.map(|value| value[index]), step);
+        let tangent = [
+            first_order.reflected_tangential_e(),
+            first_order.transmitted_tangential_e().unwrap(),
+            first_order.transmitted_conjugate_h().unwrap(),
+        ][index];
+        assert_eq!(amplitude.amplitude(), tangent.amplitude());
+        complex_near(
+            amplitude.scaled_derivatives()[0],
+            tangent.scaled_derivative(),
+            8e-12 * tangent.scaled_derivative().abs().max(1.0),
+        );
+        complex_near(amplitude.derivative_s(), first, 8e-8 / omega);
+        complex_near(
+            amplitude.second_derivative_s2(),
+            second,
+            8e-6 / omega / omega,
+        );
+    }
+}
+
+#[test]
+fn g1_coherent_film_jets_recover_native_bulk_propagation_and_half_space() {
+    use IncidenceFrequencyConstraint::{FixedAngle, FixedTransverseWavenumber};
+    let material = source(0.0);
+    let resonance = lorentz(material.clone());
+    let relaxation = debye(material.clone(), 1.0, 1.0);
+    let omega = 0.6 * OMEGA0;
+    for response in [
+        DielectricResponse::Lossless(&material),
+        DielectricResponse::Lorentz(&resonance),
+    ] {
+        let layers = [
+            DielectricLayer {
+                response,
+                thickness_m: 0.04,
+            },
+            DielectricLayer {
+                response,
+                thickness_m: 0.06,
+            },
+        ];
+        let stack = PlanarDielectricLayers::try_new_with_incident_response(
+            response, response, omega, &layers,
+        )
+        .unwrap();
+        let bulk = response
+            .bulk_dispersion(omega)
+            .unwrap()
+            .propagation(0.1)
+            .unwrap();
+        for constraint in [FixedAngle, FixedTransverseWavenumber] {
+            for polarization in [Polarization::Te, Polarization::Tm] {
+                let jet = stack
+                    .second_order_frequency_dispersion(1.0, polarization, constraint)
+                    .unwrap();
+                let amplitude = jet.transmitted_tangential_e().unwrap();
+                let phase = amplitude.logarithmic_dispersion().unwrap();
+                complex_near(amplitude.amplitude(), bulk.transfer, 2e-14);
+                near(phase.group_delay_s, bulk.group_delay_s, 2e-13 / omega);
+                near(
+                    phase.group_delay_dispersion_s2,
+                    bulk.group_delay_dispersion_s2,
+                    2e-12 / omega / omega,
+                );
+                for value in jet.reflected_tangential_e().scaled_derivatives() {
+                    complex_near(value, C64::ZERO, 2e-13);
+                }
+            }
+        }
+        let exit = DielectricResponse::Debye(&relaxation);
+        let empty =
+            PlanarDielectricLayers::try_new_with_incident_response(response, exit, omega, &[])
+                .unwrap();
+        let interface =
+            PlanarDielectricInterface::try_new_with_incident_response(response, exit).unwrap();
+        for polarization in [Polarization::Te, Polarization::Tm] {
+            for constraint in [FixedAngle, FixedTransverseWavenumber] {
+                let actual = empty
+                    .second_order_frequency_dispersion(0.7, polarization, constraint)
+                    .unwrap();
+                let expected = interface
+                    .frequency_dispersion(omega, 0.7, polarization, constraint)
+                    .unwrap();
+                for (a, b) in [
+                    (
+                        actual.reflected_tangential_e(),
+                        expected.reflected_tangential_e(),
+                    ),
+                    (
+                        actual.transmitted_tangential_e().unwrap(),
+                        expected.transmitted_tangential_e(),
+                    ),
+                    (
+                        actual.transmitted_conjugate_h().unwrap(),
+                        expected.transmitted_conjugate_h(),
+                    ),
+                ] {
+                    for (a, b) in a
+                        .scaled_derivatives()
+                        .into_iter()
+                        .zip(b.scaled_derivatives())
+                    {
+                        complex_near(a, b, 4e-13);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_resonant_etalon_delay_keeps_multiple_reflection_dwell_time() {
+    let ambient = source(0.0);
+    let omega = 0.7 * OMEGA0;
+    let ki = omega * (2.0 * E * M).sqrt();
+    for n in [2.0_f64, 8.0, 32.0] {
+        let film = source_with_storage(0.0, 2.0 * E * n * n, M);
+        let thickness = std::f64::consts::PI / (n * ki);
+        let stack = PlanarDielectricLayers::try_new(
+            &ambient,
+            DielectricResponse::Lossless(&ambient),
+            omega,
+            &[DielectricLayer {
+                response: DielectricResponse::Lossless(&film),
+                thickness_m: thickness,
+            }],
+        )
+        .unwrap();
+        // Independent Airy-series phase slope at the first half-wave resonance:
+        // tau = (n + 1/n)/2 times the single-pass phase time.
+        let expected = 0.5 * (n + n.recip()) * std::f64::consts::PI / omega;
+        for polarization in [Polarization::Te, Polarization::Tm] {
+            let jet = stack
+                .second_order_frequency_dispersion(
+                    1.0,
+                    polarization,
+                    IncidenceFrequencyConstraint::FixedAngle,
+                )
+                .unwrap();
+            let phase = jet
+                .transmitted_tangential_e()
+                .unwrap()
+                .logarithmic_dispersion()
+                .unwrap();
+            near(jet.carrier().transmitted_power_fraction, 1.0, 4e-13);
+            near(phase.group_delay_s, expected, 3e-12 * expected);
+            near(phase.group_delay_dispersion_s2, 0.0, 2e-10 / omega / omega);
+        }
+    }
+}
+
+#[test]
+fn g1_internal_critical_film_has_regular_delay_and_gdd_on_both_frequency_paths() {
+    let ambient = source_with_storage(0.0, 1.0, 1.0);
+    let critical = source_with_storage(0.0, 0.75, 1.0);
+    let exit = source_with_storage(0.0, 2.25, 1.0);
+    let layers = [DielectricLayer {
+        response: DielectricResponse::Lossless(&critical),
+        thickness_m: 1.3 / OMEGA0,
+    }];
+    for constraint in [
+        IncidenceFrequencyConstraint::FixedAngle,
+        IncidenceFrequencyConstraint::FixedTransverseWavenumber,
+    ] {
+        for polarization in [Polarization::Te, Polarization::Tm] {
+            check_layer_frequency_sweep(
+                DielectricResponse::Lossless(&ambient),
+                DielectricResponse::Lossless(&exit),
+                &layers,
+                OMEGA0,
+                0.5,
+                polarization,
+                constraint,
+            );
+        }
+    }
+    let critical_exit = PlanarDielectricLayers::try_new(
+        &ambient,
+        DielectricResponse::Lossless(&critical),
+        OMEGA0,
+        &[],
+    )
+    .unwrap();
+    assert!(critical_exit.response(0.5, Polarization::Te).is_ok());
+    assert!(
+        critical_exit
+            .second_order_frequency_dispersion(
+                0.5,
+                Polarization::Te,
+                IncidenceFrequencyConstraint::FixedTransverseWavenumber
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn g1_dispersive_absorbing_coating_jets_follow_full_native_spectral_sweeps() {
+    let material = source(0.03 * OMEGA0);
+    let clear = lorentz(source(0.0));
+    let resonance = lorentz(material.clone());
+    let relaxation = debye(material.clone(), 1.0, 1.0);
+    let conductor = ResolvedConductorState::try_from_material_with_basis(
+        material.clone(),
+        ElectricalPropertyBasis::Conductivity,
+    )
+    .unwrap();
+    let layers = [
+        DielectricLayer {
+            response: DielectricResponse::Debye(&relaxation),
+            thickness_m: 0.08,
+        },
+        DielectricLayer {
+            response: DielectricResponse::Lorentz(&resonance),
+            thickness_m: 0.17,
+        },
+        DielectricLayer {
+            response: DielectricResponse::Ohmic(&conductor),
+            thickness_m: 0.03,
+        },
+    ];
+    for incident in [
+        DielectricResponse::Lossless(&material),
+        DielectricResponse::Lorentz(&clear),
+    ] {
+        for omega in [0.4 * OMEGA0, 0.8 * OMEGA0] {
+            for cosine in [0.6, 1.0] {
+                for polarization in [Polarization::Te, Polarization::Tm] {
+                    for constraint in [
+                        IncidenceFrequencyConstraint::FixedAngle,
+                        IncidenceFrequencyConstraint::FixedTransverseWavenumber,
+                    ] {
+                        check_layer_frequency_sweep(
+                            incident,
+                            DielectricResponse::Debye(&relaxation),
+                            &layers,
+                            omega,
+                            cosine,
+                            polarization,
+                            constraint,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g3_film_frequency_jets_preserve_subdivision_and_opaque_limits() {
+    let ambient = source(0.03 * OMEGA0);
+    let resonance = lorentz(ambient.clone());
+    let conductor = ResolvedConductorState::try_from_material_with_basis(
+        ambient.clone(),
+        ElectricalPropertyBasis::Conductivity,
+    )
+    .unwrap();
+    for (response, thickness) in [
+        (DielectricResponse::Lorentz(&resonance), 0.3),
+        // Each half remains representable; their product underflows.
+        (DielectricResponse::Ohmic(&conductor), 400.0),
+        (DielectricResponse::Ohmic(&conductor), 1e5),
+    ] {
+        let one = [DielectricLayer {
+            response,
+            thickness_m: thickness,
+        }];
+        let split = [DielectricLayer {
+            response,
+            thickness_m: thickness * 0.5,
+        }; 2];
+        let whole = PlanarDielectricLayers::try_new(
+            &ambient,
+            DielectricResponse::Lossless(&ambient),
+            OMEGA0,
+            &one,
+        )
+        .unwrap();
+        let pieces = PlanarDielectricLayers::try_new(
+            &ambient,
+            DielectricResponse::Lossless(&ambient),
+            OMEGA0,
+            &split,
+        )
+        .unwrap();
+        for polarization in [Polarization::Te, Polarization::Tm] {
+            let a = whole
+                .second_order_frequency_dispersion(
+                    0.8,
+                    polarization,
+                    IncidenceFrequencyConstraint::FixedAngle,
+                )
+                .unwrap();
+            let b = pieces
+                .second_order_frequency_dispersion(
+                    0.8,
+                    polarization,
+                    IncidenceFrequencyConstraint::FixedAngle,
+                )
+                .unwrap();
+            for (a, b) in [
+                (
+                    Some(a.reflected_tangential_e()),
+                    Some(b.reflected_tangential_e()),
+                ),
+                (a.transmitted_tangential_e(), b.transmitted_tangential_e()),
+                (a.transmitted_conjugate_h(), b.transmitted_conjugate_h()),
+            ] {
+                assert_eq!(a.is_some(), b.is_some());
+                let (Some(a), Some(b)) = (a, b) else {
+                    continue;
+                };
+                for (a, b) in a
+                    .scaled_derivatives()
+                    .into_iter()
+                    .zip(b.scaled_derivatives())
+                {
+                    complex_near(a, b, 2e-10 * b.abs().max(1.0));
+                }
+            }
+            if thickness >= 400.0 {
+                let half = PlanarDielectricInterface::try_new(&ambient, response)
+                    .unwrap()
+                    .frequency_dispersion(
+                        OMEGA0,
+                        0.8,
+                        polarization,
+                        IncidenceFrequencyConstraint::FixedAngle,
+                    )
+                    .unwrap();
+                assert_eq!(a.carrier().transmitted_tangential_e, C64::ZERO);
+                assert!(a.transmitted_tangential_e().is_none());
+                assert!(a.transmitted_conjugate_h().is_none());
+                let first_order = pieces
+                    .frequency_dispersion(
+                        0.8,
+                        polarization,
+                        IncidenceFrequencyConstraint::FixedAngle,
+                    )
+                    .unwrap();
+                assert!(first_order.transmitted_tangential_e().is_none());
+                for (a, b) in a
+                    .reflected_tangential_e()
+                    .scaled_derivatives()
+                    .into_iter()
+                    .zip(half.reflected_tangential_e().scaled_derivatives())
+                {
+                    complex_near(a, b, 2e-13);
+                }
+            }
+        }
+    }
 }
 
 #[test]

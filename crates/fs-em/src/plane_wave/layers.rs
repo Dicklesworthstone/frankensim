@@ -36,6 +36,9 @@ use fs_math::{c64::C64, dd::Dd, det};
 pub mod frequency;
 pub use frequency::{LayerAmplitudeDerivative, LayeredFrequencyResponse, LayeredResonanceObservation};
 
+mod dispersion;
+pub use dispersion::LayeredFrequencyDispersion;
+
 mod illumination;
 pub use illumination::{
     CoherentLayerIllumination, IlluminationBudget, IncoherentLayerCascade, LayerIlluminationPower,

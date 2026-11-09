@@ -53,6 +53,26 @@ pub struct FresnelLogarithmicDispersion {
 }
 
 impl FresnelAmplitudeDispersion {
+    pub(in crate::plane_wave) fn try_from_scaled(
+        amplitude: C64,
+        omega: f64,
+        scaled_derivatives: [C64; 2],
+    ) -> Result<Self> {
+        let jet = Self {
+            amplitude,
+            omega,
+            scaled_derivatives,
+        };
+        if !finite(amplitude)
+            || !scaled_derivatives.into_iter().all(finite)
+            || !finite(jet.derivative_s())
+            || !finite(jet.second_derivative_s2())
+        {
+            return Err(invalid("Fresnel frequency derivatives are unrepresentable"));
+        }
+        Ok(jet)
+    }
+
     pub const fn amplitude(self) -> C64 {
         self.amplitude
     }
@@ -244,21 +264,15 @@ impl<'a> PlanarDielectricInterface<'a> {
             carrier.transmitted_tangential_e,
             carrier.transmitted_conjugate_h,
         ];
-        let amplitudes = core::array::from_fn(|index| FresnelAmplitudeDispersion {
-            amplitude: values[index],
-            omega: omega_rad_s,
-            scaled_derivatives: if index == 2 {
-                derivatives.map(core::ops::Neg::neg)
-            } else {
-                derivatives
-            },
-        });
-        if amplitudes
-            .iter()
-            .any(|jet| !finite(jet.derivative_s()) || !finite(jet.second_derivative_s2()))
-        {
-            return Err(invalid("Fresnel frequency derivatives are unrepresentable"));
-        }
+        let amplitudes = [
+            FresnelAmplitudeDispersion::try_from_scaled(values[0], omega_rad_s, derivatives)?,
+            FresnelAmplitudeDispersion::try_from_scaled(values[1], omega_rad_s, derivatives)?,
+            FresnelAmplitudeDispersion::try_from_scaled(
+                values[2],
+                omega_rad_s,
+                derivatives.map(core::ops::Neg::neg),
+            )?,
+        ];
         Ok(InterfaceFrequencyDispersion {
             incident,
             transmitted,
@@ -293,25 +307,7 @@ fn boundary_derivatives(
     if qt == C64::ZERO {
         return Err(invalid("critical transmission has no finite frequency jet"));
     }
-    let sine_squared = (1.0 - cosine) * (1.0 + cosine);
-    let (di, dt) = match constraint {
-        IncidenceFrequencyConstraint::FixedAngle => (
-            [ei[0].scale(cosine * cosine), ei[1].scale(cosine * cosine)],
-            core::array::from_fn(|index| {
-                et[index].scale(medium.mu_ratio) - ei[index].scale(sine_squared)
-            }),
-        ),
-        IncidenceFrequencyConstraint::FixedTransverseWavenumber => {
-            // k_parallel²/omega² contributes +2 s² and -6 s².
-            let transverse = [2.0 * sine_squared, -6.0 * sine_squared];
-            (
-                core::array::from_fn(|index| ei[index] + C64::from_re(transverse[index])),
-                core::array::from_fn(|index| {
-                    et[index].scale(medium.mu_ratio) + C64::from_re(transverse[index])
-                }),
-            )
-        }
-    };
+    let (di, dt) = normal_squared_derivatives(medium, cosine, constraint, ei, et);
     let di = root_derivatives(qi, di);
     let dt = root_derivatives(qt, dt);
     let (a, b, da, db) = match polarization {
@@ -352,7 +348,41 @@ fn boundary_derivatives(
     Ok(([first, second], dt))
 }
 
-fn root_derivatives(root: C64, squared_derivatives: [C64; 2]) -> [C64; 2] {
+// The same reduced normal-square jets drive the half-space and entire finite
+// slab functions. The latter never differentiates sqrt(q²) at an internal
+// critical layer: its cosine/sinc propagator is analytic in q² itself.
+pub(in crate::plane_wave) fn normal_squared_derivatives(
+    medium: WaveMedium,
+    cosine: f64,
+    constraint: IncidenceFrequencyConstraint,
+    ei: [C64; 2],
+    et: [C64; 2],
+) -> ([C64; 2], [C64; 2]) {
+    let sine_squared = (1.0 - cosine) * (1.0 + cosine);
+    match constraint {
+        IncidenceFrequencyConstraint::FixedAngle => (
+            [ei[0].scale(cosine * cosine), ei[1].scale(cosine * cosine)],
+            core::array::from_fn(|index| {
+                et[index].scale(medium.mu_ratio) - ei[index].scale(sine_squared)
+            }),
+        ),
+        IncidenceFrequencyConstraint::FixedTransverseWavenumber => {
+            // k_parallel²/omega² contributes +2 s² and -6 s².
+            let transverse = [2.0 * sine_squared, -6.0 * sine_squared];
+            (
+                core::array::from_fn(|index| ei[index] + C64::from_re(transverse[index])),
+                core::array::from_fn(|index| {
+                    et[index].scale(medium.mu_ratio) + C64::from_re(transverse[index])
+                }),
+            )
+        }
+    }
+}
+
+pub(in crate::plane_wave) fn root_derivatives(
+    root: C64,
+    squared_derivatives: [C64; 2],
+) -> [C64; 2] {
     let first = (squared_derivatives[0] / root).scale(0.5);
     [
         first,

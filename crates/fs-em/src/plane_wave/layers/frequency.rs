@@ -375,18 +375,8 @@ fn bounded_sinc_jet(
     let (sine, cosine) = det::sin_cos_dd(phase);
     let (sine, cosine) = (sine.to_f64(), cosine.to_f64());
     let p = C64::new(attenuation * cosine, -attenuation * sine);
-    let result = if delta.abs() < 0.5 {
-        let coefficients = [
-            1.0, -1.0 / 6.0, 1.0 / 120.0, -1.0 / 5040.0,
-            1.0 / 362880.0, -1.0 / 39916800.0, 1.0 / 6227020800.0,
-            -1.0 / 1307674368000.0, 1.0 / 355687428096000.0,
-        ];
-        let mut sinc = C64::from_re(coefficients[8]);
-        let mut sinc_z = C64::ZERO;
-        for coefficient in coefficients[..8].iter().rev() {
-            sinc_z = sinc_z * z + sinc;
-            sinc = sinc * z + C64::from_re(*coefficient);
-        }
+    let result = if z.abs() <= 1.0 {
+        let [sinc, sinc_z, _] = super::dispersion::sinc_series(z);
         (p * sinc, p * sinc_z)
     } else {
         let power = det::exp(2.0 * delta.im);
