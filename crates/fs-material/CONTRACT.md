@@ -24166,3 +24166,40 @@ Formatting and bounded static review passed; these tests were not compiled or
 executed because this workspace has no runnable Cargo toolchain. Complete
 dry-out, nucleation, drag, shielding and moving-volume work remain outside this
 positive-seed, well-mixed chamber path.
+
+## Viscoelastic coatings on a mechanical backing
+
+`elastic::acoustic::viscoelastic::layers::SupportedViscoelasticLayers` prepares
+normal longitudinal reflection from one original fluid into bonded
+viscoelastic layers terminated by
+`ViscoelasticBacking::{TractionFree, Clamped, Impedance}`. Each coating retains
+its original bulk/shear Maxwell sources, identities, density, frequency band,
+branch budgets and strain admission. Empty coatings retain the direct
+fluid/backing boundary; zero-thickness layers still enforce material domains.
+
+The native convention is `exp(+i omega t)`, compression `p = -sigma_zz`,
+velocity directed into the backing, and `p = Z v`. A finite backing requires
+finite `Z` with nonnegative real part. An adapter whose original mechanical
+law uses `exp(-i omega t)` conjugates that law's impedance explicitly. This
+normal scalar model supplies neither oblique mode conversion nor a causal
+realization of an arbitrary impedance snapshot.
+
+Driving reuses the stable scattering stack and original positive bulk/shear
+strain-work kernels. `SupportedViscoelasticPower` reports total incident,
+reflected, intrinsic bulk, intrinsic shear and backing powers in watts over
+the requested area. Backing work is independently
+`area * Re(Z) * |v_rear|^2 / 2`; no reflected-power deficit supplies heat.
+
+Actual rear compression and velocity, every layer's interior field and
+per-layer/subinterval intrinsic absorption remain available. Rear motion is
+retained directly through the scaled termination, including a finite stiff
+backing whose reflection rounds to the clamped limit; its exact rear field
+uses that trace. Free and clamped boundaries retain exactly zero traction or
+velocity. Cancellation, unrepresentable solves and original strain limits
+fail before response publication. Warm drives and observations allocate
+nothing and do not query the constitutive sources again.
+
+Five focused regression definitions cover an independent dissipative
+two-layer reference and positive heat partition, empty/zero/lossless phases,
+free/clamped/stiff supports, sub-ulp intrinsic heat, opaque shielding, scaling
+and original source-domain/cancellation admission.

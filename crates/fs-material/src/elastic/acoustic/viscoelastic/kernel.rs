@@ -50,7 +50,7 @@ pub(crate) struct Field {
     pub(crate) heat_density: [f64; 2],
 }
 
-fn finite(z: C64) -> bool {
+pub(super) fn finite(z: C64) -> bool {
     z.re.is_finite() && z.im.is_finite()
 }
 
@@ -541,6 +541,12 @@ impl Slab {
             let b = inward[1] * propagation(self.k, self.length - depth)?;
             (a + b, (a - b) / self.impedance)
         };
+        self.field_from_trace(pressure, velocity)
+    }
+
+    /// Reuse the original constitutive observation at an independently retained
+    /// boundary trace, without recovering tiny velocity from opposite waves.
+    pub(crate) fn field_from_trace(&self, pressure: C64, velocity: C64) -> Result<Field> {
         let strain = -(pressure / self.modulus);
         if [pressure, velocity, strain].iter().any(|z| !finite(*z)) {
             return Err("viscoelastic interior field is unrepresentable");

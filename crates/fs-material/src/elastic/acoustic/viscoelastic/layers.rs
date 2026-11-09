@@ -22,6 +22,12 @@ use crate::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_blake3::ContentHash;
 use fs_math::{c64::C64, det};
 
+mod supported;
+pub use supported::{
+    DrivenSupportedViscoelasticLayers, SupportedViscoelasticLayers, SupportedViscoelasticPower,
+    ViscoelasticBacking,
+};
+
 /// Hard bound on the number of original solids in one prepared stack.
 pub const MAX_VISCOELASTIC_LAYERS: usize = 256;
 
@@ -37,7 +43,8 @@ pub struct ViscoelasticLayer<'a> {
 /// Explicit preparation work and storage allowance; no hidden growth.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ViscoelasticLayerBudget {
-    /// At most 256 original layers, with at least one required in the stack.
+    /// At most 256 original layers. A two-fluid stack requires at least one;
+    /// a supported boundary also admits an empty coating.
     pub maximum_layers: usize,
     /// Total bulk plus shear branches across the stack. Every individual layer
     /// also retains the original slab's hard limit of 64 branches.
@@ -97,6 +104,95 @@ fn error(error: kernel::layers::Error) -> ViscoelasticSlabError {
     }
 }
 
+struct PreparedMaterials {
+    moduli: Vec<[C64; 2]>,
+    reference: Vec<f64>,
+}
+
+fn prepare_materials(
+    layers: &[ViscoelasticLayer<'_>],
+    angular_frequency_rad_s: f64,
+    budget: ViscoelasticLayerBudget,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<PreparedMaterials, ViscoelasticSlabError> {
+    poll(cancelled)?;
+    if budget.maximum_layers > MAX_VISCOELASTIC_LAYERS
+        || budget.maximum_total_branches
+            > MAX_VISCOELASTIC_LAYERS * MAX_VISCOELASTIC_SLAB_BRANCHES
+        || layers.len() > budget.maximum_layers
+    {
+        return Err(ViscoelasticSlabError::Budget);
+    }
+    let mut total_branches = 0_usize;
+    for layer in layers {
+        poll(cancelled)?;
+        total_branches = total_branches
+            .checked_add(layer.source.bulk.terms.len())
+            .and_then(|n| n.checked_add(layer.source.shear.terms.len()))
+            .filter(|n| *n <= budget.maximum_total_branches)
+            .ok_or(ViscoelasticSlabError::Budget)?;
+    }
+    let mut moduli = Vec::with_capacity(layers.len());
+    let mut reference = Vec::with_capacity(layers.len());
+    for layer in layers {
+        poll(cancelled)?;
+        let values = source_moduli(
+            layer.source,
+            angular_frequency_rad_s,
+            MAX_VISCOELASTIC_SLAB_BRANCHES,
+            cancelled,
+        )?;
+        let modulus = values[0] + values[1].scale(4.0 / 3.0);
+        let impedance = modulus
+            .sqrt()
+            .scale(det::sqrt(layer.source.density_kg_m3))
+            .abs();
+        if !impedance.is_finite() || impedance <= 0.0 {
+            return Err(ViscoelasticSlabError::Invalid(
+                "solid reference impedance is unrepresentable",
+            ));
+        }
+        moduli.push(values);
+        reference.push(impedance);
+    }
+    Ok(PreparedMaterials { moduli, reference })
+}
+
+fn prepare_stack(
+    layers: &[ViscoelasticLayer<'_>],
+    materials: &PreparedMaterials,
+    angular_frequency_rad_s: f64,
+    exterior: [f64; 2],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<kernel::layers::Stack, ViscoelasticSlabError> {
+    let mut waves = Vec::with_capacity(layers.len());
+    let mut previous = exterior[0];
+    for (i, layer) in layers.iter().enumerate() {
+        poll(cancelled)?;
+        // Balanced real wave coordinates at the exact interface. These
+        // zero-distance ports are mathematical, not extra fluid layers.
+        let next = if i + 1 == layers.len() {
+            exterior[1]
+        } else {
+            det::sqrt(materials.reference[i]) * det::sqrt(materials.reference[i + 1])
+        };
+        let wave = kernel::Slab::new(
+            layer.source.density_kg_m3,
+            materials.moduli[i],
+            angular_frequency_rad_s,
+            layer.thickness_m,
+            [previous, next],
+        )
+        .map_err(ViscoelasticSlabError::Invalid)?;
+        waves.push(kernel::layers::Layer {
+            wave,
+            maximum_strain: layer.source.maximum_absolute_strain,
+        });
+        previous = next;
+    }
+    kernel::layers::Stack::new(waves, cancelled).map_err(error)
+}
+
 impl<'a> ViscoelasticLayers<'a> {
     /// Prepare every original source once and compose its coherent scattering.
     /// The two exterior sources are queried once each, or once in total if the
@@ -109,50 +205,11 @@ impl<'a> ViscoelasticLayers<'a> {
         budget: ViscoelasticLayerBudget,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ViscoelasticSlabError> {
-        poll(cancelled)?;
-        if budget.maximum_layers > MAX_VISCOELASTIC_LAYERS
-            || budget.maximum_total_branches
-                > MAX_VISCOELASTIC_LAYERS * MAX_VISCOELASTIC_SLAB_BRANCHES
-            || layers.len() > budget.maximum_layers
-        {
-            return Err(ViscoelasticSlabError::Budget);
-        }
+        let materials = prepare_materials(layers, angular_frequency_rad_s, budget, cancelled)?;
         if layers.is_empty() {
             return Err(ViscoelasticSlabError::Invalid(
                 "a solid stack needs at least one layer",
             ));
-        }
-        let mut total_branches = 0_usize;
-        for layer in layers {
-            poll(cancelled)?;
-            total_branches = total_branches
-                .checked_add(layer.source.bulk.terms.len())
-                .and_then(|n| n.checked_add(layer.source.shear.terms.len()))
-                .filter(|n| *n <= budget.maximum_total_branches)
-                .ok_or(ViscoelasticSlabError::Budget)?;
-        }
-        let mut moduli = Vec::with_capacity(layers.len());
-        let mut reference = Vec::with_capacity(layers.len());
-        for layer in layers {
-            poll(cancelled)?;
-            let values = source_moduli(
-                layer.source,
-                angular_frequency_rad_s,
-                MAX_VISCOELASTIC_SLAB_BRANCHES,
-                cancelled,
-            )?;
-            let modulus = values[0] + values[1].scale(4.0 / 3.0);
-            let impedance = modulus
-                .sqrt()
-                .scale(det::sqrt(layer.source.density_kg_m3))
-                .abs();
-            if !impedance.is_finite() || impedance <= 0.0 {
-                return Err(ViscoelasticSlabError::Invalid(
-                    "solid reference impedance is unrepresentable",
-                ));
-            }
-            moduli.push(values);
-            reference.push(impedance);
         }
         let left = exterior_sources[0].acoustic_state()?;
         let right = if core::ptr::eq(exterior_sources[0], exterior_sources[1]) {
@@ -160,32 +217,16 @@ impl<'a> ViscoelasticLayers<'a> {
         } else {
             exterior_sources[1].acoustic_state()?
         };
-        let mut waves = Vec::with_capacity(layers.len());
-        let mut previous = left.characteristic_impedance_pa_s_m();
-        for (i, layer) in layers.iter().enumerate() {
-            poll(cancelled)?;
-            // Balanced real wave coordinates at the exact interface. These
-            // zero-distance ports are mathematical, not extra fluid layers.
-            let next = if i + 1 == layers.len() {
-                right.characteristic_impedance_pa_s_m()
-            } else {
-                det::sqrt(reference[i]) * det::sqrt(reference[i + 1])
-            };
-            let wave = kernel::Slab::new(
-                layer.source.density_kg_m3,
-                moduli[i],
-                angular_frequency_rad_s,
-                layer.thickness_m,
-                [previous, next],
-            )
-            .map_err(ViscoelasticSlabError::Invalid)?;
-            waves.push(kernel::layers::Layer {
-                wave,
-                maximum_strain: layer.source.maximum_absolute_strain,
-            });
-            previous = next;
-        }
-        let wave = kernel::layers::Stack::new(waves, cancelled).map_err(error)?;
+        let wave = prepare_stack(
+            layers,
+            &materials,
+            angular_frequency_rad_s,
+            [
+                left.characteristic_impedance_pa_s_m(),
+                right.characteristic_impedance_pa_s_m(),
+            ],
+            cancelled,
+        )?;
         poll(cancelled)?;
         Ok(Self {
             layers: layers.to_vec(),
