@@ -86,6 +86,7 @@ fn mutual_loading_regularizes_an_isolated_chimney_pole_without_cancellation() {
             radius_m: 0.002,
             chimney: [C64::ONE, r + C64::new(0.0, 1.0e5), C64::ZERO, C64::ONE],
             self_radiation: C64::new(0.0, -1.0e5),
+            mouth_radius_m: 0.0,
         };
         let ports = [make(0.0), make(distance)];
         let determinant = r * r - zm * zm;
@@ -122,6 +123,7 @@ fn unequal_lossless_chimneys_preserve_the_full_boundary_equations_and_acoustic_p
                 chimney: [C64::from_re(c), C64::new(0.0, -reference * s),
                     C64::new(0.0, -s / reference), C64::from_re(c)],
                 self_radiation: C64::new(2.0e5, -3.0e5),
+                mouth_radius_m: 0.0,
             }
         })
         .collect();
@@ -288,7 +290,7 @@ fn coupled_radiation_survives_half_and_full_wave_bore_runs() {
 }
 
 fn zero_chimney_port(position_m: f64, radius_m: f64, load: C64) -> CoupledPort {
-    CoupledPort { position_m, radius_m, chimney: [C64::ONE, C64::ZERO, C64::ZERO, C64::ONE], self_radiation: load }
+    CoupledPort { position_m, radius_m, chimney: [C64::ONE, C64::ZERO, C64::ZERO, C64::ONE], self_radiation: load, mouth_radius_m: 0.0 }
 }
 
 #[test]
@@ -486,6 +488,7 @@ fn the_complete_bore_regularizes_joint_chimney_poles_and_preserves_physical_powe
                 radius_m: 0.002,
                 chimney: [a, b, c, a],
                 self_radiation: z + diagonal_reactance + C64::from_re(epsilon),
+                mouth_radius_m: 0.0,
             });
             let holes = [prepared_coupled_hole(1, ports[0], reference),
                 prepared_coupled_hole(3, ports[1], reference)];
@@ -710,6 +713,7 @@ fn coupled_orifices_survive_joint_chimney_poles_without_changing_the_load() {
                 radius_m: 0.002,
                 chimney: [C64::from_re(cosine), C64::new(0.0, -characteristic * sine), c, C64::from_re(cosine)],
                 self_radiation: z + C64::new(epsilon, characteristic * sine / cosine),
+                mouth_radius_m: 0.0,
             });
             let holes = [prepared_coupled_hole(1, ports[0], reference),
                 prepared_coupled_hole(3, ports[1], reference)];

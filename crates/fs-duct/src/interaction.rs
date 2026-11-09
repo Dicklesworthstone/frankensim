@@ -36,6 +36,8 @@ use crate::{Duct, DuctError, LossModel, Segment, Termination, WallModel};
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod piston_tests;
 mod retained;
 
 fn bad(what: &'static str) -> DuctError {
@@ -49,6 +51,7 @@ fn finite(z: C64) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OpenHoleInteraction {
     epsilon: f64,
+    piston: bool,
 }
 
 impl OpenHoleInteraction {
@@ -61,7 +64,29 @@ impl OpenHoleInteraction {
         if !(epsilon.is_finite() && epsilon > 0.0) {
             return Err(bad("open-hole interaction needs a positive finite radiation-space factor"));
         }
-        Ok(Self { epsilon })
+        Ok(Self { epsilon, piston: false })
+    }
+
+    /// Replace the point-monopole mutual impedance by the large-distance form of the mutual impedance of two baffled circular pistons: each pair's monopole term is
+    /// multiplied by the piston directivity `D(k a) = 2 J1(k a)/(k a)` of both mouths (`a` = the mouth radius; the bell's own radius), the grazing-direction value of the
+    /// exact uniform-piston pair integral `Z_nm = (rho c k/2 pi) Int (kappa/k_z) D_n D_m J0(kappa d) d kappa` (Rayleigh integral and plane-wave spectrum). The monopole form omits
+    /// these factors, which is what makes its radiation load non-passive once the mouths are not small (the openings of a saxophone reach `ka` 7, its bell 22). The factor 2 of the
+    /// half space is part of the piston form, so any `epsilon` other than 2 refuses; distances, chimneys and the self radiation are unchanged. Without this call the mutual impedance is
+    /// the monopole of TMMI Eq. 16 bit for bit.
+    ///
+    /// # Errors
+    /// An `epsilon` other than 2 refuses.
+    pub fn with_piston(self) -> Result<Self, DuctError> {
+        if self.epsilon != 2.0 {
+            return Err(bad("the piston mutual impedance is the half-space form: it needs epsilon 2"));
+        }
+        Ok(Self { piston: true, ..self })
+    }
+
+    /// Whether the mutual impedance is the baffled-piston form.
+    #[must_use]
+    pub const fn is_piston(self) -> bool {
+        self.piston
     }
 
     /// The radiation-space factor of the mutual impedance.
@@ -73,7 +98,7 @@ impl OpenHoleInteraction {
     /// Every opening radiates alone: the mutual impedance vanishes (`epsilon` infinite). The network a frequency falls back to when the coupled
     /// solve is active there (bead frankensim-1xe5t).
     pub(crate) const fn independent() -> Self {
-        Self { epsilon: f64::INFINITY }
+        Self { epsilon: f64::INFINITY, piston: false }
     }
 
     /// Whether this is the independent network.
@@ -101,6 +126,39 @@ pub(crate) fn mutual_radiation_impedance(
     if finite(z) { Ok(z) } else { Err(DuctError::Singular) }
 }
 
+/// Directivity `D(x) = 2 J1(x)/x` of a baffled circular piston at `x = k a` (1 at 0, the series below 1e-4).
+fn piston_directivity(x: f64) -> Result<f64, DuctError> {
+    let x = x.abs();
+    if !(x.is_finite() && x <= 200.0) {
+        return Err(bad("the piston directivity is evaluated for k a up to 200"));
+    }
+    if x < 1.0e-4 {
+        let x2 = x * x;
+        return Ok(1.0 - x2 / 8.0 + x2 * x2 / 192.0);
+    }
+    Ok(2.0 * fs_math::special::bessel_j1(x) / x)
+}
+
+/// Mutual impedance of two baffled circular mouths of radii `radius_n`, `radius_m` at `distance_m`, in the large-distance form: the monopole of Eq. 16 times both piston
+/// directivities (see [`OpenHoleInteraction::with_piston`]).
+pub(crate) fn mutual_piston_impedance(
+    exterior: &GasState,
+    omega: f64,
+    distance_m: f64,
+    radius_n: f64,
+    radius_m: f64,
+    interaction: OpenHoleInteraction,
+) -> Result<C64, DuctError> {
+    if !(radius_n > 0.0 && radius_n.is_finite() && radius_m > 0.0 && radius_m.is_finite()) {
+        return Err(bad("the piston mutual impedance needs every opening's mouth radius"));
+    }
+    let z = mutual_radiation_impedance(exterior, omega, distance_m, interaction)?;
+    let k = omega / exterior.sound_speed;
+    let factor = piston_directivity(k * radius_n)? * piston_directivity(k * radius_m)?;
+    let z = z.scale(factor);
+    if finite(z) { Ok(z) } else { Err(DuctError::Singular) }
+}
+
 /// One radiating opening: its station, its chimney as `[p_bore, U_in] = M [p_mouth, U_mouth]`
 /// (`U_mouth` leaves the mouth) and the self-radiation load that closes the chimney.
 #[derive(Debug, Clone, Copy)]
@@ -110,12 +168,20 @@ pub(crate) struct CoupledPort {
     pub radius_m: f64,
     pub chimney: [C64; 4],
     pub self_radiation: C64,
+    /// The mouth's own radius, used by the baffled-piston mutual impedance only (the bell has `radius_m` 0 for the distance rule but its true radius here); 0 = not given.
+    pub mouth_radius_m: f64,
 }
 
 impl CoupledPort {
     /// The open end of the bore: no chimney, the termination's load is its self radiation.
     pub(crate) fn open_end(position_m: f64, load: C64) -> Self {
-        Self { position_m, radius_m: 0.0, chimney: [C64::ONE, C64::ZERO, C64::ZERO, C64::ONE], self_radiation: load }
+        Self { position_m, radius_m: 0.0, chimney: [C64::ONE, C64::ZERO, C64::ZERO, C64::ONE], self_radiation: load, mouth_radius_m: 0.0 }
+    }
+
+    /// The same opening with its true mouth radius recorded for the baffled-piston mutual impedance (the distance rule keeps `radius_m`).
+    pub(crate) fn with_mouth_radius(mut self, mouth_radius_m: f64) -> Self {
+        self.mouth_radius_m = mouth_radius_m;
+        self
     }
 
     /// A fully open tone hole built exactly as `chimney_open_response_with_wall` builds it: the
@@ -143,7 +209,7 @@ impl CoupledPort {
         let (radiation, _) = crate::exterior::termination_impedance(
             Termination::FlangedOpen, state, exterior, hole_radius, omega)?;
         let self_radiation = radiation.ok_or_else(|| bad("an open hole needs a radiating mouth"))?;
-        Ok(Self { position_m, radius_m: hole_radius, chimney: line.abcd()?, self_radiation })
+        Ok(Self { position_m, radius_m: hole_radius, chimney: line.abcd()?, self_radiation, mouth_radius_m: hole_radius })
     }
 }
 
@@ -210,7 +276,12 @@ fn chimney_matrices(
         inflow[i * q + i] = c * ports[i].self_radiation + d;
         for j in i + 1..q {
             // The exterior is reciprocal; evaluate each mutual kernel once.
-            let z = mutual_radiation_impedance(exterior, omega, pair_distance(&ports[i], &ports[j]), interaction)?;
+            let distance = pair_distance(&ports[i], &ports[j]);
+            let z = if interaction.is_piston() {
+                mutual_piston_impedance(exterior, omega, distance, ports[i].mouth_radius_m, ports[j].mouth_radius_m, interaction)?
+            } else {
+                mutual_radiation_impedance(exterior, omega, distance, interaction)?
+            };
             m[i * q + j] = a * z;
             m[j * q + i] = ports[j].chimney[0] * z;
             inflow[i * q + j] = c * z;

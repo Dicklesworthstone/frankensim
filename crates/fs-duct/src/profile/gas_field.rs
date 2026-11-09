@@ -479,7 +479,7 @@ impl GasFieldDuct {
             }
         }
         let length: f64 = self.duct.segments.iter().map(Segment::axial_length).sum();
-        let bell = load.map(|z| CoupledPort::open_end(length, z));
+        let bell = load.map(|z| CoupledPort::open_end(length, z).with_mouth_radius(radius));
         Ok(CoupledSetup { chain, holes, ports, bell, radiation: *radiation, load, mouth_ka })
     }
 
