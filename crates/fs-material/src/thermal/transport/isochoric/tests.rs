@@ -257,3 +257,53 @@ fn g0_fixed_volume_internal_energy_is_refused_as_open_stream_enthalpy() {
     assert_eq!(initial.cells()[&CellId(0)].specific_h_j_kg, 0.0);
     assert_eq!(initial.time_s(), 0.0);
 }
+
+#[test]
+fn g0_relative_retained_internal_energy_keeps_sub_temperature_ulp_heat_and_source_limits() {
+    let law = law([500.0, 700.0, 1000.0]);
+    let reference = 400.0_f64;
+    let tiny =
+        law.specific_heat_cv_j_kg_k(reference).unwrap() * (reference.next_up() - reference) * 0.125;
+    assert!(tiny > 0.0);
+    assert_eq!(
+        law.temperature_at_relative_internal_energy(reference, tiny)
+            .unwrap(),
+        reference
+    );
+    assert!(
+        law.temperature_after_specific_heat(reference, tiny)
+            .is_err()
+    );
+    for target in [250.0, 300.0, 350.0, 425.0, 500.0] {
+        let energy = law
+            .specific_internal_energy_change_j_kg(reference, target)
+            .unwrap();
+        close(
+            law.temperature_at_relative_internal_energy(reference, energy)
+                .unwrap(),
+            target,
+        );
+    }
+    let upper = law
+        .specific_internal_energy_change_j_kg(reference, 500.0)
+        .unwrap();
+    let lower = law
+        .specific_internal_energy_change_j_kg(reference, 250.0)
+        .unwrap();
+    assert!(
+        law.temperature_at_relative_internal_energy(reference, upper.next_up())
+            .is_err()
+    );
+    assert!(
+        law.temperature_at_relative_internal_energy(reference, lower.next_down())
+            .is_err()
+    );
+    assert!(
+        law.temperature_at_relative_internal_energy(249.0, 0.0)
+            .is_err()
+    );
+    assert!(
+        law.temperature_at_relative_internal_energy(reference, f64::NAN)
+            .is_err()
+    );
+}

@@ -10956,6 +10956,29 @@ This is numerical single-phase calorimetry, not an EOS, pressure prediction,
 phase transition, chemical reaction, evolving strain model or experimental
 material validation.
 
+### Relative internal energy and direct-temperature conductivity
+
+`IsochoricHeatCapacityLaw::temperature_at_relative_internal_energy` exposes
+the existing preserving-energy affine-segment inverse relative to an admitted
+reference temperature. Consumers must retain the supplied energy coordinate;
+a sub-temperature-ULP increment may return the rounded reference temperature
+without erasing the stored energy. Original source limits remain enforced.
+This avoids absolute-datum cancellation without changing Cv, receipts, density,
+energy identity or the separate ordinary heat-update API. Its bounded source
+traversal can cross multiple original knots.
+
+`IsochoricConductionLaw::conductivity_at_temperature_w_m_k` queries the SAME
+prepared conductivity path at an already resolved temperature. It adds no
+material selection, extrapolation or caloric inversion. Relative-energy
+consumers therefore avoid a redundant T-to-absolute-u-to-T round trip.
+
+Two focused regression definitions cover relative inversion across knots,
+retained sub-ULP heat, exact support refusals and original conductivity at
+knots/interiors. Pinned rustfmt parsing succeeds; native execution of these
+new tests remains pending the workspace's original dependencies. The consuming
+jet owns evolving mass, transport and conservation; these source methods do
+not supply general stream enthalpy, pressure work or a new thermal integrator.
+
 ## Source-integrated conduction between original Cp and Cv regions
 
 `thermal::transport::conduction::CaloricConductionLayer` retains an original

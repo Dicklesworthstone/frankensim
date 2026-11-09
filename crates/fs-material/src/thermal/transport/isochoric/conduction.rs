@@ -97,6 +97,20 @@ impl<'a> IsochoricConductionLaw<'a> {
         self.identity
     }
 
+    /// Original scalar conductivity at an already resolved caloric temperature.
+    ///
+    /// The SAME prepared source path and temperature support are retained.
+    /// Relative-energy consumers can reuse their original inversion without a
+    /// second absolute-energy round trip or a second caloric source evaluation.
+    pub fn conductivity_at_temperature_w_m_k(
+        &self,
+        temperature_k: f64,
+    ) -> Result<f64, ThermalTransportError> {
+        self.conductivity
+            .at_temperature(temperature_k)
+            .map(|(k, _)| k)
+    }
+
     /// Fused source-exact state and derivatives with respect to specific u.
     /// At k corners the shared evaluator selects the right derivative, except
     /// at the upper endpoint where it uses the left derivative.

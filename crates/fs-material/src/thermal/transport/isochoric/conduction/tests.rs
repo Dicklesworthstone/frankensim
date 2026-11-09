@@ -534,3 +534,30 @@ fn branched_cv_graph_uses_native_adaptive_sdirk2_and_matches_analytic_decay() {
     assert!(report.maximum_accepted_normalized_error <= 1.0);
     assert!(report.solve.entropy.thermal_storage_change_j_k > 0.0);
 }
+
+#[test]
+fn g1_direct_temperature_conductivity_retains_source_values_and_support() {
+    let fixture = Fixture::nonlinear();
+    let caloric = fixture.caloric();
+    let law = fixture.conduction(&caloric);
+    for t in [300.0, 350.0, 425.0, 500.0, 550.0, 625.0, 700.0] {
+        let direct = law.conductivity_at_temperature_w_m_k(t).unwrap();
+        close(direct, conductivity(t).0, 2e-13);
+        let u = caloric.specific_internal_energy_j_kg(t).unwrap();
+        close(
+            direct,
+            law.state_at_specific_internal_energy(u)
+                .unwrap()
+                .conductivity_w_m_k,
+            2e-13,
+        );
+    }
+    for t in [
+        300.0_f64.next_down(),
+        700.0_f64.next_up(),
+        f64::NAN,
+        f64::INFINITY,
+    ] {
+        assert!(law.conductivity_at_temperature_w_m_k(t).is_err());
+    }
+}

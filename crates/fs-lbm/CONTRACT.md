@@ -2009,6 +2009,71 @@ reference includes evolving areas and two original temperature-shifted laws.
 These definitions are not a claim that native Cargo tests or a performance
 benchmark have run.
 
+## Conservative thermal evolution and viscous self-heating in slender jets
+
+Under `enthalpy-coupling`, `jet::nonlinear::thermal::ThermalCarreauJet`
+binds the native explicit Carreau jet to an original
+`IsochoricHeatCapacityLaw`. The source's fixed density must match the flow;
+its original nonlinear Cv(T), caloric support and exact segment integration
+and inversion remain authoritative. An optional `IsochoricConductionLaw`
+must retain that exact caloric identity.
+
+One coupled SSPRK3 evolves native area, staggered momentum and extensive cell
+internal energy. Eulerian mass is `rho*pi*A*dz`, and donor-cell energy
+advection uses the SAME signed native area-cell face flux q. This includes
+transport when the dual momentum flux happens to vanish. Each actual stage
+inverts its evolving caloric coordinate and prepares the original thermal
+Carreau source at that temperature. The original invariant, extensional stress,
+analytic tangent and physical viscous power remain the existing owners.
+
+The transported coordinate is `m*integral(Cv dT, T_reference, T)`, with a
+single fixed numerical reference temperature. No subtraction of large source
+energy datums enters transport; changing the source's declared zero leaves
+this trajectory unchanged. The original preserving-energy inverse retains
+nonzero stored heat smaller than one temperature ULP without inventing a
+temperature increment. Conductivity is queried directly at the already
+resolved temperature through its original prepared source, avoiding a
+redundant absolute-energy round trip.
+
+Only local physical viscous power enters calorics, with the same positive RK
+quadrature as the native aggregate and cell heat accounts. Optional axial
+Fourier exchange uses the series resistances `dz/(2*pi*k*A)` of the actual
+two half-cells. Shared face powers enter neighboring inventories with opposite
+signs. The explicit thermal bound combines gross donor outflow and the
+conductive row sum times the original global maximum dT/du. Native advection,
+capillary and apparent/differential-viscosity restrictions remain active.
+
+Flow, energy inventory, prepared source field, time and cell heat publish
+together. Source/rate, work, arithmetic, conservation or cancellation refusal
+rolls back the entire call. A native geometry stop retains only completed
+coupled substeps and restores the final admitted source profile. An explicit
+absolute-joule allowance checks stored-energy change against physical heat.
+Mass roundoff, the thermal residual and the combined mechanical/thermal
+truncation residual are exposed separately; upwind loss is never deposited.
+All numerical arrays are prepared once, with O(N) reusable storage. Caloric
+inversion traverses crossed original source segments and is not claimed to
+have logarithmic cost for every reference-relative query.
+
+This owner is explicit, with third-order temporal accuracy for smooth admitted
+semidiscrete solutions and first-order donor-cell energy advection. Density,
+composition and surface tension stay fixed; the outer surface is insulated.
+There is no radial temperature profile, implicit thermal coupling, expansion,
+phase change or Marangoni stress. Material incompressibility includes radial
+strain, so pressure dilatation vanishes; native capillary work remains mechanical.
+The original slenderness/resolution and pre-pinch limits still apply.
+
+Seven jet regressions and two original-caloric/conductivity regressions define
+coupled nonlinear-Cv evolution, temporal refinement, actual mass-flux energy
+transport, uniform-temperature moving mass, source-datum invariance including
+variable conductivity, source identity/density, geometry stopping, late
+source/work/cancellation rollback, sub-ULP stored heat and original support.
+An independently executed conservative alternating-mode reference gives
+SSPRK3 error ratios about 0.1245 on timestep halving and thermal closure at
+roundoff. All nine changed Rust files parse with pinned rustfmt. Native
+compilation and these Rust regressions remain unexecuted in the current
+dependency/storage-constrained workspace; the independent oracle is not
+native integration validation.
+
 ## Adaptive source-owned turbulent gas heat and species transport
 
 `FvFlow::advance_turbulent_gas_species` advances a complete physical window

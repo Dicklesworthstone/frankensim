@@ -254,6 +254,25 @@ impl IsochoricHeatCapacityLaw {
         CapacityCurve::new(&self.knots).entropy_change(initial_k, final_k)
     }
 
+    /// Invert retained specific internal energy relative to an admitted
+    /// reference temperature, without subtracting absolute source-datum energies.
+    ///
+    /// The caller must retain the supplied energy coordinate: a nonzero stored
+    /// change below one temperature ULP may round to the reference temperature.
+    /// Original caloric support is checked even then; no energy is clipped or
+    /// discarded. This is the relative-coordinate counterpart of ThermalLaw's
+    /// internal-energy inverse, using the same bounded affine-segment kernel.
+    pub fn temperature_at_relative_internal_energy(
+        &self,
+        reference_temperature_k: f64,
+        relative_internal_energy_j_kg: f64,
+    ) -> Result<f64, ThermalTransportError> {
+        CapacityCurve::new(&self.knots).temperature_after_energy_change_preserving_energy(
+            reference_temperature_k,
+            relative_internal_energy_j_kg,
+        )
+    }
+
     /// Analytic segment inversion of signed heat, without a frozen Cv update.
     pub fn temperature_after_specific_heat(
         &self, initial_k: f64, heat_j_kg: f64,

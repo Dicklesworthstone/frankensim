@@ -83,6 +83,16 @@ impl PeriodicSlenderJet {
 }
 
 impl Spatial {
+    #[cfg(feature = "enthalpy-coupling")]
+    pub(super) fn cell_viscous_power_w(&self) -> Result<&[f64], NonlinearJetError> {
+        self.heat
+            .as_ref()
+            .map(|heat| heat.power.as_slice())
+            .ok_or(NonlinearJetError::InvalidState(
+                "thermal jet heat workspace absent",
+            ))
+    }
+
     pub(super) fn reset_viscous_heat(
         &mut self,
         gate: &CancelGate,

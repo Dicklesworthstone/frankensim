@@ -44,6 +44,50 @@ impl CarreauProfile {
         }
     }
 
+    #[cfg(feature = "enthalpy-coupling")]
+    pub(super) fn try_clone_prepared(&self, gate: &CancelGate) -> Result<Self, NonlinearJetError> {
+        let original = self.cells.as_ref().ok_or(NonlinearJetError::InvalidState(
+            "thermal jet requires prepared cell materials",
+        ))?;
+        let mut cells = Vec::new();
+        cells
+            .try_reserve_exact(original.len())
+            .map_err(|_| NonlinearJetError::Allocation)?;
+        for (i, &cell) in original.iter().enumerate() {
+            poll_at(gate, i)?;
+            cells.push(cell);
+        }
+        Ok(Self {
+            parameters: self.parameters,
+            cells: Some(cells),
+            uniform_newtonian: self.uniform_newtonian,
+        })
+    }
+
+    #[cfg(feature = "enthalpy-coupling")]
+    pub(super) fn reprepare_temperature(
+        &mut self,
+        cell: usize,
+        temperature_k: f64,
+    ) -> Result<(), NonlinearJetError> {
+        let cells = self.cells.as_mut().ok_or(NonlinearJetError::InvalidState(
+            "thermal jet requires prepared cell materials",
+        ))?;
+        cells[cell] = PreparedCarreau::new(
+            self.parameters.rheology,
+            temperature_k,
+            cells[cell].maximum_shear_rate_per_s(),
+        )
+        .map_err(|source| NonlinearJetError::Rheology {
+            cell: Some(cell),
+            source,
+        })?;
+        // Evolving temperatures need not remain uniform even for a linear
+        // rate law. The coupled owner uses only explicit original stresses.
+        self.uniform_newtonian = false;
+        Ok(())
+    }
+
     pub(super) const fn is_uniform_newtonian(&self) -> bool {
         self.uniform_newtonian
     }

@@ -47,6 +47,10 @@ pub use carreau::CarreauSlenderJetParameters;
 mod heat;
 pub use heat::SlenderJetViscousHeat;
 
+/// Conservative source-backed caloric transport and viscous self-heating.
+#[cfg(feature = "enthalpy-coupling")]
+pub mod thermal;
+
 mod implicit;
 pub use implicit::{
     SlenderJetImplicitControls, SlenderJetIntegrationMethod, SlenderJetTemporalError,
