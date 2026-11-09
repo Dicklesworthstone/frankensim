@@ -1480,6 +1480,15 @@ struct TensionedFold {
     springs: [FoldSpring; 2],
 }
 
+/// The island's port impedance `rho c / S` and inlet area `S = pi r^2` for a tract whose first section has radius `r`:
+/// the reference every island line is realized against, its own or a network owner's
+/// ([`GlottalIsland::new_with_tract_line`]).
+#[must_use]
+pub fn glottal_port_impedance(gas: &GasState, inlet_radius_m: f64) -> (f64, f64) {
+    let area = core::f64::consts::PI * inlet_radius_m * inlet_radius_m;
+    (gas.density * gas.sound_speed / area, area)
+}
+
 /// The island's tract line for `tract`, with its volume-normalized characteristic impedance `rho c / S` and its inlet
 /// area `S`: the realization [`GlottalIsland::new_with_wall`] and [`GlottalIsland::new_with_wall_exterior`] make, so
 /// a further shape of a moving tract ([`glottal_tract_line_taps`]) is realized exactly as the card's own shape is.
@@ -1503,8 +1512,7 @@ fn glottal_tract_line(
         .ok_or(GlottisError::Invalid {
             what: "tract needs a leading tube segment",
         })?;
-    let area = core::f64::consts::PI * inlet_r * inlet_r;
-    let zc_flow = gas.density * gas.sound_speed / area;
+    let (zc_flow, area) = glottal_port_impedance(gas, inlet_r);
     // The MM-bank lesson: a short wrap-truncated FIR overshoots |R| > 1
     // between realization bins, and the active line self-rings at the
     // wrap period (measured: a 179 Hz pressure-independent ring at
@@ -1647,6 +1655,43 @@ impl GlottalIsland {
     ) -> Result<Self, GlottisError> {
         card.validate()?;
         let (line, zc_flow, area) = glottal_tract_line(tract, gas, exterior, termination, sample_rate_hz, wall)?;
+        Self::assemble(card, two_mass, line, zc_flow, area, gas, sample_rate_hz)
+    }
+
+    /// An island against a tract line realized elsewhere: a branched tract's line from its network owner (the nasal
+    /// tract, N3), against the port impedance [`glottal_port_impedance`] gives for the tract's first section. The
+    /// line must have been realized against that same `rho c / S`; everything after the line is
+    /// [`GlottalIsland::new_with_wall`]'s own assembly.
+    ///
+    /// # Errors
+    /// Card refusals by name; a non-positive or non-finite inlet radius; pHS or contact admission.
+    pub fn new_with_tract_line(
+        card: FoldCard,
+        two_mass: bool,
+        line: DelayedFilter,
+        inlet_radius_m: f64,
+        gas: &GasState,
+        sample_rate_hz: u32,
+    ) -> Result<Self, GlottisError> {
+        card.validate()?;
+        if !(inlet_radius_m.is_finite() && inlet_radius_m > 0.0) {
+            return Err(GlottisError::Invalid {
+                what: "a tract line's inlet radius must be finite and positive",
+            });
+        }
+        let (zc_flow, area) = glottal_port_impedance(gas, inlet_radius_m);
+        Self::assemble(card, two_mass, line, zc_flow, area, gas, sample_rate_hz)
+    }
+
+    fn assemble(
+        card: FoldCard,
+        two_mass: bool,
+        line: DelayedFilter,
+        zc_flow: f64,
+        area: f64,
+        gas: &GasState,
+        sample_rate_hz: u32,
+    ) -> Result<Self, GlottisError> {
         let TensionedFold {
             phs,
             linear,

@@ -16,7 +16,8 @@
 //!
 //! Limits, not hidden: infinite-baffle radiation (no head diffraction) unless the
 //! opt-in `head_sphere` row puts the mouth on a rigid sphere, a plane-wave series
-//! tract (no side branches or nasal coupling), a lumped two-mass, body-cover or
+//! tract (no side branches or nasal coupling) unless the opt-in nasal rows open a
+//! nasal tract beside it (`nasal`, a graph of plane-wave edges), a lumped two-mass, body-cover or
 //! one-mass fold, a rigid or single-pin yielding wall, and an ideal pressure
 //! source under the folds unless the opt-in `subglottal_airway` row puts a
 //! symmetric tree there.
@@ -65,7 +66,19 @@
 //! fricative_noise <seed> <k> <j> [stevens [<m>]]          (optional; turbulence after section k, or the obstacle m)
 //! receiver free_field_monopole                            (optional; the mouth flow as a monopole in free space)
 //! rest_gap <time_s> <gap_m>                               (repeat, optional, two_mass only; the fold's rest gap over time)
+//! nasal_source <identifier without spaces>                (optional; with any nasal row: the nasal tables)
+//! nasal_licence <free text to end of line>
+//! velum <after_section> <port_area_m2> <attach_source>    (the port opens after 0-based oral section after_section)
+//! nasal_section <area_m2> <length_m>                      (repeat, velum first; the common nasal passage)
+//! nasal_pair <left_area_m2> <right_area_m2> <length_m>    (repeat, choana first; the two passages to the nostrils)
+//! sinus <left|right> <from_nostril_m> <ostium_area_m2> <ostium_length_m> <volume_m3>   (optional, one per side)
+//! nostrils <x_m> <y_m> <source without spaces>            (the nostrils beside the mouth on the baffle)
 //! ```
+//!
+//! The nasal rows (N3, MB 15368) open the nasal tract, and with `sinus` rows the maxillary sinuses, beside the card's
+//! oral tract as one network; the lips and both nostrils radiate into one receiver. The graph, the port, the cavity
+//! loads, the one-plane receiver and the rows refused with them are in the `nasal` child module's doc. Without the rows
+//! nothing here changes.
 //!
 //! The flow rig and the supraglottal source (MB 15368; rulings 15773, 15828, 15902, 16025; interface NavyTower 15491,
 //! 15765). `glottal_orifice` replaces the folds by a fixed hole of that area ([`GlottalIsland::with_orifice`]): the jet
@@ -327,6 +340,9 @@ use fs_phs::WallPin;
 use fs_rand::{Stream, StreamKey};
 use fs_vfit::discretize::DelayedFilter;
 
+mod nasal;
+pub use nasal::{NasalCard, NasalPair, NasalSinus};
+
 /// First line of every voice performance file.
 pub const VOICE_PERFORMANCE_SCHEMA: &str = "frankensim-voice-performance-v1";
 const HEAD_LOAD_NEEDS_SPHERE: &str = "head_load needs the head_sphere row: the load is that sphere's";
@@ -434,6 +450,8 @@ pub struct VoiceDescription {
     pub free_field_receiver: bool,
     /// Opt-in `rest_gap` rows `(time_s, gap_m)` in strictly increasing time (module doc); empty keeps the `fold` row's gap.
     pub rest_gap: Vec<(f64, f64)>,
+    /// Opt-in nasal rows (module doc; the `nasal` child module); `None` keeps the series tract and the one opening.
+    pub nasal: Option<NasalCard>,
 }
 
 /// The `fricative_noise <seed> <k> <j> [stevens [<m>]]` row: the supraglottal constriction `k` (0-based section index)
@@ -751,6 +769,7 @@ impl VoiceDescription {
         let mut fricative_noise = None;
         let mut free_field_receiver = None;
         let mut rest_gap: Vec<(f64, f64)> = Vec::new();
+        let mut nasal_draft = nasal::NasalDraft::default();
         for line in lines {
             let mut tokens = line.split_whitespace();
             let key = tokens.next().unwrap_or_default();
@@ -1200,6 +1219,7 @@ impl VoiceDescription {
                         whole(&rest, 3, "tract_move steps")?,
                     ));
                 }
+                nasal_key if nasal::NASAL_KEYS.contains(&nasal_key) => nasal_draft.row(nasal_key, &rest)?,
                 other => return Err(format!("unknown key {other:?}")),
             }
         }
@@ -1323,6 +1343,23 @@ impl VoiceDescription {
         if free_field_receiver.is_some() && (head_sphere.is_some() || observer_law.is_some()) {
             return Err("receiver free_field_monopole is refused with head_sphere and observer_law: both observe the baffle".into());
         }
+        // The nasal rows (the `nasal` child module): admitted against the oral sections, then refused by name with each
+        // row whose lines or load are one series mouth's.
+        let nasal = nasal_draft.admit(&sections)?;
+        if nasal.is_some() {
+            let series_rows = [
+                ("tract_move", !tract_moves.is_empty()),
+                ("head_sphere", head_sphere.is_some()),
+                ("head_load", head_load.is_some()),
+                ("torso_sphere", torso_sphere.is_some()),
+                ("tract_gas", tract_gas.is_some()),
+                ("fricative_noise", fricative_noise.is_some()),
+                ("receiver free_field_monopole", free_field_receiver.is_some()),
+            ];
+            if let Some((row, _)) = series_rows.iter().find(|(_, present)| *present) {
+                return Err(format!("the nasal rows are refused with `{row}`: its lines or its load are one series mouth's"));
+            }
+        }
         let (keyframes, tract_moves) = admit_motion(
             &sections,
             keyframe_drafts,
@@ -1366,6 +1403,7 @@ impl VoiceDescription {
             fricative_noise,
             free_field_receiver: free_field_receiver.is_some(),
             rest_gap,
+            nasal,
         })
     }
 
@@ -1491,8 +1529,29 @@ impl VoiceDescription {
             }
             None => None,
         };
-        let island = match split {
-            None => GlottalIsland::new_with_wall(
+        // The nasal rows: the network's island line and lip flow replace the series duct's, and the nostrils' flow lines
+        // join them (the `nasal` child module; `tract_gas` and `head_load` are refused with the rows, so `split` is
+        // `None` there). Without the rows every match below takes the arm it always took.
+        let (nasal_line, nasal_lips, nasal_nostrils) = match &self.nasal {
+            Some(card) => {
+                let lines = nasal::nasal_lines(
+                    &self.sections,
+                    card,
+                    gas,
+                    self.wall.as_ref(),
+                    self.termination,
+                    mechanics_rate,
+                    nasal::Velum::Open,
+                )?;
+                (Some((lines.line, lines.inlet_radius_m)), Some(lines.lips), lines.nostrils.zip(Some(lines.nostril_radius_m)))
+            }
+            None => (None, None, None),
+        };
+        let island = match (split, nasal_line) {
+            (_, Some((line, inlet_radius_m))) => {
+                GlottalIsland::new_with_tract_line(self.fold, self.two_mass, line, inlet_radius_m, gas, mechanics_rate)
+            }
+            (None, None) => GlottalIsland::new_with_wall(
                 self.fold,
                 self.two_mass,
                 &duct,
@@ -1501,7 +1560,7 @@ impl VoiceDescription {
                 mechanics_rate,
                 self.wall.as_ref(),
             ),
-            Some(table) => GlottalIsland::new_with_wall_exterior(
+            (Some(table), None) => GlottalIsland::new_with_wall_exterior(
                 self.fold,
                 self.two_mass,
                 &duct,
@@ -1537,8 +1596,9 @@ impl VoiceDescription {
             _ => Ok(island),
         })
         .map_err(|e| format!("glottal island refused: {e:?}"))?;
-        let (mouth, receipt) = match split {
-            None => mouth_flow_line(
+        let (mouth, receipt) = match (split, nasal_lips) {
+            (_, Some(lips)) => Ok(lips),
+            (None, None) => mouth_flow_line(
                 &duct,
                 gas,
                 mouth_load,
@@ -1547,7 +1607,7 @@ impl VoiceDescription {
                 self.wall.as_ref(),
                 &LineLadder::default(),
             ),
-            Some(table) => mouth_flow_line_exterior(
+            (Some(table), None) => mouth_flow_line_exterior(
                 &duct,
                 gas,
                 exterior,
@@ -1592,13 +1652,19 @@ impl VoiceDescription {
             density: exterior.density,
             sound_speed: exterior.sound_speed,
         };
+        // The openings on the baffle: the mouth at the origin, and with the nasal rows the left nostril at (x, y) and the
+        // right at (-x, y), in the order the trace carries their flows.
+        let mut openings = vec![CircularOpening {
+            center_m: [0.0, 0.0], radius_m: mouth_radius_m,
+        }];
+        if let (Some(card), Some((_, radius))) = (&self.nasal, &nasal_nostrils) {
+            openings.push(CircularOpening { center_m: [card.nostril_x_m, card.nostril_y_m], radius_m: radius[0] });
+            openings.push(CircularOpening { center_m: [-card.nostril_x_m, card.nostril_y_m], radius_m: radius[1] });
+        }
         let (receiver, observer_paths) = match observer.as_ref() {
             Some(propagation) => {
-                let opening = CircularOpening {
-                    center_m: [0.0, 0.0], radius_m: mouth_radius_m,
-                };
                 let (receiver, report) = BaffledPressure::circular_openings_multirate_gas_differentiating(
-                    &[opening], mechanics_rate, self.output_rate_hz, self.microphone,
+                    &openings, mechanics_rate, self.output_rate_hz, self.microphone,
                     exterior, propagation, &mut || false,
                 ).map_err(|error| format!("voice observer paths refused: {error}"))?;
                 (receiver, Some(report))
@@ -1606,6 +1672,13 @@ impl VoiceDescription {
             // `receiver free_field_monopole` (refused with observer_law at parse).
             None if self.free_field_receiver => (
                 free_field_monopole(mouth_area, mechanics_rate, self.output_rate_hz, self.microphone, medium)?,
+                None,
+            ),
+            None if openings.len() > 1 => (
+                BaffledPressure::circular_openings_multirate_differentiating(
+                    &openings, mechanics_rate, self.output_rate_hz,
+                    self.microphone, medium,
+                )?,
                 None,
             ),
             None => (
@@ -1627,11 +1700,16 @@ impl VoiceDescription {
             ),
             None => None,
         };
-        let passive_formants_hz = match &head_load {
-            Some(table) => chart.tmm_formants_tabulated(gas, self.wall.as_ref(), table, 4),
-            None => chart.tmm_formants_terminated(gas, self.wall.as_ref(), self.termination, 4),
-        }
-        .map_err(|e| format!("{e:?}"));
+        let passive_formants_hz = if self.nasal.is_some() {
+            Err("the passive formants are the series tract's: a nasal card does not read them".to_string())
+        } else {
+            match &head_load {
+                Some(table) => chart.tmm_formants_tabulated(gas, self.wall.as_ref(), table, 4),
+                None => chart.tmm_formants_terminated(gas, self.wall.as_ref(), self.termination, 4),
+            }
+            .map_err(|e| format!("{e:?}"))
+        };
+        let nostril_flow_taps = nasal_nostrils.as_ref().map(|(lines, _)| [lines[0].1.n_fft, lines[1].1.n_fft]);
         let info = VoiceInfo {
             output_rate_hz: self.output_rate_hz,
             mechanics_rate_hz: mechanics_rate,
@@ -1653,6 +1731,7 @@ impl VoiceDescription {
             tract_shapes: motion.switches.len() + 1,
             keyframe_formants_hz: motion.keyframe_formants_hz,
             subglottal_airway: island.upstream().map(|airway| airway.receipt().clone()),
+            nostril_flow_taps,
         };
         let aspiration = match self.aspiration_noise {
             Some(card) => Some(GlottalAspiration::new(card).map_err(str::to_string)?),
@@ -1771,7 +1850,8 @@ impl VoiceDescription {
             tension_flutter_second: self
                 .tension_flutter_second
                 .map(|card| TensionFlutter::on_tile(card, self.output_rate_hz, 1)),
-            trace: vec![0.0; self.mechanics_per_output as usize],
+            trace: vec![0.0; self.mechanics_per_output as usize * openings.len()],
+            nostrils: nasal_nostrils.map(|([(left, _), (right, _)], _)| [left, right]),
             ratio: self.mechanics_per_output as usize,
             mechanics_rate,
             info,
@@ -2079,6 +2159,8 @@ pub struct VoiceInfo {
     pub keyframe_formants_hz: Vec<(String, Result<Vec<f64>, String>)>,
     /// The `subglottal_airway` row's realized airway; `None` without the row.
     pub subglottal_airway: Option<AirwayReceipt>,
+    /// Converged lengths of the left and right nostrils' flow lines; `None` without the nasal rows.
+    pub nostril_flow_taps: Option<[usize; 2]>,
 }
 
 /// Source-side summaries over the physical substeps rendered so far.
@@ -2310,6 +2392,9 @@ pub struct VoicePerformance {
     /// With `glottal_orifice` only, the flow rig's read window: the first physical substep of the render's last 2 s,
     /// the sum of the glottal flow from it [m^3/s] and the substeps summed. `None` without the row.
     rig_tail: Option<(u64, f64, u64)>,
+    /// With the nasal rows, the left and right nostrils' flow lines, driven by the island's wave as the mouth's is; the
+    /// trace then carries three flows per substep, time-major (mouth, left, right). `None` keeps the one opening.
+    nostrils: Option<[DelayedFilter; 2]>,
 }
 
 fn refusal(what: String) -> RenderError {
@@ -2607,7 +2692,17 @@ impl VoicePerformance {
                     .push(fricative_pa)
                     .map_err(|e| format!("fricative mouth line refused: {e:?}"))?;
             }
-            self.trace[j] = flow;
+            match self.nostrils.as_mut() {
+                None => self.trace[j] = flow,
+                // The nasal rows: the same wave into both nostrils' lines; the receiver takes the flows time-major.
+                Some([left, right]) => {
+                    let left_flow = left.push(wave).map_err(|e| format!("nostril flow line refused: {e:?}"))?;
+                    let right_flow = right.push(wave).map_err(|e| format!("nostril flow line refused: {e:?}"))?;
+                    self.trace[3 * j] = flow;
+                    self.trace[3 * j + 1] = left_flow;
+                    self.trace[3 * j + 2] = right_flow;
+                }
+            }
             self.peak_flow_m3_s = self.peak_flow_m3_s.max(frame.flow_m3_s);
             self.min_flow_m3_s = self.min_flow_m3_s.min(frame.flow_m3_s);
             if frame.shut {

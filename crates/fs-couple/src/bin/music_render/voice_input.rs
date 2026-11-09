@@ -3,13 +3,22 @@
 use super::{RATE, create_outputs, json_string, stream_output};
 use fs_blake3::DomainHasher;
 use fs_couple::voice_performance::{
-    MAX_VOICE_PERFORMANCE_BYTES, VOICE_PERFORMANCE_SCHEMA, VoiceDescription,
+    MAX_VOICE_PERFORMANCE_BYTES, NasalSinus, VOICE_PERFORMANCE_SCHEMA, VoiceDescription,
 };
 use fs_material::gas_species::input::ThermochemicalSources;
 use std::io::{Read, Write};
 use std::path::Path;
 
 const INPUT_HASH_DOMAIN: &str = "org.frankensim.fs-couple.voice-performance.v1";
+
+/// A nasal card's `model_scope`, in place of the series sentence. The parser refuses the head, torso and tract-gas rows
+/// with a nasal row, so a nasal card always reaches the plain-baffle arm.
+const NASAL_SCOPE: &str = "lumped fold pHS on a branched plane-wave tract (the oral tract; from the velopharyngeal port \
+    the nasal passage and the two passages to the nostrils; each declared maxillary sinus a lumped cavity through its \
+    ostium) with TMM viscothermal loss and the declared radiation load at the lips and at each nostril; the mouth's and \
+    both nostrils' flows radiated through infinite-baffle circular openings on one plane (no nostril in front of the \
+    mouth's plane, no loading of one opening by another), no head diffraction; the supraglottal pressure is never the \
+    output";
 
 fn options(args: &[String]) -> Result<(&str, &str, usize), String> {
     let mut paths = Vec::new();
@@ -155,6 +164,10 @@ pub(super) fn run_with_gas_sources(
             "lumped fold pHS on a plane-wave series tract with TMM viscothermal loss and a declared radiation load; mouth flow radiated through an infinite-baffle circular opening, no head diffraction, nasal branch or side cavity; the supraglottal pressure is never the output",
         ),
     };
+    // Only a performance with the nasal rows writes this block and the nasal scope; without them the sidecar is byte for
+    // byte what it was.
+    let nasal = nasal_json(&description, info);
+    let scope = if description.nasal.is_some() { NASAL_SCOPE } else { scope };
     let provenance = format!(
         "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"voice-input\",\
          \"sample_rate_hz\":{RATE},\"samples\":{samples},\"block\":{block},\
@@ -168,7 +181,7 @@ pub(super) fn run_with_gas_sources(
          \"microphone_m\":[{:e},{:e},{:e}],\"mouth_flow_taps\":{},\"mouth_flow_rungs\":{},\
          \"passive_tract_formants_hz\":{passive},\
          \"peak_glottal_flow_m3_s\":{:e},\"min_glottal_flow_m3_s\":{:e},\"closed_fraction\":{:e},\
-         \"max_force_passes\":{},\"mean_force_passes\":{:e},{rig}{jet_band}{head}{airway}\
+         \"max_force_passes\":{},\"mean_force_passes\":{:e},{rig}{jet_band}{head}{airway}{nasal}\
          \"model_scope\":\"{scope}\"{observer}}}{gas_sources}{tract_gas}{tract_motion}}}",
         description.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,
         info.mechanics_rate_hz, info.two_mass, info.sections, info.tract_length_m,
@@ -205,6 +218,51 @@ pub(super) fn tract_gas_json(description: &VoiceDescription) -> String {
             super::thermochemical::provenance(core::slice::from_ref(record))
         )
     })
+}
+
+/// The nasal rows' block, `"nasal":{...},`, or nothing without them, so a sidecar without them is byte for byte what it
+/// was. `after_section_0_based` counts from 0: the port opens at the junction after that many plus one oral sections.
+/// The first passage section's own area is recorded; the line takes `port_area_m2` in its place.
+pub(super) fn nasal_json(
+    description: &VoiceDescription,
+    info: &fs_couple::voice_performance::VoiceInfo,
+) -> String {
+    let Some(card) = description.nasal.as_ref() else {
+        return String::new();
+    };
+    let sections = card
+        .sections
+        .iter()
+        .map(|s| format!("[{:e},{:e}]", s.area_m2, s.length_m))
+        .collect::<Vec<_>>()
+        .join(",");
+    let pairs = card
+        .pairs
+        .iter()
+        .map(|p| format!("[{:e},{:e},{:e}]", p.left_area_m2, p.right_area_m2, p.length_m))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sinus = |s: Option<&NasalSinus>| {
+        s.map_or_else(
+            || "null".to_string(),
+            |s| {
+                format!(
+                    "{{\"from_nostril_m\":{:e},\"ostium_area_m2\":{:e},\"ostium_length_m\":{:e},\"volume_m3\":{:e}}}",
+                    s.from_nostril_m, s.ostium_area_m2, s.ostium_length_m, s.volume_m3
+                )
+            },
+        )
+    };
+    let taps = info.nostril_flow_taps.map_or_else(|| "null".to_string(), |[left, right]| format!("[{left},{right}]"));
+    format!(
+        "\"nasal\":{{\"source\":{},\"licence\":{},\"velum\":{{\"after_section_0_based\":{},\"port_area_m2\":{:e},\
+         \"attach_source\":{}}},\"sections_area_length_m\":[{sections}],\"pairs_left_right_length_m\":[{pairs}],\
+         \"sinus_left\":{},\"sinus_right\":{},\"nostrils\":{{\"x_m\":{:e},\"y_m\":{:e},\"source\":{}}},\
+         \"nostril_flow_taps\":{taps}}},",
+        json_string(&card.source), json_string(&card.licence), card.after_section, card.port_area_m2,
+        json_string(&card.attach_source), sinus(card.sinus_left.as_ref()), sinus(card.sinus_right.as_ref()),
+        card.nostril_x_m, card.nostril_y_m, json_string(&card.nostril_source),
+    )
 }
 
 /// The moving tract's block, `,"tract_motion":{...}`, or nothing without `tract_move` rows, so a sidecar without them
