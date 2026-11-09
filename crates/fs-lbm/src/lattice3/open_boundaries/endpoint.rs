@@ -51,8 +51,8 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
                 )?;
             }
             EndpointSource3::Resistance(laws) => {
-                // The resistance owner admits its immutable laws and seam
-                // topology at attachment; no constitutive callback runs here.
+                // The resistance owner admits accepted or next-endpoint laws
+                // and seam topology before staging; no callback runs here.
                 if laws.len() != cells || resolved.drag.is_none() {
                     return Err(GridError3::Input("resistance endpoint workspace length"));
                 }

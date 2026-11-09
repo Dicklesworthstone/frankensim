@@ -4,7 +4,7 @@
 //! diffusion owners. Both accepted fields and their complete receipts publish
 //! together; no force-only step can detach the resistance history.
 
-use super::ResistanceOpenGrid3;
+use super::{DarcyForchheimer3, ResistanceOpenEndpointExchange3, ResistanceOpenGrid3};
 use crate::d3q19::ResistanceMomentumExchange3;
 use crate::lattice3::open_boundaries::thermal::OpenThermalError3;
 use crate::lattice3::{EquilibriumLattice3, GridError3, macro_cell};
@@ -14,6 +14,9 @@ use crate::thermal::open::{
 };
 use crate::thermal::tensor::DiffusivityField;
 use fs_exec::Cx;
+
+mod endpoint;
+pub use endpoint::ResistanceOpenEndpointThermalStep3;
 
 /// Independently measured porous momentum/work and fixed-capacity heat.
 /// Mechanical drag, skeleton and wall work retain their original receipts;
@@ -106,6 +109,25 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ResistanceOpenGrid3<L, Q> {
         diffusion: Option<DiffusivityField<'_, 3>>,
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<ResistanceOpenThermalStep3, OpenThermalError3<L::Error>> {
+        let (momentum, _, step, heat) = self.stage_with_thermal_poll(
+            thermal, collisions, heat_per_step, thermal_relaxation, diffusion, None, poll,
+        )?;
+        poll()?;
+        self.publish_step(step, momentum);
+        thermal.publish(step, heat);
+        Ok(ResistanceOpenThermalStep3 { momentum, heat })
+    }
+
+    fn stage_with_thermal_poll(
+        &mut self,
+        thermal: &mut ThermalOpenField3,
+        collisions: Option<&[L::Collision]>,
+        heat_per_step: &[f64],
+        thermal_relaxation: Option<&[f64]>,
+        diffusion: Option<DiffusivityField<'_, 3>>,
+        next_laws: Option<(&[DarcyForchheimer3], f64)>,
+        poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
+    ) -> Result<(ResistanceMomentumExchange3, ResistanceOpenEndpointExchange3, usize, ThermalOpenBalance3), OpenThermalError3<L::Error>> {
         poll()?;
         if thermal.dims != self.flow.inner.grid.dims
             || thermal.solid != self.flow.inner.grid.solid
@@ -137,8 +159,8 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ResistanceOpenGrid3<L, Q> {
         };
         // The same porous collision/stream, implicit endpoints and independent
         // work/wall/periodic gates run once, stopping before physical publication.
-        let (momentum, step) =
-            self.stage_inner::<fs_exec::TilePool>(None, collisions, poll)?;
+        let (momentum, endpoint, step) =
+            self.stage_with_laws::<fs_exec::TilePool>(None, collisions, next_laws, poll)?;
         for cell in 0..thermal.velocities.len() {
             if cell.is_multiple_of(64) {
                 poll()?;
@@ -158,9 +180,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ResistanceOpenGrid3<L, Q> {
             heat_per_step, candidate, || poll().map_err(Into::into),
         )?;
         poll()?;
-        self.publish_step(step, momentum);
-        thermal.publish(step, heat);
-        Ok(ResistanceOpenThermalStep3 { momentum, heat })
+        Ok((momentum, endpoint, step, heat))
     }
 }
 

@@ -14,6 +14,8 @@ const AXES: [[f64; 3]; 3] = [
     [-2.0 / 3.0, -1.0 / 3.0, 2.0 / 3.0],
 ];
 
+mod endpoint;
+
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     a.into_iter().zip(b).map(|(a, b)| a * b).sum()
 }

@@ -16,7 +16,7 @@ use std::sync::Mutex;
 
 pub use crate::d3q19::{DarcyForchheimer3, LinearResistance3, ResistanceMomentumExchange3};
 
-mod endpoint;
+pub(in crate::lattice3) mod endpoint;
 pub use endpoint::{ResistanceEndpointExchange3, ResistanceWork3};
 
 /// A spatial porous medium on native lattice collision and transport.

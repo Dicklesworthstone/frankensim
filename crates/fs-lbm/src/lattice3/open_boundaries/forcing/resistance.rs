@@ -2,7 +2,8 @@
 //!
 //! The original constitutive solve, collision, regularized reservoir and moving
 //! wall laws are reused. Force/drag endpoints, populations and complete momentum
-//! accounting publish together. Coefficients and skeleton velocity are held.
+//! accounting publish together. Held steps and authored next-endpoint laws
+//! retain their own force history and temporal work meaning.
 
 use super::*;
 use super::super::{EndpointSource3, EndpointWorkspace3, FaceBoundary3, StepData, coordinates,
@@ -10,6 +11,7 @@ use super::super::{EndpointSource3, EndpointWorkspace3, FaceBoundary3, StepData,
 use crate::d3q19::BoundaryStepError3;
 use crate::lattice3::moving_walls::WallExchange;
 use crate::lattice3::sources::resistance::{SourceEndpoint3, admit_drag, held_exchange};
+use crate::lattice3::sources::resistance::endpoint as source_endpoint;
 use crate::lattice3::wall_loads::WallMomentumProbe3;
 use core::marker::PhantomData;
 use fs_exec::KernelRunner;
@@ -17,9 +19,12 @@ use fs_exec::KernelRunner;
 /// Original D3Q7 thermal transport with this implicit porous velocity owner.
 pub mod thermal;
 
+mod endpoint;
+pub use endpoint::ResistanceOpenEndpointExchange3;
+
 pub use crate::d3q19::{DarcyForchheimer3, LinearResistance3, ResistanceMomentumExchange3};
 
-/// A held porous medium with native D3Q19/D3Q27 through-flow and moving walls.
+/// A porous medium with native D3Q19/D3Q27 through-flow and moving walls.
 ///
 /// At each fluid cell `F = b - D (u-v_s) - beta |u-v_s| (u-v_s)`. Velocities
 /// and material axes are resolved in the grid frame; `v_s` is prescribed
@@ -42,6 +47,8 @@ pub use crate::d3q19::{DarcyForchheimer3, LinearResistance3, ResistanceMomentumE
 ///
 /// Every interval returns the original constitutive force/work receipt plus
 /// actual reservoir transport, all wall links and periodic angular transport.
+/// `step_*` holds the accepted law; `advance_*` supplies its next physical
+/// endpoint, including changing skeleton velocity, resistance and body force.
 /// The held-law identity is `fluid_drag_work + skeleton_work = -relative_dissipation`;
 /// it is not a transported fluid energy balance. The skeleton has prescribed
 /// motion and fixed geometry; no porosity, skeleton inertia or drag heat evolves.
@@ -54,6 +61,7 @@ pub struct ResistanceOpenGrid3<L: EquilibriumLattice3<Q>, const Q: usize> {
     walls: WallMomentumProbe3<L, Q>,
     origin: [f64; 3],
     last_exchange: Option<ResistanceMomentumExchange3>,
+    last_endpoint_exchange: Option<ResistanceOpenEndpointExchange3>,
 }
 
 fn workspace<E>(cells: usize) -> Result<Vec<[f64; 3]>, GridError3<E>> {
@@ -150,6 +158,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ResistanceOpenGrid3<L, Q> {
         flow.pending_forces = pending_forces;
         Ok(Self {
             flow, laws, drag, pending_drag, walls, origin, last_exchange: None,
+            last_endpoint_exchange: None,
         })
     }
 
@@ -159,7 +168,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ResistanceOpenGrid3<L, Q> {
         &self.flow
     }
 
-    /// Immutable constitutive field in the same frame as the accepted velocity.
+    /// Constitutive field at the same accepted endpoint as force and velocity.
     pub fn laws(&self) -> &[DarcyForchheimer3] {
         &self.laws
     }
@@ -169,7 +178,8 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ResistanceOpenGrid3<L, Q> {
         self.origin
     }
 
-    /// Complete receipt from the last accepted interval; failures retain it.
+    /// Held-law receipt from the last accepted interval, or None when that
+    /// interval used `advance_*`. Failures retain both receipt selections.
     pub const fn last_exchange(&self) -> Option<ResistanceMomentumExchange3> {
         self.last_exchange
     }
@@ -219,9 +229,23 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ResistanceOpenGrid3<L, Q> {
         collisions: Option<&[L::Collision]>,
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<(ResistanceMomentumExchange3, usize), GridError3<L::Error>> {
+        let (held, _, step) = self.stage_with_laws(pool, collisions, None, poll)?;
+        Ok((held, step))
+    }
+
+    fn stage_with_laws<P: KernelRunner>(
+        &mut self,
+        pool: Option<(&P, &CancelGate)>,
+        collisions: Option<&[L::Collision]>,
+        next_laws: Option<(&[DarcyForchheimer3], f64)>,
+        poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
+    ) -> Result<(ResistanceMomentumExchange3, ResistanceOpenEndpointExchange3, usize), GridError3<L::Error>> {
         poll()?;
+        if let Some((laws, limit)) = next_laws {
+            self.admit_next_laws(laws, limit, poll)?;
+        }
         let endpoint = Some((
-            EndpointSource3::Resistance(&self.laws),
+            EndpointSource3::Resistance(next_laws.map_or(self.laws.as_slice(), |(laws, _)| laws)),
             EndpointWorkspace3 {
                 forces: &mut self.flow.pending_forces,
                 drag: Some(&mut self.pending_drag),
@@ -238,27 +262,38 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ResistanceOpenGrid3<L, Q> {
                 None, endpoint, self.origin, poll,
             )?
         };
-        let receipt = self.measure(open, collisions, poll)?;
-        Ok((receipt, step))
+        let (held, evolving) = self.measure(open, collisions, next_laws.map(|(laws, _)| laws), poll)?;
+        if next_laws.is_some_and(|(_, limit)| {
+            evolving.resistance.absolute_relative_quadrature_remainder > limit
+        }) {
+            return Err(GridError3::Input("resistance temporal work budget exceeded"));
+        }
+        Ok((held, evolving, step))
     }
 
     // The complete native candidate and every composing gate have succeeded.
     // Publication only swaps admitted buffers and cannot fail.
     fn publish_step(&mut self, step: usize, receipt: ResistanceMomentumExchange3) {
+        self.publish_fields(step);
+        self.last_exchange = Some(receipt);
+        self.last_endpoint_exchange = None;
+    }
+
+    fn publish_fields(&mut self, step: usize) {
         core::mem::swap(&mut self.flow.inner.grid.f, &mut self.flow.inner.grid.next);
         core::mem::swap(&mut self.flow.forces, &mut self.flow.pending_forces);
         core::mem::swap(&mut self.drag, &mut self.pending_drag);
         self.flow.inner.grid.completed_steps = step;
         self.flow.inner.publish_wall_exchange();
-        self.last_exchange = Some(receipt);
     }
 
     fn measure(
         &self,
         open: OpenBoundaryMomentumTransport3,
         collisions: Option<&[L::Collision]>,
+        next_laws: Option<&[DarcyForchheimer3]>,
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
-    ) -> Result<ResistanceMomentumExchange3, GridError3<L::Error>> {
+    ) -> Result<(ResistanceMomentumExchange3, ResistanceOpenEndpointExchange3), GridError3<L::Error>> {
         let grid = &self.flow.inner.grid;
         let data = StepData::<L, Q> {
             dims: grid.dims,
@@ -274,6 +309,9 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ResistanceOpenGrid3<L, Q> {
         let mut receipt = ResistanceMomentumExchange3 {
             open, ..ResistanceMomentumExchange3::default()
         };
+        let mut evolving = ResistanceOpenEndpointExchange3 {
+            open, ..ResistanceOpenEndpointExchange3::default()
+        };
         for (cell, &law) in self.laws.iter().enumerate() {
             if cell.is_multiple_of(64) {
                 poll()?;
@@ -286,11 +324,20 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ResistanceOpenGrid3<L, Q> {
                 &grid.next[cell], self.flow.pending_forces[cell], cell,
                 grid.budget.maximum_mach,
             )?;
-            receipt.add(held_exchange::<L, Q>(
-                SourceEndpoint3 { law, velocity: initial_velocity, drag: self.drag[cell] },
-                SourceEndpoint3 { law, velocity, drag: self.pending_drag[cell] },
-                cell, coordinates(cell, grid.dims), self.origin,
-            )?);
+            let initial = SourceEndpoint3 { law, velocity: initial_velocity, drag: self.drag[cell] };
+            let end = SourceEndpoint3 {
+                law: next_laws.map_or(law, |field| field[cell]),
+                velocity, drag: self.pending_drag[cell],
+            };
+            if next_laws.is_some() {
+                evolving.resistance.add(source_endpoint::exchange::<L, Q>(
+                    initial, end, cell, coordinates(cell, grid.dims), self.origin,
+                )?);
+            } else {
+                receipt.add(held_exchange::<L, Q>(
+                    initial, end, cell, coordinates(cell, grid.dims), self.origin,
+                )?);
+            }
             // Read the original pull for actual periodic coordinate crossings.
             // Reservoir replacement relative to this pull is already in open;
             // no second collision, source application or state evolution occurs.
@@ -324,13 +371,16 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ResistanceOpenGrid3<L, Q> {
             )?;
         }
         receipt.walls = walls.finish()?;
+        evolving.resistance.walls = receipt.walls;
+        evolving.resistance.periodic = receipt.periodic;
         if !receipt.is_finite()
+            || (next_laws.is_some() && !evolving.resistance.is_finite())
             || receipt.periodic.angular_momentum_change.iter().any(|v| !v.is_finite())
         {
             return Err(GridError3::Input("resistance impulse or work overflow"));
         }
         poll()?;
-        Ok(receipt)
+        Ok((receipt, evolving))
     }
 
     /// Update prescribed reservoir or tangential wall values atomically.

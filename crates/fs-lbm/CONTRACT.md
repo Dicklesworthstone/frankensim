@@ -4611,3 +4611,40 @@ thermal-owner error alias and no tensor was constructed. Full Cargo and the
 public Boussinesq wrapper remain uncompiled in this environment. These tests
 establish local implementation behavior, not spatial convergence, empirical
 PCM validation or a complete multiphysics pressure-work account.
+
+## Evolving porous laws through native open flow and heat
+
+`ResistanceOpenGrid3::{advance_serial, advance_pooled}` supplies authored
+next-endpoint resistance, material axes, skeleton velocity and body force.
+Collision retains the accepted force and drag; native streaming, complete
+reservoir traces and their interior donors resolve the next law at their own
+physical velocity. Mixed wall/open seams still require exactly zero drag.
+The held `step_*` paths retain their original arithmetic and meanings.
+
+`ResistanceOpenEndpointExchange3` combines the original shared
+`ResistanceEndpointExchange3` with actual native reservoir transport. Wall
+links, wall work and periodic angular transport retain their existing
+measurements. Endpoint-power dissipation is nonnegative; impulse work and
+its signed temporal quadrature remainder remain distinct. A finite explicit
+budget bounds the sum of absolute per-cell relative work remainders before
+publication, so spatial cancellation cannot hide an unresolved source history.
+
+`advance_serial_with_thermal` and its tensor-diffusion counterpart reuse the
+original D3Q7 heat transaction. Opening advection/source history uses accepted
+physical velocity; the closing source half-kick uses the new law's resolved
+endpoint velocity. Laws, populations, forces, drag, thermal walls/history,
+both receipts and clocks publish together. Failure leaves the accepted fields
+retryable. `last_exchange` and `last_endpoint_exchange` identify the latest
+accepted held or evolving interval; the other selection is None.
+
+No new collision, porous root solver, thermal transport kernel or per-cell
+scratch allocation is introduced. The caller supplies a complete next law
+field; this does not infer a temperature-dependent permeability closure,
+drag-heat partition, porosity evolution, skeleton inertia or transported
+total-fluid-energy balance. Fixed-geometry and low-Mach limits remain.
+
+Seven focused G0/G1/G3/G4/G5 regression groups cover independently manufactured
+changing tensor/skeleton/Forchheimer endpoints and common boosts, complete
+reservoir/wall/voxel/periodic balance, serial/pooled equality, held-law bit
+parity, invalid seams/laws and temporal budgets, actual thermal force epochs,
+finite-wall heat balance and late cancellation/refusal with deterministic retry.

@@ -126,7 +126,7 @@ impl<L: ForcedLattice3<Q>, const Q: usize> ResistanceGrid3<L, Q> {
     }
 }
 
-pub(super) fn admit_laws<L: ForcedLattice3<Q>, const Q: usize>(
+pub(in crate::lattice3) fn admit_laws<L: ForcedLattice3<Q>, const Q: usize>(
     laws: &[DarcyForchheimer3],
     count: usize,
     mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
@@ -151,7 +151,7 @@ pub(super) fn admit_laws<L: ForcedLattice3<Q>, const Q: usize>(
 }
 
 impl ResistanceEndpointExchange3 {
-    pub(super) fn add(&mut self, other: Self) {
+    pub(in crate::lattice3) fn add(&mut self, other: Self) {
         for a in 0..3 {
             self.external_impulse[a] += other.external_impulse[a];
             self.external_angular_impulse[a] += other.external_angular_impulse[a];
@@ -172,7 +172,7 @@ impl ResistanceEndpointExchange3 {
         self.absolute_relative_quadrature_remainder += other.absolute_relative_quadrature_remainder;
     }
 
-    pub(super) fn is_finite(self) -> bool {
+    pub(in crate::lattice3) fn is_finite(self) -> bool {
         [
             self.external_impulse,
             self.external_angular_impulse,
@@ -195,7 +195,7 @@ impl ResistanceEndpointExchange3 {
     }
 }
 
-pub(super) fn exchange<L: ForcedLattice3<Q>, const Q: usize>(
+pub(in crate::lattice3) fn exchange<L: ForcedLattice3<Q>, const Q: usize>(
     initial: SourceEndpoint3,
     end: SourceEndpoint3,
     cell: usize,

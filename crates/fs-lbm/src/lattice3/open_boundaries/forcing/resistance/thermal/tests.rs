@@ -16,6 +16,8 @@ use fs_exec::CancelGate;
 
 const RHO: f64 = 1.2;
 
+mod endpoint;
+
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
@@ -300,6 +302,8 @@ struct Accepted {
     walls: [Vec<ThermalWall>; 6],
     time: [usize; 2],
     momentum: Option<ResistanceMomentumExchange3>,
+    endpoint: Option<ResistanceOpenEndpointExchange3>,
+    laws: Vec<DarcyForchheimer3>,
     thermal: Option<ThermalOpenBalance3>,
     boundaries: BoundarySpec3,
 }
@@ -311,7 +315,8 @@ fn accepted(owner: &ResistanceOpenGrid3<D3q19, 19>, heat: &ThermalOpenField3) ->
         heat: heat.populations().iter().map(|v| v.map(f64::to_bits)).collect(),
         walls: core::array::from_fn(|face| heat.wall_states(face).unwrap().to_vec()),
         time: [owner.flow().completed_steps(), heat.completed_steps()],
-        momentum: owner.last_exchange(), thermal: heat.last_balance(),
+        momentum: owner.last_exchange(), endpoint: owner.last_endpoint_exchange(),
+        laws: owner.laws().to_vec(), thermal: heat.last_balance(),
         boundaries: owner.flow().boundaries(),
     }
 }
