@@ -5,6 +5,8 @@
 
 #[path = "scanning/history_controls.rs"]
 mod history_controls;
+#[path = "scanning/pointwise.rs"]
+mod pointwise;
 
 use super::*;
 use fs_conduction::bc::history::ThermalBoundaryHistory;

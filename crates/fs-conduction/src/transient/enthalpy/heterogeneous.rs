@@ -1626,7 +1626,9 @@ impl<'m> HeterogeneousEnthalpyBackwardEuler<'m, '_> {
     }
 
     /// Bind the actual pointwise ambient endpoint with heterogeneous charts
-    /// and frozen reference densities. The original residual target is retained.
+    /// and frozen reference densities. An explicit coupled-owner residual target
+    /// is retained; `None` uses the native solve's original absolute/relative
+    /// target, including its prescribed-temperature initial state.
     #[allow(clippy::too_many_arguments)]
     pub fn linearize_accepted_with_pointwise_ambient_radiation(
         &self,
@@ -1638,7 +1640,7 @@ impl<'m> HeterogeneousEnthalpyBackwardEuler<'m, '_> {
         config: EnthalpyStepConfig,
         radiation: &crate::PointwiseAmbientRadiation<'_>,
         accepted: EnthalpyStepSolution,
-        physical_target_j: f64,
+        physical_target_j: impl Into<Option<f64>>,
         max_radiation_entries: usize,
     ) -> Result<HeterogeneousEnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
         let inner = self.inner.linearize_accepted_with_pointwise_ambient_radiation(

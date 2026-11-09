@@ -14,6 +14,7 @@
 /// Implicit endpoint derivatives with respect to moving-source controls.
 pub mod sensitivity;
 mod contact;
+pub(super) mod radiation;
 
 use super::{EnthalpyHistoryRun, EnthalpyStepConfig, EnthalpyStepSolution,
     HeterogeneousEnthalpyError, conduction, invalid, poll};
@@ -23,13 +24,16 @@ use super::super::moving::motion::ScanMotionLimit;
 use super::super::events::adaptive::{AdaptiveHistoryConfig, AdaptiveHistoryStep,
     admit_proposal, select_step};
 use super::super::radiation::{RadiationRegionHistory, admit_histories, patches_before};
-use crate::{AmbientRadiationConfig, ScalarField};
+use crate::{AmbientRadiationConfig, ConductionProblem, PointwiseAmbientRadiation, ScalarField};
 use crate::interface::temperature::enthalpy::ContactEnthalpyStep;
+use crate::transient::enthalpy::heterogeneous::EnthalpyRadiation;
 use crate::transient::enthalpy::radiation::EnthalpyRadiationStepSolution;
+use self::radiation::ScanRadiationBinding;
 use fs_exec::Cx;
 use fs_scenario::signal::TimeSignal;
 
-/// Optional sourced ambient radiation, retained for every scan trial and resume.
+/// Optional area-mean ambient radiation, retained for every scan trial and resume.
+/// Local P1 emission is selected explicitly with with_pointwise_ambient_radiation.
 pub struct ScanRadiation {
     /// Original source-backed emissivities and independent Kelvin reservoirs.
     pub patches: Vec<RadiationRegionHistory>,
@@ -53,7 +57,8 @@ pub struct ScanDeposition {
 /// The original physical response; radiative reports are not flattened.
 #[derive(Debug, Clone)]
 pub enum ScanTransport {
-    /// Nonlinear conduction, latent storage and any prescribed-bath reaction.
+    /// Native nonlinear conduction, latent storage and prescribed-bath reaction.
+    /// Any local P1 radiation remains in the solution's pointwise report.
     Conduction(EnthalpyStepSolution),
     /// The same storage with separate convection and physical radiation audits.
     Radiation(Box<EnthalpyRadiationStepSolution>),
@@ -78,6 +83,8 @@ impl ScanStep {
     /// the nonlinear radiative heat for the separately checked physical balance.
     /// With source-backed contacts, use the Contact variant's physical report for
     /// the freshly queried contact/radiation residual and complete heat balance.
+    /// Pointwise radiation stays inside the common solution, separate from Robin
+    /// heat and already counted once in its physical energy balance.
     #[must_use]
     pub fn solution(&self) -> &EnthalpyStepSolution {
         match &self.transport {
@@ -93,7 +100,7 @@ impl ScanStep {
 pub struct ScanningEnthalpyRun<'h, 'm, 'c> {
     run: EnthalpyHistoryRun<'h, 'm, 'c>,
     sources: Vec<MovingHeatSource>,
-    radiation: Option<ScanRadiation>,
+    radiation: Option<ScanRadiationBinding>,
     motion_limit: Option<ScanMotionLimit>,
     contacts: Option<contact::ScanContactBinding<'m, 'c>>,
 }
@@ -115,7 +122,8 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
             radiation.config.validate().map_err(conduction)?;
             admit_histories(cx, run.problem.boundary, run.time_s(), &radiation.patches).map_err(conduction)?;
         }
-        let model = Self { run, sources, radiation, motion_limit: None, contacts: None };
+        let model = Self { run, sources, radiation: radiation.map(ScanRadiationBinding::MeanAmbient),
+            motion_limit: None, contacts: None };
         model.source_at(cx, model.run.time_s(), false)?;
         poll(cx, 0).map_err(conduction)?;
         Ok(model)
@@ -240,7 +248,7 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
 
     fn signals(&self) -> impl Iterator<Item = &TimeSignal> {
         self.sources.iter().flat_map(|source| source.signals()).chain(
-            self.radiation.iter().flat_map(|r| r.patches.iter().map(|p| &p.ambient_temperature)))
+            self.radiation.iter().flat_map(|r| r.patches().iter().map(|p| &p.ambient_temperature)))
     }
 
     fn source_at(&self, cx: &Cx<'_>, time: f64, left: bool)
@@ -270,25 +278,43 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
         self.run.storage.admit_prescribed_boundary(cx, &boundary)?;
         let (source, deposition) = self.source_at(cx, end, left)?;
         let problem = self.run.conduction_problem(&boundary, &source)?;
-        let patches = self.radiation.as_ref().map(|radiation| {
-            if left { patches_before(cx, &radiation.patches, end) } else {
-                radiation.patches.iter().map(|patch| patch.at(end)).collect()
-            }
-        }).transpose().map_err(conduction)?;
-        let radiation = self.radiation.as_ref().zip(patches.as_deref())
-            .map(|(policy, patches)| (patches, policy.config));
-        let transport = if let Some(contacts) = &self.contacts {
-            ScanTransport::Contact(Box::new(contacts.advance(cx, &self.run.storage,
-                problem, old, end - start, config, radiation)?))
-        } else {
-            match radiation {
-                None => ScanTransport::Conduction(self.run.storage.advance(cx, problem,
-                    self.run.problem.interfaces, old, end - start, config)?),
-                Some((patches, radiation_config)) =>
-                    ScanTransport::Radiation(Box::new(self.run.storage.advance_with_ambient_radiation(cx,
-                        problem, self.run.problem.interfaces, old, end - start, config, patches, radiation_config)?)),
+        let transport = match &self.radiation {
+            None => self.advance_transport(cx, problem, old, end - start, config, EnthalpyRadiation::None)?,
+            Some(binding) => {
+                let patches = binding.sample(cx, end, left).map_err(conduction)?;
+                match binding.mean_config() {
+                    Some(radiation_config) => self.advance_transport(cx, problem, old, end - start, config,
+                        EnthalpyRadiation::Ambient { patches: &patches, config: radiation_config })?,
+                    None => {
+                        let owner = PointwiseAmbientRadiation::new(cx, problem.mesh, &boundary, &patches)
+                            .map_err(conduction)?;
+                        self.advance_transport(cx, problem, old, end - start, config,
+                            EnthalpyRadiation::PointwiseAmbient(&owner))?
+                    }
+                }
             }
         };
         Ok(ScanStep { transport, deposition })
+    }
+
+    fn advance_transport(&self, cx: &Cx<'_>, problem: ConductionProblem<'_>, old: &[f64],
+        dt_s: f64, config: EnthalpyStepConfig, radiation: EnthalpyRadiation<'_>)
+        -> Result<ScanTransport, HeterogeneousEnthalpyError>
+    {
+        if let Some(contacts) = &self.contacts {
+            return Ok(ScanTransport::Contact(Box::new(contacts.advance(cx, &self.run.storage,
+                problem, old, dt_s, config, radiation)?)));
+        }
+        match radiation {
+            EnthalpyRadiation::None => Ok(ScanTransport::Conduction(self.run.storage.advance(cx,
+                problem, self.run.problem.interfaces, old, dt_s, config)?)),
+            EnthalpyRadiation::Ambient { patches, config: radiation_config } =>
+                Ok(ScanTransport::Radiation(Box::new(self.run.storage.advance_with_ambient_radiation(cx,
+                    problem, self.run.problem.interfaces, old, dt_s, config, patches, radiation_config)?))),
+            EnthalpyRadiation::PointwiseAmbient(owner) =>
+                Ok(ScanTransport::Conduction(self.run.storage.advance_with_pointwise_ambient_radiation(cx,
+                    problem, self.run.problem.interfaces, old, dt_s, config, owner)?)),
+            _ => Err(invalid("scan radiation must retain its explicitly attached ambient owner")),
+        }
     }
 }

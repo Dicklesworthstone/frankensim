@@ -1,4 +1,13 @@
 //! Moving absorbed power closes the original nonlinear thermal-contact model.
+#[path = "scanning/objectives.rs"]
+mod objectives;
+#[path = "scanning/local_radiation.rs"]
+mod local_radiation;
+#[path = "scanning/pointwise.rs"]
+mod pointwise;
+#[path = "scanning/pointwise_sensitivity.rs"]
+mod pointwise_sensitivity;
+
 use super::*;
 use fs_conduction::bc::history::ThermalBoundaryHistory;
 use fs_conduction::bc::history::march::{HeatSourceHistory, ThermalHistoryProblem};
@@ -22,6 +31,16 @@ use fs_scenario::signal::{Interp, TimeSignal};
 
 const LENGTH: Dims = Dims([1, 0, 0, 0, 0, 0]);
 const OLD: [f64; 8] = [80., 80., 80., 80., 450., 450., 450., 450.];
+
+// No-contact scenarios require separated bodies, not an undeclared coincident
+// interface. Preserve every vertex ID, volume and lower radiation/bath trace.
+fn separated_mesh() -> ConductionMesh {
+    let mut positions = mesh().positions().to_vec();
+    for point in &mut positions[4..] { point[2] += 0.05; }
+    ConductionMesh::new(
+        TetComplex::from_tets(8, vec![[0, 1, 2, 3], [4, 5, 6, 7]]), positions,
+    ).unwrap()
+}
 
 fn constant(value: f64, dims: Dims) -> TimeSignal {
     TimeSignal::Constant(QtyAny::new(value, dims))

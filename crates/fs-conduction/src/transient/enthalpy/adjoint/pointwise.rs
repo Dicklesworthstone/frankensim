@@ -1,6 +1,7 @@
 //! Explicit adjoints of accepted spatial P1 radiation endpoints.
 //!
-//! The caller supplies the original nonlinear residual target. Binding
+//! The caller retains the original nonlinear residual target or requests the
+//! native ambient owner's unchanged absolute/relative stopping rule. Binding
 //! reevaluates the complete physical load and energy balance, then retains
 //! exactly the local emission blocks and reflected patch response used by
 //! the pointwise Newton owner. No shifted Robin/flux surrogate is bound.
@@ -79,7 +80,10 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
     /// The owner must borrow this exact mesh and current physical boundary.
     /// Every radiating node must be strictly inside retained emissivity
     /// temperature support; chart/material derivatives must likewise be
-    /// single-valued. The unchanged original Newton target may be zero.
+    /// single-valued. Supply the original physical residual target for a coupled
+    /// owner, or `None` to retain this native Newton solve's absolute/relative
+    /// target computed from its constrained initial state. An explicit target
+    /// may be zero; no accepted-report residual is used as an allowance.
     #[allow(clippy::too_many_arguments)]
     pub fn linearize_accepted_with_pointwise_ambient_radiation(
         &self,
@@ -91,16 +95,17 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
         config: EnthalpyStepConfig,
         radiation: &PointwiseAmbientRadiation<'_>,
         accepted: EnthalpyStepSolution,
-        physical_target_j: f64,
+        physical_target_j: impl Into<Option<f64>>,
         max_radiation_entries: usize,
     ) -> Result<EnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
+        let physical_target_j = physical_target_j.into();
         if accepted.pointwise_radiation.as_ref().is_some_and(|report|
             report.patches.iter().any(|patch| !patch.material_states.is_empty())) {
             return Err(EnthalpyAdjointError::InvalidInput(
                 "state-dependent material emissivity cannot be rebound as a fixed ambient radiation adjoint",
             ));
         }
-        admit(cx, problem, radiation.patch_count(), 1, physical_target_j, max_radiation_entries)?;
+        admit(cx, problem, radiation.patch_count(), 1, physical_target_j.unwrap_or(0.0), max_radiation_entries)?;
         if !radiation.matches(problem.mesh, problem.boundary)
             || accepted.pointwise_radiation.is_none()
             || accepted.pointwise_enclosure_radiation.is_some()
@@ -111,7 +116,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
         }
         self.linearize_accepted_model_with_target(
             cx, problem, interfaces, old_h, dt_s, config, accepted,
-            Some(physical_target_j), Some(PointwiseBoundary::Ambient(radiation)), None,
+            physical_target_j, Some(PointwiseBoundary::Ambient(radiation)), None,
         )
     }
 

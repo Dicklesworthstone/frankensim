@@ -9,11 +9,12 @@
 
 /// Full fixed-grid inverse objectives with authored-schedule gradients.
 pub mod objective;
-mod fraction;
+pub(in crate::bc::history::march::enthalpy) mod fraction;
 
-use super::{ScanningEnthalpyRun, ScanStep, ScanTransport, events, patches_before, poll};
+use super::{ScanningEnthalpyRun, ScanStep, ScanTransport, events, poll};
+use super::radiation::ScanRadiationBinding;
 use super::super::super::moving::sensitivity::{MovingHeatGradient, MovingHeatLinearization};
-use crate::{ConductionError, LinearConfig};
+use crate::{ConductionError, LinearConfig, PointwiseAmbientRadiation};
 use crate::interface::ContactResistanceGradient;
 use crate::interface::temperature::enthalpy::{
     ContactEnthalpyLinearization, ContactEnthalpyRadiationLinearization,
@@ -78,6 +79,23 @@ pub struct ScanRadiationGradient {
     /// and query support remain fixed. At epsilon=1 only feasible directions apply.
     pub emissivities: Vec<f64>,
 }
+impl ScanRadiationGradient {
+    fn from_pointwise_ambient(
+        gradient: crate::radiation::pointwise::PointwiseRadiationParameterGradient,
+    ) -> Result<Self, EnthalpyAdjointError> {
+        if !gradient.spectral_emissivities.is_empty()
+            || gradient.radiation_regions.len() != gradient.emissivities.len()
+            || gradient.radiation_regions.len() != gradient.reservoir_temperatures.len()
+        {
+            return Err(EnthalpyAdjointError::InvalidInput(
+                "scan ambient controls require one gray emissivity and reservoir per original patch",
+            ));
+        }
+        Ok(Self { radiation_regions: gradient.radiation_regions,
+            reservoir_temperatures: gradient.reservoir_temperatures,
+            emissivities: gradient.emissivities })
+    }
+}
 
 /// All sources and radiation controls share the SAME physical transpose.
 #[derive(Debug, Clone, PartialEq)]
@@ -101,16 +119,20 @@ pub struct ScanStepGradient {
 enum ScanTangent<'m> {
     Storage(HeterogeneousEnthalpyStepLinearization<'m>),
     Radiation(HeterogeneousEnthalpyRadiationStepLinearization<'m>),
+    PointwiseRadiation(HeterogeneousEnthalpyStepLinearization<'m>),
     Contact { binding: ContactEnthalpyLinearization<'m>, max_face_pairs: usize },
     ContactRadiation { binding: ContactEnthalpyRadiationLinearization<'m>, max_face_pairs: usize },
+    ContactPointwiseRadiation { binding: ContactEnthalpyLinearization<'m>, max_face_pairs: usize },
 }
 impl<'m> ScanTangent<'m> {
     fn transport(&self) -> &EnthalpyStepLinearization<'_> {
         match self {
             Self::Storage(binding) => binding.transport(),
             Self::Radiation(binding) => binding.transport(),
+            Self::PointwiseRadiation(binding) => binding.transport(),
             Self::Contact { binding, .. } => binding.transport().transport(),
             Self::ContactRadiation { binding, .. } => binding.transport().transport(),
+            Self::ContactPointwiseRadiation { binding, .. } => binding.transport().transport(),
         }
     }
 
@@ -129,6 +151,20 @@ impl<'m> ScanTangent<'m> {
                 };
                 Ok((gradient.storage, Some(radiation), Vec::new()))
             }
+            Self::PointwiseRadiation(binding) => {
+                let gradient = binding.pullback(cx, seed, linear)?;
+                // Radiation leaves the solid. Reuse the same solved dual with
+                // the original free-row load mask and dt, then reverse its sign.
+                let transport = binding.transport();
+                let mut outward = transport.nodal_load_pullback(cx, &gradient.transport.adjoint)?;
+                for (vertex, weight) in outward.iter_mut().enumerate() {
+                    if vertex % crate::assemble::ASSEMBLY_TILE == 0 { poll(cx, vertex)?; }
+                    *weight = -*weight;
+                }
+                let radiation = ScanRadiationGradient::from_pointwise_ambient(
+                    transport.pointwise_parameter_pullback(cx, &outward)?)?;
+                Ok((gradient, Some(radiation), Vec::new()))
+            }
             Self::Contact { binding, max_face_pairs } => {
                 let gradient = binding.pullback_with_resistance_controls(cx, seed, linear, *max_face_pairs)?;
                 Ok((gradient.storage, None, gradient.resistance_multipliers))
@@ -141,6 +177,12 @@ impl<'m> ScanTangent<'m> {
                     emissivities: gradient.radiation.emissivities,
                 };
                 Ok((gradient.radiation.storage, Some(radiation), gradient.resistance_multipliers))
+            }
+            Self::ContactPointwiseRadiation { binding, max_face_pairs } => {
+                let gradient = binding.pullback_with_pointwise_radiation_controls(
+                    cx, seed, linear, *max_face_pairs)?;
+                let radiation = ScanRadiationGradient::from_pointwise_ambient(gradient.radiation)?;
+                Ok((gradient.thermal.storage, Some(radiation), gradient.thermal.resistance_multipliers))
             }
         }
     }
@@ -300,16 +342,15 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
         self.run.storage.admit_prescribed_boundary(cx, &boundary)?;
         let (source, _) = self.source_at(cx, end, left)?;
         let problem = self.run.conduction_problem(&boundary, &source)?;
-        let patches = if let Some(radiation) = &self.radiation {
-            Some(if left { patches_before(cx, &radiation.patches, end)? } else {
-                let mut patches = Vec::with_capacity(radiation.patches.len());
-                for (i, patch) in radiation.patches.iter().enumerate() {
-                    poll(cx, i)?;
-                    patches.push(patch.at(end)?);
-                }
-                patches
-            })
-        } else { None };
+        let patches = self.radiation.as_ref()
+            .map(|radiation| radiation.sample(cx, end, left)).transpose()?;
+        // The owner is prepared against this exact sampled boundary. The
+        // accepted binder retains its tangent, never these temporary borrows.
+        let pointwise = match (&self.radiation, patches.as_deref()) {
+            (Some(ScanRadiationBinding::PointwiseAmbient(_)), Some(patches)) =>
+                Some(PointwiseAmbientRadiation::new(cx, mesh, &boundary, patches)?),
+            _ => None,
+        };
         let transport = if let Some(contacts) = &self.contacts {
             let ScanTransport::Contact(accepted) = &report.transport else {
                 return Err(EnthalpyAdjointError::InvalidInput(
@@ -317,14 +358,21 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
             };
             let max_face_pairs = contacts.max_face_pairs;
             let residual = contacts.physical_residual_tolerance_j();
-            match patches.as_deref() {
-                None => ScanTangent::Contact {
+            match (pointwise.as_ref(), patches.as_deref()) {
+                (Some(radiation), _) => ScanTangent::ContactPointwiseRadiation {
+                    binding: contacts.contacts.linearize_accepted_enthalpy_with_pointwise_ambient_radiation(
+                        cx, &self.run.storage, problem, &self.run.specific_h, end - start,
+                        config, residual, radiation, accepted.as_ref().clone(),
+                        budget.max_radiation_feedback_entries, max_face_pairs)?,
+                    max_face_pairs,
+                },
+                (None, None) => ScanTangent::Contact {
                     binding: contacts.contacts.linearize_accepted_enthalpy(cx,
                         &self.run.storage, problem, &self.run.specific_h, end - start,
                         config, residual, accepted.as_ref().clone(), max_face_pairs)?,
                     max_face_pairs,
                 },
-                Some(patches) => ScanTangent::ContactRadiation {
+                (None, Some(patches)) => ScanTangent::ContactRadiation {
                     binding: contacts.contacts.linearize_accepted_enthalpy_with_ambient_radiation(cx,
                         &self.run.storage, problem, &self.run.specific_h, end - start,
                         config, residual, patches, accepted.as_ref().clone(),
@@ -334,10 +382,15 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
             }
         } else {
             let accepted = report.solution().clone();
-            match patches.as_deref() {
-                None => ScanTangent::Storage(self.run.storage.linearize_accepted(cx, problem,
+            match (pointwise.as_ref(), patches.as_deref()) {
+                (Some(radiation), _) => ScanTangent::PointwiseRadiation(
+                    self.run.storage.linearize_accepted_with_pointwise_ambient_radiation(
+                        cx, problem, self.run.problem.interfaces, &self.run.specific_h,
+                        end - start, config, radiation, accepted, None::<f64>,
+                        budget.max_radiation_feedback_entries)?),
+                (None, None) => ScanTangent::Storage(self.run.storage.linearize_accepted(cx, problem,
                     self.run.problem.interfaces, &self.run.specific_h, end - start, config, accepted)?),
-                Some(patches) => ScanTangent::Radiation(
+                (None, Some(patches)) => ScanTangent::Radiation(
                     self.run.storage.linearize_accepted_parameters_with_ambient_radiation(
                         cx, problem, self.run.problem.interfaces, &self.run.specific_h, end - start,
                         config, patches, accepted, budget.max_radiation_feedback_entries)?),

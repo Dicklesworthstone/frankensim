@@ -3799,9 +3799,13 @@ authority.
   fractions on both material traces. The same owner handles explicit endpoints,
   held-event sides, adaptive half steps and replay, retaining original contact
   states and the physical heat account in `ScanTransport::Contact`. Temperature
-  contact iteration supports the existing area-mean ambient radiation; coupled
-  Newton refuses that radiation convention, which requires the owner's separate
-  pointwise model. Fixed geometry, source claims and prescribed pressure remain
+  contact iteration supports the existing area-mean ambient radiation. Explicit
+  `with_pointwise_ambient_radiation` attachment instead composes the original
+  local P1 emission with either contact policy, including phase-aware Newton.
+  Natural convection/flux and shared prescribed-node reactions keep their own
+  accounts; local radiation is neither shifted into a Robin surrogate nor
+  counted twice. Coupled Newton still refuses area-mean radiation because that
+  is a distinct physical convention. Fixed geometry, source claims and prescribed pressure remain
   unchanged. Endpoint adjoints bind the accepted complete contact residual and
   use one transpose for source, history, radiation and whole-law resistance
   multipliers. Whole-scan objectives, point responses and smooth peak responses
@@ -5205,15 +5209,40 @@ intervals shorten while retaining the original phase, energy and entropy gates.
 An accepted `ScanningEnthalpyRun` can transfer directly through `into_sdirk2`
 with its source declarations, motion policy, caloric state, clock and lifetime
 budget intact. Original Newton contact laws transfer with their policy.
+Explicitly selected fixed pointwise ambient radiation transfers its original
+emissivity declarations and reservoir histories as well. Both SDIRK stages
+prepare their local radiation against their own sampled boundary and bath;
+direct `with_pointwise_ambient` attachment uses the same original admission.
 Area-mean scan radiation and iterated-only contact policies refuse because the
 native stage owner cannot preserve those conventions; no physics is silently
-dropped or replaced. Moving geometry, optical absorption and whole-scan SDIRK2
-adjoints are outside this integration. Focused regressions in
+dropped or replaced. Moving geometry, optical absorption and automatic SDIRK2
+objective/checkpoint tapes are outside this integration. Focused regressions in
 `tests/phase_contact/history/enclosure/scanning_sdirk.rs` use independent P1
 source loads, latent-contact equations and gray-reflection equations to check
 stage sampling, held events, motion-limited adaptive entropy, continuation and
 transactional refusal. Their native execution remains unverified: the pinned
 `asupersync` build was killed before `fs-conduction` compiled.
+
+The history `sdirk::sensitivity` module binds explicit or event-limited intervals
+through this same stage sampler and one original physical solve. The accepted
+h/T/f, clock and count publish only after both native stage tangents, moving
+source bindings and observation metadata admit. Original source declarations
+are shared immutably across retained interval bindings. Each source and authored
+Dirichlet history contracts its two actual stage cotangents at the recorded
+time and side; common authored controls count once, with no extra tableau weight.
+Temperature and liquid-fraction observations use the original per-node charts,
+and the complete previous-h seed remains available for reverse history.
+
+Optional parameter-aware history pullbacks reuse the same two native transposes
+for contact resistance and fixed/material radiation controls alongside sampled
+or authored source/bath controls. The full native parameter representation and
+both stage reports survive. Radiation parameters remain explicit per-stage
+controls; authored radiative schedule maps are not inferred. Selected time grids,
+event/adaptive decisions, geometry and caloric charts remain fixed. Five focused
+regressions in `tests/phase_contact/history/enclosure/scanning_sdirk/sensitivity.rs`
+cover independent source/contact/reflection equations, exact held-source and bath
+coefficients, prior-state derivatives, wrapper identity and atomic refusal.
+Pinned parsing and bounded source review passed; native execution is unverified.
 
 Five new native history tests compare original P1 conductivity moments and
 source-clock quadrature with independent scalar stages; preserve graded

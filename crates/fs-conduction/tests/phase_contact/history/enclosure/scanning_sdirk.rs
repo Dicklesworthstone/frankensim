@@ -1,4 +1,6 @@
 //! Moving sources enter both native stages and the original contact/radiation balance.
+#[path = "scanning_sdirk/sensitivity.rs"]
+mod sensitivity;
 use super::*;
 use fs_conduction::COMPONENT_POWER_DIMS;
 use fs_conduction::bc::history::march::enthalpy::scanning::{ScanRadiation, ScanningEnthalpyRun};

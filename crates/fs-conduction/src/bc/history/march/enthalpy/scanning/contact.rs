@@ -5,13 +5,14 @@
 //! no frozen contact snapshot is substituted for that owner.
 
 use super::{ScanningEnthalpyRun, conduction, invalid, poll};
-use crate::{AmbientRadiationConfig, AmbientRadiationPatch, ConductionProblem};
+use crate::ConductionProblem;
 use crate::interface::temperature::{ContactIterationConfig, TemperatureContacts};
 use crate::interface::temperature::enthalpy::{ContactEnthalpyNewtonConfig, ContactEnthalpyStep};
 use crate::transient::enthalpy::{EnthalpyError, EnthalpyStepConfig};
 use crate::transient::enthalpy::heterogeneous::{
-    HeterogeneousEnthalpyBackwardEuler, HeterogeneousEnthalpyError,
+    EnthalpyRadiation, HeterogeneousEnthalpyBackwardEuler, HeterogeneousEnthalpyError,
 };
+use super::radiation::ScanRadiationBinding;
 use fs_exec::Cx;
 
 #[derive(Debug, Clone, Copy)]
@@ -38,23 +39,31 @@ impl ScanContactBinding<'_, '_> {
     pub(super) fn advance(
         &self, cx: &Cx<'_>, storage: &HeterogeneousEnthalpyBackwardEuler<'_, '_>,
         problem: ConductionProblem<'_>, old: &[f64], dt_s: f64, step: EnthalpyStepConfig,
-        radiation: Option<(&[AmbientRadiationPatch], AmbientRadiationConfig)>,
+        radiation: EnthalpyRadiation<'_>,
     ) -> Result<ContactEnthalpyStep, HeterogeneousEnthalpyError> {
         match self.coupling {
             ScanContactCoupling::Newton(config) => {
                 if config.step != step {
                     return Err(invalid("scan advance controls must match the retained contact enthalpy Newton policy"));
                 }
-                if radiation.is_some() {
-                    return Err(invalid("coupled Newton contacts require pointwise radiation, not the scan's area-mean radiation"));
+                match radiation {
+                    EnthalpyRadiation::None => Ok(self.contacts.advance_enthalpy_newton(
+                        cx, storage, problem, old, dt_s, config)?),
+                    EnthalpyRadiation::PointwiseAmbient(owner) =>
+                        Ok(self.contacts.advance_enthalpy_newton_with_pointwise_ambient_radiation(
+                            cx, storage, problem, old, dt_s, config, owner)?),
+                    _ => Err(invalid("coupled Newton scan contacts require their explicit pointwise ambient owner")),
                 }
-                Ok(self.contacts.advance_enthalpy_newton(cx, storage, problem, old, dt_s, config)?)
             }
             ScanContactCoupling::Legacy(coupling) => match radiation {
-                None => Ok(self.contacts.advance_enthalpy(
+                EnthalpyRadiation::None => Ok(self.contacts.advance_enthalpy(
                     cx, storage, problem, old, dt_s, step, coupling)?),
-                Some((patches, config)) => Ok(self.contacts.advance_enthalpy_with_ambient_radiation(
+                EnthalpyRadiation::Ambient { patches, config } => Ok(self.contacts.advance_enthalpy_with_ambient_radiation(
                     cx, storage, problem, old, dt_s, step, coupling, patches, config)?),
+                EnthalpyRadiation::PointwiseAmbient(owner) =>
+                    Ok(self.contacts.advance_enthalpy_with_pointwise_ambient_radiation(
+                        cx, storage, problem, old, dt_s, step, coupling, owner)?),
+                _ => Err(invalid("scan contacts require their explicitly attached ambient radiation owner")),
             },
         }
     }
@@ -66,6 +75,8 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
     /// transfer unchanged, including after physical steps have been accepted.
     /// Coupled Newton contacts retain their complete original source laws and
     /// policy. Each new stage samples the retained moving sources at its own time.
+    /// Fixed pointwise ambient declarations and reservoir schedules transfer
+    /// unchanged; every new stage resolves its own local radiative load.
     ///
     /// # Errors
     /// Area-mean scan radiation and temperature-only iterated contacts cannot
@@ -74,9 +85,12 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
     pub fn into_sdirk2(self)
         -> Result<super::super::sdirk::Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'c>, HeterogeneousEnthalpyError>
     {
-        if self.radiation.is_some() {
-            return Err(invalid("SDIRK2 scan continuation requires pointwise radiation; area-mean scan radiation cannot be transferred"));
-        }
+        let pointwise_ambient = match self.radiation {
+            None => None,
+            Some(ScanRadiationBinding::PointwiseAmbient(patches)) => Some(patches),
+            Some(ScanRadiationBinding::MeanAmbient(_)) => return Err(invalid(
+                "SDIRK2 scan continuation requires pointwise radiation; area-mean scan radiation cannot be transferred")),
+        };
         let contacts = match self.contacts {
             None => None,
             Some(binding) => match binding.coupling {
@@ -86,7 +100,7 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
             },
         };
         Ok(super::super::sdirk::Sdirk2EnthalpyHistoryRun::from_scanning(
-            self.run, contacts, self.sources, self.motion_limit,
+            self.run, contacts, self.sources, self.motion_limit, pointwise_ambient,
         ))
     }
 
@@ -130,15 +144,16 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
     /// source-backed contact states, counted work and independent joule audit.
     ///
     /// The complete policy and its face-pair cap remain fixed for continuation.
-    /// Advance calls must pass exactly config.step. Area-mean ambient radiation
-    /// is refused because the coupled Newton owner requires pointwise radiation.
+    /// Advance calls must pass exactly config.step. Explicitly selected local
+    /// P1 ambient radiation participates in the same Newton residual. Area-mean
+    /// radiation is refused because it uses a different physical coupling owner.
     /// No thermal state, physical time or step allowance changes on attachment.
     pub fn with_contacts_newton(
         mut self, cx: &Cx<'_>, contacts: TemperatureContacts<'m, 'c>,
         config: ContactEnthalpyNewtonConfig,
     ) -> Result<Self, HeterogeneousEnthalpyError> {
         self.admit_contacts(cx, &contacts, config.max_face_pairs)?;
-        if self.radiation.is_some() {
+        if self.radiation.as_ref().is_some_and(|radiation| !radiation.is_pointwise()) {
             return Err(invalid("coupled Newton scan contacts require pointwise radiation; area-mean scan radiation is incompatible"));
         }
         config.validate()?;

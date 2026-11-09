@@ -6,6 +6,9 @@
 //! Optional moving absorbed-power sources retain their original normalized P1
 //! projection, sampled separately at each physical stage time.
 
+/// Fixed-grid native stage adjoints and authored moving-source controls.
+pub mod sensitivity;
+
 use super::{EnthalpyHistoryRun, EnthalpyStepConfig, HeterogeneousEnthalpyError,
     conduction, invalid, poll};
 use super::adaptive::{
@@ -16,9 +19,11 @@ use super::adaptive::{
 use crate::transient::enthalpy::entropy::EnthalpyEntropyBalance;
 use super::radiation::enclosure::MaterialEnclosureHistoryBinding;
 use super::radiation::material::{MaterialAmbientHistoryBinding, MaterialRadiationRegionHistory};
+use super::scanning::radiation::sample as pointwise_ambient_samples;
 use super::super::events::{self, HistoryEventStep,
     adaptive::{AdaptiveHistoryConfig, AdaptiveHistoryStep, admit_proposal, select_step_with_recovery}};
 use super::super::moving::{MovingHeatSource, assembly, motion::ScanMotionLimit};
+use super::super::radiation::RadiationRegionHistory;
 use crate::interface::temperature::TemperatureContacts;
 use crate::interface::temperature::enthalpy::ContactEnthalpyNewtonConfig;
 use crate::transient::enthalpy::heterogeneous::EnthalpyRadiation;
@@ -26,15 +31,17 @@ use crate::transient::enthalpy::sdirk::{
     EnthalpySdirk2Input, EnthalpySdirk2Stage, EnthalpySdirk2Step, SDIRK2_GAMMA,
 };
 use crate::{MaterialEnclosureRadiationPatch, MaterialPointwiseAmbientRadiation,
-    MaterialPointwiseEnclosureRadiation, ScalarField};
+    MaterialPointwiseEnclosureRadiation, PointwiseAmbientRadiation, ScalarField};
 use fs_exec::Cx;
 use fs_scenario::signal::TimeSignal;
+use std::sync::Arc;
 
 /// Persistent SDIRK2 evolution of an already admitted physical history.
 ///
 /// Construct with `into_sdirk2` on an original `EnthalpyHistoryRun`, coupled
 /// Newton `ContactEnthalpyHistoryRun`, `MaterialRadiativeEnthalpyHistoryRun`,
-/// or `MaterialEnclosureEnthalpyHistoryRun`.
+/// `MaterialEnclosureEnthalpyHistoryRun`, or an admitted pointwise-radiative
+/// `ScanningEnthalpyRun`.
 /// Conversion preserves accepted fields, time, source declarations and budget.
 /// Only the stiffly accurate second stage is published. Internal stages do not
 /// consume accepted-step slots or appear as independently accepted timesteps.
@@ -42,11 +49,12 @@ pub struct Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
     run: EnthalpyHistoryRun<'h, 'm, 'c>,
     contacts: Option<(TemperatureContacts<'m, 'i>, ContactEnthalpyNewtonConfig)>,
     radiation: Option<MaterialRadiationHistory<'h, 'c>>,
-    moving_sources: Vec<MovingHeatSource>,
+    moving_sources: Arc<[MovingHeatSource]>,
     motion_limit: Option<ScanMotionLimit>,
 }
 
 enum MaterialRadiationHistory<'h, 'c> {
+    PointwiseAmbient(Vec<RadiationRegionHistory>),
     Ambient(MaterialAmbientHistoryBinding<'c>),
     Enclosure(MaterialEnclosureHistoryBinding<'h, 'c>),
 }
@@ -56,7 +64,7 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         contacts: Option<(TemperatureContacts<'m, 'i>, ContactEnthalpyNewtonConfig)>,
         radiation: Option<MaterialEnclosureHistoryBinding<'h, 'c>>) -> Self
     { Self { run, contacts, radiation: radiation.map(MaterialRadiationHistory::Enclosure),
-        moving_sources: Vec::new(), motion_limit: None } }
+        moving_sources: Arc::from([]), motion_limit: None } }
 
     // Transfer an already admitted scan, including an evolved accepted state.
     // The public attachment API correctly refuses an already evolved history.
@@ -64,15 +72,18 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         run: EnthalpyHistoryRun<'h, 'm, 'c>,
         contacts: Option<(TemperatureContacts<'m, 'i>, ContactEnthalpyNewtonConfig)>,
         moving_sources: Vec<MovingHeatSource>, motion_limit: Option<ScanMotionLimit>,
+        pointwise_ambient: Option<Vec<RadiationRegionHistory>>,
     ) -> Self {
-        Self { run, contacts, radiation: None, moving_sources, motion_limit }
+        Self { run, contacts,
+            radiation: pointwise_ambient.map(MaterialRadiationHistory::PointwiseAmbient),
+            moving_sources: moving_sources.into(), motion_limit }
     }
 
     pub(super) fn from_material_ambient(
         run: EnthalpyHistoryRun<'h, 'm, 'c>, radiation: MaterialAmbientHistoryBinding<'c>,
     ) -> Self {
         Self { run, contacts: None, radiation: Some(MaterialRadiationHistory::Ambient(radiation)),
-            moving_sources: Vec::new(), motion_limit: None }
+            moving_sources: Arc::from([]), motion_limit: None }
     }
 
     /// Attach independently normalized moving absorbed-power sources before the
@@ -98,7 +109,7 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         assembly::project(cx, mesh, &background, &sources, self.run.time_s, false, |_| {})
             .map_err(conduction)?;
         poll(cx, sources.len()).map_err(conduction)?;
-        self.moving_sources = sources;
+        self.moving_sources = sources.into();
         Ok(self)
     }
 
@@ -125,6 +136,36 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
     /// Selected footprint-relative motion resolution, when explicitly supplied.
     #[must_use]
     pub const fn motion_limit(&self) -> Option<ScanMotionLimit> { self.motion_limit }
+
+    /// Retain fixed source-backed emissivities and independent black-reservoir
+    /// schedules before the first interval. Each physical stage integrates the
+    /// original local P1 T^4 law on its actual boundary, adding to its existing
+    /// natural heat flux. Reservoir events use the same end-left sampling as
+    /// sources; stage radiation remains separate from internal contact heat.
+    ///
+    /// # Errors
+    /// Advanced history, another radiation owner, invalid patch/bath/trace or
+    /// initial surface-material support, and cancellation. No step is taken.
+    pub fn with_pointwise_ambient(
+        mut self, cx: &Cx<'_>, patches: Vec<RadiationRegionHistory>,
+    ) -> Result<Self, HeterogeneousEnthalpyError> {
+        poll(cx, 0).map_err(conduction)?;
+        if self.run.accepted_steps != 0 || self.radiation.is_some() {
+            return Err(invalid("attach exclusive pointwise ambient radiation before the first SDIRK2 interval"));
+        }
+        super::scanning::radiation::admit_pointwise_ambient(cx, &self.run, &patches)?;
+        self.radiation = Some(MaterialRadiationHistory::PointwiseAmbient(patches));
+        Ok(self)
+    }
+
+    /// Original fixed emissivity declarations and black-reservoir schedules.
+    #[must_use]
+    pub fn pointwise_ambient_patches(&self) -> Option<&[RadiationRegionHistory]> {
+        match &self.radiation {
+            Some(MaterialRadiationHistory::PointwiseAmbient(patches)) => Some(patches),
+            _ => None,
+        }
+    }
 
     /// Attach independent material black reservoirs to an unadvanced original
     /// history, including a retained native phase-aware contact history.
@@ -330,6 +371,8 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         let reservoirs = self.material_enclosure_ambient_temperature().into_iter()
             .chain(self.material_ambient_patches().into_iter().flatten()
                 .map(|patch| &patch.ambient_temperature))
+            .chain(self.pointwise_ambient_patches().into_iter().flatten()
+                .map(|patch| &patch.ambient_temperature))
             .chain(self.moving_sources.iter().flat_map(MovingHeatSource::signals));
         let end = events::next_endpoint(cx, self.run.problem.boundary, &self.run.problem.source,
             reservoirs, self.run.time_s, target, cap).map_err(conduction)?;
@@ -381,13 +424,7 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         &self, cx: &Cx<'_>, from: f64, to: f64, before: bool,
         solve: impl for<'a> FnOnce([EnthalpySdirk2Input<'a>; 2], f64) -> R,
     ) -> Result<R, HeterogeneousEnthalpyError> {
-        let dt = to - from;
-        let stage_time = SDIRK2_GAMMA.mul_add(dt, from);
-        if ![from, to, dt, stage_time].iter().all(|x| x.is_finite()) || dt <= 0.0
-            || !(from < stage_time && stage_time < to)
-        {
-            return Err(invalid("SDIRK2 history needs a finite positive interval and representable interior stage time"));
-        }
+        let (dt, stage_time) = stage_clock(from, to)?;
         let history = self.run.problem.boundary;
         let first_boundary = history.at(cx, stage_time).map_err(conduction)?;
         let second_boundary = if before { events::boundary_before(cx, history, to) }
@@ -404,6 +441,19 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         match &self.radiation {
             None => Ok(solve(
                 [inputs(EnthalpyRadiation::None), endpoint(EnthalpyRadiation::None)], dt)),
+            Some(MaterialRadiationHistory::PointwiseAmbient(patches)) => {
+                let first_patches = pointwise_ambient_samples(cx, patches, stage_time, false)
+                    .map_err(conduction)?;
+                let second_patches = pointwise_ambient_samples(cx, patches, to, before)
+                    .map_err(conduction)?;
+                let first = PointwiseAmbientRadiation::new(
+                    cx, history.mesh(), &first_boundary, &first_patches).map_err(conduction)?;
+                let second = PointwiseAmbientRadiation::new(
+                    cx, history.mesh(), &second_boundary, &second_patches).map_err(conduction)?;
+                Ok(solve(
+                    [inputs(EnthalpyRadiation::PointwiseAmbient(&first)),
+                     endpoint(EnthalpyRadiation::PointwiseAmbient(&second))], dt))
+            }
             Some(MaterialRadiationHistory::Ambient(binding)) => {
                 let first_patches = binding.sample(cx, stage_time, false).map_err(conduction)?;
                 let second_patches = binding.sample(cx, to, before).map_err(conduction)?;
@@ -433,6 +483,17 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         self.run.publish_fields(cx, time_s, &stage.specific_enthalpy_j_kg,
             &stage.temperature, &stage.liquid_mass_fraction)
     }
+}
+
+fn stage_clock(from: f64, to: f64) -> Result<(f64, f64), HeterogeneousEnthalpyError> {
+    let dt = to - from;
+    let stage_time = SDIRK2_GAMMA.mul_add(dt, from);
+    if ![from, to, dt, stage_time].iter().all(|x| x.is_finite()) || dt <= 0.0
+        || !(from < stage_time && stage_time < to)
+    {
+        return Err(invalid("SDIRK2 history needs a finite positive interval and representable interior stage time"));
+    }
+    Ok((dt, stage_time))
 }
 
 fn fields(stage: &EnthalpySdirk2Stage) -> PhaseFields<'_> {

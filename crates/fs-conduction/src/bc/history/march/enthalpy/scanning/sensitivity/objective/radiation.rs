@@ -36,7 +36,7 @@ pub(super) fn control_count(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>)
             .ok_or_else(|| invalid("scan authored-control count overflow"))?;
     }
     if let Some(radiation) = &run.radiation {
-        for (i, patch) in radiation.patches.iter().enumerate() {
+        for (i, patch) in radiation.patches().iter().enumerate() {
             poll(cx, i)?;
             total = total.checked_add(count(&patch.ambient_temperature)?)
                 .and_then(|n| n.checked_add(1))
@@ -55,7 +55,7 @@ pub(super) fn pullback(cx: &Cx<'_>, run: &ScanningEnthalpyRun<'_, '_, '_>,
         (Some(radiation), Some(gradient)) => (radiation, gradient),
         _ => return Err(invalid("scan radiative-gradient owner changed")),
     };
-    let patches = &radiation.patches;
+    let patches = radiation.patches();
     if gradient.radiation_regions.len() != patches.len()
         || gradient.reservoir_temperatures.len() != patches.len()
         || gradient.emissivities.len() != patches.len()

@@ -8,7 +8,7 @@ use fs_exec::Cx;
 use fs_material::phase::EquilibriumEnthalpyPhaseCurve;
 
 #[derive(Debug)]
-pub(super) enum FractionDerivative {
+pub(in crate::bc::history::march::enthalpy) enum FractionDerivative {
     Smooth(f64),
     Corner,
     Endpoint,
@@ -38,7 +38,7 @@ fn derivative(curve: &EquilibriumEnthalpyPhaseCurve, h: f64) -> FractionDerivati
     FractionDerivative::Smooth(slope)
 }
 
-pub(super) fn bind(cx: &Cx<'_>, storage: &HeterogeneousEnthalpyBackwardEuler<'_, '_>, h: &[f64])
+pub(in crate::bc::history::march::enthalpy) fn bind(cx: &Cx<'_>, storage: &HeterogeneousEnthalpyBackwardEuler<'_, '_>, h: &[f64])
     -> Result<Vec<FractionDerivative>, ScanSensitivityError>
 {
     poll(cx, 0)?;
@@ -55,7 +55,7 @@ pub(super) fn bind(cx: &Cx<'_>, storage: &HeterogeneousEnthalpyBackwardEuler<'_,
     Ok(out)
 }
 
-pub(super) fn pullback(cx: &Cx<'_>, slopes: &[FractionDerivative], h: &[f64], seed: &[f64])
+pub(in crate::bc::history::march::enthalpy) fn pullback(cx: &Cx<'_>, slopes: &[FractionDerivative], h: &[f64], seed: &[f64])
     -> Result<Vec<f64>, ScanSensitivityError>
 {
     poll(cx, 0)?;
