@@ -301,6 +301,15 @@ saturation departures, fixed-area/particle dissipation, Gibbs--Helmholtz
 consistency, extensive scaling and domain refusals. No interval enclosure or
 universal relative floating-point error bound is claimed.
 
+`solid_relative_inventory_free_energy_change_j` additionally retains actual
+solvent-volume changes. A stable fixed-volume inventory difference plus
+`RT*n_after*ln(V_before/V_after)` gives the complete isothermal chemical change,
+including adjacent-volume dilution. The original solid reference is retained;
+the common solvent reference cancels only under closed solvent-volume balance.
+Pressure-response work remains a separate mechanical account. Focused checks
+recover `dF/dV=-Pi`, path independence, absent-phase limits and the exact
+same-volume reduction, without inventing a thermal or pressure-dependent law.
+
 ## Finite dissolution and precipitation in one thermal bath
 
 `solution::solubility::caloric::SolubilityCaloricModelV1` closes an isobaric
@@ -401,6 +410,17 @@ premise is explicit: <https://doi.org/10.1021/ie50260a018>. Breakup, aggregation
 polydispersity, changing film thickness and solute-volume displacement are not
 modeled. No performance or experimental calibration claim is inferred from
 the numeric reference coefficients.
+
+`advance_at_saturation` lets an explicit coupled thermodynamic owner supply a
+conditional surface concentration while reusing these same exact fixed-area
+and bounded evolving-particle trajectories. It preserves the original source,
+temperature support, rate coefficient, particle reference and growth policy.
+Its scalar stage holds the supplied concentration fixed; the enclosing owner
+must qualify that activity/source calculation and control changes in other
+species. Returned target/exhaustion receipts use the supplied conditional
+saturation. This numerical entry point supplies no nonideal calibration,
+excess calorics or new nuclei. Focused checks establish identity with the same
+native trajectories at each supplied target and retain source/domain refusals.
 
 ## Coupled finite-rate dissolution and thermal evolution
 

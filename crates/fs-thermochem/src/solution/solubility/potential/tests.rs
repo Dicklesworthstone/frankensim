@@ -231,3 +231,107 @@ fn zero_inventory_limits_scaling_and_domains_are_explicit() {
         Err(SolubilityErrorV1::OutsideTemperatureDomain)
     );
 }
+
+#[test]
+fn variable_volume_potential_has_the_original_osmotic_pressure_derivative() {
+    let model = law(0.0);
+    let (temperature, amount) = (Temperature::new(300.0), Amount::new(0.7));
+    for volume in [0.25, 1.0, 3.0] {
+        let h = 1e-5 * volume;
+        let work = model
+            .solid_relative_inventory_free_energy_change_j(
+                temperature,
+                Volume::new(volume - h),
+                amount,
+                Volume::new(volume + h),
+                amount,
+            )
+            .unwrap();
+        let derivative = work / (2.0 * h);
+        let pressure = R * 300.0 * amount.value() / volume;
+        assert!((derivative / -pressure - 1.0).abs() < 1e-9);
+    }
+}
+
+#[test]
+fn dilution_and_phase_conversion_share_one_path_independent_potential() {
+    let model = law(12_000.0);
+    let t = Temperature::new(320.0);
+    let work = |va, na, vb, nb| {
+        model
+            .solid_relative_inventory_free_energy_change_j(
+                t,
+                Volume::new(va),
+                Amount::new(na),
+                Volume::new(vb),
+                Amount::new(nb),
+            )
+            .unwrap()
+    };
+    for (va, na, vb, nb) in [
+        (1.0, 0.0, 0.25, 1.0),
+        (2.0, 0.3, 0.5, 1.2),
+        (0.2, 3.0, 2.0, 0.0),
+    ] {
+        let direct = work(va, na, vb, nb);
+        let reverse_order = work(va, na, vb, na) + work(vb, na, vb, nb);
+        let saturation = model.saturation_concentration(t).unwrap().value();
+        let absolute = |v: f64, n: f64| {
+            if n == 0.0 {
+                0.0
+            } else {
+                R * t.value() * n * ((n / (v * saturation)).ln() - 1.0)
+            }
+        };
+        let independent = absolute(vb, nb) - absolute(va, na);
+        assert!((direct - independent).abs() < 1e-10);
+        assert!((direct - reverse_order).abs() < 1e-10);
+        assert!((direct + work(vb, nb, va, na)).abs() < 1e-10);
+    }
+}
+
+#[test]
+fn adjacent_dilution_and_same_volume_keep_small_chemical_work() {
+    let model = law(0.0);
+    let t = Temperature::new(300.0);
+    let va = 1.0_f64;
+    let vb = va.next_up();
+    let amount = Amount::new(0.7);
+    let work = model
+        .solid_relative_inventory_free_energy_change_j(
+            t,
+            Volume::new(va),
+            amount,
+            Volume::new(vb),
+            amount,
+        )
+        .unwrap();
+    let expected = -R * 300.0 * 0.7 * ((vb - va) / va).ln_1p();
+    assert!(work < 0.0);
+    assert!((work / expected - 1.0).abs() < 3e-15);
+    assert_eq!(
+        model
+            .solid_relative_inventory_free_energy_change_j(
+                t,
+                Volume::new(1.0),
+                Amount::new(2.0),
+                Volume::new(1.0),
+                Amount::new(2.0_f64.next_up()),
+            )
+            .unwrap(),
+        change(&model, 2.0, 2.0_f64.next_up())
+    );
+    for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            model
+                .solid_relative_inventory_free_energy_change_j(
+                    t,
+                    Volume::new(1.0),
+                    amount,
+                    Volume::new(invalid),
+                    amount,
+                )
+                .is_err()
+        );
+    }
+}

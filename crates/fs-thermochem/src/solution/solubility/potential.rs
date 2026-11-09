@@ -60,6 +60,56 @@ impl IdealSolubilityV1 {
         )
     }
 
+    /// Solid-relative chemical-work change [J] with actual solvent-volume and
+    /// dissolved-inventory changes, at the same admitted temperature.
+    ///
+    /// Evaluates a fixed-volume inventory change plus the exact dilution work
+    /// `RT*n_after*ln(V_before/V_after)`. Relative volume logarithms retain
+    /// adjacent volume changes even when rounded concentrations coincide.
+    /// The original saturation reference stays in the phase-conversion term.
+    /// The pure-solid datum cancels only over a closed, component-conserving
+    /// system sharing this pair law; the common solvent datum additionally
+    /// requires conservation of solvent volume. Mechanical pressure work must
+    /// be accounted for separately by the original pressure response.
+    /// This function supplies no heat, pressure-dependent chemistry or change
+    /// of temperature, and it never uses elapsed time as a dilution proxy.
+    pub fn solid_relative_inventory_free_energy_change_j(
+        &self,
+        temperature: Temperature,
+        before_volume: Volume,
+        before_dissolved: Amount,
+        after_volume: Volume,
+        after_dissolved: Amount,
+    ) -> Result<f64, SolubilityErrorV1> {
+        if !positive(after_volume.value()) {
+            return Err(SolubilityErrorV1::Invalid(
+                "positive final solvent volume for solubility chemical work",
+            ));
+        }
+        let inventory_change = self.solid_relative_free_energy_change_j(
+            temperature,
+            before_volume,
+            before_dissolved,
+            after_dissolved,
+        )?;
+        if before_volume == after_volume {
+            return Ok(inventory_change);
+        }
+        let final_capacity =
+            self.saturation_concentration(temperature)?.value() * after_volume.value();
+        if !positive(final_capacity) {
+            return Err(SolubilityErrorV1::Unrepresentable(
+                "positive final saturation capacity for solubility chemical work",
+            ));
+        }
+        let dilution = energy_product(
+            finite(R * temperature.value())?,
+            after_dissolved.value(),
+            log_ratio(before_volume.value(), after_volume.value()),
+        )?;
+        finite(inventory_change + dilution)
+    }
+
     /// Fixed-volume, isothermal solid-relative free-energy change [J].
     ///
     /// Retains the `-RT ln(c_sat)` reference term: precipitation/dissolution

@@ -25,10 +25,10 @@
 
 mod particles;
 
-use super::{IdealSolubilityV1, SolubilityErrorV1, SolubilityPartitionV1};
+use super::{IdealSolubilityV1, SolubilityErrorV1, SolubilityPartitionV1, partition_at_saturation};
 use fs_math::decay::{attenuate, decayed_fraction};
 use fs_math::det::{exp, expm1, ln, pow};
-use fs_qty::{Amount, Temperature, Time, Volume, VolumetricFlowRate};
+use fs_qty::{Amount, AmountConcentration, Temperature, Time, Volume, VolumetricFlowRate};
 
 /// The caller, not supersaturation alone, supplies a surface for crystal growth.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -274,14 +274,47 @@ impl SolubilityKineticsV1 {
         initial: &SolubilityKineticStateV1,
         duration: Time,
     ) -> Result<SolubilityKineticStepV1, SolubilityErrorV1> {
+        self.advance_at_saturation(
+            temperature,
+            solvent_volume,
+            initial,
+            duration,
+            self.law.saturation_concentration(temperature)?,
+        )
+    }
+
+    /// Advance the same original film/particle law toward an explicitly
+    /// qualified conditional surface saturation [mol/m³ solvent].
+    ///
+    /// A coupled thermodynamic owner may compute this concentration from the
+    /// original pure-pair calibration and the actual surrounding composition.
+    /// It owns that activity calculation, its source support and chemical-work
+    /// account. This numerical boundary supplies none of that qualification.
+    /// The original law's temperature domain, rate coefficient, particle
+    /// reference geometry and growth policy remain binding. The conditional
+    /// saturation is held constant during this scalar stage; evolving other
+    /// species requires an enclosing coupled-step accuracy controller.
+    ///
+    /// The exact fixed-area or bounded evolving-particle trajectory is reused
+    /// without cloning or rewriting the original model. Returned equilibrium
+    /// and exhaustion receipts refer to the supplied conditional saturation.
+    /// No excess caloric model, temperature response or nucleation is inferred.
+    pub fn advance_at_saturation(
+        &self,
+        temperature: Temperature,
+        solvent_volume: Volume,
+        initial: &SolubilityKineticStateV1,
+        duration: Time,
+        saturation: AmountConcentration,
+    ) -> Result<SolubilityKineticStepV1, SolubilityErrorV1> {
+        self.law.admit_temperature(temperature)?;
         if !nonnegative(duration.value()) {
             return Err(SolubilityErrorV1::Invalid(
                 "finite nonnegative kinetic duration",
             ));
         }
         let equilibrium =
-            self.law
-                .equilibrate(temperature, solvent_volume, initial.total_solute)?;
+            partition_at_saturation(saturation, solvent_volume, initial.total_solute)?;
         let capacity = equilibrium.capacity.value();
         let dissolved = initial.dissolved.value();
         let solid = initial.solid.value();
@@ -475,3 +508,6 @@ mod tests;
 
 #[cfg(test)]
 mod particle_tests;
+
+#[cfg(test)]
+mod conditional_tests;
