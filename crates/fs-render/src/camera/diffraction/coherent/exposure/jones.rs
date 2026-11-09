@@ -348,7 +348,7 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
             pixel::integrate_moments(pixel, subdivisions, &mut cancelled, |at, cancelled| {
                 self.moments(at, detector, cancelled)
             })?;
-        let duration = Dd::from_f64(self.shutter().duration_s());
+        let duration = Dd::from_f64(self.shutter().effective_duration_s());
         let result = CoherentDiffractionPixelExposure {
             average_power: CoherentDiffractionPixelPower {
                 mean_power_w: rounded(power[0])?,

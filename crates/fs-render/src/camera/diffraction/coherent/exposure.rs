@@ -4,7 +4,7 @@
 //! watts as in the monochromatic query. This is the usual cycle-averaged
 //! photodetector law, not a subcycle measurement of the real electric field:
 //! optical sum-frequency terms are outside this scalar model. Difference
-//! frequencies survive through the uniform shutter's analytic kernels and
+//! frequencies survive through the shutter profile's analytic kernels and
 //! bounded positive modal factor, without a time raster.
 //!
 //! Monochromatic intensity can omit the sensor's common Fresnel phase; a line
@@ -21,7 +21,9 @@ use super::{
     PhysicalCamera, PreparedCoherentDiffraction, admit_coordinate, admit_count, pixel, poll,
     rounded, square,
 };
-use fs_fft::harmonic_window::{HarmonicWindow, PreparedUniformHarmonicBand, ProperHarmonicProduct};
+use fs_fft::harmonic_window::{
+    HarmonicWindow, HarmonicWindowProfile, PreparedHarmonicBand, ProperHarmonicProduct,
+};
 use fs_math::det;
 
 mod interferometer;
@@ -66,14 +68,31 @@ pub struct CoherentDiffractionTone<'a> {
     pub illumination: CoherentPupilIllumination<'a>,
 }
 
-/// Uniform physical shutter; start and duration remain separately represented.
+/// Physical shutter with unit peak transmission and an explicit temporal profile.
+///
+/// Uniform transmission is one throughout the interval. Triangular transmission
+/// rises linearly from zero to one at its midpoint and falls to zero. Power
+/// observations are normalized transmission-weighted averages; collected energy
+/// multiplies them by `effective_duration_s()`, which is T or T/2 respectively.
+/// Start and duration remain separately represented on the original source clock.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CoherentDiffractionShutter(HarmonicWindow);
 
 impl CoherentDiffractionShutter {
     /// The start/end must be finite and the duration finite and positive.
     pub fn try_new(start_s: f64, duration_s: f64) -> Result<Self, CoherentDiffractionError> {
-        Ok(Self(HarmonicWindow::new(start_s, duration_s)?))
+        Self::try_with_profile(start_s, duration_s, HarmonicWindowProfile::Uniform)
+    }
+
+    /// Admit the normalized observation profile and its physical unit-peak
+    /// transmission. A shaped shutter does not transmit for the full duration
+    /// at unit gain; its integrated transmission remains explicit.
+    pub fn try_with_profile(
+        start_s: f64,
+        duration_s: f64,
+        profile: HarmonicWindowProfile,
+    ) -> Result<Self, CoherentDiffractionError> {
+        Self::from_window(HarmonicWindow::with_profile(start_s, duration_s, profile)?)
     }
 
     /// Retain the entrance-pupil source epoch below one binary64 clock step.
@@ -82,7 +101,26 @@ impl CoherentDiffractionShutter {
         start_s: Dd,
         duration_s: f64,
     ) -> Result<Self, CoherentDiffractionError> {
-        Ok(Self(HarmonicWindow::from_clock_dd(start_s, duration_s)?))
+        Self::try_with_profile_from_clock_dd(start_s, duration_s, HarmonicWindowProfile::Uniform)
+    }
+
+    /// Retain the precise source epoch through a shaped physical shutter.
+    pub fn try_with_profile_from_clock_dd(
+        start_s: Dd,
+        duration_s: f64,
+        profile: HarmonicWindowProfile,
+    ) -> Result<Self, CoherentDiffractionError> {
+        Self::from_window(HarmonicWindow::with_profile_from_clock_dd(
+            start_s, duration_s, profile,
+        )?)
+    }
+
+    fn from_window(window: HarmonicWindow) -> Result<Self, CoherentDiffractionError> {
+        let shutter = Self(window);
+        if shutter.effective_duration_s() == 0.0 {
+            return Err(CoherentDiffractionError::Unrepresentable);
+        }
+        Ok(shutter)
     }
 
     #[must_use]
@@ -98,6 +136,22 @@ impl CoherentDiffractionShutter {
     #[must_use]
     pub fn duration_s(self) -> f64 {
         self.0.duration_s()
+    }
+
+    #[must_use]
+    pub fn profile(self) -> HarmonicWindowProfile {
+        self.0.profile()
+    }
+
+    /// Integral of the physical transmission over time, in seconds. This is
+    /// the exposure multiplier for normalized weighted powers and coherencies.
+    #[must_use]
+    pub fn effective_duration_s(self) -> f64 {
+        self.duration_s()
+            * match self.profile() {
+                HarmonicWindowProfile::Uniform => 1.0,
+                HarmonicWindowProfile::Triangular => 0.5,
+            }
     }
 }
 
@@ -122,7 +176,8 @@ pub struct CoherentDiffractionExposurePixelLimits {
     pub maximum_pair_contractions: usize,
 }
 
-/// Exposure-averaged power per tangent-coordinate area.
+/// Transmission-weighted mean power per tangent-coordinate area, normalized
+/// by the shutter's integrated transmission rather than its elapsed duration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CoherentDiffractionExposureSample {
     pub mean_power_density_w: f64,
@@ -130,7 +185,7 @@ pub struct CoherentDiffractionExposureSample {
     pub power_density_w: f64,
 }
 
-/// Uniform-shutter energy collected over the complete finite rectangular pixel.
+/// Physical shutter energy collected over the complete finite rectangular pixel.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CoherentDiffractionPixelExposure {
     pub average_power: CoherentDiffractionPixelPower,
@@ -152,9 +207,9 @@ struct FrequencyGroup {
 ///
 /// Equal frequencies are reduced in DD before squaring. Different frequencies
 /// use analytic difference-only kernels. Narrow bands use a positive modal
-/// factor of the uniform shutter, retaining weak multi-tone interference
+/// factor of the shutter profile, retaining weak multi-tone interference
 /// without subtracting nearly equal powers. The bounded modal truncation is
-/// documented by `fs_fft::harmonic_window::PreparedUniformHarmonicBand`; it is
+/// documented by `fs_fft::harmonic_window::PreparedHarmonicBand`; it is
 /// not a relative error certificate at an arbitrary null. Observation allocates
 /// nothing and retains bounded cancellation points. Unrepresentable contracted
 /// powers are refused, never clamped to a plausible positive measurement.
@@ -163,7 +218,7 @@ pub struct PreparedCoherentDiffractionExposure<'camera, 'source> {
     tone_groups: Vec<usize>,
     groups: Vec<FrequencyGroup>,
     kernels: Vec<ProperHarmonicProduct>,
-    band: Option<PreparedUniformHarmonicBand>,
+    band: Option<PreparedHarmonicBand>,
     shutter: CoherentDiffractionShutter,
     sensor_distance_m: f64,
     minimum_scale: f64,
@@ -237,9 +292,7 @@ impl PhysicalCamera {
             });
             tone_groups.push(group);
         }
-        let band_modes = shutter
-            .0
-            .uniform_band_mode_count_hz(&frequencies[..group_count])?;
+        let band_modes = shutter.0.band_mode_count_hz(&frequencies[..group_count])?;
         let component_work = band_modes.map_or(group_count * (group_count + 1) / 2, |modes| {
             modes * (group_count + 1)
         });
@@ -254,9 +307,7 @@ impl PhysicalCamera {
             contractions,
             limits.maximum_pair_contractions,
         )?;
-        let band = shutter
-            .0
-            .prepare_uniform_band_hz(&frequencies[..group_count])?;
+        let band = shutter.0.prepare_band_hz(&frequencies[..group_count])?;
         let mut prepared = Vec::with_capacity(tones.len());
         let mut groups = Vec::with_capacity(group_count);
         let mut minimum_scale = f64::INFINITY;
@@ -350,21 +401,21 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
     fn power_component_work(&self) -> usize {
         self.band.as_ref().map_or_else(
             || self.groups.len() * (self.groups.len() + 1) / 2,
-            PreparedUniformHarmonicBand::power_work,
+            PreparedHarmonicBand::power_work,
         )
     }
 
     fn cross_component_work(&self) -> usize {
         self.band.as_ref().map_or_else(
             || self.groups.len() * (2 * self.groups.len()).saturating_sub(1),
-            PreparedUniformHarmonicBand::cross_work,
+            PreparedHarmonicBand::cross_work,
         )
     }
 
     fn coherency_component_work(&self) -> usize {
         self.band.as_ref().map_or_else(
             || self.groups.len() * (3 * self.groups.len() + 1),
-            PreparedUniformHarmonicBand::coherency_work,
+            PreparedHarmonicBand::coherency_work,
         )
     }
 
@@ -396,7 +447,7 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
         Ok(result)
     }
 
-    /// Integrate the original spatial rule and analytic uniform-shutter beats.
+    /// Integrate the original spatial rule and analytic shutter-weighted beats.
     ///
     /// Spatial resolution includes both the shortest physical wavelength's
     /// pupil bandwidth and the mixed-frequency sensor-chirp gradient. Time is
@@ -424,7 +475,7 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
             quadrature_samples: samples,
             pupil_evaluations,
         };
-        let duration = Dd::from_f64(self.shutter.duration_s());
+        let duration = Dd::from_f64(self.shutter.effective_duration_s());
         let result = CoherentDiffractionPixelExposure {
             average_power,
             mean_energy_j: rounded(power[0] * duration)?,

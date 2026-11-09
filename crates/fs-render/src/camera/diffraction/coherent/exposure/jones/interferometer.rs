@@ -127,7 +127,7 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
             self.jones_interferometer_work(receiver, limits)?;
         let moments =
             self.jones_interferometer_moments(receiver, arms, [0.0; 2], &mut cancelled)?;
-        let duration = Dd::from_f64(self.shutter().duration_s());
+        let duration = Dd::from_f64(self.shutter().effective_duration_s());
         let result = PolarizedCoherentInterferometerExposureSample {
             arm_power_density_w: [rounded(moments.arms[0])?, rounded(moments.arms[1])?],
             output_coherency_density_w: [

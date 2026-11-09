@@ -99,7 +99,7 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
         let arms = [moments[0], moments[1]];
         let outputs = [moments[2], moments[3]];
         let mutual = [moments[4], moments[5]];
-        let duration = Dd::from_f64(self.shutter.duration_s());
+        let duration = Dd::from_f64(self.shutter.effective_duration_s());
         let result = CoherentInterferometerPixelExposure {
             average_power: CoherentInterferometerPixelPower {
                 arm_power_w: [rounded(arms[0])?, rounded(arms[1])?],

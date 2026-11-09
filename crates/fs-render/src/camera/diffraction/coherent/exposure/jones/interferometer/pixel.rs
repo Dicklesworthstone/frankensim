@@ -129,7 +129,7 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
         let outputs: [[Dd; 4]; 2] =
             std::array::from_fn(|port| std::array::from_fn(|axis| integrated[2 + 4 * port + axis]));
         let mutual = [integrated[10], integrated[11]];
-        let duration = Dd::from_f64(self.shutter().duration_s());
+        let duration = Dd::from_f64(self.shutter().effective_duration_s());
         let result = PolarizedCoherentInterferometerPixelExposure {
             arm_power_w: [rounded(powers[0])?, rounded(powers[1])?],
             output_coherency_w: [physical(outputs[0])?, physical(outputs[1])?],

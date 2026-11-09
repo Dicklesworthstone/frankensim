@@ -1650,3 +1650,6 @@ mod exposure_jones_short_window;
 
 #[path = "coherent_diffraction/interferometer_short_band.rs"]
 mod interferometer_short_band;
+
+#[path = "coherent_diffraction/shaped_shutter.rs"]
+mod shaped_shutter;

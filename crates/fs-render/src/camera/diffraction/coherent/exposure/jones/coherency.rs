@@ -45,7 +45,8 @@ pub struct PolarizedCoherentDiffractionExposureSample {
     pub coherency_density_w: PolarizedDiffractionCoherency,
 }
 
-/// Full polarization averaged over a physical pixel and uniform shutter.
+/// Full polarization averaged over a physical pixel and normalized shutter
+/// transmission. Joules retain the physical integrated transmission.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PolarizedCoherentDiffractionPixelExposure {
     /// Spatially integrated average coherency in watts, with exact work counts.
@@ -135,7 +136,7 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
         let mean = std::array::from_fn(|i| power[i]);
         let fluctuations = std::array::from_fn(|i| power[i + 4]);
         let total = std::array::from_fn(|i| mean[i] + fluctuations[i]);
-        let duration = Dd::from_f64(self.shutter().duration_s());
+        let duration = Dd::from_f64(self.shutter().effective_duration_s());
         let result = PolarizedCoherentDiffractionPixelExposure {
             average_power: PolarizedCoherentDiffractionPixelPower {
                 mean_coherency_w: physical(mean)?,

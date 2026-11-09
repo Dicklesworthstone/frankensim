@@ -12597,3 +12597,33 @@ checks, not execution of the full native scene/geometry solver.
   The accepted geometry and state stay frozen during optical transport. This
   adapter infers no source extrapolation, scattering, stress optics, expansion,
   moving-medium correction or causal transient constitutive storage.
+
+## Physical triangular shutters for coherent optical observations
+
+`CoherentDiffractionShutter::try_with_profile` and
+`try_with_profile_from_clock_dd` admit Uniform and Triangular physical shutters
+with unit peak transmission. `profile()` exposes the authored shape and
+`effective_duration_s()` gives integrated transmission: T for Uniform, T/2
+for Triangular. A zero unrepresentable transmission integral is refused.
+
+Reported powers and coherencies are normalized transmission-weighted means.
+Every scalar/Jones pixel and point/pixel interferometer energy uses the same
+physical transmission integral. This includes analyzer outputs, signed Stokes
+energies and both passive interferometer ports. A triangular detector's
+sensitivity is applied once to the observable, rather than squared as a field
+taper or multiplied by the full elapsed duration.
+
+Shared profile-aware positive temporal factors now serve scalar, Jones,
+analyzer, mutual-coherence and interferometer queries. Original source columns,
+chromatic pupil/sensor phase, precise source epoch, spatial quadrature and
+explicit work limits remain authoritative. Unsupported bands retain the original
+analytic pair kernels; no time raster or new optical transport model is added.
+
+All 101 functions in the current coherent_diffraction target pass: 96 existing
+tests and five new groups for physical throughput across every energy output,
+independent polarization-beat integration, fourth-order scalar/Jones nulls
+through 1 ps, retained DD epochs, and admission/cancellation. The execution
+uses the actual complete non-tracer camera/diffraction/coherent source graph,
+original geometry vectors and actual math/harmonic code, with narrow Cx/Ray/
+ShutterInterval boundary carriers. Full tracer/material-dispersion, moving-camera
+and workspace/DSR integration are outside this executed validation.
