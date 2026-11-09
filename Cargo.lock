@@ -2951,6 +2951,15 @@ name = "fs-symmetry"
 version = "0.0.1"
 
 [[package]]
+name = "fs-system"
+version = "0.0.1"
+dependencies = [
+ "fs-alloc",
+ "fs-exec",
+ "fs-ports",
+]
+
+[[package]]
 name = "fs-thermal"
 version = "0.0.1"
 dependencies = [

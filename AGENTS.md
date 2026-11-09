@@ -445,7 +445,7 @@ If you need to violate this, stop and redesign the API.
 
 As of 2026-11-09:
 
-- `crates/` holds 192 flat `fs-*` crates. Each declares its layer in
+- `crates/` holds 193 flat `fs-*` crates. Each declares its layer in
   `[package.metadata.frankensim] layer` in its `Cargo.toml` (L0 to L6, plus
   `UTIL` and `TOOL`); `cargo run -p xtask -- check-layers` enforces the
   dependency direction. Appendix A of the plan lists the crates the plan
@@ -470,9 +470,9 @@ share a composition layer:
 | Instruments and demos | `music_render` (`crates/fs-couple/src/bin/music_render.rs`) and `apps/` | offline instrument renders graded against recordings; browser demos |
 
 The convergence program joins them: one composition kernel (Component
-contract in `fs-ports` and one coupled-step driver), one assembly description
-that lowers to it (`fs-scenario`, `.fsim`), and one run path through the
-ledger (`frankensim run <assembly>`).
+contract in `fs-ports`, coupled-step driver in `fs-system`), one assembly
+description that lowers to it (`fs-scenario`, `.fsim`), and one run path
+through the ledger (`frankensim run <assembly>`).
 
 Every crate must eventually ship:
 

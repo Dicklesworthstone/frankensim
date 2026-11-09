@@ -118,6 +118,7 @@ members = [
     "crates/fs-crosswalk",
     "crates/fs-spectral",
     "crates/fs-symmetry",
+    "crates/fs-system",
     "crates/fs-conform",
     "crates/fs-detaudit",
     "crates/fs-mms",

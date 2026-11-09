@@ -1,0 +1,21 @@
+[package]
+name = "fs-system"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Composition kernel: a system of Components joined by connections, stepped as one with atomic publication and a window ledger"
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-exec = { path = "../fs-exec" }
+fs-ports = { path = "../fs-ports" }
+
+[dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
+
+[lints]
+workspace = true
