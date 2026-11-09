@@ -40,6 +40,11 @@ mod solve;
 /// Coupled composition and local-temperature accuracy over a physical interval.
 pub mod adaptive;
 
+/// Conservative prescribed-volume stirring with original parcel enthalpy.
+pub mod advection;
+/// Stirring, full molecular diffusion and heat exchange over one shared clock.
+pub mod transport;
+
 /// Original material sources refreshed at every accepted local temperature.
 #[cfg(any(feature = "continuum", feature = "experimental-miscibility-material"))]
 pub mod material;
@@ -68,6 +73,12 @@ pub enum MulticomponentNonisothermalError {
     /// declared budget permits the representable thermodynamic state to omit.
     UnresolvedCaloricInventory {
         cell: usize,
+        bound_j: f64,
+        tolerance_j: f64,
+    },
+    /// The original parcel enthalpy cannot be transported at the requested
+    /// numerical energy resolution without amplifying rounding into heat.
+    UnresolvedParcelEnthalpy {
         bound_j: f64,
         tolerance_j: f64,
     },
@@ -248,6 +259,15 @@ impl MulticomponentMiscibilityNetwork {
                 self.cells()
                     .len()
                     .checked_mul(2048)
+                    .and_then(|w| v.checked_add(w))
+            })
+            // Donor stirring retains one original caloric state per cell.
+            // Its inline MAX-species storage does not shrink with actual N;
+            // account for that payload and its independent amount allocation.
+            .and_then(|v| {
+                n.checked_mul(core::mem::size_of::<f64>())
+                    .and_then(|w| w.checked_add(core::mem::size_of::<MulticomponentCaloricStateV1>()))
+                    .and_then(|w| self.cells().len().checked_mul(w))
                     .and_then(|w| v.checked_add(w))
             })
             .and_then(|v| {

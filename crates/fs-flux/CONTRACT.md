@@ -10493,3 +10493,48 @@ compiling the prerequisite asupersync crate, before these adapters/tests were
 type-checked; no material test execution or full workspace validation is
 claimed. The separate numerical lane has 134 passing miscibility tests and
 seven passing original-source caloric transport cases.
+
+## Conservative thermal stirring of multicomponent liquids
+
+The local-temperature multicomponent field now supports prescribed-volume
+`advect_candidate`, same-interval `transport_candidate`, and complete coupled
+`advance_transport_candidate`. The original prepared canonical flow retains
+both directional streams, closed cell-volume continuity and the outgoing
+donor CFL bound. Each synchronous donor substep transports every independent
+component, its compensated low word, and the original homogeneous parcel
+enthalpy. Original changed-inventory calorics recover each receiving
+temperature; temperature averaging and an additional mixing-heat source are
+not substituted.
+
+The combined kernel composes donor stirring with full Maxwell–Stefan and
+reciprocal thermal transport over one physical interval. Full-versus-two-half
+adaptation measures both composition and temperature after the complete
+kernel, including splitting error. Each coarse trial uses at most one donor
+CFL step so independent subcycling cannot make coarse and fine trajectories
+identical and hide error. Suggested next intervals also respect this cap
+after a short terminal remainder. Separate accepted advection, molecular and
+combined species/energy receipts remain observable, as do completed rejected
+work counts. Original inventories, enthalpy and total entropy are audited
+again over the complete accepted window.
+
+A conservative parcel-energy arithmetic-resolution estimate rejects large
+reference energies whose finite heat carriage cannot meet the requested
+allowance. It includes absolute pure and original pair contributions,
+directed products and accumulation; internally cancelling B pairs cannot
+hide a large estimate. Accepted adaptive donor estimates share one
+whole-window budget. This is a numerical admission estimate, not an interval
+or source-uncertainty certificate. The numerical workspace now explicitly
+charges the fixed-size original caloric state retained for every donor cell,
+including at small actual species counts.
+
+All 145 actual-source numerical miscibility tests passed: the earlier 134,
+seven new thermal donor/coupled cases and four complete-kernel adaptive
+cases. Independent checks include three-cell synchronous circulation,
+nonideal variable-composition enthalpy, analytical counterflow relaxation,
+trace/low-word conservation, coupled-clock/transfer receipts, thermal-only
+temporal refinement, CFL alias prevention, final-step bounds, atomic
+cancellation, and explicit large-reference parcel refusal. The long
+40-substep counterflow explicitly offers 1e-7 J arithmetic allowance while
+retaining independent 2e-9 K and 1e-8 J endpoint checks. No mechanical-work,
+two-way momentum, thermal expansion or multicomponent interfacial owner is
+introduced by these prescribed incompressible-volume operators.

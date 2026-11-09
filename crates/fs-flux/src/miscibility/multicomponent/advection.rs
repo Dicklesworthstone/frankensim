@@ -43,6 +43,12 @@ impl MulticomponentMiscibilityAdvection {
         self.maximum_relative_volume_divergence
     }
 
+    /// Prepared outgoing Q/V for the same canonical directed face streams.
+    /// Thermal transport reuses this geometry without rebuilding flow data.
+    pub(super) fn donor_rates_s(&self) -> &[[f64; 2]] {
+        &self.donor_rates_s
+    }
+
     pub(super) fn admit(&self, network: &MulticomponentMiscibilityNetwork) -> Result<()> {
         if !Arc::ptr_eq(&self.network.owner, &network.owner) && self.network != *network {
             return Err(Error::Invalid(
@@ -59,7 +65,9 @@ impl MulticomponentMiscibilityAdvection {
     ) -> Result<usize> {
         admit_controls(controls)?;
         if !positive(duration_s) {
-            return Err(Error::Invalid("positive finite advection interval required"));
+            return Err(Error::Invalid(
+                "positive finite advection interval required",
+            ));
         }
         let required = (duration_s * self.maximum_outgoing_rate_s / controls.maximum_courant)
             .ceil()
@@ -173,8 +181,7 @@ impl MulticomponentMiscibilityNetwork {
             poll(&mut cancelled)?;
             if !nonnegative(rate.forward_m3_s)
                 || !nonnegative(rate.reverse_m3_s)
-                || (face.area_m2 == 0.0
-                    && (rate.forward_m3_s != 0.0 || rate.reverse_m3_s != 0.0))
+                || (face.area_m2 == 0.0 && (rate.forward_m3_s != 0.0 || rate.reverse_m3_s != 0.0))
             {
                 return Err(Error::Invalid(
                     "finite nonnegative rates and no flow through a zero-area face required",
@@ -190,7 +197,8 @@ impl MulticomponentMiscibilityNetwork {
                 .into_iter()
                 .enumerate()
             {
-                donor[direction] = finite(rate / self.cells()[cell].volume_m3, "donor volume rate")?;
+                donor[direction] =
+                    finite(rate / self.cells()[cell].volume_m3, "donor volume rate")?;
                 if rate > 0.0 && donor[direction] == 0.0 {
                     return Err(Error::Arithmetic("positive donor volume rate underflows"));
                 }
@@ -211,7 +219,10 @@ impl MulticomponentMiscibilityNetwork {
             let relative = if scale == 0.0 {
                 0.0
             } else {
-                finite(residual.value()?.abs() / scale, "relative volume divergence")?
+                finite(
+                    residual.value()?.abs() / scale,
+                    "relative volume divergence",
+                )?
             };
             if relative > maximum_relative_volume_divergence {
                 return Err(Error::VolumeDivergence {
@@ -270,14 +281,23 @@ impl MulticomponentMiscibilityField {
             if !positive(dt) || advanced_s + dt <= advanced_s {
                 return Err(Error::Arithmetic("advection substep is unrepresentable"));
             }
-            let courant = finite(dt * flow.maximum_outgoing_rate_s, "advection Courant number")?;
+            let courant = finite(
+                dt * flow.maximum_outgoing_rate_s,
+                "advection Courant number",
+            )?;
             if courant > controls.maximum_courant * (1.0 + 16.0 * f64::EPSILON) {
-                return Err(Error::Arithmetic("advection substep exceeds outgoing-volume CFL"));
+                return Err(Error::Arithmetic(
+                    "advection substep exceeds outgoing-volume CFL",
+                ));
             }
             maximum_courant = maximum_courant.max(courant);
             changes.fill(Sum::default());
-            for (face_index, (face, donor)) in self.network.faces().iter()
-                .zip(flow.donor_rates_s.iter()).enumerate()
+            for (face_index, (face, donor)) in self
+                .network
+                .faces()
+                .iter()
+                .zip(flow.donor_rates_s.iter())
+                .enumerate()
             {
                 poll(&mut cancelled)?;
                 let [i, j] = face.cells;
@@ -286,15 +306,23 @@ impl MulticomponentMiscibilityField {
                     if donor[direction] > 0.0 && !positive(fraction) {
                         return Err(Error::Arithmetic("positive donor fraction underflows"));
                     }
-                    if fraction == 0.0 { continue; }
+                    if fraction == 0.0 {
+                        continue;
+                    }
                     let sign = if direction == 0 { 1.0 } else { -1.0 };
                     for species in 0..n {
                         let from = from * n + species;
                         let to = to * n + species;
-                        let high = finite(field.amounts[from] * fraction, "advected component amount")?;
-                        let low = finite(field.amount_remainders[from] * fraction, "advected component remainder")?;
+                        let high =
+                            finite(field.amounts[from] * fraction, "advected component amount")?;
+                        let low = finite(
+                            field.amount_remainders[from] * fraction,
+                            "advected component remainder",
+                        )?;
                         if high == 0.0 {
-                            return Err(Error::Arithmetic("positive component transfer underflows"));
+                            return Err(Error::Arithmetic(
+                                "positive component transfer underflows",
+                            ));
                         }
                         for moved in [high, low] {
                             changes[from].add(-moved)?;
@@ -310,33 +338,45 @@ impl MulticomponentMiscibilityField {
                     let index = cell * n + species;
                     let mut value = (field.amounts[index], field.amount_remainders[index]);
                     for change in [changes[index].high, changes[index].low] {
-                        value = super::super::solve::add_amount(value.0, value.1, change)
-                            .map_err(|_| Error::Arithmetic("conservative advected amount update"))?;
+                        value = super::super::solve::add_amount(value.0, value.1, change).map_err(
+                            |_| Error::Arithmetic("conservative advected amount update"),
+                        )?;
                     }
                     if !positive(value.0) {
-                        return Err(Error::Positivity { cell, species, trial_mol: value.0 });
+                        return Err(Error::Positivity {
+                            cell,
+                            species,
+                            trial_mol: value.0,
+                        });
                     }
                     field.amounts[index] = value.0;
                     field.amount_remainders[index] = value.1;
                 }
             }
-            advanced_s = if substep + 1 == substeps { duration_s } else { advanced_s + dt };
+            advanced_s = if substep + 1 == substeps {
+                duration_s
+            } else {
+                advanced_s + dt
+            };
         }
         for cell in 0..self.network.cells().len() {
             poll(&mut cancelled)?;
-            let fractions = self.network.fractions(&field.amounts[cell * n..(cell + 1) * n], &mut cancelled)?;
+            let fractions = self
+                .network
+                .fractions(&field.amounts[cell * n..(cell + 1) * n], &mut cancelled)?;
             field.fractions[cell * n..(cell + 1) * n].copy_from_slice(&fractions[..n]);
         }
         field.elapsed_s = elapsed_s;
-        let (component_residual_mol, maximum_capacity_residual_mol, free_energy_change_j) = self.balances(
-            &field,
-            MulticomponentMiscibilitySolve {
-                amount_balance_tolerance_mol: controls.amount_balance_tolerance_mol,
-                free_energy_tolerance_j: controls.free_energy_tolerance_j,
-                ..MulticomponentMiscibilitySolve::default()
-            },
-            &mut cancelled,
-        )?;
+        let (component_residual_mol, maximum_capacity_residual_mol, free_energy_change_j) = self
+            .balances(
+                &field,
+                MulticomponentMiscibilitySolve {
+                    amount_balance_tolerance_mol: controls.amount_balance_tolerance_mol,
+                    free_energy_tolerance_j: controls.free_energy_tolerance_j,
+                    ..MulticomponentMiscibilitySolve::default()
+                },
+                &mut cancelled,
+            )?;
         let mut transferred_mol = Vec::with_capacity(self.network.faces().len());
         for row in transfers.chunks_exact(n) {
             poll(&mut cancelled)?;

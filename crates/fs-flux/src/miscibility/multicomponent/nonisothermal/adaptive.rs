@@ -305,7 +305,10 @@ fn count_evaluations(rates: &solve::Rates, evaluations: &mut usize) -> Result<()
     )?;
     Ok(())
 }
-fn admit_time(duration: f64, time: MulticomponentNonisothermalTimeControl) -> Result<()> {
+pub(super) fn admit_time(
+    duration: f64,
+    time: MulticomponentNonisothermalTimeControl,
+) -> Result<()> {
     composition::admit_time(duration, time.composition)?;
     if !nonnegative(time.absolute_temperature_tolerance_k)
         || !nonnegative(time.relative_temperature_tolerance)
@@ -317,7 +320,7 @@ fn admit_time(duration: f64, time: MulticomponentNonisothermalTimeControl) -> Re
     }
     Ok(())
 }
-fn retryable(error: &MulticomponentNonisothermalError) -> bool {
+pub(super) fn retryable(error: &MulticomponentNonisothermalError) -> bool {
     matches!(
         error,
         MulticomponentNonisothermalError::Spatial(
@@ -330,7 +333,7 @@ fn retryable(error: &MulticomponentNonisothermalError) -> bool {
             ))
     )
 }
-fn error_ratio(
+pub(super) fn error_ratio(
     a: &MulticomponentNonisothermalField,
     b: &MulticomponentNonisothermalField,
     time: MulticomponentNonisothermalTimeControl,

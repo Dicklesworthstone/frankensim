@@ -172,7 +172,7 @@ impl Case {
     }
 }
 
-fn enthalpy(amounts: &[f64], temperature: f64, case: &Case) -> f64 {
+pub(super) fn enthalpy(amounts: &[f64], temperature: f64, case: &Case) -> f64 {
     let n: f64 = amounts.iter().sum();
     let sensible: f64 = (0..3)
         .map(|i| amounts[i] * case.cp[i] * (temperature - case.datum))
@@ -184,7 +184,7 @@ fn enthalpy(amounts: &[f64], temperature: f64, case: &Case) -> f64 {
             .sum::<f64>()
 }
 
-fn entropy(amounts: &[f64], temperature: f64, case: &Case) -> f64 {
+pub(super) fn entropy(amounts: &[f64], temperature: f64, case: &Case) -> f64 {
     let n: f64 = amounts.iter().sum();
     let pure: f64 = (0..3)
         .map(|i| amounts[i] * case.cp[i] * (temperature / case.datum).ln())
