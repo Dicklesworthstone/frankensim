@@ -14,6 +14,9 @@
 //! transfers. Eight cached real convolution kernels yield p and all u components.
 //! Zero padding in the original FFT performs linear convolution without a
 //! periodic source, acausal pre-echo or an imposed frequency-grid propagator.
+//! Uniform edge-parallel mean flow uses the exact causal Lorentz image through
+//! `with_edge_parallel_flow`, retaining physical pressure/velocity coupling and
+//! advected perturbation energy on the original laboratory source clock.
 
 use super::{
     AeroacError, HalfPlaneFrame, HalfPlaneMonopoleLimits, HalfPlaneReceiver, IdealPlaneBoundary,
@@ -26,6 +29,8 @@ use fs_math::{c64::C64, dd::Dd, det};
 
 mod convolution;
 use convolution::Convolution;
+mod flow;
+use flow::FlowImage;
 
 const MAX_SAMPLES: usize = 65_536;
 const MAX_TOTAL_EVALUATIONS: usize = 16_777_216;
@@ -73,8 +78,11 @@ pub struct HalfPlaneTransientField {
     pub particle_velocity_m_s: [f64; 3],
     /// p*u, without a harmonic factor of one half. Sum coherent fields first.
     pub instantaneous_intensity_w_m2: [f64; 3],
-    /// p²/(2K) + rho*|u|²/2 in the original stationary medium.
+    /// p²/(2K) + rho*|u|²/2 with the original material coefficients.
     pub perturbation_energy_j_m3: f64,
+    /// Laboratory transport p*u + U*E, including the actual mean fluid flow.
+    /// This is perturbation-energy transport, not exclusively radiated sound.
+    pub instantaneous_energy_flux_w_m2: [f64; 3],
     pub pressure_quadrature_error_pa: f64,
     pub velocity_quadrature_error_m_s: [f64; 3],
     pub scope: &'static str,
@@ -93,6 +101,7 @@ pub struct PreparedHalfPlaneTransient {
     source_position_m: [f64; 3],
     receiver: HalfPlaneReceiver,
     sample_interval_s: f64,
+    edge_flow_velocity_m_s: f64,
     coefficients: Vec<[f64; 8]>,
     errors: Vec<[f64; 8]>,
     convolution: Convolution,
@@ -109,6 +118,41 @@ impl PreparedHalfPlaneTransient {
         boundary: IdealPlaneBoundary,
         source_position_m: [f64; 3],
         receiver: HalfPlaneReceiver,
+        sample_interval_s: f64,
+        maximum_samples: usize,
+        limits: HalfPlaneTransientLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        Self::with_edge_parallel_flow(
+            acoustic,
+            frame,
+            boundary,
+            source_position_m,
+            receiver,
+            0.0,
+            sample_interval_s,
+            maximum_samples,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Causal diffraction in a uniform strictly subsonic fluid flow parallel
+    /// to the infinite edge. The source and receiver remain fixed in the
+    /// laboratory. The original source clock, density and modulus are retained.
+    ///
+    /// The exact Lorentz image changes retarded delays AND couples pressure
+    /// with edge-parallel velocity. Every quadrature sample is transformed
+    /// before its physical pressure/velocity error admission. Zero flow keeps
+    /// the original stationary coefficient arithmetic.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_edge_parallel_flow(
+        acoustic: FluidAcousticState,
+        frame: HalfPlaneFrame,
+        boundary: IdealPlaneBoundary,
+        source_position_m: [f64; 3],
+        receiver: HalfPlaneReceiver,
+        edge_flow_velocity_m_s: f64,
         sample_interval_s: f64,
         maximum_samples: usize,
         limits: HalfPlaneTransientLimits,
@@ -156,12 +200,36 @@ impl PreparedHalfPlaneTransient {
         }
         let source = frame.local_receiver(HalfPlaneReceiver::WorldPosition(source_position_m))?;
         let point = frame.local_receiver(receiver)?;
-        let geometry = PointGeometry::new(source, point)?;
-        let edge_delay = geometry.distance / acoustic.sound_speed_m_s();
+        let flow = if edge_flow_velocity_m_s == 0.0 {
+            None
+        } else {
+            Some(FlowImage::new(
+                acoustic,
+                source,
+                point,
+                edge_flow_velocity_m_s,
+            )?)
+        };
+        let geometry = if let Some(flow) = &flow {
+            PointGeometry::new(
+                [source[0], source[1], 0.0],
+                [point[0], point[1], flow.stretched_axial_separation_m],
+            )?
+        } else {
+            PointGeometry::new(source, point)?
+        };
+        let edge_delay = flow
+            .as_ref()
+            .map_or(geometry.distance / acoustic.sound_speed_m_s(), |image| {
+                image.edge_delay_s
+            });
         let mut arrival = edge_delay;
         for j in 0..2 {
             if geometry.q[j] > 0.0 {
-                arrival = arrival.min(geometry.direct_distance[j] / acoustic.sound_speed_m_s());
+                arrival = arrival.min(flow.as_ref().map_or(
+                    geometry.direct_distance[j] / acoustic.sound_speed_m_s(),
+                    |image| image.direct_delays_s[j],
+                ));
             }
         }
         if !edge_delay.is_finite() || edge_delay <= 0.0 || !arrival.is_finite() || arrival <= 0.0 {
@@ -188,6 +256,7 @@ impl PreparedHalfPlaneTransient {
                 acoustic,
                 sample_interval_s,
                 lag,
+                flow.as_ref(),
             )?;
             let (values, error) = if kernel.regions() == 0 {
                 (kernel.base, [0.0; 8])
@@ -232,6 +301,7 @@ impl PreparedHalfPlaneTransient {
             source_position_m,
             receiver,
             sample_interval_s,
+            edge_flow_velocity_m_s,
             coefficients,
             errors,
             convolution,
@@ -264,6 +334,13 @@ impl PreparedHalfPlaneTransient {
     }
     pub const fn sample_interval_s(&self) -> f64 {
         self.sample_interval_s
+    }
+    pub const fn edge_flow_velocity_m_s(&self) -> f64 {
+        self.edge_flow_velocity_m_s
+    }
+    /// Original mean FLUID velocity in laboratory axes, not source motion.
+    pub fn mean_flow_velocity_m_s(&self) -> [f64; 3] {
+        self.frame.axes()[2].map(|v| v * self.edge_flow_velocity_m_s)
     }
     pub fn maximum_samples(&self) -> usize {
         self.coefficients.len()
@@ -445,17 +522,14 @@ impl PreparedHalfPlaneTransient {
     ) -> Result<HalfPlaneTransientField, AeroacError> {
         let pressure = value[0];
         let velocity = [value[1], value[2], value[3]];
-        let intensity = velocity.map(|v| (Dd::from_f64(pressure) * Dd::from_f64(v)).to_f64());
-        let mut energy = Dd::from_f64(pressure)
-            * Dd::from_f64(pressure)
-            * Dd::from_f64(0.5 * self.acoustic.adiabatic_compressibility_per_pa());
-        for v in velocity {
-            energy = energy
-                + Dd::from_f64(v)
-                    * Dd::from_f64(v)
-                    * Dd::from_f64(0.5 * self.acoustic.density_kg_m3());
-        }
-        let energy = energy.to_f64();
+        let transport = crate::curle3d::energy::instantaneous(
+            self.acoustic,
+            self.mean_flow_velocity_m_s(),
+            pressure,
+            velocity,
+        )?;
+        let intensity = transport.pressure_work_flux_w_m2;
+        let energy = transport.energy_density_j_m3;
         if value
             .iter()
             .chain(&error)
@@ -473,9 +547,14 @@ impl PreparedHalfPlaneTransient {
             particle_velocity_m_s: velocity,
             instantaneous_intensity_w_m2: intensity,
             perturbation_energy_j_m3: energy,
+            instantaneous_energy_flux_w_m2: transport.energy_flux_w_m2,
             pressure_quadrature_error_pa: error[0],
             velocity_quadrature_error_m_s: [error[1], error[2], error[3]],
-            scope: SCOPE,
+            scope: if self.edge_flow_velocity_m_s == 0.0 {
+                SCOPE
+            } else {
+                flow::SCOPE
+            },
         })
     }
 }
@@ -513,9 +592,11 @@ fn hermite(x: f64) -> [[f64; 3]; 2] {
 
 struct TapKernel<'a> {
     geometry: &'a PointGeometry,
+    flow: Option<&'a FlowImage>,
     axes: [[f64; 3]; 3],
     sign: f64,
     gamma: f64,
+    sample_interval_s: f64,
     lag: usize,
     pressure_scale: f64,
     velocity_scale: f64,
@@ -531,9 +612,11 @@ impl<'a> TapKernel<'a> {
         acoustic: FluidAcousticState,
         dt: f64,
         lag: usize,
+        flow: Option<&'a FlowImage>,
     ) -> Result<Self, AeroacError> {
         let l = geometry.distance;
-        let step = acoustic.sound_speed_m_s() * dt;
+        let speed = flow.map_or(acoustic.sound_speed_m_s(), |image| image.operator_speed_m_s);
+        let step = speed * dt;
         let gamma = l / step;
         let pressure_scale = acoustic.density_kg_m3() / l / dt / (4.0 * PI * PI);
         let velocity_scale = (1.0 / l) / l / (4.0 * PI * PI);
@@ -543,8 +626,11 @@ impl<'a> TapKernel<'a> {
         {
             return Err(invalid("causal diffraction basis scale is unrepresentable"));
         }
-        let at = |radius: f64, direction: [f64; 3]| {
-            let x = (Dd::from_f64(lag as f64) - Dd::from_f64(radius) / Dd::from_f64(step)).to_f64();
+        let at = |radius: f64, direction: [f64; 3], delay: Option<f64>| {
+            let elapsed = delay.map_or(Dd::from_f64(radius) / Dd::from_f64(step), |seconds| {
+                Dd::from_f64(seconds) / Dd::from_f64(dt)
+            });
+            let x = (Dd::from_f64(lag as f64) - elapsed).to_f64();
             let shape = hermite(x);
             let mut result = [0.0; 8];
             for j in 0..2 {
@@ -557,14 +643,22 @@ impl<'a> TapKernel<'a> {
             }
             result
         };
-        let edge = at(l, geometry.edge_gradient);
+        let edge = at(
+            l,
+            geometry.edge_gradient,
+            flow.map(|image| image.edge_delay_s),
+        );
         let mut base = [Dd::ZERO; 8];
         for j in 0..2 {
             let factor = if j == 0 { 1.0 } else { sign };
             let mut term = edge.map(|v| Dd::from_f64(v) * Dd::from_f64(0.5));
             if geometry.q[j] > 0.0 {
                 let d = geometry.direct_distance[j];
-                let direct = at(d, geometry.direct_delta[j].map(|v| v / d));
+                let direct = at(
+                    d,
+                    geometry.direct_delta[j].map(|v| v / d),
+                    flow.map(|image| image.direct_delays_s[j]),
+                );
                 for i in 0..8 {
                     term[i] = term[i] + Dd::from_f64(direct[i]) - Dd::from_f64(edge[i]);
                 }
@@ -574,6 +668,9 @@ impl<'a> TapKernel<'a> {
             }
         }
         let mut base = base.map(Dd::to_f64);
+        if let Some(image) = flow {
+            base = image.apply(base)?;
+        }
         for j in 0..2 {
             let local = [base[2 + 3 * j], base[3 + 3 * j], base[4 + 3 * j]];
             let world = rotate_real(axes, local);
@@ -582,6 +679,20 @@ impl<'a> TapKernel<'a> {
         // Only delays inside this compact temporal basis can contribute.
         // sqrt((R-L)*(R+L))/L retains the narrow first-arrival interval.
         let to_w = |multiple: f64| {
+            if let Some(image) = flow {
+                // R/L - 1 from the PHYSICAL edge arrival: no subtraction of
+                // large Lorentz clock advances at nearly sonic advection.
+                let excess = ((Dd::from_f64(multiple) * Dd::from_f64(dt)
+                    - Dd::from_f64(image.edge_delay_s))
+                    * Dd::from_f64(speed)
+                    / Dd::from_f64(l))
+                .to_f64();
+                return if excess <= 0.0 {
+                    0.0
+                } else {
+                    det::sqrt(excess) * det::sqrt(excess + 2.0)
+                };
+            }
             let ratio = multiple / gamma;
             if ratio <= 1.0 {
                 0.0
@@ -620,9 +731,11 @@ impl<'a> TapKernel<'a> {
         }
         Ok(Self {
             geometry,
+            flow,
             axes,
             sign,
             gamma,
+            sample_interval_s: dt,
             lag,
             pressure_scale,
             velocity_scale,
@@ -647,9 +760,15 @@ impl Spectrum<8> for TapKernel<'_> {
         let width = self.boundaries[region + 1] - low;
         let w = (Dd::from_f64(low) + Dd::from_f64(width) * Dd::from_f64(x)).to_f64();
         let radius = det::hypot(1.0, w);
-        let coordinate = (Dd::from_f64(self.lag as f64)
-            - Dd::from_f64(self.gamma) * Dd::from_f64(radius))
-        .to_f64();
+        let delay = if let Some(image) = self.flow {
+            // sqrt(1+w²)-1 = w*(w/(sqrt(1+w²)+1)) resolves the
+            // first diffracted arrival without a cancellation-prone shift.
+            Dd::from_f64(image.edge_delay_s) / Dd::from_f64(self.sample_interval_s)
+                + Dd::from_f64(self.gamma) * Dd::from_f64(w) * Dd::from_f64(w / (radius + 1.0))
+        } else {
+            Dd::from_f64(self.gamma) * Dd::from_f64(radius)
+        };
+        let coordinate = (Dd::from_f64(self.lag as f64) - delay).to_f64();
         let shape = hermite(coordinate);
         let inv = 1.0 / radius;
         let inv3 = inv * inv * inv;
@@ -685,6 +804,9 @@ impl Spectrum<8> for TapKernel<'_> {
             }
         }
         let mut values = values.map(Dd::to_f64);
+        if let Some(image) = self.flow {
+            values = image.apply(values)?;
+        }
         for basis in 0..2 {
             let v = rotate_real(
                 self.axes,
@@ -721,5 +843,7 @@ fn rotate_real(axes: [[f64; 3]; 3], vector: [f64; 3]) -> [f64; 3] {
     })
 }
 
+#[cfg(test)]
+mod flow_tests;
 #[cfg(test)]
 mod tests;

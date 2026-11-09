@@ -4385,3 +4385,63 @@ covariance, signed cross moments, temporal profiles and one-tone fallback are
 preserved. New physical null and cross-receiver checks join the existing profile
 tests; the combined duct/aeroac actual-helper execution passes eight checks with
 warnings denied. Full source/observer pipeline integration remains unrun.
+
+## Causal edge diffraction with original mean-flow transport
+
+`PreparedHalfPlaneTransient::with_edge_parallel_flow` extends the preceding
+causal owner to a uniform strictly subsonic mean fluid velocity parallel to
+the infinite edge. The stationary scope of `new` remains unchanged; zero
+flow retains its original tap and quadrature arithmetic. Source and receiver
+stay fixed in the laboratory. Original Q and dQ/dt, absolute epoch, relative
+sample clock, original density and adiabatic modulus remain authoritative.
+
+The actual causal Lorentz image stretches the axial separation by 1/beta,
+where beta^2=1-(U/c)^2. A physical path has delay
+(sqrt(beta^2*r_perp^2+dz^2)-(U/c)*dz)/(beta^2*c). The downstream expression is
+rationalized before evaluation. Around the first edge arrival, extra delay
+uses sqrt(1+w^2)-1=w^2/(sqrt(1+w^2)+1), avoiding subtraction of a large
+stretched flight time and nearly equal clock advance. Source-basis support
+boundaries are computed from that same physical arrival.
+
+The image couples pressure and axial particle velocity, using the same
+physical transform as the existing harmonic point-flow owner. Every
+integrand sample and exact direct/edge term is transformed before the
+original physical pressure/vector-velocity quadrature norms are tested.
+The internal Lorentz operator speed does not replace the original material
+state or become a shifted source frequency. World-frame rotations retain
+the actual signed mean-fluid velocity along the authored edge.
+
+The same eight real kernels, complete declared-window memory, native FFT
+linear convolution, direct observations and explicit total-work/storage
+limits remain in use. No source samples or physical post-emission edge
+tail are dropped. Flow does not authorize force injection, source motion,
+cross-edge/sheared convection, finite barriers, impedance edges or loss.
+
+`HalfPlaneTransientField::instantaneous_energy_flux_w_m2` now reports
+laboratory perturbation transport p*u+U*E in addition to pressure work p*u.
+The existing original `curle3d::energy::instantaneous` owner supplies energy
+and both fluxes for stationary and flowing fields. This is full quadratic
+perturbation energy, not exclusively radiated sound power. A moving control
+surface would require its own relative flux. The original material
+coefficients are retained and coherent fields must be assembled before
+the quadratic reduction.
+
+Seven new G1/G3 regression groups verify the unchanged zero-flow taps;
+independent real convected free-space fields and arrival at Mach numbers
+-0.75, 0.4, 0.85 and 0.99; the real unintegrated-by-parts Biot--Tolstoy
+potential with independent space/time differentiation; temporal source
+refinement; linearized-Euler momentum, continuity and advected-energy
+balance; both exact sheet-face conditions and shadow transitions; placed
+world frames, original clocks, source cessation and future-source
+independence; and physical/budget/cancellation refusals with exact retry.
+On the declared quartic-history fixture the relative field errors refine
+as 1.7043e-6, 1.6904e-7 and 1.6016e-8.
+
+The final focused native run passes these seven groups and all seven
+existing causal diffraction groups (14 total). It compiles the actual
+causal operators, original geometry/frame and Gauss--Kronrod numerical
+owners, original acoustic material snapshot and energy reduction, actual
+fs-math and original FFT/scalar-SIMD algorithms. Unrelated material
+receipts and executor/dependency construction are outside this narrow
+build. This is not full Cargo/workspace or DSR success, a near-sonic
+relative-error certificate, or a measured performance benchmark.
