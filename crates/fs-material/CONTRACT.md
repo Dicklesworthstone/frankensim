@@ -27,3 +27,37 @@ largest sampled relative compressibility discrepancy was `2.144e-16`.
 This is a frozen-state, linear molecular constitutive realization; it supplies
 no shear viscosity, Fourier heat conduction, material calibration or full
 workspace-build claim.
+
+## Causal Kelvin/Maxwell plane-stress ramps
+
+`PreparedTensorKelvinPlaneStress::advance` now accepts arbitrary affine
+engineering-strain ramps, holds and reversals with positive finite duration.
+The existing constrained QR/SVD preparation and native `PronyRamp` owner evolve
+the original anisotropic Maxwell history. Total transverse stress, including
+Kelvin viscosity, remains zero; out-of-plane strains and rates remain physical
+state. Zero/rank-one/rank-two transverse Kelvin operators use the existing
+algebraic traction constraints without a viscosity floor or branch reduction.
+Initial incompatible algebraic spring traction refuses without projection.
+Strain and branch memory remain continuous across prescribed-rate changes.
+
+Full original stress reconstruction supplies endpoint and interval-mean
+reactions and signed work. Independent modal and residual-Gram heat remains
+nonnegative. Original equilibrium/branch coordinates supply a separately
+evaluated local storage change, retaining sub-roundoff held-state release.
+Conservative sums of monotone modal excursions admit the complete full-tensor
+strain path; this is a numerical sufficient bound, not an interval certificate.
+All failures and cancellation leave the accepted history unchanged.
+
+`ramp_tangent` returns analytical full-six-component endpoint strain, stress,
+mean stress and rate derivatives with respect to the three final engineering
+strains at fixed incoming history, coefficients and duration. It includes
+normal relaxation and viscous rate dependence without perturbed solves.
+Both operations reuse preparation in O(n²) work with no additional dense
+factorization, n = 3 + 6 times the original branch count. They do not evolve
+temperature, fit branches, extend a finite-band calibration claim to arbitrary
+ramps, infer finite-strain behavior or admit instantaneous strain jumps.
+
+Four focused regression groups use the existing independent original ODE/DAE
+test seam: ramps/holds/reversals in every ordered material plane, full endpoint
+and mean finite-difference tangents, subdivision/tiny-hold/algebraic limits,
+and atomic domain/source/cancellation refusals.

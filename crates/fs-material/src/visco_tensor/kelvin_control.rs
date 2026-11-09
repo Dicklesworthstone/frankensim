@@ -31,7 +31,8 @@ mod semidefinite;
 mod temperature;
 mod plane_stress;
 pub use plane_stress::{PreparedTensorKelvinPlaneStress, TensorKelvinPlaneStressHarmonicAccount,
-    TensorKelvinPlaneStressHarmonicPoint, TensorKelvinPlaneStressHarmonicWindow};
+    TensorKelvinPlaneStressHarmonicPoint, TensorKelvinPlaneStressHarmonicWindow,
+    TensorKelvinPlaneStressRampStep, TensorKelvinPlaneStressRampTangent};
 pub use temperature::TensorKelvinStressTemperatureStep;
 
 type Result<T> = core::result::Result<T, TensorPronyError>;

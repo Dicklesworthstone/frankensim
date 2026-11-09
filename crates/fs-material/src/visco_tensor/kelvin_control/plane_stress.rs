@@ -26,6 +26,8 @@ use std::sync::Arc;
 mod prepare;
 mod harmonic;
 mod semidefinite;
+mod ramp;
+pub use ramp::{TensorKelvinPlaneStressRampStep, TensorKelvinPlaneStressRampTangent};
 pub use harmonic::TensorKelvinPlaneStressHarmonicWindow;
 type Result<T> = core::result::Result<T, TensorPronyError>;
 const LINES: usize = MAX_HARMONIC_MATERIAL_LINES;

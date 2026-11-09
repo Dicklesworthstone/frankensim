@@ -256,3 +256,6 @@ fn source_domain_positive_transverse_admission_and_cancellation_are_atomic() {
 
 #[path = "visco_kelvin_plane_stress_harmonic/semidefinite.rs"]
 mod semidefinite;
+
+#[path = "visco_kelvin_plane_stress_harmonic/ramp.rs"]
+mod ramp;

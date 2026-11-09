@@ -6,7 +6,7 @@ fn startup()->[[C64;3];2] {
     STRAINS.map(|tone|tone.map(|v|C64::new(0.0,v.im)))
 }
 
-fn dae_rate(ode:&OriginalOde,y:&[f64;20],plane:MaterialPlane,imposed:Voigt)->Voigt {
+pub(super) fn dae_rate(ode:&OriginalOde,y:&[f64;20],plane:MaterialPlane,imposed:Voigt)->Voigt {
     let mut matrix=ode.d;let mut rhs=ode.spring(y).map(|v|-v);
     for axis in axes(plane).1 {
         if ode.d[axis].iter().all(|v|*v==0.0) {
