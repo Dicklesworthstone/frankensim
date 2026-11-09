@@ -7949,6 +7949,36 @@ cover independent two-bus calorimetry, shared/partial routing and turn-off,
 source-resistance feedback, regenerative RC work, actual curtailed delivery,
 unsupported caloric states and transactional cancellation/retry.
 
+### Regulated demand through the original PWM and material timeline
+
+`step_power_loaded_switching_candidate` advances every prescribed gate interval
+with its own held source/load command through
+`PreparedPowerLoadedSwitchCycle`. Explicit subdivisions resolve the same native
+three-state nonlinear converter; they do not average gate/load correlation or
+reset flux and charge at an edge. The complete authored cycle must reach the
+same represented endpoint as the thermal interval, including at large absolute
+timestamps. Its full native integration count is charged to the shared
+circuit-trial budget on every proposal, including cache reuse.
+
+The averaged and switched paths share one material, receiver and energy-account
+adapter. Each proposal resolves the original seven R(T,phase) channels, then
+restarts the electrical cycle from the accepted state. Actual substep
+squared-current work supplies all seven resistor heats; squared mean current
+cannot replace ripple heating. Each load's accepted work may enter its declared
+finite receiver through the same compensated internal-transfer account.
+Source/resistor/load, converter and whole-cycle balances remain independent.
+The original native step or complete-cycle report is retained without
+reconstructing physical heat from an energy residual.
+
+All seven material coefficients use the proposed caloric endpoint over a cycle;
+refining the thermal interval and electrical subdivisions is necessary to assess
+time accuracy. The source programs, storage parameters and prescribed ideal
+complementary gates stay fixed within each trial. This extension supplies no
+semiconductor transition, gate-charge, dead-time or recovery law. Four regression
+definitions cover an independent switched capacitor/load quadratic and exact
+calorimetry, temperature-dependent ripple and shared load heat, bounded work and
+transactional retry, and distinct represented endpoints at large clock epochs.
+
 ## Native structural vibration from harmonic induction forces
 
 `spatial_induction_vibration::SpatialInductionVibration` transfers the original

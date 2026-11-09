@@ -1,4 +1,7 @@
 //! Independent source/load calorimetry and material feedback at both buses.
+#[path = "power_load/switching.rs"]
+mod switching;
+
 use super::*;
 use fs_couple::circuit_enthalpy::converter::voltage::power_load::*;
 use fs_phs::SolveBudget;

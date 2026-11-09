@@ -5,12 +5,16 @@
 //! fully dissipative load receivers heat their declared material bodies once.
 //! These are held ideal voltage supplies behind finite resistance, not finite
 //! energy reservoirs. Work uses the native discrete effort; temporal accuracy
-//! requires refinement and no continuous RMS or PWM loss is inferred.
+//! requires refinement. Prescribed PWM retains its physical gate intervals;
+//! no semiconductor transition, recovery or dead-time loss is inferred.
 
 use super::super::battery::RegulatedLoadHeat;
 use super::*;
 use fs_phs::circuit::converter::power_load::{
     PowerLoadControls, RegulatedPowerLoad, VoltagePowerLoadedStep,
+};
+use fs_phs::circuit::converter::switching::power_load::{
+    PowerLoadedSwitchCycleStep, PowerSwitchCommand, PreparedPowerLoadedSwitchCycle,
 };
 
 #[derive(Clone, Debug)]
@@ -22,21 +26,19 @@ pub struct VoltagePowerLoadedThermalSample {
 }
 
 /// Complete proposed electrical and caloric histories, published together.
-pub struct PowerLoadedVoltageConverterEnthalpyCandidate<'t> {
+pub struct PowerLoadedVoltageConverterEnthalpyCandidate<'t, Step = VoltagePowerLoadedStep> {
     thermal: DepositionSimulation<'t>,
     converter: MaterialVoltageDrivenBuckBoost,
-    report: CircuitEnthalpyReport<VoltagePowerLoadedThermalSample, VoltagePowerLoadedStep>,
+    report: CircuitEnthalpyReport<VoltagePowerLoadedThermalSample, Step>,
 }
-impl<'t> PowerLoadedVoltageConverterEnthalpyCandidate<'t> {
+impl<'t, Step> PowerLoadedVoltageConverterEnthalpyCandidate<'t, Step> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
     pub fn converter(&self) -> &MaterialVoltageDrivenBuckBoost {
         &self.converter
     }
-    pub fn report(
-        &self,
-    ) -> &CircuitEnthalpyReport<VoltagePowerLoadedThermalSample, VoltagePowerLoadedStep> {
+    pub fn report(&self) -> &CircuitEnthalpyReport<VoltagePowerLoadedThermalSample, Step> {
         &self.report
     }
     pub fn into_parts(
@@ -44,35 +46,76 @@ impl<'t> PowerLoadedVoltageConverterEnthalpyCandidate<'t> {
     ) -> (
         DepositionSimulation<'t>,
         MaterialVoltageDrivenBuckBoost,
-        CircuitEnthalpyReport<VoltagePowerLoadedThermalSample, VoltagePowerLoadedStep>,
+        CircuitEnthalpyReport<VoltagePowerLoadedThermalSample, Step>,
     ) {
         (self.thermal, self.converter, self.report)
     }
 }
 
-struct PowerDriver {
+/// A complete switched electrical/caloric candidate with per-cycle work.
+pub type PowerLoadedSwitchConverterEnthalpyCandidate<'t> =
+    PowerLoadedVoltageConverterEnthalpyCandidate<'t, PowerLoadedSwitchCycleStep>;
+
+// Both native electrical owners expose the same physical work channels.
+// This adapter adds no trajectory, averaging, heat reconstruction or solver.
+trait PowerStep: Clone {
+    fn converter(&self) -> &fs_phs::circuit::converter::ConverterStep;
+    fn source_work(&self) -> [f64; 2];
+    fn terminal_heat(&self) -> [f64; 2];
+    fn load_work(&self) -> [f64; 2];
+}
+impl PowerStep for VoltagePowerLoadedStep {
+    fn converter(&self) -> &fs_phs::circuit::converter::ConverterStep {
+        &self.converter
+    }
+    fn source_work(&self) -> [f64; 2] {
+        self.source_work_j
+    }
+    fn terminal_heat(&self) -> [f64; 2] {
+        self.terminal_resistor_heat_j
+    }
+    fn load_work(&self) -> [f64; 2] {
+        self.load_work_j
+    }
+}
+impl PowerStep for PowerLoadedSwitchCycleStep {
+    fn converter(&self) -> &fs_phs::circuit::converter::ConverterStep {
+        &self.converter
+    }
+    fn source_work(&self) -> [f64; 2] {
+        self.source_work_j
+    }
+    fn terminal_heat(&self) -> [f64; 2] {
+        self.terminal_resistor_heat_j
+    }
+    fn load_work(&self) -> [f64; 2] {
+        self.load_work_j
+    }
+}
+
+struct PowerDriver<Step> {
     converter: MaterialVoltageDrivenBuckBoost,
-    step: VoltagePowerLoadedStep,
+    step: Step,
     heat: [f64; VOLTAGE_DRIVEN_HEAT_CHANNELS],
     load_heat: [Option<RegulatedLoadHeat>; 2],
     total_heat_j: f64,
     external_work_j: Dd,
 }
-impl ThermalDriver for PowerDriver {
+impl<Step: PowerStep> ThermalDriver for PowerDriver<Step> {
     type Model = MaterialVoltageDrivenBuckBoost;
-    type Step = VoltagePowerLoadedStep;
+    type Step = Step;
     fn account(&self) -> DriverAccount<'_> {
         DriverAccount {
             resistors: &[],
             contacts: &[],
             heat_j: self.total_heat_j,
             numerical_dissipation_j: 0.0,
-            stored_change_j: self.step.converter.native.delta_h,
+            stored_change_j: self.step.converter().native.delta_h,
             supplied_j: self.external_work_j.to_f64(),
         }
     }
     fn retained_energy_balance_j(&self) -> Dd {
-        Dd::from_f64(self.step.converter.native.delta_h) - self.external_work_j
+        Dd::from_f64(self.step.converter().native.delta_h) - self.external_work_j
     }
     fn into_parts(self) -> (Self::Model, Self::Step) {
         (self.converter, self.step)
@@ -81,33 +124,37 @@ impl ThermalDriver for PowerDriver {
 
 // Audit the original converter and each source/resistor/load boundary BEFORE
 // routing any work internally. No heat or supply is a balance remainder.
-fn physical_power_account(
-    step: &VoltagePowerLoadedStep,
+fn physical_power_account<Step: PowerStep>(
+    step: &Step,
     tolerance_j: f64,
 ) -> Result<([f64; VOLTAGE_DRIVEN_HEAT_CHANNELS], Dd, Dd), Error> {
+    let converter = step.converter();
+    let source_work = step.source_work();
+    let terminal_heat = step.terminal_heat();
+    let load_work = step.load_work();
     let heat = core::array::from_fn(|i| {
         if i < CONDUCTION_CHANNELS {
-            step.converter.conduction.joules[i]
+            converter.conduction.joules[i]
         } else {
-            step.terminal_resistor_heat_j[i - CONDUCTION_CHANNELS]
+            terminal_heat[i - CONDUCTION_CHANNELS]
         }
     });
     if heat
         .iter()
-        .chain(&step.load_work_j)
+        .chain(&load_work)
         .any(|v| !v.is_finite() || *v < 0.0)
     {
         return Err(invalid(
             "voltage-driven resistance and regulated load heats must be nonnegative",
         ));
     }
-    let internal = sum(step.converter.conduction.joules)?;
+    let internal = sum(converter.conduction.joules)?;
     let total = sum(heat)?;
-    let supply = sum(step.source_work_j)? - sum(step.load_work_j)?;
-    let terminal = sum(step.converter.terminal_work_j)?;
-    let delta = Dd::from_f64(finite(step.converter.native.delta_h)?);
-    let dissipated = Dd::from_f64(finite(step.converter.native.dissipated)?);
-    let native_supply = Dd::from_f64(finite(step.converter.native.supplied)?);
+    let supply = sum(source_work)? - sum(load_work)?;
+    let terminal = sum(converter.terminal_work_j)?;
+    let delta = Dd::from_f64(finite(converter.native.delta_h)?);
+    let dissipated = Dd::from_f64(finite(converter.native.dissipated)?);
+    let native_supply = Dd::from_f64(finite(converter.native.supplied)?);
     let mut residuals = [
         internal - dissipated,
         terminal - native_supply,
@@ -117,10 +164,10 @@ fn physical_power_account(
         Dd::ZERO,
     ];
     for port in 0..2 {
-        residuals[4 + port] = Dd::from_f64(finite(step.source_work_j[port])?)
-            - Dd::from_f64(step.terminal_resistor_heat_j[port])
-            - Dd::from_f64(step.load_work_j[port])
-            - Dd::from_f64(finite(step.converter.terminal_work_j[port])?);
+        residuals[4 + port] = Dd::from_f64(finite(source_work[port])?)
+            - Dd::from_f64(terminal_heat[port])
+            - Dd::from_f64(load_work[port])
+            - Dd::from_f64(finite(converter.terminal_work_j[port])?);
     }
     if residuals
         .iter()
@@ -166,13 +213,158 @@ impl VoltageDrivenConverterThermalNetwork<'_> {
         initial_energy_increments_j: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<PowerLoadedVoltageConverterEnthalpyCandidate<'t>, Error> {
+        if source_voltage_v.iter().any(|v| !v.is_finite()) {
+            return Err(invalid("regulated voltage sources must be finite"));
+        }
+        self.step_power_driver_candidate(
+            thermal,
+            target_s,
+            converter,
+            load_heat_cells,
+            controls,
+            initial_energy_increments_j,
+            1,
+            |parameters, terminal, dt, checkpoint| {
+                let mut native = AveragedBuckBoost::new(parameters, modulation)
+                    .map_err(model)?
+                    .prepare_power_loaded_controlled(dt, electrical_controls, &mut *checkpoint)
+                    .map_err(electrical)?;
+                let (mut next, mut effort) = ([0.0; 3], [0.0; 2]);
+                let step = native
+                    .step_voltage_driven_controlled(
+                        &converter.state,
+                        source_voltage_v,
+                        &terminal,
+                        loads,
+                        &mut next,
+                        &mut effort,
+                        &mut *checkpoint,
+                    )
+                    .map_err(electrical)?;
+                Ok((next, step))
+            },
+            cancelled,
+        )
+    }
+
+    /// Couple actual prescribed gate intervals and their correlated source/load
+    /// commands to the same seven material heat owners. Every command belongs
+    /// to one ORIGINAL gate interval; numerical subdivisions add no new edge.
+    ///
+    /// Every thermal trial restarts all original flux/charges and advances the
+    /// complete native nonlinear switching cycle. Resistor heat sums accepted
+    /// squared-current work across substeps; it is never squared mean current
+    /// or the heat of an averaged duty command. Actual regulated-load work may
+    /// heat the declared receivers through the same internal-transfer account.
+    ///
+    /// The full authored cycle must span the thermal interval. Its native
+    /// integration steps are charged to the shared circuit-trial budget even
+    /// when identical material coefficients reuse a cached result. Source and
+    /// load commands, gate program and subdivisions stay fixed within a call.
+    /// All seven R(T,phase) values use the thermal trial endpoint; coupled time
+    /// accuracy requires refinement. Ideal complementary gates introduce no
+    /// diode, dead-time, transition, gate-charge or reverse-recovery physics.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_power_loaded_switching_candidate<'t>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        converter: &MaterialVoltageDrivenBuckBoost,
+        intervals: &[SwitchInterval],
+        commands: &[PowerSwitchCommand],
+        substeps_per_interval: usize,
+        load_heat_cells: [Option<CellId>; 2],
+        electrical_controls: PowerLoadControls,
+        cycle_controls: SwitchCycleControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PowerLoadedSwitchConverterEnthalpyCandidate<'t>, Error> {
+        if commands.len() != intervals.len() {
+            return Err(invalid(
+                "each physical switch interval requires its own source/load command",
+            ));
+        }
+        let integration_steps = intervals
+            .len()
+            .checked_mul(substeps_per_interval)
+            .filter(|steps| *steps != 0)
+            .ok_or_else(|| {
+                invalid("switched regulated conversion requires representable nonzero work")
+            })?;
+        self.step_power_driver_candidate(
+            thermal,
+            target_s,
+            converter,
+            load_heat_cells,
+            controls,
+            initial_energy_increments_j,
+            integration_steps,
+            |parameters, terminal, dt, checkpoint| {
+                let mut native = PreparedPowerLoadedSwitchCycle::new_controlled(
+                    parameters,
+                    terminal,
+                    intervals,
+                    substeps_per_interval,
+                    electrical_controls,
+                    cycle_controls,
+                    &mut *checkpoint,
+                )
+                .map_err(electrical)?;
+                let period = native.period_s();
+                let represented_end = finite(thermal.time_s() + period)?;
+                let clock_roundoff =
+                    0.5 * (clock_spacing(thermal.time_s()) + clock_spacing(target_s));
+                let duration_roundoff = 64.0 * f64::EPSILON * period.max(dt);
+                if represented_end <= thermal.time_s()
+                    || represented_end.to_bits() != target_s.to_bits()
+                    || (period - dt).abs() > clock_roundoff + duration_roundoff
+                {
+                    return Err(invalid(
+                        "the complete regulated switch cycle must span the thermal interval",
+                    ));
+                }
+                let (mut next, mut mean_voltage) = ([0.0; 3], [0.0; 2]);
+                let step = native
+                    .step_interval_commands_controlled(
+                        &converter.state,
+                        commands,
+                        &mut next,
+                        &mut mean_voltage,
+                        &mut *checkpoint,
+                    )
+                    .map_err(electrical)?;
+                Ok((next, step))
+            },
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_power_driver_candidate<'t, Step: PowerStep>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        converter: &MaterialVoltageDrivenBuckBoost,
+        load_heat_cells: [Option<CellId>; 2],
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        integration_steps: usize,
+        integrate: impl Fn(
+            BuckBoostParameters,
+            [f64; 2],
+            f64,
+            &mut dyn FnMut() -> bool,
+        ) -> Result<([f64; 3], Step), Error>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PowerLoadedVoltageConverterEnthalpyCandidate<'t, Step>, Error> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         super::super::super::admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
         let dt = finite(target_s - thermal.time_s())?;
         if converter.time_s.to_bits() != thermal.time_s().to_bits()
             || dt <= 0.0
-            || source_voltage_v.iter().any(|v| !v.is_finite())
+            || integration_steps == 0
         {
             return Err(invalid(
                 "regulated voltage conversion and heat need one positive interval and finite sources",
@@ -217,13 +409,7 @@ impl VoltageDrivenConverterThermalNetwork<'_> {
         // Commands, dt, storage and accepted state are fixed within this call.
         // Exact resistance equality reuses the same native electrical trajectory;
         // caloric/material admission still runs on every thermal trial.
-        let cache = RefCell::new(
-            None::<(
-                [u64; VOLTAGE_DRIVEN_HEAT_CHANNELS],
-                [f64; 3],
-                VoltagePowerLoadedStep,
-            )>,
-        );
+        let cache = RefCell::new(None::<([u64; VOLTAGE_DRIVEN_HEAT_CHANNELS], [f64; 3], Step)>);
         let (thermal, converter, report) = cell_driver_candidate(
             thermal,
             target_s,
@@ -231,7 +417,7 @@ impl VoltageDrivenConverterThermalNetwork<'_> {
             initial_energy_increments_j,
             |trial, remaining| {
                 check(&cancel)?;
-                if remaining == 0 {
+                if integration_steps > remaining {
                     return Err(CircuitEnthalpyError::CircuitBudget);
                 }
                 let coefficients = prepared
@@ -258,32 +444,14 @@ impl VoltageDrivenConverterThermalNetwork<'_> {
                 let (next, step) = if let Some((_, next, step)) = previous {
                     (next, step)
                 } else {
-                    let mut native = AveragedBuckBoost::new(parameters, modulation)
-                        .map_err(model)?
-                        .prepare_power_loaded_controlled(dt, electrical_controls, || {
-                            (*cancel.borrow_mut())()
-                        })
-                        .map_err(electrical)?;
-                    let (mut next, mut effort) = ([0.0; 3], [0.0; 2]);
-                    let step = native
-                        .step_voltage_driven_controlled(
-                            &converter.state,
-                            source_voltage_v,
-                            &terminal,
-                            loads,
-                            &mut next,
-                            &mut effort,
-                            || (*cancel.borrow_mut())(),
-                        )
-                        .map_err(electrical)?;
-                    (next, step)
+                    integrate(parameters, terminal, dt, &mut || (*cancel.borrow_mut())())?
                 };
                 let (heat, total, supply) =
                     physical_power_account(&step, controls.total_energy_tolerance_j)?;
                 let load_heat: [Option<RegulatedLoadHeat>; 2] = core::array::from_fn(|port| {
                     load_heat_cells[port].map(|cell| RegulatedLoadHeat {
                         cell,
-                        energy_j: step.load_work_j[port],
+                        energy_j: step.load_work()[port],
                     })
                 });
                 let routed = sum(load_heat.iter().flatten().map(|load| load.energy_j))?;
@@ -316,7 +484,7 @@ impl VoltageDrivenConverterThermalNetwork<'_> {
                         channels,
                         load_heat,
                     },
-                    circuit_trials: 1,
+                    circuit_trials: integration_steps,
                 })
             },
             |candidate, duration, checkpoint| {
