@@ -1653,3 +1653,29 @@ opposing formation terms, unchanged mass-only results, and unrepresented-work,
 source, storage and cancellation refusals. These
 new regressions require native execution; the authoring environment went
 offline before that check completed.
+
+## Local SGS with general prescribed moving walls
+
+`Grid3::prepare_sgs_with_moving_walls` and the corresponding serial/pooled
+step entries use local Smagorinsky, WALE or Vreman closures on selected fixed
+halfway-wall links, including interior solids and spatially varying tangential
+drives. The complete wall-link field remains with the native moving bounce-back
+owner. SGS and kinematics share each missing Cartesian neighbor's actual axial
+wall-link velocity; diagonal-only contacts do not invent an axial wall.
+
+The ordered link mapping uses fixed storage and no per-cell probe search or
+additional field allocation. Existing collision-family rates, supplied molecular
+viscosities, Mach/admission checks and eddy-to-molecular limits remain intact.
+The collision field is prepared from fresh molecular values on each call.
+
+`ForcedGrid3` exposes the same preparation, held-force steps and endpoint-force
+advances. The accepted physical velocity uses the current `F_n/2` correction
+before gradient fitting; `F_(n+1)` admission and publication remain in the original
+force owner. Native population, force, clock and wall-load transactions are reused.
+SGS diagnostics report instantaneous modeled shear transfer and add no heat.
+
+Regression groups are provided for analytic wall gradients on both lattices and
+all three models, zero-drive/disabled controls, serial/pooled/native equivalence,
+force histories, cancellation and refusal. This remains the exploratory local
+closure on fixed staircase geometry; it does not add wall functions, geometry
+remapping, a turbulent-flow qualification or an integrated energy balance.

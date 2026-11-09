@@ -15,6 +15,7 @@ mod channel;
 mod dynamic;
 mod forced;
 mod lagrangian;
+mod moving_walls;
 
 impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
     /// Allocate once for repeated SGS steps. Allocation failure is returned;
@@ -53,9 +54,10 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
     /// actual zero wall velocity, the cell centre, and its fluid neighbour.
     /// The normal derivative is exact for a quadratic profile at such walls;
     /// two opposed walls in a one-cell gap give the symmetric derivative zero.
-    /// This entry selects stationary walls. Translating planar walls use
-    /// [`Self::prepare_channel_sgs_with_moving_walls`], which binds gradients
-    /// and native streaming to the same physical wall velocities.
+    /// This entry selects stationary walls. Prescribed moving surfaces use
+    /// [`Self::prepare_sgs_with_moving_walls`], which binds gradients and native
+    /// streaming to the same physical wall velocities, including interior solids
+    /// and spatially varying tangential drives.
     ///
     /// The full velocity gradient is required by WALE. A cached macroscopic
     /// sweep avoids recomputing six neighbours' Q populations per cell. The
@@ -318,45 +320,12 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
                 Ok(())
             }
         })?;
-        // Map incoming Cartesian populations to the boundary face they leave.
-        // Direction lookup is performed once, outside the cell/gradient sweep.
-        let mut axial_face = [6usize; Q];
-        for face in 0..6 {
-            let mut incoming = [0; 3];
-            incoming[face / 2] = if face % 2 == 0 { 1 } else { -1 };
-            let q = L::E
-                .iter()
-                .position(|&e| e == incoming)
-                .ok_or(KinematicsError::Input(
-                    "moving-wall curl requires Cartesian lattice links",
-                ))?;
-            axial_face[q] = face;
-        }
-        let mut cursor = 0;
-        let mut cached_cell = usize::MAX;
-        let mut walls = [[0.0; 3]; 6];
-        Ok(
-            self.kinematics_with_forces_and_walls(gate, workspace, forces, |cell, axis, high| {
-                if cached_cell != cell {
-                    cached_cell = cell;
-                    walls = [[0.0; 3]; 6];
-                    // Cell queries and probe links are both in x-fastest order.
-                    // Diagonal-only wall contacts can be skipped without inventing
-                    // an axial boundary or averaging unrelated surface velocities.
-                    while cursor < motion.probe.links.len()
-                        && motion.probe.links[cursor].cell <= cell
-                    {
-                        let link = &motion.probe.links[cursor];
-                        let face = axial_face[link.incoming];
-                        if link.cell == cell && face < 6 {
-                            walls[face] = motion.velocities[cursor];
-                        }
-                        cursor += 1;
-                    }
-                }
-                walls[2 * axis + usize::from(high)]
-            })?,
-        )
+        Ok(self.kinematics_with_forces_and_walls(
+            gate,
+            workspace,
+            forces,
+            motion.cartesian_velocities()?,
+        )?)
     }
 
     pub(super) fn kinematics_with_forces<'a>(
