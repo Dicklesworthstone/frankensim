@@ -11,6 +11,9 @@
 //! properties remain frozen. Average-power reconstruction requires temporal
 //! refinement; it is not a resolved within-step twist or temperature feedback.
 
+/// Original driven body motion and caloric transport on one accepted interval.
+pub mod native;
+
 use super::super::power::{SurfacePower, sum_audits};
 use super::{
     JkrSnapHeatError, JkrTorsionHeat, JkrTorsionHeatError, JkrTorsionHeatReport,

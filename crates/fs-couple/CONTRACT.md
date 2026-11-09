@@ -11851,3 +11851,15 @@ finite-contact oracles and add bounded-current material support, floating
 electrodes, large common bias, two-step continuation, exact field-solve
 accounting and rejection paths. They are manufactured numerical checks, not
 measured material validation or mesh/time convergence claims.
+
+## Driven native torsion and heat on one accepted clock
+
+`friction_heat::adhesive::snap::torsion::timed::native` advances the original finite-body torsion lifecycle and complete torsional heat owner over one positive physical interval. Actual held COM forces and body-frame torques determine native motion. The internally accepted twist increment supplies the source-owned plastic loss; authored work or edited reports cannot create heat. The complete retained successor, original normal segment, angular constitutive step and irreversible loss must match exactly between native and thermal proposals.
+
+Normal and remaining twist-spring release enter at the prescribed initial normal stage, after original scheduled thermal events at that time. The independently partitioned plastic heat is transported during the interval by the original finite-cell solver. Detached body work remains kinetic, detached travel creates no future spring preload, and recontact preserves accumulated source accounts while starting a fresh junction.
+
+The combined energy audit uses actual native kinetic change, original incremental twist storage and body work together with the heat owner's compensated relative audits. Internal plastic transfer cancels once; independent mechanical and thermal absolute defects cannot conceal each other. Final caller checkpoint and cancellation checks precede publication of both momenta, native source history, all heat ledgers, finite calorics and thermal time. Late transport, caloric, budget, source, history or energy refusal leaves every original owner unchanged.
+
+The source retains its homogeneous torsion calibration and mode-III applicability ceiling. Poses/frame and material properties remain held; normal approach is prescribed at interval start. Inertial midpoint motion and average-power heat require temporal refinement. This composition supplies neither normal body integration nor reciprocal mixed-mode stability or temperature feedback.
+
+Three integration cases cover eight driven intervals with independently reconstructed body/contact/cell/outside/background energy and changing normal area, analytic fold release with detached work and fresh recontact, and post-release transport refusal, both final cancellation forms, stale time/history and deterministic retry. Pinned format and recursive syntax/module-path checks passed. These new integration cases were not compiled or executed because the required remote runners are absent and local build headroom is exhausted.

@@ -1,5 +1,7 @@
 //! G1/G3/G4: retained twist release, plastic loss and original finite calorics.
 
+#[path = "torsion/native.rs"]
+mod native;
 #[path = "torsion/timed.rs"]
 mod timed;
 
