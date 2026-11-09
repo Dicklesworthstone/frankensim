@@ -18,7 +18,9 @@ mod adaptive;
 mod material;
 mod radiation;
 mod storage;
-pub(in crate::conjugate) use radiation::advance_radiating_caloric_prepared;
+pub(in crate::conjugate) use radiation::{
+    advance_radiating_caloric_prepared, advance_radiating_sdirk2_prepared,
+};
 pub use radiation::{
     TensorCaloricRadiationReport, advance_caloric_tensor_conduction_radiating,
     advance_caloric_tensor_conduction_radiating_sdirk2,

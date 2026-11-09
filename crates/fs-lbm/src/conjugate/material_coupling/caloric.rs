@@ -6,22 +6,30 @@
 use super::{invalid, validate_joule, validate_temperature};
 use crate::conjugate::radiation::{RadiationConfig, Radiators};
 use crate::conjugate::tensor_conduction::advance_radiating_caloric_prepared;
+use crate::conjugate::transient::TransientRecord;
 use crate::conjugate::{
     ChtError, ElectricSetup, ElectricSolution, ElectricalContact, SolidMaterial,
-    TensorCaloricRadiationReport, TensorCaloricStep, TensorCaloricStorage, TensorConductivityLaw,
-    TensorNonlinearConfig, ThermalSetup, Voxel, VoxelDomain, advance_caloric_tensor_conduction,
-    poll,
+    TensorCaloricEndpoint, TensorCaloricRadiationReport, TensorCaloricStep, TensorCaloricStorage,
+    TensorConductivityLaw, TensorNonlinearConfig, ThermalSetup, Voxel, VoxelDomain,
+    advance_caloric_tensor_conduction, poll,
 };
 use fs_conduction::enthalpy::DepositionError;
 use fs_exec::CancelGate;
 use fs_math::dd::Dd;
 use std::borrow::Cow;
 
+mod sdirk;
+pub use sdirk::{
+    CaloricElectrothermalSdirk2Step, advance_caloric_tensor_electrothermal_radiating_sdirk2,
+    advance_caloric_tensor_electrothermal_sdirk2,
+};
+
 /// Native per-solve limits and bounded original-energy/current feedback.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CaloricElectrothermalConfig {
     pub thermal: TensorNonlinearConfig,
-    /// At most this many thermal proposals and one additional current solve.
+    /// At most this many thermal proposals. Current solves are stages times
+    /// (proposals + 1); each refreshed stage field seeds the next proposal.
     /// Radiation retains its original bounded inner heat solves per proposal.
     /// Each current callback is evaluated at most once per non-electrode cell.
     pub maximum_passes: usize,
@@ -64,7 +72,8 @@ pub struct CaloricElectrothermalReport {
     /// thermostats. The native record omits this equal source/removal pair.
     /// It is already part of applied_joule_energy_j, not additional heat.
     pub thermostat_joule_energy_j: f64,
-    /// dt * sum |applied local Joule power - refreshed endpoint local power|.
+    /// Positive tableau-weighted integral of absolute local applied/refreshed
+    /// Joule-power differences; neither cells nor stages cancel each other.
     pub source_mismatch_j: f64,
     /// Combining authored/Joule powers and reducing the native source ledger.
     pub source_transfer_defect_j: f64,
@@ -127,26 +136,28 @@ pub fn advance_caloric_tensor_electrothermal(
     start_time_s: f64,
     time_step_s: f64,
     config: &CaloricElectrothermalConfig,
-    resistivity: impl FnMut(usize, Voxel, f64, f64) -> Result<Option<f64>, ChtError>,
+    mut resistivity: impl FnMut(usize, Voxel, f64, f64) -> Result<Option<f64>, ChtError>,
     gate: &CancelGate,
 ) -> Result<CaloricElectrothermalStep, ChtError> {
     advance_with_heat(
         domain,
         solids,
-        electric,
-        contacts,
-        thermal,
+        [electric],
+        [contacts],
+        [thermal],
         conductivity_laws,
         storage,
         start_time_s,
         time_step_s,
+        [start_time_s + time_step_s],
+        [1.0],
         config,
-        resistivity,
+        |_, cell, occupancy, energy, temperature| resistivity(cell, occupancy, energy, temperature),
         |heated| {
             advance_caloric_tensor_conduction(
                 domain,
                 solids,
-                heated,
+                heated[0],
                 conductivity_laws,
                 storage,
                 prescribed_specific_energy_j_kg,
@@ -158,6 +169,7 @@ pub fn advance_caloric_tensor_electrothermal(
         },
         gate,
     )
+    .map(CoupledStep::backward_euler)
 }
 
 /// Advance spatial caloric/current feedback with original gray radiation.
@@ -192,7 +204,7 @@ pub fn advance_caloric_tensor_electrothermal_radiating(
     time_step_s: f64,
     config: &CaloricElectrothermalConfig,
     radiation: &RadiationConfig,
-    resistivity: impl FnMut(usize, Voxel, f64, f64) -> Result<Option<f64>, ChtError>,
+    mut resistivity: impl FnMut(usize, Voxel, f64, f64) -> Result<Option<f64>, ChtError>,
     gate: &CancelGate,
 ) -> Result<(CaloricElectrothermalStep, TensorCaloricRadiationReport), ChtError> {
     poll(gate)?;
@@ -207,20 +219,22 @@ pub fn advance_caloric_tensor_electrothermal_radiating(
     let step = advance_with_heat(
         domain,
         solids,
-        electric,
-        contacts,
-        thermal,
+        [electric],
+        [contacts],
+        [thermal],
         conductivity_laws,
         storage,
         start_time_s,
         time_step_s,
+        [start_time_s + time_step_s],
+        [1.0],
         config,
-        resistivity,
+        |_, cell, occupancy, energy, temperature| resistivity(cell, occupancy, energy, temperature),
         |heated| {
             let (step, report) = advance_radiating_caloric_prepared(
                 domain,
                 solids,
-                heated,
+                heated[0],
                 conductivity_laws,
                 storage,
                 prescribed_specific_energy_j_kg,
@@ -238,35 +252,86 @@ pub fn advance_caloric_tensor_electrothermal_radiating(
     )?;
     let report = accepted_radiation
         .ok_or_else(|| refusal("accepted radiating thermal proposal is missing its report"))?;
-    Ok((step, report))
+    Ok((step.backward_euler(), report))
 }
 
-/// Keep one electrical-source iteration for radiating and nonradiating owners.
+/// Borrow native evidence and move stage energies without copying whole solves.
+trait HeatStep<const STAGES: usize> {
+    fn endpoints(&self) -> [&TensorCaloricEndpoint; STAGES];
+    fn record(&self) -> &TransientRecord;
+    fn into_energies(self) -> [Vec<f64>; STAGES];
+}
+
+impl HeatStep<1> for TensorCaloricStep {
+    fn endpoints(&self) -> [&TensorCaloricEndpoint; 1] {
+        [&self.endpoint]
+    }
+
+    fn record(&self) -> &TransientRecord {
+        &self.record
+    }
+
+    fn into_energies(self) -> [Vec<f64>; 1] {
+        [self.endpoint.specific_energy_j_kg]
+    }
+}
+
+struct CoupledStep<Step, const STAGES: usize> {
+    thermal: Step,
+    applied_electric: [ElectricSolution; STAGES],
+    endpoint_electric: [ElectricSolution; STAGES],
+    report: CaloricElectrothermalReport,
+}
+
+impl CoupledStep<TensorCaloricStep, 1> {
+    fn backward_euler(self) -> CaloricElectrothermalStep {
+        let [applied_electric] = self.applied_electric;
+        let [endpoint_electric] = self.endpoint_electric;
+        CaloricElectrothermalStep {
+            thermal: self.thermal,
+            applied_electric,
+            endpoint_electric,
+            report: self.report,
+        }
+    }
+}
+
+/// One stage-aware electrical-source iteration around the original heat owner.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn advance_with_heat(
+fn advance_with_heat<const STAGES: usize, Step: HeatStep<STAGES>>(
     domain: &VoxelDomain,
     solids: &[SolidMaterial],
-    electric: &ElectricSetup,
-    contacts: &[ElectricalContact],
-    thermal: &ThermalSetup,
+    electric: [&ElectricSetup; STAGES],
+    contacts: [&[ElectricalContact]; STAGES],
+    thermal: [&ThermalSetup; STAGES],
     conductivity_laws: &[&dyn TensorConductivityLaw],
     storage: TensorCaloricStorage<'_>,
     start_time_s: f64,
     time_step_s: f64,
+    stage_time_s: [f64; STAGES],
+    stage_weights: [f64; STAGES],
     config: &CaloricElectrothermalConfig,
-    mut resistivity: impl FnMut(usize, Voxel, f64, f64) -> Result<Option<f64>, ChtError>,
-    mut heat: impl FnMut(&ThermalSetup) -> Result<TensorCaloricStep, ChtError>,
+    mut resistivity: impl FnMut(f64, usize, Voxel, f64, f64) -> Result<Option<f64>, ChtError>,
+    mut heat: impl FnMut([&ThermalSetup; STAGES]) -> Result<Step, ChtError>,
     gate: &CancelGate,
-) -> Result<CaloricElectrothermalStep, ChtError> {
+) -> Result<CoupledStep<Step, STAGES>, ChtError> {
     poll(gate)?;
     let cells = domain.cell_count();
     admit(config, start_time_s, time_step_s, cells)?;
+    config
+        .maximum_passes
+        .checked_add(1)
+        .and_then(|count| count.checked_mul(STAGES))
+        .and_then(|count| count.checked_mul(cells))
+        .ok_or_else(|| refusal("stage current callback work bound is unrepresentable"))?;
     domain.check_materials(solids.len())?;
     if storage.laws.len() != cells
         || storage.reference_mass_kg.len() != cells
         || storage.previous_specific_energy_j_kg.len() != cells
         || conductivity_laws.len() != cells
-        || (!thermal.power_w.is_empty() && thermal.power_w.len() != cells)
+        || thermal
+            .iter()
+            .any(|setup| !setup.power_w.is_empty() && setup.power_w.len() != cells)
     {
         return Err(refusal(
             "one original law, mass, energy and tensor per cell is required",
@@ -276,20 +341,22 @@ fn advance_with_heat(
     temperature
         .try_reserve_exact(cells)
         .map_err(|_| refusal("opening caloric temperature allocation refused"))?;
-    let mut fixed = Vec::new();
-    fixed
-        .try_reserve_exact(cells)
-        .map_err(|_| refusal("prescribed-cell allocation refused"))?;
-    fixed.resize(cells, false);
-    for (index, &(cell, _)) in thermal.fixed_temperature.iter().enumerate() {
-        checkpoint(gate, index)?;
-        let entry = fixed
-            .get_mut(cell)
-            .ok_or_else(|| refusal("prescribed cell is outside the domain"))?;
-        if *entry {
-            return Err(refusal("prescribed cells must be unique"));
+    let mut fixed: [Vec<bool>; STAGES] = std::array::from_fn(|_| Vec::new());
+    for stage in 0..STAGES {
+        fixed[stage]
+            .try_reserve_exact(cells)
+            .map_err(|_| refusal("prescribed-cell allocation refused"))?;
+        fixed[stage].resize(cells, false);
+        for (index, &(cell, _)) in thermal[stage].fixed_temperature.iter().enumerate() {
+            checkpoint(gate, index)?;
+            let entry = fixed[stage]
+                .get_mut(cell)
+                .ok_or_else(|| refusal("prescribed cell is outside the domain"))?;
+            if *entry {
+                return Err(refusal("prescribed cells must be unique"));
+            }
+            *entry = true;
         }
-        *entry = true;
     }
     for cell in 0..cells {
         checkpoint(gate, cell)?;
@@ -311,24 +378,25 @@ fn advance_with_heat(
         law.validate_reference_cell(mass, domain.volume(cell))
             .map_err(caloric_error)?;
         temperature.push(law.temperature_k(energy).map_err(caloric_error)?);
-        if thermal
-            .power_w
-            .get(cell)
-            .is_some_and(|power| !power.is_finite())
-        {
+        if thermal.iter().any(|setup| {
+            setup
+                .power_w
+                .get(cell)
+                .is_some_and(|power| !power.is_finite())
+        }) {
             return Err(refusal("authored cell powers must be finite"));
         }
     }
     validate_temperature(&temperature, cells)?;
-    let mut current = |energy: &[f64], temperature: &[f64]| {
+    let mut current = |stage: usize, energy: &[f64], temperature: &[f64]| {
         poll(gate)?;
-        let field = electric.solve_with_cell_contacts(
+        let field = electric[stage].solve_with_cell_contacts(
             domain,
             temperature,
-            contacts,
+            contacts[stage],
             |cell, occupancy, t| {
                 poll(gate)?;
-                let value = resistivity(cell, occupancy, energy[cell], t)?;
+                let value = resistivity(stage_time_s[stage], cell, occupancy, energy[cell], t)?;
                 poll(gate)?;
                 Ok(value)
             },
@@ -337,72 +405,104 @@ fn advance_with_heat(
         poll(gate)?;
         Ok::<_, ChtError>(field)
     };
-    let mut trial_energy = Cow::Borrowed(storage.previous_specific_energy_j_kg);
-    let mut applied = current(&trial_energy, &temperature)?;
-    let mut heated = thermal.clone();
-    heated.power_w.resize(cells, 0.0);
+    let mut trial_energy: [Cow<'_, [f64]>; STAGES] =
+        std::array::from_fn(|_| Cow::Borrowed(storage.previous_specific_energy_j_kg));
+    let mut applied = stage_array(|stage| current(stage, &trial_energy[stage], &temperature))?;
+    let mut heated = thermal.map(Clone::clone);
+    for setup in &mut heated {
+        setup.power_w.resize(cells, 0.0);
+    }
     let dt = Dd::from_f64(time_step_s);
+    let weighted_time = stage_weights.map(|weight| dt * Dd::from_f64(weight));
     let mut residual = f64::INFINITY;
     for pass in 1..=config.maximum_passes {
         poll(gate)?;
-        let (applied_joule, applied_electrical_defect) =
-            electrical_account(&applied, cells, dt, gate)?;
+        let mut applied_joule = Dd::ZERO;
+        let mut applied_electrode = Dd::ZERO;
+        let mut applied_electrical_defect = Dd::ZERO;
         let mut transfer = Dd::ZERO;
         let mut native_source = Dd::ZERO;
         let mut thermostat_joule = Dd::ZERO;
-        for cell in 0..cells {
-            checkpoint(gate, cell)?;
-            let authored = thermal.power_w.get(cell).copied().unwrap_or(0.0);
-            let original = Dd::from_f64(authored) + Dd::from_f64(applied.joule_w[cell]);
-            heated.power_w[cell] = number(original)?;
-            if fixed[cell] {
-                thermostat_joule = thermostat_joule + Dd::from_f64(applied.joule_w[cell]);
-            } else {
-                let represented = Dd::from_f64(heated.power_w[cell]);
-                transfer = transfer + magnitude(represented - original);
-                native_source = native_source + represented;
+        for stage in 0..STAGES {
+            let weight = weighted_time[stage];
+            let (joule, defect) = electrical_account(&applied[stage], cells, weight, gate)?;
+            applied_joule = applied_joule + joule;
+            applied_electrical_defect = applied_electrical_defect + defect;
+            applied_electrode =
+                applied_electrode + weight * Dd::from_f64(applied[stage].delivered_w);
+            let mut stage_transfer = Dd::ZERO;
+            let mut stage_source = Dd::ZERO;
+            let mut stage_thermostat = Dd::ZERO;
+            for cell in 0..cells {
+                checkpoint(gate, cell)?;
+                let authored = thermal[stage].power_w.get(cell).copied().unwrap_or(0.0);
+                let original = Dd::from_f64(authored) + Dd::from_f64(applied[stage].joule_w[cell]);
+                heated[stage].power_w[cell] = number(original)?;
+                if fixed[stage][cell] {
+                    stage_thermostat =
+                        stage_thermostat + Dd::from_f64(applied[stage].joule_w[cell]);
+                } else {
+                    let represented = Dd::from_f64(heated[stage].power_w[cell]);
+                    stage_transfer = stage_transfer + magnitude(represented - original);
+                    stage_source = stage_source + represented;
+                }
             }
+            transfer = transfer + weight * stage_transfer;
+            native_source = native_source + weight * stage_source;
+            thermostat_joule = thermostat_joule + weight * stage_thermostat;
         }
-        let step = heat(&heated)?;
+        let step = heat(heated.each_ref())?;
         poll(gate)?;
-        let endpoint_energy = &step.endpoint.specific_energy_j_kg;
-        let next = current(
-            endpoint_energy,
-            &step.endpoint.solution.solution.temperature,
-        )?;
-        let (_, endpoint_electrical_defect) = electrical_account(&next, cells, dt, gate)?;
+        let endpoints = step.endpoints();
+        let next = stage_array(|stage| {
+            current(
+                stage,
+                &endpoints[stage].specific_energy_j_kg,
+                &endpoints[stage].solution.solution.temperature,
+            )
+        })?;
+        let mut endpoint_electrical_defect = Dd::ZERO;
         let mut maximum_energy_change: f64 = 0.0;
         let mut normalized_energy: f64 = 0.0;
         let mut maximum_power_change: f64 = 0.0;
         let mut normalized_power: f64 = 0.0;
         let mut source_mismatch = Dd::ZERO;
-        for cell in 0..cells {
-            checkpoint(gate, cell)?;
-            let opening = Dd::from_f64(storage.previous_specific_energy_j_kg[cell]);
-            let previous = Dd::from_f64(trial_energy[cell]);
-            let endpoint = Dd::from_f64(endpoint_energy[cell]);
-            let change = number(magnitude(endpoint - previous))?;
-            let scale =
-                number(magnitude(endpoint - opening))?.max(number(magnitude(previous - opening))?);
-            let limit = config.specific_energy_tolerance_j_kg + config.relative_tolerance * scale;
-            maximum_energy_change = maximum_energy_change.max(change);
-            normalized_energy = normalized_energy.max(ratio(change, limit)?);
-            let power_change =
-                magnitude(Dd::from_f64(applied.joule_w[cell]) - Dd::from_f64(next.joule_w[cell]));
-            let power_change_w = number(power_change)?;
-            let power_limit = config.power_tolerance_w
-                + config.relative_tolerance * applied.joule_w[cell].max(next.joule_w[cell]);
-            maximum_power_change = maximum_power_change.max(power_change_w);
-            normalized_power = normalized_power.max(ratio(power_change_w, power_limit)?);
-            source_mismatch = source_mismatch + power_change;
+        for stage in 0..STAGES {
+            let (_, defect) = electrical_account(&next[stage], cells, weighted_time[stage], gate)?;
+            endpoint_electrical_defect = endpoint_electrical_defect + defect;
+            let mut stage_mismatch = Dd::ZERO;
+            for cell in 0..cells {
+                checkpoint(gate, cell)?;
+                let opening = Dd::from_f64(storage.previous_specific_energy_j_kg[cell]);
+                let previous = Dd::from_f64(trial_energy[stage][cell]);
+                let endpoint = Dd::from_f64(endpoints[stage].specific_energy_j_kg[cell]);
+                let change = number(magnitude(endpoint - previous))?;
+                let scale = number(magnitude(endpoint - opening))?
+                    .max(number(magnitude(previous - opening))?);
+                let limit =
+                    config.specific_energy_tolerance_j_kg + config.relative_tolerance * scale;
+                maximum_energy_change = maximum_energy_change.max(change);
+                normalized_energy = normalized_energy.max(ratio(change, limit)?);
+                let power_change = magnitude(
+                    Dd::from_f64(applied[stage].joule_w[cell])
+                        - Dd::from_f64(next[stage].joule_w[cell]),
+                );
+                let power_change_w = number(power_change)?;
+                let power_limit = config.power_tolerance_w
+                    + config.relative_tolerance
+                        * applied[stage].joule_w[cell].max(next[stage].joule_w[cell]);
+                maximum_power_change = maximum_power_change.max(power_change_w);
+                normalized_power = normalized_power.max(ratio(power_change_w, power_limit)?);
+                stage_mismatch = stage_mismatch + power_change;
+            }
+            source_mismatch = source_mismatch + weighted_time[stage] * stage_mismatch;
         }
-        source_mismatch = dt * source_mismatch;
-        transfer =
-            dt * transfer + magnitude(Dd::from_f64(step.record.source_j) - dt * native_source);
+        let record = step.record();
+        transfer = transfer + magnitude(Dd::from_f64(record.source_j) - native_source);
         let base_defect = transfer
             + applied_electrical_defect
             + endpoint_electrical_defect
-            + magnitude(Dd::from_f64(step.record.closure_j));
+            + magnitude(Dd::from_f64(record.closure_j));
         let total_defect = base_defect + source_mismatch;
         // These are original solver/representation defects, not source guesses.
         // More coupling passes cannot authorize an already excessive heat error.
@@ -420,29 +520,29 @@ fn advance_with_heat(
         {
             let report = CaloricElectrothermalReport {
                 passes: pass,
-                current_solves: pass + 1,
+                current_solves: STAGES * (pass + 1),
                 maximum_energy_change_j_kg: maximum_energy_change,
                 maximum_normalized_energy_change: normalized_energy,
                 maximum_joule_source_change_w: maximum_power_change,
-                applied_electrode_energy_j: number(dt * Dd::from_f64(applied.delivered_w))?,
+                applied_electrode_energy_j: number(applied_electrode)?,
                 applied_joule_energy_j: number(applied_joule)?,
-                thermostat_joule_energy_j: number(dt * thermostat_joule)?,
+                thermostat_joule_energy_j: number(thermostat_joule)?,
                 source_mismatch_j: number(source_mismatch)?,
                 source_transfer_defect_j: number(transfer)?,
                 applied_electrical_defect_j: number(applied_electrical_defect)?,
                 endpoint_electrical_defect_j: number(endpoint_electrical_defect)?,
-                thermal_closure_j: step.record.closure_j,
+                thermal_closure_j: record.closure_j,
                 absolute_energy_defect_j: number(total_defect)?,
             };
             poll(gate)?;
-            return Ok(CaloricElectrothermalStep {
+            return Ok(CoupledStep {
                 thermal: step,
                 applied_electric: applied,
                 endpoint_electric: next,
                 report,
             });
         }
-        trial_energy = Cow::Owned(step.endpoint.specific_energy_j_kg);
+        trial_energy = step.into_energies().map(Cow::Owned);
         applied = next;
     }
     Err(ChtError::SolverNotConverged {
@@ -451,6 +551,21 @@ fn advance_with_heat(
         relative_residual: residual,
         tolerance: 1.0,
     })
+}
+
+fn stage_array<T, const STAGES: usize>(
+    mut value: impl FnMut(usize) -> Result<T, ChtError>,
+) -> Result<[T; STAGES], ChtError> {
+    let mut stages = Vec::new();
+    stages
+        .try_reserve_exact(STAGES)
+        .map_err(|_| refusal("stage field allocation refused"))?;
+    for stage in 0..STAGES {
+        stages.push(value(stage)?);
+    }
+    stages
+        .try_into()
+        .map_err(|_| refusal("native stage field shape is inconsistent"))
 }
 
 fn admit(

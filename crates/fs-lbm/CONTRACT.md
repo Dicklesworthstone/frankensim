@@ -4320,8 +4320,49 @@ remain explicit. Authored sinks must not duplicate the same radiation.
 Two regression groups exercise latent/contact/thermostat balance in both
 escape and radiosity modes, and nonlinear single-phase cooling against an
 independent physical quartic balance. Independent scalar references and pinned
-Rust formatting/parsing passed. Native Cargo verification is pending; these
-results do not claim experimental material or radiation validation.
+Rust formatting/parsing passed. Native Cargo test and single-threaded check
+attempts were killed while compiling the original asupersync dependency, before
+fs-lbm was reached. Native integration compilation and runtime execution remain
+unverified; these results do not claim experimental material or radiation validation.
+
+## Physical-stage spatial caloric electrothermal evolution
+
+`advance_caloric_tensor_electrothermal_sdirk2` and its radiating counterpart
+compose the same original current, contact and caloric heat owners at both
+physical SDIRK2 stages. Separate stage samples carry electrical drives,
+electrical contacts, authored thermal forcing and prescribed specific energies.
+The resistivity callback receives the original stage clock, cell, occupancy,
+specific energy and temperature. Both stage energy fields and refreshed local
+Joule powers must converge, including isothermal latent intervals.
+
+Every proposal calls the original two-stage heat owner from the same physical
+opening inventory. The native owner alone carries first-stage heat and
+prescribed-cell storage into the second row. Applied electrode energy, Joule
+heat, thermostat Joule heat and local source discrepancies use the positive
+weights dt*(1-gamma) and dt*gamma. Absolute local/stage defects cannot cancel;
+source-combination and native tableau/reduction rounding enter the existing
+joule allowance. Each stage's prescribed mask owns its thermostat channel.
+
+The shared coupling engine supports one or two stages. It retains both applied
+and refreshed electrical fields, reuses refreshed fields for the next proposal,
+and moves native energy vectors without copying complete heat solves. Two-stage
+current work is exactly 2*(passes+1) solves. Native thermal and radiation work
+limits span both stages per proposal; the outer pass bound limits proposals,
+while original source query budgets persist throughout the coupled interval.
+
+Radiation geometry is prepared once for the whole interval. Returned stage
+reports expose physical powers; their tableau-weighted integral is already in
+the boundary ledger. The transient record's radiated_w remains final power.
+Fixed mass/geometry, stationary DC and original gray-surface assumptions remain.
+Second-order accuracy applies to smooth, resolved forcing and fixed constraints;
+forcing discontinuities and sharp phase corners require interval splitting.
+
+Three added regression groups cover stage-dependent current/contact/source
+data with changing prescribed latent inventory and a late second-stage refusal,
+physical radiation at both stages against independent quartic equations, and
+spatial temporal refinement against an analytical exponential solution.
+Independent references and pinned parsing/formatting passed. The native Cargo
+attempts above did not reach these nine electrothermal regression groups.
 
 
 ## Grid-aligned orthotropic immersed solids in native convection

@@ -27,7 +27,11 @@ mod sdirk;
 mod transient;
 use local::LocalOperator;
 #[cfg(feature = "enthalpy-coupling")]
-pub(super) use nonlinear::advance_radiating_caloric_prepared;
+pub(super) use nonlinear::{
+    advance_radiating_caloric_prepared, advance_radiating_sdirk2_prepared,
+};
+#[cfg(feature = "enthalpy-coupling")]
+pub(super) use sdirk::stage_clock as caloric_stage_clock;
 pub use nonlinear::{
     RotatedSolidConductivity, RotatedSourceConductivity, TensorConductivityLaw, TensorNonlinearConfig,
     TensorNonlinearSdirk2Step, TensorNonlinearSolution, TensorNonlinearStep,

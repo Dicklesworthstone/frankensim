@@ -5,9 +5,11 @@ use fs_exec::CancelGate;
 use fs_lbm::conjugate::{
     CaloricElectrothermalConfig, ChtError, ConductivityTensor, ElectricSetup, ElectricalContact,
     Electrode, ElectrodeDrive, EnergyConfig, RadiationConfig, STEFAN_BOLTZMANN, SolidMaterial,
-    TensorCaloricLaw, TensorCaloricStorage, TensorNonlinearConfig, ThermalFace, ThermalSetup,
-    Voxel, VoxelDomain, advance_caloric_tensor_electrothermal,
+    TENSOR_SDIRK2_GAMMA, TensorCaloricLaw, TensorCaloricStorage, TensorNonlinearConfig,
+    ThermalFace, ThermalSetup, Voxel, VoxelDomain, advance_caloric_tensor_electrothermal,
     advance_caloric_tensor_electrothermal_radiating,
+    advance_caloric_tensor_electrothermal_radiating_sdirk2,
+    advance_caloric_tensor_electrothermal_sdirk2,
 };
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
 
@@ -134,6 +136,36 @@ fn exposed_bar() -> (
 
 fn exposed_bar_radiation_w(temperature_k: f64) -> f64 {
     0.04 * STEFAN_BOLTZMANN * (temperature_k.powi(4) - 250.0_f64.powi(4))
+}
+
+fn single_phase() -> EquilibriumEnthalpyPhaseCurve {
+    EquilibriumEnthalpyPhaseCurve::try_new(
+        ContentHash([0xE5; 32]),
+        [(-200.0, 200.0), (400.0, 500.0)]
+            .map(
+                |(specific_enthalpy_j_kg, temperature_k)| EnthalpyPhaseKnot {
+                    specific_enthalpy_j_kg,
+                    temperature_k,
+                    liquid_mass_fraction: 0.0,
+                    bulk_density_kg_m3: MASS,
+                },
+            )
+            .to_vec(),
+    )
+    .unwrap()
+}
+
+fn temperature_root(mut low: f64, mut high: f64, residual: impl Fn(f64) -> f64) -> f64 {
+    assert!(residual(low) <= 0.0 && residual(high) >= 0.0);
+    for _ in 0..80 {
+        let middle = low + 0.5 * (high - low);
+        if residual(middle) > 0.0 {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    low + 0.5 * (high - low)
 }
 
 #[test]
@@ -636,4 +668,311 @@ fn radiating_electrothermal_endpoint_matches_independent_quartic_balance() {
     assert!(report.iterations > 1);
     assert!(result.report.absolute_energy_defect_j <= controls().energy_tolerance_j);
     assert_eq!(previous, [0.0, 200.0, 0.0, 0.0, 0.0, 0.0]);
+}
+
+#[test]
+fn sdirk_stage_sources_and_changing_thermostats_keep_original_latent_storage() {
+    let (domain, solids, first_electric, k) = bar();
+    let mut second_electric = first_electric.clone();
+    second_electric.electrodes[0].drive = ElectrodeDrive::Current(3.0);
+    let first_contact = [ElectricalContact {
+        cells: [0, 1],
+        resistance_ohm_m2: 0.25,
+        heat_fraction_to_first: 0.25,
+    }];
+    let second_contact = [ElectricalContact {
+        cells: [0, 1],
+        resistance_ohm_m2: 0.5,
+        heat_fraction_to_first: 0.5,
+    }];
+    let mut first = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
+    first.fixed_temperature = vec![(1, 300.0)];
+    first.power_w = vec![2.0, 5.0, 1.0];
+    let mut second = first.clone();
+    second.fixed_temperature = vec![(0, 300.0)];
+    second.power_w = vec![3.0, 7.0, 4.0];
+    let saved = [first.clone(), second.clone()];
+    let law = phase(0.0);
+    let laws: [&dyn TensorCaloricLaw; 3] = [&law; 3];
+    let previous = [OPENING_H; 3];
+    let storage = TensorCaloricStorage {
+        laws: &laws,
+        reference_mass_kg: &[MASS; 3],
+        previous_specific_energy_j_kg: &previous,
+    };
+    let start = 3.0;
+    let a = TENSOR_SDIRK2_GAMMA * DURATION;
+    let b = (1.0 - TENSOR_SDIRK2_GAMMA) * DURATION;
+    let times = [start + a, start + DURATION];
+    let rho = |time: f64, energy: f64| 1.0 + RESISTIVITY_SLOPE * energy + 0.1 * (time - start);
+    // Stage one fixes the middle to h=40, so stage two must carry its
+    // actual storage rate, including the thermostat. The old electrical
+    // heat on that fixed middle must NOT become an extra carried source.
+    let expected_first = [OPENING_H + 3.0 * a / MASS, 40.0, OPENING_H + a / MASS];
+    let middle = (OPENING_H + b / a * (40.0 - OPENING_H) + a / MASS * (9.0 * 1.1 + 2.25 + 7.0))
+        / (1.0 - a * 9.0 * RESISTIVITY_SLOPE / MASS);
+    let expected_second = [60.0, middle, OPENING_H + b / MASS + a * 4.0 / MASS];
+    let mut calls = Vec::new();
+    let result = advance_caloric_tensor_electrothermal_sdirk2(
+        &domain,
+        &solids,
+        [&first_electric, &second_electric],
+        [&first_contact, &second_contact],
+        [&first, &second],
+        &[&k; 3],
+        storage,
+        [&[(1, 40.0)], &[(0, 60.0)]],
+        start,
+        DURATION,
+        &controls(),
+        |time, cell, occupancy, energy, temperature| {
+            assert_eq!(cell, 1);
+            assert_eq!(occupancy, Voxel::Solid(0));
+            assert_eq!(temperature, 300.0);
+            assert!(times.contains(&time));
+            calls.push((time, energy));
+            Ok(Some(rho(time, energy)))
+        },
+        &CancelGate::new(),
+    )
+    .unwrap();
+    assert_eq!(result.thermal.stage_time_s, times);
+    for (stage, expected) in result
+        .thermal
+        .stages
+        .iter()
+        .zip([expected_first, expected_second])
+    {
+        assert_eq!(stage.solution.solution.temperature, vec![300.0; 3]);
+        for (&actual, expected) in stage.specific_energy_j_kg.iter().zip(expected) {
+            near(actual, expected, 3e-8);
+        }
+    }
+    assert_eq!(result.report.current_solves, 2 * (result.report.passes + 1));
+    assert_eq!(calls.len(), result.report.current_solves);
+    assert!(
+        calls
+            .iter()
+            .any(|&(time, energy)| time == times[0] && energy == 40.0)
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|&(time, energy)| time == times[1] && energy > 70.0)
+    );
+    let bulk = [16.0 * rho(times[0], 40.0), 9.0 * rho(times[1], middle)];
+    let joule = b * (bulk[0] + 4.0) + a * (bulk[1] + 4.5);
+    let thermostat = b * (bulk[0] + 3.0) + a * 2.25;
+    let source = b * 4.0 + a * (bulk[1] + 2.25 + 7.0 + 4.0);
+    let stored = MASS * expected_second.iter().map(|h| h - OPENING_H).sum::<f64>();
+    near(result.report.applied_joule_energy_j, joule, 1e-6);
+    near(result.report.thermostat_joule_energy_j, thermostat, 1e-7);
+    near(result.thermal.record.source_j, source, 1e-7);
+    near(result.thermal.record.stored_energy_change_j, stored, 1e-7);
+    near(
+        result.thermal.record.boundary_outflow_j,
+        source - stored,
+        1e-7,
+    );
+    near(
+        result.report.applied_electrode_energy_j + b * 3.0 + a * 11.0,
+        stored + result.thermal.record.boundary_outflow_j + thermostat,
+        1e-6,
+    );
+    assert!(result.report.absolute_energy_defect_j <= controls().energy_tolerance_j);
+
+    // A source refusal at the refreshed SECOND stage must discard both stages,
+    // including the first stage's valid prescribed latent-energy transition.
+    let refused = advance_caloric_tensor_electrothermal_sdirk2(
+        &domain,
+        &solids,
+        [&first_electric, &second_electric],
+        [&first_contact, &second_contact],
+        [&first, &second],
+        &[&k; 3],
+        storage,
+        [&[(1, 40.0)], &[(0, 60.0)]],
+        start,
+        DURATION,
+        &controls(),
+        |time, _, _, energy, _| {
+            if time == times[1] && energy > OPENING_H {
+                return Err(ChtError::InvalidInput {
+                    field: "test.second_stage_source",
+                    reason: "original endpoint response unavailable".into(),
+                });
+            }
+            Ok(Some(rho(time, energy)))
+        },
+        &CancelGate::new(),
+    );
+    assert!(matches!(
+        refused,
+        Err(ChtError::InvalidInput {
+            field: "test.second_stage_source",
+            ..
+        })
+    ));
+    assert_eq!([first, second], saved);
+    assert_eq!(previous, [OPENING_H; 3]);
+}
+
+#[test]
+fn radiating_sdirk_integrates_each_physical_current_and_radiation_stage() {
+    let (domain, solids, first_electric, k, mut setup, radiation) = exposed_bar();
+    let mut second_electric = first_electric.clone();
+    second_electric.electrodes[0].drive = ElectrodeDrive::Current(3.0);
+    setup.fixed_temperature.extend([(0, 300.0), (2, 300.0)]);
+    setup.power_w = vec![0.0, 2.0, 0.0, 0.0, 0.0, 0.0];
+    let mut second = setup.clone();
+    second.power_w[1] = 7.0;
+    let law = single_phase();
+    let laws: [&dyn TensorCaloricLaw; 6] = [&law; 6];
+    let previous = [0.0, 200.0, 0.0, 0.0, 0.0, 0.0];
+    let prescribed = [(0, 0.0), (2, 0.0), (3, 0.0), (4, 0.0), (5, 0.0)];
+    let dt = 0.25;
+    let a = TENSOR_SDIRK2_GAMMA * dt;
+    let b = (1.0 - TENSOR_SDIRK2_GAMMA) * dt;
+    let outflow = |t: f64| 3.0 * (t - 300.0) + exposed_bar_radiation_w(t);
+    let bulk = |squared_current: f64, t: f64| squared_current * (1.0 + 0.002 * (t - 300.0));
+    let first_t = temperature_root(300.0, 400.0, |t| {
+        4.0 * (t - 400.0) - a * (bulk(16.0, t) + 2.0 - outflow(t))
+    });
+    let first_rate = bulk(16.0, first_t) + 2.0 - outflow(first_t);
+    let final_t = temperature_root(300.0, first_t, |t| {
+        4.0 * (t - 400.0) - b * first_rate - a * (bulk(9.0, t) + 7.0 - outflow(t))
+    });
+    let (result, reports) = advance_caloric_tensor_electrothermal_radiating_sdirk2(
+        &domain,
+        &solids,
+        [&first_electric, &second_electric],
+        [&[], &[]],
+        [&setup, &second],
+        &[&k; 6],
+        TensorCaloricStorage {
+            laws: &laws,
+            reference_mass_kg: &[MASS; 6],
+            previous_specific_energy_j_kg: &previous,
+        },
+        [&prescribed, &prescribed],
+        2.0,
+        dt,
+        &controls(),
+        &radiation,
+        |time, _, occupancy, energy, _| {
+            assert!(time == 2.0 + a || time == 2.0 + dt);
+            Ok(match occupancy {
+                Voxel::Fluid => None,
+                Voxel::Solid(_) => Some(1.0 + 0.001 * energy),
+            })
+        },
+        &CancelGate::new(),
+    )
+    .unwrap();
+    let expected_radiation = [first_t, final_t]
+        .map(|t| exposed_bar_radiation_w(t) + 2.0 * exposed_bar_radiation_w(300.0));
+    for stage in 0..2 {
+        near(
+            result.thermal.stages[stage].solution.solution.temperature[1],
+            [first_t, final_t][stage],
+            1e-7,
+        );
+        near(reports[stage].radiated_w, expected_radiation[stage], 1e-7);
+        assert!(reports[stage].relative_power_defect <= radiation.tolerance);
+        assert_eq!(reports[stage].exposed_faces, 3);
+    }
+    let electrode = b * bulk(16.0, first_t) + a * bulk(9.0, final_t);
+    let authored = b * 2.0 + a * 7.0;
+    let boundary = b * outflow(first_t) + a * outflow(final_t);
+    near(result.report.applied_electrode_energy_j, electrode, 1e-6);
+    near(result.report.applied_joule_energy_j, electrode, 1e-6);
+    near(result.thermal.record.source_j, electrode + authored, 1e-6);
+    near(
+        result.thermal.record.stored_energy_change_j,
+        4.0 * (final_t - 400.0),
+        5e-7,
+    );
+    near(result.thermal.record.boundary_outflow_j, boundary, 5e-7);
+    near(
+        result.thermal.record.radiated_w,
+        expected_radiation[1],
+        1e-7,
+    );
+    near(
+        b * reports[0].radiated_w + a * reports[1].radiated_w,
+        b * expected_radiation[0] + a * expected_radiation[1],
+        1e-7,
+    );
+    assert!(
+        (b * reports[0].radiated_w + a * reports[1].radiated_w
+            - dt * result.thermal.record.radiated_w)
+            .abs()
+            > 0.1
+    );
+    assert!(result.report.absolute_energy_defect_j <= controls().energy_tolerance_j);
+    assert_eq!(previous, [0.0, 200.0, 0.0, 0.0, 0.0, 0.0]);
+}
+
+#[test]
+fn spatial_electrothermal_sdirk_has_second_order_time_accuracy() {
+    let (domain, solids, electric, k) = bar();
+    let law = single_phase();
+    let laws: [&dyn TensorCaloricLaw; 3] = [&law; 3];
+    let setup = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
+    // With constant rho=1, the middle receives 16 W. With M=2 and Cp=2,
+    // d=h_middle-h_end obeys d'=8-(3/4)d and the mean obeys mean'=8/3.
+    let difference = (32.0 / 3.0) * (1.0 - (-0.75_f64).exp());
+    let expected = [
+        8.0 / 3.0 - difference / 3.0,
+        8.0 / 3.0 + 2.0 * difference / 3.0,
+        8.0 / 3.0 - difference / 3.0,
+    ];
+    let mut errors = Vec::new();
+    for count in [4, 8, 16] {
+        let dt = 1.0 / f64::from(count);
+        let mut energy = vec![0.0; 3];
+        let mut electrode_j = 0.0;
+        for step in 0..count {
+            let result = advance_caloric_tensor_electrothermal_sdirk2(
+                &domain,
+                &solids,
+                [&electric, &electric],
+                [&[], &[]],
+                [&setup, &setup],
+                &[&k; 3],
+                TensorCaloricStorage {
+                    laws: &laws,
+                    reference_mass_kg: &[MASS; 3],
+                    previous_specific_energy_j_kg: &energy,
+                },
+                [&[], &[]],
+                f64::from(step) * dt,
+                dt,
+                &controls(),
+                |_, _, _, _, _| Ok(Some(1.0)),
+                &CancelGate::new(),
+            )
+            .unwrap();
+            electrode_j += result.report.applied_electrode_energy_j;
+            let [_, endpoint] = result.thermal.stages;
+            energy = endpoint.specific_energy_j_kg;
+        }
+        near(electrode_j, 16.0, 1e-8);
+        near(MASS * energy.iter().sum::<f64>(), 16.0, 1e-7);
+        errors.push(
+            energy
+                .iter()
+                .zip(expected)
+                .map(|(actual, exact)| (actual - exact).abs())
+                .fold(0.0_f64, f64::max),
+        );
+    }
+    assert!(errors[0] > 1e-4);
+    for pair in errors.windows(2) {
+        let ratio = pair[0] / pair[1];
+        assert!(
+            (3.8..4.3).contains(&ratio),
+            "second-order refinement ratio {ratio}"
+        );
+    }
 }

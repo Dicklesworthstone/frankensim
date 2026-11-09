@@ -11,8 +11,11 @@ pub mod interfaces;
 mod caloric;
 #[cfg(feature = "enthalpy-coupling")]
 pub use caloric::{
-    CaloricElectrothermalConfig, CaloricElectrothermalReport, CaloricElectrothermalStep,
+    CaloricElectrothermalConfig, CaloricElectrothermalReport, CaloricElectrothermalSdirk2Step,
+    CaloricElectrothermalStep,
     advance_caloric_tensor_electrothermal, advance_caloric_tensor_electrothermal_radiating,
+    advance_caloric_tensor_electrothermal_radiating_sdirk2,
+    advance_caloric_tensor_electrothermal_sdirk2,
 };
 
 use fs_exec::CancelGate;

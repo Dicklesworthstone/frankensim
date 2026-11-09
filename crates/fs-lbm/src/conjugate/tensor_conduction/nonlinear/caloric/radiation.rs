@@ -220,7 +220,7 @@ pub fn advance_caloric_tensor_conduction_radiating_sdirk2(
 /// Reuse immutable ray geometry across native attempts without changing their
 /// physical stage, source or work ownership.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub(super) fn advance_radiating_sdirk2_prepared(
+pub(in crate::conjugate) fn advance_radiating_sdirk2_prepared(
     domain: &VoxelDomain,
     solids: &[SolidMaterial],
     setups: [&ThermalSetup; 2],

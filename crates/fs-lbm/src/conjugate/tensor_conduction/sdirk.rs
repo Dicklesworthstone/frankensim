@@ -341,7 +341,7 @@ fn storage(cells: usize) -> Result<Vec<f64>, ChtError> {
 
 // Pure temporal arithmetic shared by the production step and direct numerical
 // tests. Spatial heat remains owned by the native face solve.
-pub(super) fn stage_clock(start: f64, dt: f64) -> Option<(f64, [f64; 2])> {
+pub(in crate::conjugate) fn stage_clock(start: f64, dt: f64) -> Option<(f64, [f64; 2])> {
     let a = TENSOR_SDIRK2_GAMMA * dt;
     let times = [start + a, start + dt];
     (start.is_finite()
