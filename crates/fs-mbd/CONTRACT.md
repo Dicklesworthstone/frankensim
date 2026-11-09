@@ -9389,3 +9389,11 @@ fresh-contact recoil after reattachment and atomic late-refusal/retry behavior.
 The scope is prescribed indentation followed by unforced rolling at held poses
 and frame; normal body motion, reciprocal area relaxation, heat destinations
 and finite rotation remain with their separate physical owners.
+
+## Native bonded torsion through prescribed normal loading
+
+`tangential_friction::adhesive::torsion::normal` changes the original attached JKR radius at fixed retained twist, then runs the original native midpoint torsion solve with actual full body inertias and held COM forces/body-frame torques. Normal JKR work, signed torsional-stiffness work, applied body work, recoverable twist and calibrated plastic loss remain distinct. Original geometry, material/calibration identity, mode-III applicability, hidden-turn, momentum, bounded-effort and mechanical work gates remain active. Original incremental work primitives drive the combined balance; independent absolute-store observations receive only an explicit roundoff allowance. Opposite stage defects cannot cancel.
+
+`prepare_rigid_adhesive_torsion_with_normal_update` stages the original source, retained native state and both bodies. The corresponding apply operation publishes all owners only after every fallible check and the final cancellation poll. This is prescribed normal loading at held poses/frame with homogeneous bonded twist; it supplies no normal impulse, detachment, stress-free annular recruitment, reciprocal Griffith equilibrium or thermal destination.
+
+Three added G1/G3/G4 integration groups cover analytic loaded-spring recoil at tensile/compressive targets with actual anisotropic inertia, independent native kinetic/impulse checks, exact replay of unchanged-area wrench-driven motion, and atomic cancellation/source/geometry/wrench refusal with deterministic retry. Formatting and recursive syntax/module resolution passed; these integration tests were not type-checked or executed because DSR/RCH were unavailable and the existing full dependency build had exhausted shared memory/disk resources. The seven underlying production torsion leaf tests passed.

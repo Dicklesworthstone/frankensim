@@ -2,6 +2,9 @@
 #[path = "../../fs-contact/tests/source_point/common.rs"]
 mod common;
 
+#[path = "adhesive_torsion/normal.rs"]
+mod normal;
+
 use core::f64::consts::PI;
 use fs_contact::normal_patch::adhesive::torsion::{JkrTorsionControls, SourceJkrTorsionContact};
 use fs_contact::normal_patch::adhesive::{JkrEnvelope, SourceJkrSphereContact};

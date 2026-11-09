@@ -15,6 +15,9 @@
 //! refuse unless the guarded scalar-mode energy excludes hidden yield.
 //! Held COM forces and body-frame torques drive the same native solve and
 //! contribute their actual work. A driven reversal requires interval refinement.
+//! [`normal`] continues a loaded spring through a prescribed normal-area change.
+
+pub mod normal;
 
 use super::super::hertz::RigidHertzError;
 use super::super::{RigidContactBinding, RigidFrictionError, poll, vector};
