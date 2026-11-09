@@ -14,6 +14,9 @@
 //! cells represent a supplied thermal network, not a geometric dual mesh;
 //! transport geometry and its refinement remain the thermal owner's responsibility.
 
+/// Original indentation hardness admitted with the coupled native candidate.
+pub mod hardness;
+
 use std::collections::BTreeSet;
 use std::sync::Arc;
 

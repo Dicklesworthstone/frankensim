@@ -8398,6 +8398,35 @@ cover force-held self-heating/softening/permanent set, timed relaxation,
 nonuniform warped B-bar point heat/conduction and consistent inertia with atomic
 late refusal. Native Cargo execution remains a separate verification requirement.
 
+### Hardness on the actual accepted Hex8 mechanics/heat state
+
+`ThermoplasticHexSolid::bind_hardness_field` pins one exact original
+indentation selection per element and admits all eight native quadrature
+points. `HexThermoplasticHardnessBinding::at_accepted` observes each point's
+actual caloric temperature and accumulated plastic strain directly from the
+private accepted coupled owner. Original mesh slices, formulation, ordered
+shared material families, cell identities, clocks, reference geometry/mass,
+caloric law objects and exact accepted enthalpies remain binding. A different
+family allocation or an edited thermal inventory cannot substitute for these
+owners.
+
+`check_candidate` consumes the existing converged
+`HexThermoplasticCandidate` and returns that unchanged candidate together
+with the complete hardness field only after every endpoint succeeds. It does
+not reconstruct a thermal step, repeat a return map, rerun transport, clone
+native history/energy, or alter the original heat, work, inertia, observer and
+feedback reports. A late unsupported hardness point returns no advanced owner.
+The reusable binding shares the original family allocation across adopted
+successors.
+
+Coverage is checked at actual accepted endpoints; it does not establish
+unobserved path coverage, uniform material hardness or empirical qualification.
+Standard/B-bar heated loading and reversal regressions specify heterogeneous
+point temperature/alpha, pinned test identity, unchanged native accounts and
+combined energy balance. Additional cases place a support boundary before the
+last point and refuse changed families, geometry/mass and stale thermal clocks
+without partial adoption.
+
 ## Loaded physical-electrode AC circuits on the finite caloric residual
 
 `circuit_enthalpy::spatial_induction::harmonic::circuit::heat_assembly_candidate`

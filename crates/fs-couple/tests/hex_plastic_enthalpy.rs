@@ -1,6 +1,9 @@
 //! G1/G3 coupled Hex8 deformation, heat and retained history regressions.
 //! Values are authored physical fixtures, not measured material calibration.
 
+#[path = "hex_plastic_enthalpy/hardness.rs"]
+mod hardness;
+
 use std::collections::BTreeMap;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
