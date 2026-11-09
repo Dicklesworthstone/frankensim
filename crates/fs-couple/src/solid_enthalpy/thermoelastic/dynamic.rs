@@ -181,41 +181,23 @@ impl<'s, 'm> DynamicThermoelasticSolid<'s, 'm> {
                 let next = &response.stress.elements()[i];
                 let a = self.potentials[i];
                 let b = potentials[i];
-                let free0 = self.state.strains[i].free_strain_mandel();
-                let free1 = state.strains[i].free_strain_mandel();
-                let sigma0 = old.stress_mandel_pa();
-                let sigma1 = next.stress_mandel_pa();
-                let e0 = old.elastic_strain_mandel();
-                let e1 = next.elastic_strain_mandel();
-                let volume = bound.reference_volume_m3;
-                let mechanical_work_j = finite(0.5 * volume * (0..6).map(|k|
-                    (sigma0[k] + sigma1[k]) * (e1[k] + free1[k] - e0[k] - free0[k])).sum::<f64>())?;
-                let expansion_work_j = finite(-0.5 * volume * (0..6).map(|k|
-                    (sigma0[k] + sigma1[k]) * (free1[k] - free0[k])).sum::<f64>())?;
-                let c0 = self.state.materials[i].stiffness_mandel_pa();
-                let c1 = state.materials[i].stiffness_mandel_pa();
-                let stiffness_work_j = finite(0.5 * volume * (0..6).map(|row|
-                    e0[row] * (0..6).map(|col|
-                        (c1[row][col] - c0[row][col]) * e1[col]).sum::<f64>()).sum::<f64>())?;
-                let free_energy_residual_j = finite(b.free_energy_j - a.free_energy_j
-                    - mechanical_work_j - expansion_work_j - stiffness_work_j)?;
-                let change = finite(b.internal_energy_j - a.internal_energy_j)?;
-                let reversible_heat_j = finite(mechanical_work_j - change)?;
                 let temperature_k = [
                     self.state.samples[i].phase.temperature_k(), state.samples[i].phase.temperature_k()];
-                let potential_residual = finite(reversible_heat_j + expansion_work_j + stiffness_work_j
-                    + temperature_k[1] * b.entropy_j_k - temperature_k[0] * a.entropy_j_k)?;
-                if free_energy_residual_j.abs() > config.energy_tolerance_j
-                    || potential_residual.abs() > config.energy_tolerance_j {
-                    return Err(ThermoelasticFeedbackError::Invalid("dynamic source potential and native stress/material work disagree"));
-                }
-                stress_work = stress_work + Dd::from_f64(mechanical_work_j);
-                internal_change = internal_change + Dd::from_f64(change);
-                reversible_heat = reversible_heat + Dd::from_f64(reversible_heat_j);
+                let exchange = self.laws[i].exchange(
+                    temperature_k[0], *old.total_strain_mandel(),
+                    temperature_k[1], *next.total_strain_mandel(), bound.reference_volume_m3)?;
+                // Keep the independently checked native/source point states,
+                // but never subtract their rounded absolute energies for heat.
+                stress_work = stress_work + exchange.retained_mechanical_work_j();
+                internal_change = internal_change + exchange.retained_internal_energy_change_j();
+                reversible_heat = reversible_heat + exchange.retained_reversible_heat_j();
                 cells.push(ThermoelasticCellStep {
                     cell: bound.source.cell, temperature_k, potentials: [a, b],
-                    mechanical_work_j, expansion_work_j, stiffness_work_j,
-                    reversible_heat_j, free_energy_residual_j,
+                    mechanical_work_j: exchange.mechanical_work_j,
+                    expansion_work_j: exchange.expansion_work_j,
+                    stiffness_work_j: exchange.stiffness_work_j,
+                    reversible_heat_j: exchange.reversible_heat_j,
+                    free_energy_residual_j: exchange.free_energy_balance_residual_j,
                 });
             }
             // Preserve the original mass increment through the independent
@@ -231,17 +213,19 @@ impl<'s, 'm> DynamicThermoelasticSolid<'s, 'm> {
             if mechanical_residual_j.abs() > config.energy_tolerance_j {
                 return Err(ThermoelasticFeedbackError::Invalid("native stress work, kinetic energy, damping and applied work disagree"));
             }
-            let applied_heat_j = finite(applied.iter().sum())?;
+            let applied_heat = applied.iter().fold(Dd::ZERO, |sum, &q| sum + Dd::from_f64(q));
+            let applied_heat_j = finite(applied_heat.to_f64())?;
             let heat_defect_j = finite(applied.iter().zip(&cells)
                 .map(|(used, cell)| (used - cell.reversible_heat_j).abs()).sum())?;
-            let external_heat_j = finite(audit.external_heat_j - applied_heat_j)?;
+            let external_heat = Dd::from_f64(audit.external_heat_j) - applied_heat;
+            let external_heat_j = finite(external_heat.to_f64())?;
             let thermal_residual_j = finite((Dd::from_f64(audit.stored_energy_change_j)
-                - Dd::from_f64(audit.incoming_energy_j) - Dd::from_f64(external_heat_j)
+                - Dd::from_f64(audit.incoming_energy_j) - external_heat
                 - reversible_heat).to_f64())?;
             let combined_residual_j = finite((kinetic_change + internal_change
                 + Dd::from_f64(audit.stored_energy_change_j) + damping_loss
                 - Dd::from_f64(audit.incoming_energy_j) - mechanical_work
-                - Dd::from_f64(external_heat_j)).to_f64())?;
+                - external_heat).to_f64())?;
             defects = [heat_defect_j, combined_residual_j];
             if heat_defect_j <= config.heat_tolerance_j
                 && thermal_residual_j.abs() <= config.energy_tolerance_j
@@ -291,8 +275,7 @@ fn dynamic_potentials<E>(
                 return Err(ThermoelasticFeedbackError::Invalid("native integrated expansion differs from the dynamic source potential"));
             }
         }
-        let strain = core::array::from_fn(|k| native.elastic_strain_mandel()[k] + free[k]);
-        let potential = source.state(strain, sample.reference_volume_m3)?;
+        let potential = source.state(*native.total_strain_mandel(), sample.reference_volume_m3)?;
         if (potential.free_energy_j - native.elastic_energy_j()).abs() > config.energy_tolerance_j
             || potential.stress_mandel_pa.iter().zip(native.stress_mandel_pa())
                 .any(|(a, b)| (a - b).abs() > config.stress_tolerance_pa) {

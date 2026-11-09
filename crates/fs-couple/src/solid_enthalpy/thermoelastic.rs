@@ -31,6 +31,7 @@ pub mod heat;
 
 use super::*;
 use std::convert::Infallible;
+use fs_math::dd::Dd;
 use fs_material::elastic::thermal::{
     AffineThermoelastic, ThermoelasticSymmetry, ThermoelasticError, ThermoelasticState,
 };
@@ -207,56 +208,45 @@ impl<'s,'m> ThermoelasticSolid<'s,'m> {
         let equilibrium=state.solve(loads,&self.fixed_dofs,self.solve,cx)?;
         let potentials=potentials(&state,&equilibrium,&self.laws,config,cx)?;
         let mut cells=Vec::with_capacity(self.source.cells.len());
-        let mut work=0.0; let mut internal_change=0.0; let mut heat=0.0;
+        let mut work=Dd::ZERO; let mut internal_change=Dd::ZERO; let mut heat=Dd::ZERO;
         for (i,bound) in self.source.cells.iter().enumerate() {
             check(cx)?;
             let old=&self.equilibrium.solution.stress.elements()[i];
             let next=&equilibrium.solution.stress.elements()[i];
             let a=&self.potentials[i]; let b=&potentials[i];
-            let free0=self.state.strains[i].free_strain_mandel();
-            let free1=state.strains[i].free_strain_mandel();
-            let sigma0=old.stress_mandel_pa(); let sigma1=next.stress_mandel_pa();
-            let e0=old.elastic_strain_mandel(); let e1=next.elastic_strain_mandel();
-            let volume=bound.reference_volume_m3;
-            let mechanical_work_j=finite(0.5*volume*(0..6).map(|k|
-                (sigma0[k]+sigma1[k])*(e1[k]+free1[k]-e0[k]-free0[k])).sum::<f64>())?;
-            let expansion_work_j=finite(-0.5*volume*(0..6).map(|k|
-                (sigma0[k]+sigma1[k])*(free1[k]-free0[k])).sum::<f64>())?;
-            let c0=self.state.materials[i].stiffness_mandel_pa();
-            let c1=state.materials[i].stiffness_mandel_pa();
-            let stiffness_work_j=finite(0.5*volume*(0..6).map(|row|
-                e0[row]*(0..6).map(|col|(c1[row][col]-c0[row][col])*e1[col]).sum::<f64>()).sum::<f64>())?;
-            let free_energy_residual_j=finite(b.free_energy_j-a.free_energy_j
-                -mechanical_work_j-expansion_work_j-stiffness_work_j)?;
-            let internal_energy_change_j=finite(b.internal_energy_j-a.internal_energy_j)?;
-            let reversible_heat_j=finite(mechanical_work_j-internal_energy_change_j)?;
             let temperature_k=[self.state.samples[i].phase.temperature_k(),state.samples[i].phase.temperature_k()];
-            let potential_residual_j=finite(reversible_heat_j+expansion_work_j+stiffness_work_j
-                +temperature_k[1]*b.entropy_j_k-temperature_k[0]*a.entropy_j_k)?;
-            if free_energy_residual_j.abs()>config.energy_tolerance_j
-                || potential_residual_j.abs()>config.energy_tolerance_j {
-                return Err(ThermoelasticFeedbackError::Invalid("native stress/material work does not close the source thermodynamic potential"));
-            }
-            work=finite(work+mechanical_work_j)?;
-            heat=finite(heat+reversible_heat_j)?;
-            internal_change=finite(internal_change+internal_energy_change_j)?;
+            let exchange=self.laws[i].exchange(
+                temperature_k[0],*old.total_strain_mandel(),
+                temperature_k[1],*next.total_strain_mandel(),bound.reference_volume_m3)?;
+            // Native/source point agreement was checked above. Only original
+            // polarized increments enter work and heat; rounded absolute Psi
+            // subtraction is retained as a diagnostic, never an energy gate.
+            work=work+exchange.retained_mechanical_work_j();
+            heat=heat+exchange.retained_reversible_heat_j();
+            internal_change=internal_change+exchange.retained_internal_energy_change_j();
             cells.push(ThermoelasticCellStep {cell:bound.source.cell,temperature_k,
-                potentials:[*a,*b],mechanical_work_j,expansion_work_j,stiffness_work_j,
-                reversible_heat_j,free_energy_residual_j});
+                potentials:[*a,*b],mechanical_work_j:exchange.mechanical_work_j,
+                expansion_work_j:exchange.expansion_work_j,stiffness_work_j:exchange.stiffness_work_j,
+                reversible_heat_j:exchange.reversible_heat_j,
+                free_energy_residual_j:exchange.free_energy_balance_residual_j});
         }
         let before=self.equilibrium.solution.displacement.displacement_m();
         let after=equilibrium.solution.displacement.displacement_m();
-        let mut external_work_j=0.0;
+        let mut external_work=Dd::ZERO;
         for &(dof,force) in self.nodal_forces_n.iter().chain(loads.nodal_forces_n()) {
             check(cx)?;
-            external_work_j=finite(external_work_j+0.5*force*(after[dof/3][dof%3]-before[dof/3][dof%3]))?;
+            external_work=external_work+Dd::from_f64(0.5)*Dd::from_f64(force)
+                *(Dd::from_f64(after[dof/3][dof%3])-Dd::from_f64(before[dof/3][dof%3]));
         }
-        let mechanical_residual_j=finite(work-external_work_j)?;
+        let external_work_j=finite(external_work.to_f64())?;
+        let mechanical_residual_j=finite((work-external_work).to_f64())?;
         if mechanical_residual_j.abs()>config.energy_tolerance_j {
             return Err(ThermoelasticFeedbackError::Invalid("actual averaged nodal work disagrees with native element stress work"));
         }
         Ok(MechanicalProposal {state,equilibrium,potentials,cells,external_work_j,
-            internal_energy_change_j:internal_change,reversible_heat_j:heat,mechanical_residual_j})
+            internal_energy_change_j:finite(internal_change.to_f64())?,
+            reversible_heat_j:finite(heat.to_f64())?,mechanical_residual_j,
+            retained_internal_change:internal_change,retained_external_work:external_work,retained_heat:heat})
     }
 
     /// Advance native equilibrium and the same spatial thermal/observer history
@@ -295,14 +285,16 @@ impl<'s,'m> ThermoelasticSolid<'s,'m> {
                 ||cx.checkpoint().map_err(|_|DepositionError::Cancelled))?;
             let state=self.admit_thermal(&thermal_next,false,cx)?;
             let actual=self.mechanics(state,loads,config,cx)?;
-            let applied_heat_j=finite(applied.iter().sum())?;
+            let applied_heat=applied.iter().fold(Dd::ZERO,|sum,&q|sum+Dd::from_f64(q));
+            let applied_heat_j=finite(applied_heat.to_f64())?;
             let heat_defect_j=finite(applied.iter().zip(&actual.cells)
                 .map(|(used,cell)|(used-cell.reversible_heat_j).abs()).sum())?;
-            let external_heat_j=finite(audit.external_heat_j-applied_heat_j)?;
-            let thermal_residual_j=finite(audit.stored_energy_change_j-audit.incoming_energy_j
-                -external_heat_j-actual.reversible_heat_j)?;
-            let combined_residual_j=finite(actual.internal_energy_change_j+audit.stored_energy_change_j
-                -audit.incoming_energy_j-actual.external_work_j-external_heat_j)?;
+            let external_heat=Dd::from_f64(audit.external_heat_j)-applied_heat;
+            let external_heat_j=finite(external_heat.to_f64())?;
+            let thermal_residual_j=finite((Dd::from_f64(audit.stored_energy_change_j)
+                -Dd::from_f64(audit.incoming_energy_j)-external_heat-actual.retained_heat).to_f64())?;
+            let combined_residual_j=finite((actual.retained_internal_change+Dd::from_f64(audit.stored_energy_change_j)
+                -Dd::from_f64(audit.incoming_energy_j)-actual.retained_external_work-external_heat).to_f64())?;
             defects=[heat_defect_j,combined_residual_j];
             if heat_defect_j<=config.heat_tolerance_j
                 && thermal_residual_j.abs()<=config.energy_tolerance_j
@@ -346,8 +338,7 @@ fn potentials<E>(state:&SolidEnthalpyState<'_>,equilibrium:&SolidEquilibrium,
                 return Err(ThermoelasticFeedbackError::Invalid("native integrated expansion differs from the admitted potential"));
             }
         }
-        let strain=core::array::from_fn(|k|native.elastic_strain_mandel()[k]+free[k]);
-        let response=source.state(strain,sample.reference_volume_m3)?;
+        let response=source.state(*native.total_strain_mandel(),sample.reference_volume_m3)?;
         if (response.free_energy_j-native.elastic_energy_j()).abs()>config.energy_tolerance_j
             || response.stress_mandel_pa.iter().zip(native.stress_mandel_pa())
                 .any(|(a,b)|(a-b).abs()>config.stress_tolerance_pa) {
@@ -362,6 +353,7 @@ struct MechanicalProposal<'m> {
     state:SolidEnthalpyState<'m>,equilibrium:SolidEquilibrium,potentials:Vec<ThermoelasticState>,
     cells:Vec<ThermoelasticCellStep>,external_work_j:f64,internal_energy_change_j:f64,
     reversible_heat_j:f64,mechanical_residual_j:f64,
+    retained_internal_change:Dd,retained_external_work:Dd,retained_heat:Dd,
 }
 #[derive(Clone,Debug,PartialEq)]
 pub struct ThermoelasticCellStep {
@@ -372,6 +364,7 @@ pub struct ThermoelasticCellStep {
     pub expansion_work_j:f64,
     pub stiffness_work_j:f64,
     pub reversible_heat_j:f64,
+    /// Rounded endpoint Psi difference minus the stable source increment; diagnostic only.
     pub free_energy_residual_j:f64,
 }
 #[derive(Debug)]

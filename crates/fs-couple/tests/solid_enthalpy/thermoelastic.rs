@@ -431,3 +431,6 @@ mod orthotropic;
 
 #[path = "thermoelastic/bulk_shear.rs"]
 mod bulk_shear;
+
+#[path = "thermoelastic/precision.rs"]
+mod precision;
