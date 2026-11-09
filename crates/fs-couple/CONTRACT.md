@@ -485,6 +485,47 @@ reservoir owners and retained source composition. The wall child exercises
 source-backed temperature-dependent walls, independent frozen-source heat and
 field reconstruction, changed-wall work/cache behavior, and refusal rollback.
 
+#### Coherent physical excitation during temperature feedback
+
+`InteriorTemperatureAcoustics` retains explicit `boundary_drives` and
+`traction_drives` alongside its existing linear velocity traces. An
+`InteriorTemperatureBoundaryDrive` supplies the original dimensionless
+six-node quadratic trace, explicit source quadrature and complex peak inward
+velocity [m/s]. An `InteriorTemperatureTractionDrive` supplies the original
+global hierarchical `WallTractionProfile` and complex peak outward pressure
+[Pa]. All drives share the native exp(+i omega t) convention and preserve
+their signed shape and relative phase. Traction drives wall momentum;
+the complete pressure, displacement, velocity and Maxwell memory remain solved.
+
+Each changed fluid/wall temperature creates one native equivalent-fluid
+preparation. Its original quadratic-source and wall-traction owners prepare
+against that exact factor, then `solve_with_sources` combines every drive
+before one coherent full-field solve. An old prepared source is never reused
+with new constitutive coefficients. The authored shapes and amplitudes stay
+fixed; unchanged temperatures reuse the existing immutable field/heat snapshot
+without source projection or material evaluation. There is no factorization
+per drive, substitute source equation or prescribed mechanical velocity.
+
+Existing source-count limits and finite amplitudes are admitted before material
+evaluation. Native source quadrature, original wall coordinates, boundary
+support, pressure-release conflicts and cancellation retain their existing
+refusals. Fluid and wall material refresh, physical fields, thermal cells and
+heat receipts still publish through the original common transaction.
+
+The field retains signed boundary-source and applied-traction work separately.
+The thermal timeline receives only the existing positive volume-loss and
+wall-resistance/relaxation forms; source work, internal pressure exchange,
+Robin loss and numerical residuals are not added as another heat input.
+Accepted-start power and actual native substep duration determine deposited
+joules. These remain frozen harmonic source drives within quasisteady thermal
+feedback, without acoustic startup, external-actuator dynamics, transient
+mechanical-memory transfer or parametric stored-energy work.
+
+`porous_heating/interior/tests/feedback/sources.rs` defines focused original
+field/work comparisons, physical heat accounting, material refresh and source
+admission/rollback cases. Native parsing, formatting, compilation and execution
+were unavailable for this extension; source review alone is not runtime proof.
+
 ## Optional local material tangents in finite-solid motion
 
 `FiniteSolidBody::with_tangent_storage` selects ordinary midpoint Newton tangent

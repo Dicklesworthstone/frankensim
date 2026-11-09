@@ -20,6 +20,10 @@
 //! require their own owners. Original material walls can refresh their stiffness,
 //! viscosity and complete relaxation spectrum at their own native temperatures.
 //! Authored mechanical coefficients and Robin data otherwise remain held.
+//! Original quadratic boundary motion and applied mechanical traction remain
+//! coherent fixed drives as the fluid and wall materials refresh. Their signed
+//! source work is observed separately; only native positive physical losses
+//! feed the existing thermal receivers.
 
 use super::heat::{InteriorHeatAccount, InteriorHeatState};
 use super::{
@@ -32,11 +36,14 @@ use crate::cavity_modal::interior::heterogeneous::porous::AcousticVolumeRegionSt
 use crate::porous_heating::PorousHeatingError;
 use crate::porous_heating::feedback::{IsobaricPorousGas, PorousTemperatureFluid, fluid};
 use fs_feec::acoustics::helmholtz::HelmholtzFe;
-use fs_feec::acoustics::helmholtz::heterogeneous::time::mechanical::MechanicalBoundary;
+use fs_feec::acoustics::helmholtz::heterogeneous::time::mechanical::{
+    MechanicalBoundary, traction::WallTractionProfile,
+};
 use fs_feec::acoustics::helmholtz::heterogeneous::{
     BoundaryAdmittance, EquivalentFluidControls, EquivalentFluidPressureField, HeterogeneousError,
-    PreparedEquivalentFluid, VelocityTrace,
+    MAX_BOUNDARY_SOURCES, MAX_VOLUME_SOURCES, PreparedEquivalentFluid, VelocityTrace,
 };
+use fs_math::c64::C64;
 use fs_material::MaterialError;
 use fs_material::porous::PorousFluidLaw;
 use fs_thermal::enthalpy::{
@@ -57,7 +64,32 @@ pub struct TemperatureInteriorCell<'t, 'm> {
     pub porous: Option<&'m PorousFluidLaw>,
 }
 
-/// Fixed frequency, boundary geometry and coherent physical velocity drive.
+/// One prescribed quadratic inward-normal boundary shape.
+///
+/// Each original triangle carries dimensionless values in native order:
+/// corner0, corner1, corner2, edge01, edge12, edge20. A complex peak velocity
+/// [m/s] on the exp(+i omega t) clock multiplies the complete signed projection.
+/// No area normalization or replacement by three corner values is performed.
+#[derive(Clone, Debug)]
+pub struct InteriorTemperatureBoundaryDrive {
+    pub traces: Vec<([u32; 3], [f64; 6])>,
+    /// Original boundary-source quadrature, from pressure order + 2 through 16.
+    pub quadrature_order: usize,
+    pub amplitude_m_s: C64,
+}
+
+/// Applied mechanical pressure on the original wall's full trace space.
+///
+/// The native profile uses original global hierarchical coordinates. A complex
+/// peak pressure [Pa] acts outward from the fluid and drives wall momentum;
+/// wall motion, its fluid reaction and every memory coordinate remain solved.
+#[derive(Clone, Debug)]
+pub struct InteriorTemperatureTractionDrive {
+    pub profile: WallTractionProfile,
+    pub amplitude_pa: C64,
+}
+
+/// Fixed frequency, boundary geometry and coherent physical source drives.
 ///
 /// All original pressure and mechanical coordinates remain in the solve.
 /// `try_new` holds the authored mechanical coefficients. The material-wall
@@ -67,6 +99,10 @@ pub struct TemperatureInteriorCell<'t, 'm> {
 pub struct InteriorTemperatureAcoustics {
     pub frequency_hz: f64,
     pub inward_velocity: Vec<VelocityTrace>,
+    /// Original quadratic boundary motion, simultaneous with the linear traces.
+    pub boundary_drives: Vec<InteriorTemperatureBoundaryDrive>,
+    /// Independent applied wall pressures, simultaneous with all fluid drives.
+    pub traction_drives: Vec<InteriorTemperatureTractionDrive>,
     pub admittances: Vec<BoundaryAdmittance>,
     pub mechanical_walls: Vec<MechanicalBoundary>,
     pub pressure_release_faces: Vec<[u32; 3]>,
@@ -159,6 +195,49 @@ fn admit_count(elements: usize, walls: usize, maximum: usize) -> Result<(), Inte
             .is_none_or(|total| total > maximum)
     {
         return Err(DepositionError::Budget("interior acoustic feedback cells").into());
+    }
+    Ok(())
+}
+
+fn admit_drives(
+    problem: &InteriorTemperatureAcoustics,
+    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+) -> Result<(), InteriorFeedbackError> {
+    for (requested, maximum, what) in [
+        (
+            problem.boundary_drives.len(),
+            MAX_BOUNDARY_SOURCES,
+            "interior feedback quadratic boundary sources",
+        ),
+        (
+            problem.traction_drives.len(),
+            MAX_VOLUME_SOURCES,
+            "interior feedback mechanical traction sources",
+        ),
+    ] {
+        checkpoint()?;
+        if requested > maximum {
+            return Err(HeterogeneousError::Limit {
+                what,
+                requested,
+                maximum,
+            }
+            .into());
+        }
+    }
+    for amplitude in problem
+        .boundary_drives
+        .iter()
+        .map(|drive| drive.amplitude_m_s)
+        .chain(problem.traction_drives.iter().map(|drive| drive.amplitude_pa))
+    {
+        checkpoint()?;
+        if !amplitude.re.is_finite() || !amplitude.im.is_finite() {
+            return Err(InteriorHeatingError::Invalid(
+                "interior feedback needs finite physical source amplitudes",
+            )
+            .into());
+        }
     }
     Ok(())
 }
@@ -273,8 +352,40 @@ fn prepare<'f, 'c, 't>(
         )
     })?;
     let field = acoustic(checkpoint, |cancelled| {
+        // Each refreshed factor owns its sources. Rebinding keeps the original
+        // geometry, signed shapes and physical amplitudes; an old material/wall
+        // preparation is never accepted by the new solve. Unchanged temperature
+        // snapshots bypass this entire preparation and reuse their Arc.
+        let mut boundary = Vec::with_capacity(problem.boundary_drives.len());
+        for drive in &problem.boundary_drives {
+            boundary.push(prepared.quadratic_velocity_source_with_quadrature(
+                &drive.traces,
+                drive.quadrature_order,
+                &mut || cancelled(),
+            )?);
+        }
+        let mut traction = Vec::with_capacity(problem.traction_drives.len());
+        for drive in &problem.traction_drives {
+            traction.push(prepared.prepare_wall_traction(&drive.profile, &mut || cancelled())?);
+        }
+        let boundary_values = boundary
+            .iter()
+            .zip(&problem.boundary_drives)
+            .map(|(source, drive)| (source, drive.amplitude_m_s))
+            .collect::<Vec<_>>();
+        let traction_values = traction
+            .iter()
+            .zip(&problem.traction_drives)
+            .map(|(source, drive)| (source, drive.amplitude_pa))
+            .collect::<Vec<_>>();
         prepared
-            .solve(&problem.inward_velocity, &mut || cancelled())
+            .solve_with_sources(
+                &problem.inward_velocity,
+                &boundary_values,
+                &[],
+                &traction_values,
+                &mut || cancelled(),
+            )
             .map_err(Into::into)
     })?;
     let destinations: Vec<_> = cells.iter().map(|cell| cell.destination).collect();
@@ -394,6 +505,7 @@ impl<'f, 'c, 't, 'm, F: PorousTemperatureFluid> TemperatureInteriorHeating<'f, '
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, InteriorFeedbackError> {
         checkpoint()?;
+        admit_drives(&problem, &mut checkpoint)?;
         let count = geometry.tetrahedra().len();
         let wall_count = if wall_bindings.is_empty() {
             problem.mechanical_walls.len()
