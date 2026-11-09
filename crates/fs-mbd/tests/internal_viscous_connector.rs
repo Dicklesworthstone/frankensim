@@ -7,6 +7,9 @@ use fs_mbd::spatial_loads::internal_impulse::viscous::{
 };
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 
+#[path = "internal_viscous_connector/driven.rs"]
+mod driven;
+
 fn close(a: f64, b: f64, tolerance: f64) {
     assert!((a - b).abs() <= tolerance, "{a:.16e} != {b:.16e}");
 }

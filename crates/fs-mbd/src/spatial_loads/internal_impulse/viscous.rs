@@ -24,6 +24,10 @@
 #[path = "viscous/network.rs"]
 pub mod network;
 
+/// Simultaneous held internal actuation and passive spatial relaxation.
+#[path = "viscous/driven.rs"]
+pub mod driven;
+
 use super::{
     InternalWrenchImpulse, InternalWrenchImpulseControls, InternalWrenchImpulseError,
     InternalWrenchImpulseReceipt, apply_internal_wrench_impulse, dd, dot, finite, finite_vector,
@@ -407,21 +411,7 @@ impl PreparedViscousConnector {
         // G. The small matrix W^T G W then has homogeneous units of 1/s.
         // All source resultants stay in range(W), including repeated rates
         // and cross-coupled semidefinite forms.
-        let mut native = [[Dd::ZERO; 12]; 6];
-        for i in 0..6 {
-            for body in 0..2 {
-                let linear = checked_vector_divide(
-                    self.force_columns_world[i].scale(if body == 0 { -1.0 } else { 1.0 }),
-                    det::sqrt(self.properties[body].mass()),
-                )?;
-                let angular = self.properties[body]
-                    .angular_mobility_factor(self.angular_columns_body[i][body]);
-                finite_vector(angular)?;
-                let offset = 6 * body;
-                native[i][offset..offset + 3].copy_from_slice(&dd(linear));
-                native[i][offset + 3..offset + 6].copy_from_slice(&dd(angular));
-            }
-        }
+        let native = self.kinetic_columns()?;
         let mut kinetic = [[Dd::ZERO; 12]; 6];
         for mode in 0..count {
             for i in 0..6 {
@@ -526,6 +516,28 @@ impl PreparedViscousConnector {
             }
         }
         Ok(())
+    }
+
+    // The same original finite-body factors define mobility for both passive
+    // relaxation and simultaneous actuation. Wrench transport is prepared once
+    // above; no consumer substitutes an infinite bath or diagonal inertia.
+    fn kinetic_columns(&self) -> Result<[[Dd; 12]; 6], ViscousConnectorError> {
+        let mut native = [[Dd::ZERO; 12]; 6];
+        for i in 0..6 {
+            for body in 0..2 {
+                let linear = checked_vector_divide(
+                    self.force_columns_world[i].scale(if body == 0 { -1.0 } else { 1.0 }),
+                    det::sqrt(self.properties[body].mass()),
+                )?;
+                let angular = self.properties[body]
+                    .angular_mobility_factor(self.angular_columns_body[i][body]);
+                finite_vector(angular)?;
+                let offset = 6 * body;
+                native[i][offset..offset + 3].copy_from_slice(&dd(linear));
+                native[i][offset + 3..offset + 6].copy_from_slice(&dd(angular));
+            }
+        }
+        Ok(native)
     }
 }
 

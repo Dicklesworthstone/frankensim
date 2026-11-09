@@ -8884,6 +8884,31 @@ cross-coupled rank-one free modes under extremely stiff exposure,
 distant origins and common boosts, zero damping, stale geometry, cancellation
 and undeliverable native momentum transfers.
 
+### Simultaneous held actuation and full spatial damping
+
+`viscous::driven::PreparedDrivenViscousConnector` integrates a held internal
+force/free couple and the original full passive damping on the same fixed-pose
+trajectory. With native relative mobility `G = B^T M^-1 B`, the conjugate
+coordinate `x = G^-1 s` obeys `x' = f - C G x`. The existing pHS exact-ZOH
+owner propagates all six coordinates, integrates signed actuator work and
+independent positive heat, and retains the original loss-factor witness.
+This supplies the physical terminal slip without alternating force kicks and
+unforced damping. Semidefinite and zero damping retain driven free directions.
+
+One native transported internal impulse applies the accepted conjugate momentum
+change to both original finite bodies. Initial coordinate reconstruction,
+actual endpoint twist, original per-body and total momentum, native work and
+independent heat/work balance all gate publication. Preparation is bounded to
+six relative coordinates; warm calls allocate nothing and reuse their original
+factor and exponential/heat caches. Poses, inertia, damping and interval are
+bound; input momenta and the held effort may change between calls.
+This source does not advance poses, introduce stiffness or assign a thermal
+destination. Changing geometry still needs temporal refinement. G1 tests in
+`tests/internal_viscous_connector/driven.rs` check scalar terminal velocity,
+actuator energy recovery, independently integrated heat, full spatial recoil
+against continuous Newton–Euler integration, subdivision, driven null losses,
+zero/unforced limits, stale geometry, cancellation and deterministic reuse.
+
 ## Finite motion with passive full spatial damping
 
 `spatial_loads::internal_motion::viscous` advances two original finite bodies
