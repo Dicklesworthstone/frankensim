@@ -367,21 +367,19 @@ impl MaterialFieldMotion {
     // are identical to the conservative path; no mechanics are solved twice.
     pub(crate) fn step_thermal_support_candidate(&self,
         section: fs_material::section::thermal::ConcentricThermoelasticSection,
-        sources: Vec<MaterialResistor>, input: FieldMotionInput<'_>,
+        sources: Vec<MaterialResistor>, contacts: Vec<SeriesElectricalContact>,
+        input: FieldMotionInput<'_>,
         controls: MaterialCircuitSolve, mut cancelled: impl FnMut() -> bool)
         -> Result<FieldMotionCandidate, MaterialCircuitError>
     {
         poll(&mut cancelled)?;
-        if !self.circuit.contacts.is_empty() {
-            return Err(invalid("thermal support currently requires explicit bulk-only electrical heat routes"));
-        }
         let support = self.support.as_ref()
             .ok_or_else(|| invalid("thermal support requires an existing material member"))?
             .with_thermal_section(section)?;
         let mut trial = self.clone();
         trial.support = Some(support);
         trial.elastic_energy_j()?;
-        trial.step_bound_support_candidate(sources, Vec::new(), input, controls, cancelled)
+        trial.step_bound_support_candidate(sources, contacts, input, controls, cancelled)
     }
 
     fn step_bound_support_candidate(&self, sources: Vec<MaterialResistor>,

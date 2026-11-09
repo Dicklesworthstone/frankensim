@@ -11863,3 +11863,24 @@ The combined energy audit uses actual native kinetic change, original incrementa
 The source retains its homogeneous torsion calibration and mode-III applicability ceiling. Poses/frame and material properties remain held; normal approach is prescribed at interval start. Inertial midpoint motion and average-power heat require temporal refinement. This composition supplies neither normal body integration nor reciprocal mixed-mode stability or temperature feedback.
 
 Three integration cases cover eight driven intervals with independently reconstructed body/contact/cell/outside/background energy and changing normal area, analytic fold release with detached work and fresh recontact, and post-release transport refusal, both final cancellation forms, stale time/history and deterministic retry. Pinned format and recursive syntax/module-path checks passed. These new integration cases were not compiled or executed because the required remote runners are absent and local build headroom is exhausted.
+
+## Electrical contact heat in thermally live actuator supports
+
+`ElectricalContactNetwork::field_motion_support_candidate` connects the original
+source-pinned series contacts to the same thermoelastic member, native field/body
+descriptor and finite enthalpy residual used by `MaterialNetwork`. Actual trial
+temperatures refresh interface resistance; declared A/B partitions deposit each
+contact loss once. Bulk Joule heat, reversible support heat, field work and
+external supplies remain distinct, and accepted reports retain the heat routes.
+Source, work-budget or cancellation refusal publishes no partial history.
+
+Interface area and heat partitions are fixed within a step. The original
+constant-reference-density solid support, affine modulus, scalar expansion and
+constant field-coefficient restrictions remain. This adds no opening, arc,
+contact mechanics, interface storage or strain-dependent electrical geometry.
+Endpoint thermal feedback remains generally first order in time. Focused G1/G4
+regressions exercise per-cell and total energy, source-dependent support motion,
+source continuity, budget refusal and final cancellation with exact retry.
+
+These regression definitions were parsed but not compiled or executed in the
+implementation environment; full coupled validation remains outstanding.

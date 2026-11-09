@@ -15,7 +15,7 @@ use fs_material::state_point::{DENSITY_PROPERTY, INVERSE_TEMPERATURE_DIMS,
     resolve_material_state_point};
 use fs_qty::{Pressure, QuantitySpec, Temperature};
 use fs_thermal::enthalpy::{CellGeometry, DepositedCell, DepositionBudget, DepositionSimulation,
-    Event, StepConfig, ThermalLaw, TimedEvent};
+    Event, StepConfig, ThermalLaw, ThermalLink, TimedEvent};
 
 fn support_card(resistivity: f64, expansion: f64)
     -> (MaterialCard, ResolvedHeatCapacityCurve, Vec<ScalarPropertyRequirement>)
@@ -80,7 +80,13 @@ fn law<'a>(cards: &'a [MaterialCard; 2], requirements: &[Vec<ScalarPropertyRequi
 fn thermal<'a>(curves: &'a [ResolvedHeatCapacityCurve; 2], law: &ConcentricThermoelasticLaw<'_>)
     -> DepositionSimulation<'a>
 {
-    let events = (0..2).map(|i| {
+    thermal_with_contact(curves, law, false)
+}
+
+fn thermal_with_contact<'a>(curves: &'a [ResolvedHeatCapacityCurve; 2],
+    law: &ConcentricThermoelasticLaw<'_>, contact: bool) -> DepositionSimulation<'a>
+{
+    let mut events: Vec<_> = (0..2).map(|i| {
         let layer = &law.reference().layer_integrals()[i];
         TimedEvent { time_s: 0.0, event: Event::Birth(DepositedCell {
             id: DESTINATIONS[i].cell, segment_id: i as u64, body_id: 0,
@@ -90,6 +96,12 @@ fn thermal<'a>(curves: &'a [ResolvedHeatCapacityCurve; 2], law: &ConcentricTherm
                 volume_m3: layer.area_m2(), surface_area_m2: 6.0 }, boundary: boundary(),
         }) }
     }).collect();
+    if contact {
+        events.push(TimedEvent { time_s: 0.0, event: Event::Contact(ThermalLink {
+            id: 7, a: DESTINATIONS[0].cell, b: DESTINATIONS[1].cell,
+            area_m2: 1.0, conductance_w_k: 0.0,
+        }) });
+    }
     DepositionSimulation::new(events, &[
         (MaterialId(0), curves[0].curve() as &dyn ThermalLaw),
         (MaterialId(1), curves[1].curve() as &dyn ThermalLaw),
@@ -235,4 +247,146 @@ fn nonpositive_combined_capacity_refuses_before_either_history_advances() {
         Err(CircuitEnthalpyError::Source(SupportThermalError::Invalid(
             "caloric plus thermoelastic capacity must stay positive over the admitted support envelope")))));
     assert_eq!(thermal.cells(), &saved_cells); assert_eq!(thermal.time_s(), 0.0); assert_eq!(model, saved_model);
+}
+
+#[test]
+fn contact_heat_drives_live_support_expansion_with_one_closed_energy_account() {
+    let run = |contact_resistance| {
+        let alpha = 1e-3;
+        let (a, ca, ra) = support_card(1.0, alpha);
+        let (b, cb, rb) = support_card(3.0, alpha);
+        let cards = [a, b]; let curves = [ca, cb]; let context = point(300.0);
+        let binding = SupportThermalBinding { law: law(&cards, &[ra, rb]),
+            layer_cells: DESTINATIONS.iter().map(|d| d.cell).collect(), volume_tolerance_m3: 1e-12 };
+        let mut thermal = thermal_with_contact(&curves, &binding.law, true);
+        let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+        let cells = cells(&cards, &curves, &context, &key);
+        let resistors = [0, 1].map(|i| CellResistor {
+            area_m2: binding.law.reference().layer_integrals()[i].area_m2(), length_m: 1.0,
+            destination: DESTINATIONS[i], selection: MaterialPropertySelection::SingleClaimOnly });
+        let links = links(); let bases = bases();
+        let bulk = MaterialNetwork { cells: &cells, resistors: &resistors, links: &links };
+        let card = source::card(&cards[0], &cards[1], contact_resistance, 0.005);
+        let interface_context = source::point();
+        let bindings = [MaterialElectricalContact { link: 7, branch: 1,
+            point: ThermalInterfacePoint { interface: &card, materials: [&cards[0], &cards[1]],
+                context: &interface_context, temperature_axes: ["Ta", "Tb"],
+                liquid_fraction_axes: [Some("melt_a"), Some("melt_b")], mean_temperature_axis: None },
+            selection: MaterialPropertySelection::SingleClaimOnly, heat_fraction_to_first: 0.25 }];
+        let network = ElectricalContactNetwork { bulk: &bulk, contacts: &bindings, electrical_bases: &bases };
+        let original = network.resolve(&thermal, || false).unwrap();
+        let circuit = driven_circuit(original.bulk.resistors)
+            .rebind_contacts_candidate(original.contacts, &[0.0, 3.0]).unwrap();
+        let support = AxialSupport::from_thermoelastic_law(&binding.law, &[300.0; 2], 1.0, 1.0, 0.2).unwrap();
+        let mut motion = MaterialFieldMotion::new_with_support(circuit, 0, body(100.0),
+            support, 0.005, [0.9, 1.1]).unwrap();
+        let initial = total_internal(&thermal, &motion, alpha);
+        let mut supplied = 0.0;
+        for n in 1..=4 {
+            let target = f64::from(n) * 0.05;
+            let dt = target - thermal.time_s();
+            let candidate = network.field_motion_support_candidate(&thermal, target, &motion,
+                &[0.0, 3.0], 0.0, &binding, config(), &[0.0; 2], || false).unwrap();
+            let report = candidate.report();
+            let electrical = &report.coupled.electrical;
+            let contact = &electrical.contacts[0];
+            let temperature = candidate.thermal().temperature_k(DESTINATIONS[0].cell).unwrap();
+            let resistance = contact_resistance * (1.0 + 0.005 * (temperature - 300.0));
+            near(contact.contact.resistance_ohm(), resistance);
+            // Independent series branch law at the actual thermal endpoint.
+            let bulk_resistance = electrical.resistors[0].material.conductor.resistance_ohm();
+            let current = 3.0 / (bulk_resistance + resistance);
+            near(contact.current_a.abs(), current);
+            near(contact.heat_j, dt * current * current * resistance);
+            for (i, destination) in DESTINATIONS.iter().enumerate() {
+                let old = &thermal.cells()[&destination.cell];
+                let new = &candidate.thermal().cells()[&destination.cell];
+                let heat = old.mass_kg * (new.specific_h_j_kg - old.specific_h_j_kg);
+                let fraction = if i == 0 { 0.25 } else { 0.75 };
+                let bulk_heat = electrical.resistors.iter()
+                    .find(|r| r.material.branch == destination.branch).unwrap().heat_j;
+                let reversible = report.coupled.source.layers[i].reversible_heat_j;
+                near(heat, bulk_heat + fraction * contact.heat_j + reversible);
+            }
+            near(report.coupled.deposited_joule_j, electrical.heat_j);
+            near(report.external_heat_j, 0.0);
+            near(report.total_energy_residual_j, 0.0);
+            assert_eq!(report.coupled.source.contact_destinations[0].cells,
+                [DESTINATIONS[0].cell, DESTINATIONS[1].cell]);
+            near(report.coupled.source.contact_destinations[0].heat_fraction_to_first, 0.25);
+            supplied += electrical.electrical_supply_j;
+            near(total_internal(candidate.thermal(), candidate.motion(), alpha), initial + supplied);
+            let (next_thermal, next_motion, _) = candidate.into_parts();
+            thermal = next_thermal; motion = next_motion;
+        }
+        (motion.gap_m(), motion.velocity_m_s(), thermal.temperature_k(DESTINATIONS[0].cell).unwrap())
+    };
+    let low = run(0.2);
+    let high = run(2.0);
+    assert!(high.2 < low.2, "series contact resistance must change actual layer heating");
+    assert!((low.0 - high.0).abs() > 1e-6, "contact heating must reach support geometry");
+    assert!((low.1 - high.1).abs() > 1e-5, "support response must reach native momentum");
+}
+
+#[test]
+fn live_support_contact_source_budget_and_late_cancellation_preserve_all_owners() {
+    let (a, ca, ra) = support_card(1.0, 1e-3);
+    let (b, cb, rb) = support_card(3.0, 1e-3);
+    let cards = [a, b]; let curves = [ca, cb]; let context = point(300.0);
+    let binding = SupportThermalBinding { law: law(&cards, &[ra, rb]),
+        layer_cells: DESTINATIONS.iter().map(|d| d.cell).collect(), volume_tolerance_m3: 1e-12 };
+    let thermal = thermal_with_contact(&curves, &binding.law, true);
+    let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+    let cells = cells(&cards, &curves, &context, &key);
+    let resistors = [0, 1].map(|i| CellResistor {
+        area_m2: binding.law.reference().layer_integrals()[i].area_m2(), length_m: 1.0,
+        destination: DESTINATIONS[i], selection: MaterialPropertySelection::SingleClaimOnly });
+    let links = links(); let bases = bases();
+    let bulk = MaterialNetwork { cells: &cells, resistors: &resistors, links: &links };
+    let card = source::card(&cards[0], &cards[1], 0.2, 0.005);
+    let interface_context = source::point();
+    let bindings = [MaterialElectricalContact { link: 7, branch: 1,
+        point: ThermalInterfacePoint { interface: &card, materials: [&cards[0], &cards[1]],
+            context: &interface_context, temperature_axes: ["Ta", "Tb"],
+            liquid_fraction_axes: [Some("melt_a"), Some("melt_b")], mean_temperature_axis: None },
+        selection: MaterialPropertySelection::SingleClaimOnly, heat_fraction_to_first: 0.25 }];
+    let network = ElectricalContactNetwork { bulk: &bulk, contacts: &bindings, electrical_bases: &bases };
+    let original = network.resolve(&thermal, || false).unwrap();
+    let circuit = driven_circuit(original.bulk.resistors)
+        .rebind_contacts_candidate(original.contacts, &[0.0, 3.0]).unwrap();
+    let support = AxialSupport::from_thermoelastic_law(&binding.law, &[300.0; 2], 1.0, 1.0, 0.2).unwrap();
+    let model = MaterialFieldMotion::new_with_support(circuit, 0, body(100.0),
+        support, 0.005, [0.9, 1.1]).unwrap();
+    let saved_cells = thermal.cells().clone(); let saved_model = model.clone();
+    let mut polls = 0;
+    let normal = network.field_motion_support_candidate(&thermal, 0.05, &model,
+        &[0.0, 3.0], 0.0, &binding, config(), &[0.0; 2], || { polls += 1; false }).unwrap();
+    let mut actual = 0;
+    assert!(matches!(network.field_motion_support_candidate(&thermal, 0.05, &model,
+        &[0.0, 3.0], 0.0, &binding, config(), &[0.0; 2], || { actual += 1; actual == polls }),
+        Err(CircuitEnthalpyError::Cancelled)));
+    let limited = CircuitEnthalpySolve { maximum_circuit_trials: normal.report().coupled.circuit_trials - 1,
+        ..config() };
+    assert!(matches!(network.field_motion_support_candidate(&thermal, 0.05, &model,
+        &[0.0, 3.0], 0.0, &binding, limited, &[0.0; 2], || false),
+        Err(CircuitEnthalpyError::CircuitBudget)));
+    let foreign_card = source::card(&cards[0], &cards[1], 0.4, 0.005);
+    let foreign_bindings = [MaterialElectricalContact { link: 7, branch: 1,
+        point: ThermalInterfacePoint { interface: &foreign_card, materials: [&cards[0], &cards[1]],
+            context: &interface_context, temperature_axes: ["Ta", "Tb"],
+            liquid_fraction_axes: [Some("melt_a"), Some("melt_b")], mean_temperature_axis: None },
+        selection: MaterialPropertySelection::SingleClaimOnly, heat_fraction_to_first: 0.25 }];
+    let foreign = ElectricalContactNetwork { bulk: &bulk, contacts: &foreign_bindings, electrical_bases: &bases };
+    assert!(matches!(foreign.field_motion_support_candidate(&thermal, 0.05, &model,
+        &[0.0, 3.0], 0.0, &binding, config(), &[0.0; 2], || false),
+        Err(CircuitEnthalpyError::Invalid("electrical contact source changed during thermal feedback"))));
+    assert!(bulk.field_motion_support_candidate(&thermal, 0.05, &model,
+        &[0.0, 3.0], 0.0, &bases, &binding, config(), &[0.0; 2], || false).is_err());
+    assert_eq!(thermal.cells(), &saved_cells); assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(model, saved_model);
+    let retry = network.field_motion_support_candidate(&thermal, 0.05, &model,
+        &[0.0, 3.0], 0.0, &binding, config(), &[0.0; 2], || false).unwrap();
+    assert_eq!(retry.motion(), normal.motion());
+    assert_eq!(retry.thermal().cells(), normal.thermal().cells());
+    assert_eq!(retry.report().coupled.source, normal.report().coupled.source);
 }
