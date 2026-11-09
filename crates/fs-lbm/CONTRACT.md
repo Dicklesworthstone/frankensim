@@ -3556,3 +3556,54 @@ with the original source-conductivity option, both SDIRK2 physical-stage roots,
 and changing prescribed latent inventory. Changed Rust sources were parsed
 with the pinned compiler's formatter. Full native integration execution was
 unavailable: DSR and RCH are absent and the local workspace has no build space.
+
+## Original-source Fourier integrals in conservative NSF gas energy
+
+`ThermochemicalNsfGas::with_source_conductivity` explicitly selects
+`NsfSourceConductivityControl` for the existing NSF total-energy owner.
+The original midpoint conductivity remains the default. Source mode retains
+the original selected pure-species viscosity/conductivity lines and WMS
+mixture, with an explicit quadrature tolerance and maximum actual WMS
+evaluations per face or complete nonlinear boundary root.
+
+All molecular Fourier paths use the selected convention: internal fluid faces,
+prescribed reservoir faces, global/local isothermal walls, finite ambient
+films, characteristic energy fluxes, and the characteristic incoming-enthalpy
+temperature root. A film or characteristic root prepares its source interval
+once and shares its actual point-query allowance across every temperature
+candidate. An exactly isothermal source face uses one original point query;
+it does not construct an artificial epsilon bracket.
+
+For a wide internal face, source mode applies the native temperature stencil
+to the original conductivity primitive: `[27*integral(Ti,Tj,k) -
+integral(Tm,Tp,k)]/24`, with the native unit conversion and one held face
+pressure. It does not multiply a single secant conductivity by the wide
+temperature gradient. The original SGS contribution retains its separate
+temperature-gradient convention and original molecular/model ratio admission.
+Fallback and boundary faces retain their original full-/half-cell lengths,
+orientation and single-valued flux ownership.
+
+The held pressure is the existing actual adjacent-pressure interpolation for
+that face; walls retain the adjacent gas pressure. Source preparation requires
+continuous admitted support over the complete involved temperature bracket.
+The native sensible internal-energy chart, density-derived pressure, pressure
+force, enthalpy-flow work, stress work and conservative total-energy flux remain
+with the same NSF owner. There is no extra heat deposit or change of species
+composition. Default midpoint expressions and arithmetic order are preserved;
+the selected source policy enters the state identity.
+
+Quadrature error is an embedded conductivity estimate, not a certified energy
+bound or additional physical joules. The original face-pressure interpolation,
+spatial discretization, fixed-composition and continuum/Mach limitations remain;
+this does not establish new general fourth-order accuracy for variable pressure
+or experimental flow validation. Existing native cancellation checkpoints
+remain, with additional face/root work bounded by the declared evaluation,
+quadrature and source-knot limits.
+
+Five G0/G1/G3/G5 native regression groups cover exact piecewise-integral
+interior fluxes, finite-film/isothermal equivalence, characteristic upstream
+enthalpy counted once, source/work refusal with rollback, and formation-datum
+and worker-count replay. All eight changed Rust files were syntax-parsed with
+the pinned formatter. Independent scalar integral and film-root calculations
+were checked; the native regression groups were not executed because DSR/RCH
+and a usable local build graph/space were unavailable.

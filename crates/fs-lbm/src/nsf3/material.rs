@@ -14,6 +14,9 @@ use fs_material::thermochemical_gas::{ResolvedThermochemicalGasState, Thermochem
 use fs_qty::Temperature;
 use fs_qty::semantic::Composition;
 
+mod conductivity;
+pub use conductivity::NsfSourceConductivityControl;
+
 /// Original named species and composition of a frozen near-ambient mixture.
 ///
 /// EOS, viscosity and conductivity use `resolve_gas_mixture` at every actual
@@ -129,6 +132,7 @@ pub struct ThermochemicalNsfGas {
     reference: GasState,
     energy_reference_j_kg: f64,
     sensible_reference_j_kg: f64,
+    source_conductivity: Option<NsfSourceConductivityControl>,
 }
 
 impl ThermochemicalNsfGas {
@@ -170,7 +174,31 @@ impl ThermochemicalNsfGas {
             reference,
             energy_reference_j_kg,
             sensible_reference_j_kg,
+            source_conductivity: None,
         })
+    }
+
+    /// Use the original WMS conductivity integral on every molecular face.
+    ///
+    /// Preparation uses each face's actual pressure and the complete temperature
+    /// interval needed by its stencil or boundary root. Unsupported interior
+    /// source segments and exhausted per-face work refuse transactionally.
+    /// The original native step still owns its cancellation checkpoints; each
+    /// face's added work is bounded by these controls and the source knot cap.
+    /// This does not change the internal-energy chart or enable composition change.
+    pub fn with_source_conductivity(
+        mut self,
+        control: NsfSourceConductivityControl,
+    ) -> Result<Self, NsfError> {
+        control.validate()?;
+        self.source_conductivity = Some(control);
+        Ok(self)
+    }
+
+    /// Selected source-integral controls; `None` retains midpoint conductivity.
+    #[must_use]
+    pub const fn source_conductivity(&self) -> Option<NsfSourceConductivityControl> {
+        self.source_conductivity
     }
 
     /// Original NASA9 mixture and source-selected transport materials.

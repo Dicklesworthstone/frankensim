@@ -123,12 +123,16 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             return Ok(adjacent_theta);
         }
         let (_, upstream_enthalpy) = self.contact_enthalpy(upstream_theta, pressure_pa)?;
+        // One source interval and actual-point allowance cover the entire
+        // enthalpy contact root; original caloric pressure remains separate.
+        let conductivity = self.spec.gas.prepare_face_conductivity(
+            &self.law, 0.5 * (adjacent_pressure_pa + pressure_pa),
+            [adjacent_theta, upstream_theta],
+        )?;
         let residual = |theta: f64| -> Result<f64, NsfError> {
             let (rho, enthalpy) = self.contact_enthalpy(theta, pressure_pa)?;
-            let mut k = self.spec.gas.face_conductivity(
-                &self.law,
-                0.5 * (adjacent_theta + theta),
-                0.5 * (adjacent_pressure_pa + pressure_pa),
+            let mut k = conductivity.mean_lattice(
+                adjacent_theta, theta, 0.5 * (adjacent_theta + theta),
             )?;
             // Use the identical sum as open_energy_flux. At fixed cell
             // velocity the acoustic face velocity, local gradient and this
