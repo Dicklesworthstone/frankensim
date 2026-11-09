@@ -14,7 +14,7 @@
 //! partial result. The returned bracket is numerical sign evidence, not an
 //! interval enclosure accounting for the evaluator's forward error.
 
-use super::{HarmonicFrequencyResponse, HarmonicResponseError, finite, invalid};
+use super::{HarmonicFrequencyResponse, HarmonicResponseError};
 use fs_exec::Cx;
 use fs_math::c64::C64;
 
@@ -35,14 +35,16 @@ pub use sensitivity::{
 };
 mod native_parameter_projection;
 mod parameter_projection;
+mod ports;
+mod projection;
 pub use parameter_projection::{HarmonicReceiverParameterJet, HarmonicTransferFieldParameterJet};
 
 impl HarmonicTransferSample {
     /// Observe any fixed real linear receiver from a complete physical field
     /// and its frequency tangent. Values and weights retain their caller-owned
     /// units and ordering; source/receiver frequency dependence must already be
-    /// included in the supplied tangent. Compensated accumulation preserves
-    /// weak surviving terms beside large coherent cancellations.
+    /// included in the supplied tangent. Binary-normalized double-double
+    /// accumulation avoids premature overflow and subnormal product rounding.
     pub fn project_real(
         receiver: &[f64],
         values: &[C64],
@@ -173,45 +175,7 @@ fn project(
     values: &[C64],
     derivatives: &[C64],
 ) -> Result<HarmonicTransferSample, HarmonicResponseError> {
-    if receiver.len() != values.len()
-        || derivatives.len() != values.len()
-        || receiver.is_empty()
-        || receiver.iter().any(|x| !x.is_finite())
-    {
-        return Err(invalid(
-            "one finite fixed receiver weight per coordinate required",
-        ));
-    }
-    let mut sums = [0.0; 4];
-    let mut correction = [0.0; 4];
-    for ((&weight, &value), &derivative) in receiver.iter().zip(values).zip(derivatives) {
-        let terms = [
-            weight * value.re,
-            weight * value.im,
-            weight * derivative.re,
-            weight * derivative.im,
-        ];
-        for ((sum, error), term) in sums.iter_mut().zip(&mut correction).zip(terms) {
-            let next = *sum + term;
-            *error += if sum.abs() >= term.abs() {
-                (*sum - next) + term
-            } else {
-                (term - next) + *sum
-            };
-            *sum = next;
-        }
-    }
-    let amplitude = C64::new(sums[0] + correction[0], sums[1] + correction[1]);
-    let angular_derivative = C64::new(sums[2] + correction[2], sums[3] + correction[3]);
-    if !finite(amplitude) || !finite(angular_derivative) {
-        return Err(invalid(
-            "physical transfer or its derivative is not representable",
-        ));
-    }
-    Ok(HarmonicTransferSample {
-        amplitude,
-        angular_derivative,
-    })
+    projection::real(receiver, values, derivatives)
 }
 
 fn project_complex(
@@ -220,57 +184,7 @@ fn project_complex(
     values: &[C64],
     derivatives: &[C64],
 ) -> Result<HarmonicTransferSample, HarmonicResponseError> {
-    if receiver.len() != values.len()
-        || receiver_angular_derivative.is_some_and(|slope| slope.len() != values.len())
-        || derivatives.len() != values.len()
-        || receiver.is_empty()
-        || receiver.iter().any(|z| !finite(*z))
-        || receiver_angular_derivative.is_some_and(|slope| slope.iter().any(|z| !finite(*z)))
-    {
-        return Err(invalid(
-            "one finite complex receiver weight and slope per coordinate required",
-        ));
-    }
-    let mut sums = [0.0; 4];
-    let mut correction = [0.0; 4];
-    let mut add = |slot: usize, term: f64| {
-        let next = sums[slot] + term;
-        correction[slot] += if sums[slot].abs() >= term.abs() {
-            (sums[slot] - next) + term
-        } else {
-            (term - next) + sums[slot]
-        };
-        sums[slot] = next;
-    };
-    for (i, ((&weight, &value), &derivative)) in
-        receiver.iter().zip(values).zip(derivatives).enumerate()
-    {
-        let weight_derivative = receiver_angular_derivative.map_or(C64::ZERO, |slope| slope[i]);
-        add(0, weight.re * value.re);
-        add(0, -weight.im * value.im);
-        add(1, weight.re * value.im);
-        add(1, weight.im * value.re);
-
-        add(2, weight_derivative.re * value.re);
-        add(2, -weight_derivative.im * value.im);
-        add(2, weight.re * derivative.re);
-        add(2, -weight.im * derivative.im);
-        add(3, weight_derivative.re * value.im);
-        add(3, weight_derivative.im * value.re);
-        add(3, weight.re * derivative.im);
-        add(3, weight.im * derivative.re);
-    }
-    let amplitude = C64::new(sums[0] + correction[0], sums[1] + correction[1]);
-    let angular_derivative = C64::new(sums[2] + correction[2], sums[3] + correction[3]);
-    if !finite(amplitude) || !finite(angular_derivative) {
-        return Err(invalid(
-            "complex physical transfer or its derivative is not representable",
-        ));
-    }
-    Ok(HarmonicTransferSample {
-        amplitude,
-        angular_derivative,
-    })
+    projection::complex(receiver, receiver_angular_derivative, values, derivatives)
 }
 
 /// Refine ONE isolated extremum of the supplied actual complex response.

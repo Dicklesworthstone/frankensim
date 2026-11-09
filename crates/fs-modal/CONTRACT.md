@@ -393,6 +393,36 @@ reusable-owner refusal are checked. A separate admission regression verifies
 that coupled first-frequency solves actually reserve the documented three-pass
 work allowance while scalar owners retain their direct baseline.
 
+### `harmonic::resonance`: physical port-flow and effort observations
+
+Native frequency responses expose fixed real/complex port-flow and port-effort
+transfer rows, plus complete authored receiver frequency tangents. Native mixed
+responses expose borrowed flow/effort field jets and fixed real/complex parameter
+projections. These retain the physical load owner's original conjugate variables,
+port ordering and units; coherent weights act as linear transfer rows without
+conjugation. An absent load or incomplete physical jet refuses explicitly.
+
+The effort tangent includes the complete dispersive Z_omega action. Changing
+attachments and material laws remain in all five field derivatives, so the
+existing peak/notch and actual half-power sensitivity queries apply directly to
+transmitted-force or flow observations. Authored receiver jets retain changes in
+the observation map, including the B_theta*effort term when observing a generalized
+load force. Observation does not modify the mechanical load or power account.
+
+First-derivative and complete parameter projections use the same existing
+binary-normalized double-double product owner. Individually overflowing coherent
+contributions may cancel before physical recovery. This avoids premature
+overflow and subnormal rounding within the shared accumulator's working
+precision. Projection takes linear work, constant scratch and no allocation; derivative shape and finiteness checks precede contraction.
+
+Independent tests distinguish a damper-loaded oscillator's transmitted-force
+peak from its displacement peak and verify both actual half-power crossings,
+bandwidth, Q and their physical loss derivatives. A dispersive Maxwell load
+with B(theta)=exp(theta)*B and Z(omega,theta)=exp(-2*theta)*Z(omega) checks that
+changing coherent receiver weights preserve physical force, velocity and
+resonance under a mere port-coordinate change. Complex receiver phase tangents,
+missing jets, invalid weights and extreme coherent cancellations are covered.
+
 ### `harmonic::resonance`: physical peak, notch and linewidth sensitivity
 
 `refine_transfer_extremum_with_parameter_derivative` and its callback entry retain the original observed response and first-derivative sign search, then request one complete H/H_omega/H_omegaomega/H_theta/H_omega_theta jet at the resolved frequency. The implicit derivative of `Re(conj(H)*H_omega)=0` differentiates either a strict peak or a strict notch, including a simple exact transfer zero. Total complex response, log-magnitude and phase derivatives follow the moving extremum; log-magnitude and phase are explicitly absent at an exact zero. Signed curvature and stationarity diagnostics expose the remaining local conditioning and search resolution. Zero or wrongly oriented curvature refuses without an arbitrary curvature floor.
