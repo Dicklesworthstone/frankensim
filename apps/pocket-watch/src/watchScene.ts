@@ -22,6 +22,22 @@ export interface SceneCallbacks {
   onTargetMoved: (tool: ActiveToolMode, posMm: [number, number, number]) => void;
 }
 
+/** Render quality tier: decides MSAA, shadow resolution, transmission, bloom and the DPR ceiling. */
+export type QualityTier = "high" | "medium" | "low";
+
+/** CSS-pixel insets of UI chrome that floats over the full-bleed canvas. */
+export interface ViewInsets {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
+export interface SceneOptions {
+  tier?: QualityTier;
+  reducedMotion?: boolean;
+}
+
 export interface ToolRenderParams {
   torchPower: number;
   torchPosMm: [number, number, number];
@@ -52,11 +68,133 @@ const CASE_RENDER_N_THETA = 128;
 const CASE_RENDER_N_Z = 22;
 const CASE_RENDER_NODES = CASE_RENDER_N_THETA * CASE_RENDER_N_Z;
 
-const GRID_N = 48;
-const GRID_HALF_SPAN_MM = 28.8;
-const GRID_DX_MM = (2.0 * GRID_HALF_SPAN_MM) / GRID_N;
-const RENDER_GRID_N = 84;
-const RENDER_GRID_DX_MM = (2.0 * GRID_HALF_SPAN_MM) / (RENDER_GRID_N - 1);
+// The Rust spatial PDE grid size can change between engine builds: the scene infers N from the
+// snapshot length (7 floats per cell) and takes the half span from `grid_half_span_mm()` when exposed.
+let GRID_N = 48;
+let GRID_HALF_SPAN_MM = 28.8;
+let GRID_DX_MM = (2.0 * GRID_HALF_SPAN_MM) / GRID_N;
+/** Vertices per side of the GPU-displaced molten/solid gold heightfield meshes. */
+const HEIGHTFIELD_RES = 160;
+
+/**
+ * Blackbody emission lookup (300 K .. 3000 K, 256 texels): linear-sRGB chromaticity of Planck's law
+ * integrated against the CIE 1931 2° observer (Wyman-Sloan-Shirley multi-lobe fit), with the
+ * photometric luminance Y(T) relative to Y(1337 K) (the melting point of gold) in the alpha channel.
+ * Glow therefore scales physically: about 1e-4 of the melt-point brightness at 900 K.
+ */
+const BLACKBODY_T_MIN = 300.0;
+const BLACKBODY_T_MAX = 3000.0;
+const BLACKBODY_TEXELS = 256;
+
+function buildBlackbodyLut(): THREE.DataTexture {
+  const g = (x: number, mu: number, s1: number, s2: number): number => {
+    const t = (x - mu) / (x < mu ? s1 : s2);
+    return Math.exp(-0.5 * t * t);
+  };
+  const cmf = (lambdaNm: number): [number, number, number] => {
+    const x =
+      1.056 * g(lambdaNm, 599.8, 37.9, 31.0) +
+      0.362 * g(lambdaNm, 442.0, 16.0, 26.7) -
+      0.065 * g(lambdaNm, 501.1, 20.4, 26.2);
+    const y = 0.821 * g(lambdaNm, 568.8, 46.9, 40.5) + 0.286 * g(lambdaNm, 530.9, 16.3, 31.1);
+    const z = 1.217 * g(lambdaNm, 437.0, 11.8, 36.0) + 0.681 * g(lambdaNm, 459.0, 26.0, 13.8);
+    return [x, y, z];
+  };
+  const planck = (lambdaNm: number, tK: number): number => {
+    const l = lambdaNm * 1e-9;
+    const c1 = 1.191042972e-16; // 2 h c^2 [W m^2 / sr]
+    const c2 = 1.438776877e-2; // h c / k [m K]
+    return c1 / (l ** 5 * (Math.exp(c2 / (l * tK)) - 1.0));
+  };
+  const xyzAt = (tK: number): [number, number, number] => {
+    let X = 0;
+    let Y = 0;
+    let Z = 0;
+    for (let l = 380; l <= 780; l += 4) {
+      const b = planck(l, tK);
+      const [xb, yb, zb] = cmf(l);
+      X += b * xb;
+      Y += b * yb;
+      Z += b * zb;
+    }
+    return [X, Y, Z];
+  };
+  const yRef = xyzAt(1337.33)[1];
+  const data = new Float32Array(BLACKBODY_TEXELS * 4);
+  for (let i = 0; i < BLACKBODY_TEXELS; i++) {
+    const tK = BLACKBODY_T_MIN + ((BLACKBODY_T_MAX - BLACKBODY_T_MIN) * i) / (BLACKBODY_TEXELS - 1);
+    const [X, Y, Z] = xyzAt(tK);
+    // XYZ -> linear sRGB (D65), chromaticity normalized to unit luminance.
+    const inv = 1.0 / Math.max(Y, 1e-300);
+    const xn = X * inv;
+    const zn = Z * inv;
+    let r = 3.2406 * xn - 1.5372 - 0.4986 * zn;
+    let gg = -0.9689 * xn + 1.8758 + 0.0415 * zn;
+    let b = 0.0557 * xn - 0.204 + 1.057 * zn;
+    r = Math.max(0, r);
+    gg = Math.max(0, gg);
+    b = Math.max(0, b);
+    // Normalize to unit Rec.709 luminance so rgb * (Y/Yref) carries the physical brightness.
+    const lum = Math.max(0.2126 * r + 0.7152 * gg + 0.0722 * b, 1e-9);
+    data[i * 4] = r / lum;
+    data[i * 4 + 1] = gg / lum;
+    data[i * 4 + 2] = b / lum;
+    data[i * 4 + 3] = Y / yRef;
+  }
+  const tex = new THREE.DataTexture(data, BLACKBODY_TEXELS, 1, THREE.RGBAFormat, THREE.FloatType);
+  tex.minFilter = THREE.NearestFilter;
+  tex.magFilter = THREE.NearestFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/** GLSL: blackbody radiance lookup (manual lerp between texels so FloatType never needs filtering). */
+const GLSL_BLACKBODY = /* glsl */ `
+uniform sampler2D uBlackbody;
+uniform float uGlowScale;
+uniform float uThermalOverlay;
+vec3 blackbodyRadiance(float tK) {
+  float x = clamp((tK - ${BLACKBODY_T_MIN.toFixed(1)}) / ${(BLACKBODY_T_MAX - BLACKBODY_T_MIN).toFixed(1)}, 0.0, 1.0) * ${(BLACKBODY_TEXELS - 1).toFixed(1)};
+  int i0 = int(floor(x));
+  int i1 = min(i0 + 1, ${BLACKBODY_TEXELS - 1});
+  vec4 a = texelFetch(uBlackbody, ivec2(i0, 0), 0);
+  vec4 b = texelFetch(uBlackbody, ivec2(i1, 0), 0);
+  vec4 c = mix(a, b, fract(x));
+  return c.rgb * c.a * uGlowScale;
+}
+vec3 thermalFalseColor(float tK) {
+  // Perceptually ordered "inferno"-style ramp from 77 K (LN2) to 1500 K.
+  float u = clamp((tK - 77.0) / 1423.0, 0.0, 1.0);
+  vec3 c0 = vec3(0.02, 0.02, 0.10);
+  vec3 c1 = vec3(0.18, 0.12, 0.55);
+  vec3 c2 = vec3(0.72, 0.18, 0.42);
+  vec3 c3 = vec3(0.98, 0.52, 0.10);
+  vec3 c4 = vec3(0.99, 0.96, 0.62);
+  if (u < 0.25) return mix(c0, c1, u / 0.25);
+  if (u < 0.5) return mix(c1, c2, (u - 0.25) / 0.25);
+  if (u < 0.75) return mix(c2, c3, (u - 0.5) / 0.25);
+  return mix(c3, c4, (u - 0.75) / 0.25);
+}
+`;
+
+/** GLSL: uniform cubic B-spline weights and their derivatives. */
+const GLSL_CUBIC = /* glsl */ `
+void bsplineWeights(float t, out vec4 w, out vec4 dw) {
+  float t2 = t * t;
+  float t3 = t2 * t;
+  float omt = 1.0 - t;
+  w = vec4(omt * omt * omt, 3.0 * t3 - 6.0 * t2 + 4.0, -3.0 * t3 + 3.0 * t2 + 3.0 * t + 1.0, t3) / 6.0;
+  dw = vec4(-0.5 * omt * omt, 1.5 * t2 - 2.0 * t, -1.5 * t2 + t + 0.5, 0.5 * t2);
+}
+void mitchellWeights(float t, out vec4 w) {
+  float t2 = t * t;
+  float t3 = t2 * t;
+  w = vec4(-7.0 * t3 + 15.0 * t2 - 9.0 * t + 1.0,
+           21.0 * t3 - 36.0 * t2 + 16.0,
+           -21.0 * t3 + 27.0 * t2 + 9.0 * t + 1.0,
+           7.0 * t3 - 6.0 * t2) / 18.0;
+}
+`;
 
 function bSplineCubic(p0: number, p1: number, p2: number, p3: number, t: number): number {
   const oneMinusT = 1.0 - t;
@@ -528,9 +666,15 @@ function updateSpiralRibbonVertices(
     ribbonThicknessMm: number;
   };
   const posAttr = geom.getAttribute("position") as THREE.BufferAttribute;
+  const nrmAttr = geom.getAttribute("normal") as THREE.BufferAttribute;
   const arr = posAttr.array as Float32Array;
+  const nrm = nrmAttr.array as Float32Array;
   const halfH = ribbonHeightMm * 0.5;
   const halfT = ribbonThicknessMm * 0.5;
+  // Analytic corner normals, weighted like an area-weighted average of the strip's side face
+  // (height h) and its top/bottom face (thickness t), without a per-frame computeVertexNormals pass.
+  const wSide = ribbonHeightMm / Math.hypot(ribbonHeightMm, ribbonThicknessMm);
+  const wCap = ribbonThicknessMm / Math.hypot(ribbonHeightMm, ribbonThicknessMm);
 
   for (let i = 0; i < samples; i++) {
     const { x, y, z, nx, ny } = evalPoint(i, samples);
@@ -540,6 +684,18 @@ function updateSpiralRibbonVertices(
     const yo = y + ny * halfT;
 
     const base = i * 12;
+    nrm[base] = -nx * wSide;
+    nrm[base + 1] = -ny * wSide;
+    nrm[base + 2] = wCap;
+    nrm[base + 3] = nx * wSide;
+    nrm[base + 4] = ny * wSide;
+    nrm[base + 5] = wCap;
+    nrm[base + 6] = nx * wSide;
+    nrm[base + 7] = ny * wSide;
+    nrm[base + 8] = -wCap;
+    nrm[base + 9] = -nx * wSide;
+    nrm[base + 10] = -ny * wSide;
+    nrm[base + 11] = -wCap;
     // 0: top-inner
     arr[base] = xi;
     arr[base + 1] = yi;
@@ -558,7 +714,8 @@ function updateSpiralRibbonVertices(
     arr[base + 11] = z - halfH;
   }
   posAttr.needsUpdate = true;
-  geom.computeVertexNormals();
+  nrmAttr.needsUpdate = true;
+  if (!geom.boundingSphere) geom.computeBoundingSphere();
 }
 
 /**
@@ -725,66 +882,155 @@ export class PocketWatchScene {
   private readonly matFrostOverlay: THREE.MeshStandardMaterial;
   private readonly frostOverlayMesh!: THREE.Mesh;
 
-  constructor(canvas: HTMLCanvasElement, callbacks: SceneCallbacks) {
+  // GPU continuum fields: blackbody LUT, case-shell node textures, spatial PDE grid texture
+  private readonly glowUniforms: {
+    uBlackbody: { value: THREE.DataTexture };
+    uGlowScale: { value: number };
+    uThermalOverlay: { value: number };
+  };
+  private readonly shellBufA = new Float32Array(CASE_SHELL_NODES * 4);
+  private readonly shellBufB = new Float32Array(CASE_SHELL_NODES * 4);
+  private readonly shellUniforms: {
+    uShellA: { value: THREE.DataTexture };
+    uShellB: { value: THREE.DataTexture };
+  };
+  private shellChecksum = Number.NaN;
+  private gridTexBuf = new Float32Array(GRID_N * GRID_N * 4);
+  private readonly gridUniforms: {
+    uGrid: { value: THREE.DataTexture };
+    uGridN: { value: number };
+    uHalfSpan: { value: number };
+  };
+  private lastGridData: Float32Array | null = null;
+  private lastCaseShellData: Float32Array | null = null;
+  private maxShellTempK = 293.15;
+  private maxGridTempK = 293.15;
+
+  // Quality, framing, camera animation, and escapement contact highlights
+  private tier: QualityTier;
+  private readonly reducedMotion: boolean;
+  private pixelRatio = 1;
+  private readonly keyLight: THREE.DirectionalLight;
+  private viewInsets: ViewInsets = { left: 0, right: 0, top: 0, bottom: 0 };
+  private cssWidth = 960;
+  private cssHeight = 640;
+  private currentPreset: CameraPreset = "overview";
+  private cameraTween: {
+    fromPos: THREE.Vector3;
+    toPos: THREE.Vector3;
+    fromTarget: THREE.Vector3;
+    toTarget: THREE.Vector3;
+    t0: number;
+    durationMs: number;
+  } | null = null;
+  private readonly contactMats: THREE.MeshPhysicalMaterial[] = [];
+  private readonly contactGlow = new Float32Array(3);
+  private aimPointerId: number | null = null;
+
+  constructor(canvas: HTMLCanvasElement, callbacks: SceneCallbacks, opts: SceneOptions = {}) {
     this.canvas = canvas;
     this.callbacks = callbacks;
+    this.tier = opts.tier ?? "high";
+    this.reducedMotion = opts.reducedMotion ?? false;
 
+    // The composer owns anti-aliasing (MSAA on the HDR target), so the default framebuffer stays
+    // single-sampled: no wasted multisample buffer on phones.
     this.renderer = new THREE.WebGLRenderer({
       canvas,
-      antialias: true,
+      antialias: false,
       powerPreference: "high-performance",
     });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 0.84;
+    this.pixelRatio = Math.min(window.devicePixelRatio || 1, PocketWatchScene.dprCap(this.tier));
+    this.renderer.setPixelRatio(this.pixelRatio);
+    // Khronos PBR Neutral keeps base colors faithful (gold stays gold instead of drifting orange).
+    this.renderer.toneMapping = THREE.NeutralToneMapping;
+    this.renderer.toneMappingExposure = 1.0;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x06080e);
+    this.scene.background = new THREE.Color(0x05070b);
 
     const pmrem = new THREE.PMREMGenerator(this.renderer);
-    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.045).texture;
-    this.scene.environmentIntensity = 0.36;
+    const studio = buildStudioEnvironmentScene();
+    this.scene.environment = pmrem.fromScene(studio, 0.02).texture;
+    this.scene.environmentIntensity = 0.62;
     pmrem.dispose();
+    studio.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (m.isMesh) {
+        m.geometry.dispose();
+        (m.material as THREE.Material).dispose();
+      }
+    });
+    void RoomEnvironment;
+
+    this.glowUniforms = {
+      uBlackbody: { value: buildBlackbodyLut() },
+      uGlowScale: { value: 0.75 },
+      uThermalOverlay: { value: 0 },
+    };
+    const makeFloatTex = (buf: Float32Array, w: number, h: number): THREE.DataTexture => {
+      const t = new THREE.DataTexture(buf, w, h, THREE.RGBAFormat, THREE.FloatType);
+      t.minFilter = THREE.NearestFilter;
+      t.magFilter = THREE.NearestFilter;
+      t.generateMipmaps = false;
+      t.needsUpdate = true;
+      return t;
+    };
+    this.shellUniforms = {
+      uShellA: { value: makeFloatTex(this.shellBufA, CASE_SHELL_N_THETA, CASE_SHELL_N_Z) },
+      uShellB: { value: makeFloatTex(this.shellBufB, CASE_SHELL_N_THETA, CASE_SHELL_N_Z) },
+    };
+    for (let i = 0; i < GRID_N * GRID_N; i++) this.gridTexBuf[i * 4 + 2] = 293.15;
+    this.gridUniforms = {
+      uGrid: { value: makeFloatTex(this.gridTexBuf, GRID_N, GRID_N) },
+      uGridN: { value: GRID_N },
+      uHalfSpan: { value: GRID_HALF_SPAN_MM },
+    };
 
     this.camera = new THREE.PerspectiveCamera(34, 1.0, 0.5, 450);
     this.camera.position.set(0, -34, 66);
 
-    // Half-float HDR post-processing pipeline (RenderPass -> UnrealBloomPass -> SMAAPass -> OutputPass)
-    // Bloom threshold is set above 1.45 so room-temperature metals stay crisp and un-washed,
-    // while genuine >900 K blackbody incandescence and blowtorch plasma plumes bloom naturally.
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    // Half-float HDR post chain (RenderPass -> UnrealBloomPass -> OutputPass). MSAA lives on the HDR
+    // target; SMAA is only enabled on the low tier where the target is single-sampled. Bloom is
+    // gated off whenever nothing is incandescent or burning, so idle frames skip its five blur mips.
     const initW = Math.max(320, canvas.clientWidth || 960);
     const initH = Math.max(260, canvas.clientHeight || 640);
-    const hdrTarget = new THREE.WebGLRenderTarget(initW * dpr, initH * dpr, {
+    const hdrTarget = new THREE.WebGLRenderTarget(initW * this.pixelRatio, initH * this.pixelRatio, {
       type: THREE.HalfFloatType,
       format: THREE.RGBAFormat,
-      samples: 4,
+      samples: this.tier === "high" ? 4 : this.tier === "medium" ? 2 : 0,
     });
     this.composer = new EffectComposer(this.renderer, hdrTarget);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
-    this.bloomPass = new UnrealBloomPass(
-      new THREE.Vector2(initW, initH),
-      0.08,
-      0.36,
-      1.48,
-    );
+    this.bloomPass = new UnrealBloomPass(new THREE.Vector2(initW, initH), 0.08, 0.36, 1.25);
+    this.bloomPass.enabled = false;
     this.composer.addPass(this.bloomPass);
     this.smaaPass = new SMAAPass();
+    this.smaaPass.enabled = this.tier === "low";
     this.composer.addPass(this.smaaPass);
     this.composer.addPass(new OutputPass());
 
     this.controls = new OrbitControls(this.camera, this.canvas);
     this.controls.enableDamping = true;
-    this.controls.dampingFactor = 0.06;
+    this.controls.dampingFactor = 0.07;
+    this.controls.rotateSpeed = 0.8;
+    this.controls.zoomSpeed = 0.9;
+    this.controls.minDistance = 4;
+    this.controls.maxDistance = 180;
     this.controls.target.set(0, -2, 0);
+    this.controls.addEventListener("start", () => {
+      this.cameraTween = null;
+    });
 
     // Museum-grade chiaroscuro horological lighting (balanced to prevent metallic blowout)
-    const keyLight = new THREE.DirectionalLight(0xfff4e0, 1.38);
+    const keyLight = new THREE.DirectionalLight(0xfff4e0, 1.15);
+    this.keyLight = keyLight;
     keyLight.position.set(32, 42, 58);
     keyLight.castShadow = true;
-    keyLight.shadow.mapSize.set(2048, 2048);
+    const shadowRes = this.tier === "low" ? 1024 : 2048;
+    keyLight.shadow.mapSize.set(shadowRes, shadowRes);
     keyLight.shadow.camera.near = 10;
     keyLight.shadow.camera.far = 160;
     const d = 34;
@@ -806,135 +1052,153 @@ export class PocketWatchScene {
     // Procedural Horological Finishes
     const finishes = buildHorologicalFinishTextures();
 
-    // Sourced Materials from `data/matdb/seed-v1`
+    // Physically based conductor reflectances (linear-sRGB F0 at normal incidence, from measured
+    // n,k data: Au/Ag/Cu 18k yellow alloy, CuZn brass, rhodium plating, carbon steel, Ti-6Al-4V,
+    // CuBe2 Glucydur). Dielectrics use their real IOR: corundum (ruby/sapphire) n = 1.768.
+    const linear = (r: number, g: number, b: number): THREE.Color =>
+      new THREE.Color().setRGB(r, g, b, THREE.LinearSRGBColorSpace);
+    const lowTier = this.tier === "low";
+
+    // 18k case: base F0 lives in `color`; the shader multiplies thermal tints / IR false-color and
+    // adds per-pixel blackbody emission from the GPU-sampled shell temperature.
     this.matGoldCase = new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color(0xffffff),
-      emissive: new THREE.Color(0xff5810),
-      emissiveIntensity: 0.0,
-      metalness: 0.91,
-      roughness: 0.23,
-      clearcoat: 0.14,
-      clearcoatRoughness: 0.18,
-      vertexColors: true,
+      color: linear(0.95, 0.76, 0.4),
+      metalness: 1.0,
+      roughness: 0.2,
+      clearcoat: 0.1,
+      clearcoatRoughness: 0.12,
+      specularIntensity: 1.0,
     });
 
     this.matSolidGoldStatic = new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color(0xe5b852),
-      metalness: 0.91,
-      roughness: 0.22,
-      clearcoat: 0.14,
-      clearcoatRoughness: 0.18,
+      color: linear(0.95, 0.76, 0.4),
+      metalness: 1.0,
+      roughness: 0.17,
+      clearcoat: 0.1,
+      clearcoatRoughness: 0.12,
     });
 
+    // Liquid gold is a mirror (roughness ~0.05) whose base color whitens slightly when hot.
     this.matMoltenGold = new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color(0xffffff),
-      emissive: new THREE.Color(0xff6214),
-      emissiveIntensity: 0.22,
-      metalness: 0.92,
-      roughness: 0.11,
-      clearcoat: 0.65,
-      clearcoatRoughness: 0.08,
-      vertexColors: true,
+      color: new THREE.Color(1, 1, 1),
+      metalness: 1.0,
+      roughness: 0.06,
+      clearcoat: 0.5,
+      clearcoatRoughness: 0.05,
       transparent: true,
-      alphaTest: 0.015,
+      alphaTest: 0.02,
       depthWrite: true,
     });
 
     this.matSolidifiedGold = new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color(0xffffff),
-      metalness: 0.9,
-      roughness: 0.27,
-      clearcoat: 0.14,
-      vertexColors: true,
+      color: new THREE.Color(1, 1, 1),
+      metalness: 1.0,
+      roughness: 0.34,
+      clearcoat: 0.08,
       transparent: true,
-      alphaTest: 0.015,
+      alphaTest: 0.02,
       depthWrite: true,
     });
 
     this.matRhodiumPlate = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(0xc2c9d6),
-      metalness: 0.86,
-      roughness: 0.34,
+      color: linear(0.66, 0.67, 0.68),
+      metalness: 1.0,
+      roughness: 0.32,
       normalMap: finishes.perlageNormal,
       normalScale: new THREE.Vector2(0.45, 0.45),
     });
 
     this.matGenevaBridge = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(0xcfd6e3),
-      metalness: 0.88,
-      roughness: 0.27,
+      color: linear(0.7, 0.71, 0.72),
+      metalness: 1.0,
+      roughness: 0.24,
       normalMap: finishes.genevaNormal,
       normalScale: new THREE.Vector2(0.55, 0.55),
     });
 
     this.matBrassWheel = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(0xd8ae48),
-      metalness: 0.89,
-      roughness: 0.25,
+      color: linear(0.91, 0.73, 0.38),
+      metalness: 1.0,
+      roughness: 0.22,
     });
 
     this.matPolishedSteel = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(0xdce3ee),
-      metalness: 0.93,
-      roughness: 0.15,
+      color: linear(0.58, 0.58, 0.6),
+      metalness: 1.0,
+      roughness: 0.12,
     });
 
     this.matSunburstSteel = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(0xd0d7e4),
-      metalness: 0.9,
-      roughness: 0.22,
+      color: linear(0.56, 0.57, 0.6),
+      metalness: 1.0,
+      roughness: 0.2,
       normalMap: finishes.sunburstNormal,
       normalScale: new THREE.Vector2(0.52, 0.52),
     });
 
+    // Blued steel is a ~250 nm Fe3O4 temper film on steel: thin-film interference (iridescence)
+    // over a steel substrate, tinted by the engine's fs-render interference color.
     this.matBluedSteel = new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color(0x1f49b8),
-      metalness: 0.84,
-      roughness: 0.18,
-      clearcoat: 0.48,
-      clearcoatRoughness: 0.1,
+      color: linear(0.09, 0.2, 0.62),
+      metalness: 0.9,
+      roughness: 0.16,
+      clearcoat: 0.4,
+      clearcoatRoughness: 0.08,
+      iridescence: lowTier ? 0 : 0.55,
+      iridescenceIOR: 2.4,
+      iridescenceThicknessRange: [220, 300],
     });
 
     this.matHairspring = new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color(0x2e60d8),
-      metalness: 0.86,
-      roughness: 0.18,
+      color: linear(0.12, 0.25, 0.7),
+      metalness: 0.9,
+      roughness: 0.16,
       clearcoat: 0.35,
+      iridescence: lowTier ? 0 : 0.45,
+      iridescenceIOR: 2.4,
+      iridescenceThicknessRange: [220, 300],
     });
 
     this.matTitaniumCage = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(0xb4becb),
-      metalness: 0.88,
-      roughness: 0.21,
-    });
-
-    this.matGlucydurBalance = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(0xe2a442),
-      metalness: 0.9,
+      color: linear(0.54, 0.5, 0.45),
+      metalness: 1.0,
       roughness: 0.18,
     });
 
+    this.matGlucydurBalance = new THREE.MeshStandardMaterial({
+      color: linear(0.93, 0.66, 0.4),
+      metalness: 1.0,
+      roughness: 0.16,
+    });
+
+    // Synthetic ruby (Cr:Al2O3): transmissive corundum with Cr3+ absorption (green/blue absorbed).
     this.matRubyJewel = new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color(0xc90a35),
-      emissive: new THREE.Color(0x280008),
-      metalness: 0.02,
-      roughness: 0.06,
-      transmission: 0.82,
-      ior: 1.77,
-      thickness: 1.2,
-      transparent: true,
-      opacity: 0.92,
+      color: linear(1.0, 0.22, 0.3),
+      emissive: linear(0.45, 0.0, 0.04),
+      emissiveIntensity: 0.0,
+      metalness: 0.0,
+      roughness: 0.05,
+      transmission: lowTier ? 0 : 0.9,
+      ior: 1.768,
+      thickness: 0.8,
+      attenuationColor: linear(0.95, 0.06, 0.12),
+      attenuationDistance: 0.45,
+      specularIntensity: 1.0,
+      transparent: lowTier,
+      opacity: lowTier ? 0.9 : 1.0,
     });
 
     this.matSapphireCrystal = new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color(0xf4f9ff),
+      color: new THREE.Color(1, 1, 1),
       metalness: 0.0,
-      roughness: 0.04,
-      transmission: 0.94,
+      roughness: 0.03,
+      transmission: lowTier ? 0 : 1.0,
       ior: 1.768,
-      thickness: 1.2,
+      thickness: 0.65,
+      specularIntensity: 1.0,
       transparent: true,
-      opacity: 0.18,
+      opacity: lowTier ? 0.14 : 1.0,
+      depthWrite: false,
     });
 
     this.matScrewSlot = new THREE.MeshBasicMaterial({ color: 0x0b101b });
