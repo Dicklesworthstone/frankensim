@@ -3,7 +3,7 @@ use super::super::grid_refinement::Policy;
 use super::*;
 use fs_solver::LinearOp;
 
-const SCOPE: &str = "One bounded native refit inherits raw design controls and protected regions, rebuilds self-weight on the finer grid, and starts a separate optimizer with its own declared update and evaluation allowances. Geometry, Krylov and wall work remain cumulative. Until a completed candidate passes a fresh complete-load-family physical recheck, the selected design and its field export remain the immutable source design. Promotion does not establish cross-grid objective descent or continuum feasibility; the promoted design receives its own enriched-grid assessment. Iteration histories, gradient audits and stopping diagnostics belong to their respective working grids.";
+const SCOPE: &str = "One bounded native refit inherits raw design controls and protected regions, rebuilds self-weight and reintegrates the original fixed mechanical preload on the finer grid, and starts a separate optimizer with its own declared update and evaluation allowances. Geometry, Krylov and wall work remain cumulative. Until a completed candidate passes a fresh complete-load-family physical recheck, the selected design and its field export remain the immutable source design. Promotion does not establish cross-grid objective descent or continuum feasibility; the promoted design receives its own enriched-grid assessment. Iteration histories, gradient audits and stopping diagnostics belong to their respective working grids.";
 
 fn invalid(message: impl Into<String>) -> Failure {
     fail("cli-study-sdf3-grid-refinement-output", message)

@@ -42,6 +42,26 @@ fn goal_model(config: Config) -> String {
     )
 }
 
+fn has_dead_load(spec: &Spec) -> bool {
+    spec.affine_dead_load.is_some_and(|law|
+        law.body_n_m3.iter().any(|value| *value != 0.0) || law.surface.is_some())
+}
+
+/// The authored reference preload is independent of occupancy and uncertainty.
+/// Its displacement is combined with native material self-weight in the common
+/// offset; the uncertain basis columns remain separate native solves.
+fn dead_load_model(spec: &Spec) -> String {
+    let Some(law) = spec.affine_dead_load else { return "null".into(); };
+    let surface = law.surface.map_or_else(|| "null".into(), |surface| {
+        let (kind, pa) = match surface.force {
+            loading::Force::Pressure(value) => ("pressure", format!("{value:.17e}")),
+            loading::Force::Traction(value) => ("traction", format!("{value:?}")),
+        };
+        format!("{{\"kind\":{kind:?},\"pa\":{pa},\"x_fraction\":{:?}}}", surface.x_fraction)
+    });
+    format!("{{\"body_n_m3\":{:?},\"surface\":{surface}}}", law.body_n_m3)
+}
+
 pub(super) fn measurement(
     point: &AffineLoadSpaceDesignPoint3,
     config: Config,
@@ -184,7 +204,7 @@ fn fields(
         }
     };
     Ok(format!(
-        "{{\"cells\":[{cells}],\"physical_nodes_m\":{:?},\"cell_nodes\":{:?},\"displacement_layout\":\"basis column then node-major xyz, on eroded material\",\"basis_displacements_m\":{basis:?},\"offset_displacement_m\":{offset:?},\"worst_displacement_m\":{worst:?}{strength}{responses}}}",
+        "{{\"cells\":[{cells}],\"physical_nodes_m\":{:?},\"cell_nodes\":{:?},\"displacement_layout\":\"basis column then node-major xyz, on eroded material\",\"offset_displacement_scope\":\"complete common load f_dead+B*rho_eroded on eroded stiffness\",\"basis_displacements_m\":{basis:?},\"offset_displacement_m\":{offset:?},\"worst_displacement_m\":{worst:?}{strength}{responses}}}",
         operator.physical_nodes(),
         operator.cell_nodes(),
     ))
@@ -399,8 +419,14 @@ pub(super) fn persist(
             format!("{:.17e}", config.cap_j), "null".into(), "dilated", "eroded",
         ),
     };
+    let dead_load = dead_load_model(spec);
+    let (force_set, dead_offset) = if has_dead_load(spec) {
+        ("f=f_dead+B*rho_eroded+Fq, ||q||_2<=1", "authored-reference-load")
+    } else {
+        ("f=B*rho_eroded+Fq, ||q||_2<=1", "zero")
+    };
     let model = format!(
-        "{{\"goal\":{goal},\"force_set\":\"f=B*rho_eroded+Fq, ||q||_2<=1\",\"dead_offset\":\"zero\",\"basis_columns\":{},\"material_density_kg_m3\":{},\"acceleration_m_s2\":{:?},\"compliance_reference_j\":{},\"compliance_limit_j\":{compliance_limit},\"volume_limit_fraction\":{volume_limit},\"threshold_offset\":{},\"nominal_threshold\":{},\"penal\":{},\"beta\":{},\"constraint_material\":{constraint_material:?},\"objective_material\":{objective_material:?},\"oracle_max_iterations\":{},\"oracle_tolerance\":{},\"oracle_separation_tolerance\":{},\"strength_constraint\":{strength_model},\"joint_sharpness\":{:.17e}{response_model}{assessment_model}{refinement_model}}}",
+        "{{\"goal\":{goal},\"force_set\":{force_set:?},\"dead_offset\":{dead_offset:?},\"affine_dead_load\":{dead_load},\"basis_columns\":{},\"material_density_kg_m3\":{},\"acceleration_m_s2\":{:?},\"compliance_reference_j\":{},\"compliance_limit_j\":{compliance_limit},\"volume_limit_fraction\":{volume_limit},\"threshold_offset\":{},\"nominal_threshold\":{},\"penal\":{},\"beta\":{},\"constraint_material\":{constraint_material:?},\"objective_material\":{objective_material:?},\"oracle_max_iterations\":{},\"oracle_tolerance\":{},\"oracle_separation_tolerance\":{},\"strength_constraint\":{strength_model},\"joint_sharpness\":{:.17e}{response_model}{assessment_model}{refinement_model}}}",
         spec.loads.len(),
         law.density_kg_m3,
         law.acceleration_m_s2,
@@ -459,8 +485,17 @@ pub(super) fn persist(
             "Worst compliance / limit",
         ),
     };
+    let preload_html = spec.affine_dead_load.map_or_else(String::new, |law| {
+        let surface = law.surface.map_or_else(|| "none".into(), |surface| match surface.force {
+            loading::Force::Pressure(value) => format!(
+                "inward-positive pressure {value:.8e} Pa on x-fraction {:?}", surface.x_fraction),
+            loading::Force::Traction(value) => format!(
+                "traction {value:?} Pa on x-fraction {:?}", surface.x_fraction),
+        });
+        format!("<p>Common fixed mechanical preload: body force density {:?} N/m³; implicit-surface load: {surface}. This reference-configuration load is added once to the density-dependent self-weight and remains fixed across the uncertain force combinations. Pressure follows the reference normal; follower-load mechanics are not included. The exported offset displacement responds to the complete common preload plus self-weight.</p>", law.body_n_m3)
+    });
     let html = format!(
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>{title}</title><body><h1>{title}</h1><p>Status: {}. Optimization status: {}. Estimated numerical results.</p><p>Selected design: {selection}; physically feasible for the declared design goal over the complete affine load set: {feasible}.</p><p>The selected design has dilated volume fraction {:.8e} and worst compliance {:.8e} J. The last accepted iterate has dilated volume fraction {:.8e} and worst compliance {:.8e} J; optimizer stopping and KKT diagnostics apply to that iterate.</p><p>{requirement} The common self-weight changes with eroded occupancy; all simultaneous external-force combinations in the declared unit ball are considered.</p>{refinement_html}{constraints_html}{assessment_html}<p>{SCOPE}</p><table><tr><th>Update</th><th>Normalized optimizer objective</th><th>Dilated volume fraction</th><th>Worst compliance (J)</th><th>{ratio_label}</th><th>Joint constraint</th><th>Feasible</th></tr>{table}</table></body></html>",
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>{title}</title><body><h1>{title}</h1><p>Status: {}. Optimization status: {}. Estimated numerical results.</p><p>Selected design: {selection}; physically feasible for the declared design goal over the complete affine load set: {feasible}.</p><p>The selected design has dilated volume fraction {:.8e} and worst compliance {:.8e} J. The last accepted iterate has dilated volume fraction {:.8e} and worst compliance {:.8e} J; optimizer stopping and KKT diagnostics apply to that iterate.</p><p>{requirement} The common self-weight changes with eroded occupancy; all simultaneous external-force combinations in the declared unit ball are considered.</p>{preload_html}{refinement_html}{constraints_html}{assessment_html}<p>{SCOPE}</p><table><tr><th>Update</th><th>Normalized optimizer objective</th><th>Dilated volume fraction</th><th>Worst compliance (J)</th><th>{ratio_label}</th><th>Joint constraint</th><th>Feasible</th></tr>{table}</table></body></html>",
         state.status,
         state.optimization_status,
         selected_volume,

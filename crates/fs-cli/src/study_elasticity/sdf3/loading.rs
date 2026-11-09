@@ -109,6 +109,27 @@ impl SurfaceSpec {
     }
 }
 
+/// An authored mechanical preload shared by the whole uncertain load ball.
+/// It is fixed on the reference domain and independent of material occupancy;
+/// the native material-acceleration recipe remains a separate changing load.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct DeadLoad {
+    pub body_n_m3: [f64; 3],
+    pub surface: Option<SurfaceSpec>,
+}
+impl DeadLoad {
+    pub(super) fn validate(self, level: u32) -> Result<()> {
+        if self.body_n_m3.iter().any(|v| !v.is_finite() || v.abs() > 1e12) {
+            return Err(fail("cli-study-sdf3-input",
+                "affine dead-body load must be finite and bounded by 1e12 N/m3 per component"));
+        }
+        if let Some(surface) = self.surface {
+            surface.validate(level)?;
+        }
+        Ok(())
+    }
+}
+
 /// Surface loads OR embedded supports require surface rules. All rule families
 /// use the same domain, support law and cumulative allowance on EVERY grid.
 pub(super) fn build_operator(
@@ -148,8 +169,9 @@ pub(super) fn build_operator(
             // Diagnose the ACTUAL retained patch, including a surface on a
             // shared band endpoint. Selection itself remains pure and stable.
             // Never remove requested loads to manufacture lower compliance.
-            if selected && spec.surfaces.iter().flatten().any(|law|
-                law.traction(p, n, spec.bounds).iter().any(|v| *v != 0.0))
+            if selected && spec.surfaces.iter().flatten()
+                .chain(spec.affine_dead_load.as_ref().and_then(|dead| dead.surface.as_ref()))
+                .any(|law| law.traction(p, n, spec.bounds).iter().any(|v| *v != 0.0))
             {
                 conflict.set(true);
             }
@@ -171,7 +193,9 @@ pub(super) fn build_operator(
                 "surface load overlaps an embedded support; declare disjoint physical patches"));
         }
         Ok(operator)
-    } else if spec.surfaces.iter().any(Option::is_some) {
+    } else if spec.surfaces.iter().any(Option::is_some)
+        || spec.affine_dead_load.is_some_and(|dead| dead.surface.is_some())
+    {
         if let Some(field) = field {
             AdaptiveElasticity3::build_with_material_field_and_surface(bounds, tree, domain, field,
                 &clamp, options, Default::default(), quadrature)
@@ -212,6 +236,25 @@ pub(super) fn with_laws<T>(spec: &Spec,
         }
     }).collect();
     apply(&loads)
+}
+
+/// Keep the known preload separate from every uncertain basis column. All
+/// callbacks borrow reference laws for the complete numerical invocation, so
+/// assessment reintegrates the same preload on each actual grid. In particular
+/// pressure uses reference normals and is never a displacement-following load.
+pub(super) fn with_affine_laws<T>(spec: &Spec,
+    apply: impl FnOnce(ReferenceLoad3<'_>, &[GoalReferenceLoad3<'_>]) -> T) -> T {
+    let body = |_: [f64; 3]| spec.affine_dead_load.map_or([0.0; 3], |dead| dead.body_n_m3);
+    let surface = |p, n| spec.affine_dead_load.and_then(|dead| dead.surface)
+        .map_or([0.0; 3], |law| law.traction(p, n, spec.bounds));
+    let dead = ReferenceLoad3 {
+        body: spec.affine_dead_load
+            .filter(|dead| dead.body_n_m3.iter().any(|v| *v != 0.0))
+            .map(|_| &body as &dyn Fn([f64; 3]) -> [f64; 3]),
+        surface: spec.affine_dead_load.and_then(|dead| dead.surface)
+            .map(|_| SurfaceForce3::Traction(&surface)),
+    };
+    with_laws(spec, |laws| apply(dead, laws))
 }
 
 #[cfg(test)]

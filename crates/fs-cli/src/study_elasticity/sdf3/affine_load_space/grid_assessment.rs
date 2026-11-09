@@ -211,14 +211,14 @@ pub(super) fn run(
             }
             spec.solver.wrap(operator, &refs, &mut poll)?
         };
-        loading::with_laws(spec, |laws| {
+        loading::with_affine_laws(spec, |dead, laws| {
             let basis: Vec<_> = laws.iter().map(|law| law.load).collect();
             response_binding::with_reference_limits(coarse_responses.as_ref(), |coarse| {
                 response_binding::with_reference_limits(fine_responses.as_ref(), |fine| {
                     study.estimate_affine_load_space_enrichment_for_goal_with_grid_constraints(
                         enriched,
                         rho,
-                        ReferenceLoad3::default(),
+                        dead,
                         &basis,
                         config.options.robustness,
                         &load_policy,

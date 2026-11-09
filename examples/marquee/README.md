@@ -159,6 +159,39 @@ objective change with `compliance-change-tolerance` and absolute volume-fraction
 change with `inventory-change-tolerance`. The example remains a numerical
 linear-elastic demonstration, without a continuum stiffness or optimality claim.
 
+## Known service preload, self-weight and uncertain loads
+
+`bracket-3d-affine-preload.fsim` adds a fixed mechanical preload to the
+fixed-volume compliance example. Its complete force family is
+`f = f_dead + B*rho_eroded + Fq`, `||q||₂ <= 1`. The optional section follows
+`material-acceleration` and precedes strength, response and grid controls:
+
+```lisp
+(affine-dead-load
+  :body-n-m3 (0.0 0.0 -0.1)
+  :surface (pressure :pa 0.1 :x-fraction (0.5 1.0)))
+```
+
+Body force density uses N/m3; surface pressure and traction use Pa. To author
+traction instead, use `(traction :pa (0.0 0.0 -0.1) :x-fraction (0.5 1.0))`.
+Use `surface none` for a body-only preload. The fixed preload does not scale
+with material occupancy. Self-weight still follows eroded occupancy, and the
+uncertain columns still describe simultaneous deviations around the combined
+common load. Omitting the section retains the original zero fixed preload.
+
+```sh
+frankensim --json study examples/marquee/bracket-3d-affine-preload.fsim preload.db --budget 2
+frankensim --json study --resume study-<receipt-hash> preload.db --budget 2
+frankensim --json report study-<receipt-hash> preload.db
+```
+
+Pressure acts inward on the reference implicit surface, including cavity walls
+inside the authored x band; it is not a follower load. Surface bands must align
+with the initial octree and cannot overlap an embedded support. Every enriched
+or refitted grid reintegrates the same physical reference law. Reported offset
+displacement includes both fixed preload and self-weight, with their cross terms
+retained in the native worst-load calculation and every declared constraint.
+
 ## Joint compliance and strength with uncertain loads
 
 `bracket-3d-affine-strength.fsim` adds a physical stress allowable to the

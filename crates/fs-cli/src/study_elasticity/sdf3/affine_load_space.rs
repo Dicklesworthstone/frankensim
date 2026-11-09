@@ -1,5 +1,6 @@
 //! Native minimum-material and fixed-volume worst-compliance affine design.
-//! Native self-weight is a common offset, never another uncertain basis column.
+//! Fixed reference preload and native self-weight share the common offset,
+//! separately from the uncertain external-load basis.
 use super::*;
 use fs_ascent::projected_al::{
     ProjectedAlError, ProjectedAlReport, ProjectedAlStop, ProjectedAlWork,
@@ -27,7 +28,7 @@ pub(super) mod grid_assessment;
 #[path = "affine_load_space/grid_refinement.rs"]
 pub(super) mod grid_refinement;
 
-const SCOPE: &str = "Estimated linear-elastic design for f=B*rho_eroded+Fq, ||q||_2<=1. The declared goal either minimizes dilated material under a worst-compliance cap, or minimizes worst compliance under a dilated-volume cap. In the latter mode the compliance reference is a numerical normalization scale, not a physical cap. The common load is native material self-weight at eroded occupancy; no separate dead load is authored. Force columns retain physical amplitudes and correlations, not probabilities. A bounded quadratic-ball solve selects the complete affine compliance witness; its primal/dual gap and residuals are numerical diagnostics, not certified bounds. Eroded material supplies stiffness and self-weight; dilated material supplies inventory. With self-weight, erosion is not asserted to be the worst manufacturing realization. When strength is declared, each retained bulk quadrature point has its own adverse load direction; an unweighted p-norm bounds both relaxed and physical sampled stresses over the load ball in exact arithmetic. The declared allowable is not inferred from stiffness. Signed displacement and support-reaction limits use each inequality's own adverse load over the same full affine ball. Displacement means use each grid's reference cut volume; support forces are numerical tractions on the solid and moments are signed about the authored reference origin. The goal's physical cap, responses and strength share one conservative joint constraint and the same physical primal fields. Initial full-chain objective and constraint gradients are independently checked. Hard or unresolved load maximizers cannot supply a smooth gradient. Only accepted points passing every declared physical cap and the complete joint constraint enter the feasible archive, ranked by the actual objective; KKT values describe the last accepted point. Accepted results are retained before more optimization. An optional active-cell uniform enrichment re-solves the entire affine load family and assesses every original response and sampled strength while inheriting physical occupancy. Separate objective, inventory and physical change gates apply on both grids. An optional single bounded native refit optimizes inherited raw controls with the same goal on an unresolved enriched grid, with separate optimizer allowances and cumulative physical work. Its source design stays selected until a complete fresh candidate recheck passes, after which the promoted design receives its own finer-grid assessment. Failed assessment preserves its accepted checkpoint and charged work for a bounded retry. Cross-process resume restores accepted optimizer state under the same source and executable, verifies the native physical-problem and goal binding, rebuilds geometry and re-solves accepted and distinct feasible incumbent endpoints against the original work allowances. Earlier optimizer steps and the initial gradient experiment are not replayed. Failed restoration and uncheckpointed work lost after a crash cannot be durably charged; previous results remain intact. Individual kernels and ledger writes are indivisible; wall and cancellation limits are cooperative. Memory is an admission envelope. No continuum stress maximum, buckling, continuum-error, manufacturing-tolerance, global design-optimality, safety or experimental-validation claim.";
+const SCOPE: &str = "Estimated linear-elastic design for f=f_dead+B*rho_eroded+Fq, ||q||_2<=1. The declared goal either minimizes dilated material under a worst-compliance cap, or minimizes worst compliance under a dilated-volume cap. In the latter mode the compliance reference is a numerical normalization scale, not a physical cap. The common load combines optional fixed reference body/surface preload with native material self-weight at eroded occupancy. Fixed preload is not scaled by occupancy; pressure is inward-positive on the reference normal, never a follower load. Omitted preload is zero. Force columns retain physical amplitudes and correlations, not probabilities. A bounded quadratic-ball solve selects the complete affine compliance witness; its primal/dual gap and residuals are numerical diagnostics, not certified bounds. Eroded material supplies stiffness and self-weight; dilated material supplies inventory. With self-weight, erosion is not asserted to be the worst manufacturing realization. When strength is declared, each retained bulk quadrature point has its own adverse load direction; an unweighted p-norm bounds both relaxed and physical sampled stresses over the load ball in exact arithmetic. The declared allowable is not inferred from stiffness. Signed displacement and support-reaction limits use each inequality's own adverse load over the same full affine ball. Displacement means use each grid's reference cut volume; support forces are numerical tractions on the solid and moments are signed about the authored reference origin. The goal's physical cap, responses and strength share one conservative joint constraint and the same physical primal fields. Initial full-chain objective and constraint gradients are independently checked. Hard or unresolved load maximizers cannot supply a smooth gradient. Only accepted points passing every declared physical cap and the complete joint constraint enter the feasible archive, ranked by the actual objective; KKT values describe the last accepted point. Accepted results are retained before more optimization. An optional active-cell uniform enrichment re-solves the entire affine load family and assesses every original response and sampled strength while inheriting physical occupancy. Separate objective, inventory and physical change gates apply on both grids. An optional single bounded native refit optimizes inherited raw controls with the same goal on an unresolved enriched grid, with separate optimizer allowances and cumulative physical work. Its source design stays selected until a complete fresh candidate recheck passes, after which the promoted design receives its own finer-grid assessment. Failed assessment preserves its accepted checkpoint and charged work for a bounded retry. Cross-process resume restores accepted optimizer state under the same source and executable, verifies the native physical-problem and goal binding, rebuilds geometry and re-solves accepted and distinct feasible incumbent endpoints against the original work allowances. Earlier optimizer steps and the initial gradient experiment are not replayed. Failed restoration and uncheckpointed work lost after a crash cannot be durably charged; previous results remain intact. Individual kernels and ledger writes are indivisible; wall and cancellation limits are cooperative. Memory is an admission envelope. No continuum stress maximum, buckling, continuum-error, manufacturing-tolerance, global design-optimality, safety or experimental-validation claim.";
 
 // The original authored mode retains its exact numerical objective. Every
 // live solve, audit, restore and refinement instead uses Config::goal.
@@ -379,16 +380,8 @@ fn compute_on_grid(
         },
         &mut cp,
     );
-    let mut state = loading::with_laws(spec, |laws| -> Result<State> {
-        let forces = laws
-            .iter()
-            .map(|law| {
-                study
-                    .operator()
-                    .elasticity()
-                    .reference_load(law.load, &poll)
-            })
-            .collect::<std::result::Result<Vec<_>, _>>()
+    let mut state = loading::with_affine_laws(spec, |dead_law, laws| -> Result<State> {
+        let assemble = |law| study.operator().elasticity().reference_load(law, &poll)
             .map_err(|e| Failure {
                 code: "cli-study-sdf3-affine-load-space",
                 message: e.to_string(),
@@ -399,11 +392,14 @@ fn compute_on_grid(
                 } else {
                     exit::REFUSED
                 },
-            })?;
+            });
+        let dead = assemble(dead_law)?;
+        let forces = laws.iter().map(|law| assemble(law.load))
+            .collect::<Result<Vec<_>>>()?;
         let basis: Vec<_> = forces.iter().map(Vec::as_slice).collect();
         // The changing material body force is assembled by the native owner
-        // once at eroded occupancy. It must not be baked into each basis load.
-        let dead = vec![0.0; forces[0].len()];
+        // once at eroded occupancy. Fixed preload and self-weight must never
+        // be baked into each uncertain basis column.
         let response_fields = response_binding::assemble(spec, study.operator().elasticity(), &poll)
             .map_err(|e| Failure {
                 code: "cli-study-sdf3-affine-response",
@@ -580,3 +576,7 @@ mod grid_refinement_tests;
 #[cfg(test)]
 #[path = "affine_load_space/compliance_tests.rs"]
 mod compliance_tests;
+
+#[cfg(test)]
+#[path = "affine_load_space/dead_load_tests.rs"]
+mod dead_load_tests;

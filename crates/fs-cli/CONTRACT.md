@@ -1972,12 +1972,13 @@ tolerance or experimental-validation claim.
 
 With `sdf3-study`, objective `dilated-volume-fraction` and optimizer
 `affine-load-space-limited-simp` minimize dilated material under the physical
-compliance cap for every `f=B*rho_eroded+Fq`, `||q||_2<=1`. The required
+compliance cap for every `f=f_dead+B*rho_eroded+Fq`, `||q||_2<=1`. The required
 `material-acceleration` section supplies full-material density and a common
 occupancy-dependent load. Authored body/pressure/traction cases are unit-weight
 columns of `F`, carrying their physical amplitudes and correlations. The common
-load is assembled once at eroded occupancy, separately from these columns.
-There is no separately authored dead offset.
+material load is assembled once at eroded occupancy, separately from these
+columns. Optional `affine-dead-load` supplies fixed reference preload; omission
+retains the zero dead offset.
 
 The optimizer fields are `type`, `initial-density`, `filter-radius-m`,
 `max-updates`, `density-floor`, `compliance-limit-j`, `threshold-offset`,
@@ -2055,10 +2056,46 @@ physical semantics remain available. The numerical example is
 `examples/marquee/bracket-3d-affine-compliance.fsim`; the same Estimated authority
 and continuum, manufacturing, buckling and global-optimality limitations apply.
 
+### Fixed mechanical preload with self-weight and uncertain loads
+
+Both affine design goals accept one optional `affine-dead-load` section after
+`material-acceleration` and before `affine-strength`, `affine-responses` or grid
+controls. Its ordered fields are `body-n-m3` and `surface`:
+
+```lisp
+(affine-dead-load
+  :body-n-m3 (0.0 0.0 -0.1)
+  :surface (pressure :pa 0.1 :x-fraction (0.5 1.0)))
+```
+
+The body vector is a constant reference-volume force density in N/m3. `surface`
+accepts `none`, the pressure form above, or
+`(traction :pa (0.0 0.0 -0.1) :x-fraction (0.5 1.0))`. Body and surface forces
+are summed into one fixed common load, independent of optimized occupancy. They
+are never copied into the uncertain columns and do not replace density-dependent
+material acceleration. Pressure is inward-positive on the reference normal;
+traction uses the authored global vector. Both use the existing retained implicit
+surface rules, including cavity walls, restricted to the declared x band.
+Clipping-box faces and follower loads are outside this input's semantics.
+
+Body components must be finite with magnitude at most 1e12. A declared surface
+law must be finite and nonzero, with a band aligned to the initial octree. The
+actual retained patch must not overlap an embedded support. An all-zero body
+with `surface none` has the same numerical load as omission. This section is
+rejected for non-affine optimizers.
+
+The native reference-load owner integrates the preload on every original,
+restored, candidate and enriched grid. Its common displacement includes both
+fixed preload and self-weight; the same fields feed compliance, strength and
+signed response constraints. Canonical source identity and native endpoint
+binding protect the load law during continuation. Model output records the
+authored SI law and identifies the combined offset field. The example is
+`examples/marquee/bracket-3d-affine-preload.fsim`.
+
 ### Joint strength under self-weight and uncertain loads
 
 Both affine design goals accept an optional `affine-strength`
-section after `material-acceleration`, with these ordered fields:
+section after `material-acceleration` and any `affine-dead-load`, with these ordered fields:
 
 ```lisp
 (affine-strength
