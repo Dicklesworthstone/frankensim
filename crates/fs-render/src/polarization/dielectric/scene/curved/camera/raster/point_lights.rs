@@ -21,6 +21,8 @@ use fs_rand::philox::philox4x32_10;
 #[cfg(feature = "volumes")]
 pub mod participating;
 
+mod sequential;
+
 /// A physical-camera failure or the original source-connection failure in one
 /// spectral lane. No successfully traced prefix is published as a partial pixel.
 #[derive(Debug)]

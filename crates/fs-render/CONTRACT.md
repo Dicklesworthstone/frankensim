@@ -10533,6 +10533,33 @@ exact native trace budgets, and chromatic analyzed-lens timing at a real
 molecular vertex. They were parsed and independently source/API/math reviewed;
 renderer execution was unavailable in this editing environment.
 
+## Steady coated-lens point-fixture pixels
+
+`camera::raster::point_lights::sequential` adds native steady CIE/XYZ and
+multi-channel QE observations for clear point fixtures, molecular point
+connections and discovered refracted source images. Each family exposes
+ordinary, constant-analyzer and source-supported spectral-analyzer variants.
+The eighteen entry points share the original point collectors and complete
+steady beam methods; molecular consumers retain all three original random
+domains and per-lane source/camera work.
+
+Steady observation requests no group clock, so nontrivial absorbing lens
+coatings remain usable through their original full-Stokes response. A detector
+row is installed once at the physical sensor before the lens. Existing source
+calibration, scene-medium admission, source polarization, Rayleigh response,
+source survival and discovered-image accounting remain with the native owners.
+The CIE/QE integrators apply original geometry weights, spectral probabilities
+and photon conversion once. Adding detector channels creates no additional
+transport path. Clipped lanes keep their proposal mass and zero scene work;
+missing analyzer/source support and original transport failures refuse.
+
+The final native-owner regression exercises all six clear detector modes and
+molecular/image spectral-analyzer CIE/QE observations, positive independent
+fixture radiometry, exact native lane/work replay, active-coating timing
+refusal, closed-pupil accounting, spectral support and cancellation. Source
+and fixtures were parsed and independently source/API reviewed. Numerical
+renderer execution remains unperformed in this editing environment.
+
 ## Retarded point-fixture CIE and quantum-efficiency pixels
 
 `camera::raster::transient::point_lights` connects the admitted point histories
