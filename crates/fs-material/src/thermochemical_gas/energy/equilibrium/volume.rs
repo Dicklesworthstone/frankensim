@@ -15,6 +15,9 @@ pub mod reversible;
 /// Driven reacting parcels with original heat/work/energy/volume balances.
 pub mod driven;
 
+/// Reacting fixed-volume internal energy on the original thermal timeline.
+pub mod storage;
+
 use super::{GasEquilibriumChamberError, ThermochemicalGasModel, equilibrium_feed_mass, poll};
 use crate::thermochemical_gas::energy::{
     IsochoricGasParcel, parcel::ClosedGasParcel, updated_point,

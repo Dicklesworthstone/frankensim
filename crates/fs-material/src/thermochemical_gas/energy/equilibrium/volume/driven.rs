@@ -11,6 +11,7 @@ use super::{
     ThermochemicalGasModel,
 };
 use fs_matdb::QueryPoint;
+use fs_math::dd::Dd;
 use fs_math::eft::two_sum;
 use fs_qty::{Amount, Energy, Temperature, Volume};
 use fs_thermochem::SpeciesId;
@@ -486,7 +487,7 @@ fn reservoir_report(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn freeze(
+pub(super) fn freeze(
     bank: &ThermochemicalGasModel,
     chemistry: &IdealGasEquilibriumV1,
     context: &QueryPoint,
@@ -523,22 +524,38 @@ fn freeze(
     // species sources and temperature, so only represented amounts can differ.
     let chemical = chamber.equilibrium().equilibrium();
     let mixture = chamber.parcel().model().thermodynamics();
-    let total = mass / properties.molar_mass().value();
-    let mut energy = Account::default();
-    for (model, &fraction) in mixture.components().iter().zip(mixture.mole_composition().fractions()) {
+    let total = Dd::from_f64(mass) / Dd::from_f64(properties.molar_mass().value());
+    let mut energy = Dd::ZERO;
+    for (model, &fraction) in mixture
+        .components()
+        .iter()
+        .zip(mixture.mole_composition().fractions())
+    {
         poll(cancelled)?;
-        let product = chemical.species().iter().find(|s| &s.species == model.species())
-            .ok_or(Error::Invalid("frozen product lacks its original equilibrium species"))?;
-        let source = model.evaluate_properties(chemical.temperature()).map_err(|source| {
-            EquilibriumVolumeErrorV1::from(CompositionEquilibriumErrorV1::SpeciesEvaluation {
-                species: model.species().clone(), source,
-            })
-        })?;
-        energy.add((total * fraction - product.amount.value()) * source.u().value());
+        let product = chemical
+            .species()
+            .iter()
+            .find(|s| &s.species == model.species())
+            .ok_or(Error::Invalid(
+                "frozen product lacks its original equilibrium species",
+            ))?;
+        let source = model
+            .evaluate_properties(chemical.temperature())
+            .map_err(|source| {
+                EquilibriumVolumeErrorV1::from(CompositionEquilibriumErrorV1::SpeciesEvaluation {
+                    species: model.species().clone(),
+                    source,
+                })
+            })?;
+        energy = energy
+            + (total * Dd::from_f64(fraction) - Dd::from_f64(product.amount.value()))
+                * Dd::from_f64(source.u().value());
     }
-    let energy_defect = energy.value();
+    let energy_defect = energy.to_f64();
     if !energy_defect.is_finite() || energy_defect.abs() > controls.energy_tolerance_j {
-        return Err(Error::Invalid("source-relative material freezing exceeded the energy allowance"));
+        return Err(Error::Invalid(
+            "source-relative material freezing exceeded the energy allowance",
+        ));
     }
     poll(cancelled)?;
     Ok((chamber, energy_defect, defect))
