@@ -8559,10 +8559,13 @@ accuracy certificate. Six focused regressions cover independent thermal and
 composition modes, CFL aliasing, accepted-path balances, work/minimum-step
 refusal, continuation and cancellation/replay.
 
-The core snapshot fbf0992 passed 70 miscibility tests on the pinned Rust toolchain.
-These six additional adaptive regressions and the changed shared estimator
-were source-reviewed but could not be compiled or executed after the execution
-environment became unavailable.
+The published numerical sources through commit 1fabe824 passed all 76
+miscibility unit tests on the pinned `nightly-2026-07-06` Rust toolchain. This
+includes 16 new regressions across enthalpy advection, coupled transport and
+adaptive stepping. Verification used a focused Cargo workspace compiling the
+original miscibility module and its original internal dependencies, with no
+replacement physics or test stubs. It is a numerical-owner check, not a full
+workspace or DSR validation, and does not qualify the material adapter below.
 
 
 ### Original materials for locally nonisothermal miscibility
@@ -8597,9 +8600,13 @@ Three focused material regression groups cover temperature-dependent source
 properties, retained card/pressure/caloric identity, independent parcel-enthalpy
 temperatures, all five evolution paths, exact-law mismatch, late source and
 density refusal, cancellation and replay. These regressions were source-reviewed
-but not compiled or executed: the attempted material build first encountered
-disk exhaustion in a registry dependency, and the execution environment became
-unavailable after the temporary build output was relocated without deletion.
+but remain uncompiled and unexecuted. The final material check used the pinned
+Rust toolchain, a single Cargo job, offline dependencies and the original-source
+material dependency closure. It stopped when the compiler emitting metadata for
+the exact pinned `asupersync` dependency received `SIGKILL`, before reaching
+`fs-material` or the changed integration tests. No diagnosis against this adapter
+was produced; the interrupted dependency build is not evidence that the adapter
+compiles. DSR and RCH were unavailable, and the full workspace was not validated.
 
 ### Compatible molecular stress with variable viscosity
 
