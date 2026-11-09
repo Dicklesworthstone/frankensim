@@ -10342,3 +10342,38 @@ bounded isolated builds execute the actual native MBD/time, pHS and linear
 algebra numerical owners with no numerical substitutes; they are not a full
 workspace build. Existing thermal getter assertions were adapted to the typed
 finite-time API without changing thermal mechanics or heat routing.
+
+## Actual native motion with retained combined adhesive history
+
+`PreparedRigidJkrCombinedPair::continue_axial_geometry` turns accepted COM
+travel and commuting axial spin into actual poses. Its shared
+`continue_at_geometry` core also admits caller-supplied compatible poses and
+a tangent gauge change. Both use the original material markers and contact
+datum, rebuild the actual complete mixed-unit mobility, retain the complete
+source history with objective shear transport and unchanged chronology, and consume pending travel once.
+The existing ordered geometry capture is shared with ordinary preparation;
+noncontiguous original assembly indices survive pair-local recapture.
+
+Eligibility is historical: each body's angular velocity and world spin
+momentum must stay on the original normal throughout every accepted held
+phase. Later cancellation of transverse excursions does not repair that path.
+Endpoint attitudes must match the sealed integrated exponential-map rotation
+within representation roundoff. Common material spin is the mean of the two
+retained signed axial angles, independently of tangent gauge selection.
+
+Double-double audits independently check actual COM displacement, linear and
+world-spin momenta, total orbital-plus-spin angular momentum, kinetic energy
+and normal approach. The original source projection continuation checks every
+stored-energy component. Projected kinetic repartition remains diagnostic;
+no impulse, gap correction, geometry work or heat is inferred.
+
+Four new integration groups specify 48 successive free normal/twist phases,
+a fully loaded shear/twist contact with actual common spin and changed tangent
+gauge, original noncontiguous body indices, false/cancelled endpoint refusal
+with retry, and cancelling transverse angular excursions. Pinned formatting,
+recursive Rust parsing and scoped whitespace checks pass. These integration
+groups remain uncompiled and unexecuted under the workspace resource limits.
+
+The normal remains fixed and original transverse marker-collinearity admission
+is retained. This owner does not provide arbitrary finite attitudes, rolling,
+material-marker migration, detached trajectories or moving thermal faces.

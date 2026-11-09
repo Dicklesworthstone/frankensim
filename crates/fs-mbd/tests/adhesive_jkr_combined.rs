@@ -2,6 +2,8 @@
 #[path = "../../fs-contact/tests/adhesive_dmt_coupled/common.rs"]
 mod common;
 
+#[path = "adhesive_jkr_combined/geometry.rs"]
+mod geometry;
 #[path = "adhesive_jkr_combined/temperature.rs"]
 mod temperature;
 

@@ -7,13 +7,15 @@
 //!
 //! This is a held-geometry momentum phase with held external COM forces and
 //! body torques. It retains constitutive history and reports all integrated
-//! native travel, but does not turn that travel into a finite pose or reset a
-//! bond after a geometry change. A changed normal approach requires a compatible
-//! geometry owner before another phase. Relative rolling, slip, debonding and
+//! native travel. [`geometry`] consumes compatible travel and commuting axial
+//! spin without restarting elastic history; unrepresented finite attitudes and
+//! transverse marker migration refuse. Relative rolling, slip, debonding and
 //! detached trajectories are outside this attached full-stick source.
 //! [`temperature`] continues the same loaded source at held geometry with
 //! explicit normal, shear, torsional and surface parameter work.
 
+/// Compatible actual poses and objective vector shear, with the source retained.
+pub mod geometry;
 /// Original material-temperature continuation of the loaded four-coordinate pair.
 pub mod temperature;
 
@@ -78,6 +80,9 @@ struct NativeEndpoint {
     bodies: [RigidBodyState; 2],
     pending_com_travel_m: [Vec3; 2],
     pending_angular_displacement_body_rad: [Vec3; 2],
+    /// Every held phase had individual principal-axis spin about the fixed normal.
+    /// A later cancelling excursion cannot replace the unresolved attitude path.
+    axial_drift_admissible: bool,
 }
 
 impl RigidJkrCombinedState {
@@ -251,45 +256,15 @@ impl<'a> PreparedRigidJkrCombinedPair<'a> {
         }
         let before = [bodies[binding.body_a], bodies[binding.body_b]];
         let properties = [properties[binding.body_a], properties[binding.body_b]];
-        let marker_arms = [binding.arm_a_body, binding.arm_b_body];
-        let axes = [
-            contact.frame.normal(),
-            contact.frame.longitudinal(),
-            contact.frame.lateral(),
-        ]
-        .map(vector);
-        let markers_before = points(before, properties, marker_arms)?;
-        let separation = markers_before[1]
-            .point_world
-            .sub(markers_before[0].point_world);
-        let normal_separation = finite(separation.dot(axes[0]))?;
-        let transverse_separation = separation.sub(axes[0].scale(normal_separation));
-        if !transverse_separation.is_finite()
-            || magnitude(transverse_separation) > controls.geometry_tolerance_m
-        {
-            return Err(RigidJkrCombinedError::Invalid(
-                "normal material markers must be collinear",
-            ));
-        }
-        let approach_m = finite(contact.reference_approach_m - normal_separation)?;
-        let reaction_arms = core::array::from_fn(|i| {
-            marker_arms[i].add(
-                before[i]
-                    .pose()
-                    .orientation()
-                    .rotate_world_to_body(separation.scale(if i == 0 { 0.5 } else { -0.5 })),
-            )
-        });
-        let reaction_before = points(before, properties, reaction_arms)?;
-        let reaction_gap = reaction_before[0]
-            .point_world
-            .sub(reaction_before[1].point_world);
-        if !reaction_gap.is_finite() || magnitude(reaction_gap) > controls.geometry_tolerance_m {
-            return Err(RigidJkrCombinedError::Invalid(
-                "unrepresentable coincident reaction point",
-            ));
-        }
-        let mobility = combined_response(before, properties, reaction_arms, axes)?;
+        let CapturedGeometry {
+            marker_arms,
+            reaction_arms,
+            axes,
+            markers_before,
+            reaction_before,
+            approach_m,
+            mobility,
+        } = capture_geometry(before, properties, contact, controls)?;
         let motion = JkrCombinedMotion::new(contact.source, mobility, controls.motion)?;
         poll(gate)?;
         Ok(Self {
@@ -357,6 +332,11 @@ impl<'a> PreparedRigidJkrCombinedPair<'a> {
                 bodies: self.before,
                 pending_com_travel_m: [Vec3::ZERO; 2],
                 pending_angular_displacement_body_rad: [Vec3::ZERO; 2],
+                axial_drift_admissible: geometry::axial_drift_admissible(
+                    self.before,
+                    self.reaction_before,
+                    self.axes[0],
+                ),
             },
         })
     }
@@ -604,6 +584,9 @@ impl<'a> PreparedRigidJkrCombinedPair<'a> {
                 ));
             }
         }
+        let axial_drift_admissible = previous.endpoint.axial_drift_admissible
+            && geometry::axial_drift_admissible(self.before, self.reaction_before, self.axes[0])
+            && geometry::axial_drift_admissible(after, reaction_after, self.axes[0]);
         poll(gate)?;
         Ok(RigidJkrCombinedCandidate {
             bodies_after: after,
@@ -613,6 +596,7 @@ impl<'a> PreparedRigidJkrCombinedPair<'a> {
                     bodies: after,
                     pending_com_travel_m,
                     pending_angular_displacement_body_rad,
+                    axial_drift_admissible,
                     ..previous.endpoint
                 },
                 ..previous
@@ -689,6 +673,74 @@ impl<'a> PreparedRigidJkrCombinedPair<'a> {
         }
         Ok(())
     }
+}
+
+struct CapturedGeometry {
+    marker_arms: [Vec3; 2],
+    reaction_arms: [Vec3; 2],
+    axes: [Vec3; 3],
+    markers_before: [PointKinematics; 2],
+    reaction_before: [PointKinematics; 2],
+    approach_m: f64,
+    mobility: [[f64; 4]; 4],
+}
+
+/// The original ordered material markers and coincident reaction construction.
+/// Pair-local arrays retain the caller's original binding indices separately.
+fn capture_geometry(
+    before: [RigidBodyState; 2],
+    properties: [MassProperties; 2],
+    contact: RigidJkrCombinedContact<'_>,
+    controls: RigidJkrCombinedControls,
+) -> Result<CapturedGeometry, RigidJkrCombinedError> {
+    let marker_arms = [contact.binding.arm_a_body, contact.binding.arm_b_body];
+    let axes = [
+        contact.frame.normal(),
+        contact.frame.longitudinal(),
+        contact.frame.lateral(),
+    ]
+    .map(vector);
+    let markers_before = points(before, properties, marker_arms)?;
+    let separation = markers_before[1]
+        .point_world
+        .sub(markers_before[0].point_world);
+    let normal_separation = finite(separation.dot(axes[0]))?;
+    let transverse_separation = separation.sub(axes[0].scale(normal_separation));
+    if !transverse_separation.is_finite()
+        || magnitude(transverse_separation) > controls.geometry_tolerance_m
+    {
+        return Err(RigidJkrCombinedError::Invalid(
+            "normal material markers must be collinear",
+        ));
+    }
+    let approach_m = finite(contact.reference_approach_m - normal_separation)?;
+    let reaction_arms = core::array::from_fn(|i| {
+        marker_arms[i].add(
+            before[i]
+                .pose()
+                .orientation()
+                .rotate_world_to_body(separation.scale(if i == 0 { 0.5 } else { -0.5 })),
+        )
+    });
+    let reaction_before = points(before, properties, reaction_arms)?;
+    let reaction_gap = reaction_before[0]
+        .point_world
+        .sub(reaction_before[1].point_world);
+    if !reaction_gap.is_finite() || magnitude(reaction_gap) > controls.geometry_tolerance_m {
+        return Err(RigidJkrCombinedError::Invalid(
+            "unrepresentable coincident reaction point",
+        ));
+    }
+    let mobility = combined_response(before, properties, reaction_arms, axes)?;
+    Ok(CapturedGeometry {
+        marker_arms,
+        reaction_arms,
+        axes,
+        markers_before,
+        reaction_before,
+        approach_m,
+        mobility,
+    })
 }
 
 /// Gram factorization retains every inertia and force/couple cross entry.
