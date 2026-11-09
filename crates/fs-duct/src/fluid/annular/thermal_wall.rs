@@ -19,6 +19,9 @@
 //! Mechanical walls remain rigid/no-slip; axial wall conduction, radiation,
 //! thermoelastic motion and background thermal evolution are not modeled.
 
+/// Source-bound finite-thickness solid conduction in the same gas boundary solve.
+pub mod conduction;
+
 use super::{
     AnnularAdmission, AnnularSection, FluidDuctError, RadialSolution, bad, filled, finite, poll,
     positive, radial_mass, relative,

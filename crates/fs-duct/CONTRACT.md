@@ -188,6 +188,81 @@ power balance and physical-volume quadrature; and checks material binding,
 payload, invalid coefficients and bounded cancellation. Manufactured
 reservoir data establish numerical constitutive checks, not measured accuracy.
 
+### Finite-thickness source-bound solid conduction at annular walls
+
+`fluid::annular::thermal_wall::conduction` resolves the radial temperature
+field inside an actual hollow cylindrical solid shell. An `AnnularSection`
+and `PreparedThermalTransport` prepare one reusable
+`PreparedRadialThermalWall` at explicitly supplied background temperature,
+positive angular frequency, gas-contact face and opposite-face bath. Density,
+the selected constrained specific heat, and radial conductivity come from one
+original source-path evaluation; its identity and receipts remain borrowed
+from that source. No material constants, heat-capacity constraint, isotropy,
+contact resistance or environmental conductance are inferred.
+
+The solid obeys `C_vol*dT/dt=k*Laplacian(T)` around uniform equilibrium.
+It reuses the SAME exact area-weighted radial P1 mass/stiffness geometry and
+native complex tridiagonal owner as the annular gas. The gas may contact
+either shell face. The other face is explicitly isothermal, insulated or
+coupled to the unchanged background bath through a nonnegative conductance
+per physical bath-face area. Gas/solid contact is perfect, so interface
+temperature and heat flux are shared; inner and outer wall flux orientations
+and their unequal physical perimeters are retained.
+
+For a unit interface temperature, positive solid Fourier and bath-exchange
+forms give the real interface admittance; the original positive heat-capacity
+mass form gives its native negative imaginary part. This discrete Green
+identity avoids recovering small dissipative work by subtracting nearly
+equal boundary fluxes. The result is checked independently against the
+original weak interface reaction and the complex integrated heat balance.
+Isothermal bath flux also uses the weak reaction. Local fields expose
+temperature, radial temperature gradient and signed Fourier flux. Analytic
+P1 integrals and physical-volume queries distinguish solid conduction loss
+`integral(k*|grad T|²)/(2*T0)`, external bath loss
+`G*P_bath*|T_bath|²/(2*T0)`, and cycle-mean reversible thermal storage
+`integral(C_vol*|T|²)/(4*T0)`, per axial metre. Oscillatory heat flow is not
+identified with acoustic availability loss or mean caloric deposition.
+
+`AnnularSection::prepare_conjugate_wall_fields[_controlled]` and its
+`prepare_molecular_conjugate_wall_fields[_controlled]` counterpart combine
+each resolved solid or original explicit boundary with the existing
+`PreparedAnnularThermalWalls` gas solve. The exact same-frequency condensed
+admittance enters that owner once; the original molecular Cp is unchanged.
+The equivalent single-frequency boundary coefficients stay private.
+Public queries return separate gas shear, gas Fourier, molecular, solid
+Fourier and actual bath-exchange losses, solid storage and local gas/solid
+fields, alongside the original wave and finite-length `TwoPort`.
+Incompatible contact orientation, interface radius, frequency or background
+temperature refuses instead of silently reusing another state's response.
+
+Solid preparation is O(N); local, face and integrated queries are O(1)
+without allocation, source evaluation or another solve. The explicit solid
+admission bounds cell width times `sqrt(omega/alpha)` in (0,1], solve/reaction/
+heat-balance residuals, and at least `320*(elements+1)+4096` numerical payload
+bytes including original geometry and native solve scratch. The gas and
+retained solid/material owners have separately declared budgets. Cancellation
+polls precede source evaluation and allocation, occur every 64 nodes and
+surround the native tile of at most 4097 nodes. Mesh refinement remains the
+spatial accuracy axis; residual checks do not certify continuum/model error.
+
+The new owner removes the lumped-temperature restriction for homogeneous
+radial solid shells in the original linear, fully developed, plane-pressure
+annular acoustic domain. It does not infer axial solid conduction, an axis
+condition at zero radius, material layering, thermal contact resistance,
+phase evolution, thermal expansion, moving walls or an evolving bath.
+The background and sufficiently small perturbation must remain in the
+original source material's valid regime.
+
+`tests/annular_conductive_walls.rs` checks the logarithmic cylindrical
+resistance with both contact orientations and mesh convergence, an independent
+dimensional coupled gas/solid ODE solution with molecular relaxation, physical
+solid-volume quadrature, complex heat conservation, separate positive
+channels against original acoustic work, the area-correct thin-wall and
+semi-infinite effusivity limits, empty-reservoir/original-boundary parity,
+source binding, state mismatches, budgets and early/late cancellation.
+The material fixtures are explicitly synthetic; these establish numerical
+and constitutive checks, not experimental material qualification.
+
 ## Purpose and layer
 
 Layer L3 (FLUX). 1D viscothermal duct/horn acoustics
