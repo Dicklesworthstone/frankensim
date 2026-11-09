@@ -13,7 +13,7 @@
 
 use super::liquid::LiquidEnthalpyCarrier;
 use super::species::StationarySpecies;
-use super::{Advected, MassBoundary, MassFlow, SelectiveOutlet, finite, invalid};
+use super::{Advected, MassBoundary, MassFlow, SelectiveOutlet, boundary_enthalpy_power_terms, finite, invalid};
 use crate::enthalpy::{CellId, DepositionError, DepositionObserver, DepositionSimulation,
     EnergyAudit, MaterialId, StepConfig};
 use crate::enthalpy::backward_euler::TransportStepCoefficients;
@@ -436,13 +436,12 @@ fn temperature(temperatures: &BTreeMap<CellId, f64>, id: CellId) -> Result<f64, 
 }
 
 fn add_power(
-    powers: &mut BTreeMap<CellId, f64>,
+    powers: &mut BTreeMap<CellId, Sum>,
     id: CellId,
     watts: f64,
 ) -> Result<(), DepositionError> {
     let power = powers.get_mut(&id).ok_or(DepositionError::Arithmetic)?;
-    *power = finite(*power + watts)?;
-    Ok(())
+    power.add(watts)
 }
 
 // One original entropy-flux law for explicit start states and implicit
@@ -458,7 +457,7 @@ fn flux_entropy_rates(
     stationary: Option<&StationaryEntropy>,
     enthalpies: &BTreeMap<CellId, f64>,
     temperatures: &BTreeMap<CellId, f64>,
-    mut powers: Option<&mut BTreeMap<CellId, f64>>,
+    mut powers: Option<&mut BTreeMap<CellId, Sum>>,
     check: &mut dyn FnMut() -> Result<(), DepositionError>,
 ) -> Result<(f64, f64), DepositionError> {
     // At coexistence the carrier uses original pure-liquid h/s; stationary
@@ -504,7 +503,10 @@ fn flux_entropy_rates(
                         difference(thermal, material_id, h, donor_h)?)
                 };
                 if stationary.is_some() {
-                    stationary_heat.entry(id).or_default().add(finite(rate * finite(donor_h - h)?)?)?;
+                    let heat = stationary_heat.entry(id).or_default();
+                    for watts in boundary_enthalpy_power_terms(rate, donor_h, h)? {
+                        heat.add(watts)?;
+                    }
                     stationary_entropy.add(finite(rate * ds)?)?;
                 } else {
                     mixing.add(finite(rate * finite((donor_h - h) / t - ds)?)?)?;
@@ -521,8 +523,10 @@ fn flux_entropy_rates(
                         // m[(h_cell-h_selected)/T_cell+s_selected-s_cell].
                         // Cancel formation terms with incoming watts BEFORE
                         // dividing by T; separation is not passive mixing.
-                        stationary_heat.entry(id).or_default()
-                            .add(finite(rate * finite(h - selected_h)?)?)?;
+                        let heat = stationary_heat.entry(id).or_default();
+                        for watts in boundary_enthalpy_power_terms(-rate, selected_h, h)? {
+                            heat.add(watts)?;
+                        }
                         stationary_entropy.add(finite(rate * local.difference(selected_s)?)?)?;
                         (selected_s.difference(reference)?, selected_h)
                     } else { (local.difference(reference)?, h) }
@@ -533,7 +537,11 @@ fn flux_entropy_rates(
         boundary.add(sign * finite(rate * boundary_s)?)?;
         if let Some(powers) = powers.as_deref_mut() {
             let energy_reference = carried(*energy_reference_cells.get(&id).unwrap_or(&id))?;
-            add_power(powers, id, sign * finite(rate * finite(carried_h - energy_reference)?)?)?;
+            // Reuse the original boundary energy arithmetic, including small
+            // stream heat recovered from opposing species formation terms.
+            for watts in boundary_enthalpy_power_terms(sign * rate, carried_h, energy_reference)? {
+                add_power(powers, id, watts)?;
+            }
         }
     }
     for (i, flow) in flows.iter().enumerate() {
@@ -619,7 +627,7 @@ impl EntropyState {
             return Err(invalid("advective entropy must retain its active cells"));
         }
         let initial = &self.initial_h;
-        let mut powers: BTreeMap<_, _> = initial.keys().map(|&id| (id, 0.0)).collect();
+        let mut powers: BTreeMap<_, _> = initial.keys().map(|&id| (id, Sum::default())).collect();
         let (boundary, mixing) = flux_entropy_rates(
             thermal, flows, boundaries, energy_reference_cells, liquid_carrier,
             self.stationary.as_ref(), initial, temperatures, Some(&mut powers), check,
@@ -637,7 +645,7 @@ impl EntropyState {
             let dh = finite(cell.specific_h_j_kg - h0)?;
             let ds = difference(thermal, cell.material_id, h0, cell.specific_h_j_kg)?;
             let energy = finite(cell.mass_kg * dh)?;
-            let transported = finite(dt * powers[&id])?;
+            let transported = finite(dt * powers[&id].total()?)?;
             storage.add(finite(cell.mass_kg * ds)?)?;
             temporal.add(finite(cell.mass_kg * finite(ds - dh / t0)?)?)?;
             other.add(finite((energy - transported) / t0)?)?;

@@ -118,6 +118,170 @@ fn mixed_at(laws: &[MixtureLaw], inlet_temperatures: [f64; 2]) -> Advected<()> {
     ], 1, 2).unwrap()
 }
 
+
+fn cancelling_species_streams<O>(inner: O, laws: &[MixtureLaw],
+    inlet_ids: [u64; 3], scale: f64) -> Advected<O> {
+    Advected::new(inner, vec![], 0).unwrap().with_boundaries(vec![
+        MassBoundary::Inlet { id: inlet_ids[0], cell: CellId(0), kg_s: 0.5 * scale,
+            material_id: MaterialId(1), specific_h_j_kg: laws[1].h(300.0) },
+        MassBoundary::Inlet { id: inlet_ids[1], cell: CellId(0), kg_s: scale,
+            material_id: MaterialId(0), specific_h_j_kg: laws[0].h(300.0) + 0.25 },
+        MassBoundary::Inlet { id: inlet_ids[2], cell: CellId(0), kg_s: 0.5 * scale,
+            material_id: MaterialId(2), specific_h_j_kg: laws[2].h(300.0) },
+        MassBoundary::Outlet { id: 13, cell: CellId(0), kg_s: 2.0 * scale },
+    ], 4).unwrap().with_stationary_species(vec!["A".into(), "B".into()], vec![
+        InletSpecies { boundary_id: inlet_ids[0], mass_fractions: vec![1.0, 0.0] },
+        InletSpecies { boundary_id: inlet_ids[1], mass_fractions: vec![0.5, 0.5] },
+        InletSpecies { boundary_id: inlet_ids[2], mass_fractions: vec![0.0, 1.0] },
+    ], 1, 2).unwrap()
+}
+
+#[test]
+fn signed_species_streams_retain_small_heat_and_implicit_endpoint_decay() {
+    use crate::enthalpy::backward_euler::BackwardEulerStep;
+
+    let large = 2.0_f64.powi(54);
+    for formation in [[0.0, 0.0], [large, -large], [-large, large]] {
+        let mut laws = [MixtureLaw::new(vec![0.5, 0.5]),
+            MixtureLaw::new(vec![1.0, 0.0]), MixtureLaw::new(vec![0.0, 1.0])];
+        for law in &mut laws { law.formation = formation; }
+        for scale in [1.0, 0.1] {
+            for ids in [[10, 11, 12], [10, 12, 11], [11, 10, 12],
+                [11, 12, 10], [12, 10, 11], [12, 11, 10]] {
+                let flow = cancelling_species_streams((), &laws, ids, scale);
+                let initial = prepared(&laws, 300.0);
+                let power = initial.power_balance_observed(&flow, || Ok(())).unwrap();
+                // Pure species enter at the cell temperature. Their formation
+                // contributions cancel physically; only the slightly warmer
+                // mixture supplies heat. Stable IDs must not erase that heat.
+                let expected_power = 0.25 * scale;
+                assert!((power.net_power_w[&CellId(0)] - expected_power).abs() < 1e-14);
+                assert!((power.external_power_w - expected_power).abs() < 1e-14);
+                let controls = StepConfig { max_dt_s: 1.0, energy_tolerance_j: 1e-9 };
+                let (next, accepted, audit) = initial
+                    .advance_observed(&flow, 0.25, controls, || Ok(())).unwrap();
+                let expected_energy = 0.25 * expected_power;
+                assert_eq!(audit.substeps, 1);
+                assert!((audit.external_heat_j - expected_energy).abs() < 1e-14);
+                assert!((audit.stored_energy_change_j - expected_energy).abs() < 1e-10);
+                assert!((accepted.audit().external_enthalpy_j - expected_energy).abs() < 1e-14);
+                assert!((next.temperature_k(CellId(0)).unwrap()
+                    - (300.0 + expected_energy / 8.0)).abs() < 1e-12);
+
+                // The endpoint must retain the small change in receiving h
+                // even when subtracting it from much larger species data.
+                let dh = next.cells()[&CellId(0)].specific_h_j_kg
+                    - initial.cells()[&CellId(0)].specific_h_j_kg;
+                let endpoint = flow.endpoint_transport(&next, || Ok(())).unwrap();
+                let expected_endpoint = scale * (0.25 - 2.0 * dh);
+                assert!((endpoint.heat.bulk.sources_w[&CellId(0)] - expected_endpoint).abs() < 1e-14);
+                assert!(endpoint.transfers.is_empty());
+
+                // The existing implicit owner sees that same decay. For a
+                // two-kilogram cell, dE = dt*Q0/(1 + dt*scale).
+                let implicit_energy = expected_energy / (1.0 + 0.25 * scale);
+                let step = BackwardEulerStep::new(&initial, 0.25, || Ok(())).unwrap();
+                let trial = step.evaluate_with_transport(&[implicit_energy],
+                    |candidate| flow.endpoint_transport(candidate, || Ok(())),
+                    || Ok(())).unwrap();
+                let (implicit, (), implicit_audit) = trial
+                    .accept(1e-10, 1e-10, || Ok(())).unwrap();
+                assert!((implicit_audit.external_heat_j - implicit_energy).abs() < 1e-10);
+                assert!((implicit.temperature_k(CellId(0)).unwrap()
+                    - (300.0 + implicit_energy / 8.0)).abs() < 1e-12);
+                assert_eq!(initial.cells()[&CellId(0)].specific_h_j_kg, 1200.0);
+                assert_eq!(initial.time_s(), 0.0);
+                assert_eq!(flow.audit().substeps, 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn cancelling_species_streams_preserve_independent_source_and_single_heat_credit() {
+    #[derive(Clone)]
+    struct Heater;
+    impl crate::enthalpy::DepositionObserver for Heater {
+        type Error = DepositionError;
+        fn sources(&mut self, _: &DepositionSimulation<'_>,
+            _: &mut dyn FnMut() -> Result<(), DepositionError>)
+            -> Result<BTreeMap<CellId, f64>, Self::Error> {
+            Ok(BTreeMap::from([(CellId(0), 0.125)]))
+        }
+        fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>)
+            -> Result<(), Self::Error> { Ok(()) }
+        fn step(&mut self, _: f64, _: f64, _: &BTreeMap<CellId, f64>,
+            _: &DepositionSimulation<'_>,
+            _: &mut dyn FnMut() -> Result<(), DepositionError>)
+            -> Result<(), Self::Error> { Ok(()) }
+    }
+
+    let large = 2.0_f64.powi(54);
+    let mut laws = [MixtureLaw::new(vec![0.5, 0.5]),
+        MixtureLaw::new(vec![1.0, 0.0]), MixtureLaw::new(vec![0.0, 1.0])];
+    for law in &mut laws { law.formation = [large, -large]; }
+    let initial = prepared(&laws, 300.0);
+    let flow = cancelling_species_streams(Heater, &laws, [10, 11, 12], 1.0);
+    let power = initial.power_balance_observed(&flow, || Ok(())).unwrap();
+    assert_eq!(power.net_power_w[&CellId(0)], 0.375);
+    let (next, accepted, audit) = initial.advance_observed(&flow, 0.25,
+        StepConfig { max_dt_s: 1.0, energy_tolerance_j: 1e-9 }, || Ok(())).unwrap();
+    assert_eq!(audit.substeps, 1);
+    assert_eq!(audit.external_heat_j, 0.09375);
+    assert_eq!(audit.stored_energy_change_j, 0.09375);
+    assert_eq!(audit.residual_j, 0.0);
+    // This separate transport observation excludes the heater; the thermal
+    // account already contains both physical contributions exactly once.
+    assert_eq!(accepted.audit().external_enthalpy_j, 0.0625);
+    assert_eq!(next.cells()[&CellId(0)].specific_h_j_kg, 1200.046875);
+    assert_eq!(initial.cells()[&CellId(0)].specific_h_j_kg, 1200.0);
+}
+
+
+#[test]
+fn recovered_species_stream_heat_remains_advective_in_entropy_accounts() {
+    let large = 2.0_f64.powi(54);
+    for initial_temperature in [300.0, 300.015625] {
+        let mut reference: Option<[f64; 6]> = None;
+        for formation in [[0.0, 0.0], [large, -large], [-large, large]] {
+            let mut laws = [MixtureLaw::new(vec![0.5, 0.5]),
+                MixtureLaw::new(vec![1.0, 0.0]), MixtureLaw::new(vec![0.0, 1.0])];
+            for law in &mut laws { law.formation = formation; }
+            let initial = prepared(&laws, initial_temperature);
+            let flow = cancelling_species_streams((), &laws, [10, 11, 12], 1.0);
+            let controls = StepConfig { max_dt_s: 1.0, energy_tolerance_j: 1e-9 };
+            let (next, observed, energy, entropy) = initial
+                .advance_advected_with_entropy(&flow, 0.25, controls, || Ok(())).unwrap();
+            let carried = entropy.advection.unwrap();
+            let audit = observed.entropy_audit().unwrap();
+            assert!(audit.other_energy_at_cell_temperature_j_k.abs() < 1e-14);
+            assert!(carried.balance_residual_j_k.abs() < 1e-14);
+            assert!(!entropy.has_unclassified_sources);
+            let (transport, endpoint) = flow
+                .endpoint_transport_with_entropy(&next, || Ok(())).unwrap();
+            assert!(endpoint.balance_residual_w_k.abs() < 1e-14);
+            let values = [
+                energy.external_heat_j,
+                carried.boundary_entropy_input_j_k,
+                carried.upwind_mixing_j_k,
+                transport.heat.bulk.sources_w[&CellId(0)],
+                endpoint.boundary_entropy_input_w_k,
+                endpoint.upwind_mixing_w_k,
+            ];
+            match reference {
+                None => reference = Some(values),
+                Some(expected) => {
+                    for (value, reference) in values.into_iter().zip(expected) {
+                        assert!((value - reference).abs() < 1e-14);
+                    }
+                }
+            }
+            assert_eq!(flow.audit().substeps, 0);
+            assert_eq!(initial.time_s(), 0.0);
+        }
+    }
+}
+
 #[test]
 fn g1_stationary_isothermal_mixing_retains_source_entropy_without_heat() {
     let expected = -0.25 * 0.25_f64.ln() - 0.75 * 0.75_f64.ln();

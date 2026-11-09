@@ -631,6 +631,27 @@ identities are prepared once, and the same relative fluxes feed thermal and
 optional entropy balances. Latent enthalpy still moves at equal temperature.
 The gross absolute transported-enthalpy diagnostic retains its original datum.
 
+Signed boundary streams retain the low parts of their enthalpy differences
+and mass-rate products through the existing compensated energy reduction.
+Species-specific formation contributions can therefore cancel before the
+remaining stream heat is combined with an independent wrapped source. The
+same reduced powers feed explicit stepping and native implicit endpoint
+residuals; the separate advection observation contains only boundary enthalpy,
+while the thermal account credits all applied heat once.
+
+The original explicit entropy observer reuses those boundary terms and
+compensates its per-cell transported-power reconstruction. Stationary-species
+mixing likewise retains those small terms before division by temperature, so
+recovered stream heat remains classified as advection rather than another
+source or a spurious entropy-balance defect.
+
+Focused caloric regressions exercise opposite species formation offsets,
+connection-ID permutations and fractional rates, followed by both explicit
+heating and implicit endpoint decay. A coupled heater verifies that stream
+cancellation neither erases its contribution nor duplicates its energy credit.
+Entropy-enabled advances and endpoint queries preserve the corresponding
+source classification and reference-independent entropy balance.
+
 The existing cell mass-balance admission remains 64 machine epsilons of the
 incoming/outgoing rate scale. Inside that allowance the equations enforce zero
 continuity; the time-integrated absolute cell mass residual and its

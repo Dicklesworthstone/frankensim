@@ -40,6 +40,7 @@ pub mod schedule;
 pub mod explicit;
 
 use std::collections::{BTreeMap, BTreeSet};
+use super::observe::EnergySum;
 use super::{CellId, DepositionError, DepositionObserver, DepositionSimulation, Event, HeatTransfer, MaterialId, ThermalStorageBasis};
 
 /// One physical connection, independent of conductive-contact identity/area.
@@ -218,6 +219,23 @@ fn finite(x: f64) -> Result<f64, DepositionError> {
     if x.is_finite() { Ok(x) } else { Err(DepositionError::Arithmetic) }
 }
 fn invalid(s: &'static str) -> DepositionError { DepositionError::InvalidInput(s) }
+
+// Retain the low parts of the original stream difference and product until
+// all boundary streams have met. Unlike a common datum shift, species-specific
+// formation terms can be large and of opposite sign within one mixing cell.
+fn boundary_enthalpy_power_terms(
+    signed_mass_rate_kg_s: f64,
+    carried_h_j_kg: f64,
+    reference_h_j_kg: f64,
+) -> Result<[f64; 4], DepositionError> {
+    let (difference, difference_error) =
+        fs_math::eft::two_sum(carried_h_j_kg, -reference_h_j_kg);
+    let (power, power_error) =
+        fs_math::eft::two_prod(signed_mass_rate_kg_s, finite(difference)?);
+    let (tail, tail_error) =
+        fs_math::eft::two_prod(signed_mass_rate_kg_s, finite(difference_error)?);
+    Ok([finite(power)?, finite(power_error)?, finite(tail)?, finite(tail_error)?])
+}
 
 fn component_references(flows: &[MassFlow]) -> BTreeMap<CellId, CellId> {
     fn root(parents: &mut BTreeMap<CellId, CellId>, mut id: CellId) -> CellId {
@@ -524,6 +542,8 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
         }
         let mut sources = self.inner.sources(thermal, check)?;
         let mut pending = BoundaryPending { time_s: thermal.time_s(), ..BoundaryPending::default() };
+        let mut boundary_powers = BTreeMap::<CellId, EnergySum>::new();
+        let mut external_power = EnergySum::default();
         for (index, boundary) in self.boundaries.iter().enumerate() {
             if index % 256 == 0 { check()?; }
             let (boundary_id, id, kg_s) = boundary.identity();
@@ -538,7 +558,7 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
                 carrier.carried_h(cell)?;
             }
             let reference_h = self.reference_h(thermal, id)?;
-            let (power_w, gross_power_w, side) = match *boundary {
+            let (signed_rate, outgoing_h, gross_power_w, side) = match *boundary {
                 MassBoundary::Inlet { material_id, specific_h_j_kg, .. } => {
                     if material_id != cell.material_id && self.stationary_species.is_none() {
                         return Err(invalid("inlet material/datum does not match receiving cell").into());
@@ -553,8 +573,7 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
                     let t = law.temperature_k(specific_h_j_kg)?;
                     if !t.is_finite() || t <= 0.0 { return Err(DepositionError::MaterialDomain.into()); }
                     pending.inlet_kg_s = finite(pending.inlet_kg_s + kg_s)?;
-                    (finite(kg_s * finite(specific_h_j_kg - reference_h)?)?,
-                        finite(kg_s * specific_h_j_kg)?, 0)
+                    (kg_s, specific_h_j_kg, finite(kg_s * specific_h_j_kg)?, 0)
                 }
                 MassBoundary::Outlet { .. } => {
                     let outgoing_h = match self.selective_outlets.get(&boundary_id) {
@@ -562,19 +581,30 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
                         None => self.carried_h(cell)?,
                     };
                     pending.outlet_kg_s = finite(pending.outlet_kg_s + kg_s)?;
-                    (-finite(kg_s * finite(outgoing_h - reference_h)?)?,
-                        -finite(kg_s * outgoing_h)?, 1)
+                    (-kg_s, outgoing_h, -finite(kg_s * outgoing_h)?, 1)
                 }
             };
             let rates = pending.rates.entry(id).or_default();
             rates[side] = finite(rates[side] + kg_s)?;
-            pending.external_power_w = finite(pending.external_power_w + power_w)?;
             pending.absolute_power_w = finite(pending.absolute_power_w + gross_power_w.abs())?;
-            if power_w != 0.0 {
-                let watts = sources.entry(id).or_default();
-                *watts = finite(*watts + power_w)?;
+            let terms = boundary_enthalpy_power_terms(signed_rate, outgoing_h, reference_h)?;
+            if terms.iter().any(|&power| power != 0.0) {
+                let watts = boundary_powers.entry(id).or_default();
+                for power in terms {
+                    watts.add(power)?;
+                    external_power.add(power)?;
+                }
             }
         }
+        for (index, (id, mut watts)) in boundary_powers.into_iter().enumerate() {
+            if index % 256 == 0 { check()?; }
+            // The wrapped physical source is independent of the mass stream.
+            // Combine it only after the full signed stream reduction, so two
+            // cancelling large inlet powers cannot erase a finite heater.
+            watts.add(sources.get(&id).copied().unwrap_or(0.0))?;
+            sources.insert(id, watts.value()?);
+        }
+        pending.external_power_w = external_power.value()?;
         check()?;
         self.boundary_pending = Some(pending);
         Ok(sources)
