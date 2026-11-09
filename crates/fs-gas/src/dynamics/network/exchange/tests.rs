@@ -156,3 +156,133 @@ fn g4_finite_plenum_exhaustion_source_domain_and_cancellation_refuse() {
         candidate
     );
 }
+
+fn closed_stroke(linear: f64, formation: f64, end_volume: f64, steps: usize) -> (Plenum, f64) {
+    let source = gas(linear, formation);
+    let mut tank = Plenum::new(0.7, source.conserved(1.0, 0.0, 2.0).unwrap()).unwrap();
+    let initial_energy = tank.state().energy * tank.volume_m3();
+    let mut work = 0.0;
+    for step in 1..=steps {
+        let volume = 0.7 + (end_volume - 0.7) * step as f64 / steps as f64;
+        let (forward, _) = tank
+            .exchange_with_volume_candidate(&source, volume, 0.0, 0.0, None, || false)
+            .unwrap();
+        let (next, receipt) = tank
+            .exchange_with_volume_candidate(&source, volume, 0.0, 0.0, Some(&forward), || false)
+            .unwrap();
+        work += receipt.work_on_gas_j;
+        tank = next;
+    }
+    close(tank.state().density * tank.volume_m3(), 0.7, 2e-14);
+    close(
+        tank.state().energy * tank.volume_m3() - initial_energy,
+        work,
+        2e-14,
+    );
+    // Independent ideal-gas entropy integral for Cv(T) = 2.5 + linear*T,
+    // R = 1: Cv0 ln(T/T0) + linear*(T-T0) + ln(V/V0) = 0.
+    let mut exact = 2.0 * (0.7 / end_volume).powf(0.4);
+    for _ in 0..12 {
+        exact -= (2.5 * (exact / 2.0).ln() + linear * (exact - 2.0) + (end_volume / 0.7).ln())
+            / (2.5 / exact + linear);
+    }
+    let actual = source
+        .primitive(tank.state(), || false)
+        .unwrap()
+        .temperature;
+    (tank, (actual - exact).abs())
+}
+
+#[test]
+fn g1_volume_work_matches_source_entropy_and_refines_at_second_order() {
+    for linear in [0.0, 0.4] {
+        for end in [0.35, 1.05] {
+            let coarse = closed_stroke(linear, 0.0, end, 16);
+            let fine = closed_stroke(linear, 0.0, end, 32);
+            assert!(coarse.1 > 3.5 * fine.1, "{coarse:?} {fine:?}");
+            assert!(fine.1 < 0.001, "{fine:?}");
+            for formation in [-1e18, 1e18] {
+                assert_eq!(closed_stroke(linear, formation, end, 32), fine);
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_moving_port_exchange_keeps_flow_and_remote_wall_work_distinct() {
+    let source = gas(0.4, 0.0);
+    let before = Plenum::new(0.7, source.conserved(1.0, 0.0, 2.0).unwrap()).unwrap();
+    for end in [0.6, 0.8] {
+        let (forward, _) = before
+            .exchange_with_volume_candidate(&source, end, 0.02, 0.15, None, || false)
+            .unwrap();
+        let (after, work) = before
+            .exchange_with_volume_candidate(&source, end, 0.01, 0.08, Some(&forward), || false)
+            .unwrap();
+        let p0 = source.primitive(before.state(), || false).unwrap().pressure;
+        let p1 = source
+            .primitive(forward.state(), || false)
+            .unwrap()
+            .pressure;
+        close(
+            work.work_on_gas_j,
+            -(0.5 * p0 + 0.5 * p1) * (end - 0.7),
+            0.0,
+        );
+        close(after.state().density * end, 0.71, 2e-15);
+        close(
+            after.state().energy * end - before.state().energy * 0.7,
+            0.08 + work.work_on_gas_j,
+            2e-15,
+        );
+        assert_eq!(work.initial_volume_m3, 0.7);
+        assert_eq!(work.final_volume_m3, end);
+    }
+    let rigid = before
+        .exchange_candidate(&source, 0.01, 0.08, || false)
+        .unwrap();
+    let (same, work) = before
+        .exchange_with_volume_candidate(&source, 0.7, 0.01, 0.08, Some(&rigid), || false)
+        .unwrap();
+    assert_eq!(same, rigid);
+    assert_eq!(work.work_on_gas_j, 0.0);
+}
+
+#[test]
+fn g4_moving_plenum_refuses_bad_stages_and_last_poll_without_mutation() {
+    let source = gas(0.4, 0.0);
+    let before = Plenum::new(0.7, source.conserved(1.0, 0.0, 2.0).unwrap()).unwrap();
+    for end in [0.0, -1.0, f64::NAN, f64::INFINITY, 100.0] {
+        assert!(
+            before
+                .exchange_with_volume_candidate(&source, end, 0.0, 0.0, None, || false)
+                .is_err()
+        );
+    }
+    assert!(
+        before
+            .exchange_with_volume_candidate(&source, 0.6, 0.0, 0.0, Some(&before), || false)
+            .is_err()
+    );
+    let mut calls = 0;
+    let expected = before
+        .exchange_with_volume_candidate(&source, 0.6, 0.01, 0.08, None, || {
+            calls += 1;
+            false
+        })
+        .unwrap();
+    let mut cancelled_calls = 0;
+    assert!(matches!(
+        before.exchange_with_volume_candidate(&source, 0.6, 0.01, 0.08, None, || {
+            cancelled_calls += 1;
+            cancelled_calls == calls
+        }),
+        Err(Error::Cancelled)
+    ));
+    assert_eq!(
+        before
+            .exchange_with_volume_candidate(&source, 0.6, 0.01, 0.08, None, || false)
+            .unwrap(),
+        expected
+    );
+}

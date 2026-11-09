@@ -9908,3 +9908,31 @@ physical Mach number without constructing conservative energy and invoking a
 caloric inversion. This adds no equation of state, approximate heat capacity,
 normalization, or retained numerical state. The moving forced spatial tests in
 `fs-flux` exercise the accessor through actual reconstructed-face admission.
+
+## Prescribed-volume compact pressure-work candidates
+
+`dynamics::network::Plenum::exchange_with_volume_candidate` extends the original
+rigid extensive exchange with an explicitly supplied endpoint volume. Its first
+candidate uses the original source pressure; its final SSP RK2 candidate uses
+the initial and complete forward-stage source pressures with the same two-stage
+port quadrature. The original thermally perfect calorics recover both pressures
+and admit the resulting inventory. No constant-gamma closure, independent heat
+source or additional port enthalpy is introduced.
+
+Mass and internal energy advance extensively and are divided by the represented
+endpoint volume. The mechanical receipt is `PlenumBoundaryWork`; its work uses
+the represented volume difference and is positive under compression. Remote
+wall work is separate from the flow work already included in transported total
+energy. Equal volumes retain the original rigid numerical path. An inconsistent
+forward-stage volume, exhausted inventory, unsupported caloric endpoint,
+unrepresentable work or cancellation refuses without changing the original
+plenum. The adapter allocates no storage and owns no clock. Its composing owner
+must impose affine volume motion over the interval, source-compatible transfers,
+acoustic/fractional-volume CFL and atomic publication with the connected field.
+
+Six focused actual-source native exchange tests passed, including the retained
+rigid/blowdown cases and three new groups covering an independent variable-Cv
+entropy integral with second-order refinement, extreme frozen formation-gauge
+invariance, separate transported and moving-wall work, and final-poll rollback.
+This algebraic source does not solve piston inertia, infer wall geometry or
+claim experimental validation or a complete workspace gate.
