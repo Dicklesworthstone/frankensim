@@ -8,6 +8,8 @@ use fs_thermal::enthalpy::{
 
 const SIGMA: f64 = crate::radiation::STEFAN_BOLTZMANN_W_M2_K4;
 
+mod spectral;
+
 struct Caloric {
     capacity: f64,
     datum: f64,

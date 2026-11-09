@@ -1,4 +1,4 @@
-//! Prepared gray optical exchange on the original native thermal cells.
+//! Prepared gray and finite-band optical exchange on original thermal cells.
 
 use std::collections::BTreeMap;
 
@@ -9,7 +9,11 @@ use fs_thermal::enthalpy::{
 };
 
 use super::super::STEFAN_BOLTZMANN_W_M2_K4 as SIGMA;
+use super::super::spectral::planck::BlackbodyBand;
 use super::{AbsorbingSlab, Arc, MAX_SLAB_LAYERS, add, exterior_difference_product};
+
+mod spectral;
+pub use spectral::{MAX_SLAB_SPECTRAL_BANDS, SlabThermalBand, SpectralSlabThermal};
 
 #[derive(Clone)]
 struct BoundLayer<'a> {
@@ -21,6 +25,7 @@ struct BoundLayer<'a> {
     geometry: CellGeometry,
     caloric: &'a dyn ThermalLaw,
     face_area_m2: [f64; 2],
+    radiative: bool,
 }
 
 /// Full-spectrum gray absorption/emission on existing uniform-temperature cells.
@@ -46,6 +51,9 @@ pub struct GraySlabThermal<'a> {
     derivative_bounds_w_k: Arc<BTreeMap<CellId, f64>>,
     area_m2: f64,
     irradiation_w_m2: [f64; 2],
+    // Only the private spectral binder selects a finite band. The public gray
+    // constructor continues to declare full-spectrum optical source coverage.
+    emission_band: Option<BlackbodyBand>,
 }
 
 impl<'a> GraySlabThermal<'a> {
@@ -67,6 +75,26 @@ impl<'a> GraySlabThermal<'a> {
         irradiation_w_m2: [f64; 2],
         cells: &[(CellId, &'a dyn ThermalLaw)],
         thermal: &DepositionSimulation<'_>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        Self::bind(
+            slab,
+            area_m2,
+            irradiation_w_m2,
+            cells,
+            thermal,
+            None,
+            checkpoint,
+        )
+    }
+
+    fn bind(
+        slab: &AbsorbingSlab,
+        area_m2: f64,
+        irradiation_w_m2: [f64; 2],
+        cells: &[(CellId, &'a dyn ThermalLaw)],
+        thermal: &DepositionSimulation<'_>,
+        emission_band: Option<BlackbodyBand>,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, DepositionError> {
         checkpoint()?;
@@ -113,6 +141,7 @@ impl<'a> GraySlabThermal<'a> {
                 geometry: cell.geometry,
                 caloric,
                 face_area_m2,
+                radiative: false,
             });
             let mut coupling = product(exterior_index_squared, face_area_m2[0] + face_area_m2[1])?;
             let mut correction = 0.0;
@@ -126,13 +155,28 @@ impl<'a> GraySlabThermal<'a> {
                     pairs.push((i, j, coefficient));
                 }
             }
-            // d(σ T^4)/dT is bounded over the SOURCE's full supported interval,
-            // not merely at the current temperature or by a frozen secant.
+            layers[i].radiative = coupling > 0.0;
+            // A fixed-wavelength Planck power is convex in T: its second
+            // derivative has the sign of x*coth(x/2)-2 >= 0. The SAME positive
+            // integral's tangent at source Tmax therefore bounds the band;
+            // 4*E_band/T would be incorrect at fixed wavelength endpoints.
             let high = slab.layers()[i].temperature_support_k()[1];
-            let mut derivative = product(4.0 * SIGMA, coupling)?;
-            for _ in 0..3 {
-                derivative = product(derivative, high)?;
-            }
+            let derivative = if coupling == 0.0 {
+                0.0
+            } else if let Some(band) = emission_band {
+                product(
+                    coupling,
+                    band.evaluate(high)
+                        .map_err(|_| DepositionError::Arithmetic)?
+                        .temperature_derivative_w_m2_k,
+                )?
+            } else {
+                let mut derivative = product(4.0 * SIGMA, coupling)?;
+                for _ in 0..3 {
+                    derivative = product(derivative, high)?;
+                }
+                derivative
+            };
             derivative_bounds_w_k.insert(id, derivative);
         }
         let result = Self {
@@ -142,6 +186,7 @@ impl<'a> GraySlabThermal<'a> {
             derivative_bounds_w_k: Arc::new(derivative_bounds_w_k),
             area_m2,
             irradiation_w_m2,
+            emission_band,
         };
         result.temperatures(thermal, &mut checkpoint)?;
         Ok(result)
@@ -222,37 +267,99 @@ impl<'a> GraySlabThermal<'a> {
         temperatures: &[f64],
     ) -> Result<BTreeMap<CellId, f64>, DepositionError> {
         let mut sources = BTreeMap::new();
-        let exterior_index_squared =
-            self.slab.exterior_refractive_index() * self.slab.exterior_refractive_index();
         for (layer, &temperature) in self.layers.iter().zip(temperatures) {
             if layer.face_area_m2 == [0.0; 2] {
                 continue;
             }
-            let square = product(temperature, temperature)?;
-            let emission = product(product(SIGMA, square)?, square)?;
-            let mut power = 0.0;
-            let mut correction = 0.0;
-            for side in 0..2 {
-                add(
-                    &mut power,
-                    &mut correction,
-                    exterior_difference_product(
-                        layer.face_area_m2[side],
-                        self.irradiation_w_m2[side],
-                        emission,
-                        exterior_index_squared,
-                    )
-                    .map_err(|_| DepositionError::Arithmetic)?,
-                );
-            }
-            if !power.is_finite() {
-                return Err(DepositionError::Arithmetic);
-            }
+            let power = self.exterior_power(layer, self.exitance(temperature)?)?;
             if power != 0.0 {
                 sources.insert(layer.id, power);
             }
         }
         Ok(sources)
+    }
+
+    fn exitance(&self, temperature: f64) -> Result<f64, DepositionError> {
+        if let Some(band) = self.emission_band {
+            return band
+                .evaluate(temperature)
+                .map(|value| value.power_w_m2)
+                .map_err(|_| DepositionError::Arithmetic);
+        }
+        let square = product(temperature, temperature)?;
+        product(product(SIGMA, square)?, square)
+    }
+
+    fn exterior_power(
+        &self,
+        layer: &BoundLayer<'_>,
+        emission: f64,
+    ) -> Result<f64, DepositionError> {
+        let exterior_index_squared =
+            self.slab.exterior_refractive_index() * self.slab.exterior_refractive_index();
+        let mut power = 0.0;
+        let mut correction = 0.0;
+        for side in 0..2 {
+            add(
+                &mut power,
+                &mut correction,
+                exterior_difference_product(
+                    layer.face_area_m2[side],
+                    self.irradiation_w_m2[side],
+                    emission,
+                    exterior_index_squared,
+                )
+                .map_err(|_| DepositionError::Arithmetic)?,
+            );
+        }
+        if power.is_finite() {
+            Ok(power)
+        } else {
+            Err(DepositionError::Arithmetic)
+        }
+    }
+
+    fn band_exitances(
+        &self,
+        temperatures: &[f64],
+    ) -> Result<[f64; MAX_SLAB_LAYERS], DepositionError> {
+        let mut values = [0.0; MAX_SLAB_LAYERS];
+        if self.emission_band.is_some() {
+            for (i, layer) in self.layers.iter().enumerate() {
+                if layer.radiative {
+                    values[i] = self.exitance(temperatures[i])?;
+                }
+            }
+        }
+        Ok(values)
+    }
+
+    fn pair_power(
+        &self,
+        coefficient: f64,
+        a: f64,
+        b: f64,
+        emitted: [f64; 2],
+    ) -> Result<f64, DepositionError> {
+        if a == b {
+            return Ok(0.0);
+        }
+        if let Some(band) = self.emission_band {
+            let gap = emitted[0] - emitted[1];
+            let scale = emitted[0].max(emitted[1]);
+            // Well-separated cached powers subtract safely. Nearby powers use
+            // the original positive Planck difference, preserving adjacent T.
+            let difference = if scale > 0.0 && gap.abs() >= 0.5 * scale {
+                gap
+            } else {
+                band.difference(a, b)
+                    .map_err(|_| DepositionError::Arithmetic)?
+            };
+            return product(coefficient, difference);
+        }
+        // Preserve the original gray factorization and equilibrium arithmetic.
+        let secant = product(product(product(coefficient, SIGMA)?, a + b)?, a * a + b * b)?;
+        product(secant, a - b)
     }
 
     fn internal_transfers(
@@ -261,21 +368,19 @@ impl<'a> GraySlabThermal<'a> {
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<Vec<HeatTransfer>, DepositionError> {
         let mut transfers = Vec::with_capacity(self.pairs.len());
+        let emitted = self.band_exitances(temperatures)?;
         for (k, &(i, j, coefficient)) in self.pairs.iter().enumerate() {
             if k % 256 == 0 {
                 checkpoint()?;
             }
             let (a, b) = (temperatures[i], temperatures[j]);
-            // Factored T^4 difference preserves nearby temperatures and gives
-            // exactly zero at equilibrium before any large emission products.
             if a == b {
                 continue;
             }
-            let secant = product(product(product(coefficient, SIGMA)?, a + b)?, a * a + b * b)?;
             transfers.push(HeatTransfer {
                 a: self.layers[i].id,
                 b: self.layers[j].id,
-                power_w: product(secant, a - b)?,
+                power_w: self.pair_power(coefficient, a, b, [emitted[i], emitted[j]])?,
             });
         }
         Ok(transfers)

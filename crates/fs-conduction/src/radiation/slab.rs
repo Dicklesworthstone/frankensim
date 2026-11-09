@@ -45,7 +45,7 @@ mod thermal;
 pub use beam::{SlabBeamExchange, SlabBeamResponse};
 pub use depth::{SlabDepthReport, SlabDepthResponse};
 pub use diffuse::{SlabDiffuseDepthReport, SlabDiffuseDepthResponse};
-pub use thermal::GraySlabThermal;
+pub use thermal::{GraySlabThermal, MAX_SLAB_SPECTRAL_BANDS, SlabThermalBand, SpectralSlabThermal};
 
 /// Maximum physical layers in one prepared slab.
 pub const MAX_SLAB_LAYERS: usize = 64;
