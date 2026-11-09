@@ -65,7 +65,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
     }
 }
 
-fn pointwise<'a>(
+pub(super) fn pointwise<'a>(
     storage: &EnthalpyBackwardEuler<'_, '_>,
     cx: &Cx<'_>,
     problem: ConductionProblem<'_>,

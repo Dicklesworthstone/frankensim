@@ -1,6 +1,8 @@
 //! Independent simplex moments for one coupled contact/radiation enthalpy solve.
 #[path = "pointwise/surface.rs"]
 mod surface;
+#[path = "pointwise/nodal_heat.rs"]
+mod nodal_heat;
 use super::*;
 use fs_conduction::radiation::{GrayDiffuseEnclosure, RadiationSurface, ViewFactorMatrix};
 use fs_conduction::{

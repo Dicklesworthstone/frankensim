@@ -25,8 +25,8 @@ struct Tangent {
 
 struct CoupledProblem<'a, 'm, 'c, 'cx> {
     base: StepContext<'a, 'm, 'c, 'cx>,
-    // Prescribed stage carry in dual nodal joules; this is algebra, not a
-    // substituted thermodynamic history or an additional physical heat source.
+    // Held dual nodal joules: either an original stage carry or an explicitly
+    // supplied physical interval heat. Its state derivative is zero in this solve.
     source_j: Option<&'a [fs_math::dd::Dd]>,
     contacts: &'a TemperatureContacts<'a, 'a>,
     config: ContactEnthalpyNewtonConfig,

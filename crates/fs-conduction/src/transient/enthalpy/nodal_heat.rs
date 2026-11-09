@@ -16,6 +16,8 @@
 //! ambient/enclosure owners and their material response. Neither entry adds an
 //! entropy-flow model or a derivative of the supplied heat with respect to state.
 
+/// Live source-backed contact and signed nodal heat in the same Newton solve.
+pub mod contact;
 /// Native pointwise radiation and signed nodal heat in the same Newton solve.
 pub mod radiation;
 
@@ -61,6 +63,9 @@ pub struct NodalHeatEndpoint {
     pub energy: NodalHeatEnergy,
     pub robin_fluxes: Vec<RobinFlux>,
     pub contact_fluxes: Vec<InterfaceFlux>,
+    /// Actual endpoint source queries for a live temperature/phase contact set.
+    /// Geometry and all nonthermal source coordinates remain held by that owner.
+    pub temperature_contacts: Option<crate::interface::temperature::TemperatureContactEvaluation>,
     /// Original ambient radiation report; convection remains separate.
     pub pointwise_radiation: Option<PointwiseRadiationReport>,
     /// Original closed/open enclosure report with reflected exchange.
@@ -125,6 +130,17 @@ impl EnthalpyBackwardEuler<'_, '_> {
         };
         let (h, newton) = context.solve_newton(config, Some(&heat))?;
         let endpoint = evaluate(&context, &h, &heat)?;
+        self.finish_nodal_heat(cx, h, newton, endpoint, config)
+    }
+
+    fn finish_nodal_heat(
+        &self,
+        cx: &Cx<'_>,
+        h: Vec<f64>,
+        newton: NewtonReport,
+        endpoint: NodalHeatEndpoint,
+        config: EnthalpyStepConfig,
+    ) -> Result<NodalHeatStep, EnthalpyError> {
         let tolerance = Dd::from_f64(config.energy_tolerance_j);
         if endpoint.maximum_free_residual_j > config.energy_tolerance_j {
             return Err(EnthalpyError::EndpointResidual {
@@ -353,6 +369,7 @@ fn evaluate(
         },
         robin_fluxes,
         contact_fluxes,
+        temperature_contacts: None,
         pointwise_radiation,
         pointwise_enclosure_radiation,
     })
