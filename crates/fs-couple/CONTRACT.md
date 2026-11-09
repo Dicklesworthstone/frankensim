@@ -9284,3 +9284,34 @@ source refusal, original strain/receiver/inventory admission, late provider
 failure, cancellation and retry. Formatting and source/API checks passed;
 these solid/thermal integration tests were not executed in the available
 runtime/constellation environment, so no full coupled-runtime gate is claimed.
+
+
+### Finite material-wall heating of a freely recoiling effusive vessel
+
+`rocket_blowdown::effusion::thermal` composes the original implicit finite
+wall/gas thermal owner with the original finite-mass molecular recoil owner.
+`GasRocketState::advance_effusion_with_wall` and
+`advance_effusion_with_wall_convection` apply both stages over the same requested
+physical duration as a first-order heat-then-escape split. The actual heated gas
+drives emitted species, molecular energy/momentum and subsequent recoil. The
+callback variant evaluates the original state-dependent heat-transfer law;
+the caller qualifies its molecular or continuum applicability.
+
+Wall mass is already included in vehicle dry mass and is never added again.
+Constant-density wall calorics and consistent fixed volume are required;
+unmodeled expansion work refuses. Both material and vessel endpoints remain
+tentative until all original source, Biot, caloric, withdrawal and mechanical
+gates pass. The combined reference-free energy budget bounds the sum of absolute
+stage defects plus native mass-remapping and gravity-history reserves. Opposite
+defects cannot cancel through this gate. Original thermal and recoil reports,
+external thermal heat, mass/impulse and mechanical work remain distinct.
+Rotation, radiation momentum, structural integrity and wall-expansion mechanics
+remain outside this adapter.
+
+Six real-owner G0/G1/G3/G4 regressions specify analytic finite-capacity heating
+and changed molecular rates, insulated parity, closed-port heat, radiation and
+external loads, frame shifts, state-dependent h, atomic late/cancellation
+refusals, and inconsistent mass/volume/expansion admission. Pinned Rustfmt and
+whitespace checks pass. Native fs-couple integration is unexecuted: DSR/RCH are
+unavailable and shared build storage cannot support the required dependencies.
+Related broader porous/capillary transport scope remains open.

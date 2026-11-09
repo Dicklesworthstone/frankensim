@@ -19,6 +19,9 @@ pub mod trajectory;
 /// Bidirectional exchange with explicit comoving molecular-source ports.
 pub mod exchange;
 
+/// Finite material-wall heat feedback on the same freely recoiling gas inventory.
+pub mod thermal;
+
 use super::GasRocketState;
 use fs_material::thermochemical_gas::energy::parcel::transfer::{
     snapshot::MAX_SNAPSHOT_TRANSFERS,
