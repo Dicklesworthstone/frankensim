@@ -39,13 +39,16 @@ use fs_sparse::Coo;
 pub mod coupled;
 
 /// Bounded density subcycling with one original native macro momentum solve.
+#[path = "conservative/subcycle.rs"]
 pub mod subcycle;
 
 /// Conservative SSPRK2 density stages with one original BDF1 momentum solve.
+#[path = "conservative/ssprk2.rs"]
 pub mod ssprk2;
 
 /// Implicit SGS and molecular rheology on the same transported-density step.
 #[cfg(feature = "experimental-sgs")]
+#[path = "conservative/sgs.rs"]
 pub mod sgs;
 
 /// Physical normalization and explicit density-transport allowances.

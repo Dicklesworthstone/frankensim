@@ -10270,3 +10270,13 @@ iterations at residual 0.9934. This is fixture-specific convergence evidence,
 not a general runtime or turbulence-validation claim. The original
 numerical kernels were compiled without numerical stubs; material/flow-control
 adapter tests and full Cargo/workspace validation were not run.
+
+### Transported-density endpoint with integral volume-flow ports
+
+`FluxSystem::density_momentum_coupled_bdf1_flow_control_step` solves each port's unknown pressure together with the original endpoint-advector density/BDF1 momentum equations.
+Every Picard trial starts from immutable old density, carried inventories and velocity; accepted transport and compatible mass flux are rebuilt at the returned endpoint, including configured density reconstruction.
+The native pressure-response owner constrains total outward volume flow without prescribing its velocity profile; disjoint natural-traction ports require one uncontrolled traction datum per controlled component.
+Targets/tolerances use m²/s per unit depth; multiply actual rates by declared depth for m³/s. Physical mass exchange uses actual transported donors, never the reference density.
+Port offsets are returned in Pa and retained in the same pressure-adjusted reactions; original traction and Open/OpenReservoir momentum semantics remain intact. Reference density only conditions the common equations.
+Every trial retains original donor admission, CFL/divergence/storage limits and cancellation. Refusal publishes no density, inventory, flow or controller state; frozen pressure responses are rebuilt when candidate coefficients change.
+Focused native regressions cover heterogeneous accelerating transport, exact accepted endpoint accounting, physical pressure/work under reference-density and depth changes, actual density-dependent inertance, reversed donors, port admission and atomic cancellation.
