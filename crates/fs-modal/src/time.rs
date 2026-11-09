@@ -36,8 +36,8 @@ use fs_math::{c64::C64, det};
 mod heat;
 use heat::{DampedTransition, ViscousIntegral};
 
-mod impulse;
 mod damping;
+mod impulse;
 mod update;
 pub use update::{ModalBasisChange, ModalRuntimeTransfer, ModalRuntimeTransferError};
 
@@ -52,8 +52,10 @@ pub use forcing::{
 /// Prepared exact motion under a continuous sinusoidal generalized force.
 pub mod harmonic;
 pub use harmonic::{
-    HarmonicForceFrame, HarmonicForceTransition, MAX_HARMONIC_TONES, ModalToneBudget,
-    PreparedHarmonicForce, PreparedModalHarmonic, PreparedModalTones,
+    HarmonicForceFrame, HarmonicForceParameterSensitivity, HarmonicForcePullback,
+    HarmonicForceSensitivityFrame, HarmonicForceTransition, MAX_HARMONIC_TONES, ModalToneBudget,
+    PreparedHarmonicForce, PreparedHarmonicForceSensitivity, PreparedModalHarmonic,
+    PreparedModalTones,
 };
 
 /// Maximum number of modes admitted by one runtime model.
@@ -336,8 +338,11 @@ struct ExactZohKernel {
 
 impl ExactZohKernel {
     fn new(modes: &[ModalAcousticMode], sample_period_s: f64) -> Self {
-        let rates = modes.iter().map(|mode| damping::rate_from_ratio(*mode))
-            .collect::<Vec<_>>().into_boxed_slice();
+        let rates = modes
+            .iter()
+            .map(|mode| damping::rate_from_ratio(*mode))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         Self::build(modes, sample_period_s, rates, false)
     }
 
@@ -356,10 +361,16 @@ impl ExactZohKernel {
             .iter()
             .copied()
             .enumerate()
-            .map(|(index, mode)| if explicit_rates {
-                PreparedZohCoefficients::with_damping_rate(mode, damping_rates_per_s[index], sample_period_s)
-            } else {
-                PreparedZohCoefficients::new(mode, sample_period_s)
+            .map(|(index, mode)| {
+                if explicit_rates {
+                    PreparedZohCoefficients::with_damping_rate(
+                        mode,
+                        damping_rates_per_s[index],
+                        sample_period_s,
+                    )
+                } else {
+                    PreparedZohCoefficients::new(mode, sample_period_s)
+                }
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
@@ -376,17 +387,35 @@ impl ExactZohKernel {
         }
     }
 
-    fn prepare(&self, index: usize, mode: ModalAcousticMode, duration_s: f64) -> PreparedZohCoefficients {
+    fn prepare(
+        &self,
+        index: usize,
+        mode: ModalAcousticMode,
+        duration_s: f64,
+    ) -> PreparedZohCoefficients {
         if self.explicit_rates {
-            PreparedZohCoefficients::with_damping_rate(mode, self.damping_rates_per_s[index], duration_s)
+            PreparedZohCoefficients::with_damping_rate(
+                mode,
+                self.damping_rates_per_s[index],
+                duration_s,
+            )
         } else {
             PreparedZohCoefficients::new(mode, duration_s)
         }
     }
 
-    fn transition(&self, index: usize, mode: ModalAcousticMode, duration_s: f64) -> ExactZohCoefficients {
+    fn transition(
+        &self,
+        index: usize,
+        mode: ModalAcousticMode,
+        duration_s: f64,
+    ) -> ExactZohCoefficients {
         if self.explicit_rates {
-            exact_zoh_coefficients_with_damping_rate(mode, self.damping_rates_per_s[index], duration_s)
+            exact_zoh_coefficients_with_damping_rate(
+                mode,
+                self.damping_rates_per_s[index],
+                duration_s,
+            )
         } else {
             exact_zoh_coefficients(mode, duration_s)
         }
@@ -568,7 +597,8 @@ impl ModalAcousticTimeModel {
         for (mode_index, mode) in modes.iter().enumerate() {
             if allow_free_coordinates && mode.angular_frequency_rad_s == 0.0 {
                 if (damping_rates_per_s.is_none() && mode.damping_ratio != 0.0)
-                    || mode.pressure_per_modal_velocity != C64::ZERO {
+                    || mode.pressure_per_modal_velocity != C64::ZERO
+                {
                     return Err(ModalAcousticTimeError::InvalidInput {
                         what: "free coordinates require zero damping ratio and zero pressure transfer",
                     });
@@ -631,21 +661,34 @@ impl ModalAcousticTimeModel {
     /// coordinate must receive ratio zero and thereby loses any previous drag.
     /// Use [`Self::with_damping_rates`] to preserve or update physical free drag.
     pub fn with_damping_ratios(&self, damping: &[f64]) -> Result<Self, ModalAcousticTimeError> {
-        if damping.len() != self.modes.len() || damping.iter().zip(&self.modes)
-            .any(|(&ratio, mode)| !ratio.is_finite() || ratio < 0.0
-                || (mode.angular_frequency_rad_s == 0.0 && ratio != 0.0)
-                || !damping::rate_from_ratio(ModalAcousticMode {
-                    damping_ratio: ratio, ..*mode
-                }).is_finite()) {
+        if damping.len() != self.modes.len()
+            || damping.iter().zip(&self.modes).any(|(&ratio, mode)| {
+                !ratio.is_finite()
+                    || ratio < 0.0
+                    || (mode.angular_frequency_rad_s == 0.0 && ratio != 0.0)
+                    || !damping::rate_from_ratio(ModalAcousticMode {
+                        damping_ratio: ratio,
+                        ..*mode
+                    })
+                    .is_finite()
+            })
+        {
             return Err(ModalAcousticTimeError::InvalidInput {
                 what: "modal mobility needs one representable nonnegative damping ratio per original coordinate",
             });
         }
         let mut candidate = self.clone();
         if self.transition_kernel.explicit_rates
-            || damping.iter().zip(&self.modes).any(|(&ratio, mode)| ratio != mode.damping_ratio) {
-            for (mode, &ratio) in candidate.modes.iter_mut().zip(damping) { mode.damping_ratio = ratio; }
-            candidate.transition_kernel = Arc::new(ExactZohKernel::new(&candidate.modes, self.sample_period_s));
+            || damping
+                .iter()
+                .zip(&self.modes)
+                .any(|(&ratio, mode)| ratio != mode.damping_ratio)
+        {
+            for (mode, &ratio) in candidate.modes.iter_mut().zip(damping) {
+                mode.damping_ratio = ratio;
+            }
+            candidate.transition_kernel =
+                Arc::new(ExactZohKernel::new(&candidate.modes, self.sample_period_s));
         }
         Ok(candidate)
     }
@@ -756,17 +799,27 @@ impl ModalAcousticTimeModel {
         if self.transition_kernel.linear.get().is_some() {
             return Ok(());
         }
-        let coefficients = self.modes.iter().enumerate().map(|(index, mode)| {
-            if self.transition_kernel.explicit_rates {
-                LinearForceTransition::try_new_with_damping_rate(
-                    mode.angular_frequency_rad_s, self.damping_rate_per_s(index), self.sample_period_s,
-                )
-            } else {
-                LinearForceTransition::try_new(
-                    mode.angular_frequency_rad_s, mode.damping_ratio, self.sample_period_s,
-                )
-            }
-        }).collect::<Result<Vec<_>, _>>()?.into_boxed_slice();
+        let coefficients = self
+            .modes
+            .iter()
+            .enumerate()
+            .map(|(index, mode)| {
+                if self.transition_kernel.explicit_rates {
+                    LinearForceTransition::try_new_with_damping_rate(
+                        mode.angular_frequency_rad_s,
+                        self.damping_rate_per_s(index),
+                        self.sample_period_s,
+                    )
+                } else {
+                    LinearForceTransition::try_new(
+                        mode.angular_frequency_rad_s,
+                        mode.damping_ratio,
+                        self.sample_period_s,
+                    )
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_boxed_slice();
         // Another clone may have completed the identical immutable cache first.
         let _ = self.transition_kernel.linear.set(coefficients);
         Ok(())
@@ -790,9 +843,12 @@ impl ModalAcousticTimeModel {
                 what: "linear-force stepping requires prepare_linear_forcing outside the callback",
             },
         )?;
-        let transition = coefficients.get(mode_index).ok_or(
-            ModalAcousticTimeError::InvalidInput { what: "linear-force mode index is out of range" },
-        )?;
+        let transition =
+            coefficients
+                .get(mode_index)
+                .ok_or(ModalAcousticTimeError::InvalidInput {
+                    what: "linear-force mode index is out of range",
+                })?;
         transition.advance(state, force_start, force_end)
     }
 
@@ -961,9 +1017,8 @@ impl ModalAcousticTimeModel {
                 });
             }
             pressure_pa.add(transfer.re * state.velocity_m_sqrt_kg_per_s);
-            pressure_pa.add(
-                transfer.im * mode.angular_frequency_rad_s * state.displacement_m_sqrt_kg,
-            );
+            pressure_pa
+                .add(transfer.im * mode.angular_frequency_rad_s * state.displacement_m_sqrt_kg);
         }
         let pressure_pa = pressure_pa.value();
         if !pressure_pa.is_finite() {
@@ -1179,7 +1234,9 @@ impl ModalAcousticTimeModel {
             "aggregate viscous integral and linear-force energy balance disagree",
             |index, _mode, state| {
                 let frame = coefficients[index].advance_with_energy(
-                    state, force_start[index], force_end[index],
+                    state,
+                    force_start[index],
+                    force_end[index],
                 )?;
                 Ok(ModalStepData {
                     next: frame.state,
@@ -1322,10 +1379,13 @@ impl ModalAcousticTimeModel {
             let phi = port_shapes[mode_index];
             let transition = match transition_coefficients {
                 Some(coefficients) => coefficients[mode_index].transition,
-                None => self.transition_kernel.transition(mode_index, *mode, duration_s),
+                None => self
+                    .transition_kernel
+                    .transition(mode_index, *mode, duration_s),
             };
             let free = advance_exact_zoh_cached(*mode, *state, 0.0, transition);
-            let unit = advance_exact_zoh_cached(*mode, ModalAcousticState::default(), 1.0, transition);
+            let unit =
+                advance_exact_zoh_cached(*mode, ModalAcousticState::default(), 1.0, transition);
             // Mobility is the force response from rest, independent of the
             // accepted state. Subtracting two large free velocities can erase it.
             let mode_mobility = unit.velocity_m_sqrt_kg_per_s;
@@ -3294,7 +3354,11 @@ mod tests {
             // The balance compares the work with the stored energies, so the work is judged on the
             // check's own scale, eps * max(|work|, E), not on |work|, which can be far below E.
             let scale = f64::EPSILON
-                * step.exact_work.abs().max(before).max(frame.total_modal_energy_j);
+                * step
+                    .exact_work
+                    .abs()
+                    .max(before)
+                    .max(frame.total_modal_energy_j);
             let work_error = (frame.input_work_j - step.exact_work).abs();
             assert!(
                 work_error <= 4.0 * scale,
@@ -3307,7 +3371,8 @@ mod tests {
                 "{{\"test\":\"work_on_refused_steps\",\"step\":{index},\"work_error_over_eps_scale\":{:.3}}}",
                 work_error / scale
             );
-            let heat_error = (frame.viscous_dissipation_j - step.exact_heat).abs() / step.exact_heat;
+            let heat_error =
+                (frame.viscous_dissipation_j - step.exact_heat).abs() / step.exact_heat;
             assert!(
                 heat_error <= 8.0 * f64::EPSILON,
                 "step {index}: heat {:e} against exact {:e}",
@@ -3395,7 +3460,10 @@ mod tests {
             // The work no longer reads the stored displacement, so the balance sees an error in it
             // only through the stored energy, w^2 |q| delta, where it used to see |F - w^2 q| delta.
             // An error of 1e-12 of q still refuses, in either direction.
-            assert!(margin(1.0e-12) > 1.0 && margin(-1.0e-12) > 1.0, "step {index}");
+            assert!(
+                margin(1.0e-12) > 1.0 && margin(-1.0e-12) > 1.0,
+                "step {index}"
+            );
             let mut relative = 1.0e-17;
             while relative < 1.0e-3 && !(margin(relative) > 1.0 && margin(-relative) > 1.0) {
                 relative *= 1.25;
@@ -3405,7 +3473,10 @@ mod tests {
         println!(
             "{{\"test\":\"displacement_error_sensitivity\",\"smallest_refused_relative_error\":{smallest:?}}}"
         );
-        assert!(smallest.iter().all(|relative| *relative <= 2.0e-13), "{smallest:?}");
+        assert!(
+            smallest.iter().all(|relative| *relative <= 2.0e-13),
+            "{smallest:?}"
+        );
     }
 
     #[test]
@@ -3429,12 +3500,21 @@ mod tests {
             };
             let coefficients = exact_zoh_coefficients(mode, dt);
             let (next, increment) = advance_exact_zoh_increment(mode, state, 3.0, coefficients);
-            assert_state_bits_eq(next, advance_exact_zoh_cached(mode, state, 3.0, coefficients));
+            assert_state_bits_eq(
+                next,
+                advance_exact_zoh_cached(mode, state, 3.0, coefficients),
+            );
             let q0 = state.displacement_m_sqrt_kg;
             if long_step {
-                assert_eq!(increment.to_bits(), (next.displacement_m_sqrt_kg - q0).to_bits());
+                assert_eq!(
+                    increment.to_bits(),
+                    (next.displacement_m_sqrt_kg - q0).to_bits()
+                );
             } else {
-                assert_eq!(next.displacement_m_sqrt_kg.to_bits(), (q0 + increment).to_bits());
+                assert_eq!(
+                    next.displacement_m_sqrt_kg.to_bits(),
+                    (q0 + increment).to_bits()
+                );
             }
         }
     }

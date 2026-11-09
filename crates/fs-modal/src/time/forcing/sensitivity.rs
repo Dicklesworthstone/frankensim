@@ -74,22 +74,22 @@ pub struct PreparedLinearForceSensitivity {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct MomentDerivative {
-    b: f64,
-    g: f64,
+pub(in crate::time) struct MomentDerivative {
+    pub(in crate::time) b: f64,
+    pub(in crate::time) g: f64,
     ramp: f64,
-    position: f64,
-    velocity: f64,
+    pub(in crate::time) position: f64,
+    pub(in crate::time) velocity: f64,
 }
 
 #[derive(Clone, Copy)]
-enum Parameter {
+pub(in crate::time) enum Parameter {
     Stiffness,
     Damping,
 }
 
 impl Parameter {
-    fn seeds(self) -> (f64, f64, f64) {
+    pub(in crate::time) fn seeds(self) -> (f64, f64, f64) {
         // Local variables are A = (omega*h)^2 and d = c*h. Doubling h
         // multiplies them by four/two, so derivatives transform inversely.
         match self {
@@ -245,7 +245,7 @@ impl PreparedLinearForceSensitivity {
 }
 
 impl MomentDerivative {
-    fn small(flow: DampedTransition, parameter: Parameter) -> Self {
+    pub(in crate::time) fn small(flow: DampedTransition, parameter: Parameter) -> Self {
         let (da, dd, _) = parameter.seeds();
         let a = flow.angle * flow.angle;
         let d = flow.drag;
@@ -274,7 +274,7 @@ impl MomentDerivative {
         result
     }
 
-    fn double(
+    pub(in crate::time) fn double(
         self,
         before: DampedTransition,
         after: DampedTransition,
@@ -319,7 +319,7 @@ impl MomentDerivative {
         next
     }
 
-    fn is_finite(self) -> bool {
+    pub(in crate::time) fn is_finite(self) -> bool {
         [self.b, self.g, self.ramp, self.position, self.velocity]
             .into_iter()
             .all(f64::is_finite)

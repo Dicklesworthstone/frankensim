@@ -12,10 +12,15 @@ mod energy;
 mod integrals;
 mod modulation;
 mod runtime;
+mod sensitivity;
 mod tones;
 pub use energy::{HarmonicForceFrame, PreparedHarmonicForce};
 pub use modulation::ToneModulationStep;
 pub use runtime::PreparedModalHarmonic;
+pub use sensitivity::{
+    HarmonicForceParameterSensitivity, HarmonicForcePullback, HarmonicForceSensitivityFrame,
+    PreparedHarmonicForceSensitivity,
+};
 pub use tones::{MAX_HARMONIC_TONES, ModalToneBudget, PreparedModalTones};
 
 /// Cached motion for `q'' + c*q' + omega^2*q = F(t)`, where
@@ -29,7 +34,8 @@ pub use tones::{MAX_HARMONIC_TONES, ModalToneBudget, PreparedModalTones};
 /// Preparation uses the existing scalar homogeneous transition and an entire
 /// force convolution. Undamped resonance, both sides of critical damping and
 /// zero-frequency free coordinates therefore need no singular special case.
-/// Once prepared, all methods allocate nothing and call no transcendentals.
+/// Once prepared, motion and phase methods allocate nothing and call no
+/// transcendentals. Optional analytic sensitivity preparation is a cold operation.
 /// Multiple harmonics superpose through [`Self::forced_increment`]; advance
 /// the homogeneous state only once before summing their zero-state responses.
 ///
@@ -49,6 +55,7 @@ pub struct HarmonicForceTransition {
     // the cosine column integrates cos(Omega*t)-1; the ZOH owner supplies 1.
     force: [f64; 4],
     cosine_remainder: bool,
+    forcing_phase_rad: f64,
     phase_cosine: f64,
     phase_sine: f64,
 }
@@ -186,6 +193,7 @@ impl HarmonicForceTransition {
             transition,
             force,
             cosine_remainder,
+            forcing_phase_rad: full_phase,
             phase_cosine,
             phase_sine,
         })

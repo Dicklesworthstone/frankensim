@@ -6,11 +6,11 @@
 //! The interpolation remains a model of the supplied record, not a claim about
 //! unresolved forcing between measurements.
 
-use super::{DampedTransition, ModalAcousticState, ModalAcousticTimeError};
 use super::heat::LinearViscousIntegral;
+use super::{DampedTransition, ModalAcousticState, ModalAcousticTimeError};
 
 mod bank;
-mod sensitivity;
+pub(super) mod sensitivity;
 pub use sensitivity::{
     LinearForceParameterPullback, LinearForceParameterSensitivity, LinearForceSensitivityFrame,
     PreparedLinearForceSensitivity,
@@ -170,7 +170,8 @@ impl LinearForceTransition {
             let scaled_ramp = transition.angle * ramp_displacement;
             ramp_integral = (2.0 * ramp_integral + 2.0 * ramp_displacement
                 - scaled_ramp * scaled_ramp
-                + transition.g * transition.g) * 0.0625;
+                + transition.g * transition.g)
+                * 0.0625;
             // R(h)=integral_0^h G(t) dt, where G is the held-force
             // displacement response. Composition of two linear-force halves:
             // R(2h)=(1+E11)*R(h)+B(h)*G(h)+h*G(h).
@@ -199,7 +200,9 @@ impl LinearForceTransition {
         }
         let viscous_integral = LinearViscousIntegral::new(original_angle, original_drag);
         if !viscous_integral.is_finite() {
-            return Err(invalid("linear-force viscous integral must be representable"));
+            return Err(invalid(
+                "linear-force viscous integral must be representable",
+            ));
         }
         Ok(Self {
             duration_s,
@@ -227,7 +230,8 @@ impl LinearForceTransition {
         force_start: f64,
         force_end: f64,
     ) -> Result<ModalAcousticState, ModalAcousticTimeError> {
-        self.motion(state, force_start, force_end).map(|(next, _, _)| next)
+        self.motion(state, force_start, force_end)
+            .map(|(next, _, _)| next)
     }
 
     /// Same-window velocity relation under a constant generalized force.
@@ -253,13 +257,18 @@ impl LinearForceTransition {
         let q = state.displacement_m_sqrt_kg;
         let v = state.velocity_m_sqrt_kg_per_s;
         if ![q, v, held_force].into_iter().all(f64::is_finite) {
-            return Err(invalid("held-force mean relation requires finite state and force"));
+            return Err(invalid(
+                "held-force mean relation requires finite state and force",
+            ));
         }
         let impulse = self.duration_s * held_force;
         let restoring = (self.angular_frequency_rad_s * q) * self.transition.angle;
         let mean = self.transition.b * v + self.transition.g * (impulse - restoring);
         let mobility = self.duration_s * self.transition.g;
-        if ![impulse, restoring, mean, mobility].into_iter().all(f64::is_finite) {
+        if ![impulse, restoring, mean, mobility]
+            .into_iter()
+            .all(f64::is_finite)
+        {
             return Err(invalid("held-force mean relation must be representable"));
         }
         Ok((mean, mobility))
@@ -315,10 +324,14 @@ impl LinearForceTransition {
                 "linear-force scaled inputs and response must be representable",
             ));
         }
-        Ok((ModalAcousticState {
-            displacement_m_sqrt_kg: q,
-            velocity_m_sqrt_kg_per_s: v,
-        }, residual, scaled_change))
+        Ok((
+            ModalAcousticState {
+                displacement_m_sqrt_kg: q,
+                velocity_m_sqrt_kg_per_s: v,
+            },
+            residual,
+            scaled_change,
+        ))
     }
 
     /// Advance with independently integrated supplied work and physical heat.
@@ -347,9 +360,13 @@ impl LinearForceTransition {
             + (flow.g - self.ramp_displacement) * residual
             + (self.ramp_displacement - self.ramp_integral) * change;
         let work = (self.duration_s * force_start) * mean_velocity + change * first_moment;
-        let (heat, allowance) = self.viscous_integral.evaluate(v, residual, change, flow.angle);
+        let (heat, allowance) = self
+            .viscous_integral
+            .evaluate(v, residual, change, flow.angle);
         if ![work, heat, allowance].into_iter().all(f64::is_finite) {
-            return Err(invalid("linear-force work and viscous heat must be representable"));
+            return Err(invalid(
+                "linear-force work and viscous heat must be representable",
+            ));
         }
         Ok(LinearForceFrame {
             state: next,
@@ -432,7 +449,7 @@ impl LinearForceTransition {
     }
 }
 
-fn small_ramp_moments(angle: f64, drag: f64) -> (f64, f64) {
+pub(super) fn small_ramp_moments(angle: f64, drag: f64) -> (f64, f64) {
     let stiffness = angle * angle;
     let mut previous = 0.0;
     let mut power = 1.0;

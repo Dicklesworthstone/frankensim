@@ -847,6 +847,32 @@ radiation account, and exact endpoints do not resolve unsampled observations.
 Long oscillatory intervals and repeated cached phase rotations accumulate
 floating-point error; no amplitude normalization is applied.
 
+`HarmonicForceTransition::prepare_sensitivities` adds analytic transient
+partials with respect to independent mass-normalized stiffness `k = omega^2`
+and physical viscous rate `c`. It differentiates the original continuous-tone
+convolution and its exact doubling, sharing the existing homogeneous-flow
+derivative owner with held-ramp forcing. Startup motion, resonant secular
+growth and ringdown remain in the derivative; a steady-state response is not
+substituted. The original motion is returned unchanged. Cold preparation
+retains the original unwrapped forcing phase; warm `advance` and `pullback`
+allocate nothing and call no transcendental functions. The pullback returns
+initial-state, cosine/sine-force and k/c cotangents, so a reverse trajectory
+can propagate state adjoints and sum every shared-parameter contribution.
+The original near-DC force imbalance preserves static balance, and the shared
+independent homogeneous retentions preserve late damping-sensitivity tails.
+
+These are partials at fixed interval duration, forcing frequency, initial
+phase, coordinates and mass normalization. Natural-frequency and damping-ratio
+parameters require the same k/c chain rules documented for held-ramp forcing
+below. Authored source phase rotation, material/basis changes, work/heat and
+nonsmooth observations retain their separate derivatives. Finite arithmetic
+can lose accuracy, and unrepresentable results refuse without changing motion.
+`tests/harmonic_sensitivities.rs` compares independent RK4 integration of the
+physical variational ODEs through free, resonant, critical, near-critical,
+overdamped and high-Q motion; it also checks an analytic secular derivative,
+the DC/held-force limit, exact static balance, late critical decay, complete
+transient reverse sweeps, the state/force transpose and finite-input refusals.
+
 `time::PreparedHarmonicForce` adds the same independently integrated signed
 work and positive viscous heat to a standalone scalar tone transition. Its
 ratio and explicit-rate constructors share the existing motion owner and
