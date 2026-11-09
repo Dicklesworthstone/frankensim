@@ -4,8 +4,11 @@ use super::{
     AutonomousMeanObjective, ForcedMeanObjectiveControls, ForcedSensitivityError,
     PhsFeedbackStateJacobian, PhsStorageHessianAction, PreparedPhsAutonomousSensitivity, Result,
 };
-use crate::phs_orbit::sensitivity::power::PowerObservation;
+use crate::phs_orbit::sensitivity::power::{PhsPowerObjective, PowerObservation};
 use fs_math::dd::Dd;
+
+mod adjoint;
+pub use adjoint::PreparedPhsAutonomousPowerAdjoint;
 
 impl PreparedPhsAutonomousSensitivity<'_> {
     /// Mean original `grad(H)^T R grad(H)` and complete coefficient covector.
@@ -18,7 +21,13 @@ impl PreparedPhsAutonomousSensitivity<'_> {
         controls: ForcedMeanObjectiveControls,
         cancelled: impl FnMut() -> bool,
     ) -> Result<AutonomousMeanObjective> {
-        self.mean_physical_power(controls, None, None, cancelled)
+        self.mean_physical_power(
+            PhsPowerObjective::MeanResistancePower,
+            controls,
+            None,
+            None,
+            cancelled,
+        )
     }
 
     /// Original resistance power with an explicit complete Hamiltonian Hessian.
@@ -28,7 +37,13 @@ impl PreparedPhsAutonomousSensitivity<'_> {
         hessian: &PhsStorageHessianAction<'_>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<AutonomousMeanObjective> {
-        self.mean_physical_power(controls, Some(hessian), None, cancelled)
+        self.mean_physical_power(
+            PhsPowerObjective::MeanResistancePower,
+            controls,
+            Some(hessian),
+            None,
+            cancelled,
+        )
     }
 
     /// Mean supplied power of the ORIGINAL instantaneous physical feedback.
@@ -47,7 +62,13 @@ impl PreparedPhsAutonomousSensitivity<'_> {
         feedback_jacobian: &PhsFeedbackStateJacobian<'_>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<AutonomousMeanObjective> {
-        self.mean_physical_power(controls, None, Some(feedback_jacobian), cancelled)
+        self.mean_physical_power(
+            PhsPowerObjective::MeanSuppliedPower,
+            controls,
+            None,
+            Some(feedback_jacobian),
+            cancelled,
+        )
     }
 
     /// Same original supply observation with an explicit complete Hessian.
@@ -58,11 +79,18 @@ impl PreparedPhsAutonomousSensitivity<'_> {
         hessian: &PhsStorageHessianAction<'_>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<AutonomousMeanObjective> {
-        self.mean_physical_power(controls, Some(hessian), Some(feedback_jacobian), cancelled)
+        self.mean_physical_power(
+            PhsPowerObjective::MeanSuppliedPower,
+            controls,
+            Some(hessian),
+            Some(feedback_jacobian),
+            cancelled,
+        )
     }
 
     fn mean_physical_power(
         &mut self,
+        objective: PhsPowerObjective,
         controls: ForcedMeanObjectiveControls,
         hessian: Option<&PhsStorageHessianAction<'_>>,
         feedback_jacobian: Option<&PhsFeedbackStateJacobian<'_>>,
@@ -81,6 +109,7 @@ impl PreparedPhsAutonomousSensitivity<'_> {
             Vec::new()
         };
         let feedback = self.feedback;
+        let omega = self.prepared.angular_frequency();
         self.prepared
             .mean_objective(
                 controls,
@@ -89,8 +118,12 @@ impl PreparedPhsAutonomousSensitivity<'_> {
                     if !observation.load(state) {
                         return false;
                     }
+                    if !objective.supplied() {
+                        return observation.resistance(state, value, gradient)
+                            && objective.normalize(omega, value, gradient, Some(frequency));
+                    }
                     let Some(derivative) = feedback_jacobian else {
-                        return observation.resistance(state, value, gradient);
+                        return false;
                     };
                     input.fill(f64::NAN);
                     if !observation.flows(&mut flows)
@@ -116,7 +149,7 @@ impl PreparedPhsAutonomousSensitivity<'_> {
                         }
                         *value = sum.to_f64();
                     }
-                    gradient.iter().all(|v| v.is_finite())
+                    objective.normalize(omega, value, gradient, Some(frequency))
                 },
                 cancelled,
             )

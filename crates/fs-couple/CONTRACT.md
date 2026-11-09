@@ -12021,3 +12021,44 @@ contact drag and thermal feedback remain outside this entry. A passive
 authored acoustic pole model still requires separate geometry validation.
 Exact linear propagation does not remove nonlinear contact, source/model,
 modal-truncation or temporal-refinement obligations.
+
+### Automatic physical power and cycle-energy adjoints
+
+`PhsPowerObjective` selects mean supplied/resistance power or supplied/resistance
+energy per actual cycle. The forced and autonomous sensitivity owners expose
+`prepare_power_adjoint` and `prepare_power_adjoint_analytic`: they sample the
+original value and complete coefficient (plus autonomous frequency) covector,
+then reuse the existing transpose factor. Source-bound
+`PreparedPhsForcedPowerAdjoint` and `PreparedPhsAutonomousPowerAdjoint` expose
+`gradient_parameter`, accepting the existing complete physical direction and
+automatically composing its direct objective and residual chains. These four
+objectives require no manually assembled explicit objective partial.
+
+Forced directions retain complete J/R/G/storage/Fourier-input changes and the
+prescribed clock. Per-cycle work includes `T*(P_p-Omega_p*P/Omega)` as its direct
+partial. Autonomous directions retain the original `G_p/H_p -> y_p -> u_p`
+feedback chain once; cycle `q_Omega=-q/Omega` enters the unchanged phase border,
+while the explicit parameter partial is `T*P_p` at fixed unknown frequency.
+Both grids contract their own direct mean with the cached dual and independently
+check direct-partial and total-gradient sampling. Supplied work and resistance
+loss retain their independent original laws and signed physical contractions.
+
+Original storage/source/feedback callbacks still evaluate cached physical
+states. Parameter queries perform no objective Hessian/feedback-Jacobian
+reevaluation, new orbit/factor, or waveform-direction solve. One private source
+sample evaluator shares the original direction assembly and scratch between
+residual and objective callbacks. Positive objective, parameter and HB scales
+condition acceptance only; selected power/energy units apply to the complete
+sampled value and coefficient/frequency covector. Refusal and cancellation
+publish no partial result and preserve the original prepared source.
+
+The 23 focused physical tests include three new autonomous/source-owner groups
+and three expanded forced-direction groups. They cover independent complex
+mechanics and separately resolved nonlinear memory systems for all four
+objectives; all twelve physical parameter changes of an analytic autonomous
+fixture; separately evaluated supply/loss laws; a nonzero period contribution;
+conditioning-scale invariance; cached tangent reuse; cancellation/refusal;
+signed raw R; and weak net work amid opposing `2^54` terms. Conditioning-scale
+variation is not a physical coordinate-unit conversion. These fixed-order
+gradients do not establish harmonic-tail convergence, stability, passivity or
+a heat destination.

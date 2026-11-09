@@ -57,6 +57,8 @@ type Result<T> = core::result::Result<T, PhsAutonomousSensitivityError>;
 mod adjoint;
 pub use adjoint::PreparedPhsAutonomousAdjoint;
 mod power;
+pub use power::PreparedPhsAutonomousPowerAdjoint;
+mod parameter;
 
 /// One source-bound exact tangent/factor for many physical parameter directions.
 ///
@@ -279,70 +281,9 @@ fn with_parameter_direction<T>(
         &mut dyn FnMut(f64, &[f64], &mut [f64]) -> bool,
     ) -> core::result::Result<T, ForcedSensitivityError>,
 ) -> Result<T> {
-    let physical = system.prepare_parameter_direction(direction.structure)?;
-    let (n, m) = (system.state_dim(), system.port_dim());
-    let mut effort = vec![f64::NAN; n];
-    let mut partial_effort = vec![0.0; n];
-    let mut flows = vec![0.0; m];
-    let mut partial_flows = vec![0.0; m];
-    let mut input = vec![f64::NAN; m];
-    let mut partial_input = vec![f64::NAN; m];
-    let mut source_refused = false;
-    let mut physical_error = None;
-    let result = run(&mut |_time, state, out| {
-        effort.fill(f64::NAN);
-        system.storage().gradient(state, &mut effort);
-        if effort.iter().any(|v| !v.is_finite())
-            || system.output_from_effort_into(&effort, &mut flows).is_err()
-        {
-            source_refused = true;
-            return false;
-        }
-        input.fill(f64::NAN);
-        if !feedback.input(state, &flows, &mut input) || input.iter().any(|v| !v.is_finite()) {
-            source_refused = true;
-            return false;
-        }
-        if let Some(storage) = direction.storage {
-            partial_effort.fill(f64::NAN);
-            if !storage(state, &mut partial_effort) || partial_effort.iter().any(|v| !v.is_finite())
-            {
-                return false;
-            }
-        }
-        if let Err(error) =
-            physical.output_from_effort_into(&effort, &partial_effort, &mut partial_flows)
-        {
-            physical_error = Some(error);
-            return false;
-        }
-        partial_input.fill(f64::NAN);
-        if !(direction.feedback)(state, &flows, &partial_flows, &mut partial_input)
-            || partial_input.iter().any(|v| !v.is_finite())
-        {
-            return false;
-        }
-        match physical.vector_field_from_effort_into(
-            &effort,
-            &partial_effort,
-            &input,
-            &partial_input,
-            out,
-        ) {
-            Ok(()) => true,
-            Err(error) => {
-                physical_error = Some(error);
-                false
-            }
-        }
-    });
-    if source_refused {
-        return Err(PhsOrbitError::SourceRefused.into());
-    }
-    if let Some(error) = physical_error {
-        return Err(error.into());
-    }
-    result.map_err(Into::into)
+    parameter::with_parameter_samples(system, feedback, direction, |samples| {
+        run(&mut |_time, state, out| samples.borrow_mut().vector_field(state, out))
+    })
 }
 
 #[cfg(test)]

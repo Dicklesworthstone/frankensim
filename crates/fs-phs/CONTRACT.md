@@ -3939,3 +3939,18 @@ comparison with fourteen heats and eight signed works, steady regeneration,
 both dead-time diode directions, original node KCL and transactional refusals.
 The standalone five-state core was compiled and tested natively; execution of
 this eleven-state extension was blocked by loss of the runtime in this delivery.
+
+## Original physical parameter derivatives of supplied and resistance power
+
+`PreparedPhsParameterDirection::supplied_power_from_effort` computes
+`e_p^T G u + e^T G_p u + e^T G u_p`;
+`resistance_power_from_effort` computes
+`e_p^T R e + e^T R e_p + e^T R_p e`. Both retain the original two-word row
+sums through outer effort contractions, allocate no heap memory, validate
+complete finite efforts/inputs, and refuse unrepresentable contractions.
+The existing source/direction admission owns J/R/G. Trusted raw signed and
+nonsymmetric R is retained without positivity repair or the symmetric
+`2*e_p^T R e` shortcut. Callers distinguish fixed-state partials from total
+effort/input derivatives; the source owner does not infer that chain.
+A focused actual-source regression preserves weak net work amid opposing
+`2^54` terms and checks the original nonsymmetric resistance algebra.

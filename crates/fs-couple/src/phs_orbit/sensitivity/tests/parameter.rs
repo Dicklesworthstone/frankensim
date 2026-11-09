@@ -1,5 +1,6 @@
 //! G1/G3: complete physical directions and the prescribed-clock chain.
 use super::*;
+use crate::phs_orbit::PhsPowerObjective;
 use fs_phs::{PhsStructureParameterDirection, QuadraticStorage};
 
 fn close(a: f64, b: f64, tolerance: f64) {
@@ -68,6 +69,7 @@ fn simultaneous_structure_storage_ports_drive_and_clock_match_original_mechanics
         .unwrap();
     close(response.angular_frequency_derivative, dw, 0.0);
     let (mut explicit, mut total) = (0.0, 0.0);
+    let mut powers = [0.0; 4]; // supplied, resistance, and their total derivatives
     for harmonic in 0..=2 {
         let w = harmonic as f64 * omega;
         let wp = harmonic as f64 * dw;
@@ -89,6 +91,20 @@ fn simultaneous_structure_storage_ports_drive_and_clock_match_original_mechanics
                 0.0,
                 (dm * w + mass * wp) / coupling - mass * w * dj / coupling / coupling,
             );
+        // Independent complex mechanics for the actual conjugate port flow.
+        // DC has multiplicity one, positive-frequency half amplitudes two.
+        let velocity = p.scale(1.0 / mass);
+        let velocity_p = pp.scale(1.0 / mass) - p.scale(dm / mass / mass);
+        let dot = |a: C64, b: C64| a.re * b.re + a.im * b.im;
+        let multiplicity = if harmonic == 0 { 1.0 } else { 2.0 };
+        powers[0] += multiplicity * port * dot(velocity, forces[harmonic]);
+        powers[1] += multiplicity * loss * dot(velocity, velocity);
+        powers[2] += multiplicity
+            * (dg * dot(velocity, forces[harmonic])
+                + port * dot(velocity_p, forces[harmonic])
+                + port * dot(velocity, df[harmonic]));
+        powers[3] +=
+            multiplicity * (dr * dot(velocity, velocity) + 2.0 * loss * dot(velocity, velocity_p));
         for (actual, expected) in [
             (response.coeffs[0][harmonic], qp),
             (response.coeffs[1][harmonic], pp),
@@ -136,6 +152,38 @@ fn simultaneous_structure_storage_ports_drive_and_clock_match_original_mechanics
         period * total - period * dw / omega * objective.value,
         5e-12,
     );
+    drop(integral);
+    // Every built-in objective now assembles its own direct J/R/G/storage/input
+    // partial and prescribed period chain. No manual explicit q_p is supplied.
+    for (kind, energy, index) in [
+        (PhsPowerObjective::MeanSuppliedPower, false, 0),
+        (PhsPowerObjective::MeanResistancePower, false, 1),
+        (PhsPowerObjective::SuppliedEnergyPerCycle, true, 0),
+        (PhsPowerObjective::ResistanceEnergyPerCycle, true, 1),
+    ] {
+        let mut power = prepared
+            .prepare_power_adjoint(kind, objective_controls(), || false)
+            .unwrap();
+        let value = if energy {
+            period * powers[index]
+        } else {
+            powers[index]
+        };
+        let expected = if energy {
+            period * (powers[index + 2] - dw / omega * powers[index])
+        } else {
+            powers[index + 2]
+        };
+        close(power.value(), value, 4e-12);
+        close(
+            power
+                .gradient_parameter(chart, physical(), || false)
+                .unwrap()
+                .derivative,
+            expected,
+            8e-12,
+        );
+    }
 }
 
 #[test]
@@ -262,6 +310,56 @@ fn nonlinear_memory_and_driving_clock_keep_generated_harmonics() {
         (energy(&system(step), &hi) - energy(&system(-step), &lo)) / (2.0 * step),
         5e-9,
     );
+    drop(adjoint);
+    // Independent dense phase quadrature of the original physical powers,
+    // including the actual relaxing-state resistance, in separately solved
+    // neighboring systems. Neither oracle calls the new power/adjoint APIs.
+    let power_mean = |p: f64, cycle: &HbOrbit, supplied: bool| {
+        (0..count)
+            .map(|i| {
+                let theta = core::f64::consts::TAU * i as f64 / count as f64;
+                let q = cycle.sample(0, theta);
+                let momentum = cycle.sample(1, theta);
+                let memory = cycle.sample(2, theta);
+                if supplied {
+                    let force = 0.05 * p
+                        + (1.0 + du * p)
+                            * (1.4 * fs_math::det::cos(theta) + 0.4 * fs_math::det::sin(theta));
+                    (1.0 + dg * p) * momentum * force
+                } else {
+                    (0.4 + dr * p) * momentum * momentum + 0.5 * (memory - q).powi(2)
+                }
+            })
+            .sum::<f64>()
+            / count as f64
+    };
+    for (kind, supplied, energy) in [
+        (PhsPowerObjective::MeanSuppliedPower, true, false),
+        (PhsPowerObjective::MeanResistancePower, false, false),
+        (PhsPowerObjective::SuppliedEnergyPerCycle, true, true),
+        (PhsPowerObjective::ResistanceEnergyPerCycle, false, true),
+    ] {
+        let reference = |p: f64, cycle: &HbOrbit| {
+            power_mean(p, cycle, supplied)
+                * if energy {
+                    core::f64::consts::TAU / cycle.omega
+                } else {
+                    1.0
+                }
+        };
+        let mut power = prepared
+            .prepare_power_adjoint(kind, objective_controls(), || false)
+            .unwrap();
+        close(power.value(), reference(0.0, &orbit), 2e-11);
+        close(
+            power
+                .gradient_parameter(chart, physical(), || false)
+                .unwrap()
+                .derivative,
+            (reference(step, &hi) - reference(-step, &lo)) / (2.0 * step),
+            2e-8,
+        );
+    }
 }
 
 #[test]
@@ -370,6 +468,57 @@ fn complete_directions_refuse_bad_sources_and_cancel_without_losing_reuse() {
             .unwrap()
             .coeffs
     );
+    let mut power = prepared
+        .prepare_power_adjoint(
+            PhsPowerObjective::SuppliedEnergyPerCycle,
+            objective_controls(),
+            || false,
+        )
+        .unwrap();
+    let complete = power
+        .gradient_parameter(chart, physical(), || false)
+        .unwrap();
+    let mut polls = 0;
+    assert!(matches!(
+        power.gradient_parameter(chart, physical(), || {
+            polls += 1;
+            polls > 10
+        }),
+        Err(PhsForcedSensitivityError::Sensitivity(
+            ForcedSensitivityError::Cancelled
+        ))
+    ));
+    assert!(
+        power
+            .gradient_parameter(
+                chart,
+                PhsForcedParameterDirection {
+                    storage: Some(&bad_storage),
+                    ..physical()
+                },
+                || false,
+            )
+            .is_err()
+    );
+    assert!(
+        power
+            .gradient_parameter(
+                chart,
+                PhsForcedParameterDirection {
+                    input: Some(&bad_clock),
+                    ..physical()
+                },
+                || false,
+            )
+            .is_err()
+    );
+    assert_eq!(
+        complete,
+        power
+            .gradient_parameter(chart, physical(), || false)
+            .unwrap()
+    );
+    drop(power);
     let mut tiny = controls();
     tiny.maximum_payload_bytes = 1;
     assert!(matches!(

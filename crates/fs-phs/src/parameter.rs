@@ -129,6 +129,129 @@ impl PortHamiltonian {
 }
 
 impl PreparedPhsParameterDirection<'_, '_> {
+    /// Differentiate the ORIGINAL supplied power, retaining every signed port:
+    /// `e_p^T G u + e^T G_p u + e^T G u_p`.
+    ///
+    /// Effort/input derivatives may be direct partials or complete derivatives;
+    /// the caller owns that distinction. Both words of each physical row are
+    /// retained through its effort contraction, so opposing ports cannot erase
+    /// weak net work by rounding a conjugate flow first. No allocation;
+    /// O(n*ports) work and constant scratch.
+    ///
+    /// # Errors
+    /// Incomplete/nonfinite efforts or inputs, or unrepresentable contraction.
+    pub fn supplied_power_from_effort(
+        &self,
+        effort: &[f64],
+        effort_derivative: &[f64],
+        input: &[f64],
+        input_derivative: &[f64],
+    ) -> Result<f64, PhsError> {
+        let (n, m) = (self.system.n, self.system.m);
+        if effort.len() != n
+            || effort_derivative.len() != n
+            || input.len() != m
+            || input_derivative.len() != m
+            || effort
+                .iter()
+                .chain(effort_derivative)
+                .chain(input)
+                .chain(input_derivative)
+                .any(|v| !v.is_finite())
+        {
+            return Err(invalid(
+                "complete finite parameter-power efforts and inputs required",
+            ));
+        }
+        let mut power = Sum::default();
+        for row in 0..n {
+            if effort_derivative[row] != 0.0 {
+                let flow = Sum::dot(&self.system.g[row * m..(row + 1) * m], input)
+                    .ok_or_else(|| invalid("supplied parameter power is not representable"))?;
+                power
+                    .add_scaled(flow, effort_derivative[row])
+                    .ok_or_else(|| invalid("supplied parameter power is not representable"))?;
+            }
+            if effort[row] != 0.0 {
+                let mut flow = Sum::default();
+                for port in 0..m {
+                    let index = row * m + port;
+                    flow.product(self.system.g[index], input_derivative[port])
+                        .ok_or_else(|| invalid("supplied parameter power is not representable"))?;
+                    if let Some(g) = self.direction.ports {
+                        flow.product(g[index], input[port]).ok_or_else(|| {
+                            invalid("supplied parameter power is not representable")
+                        })?;
+                    }
+                }
+                power
+                    .add_scaled(flow, effort[row])
+                    .ok_or_else(|| invalid("supplied parameter power is not representable"))?;
+            }
+        }
+        power
+            .value()
+            .ok_or_else(|| invalid("supplied parameter power is not representable"))
+    }
+
+    /// Differentiate the ORIGINAL resistance power:
+    /// `e_p^T R e + e^T R e_p + e^T R_p e`.
+    ///
+    /// Trusted raw-parts sources retain their actual signed, possibly
+    /// nonsymmetric R. No positivity repair or factor-of-two symmetry shortcut
+    /// is applied. Every physical row retains both compensated words through
+    /// the final effort contraction. No allocation; O(n²) work.
+    ///
+    /// # Errors
+    /// Incomplete/nonfinite efforts or an unrepresentable contraction.
+    pub fn resistance_power_from_effort(
+        &self,
+        effort: &[f64],
+        effort_derivative: &[f64],
+    ) -> Result<f64, PhsError> {
+        let n = self.system.n;
+        if effort.len() != n
+            || effort_derivative.len() != n
+            || effort
+                .iter()
+                .chain(effort_derivative)
+                .any(|v| !v.is_finite())
+        {
+            return Err(invalid("complete finite parameter-power efforts required"));
+        }
+        let mut power = Sum::default();
+        for row in 0..n {
+            if effort_derivative[row] != 0.0 {
+                let flow = Sum::dot(&self.system.r[row * n..(row + 1) * n], effort)
+                    .ok_or_else(|| invalid("resistance parameter power is not representable"))?;
+                power
+                    .add_scaled(flow, effort_derivative[row])
+                    .ok_or_else(|| invalid("resistance parameter power is not representable"))?;
+            }
+            if effort[row] != 0.0 {
+                let mut flow = Sum::default();
+                for col in 0..n {
+                    let index = row * n + col;
+                    flow.product(self.system.r[index], effort_derivative[col])
+                        .ok_or_else(|| {
+                            invalid("resistance parameter power is not representable")
+                        })?;
+                    if let Some(r) = self.direction.dissipation {
+                        flow.product(r[index], effort[col]).ok_or_else(|| {
+                            invalid("resistance parameter power is not representable")
+                        })?;
+                    }
+                }
+                power
+                    .add_scaled(flow, effort[row])
+                    .ok_or_else(|| invalid("resistance parameter power is not representable"))?;
+            }
+        }
+        power
+            .value()
+            .ok_or_else(|| invalid("resistance parameter power is not representable"))
+    }
+
     /// Apply `(J-R)e_p + (J_p-R_p)e + G_p u + G u_p` in original units.
     /// The supplied effort derivative can be a direct constitutive derivative
     /// at fixed state, or a total derivative including Hxx*x_p. The caller owns

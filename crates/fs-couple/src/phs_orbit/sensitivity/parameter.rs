@@ -6,7 +6,10 @@ use super::{
 };
 use crate::phs_orbit::sideband::PhsStorageParameterAction;
 use fs_orbit::ForcedParameterPoint;
-use fs_phs::{PhsStructureParameterDirection, PortHamiltonian};
+use fs_phs::{
+    PhsError, PhsStructureParameterDirection, PortHamiltonian, PreparedPhsParameterDirection,
+};
+use std::cell::RefCell;
 
 /// One complete physical direction at the unchanged original state and phase.
 /// None holds the corresponding original law fixed. Matrix derivatives are
@@ -90,6 +93,21 @@ pub(super) fn with_parameter_direction<T>(
         &mut dyn FnMut(f64, &[f64], &mut [f64]) -> bool,
     ) -> Result<T, ForcedSensitivityError>,
 ) -> Result<T, PhsForcedSensitivityError> {
+    with_parameter_samples(system, input, harmonics, direction, |samples| {
+        run(&mut |time, state, out| samples.borrow_mut().vector_field(time, state, out))
+    })
+}
+
+// One original physical sample owner serves both the residual column and the
+// direct objective partial. The numeric consumer invokes its two callbacks
+// sequentially; sharing this scratch avoids duplicate source assembly/buffers.
+pub(super) fn with_parameter_samples<'s, 'd, T>(
+    system: &'s PortHamiltonian,
+    input: &'s PeriodicPortInput,
+    harmonics: usize,
+    direction: PhsForcedParameterDirection<'d>,
+    run: impl FnOnce(&RefCell<ParameterSamples<'s, 'd>>) -> Result<T, ForcedSensitivityError>,
+) -> Result<T, PhsForcedSensitivityError> {
     if let Some(derivative) = direction.input {
         if derivative.omega_rad_s() != input.omega_rad_s()
             || derivative.port_count() != system.port_dim()
@@ -103,50 +121,139 @@ pub(super) fn with_parameter_direction<T>(
     }
     let physical = system.prepare_parameter_direction(direction.structure)?;
     let (n, m) = (system.state_dim(), system.port_dim());
-    let mut effort = vec![f64::NAN; n];
-    let mut effort_partial = vec![0.0; n];
-    let mut ports = vec![f64::NAN; m];
-    let mut ports_partial = vec![0.0; m];
-    let mut source_refused = false;
-    let mut physical_error = None;
-    let result = run(&mut |time, state, out| {
-        effort.fill(f64::NAN);
-        system.storage().gradient(state, &mut effort);
-        if effort.iter().any(|x| !x.is_finite()) || !input.sample_into(time, &mut ports) {
-            source_refused = true;
+    let samples = RefCell::new(ParameterSamples {
+        system,
+        input,
+        physical,
+        direction,
+        effort: vec![f64::NAN; n],
+        effort_partial: vec![0.0; n],
+        ports: vec![f64::NAN; m],
+        ports_partial: vec![0.0; m],
+        source_refused: false,
+        physical_error: None,
+    });
+    let result = run(&samples);
+    let samples = samples.into_inner();
+    if samples.source_refused {
+        return Err(PhsOrbitError::SourceRefused.into());
+    }
+    if let Some(error) = samples.physical_error {
+        return Err(error.into());
+    }
+    result.map_err(Into::into)
+}
+
+pub(super) struct ParameterSamples<'s, 'd> {
+    system: &'s PortHamiltonian,
+    input: &'s PeriodicPortInput,
+    physical: PreparedPhsParameterDirection<'s, 'd>,
+    direction: PhsForcedParameterDirection<'d>,
+    effort: Vec<f64>,
+    effort_partial: Vec<f64>,
+    ports: Vec<f64>,
+    ports_partial: Vec<f64>,
+    source_refused: bool,
+    physical_error: Option<PhsError>,
+}
+
+impl ParameterSamples<'_, '_> {
+    fn load(&mut self, time: f64, state: &[f64]) -> bool {
+        self.effort.fill(f64::NAN);
+        self.system.storage().gradient(state, &mut self.effort);
+        if self.effort.iter().any(|x| !x.is_finite())
+            || !self.input.sample_into(time, &mut self.ports)
+        {
+            self.source_refused = true;
             return false;
         }
-        if let Some(storage) = direction.storage {
-            effort_partial.fill(f64::NAN);
-            if !storage(state, &mut effort_partial) || effort_partial.iter().any(|v| !v.is_finite())
+        if let Some(storage) = self.direction.storage {
+            self.effort_partial.fill(f64::NAN);
+            if !storage(state, &mut self.effort_partial)
+                || self.effort_partial.iter().any(|v| !v.is_finite())
             {
                 return false;
             }
         }
-        if let Some(input) = direction.input {
-            if !input.sample_into(time, &mut ports_partial) {
+        if let Some(input) = self.direction.input {
+            if !input.sample_into(time, &mut self.ports_partial) {
                 return false;
             }
         }
-        match physical.vector_field_from_effort_into(
-            &effort,
-            &effort_partial,
-            &ports,
-            &ports_partial,
+        true
+    }
+
+    pub(super) fn vector_field(&mut self, time: f64, state: &[f64], out: &mut [f64]) -> bool {
+        if !self.load(time, state) {
+            return false;
+        }
+        match self.physical.vector_field_from_effort_into(
+            &self.effort,
+            &self.effort_partial,
+            &self.ports,
+            &self.ports_partial,
             out,
         ) {
             Ok(()) => true,
             Err(error) => {
-                physical_error = Some(error);
+                self.physical_error = Some(error);
                 false
             }
         }
-    });
-    if source_refused {
-        return Err(PhsOrbitError::SourceRefused.into());
     }
-    if let Some(error) = physical_error {
-        return Err(error.into());
+
+    pub(super) fn objective_partial(
+        &mut self,
+        time: f64,
+        state: &[f64],
+        objective: super::power::PhsPowerObjective,
+        omega_derivative: f64,
+        out: &mut f64,
+    ) -> bool {
+        if !self.load(time, state) {
+            return false;
+        }
+        let power = if objective.supplied() {
+            self.physical.supplied_power_from_effort(
+                &self.effort,
+                &self.effort_partial,
+                &self.ports,
+                &self.ports_partial,
+            )
+        } else {
+            self.physical
+                .resistance_power_from_effort(&self.effort, &self.effort_partial)
+        };
+        let direct = match power {
+            Ok(value) => value,
+            Err(error) => {
+                self.physical_error = Some(error);
+                return false;
+            }
+        };
+        let original = if objective.per_cycle() && omega_derivative != 0.0 {
+            let power = if objective.supplied() {
+                self.system
+                    .supplied_power_from_effort(&self.effort, &self.ports)
+            } else {
+                self.system.resistance_power_from_effort(&self.effort)
+            };
+            match power {
+                Ok(value) => value,
+                Err(error) => {
+                    self.physical_error = Some(error);
+                    return false;
+                }
+            }
+        } else {
+            0.0
+        };
+        let Some(value) =
+            objective.direct_partial(self.input.omega_rad_s(), omega_derivative, direct, original)
+        else {
+            return false;
+        };
+        *out = value;
+        true
     }
-    result.map_err(Into::into)
 }

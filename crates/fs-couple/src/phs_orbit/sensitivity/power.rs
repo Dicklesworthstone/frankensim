@@ -6,7 +6,94 @@ use super::{
     PreparedPhsForcedSensitivity, bad,
 };
 use crate::phs_orbit::tangent::StorageTangent;
+use fs_math::dd::Dd;
 use fs_phs::PortHamiltonian;
+
+mod adjoint;
+pub use adjoint::PreparedPhsForcedPowerAdjoint;
+
+/// Original physical power, averaged over a cycle or integrated over its
+/// actual period. Supplied work and resistance loss remain separate signed
+/// observations; neither is reconstructed from the other's balance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhsPowerObjective {
+    MeanSuppliedPower,
+    MeanResistancePower,
+    SuppliedEnergyPerCycle,
+    ResistanceEnergyPerCycle,
+}
+
+impl PhsPowerObjective {
+    pub(in crate::phs_orbit) fn supplied(self) -> bool {
+        matches!(self, Self::MeanSuppliedPower | Self::SuppliedEnergyPerCycle)
+    }
+
+    pub(in crate::phs_orbit) fn per_cycle(self) -> bool {
+        matches!(
+            self,
+            Self::SuppliedEnergyPerCycle | Self::ResistanceEnergyPerCycle
+        )
+    }
+
+    // Sample the normalized objective itself, so value AND every covector
+    // component are accepted in the requested power/energy units on both grids.
+    pub(in crate::phs_orbit) fn normalize(
+        self,
+        omega: f64,
+        value: &mut f64,
+        gradient: &mut [f64],
+        frequency: Option<&mut f64>,
+    ) -> bool {
+        if self.per_cycle() {
+            let period = core::f64::consts::TAU / omega;
+            if !period.is_finite() || period <= 0.0 {
+                return false;
+            }
+            for entry in core::iter::once(&mut *value).chain(gradient.iter_mut()) {
+                let scaled = (Dd::from_f64(period) * Dd::from_f64(*entry)).to_f64();
+                if !scaled.is_finite() || (scaled == 0.0 && *entry != 0.0) {
+                    return false;
+                }
+                *entry = scaled;
+            }
+        }
+        if let Some(frequency) = frequency {
+            *frequency = if self.per_cycle() {
+                -*value / omega
+            } else {
+                0.0
+            };
+            if !frequency.is_finite() || (*frequency == 0.0 && self.per_cycle() && *value != 0.0) {
+                return false;
+            }
+        }
+        value.is_finite() && gradient.iter().all(|v| v.is_finite())
+    }
+
+    pub(in crate::phs_orbit) fn direct_partial(
+        self,
+        omega: f64,
+        omega_derivative: f64,
+        direct_power: f64,
+        original_power: f64,
+    ) -> Option<f64> {
+        if !self.per_cycle() {
+            return direct_power.is_finite().then_some(direct_power);
+        }
+        let period = core::f64::consts::TAU / omega;
+        if !period.is_finite() || period <= 0.0 {
+            return None;
+        }
+        let mut derivative = Dd::from_f64(direct_power);
+        if omega_derivative != 0.0 {
+            derivative = derivative
+                - Dd::from_f64(omega_derivative) * Dd::from_f64(original_power)
+                    / Dd::from_f64(omega);
+        }
+        let value = (Dd::from_f64(period) * derivative).to_f64();
+        (value.is_finite() && (value != 0.0 || derivative.to_f64() == 0.0)).then_some(value)
+    }
+}
 
 impl PreparedPhsForcedSensitivity<'_> {
     /// Cycle mean of the ORIGINAL `grad(H)^T R grad(H)` and its complete state
@@ -22,7 +109,12 @@ impl PreparedPhsForcedSensitivity<'_> {
         controls: ForcedMeanObjectiveControls,
         cancelled: impl FnMut() -> bool,
     ) -> Result<ForcedMeanObjective, PhsForcedSensitivityError> {
-        self.mean_physical_power(false, controls, None, cancelled)
+        self.mean_physical_power(
+            PhsPowerObjective::MeanResistancePower,
+            controls,
+            None,
+            cancelled,
+        )
     }
 
     /// The same original resistance-power observation with an explicitly
@@ -33,7 +125,12 @@ impl PreparedPhsForcedSensitivity<'_> {
         hessian: &PhsStorageHessianAction<'_>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<ForcedMeanObjective, PhsForcedSensitivityError> {
-        self.mean_physical_power(false, controls, Some(hessian), cancelled)
+        self.mean_physical_power(
+            PhsPowerObjective::MeanResistancePower,
+            controls,
+            Some(hessian),
+            cancelled,
+        )
     }
 
     /// Cycle mean of the original supplied power `grad(H)^T G u(t)` and its
@@ -51,7 +148,12 @@ impl PreparedPhsForcedSensitivity<'_> {
         controls: ForcedMeanObjectiveControls,
         cancelled: impl FnMut() -> bool,
     ) -> Result<ForcedMeanObjective, PhsForcedSensitivityError> {
-        self.mean_physical_power(true, controls, None, cancelled)
+        self.mean_physical_power(
+            PhsPowerObjective::MeanSuppliedPower,
+            controls,
+            None,
+            cancelled,
+        )
     }
 
     /// Supplied power under the same retained drive with an explicit complete
@@ -62,12 +164,17 @@ impl PreparedPhsForcedSensitivity<'_> {
         hessian: &PhsStorageHessianAction<'_>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<ForcedMeanObjective, PhsForcedSensitivityError> {
-        self.mean_physical_power(true, controls, Some(hessian), cancelled)
+        self.mean_physical_power(
+            PhsPowerObjective::MeanSuppliedPower,
+            controls,
+            Some(hessian),
+            cancelled,
+        )
     }
 
     fn mean_physical_power(
         &mut self,
-        supplied: bool,
+        objective: PhsPowerObjective,
         controls: ForcedMeanObjectiveControls,
         hessian: Option<&PhsStorageHessianAction<'_>>,
         mut cancelled: impl FnMut() -> bool,
@@ -78,6 +185,7 @@ impl PreparedPhsForcedSensitivity<'_> {
         let mut observation = PowerObservation::new(self.system, hessian)?;
         let mut input = vec![f64::NAN; self.system.port_dim()];
         let drive = &self.input;
+        let omega = self.prepared.angular_frequency();
         self.prepared
             .mean_objective(
                 controls,
@@ -85,13 +193,14 @@ impl PreparedPhsForcedSensitivity<'_> {
                     if !observation.load(state) {
                         return false;
                     }
-                    if supplied {
+                    let complete = if objective.supplied() {
                         input.fill(f64::NAN);
                         drive.sample_into(time, &mut input)
                             && observation.supplied(state, &input, value, gradient)
                     } else {
                         observation.resistance(state, value, gradient)
-                    }
+                    };
+                    complete && objective.normalize(omega, value, gradient, None)
                 },
                 cancelled,
             )

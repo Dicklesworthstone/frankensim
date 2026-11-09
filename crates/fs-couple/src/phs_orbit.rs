@@ -32,6 +32,7 @@ mod sensitivity;
 pub use sensitivity::{
     PhsForcedParameterDirection, PhsForcedSensitivityError,
     PreparedPhsForcedAdjoint, PreparedPhsForcedSensitivity,
+    PhsPowerObjective, PreparedPhsForcedPowerAdjoint,
 };
 
 mod backbone_sensitivity;
@@ -106,6 +107,7 @@ pub use autonomous::{
     AutonomousPortFeedback, PhsAutonomousControls, PhsAutonomousLevel,
     PhsAutonomousParameterDirection, PhsAutonomousSensitivityError,
     PhsAutonomousStability, PreparedPhsAutonomousAdjoint, PreparedPhsAutonomousSensitivity,
+    PreparedPhsAutonomousPowerAdjoint,
     analyze_autonomous_feedback_stability,
     audit_autonomous_feedback_orbit, solve_autonomous_feedback_harmonic_balance,
     solve_autonomous_feedback_harmonic_balance_adaptive,

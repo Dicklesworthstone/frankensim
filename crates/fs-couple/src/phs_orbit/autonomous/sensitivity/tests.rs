@@ -3,6 +3,8 @@ use fs_math::{c64::C64, det};
 use fs_orbit::HbAnchor;
 use fs_phs::QuadraticStorage;
 
+#[path = "power/automatic_tests.rs"]
+mod automatic_power;
 #[path = "power/tests.rs"]
 mod power;
 
