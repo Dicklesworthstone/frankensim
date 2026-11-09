@@ -1058,3 +1058,42 @@ the accepted carrier step unchanged.
 This is the native first-order implicit donor advection scope. Species diffusion,
 reactions, mixing heat, thermodynamic composition feedback and a higher-order
 advection scheme remain with their respective future/material owners.
+
+## Resolved transient laminar films
+
+`film::transient::TransientFilm` evolves the wall-normal velocity of the same
+constant-property Newtonian film used by `NusseltFilm` and `ShearedFilm`.
+The local equation is rho u_t = rho g + mu u_yy at fixed thickness, with
+prescribed tangential no-slip wall speed and surface traction. Uniform finite
+volumes and implicit midpoint retain startup, decay, reversal and counterflow;
+drive changes do not replace the accepted profile by a steady parabola.
+
+The original native tridiagonal solver uses O(n) work/storage, reusable scratch
+and a cached factorization for unchanged durations. Every numerical traversal
+polls cancellation at least every 128 cells. The caller supplies physical-speed
+and original-equation residual limits. Invalid source/geometry/drive, failed
+solve, exceeded limits or cancellation publishes neither velocity nor time.
+
+Receipts separate body, wall and surface work, represented kinetic change,
+nonnegative viscous heat, and momentum/work defects. The prescribed surface
+stress reconstructs the actual boundary trace across its half-cell; that
+half-cell's traction work and viscous loss occur exactly once. Heat remains a
+reported transfer, not a second thermal inventory or inferred temperature rise.
+`MaterialFilmLiquid::transient_film` retains the original liquid source,
+viscosity basis, query and receipts beside this native history. No additional
+material selection or apparent-viscosity fit is introduced.
+
+G1 tests compare startup with a continuous mixed-boundary sine expansion,
+measure second-order spatial and temporal refinement, and recover the driven
+Nusselt/sheared steady limit. G0/G3/G4 checks cover signed work and momentum,
+common-frame boosts, reversal, rest, domain refusal and exact cancellation
+retry. These tests exercise the numerical owner; the material adapter also
+has source-to-native parity regressions for both viscosity bases. Verification
+of the numerical owner uses exact production film/math/tridiagonal sources;
+full Cargo and source-adapter integration remain separate verification gates.
+
+This is fixed-thickness, locally parallel, laterally wide Newtonian laminar
+flow. It does not evolve a free surface, infer turbulent transition, resolve
+entrance effects or change material temperature/composition. Midpoint may
+oscillate on unresolved stiff modes; conservation and linear stability do not
+replace temporal or spatial resolution checks for the forcing bandwidth.

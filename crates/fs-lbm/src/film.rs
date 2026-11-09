@@ -14,12 +14,14 @@
 //! equation (7), zero thermal terms; their R = 3 Re. Author manuscript:
 //! <https://www.uni-muenster.de/Physik.TP/pauli/~thiele/Paper/SOCT2002pf.pdf>.
 
-/// Original liquid-source coefficients for the same Newtonian film owner.
-pub mod material;
 /// Nonlinear shear-free films of the original thermal Carreau-Yasuda law.
 pub mod carreau;
+/// Original liquid-source coefficients for the same Newtonian film owner.
+pub mod material;
 /// Signed surface traction driving the same planar Newtonian base flow.
 pub mod sheared;
+/// Wall-normal viscous diffusion with retained momentum during startup/reversal.
+pub mod transient;
 pub use sheared::{FilmPower, ShearedFilm};
 
 /// Prescribed uniform Newtonian liquid properties; no material calibration.

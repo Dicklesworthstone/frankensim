@@ -7,7 +7,39 @@
 
 use fs_material::liquid::surface::ResolvedLiquidSurfaceState;
 
+use super::transient::{FilmDrive, FilmStep, FilmStepLimits, TransientFilm, TransientFilmError};
 use super::{FilmError, FilmMaterial, NusseltFilm, ShearedFilm};
+
+/// Resolved film inertia retaining the original immutable liquid source.
+#[derive(Debug)]
+pub struct MaterialTransientFilm<'a> {
+    liquid: MaterialFilmLiquid<'a>,
+    flow: TransientFilm,
+}
+
+impl<'a> MaterialTransientFilm<'a> {
+    /// Original source, viscosity basis, query and capillarity declaration.
+    pub const fn liquid(&self) -> MaterialFilmLiquid<'a> {
+        self.liquid
+    }
+
+    /// Accepted native profile, physical clock and original SI coefficients.
+    pub const fn flow(&self) -> &TransientFilm {
+        &self.flow
+    }
+
+    /// Advance the same source-bound velocity history without another material
+    /// selection, equilibrium reset, heat deposition or source query.
+    pub fn step(
+        &mut self,
+        duration_s: f64,
+        drive: FilmDrive,
+        limits: FilmStepLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<FilmStep, TransientFilmError> {
+        self.flow.step(duration_s, drive, limits, cancelled)
+    }
+}
 
 /// A frozen Newtonian liquid binding for repeated local film evaluations.
 ///
@@ -93,5 +125,19 @@ impl<'a> MaterialFilmLiquid<'a> {
             tangential_acceleration_m_s2,
             surface_shear_pa,
         )
+    }
+
+    /// Prepare a fixed-thickness Newtonian film initially at rest. Subsequent
+    /// drive changes evolve actual wall-normal momentum under this source's
+    /// viscosity and density. Source temperature/composition remain frozen.
+    pub fn transient_film(
+        self,
+        thickness_m: f64,
+        cells: usize,
+    ) -> Result<MaterialTransientFilm<'a>, TransientFilmError> {
+        Ok(MaterialTransientFilm {
+            liquid: self,
+            flow: TransientFilm::new(self.coefficients(), thickness_m, cells)?,
+        })
     }
 }

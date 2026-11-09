@@ -1,0 +1,442 @@
+//! Resolved unsteady Newtonian films on a tangentially moving, no-slip wall.
+//!
+//! The locally parallel equation is `rho*u_t = rho*g + (mu*u_y)_y`, with
+//! `u(0)=U_wall` and `mu*u_y(h)=tau_surface`. Uniform finite volumes retain the
+//! velocity through the film; implicit midpoint advances the original viscous
+//! diffusion, rather than instantaneously replacing it with a Nusselt profile.
+//! The flat-film reduction follows the tangential momentum/stress conditions
+//! in <https://www.damp.tottori-u.ac.jp/~ooshida/article/RIMS0007/en_node1.html>.
+//!
+//! Each interval holds its authored acceleration, wall speed and surface
+//! traction. For a smooth drive, supply their midpoint values and resolve its
+//! bandwidth. The discrete work identity is body + wall + surface work =
+//! kinetic change + viscous heat, up to the reported linear/roundoff residual.
+//! Heat is reported, not deposited into another material or thermal inventory.
+//!
+//! Geometry, density and viscosity are fixed. This is a laterally wide,
+//! streamwise uniform laminar reduction: no evolving thickness, entrance flow,
+//! capillary waves, turbulent-transition criterion or thermal evolution.
+//! Midpoint is second order but can oscillate on unresolved diffusion modes;
+//! unconditional linear stability is not a timestep-independent accuracy claim.
+
+use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
+
+use super::{FilmError, FilmMaterial, ShearedFilm};
+
+/// Maximum retained wall-normal cells; both work and storage are linear in it.
+pub const MAX_FILM_CELLS: usize = 65_536;
+
+/// Signed tangential forcing, held over one interval (SI units).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FilmDrive {
+    /// Body acceleration, including any explicitly prescribed pressure gradient.
+    pub acceleration_m_s2: f64,
+    /// Translating wall velocity; normal wall motion is not represented.
+    pub wall_velocity_m_s: f64,
+    /// Traction applied to the liquid at the free surface, in Pa.
+    pub surface_shear_pa: f64,
+}
+
+/// Explicit physical-speed and algebraic-solve admission limits.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FilmStepLimits {
+    /// Bounds initial/final cell speeds, wall speed and the surface traces
+    /// reconstructed with this interval's traction at both ends and midpoint.
+    /// The caller qualifies the laminar regime; this is not a transition model.
+    pub maximum_speed_m_s: f64,
+    /// Maximum cell momentum defect divided by that cell's mass [m/s].
+    pub maximum_velocity_residual_m_s: f64,
+}
+
+/// A refused step leaves accepted velocity and time unchanged.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TransientFilmError {
+    /// Native film material/geometry admission failure.
+    Film(FilmError),
+    /// A history, drive or numerical limit is invalid.
+    Invalid(&'static str),
+    /// Storage cannot be represented or allocated.
+    Capacity,
+    /// An intermediate or a required positive coefficient is unrepresentable.
+    NonRepresentable,
+    /// The prescribed physical-speed limit was exceeded.
+    SpeedLimit,
+    /// The original momentum equation exceeds its declared residual allowance.
+    ResidualLimit,
+    /// Cancellation observed before publication.
+    Cancelled,
+    /// Failure in the original native tridiagonal solve.
+    Linear(TridiagonalError),
+}
+impl core::fmt::Display for TransientFilmError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "transient laminar film: {self:?}")
+    }
+}
+impl std::error::Error for TransientFilmError {}
+impl From<FilmError> for TransientFilmError {
+    fn from(value: FilmError) -> Self {
+        Self::Film(value)
+    }
+}
+impl From<TridiagonalError> for TransientFilmError {
+    fn from(value: TridiagonalError) -> Self {
+        if value == TridiagonalError::Cancelled {
+            Self::Cancelled
+        } else {
+            Self::Linear(value)
+        }
+    }
+}
+
+/// One accepted interval. Extensive quantities are per unit wetted wall area.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FilmStep {
+    /// Duration of the accepted interval [s].
+    pub duration_s: f64,
+    /// Endpoint volume flux per width [m²/s].
+    pub final_flow_per_width_m2_s: f64,
+    /// Midpoint volume flux per width [m²/s].
+    pub midpoint_flow_per_width_m2_s: f64,
+    /// Velocity extrapolated across the surface half-cell using its traction.
+    pub midpoint_surface_velocity_m_s: f64,
+    /// Fluid-on-wall tangential traction; wall-on-fluid has the opposite sign.
+    pub midpoint_wall_shear_pa: f64,
+    /// Change in integrated fluid momentum [kg/(m s)].
+    pub momentum_change_kg_m_s: f64,
+    /// Momentum change minus body and boundary impulses [kg/(m s)].
+    pub momentum_residual_kg_m_s: f64,
+    /// Evaluated as sum(m*u_mid*delta_u), avoiding subtraction of energies.
+    pub kinetic_energy_change_j_m2: f64,
+    /// Signed body-force work [J/m²].
+    pub body_work_j_m2: f64,
+    /// Signed work of the translating wall on the liquid [J/m²].
+    pub wall_work_j_m2: f64,
+    /// Signed work of the surface traction on the liquid [J/m²].
+    pub surface_work_j_m2: f64,
+    /// Nonnegative resolved viscous loss, including both boundary half-cells.
+    pub viscous_heat_j_m2: f64,
+    /// Total input work minus kinetic change and viscous heat [J/m²].
+    pub work_residual_j_m2: f64,
+    /// Maximum original cell momentum residual divided by cell mass [m/s].
+    pub maximum_velocity_residual_m_s: f64,
+}
+
+/// One original constant-property film, its resolved history and reusable O(n)
+/// solve storage. Warm steps allocate nothing; equal durations reuse the native
+/// factorization. Scratch may change on refusal, but accepted history does not.
+#[derive(Debug)]
+pub struct TransientFilm {
+    material: FilmMaterial,
+    thickness: f64,
+    spacing: f64,
+    mass_per_cell_area: f64,
+    shear_conductance: f64,
+    diffusion_time: f64,
+    time: f64,
+    velocity: Vec<f64>,
+    candidate: Vec<f64>,
+    midpoint: Vec<f64>,
+    delta: Vec<f64>,
+    rhs: Vec<f64>,
+    diagonal: Vec<f64>,
+    adjacent: Vec<f64>,
+    linear: TridiagonalWorkspace,
+    factored_duration: Option<f64>,
+}
+
+fn filled(n: usize) -> Result<Vec<f64>, TransientFilmError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(n)
+        .map_err(|_| TransientFilmError::Capacity)?;
+    values.resize(n, 0.0);
+    Ok(values)
+}
+fn finite(value: f64) -> Result<f64, TransientFilmError> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(TransientFilmError::NonRepresentable)
+    }
+}
+fn positive(value: f64) -> Result<f64, TransientFilmError> {
+    if value.is_finite() && value > 0.0 {
+        Ok(value)
+    } else {
+        Err(TransientFilmError::NonRepresentable)
+    }
+}
+fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), TransientFilmError> {
+    if cancelled() {
+        Err(TransientFilmError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+impl TransientFilm {
+    /// Admit a fixed-thickness film initially at rest. The existing steady
+    /// film owner supplies the same material/geometry admission rules.
+    pub fn new(
+        material: FilmMaterial,
+        thickness_m: f64,
+        cells: usize,
+    ) -> Result<Self, TransientFilmError> {
+        if !(2..=MAX_FILM_CELLS).contains(&cells) {
+            return Err(TransientFilmError::Invalid("film cell count"));
+        }
+        Self::from_profile(material, thickness_m, filled(cells)?, 0.0)
+    }
+
+    /// Import actual cell-center velocities at a nonnegative physical time.
+    /// This is an initial-condition operation, not a steady-profile reset.
+    pub fn from_profile(
+        material: FilmMaterial,
+        thickness_m: f64,
+        velocity_m_s: Vec<f64>,
+        time_s: f64,
+    ) -> Result<Self, TransientFilmError> {
+        ShearedFilm::new(material, thickness_m, 0.0, 0.0)?;
+        let n = velocity_m_s.len();
+        if !(2..=MAX_FILM_CELLS).contains(&n)
+            || !time_s.is_finite()
+            || time_s < 0.0
+            || velocity_m_s.iter().any(|u| !u.is_finite())
+        {
+            return Err(TransientFilmError::Invalid("film initial history"));
+        }
+        let spacing = positive(thickness_m / n as f64)?;
+        let mass_per_cell_area = positive(material.density_kg_m3 * spacing)?;
+        let shear_conductance =
+            positive(material.density_kg_m3 * (material.kinematic_viscosity_m2_s / spacing))?;
+        positive(2.0 * shear_conductance)?;
+        let diffusion_time = positive(mass_per_cell_area / shear_conductance)?;
+        Ok(Self {
+            material,
+            thickness: thickness_m,
+            spacing,
+            mass_per_cell_area,
+            shear_conductance,
+            diffusion_time,
+            time: time_s,
+            velocity: velocity_m_s,
+            candidate: filled(n)?,
+            midpoint: filled(n)?,
+            delta: filled(n)?,
+            rhs: filled(n)?,
+            diagonal: filled(n)?,
+            adjacent: filled(n - 1)?,
+            linear: TridiagonalWorkspace::new(n)?,
+            factored_duration: None,
+        })
+    }
+
+    /// Original constant SI material coefficients.
+    pub const fn material(&self) -> FilmMaterial {
+        self.material
+    }
+    /// Fixed wall-to-surface thickness.
+    pub const fn thickness_m(&self) -> f64 {
+        self.thickness
+    }
+    /// Uniform wall-normal control-volume width.
+    pub const fn spacing_m(&self) -> f64 {
+        self.spacing
+    }
+    /// Physical time of the last fully admitted profile.
+    pub const fn accepted_time_s(&self) -> f64 {
+        self.time
+    }
+    /// Retained cell-center velocities, ordered from the wall to the surface.
+    pub fn velocities_m_s(&self) -> &[f64] {
+        &self.velocity
+    }
+    /// Cell-scale viscous diffusion time; resolve it for rapid forcing changes.
+    pub fn diffusion_time_s(&self) -> f64 {
+        self.diffusion_time
+    }
+
+    /// Advance the retained profile with one implicit-midpoint step. All
+    /// numerical traversals poll at least every 128 cells. No accepted state
+    /// changes until finite-value, speed, residual and cancellation checks pass.
+    pub fn step(
+        &mut self,
+        duration_s: f64,
+        drive: FilmDrive,
+        limits: FilmStepLimits,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<FilmStep, TransientFilmError> {
+        poll(&mut cancelled)?;
+        if !duration_s.is_finite()
+            || duration_s <= 0.0
+            || !limits.maximum_speed_m_s.is_finite()
+            || limits.maximum_speed_m_s <= 0.0
+            || !limits.maximum_velocity_residual_m_s.is_finite()
+            || limits.maximum_velocity_residual_m_s <= 0.0
+            || ![
+                drive.acceleration_m_s2,
+                drive.wall_velocity_m_s,
+                drive.surface_shear_pa,
+            ]
+            .into_iter()
+            .all(f64::is_finite)
+        {
+            return Err(TransientFilmError::Invalid("film step inputs"));
+        }
+        let end_time = finite(self.time + duration_s)?;
+        if end_time <= self.time {
+            return Err(TransientFilmError::NonRepresentable);
+        }
+        if drive.wall_velocity_m_s.abs() > limits.maximum_speed_m_s {
+            return Err(TransientFilmError::SpeedLimit);
+        }
+        let n = self.velocity.len();
+        let weight = positive(duration_s / self.mass_per_cell_area)?;
+        let alpha = positive(0.5 * weight * self.shear_conductance)?;
+        let body_increment = finite(duration_s * drive.acceleration_m_s2)?;
+        if self.factored_duration != Some(duration_s) {
+            self.factored_duration = None;
+            for i in 0..n {
+                if i % 128 == 0 {
+                    poll(&mut cancelled)?;
+                }
+                // Bottom wall is half a cell away; the top face has specified
+                // stress and therefore contributes no unknown to the matrix.
+                let left = if i == 0 { 2.0 } else { 1.0 };
+                let right = if i + 1 == n { 0.0 } else { 1.0 };
+                self.diagonal[i] = finite(1.0 + alpha * (left + right))?;
+                if i + 1 < n {
+                    self.adjacent[i] = -alpha;
+                }
+            }
+            self.linear.factor(
+                &self.adjacent,
+                &self.diagonal,
+                &self.adjacent,
+                &mut cancelled,
+            )?;
+            self.factored_duration = Some(duration_s);
+        }
+        for i in 0..n {
+            if i % 128 == 0 {
+                poll(&mut cancelled)?;
+            }
+            if self.velocity[i].abs() > limits.maximum_speed_m_s {
+                return Err(TransientFilmError::SpeedLimit);
+            }
+            let left = if i == 0 {
+                2.0 * self.shear_conductance * (self.velocity[0] - drive.wall_velocity_m_s)
+            } else {
+                self.shear_conductance * (self.velocity[i] - self.velocity[i - 1])
+            };
+            let right = if i + 1 == n {
+                drive.surface_shear_pa
+            } else {
+                self.shear_conductance * (self.velocity[i + 1] - self.velocity[i])
+            };
+            self.rhs[i] = finite(weight.mul_add(right - left, body_increment))?;
+        }
+        // Solve for the increment so small time steps do not subtract two
+        // large equilibrium right-hand sides before resolving the dynamics.
+        self.linear
+            .solve_factored_into(&self.rhs, &mut self.delta, &mut cancelled)?;
+        for i in 0..n {
+            if i % 128 == 0 {
+                poll(&mut cancelled)?;
+            }
+            self.candidate[i] = finite(self.velocity[i] + self.delta[i])?;
+            // Audit the REPRESENTED update, including any rounding in addition.
+            self.delta[i] = self.candidate[i] - self.velocity[i];
+            self.midpoint[i] = finite(0.5f64.mul_add(self.delta[i], self.velocity[i]))?;
+            if self.candidate[i].abs() > limits.maximum_speed_m_s {
+                return Err(TransientFilmError::SpeedLimit);
+            }
+        }
+        let wall_shear =
+            finite(2.0 * self.shear_conductance * (self.midpoint[0] - drive.wall_velocity_m_s))?;
+        let surface_offset = finite(0.5 * drive.surface_shear_pa / self.shear_conductance)?;
+        let surface_velocity = finite(self.midpoint[n - 1] + surface_offset)?;
+        for trace in [
+            finite(self.velocity[n - 1] + surface_offset)?,
+            surface_velocity,
+            finite(self.candidate[n - 1] + surface_offset)?,
+        ] {
+            if trace.abs() > limits.maximum_speed_m_s {
+                return Err(TransientFilmError::SpeedLimit);
+            }
+        }
+        let mut q = 0.0;
+        let mut q_final = 0.0;
+        let mut momentum = 0.0;
+        let mut kinetic = 0.0;
+        let mut viscous_power = finite(
+            wall_shear * (self.midpoint[0] - drive.wall_velocity_m_s)
+                + drive.surface_shear_pa * surface_offset,
+        )?;
+        let mut maximum_residual = 0.0_f64;
+        for i in 0..n {
+            if i % 128 == 0 {
+                poll(&mut cancelled)?;
+            }
+            let left = if i == 0 {
+                wall_shear
+            } else {
+                self.shear_conductance * (self.midpoint[i] - self.midpoint[i - 1])
+            };
+            let right = if i + 1 == n {
+                drive.surface_shear_pa
+            } else {
+                let difference = self.midpoint[i + 1] - self.midpoint[i];
+                let stress = finite(self.shear_conductance * difference)?;
+                viscous_power = finite(stress.mul_add(difference, viscous_power))?;
+                stress
+            };
+            let residual = finite(self.delta[i] - weight.mul_add(right - left, body_increment))?;
+            maximum_residual = maximum_residual.max(residual.abs());
+            q = finite(self.spacing.mul_add(self.midpoint[i], q))?;
+            q_final = finite(self.spacing.mul_add(self.candidate[i], q_final))?;
+            momentum = finite(self.mass_per_cell_area.mul_add(self.delta[i], momentum))?;
+            kinetic = finite(
+                (self.mass_per_cell_area * self.midpoint[i]).mul_add(self.delta[i], kinetic),
+            )?;
+        }
+        if maximum_residual > limits.maximum_velocity_residual_m_s {
+            return Err(TransientFilmError::ResidualLimit);
+        }
+        let body_work =
+            finite(duration_s * self.material.density_kg_m3 * drive.acceleration_m_s2 * q)?;
+        let wall_work = finite(-duration_s * wall_shear * drive.wall_velocity_m_s)?;
+        let surface_work = finite(duration_s * drive.surface_shear_pa * surface_velocity)?;
+        let heat = finite(duration_s * viscous_power)?;
+        let receipt = FilmStep {
+            duration_s,
+            final_flow_per_width_m2_s: q_final,
+            midpoint_flow_per_width_m2_s: q,
+            midpoint_surface_velocity_m_s: surface_velocity,
+            midpoint_wall_shear_pa: wall_shear,
+            momentum_change_kg_m_s: momentum,
+            momentum_residual_kg_m_s: finite(
+                momentum
+                    - duration_s
+                        * (self.material.density_kg_m3 * self.thickness * drive.acceleration_m_s2
+                            + drive.surface_shear_pa
+                            - wall_shear),
+            )?,
+            kinetic_energy_change_j_m2: kinetic,
+            body_work_j_m2: body_work,
+            wall_work_j_m2: wall_work,
+            surface_work_j_m2: surface_work,
+            viscous_heat_j_m2: heat,
+            work_residual_j_m2: finite(((body_work + wall_work) + surface_work) - kinetic - heat)?,
+            maximum_velocity_residual_m_s: maximum_residual,
+        };
+        poll(&mut cancelled)?;
+        core::mem::swap(&mut self.velocity, &mut self.candidate);
+        self.time = end_time;
+        Ok(receipt)
+    }
+}
+
+#[cfg(test)]
+mod tests;

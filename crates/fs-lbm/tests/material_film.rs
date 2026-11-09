@@ -4,6 +4,7 @@
 
 use fs_evidence::ValidityDomain;
 use fs_lbm::film::material::MaterialFilmLiquid;
+use fs_lbm::film::transient::{FilmDrive, FilmStepLimits, TransientFilm};
 use fs_lbm::film::{FilmError, LongWaveLimits};
 use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
@@ -282,6 +283,52 @@ fn both_original_viscosity_bases_drive_dimensional_film_and_keep_receipts() {
             power.body_work_w_m2 + power.surface_work_w_m2,
         );
         assert!(core::ptr::eq(bound.material(), &source));
+    }
+}
+
+#[test]
+fn source_bound_transient_films_retain_their_material_and_resolved_momentum() {
+    let limits = FilmStepLimits {
+        maximum_speed_m_s: 2.0,
+        maximum_velocity_residual_m_s: 1e-11,
+    };
+    for basis in [
+        LiquidViscosityBasis::Dynamic,
+        LiquidViscosityBasis::Kinematic,
+    ] {
+        let card = card(basis, true, false);
+        let source = resolve(&card, basis, LiquidCapillarity::Sourced);
+        let liquid = MaterialFilmLiquid::try_new(&source).unwrap();
+        let mut bound = liquid.transient_film(1e-3, 32).unwrap();
+        let mut native = TransientFilm::new(liquid.coefficients(), 1e-3, 32).unwrap();
+        for acceleration in [4.0, -4.0, 0.0] {
+            let drive = FilmDrive {
+                acceleration_m_s2: acceleration,
+                wall_velocity_m_s: 0.01,
+                surface_shear_pa: -0.005,
+            };
+            let receipt = bound.step(0.001, drive, limits, || false).unwrap();
+            let reference = native.step(0.001, drive, limits, || false).unwrap();
+            assert_eq!(receipt, reference);
+            assert_eq!(bound.flow().velocities_m_s(), native.velocities_m_s());
+            assert!(core::ptr::eq(bound.liquid().material(), &source));
+            assert_eq!(bound.liquid().material().viscosity_basis(), basis);
+            assert_eq!(
+                bound.liquid().material().material().card_identity(),
+                card.content_hash()
+            );
+            assert!(receipt.work_residual_j_m2.abs() < 1e-14);
+            assert!(receipt.viscous_heat_j_m2 >= 0.0);
+        }
+        assert_eq!(bound.flow().accepted_time_s(), 0.003);
+        let profile = bound.flow().velocities_m_s().to_vec();
+        assert!(
+            bound
+                .step(0.001, FilmDrive::default(), limits, || true)
+                .is_err()
+        );
+        assert_eq!(bound.flow().accepted_time_s(), 0.003);
+        assert_eq!(bound.flow().velocities_m_s(), profile);
     }
 }
 
