@@ -44,6 +44,7 @@ pub use thermal::{
 
 type Result<T> = core::result::Result<T, MulticomponentNonisothermalError>;
 
+pub mod adaptive;
 mod solve;
 
 /// Accepted local temperatures, independent inventories and energetic

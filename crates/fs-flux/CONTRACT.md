@@ -11536,3 +11536,33 @@ root-exhaustion rollback of both accepted owners; and whole-interval replay
 after reaction-induced wave shortening. These use manufactured mechanisms
 and original source solvers; they establish numerical composition behavior,
 not experimental reaction-rate or combustion validation.
+
+## Adaptive local-temperature multicomponent phase separation
+
+The thermal phase-field owner advances a complete requested interval with
+explicit time and work limits. One full interval is compared with two half
+intervals of the SAME coupled species, total-local-energy and caloric-recovery
+kernel. Independent original all-species inventory and Kelvin norms are joined
+by a graph L1 norm of per-edge interface-energy differences. Opposing changes
+on different edges cannot cancel in the temporal error estimate. Relative
+interface scaling sums max(coarse, fine) energy over each physical edge.
+
+The unchanged initial coupled face rates are reused by the coarse and first
+half stages and across rejected retries. Midpoint rates are recomputed, and
+acceptance invalidates the cache. The original shared thermal admission,
+caloric-bracket retry policy, precision failures and work counters retain their
+semantics. Positivity, bounded caloric inversion, energy and entropy refusals
+can request smaller intervals; cancellation, original-source and unresolved
+inventory precision failures remain transactional refusals.
+
+Only the two accepted half-step paths contribute physical species and total
+local-energy transfers. Completed steps, constitutive evaluations and caloric
+iterations separately report numerical work, including completed rejected or
+coarse work. A final complete-window audit rechecks all independent inventories,
+cell capacities, original caloric precision, total homogeneous enthalpy plus
+interface energy, and original entropy before publishing the endpoint.
+
+The controller exposes local time-discretization estimates, not an
+unconditional stability, global trajectory-error or spatial-convergence
+certificate. Constant energetic kappa and the fixed-geometry transport model
+remain the same as the fixed-step owner.
