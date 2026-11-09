@@ -12917,6 +12917,57 @@ adapter groups: the genuine renderer dependency build remains blocked by
 `asupersync` compilation being killed before renderer typechecking. Source
 formatting and interface review are reported separately from that native gate.
 
+## Time-resolved luminescence camera exposure
+
+`volumes::transport::luminescence::render_luminescence_exposure` observes an
+explicit ordered set of accepted field snapshots through one frozen native
+`PhysicalCamera`. `LuminescenceExposureNode` binds each declared physical time
+to a direct `LuminescenceGrid` or `ScatteringLuminescenceGrid` and a positive
+dimensionless quadrature weight. Weights must sum to one within 64 machine
+epsilons; finite increasing shutter bounds and strictly increasing in-window
+times are required. The original source identity and exact wavelength order
+must agree, while complete field identities may change with accepted powers,
+opacity and material state. The caller supplies the accepted snapshots and
+their times; this observer does not create or certify a kinetic history.
+
+Each pixel/pupil ray transports every node's actual source and absorption
+before averaging. Transporting independently averaged powers and opacity is
+not substituted for this operation. The original raster kernel, pupil draws,
+path seeds and native direct/scattered owners remain in use. Common random
+numbers correlate observations across time without altering their individual
+path measures; constant fields retain the frozen camera's samples and result.
+One output image and a bounded temporal weight vector are allocated, rather
+than a full intermediate image for every time node.
+
+`LuminescenceCameraExposure` retains the camera, sampling settings, shutter
+bounds, original source/wavelengths and an ordered field-history identity. Its
+mean is bin-integrated radiance in W/(m² sr). The optional time integral is in
+J/(m² sr), and the existing approximate visible observer projects the mean.
+These are radiance quantities, without inferred sensor irradiance, aperture
+gain or display calibration. The compensated positive weighted mean retains
+both old and new fractions independently, preserving a short bright pulse
+even when the dominant fraction rounds to one. Mean radiance remains usable
+when its time integral overflows or positive energy underflows to zero; the
+integral query explicitly refuses those unrepresentable results.
+
+`LuminescenceExposureBudget` admits temporal node storage and the full
+pixels-times-primary-samples-times-nodes query count. Every actual temporal DDA
+visit consumes the same whole-image allowance; checked totals preserve the
+native per-history bounds and prevent visit-counter overflow. Cancellation or
+any refused observation returns no partial exposure and changes no field.
+The positive quadrature is an estimate with caller-owned temporal resolution,
+not an adaptive integration or temporal error certificate. Backgrounds, camera
+motion, photon flight delay and sensor response remain separate models.
+
+Four authored fixture groups cover midpoint convergence to an independent
+exponential light integral with changing emission and foreground opacity;
+constant direct/scattered camera parity with actual multiplied work; bright
+short pulses in either weight order and integrated-radiance representability;
+and source/spectrum, time, quadrature, budget and cancellation refusals. Scalar
+calculations independently verify second-order midpoint convergence and the
+pulse/correction arithmetic. These new Rust fixtures are source-reviewed but
+unexecuted because Rust, DSR and RCH are unavailable in the current workspace.
+
 ## Bounded opaque GGX reflection sampling
 
 Opaque legacy GGX, spectral conductors and body-locked brushed conductors use

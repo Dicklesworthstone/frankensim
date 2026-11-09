@@ -771,13 +771,13 @@ fn render_camera_samples<const M: usize, A, P>(
 // Separate opacity and log-sum-exp survival preserve thin layers, partial pupil
 // coverage, and finite bright backgrounds behind opaque columns.
 #[derive(Clone, Copy, Default)]
-struct Compensated {
-    value: f64,
+pub(super) struct Compensated {
+    pub(super) value: f64,
     correction: f64,
 }
 
 impl Compensated {
-    fn add(&mut self, value: f64) {
+    pub(super) fn add(&mut self, value: f64) {
         let corrected = value - self.correction;
         let next = self.value + corrected;
         self.correction = (next - self.value) - corrected;
@@ -786,6 +786,24 @@ impl Compensated {
 
     fn update_mean(&mut self, sample: f64, count: u32) {
         self.add((sample - self.value) / f64::from(count));
+    }
+
+    pub(super) fn update_weighted_mean(
+        &mut self,
+        sample: f64,
+        old_fraction: f64,
+        new_fraction: f64,
+    ) {
+        self.correction *= old_fraction;
+        if new_fraction <= 0.5 {
+            self.add((sample - self.value) * new_fraction);
+        } else {
+            // The old fraction must not be reconstructed as 1-new_fraction:
+            // a bright short pulse survives even when new_fraction rounds to 1.
+            let old = self.value;
+            self.value = sample;
+            self.add((old - sample) * old_fraction);
+        }
     }
 }
 

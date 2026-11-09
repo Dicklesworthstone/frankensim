@@ -26,12 +26,17 @@ use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
 mod camera;
+mod exposure;
 mod scattered;
 pub use camera::{
     LuminescenceCameraError, LuminescenceCameraImage, LuminescenceCameraPixel,
     LuminescenceCameraRadianceImage, LuminescenceCameraSettings, VolumeCameraBackground,
     render_luminescence_camera, render_luminescence_camera_with_background,
     render_scattered_luminescence_camera,
+};
+pub use exposure::{
+    LuminescenceCameraExposure, LuminescenceExposureBudget, LuminescenceExposureError,
+    LuminescenceExposureField, LuminescenceExposureNode, render_luminescence_exposure,
 };
 pub use scattered::{
     LuminescenceScatteringBudget, ScatteredLuminescenceSample, ScatteringLuminescenceGrid,
