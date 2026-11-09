@@ -28,6 +28,9 @@ use fs_math::dd::Dd;
 /// Original temperature continuation of all four coupled contact coordinates.
 pub mod temperature;
 
+/// Objective shear history and actual native projection without a time step.
+pub mod transport;
+
 /// Component order is [normal,shear1,shear2,twist]. Mixed-unit arrays keep
 /// metre and radian tolerances, or force and torque limits, separate.
 #[derive(Clone, Copy, Debug, PartialEq)]

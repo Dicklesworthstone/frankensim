@@ -1,6 +1,8 @@
 //! Coupled four-coordinate dynamics: native mass metric, source work and hidden-turn refusal.
 #[path = "motion/temperature.rs"]
 mod temperature;
+#[path = "motion/transport.rs"]
+mod transport;
 
 use super::source;
 use core::f64::consts::PI;

@@ -4684,3 +4684,31 @@ limits, preserve exact no-op/round-trip states, reject lost combined equilibrium
 when the normal model still admits, and check source/control/effort/budget and
 cancellation refusals. Pinned formatting and parsing passed; these cross-crate
 tests were not compiled or executed in the resource-constrained session.
+
+## Objective combined adhesion through native projection changes
+
+`JkrCombinedMotion::rebind_projection` preserves the original shared-radius
+I/II/III source and accepted chronology while rebinding its complete native
+four-coordinate mobility and rates. The existing checked tangent isometry
+rotates only elastic vector shear. Normal approach and relative twist remain
+unchanged; a common material spin or tangent gauge change does not integrate
+a fictitious shear chord, advance physical time or initialize a new bond.
+
+The sealed old response is cached. Unchanged coordinates need no source query;
+changed shear components need one original strict point admission. Original
+rate, effort and source-applicability bounds still apply. Complete reversible
+storage and the sum of absolute normal/shear/torsion/surface storage defects
+must satisfy the original energy tolerance. No component cancellation creates
+an unreported work channel. The projected kinetic-energy difference is
+diagnostic only: the native geometry owner must independently authenticate
+actual body momentum, total kinetic energy and integrated pose travel.
+
+The four new integration groups cover dense mixed-unit metric/tangent/work
+covariance and subsequent dynamics, independent five-native-coordinate kinetic
+repartition, common material spin and changing-normal transport, and refusal/
+retry for identity, rates, mobility, effort, exact storage and cancellation.
+Pinned formatting, recursive Rust parsing and scoped whitespace checks pass;
+the integration groups are authored but uncompiled and unexecuted because the
+full dependency build remains blocked by workspace disk and memory limits.
+This source operation supplies no pose path, contact migration, slip, release,
+material refresh, impulse, work or heat.
