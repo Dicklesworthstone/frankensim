@@ -14130,3 +14130,50 @@ spatial stress interpolation or a finite-deformation Cauchy-to-Piola conversion.
 A shared matrix-free mass action uses the same positive P1/Q1 density interpolation, original geometry and native mass quadrature as consistent mass assembly. It constructs no global stiffness or mass matrix. Hex8 retains Standard/BBar-independent mass integration; curved graded Tet10/Hex20/Hex27 retain their existing quadrature floors. Material density metadata cannot replace an explicit reference profile. Existing mesh/work admission and cancellation apply, with finite acceleration and force checks. These are prescribed reference dead loads for the existing equilibrium, reaction and prestress owners; no follower geometry or transient acceleration law is inferred.
 
 Four focused regression groups cover analytical force/centroid torque/rigid work on affine and curved maps, full consistent mass action and supported columns, actual native self-weight equilibrium/reactions at equal total mass, and quadrature/field/overflow/cancellation refusal. All four and fourteen existing Hex mass/prestress regressions passed in the native source-subset harness; full workspace Cargo validation was unavailable.
+
+### Native reduced-plane pseudo-arclength continuation
+
+`HyperProblem::prepare_continuation` binds the original elastic problem to
+`hyper2d::continuation::PlaneContinuation`. The admitted formulations are
+finite-bulk P1/Q1 plane stress, exact-volume P1/Q1 plane stress, and native
+Q1 plane-strain mean dilatation. Each trial reuses the original prepared
+reference geometry, point-material/reference owners, transverse or volumetric
+condensation, complete energy Hessian, and native deformation-domain checks.
+Frozen incremental inelastic potentials refuse; this is a held elastic path.
+
+With positive physical scales `L,F` and original thickness `h`, free
+coordinates are `q=u_f/L`, prescribed motion is `u_c=lambda*g_c`, and
+dead tractions scale with `lambda`. The native equations are
+`R=h*(f_int-lambda*f_dead)/F`, `R_q=h*L*K_ff/F`, and
+`-R_lambda=h*(f_dead-K_fc*g_c)/F`. The support column is formed from
+the complete current tangent before restriction. Prescribed coordinates stay
+outside the free arclength metric. One exact-state cache shares native
+constitutive assembly across residual, tangent and parameter-column requests.
+
+The existing bordered continuation owner supplies predictor/corrector solves,
+step control and resumable path state, including negative tangents and simple
+load-control folds. Preparation requires nonempty free coordinates under an
+explicit caller cap, finite representable scaling, and a nonzero free dead
+force or prescribed-motion ramp. `start_from` admits a complete physical
+equilibrium with its exact prescribed values; resume rechecks the original
+force equation. A failed/cancelled advance returns no candidate and preserves
+the input checkpoint. Context cancellation is polled through native assembly
+and the existing continuation callbacks. Callbacks must remain pure while held.
+
+Response retains original support reactions, explicit free-force residual,
+stored elastic energy, and stored energy minus current dead-load work in
+physical units. Moving-support work is not classified as dead-load potential.
+Path events remain numerical diagnostics; no certified bifurcation, continuum
+stability, wrinkling, global injectivity, evolved history, or updated reference
+state is inferred.
+
+`tests/hyper_plane_continuation.rs` specifies analytical biaxial energy,
+reaction and dead-work checks across all five mesh/formulation combinations,
+exact split resume, displacement/parameter finite differences, heterogeneous
+held-reference parity, and frozen-history/domain/cancellation refusal.
+A bounded native source check exercised the new support restriction and the
+existing bordered continuation, CSR and dense factorization on an independent
+moving-support von Mises reference: 40 derivative comparisons, a 140-step
+limit-point crossing, exact 70+70 resume, and cancellation passed. The complete
+HyperProblem integration regressions remain unexecuted in the dependency-
+blocked workspace; no large-system performance claim is made.

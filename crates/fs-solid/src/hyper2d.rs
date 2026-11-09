@@ -45,6 +45,8 @@ use fs_solver::op::{CsrOp, LinearOp};
 use fs_sparse::Coo;
 use std::collections::BTreeMap;
 
+/// Native reduced-plane equilibrium paths, including prescribed support ramps.
+pub mod continuation;
 /// Opt-in Q1 mean-dilatation finite-strain compression.
 pub mod mean_dilatation;
 /// Traction-free thickness relaxation on the original hyperelastic energy.

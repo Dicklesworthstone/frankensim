@@ -80,7 +80,7 @@ pub(super) struct Prepared {
 }
 
 impl Prepared {
-    fn new(problem: &HyperProblem<'_>, cx: &Cx<'_>) -> Result<Self, SolidError> {
+    pub(super) fn new(problem: &HyperProblem<'_>, cx: &Cx<'_>) -> Result<Self, SolidError> {
         checkpoint(cx)?;
         let mesh = problem.mesh;
         if mesh.nodes.is_empty() || mesh.elems.is_empty() {

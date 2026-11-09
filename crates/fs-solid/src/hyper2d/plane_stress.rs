@@ -156,7 +156,7 @@ struct Element {
 }
 
 #[derive(Clone, Copy)]
-enum Constraint {
+pub(super) enum Constraint {
     FiniteBulk,
     Incompressible,
 }
@@ -339,7 +339,7 @@ pub(super) fn material_point_kinematics(
 }
 
 impl<'a> Prepared<'a> {
-    fn new(
+    pub(super) fn new(
         problem: &HyperProblem<'_>,
         local: PlaneStressSettings,
         constraint: Constraint,
