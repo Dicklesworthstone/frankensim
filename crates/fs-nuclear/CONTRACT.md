@@ -519,9 +519,10 @@ The model is closed, constant-rate, acyclic, and limited to the numerical owner'
 product yields, temperature-dependent rates or transport of emitted particles.
 The represented daughter's population is not a full nuclear mass/charge ledger.
 Original chemical composition, bulk thermal mass and material caloric laws remain
-with their existing owners. Large inventories that could amplify vanished or
-subnormal propagator coefficients retain the numerical owner's explicit refusal;
-the physical wrapper never bypasses its range checks or invents a zero tail.
+with their existing owners. Same-node exponential survivors retain representable scaled tails through the
+numerical owner's scalar attenuation kernel. Large inventories that could amplify
+unrepresented off-diagonal or integrated-count coefficients retain its explicit
+refusal; the physical wrapper never bypasses those range checks.
 
 Ten focused physical regressions cover analytic repeated-rate ingrowth and
 integrated emissions, distinct energy channels for duplicate daughters, activity

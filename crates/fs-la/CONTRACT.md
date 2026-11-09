@@ -926,7 +926,9 @@ Node/edge, series, squaring and scalar-work limits bound preparation, with
 cooperative cancellation. Nonnegative maps, closed population columns, per-node
 transfer balances and acyclic visit-count bounds are numerical admission checks,
 not certified forward-error enclosures. Unrepresentable scaled direct transfers
-refuse. Large inventories cannot silently recover subnormal or vanished coefficients;
+refuse. Same-node exponential survivors use the original scaled scalar attenuation
+kernel when their stored diagonal is subnormal or zero. Other population and
+integrated-count coefficients retain the large-inventory representability checks;
 uncertain cases refuse unless a conservative tail bound proves the contribution
 unrepresentable in the caller's selected amount unit.
 

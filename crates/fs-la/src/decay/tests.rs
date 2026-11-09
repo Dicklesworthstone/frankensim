@@ -261,11 +261,7 @@ fn explicit_budgets_and_late_cancellation_refuse_transactionally() {
 }
 
 #[test]
-fn a_large_inventory_cannot_silently_resurrect_an_underflowed_tail() {
-    for time in [730.0, 800.0] {
-        let plan = prepare(&[1.0, 0.0], &[edge(0, 1, 1.0)], time);
-        assert!(matches!(plan.apply(&[1e200, 0.0]), Err(DecayError::Unrepresentable(_))));
-    }
+fn a_large_inventory_still_refuses_an_underflowed_ingrowth_tail() {
     let chain = prepare(&[1.0, 1.0, 0.0], &[edge(0, 1, 1.0), edge(1, 2, 1.0)], 800.0);
     assert!(matches!(chain.apply(&[1e200, 0.0, 0.0]), Err(DecayError::Unrepresentable(_))));
     // Truly exhausted fast parents remain usable at large, ordinary inventories.
@@ -284,4 +280,58 @@ fn large_inventory_refuses_a_vanished_multistep_transformation_coefficient() {
     // fit in the map, but this population would make their count representable.
     assert!(matches!(chain.apply(&[1e300, 0.0, 0.0, 0.0, 0.0]),
         Err(DecayError::Unrepresentable(_))));
+}
+
+#[test]
+fn same_node_survivors_scale_before_late_tail_underflow() {
+    for (initial, time) in [
+        (1e23_f64, 730.0_f64),
+        (1e23, 760.0),
+        (1e200, 800.0),
+        (1e300, 1400.0),
+    ] {
+        let plan = prepare(&[1.0, 0.0], &[edge(0, 1, 1.0)], time);
+        let answer = plan.apply(&[initial, 0.0]).unwrap();
+        // Independent libm/log-domain oracle, scaled before exp is rounded.
+        let expected = (initial.ln() - time).exp();
+        assert!(expected > 0.0 && expected.is_finite());
+        relative(answer.populations[0], expected, 3e-13);
+        relative(answer.populations[1], initial, 5e-14);
+        relative(answer.decays[0], initial, 5e-14);
+        assert_eq!(answer.decays[1], 0.0);
+    }
+}
+
+#[test]
+fn a_subunit_inventory_retains_a_representable_diagonal_tail() {
+    let answer = prepare(&[1.0, 0.0], &[edge(0, 1, 1.0)], 744.1)
+        .apply(&[0.4, 0.0]).unwrap();
+    // The decimal oracle also retained by fs-math::decay rounds this scaled
+    // exponential to the least positive binary64 value. Rounding exp first
+    // would instead erase the survivor.
+    assert_eq!(answer.populations[0], f64::from_bits(1));
+    relative(answer.populations[1], 0.4, 5e-14);
+    assert_eq!(answer.decays[0], 0.4);
+}
+
+#[test]
+fn recovered_diagonal_tails_compose_and_reach_the_source_owner() {
+    let rates = [1.0, 0.0];
+    let edges = [edge(0, 1, 1.0)];
+    let initial = [1e200, 0.0];
+    let half = prepare(&rates, &edges, 400.0);
+    let first = half.apply(&initial).unwrap();
+    let split = half.apply(&first.populations).unwrap();
+    let whole = prepare(&rates, &edges, 800.0).apply(&initial).unwrap();
+    relative(split.populations[0], whole.populations[0], 3e-13);
+    relative(split.populations[1], whole.populations[1], 5e-14);
+    relative(first.decays[0] + split.decays[0], whole.decays[0], 5e-14);
+
+    let source = source::DecaySourcePlan::prepare(
+        &rates, &edges, 800.0, DecayLimits::default(), || false,
+    ).unwrap();
+    let answer = source.apply(&initial, &[0.0, 0.0]).unwrap();
+    relative(answer.populations[0], whole.populations[0], 3e-13);
+    relative(answer.populations[1], whole.populations[1], 5e-14);
+    relative(answer.decays[0], whole.decays[0], 5e-14);
 }

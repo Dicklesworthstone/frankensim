@@ -31,9 +31,11 @@
 //! dropping a declared positive branch. Unrepresentable late exponential tails
 //! and smaller multi-hop series terms may underflow to zero. Application refuses
 //! inventories that could magnify an unrepresented coefficient into a resolved
-//! contribution; it never treats a large-population tail as necessarily zero.
+//! contribution. Same-node survival is a known scalar exponential and is scaled
+//! before rounding its late tail; general ingrowth and count maps retain their
+//! conservative representability checks.
 
-use fs_math::det;
+use fs_math::{decay::attenuate, det};
 
 /// Constant nonnegative injection through the same positive prepared evolution.
 #[path = "decay/source.rs"]
@@ -488,7 +490,8 @@ impl DecayPlan {
 
     #[must_use] pub const fn node_count(&self) -> usize { self.nodes }
     #[must_use] pub const fn duration_s(&self) -> f64 { self.duration_s }
-    /// Row-major original-order population propagator.
+    /// Row-major original-order population propagator. Use `apply` to preserve
+    /// scaled same-node survivors when a stored diagonal underflows.
     #[must_use] pub fn transition_matrix(&self) -> &[f64] { &self.transition }
     /// Row-major original-order map from initial populations to parent counts.
     #[must_use] pub fn integrated_decay_matrix(&self) -> &[f64] { &self.integrated }
@@ -500,11 +503,12 @@ impl DecayPlan {
     /// Same-node counts remain available even when its survivor rounds to its
     /// initial population. Individual populations and their total must fit f64.
     ///
-    /// An inventory above one must not magnify a subnormal or vanished map
-    /// coefficient into a resolved contribution. Such an application refuses
-    /// unless a zero transient coefficient has an independent Erlang upper
-    /// bound below representability even after multiplication by that inventory.
-    /// This is deliberately conservative; no logarithmic inventory is inferred.
+    /// Same-node exponential survivors are scaled before a late tail rounds to
+    /// zero. An inventory above one must not magnify any other subnormal or
+    /// vanished map coefficient into a resolved contribution. Such an application
+    /// refuses unless a zero transient coefficient has an independent Erlang
+    /// upper bound below representability after multiplication by that inventory.
+    /// General ingrowth and count checks remain deliberately conservative.
     pub fn apply(&self, populations: &[f64]) -> Result<DecayAdvance, DecayError> {
         self.apply_with_cancel(populations, || false)
     }
@@ -530,11 +534,18 @@ impl DecayPlan {
             let mut c = Sum::default();
             for (j, &population) in populations.iter().enumerate() {
                 let at = i * n + j;
+                // A DAG cannot return a constituent to its original node. Its
+                // diagonal is a scalar survival law, so scale before rounding a
+                // late tail. This does not recover general ingrowth or counts.
+                let scaled_diagonal =
+                    i == j && self.transition[at] < f64::MIN_POSITIVE;
                 if population > 1.0 && !self.tails.is_empty() && self.tails[at].reachable {
-                    if self.transition[at].is_subnormal() || self.integrated[at].is_subnormal() {
+                    if (!scaled_diagonal && self.transition[at].is_subnormal())
+                        || self.integrated[at].is_subnormal()
+                    {
                         return Err(DecayError::Unrepresentable("inventory amplifies a subnormal prepared coefficient"));
                     }
-                    if self.transition[at] == 0.0
+                    if !scaled_diagonal && self.transition[at] == 0.0
                         && !self.tails[at].scaled_tail_vanishes(population, self.duration_s)
                     {
                         return Err(DecayError::Unrepresentable("inventory may recover a vanished exponential tail"));
@@ -543,7 +554,11 @@ impl DecayPlan {
                         return Err(DecayError::Unrepresentable("inventory may recover a vanished integrated count"));
                     }
                 }
-                p.product(self.transition[at], population);
+                if scaled_diagonal {
+                    p.add(attenuate(population, self.rates[i] * self.duration_s));
+                } else {
+                    p.product(self.transition[at], population);
+                }
                 c.product(self.integrated[at], population);
             }
             result[i] = p.total();
