@@ -13,7 +13,7 @@
   "a bow of finite width (10 mm in 3 cells) with hair compliance after Pitteroff and Woodhouse 1998, on G3, B3, B4, D4, A4 and E5",
   "the exact static compliance of each string's omitted modes at its bridge (residual flexibility), on the open notes G3, D4, A4 and E5, and on the stopped B3, B4, B5 and B6",
   "a rigid fingertip pressed onto the string with 3.5 N (Issanchou et al. 2017 contact law), held by a static preload, on the stopped notes B3, B4, B5 and B6. The 3.5 N lies inside what Kinoshita and Obata (2009) measured with a force transducer in a violin's neck under the A string: the peak force exceeded 4.5 N at one and two notes per second and fell to 1.7 N at 16. The level force a slow note holds after its first pulse is not printed in the abstract, so no measured value replaces 3.5 N",
-  "longitudinal string waves on A4 (all four strings) and G3 (axial modes 1 and 2 on every string); thermochemical room air (N2, O2, Ar, CO2) on A4, G3 and B4; dry air (N2 0.8, O2 0.2) as one gas state on the other notes",
+  "longitudinal string waves on A4 (all four strings), G3 and B3 (axial modes 1 and 2 on every string); thermochemical room air (N2, O2, Ar, CO2) on A4, G3 and B4; dry air (N2 0.8, O2 0.2) as one gas state on the other notes",
   "open strings tuned to equal temperament (A4 = 440 Hz) by a tension factor read from the assembled instrument's own pulse response, never from a recording"
  ],
  "physics_missing": [
