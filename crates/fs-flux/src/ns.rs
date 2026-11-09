@@ -129,6 +129,38 @@ fn convection_boundary_trace(samples: [[f64; 2]; 2], fraction: f64) -> [f64; 2] 
     core::array::from_fn(|axis| (1.0 - fraction) * samples[0][axis] + fraction * samples[1][axis])
 }
 
+// BDM1 velocities are affine and test gradients are constant. Reuse the six
+// basis values and advected test gradients at each of the ORIGINAL quadrature
+// sites, and accumulate one local block before staging sparse entries. This
+// retains the integration rule and each entry's within-cell summation order,
+// while avoiding six duplicate COO entries per local matrix coefficient.
+fn convection_cell_matrix(
+    basis: &CellBasis,
+    triangle: [[f64; 2]; 3],
+    area: f64,
+    advecting: [f64; 6],
+) -> [[f64; 6]; 6] {
+    let mut matrix = [[0.0; 6]; 6];
+    for (point, weight) in tri_quad(triangle, area) {
+        let values: [[f64; 2]; 6] = core::array::from_fn(|i| eval_basis(basis, i, point));
+        let mut velocity = [0.0; 2];
+        for (value, coefficient) in values.iter().zip(advecting) {
+            velocity[0] += coefficient * value[0];
+            velocity[1] += coefficient * value[1];
+        }
+        for (row, gradient) in matrix.iter_mut().zip(&basis.grad) {
+            let derivative = [
+                velocity[0] * gradient[0][0] + velocity[1] * gradient[0][1],
+                velocity[0] * gradient[1][0] + velocity[1] * gradient[1][1],
+            ];
+            for (entry, value) in row.iter_mut().zip(values) {
+                *entry += -weight * (value[0] * derivative[0] + value[1] * derivative[1]);
+            }
+        }
+    }
+    matrix
+}
+
 // Preserve primal insertion order. Only otherwise discarded normal momentum
 // rows enter the optional, boundary-sized reaction matrix.
 fn momentum_entry(
@@ -964,19 +996,16 @@ impl<'m> FluxSystem<'m> {
         // Cell term: −∫ (u ⊗ w) : ∇v.
         for t in 0..mesh.tris.len() {
             let p: [[f64; 2]; 3] = core::array::from_fn(|k| mesh.verts[mesh.tris[t][k]]);
-            for (q, wq) in tri_quad(p, mesh.areas[t]) {
-                let wv = w_at(t, q);
-                for i in 0..6 {
-                    let gi = self.dof(t, i);
-                    let gv = &self.bases[t].grad[i];
-                    for j in 0..6 {
-                        let gj = self.dof(t, j);
-                        let uj = eval_basis(&self.bases[t], j, q);
-                        // (u ⊗ w) : ∇v = Σ_rc u_r w_c ∂v_r/∂x_c
-                        let val = uj[0] * (wv[0] * gv[0][0] + wv[1] * gv[0][1])
-                            + uj[1] * (wv[0] * gv[1][0] + wv[1] * gv[1][1]);
-                        momentum_entry(coo, &mut reactions, con, gi, gj, -wq * val);
-                    }
+            let dofs: [usize; 6] = core::array::from_fn(|i| self.dof(t, i));
+            let matrix = convection_cell_matrix(
+                &self.bases[t],
+                p,
+                mesh.areas[t],
+                dofs.map(|dof| wfield[dof]),
+            );
+            for (row, &gi) in matrix.iter().zip(&dofs) {
+                for (&value, &gj) in row.iter().zip(&dofs) {
+                    momentum_entry(coo, &mut reactions, con, gi, gj, value);
                 }
             }
         }
@@ -1728,6 +1757,105 @@ impl<'m> FluxSystem<'m> {
 #[cfg(test)]
 mod convection_tests {
     use super::*;
+
+    #[test]
+    fn local_convection_block_matches_exact_affine_moments_and_original_quadrature() {
+        for triangle in [
+            [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            [[2.0, -3.0], [4.0, -2.5], [2.3, -1.0]],
+            [[-0.2, 0.7], [3.8, 0.7], [2.8, 0.72]],
+        ] {
+            let mesh = TriMesh::from_mesh2(&fs_solid::Mesh2 {
+                nodes: triangle.to_vec(),
+                elems: vec![vec![0, 1, 2]],
+                patches: Vec::new(),
+            });
+            let basis = cell_basis(&mesh, 0);
+            for scale in [0.0, -1.0, 0.125, 1000.0] {
+                let advecting = [0.7, -0.11, 0.4, 0.03, -0.9, 0.07].map(|v| scale * v);
+                let actual = convection_cell_matrix(&basis, triangle, mesh.areas[0], advecting);
+                let velocity = |point| {
+                    let mut result = [0.0; 2];
+                    for (i, coefficient) in advecting.into_iter().enumerate() {
+                        let value = eval_basis(&basis, i, point);
+                        for axis in 0..2 {
+                            result[axis] += coefficient * value[axis];
+                        }
+                    }
+                    result
+                };
+                let vertices = triangle.map(velocity);
+                for i in 0..6 {
+                    let gradient = basis.grad[i];
+                    for j in 0..6 {
+                        // Independent affine triangle identity:
+                        // integral(a*b) = area/12 * (sum(a)*sum(b) + sum(a*b)).
+                        let trial = triangle.map(|point| eval_basis(&basis, j, point));
+                        let mut exact = 0.0;
+                        let mut magnitude = 0.0;
+                        for r in 0..2 {
+                            for c in 0..2 {
+                                let a: f64 = trial.iter().map(|u| u[r]).sum();
+                                let b: f64 = vertices.iter().map(|w| w[c]).sum();
+                                let product: f64 =
+                                    trial.iter().zip(&vertices).map(|(u, w)| u[r] * w[c]).sum();
+                                let term =
+                                    mesh.areas[0] / 12.0 * gradient[r][c] * (a * b + product);
+                                exact -= term;
+                                magnitude += term.abs();
+                            }
+                        }
+                        let mut original = 0.0;
+                        for (point, weight) in tri_quad(triangle, mesh.areas[0]) {
+                            let w = velocity(point);
+                            let u = eval_basis(&basis, j, point);
+                            original += -weight
+                                * (u[0] * (w[0] * gradient[0][0] + w[1] * gradient[0][1])
+                                    + u[1] * (w[0] * gradient[1][0] + w[1] * gradient[1][1]));
+                        }
+                        assert_eq!(actual[i][j], original);
+                        assert!(
+                            (actual[i][j] - exact).abs() <= 8e-12 * magnitude.max(1.0),
+                            "triangle={triangle:?}, scale={scale}, ({i},{j}): {} != {exact}",
+                            actual[i][j]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn convection_stages_one_cell_block_instead_of_six_duplicate_blocks() {
+        let mesh = TriMesh::from_mesh2(&fs_solid::Mesh2::triangles(1.0, 1.0, 4, 3));
+        let system = FluxSystem::new(&mesh);
+        let mut operator = Coo::new(system.n, system.n);
+        let mut rhs = vec![0.0; system.n];
+        system.add_convection(
+            &mut operator,
+            &mut rhs,
+            &vec![0.0; system.n_u],
+            &|_| [0.0; 2],
+            &vec![None; system.n],
+            None,
+            None,
+        );
+        // Zero advector has two unsplit face sites; both sides retain their
+        // original matrix rows. Count the actual sparse staging, not a timing
+        // assertion sensitive to the machine running this regression.
+        let face_entries: usize = mesh
+            .edges
+            .iter()
+            .map(|edge| 2 * 36 * if edge.tris.1 == usize::MAX { 1 } else { 2 })
+            .sum();
+        assert_eq!(operator.staged() - face_entries, 36 * mesh.tris.len());
+        let mut residual = vec![1.0; system.n];
+        operator
+            .assemble()
+            .spmv(&vec![2.0; system.n], &mut residual);
+        assert!(residual.iter().all(|&value| value == 0.0));
+        assert!(rhs.iter().all(|&value| value == 0.0));
+    }
 
     // Antiderivative of (s-r) (a+b*s) (c+d*s), independent of quadrature.
     fn primitive(s: f64, r: f64, donor: [f64; 2], test: [f64; 2]) -> f64 {
