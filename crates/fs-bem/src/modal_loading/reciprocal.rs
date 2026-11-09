@@ -1,4 +1,5 @@
-//! Original reciprocal P1/P0 source, under the SAME unchanged matrix admission.
+//! Original reciprocal P1/P0 source, under the same matrix admission, its
+//! direct-row reciprocity bound scaled to the dense solve ([`dense_reciprocity_bound`]).
 use super::*;
 use crate::reciprocal_radiation::{Budget, Prepared};
 
@@ -25,7 +26,9 @@ pub struct ReciprocalLoadingBake {
 
 /// Compute every original signed body/aperture velocity column with one
 /// symmetric variational source. The existing strict reciprocity/passivity
-/// assessment is applied verbatim before publishing any row. No collocation
+/// assessment is applied before publishing any row, with the reciprocity bound
+/// of a direct row scaled to this solve's unknown count
+/// ([`dense_reciprocity_bound`]) and nothing else changed. No collocation
 /// matrix is repaired and no causal/acoustic-accuracy claim follows from this.
 /// The caller's per-frequency budget bounds preparation and the complete batch;
 /// the returned sweep work additionally counts every declared frequency.
@@ -83,7 +86,8 @@ pub fn modal_radiation_loading_reciprocal(
         let source = owner.solve_velocity_ports(omega/medium.sound_speed,medium,&refs,cancelled)?;
         let checks = source.solutions().iter().map(|solution|
             [solution.panels_per_wavelength,solution.backward_residual,solution.flux_balance]).collect();
-        Ok((checks,assess(omega,source.impedance().to_vec(),modes,None)?))
+        // The dense solve's own unknown count scales the direct-row reciprocity bound.
+        Ok((checks,assess(omega,source.impedance().to_vec(),modes,None,owner.unknowns())?))
     };
     let workers = helmholtz::dense_workers().min(omegas.len());
     let mut solved = if workers > 1 {

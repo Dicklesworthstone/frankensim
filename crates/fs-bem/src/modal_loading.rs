@@ -69,8 +69,8 @@ pub enum ModalLoadingError {
     NonReciprocal {
         omega: f64,
         relative_defect: f64,
-        /// [`DENSE_RECIPROCITY_BOUND`] for a direct row, or
-        /// [`IterativeErrorScale::reciprocity_bound`] for an iterative one.
+        /// [`dense_reciprocity_bound`] of the row's unknown count for a direct
+        /// row, or [`IterativeErrorScale::reciprocity_bound`] for an iterative one.
         bound: f64,
         /// The measured error scale of an iterative row; `None` for a direct one.
         scale: Option<IterativeErrorScale>,
@@ -133,9 +133,33 @@ impl core::fmt::Display for ModalLoadingError {
 }
 impl std::error::Error for ModalLoadingError {}
 
-/// Reciprocity bound of a row from direct (dense LU or Rayleigh) evaluation,
-/// relative to the Frobenius norm.
+/// Floor of the reciprocity bound of a row from direct (dense LU or Rayleigh)
+/// evaluation, relative to the Frobenius norm. [`dense_reciprocity_bound`]
+/// raises it for a solve with many unknowns.
 pub const DENSE_RECIPROCITY_BOUND: f64 = 1e-12;
+
+/// Reciprocity bound of a direct row whose dense solve had `unknowns` BEM
+/// unknowns (0 for a Rayleigh row), relative to the Frobenius norm:
+/// `max(DENSE_RECIPROCITY_BOUND, 2 * unknowns * f64::EPSILON)`.
+///
+/// Each computed entry of the projected matrix carries a normwise relative
+/// error of about `unknowns * f64::EPSILON` from the dense LU, and
+/// `Z_ij - Z_ji` takes two such errors, hence the 2. To first order the
+/// defect is `2 * unknowns * f64::EPSILON * rho`, with `rho` a growth and
+/// conditioning factor of the projected problem that this code does not
+/// bound; the 2 is the bound under the assumption `rho <= 1`. Observed on the
+/// cello skin loads (5750 and 6002 unknowns): kept sweep maxima of 0.38, 0.43
+/// and 0.66 of `unknowns * f64::EPSILON`, and one film-profile omega at
+/// 1.4058e-12 (1.06 to 1.10 of it, its unknown count not printed) that the
+/// flat 1e-12 refused: `rho` of about 0.19 to 0.55 on four values. A row that
+/// refuses with `rho` between 1 and 2 is evidence to rule on, not a reason
+/// to loosen the factor here. The floor keeps every row that passes under the
+/// flat bound passing: below about 2250 unknowns `2 * unknowns * f64::EPSILON`
+/// is under 1e-12.
+#[must_use]
+pub fn dense_reciprocity_bound(unknowns: usize) -> f64 {
+    DENSE_RECIPROCITY_BOUND.max(2.0 * unknowns as f64 * f64::EPSILON)
+}
 
 /// GMRES residual-to-error amplification allowed in an iterative row's
 /// reciprocity bound.
@@ -351,8 +375,9 @@ impl ModalLoadingRow {
     pub const fn reciprocity_relative_defect(&self) -> f64 {
         self.reciprocity_relative_defect
     }
-    /// The bound the defect met: [`DENSE_RECIPROCITY_BOUND`] for a direct
-    /// row, the scale's [`IterativeErrorScale::reciprocity_bound`] for an
+    /// The bound the defect met: [`dense_reciprocity_bound`] of its unknown
+    /// count for a direct row ([`DENSE_RECIPROCITY_BOUND`] where none is
+    /// given), the scale's [`IterativeErrorScale::reciprocity_bound`] for an
     /// iterative one.
     pub const fn reciprocity_bound(&self) -> f64 {
         self.reciprocity_bound
@@ -415,18 +440,22 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), ModalLoadingError> {
 }
 
 /// `scale` is the measured error scale of an iterative row, `None` for a
-/// direct one. Nothing is symmetrised: the returned matrix is the input.
+/// direct one. `unknowns` is the BEM unknown count of a direct row whose bound
+/// grows with its dense solve ([`dense_reciprocity_bound`]); 0 keeps the flat
+/// [`DENSE_RECIPROCITY_BOUND`], and an iterative row ignores it. Nothing is
+/// symmetrised: the returned matrix is the input.
 fn assess(
     omega: f64,
     z: Vec<C64>,
     n: usize,
     scale: Option<IterativeErrorScale>,
+    unknowns: usize,
 ) -> Result<ModalLoadingRow, ModalLoadingError> {
     if z.iter().any(|v| !v.re.is_finite() || !v.im.is_finite()) {
         return Err(ModalLoadingError::Invalid("nonfinite projected impedance"));
     }
     let bound = match scale {
-        None => DENSE_RECIPROCITY_BOUND,
+        None => dense_reciprocity_bound(unknowns),
         Some(s) => {
             if [s.gmres_residual, s.fmm_error, s.fmm_error_next]
                 .iter()
@@ -993,7 +1022,9 @@ fn load(
                 z
             }
         };
-        let mut row = assess(omega, z, modes, scale)?;
+        // This collocation route keeps the flat bound (0 unknowns); only the
+        // reciprocal skin source scales it with its own dense solve.
+        let mut row = assess(omega, z, modes, scale, 0)?;
         row.bem_diagnostics = bem_diagnostics;
         rows.push(row);
     }
@@ -1011,11 +1042,11 @@ mod tests {
     #[test]
     fn active_and_nonreciprocal_data_are_refused_without_repair() {
         assert!(matches!(
-            assess(1.0, vec![C64::from_re(-1.0)], 1, None),
+            assess(1.0, vec![C64::from_re(-1.0)], 1, None, 0),
             Err(ModalLoadingError::NonPassive { .. })
         ));
         assert!(matches!(
-            assess(1.0, vec![C64::ONE, C64::ONE, C64::ZERO, C64::ONE], 2, None),
+            assess(1.0, vec![C64::ONE, C64::ONE, C64::ZERO, C64::ONE], 2, None, 0),
             Err(ModalLoadingError::NonReciprocal { .. })
         ));
         let z = vec![
@@ -1024,7 +1055,7 @@ mod tests {
             C64::from_re(-1.0),
             C64::from_re(1.0),
         ];
-        assert_eq!(assess(1.0, z.clone(), 2, None).unwrap().impedance(), z);
+        assert_eq!(assess(1.0, z.clone(), 2, None, 0).unwrap().impedance(), z);
     }
 
     /// One row of a unit icosphere at ka 0.05 (plain CBIE) on the iterative
@@ -1102,8 +1133,8 @@ mod tests {
             let mut previous: Option<(f64, f64)> = None;
             for &order in orders {
                 let (z, swapped, scale) = forced_iterative_row(level, order);
-                let row = assess(omega, z.clone(), 2, Some(scale)).unwrap();
-                let planted = match assess(omega, swapped, 2, Some(scale)) {
+                let row = assess(omega, z.clone(), 2, Some(scale), 0).unwrap();
+                let planted = match assess(omega, swapped, 2, Some(scale), 0) {
                     Err(ModalLoadingError::NonReciprocal {
                         relative_defect,
                         bound,
@@ -1155,7 +1186,7 @@ mod tests {
             }
         }
         let (z, scale) = iterative.unwrap();
-        match assess(omega, z.clone(), 2, None) {
+        match assess(omega, z.clone(), 2, None, 0) {
             Err(ModalLoadingError::NonReciprocal {
                 bound, scale: None, ..
             }) => assert_eq!(bound, DENSE_RECIPROCITY_BOUND),
@@ -1167,7 +1198,7 @@ mod tests {
             ..scale
         };
         assert!(matches!(
-            assess(omega, z, 2, Some(unresolved)),
+            assess(omega, z, 2, Some(unresolved), 0),
             Err(ModalLoadingError::UnresolvedFmmEstimate { .. })
         ));
         let planted = vec![
@@ -1177,10 +1208,10 @@ mod tests {
             C64::new(0.5, -0.5),
         ];
         assert!(matches!(
-            assess(omega, planted.clone(), 2, None),
+            assess(omega, planted.clone(), 2, None, 0),
             Err(ModalLoadingError::NonReciprocal { .. })
         ));
-        assert!(assess(omega, planted, 2, Some(scale)).is_ok());
+        assert!(assess(omega, planted, 2, Some(scale), 0).is_ok());
         let surface = SpherePanels::icosphere(1.0, 3).unwrap();
         let shapes = [
             vec![C64::ONE; surface.areas().len()],
@@ -1207,8 +1238,78 @@ mod tests {
                 }
             }
         }
-        let row = assess(omega, dense, 2, None).unwrap();
+        let row = assess(omega, dense, 2, None, 0).unwrap();
         assert_eq!(row.reciprocity_bound(), DENSE_RECIPROCITY_BOUND);
         assert_eq!(row.iterative_error_scale(), None);
+    }
+
+    /// An `n` x `n` passive, symmetric Z (diagonal 1 + 0.1i, small symmetric
+    /// off-diagonals) with entry (0, 1) raised so that the relative reciprocity
+    /// defect, measured against the Frobenius norm, is `target`.
+    fn planted_asymmetry(n: usize, target: f64) -> Vec<C64> {
+        let mut z = vec![C64::ZERO; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                z[i * n + j] = if i == j {
+                    C64::new(1.0, 0.1)
+                } else {
+                    C64::new(1e-3 / (1.0 + (i + j) as f64), 1e-3 / (2.0 + (i * j) as f64))
+                };
+            }
+        }
+        let norm = z.iter().fold(0.0_f64, |s, v| s.hypot(v.abs()));
+        // Entries (0, 1) and (1, 0) then differ by delta: the defect is sqrt(2) delta.
+        z[1] = z[1] + C64::from_re(target * norm / 2.0_f64.sqrt());
+        z
+    }
+
+    #[test]
+    fn the_dense_bound_grows_with_the_solve_and_never_falls_below_its_floor() {
+        for unknowns in [0, 1, 80, 2251] {
+            assert_eq!(dense_reciprocity_bound(unknowns), DENSE_RECIPROCITY_BOUND);
+        }
+        assert!(dense_reciprocity_bound(2252) > DENSE_RECIPROCITY_BOUND);
+        assert_eq!(dense_reciprocity_bound(6002), 2.0 * 6002.0 * f64::EPSILON);
+        for unknowns in [0, 1, 80, 2251, 2252, 6002, 100_000] {
+            assert!(dense_reciprocity_bound(unknowns) >= DENSE_RECIPROCITY_BOUND);
+        }
+    }
+
+    /// An 80 x 80 projected matrix from a dense row of 6002 unknowns: the
+    /// 1.41e-12 relative defect the flat bound refused on a film-profile omega
+    /// passes, the stored sweep maximum 8.762e-13 passes, the same matrix at a
+    /// small solve size keeps the flat 1e-12 and refuses, and a 1e-9 asymmetry
+    /// still refuses at 6002 unknowns. Nothing is symmetrised.
+    #[test]
+    fn a_dense_row_of_many_unknowns_passes_roundoff_and_still_refuses_a_real_asymmetry() {
+        let omega = 4018.6369651786813;
+        let z = planted_asymmetry(80, 1.41e-12);
+        let row = assess(omega, z.clone(), 80, None, 6002).unwrap();
+        assert!(row.reciprocity_relative_defect() > 1.40e-12);
+        assert!(row.reciprocity_relative_defect() < 1.42e-12);
+        assert_eq!(row.reciprocity_bound(), dense_reciprocity_bound(6002));
+        assert!(row.reciprocity_relative_defect() < row.reciprocity_bound());
+        assert_eq!(row.impedance(), z);
+        assert!(assess(omega, planted_asymmetry(80, 8.762e-13), 80, None, 6002).is_ok());
+        for unknowns in [0, 80] {
+            match assess(omega, z.clone(), 80, None, unknowns) {
+                Err(ModalLoadingError::NonReciprocal {
+                    bound, scale: None, ..
+                }) => assert_eq!(bound, DENSE_RECIPROCITY_BOUND),
+                other => panic!("a small solve keeps the flat 1e-12: {other:?}"),
+            }
+        }
+        match assess(omega, planted_asymmetry(80, 1e-9), 80, None, 6002) {
+            Err(ModalLoadingError::NonReciprocal {
+                relative_defect,
+                bound,
+                scale: None,
+                ..
+            }) => {
+                assert_eq!(bound, dense_reciprocity_bound(6002));
+                assert!(relative_defect > 100.0 * bound);
+            }
+            other => panic!("a 1e-9 asymmetry still refuses at 6002 unknowns: {other:?}"),
+        }
     }
 }
