@@ -103,6 +103,11 @@ impl MovingSlipRegion {
 pub struct MovingPartialSlipSource<P> {
     pub laws: Vec<PartialSlipLaw>,
     pub conductivity_w_m_k: BTreeMap<CellId, f64>,
+    /// Optional two-sided area resistance [m² K/W], in the callback's swept
+    /// patch order. `None` explicitly selects perfect thermal contact. Sources
+    /// may resolve each pair from its original surfaces, pressure and current
+    /// trial temperatures; the common interface still determines the heat split.
+    pub area_resistance_m2_k_w: Option<Vec<[f64; 2]>>,
     pub transport: StepCoefficients<P>,
 }
 
@@ -701,13 +706,14 @@ impl MovingPartialSlip {
                 .iter()
                 .map(|v| interface_temperature_guess_k + v / controls.temperature_scale_j_per_k)
                 .collect();
-            heat_step.evaluate(
+            heat_step.evaluate_entropy_option(
                 &x[..cells],
                 &temperatures,
                 |endpoint, patches, temperatures| {
                     let MovingPartialSlipSource {
                         laws,
                         conductivity_w_m_k,
+                        area_resistance_m2_k_w,
                         transport,
                     } = resolve(endpoint, &regions, patches, temperatures)
                         .map_err(MovingPartialSlipError::Source)?;
@@ -786,16 +792,20 @@ impl MovingPartialSlip {
                             response,
                         });
                     }
-                    Ok(MovingFrictionInput {
-                        dissipated_j: heat,
-                        conductivity_w_m_k,
-                        transport: StepCoefficients {
-                            sources_w,
-                            conductances_w_k,
-                            payload: staged,
+                    Ok((
+                        MovingFrictionInput {
+                            dissipated_j: heat,
+                            conductivity_w_m_k,
+                            transport: StepCoefficients {
+                                sources_w,
+                                conductances_w_k,
+                                payload: staged,
+                            },
                         },
-                    })
+                        area_resistance_m2_k_w,
+                    ))
                 },
+                false,
                 &check,
             )
         };

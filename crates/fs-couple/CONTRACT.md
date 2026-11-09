@@ -5399,6 +5399,37 @@ oracles while allowing the actual opposing grid to subdivide each pressure
 region. These synthetic constitutive tests establish no measured material
 calibration or whole-system convergence claim.
 
+### Imperfect moving thermal contact on the same friction residual
+
+`MovingFrictionHeatStep::evaluate_with_resistance` resolves an explicit pair of
+area-specific resistances from the massless heat-generation plane to the two
+original bodies for every actual swept cell pair. Each leg uses
+`A_mean / (d_i/k_i + R_i)`. The resistance split locates that plane; signed heat
+partition and its temperature still follow the existing finite-cell equations.
+The same source callback may depend on each actual trial body/interface
+temperature. Missing, nonfinite or negative resistances refuse, one insulated
+body is supported, and two insulated legs refuse. Exact zero resistance uses
+the original arithmetic without allocating a new default resistance array.
+
+`MovingPartialSlipSource::area_resistance_m2_k_w` forwards these original source
+values through the existing linear, pressure-changing and quadratic-path
+transactions. `None` explicitly selects perfect thermal contact; `Some` needs
+one A/B pair per current swept patch. The source re-resolves the current cell
+pairs as geometry changes, so a patch index cannot become a persistent material
+identity. Local friction coefficients and resistance share the same thermal
+trial; retained elastic/kinetic histories and physical-loss ownership stay with
+the original partial-slip owner. Accepted patch reports retain their actual
+resistances. No fixed link, finite layer store or prescribed body heat fraction
+is introduced, and no numerical loss becomes heat.
+
+Independent finite-capacity temperature equations check asymmetric moving
+resistance with decreasing `mu(T)`, local heat, interface entropy and a successor
+step with different patch indexing. Focused regressions also cover exact
+perfect-contact replay, an insulating side, malformed-source refusal and late
+cancellation. Conductance coefficients remain endpoint approximations over the
+original swept residence; spatial/time refinement and source material validity
+remain separate obligations.
+
 ## Accelerated and reversing moving shear with finite heat
 
 `MovingPartialSlip::advance_quadratic_candidate` carries the original brush,

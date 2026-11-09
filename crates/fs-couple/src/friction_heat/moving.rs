@@ -16,7 +16,8 @@
 //! large rotations and nonuniform transverse temperature require a spatially
 //! resolved surface owner; this strip model does not silently approximate them.
 use super::{
-    FrictionHeatEntropy, FrictionHeatTolerances, entropy::InterfaceEntropy, finite, invalid,
+    FrictionHeatEntropy, FrictionHeatRoute, FrictionHeatTolerances, entropy::InterfaceEntropy,
+    finite, invalid,
 };
 use fs_thermal::enthalpy::backward_euler::{
     BackwardEulerStep, BackwardEulerTrial, StepCoefficients,
@@ -336,6 +337,9 @@ pub struct MovingPatchHeat {
     pub cells: [CellId; 2],
     pub mean_area_m2: f64,
     pub interface_temperature_k: f64,
+    /// Source-resolved area-specific resistances from the heat-generation
+    /// plane to the original A/B bodies [m² K/W]. Zero denotes perfect contact.
+    pub area_resistance_m2_k_w: [f64; 2],
     pub conductances_w_k: [f64; 2],
     pub body_heat_j: [f64; 2],
     pub dissipated_j: f64,
@@ -610,7 +614,9 @@ impl<'s, 'm> MovingFrictionHeatStep<'s, 'm> {
         ) -> Result<MovingFrictionInput<P>, E>,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<MovingFrictionHeatTrial<'m, P>, E> {
-        self.evaluate_entropy_option(energy_j, temperatures_k, resolve, false, checkpoint)
+        self.evaluate_entropy_option(energy_j, temperatures_k,
+            |state, patches, temperatures| resolve(state, patches, temperatures)
+                .map(|input| (input, None)), false, checkpoint)
     }
 
     /// Evaluate the original moving-contact candidate with caloric entropy.
@@ -631,7 +637,48 @@ impl<'s, 'm> MovingFrictionHeatStep<'s, 'm> {
         ) -> Result<MovingFrictionInput<P>, E>,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<MovingFrictionHeatTrial<'m, P>, E> {
-        self.evaluate_entropy_option(energy_j, temperatures_k, resolve, true, checkpoint)
+        self.evaluate_entropy_option(energy_j, temperatures_k,
+            |state, patches, temperatures| resolve(state, patches, temperatures)
+                .map(|input| (input, None)), true, checkpoint)
+    }
+
+    /// Evaluate imperfect moving contact at the same original thermal endpoint.
+    ///
+    /// The source supplies one `[R_A, R_B]` in m² K/W per supplied swept patch,
+    /// in its original cell-pair order. Each nonnegative finite resistance lies
+    /// between the massless heat-generation plane and that body's physical
+    /// surface; the bulk half-cell resistance is added separately. The split
+    /// locates the generation plane, not a prescribed heat fraction. Each leg
+    /// conducts `A_mean / (d_i/k_i + R_i)` and the same common-temperature
+    /// residual determines its signed body heat.
+    ///
+    /// Resistances may depend on the actual endpoint body/interface temperatures
+    /// and original source data. Resolve them again for each step's actual cell
+    /// pairs; indices are local to this swept geometry, not persistent contact
+    /// identities. They are retained in the accepted report, never installed as
+    /// fictitious fixed links. The source owns their physical applicability and
+    /// any pressure/history dependence. Endpoint coefficients require time and
+    /// spatial refinement just like conductivity and friction.
+    ///
+    /// All-zero resistances preserve the original perfect-contact arithmetic.
+    /// `with_entropy` adds the existing exact caloric/interface entropy audit
+    /// without another source evaluation or thermal store.
+    pub fn evaluate_with_resistance<P, E: From<DepositionError>>(
+        &self,
+        energy_j: &[f64],
+        temperatures_k: &[f64],
+        resolve: impl FnOnce(
+            &DepositionSimulation<'m>,
+            &[SweptContactPatch],
+            &[f64],
+        ) -> Result<(MovingFrictionInput<P>, Vec<[f64; 2]>), E>,
+        with_entropy: bool,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<MovingFrictionHeatTrial<'m, P>, E> {
+        self.evaluate_entropy_option(energy_j, temperatures_k,
+            |state, patches, temperatures| resolve(state, patches, temperatures)
+                .map(|(input, resistance)| (input, Some(resistance))),
+            with_entropy, checkpoint)
     }
 
     fn evaluate_entropy_option<P, E: From<DepositionError>>(
@@ -642,7 +689,7 @@ impl<'s, 'm> MovingFrictionHeatStep<'s, 'm> {
             &DepositionSimulation<'m>,
             &[SweptContactPatch],
             &[f64],
-        ) -> Result<MovingFrictionInput<P>, E>,
+        ) -> Result<(MovingFrictionInput<P>, Option<Vec<[f64; 2]>>), E>,
         with_entropy: bool,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<MovingFrictionHeatTrial<'m, P>, E> {
@@ -659,11 +706,20 @@ impl<'s, 'm> MovingFrictionHeatStep<'s, 'm> {
         let dt = self.duration_s();
         let mut entropy = None;
         let coefficients=|state: &DepositionSimulation<'m>|->Result<StepCoefficients<(P,MovingFrictionHeatReport)>,E> {
-            let MovingFrictionInput { dissipated_j,conductivity_w_m_k,transport }=
+            let (MovingFrictionInput { dissipated_j,conductivity_w_m_k,transport }, resistances)=
                 resolve(state,&self.patches,temperatures_k)?;
             if dissipated_j.len()!=self.patches.len()
                 || dissipated_j.iter().any(|h| !h.is_finite() || *h<0.0)
             { return Err(invalid("one original nonnegative physical work value per swept patch required").into()); }
+            if let Some(resistances) = &resistances {
+                if resistances.len() != self.patches.len() {
+                    return Err(invalid("one two-sided contact resistance per swept patch required").into());
+                }
+                for &resistance in resistances {
+                    check()?;
+                    FrictionHeatRoute::total_resistance(resistance)?;
+                }
+            }
             for (&id,&k) in &conductivity_w_m_k {
                 if !state.cells().contains_key(&id) || !k.is_finite() || k<0.0 {
                     return Err(invalid("moving contact conductivity must resolve active original material cells").into());
@@ -694,14 +750,27 @@ impl<'s, 'm> MovingFrictionHeatStep<'s, 'm> {
                 thermal:EnergyAudit { incoming_mass_kg:0.0,incoming_energy_j:0.0,
                     external_heat_j:0.0,stored_energy_change_j:0.0,residual_j:0.0,substeps:0,events:0 },
                 total_energy_residual_j:0.0,position:self.end,entropy:None };
-            for ((patch,&temperature),&work) in self.patches.iter().zip(temperatures_k).zip(&dissipated_j) {
+            for (index, ((patch,&temperature),&work)) in self.patches.iter().zip(temperatures_k).zip(&dissipated_j).enumerate() {
                 check()?;
+                let resistance = resistances.as_ref().map_or([0.0; 2], |r| r[index]);
                 let mut g=[0.0;2];
                 let mut heat=[0.0;2];
                 for side in 0..2 {
                     let id=patch.cells[side];
                     let k=*conductivity_w_m_k.get(&id).ok_or(invalid("missing moving surface conductivity"))?;
-                    g[side]=finite(patch.mean_area_m2*k/patch.distances_m[side])?;
+                    g[side]=if resistance[side] == 0.0 {
+                        // Preserve the existing perfect-contact operation order.
+                        finite(patch.mean_area_m2*k/patch.distances_m[side])?
+                    } else if k == 0.0 {
+                        0.0
+                    } else {
+                        let bulk = finite(patch.distances_m[side] / k)?;
+                        let total = finite(bulk + resistance[side])?;
+                        if bulk <= 0.0 || total <= 0.0 {
+                            return Err(DepositionError::Arithmetic.into());
+                        }
+                        finite(patch.mean_area_m2 / total)?
+                    };
                     if k>0.0 && g[side]==0.0 { return Err(DepositionError::Arithmetic.into()); }
                     let body_temperature_k = state.temperature_k(id)?;
                     let power=finite(g[side]*(temperature-body_temperature_k))?;
@@ -718,7 +787,8 @@ impl<'s, 'm> MovingFrictionHeatStep<'s, 'm> {
                 }
                 report.dissipated_j=finite(report.dissipated_j+work)?;
                 report.patches.push(MovingPatchHeat { cells:patch.cells,mean_area_m2:patch.mean_area_m2,
-                    interface_temperature_k:temperature,conductances_w_k:g,body_heat_j:heat,
+                    interface_temperature_k:temperature,area_resistance_m2_k_w:resistance,
+                    conductances_w_k:g,body_heat_j:heat,
                     dissipated_j:work,interface_residual_j:finite(heat[0]+heat[1]-work)? });
             }
             entropy = interface_entropy;

@@ -1,9 +1,11 @@
 //! G1/G3/G4: entropy on the original swept-contact thermal candidate.
 //! Independent temperature-coordinate linear solves; no measured-material claim.
 use fs_couple::friction_heat::{FrictionHeatEntropy, FrictionHeatTolerances, moving::*};
+use fs_couple::friction_heat::tangential_heat_candidate;
 use fs_la::prepared_lu::LuWorkspace;
 use fs_thermal::enthalpy::backward_euler::StepCoefficients;
 use fs_thermal::enthalpy::*;
+use fs_tribo::{FrictionLaw, TangentialLaw, TangentialSolveConfig, TangentialStepInput};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -256,4 +258,195 @@ fn missing_caloric_entropy_and_late_cancellation_preserve_the_original_history()
     assert_eq!(other.cells(), &saved);
     assert_eq!(old.time_s(), 0.0);
     assert_eq!(other.time_s(), 0.0);
+}
+
+// Independent full temperature system: the three ORIGINAL body stores and one
+// massless generation plane per actual pair. P_i = N_i*(0.8 - 0.02*(T_i-300))
+// comes from prescribed unit slip speed and the declared temperature law below.
+fn resistive_endpoint(
+    old: &DepositionSimulation<'_>,
+    step: &MovingFrictionHeatStep<'_, '_>,
+    resistance: &[[f64; 2]],
+) -> (Vec<f64>, Vec<f64>) {
+    let n = 3 + step.patches().len();
+    let dt = step.duration_s();
+    let mut matrix = vec![0.0; n * n];
+    let mut rhs = vec![0.0; n];
+    for i in 0..3 {
+        matrix[n * i + i] = MASS[i] / dt;
+        rhs[i] = MASS[i] / dt * old.cells()[&CellId(i as u64)].specific_h_j_kg;
+    }
+    for (i, patch) in step.patches().iter().enumerate() {
+        let interface = 3 + i;
+        let normal = 10.0 * patch.mean_area_m2;
+        matrix[n * interface + interface] = 0.02 * normal;
+        rhs[interface] = 0.8 * normal;
+        for side in 0..2 {
+            let body = patch.cells[side].0 as usize;
+            // The numerical materials have k=1 W/(m K); use physical
+            // resistance in series with their exact 0.5 m half-cell depth.
+            let conductance = patch.mean_area_m2 / (0.5 + resistance[i][side]);
+            matrix[n * body + body] += conductance;
+            matrix[n * interface + interface] += conductance;
+            matrix[n * body + interface] -= conductance;
+            matrix[n * interface + body] -= conductance;
+        }
+    }
+    let mut lu = LuWorkspace::new(n).unwrap();
+    lu.factor(&matrix).unwrap();
+    let mut rise = vec![0.0; n];
+    lu.solve_factored_into(&rhs, &mut rise).unwrap();
+    let energy = (0..3).map(|i| {
+        MASS[i] * (rise[i] - old.cells()[&CellId(i as u64)].specific_h_j_kg)
+    }).collect();
+    (energy, rise[3..].iter().map(|t| 300.0 + t).collect())
+}
+
+#[test]
+fn g1_moving_resistance_couples_local_friction_temperature_and_entropy() {
+    let (mut thermal, route) = fixture(&SENSIBLE, [0.0; 3], [0.0; 3]);
+    let dt = 0.25;
+    // The footprint visits both A cells, then rests on only the right cell.
+    // The same original material pair must retain its own resistance when
+    // swept-patch index 1 becomes index 0. No persistent link is fabricated.
+    for phase in 0..2 {
+        let step = MovingFrictionHeatStep::new(&thermal, thermal.time_s() + dt, &route,
+            MovingContactPath { start: position(phase as f64), end: position(1.0) },
+            || Ok(())).unwrap();
+        assert_eq!(step.patches().len(), 2 - phase);
+        let resistance: Vec<_> = step.patches().iter().map(|p| {
+            if p.cells[0] == CellId(0) { [0.5, 1.5] } else { [1.5, 0.0] }
+        }).collect();
+        let (energy, interfaces) = resistive_endpoint(&thermal, &step, &resistance);
+        let calls = Cell::new(0);
+        let (next, (), report) = step.evaluate_with_resistance(&energy, &interfaces,
+            |endpoint, patches, temperatures| {
+                calls.set(calls.get() + 1);
+                let mut work = Vec::with_capacity(patches.len());
+                for (patch, &temperature) in patches.iter().zip(temperatures) {
+                    let law = FrictionLaw::Coulomb {
+                        static_mu: 1.0,
+                        kinetic_mu: 0.8 - 0.02 * (temperature - 300.0),
+                    };
+                    let mechanical = tangential_heat_candidate(&law, &law.initial_state(),
+                        TangentialStepInput {
+                            normal_n: 10.0 * patch.mean_area_m2,
+                            slip_increment_m: [dt, 0.0], dt_s: dt,
+                            contact_temperature_k: None, nominal_pressure_pa: Some(10.0),
+                            compliance_m_per_n: 0.0,
+                            solve: TangentialSolveConfig { max_iterations: 64,
+                                maximum_force_n: 100.0, force_absolute_tolerance_n: 1e-12,
+                                force_relative_tolerance: 1e-12 },
+                        }, temperature, 1e-12).unwrap();
+                    assert!(temperature > endpoint.temperature_k(patch.cells[0]).unwrap());
+                    work.push(mechanical.dissipated_j);
+                }
+                Ok::<_, DepositionError>((input(&work, [0.0; 3]), resistance.clone()))
+            }, true, || Ok(())).unwrap().accept(tolerance(), || Ok(())).unwrap();
+        assert_eq!(calls.get(), 1);
+        let mut generated_entropy = 0.0;
+        let mut conductive_entropy = 0.0;
+        for (i, patch) in report.patches.iter().enumerate() {
+            assert_eq!(patch.area_resistance_m2_k_w, resistance[i]);
+            let expected_work = dt * 10.0 * patch.mean_area_m2
+                * (0.8 - 0.02 * (interfaces[i] - 300.0));
+            close(patch.dissipated_j, expected_work, 1e-12);
+            assert!(patch.dissipated_j < dt * 8.0 * patch.mean_area_m2);
+            generated_entropy += expected_work / interfaces[i];
+            for side in 0..2 {
+                let conductance = patch.mean_area_m2 / (0.5 + resistance[i][side]);
+                close(patch.conductances_w_k[side], conductance, 0.0);
+                let body_temperature = next.temperature_k(patch.cells[side]).unwrap();
+                let heat = dt * conductance * (interfaces[i] - body_temperature);
+                close(patch.body_heat_j[side], heat, 1e-12);
+                conductive_entropy += heat * (1.0 / body_temperature - 1.0 / interfaces[i]);
+            }
+        }
+        close(report.thermal.stored_energy_change_j, report.dissipated_j, 1e-10);
+        let entropy = report.entropy.unwrap();
+        close(entropy.friction_generation_j_k, generated_entropy, 1e-15);
+        close(entropy.interface_conduction_generation_j_k, conductive_entropy, 1e-14);
+        assert!(entropy.interface_conduction_generation_j_k > 0.0);
+        assert!(!entropy.has_unclassified_sources);
+        balance(entropy);
+        assert!(next.links().is_empty());
+        assert_eq!(next.time_s(), thermal.time_s() + dt);
+        thermal = next;
+    }
+}
+
+#[test]
+fn g3_zero_moving_resistance_preserves_perfect_contact_exactly() {
+    let (old, route) = fixture(&SENSIBLE, [0.0, 10.0, -5.0], [0.2, 0.3, 0.4]);
+    let step = step(&old, &route, 0.25);
+    let work = [4.0, 7.0];
+    let (energy, temperatures) = endpoint(&old, 0.25, work, [0.0; 3]);
+    for with_entropy in [false, true] {
+        let source = |_: &DepositionSimulation<'_>, _: &[SweptContactPatch], _: &[f64]| {
+            Ok::<_, DepositionError>(input(&work, [0.0; 3]))
+        };
+        let plain = if with_entropy {
+            step.evaluate_with_entropy(&energy, &temperatures, source, || Ok(()))
+        } else {
+            step.evaluate(&energy, &temperatures, source, || Ok(()))
+        }.unwrap().accept(tolerance(), || Ok(())).unwrap();
+        let explicit = step.evaluate_with_resistance(&energy, &temperatures,
+            |state, patches, temperatures| {
+                Ok::<_, DepositionError>((source(state, patches, temperatures)?,
+                    vec![[0.0; 2]; patches.len()]))
+            }, with_entropy, || Ok(())).unwrap().accept(tolerance(), || Ok(())).unwrap();
+        assert_eq!(plain.0.cells(), explicit.0.cells());
+        assert_eq!(plain.2.thermal, explicit.2.thermal);
+        assert_eq!(plain.2.body_heat_j, explicit.2.body_heat_j);
+        assert_eq!(plain.2.entropy, explicit.2.entropy);
+        for (a, b) in plain.2.patches.iter().zip(&explicit.2.patches) {
+            assert_eq!(a.conductances_w_k, b.conductances_w_k);
+            assert_eq!(a.body_heat_j, b.body_heat_j);
+            assert_eq!(b.area_resistance_m2_k_w, [0.0; 2]);
+        }
+    }
+}
+
+#[test]
+fn g0_resisted_moving_contact_admits_one_insulator_and_refuses_bad_sources_atomically() {
+    let (old, route) = fixture(&SENSIBLE, [0.0; 3], [0.0; 3]);
+    let step = step(&old, &route, 1.0);
+    let energy = [0.0, 0.0, 8.0];
+    // Both A cells are perfect insulators. B's R=0.5 and bulk d/k=0.5
+    // make each swept leg 0.5 W/K. All 8 J enters its original 4 J/K cell.
+    let temperatures = [310.0; 2];
+    let source = || {
+        let mut result = input(&[4.0; 2], [0.0; 3]);
+        result.conductivity_w_m_k.insert(CellId(0), 0.0);
+        result.conductivity_w_m_k.insert(CellId(1), 0.0);
+        result
+    };
+    let saved = old.cells().clone();
+    for resistance in [vec![], vec![[0.0; 2]], vec![[0.0; 2]; 3],
+        vec![[-0.1, 0.0]; 2], vec![[f64::NAN, 0.0]; 2],
+        vec![[0.0, f64::INFINITY]; 2]] {
+        assert!(step.evaluate_with_resistance(&energy, &temperatures,
+            |_, _, _| Ok::<_, DepositionError>((source(), resistance)),
+            true, || Ok(())).is_err());
+        assert_eq!(old.cells(), &saved);
+    }
+    let refused = step.evaluate_with_resistance(&energy, &temperatures,
+        |_, _, _| {
+            let mut input = source();
+            input.conductivity_w_m_k.insert(CellId(2), 0.0);
+            Ok::<_, DepositionError>((input, vec![[0.5; 2]; 2]))
+        }, true, || Ok(()));
+    assert!(refused.is_err());
+    let candidate = || step.evaluate_with_resistance(&energy, &temperatures,
+        |_, _, _| Ok::<_, DepositionError>((source(), vec![[0.5; 2]; 2])),
+        true, || Ok(())).unwrap();
+    assert!(matches!(candidate().accept(tolerance(), || Err(DepositionError::Cancelled)),
+        Err(DepositionError::Cancelled)));
+    assert_eq!(old.cells(), &saved);
+    let (next, (), report) = candidate().accept(tolerance(), || Ok(())).unwrap();
+    assert_eq!(report.body_heat_j, [0.0, 8.0]);
+    assert_eq!(next.temperature_k(CellId(2)).unwrap(), 302.0);
+    assert_eq!(next.temperature_k(CellId(0)).unwrap(), 300.0);
+    balance(report.entropy.unwrap());
+    assert_eq!(old.time_s(), 0.0);
 }

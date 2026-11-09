@@ -238,6 +238,7 @@ fn source(
 ) -> MovingPartialSlipSource<()> {
     MovingPartialSlipSource {
         laws: regions.iter().map(|_| law(mu)).collect(),
+        area_resistance_m2_k_w: None,
         conductivity_w_m_k: thermal
             .cells()
             .iter()

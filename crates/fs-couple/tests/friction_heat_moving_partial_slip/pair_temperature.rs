@@ -181,10 +181,23 @@ fn opposing_material_cells_resolve_distinct_traction_and_original_heat_residence
 
 #[test]
 fn interface_and_opposing_body_feedback_match_independent_condensed_heat_equations() {
+    check_interface_feedback(None);
+}
+
+#[test]
+fn imperfect_contact_resistance_changes_partial_slip_through_the_same_thermal_feedback() {
+    check_interface_feedback(Some([[0.25, 0.5], [1.0, 0.125]]));
+}
+
+fn check_interface_feedback(resistance: Option<[[f64; 2]; 2]>) {
     let (thermal, contact) = fixture(&[-3.0, 0.6, 5.0]);
     let dt = 0.02;
-    let ga = [1.1, 0.9];
-    let gb = [1.1, 2.7];
+    // Independent series resistance: original half-depth d=0.5 m and the
+    // swept areas 0.55/0.45 m². Conductivities k_A=1 and k_B in {1,3} W/(m K)
+    // remain separate from each interface's generation-plane resistance.
+    let r = resistance.unwrap_or([[0.0; 2]; 2]);
+    let ga = [0.55 / (0.5 + r[0][0]), 0.45 / (0.5 + r[1][0])];
+    let gb = [0.55 / (0.5 + r[0][1]), 0.45 / (0.5 / 3.0 + r[1][1])];
     let cb = [360.0, 440.0];
     let bulk_weight = std::array::from_fn::<_, 2, _>(|i| dt * gb[i] / (cb[i] + dt * gb[i]));
     let a_weight = ga.map(|g| dt * g / (800.0 + dt * (ga[0] + ga[1])));
@@ -251,6 +264,7 @@ fn interface_and_opposing_body_feedback_match_independent_condensed_heat_equatio
             |t, regions, patches, temperatures| {
                 let mut result = paired_source(t, regions, patches);
                 result.conductivity_w_m_k.insert(CellId(1), 1.0);
+                result.area_resistance_m2_k_w = resistance.map(|r| r.to_vec());
                 result.laws = regions
                     .iter()
                     .map(|r| {
@@ -272,6 +286,7 @@ fn interface_and_opposing_body_feedback_match_independent_condensed_heat_equatio
         3e-9,
     );
     for i in 0..2 {
+        assert_eq!(report.heat.patches[i].area_resistance_m2_k_w, r[i]);
         near(
             report.heat.patches[i].interface_temperature_k,
             300.0 + interface[i],
