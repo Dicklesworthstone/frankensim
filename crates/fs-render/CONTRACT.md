@@ -5374,6 +5374,19 @@ calls refuse a separately configured analyzer, which sequential raster callers
 install at the sensor before the lens. The shutter method uses the original
 source interval average on one frozen camera and connection walk.
 
+`CurvedCameraRaster::sample_pixel_sequential_area_lights_at_time` and
+`sample_pixel_sensor_sequential_area_lights_at_time`, together with their
+`_during_exposure` counterparts, reuse the same native area sampler/work
+accumulator and optional real-lens CIE/QE lane integrators. The original
+analyzer is admitted over the integration band and installed at the sensor
+before the lens. Chromatically clipped lanes contribute zero while retaining
+the original four-lane proposal denominator. Fully clipped packets still
+admit the clock and cancellation without source work. Source failures retain
+the original lane and cause and refuse the complete pixel. Finite shutters
+observe each source interval on one frozen optical path; QE energy and
+photoelectrons apply the explicit shutter duration once after spectral
+integration. Active-film timing restrictions are unchanged.
+
 `CurvedCameraRaster::sample_pixel_sequential` and
 `sample_pixel_sensor_sequential` integrate the same full optical seeds into
 visible XYZ or original-band QE and photon responses, including infrared.

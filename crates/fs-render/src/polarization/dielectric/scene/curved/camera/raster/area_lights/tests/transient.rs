@@ -1,6 +1,8 @@
 //! Retarded source connections through the original four-lane detectors.
 
 use super::*;
+
+mod sequential;
 use crate::polarization::dielectric::scene::curved::camera::raster::transient::area_lights::TransientAreaLightRasterError;
 use crate::polarization::dielectric::scene::curved::camera::transient::area_lights::{
     TransientAreaLightCameraError, TransientCurvedAreaLightCameraScene,

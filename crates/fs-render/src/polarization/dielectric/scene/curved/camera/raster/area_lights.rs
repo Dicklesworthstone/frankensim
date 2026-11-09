@@ -227,6 +227,31 @@ impl CurvedCameraRaster<'_> {
             ) -> Result<CameraRadianceSample, CameraRadianceError>,
         ) -> Result<P, CurvedRasterError>,
     ) -> Result<AreaLightPixelSample<P>, AreaLightRasterError<E>> {
+        self.sample_area_with_launch(
+            seed,
+            pixel,
+            sample,
+            |cx, (ray, wavelength), samples| trace(cx, ray, wavelength, samples),
+            |launch| integrate(&mut |cx, ray, wavelength, lane| {
+                launch(cx, (ray, wavelength), lane)
+            }),
+        )
+    }
+
+    /// Native lane accounting is independent of whether the launch is an
+    /// ideal ray or the complete polarized response of a resolved lens.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub(super) fn sample_area_with_launch<P, E, L>(
+        &self,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+        mut trace: impl FnMut(&Cx<'_>, L, AreaLaneSamples) -> Result<AreaLightCameraSample, E>,
+        integrate: impl FnOnce(
+            &mut dyn FnMut(&Cx<'_>, L, usize)
+                -> Result<CameraRadianceSample, CameraRadianceError>,
+        ) -> Result<P, CurvedRasterError>,
+    ) -> Result<AreaLightPixelSample<P>, AreaLightRasterError<E>> {
         let key = [seed as u32, (seed >> 32) as u32];
         let mut area_radiance_w_m2_sr_nm = [0.0; CAMERA_WAVELENGTHS];
         let mut area_samples = [0; CAMERA_WAVELENGTHS];
@@ -235,11 +260,10 @@ impl CurvedCameraRaster<'_> {
         let mut field_evaluations = [0; CAMERA_WAVELENGTHS];
         let mut query_work = [0; CAMERA_WAVELENGTHS];
         let mut source_failure = None;
-        let result = integrate(&mut |cx, ray, wavelength, lane| {
+        let result = integrate(&mut |cx, launch, lane| {
             let traced = match trace(
                 cx,
-                ray,
-                wavelength,
+                launch,
                 AreaLaneSamples { key, pixel, sample, lane },
             ) {
                 Ok(traced) => traced,

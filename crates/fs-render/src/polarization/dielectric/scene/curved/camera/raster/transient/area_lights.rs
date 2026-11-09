@@ -28,6 +28,8 @@ use crate::spectral::detector::QuantumEfficiencySensor;
 use fs_exec::Cx;
 use fs_math::dd::Dd;
 
+mod sequential;
+
 #[derive(Debug)]
 pub enum TransientAreaLightRasterError {
     Raster(CurvedRasterError),
