@@ -19,6 +19,12 @@ use fs_math::dd::Dd;
 use fs_phs::linear_exact::{LinearSplitBudget, PreparedExactZoh};
 use fs_phs::{PhsError, PortHamiltonian, QuadraticStorage, ResistanceWitness};
 
+mod relaxation;
+pub use relaxation::{
+    MAX_TORSIONAL_RELAXATION_BRANCHES, TorsionalRelaxationBranch, TorsionalRelaxationStep,
+    TorsionalRelaxationStepper,
+};
+
 /// Hard bound on the complete dense spring-bearing preparation: 27 original
 /// coordinates and at most 110 augmented exponential rows. No shaft is dropped.
 /// The all-zero-stiffness path retains the viscous owner's 64-rotor bound.
@@ -66,6 +72,13 @@ struct Coupled {
     output: Vec<f64>,
     drive_input: Vec<f64>,
     external_input: Vec<f64>,
+    memory: Vec<MemoryBranch>,
+}
+
+struct MemoryBranch {
+    projection: Vec<f64>,
+    stiffness: f64,
+    root_stiffness: f64,
 }
 
 enum Cache<const N: usize> {
@@ -120,12 +133,14 @@ pub struct ExponentialTorsionalRotorStep<const N: usize> {
     pub external_angular_impulse_world: Vec3,
     /// Signed held drive torque times its continuous integrated relative angle.
     pub drive_work_j: [f64; N],
-    /// Independently integrated sum_i D_i * relative_rate_i², never an energy gap.
-    /// No per-shaft allocation of this aggregate heat is supplied.
+    /// Independently integrated original viscous and optional Maxwell losses,
+    /// never an energy gap. No per-shaft allocation of aggregate heat is supplied.
     pub dissipated_energy_j: f64,
     /// Polarized spring storage changes of the actual accepted unwrapped phases.
     pub elastic_energy_change_j: [f64; N],
-    /// Drive work minus spring storage change minus independent physical heat.
+    /// Maxwell internal-storage change [J]. Zero for the memoryless entry.
+    pub internal_energy_change_j: f64,
+    /// Drive work minus spring/internal storage change minus physical heat.
     pub net_shaft_work_j: f64,
     /// Signed continuous external torque work from the same shaft trajectories.
     pub external_work_j: f64,
@@ -133,7 +148,8 @@ pub struct ExponentialTorsionalRotorStep<const N: usize> {
     pub kinetic_energy_change_j: f64,
     /// The native free gyrostat's numerical defect, kept distinct from heat.
     pub drift_energy_defect_j: f64,
-    /// Delta kinetic + Delta elastic - drive - external + heat - native drift defect.
+    /// Delta kinetic + Delta elastic + Delta internal - drive - external
+    /// + heat - native drift defect.
     pub work_energy_residual_j: f64,
     /// Accepted world momentum change minus the actual external impulse.
     pub angular_momentum_residual_world: Vec3,
@@ -205,6 +221,7 @@ impl<const N: usize> RotorBank<N> {
                 self,
                 stiffness_nm_per_rad,
                 damping_nms,
+                &[],
                 0.5 * duration_s,
                 &mut cancelled,
             )?))
@@ -229,6 +246,7 @@ fn prepare<const N: usize>(
     bank: &RotorBank<N>,
     stiffness: [f64; N],
     damping: [f64; N],
+    branches: &[TorsionalRelaxationBranch<N>],
     half_s: f64,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Coupled> {
@@ -292,6 +310,25 @@ fn prepare<const N: usize>(
     let storage = QuadraticStorage::new(q, n)?;
     let system =
         PortHamiltonian::new(n, m, j, r, g, Box::new(storage))?.with_resistance_witness(witness)?;
+    let mut memory = Vec::with_capacity(branches.len());
+    let mut laws = Vec::with_capacity(branches.len());
+    for branch in branches {
+        poll(cancelled)?;
+        let mut projection = vec![0.0; n];
+        projection[..N].copy_from_slice(&branch.projection);
+        laws.push(fs_phs::RelaxationBranch {
+            projection,
+            stiffness: branch.stiffness_nm_per_rad,
+            relaxation_time_s: branch.relaxation_time_s,
+        });
+        memory.push(MemoryBranch {
+            projection: branch.projection.to_vec(),
+            stiffness: branch.stiffness_nm_per_rad,
+            root_stiffness: fs_math::det::sqrt(branch.stiffness_nm_per_rad),
+        });
+    }
+    let system = system.with_relaxation_branches(laws)?;
+    let n = system.state_dim();
     poll(cancelled)?;
     let flow = PreparedExactZoh::new_owned(
         system,
@@ -310,6 +347,7 @@ fn prepare<const N: usize>(
         output: vec![0.0; m],
         drive_input: vec![0.0; m],
         external_input: vec![0.0; m],
+        memory,
     })
 }
 
@@ -352,6 +390,20 @@ impl<const N: usize> ExponentialTorsionalRotorStepper<N> {
         state: &RotorState<N>,
         drive: [f64; N],
         external: HeldTorque,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ExponentialTorsionalRotorStep<N>> {
+        self.step_with_memory(state, &[], &mut [], &mut [], drive, external, cancelled)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_memory(
+        &mut self,
+        state: &RotorState<N>,
+        memory_before: &[f64],
+        memory_midpoint: &mut [f64],
+        memory_after: &mut [f64],
+        drive: [f64; N],
+        external: HeldTorque,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ExponentialTorsionalRotorStep<N>> {
         poll(&mut cancelled)?;
@@ -365,6 +417,7 @@ impl<const N: usize> ExponentialTorsionalRotorStepper<N> {
                 drive_work_j: step.drive_work_j,
                 dissipated_energy_j: step.dissipated_energy_j,
                 elastic_energy_change_j: [0.0; N],
+                internal_energy_change_j: 0.0,
                 net_shaft_work_j: step.net_shaft_work_j,
                 external_work_j: step.external_work_j,
                 kinetic_energy_change_j: step.kinetic_energy_change_j,
@@ -385,6 +438,8 @@ impl<const N: usize> ExponentialTorsionalRotorStepper<N> {
             state,
             drive,
             external,
+            memory_before,
+            memory_midpoint,
         )?;
         poll(&mut cancelled)?;
         let mut drifted = first.impulse.state_after;
@@ -405,6 +460,8 @@ impl<const N: usize> ExponentialTorsionalRotorStepper<N> {
             &drifted,
             drive,
             external,
+            memory_midpoint,
+            memory_after,
         )?;
         poll(&mut cancelled)?;
         let native = self.bank.finish_step(
@@ -424,7 +481,18 @@ impl<const N: usize> ExponentialTorsionalRotorStepper<N> {
         let mut drive_work = [0.0; N];
         let heat = dd(first.heat) + dd(second.heat);
         let external_work = dd(first.external_work) + dd(second.external_work);
+        let internal_change = memory_energy_change(
+            &cache.memory,
+            self.rest,
+            state.relative_angle_rad,
+            memory_before,
+            second.phase,
+            memory_after,
+        )?;
         let mut net = -heat;
+        if !cache.memory.is_empty() {
+            net = net - dd(internal_change);
+        }
         for i in 0..N {
             drive_work[i] = scalar(
                 (dd(first.drive_work[i]) + dd(second.drive_work[i])).to_f64(),
@@ -443,6 +511,7 @@ impl<const N: usize> ExponentialTorsionalRotorStepper<N> {
             drive_work_j: drive_work,
             dissipated_energy_j: scalar(heat.to_f64(), "exponential torsional heat")?,
             elastic_energy_change_j: elastic,
+            internal_energy_change_j: internal_change,
             net_shaft_work_j: scalar(net.to_f64(), "exponential torsional net work")?,
             external_work_j: scalar(external_work.to_f64(), "exponential external torque work")?,
             kinetic_energy_change_j: native.kinetic_energy_change_j,
@@ -491,8 +560,13 @@ fn stage<const N: usize>(
     state: &RotorState<N>,
     drive: [f64; N],
     external: HeldTorque,
+    memory_before: &[f64],
+    memory_after: &mut [f64],
 ) -> Result<Stage<N>> {
     bank.admit_state(state)?;
+    if memory_before.len() != cache.memory.len() || memory_after.len() != cache.memory.len() {
+        return Err(invalid("complete torsional material memory state").into());
+    }
     let h = cache.flow.duration();
     let torque = match external {
         HeldTorque::Body(value) => vector(value, "exponential external body torque")?,
@@ -509,6 +583,43 @@ fn stage<const N: usize>(
     );
     let next_total = crate::lie::torque_kick(state.total_momentum_body, requested, 1.0)?;
     let actual_external = next_total - state.total_momentum_body;
+    if !cache.memory.is_empty()
+        && components(requested).iter().all(|value| *value == 0.0)
+        && components(actual_external).iter().all(|value| *value == 0.0)
+    {
+        // Exact physical equilibrium of this frozen-attitude shaft stage.
+        // A dense exponential can perturb a nonbinary nullspace by one ULP;
+        // do not manufacture material loss or unresolved impulses there.
+        // Both DD words must vanish: there is no tolerance or clipping.
+        let mut equilibrium = bank.relative_rates(state)?.iter().all(|rate| *rate == 0.0);
+        for i in 0..N {
+            scalar(drive[i], "exponential shaft drive")?;
+            let effort = dd(stiffness[i])
+                * (dd(state.relative_angle_rad[i]) - dd(rest[i]))
+                - dd(drive[i]);
+            equilibrium &= effort == Dd::ZERO;
+        }
+        for (arm, branch) in cache.memory.iter().enumerate() {
+            scalar(memory_before[arm], "finite torsional viscous strain")?;
+            equilibrium &= memory_strain(
+                branch,
+                rest,
+                state.relative_angle_rad,
+                memory_before[arm],
+            ) == Dd::ZERO;
+        }
+        if equilibrium {
+            let impulse = bank.apply_impulse(state, [0.0; N], Vec3::default())?;
+            memory_after.copy_from_slice(memory_before);
+            return Ok(Stage {
+                impulse,
+                phase: state.relative_angle_rad,
+                drive_work: [0.0; N],
+                external_work: 0.0,
+                heat: 0.0,
+            });
+        }
+    }
     cache.input.fill(0.0);
     cache.drive_input.fill(0.0);
     cache.external_input.fill(0.0);
@@ -520,7 +631,18 @@ fn stage<const N: usize>(
         // cancelling two prepared full-state/source maps. Free angles have no
         // spring origin and retain their real drive as a source.
         cache.initial[i] = if stiffness[i] == 0.0 {
-            0.0
+            if cache
+                .memory
+                .iter()
+                .any(|branch| branch.projection[i] != 0.0)
+            {
+                scalar(
+                    (dd(state.relative_angle_rad[i]) - dd(rest[i])).to_f64(),
+                    "original relaxing shaft strain",
+                )?
+            } else {
+                0.0
+            }
         } else {
             scalar(
                 compensated::divide(
@@ -545,6 +667,17 @@ fn stage<const N: usize>(
         cache.input[N + i] = source;
         cache.external_input[N + i] = source;
     }
+    for (arm, branch) in cache.memory.iter().enumerate() {
+        scalar(memory_before[arm], "finite torsional viscous strain")?;
+        // The spring equilibrium translation above must translate EVERY
+        // material memory coordinate too. Its physical strain and stress stay
+        // unchanged; a held drive must never reset a relaxation history.
+        let shifted = dd(memory_before[arm]) - memory_translation(branch, stiffness, drive)?;
+        cache.initial[2 * N + 3 + arm] = scalar(
+            (dd(branch.root_stiffness) * shifted).to_f64(),
+            "normalized torsional memory strain",
+        )?;
+    }
     let (record, observed_work) = cache.flow.step_with_work_inputs_into(
         &cache.initial,
         &cache.input,
@@ -560,6 +693,33 @@ fn stage<const N: usize>(
     let mut drive_work = [0.0; N];
     let allowance = 32768.0 * f64::EPSILON * (2 * N + 4) as f64;
     let mut drive_sum = Dd::ZERO;
+    for (arm, branch) in cache.memory.iter().enumerate() {
+        let index = 2 * N + 3 + arm;
+        // Advance the PHYSICAL strain from the normalized increment. Rebuilding
+        // an absolute strain by multiply/divide can move a stationary history
+        // by one ULP, particularly for a nonbinary sqrt(stiffness).
+        let normalized_change = dd(cache.endpoint[index]) - dd(cache.initial[index]);
+        let change = compensated::divide(normalized_change, dd(branch.root_stiffness))?;
+        let before = dd(memory_before[arm]);
+        memory_after[arm] = scalar(
+            (before + change).to_f64(),
+            "accepted torsional viscous strain",
+        )?;
+        let actual_change = dd(memory_after[arm]) - before;
+        // This is a bound on public f64 storage rounding in radians, not an
+        // arbitrary relative-to-increment tolerance. Loss/work checks below
+        // still use the actual accepted physical history. Erased nonzero
+        // history increments refuse instead of silently freezing the material.
+        let scale = memory_before[arm]
+            .abs()
+            .max(memory_after[arm].abs())
+            .max(change.to_f64().abs());
+        if (normalized_change.to_f64() != 0.0 && actual_change.to_f64() == 0.0)
+            || (actual_change - change).to_f64().abs() > 8.0 * f64::EPSILON * scale
+        {
+            return Err(invalid("resolved torsional material memory increment").into());
+        }
+    }
     for i in 0..N {
         let integrated = product(h, cache.output[i], "exponential torsional phase increment")?;
         phase[i] = increment(
@@ -604,14 +764,26 @@ fn stage<const N: usize>(
         drive_sum = drive_sum + dd(drive_work[i]);
     }
     let elastic = potential_changes(stiffness, rest, state.relative_angle_rad, phase)?;
+    let internal_change = memory_energy_change(
+        &cache.memory,
+        rest,
+        state.relative_angle_rad,
+        memory_before,
+        phase,
+        memory_after,
+    )?;
     let mut balance = dd(impulse.kinetic_energy_change_j) - dd(observed_work[1]) - drive_sum
         + dd(record.dissipated);
+    if !cache.memory.is_empty() {
+        balance = balance + dd(internal_change);
+    }
     let mut scale = impulse
         .kinetic_energy_change_j
         .abs()
         .max(observed_work[1].abs())
         .max(observed_work[0].abs())
-        .max(record.dissipated.abs());
+        .max(record.dissipated.abs())
+        .max(internal_change.abs());
     // Include actual opposing carrier/rotor transfers, never unchanged energy.
     let carrier_delta =
         bank.carrier_momentum(&impulse.state_after)? - bank.carrier_momentum(state)?;
@@ -661,4 +833,52 @@ fn stage<const N: usize>(
         external_work: observed_work[1],
         heat: record.dissipated,
     })
+}
+
+fn memory_translation<const N: usize>(
+    branch: &MemoryBranch,
+    stiffness: [f64; N],
+    drive: [f64; N],
+) -> Result<Dd> {
+    let mut translation = Dd::ZERO;
+    for i in 0..N {
+        if stiffness[i] != 0.0 && branch.projection[i] != 0.0 {
+            translation = translation
+                + dd(branch.projection[i]) * compensated::divide(dd(drive[i]), dd(stiffness[i]))?;
+        }
+    }
+    Ok(translation)
+}
+
+fn memory_strain<const N: usize>(
+    branch: &MemoryBranch,
+    rest: [f64; N],
+    phase: [f64; N],
+    memory: f64,
+) -> Dd {
+    let mut strain = -dd(memory);
+    for i in 0..N {
+        strain = strain + dd(branch.projection[i]) * (dd(phase[i]) - dd(rest[i]));
+    }
+    strain
+}
+
+fn memory_energy_change<const N: usize>(
+    branches: &[MemoryBranch],
+    rest: [f64; N],
+    phase_before: [f64; N],
+    before: &[f64],
+    phase_after: [f64; N],
+    after: &[f64],
+) -> Result<f64> {
+    let mut change = Dd::ZERO;
+    for (i, branch) in branches.iter().enumerate() {
+        let a = memory_strain(branch, rest, phase_before, before[i]);
+        let b = memory_strain(branch, rest, phase_after, after[i]);
+        change = change + dd(0.5) * dd(branch.stiffness) * (a + b) * (b - a);
+    }
+    Ok(scalar(
+        change.to_f64(),
+        "original torsional internal storage change",
+    )?)
 }

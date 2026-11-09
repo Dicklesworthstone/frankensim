@@ -10,7 +10,9 @@ use fs_ga::Vec3;
 mod exponential;
 pub use exponential::{
     ExponentialTorsionalRotorStep, ExponentialTorsionalRotorStepper,
-    MAX_EXPONENTIAL_TORSIONAL_ROTORS, TorsionalExponentialError,
+    MAX_EXPONENTIAL_TORSIONAL_ROTORS, MAX_TORSIONAL_RELAXATION_BRANCHES,
+    TorsionalExponentialError, TorsionalRelaxationBranch, TorsionalRelaxationStep,
+    TorsionalRelaxationStepper,
 };
 
 /// Prepared rotor/carrier springs, held drive and passive relative-shaft drag.

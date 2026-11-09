@@ -28,8 +28,9 @@ pub use viscous::{
 mod torsional;
 pub use torsional::{
     ExponentialTorsionalRotorStep, ExponentialTorsionalRotorStepper,
-    MAX_EXPONENTIAL_TORSIONAL_ROTORS, TorsionalExponentialError, TorsionalRotorStep,
-    TorsionalRotorStepper,
+    MAX_EXPONENTIAL_TORSIONAL_ROTORS, MAX_TORSIONAL_RELAXATION_BRANCHES,
+    TorsionalExponentialError, TorsionalRelaxationBranch, TorsionalRelaxationStep,
+    TorsionalRelaxationStepper, TorsionalRotorStep, TorsionalRotorStepper,
 };
 
 #[path = "rotors/torsional_network.rs"]

@@ -340,6 +340,38 @@ where claimed below.
   torsional, viscous, exponential-viscous and rotor-bank groups also pass.
   Native dense admission can refuse unresolved dynamics; no arbitrary-step
   accuracy, full Cargo/DSR gate or experimental validation is claimed.
+- `RotorBank::torsional_relaxation_stepper` extends the SAME prepared exact
+  shaft stages with the canonical `fs-phs::RelaxationBranch` Maxwell memory.
+  Authored dimensionless shaft projections define each strain; positive
+  stiffness and relaxation time give causal stress relaxation and
+  frequency-dependent loss. The separately supplied springs are equilibrium
+  stiffness, and memoryless viscous drag remains a separate parallel law.
+  Each original viscous strain is an explicit input/output checkpoint;
+  `relaxed_memory` initializes fully relaxed material and is never a step.
+  Drive-relative equilibrium translations carry every memory coordinate too,
+  so changing the held load does not reset the physical constitutive history.
+  Physical histories advance from normalized increments; a zero increment
+  preserves even nonbinary-normalized history exactly. Public-state rounding
+  is bounded in physical strain units, and erased nonzero increments refuse.
+  Exactly balanced frozen shaft stages preserve the original history and zero
+  heat without evaluating a dense transition; native gyrostat drift still runs.
+  Coupled projections retain every shaft reaction and full carrier recoil.
+  Independent positive heat, internal and equilibrium storage changes, source
+  work and native drift defect remain distinct in the original work balance;
+  no thermal destination is invented. Preparation retains at most 12 rotors
+  and 32 material arms, with no branch merging/truncation. Warm steps allocate
+  nothing and evaluate no exponential; no-memory calls delegate to the
+  existing exponential owner. Cancellation/refusal publishes neither state.
+  `tests/gyrostat_torsional_relaxation.rs` contains analytic single-arm decay
+  cases across damping regimes and stiff relaxation, independent positive
+  heat, three-rung harmonic response against Maxwell complex stiffness,
+  relaxed common rotation, coupled two-shaft history against original-coordinate
+  RK4, zero-memory delegation and refusal/retry. These new regressions have not
+  yet been executed: the development executor became unavailable before native
+  compilation. Frozen shaft stages use the exact linear owner; the native
+  gyrostat composition remains second order and needs timestep refinement for
+  attitude/precession. No evolving material/geometry, nonlinear strain,
+  identified material authority or discrete adjoint is claimed.
 - `RotorBank::torsional_network_stepper(couplings, duration)` adds finite
   elastic/viscous transmission BETWEEN distinct original rotor shafts.
   Each authored port has strain `x=q_first-ratio*q_second-rest`, potential
