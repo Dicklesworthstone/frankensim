@@ -23,6 +23,8 @@ pub use autonomous::{
 };
 mod adjoint;
 pub use adjoint::{ForcedObjectiveGradient, PreparedForcedAdjoint};
+mod objective;
+pub use objective::{ForcedMeanObjective, ForcedMeanObjectiveControls};
 mod backbone;
 use backbone::{AmplitudeClosure, SensitivityFactor};
 pub use backbone::{
@@ -129,6 +131,15 @@ pub enum ForcedSensitivityError {
     FrequencyDirectionRefused { samples: usize },
     /// A sampled original island-direction declaration refused or was incomplete.
     IslandDirectionRefused { sample: usize, samples: usize },
+    /// A scalar observation or its full state derivative refused or was incomplete.
+    ObjectiveRefused { sample: usize, samples: usize },
+    /// Cycle means or their complete coefficient gradients disagree across grids.
+    ObjectiveSamplingUnresolved {
+        value_defect: f64,
+        gradient_defect: f64,
+        value_limit: f64,
+        gradient_limit: f64,
+    },
     /// Retained backward error or independent differentiated equations failed.
     DerivativeUnresolved {
         relative_residual: f64,

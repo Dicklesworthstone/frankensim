@@ -1131,3 +1131,34 @@ This forced, fixed-order objective derivative supplies no existence, harmonic-ta
 branch-uniqueness or stability guarantee. The original source, objective
 derivative and cached base must remain unchanged. Autonomous and conservative
 phase/family closures are outside this entry.
+
+## Cycle-mean harmonic objectives
+
+`PreparedForcedSensitivity::mean_objective` evaluates a differentiable scalar
+cycle-mean observation and its complete ordinary real coefficient gradient on
+the two cached original AFT trajectories. The callback writes the value and
+every physical state partial, including zeros; outputs are reset to NaN for
+each sample and incomplete, refused or nonfinite callbacks publish no result.
+The shared centered AFT projection retains DC and both complex quadratures;
+positive-harmonic covector entries include the factor of two from real waveform
+reconstruction. Its gradient feeds `prepare_adjoint` directly, without another
+multiplicity, conjugation or sign change.
+
+`ForcedMeanObjectiveControls` supplies positive objective units and separate
+positive value/gradient sampling limits. Acceptance compares normalized mean
+values and the full covectors scaled by the original HB column chart; matching
+values cannot hide an unresolved objective derivative. The result returns both
+measured defects. Existing scratch and two coefficient vectors fit the original
+per-query sensitivity resource allowance, and there are no baseline source,
+tangent, orbit-solve or factorization calls. Cancellation and refusal permit a
+subsequent query on the unchanged cached trajectories.
+
+These are forced, fixed-frequency/fixed-phase coefficient partials. Explicit
+objective parameter, frequency and time-chart derivatives remain separate
+`explicit_derivative` contributions to the adjoint; autonomous phase/amplitude
+closures are outside this entry. Differentiability and harmonic refinement are
+caller obligations; two finite grids do not bound the infinite harmonic tail.
+G1/G3 regressions check Parseval and every real coefficient, independent state,
+equation and objective units, nonlinear dissipated-power gradients against
+independently resolved parameter changes, value-only and gradient-only aliasing,
+complete callbacks, cancellation and refusal/retry without baseline callbacks.
