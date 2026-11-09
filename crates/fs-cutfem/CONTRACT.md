@@ -890,3 +890,23 @@ ghost/support storage and whole-system heat-step balance. Adaptive recovery uses
 the original homogeneous hanging reconstruction cell by cell. Allocation-free
 admission follows the same physical checks. Counts bound retained bulk output;
 cancellation returns no candidate observations.
+
+
+## Prescribed-temperature residual transpose
+
+Cartesian and adaptive `thermal_residual_temperature_pullback` return each
+active cell's `z^T[(dK/dT)u - db_free/dT]` at fixed geometry, reference density,
+stiffness scales and external load. Native C', integrated expansion slopes,
+B-bar K'/G', both symmetric Nitsche consistency terms, the penalty modulus and
+both ghost-side coefficients are included. The physical displacement passes
+native total/elastic admission at retained bulk and selected surface points;
+the finite algebraic dual has no physical strain ceiling.
+
+Bulk, selected support and ghost point counts precede O(cells) scratch/output
+allocation. The original adaptive reconstruction is applied locally to both
+fields; no global expansion, derivative matrix, material fit, source callback
+or finite-difference production kernel is introduced. Relevant nonsmooth
+absolute-value/max-row stabilization branches refuse a derivative. Homogeneous
+supports are covered; nonzero displacement lifting, temperature-dependent
+external loads and the heat-equation adjoint require their additional terms.
+The caller owns the equilibrium-adjoint sign and explicit objective partials.

@@ -15,6 +15,8 @@ use fs_solver::op::LinearOp;
 use super::eigenstrain::{EigenstrainResponse3, PreparedEigenstrain3, physical_response};
 use super::{Cell3, CutElasticity3, ElasticityError3};
 
+mod sensitivity;
+
 /// Mechanical response and elastic contribution to the native thermal potential.
 ///
 /// Extensive quantities include this point's reference-volume weight and the
