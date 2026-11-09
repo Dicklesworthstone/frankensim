@@ -24203,3 +24203,33 @@ Five focused regression definitions cover an independent dissipative
 two-layer reference and positive heat partition, empty/zero/lossless phases,
 free/clamped/stiff supports, sub-ulp intrinsic heat, opaque shielding, scaling
 and original source-domain/cancellation admission.
+
+## Causal Kelvin–Maxwell harmonic plane stress
+
+`kelvin_control::PreparedTensorKelvinPlaneStress` binds the original immutable
+tensor law and source-bound history. Engineering in-plane carriers and fixed
+bias drive all original Maxwell memories plus the transverse elastic state;
+zero transverse traction determines the actual transverse strain rate.
+Preparation uses the native positive QR/SVD factor and each harmonic interval
+reuses the original causal decay moments. No material branch is fitted,
+discarded or replaced by a settled-state initialization.
+
+The full original Kelvin tensor may be positive semidefinite. Its transverse
+block must be numerically resolved positive definite; singular transverse DAEs
+retain an explicit refusal. Material coefficients and temperature are fixed.
+The existing no-Kelvin mixed controller and full-stress Kelvin/DAE owner retain
+their domains and APIs.
+
+Point evaluation returns an unpublished original history, endpoint strain rate,
+direct strain increment and conservative whole-interval strain bounds. Original
+source identity, AC/DC coverage, coherent carrier grouping, strain continuity,
+material limits, resource ceilings and cancellation remain admission gates.
+Original reaction work, positive combined Kelvin/Maxwell heat and direct spring
+storage increments are calculated independently. The account does not infer a
+separate Kelvin-versus-Maxwell heat partition.
+
+`tests/visco_kelvin_plane_stress_harmonic.rs` contains independent original-tensor
+ODE references for all four ordered planes, retained-memory and tiny-interval
+heat, pure-Kelvin cubic startup, DD subdivision, duplicate cancellation and
+transactional/domain refusals. These tests require native execution; source
+review or formatting alone is not numerical validation.
