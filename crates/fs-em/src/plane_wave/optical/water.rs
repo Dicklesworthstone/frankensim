@@ -2,14 +2,19 @@
 //!
 //! The original IAPWS R9-97 source supplies absolute phase index at actual
 //! temperature and mass density, for vacuum wavelengths 200--1100 nm. The
-//! caller explicitly selects a lossless approximation; the release supplies
-//! neither measured extinction nor a causal time-domain reservoir. Source:
+//! caller selects a lossless approximation or independently sourced current
+//! absorption; the release supplies neither extinction nor a causal reservoir. Source:
 //! <https://iapws.org/technical-guidance/release/Rindex.download>.
 
-use super::{FREQUENCY_WAVELENGTH_NM, ReflectionError, VACUUM_SPEED_M_S, dispersion, positive};
+use super::{
+    FREQUENCY_WAVELENGTH_NM, ReflectionError, VACUUM_SPEED_M_S,
+    absorption::{self, SourcedAbsorption}, dispersion, positive,
+};
 use fs_material::{
     field_storage::linear_magnetic_permeability,
-    state_point::{DENSITY_PROPERTY, ResolvedMaterialStatePoint},
+    state_point::{
+        DENSITY_PROPERTY, ResolvedMaterialStatePoint, SpectralDielectricAbsorptionStatePoint,
+    },
     water_refraction::{IapwsWaterRefraction, WAVELENGTH_RANGE_NM, WaterRefractiveSample},
 };
 use fs_math::{c64::C64, det};
@@ -18,7 +23,7 @@ use fs_qty::{
     semantic::{QuantityKind, ValueForm},
 };
 
-/// Explicit lossless ordinary-water approximation at one original material state.
+/// Original ordinary-water refraction with an explicit optical loss policy.
 ///
 /// Temperature, bulk mass density and absolute scalar permeability all come
 /// from the SAME complete resolved bundle. No pressure-to-density closure,
@@ -26,7 +31,9 @@ use fs_qty::{
 /// Selecting [`Self::try_lossless`] asserts ordinary-water applicability and
 /// chooses zero absorption; it does not infer purity from the material name or
 /// claim that real water has zero absorption over this band. Mixtures, ice,
-/// scattering and source-supported optical loss require their own owners.
+/// scattering and mixtures require their own owners. The separate absorption
+/// constructor uses the canonical original alpha spectrum at the SAME T/rho/mu
+/// state; its source band further restricts monochromatic Maxwell transport.
 ///
 /// This finite-band, homogeneous, isotropic response retains IAPWS phase
 /// dispersion for interfaces, films and monochromatic angular spectra. Its
@@ -35,6 +42,7 @@ use fs_qty::{
 #[derive(Clone, Copy, Debug)]
 pub struct WaterOpticalResponse<'a> {
     source: &'a ResolvedMaterialStatePoint,
+    absorption: Option<SourcedAbsorption<'a>>,
     temperature_k: f64,
     density_kg_m3: f64,
     permeability_h_m: f64,
@@ -93,6 +101,7 @@ impl<'a> WaterOpticalResponse<'a> {
             positive((VACUUM_SPEED_M_S * det::sqrt(permeability_h_m)).recip())?;
         let response = Self {
             source,
+            absorption: None,
             temperature_k,
             density_kg_m3,
             permeability_h_m,
@@ -104,6 +113,33 @@ impl<'a> WaterOpticalResponse<'a> {
             response.permittivity_f_m(FREQUENCY_WAVELENGTH_NM / wavelength_nm)?;
         }
         Ok(response)
+    }
+
+    /// Combine original IAPWS phase with source-supported intensity absorption.
+    ///
+    /// The complete absorption snapshot must also contain the original bulk
+    /// density and scalar permeability. Its original temperature owns BOTH
+    /// phase and loss; no separately supplied optical state can disagree.
+    /// The positive finite gap admission is in vacuum metres. No scattering,
+    /// phase correction or causal polarization reservoir is inferred from alpha.
+    pub fn try_with_current_absorption(
+        source: &'a SpectralDielectricAbsorptionStatePoint,
+        temperature_axis: &str,
+        maximum_knot_span_m: f64,
+    ) -> Result<Self, ReflectionError> {
+        let absorption =
+            SourcedAbsorption::try_new(source, maximum_knot_span_m, WAVELENGTH_RANGE_NM)?;
+        let mut response = Self::try_lossless(source.resolved(), temperature_axis)?;
+        response.absorption = Some(absorption);
+        for omega in absorption.frequency_range_rad_s() {
+            response.permittivity_f_m(omega)?;
+        }
+        Ok(response)
+    }
+
+    /// Original current-state intensity loss, or the explicit lossless policy.
+    pub fn current_absorption(self) -> Option<&'a SpectralDielectricAbsorptionStatePoint> {
+        self.absorption.map(SourcedAbsorption::source)
     }
 
     pub(in crate::plane_wave) fn frequency_jet(
@@ -158,14 +194,17 @@ impl<'a> WaterOpticalResponse<'a> {
             })
     }
 
-    /// Absolute phase n-i*k, with k=0 by the explicitly selected approximation.
+    /// Absolute n-i*k, with k=alpha*lambda/(4*pi) for the sourced-loss policy.
+    /// The explicit lossless approximation uses k=0 over the original phase band.
     pub fn complex_index(self, omega_rad_s: f64) -> Result<C64, ReflectionError> {
-        Ok(C64::from_re(
-            self.refractive_sample(omega_rad_s)?.phase_index,
-        ))
+        let phase = self.refractive_sample(omega_rad_s)?.phase_index;
+        match self.absorption {
+            Some(absorption) => absorption.complex_index(phase, omega_rad_s),
+            None => Ok(C64::from_re(phase)),
+        }
     }
 
-    /// Absolute SI epsilon = n_phase^2/(mu*c0^2), in F/m.
+    /// Absolute SI epsilon = (n-i*k)^2/(mu*c0^2), in F/m.
     /// The permeability is the retained source value, not an implicit mu0.
     pub fn permittivity_f_m(self, omega_rad_s: f64) -> Result<C64, ReflectionError> {
         dispersion::permittivity(
@@ -181,6 +220,7 @@ impl<'a> WaterOpticalResponse<'a> {
         // T/rho/mu are immutable projections of this exact complete snapshot.
         // Re-selecting a source at another temperature/density cannot match it.
         core::ptr::eq(self.source, other.source)
+            && absorption::same_source(self.absorption, other.absorption)
     }
 }
 

@@ -8424,3 +8424,32 @@ Five G1/G3 groups specify common-plane homogeneous propagation (including
 distant carriers), rowwise lossy Airy/Jones optics and plane translation,
 unequal-port flux/TIR, tiny covariance and subdivision invariance, plus work,
 dark-row geometry, input admission, replay and cancellation.
+
+## Current-state absorption for original water and silica refraction
+
+`WaterOpticalResponse::try_with_current_absorption` and
+`SilicaOpticalResponse::try_with_current_absorption` compose the original IAPWS
+or CHARMS analytic phase with the canonical independently sourced intensity
+absorption spectrum. One complete snapshot owns temperature, permeability,
+original wavelength/alpha claims and, for water, actual bulk density. No
+phase-index table, nonmagnetic default or loss fit is synthesized. The existing
+explicit lossless constructors remain separate policies.
+
+Phase and absorption bands intersect in their original frequency coordinates;
+zero absorption does not erase source support. Preparation retains a positive
+finite wavelength-gap admission. Runtime complex-index and frequency-jet
+queries allocate nothing. The shared current-alpha derivative owner preserves
+constant-alpha attenuation exactly, original interpolation cusps and two-sided
+endpoint refusals while retaining analytic phase/group/GVD. Source matching
+includes the loss policy and gap admission, so coherent consumers cannot
+silently combine different optical assumptions from the same scalar snapshot.
+
+Existing native interfaces, coherent finite films and angular spectra consume
+N=n-i*alpha*lambda/(4*pi) and epsilon=N²/(mu*c0²); absorbed work enters once
+through that complete complex permittivity. Absorbing angle-based incident
+ports and causal finite-window heat retain their existing refusals. This
+composition supplies no scattering, stress, causal reservoir, phase correction
+from absorption or empirical qualification of the independently supplied loss.
+Three authored regression groups cover oblique TE/TM Airy fields and local
+work, analytic complex group/GVD and Beer attenuation, and source/cusp/domain
+admission. These tests are defined but were not executed in this environment.

@@ -121,12 +121,12 @@ pub enum DielectricResponse<'a> {
     /// attached; no visible-band restriction or extrapolated tail is supplied.
     SpectralOptical(SpectralOpticalResponse<'a>),
     /// Original IAPWS ordinary-water phase dispersion at retained T/rho/mu,
-    /// with an explicitly selected lossless approximation. Real water absorption
-    /// and causal transient reservoirs are not supplied by this index release.
+    /// with explicitly zero loss or independently sourced current absorption.
+    /// This index release supplies no causal transient reservoir.
     WaterOptical(WaterOpticalResponse<'a>),
     /// Original NASA CHARMS Corning 7980 phase dispersion at retained T/mu,
-    /// with an explicitly selected lossless approximation. The same source
-    /// supplies thermal/group derivatives, but no causal transient reservoir.
+    /// with explicitly zero loss or independently sourced current absorption.
+    /// Original thermal/group derivatives remain; no causal reservoir is added.
     SilicaOptical(SilicaOpticalResponse<'a>),
     /// Original dielectric reference with source-owned SCHOTT temperature
     /// correction and actual-state mu. Explicitly zero loss or retained original

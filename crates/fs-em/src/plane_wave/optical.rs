@@ -26,6 +26,7 @@ use fs_material::{
 };
 use fs_math::{c64::C64, det};
 
+mod absorption;
 mod dispersion;
 pub(in crate::plane_wave) mod frequency;
 mod gas;

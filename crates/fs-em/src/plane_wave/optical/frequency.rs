@@ -327,12 +327,16 @@ pub(super) fn water(
         omega, FREQUENCY_WAVELENGTH_NM, fs_material::water_refraction::WAVELENGTH_RANGE_NM,
     )?;
     let sample = response.refractive_sample(omega)?;
-    finish(
-        C64::from_re(sample.phase_index),
+    analytic_with_absorption(
+        sample.phase_index,
         scale,
-        C64::from_re(wavelength * sample.wavelength_derivative_per_nm),
-        C64::from_re((wavelength * wavelength) * sample.wavelength_second_derivative_per_nm2),
-        C64::from_re(sample.group_index),
+        (
+            wavelength * sample.wavelength_derivative_per_nm,
+            (wavelength * wavelength) * sample.wavelength_second_derivative_per_nm2,
+            sample.group_index,
+        ),
+        response.current_absorption(),
+        omega,
     )
 }
 
@@ -357,12 +361,38 @@ pub(super) fn silica(
         resonances_um2,
         wavelength * 1e-3,
     );
-    finish(
-        C64::from_re(sample.phase_index),
+    analytic_with_absorption(
+        sample.phase_index,
         scale,
-        C64::from_re(wavelength * sample.wavelength_derivative_per_nm),
-        C64::from_re(curvature),
-        C64::from_re(sample.group_index),
+        (
+            wavelength * sample.wavelength_derivative_per_nm,
+            curvature,
+            sample.group_index,
+        ),
+        response.current_absorption(),
+        omega,
+    )
+}
+
+/// Compose the original analytic real jet with the SAME canonical loss jet
+/// used by the thermal glass owner. No finite differences or extra spectrum.
+fn analytic_with_absorption(
+    phase_index: f64,
+    scale: f64,
+    phase: (f64, f64, f64),
+    absorption: Option<&fs_material::state_point::SpectralDielectricAbsorptionStatePoint>,
+    omega: f64,
+) -> Result<OpticalFrequencyJet> {
+    let (extinction, group, curvature) = match absorption {
+        Some(source) => dielectric_absorption(source, omega)?,
+        None => (0.0, 0.0, 0.0),
+    };
+    finish(
+        C64::new(phase_index, extinction),
+        scale,
+        C64::new(phase.0, extinction - group),
+        C64::new(phase.1, curvature),
+        C64::new(phase.2, group),
     )
 }
 

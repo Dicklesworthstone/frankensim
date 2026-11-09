@@ -3,14 +3,17 @@
 //! The shared material owner retains the measured Corning 7980 Table-3 fit,
 //! its absolute vacuum indices and its 30--300 K, 400--2600 nm support:
 //! <https://ntrs.nasa.gov/citations/20070018851>.
-//! Selecting this response explicitly chooses a lossless approximation. The
-//! source supplies no absorption, causal transient reservoir or stress law.
+//! The caller selects zero loss or a separate original current-state alpha
+//! spectrum. CHARMS itself supplies no absorption, causal reservoir or stress law.
 
-use super::{FREQUENCY_WAVELENGTH_NM, ReflectionError, VACUUM_SPEED_M_S, dispersion, positive};
+use super::{
+    FREQUENCY_WAVELENGTH_NM, ReflectionError, VACUUM_SPEED_M_S,
+    absorption::{self, SourcedAbsorption}, dispersion, positive,
+};
 use fs_material::{
     field_storage::linear_magnetic_permeability,
     silica_refraction::{Corning7980Silica, SilicaRefractionSample, WAVELENGTH_RANGE_NM},
-    state_point::ResolvedMaterialStatePoint,
+    state_point::{ResolvedMaterialStatePoint, SpectralDielectricAbsorptionStatePoint},
 };
 use fs_math::{c64::C64, det};
 use fs_qty::{
@@ -28,12 +31,14 @@ use fs_qty::{
 ///
 /// Preparation freezes the original six temperature polynomials once. All
 /// wavelength queries allocate nothing and reuse that same material owner.
-/// Phase index supplies epsilon=n_phase²/(mu*c0²); group index remains the
-/// derivative for narrowband delay. This homogeneous isotropic approximation
-/// does not add thermal expansion, scattering, absorption or spatial GRIN.
+/// The complete n-i*k supplies epsilon=(n-i*k)²/(mu*c0²); phase/group refraction
+/// always comes from the original analytic source. Optional current-state alpha
+/// is independently sourced at that SAME temperature and permeability. This
+/// homogeneous isotropic model does not add expansion, scattering or spatial GRIN.
 #[derive(Clone, Copy, Debug)]
 pub struct SilicaOpticalResponse<'a> {
     source: &'a ResolvedMaterialStatePoint,
+    absorption: Option<SourcedAbsorption<'a>>,
     refractive_source: Corning7980Silica,
     permeability_h_m: f64,
     index_to_sqrt_permittivity: f64,
@@ -77,6 +82,7 @@ impl<'a> SilicaOpticalResponse<'a> {
             positive((VACUUM_SPEED_M_S * det::sqrt(permeability_h_m)).recip())?;
         let response = Self {
             source,
+            absorption: None,
             refractive_source,
             permeability_h_m,
             index_to_sqrt_permittivity,
@@ -85,6 +91,32 @@ impl<'a> SilicaOpticalResponse<'a> {
             response.permittivity_f_m(FREQUENCY_WAVELENGTH_NM / wavelength)?;
         }
         Ok(response)
+    }
+
+    /// Compose original CHARMS phase with independently sourced current loss.
+    ///
+    /// The original canonical alpha snapshot also owns the actual temperature
+    /// and absolute scalar permeability. Its wavelength support intersects the
+    /// unchanged CHARMS band, including when every alpha sample is zero. The
+    /// positive finite interpolation-gap admission is in vacuum metres.
+    pub fn try_with_current_absorption(
+        source: &'a SpectralDielectricAbsorptionStatePoint,
+        temperature_axis: &str,
+        maximum_knot_span_m: f64,
+    ) -> Result<Self, ReflectionError> {
+        let absorption =
+            SourcedAbsorption::try_new(source, maximum_knot_span_m, WAVELENGTH_RANGE_NM)?;
+        let mut response = Self::try_lossless(source.resolved(), temperature_axis)?;
+        response.absorption = Some(absorption);
+        for omega in absorption.frequency_range_rad_s() {
+            response.permittivity_f_m(omega)?;
+        }
+        Ok(response)
+    }
+
+    /// Original current-state intensity loss, or the explicit lossless policy.
+    pub fn current_absorption(self) -> Option<&'a SpectralDielectricAbsorptionStatePoint> {
+        self.absorption.map(SourcedAbsorption::source)
     }
 
     /// Original complete scalar snapshot, including its source-use identity.
@@ -124,14 +156,16 @@ impl<'a> SilicaOpticalResponse<'a> {
         })
     }
 
-    /// Absolute n-i*k with k=0 under the explicitly selected approximation.
+    /// Absolute n-i*k; sourced intensity loss gives k=alpha*lambda/(4*pi).
     pub fn complex_index(self, omega_rad_s: f64) -> Result<C64, ReflectionError> {
-        Ok(C64::from_re(
-            self.refractive_sample(omega_rad_s)?.phase_index,
-        ))
+        let phase = self.refractive_sample(omega_rad_s)?.phase_index;
+        match self.absorption {
+            Some(absorption) => absorption.complex_index(phase, omega_rad_s),
+            None => Ok(C64::from_re(phase)),
+        }
     }
 
-    /// Absolute SI epsilon=n_phase²/(mu*c0²), retaining the original source mu.
+    /// Absolute SI epsilon=(n-i*k)²/(mu*c0²), retaining the original source mu.
     pub fn permittivity_f_m(self, omega_rad_s: f64) -> Result<C64, ReflectionError> {
         dispersion::permittivity(
             self.complex_index(omega_rad_s)?,
@@ -152,6 +186,7 @@ impl<'a> SilicaOpticalResponse<'a> {
     pub(in crate::plane_wave) fn same_source(self, other: Self) -> bool {
         // The immutable source owns the sole T coordinate and the same mu.
         core::ptr::eq(self.source, other.source)
+            && absorption::same_source(self.absorption, other.absorption)
     }
 }
 
