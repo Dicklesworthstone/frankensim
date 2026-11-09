@@ -106,6 +106,8 @@ mod energy;
 #[cfg(feature = "enthalpy-coupling")]
 pub mod enthalpy;
 mod flow;
+/// Spatial supplied heat with original phase-volume pressure work and transport.
+pub mod thermal_volume_heat;
 pub use flow::{
     GasSpeciesAdvectionInlet, GasSpeciesAdvectionInput, GasSpeciesVolumeSource,
     ThermochemicalSpeciesAdvectionControls, ThermochemicalSpeciesAdvectionReport,
