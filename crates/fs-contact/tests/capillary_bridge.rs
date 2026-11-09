@@ -29,6 +29,9 @@ mod load_line;
 
 #[path = "capillary_bridge/axisymmetric_load_line.rs"]
 mod axisymmetric_load_line;
+
+#[path = "capillary_bridge/squeeze.rs"]
+mod squeeze;
 fn claim(name: &str, value: f64, dims: Dims) -> PropertyClaim {
     PropertyClaim {
         key: PropertyKey::new(name, dims),

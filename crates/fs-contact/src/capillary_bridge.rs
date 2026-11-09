@@ -4,6 +4,8 @@
 //! an invariant out-of-plane direction (reported over a supplied width), fixed
 //! liquid volume between explicit source endpoints, equal acute Young angles,
 //! and quasistatic mobile contact lines.
+//! An explicit no-slip Reynolds squeeze-flow selection adds thin-gap bulk
+//! resistance and its separately reported dissipation; the default omits it.
 //! The actual source owners remain immutable. With A=V/width, c=cos(theta),
 //! s=sin(theta), alpha=pi/2-theta, the wetted span is A/h+k h, where
 //! k=(alpha-sc)/(2c²). The same surface free energy gives
@@ -33,6 +35,8 @@ use fs_material::liquid::surface::{ResolvedLiquidSurfaceState, ResolvedLiquidWet
 use fs_material::state_point::MaterialStatePointError;
 
 mod geometry;
+mod squeeze;
+pub use squeeze::PlanarSqueezeFlowLimits;
 
 /// Dynamic planar wetting with two independent original surface sources.
 pub mod asymmetric_contact_line;
@@ -198,8 +202,8 @@ pub struct BridgeStep {
     state: BridgeState,
     pub profile: BridgeProfile,
     pub event: BridgeEvent,
-    /// Integral of dE/dgap along connected portions, excluding topology drops.
-    /// Positive when mechanical work is supplied TO the liquid surface store.
+    /// Mechanical work supplied to surface storage plus any explicitly selected
+    /// bulk squeeze dissipation, excluding topology drops.
     pub work_on_liquid_j: f64,
     /// Work-conjugate force over the entire gap increment: -work/Delta_gap.
     pub mean_normal_force_n: f64,
@@ -211,8 +215,12 @@ pub struct BridgeStep {
     /// Nonnegative unresolved free-energy release during the chosen relaxation.
     /// Its mechanical/thermal destination is external; it is NOT automatic heat.
     pub irreversible_release_j: f64,
+    /// Nonnegative Newtonian bulk-flow loss, separate from surface release and
+    /// contact-line friction. Zero unless no-slip squeeze flow was selected.
+    /// This is exported for an explicit thermal recipient, never stored twice.
+    pub bulk_viscous_dissipation_j: f64,
     pub surface_energy_change_j: f64,
-    /// Delta(surface energy) + release - work_on_liquid.
+    /// Delta(surface energy) + release + bulk loss - work_on_liquid.
     pub energy_balance_residual_j: f64,
 }
 impl BridgeStep {
@@ -232,6 +240,7 @@ pub struct SourcePlanarCapillaryBridge {
     geometry: geometry::Geometry,
     limits: BridgeLimits,
     identity: ContentHash,
+    squeeze_flow: Option<PlanarSqueezeFlowLimits>,
 }
 
 /// Closed-liquid constraint during an externally prescribed source update.
@@ -413,6 +422,7 @@ impl SourcePlanarCapillaryBridge {
             geometry,
             limits,
             identity: hash.finalize(),
+            squeeze_flow: None,
         };
         // Neither topology switch may silently inject missing energy.
         result.transition_release(
@@ -519,7 +529,10 @@ impl SourcePlanarCapillaryBridge {
             point,
             constraint,
         )?;
-        let source = Self::new(liquid, wetting, volume, self.geometry.width, self.limits)?;
+        let mut source = Self::new(liquid, wetting, volume, self.geometry.width, self.limits)?;
+        if let Some(limits) = self.squeeze_flow {
+            source = source.with_no_slip_squeeze_flow(limits)?;
+        }
         if previous.attached && previous.gap_m >= source.rupture_gap_m()
             || !previous.attached && previous.gap_m <= source.formation_gap_m()
         {
@@ -575,6 +588,9 @@ impl SourcePlanarCapillaryBridge {
             self.geometry.detached(state.gap_m)?
         };
         self.check_profile(&profile)?;
+        if profile.attached {
+            self.check_squeeze_geometry(profile.gap_m)?;
+        }
         Ok(profile)
     }
 
@@ -628,7 +644,9 @@ impl SourcePlanarCapillaryBridge {
         };
         let profile = self.evaluate(state)?;
         let connected = previous.attached || attached;
-        let work = if connected { g.work(from, to)? } else { 0.0 };
+        let surface_work = if connected { g.work(from, to)? } else { 0.0 };
+        let squeeze = self.squeeze_step(previous, gap_m, event, dt_s)?;
+        let work = finite(surface_work + squeeze.loss_j, "total bridge step work")?;
         limit(
             work.abs(),
             self.limits.maximum_abs_step_work_j,
@@ -642,15 +660,10 @@ impl SourcePlanarCapillaryBridge {
             profile.normal_force_n
         } else {
             finite(
-                -work / (gap_m - previous.gap_m),
+                -surface_work / (gap_m - previous.gap_m),
                 "work-conjugate normal force",
             )?
         };
-        limit(
-            mean_force.abs(),
-            self.limits.maximum_abs_force_n,
-            "mean bridge force",
-        )?;
         // Differentiate the same factored path work, not the endpoint force.
         // The coalescence expression is a sum of positive terms and stays
         // conditioned when the connected portion is short. A touching pair
@@ -671,17 +684,30 @@ impl SourcePlanarCapillaryBridge {
             }
             _ => 0.0,
         };
-        finite(mean_derivative, "mean force endpoint derivative")?;
+        let mean_derivative = finite(
+            mean_derivative + squeeze.tangent_n_per_m,
+            "mean force endpoint derivative",
+        )?;
+        let mean_force = finite(mean_force + squeeze.force_n, "total mean bridge force")?;
+        limit(
+            mean_force.abs(),
+            self.limits.maximum_abs_force_n,
+            "mean bridge force",
+        )?;
         let change = finite(
             profile.surface_free_energy_j - before.surface_free_energy_j,
             "surface energy change",
         )?;
-        let residual = finite(change + release - work, "surface energy closure")?;
+        let residual = finite(
+            change + release + squeeze.loss_j - work,
+            "surface and squeeze energy closure",
+        )?;
         let scale = before
             .surface_free_energy_j
             .abs()
             .max(profile.surface_free_energy_j.abs())
             .max(work.abs())
+            .max(squeeze.loss_j)
             .max(release);
         let tolerance = finite(
             self.limits.energy_absolute_tolerance_j + self.limits.energy_relative_tolerance * scale,
@@ -702,6 +728,7 @@ impl SourcePlanarCapillaryBridge {
             mean_normal_force_n: mean_force,
             mean_force_gap_derivative_n_per_m: mean_derivative,
             irreversible_release_j: release,
+            bulk_viscous_dissipation_j: squeeze.loss_j,
             surface_energy_change_j: change,
             energy_balance_residual_j: residual,
         })

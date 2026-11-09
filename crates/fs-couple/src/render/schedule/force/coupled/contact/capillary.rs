@@ -8,7 +8,8 @@
 //! mechanics/surface account publishes the bridge and body successors.
 //!
 //! The planar, axisymmetric and dynamic contact-line models share this SAME
-//! mechanical transaction. Contact-line friction has a distinct loss port.
+//! mechanical transaction. Contact-line friction and bulk squeeze viscosity
+//! have distinct loss ports.
 //! Each original liquid owner retains its geometric and numerical scope.
 //! Body inertia does not add liquid inertia or dynamic contact-line physics;
 //! the axisymmetric branch requires caller-established quasistatic applicability
@@ -170,6 +171,9 @@ pub struct CapillaryModalFrame<S = BridgeStep> {
     /// Physical contact-line friction loss, separate from topology release.
     /// A thermal recipient is not inferred by the mechanical owner.
     pub contact_line_dissipation_j: f64,
+    /// Physical liquid squeeze-flow loss from the explicitly selected model.
+    /// This is separate from line friction, surface storage and topology release.
+    pub bulk_viscous_dissipation_j: f64,
     pub topology_release_j: f64,
     pub energy_residual_j: f64,
     pub energy_tolerance_j: f64,
@@ -212,6 +216,7 @@ pub struct CapillaryStepView<S> {
     surface_energy_j: f64,
     mean_force_n: f64,
     contact_line_dissipation_j: f64,
+    bulk_viscous_dissipation_j: f64,
     topology_release_j: f64,
     estimated_energy_error_j: f64,
 }
@@ -801,10 +806,16 @@ impl<'a, L: NativeCapillaryModel<'a>> CapillaryModalSystem<'a, L> {
         let prescribed_work = finite(-force * prescribed_delta)?;
         let network_loss = finite(frame.total_dissipation_j())?;
         let contact_line_loss = finite(actual_view.contact_line_dissipation_j)?;
+        let bulk_viscous_loss = finite(actual_view.bulk_viscous_dissipation_j)?;
         if contact_line_loss < 0.0 {
             return Err(invalid("capillary contact-line loss must be nonnegative").into());
         }
-        let total_loss = finite(network_loss + contact_line_loss + actual_view.topology_release_j)?;
+        if bulk_viscous_loss < 0.0 {
+            return Err(invalid("capillary bulk viscous loss must be nonnegative").into());
+        }
+        let total_loss = finite(
+            network_loss + contact_line_loss + bulk_viscous_loss + actual_view.topology_release_j,
+        )?;
         let residual = finite((after - before) + total_loss - external_work - prescribed_work)?;
         let scale = before
             .abs()
@@ -843,6 +854,7 @@ impl<'a, L: NativeCapillaryModel<'a>> CapillaryModalSystem<'a, L> {
             prescribed_work_j: prescribed_work,
             network_dissipation_j: network_loss,
             contact_line_dissipation_j: contact_line_loss,
+            bulk_viscous_dissipation_j: bulk_viscous_loss,
             topology_release_j: actual_view.topology_release_j,
             energy_residual_j: residual,
             energy_tolerance_j: tolerance,

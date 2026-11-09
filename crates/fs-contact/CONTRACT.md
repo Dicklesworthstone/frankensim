@@ -4374,3 +4374,30 @@ force/area/energy/tangent sums, mixed curvature, tensile-contact shear capacity,
 closed-cycle work, path subdivision, bin partition, height-reference covariance
 and source/envelope/cancellation atomicity. These are numerical regressions,
 not calibration of a measured rough surface.
+
+## Explicit viscous adhesion in thin planar bridges
+
+`SourcePlanarCapillaryBridge::with_no_slip_squeeze_flow` explicitly selects
+leading-order Newtonian Reynolds resistance for a thin, parallel, impermeable
+planar gap. It uses the original sourced viscosity and actual fixed-volume wet
+span, integrates the positive resistance analytically along each constant-rate
+gap path, and supplies the exact derivative of the resulting mean force.
+`BridgeStep::bulk_viscous_dissipation_j` remains separate from surface storage,
+topology release and contact-line friction; `work_on_liquid_j` includes the bulk
+loss. Source refresh retains the selected model and resolves updated viscosity.
+Slender-gap, lateral Ca/We, Reynolds, momentum-diffusion and whole-path
+absolute-pressure bounds refuse unsupported motion, including cavitation-risk
+states and topology changes. No microscopic moving-contact-line regularization,
+finite-width flow, fluid inertia or thermal recipient is supplied.
+
+G1 tests reconstruct forces from the Reynolds pressure field and time
+integration; G3 checks path subdivision, reversal and viscosity refresh; G0/G4
+check identity/domain/cancellation atomicity. The existing compliant load-line
+consumes the same total work-conjugate force without a second fluid solver.
+The native `fs-couple` capillary transaction exports the bulk viscous loss
+separately and includes it exactly once in its coupled body/surface energy
+balance. Its regressions cover a dissipative prescribed gap cycle and
+capillary-driven body motion with reciprocal impulses.
+
+Reference: Shim et al. (2019), section 3.5, equation (3.1),
+https://pmc.ncbi.nlm.nih.gov/articles/PMC6528685/.

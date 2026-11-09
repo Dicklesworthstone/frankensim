@@ -227,6 +227,152 @@ fn column() -> Vec<f64> {
 fn close(a: f64, b: f64, tol: f64) {
     assert!((a - b).abs() <= tol, "{a:e} != {b:e}");
 }
+
+fn thin_bridge(squeeze: bool) -> SourcePlanarCapillaryBridge {
+    let (liquid, wetting) = sources(PI / 3.0, 0.05, 300.0, true);
+    let mut bounds = limits();
+    bounds.minimum_gap_m = 1e-6;
+    let source = SourcePlanarCapillaryBridge::new(liquid, wetting, 1e-12, WIDTH, bounds).unwrap();
+    if squeeze {
+        source
+            .with_no_slip_squeeze_flow(PlanarSqueezeFlowLimits {
+                maximum_gap_to_half_span_ratio: 0.02,
+                maximum_reynolds_number: 0.1,
+                maximum_unsteady_stokes_number: 0.1,
+                ambient_pressure_pa: 1e5,
+                minimum_liquid_pressure_pa: 1e3,
+                maximum_liquid_pressure_pa: 2e5,
+            })
+            .unwrap()
+    } else {
+        source
+    }
+}
+
+#[test]
+fn g1_squeeze_adhesion_cycle_exports_bulk_loss_once_through_native_mechanics() {
+    let source = thin_bridge(true);
+    let gap = 2e-6;
+    let mut owner = CapillaryModalSystem::new(
+        network(false),
+        &source,
+        assigned(&source),
+        source.initialize(gap, true).unwrap(),
+        vec![0.0; 2],
+        config(),
+        &CancelGate::new_clock_free(),
+    )
+    .unwrap();
+    let initial = owner.total_energy_j().unwrap();
+    let mut work = 0.0;
+    let mut viscous_loss = 0.0;
+    for rate in [1e-5, -1e-5] {
+        let frame = *owner.step(&[0.0; 2], rate).unwrap();
+        assert!(frame.bulk_viscous_dissipation_j > 0.0);
+        assert_eq!(
+            frame.bulk_viscous_dissipation_j,
+            frame.bridge.bulk_viscous_dissipation_j
+        );
+        assert_eq!(frame.contact_line_dissipation_j, 0.0);
+        assert_eq!(frame.topology_release_j, 0.0);
+        assert_eq!(frame.network_dissipation_j, 0.0);
+        close(frame.network_energy_j, 0.0, 1e-25);
+        close(
+            frame.prescribed_work_j,
+            frame.bridge.work_on_liquid_j,
+            1e-20,
+        );
+        work += frame.prescribed_work_j;
+        viscous_loss += frame.bulk_viscous_dissipation_j;
+        close(
+            owner.total_energy_j().unwrap() + viscous_loss,
+            initial + work,
+            1e-20,
+        );
+    }
+    close(owner.gap_m(), gap, 1e-21);
+    close(owner.total_energy_j().unwrap(), initial, 1e-20);
+    close(work, viscous_loss, 1e-20);
+    assert!(work > 0.0);
+
+    // A refused hydrodynamic trial and cancellation cannot publish mechanics,
+    // bridge history, the sample clock, or a new observation.
+    let state = owner.state();
+    let last = *owner.last_frame().unwrap();
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert!(owner.step_under_gate(&[0.0; 2], 0.0, &cancelled).is_err());
+    assert!(owner.step(&[0.0; 2], 0.02).is_err());
+    assert_eq!(owner.state(), state);
+    assert_eq!(owner.samples_rendered(), 2);
+    assert_eq!(owner.last_frame(), Some(&last));
+    assert_eq!(
+        owner.components()[0].states()[0].velocity_m_sqrt_kg_per_s,
+        0.0
+    );
+    assert_eq!(
+        owner.components()[1].states()[0].velocity_m_sqrt_kg_per_s,
+        0.0
+    );
+}
+
+#[test]
+fn g3_squeeze_flow_slows_capillary_driven_motion_and_preserves_action_reaction() {
+    let viscous = thin_bridge(true);
+    let inviscid = thin_bridge(false);
+    let gap = 2e-6;
+    let build = |source| {
+        CapillaryModalSystem::new(
+            network(false),
+            source,
+            assigned(source),
+            source.initialize(gap, true).unwrap(),
+            column(),
+            config(),
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap()
+    };
+    let mut owner = build(&viscous);
+    let mut reference = build(&inviscid);
+    let initial = owner.total_energy_j().unwrap();
+    let mut dissipated = 0.0;
+    for _ in 0..4 {
+        let previous = [
+            owner.components()[0].states()[0].velocity_m_sqrt_kg_per_s,
+            owner.components()[1].states()[0].velocity_m_sqrt_kg_per_s,
+        ];
+        let frame = *owner.step(&[0.0; 2], 0.0).unwrap();
+        let no_flow = *reference.step(&[0.0; 2], 0.0).unwrap();
+        assert_eq!(no_flow.bulk_viscous_dissipation_j, 0.0);
+        let current = [
+            owner.components()[0].states()[0].velocity_m_sqrt_kg_per_s,
+            owner.components()[1].states()[0].velocity_m_sqrt_kg_per_s,
+        ];
+        close(
+            det::sqrt(MA) * current[0] + det::sqrt(MB) * current[1],
+            0.0,
+            1e-18,
+        );
+        close(
+            det::sqrt(MA) * (current[0] - previous[0]),
+            -owner.sample_period_s() * frame.applied_mean_force_n,
+            1e-18,
+        );
+        close(
+            det::sqrt(MB) * (current[1] - previous[1]),
+            owner.sample_period_s() * frame.applied_mean_force_n,
+            1e-18,
+        );
+        dissipated += frame.bulk_viscous_dissipation_j;
+        close(owner.total_energy_j().unwrap() + dissipated, initial, 1e-17);
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+    }
+    assert!(dissipated > 0.0);
+    assert!(owner.gap_m() < gap);
+    assert!(owner.gap_m() > reference.gap_m());
+}
+
 #[test]
 fn actual_native_bodies_exchange_surface_work_and_retain_liquid_through_rupture() {
     let source = model(PI / 3.0, 0.05, true);

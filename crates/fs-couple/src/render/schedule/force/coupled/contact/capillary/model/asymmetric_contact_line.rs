@@ -77,6 +77,7 @@ impl<'a> NativeCapillaryModel<'a> for AsymmetricContactLineLoadLine<'a> {
             surface_energy_j: step.profile.surface_free_energy_j,
             mean_force_n: step.mean_normal_force_n,
             contact_line_dissipation_j: step.contact_line_dissipation_j,
+            bulk_viscous_dissipation_j: 0.0,
             // No topology change is admitted by the original connected owner.
             topology_release_j: 0.0,
             estimated_energy_error_j: step.estimated_energy_error_j,

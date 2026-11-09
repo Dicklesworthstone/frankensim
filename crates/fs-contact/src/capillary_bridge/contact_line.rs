@@ -185,6 +185,11 @@ impl SourceContactLineBridge {
         config: ContactLineConfig,
     ) -> Result<Self, ContactLineError> {
         config.validate()?;
+        if original.squeeze_flow_limits().is_some() {
+            return Err(ContactLineError::Invalid(
+                "dynamic contact-line geometry cannot discard selected bulk squeeze flow",
+            ));
+        }
         let equilibrium = original.wetting()[0].contact_angle_radians();
         let mut values = [[0.0; 3]; 2];
         for (i, wetting) in original.wetting().iter().enumerate() {
