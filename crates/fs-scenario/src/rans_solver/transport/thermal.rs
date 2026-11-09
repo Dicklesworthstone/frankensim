@@ -6,8 +6,8 @@
 //! q_diss uses the actual molecular and modeled turbulent mechanical losses.
 
 use super::{
-    RansChannelGrid, RansFieldState, RansSolver, RansTransportError, RansTransportReport,
-    RansTransportWorkspace, checkpoint, volume,
+    RansBoussinesqForce, RansChannelGrid, RansFieldState, RansSolver, RansTransportError,
+    RansTransportReport, RansTransportWorkspace, checkpoint, volume,
 };
 
 mod conjugate;
@@ -39,6 +39,9 @@ pub struct RansHeatLoad<'a> {
     pub volumetric_heating_w_m3: Option<&'a [f64]>,
     /// Explicit physical dissipation-to-heat choice; passive by default.
     pub coupling: RansHeatCoupling,
+    /// Optional streamwise acceleration from the opening temperature.
+    /// The density-departure limit also applies to the accepted endpoint.
+    pub buoyancy: Option<RansBoussinesqForce>,
 }
 
 /// Mechanical and sensible-heat budgets for one jointly accepted interval.
@@ -85,7 +88,12 @@ impl RansSolver {
     /// Backward-Euler numerical dissipation and diffusive k loss into the wall
     /// remain separate mechanical losses, never generated sensible heat.
     ///
-    /// Temperature does not change material properties or produce buoyancy.
+    /// `buoyancy` uses opening temperature to drive this momentum step; the
+    /// accepted velocity changes shear production, k/epsilon and heat mixing.
+    /// Subsequent native/adaptive steps use the resulting temperature. This
+    /// remains a first-order segregated coupling, without a nonlinear endpoint
+    /// iteration. Buoyancy work is external mechanical power, not sensible heat.
+    /// Temperature does not change the remaining material properties.
     /// No axial heat removal is supplied, so nonzero net heating changes the
     /// thermal inventory and does not define a thermal steady state.
     ///
@@ -185,6 +193,7 @@ impl RansSolver {
             pressure_gradient_pa_m,
             time_step_s,
             heat.coupling == RansHeatCoupling::Dissipative,
+            heat.buoyancy,
             work,
             &mut cancelled,
         )?;
@@ -269,6 +278,9 @@ impl RansSolver {
                     equation: "positive temperature",
                     node: i,
                 });
+            }
+            if let Some(force) = heat.buoyancy {
+                force.acceleration(next, i)?;
             }
             before.add(cell_capacity * old);
             after.add(cell_capacity * next);

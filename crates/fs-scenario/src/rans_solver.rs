@@ -6,6 +6,8 @@
 //! dissipation over a physical interval; `advance_launder_sharma_with_heat`
 //! also advances conservative sensible heat using the evolving closure, with
 //! optional deposition of molecular and modeled turbulent dissipation.
+//! Its optional `RansBoussinesqForce` also closes streamwise temperature
+//! feedback, using signed physical gravity and separate buoyancy work.
 //! `advance_launder_sharma_with_conjugate_wall` jointly solves finite conducting
 //! solid layers and the original fluid heat equation over the same interval.
 //! `advance_launder_sharma_adaptive` controls local temporal error over a
@@ -28,11 +30,11 @@ use crate::rans_card::{BoussinesqOption, LaunderSharmaCoefficients, PorousFinSin
 mod transport;
 pub use transport::{
     RansAdaptiveControls, RansAdaptiveError, RansAdaptiveHeatBalance, RansAdaptiveReport,
-    RansAdaptiveWallBalance, RansAdaptiveWorkspace, RansConjugateAdaptiveReport,
-    RansConjugateAdaptiveWorkspace, RansConjugateHeatLoad, RansConjugateReport, RansConjugateWall,
-    RansConjugateWorkspace, RansFieldTolerances, RansHeatCoupling, RansHeatLoad,
-    RansThermalTransportReport, RansTransportError, RansTransportReport, RansTransportWorkspace,
-    RansWallLayer,
+    RansAdaptiveWallBalance, RansAdaptiveWorkspace, RansBoussinesqForce,
+    RansConjugateAdaptiveReport, RansConjugateAdaptiveWorkspace, RansConjugateHeatLoad,
+    RansConjugateReport, RansConjugateWall, RansConjugateWorkspace, RansFieldTolerances,
+    RansHeatCoupling, RansHeatLoad, RansThermalTransportReport, RansTransportError,
+    RansTransportReport, RansTransportWorkspace, RansWallLayer,
 };
 
 /// Convergence termination reason.

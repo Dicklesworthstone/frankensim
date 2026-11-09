@@ -143,6 +143,8 @@ pub struct RansConjugateHeatLoad<'a> {
     pub fluid_volumetric_heating_w_m3: Option<&'a [f64]>,
     /// Whether original physical mechanical losses enter fluid sensible heat.
     pub coupling: RansHeatCoupling,
+    /// Optional streamwise Boussinesq feedback from the fluid temperature.
+    pub buoyancy: Option<super::RansBoussinesqForce>,
 }
 
 /// Original nine fluid buffers and four scalars per wall cell. Every step
@@ -362,6 +364,7 @@ impl RansSolver {
                 wall_heat_flux_w_m2: input,
                 volumetric_heating_w_m3: heat.fluid_volumetric_heating_w_m3,
                 coupling: heat.coupling,
+                buoyancy: heat.buoyancy,
             },
             impedance,
             &mut work.fluid,

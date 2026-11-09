@@ -160,6 +160,7 @@ fn g1_joint_wall_fluid_endpoints_match_the_independent_full_system() {
                         wall_volumetric_heating_w_m3: Some(&wall_heat),
                         fluid_volumetric_heating_w_m3: Some(&fluid_heat),
                         coupling,
+                        ..RansConjugateHeatLoad::default()
                     },
                     &mut work,
                     || false,

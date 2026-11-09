@@ -1,6 +1,7 @@
 use super::*;
 use crate::rans_card::RansCardDraft;
 
+mod buoyancy;
 mod conjugate;
 mod dissipative;
 

@@ -1628,7 +1628,8 @@ accepted momentum, turbulence, eddy viscosity and temperature unchanged;
 the same workspace supports retry. Mechanical-only stepping retains its
 previous numerical path and publication semantics.
 
-Temperature does not change material properties or create buoyancy. Passive
+Temperature does not change material properties. Optional streamwise
+Boussinesq feedback is described below; the default thermal load has none. Passive
 coupling leaves mechanical losses separate; dissipative coupling deposits the
 physical losses described below. This remains a constant-property thermal
 channel rather than a variable-density total-energy model. No axial heat
@@ -1722,8 +1723,9 @@ flux through the prescribed wall remains an exported mechanical boundary
 loss. Neither is silently turned into fluid heat. The combined discrete
 mean/turbulent/sensible inventory therefore balances pressure work and
 imposed heating against those explicit residual mechanical losses, up to the
-reported numerical balance defects. Temperature still has no feedback into
-material properties or buoyancy.
+reported numerical balance defects. With optional Boussinesq coupling, the
+same account also includes the separately reported buoyancy work. Temperature
+does not change material properties.
 
 `RansThermalTransportReport` separates imposed wall/volume heat from
 `molecular_heat_input_w_m2` and `turbulent_heat_input_w_m2`. Its thermal defect
@@ -1867,9 +1869,9 @@ thermal and adaptive routes also passed their unchanged behavior checks.
 This remains constant-property one-dimensional stationary-wall conduction
 coupled to the existing first-order segregated RANS screen. The single-step entry advances one authored physical interval; the joint
 adaptive entry described below controls complete wall/fluid windows. Neither
-entry infers temperature-dependent material properties, supplies thermal or
-buoyancy feedback, contact resistance, radiation, phase change or axial heat
-removal. No full-workspace, empirical conjugate turbulent heat
+entry infers temperature-dependent material properties, contact resistance,
+radiation, phase change or axial heat removal. Optional streamwise Boussinesq
+feedback is described below. No full-workspace, empirical conjugate turbulent heat
 transfer or three-dimensional turbulence validation is claimed.
 
 ## Typed scalar thermal boundary execution
@@ -1967,3 +1969,50 @@ establish empirical model accuracy. Relative temperature allowances scale with
 absolute temperature; callers must supply absolute tolerances appropriate to
 the thermal contrasts they need to resolve. The original stationary,
 constant-property, one-dimensional wall/channel assumptions remain unchanged.
+
+## Active thermal buoyancy in transported channel flow
+
+`RansHeatLoad::buoyancy` and `RansConjugateHeatLoad::buoyancy` optionally
+carry an admitted `RansBoussinesqForce`. The existing physical-time heat,
+conducting-wall and adaptive owners then apply
+`a_b = -g_streamwise * beta * (T_old - T_reference)` in the native momentum
+equation. Gravity is a signed physical acceleration along the mean flow;
+the prescribed pressure gradient excludes reference-density hydrostatics.
+Temperature therefore changes mean shear, shear production, transported
+k/modified epsilon and subsequent turbulent heat diffusion. Opening
+temperature drives each native step, and each accepted half step supplies
+the next opening state. This remains first-order segregated coupling.
+
+The material convention follows the Boussinesq equation of state
+`rho/rho_reference = 1 - beta*(T-T_reference)`
+(<https://doc.openfoam.com/2306/tools/processing/models/thermophysical/equation-of-state/rtm/Boussinesq/>).
+Density otherwise remains constant in inertia and heat storage. The caller
+declares a maximum `|beta*(T-T_reference)|` in `(0, 0.1]`; both opening and
+candidate fluid temperatures must satisfy it. Exceeding this limit refuses
+the complete fluid/wall step or adaptive window without clipping. The limit
+restricts the declared regime; it is not a certified model-error bound.
+
+`RansTransportReport::buoyancy_power` separately measures the actual nodal
+force times accepted velocity over the mechanical dual cells. Mean-energy
+balance includes this external work. Buoyancy work is not directly deposited
+as sensible heat, and the existing dissipative option still transfers only
+physical molecular and modeled turbulent destruction. Adaptive accounts
+integrate only accepted fine-step buoyancy work. The default has no buoyancy;
+zero beta is also exactly equivalent on the verified fixture. The original
+nine fluid buffers, conjugate storage and allocation-free stepping are retained.
+
+Five focused groups verify independently assembled momentum and energy
+balances in laminar and turbulent states with either gravity sign, actual
+feedback into k/epsilon/eddy heat transport, reference-pressure covariance,
+zero-force equivalence, second-order spatial convergence to a manufactured
+vertical thermal channel's quartic velocity, coupled-wall/adaptive half-step
+replay, regime refusal and every native cancellation poll. All 54 RANS module
+tests and eight existing integration tests passed in the pinned native build
+using original card, solver and BLAKE3 sources. Full workspace validation is
+blocked by missing constellation sibling checkouts; DSR/RCH are unavailable.
+
+This is a fully developed one-dimensional low-fidelity screen with gravity
+parallel to mean flow. Under its existing scalar gradient-diffusion closure,
+`g dot grad(T)=0`, so no extra buoyant k production is introduced. No transverse
+stratification, axial heat transport, variable material, gravitational-potential
+inventory, transition or empirical general mixed-convection accuracy is claimed.

@@ -238,6 +238,7 @@ fn g0_accepted_half_steps_replay_both_states_and_every_heat_input() {
         wall_volumetric_heating_w_m3: Some(&[0.2, -0.1]),
         fluid_volumetric_heating_w_m3: Some(&[0.125; 9]),
         coupling: RansHeatCoupling::Dissipative,
+        ..RansConjugateHeatLoad::default()
     };
     let mut expected = initial.clone();
     let mut expected_wall = initial_wall.clone();
@@ -328,6 +329,7 @@ fn g0_rejected_trials_do_not_add_exterior_volume_or_dissipative_heat() {
         wall_volumetric_heating_w_m3: Some(&[0.2, -0.1]),
         fluid_volumetric_heating_w_m3: Some(&[0.125; 9]),
         coupling: RansHeatCoupling::Dissipative,
+        ..RansConjugateHeatLoad::default()
     };
     let report = s
         .advance_launder_sharma_conjugate_adaptive(

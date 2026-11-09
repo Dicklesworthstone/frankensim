@@ -11,11 +11,14 @@
 //! integrated production to k. The optional thermal step transports sensible
 //! heat with the prepared endpoint eddy viscosity and can deposit molecular
 //! and modeled turbulent dissipation. All fields are accepted together.
-//! Neither path supplies porous, buoyancy, transition or
+//! Optional streamwise Boussinesq forcing closes temperature feedback on
+//! momentum. Neither path supplies porous, stratified, transition or
 //! three-dimensional flow physics.
 
 use super::{RansChannelGrid, RansFieldState, RansSolver};
 
+mod buoyancy;
+pub use buoyancy::RansBoussinesqForce;
 mod thermal;
 pub use thermal::{
     RansConjugateHeatLoad, RansConjugateReport, RansConjugateWall, RansConjugateWorkspace,
@@ -173,6 +176,9 @@ pub struct RansTransportReport {
     pub turbulent_energy_after: f64,
     /// Pressure acceleration times accepted mean volume flux.
     pub pressure_power: f64,
+    /// Integral of lagged thermal buoyancy acceleration times accepted U.
+    /// Zero unless the thermal load enables streamwise Boussinesq forcing.
+    pub buoyancy_power: f64,
     /// Molecular mean-flow dissipation from shared face gradients.
     pub molecular_dissipation: f64,
     /// Mean-flow eddy loss transferred to the k equation exactly once.
@@ -183,7 +189,7 @@ pub struct RansTransportReport {
     pub turbulent_wall_loss: f64,
     /// Backward-Euler mean-velocity numerical dissipation, always nonnegative.
     pub temporal_dissipation: f64,
-    /// Mean-energy rate minus pressure power net of all discrete mean losses.
+    /// Mean-energy rate minus pressure/buoyancy power net of all mean losses.
     pub mean_balance_defect: f64,
     /// Turbulent-energy rate minus production net of destruction and wall loss.
     pub turbulent_balance_defect: f64,
@@ -226,6 +232,7 @@ impl RansSolver {
             pressure_gradient_pa_m,
             time_step_s,
             false,
+            None,
             work,
             &mut cancelled,
         )?;
@@ -244,6 +251,7 @@ impl RansSolver {
         pressure_gradient_pa_m: f64,
         time_step_s: f64,
         retain_dissipation_heat: bool,
+        buoyancy: Option<RansBoussinesqForce>,
         work: &mut RansTransportWorkspace,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<RansTransportReport, RansTransportError> {
@@ -309,6 +317,9 @@ impl RansSolver {
                 laminar &= state.k[i] == 0.0 && state.eps[i] == 0.0;
                 positive &= state.k[i] > 0.0 && state.eps[i] > 0.0;
             }
+            if let Some(force) = buoyancy {
+                force.acceleration(state.temp_k[i], i)?;
+            }
         }
         if !laminar && !positive {
             return Err(RansTransportError::InvalidInput(
@@ -331,16 +342,18 @@ impl RansSolver {
         for i in 0..n {
             checkpoint(i, &mut cancelled)?;
             let (lower, upper) = diffusion(grid, &work.viscosity, self.nu_laminar, 1.0, i);
+            let source = if let Some(force) = buoyancy {
+                let thermal = force.acceleration(state.temp_k[i], i)?;
+                if thermal == 0.0 {
+                    acceleration
+                } else {
+                    acceleration + thermal
+                }
+            } else {
+                acceleration
+            };
             row(
-                work,
-                i,
-                dt,
-                lower,
-                upper,
-                0.0,
-                state.u[i],
-                acceleration,
-                "momentum",
+                work, i, dt, lower, upper, 0.0, state.u[i], source, "momentum",
             )?;
         }
         work.solve("momentum", &mut cancelled)?;
@@ -449,6 +462,7 @@ impl RansSolver {
             turbulent_energy_before: 0.0,
             turbulent_energy_after: 0.0,
             pressure_power: 0.0,
+            buoyancy_power: 0.0,
             molecular_dissipation,
             turbulence_production,
             turbulent_destruction: 0.0,
@@ -479,6 +493,10 @@ impl RansSolver {
             report.turbulent_energy_before += v * state.k[i];
             report.turbulent_energy_after += v * work.kinetic[i];
             report.pressure_power += v * acceleration * work.velocity[i];
+            if let Some(force) = buoyancy {
+                report.buoyancy_power +=
+                    v * force.acceleration(state.temp_k[i], i)? * work.velocity[i];
+            }
             let du = work.velocity[i] - state.u[i];
             report.temporal_dissipation += 0.5 * v * du * (du / dt);
             mean_energy_rate += 0.5 * v * (work.velocity[i] + state.u[i]) * (du / dt);
@@ -506,8 +524,13 @@ impl RansSolver {
         report.turbulent_wall_loss = (self.nu_laminar
             + 0.5 * work.viscosity[1] / self.coeffs.sigma_k)
             * (work.kinetic[1] / (grid.y_nodes[1] - grid.y_nodes[0]));
+        let applied_power = if buoyancy.is_some() {
+            report.pressure_power + report.buoyancy_power
+        } else {
+            report.pressure_power
+        };
         report.mean_balance_defect = mean_energy_rate
-            - (report.pressure_power
+            - (applied_power
                 - report.molecular_dissipation
                 - report.turbulence_production
                 - report.temporal_dissipation);
@@ -521,6 +544,7 @@ impl RansSolver {
             report.turbulent_energy_before,
             report.turbulent_energy_after,
             report.pressure_power,
+            report.buoyancy_power,
             report.molecular_dissipation,
             report.turbulence_production,
             report.turbulent_destruction,

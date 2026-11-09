@@ -689,8 +689,8 @@ struct Account {
     first: Option<Step>,
     last: Option<Step>,
     // Eight mechanical rate integrals, wall/volume heat, change, defect,
-    // then the two separately retained physical dissipation-to-heat inputs.
-    integral: [Sum; 14],
+    // then the two physical dissipation-to-heat inputs and buoyancy work.
+    integral: [Sum; 15],
 }
 
 impl Account {
@@ -709,6 +709,7 @@ impl Account {
         for (sum, rate) in self.integral[..8].iter_mut().zip(values) {
             sum.add(dt * rate);
         }
+        self.integral[14].add(dt * m.buoyancy_power);
         if let Some(h) = step.heat {
             self.integral[8].add(dt * h.wall_heat_flux_w_m2);
             self.integral[9].add(dt * h.volumetric_heat_input_w_m2);
@@ -738,7 +739,8 @@ impl Account {
         let last = self
             .last
             .ok_or(RansTransportError::InvalidInput("no accepted interval"))?;
-        let rates: [f64; 8] = core::array::from_fn(|i| self.integral[i].value / duration);
+        let rates: [f64; 9] =
+            core::array::from_fn(|i| self.integral[if i == 8 { 14 } else { i }].value / duration);
         if rates.iter().any(|value| !value.is_finite()) {
             return Err(RansTransportError::Arithmetic {
                 equation: "adaptive average balance",
@@ -752,6 +754,7 @@ impl Account {
             turbulent_energy_before: first.mechanical.turbulent_energy_before,
             turbulent_energy_after: last.mechanical.turbulent_energy_after,
             pressure_power: rates[0],
+            buoyancy_power: rates[8],
             molecular_dissipation: rates[1],
             turbulence_production: rates[2],
             turbulent_destruction: rates[3],
