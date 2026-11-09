@@ -1743,7 +1743,7 @@
       "articulation": "the stationary-flow noise of the 3-D printed model of subject 1's /s/ (s1-11-bass-s), blown through a 10 mm glottal hole with no vocal folds, at a fluid power of 500 mW",
       "range": "unvoiced fricative noise: no pitch",
       "dynamic": null,
-      "notes": "A physical model, not a voice: DVTD's flow rig blows the printed model of one speaker's /s/ from a tank through a trachea and bronchial horn, in an anechoic room. The dataset prints the subglottal pressure, the flow and the noise spectrum for this recording in s1-11-bass-s-noise-metadata.txt and s1-11-bass-s-noise-psd.txt. The metadata file's level column reads relative to 2e-4 Pa, 20.0 dB under the same signal re 20 uPa. The recording has no pitch: a grader's f0, harmonic and partial measures do not apply to it.",
+      "notes": "A physical model, not a voice: DVTD's flow rig blows the printed model of one speaker's /s/ from a tank through a trachea and bronchial horn, in an anechoic room. The dataset prints the subglottal pressure, the flow and the noise spectrum for this recording in s1-11-bass-s-noise-metadata.txt and s1-11-bass-s-noise-psd.txt. The metadata file's level column reads relative to 2e-4 Pa, 20.0 dB under the same signal re 20 uPa. The recording has no pitch: a grader's f0, harmonic and partial measures do not apply to it. It has no dynamic either: the dataset prints its fluid power, 500 mW, and no dynamic marking. A grader library entry for it carries dyn \"mf\" only because the site's grading contract needs one of pp, mf or ff; \"mf\" is the site's default label, not a measurement.",
       "gradable": false,
       "members": [
         {
