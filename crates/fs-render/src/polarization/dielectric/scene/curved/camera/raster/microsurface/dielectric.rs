@@ -2,7 +2,14 @@
 use super::super::super::microsurface::SmithDielectricCameraScene;
 use super::*;
 
-fn glass_draw(seed: u64, pixel: u32, sample: u32, lane: usize, event: u32, facet: u32) -> [f64; 4] {
+pub(in super::super) fn glass_draw(
+    seed: u64,
+    pixel: u32,
+    sample: u32,
+    lane: usize,
+    event: u32,
+    facet: u32,
+) -> [f64; 4] {
     let block = philox4x32_10(
         [pixel, sample, event, facet],
         [

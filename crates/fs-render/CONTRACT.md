@@ -13683,3 +13683,37 @@ Smith groups also pass. Native `cargo check -p fs-render --features
 tracer,volumes,photometry --lib --locked -j 1` passes with one compiler thread
 and debug info disabled; full native scene-test execution remains separate.
 Refs: frankensim-h7xu5.4 and frankensim-material-reality-ui2if.6.4.
+
+### Complete Smith surfaces inside physical participating transport
+
+`participating::microsurface::SmithDielectricRayleighScene` and
+`camera::participating::SmithDielectricRayleighCameraScene` compose original
+full Smith metal/glass with the native molecular/spectral-particle tracker.
+Physical free flights, rejected null candidates, local Mueller phase laws,
+finite-cell absorption/LTE, GRIN propagation and actual volume-event limits
+retain their original owners. The completed microscopic escape selects the
+physical medium for the next volume flight. Extended departures have no
+marginal direction PDF and refresh the thermal Mueller prefix.
+
+Separate surface, physical-flight, opaque-facet and dielectric-facet streams
+retain zero-based logical addresses; variable work in one domain cannot
+advance another. Seeded zero-scattering transport preserves the existing
+Smith path stream. Forward source power and reciprocal ordinary/analyzed/
+resolved-lens cameras are exposed without inventing statistical-height
+distance, absorption or delay.
+
+The native raster adds four full-Smith participating entry points: visible
+and multichannel QE observations, each with ordinary and sequential lenses.
+Original CIE, QE/photon proposals, pupil geometry and lens Stokes seeds are
+reused. Volume events and tracking draws are retained per wavelength; clipped
+lanes keep zero work and their original probability mass. Every live-path
+failure refuses the complete pixel.
+
+Native library checking passes with `tracer,volumes,photometry`, one compiler
+thread and no debug info. Four focused native integration groups are authored
+for zero-scattering parity, real Rayleigh-to-multiple-facet glass paths, both
+physical media, independent Beer/eta/LTE composition, source-power parity,
+detector measure, resolved lenses, and whole-sample limits/cancellation.
+Their native test binary is still building at this commit; no executed scene
+test pass is claimed here. This is path-only source observation, without
+participating NEE or new caustic image coverage. Ref: frankensim-h7xu5.4.

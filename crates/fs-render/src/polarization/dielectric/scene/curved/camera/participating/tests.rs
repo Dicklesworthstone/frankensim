@@ -22,6 +22,7 @@ use fs_geom::{Point3, Vec3};
 
 mod thermal;
 mod spatial_thermal;
+mod microsurface;
 
 fn with_cx(f: impl FnOnce(&Cx<'_>, &CancelGate)) {
     let gate = CancelGate::new_clock_free();

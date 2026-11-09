@@ -17,6 +17,18 @@ pub struct CurvedSequentialRayleighPixelSample<P> {
 }
 
 impl<P> CurvedSequentialRayleighPixelSample<P> {
+    pub(in super::super) const fn from_transport(
+        pixel: P,
+        volume_events: [u32; CAMERA_WAVELENGTHS],
+        free_flight_draws: [u32; CAMERA_WAVELENGTHS],
+    ) -> Self {
+        Self {
+            pixel,
+            volume_events,
+            free_flight_draws,
+        }
+    }
+
     pub const fn pixel_sample(&self) -> &P {
         &self.pixel
     }

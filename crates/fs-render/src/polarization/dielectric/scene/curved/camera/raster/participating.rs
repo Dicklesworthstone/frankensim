@@ -11,6 +11,8 @@ use crate::polarization::dielectric::scene::curved::participating::CurvedRayleig
 use fs_exec::Cx;
 use fs_rand::philox::philox4x32_10;
 
+mod microsurface;
+
 /// One complete spectral pixel sample with per-wavelength native volume work.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RayleighPixelSample {

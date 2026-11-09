@@ -30,7 +30,8 @@
 
 use super::{
     CurvedPathResult, CurvedPolarizedScene, CurvedSceneError, CurvedTraceEvent, CurvedTraceSettings,
-    CurvedVolumeFlight, MAX_POLARIZED_PATH_EVENTS, PolarizedBeam, SceneError, SceneMedium,
+    CurvedTransportEvent, CurvedVolumeFlight, MAX_POLARIZED_PATH_EVENTS, PolarizedBeam, SceneError,
+    SceneMedium, SmithSurfaceSampler,
 };
 use crate::volumes::VolumeGrid;
 use crate::volumes::transport::{AbsorbingGrid, VolumeTransportError};
@@ -47,6 +48,9 @@ use fs_rand::philox::philox4x32_10;
 
 /// Scattering and finite-cell absorption along a solved native source branch.
 pub mod transmittance;
+
+/// Complete rough-metal and rough-glass transport with native physical volumes.
+pub mod microsurface;
 
 mod absorbing;
 mod environment;
@@ -454,6 +458,14 @@ pub(super) enum CurvedRayleighEvent<'a> {
         pdf: f64,
     },
 }
+
+/// Full microsurface departures deliberately carry no marginal angular PDF.
+/// Original single-scattering consumers only receive `Native` events.
+pub(super) enum CurvedRayleighTransportEvent<'a> {
+    Native(CurvedRayleighEvent<'a>),
+    MicrosurfaceDeparture(&'a CurvedPathResult),
+}
+
 impl CurvedRayleighPath {
     pub const fn path(&self) -> &CurvedPathResult {
         &self.path
@@ -905,10 +917,44 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         initial_medium: usize,
         settings: CurvedRayleighTraceSettings,
         surface_samples: impl FnMut(u32) -> [f64; 3],
+        flight_samples: impl FnMut(u32) -> [f64; 4],
+        heterogeneous_samples: bool,
+        thermal_sources: &super::SpatialSources<'_>,
+        mut observe_event: impl FnMut(CurvedRayleighEvent<'_>) -> Result<(), CurvedSceneError>,
+    ) -> Result<CurvedRayleighPath, CurvedSceneError> {
+        self.trace_with_tracking_samples_events_and_smith(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            surface_samples,
+            flight_samples,
+            heterogeneous_samples,
+            thermal_sources,
+            |event| match event {
+                CurvedRayleighTransportEvent::Native(event) => observe_event(event),
+                // No microsurface sampler is installed on this original path.
+                CurvedRayleighTransportEvent::MicrosurfaceDeparture(_) => {
+                    Err(CurvedSceneError::NumericalRange)
+                }
+            },
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn trace_with_tracking_samples_events_and_smith(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedRayleighTraceSettings,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
         mut flight_samples: impl FnMut(u32) -> [f64; 4],
         heterogeneous_samples: bool,
         thermal_sources: &super::SpatialSources<'_>,
-        observe_event: impl FnMut(CurvedRayleighEvent<'_>) -> Result<(), CurvedSceneError>,
+        observe_event: impl FnMut(CurvedRayleighTransportEvent<'_>) -> Result<(), CurvedSceneError>,
+        microsurface: Option<SmithSurfaceSampler<'_>>,
     ) -> Result<CurvedRayleighPath, CurvedSceneError> {
         cx.checkpoint()?;
         if settings.max_volume_events == 0 || settings.max_volume_events > MAX_POLARIZED_PATH_EVENTS
@@ -925,7 +971,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         // stack. One observer retains cumulative source work in actual path
         // order without allocating a vertex history or retracing the camera.
         let observe_event = RefCell::new(observe_event);
-        let (path, volume_events) = self.scene.trace_with_flights_events(
+        let (path, volume_events) = self.scene.trace_with_flights_events_and_smith(
             cx,
             beam,
             initial_medium,
@@ -933,7 +979,16 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
             surface_samples,
             self.radiance_brushing,
             thermal_sources,
-            |event| (observe_event.borrow_mut())(CurvedRayleighEvent::Surface(event)),
+            |event| {
+                (observe_event.borrow_mut())(match event {
+                    CurvedTransportEvent::Surface(event) => {
+                        CurvedRayleighTransportEvent::Native(CurvedRayleighEvent::Surface(event))
+                    }
+                    CurvedTransportEvent::MicrosurfaceDeparture(path) => {
+                        CurvedRayleighTransportEvent::MicrosurfaceDeparture(path)
+                    }
+                })
+            },
             settings.max_volume_events,
             |medium, wavelength, ray| {
                 let Some(law) = self.media.get(medium) else {
@@ -1031,24 +1086,26 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
                     acceptance_sample,
                     sampled_majorant,
                     |phase| {
-                        (observe_event.borrow_mut())(CurvedRayleighEvent::VolumeArrival {
-                            path,
-                            phase,
-                        })
+                        (observe_event.borrow_mut())(CurvedRayleighTransportEvent::Native(
+                            CurvedRayleighEvent::VolumeArrival { path, phase },
+                        ))
                     },
                     |phase, next| {
                         let mut departure = *path;
                         departure.beam = next.beam;
-                        (observe_event.borrow_mut())(CurvedRayleighEvent::VolumeDeparture {
-                            path: &departure,
-                            incoming_beam: *path.beam(),
-                            phase,
-                            pdf: next.pdf,
-                        })
+                        (observe_event.borrow_mut())(CurvedRayleighTransportEvent::Native(
+                            CurvedRayleighEvent::VolumeDeparture {
+                                path: &departure,
+                                incoming_beam: *path.beam(),
+                                phase,
+                                pdf: next.pdf,
+                            },
+                        ))
                     },
                 )
             },
             |path, ray, distance| self.transport_absorbing_segment(cx, path, ray, distance),
+            microsurface,
         )?;
         cx.checkpoint()?;
         Ok(CurvedRayleighPath {

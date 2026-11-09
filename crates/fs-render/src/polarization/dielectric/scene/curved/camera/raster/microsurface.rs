@@ -9,7 +9,14 @@ pub mod dielectric;
 /// Each wavelength and geometric surface has an independent microscopic stream.
 /// The variable walk length cannot shift the original raster, pupil, wavelength
 /// or later surface draws. The seed/path counter map is one-to-one per lane.
-fn facet_draw(seed: u64, pixel: u32, sample: u32, lane: usize, event: u32, facet: u32) -> [f64; 3] {
+pub(super) fn facet_draw(
+    seed: u64,
+    pixel: u32,
+    sample: u32,
+    lane: usize,
+    event: u32,
+    facet: u32,
+) -> [f64; 3] {
     let block = philox4x32_10(
         [pixel, sample, event, facet],
         [

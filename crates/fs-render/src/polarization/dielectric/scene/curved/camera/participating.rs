@@ -40,6 +40,10 @@ use crate::polarization::dielectric::scene::curved::participating::{
 use crate::polarization::dielectric::transport::PolarizedBeam;
 use fs_exec::Cx;
 
+/// Complete Smith metal/glass continuation through the original volume laws.
+pub mod microsurface;
+pub use microsurface::SmithDielectricRayleighCameraScene;
+
 /// One completed camera sample and the original molecular traversal counters.
 /// Rejected delta-tracking candidates consume free-flight draws but do not
 /// increment real volume events. No partially resolved sample is returned.
