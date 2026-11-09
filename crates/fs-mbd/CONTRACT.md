@@ -1479,13 +1479,65 @@ candidate, and the public fixed-pose source can be composed by a coupled owner.
 This owner admits stationary bilateral supports and a held finite body-axis
 shaft torque. Active/nonsymmetric bearings, moving supports, clearance, inferred
 speed/temperature coefficient laws, fluid-film states and a thermal destination
-require their original constitutive owners. The electrical eccentric drive
-remains a separate composition; calling only its elastic component does not
-silently add bearing damping. Five focused regressions in
+require their original constitutive owners. Electrical and passive source laws
+retain separate receipts; the explicit current-drive composition below combines
+them. Calling only the elastic component does not add damping. Five regressions in
 `tests/rigid_rotor_damping.rs` specify scalar reciprocal spin braking and analytic
 midpoint heat, full-tensor/multiple-bearing dense equations and virtual power,
 independent planar ODE and heat refinement, passive/modal refusal, zero-damping
 native equivalence and final cancellation with deterministic retry.
+
+`DampedEccentricRotor::current_spin_motor` binds the original current-driven
+eccentric owner to that same passive body, making electrical drive and bearing
+damping one admitted physical trajectory. Explicit shaft-axis actuation remains
+required. `DampedEccentricDriveControl::drive` retains the original electrical
+limits, transfer checks and middle-trajectory energy gate; its duration is the
+sole physical interval. The original damping controls retain their material,
+source-transfer and modal-resolution limits, and their total-energy allowance
+now gates the complete coupled trajectory.
+
+The composition is `D(h/2), E(h/2), elastic(h), E(h/2), D(h/2)`.
+The existing electrical owner supplies both E sources; the existing passive
+owner supplies both D sources. Every source reads actual incoming body momenta.
+Both owners borrow the same original elastic geometry and full tensor; the
+electrical effective source inertia never replaces trajectory inertia. Only
+the original elastic stage advances pose, while the source intervals integrate
+their respective physical work and heat without adding elapsed physical time.
+No extra body, duplicate force integration or new controller solve is introduced.
+
+The final passive source can increase body-z speed by transferring COM motion
+into spin even while reducing total kinetic energy. Therefore the middle
+electrical receipt cannot establish the final motor operating point. The
+composition checks actual initial and final shaft speed, terminal voltage and
+signed source power with the adjacent actually accepted first/last current.
+Both draw and regenerative-return limits remain authoritative. Endpoint failure
+returns no complete candidate or electrical debit; it does not silently
+reselect a current after its work was integrated. These original-law endpoint
+diagnostics add no extra source energy.
+
+The outer ledger recomputes original initial-to-final full-body kinetic change
+and retains original gravity/elastic storage increments. It reduces the
+original half-source winding heat, bridge heat, draw and return separately,
+adds independently measured bearing heat, and subtracts only the actual
+external shaft-work receipt. Electrical shaft work is internal exchange and
+is not counted again as an external source. No signed residual is converted
+to physical loss or a controller efficiency. The complete energy gate and
+final cancellation check precede publication.
+
+This symmetric source composition is second order for smooth fixed
+coefficients and resolved mechanics with held uncurtailed current. Active
+curtailment, controller switches and nonlinear interstage electrical peaks
+require refinement; endpoint checks are not continuous-time peak certificates.
+The underlying stationary-support, current-regulated zero-inductance and
+fixed-parameter material restrictions remain explicit. Battery storage,
+inductance, thermal feedback and moving-support work require their own owners.
+
+Four focused regressions in `tests/rigid_rotor_damped_drive.rs` cover an
+independent powered/damped planar acceleration and ODE/energy-integral
+refinement, successful source curtailment and regeneration with all three
+physical losses separate, final damping that spins up the rotor beyond an
+otherwise accepted middle drive's speed/voltage/draw/return limits, both
+zero-source reductions, and late cancellation/whole-energy refusal.
 
 Focused regressions use independent Jeffcott amplitude/phase, gyroscopic circular
 mode splitting, dense coordinate congruence, cross-coupled/active work and

@@ -17,6 +17,12 @@ use crate::{
 use fs_ga::Se3;
 use fs_math::{dd::Dd, det};
 
+mod drive;
+pub use drive::{
+    DampedEccentricCurrentMotor, DampedEccentricCurrentStep, DampedEccentricDriveControl,
+    DampedEccentricDriveError, DampedEccentricMotorEndpoint,
+};
+
 /// A finite-rotation eccentric body on original passive radial K/C bearings.
 ///
 /// The elastic component retains its original native geometry and full inertia.

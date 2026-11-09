@@ -11,8 +11,10 @@ use fs_math::dd::Dd;
 
 mod damping;
 pub use damping::{
-    DampedEccentricRotor, DampedEccentricRotorLoads, DampedEccentricRotorStep,
-    EccentricBearingDampingStep, EccentricRotorDampingControl, EccentricRotorDampingError,
+    DampedEccentricCurrentMotor, DampedEccentricCurrentStep, DampedEccentricDriveControl,
+    DampedEccentricDriveError, DampedEccentricMotorEndpoint, DampedEccentricRotor,
+    DampedEccentricRotorLoads, DampedEccentricRotorStep, EccentricBearingDampingStep,
+    EccentricRotorDampingControl, EccentricRotorDampingError,
 };
 
 /// A finite-rotation rigid rotor whose actual centre of mass may miss its shaft.

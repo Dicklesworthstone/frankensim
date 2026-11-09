@@ -41,10 +41,11 @@ pub use spin_drive::{
 };
 mod eccentric;
 pub use eccentric::{
-    DampedEccentricRotor, DampedEccentricRotorLoads, DampedEccentricRotorStep,
-    EccentricBearingDampingStep, EccentricRotorDampingControl, EccentricRotorDampingError,
-    ElasticEccentricRotor, ElasticEccentricRotorError, ElasticEccentricRotorLoads,
-    ElasticEccentricRotorStep,
+    DampedEccentricCurrentMotor, DampedEccentricCurrentStep, DampedEccentricDriveControl,
+    DampedEccentricDriveError, DampedEccentricMotorEndpoint, DampedEccentricRotor,
+    DampedEccentricRotorLoads, DampedEccentricRotorStep, EccentricBearingDampingStep,
+    EccentricRotorDampingControl, EccentricRotorDampingError, ElasticEccentricRotor,
+    ElasticEccentricRotorError, ElasticEccentricRotorLoads, ElasticEccentricRotorStep,
 };
 mod eccentric_drive;
 pub use eccentric_drive::{
