@@ -12,6 +12,9 @@ pub mod rotating;
 /// Original force, rate and inertia actions about an admitted equilibrium.
 pub mod linearized;
 
+/// Simultaneous static balance and original constant lock/gear reactions.
+pub mod constrained;
+
 use super::super::bushing::coupled::CoupledSpatialBushing;
 use super::super::bushing::{self, BushingLaw, SpatialBushing};
 use super::super::implicit::MAX_IMPLICIT_SPATIAL_EVALUATIONS;
@@ -101,6 +104,8 @@ pub enum EquilibriumError {
     Invalid(&'static str),
     /// Native geometry, load, effort, material-chart or cancellation refusal.
     Motion(PrescribedBaseMotionError),
+    /// Original affine-row admission, independence or final position refusal.
+    Constraint(crate::articulated::motion::reconfigure::constraints::ConstraintError),
     /// Residual work was exhausted, possibly during final verification.
     EvaluationBudget {
         /// Residual evaluations already consumed.
@@ -137,6 +142,13 @@ impl From<ArticulatedError> for EquilibriumError {
 impl From<FreeFloatingMotionError> for EquilibriumError {
     fn from(value: FreeFloatingMotionError) -> Self {
         Self::Motion(value.into())
+    }
+}
+impl From<crate::articulated::motion::reconfigure::constraints::ConstraintError>
+    for EquilibriumError
+{
+    fn from(value: crate::articulated::motion::reconfigure::constraints::ConstraintError) -> Self {
+        Self::Constraint(value)
     }
 }
 
@@ -245,7 +257,6 @@ struct Evaluation {
     energy: f64,
 }
 
-
 // Shared physical residual for equilibrium and local response. Perturbed rates
 // never become accelerations; RNEA retains actual gyro and material damping.
 fn evaluate_native<B: BushingLaw>(
@@ -258,7 +269,10 @@ fn evaluate_native<B: BushingLaw>(
 ) -> Result<Evaluation, EquilibriumError> {
     poll(cancelled)?;
     let kinematics = forward_kinematics(
-        model, state.base, &state.joint_position, &state.joint_velocity,
+        model,
+        state.base,
+        &state.joint_position,
+        &state.joint_velocity,
     )?;
     poll(cancelled)?;
     let stage = evaluate_shared(model, &state, &kinematics, loads, bushings, cancelled)?;
@@ -277,34 +291,46 @@ fn evaluate_native<B: BushingLaw>(
         &zero_acceleration
     };
     let inverse = inverse_dynamics(
-        model, state.base, &state.joint_position, &state.joint_velocity,
-        acceleration, loads.held.gravity_world, &stage.body_wrench,
+        model,
+        state.base,
+        &state.joint_position,
+        &state.joint_velocity,
+        acceleration,
+        loads.held.gravity_world,
+        &stage.body_wrench,
     )?;
     poll(cancelled)?;
-    let physical_residual: Vec<_> = inverse.generalized_force.iter().zip(&applied)
-        .map(|(a, b)| a - b).collect();
+    let physical_residual: Vec<_> = inverse
+        .generalized_force
+        .iter()
+        .zip(&applied)
+        .map(|(a, b)| a - b)
+        .collect();
     if physical_residual.iter().any(|v| !v.is_finite()) {
         return Err(EquilibriumError::Invalid("unrepresentable force balance"));
     }
     Ok(Evaluation {
-        state, required: inverse.generalized_force, applied, physical_residual,
-        scaled_residual: Vec::new(), root_wrench: inverse.body_wrench[0],
+        state,
+        required: inverse.generalized_force,
+        applied,
+        physical_residual,
+        scaled_residual: Vec::new(),
+        root_wrench: inverse.body_wrench[0],
         energy: stage.stored_energy,
     })
 }
 
 #[allow(clippy::too_many_arguments)]
-fn solve<B: BushingLaw>(
+fn admit_inputs<B: BushingLaw>(
     model: &ArticulatedModel,
     seed: &PrescribedBaseMotionState,
     loads: SpatialMotionLoads<'_>,
     bushings: &[B],
     config: EquilibriumConfig<'_>,
-    effort: Option<&mut EffortLaw<'_>>,
     frame: FrameMode,
-    mut cancelled: impl FnMut() -> bool,
-) -> Result<ArticulatedEquilibrium, EquilibriumError> {
-    poll(&mut cancelled)?;
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), EquilibriumError> {
+    poll(cancelled)?;
     let n = model.dof_count();
     if !seed.time_s.is_finite()
         || match frame {
@@ -361,10 +387,25 @@ fn solve<B: BushingLaw>(
         loads.held.external_body_wrench,
     )?;
     validate_external_wrenches(loads.held.external_body_wrench)?;
-    bushing::admit(model, loads, bushings, &mut cancelled)?;
+    bushing::admit(model, loads, bushings, cancelled)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn solve<B: BushingLaw>(
+    model: &ArticulatedModel,
+    seed: &PrescribedBaseMotionState,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[B],
+    config: EquilibriumConfig<'_>,
+    effort: Option<&mut EffortLaw<'_>>,
+    frame: FrameMode,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<ArticulatedEquilibrium, EquilibriumError> {
+    admit_inputs(model, seed, loads, bushings, config, frame, &mut cancelled)?;
+    let n = model.dof_count();
     // Solve increments about the original seed. A zero increment preserves the
     // supplied coordinates exactly, even with nonbinary physical scales.
-    let guess = vec![0.0; n];
     let evaluations = Cell::new(0usize);
     let cancel = RefCell::new(cancelled);
     let effort = RefCell::new(effort);
@@ -394,65 +435,30 @@ fn solve<B: BushingLaw>(
             joint_velocity: vec![0.0; n],
         };
         let mut evaluated = evaluate_native(
-            model, state, loads, bushings, effort.borrow_mut().as_deref_mut(), &mut *cancel,
+            model,
+            state,
+            loads,
+            bushings,
+            effort.borrow_mut().as_deref_mut(),
+            &mut *cancel,
         )?;
-        evaluated.scaled_residual = evaluated.physical_residual.iter()
-            .zip(config.effort_scales).map(|(a, b)| a / b).collect();
+        evaluated.scaled_residual = evaluated
+            .physical_residual
+            .iter()
+            .zip(config.effort_scales)
+            .map(|(a, b)| a / b)
+            .collect();
         if evaluated.scaled_residual.iter().any(|v| !v.is_finite()) {
             return Err(EquilibriumError::Invalid("unrepresentable force balance"));
         }
         Ok(evaluated)
     };
-    let (solution, mut report) = if n == 0 {
-        evaluate(&guess)?;
-        (
-            guess,
-            NewtonReport {
-                iterations: 0,
-                residual_norm: 0.0,
-                converged: true,
-                history: Vec::new(),
-                diagnosis: None,
-            },
-        )
-    } else {
-        let problem = FallibleFiniteDifference::new(n, config.difference_step, |x: &[f64]| {
-            evaluate(x).map(|value| value.scaled_residual)
-        })
-        .map_err(difference_error)?;
-        let construction = NewtonKrylovState::new(
-            &problem,
-            guess,
-            NewtonKrylovConfig {
-                absolute_tolerance: config.residual_tolerance,
-                relative_tolerance: 0.0,
-                linear_restart: config.krylov_restart.min(n),
-                max_linear_cycles: 8,
-                forcing_minimum: 1.0e-3,
-                forcing_maximum: 0.1,
-                ..NewtonKrylovConfig::default()
-            },
-        );
-        if let Some(error) = problem.take_failure() {
-            return Err(difference_error(error));
-        }
-        let mut solver = construction.map_err(EquilibriumError::Solver)?;
-        let result = solver.run_controlled(&problem, config.maximum_iterations, &mut || {
-            problem.has_failed() || (*cancel.borrow_mut())()
-        });
-        if let Some(error) = problem.take_failure() {
-            return Err(difference_error(error));
-        }
-        match result.progress {
-            SolverRunProgress::Complete => {}
-            SolverRunProgress::Paused => return Err(PrescribedBaseMotionError::Cancelled.into()),
-            other => return Err(EquilibriumError::SolverProgress(other)),
-        }
-        if !result.report.converged {
-            return Err(EquilibriumError::Unresolved(result.report));
-        }
-        (solver.x, result.report)
-    };
+    let (solution, mut report) = solve_scaled(
+        n,
+        config,
+        |x| evaluate(x).map(|value| value.scaled_residual),
+        || (*cancel.borrow_mut())(),
+    )?;
     let final_state = evaluate(&solution)?;
     let residual_norm = fs_solver::norm2(&final_state.scaled_residual);
     report.residual_norm = residual_norm;
@@ -475,6 +481,65 @@ fn solve<B: BushingLaw>(
         nonlinear: report,
         residual_evaluations: evaluations.get(),
     })
+}
+
+// A single original Newton--Krylov dispatch for free and affine-constrained
+// equilibrium. Domain owners supply scaled native equations and retain their
+// budgets, source errors and independent final physical admission.
+fn solve_scaled(
+    n: usize,
+    config: EquilibriumConfig<'_>,
+    evaluate: impl Fn(&[f64]) -> Result<Vec<f64>, EquilibriumError>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<(Vec<f64>, NewtonReport), EquilibriumError> {
+    let guess = vec![0.0; n];
+    if n == 0 {
+        evaluate(&guess)?;
+        return Ok((
+            guess,
+            NewtonReport {
+                iterations: 0,
+                residual_norm: 0.0,
+                converged: true,
+                history: Vec::new(),
+                diagnosis: None,
+            },
+        ));
+    }
+    let problem = FallibleFiniteDifference::new(n, config.difference_step, evaluate)
+        .map_err(difference_error)?;
+    let construction = NewtonKrylovState::new(
+        &problem,
+        guess,
+        NewtonKrylovConfig {
+            absolute_tolerance: config.residual_tolerance,
+            relative_tolerance: 0.0,
+            linear_restart: config.krylov_restart.min(n),
+            max_linear_cycles: 8,
+            forcing_minimum: 1.0e-3,
+            forcing_maximum: 0.1,
+            ..NewtonKrylovConfig::default()
+        },
+    );
+    if let Some(error) = problem.take_failure() {
+        return Err(difference_error(error));
+    }
+    let mut solver = construction.map_err(EquilibriumError::Solver)?;
+    let result = solver.run_controlled(&problem, config.maximum_iterations, &mut || {
+        problem.has_failed() || cancelled()
+    });
+    if let Some(error) = problem.take_failure() {
+        return Err(difference_error(error));
+    }
+    match result.progress {
+        SolverRunProgress::Complete => {}
+        SolverRunProgress::Paused => return Err(PrescribedBaseMotionError::Cancelled.into()),
+        other => return Err(EquilibriumError::SolverProgress(other)),
+    }
+    if !result.report.converged {
+        return Err(EquilibriumError::Unresolved(result.report));
+    }
+    Ok((solver.x, result.report))
 }
 
 fn difference_error(error: FiniteDifferenceError<EquilibriumError>) -> EquilibriumError {
