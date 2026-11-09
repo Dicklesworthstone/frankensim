@@ -14999,3 +14999,34 @@ cover independent series/Fourier/radiation and per-cell/total energy laws,
 constant-response reduction, late source failure, budget/cancellation and retry.
 Pinned Rust parsing and scoped diff checks passed; Cargo compilation and these
 runtime regressions were not executed in this implementation session.
+
+### Physical heat and wave-flux resonance queries
+
+`fs-couple::phs_power_resonance::PhsPowerQuery` binds an original `HarmonicModel`
+or a fully feedback-closed `ScatteringModel` to the shared `fs-modal` signed-power
+query owner. It resolves actual extrema, half-power crossings, linewidth and
+observed Q, including their local physical-parameter derivatives and bounded
+grid surveys. Channels are independently evaluated original R/T dissipation,
+aggregate conjugate source work, individual original-port work and selected
+incident/outgoing wave flux. Boundary reference loading never becomes internal
+material heat. Equilibrium linearizations retain signed incremental-work
+semantics. Negative work is not made positive or squared to manufacture peaks.
+
+The source law lends reusable buffers with complete frequency and parameter
+jets in original input order. Selected wave slots carry incident output waves;
+ordinary slots remain conjugate inputs. Original J/R/Q/G/T and positive-reference
+directions enter the native physical equations. References are constant in
+frequency; physical dispersion remains in retained states. The first-order and
+full wave observations share the same normalized paired-frequency contraction,
+so near-stationary slopes reproduce the same original sample.
+
+Every frequency uses one original factorization. Refinement requests two state
+solves; only final extrema/edges request three-order curvature or five-order
+parameter responses. Native memory, work and residual admission remains active,
+and shared query controls bound all callbacks and extrema. The actual P_peak/2
+crossings define a positive power peak's linewidth, without a Lorentzian fit.
+Q is peak frequency divided by measured width, not a free-pole decay rate.
+Sources, models and channels must agree across peak and bandwidth queries.
+Grid resolution, local feature isolation and constitutive validity remain
+caller obligations. Cancellation, missing/flat crossings, inconsistent samples
+and source/physical refusals publish no partial query result.

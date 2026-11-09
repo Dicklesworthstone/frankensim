@@ -222,14 +222,11 @@ pub(in crate::harmonic::scattering) fn wave_power(
     dz: f64,
 ) -> Result<ScatteringPowerJet, HarmonicError> {
     let mut value = Sum::default();
-    let mut frequency = Sum::default();
+    let frequency = wave_frequency_sum(a.value, a.frequency, z)?;
     let mut second = Sum::default();
     let mut parameter = Sum::default();
     let mut mixed = Sum::default();
     add_pair(&mut value, a.value, a.value, z)?;
-    for (left, right) in [(a.value, a.frequency), (a.frequency, a.value)] {
-        add_pair(&mut frequency, left, right, z)?;
-    }
     for (left, right) in [
         (a.second_frequency, a.value),
         (a.frequency, a.frequency),
@@ -267,6 +264,25 @@ fn add_pair(total: &mut Sum, left: C64, right: C64, z: f64) -> Result<(), Harmon
         .half_product(left.re / z, right.re)
         .and_then(|()| total.half_product(left.im / z, right.im))
         .ok_or_else(|| invalid("wave power jet is not representable"))
+}
+
+/// One frequency contraction shared by first-order and complete response jets.
+/// Both conjugate terms retain the same normalized summation near a stationary
+/// wave power; multiplying a separately rounded half-product by two would not
+/// reproduce that small signed slope.
+pub(in crate::harmonic::scattering) fn wave_power_frequency(
+    amplitude: C64,
+    derivative: C64,
+    reference: f64,
+) -> Result<f64, HarmonicError> {
+    power_value(wave_frequency_sum(amplitude, derivative, reference)?)
+}
+
+fn wave_frequency_sum(amplitude: C64, derivative: C64, reference: f64) -> Result<Sum, HarmonicError> {
+    let mut sum = Sum::default();
+    add_pair(&mut sum, amplitude, derivative, reference)?;
+    add_pair(&mut sum, derivative, amplitude, reference)?;
+    Ok(sum)
 }
 
 fn power_value(sum: Sum) -> Result<f64, HarmonicError> {
