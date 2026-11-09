@@ -41,6 +41,9 @@ use crate::{Accumulator, FissionError, nonnegative};
 
 mod continuum;
 
+/// Evaluated neutron spectra bound to the original spatial neutron owner.
+pub mod neutrons;
+
 /// Explicit allocation and work bounds for preparation and source evaluation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DecayEmissionLimits {

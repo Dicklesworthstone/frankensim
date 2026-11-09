@@ -3260,3 +3260,26 @@ The original diffusion approximation and frozen-coefficient assumptions apply.
 The kinetic energy layer retains its existing exclusion of fission and abstract
 delayed-precursor energy models. Parent-wide expected spectra do not infer
 sampled branch/energy correlations, angular transport or nuclear-data uncertainty.
+
+## Evaluated radioactive neutron emission
+
+`PreparedDecayEmission::bind_neutron_group_means` binds original evaluated
+neutron spectra to an explicit `NeutronKineticModel`, retaining both original
+Arcs, projection identity, original-order yields and signed per-parent
+count/energy residuals. Each source-bin mean projects onto neighboring authored
+representative energies; parent-wide branching is not applied again. Both
+moments must close within the fixed floating-point allowance, and emitted
+kinetic energy must fit the original heavy-particle outward-radiation allocation.
+Gamma radiation, deposited heat and escaped energy cannot fund neutron creation.
+
+Missing unstable spectra require explicit nonemitting indices and cannot
+contradict supplied positive neutron-emitting modes. Source storage/work limits
+and cooperative cancellation apply; extrapolated means, incompatible species
+and unrepresentable coefficients refuse. Bin-mean condensation does not resolve
+within-bin reaction thresholds, angular transport or evaluated-data uncertainty.
+
+Five manufactured G0/G1/G4 regressions cover parsed parent-wide delayed-neutron
+emission with analytic birth/absorption history, continuum count/energy
+condensation, explicit missing-spectrum declarations, incompatible species and
+energy funding, bounded storage and late cancellation. These establish format
+and coupling behavior, not evaluated-isotope accuracy.
