@@ -21,6 +21,8 @@
 
 use super::*;
 
+/// Time-error control of composition, temperature and individual interface energies.
+pub mod adaptive;
 mod solve;
 
 /// Accepted local temperatures and inventories with energetic interfaces.

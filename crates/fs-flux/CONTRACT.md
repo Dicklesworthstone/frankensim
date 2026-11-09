@@ -8737,6 +8737,33 @@ The complete focused numerical suite passed 83 unit tests on the pinned Rust
 compiler using original sources. This excludes the material adapter and full
 workspace/DSR validation.
 
+### Adaptive local thermal phase separation
+
+`phase_field::adaptive` resolves the complete composition/interface/Fourier
+sweep with whole-step versus two-half-step control. It reuses the original
+compensated composition and Kelvin estimator and adds an independent
+interfacial-energy allowance. That norm sums absolute differences of INDIVIDUAL
+edge energies, with one whole-graph absolute allowance and a relative scale
+formed from the larger energy on each edge. Equal total interface energy cannot
+hide errors that moved between edges.
+
+Only the accepted two-half-step path contributes species and total local-energy
+transfers. All completed coarse and rejected sweeps contribute reported solver
+work. The original interval, local states and material bindings stay unchanged
+on exhaustion, source refusal, unresolvable minimum step or cancellation. The
+clock follows actual trial endpoints, including continued runs and final
+remainders shorter than the nominal minimum step. Complete-window species,
+capacity, homogeneous-plus-interface energy and entropy budgets apply again
+before a candidate is returned.
+
+Six additional regressions cover interface-driven refinement, spatial error
+cancellation, the independent Fourier relaxation mode, accepted-only local
+energy/species receipts, work/minimum-step/cancellation refusal and exact
+continuation. All 89 numerical miscibility unit tests passed in the original-source
+focused workspace. This first-order controller estimates local temporal error;
+spatial consistency still depends on the original authored graph geometry and
+resolution, and no global trajectory error bound is supplied.
+
 ### Compatible molecular stress with variable viscosity
 
 Frozen-composition planar and spatial molecular owners sample the original
