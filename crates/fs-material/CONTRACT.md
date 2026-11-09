@@ -24805,3 +24805,35 @@ banks, an analytic zero-mode heat case, incompatible histories and unresolved
 rank refusals. The downstream original laminate regression now exercises the
 admitted directional law. These sources passed pinned Rust parsing; the new
 numerical fixtures have not yet been executed in a native build.
+
+## Conserved original gas inventory for mixed cavitation
+
+`cavitation::vapor::gas::ConservedBubbleGas` retains the exact mass,
+composition, original NASA-9 calorics, transport sources and typed auxiliary
+conditions of a `ClosedGasParcel`. Its enclosing bubble supplies the current
+temperature and volume; this material view has no independently accepted gas
+clock or mutable second inventory. Preparation admits the existing continuous
+caloric branch. Successful trial samples evaluate original Cp/Cv and the
+fixed-mass ideal EOS without allocation or caloric inversion.
+
+The original `m_g integral Cv dT` supplies finite energy changes without
+subtracting formation energies. Full endpoint qualification resolves the
+original material at the dry component's actual partial pressure, retaining
+the original auxiliary query conditions and checking fixed-density coherence.
+It never reconstructs the conserved mass from rounded endpoint pressure.
+Explicitly declared water-bearing gas is refused; gas-phase stability and
+negligible dissolution of the retained species remain consumer conditions.
+
+The returned conductivity/acoustics of a qualified dry component are not
+properties of a water-vapor mixture. A mixed cavitation consumer must
+separately admit total inertia, partial versus total pressure, interfacial
+species momentum, thermal equilibration and species diffusion using physical
+wet-mixture data or explicitly authored bounds over its declared domain.
+
+Four new test groups exercise nonlinear original capacities and EOS,
+analytical caloric increments and formation-reference invariance, complete
+source/auxiliary-coordinate retention, and source-domain/water/transport
+refusals. Source and API review was completed against the current original
+owners. The executor became unavailable before this new component could be
+compiled, formatted or tested; no new runtime result or full-workspace pass
+is asserted for this checkpoint.

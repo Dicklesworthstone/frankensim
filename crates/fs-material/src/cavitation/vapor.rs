@@ -27,6 +27,8 @@ use fs_thermochem::water::if97::{If97SaturationPair, saturation_pressure_derivat
 
 /// Matched liquid enthalpy and transport for resolved cavitation heat fields.
 pub mod liquid;
+/// Conserved original-source noncondensable gas for thermal cavities.
+pub mod gas;
 
 /// One immutable original saturation pair and its allocation-free first jet.
 #[derive(Clone, Copy, Debug, PartialEq)]
