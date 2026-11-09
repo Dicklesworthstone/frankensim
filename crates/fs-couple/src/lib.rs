@@ -242,6 +242,8 @@ pub mod render;
 pub mod rocket_blowdown;
 /// Typed scenario potentials and normal currents on native material fields.
 pub mod scenario_electric;
+/// Canonical magnetic histories on the original material field owners.
+pub mod scenario_magnetic;
 /// Typed SI pressure histories on the original open-boundary owners.
 pub mod scenario_pressure;
 /// Atomic mixed velocity-inlet and pressure-outlet control updates.

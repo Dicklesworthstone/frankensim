@@ -1,3 +1,20 @@
+## Canonical magnetic scenario boundaries
+
+`scenario_magnetic::magnetic_flux_boundary_at` and `solve_magnetic_flux3`
+bind typed normal-flux histories to the original `SpatialMagnetostatics`
+exterior faces. Inputs are uniform B.n densities in tesla with odd reflection
+parity and an explicit inward/outward sign convention. Sampling preserves
+physical-time frame validation, source policy and canonical quantity metadata.
+The native owner retains actual face integration, per-component flux balance,
+deterministic gauges, material sources, residual gates and stored energy.
+
+Unsupported metadata, overlapping/interior faces, invalid time, incompatible
+net flux and cancellation publish no partial field. These are fixed-geometry,
+current-free static snapshots; histories alone do not imply induction, heat,
+moving media or an infinite-domain certificate. The G1/G3/G4 regressions in
+`tests/scenario_magnetic.rs` exercise IR round trips, analytical B/H and energy,
+normal-sign reversal, native compatibility refusal and cancellation.
+
 ## Time-resolved Hertz friction and finite-cell cooling
 
 `friction_heat::hertz::march` composes the original exact or curved native,

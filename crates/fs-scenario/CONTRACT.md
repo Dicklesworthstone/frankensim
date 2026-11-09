@@ -10,6 +10,17 @@ Ambition tags: typed BCs/frames/signals/combos [S]; seeded ensembles
 (Dryden, Kanai–Tajimi, Carreau bands) [S]; canonical IR [S]; persistent entity
 identity with rebinding receipts [S].
 
+## Oriented scalar execution
+
+`ScalarPayload::oriented_scalar_at` shares the existing scalar history and
+frame evaluator while retaining reflection parity in `ScalarSample`. Proper
+rigid frames leave ordinary scalars and pseudoscalars numerically unchanged;
+the consuming physical adapter must still admit the required parity and
+normal convention. Reflected frames are not introduced. `scalar_at` remains
+even-only, so electric and thermal consumers do not silently accept oriented
+magnetic flux. Both paths retain the original quantity, source, reference,
+basis, physical-time frame and cancellation requirements.
+
 ## Purpose and layer
 
 Layer **L3** (FLUX support). Runtime deps: `std`, fs-blake3, fs-qty,

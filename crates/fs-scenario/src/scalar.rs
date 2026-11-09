@@ -11,6 +11,8 @@ pub use crate::sample::PayloadEvaluationError as ScalarEvaluationError;
 pub struct ScalarSample {
     pub value: f64,
     pub contract: QuantityContract,
+    /// Reflection parity remains explicit even though frames use proper rotations.
+    pub orientation: OrientationParity,
 }
 
 impl ScalarPayload {
@@ -31,6 +33,31 @@ impl ScalarPayload {
         time_s: f64,
         checkpoint: &mut impl FnMut() -> ControlFlow<()>,
     ) -> Result<ScalarSample, ScalarEvaluationError> {
+        if checkpoint().is_break() {
+            return Err(ScalarEvaluationError::Cancelled);
+        }
+        if self.meta().orientation() != OrientationParity::Even {
+            return Err(ScalarEvaluationError::Unsupported(
+                "ordinary scalar evaluation requires even parity",
+            ));
+        }
+        self.oriented_scalar_at(frames, time_s, checkpoint)
+    }
+
+    /// Sample a scalar or pseudoscalar without erasing its reflection parity.
+    ///
+    /// Proper rigid frame transformations leave both values unchanged. The
+    /// returned parity distinguishes ordinary scalars from oriented quantities
+    /// such as axial magnetic flux density dotted with a polar outward normal.
+    /// This does not admit reflected frames or infer a boundary-normal sign.
+    /// Source, basis, frame, reference and cancellation policies are shared
+    /// with [`Self::scalar_at`]; consumers must check the required parity.
+    pub fn oriented_scalar_at(
+        &self,
+        frames: &FrameTree,
+        time_s: f64,
+        checkpoint: &mut impl FnMut() -> ControlFlow<()>,
+    ) -> Result<ScalarSample, ScalarEvaluationError> {
         use ScalarEvaluationError as E;
         let poll = |check: &mut dyn FnMut() -> ControlFlow<()>| {
             if check().is_break() {
@@ -42,11 +69,6 @@ impl ScalarPayload {
         poll(checkpoint)?;
         if !time_s.is_finite() {
             return Err(E::InvalidTime);
-        }
-        if self.meta().orientation() != OrientationParity::Even {
-            return Err(E::Unsupported(
-                "ordinary scalar evaluation requires even parity",
-            ));
         }
         if !matches!(self.meta().reference(), ReferenceSemantics::Continuous) {
             return Err(E::Unsupported(
@@ -76,6 +98,7 @@ impl ScalarPayload {
         Ok(ScalarSample {
             value,
             contract: self.meta().contract(),
+            orientation: self.meta().orientation(),
         })
     }
 }

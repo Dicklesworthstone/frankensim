@@ -183,3 +183,54 @@ fn scalar_frames_do_not_add_voltage_but_missing_frames_and_unowned_semantics_ref
         Err(ScalarEvaluationError::InvalidTime)
     );
 }
+
+#[test]
+fn oriented_scalar_preserves_parity_without_weakening_ordinary_scalar_admission() {
+    let dims = Dims([0, 1, -2, 0, -1, 0]);
+    let mut frames = FrameTree::new();
+    frames.add(Frame {
+        id: FrameId(1),
+        name: "proper-rotation".into(),
+        parent: WORLD,
+        motion: FrameMotion::Fixed {
+            orientation: Quat::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), 1.0),
+            translation: Vec3::new(10.0, 20.0, 30.0),
+        },
+    });
+    let payload = ScalarPayload::new(
+        PayloadMeta::new(
+            QuantityContract::Dimensions(dims),
+            PayloadId::new("basis/scalar").unwrap(),
+            FrameId(1),
+            OrientationParity::Odd,
+            ReferenceSemantics::Continuous,
+        )
+        .unwrap(),
+        SampleSource::table(
+            [0.0, 1.0].map(|v| QtyAny::new(v, TIME)).to_vec(),
+            [-2.0, 4.0].map(|v| QtyAny::new(v, dims)).to_vec(),
+            TableInterpolation::Linear,
+            OutsideDomainPolicy::Refuse,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let sampled = payload
+        .oriented_scalar_at(&frames, 0.5, &mut || ControlFlow::Continue(()))
+        .unwrap();
+    assert_eq!(sampled.value, 1.0);
+    assert_eq!(sampled.contract, QuantityContract::Dimensions(dims));
+    assert_eq!(sampled.orientation, OrientationParity::Odd);
+    assert!(matches!(
+        payload.scalar_at(&frames, 0.5, &mut || ControlFlow::Continue(())),
+        Err(ScalarEvaluationError::Unsupported(_))
+    ));
+    assert!(matches!(
+        payload.oriented_scalar_at(&FrameTree::new(), 0.5, &mut || ControlFlow::Continue(())),
+        Err(ScalarEvaluationError::Frame(_))
+    ));
+    assert_eq!(
+        payload.oriented_scalar_at(&frames, 0.5, &mut || ControlFlow::Break(())),
+        Err(ScalarEvaluationError::Cancelled)
+    );
+}
