@@ -1,9 +1,12 @@
-//! Original Kelvin/Maxwell plane stress with a positive transverse viscosity.
+//! Original Kelvin/Maxwell plane stress with resolved transverse viscosity.
 //!
 //! Write epsilon=P*u+S*v, with P the relaxed equilibrium lift and S the three
 //! transverse selectors. In energy coordinates z=[G_F*v;q], the constraint is
-//! z'=-A*z+H*u', A=C*D_FF^-1*C^T+diag(0,1/tau)=F^T*F. Native QR/SVD retains
-//! every original Maxwell coordinate. Total physical heat is z^T*A*z plus the
+//! z'=-A*z+H*u', A=C*D_FF^-1*C^T+diag(0,1/tau)=F^T*F in the definite case.
+//! For singular transverse viscosity, original null traction constrains z;
+//! native QR restricts the positive factor to that admissible subspace. Native
+//! QR/SVD retains every original Maxwell coordinate. Total physical heat is
+//! the restricted positive quadratic form plus the
 //! positive residual Kelvin Gram applied to u'. The original tensor reaction
 //! supplies independent work; no Kelvin/Maxwell heat partition is inferred.
 
@@ -22,6 +25,7 @@ use std::sync::Arc;
 
 mod prepare;
 mod harmonic;
+mod semidefinite;
 pub use harmonic::TensorKelvinPlaneStressHarmonicWindow;
 type Result<T> = core::result::Result<T, TensorPronyError>;
 const LINES: usize = MAX_HARMONIC_MATERIAL_LINES;
@@ -52,9 +56,11 @@ pub struct TensorKelvinPlaneStressHarmonicPoint {
 }
 
 /// Causal plane stress of the unchanged full anisotropic Kelvin/Maxwell law.
-/// The original viscosity may be semidefinite; its transverse 3x3 block must
-/// be numerically resolved and positive definite. Singular transverse DAEs
-/// refuse. Source parameters and temperature are fixed, with no fitted branch
+/// The original viscosity may be semidefinite. Besides a resolved SPD transverse
+/// block, original independent projected Gram columns admit transverse ranks
+/// zero, one and two. Algebraic strain constraints retain every original branch;
+/// unresolved/redundant projected ranks refuse rather than receive a loss floor.
+/// Source parameters and temperature are fixed, with no fitted branch
 /// reduction, initial strain jump or replacement of original history memory.
 pub struct PreparedTensorKelvinPlaneStress {
     model: Arc<TensorProny>,
@@ -62,7 +68,8 @@ pub struct PreparedTensorKelvinPlaneStress {
     inside: [usize;3],
     outside: [usize;3],
     equilibrium: Root3,
-    viscosity: Root3,
+    viscosity: Option<Root3>,
+    constraint: Option<semidefinite::ConstrainedPlaneStress>,
     map: [Voigt;3],
     direct_gram: [[f64;6];6],
     direct_work: [[f64;6];6],
@@ -126,5 +133,9 @@ fn l1(value:[Dd;2])->f64 {value.iter().map(|v|v.hi.abs()+v.lo.abs()).sum()}
 
 impl PreparedTensorKelvinPlaneStress {
     pub const fn plane(&self)->MaterialPlane {self.plane}
-    pub fn state_coordinates(&self)->usize {self.rates.len()}
+    /// Complete original equilibrium and Maxwell coordinates, including those
+    /// participating in algebraic constraints; no branch coordinate is removed.
+    pub fn state_coordinates(&self)->usize {3+6*self.model.branches().len()}
+    /// Original resolved rank of the transverse Kelvin viscosity block.
+    pub fn transverse_viscosity_rank(&self)->usize {self.constraint.as_ref().map_or(3,|c|c.rank)}
 }

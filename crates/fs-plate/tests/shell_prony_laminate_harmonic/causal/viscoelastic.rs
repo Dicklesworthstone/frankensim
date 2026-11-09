@@ -116,7 +116,7 @@ fn kelvin_and_maxwell_layers_reconstruct_physical_stress_and_retain_heat_on_hold
 }
 
 #[test]
-fn kelvin_controller_capacity_and_unresolved_transverse_viscosity_refuse() {
+fn kelvin_controller_capacity_refuses_but_original_directional_viscosity_evolves() {
     with_cx(|cx| {
         let shell = source(mixed_section(viscous_elastic()), CstDktMass::Consistent, cx).unwrap();
         let too_small = TensorKelvinStressControlBudget {
@@ -128,8 +128,28 @@ fn kelvin_controller_capacity_and_unresolved_transverse_viscosity_refuse() {
         d[0][0] = 0.1;
         let singular = prony().with_kelvin_viscosity_mandel(d).unwrap();
         let shell = source(mixed_section(singular), CstDktMass::Consistent, cx).unwrap();
-        assert!(shell.prepare_viscoelastic_material_causal_observer(
+        // The original in-plane dashpot has exactly zero transverse viscosity.
+        // Its elastic traction closure and every Maxwell memory remain physical.
+        let observer = shell.prepare_viscoelastic_material_causal_observer(
             causal_budget(), TensorKelvinStressControlBudget::default(), cx,
-        ).is_err());
+        ).unwrap();
+        let initial = observer.start_relaxed(Dd::ZERO, cx).unwrap();
+        let q = motion();
+        let banks = q.each_ref().map(|q| q.as_slice());
+        let step = observer.advance_window(
+            &initial, &FREQUENCIES, &banks, &[0.0; 6], 0.2, cx,
+        ).unwrap();
+        assert!(step.field.material_heat_j > 0.0);
+        assert!(step.field.points.iter().any(|point| {
+            point.layer == 0 && point.material.material_heat_j_m3 > 0.0
+        }));
+        for point in &step.field.points {
+            for i in [2, 4, 5] { assert_eq!(point.end_stress[i], 0.0); }
+        }
+        let scale = step.field.stress_work_j.abs()
+            + step.field.stored_energy_change_j.abs() + step.field.material_heat_j;
+        assert!(step.field.energy_balance_residual_j.abs() <= 3e-10 * scale);
+        assert_eq!(initial.time_s_dd(), Dd::ZERO);
+        assert_eq!(initial.dissipated_energy_j(), 0.0);
     });
 }

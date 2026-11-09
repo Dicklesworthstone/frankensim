@@ -24362,7 +24362,9 @@ reuses the original causal decay moments. No material branch is fitted,
 discarded or replaced by a settled-state initialization.
 
 The full original Kelvin tensor may be positive semidefinite. Its transverse
-block must be numerically resolved positive definite; singular transverse DAEs
+block may be resolved positive definite, or have rank zero, one or two when the
+nonzero transverse projections of the original viscosity Gram columns are
+independent and numerically resolved. Redundant or unresolved projected factors
 retain an explicit refusal. Material coefficients and temperature are fixed.
 The existing no-Kelvin mixed controller and full-stress Kelvin/DAE owner retain
 their domains and APIs.
@@ -24728,3 +24730,36 @@ The supported-heating regression fixtures cover tiny backing work and intrinsic
 absorption below reflected-power roundoff, native enthalpy retention when the
 reported temperature rounds unchanged, receiver and source-identity refusal,
 zero-thickness support, and compatibility of the original two-fluid API.
+
+
+### Original singular-transverse Kelvin plane-stress constraints
+
+The original `PreparedTensorKelvinPlaneStress` now admits directional Kelvin
+viscosity without adding a transverse dashpot floor. Positive QR resolves the
+original null-traction constraints; a restricted positive factor evolves the
+remaining elastic coordinates and every original Maxwell memory. Exactly zero
+transverse Gram projections remain direct in-plane viscosity. Nonzero projected
+columns must be independent and resolved; arbitrary redundant PSD factorizations
+are not admitted by this extension. The full-rank path retains its original
+preparation and evolution arithmetic.
+
+`transverse_viscosity_rank()` reports the admitted rank. Public
+`state_coordinates()` and the existing resource ceiling retain the conservative
+original coordinate count, while dynamic modal loops use only the constrained
+coordinates. Pure in-plane Kelvin loss with no Maxwell branches has no dynamic
+modes: original elastic traction closure and direct positive heat still apply.
+No original Maxwell coordinate is removed or refitted.
+
+An accepted original history must already satisfy the null-traction constraint;
+preparation does not project or jump its initial strain or memory. The endpoint
+null strain rate follows the differentiated original spring constraint. Combined
+Kelvin/Maxwell heat, reaction work and spring storage remain independently
+accounted, with the original source, strain, frequency, cancellation and atomic
+candidate gates. A separate heat-channel partition is not inferred.
+
+Four focused material tests specify independent original DAE trajectories in all
+four ordered planes, ranks zero through two, retained memory and changed/held
+banks, an analytic zero-mode heat case, incompatible histories and unresolved
+rank refusals. The downstream original laminate regression now exercises the
+admitted directional law. These sources passed pinned Rust parsing; the new
+numerical fixtures have not yet been executed in a native build.

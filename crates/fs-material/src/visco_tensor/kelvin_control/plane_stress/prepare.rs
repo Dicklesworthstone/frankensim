@@ -5,7 +5,8 @@ use fs_math::det;
 
 impl PreparedTensorKelvinPlaneStress {
     /// Bind an original accepted history without advancing it. The transverse
-    /// viscosity block must be SPD; a full semidefinite Kelvin tensor is allowed.
+    /// viscosity block may be SPD or have a structurally resolved original
+    /// Gram rank below three. Redundant projected columns refuse.
     /// Original dense factor budgets and cooperative cancellation apply.
     pub fn new(history:&TensorPronyHistory,plane:MaterialPlane,
         budget:TensorKelvinStressControlBudget,mut cancelled:impl FnMut()->bool)->Result<Self>
@@ -24,6 +25,10 @@ impl PreparedTensorKelvinPlaneStress {
             MaterialPlane::Axes13=>([0,2,5],[1,3,4]),MaterialPlane::Axes23=>([1,2,4],[0,3,5]),
         };
         let factor=model.kv_factor.as_ref().ok_or_else(||invalid("Kelvin plane stress requires transverse viscosity"))?;
+        let columns:Vec<_>=(0..6).filter(|&column|outside.iter().any(|&axis|factor[axis][column]!=0.0)).collect();
+        if columns.len()<3 {
+            return Self::prepare_semidefinite(history,plane,inside,outside,&columns,&mut cancelled);
+        }
         let gram=core::array::from_fn(|i|core::array::from_fn(|j|factor[j][i]));
         let equilibrium=Root3::new(&model.equilibrium_gram,outside)?;
         let viscosity=Root3::new(&gram,outside)?;
@@ -80,21 +85,32 @@ impl PreparedTensorKelvinPlaneStress {
             let response=viscosity.solve(state_rows[column].map(Dd::from_f64),true)?;
             for row in 0..3 {factor[row*n+column]=response[row].to_f64();}
         }
+        let prepared=Self {model:Arc::clone(model),plane,inside,outside,equilibrium,
+            viscosity:Some(viscosity),constraint:None,map,direct_gram,direct_work,
+            rates:Vec::new(),rate_roots:Vec::new(),modes:Vec::new(),
+            forcing:Vec::new(),strain_modes:Vec::new()};
+        Self::finish_factor(prepared,factor,&force,n,None,&mut cancelled)
+    }
+
+    // One positive native factorization for both transverse ranks. The
+    // definite path is the original identity basis with unchanged arithmetic.
+    pub(super) fn finish_factor(mut prepared:Self,mut factor:Vec<f64>,force:&[[f64;3]],
+        n:usize,basis:Option<&[f64]>,cancelled:&mut impl FnMut()->bool)->Result<Self>
+    {
+        if n==0 {poll(cancelled)?;return Ok(prepared);}
+        let original=prepared.state_coordinates();
         let scale=factor.iter().fold(0.0_f64,|s,v|s.max(v.abs()));
         if !scale.is_finite() || scale<=0.0 || force.iter().flatten().any(|v|!v.is_finite()) {
             return Err(invalid("unrepresentable constrained Kelvin relaxation factor"));
         }
         for v in &mut factor {*v/=scale;}
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         let decomposition=svd_jacobi(&factor,n,n);
-        poll(&mut cancelled)?;
-        let tolerance=8192.0*f64::EPSILON*n as f64;
-        let mut rates=Vec::with_capacity(n);
-        let mut roots=Vec::with_capacity(n);
-        let mut forcing=Vec::with_capacity(n);
-        let mut strain_modes=Vec::with_capacity(n);
+        poll(cancelled)?;
+        let tolerance=8192.0*f64::EPSILON*original as f64;
+        let mut modes=zeros(original*n)?;
         for mode in 0..n {
-            poll(&mut cancelled)?;
+            poll(cancelled)?;
             let singular=decomposition.sigma[mode];
             if !singular.is_finite() || singular<=0.0 {return Err(invalid("constrained Kelvin mode is unresolved"));}
             for row in 0..n {
@@ -106,17 +122,22 @@ impl PreparedTensorKelvinPlaneStress {
                 let value=(0..n).fold(Dd::ZERO,|s,row|s+Dd::from_f64(vectors[row*n+mode])*Dd::from_f64(vectors[row*n+other]));
                 if (value.to_f64()-if mode==other {1.0}else{0.0}).abs()>tolerance {return Err(invalid("Kelvin plane-stress modes are not resolved orthogonal"));}
             }}
+            for row in 0..original {
+                modes[row*n+mode]=if let Some(basis)=basis {
+                    number((0..n).fold(Dd::ZERO,|s,j|s+Dd::from_f64(basis[row*n+j])*Dd::from_f64(decomposition.v[j*n+mode])))?.to_f64()
+                }else{decomposition.v[row*n+mode]};
+            }
             let root=checked(scale*singular,"unrepresentable Kelvin plane-stress rate root")?;
             let rate=checked(root*root,"unrepresentable Kelvin plane-stress rate")?;
             if rate<=0.0 {return Err(invalid("Kelvin plane-stress rate underflowed"));}
-            roots.push(root);rates.push(rate);
-            forcing.push(core::array::from_fn(|j|(0..n).fold(Dd::ZERO,|s,row|s+Dd::from_f64(decomposition.v[row*n+mode])*Dd::from_f64(force[row][j])).to_f64()));
-            let free=equilibrium.solve(core::array::from_fn(|i|Dd::from_f64(decomposition.v[i*n+mode])),false)?;
-            let mut direction=[0.0;6];for i in 0..3 {direction[outside[i]]=free[i].to_f64();}
-            strain_modes.push(direction);
+            prepared.rate_roots.push(root);prepared.rates.push(rate);
+            prepared.forcing.push(core::array::from_fn(|j|(0..original).fold(Dd::ZERO,|s,row|s+Dd::from_f64(modes[row*n+mode])*Dd::from_f64(force[row][j])).to_f64()));
+            let free=prepared.equilibrium.solve(core::array::from_fn(|i|Dd::from_f64(modes[i*n+mode])),false)?;
+            let mut direction=[0.0;6];for i in 0..3 {direction[prepared.outside[i]]=free[i].to_f64();}
+            prepared.strain_modes.push(direction);
         }
-        poll(&mut cancelled)?;
-        Ok(Self {model:Arc::clone(model),plane,inside,outside,equilibrium,viscosity,map,
-            direct_gram,direct_work,rates,rate_roots:roots,modes:decomposition.v,forcing,strain_modes})
+        prepared.modes=modes;
+        poll(cancelled)?;
+        Ok(prepared)
     }
 }

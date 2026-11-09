@@ -247,8 +247,12 @@ fn source_domain_positive_transverse_admission_and_cancellation_are_atomic() {
     assert!(matches!(Control::new(&history,plane,TensorKelvinStressControlBudget::default(),||true),Err(TensorPronyError::Cancelled)));
     assert_eq!(history,original);
     let (singular,_)=fixture(diagonal([1.0,1.0,0.0,1.0,1.0,1.0]));
-    assert!(Control::new(&singular.history(),plane,TensorKelvinStressControlBudget::default(),||false).is_err());
+    let resolved=Control::new(&singular.history(),plane,TensorKelvinStressControlBudget::default(),||false).unwrap();
+    assert_eq!(resolved.transverse_viscosity_rank(),2);
     let restricted=law.with_band((1.0,10.0)).unwrap();let (h,_)=seed(&restricted,plane,BIAS);
     let c=Control::new(&h,plane,TensorKelvinStressControlBudget::default(),||false).unwrap();
     assert!(c.prepare_harmonic_window(&[],Dd::ZERO,0.2,budget(),||false).unwrap().evaluate(&[],&BIAS,&h,||false).is_err());
 }
+
+#[path = "visco_kelvin_plane_stress_harmonic/semidefinite.rs"]
+mod semidefinite;

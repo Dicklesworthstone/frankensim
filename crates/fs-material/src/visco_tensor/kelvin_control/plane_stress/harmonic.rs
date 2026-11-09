@@ -65,6 +65,8 @@ impl TensorKelvinPlaneStressHarmonicWindow<'_> {
     /// Drive the actual original state with engineering [epsilon_aa,epsilon_bb,
     /// gamma_ab]. Input strain must join the accepted history. Zero transverse
     /// traction determines its rate without a hidden strain or memory jump.
+    /// Singular transverse viscosity additionally requires the original initial
+    /// spring traction to satisfy its algebraic null-space constraints.
     /// Equal carriers combine before source admission and recovery. The complete
     /// imposed waveform and a conservative full transient strain envelope retain
     /// the original source domain. History changes only on candidate adoption.
@@ -76,9 +78,10 @@ impl TensorKelvinPlaneStressHarmonicWindow<'_> {
         if !Arc::ptr_eq(model,&history.model) || bias.iter().any(|v|!v.is_finite()) {
             return Err(invalid("Kelvin plane stress requires its original history and finite bias"));
         }
+        if let Some(constraint)=&control.constraint {constraint.admit_history(control,history)?;}
         let grouped=self.source.group_strains(strains).map_err(|_|invalid("invalid coherent Kelvin plane strains"))?;
         let frequencies=self.source.distinct_frequencies();let f=frequencies.len();
-        let n=control.state_coordinates();let tolerance=8192.0*f64::EPSILON*(n+6) as f64;
+        let n=control.state_coordinates();let m=control.rates.len();let tolerance=8192.0*f64::EPSILON*(n+6) as f64;
         let mut mapped=[[[Dd::ZERO;2];6];LINES];
         let mut embedded=mapped;
         let mut mapped_bias=[Dd::ZERO;6];
@@ -140,12 +143,12 @@ impl TensorKelvinPlaneStressHarmonicWindow<'_> {
             absolute[i]+=l1(mapped[k][i]);
             excursion[i]+=(frequencies[k]*self.duration).min(2.0)*l1(mapped[k][i]);
         }}
-        let mut changes=Vec::with_capacity(n);
-        for mode in 0..n {
+        let mut changes=Vec::with_capacity(m);
+        for mode in 0..m {
             poll(&mut cancelled)?;
             let root=control.rate_roots[mode];let mut initial=Sum::default();
             for row in 0..n {for word in [initial_state[row].hi,initial_state[row].lo] {
-                initial.add([control.modes[row*n+mode],word,root,1.0]);
+                initial.add([control.modes[row*m+mode],word,root,1.0]);
             }}
             let initial=number(initial.retained_value())?;
             let drive=rate_fields(&control.forcing[mode],&grouped[..f],frequencies,root,1.0)?;
@@ -167,8 +170,8 @@ impl TensorKelvinPlaneStressHarmonicWindow<'_> {
         let mut state_change=vec![Dd::ZERO;n];
         for row in 0..n {
             poll(&mut cancelled)?;let mut sum=Sum::default();
-            for mode in 0..n {for word in [changes[mode].hi,changes[mode].lo] {
-                sum.add_ratio(&[control.modes[row*n+mode],word],&[control.rate_roots[mode]]);
+            for mode in 0..m {for word in [changes[mode].hi,changes[mode].lo] {
+                sum.add_ratio(&[control.modes[row*m+mode],word],&[control.rate_roots[mode]]);
             }}
             state_change[row]=number(sum.retained_value())?;
         }
@@ -201,7 +204,12 @@ impl TensorKelvinPlaneStressHarmonicWindow<'_> {
         let rhs=control.outside.map(|axis| {
             let mut value=-spring[axis];for &j in &control.inside {value=value-Dd::from_f64(viscosity[axis][j])*end_rate[j];} value
         });
-        let rate=control.viscosity.solve(control.viscosity.solve(rhs,true)?,false)?;
+        let rate=if let Some(constraint)=&control.constraint {
+            constraint.endpoint_rate(control,&spring,&end_rate,&q)?
+        } else {
+            let factor=control.viscosity.as_ref().expect("admitted definite transverse viscosity");
+            factor.solve(factor.solve(rhs,true)?,false)?
+        };
         for i in 0..3 {end_rate[control.outside[i]]=rate[i];}
         let mut stress=[0.0;6];
         for i in 0..6 {
