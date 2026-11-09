@@ -3,8 +3,11 @@
 use super::{NetworkWallOperator, WallContact, WallDrag, WallExchangeError, WallThermal, poll};
 use crate::multicomponent::dissipation::TransportLaw;
 use crate::multicomponent::dissipation::evolve::fractions;
+use crate::multicomponent::wall_exchange::{
+    SourceCoupledDragControl, WallControl, WallUpdate, exchange_cell_with_source_drag,
+};
 use crate::multicomponent::{Cell, MAX_SPECIES, Mesh1d, MixtureGas, allocated, positive};
-use fs_qty::{Length, Pressure, Temperature};
+use fs_qty::{Length, Pressure, Temperature, Time};
 
 mod annular;
 mod churchill;
@@ -201,6 +204,7 @@ pub(super) struct DevelopedWallTransport {
     rectangular: Option<Vec<Option<RectangularLaminarWall>>>,
     annular: Option<Vec<Option<AnnularLaminarWall>>>,
     binary: Vec<f64>,
+    source_coupled_drag: Option<SourceCoupledDragControl>,
 }
 
 impl NetworkWallOperator<'_> {
@@ -218,10 +222,12 @@ impl NetworkWallOperator<'_> {
     /// Full original species/caloric identity must match, not only species names.
     ///
     /// Every source half resolves the actual conservative mixture's T, p and
-    /// mole fractions. Coefficients are frozen over that half (first-order local
-    /// constitutive lag), and both endpoints must satisfy the original law and
-    /// this explicit applicability domain. The ordinary `advance_for`, reacting,
-    /// dissipating and source-composed network steps all use this binding.
+    /// mole fractions. By default coefficients are frozen over that half
+    /// (first-order local constitutive lag); [`Self::with_source_coupled_drag`]
+    /// instead resolves resistance throughout mechanical relaxation. Both
+    /// endpoints must satisfy the original law and this explicit applicability
+    /// domain. Ordinary `advance_for`, reacting, dissipating and source-composed
+    /// network steps all use this binding.
     ///
     /// Bind before the first accepted wall step. This consumes the law but no
     /// gas/wall state; it does not silently change an existing accepted report.
@@ -400,8 +406,78 @@ impl NetworkWallOperator<'_> {
             rectangular,
             annular,
             binary,
+            source_coupled_drag: None,
         });
         Ok(self)
+    }
+
+    /// Resolve original transport properties throughout each selected wall's
+    /// mechanical relaxation instead of freezing its initial drag coefficients.
+    ///
+    /// Bind after a developed-transport law and before evolution. Every
+    /// mechanical trial reads the original mixture's actual T, p and composition,
+    /// including slip heating and prescribed-wall work, and re-admits the
+    /// declared Reynolds/Mach/source domain. The source controls apply separately
+    /// to each selected cell in each source interval; initial and final transport
+    /// admission remain additional bounded queries. The native source kernel
+    /// exposes its refinement receipt; the network's `maximum_iterations` still
+    /// counts only the original thermal solve.
+    ///
+    /// The resulting mechanical endpoint refreshes the local gas film before
+    /// the existing caloric/conduction heat solve. Heat still follows mechanics
+    /// with the original first-order composition and a held gas film; shared
+    /// thermal ports retain their own authored conductances. No simultaneous
+    /// thermoviscous heat integration or unsteady profile memory is inferred.
+    ///
+    /// Selected walls must be stationary or have a prescribed constant axial
+    /// velocity. Finite independent/shared supports on selected branches refuse
+    /// in either binding order; their coupled recoil equations are not replaced
+    /// by a prescribed-wall solve. Supports on unselected branches are retained.
+    pub fn with_source_coupled_drag(
+        mut self,
+        control: SourceCoupledDragControl,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, WallExchangeError> {
+        poll(&mut cancelled)?;
+        control.validate()?;
+        if self.last_report.is_some() || self.trial_active {
+            return Err(WallExchangeError::Invalid(
+                "source-coupled wall drag must bind before evolution",
+            ));
+        }
+        let transport = self.transport.as_mut().ok_or(WallExchangeError::Invalid(
+            "source-coupled wall drag requires original developed transport",
+        ))?;
+        if transport.source_coupled_drag.is_some()
+            || !transport.branches.iter().any(Option::is_some)
+        {
+            return Err(WallExchangeError::Invalid(
+                "source-coupled wall drag binds once to selected branches",
+            ));
+        }
+        for (branch, (model, shape)) in transport.branches.iter().zip(&self.branches).enumerate() {
+            poll(&mut cancelled)?;
+            if model.is_some()
+                && (self.supports.as_ref().is_some_and(|supports| {
+                    supports.any_selected(shape.start, shape.mesh.cell_count())
+                }) || self
+                    .shared_supports
+                    .as_ref()
+                    .is_some_and(|supports| supports.has_branch(branch)))
+            {
+                return Err(WallExchangeError::Invalid(
+                    "source-coupled wall drag requires prescribed wall motion",
+                ));
+            }
+        }
+        poll(&mut cancelled)?;
+        transport.source_coupled_drag = Some(control);
+        Ok(self)
+    }
+
+    /// Per-cell mechanical source accuracy/work controls, when explicitly bound.
+    pub fn source_coupled_drag_control(&self) -> Option<SourceCoupledDragControl> {
+        self.transport.as_ref()?.source_coupled_drag
     }
 
     /// Original immutable constitutive owner, including its species source.
@@ -435,6 +511,62 @@ impl NetworkWallOperator<'_> {
 }
 
 impl DevelopedWallTransport {
+    pub(super) fn couples_drag(&self, branch: usize) -> bool {
+        self.source_coupled_drag.is_some() && self.branches[branch].is_some()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn advance_drag(
+        &mut self,
+        gas: &MixtureGas,
+        branch: usize,
+        state: Cell<'_>,
+        volume: f64,
+        duration: Time,
+        contact: WallContact,
+        controls: WallControl,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Option<WallUpdate>, WallExchangeError> {
+        let Some(source_control) = self.source_coupled_drag else {
+            return Ok(None);
+        };
+        if self.branches[branch].is_none() {
+            return Ok(None);
+        }
+        let mut update = exchange_cell_with_source_drag(
+            gas,
+            state,
+            volume,
+            duration,
+            contact,
+            controls,
+            source_control,
+            |candidate, checkpoint| {
+                self.resolve(gas, branch, candidate, volume, contact, &mut || {
+                    checkpoint()
+                })
+                .map(|resolved| resolved.drag)
+            },
+            &mut *cancelled,
+        )?
+        .gas;
+        // The mechanical source owns no thermal storage. Refresh only the
+        // actual endpoint film/drag before the original thermal owner takes over.
+        update.contact = self.resolve(
+            gas,
+            branch,
+            Cell {
+                momentum: update.momentum,
+                energy: update.energy,
+                ..state
+            },
+            volume,
+            contact,
+            cancelled,
+        )?;
+        Ok(Some(update))
+    }
+
     pub(super) fn resolve(
         &mut self,
         gas: &MixtureGas,

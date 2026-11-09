@@ -16,8 +16,11 @@ use std::cell::{Cell, RefCell};
 
 /// Native time refinement that resolves radial history and reversing transport.
 pub mod adaptive;
+/// Original pump/drive losses deposited at explicitly authored native cells.
+pub mod equipment;
 
 use adaptive::RegionalCarreauDrive;
+use equipment::EquipmentThermalReport;
 use fs_exec::Cx;
 use fs_qty::Pressure;
 use fs_thermal::enthalpy::DepositionSimulation;
@@ -71,6 +74,10 @@ pub enum TransientCarreauTransportError<E> {
         residual_j: f64,
         tolerance_j: f64,
     },
+    EquipmentEnergy {
+        residual_j: f64,
+        tolerance_j: f64,
+    },
 }
 impl<E: core::fmt::Debug> core::fmt::Display for TransientCarreauTransportError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -90,10 +97,14 @@ pub struct TransientRegionalCarreauReport<T> {
     pub thermal: ImplicitTransportReport<T>,
     pub external_stream_enthalpy_j: f64,
     /// Native ambient, reservoir and authored/callback source heat, evaluated
-    /// directly before adding advection or viscous heat; internal links cancel.
+    /// directly before adding equipment losses, advection or viscous heat;
+    /// internal links cancel. Automatically routed losses are never relabeled
+    /// as caller-authored heat.
     pub other_heat_j: f64,
+    pub equipment: EquipmentThermalReport,
     /// Delta(thermal + kinetic) - reservoir - injection - head work
-    /// - other heat - external stream enthalpy. No residual is deposited.
+    /// - equipment heat - other heat - external stream enthalpy.
+    /// No residual is deposited.
     pub combined_energy_residual_j: f64,
     /// Native thermal and mechanical tolerances plus arithmetic roundoff.
     pub combined_energy_tolerance_j: f64,
@@ -119,6 +130,7 @@ struct Prepared<T, D> {
     exchange: T,
     external_stream_enthalpy_j: f64,
     other_heat_j: f64,
+    equipment: EquipmentThermalReport,
 }
 
 impl TransientRegionalCarreauTransport {
@@ -297,6 +309,7 @@ impl TransientRegionalCarreauTransport {
             injections: injections.to_vec(),
             branch_heads: branch_heads.map(<[Pressure]>::to_vec),
             branch_head_laws: None,
+            branch_heat_destinations: None,
         };
         self.advance_with_resolved_drive(
             cx,
@@ -317,7 +330,9 @@ impl TransientRegionalCarreauTransport {
     /// prepared pipe viscosity. The actual head work remains mechanical; only
     /// original radial viscous heat enters the caloric inventory. Use the
     /// adaptive thermal-drive callback when the equipment source itself must
-    /// be prepared from the same candidate thermal endpoint.
+    /// be prepared from the same candidate thermal endpoint. Sources declaring
+    /// positive routed equipment losses require advance_with_drive and explicit
+    /// heat recipients; this entry point never guesses those destinations.
     #[allow(clippy::too_many_arguments)]
     pub fn advance_with_head_laws<'m, T, E>(
         &self,
@@ -346,6 +361,7 @@ impl TransientRegionalCarreauTransport {
             injections: injections.to_vec(),
             branch_heads: held_heads.map(<[Pressure]>::to_vec),
             branch_head_laws: Some(head_laws.to_vec()),
+            branch_heat_destinations: None,
         };
         self.advance_with_resolved_drive(
             cx,
@@ -356,6 +372,45 @@ impl TransientRegionalCarreauTransport {
             controls,
             energy_guess_j,
             |_, _, _| Ok::<_, E>(&drive),
+            |cx, candidate, flow, _| exchange(cx, candidate, flow),
+        )
+        .map(|(step, _)| step)
+    }
+
+    /// Advance with the complete original held drive, including explicit
+    /// recipients for any original pump/drive routed losses. The same nonlinear
+    /// endpoint solve includes those heat sources and local viscosity feedback.
+    /// The callback supplies additional independent heat/streams only: it must
+    /// not add the automatically routed equipment losses a second time.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_drive<'m, T, E>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'m>,
+        state: &TransientCarreauState,
+        workspace: &mut TransientCarreauWorkspace,
+        target_s: f64,
+        drive: &RegionalCarreauDrive,
+        controls: TransientRegionalCarreauControls,
+        energy_guess_j: &[f64],
+        exchange: impl Fn(
+            &Cx<'_>,
+            &DepositionSimulation<'m>,
+            &TransientCarreauStep,
+        ) -> Result<CarreauTransportExchange<T>, E>,
+    ) -> Result<
+        TransientRegionalCarreauStep<'m, T>,
+        ImplicitTransportError<TransientCarreauTransportError<E>>,
+    > {
+        self.advance_with_resolved_drive(
+            cx,
+            thermal,
+            state,
+            workspace,
+            target_s,
+            controls,
+            energy_guess_j,
+            |_, _, _| Ok::<_, E>(drive),
             |cx, candidate, flow, _| exchange(cx, candidate, flow),
         )
         .map(|(step, _)| step)
@@ -538,9 +593,19 @@ impl TransientRegionalCarreauTransport {
                         },
                     ));
                 }
-                let response = exchange(cx, candidate, &hydraulics, &drive).map_err(|error| {
-                    ImplicitTransportError::Resolve(TransientCarreauTransportError::Exchange(error))
-                })?;
+                let equipment = equipment::prepare(
+                    cx,
+                    candidate,
+                    &hydraulics,
+                    forcing.branch_heads.as_deref(),
+                    forcing.branch_heat_destinations.as_deref(),
+                )?;
+                let mut response =
+                    exchange(cx, candidate, &hydraulics, &drive).map_err(|error| {
+                        ImplicitTransportError::Resolve(TransientCarreauTransportError::Exchange(
+                            error,
+                        ))
+                    })?;
                 thermal_checkpoint(cx)?;
                 // Measure the original nonadvective external source before
                 // local dissipation/stream enthalpy are installed. Internal
@@ -552,6 +617,14 @@ impl TransientRegionalCarreauTransport {
                     || thermal_checkpoint(cx),
                 )?;
                 let other_heat_j = finite(other_power_w * duration_s)?;
+                // Preserve independent callback/native sources at the same
+                // recipients. These powers come only from the retained original
+                // evaluation; no second equipment query or loss inference.
+                for (&cell, &power_w) in &equipment.sources_w {
+                    thermal_checkpoint(cx)?;
+                    let source = response.heat.bulk.sources_w.entry(cell).or_default();
+                    *source = sum(&[*source, power_w])?;
+                }
                 let rates: Vec<_> = hydraulics
                     .branches
                     .iter()
@@ -576,12 +649,13 @@ impl TransientRegionalCarreauTransport {
                         exchange: payload,
                         external_stream_enthalpy_j: stream_w * duration_s,
                         other_heat_j,
+                        equipment: equipment.report,
                     },
                 )
             },
         )?;
         let ImplicitTransportReport {
-            heat: prepared,
+            heat: mut prepared,
             thermal: audit,
             maximum_cell_residual_j,
             endpoint_evaluations,
@@ -595,6 +669,7 @@ impl TransientRegionalCarreauTransport {
             -prepared.hydraulics.branch_head_work_j,
             -prepared.external_stream_enthalpy_j,
             -prepared.other_heat_j,
+            -prepared.equipment.deposited_heat_j,
         ];
         let combined = sum(&terms)?;
         let scale = sum(&terms.map(f64::abs))?;
@@ -611,6 +686,36 @@ impl TransientRegionalCarreauTransport {
                 },
             ));
         }
+        // Independently replace ONLY sourced hydraulic work plus routed losses
+        // with original electrical input minus original surroundings heat.
+        // Unknown-power/held heads remain explicit mechanical inputs.
+        let equipment_terms = [
+            audit.stored_energy_change_j,
+            prepared.hydraulics.kinetic_energy_change_j,
+            -prepared.hydraulics.reservoir_work_j,
+            -prepared.hydraulics.injection_work_j,
+            -prepared.equipment.remaining_head_work_j,
+            -prepared.equipment.electrical_input_j,
+            prepared.equipment.surroundings_heat_j,
+            -prepared.other_heat_j,
+            -prepared.external_stream_enthalpy_j,
+        ];
+        let equipment_residual = sum(&equipment_terms)?;
+        let equipment_tolerance = finite(
+            controls.thermal.total_tolerance_j
+                + controls.mechanical_energy_tolerance_j
+                + 128.0 * f64::EPSILON * sum(&equipment_terms.map(f64::abs))?,
+        )?;
+        if equipment_residual.abs() > equipment_tolerance {
+            return Err(ImplicitTransportError::Resolve(
+                TransientCarreauTransportError::EquipmentEnergy {
+                    residual_j: equipment_residual,
+                    tolerance_j: equipment_tolerance,
+                },
+            ));
+        }
+        prepared.equipment.electrical_boundary_residual_j = equipment_residual;
+        prepared.equipment.electrical_boundary_tolerance_j = equipment_tolerance;
         let mut next_regional = self.regional.clone();
         next_regional.graph = prepared.source.graph().clone();
         thermal_checkpoint(cx)?;
@@ -633,6 +738,7 @@ impl TransientRegionalCarreauTransport {
                     },
                     external_stream_enthalpy_j: prepared.external_stream_enthalpy_j,
                     other_heat_j: prepared.other_heat_j,
+                    equipment: prepared.equipment,
                     combined_energy_residual_j: combined,
                     combined_energy_tolerance_j: allowance,
                     total_branch_solves: total_branch_solves.get(),

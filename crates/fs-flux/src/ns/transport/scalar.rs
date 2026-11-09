@@ -21,7 +21,7 @@ use fs_solver::{FgmresState, SolverRunProgress, op::CsrOp};
 use fs_sparse::precond::{Ilu0, IluControlledError, Precond, ilu0_controlled};
 use fs_sparse::{Coo, Csr};
 
-mod assembly;
+pub(in crate::ns) mod assembly;
 /// Opt-in conservative scalar bounds using original-operator flux correction.
 pub mod bounded;
 

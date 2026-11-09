@@ -4098,6 +4098,48 @@ this session: the execution environment has no usable connection. Consequently
 these new regressions have not been run, and no DSR, Cargo, native-suite or
 physical-consumer pass is claimed for this extension.
 
+### Source-coupled viscous slip relaxation
+
+`exchange_cell_with_source_drag` advances the original mixture's mechanical
+wall source with coefficients reevaluated at its evolving conservative state.
+The borrowed callback supplies an admitted `WallDrag`; it does not supply a
+replacement caloric model. Gas amount, composition, volume and prescribed wall
+velocity remain fixed during this interval. At every candidate state the
+original gas owner admits its density, temperature and pressure. No wall heat
+transfer is performed by this mechanical kernel.
+
+For gas momentum density p, wall speed U and slip s = p/rho - U, the invariant
+is E - U*p. Each accepted impulse therefore determines drive work and physical
+slip dissipation from the actual returned endpoints. Stationary walls retain
+total gas energy exactly; moving walls transfer U times the gas impulse.
+Relative kinetic energy lost becomes gas sensible energy once. There is no
+extra heating source and no conversion of a numerical error estimate to heat.
+
+A source evaluation at an exact frozen-law half step predicts the midpoint
+coefficients; the original linear/Darcy/combined exact map then advances the
+entering state for the complete candidate interval. One full candidate is
+compared with two half candidates, and the refined state is accepted only
+within independent dimensional slip and physical-heating budgets. The
+full-versus-refined difference divided by three estimates the smooth
+second-order local endpoint defect. Work is bounded and cancellation/source
+refusals publish no endpoint.
+
+A separate stage-order check requires the predicted midpoint to lie between
+the entering and returned slip magnitudes. This rejects the false agreement
+that can occur when both coarse and refined frozen predictors cross a sharp
+viscosity decrease. Constant positive coefficients retain their exact stiff
+decay. The embedded defect and stage-order check are numerical acceptance
+tests, not a certified error bound for arbitrary unresolved constitutive
+features or a global thermodynamic theorem.
+
+The returned source receipt separates accepted/rejected work and error
+estimates from the original physical wall report. Focused G1/G3 regressions
+use an independent closed-form temperature-proportional viscosity solution,
+constant-coefficient limits, opposite slip and moving-frame transformations,
+smooth sharp-decrease refusal/refinement, source-domain exit, bounded work
+and cancellation. Thermal-contact splitting and radial boundary-layer memory
+remain separate owners.
+
 ## Wall sources composed with molecular and reacting networks
 
 ### Current material state in developed pipe-wall losses
@@ -4120,8 +4162,10 @@ is that cell's wetted area. The Nusselt number and fully developed applicability
 are explicit engineering inputs, not values inferred from a gas name. This
 closure does not establish entrance length, negligible axial conduction,
 high-frequency oscillatory boundary layers, turbulent flow or a measured pipe
-correlation. Source coefficients are evaluated at bulk gas temperature and
+correlation. Source coefficients are evaluated at bulk gas temperature and, by default,
 frozen during each source half; that constitutive lag remains first order.
+The opt-in source-coupled drag binding below resolves the mechanical feedback
+within each interval while retaining the existing separate thermal owner.
 
 Both source-step endpoints must satisfy the original property law and declared
 Reynolds/Mach limits. A changed product outside its material-card domain rejects
@@ -4141,6 +4185,36 @@ through `ReactingNetwork1d::step_with_wall`. An original material-card refusal
 after reaction also checks whole-network/finite-wall rollback. These are
 manufactured numerical integration tests, not experimental combustion or
 convection validation.
+
+### Viscosity feedback within developed wall-source intervals
+
+`NetworkWallOperator::with_source_coupled_drag` opts selected developed-flow
+branches into the original source-coupled mechanical kernel. Bind it after
+the original `TransportLaw` and geometry, before evolution. At every admitted
+candidate momentum/energy state, the binding evaluates that same law at the
+actual original-mixture temperature, pressure and composition, then recomputes
+the existing geometry- and Reynolds-dependent resistance. Circular laminar,
+rough/turbulent, Gnielinski, Churchill, rectangular and annular models retain
+their original correlations and declared domains; no viscosity fit, source
+table clone, inferred transition or clipping is introduced.
+
+After friction changes the gas state, the binding refreshes the local film
+conductance before handing off to the original finite/reservoir/caloric wall
+and solid-conduction owners. Shared thermal inventories retain their authored
+port conductances and original collective heat solve. Species, branch
+impulses, physical slip heat, drive work, finite-wall energy, cancellation and
+whole-network retry remain on the existing transaction. Adaptive source work
+limits apply independently to each selected cell and source interval.
+
+This first binding admits stationary and prescribed-motion walls. A selected
+independent or shared inertial support is refused in either binding order;
+unselected branches retain their existing support owners. The scalar
+mechanical solve is second order for smooth live coefficients, while the
+separate backward-Euler thermal contact and outer coupled system retain their
+existing order limitations. Conductivity is refreshed after mechanical
+heating but is not solved jointly with temperature during the thermal step.
+These remain fully developed averaged wall closures, without unsteady radial
+profile storage or a resolved turbulent boundary layer.
 
 ### Rectangular developed-flow wall resistance
 

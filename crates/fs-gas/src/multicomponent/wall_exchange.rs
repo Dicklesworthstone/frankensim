@@ -12,6 +12,11 @@ use fs_math::det;
 use fs_qty::{DynViscosity, Length, Time};
 
 mod drag;
+mod source_drag;
+pub use source_drag::{
+    SourceCoupledDragControl, SourceCoupledDragReport, SourceCoupledDragUpdate,
+    exchange_cell_with_source_drag,
+};
 mod gas;
 mod recoil;
 pub use recoil::{
@@ -320,6 +325,13 @@ pub enum WallExchangeError {
         minimum: f64,
         /// Inclusive upper applicability bound.
         maximum: f64,
+    },
+    /// Actual-state wall drag exhausted its explicit scalar work budget.
+    SourceDragWork {
+        /// Attempted full-versus-two-half intervals, including rejected trials.
+        attempted_steps: usize,
+        /// Original constitutive selections charged before refusal.
+        source_evaluations: usize,
     },
     /// Original heat equation did not meet the requested iteration budget.
     TemperatureIterations,
@@ -845,3 +857,4 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), WallExchangeError> {
         Ok(())
     }
 }
+

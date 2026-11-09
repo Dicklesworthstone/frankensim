@@ -101,6 +101,15 @@ impl NetworkWallOperator<'_> {
                 poll(&mut cancelled)?;
                 if let Some(support) = support {
                     if self
+                        .transport
+                        .as_ref()
+                        .is_some_and(|transport| transport.couples_drag(branch))
+                    {
+                        return Err(WallExchangeError::Invalid(
+                            "source-coupled wall drag requires prescribed wall motion",
+                        ));
+                    }
+                    if self
                         .shared_supports
                         .as_ref()
                         .is_some_and(|supports| supports.has_branch(branch))

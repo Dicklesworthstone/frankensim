@@ -251,6 +251,152 @@ fn actual_caloric_endpoint_drives_original_force_pressure_and_buoyancy_without_h
 }
 
 #[test]
+fn moving_slip_source_work_uses_original_heat_partition_once_in_physical_depth_and_time() {
+    struct Wall {
+        boundaries: Vec<LaminarDrivenBoundary>,
+        routes: Vec<StokesSlipHeatRoute>,
+    }
+    impl LaminarMechanicalDrive for Wall {
+        fn boundaries(&self) -> &[LaminarDrivenBoundary] {
+            &self.boundaries
+        }
+        fn force_density(&self, _: [f64; 2]) -> [f64; 2] {
+            [0.0; 2]
+        }
+        fn velocity(&self, edge: usize, point: [f64; 2]) -> [f64; 2] {
+            let slip = if self.routes.iter().any(|route| route.edge == edge) {
+                0.08
+            } else {
+                0.0
+            };
+            [0.1 + 0.2 * point[1] + slip, 0.0]
+        }
+        fn traction(&self, _: usize, _: [f64; 2], normal: [f64; 2]) -> [f64; 2] {
+            [
+                0.08 * normal[1] - 3.0 * normal[0],
+                0.08 * normal[0] - 3.0 * normal[1],
+            ]
+        }
+        fn slip_heat_routes(&self) -> &[StokesSlipHeatRoute] {
+            &self.routes
+        }
+    }
+    with_cx(|cx, _| {
+        let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 1, 1));
+        let system = FluxSystem::new(&mesh);
+        let law = Caloric { datum: 0.0 };
+        let (old, cells) = inventory(&mesh, &law, &[300.0; 2], true);
+        let before = old.cells().clone();
+        let material = reference(0.4);
+        let owner = LaminarEnthalpy::new(
+            cx,
+            &system,
+            &material,
+            MaterialFluxNumerics {
+                linear_tolerance: 1e-12,
+                ..MaterialFluxNumerics::default()
+            },
+            &old,
+            map(&cells),
+            DEPTH,
+            2 * mesh.edges.len(),
+        )
+        .unwrap();
+        let velocity = |p: [f64; 2]| [0.1 + 0.2 * p[1], 0.0];
+        let previous = moments(&mesh, &velocity);
+        let dt = 0.04;
+        let solved = owner
+            .advance_driven(
+                cx,
+                &old,
+                LaminarDriveQuery {
+                    time_s: dt,
+                    segment: 0,
+                },
+                LaminarEnthalpyHistory {
+                    velocity_m_s: &previous,
+                    time_s: 0.0,
+                },
+                controls(),
+                &[0.0; 3],
+                |_, _, _| {
+                    let mut routes = Vec::new();
+                    let boundaries = (0..mesh.edges.len())
+                        .filter(|&e| mesh.is_boundary(e))
+                        .map(|edge| {
+                            let normal = mesh.edges[edge].normal;
+                            if normal[1] > 0.5 {
+                                routes.push(StokesSlipHeatRoute {
+                                    edge,
+                                    wall_cell: WALL,
+                                    fluid_heat_fraction: 0.25,
+                                });
+                                LaminarDrivenBoundary::NavierSlip {
+                                    edge,
+                                    tangential_resistance_pa_s_per_m: 1.0,
+                                }
+                            } else if normal[1] < -0.5 {
+                                LaminarDrivenBoundary::Velocity { edge }
+                            } else {
+                                LaminarDrivenBoundary::Open {
+                                    edge,
+                                    backflow: OpenBoundaryPolicy::NaturalTraction,
+                                }
+                            }
+                        })
+                        .collect();
+                    Ok::<_, ()>(Wall { boundaries, routes })
+                },
+                |_, t, _, _| Ok(source(t, 0.4)),
+                |_, _, _, _| Ok::<_, ()>(exchange(&mesh, law.h(300.0))),
+            )
+            .unwrap();
+        let (error, divergence) =
+            system.velocity_error(&solved.flow().step.solution.discrete().x, &velocity);
+        assert!(error < 2e-8 && divergence < 2e-8);
+        let bulk = 0.4 * 0.2_f64.powi(2) * DEPTH * dt;
+        let slip = 0.4_f64.powi(2) * 0.2_f64.powi(2) * DEPTH * dt;
+        let report = solved.report();
+        let mechanical = report.mechanical.unwrap();
+        near(
+            mechanical.velocity_boundary_work_j.unwrap(),
+            0.4 * 0.2 * (0.38 - 0.1) * DEPTH * dt,
+            2e-10,
+        );
+        near(
+            mechanical.velocity_boundary_work_j.unwrap(),
+            bulk + slip,
+            2e-10,
+        );
+        near(mechanical.imposed_traction_work_j, 0.0, 2e-10);
+        near(mechanical.backflow_resistance_work_j.unwrap(), 0.0, 1e-12);
+        near(report.bulk_viscous_heat_j, bulk, 2e-10);
+        near(report.slip_heat_j, slip, 2e-10);
+        near(report.other_external_heat_j, 0.0, 1e-12);
+        let wall_gain = old.cells()[&WALL].mass_kg
+            * (solved.thermal().cells()[&WALL].specific_h_j_kg
+                - old.cells()[&WALL].specific_h_j_kg);
+        near(wall_gain, 0.75 * slip, 1e-8);
+        let stored: f64 = old
+            .cells()
+            .iter()
+            .map(|(&id, cell)| {
+                cell.mass_kg
+                    * (solved.thermal().cells()[&id].specific_h_j_kg - cell.specific_h_j_kg)
+            })
+            .sum();
+        near(
+            stored,
+            bulk + slip + report.external_stream_enthalpy_j,
+            1e-8,
+        );
+        near(report.thermal_balance_residual_j, 0.0, 1e-8);
+        assert_eq!(old.cells(), &before);
+        assert_eq!(old.time_s(), 0.0);
+    });
+}
+
+#[test]
 fn mechanical_source_and_late_exchange_cancellation_leave_both_native_histories_intact() {
     with_cx(|cx, gate| {
         let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 1, 1));
