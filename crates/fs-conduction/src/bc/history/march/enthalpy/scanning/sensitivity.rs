@@ -2,9 +2,10 @@
 //!
 //! The existing enthalpy/radiation owner revalidates the primal and builds the
 //! complete physical tangent. One transpose solve supplies every source's
-//! center/width/watts pullback plus the previous enthalpy seed for a reverse
-//! sweep on a FIXED time grid. No solver iterations, adaptive decisions, event
-//! times, material selections or source-support admission rules are differentiated.
+//! center/width/watts pullback, radiative reservoir/emissivity controls and the
+//! previous enthalpy seed for a reverse sweep on a FIXED time grid. No solver
+//! iterations, adaptive decisions, event times, material selections or
+//! source-support admission rules are differentiated.
 
 /// Full fixed-grid inverse objectives with authored-schedule gradients.
 pub mod objective;
@@ -14,9 +15,10 @@ use super::{ScanningEnthalpyRun, ScanStep, events, patches_before, poll};
 use super::super::super::moving::sensitivity::{MovingHeatGradient, MovingHeatLinearization};
 use crate::{ConductionError, LinearConfig};
 use crate::transient::enthalpy::EnthalpyStepConfig;
-use crate::transient::enthalpy::adjoint::EnthalpyAdjointError;
+use crate::transient::enthalpy::adjoint::{EnthalpyAdjointError, EnthalpyStepLinearization};
 use crate::transient::enthalpy::heterogeneous::{HeterogeneousEnthalpyError,
-    HeterogeneousEnthalpyStepGradient, HeterogeneousEnthalpyStepLinearization};
+    HeterogeneousEnthalpyStepGradient, HeterogeneousEnthalpyStepLinearization,
+    HeterogeneousEnthalpyRadiationStepLinearization};
 use fs_exec::Cx;
 
 /// Extra retained-source and radiation-tangent caps for one linearized step.
@@ -60,7 +62,20 @@ impl From<ConductionError> for ScanSensitivityError {
     fn from(e: ConductionError) -> Self { Self::Source(e) }
 }
 
-/// All sources share the SAME physical transpose; overlapping heaters add.
+/// Independent physical radiation controls at this fixed scan endpoint.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScanRadiationGradient {
+    /// Radiating regions in the original patch declaration order.
+    pub radiation_regions: Vec<String>,
+    /// Derivative per kelvin of each black-reservoir temperature, including
+    /// coefficient and explicit reference-temperature changes.
+    pub reservoir_temperatures: Vec<f64>,
+    /// Derivative per unit absolute hemispherical emissivity; the source claim
+    /// and query support remain fixed. At epsilon=1 only feasible directions apply.
+    pub emissivities: Vec<f64>,
+}
+
+/// All sources and radiation controls share the SAME physical transpose.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScanStepGradient {
     /// Original source-density, history, reference-density and true-residual data.
@@ -68,6 +83,42 @@ pub struct ScanStepGradient {
     pub storage: HeterogeneousEnthalpyStepGradient,
     /// Independent instantaneous controls, in source declaration order.
     pub sources: Vec<MovingHeatGradient>,
+    /// Original radiative parameters, or None when no radiation is attached.
+    pub radiation: Option<ScanRadiationGradient>,
+}
+
+// Preserve each native owner's physical parameters alongside its common
+// transport tangent. In particular, do not discard radiation metadata when
+// binding a scan endpoint or solve the transpose again for its controls.
+#[derive(Debug)]
+enum ScanTangent<'m> {
+    Storage(HeterogeneousEnthalpyStepLinearization<'m>),
+    Radiation(HeterogeneousEnthalpyRadiationStepLinearization<'m>),
+}
+impl<'m> ScanTangent<'m> {
+    fn transport(&self) -> &EnthalpyStepLinearization<'_> {
+        match self {
+            Self::Storage(binding) => binding.transport(),
+            Self::Radiation(binding) => binding.transport(),
+        }
+    }
+
+    fn pullback(&self, cx: &Cx<'_>, seed: &[f64], linear: LinearConfig)
+        -> Result<(HeterogeneousEnthalpyStepGradient, Option<ScanRadiationGradient>), EnthalpyAdjointError>
+    {
+        match self {
+            Self::Storage(binding) => Ok((binding.pullback(cx, seed, linear)?, None)),
+            Self::Radiation(binding) => {
+                let gradient = binding.pullback(cx, seed, linear)?;
+                let radiation = ScanRadiationGradient {
+                    radiation_regions: gradient.radiation_regions,
+                    reservoir_temperatures: gradient.reservoir_temperatures,
+                    emissivities: gradient.emissivities,
+                };
+                Ok((gradient.storage, Some(radiation)))
+            }
+        }
+    }
 }
 
 /// Primal report and immutable derivative binding for one accepted scan step.
@@ -76,7 +127,7 @@ pub struct ScanStepGradient {
 #[derive(Debug)]
 pub struct ScanStepLinearization<'m> {
     report: ScanStep,
-    transport: HeterogeneousEnthalpyStepLinearization<'m>,
+    transport: ScanTangent<'m>,
     sources: Vec<MovingHeatLinearization<'m>>,
     // Retain each node's original chart derivative without retaining chart
     // borrows. A fraction-only corner must not disable temperature objectives.
@@ -96,25 +147,27 @@ impl ScanStepLinearization<'_> {
     pub const fn end_time_s(&self) -> f64 { self.end_time_s }
     /// Rechecked physical tangent, including any nonlinear radiation feedback.
     #[must_use]
-    pub fn transport(&self) -> &HeterogeneousEnthalpyStepLinearization<'_> { &self.transport }
+    pub fn transport(&self) -> &EnthalpyStepLinearization<'_> { self.transport.transport() }
 
     /// Pull back an objective seed in nodal specific-enthalpy coordinates.
-    /// Complete radiation feedback enters the common transpose, but radiative
-    /// reservoir and emissivity PARAMETER gradients are not returned here.
+    /// Complete radiation feedback and its reservoir/emissivity controls use
+    /// the same transpose as all moving sources, with no additional primal solve.
     /// Prescribed nodal bath-temperature gradients remain in `storage.transport`;
-    /// their constraint multipliers never enter the source or history pullbacks.
-    /// Geometry, phase charts, conductivity and boundary schedules remain fixed.
+    /// their constraint multipliers never enter physical heat-input pullbacks.
+    /// Geometry, phase charts, conductivity, time grid and event side remain
+    /// fixed; instantaneous boundary controls require a separate schedule chain
+    /// rule for authored values.
     pub fn pullback(&self, cx: &Cx<'_>, seed: &[f64], linear: LinearConfig)
         -> Result<ScanStepGradient, ScanSensitivityError>
     {
-        let storage = self.transport.pullback(cx, seed, linear)?;
+        let (storage, radiation) = self.transport.pullback(cx, seed, linear)?;
         let mut sources = Vec::with_capacity(self.sources.len());
         for (i, binding) in self.sources.iter().enumerate() {
             poll(cx, i)?;
             sources.push(binding.pullback(cx, &storage.transport.source_density)?);
         }
         poll(cx, sources.len())?;
-        Ok(ScanStepGradient { storage, sources })
+        Ok(ScanStepGradient { storage, sources, radiation })
     }
 
     /// Pull back a nodal temperature objective through the original dT/dh.
@@ -222,8 +275,8 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
         let problem = self.run.conduction_problem(&boundary, &source)?;
         let accepted = report.solution().clone();
         let transport = match &self.radiation {
-            None => self.run.storage.linearize_accepted(cx, problem, self.run.problem.interfaces,
-                &self.run.specific_h, end - start, config, accepted)?,
+            None => ScanTangent::Storage(self.run.storage.linearize_accepted(cx, problem,
+                self.run.problem.interfaces, &self.run.specific_h, end - start, config, accepted)?),
             Some(radiation) => {
                 let patches = if left { patches_before(cx, &radiation.patches, end)? }
                     else {
@@ -234,9 +287,9 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
                         }
                         patches
                     };
-                self.run.storage.linearize_accepted_storage_with_ambient_radiation(cx, problem,
-                    self.run.problem.interfaces, &self.run.specific_h, end - start, config,
-                    &patches, accepted, budget.max_radiation_feedback_entries)?
+                ScanTangent::Radiation(self.run.storage.linearize_accepted_parameters_with_ambient_radiation(
+                    cx, problem, self.run.problem.interfaces, &self.run.specific_h, end - start,
+                    config, &patches, accepted, budget.max_radiation_feedback_entries)?)
             }
         };
         let fraction_derivatives = fraction::bind(cx, &self.run.storage,

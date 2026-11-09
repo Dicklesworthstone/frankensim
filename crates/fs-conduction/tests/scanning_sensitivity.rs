@@ -53,28 +53,37 @@ fn bath_history<'m>(cx:&Cx<'_>,m:&'m ConductionMesh,bath:f64)->ThermalBoundaryHi
         .remainder("surface",ThermalBc::adiabatic()).unwrap(),
         &Environment::earth_lab(),vec![],0.).unwrap()
 }
-fn radiation()->ScanRadiation{
+fn radiation()->ScanRadiation{radiation_at(293.,0.2)}
+fn radiation_at(ambient:f64,emissivity:f64)->ScanRadiation{
+    ScanRadiation{patches:vec![radiation_patch("surface",ambient,emissivity)],config:AmbientRadiationConfig::default()}
+}
+fn radiation_patch(region:&str,ambient:f64,emissivity:f64)->RadiationRegionHistory{
     let mut claims=ClaimSet::new();claims.insert_claim(PropertyClaim{
         key:PropertyKey::new(SURFACE_EMISSIVITY_PROPERTY,EMISSIVITY_DIMS),
-        value:PropertyValue::Scalar{value:0.2,dims:EMISSIVITY_DIMS},
+        value:PropertyValue::Scalar{value:emissivity,dims:EMISSIVITY_DIMS},
         validity:ValidityDomain::unconstrained().with("T",280.,380.),uncertainty:UncertaintyModel::Unstated,
         interpolation:InterpolationPolicy::ConstantWithinValidity,observations:vec![],
         provenance:Provenance{source:"synthetic scan gradient fixture".into(),license:"test-only".into(),artifact:None}}).unwrap();
     let card=MaterialCard::assemble(MaterialStateId{chemistry:"gray fixture".into(),phase:"solid".into(),
         process:"synthetic".into(),revision:0},claims,vec![]).unwrap();
-    ScanRadiation{patches:vec![RadiationRegionHistory{region:"surface".into(),
-        emissivity:SurfaceEmissivity::from_card("surface",&card,300.,SelectionPolicy::SingleClaimOnly).unwrap(),
-        ambient_temperature:constant(293.,TEMPERATURE_DIMS)}],config:AmbientRadiationConfig::default()}
+    RadiationRegionHistory{region:region.into(),
+        emissivity:SurfaceEmissivity::from_card(region,&card,300.,SelectionPolicy::SingleClaimOnly).unwrap(),
+        ambient_temperature:constant(ambient,TEMPERATURE_DIMS)}
 }
 fn run<'h,'m,'c>(cx:&Cx<'_>,history:&'h ThermalBoundaryHistory<'m>,material:&'h ConductivityModel,
     curve:&'c EquilibriumEnthalpyPhaseCurve,old:&[f64],sources:Vec<MovingHeatSource>,rad:bool)
+    ->ScanningEnthalpyRun<'h,'m,'c>{
+    run_with_radiation(cx,history,material,curve,old,sources,rad.then(radiation))
+}
+fn run_with_radiation<'h,'m,'c>(cx:&Cx<'_>,history:&'h ThermalBoundaryHistory<'m>,material:&'h ConductivityModel,
+    curve:&'c EquilibriumEnthalpyPhaseCurve,old:&[f64],sources:Vec<MovingHeatSource>,radiation:Option<ScanRadiation>)
     ->ScanningEnthalpyRun<'h,'m,'c>{
     let base=EnthalpyHistoryRun::new(cx,ThermalHistoryProblem{boundary:history,material,
         element_materials:None,interfaces:None,source:HeatSourceHistory::Fixed(ScalarField::Uniform(0.))},
         EnthalpyHistoryMaterials{table:&[ReferenceEnthalpyMaterial{curve,reference_density_kg_m3:1.}],
             of_element:&[0],phase_conductivity:None},old,
         EnthalpyHistoryBudget{spatial:EnthalpyBudget{max_vertices:4,max_elements:1},max_steps:8}).unwrap();
-    ScanningEnthalpyRun::new(cx,base,sources,4,rad.then(radiation)).unwrap()
+    ScanningEnthalpyRun::new(cx,base,sources,4,radiation).unwrap()
 }
 fn flatten(g:&fs_conduction::bc::history::march::moving::sensitivity::MovingHeatGradient)->[f64;7]{
     [g.center_m[0],g.center_m[1],g.center_m[2],g.half_width_m[0],g.half_width_m[1],g.half_width_m[2],g.absorbed_power_w]
@@ -92,6 +101,7 @@ fn g3_scan_gradients_cross_nonlinear_conductivity_and_radiation_without_resolvin
             let endpoint=evolving.advance_linearized_to(cx,0.002,config(),budget()).unwrap();
             let g=endpoint.pullback_temperature(cx,&seed,linear()).unwrap();let a=flatten(&g.sources[0]);
             assert!(g.storage.transport.relative_residual<=linear().tolerance);
+            assert_eq!(g.radiation.is_some(),rad);
             let mut direct=run(cx,&hist,&mat,&curve,&old,vec![heater(p)],rad);
             assert_eq!(endpoint.report().solution().specific_enthalpy_j_kg,
                 direct.advance_to(cx,0.002,config()).unwrap().solution().specific_enthalpy_j_kg);
@@ -158,6 +168,11 @@ fn g0_derivative_refusals_are_atomic_and_event_binding_keeps_the_primal_side(){
         assert_eq!(kink.conduction().accepted_steps(),0);
         assert_eq!(kink.conduction().specific_enthalpy_j_kg(),&[100.;4]);
         kink.advance_to(cx,0.002,config()).unwrap();
+        let mut radiating=run(cx,&hist,&mat,&curve,&[20.;4],vec![heater(p)],true);
+        assert!(radiating.advance_linearized_to(cx,0.002,config(),
+            ScanSensitivityBudget{max_radiation_feedback_entries:0,..budget()}).is_err());
+        assert_eq!(radiating.conduction().accepted_steps(),0);
+        assert_eq!(radiating.conduction().specific_enthalpy_j_kg(),&[20.;4]);
         let held=MovingHeatSource::new([p[0],p[1],p[2]].map(|v|constant(v,Dims([1,0,0,0,0,0]))),
             [p[3],p[4],p[5]],TimeSignal::Table{times:vec![0.,0.01],values:vec![3.,0.],
                 dims:COMPONENT_POWER_DIMS,interp:Interp::Hold},0.,heater(p).budget()).unwrap();
@@ -241,5 +256,77 @@ fn g3_prescribed_scan_reverse_history_propagates_only_free_caloric_state(){
         for i in 0..4{let(mut plus,mut minus)=(old,old);plus[i]+=eps;minus[i]-=eps;
             close(first_g.storage.transport.previous_specific_enthalpy[i],
                 (objective(p,bath,plus)-objective(p,bath,minus))/(2.*eps));}
+    });
+}
+
+#[test]
+fn g3_scan_radiation_parameters_follow_the_physical_bath_and_emissivity(){
+    let m=mesh();let curve=chart();let mat=ConductivityModel::isotropic(
+        ConductivityTable::declared_curve(vec![(280.,1.),(380.,3.)]).unwrap());
+    with_cx(|cx|{
+        let p=[0.2,0.25,0.3,1.4,1.3,1.2,3.];let old=[10.,20.,30.,40.];
+        let seed=[0.3,-0.1,0.7,0.5];let ambient=293.;let emissivity=0.2;
+        for prescribed in [false,true]{
+            let hist=if prescribed{bath_history(cx,&m,299.)}else{history(cx,&m)};
+            let make=|ambient,emissivity|run_with_radiation(cx,&hist,&mat,&curve,&old,
+                vec![heater(p)],Some(radiation_at(ambient,emissivity)));
+            let mut evolving=make(ambient,emissivity);
+            let endpoint=evolving.advance_linearized_to(cx,0.002,config(),budget()).unwrap();
+            let gradient=endpoint.pullback_temperature(cx,&seed,linear()).unwrap();
+            let radiation=gradient.radiation.as_ref().unwrap();
+            assert_eq!(radiation.radiation_regions,vec!["surface".to_owned()]);
+            assert_eq!(radiation.reservoir_temperatures.len(),1);
+            assert_eq!(radiation.emissivities.len(),1);
+            assert!(radiation.reservoir_temperatures[0]>0.);
+            assert!(radiation.emissivities[0]<0.);
+            let objective=|ambient,emissivity|{
+                let mut trial=make(ambient,emissivity);
+                let step=trial.advance_to(cx,0.002,config()).unwrap();
+                seed.iter().zip(&step.solution().temperature).map(|(s,t)|s*t).sum::<f64>()
+            };
+            let dt=1e-3;let de=1e-5;
+            close(radiation.reservoir_temperatures[0],
+                (objective(ambient+dt,emissivity)-objective(ambient-dt,emissivity))/(2.*dt));
+            close(radiation.emissivities[0],
+                (objective(ambient,emissivity+de)-objective(ambient,emissivity-de))/(2.*de));
+            if prescribed{
+                // Fixed-row constraint multipliers are not external radiation.
+                let fixed=endpoint.pullback_temperature(cx,&[1.,0.,0.,0.],linear()).unwrap();
+                let radiation=fixed.radiation.unwrap();
+                close(radiation.reservoir_temperatures[0],0.);
+                close(radiation.emissivities[0],0.);
+            }
+        }
+    });
+}
+
+#[test]
+fn g3_scan_radiation_controls_keep_patch_declaration_order(){
+    let m=mesh();let curve=chart();let mat=ConductivityModel::isotropic_declared(2.).unwrap();
+    with_cx(|cx|{
+        let hist=ThermalBoundaryHistory::new(cx,ThermalBoundaryBuilder::new(&m)
+            .region("base",|face|face.centroid[2]==0.,ThermalBc::adiabatic()).unwrap()
+            .remainder("surface",ThermalBc::adiabatic()).unwrap(),
+            &Environment::earth_lab(),vec![],0.).unwrap();
+        let p=[0.2,0.25,0.3,1.4,1.3,1.2,3.];let old=[10.,20.,30.,40.];
+        let controls=[293.,0.2,287.,0.3];let seed=[0.3,-0.1,0.7,0.5];
+        let make=|x:[f64;4]|run_with_radiation(cx,&hist,&mat,&curve,&old,vec![heater(p)],
+            Some(ScanRadiation{patches:vec![radiation_patch("surface",x[0],x[1]),
+                radiation_patch("base",x[2],x[3])],config:AmbientRadiationConfig::default()}));
+        let mut evolving=make(controls);
+        let endpoint=evolving.advance_linearized_to(cx,0.002,config(),budget()).unwrap();
+        let gradient=endpoint.pullback(cx,&seed,linear()).unwrap().radiation.unwrap();
+        assert_eq!(gradient.radiation_regions,vec!["surface".to_owned(),"base".to_owned()]);
+        let analytic=[gradient.reservoir_temperatures[0],gradient.emissivities[0],
+            gradient.reservoir_temperatures[1],gradient.emissivities[1]];
+        let objective=|x|{
+            let mut trial=make(x);let step=trial.advance_to(cx,0.002,config()).unwrap();
+            seed.iter().zip(&step.solution().specific_enthalpy_j_kg).map(|(s,h)|s*h).sum::<f64>()
+        };
+        for i in 0..4{
+            let(mut plus,mut minus)=(controls,controls);let eps=if i%2==0{1e-3}else{1e-5};
+            plus[i]+=eps;minus[i]-=eps;
+            close(analytic[i],(objective(plus)-objective(minus))/(2.*eps));
+        }
     });
 }

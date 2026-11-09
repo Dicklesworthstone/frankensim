@@ -51,7 +51,7 @@ impl ScanObservable {
         -> Result<Vec<f64>, ScanSensitivityError>
     {
         match self {
-            Self::Temperature => Ok(binding.transport().transport().temperature_pullback(cx, &seed)?),
+            Self::Temperature => Ok(binding.transport().temperature_pullback(cx, &seed)?),
             Self::SpecificEnthalpy => Ok(seed),
             Self::LiquidMassFraction => binding.liquid_mass_fraction_pullback(cx, &seed),
         }
@@ -280,7 +280,7 @@ impl ReverseState {
             };
             observation.add_seed(cx, target, local)?;
         }
-        let local_h = binding.transport().transport().temperature_pullback(cx, &temperature_seed)?;
+        let local_h = binding.transport().temperature_pullback(cx, &temperature_seed)?;
         add(cx, &mut self.seed, &local_h)?;
         if let Some(seed) = fraction_seed {
             let local_h = binding.liquid_mass_fraction_pullback(cx, &seed)?;
