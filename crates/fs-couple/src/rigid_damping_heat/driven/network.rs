@@ -90,7 +90,7 @@ pub fn advance_candidate<'m, O: DepositionObserver>(
         config.into(),
         cancelled,
     )
-    .map(|(candidate, _)| candidate)
+    .map(|(candidate, _, _)| candidate)
 }
 
 /// Simultaneous driven graph with original finite-cell temperature feedback.
@@ -167,6 +167,7 @@ impl MechanicalAdvance for DrivenNetworkMotion<'_> {
             requested,
         )?;
         Ok(MechanicalStep {
+            relaxation_memory: None,
             connector_dissipation_j: core::mem::take(&mut step.connector_dissipation_j),
             connector_actuator_work_j: Some(core::mem::take(&mut step.connector_actuator_work_j)),
             dissipated_energy_j: step.dissipated_energy_j,

@@ -20,6 +20,9 @@ pub mod temperature;
 /// Simultaneous internal actuation, damping heat and finite caloric feedback.
 pub mod driven;
 
+/// Original Maxwell memory and native rigid motion on the finite thermal timeline.
+pub mod relaxation;
+
 use fs_math::{dd::Dd, eft::two_sum};
 use fs_mbd::spatial_loads::internal_impulse::viscous::network::ViscousNetworkLink;
 use fs_mbd::spatial_loads::internal_motion::{
@@ -88,6 +91,9 @@ pub struct RigidDampingThermalReport {
     pub mechanical_work_j: f64,
     /// Signed internal actuator supply/recovery, independent of passive heat [J].
     pub actuator_work_j: f64,
+    /// Elastic Maxwell storage change; exact zero for memoryless entries [J].
+    pub memory_energy_change_j: f64,
+    /// Kinetic, gravitational and retained elastic-memory storage change [J].
     pub mechanical_energy_change_j: f64,
     pub mechanical_residual_j: f64,
     pub native_drift_energy_defect_j: f64,
@@ -141,6 +147,9 @@ pub enum RigidDampingThermalError<E, S = Infallible> {
     DrivenMotion(fs_mbd::spatial_loads::internal_motion::viscous::driven::DrivenViscousMotionError),
     DrivenNetworkMotion(
         fs_mbd::spatial_loads::internal_motion::viscous::network::driven::DrivenViscousNetworkMotionError,
+    ),
+    RelaxationMotion(
+        fs_mbd::spatial_loads::internal_motion::viscous::network::relaxation::RelaxationNetworkMotionError,
     ),
     Thermal(DepositionError),
     Observer(E),
@@ -240,7 +249,7 @@ pub fn advance_candidate<'m, O: DepositionObserver>(
         config.into(),
         cancelled,
     )
-    .map(|(candidate, _)| candidate)
+    .map(|(candidate, _, _)| candidate)
 }
 
 // Only the source binding varies. The original timeline, native mechanics,
@@ -292,6 +301,8 @@ impl From<RigidDampingThermalConfig> for ThermalControls {
 #[derive(Clone)]
 struct MechanicalStep {
     states_after: Vec<RigidBodyState>,
+    // A native candidate stays pending until its matching caloric step accepts.
+    relaxation_memory: Option<relaxation::RelaxationNetworkMemory>,
     connector_dissipation_j: Vec<f64>,
     // Passive motion has no actuator bank and needs no per-step zero allocation.
     connector_actuator_work_j: Option<Vec<f64>>,
@@ -307,6 +318,7 @@ impl From<ViscousNetworkMotionStep> for MechanicalStep {
         let [_, endpoint] = step.half_sources;
         Self {
             states_after: endpoint.states_after,
+            relaxation_memory: None,
             connector_actuator_work_j: None,
             connector_dissipation_j: step.connector_dissipation_j,
             dissipated_energy_j: step.dissipated_energy_j,
@@ -328,6 +340,18 @@ trait MechanicalAdvance: Clone {
         dt_s: f64,
         requested: &dyn Fn() -> bool,
     ) -> Result<MechanicalStep, E, S>;
+    fn accept<E, S>(&mut self, step: &mut MechanicalStep) -> Result<(), E, S> {
+        if step.relaxation_memory.is_some() {
+            return Err(RigidDampingThermalError::Invalid(
+                "memoryless motion received an unexpected elastic history",
+            ));
+        }
+        Ok(())
+    }
+    /// Independent original-to-final storage change after accepted intervals.
+    fn memory_energy_change<E, S>(&self) -> Result<f64, E, S> {
+        Ok(0.0)
+    }
 }
 #[derive(Clone, Copy)]
 struct NetworkMotion(ViscousNetworkMotionControls);
@@ -372,7 +396,7 @@ fn advance_with_source<'m, O: DepositionObserver, S: DampingSource, M: Mechanica
     target_s: f64,
     config: ThermalControls,
     cancelled: impl FnMut() -> bool,
-) -> Result<(RigidDampingThermalCandidate<'m, O>, S), O::Error, S::Error> {
+) -> Result<(RigidDampingThermalCandidate<'m, O>, S, M), O::Error, S::Error> {
     let cancellation = RefCell::new(cancelled);
     let requested = || (*cancellation.borrow_mut())();
     let checkpoint = || {
@@ -480,10 +504,16 @@ fn advance_with_source<'m, O: DepositionObserver, S: DampingSource, M: Mechanica
                     * (Dd::from_f64(final_) - Dd::from_f64(initial));
         }
     }
+    let memory_change = number(
+        coupled
+            .mechanics
+            .memory_energy_change::<O::Error, S::Error>()?,
+    )?;
     let mechanical_change = kinetic
         .finish_retained()
         .map_err(ViscousNetworkMotionError::from)?
-        + potential;
+        + potential
+        + Dd::from_f64(memory_change);
     let accounts = &coupled.accounts;
     let mechanical = mechanical_change + accounts.heat - accounts.work - accounts.actuator;
     let handoff = accounts.deposited + accounts.unallocated - accounts.heat;
@@ -519,6 +549,7 @@ fn advance_with_source<'m, O: DepositionObserver, S: DampingSource, M: Mechanica
         external_thermal_heat_j: value(Dd::from_f64(audit.external_heat_j) - accounts.deposited)?,
         mechanical_work_j: value(accounts.work)?,
         actuator_work_j: value(accounts.actuator)?,
+        memory_energy_change_j: memory_change,
         mechanical_energy_change_j: value(mechanical_change)?,
         mechanical_residual_j: value(mechanical)?,
         native_drift_energy_defect_j: value(accounts.drift)?,
@@ -539,6 +570,7 @@ fn advance_with_source<'m, O: DepositionObserver, S: DampingSource, M: Mechanica
             report,
         },
         coupled.source,
+        coupled.mechanics,
     ))
 }
 
@@ -837,7 +869,7 @@ impl<O: DepositionObserver, S: DampingSource, M: MechanicalAdvance> DepositionOb
             .to_mut()
             .step(start_s, dt_s, old, thermal, check)
             .map_err(RigidDampingThermalError::Observer)?;
-        let step = pending.step;
+        let mut step = pending.step;
         for (total, &heat) in self
             .connector_heat
             .iter_mut()
@@ -866,6 +898,7 @@ impl<O: DepositionObserver, S: DampingSource, M: MechanicalAdvance> DepositionOb
             .pair_relaxations
             .checked_add(step.pair_relaxations)
             .ok_or(DepositionError::Budget("complete damper pair relaxations"))?;
+        self.mechanics.accept::<O::Error, S::Error>(&mut step)?;
         self.states = Cow::Owned(step.states_after);
         self.time_s = pending.end_s;
         check()?;

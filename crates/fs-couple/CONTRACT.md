@@ -12416,3 +12416,43 @@ physical/source admission. Those public tests were syntax parsed and source/API
 reviewed but were NOT Cargo-executed. Missing sibling workspace sources and
 writable dependency/build storage still prevent a complete Cargo/DSR gate;
 the focused native result is not a whole-workspace build claim.
+
+## Original spatial Maxwell memory with finite caloric storage
+
+`rigid_damping_heat::relaxation` connects the native simultaneous spatial
+Maxwell graph to the existing rigid/thermal transaction. The original rigid
+and Kelvin graph, complete branch factors/times, initial elastic histories and
+held efforts are explicit inputs. No relaxed spring geometry, equilibrium
+stiffness, source calibration or temperature dependence of those histories is
+inferred. Empty branch banks retain the existing driven viscous behavior.
+
+Every native moving source integrates original Kelvin and Maxwell heat along
+the same trajectory. Its complete candidate memory stays in the pending
+mechanical receipt until the matching caloric interval and observer accept.
+Only then does the private mechanical acceptance hook move that bank into the
+continuing history. Final source/thermal/energy refusal or cancellation still
+discards the entire candidate; borrowed original histories never change.
+
+The shared report adds `memory_energy_change_j`, zero for memoryless paths.
+The final independent energy account includes the original-to-final Maxwell
+storage change, retained before subtracting large absolute energies. Elastic
+recovery may accelerate the original bodies while its positive dashpot loss
+heats original finite cells. Neither released elastic storage, signed actuator
+recovery nor numerical drift is reclassified as heat. Shared receivers,
+partial routing, unallocated outflow, nonlinear calorics and actual native
+event clocks retain their existing semantics.
+
+The complete body and memory output banks are moved from the native receipt;
+initial memory is borrowed until an interval accepts. Branch, source, receiver,
+native work and dense-memory limits remain explicit. Original factors/times
+and instantaneous viscosity stay fixed through this entry. Native geometric
+composition and caloric transport require independent timestep refinement.
+
+Four focused integration groups cover preloaded memory recovery with finite
+nonlinear calorics, driven continuation against an independent physical ODE,
+empty-memory parity with the existing driven graph, and joint history/observer/
+caloric cancellation and refusal. All four passed against the original native
+MBD/pHS and finite-caloric/thermal event owners in a bounded native build, as
+did all four existing driven-thermal regressions after the shared acceptance
+hook changed. Numerical kernels and tested source were unchanged. A complete
+workspace build remains outstanding.

@@ -117,7 +117,7 @@ pub fn advance_candidate<'m, O: DepositionObserver>(
         config.into(),
         cancelled,
     )
-    .map(|(candidate, _)| candidate)
+    .map(|(candidate, _, _)| candidate)
 }
 
 /// The same driven pair with original finite-cell temperature feedback.
@@ -196,6 +196,7 @@ impl MechanicalAdvance for DrivenMotion {
         )?;
         Ok(MechanicalStep {
             states_after: step.states_after.to_vec(),
+            relaxation_memory: None,
             connector_dissipation_j: vec![step.dissipated_energy_j],
             connector_actuator_work_j: Some(vec![step.actuator_work_j]),
             dissipated_energy_j: step.dissipated_energy_j,

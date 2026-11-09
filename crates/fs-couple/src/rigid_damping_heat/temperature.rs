@@ -165,7 +165,7 @@ pub(super) fn advance_with_motion<
         temperatures_k: Vec::new(),
         evaluations: 0,
     };
-    let (native, source) = advance_with_source(
+    let (native, source, _) = advance_with_source(
         input, thermal, observer, source, mechanics, target_s, config, cancelled,
     )?;
     Ok(TemperatureDampingThermalCandidate {
