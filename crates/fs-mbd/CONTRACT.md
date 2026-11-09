@@ -947,6 +947,22 @@ displacement and velocity peaks, analytic linewidth, both whirl peaks, and
 original binary detuning under coordinate rescaling. G4 cases retain
 singular, budget, malformed-receiver and cancellation refusals.
 
+`RotorOperatingPoint::driven_antiresonance` and
+`RotorMaxwellOperatingPoint::driven_antiresonance` resolve coherent fixed-spin
+receiver minima under the original fixed complex force/torque. They share the
+native physical displacement/velocity projection and the `fs-phs` notch search.
+Every retained mechanical coordinate and Maxwell stress contributes before the
+signed receiver weights are applied; no observed response is inverted. A quiet
+receiver can coexist with finite absorber motion, bearing stress and heat.
+Response and tangent share one factor; recovery crossings skip unneeded tangent
+solves. Original mechanical and constitutive residuals, source admission, query
+limits and cancellation remain active. A caller-declared absolute recovery level
+uses the squared original observation units, with both crossings required; its
+width is not a free-mode or material Q. Three native tests check a tuned absorber
+against an independent 2x2 inverse, a memory-bearing cancellation with finite
+stress and one watt of branch heat, exact recovery-edge oracles, empty-memory
+equivalence, invalid receivers, missing edges, cancellation and budgets.
+
 `rotordynamics::periodic::periodic_floquet` forms the homogeneous period map
 for 1–256 declared constant-coefficient portions of a physical cycle. Signed
 spin and original full M/G are identical across the cycle; full C/K may change,

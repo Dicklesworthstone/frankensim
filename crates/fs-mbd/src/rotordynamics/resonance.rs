@@ -13,11 +13,13 @@ use super::{
 };
 use fs_math::{c64::C64, dd::Dd};
 pub use fs_phs::harmonic::resonance::{
-    DrivenResonance, ResonanceControls, ResonanceSearchError, ResonanceSurvey,
-    ResonanceSurveyControls, ResonanceSurveyError,
+    AntiresonanceControls, AntiresonanceRecovery, DrivenAntiresonance, DrivenResonance,
+    ResonanceControls, ResonanceSearchError, ResonanceSurvey, ResonanceSurveyControls,
+    ResonanceSurveyError,
 };
 use fs_phs::harmonic::resonance::{search_resonance, survey_resonances};
 
+mod antiresonance;
 mod synchronous;
 
 /// Original physical modes, force residues and shaft-speed sensitivities.
@@ -77,7 +79,7 @@ impl RotorObservation<'_> {
         self,
         result: &RotorHarmonicDerivative,
     ) -> Result<(C64, C64, f64), RotorError> {
-        let (weights, values, derivatives) = match self {
+        let (_, values, derivatives) = match self {
             Self::Displacement(weights) => (
                 weights,
                 &result.response.displacement,
@@ -89,7 +91,32 @@ impl RotorObservation<'_> {
                 &result.velocity_derivative,
             ),
         };
+        self.observe_phasors(
+            values,
+            derivatives,
+            result
+                .response
+                .relative_residual
+                .max(result.derivative_relative_residual),
+        )
+    }
+
+    // The selected original coordinate has the same receiver convention in
+    // instantaneous and hereditary bearing models. Retain signed interference
+    // before either peak or notch search forms an observation power.
+    fn observe_phasors(
+        self,
+        values: &[C64],
+        derivatives: &[C64],
+        relative_residual: f64,
+    ) -> Result<(C64, C64, f64), RotorError> {
         self.validate(values.len())?;
+        if values.len() != derivatives.len() {
+            return Err(RotorError::Invalid(
+                "matching original rotor observation and tangent required",
+            ));
+        }
+        let (Self::Displacement(weights) | Self::Velocity(weights)) = self;
         let mut sums = [Dd::from_f64(0.0); 4];
         for ((&weight, value), derivative) in weights.iter().zip(values).zip(derivatives) {
             for (sum, part) in
@@ -106,10 +133,7 @@ impl RotorObservation<'_> {
         Ok((
             C64::new(values[0], values[1]),
             C64::new(values[2], values[3]),
-            result
-                .response
-                .relative_residual
-                .max(result.derivative_relative_residual),
+            relative_residual,
         ))
     }
 }

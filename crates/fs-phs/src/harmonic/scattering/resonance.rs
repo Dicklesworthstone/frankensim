@@ -7,6 +7,7 @@ use crate::harmonic::resonance::{
 };
 use fs_math::c64::C64;
 
+mod antiresonance;
 mod sensitivity;
 
 /// Fixed real observation weights in the original physical units. Coherent

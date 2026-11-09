@@ -1314,6 +1314,17 @@ coherent source slopes, query/residual accounting, refusals/cancellation, and a
 damped host with a lossless absorber whose observed host cancellation retains
 0.01 J of internal energy.
 
+`ScatteringModel::driven_antiresonance` sends the complete closed-wave response
+and exact tangent to the same notch owner. State/effort, actual conjugate input
+`(2a-y)/Z`, original output and coherent outgoing `y-a` observations preserve
+physical source order, authored wave order, fixed reference loads and ordinary
+port contributions. Exact critical matching can give zero reflection while
+actual input work, internal energy and material heat remain finite. Recovery
+levels retain the selected observation's squared units. Five native regressions
+establish exact/partial matching and analytic recovery widths, reversed-order
+coherent multiport and reaction minima, refusal of an invented lossless-allpass
+notch, and cancellation/missing-edge/replay behavior.
+
 ### Physical parameter motion of observed resonance peaks
 
 `HarmonicModel::driven_resonance_with_parameter_derivative` differentiates one
