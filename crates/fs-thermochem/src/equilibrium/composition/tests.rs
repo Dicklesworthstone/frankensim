@@ -17,6 +17,7 @@ mod ionization;
 mod volume_entropy;
 mod energy_volume_path;
 mod enthalpy_path;
+mod enthalpy_pressure;
 
 const R: f64 = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
 const REFERENCE_T: f64 = 1000.0;

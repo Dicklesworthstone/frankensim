@@ -9,6 +9,7 @@ use fs_math::dd::Dd;
 use fs_math::det::{exp, ln};
 
 pub(super) mod expansion;
+pub mod enthalpy;
 pub mod volume;
 
 pub(super) struct Workspace {
@@ -242,6 +243,28 @@ impl Workspace {
             self.cp[i] = p.cp().value();
             if !self.g[i].is_finite() {
                 return Err(E::Arithmetic("dimensionless standard Gibbs energy"));
+            }
+        }
+        // One eligible species has no composition degree of freedom: its
+        // amount is fixed by the original elemental inventory. A coupled
+        // floating Newton update must not invent a one-ulp amount change when
+        // only pressure or temperature changes; a large formation reference
+        // would then turn that numerical inventory change into spurious heat.
+        if self.active.len() == 1 && self.rank == 1 && self.charge_constraint.is_none() {
+            let i = self.active[0];
+            let amount = self.targets[0] / self.a[i];
+            if !amount.is_finite() || amount <= 0.0 {
+                return Err(E::Arithmetic("single-species conserved amount"));
+            }
+            self.n[i] = amount;
+            self.log_n[i] = ln(amount);
+            self.log_total = self.log_n[i];
+            self.lambda[0] = (Dd::from_f64(self.g[i]) + Dd::from_f64(self.log_pressure_ratio))
+                / Dd::from_f64(self.a[i]);
+            let residuals = self.residuals(owner, false, self.log_total)?;
+            if converged(residuals, controls) {
+                poll(cancelled)?;
+                return Ok(0);
             }
         }
         for iteration in 0..=controls.maximum_iterations {
@@ -666,6 +689,28 @@ impl Workspace {
         controls: EquilibriumEnthalpySolveV1,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<IdealGasEquilibriumSolutionV1, E> {
+        let (temperature, iterations, temperature_iterations) = self.solve_enthalpy(
+            owner, target.value(), controls, None, cancelled,
+            |work, _, _| work.enthalpy(),
+        )?;
+        self.publish(
+            owner, temperature, controls.equilibrium, iterations,
+            temperature_iterations, Some(target), cancelled,
+        )
+    }
+
+    // One bounded HP inverse for both absolute targets and original-reference
+    // increments. Its derivative is reacting Cp, never frozen species Cp.
+    #[allow(clippy::too_many_arguments)]
+    fn solve_enthalpy<C: FnMut() -> bool>(
+        &mut self,
+        owner: &IdealGasEquilibriumV1,
+        target: f64,
+        controls: EquilibriumEnthalpySolveV1,
+        preferred: Option<f64>,
+        cancelled: &mut C,
+        mut enthalpy: impl FnMut(&Workspace, Temperature, &mut C) -> Result<f64, E>,
+    ) -> Result<(Temperature, usize, usize), E> {
         self.source_temperature_range(
             owner,
             controls.minimum_temperature_k,
@@ -675,23 +720,33 @@ impl Workspace {
             controls.minimum_temperature_k,
             controls.maximum_temperature_k,
         );
-        let mut iterations = self.solve(
+        let mut iterations = 0;
+        let mut temperature_iterations = 0;
+        let mut predictor = None;
+        if let Some(t) = preferred.filter(|t| t.is_finite() && *t > low && *t < high) {
+            poll(cancelled)?;
+            temperature_iterations = 1;
+            iterations += self.solve(owner, Temperature::new(t), controls.equilibrium, cancelled)?;
+            let residual = enthalpy(self, Temperature::new(t), cancelled)? - target;
+            if residual.abs() <= controls.enthalpy_tolerance_j {
+                return Ok((Temperature::new(t), iterations, temperature_iterations));
+            }
+            let next = match self.heat_capacity(Temperature::new(t), cancelled) {
+                Ok(cp) => Some(t - residual / cp),
+                Err(E::Cancelled) => return Err(E::Cancelled),
+                Err(_) => None,
+            };
+            predictor = Some((t, residual, next));
+        }
+        iterations += self.solve(
             owner,
             Temperature::new(low),
             controls.equilibrium,
             cancelled,
         )?;
-        let lower_h = self.enthalpy()?;
-        if (lower_h - target.value()).abs() <= controls.enthalpy_tolerance_j {
-            return self.publish(
-                owner,
-                Temperature::new(low),
-                controls.equilibrium,
-                iterations,
-                0,
-                Some(target),
-                cancelled,
-            );
+        let lower_h = enthalpy(self, Temperature::new(low), cancelled)?;
+        if (lower_h - target).abs() <= controls.enthalpy_tolerance_j {
+            return Ok((Temperature::new(low), iterations, temperature_iterations));
         }
         iterations += self.solve(
             owner,
@@ -699,43 +754,33 @@ impl Workspace {
             controls.equilibrium,
             cancelled,
         )?;
-        let upper_h = self.enthalpy()?;
-        if (upper_h - target.value()).abs() <= controls.enthalpy_tolerance_j {
-            return self.publish(
-                owner,
-                Temperature::new(high),
-                controls.equilibrium,
-                iterations,
-                0,
-                Some(target),
-                cancelled,
-            );
+        let upper_h = enthalpy(self, Temperature::new(high), cancelled)?;
+        if (upper_h - target).abs() <= controls.enthalpy_tolerance_j {
+            return Ok((Temperature::new(high), iterations, temperature_iterations));
         }
-        if !(lower_h < target.value() && target.value() < upper_h) {
+        if !(lower_h < target && target < upper_h) {
             return Err(E::EnthalpyNotBracketed {
                 lower_enthalpy_j: lower_h,
                 upper_enthalpy_j: upper_h,
             });
         }
         let mut t = low + (high - low) * 0.5;
-        let mut last_residual = upper_h - target.value();
-        let mut temperature_iterations = 0;
-        for step in 1..=controls.maximum_temperature_iterations {
+        let mut last_residual = upper_h - target;
+        if let Some((previous, residual, next)) = predictor {
+            if residual < 0.0 { low = previous; } else { high = previous; }
+            let margin = (high - low) * 0.05;
+            t = next.filter(|next| next.is_finite() && *next > low + margin && *next < high - margin)
+                .unwrap_or(low + (high - low) * 0.5);
+            last_residual = residual;
+        }
+        for step in (temperature_iterations + 1)..=controls.maximum_temperature_iterations {
             poll(cancelled)?;
             temperature_iterations = step;
             iterations +=
                 self.solve(owner, Temperature::new(t), controls.equilibrium, cancelled)?;
-            let residual = self.enthalpy()? - target.value();
+            let residual = enthalpy(self, Temperature::new(t), cancelled)? - target;
             if residual.abs() <= controls.enthalpy_tolerance_j {
-                return self.publish(
-                    owner,
-                    Temperature::new(t),
-                    controls.equilibrium,
-                    iterations,
-                    step,
-                    Some(target),
-                    cancelled,
-                );
+                return Ok((Temperature::new(t), iterations, step));
             }
             if residual < 0.0 {
                 low = t;

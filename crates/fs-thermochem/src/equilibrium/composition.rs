@@ -33,6 +33,8 @@ mod solve;
 pub mod state;
 /// Reusable source-bound equilibrium isentropes for flow consumers.
 pub use solve::expansion::path as isentrope;
+/// Reusable reacting pressure/enthalpy increments on original source references.
+pub use solve::enthalpy;
 pub use solve::expansion::{
     EquilibriumEntropySolveV1, EquilibriumExpansionErrorV1, EquilibriumThermodynamicResponseV1,
     EquilibriumThermodynamicStateV1,

@@ -63,6 +63,43 @@ impl Reference {
         Ok(reference)
     }
 
+    /// Extensive enthalpy change from the original source integrals, without
+    /// subtracting rounded absolute formation-energy totals.
+    pub(in crate::equilibrium::composition::solve) fn enthalpy_change(
+        &self, owner: &IdealGasEquilibriumV1, work: &Workspace,
+        temperature: Temperature, cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, E> {
+        let value = (self.normalized_enthalpy_change(owner, work, temperature, cancelled)?
+            * Dd::from_f64(work.scale)).to_f64();
+        if !value.is_finite() {
+            return Err(E::Arithmetic("relative reacting enthalpy"));
+        }
+        Ok(value)
+    }
+
+    // Shared by pressure/enthalpy and isentropic paths. Retain both product
+    // and summation tails in the original normalized amount basis. The actual
+    // composition-reference term remains: element residuals are never erased.
+    fn normalized_enthalpy_change(
+        &self, owner: &IdealGasEquilibriumV1, work: &Workspace,
+        temperature: Temperature, cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Dd, E> {
+        let mut value = Dd::ZERO;
+        for &i in &work.active {
+            poll(cancelled)?;
+            let sensible = owner.models[i].molar_enthalpy_change(self.temperature, temperature)
+                .map_err(|source| owner.species_error(i, source))?.value();
+            let amount = Dd::from_f64(work.n[i]);
+            let change = amount - Dd::from_f64(self.amounts[i]);
+            value = value + change * Dd::from_f64(self.enthalpies[i])
+                + amount * Dd::from_f64(sensible);
+        }
+        if !value.hi.is_finite() || !value.lo.is_finite() {
+            return Err(E::Arithmetic("normalized reacting enthalpy change"));
+        }
+        Ok(value)
+    }
+
     /// Actual extensive internal-energy change. Source integration precedes
     /// composition-dependent reference terms; absolute energy totals are never
     /// subtracted. Residual elemental-balance sensitivity remains physical.
@@ -100,19 +137,12 @@ impl Reference {
         for &i in &work.active { total.add(work.n[i]); }
         let log_total_change = crate::entropy::log_ratio(total.value(), self.total_amount);
         let log_pressure_change = crate::entropy::log_ratio(work.pressure.value(), self.pressure.value());
-        let mut dh = Sum::default();
         let mut ds = Sum::default();
         for &i in &work.active {
             poll(cancelled)?;
             let n = work.n[i];
             let dn = n - self.amounts[i];
             let model = &owner.models[i];
-            if WITH_ENTHALPY {
-                let h = model.molar_enthalpy_change(self.temperature, temperature)
-                    .map_err(|source| owner.species_error(i, source))?.value();
-                dh.add(dn * self.enthalpies[i]);
-                dh.add(n * h);
-            }
             let s = model.molar_entropy_change(self.temperature, temperature)
                 .map_err(|source| owner.species_error(i, source))?.value();
             let log_activity_change = (work.log_n[i] - self.log_amounts[i])
@@ -122,7 +152,10 @@ impl Reference {
         }
         // Composition changes are real: unlike a frozen-temperature difference,
         // their formation and partial-entropy reference terms cannot be omitted.
-        let dh = dh.value() / work.initial_mass;
+        let dh = if WITH_ENTHALPY {
+            (self.normalized_enthalpy_change(owner, work, temperature, cancelled)?
+                / Dd::from_f64(work.initial_mass)).to_f64()
+        } else { 0.0 };
         let ds = ds.value() * work.scale;
         if !dh.is_finite() || !ds.is_finite() {
             return Err(E::Arithmetic("relative reacting enthalpy or entropy").into());
