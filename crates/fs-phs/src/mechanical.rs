@@ -14,6 +14,11 @@ use crate::{
 use fs_la::factor::cholesky;
 use fs_math::det;
 
+mod harmonic;
+pub use harmonic::{
+    MechanicalHarmonicDirection, MechanicalHarmonicDirectionControls, MechanicalRelaxationDirection,
+    PreparedMechanicalHarmonicDirection,
+};
 mod impulse;
 pub use impulse::{MechanicalImpulse, MechanicalImpulseControls};
 mod sensitivity;

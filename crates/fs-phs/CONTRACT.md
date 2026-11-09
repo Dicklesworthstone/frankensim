@@ -4150,3 +4150,35 @@ First-order edge queries and existing search/refusal semantics remain.
 Focused tests exercise analytic ODE and singular-descriptor oscillators,
 ordinary plus selected sources, Maxwell histories, changing source/coupling/
 reference, independent heat/storage/flux, exact reflected zeros and reuse.
+
+### Original mechanical directions for complete harmonic response
+
+`LinearMechanicalSystem::prepare_harmonic_parameter_direction` prepares one
+complete authored local direction of original M, full C, relaxed K, force map P,
+and every Maxwell stiffness, strain projection and relaxation time. The cached
+full inverse mass supplies `-M^-1*M_theta*M^-1`; no factorization or model
+perturbation is repeated. Immutable complete J/R/Q/G derivatives are borrowed
+through `as_harmonic_direction` and reused across frequencies and original
+harmonic observations. Root and decay-rate derivative accessors support
+physical stress and independent heat recovery.
+
+Authored M/K directions are exactly symmetric; C retains both its symmetric
+resistance and skew gyroscopic changes. Signed local derivatives need not be
+passive. Original state, port and arm counts stay fixed, and equal-time or
+zero-projection arms remain distinct. Each Maxwell coupling
+`c=sqrt(k)*b` retains both stiffness and projection contributions. Differentiating
+a canonical effort alone does not supply physical stress: the changing sqrt(k)
+must also be included by the physical observation owner.
+
+The existing compensated accumulator retains both words through the two
+inverse-mass contractions and combined elastic/material contributions. Local
+binary scales preserve representable coefficients across extreme coordinate
+units. Root/rate slopes avoid premature reciprocal squares. Complete dimension,
+payload and work bounds precede allocation, with bounded cancellation and no
+partial result. There is no inferred material law, finite-parameter interval,
+topology change, fitting derivative or additional passivity certificate.
+
+Focused native tests check independently differentiated oscillator/Maxwell laws,
+coupled inertia and gyroscopic damping, changing conjugate ports, equal-time and
+initially uncoupled arms, branch reparameterization, weak inverse-mass remainders,
+capacity/cancellation/reuse and complete coordinate-unit covariance at 2^+/-400.
