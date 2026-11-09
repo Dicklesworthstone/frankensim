@@ -95,6 +95,10 @@ impl PreparedSoftScreenReceivers<'_, '_, '_, '_> {
         self.kernel_evaluations
     }
 
+    pub(super) fn incident_samples(&self) -> &[IncidentSample] {
+        &self.incident
+    }
+
     /// Incident-plus-scattered p [Pa] and Euler velocity [m/s]. The incident
     /// field is added once, retaining interference and reactive near fields.
     /// `near_field::FirstOrder` consumes these same physical p/u components.

@@ -3807,3 +3807,58 @@ finite-source reciprocity and superposition, total Euler-gradient agreement,
 live free-edge density, resource/cancellation refusals, and worker/replay
 determinism. Full-crate integration requires the complete pinned workspace.
 
+
+### Finite apertures through a rigid baffle by exact Babinet conversion
+
+`open_screen::soft::SoftScreenScattering::as_rigid_aperture` interprets the
+original solved soft-screen support as the finite open area in an infinite
+zero-thickness rigid baffle. Multiple disconnected apertures retain every
+mutual interaction in the original single-layer density; no aperture is
+assigned an unobstructed or prescribed piston velocity. The explicit unit
+transmission normal points from the declared source half-space into the
+transmission half-space. All finite volume/force/stress sources must lie
+strictly on the source side, and every supplied plane wave must travel toward
+the baffle with a resolved normal component.
+
+For `p_D = p_i + S sigma`, exact acoustic Babinet gives `p_T = -S sigma` on
+the transmitted side and `p_I = p_i + p_i(reflected point) + S sigma` on the
+incident side. The same identity differentiates to the actual Euler velocity;
+the reflected vector reverses its normal component, including finite-source
+reactive motion and the full force/stress tensor response. See Gibbs et al.
+(2020), Remark 1, equation (4), [doi:10.1007/s42985-020-00013-3](https://doi.org/10.1007/s42985-020-00013-3),
+and the 3D equivalence discussed by Chandler-Wilde et al. (2021), §1,
+[doi:10.1007/s00211-021-01182-y](https://doi.org/10.1007/s00211-021-01182-y).
+
+Every aperture vertex must be exactly coplanar under the original `fs-ivl`
+orientation predicate; exact 2D orientation projections first establish that
+the defining triangle is noncollinear, even if a rounded cross product is nonzero.
+A common exact power-of-two scaling puts coordinates
+in [-2,2]; a nonzero scaled magnitude below 2^-128 refuses, retaining the
+predicate's no-intermediate-underflow premise. Rounded arbitrary rotations
+can therefore refuse; geometry is never flattened or snapped. Original mesh
+nonintersection and convergence obligations remain. Exactly on-plane sources
+or receivers refuse because this adapter supplies off-plane fields, not
+surface-trace jump quadrature.
+
+`PreparedRigidApertureReceivers` borrows the existing source-bound raw Green
+rows and stores only additional reflected incident samples. Direct/reflected
+source work and retained row storage are bounded before sampling; cancellation
+returns no partial fields. Evaluation reuses every original adaptive pressure
+and gradient row, DD-combines coherent fields, and returns the existing
+`near_field::VectorObservation` for flux and microphone consumers. Quadrature
+discrepancies remain estimates for the original scattered representation,
+not bounds on mesh error, source error or interference-conditioned rounding.
+Transmitted far fields preserve global phase. Total transmitted power is
+half the planar density's original outgoing scattered power, with the same
+angular-resolution obligations.
+
+Five `soft::aperture::tests` cover two-hole Babinet fields and independent
+hemisphere-power integration, coherent volume/force/stress image fields,
+an exactly authored translated rational plane, and domain/work/cancellation
+refusals (G1/G3). The 2/4/8 subdivision ladder measures pressure differences
+between receivers at z=+/-0.025 m: approximately 0.145823, 0.060398 and
+0.058866 Pa. These include physical finite separation and are not zero-offset
+trace-error bounds. Normal velocity near the rigid complement at z=+/-0.001 m
+is below 3e-6 m/s in that fixture. No finite baffle, wall thickness, material
+impedance, motion, source feedback or compact multipole-array qualification is
+added.

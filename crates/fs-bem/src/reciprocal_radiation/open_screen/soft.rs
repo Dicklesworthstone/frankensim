@@ -19,6 +19,8 @@ use fs_la::eigen_complex::LuComplex;
 
 mod receivers;
 pub use receivers::PreparedSoftScreenReceivers;
+mod aperture;
+pub use aperture::{PreparedRigidApertureReceivers, RigidApertureScattering};
 
 /// Original open geometry and frequency-independent P0 single-layer moments.
 /// Multiple disconnected open components retain every mutual interaction.

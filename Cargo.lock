@@ -1095,6 +1095,7 @@ dependencies = [
  "fs-fft",
  "fs-fmm",
  "fs-geom",
+ "fs-ivl",
  "fs-la",
  "fs-material",
  "fs-math",
