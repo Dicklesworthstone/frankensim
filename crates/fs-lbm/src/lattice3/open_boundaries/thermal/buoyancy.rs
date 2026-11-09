@@ -32,9 +32,10 @@ use fs_math::dd::Dd;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BoussinesqOpenLimits3 {
     pub maximum_cells: usize,
-    /// Payload of the three force fields: fixed background, accepted total
-    /// force, and candidate total force. Original grid/thermal storage and
-    /// allocator metadata/spare caller capacity are outside this bound.
+    /// Payload of the three retained force fields: accepted background, accepted
+    /// total force, and candidate total force. Original grid/thermal storage,
+    /// caller-supplied endpoint buffers and allocator metadata/spare capacity
+    /// are outside this bound.
     pub maximum_force_storage_bytes: usize,
     /// Absolute per-component force-density difference between the preview
     /// and the actual final scalar endpoint. This resolves rounding of the
@@ -98,7 +99,10 @@ pub struct BoussinesqOpenStep3 {
     /// Sum of (F_n+F_(n+1))/2 over original fluid cells for one lattice step.
     /// Boundary/wall momentum exchange is separate from this body source.
     pub body_impulse: [f64; 3],
-    /// Body impulse after subtracting the explicitly held background once.
+    /// Sum of (B_n+B_(n+1))/2 for the authored mechanical background.
+    /// This remains separate from thermal buoyancy and wall/reservoir transport.
+    pub background_impulse: [f64; 3],
+    /// Body impulse after subtracting the trapezoidal mechanical background.
     pub buoyancy_impulse: [f64; 3],
     pub maximum_force_defect: f64,
 }
@@ -106,10 +110,11 @@ pub struct BoussinesqOpenStep3 {
 /// One accepted flow/temperature/force epoch, with bounded retained scratch.
 ///
 /// Reference heat capacity, reference-density buoyancy and external mechanical
-/// force are explicit. The background is held for this run. Population density
-/// remains the native weakly compressible pressure state, never the thermal
-/// density projection. There is no mutable escape that detaches force history
-/// from accepted momentum or permits an independent thermal time advance.
+/// force are explicit. The background can be held or supplied at the next
+/// accepted time. Population density remains the native weakly compressible
+/// pressure state, never the thermal density projection. There is no mutable
+/// escape that detaches force history from accepted momentum or permits an
+/// independent thermal time advance.
 pub struct BoussinesqOpenGrid3<L: EquilibriumLattice3<Q>, const Q: usize> {
     flow: ForcedOpenBoundaryGrid3<L, Q>,
     thermal: ThermalOpenField3,
@@ -278,6 +283,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
     pub fn law(&self) -> BoussinesqLaw3 {
         self.law
     }
+    /// Mechanical background in the same accepted epoch as total force and heat.
     pub fn background_forces(&self) -> &[[f64; 3]] {
         &self.background
     }
@@ -410,6 +416,66 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
         )
     }
 
+    /// Advance mixed buoyant/forced convection with a prescribed mechanical
+    /// background at the next accepted time.
+    ///
+    /// Total force is B + F_b(T): collision uses its retained opening epoch,
+    /// while native reconstruction and the final heat-source kick use the
+    /// endpoint background plus the buoyancy preview from transported heat.
+    /// The body/background/buoyancy impulses retain the trapezoidal source
+    /// convention. Neither mechanical work nor buoyancy work is deposited
+    /// as heat. The original opening-velocity thermal split is unchanged.
+    ///
+    /// The endpoint field must cover every original cell, be finite and vanish
+    /// on solid cells. Successful publication exchanges it with the previous
+    /// background buffer for reuse. Refusal or cancellation leaves this input
+    /// buffer and every accepted flow/thermal/force/wall epoch unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_serial(
+        &mut self,
+        cx: &Cx<'_>,
+        collisions: Option<&[L::Collision]>,
+        background_at_end: &mut Vec<[f64; 3]>,
+        heat_per_step: &[f64],
+        thermal_relaxation: Option<&[f64]>,
+        origin: [f64; 3],
+    ) -> Result<BoussinesqOpenStep3, BoussinesqOpenError3<L::Error>> {
+        self.advance_with_diffusion_poll(
+            Some(background_at_end),
+            collisions,
+            heat_per_step,
+            thermal_relaxation,
+            None,
+            origin,
+            &mut || cx.checkpoint().map_err(|_| GridError3::Cancelled),
+        )
+    }
+
+    /// Combine a changing mechanical background with the original full-tensor
+    /// heat transport and temperature-dependent buoyancy in one transaction.
+    /// Tensor axes, capacity, limits and history retain their native meanings;
+    /// background-buffer exchange matches [`Self::advance_serial`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_serial_with_tensor_diffusion(
+        &mut self,
+        cx: &Cx<'_>,
+        collisions: Option<&[L::Collision]>,
+        background_at_end: &mut Vec<[f64; 3]>,
+        heat_per_step: &[f64],
+        diffusion: DiffusivityField<'_, 3>,
+        origin: [f64; 3],
+    ) -> Result<BoussinesqOpenStep3, BoussinesqOpenError3<L::Error>> {
+        self.advance_with_diffusion_poll(
+            Some(background_at_end),
+            collisions,
+            heat_per_step,
+            None,
+            Some(diffusion),
+            origin,
+            &mut || cx.checkpoint().map_err(|_| GridError3::Cancelled),
+        )
+    }
+
     pub(super) fn step_with_poll(
         &mut self,
         collisions: Option<&[L::Collision]>,
@@ -438,11 +504,49 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
         origin: [f64; 3],
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<BoussinesqOpenStep3, BoussinesqOpenError3<L::Error>> {
+        self.advance_with_diffusion_poll(
+            None,
+            collisions,
+            heat_per_step,
+            thermal_relaxation,
+            diffusion,
+            origin,
+            poll,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_with_diffusion_poll(
+        &mut self,
+        background_at_end: Option<&mut Vec<[f64; 3]>>,
+        collisions: Option<&[L::Collision]>,
+        heat_per_step: &[f64],
+        thermal_relaxation: Option<&[f64]>,
+        diffusion: Option<DiffusivityField<'_, 3>>,
+        origin: [f64; 3],
+        poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
+    ) -> Result<BoussinesqOpenStep3, BoussinesqOpenError3<L::Error>> {
         poll()?;
         let cells = self.thermal.populations().len();
+        let endpoint_background = background_at_end
+            .as_deref()
+            .map_or(self.background.as_slice(), Vec::as_slice);
+        if endpoint_background.len() != cells {
+            return Err(BoussinesqOpenError3::Invalid(
+                "endpoint background field shape",
+            ));
+        }
         for cell in 0..cells {
             if cell % 64 == 0 {
                 poll()?;
+            }
+            if background_at_end.is_some()
+                && (endpoint_background[cell].iter().any(|v| !v.is_finite())
+                    || (self.thermal.solid[cell] && endpoint_background[cell] != [0.0; 3]))
+            {
+                return Err(BoussinesqOpenError3::Invalid(
+                    "nonfinite endpoint background or force on a solid cell",
+                ));
             }
             self.thermal.velocities[cell] = if self.thermal.solid[cell] {
                 [0.0; 3]
@@ -490,7 +594,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
             }
             self.pending_force[cell] = self
                 .law
-                .sample(transported + half_heat, self.background[cell])
+                .sample(transported + half_heat, endpoint_background[cell])
                 .map_err(|source| BoussinesqOpenError3::Law { cell, source })?
                 .total;
         }
@@ -528,7 +632,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
             };
             let actual = self
                 .law
-                .sample(temperature, self.background[cell])
+                .sample(temperature, endpoint_background[cell])
                 .map_err(|source| BoussinesqOpenError3::Law { cell, source })?
                 .total;
             for axis in 0..3 {
@@ -547,14 +651,24 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
                 body[axis] = body[axis]
                     + Dd::from_f64(0.5 * self.flow.forces[cell][axis])
                     + Dd::from_f64(0.5 * applied);
-                background[axis] = background[axis] + Dd::from_f64(self.background[cell][axis]);
+                // Preserve the held-background arithmetic, including subnormal
+                // values, when both endpoint components are identical.
+                if endpoint_background[cell][axis] == self.background[cell][axis] {
+                    background[axis] = background[axis] + Dd::from_f64(self.background[cell][axis]);
+                } else {
+                    background[axis] = background[axis]
+                        + Dd::from_f64(0.5 * self.background[cell][axis])
+                        + Dd::from_f64(0.5 * endpoint_background[cell][axis]);
+                }
             }
         }
         let body_impulse = body.map(Dd::to_f64);
+        let background_impulse = background.map(Dd::to_f64);
         let buoyancy_impulse =
             core::array::from_fn(|axis| (body[axis] - background[axis]).to_f64());
         if body_impulse
             .iter()
+            .chain(&background_impulse)
             .chain(&buoyancy_impulse)
             .any(|v| !v.is_finite())
         {
@@ -566,12 +680,16 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
             momentum,
             heat,
             body_impulse,
+            background_impulse,
             buoyancy_impulse,
             maximum_force_defect,
         };
         poll()?;
         self.flow
             .publish_with_force_swap(step, &mut self.pending_force);
+        if let Some(background_at_end) = background_at_end {
+            core::mem::swap(&mut self.background, background_at_end);
+        }
         self.thermal.publish(step, heat);
         self.last_step = Some(report);
         Ok(report)

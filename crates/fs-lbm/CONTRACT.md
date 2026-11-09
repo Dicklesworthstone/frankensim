@@ -1304,13 +1304,48 @@ Focused checks execute the actual generic-poll native owner cores across five D3
 
 ## Native open-flow Boussinesq temperature feedback
 
-`lattice3::open_boundaries::thermal::buoyancy::BoussinesqOpenGrid3` owns native D3Q19/D3Q27 momentum, D3Q7 temperature, finite thermal walls/conduction and both force epochs as one accepted state. Its explicit affine law is `F_b = -rho_ref * beta_theta * (theta - theta_ref) * gravity_lu`, plus an authored, held per-cell mechanical background. Here `beta_theta = beta_SI * delta_T` and `gravity_lu = gravity_SI * dt^2 / dx`; the law uses fixed reference density while native macroscopic velocity retains the actual population density. Attachment preserves physical momentum/stress and existing thermal history. This is fixed-reference-capacity heat transport with Boussinesq momentum feedback, not variable-density mass transport or a total-energy equation.
+`lattice3::open_boundaries::thermal::buoyancy::BoussinesqOpenGrid3` owns native D3Q19/D3Q27 momentum, D3Q7 temperature, finite thermal walls/conduction and both force epochs as one accepted state. Its explicit affine law is `F_b = -rho_ref * beta_theta * (theta - theta_ref) * gravity_lu`, plus an authored per-cell mechanical background that is held or supplied at the next accepted time. Here `beta_theta = beta_SI * delta_T` and `gravity_lu = gravity_SI * dt^2 / dx`; the law uses fixed reference density while native macroscopic velocity retains the actual population density. Attachment preserves physical momentum/stress and existing thermal history. This is fixed-reference-capacity heat transport with Boussinesq momentum feedback, not variable-density mass transport or a total-energy equation.
 
 Each step transports heat at the accepted force-corrected velocity, previews the endpoint force from transported temperature plus the remaining source half-kick, and performs one original native momentum step. Collision uses the retained opening force; donor/target reconstruction and endpoint readback use their local candidate force. The final scalar source kick uses the admitted native endpoint velocity. Its actual temperature must reproduce the applied force within the caller's absolute component tolerance; the accepted representation retains that applied force. Scalar splitting retains its original temporal-order limits. The separately reported trapezoidal body/buoyancy impulse is not deposited as sensible heat.
 
 The declared relative-density-departure envelope admits cell endpoints/source previews, authored reservoir/fixed-temperature wall data and actual candidate fluid traces at reservoirs and external/internal walls. Reservoir receipts retain the extrema of their reconstructed incoming/outgoing population pairs, including outflow/backflow. Finite-solid bulk temperatures remain governed by the thermal model, not the fluid density law. A refusal or cancellation publishes none of the flow, force, thermal history, wall state, time or receipts. Three explicitly budgeted force fields and the existing native/scalar/solid scratch are reused without per-step adapter allocation; no iterative heat re-solve is needed.
 
 Focused checks execute five actual coupled-owner cases: analytic uniformly heated boxes on both native lattices with reference density distinct from population density; thermal reversal with zero net buoyancy impulse; a conducting-wall open channel with measured two-way feedback and independent fluid-plus-solid thermal closure; final-poll/domain refusal with bitwise exact retry; and fluid-boundary domain enforcement despite admissible mixed cells. Two direct law tests cover signs, temperature-datum shifts, anomalous expansion, zero-expansion background preservation and explicit domain refusal. The numerical-owner tests use extracted production cores and real native/math/sparse kernels, excluding only execution-context wrappers. Full Cargo/public-context integration and the planned developing-channel Nusselt/refinement reference remain unverified by these tests.
+
+### Mixed buoyant and prescribed-force convection
+
+`BoussinesqOpenGrid3::advance_serial` and `advance_serial_with_tensor_diffusion`
+accept a caller-owned `background_at_end: &mut Vec<[f64; 3]>`. The field is the
+mechanical force density at the next accepted lattice time, before adding
+thermal buoyancy. It covers every original cell, is finite and vanishes on
+solid cells. Spatially nonuniform and time-varying backgrounds use the same
+native D3Q19/D3Q27 momentum and D3Q7 heat owners as held-background steps.
+
+Collision uses the retained total force `F_n = B_n + F_b(theta_n)`.
+Reservoir reconstruction, endpoint physical velocity and the final scalar
+source half-kick use `F_(n+1) = B_(n+1) + F_b(theta_transport + Q/2)`.
+The original final force-consistency gate checks the actual accepted
+temperature against this endpoint background. Thermal advection retains its
+opening physical velocity and existing source split; no additional temporal
+order is claimed.
+
+`BoussinesqOpenStep3::background_impulse` reports the fluid-cell sum of
+`(B_n + B_(n+1))/2`. `body_impulse` uses the corresponding total-force
+endpoints, and `buoyancy_impulse` subtracts the mechanical background using
+compensated accumulation. Wall and reservoir momentum remain separate.
+Mechanical and buoyant work are not deposited as heat; the original reservoir,
+finite-wall, immersed-solid and thermal-source accounts remain authoritative.
+
+After the final cancellation gate, accepted flow, total force, thermal state,
+wall histories and mechanical background publish together. Success exchanges
+the caller's endpoint buffer with the old accepted background for reuse;
+refusal or cancellation preserves both the input buffer and accepted epoch.
+The owner retains its existing three force fields without a per-step force
+allocation. Caller endpoint storage is outside `maximum_force_storage_bytes`,
+which bounds retained field payload. An unchanged endpoint background retains
+held-background arithmetic. Focused regression definitions cover affine
+forcing/heating on both lattices, identical-endpoint equivalence, spatial
+forcing with tensor/finite-wall heat closure, and refusal with exact retry.
 
 ## Constituent mass on accepted material transfers
 

@@ -179,6 +179,7 @@ struct Accepted<const Q: usize> {
     flow: Vec<[u64; Q]>,
     heat: Vec<[u64; 7]>,
     force: Vec<[u64; 3]>,
+    background: Vec<[u64; 3]>,
     walls: [Vec<ThermalWall>; 6],
     steps: [usize; 2],
     heat_receipt: Option<ThermalOpenBalance3>,
@@ -204,6 +205,11 @@ fn accepted<L: EquilibriumLattice3<Q>, const Q: usize>(
         force: coupled
             .flow()
             .forces()
+            .iter()
+            .map(|f| f.map(f64::to_bits))
+            .collect(),
+        background: coupled
+            .background_forces()
             .iter()
             .map(|f| f.map(f64::to_bits))
             .collect(),
@@ -644,3 +650,5 @@ fn boussinesq_tensor_refusal_and_late_cancellation_preserve_force_wall_and_heat_
     assert_eq!(retried, expected);
     assert_eq!(accepted(&actual), accepted(&reference));
 }
+
+mod varying_background;
