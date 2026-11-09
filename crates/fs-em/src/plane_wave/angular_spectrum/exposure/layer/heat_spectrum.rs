@@ -114,9 +114,9 @@ impl<'p, 'e, 'b, 's, 'm> AngularSpectrumExposureLayerHeatSpectrum<'p, 'e, 'b, 's
         )
     }
     /// Detector-weighted expected heat density [W/m³] for either profile.
-    /// When every source bank admits the shared positive temporal factor,
-    /// coherent nulls are resolved before squaring each original reservoir.
-    /// Other windows retain the prepared spectrum's original analytic law.
+    /// Each eligible source bank resolves coherent nulls before squaring its
+    /// reservoirs. Other banks retain their original real/proper DD pair law;
+    /// if none admit, the cached flattened spectrum remains the fast path.
     pub fn observe_window(&self, window: HarmonicWindow) -> Result<f64, AngularSpectrumError> {
         self.observe_window_cancellable(window, || false)
     }
@@ -412,15 +412,17 @@ fn positive_heat_mean(
         return Err(bad("retained heat reservoir groups are inconsistent"));
     }
     let mut frequencies = [0.0; MAX_UNIFORM_HARMONIC_BAND_TONES];
-    // Admit every source first, so a mixed unsupported observation takes its
-    // original spectrum path before any positive projections are performed.
+    // Keep the cached spectrum fast path when no source benefits. An unrelated
+    // narrow, wide-carrier or even silent bank must not disable an eligible
+    // source's positive contraction.
+    let mut any_positive = false;
     for source in banks.chunks_exact(reservoirs_per_source) {
         poll(cancelled)?;
         let first = &source[0];
         let lines = &fields[first.start..first.end];
         let proper = first.law == HarmonicProductLaw::ProperComplex;
         if positive_band_tones(lines.len(), proper).is_none() {
-            return Ok(None);
+            continue;
         }
         for (frequency, line) in frequencies.iter_mut().zip(lines) {
             *frequency = line.omega;
@@ -431,9 +433,13 @@ fn positive_heat_mean(
             window.uniform_real_band_mode_count_rad_s(&frequencies[..lines.len()])
         }
         .map_err(|_| bad("retained heat temporal factor is unrepresentable"))?;
-        if admitted.is_none() {
-            return Ok(None);
+        if admitted.is_some() {
+            any_positive = true;
+            break;
         }
+    }
+    if !any_positive {
+        return Ok(None);
     }
     let mut workspace = UniformHarmonicBandWorkspace::new();
     let mut heat = Dd::ZERO;
@@ -441,17 +447,42 @@ fn positive_heat_mean(
         poll(cancelled)?;
         let first = &source[0];
         let lines = &fields[first.start..first.end];
-        for (frequency, line) in frequencies.iter_mut().zip(lines) {
-            *frequency = line.omega;
-        }
-        let positive = PositiveLayerMoments::prepare(
-            window,
-            &frequencies[..lines.len()],
-            first.law == HarmonicProductLaw::ProperComplex,
-            &mut workspace,
-            cancelled,
-        )?
-        .ok_or_else(|| bad("retained heat temporal admission changed"))?;
+        let proper = first.law == HarmonicProductLaw::ProperComplex;
+        let positive = if positive_band_tones(lines.len(), proper).is_some() {
+            for (frequency, line) in frequencies.iter_mut().zip(lines) {
+                *frequency = line.omega;
+            }
+            PositiveLayerMoments::prepare(
+                window,
+                &frequencies[..lines.len()],
+                proper,
+                &mut workspace,
+                cancelled,
+            )?
+        } else {
+            None
+        };
+        let Some(positive) = positive else {
+            heat = heat
+                + if proper {
+                    retained_pair_heat_mean(
+                        source,
+                        fields,
+                        |a, b| window.proper_product_kernel(a, b),
+                        ProperHarmonicProduct::mean_real_product_parts_dd,
+                        cancelled,
+                    )?
+                } else {
+                    retained_pair_heat_mean(
+                        source,
+                        fields,
+                        |a, b| window.product_kernel(a, b),
+                        HarmonicProduct::mean_real_product_parts_dd,
+                        cancelled,
+                    )?
+                };
+            continue;
+        };
         for bank in source {
             let lines = &fields[bank.start..bank.end];
             for axis in 0..3 {
@@ -478,6 +509,41 @@ fn positive_heat_mean(
     }
     poll(cancelled)?;
     nonnegative_heat(heat).map(Some)
+}
+
+// A mixed observation still honors unsupported banks' exact source statistics
+// and shutter. Each kernel serves all reservoirs of that source; work is at
+// most its already admitted ordered products, with no temporary spectrum.
+fn retained_pair_heat_mean<P: Copy>(
+    banks: &[HeatBank],
+    fields: &[HeatLine],
+    kernel: impl Fn(f64, f64) -> Result<P, fs_fft::harmonic_window::WindowError>,
+    product: impl Fn(P, [Dd; 2], [Dd; 2]) -> Result<Dd, fs_fft::harmonic_window::WindowError>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Dd, AngularSpectrumError> {
+    let first = &banks[0];
+    let lines = &fields[first.start..first.end];
+    let mut heat = Dd::ZERO;
+    for (i, left) in lines.iter().enumerate() {
+        for (j, right) in lines.iter().enumerate() {
+            poll(cancelled)?;
+            let kernel = kernel(left.omega, right.omega)
+                .map_err(|_| bad("retained heat pair kernel is unrepresentable"))?;
+            for bank in banks {
+                for axis in 0..3 {
+                    let a = fields[bank.start + i].field[axis].map(|value| value * bank.left_scale);
+                    let b = fields[bank.start + j].field[axis];
+                    heat = heat
+                        + product(kernel, a, b)
+                            .map_err(|_| bad("retained heat pair product is unrepresentable"))?;
+                }
+            }
+        }
+    }
+    if !heat.to_f64().is_finite() {
+        return Err(bad("retained heat pair moment is unrepresentable"));
+    }
+    Ok(heat)
 }
 
 fn prepare_products(

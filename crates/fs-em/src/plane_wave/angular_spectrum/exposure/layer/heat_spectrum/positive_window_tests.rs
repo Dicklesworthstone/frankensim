@@ -39,6 +39,14 @@ fn relative(actual: f64, expected: f64) {
     );
 }
 
+fn spectrum_limits() -> HarmonicProductSpectrumLimits {
+    HarmonicProductSpectrumLimits {
+        maximum_products: 128,
+        maximum_generated_terms: 256,
+        maximum_workspace_bytes: 256 * core::mem::size_of::<HarmonicProductTone>(),
+    }
+}
+
 #[test]
 fn retained_local_heat_resolves_real_and_proper_short_shutter_nulls() {
     let base = 562_949_953_421_312.0;
@@ -146,8 +154,14 @@ fn retained_proper_heat_applies_material_and_peak_scale_before_products() {
         let expected = ((Dd::from_f64(amplitude) * Dd::from_f64(0.5) * scale)
             * Dd::from_f64(amplitude))
         .to_f64();
+        // The owner prepares its exported spectrum before retaining factors.
+        let spectrum = prepare_products(&banks, &fields, spectrum_limits(), &mut || false).unwrap();
+        let prepared = spectrum
+            .mean(HarmonicWindow::new(-0.5e-9, 1e-9).unwrap())
+            .unwrap();
         assert!(actual > 0.0 && actual.is_finite());
         assert!((actual - expected).abs() <= 3.0 * f64::from_bits(1) + 2e-14 * expected);
+        assert!((prepared - expected).abs() <= 3.0 * f64::from_bits(1) + 2e-14 * expected);
     }
 }
 
@@ -205,4 +219,133 @@ fn retained_heat_cancel_resumes_and_unsupported_windows_select_original_spectrum
         positive_heat_mean(&[], &[], 0, window, &mut || false).unwrap(),
         Some(0.0)
     );
+}
+
+#[test]
+fn silent_and_wide_real_sources_do_not_erase_an_independent_proper_null() {
+    let base = 562_949_953_421_312.0;
+    let duration = 1e-12_f64;
+    let window = HarmonicWindow::new(-0.5 * duration, duration).unwrap();
+    for silent_first in [false, true] {
+        let mut banks = Vec::new();
+        let mut fields = Vec::new();
+        for insert_silent in [silent_first, !silent_first] {
+            if insert_silent {
+                for count in [1, 2] {
+                    let start = fields.len();
+                    for i in 0..count {
+                        fields.push(HeatLine {
+                            omega: 2.0 + i as f64,
+                            field: [[Dd::ZERO; 2]; 3],
+                        });
+                    }
+                    banks.push(HeatBank {
+                        start,
+                        end: fields.len(),
+                        law: HarmonicProductLaw::Real,
+                        left_scale: Dd::ONE,
+                    });
+                }
+            } else {
+                append_bank(
+                    &mut banks,
+                    &mut fields,
+                    [base, base + 1.0, base + 2.0],
+                    [1.0, -2.0, 1.0].map(C64::from_re),
+                    HarmonicProductLaw::ProperComplex,
+                    C64::ONE,
+                    Dd::ONE,
+                );
+            }
+        }
+        relative(
+            positive_heat_mean(&banks, &fields, 1, window, &mut || false)
+                .unwrap()
+                .unwrap(),
+            duration.powi(4) / 160.0,
+        );
+
+        // This source's full carrier is far outside the positive real band.
+        // Shift the shutter and use both quadratures, checking the native EM
+        // phase sign as well as its exact real square and sum-frequency term.
+        let omega = 1e15_f64;
+        let amplitude = 1e-25;
+        let imaginary = 0.75 * amplitude;
+        let window = HarmonicWindow::new(0.0, duration).unwrap();
+        append_bank(
+            &mut banks,
+            &mut fields,
+            [omega, omega + 1.0, omega + 2.0],
+            [C64::new(amplitude, imaginary), C64::ZERO, C64::ZERO],
+            HarmonicProductLaw::Real,
+            C64::ONE,
+            Dd::ONE,
+        );
+        let carrier_phase = omega * duration;
+        let reference = duration.powi(4) / 10.0
+            + 0.5 * (amplitude * amplitude + imaginary * imaginary)
+            + (amplitude * amplitude - imaginary * imaginary) * (2.0 * carrier_phase).sin()
+                / (4.0 * carrier_phase)
+            - amplitude * imaginary * (1.0 - (2.0 * carrier_phase).cos()) / (2.0 * carrier_phase);
+        let mut polls = 0;
+        let actual = positive_heat_mean(&banks, &fields, 1, window, &mut || {
+            polls += 1;
+            false
+        })
+        .unwrap()
+        .unwrap();
+        relative(actual, reference);
+        let mut observed = 0;
+        assert!(matches!(
+            positive_heat_mean(&banks, &fields, 1, window, &mut || {
+                observed += 1;
+                observed == polls - 2
+            }),
+            Err(AngularSpectrumError::Cancelled)
+        ));
+        assert_eq!(
+            positive_heat_mean(&banks, &fields, 1, window, &mut || false).unwrap(),
+            Some(actual)
+        );
+    }
+}
+
+#[test]
+fn mixed_proper_pair_fallback_retains_finite_large_prepared_heat() {
+    let mut banks = Vec::new();
+    let mut fields = Vec::new();
+    append_bank(
+        &mut banks,
+        &mut fields,
+        [1.0, 2.0, 3.0],
+        [1.0, -2.0, 1.0].map(C64::from_re),
+        HarmonicProductLaw::ProperComplex,
+        C64::ONE,
+        Dd::ONE,
+    );
+    let amplitude = 1.5e154;
+    let start = fields.len();
+    fields.push(HeatLine {
+        omega: 7.0,
+        field: [
+            [Dd::from_f64(amplitude), Dd::ZERO],
+            [Dd::ZERO; 2],
+            [Dd::ZERO; 2],
+        ],
+    });
+    banks.push(HeatBank {
+        start,
+        end: fields.len(),
+        law: HarmonicProductLaw::ProperComplex,
+        left_scale: Dd::ONE,
+    });
+    let spectrum = prepare_products(&banks, &fields, spectrum_limits(), &mut || false).unwrap();
+    let window = HarmonicWindow::new(-0.5e-9, 1e-9).unwrap();
+    let actual = positive_heat_mean(&banks, &fields, 1, window, &mut || false)
+        .unwrap()
+        .unwrap();
+    let expected = (0.5 * amplitude) * amplitude;
+    assert!(actual.is_finite());
+    assert!((actual / expected - 1.0).abs() < 2e-14);
+    assert!((spectrum.mean(window).unwrap() / expected - 1.0).abs() < 2e-14);
 }
