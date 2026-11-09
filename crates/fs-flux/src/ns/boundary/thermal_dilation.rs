@@ -6,6 +6,10 @@
 //! sensible-density interpolation and variable heat capacity. The input rate
 //! is a MATERIAL derivative, not an Eulerian local heating increment.
 
+/// Original measured Cp/free-expansion sources on the same native constraint.
+#[path = "thermal_dilation/isobaric.rs"]
+pub mod isobaric;
+
 use super::{StokesAssembly, StokesBoundary, StokesBoundaryError, StokesSolution};
 use crate::ns::{FluxParams, FluxSystem};
 use fs_material::phase::{
@@ -101,38 +105,50 @@ impl<'a, 'm> CaloricDilationAssembly<'a, 'm> {
         &self,
         maximum_dilation_defect_per_s: f64,
     ) -> Result<CaloricDilationSolution, CaloricDilationError> {
-        if !maximum_dilation_defect_per_s.is_finite() || maximum_dilation_defect_per_s < 0.0 {
-            return Err(CaloricDilationError::Invalid(
-                "finite nonnegative physical dilation allowance required",
-            ));
-        }
-        let flow = self.native.solve()?;
-        let mesh = self.native.system.mesh;
-        let mut maximum_defect = 0.0_f64;
-        for (cell, source) in self.source.iter().enumerate() {
-            let mut outflow = Dd::from_f64(0.0);
-            for &(edge, sign) in &mesh.tri_edges[cell] {
-                outflow = outflow
-                    + Dd::from_f64(sign * mesh.edges[edge].len * flow.field.x[2 * edge]);
-            }
-            let actual = (outflow.hi + outflow.lo) / mesh.areas[cell];
-            let defect = (actual - source.dilation_per_s).abs();
-            if !defect.is_finite() || defect > maximum_dilation_defect_per_s {
-                return Err(CaloricDilationError::DilationDefect {
-                    cell,
-                    expected_per_s: source.dilation_per_s,
-                    actual_per_s: actual,
-                    maximum_defect_per_s: maximum_dilation_defect_per_s,
-                });
-            }
-            maximum_defect = maximum_defect.max(defect);
-        }
+        let (flow, maximum_defect) = solve_dilation(
+            &self.native,
+            self.source.iter().map(|source| source.dilation_per_s),
+            maximum_dilation_defect_per_s,
+        )?;
         Ok(CaloricDilationSolution {
             flow,
             source: self.source.clone(),
             maximum_dilation_defect_per_s: maximum_defect,
         })
     }
+}
+
+fn solve_dilation(
+    native: &StokesAssembly<'_, '_>,
+    dilation: impl Iterator<Item = f64>,
+    maximum_dilation_defect_per_s: f64,
+) -> Result<(StokesSolution, f64), CaloricDilationError> {
+    if !maximum_dilation_defect_per_s.is_finite() || maximum_dilation_defect_per_s < 0.0 {
+        return Err(CaloricDilationError::Invalid(
+            "finite nonnegative physical dilation allowance required",
+        ));
+    }
+    let flow = native.solve()?;
+    let mesh = native.system.mesh;
+    let mut maximum_defect = 0.0_f64;
+    for (cell, expected) in dilation.enumerate() {
+        let mut outflow = Dd::from_f64(0.0);
+        for &(edge, sign) in &mesh.tri_edges[cell] {
+            outflow = outflow + Dd::from_f64(sign * mesh.edges[edge].len * flow.field.x[2 * edge]);
+        }
+        let actual = (outflow.hi + outflow.lo) / mesh.areas[cell];
+        let defect = (actual - expected).abs();
+        if !defect.is_finite() || defect > maximum_dilation_defect_per_s {
+            return Err(CaloricDilationError::DilationDefect {
+                cell,
+                expected_per_s: expected,
+                actual_per_s: actual,
+                maximum_defect_per_s: maximum_dilation_defect_per_s,
+            });
+        }
+        maximum_defect = maximum_defect.max(defect);
+    }
+    Ok((flow, maximum_defect))
 }
 
 impl<'m> FluxSystem<'m> {
@@ -203,9 +219,8 @@ impl<'m> FluxSystem<'m> {
                 return Err(CaloricDilationError::NonLiquid { cell });
             }
             let knots = input.caloric.knots();
-            let knot = knots.partition_point(|k| {
-                k.specific_enthalpy_j_kg < input.specific_enthalpy_j_kg
-            });
+            let knot =
+                knots.partition_point(|k| k.specific_enthalpy_j_kg < input.specific_enthalpy_j_kg);
             if knot < knots.len()
                 && knots[knot].specific_enthalpy_j_kg == input.specific_enthalpy_j_kg
                 && ((rate < 0.0 && knot + 1 < knots.len())
@@ -241,12 +256,26 @@ impl<'m> FluxSystem<'m> {
             });
             cell_outflow.push(outflow);
         }
-        let admitted = self.admit_stokes_problem_with_dilation(
+        let native = self.assemble_stokes_dilation_native(
             params,
+            viscosity,
+            force,
             boundaries,
-            &[],
-            Some(&cell_outflow),
+            &cell_outflow,
         )?;
+        Ok(CaloricDilationAssembly { native, source })
+    }
+
+    fn assemble_stokes_dilation_native<'a>(
+        &'a self,
+        params: FluxParams,
+        viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[StokesBoundary<'_>],
+        cell_outflow: &[f64],
+    ) -> Result<StokesAssembly<'a, 'm>, CaloricDilationError> {
+        let admitted =
+            self.admit_stokes_problem_with_dilation(params, boundaries, &[], Some(cell_outflow))?;
         let mut native =
             self.assemble_stokes_admitted_viscosity(params, viscosity, force, &admitted)?;
         for (cell, &outflow) in cell_outflow.iter().enumerate() {
@@ -258,6 +287,6 @@ impl<'m> FluxSystem<'m> {
                 native.rhs[self.n_u + cell] = -outflow;
             }
         }
-        Ok(CaloricDilationAssembly { native, source })
+        Ok(native)
     }
 }

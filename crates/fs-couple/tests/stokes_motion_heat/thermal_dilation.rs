@@ -1,5 +1,8 @@
 //! Native heat, original caloric volume and actual outlet flow share one state.
 
+#[path = "thermal_dilation/isobaric.rs"]
+mod isobaric;
+
 use super::{DEPTH, binding, initial_thermal, near, thermal_config, zero};
 use std::collections::BTreeMap;
 
