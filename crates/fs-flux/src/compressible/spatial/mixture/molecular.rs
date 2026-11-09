@@ -33,8 +33,8 @@ mod stress_observation;
 pub(super) mod timed;
 pub use adaptive::{AdaptiveDissipationControl, AdaptiveMolecularReport};
 pub use coupled::{
-    MolecularEuler3d, MolecularStepControl, MolecularStepReport3d, StabilizedMolecularStepControl,
-    StabilizedMolecularStepReport3d,
+    MolecularEuler3d, MolecularStepControl, MolecularStepReport3d, MovingMolecularStepReport3d,
+    StabilizedMolecularStepControl, StabilizedMolecularStepReport3d,
 };
 pub use driving::WallAcceleration3d;
 pub(super) use driving::WallDrive3d;
@@ -114,6 +114,46 @@ struct Workspace {
     boundary_step: Vec<f64>,
     boundary_trial: Vec<f64>,
     boundary_correction: Vec<f64>,
+}
+
+/// Separate molecular mechanical and thermal transfer, positive into the gas.
+/// Used for both instantaneous rates and their SSP quadrature; no thermal
+/// residual is reconstructed by subtracting a potentially enormous wall work.
+#[derive(Clone, Copy, Default)]
+struct WallTransfer {
+    mechanical: [f64; 6],
+    heat: [f64; 6],
+}
+
+impl WallTransfer {
+    fn add_scaled(
+        &mut self,
+        other: Self,
+        scale: f64,
+        correction: &mut Self,
+    ) -> Result<(), DissipationError> {
+        for (total, value, compensation) in [
+            (
+                &mut self.mechanical,
+                other.mechanical,
+                &mut correction.mechanical,
+            ),
+            (&mut self.heat, other.heat, &mut correction.heat),
+        ] {
+            for side in 0..6 {
+                let adjusted = scale * value[side] - compensation[side];
+                let next = total[side] + adjusted;
+                if !next.is_finite() {
+                    return Err(DissipationError::Invalid(
+                        "moving molecular wall transfer overflow",
+                    ));
+                }
+                compensation[side] = (next - total[side]) - adjusted;
+                total[side] = next;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Prepared molecular transport on the original evolving-species 3-D field.
@@ -693,7 +733,27 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         maximum_workspace_bytes: usize,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Totals, DissipationError> {
-        if self.gas() != flow.gas() || self.grid != flow.grid || self.boundaries != flow.boundaries
+        if self.grid != flow.grid {
+            return Err(DissipationError::Invalid(
+                "volumetric molecular field ownership differs",
+            ));
+        }
+        self.prepare_interval_on_grid(flow, duration, maximum_workspace_bytes, cancelled)
+    }
+
+    /// Admit the current private split geometry without rebinding the accepted
+    /// operator. The source, topology and prepared buffer shapes remain owned
+    /// by this same molecular field throughout a moving-domain trial.
+    fn prepare_interval_on_grid(
+        &mut self,
+        flow: &MixtureEuler3d,
+        duration: Time,
+        maximum_workspace_bytes: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Totals, DissipationError> {
+        if self.gas() != flow.gas()
+            || self.grid.shape != flow.grid.shape
+            || self.boundaries != flow.boundaries
         {
             return Err(DissipationError::Invalid(
                 "volumetric molecular field ownership differs",
@@ -713,7 +773,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             ));
         }
         let species = self.gas().species_count();
-        let before = checked_totals(&flow.states, &self.grid, species, cancelled)?;
+        let before = checked_totals(&flow.states, &flow.grid, species, cancelled)?;
         copy_values(&flow.states, &mut self.work.current, cancelled)?;
         for values in [
             &mut self.work.boundary_trial,
@@ -739,7 +799,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     ) -> Result<MolecularReport, DissipationError> {
         let species = self.gas().species_count();
         let width = species + 4;
-        let after = checked_totals(&self.work.current, &self.grid, species, cancelled)?;
+        let after = checked_totals(&self.work.current, &flow.grid, species, cancelled)?;
         let outward = sum_rows(&self.work.boundary_trial, width, 1.0, cancelled)?;
         let boundary_change = Totals::from_row(&outward.map(|value| -value), species);
         let residual = std::array::from_fn::<_, WIDTH_LIMIT, _>(|d| {
@@ -948,8 +1008,48 @@ fn spatial<'a, L: TransportLaw>(
     gradient: &mut [[[f64; 3]; 3]],
     viscosity: &mut [stress::Viscosity],
     fluxes: &mut [Vec<f64>; 3],
+    #[cfg(feature = "experimental-sgs")] sgs: Option<&mut SubgridTransport>,
+    controls: DissipationControl,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Stage, DissipationError> {
+    spatial_with_motion(
+        source,
+        grid,
+        boundaries,
+        pressure_outlets,
+        reservoirs,
+        walls,
+        states,
+        primitive,
+        gradient,
+        viscosity,
+        fluxes,
+        #[cfg(feature = "experimental-sgs")]
+        sgs,
+        controls,
+        None,
+        None,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spatial_with_motion<'a, L: TransportLaw>(
+    source: &mut SpatialTransport<L>,
+    grid: &CartesianGrid,
+    boundaries: Boundaries3d,
+    pressure_outlets: PressureOutletPolicy,
+    reservoirs: impl Into<reservoir::View<'a>>,
+    walls: &[MolecularWall3d; 6],
+    states: &[f64],
+    primitive: &mut [Primitive],
+    gradient: &mut [[[f64; 3]; 3]],
+    viscosity: &mut [stress::Viscosity],
+    fluxes: &mut [Vec<f64>; 3],
     #[cfg(feature = "experimental-sgs")] mut sgs: Option<&mut SubgridTransport>,
     controls: DissipationControl,
+    motion: Option<super::MeshMotion>,
+    mut wall_rates: Option<&mut WallTransfer>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Stage, DissipationError> {
     let reservoirs = reservoirs.into();
@@ -961,6 +1061,15 @@ fn spatial<'a, L: TransportLaw>(
         #[cfg(feature = "experimental-sgs")]
         sgs.as_deref(),
     );
+    if motion.is_some() && !compatible {
+        return Err(DissipationError::Invalid(
+            "moving molecular stress requires compatible physical walls",
+        ));
+    }
+    let mut rate_correction = WallTransfer::default();
+    if let Some(rates) = wall_rates.as_deref_mut() {
+        *rates = WallTransfer::default();
+    }
     let mut minimum_density = f64::INFINITY;
     let mut maximum_cell_stress_scale: f64 = 0.0;
     for (row, value) in states.chunks_exact(width).zip(primitive.iter_mut()) {
@@ -998,21 +1107,25 @@ fn spatial<'a, L: TransportLaw>(
     for (index, row) in gradient.iter_mut().enumerate() {
         poll(cancelled)?;
         if compatible {
-            let value = stress::velocity_gradient(
-                grid.spacing,
-                primitive[index].velocity,
-                |axis, side| {
+            let value =
+                stress::velocity_gradient(grid.spacing, primitive[index].velocity, |axis, side| {
                     let (neighbor, reflected) =
                         cartesian::neighbour(grid, boundaries, index, axis, side == 1);
                     if reflected {
-                        let (velocity, slip, _) = walls[2 * axis + side].stress_boundary();
+                        let (mut velocity, slip, _) = walls[2 * axis + side].stress_boundary();
+                        if let Some(motion) = motion {
+                            velocity[axis] = if side == 0 {
+                                motion.lower_velocity[axis]
+                            } else {
+                                motion.upper_velocity[axis]
+                            };
+                        }
                         stress::GradientSample::Wall { velocity, slip }
                     } else {
                         stress::GradientSample::Cell(primitive[neighbor].velocity)
                     }
-                },
-            )
-            .map_err(DissipationError::Invalid)?;
+                })
+                .map_err(DissipationError::Invalid)?;
             for (axis, derivative) in row.iter_mut().enumerate() {
                 for (component, entry) in derivative.iter_mut().enumerate() {
                     *entry = value[component][axis];
@@ -1161,10 +1274,25 @@ fn spatial<'a, L: TransportLaw>(
             } => {
                 let side = side_for(axis, sign > 0.0);
                 let wall = walls[side_index(side)];
+                let normal_velocity = motion.map_or(0.0, |motion| {
+                    if sign < 0.0 {
+                        motion.lower_velocity[axis]
+                    } else {
+                        motion.upper_velocity[axis]
+                    }
+                });
+                // Preserve the stationary arithmetic while the source's normal
+                // strain uses the actual moving impermeable plane velocity.
+                let normal_gradient = if normal_velocity == 0.0 {
+                    -sign * 2.0 * primitive[cell].velocity[axis] / grid.spacing[axis]
+                } else {
+                    sign * 2.0 * (normal_velocity - primitive[cell].velocity[axis])
+                        / grid.spacing[axis]
+                };
                 let mut receipt = match wall {
                     MolecularWall3d::SlipAdiabatic => source.wall_from_primitive(
                         normal(cell, axis),
-                        -sign * 2.0 * primitive[cell].velocity[axis] / grid.spacing[axis],
+                        normal_gradient,
                         [gradient[cell][a][a], gradient[cell][b][b]],
                         output,
                         &mut *cancelled,
@@ -1181,7 +1309,7 @@ fn spatial<'a, L: TransportLaw>(
                         sign,
                         [velocity[a], velocity[b]],
                         thermal,
-                        -sign * 2.0 * primitive[cell].velocity[axis] / grid.spacing[axis],
+                        normal_gradient,
                         // One constant prescribed wall velocity has zero
                         // tangential divergence at the physical face.
                         [0.0; 2],
@@ -1207,7 +1335,7 @@ fn spatial<'a, L: TransportLaw>(
                             sign,
                             trace,
                             thermal,
-                            -sign * 2.0 * p.velocity[axis] / grid.spacing[axis],
+                            normal_gradient,
                             [
                                 fraction * gradient[cell][a][a],
                                 fraction * gradient[cell][b][b],
@@ -1241,7 +1369,10 @@ fn spatial<'a, L: TransportLaw>(
                     }
                 };
                 if compatible {
-                    let (velocity, slip, fluid_heat_fraction) = wall.stress_boundary();
+                    let (mut velocity, slip, fluid_heat_fraction) = wall.stress_boundary();
+                    if motion.is_some() {
+                        velocity[axis] = normal_velocity;
+                    }
                     let mechanics = stress::wall_stress(
                         axis,
                         sign,
@@ -1262,6 +1393,20 @@ fn spatial<'a, L: TransportLaw>(
                         - velocity[1] * traction[1]
                         - velocity[2] * traction[2]
                         + sign * (1.0 - fluid_heat_fraction) * mechanics.slip_dissipation;
+                    if let Some(rates) = wall_rates.as_deref_mut() {
+                        let area = grid.spacing[a] * grid.spacing[b];
+                        let mut face_rates = WallTransfer::default();
+                        face_rates.mechanical[side_index(side)] = sign
+                            * area
+                            * (velocity[0] * traction[0]
+                                + velocity[1] * traction[1]
+                                + velocity[2] * traction[2]);
+                        face_rates.heat[side_index(side)] = -sign
+                            * area
+                            * (receipt.nonmechanical_energy_flux_w_m2
+                                + sign * (1.0 - fluid_heat_fraction) * mechanics.slip_dissipation);
+                        rates.add_scaled(face_rates, 1.0, &mut rate_correction)?;
+                    }
                     // Wall-temperature sampling still owns Fourier heat.
                     // The compatible mechanical operator uses cell values,
                     // not the unused midpoint wall viscosity's rate bound.
@@ -1363,7 +1508,8 @@ fn spatial<'a, L: TransportLaw>(
                 receipt
             }
             cartesian::FaceKind::Boundary {
-                condition: BoundaryCondition::PressureOutlet { .. }
+                condition:
+                    BoundaryCondition::PressureOutlet { .. }
                     | BoundaryCondition::CharacteristicOutlet { .. },
                 ..
             } => {

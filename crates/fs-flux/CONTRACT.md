@@ -4637,6 +4637,40 @@ cancellation, storage/work refusal and the final wall-cooling Mach guard.
 These checks exercise the existing molecular closure; they do not establish
 new SGS calibration, moving geometry or an entropy certificate.
 
+### Molecular transport on moving evolving-species volumes
+
+`spatial::mixture::molecular::MolecularEuler3d::step_moving` executes the
+original Maxwell--Stefan/Fourier/Newtonian half step on the old volume,
+source-owned extensive ALE advection, and the second molecular half on the
+actual new volume. Every species, all three momenta, referenced partial
+enthalpies and original calorics remain native. No frozen-composition
+surrogate, independent passive-species transport or added viscous-heating
+source is introduced.
+
+Moving normal wall traces enter the compatible stress and its conjugate
+laboratory work, while authored no-slip, Navier and free-slip laws remain
+intact. The complete report retains original species and physical/reference
+energy balances and separately integrates mechanical molecular work and
+Fourier/Navier wall heat on all six sides at the same SSP stages. Wall species
+flow remains zero. Prepared source, diffusion, state and face buffers are
+reused under the original complete-owner workspace bound.
+
+A shortened central ALE step or a refused later phase restarts the whole
+split from the same accepted field. Geometry/source binding, cells, clock,
+boundary loads and reports publish together after final acceptance; failed
+proposals leave subsequent stationary and direct molecular evolution valid.
+Zero normal mesh motion preserves the original stationary numerical result
+and still reports actual prescribed tangential work and heat.
+
+Five native regressions cover exact stationary parity, comoving unequal-caloric
+Maxwell--Stefan refinement, Galilean normal-stress/work covariance for all
+three slip laws, deformation and source rebinding on every axis, complete
+boundary balances and cancellation/replay. Translation and single-axis
+affine deformation are admitted on closed reflecting/periodic domains.
+Moving chemistry, prescribed reservoirs, retained SGS and simultaneous finite
+tangential-wall inertia are not composed by this entry. Source-domain,
+species, energy-chart, parabolic and relative acoustic checks remain active.
+
 ### Accelerating no-slip walls in evolving-species three-dimensional flow
 
 `spatial::mixture::molecular::WallAcceleration3d` authors a constant tangential

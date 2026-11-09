@@ -8,6 +8,9 @@ pub use crate::compressible::mixture::molecular::{
     MolecularStepControl, StabilizedMolecularStepControl,
 };
 
+mod moving;
+pub use moving::MovingMolecularStepReport3d;
+
 #[cfg(feature = "experimental-sgs")]
 mod lagrangian_channel;
 #[cfg(feature = "experimental-sgs")]
@@ -285,32 +288,54 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
     ) -> Result<crate::compressible::spatial::molecular::StressField3d<'_>, DissipationError> {
         poll(&mut cancelled)?;
         #[cfg(feature = "experimental-sgs")]
-        if let Some(mut filter) = self.molecular.sgs.as_mut()
+        if let Some(mut filter) = self
+            .molecular
+            .sgs
+            .as_mut()
             .and_then(sgs::SubgridTransport::take_lagrangian_filter)
         {
             let result = (|| {
-                let trial = self.molecular.sgs.as_mut()
+                let trial = self
+                    .molecular
+                    .sgs
+                    .as_mut()
                     .expect("selected Lagrangian mixture SGS owner")
                     .prepare_lagrangian_with_walls(
-                        &mut filter, &self.accepted, &self.molecular.walls, &mut cancelled,
+                        &mut filter,
+                        &self.accepted,
+                        &self.molecular.walls,
+                        &mut cancelled,
                     )?;
-                let result = self.molecular.prepare_stress_field(&self.accepted, controls, &mut cancelled);
+                let result =
+                    self.molecular
+                        .prepare_stress_field(&self.accepted, controls, &mut cancelled);
                 drop(trial);
                 result
             })();
-            self.molecular.sgs.as_mut().expect("retained Lagrangian mixture SGS owner")
+            self.molecular
+                .sgs
+                .as_mut()
+                .expect("retained Lagrangian mixture SGS owner")
                 .restore_lagrangian_filter(filter, None);
             result?;
         } else {
-            self.molecular.prepare_stress_field(&self.accepted, controls, &mut cancelled)?;
+            self.molecular
+                .prepare_stress_field(&self.accepted, controls, &mut cancelled)?;
         }
         #[cfg(not(feature = "experimental-sgs"))]
-        self.molecular.prepare_stress_field(&self.accepted, controls, &mut cancelled)?;
-        Ok(crate::compressible::spatial::molecular::StressField3d::mixture(
-            &self.molecular.grid, self.molecular.boundaries, self.accepted.time.value(),
-            &self.molecular.work.primitive, &self.molecular.work.flux,
-            &self.accepted.states, self.accepted.gas.species_count(),
-        ))
+        self.molecular
+            .prepare_stress_field(&self.accepted, controls, &mut cancelled)?;
+        Ok(
+            crate::compressible::spatial::molecular::StressField3d::mixture(
+                &self.molecular.grid,
+                self.molecular.boundaries,
+                self.accepted.time.value(),
+                &self.molecular.work.primitive,
+                &self.molecular.work.flux,
+                &self.accepted.states,
+                self.accepted.gas.species_count(),
+            ),
+        )
     }
     /// Atomically refresh all prepared exterior profiles on both split fields.
     /// Prepare their topology/storage on the Euler field before composition.
@@ -1114,6 +1139,9 @@ fn copy_physical(
             ));
         }
     }
+    // A previous accepted or discarded moving split may leave the reusable
+    // frame on another geometry. Every transaction starts from the owner.
+    target.grid = source.grid;
     target.time = source.time;
     target.last_step = source.last_step;
     Ok(())

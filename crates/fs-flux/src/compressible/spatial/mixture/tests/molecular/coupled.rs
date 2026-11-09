@@ -2,6 +2,7 @@ use super::*;
 
 mod driving;
 mod inertia;
+mod moving;
 mod stabilized;
 use crate::compressible::spatial::mixture::molecular::{
     MolecularEuler3d, MolecularStepControl, MolecularStepReport3d,
