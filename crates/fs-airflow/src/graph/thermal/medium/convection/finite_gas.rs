@@ -9,6 +9,9 @@
 /// Source-pinned film properties on the same finite gas/body heat residual.
 pub mod film;
 
+/// Source-integrated conducting surfaces on the same finite heat owners.
+pub mod conjugate;
+
 mod mass_flow;
 pub use mass_flow::GasMassFlowState;
 

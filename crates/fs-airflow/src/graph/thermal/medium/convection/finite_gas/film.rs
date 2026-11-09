@@ -320,7 +320,7 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
         self.resolve_at_temperature(None, gas, body.temperature_k(), body)
     }
 
-    fn resolve_at_temperature<W>(
+    pub(super) fn resolve_at_temperature<W>(
         self,
         flow: Option<mass_flow::MassFlowInput>,
         gas: &M::State,
@@ -488,7 +488,7 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
         })
     }
 
-    fn bind_flow(
+    pub(super) fn bind_flow(
         self,
         flow: Option<mass_flow::MassFlowInput>,
         gas: &M::State,

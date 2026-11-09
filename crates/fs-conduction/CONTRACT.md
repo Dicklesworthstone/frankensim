@@ -5954,3 +5954,11 @@ The Fresnel, radiance and incoherent-layer assumptions follow
 [PBRT 4e §9.3](https://pbr-book.org/4ed/Reflection_Models/Specular_Reflection_and_Transmission)
 and [Byrnes §6](https://arxiv.org/abs/1603.02720).
 
+### Radiation admission for distinct conducting surfaces
+
+`LumpedThermalTransport::radiation_is_disabled` reports whether the retained
+maximum emissivity is exactly zero over the admitted transport span. This
+read-only query lets a composing heat owner require zero body-node radiation
+before eliminating a distinct conducting surface. It does not change the
+original emissivity model, source support, Biot admission or radiation
+temperature; relocating radiation requires its own physical surface balance.

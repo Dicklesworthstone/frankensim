@@ -160,6 +160,24 @@ impl<M: FilmGasSource> PrescribedMassFlowGasSurface<'_, M> {
     }
 }
 
+impl<'g, M: FilmGasSource> PrescribedMassFlowGasSurface<'g, M> {
+    /// Retain original bulk-density mass flux while resolving the conducting
+    /// wall and source film at their actual interface temperature.
+    pub fn with_conducting_layer<'a, 'm>(
+        self,
+        layer: &'a fs_material::thermal::conduction::source::ResolvedConductionLayer<'m>,
+        geometry: fs_material::thermal::conduction::ReservoirLayerGeometry,
+        config: fs_material::thermal::conduction::LayerConductionConfig,
+    ) -> Result<
+        super::super::conjugate::ConjugateFilmGasSurface<'g, 'a, 'm, M>,
+        super::super::conjugate::ConjugateGasError,
+    > {
+        super::super::conjugate::ConjugateFilmGasSurface::new(
+            self.surface, Some(self.flow), layer, geometry, config,
+        )
+    }
+}
+
 fn with_speed(
     law: FilmGasHeatLaw,
     speed_m_s: f64,

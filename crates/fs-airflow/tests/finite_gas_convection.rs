@@ -1,6 +1,8 @@
 //! G0/G1/G3: real material packs, original correlation and finite heat/motion solver.
 #[path = "finite_gas_convection/film.rs"]
 mod film;
+#[path = "finite_gas_convection/conjugate.rs"]
+mod conjugate;
 #[path = "finite_gas_convection/plate_sections.rs"]
 mod plate_sections;
 #[path = "finite_gas_convection/source.rs"]

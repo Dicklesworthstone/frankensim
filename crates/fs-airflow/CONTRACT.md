@@ -6368,3 +6368,32 @@ endpoint refuses until the corresponding physical geometry is supplied.
 The wall remains homogeneous, source-free, pure-phase and quasi-steady. No new
 solver, correlation, surface storage, contact resistance or lateral spreading
 is inferred. Original source and correlation admission remains active.
+
+### Conducting surfaces on the original finite gas/body owners
+
+`FilmGasSurface::with_conducting_layer` and its prescribed-mass-flow counterpart
+bind the original finite body's exact caloric object to a source-qualified
+pure-phase conductivity layer and explicit planar or radial geometry. The
+existing material kernel eliminates the actual fluid-facing temperature against
+the original film. Only the combined conductance reaches the existing piston
+or fixed-volume heat owner. Film properties, natural or mixed temperature
+contrast, physical entrance coordinates, and bulk-density mass-flux conversion
+retain their original owners.
+
+Samples preserve the actual body and surface states, original conductivity
+source, material/film power residual, and conductance representation error.
+Native use checks the layer residual against the enclosing source budget in
+joules. Initial, midpoint, and accepted endpoint source support remain
+mandatory, including conductivity support at each actual native body
+temperature when the layer's enthalpy admission snaps a source endpoint.
+Zero film area retains prepared geometry/caloric binding and participating
+body-state admission but bypasses the material root and gas-property/correlation
+queries.
+
+Isochoric use requires full positive exposed-area coverage or explicit
+insulation, with body-node radiation disabled. The original Biot check uses
+combined conductance per unit area, and existing entropy accounting describes
+the complete passive material/film connection. This remains a quasi-steady,
+source-free normal wall path; it introduces no extra thermal storage, radiation
+relocation, wall spreading, transient wall field, independent contact-resistance
+law, or additional heat integrator.

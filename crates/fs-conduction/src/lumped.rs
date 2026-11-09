@@ -326,6 +326,13 @@ impl LumpedThermalTransport {
         })
     }
 
+    /// Whether radiation is explicitly disabled over the entire admitted transport span.
+    /// Surface compositions use this before moving convection to a distinct node.
+    #[must_use]
+    pub const fn radiation_is_disabled(&self) -> bool {
+        self.maximum_emissivity == 0.0
+    }
+
     /// Retained conductivity query receipts, empty for declared constants.
     #[must_use]
     pub fn conductivity_receipts(&self) -> &[PropertyUsageReceipt] {
