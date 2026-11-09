@@ -22,12 +22,17 @@ use crate::d3q19::{
 use crate::lattice3::sources::admit_forces;
 use fs_exec::{CancelGate, Cx};
 
+mod acceleration;
+
 /// An open grid whose accepted force field is inseparable from its populations.
 /// Force values are densities in lattice units, not accelerations. Solid grid
 /// entries must be zero; all fields retain the original x-fast cell order.
 pub struct ForcedOpenBoundaryGrid3<L: EquilibriumLattice3<Q>, const Q: usize> {
     pub(super) inner: OpenBoundaryGrid3<L, Q>,
     pub(super) forces: Vec<[f64; 3]>,
+    // Reused only by density-dependent endpoints. The authored acceleration
+    // stays immutable while neighboring reservoir donors still need it.
+    pending_forces: Vec<[f64; 3]>,
 }
 
 /// Source-coordinate change at a fixed physical velocity. The native source
@@ -113,7 +118,11 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ForcedOpenBoundaryGrid3<L, Q> {
         if changed {
             core::mem::swap(&mut grid.f, &mut grid.next);
         }
-        Ok(Self { inner, forces })
+        Ok(Self {
+            inner,
+            forces,
+            pending_forces: Vec::new(),
+        })
     }
 
     pub fn dimensions(&self) -> [usize; 3] {

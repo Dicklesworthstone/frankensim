@@ -4,6 +4,8 @@ use crate::d3q27::{CollisionConfig27, CollisionModel27, D3q27, Equilibrium27, Ra
 use crate::lattice3::{D3q19, Grid3, GridBudget3, Lattice3, StepData};
 use core::marker::PhantomData;
 
+mod acceleration;
+
 const RHO: f64 = 1.2;
 const VELOCITY: [f64; 3] = [0.012, -0.008, 0.009];
 

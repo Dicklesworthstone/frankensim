@@ -1,3 +1,31 @@
+## Actual-density acceleration through native open reservoirs
+
+`ForcedOpenBoundaryGrid3::try_new_with_body_acceleration_preserving_velocity`
+attaches spatial lattice acceleration without changing physical velocity or
+stress. Serial and pooled `advance_*_with_body_acceleration` accept a borrowed
+next-epoch field. Collision retains `F_n`; each streamed donor and reconstructed
+endpoint uses its own actual `F_(n+1)=rho_(n+1)*a_(n+1)`. At wall/open seams,
+retained wall rows and the native half-source give a scalar affine density
+closure, solved directly and checked against the final population mass.
+Pressure/velocity profiles and D3Q19/D3Q27 source families retain their native meaning.
+
+A reusable force vector keeps the authored acceleration immutable while other
+cells still query their donors. The original two executor passes remain; each
+stream tile resolves its endpoint force and physical Mach before publication.
+The forced-open owner also exposes pooled held and evolving force-density steps.
+Accepted populations, source history, step count and native wall receipt publish
+together. Invalid fields, source closure, endpoint Mach or cancellation preserve
+all accepted state. Body impulse is trapezoidal; reservoir mass/linear/angular
+transport and prescribed-wall impulse/work remain distinct native contributions.
+
+Focused regressions use heterogeneous density, all three reservoir axes,
+profiled pressure/velocity, moving-wall seams/corners and native collision families;
+independently converged prescribed-force steps check the direct closure.
+Mass, linear/angular momentum, wall work, serial/pool identity, zero-source
+bit preservation and refusal/retry are exercised. This is the existing fixed
+geometry, low-Mach isothermal model; it adds no moving topology, implicit
+velocity-dependent force law, impact acceleration or fluid energy equation.
+
 ## Scheduled differential pressure in native transient flow
 
 `simple_unsteady_with_pressure_schedule` and its explicit SGS companion sample
