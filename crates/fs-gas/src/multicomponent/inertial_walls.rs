@@ -5,11 +5,12 @@
 //! simultaneous wall solve and physical acceptance as the frozen-gas route.
 
 use super::evolve::totals;
-use super::moving::{attempt, geometry_error, reported_step};
+use super::moving::{attempt, attempt_with_body_force, geometry_error, reported_step_with_source};
 use super::{
     Boundaries, Boundary, Error, MixtureEuler1d, Reconstruction, StepControl, StepReport, poll,
-    positive,
+    allocated, positive,
 };
+use crate::body_force::{BodyForce, ForceChange, ForceControl};
 use crate::dynamics::MovingWorkspace;
 use crate::dynamics::inertial_walls::{
     InertialWallLoad, InertialWallsControl, InertialWallsStep, MechanicalExchange,
@@ -61,10 +62,65 @@ impl MixtureEuler1d {
         gas_controls: StepControl,
         loads: [InertialWallLoad; 2],
         controls: InertialWallsControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<InertialWallsStep<StepReport>, PistonError> {
+        self.step_with_inertial_walls_inner(
+            walls, maximum_duration, gas_controls, loads, controls, None, cancelled,
+        )
+    }
+
+    /// Couple distributed gas acceleration to both freely moving finite walls.
+    ///
+    /// Every midpoint-wall proposal runs the original F/2-ALE-F/2 map from the
+    /// same accepted gas. Acceleration uses actual mass at each source half;
+    /// force density uses that half's actual physical volume. The native ALE
+    /// pressure impulse and conjugate boundary work alone drive the walls.
+    /// Interior mechanical impulse/work are separate external inputs in the
+    /// complete gas-plus-walls balance, never attributed to wall pressure.
+    ///
+    /// The authored source is held in moving-cell order. Loads on the walls
+    /// remain explicit; a gravitational acceleration on the gas does not
+    /// implicitly add either wall's weight. Source Mach/CFL refusal retries the
+    /// entire two-speed solve. One existing source buffer is allocated on first
+    /// nonzero use and reused by all proposals. Zero forcing is bitwise the
+    /// original unforced path, with no source allocation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_inertial_walls_and_body_force(
+        &mut self,
+        walls: &mut [Piston; 2],
+        maximum_duration: Time,
+        gas_controls: StepControl,
+        loads: [InertialWallLoad; 2],
+        controls: InertialWallsControl,
+        force: BodyForce<'_>,
+        force_controls: ForceControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<InertialWallsStep<StepReport>, PistonError> {
+        self.step_with_inertial_walls_inner(
+            walls, maximum_duration, gas_controls, loads, controls,
+            Some((force, force_controls)), cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_inertial_walls_inner(
+        &mut self,
+        walls: &mut [Piston; 2],
+        maximum_duration: Time,
+        gas_controls: StepControl,
+        loads: [InertialWallLoad; 2],
+        controls: InertialWallsControl,
+        mut forcing: Option<(BodyForce<'_>, ForceControl)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<InertialWallsStep<StepReport>, PistonError> {
         poll(&mut cancelled)?;
         validate_controls(*walls, maximum_duration, gas_controls, loads, controls)?;
+        if let Some((force, force_controls)) = forcing {
+            force_controls.admit::<Error>()?;
+            if !force.admit::<Error>(self.cell_count(), &mut cancelled)? {
+                forcing = None;
+            }
+        }
         if self.boundaries
             != (Boundaries::Ends {
                 left: Boundary::Reflecting,
@@ -119,6 +175,9 @@ impl MixtureEuler1d {
         if self.moving.is_none() {
             self.moving = Some(MovingWorkspace::new(&self.mesh).map_err(geometry_error)?);
         }
+        if forcing.is_some() && self.body_force_stage.is_none() {
+            self.body_force_stage = Some(allocated(self.states.len(), 0.0)?);
+        }
         let moving = self
             .moving
             .as_mut()
@@ -151,26 +210,50 @@ impl MixtureEuler1d {
                     moving
                         .prepare_velocities(&self.mesh, speed, &mut cancelled)
                         .map_err(geometry_error)?;
-                    let (a, b) = attempt(
-                        &self.gas,
-                        &self.states,
-                        &self.mesh,
-                        self.boundaries,
-                        dt,
-                        gas_controls.cfl,
-                        reconstruction,
-                        &mut self.work,
-                        moving,
-                        &mut cancelled,
-                    )?;
+                    let (a, b, source_change, source_rate) = match forcing {
+                        Some((force, force_controls)) => attempt_with_body_force(
+                            &self.gas,
+                            &self.states,
+                            &self.mesh,
+                            self.boundaries,
+                            dt,
+                            gas_controls.cfl,
+                            reconstruction,
+                            &mut self.work,
+                            moving,
+                            self.body_force_stage.as_mut().expect("source workspace initialized"),
+                            force,
+                            force_controls,
+                            &mut cancelled,
+                        )?,
+                        None => {
+                            let (a, b) = attempt(
+                                &self.gas, &self.states, &self.mesh, self.boundaries,
+                                dt, gas_controls.cfl, reconstruction,
+                                &mut self.work, moving, &mut cancelled,
+                            )?;
+                            (a, b, ForceChange::default(), 0.0)
+                        }
+                    };
                     let after = totals(
                         &self.work.candidate,
                         moving.mesh.volumes(),
                         species,
                         &mut cancelled,
                     )?;
-                    let gas = reported_step(before, after, [a, b], dt, area, species)?;
-                    let exchange = MechanicalExchange::from(&gas);
+                    let gas = reported_step_with_source(
+                        before, after, [a, b], dt, area, species, source_change, source_rate,
+                    )?;
+                    let mut exchange = MechanicalExchange::from(&gas);
+                    // The shared wall balance concerns pressure transfer.
+                    // Interior body work/impulse are separate external inputs,
+                    // retained without alteration in the original gas report.
+                    if source_change.impulse != 0.0 {
+                        exchange.momentum_change -= source_change.impulse;
+                    }
+                    if source_change.work != 0.0 {
+                        exchange.energy_change -= source_change.work;
+                    }
                     let displacement = [0, count]
                         .map(|end| moving.mesh.positions()[end] - self.mesh.positions()[end]);
                     mechanical_report(gas, exchange, original, loads, speed, displacement, area)

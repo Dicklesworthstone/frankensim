@@ -391,7 +391,7 @@ pub(super) fn reported_step(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn reported_step_with_source(
+pub(super) fn reported_step_with_source(
     before: Totals,
     after: Totals,
     [a, b]: [Stage; 2],
@@ -594,7 +594,7 @@ pub(super) fn attempt_with_contact(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn attempt_with_body_force(
+pub(super) fn attempt_with_body_force(
     gas: &MixtureGas,
     states: &[f64],
     mesh: &Mesh1d,

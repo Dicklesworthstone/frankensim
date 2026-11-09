@@ -9288,3 +9288,32 @@ Focused G0/G1/G3/G4 regressions cover hydrostatic isomer relaxation with both
 gravity signs, heat-release-driven motion and native C/A/C replay, physical
 formation-reference invariance, complete gas-plus-potential balance, zero-gravity
 parity, source mismatch and cancellation during final gravitational accounting.
+
+
+## Distributed acceleration with two inertial mixture walls
+
+`MixtureEuler1d::step_with_inertial_walls_and_body_force` evaluates the original
+forced ALE map inside every proposal of the existing simultaneous wall-speed
+solve. Both force halves use their actual mixture density and physical volume;
+force density and acceleration retain distinct units. Pressure impulses and
+conjugate moving-wall work come from that same transport proposal and alone
+supply the gas reaction on each wall. Interior body impulse/work remain explicit
+external inputs in `gas.source_change` and are subtracted once from the combined
+gas-plus-walls balance. Neither wall receives an implicit copy of the gas source;
+its weight or other applied acceleration must be supplied as its own force.
+
+The original acoustic/contraction bounds, force Mach checks, nonlinear solve,
+per-wall work gates and combined momentum/energy admission remain authoritative.
+Source refusals repeat the complete mechanical attempt. Field, geometry, clock
+and both velocities publish together after the final cancellation gate. The
+existing source buffer is allocated once on nonzero use and reused across
+pressure proposals; there is no per-proposal field clone or second transport
+implementation. Zero forcing retains the original unforced numerical path.
+Values are held in moving-cell order, not interpreted as a sampled Eulerian
+space/time field. This entry retains the original closed, constant-area,
+adiabatic and unequal-caloric-contact limitations.
+
+Focused G1/G3/G4 regressions cover uniform free fall with explicit gas and wall
+loads, gas temperature and absent-species retention, force-density impulse from
+actual moving volumes, replay through the native prescribed-wall map, separate
+wall work, zero-source parity and late cancellation of all accepted states.
