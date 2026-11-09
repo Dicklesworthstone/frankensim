@@ -217,8 +217,7 @@ impl IdealSolubilityV1 {
             return Ok(0.0);
         }
         let enthalpy = self.dissolution_enthalpy_at(from)?;
-        let mut change =
-            (enthalpy / R) * ((to.value() - from.value()) / from.value() / to.value());
+        let mut change = (enthalpy / R) * ((to.value() - from.value()) / from.value() / to.value());
         if let Some(phases) = &self.phase_heat_capacities {
             change += phases.log_saturation_correction(from.value(), to.value())? / R;
         }

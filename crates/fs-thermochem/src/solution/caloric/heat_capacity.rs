@@ -107,7 +107,9 @@ impl MolarHeatCapacityCurveV1 {
         let first = self.heat_capacity_at(temperatures[0])?.value();
         let last = self.heat_capacity_at(temperatures[1])?.value();
         let mut bounds = [first.min(last), first.max(last)];
-        let start = self.knots.partition_point(|&(temperature, _)| temperature <= lo);
+        let start = self
+            .knots
+            .partition_point(|&(temperature, _)| temperature <= lo);
         for &(temperature, capacity) in &self.knots[start..] {
             if temperature >= hi {
                 break;

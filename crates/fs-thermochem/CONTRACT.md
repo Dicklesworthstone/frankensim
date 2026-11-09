@@ -445,7 +445,7 @@ A full-stage/two-half-stage comparison controls changing-temperature evolution
 and accepts the two-half-stage state. This is a first-order approximation to
 continuous thermal kinetics, not an exact continuous-event solution or a
 certified global error bound. Dissolved and solid errors are scaled separately.
-The original window heat is delivered uniformly in time; each stage is anchored
+For `advance`, the original window heat is delivered uniformly in time; each stage is anchored
 to its cumulative heat target and the final energy residual is independently
 recomputed from original/final actual phases. Stage-root tolerance does not
 silently accumulate into an enlarged heat allowance.
@@ -493,6 +493,34 @@ Kirchhoff kernels directly, preserving small thermal changes that subtraction
 of rounded concentrations or large enthalpy datums would erase. Focused native
 cases cover that neighboring-temperature limit, original-pair phase/heat
 splitting, exact Cp extrema, source identity and thermal-domain refusal.
+
+### Finite-conductance heating and cooling of soluble phases
+
+`SolubilityThermalKineticsV1::advance_with_heat_transfer` couples the SAME
+thermal/phase owner to a prescribed-temperature reservoir through a complete
+contact conductance `G [W/K]`. The boundary law is Newton heat transfer,
+`power_into_solution=G*(T_reservoir-T_solution)`; geometry and transfer
+coefficients must already be included in G. This is distinct from the molecular
+film conductance `kA [m³/s]`. The standard boundary law is described in the
+[NASA Passive Thermal Control Engineering Guidebook](https://ntrs.nasa.gov/citations/20220006584).
+
+Each stage solves the implicit endpoint heat `Q_stage=G*h*(T_reservoir-T_end)`
+inside the original bounded scalar root. Its residual derivative adds `G*h`
+to the previously qualified positive caloric derivative. The original adaptive
+full/two-half comparison controls the phase and boundary-feedback error together.
+Only the accepted two-half-stage boundary heats enter the compensated heat sum;
+coarse or rejected trials contribute nothing. Direct original-to-final enthalpy
+is checked against this independently accumulated supplied heat, so the reported
+energy residual is not made zero by defining heat from the solution enthalpy.
+
+Zero G uses the original adiabatic path exactly. Reservoir temperature must be
+positive and finite but need not lie inside the solution's source interval;
+every solution endpoint still obeys its original temperature bracket. Domain,
+work-limit, cancellation and publication rules remain unchanged. The reservoir
+is prescribed and has no evolving finite heat capacity in this entry point.
+Focused cases compare sensible cooling against the independent exponential
+solution, verify first-order refinement and actual boundary heat, and exercise
+particle growth, nonideal source retention and transactional refusals.
 
 ## Binary liquid miscibility and source-owned thermodynamic forces
 

@@ -3,6 +3,9 @@
 //! Run: cargo run -p fs-material --example cosolute_crystallization
 //! Add `-- --heat` for an explicitly temperature-qualified interaction family
 //! with adiabatic crystal growth and prescribed heating/cooling.
+//! Add `-- --jacket` for the same bath cooled/heated through a finite thermal
+//! conductance to a prescribed jacket temperature. Heat then follows the
+//! evolving bath temperature and is solved inside the original time integrator.
 //! Values are authored demonstration coefficients, not measurements for a named
 //! substance. The second species has zero phase-transfer conductance, so its
 //! dissolved stock changes neither during crystallization nor during imposed
@@ -24,8 +27,7 @@ use fs_thermochem::{
         solubility::{
             IdealSolubilityV1,
             caloric::{
-                SolubilityCaloricComponentV1, SolubilityCaloricModelV1,
-                SolubilityCaloricSolveV1,
+                SolubilityCaloricComponentV1, SolubilityCaloricModelV1, SolubilityCaloricSolveV1,
                 kinetics::{SolubilityThermalKineticControlsV1, SolubilityThermalKineticsV1},
             },
             kinetics::{PrecipitationPolicyV1, SolubilityKineticStateV1, SolubilityKineticsV1},
@@ -111,8 +113,11 @@ fn advance(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().any(|argument| argument == "--jacket") {
+        return thermal_demo(true);
+    }
     if std::env::args().any(|argument| argument == "--heat") {
-        return thermal_demo();
+        return thermal_demo(false);
     }
     let mut ideal = initial()?;
     let original_virial = Arc::new(VirialSolutionModel::new(
@@ -151,7 +156,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn thermal_demo() -> Result<(), Box<dyn std::error::Error>> {
+enum ThermalDrive {
+    SuppliedHeat(f64),
+    Jacket {
+        temperature: Temperature,
+        conductance_w_k: f64,
+    },
+}
+
+fn thermal_demo(jacket: bool) -> Result<(), Box<dyn std::error::Error>> {
     let original = initial()?;
     let reference_t = Temperature::new(300.0);
     let knots = |capacity| {
@@ -162,23 +175,35 @@ fn thermal_demo() -> Result<(), Box<dyn std::error::Error>> {
     // These are the explicitly declared REFERENCE phase capacities. The
     // interaction potential adds its consistent mixture/reference calorics;
     // they are not independent measured effective mixture heat capacities.
-    let components = original.models().iter().map(|model| {
-        SolubilityCaloricComponentV1::new(
-            model.law().clone(),
-            MolarHeatCapacityCurveV1::new(model.law().solute().clone(), reference_t, knots(80.0))?,
-        )
-    }).collect::<Result<Vec<_>, _>>()?;
+    let components = original
+        .models()
+        .iter()
+        .map(|model| {
+            SolubilityCaloricComponentV1::new(
+                model.law().clone(),
+                MolarHeatCapacityCurveV1::new(
+                    model.law().solute().clone(),
+                    reference_t,
+                    knots(80.0),
+                )?,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let caloric = SolubilityCaloricModelV1::new(
         18e-6,
         PureLiquidHeatCapacityV1::new(original.solvent().clone(), reference_t, knots(75.0))?,
         components,
     )?;
     let reference = Arc::new(VirialSolutionModel::new(
-        300.0, 18e-6, 1.0, vec![150.0, 150.0],
+        300.0,
+        18e-6,
+        1.0,
+        vec![150.0, 150.0],
         vec![0.002, 0.004, 0.004, 0.002],
     )?);
     let family = Arc::new(VirialSolubilityThermalModel::new(
-        caloric.clone(), reference,
+        caloric.clone(),
+        reference,
         // C [K m³/mol] in B(T)=B_ref+C*(1/T-1/T_ref).
         vec![0.2, 0.6, 0.6, 0.1],
         [Temperature::new(290.0), Temperature::new(315.0)],
@@ -201,27 +226,82 @@ fn thermal_demo() -> Result<(), Box<dyn std::error::Error>> {
         maximum_attempts: 8192,
     };
     let mut elapsed = 0.0;
-    println!("stage,time_s,temperature_K,dissolved_mol,solid_mol,cosolute_mol,conditional_saturation_mol_m3,osmotic_pressure_Pa,window_heat_J,window_enthalpy_change_J,energy_residual_J,accepted_steps");
-    for (label, seconds, heat) in [
-        ("adiabatic_growth", 60.0, 0.0),
-        ("adiabatic_relaxation", 120.0, 0.0),
-        ("prescribed_heating", 120.0, 2500.0),
-        ("prescribed_cooling", 240.0, -2500.0),
-    ] {
-        let step = bath.advance_with_heat(&thermal, Time::new(seconds), heat, controls, || false)?;
+    let schedule = if jacket {
+        // The prescribed reservoir represents a controlled jacket. Its heat
+        // capacity, coolant flow and control-system power are not inferred.
+        [
+            ("jacket_cooling", 600.0, 292.0),
+            ("cold_hold", 300.0, 292.0),
+            ("jacket_heating", 900.0, 310.0),
+            ("jacket_recooling", 900.0, 295.0),
+        ]
+        .map(|(label, seconds, temperature)| {
+            (
+                label,
+                seconds,
+                ThermalDrive::Jacket {
+                    temperature: Temperature::new(temperature),
+                    conductance_w_k: 25.0,
+                },
+            )
+        })
+    } else {
+        [
+            ("adiabatic_growth", 60.0, 0.0),
+            ("adiabatic_relaxation", 120.0, 0.0),
+            ("prescribed_heating", 120.0, 2500.0),
+            ("prescribed_cooling", 240.0, -2500.0),
+        ]
+        .map(|(label, seconds, heat)| (label, seconds, ThermalDrive::SuppliedHeat(heat)))
+    };
+    println!(
+        "stage,time_s,temperature_K,dissolved_mol,solid_mol,cosolute_mol,conditional_saturation_mol_m3,osmotic_pressure_Pa,reservoir_temperature_K,conductance_W_K,window_heat_J,window_enthalpy_change_J,energy_residual_J,accepted_steps"
+    );
+    for (label, seconds, drive) in schedule {
+        let (step, reservoir, conductance) = match drive {
+            ThermalDrive::SuppliedHeat(heat) => (
+                bath.advance_with_heat(&thermal, Time::new(seconds), heat, controls, || false)?,
+                String::new(),
+                String::new(),
+            ),
+            ThermalDrive::Jacket {
+                temperature,
+                conductance_w_k,
+            } => (
+                bath.advance_with_heat_transfer(
+                    &thermal,
+                    Time::new(seconds),
+                    temperature,
+                    conductance_w_k,
+                    controls,
+                    || false,
+                )?,
+                format!("{:.3}", temperature.value()),
+                format!("{conductance_w_k:.6}"),
+            ),
+        };
         let (next, balance) = step.into_parts();
         bath = next;
         elapsed += seconds;
         let state = bath.last_steps()[0].state();
         let aqueous = bath.solution();
-        let concentration: Vec<_> = aqueous.solute_moles().iter()
-            .map(|amount| amount / aqueous.solvent_volume_m3()).collect();
+        let concentration: Vec<_> = aqueous
+            .solute_moles()
+            .iter()
+            .map(|amount| amount / aqueous.solvent_volume_m3())
+            .collect();
         println!(
-            "{label},{elapsed:.3},{:.9},{:.12e},{:.12e},{:.12e},{:.9},{:.9},{heat:.9},{:.12e},{:.12e},{}",
-            aqueous.temperature_k(), state.dissolved().value(), state.solid().value(),
-            aqueous.solute_moles()[1], bath.conditional_saturation(0, &concentration)?.value(),
-            aqueous.osmotic_pressure_pa()?, balance.enthalpy_change_j(),
-            balance.energy_residual_j(), balance.accepted_steps(),
+            "{label},{elapsed:.3},{:.9},{:.12e},{:.12e},{:.12e},{:.9},{:.9},{reservoir},{conductance},{:.9},{:.12e},{:.12e},{}",
+            aqueous.temperature_k(),
+            state.dissolved().value(),
+            state.solid().value(),
+            aqueous.solute_moles()[1],
+            bath.conditional_saturation(0, &concentration)?.value(),
+            aqueous.osmotic_pressure_pa()?,
+            balance.heat_input_j(),
+            balance.enthalpy_change_j(),
+            balance.energy_residual_j(),
+            balance.accepted_steps(),
         );
     }
     Ok(())

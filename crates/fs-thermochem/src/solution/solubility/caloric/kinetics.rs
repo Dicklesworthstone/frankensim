@@ -21,7 +21,9 @@
 //! Solvent volume, reference conductance and growth policy stay fixed over a window.
 //! Selected particle area evolves through each original isothermal phase solve;
 //! its original reference stock is never reset at a temperature trial.
-//! Specified heat is delivered uniformly during that window. There is no
+//! Specified heat is delivered uniformly during that window. Alternatively a
+//! prescribed-temperature reservoir exchanges heat through a finite thermal
+//! conductance, using the same implicit stages and accepted heat account. There is no
 //! simultaneous transport, evolving film coefficient, nucleation, fragmentation
 //! or population balance. An explicitly bound [`SolubilityThermalInteractionV1`]
 //! instead supplies conditional activity equilibrium and its consistent excess
@@ -37,6 +39,9 @@ use super::{
 use crate::solution::solubility::kinetics::{SolubilityKineticStateV1, SolubilityKineticsV1};
 use fs_qty::{Amount, Temperature, Time, Volume};
 use std::sync::Arc;
+
+mod heat_transfer;
+use heat_transfer::{HeatReceipt, StageHeat, StageResult, WindowHeat};
 
 pub mod interaction;
 pub use interaction::SolubilityThermalInteractionV1;
@@ -185,7 +190,12 @@ impl SolubilityThermalKineticsV1 {
                     solvent_volume,
                     phase,
                     Time::new(0.0),
-                    interactions.conditional_saturation(temperature, solvent_volume, phases, index)?,
+                    interactions.conditional_saturation(
+                        temperature,
+                        solvent_volume,
+                        phases,
+                        index,
+                    )?,
                 )?;
             } else {
                 kinetic.advance(temperature, solvent_volume, phase, Time::new(0.0))?;
@@ -244,12 +254,38 @@ impl SolubilityThermalKineticsV1 {
         duration: Time,
         heat_input_j: f64,
         controls: SolubilityThermalKineticControlsV1,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SolubilityThermalKineticOutcomeV1, SolubilityCaloricErrorV1> {
+        self.advance_with_source(
+            initial,
+            duration,
+            WindowHeat::Uniform(heat_input_j),
+            controls,
+            cancelled,
+        )
+    }
+
+    fn advance_with_source(
+        &self,
+        initial: &SolubilityThermalKineticStateV1,
+        duration: Time,
+        heat_source: WindowHeat,
+        controls: SolubilityThermalKineticControlsV1,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<SolubilityThermalKineticOutcomeV1, SolubilityCaloricErrorV1> {
         poll(&mut cancelled)?;
-        self.admit(initial, duration, heat_input_j, controls)?;
+        self.admit(
+            initial,
+            duration,
+            match heat_source {
+                WindowHeat::Uniform(heat) => heat,
+                WindowHeat::Reservoir(_) => 0.0,
+            },
+            controls,
+        )?;
         let count = self.kinetics().len();
         let mut current = WorkingState::from(initial);
+        let mut accepted_heat = HeatReceipt::default();
         let mut elapsed = 0.0;
         let mut interval = controls.initial_step.value();
         let mut accepted_steps = 0;
@@ -278,15 +314,31 @@ impl SolubilityThermalKineticsV1 {
                     "thermal kinetic time increment is unrepresentable",
                 ));
             }
-            let target_heat = heat_input_j * (end / duration.value());
-            let start_heat = heat_input_j * (elapsed / duration.value());
-            let middle_heat = 0.5 * start_heat + 0.5 * target_heat;
+            let (full_heat, middle_heat) = match heat_source {
+                WindowHeat::Uniform(heat_input_j) => {
+                    // Preserve the original prescribed-heat arithmetic exactly.
+                    let target_heat = heat_input_j * (end / duration.value());
+                    let start_heat = heat_input_j * (elapsed / duration.value());
+                    let middle_heat = 0.5 * start_heat + 0.5 * target_heat;
+                    (
+                        StageHeat::Prescribed(target_heat),
+                        StageHeat::Prescribed(middle_heat),
+                    )
+                }
+                WindowHeat::Reservoir(source) => {
+                    let heat = StageHeat::Reservoir {
+                        source,
+                        prefix: accepted_heat,
+                    };
+                    (heat, heat)
+                }
+            };
             let trial = (|| -> Result<_, SolubilityCaloricErrorV1> {
                 let full = self.stage(
                     initial,
                     &current,
                     Time::new(h),
-                    target_heat,
+                    full_heat,
                     root,
                     &mut root_iterations,
                     &mut cancelled,
@@ -300,11 +352,18 @@ impl SolubilityThermalKineticsV1 {
                     &mut root_iterations,
                     &mut cancelled,
                 )?;
+                let fine_heat = match heat_source {
+                    WindowHeat::Uniform(_) => full_heat,
+                    WindowHeat::Reservoir(source) => StageHeat::Reservoir {
+                        source,
+                        prefix: middle.heat,
+                    },
+                };
                 let fine = self.stage(
                     initial,
-                    &middle,
+                    &middle.state,
                     Time::new(h - 0.5 * h),
-                    target_heat,
+                    fine_heat,
                     root,
                     &mut root_iterations,
                     &mut cancelled,
@@ -323,7 +382,7 @@ impl SolubilityThermalKineticsV1 {
                 }
                 Err(error) => return Err(error),
             };
-            let error = temporal_error(&full, &fine, count, controls);
+            let error = temporal_error(&full.state, &fine.state, count, controls);
             if error > 1.0 {
                 rejected_steps += 1;
                 interval = half_interval(h, controls.minimum_step.value()).ok_or(
@@ -334,7 +393,8 @@ impl SolubilityThermalKineticsV1 {
                 )?;
                 continue;
             }
-            current = fine;
+            current = fine.state;
+            accepted_heat = fine.heat;
             elapsed = end;
             accepted_steps += 1;
             maximum_accepted_error_norm = maximum_accepted_error_norm.max(error);
@@ -354,10 +414,19 @@ impl SolubilityThermalKineticsV1 {
             &current.phases[..count],
             &mut cancelled,
         )?;
-        let energy_residual_j = checked(
-            enthalpy_change_j - heat_input_j,
-            "thermal kinetic window residual",
-        )?;
+        let (heat_input_j, energy_residual_j) = match heat_source {
+            WindowHeat::Uniform(heat_input_j) => (
+                heat_input_j,
+                checked(
+                    enthalpy_change_j - heat_input_j,
+                    "thermal kinetic window residual",
+                )?,
+            ),
+            WindowHeat::Reservoir(_) => (
+                accepted_heat.value()?,
+                accepted_heat.residual(enthalpy_change_j)?,
+            ),
+        };
         if energy_residual_j.abs() > controls.root.energy_tolerance_j {
             return Err(SolubilityCaloricErrorV1::EnergyResidual {
                 residual_j: energy_residual_j,
@@ -482,18 +551,25 @@ impl SolubilityThermalKineticsV1 {
         original: &SolubilityThermalKineticStateV1,
         current: &WorkingState,
         duration: Time,
-        target_heat: f64,
+        heat: StageHeat,
         controls: SolubilityCaloricSolveV1,
         root_iterations: &mut usize,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<WorkingState, SolubilityCaloricErrorV1> {
+    ) -> Result<StageResult, SolubilityCaloricErrorV1> {
         let baseline = self.change(
             original,
             current.temperature,
             &current.phases[..self.kinetics().len()],
             cancelled,
         )?;
-        let required = checked(target_heat - baseline, "thermal kinetic stage heat")?;
+        // The prescribed path keeps its original subtraction and evaluation
+        // order. Reservoir heat instead depends on the unknown endpoint.
+        let prescribed_required = match heat {
+            StageHeat::Prescribed(target) => {
+                Some(checked(target - baseline, "thermal kinetic stage heat")?)
+            }
+            StageHeat::Reservoir { .. } => None,
+        };
         // Interacting phase evolution freezes the stage's initial temperature.
         // The subsequent heat solve changes only T, so the source-qualified
         // positive frozen-stock heat capacity establishes a monotone root.
@@ -554,25 +630,33 @@ impl SolubilityThermalKineticsV1 {
             )?;
             if let Some(interactions) = &self.owner.interactions {
                 change = checked(
-                    change + interactions.enthalpy_increment_j(
-                        original.solvent_volume,
-                        current.temperature,
-                        &current.phases[..count],
-                        state.temperature,
-                        &state.phases[..count],
-                    )?,
+                    change
+                        + interactions.enthalpy_increment_j(
+                            original.solvent_volume,
+                            current.temperature,
+                            &current.phases[..count],
+                            state.temperature,
+                            &state.phases[..count],
+                        )?,
                     "interacting thermal stage enthalpy increment",
                 )?;
                 poll(cancelled)?;
             }
             Ok(Sample {
                 state,
-                residual: checked(change - required, "thermal kinetic stage residual")?,
+                residual: checked(
+                    change
+                        - match prescribed_required {
+                            Some(required) => required,
+                            None => heat.required(baseline, duration, state.temperature)?,
+                        },
+                    "thermal kinetic stage residual",
+                )?,
             })
         };
         let center = sample(current.temperature.value())?;
         if center.residual == 0.0 {
-            return Ok(center.state);
+            return heat.finish(center.state, duration);
         }
         let [lo, hi] = controls.temperature_bracket.map(|t| t.value());
         let (mut lower, mut upper) = if center.residual < 0.0 {
@@ -597,7 +681,7 @@ impl SolubilityThermalKineticsV1 {
                 || (hi - lo <= controls.temperature_tolerance_k
                     && best.residual.abs() <= controls.energy_tolerance_j)
             {
-                return Ok(best.state);
+                return heat.finish(best.state, duration);
             }
             if iteration == controls.maximum_iterations {
                 break;
@@ -681,6 +765,9 @@ impl SolubilityThermalKineticOutcomeV1 {
     pub const fn duration(&self) -> Time {
         self.duration
     }
+    /// Signed heat delivered to the bath [J]. For uniform heating this is the
+    /// prescribed window input; for reservoir exchange it is the independently
+    /// accumulated heat of the accepted implicit half stages.
     pub const fn heat_input_j(&self) -> f64 {
         self.heat_input_j
     }

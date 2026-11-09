@@ -14421,6 +14421,30 @@ fixed-area and shrinking-particle dissolution, concentration-induced crystal
 growth, coupled adiabatic finite-rate cooling and a separate equilibrium heat calculation.
 All demonstration coefficients are explicitly authored.
 
+### Jacket-driven dissolution and crystallization
+
+`KineticSolubilitySolution::advance_with_heat_transfer` sends a prescribed
+reservoir temperature and complete contact conductance in W/K to the SAME
+`SolubilityThermalKineticsV1` owner. The native heat root includes the actual
+solution-temperature feedback; a frozen starting-temperature power is not
+substituted for the boundary law. The accepted thermal report retains the
+independently integrated supplied heat and direct original-to-final enthalpy.
+
+The material handoff is shared with `advance_with_heat`: exact original phase
+laws, particle reference geometry, caloric sources and optional nonideal
+thermal family remain bound. Actual transported dissolved/solid stocks enter
+the solve, and the accepted aqueous view is rebuilt at the solved temperature.
+Volume and component totals stay fixed over the window. The jacket temperature
+is prescribed; finite coolant storage and simultaneous solute transport are
+not inferred. Zero contact, source mismatch and late cancellation preserve the
+original transactional behavior.
+
+`cargo run -p fs-material --example cosolute_crystallization -- --jacket`
+cycles one nonideal particle bath through cooling, a cold hold, heating and
+recooling. Its CSV output includes jacket temperature/conductance, actual phase
+stocks, conditional saturation, pressure, supplied heat and energy residual.
+All heat-transfer and interaction coefficients are authored demonstration data.
+
 ## Shared cavitation coefficients and frozen mixture acoustics
 
 `cavitation` owns a checked immutable liquid state at one explicit absolute

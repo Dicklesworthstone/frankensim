@@ -194,7 +194,9 @@ impl KineticSolubilitySolution {
     ) -> Result<Self> {
         if let Some(original) = &self.thermal_nonideal {
             if original != &source {
-                return Err(invalid("cannot replace the original nonideal thermal source"));
+                return Err(invalid(
+                    "cannot replace the original nonideal thermal source",
+                ));
             }
             return Ok(self);
         }
@@ -205,8 +207,7 @@ impl KineticSolubilitySolution {
                 .iter()
                 .zip(self.models.iter())
                 .any(|(thermal, kinetic)| thermal.law() != kinetic.law())
-            || caloric.solvent_molar_volume_m3_mol()
-                != self.solution.solvent_molar_volume_m3_mol()
+            || caloric.solvent_molar_volume_m3_mol() != self.solution.solvent_molar_volume_m3_mol()
             || caloric.solvent_heat_capacity().species() != self.solvent()
         {
             return Err(invalid(

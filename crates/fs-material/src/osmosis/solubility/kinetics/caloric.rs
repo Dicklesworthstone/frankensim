@@ -11,8 +11,9 @@ use fs_qty::{Temperature, Time, Volume};
 use fs_thermochem::solution::solubility::caloric::{
     SolubilityCaloricErrorV1,
     kinetics::{
-        SolubilityThermalKineticControlsV1, SolubilityThermalKineticOutcomeV1,
-        SolubilityThermalInteractionV1, SolubilityThermalKineticsV1,
+        SolubilityThermalInteractionV1, SolubilityThermalKineticControlsV1,
+        SolubilityThermalKineticOutcomeV1, SolubilityThermalKineticStateV1,
+        SolubilityThermalKineticsV1,
     },
 };
 use std::sync::Arc;
@@ -84,7 +85,62 @@ impl KineticSolubilitySolution {
         duration: Time,
         heat_input_j: f64,
         controls: SolubilityThermalKineticControlsV1,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<KineticSolubilityHeatStep, KineticSolubilityHeatError> {
+        self.advance_thermal(model, cancelled, |model, initial, cancelled| {
+            model.advance(initial, duration, heat_input_j, controls, cancelled)
+        })
+    }
+
+    /// Exchange heat with a reservoir held at its prescribed temperature.
+    ///
+    /// The actual boundary power is `G * (T_reservoir - T_solution)`, with
+    /// `conductance_w_k = G` in W/K for the complete contact or jacket. It is
+    /// an explicit apparatus input, not a molecular phase-transfer conductance
+    /// or an intrinsic solubility property. The native thermal solver couples
+    /// this temperature feedback to the actual finite-rate phase trajectories.
+    /// Its accepted boundary heat is reported by `balance().heat_input_j()`;
+    /// positive heat enters this solution.
+    ///
+    /// The reservoir may lie outside the material's temperature support, but
+    /// every solution trial must stay inside the original supported bracket.
+    /// Fixed volume, component conservation, source identity and nonideal
+    /// excess calorics follow the same rules as [`Self::advance_with_heat`].
+    /// The reservoir remains prescribed; it has no evolving finite heat store.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_heat_transfer(
+        &self,
+        model: &SolubilityThermalKineticsV1,
+        duration: Time,
+        reservoir_temperature: Temperature,
+        conductance_w_k: f64,
+        controls: SolubilityThermalKineticControlsV1,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<KineticSolubilityHeatStep, KineticSolubilityHeatError> {
+        self.advance_thermal(model, cancelled, |model, initial, cancelled| {
+            model.advance_with_heat_transfer(
+                initial,
+                duration,
+                reservoir_temperature,
+                conductance_w_k,
+                controls,
+                cancelled,
+            )
+        })
+    }
+
+    /// Bind and reconstruct exactly once around either native heat boundary.
+    /// Both paths retain the same cancellation points and material ownership.
+    fn advance_thermal<C: FnMut() -> bool>(
+        &self,
+        model: &SolubilityThermalKineticsV1,
+        mut cancelled: C,
+        advance: impl FnOnce(
+            &SolubilityThermalKineticsV1,
+            &SolubilityThermalKineticStateV1,
+            &mut C,
+        )
+            -> Result<SolubilityThermalKineticOutcomeV1, SolubilityCaloricErrorV1>,
     ) -> Result<KineticSolubilityHeatStep, KineticSolubilityHeatError> {
         if cancelled() {
             return Err(SolubilityCaloricErrorV1::Cancelled.into());
@@ -132,7 +188,7 @@ impl KineticSolubilitySolution {
             &phases[..count],
             &mut cancelled,
         )?;
-        let balance = model.advance(&initial, duration, heat_input_j, controls, &mut cancelled)?;
+        let balance = advance(model, &initial, &mut cancelled)?;
         let endpoint = balance.final_state();
         let mut solution = Self::prepare(
             endpoint.temperature(),

@@ -91,8 +91,16 @@ fn direct_thermal_increments_keep_neighboring_changes_and_original_source_domain
         2e-15,
     );
     let log_change = (1e16 / R) * ((to.value() - from.value()) / from.value() / to.value());
-    relative(model.log_saturation_ratio(from, to).unwrap(), log_change, 2e-15);
-    assert!(model.log_saturation_ratio(Temperature::new(249.0), to).is_err());
+    relative(
+        model.log_saturation_ratio(from, to).unwrap(),
+        log_change,
+        2e-15,
+    );
+    assert!(
+        model
+            .log_saturation_ratio(Temperature::new(249.0), to)
+            .is_err()
+    );
     assert!(
         model
             .dissolution_enthalpy_change_j_mol(from, Temperature::new(401.0))

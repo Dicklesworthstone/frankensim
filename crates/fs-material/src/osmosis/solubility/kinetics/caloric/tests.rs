@@ -1,7 +1,9 @@
 //! Material handoff: live transported stocks, thermal aqueous state and refusal.
 
 use super::*;
-use crate::osmosis::{nonideal::VirialSolutionModel, solubility::kinetics::VirialSolubilityThermalModel};
+use crate::osmosis::{
+    nonideal::VirialSolutionModel, solubility::kinetics::VirialSolubilityThermalModel,
+};
 use fs_qty::{Amount, AmountConcentration, VolumetricFlowRate};
 use fs_thermochem::{
     MolarThermalQuantityV1, SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R,
@@ -130,12 +132,18 @@ fn thermal_family(
     thermal: &SolubilityThermalKineticsV1,
     inverse_temperature: f64,
 ) -> Arc<VirialSolubilityThermalModel> {
-    Arc::new(VirialSolubilityThermalModel::new(
-        thermal.caloric().clone(),
-        Arc::new(VirialSolutionModel::new(300.0, MOLAR_VOLUME, 1.0, vec![2000.0], vec![1e-5]).unwrap()),
-        vec![inverse_temperature],
-        [Temperature::new(280.0), Temperature::new(340.0)],
-    ).unwrap())
+    Arc::new(
+        VirialSolubilityThermalModel::new(
+            thermal.caloric().clone(),
+            Arc::new(
+                VirialSolutionModel::new(300.0, MOLAR_VOLUME, 1.0, vec![2000.0], vec![1e-5])
+                    .unwrap(),
+            ),
+            vec![inverse_temperature],
+            [Temperature::new(280.0), Temperature::new(340.0)],
+        )
+        .unwrap(),
+    )
 }
 
 #[test]
@@ -143,15 +151,36 @@ fn explicit_thermal_family_survives_temperature_transport_and_source_checks() {
     let thermal = model(1e-4, PrecipitationPolicyV1::ExistingSolidOnly, MOLAR_VOLUME);
     let family = thermal_family(&thermal, 0.003);
     let fixed = material(&thermal, 0.15, 1.5)
-        .with_nonideal_thermodynamics(family.at_temperature(Temperature::new(300.0)).unwrap()).unwrap();
-    let bound = fixed.clone().with_thermal_nonideal_thermodynamics(family.clone()).unwrap();
+        .with_nonideal_thermodynamics(family.at_temperature(Temperature::new(300.0)).unwrap())
+        .unwrap();
+    let bound = fixed
+        .clone()
+        .with_thermal_nonideal_thermodynamics(family.clone())
+        .unwrap();
     assert_eq!(bound.last_steps(), fixed.last_steps());
     let warmer = bound.with_temperature(Temperature::new(320.0)).unwrap();
-    assert!(Arc::ptr_eq(warmer.thermal_nonideal_source().unwrap(), &family));
+    assert!(Arc::ptr_eq(
+        warmer.thermal_nonideal_source().unwrap(),
+        &family
+    ));
     assert!(std::ptr::eq(warmer.models(), bound.models()));
-    assert_eq!(warmer.last_steps()[0].state(), bound.last_steps()[0].state());
-    assert_eq!(warmer.solution().nonideal_model(), Some(family.at_temperature(Temperature::new(320.0)).unwrap().as_ref()));
-    assert_ne!(warmer.solution().nonideal_model(), bound.solution().nonideal_model());
+    assert_eq!(
+        warmer.last_steps()[0].state(),
+        bound.last_steps()[0].state()
+    );
+    assert_eq!(
+        warmer.solution().nonideal_model(),
+        Some(
+            family
+                .at_temperature(Temperature::new(320.0))
+                .unwrap()
+                .as_ref()
+        )
+    );
+    assert_ne!(
+        warmer.solution().nonideal_model(),
+        bound.solution().nonideal_model()
+    );
     assert!(bound.with_temperature(Temperature::new(350.0)).is_err());
     assert!(fixed.with_temperature(Temperature::new(320.0)).is_err());
     let restricted = Arc::new(
@@ -167,55 +196,115 @@ fn explicit_thermal_family_survives_temperature_transport_and_source_checks() {
         .with_thermal_nonideal_thermodynamics(restricted)
         .unwrap();
     // Inside the original pair-law domain but outside the thermal fit.
-    assert!(restricted.with_temperature(Temperature::new(335.0)).is_err());
-    assert!(restricted
-        .advance_with_heat(&thermal, Time::new(0.1), 0.0, controls(), || false)
-        .is_err());
+    assert!(
+        restricted
+            .with_temperature(Temperature::new(335.0))
+            .is_err()
+    );
+    assert!(
+        restricted
+            .advance_with_heat(&thermal, Time::new(0.1), 0.0, controls(), || false)
+            .is_err()
+    );
 
     let mut diluted = warmer.with_solvent_volume_m3(2e-3).unwrap();
-    diluted.replace_dissolved_inventories(1.5e-3, &[0.1]).unwrap();
+    diluted
+        .replace_dissolved_inventories(1.5e-3, &[0.1])
+        .unwrap();
     assert_eq!(diluted.last_steps()[0].state().solid(), Amount::new(1.5));
-    assert!(Arc::ptr_eq(diluted.thermal_nonideal_source().unwrap(), &family));
+    assert!(Arc::ptr_eq(
+        diluted.thermal_nonideal_source().unwrap(),
+        &family
+    ));
     let mut copy = warmer.clone();
     copy.copy_state_from(&diluted).unwrap();
     assert_eq!(copy, diluted);
-    assert!(Arc::ptr_eq(copy.thermal_nonideal_source().unwrap(), &family));
+    assert!(Arc::ptr_eq(
+        copy.thermal_nonideal_source().unwrap(),
+        &family
+    ));
 
     // Equal current B(T_ref) does not make a different thermal slope/source
     // compatible. Copying also cannot discard a declared thermal family.
     let different = thermal_family(&thermal, 0.006);
-    assert!(bound.clone().with_thermal_nonideal_thermodynamics(different.clone()).is_err());
-    let other = material(&thermal, 0.15, 1.5).with_thermal_nonideal_thermodynamics(different).unwrap();
+    assert!(
+        bound
+            .clone()
+            .with_thermal_nonideal_thermodynamics(different.clone())
+            .is_err()
+    );
+    let other = material(&thermal, 0.15, 1.5)
+        .with_thermal_nonideal_thermodynamics(different)
+        .unwrap();
     let mut destination = bound.clone();
     assert!(destination.copy_state_from(&other).is_err());
     assert!(destination.copy_state_from(&fixed).is_err());
     assert_eq!(destination, bound);
     let equal = Arc::new((*family).clone());
-    let rebound = bound.clone().with_thermal_nonideal_thermodynamics(equal).unwrap();
-    assert!(Arc::ptr_eq(rebound.thermal_nonideal_source().unwrap(), &family));
+    let rebound = bound
+        .clone()
+        .with_thermal_nonideal_thermodynamics(equal)
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        rebound.thermal_nonideal_source().unwrap(),
+        &family
+    ));
 }
 
 #[test]
 fn transported_particles_cool_with_original_excess_and_solid_reference_heat() {
     let base = model(1e-4, PrecipitationPolicyV1::ExistingSolidOnly, MOLAR_VOLUME);
-    let thermal = SolubilityThermalKineticsV1::new(base.caloric().clone(),
-        vec![base.kinetics()[0].clone().with_particle_surface(Amount::new(1.5)).unwrap()]).unwrap();
+    let thermal = SolubilityThermalKineticsV1::new(
+        base.caloric().clone(),
+        vec![
+            base.kinetics()[0]
+                .clone()
+                .with_particle_surface(Amount::new(1.5))
+                .unwrap(),
+        ],
+    )
+    .unwrap();
     let family = thermal_family(&thermal, 0.003);
     let mut original = material(&thermal, 0.15, 1.5)
-        .with_thermal_nonideal_thermodynamics(family.clone()).unwrap();
-    original.replace_dissolved_inventories(7e-4, &[0.03]).unwrap();
+        .with_thermal_nonideal_thermodynamics(family.clone())
+        .unwrap();
+    original
+        .replace_dissolved_inventories(7e-4, &[0.03])
+        .unwrap();
     let before = original.clone();
-    let step = original.advance_with_heat(&thermal, Time::new(3.0), 0.0, controls(), || false).unwrap();
+    let step = original
+        .advance_with_heat(&thermal, Time::new(3.0), 0.0, controls(), || false)
+        .unwrap();
     let accepted = step.solution();
     let after = accepted.last_steps()[0].state();
     let temperature = accepted.solution().temperature_k();
     assert!(temperature < 300.0 && after.dissolved().value() > 0.03);
     assert!(after.solid().value() < 1.5);
-    assert_eq!(after.total_solute(), original.last_steps()[0].state().total_solute());
-    assert_eq!(accepted.models()[0].particle_reference_solid(), Some(Amount::new(1.5)));
-    assert!(Arc::ptr_eq(accepted.thermal_nonideal_source().unwrap(), &family));
-    assert_eq!(accepted.solution().nonideal_model(), Some(family.at_temperature(Temperature::new(temperature)).unwrap().as_ref()));
-    assert_eq!(accepted.solution().solute_moles()[0], after.dissolved().value());
+    assert_eq!(
+        after.total_solute(),
+        original.last_steps()[0].state().total_solute()
+    );
+    assert_eq!(
+        accepted.models()[0].particle_reference_solid(),
+        Some(Amount::new(1.5))
+    );
+    assert!(Arc::ptr_eq(
+        accepted.thermal_nonideal_source().unwrap(),
+        &family
+    ));
+    assert_eq!(
+        accepted.solution().nonideal_model(),
+        Some(
+            family
+                .at_temperature(Temperature::new(temperature))
+                .unwrap()
+                .as_ref()
+        )
+    );
+    assert_eq!(
+        accepted.solution().solute_moles()[0],
+        after.dissolved().value()
+    );
     assert_eq!(original, before);
 
     // Independent H_extra for B(T)=B_ref+C(1/T-1/T_ref), retaining BOTH
@@ -227,20 +316,33 @@ fn transported_particles_cool_with_original_excess_and_solid_reference_heat() {
         0.5 * R * c * dissolved * dissolved / 7e-4
             + dissolved * saturation * (b * DISSOLUTION_ENTHALPY - R * c)
     };
-    let base_heat = (7e-4 / MOLAR_VOLUME * SOLVENT_CP
-        + after.total_solute().value() * SOLUTE_CP) * (temperature - 300.0)
+    let base_heat = (7e-4 / MOLAR_VOLUME * SOLVENT_CP + after.total_solute().value() * SOLUTE_CP)
+        * (temperature - 300.0)
         + (after.dissolved().value() - 0.03) * DISSOLUTION_ENTHALPY;
     let extra_change = extra(temperature, after.dissolved().value()) - extra(300.0, 0.03);
     assert!(extra_change.abs() > 1e-3);
     near(base_heat + extra_change, 0.0, 5e-7);
-    near(step.balance().enthalpy_change_j(), base_heat + extra_change, 5e-7);
+    near(
+        step.balance().enthalpy_change_j(),
+        base_heat + extra_change,
+        5e-7,
+    );
     assert!(step.balance().energy_residual_j().abs() <= controls().root.energy_tolerance_j);
 
     // A later heat step continues with this same family and original particle
     // geometry rather than silently falling back to ideal calorics.
-    let next = accepted.advance_with_heat(&thermal, Time::new(0.1), 5.0, controls(), || false).unwrap();
-    assert!(Arc::ptr_eq(next.solution().thermal_nonideal_source().unwrap(), &family));
-    near(next.balance().enthalpy_change_j(), 5.0, controls().root.energy_tolerance_j);
+    let next = accepted
+        .advance_with_heat(&thermal, Time::new(0.1), 5.0, controls(), || false)
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        next.solution().thermal_nonideal_source().unwrap(),
+        &family
+    ));
+    near(
+        next.balance().enthalpy_change_j(),
+        5.0,
+        controls().root.energy_tolerance_j,
+    );
 }
 
 #[test]
@@ -248,28 +350,53 @@ fn nonideal_heat_requires_exact_core_source_identity_and_rolls_back_on_refusal()
     let thermal = model(1e-4, PrecipitationPolicyV1::ExistingSolidOnly, MOLAR_VOLUME);
     let family = thermal_family(&thermal, 0.003);
     let original = material(&thermal, 0.15, 1.5)
-        .with_thermal_nonideal_thermodynamics(family.clone()).unwrap();
+        .with_thermal_nonideal_thermodynamics(family.clone())
+        .unwrap();
     let checkpoint = original.clone();
     let equal_but_distinct: Arc<dyn SolubilityThermalInteractionV1> = Arc::new((*family).clone());
     let foreign = thermal.with_interactions(equal_but_distinct).unwrap();
-    assert!(matches!(original.advance_with_heat(&foreign, Time::new(1.0), 0.0, controls(), || false),
-        Err(KineticSolubilityHeatError::SourceMismatch)));
+    assert!(matches!(
+        original.advance_with_heat(&foreign, Time::new(1.0), 0.0, controls(), || false),
+        Err(KineticSolubilityHeatError::SourceMismatch)
+    ));
     let declared: Arc<dyn SolubilityThermalInteractionV1> = family.clone();
     let bound_core = thermal.with_interactions(declared).unwrap();
-    assert!(matches!(material(&thermal, 0.15, 1.5).advance_with_heat(
-        &bound_core, Time::new(1.0), 0.0, controls(), || false), Err(KineticSolubilityHeatError::SourceMismatch)));
+    assert!(matches!(
+        material(&thermal, 0.15, 1.5).advance_with_heat(
+            &bound_core,
+            Time::new(1.0),
+            0.0,
+            controls(),
+            || false
+        ),
+        Err(KineticSolubilityHeatError::SourceMismatch)
+    ));
     let mut polls = 0;
-    assert!(matches!(original.advance_with_heat(&bound_core, Time::new(3.0), 0.0, controls(), || {
-        polls += 1;
-        polls == 16
-    }), Err(KineticSolubilityHeatError::Caloric(SolubilityCaloricErrorV1::Cancelled))));
+    assert!(matches!(
+        original.advance_with_heat(&bound_core, Time::new(3.0), 0.0, controls(), || {
+            polls += 1;
+            polls == 16
+        }),
+        Err(KineticSolubilityHeatError::Caloric(
+            SolubilityCaloricErrorV1::Cancelled
+        ))
+    ));
     assert_eq!(original, checkpoint);
     let mut limited = controls();
     limited.maximum_attempts = 1;
-    assert!(original.advance_with_heat(&bound_core, Time::new(3.0), 0.0, limited, || false).is_err());
+    assert!(
+        original
+            .advance_with_heat(&bound_core, Time::new(3.0), 0.0, limited, || false)
+            .is_err()
+    );
     assert_eq!(original, checkpoint);
-    let accepted = original.advance_with_heat(&bound_core, Time::new(0.1), 0.0, controls(), || false).unwrap();
-    assert!(Arc::ptr_eq(accepted.solution().thermal_nonideal_source().unwrap(), &family));
+    let accepted = original
+        .advance_with_heat(&bound_core, Time::new(0.1), 0.0, controls(), || false)
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        accepted.solution().thermal_nonideal_source().unwrap(),
+        &family
+    ));
 }
 
 fn near(actual: f64, expected: f64, tolerance: f64) {
@@ -484,4 +611,258 @@ fn shrinking_particles_share_the_original_heat_balance_and_geometry_source_ident
         Err(KineticSolubilityHeatError::SourceMismatch)
     ));
     assert_eq!(owner, before);
+}
+
+#[test]
+fn reservoir_cooling_tracks_temperature_feedback_and_preserves_closed_phase_stocks() {
+    let thermal = model(0.0, PrecipitationPolicyV1::ExistingSolidOnly, MOLAR_VOLUME);
+    let original = material(&thermal, 0.5, 1e-100);
+    let before = original.clone();
+    let capacity = 1e-3 / MOLAR_VOLUME * SOLVENT_CP + 0.5 * SOLUTE_CP;
+    let duration = 40.0;
+    let reservoir = 285.0;
+    let conductance = 100.0;
+    let exact = reservoir + (300.0 - reservoir) * (-conductance * duration / capacity).exp();
+    let run = |maximum_step| {
+        let mut control = controls();
+        control.initial_step = Time::new(maximum_step);
+        control.maximum_step = Time::new(maximum_step);
+        control.relative_tolerance = 1e-3;
+        original
+            .advance_with_heat_transfer(
+                &thermal,
+                Time::new(duration),
+                Temperature::new(reservoir),
+                conductance,
+                control,
+                || false,
+            )
+            .unwrap()
+    };
+    let coarse = run(4.0);
+    let fine = run(0.25);
+    let temperature = fine.solution().solution().temperature_k();
+    let coarse_error = (coarse.solution().solution().temperature_k() - exact).abs();
+    let fine_error = (temperature - exact).abs();
+    assert!(fine_error < 0.03 && 4.0 * fine_error < coarse_error);
+    assert!(temperature > reservoir && temperature < 300.0);
+    assert_eq!(original, before);
+    assert_eq!(
+        fine.solution().last_steps()[0].state(),
+        original.last_steps()[0].state()
+    );
+    assert_eq!(
+        fine.solution().last_steps()[0].state().solid().value(),
+        1e-100
+    );
+    assert_eq!(
+        fine.solution().solution().solute_moles(),
+        original.solution().solute_moles()
+    );
+    let heat = capacity * (temperature - 300.0);
+    near(fine.balance().heat_input_j(), heat, 1e-7);
+    near(fine.balance().enthalpy_change_j(), heat, 1e-7);
+    assert!(fine.balance().energy_residual_j().abs() <= 1e-7);
+    // A frozen initial cooling power would remove twice as much heat here.
+    assert!(fine.balance().heat_input_j().abs() < 0.75 * conductance * duration * 15.0);
+}
+
+#[test]
+fn jacket_cooling_grows_original_particles_and_keeps_excess_heat_in_the_balance() {
+    let fixed = model(1e-4, PrecipitationPolicyV1::ExistingSolidOnly, MOLAR_VOLUME);
+    let thermal = SolubilityThermalKineticsV1::new(
+        fixed.caloric().clone(),
+        vec![
+            fixed.kinetics()[0]
+                .clone()
+                .with_particle_surface(Amount::new(0.2))
+                .unwrap(),
+        ],
+    )
+    .unwrap();
+    let family = thermal_family(&thermal, 0.003);
+    let original = material(&thermal, 0.6, 0.2)
+        .with_thermal_nonideal_thermodynamics(family.clone())
+        .unwrap();
+    let before = original.clone();
+    let cooled = original
+        .advance_with_heat_transfer(
+            &thermal,
+            Time::new(40.0),
+            Temperature::new(285.0),
+            80.0,
+            controls(),
+            || false,
+        )
+        .unwrap();
+    let endpoint = cooled.solution();
+    let phase = endpoint.last_steps()[0].state();
+    let temperature = endpoint.solution().temperature_k();
+    assert!(temperature > 285.0 && temperature < 300.0);
+    assert!(phase.dissolved().value() < 0.6 && phase.solid().value() > 0.2);
+    assert_eq!(
+        phase.total_solute(),
+        original.last_steps()[0].state().total_solute()
+    );
+    assert_eq!(
+        endpoint.models()[0].particle_reference_solid(),
+        Some(Amount::new(0.2))
+    );
+    assert!(
+        endpoint.models()[0]
+            .conductance_at(phase.solid())
+            .unwrap()
+            .value()
+            > 1e-4
+    );
+    assert!(Arc::ptr_eq(
+        endpoint.thermal_nonideal_source().unwrap(),
+        &family
+    ));
+    assert_eq!(
+        endpoint.solution().solute_moles()[0],
+        phase.dissolved().value()
+    );
+    assert_eq!(original, before);
+
+    // Independent sensible + dissolution + virial/reference enthalpy; the
+    // jacket heat comes from the native accepted boundary powers, not this H.
+    let extra = |t: f64, dissolved: f64| {
+        let c = 0.003;
+        let b = 1e-5 + c * (1.0 / t - 1.0 / 300.0);
+        let saturation = 600.0 * (DISSOLUTION_ENTHALPY / R * (1.0 / 300.0 - 1.0 / t)).exp();
+        0.5 * R * c * dissolved * dissolved / 1e-3
+            + dissolved * saturation * (b * DISSOLUTION_ENTHALPY - R * c)
+    };
+    let sensible = (1e-3 / MOLAR_VOLUME * SOLVENT_CP + phase.total_solute().value() * SOLUTE_CP)
+        * (temperature - 300.0);
+    let phase_heat = DISSOLUTION_ENTHALPY * (phase.dissolved().value() - 0.6);
+    let extra_change = extra(temperature, phase.dissolved().value()) - extra(300.0, 0.6);
+    assert!(phase_heat < -10.0 && extra_change.abs() > 1e-3);
+    let heat = sensible + phase_heat + extra_change;
+    assert!(cooled.balance().heat_input_j() < 0.0);
+    near(cooled.balance().heat_input_j(), heat, 5e-7);
+    near(cooled.balance().enthalpy_change_j(), heat, 5e-7);
+    assert!(cooled.balance().energy_residual_j().abs() <= controls().root.energy_tolerance_j);
+
+    // A subsequent physical dilution retains the actual crystals and source.
+    // Its warmer jacket then dissolves those stocks on the same particle law.
+    let diluted = endpoint.with_solvent_volume_m3(1.2e-3).unwrap();
+    let warmed = diluted
+        .advance_with_heat_transfer(
+            &thermal,
+            Time::new(1.0),
+            Temperature::new(320.0),
+            80.0,
+            controls(),
+            || false,
+        )
+        .unwrap();
+    assert!(warmed.balance().heat_input_j() > 0.0);
+    assert!(warmed.solution().solution().solute_moles()[0] > phase.dissolved().value());
+    assert_eq!(warmed.solution().solution().solvent_volume_m3(), 1.2e-3);
+    assert_eq!(warmed.solution().models(), original.models());
+    assert!(Arc::ptr_eq(
+        warmed.solution().thermal_nonideal_source().unwrap(),
+        &family
+    ));
+}
+
+#[test]
+fn heat_transfer_retains_exact_sources_zero_contact_limit_and_atomic_cancellation() {
+    let thermal = model(1e-4, PrecipitationPolicyV1::ExistingSolidOnly, MOLAR_VOLUME);
+    let family = thermal_family(&thermal, 0.003);
+    let original = material(&thermal, 0.15, 1.5)
+        .with_thermal_nonideal_thermodynamics(family.clone())
+        .unwrap();
+    let before = original.clone();
+    let foreign_source: Arc<dyn SolubilityThermalInteractionV1> = Arc::new((*family).clone());
+    let foreign = thermal.with_interactions(foreign_source).unwrap();
+    assert!(matches!(
+        original.advance_with_heat_transfer(
+            &foreign,
+            Time::new(0.5),
+            Temperature::new(290.0),
+            10.0,
+            controls(),
+            || false,
+        ),
+        Err(KineticSolubilityHeatError::SourceMismatch)
+    ));
+    let fixed_only = material(&thermal, 0.15, 1.5)
+        .with_nonideal_thermodynamics(family.at_temperature(Temperature::new(300.0)).unwrap())
+        .unwrap();
+    assert!(matches!(
+        fixed_only.advance_with_heat_transfer(
+            &thermal,
+            Time::new(0.5),
+            Temperature::new(290.0),
+            10.0,
+            controls(),
+            || false,
+        ),
+        Err(KineticSolubilityHeatError::Material(_))
+    ));
+    let adiabatic = original
+        .advance_with_heat(&thermal, Time::new(0.5), 0.0, controls(), || false)
+        .unwrap();
+    let isolated = original
+        .advance_with_heat_transfer(
+            &thermal,
+            Time::new(0.5),
+            Temperature::new(290.0),
+            0.0,
+            controls(),
+            || false,
+        )
+        .unwrap();
+    assert_eq!(isolated, adiabatic);
+
+    let mut calls = 0;
+    let accepted = original
+        .advance_with_heat_transfer(
+            &thermal,
+            Time::new(0.5),
+            Temperature::new(290.0),
+            10.0,
+            controls(),
+            || {
+                calls += 1;
+                false
+            },
+        )
+        .unwrap();
+    assert!(calls > 1);
+    let mut observed = 0;
+    assert!(matches!(
+        original.advance_with_heat_transfer(
+            &thermal,
+            Time::new(0.5),
+            Temperature::new(290.0),
+            10.0,
+            controls(),
+            || {
+                observed += 1;
+                observed == calls
+            },
+        ),
+        Err(KineticSolubilityHeatError::Caloric(
+            SolubilityCaloricErrorV1::Cancelled
+        ))
+    ));
+    assert_eq!(observed, calls);
+    assert_eq!(original, before);
+    assert_eq!(
+        original
+            .advance_with_heat_transfer(
+                &thermal,
+                Time::new(0.5),
+                Temperature::new(290.0),
+                10.0,
+                controls(),
+                || false,
+            )
+            .unwrap(),
+        accepted
+    );
 }
