@@ -9,7 +9,7 @@ use super::*;
 
 #[path = "control/action.rs"]
 mod action;
-use action::{EnergyAction, SourceGroup};
+use action::{EnergyAction, FieldAction, SourceGroup};
 
 /// Whole preparation and repeated-query bounds for coherent source control.
 #[derive(Clone, Copy, Debug)]
@@ -23,7 +23,9 @@ pub struct AngularSpectrumApertureControlLimits {
     /// Bounds retained basis fields and each forward/source-adjoint sweep.
     pub maximum_source_field_entries: usize,
     /// N*F*(width+height+F), where F is the union of original frequencies.
-    /// Bounds the three separable kernel passes on six real field components.
+    /// With admitted positive temporal modes M, also bounds
+    /// N*M*(F+width+height+1+source_groups+controls), including complete
+    /// source projection/pullback. Each term handles six field components.
     pub maximum_kernel_pairs: usize,
     /// Peak logical storage, including original reconstruction scratch,
     /// sparse source fields, union-frequency fields, kernels and gradient.
@@ -58,6 +60,11 @@ pub struct AngularSpectrumApertureEnergyGradient<'a> {
 /// Separable x/y/time passes cost O(N*F*(width+height+F) + N*sum_s F_s)
 /// per value/gradient or Hessian action. Even/odd channels keep small positive
 /// window variances without subtracting nearly equal sum/difference kernels.
+/// An admitted 2..32-tone short-window band additionally projects original
+/// fields into at most 17 positive temporal modes BEFORE the spatial Gram,
+/// energy and coherent source pullback. Uniform and triangular shutters share
+/// this route; insufficient extra work/workspace headroom keeps the original
+/// pair operator. Queries still allocate nothing and store no dense Hessian.
 ///
 /// All banks retain their original material, geometry and source bindings.
 /// They are deterministic coherent controls; independently sampled covariance
@@ -204,7 +211,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumApertureEnergyControl<'e, 'b, 's, 'm
         let f = frequencies.len();
         let nf = mul(n, f)?;
         let grid = anchor.grid();
-        let kernel_pairs = mul(nf, add(add(grid.width, grid.height)?, f)?)?;
+        let mut kernel_pairs = mul(nf, add(add(grid.width, grid.height)?, f)?)?;
         let axis_pairs = if f == 0 {
             0
         } else {
@@ -230,6 +237,23 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumApertureEnergyControl<'e, 'b, 's, 'm
                 "optical control kernels exceed their work or storage budget",
             ));
         }
+        let field_modes = window
+            .real_band_mode_count_rad_s(&frequencies)
+            .map_err(|_| bad("optical control temporal band is unrepresentable"))?;
+        let field = if let Some(modes) = field_modes {
+            let (work, extra_bytes) =
+                FieldAction::requirements(grid, f, count, controls.len(), modes)?;
+            let bytes = add(workspace_bytes, extra_bytes)?;
+            if work <= limits.maximum_kernel_pairs && bytes <= limits.maximum_workspace_bytes {
+                kernel_pairs = kernel_pairs.max(work);
+                workspace_bytes = bytes;
+                FieldAction::new(window, &frequencies, n, controls.len(), cancelled)?
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let spatial = if f == 0 {
             None
         } else {
@@ -270,6 +294,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumApertureEnergyControl<'e, 'b, 's, 'm
             groups,
             epsilon,
             mu,
+            field,
         )?;
         poll(cancelled)?;
         Ok(Self {

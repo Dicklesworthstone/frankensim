@@ -59,6 +59,7 @@ fn action(
         groups,
         2.0,
         8.0,
+        FieldAction::new(window, omega, kx.len(), controls, &mut || false).unwrap(),
     )
     .unwrap()
 }
@@ -159,38 +160,128 @@ fn finite_patch_energy_and_complex_source_derivatives_match_independent_integrat
         HarmonicWindowProfile::Uniform,
         HarmonicWindowProfile::Triangular,
     ] {
-        let window = HarmonicWindow::with_profile(0.31, 0.42, profile).unwrap();
-        let mut owner = action(2, &omega, &kx, &blocks, aperture, window);
-        let actual = owner.evaluate(&coefficients, true, &mut || false).unwrap();
-        let expected = quadrature(&omega, &kx, &blocks, &coefficients, aperture, window);
-        close(actual, expected, 3e-9);
-        let gradient = owner.gradient.clone();
-        for source in 0..2 {
-            for imaginary in [false, true] {
-                let (mut plus, mut minus) = (coefficients, coefficients);
-                let h = 1e-4;
-                if imaginary {
-                    plus[source].im += h;
-                    minus[source].im -= h;
-                } else {
-                    plus[source].re += h;
-                    minus[source].re -= h;
-                }
-                let derivative = (quadrature(&omega, &kx, &blocks, &plus, aperture, window)
-                    - quadrature(&omega, &kx, &blocks, &minus, aperture, window))
-                    / (2.0 * h);
-                close(
+        for duration in [0.42, 0.2] {
+            let window = HarmonicWindow::with_profile(0.31, duration, profile).unwrap();
+            let mut owner = action(2, &omega, &kx, &blocks, aperture, window);
+            let actual = owner.evaluate(&coefficients, true, &mut || false).unwrap();
+            let expected = quadrature(&omega, &kx, &blocks, &coefficients, aperture, window);
+            close(actual, expected, 3e-9);
+            let gradient = owner.gradient.clone();
+            for source in 0..2 {
+                for imaginary in [false, true] {
+                    let (mut plus, mut minus) = (coefficients, coefficients);
+                    let h = 1e-4;
                     if imaginary {
-                        gradient[source].im
+                        plus[source].im += h;
+                        minus[source].im -= h;
                     } else {
-                        gradient[source].re
-                    },
-                    derivative,
-                    4e-8,
-                );
+                        plus[source].re += h;
+                        minus[source].re -= h;
+                    }
+                    let derivative = (quadrature(&omega, &kx, &blocks, &plus, aperture, window)
+                        - quadrature(&omega, &kx, &blocks, &minus, aperture, window))
+                        / (2.0 * h);
+                    close(
+                        if imaginary {
+                            gradient[source].im
+                        } else {
+                            gradient[source].re
+                        },
+                        derivative,
+                        4e-8,
+                    );
+                }
             }
         }
     }
+}
+
+#[test]
+fn coherent_two_tone_control_retains_dark_energy_gradient_and_hessian() {
+    let omega = [1.0, 2.0];
+    let blocks: Vec<_> = [1.0, -1.0]
+        .into_iter()
+        .enumerate()
+        .map(|(frequency, amplitude)| {
+            let mut field = [C64::ZERO; 6];
+            field[0] = C64::from_re(amplitude);
+            Block {
+                control: Some(1),
+                frequency,
+                fields: vec![field],
+            }
+        })
+        .collect();
+    let aperture = AngularSpectrumAperture::try_new([-0.3, 0.4], [0.7, 0.8]).unwrap();
+    for (profile, fourth, second) in [
+        (HarmonicWindowProfile::Uniform, 9.0 / 320.0, 1.0 / 12.0),
+        (HarmonicWindowProfile::Triangular, 9.0 / 960.0, 1.0 / 24.0),
+    ] {
+        for duration in [1e-12_f64, 1e-16] {
+            let window = HarmonicWindow::with_profile(-duration * 0.5, duration, profile).unwrap();
+            let mut owner = action(3, &omega, &[0.0], &blocks, aperture, window);
+            let real = [C64::ZERO, C64::ONE, C64::ZERO];
+            let energy = owner.evaluate(&real, true, &mut || false).unwrap();
+            // cos(t)-cos(2t) = 3*t²/2 + O(t⁴); epsilon/2 = 1.
+            let expected = fourth * duration.powi(4);
+            assert!(
+                (energy / expected - 1.0).abs() < 2e-13,
+                "{energy:e} != {expected:e}"
+            );
+            assert!((owner.gradient[1].re / (2.0 * expected) - 1.0).abs() < 2e-13);
+            assert_eq!(owner.gradient[1].im, 0.0);
+            assert_eq!(owner.gradient[0], C64::ZERO);
+            assert_eq!(owner.gradient[2], C64::ZERO);
+            owner.evaluate(&real, false, &mut || false).unwrap();
+            assert!((owner.gradient[1].re / (2.0 * expected) - 1.0).abs() < 2e-13);
+            let imaginary = [C64::ZERO, C64::new(0.0, 1.0), C64::ZERO];
+            owner.evaluate(&imaginary, false, &mut || false).unwrap();
+            // The Cartesian imaginary curvature retains the carrier sum:
+            // sin(2t)-sin(t) = t + O(t³), not the real dark curvature.
+            assert!(
+                (owner.gradient[1].im / (2.0 * second * duration * duration) - 1.0).abs() < 2e-13
+            );
+            assert_eq!(owner.gradient[1].re, 0.0);
+        }
+    }
+}
+
+#[test]
+fn control_temporal_payload_and_admission_cover_projection_and_source_pullback() {
+    let grid = AngularSpectrumGrid {
+        width: 3,
+        height: 2,
+        spacing_m: [1.0; 2],
+    };
+    let (work, bytes) = FieldAction::requirements(grid, 2, 5, 3, 17).unwrap();
+    assert_eq!(work, 6 * 17 * (2 + 5 + 3 + 3 + 2 + 1));
+    assert_eq!(
+        bytes,
+        2 * 17 * core::mem::size_of::<Dd>()
+            + 6 * 3 * core::mem::size_of::<FieldParts>()
+            + 3 * core::mem::size_of::<[Dd; 2]>()
+            + core::mem::size_of::<fs_fft::harmonic_window::HarmonicBandWorkspace>()
+            + fs_fft::harmonic_window::HARMONIC_BAND_PREPARATION_SCRATCH_BYTES
+    );
+    let window = HarmonicWindow::new(0.0, 1e-12).unwrap();
+    assert!(
+        FieldAction::new(window, &[1.0], 1, 1, &mut || false)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        FieldAction::new(window, &[1.0, 2.0], 1, 1, &mut || false)
+            .unwrap()
+            .is_some()
+    );
+    let wide = HarmonicWindow::new(0.0, 1.0).unwrap();
+    assert!(
+        FieldAction::new(wide, &[1.0, 2.0], 1, 1, &mut || false)
+            .unwrap()
+            .is_none()
+    );
+    assert!(FieldAction::new(window, &[1.0, 2.0], 1, 1, &mut || true).is_err());
+    assert!(FieldAction::requirements(grid, usize::MAX, 5, 3, 17).is_err());
 }
 
 #[test]
@@ -415,6 +506,7 @@ fn separable_xy_time_action_matches_the_original_full_pair_integrator() {
         groups,
         2.0,
         8.0,
+        FieldAction::new(window, &omega, nx * ny, 2, &mut || false).unwrap(),
     )
     .unwrap();
     struct Direct(Dd);

@@ -1,6 +1,10 @@
 use super::super::gram::{GramWorkspace, clear};
 use super::*;
 
+#[path = "field.rs"]
+mod field;
+pub(super) use field::FieldAction;
+
 /// Sparse original bank/frequency block. Fields already carry the shared
 /// joint aperture/shutter center rotation; no source covariance is inferred.
 pub(super) struct SourceGroup {
@@ -18,6 +22,7 @@ pub(super) struct EnergyAction {
     groups: Vec<SourceGroup>,
     weights: [Dd; 6],
     gram: GramWorkspace,
+    field: Option<FieldAction>,
 }
 
 impl EnergyAction {
@@ -31,6 +36,7 @@ impl EnergyAction {
         groups: Vec<SourceGroup>,
         epsilon: f64,
         mu: f64,
+        field: Option<FieldAction>,
     ) -> Result<Self, AngularSpectrumError> {
         let gram = GramWorkspace::new(modes, frequencies.len(), frequencies.len(), &mut || false)?;
         Ok(Self {
@@ -42,6 +48,7 @@ impl EnergyAction {
             groups,
             weights: [epsilon, epsilon, epsilon, mu, mu, mu].map(Dd::from_f64),
             gram,
+            field,
         })
     }
 
@@ -66,6 +73,21 @@ impl EnergyAction {
         self.gradient.fill(C64::ZERO);
         self.combine(coefficients, include_fixed, cancelled)?;
         let f = self.frequencies.len();
+        if let Some(field) = &mut self.field {
+            let spatial = self
+                .spatial
+                .as_ref()
+                .ok_or_else(|| bad("optical control spatial kernel is unavailable"))?;
+            return field.evaluate(
+                &mut self.gram,
+                spatial,
+                &self.groups,
+                self.weights,
+                &mut self.gradient,
+                include_fixed,
+                cancelled,
+            );
+        }
         if f != 0 {
             let spatial = self
                 .spatial
