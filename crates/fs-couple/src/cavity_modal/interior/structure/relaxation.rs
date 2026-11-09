@@ -6,6 +6,9 @@
 //! must not already be included in K; there is no sampled damping surrogate.
 
 use super::StructuralInterior;
+pub use super::resonance::{
+    StructuralInteriorParameterDirection, StructuralInteriorSourceParameterJet,
+};
 use super::resonance::{StructuralInteriorReceiver, StructuralInteriorSources};
 use fs_exec::Cx;
 use fs_math::c64::C64;
@@ -16,14 +19,18 @@ pub use fs_phs::harmonic::resonance::{
     ResonanceSurveyControls, ResonanceSurveyError,
 };
 use fs_phs::harmonic::resonance::{search_resonance, survey_resonances};
+pub use fs_phs::mechanical::MechanicalRelaxationDirection as StructuralInteriorRelaxationBranchDirection;
 
 mod fields;
 use fields::StructuralInteriorRelaxationHarmonicError as Error;
 pub use fields::{
-    StructuralInteriorRelaxationCurvatureResponse, StructuralInteriorRelaxationFrequencyResponse,
-    StructuralInteriorRelaxationHarmonicError, StructuralInteriorRelaxationHarmonicLimits,
-    StructuralInteriorRelaxationMemoryCurvature, StructuralInteriorRelaxationMemoryResponse,
-    StructuralInteriorRelaxationPowerCurvature, StructuralInteriorRelaxationResponse,
+    StructuralInteriorRelaxationCurvatureResponse,
+    StructuralInteriorRelaxationFrequencyParameterResponse,
+    StructuralInteriorRelaxationFrequencyResponse, StructuralInteriorRelaxationHarmonicError,
+    StructuralInteriorRelaxationHarmonicLimits, StructuralInteriorRelaxationMemoryCurvature,
+    StructuralInteriorRelaxationMemoryParameterJet, StructuralInteriorRelaxationMemoryResponse,
+    StructuralInteriorRelaxationParameterDirection, StructuralInteriorRelaxationPowerCurvature,
+    StructuralInteriorRelaxationPowerParameterJet, StructuralInteriorRelaxationResponse,
 };
 
 /// Source-bound complete linear image; all frequencies share native assembly.
@@ -35,6 +42,39 @@ pub struct PreparedStructuralInteriorRelaxation<'m, 'a, 'f, 'c> {
 /// One original full-state factor, reusable across coherent force/flow drives.
 pub struct PreparedStructuralInteriorRelaxationHarmonic<'p, 'm> {
     inner: fields::Factor<'p, 'm>,
+}
+
+/// One physical parameter direction, prepared once for reuse across frequencies.
+/// It is bound to the original immutable mechanical/cavity preparation.
+pub struct PreparedStructuralInteriorRelaxationDirection<'p, 'm> {
+    inner: fields::PreparedDirection<'p, 'm>,
+}
+
+impl<'m, 'a, 'f, 'c> PreparedStructuralInteriorRelaxation<'m, 'a, 'f, 'c> {
+    /// Prepare the complete original M/C/relaxed-K, reciprocal B and Maxwell
+    /// direction using the already admitted mechanical inverse and arm map.
+    ///
+    /// One supplied B derivative enters both opposite spatial blocks and both
+    /// force/flow observations. Each arm supplies its stiffness, relaxation-time
+    /// and original strain-projection derivative; equal-time arms remain
+    /// separate. Source derivatives belong to the later response query.
+    ///
+    /// No factorization, material fit or finite model perturbation occurs.
+    /// The same prepared direction can be reused by factors of this model at
+    /// any admitted positive frequency. A factor from another preparation
+    /// refuses it. The existing adapter limits bound complete retained
+    /// directions, simultaneous native jets and independent physical recovery.
+    pub fn prepare_parameter_direction<'p>(
+        &'p self,
+        direction: StructuralInteriorRelaxationParameterDirection<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<PreparedStructuralInteriorRelaxationDirection<'p, 'm>, Error> {
+        Ok(PreparedStructuralInteriorRelaxationDirection {
+            inner: self
+                .inner
+                .prepare_parameter_direction(direction, &mut || cx.checkpoint().is_err())?,
+        })
+    }
 }
 
 impl<'a, 'f, 'c> StructuralInterior<'a, 'f, 'c> {
@@ -202,6 +242,33 @@ impl PreparedStructuralInteriorRelaxationHarmonic<'_, '_> {
     ) -> Result<StructuralInteriorRelaxationResponse, Error> {
         self.inner
             .solve(structural_force, inward_flow_load, &mut || {
+                cx.checkpoint().is_err()
+            })
+    }
+
+    /// Resolve the complete original frequency/parameter response with this
+    /// SAME factor, including material k/tau/strain and geometry coupling terms.
+    ///
+    /// Five native state solves retain every memory state. The original
+    /// parameter and mixed momentum/branch equations are checked separately.
+    /// Changing sqrt(k) is included when canonical branch effort becomes
+    /// physical stress. Independent material heat includes the direct decay-
+    /// rate derivative; instantaneous wall/structural loss includes original
+    /// damping changes. Interface work retains both B and B_theta contributions.
+    ///
+    /// Full coherent source amplitude/phase jets are supplied in original
+    /// force/inward-flow order. The result exposes fields and signed power jets
+    /// for the existing receiver, extremum and bandwidth query owners.
+    /// Coordinates, topology and arm count stay fixed. No finite parameter
+    /// change, missing constitutive derivative or transient change work is inferred.
+    pub fn solve_with_frequency_parameter_derivative(
+        &self,
+        sources: StructuralInteriorSourceParameterJet<'_>,
+        direction: &PreparedStructuralInteriorRelaxationDirection<'_, '_>,
+        cx: &Cx<'_>,
+    ) -> Result<StructuralInteriorRelaxationFrequencyParameterResponse, Error> {
+        self.inner
+            .solve_with_frequency_parameter_derivative(sources, &direction.inner, &mut || {
                 cx.checkpoint().is_err()
             })
     }

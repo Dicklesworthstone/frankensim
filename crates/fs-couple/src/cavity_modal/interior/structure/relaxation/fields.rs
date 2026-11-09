@@ -109,9 +109,16 @@ type Error = StructuralInteriorRelaxationHarmonicError;
 type Limits = StructuralInteriorRelaxationHarmonicLimits;
 
 mod curvature;
+mod parameter;
 pub use curvature::{
     StructuralInteriorRelaxationCurvatureResponse, StructuralInteriorRelaxationMemoryCurvature,
     StructuralInteriorRelaxationPowerCurvature,
+};
+pub(super) use parameter::PreparedDirection;
+pub use parameter::{
+    StructuralInteriorRelaxationFrequencyParameterResponse,
+    StructuralInteriorRelaxationMemoryParameterJet, StructuralInteriorRelaxationParameterDirection,
+    StructuralInteriorRelaxationPowerParameterJet,
 };
 
 /// One original Maxwell arm in caller order, using peak phasors.
@@ -216,6 +223,7 @@ pub(super) struct Prepared<'s> {
     branches: &'s [MaxwellDampingBranch],
     roots: Vec<f64>,
     harmonic: HarmonicModel,
+    mechanical: LinearMechanicalSystem,
     limits: Limits,
 }
 pub(super) struct Factor<'p, 's> {
@@ -362,6 +370,7 @@ impl<'s> Prepared<'s> {
             branches,
             roots,
             harmonic,
+            mechanical,
             limits,
         })
     }

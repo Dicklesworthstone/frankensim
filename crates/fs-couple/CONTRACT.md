@@ -13661,3 +13661,53 @@ three grids, generated third/fifth harmonics and explicit memory, separate
 power means, complete state/effort chain rules, variational shooting, passive
 negative differential slope, weak physical contractions, malformed data,
 source refusal and cancellation/reuse.
+
+### Original material-memory parameter response and physical work
+
+`PreparedStructuralInteriorRelaxation::prepare_parameter_direction` binds one
+complete original spatial M/C/relaxed-K/interface direction and the signed
+stiffness, strain-projection and relaxation-time direction of every Maxwell arm.
+The shared spatial assembler inserts both opposite B_theta blocks. The retained
+original `LinearMechanicalSystem` supplies its cached inverse mass and canonical
+arm map; direction preparation is reused across frequencies. A factor belonging
+to another original preparation refuses the direction.
+
+`PreparedStructuralInteriorRelaxationHarmonic::solve_with_frequency_parameter_derivative`
+accepts the existing complete force/inward-flow source jet and reuses the SAME
+factor for all five native state solves. Physical displacement, velocity,
+pressure potential, pressure, interface force/flow and arm stress retain both
+parameter and mixed derivatives alongside the complete frequency curvature.
+Stress recovery includes the changing sqrt(k) multiplying canonical branch
+effort. The original kinematic, momentum and branch equations are independently
+checked, including M_theta, reciprocal B_theta, k_theta, b_theta, rate_theta
+and every additional -i frequency-action term.
+
+Each branch independently exposes spring-storage parameter/mixed derivatives,
+complete heat and signed structural/acoustic work jets. The original decay-rate
+direction contributes directly to heat; changing strain maps contribute to
+branch work. Structural and instantaneous wall heat include their original
+symmetric damping directions, while gyro/interface exchange stays outside heat.
+Eight power channels and four normalized balance methods retain all source,
+field, coefficient and mixed product rules. A zero-projection arm can develop
+a nonzero stress derivative without inventing first-order heat.
+
+The response borrows complete original field jets through
+`field_parameter_jet` and scalar arm stress through
+`branch_stress_parameter_jet`, for existing coherent receiver, extremum and
+bandwidth queries. Coordinates, topology and arm count stay fixed. Missing
+material/geometry laws, finite parameter changes and transient parameter-change
+work are not inferred.
+
+Existing adapter ceilings admit a complete parameter payload
+`8*(64*d^2+40*n^2+16*b*n+160*d+160*n+64*b)` bytes and work score
+`2048*d^3+512*n^2+1024*b*n`, with d=2*n+b. Native direction and harmonic
+bounds remain separately enforced. Recovery allocates no additional dense
+factor and performs no extra state solve; cancellation or source, binding,
+capacity, arithmetic or physical-row refusal publishes no partial response.
+
+Focused native tests compare an independently differentiated original
+uniform-pressure mixed-material law and coherent source delay, complete
+manufactured nonuniform mutual-memory/gyroscopic equations, every independent
+storage/work channel and the zero-memory limit. The actual mechanical and
+Maxwell owners execute; outer FE mesh assembly is outside this focused runtime
+verification. Existing physical field/curvature regressions remain.

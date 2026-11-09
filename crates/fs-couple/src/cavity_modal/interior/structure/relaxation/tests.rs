@@ -513,3 +513,8 @@ fn zero_memory_limit_refusals_cancellation_and_factor_reuse() {
 
 #[path = "tests/curvature.rs"]
 mod curvature;
+
+#[path = "tests/parameter.rs"]
+mod parameter;
+#[path = "tests/parameter_coupled.rs"]
+mod parameter_coupled;

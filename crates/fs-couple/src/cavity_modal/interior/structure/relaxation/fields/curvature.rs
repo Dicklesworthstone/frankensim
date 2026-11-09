@@ -118,7 +118,7 @@ impl Factor<'_, '_> {
     ) -> Result<StructuralInteriorRelaxationCurvatureResponse, Error> {
         poll(cancelled)?;
         let p = self.prepared;
-        let (n, ns) = (p.source.coordinates, p.source.structural);
+        let n = p.source.coordinates;
         // The existing complete preparation bound includes these O(n^2+b*n)
         // physical observations and retained arrays. Native solve limits remain
         // separately enforced by the original full-state harmonic owner.
@@ -128,15 +128,34 @@ impl Factor<'_, '_> {
         let second_input = source_second_derivative
             .map(|(s, a)| p.load(s, a))
             .transpose()?;
-        let zero = vec![C64::ZERO; n];
-        let f1 = first_input.as_deref().unwrap_or(&zero);
-        let f2 = second_input.as_deref().unwrap_or(&zero);
         let native = self.harmonic.response_with_frequency_curvature(
             &input,
             first_input.as_deref(),
             second_input.as_deref(),
             &mut *cancelled,
         )?;
+        self.recover_curvature(
+            native,
+            &input,
+            first_input.as_deref(),
+            second_input.as_deref(),
+            cancelled,
+        )
+    }
+
+    pub(super) fn recover_curvature(
+        &self,
+        native: fs_phs::harmonic::HarmonicFrequencyCurvatureResponse,
+        input: &[C64],
+        first_input: Option<&[C64]>,
+        second_input: Option<&[C64]>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<StructuralInteriorRelaxationCurvatureResponse, Error> {
+        let p = self.prepared;
+        let (n, ns) = (p.source.coordinates, p.source.structural);
+        let zero = vec![C64::ZERO; n];
+        let f1 = first_input.unwrap_or(&zero);
+        let f2 = second_input.unwrap_or(&zero);
         let first = p.state(
             &native.frequency_response.state_derivative,
             &native.frequency_response.effort_derivative,
@@ -175,12 +194,8 @@ impl Factor<'_, '_> {
         let native_second_residual = native.relative_second_derivative_residual;
         let mean_stored_energy_derivative = native.frequency_response.mean_stored_energy_derivative;
         let mean_stored_energy_second_derivative = native.mean_stored_energy_second_derivative;
-        let frequency_response = self.recover_frequency(
-            native.frequency_response,
-            &input,
-            first_input.as_deref(),
-            cancelled,
-        )?;
+        let frequency_response =
+            self.recover_frequency(native.frequency_response, input, first_input, cancelled)?;
         let potential_second = second.q.split_off(ns);
         let pressure_second = second.velocity.split_off(ns);
         let (force_second, flow_second) = response::interface(
