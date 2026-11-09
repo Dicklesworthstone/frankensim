@@ -60,6 +60,13 @@ pub(super) struct VolumeDissipation {
 }
 
 impl PreparedThermoviscous<'_, '_> {
+    /// Original volume-cell count, available before allocating or integrating
+    /// a spatial loss observation. This includes every retained tetrahedron.
+    #[must_use]
+    pub fn element_count(&self) -> usize {
+        self.model.space.complex.tets.len()
+    }
+
     /// Independently integrate the declared full P2 velocity and temperature
     /// coefficients on every original tetrahedron, in `TetComplex::tets` order.
     /// Vectors use the native hierarchical ordering: vertices followed by edge

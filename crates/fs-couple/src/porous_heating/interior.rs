@@ -29,6 +29,8 @@ use std::sync::Arc;
 /// Quasisteady full-volume acoustics refreshed from accepted thermal states.
 pub mod feedback;
 mod heat;
+/// Resolved mixed-field viscous heating with separate thermal availability.
+pub mod thermoviscous;
 use heat::{InteriorHeatAccount, InteriorHeatState};
 
 /// Hard storage/work ceiling; a caller may request a smaller cell budget.

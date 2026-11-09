@@ -147,6 +147,42 @@ states against independent triangle/Maxwell heat integrals, native energy and
 event accounting, contact-driven timestep admission, split observer history,
 zero-drive parity, complete area/mass/caloric binding, and late refusal rollback.
 
+### Resolved viscous acoustic heat on native thermal cells
+
+`porous_heating::interior::thermoviscous::ThermoviscousViscousHeating` connects
+the original full mixed P2/P1/P2 acoustic loss observation to the existing
+`DepositionSimulation` timeline. It borrows the exact prepared frequency,
+transport/caloric state and original velocity/temperature coefficient slices.
+The native quadrature evaluates every retained affine or curved tetrahedron
+once. Only positive shear and bulk viscous powers become caloric sources;
+conductive entropy production and thermal/molecular availability destruction
+are separately accumulated observations. Signed port/source work, first-order
+heat forcing, boundary conduction, structural losses and numerical residuals
+are not deposited by this fluid-volume adapter.
+
+The caller supplies one distinct original native caloric receiver per element.
+Both physical volume and equilibrium fluid mass must match, and the existing
+binding checks retain material, caloric object/identity, storage basis, geometry
+and body/segment state. A prepared element-count query admits the complete cell
+budget before quadrature. Matching measures do not prove spatial correspondence
+or caloric equivalence; those remain explicit caller responsibilities.
+
+Cached watts compose with authored thermal sources, contacts, reservoirs and
+events through the native observer. Accepted durations alone enter separate
+mechanism and original-order per-cell accounts. Shear plus bulk heat is included
+once in native external heat; availability loss never joins that total. Native
+candidate thermal and observer states publish together, preserving the input
+state and work account on cancellation, binding change or caloric refusal.
+Continuation uses the accepted observer without another acoustic evaluation.
+
+This is held, quasisteady cycle-mean heating, with no material refresh,
+mean-flow/streaming closure, acoustic startup or moving-geometry inference.
+`porous_heating/interior/tests/thermoviscous.rs` supplies independent affine
+strain/divergence and thermal-polynomial oracles, native event and observer
+composition, separate availability accounting, original bindings and rollback.
+Formatting and bounded source review do not establish native runtime success;
+native execution remains pending in the current pinned-dependency environment.
+
 ### Accepted-temperature feedback through the full interior pressure field
 
 `porous_heating::interior::feedback::TemperatureInteriorHeating` connects the
