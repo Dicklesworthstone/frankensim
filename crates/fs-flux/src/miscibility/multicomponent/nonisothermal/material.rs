@@ -27,7 +27,9 @@ use super::{
     MulticomponentNonisothermalField, MulticomponentNonisothermalSolve,
     MulticomponentNonisothermalStep,
 };
-use crate::miscibility::multicomponent::MulticomponentMiscibilityNetwork;
+use crate::miscibility::multicomponent::{
+    MulticomponentMiscibilityCell, MulticomponentMiscibilityNetwork,
+};
 use crate::miscibility::multicomponent::advection::MulticomponentMiscibilityAdvection;
 use crate::miscibility::multicomponent::material::{
     MulticomponentMiscibilityMaterialError as MaterialError, ResolvedMulticomponentMiscibilityField,
@@ -309,54 +311,15 @@ impl<'caloric, 'liquid, 'card>
         maximum_relative_volume_mismatch: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self> {
-        poll(cancelled)?;
-        let count = numerical.network().cells().len();
-        if count > maximum_resolved_cells {
-            return Err(MaterialError::CellBudget {
-                required: count,
-                maximum: maximum_resolved_cells,
-            }
-            .into());
-        }
-        if numerical.temperatures().len() != count {
-            return Err(
-                MulticomponentMiscibilityMaterialNonisothermalError::Invalid(
-                    "one actual temperature per original material cell required",
-                ),
-            );
-        }
-        let mut cells = Vec::with_capacity(count);
-        for (cell, (geometry, &temperature)) in numerical
-            .network()
-            .cells()
-            .iter()
-            .zip(numerical.temperatures())
-            .enumerate()
-        {
-            poll(cancelled)?;
-            let amounts = numerical
-                .cell_component_moles(cell)
-                .expect("admitted thermal field retains every original cell inventory");
-            let resolved = caloric
-                .liquid_law()
-                .homogeneous(temperature, amounts, &mut *cancelled)
-                .map_err(|error| MaterialError::Source { cell, error })?;
-            let expected_m3 = geometry.volume_m3;
-            let actual_m3 = resolved.volume_m3();
-            let mismatch = (actual_m3 - expected_m3).abs() / actual_m3.max(expected_m3);
-            if !mismatch.is_finite() || mismatch > maximum_relative_volume_mismatch {
-                return Err(MaterialError::VolumeMismatch {
-                    cell,
-                    expected_m3,
-                    actual_m3,
-                    maximum_relative_mismatch: maximum_relative_volume_mismatch,
-                }
-                .into());
-            }
-            cells.push(resolved);
-        }
-        let cells = cells.into();
-        poll(cancelled)?;
+        let cells = resolve_local_cells(
+            numerical.component_moles(),
+            numerical.temperatures(),
+            numerical.network().cells(),
+            caloric.liquid_law(),
+            maximum_resolved_cells,
+            maximum_relative_volume_mismatch,
+            cancelled,
+        )?;
         Ok(Self {
             numerical,
             caloric,
@@ -365,6 +328,62 @@ impl<'caloric, 'liquid, 'card>
             maximum_relative_volume_mismatch,
         })
     }
+}
+
+/// Original material qualification shared by homogeneous and energetic-interface
+/// thermal owners. Each caller keeps its numerical storage/entropy owner intact;
+/// this helper only resolves the same actual local T and canonical inventories.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::miscibility::multicomponent) fn resolve_local_cells(
+    component_moles: &[f64],
+    temperatures: &[Temperature],
+    geometry: &[MulticomponentMiscibilityCell],
+    source: &MulticomponentLiquidSolutionLaw<'_>,
+    maximum_resolved_cells: usize,
+    maximum_relative_volume_mismatch: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Arc<[ResolvedMulticomponentLiquidCell]>> {
+    poll(cancelled)?;
+    let count = geometry.len();
+    if count > maximum_resolved_cells {
+        return Err(MaterialError::CellBudget {
+            required: count,
+            maximum: maximum_resolved_cells,
+        }
+        .into());
+    }
+    let n = source.species().len();
+    if n == 0
+        || temperatures.len() != count
+        || count.checked_mul(n) != Some(component_moles.len())
+    {
+        return Err(MulticomponentMiscibilityMaterialNonisothermalError::Invalid(
+            "one actual temperature and complete original species inventory per material cell required",
+        ));
+    }
+    let mut cells = Vec::with_capacity(count);
+    for (cell, (geometry, &temperature)) in geometry.iter().zip(temperatures).enumerate() {
+        poll(cancelled)?;
+        let amounts = &component_moles[cell * n..(cell + 1) * n];
+        let resolved = source
+            .homogeneous(temperature, amounts, &mut *cancelled)
+            .map_err(|error| MaterialError::Source { cell, error })?;
+        let expected_m3 = geometry.volume_m3;
+        let actual_m3 = resolved.volume_m3();
+        let mismatch = (actual_m3 - expected_m3).abs() / actual_m3.max(expected_m3);
+        if !mismatch.is_finite() || mismatch > maximum_relative_volume_mismatch {
+            return Err(MaterialError::VolumeMismatch {
+                cell,
+                expected_m3,
+                actual_m3,
+                maximum_relative_mismatch: maximum_relative_volume_mismatch,
+            }
+            .into());
+        }
+        cells.push(resolved);
+    }
+    poll(cancelled)?;
+    Ok(cells.into())
 }
 
 /// Original-source endpoint and the unchanged numerical step receipt.

@@ -1,7 +1,7 @@
 //! Second derivatives of signed physical work, with products scaled before summation.
 
 use super::super::{HarmonicResponseError, finite, invalid, parameter::PowerSum};
-use fs_math::c64::C64;
+use fs_math::{c64::C64, dd::Dd};
 
 #[derive(Default)]
 pub(super) struct ComplexSum {
@@ -181,6 +181,106 @@ pub fn harmonic_mean_power_parameter_jet_with_cancel(
         angular_second_derivative: second.value()?,
         parameter_derivative: parameter.value()?,
         angular_parameter_derivative: mixed.value()?,
+    })
+}
+
+/// Value, slope and curvature of original symmetric quadratic work.
+///
+/// Evaluates P=Re(v^H D v)/2 and both frequency derivatives, where
+/// D=(C+C^T)/2 is fixed and the complete finite row-major C is supplied.
+/// Signed directions are permitted; this observation does not admit a new
+/// constitutive law. Gyroscopic/skew entries do not contribute to work.
+/// A scalar matrix also observes a material branch's independently owned
+/// positive resistance or storage coefficient without premultiplying a field.
+///
+/// Symmetric off-diagonal pairs are combined before field contraction, with
+/// their rounding remainder retained. No halved subnormal coefficient is
+/// materialized, and an exact skew pair cannot erase weaker physical work.
+/// Coefficients remain inside normalized double-double products; neither C*v
+/// nor an overflowing coefficient sum is used to form a work term.
+/// Upper-triangle traversal is O(n^2), with constant scratch and no allocation.
+pub fn harmonic_quadratic_power_curvature_with_cancel(
+    velocity: &[C64],
+    derivative: &[C64],
+    second_derivative: &[C64],
+    matrix: &[f64],
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<super::super::resonance::HarmonicPowerCurvatureSample, HarmonicResponseError> {
+    use super::super::resonance::{HarmonicPowerCurvatureSample, HarmonicPowerSample};
+    if cancelled() {
+        return Err(HarmonicResponseError::Cancelled);
+    }
+    let n = velocity.len();
+    if n == 0
+        || derivative.len() != n
+        || second_derivative.len() != n
+        || n.checked_mul(n) != Some(matrix.len())
+        || velocity
+            .iter()
+            .chain(derivative)
+            .chain(second_derivative)
+            .any(|&v| !finite(v))
+        || matrix.iter().any(|v| !v.is_finite())
+    {
+        return Err(invalid(
+            "complete finite quadratic-work fields and matrix required",
+        ));
+    }
+    let (mut value, mut first, mut second) = (
+        PowerSum::default(),
+        PowerSum::default(),
+        PowerSum::default(),
+    );
+    for i in 0..n {
+        if cancelled() {
+            return Err(HarmonicResponseError::Cancelled);
+        }
+        for j in i..n {
+            let coefficients = if i == j {
+                [matrix[i * n + i], 0.0]
+            } else {
+                let (a, b) = (matrix[i * n + j], matrix[j * n + i]);
+                if a == -b {
+                    // Cancel exact gyroscopic pairs before they reach a
+                    // shared accumulator containing much weaker dissipation.
+                    continue;
+                }
+                if (a + b).is_finite() {
+                    // One upper-triangle term replaces both original entries:
+                    // Re(v_i^* v_j)*(a+b)/2. Keep the sum's low word and leave
+                    // the half inside PowerSum, even below min subnormal.
+                    let sum = Dd::from_f64(a) + Dd::from_f64(b);
+                    [sum.hi, sum.lo]
+                } else {
+                    // Same-sign coefficient overflow is harmless when the
+                    // fields are small: normalize each original product.
+                    [a, b]
+                }
+            };
+            for c in coefficients {
+                if c == 0.0 {
+                    continue;
+                }
+                value.half_inner(velocity[i], velocity[j], c)?;
+                first.half_inner(derivative[i], velocity[j], c)?;
+                first.half_inner(velocity[i], derivative[j], c)?;
+                second.half_inner(second_derivative[i], velocity[j], c)?;
+                // Two normalized contractions avoid constructing 2*c.
+                second.half_inner(derivative[i], derivative[j], c)?;
+                second.half_inner(derivative[i], derivative[j], c)?;
+                second.half_inner(velocity[i], second_derivative[j], c)?;
+            }
+        }
+    }
+    if cancelled() {
+        return Err(HarmonicResponseError::Cancelled);
+    }
+    Ok(HarmonicPowerCurvatureSample {
+        sample: HarmonicPowerSample {
+            average_power_w: value.value()?,
+            angular_derivative: first.value()?,
+        },
+        angular_second_derivative: second.value()?,
     })
 }
 

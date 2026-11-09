@@ -108,6 +108,12 @@ impl From<response::ResponseError> for StructuralInteriorRelaxationHarmonicError
 type Error = StructuralInteriorRelaxationHarmonicError;
 type Limits = StructuralInteriorRelaxationHarmonicLimits;
 
+mod curvature;
+pub use curvature::{
+    StructuralInteriorRelaxationCurvatureResponse, StructuralInteriorRelaxationMemoryCurvature,
+    StructuralInteriorRelaxationPowerCurvature,
+};
+
 /// One original Maxwell arm in caller order, using peak phasors.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StructuralInteriorRelaxationMemoryResponse {
@@ -417,7 +423,7 @@ impl<'s> Prepared<'s> {
         omega: f64,
         state: &State,
         input: &[C64],
-        baseline: Option<&State>,
+        baseline: Option<(&State, f64)>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, Error> {
         let n = self.source.coordinates;
@@ -427,8 +433,8 @@ impl<'s> Prepared<'s> {
             let mut row = Row::new();
             row.add(state.q[i], C64::new(0.0, -omega));
             row.add(state.velocity[i], C64::from_re(-1.0));
-            if let Some(base) = baseline {
-                row.add(base.q[i], C64::new(0.0, -1.0));
+            if let Some((base, order)) = baseline {
+                row.add(base.q[i], C64::new(0.0, -order));
             }
             residual = residual.max(row.relative()?);
             let mut row = Row::new();
@@ -442,10 +448,10 @@ impl<'s> Prepared<'s> {
                         -omega * self.source.mass[i * n + j],
                     ),
                 );
-                if let Some(base) = baseline {
+                if let Some((base, order)) = baseline {
                     row.add(
                         base.velocity[j],
-                        C64::new(0.0, -self.source.mass[i * n + j]),
+                        C64::new(0.0, -order * self.source.mass[i * n + j]),
                     );
                 }
             }
@@ -467,8 +473,8 @@ impl<'s> Prepared<'s> {
                     C64::from_re(-branch.stiffness * branch.strain[i]),
                 );
             }
-            if let Some(base) = baseline {
-                row.add(base.stress[j], C64::new(0.0, -1.0));
+            if let Some((base, order)) = baseline {
+                row.add(base.stress[j], C64::new(0.0, -order));
             }
             residual = residual.max(row.relative()?);
         }
@@ -629,6 +635,18 @@ impl Factor<'_, '_> {
             input_derivative.as_deref(),
             &mut *cancelled,
         )?;
+        self.recover_frequency(native, &input, input_derivative.as_deref(), cancelled)
+    }
+
+    // Reuse the same original physical recovery after a native curvature solve.
+    fn recover_frequency(
+        &self,
+        native: fs_phs::harmonic::HarmonicFrequencyResponse,
+        input: &[C64],
+        input_derivative: Option<&[C64]>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<StructuralInteriorRelaxationFrequencyResponse, Error> {
+        let p = self.prepared;
         let state = p.state(
             &native.response.state,
             &native.response.effort,
@@ -642,12 +660,13 @@ impl Factor<'_, '_> {
             cancelled,
         )?;
         let residual = p.residual(self.omega, &state, &input, None, cancelled)?;
-        let slope_input = input_derivative.unwrap_or_else(|| vec![C64::ZERO; p.source.coordinates]);
+        let zero = vec![C64::ZERO; p.source.coordinates];
+        let slope_input = input_derivative.unwrap_or(&zero);
         let derivative_residual = p.residual(
             self.omega,
             &derivative,
             &slope_input,
-            Some(&state),
+            Some((&state, 1.0)),
             cancelled,
         )?;
         let response = p.observe(

@@ -2295,3 +2295,23 @@ physical-unit conversion and resource/cancellation boundaries. Together with
 mechanical and directly affected original tests, 26 native modal tests pass.
 These are finite-arithmetic local derivatives, not rigorous error enclosures or
 measured performance guarantees.
+
+### Symmetric quadratic physical-work curvature
+
+`harmonic_quadratic_power_curvature_with_cancel` evaluates original
+`Re(v^H*sym(C)*v)/2` and both frequency derivatives for a fixed finite
+row-major C. It retains all product-rule terms and permits signed directions;
+observation does not admit a constitutive law. Scalar matrices also observe
+independently owned material resistance or spring-storage coefficients.
+
+Upper-triangle traversal combines each off-diagonal coefficient pair before
+field contraction, preserving the sum's low word. Exact gyroscopic pairs
+cancel before reaching physical-work accumulators. Subnormal coefficients are
+never halved before multiplication; overflowing same-sign coefficient sums
+remain separate normalized products. Neither C*v nor twice a large coefficient
+is formed. The existing binary-normalized double-double work owner provides
+O(n^2) work, constant scratch, no allocation, and row cancellation checkpoints.
+Malformed, nonfinite, unrepresentable or cancelled observations return no
+partial result. Focused tests cover complex physical curvature, tiny symmetric
+work beside huge gyroscopic entries, subnormal/large coefficient products and
+coefficient remainders surviving leading quadratic cancellation.

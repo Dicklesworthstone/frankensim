@@ -14,6 +14,9 @@
 //! infer droplet trajectories, drag, entrainment, shielding or moving-volume
 //! work. The transport entropy receipt describes that substep only.
 
+/// Adaptive physical time for the complete original gas and droplet network.
+pub mod adaptive;
+
 use std::collections::BTreeMap;
 
 use super::{

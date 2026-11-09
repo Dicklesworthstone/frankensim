@@ -510,3 +510,6 @@ fn zero_memory_limit_refusals_cancellation_and_factor_reuse() {
         Err(Error::Harmonic(HarmonicError::Singular { .. }))
     ));
 }
+
+#[path = "tests/curvature.rs"]
+mod curvature;
