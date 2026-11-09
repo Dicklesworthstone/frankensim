@@ -24,6 +24,8 @@ pub struct ReservoirBoundary<'a> {
 /// One flat primitive row per side and its original-source caloric cache.
 pub(super) struct Reservoirs {
     slots: [Option<usize>; 6],
+    stagnation: [bool; 6],
+    reservoir_energy: [f64; 6],
     states: Vec<f64>,
     primitive: Vec<Primitive>,
     pub(super) profiles: Option<reservoir_profiles::Profiles>,
@@ -54,6 +56,8 @@ impl Reservoirs {
         let width = n + 4;
         let mut result = Self {
             slots: [None; 6],
+            stagnation: [false; 6],
+            reservoir_energy: [0.0; 6],
             states: allocated(inputs.len() * width, 0.0)?,
             primitive: allocated(inputs.len(), Primitive::default())?,
             profiles: None,
@@ -91,10 +95,136 @@ impl Reservoirs {
                 temperature: original.temperature,
                 sound_speed: original.sound_speed,
             };
+            result.reservoir_energy[slot] = conservative[width - 1];
             result.slots[slot] = Some(index);
         }
         stepping::poll::<Error>(cancelled)?;
         Ok(result)
+    }
+
+    pub(super) fn set_stagnation(
+        &mut self,
+        gas: &MixtureGas,
+        sides: &[BoundarySide],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        stepping::poll::<Error>(cancelled)?;
+        if sides.len() > 6 {
+            return Err(Error::Invalid("too many compact reservoir sides"));
+        }
+        let n = gas.species_count();
+        let mut candidate = [false; 6];
+        let mut flux = [0.0; WIDTH_LIMIT];
+        for &side in sides {
+            stepping::poll::<Error>(cancelled)?;
+            let axis = side.axis();
+            let sign = side.sign();
+            let slot = side_index(axis, sign);
+            let index = self.slots[slot].ok_or(Error::Invalid(
+                "compact reservoir needs an already bound uniform exterior",
+            ))?;
+            if candidate[slot] || self.primitive[index].velocity != [0.0; 3] {
+                return Err(Error::Invalid(
+                    "compact reservoir sides must be unique and exactly stationary",
+                ));
+            }
+            let row = self.row(axis, sign, n).expect("uniform reservoir slot");
+            let reservoir = fs_gas::multicomponent::Cell {
+                partial_densities: &row[..n],
+                momentum: 0.0,
+                energy: self.reservoir_energy[slot],
+            };
+            gas.reservoir_spatial_flux_from_primitive(
+                normal_primitive(row, n, axis),
+                reservoir,
+                sign,
+                &mut flux[..n + 4],
+                &mut *cancelled,
+            )?;
+            candidate[slot] = true;
+        }
+        stepping::poll::<Error>(cancelled)?;
+        self.stagnation = candidate;
+        Ok(())
+    }
+
+    pub(super) fn is_stagnation(&self, axis: usize, sign: f64) -> bool {
+        self.stagnation[side_index(axis, sign)]
+    }
+
+    pub(super) fn has_stagnation(&self) -> bool {
+        self.stagnation.iter().any(|selected| *selected)
+    }
+
+    pub(super) fn stagnation_cell(
+        &self,
+        axis: usize,
+        sign: f64,
+        species: usize,
+    ) -> Option<fs_gas::multicomponent::Cell<'_>> {
+        let slot = side_index(axis, sign);
+        if !self.stagnation[slot] {
+            return None;
+        }
+        let row = self
+            .row(axis, sign, species)
+            .expect("admitted compact reservoir");
+        Some(fs_gas::multicomponent::Cell {
+            partial_densities: &row[..species],
+            momentum: 0.0,
+            energy: self.reservoir_energy[slot],
+        })
+    }
+
+    pub(super) fn stagnation_rate(
+        &self,
+        gas: &MixtureGas,
+        grid: &CartesianGrid,
+        states: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, Error> {
+        let n = gas.species_count();
+        let width = n + 4;
+        let mut flux = [0.0; WIDTH_LIMIT];
+        let mut maximum: f64 = 0.0;
+        for side in BoundarySide::ALL {
+            let axis = side.axis();
+            let sign = side.sign();
+            let Some(reservoir) = self.stagnation_cell(axis, sign, n) else {
+                continue;
+            };
+            let [a, b] = tangents(axis);
+            for face in 0..grid.face_count(side) {
+                let mut c = [0; 3];
+                c[axis] = if sign < 0.0 { 0 } else { grid.shape[axis] - 1 };
+                c[a] = face % grid.shape[a];
+                c[b] = face / grid.shape[a];
+                let k = grid.index(c);
+                stepping::poll::<Error>(cancelled)?;
+                let q = cell(&states[k * width..(k + 1) * width], n);
+                let face = gas.reservoir_spatial_flux(
+                    q.normal(axis),
+                    reservoir,
+                    sign,
+                    &mut flux[..width],
+                    &mut *cancelled,
+                )?;
+                let density = sum(q.partial_densities.iter().copied());
+                let local = (0..3)
+                    .map(|d| {
+                        (face.signal_speed
+                            + if d == axis {
+                                0.0
+                            } else {
+                                (q.momentum[d] / density).abs()
+                            })
+                            / grid.spacing[d]
+                    })
+                    .sum::<f64>();
+                maximum = maximum.max(local);
+            }
+        }
+        Ok(maximum)
     }
 
     pub(super) fn workspace_bytes(&self) -> usize {
@@ -116,6 +246,8 @@ impl Reservoirs {
         stepping::poll::<Error>(cancelled)?;
         Ok(Self {
             slots: self.slots,
+            stagnation: self.stagnation,
+            reservoir_energy: self.reservoir_energy,
             states,
             primitive,
             profiles,

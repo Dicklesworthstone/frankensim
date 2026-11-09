@@ -585,6 +585,11 @@ fn spatial<L: TransportLaw>(
     #[cfg(feature = "experimental-sgs")] mut subgrid: Option<&mut sgs::SubgridTransport>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, MolecularError> {
+    if reservoirs.is_some_and(|view| view.has_stagnation()) {
+        return Err(MolecularError::Invalid(
+            "compact stagnation reservoirs do not specify a molecular face bath",
+        ));
+    }
     let compatible =
         reservoirs.is_none() && walls.iter().all(|wall| wall.supports_compatible_stress());
     #[cfg(feature = "experimental-sgs")]

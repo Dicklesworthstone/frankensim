@@ -306,3 +306,61 @@ fn g4_mixture_reservoir_admission_budget_and_late_cancellation_are_atomic() {
     assert_eq!(flow.boundary_impulses, loads);
     assert_eq!(flow.reservoir(input.side), Some(input));
 }
+
+
+#[test]
+fn g1_volumetric_compact_reservoir_supplies_canonical_species_and_stagnation_enthalpy() {
+    let grid = CartesianGrid::new(2, 2, 2, 0.1, 0.1, 0.1).unwrap();
+    for reconstruction in [Reconstruction::FirstOrder, Reconstruction::Muscl] {
+        for side in BoundarySide::ALL {
+            let source = standard(0.2);
+            let mut tank = [0.0; 7];
+            state_into(&source, &[0.0, 1.0, 0.0], [0.0; 3], 2.0, &mut tank).unwrap();
+            let h0 = tank[6] + 2.0;
+            let input = ReservoirBoundary {
+                side,
+                partial_densities: &[0.0, 1.0, 0.0],
+                velocity: [0.0; 3],
+                pressure_pa: 2.0,
+            };
+            let mut flow = supplied(
+                source,
+                grid,
+                one_open_side(side),
+                ([1.0, 0.0, 0.0], [0.0; 3], 1.0),
+                &[input],
+            )
+            .with_stagnation_reservoirs(&[side], || false)
+            .unwrap();
+            let bytes = flow.workspace_bytes();
+            assert!(flow.uses_stagnation_reservoir(side));
+            for _ in 0..3 {
+                let report = flow
+                    .step(
+                        Time::new(0.001),
+                        StepControl {
+                            reconstruction,
+                            ..StepControl::default()
+                        },
+                        || false,
+                    )
+                    .unwrap();
+                balance(report);
+                for face in flow.boundary_impulses(side) {
+                    assert!(face.species_masses[1] < 0.0);
+                    assert_eq!(face.species_masses[0], 0.0);
+                    assert_eq!(face.species_masses[2], 0.0);
+                    close(face.energy, h0 * face.species_masses[1], 3e-12);
+                    for axis in 0..3 {
+                        if axis != side.axis() {
+                            close(face.momentum[axis], 0.0, 3e-12);
+                        }
+                    }
+                }
+                assert_eq!(flow.workspace_bytes(), bytes);
+            }
+            let cloned = flow.reservoirs.try_clone(&mut || false).unwrap();
+            assert!(cloned.is_stagnation(side.axis(), side.sign()));
+        }
+    }
+}

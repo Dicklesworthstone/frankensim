@@ -40,6 +40,11 @@ pub(super) fn admit(
     reservoirs: &Reservoirs,
     pressure_outlets: PressureOutletPolicy,
 ) -> Result<(), DissipationError> {
+    if reservoirs.has_stagnation() {
+        return Err(DissipationError::Invalid(
+            "compact stagnation reservoirs do not specify a molecular face bath",
+        ));
+    }
     for side in BoundarySide::ALL {
         match physical_condition(boundaries, side) {
             None | Some(BoundaryCondition::Reflecting) => {}

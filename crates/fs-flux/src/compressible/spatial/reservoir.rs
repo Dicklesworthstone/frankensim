@@ -75,6 +75,7 @@ pub(super) struct Reservoirs {
     states: [Option<AdmittedReservoir>; 6],
     outlets: [Option<PressureOutletBoundary>; 6],
     characteristic_outlets: [Option<(f64, f64)>; 6],
+    stagnation: [Option<fs_gas::dynamics::Conserved>; 6],
     pub(super) profiles: profiles::Profiles,
 }
 
@@ -101,6 +102,7 @@ impl Reservoirs {
             states: [None; 6],
             outlets: [None; 6],
             characteristic_outlets: [None; 6],
+            stagnation: [None; 6],
             profiles: profiles::Profiles::default(),
         };
         for side in BoundarySide::ALL {
@@ -181,6 +183,56 @@ impl Reservoirs {
         Ok(result)
     }
 
+    pub(super) fn set_stagnation(
+        &mut self,
+        gas: &FrozenGas,
+        sides: &[BoundarySide],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        poll(cancelled)?;
+        if sides.len() > 6 {
+            return Err(Error::Invalid("at most six compact reservoir sides"));
+        }
+        let mut candidate = [None; 6];
+        for &side in sides {
+            poll(cancelled)?;
+            let axis = side.axis();
+            let sign = side.sign();
+            let slot = 2 * axis + usize::from(sign > 0.0);
+            let exterior = self.get(axis, sign).ok_or(Error::Invalid(
+                "compact reservoir needs an already bound uniform exterior",
+            ))?;
+            if candidate[slot].is_some() || exterior.input.velocity != [0.0; 3] {
+                return Err(Error::Invalid(
+                    "compact reservoir sides must be unique and exactly stationary",
+                ));
+            }
+            let reservoir = fs_gas::dynamics::Conserved {
+                density: exterior.state.density,
+                momentum: 0.0,
+                energy: exterior.state.energy,
+            };
+            gas.reservoir_spatial_flux(
+                exterior.state.normal(axis),
+                reservoir,
+                sign,
+                &mut *cancelled,
+            )?;
+            candidate[slot] = Some(reservoir);
+        }
+        poll(cancelled)?;
+        self.stagnation = candidate;
+        Ok(())
+    }
+
+    pub(super) fn is_stagnation(&self, axis: usize, sign: f64) -> bool {
+        self.stagnation[2 * axis + usize::from(sign > 0.0)].is_some()
+    }
+
+    pub(super) fn has_stagnation(&self) -> bool {
+        self.stagnation.iter().any(Option::is_some)
+    }
+
     pub(super) fn get(&self, axis: usize, sign: f64) -> Option<&AdmittedReservoir> {
         self.states[2 * axis + usize::from(sign > 0.0)].as_ref()
     }
@@ -214,6 +266,7 @@ impl Reservoirs {
             states: self.states,
             outlets: self.outlets,
             characteristic_outlets: self.characteristic_outlets,
+            stagnation: self.stagnation,
             profiles: self.profiles.try_clone(cancelled)?,
         })
     }
@@ -236,6 +289,14 @@ impl Reservoirs {
 }
 
 impl<'a> View<'a> {
+    pub(super) fn has_stagnation(self) -> bool {
+        self.owner.has_stagnation()
+    }
+
+    pub(super) fn stagnation(self, axis: usize, sign: f64) -> Option<fs_gas::dynamics::Conserved> {
+        self.owner.stagnation[2 * axis + usize::from(sign > 0.0)]
+    }
+
     pub(super) fn get_at(
         self,
         grid: &CartesianGrid,
@@ -293,14 +354,15 @@ impl<'a> View<'a> {
             let axis = side.axis();
             let sign = side.sign();
             let slot = 2 * axis + usize::from(sign > 0.0);
-            let (outlet_pressure, reference_velocity) =
-                if let Some(outlet) = self.owner.outlets[slot] {
-                    (outlet.pressure_pa, None)
-                } else if let Some((pressure, velocity)) = self.owner.characteristic_outlets[slot] {
-                    (pressure, Some(velocity))
-                } else {
-                    continue;
-                };
+            let compact = self.owner.stagnation[slot];
+            let pressure_control = if let Some(outlet) = self.owner.outlets[slot] {
+                Some((outlet.pressure_pa, None))
+            } else {
+                self.owner.characteristic_outlets[slot].map(|(p, v)| (p, Some(v)))
+            };
+            if compact.is_none() && pressure_control.is_none() {
+                continue;
+            }
             let [a, b] = tangents(axis);
             for face in 0..grid.face_count(side) {
                 let mut c = [0; 3];
@@ -334,27 +396,63 @@ impl<'a> View<'a> {
                         pressure,
                     };
                     (
-                        if let Some(velocity) = reference_velocity {
-                            gas.characteristic_outlet_spatial_flux_from_primitive(
-                                trace, sign, outlet_pressure, velocity, &mut *cancelled,
+                        if let Some(reservoir) = compact {
+                            gas.reservoir_spatial_flux_from_primitive(
+                                trace,
+                                reservoir,
+                                sign,
+                                &mut *cancelled,
                             )?
                         } else {
-                            gas.pressure_outlet_spatial_flux_from_primitive(
-                                trace, sign, outlet_pressure, &mut *cancelled,
-                            )?
+                            let (outlet_pressure, reference_velocity) =
+                                pressure_control.expect("selected pressure control");
+                            if let Some(velocity) = reference_velocity {
+                                gas.characteristic_outlet_spatial_flux_from_primitive(
+                                    trace,
+                                    sign,
+                                    outlet_pressure,
+                                    velocity,
+                                    &mut *cancelled,
+                                )?
+                            } else {
+                                gas.pressure_outlet_spatial_flux_from_primitive(
+                                    trace,
+                                    sign,
+                                    outlet_pressure,
+                                    &mut *cancelled,
+                                )?
+                            }
                         },
                         trace.transverse_velocity,
                     )
                 } else {
                     (
-                        if let Some(velocity) = reference_velocity {
-                            gas.characteristic_outlet_spatial_flux(
-                                q.normal(axis), sign, outlet_pressure, velocity, &mut *cancelled,
+                        if let Some(reservoir) = compact {
+                            gas.reservoir_spatial_flux(
+                                q.normal(axis),
+                                reservoir,
+                                sign,
+                                &mut *cancelled,
                             )?
                         } else {
-                            gas.pressure_outlet_spatial_flux(
-                                q.normal(axis), sign, outlet_pressure, &mut *cancelled,
-                            )?
+                            let (outlet_pressure, reference_velocity) =
+                                pressure_control.expect("selected pressure control");
+                            if let Some(velocity) = reference_velocity {
+                                gas.characteristic_outlet_spatial_flux(
+                                    q.normal(axis),
+                                    sign,
+                                    outlet_pressure,
+                                    velocity,
+                                    &mut *cancelled,
+                                )?
+                            } else {
+                                gas.pressure_outlet_spatial_flux(
+                                    q.normal(axis),
+                                    sign,
+                                    outlet_pressure,
+                                    &mut *cancelled,
+                                )?
+                            }
                         },
                         [q.momentum[a] / q.density, q.momentum[b] / q.density],
                     )

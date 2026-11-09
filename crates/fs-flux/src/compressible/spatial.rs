@@ -539,6 +539,33 @@ impl Euler3d {
         poll(&mut cancelled)?;
         Ok(result)
     }
+    /// Select compact, stationary stagnation reservoirs on already bound sides.
+    ///
+    /// Each selected side must have a uniform original-source reservoir with
+    /// exactly zero Cartesian velocity. Its density, pressure and composition
+    /// specify the upstream stagnation state. The original one-sided gas law
+    /// resolves inflow, outflow, choking and reversal; outward entropy and shear
+    /// remain interior-owned. Unselected reservoirs retain their full-state
+    /// Riemann boundary. An empty selection restores that original behavior.
+    ///
+    /// This is fixed infinite storage, not a finite tank or a molecular bath.
+    /// Spatial/time-dependent exterior profiles are not selected by this entry.
+    /// Selection reuses fixed metadata and allocates no stepping workspace.
+    pub fn with_stagnation_reservoirs(
+        mut self,
+        sides: &[BoundarySide],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        self.reservoirs
+            .set_stagnation(&self.gas, sides, &mut cancelled)?;
+        Ok(self)
+    }
+
+    /// Whether this uniform side uses the compact stagnation-reservoir law.
+    pub fn uses_stagnation_reservoir(&self, side: BoundarySide) -> bool {
+        self.reservoirs.is_stagnation(side.axis(), side.sign())
+    }
+
     /// Original source-bearing EOS owner.
     pub const fn gas(&self) -> &FrozenGas {
         &self.gas

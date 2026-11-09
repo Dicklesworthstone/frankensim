@@ -321,7 +321,23 @@ fn spatial(
                 sign,
                 condition,
             } => {
-                if let Some(outlet) = reservoirs.outlet(axis, sign) {
+                if let Some(reservoir) = reservoirs.stagnation(axis, sign) {
+                    if first_order {
+                        gas.reservoir_spatial_flux(
+                            states[k].normal(axis),
+                            reservoir,
+                            sign,
+                            &mut *cancelled,
+                        )?
+                    } else {
+                        gas.reservoir_spatial_flux_from_primitive(
+                            reconstruct(k, 0.5 * sign),
+                            reservoir,
+                            sign,
+                            &mut *cancelled,
+                        )?
+                    }
+                } else if let Some(outlet) = reservoirs.outlet(axis, sign) {
                     if first_order {
                         gas.pressure_outlet_spatial_flux(
                             states[k].normal(axis),

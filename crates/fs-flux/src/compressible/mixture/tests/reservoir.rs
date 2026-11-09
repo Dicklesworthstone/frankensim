@@ -449,3 +449,73 @@ fn g4_reservoir_admission_budget_and_late_refusal_preserve_fields_and_loads() {
         super::molecular::impulses(&reference_operator)
     );
 }
+
+#[test]
+fn g1_planar_compact_reservoir_supplies_donor_species_and_stagnation_enthalpy() {
+    let grid = CartesianGrid::new(2, 2, 0.1, 0.1, 0.2).unwrap();
+    for reconstruction in [Reconstruction::FirstOrder, Reconstruction::Muscl] {
+        for side in crate::compressible::SIDES {
+            let mut pairs = [AxisBoundaries::Periodic; 2];
+            pairs[side.axis()] = AxisBoundaries::Ends {
+                lower: if side.sign() < 0.0 {
+                    BoundaryCondition::Transmissive
+                } else {
+                    BoundaryCondition::Reflecting
+                },
+                upper: if side.sign() > 0.0 {
+                    BoundaryCondition::Transmissive
+                } else {
+                    BoundaryCondition::Reflecting
+                },
+            };
+            let source = equal_mass();
+            let mut tank = [0.0; 6];
+            state_into(&source, &[0.0, 1.0, 0.0], [0.0; 2], 2.0, &mut tank).unwrap();
+            let h0 = tank[5] + 2.0;
+            let mut flow = bind(
+                field(
+                    source,
+                    grid,
+                    Boundaries2d {
+                        x: pairs[0],
+                        y: pairs[1],
+                    },
+                    |_| ([1.0, 0.0, 0.0], [0.0; 2], 1.0),
+                ),
+                &[ReservoirBoundary {
+                    side,
+                    partial_densities: &[0.0, 1.0, 0.0],
+                    velocity: [0.0; 2],
+                    pressure_pa: 2.0,
+                }],
+            )
+            .with_stagnation_reservoirs(&[side], || false)
+            .unwrap();
+            let bytes = flow.workspace_bytes();
+            assert!(flow.uses_stagnation_reservoir(side));
+            for _ in 0..3 {
+                let report = flow
+                    .step(
+                        Time::new(0.001),
+                        StepControl {
+                            reconstruction,
+                            ..StepControl::default()
+                        },
+                        || false,
+                    )
+                    .unwrap();
+                balance(report);
+                for face in flow.boundary_impulses(side) {
+                    assert!(face.species_masses[1] < 0.0);
+                    assert_eq!(face.species_masses[0], 0.0);
+                    assert_eq!(face.species_masses[2], 0.0);
+                    close(face.energy, h0 * face.species_masses[1], 3e-12);
+                    close(face.momentum[1 - side.axis()], 0.0, 3e-12);
+                }
+                assert_eq!(flow.workspace_bytes(), bytes);
+            }
+            // A stagnation state has not specified the physical molecular face.
+            assert!(flow.reservoirs.admit_molecular(flow.boundaries).is_err());
+        }
+    }
+}

@@ -9926,3 +9926,45 @@ path retains direct arithmetic. Four independent precision regression groups
 bring the focused numerical suite to 107 passing tests; this does not change
 the separate unexecuted material-test status above.
 
+## Compact stagnation reservoirs on existing Cartesian gas bindings
+
+`with_stagnation_reservoirs` selects the original one-sided compact-reservoir
+law for uniform held reservoirs on `Euler3d`, `MixtureEuler2d` and
+`MixtureEuler3d`. Each selected binding must have exactly zero Cartesian
+velocity. Its original density, pressure and species define upstream stagnation
+temperature and enthalpy through the same source; no independent gamma, caloric
+fit or discharge coefficient is supplied. Unselected sides keep their existing
+complete-state Riemann condition. Empty selection restores that condition.
+
+The original gas law selects acceleration, choking, discharge or reversal.
+Incoming gas carries the tank's canonical species and stagnation enthalpy once,
+with zero shear. Outgoing gas retains interior entropy, composition, all shear
+momenta and complete kinetic energy. Both first-order and MUSCL traces enter
+the same source law and accepted RK boundary impulse. The sampled normal wave
+and transverse advection bound the full unsplit interval, including the shared
+initial bound used by reactive and force-split owners. Hydrostatic face traces
+retain their original source and face-pressure admission.
+
+Uniform source energy and selection metadata are cached once; clone paths
+retain them, and face evaluation introduces no heap allocation. Selection
+refuses duplicates, missing uniform bindings, moving tanks and cancellation.
+Spatial or timed exterior profiles remain complete-state Riemann boundaries.
+The reservoir is an externally maintained infinite store, not a coupled finite
+inventory or a resolved nozzle/contraction geometry.
+
+Stagnation data do not specify a molecular physical-face bath. Mixture molecular
+transport and explicitly enabled frozen reservoir bath exchange refuse this
+combination. The frozen field's existing default zero open-face molecular
+exchange remains available. Molecular thermodynamics is not inferred from p0/T0.
+
+Four native regression groups cover all relevant side orientations and both
+reconstructions, source-gauged tank enthalpy, original donor/absent species,
+outgoing shear, hot-reservoir CFL, selection, cloning and cancellation. A bounded
+actual-source native inviscid build passed these four groups and all six prior
+characteristic-outlet field groups (10 passed, zero failed), including the
+outgoing pressure pulse. The build retained the original gas EOS/characteristics,
+hydrostatic preparation, reconstruction, forcing, RK and conservation owners;
+unrelated chemistry/molecular wrappers were excluded. Only the new planar
+molecular-admission assertion was omitted from this inviscid build. The source
+gas adapters separately passed 18 actual-source boundary tests. Full crate,
+workspace, molecular/chemistry integration and DSR verification remain pending.

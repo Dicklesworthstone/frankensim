@@ -1117,3 +1117,160 @@ fn g0_characteristic_outlet_preserves_volumetric_advection_and_both_shears() {
         }
     }
 }
+
+#[test]
+fn g1_compact_stagnation_reservoir_carries_tank_enthalpy_and_outgoing_shear_on_all_sides() {
+    let grid = CartesianGrid::new(2, 2, 2, 0.1, 0.1, 0.1).unwrap();
+    for reconstruction in [Reconstruction::FirstOrder, Reconstruction::Muscl] {
+        for side in BoundarySide::ALL {
+            for inlet in [false, true] {
+                let source = gas(0.4);
+                let pressure = if inlet { 2.0 } else { 0.5 };
+                let mut velocity = [0.0; 3];
+                let [a, b] = tangents(side.axis());
+                if !inlet {
+                    velocity[a] = 0.2;
+                    velocity[b] = -0.3;
+                }
+                let initial = State::from_primitive(&source, 1.0, velocity, 1.0).unwrap();
+                let tank = source.conserved(1.0, 0.0, pressure).unwrap();
+                let stagnation_enthalpy = (tank.energy + pressure) / tank.density;
+                let mut pairs = [AxisBoundaries::Periodic; 3];
+                pairs[side.axis()] = AxisBoundaries::Ends {
+                    lower: if side.sign() < 0.0 {
+                        BoundaryCondition::Transmissive
+                    } else {
+                        BoundaryCondition::Reflecting
+                    },
+                    upper: if side.sign() > 0.0 {
+                        BoundaryCondition::Transmissive
+                    } else {
+                        BoundaryCondition::Reflecting
+                    },
+                };
+                let mut flow = Euler3d::new_with_reservoirs(
+                    source,
+                    grid,
+                    vec![initial; grid.len()],
+                    Boundaries3d {
+                        x: pairs[0],
+                        y: pairs[1],
+                        z: pairs[2],
+                    },
+                    &[ReservoirBoundary {
+                        side,
+                        density: 1.0,
+                        velocity: [0.0; 3],
+                        pressure_pa: pressure,
+                    }],
+                    || false,
+                )
+                .unwrap()
+                .with_stagnation_reservoirs(&[side], || false)
+                .unwrap();
+                assert!(flow.uses_stagnation_reservoir(side));
+                for _ in 0..3 {
+                    let report = flow
+                        .step(
+                            Time::new(0.001),
+                            StepControl {
+                                reconstruction,
+                                ..StepControl::default()
+                            },
+                            || false,
+                        )
+                        .unwrap();
+                    balance(&report);
+                    for face in flow.boundary_impulses(side) {
+                        assert!(if inlet {
+                            face.mass < 0.0
+                        } else {
+                            face.mass > 0.0
+                        });
+                        if inlet {
+                            close(face.energy, stagnation_enthalpy * face.mass, 3e-13);
+                            close(face.momentum[a], 0.0, 3e-13);
+                            close(face.momentum[b], 0.0, 3e-13);
+                        } else {
+                            close(face.momentum[a], velocity[a] * face.mass, 3e-13);
+                            close(face.momentum[b], velocity[b] * face.mass, 3e-13);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g4_compact_reservoir_selection_and_hot_initial_wave_bound_remain_native() {
+    let source = gas(0.0);
+    let grid = CartesianGrid::new(2, 2, 2, 0.1, 0.1, 0.1).unwrap();
+    let initial = State::from_primitive(&source, 1.0, [0.0; 3], 0.01).unwrap();
+    let side = BoundarySide::XMin;
+    let make = |velocity| {
+        Euler3d::new_with_reservoirs(
+            source.clone(),
+            grid,
+            vec![initial; grid.len()],
+            Boundaries3d {
+                x: OPEN,
+                y: WALL,
+                z: WALL,
+            },
+            &[ReservoirBoundary {
+                side,
+                density: 1.0,
+                velocity,
+                pressure_pa: 32.0,
+            }],
+            || false,
+        )
+        .unwrap()
+    };
+    assert!(
+        make([0.0; 3])
+            .with_stagnation_reservoirs(&[side, side], || false)
+            .is_err()
+    );
+    assert!(
+        make([0.0; 3])
+            .with_stagnation_reservoirs(&[BoundarySide::YMin], || false)
+            .is_err()
+    );
+    assert!(
+        make([0.0, 0.1, 0.0])
+            .with_stagnation_reservoirs(&[side], || false)
+            .is_err()
+    );
+    assert!(matches!(
+        make([0.0; 3]).with_stagnation_reservoirs(&[side], || true),
+        Err(Error::Cancelled)
+    ));
+    let mut flow = make([0.0; 3])
+        .with_stagnation_reservoirs(&[side], || false)
+        .unwrap();
+    let controls = StepControl {
+        cfl: 0.2,
+        maximum_halvings: 0,
+        reconstruction: Reconstruction::FirstOrder,
+    };
+    let report = flow.step(Time::new(1.0), controls, || false).unwrap();
+    assert_eq!(report.halvings, 0);
+    assert!(report.boundary_change.mass > 0.0);
+    balance(&report);
+    let state = flow.states().to_vec();
+    let time = flow.time();
+    let previous = *flow.last_step().unwrap();
+    let mut polls = 0;
+    assert!(matches!(
+        flow.step(Time::new(0.001), controls, || {
+            polls += 1;
+            polls == 20
+        }),
+        Err(Error::Cancelled)
+    ));
+    assert_eq!(flow.states(), state.as_slice());
+    assert_eq!(flow.time(), time);
+    assert_eq!(flow.last_step(), Some(&previous));
+}
