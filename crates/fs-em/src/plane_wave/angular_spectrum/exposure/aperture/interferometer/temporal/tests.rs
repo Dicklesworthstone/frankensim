@@ -309,3 +309,101 @@ fn cached_factor_bounds_count_retained_modes_rotations_and_shared_scratch_once()
         .is_none()
     );
 }
+
+#[test]
+fn delayed_optical_dark_envelope_retains_shifted_fourth_moment() {
+    let duration: f64 = 1e-12;
+    let area = AngularSpectrumAperture::try_new([0.0; 2], [1.0; 2]).unwrap();
+    let values: Vec<_> = [1.0, -2.0, 1.0]
+        .map(|a| vec![wave(C64::from_re(a)); 2])
+        .into();
+    let frequencies = [1e15, 1e15 + 1.0, 1e15 + 2.0];
+    for (profile, variance, fourth) in [
+        (HarmonicWindowProfile::Uniform, 1.0 / 12.0, 1.0 / 80.0),
+        (HarmonicWindowProfile::Triangular, 1.0 / 24.0, 1.0 / 240.0),
+    ] {
+        let window = HarmonicWindow::with_profile(-duration / 2.0, duration, profile).unwrap();
+        for delay in [8e-16_f64, 1e-13, 1e-12] {
+            let expected = 0.5
+                * (delay.powi(4)
+                    + 6.0 * delay.powi(2) * variance * duration.powi(2)
+                    + fourth * duration.powi(4));
+            // A(t-delay)=[1-exp(i*(t-delay))]^2 times a common carrier;
+            // its leading proper real-field power is <(t-delay)^4>/2.
+            // The first inactive arm must not determine its physical phase.
+            let mut observed = owner(
+                &frequencies,
+                &[0.0],
+                &[0.0],
+                &values,
+                2,
+                area,
+                window,
+                true,
+                true,
+            );
+            let actual = observed
+                .measure_moments(&[C64::ZERO, C64::ONE], &[0.17, delay], || false)
+                .unwrap()
+                .electric_second_moment_v2_m2()[0][0];
+            assert!(
+                (actual / expected - 1.0).abs() < 3e-12,
+                "profile={profile:?}, delay={delay:e}, actual={actual:e}, expected={expected:e}"
+            );
+            let coherent = observed
+                .measure_moments(&[C64::ONE, C64::from_re(-0.5)], &[delay; 2], || false)
+                .unwrap()
+                .electric_second_moment_v2_m2()[0][0];
+            assert!((coherent / (0.25 * expected) - 1.0).abs() < 3e-12);
+        }
+    }
+}
+
+#[test]
+fn proper_delay_projection_admits_added_carrier_phase_work() {
+    assert_eq!(delay_projection_work(3, 2, true).unwrap(), 8);
+    assert_eq!(delay_projection_work(3, 2, false).unwrap(), 0);
+    assert!(delay_projection_work(usize::MAX, 2, true).is_err());
+}
+
+#[test]
+fn overflowing_relative_carrier_keeps_valid_independent_delay_phases() {
+    let area = AngularSpectrumAperture::try_new([0.0; 2], [1.0; 2]).unwrap();
+    let window = HarmonicWindow::new(0.0, 0.1).unwrap();
+    let values = [vec![wave(C64::ONE); 2], vec![wave(C64::new(0.3, 0.2)); 2]];
+    let mut stable = owner(
+        &[2.0, 3.0],
+        &[0.0],
+        &[0.0],
+        &values,
+        2,
+        area,
+        window,
+        true,
+        true,
+    );
+    let mut original = owner(
+        &[2.0, 3.0],
+        &[0.0],
+        &[0.0],
+        &values,
+        2,
+        area,
+        window,
+        true,
+        false,
+    );
+    let delay = 0.3 * f64::MAX;
+    let gains = [C64::ONE, C64::from_re(0.2)];
+    let a = stable
+        .measure_moments(&gains, &[delay, -delay], || false)
+        .unwrap();
+    let b = original
+        .measure_moments(&gains, &[delay, -delay], || false)
+        .unwrap();
+    let (a, b) = (
+        a.electric_second_moment_v2_m2()[0][0],
+        b.electric_second_moment_v2_m2()[0][0],
+    );
+    assert!((a - b).abs() < 3e-14, "{a:e} != {b:e}");
+}

@@ -31,7 +31,8 @@ pub struct AngularSpectrumExposureApertureArm {
 /// caller arrays and allocator overhead are excluded.
 /// Window-specific requirements additionally reserve bounded positive temporal
 /// projection where admitted, with work N*M*(F+Nx+Ny+1), M<=17, plus N*F
-/// original-clock rotations for proper factors. The larger
+/// original-clock rotations for proper factors and A*(F+1) additional proper
+/// arm carrier-phase/composition terms. The larger
 /// work bound is retained per selected bank; tighter legacy limits keep the
 /// original separable pair-kernel path.
 #[derive(Clone, Copy, Debug)]
@@ -66,6 +67,8 @@ struct Bank {
 /// retain carrier sums and differences; proper factors retain differences.
 /// Different banks always add moments independently. Cancellation leaves the
 /// immutable field basis reusable; the next read overwrites all scratch.
+/// Original fields remain DD phasors: arbitrary combined complex-gain, phase
+/// and spatial nulls have no universal relative-error guarantee.
 ///
 /// The returned normal power is signed Cartesian z-directed Poynting watts.
 /// This ideal observation does not infer absorption, detector back-action,
@@ -210,16 +213,66 @@ fn combine(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), AngularSpectrumError> {
     clear(output, cancelled)?;
-    for (frequency, &omega) in bank.frequencies.iter().enumerate() {
-        for arm in 0..arms {
+    // A proper bank's common carrier phase cancels from every second moment.
+    // Remove the first active arm's carrier delay before composing the small
+    // frequency offsets. Independently rotating each bright optical phasor
+    // otherwise perturbs a resolved dark envelope before it is projected.
+    // Real banks keep their absolute phase. An unrepresentable relative
+    // carrier phase retains the original independent phase path.
+    let mut common = if bank.positive.is_some() && matches!(&bank.temporal, Temporal::Proper(_)) {
+        gains
+            .iter()
+            .position(|gain| gain.re != 0.0 || gain.im != 0.0)
+            .map(|reference| (bank.frequencies[0], delays[reference]))
+    } else {
+        None
+    };
+    if let Some((omega, reference_delay)) = common {
+        for &delay in delays {
             poll(cancelled)?;
-            let phase = Dd::from_f64(omega) * Dd::from_f64(delays[arm]);
-            if !finite_dd(phase) {
-                return Err(bad("aperture arm delay phase is unrepresentable"));
+            let relative = Dd::from_f64(delay) - Dd::from_f64(reference_delay);
+            if !finite_dd(relative) || !finite_dd(Dd::from_f64(omega) * relative) {
+                common = None;
+                break;
             }
-            let (sine, cosine) = fs_math::det::sin_cos_dd(phase);
+        }
+    }
+    for arm in 0..arms {
+        poll(cancelled)?;
+        let carrier = if let Some((omega, reference_delay)) = common {
+            Some(
+                fs_fft::harmonic_window::phase_rad_s_dd_from_clock_dd(
+                    Dd::from_f64(omega),
+                    Dd::from_f64(delays[arm]) - Dd::from_f64(reference_delay),
+                )
+                .map_err(|_| bad("aperture arm carrier phase is unrepresentable"))?,
+            )
+        } else {
+            None
+        };
+        for (frequency, &omega) in bank.frequencies.iter().enumerate() {
+            poll(cancelled)?;
+            let [cosine, negative_sine] =
+                if let (Some((reference, _)), Some([cr, ci])) = (common, carrier) {
+                    let [dr, di] = fs_fft::harmonic_window::phase_rad_s_dd_from_clock_dd(
+                        Dd::from_f64(omega) - Dd::from_f64(reference),
+                        Dd::from_f64(delays[arm]),
+                    )
+                    .map_err(|_| bad("aperture arm envelope phase is unrepresentable"))?;
+                    [cr * dr - ci * di, cr * di + ci * dr]
+                } else {
+                    let phase = Dd::from_f64(omega) * Dd::from_f64(delays[arm]);
+                    if !finite_dd(phase) {
+                        return Err(bad("aperture arm delay phase is unrepresentable"));
+                    }
+                    let (sine, cosine) = fs_math::det::sin_cos_dd(phase);
+                    [cosine, -sine]
+                };
             let [gr, gi] = [gains[arm].re, gains[arm].im].map(Dd::from_f64);
-            let (real, imaginary) = (gr * cosine + gi * sine, gi * cosine - gr * sine);
+            let (real, imaginary) = (
+                gr * cosine - gi * negative_sine,
+                gi * cosine + gr * negative_sine,
+            );
             let begin = (frequency * arms + arm) * modes;
             for (mode, input) in bank.fields[begin..begin + modes].iter().enumerate() {
                 if mode % 32 == 0 {
@@ -426,10 +479,14 @@ impl<'e, 'b, 's, 'm> Sources<'e, 'b, 's, 'm> {
                 is_proper,
                 projected_modes,
             )? {
-                if plan.extra_work <= projection_work && plan.extra_bytes <= projection_bytes {
+                let extra_work = plan
+                    .extra_work
+                    .checked_add(delay_projection_work(f, arms.len(), is_proper)?)
+                    .ok_or_else(|| bad("aperture interferometer delay work overflow"))?;
+                if extra_work <= projection_work && plan.extra_bytes <= projection_bytes {
                     let positive =
                         temporal::Positive::new(window, &frequencies, is_proper, cancelled)?;
-                    projection_work -= plan.extra_work;
+                    projection_work -= extra_work;
                     projection_bytes -= plan.extra_bytes;
                     projected_modes = projected_modes.max(plan.modes);
                     Some(positive)
@@ -545,6 +602,11 @@ impl<'e, 'b, 's, 'm> Sources<'e, 'b, 's, 'm> {
                 limits.maximum_gram_products = limits
                     .maximum_gram_products
                     .checked_add(plan.extra_work)
+                    .and_then(|work| {
+                        work.checked_add(
+                            delay_projection_work(bank.frequency_count(), arms, proper).ok()?,
+                        )
+                    })
                     .ok_or_else(|| bad("aperture projection work overflow"))?;
                 limits.maximum_workspace_bytes = limits
                     .maximum_workspace_bytes
@@ -554,6 +616,23 @@ impl<'e, 'b, 's, 'm> Sources<'e, 'b, 's, 'm> {
             }
         }
         Ok(limits)
+    }
+}
+
+// A shared carrier rotation per arm and one complex phase composition per
+// original frequency. Envelope rotations replace the original delay phases.
+fn delay_projection_work(
+    frequencies: usize,
+    arms: usize,
+    proper: bool,
+) -> Result<usize, AngularSpectrumError> {
+    if proper {
+        frequencies
+            .checked_add(1)
+            .and_then(|count| count.checked_mul(arms))
+            .ok_or_else(|| bad("aperture interferometer delay work overflow"))
+    } else {
+        Ok(0)
     }
 }
 
