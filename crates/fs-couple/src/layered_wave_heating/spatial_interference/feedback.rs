@@ -12,6 +12,8 @@
 //! frequency stack before publication. The gate controls an explicit split; it
 //! is not a coupled residual or a temporal-error certificate. The unchanged DD
 //! clock advances only by the actual accepted native thermal duration.
+//! The explicit field-heat advance preserves the original coherent reservoir
+//! fields through that interval's volume integral, with separate query limits.
 //!
 //! Geometry, exterior source states and native thermal laws stay with their
 //! original owners. The footprint remains a through-thickness thermal column,
@@ -418,6 +420,73 @@ impl<'h, 'b, 'a, 'm> QuasiSteadySpatialInterferenceHeating<'h, 'b, 'a, 'm> {
         conduction: LayerConductionConfig,
         solve: LayeredThermalSolveControls,
         workspace: &mut LayeredThermalWorkspace,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialInterferenceFeedbackStep<'h, 't>, SpatialInterferenceFeedbackError> {
+        self.advance_to_impl(
+            initial,
+            target_s,
+            maximum_temperature_change_k,
+            temporal,
+            None,
+            conduction,
+            solve,
+            workspace,
+            cancelled,
+        )
+    }
+
+    /// Refresh every original cell's complete optical law at its accepted
+    /// temperature, then integrate its coherent reservoir fields over the
+    /// actual native thermal interval before reducing them to joules. The
+    /// accepted DD source epoch, physical carrier and original continuous
+    /// footprint enter that field integral unchanged.
+    ///
+    /// `field_limits` separately bound each native cell's explicit field query,
+    /// including its original layer workspace; preparation remains subject to
+    /// `SpatialInterferenceFeedbackLimits`. Both advance routes share the
+    /// original ripple gate, single heat debit, temperature-excursion gate and
+    /// complete endpoint material/frequency admission. Endpoint snapshots do
+    /// not produce another heat credit. A refusal leaves the accepted state
+    /// and source clock unchanged. Optics remain held within the interval;
+    /// this does not transport reservoir transients or parameter work across
+    /// the temperature refresh.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_to_with_field_heat<'t>(
+        &self,
+        initial: &SpatialInterferenceState<'_, 't>,
+        target_s: f64,
+        maximum_temperature_change_k: f64,
+        temporal: SpatialInterferenceHeatingControls,
+        field_limits: AngularSpectrumHeatWindowLimits,
+        conduction: LayerConductionConfig,
+        solve: LayeredThermalSolveControls,
+        workspace: &mut LayeredThermalWorkspace,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialInterferenceFeedbackStep<'h, 't>, SpatialInterferenceFeedbackError> {
+        self.advance_to_impl(
+            initial,
+            target_s,
+            maximum_temperature_change_k,
+            temporal,
+            Some(field_limits),
+            conduction,
+            solve,
+            workspace,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_to_impl<'t>(
+        &self,
+        initial: &SpatialInterferenceState<'_, 't>,
+        target_s: f64,
+        maximum_temperature_change_k: f64,
+        temporal: SpatialInterferenceHeatingControls,
+        field_limits: Option<AngularSpectrumHeatWindowLimits>,
+        conduction: LayerConductionConfig,
+        solve: LayeredThermalSolveControls,
+        workspace: &mut LayeredThermalWorkspace,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<SpatialInterferenceFeedbackStep<'h, 't>, SpatialInterferenceFeedbackError> {
         poll(&mut cancelled)?;
@@ -465,15 +534,28 @@ impl<'h, 'b, 'a, 'm> QuasiSteadySpatialInterferenceHeating<'h, 'b, 'a, 'm> {
                         &mut *cancelled,
                     )?;
                     work.charge(heating.preparation_workspace_bytes())?;
-                    let step = heating.advance_to(
-                        initial,
-                        target_s,
-                        temporal,
-                        conduction,
-                        solve,
-                        workspace,
-                        &mut *cancelled,
-                    )?;
+                    let step = if let Some(limits) = field_limits {
+                        heating.advance_to_with_field_heat(
+                            initial,
+                            target_s,
+                            temporal,
+                            limits,
+                            conduction,
+                            solve,
+                            workspace,
+                            &mut *cancelled,
+                        )?
+                    } else {
+                        heating.advance_to(
+                            initial,
+                            target_s,
+                            temporal,
+                            conduction,
+                            solve,
+                            workspace,
+                            &mut *cancelled,
+                        )?
+                    };
                     // Only the clock label borrow changes owner. Its exact DD
                     // value and the original accepted native state move intact.
                     Ok(retain_clock(step, self.drive.source_clock))

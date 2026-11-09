@@ -11,7 +11,8 @@ use fs_couple::layered_wave_heating::{
     },
 };
 use fs_em::plane_wave::angular_spectrum::{
-    AngularSpectrumFactorStatistics, AngularSpectrumIlluminationLimits,
+    AngularSpectrumFactorStatistics, AngularSpectrumHeatWindowLimits,
+    AngularSpectrumIlluminationLimits,
 };
 use fs_material::field_storage::dielectric::lorentz::{
     LorentzPoleProperties, ResolvedLorentzMaterial,
@@ -155,7 +156,7 @@ fn feedback_limits() -> SpatialInterferenceFeedbackLimits {
     SpatialInterferenceFeedbackLimits {
         maximum_cells: 2,
         fields: ThermalInterferenceLimits {
-            maximum_lines: 8,
+            maximum_lines: 12,
             maximum_preparation_workspace_bytes: 128 << 20,
             angular: AngularSpectrumLimits {
                 maximum_grid_points: 16,
@@ -168,7 +169,7 @@ fn feedback_limits() -> SpatialInterferenceFeedbackLimits {
                 maximum_fft_work: 1 << 20,
             },
             exposure: AngularSpectrumExposureLimits {
-                maximum_lines: 8,
+                maximum_lines: 12,
                 maximum_point_line_pairs: 1024,
                 maximum_point_frequency_pairs: 1024,
                 maximum_workspace_bytes: 8 << 20,
@@ -181,16 +182,35 @@ fn feedback_limits() -> SpatialInterferenceFeedbackLimits {
                 maximum_workspace_bytes: 16 << 20,
                 maximum_fft_work: 1 << 20,
             },
-            layer: spatial.layer,
+            layer: AngularSpectrumExposureLayerLimits {
+                maximum_point_reservoir_frequency_pairs: 1 << 16,
+                ..spatial.layer
+            },
             heat: spatial.cell_heat,
         },
     }
 }
 
-fn exercise(endpoint_domain_refusal: bool, carrier: [f64; 2], lorentz: bool) {
+fn field_limits() -> AngularSpectrumHeatWindowLimits {
+    AngularSpectrumHeatWindowLimits {
+        maximum_depth_samples: 33,
+        maximum_point_line_pairs: 1 << 16,
+        maximum_fft_work: 0,
+        maximum_temporal_projection_terms: 1 << 20,
+        maximum_spatial_products: 1 << 20,
+        maximum_fallback_terms: 1024,
+        maximum_workspace_bytes: 32 << 20,
+    }
+}
+
+fn exercise(endpoint_domain_refusal: bool, carrier: [f64; 2], lorentz: bool, field_heat: bool) {
     let outside = state(&card("feedback-exterior", 1.0, 0.0), false, 100_000.0);
     let source_card = temperature_card(
-        if endpoint_domain_refusal { 300.000001 } else { 360.0 },
+        if endpoint_domain_refusal {
+            300.000001
+        } else {
+            360.0
+        },
         lorentz,
     );
     let source = debye(&source_card, 100_000.0);
@@ -270,6 +290,11 @@ fn exercise(endpoint_domain_refusal: bool, carrier: [f64; 2], lorentz: bool) {
             left_tangential_e_v_per_m: &oblique,
             right_tangential_e_v_per_m: &right,
         },
+        ThermalInterferenceLine {
+            angular_frequency_rad_s: OMEGA + 25.0,
+            left_tangential_e_v_per_m: &left,
+            right_tangential_e_v_per_m: &right,
+        },
     ];
     let factors = [
         ThermalInterferenceFactor {
@@ -309,7 +334,10 @@ fn exercise(endpoint_domain_refusal: bool, carrier: [f64; 2], lorentz: bool) {
     )
     .unwrap();
     assert_eq!(owner.carrier_transverse_wavenumber_rad_m(), carrier);
-    assert_eq!(owner.frequencies_rad_s(), [OMEGA, OMEGA + 50.0]);
+    assert_eq!(
+        owner.frequencies_rad_s(),
+        [OMEGA, OMEGA + 25.0, OMEGA + 50.0]
+    );
     let temperatures = if endpoint_domain_refusal {
         [300.0; 2]
     } else {
@@ -318,7 +346,7 @@ fn exercise(endpoint_domain_refusal: bool, carrier: [f64; 2], lorentz: bool) {
     let initial = owner
         .initial_state(
             initial_at(&bound, &temperatures),
-            Dd::from_pair(1024.0, 0.017),
+            Dd::from_pair(if field_heat { 2.0_f64.powi(50) } else { 1024.0 }, 0.017),
             || false,
         )
         .unwrap();
@@ -329,20 +357,42 @@ fn exercise(endpoint_domain_refusal: bool, carrier: [f64; 2], lorentz: bool) {
         maximum_thermal_step_s: dt,
         maximum_source_ripple_j: 100.0,
     };
+    // Exercise the same original material/thermal oracle through both public
+    // source representations. The proper three-tone bank admits the temporal
+    // field factor; the real carrier banks retain their original fallback.
+    macro_rules! advance {
+        ($owner:expr, $initial:expr, $target:expr, $excursion:expr, $cancelled:expr) => {
+            if field_heat {
+                $owner.advance_to_with_field_heat(
+                    $initial,
+                    $target,
+                    $excursion,
+                    temporal,
+                    field_limits(),
+                    conduction(),
+                    LayeredThermalSolveControls::default(),
+                    &mut workspace,
+                    $cancelled,
+                )
+            } else {
+                $owner.advance_to(
+                    $initial,
+                    $target,
+                    $excursion,
+                    temporal,
+                    conduction(),
+                    LayeredThermalSolveControls::default(),
+                    &mut workspace,
+                    $cancelled,
+                )
+            }
+        };
+    }
     let mut polls = 0;
-    let result = owner.advance_to(
-        &initial,
-        dt,
-        2.0,
-        temporal,
-        conduction(),
-        LayeredThermalSolveControls::default(),
-        &mut workspace,
-        || {
-            polls += 1;
-            false
-        },
-    );
+    let result = advance!(&owner, &initial, dt, 2.0, || {
+        polls += 1;
+        false
+    });
     if endpoint_domain_refusal {
         assert!(matches!(
             result,
@@ -365,18 +415,7 @@ fn exercise(endpoint_domain_refusal: bool, carrier: [f64; 2], lorentz: bool) {
     )
     .unwrap();
     assert_eq!(legacy.carrier_transverse_wavenumber_rad_m(), [0.0; 2]);
-    let zero_carrier = legacy
-        .advance_to(
-            &initial,
-            dt,
-            2.0,
-            temporal,
-            conduction(),
-            LayeredThermalSolveControls::default(),
-            &mut workspace,
-            || false,
-        )
-        .unwrap();
+    let zero_carrier = advance!(&legacy, &initial, dt, 2.0, || false).unwrap();
     if carrier == [0.0; 2] {
         assert_eq!(result.step.cell_energy_j, zero_carrier.step.cell_energy_j);
         assert_eq!(
@@ -403,18 +442,7 @@ fn exercise(endpoint_domain_refusal: bool, carrier: [f64; 2], lorentz: bool) {
             || false,
         )
         .unwrap();
-    let uniform_step = owner
-        .advance_to(
-            &uniform,
-            dt,
-            2.0,
-            temporal,
-            conduction(),
-            LayeredThermalSolveControls::default(),
-            &mut workspace,
-            || false,
-        )
-        .unwrap();
+    let uniform_step = advance!(&owner, &uniform, dt, 2.0, || false).unwrap();
     assert!(
         result
             .step
@@ -429,10 +457,7 @@ fn exercise(endpoint_domain_refusal: bool, carrier: [f64; 2], lorentz: bool) {
             .at_query_point(&source_card, &at(temperature, 100_000.0))
             .unwrap();
         let applied = result.applied_response(index).unwrap();
-        assert_eq!(
-            applied.material().identity(),
-            reference.identity()
-        );
+        assert_eq!(applied.material().identity(), reference.identity());
         assert_eq!(applied.material().state_coordinate("T"), Some(temperature));
         assert_eq!(
             applied.material().state_coordinate("pressure"),
@@ -450,7 +475,7 @@ fn exercise(endpoint_domain_refusal: bool, carrier: [f64; 2], lorentz: bool) {
             let omega0 = (1.35 - 0.3 * fraction) * OMEGA;
             let gamma = (0.12 + 0.13 * fraction) * OMEGA;
             let delta = (0.4 + 1.2 * fraction) * E;
-            for omega in [OMEGA, OMEGA + 50.0] {
+            for omega in [OMEGA, OMEGA + 25.0, OMEGA + 50.0] {
                 let expected = C64::from_re(2.1 * E)
                     + C64::from_re(delta * omega0.powi(2))
                         / C64::new(omega0.powi(2) - omega.powi(2), gamma * omega);
@@ -508,18 +533,32 @@ fn exercise(endpoint_domain_refusal: bool, carrier: [f64; 2], lorentz: bool) {
         dt,
         1e-17,
     );
-    let next = owner
-        .advance_to(
-            &result.step.state,
-            2.0 * dt,
-            2.0,
-            temporal,
-            conduction(),
-            LayeredThermalSolveControls::default(),
-            &mut workspace,
-            || false,
-        )
-        .unwrap();
+    if field_heat {
+        assert_eq!(
+            result.step.state.source_time_s().to_f64(),
+            initial.source_time_s().to_f64()
+        );
+        // Refusing field projection must not silently select the cached route.
+        assert!(
+            owner
+                .advance_to_with_field_heat(
+                    &initial,
+                    dt,
+                    2.0,
+                    temporal,
+                    AngularSpectrumHeatWindowLimits {
+                        maximum_temporal_projection_terms: 0,
+                        ..field_limits()
+                    },
+                    conduction(),
+                    LayeredThermalSolveControls::default(),
+                    &mut workspace,
+                    || false,
+                )
+                .is_err()
+        );
+    }
+    let next = advance!(&owner, &result.step.state, 2.0 * dt, 2.0, || false).unwrap();
     for index in 0..2 {
         assert_eq!(
             next.applied_response(index).unwrap().material().identity(),
@@ -537,35 +576,16 @@ fn exercise(endpoint_domain_refusal: bool, carrier: [f64; 2], lorentz: bool) {
     );
     assert_ne!(next.step.cell_energy_j, result.step.cell_energy_j);
     assert!(matches!(
-        owner.advance_to(
-            &initial,
-            dt,
-            0.0,
-            temporal,
-            conduction(),
-            LayeredThermalSolveControls::default(),
-            &mut workspace,
-            || false
-        ),
+        advance!(&owner, &initial, dt, 0.0, || false),
         Err(SpatialInterferenceFeedbackError::TemperatureExcursion { .. })
     ));
     let mut count = 0;
     assert!(
-        owner
-            .advance_to(
-                &initial,
-                dt,
-                2.0,
-                temporal,
-                conduction(),
-                LayeredThermalSolveControls::default(),
-                &mut workspace,
-                || {
-                    count += 1;
-                    count == polls
-                }
-            )
-            .is_err()
+        advance!(&owner, &initial, dt, 2.0, || {
+            count += 1;
+            count == polls
+        })
+        .is_err()
     );
     assert_eq!(initial.thermal().cells(), &before);
     assert_eq!(initial.thermal().time_s(), 0.0);
@@ -573,25 +593,40 @@ fn exercise(endpoint_domain_refusal: bool, carrier: [f64; 2], lorentz: bool) {
 
 #[test]
 fn nonuniform_native_cells_refresh_causal_sources_without_resetting_mixed_bank_clocks() {
-    exercise(false, [0.0; 2], false);
+    exercise(false, [0.0; 2], false, false);
 }
 
 #[test]
 fn off_axis_envelopes_heat_finite_cells_and_keep_their_carrier_through_temperature_rebuilds() {
-    exercise(false, [0.65, -0.4], false);
+    exercise(false, [0.65, -0.4], false, false);
 }
 
 #[test]
 fn endpoint_optical_domain_refusal_leaves_the_original_cell_history_unchanged() {
-    exercise(true, [0.0; 2], false);
+    exercise(true, [0.0; 2], false, false);
 }
 
 #[test]
 fn local_lorentz_resonances_refract_and_heat_coherent_fields_on_the_native_thermal_clock() {
-    exercise(false, [0.65, -0.4], true);
+    exercise(false, [0.65, -0.4], true, false);
 }
 
 #[test]
 fn late_lorentz_source_refusal_preserves_both_native_cells_and_the_original_phase_clock() {
-    exercise(true, [0.0; 2], true);
+    exercise(true, [0.0; 2], true, false);
+}
+
+#[test]
+fn field_heat_keeps_local_debye_refresh_carrier_and_sub_ulp_source_intervals() {
+    exercise(false, [0.65, -0.4], false, true);
+}
+
+#[test]
+fn field_heat_keeps_local_lorentz_refresh_and_native_caloric_balance() {
+    exercise(false, [0.65, -0.4], true, true);
+}
+
+#[test]
+fn field_heat_refuses_late_lorentz_domain_without_publishing_the_proposal() {
+    exercise(true, [0.0; 2], true, true);
 }

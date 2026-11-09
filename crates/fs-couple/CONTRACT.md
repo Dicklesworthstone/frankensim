@@ -10927,3 +10927,27 @@ Pinned formatter parsing/checks and scoped whitespace checks pass. Source/API
 and physical-account review found no concrete blocker. Native compilation
 and execution of these cross-crate integration tests were not performed in the
 constrained workspace.
+
+## Coherent interval heat through temperature-dependent optical feedback
+
+`QuasiSteadySpatialInterferenceHeating::advance_to_with_field_heat` refreshes
+every original native cell's complete Debye, Lorentz or Ohmic source bundle at
+its accepted temperature, rebuilds the original common frequency stacks and
+passes the original coherent fields to the bounded volume-heat interval query.
+Per-cell `AngularSpectrumHeatWindowLimits` are explicit and independent of the
+existing preparation limit. Original transverse carrier, finite footprint,
+real/proper source statistics, native cell order and DD epoch are preserved.
+
+Both advance routes share the same applied/endpoint transaction, source-ripple
+gate, one native heat debit, per-cell temperature-excursion gate and complete
+endpoint material/frequency admission. Endpoint snapshots add no second heat.
+Late refusal or cancellation publishes neither the thermal proposal nor an
+advanced source clock. This remains a quasi-steady split with settled optical
+reservoirs held within each interval; it adds no transient polarization state,
+parameter-work transfer, moving geometry or lateral thermal resolution.
+
+Existing native fixtures now include three-tone mixed banks and three field
+route cases for local Debye/Lorentz refresh, precise epoch continuation,
+projection-budget refusal, caloric balance and late domain/cancellation refusal.
+Formatting, source/API checks and a native DD clock probe passed. The complete
+material/EM/thermal fixture graph was not compiled or executed in this session.
