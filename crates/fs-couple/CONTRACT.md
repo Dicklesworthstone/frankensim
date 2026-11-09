@@ -7709,6 +7709,23 @@ without publishing either state. `tests/converter_enthalpy/battery.rs` covers an
 independently calculated steady power path, eight-channel calorimetry, nonlinear
 load export, temperature feedback and transactional refusal/retry.
 
+`step_with_load_heat_candidate` can explicitly bind that regulated load to a
+finite material receiver when its physical model is wholly dissipative. The
+accepted native load work, including voltage foldback and current limiting,
+heats that cell once. Requested or curtailed power never supplies heat. The
+same work cancels as an internal transfer in the combined electrical/caloric
+balance; the original eight resistance channels and native electrical audits
+remain separately visible. The accepted source sample records the load's cell
+and energy. A separate passive load body or a receiver shared with a resistance
+channel uses the same material inventory, endpoint residual and source-domain
+admission, so thermal resistance feedback remains coupled to the electrical
+trajectory. An omitted receiver preserves exported-load semantics. No useful
+work, inferred efficiency, extra load storage or controller bandwidth is claimed.
+`tests/converter_enthalpy/battery/load_heat.rs` checks independent steady-state
+chemical depletion/calorimetry, foldback and current limits, shared-body thermal
+feedback, disabled-load history, invalid mapping, caloric-domain refusal and
+late-cancellation rollback/retry.
+
 ## Native structural vibration from harmonic induction forces
 
 `spatial_induction_vibration::SpatialInductionVibration` transfers the original

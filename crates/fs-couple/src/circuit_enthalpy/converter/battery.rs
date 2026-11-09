@@ -4,7 +4,9 @@
 //! coordinates and resolves all eight original resistance sources. Battery
 //! series/polarization heat, the five converter channels and physical lead heat
 //! enter their authored receivers exactly once. Regulated-load work leaves the
-//! electrical boundary; it is never relabeled as converter or battery heat.
+//! electrical boundary by default. An explicitly dissipative load may instead
+//! heat its own finite material receiver; it remains distinct from converter
+//! and battery losses, and becomes internal work in the combined energy account.
 //!
 //! OCV, capacity, inductance and capacitances stay fixed. Resistance uses the
 //! thermal endpoint, so coupled temporal accuracy requires refinement. This
@@ -78,6 +80,17 @@ impl MaterialBatteryFedBuckBoost {
 pub struct BatteryFedConverterThermalSample {
     pub network: MaterialNetworkSample,
     pub channels: Arc<[ConverterChannelMaterial; BATTERY_FED_HEAT_CHANNELS]>,
+    /// Actual accepted load work already deposited into its declared receiver.
+    /// None retains an exported electrical load, outside the caloric inventory.
+    pub load_heat: Option<RegulatedLoadHeat>,
+}
+
+/// A fully dissipative load's sole thermal receiver and accepted electrical work.
+/// This is separate from the eight converter/battery/lead resistance losses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RegulatedLoadHeat {
+    pub cell: CellId,
+    pub energy_j: f64,
 }
 
 /// Publish the complete electrical and caloric histories together.
@@ -152,6 +165,7 @@ struct BatteryDriver {
     converter: MaterialBatteryFedBuckBoost,
     step: BatteryFedStep,
     heat: [f64; BATTERY_FED_HEAT_CHANNELS],
+    load_heat: Option<RegulatedLoadHeat>,
     total_heat_j: f64,
     net_external_work_j: Dd,
 }
@@ -314,9 +328,68 @@ impl BatteryFedConverterThermalNetwork<'_> {
         initial_energy_increments_j: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<BatteryFedConverterEnthalpyCandidate<'t>, Error> {
+        self.step_with_load_heat_candidate(
+            thermal,
+            target_s,
+            converter,
+            modulation,
+            output_current_a,
+            load,
+            None,
+            electrical_controls,
+            controls,
+            initial_energy_increments_j,
+            cancelled,
+        )
+    }
+
+    /// Advance with an explicit optional finite receiver for a fully dissipative
+    /// regulated load. `Some(cell)` deposits the native accepted load work once;
+    /// `None` exports that work as in [`Self::step_candidate`]. The receiver may
+    /// share a material cell with a resistance channel or be a separate passive
+    /// cell, but must belong to this complete material/caloric inventory.
+    ///
+    /// Heat is actual `V*I*dt` at the native discrete effort, including foldback
+    /// and current limiting, never requested watts times duration. Curtailed
+    /// demand supplies no heat. Native load work remains separately visible in
+    /// the electrical report; `source.load_heat` identifies its internal route,
+    /// and `deposited_joule_j` includes it alongside the eight resistance losses.
+    /// No efficiency, useful-work output, controller heat capacity or extra
+    /// electrical storage is inferred by declaring a dissipative receiver.
+    ///
+    /// Every trial resolves the receiving cell's original caloric law and all
+    /// endpoint material sources. Heating a shared or thermally connected body
+    /// therefore feeds back into the same electrical solve through its authored
+    /// resistance laws. Missing receivers, unsupported states, budget exhaustion
+    /// and cancellation publish neither history. A disabled or absent load has
+    /// exactly zero heat, but still requires a valid declared receiver.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_load_heat_candidate<'t>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        converter: &MaterialBatteryFedBuckBoost,
+        modulation: BridgeModulation,
+        output_current_a: f64,
+        load: Option<RegulatedPowerLoad>,
+        load_heat_cell: Option<CellId>,
+        electrical_controls: PowerLoadControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<BatteryFedConverterEnthalpyCandidate<'t>, Error> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         super::super::admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
+        if let Some(cell) = load_heat_cell {
+            if !thermal.cells().contains_key(&cell)
+                || !self.cells.iter().any(|binding| binding.cell == cell)
+            {
+                return Err(invalid(
+                    "dissipative regulated load requires an active material heat receiver",
+                ));
+            }
+        }
         let dt = finite(target_s - thermal.time_s())?;
         if converter.time_s.to_bits() != thermal.time_s().to_bits()
             || dt <= 0.0
@@ -419,6 +492,18 @@ impl BatteryFedConverterThermalNetwork<'_> {
                 };
                 let (heat, total, net_external_work_j) =
                     physical_account(&step, controls.total_energy_tolerance_j)?;
+                let load_heat = load_heat_cell.map(|cell| RegulatedLoadHeat {
+                    cell,
+                    energy_j: step.load_work_j,
+                });
+                let routed = Dd::from_f64(load_heat.map_or(0.0, |heat| heat.energy_j));
+                // The same physical work leaves the electrical bus and enters
+                // the receiver. Cancel that internal transfer in the combined
+                // boundary, while keeping every original electrical audit.
+                let total_heat_j = finite((total + routed).to_f64())?;
+                let net_external_work_j = net_external_work_j + routed;
+                finite(net_external_work_j.hi)?;
+                finite(net_external_work_j.lo)?;
                 check(&cancel)?;
                 if !reused {
                     *cache.borrow_mut() = Some((bits, next, step.clone()));
@@ -437,7 +522,8 @@ impl BatteryFedConverterThermalNetwork<'_> {
                         },
                         step,
                         heat,
-                        total_heat_j: total.to_f64(),
+                        load_heat,
+                        total_heat_j,
                         net_external_work_j,
                     },
                     sources_w: coefficients.sources_w,
@@ -445,6 +531,7 @@ impl BatteryFedConverterThermalNetwork<'_> {
                     source: BatteryFedConverterThermalSample {
                         network: coefficients.source,
                         channels,
+                        load_heat,
                     },
                     circuit_trials: 1,
                 })
@@ -455,6 +542,11 @@ impl BatteryFedConverterThermalNetwork<'_> {
                     checkpoint()?;
                     let total = by_cell.entry(channel.cell).or_insert(Dd::ZERO);
                     *total = *total + Dd::from_f64(heat);
+                }
+                if let Some(load) = candidate.load_heat {
+                    checkpoint()?;
+                    let total = by_cell.entry(load.cell).or_insert(Dd::ZERO);
+                    *total = *total + Dd::from_f64(load.energy_j);
                 }
                 let mut powers = BTreeMap::new();
                 for (cell, heat) in by_cell {
