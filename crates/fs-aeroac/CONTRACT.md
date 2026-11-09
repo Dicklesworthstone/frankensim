@@ -4085,3 +4085,9 @@ shadow-boundary gradients, convergence to the original plane-wave owner,
 placed-source phase/velocity covariance, physical-scale preservation after raw
 contour-decay underflow, and bounded refusals. This is focused source-slice
 validation with the pinned compiler, not a full fs-aeroac/workspace Cargo result.
+
+## Positive short-window pressure and velocity moments
+
+Short uniform observations use the shared `fs-fft` positive temporal factor before forming pressure or velocity products: 3–32 real waveform tones when the full carrier span is admitted, or 3–64 proper-complex tones when their difference band is admitted, with at most 17 modes. Real modes retain sum frequencies and the true constant-mode mean; proper modes fold the peak-unit half into products before overflow. Every pressure/velocity diagonal and signed cross moment uses the same factor. Supplied Hz/rad/s clocks and source statistics remain unchanged.
+
+Fixed scratch preserves allocation-free observation and the existing supplied-line/squared-line admission. Unsupported profiles, spans and counts retain the original pair kernels. Mode truncation and DD arithmetic do not certify arbitrary null-relative error. `tests/harmonic_observation_short_band.rs` exercises independent tiny-null waveform references, real/proper mixtures, native angular input, signed flux, cancellation and finite large physical moments.

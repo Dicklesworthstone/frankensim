@@ -25,6 +25,7 @@ use fs_fft::harmonic_window::{
 };
 use fs_math::{c64::C64, dd::Dd, det};
 
+mod band;
 mod quadratic;
 mod sampled;
 pub use fs_fft::harmonic_window::HarmonicProductSpectrumLimits;
@@ -77,7 +78,9 @@ pub struct HarmonicObservationBudget {
     /// Maximum supplied line count, checked before allocation.
     pub max_lines: usize,
     /// Maximum square of the supplied line count, with overflow refused.
-    /// This bounds coalescing and all pairwise interference work.
+    /// This bounds coalescing and the fallback pairwise interference work.
+    /// Short uniform bands instead use at most 64 tones and 17 temporal modes
+    /// per field component, with fixed scratch and bounded projection work.
     pub max_line_pairs: usize,
 }
 
@@ -116,8 +119,10 @@ impl<const D: usize> WindowedAcousticField<D> {
 /// frequencies are summed in input order using double-double accumulators
 /// before any quadratic observation, retaining small cancellation residuals.
 /// Frequencies that are merely close remain distinct so their beats survive.
-/// Each window is allocation-free O(M²) for M distinct frequencies, caching
-/// each frequency-pair integral across pressure and velocity components.
+/// Each window is allocation-free. Short uniform bands project pressure and
+/// velocity through one positive temporal factor (at most 64 analytic or 32
+/// real-waveform tones and 17 modes). Other windows retain O(M²) pair kernels
+/// for M distinct frequencies, reused across pressure and velocity components.
 #[derive(Clone, Debug)]
 pub struct PreparedHarmonicField<const D: usize> {
     lines: Vec<PreparedLine<D>>,
@@ -257,9 +262,10 @@ impl<const D: usize> PreparedHarmonicField<D> {
 
     /// Integrate actual real pressure and energy flux on the source clock.
     ///
-    /// Both sum- and difference-frequency contributions survive. Grouped field
-    /// components, original frequencies and any Hz conversion remain extended precision
-    /// through the contractions. This is not a relative certificate at a null.
+    /// Both sum- and difference-frequency contributions survive. Short uniform
+    /// bands use positive temporal field factors before forming any moments.
+    /// Grouped fields, original frequencies and any Hz conversion remain in
+    /// extended precision. This is not a relative certificate at a null.
     pub fn observe_window(
         &self,
         window: HarmonicWindow,
@@ -267,7 +273,7 @@ impl<const D: usize> PreparedHarmonicField<D> {
         self.observe_window_cancellable(window, || false)
     }
 
-    /// Allocation-free observation with frequency-pair cancellation polls.
+    /// Allocation-free observation with bounded mode/pair cancellation polls.
     pub fn observe_window_cancellable(
         &self,
         window: HarmonicWindow,
@@ -330,6 +336,17 @@ impl<const D: usize> PreparedHarmonicField<D> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), AeroacError> {
         poll(cancelled)?;
+        if band::accumulate(
+            self,
+            window,
+            kind,
+            include_mean,
+            full_velocity,
+            sums,
+            cancelled,
+        )? {
+            return Ok(());
+        }
         if include_mean {
             for line in &self.lines {
                 poll(cancelled)?;
@@ -400,7 +417,8 @@ pub struct ProperHarmonicObservationBudget {
     /// Maximum sum of supplied line counts across all factors.
     pub max_total_lines: usize,
     /// Maximum sum of squared supplied line counts, checked for overflow.
-    /// Bounds preparation and pairwise observation before any allocation.
+    /// Bounds preparation and fallback pairwise observation before allocation.
+    /// Short uniform bands have the fixed modal bound of HarmonicObservationBudget.
     pub max_line_pairs: usize,
 }
 
@@ -521,7 +539,8 @@ impl<const D: usize> PreparedProperHarmonicField<D> {
         self.modes.len()
     }
 
-    /// Allocate nothing; reuse each temporal kernel across all field moments.
+    /// Allocate nothing; reuse one temporal factor or each pair kernel across
+    /// all field moments. Proper factors retain the real-peak factor of one half.
     pub fn observe_window(
         &self,
         window: HarmonicWindow,
