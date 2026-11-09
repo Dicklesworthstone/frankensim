@@ -43,6 +43,9 @@ use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
 pub mod interference;
 pub mod spatial_interference;
 
+/// Depth-dependent photoemission and residual heat on original thermal cells.
+pub mod photoelectric;
+
 /// Exact transmitted-substrate cell watts on the existing thermal timeline.
 pub mod substrate;
 
