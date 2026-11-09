@@ -20,6 +20,9 @@ use fs_math::c64::C64;
 /// heat ports, coherent regional contacts and independent thermal end conditions.
 pub mod thermal;
 
+mod absorption;
+pub use absorption::BulkTractionAbsorptionResponse;
+
 /// Prepared acoustic-mode cylinder. The underlying pressure-named two-port
 /// algebra is private: every exposed mechanical quantity here is traction.
 #[derive(Clone, Copy, Debug)]
@@ -27,6 +30,10 @@ pub struct BulkTractionCylinder {
     wave: BulkThermoviscousWave,
     port: TwoPort,
     pressure_over_traction: C64,
+    material: ClassicalBulkAbsorption,
+    area_m2: f64,
+    length_m: f64,
+    omega_rad_s: f64,
 }
 
 /// Mechanical load response for unit inlet volume flow, with pressure
@@ -84,6 +91,10 @@ impl BulkTractionCylinder {
             wave,
             port,
             pressure_over_traction,
+            material: *material,
+            area_m2: area,
+            length_m,
+            omega_rad_s,
         })
     }
 
