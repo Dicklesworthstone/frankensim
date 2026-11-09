@@ -15,8 +15,14 @@
 //! traction. A positive finite-domain minimum suffices even when a weakening
 //! law tends to zero at infinite speed. No coefficient floor is introduced.
 //!
-//! Pure-viscous and partly clipped domains without positive coercivity are
-//! explicitly refused. Proven zero traction is exact coasting, never arrest.
+//! Without a global positive lower bound, the same original-law integrator
+//! advances the finite horizon without assuming a stopping event. A conditional
+//! extinction bound activates only inside a proved all-local-speed domain.
+//! For clipped affine friction, speeds below half the cutoff give at least
+//! half the original zero-speed coefficient. Pure viscosity instead uses its
+//! exact Hertz second moment to bound the local linear decay rate: its safe
+//! timestep does not collapse with speed, and no finite arrest is reported.
+//! Proven zero traction is exact coasting, never arrest.
 //! Spatial quadrature remains caller-owned: temporal error estimates do not
 //! include its error. Refine pressure panels separately for nonlinear laws.
 //! Load, radius, mobility, source curve and environment are held fixed. There
@@ -27,8 +33,9 @@ use core::f64::consts::PI;
 
 use super::{HertzFrictionPatch, HertzFrictionQuadrature};
 use crate::adhesive::spinning::transient::{
-    CircularTransientLaw, CircularTransientQuadrature, CircularTransientTraction, TransientError,
-    advance_circular_transient, circular_transient_rate_domain,
+    CircularTransientExtinction, CircularTransientLaw, CircularTransientQuadrature,
+    CircularTransientTraction, TransientError, advance_circular_transient,
+    circular_transient_rate_domain,
 };
 use crate::sliding_patch::contact::relaxation::{CircularRelaxationInput, HertzRelaxationInput};
 use crate::sliding_patch::contact::transient::{
@@ -66,8 +73,8 @@ pub enum HertzRateTransientError {
     Law(TriboError),
     /// Original circular mechanics, controls, work, effort or cancellation gate.
     Transient(HertzTransientError),
-    /// The admitted finite speed domain has no representable positive lower
-    /// coefficient. This owner cannot infer finite arrest for that domain.
+    /// The admitted speed domain has no representable positive traction bound
+    /// and is not a proved exact zero-traction branch.
     NonCoercive {
         local_speed_bound_m_s: f64,
         kinetic_coefficient_bounds: [f64; 2],
@@ -184,15 +191,35 @@ impl HertzFrictionPatch {
                 maximum_scaled_wrench_norm_n: 0.0,
             });
         }
-        if bounds[0] <= 0.0 {
+        if bounds[1] <= 0.0 {
             return Err(HertzRateTransientError::NonCoercive {
                 local_speed_bound_m_s,
                 kinetic_coefficient_bounds: bounds,
             });
         }
+        if native.force_n == [0.0; 2]
+            && native.spin_moment_nm == 0.0
+            && native.dissipated_power_w == 0.0
+        {
+            return Err(invalid("unresolved positive rate-dependent traction"));
+        }
         let force_bound = checked(normal * bounds[1])?;
         let moment_bound = checked(force_bound * (SPIN_RADIUS * radius))?;
         let maximum_scaled_wrench_norm_n = checked(force_bound * upper_norm)?;
+        let conditional_extinction = self.conditional_extinction(
+            bounds,
+            maximum_mass_radius,
+            local_speed_bound_m_s,
+            upper_norm,
+        )?;
+        let linear_wrench_norm_bound = if self.law.zero_speed_kinetic_coefficient()? == 0.0 {
+            self.affine_slope()
+                .filter(|slope| *slope > 0.0)
+                .map(|slope| checked(normal * slope * (1.0 + BOUND_ROUNDOFF)))
+                .transpose()?
+        } else {
+            None
+        };
         let trajectory = advance_circular_transient(
             &CircularRelaxationInput {
                 velocity_m_s: input.velocity_m_s,
@@ -211,6 +238,8 @@ impl HertzFrictionPatch {
                     upper_norm,
                 ],
                 maximum_mass_radius,
+                conditional_extinction,
+                linear_wrench_norm_bound,
                 quadrature: CircularTransientQuadrature::Rk4Doubling,
                 evaluate: |velocity: [f64; 2], spin: f64| {
                     let speed = det::hypot(velocity[0], velocity[1]) + radius * spin.abs();
@@ -231,6 +260,14 @@ impl HertzFrictionPatch {
                             "spatial Hertz response exceeded its admitted wrench bound",
                         ));
                     }
+                    if let Some(bound) = linear_wrench_norm_bound {
+                        let rate = det::hypot(det::hypot(velocity[0], velocity[1]), radius * spin);
+                        if wrench_norm > bound * rate {
+                            return Err(HertzWrenchError::Invalid(
+                                "viscous Hertz response exceeded its original linear bound",
+                            ));
+                        }
+                    }
                     Ok(CircularTransientTraction {
                         force_n: response.force_n,
                         spin_moment_nm: response.spin_moment_nm,
@@ -248,6 +285,61 @@ impl HertzFrictionPatch {
             kinetic_coefficient_bounds: bounds,
             maximum_scaled_wrench_norm_n,
         })
+    }
+
+    fn conditional_extinction(
+        &self,
+        bounds: [f64; 2],
+        mass_radius: f64,
+        speed_bound: f64,
+        upper_norm: f64,
+    ) -> Result<Option<CircularTransientExtinction>, HertzRateTransientError> {
+        if bounds[0] > 0.0 {
+            return Ok(None);
+        }
+        // These are domains for evaluating the ORIGINAL lower bound, not
+        // replacement coefficients. Energy keeps the subsequent physical
+        // tail inside the admitted ball; numerical moving stages still use
+        // the original instantaneous clipped/nonlinear pressure integral.
+        let speed = match self.law {
+            FrictionLaw::VelocityDependent {
+                mu_zero,
+                slope_per_speed,
+                ..
+            } if mu_zero > 0.0 && slope_per_speed < 0.0 => 0.5 * (mu_zero / -slope_per_speed),
+            FrictionLaw::Stribeck {
+                characteristic_speed,
+                ..
+            }
+            | FrictionLaw::Hyperbolic {
+                characteristic_speed,
+                ..
+            } => characteristic_speed,
+            FrictionLaw::ShiftedPower {
+                characteristic_speed,
+                exponent,
+                ..
+            } => characteristic_speed / exponent.max(1.0),
+            _ => return Ok(None),
+        };
+        if !speed.is_finite() || speed <= 0.0 {
+            return Ok(None);
+        }
+        let lower = coefficient_bounds(&self.law, speed)?[0];
+        if lower <= 0.0 {
+            return Ok(None);
+        }
+        let maximum_mass_radius =
+            checked((speed / speed_bound) * mass_radius * (1.0 - 4.0 * BOUND_ROUNDOFF))?;
+        let minimum_power_norm =
+            checked((lower / bounds[1]) * (SPIN_RADIUS / upper_norm) * (1.0 - BOUND_ROUNDOFF))?;
+        if maximum_mass_radius <= 0.0 || minimum_power_norm <= 0.0 {
+            return Ok(None);
+        }
+        Ok(Some(CircularTransientExtinction {
+            maximum_mass_radius,
+            minimum_power_norm,
+        }))
     }
 
     // Only exact autonomous zero-traction branches coast. A small quadrature

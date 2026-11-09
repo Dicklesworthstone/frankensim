@@ -7,7 +7,9 @@ pub(super) struct Metric {
     factor: Factor,
     lower: [[f64; 3]; 3],
     root_scale: f64,
+    root_lower: f64,
     root_upper: f64,
+    capacity: f64,
     radial_error: f64,
     row_bounds: [f64; 3],
     pub minimum_decay: f64,
@@ -73,14 +75,19 @@ impl Metric {
         let root_upper = finite(root_scale * det::sqrt(upper * (1.0 + 64.0 * f64::EPSILON)))?;
         let minimum_decay = finite(power_norm_bounds[0] * capacity * root_lower)?;
         let maximum_speed = finite(power_norm_bounds[1] * capacity * root_upper)?;
-        if minimum_decay <= 0.0 || maximum_speed <= 0.0 {
+        if minimum_decay < 0.0
+            || (power_norm_bounds[0] > 0.0 && minimum_decay == 0.0)
+            || maximum_speed <= 0.0
+        {
             return Err(Error::Invalid("unrepresentable positive extinction bounds"));
         }
         Ok(Self {
             factor,
             lower,
             root_scale,
+            root_lower,
             root_upper,
+            capacity,
             radial_error,
             row_bounds: core::array::from_fn(|i| {
                 det::sqrt(matrix[i][i]) * (1.0 + 64.0 * f64::EPSILON)
@@ -100,18 +107,52 @@ impl Metric {
             finite(radius * det::sqrt(1.0 + self.radial_error))?,
         ))
     }
-    pub fn tail(&self, q: [f64; 3]) -> Result<([f64; 2], [f64; 3]), Error> {
+    pub fn tail(
+        &self,
+        q: [f64; 3],
+        conditional: Option<CircularTransientExtinction>,
+    ) -> Result<Option<([f64; 2], [f64; 3])>, Error> {
         let (lower, upper) = self.radius(q)?;
+        let minimum_decay = if self.minimum_decay > 0.0 {
+            self.minimum_decay
+        } else if let Some(bound) = conditional
+            && upper <= bound.maximum_mass_radius
+        {
+            let decay = finite(bound.minimum_power_norm * self.capacity * self.root_lower)?;
+            if decay <= 0.0 {
+                return Err(Error::Invalid(
+                    "unrepresentable conditional extinction bound",
+                ));
+            }
+            decay
+        } else {
+            return Ok(None);
+        };
         let time = [
             finite(lower / self.maximum_speed)?,
-            finite(upper / self.minimum_decay)?,
+            finite(upper / minimum_decay)?,
         ];
         let integrated_radius = finite(0.5 * upper * time[1])?;
         let travel = self.row_bounds.map(|v| v * integrated_radius);
         for value in travel {
             finite(value)?;
         }
-        Ok((time, travel))
+        Ok(Some((time, travel)))
+    }
+    pub fn safe_step(&self, q: [f64; 3], linear_bound: Option<f64>) -> Result<f64, Error> {
+        let (lower, upper) = self.radius(q)?;
+        let mut speed = self.maximum_speed;
+        if let Some(bound) = linear_bound {
+            // |w|<=b|q| implies |y'|<=lambda_max(W)*b*|y| in mass
+            // coordinates. Every positive stage stays in the 1.25-radius
+            // ball under this step; unlike a constant force bound, the local
+            // rate bound shrinks with genuine asymptotic viscous motion.
+            let local = (1.25 * self.root_upper * bound) * (self.root_upper * upper);
+            if local > 0.0 {
+                speed = speed.min(local);
+            }
+        }
+        Ok(0.25 * lower / speed)
     }
     pub fn stop_impulse(&self, q: [f64; 3]) -> Result<[f64; 3], Error> {
         self.factor

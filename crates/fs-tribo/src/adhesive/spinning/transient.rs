@@ -175,8 +175,19 @@ pub(crate) struct CircularTransientLaw<F> {
     /// Admitted endpoint/tail mass radius; infinity for globally bounded laws.
     /// Positive RK stages can extend to 1.25 times this radius.
     pub maximum_mass_radius: f64,
+    /// A genuine positive lower power bound that holds only near rest.
+    pub conditional_extinction: Option<CircularTransientExtinction>,
+    /// Optional original-law bound `|w(q)| <= bound * |q|` [N s/m].
+    /// It prevents asymptotic viscous decay from collapsing the safe timestep.
+    pub linear_wrench_norm_bound: Option<f64>,
     pub quadrature: CircularTransientQuadrature,
     pub evaluate: F,
+}
+#[derive(Clone, Copy)]
+pub(crate) struct CircularTransientExtinction {
+    pub maximum_mass_radius: f64,
+    /// `H(q) >= C * minimum_power_norm * |q|` throughout the admitted ball.
+    pub minimum_power_norm: f64,
 }
 #[derive(Clone, Copy)]
 pub(crate) enum CircularTransientQuadrature {
@@ -235,6 +246,8 @@ impl AdhesiveWrenchContact {
                 spinning_capacity_nm: self.kinetic_patch().spinning_capacity_nm(),
                 power_norm_bounds: [2.0 / root_thirteen, root_thirteen / 3.0],
                 maximum_mass_radius: f64::INFINITY,
+                conditional_extinction: None,
+                linear_wrench_norm_bound: None,
                 quadrature: CircularTransientQuadrature::BogackiShampine,
                 evaluate: |velocity, spin| {
                     let native = self
@@ -307,7 +320,11 @@ where
         law.power_norm_bounds,
         config,
     )?;
-    let horizon = input.dt_s.min(metric.tail(initial)?.0[1]);
+    let horizon = input.dt_s.min(
+        metric
+            .tail(initial, law.conditional_extinction)?
+            .map_or(input.dt_s, |tail| tail.0[1]),
+    );
     let mut work = Work {
         law,
         radius,
@@ -336,7 +353,7 @@ where
             ));
         }
         let remaining = input.dt_s - elapsed;
-        let (stop, tail_travel) = metric.tail(q)?;
+        let tail = metric.tail(q, work.law.conditional_extinction)?;
         if remaining == 0.0 {
             let candidate = finish(
                 input,
@@ -358,7 +375,8 @@ where
             poll(work.cancelled)?;
             return Ok(candidate);
         }
-        if stop[1] <= remaining
+        if let Some((stop, tail_travel)) = tail
+            && stop[1] <= remaining
             && stop[1] - stop[0] <= controls.stopping_time_tolerance_s
             && errors[2] + norm(tail_travel) <= controls.scaled_travel_tolerance_m
         {
@@ -401,7 +419,7 @@ where
         }
         // Every positive embedded stage stays within h*beta of its initial
         // mass-metric state, strictly before any possible zero crossing.
-        let safe_step = 0.25 * metric.radius(q)?.0 / metric.maximum_speed;
+        let safe_step = metric.safe_step(q, work.law.linear_wrench_norm_bound)?;
         let h = next_step.min(safe_step).min(remaining);
         if !h.is_finite()
             || h <= 0.0
@@ -449,6 +467,13 @@ where
             continue;
         }
         impulse = add(impulse, step.impulse);
+        if work.law.power_norm_bounds[0] == 0.0
+            && add(initial, multiply(matrix, impulse)) == [0.0; 3]
+        {
+            // Positive stages cannot reach rest in this step. Rounded impulse
+            // cancellation is not a finite physical stopping event.
+            return Err(Error::StepUnderflow);
+        }
         if work.law.maximum_mass_radius.is_finite()
             && metric.radius(add(initial, multiply(matrix, impulse)))?.1
                 > work.law.maximum_mass_radius

@@ -6,21 +6,32 @@ speed domain follows from initial mass-metric energy plus the admitted work
 defect. Every accepted endpoint and tail start is checked; positive RK4 stages
 use a 1.25-radius expansion with explicit speed and wrench admission.
 
-Conservative bounds of the original coefficient on this finite interval supply
-the existing physical-power RK4 integration and finite-extinction tail. This
-includes hyperbolic and shifted-power curves with a zero infinite-speed
-asymptote when their finite-domain minimum remains positive. Genuine Coulomb
-retains its original exact-ray path. Proven rest, unloaded motion and fully
-clipped zero-traction states coast exactly; moving coasting never reports arrest.
-Pure-viscous or partly clipped domains without a positive representable lower
-bound refuse without a coefficient floor. No substitute friction curve is used.
+Conservative coefficient bounds on the finite speed interval supply the original
+physical-power RK4 integration. A positive global lower bound admits the existing
+finite-extinction tail, including hyperbolic and shifted-power curves with zero
+infinite-speed asymptote. Without global coercivity, the same owner advances the
+requested finite horizon and admits a tail only after the checked mass-radius
+ball lies in a proved positive-coefficient domain. For clipped affine friction,
+all local speeds below half the cutoff guarantee at least half the original
+zero-speed coefficient. Pure viscosity retains the exact Hertz linear wrench,
+with second-moment factor 2/5; its local linear rate bound keeps the safe timestep
+tied to decay time rather than vanishing speed. It has no finite stopping tail.
+Rounded zero endpoints and unproven zero traction refuse instead of inventing
+arrest or coasting. Genuine Coulomb retains its original exact-ray path; proven
+rest, unloaded motion and fully clipped zero traction retain exact stationary
+or coasting behavior. No coefficient floor or substitute curve is used.
 
 Time error estimates exclude spatial pressure-quadrature error. Callers refine
 these two axes separately. Load, radius, mobility and source/environment remain
 fixed; driven stick/slip, source evolution and normal motion retain their owners.
-Seven focused law tests cover analytic affine and zero-asymptote stopping/travel,
-full-matrix curved response, an independent pressure/time reference with live
-spatial refinement, Coulomb parity, coasting, and bounded atomic refusal.
+Eleven focused law tests cover analytic affine and zero-asymptote stopping/travel,
+25 e-fold viscous decay, independently constructed full-mobility modal exponentials
+and integrated heat, clipped translation entering its true finite-stop domain,
+original clipped-pressure/time integration, live spatial refinement, Coulomb
+parity, exact coasting, and bounded atomic refusal/replay across coercive and
+noncoercive curves. A native regression additionally checks simultaneous viscous
+sliding and spin against the actual bodies' analytic decay, travel, heat and
+momentum, without a false finite stopping event.
 
 # CONTRACT: fs-tribo
 

@@ -171,6 +171,81 @@ fn affine_sliding_and_spin_recoil_follow_independent_exact_time_and_travel() {
 }
 
 #[test]
+fn viscous_sliding_and_spin_decay_in_real_bodies_without_a_finite_stopping_event() {
+    // Exact Hertz second moment: F=-N*b*u, M=-(2/5)*N*b*a^2*omega.
+    // Both modes are active. The native masses and inertias give independent
+    // decay rates while the assembled original body's work closes their sum.
+    let f = centre_pair(0.3, 3.0);
+    let slide_mobility: f64 = f.properties.iter().map(|p| p.mass().recip()).sum();
+    let spin_mobility: f64 = f
+        .properties
+        .iter()
+        .map(|p| p.principal_inertia_body().z.recip())
+        .sum();
+    let slide_decay = 10.0 * 0.8 * slide_mobility;
+    let spin_decay = (2.0 / 5.0) * 10.0 * 0.8 * R * R * spin_mobility;
+    for duration in [0.2, 4.0] {
+        let velocity = 0.3 * (-slide_decay * duration).exp();
+        let spin = 3.0 * (-spin_decay * duration).exp();
+        let slip = 0.3 * -(-slide_decay * duration).exp_m1() / slide_decay;
+        let angle = 3.0 * -(-spin_decay * duration).exp_m1() / spin_decay;
+        let heat = 0.5 * (0.3 - velocity) * (0.3 + velocity) / slide_mobility
+            + 0.5 * (3.0 - spin) * (3.0 + spin) / spin_mobility;
+        let mut previous = None;
+        for law in [
+            FrictionLaw::VelocityDependent {
+                static_mu: 0.0,
+                mu_zero: 0.0,
+                slope_per_speed: 0.8,
+            },
+            FrictionLaw::Stribeck {
+                static_mu: 0.0,
+                kinetic_mu: 0.0,
+                characteristic_speed: 0.05,
+                viscous_per_speed: 0.8,
+            },
+        ] {
+            let law = patch(law);
+            let result = run(&f, &law, duration);
+            let mechanical = &result.report.mechanical;
+            let path = &mechanical.transient;
+            assert!(path.stopping_time_bracket_s.is_none());
+            assert_eq!(result.report.kinetic_coefficient_bounds[0], 0.0);
+            close(mechanical.slip_velocity_m_s[1][0], velocity, 2e-9);
+            close(mechanical.spin_rad_s[1], spin, 4e-9);
+            close(path.slip_increment_m[0], slip, 5e-10);
+            close(path.spin_increment_rad, angle, 5e-9);
+            close(path.dissipated_energy_j, heat, 1e-10);
+            close(
+                kinetic(f.bodies, f.properties) - kinetic(result.bodies_after, f.properties),
+                heat,
+                1e-10,
+            );
+            close(
+                mechanical.audit.total_energy_residual_j,
+                0.0,
+                controls().energy_tolerance_j,
+            );
+            close_vec(
+                mechanical.audit.linear_momentum_change_ns,
+                Vec3::ZERO,
+                controls().linear_momentum_tolerance_ns,
+            );
+            close_vec(
+                mechanical.audit.angular_momentum_change_nms,
+                Vec3::ZERO,
+                controls().angular_momentum_tolerance_nms,
+            );
+            assert_eq!(result, run(&f, &law, duration));
+            if let Some(bodies) = previous {
+                assert_eq!(result.bodies_after, bodies);
+            }
+            previous = Some(result.bodies_after);
+        }
+    }
+}
+
+#[test]
 fn coulomb_reduction_and_repeated_curve_trials_retain_the_original_native_pair() {
     let f = fixture();
     let law = patch(FrictionLaw::Coulomb {

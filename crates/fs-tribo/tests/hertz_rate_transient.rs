@@ -431,11 +431,14 @@ fn zero_traction_coasts_but_noncoercive_drag_never_claims_finite_arrest() {
     };
     for law in [viscous.clone(), clipped.clone()] {
         let patch = HertzFrictionPatch::new(N, A, law).unwrap();
-        let input = scalar_input(2, 0.7, 10.0);
-        assert!(matches!(
-            patch.advance_transient(&input, config(), grid(8), controls(), || false),
-            Err(HertzRateTransientError::NonCoercive { .. })
-        ));
+        let input = scalar_input(2, 0.7, 0.1);
+        let r = patch
+            .advance_transient(&input, config(), grid(8), controls(), || false)
+            .unwrap();
+        assert_eq!(r.kinetic_coefficient_bounds[0], 0.0);
+        assert!(r.trajectory.stopping_time_bracket_s.is_none());
+        assert!(q(&r)[2] > 0.0 && q(&r)[2] < 0.7);
+        assert!(r.trajectory.dissipated_energy_j > 0.0);
     }
     // All local speeds exceed the clipping cutoff even with spin: exact
     // autonomous coasting has no moving-to-rest event and generates no heat.
@@ -510,70 +513,351 @@ fn original_coulomb_fast_path_and_frictionless_coast_are_preserved() {
 
 #[test]
 fn cancellation_effort_and_numerical_budgets_preserve_the_original_curve() {
-    let patch = HertzFrictionPatch::new(
-        N,
-        A,
+    for law in [
         FrictionLaw::ShiftedPower {
             static_mu: 0.8,
             kinetic_mu: 0.2,
             characteristic_speed: 0.3,
             exponent: 0.4,
         },
+        FrictionLaw::VelocityDependent {
+            static_mu: 0.8,
+            mu_zero: 0.0,
+            slope_per_speed: 0.3,
+        },
+        FrictionLaw::VelocityDependent {
+            static_mu: 0.8,
+            mu_zero: 0.4,
+            slope_per_speed: -1.0,
+        },
+    ] {
+        let patch = HertzFrictionPatch::new(N, A, law).unwrap();
+        let snapshot = patch.clone();
+        let input = mixed_input();
+        let baseline = patch
+            .advance_transient(&input, config(), grid(8), controls(), || false)
+            .unwrap();
+        let mut polls = 0;
+        let cancelled = patch.advance_transient(&input, config(), grid(8), controls(), || {
+            polls += 1;
+            polls >= 17
+        });
+        assert_eq!(
+            cancelled,
+            Err(HertzRateTransientError::Transient(
+                HertzTransientError::Cancelled
+            ))
+        );
+        let exhausted = patch.advance_transient(
+            &input,
+            config(),
+            grid(8),
+            HertzTransientControls {
+                maximum_evaluations: 1,
+                ..controls()
+            },
+            || false,
+        );
+        assert_eq!(
+            exhausted,
+            Err(HertzRateTransientError::Transient(
+                HertzTransientError::EvaluationBudget
+            ))
+        );
+        let effort = patch.advance_transient(
+            &input,
+            HertzWrenchConfig {
+                maximum_force_n: 0.0,
+                ..config()
+            },
+            grid(8),
+            controls(),
+            || false,
+        );
+        assert_eq!(
+            effort,
+            Err(HertzRateTransientError::Transient(
+                HertzTransientError::EffortBudget
+            ))
+        );
+        assert_eq!(patch, snapshot);
+        assert_eq!(
+            patch
+                .advance_transient(&input, config(), grid(8), controls(), || false)
+                .unwrap(),
+            baseline
+        );
+    }
+}
+
+#[test]
+fn pure_viscosity_retains_exponential_translation_and_spin_without_finite_arrest() {
+    let slope = 0.3;
+    let law = FrictionLaw::VelocityDependent {
+        static_mu: 0.8,
+        mu_zero: 0.0,
+        slope_per_speed: slope,
+    };
+    let patch = HertzFrictionPatch::new(N, A, law).unwrap();
+    let bounded = HertzTransientControls {
+        maximum_attempts: 5_000,
+        maximum_evaluations: 60_001,
+        ..controls()
+    };
+    for axis in [0, 2] {
+        let initial = 0.7;
+        let decay_rate = N * slope * diagonal()[axis][axis] * if axis == 0 { 1.0 } else { 0.4 };
+        for exposure in [0.01, 2.0, 25.0] {
+            let dt = exposure / decay_rate;
+            let end = initial * (-exposure).exp();
+            let distance = initial * (-(-exposure).exp_m1()) / decay_rate;
+            let r = patch
+                .advance_transient(
+                    &scalar_input(axis, initial, dt),
+                    config(),
+                    grid(1),
+                    bounded,
+                    || false,
+                )
+                .unwrap();
+            scalar_check(&r, axis, initial, end, distance);
+            assert!(
+                q(&r)[axis] > 0.0,
+                "viscosity must not manufacture finite arrest"
+            );
+            assert!(r.trajectory.stopping_time_bracket_s.is_none());
+            assert_eq!(r.trajectory.stopping_tail_heat_j, 0.0);
+            assert_eq!(r.trajectory.integrated_until_s, dt);
+            assert!(
+                r.trajectory.accepted_steps + r.trajectory.rejected_steps
+                    < bounded.maximum_attempts
+            );
+        }
+    }
+}
+
+#[test]
+fn full_mobility_viscosity_matches_independent_modal_exponentials_and_heat() {
+    // Construct W=D^-1/2 R Lambda R^T D^-1/2 using known orthonormal
+    // columns. Thus z=D^1/2 q has independently known modal exponential
+    // motion. No numerical eigenproblem or production integration is used
+    // to obtain endpoints, impulse, travel or integrated physical power.
+    let slope = 0.35;
+    let damping = [N * slope, N * slope, 0.4 * N * slope];
+    let roots = damping.map(f64::sqrt);
+    let modes = [
+        [2.0 / 3.0, -2.0 / 3.0, 1.0 / 3.0],
+        [2.0 / 3.0, 1.0 / 3.0, -2.0 / 3.0],
+        [1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0],
+    ];
+    let lambda = [0.4, 1.3, 3.0];
+    let amplitudes = [0.7, -0.2, 0.4];
+    let matrix: M = core::array::from_fn(|i| {
+        core::array::from_fn(|j| {
+            (0..3)
+                .map(|k| modes[i][k] * lambda[k] * modes[j][k])
+                .sum::<f64>()
+                / (roots[i] * roots[j])
+        })
+    });
+    let initial: V = core::array::from_fn(|i| {
+        (0..3).map(|k| modes[i][k] * amplitudes[k]).sum::<f64>() / roots[i]
+    });
+    let patch = HertzFrictionPatch::new(
+        N,
+        A,
+        FrictionLaw::VelocityDependent {
+            static_mu: 0.8,
+            mu_zero: 0.0,
+            slope_per_speed: slope,
+        },
     )
     .unwrap();
-    let snapshot = patch.clone();
-    let input = mixed_input();
-    let baseline = patch
-        .advance_transient(&input, config(), grid(8), controls(), || false)
+    let bounded = HertzTransientControls {
+        maximum_attempts: 5_000,
+        maximum_evaluations: 60_001,
+        ..controls()
+    };
+    for dt in [0.1, 40.0] {
+        let expected: V = core::array::from_fn(|i| {
+            (0..3)
+                .map(|k| modes[i][k] * amplitudes[k] * (-lambda[k] * dt).exp())
+                .sum::<f64>()
+                / roots[i]
+        });
+        let distance: V = core::array::from_fn(|i| {
+            (0..3)
+                .map(|k| modes[i][k] * amplitudes[k] * (-(-lambda[k] * dt).exp_m1()) / lambda[k])
+                .sum::<f64>()
+                / roots[i]
+        });
+        let heat = (0..3)
+            .map(|k| {
+                amplitudes[k] * amplitudes[k] * (-(-2.0 * lambda[k] * dt).exp_m1())
+                    / (2.0 * lambda[k])
+            })
+            .sum::<f64>();
+        let input = HertzRelaxationInput {
+            velocity_m_s: [initial[0], initial[1]],
+            spin_rate_rad_s: initial[2] / A,
+            scaled_mobility_per_kg: matrix,
+            dt_s: dt,
+        };
+        let r = patch
+            .advance_transient(&input, config(), grid(1), bounded, || false)
+            .unwrap();
+        for i in 0..3 {
+            close(q(&r)[i], expected[i], 4e-9);
+            close(travel(&r)[i], distance[i], 1e-8);
+            close(impulse(&r)[i], -damping[i] * distance[i], 4e-9);
+        }
+        close(r.trajectory.dissipated_energy_j, heat, 8e-10);
+        assert!(q(&r).into_iter().all(|v| v > 0.0));
+        assert!(r.trajectory.stopping_time_bracket_s.is_none());
+        assert_eq!(r.trajectory.stopping_tail_heat_j, 0.0);
+        assert!(r.trajectory.work_residual_j.abs() <= config().energy_tolerance_j);
+        eprintln!(
+            "viscous full-mobility dt={dt}: {} accepted, {} rejected, {} evaluations",
+            r.trajectory.accepted_steps, r.trajectory.rejected_steps, r.trajectory.evaluations
+        );
+    }
+}
+
+#[test]
+fn clipped_initial_envelope_enters_original_coercive_domain_and_stops_at_the_analytic_time() {
+    // Actual initial translation lies below the clipping cutoff, while the
+    // conservative whole-mobility admission ball extends above it. The former
+    // global-coercivity admission refused this real finite-arrest trajectory.
+    let (mu0, slope, initial) = (0.4_f64, -1.0, 0.35);
+    let alpha = diagonal()[0][0] * N * mu0;
+    let beta = diagonal()[0][0] * N * slope;
+    let stop = (1.0 + beta * initial / alpha).ln() / beta;
+    let patch = HertzFrictionPatch::new(
+        N,
+        A,
+        FrictionLaw::VelocityDependent {
+            static_mu: 0.8,
+            mu_zero: mu0,
+            slope_per_speed: slope,
+        },
+    )
+    .unwrap();
+    for dt in [0.2 * stop, 2.0 * stop] {
+        let t = dt.min(stop);
+        let decay = (-beta * t).exp();
+        let end = if dt >= stop {
+            0.0
+        } else {
+            (initial + alpha / beta) * decay - alpha / beta
+        };
+        let distance = (initial + alpha / beta) * (1.0 - decay) / beta - alpha * t / beta;
+        let r = patch
+            .advance_transient(
+                &scalar_input(0, initial, dt),
+                config(),
+                grid(1),
+                controls(),
+                || false,
+            )
+            .unwrap();
+        assert_eq!(r.kinetic_coefficient_bounds[0], 0.0);
+        assert!(r.local_speed_bound_m_s > mu0 / -slope);
+        scalar_check(&r, 0, initial, end, distance);
+        if dt >= stop {
+            let bracket = r.trajectory.stopping_time_bracket_s.unwrap();
+            assert!(
+                bracket[0] - 2e-8 <= stop && stop <= bracket[1] + 2e-8,
+                "{bracket:?}, exact {stop}"
+            );
+            assert_eq!(q(&r), [0.0; 3]);
+            assert!(r.trajectory.stopping_tail_heat_j > 0.0);
+        } else {
+            assert!(r.trajectory.stopping_time_bracket_s.is_none());
+        }
+    }
+    let coast = patch
+        .advance_transient(
+            &scalar_input(0, 0.5, 10.0),
+            config(),
+            grid(1),
+            controls(),
+            || false,
+        )
         .unwrap();
-    let mut polls = 0;
-    let cancelled = patch.advance_transient(&input, config(), grid(8), controls(), || {
-        polls += 1;
-        polls >= 17
-    });
-    assert_eq!(
-        cancelled,
-        Err(HertzRateTransientError::Transient(
-            HertzTransientError::Cancelled
-        ))
-    );
-    let exhausted = patch.advance_transient(
-        &input,
-        config(),
-        grid(8),
-        HertzTransientControls {
-            maximum_evaluations: 1,
-            ..controls()
+    assert_eq!(q(&coast), [0.5, 0.0, 0.0]);
+    assert_eq!(coast.trajectory.slip_increment_m, [5.0, 0.0]);
+    assert!(coast.trajectory.stopping_time_bracket_s.is_none());
+    assert_eq!(coast.trajectory.dissipated_energy_j, 0.0);
+}
+
+fn clipped_spin_reference(initial: f64, dt: f64, radial: usize, steps: usize) -> (f64, f64) {
+    // Independently integrate only the actual positive-traction disk, using
+    // theta coordinates and Simpson pressure quadrature, then fixed-grid RK4.
+    let h = dt / steps as f64;
+    let acceleration = |q: f64| {
+        let upper = (0.4 / q).min(1.0).asin();
+        let dtheta = upper / radial as f64;
+        let mut sum = 0.0;
+        for i in 0..=radial {
+            let (s, c) = (i as f64 * dtheta).sin_cos();
+            let weight = if i == 0 || i == radial {
+                1.0
+            } else if i % 2 == 0 {
+                2.0
+            } else {
+                4.0
+            };
+            sum += weight * (0.4 - q * s).max(0.0) * s * s * c * c;
+        }
+        -diagonal()[2][2] * N * dtheta * sum
+    };
+    let mut q = initial;
+    let mut distance = 0.0;
+    for _ in 0..steps {
+        let a = acceleration(q);
+        let qb = q + 0.5 * h * a;
+        let b = acceleration(qb);
+        let qc = q + 0.5 * h * b;
+        let c = acceleration(qc);
+        let qd = q + h * c;
+        let d = acceleration(qd);
+        distance += h * (q + 2.0 * qb + 2.0 * qc + qd) / 6.0;
+        q += h * (a + 2.0 * b + 2.0 * c + d) / 6.0;
+    }
+    (q, distance)
+}
+
+#[test]
+fn partially_clipped_spin_uses_original_active_pressure_region_through_time() {
+    let (initial, dt) = (0.7, 0.3);
+    let coarse = clipped_spin_reference(initial, dt, 256, 256);
+    let fine = clipped_spin_reference(initial, dt, 512, 512);
+    close(coarse.0, fine.0, 2e-10);
+    close(coarse.1, fine.1, 2e-10);
+    let patch = HertzFrictionPatch::new(
+        N,
+        A,
+        FrictionLaw::VelocityDependent {
+            static_mu: 0.8,
+            mu_zero: 0.4,
+            slope_per_speed: -1.0,
         },
-        || false,
-    );
-    assert_eq!(
-        exhausted,
-        Err(HertzRateTransientError::Transient(
-            HertzTransientError::EvaluationBudget
-        ))
-    );
-    let effort = patch.advance_transient(
-        &input,
-        HertzWrenchConfig {
-            maximum_force_n: 0.0,
-            ..config()
-        },
-        grid(8),
-        controls(),
-        || false,
-    );
-    assert_eq!(
-        effort,
-        Err(HertzRateTransientError::Transient(
-            HertzTransientError::EffortBudget
-        ))
-    );
-    assert_eq!(patch, snapshot);
-    assert_eq!(
-        patch
-            .advance_transient(&input, config(), grid(8), controls(), || false)
-            .unwrap(),
-        baseline
+    )
+    .unwrap();
+    let r = patch
+        .advance_transient(
+            &scalar_input(2, initial, dt),
+            config(),
+            grid(16),
+            controls(),
+            || false,
+        )
+        .unwrap();
+    scalar_check(&r, 2, initial, fine.0, fine.1);
+    assert_eq!(r.kinetic_coefficient_bounds[0], 0.0);
+    assert!(r.trajectory.stopping_time_bracket_s.is_none());
+    assert!(
+        q(&r)[2] > 0.4,
+        "fixture must retain its clipped outer region"
     );
 }
