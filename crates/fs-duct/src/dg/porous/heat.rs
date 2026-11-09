@@ -42,6 +42,37 @@ pub struct DgPorousHeat {
     viscous: PreparedSourceLoss,
     thermal: PreparedSourceLoss,
 }
+
+/// Original porous losses localized to one complete physical DG element.
+/// The native mass transformations are element-local, so selecting ALL its
+/// energy coordinates integrates its volume without another spatial rule.
+/// Sources outside the element remain in the full propagation operator.
+#[derive(Clone, Debug)]
+pub struct DgPorousElementHeat {
+    element: usize,
+    interval_m: [f64; 2],
+    area_m2: f64,
+    heat: DgPorousHeat,
+}
+impl DgPorousElementHeat {
+    /// Original left-to-right element index.
+    pub const fn element(&self) -> usize {
+        self.element
+    }
+    /// Physical near and far face positions along the original duct axis [m].
+    pub const fn interval_m(&self) -> [f64; 2] {
+        self.interval_m
+    }
+    /// Full specimen face area [m²]; porosity belongs to the material law.
+    pub const fn area_m2(&self) -> f64 {
+        self.area_m2
+    }
+    /// Both original mechanism integrals restricted to this element's volume.
+    pub const fn heat(&self) -> &DgPorousHeat {
+        &self.heat
+    }
+}
+
 impl DgPorousHeat {
     pub const fn operator_identity(&self) -> ContentHash {
         self.operator_identity
@@ -142,9 +173,65 @@ impl<M: DgMedium> DgDuct<M> {
         budget: DenseExponentialBudget,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<DgPorousHeat, DuctError> {
+        self.prepare_porous_heat_on_dofs(propagator, 0..self.field_dofs, budget, cancelled)
+    }
+
+    /// Integrate viscous and thermal absorption in one physical DG element.
+    ///
+    /// The original static drag and memory source squares are selected by
+    /// their element-local mass coordinates, BEFORE time integration. Their
+    /// evolution uses the COMPLETE unchanged operator and held port inputs;
+    /// interelement transport and every memory therefore remain coupled.
+    /// Summing a complete element partition recovers the whole-specimen heat,
+    /// including acoustic startup and ringdown, without assuming uniform heat
+    /// or a cycle-mean tone. No endpoint power or total energy deficit is used.
+    ///
+    /// This optional cold preparation retains two native positive integral
+    /// caches per requested element; ordinary whole-specimen queries allocate
+    /// no additional storage. The supplied allowance covers this one element.
+    /// A consumer preparing many elements must partition its total allowance.
+    /// The same 128-state cap, frozen material and source-band limits apply.
+    pub fn prepare_porous_element_heat(
+        &self,
+        propagator: &DgPropagator,
+        element: usize,
+        budget: DenseExponentialBudget,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<DgPorousElementHeat, DuctError> {
+        poll(cancelled)?;
+        let geometry = self
+            .elements
+            .get(element)
+            .ok_or_else(|| invalid("porous heat needs an original element index"))?;
+        if self.gas.porous_diffusive_model().is_none() {
+            return Err(invalid(
+                "element heating requires an intrinsic porous material",
+            ));
+        }
+        let width = self.mesh.order + 1;
+        let start = element * width;
+        let heat =
+            self.prepare_porous_heat_on_dofs(propagator, start..start + width, budget, cancelled)?;
+        poll(cancelled)?;
+        Ok(DgPorousElementHeat {
+            element,
+            interval_m: [geometry.x_left, geometry.x_left + geometry.length],
+            area_m2: geometry.areas[0],
+            heat,
+        })
+    }
+
+    fn prepare_porous_heat_on_dofs(
+        &self,
+        propagator: &DgPropagator,
+        selected: core::ops::Range<usize>,
+        budget: DenseExponentialBudget,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<DgPorousHeat, DuctError> {
         poll(cancelled)?;
         let n = self.total_dofs();
         let m = self.field_dofs;
+        let source_width = selected.len();
         let ports = self.ports.len();
         if propagator.operator_identity != self.operator_identity
             || n > 128
@@ -161,11 +248,13 @@ impl<M: DgMedium> DgDuct<M> {
                     .series_terms()
                     .len()
                     .checked_add(1)
-                    .and_then(|v| v.checked_mul(m))
+                    .and_then(|v| v.checked_mul(source_width))
             })
             .ok_or_else(|| invalid("porous viscous source extent overflow"))?;
         let thermal_count = model
-            .map_or(Some(0), |model| model.shunt_terms().len().checked_mul(m))
+            .map_or(Some(0), |model| {
+                model.shunt_terms().len().checked_mul(source_width)
+            })
             .ok_or_else(|| invalid("porous thermal source extent overflow"))?;
         let bytes = viscous_count
             .checked_add(thermal_count)
@@ -189,7 +278,7 @@ impl<M: DgMedium> DgDuct<M> {
         let mut thermal = Vec::with_capacity(thermal_count * n);
         if let Some(model) = model {
             let drag_root = det::sqrt(model.series_drag_per_s());
-            for i in 0..m {
+            for i in selected.clone() {
                 poll(cancelled)?;
                 row(&mut viscous, n)[m + i] = drag_root;
             }
@@ -202,7 +291,7 @@ impl<M: DgMedium> DgDuct<M> {
             {
                 let root_gain = det::sqrt(term.gain_per_s);
                 let root_rate = det::sqrt(term.rate_per_s);
-                for i in 0..m {
+                for i in selected.clone() {
                     poll(cancelled)?;
                     let source = if is_thermal {
                         row(&mut thermal, n)

@@ -14,7 +14,7 @@ use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
 use fs_material::porous::diffusive::PorousDiffusive;
 
 mod heat;
-pub use heat::{DgPorousHeat, DgPorousHeating};
+pub use heat::{DgPorousElementHeat, DgPorousHeat, DgPorousHeating};
 
 fn invalid(what: &'static str) -> DuctError {
     DuctError::BadParameter { what }

@@ -98,7 +98,9 @@ pub use continuous::{
 mod viscothermal;
 pub use viscothermal::{DgViscousHeat, DgWallAdmission, DgWallResolution};
 mod porous;
-pub use porous::{DgPorousHeat, DgPorousHeating, DgPorousMaterial, DgPorousPower};
+pub use porous::{
+    DgPorousElementHeat, DgPorousHeat, DgPorousHeating, DgPorousMaterial, DgPorousPower,
+};
 mod compliant_wall;
 pub use compliant_wall::DgCompliantWallHeat;
 pub use compliant_wall::{DgCompliantWallState, DgWallMaterialUpdate, DgWallRelaxationTransfer};

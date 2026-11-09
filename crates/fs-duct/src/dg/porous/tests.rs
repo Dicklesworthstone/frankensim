@@ -200,6 +200,190 @@ fn forced_native_power_matches_separate_heat_without_warm_allocation() {
 }
 
 #[test]
+fn g1_element_heat_partitions_original_sources_and_preserves_physical_volume() {
+    let fluid = fluid(1.4);
+    let dg = DgDuct::from_porous_material(
+        &geometry(),
+        &model(&fluid),
+        &fluid,
+        DgMesh {
+            elements: 2,
+            order: 1,
+        },
+        DgBoundary::Closed,
+        DgBoundary::Closed,
+    )
+    .unwrap();
+    let step = dg.propagator(2e-6, 1e-11).unwrap();
+    let whole = dg
+        .prepare_porous_heat(&step, budget(), &mut || false)
+        .unwrap();
+    let cells: Vec<_> = (0..2)
+        .map(|e| {
+            dg.prepare_porous_element_heat(&step, e, budget(), &mut || false)
+                .unwrap()
+        })
+        .collect();
+    let area = core::f64::consts::PI * RADIUS * RADIUS;
+    for (index, cell) in cells.iter().enumerate() {
+        assert_eq!(cell.element(), index);
+        assert_eq!(
+            cell.interval_m(),
+            [
+                index as f64 * LENGTH / 2.0,
+                (index + 1) as f64 * LENGTH / 2.0
+            ]
+        );
+        close(cell.area_m2(), area, 1e-15);
+        assert_eq!(cell.heat().operator_identity(), whole.operator_identity());
+    }
+    // Uniform compression relaxes identically in two equal physical volumes.
+    // This checks the native element mass map, not arbitrary fractions of total
+    // heat: the same caches below also see strongly nonuniform illumination.
+    let uniform = dg.project_initial_state(|_| 1.0, |_| 0.0);
+    let left = cells[0]
+        .heat()
+        .integrated_heat_j(&uniform, &[], &mut || false)
+        .unwrap();
+    let right = cells[1]
+        .heat()
+        .integrated_heat_j(&uniform, &[], &mut || false)
+        .unwrap();
+    assert!(left.thermal_j > 0.0);
+    close(left.thermal_j, right.thermal_j, 2e-8);
+    let total = whole
+        .integrated_heat_j(&uniform, &[], &mut || false)
+        .unwrap();
+    close(left.thermal_j + right.thermal_j, total.thermal_j, 2e-8);
+
+    let local = dg.project_initial_state(|x| if x < LENGTH / 2.0 { 1.0 } else { 0.0 }, |_| 0.0);
+    let left = cells[0]
+        .heat()
+        .integrated_heat_j(&local, &[], &mut || false)
+        .unwrap();
+    let right = cells[1]
+        .heat()
+        .integrated_heat_j(&local, &[], &mut || false)
+        .unwrap();
+    let total = whole.integrated_heat_j(&local, &[], &mut || false).unwrap();
+    assert!(
+        left.thermal_j > 100.0 * right.thermal_j,
+        "{left:?} {right:?}"
+    );
+    close(left.viscous_j + right.viscous_j, total.viscous_j, 2e-8);
+    close(left.thermal_j + right.thermal_j, total.thermal_j, 2e-8);
+    let mut end = local.clone();
+    step.step(&mut end, &[]).unwrap();
+    close(
+        total.total_j(),
+        local.stored_energy_j() - end.stored_energy_j(),
+        3e-8,
+    );
+    assert_eq!(local.step_count(), 0);
+}
+
+#[test]
+fn g3_element_heat_keeps_interelement_transport_and_held_port_work() {
+    let fluid = fluid(1.0);
+    let dg = DgDuct::from_porous_material(
+        &geometry(),
+        &model(&fluid),
+        &fluid,
+        DgMesh {
+            elements: 2,
+            order: 1,
+        },
+        DgBoundary::Port(LEFT),
+        DgBoundary::Closed,
+    )
+    .unwrap();
+    let initial = dg.zero_state();
+    let step = dg.propagator(2e-5, 1e-11).unwrap();
+    let half = dg.propagator(step.dt() / 2.0, 1e-11).unwrap();
+    let input = [PortInput {
+        id: LEFT,
+        effort: 1e-6,
+    }];
+    let mut middle = initial.clone();
+    half.step(&mut middle, &input).unwrap();
+    let mut sum = 0.0;
+    for element in 0..2 {
+        let full = dg
+            .prepare_porous_element_heat(&step, element, budget(), &mut || false)
+            .unwrap();
+        let partial = dg
+            .prepare_porous_element_heat(&half, element, budget(), &mut || false)
+            .unwrap();
+        let total = full
+            .heat()
+            .integrated_heat_j(&initial, &input, &mut || false)
+            .unwrap();
+        let first = partial
+            .heat()
+            .integrated_heat_j(&initial, &input, &mut || false)
+            .unwrap();
+        let second = partial
+            .heat()
+            .integrated_heat_j(&middle, &input, &mut || false)
+            .unwrap();
+        assert!(total.viscous_j > 0.0, "drive must reach element {element}");
+        assert_eq!(total.thermal_j, 0.0);
+        close(first.viscous_j + second.viscous_j, total.viscous_j, 2e-8);
+        sum += total.viscous_j;
+    }
+    let mut end = initial.clone();
+    let record = step.step(&mut end, &input).unwrap();
+    close(
+        sum,
+        record.ledger.port_work_step_j - end.stored_energy_j(),
+        3e-8,
+    );
+}
+
+#[test]
+fn g4_element_heat_refuses_foreign_operator_bounds_budget_and_cancellation() {
+    let dg = duct(1.0, DgBoundary::Closed, DgBoundary::Closed);
+    let state = dg.project_initial_state(|_| 1.0, |_| 1e-6);
+    let original = state.clone();
+    let step = dg.propagator(2e-6, 1e-11).unwrap();
+    assert!(
+        dg.prepare_porous_element_heat(&step, 1, budget(), &mut || false)
+            .is_err()
+    );
+    assert!(
+        dg.prepare_porous_element_heat(&step, 0, budget(), &mut || true)
+            .is_err()
+    );
+    assert!(
+        dg.prepare_porous_element_heat(
+            &step,
+            0,
+            DenseExponentialBudget {
+                max_dense_bytes: 0,
+                ..budget()
+            },
+            &mut || false,
+        )
+        .is_err()
+    );
+    let other = duct(1.4, DgBoundary::Closed, DgBoundary::Closed);
+    let other_step = other.propagator(2e-6, 1e-11).unwrap();
+    assert!(
+        dg.prepare_porous_element_heat(&other_step, 0, budget(), &mut || false)
+            .is_err()
+    );
+    let heat = dg
+        .prepare_porous_element_heat(&step, 0, budget(), &mut || false)
+        .unwrap();
+    assert!(
+        heat.heat()
+            .integrated_heat_j(&other.zero_state(), &[], &mut || false)
+            .is_err()
+    );
+    assert_eq!(state, original);
+}
+
+#[test]
 fn zero_thermal_coupling_and_refusals_preserve_original_state() {
     let dg = duct(1.0, DgBoundary::Closed, DgBoundary::Closed);
     let state = dg.project_initial_state(|_| 1.0, |_| 1e-6);
