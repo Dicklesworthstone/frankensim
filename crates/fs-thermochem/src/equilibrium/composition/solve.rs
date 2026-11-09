@@ -654,6 +654,11 @@ impl Workspace {
         controls: EquilibriumEnthalpySolveV1,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<IdealGasEquilibriumSolutionV1, E> {
+        self.source_temperature_range(
+            owner,
+            controls.minimum_temperature_k,
+            controls.maximum_temperature_k,
+        )?;
         let (mut low, mut high) = (
             controls.minimum_temperature_k,
             controls.maximum_temperature_k,
@@ -748,6 +753,33 @@ impl Workspace {
             iterations: temperature_iterations,
             residual_j: last_residual,
         })
+    }
+
+    // HP, SP and UV must admit the same original source path. Separate chart
+    // endpoints do not establish a continuous enthalpy or entropy inverse.
+    fn source_temperature_range(
+        &self,
+        owner: &IdealGasEquilibriumV1,
+        minimum_temperature_k: f64,
+        maximum_temperature_k: f64,
+    ) -> Result<(), E> {
+        for &i in &self.active {
+            let model = &owner.models[i];
+            let lower = model
+                .region_for_temperature(minimum_temperature_k)
+                .ok_or(E::Invalid("equilibrium lower temperature lacks source support"))?
+                .0;
+            let upper = model
+                .region_for_temperature(maximum_temperature_k)
+                .ok_or(E::Invalid("equilibrium upper temperature lacks source support"))?
+                .0;
+            if lower != upper && model.caloric_reference.is_none() {
+                return Err(E::Invalid(
+                    "cross-region equilibrium path requires explicit caloric continuity",
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn publish(

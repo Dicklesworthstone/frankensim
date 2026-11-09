@@ -460,6 +460,8 @@ impl IdealGasEquilibriumV1 {
     /// Core fixed-pressure solve for an explicit total-enthalpy target [J].
     /// Distinct inlet temperatures or explicit heat/work contributions enter
     /// this one target, under the owner's common formation reference.
+    /// Every eligible source must cover the complete temperature bracket;
+    /// crossing NASA-9 charts requires its explicit caloric-continuity policy.
     pub fn equilibrate_hp_enthalpy(
         &self,
         pressure: Pressure,

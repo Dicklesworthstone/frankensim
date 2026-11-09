@@ -209,19 +209,11 @@ impl Workspace {
         minimum_temperature_k: f64,
         maximum_temperature_k: f64,
     ) -> Result<(), EquilibriumExpansionErrorV1> {
-        for &i in &self.active {
-            let model = &owner.models[i];
-            let lower = model.region_for_temperature(minimum_temperature_k)
-                .ok_or(EquilibriumExpansionErrorV1::Invalid("equilibrium lower temperature lacks source support"))?.0;
-            let upper = model.region_for_temperature(maximum_temperature_k)
-                .ok_or(EquilibriumExpansionErrorV1::Invalid("equilibrium upper temperature lacks source support"))?.0;
-            if lower != upper && model.caloric_reference.is_none() {
-                return Err(EquilibriumExpansionErrorV1::Invalid(
-                    "cross-region equilibrium path requires explicit caloric continuity",
-                ));
-            }
-        }
-        Ok(())
+        self.source_temperature_range(owner, minimum_temperature_k, maximum_temperature_k)
+            .map_err(|error| match error {
+                E::Invalid(reason) => EquilibriumExpansionErrorV1::Invalid(reason),
+                other => other.into(),
+            })
     }
 
     pub(super) fn entropy(&self, owner: &IdealGasEquilibriumV1, temperature: Temperature,
