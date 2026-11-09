@@ -25,6 +25,9 @@ use std::sync::Arc;
 #[path = "frame_laminate_thermal/strength.rs"]
 mod strength;
 
+#[path = "frame_laminate_thermal/thermoelastic.rs"]
+mod thermoelastic;
+
 #[derive(Clone, Copy)]
 struct Ply {
     h: f64,

@@ -20,12 +20,17 @@ use fs_exec::Cx;
 use fs_material::laminate::strength::PreparedLaminateStrength;
 use fs_material::laminate::thermal::LayerThermalStress;
 use fs_material::laminate::thermal::beam::PreparedLaminateBeam;
+use fs_material::laminate::thermal::beam::thermoelastic::ResolvedLaminateBeamThermoelastic;
 use fs_material::laminate::thermal::source::{LaminateThermalSource, ResolvedLaminateThermal};
+use fs_material::laminate::thermal::thermoelastic::AffineLaminaThermoelastic;
 use std::sync::Arc;
 
 /// Source-pinned maximum-stress indications at accepted native stations.
 pub mod strength;
 pub use strength::FrameLaminateStrengthAssessment;
+
+/// Original-source reversible storage and instantaneous thermal feedback.
+pub mod thermoelastic;
 
 fn invalid(what: &str) -> SolidError {
     SolidError::MaterialRefused { what: what.into() }
@@ -51,6 +56,7 @@ pub(super) struct FrameLaminateBinding {
     // Original per-station selections. Refresh evaluates these exact claims,
     // even when another claim becomes usable at the new temperature.
     strength: Option<Vec<Arc<PreparedLaminateStrength>>>,
+    thermoelastic: Option<Arc<Vec<AffineLaminaThermoelastic>>>,
 }
 
 /// Immutable current station with original material cards and reference paths.
@@ -60,6 +66,7 @@ pub struct FrameLaminateSection {
     resolved: Arc<ResolvedLaminateThermal>,
     prepared: PreparedLaminateBeam,
     strength: Option<Arc<PreparedLaminateStrength>>,
+    thermoelastic: Option<Arc<ResolvedLaminateBeamThermoelastic>>,
 }
 
 impl FrameLaminateSection {
@@ -80,6 +87,12 @@ impl FrameLaminateSection {
     #[must_use]
     pub fn strength(&self) -> Option<&PreparedLaminateStrength> {
         self.strength.as_deref()
+    }
+
+    /// Reversible potential attached to this exact current mechanical snapshot.
+    #[must_use]
+    pub fn thermoelastic(&self) -> Option<&ResolvedLaminateBeamThermoelastic> {
+        self.thermoelastic.as_deref()
     }
 
     /// Bound on total, free and elastic in-plane strain tensor norms.
@@ -189,11 +202,23 @@ fn prepare_stations(
             || cx.checkpoint().is_err(),
         )
         .map_err(|error| source_error(error, cx))?;
+        let thermoelastic = binding
+            .thermoelastic
+            .as_ref()
+            .map(|laws| {
+                ResolvedLaminateBeamThermoelastic::try_new(laws, &resolved, &prepared, || {
+                    cx.checkpoint().is_err()
+                })
+                .map(Arc::new)
+                .map_err(|error| source_error(error, cx))
+            })
+            .transpose()?;
         let section = FrameLaminateSection {
             binding: Arc::clone(binding),
             resolved: Arc::new(resolved),
             prepared,
             strength,
+            thermoelastic,
         };
         // Admit complete original thermal strain, including opposing strains
         // that would disappear in an averaged section resultant.
@@ -251,6 +276,7 @@ impl Frame2d {
             axis_offset_m,
             linear_strain_limit,
             strength: None,
+            thermoelastic: None,
         });
         let sections = prepare_stations(&binding, temperatures_k, cx)?;
         let SectionModel::LaminateThermal(first) = &sections[0] else {
@@ -296,6 +322,8 @@ impl Frame2d {
     /// owns supported equilibrium or frozen-temperature time advancement.
     /// Attached strength claims refresh at the same temperatures and remain
     /// pinned; any unavailable strength refuses the complete thermal update.
+    /// Attached reversible potentials retain their original smooth intervals
+    /// and share that same snapshot; an unsupported interval also refuses.
     pub fn with_laminate_temperatures(
         &self,
         element: usize,
@@ -346,6 +374,11 @@ impl Frame2d {
             d: trial.d,
             alpha: trial.alpha,
         };
+        if binding.thermoelastic.is_some() {
+            // Admit the potential at the newly compatible native strains as
+            // part of the same transaction, before returning the hot frame.
+            candidate.laminate_thermoelastic_energy(element, cx)?;
+        }
         checkpoint(cx)?;
         Ok(candidate)
     }
