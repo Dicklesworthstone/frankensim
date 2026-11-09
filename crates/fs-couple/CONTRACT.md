@@ -9723,3 +9723,14 @@ permutation invariance, one clock, inactive nodes, invalid regional mappings,
 source refusal and retry. They are added but unexecuted under the existing
 pinned dependency/resource build block; formatter checks do not establish a
 native compile or runtime result.
+
+
+## Inertial phase-changing water chamber
+
+`cavitation::water_cell::piston::WaterPiston` couples the original finite IF97 water inventory to a constant-area inertial wall. Total liquid-plus-vapor volume is the sole position coordinate; original water mass and conserved internal energy remain in `EquilibriumWaterCell`. Each bounded mechanical trial calls its existing volume/heat proposal. The exact same trapezoidal endpoint pressure supplies water pressure work and the shared native piston momentum kernel, with midpoint wall kinematics. The existing gas piston delegates to this extracted mechanical kernel without changing its arithmetic or source law.
+
+Held exterior absolute pressure, additional mechanical force and integrated water heat are explicit ports. Accepted steps expose vapor mass/volume changes, pressure/force work, wall kinetic energy, kinematic/impulse defects, and independently admitted conserved-total and original-source energy residuals. The ideal fixed support supplies reaction impulse with zero motion/work and can only attach to a wall already at rest. Proposals publish water, wall velocity, phase inventory and physical clock together after all checks and final cancellation; dropping a proposal preserves all accepted history.
+
+This is a uniform, sealed, rapidly equilibrating chamber, not a resolved spherical bubble or water-hammer model. Nucleation delay, noncondensable gas, phase-front geometry, wall impacts and resolved thermal gradients remain outside its scope. Numerical interval, source bracket, temperature and volume bounds remain explicit. Conserved energy alone does not certify timing: focused tests additionally compare oscillation phase with the original homogeneous-equilibrium acoustic tangent and demonstrate convergence under interval refinement.
+
+Fifteen focused original-source tests passed for the new mechanical and retained cell/volume paths. `cavitating_water_piston` executes a 1 g inventory under an 80 kPa then 140 kPa load, showing cavitation and subsequent complete condensation without prescribing its volume. The example exposes independent cumulative energy and accepts an integer time-refinement factor. The broader gas-piston graph was source-reviewed for the shared-kernel extraction; it was not executed in the focused dependency build.

@@ -5,14 +5,7 @@
 
 use super::{GasPiston, PistonError, PistonGas, PistonGasState, PistonInput, PistonSolve, Trial, invalid, poll};
 
-/// Mechanical boundary data retained through gas reaction, flow and heat steps.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PistonSupport {
-    /// The original finite-mass translational momentum equation.
-    Free,
-    /// An ideal support holds the accepted wall position exactly.
-    Fixed,
-}
+pub use super::mechanics::PistonSupport;
 
 impl<G: PistonGas> GasPiston<G> {
     /// Attach an ideal fixed support to a wall already at rest.

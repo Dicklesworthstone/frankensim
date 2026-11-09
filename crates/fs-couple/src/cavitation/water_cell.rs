@@ -49,6 +49,10 @@ pub mod thermal;
 #[path = "water_cell/volume.rs"]
 pub mod volume;
 
+/// Reciprocal inertial-wall dynamics on this same total water inventory.
+#[path = "water_cell/piston.rs"]
+pub mod piston;
+
 /// Source-inversion work, gross transport and absolute physical budgets.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WaterCellControls {

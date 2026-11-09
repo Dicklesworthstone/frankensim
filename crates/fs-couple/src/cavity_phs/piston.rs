@@ -12,6 +12,8 @@ mod impulse;
 pub mod momentum;
 mod support;
 pub use support::PistonSupport;
+pub(crate) mod mechanics;
+use mechanics::MechanicalTrial;
 mod constitutive;
 pub use constitutive::{PistonGas, PistonGasState};
 /// Conservative nozzle exchange with a finite reservoir and the same wall step.
@@ -174,14 +176,6 @@ struct Trial<G: PistonGas = ClosedGasParcel> {
     support_impulse: f64,
 }
 
-// Shared native kinematics and impulse account. The gas constitutive owner
-// chooses the pressure sample; neither chemistry nor heat owns a second wall.
-struct MechanicalTrial {
-    displacement: f64,
-    velocity: f64,
-    residual: f64,
-    support_impulse: f64,
-}
 fn positive(x: f64) -> bool { x.is_finite() && x > 0.0 }
 fn invalid(s: &'static str) -> PistonError { PistonError::Invalid(s) }
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), PistonError> {
@@ -268,22 +262,9 @@ impl<G: PistonGas> GasPiston<G> {
     fn mechanical_trial(&self, volume: f64, pressure: f64, input: PistonInput)
         -> Result<MechanicalTrial, PistonError>
     {
-        let displacement = (volume-self.gas.volume_m3())/self.area_m2;
-        let velocity = 2.0*(displacement/input.duration_s)-self.velocity_m_s;
-        let force = self.area_m2*(pressure-input.exterior_pressure_pa)
-            + input.external_force_n;
-        let support_impulse = if self.support == PistonSupport::Fixed {
-            if self.velocity_m_s != 0.0 || volume != self.gas.volume_m3() {
-                return Err(invalid("fixed support requires its original volume and zero velocity"));
-            }
-            -input.duration_s*force
-        } else { 0.0 };
-        let residual = self.mass_kg*(velocity-self.velocity_m_s)-input.duration_s*force-support_impulse;
-        if !positive(pressure) || !displacement.is_finite() || !velocity.is_finite() || !force.is_finite()
-            || !support_impulse.is_finite() || !residual.is_finite() || !positive(volume/self.area_m2)
-            || !(0.5*self.mass_kg*velocity*velocity).is_finite()
-        { return Err(invalid("piston candidate position, velocity or impulse is unrepresentable")); }
-        Ok(MechanicalTrial { displacement, velocity, residual, support_impulse })
+        mechanics::trial(self.mass_kg, self.area_m2, self.gas.volume_m3(),
+            self.velocity_m_s, self.support, volume, pressure, input.duration_s,
+            input.exterior_pressure_pa, input.external_force_n).map_err(invalid)
     }
 
     fn finish(

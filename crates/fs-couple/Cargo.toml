@@ -145,6 +145,10 @@ required-features = ["caloric-cavitation"]
 name = "cavitating_reservoir"
 required-features = ["cavitation"]
 
+[[example]]
+name = "cavitating_water_piston"
+required-features = ["cavitation"]
+
 [[test]]
 name = "cavitation"
 required-features = ["cavitation"]
