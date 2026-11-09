@@ -7,6 +7,10 @@ use fs_math::{c64::C64, dd::Dd};
 
 mod window;
 pub use window::{TensorPronyHarmonicWindow, TensorPronyHarmonicWindowPoint};
+mod spectrum;
+pub use spectrum::{
+    MAX_HARMONIC_MATERIAL_LINES, TensorPronyHarmonicSpectrum, TensorPronySpectrumWindow,
+};
 
 fn invalid() -> ViscoError {
     ViscoError::Parameters {

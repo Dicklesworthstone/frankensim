@@ -22689,3 +22689,29 @@ reference shifts, inactive walls, shared inventory, overshoot and cancellation.
 Native Cargo execution did not reach these modules: the dependency build ran
 out of workspace space and the executor disconnected. The recovered source and
 tests have been reviewed, but final Rustfmt and native execution remain pending.
+
+## Coherent multitone tensor-Prony material energy
+
+`TensorProny::prepare_harmonic_spectrum` retains up to 64 authored positive
+angular frequencies, their original immutable tensor law and original material
+band. `TensorPronySpectrumWindow` observes the settled real strain field over an
+unweighted physical interval using the shared `fs_fft::harmonic_window` pair
+moments. The complete Kelvin and Maxwell heat includes every carrier and beat
+cross term. Original spring factors determine endpoint storage and directly
+integrated storage change; original constitutive tensors independently determine
+stress work. Neither a diagonal cycle average nor a work-balance residual is
+substituted for physical heat. Binary material, relaxation and strain scales
+remain factored until physical results; equal-frequency lines combine with
+retained compensation before any product or source-domain check.
+
+The sum of the grouped strain ellipses' peak norms bounds the complete waveform
+for source admission, including outside the requested window. It is a
+conservative all-time bound and may refuse an admissible waveform; it is not a
+certified supremum. Frequency preparation and cached temporal pairs are bounded;
+point observations allocate no heap and the controlled evaluator propagates the
+caller's cancellation/error channel between bounded material groups. No material
+history is mutated. DC/prestrain, startup transients, evolving temperature,
+spatial error or empirical source validation are not inferred by this observer.
+The physical regression definitions compare independent real Maxwell ODE fields
+and quadrature, beat heat, coherent cancellation, one-tone parity, source-clock
+translations, original domain refusal and cancellation/reuse.

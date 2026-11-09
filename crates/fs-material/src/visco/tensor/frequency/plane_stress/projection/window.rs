@@ -4,6 +4,9 @@ use super::{Sum, binary_scale, split};
 use fs_fft::harmonic_window::{HarmonicWindow, WindowError};
 use fs_math::{c64::C64, dd::Dd, det};
 
+mod spectrum;
+pub(crate) use spectrum::{HarmonicEnergySpectrum, MAX_SPECTRUM_LINES, StrainParts};
+
 /// Shared analytic time weights, reused for all material channels and points.
 /// Fields retain the original source clock and the separately authored duration.
 pub(crate) struct HarmonicEnergyWindow {

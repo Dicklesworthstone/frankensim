@@ -115,6 +115,14 @@ impl Sum {
     pub(crate) fn value(self) -> f64 {
         binary_scale(self.fraction.to_f64(), self.exponent)
     }
+
+    /// Retain coherent equal-frequency cancellation before later contractions.
+    pub(crate) fn retained_value(self) -> Dd {
+        Dd::from_pair(
+            binary_scale(self.fraction.hi, self.exponent),
+            binary_scale(self.fraction.lo, self.exponent),
+        )
+    }
 }
 
 pub(crate) fn apply<const N: usize, const M: usize>(

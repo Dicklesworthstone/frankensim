@@ -58,10 +58,10 @@ pub mod temperature;
 pub mod tensor;
 pub use modified_zener::ModifiedFractionalZener;
 pub use tensor::{
-    Mandel6, NormalStressHarmonic, PlaneStressHarmonic, PronyBranch, TensorProny,
-    TensorPronyFrequencyDerivative,
-    TensorPronyHarmonic, TensorPronyHarmonicBranch, TensorPronyHarmonicPoint, TensorPronyState,
-    TensorPronyHarmonicWindow, TensorPronyHarmonicWindowPoint,
+    MAX_HARMONIC_MATERIAL_LINES, Mandel6, NormalStressHarmonic, PlaneStressHarmonic, PronyBranch,
+    TensorProny, TensorPronyFrequencyDerivative, TensorPronyHarmonic, TensorPronyHarmonicBranch,
+    TensorPronyHarmonicPoint, TensorPronyHarmonicSpectrum, TensorPronyHarmonicWindow,
+    TensorPronyHarmonicWindowPoint, TensorPronySpectrumWindow, TensorPronyState,
 };
 
 /// Typed refusals of the viscoelastic layer. Display strings carry stable
