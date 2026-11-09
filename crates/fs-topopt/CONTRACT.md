@@ -546,6 +546,20 @@ feasibility uses the actual cap, independently of AL stopping tolerances, and
 `recheck_best` recomputes the complete envelope without advancing the optimizer.
 No monotonic feasibility restoration is assumed for design-dependent gravity.
 
+`AffineLoadSpaceDesignCheckpoint3` and the matching `restore` variants retain
+the original AL multiplier, penalty, spectral schedule, gradient experiment,
+accepted history and physically feasible incumbent. Restoration binds exact
+nodal dead/basis loads, the prepared native body-map fingerprint, inventory,
+filter, regions and numerical/constraint policies, then independently re-solves
+the accepted endpoint and any distinct incumbent, including full derivatives
+and every response/strength requirement. No previous search or finite-difference
+experiment is replayed. The mutable checkpoint reserves those one or two
+evaluations before endpoint physics; failures keep reservations charged while
+the shared control retains actual work. Callers must persist both counters,
+original cumulative allowances and source/executable/geometry/callback identity.
+Incoming scales survive every restoration failure. Endpoint checks do not prove
+the global identity of arbitrary pure callbacks or re-verify historical solves.
+
 `affine_load_space::response` applies the existing signed displacement and
 embedded support-force/moment limit types to the same continuous affine ball.
 For an original scalar response `y(a)=y0+v^T a`, its upper/lower signed residual

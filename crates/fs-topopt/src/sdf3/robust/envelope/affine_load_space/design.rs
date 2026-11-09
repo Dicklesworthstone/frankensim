@@ -14,6 +14,10 @@ use fs_ascent::projected_al::{
 };
 use std::{cell::RefCell, ops::ControlFlow};
 
+#[path = "design_resume.rs"]
+mod resume;
+pub use resume::AffineLoadSpaceDesignCheckpoint3;
+
 /// The same physical load set serves either constrained design formulation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AffineLoadSpaceDesignGoal3 {
@@ -408,6 +412,29 @@ fn admit<O: Sdf3Elasticity>(
     Ok(())
 }
 
+fn admit_constraints<O: Sdf3Elasticity>(
+    study: &CutDensityStudy3<O>,
+    options: AffineLoadSpaceDesignOptions3,
+    constraints: AffineLoadSpaceConstraints3<'_>,
+) -> Result<(), ProjectedAlError<EvaluationStop>> {
+    constraints.admit(study).map_err(ProjectedAlError::Evaluation)?;
+    if let Some(limit) = constraints.stress {
+        let params = study.params();
+        let floor = crate::filter::heaviside(
+            options.density_floor, params.beta,
+            params.eta + options.robustness.threshold_offset,
+        );
+        if !crate::sdf3::design::monotone_stress_branch(
+            floor, params, limit.options.relaxation_power,
+        ) {
+            return Err(ProjectedAlError::Invalid(
+                "eroded density floor permits ersatz stress foldback",
+            ));
+        }
+    }
+    Ok(())
+}
+
 // Shared with reference-law fitting so raw bounds, numerical controls, native
 // inventory and protected-solid constraints are admitted before callbacks.
 pub(super) fn admit_model<O: Sdf3Elasticity>(
@@ -593,6 +620,8 @@ pub struct AffineLoadSpaceDesign3<'a, 'callback, O: Sdf3Elasticity> {
     accepted: AffineLoadSpaceDesignPoint3,
     best: Option<AffineLoadSpaceDesignPoint3>,
     history: Vec<AffineLoadSpaceDesignIteration3>,
+    binding: fs_blake3::ContentHash,
+    restoration_evaluations: usize,
 }
 impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> {
     #[allow(clippy::too_many_arguments)]
@@ -665,26 +694,9 @@ impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> 
         control: &'a mut SolveControl<'callback>,
     ) -> Result<Self, ProjectedAlError<EvaluationStop>> {
         admit(study, dead_offset, basis, rho, &policy, goal, options)?;
-        constraints
-            .admit(study)
-            .map_err(ProjectedAlError::Evaluation)?;
-        if let Some(limit) = constraints.stress {
-            let params = study.params();
-            let floor = crate::filter::heaviside(
-                options.density_floor,
-                params.beta,
-                params.eta + options.robustness.threshold_offset,
-            );
-            if !crate::sdf3::design::monotone_stress_branch(
-                floor,
-                params,
-                limit.options.relaxation_power,
-            ) {
-                return Err(ProjectedAlError::Invalid(
-                    "eroded density floor permits ersatz stress foldback",
-                ));
-            }
-        }
+        admit_constraints(study, options, constraints)?;
+        let binding = resume::binding(study, dead_offset, basis, &policy, goal,
+            options, constraints, control).map_err(ProjectedAlError::Evaluation)?;
         let check = gradient_check(
             study,
             rho,
@@ -750,6 +762,8 @@ impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> 
             accepted,
             best,
             history: vec![first],
+            binding,
+            restoration_evaluations: 0,
         })
     }
     #[must_use]
