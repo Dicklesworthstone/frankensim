@@ -410,3 +410,55 @@ fn curved_motion_or_cancelled_phase_leaves_the_native_pair_unchanged() {
     )
     .unwrap();
 }
+
+#[test]
+fn prepared_coefficient_trials_reuse_original_pair_and_refuse_changed_patch_geometry() {
+    let f = axial(1.0, 0.0);
+    let original = law();
+    let gate = CancelGate::new();
+    let prepared = PreparedRigidHertzTrajectory::new(
+        &f.bodies,
+        &f.properties,
+        f.contact(&original),
+        0.02,
+        controls(),
+        &gate,
+    )
+    .unwrap();
+    for coefficient in [0.2, 0.6, 0.2] {
+        let candidate_law = HertzWrenchContact::new(HertzWrenchParameters {
+            kinetic_mu: coefficient,
+            ..original.parameters()
+        })
+        .unwrap();
+        let candidate = prepared.advance(&candidate_law, &gate).unwrap();
+        let direct = prepare_rigid_hertz_trajectory(
+            &f.bodies,
+            &f.properties,
+            f.contact(&candidate_law),
+            0.02,
+            controls(),
+            &gate,
+        )
+        .unwrap();
+        assert_eq!(candidate, direct);
+    }
+    for parameters in [
+        HertzWrenchParameters {
+            normal_force_n: 11.0,
+            ..original.parameters()
+        },
+        HertzWrenchParameters {
+            contact_radius_m: RADIUS * 1.1,
+            ..original.parameters()
+        },
+    ] {
+        assert!(
+            prepared
+                .advance(&HertzWrenchContact::new(parameters).unwrap(), &gate)
+                .is_err()
+        );
+    }
+    assert_eq!(prepared.contact_points_world(), [Vec3::ZERO; 2]);
+    assert_eq!(f.bodies, axial(1.0, 0.0).bodies);
+}

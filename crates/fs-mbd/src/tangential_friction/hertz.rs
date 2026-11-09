@@ -11,6 +11,8 @@
 pub mod multiple;
 /// Exact invariant-direction slip/spin trajectories through finite arrest.
 pub mod trajectory;
+/// Bounded curved slip/spin trajectories with original finite-body recoil.
+pub mod transient;
 
 use super::{
     ResultantImpulse, RigidContactBinding, RigidFrictionError, add_components, components,

@@ -1,5 +1,34 @@
 # CONTRACT: fs-mbd
 
+## Curved native Hertz motion and reusable coefficient trials
+
+`tangential_friction::hertz::transient` applies the original pressure-resolved
+curved slip/spin trajectory to two finite native bodies. Actual masses, full
+inertia tensors, contact arms and tangent frame supply the complete mobility.
+The original physical-power quadrature and bounded extinction tail provide
+heat; the existing compensated pair-impulse owner applies the integrated point
+and free-couple impulses once. Actual native endpoint rates, body/pair momentum,
+kinetic change and impulse work independently check the candidate before either
+body publishes. An average wrench is not used as an endpoint friction law.
+
+A conservative bound on the original normal-response row must preserve held
+closed normal motion throughout the entire path, including the tail. Normal
+evolution, external drive, changing geometry and pose integration remain outside
+this frozen-contact branch. The numerical prefix estimates and explicit tail
+time/travel bounds remain visible in the original constitutive report.
+
+`PreparedRigidHertzTrajectory` and `PreparedRigidHertzTransient` capture the
+original pair and full response once. Every coefficient trial starts from the
+same accepted momenta and must retain the original normal load and radius.
+Thermal/source identity stays with the enclosing source owner. Their contact
+point getters expose the exact geometry used by native mechanics.
+
+The native `hertz_transient` tests compare independent planar response and RK4
+work/travel, analytical inverse-mobility stopping heat/impulse, stationary dwell,
+tangent/world rotations, coefficient retries, unaffected bodies and atomic
+budget/cancellation/normal-path refusal. The exact trajectory tests also check
+prepared trials against fresh preparation and reject changed patch geometry.
+
 ## Finite-duration Hertz stopping trajectories
 
 `tangential_friction::hertz::trajectory` stages or applies the original Hertz
