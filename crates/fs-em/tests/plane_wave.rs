@@ -41,6 +41,8 @@ mod coherence;
 mod exposure;
 #[path = "plane_wave/illumination.rs"]
 mod illumination;
+#[path = "plane_wave/incoherent.rs"]
+mod incoherent;
 #[path = "plane_wave/interior.rs"]
 mod interior;
 

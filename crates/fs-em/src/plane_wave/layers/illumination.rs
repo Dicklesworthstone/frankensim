@@ -19,6 +19,9 @@ use fs_math::dd::Dd;
 mod interior;
 pub use interior::{LayerPointField, LayerPointStatistics, PreparedLayerPoint};
 
+mod incoherent;
+pub use incoherent::IncoherentLayerCascade;
+
 /// A partial-coherence request is admitted before any factor propagation.
 #[derive(Clone, Copy, Debug)]
 pub struct IlluminationBudget {

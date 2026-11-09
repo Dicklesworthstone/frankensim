@@ -19,8 +19,9 @@
 //! optical calculations", sections 4.1, 4.3-4.5, <https://arxiv.org/abs/1603.02720>.
 //! That reference uses the opposite phasor and rotating optical p basis; this
 //! owner retains the parent's fixed tangential-E axis and explicit sourced mu.
-//! Finite coherence length, roughness, anisotropy and a mesh Maxwell solve are
-//! outside this exact homogeneous planar model.
+//! [`IncoherentLayerCascade`] joins these coherent blocks across explicitly
+//! incoherent lossless connections. A physical coherence length, roughness,
+//! anisotropy and a mesh Maxwell solve remain outside this planar model.
 
 use super::{
     DielectricResponse, Polarization, ReflectionError, WaveMedium, finite, interface_response,
@@ -33,8 +34,8 @@ use fs_math::{c64::C64, dd::Dd, det};
 
 mod illumination;
 pub use illumination::{
-    CoherentLayerIllumination, IlluminationBudget, LayerIlluminationPower, LayerPointField,
-    LayerPointStatistics, PreparedLayerDepthInterval, PreparedLayerIllumination,
+    CoherentLayerIllumination, IlluminationBudget, IncoherentLayerCascade, LayerIlluminationPower,
+    LayerPointField, LayerPointStatistics, PreparedLayerDepthInterval, PreparedLayerIllumination,
     PreparedLayerPoint,
 };
 
@@ -322,61 +323,12 @@ impl<'a> PlanarDielectricLayers<'a> {
     // frequency. Equal fitted constants do not establish source identity;
     // retain the original constitutive models and authored layer geometry.
     pub(super) fn same_sources_and_geometry(&self, other: &Self) -> bool {
-        let same_response = |a, b| match (a, b) {
-            (DielectricResponse::Lossless(a), DielectricResponse::Lossless(b)) => {
-                core::ptr::eq(a, b)
-            }
-            (DielectricResponse::Debye(a), DielectricResponse::Debye(b)) => core::ptr::eq(a, b),
-            (DielectricResponse::Lorentz(a), DielectricResponse::Lorentz(b)) => core::ptr::eq(a, b),
-            (DielectricResponse::Ohmic(a), DielectricResponse::Ohmic(b)) => core::ptr::eq(a, b),
-            (
-                DielectricResponse::DebyeWithOhmic {
-                    dielectric: a_dielectric,
-                    conductor: a_conductor,
-                },
-                DielectricResponse::DebyeWithOhmic {
-                    dielectric: b_dielectric,
-                    conductor: b_conductor,
-                },
-            ) => {
-                core::ptr::eq(a_dielectric, b_dielectric) && core::ptr::eq(a_conductor, b_conductor)
-            }
-            (
-                DielectricResponse::LorentzWithOhmic {
-                    dielectric: a_dielectric,
-                    conductor: a_conductor,
-                },
-                DielectricResponse::LorentzWithOhmic {
-                    dielectric: b_dielectric,
-                    conductor: b_conductor,
-                },
-            ) => {
-                core::ptr::eq(a_dielectric, b_dielectric) && core::ptr::eq(a_conductor, b_conductor)
-            }
-            (DielectricResponse::OpticalConductor(a), DielectricResponse::OpticalConductor(b)) => {
-                core::ptr::eq(a.source(), b.source())
-            }
-            (DielectricResponse::OpticalMaterial(a), DielectricResponse::OpticalMaterial(b)) => {
-                core::ptr::eq(a.source(), b.source())
-            }
-            (DielectricResponse::SpectralOptical(a), DielectricResponse::SpectralOptical(b)) => {
-                a.same_source(b)
-            }
-            (DielectricResponse::WaterOptical(a), DielectricResponse::WaterOptical(b)) => {
-                a.same_source(b)
-            }
-            (
-                DielectricResponse::MolecularGasOptical(a),
-                DielectricResponse::MolecularGasOptical(b),
-            ) => a.same_source(b),
-            _ => false,
-        };
-        same_response(self.incident_response, other.incident_response)
-            && same_response(self.exit, other.exit)
+        same_response_source(self.incident_response, other.incident_response)
+            && same_response_source(self.exit, other.exit)
             && self.layers.len() == other.layers.len()
             && self.layers.iter().zip(&other.layers).all(|(a, b)| {
                 a.source.thickness_m == b.source.thickness_m
-                    && same_response(a.source.response, b.source.response)
+                    && same_response_source(a.source.response, b.source.response)
             })
     }
 
@@ -477,6 +429,49 @@ impl<'a> PlanarDielectricLayers<'a> {
             exit_normal_wavenumber_rad_m: exit.transmitted_normal_wavenumber_rad_m,
             exit_permittivity_f_m: self.exit_wave.epsilon_f_m,
         })
+    }
+}
+
+fn same_response_source(a: DielectricResponse<'_>, b: DielectricResponse<'_>) -> bool {
+    match (a, b) {
+        (DielectricResponse::Lossless(a), DielectricResponse::Lossless(b)) => core::ptr::eq(a, b),
+        (DielectricResponse::Debye(a), DielectricResponse::Debye(b)) => core::ptr::eq(a, b),
+        (DielectricResponse::Lorentz(a), DielectricResponse::Lorentz(b)) => core::ptr::eq(a, b),
+        (DielectricResponse::Ohmic(a), DielectricResponse::Ohmic(b)) => core::ptr::eq(a, b),
+        (
+            DielectricResponse::DebyeWithOhmic {
+                dielectric: a_dielectric,
+                conductor: a_conductor,
+            },
+            DielectricResponse::DebyeWithOhmic {
+                dielectric: b_dielectric,
+                conductor: b_conductor,
+            },
+        ) => core::ptr::eq(a_dielectric, b_dielectric) && core::ptr::eq(a_conductor, b_conductor),
+        (
+            DielectricResponse::LorentzWithOhmic {
+                dielectric: a_dielectric,
+                conductor: a_conductor,
+            },
+            DielectricResponse::LorentzWithOhmic {
+                dielectric: b_dielectric,
+                conductor: b_conductor,
+            },
+        ) => core::ptr::eq(a_dielectric, b_dielectric) && core::ptr::eq(a_conductor, b_conductor),
+        (DielectricResponse::OpticalConductor(a), DielectricResponse::OpticalConductor(b)) => {
+            core::ptr::eq(a.source(), b.source())
+        }
+        (DielectricResponse::OpticalMaterial(a), DielectricResponse::OpticalMaterial(b)) => {
+            core::ptr::eq(a.source(), b.source())
+        }
+        (DielectricResponse::SpectralOptical(a), DielectricResponse::SpectralOptical(b)) => {
+            a.same_source(b)
+        }
+        (DielectricResponse::WaterOptical(a), DielectricResponse::WaterOptical(b)) => a.same_source(b),
+        (DielectricResponse::MolecularGasOptical(a), DielectricResponse::MolecularGasOptical(b)) => {
+            a.same_source(b)
+        }
+        _ => false,
     }
 }
 

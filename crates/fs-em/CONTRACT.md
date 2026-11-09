@@ -3882,6 +3882,43 @@ The combined-law case also checks reflection phase and integrated Debye plus
 Joule heat across frequency, using independent source equations and rejecting
 a conductivity attached from another material snapshot.
 
+### Incoherent propagation between native coherent coatings
+
+`plane_wave::layers::IncoherentLayerCascade` composes original
+`PreparedLayerIllumination` blocks across explicitly incoherent, lossless
+connections. Each block keeps its coherent thin-film interference and original
+material/geometry owners. Adjacent blocks must share the exact connecting
+source law, frequency, polarization and conserved tangential wavevector.
+The native two-port admission requires positive propagating lossless exterior
+modes. Evanescent and critical tunnelling belongs inside a coherent block;
+an absorbing connecting medium is not silently assigned additive power ports.
+
+Preparation caches the normal-power scattering matrix and left/right absorption
+fractions of every original film. Native positive dissipative modes supply
+film loss, including longitudinal TM contributions. Multiple reflected passes
+are summed through positive transmission-plus-absorption escape factors rather
+than `1 - R_left * R_right`, preserving weak transmission when both reflected
+fractions round to one. Native opaque limits can isolate an undriven cavity;
+no arbitrary trapped initial energy is inserted. Work is O(blocks + films),
+bounded to 65 blocks and 64 total films. Repeated independent-face illumination
+is allocation-free O(films), with physical incoming/outgoing W/m² and film heat
+in original block/layer order. It does not repeat a field solve, material
+lookup, phase sampling or trigonometry. Refused illumination leaves the heat
+output unchanged; any thermal consumer still owns its area/time conversion.
+
+Complete decorrelation between distinct reflected traversals is an authored
+model, not an inference from unknown phase, physical thickness or linewidth.
+The API does not supply a partial temporal-coherence model or complex outgoing
+fields. A single connection agrees with uniform coherent round-trip-phase
+averaging; several connections represent fully incoherent intensity transport,
+not arbitrary averaging of correlated static thicknesses. No roughness,
+magnetic loss, thermal evolution or measured-material validation is inferred.
+G1/G3 regressions in `tests/plane_wave/incoherent.rs` compare the analytic thick
+glass plate, lossy coherent coatings against the original phase-averaged fields
+and individual heat, lossless multi-interface transport resistance, weak-escape
+and opaque limits. G0 cases retain original source/frequency/direction domains,
+bounded preparation and transactional illumination refusal.
+
 ### Coherent vector beam diffraction through the same films
 
 `plane_wave::angular_spectrum::PlanarAngularSpectrum` accepts complex peak Ex/Ey
