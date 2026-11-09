@@ -2015,3 +2015,306 @@ fn matched_grazing_crystal_dispersion_keeps_the_original_ordinary_bulk_slope() {
         assert_eq!(propagated.log_amplitude_derivative_s, 0.0);
     }
 }
+#[test]
+fn oriented_frequency_jets_retain_vector_carriers_and_separate_modal_propagation() {
+    use crate::plane_wave::{
+        dispersion::IncidenceFrequencyConstraint,
+        uniaxial::{UniaxialMode, oriented::OrientedUniaxialInterface},
+    };
+    let outside = incident(1.1, MU);
+    let (ordinary, extraordinary) = axes([1.6; 2], [1.9; 2], [0.0; 2], Some(MU), [400.0, 800.0], 0);
+    let crystal = UniaxialOpticalResponse::try_new(&ordinary, &extraordinary, SPAN).unwrap();
+    let interface = OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&outside),
+        crystal,
+        [1.0, 2.0, 3.0],
+    )
+    .unwrap();
+    let omega = frequency(550.0);
+    let electric = [C64::new(0.7, 0.2), C64::new(0.3, -0.4)];
+    for p in [-0.4, 0.4] {
+        let carrier = interface
+            .response_at_tangential_index(omega, p, electric)
+            .unwrap();
+        for constraint in [
+            IncidenceFrequencyConstraint::FixedAngle,
+            IncidenceFrequencyConstraint::FixedTransverseWavenumber,
+        ] {
+            let jet = interface
+                .frequency_dispersion_at_tangential_index(omega, p, electric, constraint)
+                .unwrap();
+            assert!(core::ptr::eq(jet.source(), &interface));
+            assert!(core::ptr::eq(
+                jet.source().crystal_response().ordinary_source(),
+                &ordinary
+            ));
+            assert!(core::ptr::eq(
+                jet.source().crystal_response().extraordinary_source(),
+                &extraordinary
+            ));
+            assert_eq!(jet.omega_rad_s(), omega);
+            assert_eq!(jet.frequency_constraint(), constraint);
+            assert_eq!(*jet.boundary_response(), carrier);
+            let first = jet.transmitted_normal_wavenumber_derivatives_s_m();
+            let second = jet.transmitted_normal_wavenumber_second_derivatives_s2_m();
+            assert_ne!(first[0], first[1]);
+            for (index, mode) in [UniaxialMode::Ordinary, UniaxialMode::Extraordinary]
+                .into_iter()
+                .enumerate()
+            {
+                let distance = 3e-6;
+                let propagation = jet.transmitted_propagation(mode, distance).unwrap();
+                let phase = carrier.transmitted[index].normal_wavenumber_rad_m.re * distance;
+                complex_near(
+                    propagation.transfer,
+                    C64::new(fs_math::det::cos(phase), -fs_math::det::sin(phase)),
+                    4e-14,
+                );
+                near(propagation.group_delay_s, first[index].re * distance, 1e-30);
+                near(
+                    propagation.group_delay_dispersion_s2,
+                    second[index].re * distance,
+                    1e-44,
+                );
+                assert!(jet.transmitted_propagation(mode, -distance).is_err());
+                if constraint == IncidenceFrequencyConstraint::FixedAngle {
+                    complex_near(
+                        first[index],
+                        carrier.transmitted[index]
+                            .normal_wavenumber_rad_m
+                            .scale(1.0 / omega),
+                        4e-14 / C0,
+                    );
+                    assert_eq!(second[index], C64::ZERO);
+                } else {
+                    assert!(second[index].re < 0.0);
+                }
+            }
+        }
+    }
+    // The derivative owner retains the original two-sided spectral domain.
+    for wavelength in [400.0, 800.0] {
+        assert!(
+            interface
+                .response(frequency(wavelength), 0.8, electric)
+                .is_ok()
+        );
+        assert!(
+            interface
+                .frequency_dispersion(
+                    frequency(wavelength),
+                    0.8,
+                    electric,
+                    IncidenceFrequencyConstraint::FixedTransverseWavenumber,
+                )
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn oriented_frequency_jets_require_a_spectral_basis_at_equal_phase_indices() {
+    use crate::plane_wave::{
+        dispersion::IncidenceFrequencyConstraint, uniaxial::oriented::OrientedUniaxialInterface,
+    };
+    let outside = incident(1.1, MU);
+    let omega = frequency(600.0);
+    let electric = [C64::new(0.7, 0.2), C64::new(0.3, -0.4)];
+    // Bind an exactly equal carrier phase index from the original table,
+    // while retaining the ordinary table's distinct (here zero) bulk slope.
+    let (probe_o, probe_e) = axes([1.0, 2.0], [1.5; 2], [0.0; 2], Some(MU), [400.0, 800.0], 0);
+    let phase = UniaxialOpticalResponse::try_new(&probe_o, &probe_e, SPAN)
+        .unwrap()
+        .phase_indices(omega)
+        .unwrap()[0];
+    let (ordinary, extraordinary) = axes(
+        [1.0, 2.0],
+        [phase; 2],
+        [0.0; 2],
+        Some(MU),
+        [400.0, 800.0],
+        0,
+    );
+    let crystal = UniaxialOpticalResponse::try_new(&ordinary, &extraordinary, SPAN).unwrap();
+    let phases = crystal.phase_indices(omega).unwrap();
+    assert_eq!(phases[0], phases[1]);
+    let mixed = OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&outside),
+        crystal,
+        [1.0, 2.0, 3.0],
+    )
+    .unwrap();
+    let in_plane = OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&outside),
+        crystal,
+        [1.0, 0.0, 3.0],
+    )
+    .unwrap();
+    let principal = PrincipalPlaneUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&outside),
+        crystal,
+        [1.0, 3.0],
+    )
+    .unwrap();
+    for constraint in [
+        IncidenceFrequencyConstraint::FixedAngle,
+        IncidenceFrequencyConstraint::FixedTransverseWavenumber,
+    ] {
+        assert!(mixed.response(omega, 0.8, electric).is_ok());
+        assert!(
+            mixed
+                .frequency_dispersion(omega, 0.8, electric, constraint)
+                .is_err()
+        );
+        let jet = in_plane
+            .frequency_dispersion(omega, 0.8, electric, constraint)
+            .unwrap();
+        for (index, polarization) in [Polarization::Te, Polarization::Tm].into_iter().enumerate() {
+            let expected = principal
+                .frequency_dispersion(omega, 0.8, polarization, constraint)
+                .unwrap();
+            complex_near(
+                jet.transmitted_normal_wavenumber_derivatives_s_m()[index],
+                expected.transmitted_normal_wavenumber_derivative_s_m(),
+                5e-14 / C0,
+            );
+            complex_near(
+                jet.transmitted_normal_wavenumber_second_derivatives_s2_m()[index],
+                expected.transmitted_normal_wavenumber_second_derivative_s2_m(),
+                5e-14 / (C0 * omega),
+            );
+        }
+    }
+    // An identical original local law has an admitted isotropic spectral
+    // basis even when the authored optic axis has an out-of-plane component.
+    let (isotropic_o, isotropic_e) = axes(
+        [1.4, 1.6],
+        [1.4, 1.6],
+        [0.0; 2],
+        Some(MU),
+        [400.0, 800.0],
+        0,
+    );
+    let isotropic = OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&outside),
+        UniaxialOpticalResponse::try_new(&isotropic_o, &isotropic_e, SPAN).unwrap(),
+        [1.0, 2.0, 3.0],
+    )
+    .unwrap();
+    for constraint in [
+        IncidenceFrequencyConstraint::FixedAngle,
+        IncidenceFrequencyConstraint::FixedTransverseWavenumber,
+    ] {
+        let jet = isotropic
+            .frequency_dispersion(omega, 0.8, electric, constraint)
+            .unwrap();
+        let first = jet.transmitted_normal_wavenumber_derivatives_s_m();
+        let second = jet.transmitted_normal_wavenumber_second_derivatives_s2_m();
+        complex_near(first[0], first[1], 5e-14 / C0);
+        complex_near(second[0], second[1], 5e-14 / (C0 * omega));
+    }
+}
+#[test]
+fn prepared_oriented_frequency_jets_reuse_exact_signed_and_grazing_coordinates() {
+    use crate::plane_wave::{
+        dispersion::IncidenceFrequencyConstraint,
+        uniaxial::oriented::{OrientedCrystalFieldSide, OrientedUniaxialInterface},
+    };
+    let outside = incident(1.5, MU);
+    let omega = frequency(550.0);
+    let epsilon = DielectricResponse::Lossless(&outside)
+        .lossless_permittivity(omega)
+        .unwrap();
+    let ni = (C0 * fs_math::det::sqrt(MU)) * fs_math::det::sqrt(epsilon);
+    let (ordinary, extraordinary) = axes([ni; 2], [ni; 2], [0.0; 2], Some(MU), [400.0, 800.0], 0);
+    let crystal = UniaxialOpticalResponse::try_new(&ordinary, &extraordinary, SPAN).unwrap();
+    let interface = OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&outside),
+        crystal,
+        [1.0, 2.0, 3.0],
+    )
+    .unwrap();
+    for p in [-0.4, 0.4] {
+        let electric = [C64::new(0.7, 0.2), C64::new(0.3, -0.4)];
+        let prepared = interface
+            .prepare_field_at_tangential_index(omega, p, electric)
+            .unwrap();
+        for constraint in [
+            IncidenceFrequencyConstraint::FixedAngle,
+            IncidenceFrequencyConstraint::FixedTransverseWavenumber,
+        ] {
+            let direct = interface
+                .frequency_dispersion_at_tangential_index(omega, p, electric, constraint)
+                .unwrap();
+            let added = prepared.frequency_dispersion(constraint).unwrap();
+            assert!(core::ptr::eq(added.source(), &interface));
+            assert_eq!(*added.boundary_response(), *prepared.boundary_response());
+            assert_eq!(*added.boundary_response(), *direct.boundary_response());
+            assert_eq!(
+                added.transmitted_normal_wavenumber_derivatives_s_m(),
+                direct.transmitted_normal_wavenumber_derivatives_s_m(),
+            );
+            assert_eq!(
+                added.transmitted_normal_wavenumber_second_derivatives_s2_m(),
+                direct.transmitted_normal_wavenumber_second_derivatives_s2_m(),
+            );
+        }
+    }
+    for cosine in [1e-10, 1e-16, 1e-20] {
+        let electric = [C64::new(0.7 * cosine, 0.2 * cosine), C64::new(0.3, -0.4)];
+        let prepared = interface.prepare_field(omega, cosine, electric).unwrap();
+        let position = [0.0, 0.0, 0.13 / ((omega / C0) * ni * cosine)];
+        let field_before = prepared
+            .field(OrientedCrystalFieldSide::Transmitted, position)
+            .unwrap();
+        for constraint in [
+            IncidenceFrequencyConstraint::FixedAngle,
+            IncidenceFrequencyConstraint::FixedTransverseWavenumber,
+        ] {
+            let direct = interface
+                .frequency_dispersion(omega, cosine, electric, constraint)
+                .unwrap();
+            let added = prepared.frequency_dispersion(constraint).unwrap();
+            assert_eq!(*added.boundary_response(), *prepared.boundary_response());
+            assert_eq!(*added.boundary_response(), *direct.boundary_response());
+            let first = added.transmitted_normal_wavenumber_derivatives_s_m();
+            let second = added.transmitted_normal_wavenumber_second_derivatives_s2_m();
+            assert_eq!(
+                first,
+                direct.transmitted_normal_wavenumber_derivatives_s_m()
+            );
+            assert_eq!(
+                second,
+                direct.transmitted_normal_wavenumber_second_derivatives_s2_m()
+            );
+            for mode in 0..2 {
+                assert_eq!(
+                    added.boundary_response().transmitted[mode].wave_kind,
+                    UniaxialWaveKind::Propagating
+                );
+                let expected = match constraint {
+                    IncidenceFrequencyConstraint::FixedAngle => ni * cosine / C0,
+                    IncidenceFrequencyConstraint::FixedTransverseWavenumber => ni / (C0 * cosine),
+                };
+                near(first[mode].re, expected, 8e-14 * expected);
+                assert_eq!(first[mode].im, 0.0);
+                if constraint == IncidenceFrequencyConstraint::FixedAngle {
+                    assert_eq!(second[mode], C64::ZERO);
+                } else {
+                    let expected =
+                        -ni * (1.0 - cosine) * (1.0 + cosine) / ((C0 * omega) * cosine.powi(3));
+                    near(second[mode].re, expected, 1e-13 * expected.abs());
+                    assert_eq!(second[mode].im, 0.0);
+                }
+            }
+        }
+        // Adding spectral derivatives neither replaces the prepared carrier
+        // nor changes its native coherent field propagation.
+        assert_eq!(
+            prepared
+                .field(OrientedCrystalFieldSide::Transmitted, position)
+                .unwrap(),
+            field_before,
+        );
+    }
+}

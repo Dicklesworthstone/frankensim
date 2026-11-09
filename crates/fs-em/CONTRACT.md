@@ -6962,6 +6962,47 @@ workspace limits remain with their existing owners. Point queries perform no
 allocation or material/boundary reevaluation.
 
 
+### Arbitrary-axis normal-transfer frequency dispersion
+
+`OrientedUniaxialInterface::frequency_dispersion` and its signed
+tangential-index counterpart return `OrientedCrystalFrequencyDispersion`.
+It retains the original interface and unchanged vector boundary solution,
+with separate ordinary and extraordinary complex first/second normal
+wavenumber derivatives. Both explicit frequency constraints use the same
+source-bound material jets and analytic kernel as the principal-plane owner.
+Mode-selected `transmitted_propagation` supplies the existing signed
+`BulkPropagation` transfer, normal delay/GDD and evanescent attenuation
+derivatives. Modal delays are not combined into one delay for interfering fields.
+
+`PreparedOrientedCrystalField::frequency_dispersion` supplies the same
+derivatives without solving the boundary or its roots again. Both original
+prepared-field constructors retain their exact private incidence input;
+a grazing cosine is never reconstructed from a rounded transverse wavevector.
+The existing prepared field and monochromatic carrier remain unchanged.
+Exact local isotropy through both derivative orders reduces to the original
+scalar-root identity, preventing normalized-axis residuals from shifting a
+grazing cutoff. Unequal original spectral jets retain separate branches.
+
+Zero excitation does not remove a mathematically defined eigenmode derivative.
+Evanescent modes retain their complex outgoing decay branch. Either exactly
+critical branch refuses the complete two-mode derivative query. At equal
+principal phase indices with an out-of-plane axis, both first and second
+original principal jets must coincide: otherwise the native deterministic
+TE/TM basis is not a spectral eigenbasis. Principal-plane crossings and
+equal-local-law isotropic limits remain admitted.
+
+The two additional native arbitrary-axis tests bring the bounded numerical
+build to 66 passing tests, using the original `fs_math` and native vector
+carrier. They compare independent inverse-metric derivatives and native
+frequency perturbations, both frequency constraints, axis reversal, distinct
+principal spectral slopes/curvatures and matched grazing incidence.
+Original-source fixtures retain carrier/source identity, mode-specific
+propagation, prepared/direct parity, source-domain and spectral-crossing
+refusals. These source-bound fixtures passed parser/API review but were not
+executed in the full material dependency build. This remains local modal
+propagation; boundary-amplitude and finite slab/stack transfer derivatives
+require their own consumers.
+
 ### Retained vector polarization on the native planar Gauss solve
 
 The default-off `dielectric-hysteresis` feature exposes

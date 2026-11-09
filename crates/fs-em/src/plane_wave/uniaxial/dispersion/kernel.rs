@@ -83,6 +83,19 @@ pub(in crate::plane_wave::uniaxial) fn normal_derivatives(data: Input) -> Result
         }
     };
     let [ri, ro, re] = data.relative_permittivity_derivatives;
+    // The exactly isotropic carrier uses the original scalar root. When both
+    // principal local jets also coincide, its two spectral branches agree
+    // through this order. Reuse that scalar identity instead of inventing a
+    // grazing discriminant from normalized anisotropic coefficient residuals.
+    // Equal phase indices with distinct local jets remain separate branches.
+    let mode = if no == ne
+        && ro == re
+        && data.principal_wavenumber_derivatives[0] == data.principal_wavenumber_derivatives[1]
+    {
+        UniaxialMode::Ordinary
+    } else {
+        data.mode
+    };
     let axis = if data.axis[1] == 0.0 {
         let [x, z] = unit_axis([data.axis[0], data.axis[2]])?;
         [x, 0.0, z]
@@ -102,7 +115,7 @@ pub(in crate::plane_wave::uniaxial) fn normal_derivatives(data: Input) -> Result
     // Preserve the original bulk jets in exactly axial principal limits.
     // These identities also avoid rebuilding the zero GVD of linear n(lambda).
     if p == Dd::ZERO {
-        let principal = match data.mode {
+        let principal = match mode {
             UniaxialMode::Ordinary => Some(0),
             UniaxialMode::Extraordinary if xx == Dd::ZERO && yy == Dd::ZERO => Some(0),
             UniaxialMode::Extraordinary if zz == Dd::ZERO => Some(1),
@@ -118,7 +131,7 @@ pub(in crate::plane_wave::uniaxial) fn normal_derivatives(data: Input) -> Result
     }
 
     if fixed_angle {
-        let matched = match data.mode {
+        let matched = match mode {
             UniaxialMode::Ordinary if ni == no && ri == ro => Some(0),
             UniaxialMode::Extraordinary
                 if xx == Dd::ZERO && yy == Dd::ZERO && ni == ne && ri == re =>
@@ -147,7 +160,7 @@ pub(in crate::plane_wave::uniaxial) fn normal_derivatives(data: Input) -> Result
                 omega,
             );
         }
-        let common = match data.mode {
+        let common = match mode {
             UniaxialMode::Ordinary => ri == ro,
             UniaxialMode::Extraordinary => ri == ro && ro == re,
         };
@@ -163,7 +176,7 @@ pub(in crate::plane_wave::uniaxial) fn normal_derivatives(data: Input) -> Result
     }
 
     if !fixed_angle {
-        if data.mode == UniaxialMode::Ordinary {
+        if mode == UniaxialMode::Ordinary {
             // At fixed kx, use the ORIGINAL bulk K jets directly:
             // kz'=K*K'/kz and kz''=K*K''/kz-K'^2*kx^2/kz^3.
             // This preserves exactly stationary/anomalous bulk slopes and
@@ -206,7 +219,7 @@ pub(in crate::plane_wave::uniaxial) fn normal_derivatives(data: Input) -> Result
         )
     };
     let two = Dd::from_f64(2.0);
-    let (q1, q2) = match data.mode {
+    let (q1, q2) = match mode {
         UniaxialMode::Ordinary => {
             let derivatives = root_jet(q, o2, p2_derivatives, ni == no, i * i, ri, fixed_angle)?;
             (derivatives[0], derivatives[1])

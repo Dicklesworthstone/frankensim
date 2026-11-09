@@ -23,6 +23,9 @@ use super::{DielectricResponse, ReflectionError, UniaxialOpticalResponse, positi
 use fs_material::field_storage::linear_magnetic_permeability;
 use fs_math::{c64::C64, det};
 
+mod dispersion;
+pub use dispersion::OrientedCrystalFrequencyDispersion;
+
 mod group;
 pub use group::OrientedCrystalGroupResponse;
 
@@ -94,6 +97,7 @@ pub struct OrientedUniaxialInterface<'a> {
 pub struct PreparedOrientedCrystalField<'s, 'm> {
     source: &'s OrientedUniaxialInterface<'m>,
     omega_rad_s: f64,
+    incidence: Incidence,
     boundary: OrientedCrystalResponse,
 }
 
@@ -197,6 +201,7 @@ impl<'a> OrientedUniaxialInterface<'a> {
         Ok(PreparedOrientedCrystalField {
             source: self,
             omega_rad_s,
+            incidence: Incidence::Cosine(incidence_cosine),
             boundary: self.response(omega_rad_s, incidence_cosine, incident_tangential_e_v_m)?,
         })
     }
@@ -212,6 +217,7 @@ impl<'a> OrientedUniaxialInterface<'a> {
         Ok(PreparedOrientedCrystalField {
             source: self,
             omega_rad_s,
+            incidence: Incidence::TangentialIndex(tangential_index),
             boundary: self.response_at_tangential_index(
                 omega_rad_s,
                 tangential_index,
