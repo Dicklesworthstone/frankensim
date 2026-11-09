@@ -1,0 +1,28 @@
+frankensim.matdb-source.v1
+observation	bcg10-padauk-glt	Pterocarpus soyauxii (African padauk) native heartwood, 12 x 2 x 150 mm (R x T x L) free-free bars, grain angle 0-25 degrees, specific gravity 0.76 +- 0.02, 20 C and 65 percent RH	Arithmetic on the committed seed padauk-heartwood-bremaud-wst2010: Eq. 2 p.4 defines a' = E3/G32 - 2 nu32, fitted a' = 8.8 (Table 1 p.8, grain-angle model fitted to 200-400 Hz flexural E and tan delta), nu32 about 0.46 as the paper states it; G_LT/E_L = G32/E3 = 1/(a' + 2 nu32) = 1/9.72	nu32 is the paper's stated approximate value, not a measurement; over nu32 0.30 to 0.60 the ratio runs 0.106 to 0.100. Fibre axes (3 along, 2 tangential to the fibre) are taken as the bar's length and width; fit rmse printed (1.4 GPa on E/rho), no confidence level. Table 4 of Bremaud, Gril and Thibaut 2011 prints the same quantity for padauk as E3/G23 = 9.7, without the adjusted-value mark
+observation	bgt11-padauk-table4-same-genus	African padauk (Pterocarpus soyauxii), the mean row of Table 4 of Bremaud, Gril and Thibaut 2011 (specific gravity 0.75, E3/rho 17.3 GPa), the measuring group of the padauk specimens above	Printed anisotropy ratios E3/E2 = 11.5, E3/E1 = 7 and E3/G13 = 9, with 3 along the grain, 2 tangential and 1 radial (the paper's Eq. 6 text; G13 is the shear in the L-R plane), each under the table's mark "Values adjusted by comparing two species of the same genus with similar axial properties"; the 2010 padauk paper (HAL hal-00544382 p.5) says its E3/E2 = 11.5 was assigned from data on another species of the same genus (Caldersmith and Freeman 1990)	ESTIMATES, NOT MEASUREMENTS ON PADAUK: the measuring group's same-genus values, which species not printed. The pack takes the reciprocals, et_over_el = 1/11.5, er_over_el = 1/7, glr_over_el = 1/9, with T in the et slot and R in the er slot as the landed padouk pack does. No uncertainty printed
+observation	wh-honduras-mahogany-standin	Honduras mahogany (Swietenia macrophylla) clear wood at about 12 percent moisture, the Wood Handbook tabulated averages	Carried verbatim from the committed seed mahogany-honduras-fpl-gtr282 (FPL-GTR-282 Chapter 5 elastic ratios and Poisson ratios), as the landed pack padouk-ratios-bremaud2010-fpl-mahogany carries them	STAND-IN: no padouk value was found for G_RT/E_L or the three Poisson ratios; they are another species' and are the values the padouk bar cards used before this pack
+scalar	glt-over-el	bcg10-padauk-glt	glt_over_el	0.10288065843621399	1	constant
+uncertainty	glt-over-el	unstated	-	-	-	-
+validity	glt-over-el	moisture_content_known	0	0	1
+scalar	et-over-el	bgt11-padauk-table4-same-genus	et_over_el	0.086956521739130435	1	constant
+uncertainty	et-over-el	unstated	-	-	-	-
+validity	et-over-el	moisture_content_known	0	0	1
+scalar	er-over-el	bgt11-padauk-table4-same-genus	er_over_el	0.14285714285714286	1	constant
+uncertainty	er-over-el	unstated	-	-	-	-
+validity	er-over-el	moisture_content_known	0	0	1
+scalar	glr-over-el	bgt11-padauk-table4-same-genus	glr_over_el	0.11111111111111111	1	constant
+uncertainty	glr-over-el	unstated	-	-	-	-
+validity	glr-over-el	moisture_content_known	0	0	1
+scalar	grt-over-el	wh-honduras-mahogany-standin	grt_over_el	0.028	1	constant
+uncertainty	grt-over-el	unstated	-	-	-	-
+validity	grt-over-el	moisture_content_known	0	0	1
+scalar	nu-lt	wh-honduras-mahogany-standin	nu_lt	0.533	1	constant
+uncertainty	nu-lt	unstated	-	-	-	-
+validity	nu-lt	moisture_content_known	0	0	1
+scalar	nu-lr	wh-honduras-mahogany-standin	nu_lr	0.314	1	constant
+uncertainty	nu-lr	unstated	-	-	-	-
+validity	nu-lr	moisture_content_known	0	0	1
+scalar	nu-tr	wh-honduras-mahogany-standin	nu_tr	0.326	1	constant
+uncertainty	nu-tr	unstated	-	-	-	-
+validity	nu-tr	moisture_content_known	0	0	1
