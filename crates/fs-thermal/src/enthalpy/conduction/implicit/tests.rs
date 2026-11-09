@@ -1517,3 +1517,6 @@ mod equilibrium;
 
 #[path = "tests/equilibrium_isolated.rs"]
 mod equilibrium_isolated;
+
+#[path = "tests/impedance_isolated.rs"]
+mod impedance_isolated;

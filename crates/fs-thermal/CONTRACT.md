@@ -103,6 +103,58 @@ passed all eleven focused native regressions. The five complete graph/chain
 integration regressions are authored and syntax-checked; their native execution
 remains unverified because the original runtime dependency build was killed.
 
+
+### Closed-component continuous response at fixed energy
+
+An accepted isolated equilibrium now exposes its own
+`prepare_thermal_impedance` path and
+`harmonic::isolated::IsolatedThermalImpedanceModel`. The ordinary preparation and
+its unanchored-DC refusal are unchanged. Both paths retain the original material
+caloric slopes, graph tangent, complex LU, and complete original cell-power
+residual checks.
+
+For peak phasors with exp(-i omega t), each closed conducting component obeys
+-i*omega*sum(delta E)=sum(delta P). The isolated factor replaces one dependent
+power row by the component's extensive-energy sum. At nonzero frequency its
+right side is i*sum(delta P)/omega, retaining the physical storage pole under
+net heating and a well-conditioned balanced low-frequency limit. At DC every
+component's net heat must vanish within the explicit watt tolerance. The
+default response fixes its energy increment to zero;
+`response_with_component_energy` admits an explicit increment per component
+only at DC. `heat_transfer_impedance` supplies a compatible unit transfer within
+one component, without pinning any cell temperature.
+
+Component energy is the original stored coordinate (including enthalpy for a
+material that declares enthalpy), not a silently substituted internal energy or
+fitted capacity. Original component membership is retained and the represented
+tangent is audited for component isolation and conservative column sums.
+Compensated original heat/energy sums retain small residuals beside large
+inventory responses. Independent absolute joule and component-watt gates supplement every
+unmodified native power row, including each replaced row. A separate absolute
+cell-watt gate prevents a large storage response from hiding a finite power
+defect behind a small relative backward residual. Their tolerances never
+scale silently with the 1/omega pole; an unrepresentable requested response
+refuses.
+
+A single latent parcel's DC energy can be determined by its component inventory.
+Several latent parcels in one component leave unspecified phase allocations and
+refuse DC factorization. Their finite-frequency energy response remains valid
+with zero temperature response on the admitted sharp plateaus. One-sided
+caloric corners do not establish two-sided harmonic derivatives.
+
+This is a local linear response about the exact accepted isolated operating
+point. It adds no bath, leakage, artificial heat capacity, pseudo-time step,
+finite-rate chemistry, trajectory, heat/work credit, phase-selection policy,
+stability or reachability claim. The caller keeps amplitudes inside the admitted
+differentiable material branch. The dense numerical payload allowance is
+64*n*n+512*n bytes, with the same 1024-cell cap and native work/cancellation
+limits.
+
+Ten production-core analytic regressions and five native graph/material integration
+regressions are included for conservation, DC heat transfer, finite-frequency
+storage, unequal capacities, latent allocation and failure atomicity. These
+new tests remain unexecuted after the execution workspace disconnected.
+
 ## Continuous prescribed bath-temperature histories
 
 `BathTemperatureSchedule` and `with_bath_temperature_histories` on native

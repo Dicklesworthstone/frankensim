@@ -80,7 +80,8 @@ pub struct IsolatedThermalEquilibrium<'s, 'a, 'm> {
 }
 impl<'s, 'a, 'm> IsolatedThermalEquilibrium<'s, 'a, 'm> {
     /// Same immutable material/geometry-bound field as driven operating points.
-    /// Its original harmonic preparation may still refuse an unanchored DC mode.
+    /// Its ordinary harmonic preparation still refuses an unanchored DC mode;
+    /// use this isolated owner's preparation to retain component energy rows.
     pub fn field(&self) -> &ThermalOperatingPoint<'s, 'a, 'm> {
         &self.field
     }
@@ -89,6 +90,28 @@ impl<'s, 'a, 'm> IsolatedThermalEquilibrium<'s, 'a, 'm> {
     }
     pub fn caloric_evaluations(&self) -> usize {
         self.caloric_evaluations
+    }
+
+    /// Continuous response about this exact closed equilibrium, with one
+    /// conserved original-energy row per disconnected component. At DC the
+    /// default inventory increment is zero; compatible heat transfers are
+    /// supported without fixing a temperature or adding a bath.
+    pub fn prepare_thermal_impedance(
+        &self,
+        budget: super::super::harmonic::ThermalImpedanceBudget,
+        controls: super::super::harmonic::isolated::IsolatedThermalImpedanceControls,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<
+        super::super::harmonic::isolated::IsolatedThermalImpedanceModel,
+        super::super::harmonic::isolated::IsolatedThermalImpedanceError,
+    > {
+        let original = self.field.prepare_thermal_impedance(budget, &mut checkpoint)?;
+        super::super::harmonic::isolated::IsolatedThermalImpedanceModel::new(
+            original,
+            self.components.iter().map(|component| component.cells.clone()).collect(),
+            controls,
+            &mut checkpoint,
+        )
     }
 }
 

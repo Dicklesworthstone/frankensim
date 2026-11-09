@@ -17,6 +17,12 @@ use super::*;
 use fs_la::eigen_complex::{LuComplex, LuComplexError, lu_complex_with_cancel, with_lu_workers};
 use fs_math::c64::C64;
 
+#[path = "harmonic/conservation.rs"]
+mod conservation;
+/// Closed component response with conserved original stored energy.
+#[path = "harmonic/isolated.rs"]
+pub mod isolated;
+
 /// Added dense resources, excluding native graph maps and allocator overhead.
 /// Native preparation keeps its graph budgets; at most 1024 cells are admitted.
 #[derive(Clone, Copy, Debug)]
@@ -243,6 +249,18 @@ impl ThermalImpedanceModel {
                 );
             }
         }
+        self.factor_scaled_matrix(omega_rad_s, row_scales, matrix, &mut checkpoint)
+    }
+
+    // Both ordinary and closed-energy response use this original native LU.
+    fn factor_scaled_matrix(
+        &self,
+        omega_rad_s: f64,
+        row_scales: Vec<f64>,
+        matrix: Vec<C64>,
+        checkpoint: &mut impl FnMut() -> core::result::Result<(), DepositionError>,
+    ) -> Result<ThermalImpedanceFactor<'_>> {
+        let n = self.ids.len();
         let mut refusal = None;
         // Keep the declared dense budget independent of an enclosing thread
         // budget; this bounded preparation uses the native serial factor.
@@ -319,17 +337,29 @@ impl ThermalImpedanceFactor<'_> {
     pub fn response(
         &self,
         heat_w: &[C64],
+        checkpoint: impl FnMut() -> core::result::Result<(), DepositionError>,
+    ) -> Result<ThermalImpedanceResponse> {
+        self.response_with_rhs(heat_w, heat_w, checkpoint)
+    }
+
+    // Constrained component rows change only the solved RHS. Admission below
+    // always rechecks every original cell equation against the actual heat.
+    fn response_with_rhs(
+        &self,
+        heat_w: &[C64],
+        rhs: &[C64],
         mut checkpoint: impl FnMut() -> core::result::Result<(), DepositionError>,
     ) -> Result<ThermalImpedanceResponse> {
         checkpoint()?;
         let n = self.model.ids.len();
-        if heat_w.len() != n {
+        if heat_w.len() != n || rhs.len() != n {
             return Err(invalid("one heat phasor per original cell required"));
         }
         let mut energy = Vec::with_capacity(n);
-        for (&value, &scale) in heat_w.iter().zip(&self.row_scales) {
+        for ((&value, &heat), &scale) in rhs.iter().zip(heat_w).zip(&self.row_scales) {
             checkpoint()?;
             complex(value)?;
+            complex(heat)?;
             energy.push(complex(C64::new(value.re / scale, value.im / scale))?);
         }
         let mut refusal = None;
