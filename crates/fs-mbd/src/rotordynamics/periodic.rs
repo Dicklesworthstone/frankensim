@@ -41,25 +41,43 @@ pub use relaxation::power::{
     prepare_maxwell_harmonic_power_cycle,
 };
 pub use relaxation::{
-    PreparedRotorMaxwellCycle, RotorMaxwellFloquetResponse, RotorMaxwellPeriodicOrbit,
-    RotorMaxwellPeriodicTrajectory, RotorMaxwellState, periodic_maxwell_floquet,
-    prepare_maxwell_cycle, prepare_maxwell_forced_cycle, prepare_maxwell_fourier_cycle,
-    prepare_maxwell_harmonic_cycle,
+    PreparedRotorMaxwellCycle, RotorMaxwellFloquetResponse, RotorMaxwellKinetics,
+    RotorMaxwellPeriodicOrbit, RotorMaxwellPeriodicTrajectory, RotorMaxwellState,
+    periodic_maxwell_floquet, prepare_maxwell_cycle, prepare_maxwell_forced_cycle,
+    prepare_maxwell_fourier_cycle, prepare_maxwell_harmonic_cycle,
 };
 
-#[derive(Clone, Copy)]
-enum CycleForcing<'a> {
+/// Prescribed physical loading on the original coordinates of each cycle segment.
+///
+/// Rows follow the supplied segment order. Harmonic phase is continuous in the
+/// full cycle time: order `h` means angular frequency `2*pi*h/period`, with time
+/// zero at the first segment boundary. Coefficients may switch at boundaries;
+/// source phase never restarts there. Preparation checks all dimensions, finite
+/// values and harmonic bounds through the same admission as the named forcing
+/// entry points.
+#[derive(Clone, Copy, Debug)]
+pub enum RotorPeriodicForcing<'a> {
+    /// Zero applied generalized force throughout the cycle.
     Homogeneous,
+    /// One constant generalized-force vector per segment.
     Held(&'a [&'a [f64]]),
+    /// One cosine/sine pair per segment at a common positive harmonic order.
     Harmonic {
+        /// Physical force coefficients in original coordinate order.
         rows: &'a [RotorHarmonicForce<'a>],
+        /// Positive integer multiple of the full-cycle fundamental frequency.
         order: usize,
     },
+    /// A steady force and a bounded set of commensurate tones per segment.
     Fourier {
+        /// Physical force coefficients, with harmonics in `orders` order.
         rows: &'a [RotorFourierForce<'a>],
+        /// Strictly increasing positive integer harmonic orders.
         orders: &'a [usize],
     },
 }
+
+use RotorPeriodicForcing as CycleForcing;
 
 impl CycleForcing<'_> {
     fn source_coordinates(self) -> usize {

@@ -17,8 +17,8 @@ use super::super::{
     RotorFourierForce, RotorHarmonicForce, RotorPeriodicSegment, harmonic, poll, restore_entry,
 };
 use super::{
-    MaxwellGenerator, PreparedRotorMaxwellCycle, RotorMaxwellPeriodicOrbit,
-    RotorMaxwellPeriodicTrajectory, RotorMaxwellState, prepare,
+    MaxwellGenerator, PreparedRotorMaxwellCycle, RotorMaxwellKinetics, RotorMaxwellPeriodicOrbit,
+    RotorMaxwellPeriodicTrajectory, RotorMaxwellState, kinetics, prepare,
 };
 use crate::rotordynamics::relaxation::{MAX_ROTOR_MAXWELL_BRANCHES, MaxwellDampingBranch};
 use fs_math::dd::Dd;
@@ -87,8 +87,10 @@ pub struct PreparedRotorMaxwellPowerCycle<'a> {
 /// Prepare held physical loads with full hereditary storage and heat accounting.
 ///
 /// The cycle must retain the original fixed M/G, signed spin and branch laws.
-/// Each supplied K is relaxed. C and K may switch; changes in branch k/tau/strain
-/// or mass are unsupported here because they need their own parameter-work law.
+/// Each supplied K is relaxed. C and K may switch. This entry point uses original
+/// branch times; RotorMaxwellKinetics supplies held dissipative-clock changes
+/// without storage work. Changes in branch k/strain or mass require their own
+/// storage/history-transfer and parameter-work law.
 /// The caller's complete budget includes native motion, retained forms and
 /// exact quadratic-flow preparation. No extra trajectory integrator is added.
 #[allow(clippy::too_many_arguments)]
@@ -105,6 +107,7 @@ pub fn prepare_maxwell_forced_power_cycle<'a>(
         spin_rad_s,
         segments,
         branches,
+        None,
         CycleForcing::Held(held_forces),
         relative_generator_residual_tolerance,
         budget,
@@ -130,6 +133,7 @@ pub fn prepare_maxwell_harmonic_power_cycle<'a>(
         spin_rad_s,
         segments,
         branches,
+        None,
         CycleForcing::Harmonic {
             rows: forces,
             order: harmonic_order,
@@ -165,6 +169,7 @@ pub fn prepare_maxwell_fourier_power_cycle<'a>(
         spin_rad_s,
         segments,
         branches,
+        None,
         CycleForcing::Fourier {
             rows: forces,
             orders: harmonic_orders,
@@ -176,10 +181,11 @@ pub fn prepare_maxwell_fourier_power_cycle<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_power_cycle<'a>(
+pub(super) fn prepare_power_cycle<'a>(
     spin_rad_s: f64,
     segments: &[RotorPeriodicSegment<'a>],
     branches: &'a [MaxwellDampingBranch],
+    kinetics: Option<RotorMaxwellKinetics<'_>>,
     forces: CycleForcing<'_>,
     tolerance: f64,
     budget: RotorFloquetBudget,
@@ -196,13 +202,14 @@ fn prepare_power_cycle<'a>(
     }
     let n = first.model.dofs();
     forces.admit(n, segments.len())?;
+    if let Some(kinetics) = kinetics {
+        kinetics.validate(segments.len(), branches, &mut cancelled)?;
+    }
     let sources = match forces {
         CycleForcing::Held(_) => 1,
         CycleForcing::Harmonic { .. } => 2,
         CycleForcing::Fourier { orders, .. } => 1 + 2 * orders.len(),
-        CycleForcing::Homogeneous => {
-            return Err(RotorError::Invalid("explicit power source required"));
-        }
+        CycleForcing::Homogeneous => 0,
     };
     let d = 2 * n + branches.len();
     let w = d + 1;
@@ -232,6 +239,7 @@ fn prepare_power_cycle<'a>(
         spin_rad_s,
         segments,
         branches,
+        kinetics,
         forces,
         tolerance,
         native_budget,
@@ -252,7 +260,9 @@ fn prepare_power_cycle<'a>(
     let mut integrals = Vec::with_capacity(count);
     for (index, segment) in segments.iter().enumerate() {
         poll(&mut cancelled)?;
-        let (generator, _, _) = assembly.segment(segment, spin_rad_s, tolerance, &mut cancelled)?;
+        let time_scales = kinetics.map(|k| k.relaxation_time_scales[index].as_slice());
+        let (generator, _, _) =
+            assembly.segment(segment, time_scales, spin_rad_s, tolerance, &mut cancelled)?;
         let mut augmented = vec![0.0; e * e];
         for i in 0..d {
             augmented[i * e..i * e + d].copy_from_slice(&generator[i * d..(i + 1) * d]);
@@ -269,9 +279,7 @@ fn prepare_power_cycle<'a>(
                 CycleForcing::Fourier { rows, orders } => {
                     (Some(rows[index].steady), rows[index].harmonics, orders)
                 }
-                CycleForcing::Homogeneous => {
-                    return Err(RotorError::Invalid("explicit power source required"));
-                }
+                CycleForcing::Homogeneous => (None, &[], &[]),
             };
         let mut slot = 0;
         if let Some(force) = steady {
@@ -360,11 +368,10 @@ fn prepare_power_cycle<'a>(
             poll(&mut cancelled)?;
             let row = 2 * n + j;
             let scale = Dd::from_f64(motion.state_scale[row]);
+            let time =
+                kinetics::relaxation_time(branch.relaxation_time_s, time_scales.map(|row| row[j]))?;
             forms[3 + j][row * e + row] = represented(
-                h / scale
-                    / Dd::from_f64(branch.stiffness)
-                    / scale
-                    / Dd::from_f64(branch.relaxation_time_s),
+                h / scale / Dd::from_f64(branch.stiffness) / scale / Dd::from_f64(time),
             )?;
         }
         let maximum = scales.iter().fold(0.0_f64, |a, b| a.max(b.abs()));

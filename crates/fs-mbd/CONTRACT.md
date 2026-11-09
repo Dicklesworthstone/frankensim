@@ -9996,6 +9996,51 @@ lossless-Fourier and notch/peak sensitivity regressions. DSR and RCH are
 unavailable in this environment; these local Cargo runs are a bounded native
 fallback, not a full-workspace or DSR gate.
 
+## Held Maxwell clocks throughout rotor cycles
+
+`periodic::RotorMaxwellKinetics` supplies one positive relaxation-time ratio
+for every original segment and branch. Its `floquet`, `prepare_cycle` and
+`prepare_power_cycle` methods reuse the existing full-state preparation,
+native exponential, affine orbit and quadratic-work owners. The public
+`RotorPeriodicForcing` selects homogeneous, held, harmonic or finite Fourier
+loads with the original common-cycle phase convention. Homogeneous power
+accounting uses no fictitious source coordinates.
+
+Every effective time is `tau_reference * ratio[segment][branch]`, derived
+independently from the original branch. Previously shifted times are never
+compounded. The same admitted effective time enters the segment generator,
+independent original constitutive residual and branch heat form
+`sigma_j^2/(k_j tau_j)`. The original mass, signed gyro/spin, branch stiffness,
+strain direction and complete stress identity remain unchanged. Stress stays
+continuous at clock switches and the final-to-first seam. Changing only this
+dissipative rate changes no stored elastic energy and requires no parameter
+work; authored relaxed-K switches retain their existing signed work.
+
+The allocation-free `validate` method checks the complete bounded layout,
+positive finite ratios and positive representable effective times AND rates,
+with cancellation per segment and branch. Dense preparation retains its
+existing whole-query budgets; there is no extra exponential, material-pole
+elimination or integration path. The schedule is borrowed only during cold
+preparation; warm maps and work forms are immutable and need no subsequent
+kinetic evaluation. Existing named fixed-clock entries use the identical
+owner without a schedule.
+
+These are caller-declared held kinetics, not an inferred temperature law or
+thermal feedback model. Smooth rate variation still needs independent
+time/coefficient refinement. Changing branch stiffness, strain coordinates or
+topology requires its own history-transfer and storage-work law. Numerical
+Floquet, trajectory and energy diagnostics retain their original limits.
+
+Four new native groups pass: exact per-branch dark-memory decay and heat
+across three noncompounded clock rows; coupled periodic Fourier response and
+each branch's heat against independent original-ODE RK4 integration; bitwise
+identity with the original motion/power owners at all-one clocks; and malformed,
+unrepresentable, budget, cancellation and replay cases. All 25 affected existing
+periodic-unit, Maxwell harmonic and Maxwell power regressions also pass (29/29).
+The positive-time/infinite-reciprocal refusal is exercised separately from time
+underflow. These are focused actual-source local Cargo runs; DSR/RCH remain
+unavailable and no full-workspace gate is claimed.
+
 ## Resolved lossless motion at cancelling cycle boundaries
 
 The ordinary and hereditary affine advance checks retain the largest actual

@@ -64,6 +64,7 @@ pub fn prepare_maxwell_forced_cycle(
         spin_rad_s,
         segments,
         branches,
+        None,
         CycleForcing::Held(held_forces),
         relative_generator_residual_tolerance,
         budget,

@@ -3,8 +3,10 @@
 //! M q'' + (C + Omega G) q' + K_relaxed q + sum(b_j sigma_j) = f,
 //! sigma_j' + sigma_j/tau_j = k_j b_j^T q'.
 //!
-//! All original [q, q', sigma] states remain continuous at C/K switches.
-//! Branch definitions, mass, gyroscopic matrix and signed spin stay fixed.
+//! All original [q, q', sigma] states remain continuous at C/K/clock switches.
+//! Branch stiffness and strain directions, mass, gyroscopic matrix and signed
+//! spin stay fixed. Optional held kinetics change tau from its original reference
+//! on each segment; changing only this rate transfers no stored energy.
 //! No equivalent viscous damping, material-pole cancellation or state reset
 //! replaces the hereditary law. Changing K can exchange modulation work;
 //! these affine maps do not label that exchange as material heat.
@@ -22,6 +24,8 @@ mod forcing;
 pub use forcing::{RotorMaxwellPeriodicOrbit, prepare_maxwell_forced_cycle};
 mod harmonic;
 pub use harmonic::{prepare_maxwell_fourier_cycle, prepare_maxwell_harmonic_cycle};
+mod kinetics;
+pub use kinetics::RotorMaxwellKinetics;
 pub mod power;
 
 #[cfg(test)]
@@ -129,6 +133,7 @@ pub fn periodic_maxwell_floquet(
         spin_rad_s,
         segments,
         branches,
+        None,
         CycleForcing::Homogeneous,
         relative_generator_residual_tolerance,
         budget,
@@ -155,6 +160,7 @@ pub fn prepare_maxwell_cycle(
         spin_rad_s,
         segments,
         branches,
+        None,
         CycleForcing::Homogeneous,
         relative_generator_residual_tolerance,
         budget,
@@ -168,6 +174,7 @@ fn prepare(
     spin_rad_s: f64,
     segments: &[RotorPeriodicSegment<'_>],
     branches: &[MaxwellDampingBranch],
+    kinetics: Option<RotorMaxwellKinetics<'_>>,
     forces: CycleForcing<'_>,
     tolerance: f64,
     budget: RotorFloquetBudget,
@@ -191,6 +198,9 @@ fn prepare(
     let n = reference.dofs();
     let d = 2 * n + branches.len();
     forces.admit(n, segments.len())?;
+    if let Some(kinetics) = kinetics {
+        kinetics.validate(segments.len(), branches, &mut cancelled)?;
+    }
     let forced = forces.source_coordinates() != 0;
     let dense_budget = budget.admit_states(
         d,
@@ -241,8 +251,9 @@ fn prepare(
     let mut segment_maps = Vec::with_capacity(if retain_segments { segments.len() } else { 0 });
     for (index, segment) in segments.iter().enumerate() {
         poll(&mut cancelled)?;
+        let time_scales = kinetics.map(|k| k.relaxation_time_scales[index].as_slice());
         let (generator, residual, memory_residual) =
-            assembly.segment(segment, spin_rad_s, tolerance, &mut cancelled)?;
+            assembly.segment(segment, time_scales, spin_rad_s, tolerance, &mut cancelled)?;
         maximum_mass_residual = maximum_mass_residual.max(residual);
         maximum_memory_residual = maximum_memory_residual.max(memory_residual);
         let h = segment.duration_seconds;
@@ -428,6 +439,7 @@ impl<'a> MaxwellGenerator<'a> {
     fn segment(
         &self,
         segment: &RotorPeriodicSegment<'_>,
+        time_scales: Option<&[f64]>,
         spin_rad_s: f64,
         tolerance: f64,
         cancelled: &mut impl FnMut() -> bool,
@@ -446,7 +458,9 @@ impl<'a> MaxwellGenerator<'a> {
         for (j, (branch, (force, strain))) in self.branches.iter().zip(&self.coupling).enumerate() {
             poll(cancelled)?;
             let row = 2 * n + j;
-            generator[row * d + row] = finite(-h / branch.relaxation_time_s)?;
+            let time =
+                kinetics::relaxation_time(branch.relaxation_time_s, time_scales.map(|row| row[j]))?;
+            generator[row * d + row] = finite(-h / time)?;
             if generator[row * d + row] == 0.0 {
                 return Err(RotorError::Invalid("periodic memory relaxation underflow"));
             }
@@ -458,6 +472,7 @@ impl<'a> MaxwellGenerator<'a> {
         let memory_residual = memory_residual(
             &self.mass,
             self.branches,
+            time_scales,
             &generator,
             &self.state_scale,
             h,
@@ -477,6 +492,7 @@ impl<'a> MaxwellGenerator<'a> {
 fn memory_residual(
     mass: &MassSolve<'_>,
     branches: &[MaxwellDampingBranch],
+    time_scales: Option<&[f64]>,
     generator: &[f64],
     scale: &[f64],
     h: f64,
@@ -523,9 +539,11 @@ fn memory_residual(
         } else {
             finite((residual_norm / peak) / (action_norm / peak + rhs_norm / peak))?
         });
+        let time =
+            kinetics::relaxation_time(branch.relaxation_time_s, time_scales.map(|row| row[j]))?;
         maximum = maximum.max(relative_difference(
             Dd::from_f64(generator[row * d + row]),
-            -Dd::from_f64(h) / Dd::from_f64(branch.relaxation_time_s),
+            -Dd::from_f64(h) / Dd::from_f64(time),
         )?);
     }
     if maximum > tolerance {

@@ -1,10 +1,10 @@
 //! Globally phased harmonic and Fourier loads on every original memory state.
 
-use super::{PreparedRotorMaxwellCycle, prepare};
 use super::super::{
     CycleForcing, RotorError, RotorFloquetBudget, RotorFourierForce, RotorHarmonicForce,
     RotorPeriodicSegment,
 };
+use super::{PreparedRotorMaxwellCycle, prepare};
 use crate::rotordynamics::relaxation::MaxwellDampingBranch;
 
 pub(super) use super::super::fourier::segment_flow_for_states as fourier_segment_flow;
@@ -52,6 +52,7 @@ pub fn prepare_maxwell_harmonic_cycle(
         spin_rad_s,
         segments,
         branches,
+        None,
         CycleForcing::Harmonic {
             rows: forces,
             order: harmonic_order,
@@ -97,6 +98,7 @@ pub fn prepare_maxwell_fourier_cycle(
         spin_rad_s,
         segments,
         branches,
+        None,
         CycleForcing::Fourier {
             rows: forces,
             orders: harmonic_orders,
