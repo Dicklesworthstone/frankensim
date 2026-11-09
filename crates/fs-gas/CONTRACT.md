@@ -1,5 +1,35 @@
 # fs-gas contract
 
+## Adiabatic throttling with original phase enthalpy
+
+`material::phase_throttle::throttle_adiabatic_mixture_stream` closes the steady
+pressure-reduction process with zero original enthalpy increment and no shaft
+work or external heat. Its feed is the same original-source/temperature/
+pressure/mass-flow type accepted by the mixture heat-exchanger and mixing
+owners. The existing PH source resolves Joule--Thomson temperature change and
+phase redistribution with retained species data and phase policy. Formation
+and entropy reference offsets cancel before rounding; no constant-Cp,
+isentropic-expansion or separate latent-heat approximation is introduced.
+
+The supplied mass flow is conserved. Actual outgoing-minus-incoming enthalpy
+flow and entropy production are checked in W and W/K before publication;
+stream pressure work is already included in enthalpy. The source energy
+tolerance is bounded by the physical power allowance divided by throughput.
+The existing source work limit includes the inlet selection and every outlet
+trial, with no second accepted-state evaluation. Equal pressure has exact
+zero energy/entropy change after one original PT query. Cancellation, invalid
+pressure direction and source/bracket/work refusals publish no partial outlet.
+
+Focused `phase_equilibrium_throttle` regressions cover the independent
+cryogenic PR phase/enthalpy reference, the ideal-gas dilute limit, pressure-flow
+work, reference-datum and throughput invariance, exact rest and refusal/replay.
+These verify the declared model, not a measured valve or refrigerant dataset.
+The process assumes negligible inlet/outlet kinetic and potential energy
+changes, steady flow and phase equilibrium. Mass flow and downstream pressure
+are inputs; valve geometry, discharge/choking, slip and phase kinetics are not
+predicted. The thermodynamic convention follows
+[MIT 5.60, lecture 4](https://ocw.mit.edu/courses/5-60-thermodynamics-kinetics-spring-2008/e1f8054833e8077bf9428c27cbf0465c_5_60_lecture4.pdf).
+
 ## Original real-gas pressure at impermeable end walls
 
 With `material,experimental-euler`,

@@ -27,6 +27,8 @@ pub mod phase_mixing;
 pub mod phase_nozzle;
 /// Conservative normal shocks with original liquid/vapor phase equilibrium.
 pub mod phase_shock;
+/// Isenthalpic pressure reduction with original mixture phase equilibrium.
+pub mod phase_throttle;
 
 /// Shared material-card viscosity/conductivity in conservative gas transport.
 #[cfg(feature = "experimental-euler")]
