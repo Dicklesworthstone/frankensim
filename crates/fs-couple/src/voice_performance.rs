@@ -36,7 +36,7 @@
 //! fold_damping_upper <open_ratio>                    (required on two_mass and body_cover, refused on one_dof)
 //! fold_body <m_body_kg> <k_body_n_m> <damping_ratio_body> <rest_gap_upper_m>   (required on body_cover only)
 //! tract_wall <surface_density_kg_m2> <stiffness_n_m3> <resistance_pa_s_m>   (optional)
-//! termination <flanged|unflanged|ideal_open>
+//! termination <flanged|unflanged|ideal_open>    or    termination unflanged_thin_wall <quadrature_nodes>
 //! tract_source <identifier without spaces>
 //! tract_licence <free text to end of line>
 //! section <area_m2> <length_m>                       (repeat, glottis first)
@@ -60,7 +60,66 @@
 //! keyframe <name> licence <free text to end of line>
 //! keyframe_section <name> <area_m2> <length_m>            (repeat, glottis first)
 //! tract_move <start_s> <end_s> <name|card> <steps>        (repeat, in time order; the tract moves to that shape)
+//! glottal_orifice <area_m2>                               (optional; a fixed hole in place of the folds: a flow rig)
+//! subglottal_tube <area_m2> <length_m>                    (repeat, optional; a tube below the glottis, glottis end first)
+//! fricative_noise <seed> <k> <j>                          (optional; turbulence after section k)
+//! receiver free_field_monopole                            (optional; the mouth flow as a monopole in free space)
+//! rest_gap <time_s> <gap_m>                               (repeat, optional, two_mass only; the fold's rest gap over time)
 //! ```
+//!
+//! The flow rig and the supraglottal source (MB 15368; rulings 15773, 15828, 15902, 16025; interface NavyTower 15491,
+//! 15765). `glottal_orifice` replaces the folds by a fixed hole of that area ([`GlottalIsland::with_orifice`]): the jet
+//! with the two-mass exit's recovery into the first section (Ishizaka and Flanagan eq 6; a hole wider than the first
+//! section is refused), in series with the tract, as a stationary flow rig blows through a printed model. The fold rows stay
+//! (the grammar needs them) and reach no number of the render; the rows that move or read a fold are refused with it
+//! (`fold_shape`, `tension_modulation`, `tension_flutter`, `pulse_shimmer`, and the glottal sources `aspiration_noise`,
+//! `jet_noise` and `constriction_noise`, whose laws read a fold's gap or take the whole drive as their drop). A rig's
+//! stats carry its mean glottal flow over the render's last 2 s ([`VoiceStats::rig_mean_glottal_flow_m3_s`]).
+//! `subglottal_tube` rows are a tube below the glottis, one cylinder of each area and length, glottis end first, with
+//! Bessel losses and the card's `tract_wall` (rigid without one), through the same seam as `subglottal_airway`, which is
+//! refused with them: the `subglottal` schedule becomes the pressure at the tube's far end (a rig's pressure tap).
+//! `fricative_noise` is Oldham and Ukpoho's printed law in its supraglottal form
+//! ([`crate::turbulence_noise::ConstrictionNoise::new_fricative`]) at the constriction `k` (0-based section) opening into
+//! the section `j`, which the card names (MB 15828: the largest section between `k` and the lips): a series pressure at
+//! the junction after section `k`, reaching the mouth flow and the island's returned wave through the junction lines
+//! ([`crate::driving_point::outlet::junction_source_lines`]), with the constriction's Borda-Carnot drop in the island's
+//! junction solve ([`GlottalIsland::with_constriction`]). On the flow rig its drop and jet speed are those of the held
+//! flow through the orifice and the constriction at the schedule's pressure ([`GlottalIsland::orifice_held_flow_m3_s`]);
+//! on the folds, which have no held flow, they are those of the island's own flow of the step before (the source reads
+//! the flow it does not yet change, as the glottal sources do), and the source is silent while that flow is not positive
+//! (no jet leaves `k` toward `j`). That flow is the glottal flow, the lumped law of the island's own drop at `k`, not the
+//! volume velocity at `k`: in a voiced frame the noise follows the glottal pulse without the tract's filtering between
+//! the glottis and `k` (NavyTower 16796). Its lines end in the island's own mouth load: the declared termination, or with
+//! `head_load` the same table, read in the exterior with `tract_gas` (the bore, the law's density and the lines stay in
+//! the tract's gas; [`crate::driving_point::outlet::junction_source_lines_exterior`]). On a moving tract (`tract_move`;
+//! MB 16735 piece 2) every shape takes its own `k` by [`TractChart::log_area_morph`]'s own correspondence (MB 16891,
+//! ruling (c) on NavyTower 16887): at the card's section count `k` itself, at any other count the shape's section at the
+//! card's section `k`'s centre as a fraction of the tract's length from the glottis; its own junction lines after that
+//! section, switched with the island's and crossfaded the same
+//! way, and its own constriction, `A_k` that section and `A_j` the shape's largest section after it: the law's `sigma`,
+//! `d` and cutoff from the switch's step on, and the island's Borda-Carnot factor with them
+//! ([`GlottalIsland::with_constriction_keyframes`]; neither is faded). A shape with no expansion after its `k`, the
+//! card's own included (a word's card is its vowel), has `sigma >= 1`, where the printed law drives no band, and the
+//! island takes no constriction on it: the source forms and turns off through the law as the tract closes and opens,
+//! with no fade added. With `tract_move` the card's `j` must be the card shape's largest section after `k`; without it
+//! the card's one shape must be an expansion. `receiver free_field_monopole` observes
+//! the mouth flow as a point monopole in free space, `rho dQ/dt / (4 pi R)` at the microphone's distance, through the
+//! baffled receiver's own differentiator and travel-time kernel (half a point source on the rigid baffle, whose image
+//! doubles it); the microphone row's rings and points are not read by it, the mouth's size and the directivity of its
+//! opening are not modelled, and `head_sphere` and `observer_law` are refused with it. `termination unflanged_thin_wall
+//! <nodes>` is Levine and Schwinger's exact thin-wall unflanged load on that many quadrature nodes, refused by fs-duct
+//! above its first cut-on (`ka` 3.83), so the mechanics clock must keep the lip section below it. Without these rows
+//! every line takes exactly its old path.
+//!
+//! `rest_gap` rows move a `two_mass` fold's rest gap over time, as an abducting or adducting gesture of the
+//! arytenoids does (the first word, MB 16735): linear between rows in strictly increasing time, the first row's gap
+//! held before it and the last row's after it, each gap the whole opening as the `fold` row's own `rest_gap_m` (with a
+//! `fold_shape`, the mean over the fold's length). The gap is set once per output sample before the mechanics steps,
+//! as the tension gestures are ([`GlottalIsland::set_rest_gap`]): the displacement from rest is kept, and the springs'
+//! energy change is reported as work on the fold, so the ledger stays closed. The rows say nothing about how the gap
+//! moves between them; a card states where its gaps and times come from. `body_cover` and `one_dof` folds and
+//! `glottal_orifice` refuse them by name. Without the rows the fold keeps the `fold` row's gap and a performance is
+//! bit-identical to one written before the rows existed.
 //!
 //! A moving tract (pexfp.327.1): each `tract_move` takes the tract from the shape it holds (the card's own `section`
 //! rows until the first move) to keyframe `name`, or back to the card's shape with `card`, through `steps` shapes at
@@ -225,14 +284,16 @@
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::driving_point::LineLadder;
-use crate::driving_point::outlet::{mouth_flow_line, mouth_flow_line_exterior};
+use crate::driving_point::outlet::{
+    junction_source_lines, junction_source_lines_exterior, mouth_flow_line, mouth_flow_line_exterior,
+};
 use crate::glottis::{
     FoldBody, FoldCard, FoldCardSource, FoldMode, FoldRestGap, FoldShape, GLOTTAL_LINE_MAX_TAPS, GlottalIsland,
     glottal_tract_line_taps,
 };
 use crate::keyframe_line::ShapeLine;
 use crate::pcm_wav::baffled::head::{HeadSphere, TorsoSphere, head_mouth_load, head_torso_mouth_load};
-use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
+use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium, SurfaceSample};
 use crate::air_path::input::{ObserverLawInput, resolve_observer_law};
 use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationLimits, GasPropagationReport};
 use crate::pcm_wav::baffled::openings::CircularOpening;
@@ -243,13 +304,15 @@ use crate::turbulence_noise::{
     AspirationCard, ConstrictionNoise, ConstrictionNoiseCard, GlottalAspiration, GlottalJetNoise, JetNoiseCard,
     RE_CRIT_SONDHI_SCHROETER,
 };
-use crate::upstream_airway::{AirwayChain, AirwayReceipt, UpstreamAirway, WEIBEL_SAAB_2021_TABLE_1_B_MM};
-use fs_duct::{MouthLoad, Termination};
+use crate::upstream_airway::{AirwayChain, AirwayReceipt, AirwaySection, UpstreamAirway, WEIBEL_SAAB_2021_TABLE_1_B_MM};
+use fs_duct::levine_schwinger::LsQuadrature;
+use fs_duct::{LossModel, MouthLoad, Termination};
 use fs_material::gas::GasState;
 use fs_material::gas_species::input::{GasRecord, ThermochemicalSources, read_gas_record};
 use fs_math::det;
 use fs_phs::WallPin;
 use fs_rand::{Stream, StreamKey};
+use fs_vfit::discretize::DelayedFilter;
 
 /// First line of every voice performance file.
 pub const VOICE_PERFORMANCE_SCHEMA: &str = "frankensim-voice-performance-v1";
@@ -348,6 +411,28 @@ pub struct VoiceDescription {
     pub keyframes: Vec<TractKeyframe>,
     /// The tract's movements, in time order; empty for a fixed tract.
     pub tract_moves: Vec<TractMove>,
+    /// Opt-in `glottal_orifice` [m^2]: a fixed hole in place of the folds (module doc); `None` is the fold.
+    pub glottal_orifice: Option<f64>,
+    /// Opt-in `subglottal_tube` rows, glottis end first (module doc); empty for none.
+    pub subglottal_tube: Vec<TractSection>,
+    /// Opt-in `fricative_noise` (module doc); `None` adds nothing.
+    pub fricative_noise: Option<FricativeNoiseCard>,
+    /// Opt-in `receiver free_field_monopole` (module doc); `false` keeps the infinite baffle.
+    pub free_field_receiver: bool,
+    /// Opt-in `rest_gap` rows `(time_s, gap_m)` in strictly increasing time (module doc); empty keeps the `fold` row's gap.
+    pub rest_gap: Vec<(f64, f64)>,
+}
+
+/// The `fricative_noise <seed> <k> <j>` row: the supraglottal constriction `k` (0-based section index) opening into the
+/// section `j > k`. The card names both; this code chooses neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FricativeNoiseCard {
+    /// Declared seed of the noise streams.
+    pub seed: u64,
+    /// The constriction's section.
+    pub constriction: usize,
+    /// The section it opens into.
+    pub expansion: usize,
 }
 
 /// A further measured shape of a moving tract: the `keyframe` and `keyframe_section` rows of one name.
@@ -383,6 +468,46 @@ struct KeyframeDraft {
     source: Option<String>,
     licence: Option<String>,
     sections: Vec<TractSection>,
+}
+
+/// The area [m^2] of the largest section after section `k` (`fricative_noise`'s `A_j` on a moving tract, MB 15828: the
+/// largest section between `k` and the lips); 0 when none follows.
+fn widest_after(sections: &[TractSection], k: usize) -> f64 {
+    sections.iter().skip(k + 1).map(|s| s.area_m2).fold(0.0, f64::max)
+}
+
+/// `fricative_noise`'s `k` on a moving tract's shape `shape` (MB 16891, ruling (c) on NavyTower 16887): at the card's
+/// section count, `k` itself (the morph's correspondence for equal counts is section by section, so every equal-count
+/// card stays bit for bit); at any other count, the shape's section at the card's section `k`'s centre as a fraction of
+/// the tract's length from the glottis, the correspondence [`TractChart::log_area_morph`] reads unequal counts by.
+fn shape_constriction(card: &[TractSection], k: usize, shape: &[TractSection]) -> usize {
+    if shape.len() == card.len() {
+        k
+    } else {
+        section_at_fraction(shape, centre_fraction(card, k))
+    }
+}
+
+/// The distance of section `k`'s centre from the glottis as a fraction of the tract's length.
+fn centre_fraction(sections: &[TractSection], k: usize) -> f64 {
+    let total: f64 = sections.iter().map(|s| s.length_m).sum();
+    let before: f64 = sections[..k].iter().map(|s| s.length_m).sum();
+    (before + 0.5 * sections[k].length_m) / total
+}
+
+/// The section whose span holds the distance `fraction` of the tract's length from the glottis: the correspondence
+/// [`TractChart::log_area_morph`] reads unequal section counts by (`fricative_noise`'s `k` on a moving tract, NavyTower
+/// 16887 (c)). The last section if `fraction` is at or past the lips.
+fn section_at_fraction(sections: &[TractSection], fraction: f64) -> usize {
+    let at = fraction * sections.iter().map(|s| s.length_m).sum::<f64>();
+    let mut end = 0.0;
+    for (i, s) in sections.iter().enumerate() {
+        end += s.length_m;
+        if at < end {
+            return i;
+        }
+    }
+    sections.len() - 1
 }
 
 fn keyframe_draft<'a>(drafts: &'a mut Vec<KeyframeDraft>, name: &str) -> Result<&'a mut KeyframeDraft, String> {
@@ -594,6 +719,11 @@ impl VoiceDescription {
         let mut fold_body = None;
         let mut keyframe_drafts: Vec<KeyframeDraft> = Vec::new();
         let mut tract_moves: Vec<(f64, f64, String, u64)> = Vec::new();
+        let mut glottal_orifice = None;
+        let mut subglottal_tube: Vec<TractSection> = Vec::new();
+        let mut fricative_noise = None;
+        let mut free_field_receiver = None;
+        let mut rest_gap: Vec<(f64, f64)> = Vec::new();
         for line in lines {
             let mut tokens = line.split_whitespace();
             let key = tokens.next().unwrap_or_default();
@@ -693,15 +823,90 @@ impl VoiceDescription {
                     };
                     once(&mut wall, pin, key)?;
                 }
+                "termination" if rest.first() == Some(&"unflanged_thin_wall") => {
+                    // Levine and Schwinger's exact load; the quadrature's node count is the card's, never a default.
+                    arity(&rest, 2, key)?;
+                    let nodes = whole(&rest, 1, "unflanged_thin_wall quadrature nodes")?;
+                    let nodes = usize::try_from(nodes).map_err(|_| "unflanged_thin_wall quadrature nodes out of range")?;
+                    if !(fs_duct::levine_schwinger::LS_MIN_NODES..=fs_duct::levine_schwinger::LS_MAX_NODES).contains(&nodes) {
+                        return Err(format!(
+                            "unflanged_thin_wall quadrature nodes must be in {}..={}",
+                            fs_duct::levine_schwinger::LS_MIN_NODES,
+                            fs_duct::levine_schwinger::LS_MAX_NODES
+                        ));
+                    }
+                    once(&mut termination, Termination::UnflangedThinWall { quadrature: LsQuadrature { nodes } }, key)?;
+                }
                 "termination" => {
                     arity(&rest, 1, key)?;
                     let load = match rest[0] {
                         "flanged" => Termination::FlangedOpen,
                         "unflanged" => Termination::UnflangedOpen,
                         "ideal_open" => Termination::IdealOpen,
-                        _ => return Err("termination must be flanged, unflanged or ideal_open".into()),
+                        _ => {
+                            return Err(
+                                "termination must be flanged, unflanged, ideal_open or unflanged_thin_wall <nodes>".into(),
+                            );
+                        }
                     };
                     once(&mut termination, load, key)?;
+                }
+                "glottal_orifice" => {
+                    arity(&rest, 1, key)?;
+                    let area = field(&rest, 0, "glottal_orifice area")?;
+                    if area <= 0.0 {
+                        return Err("glottal_orifice area must be positive".into());
+                    }
+                    once(&mut glottal_orifice, area, key)?;
+                }
+                "subglottal_tube" => {
+                    arity(&rest, 2, key)?;
+                    if subglottal_tube.len() >= MAX_SECTIONS {
+                        return Err("too many subglottal_tube rows".into());
+                    }
+                    let section = TractSection {
+                        area_m2: field(&rest, 0, "subglottal_tube area")?,
+                        length_m: field(&rest, 1, "subglottal_tube length")?,
+                    };
+                    if !(section.area_m2 > 0.0 && section.length_m > 0.0) {
+                        return Err("subglottal_tube area and length must be positive".into());
+                    }
+                    subglottal_tube.push(section);
+                }
+                "fricative_noise" => {
+                    // The card names the constriction and the section it opens into; no gain, no gate.
+                    arity(&rest, 3, key)?;
+                    let seed = whole(&rest, 0, "fricative_noise seed")?;
+                    let index = |i: usize, what: &str| -> Result<usize, String> {
+                        usize::try_from(whole(&rest, i, what)?).map_err(|_| format!("{what} out of range"))
+                    };
+                    let card = FricativeNoiseCard {
+                        seed,
+                        constriction: index(1, "fricative_noise k")?,
+                        expansion: index(2, "fricative_noise j")?,
+                    };
+                    once(&mut fricative_noise, card, key)?;
+                }
+                "receiver" => {
+                    arity(&rest, 1, key)?;
+                    if rest[0] != "free_field_monopole" {
+                        return Err("receiver must be `free_field_monopole`".into());
+                    }
+                    once(&mut free_field_receiver, (), key)?;
+                }
+                "rest_gap" => {
+                    arity(&rest, 2, key)?;
+                    if rest_gap.len() >= MAX_SCHEDULE_POINTS {
+                        return Err("too many rest_gap points".into());
+                    }
+                    let point = (field(&rest, 0, "rest_gap time")?, field(&rest, 1, "rest_gap gap")?);
+                    if point.0 < 0.0 || point.1 <= 0.0 {
+                        return Err("rest_gap time must be non-negative and its gap positive".into());
+                    }
+                    if rest_gap.last().is_some_and(|last: &(f64, f64)| point.0 <= last.0) {
+                        return Err("rest_gap times must be strictly increasing".into());
+                    }
+                    rest_gap.push(point);
                 }
                 "tract_source" => {
                     arity(&rest, 1, key)?;
@@ -983,6 +1188,12 @@ impl VoiceDescription {
         if !two_mass && fold_shape.is_some() {
             return Err("fold_shape needs a two_mass fold".into());
         }
+        if body_cover && !rest_gap.is_empty() {
+            return Err("rest_gap needs a two_mass fold, not body_cover".into());
+        }
+        if !two_mass && !rest_gap.is_empty() {
+            return Err("rest_gap needs a two_mass fold".into());
+        }
         if sections.is_empty() {
             return Err(missing("section"));
         }
@@ -1013,6 +1224,50 @@ impl VoiceDescription {
             if tract.state().pressure != gas.state().pressure {
                 return Err("tract_gas and ambient need one static pressure: mean flow is not modeled".into());
             }
+        }
+        // The flow rig's rows (module doc): each refusal names the row it meets.
+        if glottal_orifice.is_some() {
+            let fold_rows = [
+                ("fold_shape", fold_shape.is_some()),
+                ("rest_gap", !rest_gap.is_empty()),
+                ("tension_modulation", tension_modulation.is_some()),
+                ("tension_flutter", tension_flutter.is_some()),
+                ("pulse_shimmer", pulse_shimmer.is_some()),
+                ("aspiration_noise", aspiration_noise.is_some()),
+                ("jet_noise", jet_noise.is_some()),
+                ("constriction_noise", constriction_noise.is_some()),
+            ];
+            if let Some((row, _)) = fold_rows.iter().find(|(_, present)| *present) {
+                return Err(format!("glottal_orifice replaces the folds: `{row}` moves or reads a fold and is refused with it"));
+            }
+        }
+        if !subglottal_tube.is_empty() && subglottal_airway.is_some() {
+            return Err("subglottal_tube and subglottal_airway are two airways below one glottis: refused together".into());
+        }
+        if let Some(card) = fricative_noise {
+            let (k, j) = (card.constriction, card.expansion);
+            if !(k < j && j < sections.len()) {
+                return Err(format!(
+                    "fricative_noise needs k < j < the section count {}: got k {k}, j {j}",
+                    sections.len()
+                ));
+            }
+            // A fixed tract has one shape, and the Borda-Carnot loss needs it to be an expansion after `k`.
+            if tract_moves.is_empty() && !(sections[j].area_m2 > sections[k].area_m2) {
+                return Err("fricative_noise: the Borda-Carnot loss needs section j wider than section k".into());
+            }
+            // A moving tract (MB 16735 piece 2; NavyTower 16887): every shape takes its own `A_j`, its largest section
+            // after its own `k` (MB 15828), so the card's `j` must be that section of the card's own shape. A shape with
+            // no expansion after `k`, the card's own included (the word's card is its vowel), takes no constriction and
+            // its law drives no band.
+            if !tract_moves.is_empty() && sections[j].area_m2.to_bits() != widest_after(&sections, k).to_bits() {
+                return Err("fricative_noise with tract_move needs j to be the largest section between k and the lips: \
+                            every shape takes its own"
+                    .into());
+            }
+        }
+        if free_field_receiver.is_some() && (head_sphere.is_some() || observer_law.is_some()) {
+            return Err("receiver free_field_monopole is refused with head_sphere and observer_law: both observe the baffle".into());
         }
         let (keyframes, tract_moves) = admit_motion(
             &sections,
@@ -1052,6 +1307,11 @@ impl VoiceDescription {
             torso_sphere,
             keyframes,
             tract_moves,
+            glottal_orifice,
+            subglottal_tube,
+            fricative_noise,
+            free_field_receiver: free_field_receiver.is_some(),
+            rest_gap,
         })
     }
 
@@ -1154,6 +1414,27 @@ impl VoiceDescription {
                     })
                     .map_err(|e| format!("subglottal airway refused: {e}"))?,
             ),
+            // `subglottal_tube` (refused with `subglottal_airway` at parse): the card's cylinders through the same seam.
+            None if !self.subglottal_tube.is_empty() => {
+                let sections = self
+                    .subglottal_tube
+                    .iter()
+                    .map(|s| AirwaySection {
+                        length_m: s.length_m,
+                        radius_m: (s.area_m2 / core::f64::consts::PI).sqrt(),
+                        count: 1,
+                        wall: self.wall,
+                    })
+                    .collect();
+                Some(
+                    AirwayChain::new(sections, LossModel::Bessel)
+                        .and_then(|chain| {
+                            let ladder = LineLadder { max_taps: GLOTTAL_LINE_MAX_TAPS, ..LineLadder::default() };
+                            UpstreamAirway::realize(&chain, gas, mechanics_rate, &ladder)
+                        })
+                        .map_err(|e| format!("subglottal tube refused: {e}"))?,
+                )
+            }
             None => None,
         };
         let island = match split {
@@ -1189,6 +1470,18 @@ impl VoiceDescription {
             Some(airway) => island.with_upstream(airway),
             None => Ok(island),
         })
+        .and_then(|island| match self.glottal_orifice {
+            Some(area) => island.with_orifice(area),
+            None => Ok(island),
+        })
+        // A moving tract takes every shape's constriction below (with_constriction_keyframes), shape 0's among them.
+        .and_then(|island| match self.fricative_noise {
+            Some(card) if self.tract_moves.is_empty() => island.with_constriction(
+                self.sections[card.constriction].area_m2,
+                self.sections[card.expansion].area_m2,
+            ),
+            _ => Ok(island),
+        })
         .map_err(|e| format!("glottal island refused: {e:?}"))?;
         let (mouth, receipt) = match split {
             None => mouth_flow_line(
@@ -1215,7 +1508,7 @@ impl VoiceDescription {
         // A moving tract: every further shape's two lines, and the steps at which the render switches to them. Without
         // `tract_move` rows nothing here runs and both lines stay the fixed ones.
         let mut mouth = ShapeLine::Fixed(mouth);
-        let (island, motion) = if self.tract_moves.is_empty() {
+        let (island, mut motion) = if self.tract_moves.is_empty() {
             (island, TractMotion::default())
         } else {
             let mut motion = self.realize_motion(&chart, mechanics_rate, island.port_impedance(), workers)?;
@@ -1225,6 +1518,18 @@ impl VoiceDescription {
             let island = island
                 .with_tract_keyframes(core::mem::take(&mut motion.island_taps))
                 .map_err(|e| format!("moving tract line refused: {e:?}"))?;
+            // `fricative_noise` (MB 16735 piece 2): every shape's constriction, the card's own first, switched with the
+            // tract line; a shape with no expansion after its `k` takes none.
+            let island = match self.fricative_noise {
+                Some(card) => {
+                    let mut shapes =
+                        vec![(self.sections[card.constriction].area_m2, self.sections[card.expansion].area_m2)];
+                    shapes.extend(motion.fricative.iter().map(|f| (f.area_k_m2, f.area_j_m2)));
+                    island.with_constriction_keyframes(&shapes)
+                }
+                None => Ok(island),
+            }
+            .map_err(|e| format!("moving constriction refused: {e:?}"))?;
             (island, motion)
         };
         let mouth_area = self.sections.last().map_or(0.0, |s| s.area_m2);
@@ -1244,6 +1549,11 @@ impl VoiceDescription {
                 ).map_err(|error| format!("voice observer paths refused: {error}"))?;
                 (receiver, Some(report))
             }
+            // `receiver free_field_monopole` (refused with observer_law at parse).
+            None if self.free_field_receiver => (
+                free_field_monopole(mouth_area, mechanics_rate, self.output_rate_hz, self.microphone, medium)?,
+                None,
+            ),
             None => (
                 BaffledPressure::circular_outlet_multirate_differentiating(
                     mouth_radius_m, mechanics_rate, self.output_rate_hz,
@@ -1302,6 +1612,80 @@ impl VoiceDescription {
             Some(card) => Some(ConstrictionNoise::new(card, 1.0 / f64::from(mechanics_rate)).map_err(str::to_string)?),
             None => None,
         };
+        // `fricative_noise`: the source after section k, referenced to the island's port, with the island's own mouth
+        // load: the declared termination, or with `head_load` the same table, read in the exterior with `tract_gas`
+        // (module doc). Shape 0 is the card's own tract; a moving tract adds its further shapes' lines and constrictions
+        // (`shape_taps`), switched with the island's.
+        let fricative = match self.fricative_noise {
+            Some(card) => {
+                let (area_k, area_j) =
+                    (self.sections[card.constriction].area_m2, self.sections[card.expansion].area_m2);
+                let noise = ConstrictionNoise::new_fricative(
+                    ConstrictionNoiseCard { seed: card.seed, duct_radius_m: (area_j / core::f64::consts::PI).sqrt() },
+                    1.0 / f64::from(mechanics_rate),
+                )
+                .map_err(str::to_string)?;
+                let lines = match split {
+                    None => junction_source_lines(
+                        &duct,
+                        card.constriction,
+                        gas,
+                        mouth_load,
+                        mechanics_rate,
+                        island.port_impedance(),
+                        self.wall.as_ref(),
+                        &LineLadder::default(),
+                    ),
+                    Some(table) => junction_source_lines_exterior(
+                        &duct,
+                        card.constriction,
+                        gas,
+                        exterior,
+                        table,
+                        mechanics_rate,
+                        island.port_impedance(),
+                        self.wall.as_ref(),
+                        &LineLadder::default(),
+                    ),
+                }
+                .map_err(|e| format!("fricative junction lines refused: {e}"))?;
+                let mut to_mouth_flow = ShapeLine::Fixed(lines.to_mouth_flow);
+                let mut to_inlet_wave = ShapeLine::Fixed(lines.to_inlet_wave);
+                let mut shapes = vec![FricativeShape {
+                    section: card.constriction,
+                    area_k_m2: area_k,
+                    open_area_ratio: area_k / area_j,
+                    duct_radius_m: noise.card().duct_radius_m,
+                }];
+                if !self.tract_moves.is_empty() {
+                    let further = core::mem::take(&mut motion.fricative);
+                    shapes.extend(further.iter().map(|f| FricativeShape {
+                        section: f.section,
+                        area_k_m2: f.area_k_m2,
+                        open_area_ratio: f.area_k_m2 / f.area_j_m2,
+                        duct_radius_m: (f.area_j_m2 / core::f64::consts::PI).sqrt(),
+                    }));
+                    let (mouth_taps, inlet_taps): (Vec<_>, Vec<_>) =
+                        further.into_iter().map(|f| (f.mouth_taps, f.inlet_taps)).unzip();
+                    to_mouth_flow = to_mouth_flow
+                        .to_moving(mouth_taps)
+                        .map_err(|e| format!("moving fricative mouth line refused: {e}"))?;
+                    to_inlet_wave = to_inlet_wave
+                        .to_moving(inlet_taps)
+                        .map_err(|e| format!("moving fricative inlet line refused: {e}"))?;
+                }
+                Some(FricativeSource {
+                    noise,
+                    to_mouth_flow,
+                    to_inlet_wave,
+                    shapes,
+                    shape: 0,
+                    rig: self.glottal_orifice.is_some(),
+                    last_flow_m3_s: 0.0,
+                })
+            }
+            None => None,
+        };
         Ok(VoicePerformance {
             island,
             mouth,
@@ -1311,6 +1695,7 @@ impl VoiceDescription {
             aspiration,
             jet_noise,
             constriction_noise,
+            fricative,
             pulse_shimmer: self.pulse_shimmer.map(PulseShimmer::new),
             gas_density: gas.density,
             gas_viscosity: gas.dynamic_viscosity,
@@ -1319,6 +1704,10 @@ impl VoiceDescription {
                 points: self.subglottal.clone(),
                 cursor: 0,
             },
+            rest_gap: (!self.rest_gap.is_empty()).then(|| Schedule {
+                points: self.rest_gap.clone(),
+                cursor: 0,
+            }),
             tension_modulation: self.tension_modulation,
             tension_flutter: self.tension_flutter.map(|card| TensionFlutter::new(card, self.output_rate_hz)),
             tension_flutter_second: self
@@ -1334,6 +1723,10 @@ impl VoiceDescription {
             peak_flow_m3_s: 0.0,
             min_flow_m3_s: 0.0,
             closed_steps: 0,
+            rig_tail: self.glottal_orifice.map(|_| {
+                let total = self.samples * u64::from(self.mechanics_per_output);
+                (total.saturating_sub(2 * u64::from(mechanics_rate)), 0.0, 0)
+            }),
             tract_switches: motion.switches,
             next_switch: 0,
         })
@@ -1406,10 +1799,11 @@ impl VoiceDescription {
             return Err(e);
         }
         let mut formants = Vec::with_capacity(built.len());
-        for (island_taps, mouth_taps, f) in built {
+        for (island_taps, mouth_taps, f, fricative) in built {
             motion.island_taps.push(island_taps);
             motion.mouth_taps.push(mouth_taps);
             formants.push(Some(f));
+            motion.fricative.extend(fricative);
         }
         for (at, name) in targets {
             let f = formants[at].take().ok_or("a moving tract target was reached twice")?;
@@ -1427,7 +1821,7 @@ impl VoiceDescription {
         chart: &TractChart,
         mechanics_rate: u32,
         zc: f64,
-    ) -> Result<(Vec<f64>, Vec<f64>, Result<Vec<f64>, String>), String> {
+    ) -> Result<ShapeLines, String> {
         let gas = self.tract_gas();
         let exterior = self.ambient_gas();
         let duct = chart.to_duct();
@@ -1471,12 +1865,58 @@ impl VoiceDescription {
             None => chart.tmm_formants_terminated(gas, wall, self.termination, 4),
         }
         .map_err(|e| format!("{e:?}"));
-        Ok((island_taps, mouth_taps.to_vec(), formants))
+        // `fricative_noise` (MB 16735 piece 2): this shape's `k` by the morph's own correspondence (`shape_constriction`;
+        // MB 16891 (c)); its junction lines after that section with this shape's own mouth load, exactly as `build`
+        // makes the card's; and its constriction, `A_j` the shape's largest section after its `k` (MB 15828).
+        let fricative = match self.fricative_noise {
+            Some(card) => {
+                let sections = chart.sections();
+                let k = shape_constriction(&self.sections, card.constriction, sections);
+                if k + 1 >= sections.len() {
+                    return Err("fricative_noise: the card's section k falls on a moving shape's last section, with \
+                                nothing after it"
+                        .into());
+                }
+                let lines = match split {
+                    None => junction_source_lines(&duct, k, gas, mouth_load, mechanics_rate, zc, wall, &LineLadder::default()),
+                    Some(table) => junction_source_lines_exterior(
+                        &duct, k, gas, exterior, table, mechanics_rate, zc, wall, &LineLadder::default(),
+                    ),
+                }
+                .map_err(|e| format!("moving fricative junction lines refused: {e}"))?;
+                let plain = |line: &DelayedFilter| {
+                    line.quiescent_fir()
+                        .map(|(_, taps)| taps.to_vec())
+                        .ok_or("a moving tract needs every shape's fricative lines to be plain FIRs")
+                };
+                Some(FricativeShapeLines {
+                    mouth_taps: plain(&lines.to_mouth_flow)?,
+                    inlet_taps: plain(&lines.to_inlet_wave)?,
+                    section: k,
+                    area_k_m2: sections[k].area_m2,
+                    area_j_m2: widest_after(sections, k),
+                })
+            }
+            None => None,
+        };
+        Ok((island_taps, mouth_taps.to_vec(), formants, fricative))
     }
 }
 
-/// One further shape's island taps, mouth-flow taps and passive formants (`VoiceDescription::shape_taps`).
-type ShapeLines = (Vec<f64>, Vec<f64>, Result<Vec<f64>, String>);
+/// One further shape's island taps, mouth-flow taps, passive formants and, with `fricative_noise`, its fricative lines
+/// (`VoiceDescription::shape_taps`).
+type ShapeLines = (Vec<f64>, Vec<f64>, Result<Vec<f64>, String>, Option<FricativeShapeLines>);
+
+/// One further shape's `fricative_noise` (MB 16735 piece 2): its junction lines' taps and its constriction.
+struct FricativeShapeLines {
+    mouth_taps: Vec<f64>,
+    inlet_taps: Vec<f64>,
+    /// The shape's `k`: its section at the card's section `k`'s fractional distance from the glottis.
+    section: usize,
+    area_k_m2: f64,
+    /// The shape's largest section after `k` (MB 15828).
+    area_j_m2: f64,
+}
 
 /// `build(0..n)` on up to `workers` scoped threads, each on one contiguous block of shapes, in the manner of the snowman's
 /// `par_map` (`baffled_pressure_head_torso`): every shape is built alone by the same serial code and kept at its index, so
@@ -1516,6 +1956,8 @@ struct TractMotion {
     island_taps: Vec<Vec<f64>>,
     /// The mouth-flow line taps of shapes 1...
     mouth_taps: Vec<Vec<f64>>,
+    /// With `fricative_noise`, the fricative lines and constriction of shapes 1.. (empty without the row).
+    fricative: Vec<FricativeShapeLines>,
     /// When the render starts each shape's crossfade, in step order.
     switches: Vec<TractSwitch>,
     /// Passive formants of each move's target, by name.
@@ -1597,6 +2039,9 @@ pub struct VoiceStats {
     pub mean_force_passes: f64,
     /// Gains `pulse_shimmer` has drawn, one per opening of the glottis; 0 without the key.
     pub pulse_shimmer_draws: u64,
+    /// With `glottal_orifice` only: the mean glottal flow [m^3/s] over the render's last 2 s (the flow rig's read
+    /// window; the whole render when it is shorter). `None` without the row, or before the window has begun.
+    pub rig_mean_glottal_flow_m3_s: Option<f64>,
 }
 
 struct Schedule {
@@ -1776,6 +2221,8 @@ pub struct VoicePerformance {
     /// Opt-in head: the baffled pressure through the rigid sphere's causal FIR.
     head: Option<HeadSphere>,
     schedule: Schedule,
+    /// Opt-in `rest_gap` rows: the fold's rest gap over time [m] (module doc); `None` keeps the `fold` row's gap.
+    rest_gap: Option<Schedule>,
     tension_modulation: Option<(f64, f64)>,
     tension_flutter: Option<TensionFlutter>,
     tension_flutter_second: Option<TensionFlutter>,
@@ -1785,6 +2232,8 @@ pub struct VoicePerformance {
     jet_noise: Option<GlottalJetNoise>,
     /// Opt-in glottal constriction noise (Oldham and Ukpoho's printed law, an extrapolation).
     constriction_noise: Option<ConstrictionNoise>,
+    /// Opt-in supraglottal (fricative) source and its junction lines.
+    fricative: Option<FricativeSource>,
     /// Opt-in per-cycle gain on the wave the tract receives.
     pulse_shimmer: Option<PulseShimmer>,
     gas_density: f64,
@@ -1800,10 +2249,63 @@ pub struct VoicePerformance {
     peak_flow_m3_s: f64,
     min_flow_m3_s: f64,
     closed_steps: u64,
+    /// With `glottal_orifice` only, the flow rig's read window: the first physical substep of the render's last 2 s,
+    /// the sum of the glottal flow from it [m^3/s] and the substeps summed. `None` without the row.
+    rig_tail: Option<(u64, f64, u64)>,
 }
 
 fn refusal(what: String) -> RenderError {
     RenderError::Voice(AcousticRealizeError::Nonlinear(what))
+}
+
+/// The `fricative_noise` row realized: the supraglottal source, its two junction lines, and what its drop needs.
+struct FricativeSource {
+    noise: ConstrictionNoise,
+    /// `push(p_s)`: the source's own mouth flow [m^3/s] (`JunctionSourceLines::to_mouth_flow`), moving with the tract.
+    to_mouth_flow: ShapeLine,
+    /// `push(p_s)`: the wave [Pa] it returns to the island (`JunctionSourceLines::to_inlet_wave`), moving with the tract.
+    to_inlet_wave: ShapeLine,
+    /// The constriction of every shape, shape 0 the card's own (one shape on a fixed tract).
+    shapes: Vec<FricativeShape>,
+    /// The present shape: the last switch's.
+    shape: usize,
+    /// The card has `glottal_orifice`: the source reads the held flow, not [`Self::last_flow_m3_s`].
+    rig: bool,
+    /// On the folds: the island's flow [m^3/s] of the step before, the flow the source reads (module doc).
+    last_flow_m3_s: f64,
+}
+
+/// One shape's constriction for the fricative source: its section `k`, `A_k`, `sigma = A_k / A_j` and the radius of
+/// `A_j` (`sigma >= 1` on a shape with no expansion after `k`, where the law drives no band).
+#[derive(Debug, Clone, Copy)]
+struct FricativeShape {
+    /// The (c) rule's section, read by the tests; the junction lines were built at it, and the step reads the rest.
+    #[cfg_attr(not(test), allow(dead_code))]
+    section: usize,
+    area_k_m2: f64,
+    open_area_ratio: f64,
+    duct_radius_m: f64,
+}
+
+/// The `receiver free_field_monopole` row (module doc): a point monopole at the mouth centre in free space, `rho dQ/dt /
+/// (4 pi R)`, on the baffled receiver's own band-limited differentiator and travel-time kernel. One surface sample's
+/// Rayleigh gain is `rho A / (2 pi R)` times its velocity per unit flow; a rigid baffle's image doubles a point source, so
+/// the free field is that sample with half the flow basis, `1 / (2 A)`. The band rule is the disk receiver's.
+fn free_field_monopole(
+    mouth_area_m2: f64,
+    mechanics_rate: u32,
+    output_rate: u32,
+    microphone: CircularOutletReceiver,
+    medium: RayleighMedium,
+) -> Result<BaffledPressure, String> {
+    if !(microphone.maximum_frequency_hz > 0.0 && microphone.maximum_frequency_hz <= 0.45 * f64::from(output_rate)) {
+        return Err("free_field_monopole band must be positive and at most 0.45 of its output clock".into());
+    }
+    if !(mouth_area_m2.is_finite() && mouth_area_m2 > 0.0) {
+        return Err("free_field_monopole needs a finite positive mouth area".into());
+    }
+    let surface = [SurfaceSample { position_m: [0.0; 3], area_m2: mouth_area_m2, mode_shape: vec![0.5 / mouth_area_m2] }];
+    BaffledPressure::new_multirate_differentiating(&surface, 1, mechanics_rate, output_rate, microphone.position_m, medium)
 }
 
 impl VoicePerformance {
@@ -1854,6 +2356,7 @@ impl VoicePerformance {
                 all_passes as f64 / self.steps as f64
             },
             pulse_shimmer_draws: self.pulse_shimmer.as_ref().map_or(0, |row| row.draws),
+            rig_mean_glottal_flow_m3_s: self.rig_tail.and_then(|(_, sum, n)| (n > 0).then_some(sum / n as f64)),
         }
     }
 
@@ -1883,6 +2386,12 @@ impl VoicePerformance {
                         .set_tension(1.0 + moved)
                         .map_err(|e| format!("fold tension refused: {e:?}"))?;
                 }
+                // `rest_gap`: the abducting gesture, on the same clock (module doc). Without the rows nothing is called.
+                if let Some(rest_gap) = self.rest_gap.as_mut() {
+                    self.island
+                        .set_rest_gap(rest_gap.at(t))
+                        .map_err(|e| format!("fold rest gap refused: {e:?}"))?;
+                }
             }
             // A moving tract switches both lines on the same physical step, before the island scatters into them.
             if let Some(switch) = self.tract_switches.get(self.next_switch)
@@ -1894,6 +2403,22 @@ impl VoicePerformance {
                 self.mouth
                     .switch(switch.shape, switch.fade)
                     .map_err(|e| format!("moving mouth-flow switch refused: {e}"))?;
+                // The fricative's lines take the same crossfade and its law the new shape's constriction (MB 16735
+                // piece 2); the island has already taken that shape's Borda-Carnot factor in `switch_tract`.
+                if let Some(source) = self.fricative.as_mut() {
+                    if switch.shape >= source.shapes.len() {
+                        return Err("a moving tract switch names a shape the fricative source does not have".into());
+                    }
+                    source
+                        .to_mouth_flow
+                        .switch(switch.shape, switch.fade)
+                        .map_err(|e| format!("moving fricative mouth line switch refused: {e}"))?;
+                    source
+                        .to_inlet_wave
+                        .switch(switch.shape, switch.fade)
+                        .map_err(|e| format!("moving fricative inlet line switch refused: {e}"))?;
+                    source.shape = switch.shape;
+                }
                 self.next_switch += 1;
             }
             let gesture = self.schedule.at(t);
@@ -1936,12 +2461,44 @@ impl VoicePerformance {
                     series += noise;
                 }
             }
+            // `fricative_noise`: the series pressure after section k, from the last step's flow, at the held flow through
+            // the orifice and the constriction at the gesture's pressure, or on the folds at the island's flow of the step
+            // before (module doc). It is not in the glottal drive: it reaches the island only through its own returned
+            // wave, below.
+            let fricative_pa = match self.fricative.as_mut() {
+                Some(source) => {
+                    let flow = if source.rig {
+                        self.island.orifice_held_flow_m3_s(gesture).unwrap_or(0.0)
+                    } else {
+                        source.last_flow_m3_s.max(0.0)
+                    };
+                    // The present shape's constriction: past `sigma = 1` (section k as wide as every section after it)
+                    // the printed law drives no band, so the source turns off through the law as the tract opens.
+                    let shape = source.shapes[source.shape];
+                    let jet_speed = flow / shape.area_k_m2;
+                    let open = 1.0 - shape.open_area_ratio;
+                    let dp = 0.5 * self.gas_density * jet_speed * jet_speed * open * open;
+                    source.noise.pressure_pa_jet_in(dp, jet_speed, shape.open_area_ratio, shape.duct_radius_m)
+                }
+                None => 0.0,
+            };
             let frame = if self.island.has_upstream() {
                 self.island.step_lung(gesture, series)
             } else {
                 self.island.step(drive)
             }
             .map_err(|e| format!("glottal island refused: {e:?}"))?;
+            if let Some(source) = self.fricative.as_mut() {
+                source.noise.record(frame.flow_m3_s);
+                source.last_flow_m3_s = frame.flow_m3_s;
+                let returned = source
+                    .to_inlet_wave
+                    .push(fricative_pa)
+                    .map_err(|e| format!("fricative inlet line refused: {e:?}"))?;
+                self.island
+                    .add_returning_wave_pa(returned)
+                    .map_err(|e| format!("glottal island refused: {e:?}"))?;
+            }
             if let Some(source) = self.aspiration.as_mut() {
                 source.record(frame.flow_m3_s, self.fold_length_m * frame.gap_m.max(0.0));
             }
@@ -1960,15 +2517,28 @@ impl VoicePerformance {
                     wave *= shimmer.gain;
                 }
             }
-            let flow = self
+            let mut flow = self
                 .mouth
                 .push(wave)
                 .map_err(|e| format!("mouth-flow line refused: {e:?}"))?;
+            if let Some(source) = self.fricative.as_mut() {
+                // Superposition on the linear tract: the source's own mouth flow joins the island's.
+                flow += source
+                    .to_mouth_flow
+                    .push(fricative_pa)
+                    .map_err(|e| format!("fricative mouth line refused: {e:?}"))?;
+            }
             self.trace[j] = flow;
             self.peak_flow_m3_s = self.peak_flow_m3_s.max(frame.flow_m3_s);
             self.min_flow_m3_s = self.min_flow_m3_s.min(frame.flow_m3_s);
             if frame.shut {
                 self.closed_steps += 1;
+            }
+            if let Some((from, sum, count)) = self.rig_tail.as_mut()
+                && self.steps >= *from
+            {
+                *sum += frame.flow_m3_s;
+                *count += 1;
             }
             self.steps += 1;
         }
@@ -2830,6 +3400,83 @@ mod tests {
         let flutter = render(&gesture);
         assert!(flutter.iter().all(|v| v.is_finite()));
         assert!(flutter.iter().zip(&shaped).any(|(x, y)| x != y), "the gesture must reach the shaped fold");
+    }
+
+    /// The `rest_gap` rows (MB 16735, the first word's piece 4) parse in time order, and each refusal names what it
+    /// meets: the fields, a gap that is not positive, times that do not increase, and folds that have no two-mass rest
+    /// gap to move (`one_dof`, `body_cover`, `glottal_orifice`).
+    #[test]
+    fn rest_gap_parses_and_is_refused_by_name() {
+        let parse = |text: &str| VoiceDescription::from_bytes(text.as_bytes());
+        let rows = "rest_gap 0 2.79e-3\nrest_gap 0.2 2.79e-3\nrest_gap 0.35 3.57e-4\n";
+        let ok = parse(&modulation_text(rows)).expect("parses");
+        assert_eq!(ok.rest_gap, vec![(0.0, 2.79e-3), (0.2, 2.79e-3), (0.35, 3.57e-4)]);
+        assert!(parse(&modulation_text("")).expect("parses").rest_gap.is_empty());
+        for (extra, needle) in [
+            ("rest_gap 0\n", "takes 2 fields"),
+            ("rest_gap 0 x\n", "not a number"),
+            ("rest_gap 0 inf\n", "must be finite"),
+            ("rest_gap -0.1 3e-4\n", "non-negative"),
+            ("rest_gap 0 0\n", "gap positive"),
+            ("rest_gap 0 -3e-4\n", "gap positive"),
+            ("rest_gap 0.1 3e-4\nrest_gap 0.1 4e-4\n", "strictly increasing"),
+            ("rest_gap 0.2 3e-4\nrest_gap 0.1 4e-4\n", "strictly increasing"),
+        ] {
+            let error = parse(&modulation_text(extra)).expect_err(extra);
+            assert!(error.contains(needle), "{extra:?} -> {error}");
+        }
+        let one_dof = modulation_text(rows)
+            .replace("fold two_mass", "fold one_dof")
+            .replace("fold_damping_upper 0.6\n", "");
+        let error = parse(&one_dof).expect_err("one_dof");
+        assert!(error.contains("rest_gap needs a two_mass fold"), "{error}");
+        let body_cover =
+            modulation_text(&format!("fold_body 5.0e-5 100 0.2 3.598e-4\n{rows}")).replace("fold two_mass", "fold body_cover");
+        let error = parse(&body_cover).expect_err("body_cover");
+        assert!(error.contains("rest_gap needs a two_mass fold, not body_cover"), "{error}");
+        let error = parse(&fixture(&format!("glottal_orifice 7.854e-5\n{rows}"))).expect_err("orifice");
+        assert!(error.contains("`rest_gap` moves or reads a fold"), "{error}");
+    }
+
+    /// The rows reach the fold and nothing else. A schedule at the `fold` row's own gap is bit for bit the card without
+    /// it, held from the start or from a later first row. A gesture that opens the fold and brings it back to that gap
+    /// reaches the pressure and keeps the partition free. Held at Yoshioka's /s/ voicing-offset area (39 mm^2 on the
+    /// 14 mm fold, a 2.79 mm uniform gap) the fold shuts less often than at the card's own gap.
+    #[test]
+    fn rest_gap_at_the_cards_own_gap_is_bit_identical_and_a_gesture_reaches_the_fold() {
+        let plain = render(&fixture(""));
+        for rows in ["rest_gap 0 3.57e-4\n", "rest_gap 0.01 3.57e-4\nrest_gap 0.04 3.57e-4\n"] {
+            let own = render(&fixture(rows));
+            assert_eq!(first_difference(&plain, &own), None, "{rows:?}: the card's own gap must change nothing");
+        }
+        let gesture = fixture("rest_gap 0 1.0e-3\nrest_gap 0.03 3.57e-4\n");
+        let moved = render(&gesture);
+        assert!(moved.iter().all(|v| v.is_finite()));
+        assert!(first_difference(&plain, &moved).is_some(), "the gesture must reach the pressure");
+        let description = VoiceDescription::from_bytes(gesture.as_bytes()).expect("parses");
+        let (mut whole, mut split) = (description.build().expect("builds"), description.build().expect("builds"));
+        let (mut a, mut b) = (vec![0.0_f64; 2400], vec![0.0_f64; 2400]);
+        whole.block(&mut a).expect("whole");
+        for chunk in b.chunks_mut(37) {
+            split.block(chunk).expect("split");
+        }
+        assert_eq!(first_difference(&a, &b), None, "the gesture must not depend on the partition");
+        let closed = |extra: &str| {
+            let description = VoiceDescription::from_bytes(modulation_text(extra).as_bytes()).expect("parses");
+            let mut performance = description.build().expect("builds");
+            let mut out = vec![0.0; description.samples as usize];
+            for block in out.chunks_mut(4096) {
+                performance.block(block).expect("renders");
+            }
+            assert!(out.iter().all(|v| v.is_finite()));
+            performance.stats().closed_fraction
+        };
+        let (card, abducted) = (closed(""), closed("rest_gap 0 2.79e-3\n"));
+        println!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"voice-rest-gap-abducted\",\"closed_fraction_card\":{card},\"closed_fraction_39mm2\":{abducted}}}"
+        );
+        assert!(card > 0.0, "the card's own fold must shut ({card})");
+        assert!(abducted < card, "an abducted fold shuts less often: {abducted} against {card}");
     }
 
     /// The five filters of Ternstrom and Friberg's Fig. 9, at a rate low enough for a long run. Standard deviation
@@ -3808,5 +4455,278 @@ mod tests {
             receipt.source_taps
         );
         assert!(moved, "the airway must reach the radiated pressure");
+    }
+
+    /// The flow rig's rows (MB 15368; 15773, 15828, 15902; NavyTower 15765) parse, and each refusal names what it meets:
+    /// the fold rows with the orifice, the two airways together, the fricative source with an unusable `k`/`j`, on a fixed
+    /// tract with no expansion, on a moving tract with a card `j` that is not the card shape's largest section after `k`,
+    /// the monopole with the baffle's own observers, and the thin-wall load outside its quadrature range. The fricative
+    /// source on the folds (the word, MB 16735 piece 1) and on a moving tract (piece 2) parses, with a keyframe of another
+    /// section count and with a card shape that is no expansion (NavyTower 16887), and a fixed tract keeps any wider `j`
+    /// the card names.
+    #[test]
+    fn flow_rig_rows_parse_and_are_refused_by_name() {
+        let rig = "glottal_orifice 7.854e-5\nsubglottal_tube 2.5e-4 0.08\nsubglottal_tube 1.2e-3 0.038\nfricative_noise 5 1 4\nreceiver free_field_monopole\n";
+        let ok = VoiceDescription::from_bytes(fixture(rig).as_bytes()).expect("the rig parses");
+        assert_eq!(ok.glottal_orifice, Some(7.854e-5));
+        assert_eq!(ok.subglottal_tube.len(), 2);
+        assert_eq!(ok.fricative_noise, Some(FricativeNoiseCard { seed: 5, constriction: 1, expansion: 4 }));
+        assert!(ok.free_field_receiver);
+        let plain = VoiceDescription::from_bytes(fixture("").as_bytes()).expect("parses");
+        assert!(plain.glottal_orifice.is_none() && plain.subglottal_tube.is_empty() && plain.fricative_noise.is_none());
+        assert!(!plain.free_field_receiver);
+        let thin = fixture("").replace("termination flanged", "termination unflanged_thin_wall 256");
+        assert_eq!(
+            VoiceDescription::from_bytes(thin.as_bytes()).expect("parses").termination,
+            Termination::UnflangedThinWall { quadrature: LsQuadrature { nodes: 256 } }
+        );
+        let orifice = "glottal_orifice 7.854e-5\n";
+        let cases: Vec<(String, &str)> = vec![
+            (format!("{orifice}fold_shape sine uniform\n"), "`fold_shape` moves or reads a fold"),
+            (format!("{orifice}tension_modulation 5 0.02\n"), "`tension_modulation`"),
+            (format!("{orifice}pulse_shimmer 3 0.05\n"), "`pulse_shimmer`"),
+            (format!("{orifice}aspiration_noise 3 1e7\n"), "`aspiration_noise`"),
+            (format!("{orifice}constriction_noise 7 5.3e-3\n"), "`constriction_noise`"),
+            ("glottal_orifice 0\n".into(), "must be positive"),
+            (format!("{orifice}glottal_orifice 1e-4\n"), "only appear once"),
+            ("subglottal_tube 2.5e-4 0.08\nsubglottal_airway weibel-1963 saab-2021-table-1-B 3\n".into(), "refused together"),
+            ("subglottal_tube 2.5e-4 0\n".into(), "must be positive"),
+            (format!("{orifice}fricative_noise 5 4 1\n"), "k < j"),
+            (format!("{orifice}fricative_noise 5 1 8\n"), "k < j"),
+            (format!("{orifice}fricative_noise 5 4 5\n"), "wider than section k"),
+            (format!("{orifice}fricative_noise 5 1\n"), "takes 3 fields"),
+            ("receiver free_field_monopole\nhead_sphere 0.0875 src\n".into(), "refused with head_sphere and observer_law"),
+            ("receiver baffle\n".into(), "free_field_monopole"),
+        ];
+        for (rows, word) in &cases {
+            let error = VoiceDescription::from_bytes(fixture(rows).as_bytes()).unwrap_err();
+            assert!(error.contains(word), "{rows:?}: {error}");
+        }
+        let moving = fixture(&format!(
+            "{orifice}fricative_noise 5 1 4\nkeyframe b source src\nkeyframe b licence test\n{}tract_move 0.01 0.02 b 2\n",
+            [0.5e-4, 0.7e-4, 1.5e-4, 2.5e-4, 3.0e-4, 3.0e-4, 2.5e-4, 2.0e-4]
+                .iter()
+                .map(|a| format!("keyframe_section b {a:e} 0.02\n"))
+                .collect::<String>()
+        ));
+        VoiceDescription::from_bytes(moving.as_bytes()).expect("the source on a moving tract parses (MB 16735 piece 2)");
+        let not_widest = moving.replace("fricative_noise 5 1 4", "fricative_noise 5 1 3");
+        assert_ne!(not_widest, moving, "the replacement must change the card");
+        let error = VoiceDescription::from_bytes(not_widest.as_bytes()).unwrap_err();
+        assert!(error.contains("largest section between k and the lips"), "{error}");
+        VoiceDescription::from_bytes(fixture(&format!("{orifice}fricative_noise 5 1 3\n")).as_bytes())
+            .expect("a fixed tract keeps the card's j");
+        let recounted = format!("{moving}keyframe_section b 2.0e-4 0.02\n");
+        VoiceDescription::from_bytes(recounted.as_bytes()).expect("a keyframe of another section count parses (16887 (c))");
+        let vowel = moving.replace("fricative_noise 5 1 4", "fricative_noise 5 5 6");
+        assert_ne!(vowel, moving, "the replacement must change the card");
+        VoiceDescription::from_bytes(vowel.as_bytes()).expect("a moving card's own shape need not be an expansion");
+        let error = VoiceDescription::from_bytes(fixture(&format!("{orifice}fricative_noise 5 5 6\n")).as_bytes()).unwrap_err();
+        assert!(error.contains("wider than section k"), "a fixed card's one shape must be an expansion: {error}");
+        let folds = VoiceDescription::from_bytes(fixture("fricative_noise 5 1 4\n").as_bytes()).expect("folds parse");
+        assert!(folds.glottal_orifice.is_none());
+        assert_eq!(folds.fricative_noise, Some(FricativeNoiseCard { seed: 5, constriction: 1, expansion: 4 }));
+        for nodes in ["8", "4096", "x"] {
+            let text = fixture("").replace("termination flanged", &format!("termination unflanged_thin_wall {nodes}"));
+            let error = VoiceDescription::from_bytes(text.as_bytes()).unwrap_err();
+            assert!(error.contains("unflanged_thin_wall quadrature nodes"), "{nodes}: {error}");
+        }
+    }
+
+    /// The rig renders: finite, the fricative row reaches the radiated pressure, one seed gives one noise and another seed
+    /// another, and the orifice card's fold numbers reach nothing (the same rig on a stiffer fold renders bit for bit). A
+    /// hole wider than the tract's first section (the fixture's 0.5 cm^2) has no eq 6 expansion and is refused at build.
+    #[test]
+    fn flow_rig_renders_its_fricative_seeded_and_the_fold_reaches_nothing() {
+        let wide = fixture("glottal_orifice 7.854e-5\nreceiver free_field_monopole\n");
+        let error = VoiceDescription::from_bytes(wide.as_bytes()).expect("parses").build().err().expect("refused");
+        assert!(error.contains("no expansion"), "{error}");
+        let base = "glottal_orifice 4.0e-5\nsubglottal_tube 2.5e-4 0.08\nreceiver free_field_monopole\n";
+        let quiet = render(&fixture(base));
+        let spoken = render(&fixture(&format!("{base}fricative_noise 5 1 4\n")));
+        assert!(quiet.iter().chain(&spoken).all(|x| x.is_finite()));
+        assert!(quiet.iter().zip(&spoken).any(|(a, b)| a.to_bits() != b.to_bits()), "the fricative must reach the pressure");
+        assert_eq!(spoken, render(&fixture(&format!("{base}fricative_noise 5 1 4\n"))), "one seed, one noise");
+        assert_ne!(spoken, render(&fixture(&format!("{base}fricative_noise 6 1 4\n"))), "another seed, another noise");
+        let stiff = fixture(&format!("{base}fricative_noise 5 1 4\n")).replace(
+            "fold two_mass 1.25e-4 2.5e-5 128 12.8 40",
+            "fold two_mass 1.25e-4 2.5e-5 256 25.6 80",
+        );
+        assert_ne!(stiff, fixture(&format!("{base}fricative_noise 5 1 4\n")), "the replacement must change the card");
+        let bits = |xs: &[f64]| xs.iter().map(|x| x.to_bits()).collect::<Vec<u64>>();
+        assert_eq!(bits(&spoken), bits(&render(&stiff)), "through an orifice the fold's numbers reach nothing");
+        // The rig's read window: this card is shorter than 2 s, so the mean runs over the whole render.
+        let rig = VoiceDescription::from_bytes(fixture(base).as_bytes()).expect("parses");
+        let mut performance = rig.build().expect("builds");
+        let mut out = vec![0.0; rig.samples as usize];
+        performance.block(&mut out).expect("renders");
+        let stats = performance.stats();
+        let mean = stats.rig_mean_glottal_flow_m3_s.expect("the rig's mean flow");
+        assert!(mean > 0.0 && mean <= stats.peak_glottal_flow_m3_s, "rig mean flow {mean} against the peak {}", stats.peak_glottal_flow_m3_s);
+        let plain = VoiceDescription::from_bytes(fixture("").as_bytes()).expect("parses").build().expect("builds");
+        assert!(plain.stats().rig_mean_glottal_flow_m3_s.is_none(), "a fold card has no rig window");
+    }
+
+    /// The fricative source on the folds (MB 16735 piece 1): it renders finite, reaches the radiated pressure, one seed
+    /// gives one noise and another seed another, and it reads the island's own flow: with no lung pressure there is no
+    /// flow, no jet and no noise, so the card renders as the same card without the row's noise would (the constriction's
+    /// Borda-Carnot drop stays in the island's solve either way, and at zero flow it takes nothing).
+    #[test]
+    fn fricative_on_the_folds_reads_the_islands_own_flow() {
+        let voiced = render(&fixture(""));
+        let spoken = render(&fixture("fricative_noise 5 1 4\n"));
+        assert!(spoken.iter().all(|x| x.is_finite()));
+        assert!(voiced.iter().zip(&spoken).any(|(a, b)| a.to_bits() != b.to_bits()), "the fricative must reach the pressure");
+        assert_eq!(spoken, render(&fixture("fricative_noise 5 1 4\n")), "one seed, one noise");
+        assert_ne!(spoken, render(&fixture("fricative_noise 6 1 4\n")), "another seed, another noise");
+        let still = |rows: &str| fixture(rows).replace("subglottal 0.02 900", "subglottal 0.02 0");
+        assert_ne!(still(""), fixture(""), "the replacement must change the card");
+        let silent = render(&still("fricative_noise 5 1 4\n"));
+        assert!(silent.iter().all(|x| *x == 0.0), "no lung pressure: no flow, no jet, no noise");
+        assert_eq!(silent, render(&still("")), "a still fold card renders the same with the row");
+    }
+
+    /// The fricative source's lines end in the island's own load (MB 16735 piece 3): with `head_load` the card renders
+    /// finite and the noise reaches the pressure through the head-load lines (a seed pair: the constriction's drop in the
+    /// island's solve is the same for both seeds, so only the noise can tell them apart; NavyTower 16796); a `tract_gas`
+    /// row holding the exterior's own record takes the exterior-checked lines with one gas, which are the head-load lines
+    /// exactly, so the render is bit for bit the card's without the row; a different tract gas renders finite and its
+    /// noise reaches the pressure through the exterior-checked lines (a seed pair there too).
+    #[test]
+    fn fricative_lines_take_the_islands_head_load_and_tract_gas() {
+        let bits = |xs: &[f64]| xs.iter().map(|x| x.to_bits()).collect::<Vec<u64>>();
+        let rows = |seed: u32| format!("{HEAD_LOAD}fricative_noise {seed} 1 4\n");
+        let spoken = render(&fixture(&rows(5)));
+        assert!(spoken.iter().all(|x| x.is_finite()));
+        assert_ne!(bits(&spoken), bits(&render(&fixture(&rows(6)))), "the noise reaches the pressure through the head's load");
+        let same = render(&fixture(&format!("{}tract_gas moist_air 310.15 101325 1.0\n", rows(5))));
+        assert_eq!(bits(&spoken), bits(&same), "one gas: the exterior-checked lines are the head-load lines");
+        let warm = |seed: u32| render(&fixture(&format!("{}tract_gas moist_air 290.15 101325 0.5\n", rows(seed))));
+        let warm_5 = warm(5);
+        assert!(warm_5.iter().all(|x| x.is_finite()));
+        assert_ne!(bits(&warm_5), bits(&spoken), "another tract gas reaches the pressure");
+        assert_ne!(bits(&warm_5), bits(&warm(6)), "the noise reaches the pressure through the exterior-checked lines");
+    }
+
+    /// The fricative source on a moving tract (MB 16735 piece 2). Every shape takes its own junction lines and its own
+    /// constriction, `A_k` that shape's section `k` and `A_j` its largest section after `k` (MB 15828). Shape 0 is the
+    /// card's own, bit for bit the fixed card's. On a move toward a tract whose section `k` is wider than every later
+    /// section, the middle shape is still an expansion (`sigma < 1`) and the target is past `sigma = 1`, where the printed
+    /// law drives no band: the source turns off through the law as the tract opens. The card renders finite, the noise
+    /// reaches the pressure on the moving lines (a seed pair), and the render ends with the source on the target.
+    #[test]
+    fn fricative_on_a_moving_tract_takes_each_shapes_lines_and_constriction() {
+        let bits = |xs: &[f64]| xs.iter().map(|x| x.to_bits()).collect::<Vec<u64>>();
+        // Test chart, not data: section k = 1 opens from 0.6 cm^2 to 4.0 cm^2, past every later section (3.0 at most).
+        let opened = [0.5e-4, 4.0e-4, 1.5e-4, 2.5e-4, 3.0e-4, 3.0e-4, 2.5e-4, 2.0e-4];
+        let card = |seed: u32| {
+            let mut rows = format!("fricative_noise {seed} 1 4\nkeyframe o source src\nkeyframe o licence test\n");
+            for area in opened {
+                rows.push_str(&format!("keyframe_section o {area:e} 0.02\n"));
+            }
+            rows.push_str("tract_move 0.01 0.02 o 2\n");
+            fixture(&rows)
+        };
+        let description = VoiceDescription::from_bytes(card(5).as_bytes()).expect("parses");
+        let mut performance = description.build().expect("builds");
+        let fixed = VoiceDescription::from_bytes(fixture("fricative_noise 5 1 4\n").as_bytes())
+            .expect("parses")
+            .build()
+            .expect("builds");
+        let own = fixed.fricative.as_ref().expect("the fixed card's source").shapes[0];
+        let source = performance.fricative.as_ref().expect("the source");
+        assert_eq!(source.shapes.len(), performance.tract_switches.len() + 1, "one constriction per shape");
+        assert_eq!(source.shapes.len(), 3, "the card and the move's two steps");
+        let (first, middle, last) = (source.shapes[0], source.shapes[1], source.shapes[2]);
+        let of = |s: FricativeShape| [s.area_k_m2, s.open_area_ratio, s.duct_radius_m].map(f64::to_bits);
+        assert_eq!(of(first), of(own), "shape 0: the fixed card's own");
+        assert_eq!([first.section, middle.section, last.section], [1, 1, 1], "equal counts and lengths: the card's k");
+        assert!(first.open_area_ratio < middle.open_area_ratio && middle.open_area_ratio < 1.0, "{middle:?}");
+        assert!((last.area_k_m2 / 4.0e-4 - 1.0).abs() < 1.0e-12, "{last:?}");
+        assert!((last.duct_radius_m / (3.0e-4 / core::f64::consts::PI).sqrt() - 1.0).abs() < 1.0e-12, "{last:?}");
+        assert!(last.open_area_ratio > 1.0, "the target is past the expansion: {last:?}");
+        assert!(source.noise.driven_bands_jet_in(100.0, 30.0, last.open_area_ratio, last.duct_radius_m).is_empty());
+        let mut spoken = vec![0.0; description.samples as usize];
+        for block in spoken.chunks_mut(4096) {
+            performance.block(block).expect("renders");
+        }
+        assert!(spoken.iter().all(|x| x.is_finite()));
+        assert_eq!(performance.fricative.as_ref().expect("the source").shape, 2, "the render ends on the target");
+        assert_eq!(bits(&spoken), bits(&render(&card(5))), "one seed, one noise");
+        assert_ne!(bits(&spoken), bits(&render(&card(6))), "the noise reaches the pressure on the moving lines");
+        // A word's card is its vowel (NavyTower 16887): the card's own shape need not be an expansion, and a keyframe of
+        // another section count takes its section at the card's k's centre. Test chart, not data: card k = 5 (3.0 cm^2,
+        // nothing wider after it; j = 6, the widest after it), toward a 10-section keyframe of the card's length that
+        // narrows to 0.2 cm^2 at section 6, where the card's k's centre (0.6875 of the length) falls.
+        let narrowing = [0.5e-4, 0.6e-4, 1.5e-4, 2.5e-4, 3.0e-4, 3.0e-4, 0.2e-4, 3.0e-4, 2.5e-4, 2.0e-4];
+        let closing = |seed: u32| {
+            let mut rows = format!("fricative_noise {seed} 5 6\nkeyframe n source src\nkeyframe n licence test\n");
+            for area in narrowing {
+                rows.push_str(&format!("keyframe_section n {area:e} 0.016\n"));
+            }
+            rows.push_str("tract_move 0.01 0.02 n 2\n");
+            fixture(&rows)
+        };
+        let closed = VoiceDescription::from_bytes(closing(5).as_bytes()).expect("parses").build().expect("builds");
+        let source = closed.fricative.as_ref().expect("the source");
+        let (vowel, target) = (source.shapes[0], source.shapes[2]);
+        assert_eq!(vowel.section, 5);
+        assert!(vowel.open_area_ratio > 1.0, "the card's vowel is no expansion after k: {vowel:?}");
+        assert_eq!(target.section, 6, "the card's k's centre falls on the keyframe's section 6: {target:?}");
+        assert!((target.open_area_ratio / (0.2 / 3.0) - 1.0).abs() < 1.0e-12, "{target:?}");
+        let closing_5 = render(&closing(5));
+        assert!(closing_5.iter().all(|x| x.is_finite()));
+        assert_ne!(bits(&closing_5), bits(&render(&closing(6))), "the noise forms as the tract closes");
+        // MB 16891's condition on (c): at the card's section count the rule gives k itself, so every equal-count card
+        // stays bit for bit. Test chart, not data: the opened areas on unequal lengths of the card's total, where the
+        // card's k's centre (0.1875 of the length) falls in the keyframe's section 0; every shape still takes k = 1.
+        let uneven_length = |i: usize| if i == 0 { 0.05 } else { 0.11 / 7.0 };
+        let uneven = |seed: u32| {
+            let mut rows = format!("fricative_noise {seed} 1 4\nkeyframe u source src\nkeyframe u licence test\n");
+            for (i, area) in opened.iter().enumerate() {
+                rows.push_str(&format!("keyframe_section u {area:e} {:e}\n", uneven_length(i)));
+            }
+            rows.push_str("tract_move 0.01 0.02 u 2\n");
+            fixture(&rows)
+        };
+        let keyframe: Vec<TractSection> = opened
+            .iter()
+            .enumerate()
+            .map(|(i, &area_m2)| TractSection { area_m2, length_m: uneven_length(i) })
+            .collect();
+        let at_equal_count = VoiceDescription::from_bytes(uneven(5).as_bytes()).expect("parses");
+        let card_sections = &at_equal_count.sections;
+        assert_eq!(card_sections.len(), keyframe.len());
+        assert_eq!(section_at_fraction(&keyframe, centre_fraction(card_sections, 1)), 0, "the fraction alone moves k");
+        assert_eq!(shape_constriction(card_sections, 1, &keyframe), 1, "an equal count gives k itself");
+        let uneven_source = at_equal_count.build().expect("builds").fricative.expect("the source");
+        assert_eq!(uneven_source.shapes.iter().map(|s| s.section).collect::<Vec<_>>(), [1, 1, 1], "k on every shape");
+        assert_eq!(of(uneven_source.shapes[0]), of(own), "shape 0: the fixed card's own");
+        assert!(render(&uneven(5)).iter().all(|x| x.is_finite()));
+    }
+
+    /// The free-field monopole: a low-frequency sinusoidal flow `Q0 sin(w t)` reaches the microphone at distance `R` as
+    /// `rho w Q0 / (4 pi R)` once the filter latency and the travel time have passed, half the baffled point source.
+    #[test]
+    fn free_field_monopole_radiates_rho_dq_dt_over_four_pi_r() {
+        let (rate, f, q0) = (40_000_u32, 500.0, 1.0e-4);
+        let medium = RayleighMedium { density: 1.1886, sound_speed: 344.4 };
+        let microphone = CircularOutletReceiver {
+            position_m: [0.3, 0.0, 0.3],
+            radial_rings: 4,
+            angular_points: 16,
+            maximum_frequency_hz: 16_000.0,
+        };
+        let mut receiver = free_field_monopole(3.06e-4, rate, rate, microphone, medium).expect("monopole");
+        let w = core::f64::consts::TAU * f;
+        let out: Vec<f64> = (0..8000)
+            .map(|n| receiver.step_trace(&[q0 * (w * f64::from(n) / f64::from(rate)).sin()]).expect("step"))
+            .collect();
+        let peak = out[4000..].iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+        let r = (0.3_f64 * 0.3 + 0.3 * 0.3).sqrt();
+        let expected = medium.density * w * q0 / (4.0 * core::f64::consts::PI * r);
+        assert!((peak / expected - 1.0).abs() < 0.01, "peak {peak} against rho w Q0 / (4 pi R) = {expected}");
+        let wide = CircularOutletReceiver { maximum_frequency_hz: 18_001.0, ..microphone };
+        assert!(free_field_monopole(3.06e-4, rate, rate, wide, medium).is_err(), "the disk receiver's band rule");
     }
 }

@@ -396,6 +396,8 @@ const FOLD_STRIPS: usize = 48;
 /// The strip table of a [`FoldShape`]: the gap of strip `j` is `rest[j] + mode[j] q`, each strip a `1 / FOLD_STRIPS` of
 /// the fold's length at its midpoint.
 struct FoldStrips {
+    /// The shape the table was built from, so a new rest gap rebuilds it exactly ([`GlottalIsland::set_rest_gap`]).
+    shape: FoldShape,
     mode: [f64; FOLD_STRIPS],
     rest: [f64; FOLD_STRIPS],
     /// `mean(phi^2)`: the modal mass and stiffness against the mean-gap coordinate `q`.
@@ -420,7 +422,7 @@ impl FoldStrips {
             gamma += mode[j] * mode[j] / n;
             quartic += mode[j] * mode[j] * mode[j] * mode[j] / n;
         }
-        Self { mode, rest, gamma, quartic }
+        Self { shape, mode, rest, gamma, quartic }
     }
 
     /// The gap of strip `j` at the displacement `q` [m].
@@ -669,8 +671,8 @@ pub struct GlottalFrame {
     /// The fold's stored energy change over the step [J]: `H(x1) - H(x0)`, with `FoldSpring`'s energy on the
     /// two-mass island.
     pub fold_energy_j: f64,
-    /// Work done on the fold by [`GlottalIsland::set_tension`] calls since the previous step [J]. The stored
-    /// energy changed by this plus `fold_energy_j` (the step's own `H(x1) - H(x0)`).
+    /// Work done on the fold by [`GlottalIsland::set_tension`] and [`GlottalIsland::set_rest_gap`] calls since the
+    /// previous step [J]. The stored energy changed by this plus `fold_energy_j` (the step's own `H(x1) - H(x0)`).
     pub tension_work_j: f64,
     /// Some part of the fold is shut at the end of the step: `gap_m <= 0`, or with a [`FoldShape`], which may never
     /// shut the whole length, any strip of either section.
@@ -727,13 +729,23 @@ pub struct GlottalIsland {
     gap_history: std::collections::VecDeque<f64>,
     /// Common factor on the card's three stiffnesses, 1.0 = the card as written ([`GlottalIsland::set_tension`]).
     tension: f64,
-    /// Work done by tension changes since the last step [J], reported by the next frame.
+    /// Work done by tension and rest-gap changes since the last step [J], reported by the next frame.
     tension_work_j: f64,
     /// The opt-in fold shape's strips; `None` is the printed island, by its own path.
     strips: Option<Box<FoldStrips>>,
     /// The opt-in airway below the folds ([`GlottalIsland::with_upstream`]); `None` applies the step's pressure
     /// under the folds as an ideal source.
     upstream: Option<Box<UpstreamAirway>>,
+    /// The opt-in fixed glottal orifice [m^2] ([`GlottalIsland::with_orifice`]): the flow takes this hole's jet with the
+    /// two-mass exit recovery into the tract's first section, and the fold never steps. `None` is the fold's own valve.
+    orifice_area_m2: Option<f64>,
+    /// The opt-in supraglottal constriction's kinetic factor `(1/A_k - 1/A_j)^2` [m^-4]
+    /// ([`GlottalIsland::with_constriction`]), in series with the valve's own; `None` adds nothing.
+    constriction_kinetic: Option<f64>,
+    /// A moving tract's constriction factor of every shape, shape 0 first, `None` for a shape with no expansion after
+    /// its constriction ([`GlottalIsland::with_constriction_keyframes`]); [`GlottalIsland::switch_tract`] puts the new
+    /// shape's in [`Self::constriction_kinetic`]. `None` keeps the one factor for the whole render.
+    constriction_shapes: Option<Vec<Option<f64>>>,
 }
 
 /// `eta_k`, the nonlinear coefficient of eq 1 (p. 1237), printed as 100 for both masses (p. 1250) [m^-2]. The print
@@ -1635,6 +1647,9 @@ impl GlottalIsland {
             tension_work_j: 0.0,
             strips: None,
             upstream: None,
+            orifice_area_m2: None,
+            constriction_kinetic: None,
+            constriction_shapes: None,
         })
     }
 
@@ -1748,9 +1763,20 @@ impl GlottalIsland {
     /// # Errors
     /// An island without keyframes, an unknown shape, or a switch during a running crossfade, by name.
     pub fn switch_tract(&mut self, index: usize, fade_samples: usize) -> Result<(), GlottisError> {
+        let kinetic = match &self.constriction_shapes {
+            Some(menu) => Some(*menu.get(index).ok_or(GlottisError::Invalid {
+                what: "a tract keyframe switch names a shape with no constriction",
+            })?),
+            None => None,
+        };
         self.line
             .switch(index, fade_samples)
-            .map_err(|e| keyframe_refusal(e, "a tract keyframe switch was refused"))
+            .map_err(|e| keyframe_refusal(e, "a tract keyframe switch was refused"))?;
+        // A moving constriction (with_constriction_keyframes): the new shape's factor, or none, from this step on.
+        if let Some(factor) = kinetic {
+            self.constriction_kinetic = factor;
+        }
+        Ok(())
     }
 
     /// The present fold tension (1.0 = the card as written).
@@ -1820,6 +1846,81 @@ impl GlottalIsland {
         self.springs = springs;
         self.gap_response = [None; 4];
         self.tension = tension;
+        self.tension_work_j += work;
+        Ok(work)
+    }
+
+    /// The fold's present rest gap [m]: the card's `rest_gap_m`, or the last [`GlottalIsland::set_rest_gap`].
+    #[must_use]
+    pub fn rest_gap_m(&self) -> f64 {
+        self.card.rest_gap_m
+    }
+
+    /// Set the two-mass fold's rest gap [m], which is how an abducting or adducting gesture of the arytenoids acts on
+    /// the lumped fold: the rest position moves, the displacement from it is kept, so every gap moves by the change
+    /// (with a fold shape, each strip by its share of the new mean gap, the shape's own taper). Eq 1 and 2's springs
+    /// (and a fold shape's strips) are rebuilt at the new rest gap and the present tension; the masses, stiffnesses and
+    /// damping are not touched. The springs' stored energy at the kept displacement changes by its new value less its
+    /// old: work the gesture does on the fold. It is returned, and the next frame reports it in `tension_work_j` with
+    /// any tension work, so the energy ledger stays closed. Setting the present gap is a no-op that returns 0.
+    /// Determinism class: a pure function of the call sequence.
+    ///
+    /// # Errors
+    /// A gap not finite and positive; a 1-DOF or body-cover fold, or a fixed glottal orifice, by name; pHS, split or
+    /// collision admission of the rebuilt fold.
+    pub fn set_rest_gap(&mut self, rest_gap_m: f64) -> Result<f64, GlottisError> {
+        if !(rest_gap_m.is_finite() && rest_gap_m > 0.0) {
+            return Err(GlottisError::Invalid {
+                what: "fold rest gap",
+            });
+        }
+        if !matches!(self.valve, Valve::TwoMass { .. }) {
+            return Err(GlottisError::Invalid {
+                what: "a rest-gap change needs a two-mass fold",
+            });
+        }
+        if self.orifice_area_m2.is_some() {
+            return Err(GlottisError::Invalid {
+                what: "a rest-gap change has no fold to move behind a glottal orifice",
+            });
+        }
+        if rest_gap_m == self.card.rest_gap_m {
+            return Ok(0.0);
+        }
+        let mut card = self.card;
+        card.rest_gap_m = rest_gap_m;
+        let TensionedFold {
+            phs,
+            linear,
+            obstacle,
+            damped,
+            springs,
+        } = tensioned_fold(&card, true, None, self.tension)?;
+        let strips = self
+            .strips
+            .as_ref()
+            .map(|old| Box::new(FoldStrips::new(old.shape, rest_gap_m)));
+        let Valve::TwoMass { phs: slot, x } = &mut self.valve else {
+            return Err(GlottisError::Invalid {
+                what: "a rest-gap change needs a two-mass fold",
+            });
+        };
+        // Two-mass H holds no rest gap; the difference is kept so the ledger stays closed if it ever does.
+        let mut work = phs.hamiltonian(&x[..]) - slot.hamiltonian(&x[..]);
+        work += match (&strips, &self.strips) {
+            (Some(new), Some(old)) => {
+                new.fold_spring_energy(&springs, &x[..]) - old.fold_spring_energy(&self.springs, &x[..])
+            }
+            _ => fold_spring_energy(&springs, &x[..]) - fold_spring_energy(&self.springs, &x[..]),
+        };
+        *slot = phs;
+        self.card = card;
+        self.linear = linear;
+        self.obstacle = obstacle;
+        self.damped = damped;
+        self.springs = springs;
+        self.gap_response = [None; 4];
+        self.strips = strips;
         self.tension_work_j += work;
         Ok(work)
     }
@@ -1975,6 +2076,152 @@ impl GlottalIsland {
         Ok(self)
     }
 
+    /// Replace the folds by a fixed orifice of `area_m2` (a flow rig's glottal hole, MB 15773 and 16025): the flow
+    /// through it is the jet of the two-mass channel's exit, `U^2 / a` with `a = 2 / (rho K_o)` and `K_o = (1 - 2N(1 -
+    /// N)) / A^2`, `N = A / A_1` with `A_1` the tract's first section: Ishizaka and Flanagan's eq 6 recovery (p. 1240),
+    /// the momentum balance of a sudden expansion taken to the static pressure of the tract's first section, the law
+    /// the island's own two-mass exit takes (`If72Channel::kinetic`). No entrance term is carried: eq 7's 1.37 is the
+    /// folds' own inlet. It is in series with the port, the tract and any [`Self::with_constriction`] drop, by the same
+    /// junction solve.
+    /// The fold is never stepped: its card reaches no number of the render, and every frame reports it at rest (no
+    /// dissipation, no fold energy, never shut). Without this call the island is untouched.
+    ///
+    /// # Errors
+    /// An island that has stepped or already has an orifice, an area that is not finite and positive, or a hole wider
+    /// than the tract's first section (no expansion, so no eq 6 recovery), by name.
+    pub fn with_orifice(mut self, area_m2: f64) -> Result<Self, GlottisError> {
+        if self.force_passes.1 != 0 || self.tension != 1.0 || self.orifice_area_m2.is_some() {
+            return Err(GlottisError::Invalid {
+                what: "a glottal orifice is set once, before the island's first step",
+            });
+        }
+        if !(area_m2.is_finite() && area_m2 > 0.0) {
+            return Err(GlottisError::Invalid {
+                what: "a glottal orifice needs a finite positive area",
+            });
+        }
+        if area_m2 > self.tract_inlet_area_m2 {
+            return Err(GlottisError::Invalid {
+                what: "a glottal orifice wider than the tract's first section is no expansion: eq 6 needs A <= A_1",
+            });
+        }
+        self.orifice_area_m2 = Some(area_m2);
+        Ok(self)
+    }
+
+    /// The orifice's kinetic factor `K_o = (1 - 2N(1 - N)) / A^2`, `N = A / A_1` ([`Self::with_orifice`]), with any
+    /// constriction's `(1/A_k - 1/A_j)^2` in series [m^-4].
+    fn orifice_kinetic(&self, area: f64) -> f64 {
+        let n = area / self.tract_inlet_area_m2;
+        (1.0 - 2.0 * n * (1.0 - n)) / (area * area) + self.constriction_kinetic.unwrap_or(0.0)
+    }
+
+    /// Put a supraglottal constriction's drop in series with the valve (MB 15368, rulings 15773 and 15828; NavyTower
+    /// 15491): the section `A_k` opening into the duct `A_j`, a sudden expansion whose loss is Borda-Carnot's,
+    /// `rho U^2 (1/A_k - 1/A_j)^2 / 2`. The junction solve then takes `1/a_eff = 1/a + 1/a_k` with `a_k = 2 / (rho (1/A_k -
+    /// 1/A_j)^2)`, on every valve. The tract line is unchanged: the constriction's area is already a section of it, and
+    /// only the jet's kinetic loss there is added. Without this call every junction solve takes its old arithmetic.
+    ///
+    /// # Errors
+    /// An island that has stepped or already has a constriction, or areas that are not finite with `0 < A_k < A_j` (an
+    /// expansion is needed for the Borda-Carnot loss), by name.
+    pub fn with_constriction(mut self, area_k_m2: f64, area_j_m2: f64) -> Result<Self, GlottisError> {
+        if self.force_passes.1 != 0
+            || self.tension != 1.0
+            || self.constriction_kinetic.is_some()
+            || self.constriction_shapes.is_some()
+        {
+            return Err(GlottisError::Invalid {
+                what: "a supraglottal constriction is set once, before the island's first step",
+            });
+        }
+        if !(area_k_m2.is_finite() && area_j_m2.is_finite() && area_k_m2 > 0.0 && area_j_m2 > area_k_m2) {
+            return Err(GlottisError::Invalid {
+                what: "the Borda-Carnot loss needs an expansion: 0 < A_k < A_j, both finite",
+            });
+        }
+        let gap = 1.0 / area_k_m2 - 1.0 / area_j_m2;
+        self.constriction_kinetic = Some(gap * gap);
+        Ok(self)
+    }
+
+    /// Give an island with a moving tract ([`Self::with_tract_keyframes`]) the supraglottal constriction `(A_k, A_j)` of
+    /// every shape, shape 0 first, in the tract line's order (MB 16735 piece 2), in place of [`Self::with_constriction`]'s
+    /// one. A shape whose `A_j` is wider than its `A_k` takes `(1/A_k - 1/A_j)^2` in series, exactly as there; a shape
+    /// with no section after `k` wider than `A_k` has no sudden expansion, so no jet and no Borda-Carnot loss: it takes no
+    /// constriction, and every junction solve on it takes the old arithmetic. Shape 0's is the island's from the first
+    /// step; [`Self::switch_tract`] puts the new shape's in from the switch's step on, while the tract line crossfades
+    /// its reflected wave: the factor itself is not faded. Without this call every switch keeps the island's one factor.
+    ///
+    /// # Errors
+    /// An island that has stepped or already has a constriction (either form), a count that is not the tract line's
+    /// shapes, or areas that are not finite and positive, by name.
+    pub fn with_constriction_keyframes(mut self, shapes: &[(f64, f64)]) -> Result<Self, GlottisError> {
+        if self.force_passes.1 != 0
+            || self.tension != 1.0
+            || self.constriction_kinetic.is_some()
+            || self.constriction_shapes.is_some()
+        {
+            return Err(GlottisError::Invalid {
+                what: "a moving constriction is set once, in place of with_constriction, before the island's first step",
+            });
+        }
+        let count = match &self.line {
+            ShapeLine::Moving(line) => line.shapes(),
+            ShapeLine::Fixed(_) => 1,
+        };
+        if shapes.len() != count {
+            return Err(GlottisError::Invalid {
+                what: "one constriction for every shape of the tract line, shape 0 first",
+            });
+        }
+        let mut menu = Vec::with_capacity(count);
+        for &(area_k_m2, area_j_m2) in shapes {
+            if !(area_k_m2.is_finite() && area_j_m2.is_finite() && area_k_m2 > 0.0 && area_j_m2 > 0.0) {
+                return Err(GlottisError::Invalid {
+                    what: "a moving constriction's areas must be finite and positive",
+                });
+            }
+            menu.push((area_j_m2 > area_k_m2).then(|| {
+                let gap = 1.0 / area_k_m2 - 1.0 / area_j_m2;
+                gap * gap
+            }));
+        }
+        self.constriction_kinetic = menu[0];
+        self.constriction_shapes = Some(menu);
+        Ok(self)
+    }
+
+    /// The quasi-steady flow [m^3/s] through the orifice and any constriction at the held drive `p_held_pa`: `sqrt(2 P /
+    /// (rho (K_o + (1/A_k - 1/A_j)^2)))` with the orifice's eq 6 factor `K_o` ([`Self::with_orifice`]), the junction
+    /// solve with no series impedance (the port's, the tract's and the airway's are dynamic and viscous; the render's own
+    /// mean flow is the measure of what they take). `None` without an orifice (a fold's flow has no held value) or for a
+    /// drive that is not positive and finite.
+    #[must_use]
+    pub fn orifice_held_flow_m3_s(&self, p_held_pa: f64) -> Option<f64> {
+        let area = self.orifice_area_m2?;
+        if !(p_held_pa > 0.0 && p_held_pa.is_finite()) {
+            return None;
+        }
+        Some(det::sqrt(2.0 * p_held_pa / (self.rho * self.orifice_kinetic(area))))
+    }
+
+    /// Add `p_pa` to the wave the tract returns to the island at its next step (a source inside the tract, delivered
+    /// through its own line referenced to [`Self::port_impedance`]; [`crate::driving_point::outlet::JunctionSourceLines`]).
+    /// Called after a step, in the island line's own convention: the line's output of a step is read by the next step.
+    ///
+    /// # Errors
+    /// A wave that is not finite, by name.
+    pub fn add_returning_wave_pa(&mut self, p_pa: f64) -> Result<(), GlottisError> {
+        if !p_pa.is_finite() {
+            return Err(GlottisError::Invalid {
+                what: "a returning wave must be finite",
+            });
+        }
+        self.p_minus += p_pa;
+        Ok(())
+    }
+
     /// Whether an airway is below the folds ([`Self::with_upstream`]).
     #[must_use]
     pub fn has_upstream(&self) -> bool {
@@ -2024,6 +2271,9 @@ impl GlottalIsland {
     /// # Errors
     /// As [`Self::step`].
     pub fn step_port(&mut self, port: UpstreamPort) -> Result<GlottalFrame, GlottisError> {
+        if let Some(area) = self.orifice_area_m2 {
+            return self.step_orifice(port, area);
+        }
         let gap = self.gap_m();
         // The 1-DOF island's flow sees the DELAYED gap (the Titze
         // surface-wave mechanism); the two-mass island's vertical
@@ -2057,9 +2307,15 @@ impl GlottalIsland {
             Some(ch) if ch.open() => {
                 let inertance = ch.series_inertance();
                 let drive = p_drive + self.momentum_pa_s / self.dt;
+                // A supraglottal constriction adds its Borda-Carnot factor to the channel's (with_constriction);
+                // without one the coefficient is the channel's own, bit for bit.
+                let a_coef = match self.constriction_kinetic {
+                    Some(kinetic_k) => 2.0 / (self.rho * (ch.kinetic() + kinetic_k)),
+                    None => 2.0 / (self.rho * ch.kinetic()),
+                };
                 let u = if drive.abs() > 1.0e-12 {
                     junction_flow(
-                        2.0 / (self.rho * ch.kinetic()),
+                        a_coef,
                         self.zc_flow + port.impedance + ch.series_resistance() + inertance / self.dt,
                         drive,
                     )
@@ -2072,7 +2328,10 @@ impl GlottalIsland {
             Some(_) => (0.0, 0.0),
             None if h_open > 0.0 && p_drive.abs() > 1.0e-12 => {
                 let wh = self.card.fold_length_m * h_open;
-                let a_coef = 2.0 * wh * wh / self.rho;
+                let a_coef = match self.constriction_kinetic {
+                    Some(kinetic_k) => 2.0 / (self.rho * (1.0 / (wh * wh) + kinetic_k)),
+                    None => 2.0 * wh * wh / self.rho,
+                };
                 let u = junction_flow(
                     a_coef,
                     self.zc_flow + port.impedance + self.viscous_resistance(flow_gap),
@@ -2124,6 +2383,35 @@ impl GlottalIsland {
             fold_energy_j,
             tension_work_j: core::mem::take(&mut self.tension_work_j),
             shut: self.shut(gap_m),
+        })
+    }
+
+    /// [`Self::step_port`] through the fixed orifice of `area` ([`Self::with_orifice`]): the same junction solve with `a =
+    /// 2 / (rho (K_o + constriction))` against the port, the tract's `zc` and the port's impedance, the same scatter into
+    /// the tract line; no fold force, no fold step.
+    fn step_orifice(&mut self, port: UpstreamPort, area: f64) -> Result<GlottalFrame, GlottisError> {
+        let p_drive = port.open_circuit_pa - 2.0 * self.p_minus;
+        let flow = if p_drive.abs() > 1.0e-12 {
+            junction_flow(2.0 / (self.rho * self.orifice_kinetic(area)), self.zc_flow + port.impedance, p_drive)
+        } else {
+            0.0
+        };
+        let p_sub_pa = port.pressure_pa(flow);
+        let p_supra = 2.0 * self.p_minus + self.zc_flow * flow;
+        let p_plus = p_supra - self.p_minus;
+        self.p_minus = self.line.push(p_plus).map_err(|_| GlottisError::Invalid {
+            what: "tract line left the finite set",
+        })?;
+        self.p_plus_prev = p_plus;
+        Ok(GlottalFrame {
+            flow_m3_s: flow,
+            p_supra_pa: p_supra,
+            p_sub_pa,
+            gap_m: self.gap_m(),
+            dissipated_j: 0.0,
+            fold_energy_j: 0.0,
+            tension_work_j: core::mem::take(&mut self.tension_work_j),
+            shut: false,
         })
     }
 
@@ -5058,5 +5346,234 @@ mod glottis_tests {
             misses.push("VPD order D < A < C < B".into());
         }
         assert!(misses.is_empty(), "Table 2 misses: {misses:?}");
+    }
+
+    /// The rig's fixed orifice (MB 15773, 16025) and the supraglottal constriction (15828). The held flow is the eq 6 jet
+    /// of the hole into the tract's first section, `K_o = (1 - 2N(1 - N)) / A^2`, written out here from the paper's form.
+    /// Against an open tract the steady flow at a held drive is the held junction value (an ideally open tract returns
+    /// `-p+` at DC, so the port's `zc` cancels and `U^2 / a = P`), to the tract's viscous share. The fold's card reaches
+    /// no number: two cards, one render, bit for bit. The constriction lowers the held flow exactly by its series factor
+    /// and the steady flow with it. Every refusal is by name, a hole wider than the tract's inlet among them.
+    #[test]
+    fn a_fixed_orifice_and_a_constriction_take_the_held_junction_flow_and_the_fold_reaches_nothing() {
+        let hole = core::f64::consts::PI * 0.005 * 0.005;
+        let inlet = core::f64::consts::PI * 0.010 * 0.010;
+        let n = hole / inlet;
+        let k_o = (1.0 - 2.0 * n * (1.0 - n)) / (hole * hole);
+        let drive = 1000.0;
+        let run = |k_scale: f64, constriction: Option<(f64, f64)>| {
+            let mut island = island(false, k_scale).with_orifice(hole).expect("orifice");
+            if let Some((a_k, a_j)) = constriction {
+                island = island.with_constriction(a_k, a_j).expect("constriction");
+            }
+            let held = island.orifice_held_flow_m3_s(drive).expect("held flow");
+            let flows: Vec<f64> = (0..8192).map(|_| island.step(drive).expect("step").flow_m3_s).collect();
+            (held, flows)
+        };
+        let steady = |flows: &[f64]| flows[4096..].iter().sum::<f64>() / 4096.0;
+        let (held, flows) = run(1.0, None);
+        let eq6 = (2.0 * drive / (air().density * k_o)).sqrt();
+        assert!((held / eq6 - 1.0).abs() < 1.0e-12, "held {held} against the eq 6 jet {eq6}");
+        assert!((steady(&flows) / held - 1.0).abs() < 0.02, "steady flow {} against the held {held}", steady(&flows));
+        let bits = |flows: &[f64]| flows.iter().map(|f| f.to_bits()).collect::<Vec<u64>>();
+        assert_eq!(bits(&flows), bits(&run(3.0, None).1), "the fold's card reaches nothing through an orifice");
+        let (a_k, a_j) = (0.134e-4, 3.06e-4);
+        let (held_k, flows_k) = run(1.0, Some((a_k, a_j)));
+        let factor = (1.0 / a_k - 1.0 / a_j) * (1.0 / a_k - 1.0 / a_j);
+        let expected = (2.0 * drive / (air().density * (k_o + factor))).sqrt();
+        assert!((held_k / expected - 1.0).abs() < 1.0e-12, "held {held_k} against {expected}");
+        assert!(held_k < 0.2 * held, "the /s/ constriction carries the drop: {held_k} against {held}");
+        assert!((steady(&flows_k) / held_k - 1.0).abs() < 0.02, "steady {} against the held {held_k}", steady(&flows_k));
+        assert!(island(false, 1.0).orifice_held_flow_m3_s(drive).is_none(), "a fold's flow has no held value");
+        let named = |result: Result<GlottalIsland, GlottisError>, word: &str| match result {
+            Err(GlottisError::Invalid { what }) => assert!(what.contains(word), "{what}"),
+            Err(other) => panic!("refused by another error: {other:?}"),
+            Ok(_) => panic!("admitted, but must be refused naming {word}"),
+        };
+        for (a_k, a_j) in [(0.0, 1.0e-4), (2.0e-4, 1.0e-4), (1.0e-4, 1.0e-4), (f64::NAN, 1.0e-4), (1.0e-5, f64::INFINITY)] {
+            named(island(false, 1.0).with_constriction(a_k, a_j), "Borda-Carnot");
+        }
+        for area in [0.0, -1.0e-5, f64::NAN, f64::INFINITY] {
+            named(island(false, 1.0).with_orifice(area), "finite positive area");
+        }
+        named(island(false, 1.0).with_orifice(1.01 * inlet), "no expansion");
+        island(false, 1.0).with_orifice(inlet).expect("a hole as wide as the inlet is the eq 6 limit N = 1");
+        named(island(false, 1.0).with_orifice(hole).and_then(|i| i.with_orifice(hole)), "set once");
+        named(island(false, 1.0).with_constriction(a_k, a_j).and_then(|i| i.with_constriction(a_k, a_j)), "set once");
+        let mut island = island(false, 1.0);
+        assert!(island.add_returning_wave_pa(f64::NAN).is_err());
+        island.add_returning_wave_pa(3.0).expect("finite wave");
+        assert_eq!(island.p_minus, 3.0, "the wave joins the next step's returned wave");
+    }
+
+    /// A moving constriction (MB 16735 piece 2; NavyTower 16887). Every shape's factor, shape 0 first, read through the
+    /// held flow, which is the factor's exact closed form: shape 0's from the first step, then each new shape's from its
+    /// switch, each bit for bit the one [`GlottalIsland::with_constriction`] gives. A shape with no expansion after `k`
+    /// (`A_j <= A_k`), shape 0 included, takes no constriction, so its held flow is the orifice's alone, bit for bit.
+    /// The tract line's further shapes here are the island's own taps, so only the factor moves. Without the call a
+    /// switch keeps the one factor; a refused switch changes nothing. Every refusal is by name.
+    #[test]
+    fn a_moving_constriction_takes_each_shapes_factor_at_its_switch() {
+        let hole = core::f64::consts::PI * 0.005 * 0.005;
+        let drive = 1000.0;
+        let (a_k, a_j) = (0.134e-4, 3.06e-4);
+        let held = |i: &GlottalIsland| i.orifice_held_flow_m3_s(drive).expect("held flow").to_bits();
+        let rig = || island(false, 1.0).with_orifice(hole).expect("orifice");
+        let alone = |c: Option<(f64, f64)>| match c {
+            Some((k, j)) => held(&rig().with_constriction(k, j).expect("constriction")),
+            None => held(&rig()),
+        };
+        let taps = match &rig().line {
+            ShapeLine::Fixed(line) => line.quiescent_fir().expect("a plain FIR").1.to_vec(),
+            ShapeLine::Moving(_) => panic!("a new island's line is fixed"),
+        };
+        let keyed = || rig().with_tract_keyframes(vec![taps.clone(), taps.clone()]).expect("keyframes");
+        let mut moving = keyed().with_constriction_keyframes(&[(a_k, a_j), (2.0 * a_k, a_j), (a_j, a_j)]).expect("menu");
+        assert_eq!(held(&moving), alone(Some((a_k, a_j))), "shape 0: its factor from the first step");
+        assert!(moving.switch_tract(3, 0).is_err(), "an unknown shape is refused");
+        assert_eq!(held(&moving), alone(Some((a_k, a_j))), "a refused switch changes nothing");
+        moving.switch_tract(1, 0).expect("switch to shape 1");
+        assert_eq!(held(&moving), alone(Some((2.0 * a_k, a_j))), "shape 1: its own factor");
+        moving.switch_tract(2, 0).expect("switch to shape 2");
+        assert_eq!(held(&moving), alone(None), "an opened constriction: no expansion, no constriction");
+        let mut vowel = keyed().with_constriction_keyframes(&[(a_j, 0.9 * a_j), (a_k, a_j), (a_k, a_j)]).expect("menu");
+        assert_eq!(held(&vowel), alone(None), "shape 0 with no expansion after k takes no constriction");
+        vowel.switch_tract(1, 0).expect("switch to shape 1");
+        assert_eq!(held(&vowel), alone(Some((a_k, a_j))), "the constriction forms at its shape's switch");
+        let mut kept = keyed().with_constriction(a_k, a_j).expect("constriction");
+        kept.switch_tract(2, 0).expect("switch without a moving constriction");
+        assert_eq!(held(&kept), alone(Some((a_k, a_j))), "without the call: the one factor");
+        let named = |result: Result<GlottalIsland, GlottisError>, word: &str| match result {
+            Err(GlottisError::Invalid { what }) => assert!(what.contains(word), "{what}"),
+            Err(other) => panic!("refused by another error: {other:?}"),
+            Ok(_) => panic!("admitted, but must be refused naming {word}"),
+        };
+        let menu = [(a_k, a_j), (a_k, a_j), (a_k, a_j)];
+        named(keyed().with_constriction_keyframes(&menu[..2]), "every shape of the tract line");
+        for bad in [0.0, -a_k, f64::NAN, f64::INFINITY] {
+            named(keyed().with_constriction_keyframes(&[(bad, a_j), (a_k, a_j), (a_k, a_j)]), "finite and positive");
+            named(keyed().with_constriction_keyframes(&[(a_k, a_j), (a_k, a_j), (a_k, bad)]), "finite and positive");
+        }
+        named(keyed().with_constriction(a_k, a_j).and_then(|i| i.with_constriction_keyframes(&menu)), "set once");
+        let twice = keyed().with_constriction_keyframes(&menu).expect("once");
+        named(twice.with_constriction_keyframes(&menu), "set once");
+        named(keyed().with_constriction_keyframes(&menu).and_then(|i| i.with_constriction(a_k, a_j)), "set once");
+        named(
+            keyed().with_constriction_keyframes(&[(a_j, a_j), (a_k, a_j), (a_k, a_j)]).and_then(|i| i.with_constriction(a_k, a_j)),
+            "set once",
+        );
+    }
+
+    /// The rest-gap gesture (MB 16735, the first word's piece 4). Setting the card's own gap before every step leaves
+    /// the island bit-identical. A change at a displaced state does exactly the work eq 2's contact energy stores,
+    /// written out by hand (eq 1's quartic reads the displacement, which is kept): a shut lower section that a
+    /// doubled gap opens gives its contact energy back, and a gap under the card's shuts it deeper. A ramp from three
+    /// rest gaps down to the card's under a rising pressure closes the energy ledger. A fold shape's strips follow the
+    /// new mean gap with their own taper, and no mass or stiffness moves. Refused gaps and folds change nothing.
+    #[test]
+    fn gl_031_rest_gap_changes_do_their_exact_work_and_close_the_ledger() {
+        let (mut plain, mut held) = (island(true, 1.0), island(true, 1.0));
+        let r = plain.card.rest_gap_m;
+        for k in 0..2400 {
+            let p = 1200.0 * (f64::from(k) / 1440.0).min(1.0);
+            let a = plain.step(p).expect("plain");
+            assert_eq!(held.set_rest_gap(r).expect("own gap"), 0.0);
+            let b = held.step(p).expect("held");
+            assert_eq!(a.flow_m3_s.to_bits(), b.flow_m3_s.to_bits());
+            assert_eq!(a.gap_m.to_bits(), b.gap_m.to_bits());
+            assert_eq!(b.tension_work_j, 0.0);
+        }
+
+        let mut isl = island(true, 1.0);
+        let k1 = isl.card.stiffness_lower_n_m;
+        let (q1, q2) = (-1.5 * r, 0.4 * r);
+        if let Valve::TwoMass { x, .. } = &mut isl.valve {
+            x[0] = q1;
+            x[1] = 3.0e-5;
+            x[2] = q2;
+            x[3] = -1.0e-6;
+        }
+        let contact = |g: f64| {
+            if g < 0.0 {
+                CONTACT_STIFFNESS_RATIO * k1 * g * g * (0.5 + 0.0625 * ETA_H_PER_M2 * g * g)
+            } else {
+                0.0
+            }
+        };
+        let scale = contact(r + q1).max(contact(0.8 * r + q1));
+        let mut works = Vec::new();
+        for (from, to) in [(r, 2.0 * r), (2.0 * r, 0.8 * r)] {
+            let before = fold_energy(&isl);
+            let work = isl.set_rest_gap(to).expect("rest gap");
+            let expected = contact(to + q1) - contact(from + q1);
+            assert!((work - expected).abs() <= 1.0e-9 * scale, "work {work:e} against {expected:e}");
+            assert!(
+                (before + work - fold_energy(&isl)).abs() <= 1.0e-12 * scale,
+                "{before:e} + {work:e} != {:e}",
+                fold_energy(&isl)
+            );
+            assert_eq!(isl.rest_gap_m(), to);
+            works.push(work);
+        }
+        assert!(works[0] < 0.0 && works[1] > 0.0, "opening gives the contact energy back, shutting stores it: {works:?}");
+        assert_eq!(isl.step(0.0).expect("step").tension_work_j, works[0] + works[1]);
+        assert_eq!(isl.step(0.0).expect("step").tension_work_j, 0.0);
+
+        let rate = f64::from(RATE);
+        let (n, ramp) = ((0.6 * rate) as usize, (0.3 * rate) as usize);
+        let mut isl = island(true, 1.0);
+        let h_start = fold_energy(&isl);
+        let (mut ledger, mut h_max) = (0.0_f64, h_start);
+        for k in 0..n {
+            let s = (k as f64 / ramp as f64).min(1.0);
+            isl.set_rest_gap(r * (3.0 - 2.0 * s)).expect("ramp");
+            let attack = (k as f64 / (0.03 * rate)).min(1.0);
+            let frame = isl.step(1000.0 * attack).expect("step");
+            assert!(frame.dissipated_j >= -1.0e-15);
+            ledger += frame.fold_energy_j + frame.tension_work_j;
+            h_max = h_max.max(fold_energy(&isl));
+        }
+        let miss = (ledger - (fold_energy(&isl) - h_start)).abs();
+        assert!(miss <= 1.0e-9 * h_max, "energy ledger miss {miss:e} J of {h_max:e} J");
+        assert_eq!(isl.rest_gap_m(), r, "the ramp ends on the card's own gap");
+
+        let shape = FOLD_SHAPES[2];
+        let mut shaped = island(true, 1.0).with_fold_shape(shape).expect("shape");
+        let fixed = (shaped.card.mass_lower_kg, shaped.card.stiffness_lower_n_m, shaped.card.coupling_n_m);
+        shaped.set_rest_gap(2.0 * r).expect("shaped");
+        let strips = shaped.strips.as_ref().expect("strips");
+        for (j, (_, rest)) in strips_by_hand(shape, 2.0 * r).into_iter().enumerate() {
+            assert!((strips.rest[j] - rest).abs() <= 1.0e-15 * r, "strip {j}: {} against {rest}", strips.rest[j]);
+        }
+        assert!((strips.open_gap(0.0) - 2.0 * r).abs() <= 1.0e-12 * r, "the mean gap is the new rest gap");
+        assert_eq!(
+            (shaped.card.mass_lower_kg, shaped.card.stiffness_lower_n_m, shaped.card.coupling_n_m),
+            fixed,
+            "the gesture moves no mass or stiffness"
+        );
+
+        let before = isl.rest_gap_m();
+        for bad in [0.0, -1.0e-4, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                isl.set_rest_gap(bad),
+                Err(GlottisError::Invalid { what: "fold rest gap" })
+            ));
+        }
+        assert_eq!(isl.rest_gap_m(), before, "a refused gap changes nothing");
+        let refused = |result: Result<f64, GlottisError>, word: &str| {
+            let Err(GlottisError::Invalid { what }) = result else {
+                panic!("refused by name: {word}");
+            };
+            assert!(what.contains(word), "{what}");
+        };
+        refused(island(false, 1.0).set_rest_gap(2.0 * r), "two-mass");
+        let (_, m_body_g, k) = STORY_TITZE[2];
+        refused(body_island(m_body_g, k).set_rest_gap(2.0 * r), "two-mass");
+        let mut rig = island(true, 1.0).with_orifice(1.0e-5).expect("orifice");
+        refused(rig.set_rest_gap(2.0 * r), "orifice");
+        println!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"gl-031-rest-gap-work\",\"open_work_j\":{:e},\"shut_work_j\":{:e},\"ledger_miss_j\":{miss:e},\"verdict\":\"pass\"}}",
+            works[0], works[1]
+        );
     }
 }

@@ -959,6 +959,10 @@ impl LipJetNoise {
 /// band of the bank takes its own tile.
 pub const CONSTRICTION_NOISE_KERNEL: u32 = 0x636f_6e73;
 
+/// Kernel id of the supraglottal (fricative) constriction-noise streams: "fric", so a card with both the glottal
+/// `constriction_noise` row and a `fricative_noise` row on one seed draws two independent noises.
+pub const FRICATIVE_NOISE_KERNEL: u32 = 0x6672_6963;
+
 /// The trend line of Oldham and Ukpoho's Fig. 9 (K^2 against Strouhal number for dampers and orifice plates; reprinted as
 /// Fig. 10 in Guedel, AIVC Contributed Report 02, 2005): `(St, 20 log10 K + 120)`, i.e. K^2 in dB re 1e-12. The four
 /// vertices are READ FROM THE PRINTED FIGURE (about +-1.5 dB; the measured points scatter about +-6 dB around the line):
@@ -1114,14 +1118,23 @@ struct ConstrictionBand {
 /// points about the line is about +-6 dB. How much of the source reaches the cup against the lip's own resistance and the cup's
 /// compliance is the loop's answer, not this law's. Above `f_c` and outside `0.1 <= St <= 73` the law gives no source and none is
 /// invented. With no `constriction_noise` key a performance is bit-identical to one written before the key existed.
+///
+/// THE SUPRAGLOTTAL FORM ([`Self::new_fricative`], [`Self::pressure_pa_jet`]; MB 15368, rulings 15773 and 15828). The same
+/// printed law at a constriction of the tract (section `k`, area `A_k`) opening into the duct `j` (area `A_j`, radius
+/// `r = sqrt(A_j / pi)`, the card's `duct_radius_m`): `sigma = A_k / A_j` is no longer neglected, so `d = pi r (1 - sigma)
+/// / 2` exactly as printed, `U_c = U / A_k` is the jet speed of the flow `U`, and `dp` is the drop the law's own
+/// `sigma`-`C_L` relation gives, `rho U_c^2 (1 - sigma)^2 / 2` (the Borda-Carnot loss). The caller supplies the three; the
+/// bands, the trend line, the cutoff `100 / r` and the bank are the lip's, on the streams of [`FRICATIVE_NOISE_KERNEL`].
+/// The lip's entry ([`Self::pressure_pa`]) keeps its own arithmetic, bit for bit.
 #[derive(Clone, Debug)]
 pub struct ConstrictionNoise {
     card: ConstrictionNoiseCard,
     bands: Vec<ConstrictionBand>,
     /// Row-major `CONSTRICTION_BANDS^2`: `M_ij`, the share of section `j`'s unit in-band power inside band `i`'s edges.
     overlap: Vec<f64>,
-    /// `(blow_pa, rho)` the cached amplitudes belong to, and the amplitudes `sqrt(p_j)` [Pa] per band.
-    cached_for: Option<(u64, u64)>,
+    /// What the cached amplitudes belong to (`[0, blow_pa, rho, 0, 0]` for the lip's entry, `[1, dp, U_c, sigma, r]` for
+    /// the jet's, as bits), and the amplitudes `sqrt(p_j)` [Pa] per band.
+    cached_for: Option<[u64; 5]>,
     amplitude_pa: Vec<f64>,
     last_flow_m3_s: f64,
 }
@@ -1132,6 +1145,19 @@ impl ConstrictionNoise {
     /// # Errors
     /// The reason [`ConstrictionNoiseCard::validate`] gives, or an unusable step.
     pub fn new(card: ConstrictionNoiseCard, dt: f64) -> Result<Self, &'static str> {
+        Self::on_kernel(card, dt, CONSTRICTION_NOISE_KERNEL)
+    }
+
+    /// The supraglottal source (type doc) for `card`, whose `duct_radius_m` is the radius of the duct `j` the
+    /// constriction opens into, at step `dt` seconds, on the streams of [`FRICATIVE_NOISE_KERNEL`].
+    ///
+    /// # Errors
+    /// As [`Self::new`].
+    pub fn new_fricative(card: ConstrictionNoiseCard, dt: f64) -> Result<Self, &'static str> {
+        Self::on_kernel(card, dt, FRICATIVE_NOISE_KERNEL)
+    }
+
+    fn on_kernel(card: ConstrictionNoiseCard, dt: f64, kernel: u32) -> Result<Self, &'static str> {
         card.validate()?;
         if !(dt > 0.0 && dt.is_finite()) {
             return Err("constriction_noise needs a positive finite step");
@@ -1142,7 +1168,7 @@ impl ConstrictionNoise {
                 let centre_hz = constriction_band_centre_hz(index);
                 ConstrictionBand {
                     centre_hz,
-                    filter: ButterworthBandGaussian::new_on_tile(card.seed, CONSTRICTION_NOISE_KERNEL, index as u32),
+                    filter: ButterworthBandGaussian::new_on_tile(card.seed, kernel, index as u32),
                     design: BandBiquad::design(centre_hz / edge, centre_hz * edge, dt),
                 }
             })
@@ -1171,19 +1197,57 @@ impl ConstrictionNoise {
     /// rms Pa)`: centre below `f_c = 100 / r` and `St = f d / U_c` on the printed line, `target = K * blow_pa`.
     #[must_use]
     pub fn driven_bands(&self, blow_pa: f64, rho: f64) -> Vec<(usize, f64, f64, f64)> {
-        let mut driven = Vec::new();
         if !(blow_pa > 0.0 && blow_pa.is_finite() && rho > 0.0 && rho.is_finite()) {
-            return driven;
+            return Vec::new();
         }
         let u_c = det::sqrt(2.0 * blow_pa / rho);
         let d = core::f64::consts::FRAC_PI_2 * self.card.duct_radius_m;
-        let f_c = 100.0 / self.card.duct_radius_m;
+        self.bands_on_line(blow_pa, u_c, d, self.card.duct_radius_m)
+    }
+
+    /// The bands the supraglottal form drives (type doc) for the drop `dp_pa`, the jet speed `jet_speed_m_s` and the
+    /// open-area ratio `sigma = A_k / A_j`, as in [`Self::driven_bands`]: `d = pi r (1 - sigma) / 2`, `target = K * dp`.
+    /// Empty unless `dp > 0`, `U_c > 0` and `0 <= sigma < 1`, all finite.
+    #[must_use]
+    pub fn driven_bands_jet(&self, dp_pa: f64, jet_speed_m_s: f64, open_area_ratio: f64) -> Vec<(usize, f64, f64, f64)> {
+        self.driven_bands_jet_in(dp_pa, jet_speed_m_s, open_area_ratio, self.card.duct_radius_m)
+    }
+
+    /// [`Self::driven_bands_jet`] with the duct `j` of radius `duct_radius_m` in place of the card's (a moving tract's
+    /// present shape): `d = pi r (1 - sigma) / 2` and the cutoff `100 / r` take that radius. Empty also unless `r > 0`
+    /// and finite.
+    #[must_use]
+    pub fn driven_bands_jet_in(
+        &self,
+        dp_pa: f64,
+        jet_speed_m_s: f64,
+        open_area_ratio: f64,
+        duct_radius_m: f64,
+    ) -> Vec<(usize, f64, f64, f64)> {
+        if !(dp_pa > 0.0
+            && dp_pa.is_finite()
+            && jet_speed_m_s > 0.0
+            && jet_speed_m_s.is_finite()
+            && (0.0..1.0).contains(&open_area_ratio)
+            && duct_radius_m > 0.0
+            && duct_radius_m.is_finite())
+        {
+            return Vec::new();
+        }
+        let d = core::f64::consts::PI * duct_radius_m * (1.0 - open_area_ratio) / 2.0;
+        self.bands_on_line(dp_pa, jet_speed_m_s, d, duct_radius_m)
+    }
+
+    /// Bands with a centre below `f_c = 100 / r` whose `St = f d / U_c` is on the printed line, at `K(St) dp`.
+    fn bands_on_line(&self, dp_pa: f64, u_c: f64, d: f64, duct_radius_m: f64) -> Vec<(usize, f64, f64, f64)> {
+        let mut driven = Vec::new();
+        let f_c = 100.0 / duct_radius_m;
         for (index, band) in self.bands.iter().enumerate() {
             if band.design.is_none() || !(band.centre_hz < f_c) {
                 continue;
             }
             if let Some(k) = constriction_k(band.centre_hz * d / u_c) {
-                driven.push((index, band.centre_hz, k, k * blow_pa));
+                driven.push((index, band.centre_hz, k, k * dp_pa));
             }
         }
         driven
@@ -1191,13 +1255,29 @@ impl ConstrictionNoise {
 
     /// Re-derive the per-band amplitudes for this blowing pressure and density (cached: they change only with the gesture).
     fn refresh(&mut self, blow_pa: f64, rho: f64) {
-        let key = (blow_pa.to_bits(), rho.to_bits());
+        let key = [0, blow_pa.to_bits(), rho.to_bits(), 0, 0];
         if self.cached_for == Some(key) {
             return;
         }
         self.cached_for = Some(key);
-        self.amplitude_pa.iter_mut().for_each(|a| *a = 0.0);
         let driven = self.driven_bands(blow_pa, rho);
+        self.solve_amplitudes(&driven);
+    }
+
+    /// [`Self::refresh`] for the supraglottal form, in the duct of radius `duct_radius_m`.
+    fn refresh_jet(&mut self, dp_pa: f64, jet_speed_m_s: f64, open_area_ratio: f64, duct_radius_m: f64) {
+        let key = [1, dp_pa.to_bits(), jet_speed_m_s.to_bits(), open_area_ratio.to_bits(), duct_radius_m.to_bits()];
+        if self.cached_for == Some(key) {
+            return;
+        }
+        self.cached_for = Some(key);
+        let driven = self.driven_bands_jet_in(dp_pa, jet_speed_m_s, open_area_ratio, duct_radius_m);
+        self.solve_amplitudes(&driven);
+    }
+
+    /// The bank's weights for the `driven` bands (type doc, THE BANK).
+    fn solve_amplitudes(&mut self, driven: &[(usize, f64, f64, f64)]) {
+        self.amplitude_pa.iter_mut().for_each(|a| *a = 0.0);
         let n = driven.len();
         if n == 0 {
             return;
@@ -1238,12 +1318,50 @@ impl ConstrictionNoise {
     /// not.
     pub fn pressure_pa(&mut self, blow_pa: f64, rho: f64) -> f64 {
         if !(self.last_flow_m3_s > 0.0 && blow_pa > 0.0 && blow_pa.is_finite() && rho > 0.0 && rho.is_finite()) {
-            for band in &mut self.bands {
-                let _ = band.filter.skip();
-            }
+            self.skip_all();
             return 0.0;
         }
         self.refresh(blow_pa, rho);
+        self.sum_bands()
+    }
+
+    /// The supraglottal form's series pressure [Pa] of this sample (type doc), from the last sample's flow: `dp_pa` the
+    /// drop across the constriction, `jet_speed_m_s` the jet speed `U_c = U / A_k`, `open_area_ratio` `sigma = A_k / A_j`,
+    /// all at the held flow the caller states. Silent, every stream still advancing by one sample, while the recorded flow
+    /// is not forward or the three are not usable (`dp > 0`, `U_c > 0`, `0 <= sigma < 1`, finite).
+    pub fn pressure_pa_jet(&mut self, dp_pa: f64, jet_speed_m_s: f64, open_area_ratio: f64) -> f64 {
+        self.pressure_pa_jet_in(dp_pa, jet_speed_m_s, open_area_ratio, self.card.duct_radius_m)
+    }
+
+    /// [`Self::pressure_pa_jet`] in the duct `j` of radius `duct_radius_m` (a moving tract's present shape; MB 16735 piece
+    /// 2) in place of the card's: the bank, its streams and its bands are the same, and only `d` and the cutoff `100 / r`
+    /// take that radius ([`Self::driven_bands_jet_in`]). Silent, as there, also while `r` is not finite and positive.
+    pub fn pressure_pa_jet_in(&mut self, dp_pa: f64, jet_speed_m_s: f64, open_area_ratio: f64, duct_radius_m: f64) -> f64 {
+        if !(self.last_flow_m3_s > 0.0
+            && dp_pa > 0.0
+            && dp_pa.is_finite()
+            && jet_speed_m_s > 0.0
+            && jet_speed_m_s.is_finite()
+            && (0.0..1.0).contains(&open_area_ratio)
+            && duct_radius_m > 0.0
+            && duct_radius_m.is_finite())
+        {
+            self.skip_all();
+            return 0.0;
+        }
+        self.refresh_jet(dp_pa, jet_speed_m_s, open_area_ratio, duct_radius_m);
+        self.sum_bands()
+    }
+
+    /// Advance every band's stream by one white sample, adding nothing.
+    fn skip_all(&mut self) {
+        for band in &mut self.bands {
+            let _ = band.filter.skip();
+        }
+    }
+
+    /// One sample of the bank at the cached amplitudes; every band's stream advances by one white sample.
+    fn sum_bands(&mut self) -> f64 {
         let mut sum = 0.0;
         for (band, &amplitude) in self.bands.iter_mut().zip(&self.amplitude_pa) {
             match band.design {
@@ -2377,6 +2495,103 @@ mod tests {
         assert_eq!(flue(&mut ButterworthBandGaussian::new(9, FLUE_JET_NOISE_KERNEL)), flue(&mut ButterworthBandGaussian::new_on_tile(9, FLUE_JET_NOISE_KERNEL, 0)), "tile 0 is the flue's own stream");
         for other in [GLOTTAL_NOISE_KERNEL, GLOTTAL_JET_NOISE_KERNEL, FLUE_JET_NOISE_KERNEL, LIP_JET_NOISE_KERNEL] {
             assert_ne!(CONSTRICTION_NOISE_KERNEL, other, "the constriction noise stream is its own");
+        }
+    }
+
+    /// The supraglottal form (MB 15368, 15828). `sigma` enters `d = pi r (1 - sigma) / 2` as printed, `K` is the trend at
+    /// `St = f d / U_c`, the target is `K dp`, and no band at or above `f_c = 100 / r` is driven. At `sigma = 0` with the lip's
+    /// own speed the driven set is the lip's bit for bit (`(pi r) / 2` and `(pi / 2) r` round alike: halving is exact).
+    /// Unusable inputs drive nothing. The source is silent without a forward flow, keeps one white sample per band per call
+    /// and draws the "fric" streams, so it is not the lip's noise on the same seed.
+    #[test]
+    fn fricative_form_puts_sigma_in_d_and_draws_its_own_streams() {
+        // DVTD s1-11 /s/, level cut, ruled (C): A_k 0.1340 cm^2 opening into A_j 3.0602 cm^2; the rig's printed 0.5 W flow.
+        let (a_k, a_j, rho, flow) = (0.1340e-4, 3.0602e-4, 1.1886, 5.1185e-4);
+        let r = (a_j / core::f64::consts::PI).sqrt();
+        let sigma = a_k / a_j;
+        let u_c = flow / a_k;
+        let dp = 0.5 * rho * u_c * u_c * (1.0 - sigma) * (1.0 - sigma);
+        let dt = 1.0 / 40_000.0;
+        let card = ConstrictionNoiseCard { seed: 5, duct_radius_m: r };
+        let fric = ConstrictionNoise::new_fricative(card, dt).unwrap();
+        let driven = fric.driven_bands_jet(dp, u_c, sigma);
+        assert!(driven.len() > 3, "the /s/ jet drives bands: {driven:?}");
+        let d = core::f64::consts::PI * r * (1.0 - sigma) / 2.0;
+        for &(index, centre, k, target) in &driven {
+            assert!(centre < 100.0 / r, "band {index} at {centre} Hz is not below f_c");
+            assert_eq!(Some(k), constriction_k(centre * d / u_c), "band {index}");
+            assert_eq!(target.to_bits(), (k * dp).to_bits(), "band {index}");
+        }
+        let lip = ConstrictionNoise::new(card, dt).unwrap();
+        let lip_speed = det::sqrt(2.0 * dp / rho);
+        assert_eq!(fric.driven_bands_jet(dp, lip_speed, 0.0), lip.driven_bands(dp, rho), "sigma 0 is the lip's set");
+        for (dp, u, s) in [(0.0, u_c, sigma), (dp, 0.0, sigma), (dp, u_c, 1.0), (dp, u_c, -0.1), (dp, f64::NAN, sigma), (f64::INFINITY, u_c, sigma)] {
+            assert!(fric.driven_bands_jet(dp, u, s).is_empty(), "({dp}, {u}, {s}) drives nothing");
+        }
+        let speaking = |seed, flow: f64| {
+            let mut s = ConstrictionNoise::new_fricative(ConstrictionNoiseCard { seed, duct_radius_m: r }, dt).unwrap();
+            s.record(flow);
+            let xs: Vec<u64> = (0..512).map(|_| s.pressure_pa_jet(dp, u_c, sigma).to_bits()).collect();
+            (xs, s.bands.iter().map(|b| b.filter.white.index()).collect::<Vec<_>>())
+        };
+        let (spoken, spoken_index) = speaking(5, flow);
+        let (silent, silent_index) = speaking(5, 0.0);
+        assert!(spoken.iter().any(|&x| x != 0), "a forward flow speaks");
+        assert!(silent.iter().all(|&x| f64::from_bits(x) == 0.0), "no forward flow, no jet, no source");
+        assert_eq!(spoken_index, silent_index, "one white sample per band per call, speaking or not");
+        assert_eq!(spoken, speaking(5, flow).0, "one seed, one noise");
+        assert_ne!(spoken, speaking(6, flow).0, "another seed, another noise");
+        let mut lip_s = ConstrictionNoise::new(card, dt).unwrap();
+        let mut fric_s = ConstrictionNoise::new_fricative(card, dt).unwrap();
+        lip_s.record(flow);
+        fric_s.record(flow);
+        let lip_xs: Vec<u64> = (0..256).map(|_| lip_s.pressure_pa(dp, rho).to_bits()).collect();
+        let fric_xs: Vec<u64> = (0..256).map(|_| fric_s.pressure_pa_jet(dp, lip_speed, 0.0).to_bits()).collect();
+        assert_ne!(lip_xs, fric_xs, "the fricative streams are not the lip's on the same seed");
+        for other in [GLOTTAL_NOISE_KERNEL, GLOTTAL_JET_NOISE_KERNEL, FLUE_JET_NOISE_KERNEL, LIP_JET_NOISE_KERNEL, CONSTRICTION_NOISE_KERNEL] {
+            assert_ne!(FRICATIVE_NOISE_KERNEL, other, "the fricative stream is its own");
+        }
+    }
+
+    /// The duct radius per call (MB 16735 piece 2, a moving tract): at the card's own radius the radius form is the card
+    /// form bit for bit, sample by sample; at another radius it drives exactly the bands a source built on that radius
+    /// drives, on the same streams; an unusable radius drives nothing and stays silent, one white sample per band per call.
+    #[test]
+    fn fricative_form_takes_the_present_shapes_duct_radius() {
+        let (a_k, a_j, rho, flow) = (0.1340e-4, 3.0602e-4, 1.1886, 5.1185e-4);
+        let r = (a_j / core::f64::consts::PI).sqrt();
+        let (sigma, u_c) = (a_k / a_j, flow / a_k);
+        let dp = 0.5 * rho * u_c * u_c * (1.0 - sigma) * (1.0 - sigma);
+        let dt = 1.0 / 40_000.0;
+        let on = |radius: f64| ConstrictionNoise::new_fricative(ConstrictionNoiseCard { seed: 5, duct_radius_m: radius }, dt).unwrap();
+        let (mut card_form, mut radius_form) = (on(r), on(r));
+        card_form.record(flow);
+        radius_form.record(flow);
+        for _ in 0..512 {
+            assert_eq!(
+                card_form.pressure_pa_jet(dp, u_c, sigma).to_bits(),
+                radius_form.pressure_pa_jet_in(dp, u_c, sigma, r).to_bits(),
+                "the card's radius: the card form"
+            );
+        }
+        let wide = 1.5 * r;
+        assert_eq!(on(r).driven_bands_jet_in(dp, u_c, sigma, wide), on(wide).driven_bands_jet(dp, u_c, sigma));
+        assert_ne!(on(r).driven_bands_jet_in(dp, u_c, sigma, wide), on(r).driven_bands_jet(dp, u_c, sigma));
+        let (mut built, mut moved) = (on(wide), on(r));
+        built.record(flow);
+        moved.record(flow);
+        for _ in 0..512 {
+            assert_eq!(
+                built.pressure_pa_jet(dp, u_c, sigma).to_bits(),
+                moved.pressure_pa_jet_in(dp, u_c, sigma, wide).to_bits(),
+                "another radius: the source built on it, on the same streams"
+            );
+        }
+        let mut bad = on(r);
+        bad.record(flow);
+        for radius in [0.0, -r, f64::NAN, f64::INFINITY] {
+            assert!(bad.driven_bands_jet_in(dp, u_c, sigma, radius).is_empty(), "radius {radius}");
+            assert_eq!(bad.pressure_pa_jet_in(dp, u_c, sigma, radius), 0.0, "radius {radius}");
         }
     }
 }

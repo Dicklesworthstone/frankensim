@@ -336,6 +336,212 @@ pub fn mouth_flow_line_exterior(
     Ok((line, receipt))
 }
 
+/// The two lines of a series pressure source `p_s` at a junction inside the duct (a constriction's turbulence, MB 15368),
+/// with the inlet port held at `zc` exactly as the island's line and [`mouth_flow_line`] hold it, so the island's own
+/// waves and the source's add by superposition on the linear duct.
+#[derive(Debug, Clone)]
+pub struct JunctionSourceLines {
+    /// `push(p_s)` returns the mouth volume flow [m^3/s] of the same sample, to add to [`mouth_flow_line`]'s.
+    pub to_mouth_flow: DelayedFilter,
+    /// `push(p_s)` returns the wave [Pa] the source sends to the inlet port, referenced to `zc`, to add to the island's
+    /// returned wave in the island's own convention (its line's output is read on the next step).
+    pub to_inlet_wave: DelayedFilter,
+    /// Receipts of the two ladders, mouth first.
+    pub receipts: [MouthFlowRealization; 2],
+}
+
+/// `(U_mouth / p_s, p-_inlet / p_s)` at one angular frequency (`e^{-iwt}`) for a series source between segment `k` and
+/// segment `k + 1`, raising the pressure on the mouth side. Looking upstream from the junction, the segments `k, ..., 0`
+/// end in the port's `zc` (`Z_U`, inlet-flow transfer `T_U`); downstream, `k + 1, ...` end in the termination (`Z_D`,
+/// `T_D`). The loop flow is `U = p_s / (Z_U + Z_D)` toward the mouth, so `U_mouth = T_D U`; the flow `-T_U U` reaches the
+/// port, whose matched load turns it into the arriving wave `p- = -zc T_U U`.
+///
+/// # Errors
+/// A TMM refusal on either side.
+pub fn junction_source_transfer(
+    upstream_reversed: &Duct,
+    downstream: &Duct,
+    gas: &GasState,
+    omega: f64,
+    termination: Termination,
+    wall: Option<&WallPin>,
+    zc: f64,
+) -> Result<(C64, C64), DrivingPointError> {
+    let up = fs_duct::input_impedance_load(upstream_reversed, gas, omega, LossModel::Bessel, C64::new(zc, 0.0), wall)
+        .map_err(DrivingPointError::Duct)?;
+    let down = input_impedance_wall(downstream, gas, omega, LossModel::Bessel, termination, wall)
+        .map_err(DrivingPointError::Duct)?;
+    let loop_impedance = up.impedance + down.impedance;
+    let to_mouth = down.u_mouth_over_u_in / loop_impedance;
+    let to_inlet = (up.u_mouth_over_u_in * C64::new(-zc, 0.0)) / loop_impedance;
+    Ok((to_mouth, to_inlet))
+}
+
+/// [`junction_source_transfer`] with the mouth closed by the absolute load `z_load` [Pa s/m^3] (a tabulated load's value
+/// at `omega`) in place of a declared termination: the same loop, with the downstream side ending in that load through
+/// the seam the mouth-flow line plays a table through ([`mouth_flow_line`], `baked::response`).
+///
+/// # Errors
+/// A TMM refusal on either side.
+fn junction_source_transfer_against_load(
+    upstream_reversed: &Duct,
+    downstream: &Duct,
+    gas: &GasState,
+    omega: f64,
+    z_load: C64,
+    wall: Option<&WallPin>,
+    zc: f64,
+) -> Result<(C64, C64), DrivingPointError> {
+    let up = fs_duct::input_impedance_load(upstream_reversed, gas, omega, LossModel::Bessel, C64::new(zc, 0.0), wall)
+        .map_err(DrivingPointError::Duct)?;
+    let down = super::baked::response(downstream, gas, omega, z_load, WallModel::from_pin(wall))
+        .map_err(DrivingPointError::Duct)?;
+    let loop_impedance = up.impedance + down.impedance;
+    let to_mouth = down.u_mouth_over_u_in / loop_impedance;
+    let to_inlet = (up.u_mouth_over_u_in * C64::new(-zc, 0.0)) / loop_impedance;
+    Ok((to_mouth, to_inlet))
+}
+
+/// The upstream (reversed, segments `k, ..., 0`) and downstream (`k + 1, ...`) ducts of a junction after segment `k`.
+///
+/// # Errors
+/// A junction at or after the last segment (nothing downstream), or a segment that is not a cylinder (reversal is only
+/// exact for cylinders here), by name.
+pub fn split_at_junction(physics: &Duct, k: usize) -> Result<(Duct, Duct), DrivingPointError> {
+    if k + 1 >= physics.segments.len() {
+        return Err(DrivingPointError::Invalid {
+            what: "a junction source needs at least one segment downstream of its section",
+        });
+    }
+    if !physics.segments.iter().all(|s| matches!(s, fs_duct::Segment::Cylinder { .. })) {
+        return Err(DrivingPointError::Invalid {
+            what: "a junction source needs a duct of cylinders",
+        });
+    }
+    let upstream_reversed = Duct { segments: physics.segments[..=k].iter().rev().cloned().collect() };
+    let downstream = Duct { segments: physics.segments[k + 1..].to_vec() };
+    Ok((upstream_reversed, downstream))
+}
+
+/// [`JunctionSourceLines`] for a series source after segment `k` of `physics` (a duct of cylinders), on the same
+/// transfer ladder, sampled bins and DC probes as [`mouth_flow_line`]; both lines start at the whole duct's 4-transit
+/// rung, since the loop rings with the whole duct's modes. The mouth load is the island's own, taken as
+/// [`mouth_flow_line`] takes it: a declared termination exactly as before, or a tabulated load checked against the whole
+/// duct's mouth in `gas` and covering the top rung, with its DC bin against the table's declared static load.
+///
+/// # Errors
+/// As [`split_at_junction`] and [`mouth_flow_line`].
+#[allow(clippy::too_many_arguments)]
+pub fn junction_source_lines<'a>(
+    physics: &Duct,
+    k: usize,
+    gas: &GasState,
+    termination: impl Into<MouthLoad<'a>>,
+    sample_rate_hz: u32,
+    zc: f64,
+    wall: Option<&WallPin>,
+    ladder: &LineLadder,
+) -> Result<JunctionSourceLines, DrivingPointError> {
+    junction_lines_in(physics, k, gas, gas, termination.into(), sample_rate_hz, zc, wall, ladder)
+}
+
+/// [`junction_source_lines`] for a bore filled with `gas` that radiates into a different `exterior`, as
+/// [`mouth_flow_line_exterior`]: only a tabulated load is taken, checked against the `exterior` it was computed in; every
+/// bore quantity stays `gas`'s.
+///
+/// # Errors
+/// As [`junction_source_lines`], or a table whose mouth or exterior gas does not match.
+#[allow(clippy::too_many_arguments)]
+pub fn junction_source_lines_exterior(
+    physics: &Duct,
+    k: usize,
+    gas: &GasState,
+    exterior: &GasState,
+    table: &fs_duct::TabulatedLoad,
+    sample_rate_hz: u32,
+    zc: f64,
+    wall: Option<&WallPin>,
+    ladder: &LineLadder,
+) -> Result<JunctionSourceLines, DrivingPointError> {
+    junction_lines_in(physics, k, gas, exterior, MouthLoad::Tabulated(table), sample_rate_hz, zc, wall, ladder)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn junction_lines_in(
+    physics: &Duct,
+    k: usize,
+    gas: &GasState,
+    exterior: &GasState,
+    load: MouthLoad<'_>,
+    sample_rate_hz: u32,
+    zc: f64,
+    wall: Option<&WallPin>,
+    ladder: &LineLadder,
+) -> Result<JunctionSourceLines, DrivingPointError> {
+    let (up, down) = split_at_junction(physics, k)?;
+    let length = duct_axial_length(physics);
+    if !(length > 0.0 && length.is_finite()) {
+        return Err(DrivingPointError::Invalid {
+            what: "a junction source needs positive axial length",
+        });
+    }
+    if sample_rate_hz == 0 || !(zc.is_finite() && zc > 0.0) {
+        return Err(DrivingPointError::Invalid {
+            what: "positive sample rate and finite positive port impedance required",
+        });
+    }
+    let max_taps = validate_ladder(ladder)?;
+    let dt = 1.0 / f64::from(sample_rate_hz);
+    let transit = length / gas.sound_speed / dt;
+    let demand = (4.0 * transit).ceil();
+    if !demand.is_finite() {
+        return Err(DrivingPointError::Invalid {
+            what: "transit delay is not finite",
+        });
+    }
+    // A declared termination takes exactly its old path; a table plays only through its own mouth (the whole duct's,
+    // as the island's line and the mouth-flow line check it) and must cover the top rung before any bin is sampled.
+    let static_load = match load {
+        MouthLoad::Analytic(_) => None,
+        MouthLoad::Tabulated(table) => {
+            let radius = physics
+                .segments
+                .last()
+                .ok_or(DrivingPointError::Duct(fs_duct::DuctError::EmptyDuct))?
+                .outlet_radius();
+            let mouth = table.validate_mouth(length, radius, exterior).map_err(DrivingPointError::Duct)?;
+            super::baked::validate_band(table, sample_rate_hz, max_taps)?;
+            Some(C64::new(mouth.dc_impedance, 0.0))
+        }
+        MouthLoad::Matched => return Err(super::baked::matched_refusal()),
+    };
+    let transfer = |omega: f64| match load {
+        MouthLoad::Analytic(termination) => junction_source_transfer(&up, &down, gas, omega, termination, wall, zc),
+        MouthLoad::Tabulated(table) => {
+            let z = table.z_at(omega).map_err(DrivingPointError::Duct)?;
+            junction_source_transfer_against_load(&up, &down, gas, omega, z, wall, zc)
+        }
+        MouthLoad::Matched => Err(super::baked::matched_refusal()),
+    };
+    let to_mouth = |omega: f64| transfer(omega).map(|t| t.0);
+    let to_inlet = |omega: f64| transfer(omega).map(|t| t.1);
+    let dc = |part: fn((C64, C64)) -> C64| match static_load {
+        Some(z) => dc_limit(
+            &|omega| junction_source_transfer_against_load(&up, &down, gas, omega, z, wall, zc).map(part),
+            &DC_PROBE_RAD_S,
+        ),
+        None => dc_limit(&|omega| transfer(omega).map(part), &DC_PROBE_RAD_S),
+    };
+    // Both lines start at the whole duct's 4-transit rung: `transit` is the whole duct's.
+    let (mouth_ir, mouth_receipt) = transfer_ladder(&to_mouth, dc(|t| t.0)?, transit, dt, max_taps, ladder)?;
+    let (inlet_ir, inlet_receipt) = transfer_ladder(&to_inlet, dc(|t| t.1)?, transit, dt, max_taps, ladder)?;
+    Ok(JunctionSourceLines {
+        to_mouth_flow: DelayedFilter::from_impulse_response(dt, mouth_ir).map_err(DrivingPointError::Discrete)?,
+        to_inlet_wave: DelayedFilter::from_impulse_response(dt, inlet_ir).map_err(DrivingPointError::Discrete)?,
+        receipts: [mouth_receipt, inlet_receipt],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,5 +741,78 @@ mod tests {
             t.abs(),
             inlet.abs()
         );
+    }
+
+    /// A series source after segment `k` of a uniform tube, inlet held at `zc`: the inlet wave cannot arrive before the
+    /// upstream transit `x_k / c` and peaks there (the direct wave; every echo has further to go and a mouth reflection to
+    /// lose), the mouth flow likewise after `(L - x_k) / c`. The share of each line's energy more than 4 samples before its
+    /// transit is no more than the share the realization's own kernel puts there for a unit delay at the same transit and
+    /// rung (MB 16979, 16990, 17012): the kernel's Nyquist rolloff and precursor fold give even a perfect delay early taps,
+    /// so the bound is computed from the kernel, never from the line, and a wave arriving early would put a share of its
+    /// whole energy there. A share is free of the line's units (the mouth flow's `1 / zc`). On a tube whose transits are
+    /// whole numbers of samples, and on one whose inlet transit is 9.5. At DC the loop is the port's resistor, so the inlet
+    /// wave is `-p_s` and the mouth flow `p_s / zc`, to the tube's viscous share. A junction with nothing downstream and a
+    /// duct that is not all cylinders are refused by name.
+    #[test]
+    fn junction_source_lines_are_causal_from_the_junction_and_see_the_port_resistor_at_dc() {
+        let radius = 0.01;
+        let gas = air();
+        let zc = gas.density * gas.sound_speed / (core::f64::consts::PI * radius * radius);
+        let samples = |metres: f64| metres / gas.sound_speed * f64::from(RATE);
+        let tube = |segment: f64| Duct { segments: vec![Segment::Cylinder { radius, length: segment }; 10] };
+        let lines_of = |duct: &Duct| {
+            junction_source_lines(duct, 3, &gas, Termination::FlangedOpen, RATE, zc, None, &LineLadder::default())
+                .expect("junction lines")
+        };
+        // The share of its energy more than 4 samples before `transit` (taps `..floor(transit - 4)`).
+        let early_share = |taps: &[f64], transit: f64| {
+            let total: f64 = taps.iter().map(|h| h * h).sum();
+            taps[..(transit - 4.0).floor() as usize].iter().map(|h| h * h).sum::<f64>() / total
+        };
+        // A unit delay of `transit` samples realized as every transfer line of this module is at rung `n_fft` (acoustic
+        // e^{-iwt} bins, as `transfer_ladder` passes them).
+        let kernel = |transit: f64, n_fft: usize| {
+            let delay: Vec<C64> = (0..=n_fft / 2)
+                .map(|k| {
+                    let phase = core::f64::consts::TAU * k as f64 / n_fft as f64 * transit;
+                    C64::new(phase.cos(), phase.sin())
+                })
+                .collect();
+            realize_reflectance_ir_from_positive_spectrum(&delay, n_fft, transit, true)
+        };
+        let whole = 2.5 * gas.sound_speed / f64::from(RATE);
+        for segment in [whole, 0.017] {
+            let lines = lines_of(&tube(segment));
+            let (_, mouth) = lines.to_mouth_flow.quiescent_fir().expect("mouth FIR");
+            let (_, inlet) = lines.to_inlet_wave.quiescent_fir().expect("inlet FIR");
+            for (name, taps, transit, rung) in [
+                ("inlet", inlet, samples(4.0 * segment), lines.receipts[1].n_fft),
+                ("mouth", mouth, samples(6.0 * segment), lines.receipts[0].n_fft),
+            ] {
+                let (share, bound) = (early_share(taps, transit), early_share(&kernel(transit, rung), transit));
+                assert!(
+                    share <= bound,
+                    "{name}: {share:e} of its energy more than 4 samples before the transit {transit:.3}, above the \
+                     kernel's own {bound:e} for a unit delay at rung {rung}"
+                );
+                let peak = taps.iter().enumerate().max_by(|a, b| a.1.abs().total_cmp(&b.1.abs())).expect("taps").0;
+                assert!((peak as f64 - transit).abs() < 4.0, "{name}: peak at tap {peak}, transit {transit:.3} samples");
+            }
+        }
+        let duct = tube(0.017);
+        let lines = lines_of(&duct);
+        let (_, mouth) = lines.to_mouth_flow.quiescent_fir().expect("mouth FIR");
+        let (_, inlet) = lines.to_inlet_wave.quiescent_fir().expect("inlet FIR");
+        let (inlet_dc, mouth_dc): (f64, f64) = (inlet.iter().sum(), mouth.iter().sum());
+        assert!((inlet_dc + 1.0).abs() < 1.0e-2, "inlet wave at DC {inlet_dc}, the port's resistor gives -1");
+        assert!((mouth_dc * zc - 1.0).abs() < 1.0e-2, "mouth flow at DC {mouth_dc}, the port's resistor gives 1 / zc");
+        let refused = |duct: &Duct, k: usize| match junction_source_lines(duct, k, &gas, Termination::FlangedOpen, RATE, zc, None, &LineLadder::default()) {
+            Err(DrivingPointError::Invalid { what }) => what,
+            other => panic!("expected a refusal by name, got {:?}", other.map(|_| ())),
+        };
+        assert!(refused(&duct, 9).contains("downstream"));
+        let mut coned = duct.clone();
+        coned.segments[5] = Segment::Cone { inlet_radius: radius, outlet_radius: 1.2 * radius, length: 0.017 };
+        assert!(refused(&coned, 3).contains("cylinders"));
     }
 }

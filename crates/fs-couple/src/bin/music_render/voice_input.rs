@@ -82,6 +82,11 @@ pub(super) fn run_with_gas_sources(
         ),
         Err(why) => format!("{{\"refused\":{}}}", json_string(why)),
     };
+    // Only a performance with the `glottal_orifice` row (a flow rig) writes this; without it the sidecar is byte for byte
+    // what it was. The mean runs over the render's last 2 s, the rig's read window.
+    let rig = stats.rig_mean_glottal_flow_m3_s.map_or_else(String::new, |u| {
+        format!("\"flow_rig\":{{\"mean_glottal_flow_last_2_s_m3_s\":{u:e}}},")
+    });
     // Only a performance with the `jet_noise` row writes this; without it the sidecar is byte for byte what it was.
     let jet_band = performance.jet_noise_coverage().map_or_else(String::new, |c| {
         format!(
@@ -163,7 +168,7 @@ pub(super) fn run_with_gas_sources(
          \"microphone_m\":[{:e},{:e},{:e}],\"mouth_flow_taps\":{},\"mouth_flow_rungs\":{},\
          \"passive_tract_formants_hz\":{passive},\
          \"peak_glottal_flow_m3_s\":{:e},\"min_glottal_flow_m3_s\":{:e},\"closed_fraction\":{:e},\
-         \"max_force_passes\":{},\"mean_force_passes\":{:e},{jet_band}{head}{airway}\
+         \"max_force_passes\":{},\"mean_force_passes\":{:e},{rig}{jet_band}{head}{airway}\
          \"model_scope\":\"{scope}\"{observer}}}{gas_sources}{tract_gas}{tract_motion}}}",
         description.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,
         info.mechanics_rate_hz, info.two_mass, info.sections, info.tract_length_m,
