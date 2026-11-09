@@ -189,6 +189,22 @@ fn native_ramp_drives_mount_lag_and_patch_probe_without_altering_heat() {
     assert_eq!(observers.first.state().time_s(), 0.0);
     assert_eq!(heat.temperature_k(CellId(10)).unwrap(), 300.0);
 
+    // An implicit/multiphysics owner may already have solved the endpoint.
+    // For this affine ramp, reading that candidate agrees with substep observation.
+    let endpoint_sensor = observers
+        .first
+        .observe_endpoint_candidate(&heat, &plain, 1.0, || Ok(()))
+        .unwrap();
+    near(
+        endpoint_sensor.state().reading(),
+        next.first.state().reading(),
+    );
+    assert_eq!(
+        endpoint_sensor.state().equilibrium_reading(),
+        next.first.state().equilibrium_reading()
+    );
+    assert_eq!(plain.cells(), observed.cells());
+
     let (middle, middle_sensors, _) = heat
         .advance_observed(&observers, 0.5, config(), || Ok(()))
         .unwrap();
@@ -308,6 +324,16 @@ fn cell_mapping_quantity_and_stale_history_refuse_before_publication() {
             .is_err()
     );
     assert_eq!(candidate, observer);
+    assert!(
+        observer
+            .observe_endpoint_candidate(&heat, &later_heat, 0.25, || Ok(()))
+            .is_err()
+    );
+    assert!(
+        observer
+            .observe_endpoint_candidate(&later_heat, &later_heat, 0.5, || Ok(()))
+            .is_err()
+    );
 }
 
 #[test]

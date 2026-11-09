@@ -255,12 +255,8 @@ fn model(axis_x: f64) -> ArticulatedModel {
     )])
     .unwrap()
 }
-fn initial<'m>(
-    problem: &'m SpatialVectorMagnetostatics,
-    sources: Vec<Option<ResolvedConductorState>>,
-) -> SpatialInduction<'m> {
-    // Exact Whitney integrals of A = (B cross r)/2 for transverse B=(1,0,0).
-    // The exterior A trace is held; all original interior field dofs remain free.
+fn uniform_trace(problem: &SpatialVectorMagnetostatics, b: [f64; 3]) -> VectorMagneticBoundary {
+    // Exact Whitney integrals of A = (B cross r)/2 on the original edges.
     let a: Vec<_> = problem
         .mesh()
         .edges
@@ -269,13 +265,10 @@ fn initial<'m>(
             let p = problem.positions_m()[u as usize];
             let q = problem.positions_m()[v as usize];
             let mid = std::array::from_fn(|i| 0.5 * (p[i] + q[i]));
-            dot(
-                cross([1.0, 0.0, 0.0], mid).map(|v| 0.5 * v),
-                difference(q, p),
-            )
+            dot(cross(b, mid).map(|v| 0.5 * v), difference(q, p))
         })
         .collect();
-    let boundary = VectorMagneticBoundary {
+    VectorMagneticBoundary {
         potential: problem
             .exterior_faces()
             .into_iter()
@@ -284,7 +277,15 @@ fn initial<'m>(
                 edge_integrals_wb: problem.face_edges(face).unwrap().map(|e| a[e]),
             })
             .collect(),
-    };
+    }
+}
+fn initial<'m>(
+    problem: &'m SpatialVectorMagnetostatics,
+    sources: Vec<Option<ResolvedConductorState>>,
+) -> SpatialInduction<'m> {
+    // The initial exterior A trace imposes transverse B=(1,0,0); all original
+    // interior field dofs remain free during the subsequent induction solve.
+    let boundary = uniform_trace(problem, [1.0, 0.0, 0.0]);
     let cg = CheckedCgConfig {
         tolerance: 1e-12,
         max_iterations: 3000,
@@ -417,7 +418,11 @@ fn assert_balance(
         dt * midpoint * shaft_torque,
         1e-12,
     );
-    near(kinetic + u1 - u0 + heat, dt * midpoint * shaft_torque, 2e-8);
+    near(
+        kinetic + u1 - u0 + heat,
+        dt * midpoint * shaft_torque + candidate.induction.magnetic_boundary_work_j,
+        2e-8,
+    );
     near(candidate.balance.total_energy_residual_j, 0.0, 5e-9);
     near(candidate.mechanics.support_work, 0.0, 1e-15);
     near(candidate.induction.impressed_work_j, 0.0, 1e-15);
@@ -437,6 +442,268 @@ fn assert_balance(
             },
             1e-10,
         );
+    }
+}
+
+#[test]
+fn applied_rotating_trace_drives_native_rotor_and_retains_endpoint() {
+    use fs_couple::scenario_magnetic::{
+        MagneticPotentialBoundary3,
+        induction::{ScenarioMagneticRotorError, step_rotor3},
+    };
+    use fs_qty::{Dims, QtyAny};
+    use fs_scenario::payload::{
+        OrientationParity, OutsideDomainPolicy, Payload, PayloadId, PayloadMeta, QuantityContract,
+        ReferenceSemantics, SampleSource, TableInterpolation, VectorPayload,
+    };
+    use fs_scenario::{BcKind, BcValue, BoundaryCondition, FrameTree, Physics, WORLD};
+
+    let (problem, sources) = problem(16);
+    let original = SpatialInductionRotor::new(
+        initial(&problem, sources),
+        model(0.0),
+        shape(),
+        0.0,
+        0.0,
+        limits(),
+        &mut || false,
+    )
+    .unwrap();
+    let original_a = original.field().potential_wb().to_vec();
+    let zero = vec![[0.0; 3]; problem.mesh().tets.len()];
+    let boundary = uniform_trace(&problem, [1.0, 0.1, 0.0]);
+    let mut checkpoints = 0;
+    let candidate = original
+        .step_with_boundary_candidate(
+            DT,
+            &zero,
+            &boundary,
+            0.0,
+            field_controls(),
+            controls(),
+            &mut || {
+                checkpoints += 1;
+                false
+            },
+        )
+        .unwrap();
+    assert!(candidate.state().angular_velocity_rad_s() > 0.0);
+    assert!(candidate.balance.electromagnetic_torque_nm > 0.0);
+    assert!(candidate.induction.heat_j > 0.0);
+    assert!(candidate.induction.magnetic_boundary_work_j > 0.0);
+    assert_balance(&original, &candidate, DT, 0.0);
+
+    // Authored line-average A histories drive this same original rotor. Their
+    // initial values match the retained transverse field; no field is reset.
+    let dims = Dims([1, 1, -2, 0, -1, 0]);
+    let authored: Vec<_> = problem
+        .mesh()
+        .edges
+        .iter()
+        .enumerate()
+        .map(|(edge, &[a, b])| {
+            let p = problem.positions_m()[a as usize];
+            let q = problem.positions_m()[b as usize];
+            let mid = std::array::from_fn(|axis| 0.5 * (p[axis] + q[axis]));
+            let values = [[1.0, 0.0, 0.0], [1.0, 0.1, 0.0]]
+                .map(|b| cross(b, mid).map(|a| QtyAny::new(0.5 * a, dims)).to_vec())
+                .to_vec();
+            let meta = PayloadMeta::new(
+                QuantityContract::Dimensions(dims),
+                PayloadId::new("basis/frame-cartesian").unwrap(),
+                WORLD,
+                OrientationParity::Even,
+                ReferenceSemantics::Continuous,
+            )
+            .unwrap();
+            BoundaryCondition {
+                region: format!("rotor-original-edge-{edge}"),
+                physics: Physics::Magnetics,
+                kind: BcKind::MagneticVectorPotential,
+                value: Some(BcValue::Typed(Payload::Vector(
+                    VectorPayload::new(
+                        meta,
+                        SampleSource::table(
+                            [0.0, DT]
+                                .map(|time| QtyAny::new(time, Dims([0, 0, 1, 0, 0, 0])))
+                                .to_vec(),
+                            values,
+                            TableInterpolation::Linear,
+                            OutsideDomainPolicy::Refuse,
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap(),
+                ))),
+                compatibility: None,
+                frame: WORLD.0,
+            }
+        })
+        .collect();
+    let rows: Vec<_> = problem
+        .exterior_faces()
+        .into_iter()
+        .map(|face| MagneticPotentialBoundary3::EdgeAverages {
+            face,
+            values: problem
+                .face_edges(face)
+                .unwrap()
+                .map(|edge| &authored[edge]),
+        })
+        .collect();
+    let frames = FrameTree::new();
+    let scenario = step_rotor3(
+        &original,
+        &rows,
+        &frames,
+        &zero,
+        0.0,
+        DT,
+        field_controls(),
+        controls(),
+        &mut || false,
+    )
+    .unwrap();
+    near(
+        scenario.state().angular_velocity_rad_s(),
+        candidate.state().angular_velocity_rad_s(),
+        2e-9,
+    );
+    near(scenario.induction.heat_j, candidate.induction.heat_j, 2e-9);
+    near(
+        scenario.induction.magnetic_boundary_work_j,
+        candidate.induction.magnetic_boundary_work_j,
+        2e-9,
+    );
+    for (&a, &b) in scenario
+        .state()
+        .field()
+        .potential_wb()
+        .iter()
+        .zip(candidate.state().field().potential_wb())
+    {
+        near(a, b, 2e-9);
+    }
+    assert!(matches!(
+        step_rotor3(
+            &original,
+            &rows,
+            &frames,
+            &[],
+            0.0,
+            DT,
+            field_controls(),
+            controls(),
+            &mut || false
+        ),
+        Err(ScenarioMagneticRotorError::NativeRotor(
+            SpatialRotorError::Invalid(_)
+        ))
+    ));
+    assert!(matches!(
+        step_rotor3(
+            &original,
+            &rows,
+            &frames,
+            &zero,
+            0.0,
+            0.0,
+            field_controls(),
+            controls(),
+            &mut || false
+        ),
+        Err(ScenarioMagneticRotorError::Scenario(_))
+    ));
+
+    // Recompute from the original accepted field at the converged speed.
+    // This independently checks that speed trials did not advance the trace.
+    let midpoint = 0.5 * candidate.state().angular_velocity_rad_s();
+    let velocity: Vec<_> = problem
+        .positions_m()
+        .iter()
+        .map(|p| [-midpoint * p[1], midpoint * p[0], 0.0])
+        .collect();
+    let direct = original
+        .field()
+        .step_with_boundary_candidate(
+            &zero,
+            &velocity,
+            &boundary,
+            DT,
+            field_controls(),
+            &mut || false,
+        )
+        .unwrap();
+    for (&a, &b) in candidate
+        .state()
+        .field()
+        .potential_wb()
+        .iter()
+        .zip(direct.state().potential_wb())
+    {
+        near(a, b, 2e-9);
+    }
+    near(candidate.induction.heat_j, direct.step().heat_j, 2e-9);
+    near(
+        candidate.induction.magnetic_boundary_work_j,
+        direct.step().magnetic_boundary_work_j,
+        2e-9,
+    );
+
+    let mut polled = 0;
+    let refused = original.step_with_boundary_candidate(
+        DT,
+        &zero,
+        &boundary,
+        0.0,
+        field_controls(),
+        controls(),
+        &mut || {
+            polled += 1;
+            polled == checkpoints
+        },
+    );
+    assert!(matches!(refused, Err(SpatialRotorError::Cancelled)));
+    let incomplete = VectorMagneticBoundary { potential: vec![] };
+    assert!(
+        original
+            .step_with_boundary_candidate(
+                DT,
+                &zero,
+                &incomplete,
+                0.0,
+                field_controls(),
+                controls(),
+                &mut || false,
+            )
+            .is_err()
+    );
+    assert_eq!(original.field().potential_wb(), original_a);
+    assert_eq!(original.field().time_s(), 0.0);
+    assert_eq!(original.angular_velocity_rad_s(), 0.0);
+
+    let accepted = candidate.into_state();
+    let hold = accepted
+        .step_candidate(
+            2.0 * DT,
+            &zero,
+            0.0,
+            field_controls(),
+            controls(),
+            &mut || false,
+        )
+        .unwrap();
+    assert_eq!(hold.induction.magnetic_boundary_work_j, 0.0);
+    assert_balance(&accepted, &hold, DT, 0.0);
+    for trace in &boundary.potential {
+        for (edge, expected) in problem
+            .face_edges(trace.face)
+            .unwrap()
+            .into_iter()
+            .zip(trace.edge_integrals_wb)
+        {
+            assert_eq!(hold.state().field().potential_wb()[edge], expected);
+        }
     }
 }
 

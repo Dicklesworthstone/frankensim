@@ -6,14 +6,17 @@ use super::*;
 use fs_couple::{
     circuit_enthalpy::{
         CircuitEnthalpyError, CircuitEnthalpySolve,
-        material::MaterialCell,
+        contacts::{heat::MaterialHeatNetwork, material::ElectricalContactNetwork},
+        material::{MaterialCell, MaterialNetwork},
         spatial_induction::{
             SpatialMagneticRegion, SpatialMagneticThermalLaw, SpatialMagneticThermalNetwork,
-            ThermalMagneticMaterial,
+            ThermalMagneticMaterial, rotor::heat_assembly_with_boundary_candidate,
         },
     },
     material_circuit::MaterialCircuitSolve,
+    scenario_sensor::{TemperatureSensorObserver, ThermalSensorSupport},
 };
+use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_matdb::SelectionPolicy;
 use fs_material::{
     phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase},
@@ -21,6 +24,10 @@ use fs_material::{
     thermal::source::ThermalMaterialPoint,
 };
 use fs_qty::Density;
+use fs_scenario::{
+    EntityDeclaration, EntityRef, KindExpectation, ObservationSupport, PlacementUncertainty,
+    ScenarioSensor, SensorCalibration, SensorDynamics, SensorKind, SensorLocation, SensorMount,
+};
 use fs_solver::NewtonKrylovConfig;
 use fs_thermal::enthalpy::*;
 
@@ -57,6 +64,15 @@ fn thermal_controls() -> CircuitEnthalpySolve {
 
 #[test]
 fn finite_temperature_rotor_retains_field_speed_and_source_bound_joule_heat() {
+    finite_temperature_rotor(false);
+}
+
+#[test]
+fn applied_magnetic_history_reaches_rotor_temperature_and_complete_heat_assembly() {
+    finite_temperature_rotor(true);
+}
+
+fn finite_temperature_rotor(driven: bool) {
     const SECTORS: usize = 16;
     const ALPHA: f64 = 0.005;
     const SPEED: f64 = 6.0;
@@ -218,6 +234,7 @@ fn finite_temperature_rotor_retains_field_speed_and_source_bound_joule_heat() {
         volume_tolerance_m3: 1e-12,
     };
     let zero = vec![[0.0; 3]; problem.mesh().tets.len()];
+    let boundary = uniform_trace(&problem, [1.0, 0.1, 0.0]);
     let original_a = rotor.field().potential_wb().to_vec();
     let mut bounded = thermal_controls();
     bounded.maximum_circuit_trials = 1;
@@ -242,14 +259,58 @@ fn finite_temperature_rotor_retains_field_speed_and_source_bound_joule_heat() {
     assert_eq!(heat.time_s(), 0.0);
     near(heat.temperature_k(CellId(7)).unwrap(), 300.0, 1e-12);
 
+    let assembly_id = EntityDeclaration::assembly("source-driven-rotor").identity();
+    let part = EntityDeclaration::part(assembly_id, "finite-rotor").identity();
+    let entity = EntityDeclaration::region(part, "caloric-cell").identity();
+    let instrument = ScenarioSensor::new(
+        "rotor-thermocouple",
+        SensorKind::Thermocouple,
+        SensorLocation::new(
+            EntityRef::new(entity, KindExpectation::Domain),
+            [0.0; 3],
+            PlacementUncertainty::declared_exact("original whole-cell support").unwrap(),
+        )
+        .unwrap(),
+        ObservationSupport::point(1, 0).unwrap(),
+        SensorMount::affine(1.0, 0.0, "fixture mount").unwrap(),
+        SensorDynamics::first_order(0.25, "fixture instrument response").unwrap(),
+        SensorCalibration::physical("rotor-fixture", "2026-07-01", "synthetic", 0.04).unwrap(),
+        false,
+    )
+    .unwrap()
+    .compile()
+    .unwrap();
+    let mut thermometer = TemperatureSensorObserver::new(
+        &instrument,
+        ThermalSensorSupport {
+            entity,
+            cells: &[CellId(7)],
+        },
+        &heat,
+        300.0,
+        || Ok(()),
+    )
+    .unwrap();
+
     for (index, shaft) in [0.15, 0.0].into_iter().enumerate() {
+        let apply_boundary = driven && index == 0;
         let target = (index + 1) as f64 * dt;
         let temperature_before = heat.temperature_k(CellId(7)).unwrap();
         let speed_before = rotor.angular_velocity_rad_s();
         let angle_before = rotor.angle_rad();
         let b_before = rotor.field().flux_density_t(&mut || false).unwrap();
-        let cold = rotor
-            .step_candidate(
+        let cold = if apply_boundary {
+            rotor.step_with_boundary_candidate(
+                target,
+                &zero,
+                &boundary,
+                shaft,
+                field_controls(),
+                controls(),
+                &mut || false,
+            )
+        } else {
+            rotor.step_candidate(
                 target,
                 &zero,
                 shaft,
@@ -257,9 +318,26 @@ fn finite_temperature_rotor_retains_field_speed_and_source_bound_joule_heat() {
                 controls(),
                 &mut || false,
             )
-            .unwrap();
-        let candidate = network
-            .step_rotor_candidate(
+        }
+        .unwrap();
+        let candidate = if apply_boundary {
+            network.step_rotor_with_boundary_candidate(
+                &heat,
+                target,
+                &rotor,
+                &zero,
+                &boundary,
+                shaft,
+                &laws,
+                thermal_controls(),
+                field_controls(),
+                controls(),
+                assembly(),
+                &[0.0],
+                || false,
+            )
+        } else {
+            network.step_rotor_candidate(
                 &heat,
                 target,
                 &rotor,
@@ -273,8 +351,32 @@ fn finite_temperature_rotor_retains_field_speed_and_source_bound_joule_heat() {
                 &[0.0],
                 || false,
             )
-            .unwrap();
+        }
+        .unwrap();
         let temperature = candidate.thermal().temperature_k(CellId(7)).unwrap();
+        // Observe the converged implicit thermal state; do not integrate heat
+        // again or advance the instrument through rejected Newton/speed trials.
+        let original_instrument = thermometer.clone();
+        let sensor_candidate = thermometer
+            .observe_endpoint_candidate(&heat, candidate.thermal(), dt, || Ok(()))
+            .unwrap();
+        let weight = -(-dt / 0.25_f64).exp_m1();
+        let old_reading = thermometer.state().reading();
+        let expected = old_reading
+            + (temperature_before - old_reading) * weight
+            + (temperature - temperature_before) * (1.0 - 0.25 * weight / dt);
+        assert!(sensor_candidate.state().reading() > old_reading);
+        near(sensor_candidate.state().reading(), expected, 2e-10);
+        near(
+            sensor_candidate.state().equilibrium_reading(),
+            temperature,
+            1e-12,
+        );
+        assert_eq!(
+            sensor_candidate.state().time_s(),
+            candidate.thermal().time_s()
+        );
+        assert_eq!(thermometer, original_instrument);
         let speed = candidate.rotor().angular_velocity_rad_s();
         let midpoint = 0.5 * (speed_before + speed);
         let report = candidate.report();
@@ -312,7 +414,7 @@ fn finite_temperature_rotor_retains_field_speed_and_source_bound_joule_heat() {
         );
         near(
             magnetic_change + kinetic_change + caloric_change,
-            shaft_work,
+            shaft_work + native.induction.magnetic_boundary_work_j,
             3e-8,
         );
         near(report.total_energy_residual_j, 0.0, 2e-8);
@@ -339,6 +441,106 @@ fn finite_temperature_rotor_retains_field_speed_and_source_bound_joule_heat() {
             problem.mesh().tets.len()
         );
         assert!(report.coupled.circuit_trials > native.balance.iterations);
+        if apply_boundary {
+            assert!(native.induction.magnetic_boundary_work_j.abs() > 1e-8);
+            // The complete provider must use the identical original field,
+            // momentum, source-temperature and caloric residual, retaining
+            // external magnetic supply even with no optional thermal links.
+            let bulk = MaterialNetwork {
+                cells: &cells,
+                resistors: &[],
+                links: &[],
+            };
+            let electrical = ElectricalContactNetwork {
+                bulk: &bulk,
+                contacts: &[],
+                electrical_bases: &[],
+            };
+            let heat_network = MaterialHeatNetwork {
+                electrical: &electrical,
+                thermal_contacts: &[],
+                radiation: None,
+            };
+            let gate = CancelGate::new();
+            let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+            pool.scope(|arena| {
+                let cx = Cx::new(
+                    &gate,
+                    arena,
+                    StreamKey {
+                        seed: 79,
+                        kernel_id: 3,
+                        tile: 0,
+                        iteration: 0,
+                    },
+                    Budget::INFINITE,
+                    ExecMode::Deterministic,
+                );
+                let prepared = heat_network.prepare(&cx, &heat).unwrap();
+                let complete = heat_assembly_with_boundary_candidate(
+                    &prepared,
+                    &cx,
+                    &heat,
+                    target,
+                    &rotor,
+                    &zero,
+                    &boundary,
+                    shaft,
+                    &regions,
+                    1e-12,
+                    &laws,
+                    thermal_controls(),
+                    field_controls(),
+                    controls(),
+                    assembly(),
+                    &[0.0],
+                )
+                .unwrap();
+                near(
+                    complete.thermal().temperature_k(CellId(7)).unwrap(),
+                    temperature,
+                    2e-9,
+                );
+                near(complete.rotor().angular_velocity_rad_s(), speed, 2e-10);
+                for (&a, &b) in complete
+                    .rotor()
+                    .field()
+                    .potential_wb()
+                    .iter()
+                    .zip(candidate.rotor().field().potential_wb())
+                {
+                    near(a, b, 2e-10);
+                }
+                near(
+                    complete
+                        .report()
+                        .coupled
+                        .electrical
+                        .induction
+                        .magnetic_boundary_work_j,
+                    native.induction.magnetic_boundary_work_j,
+                    2e-9,
+                );
+                near(complete.report().total_energy_residual_j, 0.0, 2e-8);
+                near(complete.report().external_heat_j, 0.0, 2e-9);
+            });
+        } else {
+            assert_eq!(native.induction.magnetic_boundary_work_j, 0.0);
+        }
+        if driven {
+            // The next ordinary interval holds the newly published trace;
+            // it must not restore the constructor boundary or repeat the ramp.
+            for trace in &boundary.potential {
+                for (edge, expected) in problem
+                    .face_edges(trace.face)
+                    .unwrap()
+                    .into_iter()
+                    .zip(trace.edge_integrals_wb)
+                {
+                    assert_eq!(candidate.rotor().field().potential_wb()[edge], expected);
+                }
+            }
+        }
         assert_eq!(rotor.field().time_s(), index as f64 * dt);
         near(
             heat.temperature_k(CellId(7)).unwrap(),
@@ -346,5 +548,6 @@ fn finite_temperature_rotor_retains_field_speed_and_source_bound_joule_heat() {
             1e-12,
         );
         (heat, rotor, _) = candidate.into_parts();
+        thermometer = sensor_candidate;
     }
 }
