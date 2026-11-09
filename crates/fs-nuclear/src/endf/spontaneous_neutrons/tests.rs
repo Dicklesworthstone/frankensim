@@ -246,20 +246,14 @@ pub(in crate::endf) fn prompt_general_evaporation_fixture(
         yield_per_fission,
         &[],
     ));
-    lines.push(control(
+    lines.extend(evaporation_prefix(
         selection,
-        za(selection),
-        f64::from(selection.nuclide.mass_number()),
-        [0, 0, 1, 0],
+        probability,
+        0.0,
+        temperature_ev,
+        restriction_ev,
         5,
-        18,
     ));
-    lines.push(control(selection, restriction_ev, 0.0, [0, 5, 1, 1], 5, 18));
-    lines.push(ints(selection, [1, 5, 0, 0, 0, 0], 5, 18));
-    append_values(&mut lines, selection, &[0.0, probability], 5, 18);
-    lines.push(control(selection, 0.0, 0.0, [0, 0, 1, 1], 5, 18));
-    lines.push(ints(selection, [1, 5, 0, 0, 0, 0], 5, 18));
-    append_values(&mut lines, selection, &[0.0, temperature_ev], 5, 18);
     lines.push(control(
         selection,
         0.0,
@@ -278,6 +272,68 @@ pub(in crate::endf) fn prompt_general_evaporation_fixture(
     append_values(&mut lines, selection, &values, 5, 18);
     lines.push(control(selection, 0.0, 0.0, [0; 4], 5, 0));
     lines.join("\n")
+}
+
+/// LF7/9 input with one explicitly supplied reference E and finite E-U cutoff.
+pub(in crate::endf) fn prompt_analytic_fixture(
+    selection: EndfSpontaneousNeutronSelection,
+    yield_per_fission: f64,
+    probability: f64,
+    incident_ev: f64,
+    temperature_ev: f64,
+    restriction_ev: f64,
+    law: i32,
+) -> String {
+    let mut lines = metadata(selection, 4);
+    lines.extend(yield_section(
+        selection,
+        FissionNeutronKind::Prompt,
+        yield_per_fission,
+        &[],
+    ));
+    lines.extend(evaporation_prefix(
+        selection,
+        probability,
+        incident_ev,
+        temperature_ev,
+        restriction_ev,
+        law,
+    ));
+    lines.push(control(selection, 0.0, 0.0, [0; 4], 5, 0));
+    lines.join("\n")
+}
+
+fn evaporation_prefix(
+    selection: EndfSpontaneousNeutronSelection,
+    probability: f64,
+    incident_ev: f64,
+    temperature_ev: f64,
+    restriction_ev: f64,
+    law: i32,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(control(
+        selection,
+        za(selection),
+        f64::from(selection.nuclide.mass_number()),
+        [0, 0, 1, 0],
+        5,
+        18,
+    ));
+    lines.push(control(
+        selection,
+        restriction_ev,
+        0.0,
+        [0, law, 1, 1],
+        5,
+        18,
+    ));
+    lines.push(ints(selection, [1, 5, 0, 0, 0, 0], 5, 18));
+    append_values(&mut lines, selection, &[incident_ev, probability], 5, 18);
+    lines.push(control(selection, 0.0, 0.0, [0, 0, 1, 1], 5, 18));
+    lines.push(ints(selection, [1, 5, 0, 0, 0, 0], 5, 18));
+    append_values(&mut lines, selection, &[incident_ev, temperature_ev], 5, 18);
+    lines
 }
 
 fn triangle() -> Vec<(f64, f64)> {
@@ -762,6 +818,119 @@ fn g0_lf5_refuses_ambiguous_temperature_rows_invalid_cutoffs_and_excess_work() {
 }
 
 #[test]
+fn g0_lf7_lf9_retain_explicit_reference_temperature_and_finite_cutoff() {
+    for law in [7, 9] {
+        let text = prompt_analytic_fixture(selection(), 2.25, 0.75, 4.0, 2.0, 1.0, law);
+        let source = parse_spectrum(&text, FissionNeutronKind::Prompt).unwrap();
+        let component = &source.components()[0];
+        assert_eq!(component.probability, 0.75);
+        assert_eq!(
+            component.probability_energies_j.as_ref(),
+            &[4.0 * super::super::EV_J]
+        );
+        assert_eq!(
+            component.incident_energies_j.as_ref(),
+            &[4.0 * super::super::EV_J]
+        );
+        assert_eq!(component.restriction_energy_j, Some(super::super::EV_J));
+        assert_eq!(component.probability_interpolation[0].law, 5);
+        assert_eq!(component.incident_interpolation[0].law, 5);
+        let expected = if law == 7 {
+            SpontaneousFissionSpectrumLaw::Maxwellian {
+                temperature_j: 2.0 * super::super::EV_J,
+            }
+        } else {
+            SpontaneousFissionSpectrumLaw::Evaporation {
+                temperature_j: 2.0 * super::super::EV_J,
+            }
+        };
+        assert_eq!(component.law, expected);
+        // No sampled outgoing points or infinite-support substitution are
+        // introduced. The zero-energy reference remains a valid singleton.
+        let zero = prompt_analytic_fixture(selection(), 2.25, 1.0, 0.0, 2.0, -3.0, law);
+        let zero = SpontaneousFissionNeutronSpectrum::parse(
+            "analytic-without-tabulation".into(),
+            selection(),
+            FissionNeutronKind::Prompt,
+            &zero,
+            SpontaneousNeutronReadLimits {
+                max_spectrum_points: 0,
+                ..SpontaneousNeutronReadLimits::default()
+            },
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(zero.components()[0].incident_energies_j.as_ref(), &[0.0]);
+        assert_eq!(
+            zero.components()[0].restriction_energy_j,
+            Some(-3.0 * super::super::EV_J)
+        );
+    }
+}
+
+#[test]
+fn g0_lf7_lf9_refuse_undefined_parameters_incident_dependence_and_excess_work() {
+    for law in [7, 9] {
+        let text = prompt_analytic_fixture(selection(), 2.25, 1.0, 0.0, 2.0, -3.0, law);
+        for (line, field, value) in [
+            (15, 1, real(0.0)),
+            (15, 1, real(-2.0)),
+            (15, 0, real(-1.0)),
+            (10, 0, real(0.0)),
+            (10, 0, real(1.0)),
+            (13, 5, format!("{:11}", 0)),
+            (15, 2, real(1.0)),
+        ] {
+            assert!(
+                parse_spectrum(
+                    &changed(&text, line, field, &value),
+                    FissionNeutronKind::Prompt
+                )
+                .is_err()
+            );
+        }
+        // A second incident energy changes E-U even when theta is constant.
+        // This is a complete two-point TAB1, not a truncated malformed source.
+        let repeated = changed(&text, 13, 5, &format!("{:11}", 2));
+        let repeated = changed(&repeated, 14, 0, &format!("{:11}", 2));
+        let repeated = changed(&repeated, 14, 1, &format!("{:11}", 2));
+        let repeated = changed(&repeated, 15, 2, &real(1.0));
+        let repeated = changed(&repeated, 15, 3, &real(2.0));
+        assert!(matches!(
+            parse_spectrum(&repeated, FissionNeutronKind::Prompt),
+            Err(EndfError::Unsupported(_))
+        ));
+        for bounded in [
+            SpontaneousNeutronReadLimits {
+                max_incident_points: 1,
+                ..SpontaneousNeutronReadLimits::default()
+            },
+            SpontaneousNeutronReadLimits {
+                max_interpolation_regions: 1,
+                ..SpontaneousNeutronReadLimits::default()
+            },
+        ] {
+            assert!(matches!(
+                SpontaneousFissionNeutronSpectrum::parse(
+                    "bounded-analytic".into(),
+                    selection(),
+                    FissionNeutronKind::Prompt,
+                    &text,
+                    bounded,
+                    || Ok(())
+                ),
+                Err(EndfError::Physics(FissionError::Budget(_)))
+            ));
+        }
+        let unsupported = changed(&text, 10, 3, &format!("{:11}", 11));
+        assert!(matches!(
+            parse_spectrum(&unsupported, FissionNeutronKind::Prompt),
+            Err(EndfError::Unsupported(_))
+        ));
+    }
+}
+
+#[test]
 fn g4_final_cancellation_does_not_publish_a_partial_source() {
     for text in [
         prompt_fixture(selection(), 2.25, &[(1.0, triangle())]),
@@ -774,6 +943,8 @@ fn g4_final_cancellation_does_not_publish_a_partial_source() {
             &[(0.5, 0.0), (1.0, 2.0), (1.5, 0.0)],
             2,
         ),
+        prompt_analytic_fixture(selection(), 2.25, 1.0, 0.0, 2.0, -3.0, 7),
+        prompt_analytic_fixture(selection(), 2.25, 1.0, 0.0, 2.0, -3.0, 9),
     ] {
         let mut polls = 0;
         SpontaneousFissionNeutronSpectrum::parse(

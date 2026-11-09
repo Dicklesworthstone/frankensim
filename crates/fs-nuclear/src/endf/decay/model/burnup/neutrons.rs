@@ -624,4 +624,7 @@ fn invalid(message: &'static str) -> EvaluatedBurnupNeutronError {
 mod tests;
 
 #[cfg(test)]
-pub(crate) use tests::{material_fixture, material_fixture_general_evaporation};
+pub(crate) use tests::{
+    material_fixture, material_fixture_evaporation, material_fixture_general_evaporation,
+    material_fixture_maxwellian,
+};

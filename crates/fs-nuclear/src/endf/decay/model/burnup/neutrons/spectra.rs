@@ -10,6 +10,7 @@ use crate::endf::decay::model::emissions::{
 };
 use crate::endf::decay::spectra::{DecayRadiation, DecaySpectrumPoint};
 use crate::endf::spectrum::PositiveIntegral;
+use crate::endf::spontaneous_neutrons::analytic::{self, AnalyticFissionSpectrum};
 use crate::endf::spontaneous_neutrons::{
     SpontaneousFissionShapePoint, SpontaneousFissionSpectrumComponent,
     SpontaneousFissionSpectrumLaw,
@@ -66,6 +67,28 @@ pub(super) fn integrate_component(
                 interpolation,
                 1.0,
                 maximum,
+                edges,
+                counts,
+                energies,
+                work,
+                limits,
+                checkpoint,
+            )
+        }
+        SpontaneousFissionSpectrumLaw::Maxwellian { temperature_j }
+        | SpontaneousFissionSpectrumLaw::Evaporation { temperature_j } => {
+            let shape = if matches!(
+                &component.law,
+                SpontaneousFissionSpectrumLaw::Maxwellian { .. }
+            ) {
+                AnalyticFissionSpectrum::Maxwellian
+            } else {
+                AnalyticFissionSpectrum::Evaporation
+            };
+            analytic::integrate(
+                shape,
+                *temperature_j,
+                outgoing_limit(component)?,
                 edges,
                 counts,
                 energies,

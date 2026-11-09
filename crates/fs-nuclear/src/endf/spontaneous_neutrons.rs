@@ -20,6 +20,7 @@ use super::{EndfError, EndfMetadata, EndfReadLimits, Reader, Record, budget};
 use crate::irradiation::NuclideId;
 use crate::{FissionError, nonnegative, positive};
 
+pub(in crate::endf) mod analytic;
 mod spectrum;
 pub use spectrum::{
     SpontaneousFissionNeutronSpectrum, SpontaneousFissionShapePoint,

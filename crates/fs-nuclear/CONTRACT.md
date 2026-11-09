@@ -3532,9 +3532,10 @@ MF5/MT18 prompt and MF5/MT455 delayed spectra admit energy-independent LF=1
 tabulations with the ENDF-102 §5.4.2 INT=1,2,3 laws and zero-density endpoints.
 Original component probabilities, source order, incident grids, interpolation
 and outgoing points remain available after SI conversion. Every supplied
-LF1 incident row must describe the same distribution. The LF5 extension below
-retains an explicitly supplied reference and finite outgoing cutoff. Other LF
-laws and actual incident dependence refuse explicitly. Neither probabilities nor spectra are
+LF1 incident row must describe the same distribution. The LF5/LF7/LF9 extensions
+below retain original parameters, an explicitly supplied reference and a finite
+outgoing cutoff. Other LF laws and actual incident dependence refuse explicitly.
+Neither probabilities nor spectra are
 renormalized; their physical normalization belongs to a separately bounded
 consumer. These quantities are per fission, so a mixed-mode parent's SF branch
 must be applied exactly once when constructing its transformation source.
@@ -3644,3 +3645,37 @@ The focused original-source suite passed 200 native tests, zero failures, with
 `thermal` enabled and no nuclear compiler diagnostics. All nine changed source
 and fixture files matched the compiled snapshot. This extends the preceding
 193-test seam; it is not a full Cargo/constellation or DSR gate.
+
+## Finite Maxwellian and evaporation spectra in native decay coupling
+
+MF5 LF7 Maxwellian and LF9 evaporation retain the original positive temperature,
+single supplied reference energy and restriction energy. Their normalized
+densities are respectively sqrt(E_out)*exp(-E_out/theta) and
+E_out*exp(-E_out/theta), restricted to the declared 0<=E_out<=E-U. This finite
+normalization defines each analytic law; component probabilities and evaluated
+multiplicities retain the original explicit normalization allowance.
+
+A shared bounded moment kernel integrates counts and first energies directly.
+Small cutoff/temperature ratios use scaled coordinates, narrow groups use a
+local series with an explicit complete-tail bound, and broad tail groups use
+upper incomplete-gamma values. Original fs-math deterministic functions,
+double-double exposure and scaled positive products preserve narrow positive
+tails without subtracting nearly equal cumulative probabilities. Unsupported
+energy coverage or lost positive prepared moments refuse explicitly. No outgoing
+tabulation, quadrature mesh, new population solver or thermal ledger is created.
+
+Prompt analytic sources pass through the same conservative group projection,
+original SF event counts, finite parent/fragment inventories and material
+heating transaction as LF1/LF5. Different neutron mean energies change capture
+deposition and radiation while retaining the original radioactive energy total.
+Delayed source parsing still does not establish aggregate-family evolution or
+permission to duplicate an explicitly represented fragment's later emission.
+
+Ten additional regressions were written: source metadata/refusal, independent
+high-precision gamma references, tiny cutoff ratios, narrow/adjacent-float tail
+bins, refinement and unit rescaling, bounds/cancellation, finite SF histories,
+and full material heat/continuation/rollback. Formatting and source review
+completed. The subsequent native compiler was killed with exit 137, then the
+execution environment became unavailable; no LF7/LF9 Rust tests ran. The earlier
+200-test LF5 result above does not validate these additions. Native validation
+of this extension remains pending; no empirical or performance claim is made.

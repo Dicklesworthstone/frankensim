@@ -3,7 +3,8 @@
 
 use super::*;
 use crate::endf::decay::model::burnup::neutrons::{
-    EvaluatedBurnupNeutrons, material_fixture, material_fixture_general_evaporation,
+    EvaluatedBurnupNeutrons, material_fixture, material_fixture_evaporation,
+    material_fixture_general_evaporation, material_fixture_maxwellian,
 };
 
 const EV_J: f64 = 1.602_176_634e-19;
@@ -19,16 +20,24 @@ fn macroscopic_budget() -> FusionNeutronActivationBudget {
 
 #[test]
 fn g1_g3_g4_evaluated_sf_and_product_neutrons_heat_original_material_once() {
-    verify_material_history(material_fixture);
+    verify_material_history(material_fixture, 2.0);
 }
 
 #[test]
 fn g1_g3_g4_lf5_spectrum_heats_original_material_with_the_same_decay_history() {
-    verify_material_history(material_fixture_general_evaporation);
+    verify_material_history(material_fixture_general_evaporation, 2.0);
+}
+
+#[test]
+fn g1_g3_g4_analytic_spectra_heat_material_from_their_original_energy_moments() {
+    // Independent 70-digit incomplete-gamma means for theta=2 eV, R=3 eV.
+    verify_material_history(material_fixture_maxwellian, 1.4794210037284057);
+    verify_material_history(material_fixture_evaporation, 1.7292098607415109);
 }
 
 fn verify_material_history(
     fixture: fn(f64) -> (Arc<EvaluatedBurnupNeutrons>, FusionNeutronActivationState),
+    prompt_mean_ev: f64,
 ) {
     let initial_nuclei = 1e18;
     let (_evaluated, state) = fixture(initial_nuclei);
@@ -68,13 +77,15 @@ fn verify_material_history(
         let fragment =
             0.25 * initial_nuclei * ((-lambda * time).exp() - (-2.0 * lambda * time).exp());
         let fragment_decays = 0.25 * parent_decays - fragment;
-        // Solve n' = lambda*P0*exp(-lambda*t)
-        //           - .5*lambda*P0*exp(-2*lambda*t) - .3*n independently.
-        let neutrons = lambda
-            * initial_nuclei
-            * (((-lambda * time).exp() - (-capture_rate * time).exp()) / (capture_rate - lambda)
-                - 0.5 * ((-2.0 * lambda * time).exp() - (-capture_rate * time).exp())
-                    / (capture_rate - 2.0 * lambda));
+        // Separate prompt SF births from the fragment's delayed births in
+        // the independent analytic solution. Their neutron means differ.
+        let first =
+            ((-lambda * time).exp() - (-capture_rate * time).exp()) / (capture_rate - lambda);
+        let second = ((-2.0 * lambda * time).exp() - (-capture_rate * time).exp())
+            / (capture_rate - 2.0 * lambda);
+        let prompt = 0.5 * lambda * initial_nuclei * first;
+        let delayed = 0.5 * lambda * initial_nuclei * (first - second);
+        let neutrons = prompt + delayed;
         let captures = 0.5 * parent_decays + fragment_decays - neutrons;
         assert!(captures > 0.0 && fragment_decays > 0.0);
         for (&actual, expected) in populations.iter().zip([
@@ -86,23 +97,30 @@ fn verify_material_history(
         ]) {
             close(actual, expected, 1e7);
         }
-        for &count in shared.neutrons().neutron_counts() {
-            close(count, 0.5 * neutrons, 1e7);
-        }
+        close(
+            shared.neutrons().neutron_counts()[0],
+            prompt * (3.0 - prompt_mean_ev) / 2.0 + delayed / 2.0,
+            1e7,
+        );
+        close(
+            shared.neutrons().neutron_counts()[1],
+            prompt * (prompt_mean_ev - 1.0) / 2.0 + delayed / 2.0,
+            1e7,
+        );
+        let emitted_ev = 0.5 * prompt_mean_ev * parent_decays + 2.0 * fragment_decays;
+        let retained_ev = prompt_mean_ev * prompt + 2.0 * delayed;
+        let captured_ev = emitted_ev - retained_ev;
         let kinetic = shared.cell_kinetic_released(0).unwrap();
-        close(kinetic.deposited_j, 0.5 * captures * EV_J, 1e-9);
-        close(kinetic.radiation_j, 1.5 * captures * EV_J, 1e-9);
-        let heat = (4.0 * parent_decays + fragment_decays + 0.5 * captures) * EV_J;
-        let radiation = (4.0 * parent_decays + fragment_decays + 1.5 * captures) * EV_J;
+        close(kinetic.deposited_j, 0.25 * captured_ev * EV_J, 1e-9);
+        close(kinetic.radiation_j, 0.75 * captured_ev * EV_J, 1e-9);
+        let heat = (4.0 * parent_decays + fragment_decays + 0.25 * captured_ev) * EV_J;
+        let radiation =
+            (5.0 * parent_decays + 3.0 * fragment_decays - emitted_ev + 0.75 * captured_ev) * EV_J;
         let released = shared.cell_released(0).unwrap();
         close(released.deposited_j, heat, 1e-9);
         close(released.radiation_j, radiation, 1e-9);
         assert_eq!(released.escaped_j, 0.0);
-        close(
-            shared.kinetic_energy_j().unwrap(),
-            2.0 * neutrons * EV_J,
-            1e-9,
-        );
+        close(shared.kinetic_energy_j().unwrap(), retained_ev * EV_J, 1e-9);
         close(
             released.total_j() + shared.kinetic_energy_j().unwrap(),
             (9.0 * parent_decays + 4.0 * fragment_decays) * EV_J,

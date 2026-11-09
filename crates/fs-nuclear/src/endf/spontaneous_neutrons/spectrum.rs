@@ -1,6 +1,6 @@
-//! Explicit MF5 partial distributions. LF1 tabulations and LF5 general
-//! evaporation retain their original curves without fabricating an MF8 decay
-//! spectrum or a normalization uncertainty that the source did not give.
+//! Explicit MF5 partial distributions. LF1 tabulations, LF5 general
+//! evaporation, LF7 Maxwellian and LF9 evaporation retain their original
+//! parameters without fabricating an MF8 decay spectrum or source uncertainty.
 
 use super::*;
 use crate::endf::decay::spectra::{DecayInterpolation, DecaySpectrumPoint};
@@ -26,10 +26,14 @@ pub enum SpontaneousFissionSpectrumLaw {
         shape: Arc<[SpontaneousFissionShapePoint]>,
         interpolation: Arc<[DecayInterpolation]>,
     },
+    /// LF7: sqrt(E_out) exp(-E_out/theta), normalized on the supplied E-U bound.
+    Maxwellian { temperature_j: f64 },
+    /// LF9: E_out exp(-E_out/theta), normalized on the supplied E-U bound.
+    Evaporation { temperature_j: f64 },
 }
 
 /// One original partial distribution (or delayed family), in source order.
-/// LF1 may repeat an identical outgoing row. LF5 requires one supplied
+/// LF1 may repeat an identical outgoing row. LF5/7/9 require one supplied
 /// temperature row: its incident energy and U define the outgoing bound E-U.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpontaneousFissionSpectrumComponent {
@@ -167,10 +171,10 @@ fn component(
     let restriction_energy_j = match lf {
         1 if probability.number(0)? == 0.0 => None,
         1 => return Err(probability.error("nonzero reserved LF1 probability field")),
-        5 => Some(convert_si(probability.number(0)?, EV_J)?),
+        5 | 7 | 9 => Some(convert_si(probability.number(0)?, EV_J)?),
         _ => {
             return Err(EndfError::Unsupported(
-                "spontaneous-neutron spectra require MF5 LF=1 or LF=5",
+                "spontaneous-neutron spectra require MF5 LF=1,5,7,9",
             ));
         }
     };
@@ -248,7 +252,7 @@ fn component(
     let outgoing = match restriction_energy_j {
         None => tabulated(reader, section, limits, counts, checkpoint)?,
         Some(restriction) => {
-            general_evaporation(reader, section, restriction, limits, counts, checkpoint)?
+            evaporation_law(reader, section, lf, restriction, limits, counts, checkpoint)?
         }
     };
     Ok(SpontaneousFissionSpectrumComponent {
@@ -396,9 +400,10 @@ fn tabulated(
     })
 }
 
-fn general_evaporation(
+fn evaporation_law(
     reader: &mut Reader<'_>,
     section: Record<'_>,
+    lf: i32,
     restriction_energy_j: f64,
     limits: SpontaneousNeutronReadLimits,
     counts: &mut SourceCounts,
@@ -412,7 +417,7 @@ fn general_evaporation(
     }
     if rows != 1 {
         return Err(EndfError::Unsupported(
-            "LF5 spontaneous-neutron temperature requires exactly one incident row",
+            "spontaneous-neutron temperature requires exactly one incident row",
         ));
     }
     consume(
@@ -439,10 +444,22 @@ fn general_evaporation(
     let incident_j = convert_si(incident, EV_J)?;
     let temperature_j = convert_si(temperature, EV_J)?;
     if !positive(incident_j - restriction_energy_j) {
-        return Err(row.error("LF5 requires finite positive outgoing bound E-U"));
+        return Err(row.error("evaporation laws require finite positive outgoing bound E-U"));
     }
     let mut incident_energies = reserved(1, "spontaneous-neutron incident memory")?;
     incident_energies.push(incident_j);
+    let analytic_law = match lf {
+        7 => Some(SpontaneousFissionSpectrumLaw::Maxwellian { temperature_j }),
+        9 => Some(SpontaneousFissionSpectrumLaw::Evaporation { temperature_j }),
+        _ => None,
+    };
+    if let Some(law) = analytic_law {
+        return Ok(IncidentSpectrum {
+            energies: incident_energies,
+            interpolation: incident_interpolation,
+            law,
+        });
+    }
 
     let tab = reader.section(section.mat, 5, section.mt, checkpoint)?;
     zero_prefix(tab)?;

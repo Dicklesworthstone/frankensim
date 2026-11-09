@@ -18,7 +18,7 @@ use crate::endf::fission_yields::spontaneous::SpontaneousFissionYieldEvaluation;
 use crate::endf::fission_yields::{EndfFissionYieldReadLimits, EndfFissionYieldSelection};
 use crate::endf::spontaneous_neutrons::{
     EndfSpontaneousNeutronSelection, SpontaneousFissionSpectrumLaw, SpontaneousNeutronReadLimits,
-    tests::{prompt_fixture, prompt_general_evaporation_fixture},
+    tests::{prompt_analytic_fixture, prompt_fixture, prompt_general_evaporation_fixture},
 };
 use crate::fusion_neutrons::activation::{
     FusionNeutronActivationBudget, FusionNeutronActivationState,
@@ -399,6 +399,27 @@ fn source_budget() -> EvaluatedBurnupNeutronBudget {
     }
 }
 
+fn analytic_source(
+    law: i32,
+    cutoff_ev: f64,
+    probability: f64,
+) -> SpontaneousFissionPromptNeutronBinding {
+    let text = prompt_analytic_fixture(selection(), 2.0, probability, 0.0, 2.0, -cutoff_ev, law);
+    let mut source = prompt(selection(), 1.0, 1.0);
+    source.spectrum = Arc::new(
+        SpontaneousFissionNeutronSpectrum::parse(
+            format!("manufactured-finite-analytic-LF{law}"),
+            selection(),
+            FissionNeutronKind::Prompt,
+            &text,
+            SpontaneousNeutronReadLimits::default(),
+            || Ok(()),
+        )
+        .unwrap(),
+    );
+    source
+}
+
 fn prepare_source(
     assembly: Arc<EvaluatedBurnupDecayAssembly>,
 ) -> Result<EvaluatedBurnupNeutrons, EvaluatedBurnupNeutronError> {
@@ -458,6 +479,18 @@ pub(crate) fn material_fixture_general_evaporation(
         parent_count,
         general_evaporation(2.0, -3.0, &[(0.5, 0.0), (1.0, 2.0), (1.5, 0.0)], 2),
     )
+}
+
+pub(crate) fn material_fixture_maxwellian(
+    parent_count: f64,
+) -> (Arc<EvaluatedBurnupNeutrons>, FusionNeutronActivationState) {
+    material_fixture_with_source(parent_count, analytic_source(7, 3.0, 1.0))
+}
+
+pub(crate) fn material_fixture_evaporation(
+    parent_count: f64,
+) -> (Arc<EvaluatedBurnupNeutrons>, FusionNeutronActivationState) {
+    material_fixture_with_source(parent_count, analytic_source(9, 3.0, 1.0))
 }
 
 fn material_fixture_with_source(
@@ -747,6 +780,100 @@ fn g0_lf5_retains_positive_endpoints_normalization_and_finite_cutoff() {
         build(2.0, 2.5, &[(0.5, 1.0), (1.5, 1.0)]),
         Err(EvaluatedBurnupNeutronError::Source(_))
     ));
+}
+
+#[test]
+fn g1_lf7_lf9_moments_follow_actual_fission_births_and_original_finite_stock() {
+    // Independent 70-digit incomplete-gamma means for theta=2 eV, R=3 eV.
+    for (law, mean_ev) in [(7, 1.4794210037284057), (9, 1.7292098607415109)] {
+        let (source, initial) = material_fixture_with_source(100.0, analytic_source(law, 3.0, 1.0));
+        let component = &source.spontaneous_sources()[0].spectrum.components()[0];
+        assert_eq!(component.incident_energies_j.as_ref(), &[0.0]);
+        assert_eq!(component.restriction_energy_j, Some(-3.0 * EV_J));
+        close(source.normalization()[0].component_integrals[0], 1.0, 2e-14);
+        close(source.projection()[0].particles_per_decay, 0.5, 2e-14);
+        close(
+            source.projection()[0].kinetic_energy_j_per_decay,
+            0.5 * mean_ev * EV_J,
+            1e-32,
+        );
+        let (after, report) = initial
+            .trial_with_rates(2.0, &[300.0], &[0.0; 2], budget(), || Ok(()))
+            .unwrap();
+        for (&actual, expected) in after.inventories()[0]
+            .populations()
+            .iter()
+            .zip([50.0, 37.5, 6.25, 6.25, 12.5])
+        {
+            close(actual, expected, 1e-9);
+        }
+        let lambda = core::f64::consts::LN_2 / 2.0;
+        let capture_rate = 0.3;
+        let a = (0.5 - (-2.0_f64 * capture_rate).exp()) / (capture_rate - lambda);
+        let b = (0.25 - (-2.0_f64 * capture_rate).exp()) / (capture_rate - 2.0 * lambda);
+        let prompt = 50.0 * lambda * a;
+        let delayed = 50.0 * lambda * (a - b);
+        let retained = prompt + delayed;
+        close(
+            after.neutrons().neutron_counts()[0],
+            prompt * (3.0 - mean_ev) / 2.0 + delayed / 2.0,
+            1e-9,
+        );
+        close(
+            after.neutrons().neutron_counts()[1],
+            prompt * (mean_ev - 1.0) / 2.0 + delayed / 2.0,
+            1e-9,
+        );
+        close(report.decay_neutrons, 31.25, 1e-9);
+        close(report.spatial.neutrons.captures, 31.25 - retained, 1e-9);
+        close(
+            report.transferred_decay_neutron_energy_j,
+            (25.0 * mean_ev + 12.5) * EV_J,
+            1e-27,
+        );
+        close(
+            after.kinetic_energy_j().unwrap(),
+            (mean_ev * prompt + 2.0 * delayed) * EV_J,
+            1e-27,
+        );
+        close(
+            after.kinetic_energy_j().unwrap() + report.released.total_j(),
+            475.0 * EV_J,
+            1e-27,
+        );
+        let events = &report.spatial.burnup[0].reaction_counts;
+        close(report.decay_neutrons, 2.0 * events[0] + events[2], 1e-9);
+        assert!(Arc::ptr_eq(
+            after.inventories()[0].model(),
+            source.assembly().model()
+        ));
+    }
+}
+
+#[test]
+fn g0_analytic_laws_do_not_repair_probabilities_or_discard_cutoff_support() {
+    let original = assembly(&[(6.0, 0.25), (4.0, 0.75)], None, true, 0.5);
+    let prepare = |law, cutoff, probability| {
+        EvaluatedBurnupNeutrons::new(
+            "original-analytic-source-boundary".into(),
+            Arc::clone(&original),
+            kinetic(Arc::clone(original.model().groups())),
+            vec![analytic_source(law, cutoff, probability)],
+            &[],
+            source_budget(),
+            || Ok(()),
+        )
+    };
+    for law in [7, 9] {
+        assert!(matches!(
+            prepare(law, 3.0, 0.9),
+            Err(EvaluatedBurnupNeutronError::Normalization { .. })
+        ));
+        assert!(matches!(
+            prepare(law, 5.0, 1.0),
+            Err(EvaluatedBurnupNeutronError::Source(_))
+        ));
+    }
 }
 
 #[test]
