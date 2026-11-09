@@ -98,6 +98,52 @@ FetchAdjustedMassConsistent mode.
   conservatively per owner. Authored OU decorrelation is a synthetic temporal
   model, not resolved nonlinear eddy turnover, and is not temporally bandlimited.
 
+### Balanced finite-mode Mann synthesis
+
+`MannSpectralModel::build_with_rule` admits the explicit
+`MannQuadratureRule::BalancedEnergyV1` geometry rule. The original `build`
+constructor selects `LegacyLogRadiusV1` and preserves its deterministic
+geometry and samples. The balanced rule uses an even count of 2 through 256
+modes and the authored finite kL band. It improves how a limited mode budget
+resolves the full anisotropic tensor, including spatial covariance.
+
+Preparation evaluates the original Mann tensor on a fixed 32×32×16 proposal
+grid in log radius, vertical direction cosine and quarter azimuth. Each
+diagonal component contributes equal proposal probability; a 5% uniform
+mixture retains strictly positive support. Those normalizations affect only
+where modes are sampled. The final positive integration weight includes the
+exact conditional-CDF Jacobian and the physical radial volume factor; every
+mode retains the full original tensor at its wavevector. No component is
+whitened, fitted or rescaled to a desired realized covariance, and no energy
+outside the authored band is added.
+
+Each quarter-domain draw supplies a pair reflected in ky, while the real
+sine/cosine representation supplies conjugate wavevectors. The two partners
+retain distinct mode indices and independent paths for all four OU
+quadratures. Their represented equal-time, one-point ensemble `uv` and `vw`
+covariances cancel exactly. That cancellation is not asserted at arbitrary
+separations or at nonzero lag with unequal authored partner lifetimes.
+
+The proposal uses 16,384 tensor evaluations and less than 1 MiB of temporary
+numerical storage once during model construction. It is then discarded.
+Retained mode storage and the O(modes) velocity/gradient sampling kernel are
+unchanged. Both temporal owners, bridges and existing linear observation
+operators consume the resulting model. Homogeneous checkpoints explicitly
+retain the rule, fixed-step checkpoints retain the full model, and prepared
+spatial filters reject a different rule even when other model inputs match.
+
+`mann_field::importance::tests` independently checks the positive coordinate
+Jacobian, all nine tensor components per mode, physical scaling, independent
+paired amplitudes over 4096 realizations, and both clocks' replay and filter
+binding. Held-out geometry seeds 32 through 63 reduce full-tensor normalized
+RMS stress error at Γ = 0, 1, 3.9, 7 and 10 with both 64 and 256 modes.
+Independent refined continuum integrals also check full-tensor RMS error at
+two oblique separations for Γ = 0, 3.9 and 10. Each component error is divided
+by `sqrt(R_ii(0) R_jj(0))` before averaging its square over all nine entries
+and held-out seeds. These checks establish the
+declared cases; they do not guarantee every component, seed, finite band or
+separation improves, or establish agreement with measured atmospheric data.
+
 ### Full-tensor Mann observations above a plane
 
 `mann_field::wall::MannPlaneWall` declares a finite plane `z = height_m` in

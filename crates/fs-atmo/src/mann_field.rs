@@ -7,6 +7,8 @@
 //! low-discrepancy directions approximate the explicitly retained finite
 //! wavenumber band. This is a finite quadrature of the homogeneous model;
 //! neither the omitted bands nor quadrature error are silently renormalized.
+//! An explicit balanced-energy rule improves finite-mode sheared spectra by
+//! importance sampling the original tensor with positive volume weights.
 //!
 //! Four exact-discrete OU paths evolve the two polarizations and quadratures.
 //! Their correlation times are caller inputs, separate from the Mann eddy
@@ -34,6 +36,8 @@ use filter::MannBoxFilter;
 
 /// Fixed-anchor affine observations with explicit spatial truncation bounds.
 pub mod affine;
+
+mod importance;
 
 /// Exact OU evolution on a separately declared fixed physical time step.
 pub mod fixed_step;
@@ -65,6 +69,22 @@ pub struct MannQuadrature {
     pub max_kl: f64,
 }
 
+/// Versioned mode-placement and integration rule. This is part of source,
+/// checkpoint and observation-filter identity, not an amplitude correction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MannQuadratureRule {
+    /// Original log-radius strata and shifted uniform solid angles.
+    /// [`MannSpectralModel::build`] always retains this rule and its old bits.
+    LegacyLogRadiusV1,
+    /// Component-balanced positive importance quadrature with independent
+    /// ky-reflected modes. Requires an even count, 2..=256. Preparation uses
+    /// a fixed 32×32×16 proposal table; sampling/storage remain O(modes).
+    /// The full original tensor and finite band are retained without whitening
+    /// or covariance fitting. Pairing changes geometry only: every mode keeps
+    /// its own four independent OU quadratures and innovation counter lanes.
+    BalancedEnergyV1,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct SpectralMode {
     k: [f64; 3],
@@ -80,6 +100,7 @@ pub struct MannSpectralModel {
     geometry_seed: u64,
     parameters: MannParams,
     quadrature: MannQuadrature,
+    quadrature_rule: MannQuadratureRule,
     advection_mps: [f64; 3],
     modes: Vec<SpectralMode>,
 }
@@ -90,6 +111,24 @@ fn invalid(message: &str) -> Refusal {
         message.into(),
         "use a finite admitted target, 1..=256 modes and explicit representable kL bounds",
     )
+}
+
+fn admit_model_inputs(
+    parameters: &MannParams,
+    quadrature: MannQuadrature,
+    advection_mps: [f64; 3],
+) -> Result<(), Refusal> {
+    parameters.admit()?;
+    if !(1..=MAX_MODES).contains(&quadrature.n_modes)
+        || !quadrature.min_kl.is_finite()
+        || quadrature.min_kl < MIN_KL
+        || !quadrature.max_kl.is_finite()
+        || quadrature.max_kl <= quadrature.min_kl
+        || !advection_mps.iter().all(|v| v.is_finite())
+    {
+        return Err(invalid("invalid mode count, kL band or advection"));
+    }
+    Ok(())
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -196,16 +235,7 @@ impl MannSpectralModel {
         quadrature: MannQuadrature,
         advection_mps: [f64; 3],
     ) -> Result<Self, Refusal> {
-        parameters.admit()?;
-        if !(1..=MAX_MODES).contains(&quadrature.n_modes)
-            || !quadrature.min_kl.is_finite()
-            || quadrature.min_kl < MIN_KL
-            || !quadrature.max_kl.is_finite()
-            || quadrature.max_kl <= quadrature.min_kl
-            || !advection_mps.iter().all(|v| v.is_finite())
-        {
-            return Err(invalid("invalid mode count, kL band or advection"));
-        }
+        admit_model_inputs(&parameters, quadrature, advection_mps)?;
         let mut stream = StreamKey {
             seed: geometry_seed,
             kernel: MANN_FIELD_KERNEL,
@@ -244,9 +274,43 @@ impl MannSpectralModel {
             geometry_seed,
             parameters,
             quadrature,
+            quadrature_rule: MannQuadratureRule::LegacyLogRadiusV1,
             advection_mps,
             modes,
         })
+    }
+
+    /// Select a replay-identified quadrature without changing the tensor,
+    /// spectral band, temporal model or query kernels. BalancedEnergyV1 uses
+    /// a bounded, one-time importance table (16,384 tensor evaluations and
+    /// less than 1 MiB of temporary numerical storage), released on return.
+    /// Every retained mode still satisfies `B B^T = weight * Phi(k)`.
+    ///
+    /// This reduces finite-mode errors in sheared fields; no rule guarantees
+    /// continuum accuracy for every seed, separation, band or truncation.
+    /// The legacy rule is the exact original [`Self::build`] operation.
+    pub fn build_with_rule(
+        geometry_seed: u64,
+        parameters: MannParams,
+        quadrature: MannQuadrature,
+        advection_mps: [f64; 3],
+        rule: MannQuadratureRule,
+    ) -> Result<Self, Refusal> {
+        match rule {
+            MannQuadratureRule::LegacyLogRadiusV1 => {
+                Self::build(geometry_seed, parameters, quadrature, advection_mps)
+            }
+            MannQuadratureRule::BalancedEnergyV1 => {
+                admit_model_inputs(&parameters, quadrature, advection_mps)?;
+                importance::Prepared::new(parameters, quadrature)?
+                    .build(geometry_seed, advection_mps)
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn quadrature_rule(&self) -> MannQuadratureRule {
+        self.quadrature_rule
     }
 
     /// Number of wavevectors; each has two independent polarizations.
@@ -357,6 +421,8 @@ pub struct MannFieldCheckpoint {
     pub parameters: MannParams,
     /// Explicit resolved wavenumber band and mode count.
     pub quadrature: MannQuadrature,
+    /// Mode-placement rule. Existing legacy definitions use LegacyLogRadiusV1.
+    pub quadrature_rule: MannQuadratureRule,
     /// Uniform phase-convection velocity [m/s].
     pub advection_mps: [f64; 3],
     /// Independent amplitude-path seed.
@@ -729,6 +795,7 @@ impl HomogeneousMannField {
             geometry_seed: self.model.geometry_seed,
             parameters: self.model.parameters,
             quadrature: self.model.quadrature,
+            quadrature_rule: self.model.quadrature_rule,
             advection_mps: self.model.advection_mps,
             evolution_seed: self.evolution_seed,
             correlation_times_s: self.correlation_times_s.clone(),
@@ -739,11 +806,12 @@ impl HomogeneousMannField {
     /// Rebuild the admitted finite-band model and restore all four paths.
     /// A mismatched clock/key, malformed model or nonfinite state refuses.
     pub fn resume(checkpoint: MannFieldCheckpoint) -> Result<Self, Refusal> {
-        let model = MannSpectralModel::build(
+        let model = MannSpectralModel::build_with_rule(
             checkpoint.geometry_seed,
             checkpoint.parameters,
             checkpoint.quadrature,
             checkpoint.advection_mps,
+            checkpoint.quadrature_rule,
         )?;
         let modes = ou_modes(&model, &checkpoint.correlation_times_s)?;
         let tick = checkpoint.paths[0].tick;

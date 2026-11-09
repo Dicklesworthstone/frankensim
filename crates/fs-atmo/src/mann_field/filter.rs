@@ -8,7 +8,9 @@
 //! Both polarizations receive the same gain, so the analytic divergence stays
 //! zero; covariance receives G squared. No lost energy is rescaled back in.
 
-use super::{MannParams, MannQuadrature, MannSpectralModel, Refusal, det, dot, refuse};
+use super::{
+    MannParams, MannQuadrature, MannQuadratureRule, MannSpectralModel, Refusal, det, dot, refuse,
+};
 
 /// Exact second moments and subfilter stresses of the finite Fourier field.
 pub mod moments;
@@ -21,6 +23,7 @@ pub struct MannBoxFilter {
     geometry_seed: u64,
     parameters: MannParams,
     quadrature: MannQuadrature,
+    quadrature_rule: MannQuadratureRule,
     advection_mps: [f64; 3],
     half_edges_m: [[f64; 3]; 3],
     gains: Vec<f64>,
@@ -121,6 +124,7 @@ impl MannBoxFilter {
             geometry_seed: model.geometry_seed,
             parameters: model.parameters,
             quadrature: model.quadrature,
+            quadrature_rule: model.quadrature_rule,
             advection_mps: model.advection_mps,
             half_edges_m,
             gains,
@@ -143,6 +147,7 @@ impl MannBoxFilter {
         if self.geometry_seed != model.geometry_seed
             || self.parameters != model.parameters
             || self.quadrature != model.quadrature
+            || self.quadrature_rule != model.quadrature_rule
             || self.advection_mps != model.advection_mps
         {
             return Err(error(
