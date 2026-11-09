@@ -1835,6 +1835,17 @@ adds the original bow-facing torque when twist is present; `centreline` applies
 only transverse force. Same-sample force and bow changes precede one joint step.
 Distinct force ports add; repeated assignments to one port use the last value.
 
+An independently oriented surface load uses
+`port STRING STATION surface-along DX DY NX NY FORCE_N`. Both `(DX,DY)` and
+`(NX,NY)` must be unit vectors in that string's declared transverse frame:
+the first is the force direction, and the second points from the centreline to
+the contact point on its original circular outer surface. The source-derived
+torque is `r*(NX*DY-NY*DX)*FORCE_N`; changing contact side reverses torque,
+and a radial force creates none. An eccentric load requires retained twist,
+and a nonzero DY requires `polarizations two`. This geometry is shared by
+preload, force events and the original coupled mechanical work account; it does
+not change the bow's own contact orientation or infer a contact/friction law.
+
 Each canonical bow track identifies its actual material string and fixed station.
 One track may stay released for a purely plucked instrument. Multiple tracks use
 the shared simultaneous-contact solver, not independent voices. Speeds and normal

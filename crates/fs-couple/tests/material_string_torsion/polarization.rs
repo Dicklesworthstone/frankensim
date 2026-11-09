@@ -452,6 +452,114 @@ fn centreline_and_surface_loads_share_both_planes_without_duplicating_torque_or_
 }
 
 #[test]
+fn g0_oriented_surface_loads_retain_signed_torque_and_conjugate_work() {
+    with_cx(|cx, gate| {
+        let make = |source| polarized(cx, gate, source, directions([1.0, 0.0], [0.6, 0.8]))
+            .with_additional_bows(vec![], MultiFrictionConfig {
+                max_ports: 4, max_sweeps: 128, max_setup_terms: 65_536,
+            }, gate).unwrap();
+        let bank = make(source(80e9, 1000.0).with_torsion("G", "eta_s", 3).unwrap());
+        let down = TransverseDirection::try_new([0.0, -1.0]).unwrap();
+        let oblique = TransverseDirection::try_new([0.6, 0.8]).unwrap();
+        let port = |coupling| StringForcePort {
+            location: StringBowLocation { string: 0, station_fraction: 0.2 }, coupling,
+        };
+        let ports = [
+            port(StringForceCoupling::Surface),
+            port(StringForceCoupling::SurfaceAlong { direction: TransverseDirection::X, normal: down }),
+            port(StringForceCoupling::SurfaceAlong { direction: TransverseDirection::X, normal: TransverseDirection::Y }),
+            port(StringForceCoupling::SurfaceAlong { direction: TransverseDirection::X, normal: TransverseDirection::X }),
+            port(StringForceCoupling::SurfaceAlong { direction: oblique, normal: TransverseDirection::X }),
+        ];
+        let rows = bank.string_force_columns(&ports, 4096, gate).unwrap();
+        assert_eq!(rows[0], rows[1], "the original bow-facing geometry must keep its bits");
+        assert_eq!(&rows[1][..8], &rows[2][..8]);
+        assert_eq!(&rows[1][..8], &rows[3][..8]);
+        assert!(rows[3][8..].iter().all(|x| *x == 0.0));
+        assert!(rows.iter().all(|row| row[11..].iter().all(|x| *x == 0.0)));
+        for k in 8..11 { assert_eq!(rows[1][k], -rows[2][k]); }
+
+        let card = &bank.cards()[0];
+        let radius = 0.0003_f64;
+        let rotary = 7800.0 * core::f64::consts::PI * radius.powi(4) / 2.0;
+        let mut expected = vec![0.0; rows[4].len()];
+        for k in 0..4 {
+            let phi = ((k+1) as f64 * core::f64::consts::PI * 0.2).sin()
+                / (0.5 * card.linear_density_kg_m * card.length_m).sqrt();
+            expected[k] = 0.6 * phi;
+            expected[4+k] = 0.8 * phi;
+        }
+        for k in 0..3 {
+            let angular = ((k+1) as f64 * core::f64::consts::PI * 0.2).sin()
+                / (0.5 * rotary * card.length_m).sqrt();
+            expected[8+k] = radius * 0.8 * angular;
+        }
+        for (a, b) in rows[4].iter().zip(&expected) { near(*a, *b, 1e-12); }
+        let velocity: Vec<_> = (0..expected.len()).map(|k| (k as f64 - 4.0) * 1e-4).collect();
+        let force = -0.003;
+        let modal_power: f64 = rows[4].iter().zip(&velocity).map(|(b, v)| force*b*v).sum();
+        let physical_power = force * expected.iter().zip(&velocity).map(|(b, v)| b*v).sum::<f64>();
+        near(modal_power, physical_power, 1e-15);
+
+        let untwisted = make(source(80e9, 1000.0));
+        assert!(untwisted.string_force_columns(&ports[1..2], 4096, gate).is_err());
+        assert!(untwisted.string_force_columns(&ports[3..4], 4096, gate).is_ok());
+        let one_plane = raw(cx, gate, source(80e9, 1000.0).with_torsion("G", "eta_s", 3).unwrap(), options()).unwrap()
+            .with_additional_bows(vec![], MultiFrictionConfig {
+                max_ports: 4, max_sweeps: 128, max_setup_terms: 65_536,
+            }, gate).unwrap();
+        assert!(one_plane.string_force_columns(&ports[4..5], 4096, gate).is_err());
+    });
+}
+
+#[test]
+fn g3_oriented_surface_traction_rotates_the_complete_shared_response() {
+    with_cx(|cx, gate| {
+        let make = |axes| two_axis_bank(cx, gate, 7800.0, axes)
+            .with_additional_bows(vec![], MultiFrictionConfig {
+                max_ports: 4, max_sweeps: 128, max_setup_terms: 65_536,
+            }, gate).unwrap();
+        let mut a = make(directions([1.0, 0.0], [0.6, 0.8]));
+        let mut b = make(directions([0.6, 0.8], [-0.28, 0.96]));
+        let load = |bank: &MultiBowStringBank, direction, normal| {
+            bank.string_force_columns(&[StringForcePort {
+                location: StringBowLocation { string: 0, station_fraction: 0.31 },
+                coupling: StringForceCoupling::SurfaceAlong {
+                    direction: TransverseDirection::try_new(direction).unwrap(),
+                    normal: TransverseDirection::try_new(normal).unwrap(),
+                },
+            }], 4096, gate).unwrap()[0].iter().map(|x| 0.001*x).collect::<Vec<_>>()
+        };
+        let fa = load(&a, [0.6, 0.8], [1.0, 0.0]);
+        let fb = load(&b, [-0.28, 0.96], [0.6, 0.8]);
+        let zero = vec![0.0; fa.len()];
+        let released = [FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 }];
+        let mut twist = 0.0_f64;
+        for step in 0..96 {
+            let x = a.step(if step < 24 { &fa } else { &zero }, &released).unwrap().clone();
+            let y = b.step(if step < 24 { &fb } else { &zero }, &released).unwrap().clone();
+            near(x.observer_pressure_pa, y.observer_pressure_pa, 1e-12);
+            near(x.external_work_j, y.external_work_j, 1e-16);
+            assert!(x.energy_residual_j.abs() <= x.energy_tolerance_j);
+            assert!(y.energy_residual_j.abs() <= y.energy_tolerance_j);
+            let qa = a.system().components()[0].states();
+            let qb = b.system().components()[0].states();
+            for k in 0..4 {
+                let x = qa[k].displacement_m_sqrt_kg;
+                let y = qa[4+k].displacement_m_sqrt_kg;
+                near(qb[k].displacement_m_sqrt_kg, 0.6*x - 0.8*y, 1e-14);
+                near(qb[4+k].displacement_m_sqrt_kg, 0.8*x + 0.6*y, 1e-14);
+            }
+            for k in 8..11 {
+                near(qa[k].displacement_m_sqrt_kg, qb[k].displacement_m_sqrt_kg, 1e-14);
+                twist = twist.max(qa[k].displacement_m_sqrt_kg.abs());
+            }
+        }
+        assert!(twist > 0.0, "an eccentric load must excite the retained twist");
+    });
+}
+
+#[test]
 fn torsion_and_polarization_construction_order_is_identical_and_invalid_geometry_refuses() {
     for direction in [
         [0.0, 0.0],

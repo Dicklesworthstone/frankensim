@@ -534,6 +534,38 @@ impl MaterialStringSource {
         -> Result<Vec<f64>, ReciprocalStringError>
     {
         let mut shapes = self.transverse_shape(card, station)?;
+        self.add_surface_torsion(card, station, 1.0, &mut shapes)?;
+        Ok(shapes)
+    }
+
+    /// Work-conjugate velocity/force at the declared outer-surface point.
+    /// If n points from the centreline to that point and d is the load axis,
+    /// d.v_surface = d.v_centre + r (n_x d_y - n_y d_x) theta_dot.
+    /// The transpose therefore applies the physical torque r (n x d) F,
+    /// including opposite-surface reversal and exactly zero radial torque.
+    pub(super) fn surface_shape_along(
+        &self, card: &BowedStringCard, station: f64,
+        direction: polarization::TransverseDirection,
+        normal: polarization::TransverseDirection,
+    ) -> Result<Vec<f64>, ReciprocalStringError> {
+        let mut shapes = self.transverse_shape_along(card, station, direction)?;
+        let [dx, dy] = direction.components();
+        let [nx, ny] = normal.components();
+        let projection = nx * dy - ny * dx;
+        if projection != 0.0 && self.torsion_source().is_none() {
+            return Err(invalid("an eccentric surface force requires retained material torsion"));
+        }
+        self.add_surface_torsion(card, station, projection, &mut shapes)?;
+        Ok(shapes)
+    }
+
+    fn add_surface_torsion(
+        &self, card: &BowedStringCard, station: f64,
+        projection: f64, shapes: &mut [f64],
+    ) -> Result<(), ReciprocalStringError> {
+        // A radial load has no first-order twist. Leave its zero entries intact
+        // rather than deriving an irrelevant angular response.
+        if projection == 0.0 { return Ok(()); }
         if let Some(twist) = self.torsion_source() {
             let offset = shapes.len() - twist.mode_count;
             match &twist.law {
@@ -541,7 +573,7 @@ impl MaterialStringSource {
                     let inertia = section.rotary_inertia_kg_m();
                     let radius = section.shear().elastic().outer_radius_m();
                     for k in 0..twist.mode_count {
-                        let value = radius * unit_shape(k, station, card.length_m, inertia);
+                        let value = projection * (radius * unit_shape(k, station, card.length_m, inertia));
                         if !value.is_finite() { return Err(invalid("torsional surface shape is not representable")); }
                         shapes[offset + k] = value;
                     }
@@ -553,14 +585,14 @@ impl MaterialStringSource {
                     let span = measured.span_m(card.length_m);
                     let inertia = measured.surface_inertia_kg_m(card.length_m);
                     for k in 0..twist.mode_count {
-                        let value = if station < support { unit_shape(k, station / support, span, inertia) } else { 0.0 };
+                        let value = if station < support { projection * unit_shape(k, station / support, span, inertia) } else { 0.0 };
                         if !value.is_finite() { return Err(invalid("torsional surface shape is not representable")); }
                         shapes[offset + k] = value;
                     }
                 }
             }
         }
-        Ok(shapes)
+        Ok(())
     }
 }
 impl TorsionalStringSource {

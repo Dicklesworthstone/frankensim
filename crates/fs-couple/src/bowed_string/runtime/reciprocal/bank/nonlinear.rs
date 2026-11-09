@@ -208,6 +208,22 @@ impl NonlinearMaterialString {
         self.source.surface_shape(&self.card, station_fraction)
             .map_err(|e| ImpactError::Owner(e.to_string()))
     }
+
+    /// Surface motion along an independent force direction, with the signed
+    /// radius/torque projection from the actual contact normal. Both vectors
+    /// use this source's original transverse frame. The shared material map
+    /// takes positive twist from the first transverse axis toward the second.
+    /// It applies to these SAME nonlinear coordinates; no extra mechanical state
+    /// or force law is introduced. Eccentric loading requires retained torsion,
+    /// and a second-plane load requires the original two-plane source.
+    pub fn surface_shape_along(
+        &self, station_fraction: f64,
+        direction: super::polarization::TransverseDirection,
+        normal: super::polarization::TransverseDirection,
+    ) -> Result<Vec<f64>, ImpactError> {
+        self.source.surface_shape_along(&self.card, station_fraction, direction, normal)
+            .map_err(|e| ImpactError::Owner(e.to_string()))
+    }
 }
 
 /// Source-retaining preparation for the original shared mechanics and pressure path.

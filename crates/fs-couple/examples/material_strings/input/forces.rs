@@ -46,7 +46,17 @@ pub(super) fn parse(
                     }
                     StringForceCoupling::CentrelineAlong(direction)
                 }
-                _ => return Err("force coupling must be centreline, surface or along DX DY".into()),
+                "surface-along" => {
+                    let direction = TransverseDirection::try_new([row.scalar()?, row.scalar()?])?;
+                    let normal = TransverseDirection::try_new([row.scalar()?, row.scalar()?])?;
+                    if !two_plane(string) && direction.components()[1] != 0.0 {
+                        return Err("second-plane force requires polarizations two".into());
+                    }
+                    // The native source additionally requires retained torsion
+                    // when this geometry applies a nonzero eccentric torque.
+                    StringForceCoupling::SurfaceAlong { direction, normal }
+                }
+                _ => return Err("force coupling must be centreline, surface, along DX DY or surface-along DX DY NX NY".into()),
             };
             if !(0.0 < station_fraction && station_fraction < 1.0) {
                 return Err("load station must be interior".into());
@@ -150,6 +160,23 @@ mod tests {
         );
         assert!(read(text, false).is_err());
         assert!(read(&text.replace("along 0 1", "along 1 1"), true).is_err());
+    }
+
+    #[test]
+    fn oriented_surface_ports_retain_force_axis_and_actual_contact_side() {
+        let text = "forces retain 2 0\nport 0 0.2 surface-along 0.6 0.8 1 0 0.01\nport 1 0.4 surface-along 1 0 0 -1 -0.02\n";
+        let value = read(text, true).unwrap().unwrap();
+        assert!(matches!(value.ports[0], MaterialForcePort::String(StringForcePort {
+            coupling: StringForceCoupling::SurfaceAlong { direction, normal }, ..
+        }) if direction.components() == [0.6, 0.8] && normal.components() == [1.0, 0.0]));
+        assert!(matches!(value.ports[1], MaterialForcePort::String(StringForcePort {
+            coupling: StringForceCoupling::SurfaceAlong { direction, normal }, ..
+        }) if direction.components() == [1.0, 0.0] && normal.components() == [0.0, -1.0]));
+        assert_eq!(value.initial_force_n, [0.01, -0.02]);
+        assert!(read(text, false).is_err());
+        for geometry in ["1 1 1 0", "1 0 1 1", "NaN 0 1 0", "1 0 0 inf", "1 0 0", "1 0 0 -1 extra"] {
+            assert!(read(&format!("forces retain 1 0\nport 0 0.2 surface-along {geometry} 1\n"), true).is_err());
+        }
     }
 
     #[test]

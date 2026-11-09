@@ -27,13 +27,26 @@ pub enum StringForceCoupling {
     /// Force at the same signed outer surface used by bow contact. Includes
     /// radius times angular velocity/torque when the source has torsional modes.
     Surface,
+    /// Force along its own physical axis at a declared point on the circular
+    /// outer surface. `normal` points from centreline to that point, in the SAME
+    /// transverse frame as `direction`. The source supplies the outer radius;
+    /// torque is `radius * (normal x direction) * force`, not a chosen modal gain.
+    /// Positive twist rotates the first transverse axis toward the second.
+    /// A radial force has no torque. Other orientations require retained torsion;
+    /// a second-plane force additionally requires both transverse polarizations.
+    SurfaceAlong {
+        /// Unit force/velocity projection in the original transverse frame.
+        direction: TransverseDirection,
+        /// Unit outward radius to the actual contact point in that frame.
+        normal: TransverseDirection,
+    },
 }
 /// A fixed physical load location, never an authored modal participation vector.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StringForcePort {
     /// Original material-string index and interior station on its COMPLETE span.
     pub location: StringBowLocation,
-    /// Centreline translation or the original bow-facing surface motion.
+    /// Centreline translation or source-derived surface motion.
     pub coupling: StringForceCoupling,
 }
 /// A source-bound physical load on the original coupled instrument.
@@ -193,6 +206,8 @@ impl MultiBowStringBank {
             StringForceCoupling::Centreline => source.source.transverse_shape(card, station).map_err(source_error)?,
             StringForceCoupling::CentrelineAlong(direction) => source.source
                 .transverse_shape_along(card, station, direction).map_err(source_error)?,
+            StringForceCoupling::SurfaceAlong { direction, normal } => source.source
+                .surface_shape_along(card, station, direction, normal).map_err(source_error)?,
         };
         if local.len() != count {
             return Err(render_invalid("string force map differs from its actual finite basis"));

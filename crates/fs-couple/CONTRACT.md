@@ -4629,6 +4629,31 @@ within their recorded numerical tolerances. New complete-bank and contact
 regressions cover nonorthogonal supports and native energy/storage behavior;
 those material-admission and dynamic integration tests have not been executed.
 
+## Oriented surface traction on two-plane material strings
+
+`StringForceCoupling::SurfaceAlong` and
+`NonlinearMaterialString::surface_shape_along` use the same source-derived
+surface map. A unit force direction d and unit outward contact radius n are
+expressed in the original transverse frame. The conjugate velocity is
+`d dot v_centre + r*(n_x*d_y-n_y*d_x)*theta_dot`; its transpose applies the
+same physical force and signed torque in the existing mechanical owner.
+Positive twist rotates the first transverse axis toward the second.
+The material section supplies r and rotary inertia. Measured whole-string
+torsion instead retains its original measured surface-displacement basis and
+supported twisting span. A radial load has exactly zero twist participation.
+An eccentric load refuses missing torsion, and second-plane translation refuses
+a one-plane source. No missing motion is silently projected away.
+
+These projections are prepared once with the existing force/coordinate budgets.
+The original bow-facing `Surface` behavior is unchanged. The material_strings
+frontend exposes `surface-along DX DY NX NY` alongside its existing force ports.
+G0/G3 regressions in the existing string-torsion and nonlinear-string batteries
+cover analytical radius/inertia normalization, opposite-side torque, radial
+loading, virtual work and simultaneous rotation of both transverse planes and
+all physical directions. The model remains small-angle circular-section
+surface kinematics; no evolving contact angle, cross-sectional deformation or
+additional contact/friction law is inferred.
+
 ## Nonlinear port harmonics and sidebands through physical BEM receivers
 
 `phs_orbit::acoustic::PortAcousticSpectrum` connects the original nonlinear

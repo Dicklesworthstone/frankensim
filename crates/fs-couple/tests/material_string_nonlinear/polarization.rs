@@ -1,7 +1,7 @@
 //! Physical two-plane invariants on the existing nonlinear owner.
 //! Synthetic material claims isolate wiring; they are not violin measurements.
 use super::*;
-use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::TransverseDirections;
+use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::{TransverseDirection, TransverseDirections};
 use fs_couple::bowed_string::runtime::reciprocal::bank::nonlinear::{
     NonlinearMaterialString, supported::SupportedMaterialStrings,
 };
@@ -201,6 +201,16 @@ fn original_material_twist_and_directional_force_torque_ports_survive_the_shared
             assert!(angle[i].abs() > 0.0);
             near(surface[i], 0.0003*angle[i], 1e-12);
         }
+        let tangent = TransverseDirection::try_new([0.6, 0.8]).unwrap();
+        let front = TransverseDirection::try_new([0.8, -0.6]).unwrap();
+        let back = TransverseDirection::try_new([-0.8, 0.6]).unwrap();
+        let declared = image.surface_shape_along(0.27, tangent, front).unwrap();
+        let opposite = image.surface_shape_along(0.27, tangent, back).unwrap();
+        let radial = image.surface_shape_along(0.27, tangent, tangent).unwrap();
+        assert_eq!(declared, surface);
+        assert_eq!(&opposite[..6], &surface[..6]);
+        assert_eq!(radial, normal);
+        for i in 6..8 { assert_eq!(opposite[i], -surface[i]); }
         let mut run = image.prepare(vec![],vec![],vec![],vec![],config_at(TORSION_RATE_HZ),gate).unwrap();
         let load: Vec<_> = normal.iter().map(|x| 0.01*x).collect();
         for _ in 0..48 { run.step(&load,gate).unwrap(); }
@@ -226,10 +236,13 @@ fn directed_endpoint_support_retains_both_planes_and_wrong_clocks_still_refuse()
         assert_eq!(supported.bodies()[0].initial.len(),7);
         assert!(image.clone().prepare(vec![],vec![],vec![],vec![],config_at(96_000),gate).is_err());
         assert!(image.angular_shape(0.27).is_err());
+        assert!(image.surface_shape_along(0.27, TransverseDirection::X, TransverseDirection::Y).is_err());
+        assert!(image.surface_shape_along(0.27, TransverseDirection::X, TransverseDirection::X).is_ok());
         for station in [0.0,1.0,-1.0,f64::NAN] {
             assert!(image.transverse_shape(station).is_err());
             assert!(image.bridge_shape(station).is_err());
             assert!(image.surface_shape(station).is_err());
+            assert!(image.surface_shape_along(station, TransverseDirection::X, TransverseDirection::X).is_err());
         }
         let mut run = image.prepare(vec![],vec![],vec![],vec![],config(),gate).unwrap();
         let before = run.state().to_vec();
