@@ -28,8 +28,7 @@ pub use spectrum::{
 
 pub use spectrum::{
     HarmonicDecayIntervalLimits, HarmonicDecayMoments, HarmonicPhaseInterval,
-    MAX_HARMONIC_DECAY_TONES, PreparedHarmonicDecayInterval,
-    phase_angular_interval_from_clock_dd,
+    MAX_HARMONIC_DECAY_TONES, PreparedHarmonicDecayInterval, phase_angular_interval_from_clock_dd,
 };
 
 /// A rejected observation window or unrepresentable moment.
@@ -76,6 +75,37 @@ pub fn phase_hz_from_clock_dd(frequency_hz: f64, time_s: Dd) -> Result<[Dd; 2], 
     }
     let time = checked(Dd::from_pair(time_s.hi, time_s.lo))?;
     phase_cycles(Dd::from_f64(frequency_hz), time, 1.0)
+}
+
+/// Instantaneous `exp(-i omega t)` for an originally angular-frequency source.
+///
+/// Signed rad/s and DC are admitted. The source clock and complex phase remain
+/// in DD; no finite shutter or rounded conversion through Hz is introduced.
+pub fn phase_rad_s_from_clock_dd(
+    angular_frequency_rad_s: f64,
+    time_s: Dd,
+) -> Result<[Dd; 2], WindowError> {
+    phase_rad_s_dd_from_clock_dd(Dd::from_f64(angular_frequency_rad_s), time_s)
+}
+
+/// Native angular phase retaining a DD frequency, including an exact retained
+/// difference between two authored source frequencies. Proper field sums can
+/// remove a common carrier before evaluating relative phases; actual real
+/// fields must also retain that carrier's final rotation.
+///
+/// This uses the original deterministic DD radian reduction. It is not a
+/// relative-error certificate for arbitrarily cancelled coherent fields.
+pub fn phase_rad_s_dd_from_clock_dd(
+    angular_frequency_rad_s: Dd,
+    time_s: Dd,
+) -> Result<[Dd; 2], WindowError> {
+    let omega = admit_frequency_dd(angular_frequency_rad_s)?;
+    if !time_s.hi.is_finite() || !time_s.lo.is_finite() {
+        return Err(WindowError::InvalidWindow);
+    }
+    let time = checked(Dd::from_pair(time_s.hi, time_s.lo))?;
+    let (real, imaginary) = proper_phase(checked(omega * time)?);
+    Ok([checked(real)?, checked(imaginary)?])
 }
 
 /// Nonnegative, unit-integral temporal sensitivity of a detector.
@@ -843,6 +873,69 @@ mod tests {
             (actual - expected).abs() <= tolerance,
             "{actual:e} != {expected:e}"
         );
+    }
+
+    #[test]
+    fn g1_native_angular_instant_phase_retains_frequency_and_clock_parts() {
+        let compose =
+            |a: [Dd; 2], b: [Dd; 2]| [a[0] * b[0] - a[1] * b[1], a[0] * b[1] + a[1] * b[0]];
+        for (omega, epoch, offset) in [
+            (512.0, 2.0_f64.powi(40), 2.0_f64.powi(-18)),
+            (2.0_f64.powi(60), 1.0, 2.0_f64.powi(-61)),
+        ] {
+            let actual = phase_rad_s_from_clock_dd(omega, Dd::from_pair(epoch, offset)).unwrap();
+            let expected = compose(
+                phase_rad_s_from_clock_dd(omega, Dd::from_f64(epoch)).unwrap(),
+                phase_rad_s_from_clock_dd(omega, Dd::from_f64(offset)).unwrap(),
+            );
+            for c in 0..2 {
+                close((actual[c] - expected[c]).to_f64(), 0.0, 2e-15);
+            }
+            let rounded = phase_rad_s_from_clock_dd(omega, Dd::from_f64(epoch)).unwrap();
+            assert!(
+                (actual[0] - rounded[0]).abs().to_f64() + (actual[1] - rounded[1]).abs().to_f64()
+                    > 1e-4
+            );
+        }
+        let carrier = 2.0_f64.powi(60);
+        let difference = Dd::from_f64(carrier) - Dd::ONE;
+        let actual = phase_rad_s_dd_from_clock_dd(difference, Dd::ONE).unwrap();
+        let expected = compose(
+            phase_rad_s_from_clock_dd(carrier, Dd::ONE).unwrap(),
+            [Dd::from_f64(1.0_f64.cos()), Dd::from_f64(1.0_f64.sin())],
+        );
+        for c in 0..2 {
+            close((actual[c] - expected[c]).to_f64(), 0.0, 2e-15);
+        }
+    }
+
+    #[test]
+    fn g0_native_angular_instant_phase_sign_small_residual_and_admission() {
+        let positive = phase_rad_s_from_clock_dd(1.0, Dd::from_f64(0.25)).unwrap();
+        close(positive[0].to_f64(), 0.25_f64.cos(), 2e-16);
+        close(positive[1].to_f64(), -0.25_f64.sin(), 2e-16);
+        let negative = phase_rad_s_from_clock_dd(-1.0, Dd::from_f64(0.25)).unwrap();
+        assert_eq!(positive[0], negative[0]);
+        assert_eq!(positive[1], -negative[1]);
+        let tiny = phase_rad_s_from_clock_dd(1.0, Dd::from_f64(1e-12)).unwrap();
+        close((Dd::ONE - tiny[0]).to_f64() / 5e-25, 1.0, 1e-7);
+        close(tiny[1].to_f64() / -1e-12, 1.0, 2e-16);
+        assert_eq!(
+            phase_rad_s_from_clock_dd(0.0, Dd::from_pair(1e100, 1.0)).unwrap()[0],
+            Dd::ONE
+        );
+        assert!(matches!(
+            phase_rad_s_from_clock_dd(f64::NAN, Dd::ZERO),
+            Err(WindowError::InvalidFrequency)
+        ));
+        assert!(matches!(
+            phase_rad_s_from_clock_dd(1.0, Dd::from_f64(f64::INFINITY)),
+            Err(WindowError::InvalidWindow)
+        ));
+        assert!(matches!(
+            phase_rad_s_from_clock_dd(f64::MAX, Dd::from_f64(2.0)),
+            Err(WindowError::Unrepresentable)
+        ));
     }
 
     // G1 independent integration of REAL signals, with platform trigonometry

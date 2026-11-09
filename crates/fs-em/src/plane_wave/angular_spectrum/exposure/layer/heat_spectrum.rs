@@ -11,7 +11,7 @@ use super::*;
 use fs_fft::harmonic_window::{
     AngularHarmonicProductInput, HarmonicProductLaw, HarmonicProductSpectrumLimits,
     HarmonicProductTone, MAX_PRODUCT_SPECTRUM_TERMS, PreparedHarmonicProductSpectrum,
-    ProductSpectrumError,
+    ProductSpectrumError, phase_rad_s_dd_from_clock_dd, phase_rad_s_from_clock_dd,
 };
 
 /// Original irreversible reservoir(s) contributing to a local heat load.
@@ -58,9 +58,11 @@ pub struct AngularSpectrumExposureHeatSpectrumLimits {
 /// No switch-on state, material-temperature feedback, source calibration,
 /// stationary spectrum or relative numerical certificate at a null is added.
 /// The prepared owner retains its original DD reservoir fields and source-bank
-/// boundaries within the already admitted preparation workspace. Short uniform
-/// window observations reuse them without a field FFT or material solve. The
-/// exported spectrum and instantaneous evaluation retain the signed-tone law.
+/// boundaries within the already admitted preparation workspace. Instantaneous
+/// queries sum each coherent reservoir field before its real/proper square;
+/// short uniform window observations reuse its positive temporal factor.
+/// Neither query allocates, reconstructs a field FFT or solves a material.
+/// The exported spectrum retains the original signed sum/difference tones.
 pub struct AngularSpectrumExposureLayerHeatSpectrum<'p, 'e, 'b, 's, 'm> {
     layer: &'p PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm>,
     depth_m: f64,
@@ -105,13 +107,9 @@ impl<'p, 'e, 'b, 's, 'm> AngularSpectrumExposureLayerHeatSpectrum<'p, 'e, 'b, 's
     pub fn evaluate_cancellable(
         &self,
         time_s: f64,
-        cancelled: impl FnMut() -> bool,
+        mut cancelled: impl FnMut() -> bool,
     ) -> Result<f64, AngularSpectrumError> {
-        nonnegative_heat(
-            self.spectrum
-                .evaluate_cancellable(time_s, cancelled)
-                .map_err(spectrum_error)?,
-        )
+        positive_heat_at_time(&self.heat_banks, &self.heat_lines, time_s, &mut cancelled)
     }
     /// Detector-weighted expected heat density [W/m³] for either profile.
     /// Each eligible source bank resolves coherent nulls before squaring its
@@ -393,6 +391,68 @@ fn filtered_negative_time_parts(e: C64, transfer: C64) -> [Dd; 2] {
     [a * c - b * d, -(a * d + b * c)]
 }
 
+// An instantaneous reservoir is a coherent vector field, not a cancellation
+// of pre-squared tones. Factor out one original source clock before summation;
+// a proper factor needs only relative phases, while a real field restores its
+// absolute carrier once. Each independent source/reservoir is squared separately.
+// Work is linear in the already retained reservoir lines, with fixed scratch.
+fn positive_heat_at_time(
+    banks: &[HeatBank],
+    fields: &[HeatLine],
+    time_s: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, AngularSpectrumError> {
+    poll(cancelled)?;
+    if !time_s.is_finite() {
+        return Err(bad("retained heat time is nonfinite"));
+    }
+    let time = Dd::from_f64(time_s);
+    let mut heat = Dd::ZERO;
+    for bank in banks {
+        poll(cancelled)?;
+        let lines = &fields[bank.start..bank.end];
+        let Some(first) = lines.first() else {
+            continue;
+        };
+        let reference = Dd::from_f64(first.omega);
+        let mut field = [[Dd::ZERO; 2]; 3];
+        for line in lines {
+            poll(cancelled)?;
+            let phase = phase_rad_s_dd_from_clock_dd(Dd::from_f64(line.omega) - reference, time)
+                .map_err(|_| bad("retained heat relative phase is unrepresentable"))?;
+            for (sum, [real, imaginary]) in field.iter_mut().zip(line.field) {
+                sum[0] = sum[0] + real * phase[0] - imaginary * phase[1];
+                sum[1] = sum[1] + real * phase[1] + imaginary * phase[0];
+            }
+        }
+        match bank.law {
+            HarmonicProductLaw::Real => {
+                let phase = phase_rad_s_from_clock_dd(first.omega, time)
+                    .map_err(|_| bad("retained heat carrier phase is unrepresentable"))?;
+                for [real, imaginary] in field {
+                    let value = real * phase[0] - imaginary * phase[1];
+                    heat = heat + (value * bank.left_scale) * value;
+                }
+            }
+            HarmonicProductLaw::ProperComplex => {
+                // Apply the peak-amplitude and authored material normalization
+                // before the square: the physical half-power can be finite
+                // even when the unscaled analytic norm overflows.
+                let scale = Dd::from_f64(0.5) * bank.left_scale;
+                for [real, imaginary] in field {
+                    heat = heat + (real * scale) * real + (imaginary * scale) * imaginary;
+                }
+            }
+        }
+    }
+    let heat = heat.to_f64();
+    if !heat.is_finite() {
+        return Err(bad("retained instantaneous heat is unrepresentable"));
+    }
+    poll(cancelled)?;
+    nonnegative_heat(heat)
+}
+
 // Preparation already admits and constructs these buffers. Retaining them
 // preserves the positive reservoir factorization without another source/FFT
 // query, a larger preparation peak, or an observation allocation. Consecutive
@@ -592,3 +652,6 @@ mod tests;
 
 #[cfg(test)]
 mod positive_window_tests;
+
+#[cfg(test)]
+mod instantaneous_tests;
