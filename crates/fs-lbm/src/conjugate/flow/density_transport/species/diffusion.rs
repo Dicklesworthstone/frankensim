@@ -57,6 +57,7 @@ pub use gas::{
 };
 #[cfg(feature = "enthalpy-coupling")]
 pub use gas::{
+    ThermochemicalAdaptiveConductionControls,
     ThermochemicalConductionAdvance, ThermochemicalConductionControls,
     ThermochemicalConductionScheme, ThermochemicalSpeciesConductionReport,
     ThermochemicalSpeciesConductionStep,

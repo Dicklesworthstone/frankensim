@@ -387,3 +387,110 @@ fn exhausted_work_and_late_refusals_publish_no_adaptive_radiation_prefix() {
     assert_eq!(setup, saved_setup);
     assert_eq!(previous, [80.0, 0.0]);
 }
+
+#[test]
+fn fatal_caloric_refusal_in_a_newton_trial_preserves_the_original_diagnostic() {
+    use fs_conduction::enthalpy::{DepositionError, ThermalLaw};
+    use std::cell::Cell;
+
+    struct TrialRefusal<'a> {
+        original: &'a dyn TensorCaloricLaw,
+        refusals: Cell<usize>,
+        refused_energy: Cell<f64>,
+    }
+
+    impl ThermalLaw for TrialRefusal<'_> {
+        fn temperature_k(&self, energy: f64) -> Result<f64, DepositionError> {
+            let temperature = self.original.temperature_k(energy)?;
+            // The original opening h=0 and both source bounds remain admitted.
+            // Only a positive interior Newton trial triggers this source budget.
+            if energy > 0.0 && energy < 100.0 {
+                self.refusals.set(self.refusals.get() + 1);
+                self.refused_energy.set(energy);
+                return Err(DepositionError::Budget("trial caloric work exhausted"));
+            }
+            Ok(temperature)
+        }
+
+        fn maximum_temperature_slope(&self) -> f64 {
+            self.original.maximum_temperature_slope()
+        }
+    }
+
+    impl TensorCaloricLaw for TrialRefusal<'_> {
+        fn specific_energy_bounds_j_kg(&self) -> [f64; 2] {
+            self.original.specific_energy_bounds_j_kg()
+        }
+
+        fn temperature_slope_kg_k_j(&self, energy: f64) -> Result<f64, DepositionError> {
+            self.original.temperature_slope_kg_k_j(energy)
+        }
+    }
+
+    let (domain, solids, mut setup, radiation) = exposed_pair(300.0);
+    setup.power_w = vec![80.0, 0.0];
+    let original = constant_cp(0.0);
+    let guarded = TrialRefusal {
+        original: &original,
+        refusals: Cell::new(0),
+        refused_energy: Cell::new(f64::NAN),
+    };
+    let laws: [&dyn TensorCaloricLaw; 2] = [&guarded, &original];
+    let k = conductivity();
+    let previous = [0.0; 2];
+    let mut config = adaptive(0.01);
+    config.initial_dt_s = 0.25;
+    config.minimum_dt_s = 0.25;
+    config.maximum_dt_s = 0.25;
+    config.maximum_attempts = 4;
+    config.step.max_backtracks = 4;
+    let mut samples = 0;
+    let refusal = advance_caloric_tensor_conduction_radiating_adaptive(
+        &domain,
+        &solids,
+        &[&k, &k],
+        TensorCaloricStorage {
+            laws: &laws,
+            reference_mass_kg: &[MASS; 2],
+            previous_specific_energy_j_kg: &previous,
+        },
+        0.0,
+        0.25,
+        &[],
+        &config,
+        &radiation,
+        |_| {
+            samples += 1;
+            Ok(TensorCaloricForcing::borrowed(&setup, &[(1, 0.0)]))
+        },
+        &CancelGate::new(),
+    )
+    .unwrap_err();
+    match refusal {
+        TensorCaloricAdaptiveError::Solve(ChtError::InvalidInput { field, reason }) => {
+            assert_eq!(field, "thermal.tensor_caloric.original_source_refusal");
+            assert_eq!(
+                reason,
+                DepositionError::Budget("trial caloric work exhausted").to_string(),
+            );
+        }
+        other => panic!("original source refusal was swallowed: {other:?}"),
+    }
+    assert_eq!(
+        samples, 2,
+        "one attempt samples exactly two physical stages"
+    );
+    assert_eq!(
+        guarded.refusals.get(),
+        1,
+        "fatal source work is never retried"
+    );
+    // At T=300 K the first radiative tangent has zero offset power. Its
+    // positive-energy Newton correction has this independent scalar value.
+    let a = TENSOR_SDIRK2_GAMMA * config.initial_dt_s;
+    let radiation_slope = 4.0 * EMISSIVITY * STEFAN_BOLTZMANN * 300.0_f64.powi(3);
+    let first_trial = 80.0 / (MASS / a + (1.0 + radiation_slope) / CP);
+    near(guarded.refused_energy.get(), first_trial, 1e-8);
+    assert_eq!(previous, [0.0; 2]);
+    assert_eq!(setup.power_w, [80.0, 0.0]);
+}

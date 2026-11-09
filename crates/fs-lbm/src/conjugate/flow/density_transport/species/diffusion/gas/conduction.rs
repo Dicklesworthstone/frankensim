@@ -9,10 +9,14 @@ use super::{
     Sum, VoxelDomain, invalid, poll, poll_every,
 };
 use crate::conjugate::{
-    ConductivityTensor, RadiationConfig, SolidMaterial, TensorCaloricEndpoint, TensorCaloricLaw,
+    ConductivityTensor, RadiationConfig, SolidMaterial, TensorCaloricAdaptiveConfig,
+    TensorCaloricAdaptiveError, TensorCaloricAdaptiveSolution, TensorCaloricEndpoint,
+    TensorCaloricForcing, TensorCaloricLaw, TensorCaloricRadiatingAdaptiveSolution,
     TensorCaloricRadiationReport, TensorCaloricSdirk2Step, TensorCaloricStep, TensorCaloricStorage,
     TensorConductivityLaw, TensorNonlinearConfig, ThermalSetup, TransientRecord,
-    advance_caloric_tensor_conduction, advance_caloric_tensor_conduction_radiating,
+    advance_caloric_tensor_conduction, advance_caloric_tensor_conduction_adaptive,
+    advance_caloric_tensor_conduction_radiating,
+    advance_caloric_tensor_conduction_radiating_adaptive,
     advance_caloric_tensor_conduction_radiating_sdirk2, advance_caloric_tensor_conduction_sdirk2,
 };
 
@@ -51,11 +55,31 @@ pub struct ThermochemicalConductionControls {
     pub maximum_enthalpy_defect_j: f64,
 }
 
+/// Adaptive time control and original source allowances for the whole window.
+#[derive(Clone, Copy, Debug)]
+pub struct ThermochemicalAdaptiveConductionControls {
+    /// SourceIntegral follows the original gas k(T,Y) throughout the window.
+    /// HeldAtOpening freezes k at the opening of the ENTIRE adaptive window;
+    /// temporal refinement does not remove this conductivity-freezing error.
+    pub conductivity: ThermochemicalConductivityModel,
+    /// Native embedded SDIRK2 accuracy, attempt and absolute heat-closure bounds.
+    pub thermal: TensorCaloricAdaptiveConfig,
+    /// Shared gas caloric queries across all accepted and rejected attempts.
+    pub maximum_caloric_queries: usize,
+    /// Initial/final source inversion defects plus the larger of net native
+    /// closure and summed absolute accepted closures must fit this allowance.
+    /// The sum of each cell's largest trial caloric residual must independently
+    /// fit this allowance.
+    pub maximum_enthalpy_defect_j: f64,
+}
+
 /// Unmodified native heat solution, including actual face fluxes and receipts.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ThermochemicalConductionAdvance {
     BackwardEuler(TensorCaloricStep),
     Sdirk2(TensorCaloricSdirk2Step),
+    Adaptive(TensorCaloricAdaptiveSolution),
+    RadiatingAdaptive(TensorCaloricRadiatingAdaptiveSolution),
     RadiatingBackwardEuler {
         step: TensorCaloricStep,
         radiation: TensorCaloricRadiationReport,
@@ -71,6 +95,8 @@ impl ThermochemicalConductionAdvance {
         match self {
             Self::BackwardEuler(step) => &step.endpoint,
             Self::Sdirk2(step) => &step.stages[1],
+            Self::Adaptive(step) => &step.endpoint,
+            Self::RadiatingAdaptive(step) => &step.thermal.endpoint,
             Self::RadiatingBackwardEuler { step, .. } => &step.endpoint,
             Self::RadiatingSdirk2 { step, .. } => &step.stages[1],
         }
@@ -81,15 +107,19 @@ impl ThermochemicalConductionAdvance {
         match self {
             Self::BackwardEuler(step) => &step.record,
             Self::Sdirk2(step) => &step.record,
+            Self::Adaptive(step) => &step.record,
+            Self::RadiatingAdaptive(step) => &step.thermal.record,
             Self::RadiatingBackwardEuler { step, .. } => &step.record,
             Self::RadiatingSdirk2 { step, .. } => &step.record,
         }
     }
 
-    /// Original radiation iteration evidence; empty for nonradiating heat.
+    /// Original radiation iteration evidence in accepted time/stage order.
+    /// Empty for nonradiating heat; discarded adaptive trials are excluded.
     pub fn radiation_reports(&self) -> &[TensorCaloricRadiationReport] {
         match self {
-            Self::BackwardEuler(_) | Self::Sdirk2(_) => &[],
+            Self::BackwardEuler(_) | Self::Sdirk2(_) | Self::Adaptive(_) => &[],
+            Self::RadiatingAdaptive(step) => step.radiation.as_flattened(),
             Self::RadiatingBackwardEuler { radiation, .. } => core::slice::from_ref(radiation),
             Self::RadiatingSdirk2 { radiation, .. } => radiation,
         }
@@ -112,7 +142,8 @@ pub struct ThermochemicalSpeciesConductionReport {
     /// Includes discarded Newton states; it is a source-accuracy admission,
     /// not another physical heat deposit or accumulated interval energy.
     pub maximum_query_caloric_defect_j: f64,
-    /// Absolute closure of the original native Fourier interval ledger.
+    /// Absolute native interval closure; adaptive windows also include the
+    /// sum of absolute accepted closures if larger, preventing cancellation.
     /// Local cell/face equations also retain the original thermal controls.
     pub native_energy_defect_j: f64,
     pub absolute_enthalpy_defect_j: f64,
@@ -184,8 +215,49 @@ fn advance_native(
     duration_s: f64,
     controls: &ThermochemicalConductionControls,
     radiation: Option<&RadiationConfig>,
+    adaptive: Option<(f64, &TensorCaloricAdaptiveConfig)>,
     gate: &CancelGate,
 ) -> Result<ThermochemicalConductionAdvance, ChtError> {
+    if let Some((target_time_s, config)) = adaptive {
+        let forcing = |_| Ok(TensorCaloricForcing::borrowed(setup, prescribed));
+        let result = if let Some(radiation) = radiation {
+            advance_caloric_tensor_conduction_radiating_adaptive(
+                domain,
+                solids,
+                conductivity_laws,
+                storage,
+                start_time_s,
+                target_time_s,
+                &[],
+                config,
+                radiation,
+                forcing,
+                gate,
+            )
+            .map(ThermochemicalConductionAdvance::RadiatingAdaptive)
+        } else {
+            advance_caloric_tensor_conduction_adaptive(
+                domain,
+                solids,
+                conductivity_laws,
+                storage,
+                start_time_s,
+                target_time_s,
+                &[],
+                config,
+                forcing,
+                gate,
+            )
+            .map(ThermochemicalConductionAdvance::Adaptive)
+        };
+        return result.map_err(|error| match error {
+            TensorCaloricAdaptiveError::Solve(error) => error,
+            error => ChtError::InvalidInput {
+                field: "gas.conduction.adaptive",
+                reason: error.to_string(),
+            },
+        });
+    }
     if let Some(radiation) = radiation {
         return match controls.scheme {
             ThermochemicalConductionScheme::BackwardEuler => {
@@ -281,6 +353,15 @@ fn conduction_report(
         controls.maximum_enthalpy_defect_j,
     )?;
     let native_energy_defect_j = thermal.record().closure_j.abs();
+    let native_energy_defect_j = match thermal {
+        ThermochemicalConductionAdvance::Adaptive(step) => {
+            native_energy_defect_j.max(step.report.absolute_accepted_closure_j)
+        }
+        ThermochemicalConductionAdvance::RadiatingAdaptive(step) => {
+            native_energy_defect_j.max(step.thermal.report.absolute_accepted_closure_j)
+        }
+        _ => native_energy_defect_j,
+    };
     let mut defect = Sum::default();
     for value in [
         native_energy_defect_j,
@@ -428,6 +509,7 @@ impl MaterialAdvectionStep {
             start_time_s,
             duration_s,
             &controls,
+            None,
             None,
             gate,
         )?;

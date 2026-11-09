@@ -3983,3 +3983,42 @@ source reframe or physics kernel is introduced. Cross-crate regression
 specifications are in fs-couple's scenario_open_boundary target. This addition
 passed pinned Rust parsing and diff checks only; typechecking and runtime
 execution remain unverified.
+
+## Adaptive source-bound gas and solid enthalpy exchange
+
+`MaterialAdvectionStep::conduct_thermochemical_species_with_solids_adaptive`
+advances the existing mixed gas/solid heat owner to an exact supplied target
+with `ThermochemicalAdaptiveConductionControls`. Its optional radiation
+selects the native adaptive radiating path. Both choices retain the original
+caloric laws, explicit carrier and solid masses, conductivity laws, contact
+resistances and single-valued interface heat.
+
+Preparation occurs once for the complete window. Original gas caloric and
+conductivity query budgets span every accepted and rejected attempt.
+`SourceIntegral` queries the original prepared WMS conductivity throughout
+that window. `HeldAtOpening` deliberately freezes gas conductivity at the
+window opening; temporal refinement does not correct that freezing error.
+Composition, source pressure/context, geometry, setup and prescribed energies
+remain fixed. The native forcing API owns time-dependent thermal schedules.
+
+The result retains the full mixed thermal endpoint and a separately masked
+gas enthalpy field prepared through the original source. Latent solid energy
+never enters gas-only slots, and EOS density never replaces carrier mass.
+Native `Adaptive` and `RadiatingAdaptive` variants expose accepted records;
+`radiation_reports()` borrows their accepted stage reports without copying.
+The adapter's native energy defect uses the larger of absolute whole-window
+closure and the sum of absolute accepted interval closures, then admits it
+together with opening/final source inversion defects. Trial caloric residuals
+retain their separate original admission and are not physical heat deposits.
+
+A late source/work/energy/cancellation refusal returns no partial gas or solid
+endpoint. Native line search distinguishes an out-of-support candidate from a
+fatal original source/work refusal; exhausted source budgets cannot turn into
+backtracking or timestep retries. Native solve errors preserve their original
+type; other adaptive refusals retain their full diagnostic. The coupled regression compares original
+constant-Cp gas cooling against an independent exponential solution while a
+solid remains on its latent plateau, with and without radiation, and exercises
+shared caloric and conductivity query-budget exhaustion. A native regression
+also checks immediate source-budget refusal inside a Newton trial at the
+timestep floor. These tests are syntax-parsed but not natively executed in
+this environment.

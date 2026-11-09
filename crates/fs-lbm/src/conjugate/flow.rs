@@ -38,6 +38,7 @@ pub use density_transport::{
 };
 #[cfg(feature = "enthalpy-coupling")]
 pub use density_transport::{
+    ThermochemicalAdaptiveConductionControls,
     ThermochemicalConductionAdvance, ThermochemicalConductionControls,
     ThermochemicalConductionScheme, ThermochemicalSpeciesConductionReport,
     ThermochemicalSpeciesConductionStep,

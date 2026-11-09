@@ -113,6 +113,7 @@ pub use flow::{
 };
 #[cfg(feature = "enthalpy-coupling")]
 pub use flow::{
+    ThermochemicalAdaptiveConductionControls,
     ThermochemicalConductionAdvance, ThermochemicalConductionControls,
     ThermochemicalConductionScheme, ThermochemicalSpeciesConductionReport,
     ThermochemicalSpeciesConductionStep,

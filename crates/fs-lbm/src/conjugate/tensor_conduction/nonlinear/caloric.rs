@@ -368,7 +368,13 @@ fn source_error(error: DepositionError) -> ChtError {
     match error {
         DepositionError::Cancelled => ChtError::Cancelled,
         other => ChtError::InvalidInput {
-            field: "thermal.tensor_caloric.original_source",
+            // Only a trial outside the constitutive chart may be backtracked.
+            // Work, contract, arithmetic and heat refusals are not new seeds.
+            field: if matches!(&other, DepositionError::MaterialDomain) {
+                "thermal.tensor_caloric.original_source"
+            } else {
+                "thermal.tensor_caloric.original_source_refusal"
+            },
             reason: other.to_string(),
         },
     }

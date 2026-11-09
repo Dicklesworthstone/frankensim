@@ -15,6 +15,7 @@ pub use species::{
 };
 #[cfg(feature = "enthalpy-coupling")]
 pub use species::{
+    ThermochemicalAdaptiveConductionControls,
     ThermochemicalConductionAdvance, ThermochemicalConductionControls,
     ThermochemicalConductionScheme, ThermochemicalSpeciesConductionReport,
     ThermochemicalSpeciesConductionStep,

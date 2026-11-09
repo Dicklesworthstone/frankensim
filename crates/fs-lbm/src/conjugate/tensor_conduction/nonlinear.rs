@@ -417,6 +417,13 @@ fn solve_coordinate<C: CellCoordinate>(
                     endpoint = candidate;
                     break;
                 }
+                // Source work and constitutive refusals cannot be repaired by
+                // trying another state, and must retain their original cause.
+                Err(error @ ChtError::InvalidInput {
+                    field: "thermal.tensor_caloric.original_source_refusal"
+                        | "gas.conduction.original_source_refusal",
+                    ..
+                }) => return Err(error),
                 // A trial may leave source support or positive Kelvin. Only
                 // that candidate is rejected; original history is immutable.
                 Ok(_) | Err(ChtError::InvalidInput { .. }) => {}

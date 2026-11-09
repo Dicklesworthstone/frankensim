@@ -32,6 +32,7 @@ pub use boundary::{BoundaryThermochemicalSpeciesDiffusionStep, GasSpeciesEnthalp
 mod conduction;
 #[cfg(feature = "enthalpy-coupling")]
 pub use conduction::{
+    ThermochemicalAdaptiveConductionControls,
     ThermochemicalConductionAdvance, ThermochemicalConductionControls,
     ThermochemicalConductionScheme, ThermochemicalSpeciesConductionReport,
     ThermochemicalSpeciesConductionStep,

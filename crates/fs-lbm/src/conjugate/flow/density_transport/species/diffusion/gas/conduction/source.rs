@@ -60,7 +60,7 @@ impl<'g> GasConductionQueryBudget<'g> {
             .get()
             .checked_add(count)
             .filter(|&next| next <= self.maximum_caloric_queries)
-            .ok_or(DepositionError::InvalidInput(
+            .ok_or(DepositionError::Budget(
                 "gas conduction caloric-query budget exhausted",
             ))?;
         self.queries.set(next);
@@ -78,7 +78,14 @@ fn native_error(error: DepositionError) -> ChtError {
 fn thermal_error(error: GasEnergyError) -> DepositionError {
     match error {
         GasEnergyError::Cancelled => DepositionError::Cancelled,
-        _ => DepositionError::MaterialDomain,
+        GasEnergyError::OutsideBracket { .. } => DepositionError::MaterialDomain,
+        GasEnergyError::NotConverged { .. } => DepositionError::Budget(
+            "original gas caloric inverse did not satisfy its source solve limits",
+        ),
+        GasEnergyError::Invalid(reason) => DepositionError::InvalidInput(reason),
+        GasEnergyError::Material(_) => DepositionError::InvalidInput(
+            "original gas caloric source refused an admitted trial",
+        ),
     }
 }
 

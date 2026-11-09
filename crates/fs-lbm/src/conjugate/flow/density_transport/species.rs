@@ -19,6 +19,7 @@ pub use diffusion::{
 };
 #[cfg(feature = "enthalpy-coupling")]
 pub use diffusion::{
+    ThermochemicalAdaptiveConductionControls,
     ThermochemicalConductionAdvance, ThermochemicalConductionControls,
     ThermochemicalConductionScheme, ThermochemicalSpeciesConductionReport,
     ThermochemicalSpeciesConductionStep,

@@ -764,3 +764,235 @@ fn radiating_gas_solid_interval_cools_latent_inventory_and_reuses_original_gas_s
         assert_eq!(species, [[0.02], [0.0]]);
     }
 }
+
+#[test]
+fn adaptive_gas_solid_windows_preserve_latent_radiation_and_shared_source_limits() {
+    use fs_lbm::conjugate::{
+        RadiationConfig, TensorCaloricAdaptiveConfig, ThermochemicalAdaptiveConductionControls,
+        ThermochemicalConductivityModel,
+    };
+    use fs_material::thermochemical_gas::conductivity::GasConductivityQuadrature;
+
+    let mut domain = VoxelDomain::new(2, 1, 1, 1.0).unwrap();
+    domain.set(1, 0, 0, Voxel::Solid(0));
+    let mass = [0.02, 0.0];
+    let carrier = carrier(&domain, &mass);
+    let before = carrier.clone();
+    let species = [[mass[0]], [0.0]];
+    let bank = source::constant_cp_model(-4000.0, 1.0);
+    let names = [SpeciesId::new("manufactured").unwrap()];
+    let context = source::point(350.0, 100_000.0);
+    let diffusivity = [0.0; 2];
+    let gate = CancelGate::new_clock_free();
+    let source =
+        GasSpeciesEnthalpySource::new(&bank, &names, &context, &diffusivity, energy(), &gate)
+            .unwrap();
+    let h = [gas_h(&bank, 350.0), 0.0];
+    let opening = source
+        .prepare(&domain, &carrier, &species, &h, &gate)
+        .unwrap();
+    let gas_k = opening.transport(0).unwrap().thermal_conductivity_w_m_k();
+    let solid_k = 3.0;
+    let solid_mass = 2.0;
+    let initial_solid_h = 80.0;
+    let conductivity = isotropic(solid_k);
+    let caloric = melting(solid_mass);
+    let bindings = [ThermochemicalSolidConductionCell {
+        cell: 1,
+        reference_mass_kg: solid_mass,
+        specific_energy_j_kg: initial_solid_h,
+        caloric: &caloric,
+        conductivity: &conductivity,
+        prescribed_specific_energy_j_kg: None,
+    }];
+    let solids = [SolidMaterial::new(
+        "adaptive radiating latent solid",
+        solid_k,
+    )];
+    let setup = contact_setup(0.75);
+    let mut radiation_config = RadiationConfig::new(vec![0.8], [Some(250.0); 6]);
+    radiation_config.surface_exchange = false;
+    radiation_config.rays_per_face = 64;
+    radiation_config.tolerance = 1e-10;
+    let duration = 0.2;
+    let capacity = mass[0] * 3.0 * R / MOLAR_MASS[0];
+    let conductance = 1.0 / (0.5 / gas_k + 0.5 / solid_k + 0.75);
+    // Original gas k is independent of temperature at this fixed source pressure.
+    // The solid stays on its plateau, so the continuous gas solution is exact.
+    let expected_gas_t = 300.0 + 50.0 * (-duration * conductance / capacity).exp();
+    let expected_gas_change = capacity * (expected_gas_t - 350.0);
+    for radiation in [None, Some(&radiation_config)] {
+        let radiated_w = if radiation.is_some() {
+            0.8 * 5.670_374_419e-8 * (300.0_f64.powi(4) - 250.0_f64.powi(4))
+        } else {
+            0.0
+        };
+        let expected_solid_h =
+            initial_solid_h + (-expected_gas_change - duration * radiated_w) / solid_mass;
+        assert!((0.0..100.0).contains(&expected_solid_h));
+        let control = ThermochemicalAdaptiveConductionControls {
+            conductivity: ThermochemicalConductivityModel::SourceIntegral {
+                quadrature: GasConductivityQuadrature {
+                    absolute_tolerance_w_m_k: 1e-12,
+                    relative_tolerance: 1e-10,
+                    maximum_subdivisions: 256,
+                    maximum_depth: 16,
+                },
+                maximum_evaluations: 2_000_000,
+            },
+            thermal: TensorCaloricAdaptiveConfig {
+                step: controls(ThermochemicalConductionScheme::Sdirk2).thermal,
+                initial_dt_s: duration,
+                minimum_dt_s: 1e-6,
+                maximum_dt_s: duration,
+                maximum_attempts: 512,
+                energy_absolute_tolerance_j_kg: 1e-5,
+                relative_tolerance: 0.0,
+                energy_tolerance_j: HEAT_BUDGET_J,
+            },
+            maximum_caloric_queries: 250_000,
+            maximum_enthalpy_defect_j: HEAT_BUDGET_J,
+        };
+        let result = carrier
+            .conduct_thermochemical_species_with_solids_adaptive(
+                &domain, &species, &h, &solids, &bindings, &setup, 0.0, duration, &source, control,
+                radiation, &gate,
+            )
+            .unwrap();
+        let native = match &result.thermal {
+            ThermochemicalConductionAdvance::Adaptive(step) => {
+                assert!(radiation.is_none());
+                assert!(result.thermal.radiation_reports().is_empty());
+                step
+            }
+            ThermochemicalConductionAdvance::RadiatingAdaptive(step) => {
+                assert!(radiation.is_some());
+                assert_eq!(step.radiation.len(), step.thermal.records.len());
+                assert_eq!(
+                    result.thermal.radiation_reports().len(),
+                    2 * step.thermal.records.len(),
+                );
+                let mut time = 0.0;
+                let mut integrated_radiation = 0.0;
+                let mut accepted_solves = 0;
+                for (record, stages) in step.thermal.records.iter().zip(&step.radiation) {
+                    let dt = record.time_s - time;
+                    assert!(dt > 0.0);
+                    time = record.time_s;
+                    for stage in stages {
+                        near(stage.radiated_w, radiated_w, 1e-8);
+                        accepted_solves += stage.iterations;
+                    }
+                    integrated_radiation += dt
+                        * ((1.0 - TENSOR_SDIRK2_GAMMA) * stages[0].radiated_w
+                            + TENSOR_SDIRK2_GAMMA * stages[1].radiated_w);
+                }
+                near(time, duration, 1e-15);
+                near(step.radiated_energy_j, integrated_radiation, 1e-9);
+                near(step.radiated_energy_j, duration * radiated_w, 1e-7);
+                assert!(step.completed_trial_radiation_solves > accepted_solves);
+                &step.thermal
+            }
+            _ => panic!("adaptive gas conduction returned a fixed interval"),
+        };
+        assert!(native.report.accuracy_rejections > 0);
+        assert!(native.report.accepted_steps > 1);
+        assert_eq!(native.records.len(), native.report.accepted_steps);
+        assert!(native.report.maximum_accepted_normalized_error <= 1.0);
+        near(native.records.last().unwrap().time_s, duration, 1e-15);
+        let endpoint = result.thermal.endpoint();
+        near(
+            endpoint.solution.solution.temperature[0],
+            expected_gas_t,
+            2e-7,
+        );
+        near(endpoint.solution.solution.temperature[1], 300.0, 1e-10);
+        near(result.state.temperatures_k()[0], expected_gas_t, 2e-7);
+        near(endpoint.specific_energy_j_kg[1], expected_solid_h, 2e-6);
+        near(
+            result.gas_specific_enthalpy_j_kg[0] - h[0],
+            expected_gas_change / mass[0],
+            2e-4,
+        );
+        assert_eq!(result.gas_specific_enthalpy_j_kg[1], 0.0);
+        // Compare the public inventories with the native physical ledger: solid
+        // latent energy is present once and is not copied into the gas-only mask.
+        let stored = mass[0] * (result.gas_specific_enthalpy_j_kg[0] - h[0])
+            + solid_mass * (endpoint.specific_energy_j_kg[1] - initial_solid_h);
+        let record = result.thermal.record();
+        near(record.stored_energy_change_j, stored, 1e-8);
+        near(stored, -duration * radiated_w, HEAT_BUDGET_J);
+        near(record.source_j, 0.0, 1e-12);
+        near(record.boundary_outflow_j, duration * radiated_w, 1e-7);
+        near(record.radiated_w, radiated_w, 1e-8);
+        assert_eq!(
+            result.report.native_energy_defect_j,
+            record
+                .closure_j
+                .abs()
+                .max(native.report.absolute_accepted_closure_j),
+        );
+        near(
+            result.report.absolute_enthalpy_defect_j,
+            result.report.native_energy_defect_j
+                + result.report.initial_caloric_defect_j
+                + result.report.endpoint_caloric_defect_j,
+            1e-12,
+        );
+        assert!(result.report.absolute_enthalpy_defect_j <= HEAT_BUDGET_J);
+        assert!(result.report.maximum_query_caloric_defect_j <= HEAT_BUDGET_J);
+        assert!(result.report.conductivity_evaluations > 0);
+
+        // Reuse the same immutable source and deterministic window. One query
+        // short of its measured whole-window cost must refuse, including work
+        // already spent on rejected trials and private accepted intervals.
+        assert!(result.report.caloric_queries > 1);
+        let exhausted = ThermochemicalAdaptiveConductionControls {
+            maximum_caloric_queries: result.report.caloric_queries - 1,
+            ..control
+        };
+        let refusal = carrier
+            .conduct_thermochemical_species_with_solids_adaptive(
+                &domain, &species, &h, &solids, &bindings, &setup, 0.0, duration, &source,
+                exhausted, radiation, &gate,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            refusal,
+            ChtError::InvalidInput { reason, .. }
+                if reason.contains("caloric-query budget exhausted")
+        ));
+
+        assert!(result.report.conductivity_evaluations > 1);
+        let ThermochemicalConductivityModel::SourceIntegral { quadrature, .. } =
+            control.conductivity
+        else {
+            unreachable!("this regression requires the original conductivity integral");
+        };
+        let conductivity_exhausted = ThermochemicalAdaptiveConductionControls {
+            conductivity: ThermochemicalConductivityModel::SourceIntegral {
+                quadrature,
+                maximum_evaluations: result.report.conductivity_evaluations - 1,
+            },
+            ..control
+        };
+        let refusal = carrier
+            .conduct_thermochemical_species_with_solids_adaptive(
+                &domain, &species, &h, &solids, &bindings, &setup, 0.0, duration, &source,
+                conductivity_exhausted, radiation, &gate,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            refusal,
+            ChtError::InvalidInput {
+                field: "gas.conduction.original_source_refusal",
+                reason,
+            } if reason.contains("work allowance exhausted")
+        ));
+        assert_eq!(carrier, before);
+        assert_eq!(species, [[0.02], [0.0]]);
+        assert_eq!(h, [gas_h(&bank, 350.0), 0.0]);
+        assert_eq!(bindings[0].reference_mass_kg, solid_mass);
+        assert_eq!(bindings[0].specific_energy_j_kg, initial_solid_h);
+    }
+}

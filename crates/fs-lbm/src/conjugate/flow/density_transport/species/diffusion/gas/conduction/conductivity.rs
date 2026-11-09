@@ -96,7 +96,7 @@ impl<'g> GasConductivityBudget<'g> {
 
     fn record_mean_error(&self, error_w_m_k: f64) -> Result<(), ChtError> {
         if !error_w_m_k.is_finite() || error_w_m_k < 0.0 {
-            return Err(invalid(
+            return Err(source_refusal(
                 "original gas conductivity returned an unrepresentable integral error estimate",
             ));
         }
@@ -106,11 +106,33 @@ impl<'g> GasConductivityBudget<'g> {
     }
 }
 
+fn source_refusal(reason: impl Into<String>) -> ChtError {
+    ChtError::InvalidInput {
+        field: "gas.conduction.original_source_refusal",
+        reason: reason.into(),
+    }
+}
+
 fn source_error(error: GasConductivityError) -> ChtError {
     match error {
         GasConductivityError::Cancelled => ChtError::Cancelled,
-        other => invalid(format!("original gas conductivity refused: {other}")),
+        other => source_refusal(format!("original gas conductivity refused: {other}")),
     }
+}
+
+// A Newton trial may leave the prepared source interval. Admit that case
+// separately, so actual source, work and quadrature refusals remain fatal.
+fn admit_trial_temperature(
+    law: &PreparedThermochemicalConductivity,
+    temperature_k: f64,
+) -> Result<(), ChtError> {
+    let [lo, hi] = law.temperature_range_k();
+    if !temperature_k.is_finite() || !(lo..=hi).contains(&temperature_k) {
+        return Err(invalid(
+            "trial temperature leaves the original gas conductivity interval",
+        ));
+    }
+    Ok(())
 }
 
 fn isotropic(k: f64) -> Result<ConductivityTensor, ChtError> {
@@ -165,6 +187,7 @@ impl TensorConductivityLaw for GasConductionConductivity<'_, '_> {
         match self {
             Self::Held(tensor) => tensor.conductivity_at_temperature(temperature_k),
             Self::Source { law, budget, .. } => {
+                admit_trial_temperature(law, temperature_k)?;
                 let k = law
                     .conductivity_at_temperature(temperature_k, || budget.point())
                     .map_err(source_error)?;
@@ -181,6 +204,8 @@ impl TensorConductivityLaw for GasConductionConductivity<'_, '_> {
                 budget,
                 quadrature,
             } => {
+                admit_trial_temperature(law, from_k)?;
+                admit_trial_temperature(law, to_k)?;
                 let mean = law
                     .mean_conductivity(from_k, to_k, *quadrature, || budget.point())
                     .map_err(source_error)?;

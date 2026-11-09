@@ -4,8 +4,9 @@ use super::{
     CancelGate, ChtError, GasConductionCaloric, GasConductionConductivity,
     GasConductionQueryBudget, GasConductivityBudget, GasSpeciesEnthalpyField,
     GasSpeciesEnthalpySource, MaterialAdvectionStep, RadiationConfig, SolidMaterial,
-    TensorCaloricLaw, TensorCaloricStorage, TensorConductivityLaw, ThermalSetup,
-    ThermochemicalConductionAdvance, ThermochemicalConductionControls,
+    TensorCaloricAdaptiveConfig, TensorCaloricLaw, TensorCaloricStorage, TensorConductivityLaw,
+    ThermalSetup, ThermochemicalAdaptiveConductionControls, ThermochemicalConductionAdvance,
+    ThermochemicalConductionControls, ThermochemicalConductionScheme,
     ThermochemicalSpeciesConductionReport, VoxelDomain, admit_interval, admitted_defect,
     advance_native, conduction_report, gas_query_defect, invalid, poll, poll_every, reserved,
 };
@@ -162,6 +163,7 @@ impl MaterialAdvectionStep {
             source,
             controls,
             None,
+            None,
             gate,
         )
     }
@@ -212,6 +214,72 @@ impl MaterialAdvectionStep {
             source,
             controls,
             Some(radiation),
+            None,
+            gate,
+        )
+    }
+
+    /// Advance original gas/solid enthalpy to an exact target with adaptive SDIRK2.
+    ///
+    /// The same prepared caloric and conductivity laws survive every accepted
+    /// and rejected attempt. Original gas source work allowances span this
+    /// ENTIRE window, while native per-attempt solver caps and the attempt cap
+    /// bound thermal work. The embedded estimate uses energy increments, so
+    /// latent plateaus retain temporal error control without an apparent Cp.
+    ///
+    /// SourceIntegral follows original k(T,Y) throughout the window and is
+    /// recommended when conductivity varies with temperature. HeldAtOpening
+    /// freezes gas k at the WINDOW opening; reducing dt does not refresh it.
+    /// Composition, carrier/solid masses, setup and prescribed energies remain
+    /// fixed for the window. Use the native adaptive forcing entry for changing
+    /// sources or boundary schedules. Optional radiation uses the same original
+    /// exposed-solid gray law as the fixed-step radiating entry.
+    ///
+    /// Only accepted intervals contribute physical heat and radiation reports.
+    /// Source failures, exhausted work, failed energy admission and cancellation
+    /// return no partial endpoint, even after private accepted intervals.
+    #[allow(clippy::too_many_arguments)]
+    pub fn conduct_thermochemical_species_with_solids_adaptive<'a, const N: usize>(
+        &self,
+        domain: &VoxelDomain,
+        species_mass_kg: &[[f64; N]],
+        gas_specific_enthalpy_j_kg: &[f64],
+        solid_materials: &[SolidMaterial],
+        solid_cells: &[ThermochemicalSolidConductionCell<'_>],
+        setup: &ThermalSetup,
+        start_time_s: f64,
+        target_time_s: f64,
+        source: &GasSpeciesEnthalpySource<'a, N>,
+        controls: ThermochemicalAdaptiveConductionControls,
+        radiation: Option<&RadiationConfig>,
+        gate: &CancelGate,
+    ) -> Result<ThermochemicalConjugateConductionStep<'a, N>, ChtError> {
+        poll(gate)?;
+        if !target_time_s.is_finite() || target_time_s <= start_time_s {
+            return Err(invalid(
+                "adaptive gas conduction needs a finite later target time",
+            ));
+        }
+        let source_controls = ThermochemicalConductionControls {
+            scheme: ThermochemicalConductionScheme::Sdirk2,
+            conductivity: controls.conductivity,
+            thermal: controls.thermal.step,
+            maximum_caloric_queries: controls.maximum_caloric_queries,
+            maximum_enthalpy_defect_j: controls.maximum_enthalpy_defect_j,
+        };
+        self.conduct_thermochemical_species_with_solids_inner(
+            domain,
+            species_mass_kg,
+            gas_specific_enthalpy_j_kg,
+            solid_materials,
+            solid_cells,
+            setup,
+            start_time_s,
+            target_time_s - start_time_s,
+            source,
+            source_controls,
+            radiation,
+            Some((target_time_s, &controls.thermal)),
             gate,
         )
     }
@@ -230,6 +298,7 @@ impl MaterialAdvectionStep {
         source: &GasSpeciesEnthalpySource<'a, N>,
         controls: ThermochemicalConductionControls,
         radiation: Option<&RadiationConfig>,
+        adaptive: Option<(f64, &TensorCaloricAdaptiveConfig)>,
         gate: &CancelGate,
     ) -> Result<ThermochemicalConjugateConductionStep<'a, N>, ChtError> {
         poll(gate)?;
@@ -350,6 +419,7 @@ impl MaterialAdvectionStep {
             duration_s,
             &controls,
             radiation,
+            adaptive,
             gate,
         )?;
         let maximum_query_caloric_defect_j =
