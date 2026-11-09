@@ -14752,9 +14752,9 @@ a complete native/authored storage tangent and n permitted loss actions,
 adds 3*n scalar scratch entries and introduces no warm adapter allocations;
 callback-internal behavior remains its author's responsibility. No-D
 arithmetic and native refusal semantics are preserved. Structured nonlinear
-law refusals survive solver callback boundaries. Parameter sensitivities
-refuse attached nonlinear loss because their current physical direction
-contract does not represent independent D_p.
+law refusals survive solver callback boundaries. Ordinary parameter queries
+hold the nonlinear-loss law fixed while retaining its full effort chain;
+explicit loss-direction methods below additionally supply independent D_p.
 
 Four new focused G0/G1 groups and thirteen existing parametric tests pass
 natively: complete pumped state/effort chains; a saturated subharmonic branch
@@ -15249,3 +15249,41 @@ a fixed D law with nonzero D_e e_p, all six physical power/work objectives,
 forward-adjoint agreement, callback refusal, cancellation, and scratch budgets.
 All 18 relevant autonomous tests pass, including the existing dissipative
 forward and ordinary autonomous sensitivity, power, and adjoint regressions.
+
+
+## Pumped nonlinear-loss parameter responses and physical work adjoints
+
+`ParametricHamiltonian::prepare_sensitivity` accepts the attached original
+nonlinear-loss source and factors its complete state/effort tangent.
+`solve_parameter_with_dissipation` and `gradient_parameter_with_dissipation`
+add an independent D_p callback at fixed state and effort. Existing parameter
+methods explicitly hold that constitutive law fixed and still retain D_e e_p.
+An explicit D_p without an attached nominal loss source refuses.
+
+Original J/R/G, storage, input, pump, response-period, and response-clock
+parameter chains remain in the residual. The shared fs-phs parameter owner keeps
+D_e e_p and D_p separate until the final compensated physical contraction.
+`MeanNonlinearPower` and `NonlinearEnergyPerCycle` independently measure
+e dot D. Their state covectors include D_x, D_e, and the complete H0_xx + Q
+storage tangent; direct heat is e_p dot D + e dot (D_e e_p + D_p). Cycle work
+retains the response-period derivative, including multi-source-period views.
+All eight pump/port/native-resistance/nonlinear-loss mean and cycle objectives
+use this same complete physical parameter direction.
+
+Preparation reserves 4n additional query scalars when nonlinear loss is
+attached. Nonlinear-work observation uses 2n reusable scratch entries within
+that bound. Parameter adjoint queries reuse the original factor and cached
+coarse/fine trajectories without additional Hessian evaluations or orbit
+solves. Other direct power accounts avoid unnecessary loss-parameter calls.
+Original source admission, callback completeness, cancellation, finite-grid
+checks, and resource limits remain explicit.
+
+Three new tests compare combined physical/loss/clock waveform and all eight
+objective gradients with neighboring original harmonic models and independently
+written RK4 equations, cover held-fixed constitutive loss with a live effort
+chain on two source periods, and exercise loss-only directions, missing nominal
+sources, incomplete callbacks, cancellation, and reuse. All 20 relevant
+parametric tests pass. The existing converged order-32 subharmonic branch now
+requests 256 sensitivity samples to satisfy the native minimum of 132; physical
+tolerances and other limits are unchanged. These finite-order/grid checks do
+not certify infinite tails, orbital stability, or nonsmooth constitutive laws.

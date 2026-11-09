@@ -45,8 +45,10 @@ impl<'a> ParametricHamiltonian<'a> {
     /// their own allocation behavior.
     ///
     /// HB, adaptive HB, variational shooting, sidebands and longer-period views
-    /// all retain this source. Parameter sensitivities currently refuse because
-    /// their physical direction contract does not yet represent independent D_p.
+    /// all retain this source. Parameter sensitivities retain D_e*e_p when the
+    /// constitutive law is fixed; explicit loss-direction queries also accept
+    /// the independent fixed-state/fixed-effort D_p. Nonlinear heat objectives
+    /// retain both these parameter terms and the full original state chain.
     pub fn with_dissipation(mut self, law: NonlinearDissipation<'a>) -> Result<Self> {
         let n = self.system.state_dim();
         if self.dissipation.is_some() || !self.tangent.available() || law.max_tangent_actions < n {

@@ -8,6 +8,9 @@ use fs_orbit::sensitivity::{
 };
 use fs_phs::PhsStructureParameterDirection;
 
+#[path = "loss_tests.rs"]
+mod loss;
+
 #[derive(Clone, Copy, Default)]
 struct Family {
     j: f64,

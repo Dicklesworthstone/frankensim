@@ -349,12 +349,15 @@ fn nonlinear_loss_saturates_pumped_half_frequency_motion_with_original_heat_and_
         (expected_means[4] * shot.orbit.period).exp(),
         5e-9,
     );
-    // The current parameter-direction contract lacks independent D_p. It must
-    // not publish a derivative of the old, less dissipative physical model.
-    assert!(matches!(
-        view.prepare_sensitivity(&orbit, parameters(), &scales(3, omega), || false),
-        Err(ParametricError::Invalid(_))
-    ));
+    // The original dissipative tangent now reaches the shared sensitivity
+    // owner on the complete two-source-period branch.
+    let mut parameter_controls = parameters();
+    // The native dealiased sensitivity grid needs at least 4*(h+1) samples;
+    // the actual h32 branch therefore requires the next power of two.
+    parameter_controls.samples_per_period = 256;
+    let _sensitivity = view
+        .prepare_sensitivity(&orbit, parameter_controls, &scales(3, omega), || false)
+        .unwrap();
     assert!(matches!(
         view.prepare_sensitivity(&orbit, parameters(), &scales(3, omega), || true),
         Err(ParametricError::Sensitivity(

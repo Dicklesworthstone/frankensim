@@ -5,11 +5,16 @@ use super::{ParametricError, ParametricHamiltonian, ParametricParameterDirection
 use core::cell::RefCell;
 use fs_orbit::sensitivity::ForcedSensitivityError;
 use fs_phs::PreparedPhsParameterDirection;
+use fs_phs::harmonic::equilibrium::{
+    DissipationParameterAction, DissipationParameterEvaluation,
+    PreparedDissipationParameterDirection,
+};
 
 pub(super) fn with_samples<'s, 'a, 'd, T>(
     source: &'s ParametricHamiltonian<'a>,
     harmonics: usize,
     direction: ParametricParameterDirection<'d>,
+    dissipation: Option<&'d DissipationParameterAction<'d>>,
     run: impl FnOnce(&RefCell<Samples<'s, 'a, 'd>>) -> core::result::Result<T, ForcedSensitivityError>,
 ) -> Result<T> {
     let (n, m) = (source.system.state_dim(), source.system.port_dim());
@@ -36,10 +41,23 @@ pub(super) fn with_samples<'s, 'a, 'd, T>(
     let physical = source
         .system
         .prepare_parameter_direction(direction.physical.structure)?;
+    let loss = match source.dissipation {
+        Some(law) => Some(
+            law.prepare_parameter_direction(n, dissipation)
+                .map_err(ParametricError::Dissipation)?,
+        ),
+        None if dissipation.is_some() => {
+            return Err(ParametricError::Invalid(
+                "a nonlinear loss direction requires the original attached loss law",
+            ));
+        }
+        None => None,
+    };
     let pump_order = direction.modulation.map_or(0, |pump| pump.harmonics);
     let samples = RefCell::new(Samples {
         source,
         physical,
+        loss,
         direction,
         scratch: Scratch::new(n, m, pump_order),
         error: None,
@@ -56,6 +74,7 @@ pub(super) fn with_samples<'s, 'a, 'd, T>(
 pub(super) struct Samples<'s, 'a, 'd> {
     source: &'s ParametricHamiltonian<'a>,
     physical: PreparedPhsParameterDirection<'a, 'd>,
+    loss: Option<PreparedDissipationParameterDirection<'a, 'd>>,
     direction: ParametricParameterDirection<'d>,
     scratch: Scratch,
     error: Option<ParametricError>,
@@ -67,7 +86,13 @@ impl Samples<'_, '_, '_> {
         time: f64,
         state: &[f64],
         rate: bool,
-        observe: impl FnOnce(&PreparedPhsParameterDirection<'_, '_>, &Scratch, &Scratch) -> Result<T>,
+        evaluate_loss: bool,
+        observe: impl FnOnce(
+            &PreparedPhsParameterDirection<'_, '_>,
+            &Scratch,
+            &Scratch,
+            Option<&DissipationParameterEvaluation<'_>>,
+        ) -> Result<T>,
     ) -> Result<T> {
         let mut original = self.source.scratch.borrow_mut();
         self.source.effort(time, state, &mut original, rate)?;
@@ -90,20 +115,41 @@ impl Samples<'_, '_, '_> {
                 return Err(ParametricError::SourceRefused);
             }
         }
-        observe(&self.physical, &original, &self.scratch)
+        let loss = self
+            .loss
+            .as_mut()
+            .filter(|_| evaluate_loss)
+            .map(|loss| loss.evaluate(state, &original.effort, &self.scratch.effort, || false))
+            .transpose()
+            .map_err(ParametricError::Dissipation)?;
+        observe(&self.physical, &original, &self.scratch, loss.as_ref())
     }
 
     pub(super) fn field(&mut self, time: f64, state: &[f64], out: &mut [f64]) -> bool {
-        match self.sample(time, state, false, |physical, base, change| {
-            physical
-                .vector_field_from_effort_into(
-                    &base.effort,
-                    &change.effort,
-                    &base.ports,
-                    &change.ports,
-                    out,
-                )
-                .map_err(Into::into)
+        match self.sample(time, state, false, true, |physical, base, change, loss| {
+            if let Some(loss) = loss {
+                physical
+                    .vector_field_with_dissipation_from_effort_into(
+                        &base.effort,
+                        &change.effort,
+                        &base.ports,
+                        &change.ports,
+                        loss.effort_chain,
+                        loss.direct_flow,
+                        out,
+                    )
+                    .map_err(Into::into)
+            } else {
+                physical
+                    .vector_field_from_effort_into(
+                        &base.effort,
+                        &change.effort,
+                        &base.ports,
+                        &change.ports,
+                        out,
+                    )
+                    .map_err(Into::into)
+            }
         }) {
             Ok(()) => true,
             Err(error) => {
@@ -118,10 +164,16 @@ impl Samples<'_, '_, '_> {
         time: f64,
         state: &[f64],
         rate: bool,
-        observe: impl FnOnce(&PreparedPhsParameterDirection<'_, '_>, &Scratch, &Scratch) -> Result<f64>,
+        evaluate_loss: bool,
+        observe: impl FnOnce(
+            &PreparedPhsParameterDirection<'_, '_>,
+            &Scratch,
+            &Scratch,
+            Option<&DissipationParameterEvaluation<'_>>,
+        ) -> Result<f64>,
         out: &mut f64,
     ) -> bool {
-        match self.sample(time, state, rate, observe) {
+        match self.sample(time, state, rate, evaluate_loss, observe) {
             Ok(value) if value.is_finite() => {
                 *out = value;
                 true

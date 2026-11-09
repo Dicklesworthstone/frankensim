@@ -10,6 +10,7 @@ use fs_orbit::sensitivity::{
     ForcedSensitivityError, PreparedForcedSensitivity,
 };
 use fs_orbit::{HbOrbit, HbScales};
+use fs_phs::harmonic::equilibrium::DissipationParameterAction;
 
 mod direction;
 mod power;
@@ -49,8 +50,8 @@ impl From<fs_phs::PhsError> for ParametricError {
 
 impl<'a> ParametricHamiltonian<'a> {
     /// Prepare exact implicit derivatives of the ORIGINAL pumped HB response.
-    /// The full tangent is `(J-R)*(H0_xx+Q(theta))`, including every nonlinear
-    /// mode and explicit memory state. The existing fs-orbit owner reevaluates
+    /// The full tangent is `(J-R)*(H0_xx+Q)-D_x-D_e*(H0_xx+Q)` when nonlinear
+    /// loss is attached, including every original memory state. The owner reevaluates
     /// the base and both independent AFT Jacobians before factoring once.
     ///
     /// The complete original H0 tangent is required; use `new_analytic` when
@@ -61,9 +62,10 @@ impl<'a> ParametricHamiltonian<'a> {
     /// before numerical preparation. Already-owned source storage and callback
     /// work retain the generic sensitivity contract's exclusions; source
     /// dimensions/bandwidth remain subject to this module's hard limits.
-    /// Nonlinear internal resistance is currently refused: this parameter
-    /// direction contract does not yet supply the independent original D_p.
-    /// Omitting that chain would produce an incomplete physical derivative.
+    /// Attached nonlinear loss reserves another 4*n scalars for the original
+    /// loss parameter chain. Ordinary parameter queries hold its constitutive
+    /// law fixed while retaining D_e*e_p; the explicit loss-direction methods
+    /// also accept the independent fixed-state/fixed-effort D_p.
     pub fn prepare_sensitivity(
         &self,
         orbit: &HbOrbit,
@@ -73,11 +75,6 @@ impl<'a> ParametricHamiltonian<'a> {
     ) -> Result<PreparedParametricSensitivity<'_, 'a>> {
         if cancelled() {
             return Err(ForcedSensitivityError::Cancelled.into());
-        }
-        if self.dissipation.is_some() {
-            return Err(ParametricError::Invalid(
-                "nonlinear internal resistance requires a complete original dissipation parameter direction",
-            ));
         }
         let harmonics = orbit
             .coeffs
@@ -93,7 +90,8 @@ impl<'a> ParametricHamiltonian<'a> {
             self.system.state_dim() as u128,
             self.system.port_dim() as u128,
         );
-        let bytes = 8 * (2 * n * n + 3 * n + m)
+        let bytes = 8
+            * (2 * n * n + 3 * n + m + if self.dissipation.is_some() { 4 * n } else { 0 })
             + 16 * ((harmonics / self.periods).min(MAX_PARAMETRIC_HARMONICS) as u128 + 1);
         if bytes > controls.maximum_payload_bytes as u128 {
             return Err(ForcedSensitivityError::Budget {
@@ -104,16 +102,13 @@ impl<'a> ParametricHamiltonian<'a> {
             .into());
         }
         controls.maximum_payload_bytes -= bytes as usize;
-        self.source_refused.set(false);
+        self.reset_failure();
         let prepared =
             PreparedForcedSensitivity::new(&Adapter(self), orbit, controls, scales, &mut cancelled);
         if matches!(prepared, Err(ForcedSensitivityError::Cancelled)) {
             return Err(ForcedSensitivityError::Cancelled.into());
         }
-        if self.source_refused.get() {
-            return Err(ParametricError::SourceRefused);
-        }
-        let prepared = prepared?;
+        let prepared = self.finish(prepared.map_err(ParametricError::Sensitivity))?;
         if cancelled() {
             return Err(ForcedSensitivityError::Cancelled.into());
         }
@@ -133,7 +128,9 @@ impl PreparedParametricSensitivity<'_, '_> {
     /// Differentiate all original Fourier states under simultaneous material,
     /// matrix, pump, drive and prescribed-clock changes. At fixed phase,
     /// `ep=partial_p grad H0 + Qp*x` and the original pHS owner supplies
-    /// `(J-R)ep+(Jp-Rp)e+Gp*u+G*up`. The original sI clock column supplies
+    /// `(J-R)ep+(Jp-Rp)e+Gp*u+G*up-D_e*ep`. The constitutive loss law is
+    /// explicitly held fixed; use `solve_parameter_with_dissipation` for D_p.
+    /// The original sI clock column supplies
     /// `i*n*Omega_p*X_n`; Q and the drive gain no extra fixed-time phase term.
     /// Omega_p is the RESPONSE-chart clock derivative. On an over_periods(m)
     /// chart the original physical source clock therefore changes by m*Omega_p;
@@ -146,6 +143,21 @@ impl PreparedParametricSensitivity<'_, '_> {
         &mut self,
         chart: ForcedSensitivityDirection,
         direction: ParametricParameterDirection<'_>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ForcedOrbitSensitivity> {
+        self.solve_parameter_with_dissipation(chart, direction, None, cancelled)
+    }
+
+    /// Complete physical derivative including explicit nonlinear loss changes.
+    /// `dissipation` is partial_p D(x,e,p) at FIXED original state and effort.
+    /// None holds that constitutive law fixed. Its D_e*e_p chain is supplied
+    /// independently by the SAME loss tangent and added exactly once. A direct
+    /// loss direction without an attached original loss law refuses.
+    pub fn solve_parameter_with_dissipation<'d>(
+        &mut self,
+        chart: ForcedSensitivityDirection,
+        direction: ParametricParameterDirection<'d>,
+        dissipation: Option<&'d DissipationParameterAction<'d>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ForcedOrbitSensitivity> {
         if cancelled() {
@@ -156,6 +168,7 @@ impl PreparedParametricSensitivity<'_, '_> {
             self.source,
             self.prepared.harmonics(),
             direction,
+            dissipation,
             |samples| {
                 self.prepared.solve_split_direction(
                     chart,
