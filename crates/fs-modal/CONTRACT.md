@@ -2336,3 +2336,15 @@ Work remains O(n^2), with constant scratch, input admission and row cancellation
 Focused native regressions compare a complex moving-field/matrix polynomial,
 extreme coefficient and gyroscopic scales, direct and mixed loss directions,
 malformed inputs and cancellation/replay; the existing curvature tests remain.
+
+### First-order quadratic physical work for resonance refinement
+
+`harmonic_quadratic_power_derivative_with_cancel` observes original
+`Re(v^H sym(C) v)/2` and its complete frequency slope without requiring a
+curvature field or evaluating second-order work. It shares the higher-jet
+owner's original symmetric coefficient pairs and normalized double-double
+products, preserving gyroscopic cancellation, weak loss and subnormal
+coefficients. Signed forms retain their physical sign. First-order results
+remain available when an unused second derivative would overflow. The
+allocation-free traversal uses constant scratch and O(n^2) work, with bounded
+row cancellation checks and no partial result after refusal.
