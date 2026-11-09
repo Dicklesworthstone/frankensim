@@ -34,6 +34,11 @@ mod unbalance;
 pub use unbalance::{PreparedRotorUnbalance, RotorUnbalanceKinematicsCotangent};
 mod ramp;
 pub use ramp::{RigidRotorSpinRampStep, RotorSpinDriveAxis, RotorSpinRamp, RotorSpinState};
+mod spin_drive;
+pub use spin_drive::{
+    RigidRotorCurrentMotor, RigidRotorCurrentStep, RotorSpinCurrentCommand, RotorSpinDriveControl,
+    RotorSpinDriveError,
+};
 
 /// Bound on supplied bearing and unbalance stations per rigid rotor query.
 pub const MAX_ROTOR_STATIONS: usize = 256;

@@ -1027,6 +1027,37 @@ analytic accelerating/braking/reversing unbalance translation, native steady
 equivalence, independent bearing-point work and acceleration exchange, and
 invalid input or final-poll cancellation with exact retry.
 
+`RigidRotor::current_spin_motor` connects a balanced axisymmetric rotor's
+original polar inertia to the existing finite-current electrical drive. The
+shaft angle is its own physical coordinate, never one of the four lateral
+translations/tilts. Shaft-axis actuation must be selected explicitly; nominal
+stationary-axis actuation refuses. Nonnegative authored shaft drag and external
+shaft torque enter the original scalar momentum equation. Native current,
+terminal-voltage, back-EMF, speed-domain and electrical-source limits determine
+the accepted current and actual spin acceleration, including stall and reversal.
+
+The resulting native midpoint spin enters the original full lateral
+`C + Omega G` operator. Native shaft displacement supplies continuous phase.
+There is no prescribed acceleration, copied inertia parameter, eigensolve or
+second integration kernel. Scalar and four-coordinate preparations remain
+bounded; the smooth trajectory is second order under time refinement.
+
+Spin kinetic storage, nonnegative shaft-drag work, signed lateral bearing work,
+gyroscopic work, independent external mechanical work, electrical draw/return,
+winding heat and bridge heat retain their original owners and meanings. Their
+combined original energy balance must satisfy the authored power allowance
+before any complete state is returned. Invalid lateral input or a final
+cancellation also publishes no partial electrical debit or spin advance.
+
+This owner retains the physical small-tilt truncation and authored bearing
+coefficients. Residual unbalance is not admitted without its reciprocal spin
+reaction; finite inductance, saturation and thermal changes are not inferred.
+`tests/rigid_rotor_spin_drive.rs` exercises analytic power-limited acceleration
+using the actual polar inertia, changing-spin free whirl and second-order
+refinement, stall heating, reversal/regeneration, passive shaft drag, exact
+native bearing-operator reuse, unsupported-axis/coordinate/domain refusals and
+late cancellation with deterministic retry.
+
 Focused regressions use independent Jeffcott amplitude/phase, gyroscopic circular
 mode splitting, dense coordinate congruence, cross-coupled/active work and
 original force residuals. A manufactured nonsymmetric rotor has an exact
