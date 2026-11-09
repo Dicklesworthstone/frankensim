@@ -19,9 +19,12 @@
 //! Equal atmospheres simplify to `ng_abs=ng_air*ng_rel`. These are narrowband
 //! group indices, not a pulse-reshaping model or a glass temperature correction.
 
-use super::{DielectricError, DielectricIor, SellmeierIor, admitted_dielectric_index};
+use super::{DielectricError, DielectricIor};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_material::air_refraction::{AirRefractiveSample, CiddorAir, WAVELENGTH_RANGE_NM};
+use fs_material::catalog_refraction::{
+    AirRelativeSellmeier, CatalogRefractionError, CatalogWavelength, CiddorAirState,
+};
 
 /// Homogeneous atmospheric phase/group law at an explicitly frozen state.
 /// Pressure is absolute Pa, temperature K, and water content is mole fraction
@@ -103,12 +106,10 @@ pub enum AirRelativeWavelength {
 /// authentication and glass thermo-optic evolution remain separate concerns.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AirRelativeSellmeierIor {
-    // Reuse the validated oscillator arithmetic in the explicit source
-    // coordinate; this private value is not exposed as an absolute glass law.
-    relative: SellmeierIor,
+    // The lower material owner is shared with native electromagnetic consumers.
+    catalog: AirRelativeSellmeier,
     reference_air: CiddorAirIor,
     wavelength_coordinate: AirRelativeWavelength,
-    vacuum_bounds_nm: (f64, f64),
 }
 
 impl AirRelativeSellmeierIor {
@@ -124,51 +125,27 @@ impl AirRelativeSellmeierIor {
         reference_air: CiddorAirIor,
         wavelength_coordinate: AirRelativeWavelength,
     ) -> Result<Self, DielectricError> {
-        let relative =
-            SellmeierIor::try_new_in_band(strengths, resonances_um2, source_wavelength_bounds_nm)?;
-        let mut candidate = Self {
-            relative,
+        let coordinate = match wavelength_coordinate {
+            AirRelativeWavelength::Vacuum => CatalogWavelength::Vacuum,
+            AirRelativeWavelength::Air(air) => CatalogWavelength::Air(catalog_air(air)?),
+        };
+        let catalog = AirRelativeSellmeier::try_new(
+            strengths,
+            resonances_um2,
+            source_wavelength_bounds_nm,
+            catalog_air(reference_air)?,
+            coordinate,
+        )
+        .map_err(catalog_error)?;
+        Ok(Self {
+            catalog,
             reference_air,
             wavelength_coordinate,
-            vacuum_bounds_nm: reference_air.wavelength_bounds_nm(),
-        };
-        let (source_lo, source_hi) = source_wavelength_bounds_nm;
-        let (air_lo, air_hi) = reference_air.wavelength_bounds_nm();
-        let (lo, hi) = match wavelength_coordinate {
-            AirRelativeWavelength::Vacuum => (source_lo.max(air_lo), source_hi.min(air_hi)),
-            AirRelativeWavelength::Air(_) => {
-                let mapped_lo = candidate.source_wavelength(air_lo)?.0;
-                let mapped_hi = candidate.source_wavelength(air_hi)?.0;
-                if source_hi < mapped_lo || source_lo > mapped_hi {
-                    return Err(DielectricError::InvalidWavelength);
-                }
-                (
-                    if source_lo <= mapped_lo {
-                        air_lo
-                    } else {
-                        candidate.inverse_air_wavelength(source_lo, true)?
-                    },
-                    if source_hi >= mapped_hi {
-                        air_hi
-                    } else {
-                        candidate.inverse_air_wavelength(source_hi, false)?
-                    },
-                )
-            }
-        };
-        if lo > hi {
-            return Err(DielectricError::InvalidWavelength);
-        }
-        candidate.vacuum_bounds_nm = (lo, hi);
-        // Both factors are positive and nonincreasing on the admitted bands;
-        // lambda_vac/n_air is increasing. Endpoint admission covers this product.
-        candidate.eval(lo)?;
-        candidate.eval(hi)?;
-        Ok(candidate)
+        })
     }
 
     pub const fn coefficients(&self) -> ([f64; 3], [f64; 3]) {
-        self.relative.coefficients()
+        self.catalog.coefficients()
     }
     pub const fn reference_air(&self) -> &CiddorAirIor {
         &self.reference_air
@@ -178,45 +155,23 @@ impl AirRelativeSellmeierIor {
     }
     /// Source support in the explicitly declared fit coordinate.
     pub const fn source_wavelength_bounds_nm(&self) -> (f64, f64) {
-        self.relative.wavelength_bounds_nm()
+        self.catalog.source_wavelength_bounds_nm()
     }
     /// Effective absolute-vacuum support consumed by all native optical paths.
     pub const fn wavelength_bounds_nm(&self) -> (f64, f64) {
-        self.vacuum_bounds_nm
+        self.catalog.wavelength_bounds_nm()
     }
     pub fn eval(&self, wavelength_nm: f64) -> Result<f64, DielectricError> {
-        let (coordinate, air, _) = self.inputs(wavelength_nm)?;
-        let index = self.relative.eval(coordinate)? * air.phase_index;
-        if !admitted_dielectric_index(index) {
-            return Err(DielectricError::InvalidIor);
-        }
-        Ok(index)
+        self.catalog.eval(wavelength_nm).map_err(catalog_error)
     }
     pub fn group_index(&self, wavelength_nm: f64) -> Result<f64, DielectricError> {
-        let (coordinate, air, coordinate_air) = self.inputs(wavelength_nm)?;
-        let relative_group = self.relative.group_index(coordinate)?;
-        let group = match self.wavelength_coordinate {
-            AirRelativeWavelength::Vacuum => {
-                let relative_phase = self.relative.eval(coordinate)?;
-                relative_group * air.phase_index
-                    + relative_phase * (air.group_index - air.phase_index)
-            }
-            AirRelativeWavelength::Air(law) if law == self.reference_air => {
-                relative_group * air.group_index
-            }
-            AirRelativeWavelength::Air(_) => {
-                let relative_phase = self.relative.eval(coordinate)?;
-                let coordinate_air = coordinate_air.expect("air wavelength sample");
-                air.group_index * relative_phase
-                    + (air.phase_index / coordinate_air.phase_index)
-                        * coordinate_air.group_index
-                        * (relative_group - relative_phase)
-            }
-        };
-        if !group.is_finite() || group <= 0.0 {
-            return Err(DielectricError::InvalidIor);
-        }
-        Ok(group)
+        self.catalog
+            .group_index(wavelength_nm)
+            .map_err(catalog_error)
+    }
+    /// The exact shared material law; its derivatives retain both atmospheres.
+    pub const fn material_law(&self) -> &AirRelativeSellmeier {
+        &self.catalog
     }
     pub fn content_identity(&self) -> ContentHash {
         let mut hash = DomainHasher::new("fs-render:air-relative-sellmeier:v1");
@@ -235,65 +190,17 @@ impl AirRelativeSellmeierIor {
         }
         hash.finalize()
     }
+}
 
-    fn admit_wavelength(&self, wavelength_nm: f64) -> Result<(), DielectricError> {
-        let (lo, hi) = self.vacuum_bounds_nm;
-        if !wavelength_nm.is_finite() || !(lo..=hi).contains(&wavelength_nm) {
-            return Err(DielectricError::InvalidWavelength);
-        }
-        Ok(())
-    }
+fn catalog_air(air: CiddorAirIor) -> Result<CiddorAirState, DielectricError> {
+    CiddorAirState::try_new(air.composition, air.temperature_k, air.pressure_pa)
+        .map_err(|_| DielectricError::InvalidIor)
+}
 
-    fn inputs(
-        &self,
-        vacuum_nm: f64,
-    ) -> Result<(f64, AirRefractiveSample, Option<AirRefractiveSample>), DielectricError> {
-        self.admit_wavelength(vacuum_nm)?;
-        let (coordinate, coordinate_air) = self.source_wavelength(vacuum_nm)?;
-        let index_air = match self.wavelength_coordinate {
-            AirRelativeWavelength::Air(law) if law == self.reference_air => {
-                coordinate_air.expect("air wavelength sample")
-            }
-            _ => self.reference_air.sample(vacuum_nm)?,
-        };
-        Ok((coordinate, index_air, coordinate_air))
-    }
-
-    fn source_wavelength(
-        &self,
-        vacuum_nm: f64,
-    ) -> Result<(f64, Option<AirRefractiveSample>), DielectricError> {
-        match self.wavelength_coordinate {
-            AirRelativeWavelength::Vacuum => Ok((vacuum_nm, None)),
-            AirRelativeWavelength::Air(law) => {
-                let air = law.sample(vacuum_nm)?;
-                Ok((vacuum_nm / air.phase_index, Some(air)))
-            }
-        }
-    }
-
-    // n_air is positive with normal dispersion in the source domain, hence
-    // d(lambda_vac/n_air)/d(lambda_vac)=ng_air/n_air² > 0. A bounded bisection
-    // finds the inward representable band edge once, never during ray queries.
-    fn inverse_air_wavelength(&self, source_nm: f64, lower: bool) -> Result<f64, DielectricError> {
-        let (mut lo, mut hi) = self.reference_air.wavelength_bounds_nm();
-        for _ in 0..64 {
-            if lo.next_up() >= hi {
-                break;
-            }
-            let middle = lo + 0.5 * (hi - lo);
-            let mapped = self.source_wavelength(middle)?.0;
-            if if lower {
-                mapped < source_nm
-            } else {
-                mapped <= source_nm
-            } {
-                lo = middle;
-            } else {
-                hi = middle;
-            }
-        }
-        Ok(if lower { hi } else { lo })
+fn catalog_error(error: CatalogRefractionError) -> DielectricError {
+    match error {
+        CatalogRefractionError::InvalidWavelength => DielectricError::InvalidWavelength,
+        _ => DielectricError::InvalidIor,
     }
 }
 

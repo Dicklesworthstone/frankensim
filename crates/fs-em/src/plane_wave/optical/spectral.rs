@@ -3,6 +3,7 @@
 use super::{ReflectionError, VACUUM_SPEED_M_S, dispersion, positive};
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::{
+    catalog_refraction::AirRelativeSellmeier,
     field_storage::{FieldStorageError, linear_magnetic_permeability},
     state_point::{
         ResolvedMaterialStatePoint, SpectralComplexIndexStatePoint, SpectralConductorStatePoint,
@@ -25,6 +26,13 @@ pub enum SpectralOpticalSource<'a> {
     TabulatedDielectric(&'a SpectralTabulatedDielectricStatePoint),
     /// Original analytic coefficients with independently supported intensity loss.
     DielectricSellmeier(&'a SpectralSellmeierStatePoint),
+    /// Explicit lossless catalog approximation with its original reference and
+    /// wavelength atmospheres. The separate magnetic source owns only mu;
+    /// reference-air conditions do not establish the actual glass state.
+    LosslessAirRelativeSellmeier {
+        law: &'a AirRelativeSellmeier,
+        magnetic: &'a ResolvedMaterialStatePoint,
+    },
 }
 
 impl<'a> From<&'a SpectralOpticalStatePoint> for SpectralOpticalSource<'a> {
@@ -48,6 +56,7 @@ impl<'a> SpectralOpticalSource<'a> {
             Self::Conductor(value) => value.resolved(),
             Self::TabulatedDielectric(value) => value.resolved(),
             Self::DielectricSellmeier(value) => value.resolved(),
+            Self::LosslessAirRelativeSellmeier { magnetic, .. } => magnetic,
         }
     }
 
@@ -55,14 +64,17 @@ impl<'a> SpectralOpticalSource<'a> {
         match self {
             Self::ComplexIndex(value) => Some(value),
             Self::Conductor(value) => Some(value.complex_index()),
-            Self::TabulatedDielectric(_) | Self::DielectricSellmeier(_) => None,
+            Self::TabulatedDielectric(_) | Self::DielectricSellmeier(_)
+            | Self::LosslessAirRelativeSellmeier { .. } => None,
         }
     }
 }
 
 /// Original analytic or piecewise source dispersion and finite-band absorption.
 ///
-/// Scalar absolute permeability MUST belong to the same complete snapshot.
+/// Scalar absolute permeability MUST belong to the same complete snapshot for
+/// material-card sources. An explicit lossless relative catalog law instead
+/// retains an independently selected, unconditioned magnetic source.
 /// The positive maximum knot span is authored in vacuum metres; it admits
 /// absorption/index-table interpolation, not analytic Sellmeier evaluation,
 /// unresolved resonances or an error certificate. There is
@@ -82,6 +94,13 @@ impl<'a> SpectralOpticalResponse<'a> {
         source: SpectralOpticalSource<'a>,
         maximum_knot_span_m: f64,
     ) -> Result<Self, ReflectionError> {
+        if let SpectralOpticalSource::LosslessAirRelativeSellmeier { magnetic, .. } = source {
+            if magnetic.query_point().into_iter().next().is_some() {
+                return Err(ReflectionError::Invalid(
+                    "relative catalog optics requires an unconditioned magnetic source; reference air is not the glass state",
+                ));
+            }
+        }
         if !maximum_knot_span_m.is_finite() || maximum_knot_span_m <= 0.0 {
             return Err(ReflectionError::Invalid(
                 "spectral optical interpolation needs a positive finite maximum knot span in metres",
@@ -152,6 +171,20 @@ impl<'a> SpectralOpticalResponse<'a> {
     /// tabulated n and intensity alpha retain their interpolation before
     /// k=alpha*lambda_vac/(4*pi), preserving the original loss spectrum.
     pub fn complex_index(self, omega_rad_s: f64) -> Result<C64, ReflectionError> {
+        if let SpectralOpticalSource::LosslessAirRelativeSellmeier { law, .. } = self.source {
+            let (lo, hi) = law.wavelength_bounds_nm();
+            let wavelength = dispersion::wavelength_from_frequency(
+                omega_rad_s,
+                super::FREQUENCY_WAVELENGTH_NM,
+                [lo, hi],
+            )
+            .ok_or(ReflectionError::Invalid(
+                "wave frequency is outside the original absolute catalog band",
+            ))?;
+            return law.eval(wavelength).map(C64::from_re).map_err(|_| {
+                ReflectionError::Invalid("original absolute catalog phase index is unrepresentable")
+            });
+        }
         if let Some(index) = self.source.complex_index() {
             let wavelength = dispersion::wavelength_from_frequency(
                 omega_rad_s, super::FREQUENCY_WAVELENGTH_NM, index.wavelength_bounds_nm(),
@@ -260,6 +293,11 @@ impl<'a> SpectralOpticalResponse<'a> {
                     .at_query_point(card, point)
                     .map_err(FieldStorageError::from)?,
             ),
+            SpectralOpticalSource::LosslessAirRelativeSellmeier { .. } => {
+                return Err(ReflectionError::Invalid(
+                    "an external relative catalog law cannot be refreshed from unrelated material-card claims",
+                ));
+            }
         };
         let refreshed = RefreshedSpectralOpticalSource {
             source,
@@ -287,6 +325,10 @@ impl<'a> SpectralOpticalResponse<'a> {
                     SpectralOpticalSource::DielectricSellmeier(a),
                     SpectralOpticalSource::DielectricSellmeier(b),
                 ) => core::ptr::eq(a, b),
+                (
+                    SpectralOpticalSource::LosslessAirRelativeSellmeier { law: a, magnetic: am },
+                    SpectralOpticalSource::LosslessAirRelativeSellmeier { law: b, magnetic: bm },
+                ) => core::ptr::eq(a, b) && core::ptr::eq(am, bm),
                 _ => false,
             }
     }

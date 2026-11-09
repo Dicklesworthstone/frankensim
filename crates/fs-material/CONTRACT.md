@@ -22644,3 +22644,10 @@ rate law, empty-tank filling, selective vapor vent, jet energy, heat or shaft wo
 Focused regressions specify two-phase discharge and actual endpoint U closure,
 dilute analytic blowdown/filling with changing composition, portion subdivision,
 large energy/entropy datums and atomic late refusal/cancellation.
+
+
+## Shared air-relative catalog-glass refraction
+
+`catalog_refraction::AirRelativeSellmeier` owns the original relative Sellmeier coefficients, full fitted band, index-reference Ciddor atmosphere and independently declared wavelength-coordinate atmosphere. It returns absolute vacuum phase/group index and analytic scaled ordinary wavelength derivatives, including both atmospheric product and coordinate-chain curvature terms. Complete source-band admission rejects active poles before intersecting the mapped air support. Boundary inversion occurs once during preparation; bounded, allocation-free queries do not fit coefficients or solve a wavelength root. Additional catalog curvature is evaluated only by the requested jet.
+
+Three original-source tests passed against independent phase/group/curvature controls, distinct atmospheric conventions, source-band and constant-relative limits. The shared owner supports both LUMEN and native Maxwell consumers without reversing layer dependencies. It supplies no absorption measurement, glass temperature evolution, source authentication or causal broadband pulse certificate.

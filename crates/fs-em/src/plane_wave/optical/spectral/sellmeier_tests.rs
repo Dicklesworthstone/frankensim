@@ -13,6 +13,10 @@ use fs_material::state_point::{
     VISIBLE_DIELECTRIC_SELLMEIER_B_PROPERTIES, VISIBLE_DIELECTRIC_SELLMEIER_C_M2_PROPERTIES,
     resolve_material_state_point,
 };
+use fs_material::{
+    air_refraction::CiddorAir,
+    catalog_refraction::{CatalogWavelength, CiddorAirState},
+};
 use fs_qty::{Dims, QuantitySpec, Temperature};
 
 fn point(temperature_k: f64) -> QueryPoint {
@@ -129,6 +133,150 @@ fn near(actual: f64, expected: f64, relative: f64) {
         (actual - expected).abs() <= relative * expected.abs().max(f64::MIN_POSITIVE),
         "{actual:.17e} != {expected:.17e}"
     );
+}
+
+fn catalog_magnetic(temperature: Option<f64>) -> ResolvedMaterialStatePoint {
+    let mut property = claim(
+        MAGNETIC_PERMEABILITY_PROPERTY,
+        QuantitySpec::dimensional(MAGNETIC_PERMEABILITY_DIMS),
+        1.3e-6,
+        1.3e-6,
+    );
+    property.value = PropertyValue::Scalar {
+        value: 1.3e-6,
+        dims: MAGNETIC_PERMEABILITY_DIMS,
+    };
+    property.validity = ValidityDomain::unconstrained();
+    property.interpolation = InterpolationPolicy::ConstantWithinValidity;
+    let mut claims = ClaimSet::new();
+    claims.insert_claim(property).unwrap();
+    let card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "authored catalog magnetic source".into(),
+            phase: "solid".into(),
+            process: "independent scalar permeability".into(),
+            revision: 0,
+        },
+        claims,
+        vec![],
+    )
+    .unwrap();
+    resolve_material_state_point(
+        &card,
+        &temperature.map_or_else(QueryPoint::new, point),
+        &[ScalarPropertyRequirement::try_new(
+            MAGNETIC_PERMEABILITY_PROPERTY,
+            MAGNETIC_PERMEABILITY_DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        )
+        .unwrap()],
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap()
+}
+
+#[test]
+fn g1_original_relative_catalog_phase_group_and_gvd_reach_native_em() {
+    let reference =
+        CiddorAirState::try_new(CiddorAir::try_new(0.012, 650.0).unwrap(), 293.15, 101_330.0)
+            .unwrap();
+    let coordinate_air =
+        CiddorAirState::try_new(CiddorAir::try_new(0.0, 450.0).unwrap(), 288.15, 101_325.0)
+            .unwrap();
+    let magnetic = catalog_magnetic(None);
+    for coordinate in [
+        CatalogWavelength::Vacuum,
+        CatalogWavelength::Air(reference),
+        CatalogWavelength::Air(coordinate_air),
+    ] {
+        let law = AirRelativeSellmeier::try_new(
+            [1.03961212, 0.231792344, 1.01046945],
+            [0.00600069867, 0.0200179144, 103.560653],
+            (320.0, 1800.0),
+            reference,
+            coordinate,
+        )
+        .unwrap();
+        let source = SpectralOpticalSource::LosslessAirRelativeSellmeier {
+            law: &law,
+            magnetic: &magnetic,
+        };
+        let response = SpectralOpticalResponse::try_new(source, 1e-7).unwrap();
+        assert!(core::ptr::eq(response.material(), &magnetic));
+        for lambda in [450.0, 550.0, 1550.0] {
+            let omega = super::super::FREQUENCY_WAVELENGTH_NM / lambda;
+            let expected = law.refractive_index_jet(lambda).unwrap();
+            let index = response.complex_index(omega).unwrap();
+            near(index.re, expected.phase_index, 2e-15);
+            assert_eq!(index.im, 0.0);
+            let bulk = crate::plane_wave::DielectricResponse::SpectralOptical(response)
+                .bulk_dispersion(omega)
+                .unwrap();
+            near(
+                bulk.group_slowness_s_m() * VACUUM_SPEED_M_S,
+                expected.group_index,
+                2e-15,
+            );
+            near(
+                bulk.group_velocity_dispersion_s2_m() * omega * VACUUM_SPEED_M_S,
+                expected.scaled_wavelength_derivatives[1],
+                3e-12,
+            );
+            near(
+                bulk.permittivity_f_m().re * 1.3e-6 * VACUUM_SPEED_M_S.powi(2),
+                expected.phase_index.powi(2),
+                3e-15,
+            );
+            assert_eq!(bulk.wavenumber_second_derivative_s2_m().im, 0.0);
+            assert_eq!(
+                bulk.propagation(1.0).unwrap().log_amplitude_derivative_s,
+                0.0
+            );
+        }
+        let (lo, hi) = law.wavelength_bounds_nm();
+        for lambda in [lo, hi] {
+            let omega = super::super::FREQUENCY_WAVELENGTH_NM / lambda;
+            assert!(response.complex_index(omega).is_ok());
+            assert!(response.frequency_jet(omega).is_err());
+        }
+        for omega in [
+            (super::super::FREQUENCY_WAVELENGTH_NM / hi).next_down(),
+            (super::super::FREQUENCY_WAVELENGTH_NM / lo).next_up(),
+        ] {
+            assert!(response.complex_index(omega).is_err());
+        }
+        let same = SpectralOpticalResponse::try_new(source, 1e-7).unwrap();
+        assert!(response.same_source(same));
+        let copied_law = law;
+        assert!(
+            !response.same_source(
+                SpectralOpticalResponse::try_new(
+                    SpectralOpticalSource::LosslessAirRelativeSellmeier {
+                        law: &copied_law,
+                        magnetic: &magnetic
+                    },
+                    1e-7
+                )
+                .unwrap()
+            )
+        );
+        assert!(
+            response
+                .at_query_point(&card(true, false), &point(300.0))
+                .is_err()
+        );
+        let conditioned = catalog_magnetic(Some(reference.temperature_k()));
+        assert!(
+            SpectralOpticalResponse::try_new(
+                SpectralOpticalSource::LosslessAirRelativeSellmeier {
+                    law: &law,
+                    magnetic: &conditioned
+                },
+                1e-7
+            )
+            .is_err()
+        );
+    }
 }
 
 #[test]

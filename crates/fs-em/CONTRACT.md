@@ -7723,3 +7723,10 @@ Focused G1/G3/G0 controls cover arbitrary-axis elliptical fields and Maxwell
 continuity, an independent matched-isotropic circular/unpolarized limit,
 complex unitary factorization invariance, opposite-phase independent factors,
 layer heat, darkness, invalid geometry, factor budgets and cancellation.
+
+
+## Original air-relative catalog glass in Maxwell transport
+
+`SpectralOpticalSource::LosslessAirRelativeSellmeier` borrows the shared material catalog law and an explicitly selected scalar magnetic source. The original `SpectralOpticalResponse` supplies absolute complex index with zero imaginary part, SI permittivity and existing interface/layer consumers. Its frequency jet converts the complete analytic ordinary wavelength curvature through the existing bulk-dispersion machinery, retaining group delay and group-velocity dispersion. Derivatives require an interior source frequency; monochromatic queries retain inclusive mapped support.
+
+The magnetic source must be unconditioned: the catalog's reference-air temperature and pressure do not establish the actual glass state. Refresh through unrelated material-card claims refuses explicitly. This source is an authored lossless approximation, not measured zero absorption or a causal time-domain model. Three shared material controls and five renderer-consumer controls passed. The native EM phase/group/GVD, SI permeability, exact-band and source-ownership regression is authored and signature-reviewed but remains unexecuted in this environment.

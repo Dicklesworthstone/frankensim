@@ -128,6 +128,8 @@ pub mod thermal;
 pub mod thermo_optic;
 /// Original NIST Ciddor atmospheric-air dispersion and pressure/temperature response.
 pub mod air_refraction;
+/// Absolute catalog-glass dispersion with explicit reference and coordinate atmospheres.
+pub mod catalog_refraction;
 /// Original NASA CHARMS Corning 7980 silica phase/group and thermal refraction.
 pub mod silica_refraction;
 /// Source-line Corning 7980 stress birefringence on original Cauchy stress.

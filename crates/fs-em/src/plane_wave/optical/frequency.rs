@@ -252,6 +252,20 @@ pub(super) fn spectral(
     scale: f64,
 ) -> Result<OpticalFrequencyJet> {
     let source = response.source();
+    if let SpectralOpticalSource::LosslessAirRelativeSellmeier { law, .. } = source {
+        let (lo, hi) = law.wavelength_bounds_nm();
+        let wavelength = interior(omega, FREQUENCY_WAVELENGTH_NM, [lo, hi])?;
+        let sample = law.refractive_index_jet(wavelength).map_err(|_| {
+            invalid("original absolute catalog spectral derivatives are unrepresentable")
+        })?;
+        return finish(
+            C64::from_re(sample.phase_index),
+            scale,
+            C64::from_re(sample.scaled_wavelength_derivatives[0]),
+            C64::from_re(sample.scaled_wavelength_derivatives[1]),
+            C64::from_re(sample.group_index),
+        );
+    }
     let complex = match source {
         SpectralOpticalSource::ComplexIndex(value) => Some(value),
         SpectralOpticalSource::Conductor(value) => Some(value.complex_index()),
