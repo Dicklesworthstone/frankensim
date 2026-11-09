@@ -132,13 +132,20 @@ pub(super) fn advect(
         }
     }
     let mut coo = Coo::new(n, n);
-    for i in 0..n {
+    for (&location, &i) in &index {
         let supplied = old[i] + incoming[i];
         let removed = new[i] + outgoing[i];
+        // A nearly empty converting source can receive routes represented by
+        // subtracting O(density) donor inventories. The native conversion has
+        // already admitted its measured remainder at that density scale.
+        // Retain only that source's actual remainder, not a global allowance.
+        let mass_roundoff =
+            2048.0 * f64::EPSILON * supplied.max(removed) + trace.conversion_roundoff_at(location);
         if !supplied.is_finite()
             || !removed.is_finite()
             || removed <= 0.0
-            || (supplied - removed).abs() > 2048.0 * f64::EPSILON * supplied.max(removed)
+            || !mass_roundoff.is_finite()
+            || (supplied - removed).abs() > mass_roundoff
         {
             return Err(Error::Invalid(
                 "native cell mass routes do not close to roundoff",
@@ -224,6 +231,9 @@ pub(super) fn advect(
         },
     ))
 }
+
+#[cfg(test)]
+mod conversion_roundoff_tests;
 
 #[cfg(test)]
 mod tests {

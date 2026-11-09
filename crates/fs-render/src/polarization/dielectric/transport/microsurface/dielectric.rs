@@ -29,11 +29,7 @@ pub mod connection;
 pub enum SmithDielectricError {
     Geometry(SmithError),
     Beam(BeamError),
-    FacetLimit {
-        facet_events: u32,
-    },
-    /// Fixed-direction evaluation needs null-tail sampling at matched indices.
-    UnsupportedMixedMeasure,
+    FacetLimit { facet_events: u32 },
     Cancelled,
 }
 impl From<SmithError> for SmithDielectricError {

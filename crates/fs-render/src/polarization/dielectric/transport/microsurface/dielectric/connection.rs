@@ -17,10 +17,12 @@
 //! remains with its radiometric owner. No stochastic value belongs in a
 //! nonlinear MIS weight.
 //!
-//! Equal-index coated rough surfaces mix continuous reflection and a null
-//! transmission atom. Fixed-direction evaluation of their null-only tails is
-//! not provided here: the explicit capability query excludes them and direct
-//! calls refuse. Their complete original path sampler remains available.
+//! Equal-index coated rough surfaces mix continuous scattering and a null
+//! transmission atom. Their continuous component connects at the final facet
+//! reflection, then samples all subsequent null transmissions. The atom remains
+//! exclusively with the original path sampler, never in this per-steradian
+//! response. The continuous-only capability query deliberately excludes mixed
+//! laws so a caller cannot suppress their unsampled delta endpoint.
 
 use super::{
     BeamError, BeamMedium, DielectricCoatingStack, DielectricError, DielectricEvent,
@@ -36,7 +38,11 @@ use fs_exec::Cx;
 use fs_geom::Vec3;
 use fs_math::det;
 
-/// An all-order stochastic radiance BSDF contraction, intentionally without PDF.
+mod mixed;
+
+/// The continuous all-order radiance BSDF contraction, intentionally without
+/// PDF. An equal-index coated interface additionally has a straight-through
+/// atom, carried only by `sample_smith_dielectric`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SmithDielectricConnectionResponse {
     factor_per_sr: f64,
@@ -55,7 +61,7 @@ impl SmithDielectricConnectionResponse {
     pub const fn event(self) -> DielectricEvent {
         self.event
     }
-    /// Actual continuation collisions. Connections do not consume extra facets.
+    /// Actual continuation collisions, excluding any mixed-law null tails.
     pub const fn facet_events(self) -> u32 {
         self.facet_events
     }
@@ -73,10 +79,11 @@ impl SmithDielectricConnectionResponse {
 }
 
 impl PolarizedBeam {
-    /// Whether this interface has the fully continuous law supported by these
-    /// fixed-direction estimators. Equal-index rough films retain a mixed
-    /// measure and must keep path-only lighting, including endpoint weight one.
-    /// This query performs no random draws or Fresnel/coating solve.
+    /// Whether this interface's entire law is continuous. Equal-index rough
+    /// films return false even though fixed-direction evaluation supplies their
+    /// continuous component: a lighting partition must separately retain their
+    /// straight-through atom. This query performs no random draws or optical
+    /// coating solve.
     pub fn smith_dielectric_connection_is_continuous(
         self,
         opposite_medium: impl Into<BeamMedium>,
@@ -100,6 +107,13 @@ impl PolarizedBeam {
     /// even for reflection. Normals and body-bound anisotropy use the native
     /// sampler's conventions. Four independent variates follow that sampler's
     /// contract and must be independent of any sampled light direction.
+    ///
+    /// At matched indices the response contains every path with at least one
+    /// facet reflection, including later null transmissions, but excludes the
+    /// straight-through atom. The quartet callback then receives a consecutive
+    /// draw ordinal across both continuation and null-tail walks. The facet
+    /// budget bounds their TOTAL sampled collisions, not just one path; escape
+    /// draws do not consume facets. Exhaustion refuses the entire estimate.
     #[allow(clippy::too_many_arguments)]
     pub fn evaluate_smith_dielectric_connection(
         self,
@@ -199,10 +213,10 @@ impl PolarizedBeam {
             None => surface.interface(camera.wavelength_nm(), reverse),
         };
         let interfaces: [DielectricInterface<'_>; 2] = [interface(reverse)?, interface(!reverse)?];
-        if indices[0] == indices[1] {
-            if stack.is_some() || surface.coating().is_some() {
-                return Err(SmithDielectricError::UnsupportedMixedMeasure);
-            }
+        if indices[0] == indices[1]
+            && stack.is_none_or(|stack| stack.layer_count() == 0)
+            && surface.coating().is_none()
+        {
             return Ok(SmithDielectricConnectionResponse::zero(event));
         }
         if exit_cosine == 0.0 {
@@ -223,6 +237,21 @@ impl PolarizedBeam {
         let basis = [tangent, bitangent, normal];
         let model = SmithGgx::try_new(alphas[0], alphas[1])?;
         let outgoing = local(basis, source_direction);
+        if indices[0] == indices[1] {
+            return mixed::evaluate(
+                cx,
+                camera,
+                media,
+                indices[0],
+                interfaces,
+                model,
+                basis,
+                source_frame,
+                normalized_source,
+                settings,
+                samples,
+            );
+        }
         let log_eta = 2.0 * (det::ln(indices[0]) - det::ln(indices[source_side]));
         let mut sum = Sum::default();
         let mut beam = camera;

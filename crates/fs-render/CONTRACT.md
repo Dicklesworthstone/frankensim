@@ -13622,3 +13622,32 @@ addresses and blocks across four lanes, 64 source bindings, both area channels
 and three seeds (5,520 addressed draws). All three checks and the four raster
 adapter probes pass. This verifies address separation, not statistical or
 physical convergence of an image.
+
+### Matched-index rough-film continuous source connections
+
+The full Smith dielectric fixed-direction methods now evaluate the continuous
+part of rough coated interfaces with equal bulk phase index. Each non-atomic
+path is partitioned at its unique last facet reflection: native continuation
+samples its prefix, a forced reflection connects toward the source, and raw
+native Mueller transmission weights integrate later direction-preserving
+crossings. Film order, polarization frame, physical medium and complementary
+statistical height are retained. The zero-transmission suffix uses exact escape
+and the analytic first-height reflection term. Factored logarithmic optical
+power protects lossy tails before final positive summation.
+
+The straight-through atom remains exclusively in the original path sampler.
+The whole-law continuous capability query stays false for matched media,
+preserving area/environment endpoint accounting; point-fixture NEE uses the
+new continuous response. Neither response nor hidden-path density is a
+marginal PDF. Callback ordinals are consecutive across prefix and tail work.
+One shared facet cap bounds all sampled collisions, with at most twice that
+cap plus one draw, fixed storage, cancellation before each draw, and
+whole-estimate refusal on exhaustion.
+
+Five new G1/G3/G4 groups cover an analytic first reflection, independent
+131072-path-per-side polarized continuous/atom integrals, transmission
+reciprocity, compact/stack and frame covariance, polarization linearity,
+replay, shared budgets and cancellation. All 46 optical/math/Philox probe
+groups pass using native optical owners with explicit execution/vector/
+container/hash fixtures. This does not establish full native scene or
+resolved-lens convergence. Refs: frankensim-h7xu5.4 and frankensim-h7xu5.4.5.

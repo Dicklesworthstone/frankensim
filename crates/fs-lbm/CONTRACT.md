@@ -4703,3 +4703,27 @@ A focused native regression stages real momentum before closing-heat/final-cance
 refusal, checks unchanged finite walls and force buffers, then reproduces an exact
 retry. Coupled tests exercise both lattices and diffusion families. Pinned parsing
 and scoped diff checks passed; these tests were not compiled or executed here.
+
+## Native conversion roundoff in extensive thermal transport
+
+The mass-route trace carries the measured residual of each conservative VOF
+conversion only after the original donor-density-scaled admission succeeds.
+The absolute amount is attached to its converting source node and accumulated
+locally. Thermal mass closure adds that original allowance to its existing
+throughput-roundoff bound. An almost empty source therefore does not lose the
+roundoff scale of the finite donor inventories used to repay its conversion
+debt. No global mass allowance, unit floor, fictitious route or mass repair is
+introduced.
+
+Native mass transfers, momentum transport, source laws, matrix coefficients
+and solver arithmetic are unchanged. The shifted enthalpy equation retains
+its explicit `(supplied - removed) * reference` contribution, so admitting an
+existing mass residual does not silently remove its energy consequence.
+Unaccounted defects and wrong-node allowances continue to refuse.
+
+Focused original-source execution passes the existing four-tick partially
+filled stationary/moving-wall thermal regression unchanged. Two new tests
+check the reference-energy term at mass scales 2^-60, 1 and 2^60, local absolute
+accumulation, missing/wrong/insufficient allowances, larger defects and
+nonfinite/overflow refusal. This is focused native numerical validation, not a
+full Cargo feature-graph or repository-level gate.

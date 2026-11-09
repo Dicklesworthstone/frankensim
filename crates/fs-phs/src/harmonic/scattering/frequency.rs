@@ -3,7 +3,7 @@
 //! boundary exchange, never extra material dissipation in the observations.
 
 use super::{
-    C64, HarmonicError, HarmonicPortPower, ScatteringFactor, ScatteringModel, ScatteringResponse,
+    C64, HarmonicError, ScatteringFactor, ScatteringModel, ScatteringResponse,
     finite, invalid, poll,
 };
 use crate::harmonic::HarmonicFrequencyResponse;
@@ -127,10 +127,12 @@ impl ScatteringFactor<'_> {
             let p = wave.original_port;
             let incident = input_derivative.map_or(C64::ZERO, |values| values[p]);
             let outgoing = raw.output_derivative[p] - incident;
-            let incident_power_w =
-                2.0 * half_pair(wave.incident.scale(1.0 / wave.reference), incident)?;
-            let outgoing_power_w =
-                2.0 * half_pair(wave.outgoing.scale(1.0 / wave.reference), outgoing)?;
+            let incident_power_w = super::mixed::observe::wave_power_frequency(
+                wave.incident, incident, wave.reference,
+            )?;
+            let outgoing_power_w = super::mixed::observe::wave_power_frequency(
+                wave.outgoing, outgoing, wave.reference,
+            )?;
             let physical_power_w = port_power_derivative[p];
             let power_residual_w = incident_power_w - outgoing_power_w - physical_power_w;
             if !finite(outgoing)
@@ -276,8 +278,4 @@ impl ScatteringModel {
         }
         Ok(relative)
     }
-}
-
-fn half_pair(left: C64, right: C64) -> Result<f64, HarmonicError> {
-    Ok(HarmonicPortPower::from_peak(left, right)?.active_w)
 }

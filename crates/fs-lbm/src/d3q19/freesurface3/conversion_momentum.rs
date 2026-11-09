@@ -262,6 +262,9 @@ impl ConversionMomentum3 {
                 "conservative conversion mass defect exceeds local roundoff; refine",
             ));
         }
+        if let Some(trace) = transport {
+            trace.record_conversion_roundoff(MassLocation3::Cell(key, lane), remaining)?;
+        }
         self.report.absolute_mass_defect += remaining.abs();
         for d in 0..3 {
             self.report.absolute_momentum_defect[d] += (remaining * velocity[d]).abs();

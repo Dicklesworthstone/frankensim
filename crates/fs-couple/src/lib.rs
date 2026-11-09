@@ -226,6 +226,8 @@ pub mod piezoelectric;
 pub mod planar_induction;
 /// Finite-amplitude periodic regimes of complete nonlinear pHS ODEs via fs-orbit.
 pub mod phs_orbit;
+/// Actual heat, port-work and wave-flux resonance of complete pHS models.
+pub mod phs_power_resonance;
 /// Material-driven biased magnetostrictive coil/core motion on the shared stepper.
 pub mod magnetostrictive;
 /// Full source-derived viscous tensors on the shared DKT and modal runtime.
