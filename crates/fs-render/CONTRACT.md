@@ -10425,6 +10425,37 @@ Finite exposures use each source's retarded interval mean on frozen transport, t
 Two focused regression groups cover complete static CIE/QE parity, one-versus-three-channel shared work, large-epoch chromatic camera-plus-connection group clocks, native QE energy/photon conversion, late source failure with deterministic replay, and cancellation. Formatter/parser checks passed; native numerical execution was unavailable in the editing environment.
 
 
+### Timed real-lens molecular area-light pixels
+
+`camera::raster::transient::area_lights::participating` exposes
+`sample_pixel_sequential_rayleigh_area_lights_at_time`,
+`sample_pixel_sensor_sequential_rayleigh_area_lights_at_time`, and their
+`_during_exposure` counterparts. They connect the original molecular
+finite-area scene to the original optional real-lens CIE and QE integrators.
+The analyzer is applied at the sensor before refracting through the lens.
+Each surviving wavelength retains its complete Stokes beam, qualified lens
+group delay, molecular camera path, independently tracked source survival and
+the emitted source channel's own retarded history.
+
+The shared molecular raster worker retains the original five Philox counter
+domains and per-lane work. Clipped wavelengths contribute zero with the original
+four-lane proposal mass; channels share the same paths. The original integrators
+apply lens geometry, spectral density and QE/photon weights once. A typed
+source-clock failure identifies its lane and refuses the whole observation.
+Clock admission and cancellation are checked even when every pupil lane clips.
+
+Finite shutters integrate each history on its frozen retarded interval without
+adding temporal traces. The existing exposure owners convert the completed mean
+to spectral energy and electrons per m² sr once, retaining all molecular and
+source-work counts. These remain frozen-media, instantaneous-scattering source
+histories; spatial volume/LTE emission remains steady.
+
+Two native regression fixtures independently specify source-survival radiometry,
+double-double source clocks, replay of all five sampling streams, CIE/photon
+integration, partial and complete clipping, and source/clock/cancellation
+refusals. The changed Rust files passed parser checks and source/API review;
+the renderer integration fixtures were not executed in this editing environment.
+
 ### Exact scalar-transfer opacity and physical density calibration
 
 The volumes feature exposes render_transfer_transport for orthographic

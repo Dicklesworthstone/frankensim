@@ -10,11 +10,11 @@ use super::super::{
     CAMERA_WAVELENGTHS, CameraRadianceError, CameraRadianceSample, CurvedCameraRaster,
     CurvedPixelSample, CurvedRasterError, unit,
 };
-use super::{AreaLightPixelSample, AreaLightRasterError};
+use super::{AreaLaneSamples, AreaLightPixelSample, AreaLightRasterError};
 use crate::charts::Ray;
 use crate::polarization::dielectric::scene::curved::camera::area_lights::camera::MAX_AREA_LIGHT_BINDINGS;
 use crate::polarization::dielectric::scene::curved::camera::area_lights::participating::{
-    CurvedRayleighAreaLightCameraScene, RayleighAreaLightCameraSettings,
+    CurvedRayleighAreaLightCameraScene, RayleighAreaLightCameraSample, RayleighAreaLightCameraSettings,
     RayleighAreaLightCameraWorkspace,
 };
 use crate::spectral::detector::QuantumEfficiencySensor;
@@ -57,6 +57,58 @@ impl<P> RayleighAreaLightPixelSample<P> {
 
     pub const fn source_candidates(&self) -> &[u32; CAMERA_WAVELENGTHS] {
         &self.source_candidates
+    }
+
+    /// Change the detector payload while preserving every original molecular
+    /// and source-work count; finite shutters convert the completed mean once.
+    pub(in super::super) fn try_map_pixel<Q, E>(
+        self,
+        map: impl FnOnce(P) -> Result<Q, E>,
+    ) -> Result<RayleighAreaLightPixelSample<Q>, E> {
+        Ok(RayleighAreaLightPixelSample {
+            area: self.area.try_map_pixel(map)?,
+            volume_events: self.volume_events,
+            free_flight_draws: self.free_flight_draws,
+            source_free_flight_draws: self.source_free_flight_draws,
+            source_candidates: self.source_candidates,
+        })
+    }
+}
+
+/// The original five independent molecular/area counter domains. Keeping the
+/// address immutable shares native draws across ideal and real-lens consumers
+/// without allocation or resetting the source-survival stream per connection.
+#[derive(Clone, Copy)]
+pub(in super::super) struct RayleighAreaLaneSamples {
+    area: AreaLaneSamples,
+}
+
+impl RayleighAreaLaneSamples {
+    pub(in super::super) fn surface(self, event: u32) -> [f64; 3] {
+        self.area.surface(event)
+    }
+
+    pub(in super::super) fn flight(self, flight: u32) -> [f64; 4] {
+        philox4x32_10(
+            [self.area.pixel, self.area.sample, flight, 0x6372_7350 + self.area.lane as u32],
+            self.area.key,
+        ).map(unit)
+    }
+
+    pub(in super::super) fn area(self, event: u32, binding: usize) -> [f64; 2] {
+        self.area.area(event, binding)
+    }
+
+    pub(in super::super) fn volume_area(self, collision: u32, binding: usize) -> [f64; 2] {
+        let domain = 0x6372_6500 + (self.area.lane * MAX_AREA_LIGHT_BINDINGS + binding) as u32;
+        let block = philox4x32_10([self.area.pixel, self.area.sample, collision, domain], self.area.key);
+        [unit(block[0]), unit(block[1])]
+    }
+
+    pub(in super::super) fn source(self, area: u32, image: u32, flight: u32) -> f64 {
+        let key = [self.area.key[0] ^ image,
+            self.area.key[1] ^ (0x6372_6200 + self.area.lane as u32)];
+        unit(philox4x32_10([self.area.pixel, self.area.sample, area, flight], key)[0])
     }
 }
 
@@ -139,6 +191,37 @@ impl CurvedCameraRaster<'_> {
             ) -> Result<CameraRadianceSample, CameraRadianceError>,
         ) -> Result<P, CurvedRasterError>,
     ) -> Result<RayleighAreaLightPixelSample<P>, AreaLightRasterError> {
+        self.sample_rayleigh_area_with_launch(
+            seed,
+            pixel,
+            sample,
+            |cx, (ray, wavelength), samples| scene.sample_ray_with_tracking_samples(
+                cx, ray, wavelength, initial_medium, settings, workspace,
+                |event| samples.surface(event),
+                |flight| samples.flight(flight),
+                |event, binding| samples.area(event, binding),
+                |collision, binding| samples.volume_area(collision, binding),
+                |area, image, flight| samples.source(area, image, flight),
+            ),
+            |trace| integrate(&mut |cx, ray, wavelength, lane| trace(cx, (ray, wavelength), lane)),
+        )
+    }
+
+    // Launch and typed source-clock failure are the only adapter seams. The
+    // original estimator, counter addresses and all per-lane work stay shared.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub(in super::super) fn sample_rayleigh_area_with_launch<P, E, L>(
+        &self,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+        mut trace: impl FnMut(&Cx<'_>, L, RayleighAreaLaneSamples)
+            -> Result<RayleighAreaLightCameraSample, E>,
+        integrate: impl FnOnce(
+            &mut dyn FnMut(&Cx<'_>, L, usize)
+                -> Result<CameraRadianceSample, CameraRadianceError>,
+        ) -> Result<P, CurvedRasterError>,
+    ) -> Result<RayleighAreaLightPixelSample<P>, AreaLightRasterError<E>> {
         let key = [seed as u32, (seed >> 32) as u32];
         let mut area_radiance_w_m2_sr_nm = [0.0; CAMERA_WAVELENGTHS];
         let mut area_samples = [0; CAMERA_WAVELENGTHS];
@@ -151,37 +234,11 @@ impl CurvedCameraRaster<'_> {
         let mut source_free_flight_draws = [0; CAMERA_WAVELENGTHS];
         let mut source_candidates = [0; CAMERA_WAVELENGTHS];
         let mut source_failure = None;
-        let result = integrate(&mut |cx, ray, wavelength, lane| {
-            let traced = match scene.sample_ray_with_tracking_samples(
-                cx,
-                ray,
-                wavelength,
-                initial_medium,
-                settings,
-                workspace,
-                |event| {
-                    let block =
-                        philox4x32_10([pixel, sample, event, 0x6372_7340 + lane as u32], key);
-                    core::array::from_fn(|i| unit(block[i]))
-                },
-                |flight| {
-                    philox4x32_10([pixel, sample, flight, 0x6372_7350 + lane as u32], key).map(unit)
-                },
-                |event, binding| {
-                    let domain = 0x6372_6100 + (lane * MAX_AREA_LIGHT_BINDINGS + binding) as u32;
-                    let block = philox4x32_10([pixel, sample, event, domain], key);
-                    [unit(block[0]), unit(block[1])]
-                },
-                |collision, binding| {
-                    let domain = 0x6372_6500 + (lane * MAX_AREA_LIGHT_BINDINGS + binding) as u32;
-                    let block = philox4x32_10([pixel, sample, collision, domain], key);
-                    [unit(block[0]), unit(block[1])]
-                },
-                |area, image, flight| {
-                    let source_key = [key[0] ^ image, key[1] ^ (0x6372_6200 + lane as u32)];
-                    unit(philox4x32_10([pixel, sample, area, flight], source_key)[0])
-                },
-            ) {
+        let result = integrate(&mut |cx, launch, lane| {
+            let samples = RayleighAreaLaneSamples {
+                area: AreaLaneSamples { key, pixel, sample, lane },
+            };
+            let traced = match trace(cx, launch, samples) {
                 Ok(traced) => traced,
                 Err(error) => {
                     source_failure = Some((lane, error));

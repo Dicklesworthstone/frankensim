@@ -1,6 +1,8 @@
 //! Native spectral streams and independently evaluated molecular source loss.
 
 use super::*;
+
+mod transient;
 use super::super::super::tests as fixtures;
 use crate::charts::TriMesh;
 use crate::dielectric::{BeerLambertAbsorption, CauchyIor, DielectricGlass, GlassProvenance};

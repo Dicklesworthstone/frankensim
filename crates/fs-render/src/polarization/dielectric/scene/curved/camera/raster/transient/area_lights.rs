@@ -30,6 +30,10 @@ use fs_math::dd::Dd;
 
 mod sequential;
 
+/// Molecular finite-area CIE/QE observations through a timed real lens.
+#[cfg(feature = "volumes")]
+pub mod participating;
+
 #[derive(Debug)]
 pub enum TransientAreaLightRasterError {
     Raster(CurvedRasterError),
