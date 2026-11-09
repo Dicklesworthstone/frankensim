@@ -26,6 +26,8 @@ mod nonlinear;
 mod sdirk;
 mod transient;
 use local::LocalOperator;
+#[cfg(feature = "enthalpy-coupling")]
+pub(super) use nonlinear::advance_radiating_caloric_prepared;
 pub use nonlinear::{
     RotatedSolidConductivity, RotatedSourceConductivity, TensorConductivityLaw, TensorNonlinearConfig,
     TensorNonlinearSdirk2Step, TensorNonlinearSolution, TensorNonlinearStep,

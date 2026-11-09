@@ -24,6 +24,8 @@ mod material;
 mod sdirk;
 mod transient;
 #[cfg(feature = "enthalpy-coupling")]
+pub(in crate::conjugate) use caloric::advance_radiating_caloric_prepared;
+#[cfg(feature = "enthalpy-coupling")]
 pub use caloric::{
     TensorCaloricAdaptiveConfig, TensorCaloricAdaptiveError, TensorCaloricAdaptiveReport,
     TensorCaloricAdaptiveSolution, TensorCaloricForcing, TensorCaloricForcingSample,

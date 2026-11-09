@@ -147,7 +147,7 @@ pub mod material_coupling;
 #[cfg(feature = "enthalpy-coupling")]
 pub use material_coupling::{
     CaloricElectrothermalConfig, CaloricElectrothermalReport, CaloricElectrothermalStep,
-    advance_caloric_tensor_electrothermal,
+    advance_caloric_tensor_electrothermal, advance_caloric_tensor_electrothermal_radiating,
 };
 mod natural;
 mod radiation;

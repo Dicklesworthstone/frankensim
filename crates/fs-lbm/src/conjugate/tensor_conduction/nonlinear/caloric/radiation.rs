@@ -93,6 +93,40 @@ pub fn advance_caloric_tensor_conduction_radiating(
     radiation: &RadiationConfig,
     gate: &CancelGate,
 ) -> Result<(TensorCaloricStep, TensorCaloricRadiationReport), ChtError> {
+    advance_radiating_caloric_prepared(
+        domain,
+        solids,
+        setup,
+        conductivity_laws,
+        storage,
+        prescribed_specific_energy_j_kg,
+        start_time_s,
+        time_step_s,
+        config,
+        radiation,
+        None,
+        gate,
+    )
+}
+
+/// Borrow the original immutable ray geometry across coupled source proposals.
+/// Each proposal retains its own bounded native thermal solve and unchanged
+/// physical opening storage; preparing geometry does not advance either one.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::conjugate) fn advance_radiating_caloric_prepared(
+    domain: &VoxelDomain,
+    solids: &[SolidMaterial],
+    setup: &ThermalSetup,
+    conductivity_laws: &[&dyn TensorConductivityLaw],
+    storage: TensorCaloricStorage<'_>,
+    prescribed_specific_energy_j_kg: &[(usize, f64)],
+    start_time_s: f64,
+    time_step_s: f64,
+    config: &TensorNonlinearConfig,
+    radiation: &RadiationConfig,
+    geometry: Option<&Radiators>,
+    gate: &CancelGate,
+) -> Result<(TensorCaloricStep, TensorCaloricRadiationReport), ChtError> {
     poll(gate)?;
     domain.check_materials(solids.len())?;
     let time_s = end_time(start_time_s, time_step_s)?;
@@ -100,7 +134,10 @@ pub fn advance_caloric_tensor_conduction_radiating(
     let prepared =
         PreparedCaloric::new(domain, conductivity_laws.len(), storage, time_step_s, gate)?;
     let stage = prepared.stage(setup, prescribed_specific_energy_j_kg, gate)?;
-    let radiators = Radiators::build(domain, solids, radiation, gate)?;
+    let radiators = match geometry {
+        Some(value) => std::borrow::Cow::Borrowed(value),
+        None => std::borrow::Cow::Owned(Radiators::build(domain, solids, radiation, gate)?),
+    };
     let accepted = solve_radiating_stage(
         domain,
         solids,

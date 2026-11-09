@@ -4292,3 +4292,33 @@ and test execution are unavailable in this environment.
 Native boundary/contact events split intervals and execute through the original same-time `advance_to`; target events remain pending at the left limit. Any change to any native cell identity, material, mass, geometry or stored enthalpy, including nonfilm inventory, refuses the entire window. No remap, birth or advected inventory is inferred. Whole-window thermal and kinetic storage and accepted-only physical work and heat close independently. Whole-call endpoint/material ceilings include discarded work; accepted native steps also obey the original `max_substeps`. Original support and algebraic limits, cancellation and source failure remain terminal. A final step suggestion supports continuation. The film retains its original fixed thickness and density; streamwise thermal advection and evolving free-surface inventory are outside this owner.
 
 Verification: 9 of 9 source-linked thermal-film tests passed, including five new independent adaptive regressions. The existing bounded projection uses actual film, Carreau, linear-algebra, math, Krylov and original thermal kernels with pinned current thermal inputs; it does not establish full-crate Cargo or executor/runtime integration. Targeted formatting and diff checks passed.
+
+## Radiating spatial caloric electrothermal feedback
+
+`advance_caloric_tensor_electrothermal_radiating` combines the original
+spatial current/contact solve with the native radiating caloric backward-Euler
+owner. Resistivity receives original specific energy and temperature, so
+latent fraction can change both current and Joule heat at constant Kelvin.
+Each source proposal retains the same opening inventory; discarded proposals
+neither advance time nor deposit additional heat.
+
+Immutable ray geometry is prepared once for the complete coupled interval
+and borrowed by every thermal proposal. Original conduction, caloric inverse,
+physical radiation powers and thermostat reactions remain with their existing
+owners. The accepted radiation report accompanies the accepted thermal step;
+its heat is already in the native boundary ledger. Applied Joule heat on
+prescribed cells retains the separate equal source/thermostat-removal channel,
+already included in total electrical heat.
+
+The common electrical-source iteration retains its local source comparisons,
+noncancelling joule allowance, original-law query budgets and cancellation.
+The outer pass bound and native radiation/thermal bounds limit total work.
+Fixed geometry, gray/diffuse/opaque surfaces, transparent gas, fixed
+emissivities/surroundings and the original cell-temperature radiation sampling
+remain explicit. Authored sinks must not duplicate the same radiation.
+
+Two regression groups exercise latent/contact/thermostat balance in both
+escape and radiosity modes, and nonlinear single-phase cooling against an
+independent physical quartic balance. Independent scalar references and pinned
+Rust formatting/parsing passed. Native Cargo verification is pending; these
+results do not claim experimental material or radiation validation.

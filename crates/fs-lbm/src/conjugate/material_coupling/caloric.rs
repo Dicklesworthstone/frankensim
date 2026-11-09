@@ -4,10 +4,13 @@
 //! electrical source deposits heat; endpoint current is separate evidence.
 
 use super::{invalid, validate_joule, validate_temperature};
+use crate::conjugate::radiation::{RadiationConfig, Radiators};
+use crate::conjugate::tensor_conduction::advance_radiating_caloric_prepared;
 use crate::conjugate::{
-    ChtError, ElectricSetup, ElectricSolution, ElectricalContact, SolidMaterial, TensorCaloricStep,
-    TensorCaloricStorage, TensorConductivityLaw, TensorNonlinearConfig, ThermalSetup, Voxel,
-    VoxelDomain, advance_caloric_tensor_conduction, poll,
+    ChtError, ElectricSetup, ElectricSolution, ElectricalContact, SolidMaterial,
+    TensorCaloricRadiationReport, TensorCaloricStep, TensorCaloricStorage, TensorConductivityLaw,
+    TensorNonlinearConfig, ThermalSetup, Voxel, VoxelDomain, advance_caloric_tensor_conduction,
+    poll,
 };
 use fs_conduction::enthalpy::DepositionError;
 use fs_exec::CancelGate;
@@ -18,7 +21,8 @@ use std::borrow::Cow;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CaloricElectrothermalConfig {
     pub thermal: TensorNonlinearConfig,
-    /// At most this many native heat solves and one additional current solve.
+    /// At most this many thermal proposals and one additional current solve.
+    /// Radiation retains its original bounded inner heat solves per proposal.
     /// Each current callback is evaluated at most once per non-electrode cell.
     pub maximum_passes: usize,
     /// Absolute tolerance on outer specific-energy changes, J/kg; positive.
@@ -123,7 +127,135 @@ pub fn advance_caloric_tensor_electrothermal(
     start_time_s: f64,
     time_step_s: f64,
     config: &CaloricElectrothermalConfig,
+    resistivity: impl FnMut(usize, Voxel, f64, f64) -> Result<Option<f64>, ChtError>,
+    gate: &CancelGate,
+) -> Result<CaloricElectrothermalStep, ChtError> {
+    advance_with_heat(
+        domain,
+        solids,
+        electric,
+        contacts,
+        thermal,
+        conductivity_laws,
+        storage,
+        start_time_s,
+        time_step_s,
+        config,
+        resistivity,
+        |heated| {
+            advance_caloric_tensor_conduction(
+                domain,
+                solids,
+                heated,
+                conductivity_laws,
+                storage,
+                prescribed_specific_energy_j_kg,
+                start_time_s,
+                time_step_s,
+                &config.thermal,
+                gate,
+            )
+        },
+        gate,
+    )
+}
+
+/// Advance spatial caloric/current feedback with original gray radiation.
+///
+/// Each electrical-source proposal converges the original radiating thermal
+/// owner from the SAME physical opening inventory. Surface exchange and heat
+/// escaping to the declared surroundings enter that owner's physical ledger;
+/// neither is a second Joule deposit. Fixed-cell electrical heat retains the
+/// explicit equal thermostat source/removal convention of the nonradiating API.
+///
+/// Immutable ray geometry is prepared once for the entire coupled interval.
+/// Every proposal retains the native radiation, Newton, Krylov and backtracking
+/// limits, while maximum_passes bounds the number of proposals. Original-law
+/// query budgets stay with the supplied laws across all proposals. The returned
+/// radiation report belongs to the accepted physical endpoint only.
+///
+/// This retains cell-centered gray/diffuse/opaque surface radiation, transparent
+/// gas and fixed geometry/emissivities/surroundings. Authored sinks must not
+/// already contain the same radiation. Time stepping remains backward Euler;
+/// unsupported source data, nonconvergence and cancellation return no interval.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_caloric_tensor_electrothermal_radiating(
+    domain: &VoxelDomain,
+    solids: &[SolidMaterial],
+    electric: &ElectricSetup,
+    contacts: &[ElectricalContact],
+    thermal: &ThermalSetup,
+    conductivity_laws: &[&dyn TensorConductivityLaw],
+    storage: TensorCaloricStorage<'_>,
+    prescribed_specific_energy_j_kg: &[(usize, f64)],
+    start_time_s: f64,
+    time_step_s: f64,
+    config: &CaloricElectrothermalConfig,
+    radiation: &RadiationConfig,
+    resistivity: impl FnMut(usize, Voxel, f64, f64) -> Result<Option<f64>, ChtError>,
+    gate: &CancelGate,
+) -> Result<(CaloricElectrothermalStep, TensorCaloricRadiationReport), ChtError> {
+    poll(gate)?;
+    admit(config, start_time_s, time_step_s, domain.cell_count())?;
+    domain.check_materials(solids.len())?;
+    config
+        .maximum_passes
+        .checked_mul(radiation.max_iterations)
+        .ok_or_else(|| refusal("radiating thermal work bound is unrepresentable"))?;
+    let radiators = Radiators::build(domain, solids, radiation, gate)?;
+    let mut accepted_radiation = None;
+    let step = advance_with_heat(
+        domain,
+        solids,
+        electric,
+        contacts,
+        thermal,
+        conductivity_laws,
+        storage,
+        start_time_s,
+        time_step_s,
+        config,
+        resistivity,
+        |heated| {
+            let (step, report) = advance_radiating_caloric_prepared(
+                domain,
+                solids,
+                heated,
+                conductivity_laws,
+                storage,
+                prescribed_specific_energy_j_kg,
+                start_time_s,
+                time_step_s,
+                &config.thermal,
+                radiation,
+                Some(&radiators),
+                gate,
+            )?;
+            accepted_radiation = Some(report);
+            Ok(step)
+        },
+        gate,
+    )?;
+    let report = accepted_radiation
+        .ok_or_else(|| refusal("accepted radiating thermal proposal is missing its report"))?;
+    Ok((step, report))
+}
+
+/// Keep one electrical-source iteration for radiating and nonradiating owners.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn advance_with_heat(
+    domain: &VoxelDomain,
+    solids: &[SolidMaterial],
+    electric: &ElectricSetup,
+    contacts: &[ElectricalContact],
+    thermal: &ThermalSetup,
+    conductivity_laws: &[&dyn TensorConductivityLaw],
+    storage: TensorCaloricStorage<'_>,
+    start_time_s: f64,
+    time_step_s: f64,
+    config: &CaloricElectrothermalConfig,
     mut resistivity: impl FnMut(usize, Voxel, f64, f64) -> Result<Option<f64>, ChtError>,
+    mut heat: impl FnMut(&ThermalSetup) -> Result<TensorCaloricStep, ChtError>,
     gate: &CancelGate,
 ) -> Result<CaloricElectrothermalStep, ChtError> {
     poll(gate)?;
@@ -231,18 +363,7 @@ pub fn advance_caloric_tensor_electrothermal(
                 native_source = native_source + represented;
             }
         }
-        let step = advance_caloric_tensor_conduction(
-            domain,
-            solids,
-            &heated,
-            conductivity_laws,
-            storage,
-            prescribed_specific_energy_j_kg,
-            start_time_s,
-            time_step_s,
-            &config.thermal,
-            gate,
-        )?;
+        let step = heat(&heated)?;
         poll(gate)?;
         let endpoint_energy = &step.endpoint.specific_energy_j_kg;
         let next = current(

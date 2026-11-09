@@ -4,9 +4,10 @@ use fs_blake3::ContentHash;
 use fs_exec::CancelGate;
 use fs_lbm::conjugate::{
     CaloricElectrothermalConfig, ChtError, ConductivityTensor, ElectricSetup, ElectricalContact,
-    Electrode, ElectrodeDrive, EnergyConfig, SolidMaterial, TensorCaloricLaw, TensorCaloricStorage,
-    TensorNonlinearConfig, ThermalFace, ThermalSetup, Voxel, VoxelDomain,
-    advance_caloric_tensor_electrothermal,
+    Electrode, ElectrodeDrive, EnergyConfig, RadiationConfig, STEFAN_BOLTZMANN, SolidMaterial,
+    TensorCaloricLaw, TensorCaloricStorage, TensorNonlinearConfig, ThermalFace, ThermalSetup,
+    Voxel, VoxelDomain, advance_caloric_tensor_electrothermal,
+    advance_caloric_tensor_electrothermal_radiating,
 };
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
 
@@ -99,6 +100,40 @@ fn controls() -> CaloricElectrothermalConfig {
 fn exact_endpoint(extra_power_w: f64) -> f64 {
     let a = DURATION * CURRENT * CURRENT / MASS;
     (OPENING_H + a + DURATION * extra_power_w / MASS) / (1.0 - a * RESISTIVITY_SLOPE)
+}
+
+fn exposed_bar() -> (
+    VoxelDomain,
+    [SolidMaterial; 1],
+    ElectricSetup,
+    ConductivityTensor,
+    ThermalSetup,
+    RadiationConfig,
+) {
+    let (_, solids, electric, conductivity) = bar();
+    // Every top face of the three-cell solid bar borders transparent fluid.
+    // Its upward hemisphere contains no other solid, so every ray escapes:
+    // F=1 exactly, independently of the ray count or radiosity mode.
+    let domain = VoxelDomain::from_fn(3, 2, 1, 1.0, |position| {
+        if position[1] < 1.0 {
+            Voxel::Solid(0)
+        } else {
+            Voxel::Fluid
+        }
+    })
+    .unwrap();
+    let mut thermal = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
+    thermal.fixed_temperature = vec![(3, 300.0), (4, 300.0), (5, 300.0)];
+    let mut radiation = RadiationConfig::new(vec![0.04], [Some(250.0); 6]);
+    radiation.rays_per_face = 32;
+    radiation.patch_size = 1;
+    radiation.max_iterations = 64;
+    radiation.tolerance = 1e-10;
+    (domain, solids, electric, conductivity, thermal, radiation)
+}
+
+fn exposed_bar_radiation_w(temperature_k: f64) -> f64 {
+    0.04 * STEFAN_BOLTZMANN * (temperature_k.powi(4) - 250.0_f64.powi(4))
 }
 
 #[test]
@@ -401,4 +436,204 @@ fn current_feedback_and_spatial_conduction_match_a_three_cell_energy_system() {
     );
     assert!(result.report.absolute_energy_defect_j <= controls().energy_tolerance_j);
     assert_eq!(previous, [0.0; 3]);
+}
+
+#[test]
+fn radiating_current_feedback_closes_latent_contact_and_thermostat_energy() {
+    let (domain, solids, electric, k, mut setup, mut radiation) = exposed_bar();
+    setup.fixed_temperature.push((0, 300.0));
+    setup.power_w = vec![0.0, 5.0, 0.0, 0.0, 0.0, 0.0];
+    let saved = setup.clone();
+    let contact = [ElectricalContact {
+        cells: [0, 1],
+        resistance_ohm_m2: 0.25,
+        heat_fraction_to_first: 0.25,
+    }];
+    let law = phase(0.0);
+    let laws: [&dyn TensorCaloricLaw; 6] = [&law; 6];
+    let previous = [OPENING_H; 6];
+    let prescribed = [
+        (0, OPENING_H),
+        (3, OPENING_H),
+        (4, OPENING_H),
+        (5, OPENING_H),
+    ];
+    let radiation_w = exposed_bar_radiation_w(300.0);
+    // Contact heat is 4 W: 1 W goes to the fixed electrode and 3 W to
+    // the free bulk cell. Radiation cools both free solid cells; the fixed
+    // emitter's thermostat supplies its radiation without changing storage.
+    let expected_middle = exact_endpoint(5.0 + 3.0 - radiation_w);
+    let expected_end = OPENING_H - DURATION * radiation_w / MASS;
+    for surface_exchange in [false, true] {
+        radiation.surface_exchange = surface_exchange;
+        let (result, report) = advance_caloric_tensor_electrothermal_radiating(
+            &domain,
+            &solids,
+            &electric,
+            &contact,
+            &setup,
+            &[&k; 6],
+            TensorCaloricStorage {
+                laws: &laws,
+                reference_mass_kg: &[MASS; 6],
+                previous_specific_energy_j_kg: &previous,
+            },
+            &prescribed,
+            0.0,
+            DURATION,
+            &controls(),
+            &radiation,
+            |_, occupancy, energy, _| {
+                Ok(match occupancy {
+                    Voxel::Fluid => None,
+                    Voxel::Solid(_) => Some(1.0 + RESISTIVITY_SLOPE * energy),
+                })
+            },
+            &CancelGate::new(),
+        )
+        .unwrap();
+        let endpoint = &result.thermal.endpoint;
+        assert_eq!(endpoint.solution.solution.temperature, vec![300.0; 6]);
+        near(endpoint.specific_energy_j_kg[1], expected_middle, 3e-8);
+        near(endpoint.specific_energy_j_kg[2], expected_end, 3e-8);
+        near(
+            law.values_at_specific_enthalpy(endpoint.specific_energy_j_kg[1])
+                .unwrap()
+                .liquid_mass_fraction,
+            expected_middle / 100.0,
+            1e-9,
+        );
+        let stored = MASS * (expected_middle + expected_end - 2.0 * OPENING_H);
+        near(result.thermal.record.stored_energy_change_j, stored, 1e-7);
+        near(
+            result.thermal.record.boundary_outflow_j,
+            2.0 * radiation_w * DURATION,
+            1e-7,
+        );
+        near(result.thermal.record.radiated_w, 3.0 * radiation_w, 1e-8);
+        near(report.radiated_w, 3.0 * radiation_w, 1e-8);
+        near(result.report.thermostat_joule_energy_j, DURATION, 1e-9);
+        near(
+            result.report.applied_joule_energy_j + 5.0 * DURATION,
+            result.thermal.record.source_j + result.report.thermostat_joule_energy_j,
+            1e-8,
+        );
+        near(
+            result.report.applied_electrode_energy_j + 5.0 * DURATION,
+            stored + 2.0 * radiation_w * DURATION + result.report.thermostat_joule_energy_j,
+            controls().energy_tolerance_j,
+        );
+        assert_eq!(report.exposed_faces, 3);
+        assert_eq!(report.rays, 3 * radiation.rays_per_face);
+        assert_eq!(report.patches, if surface_exchange { 3 } else { 0 });
+        assert!(report.relative_power_defect <= radiation.tolerance);
+        assert!(result.report.passes > 2);
+        assert_eq!(result.report.current_solves, result.report.passes + 1);
+        assert!(result.report.absolute_energy_defect_j <= controls().energy_tolerance_j);
+        assert_eq!(previous, [OPENING_H; 6]);
+    }
+    assert_eq!(setup, saved);
+}
+
+#[test]
+fn radiating_electrothermal_endpoint_matches_independent_quartic_balance() {
+    let (domain, solids, electric, k, mut setup, radiation) = exposed_bar();
+    setup.fixed_temperature.extend([(0, 300.0), (2, 300.0)]);
+    let law = EquilibriumEnthalpyPhaseCurve::try_new(
+        ContentHash([0xE4; 32]),
+        [(-200.0, 200.0), (400.0, 500.0)]
+            .map(
+                |(specific_enthalpy_j_kg, temperature_k)| EnthalpyPhaseKnot {
+                    specific_enthalpy_j_kg,
+                    temperature_k,
+                    liquid_mass_fraction: 0.0,
+                    bulk_density_kg_m3: MASS,
+                },
+            )
+            .to_vec(),
+    )
+    .unwrap();
+    let laws: [&dyn TensorCaloricLaw; 6] = [&law; 6];
+    let previous = [0.0, 200.0, 0.0, 0.0, 0.0, 0.0];
+    let dt = 0.25;
+    let cp = 2.0;
+    let alpha = 0.001;
+    // Three unit thermal conductances meet the free cell: two electrode
+    // thermostats and the fluid above. The independent scalar residual uses
+    // the physical T^4 loss and energy-dependent current at the same endpoint.
+    let outflow = |t: f64| 3.0 * (t - 300.0) + exposed_bar_radiation_w(t);
+    let residual = |t: f64| {
+        MASS * cp * (t - 400.0)
+            + dt * (outflow(t) - CURRENT * CURRENT * (1.0 + alpha * cp * (t - 300.0)))
+    };
+    let (mut low, mut high) = (300.0, 400.0);
+    assert!(residual(low) < 0.0 && residual(high) > 0.0);
+    for _ in 0..80 {
+        let middle = low + 0.5 * (high - low);
+        if residual(middle) > 0.0 {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    let expected = low + 0.5 * (high - low);
+    let (result, report) = advance_caloric_tensor_electrothermal_radiating(
+        &domain,
+        &solids,
+        &electric,
+        &[],
+        &setup,
+        &[&k; 6],
+        TensorCaloricStorage {
+            laws: &laws,
+            reference_mass_kg: &[MASS; 6],
+            previous_specific_energy_j_kg: &previous,
+        },
+        &[(0, 0.0), (2, 0.0), (3, 0.0), (4, 0.0), (5, 0.0)],
+        0.0,
+        dt,
+        &controls(),
+        &radiation,
+        |_, occupancy, energy, _| {
+            Ok(match occupancy {
+                Voxel::Fluid => None,
+                Voxel::Solid(_) => Some(1.0 + alpha * energy),
+            })
+        },
+        &CancelGate::new(),
+    )
+    .unwrap();
+    near(
+        result.thermal.endpoint.solution.solution.temperature[1],
+        expected,
+        1e-7,
+    );
+    near(
+        result.thermal.endpoint.specific_energy_j_kg[1],
+        cp * (expected - 300.0),
+        2e-7,
+    );
+    near(
+        result.thermal.record.stored_energy_change_j,
+        MASS * cp * (expected - 400.0),
+        5e-7,
+    );
+    near(
+        result.thermal.record.boundary_outflow_j,
+        dt * outflow(expected),
+        5e-7,
+    );
+    near(
+        result.report.applied_electrode_energy_j,
+        MASS * cp * (expected - 400.0) + dt * outflow(expected),
+        controls().energy_tolerance_j,
+    );
+    near(
+        report.radiated_w,
+        exposed_bar_radiation_w(expected) + 2.0 * exposed_bar_radiation_w(300.0),
+        1e-7,
+    );
+    assert!(report.iterations > 1);
+    assert!(result.report.absolute_energy_defect_j <= controls().energy_tolerance_j);
+    assert_eq!(previous, [0.0, 200.0, 0.0, 0.0, 0.0, 0.0]);
 }
