@@ -3637,3 +3637,46 @@ and worker-count replay. All eight changed Rust files were syntax-parsed with
 the pinned formatter. Independent scalar integral and film-root calculations
 were checked; the native regression groups were not executed because DSR/RCH
 and a usable local build graph/space were unavailable.
+
+## Bounded midpoint transport of SGS history
+
+`LagrangianAdvection` explicitly selects original Euler tracing or midpoint
+RK2 with a positive authored u8 substep count. The same policy transports
+signed stress, independent heat and common-component contraction histories,
+including the advected stress used by adaptive momentum memory. Each midpoint
+stage samples the current physical velocity through the original positive
+trilinear stencil. Channel half-cells interpolate to the actual moving-wall
+velocity. Accepted history retains its original positive interpolation and
+is remapped only once at the final departure, so trajectory substeps do not
+introduce repeated history-remap diffusion.
+
+Every stage and accumulated per-axis travel must satisfy the existing
+departure limit, and every sampled stage must remain inside physical walls.
+Each characteristic trace is bounded to 255 substeps and at most 510 velocity
+evaluations, with cancellation checks at most eight substeps apart. Joint
+histories may each trace their departure. Selection precedes the first accepted
+sample; trial forks preserve the policy, and rejected work cannot publish
+history, clock or normalization. No full-grid arrays are added and original
+numerical byte budgets remain unchanged.
+
+NSF exposes explicit policy selection through
+`with_lagrangian_thermal_sgs_advection` and reports it through
+`lagrangian_sgs_advection`. The original builder retains Euler. Existing
+force-corrected current velocity, moving-wall refresh, independent relaxation
+times, molecular wall heat, endpoint transactions and reversible native
+intervals remain authoritative.
+
+All 106 actual-source shared SGS tests passed in the focused native build
+using complete production math and the original model, Vreman, tangent and
+dynamic subtrees without numerical or runtime stubs. Six new groups include
+independent curved-characteristic and actual emitted-SGS-viscosity refinement,
+policy agreement across stress/heat/species, moving-wall interpolation on all
+axes, physical-unit changes, unchanged payloads and every-poll cancellation
+with exact retry, including adaptive momentum memory. One additional NSF
+runtime regression is authored and format-parsed but was not compiled or
+executed in this environment.
+
+Second-order convergence applies to smooth frozen-field trajectories only.
+Unsteady velocity/source sampling, history-remap accuracy and the complete
+physical solver are not upgraded or newly qualified. This adds no inflow
+memory, large-Courant qualification, SGS-energy model or DNS calibration.

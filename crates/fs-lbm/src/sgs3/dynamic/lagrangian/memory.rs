@@ -141,6 +141,35 @@ impl AdaptiveUpdate {
             ));
         }
         let advected = update.advected(cell, velocity, history)?;
+        self.pair_from_advected(update, cell, density, advected, contraction)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn pair_with_field(
+        &self,
+        update: &HistoryUpdate,
+        cell: usize,
+        velocity: &[[f64; 3]],
+        density: f64,
+        history: &[[f64; 2]],
+        contraction: &[[f64; 2]],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<([f64; 2], f64), DynamicSgsError> {
+        if !update.initialized || update.advection == super::LagrangianAdvection::Euler {
+            return self.pair(update, cell, velocity[cell], density, history, contraction);
+        }
+        let advected = update.advected_with_field(cell, velocity, history, cancelled)?;
+        self.pair_from_advected(update, cell, density, advected, contraction)
+    }
+
+    fn pair_from_advected(
+        &self,
+        update: &HistoryUpdate,
+        cell: usize,
+        density: f64,
+        advected: [f64; 2],
+        contraction: &[[f64; 2]],
+    ) -> Result<([f64; 2], f64), DynamicSgsError> {
         let memory_time = self.memory_time(advected, density);
         let relaxation = update.elapsed / memory_time;
         let fresh = -det::expm1(-relaxation);
