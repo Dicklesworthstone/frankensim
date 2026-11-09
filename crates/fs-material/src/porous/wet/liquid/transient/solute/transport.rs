@@ -24,6 +24,8 @@ pub enum DiluteSoluteBoundary<const N: usize> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DiluteSoluteControls<const N: usize> {
     /// Per-species allowance on EVERY original cell amount equation [mol/m²].
+    /// The sorbing entry also applies it to initial equilibrium consistency and
+    /// represented bound exchange; its transport equation includes both pools.
     pub absolute_equation_tolerance_mol_m2: [f64; N],
     /// Additional allowance on actual storage change or incident face transfer.
     /// Background inventory does not enlarge this scale. In [0,1e-3].
@@ -90,6 +92,12 @@ pub enum DiluteSoluteError {
         residual_mol_m2: f64,
         allowance_mol_m2: f64,
     },
+    Sorption {
+        cell: usize,
+        species: usize,
+        residual_mol_m2: f64,
+        allowance_mol_m2: f64,
+    },
     Balance {
         species: usize,
         residual_mol_m2: f64,
@@ -112,28 +120,28 @@ impl From<TridiagonalError> for DiluteSoluteError {
         }
     }
 }
-type Result<T> = core::result::Result<T, DiluteSoluteError>;
-fn positive(x: f64) -> bool {
+pub(super) type Result<T> = core::result::Result<T, DiluteSoluteError>;
+pub(super) fn positive(x: f64) -> bool {
     x.is_finite() && x > 0.0
 }
-fn nonnegative(x: f64) -> bool {
+pub(super) fn nonnegative(x: f64) -> bool {
     x.is_finite() && x >= 0.0
 }
-fn finite(x: f64) -> Result<f64> {
+pub(super) fn finite(x: f64) -> Result<f64> {
     if x.is_finite() {
         Ok(x)
     } else {
         Err(DiluteSoluteError::Invalid("nonfinite solute arithmetic"))
     }
 }
-fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<()> {
+pub(super) fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<()> {
     if cancelled() {
         Err(DiluteSoluteError::Cancelled)
     } else {
         Ok(())
     }
 }
-fn sum(values: impl IntoIterator<Item = f64>) -> Result<f64> {
+pub(super) fn sum(values: impl IntoIterator<Item = f64>) -> Result<f64> {
     let (mut total, mut correction) = (0.0, 0.0);
     for x in values {
         let y = x - correction;
@@ -247,7 +255,7 @@ fn series(left: f64, right: f64) -> Result<f64> {
     }
 }
 
-fn integrated_flux(coefficient: f64, drive: f64) -> Result<f64> {
+pub(super) fn integrated_flux(coefficient: f64, drive: f64) -> Result<f64> {
     let value = finite(coefficient * drive)?;
     if coefficient != 0.0 && drive != 0.0 && value == 0.0 {
         return Err(DiluteSoluteError::Invalid(
@@ -257,6 +265,42 @@ fn integrated_flux(coefficient: f64, drive: f64) -> Result<f64> {
     Ok(value)
 }
 
+/// Optional local immobile storage. It never changes the water geometry or
+/// any face coefficient. The zero-sized free-solute policy allocates nothing.
+pub(super) trait ImmobileStorage<const N: usize> {
+    fn additional_bytes(&self) -> usize {
+        0
+    }
+    fn admit(
+        &self,
+        _: &[[f64; N]],
+        _: &[f64],
+        _: DiluteSoluteControls<N>,
+        _: &mut impl FnMut() -> bool,
+    ) -> Result<()> {
+        Ok(())
+    }
+    /// Add only to the concentration-system storage diagonal and amount RHS.
+    fn terms(&self, _: usize, _: usize) -> Result<(f64, f64)> {
+        Ok((0.0, 0.0))
+    }
+    fn finish_cell(
+        &mut self,
+        _: usize,
+        _: usize,
+        _: f64,
+        _: DiluteSoluteControls<N>,
+    ) -> Result<()> {
+        Ok(())
+    }
+    /// Original amount, represented final amount, represented amount change.
+    fn amounts(&self, _: usize, _: usize) -> [f64; 3] {
+        [0.0; 3]
+    }
+}
+impl<const N: usize> ImmobileStorage<N> for () {}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn transport<const N: usize>(
     interval_s: [f64; 2],
@@ -270,11 +314,55 @@ pub(super) fn transport<const N: usize>(
     tortuosity: &[f64],
     boundaries: [DiluteSoluteBoundary<N>; 2],
     controls: DiluteSoluteControls<N>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<DiluteSoluteStep<N>> {
+    transport_with_storage(
+        interval_s,
+        duration_s,
+        before_water_m,
+        after_water_m,
+        widths_m,
+        water_face_m,
+        initial,
+        diffusivity_m2_s,
+        tortuosity,
+        boundaries,
+        controls,
+        &mut (),
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(super) fn transport_with_storage<const N: usize>(
+    interval_s: [f64; 2],
+    duration_s: f64,
+    before_water_m: &[f64],
+    after_water_m: &[f64],
+    widths_m: &[f64],
+    water_face_m: &[f64],
+    initial: &[[f64; N]],
+    diffusivity_m2_s: &[[f64; N]],
+    tortuosity: &[f64],
+    boundaries: [DiluteSoluteBoundary<N>; 2],
+    controls: DiluteSoluteControls<N>,
+    storage: &mut impl ImmobileStorage<N>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<DiluteSoluteStep<N>> {
     poll(&mut cancelled)?;
     let n = initial.len();
-    let (cell_species, workspace_bytes) = admit_extent(n, controls)?;
+    let (cell_species, original_bytes) = admit_extent(n, controls)?;
+    let workspace_bytes = original_bytes
+        .checked_add(storage.additional_bytes())
+        .ok_or(DiluteSoluteError::Invalid(
+            "sorption storage extent overflow",
+        ))?;
+    if workspace_bytes > controls.maximum_storage_bytes {
+        return Err(DiluteSoluteError::Workspace {
+            required_bytes: workspace_bytes,
+            maximum_bytes: controls.maximum_storage_bytes,
+        });
+    }
     if before_water_m.len() != n
         || after_water_m.len() != n
         || widths_m.len() != n
@@ -337,6 +425,7 @@ pub(super) fn transport<const N: usize>(
             residual_m: water_residual,
         });
     }
+    storage.admit(initial, before_water_m, controls, &mut cancelled)?;
     let mut step = DiluteSoluteStep {
         amount_mol_m2: vec![[0.0; N]; n],
         concentration_mol_m3: vec![[0.0; N]; n],
@@ -410,14 +499,16 @@ pub(super) fn transport<const N: usize>(
                 poll(&mut cancelled)?;
             }
             let (left, right) = (water_face_m[i], water_face_m[i + 1]);
+            let (capacity, release) = storage.terms(i, k)?;
             diagonal[i] = finite(
                 after_water_m[i]
                     + (-left).max(0.0)
                     + right.max(0.0)
                     + conductance_dt[i]
-                    + conductance_dt[i + 1],
+                    + conductance_dt[i + 1]
+                    + capacity,
             )?;
-            rhs[i] = initial[i][k];
+            rhs[i] = finite(initial[i][k] + release)?;
             if i > 0 {
                 lower[i - 1] = finite(-left.max(0.0) - conductance_dt[i])?;
             }
@@ -446,6 +537,7 @@ pub(super) fn transport<const N: usize>(
             }
             step.concentration_mol_m3[i][k] = c;
             step.amount_mol_m2[i][k] = integrated_flux(after_water_m[i], c)?;
+            storage.finish_cell(i, k, c, controls)?;
         }
         for face in 0..=n {
             if face % 128 == 0 {
@@ -478,7 +570,8 @@ pub(super) fn transport<const N: usize>(
             if i % 128 == 0 {
                 poll(&mut cancelled)?;
             }
-            let change = finite(step.amount_mol_m2[i][k] - initial[i][k])?;
+            let change =
+                finite(step.amount_mol_m2[i][k] - initial[i][k] + storage.amounts(i, k)[2])?;
             let (left, right) = (flux(i)?, flux(i + 1)?);
             let residual = finite(change - (left - right))?;
             maximum_defect = maximum_defect.max(residual.abs());
@@ -497,7 +590,17 @@ pub(super) fn transport<const N: usize>(
             }
         }
         let boundary = finite(flux(0)? - flux(n)?)?;
-        let change = sum((0..n).map(|i| step.amount_mol_m2[i][k] - initial[i][k]))?;
+        // Preserve the original free-solute compensated reduction order.
+        let change = if storage.additional_bytes() == 0 {
+            sum((0..n).map(|i| step.amount_mol_m2[i][k] - initial[i][k]))?
+        } else {
+            sum((0..n).flat_map(|i| {
+                [
+                    step.amount_mol_m2[i][k] - initial[i][k],
+                    storage.amounts(i, k)[2],
+                ]
+            }))?
+        };
         let residual = finite(change - boundary)?;
         if residual.abs() > controls.amount_balance_tolerance_mol_m2[k] {
             return Err(DiluteSoluteError::Balance {
@@ -506,8 +609,16 @@ pub(super) fn transport<const N: usize>(
                 allowance_mol_m2: controls.amount_balance_tolerance_mol_m2[k],
             });
         }
-        step.report.amount_before_mol_m2[k] = sum(initial.iter().map(|a| a[k]))?;
-        step.report.amount_after_mol_m2[k] = sum(step.amount_mol_m2.iter().map(|a| a[k]))?;
+        step.report.amount_before_mol_m2[k] = if storage.additional_bytes() == 0 {
+            sum(initial.iter().map(|a| a[k]))?
+        } else {
+            sum((0..n).flat_map(|i| [initial[i][k], storage.amounts(i, k)[0]]))?
+        };
+        step.report.amount_after_mol_m2[k] = if storage.additional_bytes() == 0 {
+            sum(step.amount_mol_m2.iter().map(|a| a[k]))?
+        } else {
+            sum((0..n).flat_map(|i| [step.amount_mol_m2[i][k], storage.amounts(i, k)[1]]))?
+        };
         step.report.amount_change_mol_m2[k] = change;
         step.report.boundary_amount_into_column_mol_m2[k] = boundary;
         step.report.amount_balance_defect_mol_m2[k] = residual;

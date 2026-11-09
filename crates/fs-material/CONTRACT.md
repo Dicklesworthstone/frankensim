@@ -17197,6 +17197,41 @@ exchange, stiff advection, positive trace response, budgets and cancellation.
 Two additional native hydraulic binding/interval integration tests are authored
 but unexecuted; the full material dependency build remains resource-blocked.
 
+### Reversible solute sorption in porous liquid
+
+`LiquidSaturationCandidate::transport_sorbing_dilute_solutes` couples the same
+accepted hydraulic interval to an explicit linear immobile pool per cell and
+species. The declared capacity B [m] is dry-solid mass per area times Kd [m³/kg],
+so equilibrium loading is b=B*c. Equilibrium mode requires an already consistent
+original loading within the absolute amount tolerance; it does not project the
+initial state. Finite-rate mode admits disequilibrium and evolves
+`db/dt=k*(B*c-b)` with a separately declared nonnegative rate [1/s]. Zero rate
+isolates the original pool, while zero B still permits release of an old pool.
+
+Backward Euler eliminates each bound variable analytically. With
+`alpha=k*dt/(1+k*dt)`, only `alpha*B` and `alpha*b0` enter the concentration-system
+storage diagonal and RHS. The original water volume, hydraulic balance,
+advective concentration and `theta*D/tau` half-cell resistances remain unchanged.
+The same native tridiagonal solver needs one O(cells) solve per species. Bound
+output and report payload are admitted before allocation. Cancellation publishes
+no partial hydraulic, aqueous or sorbed state.
+
+Aqueous and sorbed endpoint amounts and actual net bound exchange remain separate.
+The new report's `total` account explicitly counts both pools; its signed
+boundary advection/diffusion integrals contain aqueous transport only. Original
+cell/column total-amount balances and represented bound-exchange defects have
+independent checks. No substep adsorption/desorption history is inferred. This
+is a first-order passive dilute linear model with caller-qualified fixed B/k;
+competitive or saturating adsorption, ionic effects, reactions, sorption heat,
+drying deposition and hydraulic feedback require other constitutive owners.
+
+Sixteen focused native tests pass using the exact transport/sorption modules and
+original fs-la tridiagonal source: eight existing aqueous cases plus independent
+two-pool kinetics, retarded diffusion, stiff/equilibrium and zero-rate limits,
+changing water, time refinement, trace release, budgets and cancellation. One
+hydraulic adapter/clock-binding regression is authored but unexecuted because
+the full material dependency graph remains resource-blocked.
+
 ### Adaptive coupled gas, adsorption and sensible-heat transport
 
 `AdsorbingPoreDomain::{step_candidate_adaptive_to,advance_adaptive_to}` control

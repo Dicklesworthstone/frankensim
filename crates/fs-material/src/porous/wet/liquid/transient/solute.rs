@@ -8,18 +8,70 @@
 //! ordering is required in every constituent array. The caller qualifies D/tau
 //! and the passive dilute approximation at the actual aqueous state. Solutes do not alter water
 //! pressure, saturation, viscosity, density or retention. Activity/cross-friction,
-//! ionic migration, reaction, adsorption and hydrodynamic dispersion need their
-//! own constitutive owners and are not inferred from these passive coefficients.
+//! ionic migration, reaction and hydrodynamic dispersion need their own laws.
+//! The explicit linear sorption extension adds reversible immobile storage;
+//! sorption is never inferred from the aqueous diffusivity or tortuosity.
 
 use super::{LiquidSaturationCandidate, LiquidSaturationColumn};
 
+mod sorption;
 mod transport;
+pub use sorption::{LinearSoluteSorption, SorbingDiluteSoluteReport, SorbingDiluteSoluteStep};
 pub use transport::{
     DiluteSoluteBoundary, DiluteSoluteControls, DiluteSoluteError, DiluteSoluteReport,
     DiluteSoluteStep,
 };
 
 impl LiquidSaturationCandidate {
+    /// Transport dilute solutes with explicit reversible linear immobile storage.
+    ///
+    /// Aqueous and sorbed amounts are both mol per bulk transverse m². Every
+    /// law declares B [m] so b_eq=B*c, independent of the changing water volume.
+    /// The finite-rate option applies db/dt=k*(B*c-b) implicitly in the SAME
+    /// transport solve; equilibrium mode requires an already equilibrated
+    /// original bound pool within the absolute amount tolerance.
+    ///
+    /// The eliminated bound storage changes only the system diagonal and RHS.
+    /// Darcy advection and theta*D/tau diffusion retain the original water
+    /// geometry. Total constituent equations/balances and the represented bound
+    /// exchange are checked independently. The whole proposal is first-order
+    /// in time; coefficients are caller-qualified and frozen over the interval.
+    /// No nonlinear sites, cross-species competition, sorption heat, drying
+    /// deposition or feedback into hydraulics is inferred.
+    #[allow(clippy::too_many_arguments)]
+    pub fn transport_sorbing_dilute_solutes<const N: usize>(
+        &self,
+        original: &LiquidSaturationColumn,
+        initial_aqueous_amount_mol_m2: &[[f64; N]],
+        initial_sorbed_amount_mol_m2: &[[f64; N]],
+        sorption_laws: &[[LinearSoluteSorption; N]],
+        aqueous_diffusivity_m2_s: &[[f64; N]],
+        transport_tortuosity: &[f64],
+        boundaries: [DiluteSoluteBoundary<N>; 2],
+        controls: DiluteSoluteControls<N>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SorbingDiluteSoluteStep<N>, DiluteSoluteError> {
+        let mut storage = sorption::SorptionStorage::new(
+            original.cells.len(),
+            self.step.duration_s,
+            initial_sorbed_amount_mol_m2,
+            sorption_laws,
+            controls,
+            &mut cancelled,
+        )?;
+        let aqueous = self.transport_solute_storage(
+            original,
+            initial_aqueous_amount_mol_m2,
+            aqueous_diffusivity_m2_s,
+            transport_tortuosity,
+            boundaries,
+            controls,
+            &mut storage,
+            &mut cancelled,
+        )?;
+        storage.finish(initial_aqueous_amount_mol_m2, aqueous, &mut cancelled)
+    }
+
     /// Advance passive dissolved inventories over this SAME accepted water step.
     ///
     /// The candidate binds its exact original saturation/time and native cells/
@@ -54,6 +106,30 @@ impl LiquidSaturationCandidate {
         transport_tortuosity: &[f64],
         boundaries: [DiluteSoluteBoundary<N>; 2],
         controls: DiluteSoluteControls<N>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<DiluteSoluteStep<N>, DiluteSoluteError> {
+        self.transport_solute_storage(
+            original,
+            initial_amount_mol_m2,
+            aqueous_diffusivity_m2_s,
+            transport_tortuosity,
+            boundaries,
+            controls,
+            &mut (),
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn transport_solute_storage<const N: usize>(
+        &self,
+        original: &LiquidSaturationColumn,
+        initial_amount_mol_m2: &[[f64; N]],
+        aqueous_diffusivity_m2_s: &[[f64; N]],
+        transport_tortuosity: &[f64],
+        boundaries: [DiluteSoluteBoundary<N>; 2],
+        controls: DiluteSoluteControls<N>,
+        storage: &mut impl transport::ImmobileStorage<N>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DiluteSoluteStep<N>, DiluteSoluteError> {
         if cancelled() {
@@ -95,7 +171,7 @@ impl LiquidSaturationCandidate {
             }
             faces.push(volume);
         }
-        transport::transport(
+        transport::transport_with_storage(
             [original.elapsed_s, self.state.elapsed_s],
             self.step.duration_s,
             &before,
@@ -107,7 +183,11 @@ impl LiquidSaturationCandidate {
             transport_tortuosity,
             boundaries,
             controls,
+            storage,
             cancelled,
         )
     }
 }
+
+#[cfg(test)]
+mod adapter_tests;
