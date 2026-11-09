@@ -5,9 +5,11 @@
 //! moments. The SAME flux then transports the complete affine BDM velocity:
 //! `M(rho_new) u_new/dt + C(j) u_new + A(mu) u_new + G p
 //!  = M(rho_old) u_old/dt + f`, with the original continuity equations.
-//! The advecting volume velocity is explicitly lagged. Momentum, viscosity and
-//! pressure are implicit; this is a first-order fixed-mesh IMEX discretization,
-//! not a fully implicit density/velocity iteration or an EOS closure.
+//! The original entries explicitly lag the advecting volume velocity while
+//! momentum, viscosity and pressure are implicit. The coupled child module
+//! instead iterates the endpoint advector with its accepted transport. Both are
+//! first-order fixed-mesh maps with old-state donors, not fully implicit density
+//! integration or an EOS closure.
 //!
 //! Constant velocity is compatible with the density update because div(j)
 //! equals the cell mass loss, up to reported density-conversion roundoff.
@@ -31,6 +33,10 @@ use crate::ns::transport::density::{
 use crate::ns::transport::mass_flux::PreparedDensityMassFlux;
 use crate::ns::{FluxParams, FluxSystem, convection_boundary_trace, momentum_entry};
 use fs_sparse::Coo;
+
+/// Self-consistent endpoint-advector density and native BDF1 momentum.
+#[path = "conservative/coupled.rs"]
+pub mod coupled;
 
 /// Bounded density subcycling with one original native macro momentum solve.
 pub mod subcycle;

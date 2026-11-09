@@ -13,6 +13,9 @@ use fs_flux::{
 };
 use fs_solid::Mesh2;
 
+#[path = "density_momentum/coupled.rs"]
+mod coupled;
+
 #[path = "density_momentum/subcycle.rs"]
 mod subcycle;
 

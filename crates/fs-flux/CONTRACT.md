@@ -9638,3 +9638,33 @@ zero-SGS limit, and transactional refusal/cancellation. Scoped pinned formatting
 and whitespace checks passed. Native execution remains pending because the
 pinned asupersync dependency exceeded this execution environment's available
 build resources before the changed crate could compile.
+
+### Endpoint-advector density/momentum coupling
+
+`FluxSystem::density_momentum_coupled_bdf1_step` iterates the native endpoint
+velocity as the conservative density advector. Each trial starts from the SAME
+immutable old density, specific inventories and momentum history. It reuses the
+original directional transport, compatible H(div) mass flux, distinct old/new
+inertia, physical force/viscosity conversion and BDM pressure/reaction assembly.
+Rejected Picard updates do not consume physical time or transported inventory.
+
+The existing bounded Picard owner requires the unrelaxed velocity correction
+and both original/row-scaled residuals reassembled at the returned endpoint.
+The accepted density and ALL carried inventories are exactly the original
+transport evaluated with that returned velocity; the retained pressure,
+reactions and kinetic observations use the same endpoint mass flux. A failed
+source, missing inflow donor after reversal, excessive trial CFL, exhausted
+nonlinear work or cancellation publishes no partial coupled state.
+
+This remains first-order endpoint-advector coupling, with old-state donor
+densities and specific values. It is not fully implicit density integration
+and retains the original CFL/divergence admission, fixed geometry and passive
+inventory semantics. No phase-volume source, EOS, heat diffusion, full coupled
+adjoint or automatic numerical-heating deposition is added. Callbacks must be
+pure through all trials. Storage does not accumulate iteration history; native
+assembly/solve allocation and synchronous cancellation limits remain unchanged.
+
+G1/G3 tests in `tests/density_momentum/coupled.rs` cover acceleration from rest
+with same-interval density/inventory transport, reference-density invariance,
+closed unequal-density mass/carried/kinetic balances, and atomic nonlinear,
+CFL, missing-donor and cancellation refusals.
