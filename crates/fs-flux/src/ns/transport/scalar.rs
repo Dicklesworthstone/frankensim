@@ -22,6 +22,8 @@ use fs_sparse::precond::{Ilu0, IluControlledError, Precond, ilu0_controlled};
 use fs_sparse::{Coo, Csr};
 
 mod assembly;
+/// Opt-in conservative scalar bounds using original-operator flux correction.
+pub mod bounded;
 
 /// Each original boundary edge needs exactly one owner. Callbacks must be pure.
 #[derive(Clone, Copy)]
@@ -131,6 +133,11 @@ struct BoundaryFlux {
     diffusion: [f64; 3],
     advective_load: f64,
     diffusive_load: f64,
+    // Complete native weak boundary load, resolved onto the SAME two original
+    // Gauss values. Some SIP/trace-interpolation coefficients can be negative.
+    reservoir_coefficients: [[f64; 2]; 3],
+    reservoir_values: [f64; 2],
+    prescribed_flux: bool,
 }
 
 /// Frozen endpoint velocity, diffusivity and boundary traces. Reprepare when

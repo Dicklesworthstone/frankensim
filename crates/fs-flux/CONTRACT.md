@@ -11144,8 +11144,9 @@ The interface oracle retains both one-sided contributions at contrast 1e18.
 These focused builds used the original numerical kernels without numerical
 stubs; full Cargo/runtime integration was not run. This is passive transport
 with fixed storage properties, without variable-Cp enthalpy, phase change,
-buoyancy/thermal feedback, scalar positivity enforcement or three-dimensional
-LES qualification.
+buoyancy/thermal feedback or three-dimensional LES qualification. The original
+BDF entries do not enforce scalar bounds; the explicit bounded lane is described
+below.
 
 ## Resolved moving liquid heat around a phase-changing vapor bubble
 
@@ -11390,3 +11391,47 @@ derivative, binary normalization, and species/energy conservation through the
 supported species limit. Additional cases retain ordinary convexity admission,
 workspace boundaries and transactional cancellation. These are numerical
 oracles, not material calibration or spatial-convergence certificates.
+
+## Conservative bounds for planar SGS scalar transport
+
+`PreparedScalarTransport::prepare_bounded_transport` adds an opt-in invariant
+interval for passive concentration or constant-Cp temperature. It uses the
+original P1-DG advection/SIP matrix, original BDM velocity and the same
+molecular plus authored SGS diffusivity. Symmetric algebraic graph diffusion
+and original lumped P1 storage form a monotone Euler predictor. Limited paired
+antidiffusive fluxes restore consistent mass and high-order transport where
+the available scalar inventory permits. Equal-and-opposite interior corrections
+conserve inventory; no scalar clipping, redistribution or mass repair is applied.
+
+Complete signed weak boundary coefficients are retained on the original
+two-Gauss traces, including SIP and reversing-flow interpolation. The discrete
+constant-mode identity is explicitly admitted before claiming bounds.
+Reservoir admission includes the affine trace's physical endpoint extrema.
+The bounded SSPRK2 driver subcycles the complete interval under the actual
+low-order advection/diffusion CFL and an explicit work cap. Both Euler stages
+and the returned P1 field retain authored bounds up to the declared
+floating-point allowance. Failure or cancellation returns no partial interval
+and leaves the supplied history unchanged.
+
+Accepted boundary accounts integrate the original advective and SIP diffusive
+fluxes on those same stages, plus any boundary graph diffusion not removed by
+limiting. This extra numerical exchange is reported separately from molecular
+or SGS mixing. Source-free means no volumetric source; value and advective
+reservoir boundaries may still supply scalar or heat. Homogeneous diffusive
+flux is supported. Arbitrary volumetric sources and nonzero imposed flux need
+a separately admitted bound policy and remain on the original BDF path.
+Frozen coefficients/data, constant storage properties and the planar Estimated
+scope remain unchanged. There are no coupled species-sum constraints or new
+three-dimensional turbulence claims. Limiting may reduce local order near
+extrema.
+
+Ten focused integration tests and both scalar numerical unit tests passed
+using the original numerical source build. Five new integration groups
+demonstrate a sharp-front failure of unrestricted DG and the inventory error
+of clipping, bounded propagation, skew-grid thermal conservation, all-model
+and disabled-SGS coupling, reversing reservoirs, smooth-grid refinement,
+explicit source refusal and atomic cancellation. A new private oracle on
+obtuse triangles verifies signed SIP reservoir terms: inactive limiting
+matches original consistent-mass LU evolution, while bounded heating closes
+the budget with nonzero limiter boundary exchange. The prior six scalar
+checks also remain green. Full Cargo/runtime validation was not run.
