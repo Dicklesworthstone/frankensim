@@ -20,8 +20,10 @@
 //! and damping may be anisotropic, nonsymmetric or active. Changing speed,
 //! temperature, preload or a fluid state requires supplying the corresponding
 //! coefficients. This is a rigid-rotor linearization; shaft flexibility,
-//! nonlinear bearing clearance, spin acceleration and asymmetric-rotor Floquet
-//! physics require their original dynamic operators, not this reduction.
+//! nonlinear bearing clearance and asymmetric-rotor Floquet physics require
+//! their original dynamic operators. [`RigidRotor::spin_ramp_step`] supplies
+//! prescribed spin acceleration with an explicit drive-torque direction,
+//! phase-continuous unbalance and the corresponding transverse Euler terms.
 
 use super::{RotorBearingModel, RotorError};
 use crate::articulated::SpatialInertia;
@@ -30,6 +32,8 @@ use fs_math::c64::C64;
 
 mod unbalance;
 pub use unbalance::{PreparedRotorUnbalance, RotorUnbalanceKinematicsCotangent};
+mod ramp;
+pub use ramp::{RigidRotorSpinRampStep, RotorSpinDriveAxis, RotorSpinRamp, RotorSpinState};
 
 /// Bound on supplied bearing and unbalance stations per rigid rotor query.
 pub const MAX_ROTOR_STATIONS: usize = 256;

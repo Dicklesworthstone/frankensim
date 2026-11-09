@@ -8,8 +8,9 @@
 //! <https://ansyshelp.ansys.com/public/Views/Secured/corp/v242/en/ans_thry/thy_tool19.html>.
 //!
 //! This is the existing small-unbalance perturbation model. It does not add
-//! another mass/inertia, supply a spin drive, or change the fixed-speed rotor
-//! operator into a complete variable-spin or nonlinear bearing model.
+//! another mass/inertia or supply a spin drive. The native
+//! [`RigidRotor::spin_ramp_step`] combines this source with prescribed spin
+//! motion and an explicitly selected physical drive-torque direction.
 
 use super::{
     MAX_ROTOR_STATIONS, RigidRotor, RotorError, RotorUnbalance, add_compensated, finite, poll,

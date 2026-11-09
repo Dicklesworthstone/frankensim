@@ -905,7 +905,8 @@ The physical rigid-rotor specialization preserves transverse angular momentum
 `H = Jd theta_dot + Jp Omega [theta_y, -theta_x]` during unsupported constant-spin
 whirl. The caller supplies load samples, coefficient validity and any event
 time. Spin acceleration and nonlinear bearing evolution require their own
-physical operators. Cancellation or failed balance publishes no partial state.
+physical operators; the rigid specialization below supplies an explicit
+prescribed-spin owner. Cancellation or failed balance publishes no partial state.
 
 The transient tests exercise full-mass impulse-to-trajectory response, native
 rigid-rotor angular momentum and energy, analytic whirl and damped ring-down
@@ -917,8 +918,9 @@ rotation and admits axisymmetry under an explicit tight tolerance. Its four
 stationary coordinates are lateral translation and tilt; finite bearings use
 their actual axial stations through `A^T B A`, retaining force moments.
 Signed-speed unbalance uses `A^T F`, and recovered bearing work keeps its sign.
-This is a rigid, constant-speed linearization, without flexible-shaft,
-spin-acceleration or asymmetric-rotor Floquet claims.
+This is a rigid small-tilt linearization, without flexible-shaft or
+asymmetric-rotor Floquet claims. The steady lane retains constant speed;
+the explicit ramp lane below also supplies the acceleration-dependent terms.
 
 `RigidRotor::prepare_unbalance` retains a separate transient physical load
 source for prescribed phase, signed speed and angular acceleration. Each
@@ -940,6 +942,38 @@ operators needed for a general variable-spin tilt or flexible-shaft model.
 steady-phasor and phase-origin equivalence, all three load derivatives, native
 four-coordinate translational response against an integrated acceleration
 oracle with second-order refinement, and cancellation/representability refusal.
+
+`RigidRotor::spin_ramp_step` advances those original four coordinates through a
+prescribed constant-angular-acceleration interval. `RotorSpinState` retains
+continuous time, phase and signed speed; phase is integrated quadratically and
+the unbalance is sampled at its actual temporal midpoint, retaining tangential
+forces during startup, braking and reversal. Prepared unbalance moments require
+no station traversal during a step. A bounded four-coordinate native midpoint
+factorization retains complete `M,C,K,G`, including anisotropic, nonsymmetric
+and active bearing entries. The resulting trajectory is second order under
+time refinement; constant acceleration zero reduces to the original steady
+midpoint step without a second integration kernel.
+
+The drive-torque direction is an explicit physical input. Differentiating
+`H_perp = Jd theta_dot + Jp Omega [theta_y,-theta_x]` contributes both
+`Omega G theta_dot` and `alpha G theta`. A drive following the actual tilted
+shaft supplies the latter transverse torque and cancels it. A drive held
+along nominal stationary +z leaves the full additional `alpha G theta`
+operator. No torque direction is silently selected. Original bearing-stiffness
+work and signed work against this acceleration coupling are reported separately;
+their sum is the native effective-stiffness work. Acceleration coupling is
+exchange with the prescribed spin boundary, not damping heat or elastic storage.
+
+This owner prescribes spin rather than solving a finite-torque motor, drive
+storage or flexible-shaft problem. It retains the original small-unbalance,
+small-tilt and authored bearing-coefficient validity. A nonadvancing clock,
+nonrepresentable kinematics/operator, native solve/balance refusal or cancellation
+returns neither a partial lateral state nor a partial spin advance.
+`tests/rigid_rotor_spin_ramp.rs` checks exact free angular-momentum precession
+and its second-order refinement, shaft-following versus stationary torque,
+analytic accelerating/braking/reversing unbalance translation, native steady
+equivalence, independent bearing-point work and acceleration exchange, and
+invalid input or final-poll cancellation with exact retry.
 
 Focused regressions use independent Jeffcott amplitude/phase, gyroscopic circular
 mode splitting, dense coordinate congruence, cross-coupled/active work and

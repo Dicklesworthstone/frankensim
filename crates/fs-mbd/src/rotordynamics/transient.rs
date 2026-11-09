@@ -17,6 +17,7 @@
 use super::{MAX_ROTOR_DOFS, RotorBearingModel, RotorError, RotorOperatingPoint, finite, poll};
 use fs_la::factor::{Cholesky, FactorError, Lu, cholesky, lu};
 use fs_math::dd::Dd;
+use std::borrow::Cow;
 
 pub mod drive;
 
@@ -177,6 +178,7 @@ pub struct RotorMidpoint<'a> {
     duration_seconds: f64,
     relative_tolerance: f64,
     velocity_operator: Vec<f64>,
+    stiffness_operator: Cow<'a, [f64]>,
     mass_scale: Vec<f64>,
     mass_factor: Cholesky,
     step_row_scale: Vec<f64>,
@@ -197,6 +199,24 @@ impl<'a> RotorOperatingPoint<'a> {
         &self,
         duration_seconds: f64,
         relative_tolerance: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<RotorMidpoint<'a>, RotorError> {
+        self.midpoint_stepper_with_stiffness(
+            duration_seconds,
+            relative_tolerance,
+            Cow::Borrowed(&self.model.stiffness),
+            cancelled,
+        )
+    }
+
+    // The physical rigid-rotor ramp supplies its explicit Euler operator.
+    // Keeping this internal prevents arbitrary operators from silently
+    // replacing the declared bearing stiffness in the steady public lane.
+    pub(super) fn midpoint_stepper_with_stiffness(
+        &self,
+        duration_seconds: f64,
+        relative_tolerance: f64,
+        stiffness_operator: Cow<'a, [f64]>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<RotorMidpoint<'a>, RotorError> {
         poll(&mut cancelled)?;
@@ -212,6 +232,13 @@ impl<'a> RotorOperatingPoint<'a> {
             ));
         }
         let m = self.model;
+        if stiffness_operator.len() != m.n * m.n
+            || stiffness_operator.iter().any(|x| !x.is_finite())
+        {
+            return Err(RotorError::Invalid(
+                "finite matching rotor stiffness required",
+            ));
+        }
         let mass_scale: Vec<_> = (0..m.n)
             .map(|i| fs_math::det::sqrt(m.mass[i * m.n + i]))
             .collect();
@@ -224,7 +251,7 @@ impl<'a> RotorOperatingPoint<'a> {
                 let ij = i * m.n + j;
                 scaled_mass[ij] = finite((m.mass[ij] / mass_scale[i]) / mass_scale[j])?;
                 let entry = finite(half.mul_add(
-                    half * m.stiffness[ij],
+                    half * stiffness_operator[ij],
                     half.mul_add(self.velocity_operator[ij], m.mass[ij]),
                 ))?;
                 matrix[ij] = finite((entry / mass_scale[i]) / mass_scale[j])?;
@@ -250,6 +277,7 @@ impl<'a> RotorOperatingPoint<'a> {
             duration_seconds,
             relative_tolerance,
             velocity_operator: self.velocity_operator.clone(),
+            stiffness_operator,
             mass_scale,
             mass_factor,
             step_row_scale,
@@ -316,7 +344,7 @@ impl RotorMidpoint<'_> {
             &mut cancelled,
         )?;
         let stiffness = scaled_action(
-            &self.model.stiffness,
+            &self.stiffness_operator,
             &midpoint_position[..n],
             h,
             &mut cancelled,
@@ -637,7 +665,7 @@ impl RotorMidpoint<'_> {
         }
         self.admit_vector(&half_position[..n])?;
         let velocity_force = action(&self.velocity_operator, &state.velocity, cancelled)?;
-        let spring_force = action(&self.model.stiffness, &half_position[..n], cancelled)?;
+        let spring_force = action(&self.stiffness_operator, &half_position[..n], cancelled)?;
         let mut increment = [0.0; MAX_ROTOR_DOFS];
         for i in 0..n {
             increment[i] = ((h * (force[i] - velocity_force[i] - spring_force[i]))
