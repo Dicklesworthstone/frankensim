@@ -12,6 +12,7 @@ pub use resistance::{StokesResistancePort, StokesResistanceSolution};
 #[path = "flow_control/windkessel.rs"]
 mod windkessel;
 pub(crate) use windkessel::solve_windkessel_assembly;
+pub(super) use windkessel::{reduce_windkessel_ports, report_windkessel_ports};
 pub use windkessel::{
     StokesWindkesselBalance, StokesWindkesselHistory, StokesWindkesselPort,
     StokesWindkesselSolution,

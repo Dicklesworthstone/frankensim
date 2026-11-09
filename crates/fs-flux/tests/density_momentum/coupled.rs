@@ -3,6 +3,9 @@
 use super::*;
 use fs_flux::ns::boundary::StokesRheologyControls;
 
+#[path = "coupled/windkessel.rs"]
+mod windkessel;
+
 fn nonlinear() -> StokesRheologyControls {
     StokesRheologyControls {
         maximum_iterations: 80,

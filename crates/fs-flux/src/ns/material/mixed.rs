@@ -24,6 +24,7 @@ mod resistance;
 pub use resistance::{MaterialStokesResistancePort, MaterialStokesResistanceSolution};
 #[path = "mixed/windkessel.rs"]
 mod windkessel;
+pub(crate) use windkessel::{physical_windkessel, with_kinematic_windkessel};
 pub use windkessel::{
     MaterialStokesWindkesselBalance, MaterialStokesWindkesselHistory, MaterialStokesWindkesselPort,
     MaterialStokesWindkesselSolution,

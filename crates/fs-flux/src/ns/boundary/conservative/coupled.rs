@@ -14,6 +14,10 @@ use super::{
 use crate::ns::boundary::flow_control::FlowControl;
 use crate::ns::boundary::{StokesBoundaryError, StokesFlowControlSolution, StokesRheologyControls};
 
+/// Finite external RCR storage coupled to the same transported-density endpoint.
+#[path = "coupled/windkessel.rs"]
+pub mod windkessel;
+
 /// Joint density/inventory/flow endpoint at its own transport velocity.
 pub struct CoupledDensityMomentumStep<const N: usize> {
     /// Physical inventories, pressure, boundary reactions and native velocity.

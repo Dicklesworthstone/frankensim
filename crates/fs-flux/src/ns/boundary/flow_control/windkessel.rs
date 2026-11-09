@@ -150,7 +150,7 @@ pub(crate) fn solve_windkessel_assembly(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn reduce_windkessel_ports(
+pub(in crate::ns::boundary) fn reduce_windkessel_ports(
     system: &FluxSystem<'_>,
     ports: &[&[usize]],
     loads: &[StokesWindkesselPort],
@@ -223,7 +223,7 @@ fn reduce_windkessel_ports(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn report_windkessel_ports<S>(
+pub(in crate::ns::boundary) fn report_windkessel_ports<S>(
     reduced: &[ReducedWindkesselPort],
     flow: S,
     kinetic_energy_m4_s2: f64,

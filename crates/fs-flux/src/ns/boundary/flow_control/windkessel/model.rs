@@ -57,7 +57,7 @@ pub struct StokesWindkesselBalance {
     pub compliance_flow_residual_m2_s: f64,
 }
 
-pub(super) struct ReducedWindkesselPort {
+pub(in crate::ns::boundary) struct ReducedWindkesselPort {
     pub(super) pressure_offset: f64,
     pub(super) resistance: f64,
     load: StokesWindkesselPort,

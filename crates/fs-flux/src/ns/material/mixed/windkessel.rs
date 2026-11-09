@@ -177,7 +177,7 @@ pub(super) fn solve_material_windkessel_assembly<S>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn with_kinematic_windkessel<T>(
+pub(crate) fn with_kinematic_windkessel<T>(
     density: f64,
     ports: &[&[usize]],
     loads: &[MaterialStokesWindkesselPort],
@@ -273,7 +273,7 @@ fn with_kinematic_windkessel<T>(
     )
 }
 
-fn physical_windkessel<N, S>(
+pub(crate) fn physical_windkessel<N, S>(
     solved: StokesWindkesselSolution<N>,
     density: f64,
     recover: impl FnOnce(N, f64) -> Result<S, MaterialFluxError>,

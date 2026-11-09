@@ -10455,3 +10455,13 @@ work/transfer receipts and a large-reference artificial-heating regression.
 Seven original-source caloric transport cases separately passed through the
 actual public API. These are numerical verification, not experimental liquid
 validation or full workspace/DSR/material-build evidence.
+
+### Transported-density flow with finite external RCR storage
+
+`density_momentum_coupled_bdf1_windkessel_step` advances density/inventories, native momentum, external compliance and optional series inertance at one BDF1 endpoint.
+Existing SI loads/history/result carriers and unit conversions are reused; native reduction freezes only immutable previous fluid/compliance histories, while each nonlinear trial resolves the current density-dependent pressure response.
+All traction ports may carry loads. Reservoir laws supply pressure datums; caller-owned inflow density/inventory and Open/OpenReservoir momentum semantics remain authoritative under reversal.
+Final storage, resistor loss, pressure/reaction work and original dynamic-law residuals use measured accepted port flow. The kinetic report derives from actual heterogeneous-density energy, never a uniform reference-density surrogate.
+External energies/powers remain J/m and W/m, while the nested density-step inventories already include declared depth. Multiply external accounts by that depth for total J/W.
+Physical resistor loss and the reported BDF1 numerical energy defect remain separate from transported caloric inventory; no external EOS, material reservoir inventory or thermal deposition is implied.
+Original transport/hydraulic error owners and late cancellation refuse the complete fluid/storage result atomically. Two-step physical-oracle regressions cover heterogeneous inertia, both compliance histories, normalization, per-port work, storage-driven reverse flow and immutable refusal.
