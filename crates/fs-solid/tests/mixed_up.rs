@@ -16,6 +16,9 @@ use fs_solid::linear3::tet10::{TET10_EDGES, promote_p1_to_p2};
 use fs_solid::linear3::{TetAssemblyBudget, TetElasticError};
 use fs_solver::nonlinear::NewtonKrylovConfig;
 
+#[path = "mixed_up/continuation.rs"]
+mod continuation;
+
 #[path = "mixed_up/reference_density.rs"]
 mod reference_density;
 

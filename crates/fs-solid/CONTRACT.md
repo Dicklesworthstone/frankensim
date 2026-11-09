@@ -14197,3 +14197,53 @@ retain the small-strain reference-surface scope and original cancellation and
 publication behavior. Source review is complete; compilation and executable
 regressions were unavailable after the runtime-dependency build disconnected
 from the execution environment.
+
+## Mixed finite-strain equilibrium paths through limit points
+
+`hyper3::mixed::continuation::MixedContinuation` connects the original prepared
+TET10/P1 material system to the existing bordered pseudo-arclength solver.
+`MixedUpProblem::prepare_continuation` admits native hyperelastic sources;
+`PreparedMixedUpProblem::into_continuation` and the original uniform-pressure
+and stationary-gravity wrappers retain their already admitted geometry and loads.
+The source must implement both `HyperelasticMaterial` and
+`MixedFiniteStrainPotential`; frozen incremental inelastic potentials are not
+substituted for a history-independent equilibrium path.
+
+The original length and stress scales form diagonal variable scale D. With
+W = stress_scale_pa * reference_volume_m3, free coordinates are D^-1 x,
+the normalized residual is D r/W, and its tangent is the congruence D K D/W.
+Pressure residuals remain volumes, paired with their pressure scale. Original
+dead forces, held current-geometry pressure/gravity, prescribed displacements,
+and an authored pressure gauge datum all ramp with lambda, exactly as in the
+native static endpoints. The negative parameter derivative includes -D K_fc g/W
+for every prescribed displacement or pressure datum; constraint rows receive
+the same full tangent lifting. Held loads use their original quadrature and
+geometry derivatives without another constitutive assembly.
+
+A shared exact-point cache retains the residual, tangent and load column.
+Every evaluation preserves native material and geometry domains. Both Newton
+and continuation use one original constant-pressure-null-mode test. Every
+accepted continuation step additionally checks ALL pressure equations,
+including the gauge equation omitted from the algebraic solve. Thus an
+incompatible prescribed volume cannot be hidden behind a pressure pin.
+The complete requested advance is transactional with respect to its input
+PathState; cancellation or any refused intermediate endpoint returns no
+successor. Continuation state includes independent pressures and retains the
+native deterministic restart representation.
+
+Responses expose physical displacement, pressure, reactions, free-force
+residuals, all volume residuals, sampled det(F), and the original MATERIAL
+MIXED SADDLE potential. This potential is not relabeled as physical stored
+energy, and external loading potentials are excluded. Preparation and path
+growth obey the original assembly/factor payload caps, including retained
+CSR, bounded dense/Krylov border storage, and candidate path records.
+
+G0/G1 regressions in `tests/mixed_up/continuation.rs` cover an analytic
+incompressible Ogden tensile fold and split restart, finite-bulk/exact mixed
+tangent and load-column finite differences with moving supports plus native
+pressure/spatial gravity, pressure-gauge shear motion, incompatible volume,
+and cancellation on a cached point. The mixed saddle tangent is generally
+indefinite even on a stable branch: generic definiteness events are not a
+mechanical bifurcation certificate, and unverified branch-switch directions
+are refused. No mesh/inf-sup convergence, spatial injectivity, stability,
+evolving temperature/reference, or constitutive-history claim is added.

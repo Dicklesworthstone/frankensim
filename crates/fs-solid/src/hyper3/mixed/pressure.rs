@@ -212,6 +212,19 @@ impl<L: MixedFiniteStrainPotential> MixedPressureSolution<'_, L> {
 }
 
 impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> UniformPressureMixedProblem<'a, L> {
+    /// Follow the same mixed equilibrium with its original held loads.
+    /// The path parameter scales current pressure/gravity, dead forces and
+    /// the original support/gauge targets together.
+    pub fn into_continuation(
+        self,
+        cx: &Cx<'_>,
+    ) -> Result<
+        super::continuation::MixedContinuation<'a, L>,
+        super::continuation::MixedContinuationError,
+    > {
+        self.prepared.into_continuation(cx)
+    }
+
     /// Original finite-compliance modes with the pressure held at its full
     /// value. The SAME prepared owner equilibrates and assembles the tangent.
     pub fn solve_vibration(

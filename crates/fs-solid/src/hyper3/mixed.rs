@@ -37,6 +37,9 @@ use crate::linear3::{TetAssemblyBudget, TetElasticError};
 mod element;
 use element::{MixedPoint, PreparedMixedElement, PreparedMixedMesh};
 
+/// Native pseudo-arclength paths with independent displacement and pressure.
+pub mod continuation;
+
 /// Retained finite-strain viscoelastic histories on the mixed solid.
 pub mod visco;
 
@@ -514,6 +517,33 @@ impl<L: MixedFiniteStrainPotential> PreparedMixedUpProblem<'_, L> {
         } else {
             self.problem.settings.stress_scale_pa
         }
+    }
+
+    // One gauge admission shared by endpoint Newton and path continuation.
+    // A pressure pin is only a datum if its whole connected constant-pressure
+    // mode does no work on every free displacement at the actual deformation.
+    fn validate_pressure_gauge(&self, full: &Csr, cx: &Cx<'_>) -> Result<(), MixedUpError> {
+        if let Some((node, _)) = self.problem.pressure_gauge {
+            let nu = 3 * self.mesh.nodes_count;
+            for (i, &d) in self.free[..self.free_displacements].iter().enumerate() {
+                if i % 128 == 0 {
+                    checkpoint(cx)?;
+                }
+                let (cols, values) = full.row(d);
+                let mut signed = 0.0;
+                let mut absolute = 0.0;
+                for (&col, &value) in cols.iter().zip(values) {
+                    if col >= nu && self.gauge_component[col - nu] {
+                        signed += value;
+                        absolute += value.abs();
+                    }
+                }
+                if signed.abs() > 4096.0 * f64::EPSILON * absolute.max(f64::MIN_POSITIVE) {
+                    return Err(MixedUpError::IncompatiblePressureGauge { node });
+                }
+            }
+        }
+        Ok(())
     }
 
     fn validate_state(&self, u: &[[f64; 3]], p: &[f64]) -> Result<(), MixedUpError> {
@@ -1150,25 +1180,7 @@ impl<L: MixedFiniteStrainPotential> Endpoint<'_, '_, '_, '_, L> {
                 .tangent
                 .expect("requested original tangent")
         };
-        let nu = 3 * u.len();
-        if let Some((node, _)) = self.prepared.problem.pressure_gauge {
-            // A pressure pin is only a gauge when its constant component is a
-            // true null mode on the free displacement space, at this actual F.
-            for &d in &self.prepared.free[..self.prepared.free_displacements] {
-                let (cols, values) = full.row(d);
-                let mut signed = 0.0;
-                let mut absolute = 0.0;
-                for (&col, &value) in cols.iter().zip(values) {
-                    if col >= nu && self.prepared.gauge_component[col - nu] {
-                        signed += value;
-                        absolute += value.abs();
-                    }
-                }
-                if signed.abs() > 4096.0 * f64::EPSILON * absolute.max(f64::MIN_POSITIVE) {
-                    return Err(MixedUpError::IncompatiblePressureGauge { node });
-                }
-            }
-        }
+        self.prepared.validate_pressure_gauge(&full, self.cx)?;
         let n = self.prepared.free.len();
         let mut coo = Coo::new(n, n);
         let mut coupling = (!self.moving.is_empty()).then(|| Coo::new(n, self.moving.len()));

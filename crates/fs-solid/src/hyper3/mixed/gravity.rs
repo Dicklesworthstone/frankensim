@@ -322,6 +322,19 @@ impl<L: MixedFiniteStrainPotential> MixedGravitySolution<'_, L> {
 }
 
 impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> PreparedMixedGravityProblem<'a, L> {
+    /// Follow the same mixed equilibrium with its original held loads.
+    /// The path parameter scales current pressure/gravity, dead forces and
+    /// the original support/gauge targets together.
+    pub fn into_continuation(
+        self,
+        cx: &Cx<'_>,
+    ) -> Result<
+        super::continuation::MixedContinuation<'a, L>,
+        super::continuation::MixedContinuationError,
+    > {
+        self.prepared.into_continuation(cx)
+    }
+
     /// Finite-compliance modes of the loaded equilibrium. Density for inertia
     /// is the SAME retained reference density that supplies gravitational mass.
     pub fn solve_vibration(
