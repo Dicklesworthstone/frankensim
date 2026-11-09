@@ -134,6 +134,13 @@ impl Frame2d {
         let mut layers = 0_usize;
         for (element, (member, capacity)) in self.elements.iter().zip(capacities).enumerate() {
             checkpoint(cx)?;
+            if member.sections.iter().any(|section| {
+                matches!(section, super::SectionModel::ThermalElastic(_))
+            }) {
+                return Err(FrameTensileError::Invalid(
+                    "thermal frame layer stresses require thermal section recovery; resultant-only strength omits thermal mismatch",
+                ));
+            }
             if member.material_section.as_ref() != Some(capacity.section()) {
                 return Err(FrameTensileError::SourceMismatch { element });
             }

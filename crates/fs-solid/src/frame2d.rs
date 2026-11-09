@@ -66,6 +66,10 @@ pub mod ductile_damage;
 /// Source-bound axial/bending tensile limits on accepted material-frame forces.
 pub mod strength;
 
+/// Source-integrated expansion on the native elastic frame and reference mass.
+pub mod thermal;
+pub use thermal::{FrameThermalSection, FrameThermalSectionResponse};
+
 /// Full forced resonance of the original elastic frame and its material losses.
 pub mod harmonic;
 
@@ -111,6 +115,9 @@ pub enum SectionModel {
         /// Flexural rigidity.
         ei: f64,
     },
+    /// Frozen-temperature layer expansion and elastic response, retaining the
+    /// shared material law instead of replacing it by a stress-free EA/EI pair.
+    ThermalElastic(FrameThermalSection),
     /// A fiber section (fs-material uniaxial laws per fiber).
     Fiber(Section),
 }
@@ -121,6 +128,7 @@ impl SectionModel {
     pub fn try_respond(&self, eps0: f64, kappa: f64) -> Result<SectionState, SolidError> {
         match self {
             Self::Fiber(section) => section.try_respond(eps0, kappa),
+            Self::ThermalElastic(section) => section.respond(eps0, kappa),
             Self::Elastic { .. } => Ok(self.respond(eps0, kappa)),
         }
     }
@@ -135,6 +143,11 @@ impl SectionModel {
                 tangent: [[*ea, 0.0], [0.0, *ei]],
             },
             SectionModel::Fiber(s) => s.respond(eps0, kappa),
+            SectionModel::ThermalElastic(s) => s.respond(eps0, kappa).unwrap_or(SectionState {
+                n: f64::NAN,
+                m: f64::NAN,
+                tangent: [[f64::NAN; 2]; 2],
+            }),
         }
     }
 

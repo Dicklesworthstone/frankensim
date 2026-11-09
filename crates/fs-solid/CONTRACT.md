@@ -13620,3 +13620,34 @@ convergence, or an injectivity certificate between quadrature points. This
 adapter does not yet add inertia, creep, thermal evolution, porous/ductile
 damage, contact, or follower loads to mixed plasticity; their existing owners
 remain separate.
+
+### Integrated expansion in native elastic frames
+
+`Frame2d::with_thermal_material_sections` binds the shared material owner's
+`ConcentricThermoelasticSection` at every original Lobatto station. The native
+force-based compatibility solve, support reactions, corotational initial-stress
+tangent, modal stiffness and frozen-temperature Newmark mechanics consume the
+same source-integrated strain and current elastic response. Reference member
+mass, rotary inertia and geometry remain unchanged even when source rho(T)
+changes. Every layer retains its original material/card selection, reference
+temperature, geometry and expansion path; changing an inelastic history or a
+separate shear/viscous operator through this operation refuses.
+
+Residual/tangent trials allocate no layer recovery output. Checked recovery
+reports per-layer thermal mismatch, signed outer-fiber axial stress ranges and
+axial-plus-bending elastic storage. Layer bounds apply to total and elastic
+outer-fiber strains. The existing resultant-only tensile-strength adapter
+refuses these fields because a zero section resultant can conceal opposing
+thermal layer stresses. Refresh/cancellation is transactional. The operation
+refreshes internal compatibility at the retained nodal pose and does not itself
+solve global supported equilibrium or advance thermal/mechanical time.
+
+`tests/frame_thermal_elastic.rs` provides analytical G1/G3 definitions for free
+and restrained spatial heating, current-modulus compliance and frequencies,
+unchanged reference mass action, layered mismatch stress/storage, cooling,
+negative expansion, rotation, source/reference refusal and cancellation. This
+is prescribed-temperature, small-strain, circumferentially uniform concentric
+expansion. It does not supply a heat equation, reciprocal thermal exchange,
+radial expansion, cross-section thermal-gradient bending or a material yield
+calibration. Existing linear harmonic/viscosity routes retain their explicit
+section admission limits.
