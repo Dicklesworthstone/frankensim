@@ -705,7 +705,8 @@ impl HorologyState {
                 // Update anytime-valid COSC chronometer compliance e-process (fs_eproc::BettingEProcess)
                 let normalized_violation =
                     (self.measured_rate_s_per_day.abs() / 20.0).clamp(0.0, 1.0);
-                self.cosc_e_value = self.cosc_eprocess.observe(normalized_violation);
+                let _ = self.cosc_eprocess.observe(normalized_violation);
+                self.cosc_e_value = self.cosc_eprocess.e_value();
             }
         }
 
