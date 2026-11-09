@@ -2887,3 +2887,48 @@ equivalence through adaptive rejections, wall/hybrid replay with exact mean,
 and late spatial-budget/final-cancellation rollback. Source/parser checks
 were completed; native integration compilation and execution remain
 unverified in the disk-constrained implementation workspace.
+
+### Rigid lifting lines in conditioned Mann wake evolution
+
+`MannWakeWind::{shed_near_rigid,shed_hybrid_rigid}` connect the original
+`RigidWakeBoundary` to the same atmospheric transaction. Finite line rotation
+and pivot translation now participate in actual near-only and connected
+near/far wake evolution under the original conditioned OU history. The
+native VPM owner evaluates its rigid geometry at every midpoint or adaptive
+trial stage, preserving station distances and its path-travel resolution
+guard. Each free vertex samples physical wind at that stage's actual world
+position and elapsed time; line material velocity is not added to fluid
+velocity. No independent per-vertex noise or alternative motion law enters.
+
+The pivot, angular velocity, line geometry and atmospheric field all use the
+same right-handed z-up Mann/VPM chart. The prescribed pivot is at the start
+of the shedding interval and must be advanced between calls if it translates.
+The native shedding interval and accepted wind clock must still agree.
+Existing atmospheric/native image-plane compatibility, optional exact log-law
+mean and zero-normal ambient admission apply to rigid boundaries unchanged.
+
+Both new entry points take explicit `MannWakeIntegration` and
+`MannWakeSampling`: direct/tree midpoint, adaptive RK3(2), and exact or
+budgeted affine observations all reuse their original owners. Consecutive
+vertices share each stage frame; rejected adaptive stages revisit the same
+conditioned history, including rebuilding an affine observation when needed.
+All normal-draw, field-sample, spatial-error and native-work limits remain
+effective. As in the existing adapter, direct midpoint reports
+`MannWakeAdvection::DirectMidpoint`; its native field-work receipt is omitted,
+while atmospheric counters and native work admission remain active.
+Only an explicitly selected tree uses the `TreeMidpoint` receipt variant.
+
+Native refusal, excessive line travel, incompatible boundaries, atmospheric
+or affine budget exhaustion, and cancellation leave both wake partitions and
+the accepted wind checkpoint unchanged. After native acceptance only
+infallible wind publication remains. Preserve the explicit motion and
+sampling inputs alongside the original wake/wind checkpoint when replaying
+an interval. All four existing linear-boundary method signatures and their
+behavior are unchanged.
+
+The focused rigid consumer tests compare actual source motion against an
+independently wired original OU bridge/native VPM call, fixed-line geometry
+under the same turbulent history, adaptive near/far replay, uncached affine
+stage observations, and joint work/spatial/boundary/cancellation refusal.
+This connection adds prescribed rigid wake motion in turbulence, not a bound
+circulation solver, a new turbulence closure, or aircraft force/energy claims.
