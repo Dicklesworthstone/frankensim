@@ -8,6 +8,7 @@
 #![warn(missing_docs)]
 
 pub mod adoption;
+pub mod component;
 /// Conservative material streams through stationary or moving control surfaces.
 pub mod surface;
 pub use adoption::{

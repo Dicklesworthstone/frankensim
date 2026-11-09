@@ -1,14 +1,146 @@
 # fs-ports
 
+## Purpose and layer
+
+Layer: L3. The domain-neutral owner of the port vocabulary and of the
+executable Component contract that coupled physics is composed through.
+
 The L3 domain-neutral owner of the existing PortSchema v2, StreamPort v1,
 closed-window accounting, relation admission, and scalar coupling primitives.
 The implementation is extracted unchanged from fs-couple; that crate reexports
 these exact types and remains the owner of assembled physical systems.
 
-Only fs-iface and fs-qty are direct runtime dependencies. Geometry and physics
-operators may use the common types without importing acoustic, fluid or thermal
-solvers. No new quantities, wire versions, source authority, material laws,
-cancellation behavior or whole-system passivity claims are introduced.
+fs-iface, fs-qty and fs-exec are the direct runtime dependencies; fs-exec (L0)
+is there only for the `Cx` that `component` passes through. Geometry and
+physics operators may use the common types without importing acoustic, fluid or
+thermal solvers. The schema, stream and accounting-window types introduce no
+new quantities, wire versions, source authority, material laws, cancellation
+behavior or whole-system passivity claims.
+
+## Public types and semantics
+
+- Port description: `PortSchema` (v2), `PortKind`, `PortValueShape`,
+  `PowerPairing`, `CoordinateBinding`, `PortTimestamp`, `ConservationRole`,
+  `StableId`. A schema is admitted at construction and is descriptive.
+- Streams: `StreamPort` (v1) with its energy charts and
+  `surface::SurfaceTransport`.
+- Accounting windows: `AccountingWindowInterval`, `WindowBalance`,
+  `WindowAuditReport`.
+- Lossless relations: `ConservativeJunction`, `JunctionSchema`, `JunctionLaw`,
+  and the adoption trait `PortedModule`.
+- Iteration weight: `BoundedAitkenRelaxation`.
+- Executable contract: `component::{Component, PortTangent, StageResidual,
+  PortSpec, PortLayout, Class, Receipt, Proposal, audit_step}` and
+  `component::conformance`.
+
+The sections after the ten required ones give the semantics of each group.
+
+## Invariants
+
+- A `PortSchema` exists only if effort times flow, with the declared measure,
+  has the dimensions of power and matches its kind.
+- A lossless relation cancels interface power structurally: signs are exactly
+  plus or minus one and a Dirac matrix is exactly skew. No tolerance is applied.
+- Closed-window residuals are accumulated in one compensated, fixed-order
+  reduction.
+- In the Component contract, port energy is computed from the two values on the
+  wire, and `audit_step` is the only first-law check of a step.
+
+## Error model
+
+Refusals are structured values. `CoupleError` covers schema, stream, window and
+relation refusals. `component::ContractViolation` names the law a step broke. A
+component's own `Error` type passes through the contract unchanged. Non-test
+code contains no `unwrap`, `expect` or `panic!`.
+
+## Determinism class
+
+Deterministic. Non-test code is sequential, uses no threads, clocks, random
+numbers or hash-ordered containers, and reduces in a fixed order.
+
+## Cancellation behavior
+
+Schema, stream, window and relation calls are bounded and do not poll. The
+Component contract passes a `Cx` to `propose` and to the tangent and residual
+calls; the component polls it and returns its own cancellation error.
+
+## Unsafe boundary
+
+None. The crate denies `unsafe_code`.
+
+## Feature flags
+
+None.
+
+## Conformance tests
+
+- `adoption::tests`, `surface/tests.rs` and `relaxation::tests`.
+- `tests/component_reference.rs` for the Component contract, with the two
+  `compile_fail` doctests in `component`.
+- The fs-couple and fs-feec batteries named under "Purpose and layer".
+
+## No-claim boundaries
+
+No whole-system passivity, stability or convergence claim. No claim about the
+validity of any constitutive law, equation of state or measured value that
+flows through a port. Schema admission grants no energy closure. Each section
+below states its own limits.
+
+## Component contract v0
+
+`component` is the executable composition contract (bead
+`frankensim-rc-1109-root-3gc12.5.1`). It is version 0 and may change until the
+five kernel slices of that epic pass on it; nothing outside this crate
+implements it yet.
+
+**Tiers.** `Component` is mandatory: ports, class, `stored_energy_j`,
+`limit_dt_s`, `next_event_s`, `propose`, `admit`. `PortTangent` adds the JVP and
+VJP of the port map. `StageResidual` adds a residual in the component's own
+unknowns. Both optional tiers require `Component`; two `compile_fail` doctests
+pin that.
+
+**State.** The system owns every state. `propose(old, dt, inputs, new, outputs,
+cx)` reads the accepted state and writes a candidate slot whose content on entry
+is unspecified. It is pure: equal arguments give bitwise-equal results and
+nothing else changes. `admit` is the last refusal, after every partner proposed.
+A component may answer `Proposal::Shorten { dt_s }` instead of stepping.
+
+**Port values.** One representative pair per port and step. The side the
+component receives is held over the step; the side it returns is the step
+average of the conjugate. Flow and heat rate are positive into the owner.
+`Carrier::Power(kind)` books `dt * sum(effort * flow)`; `Carrier::Heat` carries
+temperature [K] and heat rate [W] and books `dt * flow`, with entropy
+`dt * flow / temperature`; `Carrier::Signal` books nothing. The kernel computes
+port energy from the wire values (`PortSpec::energy_in_j`), so both ends of a
+lossless connection book the same number.
+
+**First law.** `audit_step` is the one place a step's energy is tested:
+`sum(port energy in) = stored_change_j + numerical_loss_j` within the receipt's
+`energy_tolerance_j`; the receipt's stored change against re-measured endpoint
+energies; dissipation and entropy production not negative; residual within the
+owner's tolerance. Physical dissipation stays in the component as stored
+thermal energy or leaves through a heat port; it is never booked as numerical
+loss.
+
+**Errors.** `Component::Error` is the owner's type and reaches the caller
+unchanged. Contract breaches are `ContractViolation`.
+
+**Determinism and cancellation.** The contract code is sequential. `audit_step`
+does not allocate; `PortLayout::new` allocates its two offset vectors.
+Components poll `Cx::checkpoint` and return their own cancellation error.
+
+**Conformance.** `component::conformance::check_component` and
+`check_port_tangent` are the checks every implementation runs. G0 tests in
+`tests/component_reference.rs`: a spring-mass-damper with a mechanical and a
+heat port passes; 20,000 driven steps close energy to 1e-11 relative; a heat
+leak, a read of the candidate slot and a wrong VJP sign each fail the law they
+break; cancellation returns the owner's error.
+
+**No claim.** v0 has no stream ports with flow reversal, no field ports with a
+duality matrix, no multistage port values and no snapshot identity. The kit
+does not yet check `StageResidual`, unit rescaling, time reversal or temporal
+order. A passing conformance check says a component keeps its own accounts; it
+says nothing about the accuracy of its physics.
 
 The existing fs-couple/tests/couple.rs battery continues to exercise this owner
 through its public reexports. fs-couple/tests/port_identity.rs pins type and
