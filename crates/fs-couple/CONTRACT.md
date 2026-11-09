@@ -14974,3 +14974,28 @@ Focused regressions cover D3Q19/D3Q27 original-owner reduction, scalar/tensor an
 held/changing-force paths, independent momentum/heat balances, late heat refusal,
 retry and profile ownership. Pinned Rust parsing and scoped diff checks passed;
 Cargo typechecking and executable regressions were unavailable in this session.
+
+## Prepared nonlinear contacts with complete live-support heat
+
+`MaterialHeatNetwork::prepare_conductivity` and its prepared
+`field_motion_support_conductivity_candidate` join original E/J material and
+V/I/J interface response to the same finite-enthalpy/live-support transaction.
+`ContactConductionResponse` declares coordinates and source orientation; the
+existing electrical network retains interface cards, geometry, source pins and
+A/B heat partitions. The prepared seed API supplies original circuit inputs.
+
+Solved-field bundles refresh scalar or directional Fourier conductance before
+the original thermal-contact owner applies its series resistance once. The
+same-trial closed-enclosure radiation result is retained once and remains
+internal energy exchange. Native electrical iterations consume the shared work
+budget; source refusal, cancellation and failed admission publish no histories.
+The existing static preparation and support entrypoints retain their reduction.
+
+Auxiliary thermal-contact/emissivity claims must be electrically independent in
+value and applicability. Integrated-layer and externally supplied additional
+link owners explicitly refuse this frontend. Original fixed geometry/inertia,
+constant field-storage and support/caloric restrictions remain. Focused tests
+cover independent series/Fourier/radiation and per-cell/total energy laws,
+constant-response reduction, late source failure, budget/cancellation and retry.
+Pinned Rust parsing and scoped diff checks passed; Cargo compilation and these
+runtime regressions were not executed in this implementation session.

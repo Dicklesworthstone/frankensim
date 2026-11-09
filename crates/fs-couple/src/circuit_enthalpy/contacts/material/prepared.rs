@@ -6,6 +6,8 @@ use fs_conduction::transient::deposition::contact::ThermalLinkMetric;
 
 mod extension;
 mod field_storage;
+mod conductivity;
+pub use conductivity::ContactConductionResponse;
 
 /// One borrowed electrical/thermal contact network with fixed source choices.
 /// The existing bulk preparation and interface evaluator own all material queries.
@@ -156,6 +158,15 @@ impl<'a> ElectricalContactNetwork<'a> {
             None => bulk.resolve(thermal, &mut cancelled),
         }.map_err(Error::Bulk)?;
         let initial=self.resolve_contacts(thermal,sample,None,&mut cancelled)?;
+        self.retain_contact_sources(thermal, bulk, initial, cancelled)
+    }
+
+    fn retain_contact_sources<'n>(
+        &'n self, thermal: &DepositionSimulation<'_>, bulk: PreparedMaterialNetwork<'n, 'a>,
+        initial: ContactThermalCoefficients<MaterialNetworkSample>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedElectricalContactNetwork<'n, 'a>, ElectricalContactNetworkError> {
+        use ElectricalContactNetworkError as Error;
         let mut pins=BTreeMap::new();
         let mut geometry=BTreeMap::new();
         for contact in initial.contacts {

@@ -1,6 +1,6 @@
 //! Same ordered interface card and thermal-link geometry for contact current/heat.
 mod prepared;
-pub use prepared::PreparedElectricalContactNetwork;
+pub use prepared::{ContactConductionResponse, PreparedElectricalContactNetwork};
 use super::*;
 use crate::circuit_enthalpy::material::{MaterialNetwork,MaterialNetworkError,MaterialNetworkSample};
 use fs_material::conductor::ElectricalPropertyBasis;
@@ -89,6 +89,17 @@ impl ElectricalContactNetwork<'_> {
         thermal: &DepositionSimulation<'_>,
         bulk: CircuitThermalCoefficients<MaterialNetworkSample>,
         pins: Option<&BTreeMap<u64, MaterialPropertySelection>>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ContactThermalCoefficients<MaterialNetworkSample>, ElectricalContactNetworkError>
+    {
+        self.resolve_contacts_with_response(thermal, bulk, pins, &[], cancelled)
+    }
+
+    fn resolve_contacts_with_response(
+        &self, thermal: &DepositionSimulation<'_>,
+        bulk: CircuitThermalCoefficients<MaterialNetworkSample>,
+        pins: Option<&BTreeMap<u64, MaterialPropertySelection>>,
+        responses: &[crate::material_circuit::conductivity::contact::ContactResponse<'_>],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ContactThermalCoefficients<MaterialNetworkSample>, ElectricalContactNetworkError>
     {
@@ -118,7 +129,10 @@ impl ElectricalContactNetwork<'_> {
             if !claim
                 .value
                 .axes()
-                .all(|(axis, dims)| binding.point.is_response_axis(axis, dims))
+                .all(|(axis, dims)| binding.point.is_response_axis(axis, dims)
+                    || responses.iter().find(|response| response.id == binding.link)
+                        .is_some_and(|response| response.axes.iter().any(|owned|
+                            owned.name == axis && owned.coordinate.dimensions() == dims)))
             {
                 return Err(Error::Invalid(
                     "contact response requires declared thermal/phase or typed fixed external coordinates",
