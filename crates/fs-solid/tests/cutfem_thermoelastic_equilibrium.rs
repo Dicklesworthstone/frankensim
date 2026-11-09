@@ -425,3 +425,6 @@ fn selected_support_strain_is_admitted_without_allocating_prestress() {
 
 #[path = "cutfem_thermoelastic_equilibrium/dynamics.rs"]
 mod dynamics;
+
+#[path = "cutfem_thermoelastic_equilibrium/midpoint.rs"]
+mod midpoint;
