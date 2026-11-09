@@ -63,6 +63,7 @@ pub struct ResonantRecyclingPlan {
     duration_s: f64,
     relative_tolerance: f64,
     quantum_yields: Vec<f64>,
+    nonradiative_yields: Vec<f64>,
     links: Vec<RecyclingEdge>,
     escape_fractions: Vec<f64>,
     unresolved_fractions: Vec<f64>,
@@ -134,6 +135,7 @@ impl ResonantRecyclingPlan {
         }
         let mut rates = Vec::with_capacity(n);
         let mut quantum_yields = Vec::with_capacity(n);
+        let mut nonradiative_yields = Vec::with_capacity(n);
         let mut partition_errors = vec![Sum::default(); n];
         // Aggregate duplicate links in the same receiver/source order used by
         // the numerical owner before assessing its represented net sink.
@@ -142,6 +144,7 @@ impl ResonantRecyclingPlan {
             poll(&mut cancelled)?;
             rates.push(finite(1.0 / decay.lifetime_s(), "inverse lifetime")?);
             quantum_yields.push(decay.quantum_yield());
+            nonradiative_yields.push(decay.nonradiative_yield());
             partition_errors[i].add(-1.0)?;
             partition_errors[i].add(escape_fractions[i])?;
             partition_errors[i].add(unresolved_fractions[i])?;
@@ -185,7 +188,7 @@ impl ResonantRecyclingPlan {
             // External channels are applied to resolved emitted joules later.
             // Do not underflow an unnecessary phi*escape intermediate here:
             // a large store can still make that outgoing energy representable.
-            let positive_loss = phi < 1.0
+            let positive_loss = nonradiative_yields[i] > 0.0
                 || (phi > 0.0 && (escape_fractions[i] > 0.0 || unresolved_fractions[i] > 0.0));
             if positive_loss && net_yield.total()? >= 0.0 {
                 return Err(RecyclingError::Unrepresentable(
@@ -199,6 +202,7 @@ impl ResonantRecyclingPlan {
             duration_s,
             relative_tolerance: limits.relative_tolerance,
             quantum_yields,
+            nonradiative_yields,
             links: absorption_edges.to_vec(),
             escape_fractions: escape_fractions.to_vec(),
             unresolved_fractions: unresolved_fractions.to_vec(),
@@ -267,8 +271,11 @@ impl ResonantRecyclingPlan {
             poll(&mut cancelled)?;
             let phi = self.quantum_yields[i];
             step.emitted_energy_j[i] = product(evolved.removals[i], phi, "emitted energy")?;
-            step.nonradiative_heat_j[i] =
-                product(evolved.removals[i], 1.0 - phi, "nonradiative heat")?;
+            step.nonradiative_heat_j[i] = product(
+                evolved.removals[i],
+                self.nonradiative_yields[i],
+                "nonradiative heat",
+            )?;
             escape.add(product(
                 step.emitted_energy_j[i],
                 self.escape_fractions[i],
@@ -431,6 +438,35 @@ mod tests {
             (actual - expected).abs() <= 3e-11 * expected.abs().max(1e-300),
             "{actual:e} != {expected:e}"
         );
+    }
+
+    #[test]
+    fn g0_weak_quenching_retains_heat_and_refuses_erased_recycling_loss() {
+        let quenched = decay(1.0, 1.0).with_nonradiative_rate(1e-20).unwrap();
+        let open = prepare(&[quenched], &[], &[1.0], &[0.0], 1.0);
+        let step = open.advance(&[1.0], &[0.0]).unwrap();
+        close(step.nonradiative_heat_j[0], 1e-20 * -(-1.0_f64).exp_m1());
+        let scalar = quenched.advance(1.0, 0.0, 1.0).unwrap();
+        close(step.nonradiative_heat_j[0], scalar.nonradiative_heat_j);
+
+        // Unit photon return with a radiative yield rounded to one cannot
+        // resolve this positive dark sink in the current feedback generator.
+        // Refuse instead of simulating a lossless closed store.
+        assert!(matches!(
+            ResonantRecyclingPlan::prepare(
+                &[quenched],
+                &[edge(0, 0, 1.0)],
+                &[0.0],
+                &[0.0],
+                1.0,
+                32.0 * f64::EPSILON,
+                RecyclingLimits::default(),
+                || false,
+            ),
+            Err(RecyclingError::Unrepresentable(
+                "positive loss erased by recycling yields"
+            ))
+        ));
     }
 
     #[test]

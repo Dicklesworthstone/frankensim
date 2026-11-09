@@ -12,6 +12,9 @@
 //! <https://doi.org/10.1351/goldbook.Q04991>). For one fixed-energy emitting
 //! state the radiative branching probability is `kr/(kr+knr)` and the lifetime
 //! is `1/(kr+knr)`. Adding a nonradiative channel changes BOTH consistently.
+//! Radiative and nonradiative branches retain their small fractions separately:
+//! a weak quenching channel must still produce heat when the radiative yield
+//! rounds to one. A required positive branch outside binary64 range refuses.
 //! No material constants, saturation or stimulated emission are inferred.
 //! [`transfer`] adds explicitly authored singlet/triplet crossing and reverse
 //! crossing with separate thermal exchanges; [`recycling`] integrates repeated
@@ -53,6 +56,7 @@ impl std::error::Error for LuminescenceError {}
 pub struct ExcitationDecay {
     lifetime_s: f64,
     quantum_yield: f64,
+    nonradiative_yield: f64,
 }
 
 /// Integrated channels on one accepted interval, all in joules.
@@ -85,6 +89,7 @@ impl ExcitationDecay {
         Ok(Self {
             lifetime_s,
             quantum_yield,
+            nonradiative_yield: 1.0 - quantum_yield,
         })
     }
 
@@ -95,6 +100,11 @@ impl ExcitationDecay {
     /// Radiative branching probability per relaxed excitation.
     pub const fn quantum_yield(&self) -> f64 {
         self.quantum_yield
+    }
+    /// Nonradiative branching probability, retained independently of a rounded
+    /// near-unity radiative yield. Use this directly for local heat attribution.
+    pub const fn nonradiative_yield(&self) -> f64 {
+        self.nonradiative_yield
     }
 
     /// Add a supplied nonradiative decay rate in inverse seconds. The original
@@ -107,20 +117,40 @@ impl ExcitationDecay {
             return Ok(self);
         }
         let inverse_rate = 1.0 / rate_s;
-        let (lifetime, fraction) = if self.lifetime_s <= inverse_rate {
-            let fraction = 1.0 / (1.0 + rate_s * self.lifetime_s);
-            (self.lifetime_s * fraction, fraction)
+        let (lifetime, fraction, added_fraction) = if self.lifetime_s <= inverse_rate {
+            let ratio = rate_s * self.lifetime_s;
+            let denominator = 1.0 + ratio;
+            let fraction = 1.0 / denominator;
+            (self.lifetime_s * fraction, fraction, ratio / denominator)
         } else {
             let ratio = inverse_rate / self.lifetime_s;
-            (inverse_rate / (1.0 + ratio), ratio / (1.0 + ratio))
+            let denominator = 1.0 + ratio;
+            (
+                inverse_rate / denominator,
+                ratio / denominator,
+                1.0 / denominator,
+            )
         };
         let quantum_yield = self.quantum_yield * fraction;
-        if lifetime == 0.0 || (self.quantum_yield > 0.0 && quantum_yield == 0.0) {
+        // Only complement the large branch, where subtraction is well
+        // conditioned. A small dark branch must retain both its previous
+        // hazard and the independently evaluated newly added hazard.
+        let nonradiative_yield = if quantum_yield <= 0.5 {
+            1.0 - quantum_yield
+        } else {
+            self.nonradiative_yield * fraction + added_fraction
+        };
+        if lifetime == 0.0
+            || (self.quantum_yield > 0.0 && quantum_yield == 0.0)
+            || nonradiative_yield == 0.0
+        {
             return Err(LuminescenceError::Unrepresentable(
                 "quenched lifetime or yield",
             ));
         }
-        Self::try_new(lifetime, quantum_yield)
+        let mut quenched = Self::try_new(lifetime, quantum_yield)?;
+        quenched.nonradiative_yield = nonradiative_yield;
+        Ok(quenched)
     }
 
     /// Advance constant excitation power analytically, including zero-duration
@@ -166,7 +196,7 @@ impl ExcitationDecay {
         // released energy when its two individually reportable channels fit.
         let radiative =
             finite(old_release * self.quantum_yield + pump_release * self.quantum_yield)?;
-        let dark = 1.0 - self.quantum_yield;
+        let dark = self.nonradiative_yield;
         let heat = finite(old_release * dark + pump_release * dark)?;
         let (storage_change, e1) = two_sum(stored_energy_j, -stored);
         let (net_pump, e2) = two_sum(pumped, -radiative);
@@ -376,6 +406,80 @@ mod tests {
             .unwrap();
         close(strong.lifetime_s(), 1e-100, 2e-15);
         close(strong.quantum_yield(), 8e-301, 2e-15);
+    }
+
+    #[test]
+    fn g0_weak_quenching_keeps_heat_when_radiative_yield_rounds_to_one() {
+        let original = ExcitationDecay::try_new(1.0, 1.0).unwrap();
+        let quenched = original.with_nonradiative_rate(1e-20).unwrap();
+        assert_eq!(quenched.lifetime_s(), original.lifetime_s());
+        assert_eq!(quenched.quantum_yield(), 1.0);
+        close(quenched.nonradiative_yield(), 1e-20, 2e-15);
+        // The renderer caches prepared intervals by the complete decay law.
+        assert_ne!(quenched, original);
+        assert_eq!(quenched.with_nonradiative_rate(0.0).unwrap(), quenched);
+
+        let step = quenched.advance(2.0, 3.0, 1.0).unwrap();
+        // At unit lifetime and duration, the independently integrated residence
+        // is 2*(1-exp(-1)) + 3*exp(-1) = 2 + exp(-1).
+        let residence = 2.0 + (-1.0_f64).exp();
+        close(step.nonradiative_heat_j, 1e-20 * residence, 3e-15);
+        close(step.radiative_decay_energy_j, residence, 3e-15);
+    }
+
+    #[test]
+    fn g3_repeated_weak_quenching_and_interval_partition_keep_the_same_heat() {
+        let original = ExcitationDecay::try_new(2.0, 1.0).unwrap();
+        let repeated = original
+            .with_nonradiative_rate(1e-20)
+            .unwrap()
+            .with_nonradiative_rate(2e-20)
+            .unwrap();
+        let combined = original.with_nonradiative_rate(3e-20).unwrap();
+        close(repeated.nonradiative_yield(), 6e-20, 2e-15);
+        close(
+            repeated.nonradiative_yield(),
+            combined.nonradiative_yield(),
+            2e-15,
+        );
+        close(
+            repeated.quantum_yield() / repeated.lifetime_s(),
+            original.quantum_yield() / original.lifetime_s(),
+            2e-15,
+        );
+        let whole = repeated.advance(4.0, 7.0, 0.8).unwrap();
+        let first = repeated.advance(4.0, 7.0, 0.3).unwrap();
+        let second = repeated.advance(first.stored_energy_j, 7.0, 0.5).unwrap();
+        close(
+            first.nonradiative_heat_j + second.nonradiative_heat_j,
+            whole.nonradiative_heat_j,
+            2e-14,
+        );
+        close(second.stored_energy_j, whole.stored_energy_j, 2e-14);
+    }
+
+    #[test]
+    fn g0_quenching_keeps_the_radiative_tail_and_refuses_an_erased_dark_branch() {
+        let dim = ExcitationDecay::try_new(1.0, 1e-20)
+            .unwrap()
+            .with_nonradiative_rate(1.0)
+            .unwrap();
+        close(dim.quantum_yield(), 5e-21, 2e-15);
+        assert_eq!(dim.nonradiative_yield(), 1.0);
+        let step = dim.advance(1.0, 0.0, 0.5).unwrap();
+        close(
+            step.radiative_decay_energy_j,
+            5e-21 * -(-1.0_f64).exp_m1(),
+            2e-15,
+        );
+        assert!(matches!(
+            ExcitationDecay::try_new(1e-200, 1.0)
+                .unwrap()
+                .with_nonradiative_rate(1e-200),
+            Err(LuminescenceError::Unrepresentable(
+                "quenched lifetime or yield"
+            ))
+        ));
     }
 
     #[test]

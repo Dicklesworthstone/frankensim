@@ -3438,7 +3438,12 @@ loss instead of hiding it in heat. Identical inputs use one deterministic
 operation order; no new cross-ISA evidence or interval certificate is claimed.
 
 Adding a nonradiative rate preserves the original radiative rate while changing
-both lifetime and yield. `ArrheniusQuenching` evaluates an explicitly supplied
+both lifetime and yield. Radiative and nonradiative branch fractions are retained
+independently, so weak quenching still releases heat when the radiative yield
+rounds to one. `nonradiative_yield` exposes that original heat branch directly;
+the recycling owner retains it for heat and positive-sink admission. A positive
+branch that cannot be represented refuses instead of becoming zero heat.
+`ArrheniusQuenching` evaluates an explicitly supplied
 attempt rate and per-excitation barrier in SI units; its source owner must enforce
 the measured temperature domain and resolve changing-temperature coefficients.
 Focused G0/G1/G3 tests cover closed-form pumping and afterglow, tiny exposures,
