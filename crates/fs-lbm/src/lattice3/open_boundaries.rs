@@ -10,10 +10,10 @@
 //! Open faces occupy one Cartesian axis. At wall/open seams, only open-owned
 //! incoming rows are replaced: prescribed full moments apply to face interiors,
 //! not to the intersection of incompatible wall and reservoir conditions.
-//! Pressure profiles are held on their native face planes; geometry and the
-//! uniform body force remain fixed. Prescribed tangential wall motion uses the
-//! native moving reflection and a separate wall impulse/work account. Velocity
-//! profiles and characteristic outlets remain separate.
+//! Pressure and velocity profiles are held on their native face planes;
+//! geometry and the uniform body force remain fixed. Tangential wall motion uses the
+//! native moving reflection and a separate wall impulse/work account.
+//! Characteristic outlets remain separate.
 
 use super::{
     EquilibriumLattice3, FirstError, Grid3, GridError3, Lattice3, StepData, coordinates, initial,
@@ -36,8 +36,10 @@ mod rheology;
 pub mod sgs;
 /// Conservative D3Q7 heat transport on the same native open-grid transaction.
 pub mod thermal;
+mod velocity;
 
 use pressure::PressureProfile3;
+use velocity::VelocityProfile3;
 
 /// Original native grid with fixed-topology velocity/pressure face ownership.
 /// Populations, physical time and measured reservoir exchange publish together.
@@ -45,6 +47,7 @@ pub struct OpenBoundaryGrid3<L: EquilibriumLattice3<Q>, const Q: usize> {
     grid: Grid3<L, Q>,
     plan: FacePlan,
     pressure_profiles: [Option<PressureProfile3>; 6],
+    velocity_profiles: [Option<VelocityProfile3>; 6],
     wall_exchange: Option<super::moving_walls::MovingWallMomentum3>,
     pending_wall_exchange: Option<super::moving_walls::MovingWallMomentum3>,
 }
@@ -90,6 +93,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
             grid,
             plan,
             pressure_profiles: core::array::from_fn(|_| None),
+            velocity_profiles: core::array::from_fn(|_| None),
             wall_exchange: None,
             pending_wall_exchange: None,
         })
@@ -123,8 +127,9 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
     /// Atomically replace values on existing velocity/pressure/wall faces.
     /// Changing kinds or periodicity requires a different owner;
     /// this update performs no streaming, impulse or hidden population reset.
-    /// A spatial pressure profile remains authoritative: clear or update it
-    /// explicitly before changing that face's held uniform density.
+    /// Spatial pressure/velocity profiles remain authoritative: clear a profile
+    /// before changing its held uniform fallback, or update the profile itself.
+    /// Unrelated wall/reservoir updates preserve every attached profile.
     pub fn rebind_open_boundaries(
         &mut self,
         boundaries: BoundarySpec3,
@@ -164,6 +169,13 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
             {
                 return Err(GridError3::Input(
                     "clear or update the pressure profile before changing its uniform target",
+                ));
+            }
+            if self.plan.boundaries.face(face) != boundaries.face(face)
+                && self.velocity_profiles[face as usize].is_some()
+            {
+                return Err(GridError3::Input(
+                    "clear or update the velocity profile before changing its uniform target",
                 ));
             }
         }
@@ -274,6 +286,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
             },
             plan,
             pressure_profiles: &self.pressure_profiles,
+            velocity_profiles: &self.velocity_profiles,
         };
         for (tile, chunk) in grid.next.chunks_mut(64).enumerate() {
             poll()?;
@@ -353,6 +366,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
             data,
             plan,
             pressure_profiles: &self.pressure_profiles,
+            velocity_profiles: &self.velocity_profiles,
         };
         {
             let kernel = OpenStream {
@@ -563,6 +577,7 @@ struct OpenStep<'a, L: EquilibriumLattice3<Q>, const Q: usize> {
     data: StepData<'a, L, Q>,
     plan: FacePlan,
     pressure_profiles: &'a [Option<PressureProfile3>; 6],
+    velocity_profiles: &'a [Option<VelocityProfile3>; 6],
 }
 
 impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenStep<'_, L, Q> {
@@ -649,7 +664,14 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenStep<'_, L, Q> {
             }
         }
         let (rho, velocity) = match self.plan.boundaries.face(face) {
-            FaceBoundary3::Velocity { velocity } => (rho_source, velocity),
+            FaceBoundary3::Velocity { velocity } => (
+                rho_source,
+                self.velocity_profiles[face as usize]
+                    .as_ref()
+                    .map_or(velocity, |profile| {
+                        profile.values[self.plan.plane_index(cell)]
+                    }),
+            ),
             FaceBoundary3::Pressure { density } => (
                 self.pressure_profiles[face as usize]
                     .as_ref()

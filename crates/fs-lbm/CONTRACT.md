@@ -1294,6 +1294,35 @@ shear, force-epoch publication, and native-kernel parity through analytic
 Couette convergence. The linear moving reflection retains the native low-Mach
 model; no new high-Mach or moving-geometry accuracy claim is added.
 
+## Spatial velocity traces on native open flow
+
+`OpenBoundaryGrid3` and `ForcedOpenBoundaryGrid3` accept spatial velocity
+profiles on all six native face orientations for D3Q19 and D3Q27. They reuse
+the specialized owner's `InletFlux3`, profile report and refusal types. Callers
+may resample at successive physical times without resetting populations or
+force history; two face-sized vector buffers are reused, with no profile
+callback or allocation during stepping. Sampling/refusal leaves accepted
+populations and time unchanged. A successfully installed control remains held
+if a later fluid step refuses.
+
+Optional outward-normal mean control uses compensated deterministic reduction.
+Both sampled and corrected vectors respect the native grid/collision Mach
+envelope; an optional inclusive speed limit applies to the final corrected
+trace. Mixed wall/open seams retain their original per-link ownership and
+refuse mean-normal control because their complete velocity is not imposed.
+Unrelated wall/reservoir updates preserve profiles. An attached profile must
+be cleared before changing its uniform fallback; clearing restores that held
+fallback without changing physical state.
+
+The original force-corrected donor stress and regularized reconstruction consume
+the held vectors directly. Momentum receipts measure the actual operator, while
+thermal advection, rheology and SGS consume the accepted physical velocities.
+No separate flow or turbulence source model is introduced. Focused cases cover
+time updates across orientations/collision families, momentum and mass closure,
+uniform-profile bit parity, native Mach/final-speed refusal, late cancellation,
+moving-wall seam ownership, and spatial force epochs. The requested mean is a
+volume-velocity control, not an assertion of exact mass flux.
+
 ## Native open-grid spatial force epochs
 
 `lattice3::open_boundaries::forcing::ForcedOpenBoundaryGrid3` binds an explicit per-cell force density to the original native D3Q19/D3Q27 open-grid populations. Initial attachment changes only the native half-source coordinates: density, physical velocity, nonequilibrium stress, accepted time and reservoir/pressure controls survive. There is no public inner-grid escape with stale uniform-force macroscopic readback.

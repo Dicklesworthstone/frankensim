@@ -16,7 +16,9 @@ use super::{
     BoundarySpec3, EquilibriumLattice3, Face3, GridError3, OpenBoundaryGrid3,
     OpenBoundaryMomentumTransport3, initial, macro_cell,
 };
-use crate::d3q19::{BoundaryProfileError3, PressureProfileReport3};
+use crate::d3q19::{
+    BoundaryProfileError3, InletFlux3, PressureProfileReport3, VelocityProfileReport3,
+};
 use crate::lattice3::sources::admit_forces;
 use fs_exec::{CancelGate, Cx};
 
@@ -171,6 +173,43 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ForcedOpenBoundaryGrid3<L, Q> {
     }
     pub fn pressure_profile(&self, face: Face3) -> Option<&[f64]> {
         self.inner.pressure_profile(face)
+    }
+
+    /// Hold a resolved velocity trace on the same force-aware native owner.
+    /// Sampling and optional normal-volume control do not advance the force
+    /// or fluid epochs; reconstruction uses each endpoint's actual force.
+    pub fn set_velocity_profile(
+        &mut self,
+        face: Face3,
+        flux: InletFlux3,
+        gate: &CancelGate,
+        sample: impl FnMut([usize; 3]) -> Result<[f64; 3], BoundaryProfileError3>,
+    ) -> Result<VelocityProfileReport3, BoundaryProfileError3> {
+        self.inner.set_velocity_profile(face, flux, gate, sample)
+    }
+
+    /// Also enforce an inclusive speed bound on the corrected final trace.
+    pub fn set_velocity_profile_with_speed_limit(
+        &mut self,
+        face: Face3,
+        flux: InletFlux3,
+        maximum_speed_lu: f64,
+        gate: &CancelGate,
+        sample: impl FnMut([usize; 3]) -> Result<[f64; 3], BoundaryProfileError3>,
+    ) -> Result<VelocityProfileReport3, BoundaryProfileError3> {
+        self.inner
+            .set_velocity_profile_with_speed_limit(face, flux, maximum_speed_lu, gate, sample)
+    }
+
+    /// Restore the held uniform fallback without changing physical state.
+    pub fn clear_velocity_profile(&mut self, face: Face3) {
+        self.inner.clear_velocity_profile(face);
+    }
+
+    /// The accepted vector plane, independent of the force-history buffers.
+    #[must_use]
+    pub fn velocity_profile(&self, face: Face3) -> Option<&[[f64; 3]]> {
+        self.inner.velocity_profile(face)
     }
 
     /// Advance with an authored force field at the NEXT accepted time.
