@@ -177,7 +177,8 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
         }
         if analyze_samples {
             let mut line = vec![FftComplex::default(); self.grid.width.max(self.grid.height)];
-            let mut scratch = line.clone();
+            let mut scratch =
+                vec![FftComplex::default(); self.x_fft.scratch_len().max(self.y_fft.scratch_len())];
             for field in [&mut ex, &mut ey] {
                 transform(
                     self.grid,

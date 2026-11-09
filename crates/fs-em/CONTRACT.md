@@ -3887,8 +3887,11 @@ a conductivity attached from another material snapshot.
 `plane_wave::angular_spectrum::PlanarAngularSpectrum` accepts complex peak Ex/Ey
 samples at the incident face of an original `PlanarDielectricLayers`. The input
 is one explicitly periodic, band-limited rectangular cell in physical metres;
-x varies fastest. Both grid dimensions are powers of two, capped at 4096 to
-bound a single uninterruptible FFT pencil. Every nonzero incident Fourier mode
+x varies fastest. Each axis admits 1..=4096 samples at its original period.
+The existing `GeneralFft` uses cached Bluestein convolution for arbitrary
+lengths and preserves power-of-two transform bits. Odd axes retain both edge
+orders; even axes retain negative Nyquist. A pencil uses at most two 8192-point
+transforms between cancellation polls. Every nonzero incident Fourier mode
 must lie strictly inside the incident light cone. Exactly zero unsupported
 bins may oversample that spectrum; they retain their physical wavevectors and
 FFT positions without evaluating an invalid film response or dividing by an
@@ -3916,15 +3919,12 @@ propagation, enforces k.E=0, and obtains H=(k cross E)/(omega mu). It returns
 all six complex field components and physical cycle-mean Poynting flux.
 Incident, reflected, their coherent sum, and transmitted fields have explicit
 face/distance conventions. Film-induced evanescent fields decay without a
-growing transfer matrix. Transmitted field reconstruction applies late decay
-to the actual six Maxwell amplitudes, splitting an underflowing exponential
-before multiplication. A representable evanescent or absorbing field is not
-erased because its unit-amplitude transfer has rounded to zero. The ordinary
-normal-attenuation multiplication order is unchanged; one phase and at most
-two attenuation factors are cached per mode for all components. Uniform planes,
-nonuniform probes, coherence and exposure reuse this field owner. Focused
-G1/G3 regressions cover subnormal/zero unit transfers, physical component tails,
-depth composition and ordinary-path parity. The original film recursion retains transmitted
+growing transfer matrix. Deep transmission applies the physical E/H amplitudes
+before a unit transfer can underflow, with one phase and two split attenuation
+factors per mode. Fields, probes, coherence and exposure preserve representable
+evanescent/absorbing tails; ordinary-path arithmetic is unchanged. G1/G3 tests
+cover tail values, depth composition and ordinary-path parity.
+The original film recursion retains transmitted
 power-conjugate H alongside E, relative to the original incident admittance.
 Transmitted fields use these two tangential traces without dividing by kz.
 At exact critical refraction, the finite longitudinal TM electric field and
@@ -3959,7 +3959,9 @@ after propagation into an absorbing exit is computed from the actual field,
 without relabeling it as film absorption. Local flux retains interference and
 its sign. Numerical-storage and FFT-work budgets precede allocation; source
 response work is bounded by the admitted grid and original 64-layer maximum.
-Storage and work limits conservatively cover the full declared grid. Dormant
+Storage/work bounds include both axis plans, Bluestein chirps/kernels,
+convolution transforms and reusable scratch. Original power-of-two allowances
+are unchanged. Dormant
 bins retain empty entries in the shared film and two-sided response caches;
 field, heat, force, coherence and exposure queries preserve their zero fields.
 Cancellation polls between rows, pencils and bounded mode batches, publishing

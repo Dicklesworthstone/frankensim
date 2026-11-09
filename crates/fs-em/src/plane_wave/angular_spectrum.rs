@@ -29,7 +29,7 @@
 //! The phasor sign here is the conjugate of that reference, matching `layers`.
 
 use super::{Polarization, ReflectionError, layers::PlanarDielectricLayers};
-use fs_fft::{C64 as FftComplex, Fft};
+use fs_fft::{C64 as FftComplex, GeneralFft, GeneralFftBudget};
 use fs_material::field_storage::{linear_electric_permittivity, linear_magnetic_permeability};
 use fs_math::{c64::C64, dd::Dd, det};
 use modes::{
@@ -103,10 +103,14 @@ pub use exposure::{
     PreparedAngularSpectrumExposureInterferometer,
 };
 
-/// Bounds the uninterruptible work of one existing FFT pencil.
+/// Largest physical axis. A non-power-of-two pencil uses at most two
+/// 8192-point FFTs through the existing Bluestein plan before cancellation.
 pub const MAX_AXIS_POINTS: usize = 4096;
 
 /// Periodic cell samples at (column*dx, row*dy), with no implicit centering.
+/// Each positive axis may have any length up to [`MAX_AXIS_POINTS`]. Odd,
+/// prime and even lengths retain their actual period and diffraction orders;
+/// internal convolution padding never changes the physical source grid.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AngularSpectrumGrid {
     pub width: usize,
@@ -117,7 +121,9 @@ pub struct AngularSpectrumGrid {
 /// Logical numerical storage includes the retained modes, plans, one returned
 /// six-component field and its transform scratch. Input/source storage and
 /// allocator overhead are outside this bound. FFT work counts complex
-/// point-stages; one field query costs 6*N*(log2(width)+log2(height)).
+/// point-stages and Bluestein chirp products. Power-of-two grids retain
+/// 6*N*(log2(width)+log2(height)); other axes include both padded convolution
+/// transforms. The bound covers preparation or one complete field query.
 #[derive(Clone, Copy, Debug)]
 pub struct AngularSpectrumLimits {
     pub maximum_grid_points: usize,
@@ -252,8 +258,8 @@ pub struct PlanarAngularSpectrum<'s, 'm> {
     grid: AngularSpectrumGrid,
     carrier_rad_m: [f64; 2],
     carrier_phase: Vec<C64>,
-    x_fft: Fft,
-    y_fft: Fft,
+    x_fft: GeneralFft,
+    y_fft: GeneralFft,
     modes: Vec<Mode>,
     incident_omega_mu: f64,
     exit_omega_mu: f64,
@@ -428,9 +434,15 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
         {
             return Err(bad("wave number or magnetic admittance is unrepresentable"));
         }
-        let x_fft = Fft::new(grid.width);
+        let fft_budget = GeneralFftBudget {
+            max_samples: MAX_AXIS_POINTS,
+            max_workspace_bytes: limits.maximum_workspace_bytes,
+        };
+        let x_fft = GeneralFft::new(grid.width, fft_budget)
+            .map_err(|_| bad("horizontal FFT preparation refused its shape or workspace"))?;
         poll(&mut cancelled)?;
-        let y_fft = Fft::new(grid.height);
+        let y_fft = GeneralFft::new(grid.height, fft_budget)
+            .map_err(|_| bad("vertical FFT preparation refused its shape or workspace"))?;
         let mut carrier_phase = Vec::new();
         if carrier_rad_m != [0.0; 2] {
             carrier_phase
@@ -468,7 +480,8 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
         // samples, including its 1/N normalization. FORWARD synthesizes them.
         if analyze_samples {
             let mut line = vec![FftComplex::default(); grid.width.max(grid.height)];
-            let mut scratch = line.clone();
+            let mut scratch =
+                vec![FftComplex::default(); x_fft.scratch_len().max(y_fft.scratch_len())];
             for field in [&mut ex, &mut ey] {
                 transform(
                     grid,
@@ -784,7 +797,8 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
         let n = self.modes.len();
         let mut buffer = vec![FftComplex::default(); n];
         let mut line = vec![FftComplex::default(); self.grid.width.max(self.grid.height)];
-        let mut scratch = line.clone();
+        let mut scratch =
+            vec![FftComplex::default(); self.x_fft.scratch_len().max(self.y_fft.scratch_len())];
         for field in [&mut electric, &mut magnetic] {
             for c in 0..3 {
                 for (index, (dst, src)) in buffer.iter_mut().zip(field.iter()).enumerate() {
@@ -871,11 +885,11 @@ fn admit(
 ) -> Result<(usize, f64, usize, u64), AngularSpectrumError> {
     if [grid.width, grid.height]
         .iter()
-        .any(|&n| !n.is_power_of_two() || n > MAX_AXIS_POINTS)
+        .any(|&n| n == 0 || n > MAX_AXIS_POINTS)
         || grid.spacing_m.iter().any(|&v| !v.is_finite() || v <= 0.0)
     {
         return Err(bad(
-            "grid axes must be powers of two up to 4096, with positive finite spacing",
+            "grid axes must lie in 1..=4096, with positive finite spacing",
         ));
     }
     let n = grid
@@ -889,22 +903,38 @@ fn admit(
     if !area.is_finite() || area <= 0.0 {
         return Err(bad("cell area is unrepresentable"));
     }
-    // Query storage dominates preparation's two input component arrays. Plan
-    // allowance is conservative; Fft stores at most (width+height)/2 twiddles.
+    // Query storage dominates preparation's two input component arrays. Each
+    // GeneralFft allowance contains its retained chirps/plan AND transform or
+    // preparation scratch. Adding both bounds the reusable maximum scratch.
+    // Keep the original conservative allowance on power-of-two grids.
+    let fft_workspace = GeneralFft::required_workspace_bytes(grid.width)
+        .ok()
+        .and_then(|x| {
+            GeneralFft::required_workspace_bytes(grid.height)
+                .ok()
+                .and_then(|y| x.checked_add(y))
+        })
+        .and_then(|bytes| {
+            grid.width
+                .max(grid.height)
+                .checked_mul(core::mem::size_of::<FftComplex>())
+                .and_then(|line| bytes.checked_add(line))
+        })
+        .ok_or_else(|| bad("FFT workspace extent overflow"))?;
+    let original_fft_allowance = (2 * grid.width.max(grid.height) + grid.width + grid.height)
+        * core::mem::size_of::<FftComplex>();
     let per_point = core::mem::size_of::<Mode>()
         + 6 * core::mem::size_of::<C64>()
         + core::mem::size_of::<FftComplex>();
     let workspace_bytes = n
         .checked_mul(per_point)
-        .and_then(|v| {
-            (2 * grid.width.max(grid.height) + grid.width + grid.height)
-                .checked_mul(core::mem::size_of::<FftComplex>())
-                .and_then(|s| v.checked_add(s))
-        })
+        .and_then(|v| v.checked_add(fft_workspace.max(original_fft_allowance)))
         .ok_or_else(|| bad("workspace extent overflow"))?;
-    let field_fft_work = (n as u64)
-        .checked_mul(6 * u64::from(grid.width.ilog2() + grid.height.ilog2()))
-        .ok_or_else(|| bad("FFT work overflow"))?;
+    // Each axis is already bounded by MAX_AXIS_POINTS, so these conservative
+    // stage/product counts and the six vector-component passes fit in u64.
+    let field_fft_work = 6
+        * (grid.height as u64 * axis_fft_work(grid.width)
+            + grid.width as u64 * axis_fft_work(grid.height));
     if workspace_bytes > limits.maximum_workspace_bytes || field_fft_work > limits.maximum_fft_work
     {
         return Err(bad(
@@ -914,11 +944,21 @@ fn admit(
     Ok((n, area, workspace_bytes, field_fft_work))
 }
 
+fn axis_fft_work(count: usize) -> u64 {
+    if count.is_power_of_two() {
+        count as u64 * u64::from(count.ilog2())
+    } else {
+        let convolution = (2 * count - 1).next_power_of_two() as u64;
+        // Two existing transforms, a spectral product and two chirp products.
+        2 * convolution * u64::from(convolution.ilog2()) + convolution + 2 * count as u64
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn transform(
     grid: AngularSpectrumGrid,
-    x: &Fft,
-    y: &Fft,
+    x: &GeneralFft,
+    y: &GeneralFft,
     data: &mut [FftComplex],
     line: &mut [FftComplex],
     scratch: &mut [FftComplex],
@@ -928,10 +968,11 @@ fn transform(
     for row in data.chunks_exact_mut(grid.width) {
         poll(cancelled)?;
         if inverse {
-            x.inverse(row, &mut scratch[..grid.width]);
+            x.inverse(row, scratch)
         } else {
-            x.forward(row, &mut scratch[..grid.width]);
+            x.forward(row, scratch)
         }
+        .map_err(|_| bad("horizontal field transform is unrepresentable"))?;
     }
     for column in 0..grid.width {
         poll(cancelled)?;
@@ -939,10 +980,11 @@ fn transform(
             line[row] = data[row * grid.width + column];
         }
         if inverse {
-            y.inverse(&mut line[..grid.height], &mut scratch[..grid.height]);
+            y.inverse(&mut line[..grid.height], scratch)
         } else {
-            y.forward(&mut line[..grid.height], &mut scratch[..grid.height]);
+            y.forward(&mut line[..grid.height], scratch)
         }
+        .map_err(|_| bad("vertical field transform is unrepresentable"))?;
         for row in 0..grid.height {
             data[row * grid.width + column] = line[row];
         }

@@ -98,6 +98,14 @@ fn uniform_vector_beam_reduces_to_original_films_and_signed_poynting_work() {
 
 #[test]
 fn spatial_diffraction_matches_independent_direct_fourier_series() {
+    // G1/G3: odd, prime and composite axes must preserve their physical
+    // periods. Padding a source to the next power of two changes these modes.
+    for [width, height] in [[8, 4], [5, 3], [6, 5], [7, 11]] {
+        check_spatial_diffraction_against_direct_series(width, height);
+    }
+}
+
+fn check_spatial_diffraction_against_direct_series(width: usize, height: usize) {
     let material = material(1.0, 1.0);
     let stack = PlanarDielectricLayers::try_new(
         &material,
@@ -107,8 +115,8 @@ fn spatial_diffraction_matches_independent_direct_fourier_series() {
     )
     .unwrap();
     let grid = AngularSpectrumGrid {
-        width: 8,
-        height: 4,
+        width,
+        height,
         spacing_m: [8.0, 9.0],
     };
     let n = grid.width * grid.height;
@@ -116,7 +124,7 @@ fn spatial_diffraction_matches_independent_direct_fourier_series() {
     // periodic field, not a claim of unrepresented hard-aperture high modes.
     let mut input = vec![[C64::ZERO; 2]; n];
     input[grid.width + 2] = [C64::ONE, C64::new(0.2, 0.4)];
-    input[2 * grid.width + 5] = [C64::new(0.1, 0.8), C64::new(-0.3, 0.1)];
+    input[3 * grid.width - 2] = [C64::new(0.1, 0.8), C64::new(-0.3, 0.1)];
     let beam = PlanarAngularSpectrum::prepare(&stack, grid, &input, limits(), || false).unwrap();
     for distance in [0.0, 3.0, 41.0] {
         let field = beam.field(Side::Transmitted, distance, || false).unwrap();
@@ -124,12 +132,12 @@ fn spatial_diffraction_matches_independent_direct_fourier_series() {
         let mut reference_h = reference_e.clone();
         for fy in 0..grid.height {
             for fx in 0..grid.width {
-                let mx = if fx < grid.width / 2 {
+                let mx = if fx <= (grid.width - 1) / 2 {
                     fx as f64
                 } else {
                     fx as f64 - grid.width as f64
                 };
-                let my = if fy < grid.height / 2 {
+                let my = if fy <= (grid.height - 1) / 2 {
                     fy as f64
                 } else {
                     fy as f64 - grid.height as f64
