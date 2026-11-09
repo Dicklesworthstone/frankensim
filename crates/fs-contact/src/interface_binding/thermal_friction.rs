@@ -13,6 +13,8 @@
 pub mod elliptic;
 /// Source-preserving joint Hertz sliding/spin friction at actual thermal conditions.
 pub mod hertz;
+/// Original speed-law parameters refreshed from the same pinned thermal source.
+pub mod rate_dependent;
 mod query;
 pub use query::{FrictionQueryAxis, FrictionQueryAxisKind};
 

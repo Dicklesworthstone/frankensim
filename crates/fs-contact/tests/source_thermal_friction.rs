@@ -6,6 +6,8 @@ mod elliptic;
 mod hertz;
 #[path = "source_thermal_friction/query.rs"]
 mod query;
+#[path = "source_thermal_friction/rate_dependent.rs"]
+mod rate_dependent;
 
 use fs_contact::interface_binding::bind_dry_interface_system_card;
 use fs_contact::interface_binding::thermal_friction::{

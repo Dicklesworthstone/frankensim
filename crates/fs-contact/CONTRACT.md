@@ -379,6 +379,34 @@ different temperature, foreign-source refusal and exact retry. This lets framed
 articulated heat trials reuse their accepted histories without aging or
 re-querying them during orientation transport.
 
+### Source-backed full speed-law parameters and Hertz traction
+
+`interface_binding::thermal_friction::rate_dependent::SourceThermalFriction`
+resolves every typed parameter of an explicitly selected original Coulomb,
+clipped affine, Stribeck, hyperbolic or shifted-power curve from one ordered dry
+interface. Initial source selection, parameter roles, quantity conventions,
+fixed external coordinates and authority bind its identity. Temperature and
+explicit nominal-pressure refreshes evaluate the same complete pinned claims;
+they cannot substitute another usable source. Local speed remains the original
+`FrictionLaw` argument at each Hertz pressure quadrature point. No centre-speed
+coefficient or new constitutive formula replaces the original patch.
+
+The bridge admits static external parameter sources only. Speed, path or other
+unowned mechanical/history applicability refuses even on constant-valued
+parameters. Curve parameters retain their actual dimensions (speed in m/s,
+slope in s/m); the original law checks signs, coefficient ordering and positive
+scales after every refresh. Shared roles may name exactly one shared
+requirement, while ambiguous aliases refuse. Normal load and radius remain the
+original normal owner's inputs, independently of source nominal pressure.
+Each `SourceHertzFriction` retains the complete resolved parameter receipts and
+original `HertzFrictionPatch`. No history, thermal store, data fit, experimental
+validation or source-authority promotion is introduced; parameter support alone
+does not establish the selected curve's empirical validity over speed/geometry.
+Four focused tests in `tests/source_thermal_friction/rate_dependent.rs` cover
+all five original curves at changing temperature, actual mixed shear/spin
+traction, independent Coulomb pressure moments, source identity and sharing,
+and quantity/support/physical-domain refusals.
+
 ### Source-backed directional temperature-dependent Coulomb friction
 
 `interface_binding::thermal_friction::elliptic::SourceThermalEllipticCoulomb`
