@@ -257,7 +257,8 @@ impl<'f, 's, 'p, 'a> CoherentLayerHeating<'f, 's, 'p, 'a> {
                 Layer::Porous { thickness_m, .. }
                 | Layer::RelaxingPorous { thickness_m, .. }
                 | Layer::FluidGap { thickness_m }
-                | Layer::FluidLayer { thickness_m, .. },
+                | Layer::FluidLayer { thickness_m, .. }
+                | Layer::RelaxingFluid { thickness_m, .. },
             ) => thickness_m,
             None => {
                 return Err(CoherentHeatingError::Invalid(
