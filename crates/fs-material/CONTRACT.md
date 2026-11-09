@@ -22661,3 +22661,31 @@ large energy/entropy datums and atomic late refusal/cancellation.
 `catalog_refraction::AirRelativeSellmeier` owns the original relative Sellmeier coefficients, full fitted band, index-reference Ciddor atmosphere and independently declared wavelength-coordinate atmosphere. It returns absolute vacuum phase/group index and analytic scaled ordinary wavelength derivatives, including both atmospheric product and coordinate-chain curvature terms. Complete source-band admission rejects active poles before intersecting the mapped air support. Boundary inversion occurs once during preparation; bounded, allocation-free queries do not fit coefficients or solve a wavelength root. Additional catalog curvature is evaluated only by the requested jet.
 
 Three original-source tests passed against independent phase/group/curvature controls, distinct atmospheric conventions, source-band and constant-relative limits. The shared owner supports both LUMEN and native Maxwell consumers without reversing layer dependencies. It supplies no absorption measurement, glass temperature evolution, source authentication or causal broadband pulse certificate.
+
+
+## Finite material walls during molecular vacuum blowdown
+
+`thermochemical_gas::energy::parcel::transfer::species::network::transport::effusion::channel::thermal::vacuum::step_candidate`
+couples the original molecular vacuum outlets to finite `FixedVolumeChannelWall`
+inventories. All channels sample the original gas and wall states; accommodation
+heat is pooled by stable wall identity before one original isochoric storage
+inversion. Subsequent calls use the accepted wall temperatures. Shared original
+species withdrawal and escaped molecular energy stay with the native vacuum
+owner. The final audit replaces the thermostat term with actual wall storage:
+`Delta U_gas + E_escaped + Delta U_wall`, in the existing source-relative chart.
+Original gas and final wall source domains are admitted before either state is
+published. The closed-channel owner shares the same wall inversion and retains
+its double-double energy and entropy accumulation.
+
+This is an explicit first-order, fixed-geometry stage for stationary,
+collisionless circular channels with diffuse, fully accommodating walls.
+Reported wall entropy is a material storage change; vacuum entropy and total
+open-system entropy production are not assigned. Wall conduction, phase change,
+adsorption and in-flight molecular storage remain outside this owner.
+
+Six focused regression groups cover independent monatomic beam/nonlinear-wall
+balances, thermal feedback, shared-wall pooling and input ordering, caloric
+reference shifts, inactive walls, shared inventory, overshoot and cancellation.
+Native Cargo execution did not reach these modules: the dependency build ran
+out of workspace space and the executor disconnected. The recovered source and
+tests have been reviewed, but final Rustfmt and native execution remain pending.

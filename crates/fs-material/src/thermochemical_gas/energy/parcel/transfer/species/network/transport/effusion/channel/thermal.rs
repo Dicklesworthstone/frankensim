@@ -14,6 +14,8 @@
 
 /// Adaptive gas-plus-material-wall trajectories with fixed window audits.
 pub mod trajectory;
+/// Molecular channel blowdown with finite material walls and escaped energy.
+pub mod vacuum;
 
 use super::{DiffuseChannelLinkStep, DiffuseChannelNetworkLink};
 use crate::thermal::transport::{
@@ -109,6 +111,81 @@ impl<'l, 'p> FixedVolumeChannelWall<'l, 'p> {
     #[must_use]
     pub const fn temperature_k(&self) -> f64 {
         self.temperature_k
+    }
+
+    // Shared by closed channels and true-vacuum outlets: pool all incident
+    // heat before this one inversion of the ORIGINAL material storage law.
+    fn heated_candidate(
+        &self,
+        id: u64,
+        pooled: Dd,
+        range_k: [f64; 2],
+        energy_tolerance_j: f64,
+    ) -> Result<(Self, FiniteChannelWallStep, Dd, Dd), FiniteChannelError> {
+        let heat = pooled.to_f64();
+        let new_energy = (Dd::from_f64(self.specific_energy_j_kg)
+            + pooled / Dd::from_f64(self.mass_kg))
+        .to_f64();
+        if !heat.is_finite()
+            || !new_energy.is_finite()
+            || (heat != 0.0 && new_energy == self.specific_energy_j_kg)
+        {
+            return Err(FiniteChannelError::Invalid(
+                "finite wall heat is not representable",
+            ));
+        }
+        let temperature = self
+            .law
+            .temperature_k(new_energy)
+            .map_err(|error| FiniteChannelError::WallDomain { id, error })?;
+        if temperature < range_k[0] || temperature > range_k[1] {
+            return Err(FiniteChannelError::WallOvershoot {
+                id,
+                temperature_k: temperature,
+                range_k,
+            });
+        }
+        let energy = (Dd::from_f64(new_energy) - Dd::from_f64(self.specific_energy_j_kg))
+            * Dd::from_f64(self.mass_kg);
+        let residual = (energy - pooled).to_f64();
+        if !residual.is_finite() || residual.abs() > energy_tolerance_j {
+            return Err(FiniteChannelError::WallEnergyBalance {
+                id,
+                residual_j: residual,
+            });
+        }
+        let specific_entropy = self
+            .law
+            .specific_entropy_change_j_kg_k(self.specific_energy_j_kg, new_energy)
+            .map_err(|error| FiniteChannelError::WallDomain { id, error })?
+            .ok_or(FiniteChannelError::Invalid(
+                "original wall entropy became unavailable",
+            ))?;
+        let entropy_change = Dd::from_f64(specific_entropy) * Dd::from_f64(self.mass_kg);
+        if !entropy_change.to_f64().is_finite() {
+            return Err(FiniteChannelError::Invalid(
+                "finite wall entropy is not representable",
+            ));
+        }
+        let mut next = self.clone();
+        next.specific_energy_j_kg = new_energy;
+        next.temperature_k = temperature;
+        Ok((
+            next,
+            FiniteChannelWallStep {
+                id,
+                caloric_identity: self.law.identity(),
+                volume_m3: self.volume_m3,
+                mass_kg: self.mass_kg,
+                temperatures_k: [self.temperature_k, temperature],
+                specific_energies_j_kg: [self.specific_energy_j_kg, new_energy],
+                heat_into_wall_j: heat,
+                energy_change_j: energy.to_f64(),
+                entropy_change_j_k: entropy_change.to_f64(),
+            },
+            energy,
+            entropy_change,
+        ))
     }
 }
 
@@ -328,69 +405,17 @@ pub fn step_candidate<'l, 'p>(
     for (&id, pooled) in &pools {
         check(&mut cancelled)?;
         let old = &walls[&id];
-        let heat = pooled.to_f64();
-        let new_energy =
-            (Dd::from_f64(old.specific_energy_j_kg) + *pooled / Dd::from_f64(old.mass_kg)).to_f64();
-        if !heat.is_finite()
-            || !new_energy.is_finite()
-            || (heat != 0.0 && new_energy == old.specific_energy_j_kg)
-        {
-            return Err(FiniteChannelError::Invalid(
-                "finite wall heat is not representable",
-            ));
-        }
-        let temperature = old
-            .law
-            .temperature_k(new_energy)
-            .map_err(|error| FiniteChannelError::WallDomain { id, error })?;
-        let range = ranges[&id];
-        if temperature < range[0] || temperature > range[1] {
-            return Err(FiniteChannelError::WallOvershoot {
-                id,
-                temperature_k: temperature,
-                range_k: range,
-            });
-        }
-        let energy = (Dd::from_f64(new_energy) - Dd::from_f64(old.specific_energy_j_kg))
-            * Dd::from_f64(old.mass_kg);
-        let residual = (energy - *pooled).to_f64();
-        if !residual.is_finite() || residual.abs() > controls.exchange.energy_tolerance_j {
-            return Err(FiniteChannelError::WallEnergyBalance {
-                id,
-                residual_j: residual,
-            });
-        }
-        let specific_entropy = old
-            .law
-            .specific_entropy_change_j_kg_k(old.specific_energy_j_kg, new_energy)
-            .map_err(|error| FiniteChannelError::WallDomain { id, error })?
-            .ok_or(FiniteChannelError::Invalid(
-                "original wall entropy became unavailable",
-            ))?;
-        let entropy_change = Dd::from_f64(specific_entropy) * Dd::from_f64(old.mass_kg);
-        if !entropy_change.to_f64().is_finite() {
-            return Err(FiniteChannelError::Invalid(
-                "finite wall entropy is not representable",
-            ));
-        }
+        let (next, report, energy, entropy_change) = old.heated_candidate(
+            id,
+            *pooled,
+            ranges[&id],
+            controls.exchange.energy_tolerance_j,
+        )?;
         wall_heat = wall_heat + *pooled;
         wall_energy = wall_energy + energy;
         wall_entropy = wall_entropy + entropy_change;
-        let mut next = old.clone();
-        next.specific_energy_j_kg = new_energy;
-        next.temperature_k = temperature;
         next_walls.insert(id, next);
-        reports.push(FiniteChannelWallStep {
-            id,
-            caloric_identity: old.law.identity(),
-            volume_m3: old.volume_m3,
-            mass_kg: old.mass_kg,
-            temperatures_k: [old.temperature_k, temperature],
-            specific_energies_j_kg: [old.specific_energy_j_kg, new_energy],
-            heat_into_wall_j: heat,
-            energy_change_j: energy.to_f64(),
-            entropy_change_j_k: entropy_change.to_f64(),
-        });
+        reports.push(report);
     }
     for link in &ordered {
         check(&mut cancelled)?;
