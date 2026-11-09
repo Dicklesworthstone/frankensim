@@ -19,6 +19,8 @@ use fs_math::dd::Dd;
 use fs_phs::linear_exact::{LinearSplitBudget, PreparedExactZoh};
 use fs_phs::{PhsError, PortHamiltonian, QuadraticStorage, ResistanceWitness};
 
+// torsional.rs loads this file through #[path], so a bare `mod` would resolve beside it.
+#[path = "exponential/relaxation.rs"]
 mod relaxation;
 pub use relaxation::{
     MAX_TORSIONAL_RELAXATION_BRANCHES, TorsionalRelaxationBranch, TorsionalRelaxationStep,
