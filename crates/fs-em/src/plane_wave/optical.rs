@@ -29,10 +29,12 @@ use fs_math::{c64::C64, det};
 mod dispersion;
 pub(in crate::plane_wave) mod frequency;
 mod gas;
+mod silica;
 mod spectral;
 mod uniaxial;
 mod water;
 pub use gas::{MolecularGasOpticalResponse, MolecularGasOpticalSource};
+pub use silica::SilicaOpticalResponse;
 pub use spectral::{
     RefreshedSpectralOpticalSource, SpectralOpticalResponse, SpectralOpticalSource,
 };

@@ -56,8 +56,8 @@ pub mod dispersion;
 pub mod optical;
 pub use optical::{
     MolecularGasOpticalResponse, MolecularGasOpticalSource, OpticalConductorResponse,
-    OpticalMaterialResponse, RefreshedSpectralOpticalSource, SpectralOpticalResponse,
-    SpectralOpticalSource, UniaxialOpticalResponse, WaterOpticalResponse,
+    OpticalMaterialResponse, RefreshedSpectralOpticalSource, SilicaOpticalResponse,
+    SpectralOpticalResponse, SpectralOpticalSource, UniaxialOpticalResponse, WaterOpticalResponse,
 };
 
 /// Original collisional carrier transport in an admitted outgoing half-space wave.
@@ -123,6 +123,10 @@ pub enum DielectricResponse<'a> {
     /// with an explicitly selected lossless approximation. Real water absorption
     /// and causal transient reservoirs are not supplied by this index release.
     WaterOptical(WaterOpticalResponse<'a>),
+    /// Original NASA CHARMS Corning 7980 phase dispersion at retained T/mu,
+    /// with an explicitly selected lossless approximation. The same source
+    /// supplies thermal/group derivatives, but no causal transient reservoir.
+    SilicaOptical(SilicaOpticalResponse<'a>),
     /// Original molecular phase/group law and an explicitly selected magnetic
     /// source, prepared at one frequency. Lossless coherent approximation;
     /// molecular scattering is not misrepresented as absorbed heat.
@@ -150,6 +154,7 @@ impl<'a> DielectricResponse<'a> {
             Self::OpticalMaterial(response) => response.material(),
             Self::SpectralOptical(response) => response.material(),
             Self::WaterOptical(response) => response.material(),
+            Self::SilicaOptical(response) => response.material(),
             Self::MolecularGasOptical(response) => response.material(),
             Self::IonizedGas(response) => response.material(),
         }
@@ -197,6 +202,7 @@ impl<'a> DielectricResponse<'a> {
             Self::OpticalMaterial(response) => response.permittivity_f_m(omega)?,
             Self::SpectralOptical(response) => response.permittivity_f_m(omega)?,
             Self::WaterOptical(response) => response.permittivity_f_m(omega)?,
+            Self::SilicaOptical(response) => response.permittivity_f_m(omega)?,
             Self::MolecularGasOptical(response) => response.permittivity_f_m(omega)?,
             Self::IonizedGas(response) => response.permittivity(omega)?,
         };
@@ -490,6 +496,7 @@ impl<'a> PlanarDielectricInterface<'a> {
                 | DielectricResponse::OpticalMaterial(_)
                 | DielectricResponse::SpectralOptical(_)
                 | DielectricResponse::WaterOptical(_)
+                | DielectricResponse::SilicaOptical(_)
                 | DielectricResponse::MolecularGasOptical(_)
                 | DielectricResponse::IonizedGas(_) => {}
             }

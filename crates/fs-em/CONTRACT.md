@@ -1,5 +1,28 @@
 # fs-em contract
 
+## Original temperature-resolved Corning 7980 refraction
+
+With `plane-wave`, `SilicaOpticalResponse::try_lossless` and
+`DielectricResponse::SilicaOptical` carry the original `fs-material`
+`Corning7980Silica` law into native interfaces, coherent films, angular spectra
+and bulk propagation delays. The NASA CHARMS Table-3 fit retains its absolute
+vacuum index and 30--300 K, 400--2600 nm domain. Preparation freezes its six
+temperature polynomials once; wavelength queries allocate nothing. The same
+complete scalar snapshot supplies the unique absolute temperature and explicit
+SI permeability. Unowned coordinates, unsupported states and out-of-band
+frequencies refuse. Phase index forms Maxwell permittivity; original group
+index and analytic Sellmeier curvature separately drive group delay and GVD.
+
+The caller explicitly selects the named silica source and zero absorption.
+This is a homogeneous isotropic lossless approximation, without inferred
+extinction, scattering, pressure/stress response, thermal expansion or a
+causal transient energy reservoir. Native multifrequency source continuity
+retains the exact original snapshot; finite-window reservoir requests refuse.
+Six focused G0/G1/G3 controls in `plane_wave/optical/silica/tests.rs` cover
+independent high-precision phase/group/thermal/GVD values, original quantity
+and domain admission, oblique Snell/Fresnel/Brewster/TIR behavior, coherent
+thermal film phase and interior fields, and multifrequency source identity.
+
 ## Fundamental Lorentz forcing in an original static magnetic bias
 
 `SpatialHarmonicInductionResponse::static_bias_lorentz_loads` transfers the

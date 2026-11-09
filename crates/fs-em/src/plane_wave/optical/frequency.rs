@@ -10,7 +10,7 @@
 //! require matching slopes; no smoothing, extrapolation or pole fit is added.
 
 use super::{
-    OpticalConductorResponse, OpticalMaterialResponse, ReflectionError,
+    OpticalConductorResponse, OpticalMaterialResponse, ReflectionError, SilicaOpticalResponse,
     SpectralOpticalResponse, SpectralOpticalSource, VisibleDielectricAbsorption,
     VisibleOpticalStatePoint, WaterOpticalResponse, VACUUM_SPEED_M_S,
     FREQUENCY_WAVELENGTH_NM, VISIBLE_DIELECTRIC_WAVELENGTHS_NM, dispersion,
@@ -332,6 +332,36 @@ pub(super) fn water(
         scale,
         C64::from_re(wavelength * sample.wavelength_derivative_per_nm),
         C64::from_re((wavelength * wavelength) * sample.wavelength_second_derivative_per_nm2),
+        C64::from_re(sample.group_index),
+    )
+}
+
+pub(super) fn silica(
+    response: SilicaOpticalResponse<'_>,
+    omega: f64,
+    scale: f64,
+) -> Result<OpticalFrequencyJet> {
+    let wavelength = interior(
+        omega,
+        FREQUENCY_WAVELENGTH_NM,
+        fs_material::silica_refraction::WAVELENGTH_RANGE_NM,
+    )?;
+    let sample = response.refractive_sample(omega)?;
+    let (strengths, resonances_um2) = response.refractive_source().sellmeier_coefficients();
+    // The original source publishes squared micrometre resonances. This
+    // existing analytic Sellmeier derivative is scale invariant when lambda
+    // and those resonances share units; retain them without an SI round trip.
+    let (_, curvature, _) = sellmeier(
+        sample.phase_index,
+        strengths,
+        resonances_um2,
+        wavelength * 1e-3,
+    );
+    finish(
+        C64::from_re(sample.phase_index),
+        scale,
+        C64::from_re(wavelength * sample.wavelength_derivative_per_nm),
+        C64::from_re(curvature),
         C64::from_re(sample.group_index),
     )
 }

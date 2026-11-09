@@ -75,7 +75,8 @@ impl<'a> DielectricResponse<'a> {
     /// retain the original frozen carrier spectrum, including mutual drag;
     /// the cached native frequency and response must already be admitted.
     /// Optical derivatives retain Cauchy, Sellmeier, linear wavelength tables
-    /// or the original IAPWS water law; endpoints and nonsmooth knots refuse.
+    /// or the original IAPWS water and CHARMS silica laws; endpoints and
+    /// nonsmooth knots refuse.
     /// Frequency-prepared gases retain their original derivatives at the SAME
     /// admitted interior frequency: fixed partial densities for molecular
     /// Lorentz--Lorenz mixtures, or fixed T/P/composition for Ciddor air.
@@ -86,6 +87,7 @@ impl<'a> DielectricResponse<'a> {
             Self::OpticalMaterial(source) => Some(source.frequency_jet(omega)?),
             Self::SpectralOptical(source) => Some(source.frequency_jet(omega)?),
             Self::WaterOptical(source) => Some(source.frequency_jet(omega)?),
+            Self::SilicaOptical(source) => Some(source.frequency_jet(omega)?),
             Self::MolecularGasOptical(source) => Some(source.frequency_jet(omega)?),
             _ => None,
         };
