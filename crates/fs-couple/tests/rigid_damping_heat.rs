@@ -6,6 +6,9 @@ mod calibrated_shift;
 #[path = "rigid_damping_heat/driven.rs"]
 mod driven;
 
+#[path = "rigid_damping_heat/driven_network.rs"]
+mod driven_network;
+
 use fs_couple::rigid_damping_heat::temperature::{
     TemperatureDampingLaw, advance_candidate as advance_temperature,
 };

@@ -10,6 +10,9 @@
 //! This exposes the native driven-pair owner; it does not approximate a driven
 //! network by sequentially applying independent actuators.
 
+/// Simultaneous arbitrary driven connector graphs with finite heat storage.
+pub mod network;
+
 use super::{
     FrozenSource, MechanicalAdvance, MechanicalStep, Result, RigidDampingThermalCandidate,
     RigidDampingThermalError, RigidDampingThermalInput, ThermalControls, advance_with_source,
@@ -194,6 +197,7 @@ impl MechanicalAdvance for DrivenMotion {
         Ok(MechanicalStep {
             states_after: step.states_after.to_vec(),
             connector_dissipation_j: vec![step.dissipated_energy_j],
+            connector_actuator_work_j: Some(vec![step.actuator_work_j]),
             dissipated_energy_j: step.dissipated_energy_j,
             applied_work_j: step.external_loads.applied_work_j,
             actuator_work_j: step.actuator_work_j,

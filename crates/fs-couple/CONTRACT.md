@@ -11299,3 +11299,36 @@ broadband complex Airy heat/enthalpy, original alpha refresh and transactional
 phase/absorption domain exits. Native tests are defined but unexecuted here;
 independent scalar Airy arithmetic confirms the finite heating and domain-exit
 fixtures, and source/API review checks the existing native integration.
+
+## Simultaneous driven rigid graphs with per-connector finite heat
+
+`rigid_damping_heat::driven::network` connects the native simultaneous driven
+spatial graph to the same finite caloric transaction as the passive network and
+driven pair. Every original link has an explicit held material/world effort,
+heat route and optional temperature coordinate. Cycles, parallel links, shared
+bodies and isolated-body drift retain the native graph and original geometry.
+Its complete dense preparation limits are explicit; it does not use passive
+pair sweeps or invent a source subdivision.
+
+The shared report retains each original connector's signed actuator work as well
+as its independently integrated positive heat. Opposite actuator supply and
+recovery may cancel in the total work while physical damping remains positive.
+Neither recovered work nor source/drift defects become thermal energy. Passive
+links report exact zero actuator work. Connector order, compensated interval
+accumulation, shared receivers, partial heat allocation and unallocated outflow
+are preserved through the original thermal event and observer timeline.
+
+Both graph entries move the native endpoint body bank and work/heat vectors into
+the existing transaction without cloning them. Temperature feedback reuses the
+original reference forms and `TemperatureDampingLaw`; source or endpoint refusal,
+observer refusal, budget exhaustion and cancellation discard the complete
+mechanical/thermal candidate. Frozen graph source exactness does not establish
+moving-geometry or thermal accuracy; temperature feedback remains first order.
+
+Four focused integration groups specify an analytic three-body driven cycle
+with nonlinear calorics and partial shared heat allocation, parallel actuator
+supply/recovery, refinement to the independent coupled mechanical/caloric ODE,
+and native events with late refusal/retry. An independent scalar calculation
+gives feedback error ratios 1.99746 and 1.99883; work/heat balance stays below
+3.5e-15 J in that calculation. Pinned rustfmt passes. Full fs-couple integration
+execution remains outstanding under the existing dependency resource limit.

@@ -75,6 +75,9 @@ pub struct RigidDampingThermalReport {
     pub thermal: EnergyAudit,
     /// Original edge order, summed over every accepted interval [J].
     pub connector_heat_j: Vec<f64>,
+    /// Signed supplied/recovered work for each original connector [J].
+    /// Passive links retain exact zero; heat remains independently integrated.
+    pub connector_actuator_work_j: Vec<f64>,
     pub dissipated_energy_j: f64,
     /// Represented generated source energy; included once in the raw thermal audit.
     pub deposited_heat_j: f64,
@@ -136,6 +139,9 @@ pub enum RigidDampingThermalError<E, S = Infallible> {
     Invalid(&'static str),
     Motion(ViscousNetworkMotionError),
     DrivenMotion(fs_mbd::spatial_loads::internal_motion::viscous::driven::DrivenViscousMotionError),
+    DrivenNetworkMotion(
+        fs_mbd::spatial_loads::internal_motion::viscous::network::driven::DrivenViscousNetworkMotionError,
+    ),
     Thermal(DepositionError),
     Observer(E),
     /// Original connector index and the authored source's own refusal.
@@ -265,8 +271,8 @@ impl DampingSource for FrozenSource<'_> {
     }
 }
 
-// A small private adapter shares the original thermal transaction between the
-// native network and native driven-pair solvers. It does not integrate motion.
+// A small private adapter shares the original thermal transaction among the
+// native passive, driven-pair and simultaneous driven-graph solvers.
 #[derive(Clone, Copy)]
 struct ThermalControls {
     thermal: StepConfig,
@@ -287,6 +293,8 @@ impl From<RigidDampingThermalConfig> for ThermalControls {
 struct MechanicalStep {
     states_after: Vec<RigidBodyState>,
     connector_dissipation_j: Vec<f64>,
+    // Passive motion has no actuator bank and needs no per-step zero allocation.
+    connector_actuator_work_j: Option<Vec<f64>>,
     dissipated_energy_j: f64,
     applied_work_j: f64,
     actuator_work_j: f64,
@@ -299,6 +307,7 @@ impl From<ViscousNetworkMotionStep> for MechanicalStep {
         let [_, endpoint] = step.half_sources;
         Self {
             states_after: endpoint.states_after,
+            connector_actuator_work_j: None,
             connector_dissipation_j: step.connector_dissipation_j,
             dissipated_energy_j: step.dissipated_energy_j,
             applied_work_j: step.external_loads.applied_work_j,
@@ -432,6 +441,7 @@ fn advance_with_source<'m, O: DepositionObserver, S: DampingSource, M: Mechanica
         pending: None,
         accounts: Accounts::default(),
         connector_heat: vec![Dd::ZERO; input.links.len()],
+        connector_actuator_work: vec![Dd::ZERO; input.links.len()],
         pair_relaxations: 0,
     };
     let (thermal, mut coupled, audit) =
@@ -493,6 +503,12 @@ fn advance_with_source<'m, O: DepositionObserver, S: DampingSource, M: Mechanica
         thermal: audit,
         connector_heat_j: coupled
             .connector_heat
+            .iter()
+            .copied()
+            .map(value)
+            .collect::<Result<Vec<_>, O::Error, S::Error>>()?,
+        connector_actuator_work_j: coupled
+            .connector_actuator_work
             .iter()
             .copied()
             .map(value)
@@ -562,6 +578,7 @@ struct HeatObserver<'a, 'g, O: Clone, S: DampingSource, M: MechanicalAdvance> {
     pending: Option<Pending>,
     accounts: Accounts,
     connector_heat: Vec<Dd>,
+    connector_actuator_work: Vec<Dd>,
     pair_relaxations: usize,
 }
 impl<O: DepositionObserver, S: DampingSource, M: MechanicalAdvance> DepositionObserver
@@ -686,6 +703,25 @@ impl<O: DepositionObserver, S: DampingSource, M: MechanicalAdvance> DepositionOb
             dt_s,
             self.requested,
         )?;
+        if step.connector_dissipation_j.len() != self.input.links.len()
+            || step
+                .connector_actuator_work_j
+                .as_ref()
+                .is_some_and(|work| work.len() != self.input.links.len())
+        {
+            return Err(RigidDampingThermalError::Invalid(
+                "native work and heat must retain every original connector",
+            ));
+        }
+        let mut edge_work = Dd::ZERO;
+        for &work in step.connector_actuator_work_j.iter().flatten() {
+            check()?;
+            edge_work = edge_work + Dd::from_f64(number(work)?);
+        }
+        balance(
+            value(edge_work - Dd::from_f64(step.actuator_work_j))?,
+            self.config.energy_tolerance_j,
+        )?;
         let mut allocated = BTreeMap::<CellId, Dd>::new();
         let mut unallocated = Dd::ZERO;
         let mut edge_heat = Dd::ZERO;
@@ -808,6 +844,11 @@ impl<O: DepositionObserver, S: DampingSource, M: MechanicalAdvance> DepositionOb
             .zip(&step.connector_dissipation_j)
         {
             *total = *total + Dd::from_f64(heat);
+        }
+        if let Some(work) = &step.connector_actuator_work_j {
+            for (total, &value) in self.connector_actuator_work.iter_mut().zip(work) {
+                *total = *total + Dd::from_f64(value);
+            }
         }
         let a = &mut self.accounts;
         a.heat = a.heat + Dd::from_f64(step.dissipated_energy_j);
