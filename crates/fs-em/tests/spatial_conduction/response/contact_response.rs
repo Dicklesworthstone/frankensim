@@ -1,4 +1,6 @@
 //! Actual local interface response on original tetrahedral contact traces.
+#[path = "contact_response/quadrature.rs"]
+mod quadrature;
 use super::*;
 #[path = "../../common/electrical_interface_response.rs"]
 mod interface_response;

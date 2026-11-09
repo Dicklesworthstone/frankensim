@@ -4,7 +4,10 @@
 //! Bulk Hodge, boundary/gauge preparation and sparse solve retain their owners.
 
 use super::*;
-use crate::conduction::{ConductionError, admit_contact_source};
+use crate::conduction::{
+    ConductionContactQuadraturePoint, ConductionError, admit_contact_source,
+    contact_quadrature::{ContactCoefficient, ContactQuadrature, QuadratureError, triangle_rule},
+};
 use fs_material::electrical_interface::ResolvedElectricalInterface;
 use fs_sparse::Coo;
 use std::collections::BTreeMap;
@@ -20,13 +23,40 @@ pub struct SpatialConductionContact {
 }
 
 /// P1 trace response oriented from source surface A to source surface B.
-/// Current and heat are exact triangle integrals, not lumped nodal estimates.
+/// Fixed coefficients retain exact triangle integrals. Opt-in sampled contact
+/// laws retain the same positive quadrature for assembly, current and heat;
+/// endpoint densities come from their actual endpoint source samples.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpatialConductionContactResponse {
     pub voltage_jump_v: [f64; 3],
     pub current_density_a_m2: [f64; 3],
     pub current_a: f64,
     pub power_w: f64,
+    /// Actual samples in the deterministic triangle-rule order; empty for the
+    /// original constant-coefficient exact stencil.
+    pub quadrature: Vec<ConductionContactQuadraturePoint<3>>,
+}
+
+#[derive(Clone)]
+pub(super) enum ContactConductance {
+    Uniform(f64),
+    Sampled(ContactQuadrature<3>),
+}
+
+impl ContactConductance {
+    fn matrix_entry(&self, i: usize, j: usize) -> f64 {
+        match self {
+            Self::Uniform(conductance) => (conductance / 12.0) * if i == j { 2.0 } else { 1.0 },
+            Self::Sampled(quadrature) => quadrature.matrix_entry(i, j),
+        }
+    }
+}
+
+fn quadrature_error(error: QuadratureError) -> SpatialConductionError {
+    match error {
+        QuadratureError::Invalid(reason) => SpatialConductionError::Invalid(reason),
+        QuadratureError::Cancelled => SpatialConductionError::Cancelled,
+    }
 }
 
 fn key(mut vertices: [usize; 3]) -> [usize; 3] {
@@ -139,12 +169,31 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
     }
 
     pub(super) fn bind_admitted_contacts(
-        mut self,
+        self,
         contacts: Vec<SpatialConductionContact>,
         axes: Vec<[Option<String>; 2]>,
         limits: WeightedAssemblyLimits,
         cancelled: &mut impl FnMut() -> bool,
         admit: impl Fn(usize, &ResolvedElectricalInterface, &[Option<String>; 2]) -> Result<f64>,
+    ) -> Result<Self> {
+        self.bind_contact_coefficients(contacts, axes, limits, cancelled, |index, source, axes| {
+            admit(index, source, axes).map(ContactCoefficient::Uniform)
+        })
+    }
+
+    // Source owners admit every original sampled state before entering the
+    // same geometry, sparse assembly and native field-recovery path.
+    pub(super) fn bind_contact_coefficients(
+        mut self,
+        contacts: Vec<SpatialConductionContact>,
+        axes: Vec<[Option<String>; 2]>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+        admit: impl Fn(
+            usize,
+            &ResolvedElectricalInterface,
+            &[Option<String>; 2],
+        ) -> Result<ContactCoefficient>,
     ) -> Result<Self> {
         check(cancelled)?;
         let triplets = self
@@ -235,17 +284,37 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
                         "3D contact source must match the ordered adjacent materials",
                     )
                 })?;
-            let resistance = admit(contact_index, &contact.source, axes)?;
-            let conductance = finite(g.faces[a].area_m2 / resistance)?;
-            let twelfth = conductance / 12.0;
-            if !twelfth.is_finite() || twelfth <= 0.0 {
-                return Err(SpatialConductionError::Invalid(
-                    "3D contact conductance is not representably positive",
-                ));
-            }
+            let conductance = match admit(contact_index, &contact.source, axes)? {
+                ContactCoefficient::Uniform(resistance) => {
+                    let conductance = finite(g.faces[a].area_m2 / resistance)?;
+                    let twelfth = conductance / 12.0;
+                    if !twelfth.is_finite() || twelfth <= 0.0 {
+                        return Err(SpatialConductionError::Invalid(
+                            "3D contact conductance is not representably positive",
+                        ));
+                    }
+                    ContactConductance::Uniform(conductance)
+                }
+                ContactCoefficient::Sampled {
+                    subdivisions,
+                    resistance_ohm_m2,
+                } => {
+                    let rule = triangle_rule(subdivisions, cancelled).map_err(quadrature_error)?;
+                    ContactConductance::Sampled(
+                        ContactQuadrature::new(
+                            rule,
+                            g.faces[a].area_m2,
+                            [1.0; 3],
+                            resistance_ohm_m2,
+                            cancelled,
+                        )
+                        .map_err(quadrature_error)?,
+                    )
+                }
+            };
             for i in 0..3 {
                 for j in 0..3 {
-                    let value = twelfth * if i == j { 2.0 } else { 1.0 };
+                    let value = finite(conductance.matrix_entry(i, j))?;
                     let (ai, aj) = (contact.first_vertices[i], contact.first_vertices[j]);
                     let (bi, bj) = (contact.second_vertices[i], contact.second_vertices[j]);
                     matrix.push(ai, aj, value);
@@ -295,29 +364,77 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<SpatialConductionContactResponse>> {
         let mut result = Vec::with_capacity(self.contacts.len());
-        for (contact, &conductance) in self.contacts.iter().zip(&self.contact_conductance_s) {
+        for (contact, conductance) in self.contacts.iter().zip(&self.contact_conductance_s) {
             check(cancelled)?;
             let jump = [0, 1, 2].map(|i| {
                 finite(voltage[contact.first_vertices[i]] - voltage[contact.second_vertices[i]])
             });
             let [a, b, c] = jump;
             let jump = [a?, b?, c?];
-            let sum = finite(jump.iter().sum())?;
-            let power = finite(
-                (conductance / 12.0) * (jump.iter().map(|v| v * v).sum::<f64>() + sum * sum),
-            )?;
+            let (density, current, power, quadrature) = match conductance {
+                ContactConductance::Uniform(conductance) => {
+                    let sum = finite(jump.iter().sum())?;
+                    let power = finite(
+                        (conductance / 12.0)
+                            * (jump.iter().map(|v| v * v).sum::<f64>() + sum * sum),
+                    )?;
+                    let density = jump.map(|v| finite(v / contact.source.resistance_ohm_m2()));
+                    let [a, b, c] = density;
+                    (
+                        [a?, b?, c?],
+                        finite((conductance / 3.0) * sum)?,
+                        power,
+                        Vec::new(),
+                    )
+                }
+                ContactConductance::Sampled(prepared) => {
+                    let quadrature = prepared
+                        .response(jump, cancelled)
+                        .map_err(quadrature_error)?;
+                    let mut density = [None; 3];
+                    let mut current = Dd::from_f64(0.0);
+                    let mut power = Dd::from_f64(0.0);
+                    for sample in &quadrature {
+                        check(cancelled)?;
+                        for (vertex, value) in density.iter_mut().enumerate() {
+                            if sample.basis[vertex] == 1.0 {
+                                *value = Some(sample.current_density_a_m2);
+                            }
+                        }
+                        current = current
+                            + Dd::from_f64(sample.area_weight_m2)
+                                * Dd::from_f64(sample.current_density_a_m2);
+                        power = power + Dd::from_f64(sample.power_w);
+                    }
+                    let [a, b, c] = density;
+                    let missing = || {
+                        SpatialConductionError::Invalid(
+                            "sampled triangular contact lost an original endpoint",
+                        )
+                    };
+                    (
+                        [
+                            a.ok_or_else(missing)?,
+                            b.ok_or_else(missing)?,
+                            c.ok_or_else(missing)?,
+                        ],
+                        finite(current.to_f64())?,
+                        finite(power.to_f64())?,
+                        quadrature,
+                    )
+                }
+            };
             if power < 0.0 || (jump.iter().any(|&v| v != 0.0) && power == 0.0) {
                 return Err(SpatialConductionError::Invalid(
                     "3D contact Joule heat is not representably positive",
                 ));
             }
-            let density = jump.map(|v| finite(v / contact.source.resistance_ohm_m2()));
-            let [a, b, c] = density;
             result.push(SpatialConductionContactResponse {
                 voltage_jump_v: jump,
-                current_density_a_m2: [a?, b?, c?],
-                current_a: finite((conductance / 3.0) * sum)?,
+                current_density_a_m2: density,
+                current_a: current,
                 power_w: power,
+                quadrature,
             });
         }
         Ok(result)

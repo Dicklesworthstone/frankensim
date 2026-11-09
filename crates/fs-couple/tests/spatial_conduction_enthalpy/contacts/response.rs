@@ -428,3 +428,172 @@ fn current_dependent_contact_heats_both_bodies_and_complete_sourced_heat_feedbac
         ))));
     });
 }
+
+#[test]
+fn nonuniform_triangular_contact_samples_refresh_temperature_and_heat_each_body_once() {
+    use fs_em::conduction::response::contact::ContactResponseQuadrature;
+    use fs_em::spatial::conduction::{ConductionVoltageFace, SpatialConductionBoundary};
+
+    let (a, ca) = material(1.0, 1.0, 0.002);
+    let (b, cb) = material(3.0, 2.0, 0.0);
+    let (cards, curves) = ([a, b], [ca, cb]);
+    let card = nonlinear_interface(&cards);
+    let ip = interface_point(300.0, 1e5)
+        .with_quantity(
+            "Tm",
+            static_quantity(QuantityKind::AbsoluteTemperature),
+            300.0,
+        )
+        .unwrap()
+        .with_quantity(
+            "contact_J",
+            ElectricalInterfaceCoordinate::CurrentDensityMagnitude.quantity(),
+            0.0,
+        )
+        .unwrap();
+    let mut surface = surface_bindings(&cards, &card, &ip);
+    for contact in &mut surface {
+        contact.point.mean_temperature_axis = Some("Tm");
+    }
+    let context = point(300.0);
+    let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+    let cells = bindings(&cards, &curves, &context, &key);
+    let regions = regions();
+    let layout = SpatialConductionThermalNetwork {
+        cells: &cells,
+        links: &LINKS,
+        regions: &regions,
+        volume_tolerance_m3: 1e-12,
+    };
+    let mut original = nonlinear_problem(&cards, &card, &ip)
+        .with_contact_quadrature(ContactResponseQuadrature {
+            subdivisions: 2,
+            maximum_points: 38,
+        })
+        .unwrap();
+    let voltage = original
+        .exterior_faces()
+        .filter_map(|face| {
+            let points = original.mesh().faces[face].map(|v| original.positions_m()[v as usize]);
+            if points.iter().all(|p| p[0] == 0.0) {
+                Some(ConductionVoltageFace {
+                    face,
+                    voltage_v: [0.0; 3],
+                })
+            } else if points.iter().all(|p| p[0] == 2.0) {
+                Some(ConductionVoltageFace {
+                    face,
+                    voltage_v: points.map(|p| 1.0 + 2.0 * p[1]),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+    let boundary = SpatialConductionBoundary {
+        voltage,
+        current: Vec::new(),
+    };
+    let mut thermal = initial(&curves, 999.0, None);
+    let mut solve = config();
+    solve.maximum_circuit_trials = 4096;
+    for target_s in [0.1, 0.2] {
+        let old = [CellId(30), CellId(10)].map(|cell| thermal.temperature_k(cell).unwrap());
+        let next = layout
+            .step_response_contact_candidate(
+                &thermal,
+                target_s,
+                &original,
+                &boundary,
+                &surface,
+                limits(),
+                field_controls(),
+                controls(),
+                solve,
+                &[0.0; 2],
+                || false,
+            )
+            .unwrap();
+        let temperatures =
+            [CellId(30), CellId(10)].map(|cell| next.thermal().temperature_k(cell).unwrap());
+        let mean = (temperatures[0] + temperatures[1]) / 2.0;
+        let step = &next.report().electrical;
+        let mut contact_power = 0.0;
+        for (index, (contact, source_report)) in step
+            .contacts
+            .iter()
+            .zip(&step.field.evaluated_contacts)
+            .enumerate()
+        {
+            assert_eq!(contact.cells, [CellId(30), CellId(10)]);
+            near(contact.heat_fraction_to_first, 0.25);
+            assert_eq!(contact.response.quadrature.len(), 19);
+            assert_eq!(source_report.applied.len(), 19);
+            assert_eq!(source_report.evaluated.len(), 19);
+            let mut power = 0.0;
+            let mut range = [f64::INFINITY, f64::NEG_INFINITY];
+            for ((sample, applied), evaluated) in contact
+                .response
+                .quadrature
+                .iter()
+                .zip(&source_report.applied)
+                .zip(&source_report.evaluated)
+            {
+                // Independent solution of v=(r0+0.1*|j|)j at each original point.
+                let r0 = 0.5 + 0.002 * (mean - 300.0);
+                let v = sample.voltage_jump_v;
+                let density = v.signum() * 2.0 * v.abs() / (r0 + (r0 * r0 + 0.4 * v.abs()).sqrt());
+                near(sample.current_density_a_m2, density);
+                assert_eq!(applied.resistance_ohm_m2(), sample.resistance_ohm_m2);
+                near(evaluated.resistance_ohm_m2(), r0 + 0.1 * density.abs());
+                for (axis, value) in [
+                    ("Ta", temperatures[0]),
+                    ("Tb", temperatures[1]),
+                    ("Tm", mean),
+                    ("contact_J", density.abs()),
+                ] {
+                    near(evaluated.resolved().state_coordinate(axis).unwrap(), value);
+                }
+                assert_eq!(
+                    evaluated.resolved().properties()[0]
+                        .answer()
+                        .receipt
+                        .selected,
+                    original.contacts()[index].source.resolved().properties()[0]
+                        .answer()
+                        .receipt
+                        .selected,
+                );
+                let local = sample.area_weight_m2 * v * density;
+                near(sample.power_w, local);
+                power += local;
+                range[0] = range[0].min(sample.resistance_ohm_m2);
+                range[1] = range[1].max(sample.resistance_ohm_m2);
+            }
+            assert!(range[1] - range[0] > 1e-3);
+            near(contact.response.power_w, power);
+            contact_power += power;
+        }
+        // Independent per-body finite-capacity balance. G=1 W/K, C=[1,2] J/K;
+        // internal Fourier exchange cancels only after each side is checked.
+        let bulk = [
+            step.field.field.cell_power_w[..6].iter().sum::<f64>(),
+            step.field.field.cell_power_w[6..].iter().sum::<f64>(),
+        ];
+        let outgoing_a = temperatures[0] - temperatures[1];
+        near(
+            temperatures[0] - old[0],
+            0.1 * (bulk[0] + 0.25 * contact_power - outgoing_a),
+        );
+        near(
+            2.0 * (temperatures[1] - old[1]),
+            0.1 * (bulk[1] + 0.75 * contact_power + outgoing_a),
+        );
+        near(step.heat_j, 0.1 * (bulk[0] + bulk[1] + contact_power));
+        near(step.supplied_work_j, step.heat_j);
+        near(next.thermal().energy_j() - thermal.energy_j(), step.heat_j);
+        near(next.report().deposited_joule_j, step.heat_j);
+        near(next.report().total_energy_residual_j, 0.0);
+        (thermal, original, _) = next.into_parts();
+    }
+}

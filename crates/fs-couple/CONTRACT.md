@@ -12701,3 +12701,27 @@ new retained pump harmonic; and checks original-clock/bandwidth rejection,
 bounded scratch refusal, incomplete material actions and cancellation/retry.
 These fixed-order derivatives and accounts do not certify infinite harmonic
 resolution, stability, passivity or a heat destination.
+
+## Tetrahedral sampled contact response in finite thermal feedback
+
+The same explicit contact quadrature policy is retained by
+`SpatialConductionResponse` through the existing thermal source refresh and
+frozen-source handoff. The native triangular contact response carries its
+integrated loss and original point observations; existing
+`step_response_contact_candidate` heat routing consumes that integral once
+through the original receiving cells and specified contact partitions. The
+representative contact source remains the external-context seed, while
+constitutive closure and acceptance use every point's applied/evaluated source.
+
+Bulk/contact source support, caloric phase ownership, independent supplied
+electrical work, field-trial budgets and atomic continuation keep their
+existing meanings. No face-average nonlinear resistance or additional heat
+source is introduced.
+
+A focused three-dimensional thermal regression reuses the original material
+and contact fixtures with varying exterior voltage. Two accepted intervals
+check each point's original source temperature and independent quadratic
+current law, each body's finite-capacity storage and Fourier exchange, contact
+heat partitions and total supplied work. Native triangular regressions and
+the planar analytic thermal endpoint provide complementary checks. Integration
+execution and mesh/time/quadrature error bounds remain separate validation.

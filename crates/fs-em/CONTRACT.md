@@ -8722,3 +8722,28 @@ old-source 1 ps triangular null probe reproduced a real result about 3.3e10 time
 too large and an incorrectly zero proper result. Validation used actual numerical
 leaf sources with narrow outer metadata adapters; the full material/field/FFT
 pipeline and native workspace suite were not run in this environment.
+
+## Nonuniform nonlinear contacts on original tetrahedral faces
+
+`SpatialConductionResponse::with_contact_quadrature` uses the same source-owned
+sampling policy and constitutive closure on matching original triangular faces.
+Each subdivision uses positive vertex/midpoint/centroid weights exact through
+degree three. Integer barycentric keys merge shared points deterministically;
+`3*n*n+3*n+1` points per face are charged against the global contact budget.
+
+The original triangular contact operator, current and heat share those same
+point resistances and physical area weights. Endpoint densities are recovered
+from actual endpoint samples; the public sample report retains both applied
+and evaluated complete original source states. The original constant-R''
+triangle mass matrix remains a separate exact path. All-point relaxation,
+source-domain refusal, source-query counts, work acceptance and cancellation
+reuse the common nonlinear contact owner. The policy also survives native
+frozen handoffs consumed by existing finite-thermal and circuit couplers.
+
+Two focused native regression groups cover spatially varying current-dependent
+contacts at multiple resolutions and external temperatures, an independent
+pointwise quadratic current law, source identity, native bulk/contact/source
+work, exact query counts, budgets, cancellation and continuing source policy.
+The rule remains a caller-refined discretization, not a quadrature-error or
+measured-material certificate. Moving/sliding contact surfaces and interface
+electrical memory remain outside this memoryless fixed-geometry law.
