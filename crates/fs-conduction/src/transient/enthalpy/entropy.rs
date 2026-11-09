@@ -527,12 +527,11 @@ pub(super) fn evaluate(
         source.add(finite(source_load[vertex] / ti)?)?;
         has_unclassified |= context.problem.source.at(vertex) != 0.0;
         let (columns, entries) = system.operator.row(vertex);
-        let mut transport = 0.0;
+        let mut transport = finite(system.heat_residual_row(vertex, temperature))?;
         for (index, (&column, &entry)) in columns.iter().zip(entries).enumerate() {
             if index != 0 && index % ASSEMBLY_TILE == 0 {
                 poll(context.cx, index)?;
             }
-            transport = finite(transport + finite(entry * temperature[column])?)?;
             if column != vertex {
                 conduction.add(pair_generation(0.5 * entry, ti, temperature[column])?)?;
             }
@@ -543,7 +542,7 @@ pub(super) fn evaluate(
             radiation_at_node = radiation_at_node + Dd::from_f64(out) / Dd::from_f64(ti);
             finite_dd(radiation_at_node)?;
         }
-        let row = finite(de + context.dt * finite(transport - system.load[vertex])?)?;
+        let row = finite(de + context.dt * transport)?;
         if dofs.slot_of(vertex).is_some() {
             residual.add(finite(row / ti)?)?;
         } else {

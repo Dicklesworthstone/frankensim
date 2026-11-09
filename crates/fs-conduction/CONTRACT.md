@@ -1,5 +1,30 @@
 # CONTRACT: fs-conduction
 
+## Centered physical heat in spatial enthalpy transport
+
+Every original assembled system retains a temperature reference and the source,
+Neumann and Robin load expressed relative to it. Physical residuals evaluate
+`A*(T-T0) - b_relative`; Robin quadrature integrates `h*(T_bath-T0)` directly.
+This preserves small deposited heat beside large absolute-temperature Robin
+loads and removes spurious conductive heat from a uniform assembled state.
+Conductivity and its derivatives still use the original absolute material
+temperature. The temperature shift neither changes the enthalpy datum nor
+replaces reference mass, sharp latent storage or boundary physics.
+
+Native backward Euler and both SDIRK2 stages, their prescribed-temperature
+reactions, entropy accounts and compensated interval heat reuse these same
+physical rows. Sensible-temperature transients and duty cycles use them too.
+The original CSR and absolute load remain available for elimination and
+linearization. Assembly adds one nodal load buffer and a scalar, with no extra
+material query or element pass; no measured speed or general roundoff bound
+is asserted.
+
+Focused native regressions cover exact sensible and latent equilibria on a
+skew tetrahedron, a weak latent heat pulse inside a much larger Robin load,
+and representable temperature translations with independently integrated
+nonuniform Robin heat. These are numerical conservation checks, not material
+calibration or time/spatial error certificates.
+
 ## Constant-temperature invariance of native conductive loads
 
 Bulk P1 gradients use the three original nodal differences before multiplying
@@ -14,8 +39,9 @@ three-edge basis and completes the constant null mode. Local matrix-free loads
 and nonlinear coefficient columns use the same independent gradients and
 balanced fourth nodal load. Steady, nonlinear Robin, first/second-order design
 and enthalpy-stage conductivity pullbacks reuse these loads. This removes
-absolute-temperature cancellation from these local operations, not all sparse
-assembly, solve or global energy roundoff. No mesh-accuracy or measured-speed
+absolute-temperature cancellation from these local operations. The centered
+physical rows above also protect the assembled residual; solve and global
+energy roundoff remain. No mesh-accuracy or measured-speed
 claim follows from the reduced arithmetic.
 
 Focused G0/G1/G3 tests check exact uniform-state zeros, skew affine Fourier

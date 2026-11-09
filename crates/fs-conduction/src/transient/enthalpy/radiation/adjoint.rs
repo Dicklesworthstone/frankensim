@@ -266,12 +266,8 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             if row % ASSEMBLY_TILE == 0 {
                 poll(cx, row)?;
             }
-            let (columns, entries) = system.operator.row(row);
-            let mut flux = 0.0;
-            for (&column, &entry) in columns.iter().zip(entries) {
-                flux = finite(entry.mul_add(temperature[column], flux))?;
-            }
-            transport_w.push(if transport.is_prescribed(row) { 0.0 } else { finite(flux - system.load[row])? });
+            transport_w.push(if transport.is_prescribed(row) { 0.0 }
+                else { finite(system.heat_residual_row(row, &temperature))? });
         }
         // Recheck physical heat separately from the numerically combined Robin
         // reference. This is not inferred from storage or from a small residual.

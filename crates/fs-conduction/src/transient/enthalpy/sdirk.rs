@@ -297,10 +297,9 @@ fn finish_stage(
         storage = storage + delta; carried = carried + prior;
         liquid_mass_fraction.push(context.storage.curve_for_vertex(i).values_at_specific_enthalpy(value)
             .map_err(|source| EnthalpyError::Phase { vertex: i, source })?.liquid_mass_fraction.clamp(0.0, 1.0));
-        let (columns, entries) = system.operator.row(i);
-        let outward: f64 = columns.iter().zip(entries).map(|(&j, &v)| v * temperature[j]).sum();
+        let outward = system.heat_residual_row(i, &temperature);
         let outward = match &radiation { Some((load, _)) => finite(outward + load[i])?, None => finite(outward)? };
-        let known = finite(system.load[i] - outward)?;
+        let known = finite(-outward)?;
         let residual = delta - prior - Dd::from_f64(context.dt) * Dd::from_f64(known);
         let prescribed = context.is_prescribed(i);
         if let Some(terms) = &mut entropy_terms {

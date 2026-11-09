@@ -599,7 +599,6 @@ fn march_inner(
         None => assemble_operator(cx, mesh, boundary, material, source, initial)?,
     };
     let stiffness = &system.operator;
-    let load = &system.load;
 
     let theta = config.theta;
 
@@ -620,7 +619,6 @@ fn march_inner(
     validate_material_temperature(cx, problem, storage, &temperature)?;
 
     let mut recorded = Vec::with_capacity(steps);
-    let mut scratch_k = vec![0.0f64; n];
     let mut rhs = vec![0.0f64; dofs.n()];
 
     for step in 0..steps {
@@ -632,9 +630,8 @@ fn march_inner(
         // The full old field already contains the prescribed temperatures,
         // so K*T includes their contribution. Their increments are zero:
         // adding an absolute-temperature Dirichlet lift here would double it.
-        stiffness.spmv(&temperature, &mut scratch_k);
         for (slot, &vertex) in dofs.free().iter().enumerate() {
-            let value = config.dt_s * (load[vertex] - scratch_k[vertex]);
+            let value = -config.dt_s * system.heat_residual_row(vertex, &temperature);
             if !value.is_finite() {
                 return Err(ConductionError::NonFinite {
                     field: "transient right-hand side",

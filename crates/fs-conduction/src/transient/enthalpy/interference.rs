@@ -624,12 +624,7 @@ fn finish_interval(
                 .map_err(|source| EnthalpyError::Phase { vertex, source })?
                 .liquid_mass_fraction.clamp(0.0, 1.0),
         );
-        let (columns, entries) = system.operator.row(vertex);
-        let transport: f64 = columns
-            .iter()
-            .zip(entries)
-            .map(|(&column, &entry)| entry * temperature[column])
-            .sum();
+        let (transport, load) = system.heat_row_terms(vertex, &temperature);
         let transport = match &radiation {
             Some((load, _)) => super::finite(transport + load[vertex])?,
             None => transport,
@@ -638,7 +633,7 @@ fn finish_interval(
             delta,
             context.dt,
             transport,
-            system.load[vertex],
+            load,
             source_load_j[vertex],
         )?;
         if context.is_prescribed(vertex) {

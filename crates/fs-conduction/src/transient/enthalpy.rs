@@ -1020,12 +1020,7 @@ impl StepContext<'_, '_, '_, '_> {
             if index % ASSEMBLY_TILE == 0 {
                 poll(self.cx, index)?;
             }
-            let (columns, entries) = system.operator.row(vertex);
-            let transport: f64 = columns
-                .iter()
-                .zip(entries)
-                .map(|(&column, &entry)| entry * temperature[column])
-                .sum();
+            let transport = system.heat_residual_row(vertex, temperature);
             let transport = match &radiation {
                 Some((load, _)) => finite(transport + load[vertex])?,
                 None => transport,
@@ -1035,8 +1030,7 @@ impl StepContext<'_, '_, '_, '_> {
                     self.storage.storage_change_j(
                         vertex, h[vertex], self.old[vertex], temperature[vertex],
                     )? / self.dt
-                        + transport
-                        - system.load[vertex],
+                        + transport,
                 )?,
             )?;
         }
@@ -1351,12 +1345,7 @@ impl StepContext<'_, '_, '_, '_> {
             if vertex % ASSEMBLY_TILE == 0 {
                 poll(self.cx, vertex)?;
             }
-            let (columns, entries) = system.operator.row(vertex);
-            let transport: f64 = columns
-                .iter()
-                .zip(entries)
-                .map(|(&column, &entry)| entry * temperature[column])
-                .sum();
+            let (transport, load) = system.heat_row_terms(vertex, temperature);
             let transport = match &radiation {
                 Some((load, _)) => finite(transport + load[vertex])?,
                 None => transport,
@@ -1368,14 +1357,14 @@ impl StepContext<'_, '_, '_, '_> {
                     )?,
                     self.dt,
                     transport,
-                    system.load[vertex],
+                    load,
                     source[vertex],
                 )?,
                 None => finite(
                     self.storage.storage_change_j(
                         vertex, h[vertex], self.old[vertex], temperature[vertex],
                     )?
-                        + self.dt * (transport - system.load[vertex]),
+                        + self.dt * (transport - load),
                 )?,
             };
         }

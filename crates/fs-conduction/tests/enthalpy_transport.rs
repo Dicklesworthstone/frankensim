@@ -137,6 +137,153 @@ fn bits(values: &[f64]) -> Vec<u64> {
     values.iter().map(|value| value.to_bits()).collect()
 }
 
+fn skew_tetrahedron() -> ConductionMesh {
+    ConductionMesh::new(
+        TetComplex::from_tets(4, vec![[0, 1, 2, 3]]),
+        vec![
+            [0.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+            [1.0, 7.0, 0.0],
+            [2.0, 4.0, 11.0],
+        ],
+    )
+    .unwrap()
+}
+
+#[test]
+fn skew_isothermal_enthalpy_equilibria_have_no_numerical_heat_or_entropy() {
+    use fs_conduction::transient::enthalpy::heterogeneous::EnthalpyRadiation;
+    use fs_conduction::transient::enthalpy::sdirk::EnthalpySdirk2Input;
+
+    let mesh = skew_tetrahedron();
+    let boundary = adiabatic(&mesh);
+    let material = ConductivityModel::isotropic_declared(400.0).unwrap();
+    let source = ScalarField::Uniform(0.0);
+    let mut policy = config();
+    policy.newton.absolute_tolerance = 1e-20;
+    policy.newton.relative_tolerance = 0.0;
+    policy.energy_tolerance_j = 1e-18;
+    // The second equilibrium has different phase fractions at the same melting
+    // temperature. It must neither redistribute latent heat nor generate entropy.
+    for (curve, old_h) in [
+        (sensible_curve(), [100.5; 4]),
+        (latent_curve(), [125.0, 150.0, 200.0, 275.0]),
+    ] {
+        with_cx(|cx| {
+            let engine = EnthalpyBackwardEuler::uniform(
+                cx, &mesh, &curve, REFERENCE_DENSITY, budget(),
+            ).unwrap();
+            let p = problem(&mesh, &boundary, &material, &source);
+            let (step, entropy) = engine.advance_with_entropy(
+                cx, p, None, &old_h, 10_000.0, policy, 1e-20,
+            ).unwrap();
+            assert_eq!(bits(&step.specific_enthalpy_j_kg), bits(&old_h));
+            assert_eq!(step.newton.iterations, 0);
+            assert_eq!(step.stored_energy_change_j, 0.0);
+            assert_eq!(step.energy_residual_j, 0.0);
+            assert_eq!(entropy, Default::default());
+            let input = EnthalpySdirk2Input {
+                problem: p, interfaces: None,
+                radiation: EnthalpyRadiation::None, contacts: None,
+            };
+            let stages = engine.advance_sdirk2(cx, [input; 2], &old_h, 10_000.0, policy).unwrap();
+            for stage in [&stages.first_stage, &stages.second_stage] {
+                assert_eq!(bits(&stage.specific_enthalpy_j_kg), bits(&old_h));
+                assert_eq!(stage.newton.iterations, 0);
+                assert_eq!(stage.stage_energy_residual_j, 0.0);
+            }
+            assert_eq!(stages.stored_energy_change_j, 0.0);
+            assert_eq!(stages.energy_residual_j, 0.0);
+        });
+    }
+}
+
+#[test]
+fn weak_latent_heating_survives_large_robin_absolute_temperature_loads() {
+    use fs_conduction::transient::enthalpy::heterogeneous::EnthalpyRadiation;
+    use fs_conduction::transient::enthalpy::sdirk::EnthalpySdirk2Input;
+
+    let mesh = skew_tetrahedron();
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region("melting bath", |_| true, ThermalBc::robin(10_000.0, 350.0).unwrap()).unwrap()
+        .adiabatic_remainder().finish().unwrap();
+    let material = ConductivityModel::isotropic_declared(400.0).unwrap();
+    let source = ScalarField::Uniform(1e-12);
+    let curve = latent_curve();
+    let old_h = [150.0; 4];
+    let dt = 10_000.0;
+    let expected_h = 150.0 + dt * 1e-12 / REFERENCE_DENSITY;
+    // det([3,0,0], [1,7,0], [2,4,11])/6 = 38.5 m3.
+    let expected_energy = 38.5 * dt * 1e-12;
+    let mut policy = config();
+    policy.newton.absolute_tolerance = 1e-12;
+    policy.newton.relative_tolerance = 0.0;
+    policy.energy_tolerance_j = 2e-12;
+    with_cx(|cx| {
+        let engine = EnthalpyBackwardEuler::uniform(
+            cx, &mesh, &curve, REFERENCE_DENSITY, budget(),
+        ).unwrap();
+        let p = problem(&mesh, &boundary, &material, &source);
+        let step = engine.advance(cx, p, None, &old_h, dt, policy).unwrap();
+        assert_eq!(step.temperature, [350.0; 4]);
+        assert_eq!(step.robin_out_w, 0.0);
+        assert!((step.stored_energy_change_j - expected_energy).abs() < 2e-12);
+        for &h in &step.specific_enthalpy_j_kg {
+            assert!((h - expected_h).abs() < 6e-14, "{h:.16e} != {expected_h:.16e}");
+        }
+        let input = EnthalpySdirk2Input {
+            problem: p, interfaces: None,
+            radiation: EnthalpyRadiation::None, contacts: None,
+        };
+        let stages = engine.advance_sdirk2(cx, [input; 2], &old_h, dt, policy).unwrap();
+        assert_eq!(stages.second_stage.temperature, [350.0; 4]);
+        assert_eq!(stages.robin_out_j, 0.0);
+        assert!((stages.source_j - expected_energy).abs() < 1e-20);
+        assert!((stages.stored_energy_change_j - expected_energy).abs() < 2e-12);
+        for &h in &stages.second_stage.specific_enthalpy_j_kg {
+            assert!((h - expected_h).abs() < 6e-14, "{h:.16e} != {expected_h:.16e}");
+        }
+    });
+}
+
+#[test]
+fn assembled_nonuniform_robin_heat_is_invariant_under_representable_temperature_translation() {
+    use fs_conduction::assemble::{assemble_operator, full_residual};
+
+    let mesh = skew_tetrahedron();
+    let material = ConductivityModel::isotropic_declared(400.0).unwrap();
+    let source = ScalarField::Uniform(0.125);
+    let temperature = [1024.0, 1024.0 + 1.0 / 1024.0, 1024.0 - 1.0 / 512.0, 1024.0 + 1.0 / 256.0];
+    let bath = [1024.0 + 1.0 / 128.0, 1024.0, 1024.0 - 1.0 / 256.0, 1024.0 + 1.0 / 512.0];
+    let htc = [1.0, 3.0, 5.0, 7.0];
+    // Independent face integration: integral of two affine fields is
+    // A/12 * ((sum h)*(sum delta_T) + sum h_i*delta_T_i).
+    let robin_out: f64 = mesh.boundary().iter().map(|face| {
+        let h = face.vertices.map(|v| htc[v as usize]);
+        let delta = face.vertices.map(|v| temperature[v as usize] - bath[v as usize]);
+        face.area / 12.0 * (h.iter().sum::<f64>() * delta.iter().sum::<f64>()
+            + h.iter().zip(delta).map(|(h, delta)| h * delta).sum::<f64>())
+    }).sum();
+    with_cx(|cx| {
+        let mut baseline = None;
+        for shift in [0.0, 1_048_576.0] {
+            let boundary = ThermalBoundaryBuilder::new(&mesh)
+                .region("affine bath", |_| true, ThermalBc::Robin {
+                    htc: ScalarField::Nodal(htc.to_vec()),
+                    t_ref: ScalarField::Nodal(bath.map(|t| t + shift).to_vec()),
+                }).unwrap().adiabatic_remainder().finish().unwrap();
+            let t = temperature.map(|t| t + shift);
+            let system = assemble_operator(cx, &mesh, &boundary, &material, &source, &t).unwrap();
+            let residual = full_residual(&system, &t);
+            assert!((residual.iter().sum::<f64>() - (robin_out - 0.125 * 38.5)).abs() < 1e-12);
+            match &baseline {
+                None => baseline = Some(bits(&residual)),
+                Some(original) => assert_eq!(&bits(&residual), original),
+            }
+        }
+    });
+}
+
 #[test]
 fn single_phase_transport_matches_existing_backward_euler() {
     let mesh = tetrahedron();

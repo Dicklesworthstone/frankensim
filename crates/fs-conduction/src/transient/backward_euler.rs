@@ -332,12 +332,11 @@ impl<'m> BackwardEuler<'m> {
             // Do not add two full nodal buffers to the unchanged default path.
             None
         };
-        let mut applied = vec![0.0; self.mesh.vertex_count()];
-        system.operator.spmv(old, &mut applied);
-        poll(cx, 0)?;
         let rhs: Vec<f64> = dofs.free().iter().map(|&v|
-            finite(dt_s * (system.load[v] - applied[v]) - lift.as_ref().map_or(0.0, |lift| lift[v])))
+            finite(-dt_s * system.heat_residual_row(v, old)
+                - lift.as_ref().map_or(0.0, |lift| lift[v])))
             .collect::<Result<_, _>>()?;
+        poll(cx, 0)?;
         let (correction, relative_residual, krylov_iterations) = solve(cx, &matrix, &rhs, config.linear)?;
         for (slot, &v) in dofs.free().iter().enumerate() {
             if slot % 512 == 0 { poll(cx, slot)?; }

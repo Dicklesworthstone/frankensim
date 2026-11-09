@@ -446,12 +446,10 @@ impl BackwardEuler<'_> {
         let mut storage = vec![0.0; temperature.len()];
         self.capacity.spmv(&delta, &mut storage);
         poll(cx, 0)?;
-        let mut flux = vec![0.0; temperature.len()];
-        system.operator.spmv(temperature, &mut flux);
-        poll(cx, 0)?;
         let residual = dofs.free().iter().map(|&v|
-            finite(storage[v] + dt * finite(flux[v] - system.load[v])?))
+            finite(storage[v] + dt * finite(system.heat_residual_row(v, temperature))?))
             .collect::<Result<Vec<_>, _>>()?;
+        poll(cx, 0)?;
         let norm = finite(norm2(&residual))?;
         Ok(Evaluation { system, residual, norm })
     }

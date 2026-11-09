@@ -53,13 +53,46 @@ mod element;
 /// Elements (or faces) processed between cancellation polls.
 pub const ASSEMBLY_TILE: usize = 512;
 
-/// A full (pre-elimination) conduction system.
+/// A full (pre-elimination), frozen physical conduction assembly.
+///
+/// The public matrix and load support inspection and algebraic elimination.
+/// Change physical data by reassembling: mutating either field invalidates the
+/// retained centered physical loads used by residual and reaction evaluation.
 #[derive(Debug, Clone)]
 pub struct AssembledSystem {
     /// `n × n` operator over ALL vertices: conduction plus Robin.
     pub operator: Csr,
     /// Load vector over all vertices: source, Neumann, and Robin terms.
     pub load: Vec<f64>,
+    // The same physical operator in a temperature-difference coordinate.
+    // Bulk, coating and contact operators annihilate a constant temperature;
+    // only the Robin load changes under this translation. Retaining its
+    // original quadrature avoids subtracting two large absolute-temperature
+    // loads when the actual heat imbalance is small.
+    temperature_reference: f64,
+    relative_load: Vec<f64>,
+}
+
+impl AssembledSystem {
+    /// One original physical heat residual, in W, for the frozen assembled
+    /// conductivity and boundary data. Material coefficients are always
+    /// evaluated at absolute temperature before this numerical translation.
+    pub(crate) fn heat_residual_row(&self, vertex: usize, temperature: &[f64]) -> f64 {
+        let (transport, load) = self.heat_row_terms(vertex, temperature);
+        transport - load
+    }
+
+    // Keep the two centered terms separate for consumers that account for
+    // interval heat in double-double arithmetic before the final subtraction.
+    pub(crate) fn heat_row_terms(&self, vertex: usize, temperature: &[f64]) -> (f64, f64) {
+        let (columns, entries) = self.operator.row(vertex);
+        let transport: f64 = columns
+            .iter()
+            .zip(entries)
+            .map(|(&column, &entry)| entry * (temperature[column] - self.temperature_reference))
+            .sum();
+        (transport, self.relative_load[vertex])
+    }
 }
 
 /// Already integrated physical tensors from an original constitutive owner.
@@ -522,7 +555,22 @@ pub(crate) fn assemble_operator_with_material_tensors(
         start = end;
     }
 
-    assemble_boundary(cx, mesh, boundary, temperature, false, &mut coo, &mut load)?;
+    let temperature_reference = temperature.first().copied().unwrap_or(0.0);
+    crate::require_finite("assembly temperature reference", temperature_reference)?;
+    // Volumetric sources do not depend on the numerical temperature origin.
+    // Boundary assembly applies the same statement to Neumann flux and forms
+    // each Robin term directly from T_bath - T_reference.
+    let mut relative_load = load.clone();
+    assemble_boundary(
+        cx,
+        mesh,
+        boundary,
+        temperature,
+        false,
+        &mut coo,
+        &mut load,
+        Some((temperature_reference, &mut relative_load)),
+    )?;
     if let Some(interfaces) = interfaces {
         interfaces.assemble_into(cx, &mut coo)?;
     }
@@ -530,6 +578,8 @@ pub(crate) fn assemble_operator_with_material_tensors(
     Ok(AssembledSystem {
         operator: coo.assemble(),
         load,
+        temperature_reference,
+        relative_load,
     })
 }
 
@@ -598,6 +648,7 @@ pub(crate) fn robin_face_matrix(area: f64, h: [f64; 3]) -> [[f64; 3]; 3] {
     block
 }
 
+#[allow(clippy::too_many_arguments)]
 fn assemble_boundary(
     cx: &Cx<'_>,
     mesh: &ConductionMesh,
@@ -606,6 +657,7 @@ fn assemble_boundary(
     jacobian: bool,
     coo: &mut Coo,
     load: &mut [f64],
+    mut centered: Option<(f64, &mut [f64])>,
 ) -> Result<(), ConductionError> {
     let nf = mesh.boundary().len();
     let mut start = 0usize;
@@ -633,6 +685,9 @@ fn assemble_boundary(
                             acc = w.mul_add(outward_flux.at(vb), acc);
                         }
                         load[verts[a]] -= acc;
+                        if let Some((_, relative_load)) = &mut centered {
+                            relative_load[verts[a]] -= acc;
+                        }
                     }
                 }
                 ThermalBc::Robin { htc, t_ref } => {
@@ -644,6 +699,14 @@ fn assemble_boundary(
                             acc = block[a][b].mul_add(t_ref.at(vb), acc);
                         }
                         load[verts[a]] += acc;
+                        if let Some((reference, relative_load)) = &mut centered {
+                            let mut relative = 0.0f64;
+                            for (b, &vb) in verts.iter().enumerate() {
+                                relative = block[a][b]
+                                    .mul_add(t_ref.at(vb) - *reference, relative);
+                            }
+                            relative_load[verts[a]] += relative;
+                        }
                     }
                 }
             }
@@ -1014,6 +1077,7 @@ fn assemble_transport_jacobian(
             true,
             &mut boundary_coo,
             &mut discard,
+            None,
         )?;
         if let Some(interfaces) = interfaces {
             interfaces.assemble_into(cx, &mut boundary_coo)?;
@@ -1044,6 +1108,7 @@ fn assemble_transport_jacobian(
             true,
             &mut coo,
             &mut discard,
+            None,
         )?;
         if let Some(interfaces) = interfaces {
             interfaces.assemble_into(cx, &mut coo)?;
@@ -1090,27 +1155,23 @@ pub fn reduce_matrix_and_lift(matrix: &Csr, dofs: &DofMap) -> (Csr, Vec<f64>) {
     (coo.assemble(), lift)
 }
 
-/// The free-dof residual `R = (A·T_full − load)|_free`.
+/// The free-dof physical residual `R = (A·T_full − load)|_free`.
+/// Uses the original assembly's temperature-difference coordinate so a
+/// uniform Kelvin offset does not create internal conductive heat.
 #[must_use]
 pub fn residual(system: &AssembledSystem, dofs: &DofMap, full_temperature: &[f64]) -> Vec<f64> {
-    let n = full_temperature.len();
-    let mut ax = vec![0.0f64; n];
-    system.operator.spmv(full_temperature, &mut ax);
     dofs.free()
         .iter()
-        .map(|&v| ax[v] - system.load[v])
+        .map(|&v| system.heat_residual_row(v, full_temperature))
         .collect()
 }
 
 /// The full-vector residual `A·T_full − load`, whose Dirichlet entries
-/// are the nodal reaction fluxes used by the energy balance.
+/// are the nodal reaction fluxes used by the energy balance. Source and Robin
+/// terms share the original centered assembly used by the free-node residual.
 #[must_use]
 pub fn full_residual(system: &AssembledSystem, full_temperature: &[f64]) -> Vec<f64> {
-    let n = full_temperature.len();
-    let mut ax = vec![0.0f64; n];
-    system.operator.spmv(full_temperature, &mut ax);
-    for (i, a) in ax.iter_mut().enumerate() {
-        *a -= system.load[i];
-    }
-    ax
+    (0..full_temperature.len())
+        .map(|vertex| system.heat_residual_row(vertex, full_temperature))
+        .collect()
 }

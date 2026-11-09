@@ -637,7 +637,6 @@ pub fn march_duty_cycle_with_capacity(
     let mut delivered_scale_seconds = 0.0f64;
     let mut delivered_correction = 0.0f64;
 
-    let mut scratch_k = vec![0.0f64; n];
     let mut rhs = vec![0.0f64; dofs.n()];
 
     for step in 0..steps {
@@ -658,11 +657,10 @@ pub fn march_duty_cycle_with_capacity(
         // Solve for the heat-driven temperature increment, with zero change
         // at the already lifted Dirichlet vertices. Relative convergence is
         // measured against this heat pulse, not the absolute background.
-        system.operator.spmv(&temperature, &mut scratch_k);
         for (slot, &vertex) in dofs.free().iter().enumerate() {
             let value = source_scale_seconds.mul_add(
                 source_load[vertex],
-                dt * (system.load[vertex] - scratch_k[vertex]),
+                -dt * system.heat_residual_row(vertex, &temperature),
             );
             if !value.is_finite() {
                 return Err(ConductionError::NonFinite {
