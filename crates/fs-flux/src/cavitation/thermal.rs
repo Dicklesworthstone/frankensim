@@ -1,4 +1,4 @@
-//! Linear gas heat diffusion inside the original compressible bubble.
+//! Linear gas and surrounding-liquid heat diffusion in the original bubble.
 //!
 //! For exp(-i omega t), a uniform gas pressure and an isothermal interface give
 //! `kappa(omega) = gamma / [1 + 3(gamma-1)(z coth(z)-1)/z^2]`,
@@ -11,9 +11,11 @@
 //! Static continuation keeps the original ISOTHERMAL gas inventory; the
 //! material's gamma enters only the harmonic response. Gas coefficients refer
 //! to the current equilibrium pressure and liquid/interface temperature.
-//! The interface is an imposed temperature reservoir: liquid thermal
-//! impedance, changing vapor inventory, latent heat, molecular relaxation and
-//! nonlinear excursions are excluded. Continuum gas conduction, a spatially
+//! [`IsothermalWallBubble`] imposes an interface temperature reservoir;
+//! [`ConductingLiquidBubble`] instead solves the surrounding infinite liquid's
+//! spherical heat equation with continuous interface temperature and heat flux.
+//! Changing vapor inventory, latent heat, molecular relaxation and nonlinear
+//! excursions are excluded. Continuum gas conduction, a spatially
 //! uniform incident pressure and small fractional-radius amplitudes remain
 //! caller applicability conditions. Gas compactness, negligible gas inertia
 //! and a small vapor fraction are checked separately; liquid compactness alone
@@ -21,7 +23,11 @@
 
 use super::{BubbleLinearization, CavitationError, KellerMiksisBubble, positive};
 use core::f64::consts::PI;
-use fs_material::{MaterialError, fluid_transport::FluidTransport, gas::GasState};
+use fs_material::{
+    MaterialError,
+    fluid_transport::{FluidTransport, ThermalFluidTransportState},
+    gas::GasState,
+};
 use fs_math::{c64::C64, det};
 
 /// Conservative admission ceilings, not calibrated error bounds.
@@ -133,8 +139,10 @@ pub struct ThermalBubbleResponse {
     pub pressure_transfer_s2: C64,
     /// 3 p_g kappa - 2 sigma/R - i 4 mu_l omega [Pa].
     pub wall_stiffness_pa: C64,
-    /// Mean gas heat dissipation divided by |eta|^2 [W]. This excludes viscous
-    /// dissipation and outgoing acoustic power; it is zero at DC.
+    /// Mean heat-conduction dissipation divided by |eta|^2 [W]. This includes
+    /// both gas and liquid for [`ConductingLiquidBubble`], and gas alone for
+    /// [`IsothermalWallBubble`]. It excludes viscosity and outgoing acoustic
+    /// power, and is zero at DC.
     pub thermal_power_per_fractional_radius_squared_w: f64,
 }
 
@@ -258,6 +266,12 @@ impl IsothermalWallBubble {
         angular_frequency_rad_s: f64,
     ) -> Result<ThermalBubbleResponse, ThermalBubbleError> {
         let omega = angular_frequency_rad_s;
+        let (x, gas_wavenumber_radius) = self.frequency_parameters(omega)?;
+        let kappa = effective_polytropic_exponent(self.gas.gamma, x);
+        self.response_with_exponent(omega, x, gas_wavenumber_radius, kappa)
+    }
+
+    fn frequency_parameters(&self, omega: f64) -> Result<(f64, f64), ThermalBubbleError> {
         if !omega.is_finite() || omega < 0.0 {
             return Err(ThermalBubbleError::InvalidInput(
                 "nonnegative angular frequency",
@@ -276,7 +290,19 @@ impl IsothermalWallBubble {
                 "thermal diffusion parameter",
             ));
         }
-        let kappa = effective_polytropic_exponent(self.gas.gamma, x);
+        Ok((x, gas_wavenumber_radius))
+    }
+
+    // Both thermal boundary conditions use this SAME native KM tangent.
+    // There is no second radial equation, resonance or radiation coefficient.
+    fn response_with_exponent(
+        &self,
+        omega: f64,
+        x: f64,
+        gas_wavenumber_radius: f64,
+        kappa: C64,
+    ) -> Result<ThermalBubbleResponse, ThermalBubbleError> {
+        let radius = self.linearization.equilibrium_radius_m;
         let liquid = self.bubble.liquid();
         let wall_stiffness_pa = C64::new(
             3.0 * self.gas_pressure_pa * kappa.re - 2.0 * liquid.surface_tension_n_m() / radius,
@@ -322,6 +348,191 @@ impl IsothermalWallBubble {
     }
 }
 
+/// Exact harmonic conduction in the gas and an infinite surrounding liquid.
+///
+/// The far-field liquid temperature is fixed. Temperature and conductive heat
+/// flux are continuous at a thermally perfect interface; no fitted heat-transfer
+/// coefficient or new material law is introduced. Liquid transport belongs to
+/// the original equilibrium point and remains frozen. Thermal expansion of the
+/// liquid, pressure-driven liquid temperature changes, interfacial thermal
+/// resistance, phase change and interactions between neighboring temperature
+/// fields are outside this single-bubble closure. A small vapor pressure
+/// fraction alone does not certify negligible latent heat: the caller must
+/// establish the noncondensable-gas approximation for the actual liquid.
+/// These are the gas/liquid heat equations and interface conditions of
+/// Prosperetti (1977), Sec. IV, restricted to spatially uniform gas pressure:
+/// <https://pages.jh.edu/aprospe1/publications/PapersPublished/GasBubbles/JASA_Thermal_77.pdf>.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConductingLiquidBubble {
+    base: IsothermalWallBubble,
+    liquid: ThermalFluidTransportState,
+    liquid_thermal_diffusion_time_s: f64,
+}
+
+/// Harmonic interface heat exchange and the independent conduction losses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConductingLiquidBubbleResponse {
+    /// Original KM response with the coupled gas/liquid complex exponent.
+    pub bubble: ThermalBubbleResponse,
+    /// omega R^2/D_l, using the same liquid's cp-based diffusivity.
+    pub liquid_thermal_diffusion_parameter: f64,
+    /// Interface temperature perturbation divided by eta = delta R/R [K].
+    pub interface_temperature_per_fractional_radius_k: C64,
+    /// Heat rate from gas into liquid divided by eta [W], with exp(-i omega t).
+    /// This oscillatory heat rate is distinct from mean irreversible loss.
+    pub outward_heat_per_fractional_radius_w: C64,
+    /// Mean irreversible gas conduction loss divided by |eta|^2 [W].
+    pub gas_thermal_power_per_fractional_radius_squared_w: f64,
+    /// Mean irreversible liquid conduction loss divided by |eta|^2 [W].
+    pub liquid_thermal_power_per_fractional_radius_squared_w: f64,
+}
+
+impl ConductingLiquidBubble {
+    /// Retain the admitted original bubble and a coherent liquid thermal view.
+    /// Temperature, density and dynamic viscosity must exactly match the SAME
+    /// equilibrium liquid snapshot. Sources remain with the caller's material
+    /// owner; raw numerical views do not create a material-data receipt.
+    pub fn new(
+        base: IsothermalWallBubble,
+        liquid: ThermalFluidTransportState,
+    ) -> Result<Self, ThermalBubbleError> {
+        let original = base.bubble.liquid();
+        let transport = liquid.transport();
+        if liquid.temperature_k() != original.temperature_k()
+            || transport.density_kg_m3() != original.liquid_density_kg_m3()
+            || transport.dynamic_viscosity_pa_s() != original.dynamic_viscosity_pa_s()
+        {
+            return Err(ThermalBubbleError::StateMismatch(
+                "surrounding liquid thermal state",
+            ));
+        }
+        let diffusion_length = base.linearization.equilibrium_radius_m
+            / det::sqrt(transport.thermal_diffusivity_m2_s());
+        let liquid_thermal_diffusion_time_s = diffusion_length * diffusion_length;
+        if !positive(liquid_thermal_diffusion_time_s) {
+            return Err(ThermalBubbleError::NonFiniteDerived(
+                "liquid heat-diffusion coefficients",
+            ));
+        }
+        Ok(Self {
+            base,
+            liquid,
+            liquid_thermal_diffusion_time_s,
+        })
+    }
+
+    pub const fn base(&self) -> &IsothermalWallBubble {
+        &self.base
+    }
+
+    pub const fn liquid(&self) -> ThermalFluidTransportState {
+        self.liquid
+    }
+
+    /// Solve the two spherical heat equations at one admitted frequency.
+    ///
+    /// For exp(-i omega t), set z_j^2=-i omega R^2/D_j, B=z_g coth(z_g)-1,
+    /// F=3B/z_g^2, Y_g=4 pi R k_g B, Y_l=4 pi R k_l(1+z_l). Continuity gives
+    /// T_i/T_ad=Y_g/(Y_g+Y_l), and the original gas mass/energy balance gives
+    /// kappa=gamma/[1+(gamma-1)F Y_l/(Y_g+Y_l)]. The liquid solution is
+    /// T_l(r)=T_i (R/r) exp[-z_l(r/R-1)]. Queries are allocation-free.
+    pub fn response(
+        &self,
+        angular_frequency_rad_s: f64,
+    ) -> Result<ConductingLiquidBubbleResponse, ThermalBubbleError> {
+        let omega = angular_frequency_rad_s;
+        let (x, gas_wavenumber_radius) = self.base.frequency_parameters(omega)?;
+        let liquid_x = omega * self.liquid_thermal_diffusion_time_s;
+        if !liquid_x.is_finite() {
+            return Err(ThermalBubbleError::NonFiniteDerived(
+                "liquid thermal diffusion parameter",
+            ));
+        }
+        let gas_f = spherical_heat_average(x);
+        // Recover B from F, retaining Re(B)=O(x^2) without subtracting one
+        // from z*coth(z). This is essential for gas heat loss near DC.
+        let gas_b = C64::new((x / 3.0) * gas_f.im, -(x / 3.0) * gas_f.re);
+        let liquid_a = det::sqrt(0.5 * liquid_x);
+        // Remove the common 4*pi*R factor before dividing admittances.
+        let gas_admittance = gas_b.scale(self.base.gas.thermal_conductivity);
+        let liquid_admittance = C64::new(1.0 + liquid_a, -liquid_a)
+            .scale(self.liquid.transport().thermal_conductivity_w_m_k());
+        if !finite_complex(gas_admittance) || !finite_complex(liquid_admittance) {
+            return Err(ThermalBubbleError::NonFiniteDerived(
+                "spherical heat admittance",
+            ));
+        }
+        // Scaling avoids overflowing the sum at high conductivity. Evaluate
+        // BOTH shares directly: 1 minus a nearly unit share erases real loss.
+        let scale = gas_admittance
+            .re
+            .max(-gas_admittance.im)
+            .max(liquid_admittance.re)
+            .max(-liquid_admittance.im);
+        let gas_scaled = C64::new(gas_admittance.re / scale, gas_admittance.im / scale);
+        let liquid_scaled = C64::new(liquid_admittance.re / scale, liquid_admittance.im / scale);
+        let sum = gas_scaled + liquid_scaled;
+        // A large share's ordinary division subtracts two O(sqrt(omega))
+        // imaginary terms to recover an O(omega) phase. The smaller term
+        // may already have disappeared when forming the denominator. Form
+        // the cross determinant from the ORIGINAL two admittances instead.
+        // Its opposite signs are shared exactly by the two fractions.
+        let share_imaginary = (gas_scaled * liquid_scaled.conj()).im / sum.norm_sq();
+        let interface_share = C64::new((gas_scaled / sum).re, share_imaginary);
+        let gas_drop_share = C64::new((liquid_scaled / sum).re, -share_imaginary);
+        let effective_f = gas_f * gas_drop_share;
+        let gamma = self.base.gas.gamma;
+        let kappa = C64::from_re(gamma) / (C64::ONE + effective_f.scale(gamma - 1.0));
+        let bubble = self
+            .base
+            .response_with_exponent(omega, x, gas_wavenumber_radius, kappa)?;
+        let temperature = self.liquid.temperature_k();
+        let adiabatic_temperature = kappa.scale(-3.0 * temperature * ((gamma - 1.0) / gamma));
+        let interface_temperature_per_fractional_radius_k = adiabatic_temperature * interface_share;
+        let gas_drop = adiabatic_temperature * gas_drop_share;
+        let area_length = 4.0 * PI * self.base.linearization.equilibrium_radius_m;
+        // Either side gives the same flux. Use the gas side when its
+        // admittance is smaller to avoid multiplying huge and tiny values.
+        let outward_heat_per_fractional_radius_w = if gas_admittance.abs()
+            <= liquid_admittance.abs()
+        {
+            (gas_admittance * gas_drop).scale(area_length)
+        } else {
+            (liquid_admittance * interface_temperature_per_fractional_radius_k).scale(area_length)
+        };
+        // Green's identity gives P_j=Re(Y_j)|temperature drop|^2/(2*T0).
+        // Compute both nonnegative entropy integrals independently, without
+        // subtracting liquid loss from total gas p-V work. The square-root
+        // form also postpones squaring tiny temperature amplitudes.
+        let gas_loss_amplitude =
+            det::sqrt((0.5 * area_length / temperature) * gas_admittance.re) * gas_drop.abs();
+        let liquid_loss_amplitude =
+            det::sqrt((0.5 * area_length / temperature) * liquid_admittance.re)
+                * interface_temperature_per_fractional_radius_k.abs();
+        let gas_thermal_power_per_fractional_radius_squared_w =
+            gas_loss_amplitude * gas_loss_amplitude;
+        let liquid_thermal_power_per_fractional_radius_squared_w =
+            liquid_loss_amplitude * liquid_loss_amplitude;
+        if !finite_complex(interface_temperature_per_fractional_radius_k)
+            || !finite_complex(outward_heat_per_fractional_radius_w)
+            || !gas_thermal_power_per_fractional_radius_squared_w.is_finite()
+            || !liquid_thermal_power_per_fractional_radius_squared_w.is_finite()
+        {
+            return Err(ThermalBubbleError::NonFiniteDerived(
+                "coupled thermal bubble response",
+            ));
+        }
+        Ok(ConductingLiquidBubbleResponse {
+            bubble,
+            liquid_thermal_diffusion_parameter: liquid_x,
+            interface_temperature_per_fractional_radius_k,
+            outward_heat_per_fractional_radius_w,
+            gas_thermal_power_per_fractional_radius_squared_w,
+            liquid_thermal_power_per_fractional_radius_squared_w,
+        })
+    }
+}
+
 // Positive real x only. The Bernoulli expansion resolves thermal losses at
 // arbitrarily low frequencies without subtracting z*coth(z) from one. Its
 // first omitted term at x=1/4 is below 5e-20. The middle branch evaluates coth
@@ -330,7 +541,13 @@ fn effective_polytropic_exponent(gamma: f64, x: f64) -> C64 {
     if x == 0.0 {
         return C64::ONE;
     }
-    let f = if x <= 0.25 {
+    let f = spherical_heat_average(x);
+    C64::from_re(gamma) / (C64::ONE + f.scale(gamma - 1.0))
+}
+
+// F=3(z*coth(z)-1)/z^2 for z^2=-i*x. Shared by both boundary conditions.
+fn spherical_heat_average(x: f64) -> C64 {
+    if x <= 0.25 {
         let x2 = x * x;
         let re = 1.0
             + x2 * (-2.0 / 315.0
@@ -361,8 +578,7 @@ fn effective_polytropic_exponent(gamma: f64, x: f64) -> C64 {
                 3.0 * a.mul_add(coth_re + coth_im, -1.0) / x,
             )
         }
-    };
-    C64::from_re(gamma) / (C64::ONE + f.scale(gamma - 1.0))
+    }
 }
 
 #[cfg(test)]

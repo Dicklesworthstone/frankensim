@@ -40,7 +40,7 @@ mod keller_miksis;
 mod population;
 #[path = "cavitation/stepper.rs"]
 mod stepper;
-/// Frequency-dependent gas heat diffusion with an isothermal bubble interface.
+/// Gas and liquid heat diffusion through the original compressible bubble.
 #[path = "cavitation/thermal.rs"]
 pub mod thermal;
 
@@ -57,7 +57,8 @@ pub use population::{
     PopulationEvolutionStep, PopulationObservation,
 };
 pub use thermal::{
-    IsothermalWallBubble, ThermalBubbleError, ThermalBubbleLimits, ThermalBubbleResponse,
+    ConductingLiquidBubble, ConductingLiquidBubbleResponse, IsothermalWallBubble,
+    ThermalBubbleError, ThermalBubbleLimits, ThermalBubbleResponse,
 };
 
 /// Invalid input, an explicit model boundary, or an unsuccessful integration.

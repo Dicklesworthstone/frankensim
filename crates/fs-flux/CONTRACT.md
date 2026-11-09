@@ -9208,3 +9208,63 @@ The implementation environment became unavailable before compilation/tests
 completed; no passing runtime result is claimed for this extension. The intended
 focused selector is `cargo test -p fs-flux --no-default-features --features
 caloric-cavitation --lib cavitation`.
+
+## Finite surrounding-liquid conduction for cavitation nuclei
+
+`cavitation::thermal::ConductingLiquidBubble` retains an admitted
+`IsothermalWallBubble` and the SAME liquid's `ThermalFluidTransportState`.
+Temperature, density and dynamic viscosity must match the retained liquid
+snapshot exactly. Gas and liquid heat capacity/conductivity determine their
+own diffusion scales; no fitted heat-transfer coefficient, replacement gas
+inventory or second radial/acoustic equation is introduced. The underlying
+`ThermalBubbleResponse` uses the existing native Keller--Miksis operator.
+
+For exp(-i omega t), write `z_j^2 = -i omega R^2/D_j`,
+`B = z_g coth(z_g)-1`, `F = 3B/z_g^2`,
+`Y_g = 4 pi R k_g B`, and `Y_l = 4 pi R k_l (1+z_l)`.
+Continuity of temperature and heat flux between the spherical gas interior
+and unbounded liquid exterior gives `T_i/T_ad = Y_g/(Y_g+Y_l)` and
+`kappa = gamma/[1+(gamma-1) F Y_l/(Y_g+Y_l)]`. These are the heat equations
+and interface conditions of Prosperetti (1977), Sec. IV, in the uniform-gas-
+pressure limit: <https://pages.jh.edu/aprospe1/publications/PapersPublished/GasBubbles/JASA_Thermal_77.pdf>.
+Infinite liquid admittance recovers the original fixed-interface-temperature
+owner; vanishing liquid admittance recovers adiabatic gas. Finite positive
+conductivity returns the original isothermal compliance at DC.
+
+The response exposes complex interface temperature and signed oscillatory
+outward heat rate per fractional-radius amplitude. Those first-order heat
+fluxes are distinct from mean irreversible loss. Green's identity evaluates
+gas loss as `Re(Y_g)|T_ad-T_i|^2/(2 T0)` and liquid loss as
+`Re(Y_l)|T_i|^2/(2 T0)`, each per squared fractional-radius amplitude.
+Their sum closes the original gas p--V loop
+`-6 pi R^3 omega p_g Im(kappa)`. Neither viscous loss nor outgoing acoustic
+power is included. The common response's thermal power therefore denotes
+combined gas and liquid conduction for this boundary condition.
+
+The existing gas low-frequency series supplies the real admittance without
+subtracting nearly equal terms. Each interface share is divided directly,
+and both nonnegative entropy powers are evaluated independently; liquid loss
+is not subtracted from total work to recover a small gas loss. Preparation
+is constant work and each harmonic query is allocation-free and constant
+work, with the same gas compactness/refusal behavior as the base owner.
+
+The infinite liquid has a fixed far-field temperature, frozen coefficients
+and a thermally perfect interface. Nonlinear thermal histories, interfacial
+resistance, overlapping thermal fields of different nuclei, thermally driven
+liquid expansion, pressure-driven liquid temperature changes, vapor mass,
+latent heat, dissolution and molecular relaxation remain outside this model.
+The retained small-vapor bound alone does not prove negligible latent heat;
+the caller must establish the noncondensable-gas approximation. This owner is
+a harmonic constitutive response, not a nonlinear heat-transfer callback.
+
+Focused tests cover coherent retained states and refusals, exact DC response,
+isothermal-wall and insulating-liquid limits, weak-loss/high-contrast energy
+closure and interface flux, independent radial integration of both
+`k |grad T|^2/(2 T0)` entropy fields, and the original expanded native KM
+operator and cycle-integrated gas work. They establish numerical/model
+identities rather than experimental validation.
+
+The focused original-source native build passed all 81 cavitation tests,
+including the five finite-liquid conduction regression groups. This build
+uses the actual changed sources and original numerical dependencies with a
+restricted module/dependency closure; it is not a full workspace or DSR run.

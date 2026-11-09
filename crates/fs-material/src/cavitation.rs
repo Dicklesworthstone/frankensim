@@ -16,6 +16,9 @@ pub mod dissolved_gas;
 
 use crate::MaterialError;
 use crate::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
+use crate::fluid_transport::{
+    FluidTransport, FluidTransportState, ThermalFluidTransport, ThermalFluidTransportState,
+};
 use crate::liquid::surface::{SURFACE_TENSION_DIMS, require_frozen_coefficient_support};
 use crate::liquid::{DYNAMIC_VISCOSITY_DIMS, KINEMATIC_VISCOSITY_DIMS};
 use crate::liquid_temperature::LiquidViscosityBasis;
@@ -496,6 +499,16 @@ impl CavitationProperties for SaturatedWaterCavitation {
 impl FluidAcoustics for SaturatedWaterCavitation {
     fn acoustic_state(&self) -> Result<FluidAcousticState, MaterialError> {
         self.state.acoustic_state()
+    }
+}
+impl FluidTransport for SaturatedWaterCavitation {
+    fn transport_state(&self) -> Result<FluidTransportState, MaterialError> {
+        self.liquid_transport.transport_state()
+    }
+}
+impl ThermalFluidTransport for SaturatedWaterCavitation {
+    fn thermal_transport_state(&self) -> Result<ThermalFluidTransportState, MaterialError> {
+        self.liquid_transport.thermal_transport_state()
     }
 }
 

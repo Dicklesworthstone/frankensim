@@ -300,3 +300,266 @@ fn material_inventory_stability_and_thermal_domain_refusals() {
         })
     ));
 }
+
+fn liquid_thermal(conductivity: f64) -> ThermalFluidTransportState {
+    ThermalFluidTransportState::try_new(
+        fs_material::fluid_transport::FluidTransportState::try_new(
+            1000.0,
+            4200.0,
+            conductivity,
+            0.001,
+        )
+        .unwrap(),
+        293.15,
+        None,
+    )
+    .unwrap()
+}
+
+#[test]
+fn conducting_liquid_preserves_state_and_dc_compliance() {
+    let original = model();
+    let liquid = liquid_thermal(0.6);
+    let thermal = ConductingLiquidBubble::new(original, liquid).unwrap();
+    assert_eq!(thermal.base(), &original);
+    assert_eq!(thermal.liquid(), liquid);
+    let dc = thermal.response(0.0).unwrap();
+    assert_eq!(dc.bubble, original.response(0.0).unwrap());
+    assert_eq!(dc.interface_temperature_per_fractional_radius_k, C64::ZERO);
+    assert_eq!(dc.outward_heat_per_fractional_radius_w, C64::ZERO);
+    assert_eq!(dc.gas_thermal_power_per_fractional_radius_squared_w, 0.0);
+    assert_eq!(dc.liquid_thermal_power_per_fractional_radius_squared_w, 0.0);
+    assert_eq!(dc.liquid_thermal_diffusion_parameter, 0.0);
+    for (temperature, density, viscosity) in [
+        (294.15, 1000.0, 0.001),
+        (293.15, 999.0, 0.001),
+        (293.15, 1000.0, 0.002),
+    ] {
+        let wrong = ThermalFluidTransportState::try_new(
+            fs_material::fluid_transport::FluidTransportState::try_new(
+                density, 4200.0, 0.6, viscosity,
+            )
+            .unwrap(),
+            temperature,
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            ConductingLiquidBubble::new(original, wrong),
+            Err(ThermalBubbleError::StateMismatch(
+                "surrounding liquid thermal state"
+            ))
+        ));
+    }
+    assert!(thermal.response(-1.0).is_err());
+    assert!(thermal.response(f64::NAN).is_err());
+    assert!(thermal.response(f64::INFINITY).is_err());
+    assert!(matches!(
+        thermal.response(
+            1.01 * limits().maximum_gas_wavenumber_radius * original.gas().sound_speed / RADIUS
+        ),
+        Err(ThermalBubbleError::OutsideModel {
+            quantity: "gas compactness",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn finite_liquid_recovers_isothermal_wall_and_insulated_gas_limits() {
+    let original = model();
+    let conducting = ConductingLiquidBubble::new(original, liquid_thermal(1e20)).unwrap();
+    let insulating = ConductingLiquidBubble::new(original, liquid_thermal(1e-30)).unwrap();
+    for omega in [1.0, 1e3, 1e5, 6e5] {
+        let fixed = original.response(omega).unwrap();
+        let wet = conducting.response(omega).unwrap();
+        assert!(
+            (wet.bubble.effective_polytropic_exponent - fixed.effective_polytropic_exponent).abs()
+                < 2e-14
+        );
+        assert!(
+            (wet.bubble.pressure_transfer_s2 - fixed.pressure_transfer_s2).abs()
+                < 2e-14 * fixed.pressure_transfer_s2.abs()
+        );
+        assert!(wet.interface_temperature_per_fractional_radius_k.abs() < 1e-15);
+        close(
+            wet.gas_thermal_power_per_fractional_radius_squared_w,
+            fixed.thermal_power_per_fractional_radius_squared_w,
+            2e-14,
+        );
+        let insulated = insulating.response(omega).unwrap();
+        close(
+            insulated.bubble.effective_polytropic_exponent.re,
+            original.gas().gamma,
+            1e-10,
+        );
+        assert!(insulated.bubble.effective_polytropic_exponent.im <= 0.0);
+        let expected_temperature = -3.0 * original.gas().temperature * (original.gas().gamma - 1.0);
+        close(
+            insulated.interface_temperature_per_fractional_radius_k.re,
+            expected_temperature,
+            2e-10,
+        );
+        assert!(insulated.outward_heat_per_fractional_radius_w.abs() < 1e-11);
+    }
+}
+
+#[test]
+fn gas_and_liquid_entropy_losses_close_original_pressure_volume_work() {
+    for conductivity in [1e-12, 1e-4, 0.02, 0.6, 1e8] {
+        let thermal = ConductingLiquidBubble::new(model(), liquid_thermal(conductivity)).unwrap();
+        for omega in [1e-96, 1e-12, 1e-4, 1.0, 1e3, 1e5, 6e5] {
+            let response = thermal.response(omega).unwrap();
+            let gas_loss = response.gas_thermal_power_per_fractional_radius_squared_w;
+            let liquid_loss = response.liquid_thermal_power_per_fractional_radius_squared_w;
+            assert!(gas_loss > 0.0 && liquid_loss > 0.0);
+            assert!(response.bubble.effective_polytropic_exponent.im < 0.0);
+            close(
+                gas_loss + liquid_loss,
+                response
+                    .bubble
+                    .thermal_power_per_fractional_radius_squared_w,
+                3e-13,
+            );
+            // Complex heat exchange cancels at the interface, without using
+            // the native harmonic stiffness or mechanical work expression.
+            let liquid_a = (0.5 * omega * RADIUS * RADIUS
+                / thermal.liquid().transport().thermal_diffusivity_m2_s())
+            .sqrt();
+            let heat_from_liquid = (C64::new(1.0 + liquid_a, -liquid_a)
+                * response.interface_temperature_per_fractional_radius_k)
+                .scale(4.0 * PI * RADIUS * conductivity);
+            assert!(
+                (response.outward_heat_per_fractional_radius_w - heat_from_liquid).abs()
+                    <= 5e-14 * heat_from_liquid.abs()
+            );
+        }
+    }
+}
+
+fn complex_exp(z: C64) -> C64 {
+    let (sin, cos) = z.im.sin_cos();
+    C64::new(cos, sin).scale(z.re.exp())
+}
+
+fn simpson_integral(f: impl Fn(f64) -> f64, lo: f64, hi: f64) -> f64 {
+    const N: usize = 4096;
+    let h = (hi - lo) / N as f64;
+    let mut total = f(lo) + f(hi);
+    for n in 1..N {
+        total += (if n % 2 == 0 { 2.0 } else { 4.0 }) * f(lo + n as f64 * h);
+    }
+    total * h / 3.0
+}
+
+#[test]
+fn independent_radial_heat_fields_reproduce_each_entropy_integral() {
+    let thermal = ConductingLiquidBubble::new(model(), liquid_thermal(0.02)).unwrap();
+    let gas = thermal.base().gas();
+    for omega in [10.0, 1e3, 1e5] {
+        let response = thermal.response(omega).unwrap();
+        let x = omega * RADIUS * RADIUS / thermal.base().thermal_diffusivity_m2_s();
+        let z = C64::new((0.5 * x).sqrt(), -(0.5 * x).sqrt());
+        let sinh_z = (complex_exp(z) - complex_exp(-z)).scale(0.5);
+        // Directly integrate k|grad T|^2/(2T0) over the gas volume. This
+        // uses neither z*coth(z)-1 nor the production admittance/heat average.
+        let gradient_integral = simpson_integral(
+            |s| {
+                if s == 0.0 {
+                    return 0.0;
+                }
+                let plus = complex_exp(z.scale(s));
+                let minus = complex_exp(z.scale(-s));
+                let sinh = (plus - minus).scale(0.5);
+                let cosh = (plus + minus).scale(0.5);
+                let derivative = (z * cosh - sinh.scale(1.0 / s)) / sinh_z;
+                derivative.norm_sq()
+            },
+            0.0,
+            1.0,
+        );
+        let adiabatic = response
+            .bubble
+            .effective_polytropic_exponent
+            .scale(-3.0 * gas.temperature * (gas.gamma - 1.0) / gas.gamma);
+        let drop = adiabatic - response.interface_temperature_per_fractional_radius_k;
+        let gas_loss = 2.0 * PI * RADIUS * gas.thermal_conductivity / gas.temperature
+            * drop.norm_sq()
+            * gradient_integral;
+        close(
+            gas_loss,
+            response.gas_thermal_power_per_fractional_radius_squared_w,
+            3e-9,
+        );
+        // Exterior coordinate t=Re(z_l)*(r/R-1) resolves the diffusion
+        // layer independently of its thickness; the omitted tail is <1e-17.
+        let a = (0.5 * response.liquid_thermal_diffusion_parameter).sqrt();
+        let exterior_integral = simpson_integral(
+            |t| {
+                let s = 1.0 + t / a;
+                C64::new(a + 1.0 / s, -a).norm_sq() * (-2.0 * t).exp() / a
+            },
+            0.0,
+            24.0,
+        );
+        let liquid_loss = 2.0 * PI * RADIUS * 0.02 / gas.temperature
+            * response
+                .interface_temperature_per_fractional_radius_k
+                .norm_sq()
+            * exterior_integral;
+        close(
+            liquid_loss,
+            response.liquid_thermal_power_per_fractional_radius_squared_w,
+            3e-8,
+        );
+    }
+}
+
+#[test]
+fn finite_liquid_changes_real_resonance_and_thermal_loss_in_original_km_operator() {
+    let original = model();
+    let thermal = ConductingLiquidBubble::new(original, liquid_thermal(1e-5)).unwrap();
+    let omega = 2e5;
+    let response = thermal.response(omega).unwrap();
+    let fixed = original.response(omega).unwrap();
+    assert!(
+        (response.bubble.effective_polytropic_exponent - fixed.effective_polytropic_exponent).abs()
+            > 0.01
+    );
+    assert!(
+        (response.bubble.pressure_transfer_s2 - fixed.pressure_transfer_s2).abs()
+            > 0.01 * fixed.pressure_transfer_s2.abs()
+    );
+    let liquid = original.bubble().liquid();
+    let inertia = liquid.liquid_density_kg_m3() * RADIUS * RADIUS;
+    let viscous = 4.0 * liquid.dynamic_viscosity_pa_s() / inertia;
+    let kappa = response.bubble.effective_polytropic_exponent;
+    let stiffness = (kappa.scale(3.0 * original.gas().pressure)
+        - C64::from_re(2.0 * liquid.surface_tension_n_m() / RADIUS))
+    .scale(1.0 / inertia);
+    let numerator = C64::new(
+        1.0,
+        -omega * original.linearization().pressure_derivative_time_s,
+    );
+    let denominator = numerator * stiffness
+        - C64::new(
+            original.linearization().inertia_multiplier * omega * omega,
+            viscous * omega,
+        );
+    let expected = numerator / denominator;
+    assert!((response.bubble.pressure_transfer_s2 - expected).abs() < 3e-14 * expected.abs());
+    let volume = 4.0 * PI * RADIUS.powi(3) / 3.0;
+    let mut work = 0.0;
+    for i in 0..1024 {
+        let (sin, cos) = (2.0 * PI * i as f64 / 1024.0).sin_cos();
+        let pressure = -3.0 * original.gas().pressure * (kappa.re * cos + kappa.im * sin);
+        let volume_rate = -3.0 * volume * omega * sin;
+        work -= pressure * volume_rate / 1024.0;
+    }
+    close(
+        response.gas_thermal_power_per_fractional_radius_squared_w
+            + response.liquid_thermal_power_per_fractional_radius_squared_w,
+        work,
+        3e-13,
+    );
+}

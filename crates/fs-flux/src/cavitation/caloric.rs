@@ -664,4 +664,5 @@ impl CaloricBubble {
 }
 
 #[cfg(test)]
+#[path = "caloric/tests.rs"]
 mod tests;
