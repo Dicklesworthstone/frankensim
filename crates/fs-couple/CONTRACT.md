@@ -4232,6 +4232,8 @@ The optional reed-card row `line_ladder TAIL_TOL MAX_TAPS`, after the hole rows 
 
 Tests: `the_line_ladder_row_is_validated_and_the_declared_default_changes_no_bit` (bad rows refuse; `line_ladder 1e-10 65536` renders the bits of a card without the row), `the_line_ladder_row_reaches_the_ladder_and_the_refusal_carries_its_figures` (`line_ladder 1e-300 512` refuses with `max_taps=512`, the measured tail energy, `(tol=1.000e-300)` and the peak shift).
 
+**`open_hole_interaction tmmi 2 piston`**: the word `piston` after EPSILON, which must be 2 (any other value refuses), declares `fs_duct::OpenHoleInteraction::with_piston` (see the fs-duct contract: the monopole mutual impedance times the baffled-piston directivity of both mouths, the large-distance limit of the exact uniform-piston pair, not the exact integral). Without the word the card is unchanged to the bit, provenance included. The receipt names it only when declared, as `outlet_receiver.open_hole_interaction_mutual` (`ReedPerformance::open_hole_interaction_is_piston`), next to `open_hole_interaction_fallback`. Tests: `the_piston_word_is_validated_and_off_by_default`, `reed_outlet_record_names_the_piston_mutual_only_when_declared`.
+
 ## Double-reed staple pressure recovery and jet contraction (`staple_recovery`, `contraction`)
 
 `ModalAperture` also composes a fully developed `ViscousSlit` with the same

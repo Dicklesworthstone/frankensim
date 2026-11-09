@@ -38,7 +38,10 @@
 //! Optional `open_hole_interaction tmmi EPSILON` before `compile_limits`, on a
 //! `gas_field continuous` binding, couples the radiation of the open holes and the
 //! bell through the TMMI mutual impedance (EPSILON 2 as the paper prints it).
-//! The distances are axial, an upper bound; it is off unless declared.
+//! The distances are axial, an upper bound; it is off unless declared. A trailing word `piston` (`open_hole_interaction tmmi 2 piston`, EPSILON must
+//! be 2) replaces the point-monopole mutual impedance by its baffled-piston form: each pair's term times the piston directivity `2 J1(ka)/(ka)` of both mouths
+//! (the bell's own radius), the large-distance limit of the exact uniform-piston pair; the monopole omits those factors and its radiation load is then not passive
+//! once the mouths are not small. A card without the word is unchanged to the bit, provenance included. See `OpenHoleInteraction::with_piston`.
 //! Optional `tonehole_lengths lefebvre-scavone-2012` after it, on the same binding, gives every
 //! tone hole the printed thick-wall lengths of Lefebvre and Scavone (J. Acoust. Soc. Am. 131(4),
 //! 2012) instead of the engine's inner length: `fs_duct`'s `hole_lengths` lists each equation.
@@ -384,6 +387,8 @@ pub struct ReedPerformance {
     /// Leading source samples the output drops ([`OutletLatency::Compensate`]);
     /// zero when the latency is retained.
     outlet_latency_discard: u64,
+    /// The card declared `open_hole_interaction tmmi 2 piston` (the baffled-piston mutual impedance).
+    open_hole_piston: bool,
 }
 impl ReedPerformance {
     /// Decode and admit all records before building or advancing the runtime.
@@ -941,13 +946,23 @@ impl ReedPerformance {
                 return Err(bad(line, "open_hole_interaction names its law: `open_hole_interaction tmmi EPSILON`"));
             }
             let epsilon = row.positive()?;
+            let piston = if row.more() {
+                if row.word()? != "piston" {
+                    return Err(bad(line, "open_hole_interaction names its mutual form: `open_hole_interaction tmmi 2 piston`"));
+                }
+                true
+            } else { false };
             row.finish()?;
             if !matches!(&gas_field, Some((_, GasFieldResolution::Continuous(_)))) || molecular.is_some() {
                 return Err(bad(line,
                     "open_hole_interaction needs a continuous gas_field binding and no molecular bore"));
             }
-            Some(fs_duct::OpenHoleInteraction::new(epsilon).map_err(|_| bad(line,
-                "open_hole_interaction needs a positive finite radiation-space factor"))?)
+            let interaction = fs_duct::OpenHoleInteraction::new(epsilon).map_err(|_| bad(line,
+                "open_hole_interaction needs a positive finite radiation-space factor"))?;
+            Some(if piston {
+                interaction.with_piston().map_err(|_| bad(line,
+                    "open_hole_interaction piston is the half-space form: it needs EPSILON 2"))?
+            } else { interaction })
         } else { None };
         let printed_hole_lengths = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("tonehole_lengths") {
@@ -1287,6 +1302,7 @@ impl ReedPerformance {
             observer_omission,
             observer_law_declared: declared_law.is_some(),
             outlet_latency_discard,
+            open_hole_piston: open_hole_interaction.is_some_and(|interaction| interaction.is_piston()),
         })
     }
 
@@ -1426,6 +1442,12 @@ impl ReedPerformance {
     #[must_use]
     pub const fn outlet_latency_discarded_samples(&self) -> u64 {
         self.outlet_latency_discard
+    }
+
+    /// Whether the card declared the baffled-piston mutual impedance (`open_hole_interaction tmmi 2 piston`); the receipt names it.
+    #[must_use]
+    pub const fn open_hole_interaction_is_piston(&self) -> bool {
+        self.open_hole_piston
     }
     /// Output samples emitted, after any dropped leading source samples.
     fn output_samples_rendered(&self) -> u64 {

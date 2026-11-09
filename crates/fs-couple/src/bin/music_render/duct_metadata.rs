@@ -432,7 +432,11 @@ pub(super) fn reed_provenance(p: &fs_couple::render::schedule::reed::ReedPerform
     let receiver = if receiver.is_empty() { receiver } else {
         let hz = p.outlet_interaction_fallback_hz();
         let list: Vec<String> = hz.iter().map(|f| format!("{f:e}")).collect();
-        format!("{receiver},\"open_hole_interaction_fallback\":{{\"bead\":\"frankensim-1xe5t\",\"count\":{},\"hz\":[{}]}}", hz.len(), list.join(","))
+        let fallback = format!("{receiver},\"open_hole_interaction_fallback\":{{\"bead\":\"frankensim-1xe5t\",\"count\":{},\"hz\":[{}]}}", hz.len(), list.join(","));
+        // Named only when the card declares it: a card without the token keeps its provenance bytes.
+        if p.open_hole_interaction_is_piston() {
+            format!("{fallback},\"open_hole_interaction_mutual\":\"baffled-piston large-distance product (monopole times both piston directivities)\"")
+        } else { fallback }
     };
     let regions: Vec<_> = p.segment_gases().iter().map(gas_state).collect();
     let field = reed_field_provenance(p);

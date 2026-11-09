@@ -314,3 +314,19 @@ fn the_line_ladder_row_reaches_the_ladder_and_the_refusal_carries_its_figures() 
         assert!(error.contains(needle), "{needle} not in {error}");
     }
 }
+
+// ---- `open_hole_interaction tmmi 2 piston` (the baffled-piston mutual impedance; MB 14992, plan (A)) ----
+#[test]
+fn the_piston_word_is_validated_and_off_by_default() {
+    let base = holed(&source());
+    let plain = with_row(&base, "open_hole_interaction tmmi 2");
+    let declared = with_row(&base, "open_hole_interaction tmmi 2 piston");
+    assert!(!continuous_load(&plain, 280.0).unwrap().open_hole_interaction_is_piston());
+    assert!(continuous_load(&declared, 280.0).unwrap().open_hole_interaction_is_piston());
+    for bad in [
+        "open_hole_interaction tmmi 3 piston", "open_hole_interaction tmmi 4 piston", "open_hole_interaction tmmi 2 monopole",
+        "open_hole_interaction tmmi 2 piston extra", "open_hole_interaction tmmi piston", "open_hole_interaction tmmi 2.0000001 piston",
+    ] {
+        assert!(continuous_load(&with_row(&base, bad), 280.0).is_err(), "{bad}");
+    }
+}

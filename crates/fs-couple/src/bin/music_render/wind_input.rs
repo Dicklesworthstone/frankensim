@@ -1858,4 +1858,25 @@ mod tests {
             .unwrap_or_else(|error| panic!("G3: {error}"));
         assert!(loaded.source_json.contains("\"open_hole_interaction_fallback\":{\"bead\":\"frankensim-1xe5t\",\"count\":0,\"hz\":[]}"), "{}", loaded.source_json);
     }
+
+    /// `open_hole_interaction tmmi 2 piston` is declared on the card, named on the receipt, and a card without it keeps its provenance bytes.
+    #[test]
+    fn reed_outlet_record_names_the_piston_mutual_only_when_declared() {
+        const G3: &str = include_str!(
+            "../../../../../data/instruments/descriptions/clarinet/performances/BbClar.mf.G3.performance"
+        );
+        let species = gas_fixture::card_species();
+        let bindings: Vec<_> = species.iter().map(|p| p.binding()).collect();
+        let registry = ThermochemicalSources { species: &bindings, water_species: None,
+            phase: fs_material::gas_species::input::ThermochemicalPhase::FrozenGas };
+        let load = |text: &str| load_with_all_sources(text.as_bytes(), 512, ObservationPolicy::Diagnostic, Some(&registry),
+            |_| Err("no material cards".into()), |_| Err("no radiation artifacts".into()), None, OutletLatency::Retain);
+        assert_eq!(G3.matches("open_hole_interaction tmmi 2\n").count(), 1);
+        let plain = load(G3).unwrap_or_else(|error| panic!("G3: {error}"));
+        assert!(!plain.source_json.contains("open_hole_interaction_mutual"), "{}", plain.source_json);
+        let declared = G3.replace("open_hole_interaction tmmi 2\n", "open_hole_interaction tmmi 2 piston\n");
+        let piston = load(&declared).unwrap_or_else(|error| panic!("G3 piston: {error}"));
+        assert!(piston.source_json.contains("\"open_hole_interaction_mutual\":\"baffled-piston large-distance product"), "{}", piston.source_json);
+        assert!(piston.source_json.contains("\"open_hole_interaction_fallback\":{\"bead\":\"frankensim-1xe5t\""), "{}", piston.source_json);
+    }
 }
