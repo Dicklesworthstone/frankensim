@@ -4428,3 +4428,29 @@ cancellation remain authoritative. Fixed planes support tangent translation
 and normal-axis spin. Normal displacement, tilt, remapping, partial wetting,
 finite plate edges, solid dynamics and thermal feedback are outside this
 operator. Boundary work does not certify liquid total-energy conservation.
+
+## Source-bound opposing rigid-wall momentum in SI units
+
+`MaterialFreeSurface3::planar_rigid_wall_pair_candidate_si` and
+`step_with_planar_rigid_wall_pair_si` retain the original material/scaling and
+convert the shared native tick through the existing rigid-wall SI and
+pressure-reference owner. Each wall retains its raw numerical-datum wrench,
+pressure perturbation load and absolute pressure load only when an absolute
+reference was explicitly declared. Changing that physical reference does not
+change the liquid populations or mechanical boundary work.
+
+Aggregate impulse and work use the original physical units. Mass describes
+one shared inventory; the repeated per-wall inventory observations must not
+be added. Checked common-origin angular impulses include orbital moment and
+exactly reciprocal wall signs. Both local wall motions and the common liquid
+endpoints retain the original material scenario limits. Publication follows
+both report conversions, native mass/flooding admission and the final
+cancellation checkpoint. Mechanical work is not deposited as caloric heat.
+
+Validation: all eight new native pair tests and all ten selected SI moving-wall
+tests (five new pair cases and five existing cases) execute successfully against
+the selected original numerical/material sources. The two older late-speed
+fixtures now exceed their scenario bound from physical rest; no production
+speed limits or test tolerances were relaxed. Full Cargo validation remains
+blocked by the 8 GiB environment limit while compiling asupersync metadata;
+unrelated async runtime registrations are excluded from the focused build.

@@ -196,7 +196,7 @@ fn g4_local_source_speed_and_late_liquid_speed_refusals_retain_material_history(
     let mut accelerated = setup
         .free_surface3(
             MaterialFreeSurfaceDomain3 {
-                gravity_m_s2: [0.0, 0.0, -100.0],
+                gravity_m_s2: [0.0, 0.0, -150.0],
                 ..domain()
             },
             |_, _, z| z < 6,
@@ -210,8 +210,8 @@ fn g4_local_source_speed_and_late_liquid_speed_refusals_retain_material_history(
     let bits = accelerated.lattice().grid().state_bits();
     let mass = accelerated.ledger_mass_kg().unwrap();
     let counters = accelerated.lattice().conversions();
-    // Initial Guo velocity is admitted. The actual forced native endpoint
-    // exceeds the original 0.02 m/s source scenario after the fluid solve.
+    // The constructor starts at physical rest. The actual forced native
+    // endpoint reaches about 0.03 m/s, above the original 0.02 m/s scenario.
     assert!(
         matches!(accelerated.step_with_planar_wall_velocity_field_si(motion,controls(),&gate),Err(MaterialLbmError::Invalid(reason)) if reason.contains("liquid exceeds"))
     );

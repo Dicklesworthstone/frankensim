@@ -4,6 +4,8 @@ use super::*;
 
 #[path = "motion/field.rs"]
 mod field;
+#[path = "motion/pair.rs"]
+mod pair;
 
 fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
@@ -192,14 +194,14 @@ fn g4_rebind_and_late_scenario_speed_refusals_preserve_accepted_material_flow() 
     assert_eq!(fluid.lattice().grid().state_bits(), before);
     assert_eq!(fluid.ledger_mass_kg().unwrap(), mass);
 
-    // Initial Guo speed is 0.01 m/s; the first actual body-force step gives
+    // The constructor starts at physical rest. The first held-force step gives
     // interior speed about 0.03 m/s. Native Mach remains admissible, but the
     // original 0.02 m/s material scenario bound must reject AFTER the solve.
     let setup = plan_free_surface_from_material(&source, 1e-3, 2e-4, 0.02).unwrap();
     let mut fast = setup
         .free_surface3(
             MaterialFreeSurfaceDomain3 {
-                gravity_m_s2: [0.0, 0.0, -100.0],
+                gravity_m_s2: [0.0, 0.0, -150.0],
                 ..domain()
             },
             |_, _, z| z < 6,
