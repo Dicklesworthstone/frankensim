@@ -127,6 +127,39 @@ unrepresentable mass properties. The input principal moments remain declared
 data or the documented reference calibration; a rotation does not validate
 that calibration or supply missing geometry, moving masses or deformation.
 
+## Native acceleration and perception
+
+`RigidBody::prepare_point_motion` transports an accepted six-DOF state and its
+instantaneous total loads through the existing `adapter` seam to the native
+`fs-mbd` point-motion owner. Cached principal axes are reused without another
+tensor decomposition. World/NED force already contains physical weight and
+reactions, so native configured gravity is zero. Full-inertia Euler acceleration
+retains `omega cross (I omega)`; material-point acceleration retains tangential
+and centripetal terms. Preparation and point queries have fixed work, allocate
+nothing on success and do not advance state or invoke a load callback.
+Physical observation shares the spine's quaternion admission, accepts either
+double-cover representative and admitted unit-norm roundoff, then explicitly
+normalizes its native observation copy. Invalid source quaternions still refuse;
+source state bits and the strict replay transport are unchanged.
+
+`perception::step_with_rigid_motion` consumes that accepted start-of-tick motion
+at an explicit body-fixed pilot/sensor point. It subtracts the declared physical
+world gravity, rotates specific force into body FRD, and subtracts the explicit
+body-z reference before the original heave delay/filter/gain/remnant. Native body
+rates supply the other vestibular cues; visual pitch/roll cues remain explicit
+inputs. Existing perception checkpoint bytes already retain the full history.
+The G0/G1/G3 `acceleration_observation` tests cover support/free-fall distinction,
+off-CG acceleration, asymmetric/full-tensor Euler motion, frame covariance,
+the actual spine trajectory derivative, delayed force cues, replay and
+quaternion double-cover invariance.
+
+This observer requires ordinary physically consistent rigid inertia and loads
+evaluated at the same accepted state, not a predictor/corrector mixture. Rotor
+carriers, added mass, articulated joints and impulses need their coupled owner;
+no reaction solve, finite impact acceleration, sensor calibration or historical
+pilot gain is inferred. The reduced lifecycle's declared zero-heave cue remains
+unchanged; the explicit six-DOF bridge does not add an extra aerodynamic solve.
+
 ## Section pressure forces and moments through stall
 
 The parasite ledger's spatial `wrench_at` evaluates the material-point velocity

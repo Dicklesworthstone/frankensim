@@ -14,7 +14,9 @@
 //! remnant sequence.
 
 use crate::Refusal;
+use crate::adapter::vec_to_mbd;
 use fs_math::det;
+use fs_mbd::PreparedRigidPointMotion;
 use fs_rand::{Stream, StreamKey};
 
 /// The perception baseline rate [Hz] (plan Round-5 decision).
@@ -179,7 +181,83 @@ pub struct PerceivedCues {
     pub tick: u64,
 }
 
+/// Explicit point and reference for native six-DOF vestibular cues.
+///
+/// Attitude cues remain supplied by the physics-side visual/horizon model.
+/// Specific force and angular rates come from the accepted rigid motion, never
+/// from differences of air-relative velocity or renderer state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RigidPointCueInput {
+    /// Body-fixed sensor/pilot location relative to the COM [m], body FRD.
+    pub point_body_m: [f64; 3],
+    /// The physical gravitational acceleration [m/s²], world NED.
+    pub gravity_world_mps2: [f64; 3],
+    /// Pitch attitude cue relative to the declared reference [rad].
+    pub pitch_relative_rad: f64,
+    /// Roll attitude cue relative to the declared reference [rad].
+    pub roll_relative_rad: f64,
+    /// Body-z ideal specific force at the declared trim/reference [m/s²].
+    /// For a level, stationary supported body this is `-g`. It is explicit:
+    /// a tilted sensor or a different reference must not silently use `-g`.
+    pub heave_reference_mps2: f64,
+}
+
 impl PerceptionModelSpec {
+    /// Advance the original cue service from native smooth material-point motion.
+    ///
+    /// Prepare `motion` using loads at the accepted START of this perception
+    /// tick. Point acceleration retains tangential and centripetal terms;
+    /// `a_point - gravity` is rotated into body FRD before its z component is
+    /// compared with `heave_reference_mps2`. Thus the heave cue is a change in
+    /// body-down specific force, not a rotating-coordinate velocity derivative.
+    /// The other vestibular cues are the native body pitch, roll and yaw rates.
+    /// The same per-cue delay, filter, gain, remnant and checkpoint owner then
+    /// processes all six values. No extra aerodynamic solve or time step occurs.
+    ///
+    /// This explicit six-DOF path does not change the reduced `SimLoop`'s
+    /// declared zero-heave cue or add an uncalibrated pilot feedback gain.
+    ///
+    /// # Errors
+    /// `perception-motion-invalid` for invalid point/gravity or unrepresentable
+    /// motion; ordinary perception input/stream refusals also pass through.
+    /// Motion/input refusals leave the supplied perception state untouched.
+    pub fn step_with_rigid_motion(
+        &self,
+        state: &mut PerceptionState,
+        motion: &PreparedRigidPointMotion,
+        input: RigidPointCueInput,
+    ) -> Result<PerceivedCues, Refusal> {
+        let reject = |error| Refusal {
+            code: "perception-motion-invalid",
+            message: format!("native point-specific-force cue refused: {error}"),
+            ranked_repairs: vec![
+                "supply a finite body-fixed point and the original physical gravity".into(),
+            ],
+        };
+        let point = motion
+            .point_motion(vec_to_mbd(input.point_body_m))
+            .map_err(reject)?;
+        let specific_world = point
+            .specific_acceleration_world(vec_to_mbd(input.gravity_world_mps2))
+            .map_err(reject)?;
+        let specific_body = motion
+            .pose()
+            .orientation()
+            .rotate_world_to_body(specific_world);
+        let rates = motion.angular_velocity_body();
+        self.step(
+            state,
+            [
+                input.pitch_relative_rad,
+                rates.y,
+                specific_body.z - input.heave_reference_mps2,
+                input.roll_relative_rad,
+                rates.x,
+                rates.z,
+            ],
+        )
+    }
+
     /// Admit the spec.
     ///
     /// # Errors

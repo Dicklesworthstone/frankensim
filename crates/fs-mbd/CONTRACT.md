@@ -547,6 +547,13 @@ changing inertia or describe sliding/deforming attachments. Acoustic coupling
 may observe this motion but must supply its separate physical force on fluid;
 gravity or the total mechanical wrench does not create an acoustic source.
 
+`RigidPointMotion::specific_acceleration_world` uses the same ideal
+accelerometer convention as articulated points: physical `a_point - gravity`,
+in world m/s². Supported rest reads minus gravity and nonrotating free fall
+reads zero. Gravity remains explicit even when a caller's external wrench
+already includes weight. Sensor-axis rotation and measurement dynamics belong
+to the consumer; `fs-flyer` uses this native observation in its six-DOF cue path.
+
 ## Exact linearly weighted tetrahedral inertia
 
 `SpatialInertia::from_weighted_tetrahedron` accepts a positive total mass,

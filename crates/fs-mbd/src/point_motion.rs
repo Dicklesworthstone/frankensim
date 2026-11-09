@@ -45,6 +45,26 @@ pub struct RigidPointMotion {
     pub point_acceleration_world: Vec3,
 }
 
+impl RigidPointMotion {
+    /// Ideal accelerometer specific force `a_point - gravity`, in world m/s².
+    ///
+    /// Supply the physical gravity used by the original dynamics, even when
+    /// its weight was already included in an external wrench. A nonrotating
+    /// freely falling point reads zero; a stationary supported point reads
+    /// minus gravity. Sensor-axis rotation, bias and bandwidth belong to the
+    /// sensor consumer. This is the same convention as articulated-point motion.
+    pub fn specific_acceleration_world(self, gravity_world: Vec3) -> Result<Vec3, DynamicsError> {
+        if !gravity_world.is_finite() || !self.point_acceleration_world.is_finite() {
+            return Err(DynamicsError::NonFinite("specific_acceleration_world"));
+        }
+        let result = self.point_acceleration_world.sub(gravity_world);
+        if !result.is_finite() {
+            return Err(DynamicsError::NonFinite("specific_acceleration_world"));
+        }
+        Ok(result)
+    }
+}
+
 impl RigidBodyIntegrator {
     /// Captures smooth instantaneous motion under the supplied native wrench.
     ///

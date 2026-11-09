@@ -5,21 +5,28 @@
 //! This module is the ONLY sanctioned crossing.
 //!
 //! The load-bearing subtlety: fs-mbd's `from_canonical_components` REFUSES
-//! the negative representative of the quaternion double cover, while the
-//! spine's Lie step can walk a trajectory into that half. On REPLAY paths
-//! bit-preservation is mandatory, so the adapter offers exactly two
-//! spellings and no silent middle ground:
+//! the negative representative of the quaternion double cover, while both
+//! representatives describe the same physical rotation. On REPLAY paths
+//! bit-preservation is mandatory, so the adapter offers explicit transports:
 //!
 //! - [`quat_to_mbd_canonical`] — bit-preserving; the negative
 //!   representative is a TYPED refusal naming the repair.
 //! - [`quat_to_mbd_normalizing`] — explicit renormalize+resign via
 //!   `UnitQuaternion::new` for presentation/geometry consumers, where the
 //!   double-cover sign is meaningless.
+//!
+//! The physical observer applies the spine's group admission first, then
+//! explicitly normalizes only its native observation copy. This accepts the
+//! spine's admitted unit-norm roundoff without changing source replay bits
+//! or admitting a non-unit source quaternion.
 
 use crate::Refusal;
-use crate::spine::SixDofState;
+use crate::spine::{Loads, RigidBody, SixDofState, rotation_from_boundary};
 use fs_geom::Point3;
-use fs_mbd::{UnitQuaternion, Vec3 as MbdVec3};
+use fs_mbd::{
+    DynamicsError, Gravity, MassProperties, Pose, PreparedRigidPointMotion, RigidBodyIntegrator,
+    RigidBodyState, UnitQuaternion, Vec3 as MbdVec3, Wrench,
+};
 
 /// Raw world-position triple → fs-geom `Point3` (bit-preserving).
 #[must_use]
@@ -120,5 +127,87 @@ pub const fn mbd_to_state(
         vel_mps: mbd_to_vec(vel),
         quat: mbd_to_quat(quat),
         omega_body: mbd_to_vec(omega),
+    }
+}
+
+impl RigidBody {
+    /// Observe smooth six-DOF motion through the native rigid-body owner.
+    ///
+    /// `state` and `loads` must describe the same accepted instant. As in the
+    /// spine, force is WORLD/NED and moment is BODY/FRD about the COM; the
+    /// supplied force already includes any gravity and support reactions.
+    /// Native gravity is therefore zero here, so weight is never added twice.
+    /// The returned preparation shares full-inertia Euler acceleration across
+    /// any number of body-fixed or prescribed moving point queries. Its point
+    /// acceleration includes gravity; subtract the declared physical gravity
+    /// separately to obtain an ideal accelerometer's specific force.
+    ///
+    /// The existing principal frame is transported without diagonalizing the
+    /// tensor again. This read-only query allocates nothing on success and
+    /// changes neither motion nor the spine's two-call load schedule. Do not
+    /// feed it a predictor's loads paired with a corrected endpoint state.
+    /// Quaternion admission is shared with the spine: both double-cover
+    /// representatives and admitted unit-norm roundoff describe valid poses.
+    /// Only the observation's native copy is normalized to match fs-mbd's
+    /// tighter unit representation; the supplied state remains bit-for-bit
+    /// unchanged and strict replay transport keeps its original semantics.
+    ///
+    /// # Errors
+    /// Native state, wrench and derived-motion refusals are mapped to
+    /// `rigid-motion-refused`; invalid source quaternions use the spine's
+    /// `orientation-outside-group` refusal. This describes a rigid body with
+    /// physically consistent principal inertia. Reduced rotor-carrier inertia,
+    /// added fluid inertia, moving joints and impacts need their coupled owner.
+    pub fn prepare_point_motion(
+        &self,
+        state: &SixDofState,
+        loads: Loads,
+    ) -> Result<PreparedRigidPointMotion, Refusal> {
+        self.admit()?;
+        let tensor = self.inertia_tensor();
+        let principal = tensor.principal_moments();
+        let axes = tensor.principal_to_body().as_quat();
+        let properties = MassProperties::from_principal_frame(
+            self.mass_kg,
+            MbdVec3::ZERO,
+            MbdVec3::new(principal.x, principal.y, principal.z),
+            quat_to_mbd_canonical([axes.w, axes.x, axes.y, axes.z])?,
+        )
+        .map_err(motion_refusal)?;
+        let rotation = rotation_from_boundary(state.quat)?;
+        let quaternion = rotation.as_quat();
+        let orientation =
+            quat_to_mbd_normalizing([quaternion.w, quaternion.x, quaternion.y, quaternion.z])?;
+        let position = vec_to_mbd(state.pos_m);
+        let velocity = vec_to_mbd(state.vel_mps);
+        let omega = vec_to_mbd(state.omega_body);
+        let native = RigidBodyState::new(
+            Pose::new(position, orientation).map_err(motion_refusal)?,
+            velocity.scale(self.mass_kg),
+            properties
+                .angular_momentum_body_checked(omega)
+                .map_err(motion_refusal)?,
+        )
+        .map_err(motion_refusal)?;
+        RigidBodyIntegrator::new(Gravity::ZERO)
+            .prepare_point_motion(
+                native,
+                properties,
+                Wrench {
+                    force_world: vec_to_mbd(loads.force_n),
+                    torque_body: vec_to_mbd(loads.moment_nm),
+                },
+            )
+            .map_err(motion_refusal)
+    }
+}
+
+fn motion_refusal(error: DynamicsError) -> Refusal {
+    Refusal {
+        code: "rigid-motion-refused",
+        message: format!("native rigid-point observation refused: {error}"),
+        ranked_repairs: vec![
+            "supply matching finite state and total loads for an ordinary rigid body".into(),
+        ],
     }
 }

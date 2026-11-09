@@ -243,7 +243,7 @@ fn admit_derived_state(state: &SixDofState, stage: &str) -> Result<(), Refusal> 
     })
 }
 
-fn rotation_from_boundary(quaternion: [f64; 4]) -> Result<So3, Refusal> {
+pub(crate) fn rotation_from_boundary(quaternion: [f64; 4]) -> Result<So3, Refusal> {
     So3::try_from_quat(Quat {
         w: quaternion[0],
         x: quaternion[1],
