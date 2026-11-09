@@ -54,6 +54,8 @@ pub struct RotorFourierForce<'a> {
 ///
 /// Residuals describe the declared finite model, not a complete physical
 /// force-work audit or an error bound on an underlying continuous waveform.
+/// The companion power::prepare_fourier_power_cycle integrates that physical
+/// work with all cross-tone terms retained.
 #[allow(clippy::too_many_arguments)] // declared physical cycle and explicit caller budgets
 pub fn prepare_fourier_cycle(
     spin_rad_s: f64,

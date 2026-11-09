@@ -1,4 +1,4 @@
-//! Power of the original held-load rotor cycle, including its stiffness switches.
+//! Power of original held, harmonic and Fourier rotor cycles and stiffness switches.
 //!
 //! Native affine maps still own motion. The shared exact quadratic owner caches
 //! integrals of `f.v`, `v.C.v` and `v.K_skew.q` on those same linear equations.
@@ -14,9 +14,9 @@
 //! power, a heat destination, positivity of K/C, or stability of a forced orbit.
 
 use super::{
-    MassSolve, PreparedRotorCycle, RotorBearingModel, RotorError, RotorFloquetBudget,
-    RotorPeriodicOrbit, RotorPeriodicSegment, RotorPeriodicTrajectory, finite, poll,
-    prepare_forced_cycle, restore_entry,
+    CycleForcing, MassSolve, PreparedRotorCycle, RotorBearingModel, RotorError, RotorFloquetBudget,
+    RotorFourierForce, RotorHarmonicForce, RotorPeriodicOrbit, RotorPeriodicSegment,
+    RotorPeriodicTrajectory, finite, harmonic, poll, prepare_cycle, restore_entry,
 };
 use crate::rotordynamics::transient::RotorTransientState;
 use fs_math::dd::Dd;
@@ -64,7 +64,10 @@ pub enum RotorCyclePowerError {
     Dynamics(RotorError),
     /// Each segment, accumulated absolute defects and the full-cycle residual
     /// independently satisfy the same caller-authored absolute allowance.
-    Energy { residual_j: f64, tolerance_j: f64 },
+    Energy {
+        residual_j: f64,
+        tolerance_j: f64,
+    },
 }
 impl From<RotorError> for RotorCyclePowerError {
     fn from(value: RotorError) -> Self {
@@ -93,14 +96,96 @@ pub struct PreparedRotorPowerCycle<'a> {
 
 /// Prepare held-load motion and its physical work channels together.
 ///
-/// The original whole-query budget includes all native Floquet work, three
-/// Gramian preparations per segment, retained integral matrices and workspace.
-/// All forms use the SAME mass/time coordinates and normalized source used by
-/// native motion. Refusal/cancellation publishes no partially prepared cycle.
+/// The original whole-query budget includes native Floquet work, three exact
+/// quadratic integrals per segment, retained forms and all cold workspace.
+/// Refusal/cancellation publishes no partially prepared cycle.
 pub fn prepare_forced_power_cycle<'a>(
     spin_rad_s: f64,
     segments: &[RotorPeriodicSegment<'a>],
     held_forces: &[&[f64]],
+    relative_mass_residual_tolerance: f64,
+    budget: RotorFloquetBudget,
+    cancelled: impl FnMut() -> bool,
+) -> Result<PreparedRotorPowerCycle<'a>, RotorError> {
+    prepare_power_cycle(
+        spin_rad_s,
+        segments,
+        CycleForcing::Held(held_forces),
+        relative_mass_residual_tolerance,
+        budget,
+        cancelled,
+    )
+}
+
+/// Prepare continuously harmonic motion and its actual signed force work.
+///
+/// The existing native source supplies its original-mass columns, normalization
+/// and common-origin phase. Phase continues through coefficient/amplitude
+/// switches. Work is integrated on the full transient, including resonance;
+/// no steady-state or cycle-averaged phasor approximation is substituted.
+#[allow(clippy::too_many_arguments)] // authored source and explicit physical/numerical budgets
+pub fn prepare_harmonic_power_cycle<'a>(
+    spin_rad_s: f64,
+    segments: &[RotorPeriodicSegment<'a>],
+    forces: &[RotorHarmonicForce<'_>],
+    harmonic_order: usize,
+    relative_mass_residual_tolerance: f64,
+    budget: RotorFloquetBudget,
+    cancelled: impl FnMut() -> bool,
+) -> Result<PreparedRotorPowerCycle<'a>, RotorError> {
+    prepare_power_cycle(
+        spin_rad_s,
+        segments,
+        CycleForcing::Harmonic {
+            rows: forces,
+            order: harmonic_order,
+        },
+        relative_mass_residual_tolerance,
+        budget,
+        cancelled,
+    )
+}
+
+/// Prepare steady plus simultaneous Fourier loading with complete physical work.
+///
+/// The native motion owner still superposes linear responses. Quadratic work
+/// instead observes ALL source coordinates together, retaining DC-tone and
+/// tone-tone interference in source, damping and circulatory-stiffness work.
+/// Summing independent tone powers would lose those terms during transients,
+/// coefficient switches and authored amplitude changes.
+///
+/// Cold integrals have at most 2n + 1 + 2*tones coordinates (129 at the existing
+/// model/source limits), with cubic work and quadratic workspace explicitly
+/// admitted. After integration, fixed source phases are contracted into one
+/// affine coordinate in double-double arithmetic. Retained forms and warm
+/// work remain O(segments*n²), independent of the number of tones.
+#[allow(clippy::too_many_arguments)] // authored spectrum and explicit physical/numerical budgets
+pub fn prepare_fourier_power_cycle<'a>(
+    spin_rad_s: f64,
+    segments: &[RotorPeriodicSegment<'a>],
+    forces: &[RotorFourierForce<'_>],
+    harmonic_orders: &[usize],
+    relative_mass_residual_tolerance: f64,
+    budget: RotorFloquetBudget,
+    cancelled: impl FnMut() -> bool,
+) -> Result<PreparedRotorPowerCycle<'a>, RotorError> {
+    prepare_power_cycle(
+        spin_rad_s,
+        segments,
+        CycleForcing::Fourier {
+            rows: forces,
+            orders: harmonic_orders,
+        },
+        relative_mass_residual_tolerance,
+        budget,
+        cancelled,
+    )
+}
+
+fn prepare_power_cycle<'a>(
+    spin_rad_s: f64,
+    segments: &[RotorPeriodicSegment<'a>],
+    forces: CycleForcing<'_>,
     relative_mass_residual_tolerance: f64,
     budget: RotorFloquetBudget,
     mut cancelled: impl FnMut() -> bool,
@@ -110,13 +195,29 @@ pub fn prepare_forced_power_cycle<'a>(
         return Err(RotorError::Invalid("nonempty power cycle required"));
     };
     let n = first.model.dofs();
-    let e = 2 * n + 1;
+    let d = 2 * n;
+    let w = d + 1;
     let count = segments.len();
     if count > super::MAX_ROTOR_PERIODIC_SEGMENTS {
         return Err(RotorError::PeriodicBudget("power cycle segment limit"));
     }
-    let extra_bytes = (24 * e * e + count * (3 * e * e + 32)) * 8;
-    let extra_work = (e as u64).pow(3) * 256 * 3 * count as u64;
+    forces.admit(n, count)?;
+    let sources = match forces {
+        CycleForcing::Held(_) => 1,
+        CycleForcing::Harmonic { .. } => 2,
+        CycleForcing::Fourier { orders, .. } => 1 + 2 * orders.len(),
+        CycleForcing::Homogeneous => {
+            return Err(RotorError::Invalid(
+                "explicit physical power-cycle source required",
+            ));
+        }
+    };
+    // All hard model/segment/tone bounds precede products and allocation.
+    // Workspace covers the full joint Gramian and source-phase condensation;
+    // retained forms need only the physical coordinates and one affine slot.
+    let e = d + sources;
+    let extra_bytes = (32 * e * e + 8 * e + count * (3 * w * w + 32)) * 8;
+    let extra_work = (e as u64).pow(3) * (3 * 256 + 16) * count as u64 + 4 * (d as u64).pow(3);
     let native_budget = RotorFloquetBudget {
         max_dense_bytes: budget
             .max_dense_bytes
@@ -128,10 +229,10 @@ pub fn prepare_forced_power_cycle<'a>(
             .ok_or(RotorError::PeriodicBudget("power integral work"))?,
         ..budget
     };
-    let motion = prepare_forced_cycle(
+    let motion = prepare_cycle(
         spin_rad_s,
         segments,
-        held_forces,
+        forces,
         relative_mass_residual_tolerance,
         native_budget,
         &mut cancelled,
@@ -143,8 +244,12 @@ pub fn prepare_forced_power_cycle<'a>(
         max_dense_bytes: 24 * e * e * 8,
         max_multiply_terms: (e as u64).pow(3) * 256,
     };
+    let single_order = match forces {
+        CycleForcing::Harmonic { order, .. } => [order],
+        _ => [0],
+    };
     let mut integrals = Vec::with_capacity(count);
-    for (segment, force) in segments.iter().zip(held_forces) {
+    for (index, segment) in segments.iter().enumerate() {
         poll(&mut cancelled)?;
         let (generator, _) = mass.segment_generator(
             segment,
@@ -153,61 +258,134 @@ pub fn prepare_forced_power_cycle<'a>(
             relative_mass_residual_tolerance,
             &mut cancelled,
         )?;
-        let (source, _) = mass.force_column(
-            force,
-            segment.duration_seconds,
-            period,
-            relative_mass_residual_tolerance,
-            &mut cancelled,
-        )?;
-        let maximum = source.iter().fold(0.0_f64, |a, b| a.max(b.abs()));
-        let source_scale = if maximum == 0.0 { 1.0 } else { maximum };
-        let d = e - 1;
         let mut augmented = vec![0.0; e * e];
         for i in 0..d {
-            augmented[i * e..i * e + d]
-                .copy_from_slice(&generator[i * d..(i + 1) * d]);
-            augmented[i * e + d] =
-                represented(Dd::from_f64(source[i]) / Dd::from_f64(source_scale))?;
+            augmented[i * e..i * e + d].copy_from_slice(&generator[i * d..(i + 1) * d]);
         }
         let mut forms: [Vec<f64>; 3] = core::array::from_fn(|_| vec![0.0; e * e]);
+        let mut scales = vec![0.0; sources];
+        let mut phases = vec![0.0; sources];
+        let (steady, tones, orders): (Option<&[f64]>, &[RotorHarmonicForce<'_>], &[usize]) =
+            match forces {
+                CycleForcing::Held(rows) => (Some(rows[index]), &[], &[]),
+                CycleForcing::Harmonic { rows, .. } => {
+                    (None, core::slice::from_ref(&rows[index]), &single_order)
+                }
+                CycleForcing::Fourier { rows, orders } => {
+                    (Some(rows[index].steady), rows[index].harmonics, orders)
+                }
+                CycleForcing::Homogeneous => {
+                    return Err(RotorError::Invalid(
+                        "explicit physical power-cycle source required",
+                    ));
+                }
+            };
+        let mut slot = 0;
+        if let Some(force) = steady {
+            let (mut column, _) = mass.force_column(
+                force,
+                segment.duration_seconds,
+                period,
+                relative_mass_residual_tolerance,
+                &mut cancelled,
+            )?;
+            let scale = column.iter().fold(0.0_f64, |a, b| a.max(b.abs()));
+            let normalization = if scale == 0.0 { 1.0 } else { scale };
+            for value in &mut column {
+                *value = represented(Dd::from_f64(*value) / Dd::from_f64(normalization))?;
+            }
+            insert_source(
+                &mut augmented,
+                &mut forms[0],
+                e,
+                &motion.state_scale,
+                d,
+                &column,
+                force,
+                normalization,
+                segment.duration_seconds,
+            )?;
+            scales[0] = scale;
+            phases[0] = 1.0;
+            slot = 1;
+        }
+        for (&order, &force) in orders.iter().zip(tones) {
+            poll(&mut cancelled)?;
+            let source = harmonic::prepare_source(
+                &mass,
+                force,
+                order,
+                motion.boundary_times[index],
+                segment.duration_seconds,
+                period,
+                relative_mass_residual_tolerance,
+                &mut cancelled,
+            )?;
+            let normalization = if source.scale == 0.0 {
+                1.0
+            } else {
+                source.scale
+            };
+            for (j, amplitude) in [force.cosine, force.sine].into_iter().enumerate() {
+                insert_source(
+                    &mut augmented,
+                    &mut forms[0],
+                    e,
+                    &motion.state_scale,
+                    d + slot + j,
+                    &source.columns[j],
+                    amplitude,
+                    normalization,
+                    segment.duration_seconds,
+                )?;
+                scales[slot + j] = source.scale;
+                phases[slot + j] = source.phase[j];
+            }
+            augmented[(d + slot) * e + d + slot + 1] = -source.angle;
+            augmented[(d + slot + 1) * e + d + slot] = source.angle;
+            slot += 2;
+        }
         let h = Dd::from_f64(segment.duration_seconds);
         let half = Dd::from_f64(0.5);
         for i in 0..n {
             poll(&mut cancelled)?;
             let vi = Dd::from_f64(motion.state_scale[n + i]);
-            let supply = represented(
-                half * h * Dd::from_f64(force[i]) / vi / Dd::from_f64(source_scale),
-            )?;
-            forms[0][(n + i) * e + d] = supply;
-            forms[0][d * e + n + i] = supply;
             for j in 0..n {
                 let vj = Dd::from_f64(motion.state_scale[n + j]);
-                forms[1][(n + i) * e + n + j] = represented(
-                    h * Dd::from_f64(segment.model.damping()[i * n + j]) / vi / vj,
-                )?;
+                forms[1][(n + i) * e + n + j] =
+                    represented(h * Dd::from_f64(segment.model.damping()[i * n + j]) / vi / vj)?;
                 let skew = half
                     * (Dd::from_f64(segment.model.stiffness()[i * n + j])
                         - Dd::from_f64(segment.model.stiffness()[j * n + i]));
-                let entry = represented(
-                    half * h * skew / vi / Dd::from_f64(motion.state_scale[j]),
-                )?;
+                let entry =
+                    represented(half * h * skew / vi / Dd::from_f64(motion.state_scale[j]))?;
                 forms[2][(n + i) * e + j] = entry;
                 forms[2][j * e + n + i] = entry;
             }
         }
+        let maximum = scales.iter().fold(0.0_f64, |a, b| a.max(b.abs()));
+        let source_scale = if maximum == 0.0 { 1.0 } else { maximum };
+        for (phase, scale) in phases.iter_mut().zip(scales) {
+            let normalized = represented(
+                Dd::from_f64(scale) / Dd::from_f64(source_scale) * Dd::from_f64(*phase),
+            )?;
+            if scale != 0.0 && *phase != 0.0 && normalized == 0.0 {
+                return Err(RotorError::Invalid("power source-phase scaling underflow"));
+            }
+            *phase = normalized;
+        }
         for form in &mut forms {
             poll(&mut cancelled)?;
-            // Identically absent channels have identically zero integrals;
-            // symmetric stiffness does not need a separate cold exponential.
-            if form.iter().all(|value| *value == 0.0) {
-                continue;
+            // Silent channels have exactly zero integrals. Every nonzero
+            // channel observes the complete simultaneous-source trajectory.
+            if form.iter().any(|value| *value != 0.0) {
+                let flow =
+                    quadratic_flow_integral_with_budget(&augmented, form, e, 1.0, gramian_budget)
+                        .map_err(RotorError::PeriodicExponential)?;
+                poll(&mut cancelled)?;
+                *form = flow.integral;
             }
-            let flow =
-                quadratic_flow_integral_with_budget(&augmented, form, e, 1.0, gramian_budget)
-                    .map_err(RotorError::PeriodicExponential)?;
-            poll(&mut cancelled)?;
-            *form = flow.integral;
+            *form = condense_sources(form, d, &phases, &mut cancelled)?;
         }
         integrals.push(SegmentIntegrals {
             model: segment.model,
@@ -217,6 +395,82 @@ pub fn prepare_forced_power_cycle<'a>(
     }
     poll(&mut cancelled)?;
     Ok(PreparedRotorPowerCycle { motion, integrals })
+}
+
+// The source coordinate is normalized reciprocally to its force column. Its
+// observation retains the original physical force, never a mass-solved force.
+#[allow(clippy::too_many_arguments)] // one shared column assembly for DC/cosine/sine
+fn insert_source(
+    generator: &mut [f64],
+    observation: &mut [f64],
+    e: usize,
+    state_scale: &[f64],
+    slot: usize,
+    column: &[f64],
+    force: &[f64],
+    source_scale: f64,
+    duration: f64,
+) -> Result<(), RotorError> {
+    let n = force.len();
+    for (i, &value) in column.iter().enumerate() {
+        generator[i * e + slot] = value;
+    }
+    for i in 0..n {
+        let entry = represented(
+            Dd::from_f64(0.5) * Dd::from_f64(duration) * Dd::from_f64(force[i])
+                / Dd::from_f64(state_scale[n + i])
+                / Dd::from_f64(source_scale),
+        )?;
+        observation[(n + i) * e + slot] = entry;
+        observation[slot * e + n + i] = entry;
+    }
+    Ok(())
+}
+
+// B maps [physical_state, common_source_scale] to the complete initial
+// physical/source state. B^T W B includes ALL source-source cross terms.
+fn condense_sources(
+    form: &[f64],
+    d: usize,
+    phases: &[f64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<f64>, RotorError> {
+    let e = d + phases.len();
+    let w = d + 1;
+    let mut result = vec![0.0; w * w];
+    let half = Dd::from_f64(0.5);
+    for i in 0..d {
+        poll(cancelled)?;
+        for j in i..d {
+            let entry = represented(
+                half * (Dd::from_f64(form[i * e + j]) + Dd::from_f64(form[j * e + i])),
+            )?;
+            result[i * w + j] = entry;
+            result[j * w + i] = entry;
+        }
+        let mut mixed = Dd::ZERO;
+        for (j, &phase) in phases.iter().enumerate() {
+            mixed = mixed
+                + half
+                    * Dd::from_f64(phase)
+                    * (Dd::from_f64(form[i * e + d + j]) + Dd::from_f64(form[(d + j) * e + i]));
+        }
+        let entry = represented(mixed)?;
+        result[i * w + d] = entry;
+        result[d * w + i] = entry;
+    }
+    let mut constant = Dd::ZERO;
+    for (i, &left) in phases.iter().enumerate() {
+        poll(cancelled)?;
+        for (j, &right) in phases.iter().enumerate() {
+            constant = constant
+                + Dd::from_f64(left)
+                    * Dd::from_f64(form[(d + i) * e + d + j])
+                    * Dd::from_f64(right);
+        }
+    }
+    result[d * w + d] = represented(constant)?;
+    Ok(result)
 }
 
 impl PreparedRotorPowerCycle<'_> {
@@ -235,7 +489,8 @@ impl PreparedRotorPowerCycle<'_> {
     ) -> Result<(RotorPeriodicTrajectory, RotorCyclePower), RotorCyclePowerError> {
         admit_energy_tolerance(energy_tolerance_j)?;
         let trajectory =
-            self.motion.advance(initial, relative_residual_tolerance, &mut cancelled)?;
+            self.motion
+                .advance(initial, relative_residual_tolerance, &mut cancelled)?;
         let power = self.account(&trajectory, energy_tolerance_j, &mut cancelled)?;
         Ok((trajectory, power))
     }
@@ -298,16 +553,18 @@ impl PreparedRotorPowerCycle<'_> {
                     }
                 }
             }
-            let kinetic =
-                storage_change(cached.model.mass(), &before.velocity, &after.velocity);
+            let kinetic = storage_change(cached.model.mass(), &before.velocity, &after.velocity);
             let elastic = storage_change(
                 cached.model.stiffness(),
                 &before.displacement,
                 &after.displacement,
             );
             let next = self.integrals[(index + 1) % self.integrals.len()].model;
-            let switch =
-                switch_work(cached.model.stiffness(), next.stiffness(), &after.displacement);
+            let switch = switch_work(
+                cached.model.stiffness(),
+                next.stiffness(),
+                &after.displacement,
+            );
             let residual = kinetic + elastic + work[1] + work[2] - work[0];
             let residual_j = rounded(residual)?;
             check_energy(residual_j, tolerance)?;
@@ -401,14 +658,19 @@ fn represented(value: Dd) -> Result<f64, RotorError> {
 }
 fn admit_energy_tolerance(tolerance: f64) -> Result<(), RotorError> {
     if !tolerance.is_finite() || tolerance < 0.0 {
-        Err(RotorError::Invalid("finite nonnegative cycle energy allowance required"))
+        Err(RotorError::Invalid(
+            "finite nonnegative cycle energy allowance required",
+        ))
     } else {
         Ok(())
     }
 }
 fn check_energy(residual_j: f64, tolerance_j: f64) -> Result<(), RotorCyclePowerError> {
     if residual_j.abs() > tolerance_j {
-        Err(RotorCyclePowerError::Energy { residual_j, tolerance_j })
+        Err(RotorCyclePowerError::Energy {
+            residual_j,
+            tolerance_j,
+        })
     } else {
         Ok(())
     }

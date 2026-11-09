@@ -854,28 +854,45 @@ across force scales, nonbinary static equilibrium, an unstable quarter-period
 particular orbit and growing perturbations, full mutual inertia, coordinate
 congruence and cycle origin, singularity, small-force resolution and cancellation.
 
-`rotordynamics::periodic::power::prepare_forced_power_cycle` adds physical
-power to those original held-load cycles. Native maps and periodic-orbit solves
-still own motion; the shared `fs-phs` stable Gramian kernel independently caches
-integrals of applied `f.v`, signed `v.C.v`, and nonconservative `v.K_skew.q`.
-Warm evaluation uses only O(segments*n²) contractions. Polarized original
-endpoint quadratic forms independently measure kinetic and symmetric-K storage
-increments. Every K switch, including the final-to-first period seam, retains
-`q.(K_next-K_old).q/2` as parameter work at unchanged state. The full-cycle
-balance uses first-segment storage on both sides; average watts divide each
-physical work channel by the complete period. This resolves actuator and
-stiffness-modulator consumption without inventing another physical solver.
+`rotordynamics::periodic::power` adds physical work to original held-load,
+continuous harmonic and finite Fourier cycles through
+`prepare_forced_power_cycle`, `prepare_harmonic_power_cycle` and
+`prepare_fourier_power_cycle`. Native maps and periodic-orbit solves still own
+motion; the shared `fs-phs` stable Gramian kernel independently integrates
+applied `f.v`, signed `v.C.v`, and nonconservative `v.K_skew.q`. Harmonic
+source normalization, original-mass solves and common-origin phase preparation
+are shared with native motion. Phase continues through coefficient and authored
+amplitude switches; no held approximation or steady-state assumption is added.
+
+The work integral observes DC and ALL simultaneous tones in one augmented
+flow. This retains DC-tone, tone-tone and transient interference in every
+quadratic work channel, including destructive interference in actual damping
+loss. Separate per-tone powers cannot replace this integral. Cold workspace is
+quadratic and integral work cubic in at most `2n+1+2*tones` coordinates (129
+at the existing bounds), explicitly charged to the whole-query budget.
+After integration, double-double contraction of the fixed source phases
+preserves their complete cross blocks in one affine coordinate. Retained forms
+and warm evaluation remain O(segments*n²), independent of tone count.
+
+Polarized original endpoint quadratic forms independently measure kinetic and
+symmetric-K storage increments. Every K switch, including the final-to-first
+period seam, retains `q.(K_next-K_old).q/2` as parameter work at unchanged
+state. The full-cycle balance uses first-segment storage on both sides;
+average watts divide each physical work channel by the complete period.
+This resolves actuator and stiffness-modulator consumption without adding
+another physical trajectory solver.
 
 Signed active-bearing and circulatory-stiffness work is never heat; exact skew G
 does no work but remains in the motion equation. Native mass, residual, resolvent
 and cancellation gates remain active, with whole-query budgets for all cached
-forms. Each segment, accumulated absolute segment defects and the independent
-whole-cycle energy residual pass the authored energy allowance before publication.
-G1/G3 regressions cover exponential velocity reversal and analytical damping
-loss, parametric resonance and extraction at the period seam, active C,
-circulatory K, periodic square-wave power, true segment refinement and refusal.
-No continuous-modulation, Fourier-power, peak-power, physical heat routing,
-positive-storage, attraction or certified state-error claim follows.
+forms and cold source/integral work. Each segment, accumulated absolute segment
+defects and the independent whole-cycle energy residual pass the authored
+energy allowance before publication. G1/G3 regressions target analytical damping
+loss, DC/tone constructive interference, destructive damping interference,
+signed gyroscopic forcing, global-phase subdivision, active C, circulatory K,
+source/modulator exchange at the period seam, and resource/cancellation refusal.
+No smooth-modulation, peak-power, physical heat routing, positive-storage,
+attraction or certified state-error claim follows.
 
 `rotordynamics::periodic::prepare_harmonic_cycle` drives those SAME physical
 segments with continuous `Fc*cos(omega*t) + Fs*sin(omega*t)` forces/torques.
@@ -895,7 +912,8 @@ homogeneous flow. No dynamic-stiffness inverse or held-sinusoid approximation
 is introduced, including at a lossless resonance. The same cached trajectory
 and unique-orbit solve retain singularity/resolvent and cancellation refusals.
 A single harmonic and segmented coefficients do not imply smooth coefficient
-modulation, spin acceleration, actuator-work receipts or certified state errors.
+modulation, spin acceleration or certified state errors; the companion power
+API supplies the separate physical work integrals.
 
 Six G1/G3 regression cases cover continuous resonant response across force
 scales and subdivision, signed gyroscopic rotating loads, full mutual inertia
@@ -924,7 +942,7 @@ phased coefficient/amplitude switches, lossless secular growth, exact
 held/silent-source parity, and whole-spectrum resource/shape admission.
 This finite Fourier load does not infer an unmodeled force spectrum,
 nonlinear bearing/mesh feedback, smooth modulation or spin acceleration;
-waveform truncation and full actuator-work audits remain separate questions.
+waveform truncation remains separate from the companion finite-model work audit.
 
 `harmonic_response` uses `exp(+i omega t)` and native cancellable complex LU
 on `K - omega^2 M + i omega(C + Omega G)`. Row equilibration precedes the solve;

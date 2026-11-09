@@ -32,7 +32,7 @@ mod harmonic;
 pub use harmonic::{MAX_ROTOR_FORCE_HARMONIC, RotorHarmonicForce, prepare_harmonic_cycle};
 mod fourier;
 pub use fourier::{MAX_ROTOR_FORCE_TONES, RotorFourierForce, prepare_fourier_cycle};
-/// Exact signed work and stiffness-modulation power on original held-load cycles.
+/// Exact signed work and stiffness-modulation power on original forced cycles.
 pub mod power;
 
 #[derive(Clone, Copy)]

@@ -42,10 +42,11 @@ pub struct RotorHarmonicForce<'a> {
 /// is normalized before exponentiation; the largest exponential is 66 by 66.
 /// The original full mass residuals are checked independently for BOTH loads.
 ///
-/// Numerical exponential/residual error is distinct from model validity. Full
-/// force-work receipts, smooth coefficient modulation and speed ramps are
-/// outside this segmented-coefficient API. Use prepare_fourier_cycle for
-/// simultaneous steady loading and multiple harmonics of the same period.
+/// Numerical exponential/residual error is distinct from model validity.
+/// Smooth coefficient modulation and speed ramps are outside this segmented
+/// API. The companion power::prepare_harmonic_power_cycle adds independently
+/// integrated physical work. Use prepare_fourier_cycle for simultaneous steady
+/// loading and multiple harmonics of the same period.
 /// Failure/cancellation publishes no partial plan. Warm advance/orbit queries
 /// reuse the same maps and solve owner as held forcing.
 #[allow(clippy::too_many_arguments)] // explicit physical cycle, source and caller budgets
@@ -71,6 +72,75 @@ pub fn prepare_harmonic_cycle(
     )
 }
 
+/// One normalized native source and its phase at the common cycle origin.
+/// Motion and quadratic work use these same original-mass solves and rotation.
+pub(super) struct HarmonicSource {
+    pub(super) columns: [Vec<f64>; 2],
+    pub(super) scale: f64,
+    pub(super) angle: f64,
+    pub(super) phase: [f64; 2],
+    pub(super) maximum_mass_residual: f64,
+}
+
+#[allow(clippy::too_many_arguments)] // original physical source, time and mass admission
+pub(super) fn prepare_source(
+    mass: &MassSolve<'_>,
+    force: RotorHarmonicForce<'_>,
+    order: usize,
+    start: f64,
+    duration: f64,
+    period: f64,
+    tolerance: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<HarmonicSource, RotorError> {
+    poll(cancelled)?;
+    let (cosine, cosine_residual) =
+        mass.force_column(force.cosine, duration, period, tolerance, cancelled)?;
+    let (sine, sine_residual) =
+        mass.force_column(force.sine, duration, period, tolerance, cancelled)?;
+    let maximum_mass_residual = cosine_residual.max(sine_residual);
+    let scale = cosine
+        .iter()
+        .chain(&sine)
+        .fold(0.0_f64, |s, x| s.max(x.abs()));
+    let mut columns = [cosine, sine];
+    if scale == 0.0 {
+        return Ok(HarmonicSource {
+            columns,
+            scale,
+            angle: 0.0,
+            phase: [1.0, 0.0],
+            maximum_mass_residual,
+        });
+    }
+    for column in &mut columns {
+        for value in column {
+            let normalized = finite(*value / scale)?;
+            if *value != 0.0 && normalized == 0.0 {
+                return Err(RotorError::Invalid("harmonic force direction underflow"));
+            }
+            *value = normalized;
+        }
+    }
+    // Local normalized time advances the SAME globally phased physical source.
+    let angle = finite((core::f64::consts::TAU * order as f64) * (duration / period))?;
+    if angle == 0.0 {
+        return Err(RotorError::Invalid("harmonic segment phase underflow"));
+    }
+    // Reduce complete turns before converting to radians. This is shared by
+    // native motion and power, including coefficient and amplitude switches.
+    let turns = (Dd::from_f64(start) * Dd::from_f64(order as f64) / Dd::from_f64(period)).to_f64();
+    let phase = core::f64::consts::TAU * (turns - turns.floor());
+    let (sin, cos) = det::sin_cos(phase);
+    Ok(HarmonicSource {
+        columns,
+        scale,
+        angle,
+        phase: [cos, sin],
+        maximum_mass_residual,
+    })
+}
+
 #[allow(clippy::too_many_arguments)] // shared original mass and physical phase
 pub(super) fn segment_flow(
     mass: &MassSolve<'_>,
@@ -84,21 +154,14 @@ pub(super) fn segment_flow(
     budget: DenseExponentialBudget,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(AffineSegmentMap, f64), RotorError> {
-    poll(cancelled)?;
+    let source = prepare_source(
+        mass, force, order, start, duration, period, tolerance, cancelled,
+    )?;
     let d = 2 * mass.model.dofs();
-    let (cosine, cosine_residual) =
-        mass.force_column(force.cosine, duration, period, tolerance, cancelled)?;
-    let (sine, sine_residual) =
-        mass.force_column(force.sine, duration, period, tolerance, cancelled)?;
-    let residual = cosine_residual.max(sine_residual);
-    let scale = cosine
-        .iter()
-        .chain(&sine)
-        .fold(0.0_f64, |s, x| s.max(x.abs()));
-    if scale == 0.0 {
+    if source.scale == 0.0 {
         return Ok((
-            affine_segment_flow(generator, &cosine, d, budget, cancelled)?,
-            residual,
+            affine_segment_flow(generator, &source.columns[0], d, budget, cancelled)?,
+            source.maximum_mass_residual,
         ));
     }
     let e = d + 2;
@@ -106,40 +169,28 @@ pub(super) fn segment_flow(
     for i in 0..d {
         poll(cancelled)?;
         augmented[i * e..i * e + d].copy_from_slice(&generator[i * d..(i + 1) * d]);
-        for (j, column) in [&cosine, &sine].iter().enumerate() {
-            let normalized = finite(column[i] / scale)?;
-            if column[i] != 0.0 && normalized == 0.0 {
-                return Err(RotorError::Invalid("harmonic force direction underflow"));
-            }
-            augmented[i * e + d + j] = normalized;
+        for j in 0..2 {
+            augmented[i * e + d + j] = source.columns[j][i];
         }
     }
-    // The shared generator already includes duration. In normalized local
-    // time, [cos(theta),sin(theta)]' = omega*h * [-sin(theta),cos(theta)].
-    let angle = finite((core::f64::consts::TAU * order as f64) * (duration / period))?;
-    if angle == 0.0 {
-        return Err(RotorError::Invalid("harmonic segment phase underflow"));
-    }
-    augmented[d * e + d + 1] = -angle;
-    augmented[(d + 1) * e + d] = angle;
+    augmented[d * e + d + 1] = -source.angle;
+    augmented[(d + 1) * e + d] = source.angle;
     poll(cancelled)?;
     let result =
         exponential_with_budget(&augmented, e, budget).map_err(RotorError::PeriodicExponential)?;
     poll(cancelled)?;
-    // Reduce cycles before converting to radians, keeping argument reduction
-    // independent of the number of prior revolutions and of segment count.
-    let turns = (Dd::from_f64(start) * Dd::from_f64(order as f64) / Dd::from_f64(period)).to_f64();
-    let phase = core::f64::consts::TAU * (turns - turns.floor());
-    let (sin, cos) = det::sin_cos(phase);
     let mut transition = vec![0.0; d * d];
     let mut offset = Vec::with_capacity(d);
     for i in 0..d {
         poll(cancelled)?;
         transition[i * d..(i + 1) * d].copy_from_slice(&result[i * e..i * e + d]);
-        let value = (Dd::from_f64(result[i * e + d]) * Dd::from_f64(cos)
-            + Dd::from_f64(result[i * e + d + 1]) * Dd::from_f64(sin))
+        let value = (Dd::from_f64(result[i * e + d]) * Dd::from_f64(source.phase[0])
+            + Dd::from_f64(result[i * e + d + 1]) * Dd::from_f64(source.phase[1]))
         .to_f64();
-        offset.push(product_three(finite(value)?, scale, 1.0)?);
+        offset.push(product_three(finite(value)?, source.scale, 1.0)?);
     }
-    Ok((AffineSegmentMap { transition, offset }, residual))
+    Ok((
+        AffineSegmentMap { transition, offset },
+        source.maximum_mass_residual,
+    ))
 }
