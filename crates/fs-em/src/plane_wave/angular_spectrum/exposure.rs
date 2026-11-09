@@ -68,6 +68,8 @@ mod layer;
 pub use layer::{
     AngularSpectrumExposureHeatChannel, AngularSpectrumExposureHeatSpectrumLimits,
     AngularSpectrumExposureLayerDissipation, AngularSpectrumExposureLayerField,
+    AngularSpectrumExposureLayerEnergyDensity, AngularSpectrumExposureLayerEnergyLimits,
+    PreparedAngularSpectrumExposureLayerEnergy,
     AngularSpectrumExposureLayerHeatLoadSpectrum, AngularSpectrumExposureLayerHeatSpectrum,
     AngularSpectrumExposureLayerLimits, AngularSpectrumHeatAreaQuadrature,
     AngularSpectrumHeatDepthSample, AngularSpectrumHeatVolumeQuadrature, AngularSpectrumHeatWindowLimits,
@@ -1176,3 +1178,4 @@ mod tests {
         ));
     }
 }
+

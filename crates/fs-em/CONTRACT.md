@@ -8600,3 +8600,49 @@ laws. Native absolute field observations and the terminal-relative report keep
 their distinct meanings under a large common bias. Regression definitions cover
 narrow actual E/J source support, mixed/floating finite-contact loads, both signs,
 work, iteration counts and rollback under source/workspace/budget refusal.
+
+## Retained dispersive-film field and polarization energy
+
+`PreparedAngularSpectrumExposureLayer::point_energy` prepares a retained
+original-field energy observer at one original grid point and selected depth.
+`evaluate_from_clock_dd` returns instantaneous ensemble-mean energy density;
+`change_from_clock_dd` returns signed end-minus-start changes over a positive
+finite duration. DD results name electromagnetic, polarization restoring,
+polarization kinetic and total subaccounts [J/m^3], each included once.
+
+The original causal material law supplies
+`U=(epsilon_inf*E^2+mu*H^2)/2+sum(P^2/Delta)/2
++sum_Lorentz(P_dot^2/(omega0^2*Delta))/2`.
+Preparation reconstructs each original frequency field once, retaining E/H and
+normalized restoring/kinetic coordinates. Native positive-time phasors are
+conjugated into the shared negative-time law without rounding filtered products.
+Real/proper source identities and the physical proper half-factor remain intact.
+
+Queries allocate no heap, perform no new field/material solve and use linear
+coordinate-frequency work. Explicit limits bound original point-line/FFT work,
+`3*sum_b F_b*(2+D+2L)` coordinate-frequency terms, original owner workspace,
+retained fields/banks and temporary frequency-point storage. Cancellation
+publishes no partial observer or result.
+
+Coherent field increments are formed analytically before quadratic changes,
+using `delta(q^2)=delta_q*(2*q+delta_q)`. Start epoch and duration remain
+separate. Proper factors remove only their irrelevant common carrier; real
+fields retain its rotation and increment. The original scaled-DD arithmetic
+also retains the phase increment's small quadratic part, allowing finite
+changes when bright endpoint energies exceed ordinary DD range. Unrepresentable
+source phases or final physical subaccounts are explicitly refused.
+
+Seven numerical regression groups pass with warnings denied: real/proper dark
+energy through 1 ps; changes below DD endpoint resolution; precise-clock
+partition and carrier invariance; independent mixed ensembles of every store;
+polarization heat plus storage change versus independently integrated original
+work; physical scale/range; and cancellation/refusal. These execute the new
+energy helper, original scaled arithmetic and actual math/harmonic source.
+The complete preparation adapter body type-checks with narrow owner metadata
+carriers; native material admission, Maxwell reconstruction/FFT and full fs-em/
+workspace/DSR integration remain unexecuted.
+
+The observer describes settled prescribed harmonics. Switch-on transients,
+thermal energy, parameter work, volume integration, mechanical force and a
+complete enclosure balance are not inferred. Original source/material/spatial
+uncertainty and arbitrary-null relative accuracy remain unresolved.

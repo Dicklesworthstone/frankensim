@@ -865,13 +865,13 @@ fn physical_parts(value: [ScaledDd; 2]) -> Result<[Dd; 2], AngularSpectrumError>
 // Every real/imaginary accumulator has its own exponent. This extends dynamic
 // range, not DD precision, and does not certify arbitrary cancellation nulls.
 #[derive(Clone, Copy, Default)]
-struct ScaledDd {
+pub(super) struct ScaledDd {
     mantissa: Dd,
     exponent: i32,
 }
 
 impl ScaledDd {
-    const ZERO: Self = Self {
+    pub(super) const ZERO: Self = Self {
         mantissa: Dd::ZERO,
         exponent: 0,
     };
@@ -883,11 +883,11 @@ impl ScaledDd {
         exponent: 0,
     };
 
-    fn from_f64(value: f64) -> Self {
+    pub(super) fn from_f64(value: f64) -> Self {
         Self::from_dd(Dd::from_f64(value))
     }
 
-    fn from_dd(value: Dd) -> Self {
+    pub(super) fn from_dd(value: Dd) -> Self {
         Self::normalized(value, 0)
     }
 
@@ -932,7 +932,7 @@ impl ScaledDd {
     // Restore units only after spatial, reservoir and diagonal scales meet.
     // A nonzero final tone outside the physical DD range must refuse, rather
     // than publishing a silently dark spectrum.
-    fn physical(self) -> Result<Dd, AngularSpectrumError> {
+    pub(super) fn physical(self) -> Result<Dd, AngularSpectrumError> {
         if !self.is_finite() {
             return Err(bad("integrated heat scaled contraction is unrepresentable"));
         }
@@ -1041,3 +1041,4 @@ fn scale_by_two(mut value: f64, mut exponent: i32) -> f64 {
 
 #[cfg(test)]
 mod tests;
+

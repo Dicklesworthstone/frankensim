@@ -25,6 +25,12 @@ use reservoir::{LossLaw, PoleTransfer};
 
 mod temporal_moments;
 
+mod energy;
+pub use energy::{
+    AngularSpectrumExposureLayerEnergyDensity, AngularSpectrumExposureLayerEnergyLimits,
+    PreparedAngularSpectrumExposureLayerEnergy,
+};
+
 mod integrated_heat;
 pub use integrated_heat::{
     AngularSpectrumExposureLayerHeatLoadSpectrum, AngularSpectrumHeatAreaQuadrature,
@@ -1116,3 +1122,4 @@ mod tests {
         assert!((heat + storage - electrical_work).to_f64().abs() < 2e-14);
     }
 }
+

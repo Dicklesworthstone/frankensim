@@ -93,6 +93,8 @@ pub use exposure::{
     AngularSpectrumExposureInterferenceArm, AngularSpectrumExposureInterferenceLimits,
     AngularSpectrumExposureHeatChannel, AngularSpectrumExposureHeatSpectrumLimits,
     AngularSpectrumExposureLayerDissipation, AngularSpectrumExposureLayerField,
+    AngularSpectrumExposureLayerEnergyDensity, AngularSpectrumExposureLayerEnergyLimits,
+    PreparedAngularSpectrumExposureLayerEnergy,
     AngularSpectrumExposureLayerHeatLoadSpectrum, AngularSpectrumExposureLayerHeatSpectrum,
     AngularSpectrumExposureLayerLimits, AngularSpectrumExposureLimits,
     AngularSpectrumExposureMomentumField, AngularSpectrumExposureMomentumLimits,
@@ -1036,3 +1038,4 @@ fn transform(
     }
     Ok(())
 }
+
