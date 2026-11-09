@@ -8063,3 +8063,52 @@ transmission is required at derivative samples. Underflow keeps the original
 unavailable-field refusal, and zero-flux samples do not invent a square-root
 tangent. Existing source domains, incidence constraints, budgets and
 cancellation remain active.
+
+
+## Physical absorption and heating resonances in coherent films
+
+`PlanarDielectricLayers::frequency_absorption` resolves the complete analytic
+first frequency derivative of power dissipated in every original film, together
+with the native field/flux response. `LayeredAbsorptionDispersion` exposes each
+film's and the total absorbed incident-power fraction. Its `layer_power_density`
+and `total_power_density` queries expose actual cycle-mean heat per area and its
+frequency slope for a fixed supplied complex peak tangential incident electric
+field. `AbsorbedPowerDensityDispersion` reports W/m², `omega*dP/domega`, and
+`dP/domega` in W s/m². The incident admittance derivative is included, so a
+fixed-field heating peak need not coincide with an absorptance peak.
+
+The existing bounded E/H transfer and exact material-jet sweep is reused. One
+additional forward source sweep retains the coherent incoming/opposite fields
+of every film. Analytic derivatives act on the original positive even/odd slab
+loss channels, their interference, physical attenuation/phase, and dispersive
+reference port. Small-depth odd cubic loss is differentiated directly; neither
+absorption nor its derivative is obtained by subtracting reflected and
+transmitted power. The independent differentiated Poynting balance is measured
+and admitted separately. Preparation is O(layer_count), with fixed 64-film
+scratch storage and one bounded output vector, without a depth mesh, frequency
+differences or a separate stack solve per selected film.
+
+`LayeredResonanceObservation` now selects total or individual-film absorbed power
+fractions and physical heat densities, in addition to existing field and
+transmitted-power observations. The shared search uses a phase-free square root
+of the selected positive power; its peak and half-height crossings therefore
+belong to that physical quantity. Each sampled frequency reevaluates original
+material laws under the declared fixed-angle or fixed-transverse-wave-number
+constraint. Numerical observed linewidth is not a free-mode decay certificate.
+
+Zero-width and lossless films retain zero heat. A lossless carrier with nonzero
+constitutive loss slope, unresolved interior propagation/source underflow, a
+zero-power derivative observation, material-domain failure or exhausted search
+budget refuses explicitly. The ordinary carrier and front-reflection paths
+remain available independently of interior derivative admission. Fixed scalar
+permeability and immutable material snapshots retain the native domain; this does
+not evolve temperature, infer nonlinear heating or couple a thermal reservoir.
+
+Physical source-power contractions retain extreme but representable source,
+admittance and loss products before squaring. The native positive-loss amplitude
+also retains subnormal loss coefficients before contraction with large fields;
+ordinary coefficients preserve the existing numerical path. Six focused native
+numerical tests cover independent TE/TM loss-channel slopes, thin weak loss,
+near-critical geometry/material directions, and representable power across these
+scales. Public stack tests additionally exercise original per-film heat, source
+normalization, actual Airy absorption peaks and half-height crossings.

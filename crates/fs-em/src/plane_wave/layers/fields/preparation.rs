@@ -98,8 +98,8 @@ impl<'s, 'm> LayerFieldPreparation<'s, 'm> {
         let outgoing = self.incoming[layer_index + 1];
         let opposite = ((tail[0] - tail[1]) / (tail[0] + tail[1])) * outgoing;
         let slab = self.slabs[layer_index];
-        let even = (incoming + opposite).scale(det::sqrt(0.5 * slab.even_loss));
-        let odd = (incoming - opposite).scale(det::sqrt(0.5 * slab.odd_loss));
+        let even = loss_amplitude(incoming + opposite, slab.even_loss);
+        let odd = loss_amplitude(incoming - opposite, slab.odd_loss);
         let heat = 0.5 * self.admittance_s * (even.norm_sq() + odd.norm_sq());
         if !heat.is_finite() || heat < 0.0 {
             return Err(bad("selected layer absorbed power is unrepresentable"));

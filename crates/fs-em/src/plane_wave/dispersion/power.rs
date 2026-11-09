@@ -7,8 +7,8 @@
 use fs_math::{c64::C64, dd::Dd, det};
 
 /// A native directed power fraction and its analytic angular-frequency slope.
-/// These are monochromatic normal energy-flux ratios, not field intensities,
-/// material heat, finite-band pulse energy or an optical phase measurement.
+/// These are monochromatic incoming, outgoing or dissipated power ratios,
+/// not field intensities, finite-band pulse energy or an optical phase.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PowerFractionDispersion {
     fraction: f64,
@@ -28,6 +28,26 @@ impl PowerFractionDispersion {
     /// d(fraction)/domega, per rad/s.
     pub fn derivative_s(self) -> f64 {
         self.scaled_derivative / self.omega
+    }
+
+    /// A physical power owner supplies its native nonnegative carrier and
+    /// independently evaluated complete scaled derivative.
+    pub(in crate::plane_wave) fn from_scaled(
+        fraction: f64,
+        omega: f64,
+        scaled_derivative: f64,
+    ) -> Option<Self> {
+        (fraction.is_finite()
+            && fraction >= 0.0
+            && omega.is_finite()
+            && omega > 0.0
+            && scaled_derivative.is_finite()
+            && (scaled_derivative / omega).is_finite())
+        .then_some(Self {
+            fraction,
+            omega,
+            scaled_derivative,
+        })
     }
 
     /// The primal power comes from its native positive-flux calculation. The
@@ -55,14 +75,7 @@ impl PowerFractionDispersion {
             + Dd::from_f64(electric.re) * Dd::from_f64(magnetic_slope.re)
             + Dd::from_f64(electric.im) * Dd::from_f64(magnetic_slope.im);
         let scaled_derivative = slope.to_f64();
-        if !scaled_derivative.is_finite() || !(scaled_derivative / omega).is_finite() {
-            return None;
-        }
-        Some(Self {
-            fraction,
-            omega,
-            scaled_derivative,
-        })
+        Self::from_scaled(fraction, omega, scaled_derivative)
     }
 
     /// A phase-free search observation A=sqrt(P), D A=D P/(2 sqrt(P)).

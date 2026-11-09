@@ -26,6 +26,9 @@ use fs_math::{c64::C64, dd::Dd, det};
 use fs_phs::harmonic::resonance::{ResonanceControls, ResonanceSearchError};
 use fs_qty::{Dims, Time};
 
+#[path = "plane_wave_layer_frequency/absorption.rs"]
+mod absorption;
+
 const E: f64 = 1e-11;
 const M: f64 = 1e-6;
 const W: f64 = 1e9;

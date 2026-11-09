@@ -37,7 +37,10 @@ use fs_math::{c64::C64, dd::Dd, det};
 
 /// Analytic coherent amplitude tangents and source-backed driven resonance.
 pub mod frequency;
-pub use frequency::{LayerAmplitudeDerivative, LayeredFrequencyResponse, LayeredResonanceObservation};
+pub use frequency::{
+    AbsorbedPowerDensityDispersion, LayerAmplitudeDerivative, LayeredAbsorptionDispersion,
+    LayeredFrequencyResponse, LayeredResonanceObservation,
+};
 
 mod dispersion;
 pub use dispersion::LayeredFrequencyDispersion;
@@ -439,8 +442,8 @@ impl<'a> PlanarDielectricLayers<'a> {
             let right = states[i + 1];
             let tail_reflection = (right[0] - right[1]) / (right[0] + right[1]);
             let opposite = tail_reflection * outgoing;
-            let even = (incoming + opposite).scale(det::sqrt(0.5 * slabs[i].even_loss));
-            let odd = (incoming - opposite).scale(det::sqrt(0.5 * slabs[i].odd_loss));
+            let even = loss_amplitude(incoming + opposite, slabs[i].even_loss);
+            let odd = loss_amplitude(incoming - opposite, slabs[i].odd_loss);
             absorbed += even.norm_sq() + odd.norm_sq();
             incoming = outgoing;
         }
@@ -504,14 +507,19 @@ fn same_response_source(a: DielectricResponse<'_>, b: DielectricResponse<'_>) ->
         (DielectricResponse::SpectralOptical(a), DielectricResponse::SpectralOptical(b)) => {
             a.same_source(b)
         }
-        (DielectricResponse::WaterOptical(a), DielectricResponse::WaterOptical(b)) => a.same_source(b),
-        (DielectricResponse::SilicaOptical(a), DielectricResponse::SilicaOptical(b)) => a.same_source(b),
+        (DielectricResponse::WaterOptical(a), DielectricResponse::WaterOptical(b)) => {
+            a.same_source(b)
+        }
+        (DielectricResponse::SilicaOptical(a), DielectricResponse::SilicaOptical(b)) => {
+            a.same_source(b)
+        }
         (DielectricResponse::ThermoOpticOptical(a), DielectricResponse::ThermoOpticOptical(b)) => {
             a.same_source(b)
         }
-        (DielectricResponse::MolecularGasOptical(a), DielectricResponse::MolecularGasOptical(b)) => {
-            a.same_source(b)
-        }
+        (
+            DielectricResponse::MolecularGasOptical(a),
+            DielectricResponse::MolecularGasOptical(b),
+        ) => a.same_source(b),
         _ => false,
     }
 }
@@ -524,6 +532,18 @@ fn maximum(z: C64) -> f64 {
 }
 fn divided(z: C64, scale: f64) -> C64 {
     C64::new(z.re / scale, z.im / scale)
+}
+
+// Preserve an original subnormal positive loss before a large coherent field
+// restores representable heat. Ordinary coefficients retain the native path.
+fn loss_amplitude(field: C64, loss: f64) -> C64 {
+    if loss >= f64::MIN_POSITIVE {
+        field.scale(det::sqrt(0.5 * loss))
+    } else {
+        field
+            .scale(det::sqrt(loss))
+            .scale(core::f64::consts::FRAC_1_SQRT_2)
+    }
 }
 
 // The original bounded E/H recursion, shared by one-sided and simultaneous

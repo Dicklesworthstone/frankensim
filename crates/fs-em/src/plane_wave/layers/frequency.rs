@@ -1,4 +1,4 @@
-//! Source-bound coherent film frequency tangents and local driven amplitude peaks.
+//! Original coherent film field, power and heating frequency resonances.
 //!
 //! The native bounded E/H recursion owns every carrier value. Its tangent uses
 //! the original dielectric jets, with no frequency differencing or growing
@@ -22,6 +22,9 @@ use fs_math::{c64::C64, dd::Dd, det};
 use fs_phs::harmonic::resonance::{
     DrivenResonance, ResonanceControls, ResonanceSearchError, search_resonance,
 };
+
+mod absorption;
+pub use absorption::{AbsorbedPowerDensityDispersion, LayeredAbsorptionDispersion};
 
 /// One coherent field amplitude and its analytic first frequency derivative.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -127,7 +130,9 @@ impl LayeredFrequencyResponse {
     }
 }
 
-/// Selected coherent amplitude under a fixed unit incident tangential E.
+/// Observation in the native one-sided experiment. Power objectives use a
+/// phase-free square root, so their squared amplitude is the named physical
+/// fraction or heat density, rather than an optical field intensity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LayeredResonanceObservation {
     /// |r| squared is the native reflected power fraction.
@@ -141,6 +146,17 @@ pub enum LayeredResonanceObservation {
     /// the reported half-height crossings refer to transmitted POWER. Strictly
     /// positive resolved transmission is required at derivative samples.
     TransmittedPowerFraction,
+    /// Power dissipated in all finite films, divided by incident normal power.
+    /// This includes coherent standing waves and original material dispersion.
+    AbsorbedPowerFraction,
+    /// Power dissipated in one original film, divided by incident normal power.
+    LayerAbsorbedPowerFraction { layer_index: usize },
+    /// Actual total film heat per area for a fixed unit peak incident E [V/m].
+    /// The squared observation has units W/m² and includes the incident-port
+    /// admittance slope; it can peak at a different frequency from absorptance.
+    AbsorbedPowerDensity,
+    /// Actual heat per area in one original film, for fixed unit peak incident E.
+    LayerAbsorbedPowerDensity { layer_index: usize },
 }
 
 impl<'a> PlanarDielectricLayers<'a> {
@@ -163,6 +179,16 @@ impl<'a> PlanarDielectricLayers<'a> {
         incidence_cosine: f64,
         polarization: Polarization,
         constraint: IncidenceFrequencyConstraint,
+    ) -> Result<LayeredFrequencyResponse, ReflectionError> {
+        self.frequency_dispersion_impl(incidence_cosine, polarization, constraint, None)
+    }
+
+    fn frequency_dispersion_impl(
+        &self,
+        incidence_cosine: f64,
+        polarization: Polarization,
+        constraint: IncidenceFrequencyConstraint,
+        mut absorption: Option<&mut absorption::AbsorptionWork>,
     ) -> Result<LayeredFrequencyResponse, ReflectionError> {
         let carrier = self.response(incidence_cosine, polarization)?;
         let interface = PlanarDielectricInterface::try_new_with_incident_response(
@@ -189,6 +215,16 @@ impl<'a> PlanarDielectricLayers<'a> {
         if !wave_slope.is_finite() || !cosine_slope.is_finite() {
             return Err(bad("incident film frequency tangent is unrepresentable"));
         }
+        if let Some(work) = absorption.as_deref_mut() {
+            work.set_reference(
+                self,
+                incidence_cosine,
+                cosine_slope,
+                wave_slope,
+                incident_slope,
+                polarization,
+            )?;
+        }
         let mut state = admittance_state(self.exit_wave, incidence_cosine, polarization)?;
         let mut reflected_slope = exit.reflected_tangential_e().scaled_derivatives()[0];
         let mut transmitted = [
@@ -201,7 +237,7 @@ impl<'a> PlanarDielectricLayers<'a> {
         ];
         let mut transmission_available = true;
         let mut residual: f64 = 0.0;
-        for layer in self.layers.iter().rev() {
+        for (index, layer) in self.layers.iter().enumerate().rev() {
             if layer.source.thickness_m == 0.0 {
                 continue;
             }
@@ -213,6 +249,11 @@ impl<'a> PlanarDielectricLayers<'a> {
                 layer.source.thickness_m,
             )?;
             if slab.scale == C64::ZERO {
+                if absorption.is_some() {
+                    return Err(bad(
+                        "opaque propagation has no resolved interior absorption tangent",
+                    ));
+                }
                 let front = PlanarDielectricInterface::try_new_with_incident_response(
                     self.incident_response,
                     layer.source.response,
@@ -244,6 +285,7 @@ impl<'a> PlanarDielectricLayers<'a> {
                 layer.source.thickness_m,
             )?;
             let tail = state;
+            let tail_reflected_slope = reflected_slope;
             // A homogeneous state has a free common scalar. Choose its tangent
             // gauge so D(E+H)=0; carrier E/H still retain their native numerators.
             let tail_slope = reflected_slope * (tail[0] + tail[1]).scale(0.5);
@@ -285,6 +327,20 @@ impl<'a> PlanarDielectricLayers<'a> {
                 (products(&[(slope[0], next[1]), (-next[0], slope[1])])?.scale(2.0) / sum) / sum;
             if !finite(gain_slope) || !finite(reflected_slope) {
                 return Err(bad("coherent film amplitude tangent is unrepresentable"));
+            }
+            if let Some(work) = absorption.as_deref_mut() {
+                work.record(
+                    index,
+                    *layer,
+                    material,
+                    absorption::AbsorptionStep {
+                        slab,
+                        tail_reflection: (tail[0] - tail[1]) / (tail[0] + tail[1]),
+                        tail_scaled_derivative: tail_reflected_slope,
+                        gain,
+                        gain_scaled_derivative: gain_slope,
+                    },
+                )?;
             }
             // A nonzero bounded slab scale can still yield an underflowed
             // composed gain; its lost transmission tangent is not zero.
@@ -348,10 +404,12 @@ impl<'a> PlanarDielectricLayers<'a> {
     /// FixedTransverseWavenumber retains k_parallel from this prepared carrier
     /// and incidence angle; loss of propagating incidence refuses.
     ///
-    /// The selected unit-E field or normal-flux ratio remains the same experiment
-    /// across the interval. TransmittedPowerFraction measures the native Poynting
-    /// flux, including both port admittance slopes; its observation is sqrt(T),
-    /// with no optical phase assigned. Other choices measure field amplitudes.
+    /// The selected field, normal-flux fraction or heat density remains the same
+    /// experiment across the interval. Power fractions include port-admittance
+    /// slopes; physical heat densities additionally hold unit peak incident E
+    /// fixed. Absorption retains original material loss and coherent internal
+    /// fields in every selected film. Power observations use a phase-free square
+    /// root, with no optical phase assigned. Other choices measure field amplitudes.
     /// An observed half-height Q need not equal a pole-decay Q. The 64-film cap,
     /// shared total evaluation budget and before/after-query cancellation apply.
     pub fn driven_resonance(
@@ -401,9 +459,24 @@ impl<'a> PlanarDielectricLayers<'a> {
                         positive(det::sqrt((1.0 - sine) * (1.0 + sine)))?
                     }
                 };
+                if let Some(value) = absorption::search_observation(
+                    &sample,
+                    cosine,
+                    polarization,
+                    constraint,
+                    observation,
+                    need_derivative,
+                )? {
+                    return Ok(value);
+                }
                 if !need_derivative {
                     let response = sample.response(cosine, polarization)?;
-                    return Ok((select_carrier(response, observation), C64::ZERO, 0.0));
+                    return Ok((
+                        select_carrier(response, observation)
+                            .ok_or_else(|| bad("absorption observation was not resolved"))?,
+                        C64::ZERO,
+                        0.0,
+                    ));
                 }
                 let response = sample.frequency_dispersion(cosine, polarization, constraint)?;
                 let jet = match observation {
@@ -430,6 +503,10 @@ impl<'a> PlanarDielectricLayers<'a> {
                             scaled_derivative,
                         })
                     }
+                    LayeredResonanceObservation::AbsorbedPowerFraction
+                    | LayeredResonanceObservation::LayerAbsorbedPowerFraction { .. }
+                    | LayeredResonanceObservation::AbsorbedPowerDensity
+                    | LayeredResonanceObservation::LayerAbsorbedPowerDensity { .. } => None,
                 }
                 .ok_or_else(|| {
                     bad("propagation underflow has no admitted transmission frequency jet")
@@ -444,15 +521,22 @@ impl<'a> PlanarDielectricLayers<'a> {
     }
 }
 
-fn select_carrier(value: LayeredReflection, observation: LayeredResonanceObservation) -> C64 {
-    match observation {
+fn select_carrier(
+    value: LayeredReflection,
+    observation: LayeredResonanceObservation,
+) -> Option<C64> {
+    Some(match observation {
         LayeredResonanceObservation::ReflectedElectricAmplitude => value.reflected_tangential_e,
         LayeredResonanceObservation::TransmittedElectricAmplitude => value.transmitted_tangential_e,
         LayeredResonanceObservation::TransmittedMagneticAmplitude => value.transmitted_conjugate_h,
         LayeredResonanceObservation::TransmittedPowerFraction => {
             C64::from_re(det::sqrt(value.transmitted_power_fraction))
         }
-    }
+        LayeredResonanceObservation::AbsorbedPowerFraction
+        | LayeredResonanceObservation::LayerAbsorbedPowerFraction { .. }
+        | LayeredResonanceObservation::AbsorbedPowerDensity
+        | LayeredResonanceObservation::LayerAbsorbedPowerDensity { .. } => return None,
+    })
 }
 
 // D denotes omega*d/domega. Only the original epsilon varies with frequency;
