@@ -5138,6 +5138,28 @@ radiation, body storage and time integration remain the existing owners.
 Focused regressions cover material queries, signed reciprocal heat, entrance
 position, analytic film chains and native body energy/entropy closure.
 
+### Source-resolved liquid wall correction on the native surface
+
+`ImplicitLiquidConvection::with_gnielinski_wall_correction` explicitly selects
+the shared liquid `(Pr_bulk/Pr_wall)^0.11` correction for an existing developing
+turbulent circular-tube section. Bulk Re, Pr and conductivity stay with their
+original reservoir state. Wall Cp, conductivity and viscosity come from the
+same prepared source at the actual eliminated surface temperature, including
+the density factor for kinematic viscosity. Their complete analytic wall-Pr
+chain enters the original nonlinear boundary; it is not evaluated at the stored
+bulk-solid temperature. `surface_transport` retains that independent property
+sample. The corrected section Nu/coefficient remain distinct from its retained
+original constant-property cumulative means.
+
+The prescribed-mass-flow wrapper retains this selection and the actual corrected
+section Reynolds partial, alongside its separate wall-temperature tangent.
+Source support, genuine source kinks and the correlation's property-ratio domain
+remain active. Unselected laws keep K=1; this option adds no wall storage,
+energy source, turbulent closure or second surface solver. Focused regressions
+check both viscosity bases, independent corrected-section algebra and tangents,
+held-rate flow response, source refusal, and original conductive/radiative
+surface, backward-Euler energy and bath-entropy balances.
+
 ## Developing tube sections on finite gas heat owners
 
 `FilmGasHeatLaw::BulkForcedTubeSection(ForcedTurbulentTubeSectionGasSurface)`

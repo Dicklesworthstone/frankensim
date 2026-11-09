@@ -7,6 +7,8 @@ mod sections;
 mod gas;
 #[path = "implicit/mass_flow.rs"]
 mod mass_flow;
+#[path = "implicit/turbulent_wall.rs"]
+mod turbulent_wall;
 use fs_airflow::graph::thermal::medium::convection::{
     AidingVerticalPlateSettings, HorizontalPlateFacing, NaturalConvectionGeometry,
     evaluate_aiding_vertical_plate_from_material, evaluate_natural_from_material,
@@ -591,6 +593,14 @@ fn source_surface_energy_with(
     configuration: LiquidExteriorConvectionSettings,
     reference: impl Fn(f64) -> (f64, [f64; 2]),
 ) {
+    source_surface_energy_with_wall_correction(configuration, false, reference);
+}
+
+fn source_surface_energy_with_wall_correction(
+    configuration: LiquidExteriorConvectionSettings,
+    corrected: bool,
+    reference: impl Fn(f64) -> (f64, [f64; 2]),
+) {
     let card = liquid_card(0.3, 0.01, 320.0);
     let liquid = liquid_law(&card)
         .with_density_expansion(Temperature::new(280.0), Temperature::new(320.0))
@@ -635,6 +645,11 @@ fn source_surface_energy_with(
         configuration,
     )
     .unwrap();
+    let source = if corrected {
+        source.with_gnielinski_wall_correction().unwrap()
+    } else {
+        source
+    };
     let geometry = ImplicitBoundaryGeometry {
         area_m2: AREA,
         half_distance_m: 0.001,

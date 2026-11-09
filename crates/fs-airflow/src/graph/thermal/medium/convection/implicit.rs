@@ -130,9 +130,14 @@ enum Expansion {
 pub struct ExteriorConvectionResponse {
     pub property_temperature_k: f64,
     pub transport: FluidTransportState,
+    /// The original liquid at the actual exterior temperature when the
+    /// Gnielinski wall-Prandtl correction is explicitly enabled. This is a
+    /// property query, never a replacement for the bulk fluid or solid storage.
+    pub surface_transport: Option<FluidTransportState>,
     pub surface_dynamic_viscosity_pa_s: Option<f64>,
     /// Original correlation evaluation; for a finite section this is the
-    /// downstream cumulative mean, not the section's Nusselt number.
+    /// downstream cumulative mean before an optional wall-property correction,
+    /// not the section's actual Nusselt number.
     pub nusselt: NusseltEvaluation,
     /// Actual plate-strip geometry, upstream mean and strip-average Nu.
     pub plate_section: Option<PlateSectionDetails>,
@@ -170,8 +175,11 @@ pub use ExteriorConvectionResponse as LiquidExteriorConvectionResponse;
 /// Finite plate strips retain the physical leading edge, both original means
 /// and the section coefficient's own Re/Pr partials. Film derivatives act on
 /// that coefficient, including its conductivity. Circular sections retain bulk
-/// properties (K=1 for turbulent flow) and zero surface derivative. Rectangular
-/// four-wall sections require a finite area owner and are not pointwise laws.
+/// properties (K=1 for turbulent flow by default) and zero surface derivative.
+/// [`Self::with_gnielinski_wall_correction`] opts turbulent tube sections into
+/// the original liquid wall-Prandtl correction and its complete source tangent.
+/// Rectangular four-wall sections require a finite area owner and are not
+/// pointwise laws.
 ///
 /// A genuine source kink or unavailable active correlation partial refuses.
 /// Source interval endpoints use their inward derivative. At equal sphere/bath
@@ -190,6 +198,7 @@ pub struct ImplicitLiquidConvection<'a, 'm> {
     settings: ExteriorConvectionSettings,
     transport: [PreparedScalar; 4],
     expansion: Expansion,
+    gnielinski_wall_correction: bool,
 }
 
 impl<'a, 'm> ImplicitLiquidConvection<'a, 'm> {
@@ -265,7 +274,44 @@ impl<'a, 'm> ImplicitLiquidConvection<'a, 'm> {
             settings,
             transport,
             expansion,
+            gnielinski_wall_correction: false,
         })
+    }
+
+    /// Apply Gnielinski's liquid property correction `(Pr_bulk/Pr_wall)^0.11`
+    /// to the existing developing turbulent circular-tube section.
+    ///
+    /// The original source supplies wall Cp, conductivity and dynamic viscosity
+    /// at the ACTUAL eliminated exterior temperature. Kinematic viscosity
+    /// retains its original density factor. All three source derivatives enter
+    /// the native surface tangent, while bulk Re, Pr, k and speed stay fixed.
+    /// The same correction survives a [`PrescribedMassFlowConvection`] wrapper.
+    ///
+    /// This is explicit model selection, not an automatic correction for every
+    /// material. The source correlation's Newtonian single-phase assumptions,
+    /// property-ratio admission and section-model limitations still apply.
+    /// Bulk and wall property support must both be covered by the already
+    /// prepared fluid interval. Unsupported laws and source kinks refuse;
+    /// no film substitution, extra heat credit or boundary solve is introduced.
+    pub fn with_gnielinski_wall_correction(mut self) -> Result<Self, ExteriorConvectionError> {
+        if !matches!(
+            self.settings.law,
+            SourceCellConvectionLaw::ForcedTubeSection { .. }
+        ) || self.settings.property_temperature != ConvectionPropertyTemperature::Reservoir
+        {
+            return Err(ExteriorConvectionError::Invalid(
+                "liquid Gnielinski wall correction requires a bulk-property turbulent circular-tube section",
+            ));
+        }
+        let [lo, hi] = self.settings.fluid_temperature_bounds_k;
+        let [wall_lo, wall_hi] = self.settings.surface_temperature_bounds_k;
+        if wall_lo < lo || wall_hi > hi {
+            return Err(ExteriorConvectionError::Invalid(
+                "wall-Prandtl correction requires original liquid support over the whole surface interval",
+            ));
+        }
+        self.gnielinski_wall_correction = true;
+        Ok(self)
     }
 
     /// Immutable original liquid owner, including its card and complete context.
@@ -301,6 +347,17 @@ impl evaluator::ExteriorFluid for ImplicitLiquidConvection<'_, '_> {
     fn caloric(&self) -> &dyn ThermalLaw { self.caloric }
     fn energy_bounds(&self) -> [f64; 2] { self.energy_bounds_j_kg }
     fn settings(&self) -> ExteriorConvectionSettings { self.settings }
+
+    fn turbulent_wall_transport(
+        &self,
+        temperature: f64,
+    ) -> Result<Option<TransportSample>, ExteriorConvectionError> {
+        if self.gnielinski_wall_correction {
+            self.sample_transport(temperature, true).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
 
     fn sample_transport(
         &self,

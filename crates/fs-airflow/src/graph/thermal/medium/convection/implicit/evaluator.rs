@@ -5,11 +5,20 @@
 //! heat limits and conducting-surface interface apply to liquids and gases.
 
 use super::*;
+use fs_convection::developing::TurbulentTubePropertyCorrection;
 
 pub(super) trait ExteriorFluid {
     fn caloric(&self) -> &dyn ThermalLaw;
     fn energy_bounds(&self) -> [f64; 2];
     fn settings(&self) -> ExteriorConvectionSettings;
+    /// Explicit liquid-only wall-property correction on the existing turbulent
+    /// section. Other sources keep their original constant-property behavior.
+    fn turbulent_wall_transport(
+        &self,
+        _temperature: f64,
+    ) -> Result<Option<TransportSample>, ExteriorConvectionError> {
+        Ok(None)
+    }
     fn sample_transport(
         &self,
         temperature: f64,
@@ -142,6 +151,7 @@ pub(super) fn evaluate(
         return Ok(ExteriorConvectionResponse {
             property_temperature_k,
             transport: state,
+            surface_transport: None,
             surface_dynamic_viscosity_pa_s: None,
             nusselt,
             plate_section: Some(PlateSectionDetails {
@@ -162,19 +172,48 @@ pub(super) fn evaluate(
     } = settings.law
     {
         let re = state.reynolds(speed_m_s, length.value())?;
-        let section = evaluate_turbulent_circular_duct_section(
+        let mut section = evaluate_turbulent_circular_duct_section(
             re,
             state.prandtl(),
             start.value() / length.value(),
             end.value() / length.value(),
         )?;
-        let coefficient = section.heat_transfer_coefficient(ThermalConductivity::new(k), length)?;
+        let wall = source.turbulent_wall_transport(surface_temperature_k)?;
+        let (coefficient, derivative) = if let Some(wall) = &wall {
+            let pr = wall.state.prandtl();
+            section = section.with_property_correction(TurbulentTubePropertyCorrection::Liquid {
+                wall_prandtl: pr,
+            })?;
+            let coefficient = section.heat_transfer_coefficient_with_sensitivities(
+                ThermalConductivity::new(k),
+                length,
+            )?;
+            let [_, dcp, dk, dmu] = wall.derivatives;
+            let dpr = finite(
+                pr * (dmu / wall.state.dynamic_viscosity_pa_s()
+                    + dcp / wall.state.specific_heat_j_kg_k()
+                    - dk / wall.state.thermal_conductivity_w_m_k()),
+            )?;
+            let derivative = coefficient_partial(
+                &coefficient,
+                "Pr_wall",
+                dpr,
+                dcp != 0.0 || dk != 0.0 || dmu != 0.0,
+            )?;
+            (coefficient, derivative)
+        } else {
+            (
+                section.heat_transfer_coefficient(ThermalConductivity::new(k), length)?,
+                0.0,
+            )
+        };
         let (_, _, upstream, nusselt, section_nusselt) = section.into_parts();
-        // Constructor admission requires bulk properties and K=1 here;
-        // varying the wall cannot change any source coordinate or h.
+        // Bulk Re/Pr/k stay fixed. Only the explicitly selected original
+        // wall-Prandtl source contributes a surface-temperature chain.
         return Ok(ExteriorConvectionResponse {
             property_temperature_k,
             transport: state,
+            surface_transport: wall.map(|sample| sample.state),
             surface_dynamic_viscosity_pa_s: None,
             nusselt,
             plate_section: None,
@@ -186,7 +225,7 @@ pub(super) fn evaluate(
                 nusselt: section_nusselt,
             }),
             coefficient,
-            coefficient_surface_derivative_w_m2_k2: 0.0,
+            coefficient_surface_derivative_w_m2_k2: derivative,
         });
     }
     if let SourceCellConvectionLaw::ForcedLaminarTubeSection {
@@ -209,6 +248,7 @@ pub(super) fn evaluate(
         return Ok(ExteriorConvectionResponse {
             property_temperature_k,
             transport: state,
+            surface_transport: None,
             surface_dynamic_viscosity_pa_s: None,
             nusselt,
             plate_section: None,
@@ -387,6 +427,7 @@ pub(super) fn evaluate(
     Ok(ExteriorConvectionResponse {
         property_temperature_k,
         transport: state,
+        surface_transport: None,
         surface_dynamic_viscosity_pa_s: wall_viscosity,
         nusselt,
         plate_section: None,

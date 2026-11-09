@@ -172,17 +172,24 @@ impl<'a> PrescribedMassFlowConvection<'a> {
                 response.coefficient.sensitivity.d_qoi.get("Re").copied()
             }
             SourceCellConvectionLaw::ForcedTubeSection { start, end, .. } => {
-                evaluate_turbulent_circular_duct_section(
-                    reynolds,
-                    prandtl,
-                    start.value() / length.value(),
-                    end.value() / length.value(),
-                )?
-                .heat_transfer_coefficient_with_sensitivities(conductivity, length)?
-                .sensitivity
-                .d_qoi
-                .get("Re")
-                .copied()
+                // The corrected surface path already evaluated the ACTUAL
+                // section partial, including its held wall Prandtl number.
+                // Reconstructing K=1 here would silently drop that response.
+                if response.surface_transport.is_some() {
+                    response.coefficient.sensitivity.d_qoi.get("Re").copied()
+                } else {
+                    evaluate_turbulent_circular_duct_section(
+                        reynolds,
+                        prandtl,
+                        start.value() / length.value(),
+                        end.value() / length.value(),
+                    )?
+                    .heat_transfer_coefficient_with_sensitivities(conductivity, length)?
+                    .sensitivity
+                    .d_qoi
+                    .get("Re")
+                    .copied()
+                }
             }
             SourceCellConvectionLaw::ForcedLaminarTubeSection { start, end, .. } => {
                 evaluate_circular_duct_section(
@@ -287,6 +294,12 @@ impl ExteriorFluid for BoundFlow<'_> {
     }
     fn settings(&self) -> ExteriorConvectionSettings {
         self.settings
+    }
+    fn turbulent_wall_transport(
+        &self,
+        temperature: f64,
+    ) -> Result<Option<TransportSample>, ExteriorConvectionError> {
+        self.source.turbulent_wall_transport(temperature)
     }
     fn sample_transport(
         &self,
