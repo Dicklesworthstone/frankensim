@@ -575,6 +575,57 @@ discharge, a manufactured steady transfer, original-KCL bisection/RK4 state
 and heat refinement, endpoint/intermediate-gate support, and transactional
 cancellation/failure/retry. They do not constitute measured device qualification.
 
+### Finite battery and motor shafts with device commutation
+
+`commutation::battery_motor::PreparedCommutatedBatteryMotorCycle`
+joins the existing device laws to the ORIGINAL finite battery/lead/converter/DC
+motor interconnection. All nine coordinates continue across every gate:
+chemical, polarization and battery-bus charge; converter flux/input/output
+charge; motor flux; rotor and stator absolute momenta. SOC/OCV support,
+polarization, physical lead sag, auxiliary demand and regeneration remain in
+one native discrete-gradient/Newton solve. No sampled ideal voltage source or
+sequential subsystem advance substitutes for that solve.
+
+Preparation replaces the supplied `BatteryMotorDrive`'s averaged bridge
+modulation and four channel resistances with four explicit `SwitchDevice`
+laws. Original battery/lead parameters, converter L/C/winding, reciprocal motor
+and both inertias remain unchanged. The fixed native J/R/storage interconnection
+is gate-independent, so ONE nine-state workspace serves every substep; bounded
+gate/duration caches retain only static half-bridge algebra. The original
+battery/lead/chemical-storage account is reused on the accepted nine-state
+trajectory. No separate subsystem solver certificate is manufactured.
+
+`CommutatedBatteryMotorCycleStep::heat_joules` retains the existing first
+ten heat positions: converter winding/four channels, battery series and
+polarization, physical lead, motor copper and bearing friction. Four body-diode
+heats follow in input-high/input-low/output-high/output-low order. All fourteen
+are independently contracted from their original constitutive currents/speeds;
+auxiliary export and shaft work are separate. The receipt also retains seven
+endpoint storage changes, both converter-terminal works, battery-terminal and
+motor-electrical work, electromagnetic conversion, each shaft's work, actual
+load delivery/curtailment, numerical mean efforts and only the last discrete
+device/load points.
+
+Each native substep checks device and load support at its initial, discrete and
+final efforts, together with original battery support. Separate battery, lead,
+converter, output exchange, magnetic, mechanical, native and complete-drive
+balances precede publication. The cycle additionally reconciles every endpoint
+storage contribution with its accumulated intervals using actual absolute
+transfers, excluding unchanged stored energy. External torque impulse retains
+both absolute momenta. One existing `BatteryMotorSwitchCommand` belongs
+to each ORIGINAL gate interval; explicit positive subdivision remainders retain
+every represented edge, and Newton/backtracking counts are bounded. Late
+command failure, unsupported state, arithmetic/energy refusal or cancellation
+publishes none of the nine coordinates and permits retry.
+
+All constitutive data are frozen over the electrical cycle. The model retains
+the original reversible battery and linear commutated DC motor laws. It adds
+no inferred switching-transition loss, gate/output capacitance, recovery,
+avalanche, battery protection, magnetic saturation or controller. Numerical
+refinement remains necessary for diode branch changes and near-zero-current
+stiffness; neither energy closure nor nonlinear convergence certifies temporal
+accuracy, control stability or unresolved continuous-time peaks.
+
 ## Averaged bidirectional power conversion
 
 `circuit::converter::AveragedBuckBoost` assembles the original flux and both bus

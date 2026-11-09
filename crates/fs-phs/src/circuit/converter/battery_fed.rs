@@ -388,7 +388,7 @@ impl BatteryFedBuckBoost {
     // Shared by the original six-state solve and larger monolithic drives.
     // Efforts are the accepted native discrete-gradient prefix, not a sampled
     // voltage command or an independently propagated component trajectory.
-    fn account_interval(
+    pub(super) fn account_interval(
         &self,
         initial: &[f64; 6],
         next: &[f64; 6],

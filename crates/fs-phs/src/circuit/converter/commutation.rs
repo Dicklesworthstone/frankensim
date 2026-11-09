@@ -20,6 +20,9 @@ use super::{AveragedBuckBoost, BridgeModulation, BuckBoostParameters, invalid, p
 use crate::{NonlinearPortPower, PhsError, PreparedStepError, PreparedStepRecord, StepWorkspace};
 use fs_math::dd::Dd;
 
+/// Original finite battery and motor shafts with these same device laws.
+pub mod battery_motor;
+
 mod cycle;
 pub use cycle::PreparedCommutatedSwitchCycle;
 
