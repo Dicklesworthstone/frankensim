@@ -27,8 +27,8 @@ pub mod internal_impulse;
 pub mod internal_motion;
 
 use super::{
-    AdvanceOutcome, DynamicsError, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState,
-    StepReceipt, UnitQuaternion, Vec3, Wrench, finite_derived,
+    AdvanceOutcome, DynamicsError, Gravity, MassProperties, Pose, RigidBodyIntegrator,
+    RigidBodyState, StepReceipt, UnitQuaternion, Vec3, Wrench, finite_derived,
 };
 use fs_math::dd::Dd;
 
@@ -141,6 +141,23 @@ impl CompensatedVec3 {
 
     fn expressed_in(self, axes: [Vec3; 3]) -> Self {
         Self(axes.map(|axis| self.dot(Self::from_vec(axis))))
+    }
+
+    fn rotated(self, orientation: UnitQuaternion) -> Self {
+        if self == Self::ZERO || orientation == UnitQuaternion::IDENTITY {
+            return self;
+        }
+        // Evaluate the proper rotation represented by the admitted quaternion.
+        // Keeping the quaternion/vector products avoids a rounded world spin
+        // swallowing the original momentum before the endpoint subtraction.
+        let [w, x, y, z] = orientation.components().map(Dd::from_f64);
+        let axis = Self([x, y, z]);
+        let cross = axis.cross(self);
+        let correction = axis.cross(cross);
+        let twice_inverse_norm = Dd::from_f64(2.0) / (w * w + x * x + y * y + z * z);
+        Self(core::array::from_fn(|i| {
+            self.0[i] + twice_inverse_norm * (w * cross.0[i] + correction.0[i])
+        }))
     }
 
     fn norm_bound(self, field: &'static str) -> Result<f64, DynamicsError> {
@@ -292,6 +309,18 @@ impl PreparedSpatialLoads {
             .add(CompensatedVec3::from_vec(self.torque_body))
             .rounded("spatial_load.free_couple")
     }
+
+    fn moment_world(&self, orientation: UnitQuaternion) -> CompensatedVec3 {
+        let mut moment = CompensatedVec3::from_vec(self.torque_world)
+            .add(CompensatedVec3::from_vec(self.torque_body).rotated(orientation));
+        for (axis, first_moment) in basis_world(orientation)
+            .into_iter()
+            .zip(self.point_force_moments_world)
+        {
+            moment = moment.add(CompensatedVec3::from_vec(axis).cross(first_moment));
+        }
+        moment
+    }
 }
 
 /// Accepted native motion and independently reconstructable load balances.
@@ -305,8 +334,11 @@ pub struct SpatialStepReceipt {
     /// from the selected integrator's load quadrature, in N m s.
     pub angular_impulse_world: Vec3,
     /// Actual linear momentum change minus the applied impulse, in N s.
+    /// Native endpoint differences and source products cancel before rounding.
     pub linear_momentum_residual_world: Vec3,
     /// Actual total angular momentum change minus the applied impulse, in N m s.
+    /// Central spin and orbital increments remain separate; a large common
+    /// world-origin momentum cannot erase a smaller transferred or lost spin.
     pub angular_momentum_residual_world: Vec3,
     /// Exact endpoint work of the held forces, excluding gravity, in J.
     pub force_work_j: f64,
@@ -342,30 +374,23 @@ impl RigidBodyIntegrator {
         duration_seconds: f64,
     ) -> Result<SpatialStepReceipt, DynamicsError> {
         let wrench_before = loads.wrench_at(state.pose.orientation)?;
-        let (step, (drifted_state, wrench_after)) = self.step_verlet_with(
+        let (step, drifted_state) = self.step_verlet_with(
             state,
             properties,
             wrench_before,
             duration_seconds,
             |drifted: RigidBodyState| -> Result<_, DynamicsError> {
                 let wrench = loads.wrench_at(drifted.pose.orientation)?;
-                Ok((wrench, (drifted, wrench)))
+                Ok((wrench, drifted))
             },
         )?;
         let before = step.diagnostics_before;
         let after = step.diagnostics_after;
         let state_after = step.state_after;
         let half = 0.5 * duration_seconds;
-        let force = loads
-            .force_world
-            .add(self.gravity.acceleration_world().scale(properties.mass));
-        finite_vec(force, "spatial_step.total_force")?;
-        let linear_impulse = force.scale(duration_seconds);
-        let position_after = state_after.pose.position_world;
         let orientation_before = state.pose.orientation;
         let orientation_after = state_after.pose.orientation;
         let torque_before = wrench_before.torque_body;
-        let torque_after = wrench_after.torque_body;
         let kicked = state.angular_momentum_body.add(torque_before.scale(half));
         let drifted = drifted_state.angular_momentum_body;
         let momentum_after = state_after.angular_momentum_body;
@@ -389,40 +414,24 @@ impl RigidBodyIntegrator {
             after.mechanical_energy - before.mechanical_energy - force_work_j - couple_work_j,
             "spatial_step.work_energy_residual",
         )?;
-        let angular_impulse = orientation_before
-            .rotate_body_to_world(torque_before)
-            .scale(half)
-            .add(
-                orientation_after
-                    .rotate_body_to_world(torque_after)
-                    .scale(half),
-            )
-            .add(
-                state
-                    .pose
-                    .position_world
-                    .scale(0.5)
-                    .add(position_after.scale(0.5))
-                    .cross(linear_impulse),
-            );
-        let linear_residual = after
-            .linear_momentum_world
-            .sub(before.linear_momentum_world)
-            .sub(linear_impulse);
-        let angular_residual = after
-            .angular_momentum_world
-            .sub(before.angular_momentum_world)
-            .sub(angular_impulse);
-        finite_vec(linear_impulse, "spatial_step.linear_impulse")?;
-        finite_vec(angular_impulse, "spatial_step.angular_impulse")?;
-        finite_vec(linear_residual, "spatial_step.linear_residual")?;
-        finite_vec(angular_residual, "spatial_step.angular_residual")?;
+        let central_angular_impulse = loads
+            .moment_world(orientation_before)
+            .scale(0.5)
+            .add(loads.moment_world(orientation_after).scale(0.5))
+            .scale(duration_seconds);
+        let balance = impulse_balance(
+            &step,
+            properties,
+            self.gravity,
+            loads.force_world,
+            central_angular_impulse,
+        )?;
         Ok(SpatialStepReceipt {
             step,
-            linear_impulse_world: linear_impulse,
-            angular_impulse_world: angular_impulse,
-            linear_momentum_residual_world: linear_residual,
-            angular_momentum_residual_world: angular_residual,
+            linear_impulse_world: balance.linear_impulse,
+            angular_impulse_world: balance.angular_impulse,
+            linear_momentum_residual_world: balance.linear_residual,
+            angular_momentum_residual_world: balance.angular_residual,
             force_work_j,
             couple_work_j,
             work_energy_residual_j,
@@ -457,6 +466,54 @@ impl RigidBodyIntegrator {
             final_diagnostics: self.diagnostics(*state, properties)?,
         })
     }
+}
+
+struct SpatialImpulseBalance {
+    linear_impulse: Vec3,
+    angular_impulse: Vec3,
+    linear_residual: Vec3,
+    angular_residual: Vec3,
+}
+
+fn impulse_balance(
+    step: &StepReceipt,
+    properties: MassProperties,
+    gravity: Gravity,
+    force_world: Vec3,
+    central_angular_impulse: CompensatedVec3,
+) -> Result<SpatialImpulseBalance, DynamicsError> {
+    let before = step.state_before;
+    let after = step.state_after;
+    let p0 = CompensatedVec3::from_vec(before.linear_momentum_world);
+    let p1 = CompensatedVec3::from_vec(after.linear_momentum_world);
+    let x0 = CompensatedVec3::from_vec(before.pose.position_world);
+    let x1 = CompensatedVec3::from_vec(after.pose.position_world);
+    let linear_impulse = CompensatedVec3::from_vec(force_world)
+        .add(CompensatedVec3::from_vec(gravity.acceleration_world()).scale(properties.mass))
+        .scale(step.duration_seconds);
+    let linear_residual = p1.sub(p0).sub(linear_impulse);
+    let mean_position = x0.scale(0.5).add(x1.scale(0.5));
+    let mean_linear = p0.scale(0.5).add(p1.scale(0.5));
+    let spin_before =
+        CompensatedVec3::from_vec(before.angular_momentum_body).rotated(before.pose.orientation);
+    let spin_after =
+        CompensatedVec3::from_vec(after.angular_momentum_body).rotated(after.pose.orientation);
+    let angular_impulse = central_angular_impulse.add(mean_position.cross(linear_impulse));
+    // Delta(x cross p) = mean(x) cross delta(p) + delta(x) cross mean(p).
+    // Subtract the independently prescribed impulse before its orbital moment
+    // is formed. Otherwise a distant datum can erase a finite spin defect.
+    // The actual displacement term also exposes lost native pose increments.
+    let angular_residual = spin_after
+        .sub(spin_before)
+        .sub(central_angular_impulse)
+        .add(mean_position.cross(linear_residual))
+        .add(x1.sub(x0).cross(mean_linear));
+    Ok(SpatialImpulseBalance {
+        linear_impulse: linear_impulse.rounded("spatial_step.linear_impulse")?,
+        angular_impulse: angular_impulse.rounded("spatial_step.angular_impulse")?,
+        linear_residual: linear_residual.rounded("spatial_step.linear_residual")?,
+        angular_residual: angular_residual.rounded("spatial_step.angular_residual")?,
+    })
 }
 
 fn components(value: Vec3) -> [f64; 3] {

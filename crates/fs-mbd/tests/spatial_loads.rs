@@ -48,6 +48,170 @@ fn prepare(held: Wrench, world_torque: Vec3, points: &[WorldPointForce]) -> Prep
     PreparedSpatialLoads::new(held, world_torque, points, || false).unwrap()
 }
 
+fn both_spatial_lanes(
+    engine: RigidBodyIntegrator,
+    initial: RigidBodyState,
+    body: MassProperties,
+    loads: &PreparedSpatialLoads,
+    duration: f64,
+) -> [fs_mbd::spatial_loads::SpatialStepReceipt; 2] {
+    use fs_mbd::spatial_loads::midpoint::SpatialMidpointConfig;
+    [
+        engine.step_spatial(initial, body, loads, duration).unwrap(),
+        engine
+            .step_spatial_midpoint(
+                initial,
+                body,
+                loads,
+                duration,
+                SpatialMidpointConfig {
+                    maximum_iterations: 12,
+                    maximum_backtracks: 8,
+                    angular_momentum_tolerance_nms: 1e-14,
+                    relative_tolerance: 1e-13,
+                    maximum_cayley_increment: 2.0,
+                },
+                || false,
+            )
+            .unwrap()
+            .motion,
+    ]
+}
+
+#[test]
+fn physical_gravity_resultant_survives_spatial_source_accounting() {
+    // Exact integer identity: (n+1)(n-1) - n^2 = -1. The native
+    // integrators retain this force; its independent source receipt must too.
+    let n = (1_u64 << 27) as f64;
+    let body = MassProperties::new(n + 1.0, Vec3::ZERO, Vec3::new(2.0, 3.0, 4.0)).unwrap();
+    let initial = RigidBodyState::new(Pose::identity(), Vec3::ZERO, Vec3::ZERO).unwrap();
+    for scale in [2.0_f64.powi(-20), 1.0, 2.0_f64.powi(20)] {
+        for axis in [
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        ] {
+            let engine =
+                RigidBodyIntegrator::new(Gravity::new(axis.scale((n - 1.0) * scale)).unwrap());
+            let loads = prepare(
+                Wrench {
+                    force_world: axis.scale(-n * n * scale),
+                    torque_body: Vec3::ZERO,
+                },
+                Vec3::ZERO,
+                &[],
+            );
+            for receipt in both_spatial_lanes(engine, initial, body, &loads, 2.0) {
+                let expected = axis.scale(-2.0 * scale);
+                assert_eq!(receipt.step.state_after.linear_momentum_world(), expected);
+                assert_eq!(receipt.linear_impulse_world, expected);
+                assert_eq!(receipt.linear_momentum_residual_world, Vec3::ZERO);
+            }
+        }
+    }
+}
+
+#[test]
+fn common_orbital_momentum_does_not_hide_resolved_spin_impulse() {
+    let large = (1_u64 << 55) as f64;
+    let body = MassProperties::new(1.0, Vec3::ZERO, Vec3::new(2.0, 2.0, 2.0)).unwrap();
+    let initial = RigidBodyState::new(
+        Pose::new(Vec3::new(large, 0.0, 0.0), UnitQuaternion::IDENTITY).unwrap(),
+        Vec3::new(0.0, 1.0, 0.0),
+        Vec3::ZERO,
+    )
+    .unwrap();
+    let impulse = Vec3::new(0.0, 0.0, 1.0);
+    let loads = prepare(Wrench::ZERO, impulse, &[]);
+    for receipt in both_spatial_lanes(integrator(), initial, body, &loads, 1.0) {
+        let spin_after = receipt.step.state_after.angular_momentum_body();
+        vector(spin_after, impulse, 1e-14);
+        // The public absolute diagnostics legitimately round to the same value.
+        assert_eq!(
+            receipt.step.diagnostics_before.angular_momentum_world,
+            receipt.step.diagnostics_after.angular_momentum_world,
+        );
+        assert_eq!(receipt.angular_impulse_world, impulse);
+        assert_eq!(
+            receipt.angular_momentum_residual_world,
+            spin_after.sub(impulse)
+        );
+    }
+}
+
+#[test]
+fn swallowed_original_momenta_remain_visible_in_spatial_residuals() {
+    let large = (1_u64 << 55) as f64;
+    let body = MassProperties::new(large, Vec3::ZERO, Vec3::new(large, large, large)).unwrap();
+    let initial = RigidBodyState::new(
+        Pose::identity(),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 0.0, 1.0),
+    )
+    .unwrap();
+    let force = Vec3::new(large, 0.0, 0.0);
+    let torque = Vec3::new(0.0, 0.0, large);
+    let loads = prepare(
+        Wrench {
+            force_world: force,
+            torque_body: Vec3::ZERO,
+        },
+        torque,
+        &[],
+    );
+    for receipt in both_spatial_lanes(integrator(), initial, body, &loads, 1.0) {
+        assert_eq!(receipt.step.state_after.linear_momentum_world(), force);
+        let spin_after = receipt.step.state_after.angular_momentum_body();
+        vector(spin_after, torque, 1e-14);
+        assert_eq!(receipt.linear_impulse_world, force);
+        assert_eq!(receipt.angular_impulse_world, torque);
+        assert_eq!(
+            receipt.linear_momentum_residual_world,
+            Vec3::new(-1.0, 0.0, 0.0)
+        );
+        // All spin values here are integers. Subtracting the large source
+        // first retains both any native rotation error and the lost old unit.
+        let spin_defect = (spin_after.z as i128 - large as i128 - 1) as f64;
+        assert_eq!(
+            receipt.angular_momentum_residual_world,
+            Vec3::new(0.0, 0.0, spin_defect)
+        );
+    }
+}
+
+#[test]
+fn unresolved_translational_drift_remains_an_angular_momentum_defect() {
+    let large = (1_u64 << 55) as f64;
+    let body = MassProperties::new(1.0, Vec3::ZERO, Vec3::new(2.0, 2.0, 2.0)).unwrap();
+    let initial = RigidBodyState::new(
+        Pose::new(Vec3::new(large, 0.0, 0.0), UnitQuaternion::IDENTITY).unwrap(),
+        Vec3::new(1.0, 1.0, 0.0),
+        Vec3::ZERO,
+    )
+    .unwrap();
+    for receipt in both_spatial_lanes(
+        integrator(),
+        initial,
+        body,
+        &PreparedSpatialLoads::ZERO,
+        1.0,
+    ) {
+        // The x drift is lost in the actual native pose. Its missing orbital
+        // increment must be measured, never repaired or inferred from zero load.
+        assert_eq!(
+            receipt.step.state_after.pose().position_world(),
+            Vec3::new(large, 1.0, 0.0)
+        );
+        assert_eq!(receipt.linear_impulse_world, Vec3::ZERO);
+        assert_eq!(receipt.angular_impulse_world, Vec3::ZERO);
+        assert_eq!(receipt.linear_momentum_residual_world, Vec3::ZERO);
+        assert_eq!(
+            receipt.angular_momentum_residual_world,
+            Vec3::new(0.0, 0.0, -1.0)
+        );
+    }
+}
+
 fn large_residual_couple() -> PreparedSpatialLoads {
     // Exactly zero resultant, C_xy = (a + 1)(a - 1) - a^2 = -1,
     // and all other first moments zero. Rounding either product first loses

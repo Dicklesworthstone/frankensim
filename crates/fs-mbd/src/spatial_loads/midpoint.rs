@@ -9,7 +9,7 @@
 use super::{
     CompensatedVec3, DynamicsError, MassProperties, PreparedSpatialLoads, RigidBodyIntegrator,
     RigidBodyState, SpatialStepReceipt, Vec3, Wrench, basis_world, components, finite_derived,
-    finite_vec,
+    finite_vec, impulse_balance,
 };
 use crate::solve_rotation_3;
 
@@ -202,52 +202,19 @@ impl RigidBodyIntegrator {
         let omega_mid = properties.angular_velocity_body_checked(actual_midpoint)?;
         let cayley_increment_body = omega_mid.scale(duration_seconds);
         let cayley_world = rotation.rotate_body_to_world(cayley_increment_body);
-        let axes0 = basis_world(rotation);
-        let axes1 = basis_world(after.pose.orientation);
-        let mut moment_world = CompensatedVec3::from_vec(loads.torque_world)
-            .add(
-                CompensatedVec3::from_vec(rotation.rotate_body_to_world(loads.torque_body))
-                    .scale(0.5),
-            )
-            .add(
-                CompensatedVec3::from_vec(
-                    after
-                        .pose
-                        .orientation
-                        .rotate_body_to_world(loads.torque_body),
-                )
-                .scale(0.5),
-            );
-        for j in 0..3 {
-            moment_world = moment_world.add(
-                CompensatedVec3::from_vec(axes0[j])
-                    .add(CompensatedVec3::from_vec(axes1[j]))
-                    .scale(0.5)
-                    .cross(loads.point_force_moments_world[j]),
-            );
-        }
-        let weight = self.gravity.acceleration_world().scale(properties.mass);
-        let linear_impulse = loads.force_world.add(weight).scale(duration_seconds);
-        let position_mid = state
-            .pose
-            .position_world
+        let central_angular_impulse = loads
+            .moment_world(rotation)
             .scale(0.5)
-            .add(after.pose.position_world.scale(0.5));
-        let angular_impulse = moment_world
-            .scale(duration_seconds)
-            .add(CompensatedVec3::from_vec(
-                position_mid.cross(linear_impulse),
-            ))
-            .rounded("spatial_midpoint.angular_impulse")?;
-        let linear_residual = after
-            .linear_momentum_world
-            .sub(state.linear_momentum_world)
-            .sub(linear_impulse);
-        let angular_residual = step
-            .diagnostics_after
-            .angular_momentum_world
-            .sub(step.diagnostics_before.angular_momentum_world)
-            .sub(angular_impulse);
+            .add(loads.moment_world(after.pose.orientation).scale(0.5))
+            .scale(duration_seconds);
+        let balance = impulse_balance(
+            &step,
+            properties,
+            self.gravity,
+            loads.force_world,
+            central_angular_impulse,
+        )?;
+        let weight = self.gravity.acceleration_world().scale(properties.mass);
         let force_work_j = loads.force_work(state.pose, after.pose)?;
         let couple_work_j = finite_derived(
             loads.torque_body.dot(cayley_increment_body) + loads.torque_world.dot(cayley_world),
@@ -266,22 +233,14 @@ impl RigidBodyIntegrator {
             energy_change - force_work_j - couple_work_j,
             "spatial_midpoint.work_energy_residual",
         )?;
-        for vector in [
-            linear_impulse,
-            angular_impulse,
-            linear_residual,
-            angular_residual,
-        ] {
-            finite_vec(vector, "spatial_midpoint.impulse_balance")?;
-        }
         poll(&mut cancelled)?;
         Ok(SpatialMidpointReceipt {
             motion: SpatialStepReceipt {
                 step,
-                linear_impulse_world: linear_impulse,
-                angular_impulse_world: angular_impulse,
-                linear_momentum_residual_world: linear_residual,
-                angular_momentum_residual_world: angular_residual,
+                linear_impulse_world: balance.linear_impulse,
+                angular_impulse_world: balance.angular_impulse,
+                linear_momentum_residual_world: balance.linear_residual,
+                angular_momentum_residual_world: balance.angular_residual,
                 force_work_j,
                 couple_work_j,
                 work_energy_residual_j,
