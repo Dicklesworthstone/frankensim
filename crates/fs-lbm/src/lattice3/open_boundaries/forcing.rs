@@ -260,6 +260,64 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ForcedOpenBoundaryGrid3<L, Q> {
         Ok(receipt)
     }
 
+    /// Advance new reservoir targets and an authored endpoint force together.
+    ///
+    /// The original boundary owner admits kinds, profiles and speed envelopes.
+    /// Collision uses the accepted opening force; donors, reconstructed targets
+    /// and final macroscopic values use their own endpoint force. Reservoir
+    /// transport and trapezoidal body impulse retain their separate accounts.
+    /// Refusal preserves accepted targets, populations, forces, wall exchange
+    /// and completed steps; publication adds no force-coordinate reframe.
+    pub fn advance_serial_with_open_boundaries(
+        &mut self,
+        cx: &Cx<'_>,
+        boundaries: BoundarySpec3,
+        collisions: Option<&[L::Collision]>,
+        mut forces_at_end: Vec<[f64; 3]>,
+        origin: [f64; 3],
+    ) -> Result<OpenBoundaryMomentumTransport3, GridError3<L::Error>> {
+        let mut poll = || cx.checkpoint().map_err(|_| GridError3::Cancelled);
+        let plan = self.inner.prepare_open_boundaries(boundaries, &mut poll)?;
+        let (receipt, step) = self.inner.stage_serial_with_forces(
+            plan,
+            collisions,
+            Some(&self.forces),
+            Some(&forces_at_end),
+            origin,
+            &mut poll,
+        )?;
+        self.publish_with_force_swap(step, &mut forces_at_end);
+        self.inner.plan = plan;
+        Ok(receipt)
+    }
+
+    /// Hold the accepted spatial force while updating reservoirs in the same
+    /// original collision/stream transaction. No force field is copied and no
+    /// source epoch advances independently of its accepted populations.
+    pub fn step_serial_with_open_boundaries(
+        &mut self,
+        cx: &Cx<'_>,
+        boundaries: BoundarySpec3,
+        collisions: Option<&[L::Collision]>,
+        origin: [f64; 3],
+    ) -> Result<OpenBoundaryMomentumTransport3, GridError3<L::Error>> {
+        let mut poll = || cx.checkpoint().map_err(|_| GridError3::Cancelled);
+        let plan = self.inner.prepare_open_boundaries(boundaries, &mut poll)?;
+        let (receipt, step) = self.inner.stage_serial_with_forces(
+            plan,
+            collisions,
+            Some(&self.forces),
+            Some(&self.forces),
+            origin,
+            &mut poll,
+        )?;
+        core::mem::swap(&mut self.inner.grid.f, &mut self.inner.grid.next);
+        self.inner.grid.completed_steps = step;
+        self.inner.plan = plan;
+        self.inner.publish_wall_exchange();
+        Ok(receipt)
+    }
+
     /// Hold the accepted spatial force for one original native interval.
     pub fn step_serial(
         &mut self,

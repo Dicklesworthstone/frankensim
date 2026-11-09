@@ -224,6 +224,7 @@ pub mod lattice3 {
     use fs_exec::{CancelGate, Cx, KernelRunner};
     use fs_lbm::d3q19::OpenBoundaryMomentumTransport3;
     use fs_lbm::lattice3::open_boundaries::OpenBoundaryGrid3;
+    use fs_lbm::lattice3::open_boundaries::forcing::ForcedOpenBoundaryGrid3;
     use fs_lbm::lattice3::{EquilibriumLattice3, GridError3};
     use fs_lbm::material::MaterialScaling;
     use fs_material::fluid_transport::FluidTransport;
@@ -291,7 +292,7 @@ pub mod lattice3 {
             time_s,
             scaling,
             &mut || gate_checkpoint(gate),
-            |_| false,
+            |face| grid.velocity_profile(face).is_some(),
             |face| grid.pressure_profile(face).is_some(),
         )
         .map_err(Error::Scenario)?;
@@ -345,7 +346,7 @@ pub mod lattice3 {
             time_s,
             scaling,
             &mut checkpoint,
-            |_| false,
+            |face| grid.velocity_profile(face).is_some(),
             |face| grid.pressure_profile(face).is_some(),
         )
         .map_err(Error::Scenario)?;
@@ -387,12 +388,118 @@ pub mod lattice3 {
             time_s,
             scaling,
             &mut checkpoint,
-            |_| false,
+            |face| grid.velocity_profile(face).is_some(),
             |face| grid.pressure_profile(face).is_some(),
         )
         .map_err(Error::Scenario)?;
         let transport = grid
             .step_pooled_with_open_boundaries(pool, gate, prepared.targets, collisions, origin)
+            .map_err(Error::Boundary)?;
+        Ok(BoundaryStep3 {
+            samples: prepared.samples,
+            transport,
+        })
+    }
+
+    fn prepare_forced_step<L, F, const Q: usize>(
+        grid: &ForcedOpenBoundaryGrid3<L, Q>,
+        boundaries: [Option<ScenarioBoundary3<'_>>; 6],
+        frames: &FrameTree,
+        time_s: f64,
+        scaling: &MaterialScaling<'_, F>,
+        cx: &Cx<'_>,
+    ) -> Result<super::PreparedOpenFaces3, Error<L::Error>>
+    where
+        L: EquilibriumLattice3<Q>,
+        F: FluidTransport + ?Sized,
+    {
+        let mut checkpoint = || {
+            if cx.checkpoint().is_err() {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        };
+        admit_step_frequencies(boundaries, time_s, scaling.timestep_s(), &mut checkpoint)
+            .map_err(Error::Scenario)?;
+        prepare_open_faces3(
+            grid.boundaries(),
+            boundaries,
+            frames,
+            time_s,
+            scaling,
+            &mut checkpoint,
+            |face| grid.velocity_profile(face).is_some(),
+            |face| grid.pressure_profile(face).is_some(),
+        )
+        .map_err(Error::Scenario)
+    }
+
+    /// Advance typed reservoirs with the native owner's retained spatial force.
+    ///
+    /// The complete force field stays attached to its populations. Scenario
+    /// sampling, selected-profile refusal and pressure-source resolution use
+    /// the same owners as the uniform-force path. New targets, populations,
+    /// wall exchange and step count publish together after the original native
+    /// force-aware reconstruction and reservoir measurement succeed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_forced_serial<L, F, const Q: usize>(
+        grid: &mut ForcedOpenBoundaryGrid3<L, Q>,
+        boundaries: [Option<ScenarioBoundary3<'_>>; 6],
+        frames: &FrameTree,
+        time_s: f64,
+        scaling: &MaterialScaling<'_, F>,
+        cx: &Cx<'_>,
+        collisions: Option<&[L::Collision]>,
+        origin: [f64; 3],
+    ) -> Result<BoundaryStep3, Error<L::Error>>
+    where
+        L: EquilibriumLattice3<Q>,
+        F: FluidTransport + ?Sized,
+    {
+        let prepared = prepare_forced_step(grid, boundaries, frames, time_s, scaling, cx)?;
+        let transport = grid
+            .step_serial_with_open_boundaries(cx, prepared.targets, collisions, origin)
+            .map_err(Error::Boundary)?;
+        Ok(BoundaryStep3 {
+            samples: prepared.samples,
+            transport,
+        })
+    }
+
+    /// Advance typed reservoirs and an explicit native endpoint force field.
+    ///
+    /// Force densities use the original grid's lattice units and x-fast order;
+    /// conversion or material-dependent source evaluation remains with their
+    /// existing owner. Collision uses the opening force, while reconstructed
+    /// donors and targets use their own endpoint forces. The native trapezoidal
+    /// body impulse is separate from the returned reservoir transport. A late
+    /// refusal preserves every accepted source, control and fluid epoch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_forced_serial<L, F, const Q: usize>(
+        grid: &mut ForcedOpenBoundaryGrid3<L, Q>,
+        boundaries: [Option<ScenarioBoundary3<'_>>; 6],
+        frames: &FrameTree,
+        time_s: f64,
+        scaling: &MaterialScaling<'_, F>,
+        cx: &Cx<'_>,
+        collisions: Option<&[L::Collision]>,
+        forces_at_end_lu: Vec<[f64; 3]>,
+        origin: [f64; 3],
+    ) -> Result<BoundaryStep3, Error<L::Error>>
+    where
+        L: EquilibriumLattice3<Q>,
+        F: FluidTransport + ?Sized,
+    {
+        let prepared = prepare_forced_step(grid, boundaries, frames, time_s, scaling, cx)?;
+        let transport = grid
+            .advance_serial_with_open_boundaries(
+                cx,
+                prepared.targets,
+                collisions,
+                forces_at_end_lu,
+                origin,
+            )
             .map_err(Error::Boundary)?;
         Ok(BoundaryStep3 {
             samples: prepared.samples,

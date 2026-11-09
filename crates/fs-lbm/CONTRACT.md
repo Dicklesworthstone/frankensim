@@ -3966,3 +3966,20 @@ tests filtered. Rust formatting and focused whitespace checks passed. The
 separate full material-source wrapper integration remains authored and
 unexecuted. This is focused original-source verification, not a full Cargo,
 DSR or asynchronous-runtime integration result.
+
+
+## Spatial force epochs and reservoir targets in one accepted step
+
+`ForcedOpenBoundaryGrid3::{step_serial_with_open_boundaries,
+advance_serial_with_open_boundaries}` prepares candidate reservoir targets
+through the original open-boundary owner and stages the original force-aware
+collision/stream/reconstruction. The held variant borrows the accepted force
+field; the changing-source variant uses the accepted opening force and supplied
+endpoint field at their original cells. Targets publish only after native
+transport/wall measurement and final cancellation admission, alongside
+populations, force history and step count. Refusal retains all accepted epochs.
+Reservoir transport and trapezoidal body impulse remain separate; no additional
+source reframe or physics kernel is introduced. Cross-crate regression
+specifications are in fs-couple's scenario_open_boundary target. This addition
+passed pinned Rust parsing and diff checks only; typechecking and runtime
+execution remain unverified.

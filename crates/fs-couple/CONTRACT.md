@@ -13369,3 +13369,24 @@ grouped-terminal drive. Source failures and exhausted/cancelled trials retain
 both input histories. This composition adds no moving-interface, field-dependent
 caloric or reversible electrical-storage law; independent time, field and
 contact-quadrature refinement remains required.
+
+
+## Scenario reservoirs with native spatial force histories
+
+`scenario_open_boundary::lattice3::{step_forced_serial, advance_forced_serial}`
+connects existing typed velocity and pressure sampling to `ForcedOpenBoundaryGrid3`.
+Held or explicitly supplied endpoint force densities retain the native lattice-unit
+and x-fast convention and remain inseparable from their populations. Both adapters
+reuse source/frame admission, material scaling, full-vector speed bounds and
+pressure-chirp resolution. Selected velocity or pressure profiles refuse even
+when the sampled uniform target equals the dormant fallback; unselected profiles
+remain active. The same velocity-profile ownership check now applies to generic
+velocity-only rebinds and mixed serial/pooled steps.
+
+The native step publishes reservoirs, populations, accepted force epoch, wall
+exchange and step count together. Three focused regression groups specify
+D3Q19/D3Q27 parity against original explicit native composition, independent
+half-force momentum/reservoir closure and SI boundary moments, late refusal/retry,
+and profile preservation. Pinned Rust parsing and focused diff checks pass;
+Cargo typechecking/runtime tests have not run. No new force model, integrator,
+thermal-work or physical-validation claim is introduced.

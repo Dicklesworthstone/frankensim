@@ -70,8 +70,9 @@ where
 ///
 /// One native rebind follows complete preparation. The native owner then checks
 /// boundary kinds and both grid/collision speed envelopes before publication.
-/// It has no velocity profiles; existing pressure profiles on unselected faces
-/// retain their native ownership. Invalid input or cancellation retains every
+/// Selected velocity profiles refuse even if the dormant uniform target would
+/// be unchanged; all unselected profiles retain their native ownership.
+/// Invalid input or cancellation retains every
 /// target, population, completed step and force.
 ///
 /// No equilibrium, collision, geometry or scale is inferred or replaced. The
@@ -97,7 +98,7 @@ where
         time_s,
         scaling,
         gate,
-        |_| false,
+        |face| grid.velocity_profile(face).is_some(),
     )
     .map_err(Error::Scenario)?;
     grid.rebind_open_boundaries(prepared.targets, gate)
