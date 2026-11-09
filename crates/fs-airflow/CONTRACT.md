@@ -6671,3 +6671,32 @@ Adaptive resolution additionally compares each branch's viscous heat, held-head 
 `pump::radial::RadialPumpHead` retains the exact original `Arc<PumpHeadCurve>` and `Arc<ResolvedLiquidState>`. It delegates actual pressure and optional drive-power admission to the original equipment evaluator, and supplies its exact density/gravity-scaled piecewise-linear tangent (right derivative at an interior knot, left at the last endpoint). Head/drive support is intersected without extrapolation; the original nonnegative pump quadrant and viscosity limits remain enforced. Native constant reference density must equal the original inlet density. This is neither an expansion model nor an inferred reverse quadrant, affinity scaling, efficiency or motor-heat model.
 
 Verification: the unchanged bounded original-source network recipe compiled and passed 72 tests, including independent nonlinear equipment/annular/caloric balances, signed recovering work, source identity, aggregate query refusal/retry, opposing quadratic drives at constant state, and original native substep exhaustion. Two older convergence fixtures now explicitly author sufficient native inventory allowance; their physical tolerances and oracles are unchanged. Pinned formatting checks passed for the changed modern modules and new adapter/test children, and focused diff checks passed. The numerical recipe uses actual production numerical sources with a context-only cancellation facade. The two original-material/pump adapter integration tests are authored and statically reviewed but outside that recipe; they and full Cargo/native runtime integration remain execution-unverified.
+
+
+## Adaptive prescribed-flow convection on original finite inventory
+
+`transient::nonlinear::adaptive` advances the original
+`advance_implicit_with_heat` transaction over a bounded physical window.
+Full-versus-two-half backward-Euler comparisons check every active cell's
+specific storage coordinate [J/kg] and original T(h) [K], including
+nonadvecting finite walls. Relative tolerances scale interval changes,
+preserving formation-datum independence; enthalpy remains visible on latent
+plateaus. Only original accepted half-step states, heat/source payloads and
+audits are retained, with no extrapolated state or replacement caloric law.
+
+The original pump/inlet schedule is sampled independently at each actual
+endpoint and its knots are exact comparison boundaries. Resolver callbacks
+receive the particular native interval's original start and candidate endpoint
+for duration-dependent films. Original source/numerical/physical refusals are
+terminal, including discarded coarse trials. Separate attempt, source-query
+and accepted-history limits bound work; the original thermal max_substeps also
+caps accepted steps. Compensated final per-cell storage is checked against
+accepted external heat, with a separate sum of absolute native energy defects.
+Thermal topology/boundary events remain explicit left-limit handoffs; fixed
+mass/geometry, spatial refinement and forcing-resolution assumptions remain.
+
+Seven focused native regression definitions cover scheduled analytic residence
+response, latent cancellation, original half-step source equivalence,
+nonadvecting wall cooling, work/source/event refusal and cancellation. They
+were parsed with the pinned formatter but have not been compiled or executed
+in this environment. This is a local temporal estimate, not a global error bound.

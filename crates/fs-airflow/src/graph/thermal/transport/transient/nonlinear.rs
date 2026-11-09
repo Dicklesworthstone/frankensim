@@ -5,6 +5,9 @@
 //! equations; native calorics, reciprocal links and directed fluxes retain
 //! their owners. No second time integrator or replacement heat capacity enters.
 
+/// Error-controlled windows with original pump/inlet schedule transitions.
+pub mod adaptive;
+
 use std::cell::Cell;
 
 use fs_exec::Cx;
