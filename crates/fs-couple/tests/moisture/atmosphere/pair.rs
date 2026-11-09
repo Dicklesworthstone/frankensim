@@ -1,5 +1,6 @@
 //! G1/G3/G4: two finite chambers, original diffusion, and atomic refusal.
 //! All material and gas data are authored verification fixtures.
+#[path = "pair/adaptive.rs"]
 mod adaptive;
 
 use super::*;

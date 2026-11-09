@@ -1,4 +1,5 @@
 //! Different original acoustic owners share one conservative material snapshot.
+#[path = "assembly/heat.rs"]
 mod heat;
 
 use super::*;

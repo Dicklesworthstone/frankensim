@@ -262,7 +262,7 @@ fn hereditary_admission_combines_signed_elastic_viscous_and_memory_stress_before
 fn hereditary_tensile_stress_is_invariant_under_physical_width_partition() {
     with_cx(|cx, gate| {
         let eta = 30_000.0;
-        let mut previous = None;
+        let mut previous: Option<f64> = None;
         for cells in [1, 3, 9] {
             let mut bank = base(cx, gate, 7800.0)
                 .with_tensioned_fiber_ribbon(

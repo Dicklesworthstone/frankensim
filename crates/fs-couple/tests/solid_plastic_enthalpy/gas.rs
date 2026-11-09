@@ -1,4 +1,5 @@
 //! Finite gas changes actual cyclic creep; mechanical heat returns to that gas.
+#[path = "gas/dynamics.rs"]
 mod dynamics;
 
 use super::*;

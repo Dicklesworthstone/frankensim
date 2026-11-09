@@ -1,4 +1,5 @@
 //! Thermal finite-zone sources continue the original native modal/Maxwell owner.
+#[path = "maugis/batch.rs"]
 mod batch;
 
 use super::*;

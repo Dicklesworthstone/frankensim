@@ -284,7 +284,7 @@ fn physical_voltage_and_current_heating_follow_independent_coupled_ac_oracles() 
                 near(report.total_energy_residual_j, 0.0, 2e-8);
                 for source in &report.source.magnetic {
                     near(
-                        *source.material.query_point().get("T").unwrap(),
+                        source.material.state_coordinate("T").unwrap(),
                         expected[0],
                         2e-8,
                     );

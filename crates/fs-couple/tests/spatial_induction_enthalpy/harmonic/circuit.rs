@@ -356,12 +356,11 @@ fn passive_and_driven_rlc_feedback_match_independent_two_temperature_energy_bala
                         1e-12,
                     );
                     near(
-                        *resistor
+                        resistor
                             .material
                             .conductor
                             .material()
-                            .query_point()
-                            .get("T")
+                            .state_coordinate("T")
                             .unwrap(),
                         accepted_resistor_temperature,
                         1e-12,

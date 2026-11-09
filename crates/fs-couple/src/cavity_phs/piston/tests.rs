@@ -1,4 +1,7 @@
 //! Source-backed synthetic gases, actual public momentum coupling, no measured fit.
+// Explicit paths: tests/port_schema_adoption.rs also loads this file through
+// #[path], where a bare child would resolve beside this file, not under tests/.
+#[path = "tests/real_gas.rs"]
 pub(super) mod real_gas;
 
 use super::*;
@@ -390,6 +393,7 @@ fn invalid_work_bounds_source_failures_and_late_cancellation_roll_back() {
 }
 
 #[cfg(test)]
+#[path = "tests/adiabatic_solid_cavity_bridge"]
 mod adiabatic_solid_cavity_bridge {
     mod equilibrium;
     use super::gas;

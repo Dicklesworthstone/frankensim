@@ -44,8 +44,8 @@ fn moving_specimen(
     let left = offset - 4;
     let contacts = [[0, 1, 3], [0, 2, 3]]
         .map(|face| SpatialConductionContact {
-            first_vertices: face.map(|v| left + v),
-            second_vertices: face.map(|v| offset + v),
+            first_vertices: face.map(|v| (left + v) as usize),
+            second_vertices: face.map(|v| (offset + v) as usize),
             source: source.clone(),
         })
         .to_vec();

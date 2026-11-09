@@ -1,4 +1,5 @@
 //! Real material and circuit owners; synthetic coefficients, not measured fits.
+#[path = "material_circuit/harmonic.rs"]
 mod harmonic;
 
 use fs_couple::material_circuit::*;

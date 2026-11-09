@@ -8,6 +8,7 @@ use fs_material::relaxation::{
 };
 use fs_thermochem::SpeciesId;
 
+#[path = "viscous_heat/playback.rs"]
 mod playback;
 
 fn budgets() -> FiniteGasDgHeatBudget {

@@ -3,6 +3,7 @@ use super::*;
 use fs_em::spatial::conduction::motion::SpatialConductionMotion;
 use std::cell::Cell;
 
+#[path = "motion/terminals.rs"]
 mod terminals;
 
 fn model(

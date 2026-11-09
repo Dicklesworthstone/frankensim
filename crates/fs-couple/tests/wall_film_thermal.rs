@@ -9,6 +9,7 @@ use fs_thermal::evaporation::{EvaporationError, EvaporationLaw, EvaporationPrope
 mod fixture;
 use fixture::*;
 
+#[path = "wall_film_thermal/window.rs"]
 mod window;
 #[path = "wall_film_thermal/implicit.rs"]
 mod implicit;

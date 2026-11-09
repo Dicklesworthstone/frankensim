@@ -1,5 +1,6 @@
 //! Accepted-temperature optical feedback and transactional source support.
 
+#[path = "thermo_optical/spectral.rs"]
 mod spectral;
 
 use super::*;

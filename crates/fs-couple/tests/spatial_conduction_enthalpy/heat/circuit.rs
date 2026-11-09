@@ -119,7 +119,7 @@ fn with_circuit_heat<R>(
                     material_id: cell.material_id,
                     curve: cell.curve,
                     point: cell.point,
-                    conductivity: cell.conductivity,
+                    conductivity: cell.conductivity.clone(),
                 })
                 .collect::<Vec<_>>();
             cells.push(MaterialCell {

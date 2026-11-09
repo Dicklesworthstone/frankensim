@@ -95,7 +95,7 @@ fn strength(index: usize, time: f64) -> Result<TransientQuadrupoleSource, Aeroac
     })
 }
 type Reader = fn(usize, f64) -> Result<TransientQuadrupoleSource, AeroacError>;
-fn build<'a, M: QuadrupoleMotion + 'a>(
+fn build<'a, M: QuadrupoleMotion<Observer = MovingCompactObserver> + 'a>(
     sources: &'a [MovingQuadrupoleSourceWindow<M>],
     cfg: MovingPressureConfig,
 ) -> MovingQuadrupoleRenderer<'a, Reader, M> {

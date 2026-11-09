@@ -11,6 +11,7 @@ use fs_solid::reduce::OrificeSpec;
 use fs_solid::reduce::thermal::ThermalPressureLoadedValve;
 use std::convert::Infallible;
 
+#[path = "motion/radiation.rs"]
 mod radiation;
 
 const RATE: u32 = 100;

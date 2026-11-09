@@ -85,7 +85,7 @@ fn numbers<const N: usize>(args: &[String], index: usize) -> Result<[f64; N]> {
     let fields = args
         .get(index + 1..index + 1 + N)
         .ok_or_else(|| format!("{} requires {N} numeric values", args[index]))?;
-    let mut values = [0.0; N];
+    let mut values = [0.0_f64; N];
     for (value, text) in values.iter_mut().zip(fields) {
         *value = text.parse()?;
         if !value.is_finite() {

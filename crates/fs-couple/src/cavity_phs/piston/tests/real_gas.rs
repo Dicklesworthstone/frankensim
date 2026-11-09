@@ -10,7 +10,9 @@ use fs_material::thermochemical_gas::nonideal::{
 };
 use fs_thermochem::eos::peng_robinson::PengRobinsonPhaseV1;
 
-pub(in crate::cavity_phs::piston) fn real_parcel(t: f64, p: f64) -> IsochoricRealGasParcel {
+// super::super is cavity_phs::piston in the lib; tests/port_schema_adoption.rs also loads
+// this file through #[path], where crate::cavity_phs::piston is not an ancestor.
+pub(in super::super) fn real_parcel(t: f64, p: f64) -> IsochoricRealGasParcel {
     let model = ThermochemicalPengRobinsonModel::new(
         gas(0.75, 0.001).model().clone(),
         vec![
@@ -44,7 +46,7 @@ pub(in crate::cavity_phs::piston) fn real_parcel(t: f64, p: f64) -> IsochoricRea
     IsochoricRealGasParcel::new(model, point, 0.001, PengRobinsonPhaseV1::Vapor).unwrap()
 }
 
-pub(in crate::cavity_phs::piston) fn real_controls() -> PistonSolve {
+pub(in super::super) fn real_controls() -> PistonSolve {
     PistonSolve {
         volume_bracket_m3: [0.00095, 0.00105],
         gas: GasEnergySolve {

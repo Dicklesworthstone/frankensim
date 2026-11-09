@@ -96,6 +96,9 @@ impl DepositionObserver for Times {
         self.0.clear();
         Ok(())
     }
+    fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
+        Ok(())
+    }
     fn step(
         &mut self, _: f64, dt: f64, _: &BTreeMap<CellId, f64>,
         _: &DepositionSimulation<'_>,

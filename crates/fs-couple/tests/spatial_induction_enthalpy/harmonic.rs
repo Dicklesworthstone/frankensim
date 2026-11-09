@@ -492,7 +492,7 @@ fn settled_ac_heating_refreshes_conductivity_and_complete_heat_across_steps() {
                         .iter()
                         .map(|s| {
                             near(
-                                *s.material.query_point().get("T").unwrap(),
+                                s.material.state_coordinate("T").unwrap(),
                                 expected[0],
                                 1e-8,
                             );

@@ -17,7 +17,9 @@ use fs_material::state_point::{SpectralComplexIndexKnot, SpectralComplexIndexSta
 const C0: f64 = 299_792_458.0;
 const WAVELENGTH_M: f64 = 550e-9;
 
+#[path = "crystal/slab.rs"]
 mod slab;
+#[path = "crystal/stack.rs"]
 mod stack;
 
 fn crystal_card(name: &str, loss: [f64; 2]) -> MaterialCard {

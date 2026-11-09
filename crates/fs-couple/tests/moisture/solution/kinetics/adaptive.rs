@@ -2,7 +2,7 @@
 use super::*;
 use fs_couple::moisture::{
     adaptive::{KineticPhaseAccuracy, MoistureAdvanceError, MoistureTimeControls},
-    atmosphere::{CartesianMoistureParticipant, MoistureParticipant},
+    atmosphere::{CartesianMoistureParticipant, DryBasisSorption, MoistureParticipant},
 };
 
 const VOLUME: f64 = 1e-4;

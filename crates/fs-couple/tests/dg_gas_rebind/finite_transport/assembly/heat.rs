@@ -1,4 +1,5 @@
 //! Resolved main-passage shear heats the same inventory during species transport.
+#[path = "heat/aperture.rs"]
 mod aperture;
 
 use super::*;

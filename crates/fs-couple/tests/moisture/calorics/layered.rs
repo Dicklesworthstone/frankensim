@@ -244,7 +244,7 @@ fn check_whole(energy: &LayeredSorptionEnergyStep, expected_heat: f64, gas_chang
             .layers
             .iter()
             .map(|layer| layer.source_segments)
-            .sum()
+            .sum::<usize>()
     );
 }
 

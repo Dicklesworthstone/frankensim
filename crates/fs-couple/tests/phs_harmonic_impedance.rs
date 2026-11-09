@@ -301,7 +301,7 @@ fn g3_full_mutual_nonreciprocal_load_preserves_dc_work_and_unit_changes() {
         };
         let z0 = matrix(0.0);
         let z = matrix(omega);
-        let mut recorded = None;
+        let mut recorded: Option<(Vec<C64>, f64)> = None;
         for transformer in [1.0, 1e-3, 1e3] {
             let system = PortHamiltonian::new(
                 2,

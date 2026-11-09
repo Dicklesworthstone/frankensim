@@ -203,7 +203,7 @@ fn g3_fields_pcm_decimation_and_streaming_preserve_one_partition_invariant_clock
     assert_eq!(summary.samples, 128);
     assert_eq!(
         sink.into_inner(),
-        encode_pcm16_wav(&expected, 8_000, 1.0).unwrap()
+        encode_pcm16_wav(&expected, 8_000, 1.0).unwrap().0
     );
 
     let mut decimated =

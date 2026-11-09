@@ -295,15 +295,15 @@ fn g0_original_rod_publishes_complete_reciprocal_quadratic_energy_and_tangent() 
     for d in [-0.2, 0.0, 0.2] {
         let rod = rod(d, 3.0);
         let system = rod.port_hamiltonian().unwrap();
-        let part = system.storage.quadratic_part().unwrap();
+        let part = system.storage().quadratic_part().unwrap();
         assert!(part.exact);
         assert_eq!(
-            system.storage.exact_quadratic_matrix().unwrap(),
+            system.storage().exact_quadratic_matrix().unwrap(),
             part.matrix.as_slice()
         );
         let state = [0.001, -0.002, 0.003];
         let mut effort = [0.0; 3];
-        system.storage.gradient(&state, &mut effort);
+        system.storage().gradient(&state, &mut effort);
         for i in 0..3 {
             let expected: f64 = (0..3).map(|j| part.matrix[3 * i + j] * state[j]).sum();
             near(effort[i], expected, 1e-14);
@@ -312,10 +312,10 @@ fn g0_original_rod_publishes_complete_reciprocal_quadratic_energy_and_tangent() 
             }
         }
         let energy: f64 = state.iter().zip(effort).map(|(x, e)| 0.5 * x * e).sum();
-        near(system.storage.hamiltonian(&state), energy, 1e-16);
+        near(system.storage().hamiltonian(&state), energy, 1e-16);
         let direction = [-0.3, 0.2, 0.5];
         let mut action = [0.0; 3];
-        let tangent = system.storage.continuous_tangent().unwrap();
+        let tangent = system.storage().continuous_tangent().unwrap();
         assert!(tangent.apply(&state, &direction, &mut action));
         for (i, actual) in action.iter().enumerate() {
             let expected: f64 = (0..3)

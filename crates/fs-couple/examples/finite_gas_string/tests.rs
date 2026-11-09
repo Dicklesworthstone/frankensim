@@ -506,6 +506,9 @@ fn bonded_cards_drive_layer_heat_parallel_current_pitch_and_continuing_pressure(
     });
 }
 
+#[path = "tests/flow.rs"]
 mod flow;
+#[path = "tests/electrical_feedback.rs"]
 mod electrical_feedback;
+#[path = "tests/attached_sources.rs"]
 mod attached_sources;

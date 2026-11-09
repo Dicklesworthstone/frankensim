@@ -874,10 +874,14 @@ fn original_johnson_cook_fit_tracks_heated_native_endpoint_without_repartitionin
         assert!((actual_utilization - utilization(alpha, dt, 300.0, 0.08)).abs() > 1e-3);
         // Neither an identical fit on another card nor a different fixed
         // environment can authorize the same mechanical/thermal proposal.
-        for mismatched in [&foreign, &wrong_context] {
-            let bad = DuctileHistory::virgin(DuctileLawField::Uniform(mismatched), 1, 1).unwrap();
+        // Built before the loop: `advance` takes one inferred history borrow,
+        // which must outlive every call, so a history dropped per iteration fails.
+        let mismatched_histories = [&foreign, &wrong_context].map(|mismatched| {
+            DuctileHistory::virgin(DuctileLawField::Uniform(mismatched), 1, 1).unwrap()
+        });
+        for bad in &mismatched_histories {
             assert!(matches!(
-                advance(&bad),
+                advance(bad),
                 Err(DuctileAdvanceError::Ductility(DuctileSolidError::Input(_)))
             ));
             assert_eq!(bad.points()[0].utilization(), 0.0);

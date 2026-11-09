@@ -422,7 +422,7 @@ fn accumulated_sensible_and_receiver_heat_obey_the_original_single_interface_cap
         )
         .unwrap();
         let native = &baseline.report().native;
-        assert!(native.heat.as_ref().unwrap().gas_temperature_k[1] > 300.0);
+        assert!(native.heat.is_some() && native.phase.gas_temperature_k[0] > 300.0);
         assert!(baseline.report().momentum.gas_mixing_heat_j > 0.0);
         let final_gas = baseline.gas().parcel().state().state().temperature;
         let original_increment = final_gas - gas.parcel().state().state().temperature;

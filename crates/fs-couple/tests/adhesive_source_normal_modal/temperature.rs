@@ -1,5 +1,7 @@
 //! Original-source changes preserve the complete native mechanical history.
+#[path = "temperature/dmt.rs"]
 mod dmt;
+#[path = "temperature/maugis.rs"]
 mod maugis;
 
 use super::*;

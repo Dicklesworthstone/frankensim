@@ -1,5 +1,7 @@
 //! Actual source-backed DMT area/load changes in the native mechanical owner.
+#[path = "source/maugis_phase.rs"]
 mod maugis_phase;
+#[path = "source/temperature.rs"]
 mod temperature;
 
 use super::*;

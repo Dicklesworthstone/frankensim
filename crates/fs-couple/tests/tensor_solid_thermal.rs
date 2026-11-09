@@ -1,4 +1,5 @@
 //! Synthetic Kelvin/Maxwell self-heating; no empirical material qualification.
+#[path = "tensor_solid_thermal/spatial.rs"]
 mod spatial;
 use std::collections::BTreeMap;
 use fs_blake3::ContentHash;
