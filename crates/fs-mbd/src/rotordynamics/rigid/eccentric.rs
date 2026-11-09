@@ -9,6 +9,12 @@ use crate::{
 use fs_ga::Se3;
 use fs_math::dd::Dd;
 
+mod damping;
+pub use damping::{
+    DampedEccentricRotor, DampedEccentricRotorLoads, DampedEccentricRotorStep,
+    EccentricBearingDampingStep, EccentricRotorDampingControl, EccentricRotorDampingError,
+};
+
 /// A finite-rotation rigid rotor whose actual centre of mass may miss its shaft.
 ///
 /// Body +z is the shaft axis. The supplied spatial inertia is about the actual

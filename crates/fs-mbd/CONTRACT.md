@@ -1427,6 +1427,66 @@ startup, stall heat and regeneration, reciprocal eccentric-orbit refinement,
 zero-current native equivalence, final cancellation and unresolved body impulse
 refusal.
 
+`DampedEccentricRotor` extends the same actual eccentric body with stationary
+passive radial bearing damping. The original K matrices stay with the elastic
+owner; each original C matrix passes the existing `PassiveBushingMatrix`
+symmetry/positive-semidefinite admission and is retained without projection,
+damping floors or diagonalization. Symmetric anisotropic cross terms, multiple
+stations and finite body rotation retain their reciprocal COM moments. The
+full source inertia remains the original native body tensor, including its
+off-diagonal components; no housing body or additional rotor mass is introduced.
+
+At a fixed actual pose, the source rates are
+`v = [v_COM_world, omega_body]`, with `M = diag(m I3, I_body)`.
+Each stationary radial axis has the conjugate material-point velocity row
+`J = [e_world, arm_body cross R^-1 e_world]`. All bearings are assembled
+simultaneously as `D = sum J^T C J`; the original full-mass `RotorMidpoint`
+owner solves `(M + h D/2) delta_v = -h D v`. One original native momentum
+impulse applies the combined force and central moment. This is a source at
+fixed pose; native free rotation owns gyroscopic transport. The source's
+auxiliary displacement is a work quadrature and never a second physical pose.
+
+Each accepted source checks actual native endpoint rates and momentum transfer
+against that original constitutive law with explicit velocity/impulse budgets.
+Per-bearing heat is independently `h u_mid^T C u_mid` at the actual returned
+body midpoint rates, evaluated with compensated original-coefficient products.
+Both actual kinetic change plus heat and original impulse work plus heat must
+pass an explicit energy allowance. Heat is not obtained by relabeling kinetic
+loss or a numerical residual. Nonfinite or unresolved negative quadratic work
+refuses; no clipping turns an unverified response into passive dissipation.
+
+The source enforces a conservative original-inertia decay-rate trace bound
+`trace(M^-1 D)` with a numerical roundoff margin. The caller's maximum
+source-duration times that bound must lie in `(0,2]`. Implicit midpoint is not
+L-stable: unresolved stiff modes would otherwise change sign while apparently
+losing energy. This gate prevents that modal reversal and requests refinement;
+it is neither an interval spectral certificate nor a full trajectory accuracy
+estimate. Null damping directions remain free, and zero damping or duration
+skips the source solve.
+
+A complete step composes a damping half source, the original elastic
+configuration-force Verlet trajectory, then a damping half source at its
+actual endpoint pose. No velocity force is passed to configuration-only Verlet.
+For smooth fixed coefficients and resolved elastic/free rotation this symmetric
+composition is second order. The final original-body balance is
+`delta(K + gravity potential + bearing potential) + bearing_heat - shaft_work`.
+Physical bearing heat, external shaft work and signed numerical mechanical
+error remain separate, with a whole-step energy gate before publication.
+Instantaneous load and native point-acceleration queries also include damping
+and its reciprocal shaft torque. Refusal/cancellation returns no partial body
+candidate, and the public fixed-pose source can be composed by a coupled owner.
+
+This owner admits stationary bilateral supports and a held finite body-axis
+shaft torque. Active/nonsymmetric bearings, moving supports, clearance, inferred
+speed/temperature coefficient laws, fluid-film states and a thermal destination
+require their original constitutive owners. The electrical eccentric drive
+remains a separate composition; calling only its elastic component does not
+silently add bearing damping. Five focused regressions in
+`tests/rigid_rotor_damping.rs` specify scalar reciprocal spin braking and analytic
+midpoint heat, full-tensor/multiple-bearing dense equations and virtual power,
+independent planar ODE and heat refinement, passive/modal refusal, zero-damping
+native equivalence and final cancellation with deterministic retry.
+
 Focused regressions use independent Jeffcott amplitude/phase, gyroscopic circular
 mode splitting, dense coordinate congruence, cross-coupled/active work and
 original force residuals. A manufactured nonsymmetric rotor has an exact
