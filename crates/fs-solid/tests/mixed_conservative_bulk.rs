@@ -578,6 +578,174 @@ fn g1_homogeneous_dilation_uses_original_secant_pressure_and_support_work() {
 }
 
 #[test]
+fn g1_driven_compression_lifts_the_interior_and_preserves_conservative_work() {
+    with_cx(false, |cx| {
+        let p1 = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+        ];
+        let tets = [
+            [0, 1, 3, 7],
+            [0, 1, 5, 7],
+            [0, 2, 3, 7],
+            [0, 2, 6, 7],
+            [0, 4, 5, 7],
+            [0, 4, 6, 7],
+        ];
+        let (nodes, elements) = promote_p1_to_p2(&p1, &tets, None, cx).unwrap();
+        let densities = vec![DENSITY; elements.len()];
+        let material = law(false, KAPPA);
+        let stretch = 0.55_f64;
+        let dt = 0.4;
+        let speed = (stretch - 1.0) / dt;
+        let zero = vec![[0.0; 3]; nodes.len()];
+        // This affine velocity realizes the endpoint in one centered step with
+        // zero acceleration. Constant material stress needs no interior force.
+        let velocity: Vec<_> = nodes.iter().map(|point| point.map(|x| speed * x)).collect();
+        let supports: Vec<_> = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, point)| point.iter().any(|&x| x == 0.0 || x == 1.0))
+            .flat_map(|(node, point)| {
+                (0..3).map(move |axis| (3 * node + axis, (stretch - 1.0) * point[axis]))
+            })
+            .collect();
+        assert_eq!(3 * nodes.len() - supports.len(), 3);
+        let mut solver_settings = settings();
+        solver_settings.maximum_assembly_bytes = 4 * 1024 * 1024;
+        let mut bulk = bulk_settings();
+        bulk.minimum_volume_ratio = 0.1;
+        for formulation in [
+            ConservativeFormulation::FullMaterial,
+            ConservativeFormulation::OriginalMaterial {
+                bulk,
+                maximum_relative_volume_residual: 1e-9,
+                maximum_point_volume_work_defect: 1e-12,
+            },
+        ] {
+            let mut def = definition(
+                &nodes,
+                &elements,
+                MixedLawField::Uniform(&material),
+                &densities,
+            );
+            def.formulation = formulation;
+            def.maximum_quadrature_points = 64 * elements.len();
+            def.maximum_mass_assembly_bytes = 2 * 1024 * 1024;
+            let solid = def.prepare(&zero, &velocity, cx).unwrap();
+            let before = state_bits(&solid);
+            // Holding the interior at its old position reproduces the folded
+            // boundary-only pose. A genuinely prescribed fold must still refuse.
+            let mut folded = supports.clone();
+            for d in 0..3 * nodes.len() {
+                if !supports.iter().any(|&(held, _)| held == d) {
+                    folded.push((d, 0.0));
+                }
+            }
+            assert!(
+                solid
+                    .advance(
+                        dt,
+                        &folded,
+                        &[],
+                        [0.0; 3],
+                        solver_settings,
+                        WORK_ALLOWANCE,
+                        cx,
+                    )
+                    .is_err()
+            );
+            assert_eq!(state_bits(&solid), before);
+            let step = solid
+                .advance(
+                    dt,
+                    &supports,
+                    &[],
+                    [0.0; 3],
+                    solver_settings,
+                    WORK_ALLOWANCE,
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(state_bits(&solid), before);
+            assert!(step.newton.as_ref().unwrap().converged);
+            for (point, (u, v)) in nodes.iter().zip(
+                step.solid
+                    .displacement_m()
+                    .iter()
+                    .zip(step.solid.velocity_mps()),
+            ) {
+                for axis in 0..3 {
+                    near(u[axis], (stretch - 1.0) * point[axis], 2e-9);
+                    near(v[axis], speed * point[axis], 2e-9);
+                }
+            }
+            for &(d, value) in &supports {
+                assert_eq!(step.solid.displacement_m()[d / 3][d % 3], value);
+                near(
+                    step.solid.velocity_mps()[d / 3][d % 3],
+                    2.0 * value / dt - velocity[d / 3][d % 3],
+                    2e-14,
+                );
+            }
+            let j = stretch.powi(3);
+            let storage = bulk_energy(false, KAPPA, j); // Unit cube volume.
+            let kinetic = 0.5 * DENSITY * speed * speed; // Integral |X|² dV = 1.
+            near(step.min_det_f, j, 2e-9);
+            near(step.solid.stored_energy_j(), storage, WORK_ALLOWANCE);
+            near(step.solid.kinetic_energy_j(), kinetic, WORK_ALLOWANCE);
+            near(
+                step.solid.total_energy_j(),
+                storage + kinetic,
+                WORK_ALLOWANCE,
+            );
+            near(step.energy.stored_change_j, storage, WORK_ALLOWANCE);
+            near(step.energy.support_work_j, storage, WORK_ALLOWANCE);
+            near(step.energy.dead_load_work_j, 0.0, 0.0);
+            near(step.energy.balance_error_j, 0.0, WORK_ALLOWANCE);
+            let (mut measured_kinetic, mut momentum, mut angular) = (0.0, [0.0; 3], [0.0; 3]);
+            for element in &elements {
+                let (energy, linear, spin) = independent_motion(
+                    &nodes,
+                    element,
+                    step.solid.displacement_m(),
+                    step.solid.velocity_mps(),
+                );
+                measured_kinetic += energy;
+                for axis in 0..3 {
+                    momentum[axis] += linear[axis];
+                    angular[axis] += spin[axis];
+                }
+            }
+            near(measured_kinetic, kinetic, WORK_ALLOWANCE);
+            for axis in 0..3 {
+                near(momentum[axis], 0.5 * DENSITY * speed, 2e-9);
+                near(angular[axis], 0.0, 2e-9);
+            }
+            if matches!(
+                formulation,
+                ConservativeFormulation::OriginalMaterial { .. }
+            ) {
+                let pressure = 0.5 * KAPPA * (j - 1.0);
+                for &value in step.solid.algorithmic_pressure_pa() {
+                    near(value, pressure, 2e-8);
+                }
+                for &volume in step.solid.bulk_volume_ratios() {
+                    near(volume, j, 2e-9);
+                }
+                near(step.energy.pressure_work_j, storage, WORK_ALLOWANCE);
+            }
+        }
+    });
+}
+
+#[test]
 fn g0_quadrature_materials_retain_distinct_bulk_compliance_and_storage() {
     with_cx(false, |cx| {
         let (nodes, elements) = mesh(cx);

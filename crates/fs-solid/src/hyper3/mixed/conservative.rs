@@ -10,6 +10,8 @@
 //! applies it unchanged; a symmetric sparse LDL factor is only a preconditioner.
 //! Its inertia is not advertised as a stability certificate for the true system.
 //! Reference geometry and signed consistent P2 mass are prepared once and shared.
+//! Prescribed motion is lifted through the same tangent and globalized jointly
+//! with the interior, without changing endpoint velocity or work accounting.
 //!
 //! This is a second-order conservative nonlinear time discretization, with
 //! explicit constitutive roundoff/work admission. It is not frequency matched:
@@ -1205,12 +1207,24 @@ impl<'a> ConservativeTetSolid<'a> {
                 ));
             }
             constrained[d] = true;
-            u[d / 3][d % 3] = value;
         }
         let free: Vec<_> = (0..ndofs)
             .filter(|&d| !constrained[d])
             .chain(ndofs..ndofs + np)
             .collect();
+        // Boundary-only injection can invert a valid compressed body before
+        // the interior has a chance to respond. Include moving supports in the
+        // same native Newton step whenever displacement unknowns remain.
+        let free_displacements = free.first().is_some_and(|&d| d < ndofs);
+        let mut moving = Vec::new();
+        for &(d, target) in prescribed_m {
+            if !free_displacements {
+                u[d / 3][d % 3] = target;
+            } else if u[d / 3][d % 3] != target {
+                moving.push((d, target));
+            }
+        }
+        moving.sort_unstable_by_key(|&(d, _)| d);
         if free.len() > self.definition.budget.maximum_free_dofs {
             return Err(invalid(
                 "conservative free displacement/pressure budget exceeded",
@@ -1252,6 +1266,7 @@ impl<'a> ConservativeTetSolid<'a> {
             let endpoint = Endpoint {
                 solid: self,
                 base_u: &u,
+                moving: &moving,
                 external_n: &external_n,
                 free: &free,
                 free_index: &free_index,
@@ -1264,7 +1279,7 @@ impl<'a> ConservativeTetSolid<'a> {
                 fatal_error: RefCell::new(None),
                 trial_error: RefCell::new(None),
             };
-            let initial = free
+            let mut initial: Vec<_> = free
                 .iter()
                 .map(|&d| {
                     if d < ndofs {
@@ -1274,6 +1289,11 @@ impl<'a> ConservativeTetSolid<'a> {
                     }
                 })
                 .collect();
+            initial.extend(
+                moving
+                    .iter()
+                    .map(|&(d, _)| u[d / 3][d % 3] / settings.length_scale_m),
+            );
             let mut newton =
                 NewtonKrylovState::new(&endpoint, initial, settings.newton).map_err(|error| {
                     endpoint
@@ -1300,6 +1320,11 @@ impl<'a> ConservativeTetSolid<'a> {
                     report: result.report,
                 }
                 .into());
+            }
+            // Enforce exact authored endpoint motion before the existing
+            // physical residual, volume, centered-velocity and work gates.
+            for (j, &(_, target)) in moving.iter().enumerate() {
+                newton.x[free.len() + j] = target / settings.length_scale_m;
             }
             // A solved initial residual does not establish an admissible mixed
             // factorization. Exact constraints require independent rows; finite
@@ -1481,11 +1506,51 @@ struct Linearization {
     x: Vec<f64>,
     matrix: Csr,
     preconditioner: LdltFactor,
+    coupling: Option<Csr>,
+}
+
+impl Linearization {
+    // Keep the true nonsymmetric free tangent. The support rows add identity;
+    // they are constraints, not extra equations in the symmetric factor.
+    fn apply(&self, direction: &[f64], output: &mut [f64]) {
+        let n = self.matrix.nrows();
+        self.matrix.spmv(&direction[..n], &mut output[..n]);
+        if let Some(coupling) = &self.coupling {
+            for (i, value) in output[..n].iter_mut().enumerate() {
+                let (cols, entries) = coupling.row(i);
+                for (&j, &entry) in cols.iter().zip(entries) {
+                    *value += entry * direction[n + j];
+                }
+            }
+        }
+        output[n..].copy_from_slice(&direction[n..]);
+    }
+
+    // This is the original symmetric approximation with exact support lifting,
+    // not an inverse or a stability certificate for the true Newton tangent.
+    fn solve(&self, residual: &[f64], output: &mut [f64]) {
+        let n = self.matrix.nrows();
+        if let Some(coupling) = &self.coupling {
+            let mut lifted = residual[..n].to_vec();
+            for (i, value) in lifted.iter_mut().enumerate() {
+                let (cols, entries) = coupling.row(i);
+                for (&j, &entry) in cols.iter().zip(entries) {
+                    *value -= entry * residual[n + j];
+                }
+            }
+            output[..n].copy_from_slice(&self.preconditioner.solve(&lifted));
+        } else {
+            output[..n].copy_from_slice(&self.preconditioner.solve(&residual[..n]));
+        }
+        output[n..].copy_from_slice(&residual[n..]);
+    }
 }
 
 struct Endpoint<'p, 'a, 'c, 'scope> {
     solid: &'p ConservativeTetSolid<'a>,
     base_u: &'p [[f64; 3]],
+    // Sorted global displacement DOFs with exact physical endpoint targets.
+    moving: &'p [(usize, f64)],
     external_n: &'p [f64],
     free: &'p [usize],
     free_index: &'p [Option<usize>],
@@ -1519,7 +1584,7 @@ impl Endpoint<'_, '_, '_, '_> {
     }
 
     fn physical_state(&self, x: &[f64]) -> Result<(Vec<[f64; 3]>, Vec<f64>), ConservativeTetError> {
-        if x.len() != self.free.len() || x.iter().any(|v| !v.is_finite()) {
+        if x.len() != self.dimension() || x.iter().any(|v| !v.is_finite()) {
             return Err(invalid("invalid native conservative Newton state"));
         }
         let mut u = self.base_u.to_vec();
@@ -1531,6 +1596,15 @@ impl Endpoint<'_, '_, '_, '_> {
             } else {
                 p[d - nu] = v * self.settings.stress_scale_pa;
             }
+        }
+        for (j, &(d, target)) in self.moving.iter().enumerate() {
+            let value = x[self.free.len() + j];
+            let scale = self.settings.length_scale_m;
+            u[d / 3][d % 3] = if value == target / scale {
+                target
+            } else {
+                value * scale
+            };
         }
         if u.iter().flatten().chain(&p).any(|v| !v.is_finite()) {
             return Err(invalid("unrepresentable physical conservative state"));
@@ -1556,6 +1630,8 @@ impl Endpoint<'_, '_, '_, '_> {
             .tangent
             .expect("requested tangent");
         let mut actual = Coo::new(self.free.len(), self.free.len());
+        let mut coupling =
+            (!self.moving.is_empty()).then(|| Coo::new(self.free.len(), self.moving.len()));
         for (row, &d) in self.free.iter().enumerate() {
             if row % 128 == 0 {
                 checkpoint(self.cx)?;
@@ -1566,6 +1642,12 @@ impl Endpoint<'_, '_, '_, '_> {
                     let scale =
                         self.variable_scale(d) * self.variable_scale(col) / self.work_scale_j;
                     actual.push(row, j, value * scale);
+                } else if let Some(coupling) = &mut coupling
+                    && let Ok(j) = self.moving.binary_search_by_key(&col, |&(d, _)| d)
+                {
+                    let scale =
+                        self.variable_scale(d) * self.variable_scale(col) / self.work_scale_j;
+                    coupling.push(row, j, value * scale);
                 }
             }
         }
@@ -1624,6 +1706,7 @@ impl Endpoint<'_, '_, '_, '_> {
             x: x.to_vec(),
             matrix,
             preconditioner,
+            coupling: coupling.map(|coo| coo.assemble()),
         });
         Ok(())
     }
@@ -1636,7 +1719,7 @@ impl Endpoint<'_, '_, '_, '_> {
 
 impl NonlinearProblem for Endpoint<'_, '_, '_, '_> {
     fn dimension(&self) -> usize {
-        self.free.len()
+        self.free.len() + self.moving.len()
     }
     fn residual(&self, x: &[f64], residual: &mut [f64]) {
         let value = self
@@ -1646,6 +1729,10 @@ impl NonlinearProblem for Endpoint<'_, '_, '_, '_> {
             Ok(state) => {
                 for (r, &d) in residual.iter_mut().zip(self.free) {
                     *r = self.scaled_residual(&state, d);
+                }
+                for (j, &(_, target)) in self.moving.iter().enumerate() {
+                    let index = self.free.len() + j;
+                    residual[index] = x[index] - target / self.settings.length_scale_m;
                 }
                 *self.trial_error.borrow_mut() = None;
             }
@@ -1662,8 +1749,7 @@ impl NonlinearProblem for Endpoint<'_, '_, '_, '_> {
                 .borrow()
                 .as_ref()
                 .expect("cached true tangent")
-                .matrix
-                .spmv(direction, output),
+                .apply(direction, output),
             Err(error) => self.refuse_callback(output, error),
         }
     }
@@ -1676,16 +1762,61 @@ impl NonlinearProblem for Endpoint<'_, '_, '_, '_> {
         output: &mut [f64],
     ) {
         match self.ensure_linearization(x) {
-            Ok(()) => output.copy_from_slice(
-                &self
-                    .linearization
-                    .borrow()
-                    .as_ref()
-                    .expect("cached symmetric preconditioner")
-                    .preconditioner
-                    .solve(residual),
-            ),
+            Ok(()) => self
+                .linearization
+                .borrow()
+                .as_ref()
+                .expect("cached symmetric preconditioner")
+                .solve(residual, output),
             Err(error) => self.refuse_callback(output, error),
+        }
+    }
+}
+
+#[cfg(test)]
+mod prescribed_motion_tests {
+    use super::*;
+
+    fn matrix(rows: [[f64; 3]; 3]) -> Csr {
+        let mut entries = Coo::new(3, 3);
+        for (i, row) in rows.iter().enumerate() {
+            for (j, &value) in row.iter().enumerate() {
+                entries.push(i, j, value);
+            }
+        }
+        entries.assemble()
+    }
+
+    #[test]
+    fn support_lifting_retains_the_true_nonsymmetric_tangent() {
+        let symmetric = matrix([[4.0, 1.0, 1.0], [1.0, 3.0, 2.0], [1.0, 2.0, -1.0]]);
+        let symbolic = SymbolicLdlt::analyze(&symmetric, DirectOrdering::Amd).unwrap();
+        let preconditioner = symbolic
+            .factor(&symmetric, &LdltOptions::default())
+            .unwrap();
+        let mut coupling = Coo::new(3, 2);
+        for (i, row) in [[2.0, -3.0], [4.0, 1.0], [5.0, -2.0]].iter().enumerate() {
+            for (j, &value) in row.iter().enumerate() {
+                coupling.push(i, j, value);
+            }
+        }
+        let linearization = Linearization {
+            x: Vec::new(),
+            matrix: matrix([[4.0, 2.0, 1.0], [0.0, 3.0, 2.0], [1.0, 2.0, -1.0]]),
+            preconditioner,
+            coupling: Some(coupling.assemble()),
+        };
+        let direction = [0.3, -0.2, 0.5, 0.7, -0.4];
+        let mut action = [f64::NAN; 5];
+        linearization.apply(&direction, &mut action);
+        for (actual, expected) in action.into_iter().zip([3.9, 2.8, 3.7, 0.7, -0.4]) {
+            assert!((actual - expected).abs() < 2e-14);
+        }
+        // Invert the lifted symmetric approximation, not the true Jacobian.
+        let mut recovered = [f64::NAN; 5];
+        linearization.solve(&[4.1, 3.1, 3.7, 0.7, -0.4], &mut recovered);
+        for (actual, expected) in recovered.into_iter().zip(direction) {
+            assert!((actual - expected).abs() < 2e-14);
         }
     }
 }
