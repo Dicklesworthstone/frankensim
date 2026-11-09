@@ -1,5 +1,5 @@
-//! Analytic tube constructors: constant-twist screws and the Wankel
-//! rotor pose.
+//! Analytic tube constructors: constant-twist screws, accelerated rigid
+//! paths, and the Wankel rotor pose.
 //!
 //! Blade placement and signs for the rotational and ideal (
 //! translational) bivectors are extracted from fs-ga at runtime by
@@ -21,6 +21,11 @@ use crate::tube::{CertifiedMotorTube, MotorTubeSegment};
 use fs_ga::{Motor, Pga};
 use fs_ivl::{Interval, TaylorModel1};
 use std::sync::OnceLock;
+
+mod accelerated;
+pub use accelerated::{
+    AcceleratedRigidParams, AcceleratedRigidTube, PointMotionEnclosure, accelerated_rigid_tube,
+};
 
 /// Blade index and sign for one coordinate axis of a bivector family.
 #[derive(Debug, Clone, Copy)]

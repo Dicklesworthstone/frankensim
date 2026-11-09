@@ -8,8 +8,8 @@
 //! (moving geometry with frozen-time snapshots and certified
 //! time-span field enclosures), [`SweptChart`] (certified implicit
 //! infimum bounds), fail-closed [`EnvelopeChart`] characteristic
-//! classification, analytic screw and Wankel-pose constructors, and
-//! two-sided clearance and closed-chamber volume receipts, plus
+//! classification, analytic screw, accelerated rigid, and Wankel-pose
+//! constructors, two-sided clearance and closed-chamber volume receipts, plus
 //! the [`LowerToMotorTube`] builder contract that lets higher layers
 //! lower their motions here without upward dependencies.
 //!
@@ -28,7 +28,10 @@ pub mod swept;
 pub mod tube;
 pub mod volume;
 
-pub use analytic::{ScrewParams, WankelParams, screw_tube, wankel_tube};
+pub use analytic::{
+    AcceleratedRigidParams, AcceleratedRigidTube, PointMotionEnclosure, ScrewParams, WankelParams,
+    accelerated_rigid_tube, screw_tube, wankel_tube,
+};
 pub use clearance::{
     ClearanceConfig, ClearanceDecision, ClearanceErrors, ClearanceLowerEvidence, ClearanceOracle,
     ClearanceRange, ClearanceRangeErrors, ClearanceSidedness, ClearanceWitnessEvidence,

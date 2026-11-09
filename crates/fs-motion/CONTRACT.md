@@ -101,6 +101,25 @@ lower their motions into tubes through [`LowerToMotorTube`].
   `wankel_tube` (Wankel rotor **pose**: eccentric-center orbit at crank
   rate plus rotor phasing at 1/3 rate; the epitrochoid housing curve is
   the derived apex locus, deliberately NOT constructed here).
+- `accelerated_rigid_tube` binds pose, component rate, and component
+  acceleration for prescribed fixed-axis angular acceleration and constant
+  reference-frame translational acceleration. With `tau = t - reference_time_s`,
+  its path is `base_pose * T(center) * T(v*tau + a*tau^2/2) *
+  R(axis, omega*tau + alpha*tau^2/2) * T(-center)`. Times are absolute seconds;
+  velocities are specified at the reference time. The axis and translation
+  vectors use the fixed frame before `base_pose`, not the rotating body frame.
+  Axis squared norm must differ from one by at most `64 * f64::EPSILON`;
+  the axis is never silently normalized. `AcceleratedRigidTube::point_motion_over`
+  encloses world position, velocity, and acceleration of a body-fixed point,
+  including tangential and centripetal acceleration. It differentiates the
+  homogeneous sandwich and its weight twice, so uniform motor scaling cancels
+  in all three results. All derivatives share the primal's rounded constant
+  multivectors and double-cover sign, and every time-dependent operation uses
+  the original Taylor-model remainder owner. The borrowed `motion()` and
+  `rate()` feed native event guards; `into_motion()` feeds native swept geometry.
+  This certifies the constructed path, not an approximation to a force-driven
+  trajectory: changing-axis angular acceleration, arbitrary torque integration,
+  deformable motion, and unprovided dynamic-model error remain outside its claim.
 - `LowerToMotorTube` — the builder trait higher layers implement to
   lower their motion descriptions (frame trees, MBD trajectories) into
   tubes without this crate importing their types.
