@@ -8564,3 +8564,22 @@ zero, test a fixed-transverse notch shifted from the prepared carrier, and check
 invalid power observations, missing brackets/edges and cancellation. The public
 EM tests remain unexecuted while the full dependency build is unavailable; the
 extraction and source/constraint/lifetime contracts were independently reviewed.
+
+## Direct sparse tetrahedral conduction electrodes
+
+`SpatialConduction::solve_terminals` identifies complete exterior face electrodes
+on the original scalar/tensor conductivity and finite-contact Hodge, then reuses
+the geometry-neutral grouped sparse checked-CG solve at the actual drive.
+Shared `ConductionTerminalControl` admits voltage, conserved total-current and
+mixed/floating controls; `ConductionTerminalLimits` bounds the extra sparse
+workspace. All bodies/electrodes need a common bulk/contact/electrode connection.
+Original difference-form reactions remove internal equipotential links before
+summation while retaining signed anisotropic/contact couplings. Native current,
+local bulk/contact heat and Hodge/source-work gates remain independent of the
+authored terminal-current/work checks. Absolute field observations retain the
+held bias; the terminal report keeps physical differences relative to terminal
+zero, including induced drops below the absolute display precision. This is
+stationary fixed-geometry DC; it does not add motion, induction or a nonlinear
+terminal matrix. Three native regression groups in
+`tests/spatial_conduction/direct_terminals.rs` cover analytic contact/floating
+networks, rotated tensor sources, gauge invariance, bounds and cancellation.

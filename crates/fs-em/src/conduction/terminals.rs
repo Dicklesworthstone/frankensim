@@ -55,13 +55,13 @@ fn invalid(reason: &'static str) -> ConductionError {
     ConductionError::Invalid(reason)
 }
 
-struct Controls {
-    voltages: Vec<Option<f64>>,
-    currents: Vec<Option<f64>>,
+pub(crate) struct Controls {
+    pub(crate) voltages: Vec<Option<f64>>,
+    pub(crate) currents: Vec<Option<f64>>,
 }
 
 impl ConductionTerminalControl<'_> {
-    fn prepare(
+    pub(crate) fn prepare(
         self,
         count: usize,
         tolerance_a: f64,

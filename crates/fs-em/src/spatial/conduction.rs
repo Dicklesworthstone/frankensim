@@ -13,6 +13,7 @@ mod contact;
 pub use contact::{SpatialConductionContact, SpatialConductionContactResponse};
 mod terminals;
 pub use terminals::SpatialResistance;
+mod direct;
 mod matrix;
 pub use matrix::{
     SpatialConductanceControls, SpatialConductanceMatrix, SpatialMixedConductance,
@@ -35,6 +36,7 @@ use fs_material::conductor::{
     ELECTRICAL_CONDUCTIVITY_DIMS, ResolvedConductorState,
     spatial::{SpatialConductivity, SpatialConductorMaterial},
 };
+use fs_math::dd::Dd;
 use fs_rep_mesh::TetComplex;
 use fs_solver::SolveReport;
 use fs_sparse::Csr;
@@ -417,13 +419,18 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
         for v in 0..n {
             check(cancelled)?;
             let (columns, values) = self.stiffness.row(v);
-            applied[v] = finite(
-                columns
-                    .iter()
-                    .zip(values)
-                    .map(|(&j, &value)| value * relative[j])
-                    .sum(),
-            )?;
+            // The native constant-potential nullspace is exact. Difference
+            // form removes internal equipotential links before summation, so
+            // large internal conductance cannot erase a small exterior link.
+            // Signed off-diagonals retain the complete anisotropic/contact law.
+            let mut reaction = Dd::from_f64(0.0);
+            for (&j, &value) in columns.iter().zip(values) {
+                if j != v {
+                    let difference = finite(relative[j] - relative[v])?;
+                    reaction = reaction + Dd::from_f64(value) * Dd::from_f64(difference);
+                }
+            }
+            applied[v] = finite(reaction.to_f64())?;
             if let Some(motion) = motion {
                 applied[v] = finite(applied[v] - motion.load_a[v])?;
             }

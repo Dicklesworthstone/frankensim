@@ -2,6 +2,8 @@
 //! Manufactured source laws test implementation, not empirical material data.
 #[path = "spatial_conduction/contacts.rs"]
 mod contacts;
+#[path = "spatial_conduction/direct_terminals.rs"]
+mod direct_terminals;
 #[path = "spatial_conduction/matrix.rs"]
 mod matrix;
 #[path = "spatial_conduction/motion.rs"]
