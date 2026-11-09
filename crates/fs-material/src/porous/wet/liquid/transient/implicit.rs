@@ -533,6 +533,8 @@ impl LiquidSaturationColumn {
         poll(&mut cancelled)?;
         Ok((
             LiquidSaturationCandidate {
+                original_saturations: self.saturations.clone(),
+                original_elapsed_s: self.elapsed_s,
                 state: next,
                 step: LiquidSaturationStep {
                     duration_s: input.duration_s,

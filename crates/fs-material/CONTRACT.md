@@ -17115,6 +17115,41 @@ manufactured nonlinear Robin balance and its mirror, actual source domains,
 budget refusal and late cancellation. No finite-reservoir compliance, coupled
 gas/heat storage or empirical hydraulic calibration is inferred.
 
+### Passive dissolved transport in evolving porous liquid
+
+`LiquidSaturationCandidate::transport_dilute_solutes` carries original dilute
+neutral-solute inventories over the SAME accepted explicit or implicit water
+interval. The candidate retains exact original saturation/time binding and
+checks the original cell/calibration identities. Both original and final liquid
+storage must be positive; drying deposition or reopening requires another
+phase/storage owner. Every cell's water-volume change and the whole-column
+balance must close against the original hydraulic face integrals.
+
+One backward-Euler donor-cell/diffusion matrix per solute uses actual final
+water storage and `theta*D/tau`, with theta=porosity*saturation. D is explicit
+aqueous diffusivity; tau is the transport divisor in this formula. Geometric
+or acoustic tortuosity conventions require an explicit source-supported
+conversion. Native half-cell resistances and explicit surface film resistance add
+in series. A no-diffusion boundary can prescribe hydraulic inflow concentration;
+a reservoir can drive molecular exchange at zero water flow. Zero D blocks
+diffusion without suppressing the original hydraulic transport.
+
+The existing native adjacent-pivot tridiagonal solver gives O(cells*species)
+work and bounded reusable scratch. Every original cell equation and one fixed
+constituent balance is checked independently after solving; signed advective
+and diffusive face transfers are separate. No concentration clipping, fictitious
+water flux or explicit diffusion CFL is introduced. This is a first-order
+passive dilute approximation with caller-qualified D/tau and applicability,
+without inferred activity, cross-friction, ionic migration, reaction, adsorption
+or hydrodynamic dispersion. Local time error requires physical interval refinement.
+
+Eight tests of the exact production transport operator and original native
+tridiagonal solver pass: independent two-volume BE and eigenmode limits, unequal
+wet resistance, changing-storage uniform concentration and reversal, film-driven
+exchange, stiff advection, positive trace response, budgets and cancellation.
+Two additional native hydraulic binding/interval integration tests are authored
+but unexecuted; the full material dependency build remains resource-blocked.
+
 ### Adaptive coupled gas, adsorption and sensible-heat transport
 
 `AdsorbingPoreDomain::{step_candidate_adaptive_to,advance_adaptive_to}` control

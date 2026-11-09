@@ -22,6 +22,9 @@ use super::{
 };
 use crate::MaterialError;
 
+/// Passive dissolved transport through an accepted conservative water interval.
+pub mod solute;
+
 mod boundary;
 pub use boundary::{LiquidSaturationBoundary, LiquidSaturationBoundaryStepInput};
 mod implicit;
@@ -94,6 +97,9 @@ pub struct LiquidSaturationStep {
 /// Immutable candidate so a rejected solve never mutates accepted saturation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LiquidSaturationCandidate {
+    // Exact original storage/clock binding for physical transport consumers.
+    original_saturations: Vec<f64>,
+    original_elapsed_s: f64,
     state: LiquidSaturationColumn,
     step: LiquidSaturationStep,
 }
@@ -291,6 +297,8 @@ impl LiquidSaturationColumn {
             return Err(invalid("transient liquid saturation step cancelled"));
         }
         Ok(LiquidSaturationCandidate {
+            original_saturations: self.saturations.clone(),
+            original_elapsed_s: self.elapsed_s,
             state: next,
             step: LiquidSaturationStep {
                 duration_s: input.duration_s,
@@ -634,5 +642,103 @@ mod tests {
                 .is_err()
         );
         assert_eq!(wet.saturations(), &[0.5, 0.5]);
+    }
+
+    fn solute_controls() -> solute::DiluteSoluteControls<2> {
+        solute::DiluteSoluteControls {
+            absolute_equation_tolerance_mol_m2: [1e-12; 2],
+            relative_equation_tolerance: 1e-12,
+            amount_balance_tolerance_mol_m2: [1e-12; 2],
+            water_balance_tolerance_m: 1e-12,
+            maximum_cell_species: 4,
+            maximum_storage_bytes: 64 * 1024,
+        }
+    }
+
+    #[test]
+    fn dissolved_transport_consumes_explicit_and_implicit_native_water_intervals() {
+        use solute::DiluteSoluteBoundary;
+        let original = column([0.5, 0.5]);
+        let saved = original.clone();
+        let p = pressures(original.states(), 150_000.0).unwrap()[0].unwrap();
+        let water_input = input([p + 500.0, p], 0.01);
+        let explicit = original.step_candidate(water_input, || false).unwrap();
+        let (implicit, _) = original
+            .step_candidate_implicit(
+                water_input,
+                LiquidSaturationImplicitControls {
+                    absolute_saturation_residual_tolerance: 1e-13,
+                    relative_saturation_residual_tolerance: 1e-12,
+                    volume_balance_tolerance_m: 1e-13,
+                    maximum_iterations: 64,
+                    maximum_line_search_trials: 32,
+                },
+                || false,
+            )
+            .unwrap();
+        let concentrations = [3.0, 0.2];
+        let amounts: Vec<_> = original
+            .cells
+            .iter()
+            .zip(original.saturations())
+            .map(|(cell, s)| concentrations.map(|c| c * cell.capacity_m() * s))
+            .collect();
+        for water in [explicit, implicit] {
+            let before = water.clone();
+            let result = water
+                .transport_dilute_solutes(
+                    &original,
+                    &amounts,
+                    &[[1e-4, 2e-4]; 2],
+                    &[2.0; 2],
+                    [
+                        DiluteSoluteBoundary::InflowConcentration(concentrations),
+                        DiluteSoluteBoundary::Outflow,
+                    ],
+                    solute_controls(),
+                    || false,
+                )
+                .unwrap();
+            assert_eq!(result.report.interval_s, [0.0, 0.01]);
+            for cell in &result.concentration_mol_m3 {
+                for k in 0..2 {
+                    assert!((cell[k] - concentrations[k]).abs() < 2e-8);
+                }
+            }
+            assert_eq!(water, before);
+        }
+        assert_eq!(original, saved);
+    }
+
+    #[test]
+    fn dissolved_transport_refuses_a_different_native_storage_clock_or_material() {
+        use solute::{DiluteSoluteBoundary, DiluteSoluteError};
+        let original = column([0.5, 0.5]);
+        let p = pressures(original.states(), 150_000.0).unwrap()[0].unwrap();
+        let water = original
+            .step_candidate(input([p, p], 1.0), || false)
+            .unwrap();
+        let wrong_storage = column([0.51, 0.49]);
+        let mut wrong_clock = original.clone();
+        wrong_clock.elapsed_s = 1.0;
+        let mut wrong_cells = original.cells.clone();
+        wrong_cells[0].intrinsic_permeability_m2 *= 2.0;
+        let wrong_material = LiquidSaturationColumn::new(wrong_cells, vec![0.5; 2]).unwrap();
+        for other in [&wrong_storage, &wrong_clock, &wrong_material] {
+            assert!(matches!(
+                water.transport_dilute_solutes(
+                    other,
+                    &[[0.1, 0.2]; 2],
+                    &[[1e-4; 2]; 2],
+                    &[2.0; 2],
+                    [DiluteSoluteBoundary::Outflow; 2],
+                    solute_controls(),
+                    || false
+                ),
+                Err(DiluteSoluteError::Invalid(_))
+            ));
+        }
+        assert_eq!(original.saturations(), &[0.5, 0.5]);
+        assert_eq!(original.elapsed_s(), 0.0);
     }
 }
