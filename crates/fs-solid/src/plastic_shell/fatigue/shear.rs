@@ -7,7 +7,7 @@ use fs_blake3::ContentHash;
 use fs_exec::Cx;
 use fs_material::fatigue::critical_plane::fatemi_socie::{
     FatemiSocieCalibration, FatemiSocieCycle, FatemiSocieCycleResult, FatemiSocieError,
-    FatemiSocieLimits,
+    FatemiSocieLimits, FatemiSocieMinerSummary, FatemiSociePlaneDamage,
 };
 use fs_material::fatigue::critical_plane::{CycleClosureTolerance, TensorFatigueSample};
 use fs_material::fatigue::cyclic::SourceBoundFatigueLaw;
@@ -127,6 +127,45 @@ impl ShearBank {
             .iter()
             .map(|g| g.counter.result().copied())
             .collect()
+    }
+
+    pub(super) fn enable_miner(
+        &mut self,
+        maximum_cycles: u64,
+        cx: &Cx<'_>,
+    ) -> Result<(), ShellFatigueError> {
+        poll(cx)?;
+        let mut gauges = Vec::new();
+        gauges
+            .try_reserve_exact(self.gauges.len())
+            .map_err(|_| ShellFatigueError::Budget)?;
+        for (index, gauge) in self.gauges.iter().enumerate() {
+            poll(cx)?;
+            if gauge.counter.sample_count() > 1 {
+                return Err(ShellFatigueError::Invalid(
+                    "enable FS/Miner at the first observation of a fresh cycle window",
+                ));
+            }
+            let mut next = gauge.clone();
+            next.counter
+                .enable_miner(maximum_cycles)
+                .map_err(|error| shear_error(index, error))?;
+            gauges.push(next);
+        }
+        poll(cx)?;
+        self.gauges = gauges;
+        Ok(())
+    }
+
+    pub(super) fn miner_summaries(&self) -> Vec<Option<FatemiSocieMinerSummary>> {
+        self.gauges
+            .iter()
+            .map(|g| g.counter.miner_summary())
+            .collect()
+    }
+
+    pub(super) fn miner_plane_damage(&self, gauge: usize) -> Option<&[FatemiSociePlaneDamage]> {
+        self.gauges.get(gauge)?.counter.miner_plane_damage()
     }
 
     pub(super) fn samples(&self) -> &[TensorFatigueSample] {

@@ -16,8 +16,9 @@
 //! existing bounded rainflow/Miner owner and explicit uncorrected, Morrow or
 //! SWT policy. Paired policies retain its coincident-extrema admission rules.
 //! Separate Fatemi-Socie windows observe representative shear cycles with their
-//! original torsional calibration and full-tensor closure. They neither count
-//! arbitrary shear reversals nor contribute an invented Miner damage term.
+//! original torsional calibration and full-tensor closure. Optional shear Miner
+//! accumulation counts each explicitly closed window once on every fixed plane;
+//! no arbitrary shear reversal count or repeated exposure is inferred.
 //! These empirical estimates do not change stiffness, deposit heat, create
 //! cracks, establish cyclic stabilization or certify component service life.
 
@@ -33,7 +34,8 @@ use fs_blake3::ContentHash;
 use fs_exec::Cx;
 use fs_material::fatigue::critical_plane::TensorFatigueSample;
 use fs_material::fatigue::critical_plane::fatemi_socie::{
-    FatemiSocieCalibration, FatemiSocieCycleResult, FatemiSocieError,
+    FatemiSocieCalibration, FatemiSocieCycleResult, FatemiSocieError, FatemiSocieMinerSummary,
+    FatemiSociePlaneDamage,
 };
 use fs_material::fatigue::critical_plane::miner::{
     CriticalPlaneMiner, CriticalPlaneMinerError, CriticalPlaneMinerLimits, CriticalPlaneMinerResult,
@@ -313,10 +315,32 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> ShellFatiguePath<'p, 'm, L> {
             .collect()
     }
 
-    /// Completed representative shear windows, without repetition or damage
-    /// accumulation. Open windows have no life result.
+    /// Completed representative shear windows. Open windows have no life result;
+    /// optional fixed-plane Miner totals are exposed separately.
     pub fn fatemi_socie_results(&self) -> Vec<Option<FatemiSocieCycleResult>> {
         self.shear.results()
+    }
+
+    /// Enable bounded Miner accumulation before observing a shear cycle,
+    /// including after explicit conditioning. All gauges are admitted together;
+    /// each accepted closed window counts once, without inferred repetitions.
+    pub fn enable_fatemi_socie_miner(
+        &mut self,
+        maximum_cycles: u64,
+        cx: &Cx<'_>,
+    ) -> Result<(), ShellFatigueError> {
+        self.require_shear(cx)?;
+        self.shear.enable_miner(maximum_cycles, cx)
+    }
+
+    /// Greatest accumulated damage on a fixed plane in each opted-in gauge.
+    pub fn fatemi_socie_miner_summaries(&self) -> Vec<Option<FatemiSocieMinerSummary>> {
+        self.shear.miner_summaries()
+    }
+
+    /// Per-plane totals retain the original facet-frame normal ordering.
+    pub fn fatemi_socie_plane_damage(&self, gauge: usize) -> Option<&[FatemiSociePlaneDamage]> {
+        self.shear.miner_plane_damage(gauge)
     }
 
     /// Latest accepted physical tensors in shear-gauge order and facet frames.
@@ -336,9 +360,10 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> ShellFatiguePath<'p, 'm, L> {
     }
 
     /// Begin every shear window at the CURRENT accepted native tensor state.
-    /// This discards only the previous representative windows/results. Normal
-    /// rainflow history, mechanics, velocity and physical time are preserved;
-    /// discarded conditioning windows receive no implicit fatigue credit.
+    /// This discards only the previous representative windows/results. Completed
+    /// shear Miner totals, normal rainflow history, mechanics, velocity and
+    /// physical time are preserved; discarded conditioning windows receive no
+    /// implicit fatigue credit.
     pub fn restart_fatemi_socie_cycle(&mut self, cx: &Cx<'_>) -> Result<(), ShellFatigueError> {
         self.require_shear(cx)?;
         self.shear.restart(self.problem, &self.solution, cx)
@@ -346,7 +371,8 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> ShellFatiguePath<'p, 'm, L> {
 
     /// Close the current representative shear windows together. Full stress
     /// and strain closure is required; one late refusal preserves every prior
-    /// window. This changes no accepted mechanics or normal-strain history.
+    /// window and shear damage total. Each opted-in plane receives one cycle's
+    /// damage, once. This changes no accepted mechanics or normal-strain history.
     pub fn close_fatemi_socie_cycle(
         &mut self,
         cx: &Cx<'_>,

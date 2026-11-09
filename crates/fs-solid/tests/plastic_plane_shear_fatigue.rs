@@ -308,6 +308,73 @@ fn known_life(parameter: f64) -> f64 {
 }
 
 #[test]
+fn g1_shear_miner_accumulates_explicit_cycles_across_native_restart_once() {
+    let (law, calibration) = fixture(10.0, 0.0, 0.5, 0.2);
+    let mesh = Mesh2::quads(1.0, 1.0, 1, 1);
+    let fixed = supports(&mesh, 0.0);
+    let loads = [0.004, -0.004, 0.0, 0.002, -0.002, 0.0];
+    let p = problem(&mesh, &law, &fixed, &loads);
+    with_cx(&CancelGate::new(), |cx| {
+        let mut gauge = shear_gauge(&law, &calibration);
+        gauge.normals_in_mesh_frame = vec![[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        let mut path = PlaneFatiguePath::new_with_shear(
+            &p,
+            vec![normal_gauge(&law)],
+            vec![gauge],
+            config(),
+            shear_budget(),
+            cx,
+        )
+        .unwrap();
+        assert_eq!(path.fatemi_socie_miner_summaries(), vec![None]);
+        assert!(path.enable_fatemi_socie_miner(0, cx).is_err());
+        assert_eq!(path.fatemi_socie_miner_summaries(), vec![None]);
+        path.enable_fatemi_socie_miner(2, cx).unwrap();
+        path.advance(3, cx).unwrap();
+        let result = path.finish_fatemi_socie_cycle(cx).unwrap();
+        let once = path.fatemi_socie_miner_summaries();
+        let summary = once[0].unwrap();
+        assert_eq!(summary.completed_cycles, 1);
+        assert_eq!(summary.selected_plane, 0);
+        close(summary.miner_damage, 1.0 / known_life(0.004), 1e-12);
+        assert_eq!(path.finish_fatemi_socie_cycle(cx).unwrap(), result);
+        assert_eq!(path.fatemi_socie_miner_summaries(), once);
+
+        let mut resumed = path.clone();
+        for run in [&mut path, &mut resumed] {
+            run.restart_fatemi_socie_cycle(cx).unwrap();
+            assert_eq!(run.fatemi_socie_miner_summaries(), once);
+            assert!(run.enable_fatemi_socie_miner(100, cx).is_err());
+            assert_eq!(run.fatemi_socie_miner_summaries(), once);
+        }
+        path.advance(3, cx).unwrap();
+        resumed.advance(1, cx).unwrap();
+        resumed.advance(2, cx).unwrap();
+        assert_eq!(path.finish(cx).unwrap(), resumed.finish(cx).unwrap());
+        assert_eq!(path.solution(), resumed.solution());
+        assert_eq!(
+            path.fatemi_socie_miner_summaries(),
+            resumed.fatemi_socie_miner_summaries()
+        );
+        let summary = path.fatemi_socie_miner_summaries()[0].unwrap();
+        assert_eq!(summary.completed_cycles, 2);
+        // Pure shear has zero normal opening stress on the x plane. Each
+        // explicitly closed window contributes one independently known life.
+        close(
+            summary.miner_damage,
+            1.0 / known_life(0.004) + 1.0 / known_life(0.002),
+            1e-12,
+        );
+        let planes = path.fatemi_socie_plane_damage(0).unwrap();
+        close(planes[0].miner_damage, summary.miner_damage, 1e-14);
+        assert_eq!(planes[1].miner_damage, 0.0);
+        let closed = path.fatemi_socie_miner_summaries();
+        path.finish(cx).unwrap();
+        assert_eq!(path.fatemi_socie_miner_summaries(), closed);
+    });
+}
+
+#[test]
 fn native_p1_q1_shear_cycles_keep_plane_reduction_normal_stress_and_live_miner_history() {
     let (law, calibration) = fixture(10.0, 0.0, 0.5, 0.2);
     let amplitude = 0.004;
@@ -573,8 +640,10 @@ fn late_shear_append_failure_restores_mechanics_miner_and_every_tensor_prefix() 
             cx,
         )
         .unwrap();
+        path.enable_fatemi_socie_miner(2, cx).unwrap();
         let before = path.solution().clone();
         let normal = path.plane_summaries(0);
+        let shear_damage = path.fatemi_socie_miner_summaries();
         assert!(matches!(
             path.advance(3, cx),
             Err(PlaneFatigueError::FatemiSocie {
@@ -584,6 +653,7 @@ fn late_shear_append_failure_restores_mechanics_miner_and_every_tensor_prefix() 
         ));
         assert_eq!(path.solution(), &before);
         assert_eq!(path.plane_summaries(0), normal);
+        assert_eq!(path.fatemi_socie_miner_summaries(), shear_damage);
         assert_eq!(path.sample_count(), 1);
         for index in 0..2 {
             assert_eq!(path.fatemi_socie_sample_count(index), Some(1));
@@ -603,6 +673,7 @@ fn late_shear_append_failure_restores_mechanics_miner_and_every_tensor_prefix() 
         assert_eq!(path.solution(), &observed);
         assert_eq!(path.plane_summaries(0), normal);
         assert_eq!(path.fatemi_socie_results(), vec![None, None]);
+        assert_eq!(path.fatemi_socie_miner_summaries(), shear_damage);
     });
 }
 
@@ -626,11 +697,13 @@ fn late_shear_life_refusal_does_not_seal_either_fatigue_bank() {
             cx,
         )
         .unwrap();
+        path.enable_fatemi_socie_miner(2, cx).unwrap();
         path.advance(1, cx).unwrap();
         path.restart_fatemi_socie_cycle(cx).unwrap();
         path.advance(2, cx).unwrap();
         let native = path.solution().clone();
         let normal = path.plane_summaries(0);
+        let shear_damage = path.fatemi_socie_miner_summaries();
         assert!(matches!(
             path.finish(cx),
             Err(PlaneFatigueError::FatemiSocie { gauge: 1, .. })
@@ -640,6 +713,7 @@ fn late_shear_life_refusal_does_not_seal_either_fatigue_bank() {
         assert!(!path.is_finished());
         assert_eq!(path.results(), vec![None]);
         assert_eq!(path.fatemi_socie_results(), vec![None, None]);
+        assert_eq!(path.fatemi_socie_miner_summaries(), shear_damage);
         assert_eq!(path.fatemi_socie_sample_count(0), Some(3));
         assert_eq!(path.fatemi_socie_sample_count(1), Some(3));
     });

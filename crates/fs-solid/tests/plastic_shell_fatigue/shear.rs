@@ -198,7 +198,95 @@ fn same<L: SourceBoundFatigueLaw>(
     assert_eq!(a.results(), b.results());
     assert_eq!(a.fatemi_socie_samples(), b.fatemi_socie_samples());
     assert_eq!(a.fatemi_socie_results(), b.fatemi_socie_results());
+    assert_eq!(
+        a.fatemi_socie_miner_summaries(),
+        b.fatemi_socie_miner_summaries()
+    );
     assert_eq!(a.is_finished(), b.is_finished());
+}
+
+#[test]
+fn g1_shell_shear_miner_keeps_cycle_totals_and_rolls_back_exhausted_cycle_exposure() {
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let f = fixture(0);
+        let section = section(f.law.clone());
+        let mesh = mesh();
+        let fixed = shear_field(&mesh, GAMMA);
+        let factors = [1.0, -1.0, 0.0, 0.5, -0.5, 0.0, 1.0, -1.0, 0.0];
+        let p = problem(&mesh, &section, &fixed, &[], &factors);
+        let mut g = fs_gauge(&f.law, &f.calibration);
+        g.normals_in_facet_frame = vec![[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        let mut run = ShellFatiguePath::new_with_fatemi_socie(
+            &p,
+            vec![normal_gauge(&f.law)],
+            vec![g],
+            config(),
+            shear_config(),
+            cx,
+        )
+        .unwrap();
+        assert_eq!(run.fatemi_socie_miner_summaries(), vec![None]);
+        assert!(run.enable_fatemi_socie_miner(0, cx).is_err());
+        assert_eq!(run.fatemi_socie_miner_summaries(), vec![None]);
+        run.enable_fatemi_socie_miner(2, cx).unwrap();
+        run.advance_next(cx).unwrap();
+        run.advance_next(cx).unwrap();
+        run.advance_next_cycle(cx).unwrap();
+        let first = run.clone();
+        let result = run.fatemi_socie_results()[0].unwrap();
+        assert_eq!(run.close_fatemi_socie_cycle(cx).unwrap(), vec![result]);
+        same(&run, &first);
+        close(
+            run.fatemi_socie_miner_summaries()[0].unwrap().miner_damage,
+            1.0 / 20000.0,
+            1e-12,
+        );
+
+        let mut resumed = run.clone();
+        for branch in [&mut run, &mut resumed] {
+            branch.restart_fatemi_socie_cycle(cx).unwrap();
+            assert_eq!(
+                branch.fatemi_socie_miner_summaries(),
+                first.fatemi_socie_miner_summaries()
+            );
+            assert!(branch.enable_fatemi_socie_miner(100, cx).is_err());
+            branch.advance_next(cx).unwrap();
+            branch.advance_next(cx).unwrap();
+            branch.advance_next_cycle(cx).unwrap();
+        }
+        same(&run, &resumed);
+        let summary = run.fatemi_socie_miner_summaries()[0].unwrap();
+        assert_eq!(summary.completed_cycles, 2);
+        // Halving engineering shear amplitude quadruples this synthetic life.
+        close(summary.miner_damage, 1.0 / 20000.0 + 1.0 / 80000.0, 1e-12);
+        let planes = run.fatemi_socie_plane_damage(0).unwrap();
+        close(planes[0].miner_damage, summary.miner_damage, 1e-14);
+        assert_eq!(planes[1].miner_damage, 0.0);
+
+        run.restart_fatemi_socie_cycle(cx).unwrap();
+        run.advance_next(cx).unwrap();
+        run.advance_next(cx).unwrap();
+        let prefix = run.clone();
+        assert!(matches!(
+            run.advance_next_cycle(cx),
+            Err(ShellFatigueError::FatemiSocie {
+                error: FatemiSocieError::Budget,
+                ..
+            })
+        ));
+        same(&run, &prefix);
+        gate.request();
+        assert_eq!(
+            run.advance_next_cycle(cx),
+            Err(ShellFatigueError::Cancelled)
+        );
+        assert_eq!(
+            run.restart_fatemi_socie_cycle(cx),
+            Err(ShellFatigueError::Cancelled)
+        );
+        same(&run, &prefix);
+    });
 }
 
 #[test]
@@ -397,6 +485,7 @@ fn shear_cycle_backward_euler_keeps_native_motion_energy_and_clone_continuation(
             cx,
         )
         .unwrap();
+        run.enable_fatemi_socie_miner(2, cx).unwrap();
         let mut native = problem(&mesh, &section, &fixed, &[], &[0.0])
             .solve(cx)
             .unwrap();
@@ -440,6 +529,9 @@ fn shear_cycle_backward_euler_keeps_native_motion_energy_and_clone_continuation(
             }
         }
         close(run.elapsed_time_s(), 3.0 * dt, 1e-15);
+        let damage = run.fatemi_socie_miner_summaries()[0].unwrap();
+        assert_eq!(damage.completed_cycles, 1);
+        close(damage.miner_damage, 1.0 / 20000.0, 1e-12);
         close(
             run.fatemi_socie_results()[0]
                 .unwrap()
@@ -484,6 +576,7 @@ fn nonclosure_and_late_second_shear_refusal_restore_open_prefix_before_smaller_r
             cx,
         )
         .unwrap();
+        run.enable_fatemi_socie_miner(2, cx).unwrap();
         run.advance_next(cx).unwrap();
         let prefix = run.clone();
         assert!(matches!(

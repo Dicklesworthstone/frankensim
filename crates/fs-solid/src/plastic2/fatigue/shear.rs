@@ -5,7 +5,8 @@
 //! shear amplitude comes from the full two-component shear path on each plane;
 //! the original maximum-shear-plane selection and full-cycle normal-stress
 //! maximum remain in fs-material. No axial coefficient is relabeled, no cycle
-//! repetitions are inferred, and no Miner damage is synthesized from a window.
+//! repetitions are inferred. Explicitly enabled FS/Miner accumulates one cycle
+//! per closed window on each fixed plane through that same material owner.
 
 use std::sync::Arc;
 

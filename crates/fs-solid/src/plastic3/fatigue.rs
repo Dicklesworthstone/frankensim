@@ -31,7 +31,7 @@ use fs_exec::Cx;
 use fs_material::SmallStrainLaw;
 use fs_material::fatigue::critical_plane::fatemi_socie::{
     FatemiSocieCalibration, FatemiSocieCycle, FatemiSocieCycleResult, FatemiSocieError,
-    FatemiSocieLimits,
+    FatemiSocieLimits, FatemiSocieMinerSummary, FatemiSociePlaneDamage,
 };
 use fs_material::fatigue::critical_plane::miner::{
     CriticalPlaneMiner, CriticalPlaneMinerError, CriticalPlaneMinerLimits, CriticalPlaneMinerResult,
@@ -471,6 +471,27 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> J2FatiguePath<'p, 'm, L> {
     pub fn fatemi_socie_calibration(&self, gauge: usize) -> Option<&FatemiSocieCalibration> {
         self.observer.fatemi_socie_calibration(gauge)
     }
+    /// Enable fixed-material-plane FS/Miner accumulation on every shear gauge
+    /// at the first observation of its current window. A warm-up window may be
+    /// restarted first; unobserved or discarded cycles receive no damage credit.
+    /// Each successfully closed native cycle contributes once on every plane.
+    /// This explicit maximum-accumulated-damage convention is separate from
+    /// the existing single-cycle maximum-shear-plane result.
+    pub fn enable_fatemi_socie_miner(
+        &mut self,
+        maximum_cycles: u64,
+        cx: &Cx<'_>,
+    ) -> Result<(), J2FatigueError> {
+        self.observer.enable_fatemi_socie_miner(maximum_cycles, cx)
+    }
+    /// Completed-cycle damage only; the current open window adds no credit.
+    pub fn fatemi_socie_miner_summaries(&self) -> Vec<Option<FatemiSocieMinerSummary>> {
+        self.observer.fatemi_socie_miner_summaries()
+    }
+    /// Original plane order and separate damage totals, without a new search.
+    pub fn fatemi_socie_plane_damage(&self, gauge: usize) -> Option<&[FatemiSociePlaneDamage]> {
+        self.observer.fatemi_socie_plane_damage(gauge)
+    }
     pub fn variable_amplitude_results(&self) -> Vec<Option<CriticalPlaneMinerResult>> {
         self.observer.variable_amplitude_results()
     }
@@ -491,6 +512,7 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> J2FatiguePath<'p, 'm, L> {
     /// CURRENT accepted native tensors, for example after physical warm-up.
     /// Mechanics, accepted increments and every fixed-gauge history are retained.
     /// Discarded windows are not silently credited as counted fatigue cycles.
+    /// Explicitly enabled FS/Miner totals survive; only an open window is lost.
     pub fn restart_critical_plane_cycle(&mut self, cx: &Cx<'_>) -> Result<(), J2FatigueError> {
         self.observer
             .restart_critical_plane_cycle(&self.solution, cx)
@@ -824,6 +846,55 @@ impl J2FatigueObserver {
         self.fatemi_socie
             .get(gauge)
             .map(|g| g.counter.calibration())
+    }
+    pub(super) fn enable_fatemi_socie_miner(
+        &mut self,
+        maximum_cycles: u64,
+        cx: &Cx<'_>,
+    ) -> Result<(), J2FatigueError> {
+        self.require_critical(cx)?;
+        if self.fatemi_socie.is_empty() {
+            return Err(J2FatigueError::Invalid(
+                "no Fatemi-Socie gauges were declared",
+            ));
+        }
+        let mut shear = Vec::new();
+        shear
+            .try_reserve_exact(self.fatemi_socie.len())
+            .map_err(|_| J2FatigueError::Budget)?;
+        for (index, gauge) in self.fatemi_socie.iter().enumerate() {
+            poll(cx)?;
+            // Refuse before copying any long open tensor history. Admission
+            // otherwise copies at most the one original native observation.
+            if gauge.counter.sample_count() > 1 {
+                return Err(J2FatigueError::Invalid(
+                    "enable FS/Miner at the first observation of a fresh cycle window",
+                ));
+            }
+            let mut next = gauge.clone();
+            next.counter.enable_miner(maximum_cycles).map_err(|error| {
+                J2FatigueError::FatemiSocie {
+                    gauge: index,
+                    error,
+                }
+            })?;
+            shear.push(next);
+        }
+        poll(cx)?;
+        self.fatemi_socie = shear;
+        Ok(())
+    }
+    pub(super) fn fatemi_socie_miner_summaries(&self) -> Vec<Option<FatemiSocieMinerSummary>> {
+        self.fatemi_socie
+            .iter()
+            .map(|g| g.counter.miner_summary())
+            .collect()
+    }
+    pub(super) fn fatemi_socie_plane_damage(
+        &self,
+        gauge: usize,
+    ) -> Option<&[FatemiSociePlaneDamage]> {
+        self.fatemi_socie.get(gauge)?.counter.miner_plane_damage()
     }
     pub(super) fn variable_amplitude_results(&self) -> Vec<Option<CriticalPlaneMinerResult>> {
         self.variable_amplitude

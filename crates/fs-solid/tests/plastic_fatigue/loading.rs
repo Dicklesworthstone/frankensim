@@ -150,6 +150,16 @@ fn unchanged<L: SourceBoundFatigueLaw>(
     assert_eq!(a.critical_plane_results(), b.critical_plane_results());
     assert_eq!(a.fatemi_socie_results(), b.fatemi_socie_results());
     assert_eq!(
+        a.fatemi_socie_miner_summaries(),
+        b.fatemi_socie_miner_summaries()
+    );
+    for gauge in 0..a.fatemi_socie_results().len() {
+        assert_eq!(
+            a.fatemi_socie_plane_damage(gauge),
+            b.fatemi_socie_plane_damage(gauge)
+        );
+    }
+    assert_eq!(
         a.variable_amplitude_results(),
         b.variable_amplitude_results()
     );
@@ -378,6 +388,7 @@ fn late_loading_native_and_cycle_failures_restore_open_histories_before_retry() 
         let third = shear_values(-0.5 * R, -0.5 * 3.0_f64.sqrt() * R);
         run.advance_with_loading(&[loading(&start)], cx).unwrap();
         run.restart_critical_plane_cycle(cx).unwrap();
+        run.enable_fatemi_socie_miner(1, cx).unwrap();
         let prefix = run.clone();
         assert!(matches!(
             run.advance_with_loading(&[loading(&second), loading(&third[..third.len() - 1])], cx),
@@ -437,5 +448,93 @@ fn late_loading_native_and_cycle_failures_restore_open_histories_before_retry() 
             close(result.cycles_to_failure.unwrap(), 500000.0, 1e-4);
         }
         assert_eq!(run.finish(cx).unwrap(), clean.finish(cx).unwrap());
+        for summary in run
+            .fatemi_socie_miner_summaries()
+            .into_iter()
+            .map(Option::unwrap)
+        {
+            assert_eq!(summary.completed_cycles, 1);
+            close(summary.miner_damage, 1.0 / 500000.0, 1e-14);
+        }
+    });
+}
+
+#[test]
+fn native_shear_miner_keeps_material_planes_across_rotating_cycles() {
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        let law = material();
+        let fixed: Vec<_> = (0..3 * NODES.len()).map(|d| (d, 0.0)).collect();
+        let p = problem(&law, &fixed, &[1.0; 9]);
+        let mut gauge = shear_gauge(&law);
+        gauge.normals_in_mesh_frame = vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let mut run = J2FatiguePath::new_with_fatemi_socie(
+            &p,
+            FRAME,
+            vec![],
+            vec![],
+            vec![gauge],
+            config(),
+            cx,
+        )
+        .unwrap();
+        assert_eq!(run.fatemi_socie_miner_summaries(), vec![None]);
+        assert!(run.enable_fatemi_socie_miner(0, cx).is_err());
+        assert_eq!(run.fatemi_socie_miner_summaries(), vec![None]);
+        run.enable_fatemi_socie_miner(3, cx).unwrap();
+        let initial = run.fatemi_socie_miner_summaries();
+        assert!(run.enable_fatemi_socie_miner(3, cx).is_err());
+        assert_eq!(run.fatemi_socie_miner_summaries(), initial);
+
+        // First xz, then weaker yz, then larger yz. Normal stress on both
+        // coordinate planes is zero. The independent fit is N=.5*(.2/gamma_a)^2.
+        // The two physical plane histories must never be combined into one crack.
+        let mut expected = [0.0_f64; 2];
+        for (cycle, (u, v, plane)) in [(R, 0.0, 0), (0.0, 0.5 * R, 1), (0.0, R, 1)]
+            .into_iter()
+            .enumerate()
+        {
+            if cycle > 0 {
+                let previous = run.fatemi_socie_miner_summaries();
+                run.restart_critical_plane_cycle(cx).unwrap();
+                assert_eq!(run.fatemi_socie_miner_summaries(), previous);
+                assert_eq!(run.fatemi_socie_results(), vec![None]);
+            }
+            let values = [
+                shear_values(u, v),
+                shear_values(-u, -v),
+                shear_values(0.0, 0.0),
+            ];
+            let targets = values.each_ref().map(|value| loading(value));
+            run.advance_cycle_with_loading(&targets, cx).unwrap();
+            let gamma = 2.0 * u.abs().max(v.abs());
+            expected[plane] += 2.0 * (gamma / 0.2).powi(2);
+            let summary = run.fatemi_socie_miner_summaries()[0].unwrap();
+            assert_eq!(summary.completed_cycles, cycle as u64 + 1);
+            assert_eq!(
+                summary.selected_plane,
+                if expected[0] >= expected[1] { 0 } else { 1 }
+            );
+            close(summary.miner_damage, expected[0].max(expected[1]), 1e-14);
+            assert_eq!(run.fatemi_socie_plane_damage(0).unwrap().len(), 2);
+            assert!(
+                run.solution()
+                    .element_states
+                    .iter()
+                    .all(|state| state.alpha == 0.0)
+            );
+            if cycle == 1 {
+                assert!(summary.miner_damage < expected.iter().sum::<f64>());
+            }
+        }
+        let completed = run.fatemi_socie_miner_summaries();
+        let mut replay = run.clone();
+        run.finish(cx).unwrap();
+        run.finish(cx).unwrap();
+        replay.finish(cx).unwrap();
+        assert_eq!(run.fatemi_socie_miner_summaries(), completed);
+        assert_eq!(
+            run.fatemi_socie_miner_summaries(),
+            replay.fatemi_socie_miner_summaries()
+        );
     });
 }

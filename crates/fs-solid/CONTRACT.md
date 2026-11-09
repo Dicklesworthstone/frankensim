@@ -2596,16 +2596,19 @@ shear histories in place, with accepted-prefix rollback on late refusal rather
 than copying the entire retained trace at every endpoint.
 
 Explicit restart seeds a new representative window at the current accepted
-material point while preserving normal rainflow history and native motion.
+material point while preserving normal rainflow history, completed optional
+shear Miner totals and native motion.
 Full tensor stress/strain closure remains required. Static and backward-Euler
 cycle endpoint methods accept mechanics and all observations together; failed
 closure, calibration or cancellation preserves the previous solution, velocity,
 time and counters. Finalization closes both kinds of observation atomically;
 normal-history preview does not close or reinterpret a shear window.
 
-Representative shear-life results remain separate from Miner accumulation.
+Representative shear-life results remain separate from the optional fixed-plane
+FS/Miner totals. Opting in counts each explicitly closed window once per plane;
+repeated closure adds no damage and failed closure publishes no partial total.
 Neither repetitions, arbitrary variable-amplitude shear cycles, stabilization
-nor creep/thermal interactions are inferred. Five focused synthetic regressions
+nor creep/thermal interactions are inferred. Focused synthetic regressions
 in `tests/plastic_shell_fatigue/shear.rs` cover an independent engineering-shear
 life formula, native conditioned Voce/Chaboche histories, original inertia and
 clone continuation, late-gauge rollback, source mismatches and window budgets.
@@ -2719,16 +2722,44 @@ calibration evidence remain inspectable.
 
 A native block and every fatigue bank publish together only after requested
 closure succeeds. Failure restores mechanics, fixed/SWT snapshots, each
-Fatemi–Socie accepted prefix and any provisional result. Ordinary advances do
+Fatemi–Socie accepted prefix, provisional result and current-window damage. Ordinary advances do
 not copy the retained shear tensor histories. Restart samples the actual
 accepted mechanical state and preserves fixed-plane counters and the global
 sample budget. A decaying or ratcheting path that fails closure cannot silently
 become a stabilized periodic-life result.
 
-This extension predicts bounded empirical shear-controlled life for a declared
-resolved representative cycle at fixed source conditions. It does not establish
-stabilization or experimental component validity, count multiaxial
-variable-amplitude cycles, or evolve fatigue stiffness loss or crack geometry.
+All four native owners, `J2FatiguePath`, `J2DynamicFatigueRun`,
+`PlaneFatiguePath` and `ShellFatiguePath`, additionally expose
+`enable_fatemi_socie_miner(maximum_cycles, cx)`,
+`fatemi_socie_miner_summaries()` and `fatemi_socie_plane_damage(gauge)`.
+Enable once before the first loading excursion of a fresh window, including
+after explicitly discarded conditioning. Admission is atomic across gauges
+and checks cancellation before publication; late enabling cannot reinterpret
+an already observed trace.
+
+The shared material owner adds one calibrated life fraction per explicitly
+closed cycle to EACH fixed material plane, then selects maximum accumulated
+damage. Changing loading direction never combines distinct per-cycle winning
+planes. Every nonzero plane must fit the original finite torsional calibration;
+zero shear contributes zero. The representative-cycle result retains its
+original maximum-shear convention separately from the cumulative summary.
+Native restart carries completed plane totals and seeds the next window from
+actual accepted stress and strain. Closing the same window twice adds no
+exposure. Failed mechanics, late-gauge calibration refusal, exhausted cycle
+budget or cancellation retains all prior completed damage and native state.
+Ordinary steps still do not copy the retained tensor trace.
+
+Four additional native regressions exercise changing shear direction,
+amplitude and opening stress, plane/shell restart, repeated closure, clone
+continuation and cycle-budget rollback. Existing late-bank and inertial
+rollback checks also compare per-plane totals. These are synthetic numerical
+references; their source definitions do not constitute experimental evidence.
+
+This extension predicts bounded empirical shear-controlled life and optionally
+linear accumulated damage for explicitly resolved cycles at fixed source
+conditions. It does not establish stabilization or experimental component
+validity, automatically count multiaxial variable-amplitude cycles, model
+load-order interactions, or evolve fatigue stiffness loss or crack geometry.
 
 ## Findley shear-path fatigue from native elastic and Newmark responses
 
@@ -12549,10 +12580,12 @@ and its original initial-yield normalization.
 The shared `FatemiSocieCycle` owns the full two-dimensional shear path,
 maximum-shear-plane convention, whole-cycle normal-stress maximum and bounded
 shear-life inversion. `restart_fatemi_socie_cycle` explicitly begins a window
-at the accepted state after conditioning, preserving mechanics and lifetime
-normal history. `finish_fatemi_socie_cycle` requires complete stress/strain
-closure and exposes the representative cycle's life separately. No repetitions
-or accumulated Miner damage are inferred from a shear window.
+at the accepted state after conditioning, preserving mechanics, lifetime
+normal history and completed optional shear Miner totals.
+`finish_fatemi_socie_cycle` requires complete stress/strain closure and exposes
+the representative cycle's life separately. With explicitly enabled FS/Miner,
+it credits exactly one cycle to each fixed plane and remains idempotent.
+Repetitions and unresolved multiaxial cycle decompositions are not inferred.
 
 `PlaneShearFatigueBudget` bounds retained paired tensor samples, search planes,
 projection work and circle work across all gauges. Ordinary advancement stages
@@ -12560,7 +12593,7 @@ only current mechanics and bounded normal residues; a late failure truncates
 shear histories to their saved accepted prefixes. It does not clone accumulated
 shear tensors on each step. Whole-path finalization seals both banks atomically.
 
-Five focused regressions in `tests/plastic_plane_shear_fatigue.rs` cover native
+Focused regressions in `tests/plastic_plane_shear_fatigue.rs` cover native
 P1/Q1 reductions and opening-stress effects, Prager shear reversal, conditioning
 and nonclosure under isotropic hardening, source/G/yield binding, aggregate caps,
 restart equivalence and late append/finalization rollback. They remain synthetic

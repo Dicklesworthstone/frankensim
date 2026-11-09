@@ -204,6 +204,16 @@ fn same_banks(a: &J2DynamicFatigueRun<'_, '_>, b: &J2DynamicFatigueRun<'_, '_>, 
     same_state(a, b);
     assert_eq!(a.fatemi_socie_results(), b.fatemi_socie_results());
     assert_eq!(
+        a.fatemi_socie_miner_summaries(),
+        b.fatemi_socie_miner_summaries()
+    );
+    for gauge in 0..a.fatemi_socie_results().len() {
+        assert_eq!(
+            a.fatemi_socie_plane_damage(gauge),
+            b.fatemi_socie_plane_damage(gauge)
+        );
+    }
+    assert_eq!(
         a.variable_amplitude_results(),
         b.variable_amplitude_results()
     );
@@ -271,6 +281,7 @@ fn explicit_block_refusals_restore_native_motion_and_all_four_fatigue_banks_befo
             cx,
         )
         .unwrap();
+        run.enable_fatemi_socie_miner(1, cx).unwrap();
         run.advance_to_with_loading(
             0.05,
             1.0,
@@ -351,5 +362,92 @@ fn explicit_block_refusals_restore_native_motion_and_all_four_fatigue_banks_befo
                 .all(|result| result.is_some_and(|result| result.samples == 5))
         );
         assert_eq!(run.finish(cx).unwrap(), expected.finish(cx).unwrap());
+        assert!(
+            run.fatemi_socie_miner_summaries()
+                .iter()
+                .all(|s| s.is_some_and(|s| s.completed_cycles == 1 && s.miner_damage > 0.0))
+        );
+    });
+}
+
+#[test]
+fn inertial_shear_miner_accumulates_actual_amplitudes_and_opening_stress() {
+    let law = material(false, Some(Density::DIMS));
+    let supports = fixed(false);
+    let p = problem(&law, &supports, &[1.0]);
+    with_cx(&CancelGate::new(), |cx| {
+        let mut run = J2DynamicFatigueRun::new_with_fatemi_socie(
+            &p,
+            FRAME,
+            vec![],
+            vec![],
+            vec![shear_gauge(&law, 0.5)],
+            config(9),
+            0.0,
+            vec![[0.0; 3]; 4],
+            cx,
+        )
+        .unwrap();
+        run.enable_fatemi_socie_miner(2, cx).unwrap();
+        let mut damage = 0.0;
+        for (cycle, amplitude) in [0.001, 0.0005].into_iter().enumerate() {
+            if cycle > 0 {
+                let previous = run.fatemi_socie_miner_summaries();
+                run.restart_critical_plane_cycle(cx).unwrap();
+                assert_eq!(run.fatemi_socie_miner_summaries(), previous);
+            }
+            let values = [
+                affine_values(2.0 * amplitude, amplitude),
+                affine_values(-amplitude, -amplitude),
+                affine_values(0.0, 0.0),
+            ];
+            let targets: Vec<_> = values
+                .iter()
+                .enumerate()
+                .map(|(i, values)| J2DynamicFatigueLoadingTarget {
+                    time_s: 0.1 * (3 * cycle + i + 1) as f64,
+                    load_factor: 1.0,
+                    loading: J2FatigueLoading {
+                        prescribed_values_m: values,
+                        nodal_forces_n: &[],
+                    },
+                })
+                .collect();
+            run.advance_cycle_with_loading(&targets, cx).unwrap();
+            // Full prescribed affine strain: gamma_a=2a, sigma_xx,max=E*2a,
+            // k=.5 and sigma_y0=10. Inertia changes reactions, not this field.
+            let parameter = 2.0 * amplitude * (1.0 + 0.5 * 60.0 * 2.0 * amplitude / 10.0);
+            damage += 2.0 * (parameter / 0.2).powi(2);
+            let summary = run.fatemi_socie_miner_summaries()[0].unwrap();
+            assert_eq!(summary.completed_cycles, cycle as u64 + 1);
+            close(summary.miner_damage, damage, 1e-13);
+            assert!(run.last_step().is_some());
+        }
+        let completed = run.fatemi_socie_miner_summaries();
+        run.restart_critical_plane_cycle(cx).unwrap();
+        let previous = run.clone();
+        let values = [
+            affine_values(0.002, 0.001),
+            affine_values(-0.001, -0.001),
+            affine_values(0.0, 0.0),
+        ];
+        let targets: Vec<_> = values
+            .iter()
+            .enumerate()
+            .map(|(i, values)| J2DynamicFatigueLoadingTarget {
+                time_s: 0.7 + i as f64 * 0.1,
+                load_factor: 1.0,
+                loading: J2FatigueLoading {
+                    prescribed_values_m: values,
+                    nodal_forces_n: &[],
+                },
+            })
+            .collect();
+        assert!(matches!(
+            run.advance_cycle_with_loading(&targets, cx),
+            Err(J2FatigueError::FatemiSocie { .. })
+        ));
+        same_banks(&run, &previous, cx);
+        assert_eq!(run.fatemi_socie_miner_summaries(), completed);
     });
 }

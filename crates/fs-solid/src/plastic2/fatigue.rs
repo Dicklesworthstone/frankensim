@@ -13,7 +13,9 @@
 //! validation require separate models and evidence. Optional Fatemi-Socie
 //! gauges share the same solve and accepted tensors, while retaining explicit
 //! closed representative-cycle windows alongside the live normal-strain Miner
-//! histories. No repetition count or stabilized response is inferred.
+//! histories. Optional shear Miner accumulation counts each explicitly closed
+//! window once on every fixed plane. No repetition count or stabilized response
+//! is inferred.
 
 pub mod shear;
 pub use shear::{PlaneFatemiSocieGauge, PlaneShearFatigueBudget};
@@ -24,7 +26,8 @@ use fs_blake3::ContentHash;
 use fs_exec::Cx;
 use fs_material::fatigue::critical_plane::TensorFatigueSample;
 use fs_material::fatigue::critical_plane::fatemi_socie::{
-    FatemiSocieCalibration, FatemiSocieCycleResult, FatemiSocieError,
+    FatemiSocieCalibration, FatemiSocieCycleResult, FatemiSocieError, FatemiSocieMinerSummary,
+    FatemiSociePlaneDamage,
 };
 use fs_material::fatigue::critical_plane::miner::{
     CriticalPlaneMiner, CriticalPlaneMinerError, CriticalPlaneMinerLimits, CriticalPlaneMinerResult,
@@ -203,7 +206,11 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> PlaneFatiguePath<'p, 'm, L> {
                     "gauge is outside the original plane quadrature",
                 ));
             }
-            bind_curve(problem.law(gauge.element, gauge.quadrature_point), index, &gauge)?;
+            bind_curve(
+                problem.law(gauge.element, gauge.quadrature_point),
+                index,
+                &gauge,
+            )?;
             bank.push(GaugeState {
                 element: gauge.element,
                 point: gauge.quadrature_point,
@@ -287,6 +294,63 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> PlaneFatiguePath<'p, 'm, L> {
             .map(|g| g.counter.result().copied())
             .collect()
     }
+
+    /// Select bounded Miner accumulation for explicitly closed shear cycles.
+    /// Enable before observing a cycle, including after an explicit conditioning
+    /// restart. Every gauge is admitted together; failed admission or cancellation
+    /// changes neither mechanics nor any existing fatigue state.
+    pub fn enable_fatemi_socie_miner(
+        &mut self,
+        maximum_cycles: u64,
+        cx: &Cx<'_>,
+    ) -> Result<(), PlaneFatigueError> {
+        poll(cx)?;
+        if self.finished {
+            return Err(PlaneFatigueError::Finished);
+        }
+        if self.fatemi_socie.is_empty() {
+            return Err(PlaneFatigueError::Invalid(
+                "no shear-cycle gauges were declared",
+            ));
+        }
+        let mut gauges = Vec::new();
+        gauges
+            .try_reserve_exact(self.fatemi_socie.len())
+            .map_err(|_| PlaneFatigueError::Budget)?;
+        for (index, gauge) in self.fatemi_socie.iter().enumerate() {
+            poll(cx)?;
+            if gauge.counter.sample_count() > 1 {
+                return Err(PlaneFatigueError::Invalid(
+                    "enable FS/Miner at the first observation of a fresh cycle window",
+                ));
+            }
+            let mut next = gauge.clone();
+            next.counter.enable_miner(maximum_cycles).map_err(|error| {
+                PlaneFatigueError::FatemiSocie {
+                    gauge: index,
+                    error,
+                }
+            })?;
+            gauges.push(next);
+        }
+        poll(cx)?;
+        self.fatemi_socie = gauges;
+        Ok(())
+    }
+
+    /// Greatest accumulated damage on a fixed plane in each opted-in gauge.
+    /// Unfinished or discarded windows contribute no cycle exposure.
+    pub fn fatemi_socie_miner_summaries(&self) -> Vec<Option<FatemiSocieMinerSummary>> {
+        self.fatemi_socie
+            .iter()
+            .map(|g| g.counter.miner_summary())
+            .collect()
+    }
+
+    /// Per-plane totals retain the original mesh-frame normal ordering.
+    pub fn fatemi_socie_plane_damage(&self, gauge: usize) -> Option<&[FatemiSociePlaneDamage]> {
+        self.fatemi_socie.get(gauge)?.counter.miner_plane_damage()
+    }
     pub fn fatemi_socie_calibration(&self, gauge: usize) -> Option<&FatemiSocieCalibration> {
         self.fatemi_socie
             .get(gauge)
@@ -303,7 +367,8 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> PlaneFatiguePath<'p, 'm, L> {
 
     /// Begin a new declared representative cycle at the actual current native
     /// state. Conditioning is explicit; this does not reset mechanical history,
-    /// normal-strain Miner counters, or the accepted load-path position.
+    /// normal-strain or completed shear Miner totals, or the accepted load-path
+    /// position. Discarded open windows contribute no shear damage.
     pub fn restart_fatemi_socie_cycle(&mut self, cx: &Cx<'_>) -> Result<(), PlaneFatigueError> {
         poll(cx)?;
         if self.finished {
@@ -323,8 +388,9 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> PlaneFatiguePath<'p, 'm, L> {
 
     /// Finalize the current closed shear window at any accepted endpoint.
     /// Closure of all six stress and strain components is required. The result
-    /// predicts the declared representative cycle's life, not accumulated
-    /// damage or the number of repetitions contained in the load path.
+    /// predicts the declared representative cycle's life. Opted-in Miner totals
+    /// separately count this window once on each fixed plane; finalizing the
+    /// same window again adds no exposure.
     /// Further mechanical advancement requires an explicit cycle restart.
     pub fn finish_fatemi_socie_cycle(
         &mut self,

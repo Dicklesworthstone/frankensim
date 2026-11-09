@@ -3281,13 +3281,60 @@ cyclic stabilization, resolve internal variable-amplitude cycles or count
 repetitions. Results expose full-cycle life, selected plane, shear amplitude,
 normal extrema, correction, closure defects and numerical work. Sample,
 plane, projection and circle limits and cancellation bound computation.
-The retained history supports inexpensive append rollback. No accumulated
-damage, stiffness loss, crack growth, inferred endurance limit or validation of
-component service life is claimed.
+The retained history supports inexpensive append rollback. Accumulation is
+available only through the explicit fixed-plane mode below. No stiffness loss,
+crack growth, inferred endurance limit or validation of component service life
+is claimed.
 
 The plane and strain conventions follow the
 [original Fatemi–Socie formulation](https://doi.org/10.1111/j.1460-2695.1988.tb01169.x)
 and [strain-based fatigue model reference](https://doc.comsol.com/6.4/doc/com.comsol.help.fatigue/fatigue_ug_sme.4.23.html).
+
+### Explicit fixed-plane accumulation across resolved shear cycles
+
+`FatemiSocieCycle::enable_miner(maximum_cycles)` opts into bounded FS/Miner
+accumulation before the first loading excursion, with zero or one observation.
+It can be enabled only once, and the positive complete-cycle limit survives
+window restarts. Every successful finalization represents exactly ONE
+caller-declared resolved complete cycle. A window containing several reversals
+is not automatically decomposed into multiaxial cycles.
+
+For every original material plane p and accepted cycle i, the same vector-path
+amplitude and whole-window normal-stress maximum produce its calibrated life
+N(p,i). The retained rule is `D(p) = sum_i 1/N(p,i)`; the summary reports
+`max_p D(p)`. It never adds the winners from different planes into one damage
+history. This maximum-accumulated-damage approximation is a separate model
+choice from the original maximum-shear-plane representative-cycle result,
+which remains unchanged and separately inspectable.
+
+`miner_summary()` exposes completed and maximum cycle counts, plane count,
+selected original normal and accumulated damage. `miner_plane_damage()`
+exposes every plane's total in the original normal order. Exact damage ties
+select the first plane. Sums use compensation and refuse nonfinite arithmetic.
+Zero shear contributes zero; EVERY positive candidate-plane parameter must
+remain inside the original finite life calibration. Thus a weak off-axis
+plane below the fit can refuse accumulation even when the representative
+maximum-shear plane is supported. No endurance limit or extrapolated life is
+silently substituted.
+
+The projection and enclosing-circle work is shared with the existing result;
+only the opted-in mode inverts each positive plane's life. Additional retained
+state is O(number of planes), independent of previous cycle sample counts.
+Finalization stages all totals and publishes after the last domain, work and
+cancellation check. Repeated finalization is idempotent. `fresh()` carries
+completed totals while discarding an unfinished window without credit;
+`discard_after()` retracts the current window's provisional contribution
+without removing previously carried cycles. Neither operation resets native
+constitutive history or supplies missing loading exposure.
+
+This empirical linear damage sum does not model load-order interactions,
+nonproportional hardening, creep, changing material conditions, or fatigue
+feedback into stiffness and heat. Cycle segmentation, sampling resolution,
+conditioning and calibration applicability remain explicit caller obligations.
+Six focused numerical regressions cover changing damaging planes, varying
+amplitudes and normal peaks, rotating shear, chunking, prefix rollback,
+late-plane refusal, cancellation and cycle limits. They validate implementation
+identities rather than component service life.
 
 ## Shear-path Findley fatigue on declared elastic stress windows
 

@@ -27,7 +27,7 @@ use fs_blake3::ContentHash;
 use fs_exec::Cx;
 use fs_material::fatigue::critical_plane::SwtCycleResult;
 use fs_material::fatigue::critical_plane::fatemi_socie::{
-    FatemiSocieCalibration, FatemiSocieCycleResult,
+    FatemiSocieCalibration, FatemiSocieCycleResult, FatemiSocieMinerSummary, FatemiSociePlaneDamage,
 };
 use fs_material::fatigue::critical_plane::miner::CriticalPlaneMinerResult;
 use fs_material::fatigue::cyclic::SourceBoundFatigueLaw;
@@ -351,6 +351,23 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> J2DynamicFatigueRun<'p, 'm, L> {
     pub fn fatemi_socie_calibration(&self, gauge: usize) -> Option<&FatemiSocieCalibration> {
         self.observer.fatemi_socie_calibration(gauge)
     }
+    /// Accumulate shear-mode Miner damage on fixed material planes across
+    /// explicitly closed native cycles. Enable at a window's first observation,
+    /// optionally after restarting a physical warm-up window. Each actual
+    /// closed cycle counts once; no repeated plastic/inertial state is inferred.
+    pub fn enable_fatemi_socie_miner(
+        &mut self,
+        maximum_cycles: u64,
+        cx: &Cx<'_>,
+    ) -> Result<(), J2FatigueError> {
+        self.observer.enable_fatemi_socie_miner(maximum_cycles, cx)
+    }
+    pub fn fatemi_socie_miner_summaries(&self) -> Vec<Option<FatemiSocieMinerSummary>> {
+        self.observer.fatemi_socie_miner_summaries()
+    }
+    pub fn fatemi_socie_plane_damage(&self, gauge: usize) -> Option<&[FatemiSociePlaneDamage]> {
+        self.observer.fatemi_socie_plane_damage(gauge)
+    }
     pub fn variable_amplitude_results(&self) -> Vec<Option<CriticalPlaneMinerResult>> {
         self.observer.variable_amplitude_results()
     }
@@ -366,6 +383,7 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> J2DynamicFatigueRun<'p, 'm, L> {
     /// Discard only the critical window/result and begin at the current accepted
     /// native state. Physical time, velocity, plastic history and all fixed-gauge
     /// samples remain intact. Warm-up cycles are not implicitly counted here.
+    /// Enabled FS/Miner damage stays attached to each original material plane.
     pub fn restart_critical_plane_cycle(&mut self, cx: &Cx<'_>) -> Result<(), J2FatigueError> {
         self.observer
             .restart_critical_plane_cycle(&self.solution, cx)
