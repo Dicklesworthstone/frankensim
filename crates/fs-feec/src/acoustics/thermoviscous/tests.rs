@@ -8,6 +8,7 @@ mod heat_source;
 mod body_force;
 mod moving_wall;
 mod time;
+mod dissipation;
 
 #[test]
 fn g1_local_stress_observation_integrates_to_original_viscous_power() {

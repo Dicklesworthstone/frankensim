@@ -62,6 +62,9 @@ pub mod time;
 pub mod stress;
 /// Complete velocity/temperature continuity between original resolved regions.
 pub mod interface;
+/// Element-resolved viscous heat and distinct thermal availability losses.
+pub mod dissipation;
+pub use dissipation::ThermoviscousElementPower;
 
 /// Hard dense-solver cap, independent of the caller's smaller budget.
 pub const MAX_LNS_DOFS: usize = 1536;
@@ -367,12 +370,14 @@ pub struct ThermoviscousPower {
     pub viscous_w: f64,
     /// Independent dilatational-viscous dissipation.
     pub bulk_w: f64,
-    /// Resolved heat-conduction dissipation.
+    /// Resolved conductive availability loss `T0 * entropy production`.
+    /// This acoustic disturbance-energy loss is not a mean caloric heat source.
     pub conductive_w: f64,
     /// Conduction in finite or semi-infinite stationary solids, evaluated from
     /// their original heat-flux admittance and the resolved wall temperature.
     pub solid_conductive_w: f64,
-    /// Molecular/caloric relaxation from passive complex heat capacity.
+    /// Molecular/caloric availability loss from passive complex heat capacity;
+    /// a separate mean-energy closure is needed before caloric heat deposition.
     pub caloric_w: f64,
     /// Original structural damping, including attached cross-mode channels;
     /// excludes the resolved fluid losses.
@@ -1594,62 +1599,11 @@ impl PreparedThermoviscous<'_, '_> {
             structural_relaxation_w: moving_wall.relaxation_w,
         };
         power.input_w += moving_wall.external_input_w;
-        let quad = duffy_quadrature(model.volume_quadrature_order());
-        for t in 0..model.space.complex.tets.len() {
-            poll(cancelled)?;
-            let dofs = model.space.element_dofs(t);
-            for &(bary, w) in &quad {
-                poll(cancelled)?;
-                let (jac, barycentric_gradients) = model.volume_geometry(t, bary)?;
-                let mut grad_v = [[C64::ZERO; 3]; 3];
-                let mut grad_t = [C64::ZERO; 3];
-                let mut temp = C64::ZERO;
-                for &(i, f) in &dofs {
-                    let dl = f.d_lambda(bary, 2);
-                    let gradient = std::array::from_fn::<_, 3, _>(|c| {
-                        (0..4)
-                            .map(|a| dl[a] * barycentric_gradients[a][c])
-                            .sum::<f64>()
-                    });
-                    temp = temp + temperature_k[i].scale(f.eval(bary, 2));
-                    for a in 0..3 {
-                        grad_t[a] = grad_t[a] + temperature_k[i].scale(gradient[a]);
-                        for b in 0..3 {
-                            grad_v[a][b] = grad_v[a][b] + velocity_m_s[i][a].scale(gradient[b]);
-                        }
-                    }
-                }
-                let divergence = grad_v[0][0] + grad_v[1][1] + grad_v[2][2];
-                let mut dev_norm = 0.0;
-                for a in 0..3 {
-                    for b in 0..3 {
-                        let dev = (grad_v[a][b] + grad_v[b][a]).scale(0.5)
-                            - if a == b {
-                                divergence.scale(1.0 / 3.0)
-                            } else {
-                                C64::ZERO
-                            };
-                        dev_norm += dev.norm_sq();
-                    }
-                }
-                let volume_weight = jac * w;
-                let gas = model.medium;
-                power.viscous_w += volume_weight * gas.dynamic_viscosity_pa_s * dev_norm;
-                power.bulk_w +=
-                    0.5 * volume_weight * gas.bulk_viscosity_pa_s * divergence.norm_sq();
-                power.conductive_w += 0.5 * volume_weight * gas.thermal_conductivity_w_m_k
-                    / gas.temperature_k
-                    * grad_t.iter().map(|z| z.norm_sq()).sum::<f64>();
-                power.caloric_w += -0.5
-                    * volume_weight
-                    * std::f64::consts::TAU
-                    * self.frequency_hz
-                    * gas.density_kg_m3
-                    * self.cp.im
-                    / gas.temperature_k
-                    * temp.norm_sq();
-            }
-        }
+        let volume = self.volume_dissipation(&velocity_m_s, &temperature_k, cancelled, |_| {})?;
+        power.viscous_w = volume.viscous_w;
+        power.bulk_w = volume.bulk_w;
+        power.conductive_w = volume.conductive_w;
+        power.caloric_w = volume.caloric_w;
         if [
             power.input_w,
             power.viscous_w,

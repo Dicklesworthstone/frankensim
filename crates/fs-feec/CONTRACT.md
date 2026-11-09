@@ -1474,6 +1474,30 @@ The response retains original-coordinate pressure, velocity and temperature,
 all port flows, and independently integrated shear, bulk, conduction and
 caloric work. Losses and work residuals are not clipped.
 
+`PreparedThermoviscous::element_dissipation` and the same method on the loaded
+`PreparedThermoviscousScattering` independently integrate the declared full P2
+velocity and actual temperature-perturbation coefficients in original tetrahedron
+order. They retain the immutable prepared frequency, complex Cp, equilibrium,
+transport and affine/quadratic geometry. Each `ThermoviscousElementPower` reports
+actual quadrature volume and original `rho*V` mass, shear and independent bulk
+viscous heating, conductive entropy production, conductive availability loss,
+and complex-Cp caloric availability loss. The same physical quadrature kernel
+serves existing response power; its original global point accumulation order is
+retained independently of the element totals. Ordinary responses do not allocate
+an additional element result vector or refactor the mixed system.
+
+Only `viscous_heat_w()` (shear plus bulk) is a direct mean caloric heat source.
+Fourier conduction contributes `T0*entropy production` to the acoustic
+disturbance-energy balance; complex-Cp caloric loss is likewise reported as
+availability destruction. Neither is silently deposited into a mean heat
+equation without its own supported mean-energy closure. Pressure work, boundary
+conduction, structural losses and balance residuals are excluded from these
+volume records. Full native coefficient lengths and finite values are admitted;
+original element/quadrature limits and cancellation apply. An arbitrary admitted
+field observation does not certify the field satisfies the mixed equations or
+boundary conditions. No loss clipping, fitted attenuation, or vertex-only
+gradient reconstruction is used.
+
 `ThermoviscousFe::prepare_stress_at` retains the original P2 physical velocity
 gradients and P1 pressure interpolation at an admitted point of an affine or
 quadratic tetrahedron. Warm harmonic and instantaneous observations read ten
