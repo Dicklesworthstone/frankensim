@@ -8,6 +8,9 @@ use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 #[path = "thermoelastic/motion.rs"]
 mod motion;
 
+#[path = "thermoelastic/dynamics.rs"]
+mod dynamics;
+
 fn kelvin() -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,

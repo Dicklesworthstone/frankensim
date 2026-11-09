@@ -32,6 +32,9 @@ pub use strength::FrameLaminateStrengthAssessment;
 /// Original-source reversible storage and instantaneous thermal feedback.
 pub mod thermoelastic;
 
+/// Native inertial response between two original laminate temperature fields.
+pub mod dynamics;
+
 fn invalid(what: &str) -> SolidError {
     SolidError::MaterialRefused { what: what.into() }
 }

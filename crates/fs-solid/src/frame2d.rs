@@ -607,6 +607,13 @@ struct DampingPreparation {
     cmat: Vec<f64>,
 }
 
+/// An original material endpoint prepared by the native thermal trajectory.
+/// Private: callers cannot substitute arbitrary force or acceleration histories.
+struct DynamicInitialState<'a> {
+    internal_force: &'a [f64],
+    acceleration: &'a [f64],
+}
+
 /// Newton acceptance: the force residual meets `tol`, or the iteration has
 /// reached the round-off floor — a correction negligible against the solved
 /// coordinate (displacement or acceleration) while within `floor_tol`.
@@ -1696,6 +1703,23 @@ impl Frame2d {
         checkpoint: &mut impl FnMut() -> Result<(), SolidError>,
         accepted: &mut (impl FnMut(&Self) -> Result<(), SolidError> + ?Sized),
     ) -> Result<DynamicHistory, SolidError> {
+        self.newmark_with_load_initialized(
+            ground, dt, dir, damping, sustained_load, None, checkpoint, accepted,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn newmark_with_load_initialized(
+        &mut self,
+        ground: &[f64],
+        dt: f64,
+        dir: (f64, f64),
+        damping: Rayleigh,
+        sustained_load: &[f64],
+        original: Option<DynamicInitialState<'_>>,
+        checkpoint: &mut impl FnMut() -> Result<(), SolidError>,
+        accepted: &mut (impl FnMut(&Self) -> Result<(), SolidError> + ?Sized),
+    ) -> Result<DynamicHistory, SolidError> {
         checkpoint()?;
         let n = self.ndof();
         if !(dt.is_finite() && dt > 0.0) {
@@ -1772,11 +1796,31 @@ impl Frame2d {
             iterations: vec![0],
         };
         // Consistent initial acceleration on massive DOFs.
-        let (f0, _, _) = self.assemble_controlled(&self.u, checkpoint)?;
+        let f0 = if let Some(start) = &original {
+            if start.internal_force.len() != n
+                || start.acceleration.len() != n
+                || start
+                    .internal_force
+                    .iter()
+                    .chain(start.acceleration)
+                    .any(|x| !x.is_finite())
+            {
+                return Err(SolidError::InvalidInput {
+                    what: "original Newmark endpoint must retain finite native force and acceleration".into(),
+                });
+            }
+            start.internal_force.to_vec()
+        } else {
+            self.assemble_controlled(&self.u, checkpoint)?.0
+        };
         let p0 = pext(ground.first().copied().unwrap_or(0.0));
         let c0 = cv(&self.vel);
         let initial_force: Vec<f64> = (0..n).map(|d| p0[d] - c0[d] - f0[d]).collect();
-        let initial_acceleration = m.acceleration(&initial_force, &self.fixed)?;
+        let initial_acceleration = if let Some(start) = original {
+            start.acceleration.to_vec()
+        } else {
+            m.acceleration(&initial_force, &self.fixed)?
+        };
         // Failed admission must not establish a reference for a future run.
         // Once initialization succeeds, retain it even if a later step fails.
         if let Some(stiffness) = new_reference {
