@@ -2,7 +2,7 @@
 //!
 //! At one frozen material state per section, the SAME conserved mass rate m
 //! obeys the sum of its ORIGINAL pressure-loss laws. Constant linear/quadratic
-//! laws use an analytic scalar inverse. An explicitly selected turbulent pipe
+//! laws use an analytic scalar inverse. An explicitly selected nonlinear pipe
 //! uses bounded Newton/bisection inside the common Reynolds support instead.
 //! Re-evaluate every original section for signed pressure, tangent and heat.
 //! No temperature equation, pump curve, interpolation or fluid default is added.
@@ -271,7 +271,7 @@ impl<F: FluidTransport> SeriesPressureFlow<F> {
             || !(0.0..1.0).contains(&budget.relative_pressure_tolerance)
         { return Err(invalid("nonempty bounded sections, finite drive and pressure tolerances required")); }
         let mut snapshots = Vec::with_capacity(sections.len());
-        let nonlinear = sections.iter().any(|section| section.resistance.relative_roughness.is_some());
+        let nonlinear = sections.iter().any(|section| section.resistance.pipe_friction.is_some());
         let (mut linear, mut quadratic) = (Sum::default(), Sum::default());
         for (index, section) in sections.iter().enumerate() {
             poll(gate)?;

@@ -437,3 +437,66 @@ fn turbulent_series_refuses_unreachable_pressure_and_disjoint_original_support()
         PressureSection { resistance: narrow, medium: fluid(1000.0, 0.001) },
     ], 1e4, budget(), &gate).is_err());
 }
+
+#[test]
+fn churchill_series_crosses_transition_with_original_viscosity_and_shared_mass() {
+    struct Source { calls: std::cell::Cell<usize>, state: FluidTransportState }
+    impl FluidTransport for Source {
+        fn transport_state(&self) -> core::result::Result<FluidTransportState, MaterialError> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(self.state)
+        }
+    }
+    // Direct published Darcy equation, independent of the scaled constitutive
+    // implementation and its Newton tangent/inverse.
+    let pressure = |mass: f64, length: f64, roughness: f64, rho: f64, mu: f64| {
+        let area = core::f64::consts::PI * 0.01_f64.powi(2) / 4.0;
+        let re = mass * 0.01 / (mu * area);
+        let a = (-2.457 * ((7.0 / re).powf(0.9) + 0.27 * roughness).ln()).powi(16);
+        let b = (37530.0 / re).powi(16);
+        let f = 8.0 * ((8.0 / re).powi(12) + (a + b).powf(-1.5)).powf(1.0 / 12.0);
+        f * (length / 0.01) * mass * mass / (2.0 * rho * area * area)
+    };
+    let pipe = |length, roughness| MaterialFlowResistance::circular_churchill(
+        Length::new(length), Length::new(0.01), Length::new(roughness * 0.01),
+        (0.0, 1e6),
+    ).unwrap();
+    let sections = || vec![
+        PressureSection {
+            resistance: pipe(2.0, 1e-4),
+            medium: Source { calls: std::cell::Cell::new(0), state: fluid(1000.0, 0.001) },
+        },
+        PressureSection {
+            resistance: pipe(0.5, 0.01),
+            medium: Source { calls: std::cell::Cell::new(0), state: fluid(800.0, 0.003) },
+        },
+    ];
+    let gate = CancelGate::new_clock_free();
+    let area = core::f64::consts::PI * 0.01_f64.powi(2) / 4.0;
+    for re in [1000.0, 2300.0, 3000.0, 10000.0] {
+        let mass = re * 0.001 * area / 0.01;
+        let drops = [pressure(mass, 2.0, 1e-4, 1000.0, 0.001),
+            pressure(mass, 0.5, 0.01, 800.0, 0.003)];
+        let drive = drops[0] + drops[1];
+        for sign in [-1.0, 1.0] {
+            let solved = SeriesPressureFlow::solve(sections(), sign * drive, budget(), &gate).unwrap();
+            assert!((solved.mass_flow_kg_s() / (sign * mass) - 1.0).abs() < 3e-11);
+            for (index, value) in solved.evaluations().iter().enumerate() {
+                assert!((value.pressure_drop_pa / (sign * drops[index]) - 1.0).abs() < 6e-11);
+                assert_eq!(value.law, solved.sections()[index].resistance);
+                assert_eq!(value.transport, solved.sections()[index].medium.state);
+                assert_eq!(solved.sections()[index].medium.calls.get(), 1);
+                near(value.dissipated_power_w, value.pressure_drop_pa * value.volume_flow_m3_s);
+            }
+            let expected_power = drops[0] * mass / 1000.0 + drops[1] * mass / 800.0;
+            assert!((solved.dissipated_power_w() / expected_power - 1.0).abs() < 8e-11);
+            assert!(solved.dpressure_dmass_flow() > 0.0);
+        }
+    }
+    let rest = SeriesPressureFlow::solve(sections(), 0.0, budget(), &gate).unwrap();
+    assert_eq!(rest.mass_flow_kg_s(), 0.0);
+    assert_eq!(rest.dissipated_power_w(), 0.0);
+    let expected_tangent = 128.0 / (core::f64::consts::PI * 0.01_f64.powi(4))
+        * (2.0 * 0.001 / 1000.0 + 0.5 * 0.003 / 800.0);
+    assert!((rest.dpressure_dmass_flow() / expected_tangent - 1.0).abs() < 1e-14);
+}

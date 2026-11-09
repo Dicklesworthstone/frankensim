@@ -1,7 +1,7 @@
 //! Explicit developed rough-pipe resistance on the original fluid snapshot.
 
 use fs_math::det;
-use super::{Area, Length, MaterialFlowResistance, ResistanceError, positive};
+use super::{Area, Length, MaterialFlowResistance, PipeFriction, ResistanceError, positive};
 
 impl MaterialFlowResistance {
     /// Fully developed Newtonian circular pipe, using Darcy-Weisbach loss and
@@ -47,21 +47,28 @@ impl MaterialFlowResistance {
             return Err(ResistanceError::Invalid("turbulent pipe geometry is unrepresentable"));
         }
         let mut law = Self::try_new(0.0, geometry, Area::new(area), Length::new(diameter), reynolds_range)?;
-        law.relative_roughness = Some(relative_roughness);
+        law.pipe_friction = Some(PipeFriction::Colebrook(relative_roughness));
         Ok(law)
     }
 
 
-    /// Numerical pressure-to-flow inverse of this same Colebrook law. Graph
+    /// Numerical pressure-to-flow inverse of the original pipe law. Graph
     /// brackets may use it only inside their precomputed Reynolds endpoints;
-    /// accepted flows must still pass `evaluate_snapshot`. This is algebraic,
-    /// not an explicit approximation to the friction factor.
+    /// accepted flows must still pass `evaluate_snapshot`. Colebrook uses its
+    /// algebraic inverse; Churchill uses bounded Newton/bisection with the same
+    /// exact derivative as the forward law and the admitted volume-flow bounds.
     pub(crate) fn turbulent_trial_volume_flow(
         &self, transport: fs_material::fluid_transport::FluidTransportState,
         rho: f64, pressure_magnitude: f64,
+        volume_bounds: (f64, f64),
     ) -> Result<f64, ResistanceError> {
-        let roughness = self.relative_roughness
-            .ok_or(ResistanceError::Invalid("Colebrook pipe required for nonlinear inverse"))?;
+        let roughness = match self.pipe_friction {
+            Some(PipeFriction::Colebrook(roughness)) => roughness,
+            Some(PipeFriction::Churchill(_)) => {
+                return super::churchill::invert(self, transport, rho, pressure_magnitude, volume_bounds);
+            }
+            None => return Err(ResistanceError::Invalid("pipe friction required for nonlinear inverse")),
+        };
         if !positive(rho) || !positive(pressure_magnitude) {
             return Err(ResistanceError::Invalid("positive density and pressure required for pipe inverse"));
         }
@@ -81,11 +88,14 @@ impl MaterialFlowResistance {
         Ok(q)
     }
 
-    /// Equivalent sand roughness / diameter for the selected Colebrook pipe.
+    /// Equivalent sand roughness / diameter for the selected nonlinear pipe law.
     /// `None` denotes an authored constant linear/quadratic resistance.
     #[must_use]
     pub const fn relative_sand_roughness(&self) -> Option<f64> {
-        self.relative_roughness
+        match self.pipe_friction {
+            Some(PipeFriction::Colebrook(roughness) | PipeFriction::Churchill(roughness)) => Some(roughness),
+            None => None,
+        }
     }
 }
 

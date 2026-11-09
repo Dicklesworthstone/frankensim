@@ -407,7 +407,7 @@ impl LossGraph {
                     "turbulent branch differential resistance")?;
                 let agrees = |a: f64, b: f64| {
                     let scale = a.abs().max(b.abs());
-                    scale > 0.0 && (a / scale - b / scale).abs() <= 256.0 * f64::EPSILON
+                    a == b || (scale > 0.0 && (a / scale - b / scale).abs() <= 256.0 * f64::EPSILON)
                 };
                 if tangent <= 0.0 || !agrees(original.pressure_drop_pa, dp)
                     || !agrees(original.dissipated_power_w, power)

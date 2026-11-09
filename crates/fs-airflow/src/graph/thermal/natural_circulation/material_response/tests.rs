@@ -453,3 +453,84 @@ fn turbulent_continuation_refuses_unsupported_physics_and_native_inertia_retains
             [0.0, 0.0, -9.81], cx).is_err());
     });
 }
+
+#[test]
+fn churchill_graph_crosses_transition_and_reverses_with_original_materials() {
+    with_cx(|cx| {
+        let mut selected = law(1.0, 0.0);
+        selected.resistance = MaterialFlowResistance::circular_churchill(
+            Length::new(2.0), Length::new(0.01), Length::new(1e-6), (0.0, 1e6),
+        ).unwrap();
+        selected.exchange.clear();
+        let area = core::f64::consts::PI * 0.01_f64.powi(2) / 4.0;
+        let q = 3000.0 * 0.001 * area / (1000.0 * 0.01);
+        for (mu, re) in [(0.003, 1000.0_f64), (0.001, 3000.0), (0.0003, 10000.0)] {
+            // Direct Churchill equation with the bounded Boussinesq momentum
+            // density, while the original 900 kg/m^3 snapshot stays attached.
+            let a = (-2.457 * ((7.0 / re).powf(0.9) + 0.27e-4).ln()).powi(16);
+            let b = (37530.0 / re).powi(16);
+            let f = 8.0 * ((8.0 / re).powi(12) + (a + b).powf(-1.5)).powf(1.0 / 12.0);
+            let dp = f * 200.0 * 500.0 * (q / area).powi(2);
+            for sign in [-1.0, 1.0] {
+                let response = evaluate_material_graph(cx, &template(), density(),
+                    &[selected.clone()], &[sign * q],
+                    vec![source("current bulk", 900.0, mu, 0.5)], vec![vec![]]).unwrap();
+                let mut controls = config();
+                controls.absolute_flow_tolerance = fs_qty::VolumetricFlowRate::new(1e-16);
+                controls.relative_flow_tolerance = 1e-12;
+                let solved = response.graph.solve(
+                    &[boundary(0, sign * dp), boundary(1, 0.0)], controls, cx,
+                ).unwrap();
+                let flow = solved.branches[0].flow.value();
+                assert!((flow / (sign * q) - 1.0).abs() < 3e-12);
+                let original = solved.branches[0].turbulent_loss.as_ref().unwrap();
+                let value = original.evaluate(solved.branches[0].flow).unwrap();
+                assert_eq!(original.law(), selected.resistance);
+                assert_eq!(original.source(), &selected.source);
+                assert_eq!(value.transport.density_kg_m3(), 900.0);
+                assert_eq!(value.transport.dynamic_viscosity_pa_s(), mu);
+                assert_eq!(value.momentum_density_kg_m3, 1000.0);
+                assert!((value.reynolds / re - 1.0).abs() < 3e-12);
+                assert!((value.dissipated_power_w / (dp * q) - 1.0).abs() < 6e-12);
+                assert_eq!(response.momentum[0].medium.queries.get(), 1);
+            }
+        }
+    });
+}
+
+#[test]
+fn churchill_graph_rest_has_poiseuille_tangent_and_continuous_signed_pressure_response() {
+    use crate::graph::sensitivity::GraphSensitivityConfig;
+    use fs_qty::{Pressure, VolumetricFlowRate};
+    use fs_solver::CheckedCgConfig;
+    with_cx(|cx| {
+        let mut selected = law(1.0, 0.0);
+        selected.resistance = MaterialFlowResistance::circular_churchill(
+            Length::new(2.0), Length::new(0.01), Length::new(1e-6), (0.0, 1e6),
+        ).unwrap();
+        selected.exchange.clear();
+        let response = evaluate_material_graph(cx, &template(), density(), &[selected],
+            &[0.0], vec![source("rest", 900.0, 0.001, 0.5)], vec![vec![]]).unwrap();
+        let linear = response.graph.solve_linearized(
+            &[boundary(0, 0.0), boundary(1, 0.0)], config(),
+            GraphSensitivityConfig { minimum_absolute_flow: VolumetricFlowRate::new(0.0),
+                linear: CheckedCgConfig { tolerance: 1e-12, max_iterations: 64, max_corrections: 2 } },
+            cx,
+        ).unwrap();
+        assert_eq!(linear.solution().branches[0].flow.value(), 0.0);
+        let original = linear.solution().branches[0].turbulent_loss.as_ref().unwrap();
+        assert_eq!(original.evaluate(VolumetricFlowRate::new(0.0)).unwrap().dissipated_power_w, 0.0);
+        let tangent = linear.tangent(&[0.0], &[Pressure::new(1.0), Pressure::new(0.0)], cx).unwrap();
+        let conductance = core::f64::consts::PI * 0.01_f64.powi(4) / (128.0 * 0.001 * 2.0);
+        assert!((tangent.flows[0].value() / conductance - 1.0).abs() < 1e-14);
+        for dp in [-1e-8, 1e-8] {
+            let solved = response.graph.solve(
+                &[boundary(0, dp), boundary(1, 0.0)], config(), cx,
+            ).unwrap();
+            let q = solved.branches[0].flow.value();
+            assert!((q / (conductance * dp) - 1.0).abs() < 1e-13);
+            assert!(dp * q > 0.0);
+        }
+        assert_eq!(response.momentum[0].medium.queries.get(), 1);
+    });
+}

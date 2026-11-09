@@ -46,7 +46,8 @@ pub type FlowWeight = Qty<-3, 0, 1, 0, 0, 0>;
 #[derive(Debug, Clone, Copy)]
 pub struct GraphSensitivityConfig {
     /// Refuse branches at or below this nonnegative absolute flow (m^3/s).
-    /// Zero also admits stagnant branches with a positive linear coefficient.
+    /// Zero also admits stagnant branches with a positive original differential
+    /// resistance, including explicitly selected Churchill pipe friction.
     pub minimum_absolute_flow: VolumetricFlowRate,
     /// Shared iteration budget and recomputed-residual target for each solve.
     pub linear: CheckedCgConfig,
@@ -191,7 +192,8 @@ impl LossGraph {
             let q = branch.flow.value();
             let linear = self.linear_resistance[edge];
             if q.abs() <= sensitivity.minimum_absolute_flow.value()
-                && (linear == 0.0 || sensitivity.minimum_absolute_flow.value() > 0.0)
+                && ((linear == 0.0 && self.turbulent_losses[edge].is_none())
+                    || sensitivity.minimum_absolute_flow.value() > 0.0)
             {
                 return Err(GraphSensitivityError::NonDifferentiableBranch {
                     branch: edge, flow: branch.flow,

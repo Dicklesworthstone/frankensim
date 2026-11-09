@@ -5816,3 +5816,39 @@ Focused regressions cover an independent fan/Poiseuille intersection under
 density and speed changes, heated branch redistribution with nonlinear original
 enthalpy, actual inlet-volume selection, native source/stall refusals, and shared
 work, cancellation and separate omitted-fan-power admission.
+
+## Explicit continuous circular-pipe viscosity law
+
+`MaterialFlowResistance::circular_churchill` selects Churchill's 1977 empirical
+laminar/transition/turbulent correlation with authored Reynolds support inside
+[0, 1e8] and equivalent sand roughness / diameter inside [0, 0.05]. Existing
+Poiseuille and Colebrook constructors retain their original applicability.
+This assumes steady developed Newtonian pipe flow; it does not resolve
+transition intermittency, entrance profiles, compressibility or unsteady stress.
+The transition fit is an engineering approximation, not an onset criterion.
+
+The implementation scales the exact Poiseuille geometry by `f_D Re / 64`,
+which has a finite unit limit at rest. Original source dynamic viscosity and
+momentum density determine Reynolds number, signed pressure and pressure work.
+The exact fixed-material derivative differentiates the same correlation,
+including its Reynolds dependence. Weak flow and rest recover the original
+Poiseuille resistance without artificial drag or a singular friction factor.
+
+Existing series and native graph owners retain this original nonlinear law and
+its material snapshot. Series inversion intersects authored Reynolds intervals;
+graph inversion uses bounded Newton/bisection inside admitted flow endpoints.
+Reverse flow remains dissipative. An explicitly admitted rest state now passes
+native pressure/work closure and graph sensitivity uses its positive original
+differential resistance. Constant-coefficient exports continue to refuse
+nonlinear friction; a hydraulic regime selection does not extend any separate
+heat-transfer correlation's domain.
+
+Regressions compare the independent published Darcy equation, perturb the
+analytical tangent through transition, check rest and signed-flow symmetry,
+and exercise actual viscosity changes, source-retaining series pressure solves,
+native graph inversion and the zero-flow Poiseuille sensitivity.
+
+Reference: S. W. Churchill, "Friction-factor equation spans all fluid-flow
+regimes" (1977), equations (5), (18), converted from the paper's friction
+convention to Darcy friction:
+<https://files.engineering.com/files/85c0f3a6-a102-4a22-9d35-f15858c0dd2b/CEM_-_Friction-factor_equation_%281977%29.pdf>.

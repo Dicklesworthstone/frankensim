@@ -6,6 +6,8 @@
 //! pipe-friction correlation. The coefficients and Reynolds interval are
 //! explicit authored assumptions. `circular_turbulent` instead selects the
 //! implicit Colebrook-White pipe law with declared equivalent sand roughness.
+//! `circular_churchill` explicitly selects a continuous laminar/transition/
+//! turbulent engineering correlation, retaining finite resistance at rest.
 //! Entrance, phase and compressible effects are not inferred.
 //!
 //! Source form: COMSOL, Forchheimer Flow model documentation,
@@ -24,6 +26,13 @@ pub mod pressure;
 // Geometry-derived Newtonian laminar laws feed this same material/flow owner.
 mod laminar;
 mod turbulent;
+mod churchill;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PipeFriction {
+    Colebrook(f64),
+    Churchill(f64),
+}
 
 /// Immutable geometry/calibration, not fluid-specific pressure-loss constants.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -33,8 +42,9 @@ pub struct MaterialFlowResistance {
     flow_area: Area,
     reynolds_length: Length,
     reynolds_range: (f64, f64),
-    // Some selects Colebrook friction; inertial_geometry then excludes f(Re).
-    relative_roughness: Option<f64>,
+    // Colebrook scales inertial geometry by f(Re). Churchill scales the exact
+    // Poiseuille geometry by f(Re)*Re/64, which remains finite through rest.
+    pipe_friction: Option<PipeFriction>,
 }
 
 /// Original material refusal or an unsupported pressure-loss evaluation.
@@ -108,7 +118,7 @@ impl MaterialFlowResistance {
             return Err(ResistanceError::Invalid("invalid resistance factors, geometry or Reynolds support"));
         }
         Ok(Self { viscous_geometry: viscous_geometry_per_m3, inertial_geometry: inertial_geometry_per_m4,
-            flow_area, reynolds_length, reynolds_range, relative_roughness: None })
+            flow_area, reynolds_length, reynolds_range, pipe_friction: None })
     }
 
     /// Flow-normal area used by velocity and Reynolds admission.
@@ -145,7 +155,7 @@ impl MaterialFlowResistance {
     pub(crate) fn volume_coefficients(
         &self, transport: FluidTransportState, momentum_density: f64,
     ) -> Result<(f64, f64), ResistanceError> {
-        if self.relative_roughness.is_some() {
+        if self.pipe_friction.is_some() {
             return Err(ResistanceError::Invalid("Reynolds-dependent pipe friction cannot be frozen into volume-flow coefficients"));
         }
         if !positive(momentum_density) {
@@ -185,13 +195,21 @@ impl MaterialFlowResistance {
         if reynolds < self.reynolds_range.0 || reynolds > self.reynolds_range.1 {
             return Err(ResistanceError::Reynolds { value: reynolds, admitted: self.reynolds_range });
         }
-        let viscous = (self.viscous_geometry * mu) * q;
-        let (friction, logarithmic_slope) = if let Some(roughness) = self.relative_roughness {
-            turbulent::colebrook(reynolds, roughness)?
-        } else { (1.0, 0.0) };
+        let (viscous_scale, viscous_slope, friction, logarithmic_slope) = match self.pipe_friction {
+            Some(PipeFriction::Colebrook(roughness)) => {
+                let (factor, slope) = turbulent::colebrook(reynolds, roughness)?;
+                (1.0, 0.0, factor, slope)
+            }
+            Some(PipeFriction::Churchill(roughness)) => {
+                let (factor, slope) = churchill::laminar_multiplier(reynolds, roughness);
+                (factor, slope, 1.0, 0.0)
+            }
+            None => (1.0, 0.0, 1.0, 0.0),
+        };
+        let viscous = ((self.viscous_geometry * mu) * viscous_scale) * q;
         let inertial = ((self.inertial_geometry * friction) * mass.abs()) * q;
         let dp = viscous + inertial;
-        let derivative = (self.viscous_geometry * mu) / rho
+        let derivative = ((self.viscous_geometry * mu) / rho) * viscous_scale * (1.0 + viscous_slope)
             + ((2.0 + logarithmic_slope) * (self.inertial_geometry * friction) * q.abs());
         let power = dp * q;
         if [viscous, inertial, dp, derivative, power].iter().any(|v| !v.is_finite())

@@ -1,9 +1,10 @@
-//! Source-preserving turbulent pipe branches for the native passive graph.
+//! Source-preserving Reynolds-dependent pipe branches for the native graph.
 //!
 //! The nodal solver brackets through zero flow. Outside the authored turbulent
 //! Reynolds band it uses a private monotone numerical continuation, solely to
 //! locate roots. Every public graph/fan result re-evaluates the original pipe;
-//! continuation is never an admissible laminar or transition model.
+//! continuation is never a physical extrapolation. Explicitly selected Churchill
+//! pipes admit their original laminar/transition law, including rest.
 
 use fs_material::fluid_transport::FluidTransportState;
 use fs_qty::{MassFlowRate, VolumetricFlowRate};
@@ -13,7 +14,7 @@ use crate::graph::thermal::medium::series::hydraulic::{
 };
 use crate::{LossElement, LossResistance, SourceProvenance, ToleranceBasis};
 
-/// One original Colebrook pipe and its coherent frozen material snapshot.
+/// One original Colebrook or Churchill pipe and its coherent material snapshot.
 /// Momentum density is explicit for the existing bounded Boussinesq owner;
 /// no material property, roughness, or friction coefficient is fitted here.
 #[derive(Debug, Clone, PartialEq)]
@@ -32,12 +33,12 @@ pub struct TurbulentPipeLoss {
 }
 
 impl TurbulentPipeLoss {
-    /// Bind a developed turbulent pipe to one original material snapshot.
+    /// Bind an original nonlinear pipe law to one coherent material snapshot.
     /// The source describes its geometric law and developed-flow assumption.
     /// Source density bounds remain the caller's explicit Boussinesq policy.
     ///
     /// # Errors
-    /// A non-Colebrook law, missing source, invalid density/uncertainty, or
+    /// A non-pipe law, missing source, invalid density/uncertainty, or
     /// unrepresentable Reynolds endpoints, pressure loss, power or tangent.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -56,7 +57,7 @@ impl TurbulentPipeLoss {
             || !momentum_density_kg_m3.is_finite() || momentum_density_kg_m3 <= 0.0
             || law.relative_sand_roughness().is_none()
         {
-            return Err(ResistanceError::Invalid("source-backed turbulent pipe and positive momentum density required"));
+            return Err(ResistanceError::Invalid("source-backed nonlinear pipe and positive momentum density required"));
         }
         // Round the two numerical brackets inward, never widen source support.
         // The original evaluation below remains the authority on every endpoint.
@@ -107,7 +108,9 @@ impl TurbulentPipeLoss {
     pub const fn source(&self) -> &SourceProvenance { &self.source }
 
     /// Evaluate the ORIGINAL law, including its Reynolds support and power.
-    /// Zero/transition flow refuses; the graph's numerical continuation is private.
+    /// Colebrook still refuses zero/transition flow. Churchill admits only its
+    /// declared interval, including rest when selected. Numerical continuation
+    /// outside either original interval remains private.
     pub fn evaluate(&self, flow: VolumetricFlowRate) -> Result<ResistanceEvaluation, ResistanceError> {
         let q = flow.value();
         let mass = q * self.momentum_density_kg_m3;
@@ -134,7 +137,8 @@ impl TurbulentPipeLoss {
         } else {
             // Suppress only inverse-rounding excursions at the two admitted
             // endpoints. Original support and pressure closure are still checked.
-            self.law.turbulent_trial_volume_flow(self.transport, self.momentum_density_kg_m3, dp)?
+            self.law.turbulent_trial_volume_flow(self.transport, self.momentum_density_kg_m3, dp,
+                (self.lower_flow_m3_s, self.upper_flow_m3_s))?
                 .clamp(self.lower_flow_m3_s, self.upper_flow_m3_s)
         };
         if !q.is_finite() || (dp != 0.0 && q <= 0.0) {
