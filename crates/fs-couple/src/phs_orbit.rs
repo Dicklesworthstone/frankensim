@@ -633,7 +633,6 @@ fn audit_orbit_with_input_effort(
             || row.iter().any(|z|!z.re.is_finite() || !z.im.is_finite()))
     { return Err(bad("cycle audit needs finite original-state Fourier rows and 32..=65536 samples")); }
     let n=system.state_dim(); let m=system.port_dim();
-    let (_,r,_)=system.structure();
     let mut x=vec![0.0;n]; let mut e=vec![0.0;n]; let mut u=vec![0.0;m];
     let mut flows=vec![0.0;m];
     let (mut energy_sum,mut supply_sum,mut loss_sum,mut scale_sum)=(0.0,0.0,0.0,0.0);
@@ -655,11 +654,8 @@ fn audit_orbit_with_input_effort(
         // can hide real work when large opposite source powers cancel.
         let supply=system.supplied_power_from_effort(&e,&u)
             .map_err(|_|PhsOrbitError::SourceRefused)?;
-        let mut loss=0.0;
-        for i in 0..n {
-            let re=(0..n).map(|k|r[i*n+k]*e[k]).sum::<f64>();
-            loss+=e[i]*re;
-        }
+        let loss=system.resistance_power_from_effort(&e)
+            .map_err(|_|PhsOrbitError::SourceRefused)?;
         if ![h,supply,loss].iter().all(|v|v.is_finite()) {
             return Err(bad("cycle audit produced nonfinite physical work or storage"));
         }
@@ -754,6 +750,31 @@ mod tests {
             assert_eq!(audit.mean_resistance_loss_w,1.0);
             assert_eq!(audit.cycle_power_residual_w,0.0);
             assert_eq!(audit.relative_power_residual,0.0);
+        }
+    }
+
+    #[test]
+    fn g1_cycle_loss_retains_a_weak_collective_resistance_direction() {
+        let identity=vec![1.0,0.0,0.0, 0.0,1.0,0.0, 0.0,0.0,1.0];
+        let system=PortHamiltonian::new(3,3,vec![0.0;9],vec![1.0;9],identity.clone(),
+            Box::new(QuadraticStorage::new(identity,3).unwrap())).unwrap();
+        let large=2.0_f64.powi(54);
+        let input=PeriodicPortInput::new(1.0,vec![vec![C64::ONE];3]).unwrap();
+        for state in [[large,1.0,-large],[1.0,large,-large],[-large,1.0,large]] {
+            // R=b*b^T with b=[1,1,1]. Independently, (b dot state)^2=1,
+            // while the authored input balances each resistance flow exactly.
+            let orbit=HbOrbit {
+                omega:1.0,
+                coeffs:state.into_iter().map(|x|vec![C64::from_re(x)]).collect(),
+                residual_trace:Vec::new(),residual:0.0,aft_samples:0,sampling_defect:0.0,
+            };
+            for samples in [32,64,128] {
+                let audit=audit_forced_orbit(&system,&input,&orbit,samples).unwrap();
+                assert_eq!(audit.mean_supplied_power_w,1.0);
+                assert_eq!(audit.mean_resistance_loss_w,1.0);
+                assert_eq!(audit.cycle_power_residual_w,0.0);
+                assert_eq!(audit.relative_power_residual,0.0);
+            }
         }
     }
 

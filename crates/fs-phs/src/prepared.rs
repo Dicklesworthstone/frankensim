@@ -638,16 +638,11 @@ impl StepWorkspace {
             stagnant,
             dissipation.is_some(),
         )?;
-        let mut dissipated = 0.0;
-        for row in 0..n {
-            let mut value = 0.0;
-            for col in 0..n { value += sys.r[row * n + col] * self.effort[col]; }
-            dissipated += self.effort[row] * value;
-        }
-        if dissipation.is_some() {
-            dissipated += self.nonlinear_power.dissipated_power_w;
-        }
-        dissipated *= dt;
+        let other_loss = if dissipation.is_some() {
+            self.nonlinear_power.dissipated_power_w
+        } else { 0.0 };
+        let dissipated = crate::resistance_work_from_effort(
+            n, &sys.r, &self.effort, dt, other_loss)?;
         sys.output_from_effort_into(&self.effort, &mut self.output)?;
         let supplied = crate::port_work_from_effort(n, self.m, &sys.g, &self.effort, u, dt,
             self.nonlinear_power.supplied_power_w)?;

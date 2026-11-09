@@ -12,6 +12,115 @@ fn driven_unit_mass(port_map: Vec<f64>) -> PortHamiltonian {
         Box::new(QuadraticStorage::new(vec![1.0], 1).unwrap())).unwrap()
 }
 
+fn collective_resistance() -> PortHamiltonian {
+    let identity = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    PortHamiltonian::new(3, 3, vec![0.0; 9], vec![1.0; 9], identity.clone(),
+        Box::new(QuadraticStorage::new(identity, 3).unwrap())).unwrap()
+}
+
+#[test]
+fn collective_resistance_retains_weak_heat_in_every_coordinate_order() {
+    // R = b*b^T, b = [1,1,1], so the independent physical loss is
+    // (b dot effort)^2 = 1. Both the resistance rows and their final
+    // contraction can lose that direction if they are rounded separately.
+    let system = collective_resistance();
+    let large = 2.0_f64.powi(54);
+    for effort in [
+        [large, 1.0, -large], [-large, 1.0, large], [1.0, large, -large],
+        [large, -large, 1.0], [-large, large, 1.0], [1.0, -large, large],
+    ] {
+        assert_eq!(system.resistance_power_from_effort(&effort).unwrap(), 1.0);
+        // Gu = R*effort = [1,1,1]: this is an exact driven equilibrium.
+        let dt = 0.125;
+        let record = step(&system, &effort, &[1.0; 3], dt).unwrap();
+        assert_eq!(record.x.as_slice(), effort.as_slice());
+        assert_eq!(record.dissipated, dt);
+        assert_eq!(record.supplied, dt);
+        assert_eq!(record.balance_residual(), 0.0);
+
+        let mut workspace = StepWorkspace::new(&system).unwrap();
+        let (mut next, mut output) = ([31.0; 3], [47.0; 3]);
+        let prepared = workspace.step_into(&system, &effort, &[1.0; 3], dt,
+            &mut next, &mut output).unwrap();
+        assert_eq!(next, effort);
+        assert_eq!(prepared.dissipated, dt);
+        assert_eq!(prepared.supplied, dt);
+        assert_eq!(prepared.balance_residual(), 0.0);
+    }
+    assert_eq!(system.resistance_power_from_effort(&[large, 0.0, -large]).unwrap(), 0.0);
+}
+
+#[test]
+fn resistance_power_retains_product_remainders_and_active_sign() {
+    let delta = 2.0_f64.powi(-27);
+    // This exactly represented rank-one matrix is [1,-1]^T[1,-1].
+    // The loss is (e0-e1)^2, not the difference of rounded O(1) powers.
+    let system = PortHamiltonian::new(2, 0, vec![0.0; 4],
+        vec![1.0, -1.0, -1.0, 1.0], vec![],
+        Box::new(QuadraticStorage::new(vec![1.0,0.0,0.0,1.0],2).unwrap())).unwrap();
+    assert_eq!(system.resistance_power_from_effort(&[1.0 + delta, 1.0 - delta]).unwrap(),
+        4.0 * delta * delta);
+    // For d=2^-26, every entry of b*b^T is exactly representable, with
+    // b=[1+d,1]. At e=[1-d,-1], b dot e=-d^2 and the loss is d^4.
+    // This checks the multiplication remainders as well as signed summation.
+    let d = 2.0_f64.powi(-26);
+    let product = PortHamiltonian::new(2, 0, vec![0.0;4],
+        vec![1.0 + 2.0*d + d*d, 1.0+d, 1.0+d, 1.0], vec![],
+        Box::new(QuadraticStorage::new(vec![1.0,0.0,0.0,1.0],2).unwrap())).unwrap();
+    assert_eq!(product.resistance_power_from_effort(&[1.0-d,-1.0]).unwrap(), d.powi(4));
+    assert!(system.resistance_power_from_effort(&[1.0]).is_err());
+    assert!(system.resistance_power_from_effort(&[1.0, f64::NAN]).is_err());
+    assert!(system.resistance_power_from_effort(&[f64::MAX, -f64::MAX]).is_err());
+
+    let active = PortHamiltonian::from_raw_parts(1, 0, vec![0.0], vec![-2.0], vec![],
+        Box::new(QuadraticStorage::new(vec![1.0],1).unwrap()));
+    // The numerical observer must not turn a deliberately active mutation
+    // into a passive system by clipping or taking an absolute value.
+    assert_eq!(active.resistance_power_from_effort(&[3.0]).unwrap(), -18.0);
+}
+
+#[test]
+fn resistance_compensation_tails_may_round_below_the_physical_range() {
+    let d = 2.0_f64.powi(-27);
+    let system = PortHamiltonian::new(1, 0, vec![0.0], vec![1.0+d], vec![],
+        Box::new(QuadraticStorage::new(vec![1.0],1).unwrap())).unwrap();
+    let effort = (1.0-d) * 2.0_f64.powi(-530);
+    // R*e has a retained -2^-584 tail. Its product with e underflows,
+    // but the original physical loss rounds to the subnormal 2^-1060.
+    assert_eq!(system.resistance_power_from_effort(&[effort]).unwrap(),
+        f64::from_bits(0x4000));
+
+    let d = 2.0_f64.powi(-30);
+    let system = PortHamiltonian::new(1, 0, vec![0.0], vec![1.0+d], vec![],
+        Box::new(QuadraticStorage::new(vec![1.0],1).unwrap())).unwrap();
+    let dt = 2.0_f64.powi(-1018);
+    // Here the final work is normal, although its compensation tail after
+    // duration scaling is smaller than the subnormal range.
+    let expected = (1.0-d) * dt;
+    let record = step(&system, &[1.0-d], &[], dt).unwrap();
+    assert_eq!(record.dissipated, expected);
+    let mut workspace = StepWorkspace::new(&system).unwrap();
+    let (mut next, mut output) = ([0.0], []);
+    let prepared = workspace.step_into(&system, &[1.0-d], &[], dt,
+        &mut next, &mut output).unwrap();
+    assert_eq!(prepared.dissipated, expected);
+}
+
+#[test]
+fn descriptor_resistance_heat_uses_the_original_coupled_efforts() {
+    let identity = vec![1.0,0.0,0.0, 0.0,1.0,0.0, 0.0,0.0,1.0];
+    let descriptor = DescriptorPortHamiltonian::new(3, 3, 3,
+        vec![0.0;9], vec![1.0;9], identity.clone(),
+        Box::new(QuadraticStorage::new(identity,3).unwrap())).unwrap();
+    let large = 2.0_f64.powi(54);
+    let initial = [large,1.0,-large];
+    let record = step_descriptor(&descriptor, &initial, &[1.0;3], 0.125).unwrap();
+    assert_eq!(record.x.as_slice(), initial.as_slice());
+    assert_eq!(record.dissipated, 0.125);
+    assert_eq!(record.supplied, 0.125);
+    assert_eq!(record.balance_residual(), 0.0);
+}
+
 #[test]
 fn opposing_multiport_loads_retain_motion_and_signed_work_in_every_order() {
     let large = 2.0_f64.powi(53);
@@ -226,6 +335,26 @@ fn zero_duration_is_a_noop_with_the_correct_port_output() {
     let record = work.step_into(&sys, &[0.3, 0.7], &[2.0], 0.0, &mut next, &mut y).unwrap();
     assert_eq!(next, [0.3, 0.7]); assert_eq!(y, [0.7]);
     assert_eq!(record.delta_h, 0.0); assert_eq!(record.supplied, 0.0); assert_eq!(record.dissipated, 0.0);
+
+    // The instantaneous loss falls below binary64's range, but no time
+    // elapses and the physical work is exactly zero in every step owner.
+    let tiny = PortHamiltonian::new(1, 0, vec![0.0], vec![1e-200], vec![],
+        Box::new(QuadraticStorage::new(vec![1.0],1).unwrap())).unwrap();
+    let descriptor = DescriptorPortHamiltonian::new(1, 1, 0,
+        vec![0.0], vec![1e-200], vec![],
+        Box::new(QuadraticStorage::new(vec![1.0],1).unwrap())).unwrap();
+    let mut workspace = StepWorkspace::new(&tiny).unwrap();
+    let (mut next, mut output) = ([0.0], []);
+    let ordinary = step(&tiny, &[1e-100], &[], 0.0).unwrap();
+    let implicit = step_descriptor(&descriptor, &[1e-100], &[], 0.0).unwrap();
+    let prepared = workspace.step_into(&tiny, &[1e-100], &[], 0.0,
+        &mut next, &mut output).unwrap();
+    assert_eq!(ordinary.x, [1e-100]);
+    assert_eq!(implicit.x, [1e-100]);
+    assert_eq!(next, [1e-100]);
+    for dissipated in [ordinary.dissipated, implicit.dissipated, prepared.dissipated] {
+        assert_eq!(dissipated, 0.0);
+    }
 }
 
 #[test]

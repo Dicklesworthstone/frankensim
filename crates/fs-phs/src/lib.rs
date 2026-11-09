@@ -1190,6 +1190,24 @@ impl PortHamiltonian {
             .ok_or(PhsError::Unadmitted { what: "unrepresentable physical supplied power" })
     }
 
+    /// Original resistive power `effort^T R effort`, without allocating.
+    ///
+    /// Both words of each resistance-row contraction survive the final effort
+    /// contraction. Opposing modal contributions can otherwise erase a weak
+    /// dissipative direction even when the original matrix is positive
+    /// semidefinite. This uses the original R, not a fitted factor, absolute
+    /// value, clipped eigenvalue or difference of supplied and stored energy.
+    ///
+    /// # Errors
+    /// Refuses incomplete/nonfinite efforts and unrepresentable arithmetic.
+    /// This is a two-word numerical contraction, not a positivity certificate
+    /// or arbitrary-precision/overflow-cancellation guarantee. A raw-parts
+    /// system with active resistance retains its signed power.
+    pub fn resistance_power_from_effort(&self, effort: &[f64]) -> Result<f64, PhsError> {
+        resistance_power_sum(self.n, &self.r, effort)?.value()
+            .ok_or(PhsError::Unadmitted { what: "unrepresentable physical resistance power" })
+    }
+
     /// Structure matrices (row-major J, R, G) — read-only views.
     #[must_use]
     pub fn structure(&self) -> (&[f64], &[f64], &[f64]) {
@@ -1518,6 +1536,62 @@ fn port_work_from_effort(
         work.value()
     })();
     result.ok_or(PhsError::Unadmitted { what: "unrepresentable physical port work" })
+}
+
+// Keep the original R contraction through both factors, just as supplied
+// power keeps the original G map. Rounding R*effort first is insufficient:
+// the final signed effort sum may cancel its leading terms as well.
+fn resistance_power_sum(
+    n: usize, resistance: &[f64], effort: &[f64],
+) -> Result<interconnection::accumulation::Sum, PhsError> {
+    use interconnection::accumulation::Sum;
+    if effort.len() != n || n.checked_mul(n) != Some(resistance.len()) {
+        return Err(PhsError::Dimension { what: "physical resistance power extents" });
+    }
+    if effort.iter().any(|value| !value.is_finite()) {
+        return Err(PhsError::Unadmitted { what: "nonfinite physical resistance effort" });
+    }
+    let mut power = Sum::default();
+    for (row, &e) in effort.iter().enumerate() {
+        let flow = Sum::dot(&resistance[row*n..(row+1)*n], effort)
+            .ok_or(PhsError::Unadmitted { what: "unrepresentable physical resistance flow" })?;
+        // Normalize first: only the leading word is a physical term whose
+        // underflow must refuse. A compensation tail may round below range.
+        let (high, low) = flow.components()
+            .ok_or(PhsError::Unadmitted { what: "unrepresentable physical resistance flow" })?;
+        power.product(high, e).and_then(|()| power.product_remainder(low, e))
+            .ok_or(PhsError::Unadmitted { what: "unrepresentable physical resistance power" })?;
+    }
+    Ok(power)
+}
+
+// Native discrete-gradient heat and separately authored nonlinear loss share
+// their physical duration before final rounding. No energy-balance correction.
+fn resistance_work_from_effort(
+    n: usize, resistance: &[f64], effort: &[f64], duration: f64, other_power: f64,
+) -> Result<f64, PhsError> {
+    if !duration.is_finite() || duration < 0.0 || !other_power.is_finite() {
+        return Err(PhsError::Unadmitted { what: "invalid physical resistance duration or power" });
+    }
+    if duration == 0.0 {
+        if effort.len() != n || n.checked_mul(n) != Some(resistance.len()) {
+            return Err(PhsError::Dimension { what: "physical resistance work extents" });
+        }
+        if effort.iter().chain(resistance).any(|value| !value.is_finite()) {
+            return Err(PhsError::Unadmitted { what: "nonfinite physical resistance work" });
+        }
+        return Ok(0.0);
+    }
+    let mut power = resistance_power_sum(n, resistance, effort)?;
+    let result = (|| {
+        power.product(1.0, other_power)?;
+        let (high, low) = power.components()?;
+        let mut work = interconnection::accumulation::Sum::default();
+        work.product(high, duration)?;
+        work.product_remainder(low, duration)?;
+        work.value()
+    })();
+    result.ok_or(PhsError::Unadmitted { what: "unrepresentable physical resistance work" })
 }
 
 /// Isolated 0-junction of two 1-port systems: `p_a = p_b`, `U_a + U_b = U_ext`.
@@ -2206,15 +2280,10 @@ pub fn step_descriptor(
     let h1 = sys.storage.hamiltonian(&x1);
     let delta_h = storage_energy_change(sys.storage.as_ref(), x0, &x1,
         &mut vec![0.0; n], &mut vec![0.0; n]);
-    let mut dissipated = 0.0;
-    for i in 0..n {
-        let mut rd = 0.0;
-        for k in 0..n {
-            rd += sys.r[i * n + k] * dg[k];
-        }
-        dissipated += dg[i] * rd;
-    }
-    dissipated *= dt;
+    let dissipated = resistance_work_from_effort(n, &sys.r, &dg, dt, 0.0)
+        .map_err(|_| PhsError::DescriptorDomain {
+            what: "accepted resistance work is unrepresentable",
+        })?;
     let supplied = port_work_from_effort(n, sys.m, &sys.g, &dg, u, dt, 0.0)
         .map_err(|_| PhsError::DescriptorDomain {
         what: "accepted port work is unrepresentable",
@@ -2633,15 +2702,7 @@ fn ledger(
 ) -> Result<StepRecord, PhsError> {
     let n = sys.n;
     let mut dg = discrete_gradient(sys.storage.as_ref(), x0, &x1);
-    let mut dissipated = 0.0;
-    for i in 0..n {
-        let mut row = 0.0;
-        for k in 0..n {
-            row += sys.r[i * n + k] * dg[k];
-        }
-        dissipated += dg[i] * row;
-    }
-    dissipated *= dt;
+    let dissipated = resistance_work_from_effort(n, &sys.r, &dg, dt, 0.0)?;
     let mut y = vec![0.0; sys.m];
     sys.output_from_effort_into(&dg, &mut y)?;
     let supplied = port_work_from_effort(n, sys.m, &sys.g, &dg, u, dt, 0.0)?;

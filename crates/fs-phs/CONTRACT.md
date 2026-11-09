@@ -315,6 +315,27 @@ integral contractions are otherwise unchanged. Focused `prepared_step` tests
 cover analytic unit-mass driving/braking, product remainders, an algebraic
 resistive port, zero-time observation and transactional forcing refusals.
 
+`PortHamiltonian::resistance_power_from_effort` similarly contracts the original
+`effort^T R effort` through both factors before final rounding. Ordinary,
+prepared and descriptor discrete-gradient ledgers share this arithmetic and
+retain the physical duration and any independently authored nonlinear loss
+before rounding the heat. The nonlinear periodic-orbit audit uses the same
+owner. This prevents a quiet collective dissipative direction from disappearing
+between opposing modal efforts. R, source witnesses, state evolution, solver
+tolerances and constitutive laws are unchanged; heat is not reconstructed from
+the energy balance. Raw active mutations retain their signed power.
+
+The contraction allocates nothing, performs O(n^2) work, and refuses invalid or
+unrepresentable inputs. It does not certify positivity near arbitrary numerical
+nulls or support arbitrary-precision/overflow cancellation. Focused G1/G3 cases
+in `tests/prepared_step.rs` check independent rank-one loss, coordinate
+permutations, product remainders, exact lossless directions, descriptor parity
+and signed active mutations. Normal and subnormal physical results remain
+admitted when only a compensation tail rounds below range; validated zero-time
+steps return zero heat without forming an unrepresentable instantaneous loss.
+The pHS orbit regression repeats the independent
+cycle balance on three sampling grids.
+
 ## Explicit synchronous converter gate cycles
 
 `circuit::converter::switching::PreparedSwitchCycle` advances the original
