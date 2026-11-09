@@ -3,6 +3,9 @@
 use super::*;
 use fs_flux::StokesResistancePort;
 
+#[path = "flow_control/windkessel.rs"]
+mod windkessel;
+
 /// G1: independently integrate plug-flow momentum and its pressure work. The
 /// channel has perfect-slip walls; dissipation is solely the external resistor.
 #[test]

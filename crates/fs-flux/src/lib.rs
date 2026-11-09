@@ -98,6 +98,8 @@ pub use ns::boundary::{
     OpenBoundaryPolicy, PreparedStokesFlowControl, StokesAssembly, StokesBoundary,
     StokesBoundaryError, StokesFlowControlSolution, StokesPressureReference, StokesResistancePort,
     StokesResistanceSolution, StokesRheologyControls, StokesRheologySolution, StokesSolution,
+    StokesWindkesselBalance, StokesWindkesselHistory, StokesWindkesselPort,
+    StokesWindkesselSolution,
 };
 #[cfg(feature = "continuum")]
 pub use ns::linearization::{

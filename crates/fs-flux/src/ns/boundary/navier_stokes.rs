@@ -1307,44 +1307,13 @@ impl<'m> FluxSystem<'m> {
         };
         self.check_mixed_bdf1_history(previous_velocity, timestep_s)?;
         self.check_mixed_bdf1_history(older, previous_timestep_s)?;
-        let ratio = timestep_s / previous_timestep_s;
-        if !ratio.is_finite() || ratio <= 0.0 || ratio > 2.0 {
-            return Err(StokesBoundaryError::InvalidInput(
-                "BDF2 needs a representable positive step ratio no greater than two",
-            ));
-        }
-        let equal_steps = timestep_s == previous_timestep_s;
-        let weight = ratio * ratio / (1.0 + 2.0 * ratio);
-        if !weight.is_finite() || weight <= 0.0 {
-            return Err(StokesBoundaryError::InvalidInput(
-                "BDF2 history coefficient is not representable",
-            ));
-        }
-        let effective_timestep = if equal_steps {
-            (2.0 / 3.0) * timestep_s
-        } else {
-            timestep_s * ((1.0 + ratio) / (1.0 + 2.0 * ratio))
-        };
+        let step = super::bdf::StokesBdfStep::new(timestep_s, Some(previous_timestep_s))
+            .map_err(StokesBoundaryError::InvalidInput)?;
+        let effective_timestep = step.effective_timestep_s;
         let history = previous_velocity
             .iter()
             .zip(older)
-            .map(|(&recent, &old)| {
-                let difference = recent - old;
-                let correction = if equal_steps {
-                    // Retain the original equal-step bits, including its
-                    // overflow-safe difference and exact constant history.
-                    if difference.is_finite() {
-                        difference / 3.0
-                    } else {
-                        recent / 3.0 - old / 3.0
-                    }
-                } else if difference.is_finite() {
-                    weight * difference
-                } else {
-                    weight * recent - weight * old
-                };
-                recent + correction
-            })
+            .map(|(&recent, &old)| step.history(recent, old))
             .collect::<Vec<_>>();
         self.check_mixed_bdf1_history(&history, effective_timestep)?;
         Ok((Some(history), effective_timestep))

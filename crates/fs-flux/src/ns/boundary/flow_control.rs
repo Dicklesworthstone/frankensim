@@ -9,6 +9,13 @@ use crate::ns::FluxSolution;
 #[path = "flow_control/resistance.rs"]
 mod resistance;
 pub use resistance::{StokesResistancePort, StokesResistanceSolution};
+#[path = "flow_control/windkessel.rs"]
+mod windkessel;
+pub(crate) use windkessel::solve_windkessel_assembly;
+pub use windkessel::{
+    StokesWindkesselBalance, StokesWindkesselHistory, StokesWindkesselPort,
+    StokesWindkesselSolution,
+};
 
 /// Resolved flow and the uniform pressure increments required at controlled ports.
 pub struct StokesFlowControlSolution<S = StokesSolution> {

@@ -9387,3 +9387,43 @@ The focused original-source native build passed all 81 cavitation tests,
 including the five finite-liquid conduction regression groups. This build
 uses the actual changed sources and original numerical dependencies with a
 restricted module/dependency closure; it is not a full workspace or DSR run.
+
+## Implicit RCR storage and series inertance at resolved laminar ports
+
+The native `bdf2_stokes_mixed_variable_step_windkessel_ports` advances the
+original fixed-mesh Stokes momentum and passive lumped external loads at one
+common endpoint. Outward flow Q is volume per depth; with compliance pressure x
+relative to the same reservoir, the external laws are
+`p=p_res+Rp Q+L D_t Q+x` and `C D_t x=Q-x/Rd`.
+Rp and L are finite/nonnegative; Rd and C are finite/strictly positive.
+The reservoir increment is held during each interval; external coefficients,
+port ordering and the compliance reference remain fixed through both histories.
+
+Fluid, compliance and series inertia share the original admitted BDF reduction:
+BDF1 startup, equal-step BDF2 arithmetic, or variable-step BDF2 with ratio at
+most two. A history pairs velocity moments with compliance pressures at one
+time level. Previous/older port flows are integrated from those SAME native
+velocity moments; independently supplied inertance-flow histories are not
+accepted. The original positive fluid mass and viscosity remain in the
+continuum solve. Eliminating storage produces a positive effective port
+resistance, solved through the existing full coupled mobility response.
+No endpoint flow is lagged and no profile is imposed. Original continuum
+residuals and BOTH unreduced dynamic laws are checked on integrated endpoint
+flows before any field or storage state is returned.
+
+The report separates external C*x^2/2 and L*Q^2/2 storage, nonnegative
+Rp*Q^2 and x^2/Rd resistor powers, reservoir and added-traction work, the
+actual-interval storage change and a signed BDF energy defect. The effective
+resistance's apparent loss is NOT physical heat. BDF2's defect can be negative;
+neither ordinary single-state energy monotonicity nor arbitrary-step coupled
+passivity is asserted. Original traction work and resolved-fluid heat remain
+separate. The load is linear lumped storage, not a distributed wave, cavitation,
+thermal update, moving interface or nonlinear external device.
+
+Focused exact-source scalar tests cover the original two-state equations,
+BDF1/unequal BDF2, flow reversal, zero series inertance/proximal resistance,
+closed-port exponential relaxation and second-order convergence, original-law
+residuals and independent energy accounting. A native FEM regression is authored
+for the complete perfect-slip channel plus external storage/inertia, physical
+pressure datum and coupled energy. Full native FEM execution remains pending:
+the workspace dependency build was killed in pinned asupersync before fs-flux.

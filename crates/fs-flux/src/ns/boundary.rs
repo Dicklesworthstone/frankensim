@@ -24,6 +24,8 @@ pub use transport::BoundaryTransport;
 #[path = "boundary/rheology.rs"]
 mod rheology;
 pub use rheology::{StokesRheologyControls, StokesRheologySolution};
+#[path = "boundary/bdf.rs"]
+pub(crate) mod bdf;
 /// Conservative changing-density transport and native BDM momentum.
 #[path = "boundary/conservative.rs"]
 pub mod conservative;
@@ -35,9 +37,11 @@ mod navier_stokes;
 mod transient;
 /// Source-derived thermal dilation on the original mixed Stokes operator.
 pub mod thermal_dilation;
+pub(crate) use flow_control::solve_windkessel_assembly;
 pub use flow_control::{
     PreparedStokesFlowControl, StokesFlowControlSolution, StokesResistancePort,
-    StokesResistanceSolution,
+    StokesResistanceSolution, StokesWindkesselBalance, StokesWindkesselHistory,
+    StokesWindkesselPort, StokesWindkesselSolution,
 };
 pub use navier_stokes::{
     NavierStokesBoundary, NavierStokesControls, NavierStokesStep, OpenBoundaryPolicy,
@@ -132,8 +136,7 @@ pub enum StokesBoundaryError {
     IncompatibleFlux {
         /// Connected fluid component (ordered by its first triangle).
         component: usize,
-        /// Signed outward integral of prescribed velocity minus the integrated
-        /// dilation source, if one was supplied by the thermal entry.
+        /// Signed outward integral of prescribed velocity.
         net_flux: f64,
         /// Roundoff allowance for the assembled boundary quadrature.
         tolerance: f64,
@@ -169,6 +172,19 @@ pub enum StokesBoundaryError {
         residual_m2_s2: f64,
         /// Absolute plus relative accepted pressure defect [m²/s²].
         tolerance_m2_s2: f64,
+    },
+    /// The accepted field/storage missed an original dynamic external port law.
+    WindkesselLawNotConverged {
+        /// Controlled port in caller order.
+        port: usize,
+        /// Absolute pressure/inertance-law defect [m²/s²].
+        pressure_residual_m2_s2: f64,
+        /// Admitted pressure defect [m²/s²].
+        pressure_tolerance_m2_s2: f64,
+        /// Absolute compliance-continuity defect [m²/s].
+        flow_residual_m2_s: f64,
+        /// Admitted compliance-continuity defect [m²/s].
+        flow_tolerance_m2_s: f64,
     },
     /// An explicitly recomputed residual did not meet the requested tolerance.
     NotConverged {
@@ -779,16 +795,6 @@ impl<'m> FluxSystem<'m> {
         boundaries: &[StokesBoundary<'_>],
         anchors_velocity: &[bool],
     ) -> Result<AdmittedBoundary, StokesBoundaryError> {
-        self.admit_stokes_problem_with_dilation(params, boundaries, anchors_velocity, None)
-    }
-
-    fn admit_stokes_problem_with_dilation(
-        &self,
-        params: FluxParams,
-        boundaries: &[StokesBoundary<'_>],
-        anchors_velocity: &[bool],
-        cell_outflow_m2_s: Option<&[f64]>,
-    ) -> Result<AdmittedBoundary, StokesBoundaryError> {
         if !(params.sigma.is_finite()
             && params.sigma > 0.0
             && params.tol.is_finite()
@@ -802,11 +808,7 @@ impl<'m> FluxSystem<'m> {
         if self.mesh.tris.is_empty() {
             return Err(StokesBoundaryError::InvalidInput("empty fluid mesh"));
         }
-        self.admit_stokes_boundaries_with_dilation(
-            boundaries,
-            anchors_velocity,
-            cell_outflow_m2_s,
-        )
+        self.admit_stokes_boundaries_with_velocity_anchors(boundaries, anchors_velocity)
     }
 
     pub(super) fn admit_stokes_boundaries(
@@ -821,23 +823,7 @@ impl<'m> FluxSystem<'m> {
         boundaries: &[StokesBoundary<'_>],
         anchors_velocity: &[bool],
     ) -> Result<AdmittedBoundary, StokesBoundaryError> {
-        self.admit_stokes_boundaries_with_dilation(boundaries, anchors_velocity, None)
-    }
-
-    fn admit_stokes_boundaries_with_dilation(
-        &self,
-        boundaries: &[StokesBoundary<'_>],
-        anchors_velocity: &[bool],
-        cell_outflow_m2_s: Option<&[f64]>,
-    ) -> Result<AdmittedBoundary, StokesBoundaryError> {
         let mesh = self.mesh;
-        if cell_outflow_m2_s.is_some_and(|source| {
-            source.len() != mesh.tris.len() || source.iter().any(|v| !v.is_finite())
-        }) {
-            return Err(StokesBoundaryError::InvalidInput(
-                "dilation requires one finite integrated source per triangle",
-            ));
-        }
         let mut owners = vec![None; mesh.edges.len()];
         let components = self.pressure_roots.len();
         let mut has_velocity = vec![false; components];
@@ -935,27 +921,9 @@ impl<'m> FluxSystem<'m> {
                 StokesBoundary::TotalTraction { .. } => Samples::Traction(values),
             });
         }
-        let dilation = cell_outflow_m2_s.map(|source| {
-            let zero = fs_math::dd::Dd::from_f64(0.0);
-            let mut totals = vec![(zero, 0.0_f64, 0_usize); components];
-            for (cell, &rate) in source.iter().enumerate() {
-                let total = &mut totals[self.pressure_component[cell]];
-                total.0 = total.0 + fs_math::dd::Dd::from_f64(rate);
-                total.1 += rate.abs();
-                total.2 += 1;
-            }
-            totals
-        });
         for component in 0..components {
-            let mut net_flux = net_flux[component];
-            let mut absolute_flux = absolute_flux[component];
-            let mut terms = boundary_count[component];
-            if let Some(totals) = &dilation {
-                let difference = fs_math::dd::Dd::from_f64(net_flux) - totals[component].0;
-                net_flux = difference.hi + difference.lo;
-                absolute_flux += totals[component].1;
-                terms += totals[component].2;
-            }
+            let net_flux = net_flux[component];
+            let absolute_flux = absolute_flux[component];
             if !net_flux.is_finite() || !absolute_flux.is_finite() {
                 return Err(StokesBoundaryError::InvalidInput("boundary flux overflow"));
             }
@@ -964,7 +932,7 @@ impl<'m> FluxSystem<'m> {
             }
             let tolerance = 256.0
                 * f64::EPSILON
-                * terms as f64
+                * boundary_count[component] as f64
                 * absolute_flux.max(f64::MIN_POSITIVE);
             if net_flux.abs() > tolerance {
                 return Err(StokesBoundaryError::IncompatibleFlux {
