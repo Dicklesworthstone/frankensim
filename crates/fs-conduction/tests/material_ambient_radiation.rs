@@ -295,3 +295,56 @@ fn a_foreign_larger_mesh_refuses_before_indexing_heterogeneous_caloric_bindings(
 
 #[path = "material_ambient_radiation/entropy.rs"]
 mod entropy;
+
+#[test]
+fn signed_nodal_heat_keeps_original_latent_emissivity_and_caloric_identity() {
+    use fs_math::dd::Dd;
+    let mesh = mesh(); let boundary = boundary(&mesh);
+    let card = card(Some("melt")); let context = context();
+    let material = ConductivityModel::isotropic_declared(3.0).unwrap();
+    let source = ScalarField::Uniform(0.0);
+    let problem = ConductionProblem { mesh: &mesh, boundary: &boundary, material: &material,
+        source: &source, element_materials: None };
+    for datum in [0.0, 4096.0] {
+        let curve = curve(&card, datum);
+        for bath in [300.0, 500.0] {
+            let old = [datum + 500.0; 4];
+            let expected = [420.0, 570.0, 610.0, 510.0].map(|h| datum + h);
+            let emissivity = [420.0, 570.0, 610.0].map(|h| 0.2 + 0.6 * h / LATENT);
+            let load = exact_face_load([400.0; 3], emissivity, bath);
+            let dt = 0.2;
+            let heat: [Dd; 4] = std::array::from_fn(|v| Dd::from_f64(
+                expected[v] - old[v] + if v < 3 { dt * load[v] } else { 0.0 }));
+            with_cx(|cx| {
+                let owner = MaterialPointwiseAmbientRadiation::new(
+                    cx, &mesh, &boundary, &[patch(&card, &curve, &context, bath)],
+                ).unwrap();
+                let native = HeterogeneousEnthalpyBackwardEuler::new(cx, &mesh,
+                    &[ReferenceEnthalpyMaterial { curve: &curve, reference_density_kg_m3: RHO }],
+                    &[0], budget()).unwrap();
+                let step = native.advance_with_nodal_heat_and_radiation(
+                    cx, problem, None, &old, dt, config(), &heat,
+                    EnthalpyRadiation::MaterialAmbient(&owner),
+                ).unwrap();
+                for (v, &h) in step.specific_enthalpy_j_kg.iter().enumerate() {
+                    close(h, expected[v], 2e-8);
+                    close(step.liquid_mass_fraction[v], (expected[v] - datum) / LATENT, 2e-11);
+                }
+                assert_eq!(step.endpoint.temperature, vec![400.0; 4]);
+                close(step.endpoint.energy.radiation_out_j.to_f64(),
+                    dt * load.iter().sum::<f64>(), 2e-8);
+                assert!(step.endpoint.maximum_free_residual_j <= config().energy_tolerance_j);
+                // Equal numerical knots do not permit substituting original caloric identity.
+                let replacement = curve.clone();
+                let wrong = EnthalpyBackwardEuler::uniform(
+                    cx, &mesh, &replacement, RHO, budget(),
+                ).unwrap();
+                assert!(wrong.advance_with_nodal_heat_and_radiation(
+                    cx, problem, None, &old, dt, config(), &heat,
+                    EnthalpyRadiation::MaterialAmbient(&owner),
+                ).is_err());
+            });
+            assert_eq!(old, [datum + 500.0; 4]);
+        }
+    }
+}

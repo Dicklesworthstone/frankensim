@@ -12,8 +12,12 @@
 //! Newton stopping criterion. No residual becomes a physical heat source.
 //!
 //! This entry has the original backward-Euler temporal order and stationary
-//! reference geometry. It does not add radiation, an entropy-flow model, or
-//! a derivative of the supplied heat with respect to the evolving state.
+//! reference geometry. The radiation entry retains the original pointwise
+//! ambient/enclosure owners and their material response. Neither entry adds an
+//! entropy-flow model or a derivative of the supplied heat with respect to state.
+
+/// Native pointwise radiation and signed nodal heat in the same Newton solve.
+pub mod radiation;
 
 use fs_exec::Cx;
 use fs_math::dd::Dd;
@@ -24,7 +28,11 @@ use super::{
     ASSEMBLY_TILE, DofMap, EnthalpyBackwardEuler, EnthalpyError, EnthalpyStepConfig,
     StepContext, energy_balance, finite, poll,
 };
-use crate::{ConductionProblem, InterfaceFlux, RobinFlux, ThermalInterfaces};
+use crate::{
+    ConductionProblem, InterfaceFlux, PointwiseEnclosureReport,
+    PointwiseRadiationReport, RobinFlux, ThermalInterfaces,
+};
+use super::pointwise::PointwiseBoundary;
 
 /// Independently integrated physical interval energies; positive input heats
 /// the original inventory. Boundary heat is positive outward except Dirichlet.
@@ -35,6 +43,8 @@ pub struct NodalHeatEnergy {
     pub stored_energy_change_j: Dd,
     pub neumann_out_j: Dd,
     pub robin_out_j: Dd,
+    /// Original pointwise radiation, positive outward; zero without radiation.
+    pub radiation_out_j: Dd,
     pub dirichlet_in_j: Dd,
     pub residual_j: Dd,
 }
@@ -51,6 +61,10 @@ pub struct NodalHeatEndpoint {
     pub energy: NodalHeatEnergy,
     pub robin_fluxes: Vec<RobinFlux>,
     pub contact_fluxes: Vec<InterfaceFlux>,
+    /// Original ambient radiation report; convection remains separate.
+    pub pointwise_radiation: Option<PointwiseRadiationReport>,
+    /// Original closed/open enclosure report with reflected exchange.
+    pub pointwise_enclosure_radiation: Option<PointwiseEnclosureReport>,
 }
 
 /// An admitted step from the original Newton solve and original inventory.
@@ -81,6 +95,23 @@ impl EnthalpyBackwardEuler<'_, '_> {
         config: EnthalpyStepConfig,
         nodal_heat_j: &[Dd],
     ) -> Result<NodalHeatStep, EnthalpyError> {
+        self.advance_nodal_heat(
+            cx, problem, interfaces, old_specific_h, dt_s, config, nodal_heat_j, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_nodal_heat(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        nodal_heat_j: &[Dd],
+        pointwise_radiation: Option<PointwiseBoundary<'_>>,
+    ) -> Result<NodalHeatStep, EnthalpyError> {
         self.admit_step(cx, problem, old_specific_h, dt_s, config)?;
         let heat = admit_heat(cx, self.masses.len(), nodal_heat_j)?;
         let context = StepContext {
@@ -90,7 +121,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
             interfaces,
             old: old_specific_h,
             dt: dt_s,
-            pointwise_radiation: None,
+            pointwise_radiation,
         };
         let (h, newton) = context.solve_newton(config, Some(&heat))?;
         let endpoint = evaluate(&context, &h, &heat)?;
@@ -147,6 +178,25 @@ impl EnthalpyBackwardEuler<'_, '_> {
         config: EnthalpyStepConfig,
         nodal_heat_j: &[Dd],
     ) -> Result<NodalHeatEndpoint, EnthalpyError> {
+        self.evaluate_nodal_heat(
+            cx, problem, interfaces, old_specific_h, candidate_specific_h,
+            dt_s, config, nodal_heat_j, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_nodal_heat(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_specific_h: &[f64],
+        candidate_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        nodal_heat_j: &[Dd],
+        pointwise_radiation: Option<PointwiseBoundary<'_>>,
+    ) -> Result<NodalHeatEndpoint, EnthalpyError> {
         self.admit_step(cx, problem, old_specific_h, dt_s, config)?;
         let heat = admit_heat(cx, self.masses.len(), nodal_heat_j)?;
         let context = StepContext {
@@ -156,7 +206,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
             interfaces,
             old: old_specific_h,
             dt: dt_s,
-            pointwise_radiation: None,
+            pointwise_radiation,
         };
         evaluate(&context, candidate_specific_h, &heat)
     }
@@ -211,6 +261,8 @@ fn evaluate(
     let temperature = context.temperatures(h)?;
     let scales = context.phase_scales(h)?;
     let system = context.assemble(&temperature, scales.as_ref())?;
+    let radiation = context.pointwise_radiation
+        .map(|owner| owner.load_and_report(context.cx, &temperature, h)).transpose()?;
     let dt = Dd::from_f64(context.dt);
     let mut stored = Dd::ZERO;
     let mut supplied = Dd::ZERO;
@@ -227,8 +279,12 @@ fn evaluate(
         stored = checked_dd(stored + change)?;
         supplied = checked_dd(supplied + heat[vertex])?;
         let (transport, load) = system.heat_row_terms(vertex, &temperature);
+        let radiative_load = match &radiation {
+            Some((load, _)) => Dd::from_f64(finite(load[vertex])?),
+            None => Dd::ZERO,
+        };
         let transport = product(
-            dt, checked_dd(Dd::from_f64(transport) - Dd::from_f64(load))?,
+            dt, checked_dd(Dd::from_f64(transport) - Dd::from_f64(load) + radiative_load)?,
         )?;
         let residual = checked_dd(change + transport - heat[vertex])?;
         if context.is_prescribed(vertex) {
@@ -254,7 +310,13 @@ fn evaluate(
     let volumetric = product(dt, Dd::from_f64(finite(boundary.source_w)?))?;
     let neumann = product(dt, Dd::from_f64(finite(boundary.neumann_out_w)?))?;
     let robin = product(dt, Dd::from_f64(finite(boundary.robin_out_w)?))?;
-    let residual = checked_dd(stored - (volumetric + supplied + dirichlet - neumann - robin))?;
+    let radiation_out = match &radiation {
+        Some((_, report)) => product(dt, Dd::from_f64(finite(report.outward_heat_w())?))?,
+        None => Dd::ZERO,
+    };
+    let residual = checked_dd(
+        stored - (volumetric + supplied + dirichlet - neumann - robin - radiation_out),
+    )?;
     let contact_fluxes = match context.interfaces {
         Some(interfaces) => interfaces.fluxes(&temperature)?,
         None => Vec::new(),
@@ -270,6 +332,8 @@ fn evaluate(
             rounded_maximum
         },
     )?;
+    let (pointwise_radiation, pointwise_enclosure_radiation) = radiation
+        .map_or((None, None), |(_, report)| report.into_reports());
     poll(context.cx, h.len())?;
     Ok(NodalHeatEndpoint {
         temperature,
@@ -283,10 +347,13 @@ fn evaluate(
             stored_energy_change_j: stored,
             neumann_out_j: neumann,
             robin_out_j: robin,
+            radiation_out_j: radiation_out,
             dirichlet_in_j: dirichlet,
             residual_j: residual,
         },
         robin_fluxes,
         contact_fluxes,
+        pointwise_radiation,
+        pointwise_enclosure_radiation,
     })
 }

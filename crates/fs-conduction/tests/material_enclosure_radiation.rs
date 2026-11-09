@@ -253,3 +253,60 @@ fn equal_temperature_latent_enclosure_has_exactly_zero_heat_despite_nonuniform_p
     with_cancelled_cx(|cx| assert!(PointwiseEnclosureRadiation::new(cx, &mesh, &boundary, &enclosure,
         PointwiseEnclosureTolerance::default()).is_err()));
 }
+
+#[test]
+fn supplied_nodal_heat_closes_local_latent_storage_and_reflected_radiation_together() {
+    use fs_math::dd::Dd;
+    let mesh = mesh(); let boundary = boundary(&mesh); let context = context();
+    let cards = [material_card("left"), material_card("right")];
+    let curves = [phase_curve(&cards[0], 400.0, 0.0), phase_curve(&cards[1], 350.0, 0.0)];
+    let declarations = bindings(&cards, &curves, &context);
+    let enclosure = closed(&mesh, &cards, &context);
+    let material = ConductivityModel::isotropic_declared(2.0).unwrap();
+    let source = ScalarField::Uniform(0.0);
+    let problem = ConductionProblem { mesh: &mesh, boundary: &boundary,
+        material: &material, source: &source, element_materials: None };
+    let old = [500.0; 8];
+    let expected = [400.0, 500.0, 600.0, 510.0, 460.0, 520.0, 580.0, 490.0];
+    let dt = 0.2;
+    with_cx(|cx| {
+        for mutual in [1.0, 0.4] {
+            let open = OpenDiffuseEnclosure::new(cx, surfaces(&mesh, &cards, &context),
+                vec![vec![0.0, 0.4], vec![0.4, 0.0]],
+                ViewFactorEvidence::Analytic { geometry: "synthetic reciprocal patch/bath algebra".into() },
+                ViewFactorTolerance::default()).unwrap();
+            let base = if mutual == 1.0 {
+                PointwiseEnclosureRadiation::new(cx, &mesh, &boundary, &enclosure,
+                    PointwiseEnclosureTolerance::default()).unwrap()
+            } else {
+                PointwiseEnclosureRadiation::new_open(cx, &mesh, &boundary, &open, 300.0,
+                    PointwiseEnclosureTolerance::default()).unwrap()
+            };
+            let owner = MaterialPointwiseEnclosureRadiation::new(cx, &base, &declarations).unwrap();
+            let native = HeterogeneousEnthalpyBackwardEuler::new(cx, &mesh, &[
+                ReferenceEnthalpyMaterial { curve: &curves[0], reference_density_kg_m3: RHO },
+                ReferenceEnthalpyMaterial { curve: &curves[1], reference_density_kg_m3: RHO },
+            ], &[0, 1], budget()).unwrap();
+            let (load, _, _) = oracle(&curves, &expected, mutual, 300.0);
+            let heat: [Dd; 8] = std::array::from_fn(|v| Dd::from_f64(
+                expected[v] - old[v] + dt * load[v]));
+            let step = native.advance_with_nodal_heat_and_radiation(cx, problem, None,
+                &old, dt, config(), &heat, EnthalpyRadiation::MaterialEnclosure(&owner)).unwrap();
+            for (h, expected) in step.specific_enthalpy_j_kg.iter().zip(expected) {
+                close(*h, expected, 2e-8);
+            }
+            close(step.endpoint.energy.radiation_out_j.to_f64(),
+                dt * load.iter().sum::<f64>(), 2e-8);
+            assert!(step.endpoint.pointwise_radiation.is_none());
+            assert!(step.endpoint.pointwise_enclosure_radiation.is_some());
+            assert!(step.endpoint.maximum_free_residual_j <= config().energy_tolerance_j);
+            assert!(step.endpoint.energy.residual_j.to_f64().abs() <= config().energy_tolerance_j);
+            let audit = native.evaluate_endpoint_with_nodal_heat_and_radiation(
+                cx, problem, None, &old, &step.specific_enthalpy_j_kg, dt, config(), &heat,
+                EnthalpyRadiation::MaterialEnclosure(&owner),
+            ).unwrap();
+            assert!(audit.maximum_free_residual_j <= config().energy_tolerance_j);
+        }
+    });
+    assert_eq!(old, [500.0; 8]);
+}

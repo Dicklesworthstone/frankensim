@@ -6,6 +6,8 @@ mod adjoint;
 mod endpoint;
 #[path = "enthalpy_radiation/pointwise.rs"]
 mod pointwise;
+#[path = "enthalpy_radiation/nodal_heat.rs"]
+mod nodal_heat;
 mod support;
 
 use fs_blake3::ContentHash;
