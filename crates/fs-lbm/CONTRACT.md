@@ -1710,6 +1710,46 @@ source, storage and cancellation refusals. These
 new regressions require native execution; the authoring environment went
 offline before that check completed.
 
+## Original gas calorics on constituent diffusion
+
+`GasSpeciesEnthalpySource` binds the full canonical species bank, original
+NASA-9 formation references, pressure context and transport data to the native
+species/enthalpy diffusion owner. Every cell preparation converts the actual
+constituent masses to molar amounts, checks their partition of the immutable
+carrier to machine roundoff, and inverts the original composition-dependent
+enthalpy law. The same resolved state supplies temperature, Cp, conductivity,
+viscosity and EOS density. Zero local abundance retains the full source bank.
+The full bank must admit a continuous increasing caloric branch, including
+species absent from a particular cell; discontinuous seams do not get hidden
+by a diffusion step.
+
+Face partial specific enthalpies come from each original species law at the
+physical face temperature, interpolated with the actual graded cell widths.
+`GasSpeciesDiffusivity::Binary` reuses an explicit `BinaryDiffusionMaterial`
+for exactly its two species, refreshing its m²/s law at the reconstructed T/p
+while preserving auxiliary source coordinates and property selection. The
+`Frozen` variant retains an explicitly authored common mixing field, including
+zero-diffusion barriers. Viscosity never substitutes for molecular diffusivity,
+and one binary coefficient cannot silently represent a larger molecular mixture.
+
+`diffuse_thermochemical_species` advances the existing positive species kernel
+and its exact constituent-carried energy account, then reconstructs the endpoint
+from both returned inventories. Initial/endpoint caloric residuals and the
+original transport defect share an absolute joule budget. Owned prepared arrays
+are reserved from the native storage ceiling before allocation; immutable source
+banks and temporary original material-evaluation scratch remain additional.
+Source, identity, domain, storage or cancellation refusal returns no partial
+candidate. The returned h already contains diffusion energy.
+
+This entry freezes D and face partial h over its declared interval; repeated
+steps must refresh them. It is an isobaric fixed-carrier constitutive closure:
+EOS density is returned for subsequent flow/pressure coupling and never replaces
+the accepted mass. It introduces no pressure work, reactions, arbitrary
+multicomponent molecular friction, Soret term or coupled temporal-order claim.
+Regression definitions cover variable-Cp analytic binary exchange, formation
+reference invariance, graded physical face interpolation, absent species,
+source-dependent diffusivity, validity axes and atomic refusals.
+
 ## Local SGS with general prescribed moving walls
 
 `Grid3::prepare_sgs_with_moving_walls` and the corresponding serial/pooled

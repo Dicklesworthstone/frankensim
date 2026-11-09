@@ -109,7 +109,6 @@ mod flow;
 pub(crate) use flow::scale_rows;
 #[cfg(feature = "implicit-enthalpy-coupling")]
 pub use flow::{
-    AdaptiveSpeciesDiffusionControls, AdaptiveSpeciesDiffusionStep,
     ImplicitConductiveResistiveThermalVolumeMomentumStep,
     ImplicitConductiveThermalVolumeMomentumStep, ImplicitConductiveThermalVolumeReport,
     ImplicitConductiveThermalVolumeStep, ImplicitConductiveViscousThermalVolumeMomentumStep,
@@ -153,6 +152,7 @@ pub use energy::{
     SourceFaceContact, ThermalFace, ThermalSetup, solve_energy,
 };
 pub use flow::{
+    AdaptiveSpeciesDiffusionControls, AdaptiveSpeciesDiffusionStep,
     BinarySpeciesDiffusionControls, BinarySpeciesDiffusionReport, BinarySpeciesDiffusionStep,
     AdvectedMaterial, CoexistenceVolumeControls, CoexistenceVolumeInput, CoexistenceVolumeReport,
     CoexistenceVolumeStep, ConductiveResistiveThermalVolumeMomentumControls,
@@ -174,6 +174,8 @@ pub use flow::{
     MAX_MATERIAL_SPECIES, MaterialSpeciesControls, MaterialSpeciesInput, MaterialSpeciesReport,
     MaterialSpeciesStep, SpeciesDiffusionControls, SpeciesDiffusionReport, SpeciesDiffusionStep,
     SpeciesEnthalpyDiffusionReport, SpeciesEnthalpyDiffusionStep,
+    GasSpeciesDiffusivity, GasSpeciesEnthalpyField, GasSpeciesEnthalpySource,
+    ThermochemicalSpeciesDiffusionReport, ThermochemicalSpeciesDiffusionStep,
     MaterialVolumeSource, PhaseResistanceMomentumControls, PhaseResistanceMomentumInput,
     PiecewiseThermalVolumeControls, ProjectionReport, ReservoirPressure,
     ResistiveDensityProjection, ResistiveMaterialDensityMomentumStep,

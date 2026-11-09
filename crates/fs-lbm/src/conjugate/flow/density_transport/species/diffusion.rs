@@ -11,8 +11,10 @@
 //! sweeps are a symmetric second-order splitting for frozen linear coefficients.
 //! A large stable step is not an accuracy certificate: refine physical substeps.
 //!
-//! This is an isothermal fixed-carrier constitutive component. It does not evolve
-//! partial enthalpy, temperature, pressure, chemical potentials or mixture volume.
+//! The mass-only entry is an isothermal fixed-carrier constitutive component.
+//! The enthalpy extension transports original species partial enthalpies; its
+//! gas adapter reconstructs temperature and material properties from the same
+//! inventories. Neither entry evolves pressure or mixture volume.
 //! Unequal molecular species diffusivities, nonideal thermodynamic factors and
 //! Soret/barodiffusion require their own original constitutive owners.
 //!
@@ -29,6 +31,11 @@ use fs_math::det;
 
 mod enthalpy;
 pub use enthalpy::{SpeciesEnthalpyDiffusionReport, SpeciesEnthalpyDiffusionStep};
+mod gas;
+pub use gas::{
+    GasSpeciesDiffusivity, GasSpeciesEnthalpyField, GasSpeciesEnthalpySource,
+    ThermochemicalSpeciesDiffusionReport, ThermochemicalSpeciesDiffusionStep,
+};
 
 /// Explicit diffusion work, storage and independent constituent-mass budgets.
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -17,6 +17,8 @@ pub use diffusion::{
     BinarySpeciesDiffusionControls, BinarySpeciesDiffusionReport, BinarySpeciesDiffusionStep,
     SpeciesDiffusionControls, SpeciesDiffusionReport, SpeciesDiffusionStep,
     SpeciesEnthalpyDiffusionReport, SpeciesEnthalpyDiffusionStep,
+    GasSpeciesDiffusivity, GasSpeciesEnthalpyField, GasSpeciesEnthalpySource,
+    ThermochemicalSpeciesDiffusionReport, ThermochemicalSpeciesDiffusionStep,
 };
 
 /// Hard component bound; the caller also supplies solve and storage budgets.
