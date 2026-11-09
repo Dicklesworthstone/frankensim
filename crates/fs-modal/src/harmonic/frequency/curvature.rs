@@ -413,7 +413,7 @@ impl PreparedHarmonicResponse {
     }
 }
 
-fn normalize_motion(
+pub(super) fn normalize_motion(
     owner: &PreparedHarmonicResponse,
     values: &[C64],
     cx: &Cx<'_>,

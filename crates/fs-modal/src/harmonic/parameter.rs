@@ -15,6 +15,9 @@ use crate::{quadratic_fraction, quadratic_power_scale};
 use fs_exec::Cx;
 use fs_math::{c64::C64, dd::Dd};
 
+mod mixed;
+pub use mixed::{HarmonicFrequencyParameterControls, HarmonicFrequencyParameterResponse};
+
 mod load;
 pub use load::HarmonicPortParameterDirection;
 

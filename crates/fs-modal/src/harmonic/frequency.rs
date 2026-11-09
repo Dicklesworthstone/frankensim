@@ -313,6 +313,23 @@ impl PreparedHarmonicResponse {
         })
     }
 
+    // Apply -A_omega to a PUBLISHED physical displacement without changing
+    // its physical source or the immutable binary coordinate/time maps.
+    // The caller admits complete state/load jets and total resources before
+    // this internal action. Its vector and uncancelled row envelope are both
+    // D^-1 times physical force, divided by 2^the returned exponent.
+    pub(super) fn physical_frequency_action(
+        &self,
+        displacement: &[C64],
+        impedance_derivative: Option<&[C64]>,
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<C64>, Vec<f64>, i32), HarmonicResponseError> {
+        let (state, state_exponent) = curvature::normalize_motion(self, displacement, cx)?;
+        let action = self.frequency_action(&state, impedance_derivative, cx)?;
+        let exponent = state_exponent + action.exponent - self.time_exponent;
+        Ok((action.value, action.envelope, exponent))
+    }
+
     fn frequency_action(
         &self,
         state: &[C64],

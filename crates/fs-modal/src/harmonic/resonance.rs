@@ -33,6 +33,7 @@ pub use sensitivity::{
     refine_half_power_bandwidth_with_parameter_derivative_with_cancel,
     refine_transfer_extremum_with_parameter_derivative_with_cancel,
 };
+mod native_parameter_projection;
 mod parameter_projection;
 pub use parameter_projection::{HarmonicReceiverParameterJet, HarmonicTransferFieldParameterJet};
 

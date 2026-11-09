@@ -43,6 +43,7 @@ pub use frequency::{
 };
 mod parameter;
 pub use parameter::{
+    HarmonicFrequencyParameterControls, HarmonicFrequencyParameterResponse,
     HarmonicParameterControls, HarmonicParameterResponse, HarmonicPortParameterDirection,
     HarmonicPortParameterResponse, harmonic_mean_power_derivative_with_cancel,
 };
