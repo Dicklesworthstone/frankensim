@@ -21,6 +21,7 @@ use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
 use fs_material::porous::{PorousFluidLaw, PorousFluidResponse};
 use fs_material::relaxation::RelaxationState;
 use fs_math::c64::C64;
+use std::sync::Arc;
 
 mod excitation;
 pub use excitation::{PorousLayerDissipation, PorousLayerExcitation, PorousLayerField};
@@ -44,7 +45,7 @@ fn finite(value: C64) -> bool {
 #[derive(Debug, Clone)]
 pub struct PorousLayer<'a> {
     material: &'a PorousFluidLaw,
-    relaxation: Option<&'a RelaxationState>,
+    relaxation: Option<LayerRelaxation<'a>>,
     response: PorousFluidResponse,
     thickness_m: f64,
     area_m2: f64,
@@ -52,6 +53,12 @@ pub struct PorousLayer<'a> {
     normal_wavenumber: C64,
     normal_specific_impedance: C64,
     two_port: TwoPort,
+}
+
+#[derive(Debug, Clone)]
+enum LayerRelaxation<'a> {
+    Borrowed(&'a RelaxationState),
+    Shared(Arc<RelaxationState>),
 }
 
 /// Original coherent boundary account, shared with every native two-port.
@@ -179,8 +186,39 @@ impl<'a> PorousLayer<'a> {
         )?;
         Self::from_response(
             material,
-            Some(relaxation),
+            Some(LayerRelaxation::Borrowed(relaxation)),
             material.effective_relaxing(relaxation, omega)?,
+            thickness_m,
+            area_m2,
+            reference_impedance,
+            tangential_wavenumber_rad_m,
+        )
+    }
+
+    /// Retain one shared original molecular state across movable temperature
+    /// caches or frequency bins. The response is identical to
+    /// `try_new_relaxing_oblique`; cloning a layer shares its source without
+    /// copying reservoirs or borrowing another field of its owning cache.
+    pub fn try_new_relaxing_oblique_shared(
+        material: &'a PorousFluidLaw,
+        relaxation: Arc<RelaxationState>,
+        omega: f64,
+        thickness_m: f64,
+        area_m2: f64,
+        reference_impedance: f64,
+        tangential_wavenumber_rad_m: f64,
+    ) -> Result<Self, FluidDuctError> {
+        Self::admit_geometry(
+            thickness_m,
+            area_m2,
+            reference_impedance,
+            tangential_wavenumber_rad_m,
+        )?;
+        let response = material.effective_relaxing(&relaxation, omega)?;
+        Self::from_response(
+            material,
+            Some(LayerRelaxation::Shared(relaxation)),
+            response,
             thickness_m,
             area_m2,
             reference_impedance,
@@ -209,7 +247,7 @@ impl<'a> PorousLayer<'a> {
 
     fn from_response(
         material: &'a PorousFluidLaw,
-        relaxation: Option<&'a RelaxationState>,
+        relaxation: Option<LayerRelaxation<'a>>,
         response: PorousFluidResponse,
         thickness_m: f64,
         area_m2: f64,
@@ -279,8 +317,12 @@ impl<'a> PorousLayer<'a> {
     /// Original molecular gas, when explicitly bound by a relaxing constructor.
     /// Its absence means the original equilibrium porous response, not an
     /// inferred reservoir model. An explicitly empty source is still retained.
-    pub const fn relaxation_state(&self) -> Option<&'a RelaxationState> {
-        self.relaxation
+    pub fn relaxation_state(&self) -> Option<&RelaxationState> {
+        match self.relaxation.as_ref() {
+            Some(LayerRelaxation::Borrowed(state)) => Some(state),
+            Some(LayerRelaxation::Shared(state)) => Some(state.as_ref()),
+            None => None,
+        }
     }
     pub const fn material_response(&self) -> &PorousFluidResponse {
         &self.response

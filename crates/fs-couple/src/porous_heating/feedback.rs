@@ -34,6 +34,10 @@ use fs_math::c64::C64;
 pub mod fluid;
 pub use fluid::{IsobaricPorousLiquid, PorousLiquidState, PorousTemperatureFluid};
 
+/// Original molecular calorics refreshed at accepted pore-gas temperatures.
+pub mod molecular;
+pub use molecular::{IsobaricRelaxingPorousGas, PorousRelaxingState};
+
 /// Partially coherent two-sided stationary pressure spectra.
 pub mod covariance;
 /// Statistically stationary independent frequencies on one thermal specimen.
@@ -381,7 +385,7 @@ impl<'a, F: PorousTemperatureFluid> TemperaturePorousHeating<'a, F> {
             } else {
                 fluid::evaluate(&gas, thermal.temperature_k(cell.cell)?)?
             };
-            layers.push(PorousLayer::try_new_oblique(
+            layers.push(gas.prepare_layer(
                 cell.material,
                 &state,
                 drive.angular_frequency_rad_s,
@@ -557,7 +561,7 @@ impl<'a, F: PorousTemperatureFluid> TemperaturePorousHeating<'a, F> {
         }
         for (i, state) in changed {
             checkpoint()?;
-            let layer = PorousLayer::try_new_oblique(
+            let layer = self.gas.prepare_layer(
                 self.cells[*i].material,
                 state,
                 self.drive.angular_frequency_rad_s,

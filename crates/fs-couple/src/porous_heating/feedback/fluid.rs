@@ -5,12 +5,14 @@
 //! the authored thermal masses, geometry or fixed exterior acoustic reference.
 
 use super::{IsobaricPorousGas, PorousHeatingError};
+use fs_duct::porous::PorousLayer;
 use fs_matdb::MaterialCard;
 use fs_material::fluid_acoustics::thermoviscous::{ThermoviscousFluid, ThermoviscousFluidState};
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_material::gas::GasState;
 use fs_material::liquid::density::{LiquidDensityError, ResolvedLiquidDensityState};
+use fs_material::porous::PorousFluidLaw;
 use fs_material::state_point::MaterialStatePointError;
 use std::sync::Arc;
 
@@ -30,6 +32,34 @@ pub trait PorousTemperatureFluid: Clone {
     fn evaluate(&self, temperature_k: f64) -> Result<Self::State, PorousHeatingError>;
     /// Actual absolute temperature carried by the returned native state [K].
     fn temperature_k(&self, state: &Self::State) -> f64;
+
+    /// Prepare the original porous response from this exact cached state.
+    /// The default preserves the equilibrium-fluid path. A dispersive source
+    /// retains its additional original constitutive state in the returned layer
+    /// and uses the same native phase, geometry, support and heat owners.
+    /// This must not reevaluate the temperature source or substitute another
+    /// gas/composition; frequency bins share one accepted material snapshot.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_layer<'a>(
+        &self,
+        material: &'a PorousFluidLaw,
+        state: &Self::State,
+        omega: f64,
+        thickness_m: f64,
+        area_m2: f64,
+        reference_impedance: f64,
+        tangential_wavenumber_rad_m: f64,
+    ) -> Result<PorousLayer<'a>, PorousHeatingError> {
+        Ok(PorousLayer::try_new_oblique(
+            material,
+            state,
+            omega,
+            thickness_m,
+            area_m2,
+            reference_impedance,
+            tangential_wavenumber_rad_m,
+        )?)
+    }
 }
 
 impl PorousTemperatureFluid for IsobaricPorousGas<'_> {

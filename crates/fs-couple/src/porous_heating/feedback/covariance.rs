@@ -488,7 +488,7 @@ impl<'a, F: PorousTemperatureFluid> PorousCrossSpectrumHeating<'a, F> {
                 let length = finite(norm(std::array::from_fn(|i| {
                     original.geometry.end_m[i] - original.geometry.start_m[i]
                 })))?;
-                layers.push(PorousLayer::try_new_oblique(
+                layers.push(gas.prepare_layer(
                     cell.material,
                     state,
                     bin.angular_frequency_rad_s,
@@ -630,7 +630,7 @@ impl<'a, F: PorousTemperatureFluid> PorousCrossSpectrumHeating<'a, F> {
         for (bin, response) in self.bins.iter().zip(&mut self.responses) {
             for &i in &changed {
                 checkpoint()?;
-                response.layers[i] = PorousLayer::try_new_oblique(
+                response.layers[i] = self.gas.prepare_layer(
                     response.layers[i].material(),
                     &self.states[i],
                     bin.angular_frequency_rad_s,

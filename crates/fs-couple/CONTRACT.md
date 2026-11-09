@@ -9734,3 +9734,41 @@ Held exterior absolute pressure, additional mechanical force and integrated wate
 This is a uniform, sealed, rapidly equilibrating chamber, not a resolved spherical bubble or water-hammer model. Nucleation delay, noncondensable gas, phase-front geometry, wall impacts and resolved thermal gradients remain outside its scope. Numerical interval, source bracket, temperature and volume bounds remain explicit. Conserved energy alone does not certify timing: focused tests additionally compare oscillation phase with the original homogeneous-equilibrium acoustic tangent and demonstrate convergence under interval refinement.
 
 Fifteen focused original-source tests passed for the new mechanical and retained cell/volume paths. `cavitating_water_piston` executes a 1 g inventory under an 80 kPa then 140 kPa load, showing cavitation and subsequent complete condensation without prescribing its volume. The example exposes independent cumulative energy and accepts an integer time-refinement factor. The broader gas-piston graph was source-reviewed for the shared-kernel extraction; it was not executed in the focused dependency build.
+
+## Molecular porous refraction on the accepted thermal timeline
+
+`porous_heating::feedback::IsobaricRelaxingPorousGas` retains the original
+isobaric gas specification, a complete `RelaxingMedium` composition and its
+`RelaxationAbsorption` law. The reference equilibrium state must match that gas
+law exactly. Both owners admit the declared thermal support and every later
+native cell temperature; no extrapolation or independent absorption(T) fit is
+introduced. Each changed cell refreshes density, sound speed, viscosity,
+conductivity, molecular heat capacities and collision times together once.
+
+The existing single-frequency, coherent spectral and covariance/independent
+angular-mode feedback owners consume that same immutable state through
+`PorousTemperatureFluid::prepare_layer`. The default preserves the original
+equilibrium gas/liquid path. The molecular adapter uses the native finite
+`PorousLayer` response, whose shared source ownership permits cache movement
+and cloning without self-references or per-bin reservoir copies. Original
+porous source support, conserved tangential wavenumber and full-area
+pressure/volume-flow phase conventions remain binding.
+
+Coupled pore-thermal/molecular compression and pore viscosity supply the
+existing positive interior heat integrals. They are not independent added
+attenuation channels. Every native explicit step deposits its accepted START
+heat once; changed endpoint states prepare the next response and are admitted
+before publication. Unchanged/latent-plateau cells reuse their original state.
+Spectral bins share one source evaluation per changed cell; each frequency
+retains its original coherent stack solve. The fixed exterior wave reference,
+authored thermal mass/caloric law and separate passive backing-load account
+remain unchanged. This is an isobaric, frozen-background-per-step quasisteady
+model, not finite pore mass transport or transient molecular-memory evolution.
+
+Four focused tests in `tests/porous_heating_feedback/molecular.rs` compare
+oblique temperature-gradient fields and cell heat with the original material
+and duct owners, selective accepted-state refresh with start-step energy,
+shared spectral states and equivalent covariance heating, exact empty-reservoir
+recovery, and source-domain/cancellation refusal without candidate publication.
+They are authored and syntax checked; native execution remains blocked by the
+dependency compilation resource limit.
