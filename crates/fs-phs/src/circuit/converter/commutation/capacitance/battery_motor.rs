@@ -1,16 +1,19 @@
 //! Constant or original voltage-dependent device charge in the finite battery/motor chain.
 //!
-//! State is [battery q_chemical,q_polarization,q_bus, converter lambda,q_bus_in,
-//! q_bus_out,q_node_in,q_node_out, motor lambda,p_rotor,p_stator]. The converter
-//! bus coordinates are TOTAL electrode charges, not the old bare-Cb charges.
-//! Initialize them through the retained parameters().state with authored
-//! node voltages and the same complete capacitor law. Copying the old nine-state bus charges into this eleven-state
-//! layout would describe a different physical state and is never done here.
+//! The eleven-state lanes retain battery3, converter5, motor3. The gate-driven
+//! fifteen-state lane retains battery3, converter9, motor3: converter flux,
+//! bus/bus/GROUPED-node/GROUPED-node charges, then four gate charges at indices
+//! 8..12; motor flux and rotor/stator momenta are at12,13,14. Grouped node
+//! charge includes that leg's high-side gate electrode. Initialize converter
+//! coordinates through the retained parameters with authored physical voltages;
+//! old bus/node charges cannot be copied into a different capacitor topology.
 //!
-//! Every gate shares one original native workspace, complete finite battery
-//! storage and reciprocal motor law. Coss is reversible storage. Its actual
-//! discharge heat emerges in the original channel/diode laws; no Eoss loss map,
-//! node reset, sampled supply, split subsystem solve or efficiency is added.
+//! Every gate command shares one original native workspace, finite battery
+//! storage and reciprocal motor law. Actual gate-source voltage owns driven
+//! conductance; gate supply work and four driver resistor heats are explicit.
+//! Intrinsic drain, gate/source and Miller energies are reversible storage.
+//! No extra Coss loss map, node reset, sampled supply, split solve, inferred
+//! efficiency, carrier recovery or finite gate-rail energy is introduced.
 
 use super::*;
 use crate::circuit::battery::{BatteryOcvCurve, BatteryParameters, BatterySource};
@@ -25,7 +28,7 @@ use fs_math::det;
 pub struct CapacitiveBatteryMotorCycleStep {
     pub native: PreparedStepRecord,
     pub converter: CapacitiveConverterAccount,
-    /// Chemical, polarization, battery bus, COMPLETE five-state converter,
+    /// Chemical, polarization, battery bus, COMPLETE five- or nine-state converter,
     /// motor magnetic, rotor kinetic, stator kinetic energy changes.
     pub storage_change_j: [f64; 7],
     pub battery_terminal_work_j: f64,
@@ -70,6 +73,15 @@ impl CapacitiveBatteryMotorCycleStep {
             d[3],
         ]
     }
+    /// Complete original fourteen heats plus four separately owned gate drivers.
+    pub fn all_heat_joules(&self) -> [f64; 18] {
+        let mut out = [0.0; 18];
+        out[..14].copy_from_slice(&self.heat_joules());
+        if let Some(gate) = &self.converter.gate {
+            out[14..].copy_from_slice(&gate.resistor_heat_j);
+        }
+        out
+    }
     pub fn total_storage_change_j(&self) -> f64 {
         total(self.storage_change_j)
     }
@@ -77,15 +89,17 @@ impl CapacitiveBatteryMotorCycleStep {
         total(
             self.storage_change_j
                 .into_iter()
-                .chain(self.heat_joules())
+                .chain(self.all_heat_joules())
                 .chain([
                     self.load_work_j,
                     -self.shaft_work_j[0],
                     -self.shaft_work_j[1],
-                ]),
+                ])
+                .chain(self.converter.gate_source_work_j().map(|w| -w)),
         )
     }
-    fn work(&self) -> [f64; 8] {
+    fn work(&self) -> [f64; 12] {
+        let g = self.converter.gate_source_work_j();
         [
             self.battery_terminal_work_j,
             self.converter.terminal_work_j[0],
@@ -95,6 +109,10 @@ impl CapacitiveBatteryMotorCycleStep {
             self.shaft_work_j[0],
             self.shaft_work_j[1],
             self.load_work_j,
+            g[0],
+            g[1],
+            g[2],
+            g[3],
         ]
     }
     fn means(&self) -> [f64; 7] {
@@ -111,17 +129,21 @@ impl CapacitiveBatteryMotorCycleStep {
     fn admit(
         &self,
         changes: [f64; 7],
-        work: [f64; 8],
+        work: [f64; 12],
         absolute: f64,
         relative: f64,
     ) -> Result<(), PhsError> {
         let s = self.storage_change_j;
         let w = self.work();
-        let h = self.heat_joules();
-        let converter_heat = total(self.converter.heat_joules());
+        let h = self.all_heat_joules();
+        let converter_heat = total(self.converter.all_heat_joules());
         let heat = total(h);
         let source_scale = total(changes[..3].iter().copied().chain([work[0], h[5], h[6]]));
-        let converter_scale = total([changes[3], converter_heat, work[1], work[2]]);
+        let converter_scale = total(
+            [changes[3], converter_heat, work[1], work[2]]
+                .into_iter()
+                .chain(work[8..].iter().copied()),
+        );
         let lead_scale = total([work[0], work[1], h[7]]);
         let output_scale = total([work[2], work[3], work[7]]);
         let magnetic_scale = total([changes[4], h[8], work[3], work[4]]);
@@ -149,7 +171,14 @@ impl CapacitiveBatteryMotorCycleStep {
         }
         for (error, magnitude) in [
             (total([s[0], s[1], s[2], h[5], h[6], -w[0]]), source_scale),
-            (total([s[3], converter_heat, -w[1], -w[2]]), converter_scale),
+            (
+                total(
+                    [s[3], converter_heat, -w[1], -w[2]]
+                        .into_iter()
+                        .chain(w[8..].iter().map(|v| -v)),
+                ),
+                converter_scale,
+            ),
             (total([-w[0], -w[1], -h[7]]), lead_scale),
             (total([w[2], w[3], w[7]]), output_scale),
             (total([s[4], h[8], w[4], -w[3]]), magnetic_scale),
@@ -164,8 +193,16 @@ impl CapacitiveBatteryMotorCycleStep {
             (total(s.into_iter().chain([-self.native.delta_h])), scale),
             (total([heat, -self.native.dissipated]), heat),
             (
-                total([self.native.supplied, -w[5], -w[6], w[7]]),
-                total([work[5], work[6], work[7]]),
+                total(
+                    [self.native.supplied, -w[5], -w[6], w[7]]
+                        .into_iter()
+                        .chain(w[8..].iter().map(|v| -v)),
+                ),
+                total(
+                    [work[5], work[6], work[7]]
+                        .into_iter()
+                        .chain(work[8..].iter().copied()),
+                ),
             ),
             (self.balance_residual_j(), scale),
         ] {
@@ -180,17 +217,21 @@ impl CapacitiveBatteryMotorCycleStep {
         Ok(())
     }
 }
-pub struct PreparedCapacitiveBatteryMotorCycle<P = CapacitiveCommutationParameters> {
+pub struct PreparedCapacitiveBatteryMotorCycle<
+    P = CapacitiveCommutationParameters,
+    const C: usize = 5,
+    const N: usize = 11,
+> {
     parameters: P,
     battery: BatterySource,
-    core: ConverterCore,
+    core: ConverterCore<C>,
     lead_resistance_ohm: f64,
     motor_parameters: DcMotorParameters,
     system: PortHamiltonian,
     workspace: StepWorkspace,
     plan: GatePlan,
 }
-fn core_state(state: &[f64; 11]) -> [f64; 5] {
+fn core_state<const C: usize, const N: usize>(state: &[f64; N]) -> [f64; C] {
     core::array::from_fn(|i| state[3 + i])
 }
 
@@ -198,7 +239,10 @@ fn core_state(state: &[f64; 11]) -> [f64; 5] {
 pub type PreparedChargeBatteryMotorCycle =
     PreparedCapacitiveBatteryMotorCycle<charge::ChargeCommutationParameters>;
 
-fn converter_parameters(model: &BatteryMotorDrive, devices: [SwitchDevice; 4]) -> CommutationParameters {
+fn converter_parameters(
+    model: &BatteryMotorDrive,
+    devices: [SwitchDevice; 4],
+) -> CommutationParameters {
     let p = model.electrical().parameters();
     CommutationParameters {
         inductance_h: p.inductance_h,
@@ -229,8 +273,16 @@ impl PreparedCapacitiveBatteryMotorCycle {
             output_capacitance_f,
         };
         let core = ConverterCore::new(parameters)?;
-        Self::prepare(model, parameters, core, intervals, substeps_per_interval,
-            electrical, controls, cancelled)
+        Self::prepare(
+            model,
+            parameters,
+            core,
+            intervals,
+            substeps_per_interval,
+            electrical,
+            controls,
+            cancelled,
+        )
     }
 }
 impl PreparedCapacitiveBatteryMotorCycle<charge::ChargeCommutationParameters> {
@@ -256,19 +308,25 @@ impl PreparedCapacitiveBatteryMotorCycle<charge::ChargeCommutationParameters> {
             maximum_cells_per_chord,
         };
         let core = ConverterCore::new_charge(&parameters)?;
-        Self::prepare(model, parameters, core, intervals, substeps_per_interval,
-            electrical, controls, cancelled)
+        Self::prepare(
+            model,
+            parameters,
+            core,
+            intervals,
+            substeps_per_interval,
+            electrical,
+            controls,
+            cancelled,
+        )
     }
 }
-impl<P: Clone> PreparedCapacitiveBatteryMotorCycle<P> {
-    pub fn parameters(&self) -> P { self.parameters.clone() }
-}
-impl<P> PreparedCapacitiveBatteryMotorCycle<P> {
-    #[allow(clippy::too_many_arguments)]
-    fn prepare(
+/// Retained gate/Miller charge in the same finite battery and two-shaft drive.
+pub type PreparedGateBatteryMotorCycle =
+    PreparedCapacitiveBatteryMotorCycle<gate::GateCommutationParameters, 9, 15>;
+impl PreparedCapacitiveBatteryMotorCycle<gate::GateCommutationParameters, 9, 15> {
+    pub fn new_gate_controlled(
         model: BatteryMotorDrive,
-        parameters: P,
-        mut core: ConverterCore,
+        parameters: gate::GateCommutationParameters,
         intervals: &[CommutationInterval],
         substeps_per_interval: usize,
         electrical: PowerLoadControls,
@@ -276,8 +334,55 @@ impl<P> PreparedCapacitiveBatteryMotorCycle<P> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, PreparedStepError> {
         poll(&mut cancelled)?;
-        let plan = GatePlan::new(core.parameters.devices, intervals,
-            substeps_per_interval, electrical, controls, &mut cancelled)?;
+        if converter_parameters(&model, parameters.converter.devices) != parameters.converter {
+            return Err(invalid(
+                "gate drive must retain original converter L, Cbus and winding resistance",
+            )
+            .into());
+        }
+        let core = ConverterCore::<9>::new_gate(&parameters)?;
+        Self::prepare(
+            model,
+            parameters,
+            core,
+            intervals,
+            substeps_per_interval,
+            electrical,
+            controls,
+            cancelled,
+        )
+    }
+}
+impl<P: Clone, const C: usize, const N: usize> PreparedCapacitiveBatteryMotorCycle<P, C, N> {
+    pub fn parameters(&self) -> P {
+        self.parameters.clone()
+    }
+}
+impl<P, const C: usize, const N: usize> PreparedCapacitiveBatteryMotorCycle<P, C, N> {
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        model: BatteryMotorDrive,
+        parameters: P,
+        mut core: ConverterCore<C>,
+        intervals: &[CommutationInterval],
+        substeps_per_interval: usize,
+        electrical: PowerLoadControls,
+        controls: SwitchCycleControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, PreparedStepError> {
+        poll(&mut cancelled)?;
+        if C.checked_add(6) != Some(N) {
+            return Err(invalid("complete gate/converter drive dimension mismatch").into());
+        }
+        let plan = GatePlan::new(
+            core.parameters.devices,
+            intervals,
+            substeps_per_interval,
+            electrical,
+            controls,
+            core.gate_parameters().map(|p| &p.gate_drivers),
+            &mut cancelled,
+        )?;
         core.admit_work(&plan)?;
         let mut battery = BatterySource::new(
             model.electrical().battery_curve().clone(),
@@ -292,7 +397,7 @@ impl<P> PreparedCapacitiveBatteryMotorCycle<P> {
             &[],
             &[],
             InterconnectionBudget {
-                max_states: 8,
+                max_states: C + 3,
                 max_total_ports: 3,
                 max_dense_bytes: 1 << 19,
                 max_coupling_multiply_terms: 256,
@@ -310,7 +415,7 @@ impl<P> PreparedCapacitiveBatteryMotorCycle<P> {
             &[0],
             &[1.0],
             InterconnectionBudget {
-                max_states: 11,
+                max_states: N,
                 max_total_ports: 6,
                 max_dense_bytes: 1 << 20,
                 max_coupling_multiply_terms: 512,
@@ -329,23 +434,23 @@ impl<P> PreparedCapacitiveBatteryMotorCycle<P> {
             plan,
         })
     }
-    /// Explicit concatenation of ORIGINAL battery3, NEW total-electrode
-    /// converter5 and original motor3 coordinates. Converter state should be
-    /// initialized with parameters().state(current,bus_voltage,node_voltage).
+    /// Explicit concatenation of original battery3, complete converter5/9,
+    /// and original motor3. The gate lane includes its four gate charges before
+    /// motor state. Initialize through the matching parameters().state method.
     pub fn state(
         &self,
         battery_state: &[f64; 3],
-        converter_state: &[f64; 5],
+        converter_state: &[f64; C],
         motor_state: &[f64; 3],
-    ) -> Result<[f64; 11], PhsError> {
+    ) -> Result<[f64; N], PhsError> {
         self.core.energy(converter_state)?;
-        let mut state = [0.0; 11];
+        let mut state = [0.0; N];
         state[..3].copy_from_slice(battery_state);
-        state[3..8].copy_from_slice(converter_state);
-        state[8..].copy_from_slice(motor_state);
+        state[3..3 + C].copy_from_slice(converter_state);
+        state[3 + C..].copy_from_slice(motor_state);
         if state.iter().any(|v| !v.is_finite()) || !self.system.hamiltonian(&state).is_finite() {
             return Err(invalid(
-                "finite supported original eleven-state battery/converter/motor coordinates required",
+                "finite supported original battery/converter/gate/motor coordinates required",
             ));
         }
         Ok(state)
@@ -379,18 +484,18 @@ impl<P> PreparedCapacitiveBatteryMotorCycle<P> {
     }
     pub fn step_controlled(
         &mut self,
-        initial: &[f64; 11],
+        initial: &[f64; N],
         command: BatteryMotorSwitchCommand,
-        next: &mut [f64; 11],
+        next: &mut [f64; N],
         cancelled: impl FnMut() -> bool,
     ) -> Result<CapacitiveBatteryMotorCycleStep, PreparedStepError> {
         self.advance(initial, |_| command, next, cancelled)
     }
     pub fn step_interval_commands_controlled(
         &mut self,
-        initial: &[f64; 11],
+        initial: &[f64; N],
         commands: &[BatteryMotorSwitchCommand],
-        next: &mut [f64; 11],
+        next: &mut [f64; N],
         cancelled: impl FnMut() -> bool,
     ) -> Result<CapacitiveBatteryMotorCycleStep, PreparedStepError> {
         if commands.len() != self.plan.intervals.len() {
@@ -404,55 +509,58 @@ impl<P> PreparedCapacitiveBatteryMotorCycle<P> {
     #[allow(clippy::too_many_arguments)]
     fn step_native(
         battery: &BatterySource,
-        core: &ConverterCore,
+        core: &ConverterCore<C>,
         lead: f64,
         m: DcMotorParameters,
         system: &PortHamiltonian,
         workspace: &mut StepWorkspace,
         gate: &GateStep,
         controls: PowerLoadControls,
-        initial: &[f64; 11],
+        initial: &[f64; N],
         command: BatteryMotorSwitchCommand,
         cancel: &mut impl FnMut() -> bool,
-    ) -> Result<([f64; 11], CapacitiveBatteryMotorCycleStep), PreparedStepError> {
+    ) -> Result<([f64; N], CapacitiveBatteryMotorCycleStep), PreparedStepError> {
         poll(cancel)?;
         let initial_core = core_state(initial);
         let start = core.effort(&initial_core)?;
-        gate.point(&start)?;
+        core.point(gate, &start)?;
         load_point(command.auxiliary_load, start[2])?;
         let port = |_: &[f64], e: &[f64], out: &mut [f64]| {
-            if e.len() != 11 || out.len() != 11 {
+            if e.len() != N || out.len() != N {
                 return None;
             }
-            let point = gate.point(&e[3..8]).ok()?;
+            let point = core.point(gate, &e[3..3 + C]).ok()?;
             let load = load_point(command.auxiliary_load, e[5]).ok()?;
             out.fill(0.0);
-            let heat = point.flow(&mut out[3..8])?;
+            let heat = point.flow(&mut out[3..3 + C])?;
             out[5] = number(point.legs[1].high_current + Dd::from_f64(load.current_a)).ok()?;
             Some(NonlinearPortPower {
-                supplied_power_w: -load.delivered_power_w,
+                supplied_power_w: number(
+                    point.supplied_power() - Dd::from_f64(load.delivered_power_w),
+                )
+                .ok()?,
                 dissipated_power_w: heat,
             })
         };
         let tangent = |_: &[f64], e: &[f64], _: &[f64], de: &[f64], out: &mut [f64]| {
-            if e.len() != 11 || de.len() != 11 || out.len() != 11 {
+            if e.len() != N || de.len() != N || out.len() != N {
                 return false;
             }
-            let Ok(point) = gate.point(&e[3..8]) else {
+            let Ok(point) = core.point(gate, &e[3..3 + C]) else {
                 return false;
             };
             let Ok(load) = load_point(command.auxiliary_load, e[5]) else {
                 return false;
             };
             out.fill(0.0);
-            if !point.tangent(&de[3..8], &mut out[3..8]) {
+            if !point.tangent(&de[3..3 + C], &mut out[3..3 + C]) {
                 return false;
             }
             out[5] = total([out[5], load.incremental_conductance_s * de[5]]);
             out.iter().all(|v| v.is_finite())
         };
         let dt = gate.duration_s;
-        let (mut next, mut outputs) = ([0.0; 11], [0.0; 4]);
+        let (mut next, mut outputs) = ([0.0; N], [0.0; 4]);
         let native = workspace.step_into_supplied_controlled(
             system,
             initial,
@@ -473,14 +581,14 @@ impl<P> PreparedCapacitiveBatteryMotorCycle<P> {
         let e = workspace
             .last_step_discrete_effort()
             .ok_or_else(|| invalid("capacitive drive requires its original accepted effort"))?;
-        let ce: &[f64; 5] = (&e[3..8])
+        let ce: &[f64; C] = (&e[3..3 + C])
             .try_into()
             .map_err(|_| invalid("capacitive drive converter effort dimension"))?;
-        let nodes = gate.point(ce)?;
+        let nodes = core.point(gate, ce)?;
         let load = load_point(command.auxiliary_load, e[5])?;
         let next_core = core_state(&next);
         let end = core.effort(&next_core)?;
-        gate.point(&end)?;
+        core.point(gate, &end)?;
         load_point(command.auxiliary_load, end[2])?;
         let lead_current = number((Dd::from_f64(e[2]) - Dd::from_f64(e[4])) / Dd::from_f64(lead))?;
         let b = battery.interval(
@@ -489,7 +597,7 @@ impl<P> PreparedCapacitiveBatteryMotorCycle<P> {
             -lead_current,
             dt,
         )?;
-        let output = number(-Dd::from_f64(e[8]) - Dd::from_f64(load.current_a))?;
+        let output = number(-Dd::from_f64(e[3 + C]) - Dd::from_f64(load.current_a))?;
         let converter = core.account(
             &initial_core,
             &next_core,
@@ -499,7 +607,7 @@ impl<P> PreparedCapacitiveBatteryMotorCycle<P> {
             dt,
             controls,
         )?;
-        let relative_speed = total([e[9], -e[10]]);
+        let relative_speed = total([e[4 + C], -e[5 + C]]);
         let step = CapacitiveBatteryMotorCycleStep {
             native,
             storage_change_j: [
@@ -507,33 +615,34 @@ impl<P> PreparedCapacitiveBatteryMotorCycle<P> {
                 b.polarization_energy_change_j,
                 b.bus_energy_change_j,
                 converter.storage_change_j,
-                quadratic(initial[8], next[8], m.inductance_h),
-                quadratic(initial[9], next[9], m.rotor_inertia_kg_m2),
-                quadratic(initial[10], next[10], m.stator_inertia_kg_m2),
+                quadratic(initial[3 + C], next[3 + C], m.inductance_h),
+                quadratic(initial[4 + C], next[4 + C], m.rotor_inertia_kg_m2),
+                quadratic(initial[5 + C], next[5 + C], m.stator_inertia_kg_m2),
             ],
             converter,
             battery_terminal_work_j: b.terminal_work_j,
-            motor_electrical_work_j: product(dt, e[5], e[8]),
+            motor_electrical_work_j: product(dt, e[5], e[3 + C]),
             electromagnetic_work_j: (Dd::from_f64(dt)
                 * Dd::from_f64(m.coupling_nm_per_a)
-                * Dd::from_f64(e[8])
+                * Dd::from_f64(e[3 + C])
                 * Dd::from_f64(relative_speed))
             .to_f64(),
             shaft_work_j: [
-                product(dt, command.shaft_torque_nm[0], e[9]),
-                product(dt, command.shaft_torque_nm[1], e[10]),
+                product(dt, command.shaft_torque_nm[0], e[4 + C]),
+                product(dt, command.shaft_torque_nm[1], e[5 + C]),
             ],
             load_work_j: (Dd::from_f64(dt) * Dd::from_f64(load.delivered_power_w)).to_f64(),
             curtailed_load_energy_j: (Dd::from_f64(dt) * Dd::from_f64(load.curtailed_power_w))
                 .to_f64(),
             mean_bus_voltage_v: [e[2], e[4], e[5]],
             mean_lead_current_a: lead_current,
-            mean_motor_current_a: e[8],
-            mean_shaft_speed_rad_s: [e[9], e[10]],
+            mean_motor_current_a: e[3 + C],
+            mean_shaft_speed_rad_s: [e[4 + C], e[5 + C]],
             last_auxiliary_load: load,
-            angular_momentum_residual_nms: (Dd::from_f64(next[9]) - Dd::from_f64(initial[9])
-                + Dd::from_f64(next[10])
-                - Dd::from_f64(initial[10])
+            angular_momentum_residual_nms: (Dd::from_f64(next[4 + C])
+                - Dd::from_f64(initial[4 + C])
+                + Dd::from_f64(next[5 + C])
+                - Dd::from_f64(initial[5 + C])
                 - Dd::from_f64(dt)
                     * (Dd::from_f64(command.shaft_torque_nm[0])
                         + Dd::from_f64(command.shaft_torque_nm[1])))
@@ -547,8 +656,8 @@ impl<P> PreparedCapacitiveBatteryMotorCycle<P> {
             .to_f64(),
             copper_heat_j: (Dd::from_f64(dt)
                 * Dd::from_f64(m.winding_resistance_ohm)
-                * Dd::from_f64(e[8])
-                * Dd::from_f64(e[8]))
+                * Dd::from_f64(e[3 + C])
+                * Dd::from_f64(e[3 + C]))
             .to_f64(),
             bearing_heat_j: (Dd::from_f64(dt)
                 * Dd::from_f64(m.bearing_drag_nm_s_per_rad)
@@ -567,16 +676,16 @@ impl<P> PreparedCapacitiveBatteryMotorCycle<P> {
     }
     fn advance(
         &mut self,
-        initial: &[f64; 11],
+        initial: &[f64; N],
         command: impl Fn(usize) -> BatteryMotorSwitchCommand,
-        next: &mut [f64; 11],
+        next: &mut [f64; N],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CapacitiveBatteryMotorCycleStep, PreparedStepError> {
         poll(&mut cancelled)?;
         let mut state = *initial;
         let mut converter = ConverterAccumulator::new();
         let (mut changes, mut absolute_changes) = ([Dd::ZERO; 7], [Dd::ZERO; 7]);
-        let (mut work, mut absolute_work) = ([Dd::ZERO; 8], [Dd::ZERO; 8]);
+        let (mut work, mut absolute_work) = ([Dd::ZERO; 12], [Dd::ZERO; 12]);
         let (mut means, mut heat, mut native) = ([Dd::ZERO; 7], [Dd::ZERO; 5], [Dd::ZERO; 3]);
         let (mut curtailed, mut impulse) = (Dd::ZERO, Dd::ZERO);
         let (mut iterations, mut residual) = (0usize, 0.0_f64);
@@ -656,16 +765,16 @@ impl<P> PreparedCapacitiveBatteryMotorCycle<P> {
             quadratic(initial[1], state[1], b.polarization_capacitance_f),
             quadratic(initial[2], state[2], b.bus_capacitance_f),
             converter.storage_change_j,
-            quadratic(initial[8], state[8], m.inductance_h),
-            quadratic(initial[9], state[9], m.rotor_inertia_kg_m2),
-            quadratic(initial[10], state[10], m.stator_inertia_kg_m2),
+            quadratic(initial[3 + C], state[3 + C], m.inductance_h),
+            quadratic(initial[4 + C], state[4 + C], m.rotor_inertia_kg_m2),
+            quadratic(initial[5 + C], state[5 + C], m.stator_inertia_kg_m2),
         ];
         let delta_h = storage_energy_change(
             self.system.storage(),
             initial,
             &state,
-            &mut [0.0; 11],
-            &mut [0.0; 11],
+            &mut [0.0; N],
+            &mut [0.0; N],
         );
         let (last_mean, last_auxiliary_load) =
             last.ok_or_else(|| invalid("empty capacitive drive cycle"))?;
@@ -698,9 +807,10 @@ impl<P> PreparedCapacitiveBatteryMotorCycle<P> {
             mean_motor_current_a: mean[4],
             mean_shaft_speed_rad_s: [mean[5], mean[6]],
             last_auxiliary_load,
-            angular_momentum_residual_nms: (Dd::from_f64(state[9]) - Dd::from_f64(initial[9])
-                + Dd::from_f64(state[10])
-                - Dd::from_f64(initial[10])
+            angular_momentum_residual_nms: (Dd::from_f64(state[4 + C])
+                - Dd::from_f64(initial[4 + C])
+                + Dd::from_f64(state[5 + C])
+                - Dd::from_f64(initial[5 + C])
                 - impulse)
                 .to_f64(),
             integration_steps: self.plan.integration_steps,
@@ -731,7 +841,7 @@ impl<P> PreparedCapacitiveBatteryMotorCycle<P> {
             changes_abs
                 .into_iter()
                 .chain(work_abs)
-                .chain(step.heat_joules()),
+                .chain(step.all_heat_joules()),
         );
         admit(
             number(Dd::from_f64(delta_h) - native[0])?,
@@ -748,6 +858,15 @@ impl<P> PreparedCapacitiveBatteryMotorCycle<P> {
                 c.absolute_energy_tolerance_j,
                 c.relative_energy_tolerance,
                 "capacitive drive shared converter work accumulation disagrees",
+            )?;
+        }
+        for k in 0..4 {
+            admit(
+                total([step.converter.gate_source_work_j()[k], -w[8 + k]]),
+                work_abs[8 + k],
+                c.absolute_energy_tolerance_j,
+                c.relative_energy_tolerance,
+                "finite-drive gate source work accumulation disagrees",
             )?;
         }
         poll(&mut cancelled)?;

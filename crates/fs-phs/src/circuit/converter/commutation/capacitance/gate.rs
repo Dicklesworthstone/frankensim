@@ -175,6 +175,9 @@ impl GateCommutationStorage {
             scales,
         })
     }
+    pub(super) fn parameters(&self) -> &GateCommutationParameters {
+        &self.parameters
+    }
     pub(super) fn maximum_cells_per_chord(&self) -> usize {
         self.parameters.maximum_cells_per_chord
     }

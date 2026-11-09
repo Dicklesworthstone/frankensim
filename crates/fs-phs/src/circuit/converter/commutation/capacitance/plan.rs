@@ -4,6 +4,7 @@ pub(super) struct GateStep {
     pub(super) gates: DeviceGateState,
     pub(super) duration_s: f64,
     pub(super) legs: [HalfBridgeConduction; 2],
+    pub(super) drivers: Option<[GateDriverBranch; 4]>,
 }
 pub(super) struct GatePlan {
     pub(super) intervals: Vec<CommutationInterval>,
@@ -22,6 +23,7 @@ impl GatePlan {
         substeps: usize,
         electrical: PowerLoadControls,
         controls: SwitchCycleControls,
+        drivers: Option<&[GateDriver; 4]>,
         cancel: &mut impl FnMut() -> bool,
     ) -> Result<Self, PreparedStepError> {
         poll(cancel)?;
@@ -94,6 +96,10 @@ impl GatePlan {
                         gates: interval.gates,
                         duration_s,
                         legs,
+                        drivers: match drivers {
+                            Some(d) => Some(four(core::array::from_fn(|k| d[k].branch(on[k])))?),
+                            None => None,
+                        },
                     });
                     i
                 };

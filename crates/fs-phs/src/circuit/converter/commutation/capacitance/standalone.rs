@@ -1,4 +1,6 @@
-//! Original five-state native commutation with finite-resistance voltage terminals.
+//! Original five-/nine-state native commutation with finite-resistance terminals.
+//! The gate lane appends four physical gate charges after grouped node charges;
+//! its source work and four driver heats remain in the converter gate account.
 use super::*;
 
 #[derive(Clone, Debug)]
@@ -15,9 +17,12 @@ pub struct CapacitiveCommutatedStep {
 }
 /// One reusable native workspace with explicitly continuing node charges.
 /// Ideal supplies have finite impedance; they do not have finite stored energy.
-pub struct PreparedCapacitiveCommutatedSwitchCycle<P = CapacitiveCommutationParameters> {
+pub struct PreparedCapacitiveCommutatedSwitchCycle<
+    P = CapacitiveCommutationParameters,
+    const N: usize = 5,
+> {
     parameters: P,
-    core: ConverterCore,
+    core: ConverterCore<N>,
     terminal_resistance_ohm: [f64; 2],
     plan: GatePlan,
     workspace: StepWorkspace,
@@ -27,13 +32,14 @@ struct Operating {
     loads: [PowerLoadPoint; 2],
     source: [f64; 2],
 }
-fn operating(
+fn operating<const N: usize>(
+    core: &ConverterCore<N>,
     gate: &GateStep,
     e: &[f64],
     sources: VoltageSources,
     loads: &[Option<RegulatedPowerLoad>; 2],
 ) -> Result<Operating, PhsError> {
-    let nodes = gate.point(e)?;
+    let nodes = core.point(gate, e)?;
     let loads = [load_point(loads[0], e[1])?, load_point(loads[1], e[2])?];
     let source = core::array::from_fn(|k| sources.current_a(k, e[k + 1]));
     if source.iter().any(|i| !i.is_finite()) {
@@ -61,8 +67,16 @@ impl PreparedCapacitiveCommutatedSwitchCycle {
     ) -> Result<Self, PreparedStepError> {
         poll(&mut cancelled)?;
         let core = ConverterCore::new(parameters)?;
-        Self::prepare(parameters, core, terminal_resistance_ohm, intervals,
-            substeps_per_interval, electrical, controls, cancelled)
+        Self::prepare(
+            parameters,
+            core,
+            terminal_resistance_ohm,
+            intervals,
+            substeps_per_interval,
+            electrical,
+            controls,
+            cancelled,
+        )
     }
 }
 impl PreparedCapacitiveCommutatedSwitchCycle<charge::ChargeCommutationParameters> {
@@ -80,18 +94,55 @@ impl PreparedCapacitiveCommutatedSwitchCycle<charge::ChargeCommutationParameters
     ) -> Result<Self, PreparedStepError> {
         poll(&mut cancelled)?;
         let core = ConverterCore::new_charge(&parameters)?;
-        Self::prepare(parameters, core, terminal_resistance_ohm, intervals,
-            substeps_per_interval, electrical, controls, cancelled)
+        Self::prepare(
+            parameters,
+            core,
+            terminal_resistance_ohm,
+            intervals,
+            substeps_per_interval,
+            electrical,
+            controls,
+            cancelled,
+        )
     }
 }
-impl<P: Clone> PreparedCapacitiveCommutatedSwitchCycle<P> {
-    pub fn parameters(&self) -> P { self.parameters.clone() }
+/// Four physical gate charges share the original converter trajectory.
+pub type PreparedGateCommutatedSwitchCycle =
+    PreparedCapacitiveCommutatedSwitchCycle<gate::GateCommutationParameters, 9>;
+impl PreparedCapacitiveCommutatedSwitchCycle<gate::GateCommutationParameters, 9> {
+    pub fn new_gate_controlled(
+        parameters: gate::GateCommutationParameters,
+        terminal_resistance_ohm: [f64; 2],
+        intervals: &[CommutationInterval],
+        substeps_per_interval: usize,
+        electrical: PowerLoadControls,
+        controls: SwitchCycleControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, PreparedStepError> {
+        poll(&mut cancelled)?;
+        let core = ConverterCore::<9>::new_gate(&parameters)?;
+        Self::prepare(
+            parameters,
+            core,
+            terminal_resistance_ohm,
+            intervals,
+            substeps_per_interval,
+            electrical,
+            controls,
+            cancelled,
+        )
+    }
 }
-impl<P> PreparedCapacitiveCommutatedSwitchCycle<P> {
+impl<P: Clone, const N: usize> PreparedCapacitiveCommutatedSwitchCycle<P, N> {
+    pub fn parameters(&self) -> P {
+        self.parameters.clone()
+    }
+}
+impl<P, const N: usize> PreparedCapacitiveCommutatedSwitchCycle<P, N> {
     #[allow(clippy::too_many_arguments)]
     fn prepare(
         parameters: P,
-        core: ConverterCore,
+        core: ConverterCore<N>,
         terminal_resistance_ohm: [f64; 2],
         intervals: &[CommutationInterval],
         substeps_per_interval: usize,
@@ -101,12 +152,25 @@ impl<P> PreparedCapacitiveCommutatedSwitchCycle<P> {
     ) -> Result<Self, PreparedStepError> {
         poll(&mut cancelled)?;
         VoltageSources::new([0.0; 2], terminal_resistance_ohm)?;
-        let plan = GatePlan::new(core.parameters.devices, intervals,
-            substeps_per_interval, electrical, controls, &mut cancelled)?;
+        let plan = GatePlan::new(
+            core.parameters.devices,
+            intervals,
+            substeps_per_interval,
+            electrical,
+            controls,
+            core.gate_parameters().map(|p| &p.gate_drivers),
+            &mut cancelled,
+        )?;
         core.admit_work(&plan)?;
         let workspace = plan.workspace(&core.system)?;
         poll(&mut cancelled)?;
-        Ok(Self { parameters, core, terminal_resistance_ohm, plan, workspace })
+        Ok(Self {
+            parameters,
+            core,
+            terminal_resistance_ohm,
+            plan,
+            workspace,
+        })
     }
     pub fn terminal_resistance_ohm(&self) -> [f64; 2] {
         self.terminal_resistance_ohm
@@ -128,10 +192,10 @@ impl<P> PreparedCapacitiveCommutatedSwitchCycle<P> {
     }
     pub fn step_controlled(
         &mut self,
-        initial: &[f64; 5],
+        initial: &[f64; N],
         source_voltage_v: &[f64; 2],
         loads: &[Option<RegulatedPowerLoad>; 2],
-        next: &mut [f64; 5],
+        next: &mut [f64; N],
         mean_bus_voltage_v: &mut [f64; 2],
         cancelled: impl FnMut() -> bool,
     ) -> Result<CapacitiveCommutatedStep, PreparedStepError> {
@@ -143,9 +207,9 @@ impl<P> PreparedCapacitiveCommutatedSwitchCycle<P> {
     }
     pub fn step_interval_commands_controlled(
         &mut self,
-        initial: &[f64; 5],
+        initial: &[f64; N],
         commands: &[PowerSwitchCommand],
-        next: &mut [f64; 5],
+        next: &mut [f64; N],
         mean_bus_voltage_v: &mut [f64; 2],
         cancelled: impl FnMut() -> bool,
     ) -> Result<CapacitiveCommutatedStep, PreparedStepError> {
@@ -165,9 +229,9 @@ impl<P> PreparedCapacitiveCommutatedSwitchCycle<P> {
     }
     fn advance(
         &mut self,
-        initial: &[f64; 5],
+        initial: &[f64; N],
         command: impl Fn(usize) -> PowerSwitchCommand,
-        next: &mut [f64; 5],
+        next: &mut [f64; N],
         mean_bus_voltage_v: &mut [f64; 2],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CapacitiveCommutatedStep, PreparedStepError> {
@@ -190,6 +254,7 @@ impl<P> PreparedCapacitiveCommutatedSwitchCycle<P> {
             [Dd::ZERO; 2],
         );
         let mut native = [Dd::ZERO; 3];
+        let mut gate_transfers = Dd::ZERO;
         let (mut iterations, mut residual) = (0usize, 0.0_f64);
         let mut last = None;
         for k in 0..self.plan.intervals.len() {
@@ -200,11 +265,17 @@ impl<P> PreparedCapacitiveCommutatedSwitchCycle<P> {
             for j in 0..self.plan.substeps {
                 poll(&mut cancelled)?;
                 let gate = self.plan.step(k, j);
-                operating(gate, &self.core.effort(&state)?, sources, &command.loads)?;
+                operating(
+                    &self.core,
+                    gate,
+                    &self.core.effort(&state)?,
+                    sources,
+                    &command.loads,
+                )?;
                 let port = |_: &[f64], e: &[f64], out: &mut [f64]| {
-                    let p = operating(gate, e, sources, &command.loads).ok()?;
+                    let p = operating(&self.core, gate, e, sources, &command.loads).ok()?;
                     let heat = p.nodes.flow(out)?;
-                    let mut supply = Dd::ZERO;
+                    let mut supply = p.nodes.supplied_power();
                     for n in 0..2 {
                         let external =
                             Dd::from_f64(p.source[n]) - Dd::from_f64(p.loads[n].current_a);
@@ -217,7 +288,7 @@ impl<P> PreparedCapacitiveCommutatedSwitchCycle<P> {
                     })
                 };
                 let tangent = |_: &[f64], e: &[f64], _: &[f64], de: &[f64], out: &mut [f64]| {
-                    let Ok(p) = operating(gate, e, sources, &command.loads) else {
+                    let Ok(p) = operating(&self.core, gate, e, sources, &command.loads) else {
                         return false;
                     };
                     if !p.nodes.tangent(de, out) {
@@ -232,7 +303,7 @@ impl<P> PreparedCapacitiveCommutatedSwitchCycle<P> {
                     }
                     out.iter().all(|v| v.is_finite())
                 };
-                let (mut endpoint, mut outputs) = ([0.0; 5], [0.0; 2]);
+                let (mut endpoint, mut outputs) = ([0.0; N], [0.0; 2]);
                 let record = self.workspace.step_into_supplied_controlled(
                     &self.core.system,
                     &state,
@@ -245,15 +316,21 @@ impl<P> PreparedCapacitiveCommutatedSwitchCycle<P> {
                     Some(&tangent),
                     &mut cancelled,
                 )?;
-                let e: &[f64; 5] = self
+                let e: &[f64; N] = self
                     .workspace
                     .last_step_discrete_effort()
                     .and_then(|e| e.try_into().ok())
                     .ok_or_else(|| {
                         invalid("capacitive step requires its original accepted effort")
                     })?;
-                let p = operating(gate, e, sources, &command.loads)?;
-                operating(gate, &self.core.effort(&endpoint)?, sources, &command.loads)?;
+                let p = operating(&self.core, gate, e, sources, &command.loads)?;
+                operating(
+                    &self.core,
+                    gate,
+                    &self.core.effort(&endpoint)?,
+                    sources,
+                    &command.loads,
+                )?;
                 let net = core::array::from_fn(|n| {
                     (Dd::from_f64(p.source[n]) - Dd::from_f64(p.loads[n].current_a)).to_f64()
                 });
@@ -304,8 +381,16 @@ impl<P> PreparedCapacitiveCommutatedSwitchCycle<P> {
                     current[n] = current[n] + dt * Dd::from_f64(p.source[n]);
                     transfers[n] = transfers[n] + Dd::from_f64(scale);
                 }
-                let heat = total(account.heat_joules());
-                let scale = total(sw.map(f64::abs)).max(heat).max(record.delta_h.abs());
+                gate_transfers = gate_transfers
+                    + account
+                        .gate_source_work_j()
+                        .into_iter()
+                        .fold(Dd::ZERO, |s, w| s + Dd::from_f64(w.abs()));
+                let heat = total(account.all_heat_joules());
+                let scale = total(sw.map(f64::abs))
+                    .max(heat)
+                    .max(record.delta_h.abs())
+                    .max(total(account.gate_source_work_j().map(f64::abs)));
                 for error in [
                     total([record.delta_h, -account.storage_change_j]),
                     total([record.dissipated, -heat]),
@@ -313,6 +398,7 @@ impl<P> PreparedCapacitiveCommutatedSwitchCycle<P> {
                         account
                             .terminal_work_j
                             .into_iter()
+                            .chain(account.gate_source_work_j())
                             .chain([-record.supplied]),
                     ),
                 ] {
@@ -369,19 +455,21 @@ impl<P> PreparedCapacitiveCommutatedSwitchCycle<P> {
             last_loads,
             integration_steps: self.plan.integration_steps,
         };
-        let scale = number(transfers[0] + transfers[1])?.max(total(result.converter.heat_joules()));
+        let scale = number(transfers[0] + transfers[1] + gate_transfers)?
+            .max(total(result.converter.all_heat_joules()));
         let c = self.plan.controls;
         for error in [
             total([result.native.delta_h, -summed_native_delta]),
             total([
                 result.native.dissipated,
-                -total(result.converter.heat_joules()),
+                -total(result.converter.all_heat_joules()),
             ]),
             total(
                 result
                     .converter
                     .terminal_work_j
                     .into_iter()
+                    .chain(result.converter.gate_source_work_j())
                     .chain([-result.native.supplied]),
             ),
             total(
@@ -389,7 +477,8 @@ impl<P> PreparedCapacitiveCommutatedSwitchCycle<P> {
                     .into_iter()
                     .chain(result.terminal_resistor_heat_j)
                     .chain(result.load_work_j)
-                    .chain(result.source_work_j.map(|v| -v)),
+                    .chain(result.source_work_j.map(|v| -v))
+                    .chain(result.converter.gate_source_work_j().map(|v| -v)),
             ),
         ] {
             admit(

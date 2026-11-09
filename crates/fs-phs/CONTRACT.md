@@ -4070,6 +4070,39 @@ positive driver-resistor heat. The driver refuses unsupported current rather
 than clipping it. These laws do not infer saturation, carrier recovery,
 temperature-dependent reversible storage or a finite-energy gate-rail reservoir.
 
+## Finite gate-controlled converter and battery-motor trajectories
+
+`PreparedGateCommutatedSwitchCycle` and
+`battery_motor::PreparedGateBatteryMotorCycle` extend the existing prepared
+owners to nine and fifteen coordinates. The original constant-capacitance and
+nonlinear Qds lanes retain their five- and eleven-state layouts. All lanes use
+the same bounded interval program, native solve workspace, endpoint admission,
+cancellation and physical-account accumulators.
+
+A gate command selects its authored finite-impedance voltage-source branch.
+Actual source-referenced Vgs determines the complete original G(Vgs) channel
+law and its analytic derivative. Four gate charges continue through commands
+and cycle boundaries. The floating high-side driver injects only its gate
+coordinate because the grouped node coordinate already includes the equal
+source-electrode reaction. Intrinsic Qds, Cgs and Cgd remain reversible storage.
+
+The native nonlinear port includes four signed gate-source works and four
+nonnegative driver-resistor heats. Converter `all_heat_joules()` returns thirteen
+physical heats; the complete finite drive returns eighteen. Legacy device and
+drive `heat_joules()` retain their nine- and fourteen-channel partitions.
+Every native, converter, battery/lead, motor/shaft and complete-cycle balance
+uses the full heat and signed source-work account. Gate-driver recovery is
+negative external source work, never negative resistor heat or an invented
+battery transfer.
+
+The gate and channel evaluations enforce original voltage/current support at
+initial, accepted discrete-effort and endpoint states. They do not certify
+unresolved inter-step peaks. Temporal refinement remains explicit for small
+gate RC and switching time scales. Failed support, work budgets or final
+cancellation leave caller state and outputs unchanged. Gate supplies have
+finite resistance and audited work; no finite-energy rail inventory, channel
+saturation law, carrier recovery or avalanche law is inferred.
+
 ## Finite battery and motor shafts with device capacitor charge
 
 `commutation::capacitance::battery_motor::PreparedCapacitiveBatteryMotorCycle`

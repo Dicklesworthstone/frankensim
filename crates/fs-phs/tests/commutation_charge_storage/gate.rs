@@ -213,6 +213,13 @@ fn gate_source_support_and_capacitance_or_chord_budgets_refuse_without_regulariz
     let mut zero = p.clone();
     zero.gate_drain_capacitance_f = [0.0; 4];
     assert!(zero.validate().is_ok());
+    let origin = zero.state(0.0, [0.0; 2], [0.0; 2], [0.0; 4]).unwrap();
+    assert_eq!(origin, [0.0; 9]);
+    let zero_storage = GateCommutationStorage::new(&zero).unwrap();
+    assert_eq!(zero_storage.hamiltonian(&origin), 0.0);
+    let mut origin_effort = [1.0; 9];
+    zero_storage.gradient(&origin, &mut origin_effort);
+    assert_eq!(origin_effort, [0.0; 9]);
     let a = p.state(0.0, [4.0, -2.0], [-0.6, 3.0], [0.0; 4]).unwrap();
     let b = p.state(0.0, [-3.0, 5.0], [2.0, -2.5], [0.0; 4]).unwrap();
     let midpoint: [f64; 9] = core::array::from_fn(|k| f64::midpoint(a[k], b[k]));

@@ -248,15 +248,19 @@ impl Leg {
                 "electrode charge leaves the original coupled curve domain",
             ));
         }
-        let root = if sign(flo) == 0 {
-            lo
+        let charge = if sign(flo) == 0 {
+            [lo, known_at(lo).unwrap_or(q[1] + lo)]
         } else if sign(fhi) == 0 {
-            hi
+            [hi, known_at(hi).unwrap_or(q[1] + hi)]
         } else {
+            // An exact source-knot root is already the physical inverse.
+            // Retain that witness instead of resolving it from an unrelated
+            // cell midpoint; at zero voltage a tiny spurious root has no
+            // nonzero physical scale against which to admit its KVL error.
             let locate = |curve: &CapacitorChargeCurve,
                           shift: Dd,
                           is_low: bool|
-             -> Result<usize, PhsError> {
+             -> Result<(usize, Option<[Dd; 2]>), PhsError> {
                 let mut a = 0usize;
                 let mut b = curve.knots().len();
                 while a < b {
@@ -267,16 +271,19 @@ impl Leg {
                     } else if less(hi, x) {
                         false
                     } else {
-                        sign(self.equation(
-                            q[0],
-                            q[1],
-                            x,
-                            if is_low {
-                                Some(dd(curve.knots()[m].0))
-                            } else {
-                                known_at(x)
-                            },
-                        )?) <= 0
+                        let known = if is_low {
+                            Some(dd(curve.knots()[m].0))
+                        } else {
+                            known_at(x)
+                        };
+                        let value = self.equation(q[0], q[1], x, known)?;
+                        if sign(value) == 0 {
+                            return Ok((
+                                m.min(curve.knots().len() - 2),
+                                Some([x, known.unwrap_or(q[1] + x)]),
+                            ));
+                        }
+                        sign(value) < 0
                     };
                     if nonpositive {
                         a = m + 1;
@@ -284,32 +291,40 @@ impl Leg {
                         b = m;
                     }
                 }
-                Ok(a.saturating_sub(1).min(curve.knots().len() - 2))
+                Ok((a.saturating_sub(1).min(curve.knots().len() - 2), None))
             };
-            let index = [
-                locate(&self.high, Dd::ZERO, false)?,
-                locate(&self.low, q[1], true)?,
-            ];
-            let lower = max(lo, max(dd(hk[index[0]].0), dd(lk[index[1]].0) - q[1]));
-            let upper = min(
-                hi,
-                min(dd(hk[index[0] + 1].0), dd(lk[index[1] + 1].0) - q[1]),
-            );
-            if less(upper, lower) {
-                return Err(invalid("original charge-knot searches disagree"));
+            let (high_index, high_root) = locate(&self.high, Dd::ZERO, false)?;
+            if let Some(root) = high_root {
+                root
+            } else {
+                let (low_index, low_root) = locate(&self.low, q[1], true)?;
+                if let Some(root) = low_root {
+                    root
+                } else {
+                    let index = [high_index, low_index];
+                    let lower = max(lo, max(dd(hk[index[0]].0), dd(lk[index[1]].0) - q[1]));
+                    let upper = min(
+                        hi,
+                        min(dd(hk[index[0] + 1].0), dd(lk[index[1] + 1].0) - q[1]),
+                    );
+                    if less(upper, lower) {
+                        return Err(invalid("original charge-knot searches disagree"));
+                    }
+                    let x = dd(0.5) * lower + dd(0.5) * upper;
+                    let h = evaluate(&self.high, x)?;
+                    let l = evaluate(&self.low, known_at(x).unwrap_or(q[1] + x))?;
+                    let beta = dd(1.0) / dd(self.bus_f);
+                    let scale = number(beta)?.max(h.slope).max(l.slope);
+                    let denominator =
+                        beta / dd(scale) + dd(h.slope) / dd(scale) + dd(l.slope) / dd(scale);
+                    let root = x - self.equation(q[0], q[1], x, known_at(x))? / denominator;
+                    [root, known_at(root).unwrap_or(q[1] + root)]
+                }
             }
-            let x = dd(0.5) * lower + dd(0.5) * upper;
-            let h = evaluate(&self.high, x)?;
-            let l = evaluate(&self.low, known_at(x).unwrap_or(q[1] + x))?;
-            let beta = dd(1.0) / dd(self.bus_f);
-            let scale = number(beta)?.max(h.slope).max(l.slope);
-            let denominator = beta / dd(scale) + dd(h.slope) / dd(scale) + dd(l.slope) / dd(scale);
-            x - self.equation(q[0], q[1], x, known_at(x))? / denominator
         };
-        let charge = [root, known_at(root).unwrap_or(q[1] + root)];
         let h = evaluate(&self.high, charge[0])?;
         let l = evaluate(&self.low, charge[1])?;
-        let voltage = [(q[0] - root) / dd(self.bus_f), l.voltage];
+        let voltage = [(q[0] - charge[0]) / dd(self.bus_f), l.voltage];
         let error = number(voltage[0] - h.voltage - l.voltage)?;
         let magnitude = total([
             number(voltage[0])?.abs(),

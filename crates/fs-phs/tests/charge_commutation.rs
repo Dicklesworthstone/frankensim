@@ -27,6 +27,9 @@ use fs_phs::circuit::motor::{DcMotor, DcMotorParameters};
 use fs_phs::{PreparedStepError, SolveBudget};
 use std::cell::Cell;
 
+#[path = "charge_commutation/gate.rs"]
+mod gate;
+
 const DEVICE: SwitchDevice = SwitchDevice {
     on_resistance_ohm: 0.2,
     off_resistance_ohm: 40.0,
