@@ -6,8 +6,9 @@
 //! Driven steady states may carry heat and produce entropy; they are not
 //! thermodynamic equilibrium of an isolated inventory.
 //!
-//! Every currently conducting component must reach a temperature-dependent
-//! external bath. Insulated inventories need an energy constraint, so this
+//! Every storage component must reach a temperature-dependent external bath
+//! or a whole-enthalpy outflow through original directed upwind transport.
+//! Closed insulated inventories need an energy constraint, so this
 //! owner refuses them instead of selecting an arbitrary null-space temperature.
 //! Clocks, authored events and prescribed geometry stay frozen at the queried
 //! instant. The returned point is a read-only field, never a time trajectory or
@@ -21,6 +22,9 @@ use super::*;
 // implicit.rs loads this file through #[path], so a bare `mod` would resolve beside it.
 #[path = "equilibrium/isolated.rs"]
 pub mod isolated;
+
+#[path = "equilibrium/support.rs"]
+mod support;
 
 /// Bounded nonlinear work and physical heat-rate acceptance, in watts.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -46,7 +50,7 @@ pub struct ThermalOperatingReport {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ThermalOperatingError {
     Original(ImplicitConductionError),
-    /// This component has no currently active temperature-dependent bath.
+    /// This cell cannot reach an active bath or original directed enthalpy outlet.
     Unanchored {
         cell: CellId,
     },
@@ -124,8 +128,11 @@ impl<'a> ImplicitConductionChain<'a> {
     /// Find a stationary point using the original analytic energy tangent.
     /// The caller supplies an initial guess within every original source domain.
     /// Line search, cancellation, singular tangents and work exhaustion publish
-    /// no field. Advection and isolated energy-constrained equilibria are outside
-    /// this conduction-only lane. A latent plateau is never regularized.
+    /// no field. Prescribed first-order whole-enthalpy advection uses its original
+    /// fluxes/tangent at the frozen clock. Flow history is not advanced and no
+    /// finite-step heat, work or entropy credit is manufactured. Closed isolated
+    /// inventories need their energy-constrained owner. A latent plateau is
+    /// never regularized: throughflow can determine its stored h while dT/dh=0.
     pub fn solve_operating_point<'s, 'm>(
         &'s self,
         initial_guess: &DepositionSimulation<'m>,
@@ -138,12 +145,10 @@ impl<'a> ImplicitConductionChain<'a> {
             || controls.maximum_residual_evaluations == 0
             || !nonnegative(controls.cell_tolerance_w)
             || !nonnegative(controls.total_tolerance_w)
-            || self.advection.is_some()
         {
-            return Err(ImplicitConductionError::Invalid(
-                "invalid stationary controls/workspace or unsupported advection",
-            )
-            .into());
+            return Err(
+                ImplicitConductionError::Invalid("invalid stationary controls/workspace").into(),
+            );
         }
         self.admit(initial_guess, &mut checkpoint)?;
         let mut state = initial_guess.clone();
@@ -267,13 +272,29 @@ impl<'a> ImplicitConductionChain<'a> {
             return Err(DepositionError::Budget("stationary thermal residual evaluations").into());
         }
         work.residual_evaluations += 1;
-        let endpoint = self.endpoint(state, checkpoint)?;
+        let endpoint = self.stationary_endpoint(state, checkpoint)?;
         let powers = self.stationary_heat_rates(state, &endpoint, checkpoint)?;
         Ok((endpoint, powers))
     }
 
-    /// Shared with harmonic preparation; source feedback is credited once on
-    /// top of the original paired conduction/boundary heat-rate owner.
+    /// Evaluate every original source once at the frozen operating clock.
+    pub(super) fn stationary_endpoint(
+        &self,
+        state: &DepositionSimulation<'_>,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Endpoint, ImplicitConductionError> {
+        let mut endpoint = self.endpoint(state, checkpoint)?;
+        if let Some(flow) = &self.advection {
+            let stationary =
+                flow.stationary_endpoint(state, &self.index, &mut endpoint, checkpoint)?;
+            endpoint.stationary_advection = Some(stationary);
+        }
+        checkpoint()?;
+        Ok(endpoint)
+    }
+
+    /// Shared with harmonic preparation; source feedback and native enthalpy
+    /// transport are credited once on top of paired conduction/boundary rates.
     pub(super) fn stationary_heat_rates(
         &self,
         thermal: &DepositionSimulation<'_>,
@@ -312,6 +333,29 @@ impl<'a> ImplicitConductionChain<'a> {
                     .get_mut(&id)
                     .ok_or(DepositionError::Arithmetic)?
                     .add(power)?;
+            }
+        }
+        if let Some(flow) = &endpoint.stationary_advection {
+            for (&id, &power) in &flow.transport.heat.bulk.sources_w {
+                checkpoint()?;
+                rates
+                    .watts
+                    .get_mut(&id)
+                    .ok_or(DepositionError::Arithmetic)?
+                    .add(power)?;
+            }
+            for transfer in &flow.transport.transfers {
+                checkpoint()?;
+                rates
+                    .watts
+                    .get_mut(&transfer.a)
+                    .ok_or(DepositionError::Arithmetic)?
+                    .add(-transfer.power_w)?;
+                rates
+                    .watts
+                    .get_mut(&transfer.b)
+                    .ok_or(DepositionError::Arithmetic)?
+                    .add(transfer.power_w)?;
             }
         }
         self.ids
@@ -381,32 +425,31 @@ impl<'a> ImplicitConductionChain<'a> {
             };
             anchored[i] = ambient || reservoir;
         }
-        let mut seen = vec![false; n];
-        let mut pending = Vec::with_capacity(n);
-        for start in 0..n {
-            checkpoint()?;
-            if seen[start] {
-                continue;
-            }
-            pending.clear();
-            pending.push(start);
-            seen[start] = true;
-            let mut has_bath = false;
-            while let Some(i) = pending.pop() {
+        if let Some(flow) = &endpoint.stationary_advection {
+            for &(upstream, downstream) in &flow.directions {
                 checkpoint()?;
-                has_bath |= anchored[i];
-                for &j in &adjacency[i] {
-                    if !seen[j] {
-                        seen[j] = true;
-                        pending.push(j);
-                    }
+                // Reverse traversal from a sink must respect actual flow:
+                // a downstream outlet can drain an upstream storage mode.
+                adjacency[self.index[&downstream]].push(self.index[&upstream]);
+            }
+            for id in &flow.outlets {
+                checkpoint()?;
+                anchored[self.index[id]] = true;
+            }
+        }
+        let missing =
+            support::first_unanchored(&adjacency, &anchored, checkpoint).map_err(|error| {
+                match error {
+                    support::SupportError::Checkpoint(e) => ThermalOperatingError::from(e),
+                    support::SupportError::Invalid => ThermalOperatingError::from(
+                        ImplicitConductionError::Invalid("invalid stationary support graph"),
+                    ),
                 }
-            }
-            if !has_bath {
-                return Err(ThermalOperatingError::Unanchored {
-                    cell: self.ids[start],
-                });
-            }
+            })?;
+        if let Some(index) = missing {
+            return Err(ThermalOperatingError::Unanchored {
+                cell: self.ids[index],
+            });
         }
         Ok(())
     }

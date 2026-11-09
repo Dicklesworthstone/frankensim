@@ -407,6 +407,41 @@ impl<O> Advected<O> {
 }
 
 impl Advected<()> {
+    /// Original whole-enthalpy flow topology for a frozen-clock operating point.
+    /// State-independent selected streams and a separate mobile liquid carrier
+    /// need their own stationary inventory constraints; they cannot anchor bulk
+    /// storage merely because a nonzero mass rate was prescribed.
+    pub(super) fn stationary_bulk_support(
+        &self,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Vec<(CellId, CellId)>, Vec<CellId>), DepositionError> {
+        checkpoint()?;
+        self.admit_implicit_transport()?;
+        if self.liquid_carrier.is_some() || !self.selective_outlets.is_empty() {
+            return Err(invalid(
+                "stationary throughflow requires the original whole-enthalpy carrier",
+            ));
+        }
+        let mut directions = Vec::with_capacity(self.flows.len());
+        for flow in &self.flows {
+            checkpoint()?;
+            if let Some((upstream, downstream, _)) = flow.directed() {
+                directions.push((upstream, downstream));
+            }
+        }
+        let mut outlets = Vec::new();
+        for boundary in &self.boundaries {
+            checkpoint()?;
+            if let MassBoundary::Outlet { cell, kg_s, .. } = *boundary {
+                if kg_s > 0.0 {
+                    outlets.push(cell);
+                }
+            }
+        }
+        checkpoint()?;
+        Ok((directions, outlets))
+    }
+
     fn admit_implicit_transport(&self) -> Result<(), DepositionError> {
         if self.entropy.is_some() {
             return Err(invalid("implicit enthalpy excludes flow entropy histories"));

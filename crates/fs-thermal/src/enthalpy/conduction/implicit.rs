@@ -329,6 +329,9 @@ struct Endpoint {
     transport_tangent: Vec<(usize, usize, f64)>,
     advection_multiplier: f64,
     advection_entropy: Option<ClassifiedAdvectionEntropy>,
+    // Set only by frozen-clock stationary/response preparation. Evolution
+    // continues to evaluate and account its own native endpoint fluxes.
+    stationary_advection: Option<advection::StationaryAdvection>,
 }
 
 #[derive(Clone, Copy)]
@@ -915,6 +918,7 @@ impl<'a> ImplicitConductionChain<'a> {
             transport_tangent: Vec::new(),
             advection_multiplier: 1.0,
             advection_entropy: None,
+            stationary_advection: None,
         };
         self.apply_bath_histories(thermal, &mut endpoint, checkpoint)?;
         Ok(endpoint)

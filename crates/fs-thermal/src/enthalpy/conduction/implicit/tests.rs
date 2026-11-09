@@ -1515,6 +1515,9 @@ mod impedance;
 #[path = "tests/equilibrium.rs"]
 mod equilibrium;
 
+#[path = "tests/equilibrium_advection.rs"]
+mod equilibrium_advection;
+
 #[path = "tests/equilibrium_isolated.rs"]
 mod equilibrium_isolated;
 

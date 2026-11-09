@@ -4242,3 +4242,35 @@ zero-law behavior and budget/cancellation/retry checks. Together with the
 fifteen unchanged column and simultaneous-beam regressions, all twenty-one
 focused native tests passed against the production math, reaction and thermal
 sources. Renderer execution remains a separate gate.
+
+
+## Stationary and harmonic prescribed throughflow
+
+The native implicit operating-point and thermal-impedance owners now admit
+prescribed first-order whole-enthalpy upwind flow. Every residual uses the
+original endpoint transport, continuity/material/source-datum checks, paired
+transfers and external enthalpy powers. The already compiled native directed
+energy tangent is reused without symmetrization or temperature-flux fitting.
+Schedules sample rates and inlet data at the frozen operating clock; no event,
+inventory, flow history, heat/work credit or entropy history advances.
+
+Stationary storage must reach an active original bath or a positive original
+enthalpy outlet along directed transport and bidirectional conduction. A linear
+reverse traversal checks this topology; actual native factorization and every
+physical heat row still decide numerical acceptance. Closed circulation and a
+stopped ungrounded pump do not create an energy reference. Whole-enthalpy
+throughflow can determine stored energy on a latent plateau while dT/dh stays
+exactly zero; harmonic energy response is retained even when temperature
+response vanishes. Inlet data and flow rates are held fixed for heat-drive
+phasors; flow modulation is not inferred.
+
+Reconstructed/limited advection, separately mobile liquid carriers and selected
+prescribed-enthalpy outlets require their own stationary constraints and refuse
+this path. Frozen stationary species retain their original per-endpoint source
+admission; no composition evolution or momentum closure is added. Six native
+G0/G3/G4 support-graph tests passed. Six full-owner G1/G3/G4 regressions cover
+analytical two-way throughflow, directed DC/frequency response, latent storage,
+frozen schedules and mass, closed/zero-flow refusal, budget/cancellation and
+unsupported reconstruction. Those full-owner tests are added but unexecuted
+here because the real runtime dependency compilation is resource-blocked; no
+full-crate, continuum, stability or forward-error certification is claimed.

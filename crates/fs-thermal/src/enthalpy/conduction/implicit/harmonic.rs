@@ -106,8 +106,10 @@ pub struct ThermalImpedanceResponse {
 }
 
 impl ImplicitConductionChain<'_> {
-    /// Linearize native conduction, contacts, boundaries and source feedback.
-    /// All clocks freeze at this steady operating point; advection refuses.
+    /// Linearize native conduction, contacts, boundaries, source feedback and
+    /// prescribed whole-enthalpy upwind transport at this frozen operating clock.
+    /// The directed advective tangent remains nonsymmetric. Inlet data/rates are
+    /// held constant; heat-drive phasors do not represent mass-flow modulation.
     pub fn prepare_thermal_impedance(
         &self,
         thermal: &DepositionSimulation<'_>,
@@ -128,13 +130,8 @@ impl ImplicitConductionChain<'_> {
         {
             return Err(invalid("invalid thermal impedance resources or tolerances"));
         }
-        if self.advection.is_some() {
-            return Err(invalid(
-                "thermal impedance currently requires a conduction-only graph",
-            ));
-        }
         self.admit(thermal, &mut checkpoint)?;
-        let endpoint = self.endpoint(thermal, &mut checkpoint)?;
+        let endpoint = self.stationary_endpoint(thermal, &mut checkpoint)?;
         let rates = self.stationary_heat_rates(thermal, &endpoint, &mut checkpoint)?;
         let mut slopes = Vec::with_capacity(n);
         for (i, &id) in self.ids.iter().enumerate() {

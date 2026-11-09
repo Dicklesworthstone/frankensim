@@ -71,7 +71,47 @@ pub(super) struct ImplicitAdvectionStage<'a> {
     pub(super) multiplier: f64,
 }
 
+/// One immutable original flux evaluation and its physical outflow topology.
+pub(super) struct StationaryAdvection {
+    pub(super) transport: TransportStepCoefficients<()>,
+    pub(super) directions: Vec<(CellId, CellId)>,
+    pub(super) outlets: Vec<CellId>,
+}
+
 impl ImplicitAdvection {
+    pub(super) fn stationary_endpoint(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        index: &BTreeMap<CellId, usize>,
+        endpoint: &mut Endpoint,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<StationaryAdvection, ImplicitConductionError> {
+        checkpoint()?;
+        if self.reconstruction.is_some() {
+            return Err(ImplicitConductionError::Invalid(
+                "stationary throughflow requires original first-order upwind fluxes",
+            ));
+        }
+        let stage = self.stage(thermal.time_s(), checkpoint)?;
+        let (directions, outlets) = stage.flow.stationary_bulk_support(&mut *checkpoint)?;
+        let (transport, tangent, _) = self.endpoint(
+            thermal,
+            &stage,
+            index,
+            &endpoint.states,
+            false,
+            &mut *checkpoint,
+        )?;
+        endpoint.advection_multiplier = stage.multiplier;
+        endpoint.transport_tangent = tangent;
+        checkpoint()?;
+        Ok(StationaryAdvection {
+            transport,
+            directions,
+            outlets,
+        })
+    }
+
     pub(super) fn stage(
         &self,
         time_s: f64,
