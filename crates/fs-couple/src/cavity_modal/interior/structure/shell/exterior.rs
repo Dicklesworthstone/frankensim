@@ -27,6 +27,9 @@ use fs_bem::reciprocal_radiation::{
     CoherentRadiationPower, CoherentVelocityPortField, PreparedReceivers, VelocityPortSolution,
 };
 use fs_exec::Cx;
+use fs_feec::acoustics::helmholtz::heterogeneous::{
+    BoundaryVelocitySource, VelocityTrace, VolumeVelocitySource,
+};
 use fs_math::c64::C64;
 use fs_modal::harmonic::{HarmonicPortControls, PreparedHarmonicResponse};
 
@@ -182,6 +185,31 @@ impl<'p, 'geometry> PreparedTensorShellInteriorExterior<'p, 'geometry, '_, '_, '
                 || cx.checkpoint().is_err(),
             )
             .map_err(TensorShellRadiationError::from)?)
+    }
+
+    /// Drive original distributed injection through the SAME complete loaded
+    /// shell/interior factor and all exterior self/mutual reaction terms.
+    /// Prepared shapes belong to the original heterogeneous interior; all
+    /// amplitudes use exp(-i omega t). The real native projection adds no
+    /// frequency, density, area normalization or phasor conjugation.
+    /// Signed physical source work is included once in acoustic input, while
+    /// original material heat, wall heat and independently observed exterior
+    /// outgoing flux retain their existing separate admission.
+    pub fn solve_with_sources(
+        &self,
+        structural_force: &[C64],
+        inward_velocity: &[VelocityTrace],
+        boundary_sources: &[(&BoundaryVelocitySource<'_, '_, '_>, C64)],
+        volume_sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64)],
+        cx: &Cx<'_>,
+    ) -> Result<TensorShellInteriorExteriorResponse<'p, 'geometry>, TensorShellInteriorError> {
+        let load = self.owner.model.project_sources(
+            inward_velocity,
+            boundary_sources,
+            volume_sources,
+            cx,
+        )?;
+        self.solve(structural_force, &load, cx)
     }
 
     /// Solve coherent external forces/torques and original inward flow loads.

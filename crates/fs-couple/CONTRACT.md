@@ -932,6 +932,37 @@ direct radiation from a moving structural wall requires its own reciprocal
 coupling. Prescribed injection does not infer combustion, mean-flow sources,
 acoustic startup or a causal realization.
 
+## Distributed injection drives full structural and exterior fields
+
+`HeterogeneousHelmholtzFe::project_source_load` supplies the original signed
+volume-injection and quadratic boundary-velocity columns to complete
+pressure-potential multiphysics pencils. The same native projector checks
+source identity, finite amplitudes, source-count limits, complete support and
+pressure-release exclusions. It retains every original pressure coordinate,
+including constant compression and higher-order edge/face shapes. Source
+preparation uses the original affine or curved quadrature and is not repeated
+by subsequent drives.
+
+`StructuralInterior::project_sources` and the prepared structural,
+material-shell and exterior-loaded shell `solve_with_sources` methods pass
+these physical loads into their existing complete factors. All coupled drives
+use peak `exp(-i omega t)` amplitudes; the real spatial columns need no
+conversion. Amplitudes imported from an `exp(+i omega t)` drive are conjugated
+by the caller. In `M_a psi_ddot + C_wall psi_dot + K_a psi + B u_dot = b`,
+`p = psi_dot` and `b` has units m³/s, with no extra density or frequency factor.
+Boundary injection is prescribed relative to structural motion and passive
+wall flow, not a second structural displacement constraint.
+
+The original `average_acoustic_input_power_w` already includes the complete
+signed `Re(p^H b)/2` source work once. Coherent source cancellation and negative
+individual work remain valid; no source work is relabeled as heat. The same
+original material strain, reciprocal interface work and full mutual exterior
+reaction checks remain authoritative, with material heat, wall heat and
+independently observed outgoing flux kept separate. Existing raw-load solves
+are unchanged. This is fixed-geometry linear harmonic forcing of the retained
+fluid, structure and exterior owners; no mass-transfer law, heat-release law,
+nonlinear wall motion or new acoustic reduction is inferred.
+
 ## Simultaneous original shell, interior pressure and exterior radiation
 
 `TensorShellInterior::prepare_with_exterior` couples the original material

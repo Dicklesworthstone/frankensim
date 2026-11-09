@@ -25,6 +25,9 @@ use fs_plate::shell::viscosity::harmonic::{
 use fs_plate::shell::{CstDktMass, ShellMesh, ShellSupport};
 use fs_rep_mesh::TetComplex;
 
+#[path = "tensor_shell_interior_exterior/sources.rs"]
+mod sources;
+
 const POINTS: [[f64; 3]; 4] = [
     [0.0, 0.0, 0.0],
     [0.4, 0.0, 0.0],

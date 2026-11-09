@@ -34,6 +34,7 @@ pub mod resonance;
 mod response;
 /// Original tensor-Prony shell materials coupled to the full interior field.
 pub mod shell;
+mod sources;
 /// Complete original structural/interior waves with bounded sparse midpoint solves.
 pub mod sparse;
 /// Full original structural and pressure fields on one exact held-input timeline.

@@ -15,6 +15,7 @@
 
 /// Simultaneous original interior pressure and closed exterior radiation loading.
 pub mod exterior;
+mod sources;
 mod trace;
 
 use super::{

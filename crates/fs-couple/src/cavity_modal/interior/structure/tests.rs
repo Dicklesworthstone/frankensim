@@ -14,6 +14,8 @@ mod poles_tests;
 mod relaxation_tests;
 #[path = "resonance_tests.rs"]
 mod resonance_tests;
+#[path = "sources_tests.rs"]
+mod sources_tests;
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();
