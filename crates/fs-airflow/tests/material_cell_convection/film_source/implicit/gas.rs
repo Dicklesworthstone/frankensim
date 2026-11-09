@@ -292,3 +292,5 @@ fn gas_phase_property_interval_and_pointwise_geometry_fail_without_mutation() {
 mod native;
 #[path = "gas/surface.rs"]
 mod surface;
+#[path = "gas/turbulent_air.rs"]
+mod turbulent_air;

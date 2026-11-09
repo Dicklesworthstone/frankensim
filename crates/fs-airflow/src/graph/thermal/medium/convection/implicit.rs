@@ -5,8 +5,8 @@
 //! integrated boundary retains material/coating resistance, both bath powers,
 //! bulk storage, surface elimination and time integration.
 
-mod source;
 mod evaluator;
+mod source;
 
 /// Original fixed-composition gas properties on the native conducting surface.
 pub mod gas;
@@ -22,8 +22,8 @@ use super::deposition::{
 };
 use super::*;
 use fs_convection::developing::{
-    FlatPlateSectionError, evaluate_circular_duct_section, evaluate_flat_plate_section,
-    evaluate_turbulent_circular_duct_section,
+    FlatPlateSectionError, TurbulentTubePropertyCorrection, evaluate_circular_duct_section,
+    evaluate_flat_plate_section, evaluate_turbulent_circular_duct_section,
 };
 use fs_matdb::PropertyLineSlice;
 use fs_material::liquid::VOLUMETRIC_EXPANSION_PROPERTY;
@@ -77,10 +77,7 @@ impl fmt::Display for ExteriorConvectionError {
             Self::Correlation(error) => error.fmt(f),
             Self::Thermal(error) => error.fmt(f),
             Self::MissingDerivative { axis } => {
-                write!(
-                    f,
-                    "exterior convection needs the original {axis} partial"
-                )
+                write!(f, "exterior convection needs the original {axis} partial")
             }
         }
     }
@@ -105,9 +102,9 @@ impl From<FlatPlateSectionError> for ExteriorConvectionError {
     fn from(error: FlatPlateSectionError) -> Self {
         match error {
             FlatPlateSectionError::Correlation(error) => Self::Correlation(error),
-            FlatPlateSectionError::UnsupportedCorrelation(_) => Self::Invalid(
-                "finite plate strips require an original flat-plate mean correlation",
-            ),
+            FlatPlateSectionError::UnsupportedCorrelation(_) => {
+                Self::Invalid("finite plate strips require an original flat-plate mean correlation")
+            }
         }
     }
 }
@@ -134,6 +131,9 @@ pub struct ExteriorConvectionResponse {
     /// Gnielinski wall-Prandtl correction is explicitly enabled. This is a
     /// property query, never a replacement for the bulk fluid or solid storage.
     pub surface_transport: Option<FluidTransportState>,
+    /// Explicit correction on the actual turbulent section, including its
+    /// held bulk/wall inputs. Original cumulative mean evidence remains K=1.
+    pub turbulent_property_correction: Option<TurbulentTubePropertyCorrection>,
     pub surface_dynamic_viscosity_pa_s: Option<f64>,
     /// Original correlation evaluation; for a finite section this is the
     /// downstream cumulative mean before an optional wall-property correction,
@@ -147,13 +147,13 @@ pub struct ExteriorConvectionResponse {
     pub coefficient_surface_derivative_w_m2_k2: f64,
 }
 
-/// Compatible name for the original liquid settings. Gas and liquid sources
-/// share the same physical geometry, property convention and native boundary.
-pub use ExteriorConvectionSettings as LiquidExteriorConvectionSettings;
 /// Compatible name for the original liquid source/correlation error.
 pub use ExteriorConvectionError as LiquidExteriorConvectionError;
 /// Compatible name for the original liquid coefficient and tangent response.
 pub use ExteriorConvectionResponse as LiquidExteriorConvectionResponse;
+/// Compatible name for the original liquid settings. Gas and liquid sources
+/// share the same physical geometry, property convention and native boundary.
+pub use ExteriorConvectionSettings as LiquidExteriorConvectionSettings;
 
 /// Source-backed liquid convection for `IntegratedCaloricGrayBoundary`.
 ///
@@ -344,16 +344,23 @@ impl<'a, 'm> ImplicitLiquidConvection<'a, 'm> {
 }
 
 impl evaluator::ExteriorFluid for ImplicitLiquidConvection<'_, '_> {
-    fn caloric(&self) -> &dyn ThermalLaw { self.caloric }
-    fn energy_bounds(&self) -> [f64; 2] { self.energy_bounds_j_kg }
-    fn settings(&self) -> ExteriorConvectionSettings { self.settings }
+    fn caloric(&self) -> &dyn ThermalLaw {
+        self.caloric
+    }
+    fn energy_bounds(&self) -> [f64; 2] {
+        self.energy_bounds_j_kg
+    }
+    fn settings(&self) -> ExteriorConvectionSettings {
+        self.settings
+    }
 
-    fn turbulent_wall_transport(
+    fn turbulent_wall_correction(
         &self,
         temperature: f64,
-    ) -> Result<Option<TransportSample>, ExteriorConvectionError> {
+    ) -> Result<Option<evaluator::TurbulentWallCorrection>, ExteriorConvectionError> {
         if self.gnielinski_wall_correction {
-            self.sample_transport(temperature, true).map(Some)
+            self.sample_transport(temperature, true)
+                .map(|sample| Some(evaluator::TurbulentWallCorrection::Liquid(sample)))
         } else {
             Ok(None)
         }
@@ -421,17 +428,29 @@ impl evaluator::ExteriorFluid for ImplicitLiquidConvection<'_, '_> {
 }
 
 impl ImplicitGrayExteriorLaw for ImplicitLiquidConvection<'_, '_> {
-    fn caloric_law(&self) -> &dyn ThermalLaw { self.caloric }
-    fn energy_bounds_j_kg(&self) -> [f64; 2] { self.energy_bounds_j_kg }
+    fn caloric_law(&self) -> &dyn ThermalLaw {
+        self.caloric
+    }
+    fn energy_bounds_j_kg(&self) -> [f64; 2] {
+        self.energy_bounds_j_kg
+    }
     fn surface_temperature_bounds_k(&self) -> [f64; 2] {
         self.settings.surface_temperature_bounds_k
     }
-    fn flux_state_at_surface(&self, energy: f64, surface: f64, bath: f64)
-        -> Result<ImplicitGrayExteriorFluxState, DepositionError> {
+    fn flux_state_at_surface(
+        &self,
+        energy: f64,
+        surface: f64,
+        bath: f64,
+    ) -> Result<ImplicitGrayExteriorFluxState, DepositionError> {
         evaluator::flux_state_at_surface(self, energy, surface, bath)
     }
-    fn state_at_surface(&self, energy: f64, surface: f64, bath: f64)
-        -> Result<ImplicitGrayExteriorState, DepositionError> {
+    fn state_at_surface(
+        &self,
+        energy: f64,
+        surface: f64,
+        bath: f64,
+    ) -> Result<ImplicitGrayExteriorState, DepositionError> {
         evaluator::state_at_surface(self, energy, surface, bath)
     }
 }

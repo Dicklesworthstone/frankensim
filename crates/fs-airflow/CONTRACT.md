@@ -5160,6 +5160,26 @@ check both viscosity bases, independent corrected-section algebra and tangents,
 held-rate flow response, source refusal, and original conductive/radiative
 surface, backward-Euler energy and bath-entropy balances.
 
+### Explicit air wall correction on the native surface
+
+`ImplicitGasConvection::with_gnielinski_air_wall_correction` selects the shared
+Gnielinski air factor `(T_bulk/T_wall)^0.45` on a developing turbulent circular
+tube. Eligibility requires the retained original dry-air source; humid air,
+named mixtures and thermochemical gases are not inferred to satisfy the air
+model. Both bulk and actual eliminated wall temperatures retain declared
+source support and use absolute kelvin. Original bulk transport still supplies
+Re, Pr and conductivity. The native surface tangent includes `-0.45 h/T_wall`;
+the coefficient also retains the independent `T_bulk` partial at fixed transport
+groups, without claiming a total bath-temperature Jacobian.
+
+The shared response records explicit turbulent correction inputs separately
+from original K=1 cumulative means. Prescribed mass flow carries either the
+liquid or air selection into its actual corrected section Reynolds partial.
+No wall transport curve, storage or additional heat solve is introduced for
+the air temperature factor. Focused G1/G3 regressions cover correction values,
+source/geometry refusal, both analytic temperature axes, actual bulk-density
+flow response and the existing native conduction/storage/bath-entropy balance.
+
 ## Developing tube sections on finite gas heat owners
 
 `FilmGasHeatLaw::BulkForcedTubeSection(ForcedTurbulentTubeSectionGasSurface)`

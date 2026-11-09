@@ -32,7 +32,7 @@ pub struct MassFlowConvectionResponse {
 ///
 /// Borrow a prepared `ImplicitGasConvection` or `ImplicitLiquidConvection`;
 /// all original source selections, caloric identity, temperature support,
-/// property conventions, surface-viscosity corrections and physical geometry
+/// property conventions, explicit wall corrections and physical geometry
 /// remain attached. The wrapped law's authored speed is replaced by the bulk
 /// velocity at EACH actual bath temperature. Only forced laws are admitted:
 /// a scalar flow magnitude cannot specify natural/mixed flow orientation.
@@ -44,7 +44,7 @@ pub struct MassFlowConvectionResponse {
 /// an artificial speed floor and still needs the original correlation's domain.
 ///
 /// During native surface elimination the bath, mass rate and area are fixed,
-/// hence dU/dTs = 0. The existing film-property or wall-viscosity chain supplies
+/// hence dU/dTs = 0. The existing film-property or selected wall chain supplies
 /// the exact same surface tangent as a correctly rebound speed law. Across bath
 /// updates the original bulk density changes the speed. No bath-temperature,
 /// hydraulic-network or complete coupled-system Jacobian is claimed.
@@ -173,9 +173,9 @@ impl<'a> PrescribedMassFlowConvection<'a> {
             }
             SourceCellConvectionLaw::ForcedTubeSection { start, end, .. } => {
                 // The corrected surface path already evaluated the ACTUAL
-                // section partial, including its held wall Prandtl number.
-                // Reconstructing K=1 here would silently drop that response.
-                if response.surface_transport.is_some() {
+                // section partial, including its held wall inputs. Rebuilding
+                // K=1 would drop either the liquid or air correction.
+                if response.turbulent_property_correction.is_some() {
                     response.coefficient.sensitivity.d_qoi.get("Re").copied()
                 } else {
                     evaluate_turbulent_circular_duct_section(
@@ -295,11 +295,11 @@ impl ExteriorFluid for BoundFlow<'_> {
     fn settings(&self) -> ExteriorConvectionSettings {
         self.settings
     }
-    fn turbulent_wall_transport(
+    fn turbulent_wall_correction(
         &self,
         temperature: f64,
-    ) -> Result<Option<TransportSample>, ExteriorConvectionError> {
-        self.source.turbulent_wall_transport(temperature)
+    ) -> Result<Option<evaluator::TurbulentWallCorrection>, ExteriorConvectionError> {
+        self.source.turbulent_wall_correction(temperature)
     }
     fn sample_transport(
         &self,

@@ -1,6 +1,7 @@
 //! Original isobaric gas properties on a native conducting exterior surface.
 
 use super::*;
+use fs_material::gas_species::input::GasRecord;
 use fs_material::gas_species::input::temperature::{
     IsobaricGasLaw, IsobaricGasTransportTangent, PreparedIsobaricGasTransport,
 };
@@ -21,8 +22,11 @@ use fs_material::gas_species::input::temperature::{
 /// their source owners; unsupported derivatives and genuine source kinks refuse.
 /// Original temperature/pressure surfaces prepare their cell geometry once and
 /// retain fixed-pressure, inward thermal tangents at admitted source endpoints.
-/// Bulk-held laws without a wall-viscosity correction retain exactly zero
+/// Bulk-held laws without a selected wall correction retain exactly zero
 /// wall-property derivatives and need no active transport tangent.
+/// [`Self::with_gnielinski_air_wall_correction`] explicitly selects the
+/// original air temperature-ratio correction for developing turbulent tubes.
+/// Its actual wall-temperature tangent needs no fitted transport derivative.
 ///
 /// Gas and liquid sources share physical geometry, equilibrium heat limits,
 /// correlation-domain admission and explicit property-temperature conventions.
@@ -35,6 +39,7 @@ pub struct ImplicitGasConvection<'a, 'g> {
     gas: &'g IsobaricGasLaw,
     transport: Option<PreparedIsobaricGasTransport<'g>>,
     settings: ExteriorConvectionSettings,
+    gnielinski_air_wall_correction: bool,
 }
 
 impl<'a, 'g> ImplicitGasConvection<'a, 'g> {
@@ -70,7 +75,51 @@ impl<'a, 'g> ImplicitGasConvection<'a, 'g> {
             gas,
             transport,
             settings,
+            gnielinski_air_wall_correction: false,
         })
+    }
+
+    /// Explicitly select Gnielinski's air correction `(Tbulk/Twall)^0.45`
+    /// for this developing turbulent circular-tube section.
+    ///
+    /// Only the retained original dry-air source is admitted. Humid air,
+    /// arbitrary named mixtures and thermochemical gases are not silently
+    /// declared eligible for the air exponent. Bulk Re, Pr and conductivity
+    /// still come from the same source at the actual bath temperature.
+    ///
+    /// Both temperatures are absolute kelvin. The native surface solve supplies
+    /// the actual exterior temperature after material/coating resistance;
+    /// its analytic partial is `-0.45 h/Twall`. The coefficient also retains
+    /// the explicit `T_bulk` partial at fixed transport groups, not a total
+    /// bath-temperature derivative. Prescribed mass flow retains the correction.
+    /// Original source intervals and the correlation's ratio admission remain
+    /// active. No air-property substitution or second thermal solve is added.
+    pub fn with_gnielinski_air_wall_correction(mut self) -> Result<Self, ExteriorConvectionError> {
+        if !matches!(
+            self.settings.law,
+            SourceCellConvectionLaw::ForcedTubeSection { .. }
+        ) || self.settings.property_temperature != ConvectionPropertyTemperature::Reservoir
+        {
+            return Err(ExteriorConvectionError::Invalid(
+                "air Gnielinski wall correction requires a bulk-property turbulent circular-tube section",
+            ));
+        }
+        if !matches!(self.gas.reference(), GasRecord::Legacy(state)
+            if state.water_mole_fraction == 0.0)
+        {
+            return Err(ExteriorConvectionError::Invalid(
+                "air Gnielinski wall correction requires the retained original dry-air source",
+            ));
+        }
+        let [lo, hi] = self.settings.fluid_temperature_bounds_k;
+        let [wall_lo, wall_hi] = self.settings.surface_temperature_bounds_k;
+        if wall_lo < lo || wall_hi > hi {
+            return Err(ExteriorConvectionError::Invalid(
+                "air wall correction requires original gas support over the whole surface interval",
+            ));
+        }
+        self.gnielinski_air_wall_correction = true;
+        Ok(self)
     }
 
     /// Retained original gas, including its reference pressure, composition and
@@ -120,6 +169,18 @@ impl evaluator::ExteriorFluid for ImplicitGasConvection<'_, '_> {
     }
     fn settings(&self) -> ExteriorConvectionSettings {
         self.settings
+    }
+
+    fn turbulent_wall_correction(
+        &self,
+        temperature: f64,
+    ) -> Result<Option<evaluator::TurbulentWallCorrection>, ExteriorConvectionError> {
+        if self.gnielinski_air_wall_correction {
+            self.admit_temperature(temperature)?;
+            Ok(Some(evaluator::TurbulentWallCorrection::Air))
+        } else {
+            Ok(None)
+        }
     }
 
     fn sample_transport(

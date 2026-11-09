@@ -5,18 +5,24 @@
 //! heat limits and conducting-surface interface apply to liquids and gases.
 
 use super::*;
-use fs_convection::developing::TurbulentTubePropertyCorrection;
+
+/// Source-specific wall inputs, resolved by the original fluid owner. The
+/// shared evaluator applies one correction to the same physical tube section.
+pub(super) enum TurbulentWallCorrection {
+    Liquid(TransportSample),
+    Air,
+}
 
 pub(super) trait ExteriorFluid {
     fn caloric(&self) -> &dyn ThermalLaw;
     fn energy_bounds(&self) -> [f64; 2];
     fn settings(&self) -> ExteriorConvectionSettings;
-    /// Explicit liquid-only wall-property correction on the existing turbulent
-    /// section. Other sources keep their original constant-property behavior.
-    fn turbulent_wall_transport(
+    /// Explicit fluid-specific correction on the existing turbulent section.
+    /// Unselected sources retain the original constant-property behavior.
+    fn turbulent_wall_correction(
         &self,
         _temperature: f64,
-    ) -> Result<Option<TransportSample>, ExteriorConvectionError> {
+    ) -> Result<Option<TurbulentWallCorrection>, ExteriorConvectionError> {
         Ok(None)
     }
     fn sample_transport(
@@ -152,6 +158,7 @@ pub(super) fn evaluate(
             property_temperature_k,
             transport: state,
             surface_transport: None,
+            turbulent_property_correction: None,
             surface_dynamic_viscosity_pa_s: None,
             nusselt,
             plate_section: Some(PlateSectionDetails {
@@ -178,42 +185,58 @@ pub(super) fn evaluate(
             start.value() / length.value(),
             end.value() / length.value(),
         )?;
-        let wall = source.turbulent_wall_transport(surface_temperature_k)?;
-        let (coefficient, derivative) = if let Some(wall) = &wall {
-            let pr = wall.state.prandtl();
-            section = section.with_property_correction(TurbulentTubePropertyCorrection::Liquid {
-                wall_prandtl: pr,
-            })?;
-            let coefficient = section.heat_transfer_coefficient_with_sensitivities(
-                ThermalConductivity::new(k),
-                length,
-            )?;
-            let [_, dcp, dk, dmu] = wall.derivatives;
-            let dpr = finite(
-                pr * (dmu / wall.state.dynamic_viscosity_pa_s()
-                    + dcp / wall.state.specific_heat_j_kg_k()
-                    - dk / wall.state.thermal_conductivity_w_m_k()),
-            )?;
-            let derivative = coefficient_partial(
-                &coefficient,
-                "Pr_wall",
-                dpr,
-                dcp != 0.0 || dk != 0.0 || dmu != 0.0,
-            )?;
-            (coefficient, derivative)
+        let wall = source.turbulent_wall_correction(surface_temperature_k)?;
+        let correction = match &wall {
+            Some(TurbulentWallCorrection::Liquid(sample)) => {
+                Some(TurbulentTubePropertyCorrection::Liquid {
+                    wall_prandtl: sample.state.prandtl(),
+                })
+            }
+            Some(TurbulentWallCorrection::Air) => Some(TurbulentTubePropertyCorrection::Air {
+                bulk_temperature: Temperature::new(bath_temperature_k),
+                wall_temperature: Temperature::new(surface_temperature_k),
+            }),
+            None => None,
+        };
+        let coefficient = if let Some(correction) = correction {
+            section = section.with_property_correction(correction)?;
+            section
+                .heat_transfer_coefficient_with_sensitivities(ThermalConductivity::new(k), length)?
         } else {
-            (
-                section.heat_transfer_coefficient(ThermalConductivity::new(k), length)?,
-                0.0,
-            )
+            section.heat_transfer_coefficient(ThermalConductivity::new(k), length)?
+        };
+        let derivative = match &wall {
+            Some(TurbulentWallCorrection::Liquid(sample)) => {
+                let [_, dcp, dk, dmu] = sample.derivatives;
+                let dpr = finite(
+                    sample.state.prandtl()
+                        * (dmu / sample.state.dynamic_viscosity_pa_s()
+                            + dcp / sample.state.specific_heat_j_kg_k()
+                            - dk / sample.state.thermal_conductivity_w_m_k()),
+                )?;
+                coefficient_partial(
+                    &coefficient,
+                    "Pr_wall",
+                    dpr,
+                    dcp != 0.0 || dk != 0.0 || dmu != 0.0,
+                )?
+            }
+            Some(TurbulentWallCorrection::Air) => {
+                coefficient_partial(&coefficient, "T_wall", 1.0, true)?
+            }
+            None => 0.0,
         };
         let (_, _, upstream, nusselt, section_nusselt) = section.into_parts();
-        // Bulk Re/Pr/k stay fixed. Only the explicitly selected original
-        // wall-Prandtl source contributes a surface-temperature chain.
+        // Bulk Re/Pr/k stay fixed during surface elimination. Only the
+        // explicitly selected liquid-property or air-temperature chain moves.
         return Ok(ExteriorConvectionResponse {
             property_temperature_k,
             transport: state,
-            surface_transport: wall.map(|sample| sample.state),
+            surface_transport: match wall {
+                Some(TurbulentWallCorrection::Liquid(sample)) => Some(sample.state),
+                _ => None,
+            },
+            turbulent_property_correction: correction,
             surface_dynamic_viscosity_pa_s: None,
             nusselt,
             plate_section: None,
@@ -249,6 +272,7 @@ pub(super) fn evaluate(
             property_temperature_k,
             transport: state,
             surface_transport: None,
+            turbulent_property_correction: None,
             surface_dynamic_viscosity_pa_s: None,
             nusselt,
             plate_section: None,
@@ -428,6 +452,7 @@ pub(super) fn evaluate(
         property_temperature_k,
         transport: state,
         surface_transport: None,
+        turbulent_property_correction: None,
         surface_dynamic_viscosity_pa_s: wall_viscosity,
         nusselt,
         plate_section: None,

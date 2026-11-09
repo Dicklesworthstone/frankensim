@@ -41,6 +41,15 @@ fn reference(gas: &IsobaricGasLaw, body: f64) -> (f64, [f64; 2]) {
 }
 
 fn advance(gas: &IsobaricGasLaw) -> f64 {
+    advance_with(gas, settings(plate()), false, reference)
+}
+
+pub(super) fn advance_with(
+    gas: &IsobaricGasLaw,
+    configuration: ExteriorConvectionSettings,
+    corrected_air: bool,
+    reference: impl Fn(&IsobaricGasLaw, f64) -> (f64, [f64; 2]),
+) -> f64 {
     let card = liquid_card(0.0, 0.01, 320.0);
     let material = liquid_law(&card);
     let point = |temperature| {
@@ -76,7 +85,6 @@ fn advance(gas: &IsobaricGasLaw) -> f64 {
     .unwrap();
     let conduction = IsobaricConductionLaw::try_new(&card, &caloric, &k_key, selection).unwrap();
     let layer = CaloricConductionLayer::from_isobaric(&conduction).unwrap();
-    let configuration: ExteriorConvectionSettings = settings(plate());
     let source = ImplicitGasConvection::try_new(
         layer.caloric_law(),
         layer.energy_bounds_j_kg(),
@@ -84,6 +92,11 @@ fn advance(gas: &IsobaricGasLaw) -> f64 {
         configuration,
     )
     .unwrap();
+    let source = if corrected_air {
+        source.with_gnielinski_air_wall_correction().unwrap()
+    } else {
+        source
+    };
     let geometry = ImplicitBoundaryGeometry {
         area_m2: AREA,
         half_distance_m: 0.005,
@@ -265,7 +278,8 @@ fn original_thermochemical_calorics_drive_the_same_implicit_wall_and_bath_accoun
         IsobaricGasLaw::try_from_model(
             thermochemical_source::model_transport_with_heat_capacity_slope(0.8, slope),
             thermochemical_source::point(300.0, 100000.0),
-        ).unwrap()
+        )
+        .unwrap()
     };
     let constant_cp = make(0.0);
     let variable_cp = make(0.002);
