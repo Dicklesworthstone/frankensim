@@ -11,11 +11,13 @@
 //! only rigid incompressible pressure junctions; the separate one-inventory
 //! thermal owner remains available for explicitly compliant networks.
 
+use std::borrow::Borrow;
 use std::cell::{Cell, RefCell};
 
 /// Native time refinement that resolves radial history and reversing transport.
 pub mod adaptive;
 
+use adaptive::RegionalCarreauDrive;
 use fs_exec::Cx;
 use fs_qty::Pressure;
 use fs_thermal::enthalpy::DepositionSimulation;
@@ -55,6 +57,8 @@ pub struct TransientRegionalCarreauControls {
 #[derive(Debug)]
 pub enum TransientCarreauTransportError<E> {
     Momentum(TransientCarreauError),
+    /// The authored drive source refused a prepared thermal endpoint.
+    Drive(E),
     Exchange(E),
     MechanicalEnergy { residual_j: f64, tolerance_j: f64 },
     CombinedEnergy { residual_j: f64, tolerance_j: f64 },
@@ -95,7 +99,8 @@ pub struct TransientRegionalCarreauStep<'m, T> {
     pub report: TransientRegionalCarreauReport<T>,
 }
 
-struct Prepared<T> {
+struct Prepared<T, D> {
+    drive: D,
     source: TransientCarreauGraph,
     state: TransientCarreauState,
     hydraulics: TransientCarreauStep,
@@ -275,6 +280,57 @@ impl TransientRegionalCarreauTransport {
         TransientRegionalCarreauStep<'m, T>,
         ImplicitTransportError<TransientCarreauTransportError<E>>,
     > {
+        let drive = RegionalCarreauDrive {
+            boundaries: boundaries.to_vec(),
+            injections: injections.to_vec(),
+            branch_heads: branch_heads.map(<[Pressure]>::to_vec),
+        };
+        self.advance_with_resolved_drive(
+            cx,
+            thermal,
+            state,
+            workspace,
+            target_s,
+            controls,
+            energy_guess_j,
+            |_, _, _| Ok::<_, E>(&drive),
+            |cx, candidate, flow, _| exchange(cx, candidate, flow),
+        )
+        .map(|(step, _)| step)
+    }
+
+    /// One original thermal residual owner for prescribed and endpoint-resolved
+    /// drive laws. Returning the accepted drive together with the physical state
+    /// keeps discarded nonlinear source samples out of the accepted trajectory.
+    /// A borrowed drive preserves prescribed forcing without cloning each trial.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn advance_with_resolved_drive<'m, T, E, D>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'m>,
+        state: &TransientCarreauState,
+        workspace: &mut TransientCarreauWorkspace,
+        target_s: f64,
+        controls: TransientRegionalCarreauControls,
+        energy_guess_j: &[f64],
+        resolve_drive: impl Fn(
+            &Cx<'_>,
+            &DepositionSimulation<'m>,
+            &TransientCarreauGraph,
+        ) -> Result<D, E>,
+        exchange: impl Fn(
+            &Cx<'_>,
+            &DepositionSimulation<'m>,
+            &TransientCarreauStep,
+            &D,
+        ) -> Result<CarreauTransportExchange<T>, E>,
+    ) -> Result<
+        (TransientRegionalCarreauStep<'m, T>, D),
+        ImplicitTransportError<TransientCarreauTransportError<E>>,
+    >
+    where
+        D: Borrow<RegionalCarreauDrive>,
+    {
         thermal_checkpoint(cx)?;
         let duration_s = target_s - thermal.time_s();
         if state.accepted_time_s() != thermal.time_s()
@@ -317,6 +373,11 @@ impl TransientRegionalCarreauTransport {
                     .momentum
                     .at_temperatures(&temperatures, cx)
                     .map_err(momentum_error)?;
+                let drive = resolve_drive(cx, candidate, &source).map_err(|error| {
+                    ImplicitTransportError::Resolve(TransientCarreauTransportError::Drive(error))
+                })?;
+                thermal_checkpoint(cx)?;
+                let forcing = drive.borrow();
                 let mut proposed = state.clone();
                 let hydraulic_controls = TransientCarreauControls {
                     maximum_branch_solves: controls.hydraulics.maximum_branch_solves.min(remaining),
@@ -324,12 +385,12 @@ impl TransientRegionalCarreauTransport {
                 };
                 let hydraulics = {
                     let mut scratch = workspace.borrow_mut();
-                    match branch_heads {
+                    match forcing.branch_heads.as_deref() {
                         Some(heads) => source.step_with_heads(
                             &mut proposed,
                             &mut scratch,
-                            boundaries,
-                            injections,
+                            &forcing.boundaries,
+                            &forcing.injections,
                             heads,
                             duration_s,
                             hydraulic_controls,
@@ -338,8 +399,8 @@ impl TransientRegionalCarreauTransport {
                         None => source.step(
                             &mut proposed,
                             &mut scratch,
-                            boundaries,
-                            injections,
+                            &forcing.boundaries,
+                            &forcing.injections,
                             duration_s,
                             hydraulic_controls,
                             cx,
@@ -366,7 +427,7 @@ impl TransientRegionalCarreauTransport {
                         },
                     ));
                 }
-                let response = exchange(cx, candidate, &hydraulics).map_err(|error| {
+                let response = exchange(cx, candidate, &hydraulics, &drive).map_err(|error| {
                     ImplicitTransportError::Resolve(TransientCarreauTransportError::Exchange(error))
                 })?;
                 thermal_checkpoint(cx)?;
@@ -397,6 +458,7 @@ impl TransientRegionalCarreauTransport {
                     heat_w,
                     response,
                     |payload, stream_w, _| Prepared {
+                        drive,
                         source,
                         state: proposed,
                         hydraulics,
@@ -441,7 +503,7 @@ impl TransientRegionalCarreauTransport {
         let mut next_regional = self.regional.clone();
         next_regional.graph = prepared.source.graph().clone();
         thermal_checkpoint(cx)?;
-        Ok(TransientRegionalCarreauStep {
+        Ok((TransientRegionalCarreauStep {
             next: Self {
                 momentum: prepared.source,
                 regional: next_regional,
@@ -463,7 +525,7 @@ impl TransientRegionalCarreauTransport {
                 combined_energy_tolerance_j: allowance,
                 total_branch_solves: total_branch_solves.get(),
             },
-        })
+        }, prepared.drive))
     }
 }
 

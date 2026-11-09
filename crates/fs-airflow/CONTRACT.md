@@ -6467,3 +6467,52 @@ unchanged. The existing `ConjugateFilmGasSurface` type and film sample payload
 remain compatible for both legacy constructors. All shared original-caloric,
 native-temperature conductivity support, pure-phase, radiation, Biot,
 cancellation, insulation, and source-work admissions continue to apply.
+
+### Thermal feedback into resolved pressure and head drives
+
+`carreau::transient::adaptive::advance_resolved_with_thermal_drive` evaluates
+an explicitly authored pressure, head or injection law inside the existing
+native regional thermal residual. The pure callback receives the native
+candidate thermal endpoint, the strict interval midpoint as its time coordinate,
+and the original radial graph re-prepared at each pipe's actual candidate
+temperature. The same original material law, support and radial history remain
+in force; the adapter supplies no surrogate resistance or inferred pump law.
+
+Every prepared residual, numerical derivative probe and final acceptance query
+resolves its own drive. The original midpoint momentum step restarts the same
+accepted radial history under that trial's forcing. Its actual signed flow
+supplies the existing enthalpy transport, and only its resolved viscous heat
+enters the caloric source. Pressure and recovering head work remain separate
+mechanical exchange. The accepted drive sample travels through the original
+thermal payload with the accepted flow and heat, rather than being reconstructed
+or queried again after convergence.
+
+The prescribed-drive entry still queries once per native interval and reuses
+that sample. Its `thermal_time_s` is None; feedback samples explicitly record
+Some(end_s), while `sample_time_s` remains the midpoint time. Both entries use
+the same full-versus-two-half adaptive controller and authored event splitting.
+Only accepted fine-step samples receive physical accounting credit.
+`drive_evaluations` counts all actual queries, including discarded comparisons
+and terminal source refusals; existing native-attempt, thermal-endpoint and
+branch-solve budgets bound the work.
+
+A feedback-source refusal remains a terminal `Step/Resolve/Drive` error.
+Original material preparation failures remain momentum-source errors, and heat
+exchange errors retain their separate variant. Source failure, nonlinear failure,
+work exhaustion and cancellation preserve the complete input window, including
+after a locally accepted prefix. Scratch workspaces remain reusable.
+
+This is first-order endpoint-temperature/midpoint-momentum coupling with fixed
+reference density, fixed regional masses and zero hydraulic compliance.
+Temperature-controlled pressure is an external mechanical law, not a new fluid
+equation of state or thermal expansion model. No flow-dependent pump-curve solve,
+shaft/controller history, moving valve topology, cavitation or changed free-node
+injection constraint is supplied.
+
+Three focused regression definitions cover prescribed-drive parity and query
+semantics; original-viscosity head feedback against independent annular momentum
+and nonlinear caloric balances, including recovering head work and nonbinary
+events; and late source/cancellation refusals, endpoint budgets and retry.
+The new source and tests were inspected statically against native APIs. Their
+compilation, formatter check and execution are not claimed while the execution
+workspace is unavailable.

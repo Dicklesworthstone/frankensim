@@ -8,13 +8,15 @@
 //! This follows the existing inertial transport controller's dyadic pattern;
 //! it adds neither an extrapolated physical state nor another heat integrator.
 
+use std::cell::Cell;
+
 use fs_exec::Cx;
 use fs_qty::Pressure;
 use fs_thermal::enthalpy::{DepositionError, DepositionSimulation};
 
 use super::{
     CarreauTransportExchange, FixedPressure, FlowInjection, ImplicitTransportError,
-    TransientCarreauState, TransientCarreauStep, TransientCarreauTransportError,
+    TransientCarreauGraph, TransientCarreauState, TransientCarreauStep, TransientCarreauTransportError,
     TransientCarreauWorkspace, TransientRegionalCarreauControls, TransientRegionalCarreauReport,
     TransientRegionalCarreauStep, TransientRegionalCarreauTransport, thermal_checkpoint,
 };
@@ -51,8 +53,10 @@ pub struct RegionalCarreauResolutionControls {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RegionalCarreauResolutionWork {
     pub native_steps: usize,
-    /// One pure drive query per attempted native interval, including rejected
-    /// comparisons and a terminal drive/source refusal.
+    /// Every drive query, including discarded comparisons and terminal source
+    /// refusals. Prescribed histories query once per native attempt; thermal
+    /// feedback queries once per prepared original thermal endpoint evaluation.
+    /// Native attempt and endpoint limits bound both modes.
     pub drive_evaluations: usize,
     pub rejected_intervals: usize,
     /// Exact counts from completed native solves, including discarded ones.
@@ -82,15 +86,25 @@ pub struct RegionalCarreauDrive {
     pub branch_heads: Option<Vec<Pressure>>,
 }
 
-/// The exact held forcing used by one accepted native midpoint interval.
-/// Its endpoint thermal solve reuses this sample on every source/derivative
-/// trial. Samples on discarded comparison intervals carry no physical credit.
+/// The exact forcing used by one accepted native midpoint momentum interval.
+/// Prescribed histories reuse one sample on every thermal source/derivative
+/// trial. Feedback instead retains ONLY the final accepted endpoint's sample;
+/// each nonlinear trial resolves its own temperatures and physical drive.
+/// Samples on discarded comparison intervals carry no physical credit.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegionalCarreauDriveSample {
     pub start_s: f64,
     pub end_s: f64,
     pub sample_time_s: f64,
+    /// None for a prescribed drive. Some(end_s) means the drive uses this
+    /// accepted thermal endpoint with the separately stated midpoint time.
+    pub thermal_time_s: Option<f64>,
     pub drive: RegionalCarreauDrive,
+}
+impl std::borrow::Borrow<RegionalCarreauDrive> for RegionalCarreauDriveSample {
+    fn borrow(&self) -> &RegionalCarreauDrive {
+        &self.drive
+    }
 }
 
 /// All accepted native substeps, in chronological order. Their original
@@ -99,7 +113,8 @@ pub struct RegionalCarreauDriveSample {
 #[derive(Debug)]
 pub struct RegionalCarreauTrajectory<T> {
     pub steps: Vec<TransientRegionalCarreauReport<T>>,
-    /// One midpoint drive sample per retained native report, in identical order.
+    /// One actual midpoint drive sample per retained native report, in identical
+    /// order, with explicit thermal-endpoint time for source feedback.
     pub drive_samples: Vec<RegionalCarreauDriveSample>,
     pub estimates: Vec<RegionalCarreauResolutionEstimate>,
     pub work: RegionalCarreauResolutionWork,
@@ -243,6 +258,118 @@ pub fn advance_resolved_with_drive<'m, T, E>(
     step_controls: TransientRegionalCarreauControls,
     controls: RegionalCarreauResolutionControls,
     drive: impl Fn(&Cx<'_>, f64) -> Result<RegionalCarreauDrive, E>,
+    exchange: impl Fn(
+        &Cx<'_>,
+        &DepositionSimulation<'m>,
+        &TransientCarreauStep,
+        &RegionalCarreauDriveSample,
+    ) -> Result<CarreauTransportExchange<T>, E>,
+) -> Result<ResolvedRegionalCarreau<'m, T>, RegionalCarreauResolutionError<E>> {
+    advance_with_driver(
+        cx,
+        owner,
+        thermal,
+        state,
+        workspace,
+        target_s,
+        discontinuities_s,
+        step_controls,
+        controls,
+        DriveResolver::Prescribed(&drive),
+        exchange,
+    )
+}
+
+/// Resolve authored pressure/head/flow feedback in the SAME original regional
+/// thermal residual and adaptive/event controller. Each source callback receives
+/// the strict interval midpoint, the candidate native thermal endpoint, and the
+/// original radial graph re-prepared at those local endpoint temperatures.
+/// This permits temperature-controlled pressure or head laws to feed back into
+/// the accepted flow and heat. The callback is pure and must validate its own
+/// source support; no pump curve, equation of state or control law is inferred.
+///
+/// Unlike the prescribed-drive entry, EVERY prepared thermal residual and
+/// derivative probe queries its own drive. Each trial restarts the same accepted
+/// radial history and holds that trial's forcing during native midpoint momentum.
+/// The exchange callback sees exactly that trial sample. Only the final native
+/// acceptance sample is retained; its `thermal_time_s` is Some(end_s), while
+/// `sample_time_s` remains the time coordinate used by the authored drive law.
+/// This endpoint-temperature/midpoint-momentum coupling remains first order.
+///
+/// Original work, viscous heat, transport and conservation gates are unchanged:
+/// temperature-dependent pressure is mechanical input, not an added caloric
+/// source. Fixed reference density, fixed regional masses and zero compliance
+/// remain required. This supplies no thermal expansion/EOS, valve topology,
+/// controller state or flow-dependent pump-curve iteration. Free-junction
+/// injections retain the original initial/midpoint/final continuity restriction.
+///
+/// Native attempt, thermal endpoint and branch-work limits include rejected
+/// candidates. Feedback refusal is a terminal Step/Resolve/Drive error, never a
+/// reason to hide the source failure by shrinking time. The complete requested
+/// window publishes synchronized original owners or leaves every input intact.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_resolved_with_thermal_drive<'m, T, E>(
+    cx: &Cx<'_>,
+    owner: &TransientRegionalCarreauTransport,
+    thermal: &DepositionSimulation<'m>,
+    state: &TransientCarreauState,
+    workspace: &mut TransientCarreauWorkspace,
+    target_s: f64,
+    discontinuities_s: &[f64],
+    step_controls: TransientRegionalCarreauControls,
+    controls: RegionalCarreauResolutionControls,
+    drive: impl Fn(
+        &Cx<'_>,
+        f64,
+        &DepositionSimulation<'m>,
+        &TransientCarreauGraph,
+    ) -> Result<RegionalCarreauDrive, E>,
+    exchange: impl Fn(
+        &Cx<'_>,
+        &DepositionSimulation<'m>,
+        &TransientCarreauStep,
+        &RegionalCarreauDriveSample,
+    ) -> Result<CarreauTransportExchange<T>, E>,
+) -> Result<ResolvedRegionalCarreau<'m, T>, RegionalCarreauResolutionError<E>> {
+    advance_with_driver(
+        cx,
+        owner,
+        thermal,
+        state,
+        workspace,
+        target_s,
+        discontinuities_s,
+        step_controls,
+        controls,
+        DriveResolver::Thermal(&drive),
+        exchange,
+    )
+}
+
+type ThermalDrive<'a, 'm, E> = dyn Fn(
+    &Cx<'_>,
+    f64,
+    &DepositionSimulation<'m>,
+    &TransientCarreauGraph,
+) -> Result<RegionalCarreauDrive, E> + 'a;
+
+enum DriveResolver<'a, 'm, E> {
+    Prescribed(&'a dyn Fn(&Cx<'_>, f64) -> Result<RegionalCarreauDrive, E>),
+    Thermal(&'a ThermalDrive<'a, 'm, E>),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_with_driver<'m, T, E>(
+    cx: &Cx<'_>,
+    owner: &TransientRegionalCarreauTransport,
+    thermal: &DepositionSimulation<'m>,
+    state: &TransientCarreauState,
+    workspace: &mut TransientCarreauWorkspace,
+    target_s: f64,
+    discontinuities_s: &[f64],
+    step_controls: TransientRegionalCarreauControls,
+    controls: RegionalCarreauResolutionControls,
+    drive: DriveResolver<'_, 'm, E>,
     exchange: impl Fn(
         &Cx<'_>,
         &DepositionSimulation<'m>,
@@ -430,7 +557,7 @@ fn native_step<'m, T, E>(
     mut step: TransientRegionalCarreauControls,
     controls: RegionalCarreauResolutionControls,
     work: &mut RegionalCarreauResolutionWork,
-    drive: &impl Fn(&Cx<'_>, f64) -> Result<RegionalCarreauDrive, E>,
+    drive: &DriveResolver<'_, 'm, E>,
     exchange: &impl Fn(
         &Cx<'_>,
         &DepositionSimulation<'m>,
@@ -461,56 +588,62 @@ fn native_step<'m, T, E>(
         ));
     }
     work.native_steps += 1;
-    work.drive_evaluations += 1;
-    let sample = RegionalCarreauDriveSample {
-        start_s,
-        end_s: target_s,
-        sample_time_s,
-        drive: drive(cx, sample_time_s).map_err(|source| {
-            RegionalCarreauResolutionError::Drive {
+    let guess = vec![0.0; thermal.cells().len()];
+    let result = match drive {
+        DriveResolver::Prescribed(resolve) => {
+            work.drive_evaluations = work.drive_evaluations.checked_add(1)
+                .ok_or_else(|| limit("drive evaluation count limit", *work))?;
+            let sample = RegionalCarreauDriveSample {
                 start_s,
                 end_s: target_s,
                 sample_time_s,
-                work: *work,
-                source,
-            }
-        })?,
-    };
-    checkpoint(cx)?;
-    let guess = vec![0.0; thermal.cells().len()];
-    let resolve =
-        |cx: &Cx<'_>, candidate: &DepositionSimulation<'m>, flow: &TransientCarreauStep| {
-            exchange(cx, candidate, flow, &sample)
-        };
-    let result = match sample.drive.branch_heads.as_deref() {
-        Some(heads) => owner.advance_with_heads(
-            cx,
-            thermal,
-            state,
-            workspace,
-            target_s,
-            &sample.drive.boundaries,
-            &sample.drive.injections,
-            heads,
-            step,
-            &guess,
-            resolve,
-        ),
-        None => owner.advance(
-            cx,
-            thermal,
-            state,
-            workspace,
-            target_s,
-            &sample.drive.boundaries,
-            &sample.drive.injections,
-            step,
-            &guess,
-            resolve,
-        ),
+                thermal_time_s: None,
+                drive: resolve(cx, sample_time_s).map_err(|source| {
+                    RegionalCarreauResolutionError::Drive {
+                        start_s,
+                        end_s: target_s,
+                        sample_time_s,
+                        work: *work,
+                        source,
+                    }
+                })?,
+            };
+            checkpoint(cx)?;
+            let result = owner.advance_with_resolved_drive(
+                cx, thermal, state, workspace, target_s, step, &guess,
+                |_, _, _| Ok::<_, E>(&sample.drive),
+                |cx, candidate, flow, _| exchange(cx, candidate, flow, &sample),
+            )
+            .map(|(result, _)| result);
+            result.map(|result| (result, sample))
+        }
+        DriveResolver::Thermal(resolve) => {
+            // The native endpoint owner admits at most 1,000,000 evaluations.
+            // Count before querying so a source refusal is included as work.
+            let evaluations = Cell::new(0usize);
+            let result = owner.advance_with_resolved_drive(
+                cx, thermal, state, workspace, target_s, step, &guess,
+                |cx, candidate, source| {
+                    evaluations.set(evaluations.get() + 1);
+                    resolve(cx, sample_time_s, candidate, source).map(|drive| {
+                        RegionalCarreauDriveSample {
+                            start_s,
+                            end_s: target_s,
+                            sample_time_s,
+                            thermal_time_s: Some(candidate.time_s()),
+                            drive,
+                        }
+                    })
+                },
+                |cx, candidate, flow, sample| exchange(cx, candidate, flow, sample),
+            );
+            work.drive_evaluations = work.drive_evaluations.checked_add(evaluations.get())
+                .ok_or_else(|| limit("drive evaluation count limit", *work))?;
+            result
+        }
     };
     match result {
-        Ok(result) => {
+        Ok((result, sample)) => {
             if result.report.total_branch_solves > remaining {
                 return Err(RegionalCarreauResolutionError::Invalid(
                     "original branch work exceeded remaining limit",

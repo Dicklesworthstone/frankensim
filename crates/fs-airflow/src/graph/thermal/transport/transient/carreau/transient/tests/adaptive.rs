@@ -1,6 +1,7 @@
 //! Native time refinement of radial history and reversing thermal transport.
 
 mod drive;
+mod feedback;
 
 use super::super::adaptive::*;
 use super::*;
