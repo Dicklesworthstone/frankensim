@@ -5350,3 +5350,87 @@ source/band/cancellation refusals. These native tests are authored but not
 executed: the dependency build was previously killed before physics crates
 compiled, and the executor became unavailable during this increment.
 Final formatter/compiler execution is therefore unverified.
+
+### Layered cylindrical thermal walls and finite interlayer contacts
+
+`thermal_wall::conduction::layered::PreparedLayeredRadialThermalWall` retains
+independent original `PreparedThermalTransport` sources on an ordered,
+contiguous sequence of actual `AnnularSection` solid layers. Each source
+supplies its own density, selected constrained heat capacity and radial
+conductivity at the common background temperature. No effective material,
+conductivity averaging, hidden contact law or matched-specimen authority
+replaces these bindings. Interlayer resistances are explicit nonnegative
+data in m² K/W at that state: zero is a perfect contact; a positive finite
+resistance retains the two physical face temperatures and their jump.
+Gas contact remains perfect at either terminal shell face. The other
+terminal retains the original isothermal, insulated or finite-conductance
+bath at the unchanged background temperature.
+
+Each layer reuses BOTH Dirichlet face responses of the original radial
+solid owner. Their heat-rate admittances assemble one ordered native
+tridiagonal face chain; perfect contacts share a coordinate and finite
+contacts contribute the actual `2*pi*r/R` conductance. This is exact
+same-frequency elimination of the original radial P1 coordinates.
+Both basis fields remain retained, so all local original fields are
+reconstructed. No transfer matrix or division by a vanishing through-response
+appears; a thermally opaque layer can have zero representable transmission
+without introducing an overflow.
+
+Local temperature and gradients are combined coherently BEFORE the same
+shared positive radial mass/stiffness forms are evaluated. Thus all
+interference terms enter each layer's conduction loss and thermal storage;
+independent basis losses are never simply added. Interface loss is
+`2*pi*r*|T_inner-T_outer|²/(2*T0*R)`, exactly zero at a perfect contact.
+Bath exchange and each material layer's reversible storage remain separate.
+Original weak reactions give each layer's inward face fluxes. Contact
+continuity, layer/global complex heat balance and positive work are checked
+independently. The total interface admittance comes from these positive
+layer/contact/bath forms and original storage, preserving the existing
+native peak `exp(-i*omega*t)` convention.
+
+`AnnularConjugateWall::Layered` enters the SAME existing gas/molecular wall
+solve. Its single-frequency condensed coefficients remain private. Existing
+wave and `TwoPort` operations are unchanged. Wall and integrated acoustic
+observations add the explicit `thermal_contact_w_m` channel; boundary-only
+and homogeneous walls return exactly zero there. The existing wrapper now
+also exposes layer-selected solid fields and actual thermal-contact
+observations. The prepared layered owner exposes each original source,
+geometry and sample, both material-face temperatures/fluxes, local
+temperature/gradient/heat flux, per-layer conduction/storage, contact
+temperature jumps and heat, total bath exchange, and the linear oscillatory
+thermal-energy inventory. This inventory is distinct from cycle-mean
+quadratic acoustic thermal storage and from mean caloric deposition.
+
+Preparation is O(total radial cells + layers), with at most 64 layers,
+4096 combined original radial elements and 128 face coordinates before
+perfect-contact merging. The explicit payload cap must cover
+`512*(total_cells+layers)+2048*layers+8192` bytes, including original geometry,
+retained bases and radial/face solve scratch; source paths and allocator
+metadata are excluded. Per-layer/contact/local and whole-wall queries are
+O(1), allocation-free and require no source reevaluation. Each layer retains
+the original cell-diffusion-phase ceiling and source admissions. Cancellation
+is polled before source work, between original basis solves, every 64 radial
+coordinates and around the bounded face-chain solve.
+
+Contact continuity uses the uncancelled original endpoint-equation term
+scale, so a nearly insulated interface does not normalize a weak-reaction
+roundoff error by its vanishing net flux. Scaled algebraic rows, and
+layer/contact balances normalized by their original unit-temperature
+admittances, use a smallest-normal denominator floor at underflowed tails.
+Physical temperatures, fluxes and positive work are unchanged and never
+clipped by this safeguard. The total nonzero source heat/work checks retain
+their actual unfloored physical scale. These are numerical residual
+admissions, not bounds on mesh, source, phase, or model error.
+
+The original homogeneous wall's arithmetic is shared through private
+nodal-accessor helpers for positive radial forms and weak endpoint terms.
+Its full field/wave/thermal behavior remains covered by the existing
+homogeneous-wall regressions. Eight additional G1/G3 cases in
+`tests/annular_layered_thermal_walls.rs` cover original-wall and perfect-split
+recovery, independent logarithmic multilayer resistance and contact jumps,
+a dimensional coupled molecular-gas/two-solid ODE mesh ladder, physical
+coherent volume quadrature and heat/storage balances, full acoustic work
+with separate contact heat on both gas walls, the opaque 4096-cell limit,
+perfect/isolating contact limits, original source/state/refusal behavior and
+early/late cancellation. Synthetic material data establish constitutive
+and numerical checks; no experimental material qualification is inferred.

@@ -21,6 +21,11 @@
 //! require their own owners. Positive losses are acoustic availability losses,
 //! not an automatic assignment of mean caloric heating.
 
+/// Independent material layers and finite interlayer thermal contact resistance.
+pub mod layered;
+
+use layered::{PreparedLayeredRadialThermalWall, RadialThermalContactObservation};
+
 use super::{
     AnnularAdmission, AnnularSection, AnnularThermalWall, AnnularThermalWallField, DuctError,
     FluidDuctError, PreparedAnnularThermalWalls, SegmentWave, bad, filled, finite, nodal_load,
@@ -80,7 +85,8 @@ pub struct RadialThermalWallAdmission {
     /// This is a resolution ceiling, not a continuum-error certificate.
     pub maximum_cell_diffusion_phase: f64,
     /// Componentwise solve error, weak reaction/positive-form agreement and
-    /// complex heat-balance defect, in (0,1). Refine the mesh separately.
+    /// complex heat-balance defect, in (0,1). Scaled algebraic rows use a
+    /// smallest-normal denominator floor for underflowed tails. Refine separately.
     pub maximum_relative_residual: f64,
     /// Conservative numerical peak: 320*(elements+1)+4096 bytes, including
     /// borrowed radial geometry and native solve scratch. Excludes allocator
@@ -245,39 +251,13 @@ impl AnnularSection {
         let (mut nodes, backward) =
             solve_solid(self, argument, boundary, contact, bath, &mut cancelled)?;
         let n = self.elements();
-        let (mut stiffness, mut mass, mut integral_re, mut integral_im) =
-            (Dd::ZERO, Dd::ZERO, Dd::ZERO, Dd::ZERO);
-        for i in 0..n {
-            if i % 64 == 0 {
-                poll(&mut cancelled, i)?;
-            }
-            stiffness = stiffness
-                + Dd::from_f64(self.stiffness_edges[i])
-                    * Dd::from_f64((nodes[i + 1] - nodes[i]).norm_sq());
-            let x = self.fractions[i];
-            let width = self.fractions[i + 1] - x;
-            let left = self.inner_m / mean_radius + self.gap_m / mean_radius * x;
-            let right = self.inner_m / mean_radius + self.gap_m / mean_radius * (x + width);
-            let (diagonal, off) = radial_mass(width, left, right);
-            let ratio = off / diagonal[0];
-            let form = (nodes[i] + nodes[i + 1].scale(ratio)).norm_sq() * diagonal[0]
-                + nodes[i + 1].norm_sq() * (diagonal[1] - off * ratio);
-            mass = mass + Dd::from_f64(form);
-        }
-        for (i, value) in nodes.iter().enumerate() {
-            if i % 64 == 0 {
-                poll(&mut cancelled, i)?;
-            }
-            let weight = Dd::from_f64(nodal_load(self, i));
-            integral_re = integral_re + weight * Dd::from_f64(value.re);
-            integral_im = integral_im + weight * Dd::from_f64(value.im);
-        }
+        let forms = radial_forms(self, |i| nodes[i], &mut cancelled)?;
         let contact_perimeter = core::f64::consts::TAU * radii[contact];
         let bath_perimeter = core::f64::consts::TAU * radii[bath_side];
         let fourier_form =
-            conductivity * (self.area_m2 / self.gap_m / self.gap_m) * stiffness.to_f64();
+            conductivity * (self.area_m2 / self.gap_m / self.gap_m) * forms.stiffness;
         let bath_form = conductance * bath_perimeter * nodes[bath_side * n].norm_sq();
-        let storage_form = capacity * self.area_m2 * mass.to_f64();
+        let storage_form = capacity * self.area_m2 * forms.mass;
         // Green's identity gives the exact discrete admittance through positive
         // forms. In particular a tiny real loss is not obtained by subtracting
         // almost equal endpoint flux terms in the quasistatic insulated limit.
@@ -285,7 +265,7 @@ impl AnnularSection {
             (fourier_form + bath_form) / contact_perimeter,
             -omega * (storage_form / contact_perimeter),
         );
-        let reaction = endpoint_reaction(self, argument, contact, &nodes)
+        let reaction = endpoint_reaction(self, argument, contact, |i| nodes[i])
             .conj()
             .scale(conductivity / self.gap_m * mean_radius / radii[contact]);
         let reaction_defect = relative(
@@ -293,12 +273,14 @@ impl AnnularSection {
             admittance.abs() + reaction.abs(),
         );
         let bath_flux = match bath {
-            RadialWallBath::Isothermal => -endpoint_reaction(self, argument, bath_side, &nodes)
-                .conj()
-                .scale(conductivity / self.gap_m * mean_radius / radii[bath_side]),
+            RadialWallBath::Isothermal => {
+                -endpoint_reaction(self, argument, bath_side, |i| nodes[i])
+                    .conj()
+                    .scale(conductivity / self.gap_m * mean_radius / radii[bath_side])
+            }
             _ => nodes[bath_side * n].conj().scale(conductance),
         };
-        let integral = C64::new(integral_re.to_f64(), -integral_im.to_f64()).scale(self.area_m2);
+        let integral = forms.integral.conj().scale(self.area_m2);
         let input = admittance.scale(contact_perimeter);
         let output = bath_flux.scale(bath_perimeter);
         let stored_rate = C64::new(0.0, omega * capacity) * integral;
@@ -360,8 +342,76 @@ impl AnnularSection {
     }
 }
 
+// Shared exact positive P1 forms for any coherent nodal temperature.
+// The accessor lets a layered wall reconstruct both Dirichlet basis fields
+// BEFORE squaring, retaining every interference term with the same arithmetic.
+struct RadialThermalForms {
+    stiffness: f64,
+    mass: f64,
+    integral: C64,
+}
+fn radial_forms(
+    section: &AnnularSection,
+    node: impl Fn(usize) -> C64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<RadialThermalForms, DuctError> {
+    let n = section.elements();
+    let mean_radius = section.inner_m + 0.5 * section.gap_m;
+    let (mut stiffness, mut mass, mut integral_re, mut integral_im) =
+        (Dd::ZERO, Dd::ZERO, Dd::ZERO, Dd::ZERO);
+    for i in 0..n {
+        if i % 64 == 0 {
+            poll(cancelled, i)?;
+        }
+        let a = node(i);
+        let b = node(i + 1);
+        stiffness =
+            stiffness + Dd::from_f64(section.stiffness_edges[i]) * Dd::from_f64((b - a).norm_sq());
+        let x = section.fractions[i];
+        let width = section.fractions[i + 1] - x;
+        let left = section.inner_m / mean_radius + section.gap_m / mean_radius * x;
+        let right = section.inner_m / mean_radius + section.gap_m / mean_radius * (x + width);
+        let (diagonal, off) = radial_mass(width, left, right);
+        let ratio = off / diagonal[0];
+        let form = (a + b.scale(ratio)).norm_sq() * diagonal[0]
+            + b.norm_sq() * (diagonal[1] - off * ratio);
+        mass = mass + Dd::from_f64(form);
+    }
+    for i in 0..=n {
+        if i % 64 == 0 {
+            poll(cancelled, i)?;
+        }
+        let value = node(i);
+        let weight = Dd::from_f64(nodal_load(section, i));
+        integral_re = integral_re + weight * Dd::from_f64(value.re);
+        integral_im = integral_im + weight * Dd::from_f64(value.im);
+    }
+    Ok(RadialThermalForms {
+        stiffness: stiffness.to_f64(),
+        mass: mass.to_f64(),
+        integral: C64::new(integral_re.to_f64(), integral_im.to_f64()),
+    })
+}
+
 // Original area-normalized K+i*omega*C/k M; only boundary conditions change.
-fn endpoint_reaction(section: &AnnularSection, argument: f64, side: usize, values: &[C64]) -> C64 {
+fn endpoint_reaction(
+    section: &AnnularSection,
+    argument: f64,
+    side: usize,
+    value: impl Fn(usize) -> C64,
+) -> C64 {
+    let terms = endpoint_reaction_terms(section, argument, side, value);
+    terms[0] + terms[1]
+}
+
+// Separate original endpoint terms also define a backward-error scale when
+// the net flux is small through physical cancellation.
+fn endpoint_reaction_terms(
+    section: &AnnularSection,
+    argument: f64,
+    side: usize,
+    value: impl Fn(usize) -> C64,
+) -> [C64; 2] {
     let n = section.elements();
     let edge = if side == 0 { 0 } else { n - 1 };
     let node = side * n;
@@ -374,7 +424,7 @@ fn endpoint_reaction(section: &AnnularSection, argument: f64, side: usize, value
         -section.stiffness_edges[edge],
         argument * section.mass_edges[edge],
     );
-    diagonal * values[node] + off * values[other]
+    [diagonal * value(node), off * value(other)]
 }
 
 fn solve_solid(
@@ -468,7 +518,10 @@ fn solve_solid(
             error = error + off[i] * values[i + 1];
             magnitude += off[i].abs() * values[i + 1].abs();
         }
-        residual = residual.max(relative(error.abs(), magnitude));
+        // A unit-temperature solve can have a physically extinguished tail.
+        // Below the smallest normal scale, one subnormal rounding ulp must
+        // not become an order-one relative error. The solved field is unchanged.
+        residual = residual.max(relative(error.abs(), magnitude.max(f64::MIN_POSITIVE)));
     }
     Ok((values, residual))
 }
@@ -592,6 +645,8 @@ impl<'a> PreparedRadialThermalWall<'a> {
 pub enum AnnularConjugateWall<'a> {
     Boundary(AnnularThermalWall),
     Solid(&'a PreparedRadialThermalWall<'a>),
+    /// Original concentric material layers with explicit interlayer resistance.
+    Layered(&'a PreparedLayeredRadialThermalWall<'a>),
 }
 
 /// Face and integrated work for either an explicit boundary or a resolved solid.
@@ -605,6 +660,8 @@ pub struct AnnularConjugateWallObservation {
     /// Per physical bath-face area; bath and interface radii can differ.
     pub wall_to_bath_heat_flux_w_m2: C64,
     pub solid_conduction_w_m: f64,
+    /// Availability loss at actual finite interlayer contacts; zero for a homogeneous wall.
+    pub thermal_contact_w_m: f64,
     pub bath_exchange_w_m: f64,
     pub thermal_storage_j_m: f64,
 }
@@ -615,6 +672,7 @@ pub struct AnnularConjugateWallDissipation {
     pub gas_conduction_w_m: f64,
     pub gas_molecular_w_m: f64,
     pub solid_conduction_w_m: [f64; 2],
+    pub thermal_contact_w_m: [f64; 2],
     pub bath_exchange_w_m: [f64; 2],
     pub total_w_m: f64,
 }
@@ -668,6 +726,36 @@ fn condensed_walls(
                 }
                 AnnularThermalWall::Finite {
                     conductance_w_m2_k: solid.admittance.re,
+                    areal_heat_capacity_j_m2_k: capacity,
+                }
+            }
+            AnnularConjugateWall::Layered(solid) => {
+                let expected_face = if side == 0 {
+                    RadialWallFace::Outer
+                } else {
+                    RadialWallFace::Inner
+                };
+                let radius = if side == 0 {
+                    section.inner_m
+                } else {
+                    section.outer_m
+                };
+                if solid.gas_face() != expected_face
+                    || solid.interface_radius_m() != radius
+                    || solid.angular_frequency_rad_s() != omega
+                    || solid.temperature_k() != gas.temperature
+                {
+                    return Err(bad(
+                        "layered solid face, radius, frequency or equilibrium temperature does not match gas",
+                    ));
+                }
+                let admittance = solid.interface_admittance_w_m2_k();
+                let capacity = -admittance.im / omega;
+                if !positive(capacity) {
+                    return Err(bad("condensed layered solid storage is unrepresentable"));
+                }
+                AnnularThermalWall::Finite {
+                    conductance_w_m2_k: admittance.re,
                     areal_heat_capacity_j_m2_k: capacity,
                 }
             }
@@ -791,6 +879,40 @@ impl<'g, 'm, 'w, M: ?Sized> PreparedConjugateAnnularWalls<'g, 'm, 'w, M> {
             AnnularConjugateWall::Boundary(_) => {
                 Err(bad("this annular wall has no resolved solid field"))
             }
+            AnnularConjugateWall::Layered(_) => Err(bad(
+                "a layered solid field requires an explicit layer index",
+            )),
+        }
+    }
+    /// Coherent original solid field at an explicitly selected material layer.
+    pub fn layered_solid_field_in_cell(
+        &self,
+        side: usize,
+        layer: usize,
+        cell: usize,
+        fraction: f64,
+        pressure_pa: C64,
+    ) -> Result<RadialThermalWallField, DuctError> {
+        let interface = self.gas.wall_observation(side, pressure_pa)?;
+        match self.walls[side] {
+            AnnularConjugateWall::Layered(solid) => {
+                solid.field_in_cell(layer, cell, fraction, interface.temperature_k)
+            }
+            _ => Err(bad("this annular wall has no layered solid field")),
+        }
+    }
+    pub fn thermal_contact_observation(
+        &self,
+        side: usize,
+        contact: usize,
+        pressure_pa: C64,
+    ) -> Result<RadialThermalContactObservation, DuctError> {
+        let interface = self.gas.wall_observation(side, pressure_pa)?;
+        match self.walls[side] {
+            AnnularConjugateWall::Layered(solid) => {
+                solid.contact_observation(contact, interface.temperature_k)
+            }
+            _ => Err(bad("this annular wall has no interlayer thermal contacts")),
         }
     }
     pub fn wall_observation(
@@ -808,6 +930,7 @@ impl<'g, 'm, 'w, M: ?Sized> PreparedConjugateAnnularWalls<'g, 'm, 'w, M> {
                 fluid_to_wall_heat_flux_w_m2: fluid.fluid_to_wall_heat_flux_w_m2,
                 wall_to_bath_heat_flux_w_m2: fluid.wall_to_bath_heat_flux_w_m2,
                 solid_conduction_w_m: 0.0,
+                thermal_contact_w_m: 0.0,
                 bath_exchange_w_m: fluid.bath_dissipation_w_m,
                 thermal_storage_j_m: fluid.thermal_storage_j_m,
             },
@@ -821,6 +944,22 @@ impl<'g, 'm, 'w, M: ?Sized> PreparedConjugateAnnularWalls<'g, 'm, 'w, M> {
                     fluid_to_wall_heat_flux_w_m2: response.fluid_to_wall_heat_flux_w_m2,
                     wall_to_bath_heat_flux_w_m2: response.wall_to_bath_heat_flux_w_m2,
                     solid_conduction_w_m: response.solid_conduction_w_m,
+                    thermal_contact_w_m: 0.0,
+                    bath_exchange_w_m: response.bath_exchange_w_m,
+                    thermal_storage_j_m: response.thermal_storage_j_m,
+                }
+            }
+            AnnularConjugateWall::Layered(solid) => {
+                let response = solid.observation(fluid.temperature_k)?;
+                AnnularConjugateWallObservation {
+                    interface_radius_m: response.interface_radius_m,
+                    bath_radius_m: response.bath_radius_m,
+                    interface_temperature_k: response.interface_temperature_k,
+                    bath_face_temperature_k: response.bath_temperature_k,
+                    fluid_to_wall_heat_flux_w_m2: response.fluid_to_wall_heat_flux_w_m2,
+                    wall_to_bath_heat_flux_w_m2: response.wall_to_bath_heat_flux_w_m2,
+                    solid_conduction_w_m: response.solid_conduction_w_m,
+                    thermal_contact_w_m: response.thermal_contact_w_m,
                     bath_exchange_w_m: response.bath_exchange_w_m,
                     thermal_storage_j_m: response.thermal_storage_j_m,
                 }
@@ -837,16 +976,19 @@ impl<'g, 'm, 'w, M: ?Sized> PreparedConjugateAnnularWalls<'g, 'm, 'w, M> {
             .gas
             .dissipation_per_axial_length(pressure_pa, volume_flow_m3_s)?;
         let mut solid = [0.0; 2];
+        let mut contacts = [0.0; 2];
         let mut bath = [0.0; 2];
         for side in 0..2 {
             let wall = self.wall_observation(side, pressure_pa)?;
             solid[side] = wall.solid_conduction_w_m;
+            contacts[side] = wall.thermal_contact_w_m;
             bath[side] = wall.bath_exchange_w_m;
         }
         let total = gas.viscous_w_m
             + gas.conduction_w_m
             + gas.molecular_w_m
             + solid.into_iter().sum::<f64>()
+            + contacts.into_iter().sum::<f64>()
             + bath.into_iter().sum::<f64>();
         if !total.is_finite() {
             return Err(bad(
@@ -858,6 +1000,7 @@ impl<'g, 'm, 'w, M: ?Sized> PreparedConjugateAnnularWalls<'g, 'm, 'w, M> {
             gas_conduction_w_m: gas.conduction_w_m,
             gas_molecular_w_m: gas.molecular_w_m,
             solid_conduction_w_m: solid,
+            thermal_contact_w_m: contacts,
             bath_exchange_w_m: bath,
             total_w_m: total,
         })
