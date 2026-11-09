@@ -171,6 +171,10 @@ pub struct RansAdaptiveHeatBalance {
     pub wall_heat_j_m2: f64,
     /// Integrated volumetric input [J/m²].
     pub volume_heat_j_m2: f64,
+    /// Integrated deposited molecular dissipation [J/m²].
+    pub molecular_heat_j_m2: f64,
+    /// Integrated deposited modeled turbulent destruction [J/m²].
+    pub turbulent_heat_j_m2: f64,
     /// Sum of accepted local heat balance defects [J/m²].
     pub balance_defect_j_m2: f64,
 }
@@ -200,7 +204,7 @@ pub struct RansAdaptiveReport {
     /// trajectory. `time_step_s` is the full window. Balance defects are
     /// averaged local defects, not a newly applied single backward-Euler step.
     pub mechanical: RansTransportReport,
-    /// Present only when passive temperature was advanced.
+    /// Present only when sensible temperature was advanced.
     pub heat: Option<RansAdaptiveHeatBalance>,
 }
 
@@ -601,8 +605,9 @@ impl Sum {
 struct Account {
     first: Option<Step>,
     last: Option<Step>,
-    // Eight mechanical rate integrals, then wall/volume heat, change, defect.
-    integral: [Sum; 12],
+    // Eight mechanical rate integrals, wall/volume heat, change, defect,
+    // then the two separately retained physical dissipation-to-heat inputs.
+    integral: [Sum; 14],
 }
 
 impl Account {
@@ -626,6 +631,8 @@ impl Account {
             self.integral[9].add(dt * h.volumetric_heat_input_w_m2);
             self.integral[10].add(h.thermal_energy_change_j_m2);
             self.integral[11].add(dt * h.thermal_balance_defect_w_m2);
+            self.integral[12].add(dt * h.molecular_heat_input_w_m2);
+            self.integral[13].add(dt * h.turbulent_heat_input_w_m2);
         }
         if self.integral.iter().any(|sum| !sum.value.is_finite()) {
             return Err(RansTransportError::Arithmetic {
@@ -679,6 +686,8 @@ impl Account {
                 energy_change_j_m2: self.integral[10].value,
                 wall_heat_j_m2: self.integral[8].value,
                 volume_heat_j_m2: self.integral[9].value,
+                molecular_heat_j_m2: self.integral[12].value,
+                turbulent_heat_j_m2: self.integral[13].value,
                 balance_defect_j_m2: self.integral[11].value,
             });
         Ok((mechanical, heat))

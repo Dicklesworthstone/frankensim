@@ -231,8 +231,16 @@ fn accepted_two_half_steps_and_only_their_budgets_replay_exactly() {
     let load = RansHeatLoad {
         wall_heat_flux_w_m2: 0.25,
         volumetric_heating_w_m3: Some(&source),
+        ..RansHeatLoad::default()
     };
-    for heat in [None, Some(load)] {
+    for heat in [
+        None,
+        Some(load),
+        Some(RansHeatLoad {
+            coupling: crate::rans_solver::RansHeatCoupling::Dissipative,
+            ..load
+        }),
+    ] {
         let mut actual = initial.clone();
         let mut work = RansAdaptiveWorkspace::try_new(&grid, 9).unwrap();
         let addresses = allocations(&work);
@@ -354,13 +362,27 @@ fn accepted_two_half_steps_and_only_their_budgets_replay_exactly() {
             assert_eq!(heat.wall_heat_j_m2, h * load.wall_heat_flux_w_m2);
             assert_eq!(heat.volume_heat_j_m2, h * source[0] * grid.half_height_m);
             assert_eq!(
+                heat.molecular_heat_j_m2,
+                (h / 2.0)
+                    * (thermal[0].molecular_heat_input_w_m2 + thermal[1].molecular_heat_input_w_m2)
+            );
+            assert_eq!(
+                heat.turbulent_heat_j_m2,
+                (h / 2.0)
+                    * (thermal[0].turbulent_heat_input_w_m2 + thermal[1].turbulent_heat_input_w_m2)
+            );
+            assert_eq!(
                 heat.balance_defect_j_m2,
                 (h / 2.0)
                     * (thermal[0].thermal_balance_defect_w_m2
                         + thermal[1].thermal_balance_defect_w_m2)
             );
             close(
-                heat.energy_change_j_m2 - heat.wall_heat_j_m2 - heat.volume_heat_j_m2,
+                heat.energy_change_j_m2
+                    - heat.wall_heat_j_m2
+                    - heat.volume_heat_j_m2
+                    - heat.molecular_heat_j_m2
+                    - heat.turbulent_heat_j_m2,
                 heat.balance_defect_j_m2,
                 2e-14,
             );
@@ -592,6 +614,7 @@ fn every_observed_cancellation_poll_rolls_back_and_allows_identical_retry() {
     let heat = Some(RansHeatLoad {
         wall_heat_flux_w_m2: 0.125,
         volumetric_heating_w_m3: None,
+        ..RansHeatLoad::default()
     });
     let mut work = RansAdaptiveWorkspace::try_new(&grid, 5).unwrap();
     let addresses = allocations(&work);

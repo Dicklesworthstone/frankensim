@@ -1,6 +1,8 @@
 use super::*;
 use crate::rans_card::RansCardDraft;
 
+mod dissipative;
+
 fn solver() -> RansSolver {
     let card = RansCardDraft::launder_sharma_channel("thermal-transport-regression")
         .freeze()
@@ -175,6 +177,7 @@ fn implicit_heat_matches_dense_oracle_and_preserves_the_mechanical_endpoint() {
             RansHeatLoad {
                 wall_heat_flux_w_m2: 0.7,
                 volumetric_heating_w_m3: Some(&heating),
+                ..RansHeatLoad::default()
             },
             &mut work,
             || false,
@@ -225,6 +228,7 @@ fn wall_and_volume_heating_have_the_correct_inventory_and_storage_rates() {
                 RansHeatLoad {
                     wall_heat_flux_w_m2: 0.0,
                     volumetric_heating_w_m3: Some(&heating),
+                    ..RansHeatLoad::default()
                 },
                 &mut work,
                 || false,
@@ -258,6 +262,7 @@ fn wall_and_volume_heating_have_the_correct_inventory_and_storage_rates() {
                 RansHeatLoad {
                     wall_heat_flux_w_m2: 0.8,
                     volumetric_heating_w_m3: None,
+                    ..RansHeatLoad::default()
                 },
                 &mut work,
                 || false,
@@ -294,6 +299,7 @@ fn thermal_diffusion_uses_updated_turbulence_and_the_authored_prandtl_number() {
                 RansHeatLoad {
                     wall_heat_flux_w_m2: 0.0,
                     volumetric_heating_w_m3: None,
+                    ..RansHeatLoad::default()
                 },
                 &mut work,
                 || false,
@@ -344,6 +350,7 @@ fn no_source_heat_obeys_the_maximum_principle_and_preserves_uniform_temperature(
             RansHeatLoad {
                 wall_heat_flux_w_m2: 0.0,
                 volumetric_heating_w_m3: None,
+                ..RansHeatLoad::default()
             },
             &mut work,
             || false,
@@ -365,6 +372,7 @@ fn no_source_heat_obeys_the_maximum_principle_and_preserves_uniform_temperature(
             RansHeatLoad {
                 wall_heat_flux_w_m2: 0.0,
                 volumetric_heating_w_m3: None,
+                ..RansHeatLoad::default()
             },
             &mut work,
             || false,
@@ -393,6 +401,7 @@ fn signed_cooling_is_admitted_until_temperature_would_be_nonpositive() {
             RansHeatLoad {
                 wall_heat_flux_w_m2: 0.0,
                 volumetric_heating_w_m3: Some(&cooling),
+                ..RansHeatLoad::default()
             },
             &mut work,
             || false,
@@ -415,7 +424,8 @@ fn signed_cooling_is_admitted_until_temperature_would_be_nonpositive() {
             1.0,
             RansHeatLoad {
                 wall_heat_flux_w_m2: 0.0,
-                volumetric_heating_w_m3: Some(&severe_cooling)
+                volumetric_heating_w_m3: Some(&severe_cooling),
+                ..RansHeatLoad::default()
             },
             &mut work,
             || false,
@@ -454,7 +464,8 @@ fn thermal_admission_and_late_overflow_preserve_the_complete_accepted_state() {
                     0.3,
                     RansHeatLoad {
                         wall_heat_flux_w_m2: wall_flux,
-                        volumetric_heating_w_m3: Some(&sources)
+                        volumetric_heating_w_m3: Some(&sources),
+                        ..RansHeatLoad::default()
                     },
                     &mut work,
                     || false,
@@ -476,7 +487,8 @@ fn thermal_admission_and_late_overflow_preserve_the_complete_accepted_state() {
             2.0,
             RansHeatLoad {
                 wall_heat_flux_w_m2: f64::MAX,
-                volumetric_heating_w_m3: None
+                volumetric_heating_w_m3: None,
+                ..RansHeatLoad::default()
             },
             &mut work,
             || false,
@@ -495,6 +507,7 @@ fn thermal_admission_and_late_overflow_preserve_the_complete_accepted_state() {
             RansHeatLoad {
                 wall_heat_flux_w_m2: 0.7,
                 volumetric_heating_w_m3: None,
+                ..RansHeatLoad::default()
             },
             &mut fresh,
             || false,
@@ -509,6 +522,7 @@ fn thermal_admission_and_late_overflow_preserve_the_complete_accepted_state() {
             RansHeatLoad {
                 wall_heat_flux_w_m2: 0.7,
                 volumetric_heating_w_m3: None,
+                ..RansHeatLoad::default()
             },
             &mut work,
             || false,
@@ -548,6 +562,7 @@ fn every_cancellation_poll_rolls_back_heat_and_mechanics_then_replays() {
             RansHeatLoad {
                 wall_heat_flux_w_m2: 0.7,
                 volumetric_heating_w_m3: Some(&heating),
+                ..RansHeatLoad::default()
             },
             &mut work,
             || {
@@ -569,6 +584,7 @@ fn every_cancellation_poll_rolls_back_heat_and_mechanics_then_replays() {
                 RansHeatLoad {
                     wall_heat_flux_w_m2: 0.7,
                     volumetric_heating_w_m3: Some(&heating),
+                    ..RansHeatLoad::default()
                 },
                 &mut work,
                 || {
@@ -589,6 +605,7 @@ fn every_cancellation_poll_rolls_back_heat_and_mechanics_then_replays() {
                 RansHeatLoad {
                     wall_heat_flux_w_m2: 0.7,
                     volumetric_heating_w_m3: Some(&heating),
+                    ..RansHeatLoad::default()
                 },
                 &mut work,
                 || false,

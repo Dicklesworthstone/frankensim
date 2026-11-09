@@ -1589,8 +1589,9 @@ or an empirical turbulent-channel calibration.
 ## Conservative transient heat with transported channel turbulence
 
 `RansSolver::advance_launder_sharma_with_heat` advances the same momentum,
-k and modified-epsilon equations, then prepares passive sensible heat before
-jointly accepting all five fields. Its thermal diffusivity is
+k and modified-epsilon equations, then prepares sensible heat before jointly
+accepting all five fields. `RansHeatLoad::coupling` selects passive transport
+or physical dissipation-to-heat coupling, described below. Its thermal diffusivity is
 `k_thermal/(rho*cp) + nu_t/Pr_t`, using the newly prepared mechanical
 endpoint's eddy viscosity and the admitted turbulent Prandtl number.
 `RansHeatLoad` supplies a signed wall heat flux [W/m²], positive into the
@@ -1616,11 +1617,12 @@ accepted momentum, turbulence, eddy viscosity and temperature unchanged;
 the same workspace supports retry. Mechanical-only stepping retains its
 previous numerical path and publication semantics.
 
-Temperature does not change material properties or create buoyancy; modeled
-mechanical dissipation is not deposited as heat. This is a constant-property
-passive thermal channel, not a variable-density total-energy model. No axial
-heat removal is inferred: nonzero net input changes thermal inventory rather
-than defining a thermal steady state.
+Temperature does not change material properties or create buoyancy. Passive
+coupling leaves mechanical losses separate; dissipative coupling deposits the
+physical losses described below. This remains a constant-property thermal
+channel rather than a variable-density total-energy model. No axial heat
+removal is inferred: nonzero net input changes thermal inventory rather than
+defining a thermal steady state.
 
 Seven new native thermal regression groups compare the endpoint against an
 independent dense physical-unit solve; verify wall/volumetric heating and
@@ -1638,8 +1640,9 @@ empirical turbulent heat-transfer validation remain outside that evidence.
 `RansSolver::advance_launder_sharma_adaptive` advances the original implicit
 Launder-Sharma momentum, kinetic-energy and modified-dissipation steps over
 a bounded physical window, optionally including the original conservative
-passive-heat step. Pressure gradient and the optional wall/volumetric heat
-load are held constant throughout the window. The no-heat route preserves
+heat step with its explicitly selected physical coupling. Pressure gradient,
+heat-coupling choice and optional wall/volumetric heat load are held constant
+throughout the window. The no-heat route preserves
 temperature and does not impose thermal-material admission. This is the
 one-dimensional transported channel entry, separate from the legacy frozen
 relaxation screen.
@@ -1689,3 +1692,52 @@ error certificate, a spatial-resolution criterion, a general forcing-event
 resolver, or evidence of empirically validated turbulent heat transfer.
 The bounded channel geometry, original closure assumptions and thermal
 scope remain unchanged; full Cargo/workspace validation was not run.
+
+## Physical dissipative heating in transported RANS
+
+`RansHeatLoad::coupling` selects `RansHeatCoupling::Passive` (the default)
+or `Dissipative`. The latter deposits molecular mean-flow dissipation and
+the accepted k equation's physical destruction into sensible heat, through
+the original implicit thermal operator. Each molecular face loss is divided
+between its two thermal half cells, including the wall thermal inventory.
+Each turbulent source is the actual local implicit destruction
+`rho * ((epsilon_old + D_old) / k_old) * k_new`, with the same low-Re D term
+and dual-cell measure as the mechanical step. This retains the transported
+modified-dissipation definition rather than mistaking it for physical epsilon.
+
+Mean-flow eddy work already produces k and is never deposited a second time.
+Backward-Euler temporal loss remains numerical dissipation, and diffusive k
+flux through the prescribed wall remains an exported mechanical boundary
+loss. Neither is silently turned into fluid heat. The combined discrete
+mean/turbulent/sensible inventory therefore balances pressure work and
+imposed heating against those explicit residual mechanical losses, up to the
+reported numerical balance defects. Temperature still has no feedback into
+material properties or buoyancy.
+
+`RansThermalTransportReport` separates imposed wall/volume heat from
+`molecular_heat_input_w_m2` and `turbulent_heat_input_w_m2`. Its thermal defect
+subtracts all imposed and generated inputs. The adaptive owner integrates
+the two generated inputs separately as `molecular_heat_j_m2` and
+`turbulent_heat_j_m2`; only accepted fine half steps contribute. Generated
+heat varies with the actual evolving mechanics, even though the authored
+coupling and external loads are constant over a window.
+
+The mechanical production buffer is reused after the epsilon solve to retain
+local physical losses. No numerical arrays are added: a single step retains
+nine arrays, and an adaptive window retains 24. Both routes keep their atomic
+publication, cancellation, finite-temperature and bounded-work semantics.
+Default passive stepping retains its previous field behavior; explicit load
+literals can use `..RansHeatLoad::default()` to select that choice.
+
+Five new native groups compare spatially distributed heating against the
+independent dense physical-unit thermal solve; close an independently
+integrated combined energy balance on stretched grids in laminar and active
+turbulent cases; distinguish physical heating from eddy transfer, numerical
+loss and wall loss; exclude rejected adaptive trial heat; exercise every
+observed coupled cancellation point and reuse all nine buffers; and refuse
+unrepresentable generated heat before publishing mechanics. The existing
+exact two-half-step adaptive replay and 24-allocation test also runs with
+dissipative coupling. All 38 RANS module tests and 8 existing RANS integration
+tests passed in the focused pinned native build using the original card and
+BLAKE3 implementation. Full Cargo/workspace and empirical turbulent heat
+transfer validation were not run.

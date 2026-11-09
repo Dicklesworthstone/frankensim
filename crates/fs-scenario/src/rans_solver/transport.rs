@@ -8,15 +8,16 @@
 //! One first-order segregated step solves momentum, k and modified epsilon
 //! with implicit diffusion/destruction and lagged constitutive coefficients.
 //! Face eddy work from the accepted momentum trial supplies exactly the same
-//! integrated production to k. The optional thermal step transports passive
-//! sensible heat with the prepared endpoint eddy viscosity and accepts all
-//! fields together. Neither path supplies porous, buoyancy, transition or
+//! integrated production to k. The optional thermal step transports sensible
+//! heat with the prepared endpoint eddy viscosity and can deposit molecular
+//! and modeled turbulent dissipation. All fields are accepted together.
+//! Neither path supplies porous, buoyancy, transition or
 //! three-dimensional flow physics.
 
 use super::{RansChannelGrid, RansFieldState, RansSolver};
 
 mod thermal;
-pub use thermal::{RansHeatLoad, RansThermalTransportReport};
+pub use thermal::{RansHeatCoupling, RansHeatLoad, RansThermalTransportReport};
 mod adaptive;
 pub use adaptive::{
     RansAdaptiveControls, RansAdaptiveError, RansAdaptiveHeatBalance, RansAdaptiveReport,
@@ -220,6 +221,7 @@ impl RansSolver {
             state,
             pressure_gradient_pa_m,
             time_step_s,
+            false,
             work,
             &mut cancelled,
         )?;
@@ -228,7 +230,8 @@ impl RansSolver {
     }
 
     // Retain the original numerical path and cancellation order, but defer
-    // publication so a passive scalar can share the same acceptance boundary.
+    // publication so heat can share the same acceptance boundary. The optional
+    // local dissipation account reuses production after the epsilon solve.
     #[allow(clippy::too_many_arguments)]
     fn prepare_launder_sharma(
         &self,
@@ -236,6 +239,7 @@ impl RansSolver {
         state: &RansFieldState,
         pressure_gradient_pa_m: f64,
         time_step_s: f64,
+        retain_dissipation_heat: bool,
         work: &mut RansTransportWorkspace,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<RansTransportReport, RansTransportError> {
@@ -451,6 +455,9 @@ impl RansSolver {
         };
         let mut mean_energy_rate = 0.0;
         let mut turbulent_energy_rate = 0.0;
+        if retain_dissipation_heat {
+            work.production[0] = 0.0;
+        }
         for i in 1..n {
             checkpoint(i, &mut cancelled)?;
             if work.kinetic[i] < 0.0
@@ -472,7 +479,7 @@ impl RansSolver {
             report.temporal_dissipation += 0.5 * v * du * (du / dt);
             mean_energy_rate += 0.5 * v * (work.velocity[i] + state.u[i]) * (du / dt);
             turbulent_energy_rate += v * ((work.kinetic[i] - state.k[i]) / dt);
-            if !laminar {
+            let destruction = if !laminar {
                 let (d, _) = low_re_terms(
                     grid,
                     &state.k,
@@ -481,8 +488,15 @@ impl RansSolver {
                     &work.viscosity,
                     i,
                 );
-                report.turbulent_destruction +=
-                    v * ((state.eps[i] + d) / state.k[i]) * work.kinetic[i];
+                v * ((state.eps[i] + d) / state.k[i]) * work.kinetic[i]
+            } else {
+                0.0
+            };
+            report.turbulent_destruction += destruction;
+            if retain_dissipation_heat {
+                // Exact Patankar loss used by the accepted k equation, per
+                // unit density and integrated over this mechanical dual cell.
+                work.production[i] = destruction;
             }
         }
         report.turbulent_wall_loss = (self.nu_laminar
@@ -518,6 +532,26 @@ impl RansSolver {
                 equation: "energy budget",
                 node: n - 1,
             });
+        }
+        if retain_dissipation_heat {
+            // Molecular face loss is distributed to the two thermal half
+            // cells, including the thermal wall inventory. Eddy work already
+            // went to k; neither it, temporal loss nor k flux into the wall is
+            // deposited a second time. No additional numerical buffer is used.
+            for i in 1..n {
+                checkpoint(i, &mut cancelled)?;
+                let dy = grid.y_nodes[i] - grid.y_nodes[i - 1];
+                let du = work.velocity[i] - work.velocity[i - 1];
+                let half = 0.5 * (self.nu_laminar * (du * (du / dy)));
+                work.production[i - 1] += half;
+                work.production[i] += half;
+                if !work.production[i - 1].is_finite() || !work.production[i].is_finite() {
+                    return Err(RansTransportError::Arithmetic {
+                        equation: "local dissipation heat",
+                        node: i,
+                    });
+                }
+            }
         }
         // Finish every fallible operation before publishing the joint endpoint.
         for i in 0..n {

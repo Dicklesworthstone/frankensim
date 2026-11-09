@@ -1,13 +1,26 @@
-//! Conservative transient passive heat coupled to transported turbulence.
+//! Conservative sensible heat coupled to transported turbulence.
 //!
-//! rho cp T_t = d_y[(kappa + rho cp nu_t/Pr_t) T_y] + q_volume.
+//! rho cp T_t = d_y[(kappa + rho cp nu_t/Pr_t) T_y] + q_volume + q_diss.
 //! The prepared mechanical endpoint supplies nu_t, a prescribed flux enters
-//! the wall half-cell, and the centerline exterior heat flux is zero.
+//! the wall half-cell, and the centerline exterior heat flux is zero. Optional
+//! q_diss uses the actual molecular and modeled turbulent mechanical losses.
 
 use super::{
     RansChannelGrid, RansFieldState, RansSolver, RansTransportError, RansTransportReport,
     RansTransportWorkspace, checkpoint, volume,
 };
+
+/// Whether physical mechanical dissipation becomes sensible heat.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RansHeatCoupling {
+    /// Transport heat without depositing mechanical losses.
+    #[default]
+    Passive,
+    /// Deposit molecular mean-flow dissipation and the accepted k equation's
+    /// modified-epsilon plus low-Re destruction. Eddy production is an internal
+    /// mean-to-k transfer; numerical dissipation and wall k flux stay separate.
+    Dissipative,
+}
 
 /// Heat inputs held constant over one common physical interval.
 #[derive(Clone, Copy, Debug, Default)]
@@ -18,6 +31,8 @@ pub struct RansHeatLoad<'a> {
     /// The dual-cell integral is the trapezoidal integral on the authored grid.
     /// Signed values permit cooling; a nonpositive temperature endpoint refuses.
     pub volumetric_heating_w_m3: Option<&'a [f64]>,
+    /// Explicit physical dissipation-to-heat choice; passive by default.
+    pub coupling: RansHeatCoupling,
 }
 
 /// Mechanical and sensible-heat budgets for one jointly accepted interval.
@@ -38,13 +53,17 @@ pub struct RansThermalTransportReport {
     pub wall_heat_flux_w_m2: f64,
     /// Integral of the prescribed volumetric heating across the half-channel [W/m²].
     pub volumetric_heat_input_w_m2: f64,
-    /// Accepted local-increment rate minus wall and volume heat input [W/m²].
+    /// Deposited molecular mean-flow loss [W/m²]; zero in passive mode.
+    pub molecular_heat_input_w_m2: f64,
+    /// Deposited modeled turbulent destruction [W/m²]; zero in passive mode.
+    pub turbulent_heat_input_w_m2: f64,
+    /// Accepted local-increment rate minus all imposed/generated heat [W/m²].
     /// This measures numerical balance, including endpoint rounding.
     pub thermal_balance_defect_w_m2: f64,
 }
 
 impl RansSolver {
-    /// Advance momentum, turbulence and passive temperature atomically.
+    /// Advance momentum, turbulence and sensible temperature atomically.
     ///
     /// Thermal diffusivity is kappa/(rho cp) + nu_t/Pr_t, with nu_t from
     /// the prepared mechanical endpoint. Shared face conductances act on the
@@ -54,10 +73,15 @@ impl RansSolver {
     /// unforced temperature exactly. The original nine workspace arrays are
     /// reused; stepping allocates no numerical storage.
     ///
-    /// Heat is passive: it does not change material properties or produce
-    /// buoyancy. Mechanical dissipation is not deposited as heat. No axial
-    /// heat removal is supplied, so nonzero net heating continues to change
-    /// the thermal inventory and does not define a thermal steady state.
+    /// `Dissipative` coupling deposits rho times the molecular face loss and
+    /// the actual implicit k destruction (modified epsilon plus its low-Re D
+    /// term). Eddy mean-flow loss already produces k and is not counted again.
+    /// Backward-Euler numerical dissipation and diffusive k loss into the wall
+    /// remain separate mechanical losses, never generated sensible heat.
+    ///
+    /// Temperature does not change material properties or produce buoyancy.
+    /// No axial heat removal is supplied, so nonzero net heating changes the
+    /// thermal inventory and does not define a thermal steady state.
     ///
     /// # Errors
     /// Mechanical admission/errors pass through. Thermal material parameters
@@ -122,6 +146,7 @@ impl RansSolver {
             state,
             pressure_gradient_pa_m,
             time_step_s,
+            heat.coupling == RansHeatCoupling::Dissipative,
             work,
             &mut cancelled,
         )?;
@@ -134,7 +159,12 @@ impl RansSolver {
             let v = thermal_volume(grid, i);
             let source = heat.volumetric_heating_w_m3.map_or(0.0, |values| values[i]);
             let storage = v / dt;
-            let input = v * (source / capacity);
+            let mut input = v * (source / capacity);
+            if heat.coupling == RansHeatCoupling::Dissipative {
+                // production now retains the integrated physical mechanical
+                // loss per unit density, not the earlier mean-to-k transfer.
+                input += work.production[i] / self.cp;
+            }
             if !storage.is_finite() || storage <= 0.0 || !input.is_finite() {
                 return Err(RansTransportError::Arithmetic {
                     equation: "thermal storage/source",
@@ -206,13 +236,25 @@ impl RansSolver {
             change.add(cell_capacity * (next - old));
             work.rhs[i] = next;
         }
-        let net_input = heat.wall_heat_flux_w_m2 + volumetric_input.value;
+        let (molecular_heat, turbulent_heat) = match heat.coupling {
+            RansHeatCoupling::Passive => (0.0, 0.0),
+            RansHeatCoupling::Dissipative => (
+                self.rho * mechanical.molecular_dissipation,
+                self.rho * mechanical.turbulent_destruction,
+            ),
+        };
+        let mut net_input = heat.wall_heat_flux_w_m2 + volumetric_input.value;
+        if heat.coupling == RansHeatCoupling::Dissipative {
+            net_input += molecular_heat + turbulent_heat;
+        }
         let defect = change.value / dt - net_input;
         if [
             before.value,
             after.value,
             change.value,
             volumetric_input.value,
+            molecular_heat,
+            turbulent_heat,
             net_input,
             defect,
         ]
@@ -231,6 +273,8 @@ impl RansSolver {
             thermal_energy_change_j_m2: change.value,
             wall_heat_flux_w_m2: heat.wall_heat_flux_w_m2,
             volumetric_heat_input_w_m2: volumetric_input.value,
+            molecular_heat_input_w_m2: molecular_heat,
+            turbulent_heat_input_w_m2: turbulent_heat,
             thermal_balance_defect_w_m2: defect,
         };
         checkpoint(0, &mut cancelled)?;
