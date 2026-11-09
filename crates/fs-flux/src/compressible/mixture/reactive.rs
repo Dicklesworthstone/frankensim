@@ -128,6 +128,7 @@ impl ReactingEuler2d {
                 flow.grid(),
             )?)
             .and_then(|bytes| bytes.checked_add(flow.reservoirs.workspace_bytes()))
+            .and_then(|bytes| bytes.checked_sub(size_of::<super::finite::FiniteReservoirs<2, 4>>()))
             .and_then(|bytes| bytes.checked_add(chemistry.workspace_bytes()))
             .and_then(|bytes| {
                 bytes.checked_add(
@@ -202,8 +203,9 @@ impl ReactingEuler2d {
             MixtureEuler2d::required_workspace_bytes(flow.gas(), flow.grid())?,
             &mut cancelled,
         )?;
-        trial.reservoirs = flow.reservoirs.try_clone(&mut cancelled)?;
-        trial.workspace_bytes += trial.reservoirs.workspace_bytes();
+        trial.reservoirs = flow.reservoirs.try_clone(flow.gas(), &mut cancelled)?;
+        trial.workspace_bytes += trial.reservoirs.workspace_bytes()
+            - size_of::<super::finite::FiniteReservoirs<2, 4>>();
         trial.time = flow.time;
         trial.last_step = flow.last_step;
         copy_values(
@@ -843,6 +845,7 @@ fn copy_physical(
         &mut target.boundary_impulses,
         cancelled,
     )?;
+    target.reservoirs.copy_finite_from(&source.gas, &source.reservoirs, cancelled)?;
     target.time = source.time;
     target.last_step = source.last_step;
     Ok(())

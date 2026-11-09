@@ -12,8 +12,12 @@
 pub mod molecular;
 /// Source-owned finite-rate chemistry on the same conservative Cartesian field.
 pub mod reactive;
+pub(in crate::compressible) mod finite;
 mod reservoir;
-pub use reservoir::ReservoirBoundary;
+pub use finite::{FiniteReservoirInventory, FiniteReservoirTransfer};
+pub use reservoir::{FiniteReservoir, ReservoirBoundary};
+/// Accepted finite-tank exchange in two Cartesian dimensions.
+pub type FiniteReservoirReport = finite::FiniteReservoirReport<2>;
 /// Conservative acceleration and body-force work on the original mixture owner.
 pub mod forcing;
 pub use super::{BodyForce2d, ForceChange2d, ForceControl2d};
@@ -224,6 +228,7 @@ impl MixtureEuler2d {
         gas: &MixtureGas,
         grid: &CartesianGrid,
     ) -> Result<usize, Error> {
+        let finite_bytes = finite::FiniteReservoirs::<2, 4>::required_bytes(gas, 0)?;
         let checked = || -> Option<usize> {
             let [nx, ny] = grid.shape;
             let width = gas.species_count().checked_add(3)?;
@@ -241,7 +246,8 @@ impl MixtureEuler2d {
             scalars
                 .checked_mul(size_of::<f64>())?
                 .checked_add(grid.len().checked_mul(size_of::<Primitive>())?)?
-                .checked_add(faces.checked_mul(size_of::<FaceFlux>())?)
+                .checked_add(faces.checked_mul(size_of::<FaceFlux>())?)?
+                .checked_add(finite_bytes)
         };
         checked().ok_or(Error::Invalid("Cartesian species workspace size overflow"))
     }
@@ -364,9 +370,11 @@ impl MixtureEuler2d {
     /// specify the upstream stagnation state. The original one-sided gas law
     /// resolves inflow, outflow, choking and reversal; outward entropy and shear
     /// remain interior-owned. Unselected reservoirs retain their full-state
-    /// Riemann boundary. An empty selection restores that original behavior.
+    /// Riemann boundary. An empty selection restores that original behavior
+    /// for held reservoirs; bound finite tanks always retain their compact law.
     ///
-    /// This is fixed infinite storage, not a finite tank or a molecular bath.
+    /// Held reservoirs retain infinite storage. Existing finite tank bindings
+    /// retain their compact law even when omitted from this selection.
     /// Spatial/time-dependent exterior profiles are not selected by this entry.
     /// Selection reuses fixed metadata and allocates no stepping workspace.
     pub fn with_stagnation_reservoirs(
@@ -609,7 +617,7 @@ impl MixtureEuler2d {
                         &self.gas,
                         &self.grid,
                         self.boundaries,
-                        &self.reservoirs,
+                        &mut self.reservoirs,
                         &workspace.kicked,
                         &mut self.work,
                         dt,
@@ -638,7 +646,7 @@ impl MixtureEuler2d {
                         &self.gas,
                         &self.grid,
                         self.boundaries,
-                        &self.reservoirs,
+                        &mut self.reservoirs,
                         &self.states,
                         &mut self.work,
                         dt,
@@ -698,6 +706,7 @@ impl MixtureEuler2d {
             absolute_energy_residual_j,
         };
         cartesian::poll::<Error>(&mut cancelled)?;
+        self.reservoirs.finite.publish();
         std::mem::swap(&mut self.states, &mut self.work.candidate);
         self.boundary_impulses
             .copy_from_slice(&self.work.boundary_trial);
@@ -712,7 +721,7 @@ fn attempt(
     gas: &MixtureGas,
     grid: &CartesianGrid,
     boundaries: Boundaries2d,
-    reservoirs: &reservoir::Reservoirs,
+    reservoirs: &mut reservoir::Reservoirs,
     original: &[f64],
     work: &mut Workspace,
     dt: f64,
@@ -742,7 +751,7 @@ fn attempt_with_contact(
     gas: &MixtureGas,
     grid: &CartesianGrid,
     boundaries: Boundaries2d,
-    reservoirs: &reservoir::Reservoirs,
+    reservoirs: &mut reservoir::Reservoirs,
     original: &[f64],
     work: &mut Workspace,
     dt: f64,
@@ -758,6 +767,7 @@ fn attempt_with_contact(
             grid,
             boundaries,
             reservoirs,
+            final_stage,
             if final_stage { &work.stage } else { original },
             &mut work.primitive,
             &mut work.slopes,
@@ -827,6 +837,13 @@ fn attempt_with_contact(
             },
             cancelled,
         )?;
+        reservoirs.finite.stage(
+            gas,
+            &work.boundary_trial,
+            super::SIDES.map(|side| grid.face_count(side)),
+            if final_stage { 1.0 } else { 2.0 },
+            cancelled,
+        )?;
         Ok(stats)
     })
 }
@@ -853,6 +870,7 @@ fn spatial(
         grid,
         boundaries,
         reservoirs,
+        false,
         states,
         primitive,
         slopes,
@@ -873,6 +891,7 @@ fn spatial_with_contact(
     grid: &CartesianGrid,
     boundaries: Boundaries2d,
     reservoirs: &reservoir::Reservoirs,
+    trial_finite: bool,
     states: &[f64],
     primitive: &mut [Primitive],
     slopes: &mut [f64],
@@ -966,6 +985,8 @@ fn spatial_with_contact(
     let mut left = [0.0; WIDTH_LIMIT];
     let mut right = [0.0; WIDTH_LIMIT];
     let mut result = [0.0; WIDTH_LIMIT];
+    let mut tank_waves = [0.0; 4];
+    let mut tank_wave_corrections = [0.0; 4];
     cartesian::faces::<Error, _>(grid, boundaries, cancelled, |face, cancelled| {
         let axis = face.axis;
         let (fluxes, metadata) = if axis == 0 {
@@ -1006,7 +1027,7 @@ fn spatial_with_contact(
                 sign,
                 condition,
             } => {
-                if let Some(reservoir) = reservoirs.stagnation_cell(axis, sign, n) {
+                if let Some(reservoir) = reservoirs.stagnation_cell_at(axis, sign, n, trial_finite) {
                     if first_order {
                         gas.reservoir_normal_flux(
                             q(k),
@@ -1130,6 +1151,16 @@ fn spatial_with_contact(
             }
             cartesian::FaceKind::PeriodicCopy { .. } => unreachable!(),
         };
+        if let cartesian::FaceKind::Boundary { sign, .. } = face.kind {
+            let slot = 2 * axis + usize::from(sign > 0.0);
+            if reservoirs.finite.has_side(slot) {
+                let wave = grid.face_area(super::SIDES[slot]) * receipt.signal_speed;
+                let y = wave - tank_wave_corrections[slot];
+                let next = tank_waves[slot] + y;
+                tank_wave_corrections[slot] = (next - tank_waves[slot]) - y;
+                tank_waves[slot] = next;
+            }
+        }
         if let Some((workspace, _)) = contact.as_mut() {
             match face.kind {
                 cartesian::FaceKind::Interior { left: l, right: r } => {
@@ -1174,6 +1205,15 @@ fn spatial_with_contact(
         },
         cancelled,
     )?;
+    for (slot, wave) in tank_waves.into_iter().enumerate() {
+        if let Some(volume) = reservoirs.finite.volume(slot) {
+            let rate = 0.5 * wave / volume;
+            if !rate.is_finite() {
+                return Err(Error::Invalid("unrepresentable finite mixture aperture-wave rate"));
+            }
+            stats.rate = stats.rate.max(rate);
+        }
+    }
     if force_control.is_some() {
         stats.rate = stats.rate.max(cell_rate);
     }

@@ -1,5 +1,8 @@
 //! Immutable source-admitted boundary gas shared by advection and molecules.
 use super::*;
+use super::finite::FiniteReservoirs;
+mod finite;
+pub use finite::FiniteReservoir;
 use crate::compressible::molecular::MolecularWall2d;
 use crate::compressible::{AxisBoundaries, SIDES};
 use fs_gas::multicomponent::dissipation::DissipationError;
@@ -33,6 +36,7 @@ pub(super) struct Reservoirs {
     reservoir_energy: [f64; 4],
     states: Vec<f64>,
     primitive: Vec<Primitive>,
+    pub(super) finite: FiniteReservoirs<2, 4>,
 }
 impl Reservoirs {
     pub(super) fn required_bytes(gas: &MixtureGas, count: usize) -> Result<usize, Error> {
@@ -61,6 +65,7 @@ impl Reservoirs {
             reservoir_energy: [0.0; 4],
             states: allocated(inputs.len() * width, 0.0)?,
             primitive: allocated(inputs.len(), Primitive::default())?,
+            finite: FiniteReservoirs::empty(),
         };
         let mut conservative = [0.0; WIDTH_LIMIT];
         for (index, input) in inputs.iter().enumerate() {
@@ -113,7 +118,8 @@ impl Reservoirs {
             return Err(Error::Invalid("too many compact reservoir sides"));
         }
         let n = gas.species_count();
-        let mut candidate = [false; 4];
+        let mut candidate = std::array::from_fn(|slot| self.finite.has_side(slot));
+        let mut seen = [false; 4];
         let mut flux = [0.0; WIDTH_LIMIT];
         for &side in sides {
             cartesian::poll::<Error>(cancelled)?;
@@ -123,7 +129,7 @@ impl Reservoirs {
             let index = self.slots[slot].ok_or(Error::Invalid(
                 "compact reservoir needs an already bound uniform exterior",
             ))?;
-            if candidate[slot] || self.primitive[index].velocity != [0.0; 2] {
+            if seen[slot] || self.primitive[index].velocity != [0.0; 2] {
                 return Err(Error::Invalid(
                     "compact reservoir sides must be unique and exactly stationary",
                 ));
@@ -142,6 +148,7 @@ impl Reservoirs {
                 &mut *cancelled,
             )?;
             candidate[slot] = true;
+            seen[slot] = true;
         }
         cartesian::poll::<Error>(cancelled)?;
         self.stagnation = candidate;
@@ -162,7 +169,20 @@ impl Reservoirs {
         sign: f64,
         species: usize,
     ) -> Option<fs_gas::multicomponent::Cell<'_>> {
+        self.stagnation_cell_at(axis, sign, species, false)
+    }
+
+    pub(super) fn stagnation_cell_at(
+        &self,
+        axis: usize,
+        sign: f64,
+        species: usize,
+        trial: bool,
+    ) -> Option<fs_gas::multicomponent::Cell<'_>> {
         let slot = side_index(axis, sign);
+        if let Some(state) = self.finite.state(slot, trial) {
+            return Some(state);
+        }
         if !self.stagnation[slot] {
             return None;
         }
@@ -194,6 +214,7 @@ impl Reservoirs {
                 continue;
             };
             let position = if sign < 0.0 { 0 } else { grid.shape[axis] - 1 };
+            let (mut wave_sum, mut wave_correction) = (0.0, 0.0);
             for face in 0..grid.face_count(side) {
                 let k = if axis == 0 {
                     face * grid.shape[0] + position
@@ -209,6 +230,11 @@ impl Reservoirs {
                     &mut flux[..width],
                     &mut *cancelled,
                 )?;
+                let wave = grid.face_area(side) * face.signal_speed;
+                let y = wave - wave_correction;
+                let next = wave_sum + y;
+                wave_correction = (next - wave_sum) - y;
+                wave_sum = next;
                 let density = sum(q.partial_densities.iter().copied());
                 let local = (0..2)
                     .map(|d| {
@@ -223,6 +249,13 @@ impl Reservoirs {
                     .sum::<f64>();
                 maximum = maximum.max(local);
             }
+            if let Some(volume) = self.finite.volume(side_index(axis, sign)) {
+                let rate = 0.5 * wave_sum / volume;
+                if !rate.is_finite() {
+                    return Err(Error::Invalid("unrepresentable finite mixture aperture-wave rate"));
+                }
+                maximum = maximum.max(rate);
+            }
         }
         Ok(maximum)
     }
@@ -230,9 +263,10 @@ impl Reservoirs {
     pub(super) fn workspace_bytes(&self) -> usize {
         self.states.capacity() * size_of::<f64>()
             + self.primitive.capacity() * size_of::<Primitive>()
+            + self.finite.workspace_bytes()
     }
 
-    pub(super) fn try_clone(&self, cancelled: &mut impl FnMut() -> bool) -> Result<Self, Error> {
+    pub(super) fn try_clone(&self, gas: &MixtureGas, cancelled: &mut impl FnMut() -> bool) -> Result<Self, Error> {
         let mut states = allocated(self.states.len(), 0.0)?;
         copy_values(&self.states, &mut states, cancelled)?;
         let mut primitive = allocated(self.primitive.len(), Primitive::default())?;
@@ -244,6 +278,7 @@ impl Reservoirs {
             reservoir_energy: self.reservoir_energy,
             states,
             primitive,
+            finite: self.finite.try_clone(gas, cancelled)?,
         })
     }
 
@@ -252,6 +287,15 @@ impl Reservoirs {
         side: BoundarySide,
         species: usize,
     ) -> Option<ReservoirBoundary<'_>> {
+        let slot = side_index(side.axis(), side.sign());
+        if let Some(state) = self.finite.state(slot, false) {
+            return Some(ReservoirBoundary {
+                side,
+                partial_densities: state.partial_densities,
+                velocity: [0.0; 2],
+                pressure_pa: self.finite.primitive(slot, false).expect("accepted finite primitive").pressure,
+            });
+        }
         self.row(side.axis(), side.sign(), species)
             .map(|row| ReservoirBoundary {
                 side,
@@ -273,18 +317,31 @@ impl Reservoirs {
         sign: f64,
         species: usize,
     ) -> Option<NormalPrimitive<'_>> {
+        let slot = side_index(axis, sign);
+        if let Some(state) = self.finite.state(slot, false) {
+            return Some(NormalPrimitive {
+                partial_densities: state.partial_densities,
+                normal_velocity: 0.0,
+                transverse_velocity: 0.0,
+                pressure: self.finite.primitive(slot, false).expect("accepted finite primitive").pressure,
+            });
+        }
         self.row(axis, sign, species)
             .map(|row| normal_primitive(row, species, axis))
     }
 
     pub(super) fn maximum_rate(&self, grid: &CartesianGrid) -> f64 {
-        self.primitive
-            .iter()
-            .map(|p| {
-                (p.velocity[0].abs() + p.sound_speed) / grid.spacing[0]
-                    + (p.velocity[1].abs() + p.sound_speed) / grid.spacing[1]
+        self.slots.iter().enumerate().filter_map(|(slot, index)| {
+            index.map(|index| {
+                if let Some(p) = self.finite.primitive(slot, false) {
+                    p.sound_speed / grid.spacing[0] + p.sound_speed / grid.spacing[1]
+                } else {
+                    let p = self.primitive[index];
+                    (p.velocity[0].abs() + p.sound_speed) / grid.spacing[0]
+                        + (p.velocity[1].abs() + p.sound_speed) / grid.spacing[1]
+                }
             })
-            .fold(0.0, f64::max)
+        }).fold(0.0, f64::max)
     }
 
     /// An Euler continuation or imposed pressure alone defines no molecular bath.

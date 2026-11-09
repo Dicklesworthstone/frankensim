@@ -10614,6 +10614,47 @@ type-checked; no material test execution or full workspace validation is
 claimed. The separate numerical lane has 134 passing miscibility tests and
 seven passing original-source caloric transport cases.
 
+## Evolving-species finite tanks on planar Cartesian gas boundaries
+
+`MixtureEuler2d::with_finite_reservoirs` couples selected already-bound uniform,
+exactly stationary reservoir sides to independent finite, rigid, well-mixed
+species inventories. The explicit total workspace budget includes both prepared
+inventory buffers and interval reports. Initial canonical partial densities,
+pressure and per-species energy references remain owned by the original source.
+The shared Cartesian `mixture::finite` storage calls the original
+`MixtureGas` plenum's `exchange_candidate_into`; it introduces no duplicate
+caloric model or dimension-specific inventory update.
+
+The full forward tank stage drives the second native SSP RK2 residual. The
+accepted tank receives the same outward canonical species and total-energy
+face impulses, with native RK weights, as the field boundary account. Complete
+incoming kinetic energy thermalizes. Flow pressure work is already present in
+the total-energy flux and is not added a second time. The entire Cartesian
+momentum flux is reported to the stationary support, which performs no work.
+Reports retain before/after pressure, temperature, volume, species inventories,
+referenced energy, per-species residuals and original-gauge energy residuals.
+Accepted exterior getters return the evolving tank composition and pressure.
+
+Initial and both residual CFL bounds include each tank's summed aperture-wave
+rate `0.5 * sum(face_area * signal_speed) / volume`; large field cells cannot
+hide small finite storage. Side transfer and wave sums are compensated. Warm
+stages, retries, inventory restoration and publication allocate no storage.
+Cells, tanks, time, boundary impulses and reports publish together after the
+last cancellation poll. Failed trial inventories remain private. Prepared
+reactive/split clones retain and restore accepted tanks on every retry; tank
+chemistry itself is not inferred. Finite sides retain the compact law when a
+later held-reservoir selection omits them. The explicit molecular-bath path
+continues to refuse a compact tank without physical face transport data.
+
+Focused regressions cover variable-Cp filling and blowdown with different
+species mixtures on all four sides and both reconstruction orders, exact-zero
+species retention, full shear/support transfer, global species and energy
+balance, RK2 pressure-feedback refinement, tiny-tank initial CFL, final-poll
+rollback followed by deterministic retry, capacity admission and prepared
+clone/restoration. This remains an estimated compact-reservoir engineering
+model: no internal tank waves, finite mixing time, heat exchange or discrete
+entropy theorem is claimed. Broad gas-control-volume/network beads remain open.
+
 ## Conservative thermal stirring of multicomponent liquids
 
 The local-temperature multicomponent field now supports prescribed-volume
