@@ -909,12 +909,42 @@ transcendentals and does not differentiate preparation iterations. Inputs and
 scaled results must remain finite, with no mutation or partial gradient on
 refusal. A reverse trajectory carries both state cotangents and adds both
 adjacent contributions at every shared force sample. These are derivatives of
-the caller's scalar objective, not physical state values. Parameter/time
-sensitivities and derivatives of nonsmooth peak selection are outside scope.
+the caller's scalar objective, not physical state values. This fixed-coefficient
+pullback does not supply parameter/time or nonsmooth peak-selection derivatives.
 G3 checks the transpose identity across free/under/critical/overdamped regimes
 and tiny/finite steps, then compares all initial-state and shared-force
 trajectory derivatives with independent finite differences. G0 covers invalid
 seeds, overflow refusal, zero cotangents and deterministic retry.
+
+`LinearForceTransition::prepare_sensitivities` additionally prepares analytic
+physical-coefficient sensitivities for transient damping calibration and inverse
+design. `PreparedLinearForceSensitivity` reuses the original forward step and
+returns derivatives with respect to independent mass-normalized stiffness
+`k = omega^2` [1/s^2] and viscous rate `c` [1/s]. The small-interval entire flow
+moments and their exact doubling identities are differentiated during scalar
+preparation; no finite-difference trajectories, pole separation, fitted decay
+law or special critical-damping band is introduced. Independent homogeneous
+retentions preserve late free and held-force damping-sensitivity tails; the
+force-imbalance form keeps exactly balanced static states independent of damping.
+Runtime `advance` and `pullback` allocate nothing and evaluate no transcendental
+functions. The latter combines both coefficient cotangents with the original
+state and force-sample transpose.
+
+These are partials at fixed duration, source coordinates, initial state and
+forcing. A reverse trajectory accumulates coefficient contributions from every
+step and both contributions at shared force samples. At fixed `c`, frequency
+sensitivity is `2*omega*dJ/dk`; at fixed ratio with `c = 2*zeta*omega`, it is
+`2*omega*dJ/dk + 2*zeta*dJ/dc`, and the ratio sensitivity is
+`2*omega*dJ/dc`. Zero stiffness and zero damping have their one-sided physical
+limits without a numerical floor. Material, mass-normalization, basis, time,
+heat/work and nonsmooth-observation derivatives remain outside this helper.
+Unrepresentable sensitivities refuse without mutating prepared or physical state.
+G1 regressions compare an independent high-precision augmented variational
+matrix exponential through free, critical, near-critical, high-Q and stiff-drag
+regimes, late critical tails and exact static balance. G3 checks subdivision of
+one continuous ramp, complete transient reverse sweeps and the ratio chain rule;
+G0 checks refusal and deterministic replay in
+`tests/linear_forcing_sensitivity.rs`.
 
 `held_force_for_port_velocity` solves the exact-ZOH scalar endpoint constraint
 using free modal motion plus unit-port-force mobility, with conjugate force

@@ -9,6 +9,12 @@
 use super::{DampedTransition, ModalAcousticState, ModalAcousticTimeError};
 use super::heat::LinearViscousIntegral;
 
+mod sensitivity;
+pub use sensitivity::{
+    LinearForceParameterPullback, LinearForceParameterSensitivity, LinearForceSensitivityFrame,
+    PreparedLinearForceSensitivity,
+};
+
 /// Cached transition for `q'' + c*q' + omega^2*q = F(t)` with
 /// `F(t) = F_start + (F_end-F_start)*t/duration`.
 /// Supply `c = 2*zeta*omega` through [`Self::try_new`], or specify the physical

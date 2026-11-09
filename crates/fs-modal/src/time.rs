@@ -43,7 +43,11 @@ pub use update::{ModalBasisChange, ModalRuntimeTransfer, ModalRuntimeTransferErr
 
 /// Prepared exact transitions under linearly interpolated force samples.
 pub mod forcing;
-pub use forcing::{LinearForceFrame, LinearForcePullback, LinearForceTransition};
+pub use forcing::{
+    LinearForceFrame, LinearForceParameterPullback, LinearForceParameterSensitivity,
+    LinearForcePullback, LinearForceSensitivityFrame, LinearForceTransition,
+    PreparedLinearForceSensitivity,
+};
 
 /// Prepared exact motion under a continuous sinusoidal generalized force.
 pub mod harmonic;

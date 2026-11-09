@@ -19,6 +19,7 @@ use crate::{DynamicsError, MassProperties, RigidBodyState, RigidKineticEnergyCha
 use fs_math::dd::Dd;
 
 /// Finite motion with shared-body networks of the same passive spatial laws.
+#[path = "viscous/network.rs"]
 pub mod network;
 
 /// One passive spatial law attached to the original material frames.

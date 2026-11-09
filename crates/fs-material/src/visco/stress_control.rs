@@ -407,8 +407,11 @@ impl StressControlledMaxwell {
         let correction = stress_residual / self.e0;
         if correction != 0.0 {
             strain += correction;
-            for q in &mut q {
-                *q += correction;
+            // Absent arms do not participate in stress reconstruction. Keep
+            // their independently integrated histories, including exact decay
+            // to zero, instead of injecting this numerical closure into them.
+            for &original in &self.active {
+                q[original] += correction;
             }
             strain_bounds[0] = strain_bounds[0].min(strain);
             strain_bounds[1] = strain_bounds[1].max(strain);
