@@ -25,7 +25,8 @@ pub use radiation::{
 pub use adaptive::{
     TensorCaloricAdaptiveConfig, TensorCaloricAdaptiveError, TensorCaloricAdaptiveReport,
     TensorCaloricAdaptiveSolution, TensorCaloricForcing, TensorCaloricForcingSample,
-    advance_caloric_tensor_conduction_adaptive,
+    advance_caloric_tensor_conduction_adaptive, TensorCaloricRadiatingAdaptiveSolution,
+    advance_caloric_tensor_conduction_radiating_adaptive,
 };
 use storage::{CaloricStage, PreparedCaloric};
 

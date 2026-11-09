@@ -569,3 +569,6 @@ fn exhausted_radiation_and_native_work_or_cancellation_return_no_interval() {
     assert_eq!(previous, [200.0, 0.0]);
     assert_eq!(setup, saved);
 }
+
+#[path = "tensor_caloric_radiation/adaptive.rs"]
+mod adaptive;

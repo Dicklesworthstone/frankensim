@@ -8,11 +8,13 @@ use fs_conduction::enthalpy::conduction::implicit::adaptive::ConductionTimeOrder
 use fs_exec::CancelGate;
 use std::borrow::Cow;
 
-use super::super::super::sdirk::stage_clock;
+use super::super::super::sdirk::{TENSOR_SDIRK2_GAMMA, stage_clock};
 use super::super::{TensorConductivityLaw, TensorNonlinearConfig};
+use super::radiation::{TensorCaloricRadiationReport, advance_radiating_sdirk2_prepared};
 use super::{
     TensorCaloricEndpoint, TensorCaloricStorage, advance_caloric_tensor_conduction_sdirk2,
 };
+use crate::conjugate::radiation::{RadiationConfig, Radiators};
 use crate::conjugate::transient::TransientRecord;
 use crate::conjugate::{ChtError, SolidMaterial, ThermalSetup, VoxelDomain, finite, poll};
 
@@ -128,6 +130,26 @@ pub struct TensorCaloricAdaptiveSolution {
     pub report: TensorCaloricAdaptiveReport,
 }
 
+/// Accepted adaptive radiation on the same original-caloric thermal timeline.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TensorCaloricRadiatingAdaptiveSolution {
+    /// Original endpoint, accepted records, whole-window heat and time control.
+    pub thermal: TensorCaloricAdaptiveSolution,
+    /// Native physical radiation reports for each accepted interval, in the
+    /// same order as thermal.records. Rejected stage heat is never retained.
+    /// Geometry counts identify the one shared prepared ray geometry; summing
+    /// them would not measure ray-tracing work.
+    pub radiation: Vec<[TensorCaloricRadiationReport; 2]>,
+    /// Compensated sum of actual SDIRK stage radiation [J], positive outward.
+    /// This is an informational component of thermal.record.boundary_outflow_j;
+    /// it must not be deposited or debited from that account again.
+    pub radiated_energy_j: f64,
+    /// Native radiative heat solves in completed trials, including accuracy
+    /// rejections. Incomplete failed work is bounded by maximum_attempts times
+    /// the per-attempt limits and counted in thermal.report.solver_rejections.
+    pub completed_trial_radiation_solves: usize,
+}
+
 #[derive(Debug)]
 pub enum TensorCaloricAdaptiveError {
     Solve(ChtError),
@@ -204,7 +226,7 @@ impl std::error::Error for TensorCaloricAdaptiveError {}
 /// Invalid controls/schedules, unresolved stage/event times, exhausted work,
 /// temporal error at the step floor, native source/solve/cancellation refusals,
 /// or a failed whole-window joule gate return no partial physical result.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub fn advance_caloric_tensor_conduction_adaptive<'f>(
     domain: &VoxelDomain,
     solids: &[SolidMaterial],
@@ -214,9 +236,101 @@ pub fn advance_caloric_tensor_conduction_adaptive<'f>(
     target_time_s: f64,
     transition_times_s: &[f64],
     config: &TensorCaloricAdaptiveConfig,
-    mut forcing: impl FnMut(TensorCaloricForcingSample) -> Result<TensorCaloricForcing<'f>, ChtError>,
+    forcing: impl FnMut(TensorCaloricForcingSample) -> Result<TensorCaloricForcing<'f>, ChtError>,
     gate: &CancelGate,
 ) -> Result<TensorCaloricAdaptiveSolution, TensorCaloricAdaptiveError> {
+    advance_adaptive(
+        domain,
+        solids,
+        conductivity_laws,
+        storage,
+        start_time_s,
+        target_time_s,
+        transition_times_s,
+        config,
+        None,
+        forcing,
+        gate,
+    )
+    .map(|value| value.thermal)
+}
+
+/// Advance original enthalpy and nonlinear radiation through an adaptive window.
+///
+/// Uses the SAME embedded SDIRK2(1) controller, original-energy discrepancy,
+/// forcing samples, transition left limits, prescribed-mask admission and
+/// compensated physical heat account as the nonradiating entry. Radiation
+/// converges at both physical stages on every attempt; an accuracy rejection
+/// publishes neither its state nor any of its heat.
+///
+/// The original ray geometry is prepared ONCE for this window and reused by
+/// every accepted and rejected attempt. Geometry, emissivities and radiative
+/// surroundings remain fixed. Time-varying authored sources, boundary/contact
+/// and thermostat conditions use the original forcing callback and transition
+/// schedule. Its read-only/deterministic/cancellation requirements also apply.
+///
+/// Native Newton/Krylov/backtrack and radiation.max_iterations limits are
+/// shared across both stages and all radiation retries of each attempt.
+/// maximum_attempts bounds their whole-window products, including incomplete
+/// failed attempts; caller-owned source objects retain their own shared query
+/// budgets across all attempts. Reducing dt never resets a source budget.
+///
+/// Only physical accepted stage powers enter radiated_energy_j. The final
+/// thermal.record.radiated_w remains endpoint power; neither is another heat
+/// source. The embedded estimate controls original stored energy, including
+/// latent plateaus, not a certified radiation-channel quadrature error.
+///
+/// Cell-centered gray radiation and the original smooth-segment time-accuracy
+/// limits remain. Any late error or cancellation discards the complete private
+/// prefix and returns no gas, solid, phase or heat-history partial result.
+///
+/// # Errors
+/// The original adaptive and radiating caloric admissions apply. Invalid source
+/// support, controls, geometry, masks and cancellation are fatal; bounded native
+/// nonconvergence or embedded accuracy rejection may reduce the next trial dt.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_caloric_tensor_conduction_radiating_adaptive<'f>(
+    domain: &VoxelDomain,
+    solids: &[SolidMaterial],
+    conductivity_laws: &[&dyn TensorConductivityLaw],
+    storage: TensorCaloricStorage<'_>,
+    start_time_s: f64,
+    target_time_s: f64,
+    transition_times_s: &[f64],
+    config: &TensorCaloricAdaptiveConfig,
+    radiation: &RadiationConfig,
+    forcing: impl FnMut(TensorCaloricForcingSample) -> Result<TensorCaloricForcing<'f>, ChtError>,
+    gate: &CancelGate,
+) -> Result<TensorCaloricRadiatingAdaptiveSolution, TensorCaloricAdaptiveError> {
+    advance_adaptive(
+        domain,
+        solids,
+        conductivity_laws,
+        storage,
+        start_time_s,
+        target_time_s,
+        transition_times_s,
+        config,
+        Some(radiation),
+        forcing,
+        gate,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn advance_adaptive<'f>(
+    domain: &VoxelDomain,
+    solids: &[SolidMaterial],
+    conductivity_laws: &[&dyn TensorConductivityLaw],
+    storage: TensorCaloricStorage<'_>,
+    start_time_s: f64,
+    target_time_s: f64,
+    transition_times_s: &[f64],
+    config: &TensorCaloricAdaptiveConfig,
+    radiation: Option<&RadiationConfig>,
+    mut forcing: impl FnMut(TensorCaloricForcingSample) -> Result<TensorCaloricForcing<'f>, ChtError>,
+    gate: &CancelGate,
+) -> Result<TensorCaloricRadiatingAdaptiveSolution, TensorCaloricAdaptiveError> {
     poll(gate)?;
     validate(
         start_time_s,
@@ -235,6 +349,16 @@ pub fn advance_caloric_tensor_conduction_adaptive<'f>(
             "adaptive tensor storage needs one original law, mass, energy and tensor law per cell",
         ));
     }
+    let radiators = match radiation {
+        Some(config) => {
+            domain.check_materials(solids.len())?;
+            Some(Radiators::build(domain, solids, config, gate)?)
+        }
+        None => None,
+    };
+    let mut radiation_records = Vec::new();
+    let mut radiated_energy = Sum::default();
+    let mut completed_trial_radiation_solves = 0usize;
     let mut fixed = Vec::new();
     fixed.try_reserve_exact(cells).map_err(|_| {
         TensorCaloricAdaptiveError::Invalid("adaptive prescribed-cell field allocation refused")
@@ -313,25 +437,46 @@ pub fn advance_caloric_tensor_conduction_adaptive<'f>(
             .map_or(storage.previous_specific_energy_j_kg, |value| {
                 value.specific_energy_j_kg.as_slice()
             });
-        let trial = advance_caloric_tensor_conduction_sdirk2(
-            domain,
-            solids,
-            [first_data.setup.as_ref(), second_data.setup.as_ref()],
-            conductivity_laws,
-            TensorCaloricStorage {
-                previous_specific_energy_j_kg: previous,
-                ..storage
-            },
-            [
-                first_data.prescribed_specific_energy_j_kg.as_ref(),
-                second_data.prescribed_specific_energy_j_kg.as_ref(),
-            ],
-            time,
-            dt,
-            &config.step,
-            gate,
-        );
-        let trial = match trial {
+        let setups = [first_data.setup.as_ref(), second_data.setup.as_ref()];
+        let prescribed = [
+            first_data.prescribed_specific_energy_j_kg.as_ref(),
+            second_data.prescribed_specific_energy_j_kg.as_ref(),
+        ];
+        let trial_storage = TensorCaloricStorage {
+            previous_specific_energy_j_kg: previous,
+            ..storage
+        };
+        let trial = match radiation.zip(radiators.as_ref()) {
+            Some((radiation, geometry)) => advance_radiating_sdirk2_prepared(
+                domain,
+                solids,
+                setups,
+                conductivity_laws,
+                trial_storage,
+                prescribed,
+                time,
+                dt,
+                &config.step,
+                radiation,
+                Some(geometry),
+                gate,
+            )
+            .map(|(step, reports)| (step, Some(reports))),
+            None => advance_caloric_tensor_conduction_sdirk2(
+                domain,
+                solids,
+                setups,
+                conductivity_laws,
+                trial_storage,
+                prescribed,
+                time,
+                dt,
+                &config.step,
+                gate,
+            )
+            .map(|step| (step, None)),
+        };
+        let (trial, radiation_trial) = match trial {
             Ok(trial) => trial,
             Err(error @ ChtError::SolverNotConverged { .. }) => {
                 report.solver_rejections += 1;
@@ -341,6 +486,15 @@ pub fn advance_caloric_tensor_conduction_adaptive<'f>(
             }
             Err(error) => return Err(error.into()),
         };
+        if let Some(reports) = &radiation_trial {
+            for stage in reports {
+                completed_trial_radiation_solves = completed_trial_radiation_solves
+                    .checked_add(stage.iterations)
+                    .ok_or(TensorCaloricAdaptiveError::Invalid(
+                        "adaptive completed-trial radiation work counter overflow",
+                    ))?;
+            }
+        }
         report.completed_trial_iterations = report
             .completed_trial_iterations
             .checked_add(trial.record.iterations)
@@ -384,6 +538,25 @@ pub fn advance_caloric_tensor_conduction_adaptive<'f>(
         records.try_reserve(1).map_err(|_| {
             TensorCaloricAdaptiveError::Invalid("adaptive accepted-record allocation refused")
         })?;
+        if let Some(reports) = radiation_trial {
+            radiation_records.try_reserve(1).map_err(|_| {
+                TensorCaloricAdaptiveError::Invalid("adaptive radiation-record allocation refused")
+            })?;
+            // Match the original tableau: the first physical stage record
+            // spans a=gamma*dt and its contribution is weighted by (1-gamma)/gamma.
+            let carry_weight = (1.0 - TENSOR_SDIRK2_GAMMA) / TENSOR_SDIRK2_GAMMA;
+            for heat_j in [
+                carry_weight * (a * reports[0].radiated_w),
+                a * reports[1].radiated_w,
+            ] {
+                radiated_energy
+                    .add(heat_j)
+                    .ok_or(TensorCaloricAdaptiveError::Invalid(
+                        "unrepresentable accepted radiation accumulation",
+                    ))?;
+            }
+            radiation_records.push(reports);
+        }
         for (sum, value) in heat.iter_mut().zip([
             trial.record.source_j,
             trial.record.boundary_outflow_j,
@@ -474,11 +647,16 @@ pub fn advance_caloric_tensor_conduction_adaptive<'f>(
         });
     }
     poll(gate)?;
-    Ok(TensorCaloricAdaptiveSolution {
-        endpoint,
-        records,
-        record,
-        report,
+    Ok(TensorCaloricRadiatingAdaptiveSolution {
+        thermal: TensorCaloricAdaptiveSolution {
+            endpoint,
+            records,
+            record,
+            report,
+        },
+        radiation: radiation_records,
+        radiated_energy_j: total(radiated_energy)?,
+        completed_trial_radiation_solves,
     })
 }
 

@@ -3871,3 +3871,40 @@ Rust sources passed the pinned formatter/parser. The exact standalone force
 law module and its five inline tests passed metadata-only Rust compilation;
 the tests were not executed. Full native integration compilation and runtime
 validation remain pending in a usable workspace build environment.
+
+## Adaptive original-enthalpy radiation
+
+`advance_caloric_tensor_conduction_radiating_adaptive` composes the original
+caloric SDIRK2 radiation stages with the existing embedded energy controller.
+It shares the nonradiating adaptive loop, transition schedule, stage forcing,
+prescribed-mask admission and whole-window heat gates. The error estimate uses
+original specific-energy increments; a sharp latent plateau remains visible
+even when its temperature does not change. It is a local asymptotic estimate,
+not a certified endpoint or individual heat-channel quadrature bound.
+
+The original ray geometry is prepared once for the entire window and borrowed
+by every accepted and rejected attempt. Geometry, emissivities and radiative
+surroundings are fixed over that window. Authored thermal forcing may vary at
+the actual stage times, with explicit left limits at declared transitions.
+Callers needing changing radiative geometry or surroundings must separate
+windows at those changes.
+
+`TensorCaloricRadiatingAdaptiveSolution` retains one pair of physical
+radiation reports per accepted interval, aligned with `thermal.records`.
+Its compensated `radiated_energy_j` uses the native SDIRK stage weights and
+is already part of the thermal boundary account; it must not be debited again.
+The final record's `radiated_w` remains endpoint power. Completed rejected
+trials contribute to work counters but never to accepted heat or history.
+
+Native nonlinear, linear and radiation limits are shared within each attempt;
+the attempt limit bounds total work, including incomplete solver failures.
+Caller-owned caloric and conductivity query budgets persist across attempts.
+Fatal source, invalid-data, allocation and cancellation errors return no
+accepted prefix. Whole-window closure and the sum of absolute accepted native
+closures must both pass the declared joule tolerance.
+
+G1/G3/G4 regression groups cover nonlinear cooling refinement against an
+independent scalar reference, latent energy adaptation at constant temperature,
+forcing transitions and prescribed phase inventory, and late work/source/
+cancellation refusals. These new native tests are authored and syntax-parsed;
+they have not been compiled or executed in this environment.

@@ -164,6 +164,39 @@ pub fn advance_caloric_tensor_conduction_radiating_sdirk2(
     radiation: &RadiationConfig,
     gate: &CancelGate,
 ) -> Result<(TensorCaloricSdirk2Step, [TensorCaloricRadiationReport; 2]), ChtError> {
+    advance_radiating_sdirk2_prepared(
+        domain,
+        solids,
+        setups,
+        conductivity_laws,
+        storage,
+        prescribed_specific_energy_j_kg,
+        start_time_s,
+        time_step_s,
+        config,
+        radiation,
+        None,
+        gate,
+    )
+}
+
+/// Reuse immutable ray geometry across native attempts without changing their
+/// physical stage, source or work ownership.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(super) fn advance_radiating_sdirk2_prepared(
+    domain: &VoxelDomain,
+    solids: &[SolidMaterial],
+    setups: [&ThermalSetup; 2],
+    conductivity_laws: &[&dyn TensorConductivityLaw],
+    storage: TensorCaloricStorage<'_>,
+    prescribed_specific_energy_j_kg: [&[(usize, f64)]; 2],
+    start_time_s: f64,
+    time_step_s: f64,
+    config: &TensorNonlinearConfig,
+    radiation: &RadiationConfig,
+    geometry: Option<&Radiators>,
+    gate: &CancelGate,
+) -> Result<(TensorCaloricSdirk2Step, [TensorCaloricRadiationReport; 2]), ChtError> {
     poll(gate)?;
     domain.check_materials(solids.len())?;
     let (a, stage_time_s) = stage_clock(start_time_s, time_step_s).ok_or_else(|| {
@@ -171,7 +204,10 @@ pub fn advance_caloric_tensor_conduction_radiating_sdirk2(
     })?;
     let mut work = RadiationWork::new(config, radiation)?;
     let prepared = PreparedCaloric::new(domain, conductivity_laws.len(), storage, a, gate)?;
-    let radiators = Radiators::build(domain, solids, radiation, gate)?;
+    let radiators = match geometry {
+        Some(value) => std::borrow::Cow::Borrowed(value),
+        None => std::borrow::Cow::Owned(Radiators::build(domain, solids, radiation, gate)?),
+    };
     let mut first = {
         let stage = prepared.stage(setups[0], prescribed_specific_energy_j_kg[0], gate)?;
         solve_radiating_stage(
