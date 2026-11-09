@@ -4047,10 +4047,10 @@ workspace bytes. Both species masses and physical energy had zero printed
 residual; fluid/support momentum residuals were at most 3.89e-16 kg m/s.
 The exported nitrogen fraction remains within its original 0.25--0.95 range;
 this observation is not a fully discrete maximum-principle certificate.
-This stationary inviscid species owner does
-not itself integrate chemistry or molecular species diffusion, preserve
-pressure exactly at moving unequal-caloric contacts, move the geometry, or
-establish an entropy/invariant-domain or experimental combustion claim.
+The ordinary stationary inviscid species step does not itself integrate
+chemistry or molecular species diffusion, preserve pressure exactly at moving
+unequal-caloric contacts, move geometry, or establish an entropy/invariant-domain
+or experimental combustion claim.
 
 ### Moving volumes with evolving species
 
@@ -4080,6 +4080,37 @@ This entry excludes moving-domain chemistry, molecular transport, contact-energy
 projection, prescribed exterior states/profiles and pressure outlets. Existing
 source precision, unequal-caloric advecting-contact and engineering-authority
 limits remain; no general entropy, positivity or FSI-stability theorem follows.
+
+### Reciprocal finite-piston evolving mixtures
+
+`MixtureEuler3d::step_with_inertial_walls` advances every original species and
+both finite guided piston planes on one Cartesian axis. The same native
+`solve_coupled` mechanics and `SpatialInertialWallsStep<StepReport>` used by
+the frozen field consume the mixture's actual stage-integrated pressure
+impulses and work. Local composition, calorics, all momenta and source energy
+references remain with the original mixture owner. Every proposal restarts
+from the same accepted field at one duration and reuses prepared scratch.
+
+Both referenced and physical gas-plus-wall energies must satisfy the authored
+energy budget. Physical gas increments use referenced `delta E` plus the
+compensated sum of each actual species-mass change times its original energy
+reference, avoiding subtraction of large absolute formation-energy totals.
+No species renormalization, nominal frozen mixture or caloric correction is
+introduced. Combined axial momentum, each wall's work and actual represented
+plane travel are admitted independently. Nonuniform pressure produces the
+same explicit piston torque and opposite ideal-guide angular impulse.
+
+Six native G1/G3/G4 regressions independently reconstruct accepted species,
+axial momentum and physical gas-plus-wall energy, exercise both reconstructions
+and every axis, and check translation, boosts with external work, source
+reference shifts, pressure torque and cancellation/refusal/replay. The ten
+moving-mixture regressions pass again after sharing the trial/report helpers.
+
+This entry admits sealed, adiabatic inviscid flow with periodic or stationary
+reflecting transverse sides. Reactions, molecular transport, leakage, wall
+rotation, contact stops, prescribed exteriors and deformable piston surfaces
+remain separate. Original source and unequal-caloric-contact limits remain;
+no general FSI stability or experimental validation is asserted.
 
 ### Exploratory turbulent mixing on evolving-species three-dimensional gas
 

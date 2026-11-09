@@ -30,6 +30,8 @@ const WIDTH_LIMIT: usize = MAX_SPECIES + 4;
 
 /// Conservative mechanical forcing within the original accepted-step owner.
 pub mod forcing;
+/// Reciprocal pressure impulse and work with two finite guided planes.
+pub mod inertial_walls;
 /// Original species diffusion, Fourier heat and full three-dimensional stress.
 pub mod molecular;
 /// Conservative original-species transport on moving Cartesian volumes.

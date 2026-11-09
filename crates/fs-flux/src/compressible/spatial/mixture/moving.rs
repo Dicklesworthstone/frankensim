@@ -39,19 +39,7 @@ impl MixtureEuler3d {
             return self.step(maximum_duration, controls, cancelled);
         }
         stepping::poll::<Error>(&mut cancelled)?;
-        motion.admit_boundaries::<Error>(self.boundaries)?;
-        if self
-            .prepared_reservoir_profile_sides()
-            .into_iter()
-            .any(|x| x)
-            || BoundarySide::ALL
-                .into_iter()
-                .any(|side| self.reservoir(side).is_some())
-        {
-            return Err(Error::Invalid(
-                "moving mixture does not admit prescribed exterior states or profiles",
-            ));
-        }
+        self.admit_motion(motion)?;
         if !positive(maximum_duration.value())
             || !positive(controls.cfl)
             || controls.cfl > 0.45
@@ -121,33 +109,17 @@ impl MixtureEuler3d {
             },
         )?;
         let after = checked_totals(&self.work.candidate, &next_grid, n, &mut cancelled)?;
-        let outward = sum_rows(&self.work.boundary_trial, width, 1.0, &mut cancelled)?;
-        let boundary_change = Totals::from_row(&outward.map(|v| -v), n);
-        let residual = std::array::from_fn::<_, WIDTH_LIMIT, _>(|d| {
-            if d < width {
-                after.component(d) - before.component(d) - boundary_change.component(d)
-            } else {
-                0.0
-            }
-        });
-        if !residual.iter().all(|v| v.is_finite()) {
-            return Err(Error::Invalid("moving mixture extensive balance overflow"));
-        }
-        let conservation_residual = Totals::from_row(&residual[..width], n);
-        let report = StepReport {
-            elapsed: Time::new(accepted.dt),
-            maximum_cfl: accepted.stats.rate * accepted.dt,
-            halvings: accepted.halvings,
-            hll_fallback_faces: accepted.stats.fallback,
-            limited_cells: accepted.stats.limited,
-            first_order_retry: accepted.reconstruction != controls.reconstruction,
+        let report = reported_step(
+            &self.gas,
             before,
             after,
-            boundary_change,
-            source_change: ForceChange3d::default(),
-            absolute_energy_residual_j: conservation_residual.absolute_energy(&self.gas)?,
-            conservation_residual,
-        };
+            &self.work.boundary_trial,
+            accepted.dt,
+            accepted.stats,
+            accepted.halvings,
+            accepted.reconstruction != controls.reconstruction,
+            &mut cancelled,
+        )?;
         stepping::poll::<Error>(&mut cancelled)?;
         std::mem::swap(&mut self.states, &mut self.work.candidate);
         self.boundary_impulses
@@ -157,10 +129,70 @@ impl MixtureEuler3d {
         self.last_step = Some(report);
         Ok(report)
     }
+
+    pub(super) fn admit_motion(&self, motion: MeshMotion) -> Result<(), Error> {
+        motion.admit_boundaries::<Error>(self.boundaries)?;
+        if self
+            .prepared_reservoir_profile_sides()
+            .into_iter()
+            .any(|x| x)
+            || BoundarySide::ALL
+                .into_iter()
+                .any(|side| self.reservoir(side).is_some())
+        {
+            return Err(Error::Invalid(
+                "moving mixture does not admit prescribed exterior states or profiles",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn attempt(
+pub(super) fn reported_step(
+    gas: &MixtureGas,
+    before: Totals,
+    after: Totals,
+    boundary_trial: &[f64],
+    dt: f64,
+    stats: stepping::StageStats,
+    halvings: usize,
+    first_order_retry: bool,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<StepReport, Error> {
+    let n = gas.species_count();
+    let width = n + 4;
+    let outward = sum_rows(boundary_trial, width, 1.0, cancelled)?;
+    let boundary_change = Totals::from_row(&outward.map(|v| -v), n);
+    let residual = std::array::from_fn::<_, WIDTH_LIMIT, _>(|d| {
+        if d < width {
+            after.component(d) - before.component(d) - boundary_change.component(d)
+        } else {
+            0.0
+        }
+    });
+    if !residual.iter().all(|v| v.is_finite()) {
+        return Err(Error::Invalid("moving mixture extensive balance overflow"));
+    }
+    let conservation_residual = Totals::from_row(&residual[..width], n);
+    Ok(StepReport {
+        elapsed: Time::new(dt),
+        maximum_cfl: stats.rate * dt,
+        halvings,
+        hll_fallback_faces: stats.fallback,
+        limited_cells: stats.limited,
+        first_order_retry,
+        before,
+        after,
+        boundary_change,
+        source_change: ForceChange3d::default(),
+        absolute_energy_residual_j: conservation_residual.absolute_energy(gas)?,
+        conservation_residual,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn attempt(
     gas: &MixtureGas,
     original_grid: &CartesianGrid,
     next_grid: &CartesianGrid,
