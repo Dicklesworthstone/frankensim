@@ -30,6 +30,10 @@ use fs_thermal::enthalpy::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+mod source;
+mod supported;
+pub use supported::SupportedViscoelasticHeating;
+
 /// Hard storage bound for resolved acoustic depth bins.
 pub const MAX_ACOUSTIC_THERMAL_BINS: usize = 16_384;
 /// Hard storage bound for the optional prescribed power envelope.
@@ -46,6 +50,18 @@ pub struct AcousticThermalBin {
     pub cell: CellId,
     /// Closed positive temperature range [K] where the caller admits the SAME
     /// frozen acoustic law. This is not a calibrated temperature-response model.
+    pub temperature_band_k: [f64; 2],
+}
+
+/// Explicit thermal receiver for the original backing's irreversible work.
+/// Its original mass, geometry, caloric law and storage basis remain unchanged.
+/// It must be distinct from every coating bin; no support mass or material law
+/// is inferred from an acoustic impedance or a mechanical oscillator.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AcousticBackingThermalCell {
+    pub cell: CellId,
+    /// Closed positive temperature interval [K] admitting the same frozen
+    /// backing law. This is an authored applicability guard, not a refresh law.
     pub temperature_band_k: [f64; 2],
 }
 
@@ -93,16 +109,27 @@ pub struct AcousticHeatingEnergy {
     pub duration_s: f64,
     /// Integral of the prescribed power fraction over accepted native time [s].
     pub exposure_s: f64,
+    /// Physical exterior incident energy. A supported coating has only the
+    /// left exterior; its absent right exterior entry is exactly zero.
     pub incident_j: [f64; 2],
+    /// Physical exterior outgoing energy; right is zero for a supported coating.
     pub outgoing_j: [f64; 2],
     pub bulk_absorbed_j: f64,
     pub shear_absorbed_j: f64,
+    /// Independent irreversible work at the actual backing velocity [J].
+    /// This never includes the backing's kinetic or elastic storage.
+    pub backing_absorbed_j: f64,
+    /// Backing work credited to an explicitly selected distinct thermal cell [J].
+    /// This is a subset of thermal_input_j, not an additional heat credit.
+    pub backing_thermal_input_j: f64,
+    /// Backing work leaving this thermal accounting boundary without a receiver [J].
+    pub exported_backing_j: f64,
     /// Actual acoustic source watts times the duration credited by the native
     /// thermal owner. Already included in its external_heat_j; do not add twice.
     pub thermal_input_j: f64,
-    /// Independent incident minus outgoing minus constitutive absorption [J].
+    /// Independent incident minus outgoing, coating heat and backing work [J].
     pub balance_residual_j: f64,
-    /// Constitutive absorption minus actual cell source credits [J].
+    /// Coating absorption plus received backing work minus actual cell credits [J].
     pub credit_residual_j: f64,
     /// Sum of absolute per-interval balance and credit discrepancies [J].
     pub accumulated_absolute_defect_j: f64,
@@ -147,8 +174,9 @@ impl From<DepositionError> for AcousticHeatingError {
 type Result<T> = core::result::Result<T, AcousticHeatingError>;
 
 #[derive(Clone, Debug)]
-struct BoundBin {
-    power: AcousticBinPower,
+struct BoundCell {
+    id: CellId,
+    temperature_band_k: [f64; 2],
     material_id: MaterialId,
     segment_id: u64,
     body_id: u64,
@@ -156,18 +184,42 @@ struct BoundBin {
     geometry: CellGeometry,
     caloric_identity: Option<[u8; 32]>,
     storage_basis: ThermalStorageBasis,
-    heat_w: f64,
 }
 
-impl BoundBin {
+impl BoundCell {
+    fn new(
+        id: CellId,
+        temperature_band_k: [f64; 2],
+        thermal: &DepositionSimulation<'_>,
+    ) -> Result<Self> {
+        let [lo, hi] = temperature_band_k;
+        if !positive(lo) || !positive(hi) || hi < lo {
+            return Err(AcousticHeatingError::Invalid(
+                "acoustic thermal receiver needs a positive ordered temperature interval",
+            ));
+        }
+        let cell = thermal.cells().get(&id).ok_or(AcousticHeatingError::Invalid(
+            "acoustic thermal cell is inactive",
+        ))?;
+        let bound = Self {
+            id,
+            temperature_band_k,
+            material_id: cell.material_id,
+            segment_id: cell.segment_id,
+            body_id: cell.body_id,
+            mass_kg: cell.mass_kg,
+            geometry: cell.geometry,
+            caloric_identity: thermal.material_caloric_identity(cell.material_id)?,
+            storage_basis: thermal.material_storage_basis(cell.material_id)?,
+        };
+        bound.validate(thermal)?;
+        Ok(bound)
+    }
+
     fn validate(&self, thermal: &DepositionSimulation<'_>) -> Result<()> {
-        let cell =
-            thermal
-                .cells()
-                .get(&self.power.binding.cell)
-                .ok_or(AcousticHeatingError::Invalid(
-                    "acoustic thermal cell is inactive",
-                ))?;
+        let cell = thermal.cells().get(&self.id).ok_or(AcousticHeatingError::Invalid(
+            "acoustic thermal cell is inactive",
+        ))?;
         if cell.material_id != self.material_id
             || cell.segment_id != self.segment_id
             || cell.body_id != self.body_id
@@ -181,7 +233,7 @@ impl BoundBin {
             ));
         }
         let temperature_k = thermal.temperature_k(cell.id)?;
-        let [lo, hi] = self.power.binding.temperature_band_k;
+        let [lo, hi] = self.temperature_band_k;
         if temperature_k < lo || temperature_k > hi {
             return Err(AcousticHeatingError::TemperatureSupport {
                 cell: cell.id,
@@ -194,12 +246,36 @@ impl BoundBin {
 }
 
 #[derive(Clone, Debug)]
+struct BoundBin {
+    power: AcousticBinPower,
+    cell: BoundCell,
+    heat_w: f64,
+}
+
+#[derive(Clone, Debug)]
+struct BoundBacking {
+    binding: AcousticBackingThermalCell,
+    cell: BoundCell,
+}
+
+#[derive(Clone, Copy)]
+struct HeatingPower {
+    incident: [f64; 2],
+    outgoing: [f64; 2],
+    heat: [f64; 2],
+    backing: f64,
+}
+
+#[derive(Clone, Debug)]
 struct Account {
     duration: Dd,
     exposure: Dd,
     incident: [Dd; 2],
     outgoing: [Dd; 2],
     heat: [Dd; 2],
+    backing: Dd,
+    backing_credit: Dd,
+    exported_backing: Dd,
     credit: Dd,
     absolute_defect: Dd,
     timing: Dd,
@@ -212,6 +288,9 @@ impl Default for Account {
             incident: [Dd::ZERO; 2],
             outgoing: [Dd::ZERO; 2],
             heat: [Dd::ZERO; 2],
+            backing: Dd::ZERO,
+            backing_credit: Dd::ZERO,
+            exported_backing: Dd::ZERO,
             credit: Dd::ZERO,
             absolute_defect: Dd::ZERO,
             timing: Dd::ZERO,
@@ -221,8 +300,9 @@ impl Default for Account {
 impl Account {
     fn value(&self) -> Result<AcousticHeatingEnergy> {
         let heat = self.heat[0] + self.heat[1];
-        let balance =
-            self.incident[0] + self.incident[1] - self.outgoing[0] - self.outgoing[1] - heat;
+        let balance = self.incident[0] + self.incident[1]
+            - self.outgoing[0] - self.outgoing[1] - heat - self.backing;
+        let credit_residual = heat + self.backing_credit - self.credit;
         let values = [
             self.duration,
             self.exposure,
@@ -232,13 +312,16 @@ impl Account {
             self.outgoing[1],
             self.heat[0],
             self.heat[1],
+            self.backing,
+            self.backing_credit,
+            self.exported_backing,
             self.credit,
             self.absolute_defect,
             self.timing,
         ];
         if values.iter().any(|v| !nonnegative(v.to_f64()))
             || !balance.to_f64().is_finite()
-            || !(heat - self.credit).to_f64().is_finite()
+            || !credit_residual.to_f64().is_finite()
         {
             return Err(AcousticHeatingError::Invalid(
                 "acoustic energy account is unrepresentable",
@@ -251,9 +334,12 @@ impl Account {
             outgoing_j: self.outgoing.map(Dd::to_f64),
             bulk_absorbed_j: self.heat[0].to_f64(),
             shear_absorbed_j: self.heat[1].to_f64(),
+            backing_absorbed_j: self.backing.to_f64(),
+            backing_thermal_input_j: self.backing_credit.to_f64(),
+            exported_backing_j: self.exported_backing.to_f64(),
             thermal_input_j: self.credit.to_f64(),
             balance_residual_j: balance.to_f64(),
-            credit_residual_j: (heat - self.credit).to_f64(),
+            credit_residual_j: credit_residual.to_f64(),
             accumulated_absolute_defect_j: self.absolute_defect.to_f64(),
             timing_discrepancy_j: self.timing.to_f64(),
         })
@@ -270,18 +356,29 @@ struct Pending {
     energy: AcousticHeatingEnergy,
 }
 
-/// Prepared spatial acoustic heat source, borrowing the original solid stack.
+/// Native heating of an original two-fluid viscoelastic stack.
+pub type ViscoelasticHeating<'s, 'a> =
+    AcousticHeating<&'s ViscoelasticLayers<'a>, [C64; 2], ViscoelasticLayersPower>;
+
+/// Shared accepted-time heating owner for the original acoustic source types.
+/// Use the source-specific ViscoelasticHeating or SupportedViscoelasticHeating
+/// aliases and constructors. Its private state cannot be made from arbitrary
+/// heat or power data; source, authored incident phasor and native power types
+/// remain intact. Copying their references does not clone a physical stack.
+///
 /// Immutable constitutive powers are prepared once. Native steps make bounded
 /// passes over the bins without repeating acoustic wave/material/exterior
 /// queries. Native ordered-cell lookups and source-map insertions cost O(log n)
 /// per bin; the original observer protocol allocates that per-step source map.
 #[derive(Clone)]
-pub struct ViscoelasticHeating<'s, 'a> {
-    stack: &'s ViscoelasticLayers<'a>,
-    incident_peak_pressure_pa: [C64; 2],
+pub struct AcousticHeating<Source, Incident, Power> {
+    stack: Source,
+    incident_peak_pressure_pa: Incident,
     area_m2: f64,
     bins: Arc<[BoundBin]>,
-    peak_power: ViscoelasticLayersPower,
+    peak_power: Power,
+    powers: HeatingPower,
+    backing_receiver: Option<BoundBacking>,
     envelope: Option<Arc<[AcousticPowerSegment]>>,
     budget: AcousticHeatingBudget,
     time_s: f64,
@@ -292,7 +389,7 @@ pub struct ViscoelasticHeating<'s, 'a> {
     pending: Option<Pending>,
 }
 
-impl<'s, 'a> ViscoelasticHeating<'s, 'a> {
+impl<'s, 'a> AcousticHeating<&'s ViscoelasticLayers<'a>, [C64; 2], ViscoelasticLayersPower> {
     /// Bind a complete nonoverlapping depth partition to the active native cells.
     /// Cell volume must equal area*depth and mass must equal that volume times
     /// the ORIGINAL acoustic density, within 64 eps relative arithmetic.
@@ -307,145 +404,42 @@ impl<'s, 'a> ViscoelasticHeating<'s, 'a> {
         budget: AcousticHeatingBudget,
         mut checkpoint: impl FnMut() -> core::result::Result<(), DepositionError>,
     ) -> Result<Self> {
-        checkpoint()?;
-        if budget.maximum_bins > MAX_ACOUSTIC_THERMAL_BINS
-            || budget.maximum_power_segments > MAX_ACOUSTIC_POWER_SEGMENTS
-            || bins.len() > budget.maximum_bins
-            || !nonnegative(budget.energy_absolute_tolerance_j)
-        {
-            return Err(AcousticHeatingError::Budget);
-        }
-        if bins.is_empty() || !positive(area_m2) {
-            return Err(AcousticHeatingError::Invalid(
-                "acoustic heating needs positive area and thermal bins",
-            ));
-        }
-        let mut ordered = bins.to_vec();
-        ordered.sort_by(|a, b| {
-            a.layer
-                .cmp(&b.layer)
-                .then(a.depths_m[0].total_cmp(&b.depths_m[0]))
-        });
-        let mut identities = BTreeSet::new();
-        for bin in &ordered {
-            checkpoint()?;
-            let [lo, hi] = bin.temperature_band_k;
-            if bin.layer >= stack.layer_count()
-                || !positive(lo)
-                || !positive(hi)
-                || hi < lo
-                || !identities.insert(bin.cell)
-            {
-                return Err(AcousticHeatingError::Invalid(
-                    "acoustic bin index, unique cell or temperature support is invalid",
-                ));
-            }
-        }
-        let mut interruption = None;
-        let drive = stack.drive(incident_peak_pressure_pa, area_m2, &mut || {
-            cancelled(&mut checkpoint, &mut interruption)
-        });
-        let drive = acoustic_result(drive, interruption.take())?;
-        let mut bound = Vec::with_capacity(ordered.len());
-        let mut cursor = 0;
-        for layer_index in 0..stack.layer_count() {
-            checkpoint()?;
-            let layer = stack.layer(layer_index).expect("original layer");
-            let mut depth = 0.0;
-            let mut heat = [Dd::ZERO; 2];
-            let first = cursor;
-            while cursor < ordered.len() && ordered[cursor].layer == layer_index {
-                checkpoint()?;
-                let bin = ordered[cursor];
-                let [start, end] = bin.depths_m;
-                if !nonnegative(start)
-                    || !positive(end)
-                    || start != depth
-                    || end <= start
-                    || end > layer.thickness_m
-                {
-                    return Err(AcousticHeatingError::Invalid(
-                        "acoustic depth bins must partition each layer without gaps or overlap",
-                    ));
-                }
-                let cell = thermal
-                    .cells()
-                    .get(&bin.cell)
-                    .ok_or(AcousticHeatingError::Invalid(
-                        "acoustic thermal bin is inactive",
-                    ))?;
-                let volume = product(area_m2, end - start)?;
-                let mass = product(layer.source.density_kg_m3, volume)?;
-                if !roundoff_equal(cell.geometry.volume_m3, volume)
-                    || !roundoff_equal(cell.mass_kg, mass)
-                {
-                    return Err(AcousticHeatingError::Invalid(
-                        "acoustic bin volume or mass disagrees with the original solid",
-                    ));
-                }
-                let local = drive.absorption_between(layer_index, [start, end], &mut || {
-                    cancelled(&mut checkpoint, &mut interruption)
-                });
-                let local = acoustic_result(local, interruption.take())?;
-                let q = [local.bulk_absorbed_power_w, local.shear_absorbed_power_w];
-                let heat_w = checked((Dd::from_f64(q[0]) + Dd::from_f64(q[1])).to_f64())?;
-                for channel in 0..2 {
-                    heat[channel] = heat[channel] + Dd::from_f64(q[channel]);
-                }
-                let binding = BoundBin {
-                    power: AcousticBinPower {
-                        binding: bin,
-                        source_identity: local.source_identity,
-                        bulk_absorbed_power_w: q[0],
-                        shear_absorbed_power_w: q[1],
-                    },
-                    material_id: cell.material_id,
-                    segment_id: cell.segment_id,
-                    body_id: cell.body_id,
-                    mass_kg: cell.mass_kg,
-                    geometry: cell.geometry,
-                    caloric_identity: thermal.material_caloric_identity(cell.material_id)?,
-                    storage_basis: thermal.material_storage_basis(cell.material_id)?,
-                    heat_w,
-                };
-                binding.validate(thermal)?;
-                bound.push(binding);
-                depth = end;
-                cursor += 1;
-            }
-            if depth != layer.thickness_m {
-                return Err(AcousticHeatingError::Invalid(
-                    "every positive acoustic layer needs a complete thermal depth partition",
-                ));
-            }
-            let original = drive.layer_absorption(layer_index, &mut || {
-                cancelled(&mut checkpoint, &mut interruption)
-            });
-            let original = acoustic_result(original, interruption.take())?;
-            for (sum, total) in heat.into_iter().zip([
-                original.bulk_absorbed_power_w,
-                original.shear_absorbed_power_w,
-            ]) {
-                let discrepancy = (sum - Dd::from_f64(total)).to_f64().abs();
-                let scale = sum.to_f64().max(total);
-                let allowance = 4096.0 * f64::EPSILON * (cursor - first + 1) as f64 * scale;
-                if !nonnegative(discrepancy) || discrepancy > allowance {
-                    return Err(AcousticHeatingError::Invalid(
-                        "positive depth-bin heat does not close against the original layer",
-                    ));
-                }
-            }
-        }
-        if cursor != ordered.len() {
-            return Err(AcousticHeatingError::Invalid("unbound acoustic depth bin"));
-        }
-        checkpoint()?;
-        Ok(Self {
+        let prepared = source::prepare(
+            source::NativeStack::TwoFluid(stack),
+            incident_peak_pressure_pa,
+            area_m2,
+            bins,
+            thermal,
+            budget,
+            &mut checkpoint,
+        )?;
+        let source::NativePower::TwoFluid(peak_power) = prepared.power else {
+            return Err(AcousticHeatingError::Invalid("acoustic source kind disagrees"));
+        };
+        Ok(Self::from_prepared(
+            stack, incident_peak_pressure_pa, peak_power, area_m2, thermal, budget, prepared,
+        ))
+    }
+}
+
+impl<Source: Copy, Incident: Copy, Power: Copy> AcousticHeating<Source, Incident, Power> {
+    fn from_prepared(
+        stack: Source,
+        incident_peak_pressure_pa: Incident,
+        peak_power: Power,
+        area_m2: f64,
+        thermal: &DepositionSimulation<'_>,
+        budget: AcousticHeatingBudget,
+        prepared: source::Prepared,
+    ) -> Self {
+        Self {
             stack,
             incident_peak_pressure_pa,
             area_m2,
-            bins: bound.into(),
-            peak_power: drive.power(),
+            bins: prepared.bins,
+            peak_power,
+            powers: prepared.power.components(),
+            backing_receiver: None,
             envelope: None,
             budget,
             time_s: thermal.time_s(),
@@ -454,7 +448,7 @@ impl<'s, 'a> ViscoelasticHeating<'s, 'a> {
             account: Account::default(),
             energy: AcousticHeatingEnergy::default(),
             pending: None,
-        })
+        }
     }
 
     /// Bind a bounded affine POWER envelope before this source's first advance.
@@ -499,16 +493,16 @@ impl<'s, 'a> ViscoelasticHeating<'s, 'a> {
         Ok(self)
     }
 
-    pub const fn original_stack(&self) -> &'s ViscoelasticLayers<'a> {
+    pub const fn original_stack(&self) -> Source {
         self.stack
     }
-    pub const fn incident_peak_pressure_pa(&self) -> [C64; 2] {
+    pub const fn incident_peak_pressure_pa(&self) -> Incident {
         self.incident_peak_pressure_pa
     }
     pub const fn area_m2(&self) -> f64 {
         self.area_m2
     }
-    pub const fn peak_power(&self) -> ViscoelasticLayersPower {
+    pub const fn peak_power(&self) -> Power {
         self.peak_power
     }
     pub const fn time_s(&self) -> f64 {
@@ -580,7 +574,11 @@ impl<'s, 'a> ViscoelasticHeating<'s, 'a> {
         }
         for bin in self.bins.iter() {
             checkpoint()?;
-            bin.validate(thermal)?;
+            bin.cell.validate(thermal)?;
+        }
+        if let Some(backing) = &self.backing_receiver {
+            checkpoint()?;
+            backing.cell.validate(thermal)?;
         }
         Ok(())
     }
@@ -598,7 +596,9 @@ impl<'s, 'a> ViscoelasticHeating<'s, 'a> {
     }
 }
 
-impl DepositionObserver for ViscoelasticHeating<'_, '_> {
+impl<Source: Copy, Incident: Copy, Power: Copy> DepositionObserver
+    for AcousticHeating<Source, Incident, Power>
+{
     type Error = AcousticHeatingError;
 
     fn begin(&mut self) -> Result<()> {
@@ -666,17 +666,28 @@ impl DepositionObserver for ViscoelasticHeating<'_, '_> {
                 product(product(powers[1], mean)?, duration_s)?,
             ])
         };
-        let incident = energy_pair(self.peak_power.incident_power_w)?;
-        let outgoing = energy_pair(self.peak_power.outgoing_power_w)?;
-        let heat = energy_pair([
-            self.peak_power.bulk_absorbed_power_w,
-            self.peak_power.shear_absorbed_power_w,
-        ])?;
+        let incident = energy_pair(self.powers.incident)?;
+        let outgoing = energy_pair(self.powers.outgoing)?;
+        let heat = energy_pair(self.powers.heat)?;
+        let backing_watts = product(self.powers.backing, mean)?;
+        let backing_work = product(backing_watts, duration_s)?;
+        let (backing_credit, exported_backing) = if let Some(backing) = &self.backing_receiver {
+            checkpoint()?;
+            // This distinct native cell receives the original resistance work
+            // once. Kinetic/elastic backing storage never enters this source.
+            sources.insert(backing.binding.cell, backing_watts);
+            credit = credit + Dd::from_f64(backing_work);
+            (backing_work, 0.0)
+        } else {
+            (0.0, backing_work)
+        };
         let physical_heat = Dd::from_f64(heat[0]) + Dd::from_f64(heat[1]);
+        let received_heat = physical_heat + Dd::from_f64(backing_credit);
         let balance = Dd::from_f64(incident[0]) + Dd::from_f64(incident[1])
             - Dd::from_f64(outgoing[0])
             - Dd::from_f64(outgoing[1])
-            - physical_heat;
+            - physical_heat
+            - Dd::from_f64(backing_work);
         let mut account = self.account.clone();
         add(&mut account.duration, duration_s)?;
         add(&mut account.exposure, product(mean, duration_s)?)?;
@@ -685,18 +696,21 @@ impl DepositionObserver for ViscoelasticHeating<'_, '_> {
             add(&mut account.outgoing[i], outgoing[i])?;
             add(&mut account.heat[i], heat[i])?;
         }
+        add(&mut account.backing, backing_work)?;
+        add(&mut account.backing_credit, backing_credit)?;
+        add(&mut account.exported_backing, exported_backing)?;
         account.credit = account.credit + credit;
         add(&mut account.absolute_defect, balance.to_f64().abs())?;
         add(
             &mut account.absolute_defect,
-            (physical_heat - credit).to_f64().abs(),
+            (received_heat - credit).to_f64().abs(),
         )?;
         let mismatch = (Dd::from_f64(end_s) - Dd::from_f64(start_s) - Dd::from_f64(duration_s))
             .to_f64()
             .abs();
         let peak_incident = checked(
-            (Dd::from_f64(self.peak_power.incident_power_w[0])
-                + Dd::from_f64(self.peak_power.incident_power_w[1]))
+            (Dd::from_f64(self.powers.incident[0])
+                + Dd::from_f64(self.powers.incident[1]))
             .to_f64(),
         )?;
         add(&mut account.timing, checked(peak_incident * mismatch)?)?;

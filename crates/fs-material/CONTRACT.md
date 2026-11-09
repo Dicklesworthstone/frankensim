@@ -24695,3 +24695,36 @@ entropy, continuous gas/two-wall refinement, accepted-history replay, analytic
 closed-port conductive relaxation, original-source/work/cancellation refusal,
 and unchanged single-wall delegation. These are numerical implementation
 fixtures, not empirical validation of the declared material or flow regime.
+
+### Supported viscoelastic coating heat on the original thermal timeline
+
+`viscoelastic::thermal::SupportedViscoelasticHeating` binds the original
+`SupportedViscoelasticLayers` to complete physical depth bins on the existing
+enthalpy simulation. Exact native interval work supplies separate bulk and shear
+heating. It shares the existing two-fluid heating owner's partition checks,
+source identities, caloric/mass/geometry guards, power envelope, cancellation
+and atomic accepted-time observer. The original two-fluid constructor,
+source/input/power getter types and behavior remain available.
+
+Backing resistance work follows the same accepted exposure independently.
+Without a receiver it is reported as `exported_backing_j`.
+`with_backing_receiver` can instead bind one explicitly authored active thermal
+cell distinct from every coating bin before the first advance. Its original
+mass, geometry, caloric identity and storage basis remain authoritative; no
+backing thermal mass or constitutive law is inferred from impedance.
+`backing_thermal_input_j` is a subset of total native `thermal_input_j`.
+Backing elastic and kinetic storage never becomes heat.
+
+The physical acoustic balance subtracts all backing dissipation; the
+thermal-credit balance includes only explicitly received backing work.
+Empty or zero-thickness supported coatings retain their direct boundary and
+can heat only the explicit backing receiver. Coefficients remain frozen under
+the caller's declared coating and support temperature bands: no temperature
+refresh, carrier transient, resonator ring-up or mechanical-energy release is
+inferred. The native thermal owner continues to control conduction, boundary
+events, material storage and accepted durations.
+
+The supported-heating regression fixtures cover tiny backing work and intrinsic
+absorption below reflected-power roundoff, native enthalpy retention when the
+reported temperature rounds unchanged, receiver and source-identity refusal,
+zero-thickness support, and compatibility of the original two-fluid API.
