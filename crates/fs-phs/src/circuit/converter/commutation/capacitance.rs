@@ -33,6 +33,8 @@ use crate::{
 };
 use fs_math::dd::Dd;
 
+/// Original finite battery and motor shafts with continuing device capacitor charge.
+pub mod battery_motor;
 mod plan;
 mod standalone;
 use plan::{GatePlan, GateStep};

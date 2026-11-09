@@ -3902,3 +3902,40 @@ resolve a transient on an arbitrarily coarse interval. The focused native
 regressions compare independent analytic RC trajectories and individual heat
 integrals, including nanofarad/nanosecond similarity, gate-edge continuity,
 known-node slopes, and atomic refusals.
+
+## Finite battery and motor shafts with device capacitor charge
+
+`commutation::capacitance::battery_motor::PreparedCapacitiveBatteryMotorCycle`
+composes the original battery, physical lead, five-state capacitive converter
+and reciprocal DC motor through the existing native interconnection. Its eleven
+coordinates are battery chemical/polarization/bus charge, converter flux and
+bus/bus/node/node electrode charge, then motor flux and rotor/stator momenta.
+All continue across gate edges in one native workspace. Converter bus charges
+are total electrode charges: initialize from explicitly authored bus and node
+voltages. Bare bus charges from the nine-state lane are not interchangeable;
+no state promotion or node reset is inferred.
+
+The same `ConverterCore` and `CapacitiveConverterAccount` as the standalone lane
+own coupled capacitance, winding storage, original device conduction and each
+bus/device capacitor energy change. `BatterySource::interval` owns original
+chemical/polarization/bus storage and heat. The mapped motor connection retains
+equal/opposite torque and bearing reactions. Regeneration, polarization, finite
+bus charging and auxiliary demand are solved together. Capacitor energy stays
+in reversible electrical storage and never becomes an extra term in the
+fourteen physical heat channels or an empirical switching-loss map.
+
+Each substep and complete cycle reconcile battery, lead, converter, magnetic,
+mechanical, interface and full native accounts. Endpoint energy is independently
+checked against accumulated constituent contributions. Device/load and original
+SOC support, bounded refinement, gate/command correlation and atomic refusal
+remain binding. Both shaft momenta and external torque impulse are retained.
+Constant C/L and original battery/motor laws stay fixed over the electrical
+cycle. Temperature-dependent storage work, nonlinear C(V), recovery, gate-drive
+energy, protection and automatic control require their own accounted models.
+Temporal refinement must resolve the additional physical RC time scales.
+
+`tests/capacitive_battery_motor.rs` defines an independent physical-voltage RK4
+comparison with fourteen heats and eight signed works, steady regeneration,
+both dead-time diode directions, original node KCL and transactional refusals.
+The standalone five-state core was compiled and tested natively; execution of
+this eleven-state extension was blocked by loss of the runtime in this delivery.
