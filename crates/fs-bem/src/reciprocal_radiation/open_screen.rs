@@ -870,6 +870,33 @@ impl<'a> PreparedScreen<'a> {
         )
     }
 
+    /// Integrate the local conductive weak form directly, using the original
+    /// P1 law and pressure interpolation. Shared by individual sources and
+    /// coherent mechanical ports; reactive current never enters this heat.
+    fn local_wall_work(
+        &self,
+        beta: &[C64],
+        jump: &[C64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, HelmholtzError> {
+        let mut work = crate::ComplexSum::default();
+        for (facet, samples) in self.facets.iter().zip(&self.samples) {
+            poll(cancelled)?;
+            for sample in samples {
+                let conductance = (0..3)
+                    .map(|a| beta[facet.ids[a]].re * sample.shape[a])
+                    .sum::<f64>();
+                let pressure = (0..3).fold(C64::ZERO, |p, a| {
+                    p + jump[facet.ids[a]].scale(sample.shape[a])
+                });
+                work.add(C64::from_re(
+                    conductance * pressure.norm_sq() * sample.weight,
+                ));
+            }
+        }
+        Ok(work.finish().re)
+    }
+
     /// The pressure-test/velocity work pairing is the RHS and its transpose.
     /// A facet-local shell trace and a continuous nodal drive share this solve.
     #[allow(clippy::too_many_arguments)]
@@ -922,24 +949,7 @@ impl<'a> PreparedScreen<'a> {
         match admittance {
             Admittance::Rigid => {}
             Admittance::Local { beta, .. } => {
-                // Use the SAME interpolated law/pressure and quadrature as
-                // weak_image, but integrate its conductive work directly.
-                // Contracting the rounded reactive weak image would erase
-                // weak physical loss, or invent loss on a reactive sheet.
-                for (facet, samples) in self.facets.iter().zip(&self.samples) {
-                    poll(cancelled)?;
-                    for sample in samples {
-                        let conductance = (0..3)
-                            .map(|a| beta[facet.ids[a]].re * sample.shape[a])
-                            .sum::<f64>();
-                        let pressure = (0..3).fold(C64::ZERO, |p, a| {
-                            p + jump[facet.ids[a]].scale(sample.shape[a])
-                        });
-                        wall_work.add(C64::from_re(
-                            conductance * pressure.norm_sq() * sample.weight,
-                        ));
-                    }
-                }
+                wall_work.add(C64::from_re(self.local_wall_work(beta, &jump, cancelled)?));
             }
             Admittance::NonLocal { .. } => {
                 let weak = self.weak_image(admittance, &jump)?;

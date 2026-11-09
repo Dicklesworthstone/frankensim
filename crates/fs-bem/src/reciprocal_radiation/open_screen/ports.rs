@@ -15,8 +15,9 @@ pub struct ScreenPortLimits {
     pub maximum_ports: usize,
     /// Every row-major impedance entry, including all self and mutual terms.
     pub maximum_matrix_entries: usize,
-    /// Every retained nodal pressure jump across all source columns. The real
-    /// weak-drive scratch has no more entries than this same bound.
+    /// Every retained nodal pressure jump across all source columns, plus one
+    /// nodal row when a local sheet admittance is retained. The real weak-drive
+    /// scratch has no more entries than this same bound.
     pub maximum_jump_entries: usize,
     /// One assembly/factor, all source solves/audits and full work projection.
     /// The same total must also fit OpenOptions::maximum_work.
@@ -30,6 +31,7 @@ pub struct ScreenVelocityPortSolution<'p, 's> {
     solutions: Vec<JumpSolution<'p, 's>>,
     impedance: Vec<C64>,
     frequency_work: u64,
+    local_admittance: Option<Vec<C64>>,
 }
 
 impl<'s> PreparedScreen<'s> {
@@ -48,6 +50,21 @@ impl<'s> PreparedScreen<'s> {
         let work =
             self.frequency_work() + 128 * p * n * n + 128 * p * f + 64 * p * v + 8 * p * p * v;
         u64::try_from(work).map_err(|_| bad("open velocity-port work overflow"))
+    }
+
+    /// Complete passive local-sheet batch, including assembly of its original
+    /// Robin weak form and per-source absorption. No wall law is approximated
+    /// by a modal diagonal or by an added damping term.
+    pub fn velocity_port_work_with_local_admittance(
+        &self,
+        ports: usize,
+    ) -> Result<u64, HelmholtzError> {
+        let base = u128::from(self.velocity_port_work(ports)?);
+        let n = self.n as u128;
+        let v = self.surface.vertices.len() as u128;
+        let samples = self.samples.iter().map(|s| s.len() as u128).sum::<u128>();
+        let work = base + 128 * (n + ports as u128) * samples + 32 * n * (n + v) + 16 * v;
+        u64::try_from(work).map_err(|_| bad("local-sheet velocity-port work overflow"))
     }
 
     /// Exact real work pairing G, mode-major with one entry per ACTIVE pressure
@@ -135,11 +152,66 @@ impl<'s> PreparedScreen<'s> {
         medium: Medium,
         rows: &[&[[f64; 3]]],
         limits: ScreenPortLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ScreenVelocityPortSolution<'p, 's>, HelmholtzError> {
+        self.solve_velocity_ports_boundary(k, medium, rows, None, limits, cancelled)
+    }
+
+    /// Load every physical velocity coordinate through a passive, locally
+    /// reacting sheet at this frequency. beta = rho*c*Y is dimensionless and
+    /// has one finite value per ORIGINAL mesh vertex, including free edges.
+    /// Its real part must be nonnegative; the imaginary part retains storage.
+    ///
+    /// The relative leakage law is v = v_drive - Y*[p]. The original weak
+    /// operator becomes H + i*k*M_beta; the SAME exact drive/test pairing G
+    /// supplies (H+i*k*M_beta)*p = i*rho*omega*G^T*rate and efforts G*p.
+    /// Both faces are already present in [p], with no extra factor two.
+    ///
+    /// The complete matrix therefore loads the structure with radiation AND
+    /// sheet absorption. Use absorbed_power_w and radiated_power_w to separate
+    /// those channels for coherent complex rates. A porous/perforated sheet's
+    /// homogenization, frequency dependence and validity belong to its authored
+    /// Y law; no wall thickness, thermal law or causal fit is inferred here.
+    ///
+    /// One original Robin factorization serves all columns. beta is retained
+    /// by value, so later field/heat observations cannot use a different law.
+    /// maximum_jump_entries includes this one additional nodal coefficient row.
+    /// Invalid/active beta, exceeded resources or cancellation publish no batch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_velocity_ports_with_local_admittance<'p>(
+        &'p self,
+        k: f64,
+        medium: Medium,
+        rows: &[&[[f64; 3]]],
+        beta: &[C64],
+        limits: ScreenPortLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ScreenVelocityPortSolution<'p, 's>, HelmholtzError> {
+        self.solve_velocity_ports_boundary(k, medium, rows, Some(beta), limits, cancelled)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_velocity_ports_boundary<'p>(
+        &'p self,
+        k: f64,
+        medium: Medium,
+        rows: &[&[[f64; 3]]],
+        beta: Option<&[C64]>,
+        limits: ScreenPortLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ScreenVelocityPortSolution<'p, 's>, HelmholtzError> {
         poll(&mut cancelled)?;
+        let law = beta.map_or(Admittance::Rigid, |beta| Admittance::Local {
+            beta,
+            declared_active: false,
+        });
+        law.validate(self.surface.vertices.len())?;
         let ports = rows.len();
-        let frequency_work = self.velocity_port_work(ports)?;
+        let frequency_work = if beta.is_some() {
+            self.velocity_port_work_with_local_admittance(ports)?
+        } else {
+            self.velocity_port_work(ports)?
+        };
         if !k.is_finite()
             || k <= 0.0
             || k > self.highest_k
@@ -159,7 +231,8 @@ impl<'s> PreparedScreen<'s> {
             .checked_mul(ports)
             .ok_or_else(|| bad("open velocity-port matrix extent overflow"))?;
         let jumps = ports
-            .checked_mul(self.surface.vertices.len())
+            .checked_add(usize::from(beta.is_some()))
+            .and_then(|rows| rows.checked_mul(self.surface.vertices.len()))
             .ok_or_else(|| bad("open velocity-port jump extent overflow"))?;
         if entries > limits.maximum_matrix_entries
             || jumps > limits.maximum_jump_entries
@@ -170,6 +243,13 @@ impl<'s> PreparedScreen<'s> {
                 "complete open velocity-port batch exceeds declared resources",
             ));
         }
+        let local_admittance = if let Some(values) = beta {
+            let mut owned = zeroed(values.len(), C64::ZERO)?;
+            owned.copy_from_slice(values);
+            Some(owned)
+        } else {
+            None
+        };
         // Retain the actual test/drive pairing once, rather than repeating nine
         // facet products for every mode pair or inventing a lumped mass rule.
         let weak = self.velocity_port_pairing(
@@ -179,7 +259,7 @@ impl<'s> PreparedScreen<'s> {
             &mut cancelled,
         )?;
         poll(&mut cancelled)?;
-        let (h, lu) = self.factor_wave(k, true, Admittance::Rigid, &mut cancelled)?;
+        let (h, lu) = self.factor_wave(k, true, law, &mut cancelled)?;
         let mut solutions = Vec::new();
         solutions
             .try_reserve_exact(ports)
@@ -196,7 +276,7 @@ impl<'s> PreparedScreen<'s> {
                 k,
                 true,
                 medium,
-                Admittance::Rigid,
+                law,
                 &drive,
                 &h,
                 &lu,
@@ -224,6 +304,7 @@ impl<'s> PreparedScreen<'s> {
             solutions,
             impedance,
             frequency_work,
+            local_admittance,
         })
     }
 }
@@ -241,6 +322,12 @@ impl<'p, 's> ScreenVelocityPortSolution<'p, 's> {
     pub fn frequency_work(&self) -> u64 {
         self.frequency_work
     }
+    /// Original normalized nodal sheet law at this source frequency. None
+    /// means the rigid API; a supplied all-zero law remains explicitly present.
+    pub fn local_admittance(&self) -> Option<&[C64]> {
+        self.local_admittance.as_deref()
+    }
+
     /// Largest original per-source backward residual; not an error bound for
     /// a nearly cancelling coherent combination or the continuum field.
     pub fn maximum_backward_residual(&self) -> f64 {
@@ -286,6 +373,34 @@ impl<'p, 's> ScreenVelocityPortSolution<'p, 's> {
                 .sum::<f64>();
         if !power.is_finite() {
             return Err(bad("open velocity-port work overflow"));
+        }
+        Ok(power)
+    }
+
+    /// Irreversible sheet work for the SAME coherent pressure field [W].
+    /// Integrates Re(beta)*|[p]|^2/(2*rho*c) with the source's original P1 law
+    /// and quadrature. Complex source amplitudes combine before squaring;
+    /// summing the unit-source heat would discard physical interference.
+    /// Purely reactive sheets return exactly zero, even at large reactance.
+    pub fn absorbed_power_w(
+        &self,
+        rates: &[C64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<f64, HelmholtzError> {
+        poll(&mut cancelled)?;
+        self.admit_rates(rates)?;
+        let Some(beta) = self.local_admittance.as_deref() else {
+            return Ok(0.0);
+        };
+        let jump = self.pressure_jump(rates, &mut cancelled)?;
+        let source = &self.solutions[0];
+        let work = source
+            .prepared
+            .local_wall_work(beta, &jump, &mut cancelled)?;
+        let power = 0.5 / (source.medium.density * source.medium.sound_speed) * work;
+        poll(&mut cancelled)?;
+        if !power.is_finite() || power < 0.0 {
+            return Err(bad("coherent passive-sheet absorption is unrepresentable"));
         }
         Ok(power)
     }

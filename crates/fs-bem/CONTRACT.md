@@ -1607,6 +1607,31 @@ the original P1 observer once, retaining every interference term. Failed or
 cancelled batches publish no partial matrix. This is real-frequency response;
 it supplies neither a causal loading realization nor complex loaded poles.
 
+`PreparedScreen::solve_velocity_ports_with_local_admittance` extends that same
+mechanical pairing to a passive porous/absorbing sheet. The caller supplies
+frequency-evaluated nodal `beta=rho*c*Y`; finite nonnegative real parts are
+required, including at the free-edge vertices. The original Robin operator
+`H+i*k*M_beta` is factored once for the complete source batch. Its spatially
+varying P1 coefficient remains inside the weak integral, preserving reciprocity
+and source work without a modal-diagonal damping approximation. The complete
+matrix now represents radiation plus sheet absorption in the original source
+coordinates; the pressure jump still accounts for both faces exactly once.
+
+The batch owns its original nodal beta values. Its `absorbed_power_w` combines
+the complex source pressure fields before integrating
+`Re(beta)*|[p]|^2/(2*rho*c)`, using the SAME local wall-work owner as the scalar
+screen solve. Reactive currents cannot create spurious heat or erase weak
+conductance. Original `input_power_w` and `radiated_power_w` retain coherent
+cross terms; their physical balance is input = radiation + absorption.
+The retained-entry allowance includes one extra nodal law row, and the work
+allowance includes Robin assembly and all source absorption integrals. The
+rigid API is unchanged; an all-zero supplied law gives identical jumps and
+impedances. This local sheet model supplies no independently coated second
+face, material homogenization, inferred thermal partition or broadband law.
+`tests/open_screen_port_admittance.rs` checks exact P1 work, independent cubic
+heat integration, coherent energy balance, high-Q/lossless clock invariance,
+zero-law equality, source-law retention, resource refusals and cancellation.
+
 `JumpSolution::prepare_receivers` and
 `ScreenVelocityPortSolution::prepare_receivers` also expose Cartesian particle
 velocity beside pressure. They reuse the original adaptive P1 double-layer
