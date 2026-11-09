@@ -1,4 +1,4 @@
-//! A source-clock variation is an exact affine envelope on the original tone.
+//! A source-clock variation raises the original polynomial envelope by one degree.
 
 use super::gradient::{
     ModalTonePowerDerivative, ModalTonePowerGradientBudget, admit_layout, finite, poll,
@@ -25,7 +25,7 @@ impl ModalTonePowerFrequencyGradient {
     }
 }
 
-/// Original constant-tone bank plus exact affine power companion factors.
+/// Original tone bank plus exact affine or quadratic power companion factors.
 ///
 /// dF_j/dOmega_j = t*(S_j*cos(Omega_j*t)-C_j*sin(Omega_j*t)). This is the
 /// original affine forcing law with zero start and h*(S_j,-C_j) end variation.
@@ -35,8 +35,8 @@ impl ModalTonePowerFrequencyGradient {
 ///
 /// Warm queries allocate nothing, call no transcendentals and poll cancellation
 /// between factor rows and original source contractions. Duration, mechanics,
-/// source initial phase and mass/basis normalization stay fixed. An affine BASE
-/// would require quadratic-envelope power factors and is explicitly refused.
+/// source initial phase and mass/basis normalization stay fixed. An affine base
+/// uses complementary quadratic clock factors for its two original endpoints.
 #[derive(Debug)]
 pub struct PreparedModalTonePowerFrequencyGradient<'a> {
     bank: &'a PreparedModalTones,
@@ -44,13 +44,15 @@ pub struct PreparedModalTonePowerFrequencyGradient<'a> {
 }
 
 impl PreparedModalTones {
-    /// Prepare one affine power companion per original mode. The original bank,
+    /// Prepare one polynomial power companion per original mode. The original bank,
     /// motion coefficients, accepted state and model binding remain unchanged.
     ///
-    /// The existing affine bank admission is a conservative cold byte/work
-    /// bound for these companions; no duplicate motion or model is constructed.
+    /// For constant bases, the existing affine bank admission is a conservative
+    /// cold byte/work bound; no duplicate motion or model is constructed.
     /// It excludes the borrowed original bank. Query admission separately uses
-    /// the companion's full affine dimension and the original source count.
+    /// the companion's full dimension and the original source count. Affine
+    /// bases use n=2+6K complementary quadratic factors with their own explicit
+    /// cold and warm admission; every original endpoint is retained.
     /// Cancellation is polled before allocation and between bounded companion
     /// preparations. Refusal publishes no partial cache or physical state.
     pub fn prepare_power_frequency_gradients(
@@ -60,11 +62,6 @@ impl PreparedModalTones {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PreparedModalTonePowerFrequencyGradient<'_>, ModalAcousticTimeError> {
         poll(&mut cancelled)?;
-        if self.affine {
-            return Err(invalid(
-                "source-frequency power gradients require constant-envelope tones",
-            ));
-        }
         if self.tone_count() > preparation_budget.maximum_tones {
             return Err(ModalAcousticTimeError::BudgetExceeded {
                 what: "power-frequency companion tone count",
@@ -72,26 +69,35 @@ impl PreparedModalTones {
                 limit: preparation_budget.maximum_tones as f64,
             });
         }
-        admit_layout(self.unique.len(), self.tone_count(), true, query_budget)?;
-        admit_cost(
-            self.mode_count(),
-            |index| {
-                let motion = &self.modes[index].motion[0];
-                (motion.angular_frequency_rad_s, motion.transition.drag)
-            },
-            &self.unique,
-            self.tone_count(),
-            self.duration_s,
-            preparation_budget,
-            true,
-            &mut cancelled,
-        )?;
+        if self.affine {
+            super::quadratic::admit(self, preparation_budget, query_budget, &mut cancelled)?;
+        } else {
+            admit_layout(self.unique.len(), self.tone_count(), true, query_budget)?;
+            admit_cost(
+                self.mode_count(),
+                |index| {
+                    let motion = &self.modes[index].motion[0];
+                    (motion.angular_frequency_rad_s, motion.transition.drag)
+                },
+                &self.unique,
+                self.tone_count(),
+                self.duration_s,
+                preparation_budget,
+                true,
+                &mut cancelled,
+            )?;
+        }
         poll(&mut cancelled)?;
         let mut companions = Vec::with_capacity(self.mode_count());
         for mode in &self.modes {
             poll(&mut cancelled)?;
             let motion = &mode.motion[0];
-            companions.push(TonePower::try_new_affine(
+            let prepare = if self.affine {
+                TonePower::try_new_quadratic
+            } else {
+                TonePower::try_new_affine
+            };
+            companions.push(prepare(
                 motion.angular_frequency_rad_s,
                 motion.transition.drag,
                 &self.unique,
@@ -125,6 +131,11 @@ impl PreparedModalTonePowerFrequencyGradient<'_> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ModalTonePowerFrequencyGradient, ModalAcousticTimeError> {
         poll(&mut cancelled)?;
+        if self.bank.affine {
+            return Err(invalid(
+                "affine source clocks require both original endpoint pairs",
+            ));
+        }
         let companion = self
             .companions
             .get(mode_index)
@@ -156,6 +167,53 @@ impl PreparedModalTonePowerFrequencyGradient<'_> {
                     ),
             })?;
         }
+        poll(&mut cancelled)?;
+        Ok(ModalTonePowerFrequencyGradient {
+            sources,
+            count: self.bank.tone_count(),
+        })
+    }
+
+    /// Complete coherent source-clock work/heat derivatives for an affine bank.
+    /// Both endpoint pairs use the ORIGINAL interval-start carrier basis. The
+    /// exact direction h*[u*(1-u)*(S0,-C0)+u*u*(S1,-C1)] retains each original
+    /// source independently, even when duplicate nominal envelopes cancel.
+    /// It forms neither individual endpoint differences nor a difference of
+    /// late-time complementary power covectors. State, mechanics, interval and
+    /// endpoint amplitudes stay fixed. A trajectory reverse sweep also includes
+    /// the motion and accepted source-phase advancement chains.
+    #[allow(clippy::too_many_arguments)]
+    pub fn gradients_mode_affine(
+        &self,
+        mode_index: usize,
+        state: ModalAcousticState,
+        cosine_start: &[f64],
+        sine_start: &[f64],
+        cosine_end: &[f64],
+        sine_end: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ModalTonePowerFrequencyGradient, ModalAcousticTimeError> {
+        poll(&mut cancelled)?;
+        if !self.bank.affine {
+            return Err(invalid(
+                "affine source clocks require an original affine tone bank",
+            ));
+        }
+        let companion = self
+            .companions
+            .get(mode_index)
+            .ok_or_else(|| invalid("tone mode index must be admitted"))?;
+        let [c, s, dc, ds] =
+            self.bank
+                .collect_affine(cosine_start, sine_start, cosine_end, sine_end)?;
+        let k = self.bank.unique.len();
+        let sources = companion.affine_clock_derivatives(
+            state,
+            [&c[..k], &s[..k], &dc[..k], &ds[..k]],
+            [cosine_start, sine_start, cosine_end, sine_end],
+            &self.bank.source_to_unique,
+            &mut cancelled,
+        )?;
         poll(&mut cancelled)?;
         Ok(ModalTonePowerFrequencyGradient {
             sources,

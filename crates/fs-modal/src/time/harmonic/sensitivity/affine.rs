@@ -194,7 +194,12 @@ impl AffineForceSensitivity {
     }
 }
 
-fn small_delta_derivative(angle: f64, drag: f64, phase: f64, parameter: Parameter) -> [f64; 4] {
+pub(in crate::time::harmonic) fn small_delta_derivative(
+    angle: f64,
+    drag: f64,
+    phase: f64,
+    parameter: Parameter,
+) -> [f64; 4] {
     let (da, dd, _) = parameter.seeds();
     let mut gains = [0.0; 4];
     for column in 0..2 {

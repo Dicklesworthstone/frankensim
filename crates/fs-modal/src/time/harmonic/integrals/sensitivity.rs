@@ -217,7 +217,7 @@ fn physical_gradient(
 
 // Frechet action of the same short augmented flow. The original entire
 // exponential's differentiated recurrence has no pole/detuning denominators.
-fn small_action_derivatives(
+pub(in crate::time::harmonic) fn small_action_derivatives(
     angle: f64,
     drag: f64,
     phase: f64,

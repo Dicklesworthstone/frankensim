@@ -16,7 +16,7 @@ use crate::time::forcing::{
 };
 use fs_math::det;
 
-mod affine;
+pub(super) mod affine;
 mod clock;
 pub(super) use affine::AffineForceSensitivity;
 pub use clock::HarmonicForcePhasePullback;
@@ -387,7 +387,7 @@ impl PreparedHarmonicForceSensitivity {
     }
 }
 
-fn small_derivative(
+pub(in crate::time::harmonic) fn small_derivative(
     angle: f64,
     drag: f64,
     phase: f64,

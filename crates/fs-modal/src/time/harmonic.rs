@@ -28,10 +28,11 @@ pub use tones::{
     MAX_HARMONIC_TONES, ModalAffineTonePowerGradient, ModalAffineTonePowerSourceGradient,
     ModalAffineTonePullback, ModalAffineToneSourcePullback, ModalToneBudget,
     ModalTonePowerDerivative, ModalTonePowerFrequencyGradient, ModalTonePowerGradient,
-    ModalTonePowerGradientBudget, ModalTonePowerSourceGradient, ModalTonePullback,
-    ModalToneSensitivityBudget, ModalToneSensitivityFrame, ModalToneSourcePullback,
-    ModalToneSourceSensitivity, PreparedModalTonePowerFrequencyGradient,
-    PreparedModalTonePowerGradient, PreparedModalToneSensitivity, PreparedModalTones,
+    ModalTonePowerGradientBudget, ModalTonePowerMechanicalGradient, ModalTonePowerSourceGradient,
+    ModalTonePullback, ModalToneSensitivityBudget, ModalToneSensitivityFrame,
+    ModalToneSourcePullback, ModalToneSourceSensitivity, PreparedModalTonePowerFrequencyGradient,
+    PreparedModalTonePowerGradient, PreparedModalTonePowerMechanicalGradient,
+    PreparedModalToneSensitivity, PreparedModalTones,
 };
 
 /// Cached motion for `q'' + c*q' + omega^2*q = F(t)`, where
