@@ -40,38 +40,40 @@ export interface ToolRenderParams {
 
 const CASE_SHELL_N_THETA = 64;
 const CASE_SHELL_N_Z = 8;
+const CASE_N_THETA = CASE_SHELL_N_THETA;
+const CASE_N_Z = CASE_SHELL_N_Z;
 const CASE_SHELL_NODES = CASE_SHELL_N_THETA * CASE_SHELL_N_Z;
 const CASE_RENDER_N_THETA = 128;
 const CASE_RENDER_N_Z = 22;
+const CASE_RENDER_NODES = CASE_RENDER_N_THETA * CASE_RENDER_N_Z;
 
-const GRID_N = 24;
+const GRID_N = 48;
 const GRID_HALF_SPAN_MM = 28.8;
 const GRID_DX_MM = (2.0 * GRID_HALF_SPAN_MM) / GRID_N;
 const RENDER_GRID_N = 84;
 const RENDER_GRID_DX_MM = (2.0 * GRID_HALF_SPAN_MM) / (RENDER_GRID_N - 1);
 
-function catmullRom(p0: number, p1: number, p2: number, p3: number, t: number): number {
+function bSplineCubic(p0: number, p1: number, p2: number, p3: number, t: number): number {
+  const oneMinusT = 1.0 - t;
   const t2 = t * t;
   const t3 = t2 * t;
-  return (
-    0.5 *
-    (2.0 * p1 +
-      (-p0 + p2) * t +
-      (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 +
-      (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
-  );
+  const b0 = (oneMinusT * oneMinusT * oneMinusT) / 6.0;
+  const b1 = (3.0 * t3 - 6.0 * t2 + 4.0) / 6.0;
+  const b2 = (-3.0 * t3 + 3.0 * t2 + 3.0 * t + 1.0) / 6.0;
+  const b3 = t3 / 6.0;
+  return b0 * p0 + b1 * p1 + b2 * p2 + b3 * p3;
 }
 
 /**
- * Smoothly sample a 2D scalar field on the `24 x 24` PDE grid at world coordinates `(xMm, yMm)`
- * using 9-point Gaussian-filtered bilinear interpolation so free-surface molten & solidified gold
- * pools render with organic Young-Laplace meniscus contours instead of 2.17 mm square cells.
+ * Smoothly sample a 2D scalar field on the `48 x 48` PDE grid at world coordinates `(xMm, yMm)`
+ * using C^2-continuous Bicubic B-Spline interpolation so free-surface molten & solidified gold
+ * pools render with organic Young-Laplace meniscus contours and continuous specular curvature.
  */
 function sampleSmoothPdeField(
   gridData: Float32Array,
-  channelOffset: number,
   xMm: number,
   yMm: number,
+  channelOffset: number,
 ): number {
   const gx = (xMm + GRID_HALF_SPAN_MM) / GRID_DX_MM - 0.5;
   const gy = (yMm + GRID_HALF_SPAN_MM) / GRID_DX_MM - 0.5;
@@ -79,24 +81,25 @@ function sampleSmoothPdeField(
   const iy0 = Math.floor(gy);
   const fx = gx - ix0;
   const fy = gy - iy0;
+  const ch = channelOffset | 0;
 
   const readCell = (cx: number, cy: number): number => {
     const xClamp = Math.max(0, Math.min(GRID_N - 1, cx));
     const yClamp = Math.max(0, Math.min(GRID_N - 1, cy));
-    return gridData[(yClamp * GRID_N + xClamp) * 7 + channelOffset]!;
+    return gridData[(yClamp * GRID_N + xClamp) * 7 + ch] ?? 0.0;
   };
 
-  // Evaluate 4x4 Catmull-Rom bicubic patch clamped to >= 0 for positive thickness fields
+  // Evaluate 4x4 C^2 Bicubic B-Spline patch (strictly convex-hull preserving, zero ringing)
   const rowVals = [0, 0, 0, 0];
   for (let m = -1; m <= 2; m++) {
     const v0 = readCell(ix0 - 1, iy0 + m);
     const v1 = readCell(ix0, iy0 + m);
     const v2 = readCell(ix0 + 1, iy0 + m);
     const v3 = readCell(ix0 + 2, iy0 + m);
-    rowVals[m + 1] = catmullRom(v0, v1, v2, v3, fx);
+    rowVals[m + 1] = bSplineCubic(v0, v1, v2, v3, fx);
   }
-  const val = catmullRom(rowVals[0]!, rowVals[1]!, rowVals[2]!, rowVals[3]!, fy);
-  return channelOffset === 0 ? Math.max(70.0, val) : Math.max(0.0, val);
+  const val = bSplineCubic(rowVals[0]!, rowVals[1]!, rowVals[2]!, rowVals[3]!, fy);
+  return ch === 0 ? Math.max(70.0, val) : Math.max(0.0, val);
 }
 
 /**
@@ -711,8 +714,10 @@ export class PocketWatchScene {
     // Sourced Materials from `data/matdb/seed-v1`
     this.matGoldCase = new THREE.MeshPhysicalMaterial({
       color: new THREE.Color(0xffffff),
-      metalness: 0.92,
-      roughness: 0.22,
+      emissive: new THREE.Color(0xff5810),
+      emissiveIntensity: 0.0,
+      metalness: 0.91,
+      roughness: 0.23,
       clearcoat: 0.14,
       clearcoatRoughness: 0.18,
       vertexColors: true,
@@ -720,26 +725,35 @@ export class PocketWatchScene {
 
     this.matSolidGoldStatic = new THREE.MeshPhysicalMaterial({
       color: new THREE.Color(0xe5b852),
-      metalness: 0.92,
-      roughness: 0.21,
+      metalness: 0.91,
+      roughness: 0.22,
       clearcoat: 0.14,
       clearcoatRoughness: 0.18,
     });
 
     this.matMoltenGold = new THREE.MeshPhysicalMaterial({
       color: new THREE.Color(0xffffff),
-      metalness: 0.94,
-      roughness: 0.07,
-      clearcoat: 0.75,
-      clearcoatRoughness: 0.05,
+      emissive: new THREE.Color(0xff6214),
+      emissiveIntensity: 0.22,
+      metalness: 0.92,
+      roughness: 0.11,
+      clearcoat: 0.65,
+      clearcoatRoughness: 0.08,
       vertexColors: true,
+      transparent: true,
+      alphaTest: 0.015,
+      depthWrite: true,
     });
 
     this.matSolidifiedGold = new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color(0xdca942),
+      color: new THREE.Color(0xffffff),
       metalness: 0.9,
-      roughness: 0.28,
-      clearcoat: 0.12,
+      roughness: 0.27,
+      clearcoat: 0.14,
+      vertexColors: true,
+      transparent: true,
+      alphaTest: 0.015,
+      depthWrite: true,
     });
 
     this.matRhodiumPlate = new THREE.MeshStandardMaterial({
@@ -874,7 +888,7 @@ export class PocketWatchScene {
     this.watchRoot.add(this.frostOverlayMesh);
 
     // Build Interactive Perturbation Tools (Blowtorch, LN2, Oil, Magnet, Studio Microphone)
-    const tools = this.buildPerturbationApparatus();
+    const tools = this.buildPerturbationApparatus(finishes.softParticleTex);
     this.torchFlameCore = tools.torchFlameCore;
     this.torchFlamePlume = tools.torchFlamePlume;
     this.torchPointLight = tools.torchPointLight;
@@ -888,12 +902,13 @@ export class PocketWatchScene {
   }
 
   /**
-   * 1. Emergent 3D Deformable 18k Gold Bassine Case Shell (`64 x 8` Lagrangian shell nodes)
+   * 1. Emergent 3D Deformable 18k Gold Bassine Case Shell (`128 x 22` Smooth Catmull-Rom Subdivided Surface
+   *    evaluated from the `64 x 8` Rust Lagrangian shell continuum nodes)
    *    + 12h Pendant, 24-Flute Onion Crown, Articulated Bow, and Sapphire Crystals.
    */
   private buildDeformableBassineCaseAndCrown(): void {
-    // Double-sided (outer + inner wall) triangle mesh over the 64 x 8 = 512 3D shell nodes from WASM
-    const totalVerts = CASE_SHELL_NODES * 2; // 0..511 = outer surface, 512..1023 = inner surface
+    const ringVerts = CASE_RENDER_N_THETA * CASE_RENDER_N_Z;
+    const totalVerts = ringVerts * 2; // 0..ringVerts-1 = outer surface, ringVerts..2*ringVerts-1 = inner surface
     const positions = new Float32Array(totalVerts * 3);
     const colors = new Float32Array(totalVerts * 3);
     const indices: number[] = [];
@@ -902,67 +917,59 @@ export class PocketWatchScene {
     const profileR = [23.0, 25.0, 26.3, 26.8, 26.8, 26.3, 25.0, 23.0];
     const profileH = [2.1, 2.3, 2.6, 2.8, 2.8, 2.6, 2.3, 2.1];
 
+    // Initialize synthetic default 64x8 buffer and populate the smooth 128x22 surface
+    const initData = new Float32Array(CASE_SHELL_NODES * 6);
     for (let iz = 0; iz < CASE_SHELL_N_Z; iz++) {
       for (let it = 0; it < CASE_SHELL_N_THETA; it++) {
-        const i = iz * CASE_SHELL_N_THETA + it;
+        const i = (iz * CASE_SHELL_N_THETA + it) * 6;
         const theta = (it * Math.PI * 2) / CASE_SHELL_N_THETA;
-        const nx = Math.cos(theta);
-        const ny = Math.sin(theta);
-        const r0 = profileR[iz]!;
-        const z0 = profileZ[iz]!;
-        const h0 = profileH[iz]!;
-        const x0 = r0 * nx;
-        const y0 = r0 * ny;
-
-        const oIdx = i * 3;
-        positions[oIdx] = x0 + nx * h0 * 0.45;
-        positions[oIdx + 1] = y0 + ny * h0 * 0.45;
-        positions[oIdx + 2] = z0;
-
-        const iIdx = (CASE_SHELL_NODES + i) * 3;
-        positions[iIdx] = x0 - nx * h0 * 0.55;
-        positions[iIdx + 1] = y0 - ny * h0 * 0.55;
-        positions[iIdx + 2] = z0;
+        const dyTop = Math.max(0.0, Math.sin(theta));
+        const dAng = Math.abs(theta - Math.PI * 0.5);
+        const pendantLobe =
+          dAng < 0.22
+            ? 2.2 * (1.0 - dAng / 0.22) * (1.0 - dAng / 0.22) * (1.0 - 0.12 * Math.abs(profileZ[iz]!))
+            : 0.0;
+        const r0 = profileR[iz]! + pendantLobe * dyTop;
+        initData[i] = r0 * Math.cos(theta);
+        initData[i + 1] = r0 * Math.sin(theta);
+        initData[i + 2] = profileZ[iz]!;
+        initData[i + 3] = profileH[iz]! + 0.35 * pendantLobe;
+        initData[i + 4] = 293.15;
+        initData[i + 5] = 0.0;
       }
     }
 
-    for (let i = 0; i < totalVerts; i++) {
-      colors[i * 3] = 1.0;
-      colors[i * 3 + 1] = 0.82;
-      colors[i * 3 + 2] = 0.35;
-    }
-
-    // Outer wall quads + Inner wall quads
-    for (let iz = 0; iz < CASE_SHELL_N_Z - 1; iz++) {
-      for (let it = 0; it < CASE_SHELL_N_THETA; it++) {
-        const itNext = (it + 1) % CASE_SHELL_N_THETA;
-        const o00 = iz * CASE_SHELL_N_THETA + it;
-        const o10 = iz * CASE_SHELL_N_THETA + itNext;
-        const o01 = (iz + 1) * CASE_SHELL_N_THETA + it;
-        const o11 = (iz + 1) * CASE_SHELL_N_THETA + itNext;
+    // Outer wall quads + Inner wall quads on the subdivided 128 x 22 lattice
+    for (let iz = 0; iz < CASE_RENDER_N_Z - 1; iz++) {
+      for (let it = 0; it < CASE_RENDER_N_THETA; it++) {
+        const itNext = (it + 1) % CASE_RENDER_N_THETA;
+        const o00 = iz * CASE_RENDER_N_THETA + it;
+        const o10 = iz * CASE_RENDER_N_THETA + itNext;
+        const o01 = (iz + 1) * CASE_RENDER_N_THETA + it;
+        const o11 = (iz + 1) * CASE_RENDER_N_THETA + itNext;
         indices.push(o00, o10, o11, o00, o11, o01);
 
-        const i00 = CASE_SHELL_NODES + o00;
-        const i10 = CASE_SHELL_NODES + o10;
-        const i01 = CASE_SHELL_NODES + o01;
-        const i11 = CASE_SHELL_NODES + o11;
+        const i00 = ringVerts + o00;
+        const i10 = ringVerts + o10;
+        const i01 = ringVerts + o01;
+        const i11 = ringVerts + o11;
         indices.push(i00, i11, i10, i00, i01, i11);
       }
     }
 
-    // Top bezel rim cap (iz = CASE_SHELL_N_Z - 1) & Bottom bezel rim cap (iz = 0)
-    for (let it = 0; it < CASE_SHELL_N_THETA; it++) {
-      const itNext = (it + 1) % CASE_SHELL_N_THETA;
-      const topO0 = (CASE_SHELL_N_Z - 1) * CASE_SHELL_N_THETA + it;
-      const topO1 = (CASE_SHELL_N_Z - 1) * CASE_SHELL_N_THETA + itNext;
-      const topI0 = CASE_SHELL_NODES + topO0;
-      const topI1 = CASE_SHELL_NODES + topO1;
+    // Top bezel rim cap & Bottom bezel rim cap
+    for (let it = 0; it < CASE_RENDER_N_THETA; it++) {
+      const itNext = (it + 1) % CASE_RENDER_N_THETA;
+      const topO0 = (CASE_RENDER_N_Z - 1) * CASE_RENDER_N_THETA + it;
+      const topO1 = (CASE_RENDER_N_Z - 1) * CASE_RENDER_N_THETA + itNext;
+      const topI0 = ringVerts + topO0;
+      const topI1 = ringVerts + topO1;
       indices.push(topO0, topO1, topI1, topO0, topI1, topI0);
 
       const botO0 = it;
       const botO1 = itNext;
-      const botI0 = CASE_SHELL_NODES + botO0;
-      const botI1 = CASE_SHELL_NODES + botO1;
+      const botI0 = ringVerts + botO0;
+      const botI1 = ringVerts + botO1;
       indices.push(botO0, botI1, botO1, botO0, botI0, botI1);
     }
 
@@ -970,7 +977,7 @@ export class PocketWatchScene {
     this.caseShellGeometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
     this.caseShellGeometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
     this.caseShellGeometry.setIndex(indices);
-    this.caseShellGeometry.computeVertexNormals();
+    this.updateCaseShellFromContinuum(initData);
 
     this.caseShellMesh = new THREE.Mesh(this.caseShellGeometry, this.matGoldCase);
     this.caseShellMesh.castShadow = true;
@@ -980,7 +987,7 @@ export class PocketWatchScene {
     // 12 o'clock Pendant Post & Collar
     const pendantPost = new THREE.Mesh(
       new THREE.CylinderGeometry(2.4, 3.0, 5.2, 32),
-      this.matGoldCase,
+      this.matSolidGoldStatic,
     );
     pendantPost.position.set(0, 28.4, 0);
     this.layerCase.add(pendantPost);
@@ -989,7 +996,7 @@ export class PocketWatchScene {
     this.crownGroup.position.set(0, 32.0, 0);
     const crownCore = new THREE.Mesh(
       new THREE.SphereGeometry(3.4, 32, 20),
-      this.matGoldCase,
+      this.matSolidGoldStatic,
     );
     crownCore.scale.set(1.0, 0.72, 1.0);
     this.crownGroup.add(crownCore);
@@ -998,7 +1005,7 @@ export class PocketWatchScene {
       const ang = (k * Math.PI * 2) / 24;
       const flute = new THREE.Mesh(
         new THREE.CylinderGeometry(0.32, 0.32, 2.2, 8),
-        this.matGoldCase,
+        this.matSolidGoldStatic,
       );
       flute.position.set(Math.cos(ang) * 3.25, 0, Math.sin(ang) * 3.25);
       this.crownGroup.add(flute);
@@ -1008,7 +1015,7 @@ export class PocketWatchScene {
     // Articulated 18k Gold Pocket-Watch Bow (Torus ring arching over the onion crown)
     const bow = new THREE.Mesh(
       new THREE.TorusGeometry(6.2, 0.72, 20, 64, Math.PI * 1.48),
-      this.matGoldCase,
+      this.matSolidGoldStatic,
     );
     bow.position.set(0, 30.2, 0);
     bow.rotation.z = -Math.PI * 0.24;
@@ -1062,7 +1069,7 @@ export class PocketWatchScene {
     // Chamfered 18k gold inner bezel ring around the 6 o'clock Tourbillon well
     const tourbBezel = new THREE.Mesh(
       new THREE.TorusGeometry(6.65, 0.24, 16, 64),
-      this.matGoldCase,
+      this.matSolidGoldStatic,
     );
     tourbBezel.position.set(0, -11.0, -0.32);
     this.layerMainplate.add(tourbBezel);
@@ -1091,7 +1098,7 @@ export class PocketWatchScene {
     const lowerTourbChaton = createRubyChatonAssembly(
       1.35,
       0.72,
-      this.matGoldCase,
+      this.matSolidGoldStatic,
       this.matRubyJewel,
       this.matPolishedSteel,
       this.matScrewSlot,
@@ -1113,7 +1120,7 @@ export class PocketWatchScene {
       const ch = createRubyChatonAssembly(
         1.1,
         0.58,
-        this.matGoldCase,
+        this.matSolidGoldStatic,
         this.matRubyJewel,
         this.matPolishedSteel,
         this.matScrewSlot,
@@ -1479,7 +1486,7 @@ export class PocketWatchScene {
       const ch = createRubyChatonAssembly(
         1.25,
         0.66,
-        this.matGoldCase,
+        this.matSolidGoldStatic,
         this.matRubyJewel,
         this.matPolishedSteel,
         this.matScrewSlot,
@@ -1533,7 +1540,7 @@ export class PocketWatchScene {
     const upperTourbChaton = createRubyChatonAssembly(
       1.35,
       0.72,
-      this.matGoldCase,
+      this.matSolidGoldStatic,
       this.matRubyJewel,
       this.matPolishedSteel,
       this.matScrewSlot,
@@ -1584,7 +1591,7 @@ export class PocketWatchScene {
       // Gold hexagonal nut on top of pillar
       const nut = new THREE.Mesh(
         new THREE.CylinderGeometry(0.45, 0.45, 0.22, 6),
-        this.matGoldCase,
+        this.matSolidGoldStatic,
       );
       nut.rotation.x = Math.PI * 0.5;
       nut.position.set(px, py, 1.28);
@@ -1627,7 +1634,7 @@ export class PocketWatchScene {
     const escapeJewel = createRubyChatonAssembly(
       0.65,
       0.35,
-      this.matGoldCase,
+      this.matSolidGoldStatic,
       this.matRubyJewel,
       this.matPolishedSteel,
       this.matScrewSlot,
@@ -1661,7 +1668,7 @@ export class PocketWatchScene {
     hornRight.rotation.z = -0.92;
     const guardDart = new THREE.Mesh(
       new THREE.CylinderGeometry(0.05, 0.02, 0.45, 8),
-      this.matGoldCase,
+      this.matSolidGoldStatic,
     );
     guardDart.position.set(0.95, -0.85, 0.08);
     guardDart.rotation.z = 0.85;
@@ -1713,7 +1720,7 @@ export class PocketWatchScene {
     ] as const) {
       const bankPin = new THREE.Mesh(
         new THREE.CylinderGeometry(0.11, 0.11, 0.65, 12),
-        this.matGoldCase,
+        this.matSolidGoldStatic,
       );
       bankPin.rotation.x = Math.PI * 0.5;
       bankPin.position.set(bx, by, -0.38);
@@ -1743,7 +1750,7 @@ export class PocketWatchScene {
       // 4 Slotted Gold Microstella Regulating Nuts facing inward on the rim
       const microstella = new THREE.Mesh(
         new THREE.CylinderGeometry(0.32, 0.32, 0.28, 6),
-        this.matGoldCase,
+        this.matSolidGoldStatic,
       );
       microstella.position.set(Math.cos(a + 0.35) * 4.12, Math.sin(a + 0.35) * 4.12, 0);
       microstella.rotation.z = a + 0.35 + Math.PI * 0.5;
@@ -1755,7 +1762,7 @@ export class PocketWatchScene {
       const a = (k * Math.PI * 2) / 16;
       const screw = new THREE.Mesh(
         new THREE.CylinderGeometry(0.22, 0.16, 0.55, 12),
-        this.matGoldCase,
+        this.matSolidGoldStatic,
       );
       screw.position.set(Math.cos(a) * 4.95, Math.sin(a) * 4.95, 0);
       screw.rotation.z = a - Math.PI * 0.5;
@@ -1887,7 +1894,7 @@ export class PocketWatchScene {
       const isHour = m % 5 === 0;
       const pearl = new THREE.Mesh(
         new THREE.SphereGeometry(isHour ? 0.24 : 0.11, 10, 10),
-        this.matGoldCase,
+        this.matSolidGoldStatic,
       );
       pearl.position.set(Math.cos(a) * 21.4, Math.sin(a) * 21.4, 2.14);
       this.layerDialHands.add(pearl);
@@ -1898,7 +1905,7 @@ export class PocketWatchScene {
       const a = Math.PI * 0.5 - (h * Math.PI * 2) / 12;
       const marker = new THREE.Mesh(
         new THREE.BoxGeometry(0.46, 1.85, 0.24),
-        this.matGoldCase,
+        this.matSolidGoldStatic,
       );
       marker.position.set(Math.cos(a) * 20.1, Math.sin(a) * 20.1, 2.18);
       marker.rotation.z = a - Math.PI * 0.5;
@@ -1945,7 +1952,7 @@ export class PocketWatchScene {
     for (const sign of [-1, 1]) {
       const moonOrb = new THREE.Mesh(
         new THREE.CylinderGeometry(1.25, 1.25, 0.20, 28),
-        this.matGoldCase,
+        this.matSolidGoldStatic,
       );
       moonOrb.rotation.x = Math.PI * 0.5;
       moonOrb.position.set(sign * 1.95, 0, 0.03);
@@ -1955,13 +1962,13 @@ export class PocketWatchScene {
     for (let s = 0; s < 16; s++) {
       const a = (s * Math.PI * 2) / 16 + 0.2;
       const r = 1.1 + (s % 3) * 0.85;
-      const star = new THREE.Mesh(new THREE.OctahedronGeometry(0.14, 0), this.matGoldCase);
+      const star = new THREE.Mesh(new THREE.OctahedronGeometry(0.14, 0), this.matSolidGoldStatic);
       star.position.set(Math.cos(a) * r, Math.sin(a) * r, 0.09);
       this.moonDiscGroup.add(star);
     }
     const moonBezel = new THREE.Mesh(
       new THREE.TorusGeometry(3.92, 0.18, 16, 48),
-      this.matGoldCase,
+      this.matSolidGoldStatic,
     );
     moonBezel.position.z = 0.08;
     moonGroup.add(this.moonDiscGroup, moonBezel);
@@ -1997,7 +2004,7 @@ export class PocketWatchScene {
       tail.position.y = -1.3;
       const boss = new THREE.Mesh(
         new THREE.CylinderGeometry(0.88, 0.88, 0.32, 24),
-        this.matGoldCase,
+        this.matSolidGoldStatic,
       );
       boss.rotation.x = Math.PI * 0.5;
       g.add(shaft, pommeRing, tip, tail, boss);
@@ -2023,38 +2030,41 @@ export class PocketWatchScene {
   }
 
   /**
-   * 9. Continuous 3D Free-Surface Molten & Solidified Gold Heightfield Meshes over the `24 x 24`
-   *    Spatial Finite-Volume PDE Grid from WASM (`sim.spatial_grid_snapshot()`).
+   * 9. Continuous 3D Free-Surface Molten & Solidified Gold Heightfield Meshes reconstructed via
+   *    C^2 Bicubic B-Spline Interpolation (`84 x 84`) over the `48 x 48` Spatial Finite-Volume
+   *    PDE Grid from WASM (`sim.spatial_grid_snapshot()`), with 4-channel RGBA per-pixel iso-contour
+   *    meniscus feathering so liquid and frozen gold pools never show Cartesian quad edges.
    */
   private buildContinuumMoltenAndSolidGoldHeightfields(): void {
     const buildGridGeom = (): THREE.BufferGeometry => {
-      const vCount = GRID_N * GRID_N;
+      const vCount = RENDER_GRID_N * RENDER_GRID_N;
       const pos = new Float32Array(vCount * 3);
-      const col = new Float32Array(vCount * 3);
+      const col = new Float32Array(vCount * 4);
       const idx: number[] = [];
-      for (let gy = 0; gy < GRID_N; gy++) {
-        for (let gx = 0; gx < GRID_N; gx++) {
-          const i = gy * GRID_N + gx;
-          pos[i * 3] = -GRID_HALF_SPAN_MM + (gx + 0.5) * GRID_DX_MM;
-          pos[i * 3 + 1] = -GRID_HALF_SPAN_MM + (gy + 0.5) * GRID_DX_MM;
+      for (let gy = 0; gy < RENDER_GRID_N; gy++) {
+        for (let gx = 0; gx < RENDER_GRID_N; gx++) {
+          const i = gy * RENDER_GRID_N + gx;
+          pos[i * 3] = -GRID_HALF_SPAN_MM + (gx + 0.5) * RENDER_GRID_DX_MM;
+          pos[i * 3 + 1] = -GRID_HALF_SPAN_MM + (gy + 0.5) * RENDER_GRID_DX_MM;
           pos[i * 3 + 2] = -10.0;
-          col[i * 3] = 1.0;
-          col[i * 3 + 1] = 0.84;
-          col[i * 3 + 2] = 0.38;
+          col[i * 4] = 0.96;
+          col[i * 4 + 1] = 0.78;
+          col[i * 4 + 2] = 0.34;
+          col[i * 4 + 3] = 0.0;
         }
       }
-      for (let gy = 0; gy < GRID_N - 1; gy++) {
-        for (let gx = 0; gx < GRID_N - 1; gx++) {
-          const i00 = gy * GRID_N + gx;
+      for (let gy = 0; gy < RENDER_GRID_N - 1; gy++) {
+        for (let gx = 0; gx < RENDER_GRID_N - 1; gx++) {
+          const i00 = gy * RENDER_GRID_N + gx;
           const i10 = i00 + 1;
-          const i01 = i00 + GRID_N;
+          const i01 = i00 + RENDER_GRID_N;
           const i11 = i01 + 1;
           idx.push(i00, i10, i11, i00, i11, i01);
         }
       }
       const g = new THREE.BufferGeometry();
       g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-      g.setAttribute("color", new THREE.BufferAttribute(col, 3));
+      g.setAttribute("color", new THREE.BufferAttribute(col, 4));
       g.setIndex(idx);
       return g;
     };
@@ -2072,13 +2082,13 @@ export class PocketWatchScene {
 
   /**
    * Build the 3D interactive physics perturbation tools:
-   * - Oxy-Butane Blowtorch nozzle & plasma flame plume
-   * - Cryogenic LN2 Dewar nozzle & Leidenfrost vapor cloud
+   * - Oxy-Butane Blowtorch nozzle & multi-layered soft additive plasma flame plume
+   * - Cryogenic LN2 Dewar nozzle & soft textured Leidenfrost vapor cloud
    * - Horological Oil Precision Oiler & stream
    * - Sintered NdFeB N42 Horseshoe/Bar Super-Magnet
    * - Studio Condenser Measurement Microphone
    */
-  private buildPerturbationApparatus(): {
+  private buildPerturbationApparatus(softParticleTex: THREE.CanvasTexture): {
     torchFlameCore: THREE.Mesh;
     torchFlamePlume: THREE.Mesh;
     torchPointLight: THREE.PointLight;
@@ -2086,74 +2096,125 @@ export class PocketWatchScene {
     ln2FrostCloud: THREE.Points;
     oilStreamMesh: THREE.Mesh;
   } {
-    // 1. Blowtorch
+    // 1. Blowtorch with multi-layered soft additive plasma cones & surface hotspot halo
     const nozzle = new THREE.Mesh(
-      new THREE.CylinderGeometry(1.2, 1.8, 12, 20),
+      new THREE.CylinderGeometry(1.1, 1.65, 11.5, 28),
       this.matBrassWheel,
     );
-    nozzle.position.set(0, -14, 8);
+    nozzle.position.set(0, -14.2, 8.2);
     nozzle.rotation.x = -0.55;
-    this.torchGroup.add(nozzle);
+    const nozzleTip = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.88, 1.12, 2.2, 28),
+      this.matPolishedSteel,
+    );
+    nozzleTip.position.set(0, -9.2, 5.1);
+    nozzleTip.rotation.x = -0.55;
+    this.torchGroup.add(nozzle, nozzleTip);
 
     const torchFlameCore = new THREE.Mesh(
-      new THREE.ConeGeometry(1.4, 9.5, 20),
+      new THREE.ConeGeometry(1.15, 9.2, 36, 1, true),
       new THREE.MeshBasicMaterial({
-        color: 0x8be8ff,
+        color: 0xaef4ff,
         transparent: true,
-        opacity: 0.92,
+        opacity: 0.86,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
       }),
     );
-    torchFlameCore.position.set(0, -5.5, 3.8);
+    torchFlameCore.position.set(0, -5.2, 3.5);
     torchFlameCore.rotation.x = 0.98;
 
-    const torchFlamePlume = new THREE.Mesh(
-      new THREE.ConeGeometry(3.2, 15.0, 24),
+    const innerCoreSheath = new THREE.Mesh(
+      new THREE.ConeGeometry(1.75, 11.6, 36, 1, true),
       new THREE.MeshBasicMaterial({
-        color: 0xff7b1c,
+        color: 0x3ec8ff,
         transparent: true,
-        opacity: 0.55,
+        opacity: 0.48,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      }),
+    );
+    torchFlameCore.add(innerCoreSheath);
+
+    const torchFlamePlume = new THREE.Mesh(
+      new THREE.ConeGeometry(2.85, 14.5, 36, 1, true),
+      new THREE.MeshBasicMaterial({
+        color: 0xff8a24,
+        transparent: true,
+        opacity: 0.42,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
       }),
     );
     torchFlamePlume.position.set(0, -3.2, 2.2);
     torchFlamePlume.rotation.x = 0.98;
 
-    const torchPointLight = new THREE.PointLight(0xff8c2b, 0.0, 48);
-    torchPointLight.position.set(0, 0, 3);
+    // Soft 3D spherical plasma impingement tip inside torchFlameCore (never slices watch planes!)
+    const plasmaTip = new THREE.Mesh(
+      new THREE.SphereGeometry(1.35, 24, 16),
+      new THREE.MeshBasicMaterial({
+        color: 0xffb454,
+        transparent: true,
+        opacity: 0.44,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      }),
+    );
+    plasmaTip.position.set(0, -4.4, 0);
+    torchFlameCore.add(plasmaTip);
+
+    const torchPointLight = new THREE.PointLight(0xff9638, 0.0, 48, 1.25);
+    torchPointLight.position.set(0, -2.0, 7.5);
     this.torchGroup.add(torchFlameCore, torchFlamePlume, torchPointLight);
     this.torchGroup.visible = false;
     this.scene.add(this.torchGroup);
 
-    // 2. Liquid Nitrogen (LN2) Cryogenic Nozzle & Vapor Plume
+    // 2. Liquid Nitrogen (LN2) Cryogenic Nozzle & Soft Billowing Vapor Plume
     const ln2Spout = new THREE.Mesh(
-      new THREE.CylinderGeometry(1.4, 1.8, 10, 20),
+      new THREE.CylinderGeometry(1.3, 1.75, 10, 28),
       this.matPolishedSteel,
     );
     ln2Spout.position.set(0, 0, 14);
     ln2Spout.rotation.x = Math.PI * 0.5;
     const ln2StreamMesh = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.65, 2.4, 12, 20),
+      new THREE.CylinderGeometry(0.55, 2.2, 12, 28, 1, true),
       new THREE.MeshBasicMaterial({
-        color: 0xbaf2ff,
+        color: 0xc2f4ff,
         transparent: true,
-        opacity: 0.68,
+        opacity: 0.52,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
       }),
     );
     ln2StreamMesh.position.set(0, 0, 5.5);
     ln2StreamMesh.rotation.x = Math.PI * 0.5;
 
-    const cloudPts = new Float32Array(120 * 3);
-    for (let i = 0; i < 120; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const r = Math.random() * 11.0;
+    const cloudPts = new Float32Array(140 * 3);
+    for (let i = 0; i < 140; i++) {
+      const a = (i * 2.3999632) % (Math.PI * 2);
+      const r = Math.sqrt(i / 140) * 11.5;
       cloudPts[i * 3] = Math.cos(a) * r;
       cloudPts[i * 3 + 1] = Math.sin(a) * r;
-      cloudPts[i * 3 + 2] = Math.random() * 3.5;
+      cloudPts[i * 3 + 2] = ((i * 7) % 19) * 0.18;
     }
     const cloudGeom = new THREE.BufferGeometry();
     cloudGeom.setAttribute("position", new THREE.BufferAttribute(cloudPts, 3));
     const ln2FrostCloud = new THREE.Points(
       cloudGeom,
-      new THREE.PointsMaterial({ color: 0xdff8ff, size: 1.4, transparent: true, opacity: 0.55 }),
+      new THREE.PointsMaterial({
+        map: softParticleTex,
+        color: 0xdff8ff,
+        size: 3.4,
+        transparent: true,
+        opacity: 0.46,
+        alphaTest: 0.01,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      }),
     );
     this.ln2Group.add(ln2Spout, ln2StreamMesh, ln2FrostCloud);
     this.ln2Group.visible = false;
@@ -2161,13 +2222,13 @@ export class PocketWatchScene {
 
     // 3. Watch Oil Dropper
     const oilNeedle = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.25, 0.85, 11, 16),
-      this.matGoldCase,
+      new THREE.CylinderGeometry(0.25, 0.85, 11, 20),
+      this.matSolidGoldStatic,
     );
     oilNeedle.position.set(0, 0, 12);
     oilNeedle.rotation.x = Math.PI * 0.5;
     const oilStreamMesh = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.22, 0.55, 8.5, 14),
+      new THREE.CylinderGeometry(0.22, 0.52, 8.5, 20),
       new THREE.MeshPhysicalMaterial({
         color: 0xffb82e,
         transmission: 0.85,
@@ -2223,8 +2284,9 @@ export class PocketWatchScene {
   }
 
   /**
-   * Update the 3D Bassine Case Shell vertices directly from the `64 x 8` Lagrangian continuum nodes
-   * computed by the Rust Thermo-Elasto-Viscoplastic + Surface-Tension solver (`sim.case_shell_snapshot()`).
+   * Update the high-resolution `128 x 22` Bassine Case Shell vertices by Catmull-Rom spline
+   * interpolation of the `64 x 8` Lagrangian continuum nodes computed by the Rust
+   * Thermo-Elasto-Viscoplastic + Surface-Tension solver (`sim.case_shell_snapshot()`).
    */
   private updateCaseShellFromContinuum(caseShellData: Float32Array): void {
     if (caseShellData.length < CASE_SHELL_NODES * 6) return;
@@ -2234,59 +2296,99 @@ export class PocketWatchScene {
     const pos = posAttr.array as Float32Array;
     const col = colAttr.array as Float32Array;
 
-    for (let i = 0; i < CASE_SHELL_NODES; i++) {
-      const base = i * 6;
-      const x = caseShellData[base]!;
-      const y = caseShellData[base + 1]!;
-      const z = caseShellData[base + 2]!;
-      const h = caseShellData[base + 3]!;
-      const tempK = caseShellData[base + 4]!;
-      const meltFrac = caseShellData[base + 5]!;
+    const sampleNodeField = (iz: number, it: number, ch: number): number => {
+      const zClamped = Math.max(0, Math.min(CASE_N_Z - 1, iz));
+      const tWrapped = ((it % CASE_N_THETA) + CASE_N_THETA) % CASE_N_THETA;
+      return caseShellData[(zClamped * CASE_N_THETA + tWrapped) * 6 + ch]!;
+    };
 
-      const rXY = Math.max(1.0, Math.hypot(x, y));
-      const nx = x / rXY;
-      const ny = y / rXY;
+    const sampleShellSmooth = (uTheta: number, vZ: number, ch: number): number => {
+      const ft = uTheta * CASE_N_THETA;
+      const fz = vZ * (CASE_N_Z - 1);
+      const it0 = Math.floor(ft);
+      const iz0 = Math.floor(fz);
+      const tt = ft - it0;
+      const tz = fz - iz0;
 
-      // Outer shell surface at (x + 0.5*h*nx, y + 0.5*h*ny, z)
-      const oIdx = i * 3;
-      pos[oIdx] = x + nx * h * 0.45;
-      pos[oIdx + 1] = y + ny * h * 0.45;
-      pos[oIdx + 2] = z;
-
-      // Inner shell surface at (x - 0.5*h*nx, y - 0.5*h*ny, z)
-      const iIdx = (CASE_SHELL_NODES + i) * 3;
-      pos[iIdx] = x - nx * h * 0.55;
-      pos[iIdx + 1] = y - ny * h * 0.55;
-      pos[iIdx + 2] = z;
-
-      // Vertex color: 18k Gold base + Planck blackbody incandescence above 780 K or cryo tint
-      let cr = 1.0;
-      let cg = 0.82;
-      let cb = 0.35;
-      if (this.thermalOverlayMode) {
-        const u = Math.max(0, Math.min(1, (tempK - 77.36) / 1400.0));
-        cr = Math.min(1, u * 2.2);
-        cg = Math.sin(u * Math.PI) * 0.85;
-        cb = Math.max(0, 1.0 - u * 2.0);
-      } else if (tempK > 780.0) {
-        const glow = Math.min(1.8, (tempK - 780.0) / 580.0);
-        cr = Math.min(1.6, 1.0 + glow * 0.65);
-        cg = Math.min(1.3, 0.82 + glow * 0.38 * meltFrac);
-        cb = Math.min(1.0, 0.35 + glow * 0.25 * meltFrac);
-      } else if (tempK < 220.0) {
-        const cryo = Math.min(1.0, (220.0 - tempK) / 145.0);
-        cr = 1.0 - cryo * 0.18;
-        cg = 0.82 + cryo * 0.12;
-        cb = 0.35 + cryo * 0.52;
+      const rowVals = [0, 0, 0, 0];
+      for (let dz = -1; dz <= 2; dz++) {
+        const p0 = sampleNodeField(iz0 + dz, it0 - 1, ch);
+        const p1 = sampleNodeField(iz0 + dz, it0, ch);
+        const p2 = sampleNodeField(iz0 + dz, it0 + 1, ch);
+        const p3 = sampleNodeField(iz0 + dz, it0 + 2, ch);
+        rowVals[dz + 1] = bSplineCubic(p0, p1, p2, p3, tt);
       }
+      return bSplineCubic(rowVals[0]!, rowVals[1]!, rowVals[2]!, rowVals[3]!, tz);
+    };
 
-      col[oIdx] = cr;
-      col[oIdx + 1] = cg;
-      col[oIdx + 2] = cb;
-      col[iIdx] = cr * 0.92;
-      col[iIdx + 1] = cg * 0.92;
-      col[iIdx + 2] = cb * 0.92;
+    let maxShellTempK = 293.15;
+
+    for (let iz = 0; iz < CASE_RENDER_N_Z; iz++) {
+      const vZ = iz / (CASE_RENDER_N_Z - 1);
+      const rimPinch = Math.sin(vZ * Math.PI);
+      const bezelLip = 0.72 + 0.28 * Math.pow(rimPinch, 0.45);
+
+      for (let it = 0; it < CASE_RENDER_N_THETA; it++) {
+        const uTheta = it / CASE_RENDER_N_THETA;
+        const idx = iz * CASE_RENDER_N_THETA + it;
+
+        const x = sampleShellSmooth(uTheta, vZ, 0);
+        const y = sampleShellSmooth(uTheta, vZ, 1);
+        const z = sampleShellSmooth(uTheta, vZ, 2);
+        const h = Math.max(0.08, sampleShellSmooth(uTheta, vZ, 3)) * bezelLip;
+        const tempK = Math.max(50.0, sampleShellSmooth(uTheta, vZ, 4));
+        const meltFrac = Math.max(0.0, Math.min(1.0, sampleShellSmooth(uTheta, vZ, 5)));
+        if (tempK > maxShellTempK) maxShellTempK = tempK;
+
+        const rXY = Math.max(1.0, Math.hypot(x, y));
+        const nx = x / rXY;
+        const ny = y / rXY;
+
+        // Outer shell surface at (x + 0.45*h*nx, y + 0.45*h*ny, z)
+        const oIdx = idx * 3;
+        pos[oIdx] = x + nx * h * 0.45;
+        pos[oIdx + 1] = y + ny * h * 0.45;
+        pos[oIdx + 2] = z;
+
+        // Inner shell surface at (x - 0.55*h*nx, y - 0.55*h*ny, z)
+        const iIdx = (CASE_RENDER_NODES + idx) * 3;
+        pos[iIdx] = x - nx * h * 0.55;
+        pos[iIdx + 1] = y - ny * h * 0.55;
+        pos[iIdx + 2] = z;
+
+        // Vertex color: 18k Yellow Gold reflectance strictly in [0, 1] (preserves Schlick Fresnel energy conservation)
+        let cr = 0.93;
+        let cg = 0.75;
+        let cb = 0.32;
+        if (this.thermalOverlayMode) {
+          const u = Math.max(0, Math.min(1, (tempK - 77.36) / 1400.0));
+          cr = Math.min(1, u * 2.0);
+          cg = Math.sin(u * Math.PI) * 0.85;
+          cb = Math.max(0, 1.0 - u * 2.0);
+        } else if (tempK > 720.0) {
+          const glow = Math.min(1.0, (tempK - 720.0) / 680.0);
+          cr = Math.min(1.0, 0.93 + glow * 0.07);
+          cg = Math.min(0.95, 0.75 - glow * 0.14 * (1.0 - meltFrac) + glow * 0.16 * meltFrac);
+          cb = Math.min(0.72, 0.32 + glow * 0.34 * meltFrac);
+        } else if (tempK < 220.0) {
+          const cryo = Math.min(1.0, (220.0 - tempK) / 145.0);
+          cr = 0.93 - cryo * 0.22;
+          cg = 0.75 + cryo * 0.14;
+          cb = 0.32 + cryo * 0.52;
+        }
+
+        col[oIdx] = cr;
+        col[oIdx + 1] = cg;
+        col[oIdx + 2] = cb;
+        col[iIdx] = cr * 0.90;
+        col[iIdx + 1] = cg * 0.90;
+        col[iIdx + 2] = cb * 0.90;
+      }
     }
+
+    // Subtle uniform blackbody self-emission when case exceeds 820 K
+    this.matGoldCase.emissiveIntensity =
+      maxShellTempK > 820.0 ? Math.min(0.28, ((maxShellTempK - 820.0) / 650.0) * 0.28) : 0.0;
 
     posAttr.needsUpdate = true;
     colAttr.needsUpdate = true;
@@ -2294,11 +2396,29 @@ export class PocketWatchScene {
   }
 
   /**
-   * Update the continuous 3D Molten & Solidified Gold Free-Surface Heightfields directly from the
-   * `24 x 24 = 576` Spatial PDE Grid computed in Rust (`sim.spatial_grid_snapshot()`).
+   * Update the continuous 3D Molten & Solidified Gold Free-Surface Heightfields using C^2
+   * Bicubic B-Spline reconstruction (`84 x 84`) over the `48 x 48 = 2304` Spatial PDE Grid
+   * computed in Rust (`sim.spatial_grid_snapshot()`), with per-pixel RGBA iso-contour meniscus
+   * feathering so pools never show boxy Cartesian quad boundaries.
    */
   private updateGoldHeightfieldsFromSpatialGrid(gridData: Float32Array): void {
     if (gridData.length < GRID_N * GRID_N * 7) return;
+
+    // Fast coarse scan to avoid 84x84 spline evaluation when no molten or frozen gold exists
+    let maxLiqCourse = 0.0;
+    let maxFrzCourse = 0.0;
+    for (let i = 0; i < GRID_N * GRID_N; i++) {
+      const liq = gridData[i * 7 + 3]!;
+      const frz = gridData[i * 7 + 4]!;
+      if (liq > maxLiqCourse) maxLiqCourse = liq;
+      if (frz > maxFrzCourse) maxFrzCourse = frz;
+    }
+
+    if (maxLiqCourse <= 0.008 && maxFrzCourse <= 0.008) {
+      this.moltenGoldMesh.visible = false;
+      this.solidGoldMesh.visible = false;
+      return;
+    }
 
     const mPosAttr = this.moltenGoldGeometry.getAttribute("position") as THREE.BufferAttribute;
     const mColAttr = this.moltenGoldGeometry.getAttribute("color") as THREE.BufferAttribute;
@@ -2306,61 +2426,76 @@ export class PocketWatchScene {
     const mCol = mColAttr.array as Float32Array;
 
     const sPosAttr = this.solidGoldGeometry.getAttribute("position") as THREE.BufferAttribute;
+    const sColAttr = this.solidGoldGeometry.getAttribute("color") as THREE.BufferAttribute;
     const sPos = sPosAttr.array as Float32Array;
+    const sCol = sColAttr.array as Float32Array;
 
+    const totalVerts = RENDER_GRID_N * RENDER_GRID_N;
     let anyMolten = false;
     let anySolid = false;
 
-    for (let idx = 0; idx < GRID_N * GRID_N; idx++) {
-      const base = idx * 7;
-      const tempK = gridData[base]!;
-      const liqGoldMm = gridData[base + 3]!;
-      const frzGoldMm = gridData[base + 4]!;
-
+    for (let idx = 0; idx < totalVerts; idx++) {
       const xMm = mPos[idx * 3]!;
       const yMm = mPos[idx * 3 + 1]!;
+      const rCenter = Math.hypot(xMm, yMm);
+
+      // Smooth circular radial taper near the outer case rim (r <= 25.0 mm)
+      const radialT = Math.max(0.0, Math.min(1.0, (25.0 - rCenter) / 2.6));
+      const radialMask = radialT * radialT * (3.0 - 2.0 * radialT);
+
+      if (radialMask <= 0.001) {
+        mPos[idx * 3 + 2] = -2.2;
+        mCol[idx * 4 + 3] = 0.0;
+        sPos[idx * 3 + 2] = -2.2;
+        sCol[idx * 4 + 3] = 0.0;
+        continue;
+      }
+
+      const tempK = sampleSmoothPdeField(gridData, xMm, yMm, 0);
+      const rawLiq = sampleSmoothPdeField(gridData, xMm, yMm, 3) * radialMask;
+      const rawFrz = sampleSmoothPdeField(gridData, xMm, yMm, 4) * radialMask;
+
+      // Smooth substrate elevation transition between recessed 6h Tourbillon well (-0.65 mm) and mainplate (+0.25 mm)
       const distTourb = Math.hypot(xMm, yMm + 11.0);
-      const baseZ = distTourb <= 6.8 ? -0.45 : 0.85;
+      const wellBlend = Math.max(0.0, Math.min(1.0, (distTourb - 5.2) / 2.8));
+      const smoothWell = wellBlend * wellBlend * (3.0 - 2.0 * wellBlend);
+      const baseZ = -0.65 * (1.0 - smoothWell) + 0.28 * smoothWell;
 
-      if (liqGoldMm > 0.025) {
+      // 1. Molten Gold Free-Surface Height & Smooth Per-Pixel Meniscus Alpha
+      const liqAlphaT = Math.max(0.0, Math.min(1.0, (rawLiq - 0.006) / 0.042));
+      const liqAlpha = liqAlphaT * liqAlphaT * (3.0 - 2.0 * liqAlphaT);
+      if (liqAlpha > 0.005) {
         anyMolten = true;
-        mPos[idx * 3 + 2] = baseZ + frzGoldMm + Math.min(2.8, liqGoldMm * 1.45);
-        const glow = Math.max(0, Math.min(1.5, (tempK - 950.0) / 500.0));
-        mCol[idx * 3] = Math.min(1.5, 1.0 + glow * 0.5);
-        mCol[idx * 3 + 1] = Math.min(1.2, 0.78 + glow * 0.35);
-        mCol[idx * 3 + 2] = Math.min(0.9, 0.25 + glow * 0.35);
-      } else {
-        mPos[idx * 3 + 2] = baseZ + frzGoldMm - 0.03;
       }
+      const liqDome = Math.pow(liqAlpha, 0.65);
+      mPos[idx * 3 + 2] =
+        baseZ - 0.42 * (1.0 - liqDome) + rawFrz * 1.25 + Math.min(2.4, rawLiq * 1.32) * liqDome;
 
-      if (frzGoldMm > 0.025) {
+      const glow = Math.max(0.0, Math.min(1.0, (tempK - 950.0) / 550.0));
+      mCol[idx * 4] = Math.min(1.0, 0.96 + glow * 0.04);
+      mCol[idx * 4 + 1] = Math.min(0.92, 0.74 + glow * 0.16);
+      mCol[idx * 4 + 2] = Math.min(0.68, 0.28 + glow * 0.32);
+      mCol[idx * 4 + 3] = liqAlpha;
+
+      // 2. Solidified (Quenched) Gold Free-Surface Height & Smooth Per-Pixel Meniscus Alpha
+      const frzAlphaT = Math.max(0.0, Math.min(1.0, (rawFrz - 0.006) / 0.042));
+      const frzAlpha = frzAlphaT * frzAlphaT * (3.0 - 2.0 * frzAlphaT);
+      if (frzAlpha > 0.005) {
         anySolid = true;
-        sPos[idx * 3 + 2] = baseZ + Math.min(2.8, frzGoldMm * 1.45);
-      } else {
-        sPos[idx * 3 + 2] = baseZ - 0.03;
       }
+      const frzDome = Math.pow(frzAlpha, 0.65);
+      sPos[idx * 3 + 2] =
+        baseZ - 0.42 * (1.0 - frzDome) + Math.min(2.4, rawFrz * 1.32) * frzDome;
+
+      const cryo = tempK < 220.0 ? Math.min(1.0, (220.0 - tempK) / 145.0) : 0.0;
+      sCol[idx * 4] = 0.88 - cryo * 0.16;
+      sCol[idx * 4 + 1] = 0.69 + cryo * 0.12;
+      sCol[idx * 4 + 2] = 0.28 + cryo * 0.45;
+      sCol[idx * 4 + 3] = frzAlpha;
     }
 
     this.moltenGoldMesh.visible = anyMolten;
     if (anyMolten) {
-      const mIndices: number[] = [];
-      for (let gy = 0; gy < GRID_N - 1; gy++) {
-        for (let gx = 0; gx < GRID_N - 1; gx++) {
-          const i00 = gy * GRID_N + gx;
-          const i10 = i00 + 1;
-          const i01 = i00 + GRID_N;
-          const i11 = i01 + 1;
-          if (
-            gridData[i00 * 7 + 3]! > 0.025 ||
-            gridData[i10 * 7 + 3]! > 0.025 ||
-            gridData[i01 * 7 + 3]! > 0.025 ||
-            gridData[i11 * 7 + 3]! > 0.025
-          ) {
-            mIndices.push(i00, i10, i11, i00, i11, i01);
-          }
-        }
-      }
-      this.moltenGoldGeometry.setIndex(mIndices);
       mPosAttr.needsUpdate = true;
       mColAttr.needsUpdate = true;
       this.moltenGoldGeometry.computeVertexNormals();
@@ -2368,25 +2503,8 @@ export class PocketWatchScene {
 
     this.solidGoldMesh.visible = anySolid;
     if (anySolid) {
-      const sIndices: number[] = [];
-      for (let gy = 0; gy < GRID_N - 1; gy++) {
-        for (let gx = 0; gx < GRID_N - 1; gx++) {
-          const i00 = gy * GRID_N + gx;
-          const i10 = i00 + 1;
-          const i01 = i00 + GRID_N;
-          const i11 = i01 + 1;
-          if (
-            gridData[i00 * 7 + 4]! > 0.025 ||
-            gridData[i10 * 7 + 4]! > 0.025 ||
-            gridData[i01 * 7 + 4]! > 0.025 ||
-            gridData[i11 * 7 + 4]! > 0.025
-          ) {
-            sIndices.push(i00, i10, i11, i00, i11, i01);
-          }
-        }
-      }
-      this.solidGoldGeometry.setIndex(sIndices);
       sPosAttr.needsUpdate = true;
+      sColAttr.needsUpdate = true;
       this.solidGoldGeometry.computeVertexNormals();
     }
   }
@@ -2447,17 +2565,24 @@ export class PocketWatchScene {
       this.frostOverlayMesh.visible = false;
     }
 
-    // 6. Update Perturbation Tool Apparatus Positions & Intensities
+    // 6. Update Perturbation Tool Apparatus Positions, Dynamic Bloom & Intensities
+    const maxNodeTempK = Math.max(...snap.nodes.map((n) => n.temperatureK));
+    const incandescenceFactor = Math.max(0, Math.min(1, (maxNodeTempK - 820.0) / 550.0));
+    this.bloomPass.strength = 0.06 + Math.max(incandescenceFactor * 0.12, tools.torchPower * 0.08);
+
     this.torchGroup.visible = tools.torchPower > 0.01 || this.activeTool === "torch";
     this.torchGroup.position.set(tools.torchPosMm[0], tools.torchPosMm[1], tools.torchPosMm[2]);
-    const flameScale = Math.max(0.05, tools.torchPower);
+    const flameActive = tools.torchPower > 0.01;
+    this.torchFlameCore.visible = flameActive;
+    this.torchFlamePlume.visible = flameActive;
+    const flameScale = Math.max(0.08, tools.torchPower);
     this.torchFlameCore.scale.set(flameScale, flameScale, flameScale);
     this.torchFlamePlume.scale.set(
-      flameScale * (0.95 + Math.random() * 0.1),
-      flameScale * (0.92 + Math.random() * 0.16),
+      flameScale * (0.96 + Math.sin(performance.now() * 0.045) * 0.05),
+      flameScale * (0.94 + Math.cos(performance.now() * 0.062) * 0.07),
       flameScale,
     );
-    this.torchPointLight.intensity = tools.torchPower * 6.5;
+    this.torchPointLight.intensity = tools.torchPower * 2.2 + incandescenceFactor * 0.9;
 
     this.ln2Group.visible = tools.ln2Rate > 0.01 || this.activeTool === "ln2";
     this.ln2Group.position.set(tools.ln2PosMm[0], tools.ln2PosMm[1], tools.ln2PosMm[2]);
@@ -2480,7 +2605,20 @@ export class PocketWatchScene {
 
   public setToolMode(mode: ActiveToolMode): void {
     this.activeTool = mode;
-    this.controls.enabled = mode === "inspect";
+    this.controls.enabled = true;
+    this.controls.enableZoom = true;
+    this.controls.mouseButtons =
+      mode === "inspect"
+        ? {
+            LEFT: THREE.MOUSE.ROTATE,
+            MIDDLE: THREE.MOUSE.DOLLY,
+            RIGHT: THREE.MOUSE.PAN,
+          }
+        : {
+            LEFT: null as unknown as THREE.MOUSE,
+            MIDDLE: THREE.MOUSE.DOLLY,
+            RIGHT: THREE.MOUSE.ROTATE,
+          };
   }
 
   public setExplodedFactor(factor: number): void {
@@ -2536,13 +2674,14 @@ export class PocketWatchScene {
       if (this.raycaster.ray.intersectPlane(this.interactionPlane, hit)) {
         const x = Math.max(-29, Math.min(29, hit.x));
         const y = Math.max(-29, Math.min(29, hit.y));
-        return [x, y, 2.5];
+        const z = this.activeTool === "mic" ? 11.0 : 2.0;
+        return [x, y, z];
       }
       return null;
     };
 
     this.canvas.addEventListener("pointerdown", (ev) => {
-      if (this.activeTool === "inspect") return;
+      if (this.activeTool === "inspect" || ev.button !== 0) return;
       this.isDraggingTool = true;
       const pt = pickWatchPlane(ev);
       if (pt) this.callbacks.onTargetMoved(this.activeTool, pt);

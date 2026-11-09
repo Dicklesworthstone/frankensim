@@ -54,7 +54,7 @@ test("WASM PocketWatchSim — chronometer timekeeping, winding, and all 5 multip
   const caseShell = sim.case_shell_snapshot();
   assert.equal(caseShell.length, 512 * 6, "expected 512 3D Lagrangian shell nodes * 6 floats");
   const spatialGrid = sim.spatial_grid_snapshot();
-  assert.equal(spatialGrid.length, 576 * 7, "expected 24x24 (576) PDE cells * 7 floats");
+  assert.equal(spatialGrid.length, 2304 * 7, "expected 48x48 (2304) PDE cells * 7 floats");
   const coils = sim.mainspring_coils_mm();
   assert.equal(coils.length, 18, "expected 18 discretized elastica mainspring coil radii");
 

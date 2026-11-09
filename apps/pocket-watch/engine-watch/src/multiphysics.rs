@@ -1,5 +1,5 @@
 //! Coupled 3D Thermo-Elasto-Viscoplastic Case Shell (`64 x 8 = 512` 3D Lagrangian Shell Nodes)
-//! + 2D Finite-Volume Free-Surface Capillary / Lubrication Multiphysics PDE Engine (`24 x 24 = 576` cells)
+//! + 2D Finite-Volume Free-Surface Capillary / Lubrication Multiphysics PDE Engine (`48 x 48 = 2304` cells)
 //! for the FrankenSim Pocket Watch (`Calibre FS-1903`).
 //!
 //! Zero canned shapes or scripted slumps: every geometric deformation of the 18k gold case
@@ -62,13 +62,14 @@ use crate::materials::{
 pub const NODE_COUNT: usize = 12;
 
 /// Spatial PDE grid resolution along X and Y across $[-28.8\text{ mm}, +28.8\text{ mm}]$.
-pub const GRID_N: usize = 24;
+pub const GRID_N: usize = 48;
 pub const GRID_CELLS: usize = GRID_N * GRID_N;
-/// Grid physical half-span ($\text{mm}$). Cell pitch $\Delta x = 57.6 / 24 = 2.4\text{ mm}$.
+/// Grid physical half-span ($\text{mm}$). Cell pitch $\Delta x = 57.6 / 48 = 1.2\text{ mm}$.
 pub const GRID_HALF_SPAN_MM: f64 = 28.8;
 pub const GRID_DX_MM: f64 = (2.0 * GRID_HALF_SPAN_MM) / (GRID_N as f64);
 pub const GRID_DX_M: f64 = GRID_DX_MM * 1.0e-3;
 pub const GRID_CELL_AREA_M2: f64 = GRID_DX_M * GRID_DX_M;
+const AREA_SCALE_VS_24: f64 = GRID_CELL_AREA_M2 / 5.76e-6;
 
 /// 3D Deformable 18k Gold Case Shell resolution:
 /// 64 circumferential stations around $[0, 2\pi)$ $\times$ 8 meridional profile stations from back bezel to front bezel.
@@ -444,7 +445,7 @@ impl MultiphysicsState {
             };
 
             let card = material.card();
-            let base_mass_kg = (card.density_kg_m3 * GRID_CELL_AREA_M2 * thickness_m).max(1.2e-5);
+            let base_mass_kg = (card.density_kg_m3 * GRID_CELL_AREA_M2 * thickness_m).max(3.0e-6);
             let thermal_mass_j_per_k = base_mass_kg * card.cp_j_kg_k;
 
             SpatialCell {
@@ -884,9 +885,9 @@ impl MultiphysicsState {
                 }
                 self.case_shell[idx].von_mises_stress_pa = sigma_eq_pa;
 
-                // Convert membrane stresses into nodal forces (scaled to keep high-stiffness explicit stable)
-                let f_theta_mag =
-                    (sigma_theta_pa * a_cross_theta_m2).clamp(-18.0, 18.0) * 0.012;
+                // Convert membrane stresses into smooth nodal forces (hyperbolic-tangent compliant response
+                // avoids bang-bang saturation and sawtooth node-to-node oscillations)
+                let f_theta_mag = 0.20 * ((sigma_theta_pa * a_cross_theta_m2) / 24.0).tanh();
                 for c in 0..3 {
                     let df = f_theta_mag * u_theta[c];
                     force_n[idx][c] += df;
@@ -895,7 +896,7 @@ impl MultiphysicsState {
                 if has_z_next {
                     let a_cross_z_m2 =
                         (node.thickness_mm * 1.0e-3) * (node.ref_l_theta_mm * 1.0e-3);
-                    let f_z_mag = (sigma_z_pa * a_cross_z_m2).clamp(-18.0, 18.0) * 0.012;
+                    let f_z_mag = 0.20 * ((sigma_z_pa * a_cross_z_m2) / 24.0).tanh();
                     for c in 0..3 {
                         let df = f_z_mag * u_z[c];
                         force_n[idx][c] += df;
@@ -909,8 +910,9 @@ impl MultiphysicsState {
                     force_n[idx][c] -= k_bend_n_per_mm * bend_disp_mm[c];
                 }
 
-                // Discrete Mean-Curvature Vector for Young-Laplace Surface Tension:
-                // F_cap = sigma_Au(T) * A_node * Laplacian_s(x)
+                // Discrete Mean-Curvature Vector for Young-Laplace Surface Tension + Tangential Shear Smoothing:
+                // Even in the warm viscoplastic regime before full liquidus, continuous curvature regularization
+                // prevents faceted/boxy buckling and produces smooth Rayleigh-Plateau rim beading.
                 let lap_theta = [
                     n_prev.pos_mm[0] - 2.0 * node.pos_mm[0] + n_next.pos_mm[0],
                     n_prev.pos_mm[1] - 2.0 * node.pos_mm[1] + n_next.pos_mm[1],
@@ -935,21 +937,25 @@ impl MultiphysicsState {
                     ]
                 };
 
-                // When softening / melting (T > 900 K or melt_fraction > 0), surface tension & Marangoni
-                // forces act on the free liquid/mushy surface!
-                let fluidity_weight =
-                    (node.melt_fraction + 0.15 * ((node.temperature_k - 900.0) / 300.0).clamp(0.0, 1.0))
-                        .clamp(0.0, 1.0);
+                // Smooth viscoelastic-capillary curvature coupling across all elevated temperatures
+                let fluidity_weight = (node.melt_fraction
+                    + 0.28 * ((node.temperature_k - 650.0) / 550.0).clamp(0.0, 1.0))
+                .clamp(0.0, 1.0);
                 if fluidity_weight > 1.0e-3 {
                     let sigma_au = gold_liquid_surface_tension_n_m(node.temperature_k);
-                    let cap_coeff = 0.038 * sigma_au * fluidity_weight;
+                    let cap_coeff = 0.052 * sigma_au * fluidity_weight;
                     for c in 0..3 {
-                        force_n[idx][c] += cap_coeff * (lap_theta[c] + 1.35 * lap_z[c]);
+                        force_n[idx][c] += cap_coeff * (lap_theta[c] + 1.25 * lap_z[c]);
+                    }
+
+                    // Viscous shear velocity coupling between adjacent shell nodes (eliminates node-to-node sawtooth)
+                    for c in 0..3 {
+                        let dv_lap =
+                            n_prev.vel_mm_s[c] - 2.0 * node.vel_mm_s[c] + n_next.vel_mm_s[c];
+                        force_n[idx][c] += 0.018 * fluidity_weight * dv_lap;
                     }
 
                     // Marangoni thermocapillary tangential force: d(sigma)/dT * grad_s(T)
-                    // Pulls liquid gold away from the hottest torch center toward the cooler surrounding rim
-                    // (producing the characteristic raised solidified crater rim around a melt pool!)
                     let dt_theta = n_next.temperature_k - n_prev.temperature_k;
                     let marangoni_f = 1.2e-4
                         * GOLD_MARANGONI_DSIGMA_DT_N_M_K
@@ -971,7 +977,7 @@ impl MultiphysicsState {
                 let idx = iz * CASE_SHELL_N_THETA + it;
                 let mut node = self.case_shell[idx];
 
-                // Couple shell node thermally to nearest interior 24x24 movement cell
+                // Couple shell node thermally to nearest interior 48x48 movement cell
                 let gx = (((node.pos_mm[0] + GRID_HALF_SPAN_MM) / GRID_DX_MM).floor() as isize)
                     .clamp(0, (GRID_N - 1) as isize) as usize;
                 let gy = (((node.pos_mm[1] + GRID_HALF_SPAN_MM) / GRID_DX_MM).floor() as isize)
@@ -1009,7 +1015,7 @@ impl MultiphysicsState {
 
                 let mut q_ext_w = q_cond_w[idx] + q_amb - q_to_movement;
                 self.grid[cell_idx].enthalpy_j_kg +=
-                    (q_to_movement * dt) / self.grid[cell_idx].base_mass_kg.max(1.0e-5);
+                    (q_to_movement * dt) / self.grid[cell_idx].base_mass_kg.max(2.5e-6);
 
                 // Outward radial unit vector in XY plane
                 let r_xy = (node.pos_mm[0].powi(2) + node.pos_mm[1].powi(2))
@@ -1104,16 +1110,10 @@ impl MultiphysicsState {
                 node.temperature_k = t_new;
                 node.melt_fraction = phi_new;
 
-                // Integrate 3D nodal velocity & position with temperature/viscosity-dependent damping:
-                // When solid at low temperature, high structural damping locks the shell;
-                // when viscoplastic or molten, viscosity mu_eff(T, f_L) governs flow speed!
+                // Integrate 3D nodal velocity & position with smooth temperature/viscosity-dependent mobility
+                // (no discontinuous jump at 600 K, eliminating spatial step artifacts across isotherms)
                 let mu_eff = gold_effective_viscosity_pa_s(t_new, phi_new);
-                let mobility = if t_new < 600.0 && phi_new <= 0.0 {
-                    // Pure thermo-elastic regime (allows instantaneous thermal expansion/contraction)
-                    0.35
-                } else {
-                    (1.0 / (1.0 + 0.008 * mu_eff)).clamp(0.04, 1.0)
-                };
+                let mobility = (0.18 + 0.68 / (1.0 + 0.0025 * mu_eff)).clamp(0.18, 0.86);
 
                 let damping = (-14.0 * dt).exp();
                 for c in 0..3 {
@@ -1138,7 +1138,8 @@ impl MultiphysicsState {
                 node.pos_mm[2] = node.pos_mm[2].clamp(-4.2, 4.4);
 
                 // Update local wall thickness by mass conservation + capillary bead thickening at rim,
-                // and shed detached liquid gold droplets onto the 24x24 free-surface PDE grid when f_L > 0.08!
+                // and shed detached liquid gold droplets onto the 24x24 free-surface PDE grid using a
+                // smooth 3x3 Gaussian mollifier kernel (eliminating single-cell nearest-neighbor staircase spikes!)
                 let r0 = (node.ref_pos_mm[0].powi(2) + node.ref_pos_mm[1].powi(2))
                     .sqrt()
                     .max(1.0);
@@ -1152,32 +1153,62 @@ impl MultiphysicsState {
                         let dm_kg = GOLD_18K_CARD.density_kg_m3 * node.area_m2 * (dh_drip * 1.0e-3);
                         node.mass_kg = (node.mass_kg - dm_kg).max(5.0e-6);
 
-                        // Deposit detached liquid gold mass & enthalpy into the interior cell just inside the case wall!
-                        let inward_x_mm = node.pos_mm[0] * (20.8 / r_curr.max(20.8));
-                        let inward_y_mm = node.pos_mm[1] * (20.8 / r_curr.max(20.8));
-                        let ix = (((inward_x_mm + GRID_HALF_SPAN_MM) / GRID_DX_MM).floor() as isize)
-                            .clamp(0, (GRID_N - 1) as isize)
-                            as usize;
-                        let iy = (((inward_y_mm + GRID_HALF_SPAN_MM) / GRID_DX_MM).floor() as isize)
-                            .clamp(0, (GRID_N - 1) as isize)
-                            as usize;
-                        let cidx = iy * GRID_N + ix;
-                        if self.grid[cidx].active {
-                            let added_height_mm =
-                                (dm_kg / (GOLD_18K_CARD.density_kg_m3 * GRID_CELL_AREA_M2)) * 1.0e3;
-                            let prev_h = self.grid[cidx].liquid_gold_mm;
-                            let new_h = prev_h + added_height_mm;
-                            if new_h > 1.0e-6 {
-                                self.grid[cidx].liquid_gold_enthalpy_j_kg = (prev_h
-                                    * self.grid[cidx].liquid_gold_enthalpy_j_kg
-                                    + added_height_mm * node.enthalpy_j_kg)
-                                    / new_h;
+                        // Deposit detached liquid gold mass & enthalpy at the actual inward drip front
+                        // distributed smoothly over a 5x5 Gaussian neighborhood of 48x48 PDE cells!
+                        let iz_offset = 0.42 * ((iz as f64) - 3.5).abs();
+                        let drip_r = (r_curr - 2.4 - iz_offset).clamp(14.5, 20.6);
+                        let inward_x_mm = node.pos_mm[0] * (drip_r / r_curr.max(1.0));
+                        let inward_y_mm = node.pos_mm[1] * (drip_r / r_curr.max(1.0));
+                        let cx_center = (((inward_x_mm + GRID_HALF_SPAN_MM) / GRID_DX_MM).floor()
+                            as isize)
+                            .clamp(0, (GRID_N - 1) as isize);
+                        let cy_center = (((inward_y_mm + GRID_HALF_SPAN_MM) / GRID_DX_MM).floor()
+                            as isize)
+                            .clamp(0, (GRID_N - 1) as isize);
+
+                        let mut w_sum = 0.0_f64;
+                        let mut targets = [(0_usize, 0.0_f64); 25];
+                        let mut t_count = 0_usize;
+                        let sigma_drip_mm = GRID_DX_MM * 1.45;
+                        for dy in -2_isize..=2 {
+                            for dx in -2_isize..=2 {
+                                let nx = (cx_center + dx).clamp(0, (GRID_N - 1) as isize) as usize;
+                                let ny = (cy_center + dy).clamp(0, (GRID_N - 1) as isize) as usize;
+                                let cidx = ny * GRID_N + nx;
+                                if self.grid[cidx].active && !self.grid[cidx].is_gold_case {
+                                    let ddx = self.grid[cidx].x_mm - inward_x_mm;
+                                    let ddy = self.grid[cidx].y_mm - inward_y_mm;
+                                    let w = (-(ddx * ddx + ddy * ddy)
+                                        / (2.0 * sigma_drip_mm * sigma_drip_mm))
+                                        .exp();
+                                    targets[t_count] = (cidx, w);
+                                    t_count += 1;
+                                    w_sum += w;
+                                }
                             }
-                            self.grid[cidx].liquid_gold_mm = new_h;
-                            // Thermal conduction from hot liquid gold droplet into the substrate cell
-                            let dh_enth = (node.enthalpy_j_kg - self.grid[cidx].enthalpy_j_kg).max(0.0);
-                            self.grid[cidx].enthalpy_j_kg +=
-                                (dm_kg * dh_enth) / (self.grid[cidx].base_mass_kg + dm_kg);
+                        }
+
+                        if w_sum > 1.0e-8 {
+                            for &(cidx, w) in &targets[..t_count] {
+                                let frac = w / w_sum;
+                                let cell_dm_kg = dm_kg * frac;
+                                let added_height_mm = (cell_dm_kg
+                                    / (GOLD_18K_CARD.density_kg_m3 * GRID_CELL_AREA_M2))
+                                    * 1.0e3;
+                                let prev_h = self.grid[cidx].liquid_gold_mm;
+                                let new_h = prev_h + added_height_mm;
+                                if new_h > 1.0e-6 {
+                                    self.grid[cidx].liquid_gold_enthalpy_j_kg = (prev_h
+                                        * self.grid[cidx].liquid_gold_enthalpy_j_kg
+                                        + added_height_mm * node.enthalpy_j_kg)
+                                        / new_h;
+                                }
+                                self.grid[cidx].liquid_gold_mm = new_h;
+                                let dh_enth =
+                                    (node.enthalpy_j_kg - self.grid[cidx].enthalpy_j_kg).max(0.0);
+                                self.grid[cidx].enthalpy_j_kg += (cell_dm_kg * dh_enth)
+                                    / (self.grid[cidx].base_mass_kg + cell_dm_kg);
+                            }
                         }
                     }
                 }
@@ -1280,34 +1311,59 @@ impl MultiphysicsState {
                 .step_with_momentum(&fs_exec::CancelGate::new_clock_free());
         }
 
-        // 2. Compute discrete free-surface curvature Laplacian(eta) for Young-Laplace capillary pressure
-        let neighbors: [(isize, isize); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+        // 2. Compute isotropic 9-point discrete curvature Laplacian(M_Au) on the gold film thickness
+        //    (avoiding artificial step-cliff spikes from dry solid walls while preserving O(dx^4) rotational isotropy!)
+        let orth_dirs: [(isize, isize); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+        let diag_dirs: [(isize, isize); 4] = [(-1, -1), (1, -1), (-1, 1), (1, 1)];
         for gy in 0..GRID_N {
             for gx in 0..GRID_N {
                 let idx = gy * GRID_N + gx;
                 if !self.grid[idx].active {
                     continue;
                 }
-                let eta_c = free_surface_eta_mm[idx];
-                let mut lap = 0.0;
-                for (dx, dy) in neighbors {
+                let h_c = self.grid[idx].liquid_gold_mm + self.grid[idx].frozen_gold_mm;
+                let mut sum_orth = 0.0;
+                let mut sum_diag = 0.0;
+                for (dx, dy) in orth_dirs {
                     let nx = gx as isize + dx;
                     let ny = gy as isize + dy;
                     if nx >= 0 && nx < GRID_N as isize && ny >= 0 && ny < GRID_N as isize {
                         let nidx = (ny as usize) * GRID_N + (nx as usize);
                         if self.grid[nidx].active {
-                            lap += free_surface_eta_mm[nidx] - eta_c;
+                            let h_n =
+                                self.grid[nidx].liquid_gold_mm + self.grid[nidx].frozen_gold_mm;
+                            sum_orth += h_n - h_c;
                         }
                     }
                 }
-                eta_laplacian_mm[idx] = lap / (GRID_DX_MM * GRID_DX_MM);
+                for (dx, dy) in diag_dirs {
+                    let nx = gx as isize + dx;
+                    let ny = gy as isize + dy;
+                    if nx >= 0 && nx < GRID_N as isize && ny >= 0 && ny < GRID_N as isize {
+                        let nidx = (ny as usize) * GRID_N + (nx as usize);
+                        if self.grid[nidx].active {
+                            let h_d =
+                                self.grid[nidx].liquid_gold_mm + self.grid[nidx].frozen_gold_mm;
+                            sum_diag += h_d - h_c;
+                        }
+                    }
+                }
+                eta_laplacian_mm[idx] =
+                    (4.0 * sum_orth + sum_diag) / (6.0 * GRID_DX_MM * GRID_DX_MM);
             }
         }
 
-        // 3. Evaluate 2D Finite-Volume fluxes:
-        //    (a) Fourier heat conduction -k * grad(T)
-        //    (b) Lubrication + Young-Laplace Capillary + Wetting Cohesion + Marangoni molten gold flux
+        // 3. Evaluate isotropic 8-neighbor (orthogonal + diagonal) 2D Finite-Volume fluxes:
+        //    (a) Fourier heat conduction -k * grad(T) (in 2D, face conductance k*(dy*h_z)/dx = k*h_z is grid-scale invariant)
+        //    (b) Lubrication + Young-Laplace Capillary + Smooth Cox-Voinov Wetting + Marangoni molten gold flux
         //    (c) Watch oil Marangoni/capillary spreading flux
+        //    Weights (2/3, 2/3, sqrt(2)/6, sqrt(2)/6) yield the exact 4:1 O(dx^4)-isotropic 9-point operator after / dist_scale.
+        let stencil_faces: [(isize, isize, f64, f64); 4] = [
+            (1, 0, 1.0, 2.0 / 3.0),
+            (0, 1, 1.0, 2.0 / 3.0),
+            (1, 1, core::f64::consts::SQRT_2, core::f64::consts::SQRT_2 / 6.0),
+            (1, -1, core::f64::consts::SQRT_2, core::f64::consts::SQRT_2 / 6.0),
+        ];
         for gy in 0..GRID_N {
             for gx in 0..GRID_N {
                 let idx = gy * GRID_N + gx;
@@ -1317,8 +1373,7 @@ impl MultiphysicsState {
                 let c = &self.grid[idx];
                 let card_c = c.material.card();
 
-                // Only visit Right (+1, 0) and Up (0, +1) faces to conserve mass & energy exactly
-                for (dx, dy) in [(1_isize, 0_isize), (0_isize, 1_isize)] {
+                for (dx, dy, dist_scale, weight) in stencil_faces {
                     let nx = gx as isize + dx;
                     let ny = gy as isize + dy;
                     if nx < 0 || nx >= GRID_N as isize || ny < 0 || ny >= GRID_N as isize {
@@ -1331,64 +1386,74 @@ impl MultiphysicsState {
                     let nc = &self.grid[nidx];
                     let card_n = nc.material.card();
 
-                    // (a) Harmonic-mean thermal conductivity across cell face
+                    // (a) Harmonic-mean thermal conductivity across cell face (isotropic 8-neighbor)
                     let k_harm = (2.0 * card_c.conductivity_w_m_k * card_n.conductivity_w_m_k)
                         / (card_c.conductivity_w_m_k + card_n.conductivity_w_m_k).max(1.0);
-                    // Include high thermal conductivity of any bridging liquid/solid gold layer!
-                    let gold_bridge_mm =
-                        0.5 * (c.liquid_gold_mm + c.frozen_gold_mm + nc.liquid_gold_mm + nc.frozen_gold_mm);
-                    let g_face_w_k =
-                        k_harm * (1.8e-3) + GOLD_18K_CARD.conductivity_w_m_k * (gold_bridge_mm * 1.0e-3);
-                    let q_cond = g_face_w_k * (nc.temperature_k - c.temperature_k) * 0.22;
+                    let gold_bridge_mm = 0.5
+                        * (c.liquid_gold_mm
+                            + c.frozen_gold_mm
+                            + nc.liquid_gold_mm
+                            + nc.frozen_gold_mm);
+                    let g_face_w_k = k_harm * (1.8e-3)
+                        + GOLD_18K_CARD.conductivity_w_m_k * (gold_bridge_mm * 1.0e-3);
+                    let q_cond = weight
+                        * g_face_w_k
+                        * (nc.temperature_k - c.temperature_k)
+                        * 0.14
+                        / dist_scale;
                     net_q_w[idx] += q_cond;
                     net_q_w[nidx] -= q_cond;
 
                     // (b) Molten gold free-surface flow with Young-Laplace surface tension,
-                    //     contact-angle cohesion bead threshold, gravity tilt, and Marangoni shear
+                    //     smooth contact-angle wetting mobility, gravity tilt, and Marangoni shear
                     let h_max = c.liquid_gold_mm.max(nc.liquid_gold_mm);
-                    if h_max > 0.015 {
-                        let t_face = 0.5 * (c.temperature_k.max(1340.0) + nc.temperature_k.max(1340.0));
+                    if h_max > 0.005 {
+                        let t_face =
+                            0.5 * (c.temperature_k.max(1340.0) + nc.temperature_k.max(1340.0));
                         let sigma_au = gold_liquid_surface_tension_n_m(t_face);
 
-                        // Contact-angle disjoining cohesion pressure: prevents molten gold from flattening
-                        // into an unphysical thin sheet; instead it forms rounded sessile beads of thickness h_cap!
                         let cos_theta_c = gold_substrate_contact_angle_cos(c.temperature_k);
                         let cos_theta_n = gold_substrate_contact_angle_cos(nc.temperature_k);
-                        let h_cap_c = 0.85 * (1.0 - cos_theta_c).sqrt();
-                        let h_cap_n = 0.85 * (1.0 - cos_theta_n).sqrt();
+                        let h_cap_c = (0.55 * (1.0 - cos_theta_c).sqrt()).max(0.15);
+                        let h_cap_n = (0.55 * (1.0 - cos_theta_n).sqrt()).max(0.15);
 
-                        // Effective generalized pressure head (in mm of gold equivalent):
-                        // P = eta - 0.14 * y_mm (bench tilt toward 6h Tourbillon) - l_cap^2 * Laplacian(eta) + Pi_cohesion(H)
-                        let l_cap_mm2 = (sigma_au / (GOLD_18K_CARD.density_kg_m3 * 9.81)) * 1.0e6;
-                        let coh_c = if c.liquid_gold_mm > 0.01 && c.liquid_gold_mm < h_cap_c {
-                            -0.35 * (h_cap_c - c.liquid_gold_mm)
-                        } else {
-                            0.0
-                        };
-                        let coh_n = if nc.liquid_gold_mm > 0.01 && nc.liquid_gold_mm < h_cap_n {
-                            -0.35 * (h_cap_n - nc.liquid_gold_mm)
-                        } else {
-                            0.0
-                        };
+                        // Smooth capillary length scale (bounded for explicit biharmonic stability)
+                        let l_cap_mm2 =
+                            ((sigma_au / (GOLD_18K_CARD.density_kg_m3 * 9.81)) * 1.0e6).min(3.8);
+                        // Strictly positive-slope C^infty meniscus pressure (zero negative-diffusivity cliff at H -> 0!)
+                        let coh_c = 0.06 * (c.liquid_gold_mm * c.liquid_gold_mm)
+                            / (c.liquid_gold_mm + h_cap_c);
+                        let coh_n = 0.06 * (nc.liquid_gold_mm * nc.liquid_gold_mm)
+                            / (nc.liquid_gold_mm + h_cap_n);
 
-                        let p_c = free_surface_eta_mm[idx] - 0.09 * c.y_mm
+                        // Smooth gentle radial bowl attraction toward the recessed 6h Tourbillon well
+                        let dist_t_c = (c.x_mm * c.x_mm + (c.y_mm + 11.0).powi(2)).sqrt();
+                        let dist_t_n = (nc.x_mm * nc.x_mm + (nc.y_mm + 11.0).powi(2)).sqrt();
+                        let smooth_bed_c =
+                            -1.25 * (-dist_t_c * dist_t_c / (2.0 * 7.8 * 7.8)).exp();
+                        let smooth_bed_n =
+                            -1.25 * (-dist_t_n * dist_t_n / (2.0 * 7.8 * 7.8)).exp();
+
+                        let p_c = smooth_bed_c + c.frozen_gold_mm + c.liquid_gold_mm
+                            - 0.08 * c.y_mm
                             - 0.18 * l_cap_mm2 * eta_laplacian_mm[idx]
                             + coh_c;
-                        let p_n = free_surface_eta_mm[nidx] - 0.09 * nc.y_mm
+                        let p_n = smooth_bed_n + nc.frozen_gold_mm + nc.liquid_gold_mm
+                            - 0.08 * nc.y_mm
                             - 0.18 * l_cap_mm2 * eta_laplacian_mm[nidx]
                             + coh_n;
 
                         // Marangoni thermocapillary shear term + D2Q9 FreeSurface LBM velocity (`fs_lbm::FreeSurface`)
-                        let marangoni_head =
-                            -0.0012 * (nc.temperature_k - c.temperature_k);
+                        let marangoni_head = -0.0009 * (nc.temperature_k - c.temperature_k);
                         let m_lbm_c = self.lbm_free_surface.grid.moments(idx);
                         let m_lbm_n = self.lbm_free_surface.grid.moments(nidx);
                         let u_face: f64 = 0.5
                             * ((m_lbm_c.u[0] + m_lbm_n.u[0]) * (dx as f64)
-                                + (m_lbm_c.u[1] + m_lbm_n.u[1]) * (dy as f64));
-                        let lbm_head = (u_face * 1.8_f64).clamp(-0.35, 0.35);
+                                + (m_lbm_c.u[1] + m_lbm_n.u[1]) * (dy as f64))
+                            / dist_scale;
+                        let lbm_head = (u_face * 1.2_f64).clamp(-0.24, 0.24);
 
-                        let delta_p = (p_c - p_n) + marangoni_head + lbm_head;
+                        let delta_p = ((p_c - p_n) + marangoni_head + lbm_head) / dist_scale;
                         let (donor, acceptor, dp_abs) = if delta_p >= 0.0 {
                             (idx, nidx, delta_p)
                         } else {
@@ -1396,22 +1461,22 @@ impl MultiphysicsState {
                         };
 
                         let h_donor = self.grid[donor].liquid_gold_mm;
-                        // Wetting threshold: a thin sessile bead below 0.18 mm won't advance onto a dry cold cell
-                        // unless driven by sufficient hydrostatic/capillary overpressure!
-                        let dry_acceptor = self.grid[acceptor].liquid_gold_mm < 0.01;
-                        let min_advance_h = if dry_acceptor { 0.16 } else { 0.02 };
+                        let h_acc = self.grid[acceptor].liquid_gold_mm;
+                        // Smooth Cox-Voinov contact-line wetting factor
+                        let wet_factor = (h_donor * h_donor) / (h_donor * h_donor + 0.025 * 0.025)
+                            * (0.55 + 0.45 * (h_acc / (h_acc + 0.02)));
 
-                        if h_donor > min_advance_h && dp_abs > 0.015 {
+                        if h_donor > 0.005 && dp_abs > 0.002 {
                             let phi_donor = self.grid[donor].melt_fraction.max(0.25);
                             let mu_donor = gold_effective_viscosity_pa_s(
                                 self.grid[donor].temperature_k.max(1340.0),
                                 phi_donor,
                             );
-                            // Poiseuille / lubrication mobility H^3 / (3 * mu)
-                            let mobility =
-                                ((h_donor * h_donor * h_donor) / (12.0 * mu_donor)).clamp(0.0, 4.5);
-                            let dh = (mobility * dp_abs * dt_s)
-                                .min(0.24 * (h_donor - 0.05).max(0.0));
+                            let mobility = (((h_donor * h_donor * h_donor) / (8.5 * mu_donor))
+                                * wet_factor)
+                                .clamp(0.0, 4.8);
+                            let dh = (weight * mobility * dp_abs * dt_s)
+                                .min(0.20 * (h_donor - 0.003).max(0.0));
                             if dh > 1.0e-6 {
                                 new_liq_mm[donor] -= dh;
                                 let h_acc_prev = new_liq_mm[acceptor].max(0.0);
@@ -1434,14 +1499,14 @@ impl MultiphysicsState {
                         }
                     }
 
-                    // (c) Watch oil spreading on movement substrate
+                    // (c) Watch oil spreading on movement substrate (isotropic 8-neighbor)
                     if !c.is_gold_case && !nc.is_gold_case {
                         let diff_oil = nc.oil_um - c.oil_um;
-                        if diff_oil.abs() > 2.0 {
+                        if diff_oil.abs() > 1.5 {
                             let t_avg = 0.5 * (c.temperature_k + nc.temperature_k);
                             let mu_oil = watch_oil_viscosity_pa_s(t_avg);
                             let oil_mob = (0.045 / mu_oil.max(0.008)).clamp(0.0, 1.8);
-                            let d_oil = 0.22 * oil_mob * diff_oil * dt_s;
+                            let d_oil = weight * 0.20 * oil_mob * diff_oil * dt_s / dist_scale;
                             new_oil_um[idx] += d_oil;
                             new_oil_um[nidx] -= d_oil;
                         }
@@ -1485,7 +1550,7 @@ impl MultiphysicsState {
                     let q_t = self.inputs.blowtorch_power
                         * exposure
                         * w
-                        * 0.016
+                        * (0.016 * AREA_SCALE_VS_24)
                         * (flame_temp_k - t_i);
                     q_cell_w += q_t;
                     torch_grid_w += q_t;
@@ -1497,8 +1562,9 @@ impl MultiphysicsState {
                 let dx = c.x_mm - self.inputs.ln2_pos_mm[0];
                 let dy = c.y_mm - self.inputs.ln2_pos_mm[1];
                 let w = (-(dx * dx + dy * dy) / (2.0 * 16.0 * 16.0)).exp();
-                c.ln2_mass_g =
-                    (c.ln2_mass_g + self.inputs.ln2_pour_rate * w * 0.24 * dt_s).min(0.45);
+                c.ln2_mass_g = (c.ln2_mass_g
+                    + self.inputs.ln2_pour_rate * w * (0.24 * AREA_SCALE_VS_24) * dt_s)
+                    .min(0.45 * AREA_SCALE_VS_24);
             }
             if c.ln2_mass_g > 1.0e-6 {
                 if t_i > T_LN2_SAT_K + 0.05 {
@@ -1533,7 +1599,7 @@ impl MultiphysicsState {
             let gold_mass_kg = GOLD_18K_CARD.density_kg_m3
                 * GRID_CELL_AREA_M2
                 * ((c.liquid_gold_mm + c.frozen_gold_mm) * 1.0e-3);
-            let eff_mass_kg = (c.base_mass_kg + gold_mass_kg).max(1.0e-5);
+            let eff_mass_kg = (c.base_mass_kg + gold_mass_kg).max(2.5e-6);
             c.enthalpy_j_kg += (q_cell_w * dt_s) / eff_mass_kg;
 
             let (t_new, phi_new) = card.temperature_and_melt_from_enthalpy(c.enthalpy_j_kg);
@@ -1967,7 +2033,7 @@ impl MultiphysicsState {
             if c.frozen_gold_mm > 1.0e-4 {
                 let sigma_y = gold_viscoplastic_yield_stress_pa(c.temperature_k, c.melt_fraction, 0.1);
                 let contact_area_m2 =
-                    (c.frozen_gold_mm * 1.0e-3) * (GRID_DX_M * 0.35);
+                    (c.frozen_gold_mm * 1.0e-3) * (GRID_DX_M * 0.35) * (GRID_DX_M / 0.0024);
                 tau_solid_nm += 0.577 * sigma_y * contact_area_m2 * r_lever_m * gear_gain;
             }
         }

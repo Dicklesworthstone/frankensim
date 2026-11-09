@@ -22,7 +22,8 @@ async function boot(): Promise<void> {
   const micAudio = new VirtualMicrophoneAudio();
   const timegrapher = new HorologicalTimegrapher();
 
-  // Interactive tool state
+  // Interactive tool & simulation state
+  let activeToolMode: ActiveToolMode = "inspect";
   let torchPower = 0.0;
   let torchPosMm: [number, number, number] = [0.0, -24.0, 2.0];
   let ln2Rate = 0.0;
@@ -35,17 +36,12 @@ async function boot(): Promise<void> {
   let micPosMm: [number, number, number] = [0.0, -11.0, 11.0];
   let micGain = 1.4;
   let slowMo = false;
-
-  const syncToolsToSim = (): void => {
-    sim.set_blowtorch(torchPower, torchPosMm[0], torchPosMm[1], torchPosMm[2]);
-    sim.set_liquid_nitrogen(ln2Rate, ln2PosMm[0], ln2PosMm[1], ln2PosMm[2]);
-    sim.set_oil_pour(oilRate, oilPosMm[0], oilPosMm[1], oilPosMm[2]);
-    sim.set_magnet(magnetOn, 1.0, magnetPosMm[0], magnetPosMm[1], magnetPosMm[2]);
-    sim.set_microphone(micPosMm[0], micPosMm[1], micPosMm[2], micGain);
-  };
-  syncToolsToSim();
+  let simPaused = false;
 
   // DOM References
+  const appShell = $("#app-shell");
+  const leftDock = $("#left-dock");
+  const rightDock = $("#right-dock");
   const canvasViewport = $<HTMLCanvasElement>("#viewport-canvas");
   const canvasScope = $<HTMLCanvasElement>("#canvas-oscilloscope");
   const canvasTimegrapher = $<HTMLCanvasElement>("#canvas-timegrapher");
@@ -57,6 +53,14 @@ async function boot(): Promise<void> {
   const hudRateSDay = $("#hud-rate-s-day");
   const hudStatusPill = $("#hud-status-pill");
   const hudDigest = $("#hud-digest");
+  const btnPauseSim = $<HTMLButtonElement>("#btn-pause-sim");
+  const btnTheaterMode = $<HTMLButtonElement>("#btn-theater-mode");
+  const btnStopPerturbations = $<HTMLButtonElement>("#btn-stop-perturbations");
+
+  const stageToolBanner = $("#stage-tool-banner");
+  const stageBannerText = $("#stage-banner-text");
+  const btnBannerOrbit = $<HTMLButtonElement>("#btn-banner-orbit");
+  const btnBannerStop = $<HTMLButtonElement>("#btn-banner-stop");
 
   const hudPowerReservePct = $("#hud-power-reserve-pct");
   const hudPowerReserveBar = $("#hud-power-reserve-bar");
@@ -95,19 +99,78 @@ async function boot(): Promise<void> {
   const ovFouledGold = $("#ov-fouled-gold");
   const ovBField = $("#ov-b-field");
 
+  const updatePerturbationBannerAndBadges = (): void => {
+    const anyPerturbActive =
+      torchPower > 0.01 || ln2Rate > 0.01 || oilRate > 0.01 || magnetOn;
+    btnStopPerturbations.classList.toggle("hidden", !anyPerturbActive);
+
+    // Highlight active subtool parameter box
+    document.querySelectorAll(".subtool-box").forEach((b) => b.classList.remove("is-focused"));
+    if (activeToolMode === "torch" || torchPower > 0.01) {
+      $("#subtool-torch").classList.add("is-focused");
+    }
+    if (activeToolMode === "ln2" || ln2Rate > 0.01) {
+      $("#subtool-ln2").classList.add("is-focused");
+    }
+    if (activeToolMode === "oil" || oilRate > 0.01) {
+      $("#subtool-oil").classList.add("is-focused");
+    }
+    if (activeToolMode === "magnet" || magnetOn) {
+      $("#subtool-magnet").classList.add("is-focused");
+    }
+
+    canvasViewport.classList.toggle("tool-cursor", activeToolMode !== "inspect");
+
+    if (activeToolMode !== "inspect" || anyPerturbActive) {
+      stageToolBanner.classList.remove("hidden");
+      btnBannerOrbit.classList.toggle("hidden", activeToolMode === "inspect");
+      btnBannerStop.classList.toggle("hidden", !anyPerturbActive);
+
+      if (activeToolMode === "torch") {
+        stageBannerText.textContent = `🔥 Blowtorch Engaged (${Math.round(torchPower * 100)}%) — Drag across the 3D watch to aim the 2250 K flame jet`;
+      } else if (activeToolMode === "ln2") {
+        stageBannerText.textContent = `❄️ Cryogenic LN₂ Engaged (${Math.round(ln2Rate * 100)}%) — Drag across the 3D watch to pour 77 K liquid nitrogen`;
+      } else if (activeToolMode === "oil") {
+        stageBannerText.textContent = `💧 Precision Oiler Engaged (${Math.round(oilRate * 100)}%) — Drag across the 3D watch to deposit Pennzane oil`;
+      } else if (activeToolMode === "magnet") {
+        stageBannerText.textContent = `🧲 NdFeB Super-Magnet Engaged — Drag across the 3D watch to sweep the 1.32 T magnetic field`;
+      } else if (activeToolMode === "mic") {
+        stageBannerText.textContent = `🎙️ 3D Acoustic Probe Mode — Drag across the 3D watch to position the condenser microphone`;
+      } else {
+        const activeNames: string[] = [];
+        if (torchPower > 0.01) activeNames.push(`🔥 Blowtorch ${Math.round(torchPower * 100)}%`);
+        if (ln2Rate > 0.01) activeNames.push(`❄️ LN₂ ${Math.round(ln2Rate * 100)}%`);
+        if (oilRate > 0.01) activeNames.push(`💧 Oil ${Math.round(oilRate * 100)}%`);
+        if (magnetOn) activeNames.push(`🧲 Magnet (${magnetDistMm.toFixed(0)} mm)`);
+        stageBannerText.textContent = `Active Perturbation: ${activeNames.join(" + ")} · Orbiting 3D camera`;
+      }
+    } else {
+      stageToolBanner.classList.add("hidden");
+    }
+  };
+
+  const syncToolsToSim = (): void => {
+    sim.set_blowtorch(torchPower, torchPosMm[0], torchPosMm[1], torchPosMm[2]);
+    sim.set_liquid_nitrogen(ln2Rate, ln2PosMm[0], ln2PosMm[1], ln2PosMm[2]);
+    sim.set_oil_pour(oilRate, oilPosMm[0], oilPosMm[1], oilPosMm[2]);
+    sim.set_magnet(magnetOn, 1.0, magnetPosMm[0], magnetPosMm[1], magnetPosMm[2]);
+    sim.set_microphone(micPosMm[0], micPosMm[1], micPosMm[2], micGain);
+    updatePerturbationBannerAndBadges();
+  };
+
   const scene = new PocketWatchScene(canvasViewport, {
     onTargetMoved(tool, posMm) {
       if (tool === "torch") {
         torchPosMm = posMm;
         if (torchPower < 0.05) {
-          torchPower = 0.75;
-          sliderTorchPower.value = "0.75";
+          torchPower = 0.78;
+          sliderTorchPower.value = "0.78";
         }
       } else if (tool === "ln2") {
         ln2PosMm = posMm;
         if (ln2Rate < 0.05) {
-          ln2Rate = 0.85;
-          sliderLn2Rate.value = "0.85";
+          ln2Rate = 0.80;
+          sliderLn2Rate.value = "0.80";
         }
       } else if (tool === "oil") {
         oilPosMm = posMm;
@@ -119,39 +182,53 @@ async function boot(): Promise<void> {
         magnetOn = true;
         chkMagnetOn.checked = true;
         magnetPosMm = posMm;
+        magnetDistMm = Math.round(
+          Math.max(8, Math.min(80, Math.hypot(posMm[0] + 2.2, posMm[1] + 11.0))),
+        );
+        sliderMagnetDist.value = String(magnetDistMm);
       } else if (tool === "mic") {
         micPosMm = posMm;
       }
       syncToolsToSim();
     },
   });
+  syncToolsToSim();
 
-  // Bind Tool Buttons
-  document.querySelectorAll<HTMLButtonElement>(".tool-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      document.querySelectorAll(".tool-btn").forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      const mode = (btn.dataset.tool ?? "inspect") as ActiveToolMode;
-      scene.setToolMode(mode);
+  const selectToolMode = (mode: ActiveToolMode, autoArm = true): void => {
+    activeToolMode = mode;
+    document.querySelectorAll<HTMLButtonElement>(".tool-btn").forEach((b) => {
+      b.classList.toggle("active", b.dataset.tool === mode);
     });
-  });
+    scene.setToolMode(mode);
 
-  // Bind Camera Presets
-  document.querySelectorAll<HTMLButtonElement>(".cam-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      document.querySelectorAll(".cam-btn").forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      const preset = (btn.dataset.cam ?? "overview") as CameraPreset;
-      scene.setCameraPreset(preset);
+    // Auto-arm a sensible working intensity when selecting a perturbation tool
+    // so clicking the tool button immediately activates the physical apparatus!
+    if (autoArm) {
+      if (mode === "torch" && torchPower < 0.05) {
+        torchPower = 0.78;
+        sliderTorchPower.value = "0.78";
+      } else if (mode === "ln2" && ln2Rate < 0.05) {
+        ln2Rate = 0.80;
+        sliderLn2Rate.value = "0.80";
+      } else if (mode === "oil" && oilRate < 0.05) {
+        oilRate = 0.65;
+        sliderOilRate.value = "0.65";
+      } else if (mode === "magnet" && !magnetOn) {
+        magnetOn = true;
+        chkMagnetOn.checked = true;
+      }
+    }
+    syncToolsToSim();
+  };
+
+  const applyCameraPreset = (preset: CameraPreset): void => {
+    document.querySelectorAll<HTMLButtonElement>(".cam-btn").forEach((b) => {
+      b.classList.toggle("active", b.dataset.cam === preset);
     });
-  });
+    scene.setCameraPreset(preset);
+  };
 
-  // Crown Winding & Reset
-  $("#btn-wind-crown").addEventListener("click", () => {
-    sim.wind_crown(1.5);
-  });
-
-  const resetAllControls = (): void => {
+  const stopAllPerturbations = (): void => {
     torchPower = 0.0;
     sliderTorchPower.value = "0";
     ln2Rate = 0.0;
@@ -163,15 +240,80 @@ async function boot(): Promise<void> {
     magnetDistMm = 28.0;
     sliderMagnetDist.value = "28";
     magnetPosMm = [28.0, -11.0, 2.5];
-    syncToolsToSim();
+    selectToolMode("inspect", false);
   };
 
-  $("#btn-reset-watch").addEventListener("click", () => {
-    resetAllControls();
+  // Bind Tool Selector Buttons
+  document.querySelectorAll<HTMLButtonElement>(".tool-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const mode = (btn.dataset.tool ?? "inspect") as ActiveToolMode;
+      selectToolMode(mode, true);
+    });
+  });
+
+  btnStopPerturbations.addEventListener("click", stopAllPerturbations);
+  btnBannerStop.addEventListener("click", stopAllPerturbations);
+  btnBannerOrbit.addEventListener("click", () => selectToolMode("inspect", false));
+
+  // Bind Camera Presets
+  document.querySelectorAll<HTMLButtonElement>(".cam-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const preset = (btn.dataset.cam ?? "overview") as CameraPreset;
+      applyCameraPreset(preset);
+    });
+  });
+
+  // Pause / Resume & Theater Studio Mode
+  const togglePause = (): void => {
+    simPaused = !simPaused;
+    btnPauseSim.textContent = simPaused ? "▶ Resume" : "⏸ Pause";
+    btnPauseSim.classList.toggle("active", simPaused);
+  };
+  btnPauseSim.addEventListener("click", togglePause);
+
+  const toggleTheaterMode = (): void => {
+    const isTheater = appShell.classList.toggle("theater-mode");
+    btnTheaterMode.classList.toggle("active", isTheater);
+    btnTheaterMode.textContent = isTheater ? "⤡ Exit Studio" : "⤢ Studio View";
+    setTimeout(() => scene.resize(), 60);
+    setTimeout(() => scene.resize(), 240);
+  };
+  btnTheaterMode.addEventListener("click", toggleTheaterMode);
+
+  // Mobile Segmented Tab Navigation
+  const setMobileTab = (tabName: string): void => {
+    document.querySelectorAll<HTMLButtonElement>(".mob-tab-btn").forEach((b) => {
+      b.classList.toggle("active", b.dataset.mobileTab === tabName);
+    });
+    document.querySelectorAll<HTMLElement>(".panel-card[data-mobile-group]").forEach((card) => {
+      card.classList.toggle("mobile-tab-active", card.dataset.mobileGroup === tabName);
+    });
+    const isMetrology = tabName === "metrology";
+    leftDock.classList.toggle("mobile-dock-hidden", isMetrology);
+    rightDock.classList.toggle("mobile-dock-hidden", !isMetrology);
+    setTimeout(() => scene.resize(), 40);
+  };
+  setMobileTab("perturb");
+
+  document.querySelectorAll<HTMLButtonElement>(".mob-tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      setMobileTab(btn.dataset.mobileTab ?? "perturb");
+    });
+  });
+
+  // Crown Winding & Reset
+  $("#btn-wind-crown").addEventListener("click", () => {
+    sim.wind_crown(1.5);
+  });
+
+  const resetWatchAll = (): void => {
+    stopAllPerturbations();
     sim.reset();
     sim.set_compensated_hairspring(chkInvarSpring.checked);
     timegrapher.reset();
-  });
+  };
+
+  $("#btn-reset-watch").addEventListener("click", resetWatchAll);
 
   // Architecture & View Toggles
   sliderExploded.addEventListener("input", () => {
@@ -202,6 +344,10 @@ async function boot(): Promise<void> {
       chip.classList.add("active");
       const parts = (chip.dataset.torchAim ?? "0,-24,2").split(",").map(Number);
       torchPosMm = [parts[0] ?? 0, parts[1] ?? -24, parts[2] ?? 2];
+      if (torchPower < 0.05) {
+        torchPower = 0.78;
+        sliderTorchPower.value = "0.78";
+      }
       syncToolsToSim();
     });
   });
@@ -230,6 +376,7 @@ async function boot(): Promise<void> {
     sliderOilRate.value = "0";
     sim.set_oil_pour(0.0, oilPosMm[0], oilPosMm[1], oilPosMm[2]);
     sim.clean_excess_oil();
+    updatePerturbationBannerAndBadges();
   });
 
   chkMagnetOn.addEventListener("change", () => {
@@ -254,7 +401,7 @@ async function boot(): Promise<void> {
   // 3D Virtual Microphone Controls
   btnToggleAudio.addEventListener("click", async () => {
     const running = await micAudio.toggle(sim);
-    btnToggleAudio.textContent = running ? "🔇 Mute 48 kHz Mic" : "🔊 Enable Live 48 kHz Mic";
+    btnToggleAudio.textContent = running ? "🔇 Mute 48 kHz Mic" : "🔊 Enable 48 kHz Mic";
   });
 
   sliderMicGain.addEventListener("input", () => {
@@ -275,41 +422,39 @@ async function boot(): Promise<void> {
   // Guided Multiphysics Scenarios
   document.querySelectorAll<HTMLButtonElement>("[data-preset]").forEach((btn) => {
     btn.addEventListener("click", () => {
+      if (simPaused) togglePause();
+      document.querySelectorAll(".preset-btn").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
       const preset = btn.dataset.preset;
       switch (preset) {
         case "chronometer":
-          resetAllControls();
-          sim.reset();
-          scene.setCameraPreset("overview");
-          timegrapher.reset();
+          resetWatchAll();
+          applyCameraPreset("overview");
           break;
 
         case "thermal-drift":
-          resetAllControls();
+          stopAllPerturbations();
           sim.reset();
           torchPosMm = [0.0, -22.0, 2.0];
           torchPower = 0.42;
           sliderTorchPower.value = "0.42";
           syncToolsToSim();
-          // Pre-warm for 1.5 s so thermal expansion drift is immediately visible
           for (let i = 0; i < 30; i++) sim.step(0.05);
-          scene.setCameraPreset("tourbillon");
+          applyCameraPreset("tourbillon");
           break;
 
         case "melt-gold":
-          resetAllControls();
+          stopAllPerturbations();
           sim.reset();
           torchPosMm = [0.0, -25.0, 1.5];
           torchPower = 1.0;
           sliderTorchPower.value = "1.0";
           syncToolsToSim();
-          // Heat the 6h 18k gold case into the mushy/liquid melting plateau so molten gold flows into the Tourbillon
           for (let i = 0; i < 125; i++) sim.step(0.05);
-          scene.setCameraPreset("overview");
+          applyCameraPreset("overview");
           break;
 
         case "melt-then-ln2": {
-          // Ensure the gold case has melted into the gears first, then quench with LN2!
           const curSnap = decodeWatchSnapshot(sim.snapshot());
           if (curSnap.nodes[3]!.plasticSlump < 0.08) {
             sim.set_blowtorch(1.0, 0.0, -25.0, 1.5);
@@ -322,44 +467,77 @@ async function boot(): Promise<void> {
           sliderLn2Rate.value = "1.0";
           syncToolsToSim();
           for (let i = 0; i < 90; i++) sim.step(0.05);
-          scene.setCameraPreset("overview");
+          applyCameraPreset("overview");
           break;
         }
 
         case "cryo-freeze":
-          resetAllControls();
+          stopAllPerturbations();
           sim.reset();
           ln2PosMm = [0.0, -11.0, 3.0];
           ln2Rate = 1.0;
           sliderLn2Rate.value = "1.0";
           syncToolsToSim();
           for (let i = 0; i < 85; i++) sim.step(0.05);
-          scene.setCameraPreset("tourbillon");
+          applyCameraPreset("tourbillon");
           break;
 
         case "oil-flood":
-          resetAllControls();
+          stopAllPerturbations();
           sim.reset();
           oilPosMm = [0.0, -11.0, 2.0];
           oilRate = 0.85;
           sliderOilRate.value = "0.85";
           syncToolsToSim();
           for (let i = 0; i < 25; i++) sim.step(0.05);
-          scene.setCameraPreset("tourbillon");
+          applyCameraPreset("tourbillon");
           break;
 
         case "magnet-attack":
-          resetAllControls();
+          stopAllPerturbations();
           magnetOn = true;
           chkMagnetOn.checked = true;
           magnetDistMm = 13.0;
           sliderMagnetDist.value = "13";
           magnetPosMm = [13.0, -11.0, 2.5];
           syncToolsToSim();
-          scene.setCameraPreset("tourbillon");
+          applyCameraPreset("tourbillon");
           break;
       }
     });
+  });
+
+  // Global Keyboard Shortcuts (guarded against inputs)
+  window.addEventListener("keydown", (ev) => {
+    const tag = (ev.target as HTMLElement | null)?.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+    if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+
+    const key = ev.key.toLowerCase();
+    if (key === "1" || ev.key === "Escape") {
+      selectToolMode("inspect", false);
+    } else if (key === "2") {
+      selectToolMode("torch", true);
+    } else if (key === "3") {
+      selectToolMode("ln2", true);
+    } else if (key === "4") {
+      selectToolMode("oil", true);
+    } else if (key === "5") {
+      selectToolMode("magnet", true);
+    } else if (key === "6") {
+      selectToolMode("mic", false);
+    } else if (key === "x") {
+      stopAllPerturbations();
+    } else if (key === "w") {
+      sim.wind_crown(1.5);
+    } else if (key === "r") {
+      resetWatchAll();
+    } else if (key === "f") {
+      toggleTheaterMode();
+    } else if (ev.code === "Space") {
+      ev.preventDefault();
+      togglePause();
+    }
   });
 
   // Main 60 FPS Simulation & Render Loop
@@ -372,7 +550,7 @@ async function boot(): Promise<void> {
     const driftS = snap.watchDisplayedTimeS - snap.labTimeS;
     hudTimeDrift.textContent = `${driftS >= 0 ? "+" : ""}${driftS.toFixed(2)} s`;
     hudTimeDrift.style.color =
-      Math.abs(driftS) < 0.25 ? "#67e8c8" : driftS < 0 ? "#ffc168" : "#ff7a8e";
+      Math.abs(driftS) < 0.25 ? "#52eba8" : driftS < 0 ? "#ffc56e" : "#ff8295";
 
     const effRate = 0.35 * snap.measuredRateSPerDay + 0.65 * snap.theoreticalRateSPerDay;
     const rateStr = `${effRate >= 0 ? "+" : ""}${effRate.toFixed(1)} s/d`;
@@ -382,15 +560,17 @@ async function boot(): Promise<void> {
     tgAmp.textContent = `${snap.balanceAmplitudeDeg.toFixed(0)}°`;
     tgBeatErr.textContent = `${snap.measuredBeatErrorMs.toFixed(1)} ms`;
 
-    const statusText = sim.status_label();
+    const statusText = simPaused ? "PAUSED — INSPECTING 3D CALIBRE" : sim.status_label();
     hudStatusPill.textContent = statusText;
     hudStatusPill.className =
       "status-pill " +
-      (snap.statusCode === 0
-        ? "status-ok"
-        : snap.statusCode === 1
-          ? "status-warn"
-          : "status-danger");
+      (simPaused
+        ? "status-warn"
+        : snap.statusCode === 0
+          ? "status-ok"
+          : snap.statusCode === 1
+            ? "status-warn"
+            : "status-danger");
 
     if (frameCounter % 12 === 0) {
       hudDigest.textContent = sim.state_digest_hex().slice(0, 16) + "…";
@@ -439,9 +619,11 @@ async function boot(): Promise<void> {
     lastFrameMs = nowMs;
     frameCounter++;
 
-    const simDt = slowMo ? rawDtS * 0.15 : rawDtS;
-    sim.step(simDt);
-    micAudio.pumpSilentScopeBlock(sim);
+    if (!simPaused) {
+      const simDt = slowMo ? rawDtS * 0.15 : rawDtS;
+      sim.step(simDt);
+      micAudio.pumpSilentScopeBlock(sim);
+    }
 
     const snap = decodeWatchSnapshot(sim.snapshot());
     updateHud(snap);
