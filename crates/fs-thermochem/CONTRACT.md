@@ -4541,3 +4541,28 @@ moving-phase derivatives, weak heat under large reference datums, composition
 and reversal, source/density/phase refusals and late cancellation. These new
 regressions were authored but could not be compiled or executed while the
 development executor was unavailable.
+
+
+### Source-relative receiving UV equilibrium from an accepted SP state
+
+The prepared `composition::volume::energy_path` owner accepts an opaque
+`EquilibriumCaloricAnchorV1` through `sample_from_caloric_anchor`. Exact original
+chemistry, elemental/charge inventory and feed normalization must agree. The
+original TV/Gibbs closure and safeguarded UV root solve the requested extensive
+`U-U_anchor`; per-species source integrals and amount-reference terms precede
+summation. The shared internal-energy integral retains double-double amount,
+formation-energy and RT arithmetic, matching the existing enthalpy treatment.
+Neither the prepared UV birth reference nor the anchor's SP entropy reference
+changes. The returned anchored balances are separate from the ordinary sample's
+immutable UV-reference balances. Failure or cancellation invalidates current
+publication. Direct SP entropy differences use the same source/mixing-entropy
+owner and exact anchor binding.
+
+This is a caloric/source integration seam, not a mass-flow law or a different
+reaction solver. A receiving-volume consumer owns its mass scaling, finite
+exported enthalpy, EOS reconciliation and total energy/entropy acceptance.
+Focused frozen-limit, large-formation-datum and source/cancellation regressions
+are in `fs-gas::equilibrium_flow::tests::nozzle_pair_anchor`.
+
+Three focused native integration regressions are authored but uncompiled and
+unexecuted while the development executor is disconnected.

@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 
 mod nozzle;
 mod nozzle_prepared;
+mod nozzle_pair_anchor;
 #[cfg(feature = "material")]
 mod nozzle_material;
 #[cfg(feature = "material")]
