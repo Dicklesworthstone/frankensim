@@ -3,6 +3,9 @@
 #[path = "../../fs-contact/tests/adhesive_temperature/common.rs"]
 mod common;
 
+#[path = "adhesive_torsional_temperature_heat/combined.rs"]
+mod combined;
+
 use core::f64::consts::PI;
 use fs_contact::normal_patch::adhesive::mixed_mode::torsion::motion::JkrTorsionalMotionBudget;
 use fs_contact::normal_patch::adhesive::mixed_mode::{JkrMixedModeEnvelope, SourceJkrMixedMode};

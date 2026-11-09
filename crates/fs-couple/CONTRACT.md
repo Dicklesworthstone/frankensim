@@ -13421,3 +13421,55 @@ half-force momentum/reservoir closure and SI boundary moments, late refusal/retr
 and profile preservation. Pinned Rust parsing and focused diff checks pass;
 Cargo typechecking/runtime tests have not run. No new force model, integrator,
 thermal-work or physical-validation claim is introduced.
+
+## Coupled normal, vector shear and twist at finite thermal temperatures
+
+`friction_heat::adhesive::combined_temperature::propose_jkr_combined_temperature_heat`
+continues the original attached, full-stick I/II/III JKR source and sealed
+native four-coordinate history at actual finite-cell temperatures. The two
+bulk temperatures, massless-interface temperature and common relaxed contact
+area close in the same bounded thermal endpoint solve. Each trial requeries
+the original selected bulk and interface claims at their independent Kelvin
+coordinates, then reruns the original combined source and native admission.
+Normal, both shear components and twist share one disk; the torsional-only
+radius cannot substitute for a shear-loaded contact.
+
+A private statically dispatched backend now serves both this entry and
+`propose_jkr_torsional_temperature_heat`. It retains the existing finite
+difference/Newton driver, trial budgets, cancellation, variable-area transport,
+receiver/coverage checks, caloric registration and final-trial entropy audit.
+The original public torsional error enum, variant imports, conversions and
+display text remain intact. Neither adapter introduces a second contact model.
+
+The returned candidate owns the successor source, native bodies and history,
+thermal state, refreshed route and complete typed reports together. Coordinates,
+rates, complete native mobility, pending COM/angular travel, geometry, mechanical
+clock and step count survive the temperature phase. The caloric clock advances
+to the already staged mechanical endpoint. Original incoming bulk source
+temperatures must agree with the accepted receiving cells, and original ordered
+body/card/registered caloric identities and the reaction plane must agree.
+
+Normal elastic, vector-shear elastic, torsional elastic and surface-energy
+changes remain separate in the original source report. Their signed sum stays
+on an explicitly named, bounded external coefficient-work port. It is not
+deposited as heat or inferred as entropy: this mechanical potential does not
+supply a caloric constitutive law. The driver checks both the complete contact
+plus finite-cell balance and absolute independent stage residuals. Conductivity
+and other heat supplies remain with the original callback and thermal owners.
+
+Three new combined integration groups specify independently solved simultaneous
+thermal/area feedback and all four storage terms, unchanged native history and
+subsequent motion, full-pipeline zero-shear reduction to the original torsional
+owner, and atomic receiver/domain/work/area/trial/cancellation refusals with
+retry. Together with the four new source and three native groups, this extension
+adds ten authored integration groups. Pinned formatting, recursive Rust parsing,
+scoped whitespace and independent source/API review pass. These integration
+tests have not been compiled or executed: the complete dependency build is
+blocked by the current workspace's exhausted disk and memory limits. No
+whole-crate/workspace or numerical execution pass is claimed.
+
+This entry holds admitted native geometry and attached full-stick topology.
+It does not consume pending travel, correct a stale gap, supply moving thermal
+faces, infer finite-rotation kinematics, cross a thermal instability or invent
+slip/debonding heat. Endpoint area limits do not establish stability along an
+unobserved temperature path.

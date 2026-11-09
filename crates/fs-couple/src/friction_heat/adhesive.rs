@@ -26,6 +26,10 @@ pub mod moment;
 /// Original loaded JKR source feedback from actual finite-body temperatures.
 pub mod torsional_temperature;
 
+/// Common-radius normal, vector shear and twist at actual finite temperatures.
+pub mod combined_temperature;
+mod temperature_coupling;
+
 use super::FrictionHeatRoute;
 use super::network::{
     FrictionHeatNetworkInput, FrictionHeatNetworkReport, FrictionHeatNetworkStep,
@@ -408,9 +412,8 @@ pub fn propose_rigid_adhesive_island_heat<'a, 'm, P, E>(
     let trial = evaluate(&solver.x, controls.audit_entropy)?;
     let native = &trial.payload().mechanical.report.mechanical;
     let heat = trial.report();
-    let combined = native.kinetic_change_j
-        + heat.thermal.stored_energy_change_j
-        - heat.external_heat_j;
+    let combined =
+        native.kinetic_change_j + heat.thermal.stored_energy_change_j - heat.external_heat_j;
     let summed = native.total_energy_residual_j + heat.total_energy_residual_j;
     if [combined, summed]
         .iter()
