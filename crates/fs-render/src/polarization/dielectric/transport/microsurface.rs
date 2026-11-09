@@ -16,6 +16,8 @@ use crate::conductor::microsurface::{SmithError, SmithEvent, SmithGgx, unit};
 use crate::conductor::{ConductorOptics, ConductorSurface};
 
 pub mod connection;
+/// Two-sided rough glass with shared statistical heights and native refraction.
+pub mod dielectric;
 
 
 pub const MAX_SMITH_FACET_EVENTS: u32 = 65_536;

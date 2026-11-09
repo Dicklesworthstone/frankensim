@@ -1111,26 +1111,74 @@ impl<'a> CurvedPolarizedScene<'a> {
                     }
                     let target_medium =
                         self.medium_at(target, result.beam.ray().origin, wavelength)?;
-                    let Some(next) = sample_boundary(
-                        result.beam,
-                        witness.normal,
-                        target_medium,
-                        interaction,
-                        instance.transform(),
-                        self.coatings,
-                        self.coating_stacks.get(witness.boundary_id).copied().flatten(),
-                        samples(event),
-                    )?
-                    else {
-                        result.termination = PathTermination::RejectedMicrofacet;
-                        break;
+                    let smith_dielectric = match (interaction, microsurface.as_mut()) {
+                        (Interaction::Dielectric { surface, .. }, Some(sampler))
+                            if !surface.is_delta() =>
+                        {
+                            sampler
+                                .dielectric_samples
+                                .as_mut()
+                                .map(|draws| (surface, sampler.settings, draws))
+                        }
+                        _ => None,
                     };
-                    if next.event == DielectricEvent::Transmission {
-                        result.medium = target;
-                        result.medium_identity = self.medium_identity(target);
+                    if let Some((surface, walk_settings, draws)) = smith_dielectric {
+                        let surface = super::bind_dielectric_surface(surface, instance.transform())?;
+                        let stack = self
+                            .coating_stacks
+                            .get(witness.boundary_id)
+                            .copied()
+                            .flatten();
+                        let next = match stack {
+                            Some(stack) => result.beam.sample_smith_stack_dielectric(
+                                cx,
+                                witness.normal,
+                                target_medium,
+                                surface,
+                                stack,
+                                walk_settings,
+                                |facet| draws(event, facet),
+                            ),
+                            None => result.beam.sample_smith_dielectric(
+                                cx,
+                                witness.normal,
+                                target_medium,
+                                surface,
+                                walk_settings,
+                                |facet| draws(event, facet),
+                            ),
+                        }
+                        .map_err(SceneError::from)?;
+                        // Microscopic crossings can return to the incident side.
+                        // Only the final escape side updates scene topology.
+                        if next.event() == DielectricEvent::Transmission {
+                            result.medium = target;
+                            result.medium_identity = self.medium_identity(target);
+                        }
+                        result.beam = next.beam();
+                        None
+                    } else {
+                        let Some(next) = sample_boundary(
+                            result.beam,
+                            witness.normal,
+                            target_medium,
+                            interaction,
+                            instance.transform(),
+                            self.coatings,
+                            self.coating_stacks.get(witness.boundary_id).copied().flatten(),
+                            samples(event),
+                        )?
+                        else {
+                            result.termination = PathTermination::RejectedMicrofacet;
+                            break;
+                        };
+                        if next.event == DielectricEvent::Transmission {
+                            result.medium = target;
+                            result.medium_identity = self.medium_identity(target);
+                        }
+                        result.beam = next.beam;
+                        Some((next.event, next.pdf, next.delta))
                     }
-                    result.beam = next.beam;
-                    Some((next.event, next.pdf, next.delta))
                 }
             };
             let outgoing = witness.normal.dot(result.beam.ray().dir);

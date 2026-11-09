@@ -39,6 +39,10 @@ use crate::polarization::dielectric::transport::microsurface::SmithWalkSettings;
 use fs_exec::Cx;
 use fs_rand::philox::philox4x32_10;
 
+/// Explicit full rough-glass continuation, separate from opaque-light estimators.
+pub mod dielectric;
+pub use dielectric::SmithDielectricCameraScene;
+
 /// Allocation-free opt-in view of an admitted physical source camera. Keeping
 /// a distinct owner prevents a single-scattering NEE strategy from silently
 /// receiving a different BSDF or an invented outgoing proposal probability.
@@ -226,7 +230,29 @@ impl<'a, 's, 'm> SmithCameraScene<'a, 's, 'm> {
         initial_medium: usize,
         settings: CurvedTraceSettings,
         surface_samples: impl FnMut(u32) -> [f64; 3],
+        facet_samples: impl FnMut(u32, u32) -> [f64; 3],
+    ) -> Result<CameraRadianceSample, CameraRadianceError> {
+        self.sample_launched_ray_with_microsurfaces(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            surface_samples,
+            facet_samples,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sample_launched_ray_with_microsurfaces(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedTraceSettings,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
         mut facet_samples: impl FnMut(u32, u32) -> [f64; 3],
+        mut dielectric_samples: Option<&mut dyn FnMut(u32, u32) -> [f64; 4]>,
     ) -> Result<CameraRadianceSample, CameraRadianceError> {
         let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
         let mut emission = SurfaceEmission::new(self.camera, initial_index);
@@ -257,7 +283,9 @@ impl<'a, 's, 'm> SmithCameraScene<'a, 's, 'm> {
                 Some(SmithSurfaceSampler {
                     settings: self.microsurface,
                     samples: &mut facet_samples,
-                    dielectric_samples: None,
+                    dielectric_samples: dielectric_samples.as_mut().map(|samples| {
+                        &mut **samples as &mut dyn FnMut(u32, u32) -> [f64; 4]
+                    }),
                 }),
             )
             .map(|(path, _)| path);

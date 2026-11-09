@@ -163,6 +163,8 @@ pub enum SceneError {
     Conductor(ConductorBeamError),
     /// A microscopic path failed or exceeded its explicit facet budget.
     Smith(SmithBeamError),
+    /// Explicit two-sided dielectric microsurface path failure.
+    SmithDielectric(super::transport::microsurface::dielectric::SmithDielectricError),
     #[cfg(feature = "volumes")]
     Scattering(crate::volumes::transport::scattering::polarized::PolarizedScatteringError),
     Cancelled,
@@ -181,6 +183,16 @@ impl From<ConductorBeamError> for SceneError {
 impl From<SmithBeamError> for SceneError {
     fn from(error: SmithBeamError) -> Self {
         match error { SmithBeamError::Cancelled => Self::Cancelled, other => Self::Smith(other) }
+    }
+}
+impl From<super::transport::microsurface::dielectric::SmithDielectricError> for SceneError {
+    fn from(error: super::transport::microsurface::dielectric::SmithDielectricError) -> Self {
+        match error {
+            super::transport::microsurface::dielectric::SmithDielectricError::Cancelled => {
+                Self::Cancelled
+            }
+            other => Self::SmithDielectric(other),
+        }
     }
 }
 impl From<fs_exec::Cancelled> for SceneError {

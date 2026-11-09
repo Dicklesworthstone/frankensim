@@ -3,6 +3,9 @@
 use super::super::microsurface::SmithCameraScene;
 use super::*;
 
+/// Explicit two-sided rough-glass camera transport on the native raster.
+pub mod dielectric;
+
 /// Each wavelength and geometric surface has an independent microscopic stream.
 /// The variable walk length cannot shift the original raster, pupil, wavelength
 /// or later surface draws. The seed/path counter map is one-to-one per lane.

@@ -438,3 +438,5 @@ fn g1_brushed_camera_preserves_the_complete_anisotropic_radiance_path() {
         }
     });
 }
+
+mod dielectric;

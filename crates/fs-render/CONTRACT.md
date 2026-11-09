@@ -12738,3 +12738,63 @@ ordinary/Smith dispatch, endpoint partition resets, primary/LTE preservation,
 blocked and unsupported legs, cancellation, and facet/geometry refusals.
 Four native full-scene regression groups are authored but unrun. Full workspace
 Cargo and resolved-geometry runtime validation remain unavailable.
+
+### Full two-sided rough dielectric Smith transport
+
+`PolarizedBeam::sample_smith_dielectric` and
+`sample_smith_stack_dielectric` add the Heitz et al. (2016) dielectric random
+walk to the original native Smith geometry. Every microscopic collision uses
+the original spectral smooth Fresnel/coating Mueller response and ray-frame
+owner. Refraction changes the active medium and reverses the same statistical
+height: for `d = -ln(C1(h))`, the opposite side is
+`-ln(1-exp(-d))`, evaluated without losing small complementary probabilities.
+Both sides retain the authored anisotropic slope distribution. Transmission
+therefore has the shared-height beta-function masking law from the original
+model; it is not approximated by the reflection masking expression used in
+the older single-scattering dielectric path. TIR phase, multiple reflection
+and transmission returns, reversed compact or arbitrary passive film order,
+and local incident/exit phase indices remain in the native optical owner.
+
+The caller supplies independent `[flight, facet_u, facet_v, Fresnel_branch]`
+variates. The finite facet budget and cancellation refuse incomplete samples.
+Only final escape determines the macroscopic event and scene medium identity.
+Each microscopic response carries ray power; no radiance eta multiplier,
+albedo compensation, extra Smith G factor, fictitious metric distance, delay,
+or bulk Beer attenuation is applied inside the statistical surface. Coherent
+film absorption remains local to each facet. The joint log density is in
+per-collision depth and facet-normal measure with branch/escape atoms. It is
+never an outgoing marginal PDF. A bare equal-index boundary is an exact null
+event with no draws and preserved frame. At a coated equal-index boundary,
+paths with no facet reflection retain the straight-through delta atom of the
+mixed distribution instead of claiming a continuous rough transmission PDF.
+
+`SmithDielectricCameraScene` is an explicit path-only camera owner for full
+opaque and dielectric Smith transport. The curved scene binds physical body
+axes once per hit, retains source/GRIN/Beer propagation and optical distance,
+and changes topology only on net macroscopic transmission. The existing
+camera's reciprocal Stokes launch and endpoint n-squared conversion remain
+the sole radiance conversion. Seeded spectral, passive-analyzer, resolved
+lens, and four-wavelength/pupil raster paths use independent logical facet
+streams; variable microscopic work cannot shift other surface or pixel
+draws. Existing opaque point, environment and area-light connection wrappers
+retain their original dielectric law until they have a compatible full
+dielectric connection estimator. No hidden-path PDF is inserted into MIS.
+
+Regression coverage includes the independently integrated transmission beta
+law, two-sided polarized white furnaces, cosine-integrated n-squared
+transmission reciprocity, genuine refractive returns, analytic TIR ellipticity,
+reversed lossy films, arbitrary-stack/compact-film agreement with rotated
+anisotropy, equal-index mixed measures, deterministic replay and explicit
+limits/cancellation. Native scene regressions cover final-medium/Beer/radiance
+and geometric-distance accounting plus smooth camera/raster parity.
+
+Verification in this session: seven production optical groups passed with the
+original dielectric/coating/anisotropy, interface Mueller, smooth beam scatter,
+Smith geometry, fs_math and Philox sources; external execution/container/hash
+wiring used explicit fixtures. An eighth focused probe executed the exact new
+curved dispatch block with fixture context containers and native glass optics.
+Actual camera/raster modules typechecked against signature fixtures. The two
+full native scene regressions are authored but unrun; the absent sibling
+workspace graph prevents full Cargo, resolved geometry/GRIN, raster, clippy,
+material-state or remote-runner validation. These are numerical-model checks,
+not experimental validation of arbitrary measured rough glass.
