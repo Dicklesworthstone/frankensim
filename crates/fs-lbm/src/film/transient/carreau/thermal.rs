@@ -8,13 +8,16 @@
 //! coupled composition is first order when temperature evolves.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 
 use fs_conduction::enthalpy::backward_euler::{
-    BackwardEulerStep, BackwardEulerTrial, BoundaryStepCoefficients, StepCoefficients,
+    BackwardEulerStep, BackwardEulerTrial, BoundaryConductances, BoundaryStepCoefficients,
+    StepCoefficients,
 };
-use fs_conduction::enthalpy::{CellId, DepositionError, DepositionSimulation, EnergyAudit};
+use fs_conduction::enthalpy::{
+    CellId, DepositionError, DepositionObserver, DepositionSimulation, EnergyAudit, Event,
+};
 use fs_math::dd::Dd;
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
 use fs_solver::{NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport};
@@ -23,6 +26,8 @@ use super::{
     FilmDrive, FilmStepLimits, TransientCarreauControls, TransientCarreauError,
     TransientCarreauFilm, TransientCarreauFilmSpec, TransientCarreauStep, filled,
 };
+
+pub mod adaptive;
 
 /// Original thermal work/accuracy bounds, separate from momentum controls.
 #[derive(Clone, Copy, Debug)]
@@ -144,6 +149,8 @@ pub struct ThermalFilmReport<T> {
     pub momentum_material_evaluations: u64,
     pub maximum_cell_residual_j: f64,
     pub deposited_viscous_heat_j: f64,
+    /// Actual heat inserted in each original film cell, in film_cells() order.
+    pub deposited_cell_heat_j: Vec<f64>,
     /// Sum of deposited cell heat minus area times the native flow loss.
     pub heat_partition_residual_j: f64,
     pub kinetic_energy_change_j: f64,
@@ -151,6 +158,11 @@ pub struct ThermalFilmReport<T> {
     pub mechanical_work_j: f64,
     /// Original external thermal supply BEFORE inserting viscous heat.
     pub other_heat_j: f64,
+    /// Original net cell heat BEFORE inserting viscous heat, including internal
+    /// conduction. Uses the same endpoint source and conductance overrides as
+    /// the accepted thermal residual. Different mechanisms within one cell may
+    /// cancel: this is not a per-boundary or per-mechanism error certificate.
+    pub other_cell_heat_j: BTreeMap<CellId, f64>,
     /// Actual thermal storage + kinetic change - other heat - mechanical work.
     /// Thermal storage is measured by the native owner relative to accepted
     /// enthalpy; no absolute caloric reference datum is subtracted here.
@@ -162,6 +174,71 @@ struct Endpoint<T> {
     exchange: T,
     deposited_heat_j: f64,
     other_heat_j: f64,
+    other_cell_heat_j: BTreeMap<CellId, f64>,
+}
+
+/// One aggregate counter shared by every native comparison in an adaptive call.
+#[derive(Default)]
+struct ThermalFilmWork {
+    endpoints: Cell<usize>,
+    materials: Cell<u64>,
+}
+
+/// Forward the actual endpoint overrides to the original thermal rate owner.
+/// This is only an observation of the same rates, before viscous insertion.
+#[derive(Clone)]
+struct EndpointRates<'a> {
+    sources: &'a BTreeMap<CellId, f64>,
+    links: &'a BTreeMap<u64, f64>,
+    boundaries: &'a BoundaryConductances,
+}
+impl DepositionObserver for EndpointRates<'_> {
+    type Error = DepositionError;
+    fn sources(
+        &mut self,
+        _: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, DepositionError> {
+        check()?;
+        Ok(self.sources.clone())
+    }
+    fn conductances(
+        &mut self,
+        _: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<u64, f64>, DepositionError> {
+        check()?;
+        Ok(self.links.clone())
+    }
+    fn ambient_conductances(
+        &mut self,
+        _: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, DepositionError> {
+        check()?;
+        Ok(self.boundaries.ambient_w_k.clone())
+    }
+    fn reservoir_conductances(
+        &mut self,
+        _: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, DepositionError> {
+        check()?;
+        Ok(self.boundaries.reservoir_w_k.clone())
+    }
+    fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), DepositionError> {
+        Ok(())
+    }
+    fn step(
+        &mut self,
+        _: f64,
+        _: f64,
+        _: &BTreeMap<CellId, f64>,
+        _: &DepositionSimulation<'_>,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), DepositionError> {
+        Ok(())
+    }
 }
 
 fn finite(value: f64) -> Result<f64, DepositionError> {
@@ -372,6 +449,34 @@ impl<'m> ThermalCarreauFilm<'m> {
         resolve: impl Fn(&DepositionSimulation<'m>, &[CellId]) -> Result<ThermalFilmExchange<T>, E>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<ThermalFilmReport<T>, ThermalFilmError<E>> {
+        self.advance_metered(
+            target_s,
+            drive,
+            limits,
+            momentum,
+            controls,
+            energy_guess_j,
+            resolve,
+            cancelled,
+            &ThermalFilmWork::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_metered<T, E>(
+        &mut self,
+        target_s: f64,
+        drive: FilmDrive,
+        limits: FilmStepLimits,
+        momentum: TransientCarreauControls,
+        controls: ThermalFilmControls,
+        energy_guess_j: &[f64],
+        resolve: impl Fn(&DepositionSimulation<'m>, &[CellId]) -> Result<ThermalFilmExchange<T>, E>,
+        cancelled: impl FnMut() -> bool,
+        work: &ThermalFilmWork,
+    ) -> Result<ThermalFilmReport<T>, ThermalFilmError<E>> {
+        let opening_endpoints = work.endpoints.get();
+        let opening_materials = work.materials.get();
         let (next, report) = {
             let checkpoint = RefCell::new(cancelled);
             let stopped = Cell::new(false);
@@ -422,14 +527,14 @@ impl<'m> ThermalCarreauFilm<'m> {
             let trial = RefCell::new(&mut self.trial);
             let temperatures = RefCell::new(&mut self.face_temperatures);
             let heat = RefCell::new(&mut self.cell_heat);
-            let evaluations = Cell::new(0usize);
-            let material_evaluations = Cell::new(0u64);
+            let evaluations = &work.endpoints;
+            let material_evaluations = &work.materials;
             let cells = &self.cells;
             let area = self.area;
             let evaluate =
                 |x: &[f64]| -> Result<BackwardEulerTrial<'m, Endpoint<T>>, ThermalFilmError<E>> {
                     check()?;
-                    if evaluations.get() == controls.maximum_endpoint_evaluations {
+                    if evaluations.get() >= controls.maximum_endpoint_evaluations {
                         return Err(ThermalFilmError::EndpointBudget);
                     }
                     evaluations.set(evaluations.get() + 1);
@@ -490,14 +595,20 @@ impl<'m> ThermalCarreauFilm<'m> {
                                 mut bulk,
                                 boundaries,
                             } = exchange.heat;
-                            let other = finite(
-                                dt * candidate.external_step_power_with_boundary_conductances(
-                                    &bulk.sources_w,
-                                    &bulk.conductances_w_k,
-                                    &boundaries,
-                                    || check(),
-                                )?,
+                            let rates = candidate.power_balance_observed(
+                                &EndpointRates {
+                                    sources: &bulk.sources_w,
+                                    links: &bulk.conductances_w_k,
+                                    boundaries: &boundaries,
+                                },
+                                || check(),
                             )?;
+                            let other = finite(dt * rates.external_power_w)?;
+                            let other_cells = rates
+                                .net_power_w
+                                .into_iter()
+                                .map(|(id, rate)| Ok((id, finite(dt * rate)?)))
+                                .collect::<Result<BTreeMap<_, _>, DepositionError>>()?;
                             let mut deposited = Dd::from_f64(0.0);
                             for (&cell, &q) in cells.iter().zip(heat.iter()) {
                                 check()?;
@@ -522,6 +633,7 @@ impl<'m> ThermalCarreauFilm<'m> {
                                         exchange: bulk.payload,
                                         deposited_heat_j: finite(deposited.to_f64())?,
                                         other_heat_j: other,
+                                        other_cell_heat_j: other_cells,
                                     },
                                 },
                                 boundaries,
@@ -603,14 +715,20 @@ impl<'m> ThermalCarreauFilm<'m> {
                 thermal: audit,
                 exchange: endpoint.exchange,
                 nonlinear: result.report,
-                endpoint_evaluations: evaluations.get(),
-                momentum_material_evaluations: material_evaluations.get(),
+                endpoint_evaluations: evaluations.get() - opening_endpoints,
+                momentum_material_evaluations: material_evaluations.get() - opening_materials,
                 maximum_cell_residual_j,
                 deposited_viscous_heat_j: endpoint.deposited_heat_j,
+                deposited_cell_heat_j: heat
+                    .borrow()
+                    .iter()
+                    .map(|q| finite(dt * (area * q / dt)))
+                    .collect::<Result<Vec<_>, _>>()?,
                 heat_partition_residual_j: partition,
                 kinetic_energy_change_j: kinetic,
                 mechanical_work_j: work,
                 other_heat_j: endpoint.other_heat_j,
+                other_cell_heat_j: endpoint.other_cell_heat_j,
                 combined_energy_residual_j: combined,
             };
             check()?;

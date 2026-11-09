@@ -12,6 +12,9 @@ use fs_material::fluid_transport::rheology::{
 use fs_material::visco::temperature::{TemperatureShift, TemperatureShiftModel};
 use std::collections::BTreeMap;
 
+#[path = "tests/adaptive.rs"]
+mod adaptive;
+
 const IDS: [CellId; 2] = [CellId(20), CellId(3)];
 const SPEC: TransientCarreauFilmSpec = TransientCarreauFilmSpec {
     density_kg_m3: 1.0,

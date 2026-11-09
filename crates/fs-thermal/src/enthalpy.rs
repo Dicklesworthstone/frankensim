@@ -480,6 +480,14 @@ impl<'a> DepositionSimulation<'a> {
     pub fn time_s(&self) -> f64 {
         self.time_s
     }
+    /// Next unprocessed native event time, including an event pending at the
+    /// current time. Reading this does not advance the timeline or consume an
+    /// event. An implicit caller can stop at the event's left limit, then use
+    /// advance_to(current_time, ...) for the original same-time event handoff.
+    #[must_use]
+    pub fn next_event_time_s(&self) -> Option<f64> {
+        self.schedule.get(self.cursor).map(|event| event.time_s)
+    }
     /// Original allocation and per-advance work ceilings. Coupled drivers use
     /// these same limits across their accepted refinements.
     #[must_use]
