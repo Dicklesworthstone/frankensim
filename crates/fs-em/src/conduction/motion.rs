@@ -18,8 +18,8 @@
 
 use super::{
     ConductionBoundaryResponse, ConductionCellResponse, ConductionContactResponse,
-    ConductionControls, ConductionCurrentTrace, ConductionError, PlanarConduction, finite,
-    gradients, poll, scalar_potential,
+    ConductionControls, ConductionCurrentTrace, ConductionError, ConductionField, PlanarConduction,
+    finite, gradients, poll, scalar_potential,
 };
 use fs_material::conductor::ResolvedConductorState;
 use fs_material::conductor::planar::PlanarConductorMaterial;
@@ -227,6 +227,25 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
     }
 }
 
+/// Original prescribed-motion observations accompanying a nonlinear field.
+/// The conductor-frame field drives material response and irreversible heat.
+/// Mechanical power is positive OUT to motion; terminal power is positive IN.
+#[derive(Clone, Debug)]
+pub struct ConductionMotionReport {
+    pub velocity_m_s: Vec<[f64; 2]>,
+    pub normal_flux_density_t: Vec<f64>,
+    pub conductor_field_v_m: Vec<[f64; 2]>,
+    pub lorentz_force_density_n_m3: Vec<[f64; 2]>,
+    pub cell_mechanical_power_w: Vec<f64>,
+    pub mechanical_power_w: f64,
+    /// Signed bulk laboratory E.J, excluding stationary contact work.
+    pub electrical_power_w: f64,
+    pub contact_power_w: f64,
+    pub terminal_power_w: f64,
+    /// Sum of absolute local heat + mechanical - electrical defects.
+    pub work_pairing_residual_w: f64,
+}
+
 /// Accepted current, heat and force with the exact original source/geometry
 /// and prescribed velocity/field snapshots. Mechanical power is positive when
 /// the electromagnetic force does work on the moving conductor; terminal power
@@ -254,7 +273,43 @@ pub struct MovingConductionField<'a, C = ResolvedConductorState> {
     report: Option<SolveReport>,
 }
 
-impl<C: PlanarConductorMaterial> MovingConductionField<'_, C> {
+impl<'a, C: PlanarConductorMaterial> MovingConductionField<'a, C> {
+    // Consume native arrays into the shared nonlinear source closure. This
+    // projection never escapes as a stationary public solve: its caller pairs
+    // the field with the mandatory physical motion account below.
+    pub(super) fn into_response_parts(self) -> (ConductionField<'a, C>, ConductionMotionReport) {
+        let motion = ConductionMotionReport {
+            velocity_m_s: self.velocity_m_s,
+            normal_flux_density_t: self.normal_flux_density_t,
+            conductor_field_v_m: self.conductor_field_v_m,
+            lorentz_force_density_n_m3: self.lorentz_force_density_n_m3,
+            cell_mechanical_power_w: self.cell_mechanical_power_w,
+            mechanical_power_w: self.mechanical_power_w,
+            electrical_power_w: self.electrical_power_w,
+            contact_power_w: self.contact_power_w,
+            terminal_power_w: self.boundary.terminal_power_w,
+            work_pairing_residual_w: self.work_pairing_residual_w,
+        };
+        let field = ConductionField {
+            problem: self.problem,
+            voltage_v: self.voltage_v,
+            relative_voltage_v: self.relative_voltage_v,
+            reference_voltage_v: self.reference_voltage_v,
+            electric_field_v_m: self.response.electric_field_v_m,
+            current_density_a_m2: self.response.current_density_a_m2,
+            cell_power_w: self.response.cell_power_w,
+            contact_response: self.contact_response,
+            power_w: self.joule_power_w,
+            nodal_boundary_current_a: self.boundary.nodal_boundary_current_a,
+            nodal_applied_current_a: self.nodal_applied_current_a,
+            boundary_current_a: self.boundary.boundary_current_a,
+            maximum_free_current_residual_a: self.boundary.maximum_free_current_residual_a,
+            power_balance_residual_w: self.power_balance_residual_w,
+            report: self.report,
+        };
+        (field, motion)
+    }
+
     pub fn problem(&self) -> &PlanarConduction<C> {
         self.problem
     }

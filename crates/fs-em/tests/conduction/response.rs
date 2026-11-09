@@ -9,6 +9,8 @@ mod axisymmetric;
 mod contacts;
 #[path = "response/current.rs"]
 mod current;
+#[path = "response/motion.rs"]
+mod motion;
 #[path = "response/power.rs"]
 mod power;
 #[path = "response/terminals.rs"]

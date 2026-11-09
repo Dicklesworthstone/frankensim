@@ -8920,3 +8920,50 @@ quadrature, mesh-error, uniqueness or empirical material certificate.
 Finite-aperture normalized-window moments now optionally project each original E/H source bank into bounded positive temporal modes before continuous rectangle products. Both Uniform and Triangular shutters retain actual real carrier sums and proper-complex difference statistics, original joint center phases, all spatial modes and Nyquist terms, signed Poynting, Jones-before-product analyses and Maxwell stress. M<=17, source limits 2..32 real or 2..64 proper and half-band<=0.5 remain shared-core admission. Additional logical payload is 31,504+192*N*M bytes; work reserves max(N²F²,N*F*M+N²*M) per selected bank. Tight existing budgets and unsupported bands keep the original pair law. The separate wrench, interferometer and energy-control owners are not covered by this generic measurement change.
 
 Focused verification passed 13 exact numerical tests and two full dispatch-body tests with manufactured reconstruction adapters under -Dwarnings. These cover real/proper dark residuals, both profiles, independent field quadrature, continuous rectangle partitions including unpaired Nyquist modes, exact budget boundaries, cancellation and single reconstruction per original frequency. The centered 1ps real two-tone fixture previously returned 9.183549615799121e-41 instead of the physical leading value 2.8125e-50; the projected route preserves that residual. This is focused numerical and dispatch validation, without a native Maxwell/material/FFT reconstruction or full workspace claim. It does not certify relative error at arbitrary joint spatial nulls.
+
+
+### Nonlinear conductor-frame response under prescribed motion
+
+The original planar and tetrahedral scalar conductivity/resistivity owners now
+close material response at the actual conductor-frame field E' = E + u cross B
+and native J. Laboratory E remains a separate observation. Constitutive current
+and heat defects use the same E' as the material source; complete source pins,
+external coordinates, source-coordinate relaxation, stationary-contact response,
+adaptive contact quadrature, cancellation and cumulative field/source work
+limits retain their existing owners. No accepted nonlinear operating point is
+rescaled, and the private native adapters move existing buffers without cloning.
+
+Planar boundary voltage and distributed-current traces use
+conduction::response::motion::MovingConductionResponseCandidate. Its mandatory
+field/motion report keeps native Joule heat, signed bulk laboratory electrical
+work, stationary-contact heat, signed terminal supply and Lorentz mechanical
+output distinct. The 3D response::motion entry points accept original boundary
+traces or direct grouped voltage/current/floating/mixed electrodes, returning
+the original source owner with SpatialMovingConductionSnapshot. Each direct
+electrode constitutive trial uses one actual-amplitude sparse solve.
+
+Positive mechanical work leaves the electrical/thermal system. Native terminal
+input equals irreversible Joule heat plus signed mechanical output; generation
+may have negative electrical supply, and short-circuit braking may heat with
+zero terminal supply. Adaptive contact comparison additionally observes local
+and total signed mechanical work. Contacts remain stationary surface laws:
+both original adjacent cells must have zero velocity, including when u cross B
+vanishes. Motion in remote bulk cells is admitted.
+
+These are prescribed velocity/B snapshots on fixed geometry and material
+occupancy. They add no induction evolution, mesh advection, mechanical state
+integration, sliding-interface work law or regulated-power moving policy.
+Planar total-current moving electrodes and axisymmetric motion are not exposed
+by these entry points. Positive source values do not establish uniqueness or
+convergence.
+
+Ten focused native regressions cover original E'/J source coordinates, motoring,
+generation, braking, open-circuit screening, zero-motion parity, direct 3D
+current/floating/mixed electrodes, planar current traces under a large common
+voltage gauge, stationary contact heat and moving-side refusal, source-domain
+refusal, budgets, cancellation and retry. Pinned rustfmt parsed/formatted the
+changed Rust files. Bounded rustc verification exercised the actual 3D snapshot
+getters/observation adapter with unrelated opaque result types substituted and
+independent uniform-bar roots; separate analytic signed-work references also
+passed. The new native integration regressions have not been compiled or run
+in this environment; these checks are not a full crate/workspace validation.

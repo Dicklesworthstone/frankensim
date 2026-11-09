@@ -2,7 +2,8 @@
 //!
 //! Each bounded iteration assembles the SAME FEEC conductivity operator, solves
 //! its original voltage/current traces, and refreshes complete pinned sources at
-//! actual |E| and |J|. Applied/evaluated conductivity, current and power must all
+//! actual |E| and |J| (conductor-frame E' for prescribed motion). Applied and
+//! evaluated conductivity, current and power must all
 //! agree. Optional relaxation requeries original sources at damped E/J
 //! coordinates; it never blends conductivities or adds iteration error as heat.
 //! This Picard closure need not converge for every positive source curve and
@@ -15,6 +16,8 @@ use std::sync::Arc;
 
 /// Original local contact source laws and bounded trace/quadrature response.
 pub mod contact;
+/// Original-source response under prescribed planar motion.
+pub mod motion;
 mod power;
 /// Simultaneous original terminal controls inside the nonlinear source closure.
 pub mod terminals;
@@ -193,13 +196,15 @@ pub struct PlanarConductionResponse {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConductionResponseSample {
     pub triangle: usize,
-    /// Complete original material evaluated at the actual reported E and J.
+    /// Complete original material evaluated at actual J and the physical source
+    /// field: laboratory E for stationary owners, conductor-frame E' for motion.
     pub conductor: ResolvedConductorState,
     /// Evaluated minus applied conductivity [S/m].
     pub conductivity_defect_s_m: f64,
-    /// Native J minus the source-evaluated J(E) [A/m2], in mesh axes.
+    /// Native J minus the source-evaluated J(E) or J(E') [A/m2], in mesh axes.
     pub current_density_defect_a_m2: [f64; 2],
-    /// Native local E.J minus source-evaluated power over this cell [W].
+    /// Native irreversible power minus source-evaluated heat over this cell
+    /// [W], pairing the current defect with that same physical source field.
     pub power_defect_w: f64,
 }
 
@@ -933,10 +938,49 @@ impl PlanarConductionResponse {
         field_controls: ConductionControls,
         controls: ConductionResponseControls,
         cancelled: &mut impl FnMut() -> bool,
+        solve: impl for<'p> FnMut(
+            &'p PlanarConduction,
+            &mut dyn FnMut() -> bool,
+        ) -> Result<(ConductionField<'p>, D), E>,
+    ) -> Result<(ConductionResponseCandidate, D), E>
+    where
+        E: From<ConductionResponseError>,
+    {
+        self.solve_source_frame_candidate(
+            seeds,
+            contacts,
+            assembly,
+            field_controls,
+            controls,
+            cancelled,
+            solve,
+            |field, _, cell| field.electric_field_v_m()[cell],
+            |_, _, _| Ok(()),
+        )
+    }
+
+    // One original-source iteration for both stationary and prescribed-motion
+    // fields. Only the physical source frame and extra signed work observations
+    // differ; source admission, relaxation, contact closure and budgets are shared.
+    #[allow(clippy::too_many_arguments)]
+    fn solve_source_frame_candidate<D, E>(
+        &self,
+        seeds: Vec<ResolvedConductorState>,
+        contacts: Vec<ConductionContact>,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: ConductionResponseControls,
+        cancelled: &mut impl FnMut() -> bool,
         mut solve: impl for<'p> FnMut(
             &'p PlanarConduction,
             &mut dyn FnMut() -> bool,
         ) -> Result<(ConductionField<'p>, D), E>,
+        source_field: impl Fn(&ConductionField<'_>, &D, usize) -> [f64; 2],
+        refine_work: impl Fn(
+            &D,
+            &mut ContactQuadratureSnapshot,
+            &mut dyn FnMut() -> bool,
+        ) -> Result<(), ConductionResponseError>,
     ) -> Result<(ConductionResponseCandidate, D), E>
     where
         E: From<ConductionResponseError>,
@@ -959,6 +1003,7 @@ impl PlanarConductionResponse {
                 controls,
                 cancelled,
                 solve,
+                &source_field,
             );
         };
         poll(cancelled).map_err(ConductionResponseError::from)?;
@@ -1009,13 +1054,15 @@ impl PlanarConductionResponse {
                 rung_controls,
                 cancelled,
                 &mut solve,
+                &source_field,
             )?;
             work.record(
                 candidate.report.field_solves,
                 candidate.report.source_evaluations,
             )
             .map_err(ConductionResponseError::from)?;
-            let snapshot = self.refinement_snapshot(&candidate.report, cancelled)?;
+            let mut snapshot = self.refinement_snapshot(&candidate.report, cancelled)?;
+            refine_work(&driver, &mut snapshot, cancelled)?;
             if let Some(coarse) = &previous {
                 let differences = refinement
                     .compare(coarse, &snapshot, cancelled)
@@ -1117,6 +1164,7 @@ impl PlanarConductionResponse {
             &'p PlanarConduction,
             &mut dyn FnMut() -> bool,
         ) -> Result<(ConductionField<'p>, D), E>,
+        source_field: &impl Fn(&ConductionField<'_>, &D, usize) -> [f64; 2],
     ) -> Result<(ConductionResponseCandidate, D), E>
     where
         E: From<ConductionResponseError>,
@@ -1233,7 +1281,7 @@ impl PlanarConductionResponse {
             maximum_contact_voltage = 0.0;
             for (triangle, (source, seed)) in self.sources.iter().zip(&seeds).enumerate() {
                 poll(cancelled).map_err(ConductionResponseError::from)?;
-                let e = field.electric_field_v_m()[triangle];
+                let e = source_field(&field, &driver, triangle);
                 let j = field.current_density_a_m2()[triangle];
                 let conductor = source
                     .at_fields(seed, e, j)

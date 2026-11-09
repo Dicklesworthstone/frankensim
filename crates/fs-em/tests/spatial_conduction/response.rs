@@ -5,6 +5,8 @@ mod adaptive;
 mod contact_response;
 #[path = "response/direct_terminals.rs"]
 mod direct_terminals;
+#[path = "response/motion.rs"]
+mod motion;
 #[path = "response/power.rs"]
 mod power;
 use super::contacts::{contacts as contact_faces, interface};

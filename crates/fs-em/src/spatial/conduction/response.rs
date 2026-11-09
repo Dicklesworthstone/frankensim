@@ -8,6 +8,9 @@
 //! Positive source values do not guarantee convergence or uniqueness.
 
 use super::*;
+
+/// Original scalar source response under prescribed conductor motion.
+pub mod motion;
 use crate::conduction::response::contact::refinement::{ContactQuadratureSnapshot, RefinementWork};
 use crate::conduction::response::contact::{
     self, ContactQuadratureRefinementControls, ContactQuadratureRefinementReport,
@@ -21,6 +24,7 @@ pub use crate::conduction::response::terminals::{
 pub use crate::conduction::response::{AdaptiveConductionRelaxation, ConductionResponseSources};
 use fs_material::conductor::{ConductorError, response::ScalarConductorResponse};
 use fs_material::electrical_interface::response::ScalarElectricalInterfaceResponse;
+use motion::ResponseField;
 
 /// Constitutive and total native-solve limits, separate from field tolerances.
 #[derive(Clone, Copy, Debug)]
@@ -149,7 +153,8 @@ pub struct SpatialConductionResponse {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpatialConductionResponseSample {
     pub tetrahedron: usize,
-    /// Complete original source evaluated at the actual reported E and J.
+    /// Complete original source at actual material-frame E and J. For moving
+    /// snapshots E is the conductor-frame field, not the laboratory field.
     pub conductor: ResolvedConductorState,
     /// Evaluated minus applied conductivity.
     pub conductivity_defect_s_m: f64,
@@ -159,9 +164,9 @@ pub struct SpatialConductionResponseSample {
 }
 
 #[derive(Clone, Debug)]
-pub struct SpatialConductionResponseReport {
+pub struct SpatialConductionResponseReport<F = SpatialConductionField> {
     /// Original native field, including separately retained contact Joule heat.
-    pub field: SpatialConductionField,
+    pub field: F,
     /// Native ordered reactions and independent authored source work from the
     /// accepted direct terminal solve; absent for other driver kinds.
     pub terminals: Option<ConductionTerminalReport>,
@@ -178,18 +183,23 @@ pub struct SpatialConductionResponseReport {
     pub contact_quadrature_refinement: Option<ContactQuadratureRefinementReport>,
 }
 
-pub struct SpatialConductionResponseCandidate {
+pub struct SpatialConductionResponseCandidate<F = SpatialConductionField> {
     problem: SpatialConductionResponse,
-    report: SpatialConductionResponseReport,
+    report: SpatialConductionResponseReport<F>,
 }
-impl SpatialConductionResponseCandidate {
+impl<F> SpatialConductionResponseCandidate<F> {
     pub fn problem(&self) -> &SpatialConductionResponse {
         &self.problem
     }
-    pub fn report(&self) -> &SpatialConductionResponseReport {
+    pub fn report(&self) -> &SpatialConductionResponseReport<F> {
         &self.report
     }
-    pub fn into_parts(self) -> (SpatialConductionResponse, SpatialConductionResponseReport) {
+    pub fn into_parts(
+        self,
+    ) -> (
+        SpatialConductionResponse,
+        SpatialConductionResponseReport<F>,
+    ) {
         (self.problem, self.report)
     }
 }
@@ -753,9 +763,9 @@ impl SpatialConductionResponse {
     /// Capture gauge-invariant observables on the unchanged original geometry.
     /// Native E retains the differences used by the solve, even when an
     /// absolute voltage reference is too large for subtracting reported values.
-    fn contact_quadrature_snapshot(
+    fn contact_quadrature_snapshot<F: ResponseField>(
         &self,
-        report: &SpatialConductionResponseReport,
+        report: &SpatialConductionResponseReport<F>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ContactQuadratureSnapshot> {
         let mut snapshot = ContactQuadratureSnapshot {
@@ -766,7 +776,7 @@ impl SpatialConductionResponse {
         };
         for (cell, tet) in self.mesh().tets.iter().enumerate() {
             check(cancelled)?;
-            let e = report.field.electric_field_v_m[cell];
+            let e = report.field.electric_field_v_m()[cell];
             let origin = self.positions_m()[tet[0] as usize];
             for &vertex in &tet[1..] {
                 let position = self.positions_m()[vertex as usize];
@@ -778,10 +788,10 @@ impl SpatialConductionResponse {
             }
             snapshot
                 .current_density_a_m2
-                .extend(report.field.current_density_a_m2[cell]);
-            snapshot.power_w.push(report.field.cell_power_w[cell]);
+                .extend(report.field.current_density_a_m2()[cell]);
+            snapshot.power_w.push(report.field.cell_power_w()[cell]);
         }
-        for contact in &report.field.contacts {
+        for contact in report.field.contacts() {
             check(cancelled)?;
             snapshot
                 .voltage_differences_v
@@ -792,19 +802,28 @@ impl SpatialConductionResponse {
                 .current_density_a_m2
                 .extend(contact.current_density_a_m2);
         }
-        for current in &report.field.nodal_boundary_current_a {
+        for current in report.field.nodal_boundary_current_a() {
             check(cancelled)?;
             if let Some(current) = current {
                 snapshot.current_a.push(*current);
             }
         }
-        snapshot.power_w.push(report.field.power_w);
-        snapshot.power_w.push(report.field.supplied_power_w);
+        snapshot.power_w.push(report.field.power_w());
+        snapshot.power_w.push(report.field.supplied_power_w());
+        if let Some(powers) = report.field.cell_mechanical_power_w() {
+            for &power in powers {
+                check(cancelled)?;
+                snapshot.power_w.push(power);
+            }
+        }
+        if let Some(power) = report.field.mechanical_power_w() {
+            snapshot.power_w.push(power);
+        }
         Ok(snapshot)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn solve_coupled_candidate<D, E>(
+    fn solve_coupled_candidate<D, E, F: ResponseField>(
         &self,
         seeds: Vec<ResolvedConductorState>,
         contacts: Vec<SpatialConductionContact>,
@@ -813,11 +832,8 @@ impl SpatialConductionResponse {
         field_controls: ConductionControls,
         controls: SpatialConductionResponseControls,
         cancelled: &mut impl FnMut() -> bool,
-        mut solve: impl FnMut(
-            &SpatialConduction,
-            &mut dyn FnMut() -> bool,
-        ) -> Result<(SpatialConductionField, D), E>,
-    ) -> Result<(SpatialConductionResponseCandidate, D), E>
+        mut solve: impl FnMut(&SpatialConduction, &mut dyn FnMut() -> bool) -> Result<(F, D), E>,
+    ) -> Result<(SpatialConductionResponseCandidate<F>, D), E>
     where
         E: From<SpatialConductionResponseError>,
     {
@@ -945,7 +961,7 @@ impl SpatialConductionResponse {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn solve_fixed_contact_candidate<D, E>(
+    fn solve_fixed_contact_candidate<D, E, F: ResponseField>(
         &self,
         seeds: Vec<ResolvedConductorState>,
         contacts: Vec<SpatialConductionContact>,
@@ -955,11 +971,8 @@ impl SpatialConductionResponse {
         field_controls: ConductionControls,
         controls: SpatialConductionResponseControls,
         cancelled: &mut impl FnMut() -> bool,
-        mut solve: impl FnMut(
-            &SpatialConduction,
-            &mut dyn FnMut() -> bool,
-        ) -> Result<(SpatialConductionField, D), E>,
-    ) -> Result<(SpatialConductionResponseCandidate, D), E>
+        mut solve: impl FnMut(&SpatialConduction, &mut dyn FnMut() -> bool) -> Result<(F, D), E>,
+    ) -> Result<(SpatialConductionResponseCandidate<F>, D), E>
     where
         E: From<SpatialConductionResponseError>,
     {
@@ -1127,8 +1140,8 @@ impl SpatialConductionResponse {
             let mut power_correction = 0.0;
             for (tetrahedron, (source, seed)) in self.sources.iter().zip(&seeds).enumerate() {
                 check(cancelled)?;
-                let e = field.electric_field_v_m[tetrahedron];
-                let j = field.current_density_a_m2[tetrahedron];
+                let e = field.conductor_field_v_m()[tetrahedron];
+                let j = field.current_density_a_m2()[tetrahedron];
                 let conductor = source
                     .at_spatial_fields(seed, e, j)
                     .map_err(SpatialConductionResponseError::from)?;
@@ -1169,7 +1182,7 @@ impl SpatialConductionResponse {
             if let Some(bindings) = &self.contact_sources {
                 for (index, law) in bindings.laws().iter().enumerate() {
                     check(cancelled)?;
-                    let heat = &field.contacts[index];
+                    let heat = &field.contacts()[index];
                     let (sample, contact_converged) = match quadrature {
                         Some(_) => contact::evaluate_sampled(
                             index,
