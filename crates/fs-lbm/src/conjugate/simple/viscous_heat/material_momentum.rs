@@ -91,6 +91,12 @@ pub(in crate::conjugate) struct NativeMaterialViscosityInput<'a> {
 
 pub(in crate::conjugate) struct NativeMaterialViscosityStep {
     pub momentum_kg_m_s: Vec<[f64; 3]>,
+    /// Accepted cell SGS kinematic viscosity [m^2/s] at the SAME native
+    /// velocity and source coefficients used by the residual and work audit.
+    /// Fixed solids are zero; empty is the original or zero-model path.
+    /// Thermal consumers receive the existing buffer without resampling.
+    #[cfg(feature = "implicit-enthalpy-coupling")]
+    pub cell_eddy_viscosity_m2_s: Vec<f64>,
     pub report: MaterialViscosityReport,
 }
 
@@ -393,7 +399,7 @@ fn kick_with_refresh(
         });
     }
     audit(
-        &solver,
+        solver,
         input.mass_kg,
         input.momentum_kg_m_s,
         controls,
@@ -443,7 +449,7 @@ fn set_bulk_viscosity(
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn audit(
-    solver: &Solver<'_>,
+    solver: Solver<'_>,
     mass: &[f64],
     original: &[[f64; 3]],
     controls: MaterialViscosityControls,
@@ -700,6 +706,10 @@ fn audit(
     poll(gate)?;
     Ok(NativeMaterialViscosityStep {
         momentum_kg_m_s: momentum,
+        // Only a successful same-endpoint work audit releases this closure.
+        // Moving the existing Vec adds no allocation to any solver path.
+        #[cfg(feature = "implicit-enthalpy-coupling")]
+        cell_eddy_viscosity_m2_s: solver.eddy_viscosity,
         report,
     })
 }

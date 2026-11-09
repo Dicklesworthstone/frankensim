@@ -1,6 +1,7 @@
 //! Genuine T/rate source surfaces must close on the same native heat endpoint.
 
 mod sgs;
+mod sgs_transport;
 
 use super::*;
 

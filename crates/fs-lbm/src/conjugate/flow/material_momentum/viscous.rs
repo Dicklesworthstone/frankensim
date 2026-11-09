@@ -40,6 +40,11 @@ pub struct MaterialMomentumViscosityInput<'a> {
 /// decide how its physical heat enters their original material state owner.
 pub(in crate::conjugate::flow) struct PreparedMaterialViscosity {
     pub momentum_kg_m_s: Vec<[f64; 3]>,
+    /// Original accepted cell SGS kinematic viscosity [m^2/s], transferred
+    /// from the native stress solve for thermal transport. Empty means the
+    /// original or zero-model path; active quiescent SGS retains zero slots.
+    #[cfg(feature = "implicit-enthalpy-coupling")]
+    pub cell_eddy_viscosity_m2_s: Vec<f64>,
     pub report: MaterialViscosityReport,
     pub reconstruction: DensityMomentumReconstructionReport,
 }
@@ -837,6 +842,8 @@ impl FlowField {
         };
         Ok(PreparedMaterialViscosity {
             momentum_kg_m_s: viscous.momentum_kg_m_s,
+            #[cfg(feature = "implicit-enthalpy-coupling")]
+            cell_eddy_viscosity_m2_s: viscous.cell_eddy_viscosity_m2_s,
             report: viscous.report,
             reconstruction: reconstructed.report,
         })
@@ -976,6 +983,8 @@ impl FlowField {
         Ok(PreparedMaterialRheology {
             viscosity: PreparedMaterialViscosity {
                 momentum_kg_m_s: viscosity.momentum_kg_m_s,
+                #[cfg(feature = "implicit-enthalpy-coupling")]
+                cell_eddy_viscosity_m2_s: viscosity.cell_eddy_viscosity_m2_s,
                 report: viscosity.report,
                 reconstruction: reconstructed.report,
             },

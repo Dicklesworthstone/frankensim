@@ -3398,3 +3398,45 @@ attachment, a manufactured anisotropic/nonlinear physical endpoint and common
 velocity boost, pressure-driven porous-slab flow, zero-law population parity,
 complete wall/reservoir/periodic momentum, updated traces, seam refusal and
 transaction rollback.
+
+## SGS heat transport at the coupled material endpoint
+
+`advance_isotropic_implicit_conjugate_thermorheological_thermal_volume_momentum_with_baths_and_sgs_transport`
+adds explicit turbulent-Prandtl heat transport to the same original-history
+implicit temperature/rate/SGS solve. The caller supplies finite positive Pr_t.
+Each fluid side evaluates k_total(h) = k_source(h) + (M/V) Cp(h) nu_t / Pr_t
+from the original material/caloric source and the accepted native cell closure.
+Total conductivities enter the original two half-cell resistances before their
+harmonic combination. The existing native sparse heat graph owns conservative
+fluxes and nonlinear storage; its attached link laws include the complete
+enthalpy derivatives of both k_source and sensible Cp. No finite-difference
+material derivatives or separate thermal solver are introduced.
+
+The heat graph freezes one closure per trial. The outer owner refreshes momentum,
+molecular shear/bulk and SGS at that exact thermal endpoint and charges BOTH the
+molecular heat mismatch and twice the sum of absolute modeled face-heat changes.
+Both adjacent residuals are charged, so opposing face exchanges cannot cancel.
+The same bound enters the explicit feedback tolerance and final shared thermal
+budget; the independent mechanical budget still accounts for molecular heating
+and modeled momentum transfer through its original owner. Rejected trials relax
+heat and closure while retaining the original fluid and finite-solid histories.
+
+The feedback report retains Pr_t, the closure used by the accepted heat graph,
+the accepted native closure and the explicit modeled heat-coupling defect. Native
+coefficients transfer by ownership after the successful stress/work audit; the
+thermal graph does not infer them from scalar dissipation. Validated zero model
+coefficients take the original path with empty closure receipts.
+
+This isotropic gradient-diffusion closure applies only to fluid-fluid links.
+Baths, fluid-solid interfaces and source contacts retain their molecular laws;
+no thermal wall function, scalar-variance equation, variable-Pr_t model or
+immediate conversion of modeled SGS energy transfer into caloric heat is claimed.
+Positive modeled transport requires a supported fully liquid sensible response.
+Original material domains, exploratory SGS policy, cancellation and whole-call
+thermal/stress work ceilings remain authoritative.
+
+Focused regressions cover the genuine variable material response, total
+half-cell resistance and analytic tangents; independent coupled momentum/thermal
+roots at two Pr_t values; finite-solid history and molecular wall interfaces;
+used/accepted closure receipts; exact zero closures; invalid Pr_t; bounded work;
+late cancellation and original-input replay.

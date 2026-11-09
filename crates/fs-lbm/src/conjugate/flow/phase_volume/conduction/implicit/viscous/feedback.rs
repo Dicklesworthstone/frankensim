@@ -4,6 +4,7 @@ mod rheology;
 pub use rheology::ImplicitThermorheologicalThermalVolumeMomentumStep;
 
 use super::*;
+use super::super::sgs::{self, SgsThermalField};
 use crate::conjugate::FvBoundary;
 use crate::conjugate::flow::phase_volume::momentum::admit_viscous_thermal_input;
 use fs_material::fluid_transport::viscous::NewtonianViscosity;
@@ -16,10 +17,12 @@ pub struct ThermalViscosityFeedbackControls {
     /// Maximum native heat trials, all starting from the original inventory.
     /// This spans all outer Darcy trials when composed with phase resistance.
     pub maximum_trials: usize,
-    /// Convex relaxation of each physical heat guess, strictly in (0, 1].
+    /// Convex relaxation of each physical heat guess and, when selected, the
+    /// frozen SGS diffusivity field, strictly in (0, 1].
     pub relaxation: f64,
     /// Sum of absolute cellwise differences between used and actual molecular
-    /// heat [J]. This also consumes the original shared thermal/work budgets.
+    /// heat [J], plus the non-cancelling SGS transport mismatch when selected.
+    /// This also consumes the original shared thermal/work budgets.
     pub maximum_heat_defect_j: f64,
 }
 
@@ -49,8 +52,20 @@ pub struct ThermalViscosityFeedbackReport {
     pub source_evaluations: usize,
     /// Signed sum Q_used - Q_actual [J], before material advection.
     pub heat_coupling_defect_j: f64,
-    /// Non-cancelling sum |Q_used - Q_actual| [J], used for acceptance.
+    /// Non-cancelling molecular sum |Q_used - Q_actual| [J].
     pub absolute_heat_coupling_defect_j: f64,
+    /// Twice the sum of absolute fluid-link heat changes caused by replacing
+    /// the used SGS field with the accepted field at the SAME thermal endpoint.
+    /// Both adjacent cell residuals are charged; opposite faces cannot cancel.
+    pub absolute_sgs_heat_coupling_defect_j: f64,
+    /// Explicit modeled heat transport parameter; None on molecular-only paths.
+    pub turbulent_prandtl_number: Option<f64>,
+    /// Cell closure actually supplied to the accepted heat graph [m^2/s].
+    /// Empty unless modeled heat transport is selected; fixed solids are zero.
+    pub used_cell_eddy_viscosity_m2_s: Vec<f64>,
+    /// Accepted native momentum closure at that thermal endpoint [m^2/s].
+    /// Its difference from the used field is accounted above, never hidden.
+    pub cell_eddy_viscosity_m2_s: Vec<f64>,
     /// Accepted coupling, heat assembly, implicit endpoint and transport defects.
     pub absolute_enthalpy_defect_j: f64,
 }
@@ -170,6 +185,7 @@ impl FlowField {
             contacts,
             input,
             boundaries,
+            None,
             controls,
             viscosity_controls,
             solve,
@@ -236,6 +252,7 @@ impl FlowField {
         contacts: &[ThermalVolumeContact<'_>],
         input: ThermalVolumeMomentumInput<'_>,
         boundaries: [FvBoundary; 6],
+        turbulent_prandtl_number: Option<f64>,
         controls: ConductiveThermalVolumeMomentumControls,
         viscosity_controls: MaterialViscosityControls,
         solve: ImplicitThermalVolumeSolveControls,
@@ -267,7 +284,7 @@ impl FlowField {
             None => ([FlowFace::Wall; 6], None, None),
         };
         let mut work = ThermalViscosityFeedbackReport::default();
-        let accepted = self.prepare_implicit_thermal_feedback(
+        let accepted = self.prepare_implicit_thermal_feedback_with_sgs(
             domain,
             faces,
             mouth,
@@ -276,6 +293,7 @@ impl FlowField {
             solids,
             contacts,
             input,
+            turbulent_prandtl_number,
             controls,
             viscosity_controls,
             solve,
@@ -344,7 +362,7 @@ impl FlowField {
     /// Shared native thermal/molecular preparation, retaining original M/P/h.
     /// Callers own phase-support admission and the subsequent mechanical split.
     /// The supplied work ledger spans every nested heat and molecular trial.
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     pub(in super::super) fn prepare_implicit_thermal_feedback<S>(
         &self,
         domain: &VoxelDomain,
@@ -355,6 +373,42 @@ impl FlowField {
         solids: &[ThermalVolumeSolidCell<'_, '_>],
         contacts: &[ThermalVolumeContact<'_>],
         input: ThermalVolumeMomentumInput<'_>,
+        controls: ConductiveThermalVolumeMomentumControls,
+        viscosity_controls: MaterialViscosityControls,
+        solve: ImplicitThermalVolumeSolveControls,
+        feedback: ThermalViscosityFeedbackControls,
+        workspace: &mut ImplicitThermalVolumeWorkspace,
+        gate: &CancelGate,
+        work: &mut ThermalViscosityFeedbackReport,
+        prepare: impl FnMut(
+            [FlowFace; 6],
+            Option<usize>,
+            Option<&PreparedImplicitHeat>,
+            Option<PreparedThermalFeedback<S>>,
+            &mut ThermalViscosityFeedbackReport,
+        ) -> Result<PreparedThermalFeedback<S>, ChtError>,
+    ) -> Result<ConvergedThermalFeedback<S>, ChtError> {
+        self.prepare_implicit_thermal_feedback_with_sgs(
+            domain, faces, mouth, conductivity, baths, solids, contacts, input,
+            None, controls, viscosity_controls, solve, feedback, workspace, gate,
+            work, prepare,
+        )
+    }
+
+    /// Close molecular heating and optional modeled fluid heat transport on one
+    /// original-history thermal/mechanical fixed point.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn prepare_implicit_thermal_feedback_with_sgs<S>(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        mouth: Option<usize>,
+        conductivity: &PreparedPhaseConductivity<'_>,
+        baths: ThermalVolumeBoundaries<'_>,
+        solids: &[ThermalVolumeSolidCell<'_, '_>],
+        contacts: &[ThermalVolumeContact<'_>],
+        input: ThermalVolumeMomentumInput<'_>,
+        turbulent_prandtl_number: Option<f64>,
         controls: ConductiveThermalVolumeMomentumControls,
         viscosity_controls: MaterialViscosityControls,
         solve: ImplicitThermalVolumeSolveControls,
@@ -387,8 +441,28 @@ impl FlowField {
         if work.trials >= feedback.maximum_trials {
             return Err(refuse("thermal viscosity whole-call trial work exhausted"));
         }
+        if let Some(prandtl) = turbulent_prandtl_number {
+            sgs::admit_prandtl_number(prandtl)?;
+        }
         let mut mechanical = prepare(faces, mouth, None, None, work)?;
         let mut used_heat = mechanical.viscosity.report.cell_molecular_heat_j.clone();
+        let mut used_eddy = Vec::new();
+        if turbulent_prandtl_number.is_some() {
+            let actual = &mechanical.viscosity.cell_eddy_viscosity_m2_s;
+            if actual.len() != domain.cell_count() {
+                return Err(refuse("modeled heat transport requires the accepted native SGS field"));
+            }
+            used_eddy.try_reserve_exact(actual.len())
+                .map_err(|_| refuse("SGS thermal closure allocation failed"))?;
+            for (cell, &value) in actual.iter().enumerate() {
+                poll_every(gate, cell)?;
+                finite("flow.thermal_sgs_eddy", value)?;
+                if value < 0.0 {
+                    return Err(refuse("SGS thermal diffusivity must be nonnegative"));
+                }
+                used_eddy.push(value);
+            }
+        }
         while work.trials < feedback.maximum_trials {
             poll(gate)?;
             let mut remaining = solve;
@@ -406,7 +480,11 @@ impl FlowField {
             }
             let (combined, assembly) =
                 combine_guessed_heat(input.volume.net_enthalpy_increment_j, &used_heat, gate)?;
-            let prepared = self.prepare_implicit_conjugate_heat(
+            let thermal_sgs = turbulent_prandtl_number.map(|prandtl| SgsThermalField {
+                eddy_viscosity_m2_s: &used_eddy,
+                turbulent_prandtl_number: prandtl,
+            });
+            let prepared = self.prepare_implicit_conjugate_heat_with_sgs(
                 domain,
                 conductivity,
                 baths,
@@ -416,6 +494,7 @@ impl FlowField {
                     net_enthalpy_increment_j: &combined,
                     ..input.volume
                 },
+                thermal_sgs,
                 ConductiveThermalVolumeControls {
                     volume: controls.evolution.volume,
                     max_conductive_faces: controls.max_conductive_faces,
@@ -445,8 +524,30 @@ impl FlowField {
                 &mechanical.viscosity.report.cell_molecular_heat_j,
                 gate,
             )?;
+            let sgs_defect = match thermal_sgs {
+                Some(used) => sgs::heat_flux_mismatch_j(
+                    domain,
+                    conductivity,
+                    input.volume.mass_kg,
+                    used,
+                    &mechanical.viscosity.cell_eddy_viscosity_m2_s,
+                    &prepared.endpoint_samples,
+                    controls.evolution.mechanics.projection.duration_s,
+                    controls.max_conductive_faces,
+                    gate,
+                )?,
+                None => 0.0,
+            };
+            let coupling_defect = if sgs_defect == 0.0 {
+                absolute
+            } else {
+                (Dd::from_f64(absolute) + Dd::from_f64(sgs_defect))
+                    .to_f64()
+                    .next_up()
+            };
+            finite("flow.thermoviscous_combined_heat_defect", coupling_defect)?;
             let shared = (assembly
-                + Dd::from_f64(absolute)
+                + Dd::from_f64(coupling_defect)
                 + Dd::from_f64(prepared.report.absolute_enthalpy_defect_j))
             .to_f64();
             let molecular = (assembly
@@ -455,19 +556,26 @@ impl FlowField {
             .to_f64();
             finite("flow.thermoviscous_shared_heat_defect", shared)?;
             finite("flow.thermoviscous_molecular_heat_defect", molecular)?;
-            if absolute <= feedback.maximum_heat_defect_j
+            if coupling_defect <= feedback.maximum_heat_defect_j
                 && shared <= heat_budget
                 && molecular <= viscosity_controls.maximum_energy_defect_j
             {
                 work.heat_coupling_defect_j = signed;
                 work.absolute_heat_coupling_defect_j = absolute;
+                work.absolute_sgs_heat_coupling_defect_j = sgs_defect;
+                if let Some(prandtl) = turbulent_prandtl_number {
+                    work.turbulent_prandtl_number = Some(prandtl);
+                    work.used_cell_eddy_viscosity_m2_s = used_eddy;
+                    work.cell_eddy_viscosity_m2_s =
+                        core::mem::take(&mut mechanical.viscosity.cell_eddy_viscosity_m2_s);
+                }
                 poll(gate)?;
                 return Ok(ConvergedThermalFeedback {
                     mechanical,
                     heat: prepared,
                     used_molecular_heat_j: used_heat,
                     assembly,
-                    coupling_defect_j: absolute,
+                    coupling_defect_j: coupling_defect,
                     heat_budget_j: heat_budget,
                 });
             }
@@ -488,6 +596,24 @@ impl FlowField {
                         return Err(refuse(
                             "thermal viscosity requires nonnegative molecular heat",
                         ));
+                    }
+                }
+                if turbulent_prandtl_number.is_some() {
+                    let actual = &mechanical.viscosity.cell_eddy_viscosity_m2_s;
+                    if actual.len() != used_eddy.len() {
+                        return Err(refuse("SGS thermal closure changed field shape"));
+                    }
+                    for (cell, (used, actual)) in used_eddy.iter_mut().zip(actual).enumerate() {
+                        poll_every(gate, cell)?;
+                        *used = if feedback.relaxation == 1.0 {
+                            *actual
+                        } else {
+                            (1.0 - feedback.relaxation) * *used + feedback.relaxation * *actual
+                        };
+                        finite("flow.thermoviscous_relaxed_eddy", *used)?;
+                        if *used < 0.0 {
+                            return Err(refuse("SGS thermal diffusivity must be nonnegative"));
+                        }
                     }
                 }
             }

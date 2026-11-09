@@ -1,6 +1,7 @@
 //! One native implicit enthalpy interval before the original volume transport.
 
 use super::*;
+use fs_conduction::enthalpy::conduction::implicit::link::ImplicitLinkLaw;
 use fs_conduction::enthalpy::conduction::implicit::source::ImplicitHeatSourceLaw;
 use fs_conduction::enthalpy::conduction::implicit::{
     ImplicitConductionControls, ImplicitConductionGraph, ImplicitConductionLaw,
@@ -24,6 +25,7 @@ pub use momentum::ImplicitConductiveThermalVolumeMomentumStep;
 mod contact;
 pub use contact::ThermalVolumeContact;
 mod surface;
+mod sgs;
 pub use surface::{ThermalVolumeBathExchange, ThermalVolumeBoundaries, ThermalVolumeBoundaryFace};
 mod viscous;
 pub use viscous::{
@@ -343,6 +345,29 @@ impl FlowField {
         workspace: &mut ImplicitThermalVolumeWorkspace,
         gate: &CancelGate,
     ) -> Result<PreparedImplicitHeat, ChtError> {
+        self.prepare_implicit_conjugate_heat_with_sgs(
+            domain, conductivity, baths, solids, contacts, input, None, controls,
+            solve, workspace, gate,
+        )
+    }
+
+    /// The original heat graph with an optional frozen fluid SGS diffusivity.
+    /// The outer thermal/mechanical owner closes this field before acceptance.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn prepare_implicit_conjugate_heat_with_sgs(
+        &self,
+        domain: &VoxelDomain,
+        conductivity: &PreparedPhaseConductivity<'_>,
+        baths: ThermalVolumeBoundaries<'_>,
+        solids: &[ThermalVolumeSolidCell<'_, '_>],
+        contacts: &[ThermalVolumeContact<'_>],
+        input: CoexistenceVolumeInput<'_>,
+        thermal_sgs: Option<sgs::SgsThermalField<'_>>,
+        controls: ConductiveThermalVolumeControls,
+        solve: ImplicitThermalVolumeSolveControls,
+        workspace: &mut ImplicitThermalVolumeWorkspace,
+        gate: &CancelGate,
+    ) -> Result<PreparedImplicitHeat, ChtError> {
         let boundary_faces = baths
             .baths
             .len()
@@ -578,6 +603,13 @@ impl FlowField {
                 || checkpoint(gate),
             )
             .map_err(|e| native_error(gate, e))?;
+        let sgs_links = match thermal_sgs {
+            Some(field) => sgs::prepare_links(
+                domain, conductivity, &initial, input.mass_kg, field,
+                controls.max_conductive_faces, gate,
+            )?,
+            None => Vec::new(),
+        };
         let observer = ConductionObserver::new(
             &initial,
             if sources.is_empty() {
@@ -606,6 +638,16 @@ impl FlowField {
         if !contact_bindings.is_empty() {
             graph = graph
                 .with_contacts(&initial, &contact_bindings, || checkpoint(gate))
+                .map_err(|e| native_error(gate, e))?;
+        }
+        if !sgs_links.is_empty() {
+            let mut bindings = Vec::with_capacity(sgs_links.len());
+            for (index, (id, law)) in sgs_links.iter().enumerate() {
+                poll_every(gate, index)?;
+                bindings.push((*id, law as &dyn ImplicitLinkLaw));
+            }
+            graph = graph
+                .with_link_laws(&initial, &bindings, || checkpoint(gate))
                 .map_err(|e| native_error(gate, e))?;
         }
         if !bath_sources.is_empty() {
@@ -650,7 +692,7 @@ impl FlowField {
         let mut assembly = Sum::default();
         let mut exchanged = Sum::default();
         let mut solid_to_fluid = Sum::default();
-        for (index, (&_, link)) in initial.links().iter().enumerate() {
+        for (index, (&id, link)) in initial.links().iter().enumerate() {
             poll_every(gate, index)?;
             let a = link.a.0 as usize;
             let b = link.b.0 as usize;
@@ -669,7 +711,25 @@ impl FlowField {
             } else {
                 links[index].contact_resistance_m2_k_w
             };
-            let q = if ka == 0.0 || kb == 0.0 {
+            let q = if let Ok(sgs_index) =
+                sgs_links.binary_search_by_key(&id, |(link_id, _)| *link_id)
+            {
+                // Reconstruct accepted physical heat with the EXACT link law
+                // used by the native residual, including total half-cell k.
+                let g = sgs_links[sgs_index].1.conductance_from_samples_w_k(
+                    [final_samples[a].unwrap(), final_samples[b].unwrap()],
+                    links[index],
+                    link.area_m2,
+                    gate,
+                )?;
+                let delta = final_samples[b].unwrap().temperature_k()
+                    - final_samples[a].unwrap().temperature_k();
+                let heat = dt * (g * delta);
+                if g != 0.0 && delta != 0.0 && heat == 0.0 {
+                    return Err(refuse("nonzero implicit SGS conductive heat underflowed"));
+                }
+                heat
+            } else if ka == 0.0 || kb == 0.0 {
                 0.0
             } else {
                 let geometry = links[index];

@@ -97,6 +97,7 @@ impl FlowField {
             input,
             boundaries,
             None,
+            None,
             controls,
             viscosity_controls,
             solve,
@@ -170,6 +171,91 @@ impl FlowField {
             input,
             boundaries,
             Some(sgs),
+            None,
+            controls,
+            viscosity_controls,
+            solve,
+            feedback,
+            workspace,
+            gate,
+            resolve,
+        )
+    }
+
+    /// Close SGS momentum and modeled fluid heat transport with the original
+    /// temperature/rate rheology and finite-solid thermal inventories.
+    ///
+    /// The caller supplies a finite positive turbulent Prandtl number. On
+    /// fluid-fluid faces, the original molecular conductivity is augmented by
+    /// `k_t = (M/V) * Cp * nu_t / Pr_t` BEFORE combining the two half-cell
+    /// resistances. The original caloric source supplies sensible Cp and its
+    /// analytic enthalpy tangent; the existing sparse implicit heat graph owns
+    /// flux, Jacobian, nonlinear work and conservative storage.
+    ///
+    /// Each thermal solve freezes one SGS field. The outer feedback refreshes
+    /// native momentum and both molecular coefficients at that trial's exact
+    /// phase/rate, and accepts only when molecular heating AND the change in
+    /// every modeled face heat fit the shared non-cancelling energy bounds.
+    /// Original histories never advance during retries. The feedback report
+    /// retains used/accepted eddy fields, Pr_t and their explicit heat defect.
+    ///
+    /// Baths, source contacts and fluid-solid interfaces retain molecular heat
+    /// transfer. No thermal wall function is inferred; near-wall resolution
+    /// remains the caller's responsibility. This explicit isotropic gradient
+    /// diffusion closure does not supply scalar-variance transport or a
+    /// universal turbulent Prandtl law. Modeled momentum-energy transfer stays
+    /// separate from caloric heat, exactly as in the momentum-only SGS entry.
+    ///
+    /// The same whole-call work, original M/V inertia, pressure-mouth ownership,
+    /// phase admission and one final pressure/advection split apply. Validated
+    /// zero model coefficients follow the exact original thermorheological path
+    /// with no thermal SGS field allocation.
+    ///
+    /// # Errors
+    /// Invalid Pr_t, unsupported caloric response, any source/cap/conservation
+    /// refusal, bounded nonlinear exhaustion or cancellation returns no partial
+    /// fluid or finite-solid endpoint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_isotropic_implicit_conjugate_thermorheological_thermal_volume_momentum_with_baths_and_sgs_transport(
+        &self,
+        domain: &VoxelDomain,
+        reservoir: Option<([FlowFace; 6], StaggeredBoundaryPressure<'_>)>,
+        conductivity: &PreparedPhaseConductivity<'_>,
+        baths: ThermalVolumeBoundaries<'_>,
+        solids: &[ThermalVolumeSolidCell<'_, '_>],
+        contacts: &[ThermalVolumeContact<'_>],
+        input: ThermalVolumeMomentumInput<'_>,
+        boundaries: [FvBoundary; 6],
+        sgs: FvSgsConfig,
+        turbulent_prandtl_number: f64,
+        controls: ConductiveThermalVolumeMomentumControls,
+        viscosity_controls: MaterialViscosityControls,
+        solve: ImplicitThermalVolumeSolveControls,
+        feedback: ThermalViscosityFeedbackControls,
+        workspace: &mut ImplicitThermalVolumeWorkspace,
+        gate: &CancelGate,
+        resolve: impl FnMut(
+            usize,
+            &EquilibriumPhaseState,
+            f64,
+        ) -> Result<(ResolvedPhaseTransportState, f64), ChtError>,
+    ) -> Result<ImplicitThermorheologicalThermalVolumeMomentumStep, ChtError> {
+        poll(gate)?;
+        sgs.validate()?;
+        super::super::super::sgs::admit_prandtl_number(turbulent_prandtl_number)?;
+        let thermal_prandtl = (sgs.model.coefficient() != 0.0)
+            .then_some(turbulent_prandtl_number);
+        self.advance_implicit_thermorheological_feedback(
+            domain,
+            reservoir,
+            conductivity,
+            baths,
+            solids,
+            contacts,
+            input,
+            boundaries,
+            Some(sgs),
+            thermal_prandtl,
             controls,
             viscosity_controls,
             solve,
@@ -192,6 +278,7 @@ impl FlowField {
         input: ThermalVolumeMomentumInput<'_>,
         boundaries: [FvBoundary; 6],
         sgs: Option<FvSgsConfig>,
+        turbulent_prandtl_number: Option<f64>,
         controls: ConductiveThermalVolumeMomentumControls,
         viscosity_controls: MaterialViscosityControls,
         solve: ImplicitThermalVolumeSolveControls,
@@ -215,6 +302,7 @@ impl FlowField {
             contacts,
             input,
             boundaries,
+            turbulent_prandtl_number,
             controls,
             viscosity_controls,
             solve,
