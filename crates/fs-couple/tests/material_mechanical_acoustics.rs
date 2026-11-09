@@ -6,13 +6,19 @@ use fs_couple::bernoulli_aperture::wall::material::{
 };
 use fs_couple::cavity_modal::interior::heterogeneous::AxialGasEmbedding;
 use fs_couple::cavity_modal::interior::heterogeneous::mechanical::{
-    CylindricalMaterialBoundary, MaterialMechanicalError, MaterialMechanicalTime,
+    CylindricalMaterialBoundary, MaterialMechanicalError, MaterialMechanicalHarmonic,
+    MaterialMechanicalHarmonicError, MaterialMechanicalTime,
+};
+use fs_couple::cavity_modal::interior::heterogeneous::porous::{
+    AcousticVolumeRegion, AcousticVolumeRegionState, PorousRegionsInterior,
 };
 use fs_couple::cavity_modal::interior::heterogeneous::regions::FluidRegionsInterior;
 use fs_evidence::ValidityDomain;
-use fs_feec::acoustics::helmholtz::heterogeneous::HeterogeneousError;
 use fs_feec::acoustics::helmholtz::heterogeneous::time::mechanical::{
     MechanicalBoundary, MechanicalTimeLimits,
+};
+use fs_feec::acoustics::helmholtz::heterogeneous::{
+    BoundaryAdmittance, EquivalentFluidControls, HeterogeneousError, VelocityTrace,
 };
 use fs_feec::acoustics::helmholtz::{HelmholtzFe, Medium};
 use fs_matdb::{
@@ -21,6 +27,7 @@ use fs_matdb::{
 };
 use fs_material::fluid_acoustics::FluidAcoustics;
 use fs_material::gas::{GasSpec, GasState};
+use fs_material::porous::{PorousCard, PorousFluidLaw};
 use fs_material::state_point::{
     MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
     resolve_material_state_point,
@@ -160,6 +167,205 @@ fn close(actual: &[f64], expected: &[f64]) {
     for (&a, &b) in actual.iter().zip(expected) {
         assert!((a - b).abs() < 2e-10 * scale, "{a} != {b}");
     }
+}
+
+/// G1: independently evaluated original constitutive impedance agrees with
+/// every native pressure/wall coordinate away from mechanical poles.
+#[test]
+fn porous_volume_and_original_material_wall_share_pressure_motion_and_heat() {
+    let wall = source(THICKNESS, 1.0, BAND);
+    let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 300.0, 100_000.0).unwrap();
+    let porous = PorousFluidLaw::try_new(PorousCard::melamine_uf_nguyen2024(), 1.81e-5).unwrap();
+    let (complex, positions) = mesh();
+    let geometry = HelmholtzFe::new(&complex, &positions, 2, PLACEHOLDER).unwrap();
+    let selected = faces(&geometry);
+    let regions = vec![0; complex.tets.len()];
+    let sources = [AcousticVolumeRegion::Porous {
+        law: &porous,
+        fluid: &gas,
+    }];
+    let frequency_hz = 800.0;
+    let model = MaterialMechanicalHarmonic::new(
+        &geometry,
+        frequency_hz,
+        &sources,
+        &regions,
+        &[],
+        vec![boundary(&wall, selected.clone())],
+        &[],
+        EquivalentFluidControls::default(),
+        &mut || false,
+    )
+    .unwrap();
+    assert!(core::ptr::eq(model.boundaries()[0].source, &wall));
+    assert_eq!(model.wall_band_hz(), BAND);
+    assert_eq!(model.interior().element_regions(), regions);
+    let state = match model.interior().region_state(0).unwrap() {
+        AcousticVolumeRegionState::Porous(state) => state,
+        _ => panic!("original porous material was replaced"),
+    };
+    assert_eq!(
+        state,
+        porous
+            .effective_fluid(&gas, core::f64::consts::TAU * frequency_hz)
+            .unwrap()
+    );
+    let original = model.prepared().wall(0).unwrap();
+    assert_eq!(original.relaxation.len(), 2);
+    let WallMaterialLoss::Maxwell(memory) = model.boundaries()[0].source.loss() else {
+        panic!()
+    };
+    assert_eq!(memory.material().terms.len(), 3);
+    assert_eq!(memory.source_identity(), Some(wall.material().identity()));
+
+    let minimum_x = positions
+        .iter()
+        .map(|point| point[0])
+        .fold(f64::INFINITY, f64::min);
+    let drive: Vec<VelocityTrace> = geometry
+        .boundary_faces()
+        .into_iter()
+        .filter(|face| face.iter().all(|&v| positions[v as usize][0] == minimum_x))
+        .map(|face| (face, [C64::new(0.001, -0.0003); 3]))
+        .collect();
+    let actual = model.prepared().solve(&drive, &mut || false).unwrap();
+    // The source's original complex law uses exp(-i omega t); conjugate once
+    // for this independently assembled exp(+i omega t) Robin reference.
+    let impedance = wall
+        .specific_impedance(RADIUS, core::f64::consts::TAU * frequency_hz)
+        .unwrap()
+        .conj();
+    let reference = PorousRegionsInterior::new(
+        &geometry,
+        frequency_hz,
+        &sources,
+        &regions,
+        &[BoundaryAdmittance {
+            faces: selected,
+            admittance_m_pa_s: impedance.recip(),
+        }],
+        &[],
+        EquivalentFluidControls::default(),
+        &mut || false,
+    )
+    .unwrap();
+    let expected = reference.operator().solve(&drive, &mut || false).unwrap();
+    let scale = expected
+        .pressure_pa
+        .iter()
+        .map(|p| p.abs())
+        .fold(0.0_f64, f64::max);
+    for (&a, &b) in actual.pressure_pa.iter().zip(&expected.pressure_pa) {
+        assert!((a - b).abs() < 2e-10 * scale, "{a:?} versus {b:?}");
+    }
+    for (&dof, &velocity) in model
+        .prepared()
+        .wall_dofs(0)
+        .unwrap()
+        .iter()
+        .zip(&actual.walls[0].normal_velocity_m_s)
+    {
+        let expected_velocity = actual.pressure_pa[dof] / impedance;
+        assert!((velocity - expected_velocity).abs() < 2e-10 * scale / impedance.abs());
+    }
+    assert_eq!(actual.walls[0].relaxation_memory.len(), 2);
+    assert!(actual.wall_accounting.relaxation_dissipation_w > 0.0);
+    assert!(actual.density_dissipation_w > 0.0 && actual.compressional_dissipation_w > 0.0);
+    assert_eq!(actual.boundary_dissipation_w, 0.0);
+    let power_scale = actual.input_power_w.abs();
+    assert!(
+        (actual.wall_accounting.dissipation_w() - expected.boundary_dissipation_w).abs()
+            < 2e-10 * power_scale
+    );
+    assert!(
+        (actual.density_dissipation_w - expected.density_dissipation_w).abs() < 2e-10 * power_scale
+    );
+    assert!(
+        (actual.compressional_dissipation_w - expected.compressional_dissipation_w).abs()
+            < 2e-10 * power_scale
+    );
+    assert!(actual.power_balance_residual_w().abs() < 2e-10 * power_scale);
+    assert!(actual.fluid_power_balance_residual_w().abs() < 2e-10 * power_scale);
+    assert!(actual.wall_accounting.power_balance_residual_w().abs() < 2e-10 * power_scale);
+}
+
+/// G0/G1: original source bandwidth and actual membrane geometry remain binding.
+#[test]
+fn porous_mechanical_material_binding_preserves_frequency_geometry_and_cancellation_refusals() {
+    let wall = source(THICKNESS, 1.0, [100.0, 2000.0]);
+    let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 300.0, 100_000.0).unwrap();
+    let (complex, positions) = mesh();
+    let geometry = HelmholtzFe::new(&complex, &positions, 1, PLACEHOLDER).unwrap();
+    let regions = vec![0; complex.tets.len()];
+    let sources = [AcousticVolumeRegion::Fluid(&gas)];
+    let good = boundary(&wall, faces(&geometry));
+    for frequency_hz in [0.0, 99.0, 2001.0, f64::NAN] {
+        assert!(matches!(
+            MaterialMechanicalHarmonic::new(
+                &geometry,
+                frequency_hz,
+                &sources,
+                &regions,
+                &[],
+                vec![good.clone()],
+                &[],
+                EquivalentFluidControls::default(),
+                &mut || false,
+            ),
+            Err(MaterialMechanicalHarmonicError::Frequency { boundary: 0, .. })
+        ));
+    }
+    let mut wrong_geometry = good.clone();
+    wrong_geometry.radius_m *= 1.2;
+    assert!(matches!(
+        MaterialMechanicalHarmonic::new(
+            &geometry,
+            800.0,
+            &sources,
+            &regions,
+            &[],
+            vec![wrong_geometry],
+            &[],
+            EquivalentFluidControls::default(),
+            &mut || false,
+        ),
+        Err(MaterialMechanicalHarmonicError::Wall(
+            MaterialMechanicalError::Geometry { .. }
+        ))
+    ));
+    assert!(matches!(
+        MaterialMechanicalHarmonic::new(
+            &geometry,
+            800.0,
+            &sources,
+            &regions,
+            &[],
+            vec![good.clone()],
+            &[],
+            EquivalentFluidControls::default(),
+            &mut || true,
+        ),
+        Err(MaterialMechanicalHarmonicError::Wall(
+            MaterialMechanicalError::Interior(HeterogeneousError::Cancelled,)
+        ))
+    ));
+    let thick = source(0.006, 1.0, BAND);
+    assert!(matches!(
+        MaterialMechanicalHarmonic::new(
+            &geometry,
+            800.0,
+            &sources,
+            &regions,
+            &[],
+            vec![boundary(&thick, good.faces)],
+            &[],
+            EquivalentFluidControls::default(),
+            &mut || false,
+        ),
+        Err(MaterialMechanicalHarmonicError::Wall(
+            MaterialMechanicalError::Source { .. }
+        ))
+    ));
 }
 
 /// G1/G3: original source identity, complex reflection and full transient parity.

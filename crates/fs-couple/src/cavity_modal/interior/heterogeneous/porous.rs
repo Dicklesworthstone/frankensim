@@ -14,13 +14,14 @@
 //! a resolved porous volume, and heat remains separate from exterior wall losses.
 
 use fs_feec::acoustics::helmholtz::HelmholtzFe;
+use fs_feec::acoustics::helmholtz::heterogeneous::time::mechanical::MechanicalBoundary;
 use fs_feec::acoustics::helmholtz::heterogeneous::{
     BoundaryAdmittance, EquivalentFluidCoefficients, EquivalentFluidControls, HeterogeneousError,
     PreparedEquivalentFluid,
 };
 use fs_material::MaterialError;
-use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
+use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_material::porous::{PorousFluidLaw, PorousFluidResponse};
 use fs_material::relaxation::RelaxationState;
 use fs_math::c64::C64;
@@ -89,11 +90,21 @@ pub enum PorousRegionsInteriorError {
 impl core::fmt::Display for PorousRegionsInteriorError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::ElementCount { expected, supplied } => write!(f,
-                "acoustic material regions need {expected} tetrahedron assignments, received {supplied}"),
-            Self::UnknownRegion { tetrahedron, region, source_count } => write!(f,
-                "acoustic tetrahedron {tetrahedron} names region {region}, with {source_count} sources supplied"),
-            Self::Material { region, source } => write!(f, "acoustic volume region {region}: {source}"),
+            Self::ElementCount { expected, supplied } => write!(
+                f,
+                "acoustic material regions need {expected} tetrahedron assignments, received {supplied}"
+            ),
+            Self::UnknownRegion {
+                tetrahedron,
+                region,
+                source_count,
+            } => write!(
+                f,
+                "acoustic tetrahedron {tetrahedron} names region {region}, with {source_count} sources supplied"
+            ),
+            Self::Material { region, source } => {
+                write!(f, "acoustic volume region {region}: {source}")
+            }
             Self::Interior(error) => error.fmt(f),
         }
     }
@@ -128,12 +139,48 @@ pub struct PorousRegionsInterior<'f, 'c, 's> {
 }
 
 impl<'f, 'c, 's> PorousRegionsInterior<'f, 'c, 's> {
+    /// Resolve the original volume materials with fixed or Robin boundaries.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         geometry: &'f HelmholtzFe<'c>,
         frequency_hz: f64,
         sources: &[AcousticVolumeRegion<'s>],
         element_regions: &[usize],
         admittances: &[BoundaryAdmittance],
+        pressure_release_faces: &[[u32; 3]],
+        controls: EquivalentFluidControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, PorousRegionsInteriorError> {
+        Self::new_with_coupled_mechanical_walls(
+            geometry,
+            frequency_hz,
+            sources,
+            element_regions,
+            admittances,
+            &[],
+            pressure_release_faces,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Resolve fluid pressure and original distributed wall motion together.
+    ///
+    /// Every pressure coordinate, wall displacement/velocity and Maxwell memory
+    /// reaches the same native harmonic solve. The complete active coordinate
+    /// count shares `controls.harmonic.max_dofs`; no wall mode or memory is
+    /// removed to fit it. Sources and their exact volume responses remain bound
+    /// as in `new`. The supplied mechanical coefficients retain their own
+    /// geometry/material applicability; use the sibling material-wall adapter
+    /// when the original source is a `LocalMaterialWall`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_coupled_mechanical_walls(
+        geometry: &'f HelmholtzFe<'c>,
+        frequency_hz: f64,
+        sources: &[AcousticVolumeRegion<'s>],
+        element_regions: &[usize],
+        admittances: &[BoundaryAdmittance],
+        boundaries: &[MechanicalBoundary],
         pressure_release_faces: &[[u32; 3]],
         controls: EquivalentFluidControls,
         cancelled: &mut impl FnMut() -> bool,
@@ -161,10 +208,11 @@ impl<'f, 'c, 's> PorousRegionsInterior<'f, 'c, 's> {
         }
         let omega = core::f64::consts::TAU * frequency_hz;
         let mut states = vec![None; sources.len()];
-        let operator = PreparedEquivalentFluid::new(
+        let operator = PreparedEquivalentFluid::new_with_coupled_mechanical_walls(
             geometry,
             frequency_hz,
             admittances,
+            boundaries,
             pressure_release_faces,
             controls,
             &mut |element, _| {
@@ -173,16 +221,18 @@ impl<'f, 'c, 's> PorousRegionsInterior<'f, 'c, 's> {
                     Some(state) => state,
                     None => {
                         let evaluated = match sources[region] {
-                            AcousticVolumeRegion::Fluid(fluid) => fluid.acoustic_state()
-                                .map(AcousticVolumeRegionState::Fluid),
-                            AcousticVolumeRegion::Porous { law, fluid } => law.effective_fluid(fluid, omega)
+                            AcousticVolumeRegion::Fluid(fluid) => {
+                                fluid.acoustic_state().map(AcousticVolumeRegionState::Fluid)
+                            }
+                            AcousticVolumeRegion::Porous { law, fluid } => law
+                                .effective_fluid(fluid, omega)
                                 .map(AcousticVolumeRegionState::Porous),
-                            AcousticVolumeRegion::RelaxingPorous { law, relaxation } => law.effective_relaxing(relaxation, omega)
+                            AcousticVolumeRegion::RelaxingPorous { law, relaxation } => law
+                                .effective_relaxing(relaxation, omega)
                                 .map(AcousticVolumeRegionState::Porous),
                         };
-                        let state = evaluated.map_err(|source| PorousRegionsInteriorError::Material {
-                            region,
-                            source,
+                        let state = evaluated.map_err(|source| {
+                            PorousRegionsInteriorError::Material { region, source }
                         })?;
                         states[region] = Some(state);
                         state

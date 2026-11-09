@@ -61,6 +61,36 @@ by subtracting two identity-bearing deformations. Original material domains,
 positive Jacobians, external-load owners, candidate acceptance, and cancellation
 remain authoritative.
 
+## Original material membranes with lossy three-dimensional acoustic volumes
+
+`heterogeneous::mechanical::MaterialMechanicalHarmonic` retains the original
+cylindrical wall source and each free-fluid/porous source alongside one complete
+pressure/wall solve. The shared geometry admission checks the actual faceted
+cylinder, outward orientation and original membrane thickness/radius domain.
+Every wall's original frequency band must admit the requested solve frequency
+before any volume source is sampled. Reported wall-band intersection is separate
+from volume-source applicability, which the original material owner admits.
+
+The same `LocalMaterialWall::acoustic_cell_wall` reduction used by the transient
+and duct owners supplies surface mass, equilibrium stiffness, Kelvin resistance
+and every positive Maxwell arm. Real coefficients enter the native harmonic
+equations directly; consistent FE trace area is applied once. The source's
+negative-frequency-exponent impedance and the pressure solver's positive
+exponent are not mixed. Original material snapshots, zero source arms, bands,
+restraint and geometry remain available through the retained source bindings.
+
+The generic `PorousRegionsInterior::new_with_coupled_mechanical_walls` constructor
+also admits explicitly authored numerical walls. Both paths preserve complete
+pressure and wall coordinates, coherent applied traction, and separate boundary,
+volume and mechanical heat accounts. Original local membrane and rigid porous
+frame assumptions remain binding; no shell bending, moving pore skeleton,
+thermal feedback or bulk dispersive stored energy is inferred.
+
+`tests/material_mechanical_acoustics.rs` compares the coupled porous/material-wall
+field with the separately evaluated original constitutive impedance, including
+all pressure coefficients, wall velocity and independent fluid/wall/total work.
+It also specifies original bandwidth, geometry, source and cancellation refusals.
+
 ## Original free-fluid and porous sources in resolved acoustic volumes
 
 `cavity_modal::interior::heterogeneous::porous::PorousRegionsInterior` binds

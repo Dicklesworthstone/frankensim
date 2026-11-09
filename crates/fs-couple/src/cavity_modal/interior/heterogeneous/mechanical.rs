@@ -1,4 +1,4 @@
-//! Original material walls in the full spatial acoustic time operator.
+//! Original material walls in full spatial acoustic time and harmonic operators.
 //!
 //! The source law is a thin cylindrical hoop membrane. Its local radial motion
 //! approximates the outward normal motion of explicitly admitted mesh facets;
@@ -8,11 +8,15 @@
 use super::AxialGasEmbedding;
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::wall::material::{LocalMaterialWall, WallMaterialLoss};
+use fs_feec::acoustics::helmholtz::HelmholtzFe;
 use fs_feec::acoustics::helmholtz::heterogeneous::time::ResistiveBoundary;
 use fs_feec::acoustics::helmholtz::heterogeneous::time::mechanical::{
     MechanicalBoundary, MechanicalTimeLimits, PreparedMechanicalTime,
 };
 use fs_feec::acoustics::helmholtz::heterogeneous::{HeterogeneousError, HeterogeneousHelmholtzFe};
+
+mod harmonic;
+pub use harmonic::{MaterialMechanicalHarmonic, MaterialMechanicalHarmonicError};
 
 /// One original wall source on a faceted approximation of a cylinder's side.
 ///
@@ -122,7 +126,7 @@ impl<'m, 'f, 'c, 's> MaterialMechanicalTime<'m, 'f, 'c, 's> {
             if cancelled() {
                 return Err(HeterogeneousError::Cancelled.into());
             }
-            let span = boundary.admit_geometry(index, operator, cancelled)?;
+            let span = boundary.admit_geometry(index, operator.geometry(), cancelled)?;
             let material_error = |source| MaterialMechanicalError::Source {
                 boundary: index,
                 source,
@@ -181,7 +185,7 @@ impl CylindricalMaterialBoundary<'_> {
     fn admit_geometry(
         &self,
         index: usize,
-        operator: &HeterogeneousHelmholtzFe<'_, '_>,
+        geometry: &HelmholtzFe<'_>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, MaterialMechanicalError> {
         let invalid = |what| MaterialMechanicalError::Geometry {
@@ -208,8 +212,7 @@ impl CylindricalMaterialBoundary<'_> {
             if cancelled() {
                 return Err(HeterogeneousError::Cancelled.into());
             }
-            let (vertices, normal, _) = operator
-                .geometry()
+            let (vertices, normal, _) = geometry
                 .boundary_geometry(face)
                 .map_err(HeterogeneousError::from)?;
             for vertex in vertices {
