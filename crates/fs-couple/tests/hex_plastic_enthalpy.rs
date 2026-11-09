@@ -730,7 +730,10 @@ struct Probe {
     fail: bool,
 }
 impl DepositionObserver for Probe {
-    type Error = &'static str;
+    type Error = DepositionError;
+    fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
+        Ok(())
+    }
     fn step(
         &mut self,
         start: f64,
@@ -739,10 +742,10 @@ impl DepositionObserver for Probe {
         _thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Self::Error> {
-        checkpoint().map_err(|_| "cancelled")?;
+        checkpoint()?;
         self.steps += 1;
         if self.fail && start + dt > DT / 2.0 {
-            Err("late caloric observer refusal")
+            Err(DepositionError::InvalidInput("late caloric observer refusal"))
         } else {
             Ok(())
         }
@@ -781,7 +784,7 @@ fn consistent_inertial_stopping_stays_out_of_heat_and_late_failure_preserves_all
         assert!(matches!(
             refused,
             Err(HexThermoplasticError::Observer(
-                "late caloric observer refusal"
+                DepositionError::InvalidInput("late caloric observer refusal")
             ))
         ));
         assert_eq!(observer.steps, 0);

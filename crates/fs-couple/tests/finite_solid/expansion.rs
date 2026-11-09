@@ -1,7 +1,11 @@
 //! Directional finite expansion, original-mass mechanics and derivative oracles.
+#[path = "expansion/conservative.rs"]
 mod conservative;
+#[path = "expansion/plane.rs"]
 mod plane;
+#[path = "expansion/thermodynamics.rs"]
 mod thermodynamics;
+#[path = "expansion/visco.rs"]
 mod visco;
 
 use super::*;
