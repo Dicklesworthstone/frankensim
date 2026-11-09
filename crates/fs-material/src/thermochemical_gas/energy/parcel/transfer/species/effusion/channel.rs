@@ -11,19 +11,22 @@
 //! The model assumes stationary Maxwellian reservoirs, collisionless flight,
 //! velocity-independent diffuse reflection, equilibrated reservoir internal modes,
 //! no adsorption/reaction, and negligible flight time and channel gas storage.
-//! It supplies no outgoing angular/momentum law or moving-wall work. Santeler's
-//! transmission approximation and the optional ring-resolved Clausing solution
+//! The optional momentum owner resolves outgoing angular moments for explicitly
+//! qualified speed laws. Moving-wall work is outside these stationary channels.
+//! Santeler's transmission approximation and the ring-resolved Clausing solution
 //! retain explicit numerical estimates, not certified accuracy bounds.
 //! Molecular energy accommodation follows Chiggiato, *Vacuum Technology for
 //! Superconducting Devices*, section 2.2.2, <https://arxiv.org/abs/1501.07162>.
 
 mod geometry;
 pub use geometry::{
-    AccommodationResolution, ClausingControls, ClausingResolution, CylindricalMolecularGeometry,
-    MolecularAccommodation,
+    AccommodationResolution, AxialMomentumResolution, ClausingControls, ClausingResolution,
+    CylindricalMolecularGeometry, MolecularAccommodation, MolecularAxialMoments,
 };
 /// Molecular escape through the same diffuse channel into a true vacuum.
 pub mod vacuum;
+/// Geometry-resolved axial molecular momentum and stationary-wall impulse.
+pub mod momentum;
 
 use super::{
     ClosedGasParcel, EffusiveFlux, EffusiveInterface, GasEnergyError, MAX_EFFUSIVE_SPECIES, R,

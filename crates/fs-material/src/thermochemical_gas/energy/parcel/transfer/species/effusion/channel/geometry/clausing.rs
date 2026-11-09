@@ -12,6 +12,7 @@ use super::super::super::poll;
 use super::{CylindricalMolecularGeometry, GasEnergyError, det, invalid, positive};
 
 pub(super) mod accommodation;
+pub(super) mod momentum;
 
 /// Explicit accuracy and work budgets. At least three nested grids are used.
 #[derive(Clone, Copy, Debug, PartialEq)]

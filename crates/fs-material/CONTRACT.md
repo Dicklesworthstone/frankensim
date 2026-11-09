@@ -23631,3 +23631,68 @@ closed/elastic/pressure-limited startup, work/minimum-time bounds, original
 source refusals and early/final cancellation with unchanged original endpoints.
 Independent arithmetic probes support the fixtures, but do not constitute
 execution of the Rust physical owners.
+
+
+## Finite diffuse-channel axial momentum and accepted-transfer impulses
+
+The original circular Clausing geometry now resolves incident-normalized axial
+cosine moments for direct, wall-transmitted, and returned molecules through
+`CylindricalMolecularGeometry::resolve_axial_momentum`. The returned geometry
+and all three moments share one final mass grid and escape-probability solve.
+The circular cosine-law angular kernels have an analytic axial ring average
+and positive eight-point Gauss angular quadrature. Spatial and angular
+refinement are separate, cancellable, bounded by the authored Clausing
+controls, and use O(number of rings) storage. Reports retain angular work,
+spatial changes, linear-solve estimates, and the equilibrium reciprocity
+residual. These are numerical estimates, not certified error bounds.
+The exact zero-length aperture retains direct moment 2/3 with no wall paths.
+
+`species::effusion::channel::momentum::DiffuseChannelMomentumInterface` binds
+those moments to the original channel catalog, mouth qualification, original
+species caloric owners, and explicit speed-distribution provenance. Construction
+rebinds the existing common or species-specific heat accommodation to that same
+final geometry without another geometry solve. It qualifies full Maxwellian
+wall accommodation or elastic diffuse scattering preserving incident speed,
+including a mixed endpoint table over the original species. Finite-channel
+intermediate accommodation is refused: its joint angular/collision-history
+speed moments are not implemented here. The existing partial-accommodation
+mass/energy owner remains available. An aperture has no active wall and
+does not acquire a wall-temperature or accommodation dependency.
+
+The new rate APIs preserve the original full vacuum or reciprocal mass/energy
+flux and return per-species incident, transmitted, returned, and stationary-wall
+forces in N. Flux-weighted molecular speed is 3/2 times the original thin-mouth
+mean normal speed. Each outgoing speed uses its conditional angular moment,
+with the authored original gas or wall temperature as appropriate; using the
+thin-aperture speed times channel conductance is not the channel momentum law.
+`vacuum_outlet`, `reciprocal_step`, and `finite_wall_step` enrich original
+accepted native receipts with impulses in N s. They use the actual accepted
+transmitted and returned masses, retain original mouth/source identity and
+exact geometry/surface qualification, and reject noncanonical, duplicated,
+unknown, negative, nonfinite, or omitted active species inventory. These receipt
+queries do not resample the caloric owners.
+
+For each directed beam the wall account is incident plus returned minus
+transmitted momentum. Exterior forces/impulses use one left-to-right axis;
+their sum with the wall contribution closes the molecular momentum account.
+A vessel containing its source gas and channel wall recoils against the
+escaping momentum. These are stationary-wall local-rest-frame molecular
+boundary data; the module adds neither other container tractions nor a
+continuum nozzle pressure-thrust term. A moving mechanics consumer must retain
+the accompanying changing mass, complete molecular energy, and frame transport.
+
+Validation evidence for this increment: the narrow native geometry executable
+using the real fs-math owner passed all 23 existing geometry tests and five
+of six new moment tests. The remaining test stopped in its existing mass-only
+L/D=10 comparison because its 1024-ring work limit was insufficient. Its limit
+was corrected to 2048 without changing tolerances; that native rerun was
+interrupted by loss of the executor and is not claimed as a pass. Passed new
+checks include an independent 160,000-history diffuse-ray reference, an
+independent direct-path integral, aperture/scaling behavior, cancellation and
+work bounds. A bounded JavaScript replay confirms the corrected comparison's
+numerical work estimate only. Four additional native consumer test groups cover
+equilibrium pressure/momentum, beaming and wall-speed scaling, endpoint species
+accommodation, and original accepted vacuum/reciprocal receipt identity and
+conservation; these were authored and statically reviewed but not compiled or
+executed after the workspace became unavailable. Recovered source has no new
+native formatting or compilation claim.

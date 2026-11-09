@@ -15,6 +15,7 @@
 
 mod clausing;
 pub use clausing::accommodation::{AccommodationResolution, MolecularAccommodation};
+pub use clausing::momentum::{AxialMomentumResolution, MolecularAxialMoments};
 pub use clausing::{ClausingControls, ClausingResolution};
 
 use super::super::{GasEnergyError, invalid, positive};
@@ -168,6 +169,22 @@ impl CylindricalMolecularGeometry {
         cancelled: impl FnMut() -> bool,
     ) -> Result<(Self, Vec<MolecularAccommodation>), GasEnergyError> {
         clausing::accommodation::resolve_batch(self, coefficients, controls, cancelled)
+    }
+
+    /// Resolve the direct, wall-transmitted and returned axial angular moments
+    /// together with mass transmission on one Clausing grid. Each moment is the
+    /// expectation of the nonnegative outgoing axial direction cosine times
+    /// its path indicator, normalized by the ORIGINAL incident molecule count.
+    ///
+    /// These are geometric weights, not speeds or forces. A material consumer
+    /// must separately qualify the incident and reflected speed distributions;
+    /// an energy-accommodation coefficient alone cannot supply that law.
+    pub fn resolve_axial_momentum(
+        self,
+        controls: ClausingControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(Self, MolecularAxialMoments), GasEnergyError> {
+        clausing::momentum::resolve(self, controls, cancelled)
     }
 
     /// `None` identifies the original Santeler approximation. A retained report
