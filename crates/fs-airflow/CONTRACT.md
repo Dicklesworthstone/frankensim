@@ -653,6 +653,48 @@ advection and nonlinear solver code with context-only cancellation glue; this
 is not a full Cargo or native-runtime verification. Pinned rustfmt and focused
 diff checks passed.
 
+### Authored pressure, head and injection histories
+
+`carreau::transient::adaptive::advance_resolved_with_drive` uses the same
+native adaptive controller as the held-drive entry. A pure callback supplies
+original pressure boundaries, volume injections and optional branch heads at
+each proposed interval's strict interior midpoint. Each coarse and half-step
+proposal gets its own single query; every thermal residual and derivative probe
+within that native step reuses the same held forcing. No waveform, interpolation
+or substitute pump model is inferred.
+
+Finite strictly increasing authored discontinuity times clip comparison windows
+exactly. Neither coarse nor fine proposals cross an event, and no callback is
+queried at the discontinuity itself. The next forcing segment starts there with
+the actual retained radial and caloric histories and a fresh comparison-width
+proposal. Nonbinary event periods do not carry a rounded previous period into
+a final unrepresentable time sliver. Native thermal inventory events retain
+their separate admission.
+
+Accepted `drive_samples` correspond one-for-one with chronological native
+reports and retain their start, end, midpoint and exact physical port values.
+The exchange callback receives that same sample to author actual incoming and
+outgoing streams, including separate injection/reservoir streams at one node.
+Rejected comparison samples carry no physical work or heat credit. Drive calls
+are counted and bounded by native attempt limits; source refusal, cancellation
+and exhausted work preserve the complete input window even after a locally
+accepted prefix.
+
+Pressure and head waveforms, and changing injections at pressure-reservoir
+nodes, retain original midpoint work accounting. A free rigid junction still
+requires the native held injection to match initial, mean and final flow.
+Incompatible changes refuse even at an event; no impulsive pressure, velocity
+reset or changing-mass storage is fabricated. The coupled thermal method remains
+first order, with explicit maximum-interval and source-support limits.
+
+Five new regressions check exact held-drive parity, nonbinary event splitting
+against separately executed native segments, smooth pressure/head/injection
+forcing against independent radial/caloric dynamics and mechanical work,
+invalid/late drive and rigid-junction refusals, retry, cancellation and bounded
+queries. The same original-source slice now passes 58 tests; full Cargo and
+native-runtime validation are not claimed. Pinned rustfmt and focused diff
+checks passed.
+
 ## Original-law Carreau network design derivatives
 
 `CarreauPipeGraph::solve_linearized` and

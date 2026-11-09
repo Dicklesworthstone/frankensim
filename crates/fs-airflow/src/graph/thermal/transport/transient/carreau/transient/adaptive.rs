@@ -23,9 +23,10 @@ use super::{
 #[derive(Clone, Copy, Debug)]
 pub struct RegionalCarreauResolutionControls {
     /// Maximum full comparison interval. Retained native intervals are half
-    /// this width or smaller. Split discontinuous forcing/events beforehand.
+    /// this width or smaller. Author drive discontinuities explicitly; native
+    /// thermal inventory events retain their separate admission.
     pub maximum_interval_s: f64,
-    /// Refinement floor; a shorter clipped final interval cannot refine again.
+    /// Refinement floor; a shorter event/final interval cannot refine again.
     pub minimum_interval_s: f64,
     /// Includes discarded coarse/fine attempts and the terminal refused step.
     pub maximum_native_steps: usize,
@@ -50,6 +51,9 @@ pub struct RegionalCarreauResolutionControls {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RegionalCarreauResolutionWork {
     pub native_steps: usize,
+    /// One pure drive query per attempted native interval, including rejected
+    /// comparisons and a terminal drive/source refusal.
+    pub drive_evaluations: usize,
     pub rejected_intervals: usize,
     /// Exact counts from completed native solves, including discarded ones.
     /// On terminal native failure its original remaining budget still bounds
@@ -69,12 +73,34 @@ pub struct RegionalCarreauResolutionEstimate {
     pub maximum_cancelled_volume_m3: f64,
 }
 
+/// Physical native pressure, flow and optional branch-head data at one time.
+/// No interpolation, source model or additional thermal stream is inferred.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegionalCarreauDrive {
+    pub boundaries: Vec<FixedPressure>,
+    pub injections: Vec<FlowInjection>,
+    pub branch_heads: Option<Vec<Pressure>>,
+}
+
+/// The exact held forcing used by one accepted native midpoint interval.
+/// Its endpoint thermal solve reuses this sample on every source/derivative
+/// trial. Samples on discarded comparison intervals carry no physical credit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegionalCarreauDriveSample {
+    pub start_s: f64,
+    pub end_s: f64,
+    pub sample_time_s: f64,
+    pub drive: RegionalCarreauDrive,
+}
+
 /// All accepted native substeps, in chronological order. Their original
 /// pressure/head work, viscous heat, kinetic and caloric changes remain separate.
 /// Only these reports contribute to the requested physical accounting window.
 #[derive(Debug)]
 pub struct RegionalCarreauTrajectory<T> {
     pub steps: Vec<TransientRegionalCarreauReport<T>>,
+    /// One midpoint drive sample per retained native report, in identical order.
+    pub drive_samples: Vec<RegionalCarreauDriveSample>,
     pub estimates: Vec<RegionalCarreauResolutionEstimate>,
     pub work: RegionalCarreauResolutionWork,
 }
@@ -93,6 +119,13 @@ pub enum RegionalCarreauResolutionError<E> {
     WorkLimit {
         reason: &'static str,
         work: RegionalCarreauResolutionWork,
+    },
+    Drive {
+        start_s: f64,
+        end_s: f64,
+        sample_time_s: f64,
+        work: RegionalCarreauResolutionWork,
+        source: E,
     },
     Step {
         start_s: f64,
@@ -148,6 +181,75 @@ pub fn advance_resolved<'m, T, E>(
         &TransientCarreauStep,
     ) -> Result<CarreauTransportExchange<T>, E>,
 ) -> Result<ResolvedRegionalCarreau<'m, T>, RegionalCarreauResolutionError<E>> {
+    let drive = RegionalCarreauDrive {
+        boundaries: boundaries.to_vec(),
+        injections: injections.to_vec(),
+        branch_heads: branch_heads.map(<[Pressure]>::to_vec),
+    };
+    advance_resolved_with_drive(
+        cx,
+        owner,
+        thermal,
+        state,
+        workspace,
+        target_s,
+        &[],
+        step_controls,
+        controls,
+        |_, _| Ok(drive.clone()),
+        |cx, candidate, flow, _| exchange(cx, candidate, flow),
+    )
+}
+
+/// Resolve a prescribed physical drive history with exactly the same native
+/// adaptive momentum/enthalpy controller as [`advance_resolved`]. `drive` is
+/// queried ONCE at each proposed native interval's strict interior midpoint,
+/// including the discarded coarse step and both candidate half steps. Each
+/// returned forcing is held throughout that interval's thermal nonlinear solve;
+/// it is never sampled at the endpoint or independently on derivative probes.
+/// The exchange callback receives this exact sample alongside the thermal
+/// endpoint and original flow report to author its actual incoming streams.
+///
+/// `discontinuities_s` must be finite and strictly increasing. It may include
+/// times outside this window. Every comparison window is clipped to the next
+/// authored time, and both fine steps remain on that same side of the event.
+/// The next comparison starts exactly there; no callback is queried at the
+/// discontinuity itself. Its comparison-width proposal restarts at the authored
+/// maximum, since the previous forcing's local estimate no longer applies.
+/// A pressure/head jump preserves the actual velocity
+/// history. No waveform, smoothing, valve topology or impulsive state reset is
+/// inferred. Native thermal inventory events still require their own admission.
+///
+/// Time-varying injections at pressure-reservoir nodes are admitted by the
+/// original momentum owner. A free rigid junction instead requires its held
+/// injection to match initial, midpoint AND final flow; an incompatible change
+/// refuses, even at an authored event. This adapter does not invent the pressure
+/// impulse or changing-mass owner needed to change that constraint.
+///
+/// Only accepted fine-drive samples and native reports are returned. Every
+/// native/source refusal is terminal and the complete window remains atomic.
+/// The original first-order thermal coupling, local error estimates, spatial
+/// resolution and maximum-interval controls still apply to smooth waveforms;
+/// midpoint sampling cannot detect arbitrarily fast unsampled oscillations.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_resolved_with_drive<'m, T, E>(
+    cx: &Cx<'_>,
+    owner: &TransientRegionalCarreauTransport,
+    thermal: &DepositionSimulation<'m>,
+    state: &TransientCarreauState,
+    workspace: &mut TransientCarreauWorkspace,
+    target_s: f64,
+    discontinuities_s: &[f64],
+    step_controls: TransientRegionalCarreauControls,
+    controls: RegionalCarreauResolutionControls,
+    drive: impl Fn(&Cx<'_>, f64) -> Result<RegionalCarreauDrive, E>,
+    exchange: impl Fn(
+        &Cx<'_>,
+        &DepositionSimulation<'m>,
+        &TransientCarreauStep,
+        &RegionalCarreauDriveSample,
+    ) -> Result<CarreauTransportExchange<T>, E>,
+) -> Result<ResolvedRegionalCarreau<'m, T>, RegionalCarreauResolutionError<E>> {
     checkpoint(cx)?;
     let start = thermal.time_s();
     if !target_s.is_finite()
@@ -176,11 +278,23 @@ pub fn advance_resolved<'m, T, E>(
             "finite synchronized interval and bounded native resolution controls required",
         ));
     }
+    for (index, &time) in discontinuities_s.iter().enumerate() {
+        if index % 64 == 0 {
+            checkpoint(cx)?;
+        }
+        if !time.is_finite() || index > 0 && time <= discontinuities_s[index - 1] {
+            return Err(RegionalCarreauResolutionError::Invalid(
+                "finite strictly increasing authored drive discontinuities required",
+            ));
+        }
+    }
+    let mut event = discontinuities_s.partition_point(|&time| time <= start);
     let mut next = owner.clone();
     let mut momentum = state.clone();
     let mut caloric = thermal.clone();
     let mut work = RegionalCarreauResolutionWork::default();
     let mut steps = Vec::new();
+    let mut drive_samples = Vec::new();
     let mut estimates = Vec::new();
     let mut proposed = controls.maximum_interval_s;
     while caloric.time_s() < target_s {
@@ -189,8 +303,24 @@ pub fn advance_resolved<'m, T, E>(
             return Err(limit("retained native step limit", work));
         }
         let start = caloric.time_s();
-        let end = if proposed >= target_s - start {
-            target_s
+        let mut crossed_event = false;
+        while event < discontinuities_s.len() && discontinuities_s[event] <= start {
+            event += 1;
+            crossed_event = true;
+        }
+        if crossed_event {
+            // A new forcing segment gets its own error estimate. Do not carry
+            // an event-clipped floating-point width into the next segment:
+            // nominally equal decimal periods can differ by one time ULP.
+            proposed = controls.maximum_interval_s;
+        }
+        let segment_end = discontinuities_s
+            .get(event)
+            .copied()
+            .unwrap_or(target_s)
+            .min(target_s);
+        let end = if proposed >= segment_end - start {
+            segment_end
         } else {
             start + proposed
         };
@@ -201,49 +331,43 @@ pub fn advance_resolved<'m, T, E>(
                 "comparison interval is not representable",
             ));
         }
-        let coarse = native_step(
+        let (coarse, _) = native_step(
             cx,
             &next,
             &caloric,
             &momentum,
             workspace,
             end,
-            boundaries,
-            injections,
-            branch_heads,
             step_controls,
             controls,
             &mut work,
+            &drive,
             &exchange,
         )?;
-        let first = native_step(
+        let (first, first_drive) = native_step(
             cx,
             &next,
             &caloric,
             &momentum,
             workspace,
             middle,
-            boundaries,
-            injections,
-            branch_heads,
             step_controls,
             controls,
             &mut work,
+            &drive,
             &exchange,
         )?;
-        let second = native_step(
+        let (second, second_drive) = native_step(
             cx,
             &first.next,
             &first.thermal,
             &first.momentum,
             workspace,
             end,
-            boundaries,
-            injections,
-            branch_heads,
             step_controls,
             controls,
             &mut work,
+            &drive,
             &exchange,
         )?;
         let estimate = compare(
@@ -265,6 +389,8 @@ pub fn advance_resolved<'m, T, E>(
             caloric = second.thermal;
             steps.push(first.report);
             steps.push(second.report);
+            drive_samples.push(first_drive);
+            drive_samples.push(second_drive);
             estimates.push(estimate);
             proposed = if estimate.error_ratio <= 0.25 && estimate.maximum_reversal_step_s == 0.0 {
                 (2.0 * width).min(controls.maximum_interval_s)
@@ -286,6 +412,7 @@ pub fn advance_resolved<'m, T, E>(
         thermal: caloric,
         report: RegionalCarreauTrajectory {
             steps,
+            drive_samples,
             estimates,
             work,
         },
@@ -300,18 +427,23 @@ fn native_step<'m, T, E>(
     state: &TransientCarreauState,
     workspace: &mut TransientCarreauWorkspace,
     target_s: f64,
-    boundaries: &[FixedPressure],
-    injections: &[FlowInjection],
-    branch_heads: Option<&[Pressure]>,
     mut step: TransientRegionalCarreauControls,
     controls: RegionalCarreauResolutionControls,
     work: &mut RegionalCarreauResolutionWork,
+    drive: &impl Fn(&Cx<'_>, f64) -> Result<RegionalCarreauDrive, E>,
     exchange: &impl Fn(
         &Cx<'_>,
         &DepositionSimulation<'m>,
         &TransientCarreauStep,
+        &RegionalCarreauDriveSample,
     ) -> Result<CarreauTransportExchange<T>, E>,
-) -> Result<TransientRegionalCarreauStep<'m, T>, RegionalCarreauResolutionError<E>> {
+) -> Result<
+    (
+        TransientRegionalCarreauStep<'m, T>,
+        RegionalCarreauDriveSample,
+    ),
+    RegionalCarreauResolutionError<E>,
+> {
     checkpoint(cx)?;
     if work.native_steps == controls.maximum_native_steps {
         return Err(limit("native step attempt limit", *work));
@@ -321,15 +453,60 @@ fn native_step<'m, T, E>(
         return Err(limit("total original branch solve limit", *work));
     }
     step.maximum_total_branch_solves = step.maximum_total_branch_solves.min(remaining);
+    let start_s = thermal.time_s();
+    let sample_time_s = start_s + 0.5 * (target_s - start_s);
+    if !(start_s < sample_time_s && sample_time_s < target_s) {
+        return Err(RegionalCarreauResolutionError::Invalid(
+            "native midpoint drive sample is not representable inside its interval",
+        ));
+    }
     work.native_steps += 1;
+    work.drive_evaluations += 1;
+    let sample = RegionalCarreauDriveSample {
+        start_s,
+        end_s: target_s,
+        sample_time_s,
+        drive: drive(cx, sample_time_s).map_err(|source| {
+            RegionalCarreauResolutionError::Drive {
+                start_s,
+                end_s: target_s,
+                sample_time_s,
+                work: *work,
+                source,
+            }
+        })?,
+    };
+    checkpoint(cx)?;
     let guess = vec![0.0; thermal.cells().len()];
-    let result = match branch_heads {
+    let resolve =
+        |cx: &Cx<'_>, candidate: &DepositionSimulation<'m>, flow: &TransientCarreauStep| {
+            exchange(cx, candidate, flow, &sample)
+        };
+    let result = match sample.drive.branch_heads.as_deref() {
         Some(heads) => owner.advance_with_heads(
-            cx, thermal, state, workspace, target_s, boundaries, injections, heads, step, &guess,
-            exchange,
+            cx,
+            thermal,
+            state,
+            workspace,
+            target_s,
+            &sample.drive.boundaries,
+            &sample.drive.injections,
+            heads,
+            step,
+            &guess,
+            resolve,
         ),
         None => owner.advance(
-            cx, thermal, state, workspace, target_s, boundaries, injections, step, &guess, exchange,
+            cx,
+            thermal,
+            state,
+            workspace,
+            target_s,
+            &sample.drive.boundaries,
+            &sample.drive.injections,
+            step,
+            &guess,
+            resolve,
         ),
     };
     match result {
@@ -340,7 +517,7 @@ fn native_step<'m, T, E>(
                 ));
             }
             work.completed_branch_solves += result.report.total_branch_solves;
-            Ok(result)
+            Ok((result, sample))
         }
         Err(source) => Err(RegionalCarreauResolutionError::Step {
             start_s: thermal.time_s(),
