@@ -2019,9 +2019,11 @@ and inversion remain authoritative. An optional `IsochoricConductionLaw`
 must retain that exact caloric identity.
 
 One coupled SSPRK3 evolves native area, staggered momentum and extensive cell
-internal energy. Eulerian mass is `rho*pi*A*dz`, and donor-cell energy
-advection uses the SAME signed native area-cell face flux q. This includes
-transport when the dual momentum flux happens to vanish. Each actual stage
+internal energy. Eulerian mass is `rho*pi*A*dz`. Energy advection reconstructs
+minmod-limited linear traces of the anchored specific energy and shares the SAME
+signed native area-cell face flux q between its two cells. This includes
+transport when the dual momentum flux happens to vanish. Constant specific
+energy follows the identical mass update, including signed relative energies. Each actual stage
 inverts its evolving caloric coordinate and prepares the original thermal
 Carreau source at that temperature. The original invariant, extensional stress,
 analytic tangent and physical viscous power remain the existing owners.
@@ -2039,8 +2041,10 @@ Only local physical viscous power enters calorics, with the same positive RK
 quadrature as the native aggregate and cell heat accounts. Optional axial
 Fourier exchange uses the series resistances `dz/(2*pi*k*A)` of the actual
 two half-cells. Shared face powers enter neighboring inventories with opposite
-signs. The explicit thermal bound combines gross donor outflow and the
-conductive row sum times the original global maximum dT/du. Native advection,
+signs. The explicit thermal bound combines twice the gross outgoing mass rate with
+the conductive row sum times the original global maximum dT/du. This sufficient
+bound preserves mass-weighted convexity for transport with changing cell mass;
+physical heating still requires admission by the original caloric source. Native advection,
 capillary and apparent/differential-viscosity restrictions remain active.
 
 Flow, energy inventory, prepared source field, time and cell heat publish
@@ -2050,26 +2054,35 @@ coupled substeps and restores the final admitted source profile. An explicit
 absolute-joule allowance checks stored-energy change against physical heat.
 Mass roundoff, the thermal residual and the combined mechanical/thermal
 truncation residual are exposed separately; upwind loss is never deposited.
-All numerical arrays are prepared once, with O(N) reusable storage. Caloric
-inversion traverses crossed original source segments and is not claimed to
-have logarithmic cost for every reference-relative query.
+All numerical arrays are prepared once, with O(N) reusable storage; the limited
+traces require no additional array. Identical rounded stage temperatures reuse
+their immutable prepared rheology. Caloric inversion traverses crossed original
+source segments and is not claimed to have logarithmic cost for every
+reference-relative query.
 
 This owner is explicit, with third-order temporal accuracy for smooth admitted
-semidiscrete solutions and first-order donor-cell energy advection. Density,
+semidiscrete solutions. Energy reconstruction is second order on smooth
+monotone patches; limiting reduces spatial order near extrema. Density,
 composition and surface tension stay fixed; the outer surface is insulated.
 There is no radial temperature profile, implicit thermal coupling, expansion,
 phase change or Marangoni stress. Material incompressibility includes radial
 strain, so pressure dilatation vanishes; native capillary work remains mechanical.
 The original slenderness/resolution and pre-pinch limits still apply.
 
-Seven jet regressions and two original-caloric/conductivity regressions define
+Eight jet regressions and two original-caloric/conductivity regressions define
 coupled nonlinear-Cv evolution, temporal refinement, actual mass-flux energy
 transport, uniform-temperature moving mass, source-datum invariance including
 variable conductivity, source identity/density, geometry stopping, late
 source/work/cancellation rollback, sub-ULP stored heat and original support.
 An independently executed conservative alternating-mode reference gives
 SSPRK3 error ratios about 0.1245 on timestep halving and thermal closure at
-roundoff. All nine changed Rust files parse with pinned rustfmt. Native
+roundoff. A separate exact-cell-average periodic advection fixture covers both
+flow directions and signed specific energies at 32, 64 and 128 cells. Its
+independently computed L1 errors are 7.2683035e-4, 2.2051748e-4 and 6.0154975e-5
+J/kg, with refinement ratios 0.3034 and 0.2728 approaching second order despite
+limiter reduction at extrema. The corresponding donor error at 128 cells is
+9.6669464e-4 J/kg. No new extrema or unaccounted heat appear in that independent
+transport calculation. All changed Rust files parse with pinned rustfmt. Native
 compilation and these Rust regressions remain unexecuted in the current
 dependency/storage-constrained workspace; the independent oracle is not
 native integration validation.

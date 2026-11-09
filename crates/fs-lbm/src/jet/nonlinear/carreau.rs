@@ -73,6 +73,11 @@ impl CarreauProfile {
         let cells = self.cells.as_mut().ok_or(NonlinearJetError::InvalidState(
             "thermal jet requires prepared cell materials",
         ))?;
+        if cells[cell].temperature_k() == temperature_k {
+            // The original law and rate envelope are immutable. A rounded
+            // identical stage temperature retains the exact preparation.
+            return Ok(());
+        }
         cells[cell] = PreparedCarreau::new(
             self.parameters.rheology,
             temperature_k,

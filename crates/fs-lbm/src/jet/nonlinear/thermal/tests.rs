@@ -570,3 +570,106 @@ fn g0_geometry_stop_publishes_only_complete_coupled_substeps_and_their_source() 
     );
     assert_eq!(jet.flow().time_s(), report.flow.end_time_s);
 }
+
+#[test]
+fn g1_smooth_signed_energy_advection_refines_in_space_in_both_directions() {
+    let gate = CancelGate::new_clock_free();
+    let fixture = Fixture::new([1e-5; 3], 2.0);
+    let caloric = fixture.caloric(280.0);
+    let mut parameters = material();
+    // Positive Newtonian viscosity remains original source data. Constant
+    // A/u makes strain and physical heat exactly zero; tiny mu prevents the
+    // unrelated explicit viscous bound from dominating this transport test.
+    parameters.rheology = ThermalCarreauYasuda::new(
+        CarreauYasuda::new(1e-9, 1e-9, 0.0, 1.0, 2.0, [0.0, 1000.0]).unwrap(),
+        TemperatureShift::new(
+            TemperatureShiftModel::WilliamsLandelFerry {
+                c1: 1.0,
+                c2_k: 100.0,
+            },
+            300.0,
+            [280.0, 360.0],
+        )
+        .unwrap(),
+        ViscosityShiftMode::VerticalAndRate,
+    );
+    let mut forward_errors = Vec::new();
+    for speed in [1.0_f64, -1.0] {
+        let mut errors = Vec::new();
+        for n in [32, 64, 128] {
+            let dx = 1.0 / n as f64;
+            let half_width = core::f64::consts::PI / n as f64;
+            // Exact finite-volume averages of a sinusoidal specific energy.
+            // Cv(T)=1e-5*T, so T is the inverse of energy, not its average.
+            let amplitude = 0.05 * fs_math::det::sin(half_width) / half_width;
+            let cell_phase = |i| core::f64::consts::TAU * (i as f64 + 0.5) / n as f64;
+            let energy = |i| amplitude * fs_math::det::sin(cell_phase(i));
+            let temperatures: Vec<_> = (0..n)
+                .map(|i| (320.0_f64.powi(2) + 2.0 * energy(i) / 1e-5).sqrt())
+                .collect();
+            let flow = PeriodicSlenderJet::new_carreau(
+                parameters,
+                1.0,
+                &vec![1.0; n],
+                &vec![speed; n],
+                limits(),
+                &gate,
+            )
+            .unwrap();
+            let mut jet =
+                ThermalCarreauJet::new(flow, &caloric, None, &temperatures, 100.0, &gate).unwrap();
+            let minimum = jet
+                .cell_internal_energy_from_reference_j()
+                .iter()
+                .zip(jet.cell_masses_kg())
+                .map(|(e, m)| e / m)
+                .fold(f64::INFINITY, f64::min);
+            let maximum = jet
+                .cell_internal_energy_from_reference_j()
+                .iter()
+                .zip(jet.cell_masses_kg())
+                .map(|(e, m)| e / m)
+                .fold(f64::NEG_INFINITY, f64::max);
+            assert!(minimum < 0.0 && maximum > 0.0);
+            let mut controls = budget(0.025 * dx);
+            controls.flow.maximum_substeps = 8 * n + 16;
+            let report = jet.advance(0.2, controls, &gate).unwrap();
+            assert_eq!(report.flow.outcome, SlenderJetOutcome::Completed);
+            assert_eq!(report.flow.viscous_dissipation_j, 0.0);
+            assert_eq!(report.flow.upwind_dissipation_j, 0.0);
+            near(report.internal_energy_change_j, 0.0, 2e-13);
+            near(report.mass_balance_residual_kg, 0.0, 0.0);
+            let mut error = 0.0;
+            for (i, (&e, m)) in jet
+                .cell_internal_energy_from_reference_j()
+                .iter()
+                .zip(jet.cell_masses_kg())
+                .enumerate()
+            {
+                let actual = e / m;
+                let exact = amplitude
+                    * (fs_math::det::sin(cell_phase(i) - core::f64::consts::TAU * speed * 0.2)
+                        - fs_math::det::sin(half_width));
+                error += (actual - exact).abs() / n as f64;
+                assert!(actual >= minimum - 1e-13 && actual <= maximum + 1e-13);
+                assert_eq!(jet.flow().radius_squared_m2()[i], 1.0);
+                assert_eq!(jet.flow().radius_squared_flux_m3_s()[i], speed);
+            }
+            assert!(jet.temperatures_k().all(|t| (280.0..=360.0).contains(&t)));
+            errors.push(error);
+        }
+        // The minmod extrema reduce order locally. Global L1 convergence
+        // approaches order two; this is distinct from the temporal RK test.
+        for pair in errors.windows(2) {
+            assert!(pair[1] < 0.35 * pair[0], "speed={speed}, errors={errors:?}");
+        }
+        assert!(errors[2] < 6.1e-5, "speed={speed}, errors={errors:?}");
+        if speed > 0.0 {
+            forward_errors = errors;
+        } else {
+            for (a, b) in forward_errors.iter().zip(errors) {
+                near(*a, b, 2e-13);
+            }
+        }
+    }
+}

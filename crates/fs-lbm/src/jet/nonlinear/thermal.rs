@@ -7,9 +7,10 @@
 //! temperature and the original Carreau stress again. This is third order in
 //! time for smooth admitted semidiscrete solutions, not a held-temperature split.
 //!
-//! Energy advection is donor cell (first order in space). Optional axial
-//! Fourier conduction uses the original source k(T) and the two half-cell
-//! resistances dz/(2*pi*k*A). The free surface is insulated; density, composition
+//! Energy advection uses minmod-limited linear specific-energy traces with
+//! the native face mass flux. It is second order on smooth monotone patches;
+//! limiting reduces order at extrema. Optional axial Fourier conduction uses
+//! the original source k(T) and the two half-cell resistances dz/(2*pi*k*A). The free surface is insulated; density, composition
 //! and surface tension stay fixed. Incompressibility includes the radial strain,
 //! so material pressure work vanishes (div u=0); capillary work remains in the
 //! native mechanical account. There is no thermal expansion, Marangoni stress,
@@ -553,8 +554,22 @@ fn evaluate(
     for i in 0..n {
         poll_at(gate, i)?;
         let r = next(i, n);
-        let donor = if fields.q[i] >= 0.0 { i } else { r };
-        let mut flux = finite(rho_pi * fields.q[i] * workspace.specific[donor])?;
+        // Reconstruct the transported specific energy, not the extensive
+        // cell inventory: masses change with area, and the source datum must
+        // not enter a slope. One signed face flux is shared by both cells.
+        let jump = workspace.specific[r] - workspace.specific[i];
+        let trace = if fields.q[i] >= 0.0 {
+            workspace.specific[i]
+                + 0.5
+                    * minmod(
+                        workspace.specific[i] - workspace.specific[previous(i, n)],
+                        jump,
+                    )
+        } else {
+            workspace.specific[r]
+                - 0.5 * minmod(jump, workspace.specific[next(r, n)] - workspace.specific[r])
+        };
+        let mut flux = finite(rho_pi * fields.q[i] * finite(trace)?)?;
         if source.conduction.is_some() {
             let left = positive(workspace.conductivity[i] * fields.a[i])?;
             let right = positive(workspace.conductivity[r] * fields.a[r])?;
@@ -576,10 +591,12 @@ fn evaluate(
         poll_at(gate, i)?;
         let l = previous(i, n);
         energy_rhs[i] = finite(-(spatial.flux[i] - spatial.flux[l]) + powers[i])?;
-        // Gross outgoing mass, not net drainage. Balanced flow through a thin
-        // cell may have zero drainage and still require a small donor step.
+        // Bound limited outgoing traces using twice the gross donor outflow,
+        // not net drainage. Together with the conductive row sum this keeps
+        // each Euler transport update mass-weighted convex in specific energy.
+        // Physical heating is admitted separately through the original inverse.
         let advective =
-            finite((fields.q[i].max(0.0) + (-fields.q[l]).max(0.0)) / fields.a[i] / dx)?;
+            finite(2.0 * (fields.q[i].max(0.0) + (-fields.q[l]).max(0.0)) / fields.a[i] / dx)?;
         let conductive = if source.conduction.is_some() {
             finite(
                 source.maximum_temperature_slope
