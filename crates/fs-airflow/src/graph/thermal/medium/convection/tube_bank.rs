@@ -1,4 +1,7 @@
 //! Bulk/wall material transport on the original bare tube-bank correlation.
+/// Finite liquid throughflow with source-exact calorics and refreshed bank properties.
+pub mod stream;
+
 use super::*;
 use fs_convection::tube_bank::{self, TubeBankError, TubeBankEvaluation, TubeBankGeometry};
 

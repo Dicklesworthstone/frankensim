@@ -1549,10 +1549,45 @@ material and uses the retained bulk conductivity and outside diameter.
 
 The generic transport seam cannot prove common composition/pressure identity.
 The caller retains that obligation and the bank mean's effective bulk reference;
-this API supplies no finite-stream heat balance, pressure loss, short-pin or
+this snapshot API supplies no finite-stream heat balance, pressure loss, short-pin or
 finned-surface correction. Its focused material regression checks distinct
 bulk/wall snapshots against independent formula arithmetic, source identity,
 gap Reynolds, stagnation refusal and the actual Robin coefficient.
+
+`tube_bank::stream::LiquidTubeBankStream` adds a finite single-phase liquid
+stream around one uniformly isothermal bank. It binds the original
+`LiquidTemperatureLaw` and `IsobaricHeatCapacityLaw`, requiring the same card,
+selected Cp claim, typed temperature axis and complete fixed source context.
+Source scalar/temperature curves must be continuous and supported over the
+inlet-to-wall interval; no material extrapolation or new caloric chart occurs.
+
+The original source-caloric `linear_heat_exchange` owns the complete Cp(T)
+integral and inverse. A bounded scalar bracket refreshes actual liquid transport
+at the arithmetic inlet/outlet mean and surface Pr at the held wall. One mass
+flux supplies the representative approach speed at mean density, so Re uses
+mass flux and the actual mean viscosity without an extra inlet/mean density
+factor. The actual inlet velocity is retained separately. Tube count, original
+transverse pitch and axial span determine frontal area and lateral heated area;
+half-pitch side margins or transverse repetition exclude inferred bypass area.
+
+One retained relative-enthalpy increment supplies equal and opposite wall/fluid
+watts. Original Cp at the represented outlet and the effective caloric Robin
+mean provide two independent watt residuals; explicit absolute/relative gates
+apply before any result returns. The result retains the original caloric owner,
+complete inlet/mean/wall source states, correlation evidence, iteration residual
+and the same actual conduction Robin handoff. Refusal or cancellation returns
+no partial state and changes no source owner.
+
+This is a steady, mean-property, isothermal-wall closure. It does not establish
+empirical accuracy under strong property variation, tube-end insignificance,
+uniqueness of nonlinear mean-property solutions, pressure loss, wall/fluid
+storage, fins, phase change or a second stream. Zero flow and out-of-domain
+forced Re refuse instead of manufacturing a stagnant-flow coefficient. The
+existing `CaloricHeatExchanger` remains the separate two-stream owner. Focused
+regressions cover independent constant-Cp heating/cooling/equilibrium, a
+manufactured variable-Cp/transport endpoint, conserved mass-flux Reynolds,
+parallel-area scaling, caloric datum changes and source/work/cancellation
+refusals. Native execution status is reported separately from authored tests.
 
 ### Reciprocal material convection on finite thermal links
 

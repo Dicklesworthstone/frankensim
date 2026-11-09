@@ -24,6 +24,7 @@ pub struct TubeBankGeometry {
     layout: TubeBankLayout,
     rows: u32,
     diameter: Length,
+    transverse_pitch: Length,
     transverse_over_diameter: f64,
     longitudinal_over_diameter: f64,
     gap_velocity_ratio: f64,
@@ -115,6 +116,7 @@ impl TubeBankGeometry {
             layout,
             rows,
             diameter,
+            transverse_pitch,
             transverse_over_diameter: transverse,
             longitudinal_over_diameter: longitudinal,
             gap_velocity_ratio,
@@ -128,6 +130,10 @@ impl TubeBankGeometry {
     }
     pub const fn diameter(self) -> Length {
         self.diameter
+    }
+    /// Original transverse center spacing, needed to retain frontal flow area.
+    pub const fn transverse_pitch(self) -> Length {
+        self.transverse_pitch
     }
     /// Maximum inter-tube speed divided by upstream unobstructed speed.
     pub const fn gap_velocity_ratio(self) -> f64 {
