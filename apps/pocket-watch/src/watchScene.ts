@@ -1398,9 +1398,28 @@ export class PocketWatchScene {
       Math.abs(insets.bottom - this.viewInsets.bottom) > 0.5;
     this.viewInsets = { ...insets };
     if (changed) {
-      this.resize();
-      if (reframe) this.applyCameraPreset(this.currentPreset, true);
+      // Only the projection window moves; the canvas and render targets keep their size.
+      this.applyViewOffset();
+      if (reframe) this.applyCameraPreset(this.currentPreset, !this.reducedMotion);
     }
+  }
+
+  /** Re-fit the current camera preset to the unobstructed region. */
+  public reframe(animate: boolean): void {
+    this.applyCameraPreset(this.currentPreset, animate && !this.reducedMotion);
+  }
+
+  private applyViewOffset(): void {
+    const w = this.cssWidth;
+    const h = this.cssHeight;
+    const ox = (this.viewInsets.right - this.viewInsets.left) * 0.5;
+    const oy = (this.viewInsets.bottom - this.viewInsets.top) * 0.5;
+    if (Math.abs(ox) > 0.5 || Math.abs(oy) > 0.5) {
+      this.camera.setViewOffset(w, h, ox, oy, w, h);
+    } else {
+      this.camera.clearViewOffset();
+    }
+    this.camera.updateProjectionMatrix();
   }
 
   /**
@@ -3873,14 +3892,7 @@ if (uThermalOverlay > 0.5) totalEmissiveRadiance += thermalFalseColor(vHfTempK) 
     this.composer.setSize(w, h);
     this.camera.aspect = w / h;
     // Shift the projection center into the middle of the unobstructed region.
-    const ox = (this.viewInsets.right - this.viewInsets.left) * 0.5;
-    const oy = (this.viewInsets.bottom - this.viewInsets.top) * 0.5;
-    if (Math.abs(ox) > 0.5 || Math.abs(oy) > 0.5) {
-      this.camera.setViewOffset(w, h, ox, oy, w, h);
-    } else {
-      this.camera.clearViewOffset();
-    }
-    this.camera.updateProjectionMatrix();
+    this.applyViewOffset();
   }
 
   /** Render one frame without any simulation update (used while presets fast-forward). */
