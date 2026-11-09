@@ -17,6 +17,9 @@
 use super::harmonic::{ThermalImpedanceBudget, ThermalImpedanceError, ThermalImpedanceModel};
 use super::*;
 
+/// Conserved original storage in closed, disconnected conducting components.
+pub mod isolated;
+
 /// Bounded nonlinear work and physical heat-rate acceptance, in watts.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThermalOperatingControls {

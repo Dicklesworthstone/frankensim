@@ -51,6 +51,58 @@ heated chains, nonlinear conductivity, sparse nonlocal feedback, impedance
 handoff, latent/null-space behavior, source-domain limits, cancellation and
 work ceilings.
 
+## Closed-component thermal equilibrium with conserved original storage
+
+`ImplicitConductionChain::solve_isolated_equilibrium` and the graph counterpart
+solve common temperatures with a separate conserved inventory for each original
+connected component. They preserve every mass, material binding, geometry,
+physical clock and future event. The conserved row is
+`sum m_i*(e_i-e_i,initial)=0` in the original stored coordinate: enthalpy,
+explicit fixed-volume internal energy, or declared sensible storage. No
+pressure-work conversion or assertion that every coordinate is internal energy
+is introduced. Original-coordinate differences and their mass products use the
+existing `fs-math::Dd` owner, with independent physical residual acceptance.
+
+The reusable `equilibrium::isolated::caloric` core queries each original
+continuous nondecreasing `T(e)` on its declared domain. Two bounded generalized
+inverse searches retain both sides of an exact latent plateau, including when
+a material selects a sensible one-sided derivative at a corner. A scalar
+temperature solve uses original slopes and safeguarded bisection; latent heat
+never becomes an apparent heat capacity. The source-evaluation ceiling is
+shared across disconnected components. Original source and checkpoint refusals
+propagate.
+
+An already equilibrated component retains every original energy exactly.
+Otherwise one latent parcel is determined by the remaining conserved energy.
+Several independent latent allocations with a strictly interior inventory
+refuse; a loose energy tolerance cannot select their phase distribution.
+Conservation can uniquely determine an all-solid or all-liquid endpoint. An
+unrepresentable original-coordinate balance refuses rather than being rounded
+into a successful root.
+
+The native owner reuses its original endpoint and heat-rate evaluators. Every
+authored link must conduct initially and at the returned state, and exact
+component membership is rechecked before each cell's original watt residual is
+accepted. Disconnected components and isolated cells with no connecting link
+are supported. Authored insulating links, changed conducting topology, external
+baths/sources, advection and custom flux links remain outside this lane.
+Temperature-dependent native Fourier/contact coefficients retain their
+original material meaning.
+
+The result contains a read-only `ThermalOperatingPoint` and per-component
+conservation reports. It supplies neither a time-integrated heat/work credit
+nor a phase-evolution or reachability claim. Scalar regressions cover unequal
+masses and capacities, nonlinear calorics, large independent energy datums,
+latent allocation and endpoints, domain/work/cancellation refusal and
+unrepresentable exchange. Native integration regressions cover disconnected
+inventories, retained event history, latent refusal, the independent watt gate
+and closing material conductance.
+
+The exact production caloric core compiled against the real `fs-math` and
+passed all eleven focused native regressions. The five complete graph/chain
+integration regressions are authored and syntax-checked; their native execution
+remains unverified because the original runtime dependency build was killed.
+
 ## Continuous prescribed bath-temperature histories
 
 `BathTemperatureSchedule` and `with_bath_temperature_histories` on native

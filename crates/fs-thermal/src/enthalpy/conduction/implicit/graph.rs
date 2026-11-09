@@ -53,6 +53,20 @@ pub struct ImplicitConductionGraph<'a> {
     inner: ImplicitConductionChain<'a>,
 }
 impl<'a> ImplicitConductionGraph<'a> {
+    /// Conserve each closed component's original stored energy at common T.
+    /// The chain owner retains original calorics, latent allocation refusals,
+    /// native connection checks and final cellwise heat-rate acceptance.
+    pub fn solve_isolated_equilibrium<'s, 'm>(
+        &'s self,
+        initial: &DepositionSimulation<'m>,
+        controls: super::equilibrium::isolated::IsolatedThermalControls,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<super::equilibrium::isolated::IsolatedThermalEquilibrium<'s, 'a, 'm>,
+        super::equilibrium::isolated::IsolatedThermalError>
+    {
+        self.inner.solve_isolated_equilibrium(initial, controls, checkpoint)
+    }
+
     /// Solve sparse nonlocal heat-generation feedback with graph conduction.
     /// See the chain attachment for immutable original-caloric bindings,
     /// sparse derivative units, source ownership and physical-time semantics.
