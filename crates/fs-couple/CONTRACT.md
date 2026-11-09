@@ -8832,3 +8832,33 @@ control, not a global-error or unconditional-convergence certificate. The
 two-capacity decay, total-source ownership, external radiation, latent-only
 accuracy control and atomic budget/source/cancellation refusal. They are
 source/formatter checked; native execution remains unverified in this session.
+
+## Shared finite gas with distinct enthalpy bodies
+
+`finite_gas_thermal::bodies::FiniteGasBodiesEnvironment` advances one original
+`IsochoricGasStorage` and a bounded set of independent native lumped bodies at
+one shared gas endpoint. Each body retains its own caloric/phase curve, geometry,
+convection law, internal heat and radiation enclosure. The scalar gas exchange
+is matched to the sum of actual native body convective transfers; individual
+transfers are never corrected or redistributed. Opposing transfers still solve
+every body when the gas has exactly zero net heat. Canonical physical body IDs
+make input ordering immaterial without imposing sequential reservoir updates.
+
+Original fixed-density gas internal-energy and entropy increments are counted
+once, including supported real-gas departures. Body storage uses each original
+enthalpy and relative entropy law, including latent plateaus. The shared entropy
+account sums each interface at its own body temperature and assigns the scalar
+source mismatch at the shared gas temperature. One whole-account joule allowance
+bounds the sum of absolute native body, gas and matching defects. Radiation
+remains exchange with each explicitly prescribed external enclosure.
+
+All endpoints are immutable proposals published together. Native source/phase
+refusals, callback errors and cancellation retain body identity and publish no
+partial update; external callback effects remain the caller's responsibility.
+The body count and existing scalar/native iteration limits bound work. This is
+a fixed-volume backward-Euler lumped operator, without direct body/body contact,
+spatial gas transport or a replacement for existing spatial wall/piston networks.
+Five native regression groups cover independent simultaneous-capacity solutions,
+opposing latent transfers, gas-source/radiation ownership, original single-body
+parity and transactional refusals, and dense-gas departure-energy conservation.
+They are source/formatter checked; native execution remains unverified here.

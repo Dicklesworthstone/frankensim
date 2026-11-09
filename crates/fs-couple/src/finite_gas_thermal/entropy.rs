@@ -11,6 +11,8 @@ use fs_material::{
 /// Every two-element array is ordered `[body, gas]`. Storage uses relative
 /// entropy from the original material owners: no absolute entropy reference,
 /// constant heat capacity, or separate latent-heat credit is introduced.
+/// The shared-gas `bodies` owner sums each distinct body's contribution in the
+/// first slot at that body's own endpoint temperature; gas appears only once.
 /// The body retains its chart's pressure/composition and energy convention;
 /// the gas has fixed volume and composition, including its actual EOS pressure
 /// change. Other mechanical, chemical and radiation-field entropy is not inferred.
@@ -40,10 +42,14 @@ pub struct FiniteGasEntropyReport {
     /// Exact storage entropy minus measured storage energy/T_endpoint for each
     /// owner. These backward-Euler temporal defects are not physical production.
     pub temporal_defect_j_k: [f64; 2],
-    /// Interface/source-matching energy residual divided by T_body,end.
+    /// Interface/source-matching residual at its explicitly accounted endpoint:
+    /// the single-body owner uses T_body,end; `bodies` uses T_gas,end because
+    /// every body's measured convective transfer is retained without repair.
     pub source_residual_j_k: f64,
     /// Original owner energy residuals divided by their endpoint temperatures:
     /// `[(solid_residual-source_residual)/T_body, (gas_storage-gas_heat-Q)/T_gas]`.
+    /// With multiple bodies, the first slot instead sums each body's unmodified
+    /// measured-transfer residual divided by its own endpoint temperature.
     pub algebraic_residual_j_k: [f64; 2],
     /// Compensated storage-minus-account difference; never converted into heat.
     pub balance_residual_j_k: f64,
@@ -58,24 +64,34 @@ pub(super) fn evaluate<G: IsochoricGasStorage>(
     [heat_j, radiation_heat_j]: [f64; 2],
     [source_residual_j, solid_residual_j]: [f64; 2],
 ) -> Result<FiniteGasEntropyReport, Error> {
-    let body_k = body.temperature_k();
     let gas_k = next_gas.temperature_k();
-    let enclosure_k = environment.body.radiation_temperature_k;
-    let storage_change_j_k = [
-        input.mass_kg
-            * input.curve.specific_entropy_change_j_kg_k(
-                input.initial.specific_enthalpy_j_kg(),
-                body.specific_enthalpy_j_kg(),
-            )?,
-        environment.gas.mass_kg()
-            * environment
-                .gas
-                .specific_entropy_change_to_temperature_j_kg_k(gas_k)
-                .map_err(GasEnergyError::from)
-                .map_err(gas_error)?,
-    ];
-    let mut report = FiniteGasEntropyReport {
-        storage_change_j_k,
+    let mut report = body_terms(input, body, gas_k,
+        environment.body.radiation_temperature_k, body_storage,
+        [heat_j, radiation_heat_j], [source_residual_j, solid_residual_j])?;
+    report.storage_change_j_k[1] = environment.gas.mass_kg()
+        * environment.gas.specific_entropy_change_to_temperature_j_kg_k(gas_k)
+            .map_err(GasEnergyError::from).map_err(gas_error)?;
+    report.unclassified_heat_at_endpoint_j_k[1] = environment.gas_heat_j / gas_k;
+    report.temporal_defect_j_k[1] = report.storage_change_j_k[1] - gas_storage / gas_k;
+    report.algebraic_residual_j_k[1] = sum([gas_storage, -environment.gas_heat_j, -heat_j])? / gas_k;
+    finish_balance(&mut report)?;
+    Ok(report)
+}
+
+// Original body/transfer terms only. The enclosing owner adds gas exactly once
+// and then closes the full entropy identity; this partial chart is not published.
+pub(super) fn body_terms(
+    input: UniformEnthalpyStepInput<'_>, body: EquilibriumPhaseState,
+    gas_k: f64, enclosure_k: f64, body_storage: f64,
+    [heat_j, radiation_heat_j]: [f64; 2],
+    [source_residual_j, solid_residual_j]: [f64; 2],
+) -> Result<FiniteGasEntropyReport, Error> {
+    let body_k = body.temperature_k();
+    let storage = input.mass_kg * input.curve.specific_entropy_change_j_kg_k(
+        input.initial.specific_enthalpy_j_kg(), body.specific_enthalpy_j_kg(),
+    )?;
+    Ok(FiniteGasEntropyReport {
+        storage_change_j_k: [storage, 0.0],
         // Differences preserve the small force near equilibrium; the ratio is
         // bounded in either direction without a temperature product.
         convection_production_j_k: (heat_j / body_k.min(gas_k))
@@ -85,19 +101,22 @@ pub(super) fn evaluate<G: IsochoricGasStorage>(
             * ((enclosure_k - body_k) / body_k.max(enclosure_k)),
         unclassified_heat_at_endpoint_j_k: [
             input.internal_heat_j / body_k,
-            environment.gas_heat_j / gas_k,
+            0.0,
         ],
         temporal_defect_j_k: [
-            storage_change_j_k[0] - body_storage / body_k,
-            storage_change_j_k[1] - gas_storage / gas_k,
+            storage - body_storage / body_k,
+            0.0,
         ],
         source_residual_j_k: source_residual_j / body_k,
         algebraic_residual_j_k: [
             (solid_residual_j - source_residual_j) / body_k,
-            sum([gas_storage, -environment.gas_heat_j, -heat_j])? / gas_k,
+            0.0,
         ],
         balance_residual_j_k: 0.0,
-    };
+    })
+}
+
+pub(super) fn finish_balance(report: &mut FiniteGasEntropyReport) -> Result<(), Error> {
     report.balance_residual_j_k = sum([
         report.storage_change_j_k[0],
         report.storage_change_j_k[1],
@@ -112,7 +131,7 @@ pub(super) fn evaluate<G: IsochoricGasStorage>(
         -report.algebraic_residual_j_k[0],
         -report.algebraic_residual_j_k[1],
     ])?;
-    Ok(report)
+    Ok(())
 }
 
 // Fixed-order Neumaier summation retains small residuals beside cancelling

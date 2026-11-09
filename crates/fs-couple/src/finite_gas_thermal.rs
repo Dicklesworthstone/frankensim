@@ -13,6 +13,9 @@ pub use entropy::FiniteGasEntropyReport;
 /// Error-controlled physical-time windows on the same finite gas and enthalpy body.
 pub mod window;
 
+/// Simultaneous exchange between one finite gas and distinct enthalpy bodies.
+pub mod bodies;
+
 /// Finite water condensation/evaporation in the same reciprocal thermal solve.
 pub mod condensation;
 

@@ -14,6 +14,9 @@ mod entropy;
 #[path = "finite_gas/window.rs"]
 mod window;
 
+#[path = "finite_gas/bodies.rs"]
+mod bodies;
+
 fn gas(temperature_k: f64, volume_m3: f64) -> IsochoricGasParcel {
     gas_with_conductivity(temperature_k, volume_m3, 0.025)
 }
