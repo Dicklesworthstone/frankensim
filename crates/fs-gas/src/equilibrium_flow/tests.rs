@@ -1,9 +1,9 @@
 use super::*;
 use fs_evidence::ValidityDomain;
-use fs_matdb::{ConstitutiveModelCard, LawId, LawParameter, Provenance};
+use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, Provenance};
 use fs_qty::MolarMass;
 use fs_thermochem::{
-    ChargeVector, ElementId, ElementalMatrix, ElementalReferenceIdV1, InitialStatePolicy,
+    ChargeVector, ElementId, ElementalMatrix, ElementalReferenceIdV1,
     NASA9_LAW_ID_V1, NASA9_LAW_VERSION_V1, NASA9_STATE_SCHEMA_VERSION_V1, Nasa9RegionV1,
     Nasa9StandardStateModelV1, ReferenceEquationOfStateV1, StandardStateConventionV1,
     StandardStatePhaseV1, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K, required_nasa9_parameter_dims,

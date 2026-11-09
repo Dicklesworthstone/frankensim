@@ -10344,6 +10344,17 @@ composition target passed all 52 tests, including seven new pressure/enthalpy
 and shared-isentrope cases; that result does not assert full material or
 workspace validation.
 
+
+### Reacting gas storage on the original thermal timeline
+
+`thermochemical_gas::energy::equilibrium::pressure::storage::GasEquilibriumThermalStorage` binds the original material bank and canonical native isobaric Gibbs/HP law to `ThermalLaw`. Cells store `(H-H_cold)/feed_mass` at fixed pressure and conserved elemental ratios; their actual positive cell mass may differ from the chemistry normalization. The existing thermal timeline owns every finite heat transfer and conserved joule. Enthalpy includes quasistatic pressure-volume work; reference mesh geometry does not impose a rigid-volume constraint. Reacting Cp, composition-dependent density and chemical/mixing entropy come from the same original equilibrium sources, while fully resolved material products retain separately identified frozen transport and acoustics.
+
+A global `dT/dh` upper bound reuses the original NASA coefficient interval bound for every eligible species. The stable ideal-gas redistribution contribution to Cp is nonnegative; the admitted product/feed mass discrepancy and outward rounding are included before inversion. Uncertifiable bounds refuse. Every caloric query restarts the same numerical anchor. Direct local source heat must close the stored increment plus reported endpoint inverse residuals within the original absolute H allowance. The source inverse-temperature mean must lie between the actual endpoint reciprocal temperatures with only explicit floating-point allowance; unresolved entropy intervals refuse without clamping.
+
+The optional `GasEquilibriumConductionLaw` attaches an explicitly declared bulk k(T) curve covering the complete caloric domain to the existing implicit, isolated-equilibrium and harmonic heat owners. Its chain rule uses reacting Cp; density-aware geometry uses `d(1/rho)/dh = (alpha/rho) dT/dh`, including changing molecular count. Nonzero derivative underflow refuses. No reacting conductivity derivative is inferred from frozen transport, and no compatible stream enthalpy datum or species-advection law is invented. Complete NASA support and cold/hot material resolution are prepared; accepted full material queries recheck original transport/source claims, including unsupported interior points.
+
+Five focused regressions exercise analytical reacting calorics/entropy, finite original-timeline heating and cooling with independent cell mass, dissociation volume and conduction derivatives, source/transport refusal, and cancellation/retry. These new material tests were authored and independently source-reviewed but could not be executed after the native executor became unavailable.
+
 ### Sealed constant-volume equilibrium and conserved parcel chemistry
 
 `energy::equilibrium::volume` connects the original TV/UV chemistry owner to

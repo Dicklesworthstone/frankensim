@@ -8,6 +8,9 @@
 //! This supplies thermodynamic endpoints, not reaction kinetics, a throttle
 //! rate, a pressure-controller trajectory or an unaccounted heat/work law.
 
+/// Fixed-pressure reacting calorics on the existing finite thermal-storage owner.
+pub mod storage;
+
 use super::{GasEquilibriumChamberError, ThermochemicalGasModel};
 use crate::thermochemical_gas::{coordinates, energy::parcel::ClosedGasParcel, positive};
 use fs_matdb::QueryPoint;
