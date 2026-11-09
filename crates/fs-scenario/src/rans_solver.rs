@@ -5,6 +5,8 @@
 //! `advance_launder_sharma` separately transports momentum, k and modified
 //! dissipation over a physical interval; `advance_launder_sharma_with_heat`
 //! also advances conservative passive heat using the evolving closure.
+//! `advance_launder_sharma_adaptive` controls local temporal error over a
+//! bounded constant-forcing physical window, with optional passive heat.
 //! These bounded entry points do not imply empirically validated general RANS;
 //! see the method and crate contracts.
 //! - Explicit stretched-grid wall-normal transport; wall resolution is caller supplied
@@ -20,8 +22,9 @@ use crate::rans_card::{BoussinesqOption, LaunderSharmaCoefficients, PorousFinSin
 
 mod transport;
 pub use transport::{
-    RansHeatLoad, RansThermalTransportReport, RansTransportError, RansTransportReport,
-    RansTransportWorkspace,
+    RansAdaptiveControls, RansAdaptiveError, RansAdaptiveHeatBalance, RansAdaptiveReport,
+    RansAdaptiveWorkspace, RansFieldTolerances, RansHeatLoad, RansThermalTransportReport,
+    RansTransportError, RansTransportReport, RansTransportWorkspace,
 };
 
 /// Convergence termination reason.

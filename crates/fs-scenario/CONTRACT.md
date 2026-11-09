@@ -1632,3 +1632,60 @@ state; and cancel at every observed poll before exact retry. All 26 module
 tests and 8 existing RANS integration tests passed in the focused pinned
 nightly build with the original card and BLAKE3 owner. Full-workspace and
 empirical turbulent heat-transfer validation remain outside that evidence.
+
+## Adaptive physical windows for transported channel turbulence
+
+`RansSolver::advance_launder_sharma_adaptive` advances the original implicit
+Launder-Sharma momentum, kinetic-energy and modified-dissipation steps over
+a bounded physical window, optionally including the original conservative
+passive-heat step. Pressure gradient and the optional wall/volumetric heat
+load are held constant throughout the window. The no-heat route preserves
+temperature and does not impose thermal-material admission. This is the
+one-dimensional transported channel entry, separate from the legacy frozen
+relaxation screen.
+
+Every trial compares one full native step against two native half steps.
+The two-half-step trajectory is accepted only if both the scaled local
+error and an explicit resolved-field change limit pass. Controls provide
+physical-unit absolute allowances for velocity, k, modified dissipation,
+eddy viscosity and temperature, a common relative allowance, interval
+bounds and a total attempt ceiling. Eddy-viscosity error uses the coarse
+and refined constitutive endpoints rather than a potentially stale input
+cache. A separate change bound on each transported field at both half and
+full endpoints rejects stiff decay that a coarse/refined endpoint comparison
+alone could miss. No field clipping, epsilon floor or Richardson
+extrapolation is introduced; accepted states use the original positive
+native steps. Arithmetic refusals may refine the interval, while invalid
+inputs and cancellation refuse the window. A final endpoint remainder may
+be shorter than the declared minimum retry interval.
+
+`RansAdaptiveWorkspace` reserves the original nine work arrays and three
+complete state images once: 24 f64 arrays, or 192 numerical bytes per node.
+The node ceiling precedes allocation, and each trial invokes at most three
+native steps without allocating. All intermediate acceptance remains inside
+the workspace. Exhausted attempts, an unrefinable interval, cancellation or
+other failure leave every caller field unchanged across the entire window;
+success publishes the final state after the last cancellation checkpoint.
+
+`RansAdaptiveReport` records actual attempts, accepted/rejected intervals and
+native step calls. Compensated mechanical and optional heat accounts contain
+only accepted fine half steps, with time-averaged mechanical rates and
+integrated wall/volume heat. Rejected coarse or refined trajectories never
+contribute. Each accepted half step refreshes the turbulence closure, and
+its heat solve uses that mechanical endpoint's eddy diffusivity.
+
+Seven new adaptive regression groups compare velocity and temperature mode
+decay with independently derived semidiscrete eigenvalues; require tighter
+tolerances to improve endpoint error; reproduce native half-step states and
+accounts; exclude rejected nonzero heat inputs from accepted budgets; check
+active turbulence from an empty eddy cache; reject stiff endpoint aliasing;
+exercise whole-window refusal and every observed cancellation poll; and
+verify physical admission plus stable addresses/capacities for all 24 work
+arrays. All 33 RANS module tests and 8 existing RANS integration tests passed
+in the focused pinned native build with the original card and BLAKE3 owner.
+
+Step doubling estimates first-order local temporal error. It is not a global
+error certificate, a spatial-resolution criterion, a general forcing-event
+resolver, or evidence of empirically validated turbulent heat transfer.
+The bounded channel geometry, original closure assumptions and thermal
+scope remain unchanged; full Cargo/workspace validation was not run.

@@ -17,6 +17,11 @@ use super::{RansChannelGrid, RansFieldState, RansSolver};
 
 mod thermal;
 pub use thermal::{RansHeatLoad, RansThermalTransportReport};
+mod adaptive;
+pub use adaptive::{
+    RansAdaptiveControls, RansAdaptiveError, RansAdaptiveHeatBalance, RansAdaptiveReport,
+    RansAdaptiveWorkspace, RansFieldTolerances,
+};
 
 /// A refused step leaves every accepted field untouched.
 #[derive(Clone, Debug, PartialEq, Eq)]
