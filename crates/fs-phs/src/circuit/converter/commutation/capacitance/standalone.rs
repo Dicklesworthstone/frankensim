@@ -15,7 +15,8 @@ pub struct CapacitiveCommutatedStep {
 }
 /// One reusable native workspace with explicitly continuing node charges.
 /// Ideal supplies have finite impedance; they do not have finite stored energy.
-pub struct PreparedCapacitiveCommutatedSwitchCycle {
+pub struct PreparedCapacitiveCommutatedSwitchCycle<P = CapacitiveCommutationParameters> {
+    parameters: P,
     core: ConverterCore,
     terminal_resistance_ohm: [f64; 2],
     plan: GatePlan,
@@ -44,6 +45,10 @@ fn operating(
         source,
     })
 }
+/// The original charge curves select storage; gate and electrical step loops are shared.
+pub type PreparedChargeCommutatedSwitchCycle =
+    PreparedCapacitiveCommutatedSwitchCycle<charge::ChargeCommutationParameters>;
+
 impl PreparedCapacitiveCommutatedSwitchCycle {
     pub fn new_controlled(
         parameters: CapacitiveCommutationParameters,
@@ -55,27 +60,53 @@ impl PreparedCapacitiveCommutatedSwitchCycle {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, PreparedStepError> {
         poll(&mut cancelled)?;
-        VoltageSources::new([0.0; 2], terminal_resistance_ohm)?;
-        let plan = GatePlan::new(
-            parameters.converter.devices,
-            intervals,
-            substeps_per_interval,
-            electrical,
-            controls,
-            &mut cancelled,
-        )?;
         let core = ConverterCore::new(parameters)?;
+        Self::prepare(parameters, core, terminal_resistance_ohm, intervals,
+            substeps_per_interval, electrical, controls, cancelled)
+    }
+}
+impl PreparedCapacitiveCommutatedSwitchCycle<charge::ChargeCommutationParameters> {
+    /// Retain four complete original V(q) curves. State coordinates must be
+    /// initialized with these same curves; the constructor never converts,
+    /// resets or silently clamps an existing constant-capacitor state.
+    pub fn new_charge_controlled(
+        parameters: charge::ChargeCommutationParameters,
+        terminal_resistance_ohm: [f64; 2],
+        intervals: &[CommutationInterval],
+        substeps_per_interval: usize,
+        electrical: PowerLoadControls,
+        controls: SwitchCycleControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, PreparedStepError> {
+        poll(&mut cancelled)?;
+        let core = ConverterCore::new_charge(&parameters)?;
+        Self::prepare(parameters, core, terminal_resistance_ohm, intervals,
+            substeps_per_interval, electrical, controls, cancelled)
+    }
+}
+impl<P: Clone> PreparedCapacitiveCommutatedSwitchCycle<P> {
+    pub fn parameters(&self) -> P { self.parameters.clone() }
+}
+impl<P> PreparedCapacitiveCommutatedSwitchCycle<P> {
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        parameters: P,
+        core: ConverterCore,
+        terminal_resistance_ohm: [f64; 2],
+        intervals: &[CommutationInterval],
+        substeps_per_interval: usize,
+        electrical: PowerLoadControls,
+        controls: SwitchCycleControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, PreparedStepError> {
+        poll(&mut cancelled)?;
+        VoltageSources::new([0.0; 2], terminal_resistance_ohm)?;
+        let plan = GatePlan::new(core.parameters.devices, intervals,
+            substeps_per_interval, electrical, controls, &mut cancelled)?;
+        core.admit_work(&plan)?;
         let workspace = plan.workspace(&core.system)?;
         poll(&mut cancelled)?;
-        Ok(Self {
-            core,
-            terminal_resistance_ohm,
-            plan,
-            workspace,
-        })
-    }
-    pub fn parameters(&self) -> CapacitiveCommutationParameters {
-        self.core.parameters
+        Ok(Self { parameters, core, terminal_resistance_ohm, plan, workspace })
     }
     pub fn terminal_resistance_ohm(&self) -> [f64; 2] {
         self.terminal_resistance_ohm

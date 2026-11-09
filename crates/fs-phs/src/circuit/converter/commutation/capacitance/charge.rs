@@ -210,8 +210,12 @@ impl Leg {
                     hits[k]=Some((w,boundary));
                 }
             }
-            let next=position+width;
-            if sign(width)<=0||!less(position,next)||less(dd(1.0),next){
+            // The final span is defined by the authored endpoint, not by
+            // a rounded reconstruction of position + (1 - position). That DD
+            // sum can retain a nonzero low word on either side of one.
+            let terminal=sign(width-remaining)==0;
+            let next=if terminal{dd(1.0)}else{position+width};
+            if sign(width)<=0||!less(position,next)||(!terminal&&!less(next,dd(1.0))){
                 return Err(invalid("charge-cell traversal cannot advance representably"));
             }
             let qb=a[0]+direction[0]*position;
@@ -222,9 +226,8 @@ impl Leg {
             for k in 0..2{mean[k]=mean[k]+width*([vbus,vlo][k]+dd(0.5)*width*dv[k]);}
             let weight=width*(position+dd(0.5)*width);
             for k in 0..3{end_hessian[k]=end_hessian[k]+weight*dd(cell.hessian[k]);}
-            charge=[charge[0]+cell.derivative[0]*width,charge[1]+cell.derivative[1]*width];
             position=next;
-            if sign(dd(1.0)-position)==0{
+            if terminal{
                 for v in mean.into_iter().chain(end_hessian){number(v)?;}
                 return Ok(Chord{mean,end_hessian});
             }

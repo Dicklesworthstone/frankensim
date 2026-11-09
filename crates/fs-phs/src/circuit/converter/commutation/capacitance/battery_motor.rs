@@ -1,10 +1,10 @@
-//! Constant device-capacitor charge in the finite battery/converter/motor chain.
+//! Constant or original voltage-dependent device charge in the finite battery/motor chain.
 //!
 //! State is [battery q_chemical,q_polarization,q_bus, converter lambda,q_bus_in,
 //! q_bus_out,q_node_in,q_node_out, motor lambda,p_rotor,p_stator]. The converter
 //! bus coordinates are TOTAL electrode charges, not the old bare-Cb charges.
-//! Initialize them through CapacitiveCommutationParameters::state with authored
-//! node voltages. Copying the old nine-state bus charges into this eleven-state
+//! Initialize them through the retained parameters().state with authored
+//! node voltages and the same complete capacitor law. Copying the old nine-state bus charges into this eleven-state
 //! layout would describe a different physical state and is never done here.
 //!
 //! Every gate shares one original native workspace, complete finite battery
@@ -14,6 +14,7 @@
 
 use super::*;
 use crate::circuit::battery::{BatteryOcvCurve, BatteryParameters, BatterySource};
+use crate::circuit::capacitance::CapacitorChargeCurve;
 use crate::circuit::converter::battery_fed::motor::BatteryMotorDrive;
 use crate::circuit::converter::switching::battery_motor::BatteryMotorSwitchCommand;
 use crate::circuit::motor::{DcMotor, DcMotorParameters};
@@ -179,7 +180,8 @@ impl CapacitiveBatteryMotorCycleStep {
         Ok(())
     }
 }
-pub struct PreparedCapacitiveBatteryMotorCycle {
+pub struct PreparedCapacitiveBatteryMotorCycle<P = CapacitiveCommutationParameters> {
+    parameters: P,
     battery: BatterySource,
     core: ConverterCore,
     lead_resistance_ohm: f64,
@@ -192,6 +194,19 @@ fn core_state(state: &[f64; 11]) -> [f64; 5] {
     core::array::from_fn(|i| state[3 + i])
 }
 
+/// Original device charge curves in the SAME eleven-state native drive.
+pub type PreparedChargeBatteryMotorCycle =
+    PreparedCapacitiveBatteryMotorCycle<charge::ChargeCommutationParameters>;
+
+fn converter_parameters(model: &BatteryMotorDrive, devices: [SwitchDevice; 4]) -> CommutationParameters {
+    let p = model.electrical().parameters();
+    CommutationParameters {
+        inductance_h: p.inductance_h,
+        bus_capacitance_f: p.bus_capacitance_f,
+        winding_resistance_ohm: p.winding_resistance_ohm,
+        devices,
+    }
+}
 impl PreparedCapacitiveBatteryMotorCycle {
     /// The original model supplies source/lead, converter L/Cb/winding and motor
     /// laws. Explicit devices replace averaged bridge conduction. Four authored
@@ -209,25 +224,61 @@ impl PreparedCapacitiveBatteryMotorCycle {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, PreparedStepError> {
         poll(&mut cancelled)?;
-        let p = model.electrical().parameters();
         let parameters = CapacitiveCommutationParameters {
-            converter: CommutationParameters {
-                inductance_h: p.inductance_h,
-                bus_capacitance_f: p.bus_capacitance_f,
-                winding_resistance_ohm: p.winding_resistance_ohm,
-                devices,
-            },
+            converter: converter_parameters(&model, devices),
             output_capacitance_f,
         };
-        let plan = GatePlan::new(
-            devices,
-            intervals,
-            substeps_per_interval,
-            electrical,
-            controls,
-            &mut cancelled,
-        )?;
-        let mut core = ConverterCore::new(parameters)?;
+        let core = ConverterCore::new(parameters)?;
+        Self::prepare(model, parameters, core, intervals, substeps_per_interval,
+            electrical, controls, cancelled)
+    }
+}
+impl PreparedCapacitiveBatteryMotorCycle<charge::ChargeCommutationParameters> {
+    /// Four complete original V(q) laws retain reversible device energy and
+    /// their finite support. Explicit total-electrode initialization is required;
+    /// no sampled differential capacitance or switching-loss map is introduced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_charge_controlled(
+        model: BatteryMotorDrive,
+        devices: [SwitchDevice; 4],
+        output_charge_curves: [CapacitorChargeCurve; 4],
+        maximum_cells_per_chord: usize,
+        intervals: &[CommutationInterval],
+        substeps_per_interval: usize,
+        electrical: PowerLoadControls,
+        controls: SwitchCycleControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, PreparedStepError> {
+        poll(&mut cancelled)?;
+        let parameters = charge::ChargeCommutationParameters {
+            converter: converter_parameters(&model, devices),
+            output_charge_curves,
+            maximum_cells_per_chord,
+        };
+        let core = ConverterCore::new_charge(&parameters)?;
+        Self::prepare(model, parameters, core, intervals, substeps_per_interval,
+            electrical, controls, cancelled)
+    }
+}
+impl<P: Clone> PreparedCapacitiveBatteryMotorCycle<P> {
+    pub fn parameters(&self) -> P { self.parameters.clone() }
+}
+impl<P> PreparedCapacitiveBatteryMotorCycle<P> {
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        model: BatteryMotorDrive,
+        parameters: P,
+        mut core: ConverterCore,
+        intervals: &[CommutationInterval],
+        substeps_per_interval: usize,
+        electrical: PowerLoadControls,
+        controls: SwitchCycleControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, PreparedStepError> {
+        poll(&mut cancelled)?;
+        let plan = GatePlan::new(core.parameters.devices, intervals,
+            substeps_per_interval, electrical, controls, &mut cancelled)?;
+        core.admit_work(&plan)?;
         let mut battery = BatterySource::new(
             model.electrical().battery_curve().clone(),
             model.electrical().battery_parameters(),
@@ -268,6 +319,7 @@ impl PreparedCapacitiveBatteryMotorCycle {
         let workspace = plan.workspace(&system)?;
         poll(&mut cancelled)?;
         Ok(Self {
+            parameters,
             battery,
             core,
             lead_resistance_ohm,
@@ -297,9 +349,6 @@ impl PreparedCapacitiveBatteryMotorCycle {
             ));
         }
         Ok(state)
-    }
-    pub fn parameters(&self) -> CapacitiveCommutationParameters {
-        self.core.parameters
     }
     pub fn battery_parameters(&self) -> BatteryParameters {
         self.battery.parameters()

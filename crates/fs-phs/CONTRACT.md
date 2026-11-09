@@ -3929,6 +3929,19 @@ support magnitudes size numerical coordinate probes. No curve resampling,
 extrapolation, parameter-change work, extra loss map or new dynamic integrator
 is introduced.
 
+`PreparedChargeCommutatedSwitchCycle::new_charge_controlled` and
+`battery_motor::PreparedChargeBatteryMotorCycle::new_charge_controlled`
+select the original charge curves through the same prepared five-/eleven-state
+owners. Existing constant constructors and default parameter types remain
+available. Gate plans, accepted-state continuation, channel/body-diode laws,
+regulated-load callbacks, finite battery/motor interconnection, cancellation
+and physical reports share the step loops. Device energy changes remain
+reversible storage; channel and diode heats remain separate constituent terms,
+with all fourteen drive heat channels preserved. Combined cycle/Newton/chord
+work is checked for representability. Small capacitance and rapid conduction
+still require explicit time refinement; no gate-drive or reverse-recovery state
+is inferred.
+
 ## Finite battery and motor shafts with device capacitor charge
 
 `commutation::capacitance::battery_motor::PreparedCapacitiveBatteryMotorCycle`

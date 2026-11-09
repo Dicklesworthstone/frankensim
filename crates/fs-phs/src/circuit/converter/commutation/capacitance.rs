@@ -1,21 +1,18 @@
-//! Constant output-capacitance charge storage in the original commutating bridge.
+//! Physical output-capacitor charge in the original commutating bridge.
 //!
 //! State is [lambda, q_bus_in, q_bus_out, q_node_in, q_node_out].
-//! A bus coordinate is TOTAL electrode charge Cb*Vbus+Ch*(Vbus-Vnode),
-//! not the older bare-bus charge Cb*Vbus. Node charge is
-//! -Ch*Vbus+(Ch+Cl)*Vnode. Initial node voltages must be authored explicitly;
-//! gate edges never reset charge or voltage, and no Coss energy is debited as
-//! an additional switching-loss map.
+//! A bus coordinate is TOTAL electrode charge Cb*Vbus+Qhigh(Vbus-Vnode);
+//! node charge is Qlow(Vnode)-Qhigh(Vbus-Vnode). Initialize explicitly through
+//! the retained constant-capacitance or original charge-curve parameters.
+//! Bare-Cb bus charges and charges from a different law are not interchangeable.
 //!
-//! Each grounded reciprocal block is admitted and inverted by the existing
-//! CapacitanceBlock owner. The same original quadratic storage and native
-//! solver serve both the standalone five-state and finite-source eleven-state
-//! lanes. Constant positive device capacitances are required: nonlinear C(V),
-//! temperature-dependent storage, recovery charge and gate-drive energy are
+//! Constant positive capacitors retain the existing CapacitanceBlock owner.
+//! The charge module adds original bounded V(q) curves with exact cell-wise
+//! storage and discrete gradients. Both laws share the same five-state and
+//! eleven-state native solver, gate program, conduction and physical accounts.
+//! Gate edges never reset charge and no Coss loss map adds heat a second time.
+//! Temperature-dependent storage, recovery charge and gate-drive energy are
 //! not inferred. Small RC time scales require explicit temporal refinement.
-//!
-//! The `charge` module admits complete original nonlinear device Q(V) laws
-//! and their coupled electrode storage without reducing them to constant C.
 
 use super::{
     CommutationInterval, CommutationParameters, DeviceConductionPoint, DeviceGateState,
@@ -38,12 +35,12 @@ use fs_math::dd::Dd;
 
 /// Original finite battery and motor shafts with continuing device capacitor charge.
 pub mod battery_motor;
-/// Original voltage-dependent device charge and exact electrode storage.
+/// Original bounded device charge curves and exact coupled electrode storage.
 pub mod charge;
 mod plan;
 mod standalone;
 use plan::{GatePlan, GateStep};
-pub use standalone::{CapacitiveCommutatedStep, PreparedCapacitiveCommutatedSwitchCycle};
+pub use standalone::{CapacitiveCommutatedStep, PreparedCapacitiveCommutatedSwitchCycle, PreparedChargeCommutatedSwitchCycle};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CapacitiveCommutationParameters {
@@ -201,9 +198,16 @@ fn capacitor_change(before: Dd, after: Dd, capacitance: f64) -> f64 {
         .to_f64()
 }
 
+enum ConverterStorage {
+    Constant {
+        output_capacitance_f: [f64; 4],
+        blocks: [CapacitanceBlock; 2],
+    },
+    Charge(charge::ChargeCommutationStorage),
+}
 struct ConverterCore {
-    parameters: CapacitiveCommutationParameters,
-    blocks: [CapacitanceBlock; 2],
+    parameters: CommutationParameters,
+    storage: ConverterStorage,
     system: PortHamiltonian,
 }
 impl ConverterCore {
@@ -243,46 +247,69 @@ impl ConverterCore {
                 }
             }
         }
-        // Direct sum of the two already admitted reciprocal SPD inverses and
-        // positive inductor compliance. No additional inverse or fitted C law.
-        let storage = QuadraticStorage::admitted(q, 5);
+        // Existing admitted reciprocal SPD blocks remain the constant-law path.
+        Self::with_storage(
+            p,
+            ConverterStorage::Constant {
+                output_capacitance_f: parameters.output_capacitance_f,
+                blocks,
+            },
+            Box::new(QuadraticStorage::admitted(q, 5)),
+        )
+    }
+    fn new_charge(parameters: &charge::ChargeCommutationParameters) -> Result<Self, PhsError> {
+        let storage = charge::ChargeCommutationStorage::new(parameters)?;
+        Self::with_storage(
+            parameters.converter,
+            ConverterStorage::Charge(storage.clone()),
+            Box::new(storage),
+        )
+    }
+    fn with_storage(
+        parameters: CommutationParameters,
+        storage: ConverterStorage,
+        law: Box<dyn Storage>,
+    ) -> Result<Self, PhsError> {
         let mut j = vec![0.0; 25];
         j[3] = 1.0;
         j[4] = -1.0;
         j[15] = -1.0;
         j[20] = 1.0;
         let mut r = vec![0.0; 25];
-        r[0] = p.winding_resistance_ohm;
+        r[0] = parameters.winding_resistance_ohm;
         let mut g = vec![0.0; 10];
         g[2] = 1.0;
         g[5] = 1.0;
-        let system = PortHamiltonian::new(5, 2, j, r, g, Box::new(storage))?;
-        Ok(Self {
-            parameters,
-            blocks,
-            system,
-        })
+        let system = PortHamiltonian::new(5, 2, j, r, g, law)?;
+        Ok(Self { parameters, storage, system })
+    }
+    fn admit_work(&self, plan: &GatePlan) -> Result<(), PhsError> {
+        if let ConverterStorage::Charge(storage) = &self.storage {
+            plan.integration_steps
+                .checked_mul(plan.electrical.solve.max_iterations)
+                .and_then(|n| n.checked_mul(usize::from(plan.electrical.backtracking_halvings) + 1))
+                .and_then(|n| n.checked_mul(2))
+                .and_then(|n| n.checked_mul(storage.maximum_cells_per_chord()))
+                .ok_or_else(|| invalid("nonlinear capacitor chord/cycle work bound overflow"))?;
+        }
+        Ok(())
     }
     fn state(&self, current: f64, bus: [f64; 2], node: [f64; 2]) -> Result<[f64; 5], PhsError> {
+        if let ConverterStorage::Charge(storage) = &self.storage {
+            return storage.state(current, bus, node);
+        }
+        let ConverterStorage::Constant { blocks, .. } = &self.storage else { unreachable!() };
         if !current.is_finite() || bus.iter().chain(&node).any(|v| !v.is_finite()) {
-            return Err(invalid(
-                "finite authored current and bus/node voltages required",
-            ));
+            return Err(invalid("finite authored current and bus/node voltages required"));
         }
         let charges = |leg: usize| {
-            self.blocks[leg]
+            blocks[leg]
                 .charges_c(&[bus[leg], node[leg]])
                 .map_err(|_| invalid("original bus/node electrode charges are unrepresentable"))
         };
         let a = charges(0)?;
         let b = charges(1)?;
-        let state = [
-            self.parameters.converter.inductance_h * current,
-            a[0],
-            b[0],
-            a[1],
-            b[1],
-        ];
+        let state = [self.parameters.inductance_h * current, a[0], b[0], a[1], b[1]];
         self.energy(&state)?;
         Ok(state)
     }
@@ -314,26 +341,28 @@ impl ConverterCore {
         initial: &[f64; 5],
         next: &[f64; 5],
     ) -> Result<([f64; 7], f64), PhsError> {
-        let a = self.effort(initial)?;
-        let b = self.effort(next)?;
-        let p = self.parameters;
-        let mut parts = [0.0; 7];
-        parts[0] = quadratic(initial[0], next[0], p.converter.inductance_h);
-        for k in 0..2 {
-            let av = Dd::from_f64(a[1 + k]);
-            let bv = Dd::from_f64(b[1 + k]);
-            let an = Dd::from_f64(a[3 + k]);
-            let bn = Dd::from_f64(b[3 + k]);
-            parts[1 + k] = capacitor_change(av, bv, p.converter.bus_capacitance_f[k]);
-            parts[3 + 2 * k] = capacitor_change(av - an, bv - bn, p.output_capacitance_f[2 * k]);
-            parts[4 + 2 * k] = capacitor_change(an, bn, p.output_capacitance_f[2 * k + 1]);
-        }
+        let parts = match &self.storage {
+            ConverterStorage::Charge(storage) => storage.parts(initial, next)?,
+            ConverterStorage::Constant { output_capacitance_f, .. } => {
+                let a = self.effort(initial)?;
+                let b = self.effort(next)?;
+                let p = self.parameters;
+                let mut parts = [0.0; 7];
+                parts[0] = quadratic(initial[0], next[0], p.inductance_h);
+                for k in 0..2 {
+                    let av = Dd::from_f64(a[1 + k]);
+                    let bv = Dd::from_f64(b[1 + k]);
+                    let an = Dd::from_f64(a[3 + k]);
+                    let bn = Dd::from_f64(b[3 + k]);
+                    parts[1 + k] = capacitor_change(av, bv, p.bus_capacitance_f[k]);
+                    parts[3 + 2 * k] = capacitor_change(av - an, bv - bn, output_capacitance_f[2 * k]);
+                    parts[4 + 2 * k] = capacitor_change(an, bn, output_capacitance_f[2 * k + 1]);
+                }
+                parts
+            }
+        };
         let delta = storage_energy_change(
-            self.system.storage(),
-            initial,
-            next,
-            &mut [0.0; 5],
-            &mut [0.0; 5],
+            self.system.storage(), initial, next, &mut [0.0; 5], &mut [0.0; 5],
         );
         Ok((parts, delta))
     }
@@ -356,7 +385,7 @@ impl ConverterCore {
             device_capacitor_energy_change_j: [s[3], s[4], s[5], s[6]],
             terminal_work_j: [product(dt, e[1], current[0]), product(dt, e[2], current[1])],
             winding_heat_j: (Dd::from_f64(dt)
-                * Dd::from_f64(self.parameters.converter.winding_resistance_ohm)
+                * Dd::from_f64(self.parameters.winding_resistance_ohm)
                 * Dd::from_f64(e[0])
                 * Dd::from_f64(e[0]))
             .to_f64(),

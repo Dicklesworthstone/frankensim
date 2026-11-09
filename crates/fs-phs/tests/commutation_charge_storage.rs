@@ -183,7 +183,7 @@ fn exact_avf_and_end_jacobian_cross_original_cells_without_global_energy_correct
         close(tangent[i],jacobian[i],2e-11);
         close(tangent[i],(plus[i]-minus[i])/(2.0*epsilon),2e-8);
     }
-    let mid=core::array::from_fn(|i|f64::midpoint(a[i],b[i]));
+    let mid: [f64; 5] = core::array::from_fn(|i|f64::midpoint(a[i],b[i]));
     let physical_mid=physical(&p,c,&mid);
     let midpoint_work: f64=(0..5).map(|i|physical_mid[i]*(b[i]-a[i])).sum();
     close(storage.midpoint_energy_remainder(&a,&b,&mid).unwrap(),after-before-midpoint_work,3e-11);
@@ -207,7 +207,7 @@ fn supported_endpoints_do_not_admit_an_unsupported_charge_chord_or_a_nonsmooth_t
     assert!(storage.hamiltonian(&a).is_finite()&&storage.hamiltonian(&b).is_finite());
     // Both high-device endpoint voltages are19.9V<20V. The electrode-charge
     // midpoint instead implies Vlow=27/28,Vhigh=1403/70>20V.
-    let mid=core::array::from_fn(|i|f64::midpoint(a[i],b[i]));
+    let mid: [f64; 5] = core::array::from_fn(|i|f64::midpoint(a[i],b[i]));
     assert!(!storage.hamiltonian(&mid).is_finite());
     assert!(!mean(&storage,&a,&b).iter().all(|v|v.is_finite()));
     let mut tangent=[0.0;5];
@@ -216,4 +216,43 @@ fn supported_endpoints_do_not_admit_an_unsupported_charge_chord_or_a_nonsmooth_t
     let kink=p.state(0.0,[3.0,4.0],[2.0,2.0]).unwrap();
     let storage=ChargeCommutationStorage::new(&p).unwrap();
     assert!(!ContinuousStorageTangent::apply(&storage,&kink,&[1.0;5],&mut tangent));
+}
+
+#[test]
+fn final_chord_span_after_a_knee_keeps_the_original_avf_and_end_jacobian() {
+    let cap = [0.02, 0.03, 0.025, 0.015];
+    let mut parameters = parameters([0.04, 0.05], cap);
+    parameters.maximum_cells_per_chord = 2;
+    // This supported Newton chord crosses exactly one input-high source knee.
+    // Its DD crossing coordinate has a nonzero low word. Adding the remaining
+    // span to it need not reproduce an exact DD one, although the span itself
+    // is the original, exact terminal remainder.
+    let a = [0.0, 0.533, 0.43, 0.32149999999999995, -0.02];
+    let b = [0.0, 0.5285254119813318, 0.43, 0.3291129534722174, -0.02];
+    let direction = [0.0, 0.7, 0.0, -0.2, 0.0];
+    let before = physical(&parameters, cap, &a);
+    let after = physical(&parameters, cap, &b);
+    assert!(before[1] - before[3] > 1.0);
+    assert!(after[1] - after[3] < 1.0);
+    let storage = ChargeCommutationStorage::new(&parameters).unwrap();
+    let (expected, expected_tangent) =
+        analytic_chord(&parameters, cap, &a, &b, &direction);
+    let actual = mean(&storage, &a, &b);
+    let reversed = mean(&storage, &b, &a);
+    let mut tangent = [0.0; 5];
+    assert!(ConstitutiveDiscreteGradient::end_jacobian_action(
+        &storage, &a, &b, &direction, &mut tangent,
+    ));
+    for i in 0..5 {
+        close(actual[i], expected[i], 2e-11);
+        close(reversed[i], expected[i], 2e-11);
+        close(tangent[i], expected_tangent[i], 2e-11);
+    }
+    let energy_change: f64 = parts(&parameters, cap, &b)
+        .into_iter()
+        .zip(parts(&parameters, cap, &a))
+        .map(|(after, before)| after - before)
+        .sum();
+    let work: f64 = (0..5).map(|i| actual[i] * (b[i] - a[i])).sum();
+    close(work, energy_change, 3e-12);
 }
