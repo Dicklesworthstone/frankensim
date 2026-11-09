@@ -77,10 +77,12 @@ impl RateState {
     }
 }
 
-// Canonical immutable constitutive preparation shared by the circular-pipe
-// and planar-slit reductions. Geometry never enters this source-law owner.
+/// Canonical immutable constitutive preparation shared by pipes, slits and
+/// resolved transient films. Geometry never enters this source-law owner.
+/// The original temperature shift is evaluated once; local queries retain the
+/// original reference curve, positive stress tangent and complete rate support.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct PreparedCarreau {
+pub struct PreparedCarreau {
     pub(super) law: ThermalCarreauYasuda,
     pub(super) temperature: TemperatureShiftState,
     pub(super) rest: RateState,
@@ -88,7 +90,7 @@ pub(super) struct PreparedCarreau {
 }
 
 impl PreparedCarreau {
-    pub(super) fn new(
+    pub fn new(
         law: ThermalCarreauYasuda,
         temperature_k: f64,
         maximum_rate_per_s: f64,
@@ -114,6 +116,52 @@ impl PreparedCarreau {
                 tangent: ceiling.stress_tangent_pa_s(),
             },
         })
+    }
+
+    /// Original material calibration; no apparent-viscosity fit is introduced.
+    pub const fn law(&self) -> &ThermalCarreauYasuda {
+        &self.law
+    }
+
+    /// Uniform held temperature of this constitutive preparation.
+    pub const fn temperature_k(&self) -> f64 {
+        self.temperature.temperature_k()
+    }
+
+    /// Physical shear-rate ceiling, unchanged by subsequent queries.
+    pub const fn maximum_shear_rate_per_s(&self) -> f64 {
+        self.ceiling.rate
+    }
+
+    /// Original zero-shear viscosity, for a diffusion scale or preconditioner.
+    pub const fn zero_shear_viscosity_pa_s(&self) -> f64 {
+        self.rest.viscosity
+    }
+
+    /// Apparent viscosity and d(mu*g)/dg [Pa s] at a nonnegative physical rate.
+    /// Reuses the prepared shift and the original reference evaluator. The
+    /// positive tangent remains defined when the scalar viscosity derivative
+    /// is singular at rest; neither quantity is clipped or extended.
+    pub fn viscosity_and_tangent(&self, rate_per_s: f64) -> Result<[f64; 2], MaterialError> {
+        let sample = self.sample_rate(rate_per_s)?;
+        Ok([sample.viscosity, sample.tangent])
+    }
+
+    /// Invert a signed shear stress through the SAME bounded constitutive
+    /// solve used by pipe and slit profiles. Returns the signed rate and the
+    /// number of local source evaluations; cached zero/ceiling queries use zero.
+    /// The caller may reduce the iteration budget to its remaining work budget.
+    pub fn signed_shear_rate_at_stress(
+        &self,
+        stress_pa: f64,
+        controls: CarreauPipeControls,
+    ) -> Result<(f64, u32), MaterialError> {
+        controls.admit()?;
+        if !stress_pa.is_finite() {
+            return Err(state_error("Carreau shear stress must be finite"));
+        }
+        let (sample, iterations) = self.inverse(stress_pa.abs(), self.ceiling, controls)?;
+        Ok((sample.rate.copysign(stress_pa), iterations))
     }
 
     pub(super) fn constant(&self) -> bool {

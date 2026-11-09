@@ -1262,6 +1262,33 @@ This is the native first-order implicit donor advection scope. Species diffusion
 reactions, mixing heat, thermodynamic composition feedback and a higher-order
 advection scheme remain with their respective future/material owners.
 
+## Resolved transient Carreau films
+
+`film::transient::TransientCarreauFilm` retains the full wall-normal velocity
+history under signed body acceleration, translating-wall velocity and imposed
+surface traction. Each implicit-midpoint face evaluates the original thermal
+Carreau stress and positive stress tangent. The shared `fs-material`
+`PreparedCarreau` owner retains the original temperature shift and constitutive
+inverse; no fitted apparent viscosity or summed steady profiles are substituted.
+Bounded Newton/backtracking uses the native tridiagonal solve and reusable O(n)
+arrays. Accepted trials retain their constitutive/Jacobian evaluation.
+
+Newtonian and nonlinear films share one finite-volume momentum and work account,
+including both boundary half-cells. The nonlinear surface inverse exposes its
+stress defect separately. Initial, midpoint and final rates remain within the
+authored source-supported ceiling; velocity, source, iteration, work and final
+cancellation refusals leave accepted history and time unchanged. A prescribed
+temperature update retains momentum, density, geometry and the physical rate
+ceiling while re-preparing the original source and diffusion scale.
+
+G1/G3/G4 tests cover the original Newtonian limit, independent constitutive
+integration and spatial refinement, nonlinear time refinement, reversing and
+moving-wall work, exact rest/Couette limits, temperature continuation and atomic
+retry. This is fixed-thickness, locally parallel generalized-Newtonian flow.
+It adds no elastic memory, thermal evolution, free-surface geometry, entrance
+flow, capillary waves or turbulent-transition prediction. Midpoint time and
+wall-normal resolution remain accuracy requirements.
+
 ## Resolved transient laminar films
 
 `film::transient::TransientFilm` evolves the wall-normal velocity of the same

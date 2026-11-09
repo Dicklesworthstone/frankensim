@@ -23,6 +23,12 @@ use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
 
 use super::{FilmError, FilmMaterial, ShearedFilm};
 
+mod carreau;
+pub use carreau::{
+    TransientCarreauControls, TransientCarreauError, TransientCarreauFilm,
+    TransientCarreauFilmSpec, TransientCarreauStep,
+};
+
 /// Maximum retained wall-normal cells; both work and storage are linear in it.
 pub const MAX_FILM_CELLS: usize = 65_536;
 
@@ -353,9 +359,45 @@ impl TransientFilm {
                 return Err(TransientFilmError::SpeedLimit);
             }
         }
-        let wall_shear =
-            finite(2.0 * self.shear_conductance * (self.midpoint[0] - drive.wall_velocity_m_s))?;
         let surface_offset = finite(0.5 * drive.surface_shear_pa / self.shear_conductance)?;
+        let receipt = self.report_candidate(
+            duration_s,
+            drive,
+            limits,
+            surface_offset,
+            |face| {
+                if face == 0 {
+                    2.0 * self.shear_conductance * (self.midpoint[0] - drive.wall_velocity_m_s)
+                } else if face == n {
+                    drive.surface_shear_pa
+                } else {
+                    self.shear_conductance * (self.midpoint[face] - self.midpoint[face - 1])
+                }
+            },
+            &mut cancelled,
+        )?;
+        poll(&mut cancelled)?;
+        core::mem::swap(&mut self.velocity, &mut self.candidate);
+        self.time = end_time;
+        Ok(receipt)
+    }
+
+    // One finite-volume summation-by-parts account for Newtonian and nonlinear
+    // films. The constitutive owner supplies its actual midpoint face stresses;
+    // numerical defects are reported separately from the physical viscous heat.
+    fn report_candidate(
+        &self,
+        duration_s: f64,
+        drive: FilmDrive,
+        limits: FilmStepLimits,
+        surface_offset: f64,
+        stress: impl Fn(usize) -> f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<FilmStep, TransientFilmError> {
+        let n = self.velocity.len();
+        let weight = positive(duration_s / self.mass_per_cell_area)?;
+        let body_increment = finite(duration_s * drive.acceleration_m_s2)?;
+        let wall_shear = finite(stress(0))?;
         let surface_velocity = finite(self.midpoint[n - 1] + surface_offset)?;
         for trace in [
             finite(self.velocity[n - 1] + surface_offset)?,
@@ -377,21 +419,14 @@ impl TransientFilm {
         let mut maximum_residual = 0.0_f64;
         for i in 0..n {
             if i % 128 == 0 {
-                poll(&mut cancelled)?;
+                poll(cancelled)?;
             }
-            let left = if i == 0 {
-                wall_shear
-            } else {
-                self.shear_conductance * (self.midpoint[i] - self.midpoint[i - 1])
-            };
-            let right = if i + 1 == n {
-                drive.surface_shear_pa
-            } else {
+            let left = finite(stress(i))?;
+            let right = finite(stress(i + 1))?;
+            if i + 1 < n {
                 let difference = self.midpoint[i + 1] - self.midpoint[i];
-                let stress = finite(self.shear_conductance * difference)?;
-                viscous_power = finite(stress.mul_add(difference, viscous_power))?;
-                stress
-            };
+                viscous_power = finite(right.mul_add(difference, viscous_power))?;
+            }
             let residual = finite(self.delta[i] - weight.mul_add(right - left, body_increment))?;
             maximum_residual = maximum_residual.max(residual.abs());
             q = finite(self.spacing.mul_add(self.midpoint[i], q))?;
@@ -431,9 +466,6 @@ impl TransientFilm {
             work_residual_j_m2: finite(((body_work + wall_work) + surface_work) - kinetic - heat)?,
             maximum_velocity_residual_m_s: maximum_residual,
         };
-        poll(&mut cancelled)?;
-        core::mem::swap(&mut self.velocity, &mut self.candidate);
-        self.time = end_time;
         Ok(receipt)
     }
 }
