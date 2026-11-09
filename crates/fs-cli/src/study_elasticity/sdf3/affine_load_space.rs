@@ -22,8 +22,10 @@ mod output;
 mod resume;
 #[path = "affine_load_space/response_binding.rs"]
 mod response_binding;
+#[path = "affine_load_space/grid_assessment.rs"]
+pub(super) mod grid_assessment;
 
-const SCOPE: &str = "Estimated fixed-grid linear-elastic minimum-material design for f=B*rho_eroded+Fq, ||q||_2<=1. The common load is native material self-weight at eroded occupancy; no separate dead load is authored. The force columns retain physical amplitudes and correlations, not probabilities. A bounded quadratic-ball solve selects the complete affine compliance witness; its primal/dual gap and residuals are numerical diagnostics, not certified bounds. Eroded material supplies stiffness and self-weight; dilated material supplies the minimized volume. With self-weight, erosion is not asserted to be the worst manufacturing realization. When strength is declared, each retained bulk quadrature point has its own adverse load direction; an unweighted p-norm bounds both relaxed and physical sampled stresses over the load ball in exact arithmetic. The declared allowable is not inferred from stiffness. Signed displacement and support-reaction limits use each inequality's own adverse load over the same full affine ball. Displacement means use fixed reference cut volume; support forces are numerical tractions on the solid and moments are signed about the authored reference origin. Compliance, responses and strength share one conservative joint constraint and the same physical primal fields. Initial full-chain objective and constraint gradients are independently checked. Hard or unresolved load maximizers cannot supply a smooth gradient. Only accepted points passing every declared physical cap and the complete joint constraint enter the least-material archive; KKT values describe the last accepted point. Accepted results are retained before more optimization. Cross-process resume restores accepted optimizer state under the same source and executable, verifies the native physical-problem binding, rebuilds geometry and re-solves the accepted and distinct feasible incumbent endpoints against the original work allowances. Earlier optimizer steps and the initial gradient experiment are not replayed. Failed restoration and uncheckpointed work lost after a crash cannot be durably charged; previous results remain intact. Individual kernels and ledger writes are indivisible; wall and cancellation limits are cooperative. Memory is an admission envelope. No continuum stress maximum, buckling, continuum-error, manufacturing-tolerance, global design-optimality, safety or experimental-validation claim.";
+const SCOPE: &str = "Estimated fixed-grid linear-elastic minimum-material design for f=B*rho_eroded+Fq, ||q||_2<=1. The common load is native material self-weight at eroded occupancy; no separate dead load is authored. The force columns retain physical amplitudes and correlations, not probabilities. A bounded quadratic-ball solve selects the complete affine compliance witness; its primal/dual gap and residuals are numerical diagnostics, not certified bounds. Eroded material supplies stiffness and self-weight; dilated material supplies the minimized volume. With self-weight, erosion is not asserted to be the worst manufacturing realization. When strength is declared, each retained bulk quadrature point has its own adverse load direction; an unweighted p-norm bounds both relaxed and physical sampled stresses over the load ball in exact arithmetic. The declared allowable is not inferred from stiffness. Signed displacement and support-reaction limits use each inequality's own adverse load over the same full affine ball. Displacement means use each grid's reference cut volume; support forces are numerical tractions on the solid and moments are signed about the authored reference origin. Compliance, responses and strength share one conservative joint constraint and the same physical primal fields. Initial full-chain objective and constraint gradients are independently checked. Hard or unresolved load maximizers cannot supply a smooth gradient. Only accepted points passing every declared physical cap and the complete joint constraint enter the least-material archive; KKT values describe the last accepted point. Accepted results are retained before more optimization. An optional active-cell uniform enrichment re-solves the entire affine load family and assesses every original response and sampled strength while inheriting physical occupancy. Separate change gates and strict physical caps apply on both grids; the initial-grid optimizer remains unchanged. Failed assessment preserves its accepted checkpoint and charged work for a bounded retry. Cross-process resume restores accepted optimizer state under the same source and executable, verifies the native physical-problem binding, rebuilds geometry and re-solves the accepted and distinct feasible incumbent endpoints against the original work allowances. Earlier optimizer steps and the initial gradient experiment are not replayed. Failed restoration and uncheckpointed work lost after a crash cannot be durably charged; previous results remain intact. Individual kernels and ledger writes are indivisible; wall and cancellation limits are cooperative. Memory is an admission envelope. No continuum stress maximum, buckling, continuum-error, manufacturing-tolerance, global design-optimality, safety or experimental-validation claim.";
 
 const GOAL: AffineLoadSpaceDesignGoal3 = AffineLoadSpaceDesignGoal3::MinimumMaterial {
     objective: MinimumMaterialObjective3::VolumeFraction,
@@ -70,12 +72,15 @@ impl Config {
         if let Some(family) = &spec.affine_responses {
             family.validate(spec)?;
         }
+        if let Some(policy) = spec.affine_grid_assessment {
+            policy.validate(spec)?;
+        }
         self.options
             .optimizer
             .validate::<EvaluationStop>(spec.leaves)
             .map_err(|e| fail("cli-study-sdf3-input", e.to_string()))?;
         if spec.material_acceleration.is_none()
-            || spec.max_level != spec.level
+            || (spec.affine_grid_assessment.is_none() && spec.max_level != spec.level)
             || spec.schedule.len() != 1
             || spec.loads.iter().any(|(_, weight)| *weight != 1.0)
             || !(1..=1024).contains(&spec.updates)
@@ -135,6 +140,8 @@ struct State {
     optimizer: ProjectedAlWork,
     spent: Spent,
     status: &'static str,
+    optimization_status: &'static str,
+    assessment: Option<grid_assessment::Outcome>,
     checkpoint: AffineLoadSpaceDesignCheckpoint3,
 }
 impl State {
@@ -152,6 +159,8 @@ impl State {
             optimizer: design.optimizer_work(),
             spent: Spent::default(),
             status: "checkpointed",
+            optimization_status: "checkpointed",
+            assessment: None,
             checkpoint: design.checkpoint(),
         }
     }
@@ -388,7 +397,15 @@ fn compute_observed(
             .map_err(|e| numerical_failure(e, gate, poll().is_break()))?;
             let result = design.run(0);
             let mut state = State::capture(&design, result);
-            let updates = limit.min(spec.updates - design.optimizer_work().iterations);
+            if let Some(recovery) = recovery.filter(|r| r.optimizer_finished(spec)) {
+                if let (Some(report), Some(stop)) = (&mut state.report, recovery.optimizer_stop) {
+                    // Restoring an endpoint is not a new search that can
+                    // replace its original Stalled/PenaltyLimit termination.
+                    report.stop = stop;
+                }
+            }
+            let updates = if recovery.is_some_and(|r| r.optimizer_finished(spec)) { 0 }
+                else { limit.min(spec.updates - design.optimizer_work().iterations) };
             for _ in 0..updates {
                 if state.error.is_some()
                     || state
@@ -407,7 +424,19 @@ fn compute_observed(
         })
     })?;
     state.spent = prior.add(control.work(), geometry, start.elapsed().as_secs_f64())?;
-    state.status = state.terminal(config, gate, state.spent.wall_s >= spec.wall_s);
+    state.optimization_status = recovery.filter(|r| r.optimizer_finished(spec))
+        .map_or_else(|| state.terminal(config, gate, state.spent.wall_s >= spec.wall_s),
+            |r| r.optimization_status);
+    state.status = state.optimization_status;
+    if let Some(assessment) = spec.affine_grid_assessment {
+        // Retain the complete accepted AL slice before any enriched physics.
+        // Pending assessment is not a claim of full study completion.
+        state.status = "checkpointed";
+        observed(&study, &state)?;
+        grid_assessment::attach(assessment, spec, &tree, &mut study, &mut state,
+            &mut quadrature, &mut control, gate, &poll);
+        state.spent = prior.add(control.work(), quadrature.work(), start.elapsed().as_secs_f64())?;
+    }
     Ok(Computation { study, state })
 }
 
@@ -444,3 +473,7 @@ mod strength_tests;
 #[cfg(test)]
 #[path = "affine_load_space/response_tests.rs"]
 mod response_tests;
+
+#[cfg(test)]
+#[path = "affine_load_space/grid_assessment_tests.rs"]
+mod grid_assessment_tests;

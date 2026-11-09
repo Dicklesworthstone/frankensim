@@ -2070,7 +2070,7 @@ does not certify a physical part.
 
 ### Signed displacement, support-force and support-moment limits
 
-The same affine minimum-material mode accepts a final `affine-responses`
+The same affine minimum-material mode accepts an optional `affine-responses`
 section after `material-acceleration` and any `affine-strength` declaration:
 
 ```lisp
@@ -2130,6 +2130,63 @@ window, a support-force window and a support-moment upper bound together with
 compliance and strength. Its inputs are a numerical demonstration; these
 discrete linear-model estimates do not establish continuum serviceability or
 support capacity.
+
+### Enriched-grid assessment of the complete affine design
+
+An optional final `affine-grid-assessment` section rechecks the selected design
+after a retained optimizer slice on a uniformly enriched active grid:
+
+```lisp
+(affine-grid-assessment
+  :max-transfer-terms 500000
+  :compliance-change-tolerance 0.02
+  :response-change-tolerance 0.02
+  :stress-change-tolerance 0.02
+  :inventory-change-tolerance 0.0001)
+```
+
+The original physics envelope must allow at least one finer level and its
+full uniform leaf allowance. Optimization continues on the initial grid;
+assessment refines its active cells once and inherits their already-filtered
+eroded and dilated physical occupancy. Each grid reassembles its native
+self-weight and reference loads, then independently solves and maximizes the
+complete affine load model. It preserves the authored geometry, constitutive
+formulation, support and solver policy. Displacement averages use each grid's
+own retained cut volume over the same physical observation band; both
+normalizers are reported. Support forces and moments are reintegrated through
+the same live reaction laws. There is no fine-grid refilter or optimizer step.
+
+A passing `grid_assessment` requires both grids' strict physical compliance,
+every signed response and sampled-strength bounds, and the native joint upper
+constraint. It separately gates the whole compliance-model change
+`||G_f-G_c||_F + 2||h_f-h_c||_2 + |c_f-c_c|`, each normalized signed-response
+model change, the native matched-site stress-field and aggregate changes,
+and the normalized dilated-inventory objective change. Matching worst values
+alone is insufficient. Change tolerances never excuse physical cap excess.
+Reports retain coarse/fine values and adverse coefficients, complete original
+bound rows, sampled stress evidence, inventory changes, both frozen-witness
+DWR decompositions and the adverse-direction switch corrections. These are
+numerical two-grid observations, without a continuum or interval-certificate
+claim. Sample-count dependence of the strength p-norm can itself prevent a pass.
+
+Transfer terms are bounded by 4,000,000; all four finite change tolerances lie
+in `[0,1e6]`, including an exact zero gate. The memory admission envelope
+includes the extra operator, transfer, body-map and response/stress storage.
+Geometry, Krylov and wall work consume the original cumulative budgets.
+Assessment does not consume optimizer trial evaluations or alter the accepted
+checkpoint, feasible incumbent or optimization history. A stopped assessment
+retains its reason and spent work alongside the valid selected design.
+
+`optimization_status` records the original optimizer outcome independently.
+A completed optimizer whose checked design fails assessment reports
+`grid-unresolved`; cancellation and budget stops retain their own statuses.
+Resume can retry an incomplete assessment after optimization has finished,
+without taking another AL step or replaying the initial gradient experiment.
+The original source, executable and cumulative budgets still apply, including
+the native endpoint verification work required for restoration. Existing design
+and VTU fields describe the selected initial-grid design; the assessment is a
+separate physical recheck and does not promote a fine-grid optimum. The joint
+example is `examples/marquee/bracket-3d-affine-grid-assessment.fsim`.
 
 ### Scientific field export for 3-D studies
 

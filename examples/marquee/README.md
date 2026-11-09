@@ -188,7 +188,7 @@ frankensim --json report study-<receipt-hash> responses.db
 frankensim --json study --resume study-<receipt-hash> responses.db --budget 2
 ```
 
-The final `affine-responses` section declares `sharpness`, `joint-sharpness`
+The optional `affine-responses` section declares `sharpness`, `joint-sharpness`
 and an ordered `limits` list. Each `mean-displacement`, `support-force` or
 `support-moment` row has a unique name, Cartesian axis, signed `at-most` or
 `at-least` sense, original bound and positive same-unit scale. Displacement
@@ -219,6 +219,41 @@ uncertainty radius has no smooth norm derivative and is refused for smooth
 optimization. The example's limits are demonstration inputs whose feasibility
 must be read from the computed report; no continuum serviceability or physical
 support-capacity certification is implied.
+
+## Joint design with an enriched-grid physical recheck
+
+`bracket-3d-affine-grid-assessment.fsim` adds an actual finer-grid assessment
+to the complete self-weight, uncertain-load, strength and signed-serviceability
+problem. The optimizer retains its initial grid. After saving its selected
+design, the study refines every active cell once, transfers physical occupancy
+through the native parent map, rebuilds self-weight and re-solves the whole load
+family on both grids. Each displacement average uses its own grid's measured
+reference cut volume over the original physical band.
+
+```sh
+frankensim --json study examples/marquee/bracket-3d-affine-grid-assessment.fsim assessed.db --budget 2
+frankensim --json report study-<receipt-hash> assessed.db
+frankensim --json study --resume study-<receipt-hash> assessed.db --budget 2
+```
+
+The final `affine-grid-assessment` section declares the transfer allowance and
+separate compliance, response, stress and inventory change tolerances. The
+existing physics `maximum-level` and `maximum-leaves` must accommodate the
+one-level probe; the example raises them from 1/8 to 2/64 and uses a 1 GiB
+memory admission allowance. Every solve, geometry sample and elapsed second
+spends the original cumulative budgets. It adds no optimizer trial evaluation.
+
+Read `grid_assessment.passed` together with `optimization_status`. A pass
+requires both grids' original physical bounds and joint aggregate, complete
+load/response/stress model stability, and stable dilated inventory. A completed
+optimizer can therefore report `grid-unresolved`. Failed or interrupted probes
+retain their reason and spent work, and can be retried through normal resume
+without another AL step after optimization is finished. The report includes
+both grids' adverse coefficients, original signed bounds, sampled stresses,
+normalization volumes and frozen-load DWR/switch diagnostics. Exported design
+and VTU fields remain those of the selected initial-grid design. This example
+checks numerical grid dependence; it does not claim a mesh-independent optimum
+or a continuum strength/serviceability certificate.
 
 ## Thermal cooling-hole radius study
 

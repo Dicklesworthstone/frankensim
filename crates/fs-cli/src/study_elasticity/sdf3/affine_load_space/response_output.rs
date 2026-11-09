@@ -12,7 +12,7 @@ fn invalid(message: impl Into<String>) -> Failure {
     fail("cli-study-sdf3-response-output", message)
 }
 
-fn sense(value: ResponseLimitSense3) -> &'static str {
+pub(super) fn sense(value: ResponseLimitSense3) -> &'static str {
     match value {
         ResponseLimitSense3::AtMost => "at-most",
         ResponseLimitSense3::AtLeast => "at-least",
@@ -123,7 +123,7 @@ pub(super) fn fields(family: &Family, e: &AffineResponseEvaluation3) -> Result<S
     ))
 }
 
-fn html_text(value: &str) -> String {
+pub(super) fn html_text(value: &str) -> String {
     let mut escaped = String::new();
     for ch in value.chars() {
         match ch {

@@ -10,10 +10,31 @@ const SCHEMA: &str = "sdf3-affine-load-space-state.v1";
 pub(super) struct Recovery {
     pub(super) checkpoint: AffineLoadSpaceDesignCheckpoint3,
     pub(super) spent: Spent,
+    pub(super) optimization_status: &'static str,
+    pub(super) optimizer_stop: Option<ProjectedAlStop>,
+    assessment_checked: bool,
+}
+impl Recovery {
+    pub(super) fn optimizer_finished(&self, spec: &Spec) -> bool {
+        matches!(self.optimization_status, "completed" | "no-feasible-descent")
+            || self.checkpoint.optimizer.work.iterations == spec.updates
+    }
 }
 
 fn invalid(message: impl Into<String>) -> Failure {
     fail("cli-study-sdf3-affine-load-space-checkpoint", message)
+}
+fn status(value: Option<&str>) -> Result<&'static str> {
+    match value {
+        Some("completed") => Ok("completed"),
+        Some("no-feasible-descent") => Ok("no-feasible-descent"),
+        Some("budget-exhausted") => Ok("budget-exhausted"),
+        Some("cancelled") => Ok("cancelled"),
+        Some("checkpointed") => Ok("checkpointed"),
+        Some("numerical-failure") => Ok("numerical-failure"),
+        Some("grid-unresolved") => Ok("grid-unresolved"),
+        _ => Err(invalid("unknown retained affine status")),
+    }
 }
 fn field<'a>(value: &'a JsonValue, key: &str) -> Result<&'a JsonValue> {
     value
@@ -234,6 +255,30 @@ fn recover(spec: &Spec, ledger: &Ledger, old: &Loaded, producer: ContentHash) ->
         "report_json",
         "study-report-json",
     )?)?;
+    let optimization_status = status(receipt.str_field("optimization_status")
+        .or_else(|| receipt.str_field("status")))?;
+    let optimizer_stop = match field(&report, "stop")?.str_field("reason") {
+        Some("Converged") => Some(ProjectedAlStop::Converged),
+        Some("IterationLimit") => Some(ProjectedAlStop::IterationLimit),
+        Some("EvaluationLimit") => Some(ProjectedAlStop::EvaluationLimit),
+        Some("MultiplierLimit") => Some(ProjectedAlStop::MultiplierLimit),
+        Some("PenaltyLimit") => Some(ProjectedAlStop::PenaltyLimit),
+        Some("Stalled") => Some(ProjectedAlStop::Stalled),
+        Some("EvaluationStopped") => None,
+        _ => return Err(invalid("unknown retained optimizer stop")),
+    };
+    if optimization_status == "grid-unresolved"
+        || report.str_field("optimization_status").is_some_and(|s| s != optimization_status)
+    {
+        return Err(invalid("retained optimizer and assessment termination disagree"));
+    }
+    let assessment_checked = if spec.affine_grid_assessment.is_some() {
+        match field(&report, "grid_assessment")?.str_field("status") {
+            Some("checked") => true,
+            Some("pending" | "budget-exhausted" | "cancelled" | "numerical-failure") => false,
+            _ => return Err(invalid("missing or unknown grid-assessment status")),
+        }
+    } else { false };
     let gradient_check = gradient(&report, spec)?;
     let rows = document(&linked(ledger, receipt, "iterations", "study-iterations")?)?;
     if rows.str_field("schema") != Some("sdf3-affine-load-space-iterations.v1") {
@@ -276,7 +321,7 @@ fn recover(spec: &Spec, ledger: &Ledger, old: &Loaded, producer: ContentHash) ->
     };
     let spent = Spent::read(receipt)?;
     spent.validate(spec)?;
-    Ok(Recovery { checkpoint, spent })
+    Ok(Recovery { checkpoint, spent, optimization_status, optimizer_stop, assessment_checked })
 }
 
 pub(super) fn drive(
@@ -293,18 +338,9 @@ pub(super) fn drive(
         .transpose()?;
     let limit = cap.unwrap_or(spec.updates).min(spec.updates);
     if let (Some(old), Some(recovery)) = (old, &recovery) {
-        let status = match old.value.str_field("status") {
-            Some("completed") => "completed",
-            Some("no-feasible-descent") => "no-feasible-descent",
-            Some("budget-exhausted") => "budget-exhausted",
-            Some("cancelled") => "cancelled",
-            Some("checkpointed") => "checkpointed",
-            Some("numerical-failure") => "numerical-failure",
-            _ => return Err(invalid("unknown retained affine status")),
-        };
-        if matches!(status, "completed" | "no-feasible-descent")
-            || recovery.checkpoint.optimizer.work.iterations == spec.updates
-        {
+        let status = status(old.value.str_field("status"))?;
+        let assessment_done = spec.affine_grid_assessment.is_none() || recovery.assessment_checked;
+        if recovery.optimizer_finished(spec) && assessment_done {
             return Ok(Outcome {
                 pointer: format!("study-{}", old.hash.to_hex()),
                 receipt: old.bytes.clone(),

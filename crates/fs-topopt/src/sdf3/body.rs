@@ -30,7 +30,11 @@ pub(crate) fn controlled<T>(
     if let Some(stop) = stopped {
         return Err(stop);
     }
-    result.map_err(|_| failure("sdf3-material-body-load"))
+    result.map_err(|error| match error {
+        ElasticityError3::Invalid("material body-load term allowance exhausted") =>
+            failure("sdf3-material-body-load-budget"),
+        _ => failure("sdf3-material-body-load"),
+    })
 }
 
 // Both vectors already belong to the same reduced native displacement space.

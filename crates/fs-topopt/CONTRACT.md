@@ -747,6 +747,18 @@ The report retains the goal and inventory binding, and `objective_change()`
 uses the normalized worst-compliance change or the selected inventory change
 as appropriate. Neither mode adds a second solver, filter or optimizer.
 
+`estimate_affine_load_space_enrichment_for_goal_with_grid_constraints` binds
+separate reference observation laws on the coarse and fine grids through that
+same assessment owner. A mean displacement can therefore use each grid's own
+retained cut volume as its denominator. The caller preserves the physical
+patch, axis and reaction law; ordered observation kinds, bounds, senses,
+scales and the complete response/strength/joint policies must match before
+callbacks or solver work begin. The original entry points reuse one family on
+both grids. `joint_constraints()` exposes both grids' actual upper aggregates,
+including positive values for infeasible designs, while refusing inconsistent
+constraint bindings. The strict feasibility gate uses these same values;
+normalization and change tolerances do not relax any physical bound.
+
 `affine_load_space::campaign::AffineLoadSpaceCampaign3` automatically repeats
 full assessment and refitting for BOTH design goals. Its original physical cap,
 objective, filter/SIMP parameters, pure dead/basis laws and native acceleration
