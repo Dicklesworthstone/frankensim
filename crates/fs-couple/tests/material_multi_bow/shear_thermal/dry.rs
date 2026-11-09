@@ -79,6 +79,14 @@ fn dry_network(
     temperatures: [f64; 2],
     depths: [f64; 2],
 ) -> DepositionSimulation<'_> {
+    dry_network_with_ambient(curve, temperatures, depths, 0.0)
+}
+fn dry_network_with_ambient(
+    curve: &EquilibriumEnthalpyPhaseCurve,
+    temperatures: [f64; 2],
+    depths: [f64; 2],
+    htc_w_m2_k: f64,
+) -> DepositionSimulation<'_> {
     let mut events = Vec::new();
     for side in 0..2 {
         for cell in 0..3 {
@@ -100,7 +108,7 @@ fn dry_network(
                     },
                     boundary: Boundary {
                         ambient_k: 300.0,
-                        htc_w_m2_k: 0.0,
+                        htc_w_m2_k,
                         reservoir: None,
                         source_w: 0.0,
                     },
@@ -266,6 +274,134 @@ fn guesses_from_cells(cells: &BTreeMap<CellId, DepositedCell>) -> Vec<f64> {
         .values()
         .map(|c| c.mass_kg * c.specific_h_j_kg)
         .collect()
+}
+
+#[test]
+fn moving_partial_contact_shields_cooling_and_lift_restores_exposure() {
+    with_cx(|cx, gate| {
+        let (card, caloric) = coating(false, false);
+        let bundle = transport(&card);
+        let context = point(300.0);
+        let depths = [DEPTH; 2];
+        let mut partial = route(&card, caloric.curve(), &bundle, &context, depths);
+        partial.string_coordinate_origin_m = -0.098;
+        partial.heat.footprint.intervals_m = [[0.001, 0.003]; 2];
+        let routes = [partial];
+        let htc = 20_000.0;
+        let mut heat = dry_network_with_ambient(caloric.curve(), [310.0; 2], depths, htc);
+        let mut bank = dry_bank(cx, gate, 340.0)
+            .with_bow_station_motion(motion_limits(), gate)
+            .unwrap();
+        let forces = vec![0.0; bank.system().mode_count()];
+        let dt = bank.system().sample_period_s();
+        let capacity = DENSITY * LENGTH * WIDTH * DEPTH * CP;
+        let area = 2.0 * (LENGTH * WIDTH + DEPTH * (LENGTH + WIDTH));
+        for (load, station, moved) in [
+            (0.1, None, false),
+            (0.0, None, false),
+            (0.1, None, false),
+            (0.1, Some(0.208), true),
+        ] {
+            let before = heat.cells().clone();
+            let old_energy = total_heat(&heat);
+            let stations = station.map(|station| [station, 0.3]);
+            let frame = bank
+                .step_with_dry_contact_thermal_motion(
+                    &mut heat,
+                    &routes,
+                    &[],
+                    solve_controls(),
+                    &guesses_from_cells(&before),
+                    &forces,
+                    &[drive(0.0, load), drive(0.0, 0.0)],
+                    stations.as_ref().map(|s| s.as_slice()),
+                    None,
+                    None,
+                    gate,
+                    other,
+                )
+                .unwrap();
+            assert_eq!(frame.routed_dry_heat_j, 0.0);
+            let covered = |side, cell| {
+                if load > 0.0
+                    && if moved && side == 0 {
+                        cell > 0
+                    } else {
+                        cell < 2
+                    }
+                {
+                    0.5 * AREA
+                } else {
+                    0.0
+                }
+            };
+            // Eliminate each original finite cell from the common-temperature
+            // balance. Before migration symmetry reduces this exactly to the
+            // independent Robin formula; migration couples unequal warm cells.
+            let (mut numerator, mut denominator) = (0.0, 0.0);
+            for side in 0..2 {
+                for cell in 0..3 {
+                    let t0 = 300.0 + before[&id(side, cell)].specific_h_j_kg / CP;
+                    let h = htc * (area - covered(side, cell));
+                    let g = 0.2 * covered(side, cell) / (0.5 * DEPTH);
+                    let diagonal = capacity + dt * (h + g);
+                    numerator += g * (capacity * t0 + dt * h * 300.0) / diagonal;
+                    denominator += g * (capacity + dt * h) / diagonal;
+                }
+            }
+            let interface = if load > 0.0 {
+                numerator / denominator
+            } else {
+                0.0
+            };
+            let mut external = 0.0;
+            for side in 0..2 {
+                for cell in 0..3 {
+                    let id = id(side, cell);
+                    let old_temperature = 300.0 + before[&id].specific_h_j_kg / CP;
+                    let conductance = htc * (area - covered(side, cell));
+                    let contact = 0.2 * covered(side, cell) / (0.5 * DEPTH);
+                    let expected = (capacity * old_temperature
+                        + dt * conductance * 300.0
+                        + dt * contact * interface)
+                        / (capacity + dt * (conductance + contact));
+                    let actual = heat.temperature_k(id).unwrap();
+                    assert!(
+                        (actual - expected).abs() < 1e-7,
+                        "cell {id:?}: {actual} vs {expected}"
+                    );
+                    assert!(actual < old_temperature);
+                    if !moved {
+                        let robin = (capacity * old_temperature + dt * conductance * 300.0)
+                            / (capacity + dt * conductance);
+                        assert!((actual - robin).abs() < 1e-7);
+                    }
+                    assert_eq!(
+                        heat.cells()[&id].boundary,
+                        before[&id].boundary,
+                        "coverage changes endpoint exchange, not authored bath data"
+                    );
+                    external += dt * conductance * (300.0 - actual);
+                }
+            }
+            assert!((frame.external_heat_j - external).abs() < 2e-12);
+            assert!((total_heat(&heat) - old_energy - external).abs() < 2e-12);
+            assert!(frame.total_energy_residual_j.abs() < 2e-12);
+            if load == 0.0 {
+                assert_eq!(frame.dry_contacts[0].interface_temperature_k, None);
+                assert!(frame.dry_contacts[0].cell_heat_j.is_empty());
+            } else {
+                let contact_temperature = frame.dry_contacts[0].interface_temperature_k.unwrap();
+                assert!((contact_temperature - interface).abs() < 1e-7);
+                if !moved {
+                    assert!(
+                        heat.temperature_k(id(0, 0)).unwrap()
+                            > heat.temperature_k(id(0, 2)).unwrap()
+                    );
+                }
+            }
+        }
+    });
 }
 
 #[test]

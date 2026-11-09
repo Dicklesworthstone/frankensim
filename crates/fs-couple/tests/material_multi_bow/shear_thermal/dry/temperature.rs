@@ -162,3 +162,138 @@ fn source_feedback_refusal_restores_law_motion_and_cells_then_release_preserves_
         assert_eq!(heat.cells(), &cells);
     });
 }
+
+#[test]
+fn cooling_changes_recontact_friction_and_late_failure_preserves_the_warm_history() {
+    with_cx(|cx, gate| {
+        let (card, caloric) = coating(false, false);
+        let bundle = transport(&card);
+        let context = point(300.0);
+        let depths = [DEPTH; 2];
+        let routes = [route(&card, caloric.curve(), &bundle, &context, depths)];
+        let mut bank = temperature_bank(cx, gate, &card);
+        let mut heat = dry_network_with_ambient(caloric.curve(), [310.0; 2], depths, 20_000.0);
+        let forces = vec![0.0; bank.system().mode_count()];
+        let drives = [drive(0.05, 0.1), drive(0.0, 0.0)];
+        let guess = guesses(&heat);
+        let first = bank
+            .step_with_dry_contact_thermal_motion(
+                &mut heat,
+                &routes,
+                &[],
+                solve_controls(),
+                &guess,
+                &forces,
+                &drives,
+                None,
+                None,
+                None,
+                gate,
+                other,
+            )
+            .unwrap();
+        let first_temperature = first.dry_contacts[0].interface_temperature_k.unwrap();
+        let first_traction = first.mechanics.ports[0].traction_n;
+        assert!((first_traction - 0.1 * (0.4 - 0.005 * (first_temperature - 300.0))).abs() < 2e-9);
+        let source_before_lift = bank.bow_interface(0).unwrap().clone();
+        let before_lift = heat.temperature_k(id(0, 1)).unwrap();
+        let guess = guesses(&heat);
+        let lifted = bank
+            .step_with_dry_contact_thermal_motion(
+                &mut heat,
+                &routes,
+                &[],
+                solve_controls(),
+                &guess,
+                &forces,
+                &[drive(0.05, 0.0), drive(0.0, 0.0)],
+                None,
+                None,
+                None,
+                gate,
+                other,
+            )
+            .unwrap();
+        assert_eq!(lifted.routed_dry_heat_j, 0.0);
+        assert_eq!(lifted.dry_contacts[0].interface_temperature_k, None);
+        assert!(heat.temperature_k(id(0, 1)).unwrap() < before_lift);
+        assert_eq!(
+            bank.bow_interface(0).unwrap(),
+            &source_before_lift,
+            "an absent contact has no invented interface temperature"
+        );
+
+        let saved = (
+            states(&bank),
+            bank.bow_interface(0).unwrap().clone(),
+            heat.cells().clone(),
+            heat.time_s(),
+            bank.system().samples_rendered(),
+        );
+        let calls = Cell::new(0);
+        let guess = guesses(&heat);
+        let refused = bank.step_with_dry_contact_thermal_motion(
+            &mut heat,
+            &routes,
+            &[],
+            solve_controls(),
+            &guess,
+            &forces,
+            &drives,
+            None,
+            None,
+            None,
+            gate,
+            |endpoint| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 4 {
+                    Err("late ambient/contact source refusal")
+                } else {
+                    Ok(other(endpoint).unwrap())
+                }
+            },
+        );
+        assert!(refused.is_err());
+        assert_eq!(calls.get(), 4);
+        assert_eq!(states(&bank), saved.0);
+        assert_eq!(bank.bow_interface(0).unwrap(), &saved.1);
+        assert_eq!(heat.cells(), &saved.2);
+        assert_eq!(
+            (heat.time_s(), bank.system().samples_rendered()),
+            (saved.3, saved.4)
+        );
+
+        let returned = bank
+            .step_with_dry_contact_thermal_motion(
+                &mut heat,
+                &routes,
+                &[],
+                solve_controls(),
+                &guess,
+                &forces,
+                &drives,
+                None,
+                None,
+                None,
+                gate,
+                other,
+            )
+            .unwrap();
+        let temperature = returned.dry_contacts[0].interface_temperature_k.unwrap();
+        let traction = returned.mechanics.ports[0].traction_n;
+        assert!(temperature < first_temperature && traction > first_traction);
+        assert!((traction - 0.1 * (0.4 - 0.005 * (temperature - 300.0))).abs() < 2e-9);
+        assert_eq!(
+            bank.bow_interface(0)
+                .unwrap()
+                .resolved_temperature_source()
+                .unwrap()
+                .state_coordinate("T"),
+            Some(temperature)
+        );
+        for frame in [&first, &lifted, &returned] {
+            assert!(frame.external_heat_j < 0.0);
+            assert!(frame.total_energy_residual_j.abs() < 2e-12);
+        }
+    });
+}

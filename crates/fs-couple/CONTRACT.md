@@ -1,3 +1,24 @@
+## Ambient cooling around modal dry contact
+
+The finite-cell modal dry-contact transaction applies each original Robin
+boundary over native exposed area minus the actual loaded footprint overlap.
+Lift restores full original exposure. Migration and recontact retain the same
+finite thermal histories, and source-selected friction uses the newly solved
+interface temperature in the same mechanical/thermal transaction. Original
+heat-transfer coefficient, bath temperature, material and caloric objects stay
+authoritative; no fitted decay or extra heat store is introduced.
+
+Shared cells require the same declared material face and disjoint loaded
+footprint intervals. Overlapping active intervals and unresolved reservoir
+faces refuse. Retained-film ambient coverage remains outside this route.
+Geometry prepares once per physical step. The native boundary residual and
+independent external-power account use identical conductances; the existing
+joint rollback applies to source, coverage and cancellation failures.
+
+The dry-contact regressions specify analytical Robin cooling with partial
+coverage, lift, recontact and bow migration, plus temperature-dependent
+friction feedback and a late source refusal preserving both physical owners.
+
 ## Resolved interior acoustic absorption on the native thermal timeline
 
 `porous_heating::interior::InteriorAcousticHeating` binds every original

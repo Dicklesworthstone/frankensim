@@ -38,7 +38,7 @@ pub mod rates;
 mod source;
 
 use super::*;
-use dry::{DryContactHeat, DryContactHeatFrame};
+use dry::{DryAmbientBoundaries, DryContactHeat, DryContactHeatFrame};
 use source::DryTemperatureUnknown;
 use material::MaterialRelaxationHeatDestination;
 use fs_material::thermal::source::ThermalMaterialError;
@@ -50,7 +50,9 @@ use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceErr
 use fs_solver::{
     NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, SolverRunProgress,
 };
-use fs_thermal::enthalpy::backward_euler::{BackwardEulerStep, StepCoefficients};
+use fs_thermal::enthalpy::backward_euler::{
+    BackwardEulerStep, BoundaryConductances, BoundaryStepCoefficients, StepCoefficients,
+};
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation, EnergyAudit};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -723,6 +725,7 @@ impl MultiFrictionModalSystem {
                 .map_err(ModalFrictionError::from)?;
             thermodynamics.push((slopes, initial));
         }
+        let ambient = DryAmbientBoundaries::prepare(dry, thermal, checkpoint)?;
         self.prepare_step(drives, obstacle_offsets, obstacle_geometry, contact_patch_motion, Some(gate))?;
         let step = BackwardEulerStep::new(thermal, target_s, checkpoint)?;
         let dt = step.duration_s();
@@ -739,7 +742,7 @@ impl MultiFrictionModalSystem {
             // below its cell's enthalpy resolution. Such a component is the exactly representable zero, as fs-thermal's
             // implicit conduction driver proposes; the residual below still charges every joule, and `evaluate` still
             // refuses a nonzero increment that cannot move the coordinate when one is passed to it directly.
-            step.evaluate(
+            step.evaluate_with_boundary_conductances(
                 &step.resolvable_increments_j(&x[..cell_count]),
                 |endpoint| {
                     checkpoint()?;
@@ -903,11 +906,13 @@ impl MultiFrictionModalSystem {
                         conductances_w_k,
                         payload,
                     } = resolve(endpoint, &system.staged_ports).map_err(LayerThermalError::Source)?;
+                    let boundaries = ambient.at_ports(&system.staged_ports, checkpoint)?;
                     drop(system);
                     let external_heat_j = number(
-                        dt * endpoint.external_step_power_w(
+                        dt * endpoint.external_step_power_with_boundary_conductances(
                             &sources_w,
                             &conductances_w_k,
+                            &boundaries,
                             checkpoint,
                         )?,
                     )?;
@@ -953,7 +958,7 @@ impl MultiFrictionModalSystem {
                             "contact plastic loss, reversible exchange, series loss and finite-cell heat do not balance",
                         ));
                     }
-                    Ok::<_, LayerThermalError<E>>(StepCoefficients {
+                    Ok::<_, LayerThermalError<E>>(BoundaryStepCoefficients { bulk: StepCoefficients {
                         sources_w,
                         conductances_w_k,
                         payload: (
@@ -972,7 +977,7 @@ impl MultiFrictionModalSystem {
                             material_heat_j,
                             dry_heat_j, dry_frames, dry_sources,
                         ),
-                    })
+                    }, boundaries })
                 },
                 checkpoint,
             )

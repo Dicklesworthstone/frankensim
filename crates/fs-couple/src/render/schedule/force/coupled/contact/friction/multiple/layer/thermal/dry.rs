@@ -7,6 +7,12 @@
 //! effusivity split or a flash-temperature formula. A translating footprint
 //! visits the SAME original cells; accepted heat is never reset or advected to
 //! an unrelated cell. Refine cells, footprint and time together.
+//!
+//! Original Robin boundaries cool only the uncovered material surface. A loaded
+//! footprint shields its actual overlap; lifting restores that area to the
+//! original ambient bath. The native boundary owner retains h, bath temperature
+//! and external heat accounting. Reservoir faces require a separate geometric
+//! correspondence and remain unsupported by this strip adapter.
 
 use super::*;
 use fs_material::state_point::{ResolvedMaterialStatePoint, THERMAL_CONDUCTIVITY_DIMS};
@@ -83,6 +89,15 @@ impl DryThermalCell<'_> {
         thermal: &DepositionSimulation<'_>,
         area: f64,
     ) -> Result<(f64, f64), LayerThermalError<E>> {
+        self.conductance_with_ambient(thermal, area, false)
+    }
+
+    fn conductance_with_ambient<E>(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        area: f64,
+        allow_ambient: bool,
+    ) -> Result<(f64, f64), LayerThermalError<E>> {
         let bad = LayerThermalError::Invalid;
         let cell = thermal
             .cells()
@@ -90,11 +105,11 @@ impl DryThermalCell<'_> {
             .ok_or(bad("dry heat cell is inactive"))?;
         if !thermal.uses_material_law(cell.material_id, self.caloric)
             || self.transport.card_identity() != self.material.material.content_hash()
-            || cell.boundary.htc_w_m2_k != 0.0
+            || !allow_ambient && cell.boundary.htc_w_m2_k != 0.0
             || cell.boundary.reservoir.is_some()
         {
             return Err(bad(
-                "dry heat requires the original caloric/card identity and insulated cell boundaries; moving ambient coverage is not supplied",
+                "contact heat requires original caloric/card identity, no unresolved reservoir face, and explicit ambient coverage",
             ));
         }
         let phase = self
@@ -248,7 +263,7 @@ impl DryContactHeat<'_> {
                 side_cells[side].insert(cell.cell);
                 // Admit every cell, including currently uncovered history, and
                 // pin its source before any mechanical candidate is published.
-                cell.conductance::<E>(thermal, area)?;
+                cell.conductance_with_ambient::<E>(thermal, area, true)?;
                 previous = Some(cell.interval_m[1]);
             }
             if interval[0] < cells[0].interval_m[0]
@@ -331,7 +346,8 @@ impl DryContactHeat<'_> {
             for cell in cells {
                 let overlap = cell.interval_m[1].min(interval[1]) - cell.interval_m[0].max(interval[0]);
                 if overlap > 0.0 {
-                    let (g, temperature) = cell.conductance(endpoint, overlap * footprint.widths_m[side])?;
+                    let (g, temperature) = cell.conductance_with_ambient(
+                        endpoint, overlap * footprint.widths_m[side], true)?;
                     conductors.push((cell.cell, g, temperature));
                 }
             }
@@ -379,10 +395,147 @@ impl DryContactHeat<'_> {
     }
 }
 
+struct AmbientFootprint {
+    port: usize,
+    interval_m: [f64; 2],
+    area_m2: f64,
+}
+
+struct AmbientSurface {
+    interval_m: [f64; 2],
+    width_m: f64,
+    exposed_area_m2: f64,
+    htc_w_m2_k: f64,
+    footprints: Vec<AmbientFootprint>,
+}
+
+/// Prepared geometry only: temperatures and heat remain with the original
+/// thermal owner. Native topology/area is traversed once per physical step.
+pub(super) struct DryAmbientBoundaries {
+    surfaces: BTreeMap<CellId, AmbientSurface>,
+}
+
+impl DryAmbientBoundaries {
+    pub(super) fn prepare<E>(
+        routes: &[DryContactHeat<'_>],
+        thermal: &DepositionSimulation<'_>,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, LayerThermalError<E>> {
+        let bad = LayerThermalError::Invalid;
+        let mut surfaces = BTreeMap::<CellId, AmbientSurface>::new();
+        for route in routes {
+            checkpoint()?;
+            let footprint = route.resolved_footprint();
+            for (side, cells) in route.surfaces.iter().enumerate() {
+                for cell in cells {
+                    checkpoint()?;
+                    let htc = thermal.cells()[&cell.cell].boundary.htc_w_m2_k;
+                    let interval = [
+                        cell.interval_m[0].max(footprint.intervals_m[side][0]),
+                        cell.interval_m[1].min(footprint.intervals_m[side][1]),
+                    ];
+                    if htc == 0.0 || interval[1] <= interval[0] {
+                        continue;
+                    }
+                    let surface = surfaces.entry(cell.cell).or_insert_with(|| AmbientSurface {
+                        interval_m: cell.interval_m,
+                        width_m: cell.width_m,
+                        exposed_area_m2: 0.0,
+                        htc_w_m2_k: htc,
+                        footprints: Vec::new(),
+                    });
+                    if surface.interval_m != cell.interval_m || surface.width_m != cell.width_m {
+                        return Err(bad(
+                            "ambient contact coverage needs one original material face per cell",
+                        ));
+                    }
+                    surface.footprints.push(AmbientFootprint {
+                        port: route.port,
+                        interval_m: interval,
+                        area_m2: positive((interval[1] - interval[0]) * footprint.widths_m[side])?,
+                    });
+                }
+            }
+        }
+        let ids: Vec<_> = surfaces.keys().copied().collect();
+        let areas = thermal.exposed_areas_m2(&ids, &mut checkpoint)?;
+        for (&id, surface) in &mut surfaces {
+            checkpoint()?;
+            surface.exposed_area_m2 = areas[&id];
+            let face = positive((surface.interval_m[1] - surface.interval_m[0]) * surface.width_m)?;
+            if face > surface.exposed_area_m2 && !same_size(face, surface.exposed_area_m2) {
+                return Err(bad(
+                    "original thermal contacts leave insufficient exposed area for the dry surface",
+                ));
+            }
+            surface.footprints.sort_by(|a, b| {
+                a.interval_m[0]
+                    .total_cmp(&b.interval_m[0])
+                    .then(a.interval_m[1].total_cmp(&b.interval_m[1]))
+                    .then(a.port.cmp(&b.port))
+            });
+        }
+        Ok(Self { surfaces })
+    }
+
+    pub(super) fn at_ports<E>(
+        &self,
+        ports: &[FrictionPortFrame],
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BoundaryConductances, LayerThermalError<E>> {
+        let bad = LayerThermalError::Invalid;
+        let mut boundaries = BoundaryConductances::default();
+        for (&id, surface) in &self.surfaces {
+            checkpoint()?;
+            let (mut covered, mut end) = (0.0, None);
+            for footprint in &surface.footprints {
+                checkpoint()?;
+                let normal = ports
+                    .get(footprint.port)
+                    .ok_or(bad("ambient contact port is absent"))?
+                    .normal_force_n;
+                if !normal.is_finite() || normal < 0.0 {
+                    return Err(bad(
+                        "ambient contact coverage needs finite nonnegative load",
+                    ));
+                }
+                if normal == 0.0 {
+                    continue;
+                }
+                // Width offsets are not in this strip representation. Two
+                // loaded overlapping intervals cannot claim independent faces.
+                if end.is_some_and(|previous| footprint.interval_m[0] < previous) {
+                    return Err(bad(
+                        "overlapping loaded dry footprints share one ambient surface",
+                    ));
+                }
+                end = Some(footprint.interval_m[1]);
+                covered = number(covered + footprint.area_m2)?;
+            }
+            let uncovered = if covered <= surface.exposed_area_m2 {
+                surface.exposed_area_m2 - covered
+            } else if same_size(covered, surface.exposed_area_m2) {
+                // Only representation roundoff at a completely covered face.
+                0.0
+            } else {
+                return Err(bad(
+                    "loaded dry footprints exceed the exposed material surface",
+                ));
+            };
+            boundaries
+                .ambient_w_k
+                .insert(id, number(surface.htc_w_m2_k * uncovered)?);
+        }
+        Ok(boundaries)
+    }
+}
+
 impl MultiFrictionModalSystem {
     /// Original dry friction, material-coordinate half-cell conduction, finite
     /// heat capacity and optional series-drive heating on ONE accepted clock.
     /// A released contact switches off both friction heating and conduction.
+    /// Original Robin boundaries then cool the fully exposed material surface;
+    /// loaded footprints shield only their actual covered area from that bath.
     /// Existing films remain covered only by their fixed-film route; this dry
     /// continuation never transports or resets material shear history.
     #[allow(clippy::too_many_arguments)]
