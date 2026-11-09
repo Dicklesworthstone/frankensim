@@ -179,8 +179,49 @@ specific heat. The steady solve uses its conductivity; transient storage uses
 the product of its density and specific heat. This path does not infer
 anisotropic axes or a temperature table. An explicit `source` cannot be mixed
 with `conductivity_w_m_k`, `conductivity_table`, or
-`volumetric_heat_capacity_j_m3_k` overrides. Surface emissivity remains an
+`volumetric_heat_capacity_j_m3_k` or
+`volumetric_heat_capacity_table_j_m3_k` overrides. Surface emissivity remains an
 independent explicitly authored surface property in frozen mode.
+
+## Authored solid heat-capacity curves
+
+Ordinary voxel solids can declare a bounded volumetric heat-capacity curve for
+transient cooling and heating:
+
+```json
+{
+  "name": "declared-solid",
+  "conductivity_w_m_k": 2.0,
+  "volumetric_heat_capacity_table_j_m3_k": [
+    [280.0, 1800000.0],
+    [320.0, 2200000.0],
+    [400.0, 3000000.0]
+  ]
+}
+```
+
+These numbers illustrate the input format; they are not measurements of a
+particular material. Each pair is absolute temperature in kelvin followed by
+heat capacity per **fixed reference volume** in J/(m³ K). Supply 2–4096 pairs
+with positive finite temperatures and capacities and strictly increasing
+temperatures. Declare either this table or `volumetric_heat_capacity_j_m3_k`;
+declaring both refuses. Source-backed material entries retain their own storage
+law and cannot be overridden with either input.
+
+The table is piecewise linear. A voxel of reference volume `V` stores
+`V * integral(Cvol(T) dT)`, so a step crossing a breakpoint integrates every
+crossed interval. It does not use `Cvol(T_new) * (T_new - T_old)`. The implicit
+thermal endpoint and energy report use the same integral, with the old state
+held fixed throughout nonlinear iteration. Voxel subdivision changes the volume
+factor, not the material curve. Compact component boxes retain their independent
+junction storage and contribute no additional voxel capacity.
+
+Initial and accepted temperatures must remain inside the declared span. The
+solver does not extend end values, infer a density, change mass with temperature,
+or turn a large capacity into latent heat. Sharp phase changes require the
+existing source-enthalpy models. The steady energy equation does not use heat
+capacity. Transient thermal integration remains backward Euler, including when
+the separately marched momentum uses BDF2.
 
 ## Coupled temperature-dependent fluid and solids
 

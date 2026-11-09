@@ -1,5 +1,23 @@
 # CONTRACT: fs-cli
 
+## Ordinary solid heat-capacity tables in cooling-cht
+
+An authored solid may select `volumetric_heat_capacity_table_j_m3_k` instead
+of a constant volumetric capacity. The bounded positive temperature/capacity
+pairs lower to the original `fs-material` caloric integration kernel through
+`SolidMaterial::with_heat_capacity_table`; JSON parsing introduces no separate
+storage approximation. Both native frozen-flow and unsteady energy marches
+integrate each cell's capacity at its fixed reference volume. Compact component
+aliases retain only their original junction storage.
+
+The schema rejects simultaneous constant/table declarations and any attempted
+override of a source-backed material. Initial and final thermal states must
+remain within the table support. Thermal storage stays backward Euler and does
+not infer density, phase change, experimental authority or a higher time order
+from BDF2 momentum. Executable CLI regressions heat a sealed solid/package/fluid
+assembly through a capacity breakpoint, verify its independently integrated
+energy, and reject malformed, competing and out-of-domain laws.
+
 ## Native coating heat storage and trajectory adjoints — drivers 135, 137
 
 Schema-v17 constant-capacity transient projects may add uniform, explicitly

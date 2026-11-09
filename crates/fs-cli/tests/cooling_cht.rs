@@ -2501,6 +2501,89 @@ fn compact_junction_capacity_tables_refuse_ambiguous_or_unsupported_data() {
 }
 
 #[test]
+fn solid_capacity_tables_close_the_cli_heat_balance_with_compact_storage() {
+    // The solid has Cvol=4+8*(T-300) J/(m3 K) and volume 1 m3.
+    // Its original integral, the compact package's independent integral and
+    // the fluid's constant storage must account for the same supplied 2 J.
+    let table = COMPACT_TABLE_TRANSIENT.replace(
+        "\"volumetric_heat_capacity_j_m3_k\":4",
+        "\"volumetric_heat_capacity_table_j_m3_k\":[[299,4],[300,4],[300.05,4.4],[302,20]]",
+    );
+    for flow in ["frozen", "unsteady"] {
+        let scene = table.replace("\"flow\":\"unsteady\"", &format!("\"flow\":\"{flow}\""));
+        let (code, result, error) = run(&scratch(&format!("solid-capacity-{flow}.json"), &scene));
+        assert_eq!(code, 0, "{error}");
+        let probes = result.get("probes").and_then(J::as_array).unwrap();
+        let solid = f(&probes[0], &["temperature_k"]) - 300.0;
+        let junction = f(&probes[1], &["temperature_k"]) - 300.0;
+        let fluid = f(&probes[2], &["temperature_k"]) - 300.0;
+        assert!(solid > 0.05, "the solid must cross its interior capacity knot: {solid}");
+        let stored = 4.0 * solid + 4.0 * solid * solid
+            + 2.0 * junction + 2.0 * junction * junction + 2.0 * fluid;
+        assert!((stored - 2.0).abs() < 1e-7, "{flow}: stored {stored} J");
+        let records = result.path(&["transient", "records"]).and_then(J::as_array).unwrap();
+        assert_eq!(records.len(), 4);
+        for record in records {
+            assert!((f(record, &["stored_energy_change_j"]) - 0.5).abs() < 1e-8);
+            assert!(f(record, &["closure_j"]).abs() < 1e-8);
+        }
+        let reference = COMPACT_TABLE_TRANSIENT.replace(
+            "\"flow\":\"unsteady\"", &format!("\"flow\":\"{flow}\""),
+        );
+        let (code, constant, error) = run(&scratch(
+            &format!("solid-constant-capacity-{flow}.json"), &reference,
+        ));
+        assert_eq!(code, 0, "{error}");
+        let constant_probes = constant.get("probes").and_then(J::as_array).unwrap();
+        assert!(solid < f(&constant_probes[0], &["temperature_k"]) - 300.0,
+            "growing heat capacity must change the accepted temperature");
+    }
+}
+
+#[test]
+fn solid_capacity_tables_reject_conflicting_sources_and_unsupported_states() {
+    let key = "\"volumetric_heat_capacity_j_m3_k\":4";
+    for (index, table) in [
+        "[[300,4]]", "[[300,4],[300,8]]", "[[301,8],[300,4]]",
+        "[[299,0],[301,4]]", "[[0,4],[301,8]]", "[[299,\"warm\"],[301,8]]",
+        // The constructor admits these two curves, but the actual initial
+        // state or heated endpoint is outside the authored support.
+        "[[301,4],[302,8]]", "[[299,4],[300,4]]",
+    ].into_iter().enumerate() {
+        let scene = COMPACT_TABLE_TRANSIENT.replace(
+            key, &format!("\"volumetric_heat_capacity_table_j_m3_k\":{table}"),
+        );
+        let (code, diagnostic, error) = run(&scratch(
+            &format!("solid-capacity-refusal-{index}.json"), &scene,
+        ));
+        assert_eq!(code, 4, "{diagnostic:?} {error}");
+        if index < 6 {
+            assert_eq!(diagnostic.str_field("code"), Some("cooling-cht-input"));
+        } else {
+            assert!(matches!(diagnostic.str_field("code"),
+                Some("cooling-cht-input" | "cooling-cht-solve")));
+        }
+        assert!(diagnostic.get("transient").is_none());
+    }
+    let table = "\"volumetric_heat_capacity_table_j_m3_k\":[[299,4],[302,20]]";
+    let ambiguous = COMPACT_TABLE_TRANSIENT.replace(key, &format!("{key},{table}"));
+    let (code, diagnostic, _) = run(&scratch("solid-capacity-ambiguous.json", &ambiguous));
+    assert_eq!(code, 4, "{diagnostic:?}");
+    assert!(diagnostic.str_field("message").unwrap().contains("declare only one"));
+
+    let source = COMPACT_TABLE_TRANSIENT.replace(
+        "\"conductivity_w_m_k\":1,\n   \"volumetric_heat_capacity_j_m3_k\":4",
+        &format!("\"source\":{{\"mode\":\"frozen\",\"pack\":\"unused.fsmcdpk\",\"state\":[]}}, {table}"),
+    );
+    assert_ne!(source, COMPACT_TABLE_TRANSIENT);
+    let (code, diagnostic, _) = run(&scratch("solid-capacity-source-conflict.json", &source));
+    assert_eq!(code, 4, "{diagnostic:?}");
+    assert!(diagnostic.str_field("message").unwrap().contains(
+        "source-derived thermal coefficients cannot be overridden"
+    ));
+}
+
+#[test]
 fn sealed_box_radiates_from_the_block_to_its_walls() {
     // A heated block inside a sealed box whose 2 mm walls are an emissive
     // solid held at 300 K from outside: no opening, so only surface-to-
