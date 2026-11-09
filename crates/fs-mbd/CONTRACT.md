@@ -401,6 +401,57 @@ apply. Rotating supports preserve the world direction and actual application
 point of external loads; scalar root joints remain admissible. The targeted
 regression entry is `cargo test -p fs-mbd --test articulated_prescribed_spatial`.
 
+## Local response about supported mechanical equilibria
+
+`articulated::motion::spatial_loads::prescribed::equilibrium::linearized`
+prepares local mechanical response about an original stationary or uniformly
+rotating supported equilibrium. Preparation independently reevaluates the
+physical force balance against the immutable model, loads and material laws;
+a public root report cannot replace that admission. Constant held actuator
+efforts, native axial connections and diagonal/coupled bushings retain their
+original meaning. The rotating owner's world-load symmetry checks are shared.
+
+The original joint coordinates obey
+`M*delta_qdd + C*delta_qd + K*delta_q = delta_effort`.
+Matrix-free inertia uses native inverse dynamics with the direction in the
+acceleration argument and all independent bias terms zero. Position and rate
+actions differentiate the same original required-minus-applied effort balance.
+Joint accelerations stay zero while joint velocities are perturbed, preserving
+the original velocity bias without confusing it with inertia. K includes
+geometric preload, follower loading and centrifugal softening. C includes
+material damping and Coriolis/gyroscopic terms. Neither operator is projected
+onto symmetry, positive stiffness or proportional damping, and an unstable
+root remains unstable.
+
+The shared bounded central directional-action owner compares successive
+stencils in explicit position/rate and effort scales. Physical coordinates are
+anchored at the admitted state and incremented with fused multiply-add.
+Compensated requested-versus-represented offset checks enforce an explicit
+relative stencil-distortion allowance. Overflow, nonzero values erased by
+scaling, original physical-domain refusals and unresolved stencils return
+without a partial action. Reported stencil disagreement is an estimate, not a
+certified derivative error, smoothness proof or branch-stability certificate.
+The original state, clock, loads and material history are never advanced.
+
+An explicitly bounded dense export supports at most 64 joint coordinates.
+Its mass block comes directly from the existing generalized composite-rigid-body
+owner, preserving that owner's symmetric assembly rather than repairing
+independently sampled mass columns. The export retains full K and C, physical
+stencil diagnostics and an explicit source-evaluation budget. Existing fs-modal
+quadratic pole and prepared-mode owners consume the same M/C/K for poles,
+mode shapes, residues and sensitivities; no second eigensolver is introduced.
+Larger admitted trees can use matrix-free actions within original tree limits.
+
+Analytical integration cases cover a damped spinning radial slider, transverse
+preload stiffness, inverted-pendulum growth, a two-coordinate Coriolis coupling,
+original balance/budget/cancellation refusals and coordinate quantization.
+These new integration cases remain unexecuted because the execution workspace
+disconnected. The shared derivative kernel's six native cases passed before
+that outage; its final underflow hardening and this full mechanical integration
+were reviewed afterward. Arbitrary effort callbacks, contact switches,
+closed-loop constraints and nonuniformly rotating operating points are outside
+this local supported-tree response API.
+
 ## Relative equilibrium under supported uniform rotation
 
 `articulated::motion::spatial_loads::prescribed::equilibrium::rotating::equilibrate_uniform_rotation`

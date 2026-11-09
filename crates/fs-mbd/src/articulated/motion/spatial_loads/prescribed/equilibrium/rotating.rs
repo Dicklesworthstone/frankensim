@@ -64,31 +64,7 @@ pub fn equilibrate_uniform_rotation(
     config: EquilibriumConfig<'_>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<RotatingArticulatedEquilibrium, EquilibriumError> {
-    poll(&mut cancelled)?;
-    let frame = UniformRotationFrame::new(seed.base.world_from_base, seed.base.twist_body.angular)
-        .map_err(frame_error)?;
-    if loads.world_points.len() > MAX_SPATIAL_MOTION_LOADS {
-        return Err(EquilibriumError::Invalid(
-            "bounded world point inventory required",
-        ));
-    }
-    if !frame.admits_world_vector(loads.held.gravity_world) {
-        return Err(EquilibriumError::Invalid(
-            "world gravity is not invariant under the supported rotation",
-        ));
-    }
-    for (i, load) in loads.world_points.iter().enumerate() {
-        if i % 64 == 0 {
-            poll(&mut cancelled)?;
-        }
-        if !frame.admits_world_vector(load.force_world)
-            || !frame.admits_world_vector(load.couple_world)
-        {
-            return Err(EquilibriumError::Invalid(
-                "world point load is not invariant under the supported rotation",
-            ));
-        }
-    }
+    let frame = admit_frame(seed, loads, &mut cancelled)?;
     let mode = if seed.base.twist_body.angular == Twist::zero().angular {
         FrameMode::Stationary
     } else {
@@ -120,6 +96,41 @@ pub fn equilibrate_uniform_rotation(
         frame,
         support_power_w,
     })
+}
+
+// Shared symmetry admission for the root and its original local response.
+pub(super) fn admit_frame(
+    seed: &PrescribedBaseMotionState,
+    loads: SpatialMotionLoads<'_>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<UniformRotationFrame, EquilibriumError> {
+    poll(&mut cancelled)?;
+    let frame = UniformRotationFrame::new(seed.base.world_from_base, seed.base.twist_body.angular)
+        .map_err(frame_error)?;
+    if loads.world_points.len() > MAX_SPATIAL_MOTION_LOADS {
+        return Err(EquilibriumError::Invalid(
+            "bounded world point inventory required",
+        ));
+    }
+    if !frame.admits_world_vector(loads.held.gravity_world) {
+        return Err(EquilibriumError::Invalid(
+            "world gravity is not invariant under the supported rotation",
+        ));
+    }
+    for (i, load) in loads.world_points.iter().enumerate() {
+        if i % 64 == 0 {
+            poll(&mut cancelled)?;
+        }
+        if !frame.admits_world_vector(load.force_world)
+            || !frame.admits_world_vector(load.couple_world)
+        {
+            return Err(EquilibriumError::Invalid(
+                "world point load is not invariant under the supported rotation",
+            ));
+        }
+    }
+    poll(&mut cancelled)?;
+    Ok(frame)
 }
 
 fn frame_error(error: UniformRotationError) -> EquilibriumError {

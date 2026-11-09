@@ -3,6 +3,9 @@
 #[path = "articulated_equilibrium/rotating.rs"]
 mod rotating;
 
+#[path = "articulated_equilibrium/linearized.rs"]
+mod linearized;
+
 use fs_ga::{Mat3, Se3, So3, Twist, Vec3, Wrench};
 use fs_mbd::articulated::motion::FreeFloatingMotionLoads;
 use fs_mbd::articulated::motion::prescribed::{

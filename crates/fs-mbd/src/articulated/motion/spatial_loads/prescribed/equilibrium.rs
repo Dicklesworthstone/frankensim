@@ -9,6 +9,9 @@
 /// Relative equilibrium under a genuinely uniform supported rotation.
 pub mod rotating;
 
+/// Original force, rate and inertia actions about an admitted equilibrium.
+pub mod linearized;
+
 use super::super::bushing::coupled::CoupledSpatialBushing;
 use super::super::bushing::{self, BushingLaw, SpatialBushing};
 use super::super::implicit::MAX_IMPLICIT_SPATIAL_EVALUATIONS;
@@ -242,6 +245,54 @@ struct Evaluation {
     energy: f64,
 }
 
+
+// Shared physical residual for equilibrium and local response. Perturbed rates
+// never become accelerations; RNEA retains actual gyro and material damping.
+fn evaluate_native<B: BushingLaw>(
+    model: &ArticulatedModel,
+    state: PrescribedBaseMotionState,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[B],
+    effort: Option<&mut EffortLaw<'_>>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Evaluation, EquilibriumError> {
+    poll(cancelled)?;
+    let kinematics = forward_kinematics(
+        model, state.base, &state.joint_position, &state.joint_velocity,
+    )?;
+    poll(cancelled)?;
+    let stage = evaluate_shared(model, &state, &kinematics, loads, bushings, cancelled)?;
+    admit_stage(&stage)?;
+    let mut applied = loads.held.generalized_force.to_vec();
+    if let Some(law) = effort {
+        law(0.0, &state, &mut applied)?;
+        poll(cancelled)?;
+    }
+    model.validate_applied_effort(&applied)?;
+    let mut zero_acceleration = Vec::new();
+    let acceleration = if state.joint_velocity.iter().all(|v| *v == 0.0) {
+        &state.joint_velocity
+    } else {
+        zero_acceleration.resize(model.dof_count(), 0.0);
+        &zero_acceleration
+    };
+    let inverse = inverse_dynamics(
+        model, state.base, &state.joint_position, &state.joint_velocity,
+        acceleration, loads.held.gravity_world, &stage.body_wrench,
+    )?;
+    poll(cancelled)?;
+    let physical_residual: Vec<_> = inverse.generalized_force.iter().zip(&applied)
+        .map(|(a, b)| a - b).collect();
+    if physical_residual.iter().any(|v| !v.is_finite()) {
+        return Err(EquilibriumError::Invalid("unrepresentable force balance"));
+    }
+    Ok(Evaluation {
+        state, required: inverse.generalized_force, applied, physical_residual,
+        scaled_residual: Vec::new(), root_wrench: inverse.body_wrench[0],
+        energy: stage.stored_energy,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn solve<B: BushingLaw>(
     model: &ArticulatedModel,
@@ -342,58 +393,15 @@ fn solve<B: BushingLaw>(
                 .collect(),
             joint_velocity: vec![0.0; n],
         };
-        let kinematics = forward_kinematics(
-            model,
-            state.base,
-            &state.joint_position,
-            &state.joint_velocity,
+        let mut evaluated = evaluate_native(
+            model, state, loads, bushings, effort.borrow_mut().as_deref_mut(), &mut *cancel,
         )?;
-        poll(&mut *cancel)?;
-        let stage = evaluate_shared(model, &state, &kinematics, loads, bushings, &mut *cancel)?;
-        admit_stage(&stage)?;
-        let mut applied = loads.held.generalized_force.to_vec();
-        if let Some(law) = effort.borrow_mut().as_deref_mut() {
-            law(0.0, &state, &mut applied)?;
-            poll(&mut *cancel)?;
-        }
-        model.validate_applied_effort(&applied)?;
-        let inverse = inverse_dynamics(
-            model,
-            state.base,
-            &state.joint_position,
-            &state.joint_velocity,
-            &state.joint_velocity,
-            loads.held.gravity_world,
-            &stage.body_wrench,
-        )?;
-        poll(&mut *cancel)?;
-        let physical_residual: Vec<_> = inverse
-            .generalized_force
-            .iter()
-            .zip(&applied)
-            .map(|(a, b)| a - b)
-            .collect();
-        let scaled_residual: Vec<_> = physical_residual
-            .iter()
-            .zip(config.effort_scales)
-            .map(|(a, b)| a / b)
-            .collect();
-        if physical_residual
-            .iter()
-            .chain(&scaled_residual)
-            .any(|v| !v.is_finite())
-        {
+        evaluated.scaled_residual = evaluated.physical_residual.iter()
+            .zip(config.effort_scales).map(|(a, b)| a / b).collect();
+        if evaluated.scaled_residual.iter().any(|v| !v.is_finite()) {
             return Err(EquilibriumError::Invalid("unrepresentable force balance"));
         }
-        Ok(Evaluation {
-            state,
-            required: inverse.generalized_force,
-            applied,
-            physical_residual,
-            scaled_residual,
-            root_wrench: inverse.body_wrench[0],
-            energy: stage.stored_energy,
-        })
+        Ok(evaluated)
     };
     let (solution, mut report) = if n == 0 {
         evaluate(&guess)?;
