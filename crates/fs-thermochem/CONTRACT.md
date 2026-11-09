@@ -4591,3 +4591,12 @@ current path's already-admitted temperature range triggers the existing source
 admission over their union. Uncorrected caloric jumps or temperature gaps refuse;
 the original explicit caloric-continuity correction remains the only accepting
 bridge. Same-range queries reuse their existing admission.
+
+
+## Sealed pure-fluid calorics across the coexistence boundary
+
+`eos::peng_robinson::saturation::isochoric::sealed` prepares original fixed-density calorics across stable subcritical liquid, coexistence and vapor. `pure_equilibrium_density_at_saturation` binds the original pure component and accepted saturation witness, uses its convex volume comparison, and evaluates the original homogeneous density EOS only outside the dome. A mechanically stable metastable root inside the dome is never substituted for equilibrium. The extra homogeneous evaluation count remains explicit.
+
+`PengRobinsonSealedCaloricReferenceV1` shares the existing NASA/PR direct phase integrals and compensated symmetric amount identity. Phase appearance/disappearance, formation and entropy datums, and latent energy stay in one original U/S account. Homogeneous increments require two scalar caloric evaluations; changing phase allocations require at most four, with bounded cancellation and immutable publication. Original source continuity, exact conserved density, subcritical support and the analytic nonnegative residual-Cv branch remain mandatory.
+
+The response uses homogeneous Cv outside coexistence and the original moving-phase Cv inside. Exact saturated endpoints retain the coexistence-side finite-step tangent and explicitly mark their lack of a two-sided derivative; no common acoustic closure is inferred. Five actual-source regressions cover both dome exits, one-sided tangents, direct energy/entropy composition and datum invariance, metastability exclusion, binding and cancellation. They passed alongside five existing isochoric and five isobaric regressions (15/15).
