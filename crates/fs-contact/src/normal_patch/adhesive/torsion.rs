@@ -16,6 +16,9 @@
 //! of newly bonded annuli; those require different equilibrium/history owners.
 //! No plastic loss, normal storage or adhesion release is counted as heat here.
 
+/// Original normal branch events with retained spring release and fresh recontact.
+pub mod events;
+
 use super::{JkrError, JkrResponse, SourceJkrSphereContact};
 use core::f64::consts::PI;
 use fs_blake3::{ContentHash, DomainHasher};

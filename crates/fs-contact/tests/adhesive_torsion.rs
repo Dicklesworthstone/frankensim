@@ -1,6 +1,9 @@
 //! G0/G1/G3: original unequal bulk compliances, tensile JKR area and twist work.
 #[path = "source_point/common.rs"]
 mod common;
+
+#[path = "adhesive_torsion/events.rs"]
+mod events;
 use core::f64::consts::PI;
 use fs_contact::normal_patch::adhesive::torsion::*;
 use fs_contact::normal_patch::adhesive::{JkrEnvelope, SourceJkrSphereContact};
