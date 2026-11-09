@@ -6,6 +6,15 @@
 //! temperatures and mole fractions through explicitly loaded source packs.
 //! An alternative gas_steady block generates that same field from the existing
 //! conservative thermal/species owner, using the authored bore geometry.
+//! Optional `bore_wall rigid|isotropic ...|orthotropic ...` after those gas
+//! records uses the existing source-bound duct-wall grammar. One original
+//! material, thickness, restraint and loss spectrum reaches reed feedback,
+//! tone-hole shunts and every observed mouth. Its held material temperature
+//! remains independent of the gas. This locally reacting membrane image does
+//! not add shell propagation or radiation from the wall. A molecular bore
+//! retains its own `molecular_wall` owner and refuses a second material wall.
+//! Open-hole shunts also require the source law at their original near-DC
+//! probe, 1e-3 rad/s, in addition to the positive audio-frequency bins.
 //! An explicit-species source can declare `molecular`, `molecular_resolution`
 //! and `molecular_wall` records before `compile_limits`, with either its
 //! homogeneous ambient or the same continuous authored/injected/steady field.
@@ -83,6 +92,7 @@ use crate::air_path::{
     observer_band_top_hz, omitted_observer_absorption,
 };
 use crate::air_path::input::ObserverLawInput as DeclaredObserverLaw;
+use crate::dg_port::input::wall::{DgMaterialWallInput, DgMaterialWallRecord};
 use crate::driving_point::regional::outlet::{OutletError, OutletReceiverInfo};
 use fs_blake3::{ContentHash, hash_domain};
 use fs_duct::{Duct, HoleState, Segment, Termination};
@@ -143,8 +153,10 @@ pub enum ReedPerformanceError {
         /// Original thermal, caloric, phase, balance, work or mean-flow refusal.
         source: fs_material::gas_field::steady::SteadyGasError,
     },
-    /// An explicitly named wall pack or its caloric/conductivity source refused.
+    /// An explicitly named wall pack or its material source refused.
     MaterialSource { line: usize, source: String },
+    /// The shared source-bound duct-wall parser or constitutive owner refused.
+    MaterialWall(crate::dg_port::input::DgSourceError),
     /// The original terminal transfer or physical receiver refused.
     Outlet(OutletError),
     /// The existing reed, TMM or gas realization refused.
@@ -162,6 +174,7 @@ impl core::fmt::Display for ReedPerformanceError {
             Self::Gas { line, source } => write!(f, "reed gas line {line}: {source}"),
             Self::SteadyGas { line, source } => write!(f, "reed steady gas line {line}: {source}"),
             Self::MaterialSource { line, source } => write!(f, "reed wall material line {line}: {source}"),
+            Self::MaterialWall(source) => write!(f, "reed bore wall: {source}"),
             Self::Model(e) => write!(f, "reed model: {e}"),
             Self::Outlet(e) => write!(f, "reed outlet: {e}"),
             Self::Schedule(e) => write!(f, "reed input: {e}"),
@@ -175,6 +188,7 @@ impl std::error::Error for ReedPerformanceError {
             Self::Observation(source) => Some(source),
             Self::Gas { source, .. } => Some(source),
             Self::SteadyGas { source, .. } => Some(source),
+            Self::MaterialWall(source) => Some(source),
             Self::Model(source) => Some(source),
             Self::Outlet(source) => Some(source),
             _ => None,
@@ -380,6 +394,7 @@ pub struct ReedPerformance {
     gas_records: Vec<GasRecord>,
     gas_field: Option<(fs_material::gas_field::AxialGasField, GasFieldResolution)>,
     steady_gas: Option<SteadyGasPerformance>,
+    bore_wall: Option<DgMaterialWallRecord>,
     observer: ObserverFilter,
     observer_range_spread_m: Option<f64>,
     observer_omission: Result<ObserverOmission, AcousticRealizeError>,
@@ -432,7 +447,7 @@ impl ReedPerformance {
         Self::from_bytes_with_environment(bytes, max_block, policy, sources, None)
     }
 
-    /// Resolve stationary wall material cards through the caller's immutable
+    /// Resolve stationary thermal and acoustic wall cards through the caller's immutable
     /// source loader. The library opens no files; numeric wall conductances
     /// keep their existing grammar and execution path.
     pub fn from_bytes_with_sources(
@@ -560,7 +575,7 @@ impl ReedPerformance {
             gas_field,
             source_reed,
             &mut |_| {
-                Err("stationary material walls require an explicit material-card loader".into())
+                Err("material walls require an explicit material-card loader".into())
             },
         )
     }
@@ -924,8 +939,28 @@ impl ReedPerformance {
                 )?);
             }
         }
+        let bore_wall = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("bore_wall") {
+            let mut row = r.row("bore_wall")?;
+            let input = DgMaterialWallInput::read(row.line, &mut row.words)
+                .map_err(ReedPerformanceError::MaterialWall)?;
+            row.finish()?;
+            match input {
+                Some(input) => {
+                    let pack = load_material(input.path()).map_err(|source|
+                        ReedPerformanceError::MaterialSource { line: input.line(), source })?;
+                    Some(input.resolve(std::sync::Arc::new(pack), &fs_exec::CancelGate::new_clock_free())
+                        .map_err(ReedPerformanceError::MaterialWall)?)
+                }
+                None => None,
+            }
+        } else { None };
         let molecular = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("molecular") {
+            if bore_wall.is_some() {
+                return Err(bad(r.line + 1,
+                    "a molecular bore retains its molecular_wall law and cannot also select bore_wall"));
+            }
             if explicit_segment_gas {
                 return Err(bad(r.line + 1,
                     "molecular bore propagation requires homogeneous ambient species or a continuous field, no segment gas"));
@@ -1123,6 +1158,8 @@ impl ReedPerformance {
         let duct = Duct { segments };
         let outlet_radius_m = duct.segments.last().map_or(0.0, Segment::outlet_radius);
         let band_top_hz = observer_band_top_hz(observation.declared_band_hz(), rate);
+        let wall = bore_wall.as_ref().map_or(fs_duct::WallModel::Rigid,
+            |record| fs_duct::WallModel::Law(record.wall()));
         let (voice, terminal, observer, observer_omission) = if let Some(molecular) = molecular {
             let outlet_gas = match &gas_field {
                 Some((field, _)) => *field.state_at(field.length_m())
@@ -1210,7 +1247,7 @@ impl ReedPerformance {
                 rate,
                 samples as usize,
                 observer.receipt().delay_speed_m_s.unwrap_or(medium.sound_speed),
-                declared_law.as_ref(), &gas_records,
+                declared_law.as_ref(), &gas_records, wall,
             )?;
             (voice, terminal, observer, omission)
         } else {
@@ -1228,7 +1265,7 @@ impl ReedPerformance {
                 rate,
                 samples as usize,
                 observer.receipt().delay_speed_m_s.unwrap_or(medium.sound_speed),
-                declared_law.as_ref(), &gas_records, open_hole_orifice,
+                declared_law.as_ref(), &gas_records, open_hole_orifice, wall,
             )?;
             (voice, terminal, observer, omission)
         };
@@ -1297,6 +1334,7 @@ impl ReedPerformance {
             gas_records,
             gas_field,
             steady_gas,
+            bore_wall,
             observer,
             observer_range_spread_m,
             observer_omission,
@@ -1425,6 +1463,12 @@ impl ReedPerformance {
     /// Prescribed fields and legacy regional input return None.
     pub fn steady_gas(&self) -> Option<&SteadyGasPerformance> {
         self.steady_gas.as_ref()
+    }
+    /// The original source pack and resolved local membrane shared by feedback,
+    /// shunts and mouth observations. `None` retains the rigid-wall path.
+    /// The wall's held material state is not replaced by the gas temperature.
+    pub fn bore_wall(&self) -> Option<&DgMaterialWallRecord> {
+        self.bore_wall.as_ref()
     }
     /// All authored gas records, including field knots and source receipts, in
     /// read order. The field model separately retains every declared source ID.
@@ -1814,3 +1858,6 @@ mod viscous_tests;
 
 #[cfg(test)]
 mod orifice_tests;
+
+#[cfg(test)]
+mod material_wall_tests;

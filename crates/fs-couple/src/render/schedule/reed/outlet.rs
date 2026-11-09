@@ -144,13 +144,14 @@ impl ObservationInput {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn build(self, duct: &Duct, gases: &[GasState], reed: BeatingReed,
         termination: Termination, rate: u32, samples: usize, delay_speed_m_s: f64,
-        declared_law: Option<&DeclaredObserverLaw>, records: &[GasRecord], orifice_ports: usize)
+        declared_law: Option<&DeclaredObserverLaw>, records: &[GasRecord], orifice_ports: usize,
+        wall: fs_duct::WallModel<'_>)
         -> Result<(ReedBoreVoice, Option<TerminalObservation>), ReedPerformanceError> {
         let regional = RegionalDuct::new(duct, gases)
             .and_then(|regional| regional.with_open_hole_orifice_ports(orifice_ports))
             .map_err(|error| ReedPerformanceError::Model(map_drive(DrivingPointError::Duct(error))))?;
         self.build_regional(duct, regional, reed, termination, rate, samples, delay_speed_m_s,
-            declared_law, records)
+            declared_law, records, wall)
     }
 
     /// Original molecular constitutive owner in both pressure feedback and
@@ -224,20 +225,21 @@ impl ObservationInput {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn build_regional(self, duct: &Duct, regional: RegionalDuct, reed: BeatingReed,
         termination: Termination, rate: u32, samples: usize, delay_speed_m_s: f64,
-        declared_law: Option<&DeclaredObserverLaw>, records: &[GasRecord])
+        declared_law: Option<&DeclaredObserverLaw>, records: &[GasRecord], wall: fs_duct::WallModel<'_>)
         -> Result<(ReedBoreVoice, Option<TerminalObservation>), ReedPerformanceError> {
         if let Self::Legacy(distance) = self {
+            admit_material_shunt(&regional, wall)?;
             let mut voice = ReedBoreVoice::with_line(duct, regional.inlet_gas(), reed,
                 PlateBank::default(), distance, rate, |_| {
-                    regional.characteristic_line_realized(termination, rate, samples, None, None)
+                    regional.characteristic_line_with_wall_realized(termination, rate, samples, wall, None)
                         .map_err(map_drive)
                 }).map_err(ReedPerformanceError::Model)?;
             let grid = voice.line.history().len();
             let single = regional
-                .register_hole_shunt_line(rate, grid, fs_duct::WallModel::from_pin(None))
+                .register_hole_shunt_line(rate, grid, wall)
                 .map_err(ReedPerformanceError::Outlet)?;
             if let Some(mut shunt) = regional
-                .select_register_hole_shunt(single, rate, grid, fs_duct::WallModel::from_pin(None))
+                .select_register_hole_shunt(single, rate, grid, wall)
                 .map_err(ReedPerformanceError::Outlet)?
             {
                 shunt
@@ -253,6 +255,7 @@ impl ObservationInput {
                 .map_err(|error| ReedPerformanceError::Model(map_drive(DrivingPointError::Duct(error))))?,
             None => regional,
         };
+        admit_material_shunt(&regional, wall)?;
         // The same exterior law acts over each opening's actual path. Its
         // receiver consumes that filter's own delay allocation, so dispersive
         // propagation is counted exactly once before the pressures are summed.
@@ -276,7 +279,7 @@ impl ObservationInput {
         let [x, y, z] = receiver.position_m;
         let mut voice = ReedBoreVoice::with_line(duct, regional.inlet_gas(), reed,
             PlateBank::default(), x.hypot(y).hypot(z), rate, |_| {
-                regional.characteristic_line_realized(termination, rate, samples, None, None)
+                regional.characteristic_line_with_wall_realized(termination, rate, samples, wall, None)
                     .map_err(map_drive)
             }).map_err(ReedPerformanceError::Model)?;
         let grid = voice.line.history().len();
@@ -285,7 +288,7 @@ impl ObservationInput {
                 rate,
                 grid,
                 receiver,
-                fs_duct::WallModel::from_pin(None),
+                wall,
                 delay_speed_m_s,
                 &hole_delay_speeds,
                 1.0,
@@ -301,7 +304,7 @@ impl ObservationInput {
                 .map_err(ReedPerformanceError::Outlet)?;
         }
         if let Some(mut shunt) = regional
-            .select_register_hole_shunt(shunt, rate, grid, fs_duct::WallModel::from_pin(None))
+            .select_register_hole_shunt(shunt, rate, grid, wall)
             .map_err(ReedPerformanceError::Outlet)?
         {
             shunt
@@ -319,6 +322,26 @@ impl ObservationInput {
             }),
         ))
     }
+}
+
+// The original single-hole and multiport realizations use this near-DC
+// response to set their static bins. Their legacy optional probe must not
+// hide a material wall's unsupported source band or constitutive refusal.
+fn admit_material_shunt(regional: &RegionalDuct, wall: fs_duct::WallModel<'_>)
+    -> Result<(), ReedPerformanceError>
+{
+    if !matches!(wall, fs_duct::WallModel::Law(_)) { return Ok(()); }
+    let ports = regional.open_hole_orifice_ports().min(regional.open_hole_sites().len());
+    let probe = if ports > 1 {
+        regional.response_with_wall_holes_and_ports(1.0e-3, fs_duct::LossModel::Bessel,
+            Termination::FlangedOpen, wall, ports).map(|_| ())
+    } else if ports == 1 {
+        regional.response_with_wall_and_holes(1.0e-3, fs_duct::LossModel::Bessel,
+            Termination::FlangedOpen, wall).map(|_| ())
+    } else {
+        return Ok(());
+    };
+    probe.map_err(|error| ReedPerformanceError::Model(map_drive(DrivingPointError::Duct(error))))
 }
 
 #[cfg(test)]
