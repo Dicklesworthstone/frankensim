@@ -6,6 +6,10 @@ use fs_flyer::partitioned::articulated::actuation::{
 use fs_mbd::rotordynamics::transient::drive::voltage::{RotorVoltageControl, RotorWindingMotor};
 use fs_mbd::rotordynamics::transient::drive::{RotorCurrentDrive, RotorDrivePowerControl};
 
+
+#[path = "actuation/contact.rs"]
+mod contact;
+
 fn drive(joint: usize, voltage: f64, inductance: f64, resistance: f64) -> JointVoltageDrive {
     JointVoltageDrive {
         motor: RotorWindingMotor {

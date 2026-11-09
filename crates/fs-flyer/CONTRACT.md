@@ -499,6 +499,39 @@ continuous-time peak certificate. Shared batteries, switching/thermal/magnetic
 nonlinearities, contact/event composition and the reduced historical canard
 lifecycle are outside this smooth native actuation owner.
 
+### Voltage-driven sustained contact
+
+`partitioned::articulated::actuation::contact::step_with_contacts` composes
+the continuing winding owner with the ORIGINAL sustained Coulomb-contact solve.
+Electrical joint impedance enters the same complete dry/fluid effective mass
+before free and contact responses are computed. Contact-constrained relative
+joint rates therefore determine back EMF, winding current, motor torque and
+body recoil together. No unconstrained motor trajectory is imposed afterward.
+
+The original contact path supplies its actual accepted midpoint and endpoint.
+Those states undergo the existing current, speed, source-power, winding and
+electrical-work admission BEFORE the caller's required geometry admission.
+Aerodynamic loads are not reevaluated; joint rates are not reconstructed by
+position differencing. Native cancellation checks bracket the bounded drive
+and path admission. Every refusal leaves caller-owned mechanical/current state
+untouched and returns no partial source debit or geometry result.
+
+The returned native contact receipt retains its real normal/tangent impulses,
+normal/friction work and prescribed-support work. These remain separate from
+motor work, magnetic storage and winding/bridge heat. Auxiliary contact-solver
+projection loss is not physical heat. The result's `into_state` carries the
+accepted native motion, aero-memory and winding currents into the next tick.
+
+Focused native regressions use a supported helical mechanism: independent
+constrained-inertia/circuit equations predict current, recoil and support load,
+including attached-fluid inertia, passive impedance and regeneration. They
+check complete storage/source work, Coulomb friction and moving-support power,
+continuation, the empty-contact reduction, and capability/geometry/cancellation
+refusals. Execution status is reported separately. Original required path
+coverage, incoming-impact and friction-turning refusals remain active; this
+owner adds neither event localization nor joint-stop or multi-tree composition.
+The historical reduced canard lifecycle still requires authored linked geometry.
+
 ### Simultaneous contacts with complete articulated fluid inertia
 
 `partitioned::articulated::impact::resolve` resets a caller-located event on one
