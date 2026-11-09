@@ -1,6 +1,7 @@
 //! Two original rigid reflections sharing one source-bound liquid timestep.
 
 use super::*;
+use crate::d3q19::freesurface3::PlanarRigidWallPairReport3;
 use fs_math::dd::Dd;
 
 /// Both opposing flooded wall exchanges from one accepted native VOF tick.
@@ -111,12 +112,31 @@ impl MaterialFreeSurface3<'_> {
             self.prepare_planar_rigid_wall_motion_si(motions[0], gate)?,
             self.prepare_planar_rigid_wall_motion_si(motions[1], gate)?,
         ];
-        let units = self.planar_wall_units()?;
         let (candidate, raw) = self.lattice.planar_rigid_wall_pair_candidate(
             native,
             maximum_relative_mass_defect,
             gate,
         )?;
+        let report = self.planar_rigid_wall_pair_report_si(motions, raw, gate)?;
+        Ok((
+            Self {
+                lattice: candidate,
+                scaling: self.scaling,
+            },
+            report,
+        ))
+    }
+
+    /// Shared original units, pressure reference and endpoint-speed admission
+    /// for the cold pair and the complete thermal owner's final native pair.
+    /// The measured boundary work stays distinct from any caloric source.
+    pub(crate) fn planar_rigid_wall_pair_report_si(
+        &self,
+        motions: [MaterialPlanarRigidWallMotion3; 2],
+        raw: PlanarRigidWallPairReport3,
+        gate: &CancelGate,
+    ) -> Result<MaterialPlanarRigidWallPairReport3, MaterialLbmError> {
+        let units = self.planar_wall_units()?;
         let walls = [
             self.planar_rigid_wall_report_si(motions[0], raw.walls[0], gate)?,
             self.planar_rigid_wall_report_si(motions[1], raw.walls[1], gate)?,
@@ -157,13 +177,7 @@ impl MaterialFreeSurface3<'_> {
         if gate.is_requested() {
             return Err(FreeSurfaceError3::Cancelled.into());
         }
-        Ok((
-            Self {
-                lattice: candidate,
-                scaling: self.scaling,
-            },
-            report,
-        ))
+        Ok(report)
     }
 
     /// Publish the single fully admitted liquid candidate and both physical

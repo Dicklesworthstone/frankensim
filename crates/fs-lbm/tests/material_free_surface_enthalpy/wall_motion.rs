@@ -6,6 +6,9 @@ use fs_lbm::material::free_surface::MaterialPlanarWallVelocityField3;
 use fs_lbm::material::free_surface::enthalpy::MaterialFreeSurfaceEnthalpy3;
 use fs_lbm::material::transport::boussinesq::BoussinesqConfig;
 
+#[path = "wall_motion/pair.rs"]
+mod pair;
+
 fn controls() -> PlanarWallFieldControls3 {
     PlanarWallFieldControls3 {
         maximum_domain_cells: 512,

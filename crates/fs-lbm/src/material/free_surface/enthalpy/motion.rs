@@ -3,16 +3,20 @@
 use super::*;
 use crate::d3q19::freesurface3::transport::MassTransport3;
 use crate::d3q19::freesurface3::{
-    PlanarRigidWallMotion3, PlanarRigidWallReport3, PlanarWallFieldControls3,
-    PlanarWallFieldReport3, PlanarWallVelocityField3,
+    PlanarRigidWallMotion3, PlanarRigidWallPairReport3, PlanarRigidWallReport3,
+    PlanarWallFieldControls3, PlanarWallFieldReport3, PlanarWallVelocityField3,
 };
 use crate::material::free_surface::{
-    MaterialPlanarRigidWallMotion3, MaterialPlanarRigidWallReport3, MaterialPlanarWallFieldReport3,
+    MaterialPlanarRigidWallMotion3, MaterialPlanarRigidWallPairReport3,
+    MaterialPlanarRigidWallReport3, MaterialPlanarWallFieldReport3,
     MaterialPlanarWallVelocityField3,
 };
 
 mod rigid;
-pub use rigid::{FreeSurfaceRigidWallEnthalpyReport, FreeSurfaceRigidWallViscousReport};
+pub use rigid::{
+    FreeSurfaceRigidWallEnthalpyReport, FreeSurfaceRigidWallPairEnthalpyReport,
+    FreeSurfaceRigidWallPairViscousReport, FreeSurfaceRigidWallViscousReport,
+};
 
 /// One accepted thermal flow tick and its actual distributed wall exchange.
 #[derive(Clone, Debug, PartialEq)]
@@ -44,16 +48,23 @@ pub(super) enum ThermalWallBoundary<'a> {
         motion_si: MaterialPlanarRigidWallMotion3,
         maximum_relative_mass_defect: f64,
     },
+    RigidPair {
+        native: [PlanarRigidWallMotion3; 2],
+        motions_si: [MaterialPlanarRigidWallMotion3; 2],
+        maximum_relative_mass_defect: f64,
+    },
 }
 
 pub(super) enum NativeThermalWallReport {
     Field(PlanarWallFieldReport3),
     Rigid(PlanarRigidWallReport3),
+    RigidPair(PlanarRigidWallPairReport3),
 }
 
 pub(super) enum ThermalWallReport {
     Field(MaterialPlanarWallFieldReport3),
     Rigid(MaterialPlanarRigidWallReport3),
+    RigidPair(MaterialPlanarRigidWallPairReport3),
 }
 
 impl ThermalWallBoundary<'_> {
@@ -93,6 +104,21 @@ impl ThermalWallBoundary<'_> {
                     gate,
                 )?;
                 Ok((trace, NativeThermalWallReport::Rigid(report)))
+            }
+            Self::RigidPair {
+                native,
+                maximum_relative_mass_defect,
+                ..
+            } => {
+                let (trace, report) = lattice.step_with_planar_rigid_wall_pair_transport(
+                    native,
+                    maximum_relative_mass_defect,
+                    tau,
+                    forces,
+                    maximum_routes,
+                    gate,
+                )?;
+                Ok((trace, NativeThermalWallReport::RigidPair(report)))
             }
         }
     }
@@ -135,6 +161,23 @@ impl ThermalWallBoundary<'_> {
                 )?;
                 Ok(ThermalWallReport::Rigid(
                     flow.planar_rigid_wall_report_si(motion_si, report, gate)?,
+                ))
+            }
+            (
+                Self::RigidPair {
+                    motions_si,
+                    maximum_relative_mass_defect,
+                    ..
+                },
+                NativeThermalWallReport::RigidPair(mut report),
+            ) => {
+                lattice.refresh_planar_rigid_wall_pair_endpoint(
+                    &mut report,
+                    maximum_relative_mass_defect,
+                    gate,
+                )?;
+                Ok(ThermalWallReport::RigidPair(
+                    flow.planar_rigid_wall_pair_report_si(motions_si, report, gate)?,
                 ))
             }
             _ => Err(Error::Invalid(

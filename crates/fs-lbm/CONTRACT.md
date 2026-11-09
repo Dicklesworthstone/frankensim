@@ -4454,3 +4454,41 @@ fixtures now exceed their scenario bound from physical rest; no production
 speed limits or test tolerances were relaxed. Full Cargo validation remains
 blocked by the 8 GiB environment limit while compiling asupersync metadata;
 unrelated async runtime registrations are excluded from the focused build.
+
+## Two rigid wall exchanges on one thermal liquid trajectory
+
+`MaterialFreeSurfaceEnthalpy3::planar_rigid_wall_pair_candidate_si` admits two
+opposing flooded rigid wall motions through the existing source-bound thermal
+owner. Authored cell heat refreshes the original temperature-dependent local
+viscosity/rheology and optional Boussinesq force before one collision, both
+reflections and VOF conversion. The same native mass-route trace carries
+extensive enthalpy. Advected material, wetting and force-frame refresh then
+rechecks both actual wall endpoints before returning the shared candidate.
+The native transport entry borrows that sole candidate, without cloning the
+population state or inventing a second heat-advection flux.
+
+`planar_rigid_wall_pair_candidate_with_viscous_heating_si` additionally uses
+the original held initial-state molecular stress-power sampler. Authored heat,
+molecular heat, both measured wall works and body heat remain distinct. One
+thermal interval advances its original accepted clock once; a discarded body
+pilot can deposit no second copy of heat in the accepted state. Both wall
+wrenches retain their original SI pressure reference, reciprocal impulse,
+common-origin orbital/spin moment and boundary work accounts.
+
+Constant-temperature compatibility, original zero-wall thermal replay,
+heated-viscosity/buoyancy response, independent source-once molecular replay
+and late source/second-wall/cancellation refusal have focused executable tests.
+The first-order thermal source split retains its timestep-refinement requirement.
+Fixed fully flooded planes permit tangent translation and normal-axis spin;
+normal movement, tilt, changing coverage and finite edges remain unsupported.
+Prepared conduction/electrical/surface-temperature owners retain their original
+admission rules. Mechanical wall work is not deposited as caloric heat and
+this does not claim a discrete whole-fluid total-energy balance.
+
+Validation: four new thermal-pair tests, eight native pair regressions and five
+SI pair regressions pass against the selected original numerical/source code.
+A separate existing partially filled wall-field fixture refuses in ordinary
+stationary transport, before any wall entry, with `native cell mass routes do
+not close to roundoff`; that untouched baseline path is not claimed green.
+Full Cargo/workspace validation remains outside this focused execution because
+the async runtime dependency exceeds the environment's 8 GiB memory limit.

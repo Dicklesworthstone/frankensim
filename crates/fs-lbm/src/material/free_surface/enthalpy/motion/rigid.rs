@@ -2,6 +2,9 @@
 
 use super::*;
 
+mod pair;
+pub use pair::{FreeSurfaceRigidWallPairEnthalpyReport, FreeSurfaceRigidWallPairViscousReport};
+
 /// A complete unpublished thermal tick and its actual rigid wall response.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FreeSurfaceRigidWallEnthalpyReport {
@@ -111,6 +114,27 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         absolute_heat: f64,
         gate: &CancelGate,
     ) -> Result<(Self, FreeSurfaceRigidWallEnthalpyReport), Error> {
+        let (candidate, flow, wall) =
+            self.wall_enthalpy_candidate(boundary, heated, external, viscous, absolute_heat, gate)?;
+        let wall = match wall {
+            ThermalWallReport::Rigid(report) => report,
+            _ => unreachable!("rigid boundary retains its original wall receipt"),
+        };
+        Ok((candidate, FreeSurfaceRigidWallEnthalpyReport { flow, wall }))
+    }
+
+    // One construction seam retains the same source and thermal history for
+    // either rigid boundary owner; no population or prepared operator is cloned
+    // after the original thermal pipeline has produced its single candidate.
+    fn wall_enthalpy_candidate(
+        &self,
+        boundary: ThermalWallBoundary<'_>,
+        heated: BTreeMap<MassLocation3, f64>,
+        external: f64,
+        viscous: f64,
+        absolute_heat: f64,
+        gate: &CancelGate,
+    ) -> Result<(Self, FreeSurfaceEnthalpyReport, ThermalWallReport), Error> {
         // Both entry points use prepare_heat, whose original electrical
         // ownership gate prevents dropping or cloning a prepared operator.
         let tick = self.prepare_enthalpy_tick_with_wall(
@@ -126,10 +150,9 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             Some(boundary),
             gate,
         )?;
-        let wall = match tick.wall {
-            Some(ThermalWallReport::Rigid(report)) => report,
-            _ => unreachable!("rigid boundary retains its original wall receipt"),
-        };
+        let wall = tick
+            .wall
+            .expect("thermal boundary retains its original wall receipt");
         let candidate = Self {
             flow: MaterialFreeSurface3 {
                 lattice: tick.lattice,
@@ -155,12 +178,6 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             electrical: None,
         };
         poll(gate)?;
-        Ok((
-            candidate,
-            FreeSurfaceRigidWallEnthalpyReport {
-                flow: tick.report,
-                wall,
-            },
-        ))
+        Ok((candidate, tick.report, wall))
     }
 }

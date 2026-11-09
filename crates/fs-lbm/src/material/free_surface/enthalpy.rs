@@ -81,7 +81,8 @@ pub mod viscous;
 pub mod motion;
 pub use motion::{
     FreeSurfacePlanarWallEnthalpyReport, FreeSurfacePlanarWallViscousReport,
-    FreeSurfaceRigidWallEnthalpyReport, FreeSurfaceRigidWallViscousReport,
+    FreeSurfaceRigidWallEnthalpyReport, FreeSurfaceRigidWallPairEnthalpyReport,
+    FreeSurfaceRigidWallPairViscousReport, FreeSurfaceRigidWallViscousReport,
 };
 
 /// Original T/shear source tables on actual native collision and molecular heat.
