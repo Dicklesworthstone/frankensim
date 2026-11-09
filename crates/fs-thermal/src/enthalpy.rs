@@ -24,7 +24,8 @@ use std::rc::Rc;
 // Keep the std-only kernel testable as a standalone crate as well as a module.
 #[path = "deposition/observe.rs"]
 mod observe;
-pub use observe::{ContactUpdate, DepositionObserver, PowerBalance};
+pub use observe::{ContactUpdate, DepositionObserver, PowerBalance, collect_source_rates};
+pub(crate) use observe::SourcePowers;
 #[path = "deposition/coverage.rs"]
 mod coverage;
 pub use coverage::{ContactPatch, ContactPatchUpdate};

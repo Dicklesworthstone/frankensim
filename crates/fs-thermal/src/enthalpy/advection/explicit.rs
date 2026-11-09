@@ -195,7 +195,7 @@ fn evaluate<'m, O: PureFlow>(
         thermal.set_step_conductances(&coefficients.bulk.conductances_w_k, checkpoint)?;
     let result = (|| {
         let mut owner = owner.clone();
-        let flow_sources = owner.sources(thermal, checkpoint)?;
+        let flow_sources = crate::enthalpy::SourcePowers::capture(thermal, &mut owner, checkpoint)?;
         let transfers = owner.heat_transfers(thermal, checkpoint)?;
         let mut rates = thermal.heat_rates_with_boundaries(
             controls.step.max_dt_s,
@@ -203,7 +203,7 @@ fn evaluate<'m, O: PureFlow>(
             checkpoint,
         )?;
         thermal.add_rate_sources(&mut rates, &coefficients.bulk.sources_w, checkpoint)?;
-        thermal.add_rate_sources(&mut rates, &flow_sources, checkpoint)?;
+        thermal.add_rate_source_powers(&mut rates, &flow_sources, checkpoint)?;
         thermal.add_step_transfers(&mut rates, &transfers, checkpoint)?;
         let dt = owner.limit_timestep_s(thermal, rates.explicit_dt_s, checkpoint)?;
         if !dt.is_finite() || dt <= 0.0 || dt > rates.explicit_dt_s {

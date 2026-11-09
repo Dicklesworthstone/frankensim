@@ -152,18 +152,38 @@ impl DepositionSimulation<'_> {
         transfers: &[HeatTransfer],
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(BTreeMap<CellId, observe::EnergySum>, bool), DepositionError> {
+        let mut generated_terms = SourcePowers::default();
+        let mut interval_terms = SourcePowers::default();
+        for (&id, &watts) in generated {
+            checkpoint()?;
+            generated_terms.add(self, id, watts)?;
+        }
+        for (&id, &watts) in interval {
+            checkpoint()?;
+            interval_terms.add(self, id, watts)?;
+        }
+        self.entropy_source_contributions(&generated_terms, &interval_terms, transfers, checkpoint)
+    }
+
+    fn entropy_source_contributions(
+        &self,
+        generated: &SourcePowers,
+        interval: &SourcePowers,
+        transfers: &[HeatTransfer],
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(BTreeMap<CellId, observe::EnergySum>, bool), DepositionError> {
         let mut sources = BTreeMap::new();
-        let mut has_unclassified = false;
+        let mut has_unclassified = generated.has_nonzero || interval.has_nonzero;
         for (i, (&id, cell)) in self.cells.iter().enumerate() {
             if i % 256 == 0 { checkpoint()?; }
-            let generated = generated.get(&id).copied().unwrap_or(0.0);
-            let interval = interval.get(&id).copied().unwrap_or(0.0);
-            has_unclassified |= cell.boundary.source_w != 0.0 || generated != 0.0 || interval != 0.0;
-            if generated != 0.0 || interval != 0.0 {
+            let generated = generated.powers.get(&id);
+            let interval = interval.powers.get(&id);
+            has_unclassified |= cell.boundary.source_w != 0.0;
+            if generated.is_some() || interval.is_some() {
                 let mut power = observe::EnergySum::default();
                 power.add(cell.boundary.source_w)?;
-                power.add(generated)?;
-                power.add(interval)?;
+                if let Some(generated) = generated { power.add_scaled(generated, 1.0)?; }
+                if let Some(interval) = interval { power.add_scaled(interval, 1.0)?; }
                 sources.insert(id, power);
             }
         }
@@ -390,21 +410,21 @@ impl DepositionSimulation<'_> {
 pub(super) struct EntropyObserver<O> {
     pub(super) inner: O,
     initial_h: BTreeMap<CellId, f64>,
-    sources: BTreeMap<CellId, f64>,
+    sources: SourcePowers,
     conductances: BTreeMap<u64, f64>,
     reservoirs: BTreeMap<CellId, f64>,
     ambient: BTreeMap<CellId, f64>,
     transfers: Vec<HeatTransfer>,
-    interval_sources: BTreeMap<CellId, f64>,
+    interval_sources: SourcePowers,
     pub(super) audit: EntropyAudit,
 }
 impl<O> EntropyObserver<O> {
     pub(super) fn new(inner: O) -> Self {
         Self {
-            inner, initial_h: BTreeMap::new(), sources: BTreeMap::new(),
+            inner, initial_h: BTreeMap::new(), sources: SourcePowers::default(),
             conductances: BTreeMap::new(), reservoirs: BTreeMap::new(),
             ambient: BTreeMap::new(), transfers: Vec::new(),
-            interval_sources: BTreeMap::new(), audit: EntropyAudit::default(),
+            interval_sources: SourcePowers::default(), audit: EntropyAudit::default(),
         }
     }
 }
@@ -419,6 +439,14 @@ impl<O: DepositionObserver> DepositionObserver for EntropyObserver<O> {
         thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        self.visit_sources(thermal, &mut |_, _| Ok(()), checkpoint)?;
+        Ok(self.sources.rounded()?)
+    }
+    fn visit_sources(
+        &mut self, thermal: &DepositionSimulation<'_>,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
         self.initial_h.clear();
         for (i, (&id, cell)) in thermal.cells.iter().enumerate() {
             if i % 256 == 0 {
@@ -426,8 +454,12 @@ impl<O: DepositionObserver> DepositionObserver for EntropyObserver<O> {
             }
             self.initial_h.insert(id, cell.specific_h_j_kg);
         }
-        self.sources = self.inner.sources(thermal, checkpoint)?;
-        Ok(self.sources.clone())
+        self.sources = SourcePowers::default();
+        let sources = &mut self.sources;
+        self.inner.visit_sources(thermal, &mut |id, watts| {
+            sources.add(thermal, id, watts)?;
+            emit(id, watts)
+        }, checkpoint)
     }
     fn conductances(&mut self, thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
@@ -463,8 +495,20 @@ impl<O: DepositionObserver> DepositionObserver for EntropyObserver<O> {
         start_s: f64, dt_s: f64, end_s: f64,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
-        self.interval_sources = self.inner.step_sources(thermal, start_s, dt_s, end_s, checkpoint)?;
-        Ok(self.interval_sources.clone())
+        self.visit_step_sources(thermal, start_s, dt_s, end_s, &mut |_, _| Ok(()), checkpoint)?;
+        Ok(self.interval_sources.rounded()?)
+    }
+    fn visit_step_sources(&mut self, thermal: &DepositionSimulation<'_>,
+        start_s: f64, dt_s: f64, end_s: f64,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        self.interval_sources = SourcePowers::default();
+        let sources = &mut self.interval_sources;
+        self.inner.visit_step_sources(thermal, start_s, dt_s, end_s, &mut |id, watts| {
+            sources.add(thermal, id, watts)?;
+            emit(id, watts)
+        }, checkpoint)
     }
     fn limit_timestep_s(&mut self, thermal: &DepositionSimulation<'_>, proposed_s: f64,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
@@ -482,7 +526,7 @@ impl<O: DepositionObserver> DepositionObserver for EntropyObserver<O> {
         thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Self::Error> {
-        let (sources, has_unclassified) = thermal.entropy_source_powers(
+        let (sources, has_unclassified) = thermal.entropy_source_contributions(
             &self.sources, &self.interval_sources, &self.transfers, checkpoint,
         )?;
         let mut audit = thermal.entropy_step_audit_with_boundary_coefficients(

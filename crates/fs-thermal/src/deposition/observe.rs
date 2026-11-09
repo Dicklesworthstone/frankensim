@@ -13,6 +13,21 @@ pub struct PowerBalance {
     pub external_power_w: f64,
 }
 
+/// Materialize a scalar source-rate view from one contribution visit.
+/// Every term is admitted before compensation, so unknown cells and nonfinite
+/// values cannot cancel into validity. Storage is O(active source cells).
+/// This rounds once per cell; native observer integration uses the unrounded
+/// contributions instead. Wrappers can keep their map API without evaluating
+/// a physical producer twice or duplicating its equations.
+pub fn collect_source_rates<E: From<DepositionError>>(
+    thermal: &DepositionSimulation<'_>,
+    produce: impl FnOnce(&mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>) -> Result<(), E>,
+) -> Result<BTreeMap<CellId, f64>, E> {
+    let mut sources = SourcePowers::default();
+    produce(&mut |id, watts| sources.add(thermal, id, watts))?;
+    Ok(sources.rounded()?)
+}
+
 /// History coupling on the actual thermal grid, without storing whole fields.
 /// `Clone` must deeply copy mutable physical state. Shared immutable laws are
 /// fine; external effects or shared mutable state cannot be rolled back here.
@@ -55,6 +70,27 @@ pub trait DepositionObserver: Clone {
     fn sources(&mut self, _thermal: &DepositionSimulation<'_>,
         _checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
         -> Result<BTreeMap<CellId, f64>, Self::Error> { Ok(BTreeMap::new()) }
+    /// Stream independent signed source contributions into the native heat sum.
+    /// The default evaluates `sources` exactly once. Composing observers must
+    /// forward this hook and emit each owner's terms without first rounding
+    /// them into one rate; otherwise a small physical source can disappear
+    /// between large opposing sources. Repeated cells are additive. Every
+    /// contribution must name an active cell and be finite, even if it would
+    /// cancel another contribution. The receiving owner validates both.
+    ///
+    /// Emit in deterministic order and poll at bounded work boundaries. The
+    /// sink retains O(active cells) compensated sums, not a history of terms.
+    /// A failed sink or owner aborts the same disposable thermal candidate.
+    fn visit_sources(&mut self, thermal: &DepositionSimulation<'_>,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<(), Self::Error> {
+        for (index, (id, watts)) in self.sources(thermal, checkpoint)?.into_iter().enumerate() {
+            if index % 256 == 0 { checkpoint()?; }
+            emit(id, watts)?;
+        }
+        Ok(())
+    }
     /// Step-local thermal-link conductances [W/K], evaluated after `sources`
     /// against the SAME start state. A source owner may retain one prepared
     /// material evaluation for both hooks. Omitted links keep their authored
@@ -138,6 +174,23 @@ pub trait DepositionObserver: Clone {
         _start_s: f64, _dt_s: f64, _end_s: f64,
         _checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
         -> Result<BTreeMap<CellId, f64>, Self::Error> { Ok(BTreeMap::new()) }
+    /// Stream the `step_sources` contributions for the SAME accepted interval.
+    /// The default calls that hook once. Wrappers forward this method as well
+    /// as `visit_sources` and `requires_step_interval`; no source owner is
+    /// evaluated again just to construct an accounting view.
+    fn visit_step_sources(&mut self, thermal_start: &DepositionSimulation<'_>,
+        start_s: f64, dt_s: f64, end_s: f64,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<(), Self::Error> {
+        for (index, (id, watts)) in self.step_sources(
+            thermal_start, start_s, dt_s, end_s, checkpoint,
+        )?.into_iter().enumerate() {
+            if index % 256 == 0 { checkpoint()?; }
+            emit(id, watts)?;
+        }
+        Ok(())
+    }
     fn event(&mut self, event: &Event, thermal: &DepositionSimulation<'_>)
         -> Result<(), Self::Error>;
     /// Old temperatures and new enthalpy-backed temperatures on the same step.
@@ -209,21 +262,21 @@ impl<'a> DepositionSimulation<'a> {
         Ok(next)
     }
 
-    // Validate the complete generated field before changing any boundary. The
-    // ordinary no-source path does not even add +0, preserving its arithmetic.
-    pub(super) fn add_step_sources(&mut self, sources: &BTreeMap<CellId, f64>,
+    // Observer readback includes the authored rate and both reduced source
+    // components. The rounded boundary is never reused as the physical rate.
+    pub(super) fn add_step_source_powers(&mut self, sources: &SourcePowers,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>)
         -> Result<Vec<(CellId, f64)>, DepositionError> {
-        if sources.len() > self.cells.len() {
-            return Err(DepositionError::InvalidInput("too many generated heat sources"));
-        }
-        let mut changes = Vec::with_capacity(sources.len());
-        for (index, (&id, &watts)) in sources.iter().enumerate() {
+        let mut changes = Vec::with_capacity(sources.powers.len());
+        for (index, (&id, watts)) in sources.powers.iter().enumerate() {
             if index % 256 == 0 { checkpoint()?; }
-            let cell = self.cells.get(&id).ok_or(DepositionError::InvalidInput("inactive generated-source cell"))?;
-            finite(watts)?;
-            if watts != 0.0 {
-                changes.push((id, cell.boundary.source_w, finite(cell.boundary.source_w + watts)?));
+            let cell = self.cells.get(&id)
+                .ok_or(DepositionError::InvalidInput("inactive generated-source cell"))?;
+            if watts.sum != 0.0 || watts.correction != 0.0 {
+                let mut combined = EnergySum::default();
+                combined.add(cell.boundary.source_w)?;
+                combined.add_scaled(watts, 1.0)?;
+                changes.push((id, cell.boundary.source_w, combined.value()?));
             }
         }
         checkpoint()?;
@@ -257,6 +310,20 @@ impl<'a> DepositionSimulation<'a> {
             if watts == 0.0 { continue; }
             rates.watts.get_mut(&id).expect("validated generated-source cell").add(watts)?;
             rates.external_w.add(watts)?;
+        }
+        checkpoint()
+    }
+
+    pub(super) fn add_rate_source_powers(&self, rates: &mut HeatRates, sources: &SourcePowers,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>)
+        -> Result<(), DepositionError> {
+        for (index, (&id, watts)) in sources.powers.iter().enumerate() {
+            if index % 256 == 0 { checkpoint()?; }
+            let total = rates.watts.get_mut(&id)
+                .ok_or(DepositionError::InvalidInput("inactive generated-source cell"))?;
+            if watts.sum == 0.0 && watts.correction == 0.0 { continue; }
+            total.add_scaled(watts, 1.0)?;
+            rates.external_w.add_scaled(watts, 1.0)?;
         }
         checkpoint()
     }
@@ -311,21 +378,11 @@ impl<'a> DepositionSimulation<'a> {
 
     // Duration-dependent losses enter the SAME rate field and external-energy
     // audit after dt is fixed. Never evaluate boundaries/conduction a second time.
-    fn add_interval_sources(&self, rates: &mut HeatRates, sources: &BTreeMap<CellId, f64>,
+    fn add_interval_sources(&self, rates: &mut HeatRates, sources: &SourcePowers,
         unrepresented_heat_j: &mut f64,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>)
         -> Result<(), DepositionError> {
-        if sources.is_empty() { return Ok(()); }
-        if sources.len() > self.cells.len() {
-            return Err(DepositionError::InvalidInput("too many interval heat sources"));
-        }
-        for (index, (&id, &watts)) in sources.iter().enumerate() {
-            if index % 256 == 0 { checkpoint()?; }
-            if !self.cells.contains_key(&id) {
-                return Err(DepositionError::InvalidInput("inactive interval-source cell"));
-            }
-            finite(watts)?;
-        }
+        if sources.powers.is_empty() { return Ok(()); }
         let dt_s = rates.explicit_dt_s;
         let mut bound_roundoff = |total: &EnergySum| -> Result<(), DepositionError> {
             // Intermediate addition errors can cancel physically. Bound only
@@ -341,16 +398,8 @@ impl<'a> DepositionSimulation<'a> {
             }
             Ok(())
         };
-        let mut has_source = false;
-        for (index, (&id, &watts)) in sources.iter().enumerate() {
-            if index % 256 == 0 { checkpoint()?; }
-            if watts == 0.0 { continue; }
-            has_source = true;
-            let total = rates.watts.get_mut(&id).expect("validated interval-source cell");
-            total.add(watts)?;
-            rates.external_w.add(watts)?;
-        }
-        if has_source {
+        self.add_rate_source_powers(rates, sources, checkpoint)?;
+        if sources.has_nonzero {
             bound_roundoff(&rates.external_w)?;
         }
         checkpoint()
@@ -402,7 +451,7 @@ impl<'a> DepositionSimulation<'a> {
                 "instantaneous power balance cannot evaluate interval-dependent heat",
             ).into());
         }
-        let sources = observer.sources(&candidate, &mut checkpoint)?;
+        let sources = SourcePowers::capture(&candidate, &mut observer, &mut checkpoint)?;
         let conductances = observer.conductances(&candidate, &mut checkpoint)?;
         let ambient = observer.ambient_conductances(&candidate, &mut checkpoint)?;
         let reservoirs = observer.reservoir_conductances(&candidate, &mut checkpoint)?;
@@ -415,7 +464,7 @@ impl<'a> DepositionSimulation<'a> {
         let mut rates = candidate.heat_rates_with_boundaries(
             f64::MAX, &boundaries, &mut checkpoint,
         )?;
-        candidate.add_rate_sources(&mut rates, &sources, &mut checkpoint)?;
+        candidate.add_rate_source_powers(&mut rates, &sources, &mut checkpoint)?;
         candidate.add_step_transfers(&mut rates, &transfers, &mut checkpoint)?;
         let mut net_power_w = BTreeMap::new();
         for (index, (id, power)) in rates.watts.into_iter().enumerate() {
@@ -518,7 +567,7 @@ impl<'a> DepositionSimulation<'a> {
                 }
                 stop = stop.min(transition);
             }
-            let sources = observer.sources(&next, &mut checkpoint)?;
+            let sources = SourcePowers::capture(&next, &mut observer, &mut checkpoint)?;
             checkpoint()?;
             let conductances = observer.conductances(&next, &mut checkpoint)?;
             checkpoint()?;
@@ -536,8 +585,8 @@ impl<'a> DepositionSimulation<'a> {
             let mut rates = next.heat_rates_with_boundaries(
                 config.max_dt_s, &boundaries, &mut checkpoint,
             )?;
-            next.add_rate_sources(&mut rates, &sources, &mut checkpoint)?;
-            let authored = next.add_step_sources(&sources, &mut checkpoint)?;
+            next.add_rate_source_powers(&mut rates, &sources, &mut checkpoint)?;
+            let authored = next.add_step_source_powers(&sources, &mut checkpoint)?;
             let step: Result<_, O::Error> = (|| {
                 next.add_step_transfers(&mut rates, &transfers, &mut checkpoint)?;
                 let dt = observer.limit_timestep_s(&next, rates.explicit_dt_s, &mut checkpoint)?;
@@ -548,8 +597,8 @@ impl<'a> DepositionSimulation<'a> {
                 let time = finite(start_s + rates.explicit_dt_s)?;
                 if time <= start_s { return Err(DepositionError::Arithmetic.into()); }
                 let end_s = if rates.explicit_dt_s == stop-start_s { stop } else { time };
-                let interval_sources = observer.step_sources(
-                    &next, start_s, rates.explicit_dt_s, end_s, &mut checkpoint,
+                let interval_sources = SourcePowers::capture_interval(
+                    &next, &mut observer, start_s, rates.explicit_dt_s, end_s, &mut checkpoint,
                 )?;
                 next.add_interval_sources(
                     &mut rates, &interval_sources, &mut unrepresented_heat_j, &mut checkpoint,
@@ -649,12 +698,76 @@ impl<'a> DepositionSimulation<'a> {
 // Fixed cell order and Neumaier correction retain small terms of either sign.
 // Used for physical changes and signed heat channels, not differences between
 // arbitrary whole-system formation-energy datums.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct EnergySum {
     sum: f64,
     correction: f64,
 }
+
+/// One bounded reduction of source contributions. Both components enter the
+/// physical heat/entropy owner; `rounded` is only a scalar boundary/API view.
+#[derive(Clone, Default)]
+pub(crate) struct SourcePowers {
+    pub(in crate::enthalpy) powers: BTreeMap<CellId, EnergySum>,
+    pub(in crate::enthalpy) has_nonzero: bool,
+}
+impl SourcePowers {
+    pub(crate) fn add(&mut self, thermal: &DepositionSimulation<'_>, id: CellId, watts: f64)
+        -> Result<(), DepositionError> {
+        if !thermal.cells.contains_key(&id) {
+            return Err(DepositionError::InvalidInput("inactive generated-source cell"));
+        }
+        finite(watts)?;
+        self.has_nonzero |= watts != 0.0;
+        self.powers.entry(id).or_default().add(watts)
+    }
+    pub(crate) fn rounded(&self) -> Result<BTreeMap<CellId, f64>, DepositionError> {
+        self.powers.iter().map(|(&id, power)| Ok((id, power.value()?))).collect()
+    }
+    pub(crate) fn visit(&self, emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>)
+        -> Result<(), DepositionError> {
+        for (&id, power) in &self.powers {
+            emit(id, power.sum)?;
+            if power.correction != 0.0 { emit(id, power.correction)?; }
+        }
+        Ok(())
+    }
+    // A scalar-only endpoint solver must charge its final source rounding
+    // against the same cell/whole-window energy allowances as its residuals.
+    pub(in crate::enthalpy) fn rounding_energy(&self, duration_s: f64)
+        -> Result<(f64, f64), DepositionError> {
+        let mut maximum: f64 = 0.0;
+        let mut total = 0.0;
+        for power in self.powers.values() {
+            let lost_w = power.roundoff()?;
+            if lost_w == 0.0 { continue; }
+            let lost_j = finite((lost_w.abs() * duration_s).next_up())?;
+            maximum = maximum.max(lost_j);
+            total = finite((total + lost_j).next_up())?;
+        }
+        Ok((maximum, total))
+    }
+    pub(in crate::enthalpy) fn capture<O: DepositionObserver>(
+        thermal: &DepositionSimulation<'_>, observer: &mut O,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, O::Error> {
+        let mut sources = Self::default();
+        observer.visit_sources(thermal, &mut |id, watts| sources.add(thermal, id, watts), checkpoint)?;
+        Ok(sources)
+    }
+    pub(in crate::enthalpy) fn capture_interval<O: DepositionObserver>(
+        thermal: &DepositionSimulation<'_>, observer: &mut O,
+        start_s: f64, dt_s: f64, end_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, O::Error> {
+        let mut sources = Self::default();
+        observer.visit_step_sources(thermal, start_s, dt_s, end_s,
+            &mut |id, watts| sources.add(thermal, id, watts), checkpoint)?;
+        Ok(sources)
+    }
+}
 impl EnergySum {
+    pub(super) fn components(&self) -> [f64; 2] { [self.sum, self.correction] }
     pub(super) fn add(&mut self, value: f64) -> Result<(), DepositionError> {
         finite(value)?;
         let next = finite(self.sum + value)?;

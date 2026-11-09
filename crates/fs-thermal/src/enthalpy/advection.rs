@@ -546,6 +546,14 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
         self.inner.step_sources(thermal_start, start_s, dt_s, end_s, check)
     }
 
+    fn visit_step_sources(&mut self, thermal_start: &DepositionSimulation<'_>,
+        start_s: f64, dt_s: f64, end_s: f64,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<(), Self::Error> {
+        self.inner.visit_step_sources(thermal_start, start_s, dt_s, end_s, emit, check)
+    }
+
     fn begin(&mut self) -> Result<(), Self::Error> {
         self.inner.begin()?;
         self.pending = None;
@@ -557,6 +565,14 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
     fn sources(&mut self, thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>)
         -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        let mut sources = super::SourcePowers::default();
+        self.visit_sources(thermal, &mut |id, watts| sources.add(thermal, id, watts), check)?;
+        Ok(sources.rounded()?)
+    }
+    fn visit_sources(&mut self, thermal: &DepositionSimulation<'_>,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<(), Self::Error> {
         check()?;
         if let Some(carrier) = &self.liquid_carrier {
             if self.stationary_species.is_some() || !self.selective_outlets.is_empty() {
@@ -575,7 +591,7 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
             entropy.capture(thermal, self.stationary_species.as_ref(), &self.boundaries,
                 &self.selective_outlets, &self.selective_outlet_laws, check)?;
         }
-        let mut sources = self.inner.sources(thermal, check)?;
+        self.inner.visit_sources(thermal, emit, check)?;
         let mut pending = BoundaryPending { time_s: thermal.time_s(), ..BoundaryPending::default() };
         let mut boundary_powers = BTreeMap::<CellId, EnergySum>::new();
         let mut external_power = EnergySum::default();
@@ -631,18 +647,18 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
                 }
             }
         }
-        for (index, (id, mut watts)) in boundary_powers.into_iter().enumerate() {
+        for (index, (id, watts)) in boundary_powers.into_iter().enumerate() {
             if index % 256 == 0 { check()?; }
-            // The wrapped physical source is independent of the mass stream.
-            // Combine it only after the full signed stream reduction, so two
-            // cancelling large inlet powers cannot erase a finite heater.
-            watts.add(sources.get(&id).copied().unwrap_or(0.0))?;
-            sources.insert(id, watts.value()?);
+            // Preserve stream and wrapped source components until the native
+            // heat owner combines them with authored sources and conduction.
+            for power in watts.components() {
+                if power != 0.0 { emit(id, power)?; }
+            }
         }
         pending.external_power_w = external_power.value()?;
         check()?;
         self.boundary_pending = Some(pending);
-        Ok(sources)
+        Ok(())
     }
     fn conductances(&mut self, thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>)

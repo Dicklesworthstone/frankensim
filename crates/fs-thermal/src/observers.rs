@@ -11,7 +11,7 @@
 //! not a strongly coupled nonlinear solve or an accuracy/stability certificate.
 
 use std::collections::BTreeMap;
-use crate::enthalpy::{CellId, DepositionError, DepositionObserver, DepositionSimulation, Event, HeatTransfer};
+use crate::enthalpy::{CellId, DepositionError, DepositionObserver, DepositionSimulation, Event, HeatTransfer, SourcePowers};
 
 /// Two independent observers; their order is explicit and deterministic.
 #[derive(Clone, Debug, PartialEq)]
@@ -72,22 +72,6 @@ impl<A: std::error::Error + 'static, B: std::error::Error + 'static> std::error:
     }
 }
 
-fn admit_sources(
-    values: &BTreeMap<CellId, f64>, thermal: &DepositionSimulation<'_>,
-    check: &mut dyn FnMut() -> Result<(), DepositionError>,
-) -> Result<(), DepositionError> {
-    if values.len() > thermal.cells().len() {
-        return Err(DepositionError::InvalidInput("too many composed heat-source cells"));
-    }
-    for (index, (id, watts)) in values.iter().enumerate() {
-        if index % 256 == 0 { check()?; }
-        if !thermal.cells().contains_key(id) {
-            return Err(DepositionError::InvalidInput("inactive composed heat-source cell"));
-        }
-        if !watts.is_finite() { return Err(DepositionError::Arithmetic); }
-    }
-    Ok(())
-}
 fn admit_conductances(
     values: &BTreeMap<u64, f64>, thermal: &DepositionSimulation<'_>,
     check: &mut dyn FnMut() -> Result<(), DepositionError>,
@@ -170,27 +154,25 @@ impl<A: DepositionObserver, B: DepositionObserver> DepositionObserver for Couple
         start_s: f64, dt_s: f64, end_s: f64,
         check: &mut dyn FnMut() -> Result<(), DepositionError>)
         -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        let mut result = SourcePowers::default();
+        self.visit_step_sources(thermal_start, start_s, dt_s, end_s,
+            &mut |id, watts| result.add(thermal_start, id, watts), check)?;
+        Ok(result.rounded()?)
+    }
+
+    fn visit_step_sources(&mut self, thermal_start: &DepositionSimulation<'_>,
+        start_s: f64, dt_s: f64, end_s: f64,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<(), Self::Error> {
         check()?;
-        let mut result = self.first.step_sources(thermal_start, start_s, dt_s, end_s, check)
+        self.first.visit_step_sources(thermal_start, start_s, dt_s, end_s, emit, check)
             .map_err(ObserverCouplingError::First)?;
-        admit_sources(&result, thermal_start, check)?;
         check()?;
-        let other = self.second.step_sources(thermal_start, start_s, dt_s, end_s, check)
+        self.second.visit_step_sources(thermal_start, start_s, dt_s, end_s, emit, check)
             .map_err(ObserverCouplingError::Second)?;
-        admit_sources(&other, thermal_start, check)?;
-        for (index, (id, watts)) in other.into_iter().enumerate() {
-            if index % 256 == 0 { check()?; }
-            match result.get_mut(&id) {
-                Some(total) if watts != 0.0 => {
-                    *total += watts;
-                    if !total.is_finite() { return Err(DepositionError::Arithmetic.into()); }
-                }
-                Some(_) => {},
-                None => { result.insert(id, watts); },
-            }
-        }
         check()?;
-        Ok(result)
+        Ok(())
     }
 
     fn begin(&mut self) -> Result<(), Self::Error> {
@@ -201,25 +183,21 @@ impl<A: DepositionObserver, B: DepositionObserver> DepositionObserver for Couple
     fn sources(&mut self, thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>)
         -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        let mut result = SourcePowers::default();
+        self.visit_sources(thermal, &mut |id, watts| result.add(thermal, id, watts), check)?;
+        Ok(result.rounded()?)
+    }
+
+    fn visit_sources(&mut self, thermal: &DepositionSimulation<'_>,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<(), Self::Error> {
         check()?;
-        let mut result = self.first.sources(thermal, check).map_err(ObserverCouplingError::First)?;
-        admit_sources(&result, thermal, check)?;
+        self.first.visit_sources(thermal, emit, check).map_err(ObserverCouplingError::First)?;
         check()?;
-        let other = self.second.sources(thermal, check).map_err(ObserverCouplingError::Second)?;
-        admit_sources(&other, thermal, check)?;
-        for (index, (id, watts)) in other.into_iter().enumerate() {
-            if index % 256 == 0 { check()?; }
-            match result.get_mut(&id) {
-                Some(total) if watts != 0.0 => {
-                    *total += watts;
-                    if !total.is_finite() { return Err(DepositionError::Arithmetic.into()); }
-                }
-                Some(_) => {},
-                None => { result.insert(id, watts); },
-            }
-        }
+        self.second.visit_sources(thermal, emit, check).map_err(ObserverCouplingError::Second)?;
         check()?;
-        Ok(result)
+        Ok(())
     }
 
     fn conductances(&mut self, thermal: &DepositionSimulation<'_>,

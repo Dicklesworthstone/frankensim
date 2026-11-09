@@ -193,6 +193,20 @@ impl<O: DepositionObserver> DepositionObserver for ReconstructedAdvected<O> {
         self.advection.sources(thermal, check)
     }
 
+    fn visit_sources(
+        &mut self, thermal: &DepositionSimulation<'_>,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        if let Some(plan) = &self.reconstruction {
+            plan.admit_cells(thermal, check)?;
+        }
+        if let Some(schedule) = &mut self.schedule {
+            schedule.prepare(&mut self.advection, thermal, check)?;
+        }
+        self.advection.visit_sources(thermal, emit, check)
+    }
+
     fn conductances(
         &mut self,
         thermal: &DepositionSimulation<'_>,
@@ -334,6 +348,15 @@ impl<O: DepositionObserver> DepositionObserver for ReconstructedAdvected<O> {
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
         self.advection
             .step_sources(thermal_start, start_s, dt_s, end_s, check)
+    }
+
+    fn visit_step_sources(
+        &mut self, thermal_start: &DepositionSimulation<'_>,
+        start_s: f64, dt_s: f64, end_s: f64,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        self.advection.visit_step_sources(thermal_start, start_s, dt_s, end_s, emit, check)
     }
 
     fn event(

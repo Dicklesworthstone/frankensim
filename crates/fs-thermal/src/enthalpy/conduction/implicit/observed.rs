@@ -97,6 +97,10 @@ impl ImplicitConductionChain<'_> {
     /// audits count external heat once and cancel internal transfers. Transfer
     /// entropy remains unclassified unless its owner supplies its own account.
     /// This is not the adaptive step-doubling path or a moving-mass model.
+    /// Independent source contributions remain compensated through the joint
+    /// start/interval reduction. Final scalar-source rounding spends the same
+    /// cell and whole-call joule allowances as the nonlinear residual; it is
+    /// never silently reclassified as external heat or physical dissipation.
     pub fn advance_observed_to<'m, O: DepositionObserver>(
         &self,
         thermal: &DepositionSimulation<'m>,
@@ -127,6 +131,7 @@ impl ImplicitConductionChain<'_> {
         observers.source.begin().map_err(Observer)?;
         let mut report = empty_report();
         let mut supplied = Sum::default();
+        let mut source_rounding_j = 0.0;
         loop {
             checkpoint()?;
             let (with_events, observed, events) = next.advance_observed(
@@ -174,7 +179,9 @@ impl ImplicitConductionChain<'_> {
                 }
                 stop = stop.min(transition);
             }
-            let sources = source.sources(&next, &mut checkpoint).map_err(Observer)?;
+            let sources = crate::enthalpy::SourcePowers::capture(
+                &next, source, &mut checkpoint,
+            ).map_err(Observer)?;
             if !source
                 .conductances(&next, &mut checkpoint)
                 .map_err(Observer)?
@@ -197,7 +204,7 @@ impl ImplicitConductionChain<'_> {
             // Advected consumes its source epoch here and retains the pending
             // mass/enthalpy account until exactly one accepted step callback.
             let transfers = source.heat_transfers(&next, &mut checkpoint).map_err(Observer)?;
-            let authored = next.add_step_sources(&sources, &mut checkpoint)?;
+            let authored = next.add_step_source_powers(&sources, &mut checkpoint)?;
             let limit = source.limit_timestep_s(&next, controls.maximum_dt_s, &mut checkpoint);
             restore_sources(&mut next, authored);
             let limit = limit.map_err(Observer)?;
@@ -220,38 +227,49 @@ impl ImplicitConductionChain<'_> {
                     return Err(DepositionError::Arithmetic.into());
                 }
                 let duration = finite(end - start)?;
-                let authored = next.add_step_sources(&sources, &mut checkpoint)?;
-                let interval = source.step_sources(&next, start, duration, end, &mut checkpoint);
+                let authored = next.add_step_source_powers(&sources, &mut checkpoint)?;
+                let interval = crate::enthalpy::SourcePowers::capture_interval(
+                    &next, source, start, duration, end, &mut checkpoint,
+                );
                 restore_sources(&mut next, authored);
                 let interval = interval.map_err(Observer)?;
-                if interval.len() > next.cells.len() {
-                    return Err(
-                        DepositionError::InvalidInput("too many generated heat sources").into(),
-                    );
-                }
                 let mut combined = sources.clone();
-                for (id, watts) in interval {
-                    checkpoint()?;
-                    if !next.cells.contains_key(&id) {
-                        return Err(DepositionError::InvalidInput(
-                            "inactive generated-source cell",
-                        )
-                        .into());
-                    }
-                    let value = combined.entry(id).or_insert(0.0);
-                    *value = finite(*value + finite(watts)?)?;
+                let mut visited = 0usize;
+                interval.visit(&mut |id, watts| {
+                    if visited % 256 == 0 { checkpoint()?; }
+                    visited += 1;
+                    combined.add(&next, id, watts)
+                })?;
+                let (cell_rounding_j, interval_rounding_j) = combined.rounding_energy(duration)?;
+                let next_rounding_j = if interval_rounding_j == 0.0 { source_rounding_j } else {
+                    finite((source_rounding_j + interval_rounding_j).next_up())?
+                };
+                if cell_rounding_j > controls.cell_tolerance_j
+                    || next_rounding_j > controls.total_tolerance_j {
+                    return Err(DepositionError::EnergyBalance(
+                        cell_rounding_j.max(next_rounding_j),
+                    ).into());
                 }
+                let mut remaining = controls;
+                remaining.cell_tolerance_j -= cell_rounding_j;
+                remaining.total_tolerance_j -= next_rounding_j;
+                let has_unclassified_sources = combined.has_nonzero;
+                let combined = combined.rounded()?;
                 match self.solve_step_with_sources(
                     &next,
                     end,
                     &combined,
                     &transfers,
-                    controls,
+                    remaining,
                     workspace,
                     &mut report,
                     &mut checkpoint,
                 ) {
-                    Ok((accepted, energy, entropy, maximum)) => {
+                    Ok((accepted, energy, mut entropy, maximum)) => {
+                        source_rounding_j = next_rounding_j;
+                        // Opposing source powers do not determine their source
+                        // temperatures or prove zero entropy exchange.
+                        entropy.has_unclassified_sources |= has_unclassified_sources;
                         source
                             .step(
                                 start,
@@ -264,7 +282,7 @@ impl ImplicitConductionChain<'_> {
                         supplied.add(energy.external_heat_j)?;
                         accumulate_entropy(&mut report.entropy, entropy)?;
                         report.maximum_cell_residual_j =
-                            report.maximum_cell_residual_j.max(maximum);
+                            report.maximum_cell_residual_j.max(maximum + cell_rounding_j);
                         report.energy.substeps += 1;
                         next = accepted;
                         break;
@@ -300,7 +318,7 @@ impl ImplicitConductionChain<'_> {
         report.energy.stored_energy_change_j = storage.total()?;
         report.energy.residual_j =
             finite(report.energy.stored_energy_change_j - report.energy.external_heat_j)?;
-        if report.energy.residual_j.abs() > controls.total_tolerance_j {
+        if finite(report.energy.residual_j.abs() + source_rounding_j)? > controls.total_tolerance_j {
             return Err(DepositionError::EnergyBalance(report.energy.residual_j).into());
         }
         checkpoint()?;

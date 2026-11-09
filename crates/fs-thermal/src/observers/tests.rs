@@ -57,6 +57,32 @@ impl ThermalLaw for Law {
         Ok(300.0 + h / self.0)
     }
     fn maximum_temperature_slope(&self) -> f64 { 1.0 / self.0 }
+    fn specific_entropy_change_j_kg_k(&self, a: f64, b: f64)
+        -> Result<Option<f64>, DepositionError> {
+        self.temperature_k(a)?;
+        self.temperature_k(b)?;
+        Ok(Some(self.0 * ((b-a)/(300.0*self.0+a)).ln_1p()))
+    }
+}
+impl crate::enthalpy::conduction::ConductivityLaw for Law {
+    fn conductivity_w_m_k(&self, h: f64) -> Result<f64, DepositionError> {
+        self.temperature_k(h)?;
+        Ok(1.0)
+    }
+}
+impl crate::enthalpy::conduction::implicit::ImplicitConductionLaw for Law {
+    fn caloric_law(&self) -> &dyn ThermalLaw { self }
+    fn conductivity_law(&self) -> &dyn crate::enthalpy::conduction::ConductivityLaw { self }
+    fn enthalpy_bounds_j_kg(&self) -> [f64; 2] { [0.0, 10000.0] }
+    fn state_at_specific_enthalpy(&self, h: f64)
+        -> Result<crate::enthalpy::conduction::implicit::ImplicitConductionState, DepositionError> {
+        Ok(crate::enthalpy::conduction::implicit::ImplicitConductionState {
+            temperature_k: self.temperature_k(h)?,
+            temperature_slope_kg_k_j: 1.0/self.0,
+            conductivity_w_m_k: 1.0,
+            conductivity_slope_kg_w_m_k_j: 0.0,
+        })
+    }
 }
 static A: Law = Law(2.0);
 static B: Law = Law(4.0);
@@ -152,6 +178,63 @@ fn nested_owners_support_signed_cooling_without_a_second_thermal_step() {
     near(audit.external_heat_j, 10.0);
     assert_eq!(accepted.first.first.grid, accepted.first.second.grid);
     assert_eq!(accepted.first.first.grid, accepted.second.grid);
+}
+
+#[test]
+fn g1_g3_nested_opposing_sources_retain_the_physical_heat_in_every_order() {
+    let large = 2.0_f64.powi(80);
+    let (active, _) = initial(false).advance_to(0.0, config(), || Ok(())).unwrap();
+    for powers in [
+        [large, 1.0, -large], [large, -large, 1.0], [1.0, large, -large],
+        [1.0, -large, large], [-large, large, 1.0], [-large, 1.0, large],
+    ] {
+        let owners = CoupledObservers::new(
+            CoupledObservers::new(Producer::new(1, powers[0]), Producer::new(1, powers[1])),
+            Producer::new(1, powers[2]),
+        );
+        let power = active.power_balance_observed(&owners, || Ok(())).unwrap();
+        assert_eq!(power.net_power_w[&CellId(1)], 1.0);
+        assert_eq!(power.external_power_w, 1.0);
+        let (next, accepted, audit) = active.advance_observed(
+            &owners, 1.0, config(), || Ok(()),
+        ).unwrap();
+        assert_eq!(next.cells()[&CellId(1)].specific_h_j_kg, 1.0);
+        assert_eq!(next.temperature_k(CellId(1)).unwrap(), 300.5);
+        assert_eq!(audit.external_heat_j, 1.0);
+        assert_eq!(audit.residual_j, 0.0);
+        assert_eq!(accepted.first.first.grid, accepted.first.second.grid);
+        assert_eq!(accepted.first.first.grid, accepted.second.grid);
+        assert_eq!(accepted.first.first.source_states.len(), audit.substeps);
+        assert!(owners.first.first.source_states.is_empty());
+        assert_eq!(active.cells()[&CellId(1)].specific_h_j_kg, 0.0);
+    }
+}
+
+#[test]
+fn g1_g3_entropy_and_advective_wrappers_use_the_same_unrounded_sources() {
+    use crate::enthalpy::advection::{Advected, MassFlow};
+    let large = 2.0_f64.powi(80);
+    let owners = CoupledObservers::new(
+        CoupledObservers::new(Producer::new(1, large), Producer::new(1, 1.0)),
+        Producer::new(1, -large),
+    );
+    let thermal = interval_initial();
+    let flow = vec![
+        MassFlow { id: 10, a: CellId(1), b: CellId(2), kg_s: 1.0 },
+        MassFlow { id: 11, a: CellId(2), b: CellId(1), kg_s: 1.0 },
+    ];
+    let actual = Advected::new(owners, flow.clone(), 2).unwrap();
+    let reference = Advected::new(Producer::new(1, 1.0), flow, 2).unwrap();
+    let (expected, _, expected_energy, expected_entropy) = thermal
+        .advance_observed_with_entropy(&reference, 0.05, config(), || Ok(())).unwrap();
+    let (next, accepted, energy, entropy) = thermal
+        .advance_observed_with_entropy(&actual, 0.05, config(), || Ok(())).unwrap();
+    assert_eq!(next.cells(), expected.cells());
+    assert_eq!(energy, expected_energy);
+    assert_eq!(entropy, expected_entropy);
+    assert!(entropy.has_unclassified_sources);
+    assert!(next.cells()[&CellId(2)].specific_h_j_kg > 0.0);
+    assert_eq!(accepted.inner().first.first.grid.len(), energy.substeps);
 }
 
 #[test]
@@ -292,6 +375,91 @@ impl DepositionObserver for IntervalProducer {
         }
         Ok(())
     }
+}
+
+#[test]
+fn g1_interval_and_start_sources_cancel_only_in_the_native_heat_owner() {
+    let large = 2.0_f64.powi(80);
+    let owners = CoupledObservers::new(
+        Producer::new(1, large),
+        CoupledObservers::new(IntervalProducer::new(-large, 0.0), IntervalProducer::new(1.0, 0.0)),
+    );
+    let (next, accepted, energy, entropy) = initial(false)
+        .advance_observed_with_entropy(&owners, 1.0, config(), || Ok(())).unwrap();
+    let (expected, _, expected_energy, expected_entropy) = initial(false)
+        .advance_observed_with_entropy(&IntervalProducer::new(1.0, 0.0), 1.0, config(), || Ok(())).unwrap();
+    assert_eq!(next.cells(), expected.cells());
+    assert_eq!(energy, expected_energy);
+    assert_eq!(entropy, expected_entropy);
+    assert_eq!(accepted.first.source_states.len(), energy.substeps);
+    assert_eq!(accepted.second.first.accepted, energy.substeps);
+    assert_eq!(accepted.second.second.accepted, energy.substeps);
+    assert!(owners.second.first.prepared.is_empty());
+}
+
+#[test]
+fn g1_g3_implicit_sources_share_the_compensated_start_interval_balance() {
+    use crate::enthalpy::conduction::{ConductionObserver, ConductiveLink};
+    use crate::enthalpy::conduction::implicit::{ImplicitConductionChain,
+        ImplicitConductionControls, ImplicitConductionWorkspace};
+    let large = 2.0_f64.powi(80);
+    let owners = CoupledObservers::new(
+        Producer::new(1, large),
+        CoupledObservers::new(IntervalProducer::new(1.0, 0.0), IntervalProducer::new(-large, 0.0)),
+    );
+    let (thermal, _) = initial(true).advance_to(0.0, config(), || Ok(())).unwrap();
+    let link = ConductiveLink { link_id: 7, half_distances_m: [0.5; 2],
+        contact_resistance_m2_k_w: 0.0 };
+    let conduction = ConductionObserver::new(&thermal,
+        &[(MaterialId(1), &A), (MaterialId(2), &B)], &[link], &[], || Ok(())).unwrap();
+    let chain = ImplicitConductionChain::new(&thermal, &conduction,
+        &[(MaterialId(1), &A), (MaterialId(2), &B)], || Ok(())).unwrap();
+    let controls = ImplicitConductionControls { maximum_dt_s: 1.0,
+        cell_tolerance_j: 1e-10, total_tolerance_j: 1e-9,
+        ..ImplicitConductionControls::default() };
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let (expected, _, expected_report) = chain.advance_observed_to(&thermal,
+        &IntervalProducer::new(1.0, 0.0), 1.0, controls, &mut workspace, || Ok(())).unwrap();
+    let (next, accepted, report) = chain.advance_observed_to(&thermal,
+        &owners, 1.0, controls, &mut workspace, || Ok(())).unwrap();
+    assert_eq!(next.cells(), expected.cells());
+    assert_eq!(report.energy, expected_report.energy);
+    assert_eq!(report.entropy, expected_report.entropy);
+    assert_eq!(report.energy.external_heat_j, 1.0);
+    near(next.cells()[&CellId(1)].specific_h_j_kg, 5.0/7.0);
+    near(next.cells()[&CellId(2)].specific_h_j_kg, 2.0/7.0);
+    assert_eq!(accepted.first.source_states.len(), report.energy.substeps);
+    assert_eq!(accepted.second.first.prepared, accepted.second.second.prepared);
+    assert_eq!(accepted.second.first.accepted, report.energy.substeps);
+    assert!(owners.second.first.prepared.is_empty());
+    assert_eq!(thermal.time_s(), 0.0);
+    let cancelling = CoupledObservers::new(Producer::new(1, large),
+        IntervalProducer::new(-large, 0.0));
+    let (unchanged, _, zero) = chain.advance_observed_to(&thermal,
+        &cancelling, 1.0, controls, &mut workspace, || Ok(())).unwrap();
+    assert_eq!(unchanged.cells(), thermal.cells());
+    assert_eq!(zero.energy.external_heat_j, 0.0);
+    assert!(zero.entropy.has_unclassified_sources);
+}
+
+#[test]
+fn g4_streamed_physical_heat_preserves_all_owners_on_late_refusal_and_retry() {
+    let large = 2.0_f64.powi(80);
+    let mut rejecting = Producer::new(1, -large);
+    rejecting.fail_step = Some(3);
+    let mut owners = CoupledObservers::new(
+        CoupledObservers::new(Producer::new(1, large), Producer::new(1, 1.0)), rejecting,
+    );
+    let old = initial(false);
+    assert!(old.advance_observed(&owners, 1.0, config(), || Ok(())).is_err());
+    assert!(old.cells().is_empty());
+    assert!(owners.first.first.grid.is_empty());
+    assert!(owners.first.second.source_states.is_empty());
+    assert!(owners.second.grid.is_empty());
+    owners.second.fail_step = None;
+    let (next, _, energy) = old.advance_observed(&owners, 1.0, config(), || Ok(())).unwrap();
+    assert_eq!(next.cells()[&CellId(1)].specific_h_j_kg, 1.0);
+    assert_eq!(energy.external_heat_j, 1.0);
 }
 
 fn interval_initial() -> DepositionSimulation<'static> {
