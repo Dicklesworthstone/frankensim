@@ -9,6 +9,10 @@ use crate::ns::boundary::{StokesBoundaryError, StokesRheologyControls};
 use crate::ns::transport::density::DensityTransportError;
 use fs_material::MaterialError;
 
+#[path = "rheology/ports.rs"]
+mod ports;
+pub use ports::CoupledDensityMomentumRheologyFlowControlStep;
+
 /// Pure molecular source at (cell, centroid [m], transported state, shear [1/s]).
 /// Returns positive finite dynamic viscosity [Pa s] or its original source refusal.
 pub type CellRheology<'a, const N: usize> = dyn Fn(usize, [f64; 2], &DensityTransportCell<N>, f64) -> core::result::Result<f64, MaterialError>
@@ -76,7 +80,7 @@ impl FluxSystem<'_> {
         nonlinear: StokesRheologyControls,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CoupledDensityMomentumRheologyStep<N>> {
-        let (solved, mut response) = self.coupled_density_momentum_bdf1_viscosity(
+        let (solved, response) = self.coupled_density_momentum_bdf1_viscosity(
             numerics,
             CoupledViscosity::Rheology(dynamic_viscosity),
             force_density,
@@ -90,9 +94,19 @@ impl FluxSystem<'_> {
             None,
             &mut cancelled,
         )?;
+        self.finish_coupled_rheology(solved.flow, response, controls, &mut cancelled)
+    }
+
+    pub(super) fn finish_coupled_rheology<const N: usize>(
+        &self,
+        step: CoupledDensityMomentumStep<N>,
+        mut response: Vec<CoupledDensityMomentumRheologyCell>,
+        controls: DensityMomentumControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<CoupledDensityMomentumRheologyStep<N>> {
         let mut power = Sums::<1>::new();
         for (cell, output) in response.iter_mut().enumerate() {
-            poll(&mut cancelled)?;
+            poll(cancelled)?;
             let rate = output.strain_rate_per_s;
             let local = (output.dynamic_viscosity_pa_s * rate) * rate;
             let integrated = (local * self.mesh.areas[cell]) * controls.depth_m;
@@ -112,9 +126,9 @@ impl FluxSystem<'_> {
                 "unrepresentable integrated molecular viscous heating",
             ));
         }
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         Ok(CoupledDensityMomentumRheologyStep {
-            step: solved.flow,
+            step,
             cells: response,
             viscous_heating_w,
         })

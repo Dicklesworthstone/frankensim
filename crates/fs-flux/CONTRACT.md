@@ -10758,3 +10758,29 @@ It retains the original first-order endpoint-advector/CFL limits. One reusable
 source buffer is checked against the per-owner storage allowance; that allowance
 is not a native linear-solver or total-process memory cap.
 
+
+
+## Source rheology in transported-density flow ports and finite RCR storage
+
+`density_momentum_coupled_bdf1_rheology_flow_control_step` resolves integral port
+pressures with the same accepted transported density and molecular shear law.
+`density_momentum_coupled_bdf1_rheology_windkessel_step` couples that endpoint to
+the original finite compliance, resistance and series-inertance histories.
+Both use the existing private viscosity selector and native Picard/pressure
+responses. The original RCR reduction, original-equation reporting, physical
+pressure conversion and one molecular-heating finalizer are shared; no second
+nonlinear solver, constitutive law or pressure response is introduced.
+
+Each trial rebuilds its pressure response with its actual transported density
+and retained cellwise molecular viscosity. Accepted source samples, flow,
+pressure, boundary reactions and load histories belong to the same endpoint.
+Source failures remain original `MaterialError` values inside the momentum
+error, including through RCR reporting and SI conversion. Rejected trials
+advance neither the old fluid inventories nor the external storage.
+
+The original traction-datum, port-disjointness, reversal/donor, BDF1, CFL,
+cancellation and storage restrictions remain. Molecular heating is reported in
+whole-domain W using the authored depth; external RCR powers remain W/m. Neither
+physical resistor loss nor numerical BDF defect is combined with molecular
+heating or silently deposited in a carried inventory.
+

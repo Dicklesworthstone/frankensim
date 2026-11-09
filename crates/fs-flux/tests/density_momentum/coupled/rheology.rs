@@ -6,6 +6,9 @@ use fs_material::MaterialError;
 use fs_material::fluid_transport::rheology::CarreauYasuda;
 use std::cell::{Cell as Counter, RefCell};
 
+#[path = "rheology/ports.rs"]
+mod ports;
+
 fn curve(cell: &Cell<1>) -> CarreauYasuda {
     CarreauYasuda::new(
         0.03 + 0.002 * cell.density_kg_m3 + 0.001 * cell.specific[0],

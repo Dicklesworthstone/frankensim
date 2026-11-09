@@ -189,22 +189,7 @@ impl<'m> FluxSystem<'m> {
             )),
             &mut cancelled,
         )?;
-        let mut pressure_offsets_pa = solved.pressure_offsets_m2_s2;
-        for pressure in &mut pressure_offsets_pa {
-            poll(&mut cancelled)?;
-            let physical = *pressure * controls.reference_density_kg_m3;
-            if !physical.is_finite() || (physical == 0.0 && *pressure != 0.0) {
-                return Err(invalid("unrepresentable physical port pressure"));
-            }
-            *pressure = physical;
-        }
-        poll(&mut cancelled)?;
-        Ok(CoupledDensityMomentumFlowControlStep {
-            step: solved.flow,
-            pressure_offsets_pa,
-            outward_volume_rates_m2_s: solved.outward_volume_rates_m2_s,
-            maximum_flow_residual_m2_s: solved.maximum_flow_residual_m2_s,
-        })
+        physical_flow_control(solved, controls, &mut cancelled)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -369,4 +354,27 @@ impl<'m> FluxSystem<'m> {
             response.into_inner(),
         ))
     }
+}
+
+fn physical_flow_control<const N: usize>(
+    solved: StokesFlowControlSolution<CoupledDensityMomentumStep<N>>,
+    controls: DensityMomentumControls,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<CoupledDensityMomentumFlowControlStep<N>> {
+    let mut pressure_offsets_pa = solved.pressure_offsets_m2_s2;
+    for pressure in &mut pressure_offsets_pa {
+        poll(cancelled)?;
+        let physical = *pressure * controls.reference_density_kg_m3;
+        if !physical.is_finite() || (physical == 0.0 && *pressure != 0.0) {
+            return Err(invalid("unrepresentable physical port pressure"));
+        }
+        *pressure = physical;
+    }
+    poll(cancelled)?;
+    Ok(CoupledDensityMomentumFlowControlStep {
+        step: solved.flow,
+        pressure_offsets_pa,
+        outward_volume_rates_m2_s: solved.outward_volume_rates_m2_s,
+        maximum_flow_residual_m2_s: solved.maximum_flow_residual_m2_s,
+    })
 }

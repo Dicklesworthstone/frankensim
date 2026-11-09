@@ -1,8 +1,10 @@
 //! Transported-density BDF1 momentum with the original finite RCR port storage.
 
+use super::rheology::CoupledDensityMomentumRheologyCell;
 use super::{
-    CoupledDensityMomentumStep, DensityMomentumControls, DensityTransportCell, FluxSystem,
-    MaterialFluxNumerics, MaterialNavierStokesBoundary, StokesRheologyControls, invalid, poll,
+    CoupledDensityMomentumStep, CoupledViscosity, DensityMomentumControls, DensityTransportCell,
+    FluxSystem, MaterialFluxNumerics, MaterialNavierStokesBoundary, StokesRheologyControls,
+    invalid, poll,
 };
 use crate::material::mixed::{physical_windkessel, with_kinematic_windkessel};
 use crate::material::{
@@ -105,8 +107,56 @@ impl FluxSystem<'_> {
         nonlinear: StokesRheologyControls,
         absolute_pressure_tolerance_pa: f64,
         absolute_flow_tolerance_m2_s: f64,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<MaterialStokesWindkesselSolution<CoupledDensityMomentumStep<N>>> {
+        self.coupled_density_momentum_bdf1_windkessel_viscosity(
+            numerics,
+            CoupledViscosity::Spatial(dynamic_viscosity),
+            force_density,
+            boundaries,
+            ports,
+            loads,
+            previous,
+            cells,
+            inflow,
+            timestep_s,
+            controls,
+            nonlinear,
+            absolute_pressure_tolerance_pa,
+            absolute_flow_tolerance_m2_s,
+            |flow, _, _| Ok(flow),
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn coupled_density_momentum_bdf1_windkessel_viscosity<
+        const N: usize,
+        S,
+        C: FnMut() -> bool,
+    >(
+        &self,
+        numerics: MaterialFluxNumerics,
+        dynamic_viscosity: CoupledViscosity<'_, N>,
+        force_density: &dyn Fn(usize, [f64; 2], &DensityTransportCell<N>) -> [f64; 2],
+        boundaries: &[MaterialNavierStokesBoundary<'_>],
+        ports: &[&[usize]],
+        loads: &[MaterialStokesWindkesselPort],
+        previous: MaterialStokesWindkesselHistory<'_>,
+        cells: &[DensityTransportCell<N>],
+        inflow: &[Option<DensityTransportCell<N>>],
+        timestep_s: f64,
+        controls: DensityMomentumControls,
+        nonlinear: StokesRheologyControls,
+        absolute_pressure_tolerance_pa: f64,
+        absolute_flow_tolerance_m2_s: f64,
+        finish: impl FnOnce(
+            CoupledDensityMomentumStep<N>,
+            Vec<CoupledDensityMomentumRheologyCell>,
+            &mut C,
+        ) -> super::Result<S>,
+        mut cancelled: C,
+    ) -> Result<MaterialStokesWindkesselSolution<S>> {
         poll(&mut cancelled)?;
         let reference = controls.reference_density_kg_m3;
         // The nested result preserves both original error owners without
@@ -134,7 +184,7 @@ impl FluxSystem<'_> {
                         absolute_flow_tolerance_m2_s,
                     )?;
                     poll(&mut cancelled)?;
-                    let solved = self.coupled_density_momentum_bdf1(
+                    let (solved, response) = self.coupled_density_momentum_bdf1_viscosity(
                         numerics,
                         dynamic_viscosity,
                         force_density,
@@ -169,9 +219,10 @@ impl FluxSystem<'_> {
                         );
                     }
                     poll(&mut cancelled)?;
+                    let flow = finish(solved.flow, response, &mut cancelled)?;
                     let reported = report_windkessel_ports(
                         &reduced,
-                        solved.flow,
+                        flow,
                         native_energy,
                         solved.pressure_offsets_m2_s2,
                         solved.outward_volume_rates_m2_s,
