@@ -32,6 +32,8 @@
 //!   load — the tfz.14/tfz.15 global-buckling spot check.
 
 pub mod certificate;
+/// Compatible small-strain elastic response of an actually selected truss.
+pub mod elastic;
 pub mod ground;
 pub mod lp;
 /// Source-bound material assignments shared by layout, sizing and mass.

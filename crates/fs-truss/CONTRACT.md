@@ -19,6 +19,39 @@ iteration with explicit convergence diagnostics → Euler/code sizing
 with catalog snapping → fs-solid rod re-analysis. The
 steel-and-concrete flagship's engine (§15.2).
 
+## Displacement-compatible elastic reanalysis
+
+`elastic::solve` and `MaterialLayout::elastic_response` analyze the actual
+selected areas with each original member's Young's modulus. The native checked
+CG owner applies `K = B diag(EA/L) B^T` without assembling a global matrix and
+uses Jacobi preconditioning. Memory and each action are linear in node/member
+count. Member/recovery loops poll cancellation every 256 entries; native CG
+retains its own iteration checkpoints. The total iteration budget also covers
+at most two defect corrections. No new numerical recurrence is used.
+
+The returned original-order displacements generate signed axial strains,
+forces and stresses. Support reactions include loads applied at supported
+nodes. Strain energy and load compliance use those same fields. Acceptance
+recomputes equilibrium from recovered forces on every original free coordinate;
+a recursive CG residual alone cannot publish an accepted response. Zero-area
+members contribute no stiffness. Unloaded zero-stiffness coordinates receive
+zero displacement; loaded ones refuse without regularizing springs.
+
+This explicitly supplements the existing **plastic-equilibrium** layout/sizing
+audit: a redundant truss's statically admissible LP/refitted force distribution
+need not be elastically compatible after snapping. Callers may pass the paired
+`areas_m2` and `load_case` of a `MaterialBodyLoadDesign`, retaining its actual
+self-weight loads. The original audit's semantics are unchanged. Reanalysis
+does not certify strength, displacement limits, uniqueness, stability, buckling,
+finite deformation, bending, or inelastic redistribution. Numerical equilibrium
+alone does not exclude an unloaded mechanism.
+
+G1/G3 regressions exercise serial members, a redundant three-member analytic
+solution, stiffness-dependent load redistribution, supported loads/reactions,
+energy, rotation covariance, load reversal and pruning. G4 regressions target
+loaded mechanisms, invalid material arrays, exhausted work and cancellation.
+A material consumer regression carries source-resolved moduli through this path.
+
 ## Public types and semantics
 
 - `GroundRules` is immutable and admitted only through `try_new` or a finite

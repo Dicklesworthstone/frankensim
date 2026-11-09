@@ -1184,3 +1184,30 @@ fn homothetic_section_domains_and_assignment_admission_fail_before_publication()
         ));
     });
 }
+
+#[test]
+fn source_moduli_and_actual_catalog_areas_drive_compatible_elastic_displacements() {
+    with_cx(|cx, _| {
+        let (ground, case) = two_members(cx, 12.0);
+        let source = card([8000.0; 2], [4e9, 2e9], [300e6; 2]);
+        let states = [material(&source, 300.0), material(&source, 600.0)];
+        let layout = MaterialLayout::try_new(
+            &ground, &case, &states, &[0, 1], LayoutLimits::default(), cx,
+        )
+        .unwrap();
+        let response = layout.elastic_response(
+            &[2e-6, 3e-6], &case, fs_truss::elastic::ElasticControls::default(), cx,
+        )
+        .unwrap();
+        relative(response.displacements_m[1][0], 12.0 / (4e9 * 2e-6), 1e-12);
+        relative(
+            response.displacements_m[2][0],
+            12.0 / (4e9 * 2e-6) + 12.0 / (2e9 * 3e-6),
+            1e-12,
+        );
+        for force in response.member_force_n {
+            relative(force, 12.0, 1e-12);
+        }
+        relative(response.compliance_j, 2.0 * response.strain_energy_j, 1e-12);
+    });
+}

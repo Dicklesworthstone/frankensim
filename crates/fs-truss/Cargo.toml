@@ -21,6 +21,7 @@ fs-matdb = { path = "../fs-matdb" }
 fs-material = { path = "../fs-material" }
 fs-qty = { path = "../fs-qty" }
 fs-solid = { path = "../fs-solid" }
+fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
 
 [dev-dependencies]

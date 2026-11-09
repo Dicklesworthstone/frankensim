@@ -548,6 +548,38 @@ impl<'a> MaterialLayout<'a> {
             .map(|&index| &self.materials[index])
     }
 
+    /// Reanalyze actual selected areas with displacement-compatible elasticity.
+    /// The original source moduli and ground geometry determine each EA/L;
+    /// the explicitly supplied case may include the converged self-weight load.
+    /// Pass MaterialBodyLoadDesign's paired areas_m2 and load_case to reanalyze
+    /// that design. Original LP/audit forces are plastic-equilibrium quantities
+    /// and need not equal these elastic forces in a redundant truss.
+    ///
+    /// This does not relabel the plastic audit or certify elastic strength,
+    /// global stability or uniqueness. Use recovered signed stresses to check
+    /// the original selected material limits and buckling model independently.
+    ///
+    /// # Errors
+    /// See [crate::elastic::solve]; invalid arrays, loads, nonconvergence and
+    /// cancellation return no accepted response.
+    pub fn elastic_response(
+        &self,
+        areas_m2: &[f64],
+        case: &LayoutCase,
+        controls: crate::elastic::ElasticControls,
+        cx: &Cx<'_>,
+    ) -> Result<crate::elastic::ElasticResponse, crate::elastic::ElasticError> {
+        checkpoint(cx)?;
+        let mut moduli = Vec::with_capacity(self.assignments.len());
+        for (index, &assignment) in self.assignments.iter().enumerate() {
+            if index % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            moduli.push(self.materials[assignment].youngs);
+        }
+        crate::elastic::solve(self.ground, case, areas_m2, &moduli, controls, cx)
+    }
+
     /// Solve through the existing PDHG owner, retaining both physical totals.
     /// This inherits that solver's iteration bound and synchronous cancellation
     /// limitation; assembly and material publication remain cancellation-polled.
