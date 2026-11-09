@@ -5098,7 +5098,7 @@ longitudinal chromatic aberration in explicitly selected geometric,
 finite-defocus and layered camera paths. A prescription contains one to eight coincident ideal thin
 elements, each retaining its exact native `DielectricIor` (Cauchy, Sellmeier or
 tabulated phase index) and signed front/back surface curvatures in inverse
-metres. The exterior index is exactly one and wavelengths are vacuum nm within
+metres. The default exterior index is one and wavelengths are vacuum nm within
 the intersection of the original material laws’ source bands, including
 explicit infrared support; group index is never substituted for phase index. No IOR fit, RGB conversion, external optics library or new pupil raster
 is introduced. The immutable bounded prescription is shared across evaluated
@@ -5108,6 +5108,12 @@ nothing.
 For reference wavelength `lambda_ref`, element power adds at the common pupil:
 
 `P(lambda) = sum_j (n_j(lambda)-1)*(C_front,j-C_back,j)`.
+
+An explicit `try_new_in_medium` prescription retains the surrounding native
+phase-index law. Its power uses `n_j(lambda)/n_exterior(lambda)-1`, and its
+stable chromatic difference subtracts double-double cross products of the
+native material/exterior indices. Wavelength support is their intersection;
+no surrounding material is guessed from the camera or scene.
 
 The declared reference focus `s` sets the positive sensor conjugate
 `t = 1/(P(lambda_ref)-1/s)`. At actual source depth `z`, the propagated pupil
@@ -5150,13 +5156,38 @@ material index difference. `generate_geometric_spectral_rays_from_tangent_offset
 returns those separate rays with unit aperture-average camera weight. Native
 curved raster XYZ, QE and participating paths consume each lane’s own ray,
 retaining absorption, refraction, visibility and photon-energy weighting.
-Their actual launch phase index must equal the prescription’s index-one
-exterior; a mismatch refuses the complete pixel. Source bands/gaps,
-`lambda/opening_width <= 0.01`, and the full pupil’s outgoing paraxial slope
+Their actual launch phase index must equal the prescription’s native exterior
+law (index one by default); a mismatch refuses the complete pixel. Source bands/gaps,
+`lambda_vac/(n_exterior*opening_width) <= 0.01`, and the full pupil’s outgoing paraxial slope
 remain admission conditions. This mode omits diffraction; shared-ray entry
 points refuse it, and curved raster still refuses wave diffraction without
 the original source-depth and clear-pupil proof. Achromatic cameras retain
 their existing ray arithmetic and Philox streams.
+
+The main cinematic tracer also consumes these distinct geometric material rays.
+One native pupil draw launches four original spectral path states, with unit
+ideal-phase camera weights and the original wavelength measure, path RNG,
+nested-medium state, scattering, absorption and source owners. Real sequential
+lens launches share only this small fixed-array adapter and retain their
+original clipping/throughput. Every accepted launch checks the exact native
+exterior phase index against the actual starting transport medium. A calibrated
+photometric packet keeps its original wavelengths rather than reconstructing
+a display observer packet.
+
+All five aligned AOV paths retain the actual lane-zero wavelength and pupil
+witness for geometric as well as sequential optics. Geometric motion uses the
+native analytic inverse with a 1e-8 m forward-ray residual tolerance. Unsupported
+local inverse projections clear motion validity; missing internal witnesses
+remain alignment errors and cancellation remains cancellation. AOV depth stays
+in the authored camera frame. Existing admitted camera output semantics and
+stream identities are unchanged.
+
+Two focused native integration groups specify four distinct chromatic emitter
+hits and their CIE integral, actual hero/pupil retention, analytical translated
+camera motion, public beauty/AOV parity, exterior-medium mismatch, full-field
+paraxial refusal and continued shared-ray API refusal. The full modified tracer
+and all changed test/adapter sources passed Rust parsing and independent
+source/API review; these renderer integration groups were not executed here.
 
 Paraxial admission requires `a*abs(C_surface) <= 0.05`, object- and image-side
 pupil tangent slopes at most 0.1, and nominal raster chief-ray tangent radius

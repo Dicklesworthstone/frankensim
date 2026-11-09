@@ -51,7 +51,7 @@ fn animated(sequential: bool, front_radius: f64) -> AnimatedCamera {
     .unwrap()
 }
 
-fn scene() -> Scene {
+pub(super) fn scene() -> Scene {
     let white = lift_rgb([1.0; 3]);
     Scene {
         primitives: vec![Primitive {
@@ -76,7 +76,7 @@ fn scene() -> Scene {
     }
 }
 
-fn settings() -> Settings {
+pub(super) fn settings() -> Settings {
     Settings {
         width: 7,
         height: 5,
@@ -88,7 +88,7 @@ fn settings() -> Settings {
     }
 }
 
-fn shutter() -> ShutterInterval {
+pub(super) fn shutter() -> ShutterInterval {
     ShutterInterval::resolve(
         0.55,
         0.0,
@@ -99,7 +99,7 @@ fn shutter() -> ShutterInterval {
     .unwrap()
 }
 
-fn provenance() -> CinematicAovProvenance {
+pub(super) fn provenance() -> CinematicAovProvenance {
     let identity = hash_domain(
         "org.frankensim.render.sequential-motion-aov-test",
         b"native",
@@ -107,7 +107,7 @@ fn provenance() -> CinematicAovProvenance {
     CinematicAovProvenance::try_new(1, 0.5, 0.25, 0.75, identity, identity, identity).unwrap()
 }
 
-fn trace(scene: &Scene, camera: &AnimatedCamera, cx: &Cx<'_>, capture: bool) -> PathTraceSample {
+pub(super) fn trace(scene: &Scene, camera: &AnimatedCamera, cx: &Cx<'_>, capture: bool) -> PathTraceSample {
     let interval = shutter();
     let time = PathTime {
         interval,
@@ -136,12 +136,12 @@ fn trace(scene: &Scene, camera: &AnimatedCamera, cx: &Cx<'_>, capture: bool) -> 
     .unwrap()
 }
 
-fn previous(
+pub(super) fn previous(
     cx: &Cx<'_>,
     camera: &AnimatedCamera,
     scene: &Scene,
     traced: &PathTraceSample,
-    witness: Option<SequentialMotionWitness>,
+    witness: Option<SpectralMotionWitness>,
 ) -> Result<Option<[f64; 2]>, CinematicAovError> {
     let exposure = camera.admit_shutter(cx, shutter(), CutSide::After).unwrap();
     let time = traced.absolute_time_s.unwrap();
@@ -171,8 +171,8 @@ fn original_hero_pupil_and_sensor_tangent_drive_aligned_motion_without_changing_
             traced.xyz.map(f64::to_bits),
             uncaptured.xyz.map(f64::to_bits)
         );
-        assert!(uncaptured.sequential_motion.is_none());
-        let witness = traced.sequential_motion.unwrap();
+        assert!(uncaptured.spectral_motion.is_none());
+        let witness = traced.spectral_motion.unwrap();
         let primary = traced.primary.as_ref().unwrap();
         let time = traced.absolute_time_s.unwrap();
         let exposure = camera.admit_shutter(cx, shutter(), CutSide::After).unwrap();
@@ -298,12 +298,12 @@ fn native_clipping_missing_witness_local_inverse_and_camera_cut_have_distinct_ou
         let scene = scene();
         let camera = animated(true, 0.012);
         let traced = trace(&scene, &camera, cx, true);
-        let witness = traced.sequential_motion.unwrap();
+        let witness = traced.spectral_motion.unwrap();
         assert!(matches!(
             previous(cx, &camera, &scene, &traced, None),
             Err(CinematicAovError::SampleAlignmentMismatch)
         ));
-        let clipped_seed = SequentialMotionWitness {
+        let clipped_seed = SpectralMotionWitness {
             initial_tangent_xy: [1e6, 1e6],
             ..witness
         };
@@ -311,7 +311,7 @@ fn native_clipping_missing_witness_local_inverse_and_camera_cut_have_distinct_ou
             previous(cx, &camera, &scene, &traced, Some(clipped_seed)).unwrap(),
             None
         );
-        let invalid = SequentialMotionWitness {
+        let invalid = SpectralMotionWitness {
             initial_tangent_xy: [f64::NAN, 0.0],
             ..witness
         };
@@ -340,7 +340,7 @@ fn native_clipping_missing_witness_local_inverse_and_camera_cut_have_distinct_ou
         .unwrap();
         let at_cut = trace(&scene, &cut, cx, true);
         assert_eq!(
-            previous(cx, &cut, &scene, &at_cut, at_cut.sequential_motion).unwrap(),
+            previous(cx, &cut, &scene, &at_cut, at_cut.spectral_motion).unwrap(),
             None
         );
 
@@ -348,7 +348,7 @@ fn native_clipping_missing_witness_local_inverse_and_camera_cut_have_distinct_ou
         // stays absent; another wavelength must never supply a hero witness.
         let stopped = trace(&scene, &animated(true, 1e-9), cx, true);
         assert!(stopped.primary.is_none());
-        assert!(stopped.sequential_motion.is_none());
+        assert!(stopped.spectral_motion.is_none());
         assert_eq!(stopped.xyz, [0.0; 3]);
         assert!(matches!(
             TracerError::from(MotionVectorError::from(SequentialProjectionError::Camera(
@@ -365,7 +365,7 @@ fn ordinary_camera_previous_motion_retains_the_original_projection_bits() {
         let scene = scene();
         let camera = animated(false, 0.012);
         let traced = trace(&scene, &camera, cx, true);
-        assert!(traced.sequential_motion.is_none());
+        assert!(traced.spectral_motion.is_none());
         let time = traced.absolute_time_s.unwrap();
         let before = motion_frame_for_shape(
             cx,
