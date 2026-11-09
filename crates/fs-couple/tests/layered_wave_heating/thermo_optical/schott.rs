@@ -11,7 +11,8 @@ use fs_material::{
     state_point::{
         SPECTRAL_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES, SPECTRAL_DIELECTRIC_ABSORPTION_QUANTITY,
         SPECTRAL_DIELECTRIC_IOR_PROPERTIES, SPECTRAL_OPTICAL_WAVELENGTH_M_PROPERTIES,
-        SpectralOpticalStatePoint, SpectralTabulatedDielectricStatePoint,
+        SpectralDielectricAbsorptionStatePoint, SpectralOpticalStatePoint,
+        SpectralTabulatedDielectricStatePoint, resolve_spectral_dielectric_absorption_state_point,
         resolve_spectral_tabulated_dielectric_state_point,
     },
     thermo_optic::{SchottThermoOpticLaw, ThermoOpticCoefficients},
@@ -434,13 +435,17 @@ fn nonuniform_accepted_temperatures_drive_native_coherent_heat_and_next_step() {
 
 // Independent equal-exterior complex Airy series, using standard trig/exp.
 fn airy_absorption(wavelength: f64, t: f64) -> f64 {
+    airy_absorption_with_alpha(wavelength, t, ALPHA)
+}
+
+fn airy_absorption_with_alpha(wavelength: f64, t: f64, alpha: f64) -> f64 {
     let n = C64::new(
         phase(wavelength, t),
-        -ALPHA * wavelength / (2.0 * core::f64::consts::TAU),
+        -alpha * wavelength / (2.0 * core::f64::consts::TAU),
     );
     let r = (C64::ONE - n) / (C64::ONE + n);
     let angle = -core::f64::consts::TAU * n.re * DEPTH / wavelength;
-    let p = C64::new(angle.cos(), angle.sin()) * (-ALPHA * DEPTH / 2.0).exp();
+    let p = C64::new(angle.cos(), angle.sin()) * (-alpha * DEPTH / 2.0).exp();
     let denominator = C64::ONE - r * r * p * p;
     let reflected = r * (C64::ONE - p * p) / denominator;
     let transmitted = (C64::ONE - r * r) * p / denominator;
@@ -551,4 +556,266 @@ fn broadband_thermal_glass_matches_independent_airy_heat_and_refuses_endpoint_do
     ));
     assert_eq!(initial.cells(), &before);
     assert_eq!(initial.time_s(), 0.0);
+}
+
+fn current_alpha_card(upper: f64) -> MaterialCard {
+    let base = reference_card(ALPHA);
+    let mut claims = ClaimSet::new();
+    for (_, original) in base.claims().claims_ordered() {
+        let mut claim = original.clone();
+        let name = claim.key.name();
+        if SPECTRAL_OPTICAL_WAVELENGTH_M_PROPERTIES.contains(&name) {
+            claim.validity = ValidityDomain::unconstrained().with_quantity(
+                "T",
+                quantity(QuantityKind::AbsoluteTemperature),
+                280.0,
+                upper,
+            );
+        } else if SPECTRAL_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES.contains(&name) {
+            claim.value = PropertyValue::Curve {
+                abscissa: "T".into(),
+                abscissa_dims: fs_qty::Temperature::DIMS,
+                knots: vec![(280.0, 0.5 * ALPHA), (360.0, 2.5 * ALPHA)],
+                dims: claim.key.dims(),
+            };
+            claim.validity = ValidityDomain::unconstrained().with_quantity(
+                "T",
+                quantity(QuantityKind::AbsoluteTemperature),
+                280.0,
+                upper,
+            );
+            claim.interpolation = InterpolationPolicy::LinearInside;
+        }
+        claims.insert_claim(claim).unwrap();
+    }
+    MaterialCard::assemble(base.id().clone(), claims, vec![]).unwrap()
+}
+
+fn current_alpha_source(card: &MaterialCard) -> SchottThermoOpticalSource {
+    let source = resolve_spectral_dielectric_absorption_state_point(
+        card,
+        &point(300.0),
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    let complete = source
+        .resolved()
+        .with_additional_requirements(
+            card,
+            &[ScalarPropertyRequirement::try_new(
+                MU_NAME,
+                MU,
+                ScalarAdmissibility::StrictlyPositive,
+            )
+            .unwrap()],
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+    SchottThermoOpticalSource::try_with_current_absorption(
+        optical(card),
+        law(350.0),
+        SpectralDielectricAbsorptionStatePoint::try_from_material(complete).unwrap(),
+        "T",
+        GAP,
+        GAP,
+    )
+    .unwrap()
+}
+
+fn alpha_at(t: f64) -> f64 {
+    ALPHA * (0.5 + (t - 280.0) / 40.0)
+}
+
+#[test]
+fn current_alpha_refresh_keeps_reference_phase_and_original_actual_requirements_separate() {
+    let card = current_alpha_card(360.0);
+    let source = current_alpha_source(&card);
+    let hot = source.at_query_point(&card, &point(330.0)).unwrap();
+    assert!(
+        source
+            .reference_source()
+            .at_query_point(&card, &point(330.0))
+            .is_err()
+    );
+    assert!(std::ptr::eq(source.reference_source(), hot.reference_source()));
+    assert!(!hot.retains_reference_absorption());
+    assert_eq!(hot.resolved().properties().len(), 19);
+    assert_eq!(hot.current_absorption().unwrap().resolved(), hot.resolved());
+    assert_eq!(
+        hot.reference_source().resolved().state_coordinate("T"),
+        Some(300.0)
+    );
+    assert_eq!(hot.resolved().state_coordinate("T"), Some(330.0));
+    let index = hot
+        .response()
+        .unwrap()
+        .complex_index(OPTICAL_OMEGA)
+        .unwrap();
+    near(index.re, phase(550e-9, 330.0), 3e-15);
+    near(
+        index.im,
+        -alpha_at(330.0) * 550e-9 / (4.0 * core::f64::consts::PI),
+        3e-17,
+    );
+    assert_eq!(hot.at_query_point(&card, &point(300.0)).unwrap(), source);
+    assert!(source.at_query_point(&card, &point(361.0)).is_err());
+    let wrong = current_alpha_card(340.0);
+    assert!(source.at_query_point(&wrong, &point(330.0)).is_err());
+}
+
+#[test]
+fn current_alpha_drives_native_mono_and_broadband_heat_with_atomic_source_bounds() {
+    for upper in [360.0, 320.2] {
+        let card = current_alpha_card(upper);
+        let source = current_alpha_source(&card);
+        let outside = exterior();
+        let native = thermal_body(&card, 1);
+        let laws = native.thermal_laws(false).unwrap();
+        let bound = native.bind(&laws, ids()).unwrap();
+        let initial = initial_at(&bound, &[320.0]);
+        let before = initial.cells().clone();
+        let t0 = initial.temperature_k(bound.cell_ids()[0]).unwrap();
+        let wavelengths = [550e-9, 650e-9];
+        let lines = wavelengths.map(|w| ThermoOpticalSpectralLine {
+            angular_frequency_rad_s: core::f64::consts::TAU * LIGHT_SPEED / w,
+            incidence_cosine: 1.0,
+            polarization: Polarization::Te,
+        });
+        let limits = BroadbandThermoOpticalLimits {
+            maximum_lines: 2,
+            maximum_cell_line_pairs: 2,
+            maximum_cell_factor_pairs: 2,
+        };
+        let bindings = [ThermoOpticalLayer {
+            source: &source,
+            card: &card,
+        }];
+        let owner = BroadbandThermoOpticalWaveHeating::try_new(
+            &bound,
+            &outside,
+            DielectricResponse::Lossless(&outside),
+            &lines,
+            &bindings,
+            limits,
+            || false,
+        )
+        .unwrap();
+        let amplitudes: [f64; 2] = [1e6, 1.4e6];
+        let drives = amplitudes
+            .map(|a| LayeredWaveDrive::Coherent([C64::new(a, 0.0), C64::ZERO]));
+        let dt = 1e-10;
+        let mut powers = [0.0; 2];
+        let mut frozen_power = 0.0;
+        for (i, &w) in wavelengths.iter().enumerate() {
+            let flux = amplitudes[i].powi(2) / (2.0 * M * LIGHT_SPEED);
+            powers[i] = AREA * flux * airy_absorption_with_alpha(w, t0, alpha_at(t0));
+            frozen_power += AREA * flux * airy_absorption(w, t0);
+        }
+        let expected_energy = dt * powers.iter().sum::<f64>();
+        let expected_t = t0 + expected_energy / (RHO * AREA * DEPTH * CP);
+        assert!(expected_energy > 1.4 * dt * frozen_power);
+        let controls = LayeredThermalSolveControls::default();
+        let mut workspace = LayeredThermalWorkspace::new(1).unwrap();
+        if upper < expected_t {
+            assert!(
+                source
+                    .at_query_point(&card, &point(t0))
+                    .unwrap()
+                    .wave_response(lines[0].angular_frequency_rad_s)
+                    .is_ok()
+            );
+            assert!(matches!(
+                owner.advance_to(
+                    &initial,
+                    dt,
+                    &drives,
+                    conduction(),
+                    controls,
+                    &mut workspace,
+                    || false,
+                ),
+                Err(LayeredWaveHeatingError::Material(_))
+            ));
+        } else {
+            let result = owner
+                .advance_to(
+                    &initial,
+                    dt,
+                    &drives,
+                    conduction(),
+                    controls,
+                    &mut workspace,
+                    || false,
+                )
+                .unwrap();
+            near(
+                result.step.optical.absorbed_j,
+                expected_energy,
+                2e-11 * expected_energy,
+            );
+            near(
+                result
+                    .step
+                    .thermal
+                    .temperature_k(bound.cell_ids()[0])
+                    .unwrap(),
+                expected_t,
+                3e-9,
+            );
+            near(
+                result.step.heat_report.energy.stored_energy_change_j,
+                expected_energy,
+                3e-11,
+            );
+            let mono = ThermoOpticalWaveHeating::try_new(
+                &bound,
+                &outside,
+                DielectricResponse::Lossless(&outside),
+                lines[0].angular_frequency_rad_s,
+                1.0,
+                Polarization::Te,
+                &bindings,
+                || false,
+            )
+            .unwrap();
+            let one_line = mono
+                .advance_to(
+                    &initial,
+                    dt,
+                    drives[0],
+                    conduction(),
+                    controls,
+                    &mut workspace,
+                    || false,
+                )
+                .unwrap();
+            near(
+                one_line.step.optical.absorbed_j,
+                dt * powers[0],
+                2e-11 * dt * powers[0],
+            );
+            assert_eq!(one_line.applied_optical_states, result.applied_optical_states);
+            let next = owner
+                .advance_to(
+                    &result.step.thermal,
+                    2.0 * dt,
+                    &drives,
+                    conduction(),
+                    controls,
+                    &mut workspace,
+                    || false,
+                )
+                .unwrap();
+            assert_eq!(next.applied_optical_states, result.endpoint_optical_states);
+            assert_ne!(next.applied_optical_states, result.applied_optical_states);
+            let accepted_alpha = next.applied_optical_states[0]
+                .current_absorption()
+                .unwrap()
+                .absorption_per_m_at(550e-9)
+                .unwrap();
+            near(accepted_alpha, alpha_at(expected_t), 1e-5);
+        }
+        assert_eq!(initial.cells(), &before);
+        assert_eq!(initial.time_s(), 0.0);
+    }
 }

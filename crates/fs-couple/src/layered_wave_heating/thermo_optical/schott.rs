@@ -6,7 +6,9 @@ use super::{
     ThermoOpticalSource,
 };
 use fs_em::plane_wave::ThermoOpticOpticalResponse;
-use fs_material::thermo_optic::SchottThermoOpticLaw;
+use fs_material::{
+    state_point::SpectralDielectricAbsorptionStatePoint, thermo_optic::SchottThermoOpticLaw,
+};
 use std::sync::Arc;
 
 #[derive(Debug, PartialEq)]
@@ -16,6 +18,15 @@ struct Reference {
     temperature_axis: String,
     maximum_knot_span_m: f64,
     retain_reference_absorption: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Actual {
+    FixedLoss(ResolvedMaterialStatePoint),
+    CurrentAbsorption {
+        source: SpectralDielectricAbsorptionStatePoint,
+        maximum_knot_span_m: f64,
+    },
 }
 
 /// One immutable reference spectrum and the current cell's material state.
@@ -30,12 +41,14 @@ struct Reference {
 ///
 /// Reference data/law are shared across cells and endpoint snapshots. The
 /// actual state belongs to the same immutable card and carries the original
-/// static absolute-temperature coordinate and semantics. This source adds no
-/// pressure, stress, expansion, absorption-temperature or transient EM law.
+/// static absolute-temperature coordinate and semantics. The current-absorption
+/// mode refreshes original alpha claims alongside permeability without querying
+/// reference phase claims hot. No pressure, stress, expansion, invented
+/// absorption-temperature fit or transient EM law is added.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SchottThermoOpticalSource {
     reference: Arc<Reference>,
-    actual: ResolvedMaterialStatePoint,
+    actual: Actual,
 }
 
 impl SchottThermoOpticalSource {
@@ -51,7 +64,7 @@ impl SchottThermoOpticalSource {
         Self::try_new(
             optical,
             law,
-            actual,
+            Actual::FixedLoss(actual),
             temperature_axis,
             maximum_knot_span_m,
             false,
@@ -74,17 +87,44 @@ impl SchottThermoOpticalSource {
         Self::try_new(
             optical,
             law,
-            actual,
+            Actual::FixedLoss(actual),
             temperature_axis,
             maximum_knot_span_m,
             true,
         )
     }
 
+    /// Refresh independently sourced alpha(T,lambda) on each native cell state.
+    ///
+    /// The current source contains its own original wavelength/alpha claims and
+    /// same-state permeability. Reference phase remains at T0; current loss is
+    /// evaluated once by the existing full complex Maxwell response. Its table
+    /// has a separately retained gap admission, which is rechecked after refresh.
+    pub fn try_with_current_absorption(
+        optical: SpectralOpticalStatePoint,
+        law: SchottThermoOpticLaw,
+        absorption: SpectralDielectricAbsorptionStatePoint,
+        temperature_axis: &str,
+        maximum_reference_knot_span_m: f64,
+        maximum_absorption_knot_span_m: f64,
+    ) -> Result<Self, ReflectionError> {
+        Self::try_new(
+            optical,
+            law,
+            Actual::CurrentAbsorption {
+                source: absorption,
+                maximum_knot_span_m: maximum_absorption_knot_span_m,
+            },
+            temperature_axis,
+            maximum_reference_knot_span_m,
+            false,
+        )
+    }
+
     fn try_new(
         optical: SpectralOpticalStatePoint,
         law: SchottThermoOpticLaw,
-        actual: ResolvedMaterialStatePoint,
+        actual: Actual,
         temperature_axis: &str,
         maximum_knot_span_m: f64,
         retain_reference_absorption: bool,
@@ -122,6 +162,14 @@ impl SchottThermoOpticalSource {
         self.reference.retain_reference_absorption
     }
 
+    /// Original independently sourced loss at the current accepted cell state.
+    pub fn current_absorption(&self) -> Option<&SpectralDielectricAbsorptionStatePoint> {
+        match &self.actual {
+            Actual::CurrentAbsorption { source, .. } => Some(source),
+            Actual::FixedLoss(_) => None,
+        }
+    }
+
     /// Native complex response at this accepted cell state, before selecting a
     /// frequency. The source band's original endpoint admission is retained.
     pub fn response(&self) -> Result<ThermoOpticOpticalResponse<'_>, ReflectionError> {
@@ -129,18 +177,31 @@ impl SchottThermoOpticalSource {
             (&self.reference.optical).into(),
             self.reference.maximum_knot_span_m,
         )?;
+        if let Actual::CurrentAbsorption {
+            source,
+            maximum_knot_span_m,
+        } = &self.actual
+        {
+            return ThermoOpticOpticalResponse::try_with_current_absorption(
+                reference,
+                &self.reference.law,
+                source,
+                &self.reference.temperature_axis,
+                *maximum_knot_span_m,
+            );
+        }
         if self.reference.retain_reference_absorption {
             ThermoOpticOpticalResponse::try_with_reference_absorption(
                 reference,
                 &self.reference.law,
-                &self.actual,
+                self.resolved(),
                 &self.reference.temperature_axis,
             )
         } else {
             ThermoOpticOpticalResponse::try_lossless(
                 reference,
                 &self.reference.law,
-                &self.actual,
+                self.resolved(),
                 &self.reference.temperature_axis,
             )
         }
@@ -149,7 +210,10 @@ impl SchottThermoOpticalSource {
 
 impl ThermoOpticalSource for SchottThermoOpticalSource {
     fn resolved(&self) -> &ResolvedMaterialStatePoint {
-        &self.actual
+        match &self.actual {
+            Actual::FixedLoss(source) => source,
+            Actual::CurrentAbsorption { source, .. } => source.resolved(),
+        }
     }
 
     fn at_query_point(
@@ -159,7 +223,16 @@ impl ThermoOpticalSource for SchottThermoOpticalSource {
     ) -> Result<Self, MaterialStatePointError> {
         Ok(Self {
             reference: Arc::clone(&self.reference),
-            actual: self.actual.at_query_point(card, point)?,
+            actual: match &self.actual {
+                Actual::FixedLoss(source) => Actual::FixedLoss(source.at_query_point(card, point)?),
+                Actual::CurrentAbsorption {
+                    source,
+                    maximum_knot_span_m,
+                } => Actual::CurrentAbsorption {
+                    source: source.at_query_point(card, point)?,
+                    maximum_knot_span_m: *maximum_knot_span_m,
+                },
+            },
         })
     }
 

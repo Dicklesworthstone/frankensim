@@ -10260,3 +10260,31 @@ with zero AC forcing, consecutive coherent forced intervals against independent
 real-time work/heat integrals, physical caloric endpoints, and late-failure/
 clock/cancellation atomicity. They were authored and independently reviewed
 but not native-compiled or executed after the execution environment failed.
+
+## Sourced current-temperature absorption in native coherent heat
+
+`SchottThermoOpticalSource::try_with_current_absorption` composes its original
+T0 reference phase with a `SpectralDielectricAbsorptionStatePoint` carrying the
+actual cell's original wavelength/alpha claims and same-state permeability.
+The shared Maxwell response applies the catalog thermal phase correction from
+the immutable reference and evaluates the supplied current loss once. The
+source records separate original phase and absorption gap admissions; their
+supported wavelength bands must intersect.
+
+Both original monochromatic and broadband heat owners refresh that complete
+actual source at each accepted cell temperature, retain its selected claims,
+and reuse the existing complex field deposition and implicit thermal owner.
+Current loss is never frozen by an ordinary state-only refresh, and reference
+phase claims are never queried at a hot temperature. Applied and endpoint
+optical receipts retain the full current absorption source. A late alpha-domain
+or endpoint response refusal discards the candidate heat step atomically.
+
+The lossless and explicitly frozen-reference-alpha constructors retain their
+original behavior. This increment does not infer an absorption-temperature fit,
+material expansion, stress, pressure feedback or additional heat. Authored
+regressions specify original-source identity, hot-state alpha/mu refresh,
+independent complex Airy monochromatic and broadband caloric response,
+accepted-endpoint continuation and atomic current-source-bound refusal.
+Native regression execution and final formatter verification were unavailable
+after the session's executor outage; independent formula and source reviews
+do not substitute for that pending execution.
