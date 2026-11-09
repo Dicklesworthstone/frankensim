@@ -4157,17 +4157,23 @@ stored excitation and passive heat remain tied to the one shared cell history.
 Internal segment passage is not an external energy input. Per-beam photon
 closure and whole-system energy closure are audited independently; a residual
 is never normalized away or deposited as heat. Empty paths and empty model sets
-are supported under explicit positive admission bounds; repeated indices within
-one beam, unsupported photon energies and exceeded budgets are refused without
-mutating caller populations.
+are supported under explicit positive admission bounds. A path may revisit the
+same original cell; every visit keeps its own depth and exact position in the
+path while sharing that cell's one evolving inventory. In particular, returns
+separated by a passive absorber are not merged. Returning paths participate in
+the existing cyclic common-ground solve, and every occurrence counts against
+the original segment bound. Invalid cell indices, unsupported photon energies
+and exceeded budgets are refused without mutating caller populations.
 
 The physical boundary remains quasistatic directed transport with spatially
 homogeneous original cells and fixed constitutive coefficients during each
 call. Molecular depth per ground emitter is cross section times ray length
 divided by the original cell volume. Spatial refinement and the caller's native
 thermal/pulse clock remain separate accuracy requirements. Coherent standing
-waves, pump scattering/reflection, stimulated emission, excited-state
-absorption and active recycling of emitted light are not modeled.
+waves, stimulated emission and excited-state absorption are not modeled. This
+owner does not sample scattering or reflection: the geometry caller supplies
+complete ordered paths. Active recycling of emitted light is handled by the
+separate coupled owner below.
 
 Seven new focused regressions cover identical-path power splitting, original
 column equivalence, unique-cell afterglow, passive spectral overlap and empty
@@ -4180,6 +4186,15 @@ passed natively against the unchanged production math and reaction sources.
 The opposed transient used 256 accepted substeps, and the stiff steady case
 used two while retaining more than 691,000 pump events per emitter. Full
 renderer compilation remains a separate gate.
+
+Two further authored return-path regressions specify independent changing-ground
+fluence and passive absorption for an active cell, passive neighbor and return
+to the original active cell; and stationary locally maintained recycling with
+separate first/return depths and native event-energy attribution. The admission
+fixture checks invalid indices and counts repeated visits against the segment
+limit. The scalar reference equations have been checked independently; these
+new Rust regressions are unexecuted because the current workspace has no Rust,
+DSR or RCH toolchain. Earlier native pass counts do not cover this extension.
 
 ## Finite-inventory triplet annihilation and delayed fluorescence
 
@@ -4253,8 +4268,11 @@ state; they are admitted without normalization. Every photon must be
 affordable by its source state and each active receiving branch. Source
 Stokes heat, destination relaxation, passive heat, escaped photons and
 declared unresolved photons remain distinct. Photon flight time is neglected;
-paths are ballistic, cell-averaged inputs. Geometry/spectral quadrature and
-measured material validity remain caller responsibilities.
+paths are ordered, cell-averaged inputs and may return to an original cell.
+Every repeated visit uses that same cell's common ground history. The source
+and receiver ledgers retain the actual segment order, including passive losses
+between visits. Geometry sampling, spectral quadrature and measured material
+validity remain caller responsibilities.
 
 Each nonstationary stage solves mean radiative source rates together with
 the original common-ground optical closure. Sources are bounded by radiative
@@ -4286,9 +4304,9 @@ Returned external/recycled pump events, photon energies and relaxation heat
 are accumulated directly from actual channel events. Internal emitted and
 absorbed traffic is excluded from external input and from the global
 energy-balance scale. No population is clipped, no coefficient inferred and
-no residual deposited as heat. Refusal preserves caller state. Scattering,
-reflection, stimulated emission, excited-state absorption and finite photon
-flight are not introduced by this owner.
+no residual deposited as heat. Refusal preserves caller state. Scattering and
+reflection sampling, stimulated emission, excited-state absorption and finite
+photon flight are not introduced by this owner.
 
 Five focused native regression groups passed against the corrected production
 sources: independent exponential-integral self-return decay; exact emitted-fluence

@@ -190,10 +190,15 @@ fn g3_weak_energetic_beam_retains_heat_below_the_mean_photon_ulp() {
 }
 
 #[test]
-fn g0_refuses_duplicate_cells_bad_quanta_and_bounded_work_without_mutation() {
+fn g0_refuses_invalid_cells_bad_quanta_and_bounded_work_without_mutation() {
     let models = [model(); 2];
     assert!(SaturablePumpBeams::try_new(
-        &models, &[path(&[0, 0], 1e-12, 5e-19)], 2, 1, 2, || false,
+        &models, &[path(&[0, 2], 1e-12, 5e-19)], 2, 1, 2, || false,
+    ).is_err());
+    // Returning to a cell is valid, but its second segment still consumes
+    // the original aggregate geometry allowance.
+    assert!(SaturablePumpBeams::try_new(
+        &models, &[path(&[0, 1, 0], 1e-12, 5e-19)], 2, 1, 2, || false,
     ).is_err());
     assert!(SaturablePumpBeams::try_new(
         &models, &[path(&[0], 1e-12, 3e-19)], 2, 1, 2, || false,
