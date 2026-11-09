@@ -25,6 +25,8 @@ const WALLS: AxisBoundaries = AxisBoundaries::Ends {
 };
 
 mod molecular;
+mod moving;
+mod moving_chemistry_oracle;
 mod reservoir_profiles;
 
 fn mechanism(heat: f64, rate: f64, reference: f64) -> (MixtureGas, IdealGasKineticsV1) {
@@ -470,7 +472,8 @@ fn g1_hot_species_reservoir_survives_reactive_split_without_cfl_retry() {
         &[input],
         bytes,
         || false,
-    ).unwrap();
+    )
+    .unwrap();
     let reactor = CellChemistry::new(flow.gas().clone(), mechanism, chemistry(), || false).unwrap();
     let bytes = ReactingEuler3d::required_workspace_bytes(&flow, &reactor).unwrap();
     let mut reacting = ReactingEuler3d::with_chemistry(flow, reactor, bytes, || false).unwrap();
@@ -495,7 +498,11 @@ fn g1_hot_species_reservoir_survives_reactive_split_without_cfl_retry() {
         assert!(report.boundary_change.species_masses[0] > 0.0);
         assert!(report.chemistry.cell_solves > 0);
         assert_eq!(reacting.flow().reservoir(input.side), Some(input));
-        close(reacting.flow().time().value() - before_time, report.elapsed.value(), 2e-14);
+        close(
+            reacting.flow().time().value() - before_time,
+            report.elapsed.value(),
+            2e-14,
+        );
         balance(&report);
     }
 }

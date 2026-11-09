@@ -11435,3 +11435,46 @@ obtuse triangles verifies signed SIP reservoir terms: inactive limiting
 matches original consistent-mass LU evolution, while bounded heating closes
 the budget with nonzero limiter boundary exchange. The prior six scalar
 checks also remain green. Full Cargo/runtime validation was not run.
+
+
+### Reacting gas on translating and deforming three-dimensional volumes
+
+`spatial::mixture::reactive::ReactingEuler3d::step_moving` composes the original
+prepared cell chemistry as C(dt/2), conservative ALE(dt), C(dt/2). The chemistry
+halves use the actual old and new cell volumes, retain all three momenta and
+physical chemical-plus-kinetic energy, and report their original species and
+referenced-energy source changes. `step_moving_with_dissipation` surrounds this
+composition with the original molecular D(dt/2) intervals on the same old/new
+geometry. Maxwell--Stefan species transport, partial enthalpies, Fourier heat,
+full Newtonian stress and normal moving-wall work retain their original owners
+and prepared numerical buffers.
+
+Closed reflecting and periodic domains admit translation and the existing
+single-axis deformation. All phases share one actual accepted interval; an ALE
+shortening restarts the complete source/transport composition. The final state
+must remain inside the chemistry temperature interval and the mesh-relative
+acoustic bound after the last source, including inviscid heat release. No
+per-trial whole-field allocation or alternative reaction/transport law is added.
+
+`MovingReactiveStepReport3d` retains the complete original reacting report and
+separate six-side molecular mechanical-work and wall-heat integrals. Species
+and referenced-energy residuals subtract the actual chemical source, while an
+independent physical-energy residual restores the species energy references
+using conservative differences. Pressure work remains in the central ALE
+report. Chemistry contributes no boundary species flux or external force.
+
+Accepted cells, geometry, physical time, source binding, reports and complete
+face transfers publish together after the final cancellation checkpoint. A
+refused trial leaves the accepted owners unchanged; reusable trial geometry is
+reset from the accepted field before either moving or stationary stepping.
+Open ports, retained SGS histories, finite tangential wall inertia and
+simultaneous deformation of multiple axes are not composed by these entries.
+The selected reactor method retains its own accuracy; symmetric ordering does
+not establish a fully discrete entropy law or a splitting convergence order.
+
+Focused regressions cover stationary native-path parity, translating exothermic
+flow against the original homogeneous reactor, whole-interval acoustic replay,
+all three deformation axes with stress/heat/source balance, energy-reference
+invariance, source rebinding and early/late cancellation. An independent
+bimolecular logistic solution checks concentration-dependent conversion on both
+actual volumes under compression and expansion on every axis.
