@@ -19,9 +19,12 @@ mod power;
 /// Simultaneous original terminal controls inside the nonlinear source closure.
 pub mod terminals;
 use contact::{
+    ContactQuadratureRefinementControls, ContactQuadratureRefinementReport,
     ContactResponseControls, ContactResponseError, ContactResponseQuadrature,
     ContactResponseSample, ContactResponseSources,
 };
+
+use contact::refinement::{ContactQuadratureSnapshot, RefinementWork};
 
 pub const MAX_RESPONSE_ITERATIONS: usize = 128;
 
@@ -231,6 +234,8 @@ pub struct ConductionResponseReport {
     /// Complete actual-field AND relaxed-coordinate source queries, excluding
     /// initial binding admission. Full steps and fixed sources add no queries.
     pub source_evaluations: usize,
+    /// Resolution estimate and cumulative actual work when refinement is enabled.
+    pub contact_quadrature_refinement: Option<ContactQuadratureRefinementReport>,
 }
 
 pub struct ConductionResponseCandidate {
@@ -468,6 +473,31 @@ impl PlanarConductionResponse {
                 "contact quadrature requires original interface response laws",
             ))?;
         self.contact_sources = Some(bindings.with_quadrature(quadrature)?);
+        Ok(self)
+    }
+
+    /// Refine contact integration until independently converged original-source
+    /// solves agree in local voltage drops, currents, bulk/contact heat and J.
+    /// Every rung begins at the same original external state. The accepted
+    /// numerical policy keeps its declared initial resolution for subsequent
+    /// thermal/circuit solves; the report names the actual finer stencil.
+    ///
+    /// With refinement, `maximum_iterations` also bounds the TOTAL frozen-field
+    /// trials, preserving the remaining-work cap supplied by thermal owners.
+    /// Complete worst-case rung work is admitted before a solve. This estimates
+    /// resolution convergence; it does not certify quadrature or mesh error.
+    pub fn with_contact_quadrature_refinement(
+        mut self,
+        quadrature: ContactResponseQuadrature,
+        controls: ContactQuadratureRefinementControls,
+    ) -> Result<Self, ConductionResponseError> {
+        let bindings = self
+            .contact_sources
+            .take()
+            .ok_or(ConductionResponseError::Invalid(
+                "contact refinement requires original interface response laws",
+            ))?;
+        self.contact_sources = Some(bindings.with_quadrature_refinement(quadrature, controls)?);
         Ok(self)
     }
 
@@ -911,6 +941,186 @@ impl PlanarConductionResponse {
     where
         E: From<ConductionResponseError>,
     {
+        let quadrature = self
+            .contact_sources
+            .as_ref()
+            .and_then(ContactResponseSources::quadrature);
+        let Some(refinement) = self
+            .contact_sources
+            .as_ref()
+            .and_then(ContactResponseSources::quadrature_refinement)
+        else {
+            return self.solve_coupled_fixed_candidate(
+                seeds,
+                contacts,
+                quadrature,
+                assembly,
+                field_controls,
+                controls,
+                cancelled,
+                solve,
+            );
+        };
+        poll(cancelled).map_err(ConductionResponseError::from)?;
+        controls.validate()?;
+        let initial = quadrature.ok_or(ConductionResponseError::Invalid(
+            "contact refinement requires its original initial quadrature",
+        ))?;
+        let mut current = initial;
+        // Existing thermal owners narrow maximum_iterations to their remaining
+        // circuit trials. Keep that cap global across all refinement rungs.
+        let mut bounded = refinement;
+        bounded.maximum_field_solves = bounded
+            .maximum_field_solves
+            .min(controls.maximum_iterations);
+        let mut work = RefinementWork::new(bounded).map_err(ConductionResponseError::from)?;
+        let mut previous = None;
+        for refinements in 0..=refinement.maximum_refinements {
+            poll(cancelled).map_err(ConductionResponseError::from)?;
+            let points = current
+                .edge_points(contacts.len())
+                .map_err(ConductionResponseError::from)?;
+            let total_points =
+                points
+                    .checked_mul(contacts.len())
+                    .ok_or(ConductionResponseError::Invalid(
+                        "contact refinement point count overflows",
+                    ))?;
+            let mut rung_controls = controls;
+            rung_controls.maximum_iterations = work
+                .iteration_allowance(controls.maximum_iterations, 1, seeds.len(), total_points)
+                .map_err(ConductionResponseError::from)?;
+            work.reserve(
+                rung_controls.maximum_iterations,
+                1,
+                seeds.len(),
+                total_points,
+            )
+            .map_err(ConductionResponseError::from)?;
+            // All trials see the same original external physical state and the
+            // callback's same accepted history. Neither coarse sources nor its
+            // private driver proposal advance the next rung.
+            let (mut candidate, driver) = self.solve_coupled_fixed_candidate(
+                seeds.clone(),
+                contacts.clone(),
+                Some(current),
+                assembly,
+                field_controls,
+                rung_controls,
+                cancelled,
+                &mut solve,
+            )?;
+            work.record(
+                candidate.report.field_solves,
+                candidate.report.source_evaluations,
+            )
+            .map_err(ConductionResponseError::from)?;
+            let snapshot = self.refinement_snapshot(&candidate.report, cancelled)?;
+            if let Some(coarse) = &previous {
+                let differences = refinement
+                    .compare(coarse, &snapshot, cancelled)
+                    .map_err(ConductionResponseError::from)?;
+                if differences.converged {
+                    let report = work.report(
+                        initial.subdivisions,
+                        current.subdivisions,
+                        refinements,
+                        differences,
+                    );
+                    candidate.report.field_solves = report.field_solves;
+                    candidate.report.source_evaluations = report.source_evaluations;
+                    candidate.report.contact_quadrature_refinement = Some(report);
+                    poll(cancelled).map_err(ConductionResponseError::from)?;
+                    return Ok((candidate, driver));
+                }
+                if refinements == refinement.maximum_refinements {
+                    return Err(ConductionResponseError::from(
+                        ContactResponseError::QuadratureNotConverged {
+                            subdivisions: current.subdivisions,
+                            refinements,
+                            differences,
+                        },
+                    )
+                    .into());
+                }
+            }
+            previous = Some(snapshot);
+            // Discard the coarse accepted operator and driver proposal before
+            // preparing another one; only the compact observations continue.
+            drop(candidate);
+            drop(driver);
+            current.subdivisions =
+                current
+                    .subdivisions
+                    .checked_mul(2)
+                    .ok_or(ConductionResponseError::Invalid(
+                        "contact refinement subdivision count overflows",
+                    ))?;
+        }
+        unreachable!("positive bounded refinement always compares or refuses")
+    }
+
+    fn refinement_snapshot(
+        &self,
+        report: &ConductionResponseReport,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ContactQuadratureSnapshot, ConductionResponseError> {
+        let mut result = ContactQuadratureSnapshot {
+            voltage_differences_v: Vec::new(),
+            current_a: Vec::new(),
+            power_w: report.cell_power_w.clone(),
+            current_density_a_m2: Vec::new(),
+        };
+        for (cell, face) in self.mesh().faces().iter().enumerate() {
+            poll(cancelled)?;
+            let e = report.electric_field_v_m[cell];
+            let points = face.map(|v| self.mesh().vertices()[v as usize]);
+            for [a, b] in [[0, 1], [1, 2], [2, 0]] {
+                let edge = [points[b][0] - points[a][0], points[b][1] - points[a][1]];
+                result
+                    .voltage_differences_v
+                    .push(finite(-e[0].mul_add(edge[0], e[1] * edge[1]))?);
+            }
+            result
+                .current_density_a_m2
+                .extend_from_slice(&report.current_density_a_m2[cell]);
+        }
+        for contact in &report.contact_response {
+            poll(cancelled)?;
+            result
+                .voltage_differences_v
+                .extend_from_slice(&contact.voltage_jump_v);
+            result.current_a.push(contact.current_a);
+            result.power_w.push(contact.power_w);
+            result
+                .current_density_a_m2
+                .extend_from_slice(&contact.current_density_a_m2);
+        }
+        result
+            .current_a
+            .extend(report.nodal_boundary_current_a.iter().flatten().copied());
+        result.power_w.push(report.power_w);
+        Ok(result)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_coupled_fixed_candidate<D, E>(
+        &self,
+        seeds: Vec<ResolvedConductorState>,
+        contacts: Vec<ConductionContact>,
+        quadrature: Option<ContactResponseQuadrature>,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: ConductionResponseControls,
+        cancelled: &mut impl FnMut() -> bool,
+        mut solve: impl for<'p> FnMut(
+            &'p PlanarConduction,
+            &mut dyn FnMut() -> bool,
+        ) -> Result<(ConductionField<'p>, D), E>,
+    ) -> Result<(ConductionResponseCandidate, D), E>
+    where
+        E: From<ConductionResponseError>,
+    {
         poll(cancelled).map_err(ConductionResponseError::from)?;
         controls.validate()?;
         self.native
@@ -929,10 +1139,6 @@ impl PlanarConductionResponse {
         }
         let mut applied = seeds.clone();
         let mut applied_contacts = contacts.clone();
-        let quadrature = self
-            .contact_sources
-            .as_ref()
-            .and_then(|bindings| bindings.quadrature());
         let mut applied_contact_samples = Vec::new();
         if let Some(quadrature) = quadrature {
             let points = quadrature
@@ -1120,6 +1326,7 @@ impl PlanarConductionResponse {
             poll(cancelled).map_err(ConductionResponseError::from)?;
             if converged && absolute_power <= field_controls.power_tolerance_w {
                 let report = ConductionResponseReport {
+                    contact_quadrature_refinement: None,
                     voltage_v: field.voltage_v().to_vec(),
                     relative_voltage_v: field.relative_voltage_v().to_vec(),
                     reference_voltage_v: field.reference_voltage_v().to_vec(),

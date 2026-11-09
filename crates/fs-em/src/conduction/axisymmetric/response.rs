@@ -165,6 +165,20 @@ impl AxisymmetricConductionResponse {
         })
     }
 
+    /// Automatically refine the original swept contact integration, retaining
+    /// the actual radial measure and the common nonlinear work/accuracy gates.
+    pub fn with_contact_quadrature_refinement(
+        self,
+        quadrature: ContactResponseQuadrature,
+        controls: crate::conduction::response::contact::ContactQuadratureRefinementControls,
+    ) -> Result<Self, ConductionResponseError> {
+        Ok(Self {
+            core: self
+                .core
+                .with_contact_quadrature_refinement(quadrature, controls)?,
+        })
+    }
+
     /// Requery original sources at relaxed owned electrical coordinates.
     /// The weight lies in (0,1]; all native and constitutive gates remain binding.
     pub fn with_relaxation(self, weight: f64) -> Result<Self, ConductionResponseError> {

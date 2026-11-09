@@ -8,8 +8,10 @@
 //! Positive source values do not guarantee convergence or uniqueness.
 
 use super::*;
+use crate::conduction::response::contact::refinement::{ContactQuadratureSnapshot, RefinementWork};
 use crate::conduction::response::contact::{
-    self, ContactResponseControls, ContactResponseError, ContactResponseQuadrature,
+    self, ContactQuadratureRefinementControls, ContactQuadratureRefinementReport,
+    ContactResponseControls, ContactResponseError, ContactResponseQuadrature,
     ContactResponseSample, ContactResponseSources,
 };
 pub use crate::conduction::response::terminals::{
@@ -171,6 +173,9 @@ pub struct SpatialConductionResponseReport {
     /// Actual-field and damped-coordinate source queries, excluding initial
     /// binding. Full steps and fixed sources need no extra damping queries.
     pub source_evaluations: usize,
+    /// Successive fully converged integration resolutions, when requested.
+    /// This is a discretization comparison, not a guaranteed error enclosure.
+    pub contact_quadrature_refinement: Option<ContactQuadratureRefinementReport>,
 }
 
 pub struct SpatialConductionResponseCandidate {
@@ -360,6 +365,31 @@ impl SpatialConductionResponse {
                     "contact quadrature requires original interface response laws",
                 ))?;
         self.contact_sources = Some(bindings.with_quadrature(quadrature)?);
+        Ok(self)
+    }
+
+    /// Refine original triangular contact integration until successive complete
+    /// source/field solves satisfy the requested dimensional comparison gates.
+    ///
+    /// Each rung doubles the subdivisions and starts from the same external
+    /// source context and accepted driver history. The point cap applies at
+    /// every rung; the refinement and native field-solve caps apply to the whole
+    /// invocation. Admission reserves a complete worst-case nonlinear rung,
+    /// while reports count only actual work. Resolution agreement is an
+    /// estimate, not a guaranteed quadrature bound or a mesh-error certificate.
+    pub fn with_contact_quadrature_refinement(
+        mut self,
+        quadrature: ContactResponseQuadrature,
+        controls: ContactQuadratureRefinementControls,
+    ) -> Result<Self> {
+        quadrature.triangle_points(self.contacts().len())?;
+        let bindings =
+            self.contact_sources
+                .take()
+                .ok_or(SpatialConductionResponseError::Invalid(
+                    "contact refinement requires original interface response laws",
+                ))?;
+        self.contact_sources = Some(bindings.with_quadrature_refinement(quadrature, controls)?);
         Ok(self)
     }
 
@@ -720,11 +750,206 @@ impl SpatialConductionResponse {
         )
     }
 
+    /// Capture gauge-invariant observables on the unchanged original geometry.
+    /// Native E retains the differences used by the solve, even when an
+    /// absolute voltage reference is too large for subtracting reported values.
+    fn contact_quadrature_snapshot(
+        &self,
+        report: &SpatialConductionResponseReport,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ContactQuadratureSnapshot> {
+        let mut snapshot = ContactQuadratureSnapshot {
+            voltage_differences_v: Vec::new(),
+            current_a: Vec::new(),
+            power_w: Vec::new(),
+            current_density_a_m2: Vec::new(),
+        };
+        for (cell, tet) in self.mesh().tets.iter().enumerate() {
+            check(cancelled)?;
+            let e = report.field.electric_field_v_m[cell];
+            let origin = self.positions_m()[tet[0] as usize];
+            for &vertex in &tet[1..] {
+                let position = self.positions_m()[vertex as usize];
+                let drop = e[0].mul_add(
+                    position[0] - origin[0],
+                    e[1].mul_add(position[1] - origin[1], e[2] * (position[2] - origin[2])),
+                );
+                snapshot.voltage_differences_v.push(finite(drop)?);
+            }
+            snapshot
+                .current_density_a_m2
+                .extend(report.field.current_density_a_m2[cell]);
+            snapshot.power_w.push(report.field.cell_power_w[cell]);
+        }
+        for contact in &report.field.contacts {
+            check(cancelled)?;
+            snapshot
+                .voltage_differences_v
+                .extend(contact.voltage_jump_v);
+            snapshot.current_a.push(contact.current_a);
+            snapshot.power_w.push(contact.power_w);
+            snapshot
+                .current_density_a_m2
+                .extend(contact.current_density_a_m2);
+        }
+        for current in &report.field.nodal_boundary_current_a {
+            check(cancelled)?;
+            if let Some(current) = current {
+                snapshot.current_a.push(*current);
+            }
+        }
+        snapshot.power_w.push(report.field.power_w);
+        snapshot.power_w.push(report.field.supplied_power_w);
+        Ok(snapshot)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn solve_coupled_candidate<D, E>(
         &self,
         seeds: Vec<ResolvedConductorState>,
         contacts: Vec<SpatialConductionContact>,
+        solves_per_iteration: usize,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: SpatialConductionResponseControls,
+        cancelled: &mut impl FnMut() -> bool,
+        mut solve: impl FnMut(
+            &SpatialConduction,
+            &mut dyn FnMut() -> bool,
+        ) -> Result<(SpatialConductionField, D), E>,
+    ) -> Result<(SpatialConductionResponseCandidate, D), E>
+    where
+        E: From<SpatialConductionResponseError>,
+    {
+        check(cancelled)?;
+        let Some(mut refinement) = self
+            .contact_sources
+            .as_ref()
+            .and_then(ContactResponseSources::quadrature_refinement)
+        else {
+            return self.solve_fixed_contact_candidate(
+                seeds,
+                contacts,
+                self.contact_sources
+                    .as_ref()
+                    .and_then(ContactResponseSources::quadrature),
+                solves_per_iteration,
+                assembly,
+                field_controls,
+                controls,
+                cancelled,
+                solve,
+            );
+        };
+        let initial = self
+            .contact_sources
+            .as_ref()
+            .and_then(ContactResponseSources::quadrature)
+            .ok_or(SpatialConductionResponseError::Invalid(
+                "contact refinement requires an initial integration rule",
+            ))?;
+        // The pre-existing native budget remains global across all discarded
+        // resolutions, including every basis solve of a reusable terminal map.
+        refinement.maximum_field_solves = refinement
+            .maximum_field_solves
+            .min(controls.maximum_field_solves);
+        let mut work =
+            RefinementWork::new(refinement).map_err(SpatialConductionResponseError::from)?;
+        let mut quadrature = initial;
+        let mut previous = None;
+        for refinements in 0..=refinement.maximum_refinements {
+            check(cancelled)?;
+            let points = quadrature
+                .triangle_points(contacts.len())
+                .map_err(SpatialConductionResponseError::from)?;
+            let total_points = points.checked_mul(contacts.len()).ok_or(
+                SpatialConductionResponseError::Invalid("contact point count overflows"),
+            )?;
+            let mut rung_controls = controls;
+            rung_controls.maximum_iterations = work
+                .iteration_allowance(
+                    controls.maximum_iterations,
+                    solves_per_iteration,
+                    seeds.len(),
+                    total_points,
+                )
+                .map_err(SpatialConductionResponseError::from)?;
+            work.reserve(
+                rung_controls.maximum_iterations,
+                solves_per_iteration,
+                seeds.len(),
+                total_points,
+            )
+            .map_err(SpatialConductionResponseError::from)?;
+            let (mut candidate, driver) = self.solve_fixed_contact_candidate(
+                seeds.clone(),
+                contacts.clone(),
+                Some(quadrature),
+                solves_per_iteration,
+                assembly,
+                field_controls,
+                rung_controls,
+                cancelled,
+                &mut solve,
+            )?;
+            work.record(
+                candidate.report.field_solves,
+                candidate.report.source_evaluations,
+            )
+            .map_err(SpatialConductionResponseError::from)?;
+            let current = self.contact_quadrature_snapshot(&candidate.report, cancelled)?;
+            if let Some(previous) = &previous {
+                let differences = refinement
+                    .compare(previous, &current, cancelled)
+                    .map_err(SpatialConductionResponseError::from)?;
+                if differences.converged {
+                    check(cancelled)?;
+                    let report = work.report(
+                        initial.subdivisions,
+                        quadrature.subdivisions,
+                        refinements,
+                        differences,
+                    );
+                    candidate.report.field_solves = report.field_solves;
+                    candidate.report.source_evaluations = report.source_evaluations;
+                    candidate.report.contact_quadrature_refinement = Some(report);
+                    // Preserve the authored initial rule for subsequent thermal
+                    // trials; the native accepted operator still owns this fine stencil.
+                    candidate.problem.contact_sources = self.contact_sources.clone();
+                    return Ok((candidate, driver));
+                }
+                if refinements == refinement.maximum_refinements {
+                    return Err(SpatialConductionResponseError::from(
+                        ContactResponseError::QuadratureNotConverged {
+                            subdivisions: quadrature.subdivisions,
+                            refinements,
+                            differences,
+                        },
+                    )
+                    .into());
+                }
+            }
+            previous = Some(current);
+            // Neither a constitutive nor an integration retry advances the
+            // accepted physical driver history. Drop its proposal and sources.
+            drop(candidate);
+            drop(driver);
+            quadrature.subdivisions = quadrature.subdivisions.checked_mul(2).ok_or(
+                SpatialConductionResponseError::Invalid("contact refinement resolution overflows"),
+            )?;
+        }
+        Err(SpatialConductionResponseError::Invalid(
+            "contact refinement did not compare two resolutions",
+        )
+        .into())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_fixed_contact_candidate<D, E>(
+        &self,
+        seeds: Vec<ResolvedConductorState>,
+        contacts: Vec<SpatialConductionContact>,
+        quadrature: Option<ContactResponseQuadrature>,
         solves_per_iteration: usize,
         assembly: WeightedAssemblyLimits,
         field_controls: ConductionControls,
@@ -798,10 +1023,6 @@ impl SpatialConductionResponse {
         }
         let mut applied = seeds.clone();
         let mut applied_contacts = contacts.clone();
-        let quadrature = self
-            .contact_sources
-            .as_ref()
-            .and_then(|bindings| bindings.quadrature());
         let mut applied_contact_samples = Vec::new();
         if let Some(quadrature) = quadrature {
             let points = quadrature
@@ -1002,6 +1223,7 @@ impl SpatialConductionResponse {
                     evaluated,
                     evaluated_contacts,
                     iterations: iteration,
+                    contact_quadrature_refinement: None,
                     field_solves,
                     source_evaluations: iteration
                         .checked_mul(seeds.len())

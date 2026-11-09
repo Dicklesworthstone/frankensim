@@ -9,6 +9,12 @@ use fs_material::electrical_interface::{
 use fs_material::state_point::MaterialStatePointError;
 use std::sync::Arc;
 
+pub(crate) mod refinement;
+pub use refinement::{
+    ContactQuadratureDifferences, ContactQuadratureRefinementControls,
+    ContactQuadratureRefinementReport,
+};
+
 /// Separate dimensional contact-law gates. Voltage and density tolerances also
 /// bound variation across electrically varying traces; static traces retain
 /// the native nonuniform P1 response.
@@ -47,6 +53,20 @@ pub enum ContactResponseError {
     Cancelled,
     Material(MaterialStatePointError),
     Invalid(&'static str),
+    /// A complete refinement rung cannot fit the remaining declared work.
+    QuadratureBudget {
+        work: &'static str,
+        completed: usize,
+        required: usize,
+        maximum: usize,
+    },
+    /// Both resolutions closed their original source laws, but their physical
+    /// observations still differ beyond the declared refinement tolerances.
+    QuadratureNotConverged {
+        subdivisions: usize,
+        refinements: usize,
+        differences: ContactQuadratureDifferences,
+    },
     NonuniformTrace {
         contact: usize,
         voltage_spread_v: f64,
@@ -113,6 +133,7 @@ pub struct ContactResponseSources {
     laws: Arc<[ScalarElectricalInterfaceResponse]>,
     controls: ContactResponseControls,
     quadrature: Option<ContactResponseQuadrature>,
+    quadrature_refinement: Option<ContactQuadratureRefinementControls>,
 }
 impl ContactResponseSources {
     pub fn new(
@@ -124,6 +145,7 @@ impl ContactResponseSources {
             laws: laws.into(),
             controls,
             quadrature: None,
+            quadrature_refinement: None,
         })
     }
     pub fn laws(&self) -> &[ScalarElectricalInterfaceResponse] {
@@ -135,13 +157,28 @@ impl ContactResponseSources {
     pub fn quadrature(&self) -> Option<ContactResponseQuadrature> {
         self.quadrature
     }
+    /// Automatic resolution policy retained through frozen and thermal handoffs.
+    pub fn quadrature_refinement(&self) -> Option<ContactQuadratureRefinementControls> {
+        self.quadrature_refinement
+    }
     pub(crate) fn with_quadrature(
         mut self,
         quadrature: ContactResponseQuadrature,
     ) -> Result<Self, ContactResponseError> {
         quadrature.edge_points(self.laws.len())?;
         self.quadrature = Some(quadrature);
+        self.quadrature_refinement = None;
         Ok(self)
+    }
+    pub(crate) fn with_quadrature_refinement(
+        self,
+        quadrature: ContactResponseQuadrature,
+        controls: ContactQuadratureRefinementControls,
+    ) -> Result<Self, ContactResponseError> {
+        controls.validate()?;
+        let mut result = self.with_quadrature(quadrature)?;
+        result.quadrature_refinement = Some(controls);
+        Ok(result)
     }
 }
 

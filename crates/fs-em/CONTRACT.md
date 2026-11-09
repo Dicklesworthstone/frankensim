@@ -8870,3 +8870,46 @@ including signed Poynting and a2^49 rad/s common proper carrier. The exterior
 two-tone one-point reservation admits exactly204 terms and falls back at203.
 This is actual numerical-helper validation; full native material/FFT constructors
 and the workspace suite remain unrun.
+
+## Adaptive integration of original nonlinear electrical contacts
+
+`with_contact_quadrature_refinement` closes the original bulk and interface laws
+at each successively doubled contact resolution on planar, revolved and original
+tetrahedral traces. Every rung starts from the same supplied material/contact
+context and the external driver's same accepted history. The finer candidate is
+accepted only after consecutive complete solves agree in physical edge voltage
+drops, original contact endpoint jumps, individual contact and boundary currents,
+bulk/contact and total heat, and current-density components. Separate comparisons
+prevent opposing local errors from cancelling. Physical edge drops recovered
+from native electric fields remain independent of absolute voltage references.
+
+The common policy bounds subdivision refinements, total contact points, frozen
+field trials and original-source queries. Before a rung, its iteration allowance
+is narrowed by the remaining global work and its full worst-case queries are
+reserved, including relaxed-coordinate reevaluation. This conservative source
+reservation may refuse a solve that could converge more cheaply. Successful
+reports charge actual work across all discarded and accepted rungs. For the
+planar and axisymmetric response owners, the original `maximum_iterations`
+also caps total frozen-field trials across refinement, preserving the remaining
+budget passed by thermal owners. The tetrahedral `maximum_field_solves` remains
+global, including every basis solve for an explicitly requested terminal matrix.
+Callback-internal work retains its separate driver bounds.
+
+The accepted native operator retains its actual finer stencil; continuing source
+policy retains the declared initial resolution. Frozen and thermal handoffs
+therefore repeat the same refinement procedure from their refreshed physical
+state. Fixed quadrature explicitly clears automatic refinement. Cancellation,
+source failure, unresolved differences or work/point exhaustion returns no
+accepted candidate, and refinement differences never enter physical heat.
+
+Three executed shared-helper tests cover componentwise acceptance, conservative
+admission with actual accounting, invalid observations and cancellation. Planar
+integration regressions cover an exact nonuniform field, explicit sums of
+discarded-rung work, continuation and refusals, plus a nonlinear contact whose
+current and heat are independently integrated analytically. Tetrahedral
+regressions compare the accepted native field and actual cumulative work against
+successive fixed-resolution solves, preserve source policy through continuation,
+and exercise unresolved, point/work-budget and late-cancellation refusals.
+The integration regressions have been authored and formatted, but not compiled
+or executed in this environment. Resolution convergence is an estimate, not a
+quadrature, mesh-error, uniqueness or empirical material certificate.
