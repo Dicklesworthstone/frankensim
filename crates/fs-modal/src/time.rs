@@ -56,11 +56,12 @@ pub use harmonic::{
     HarmonicForcePullback, HarmonicForceSensitivityFrame, HarmonicForceTransition,
     HarmonicPowerGradient, MAX_HARMONIC_TONES, ModalAffineTonePowerGradient,
     ModalAffineTonePowerSourceGradient, ModalAffineTonePullback, ModalAffineToneSourcePullback,
-    ModalToneBudget, ModalTonePowerDerivative, ModalTonePowerGradient,
-    ModalTonePowerGradientBudget, ModalTonePowerSourceGradient, ModalTonePullback,
-    ModalToneSensitivityBudget, ModalToneSensitivityFrame, ModalToneSourcePullback,
-    ModalToneSourceSensitivity, PreparedHarmonicForce, PreparedHarmonicForceSensitivity,
-    PreparedHarmonicPowerSensitivity, PreparedModalHarmonic, PreparedModalTonePowerGradient,
+    ModalToneBudget, ModalTonePowerDerivative, ModalTonePowerFrequencyGradient,
+    ModalTonePowerGradient, ModalTonePowerGradientBudget, ModalTonePowerSourceGradient,
+    ModalTonePullback, ModalToneSensitivityBudget, ModalToneSensitivityFrame,
+    ModalToneSourcePullback, ModalToneSourceSensitivity, PreparedHarmonicForce,
+    PreparedHarmonicForceSensitivity, PreparedHarmonicPowerSensitivity, PreparedModalHarmonic,
+    PreparedModalTonePowerFrequencyGradient, PreparedModalTonePowerGradient,
     PreparedModalToneSensitivity, PreparedModalTones,
 };
 

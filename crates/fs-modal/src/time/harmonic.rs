@@ -27,9 +27,10 @@ pub use sensitivity::{
 pub use tones::{
     MAX_HARMONIC_TONES, ModalAffineTonePowerGradient, ModalAffineTonePowerSourceGradient,
     ModalAffineTonePullback, ModalAffineToneSourcePullback, ModalToneBudget,
-    ModalTonePowerDerivative, ModalTonePowerGradient, ModalTonePowerGradientBudget,
-    ModalTonePowerSourceGradient, ModalTonePullback, ModalToneSensitivityBudget,
-    ModalToneSensitivityFrame, ModalToneSourcePullback, ModalToneSourceSensitivity,
+    ModalTonePowerDerivative, ModalTonePowerFrequencyGradient, ModalTonePowerGradient,
+    ModalTonePowerGradientBudget, ModalTonePowerSourceGradient, ModalTonePullback,
+    ModalToneSensitivityBudget, ModalToneSensitivityFrame, ModalToneSourcePullback,
+    ModalToneSourceSensitivity, PreparedModalTonePowerFrequencyGradient,
     PreparedModalTonePowerGradient, PreparedModalToneSensitivity, PreparedModalTones,
 };
 

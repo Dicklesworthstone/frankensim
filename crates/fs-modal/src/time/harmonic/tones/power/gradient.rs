@@ -107,24 +107,7 @@ impl PreparedModalTones {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PreparedModalTonePowerGradient<'_>, ModalAcousticTimeError> {
         poll(&mut cancelled)?;
-        let bytes = core::mem::size_of::<ModalTonePowerGradient>()
-            + core::mem::size_of::<ModalAffineTonePowerGradient>()
-            + core::mem::size_of::<PreparedModalTonePowerGradient<'_>>()
-            + 4 * core::mem::size_of::<[ModalTonePowerDerivative; MAX_COORDINATES]>()
-            + 4 * core::mem::size_of::<[f64; MAX_COORDINATES]>()
-            + 4 * core::mem::size_of::<[Sum; MAX_COORDINATES]>()
-            + 4 * core::mem::size_of::<[[f64; MAX_HARMONIC_TONES]; 4]>();
-        cap(
-            "tone power gradient scratch bytes",
-            bytes,
-            budget.maximum_scratch_bytes,
-        )?;
-        let n = 2 + (if self.affine { 4 } else { 2 }) * self.unique.len();
-        cap(
-            "tone power gradient query work score",
-            64 * n * n + 256 * self.tone_count(),
-            budget.maximum_query_work,
-        )?;
+        admit_layout(self.unique.len(), self.tone_count(), self.affine, budget)?;
         poll(&mut cancelled)?;
         Ok(PreparedModalTonePowerGradient { bank: self })
     }
@@ -254,7 +237,7 @@ impl PreparedModalTonePowerGradient<'_> {
 }
 
 impl TonePower {
-    fn input_gradients(
+    pub(super) fn input_gradients(
         &self,
         state: ModalAcousticState,
         cosine: &[f64],
@@ -342,7 +325,7 @@ fn phase(
     })
 }
 
-fn finite(
+pub(super) fn finite(
     value: ModalTonePowerDerivative,
 ) -> Result<ModalTonePowerDerivative, ModalAcousticTimeError> {
     if value.input_work.is_finite() && value.viscous_dissipation.is_finite() {
@@ -354,12 +337,40 @@ fn finite(
     }
 }
 
-fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), ModalAcousticTimeError> {
+pub(super) fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), ModalAcousticTimeError> {
     if cancelled() {
         Err(invalid("tone power gradient query cancelled"))
     } else {
         Ok(())
     }
+}
+
+// Shared by direct input covectors and source-clock companion queries. The
+// latter use the affine layout even though their nominal bank is constant.
+pub(super) fn admit_layout(
+    distinct: usize,
+    input_tones: usize,
+    affine: bool,
+    budget: ModalTonePowerGradientBudget,
+) -> Result<(), ModalAcousticTimeError> {
+    let bytes = core::mem::size_of::<ModalTonePowerGradient>()
+        + core::mem::size_of::<ModalAffineTonePowerGradient>()
+        + core::mem::size_of::<PreparedModalTonePowerGradient<'_>>()
+        + 4 * core::mem::size_of::<[ModalTonePowerDerivative; MAX_COORDINATES]>()
+        + 4 * core::mem::size_of::<[f64; MAX_COORDINATES]>()
+        + 4 * core::mem::size_of::<[Sum; MAX_COORDINATES]>()
+        + 4 * core::mem::size_of::<[[f64; MAX_HARMONIC_TONES]; 4]>();
+    cap(
+        "tone power gradient scratch bytes",
+        bytes,
+        budget.maximum_scratch_bytes,
+    )?;
+    let n = 2 + (if affine { 4 } else { 2 }) * distinct;
+    cap(
+        "tone power gradient query work score",
+        64 * n * n + 256 * input_tones,
+        budget.maximum_query_work,
+    )
 }
 
 fn cap(what: &'static str, value: usize, limit: usize) -> Result<(), ModalAcousticTimeError> {

@@ -2169,3 +2169,31 @@ cover independent physical variational ODEs, duplicate/near-tone controls,
 complete energy transpose, constant-envelope reduction, the active 32nd source,
 unequal-step multimode reverse chains, units, budgets and reusable refusals.
 Finite-arithmetic gradients remain estimates, not rigorous enclosures.
+
+### Coherent source-frequency work and heat gradients
+
+`PreparedModalTones::prepare_power_frequency_gradients` adds separately admitted
+source-clock work/heat derivatives for constant-envelope banks. It borrows the
+original bank and prepares only the existing affine TonePower factors per mode,
+under conservative original affine byte/work admission and separate affine-layout
+query caps. The exact direction is
+`dF_j/dOmega_j = t*(S_j*cos(Omega_j*t)-C_j*sin(Omega_j*t))`; contracting the full
+affine endpoint power covector with `h*(S_j,-C_j)` includes direct source work and
+changed coherent velocity together. Original input order is retained at duplicate
+frequencies, including opposite nonzero independent detuning derivatives when
+nominal forces cancel. Frequencies sharing an authored fundamental require their
+explicit parameter-chain weights.
+
+Local derivatives hold initial state, interval-start quadratures, mechanics,
+duration and basis/mass fixed. Multi-interval reverse sweeps also include motion
+and source-phase advancement clock chains. An affine base explicitly refuses
+because its clock direction requires quadratic-envelope power factors. Warm
+queries allocate nothing, evaluate no transcendentals and poll between factor
+rows/source contractions; cancellation or nonfinite results publish no partial
+derivative. These are operation properties, not measured timing claims.
+
+Five G1/G3 tests in `tone_power_frequency.rs` cover independent power variational
+ODEs, analytic duplicate/DC detuning, relative tiny near-DC heat derivatives,
+scalar/32nd-source agreement, unequal-step multimode clock reversal, unit rescaling
+and resource/law/refusal reuse. The six existing coherent power-control tests also
+pass on this source. Gradients remain finite-arithmetic estimates, not enclosures.

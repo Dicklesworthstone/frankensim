@@ -1,6 +1,8 @@
 //! Cross-frequency power forms, using the scalar entire flow and heat QR owner.
 
+mod frequency;
 mod gradient;
+pub use frequency::{ModalTonePowerFrequencyGradient, PreparedModalTonePowerFrequencyGradient};
 pub use gradient::{
     ModalAffineTonePowerGradient, ModalAffineTonePowerSourceGradient, ModalTonePowerDerivative,
     ModalTonePowerGradient, ModalTonePowerGradientBudget, ModalTonePowerSourceGradient,
