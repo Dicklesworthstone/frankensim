@@ -2900,3 +2900,58 @@ source and real fs-math: independent polynomial work with signed mixed
 coordinates, near-coincident increments down to 2^-24, midpoint rounding,
 original off-diagonal stiffness and malformed input. This bounded source run
 does not claim full mesh-construction or fs-couple runtime verification.
+
+## Causal hereditary dynamics in the complete MITC coordinate space
+
+`shell::mitc::transient::MitcTransientSource` connects the original supported
+MITC pencil to `fs-phs::mechanical::LinearMechanicalSystem`. The caller supplies
+the RELAXED equilibrium model, per-facet admitted `ShearShellViscosity` and
+`ShearShellRelaxationBranch` values, and explicit source thickness/strain
+domains. Original consistent mass, oblique support frames, physical axial
+rotations, elastic director-bubble condensation and conservative drilling/
+connection stiffness remain unchanged. Lumped inertia is refused.
+
+The existing seven-point strain rule contracts the original passive material
+factors directly. Each nonzero quadrature/factor row becomes a native Maxwell
+arm: its square root of stiffness times area/weight is retained in the strain
+row, with scalar branch stiffness one. Relaxation times and independent
+histories are never averaged or merged, and excess spring stiffness enters
+storage exactly once. Input/output ports are full retained support-coordinate
+force/velocity pairs. There is no modal projection, new integrator, frequency
+fit, numerical viscosity, or independent mechanical assembly.
+
+Native pHS state initialization, exact/discrete-gradient propagation, power-port
+composition, integrated heat and solver residuals remain their existing owners.
+The adapter supplies admitted physical motion, total stored energy and
+instantaneous Kelvin-plus-Maxwell heat. Numerical balance residual is not
+material heating. A fully relaxed initial state is distinct from zero viscous
+history at nonzero displacement. Memory labels preserve original facet, source
+branch, quadrature point and factor channel. Weighted history entries have
+units sqrt(J). Exactly zero mapped rows retain zero history; separately authored
+pre-existing heat in an unobservable omitted row is outside this source.
+
+Every initialized or observed state passes the existing whole-facet Bernstein
+reduced-strain bound at the authored physical thickness faces. The norm includes
+xx, yy and all represented tensor shears; unmeasured normal strain, failure
+criteria, temperature validity, internal-history provenance and between-time
+extrema are not inferred. Callers using the exposed native mechanics must admit
+candidate states before publication and retain temporal/material validity.
+
+Cold facet/coordinate/channel, numerical-payload and scalar-work ceilings precede
+numerical allocation. The original bounded dense pHS source currently permits
+256 complete mechanical-plus-memory states; excessive models refuse rather than
+truncate any coordinate, nonzero mapped channel or weak material direction.
+The channel preflight counts seven rows per nonzero constitutive factor before
+geometric zero removal. Native factor admission is one bounded atomic operation;
+spatial work polls Cx at facet/point/row boundaries. Propagators retain their own
+additional dimension, time-resolution, work and cancellation contracts.
+
+These authored causal RESULTANT branches do not automatically represent an
+arbitrary full-tensor laminate's frequency-dependent plane-stress elimination.
+That harmonic material cannot be sampled into a transient source, and no material
+calibration or spatial convergence claim follows from this adapter. The three
+native regression groups in `tests/shell_mitc_transient.rs` compare the complete
+original spatial work, consistent inertia and frame expansion; independent
+scalar Maxwell time balance and material heat; and source-domain, budget,
+lossless and cancellation refusals. Pinned Rust parsing passed. Native test
+execution remains pending in the unavailable complete dependency workspace.

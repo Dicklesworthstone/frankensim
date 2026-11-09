@@ -37,6 +37,8 @@ pub mod thermal;
 pub mod viscosity;
 /// Independent passive hereditary A/B/D and transverse-shear spectra.
 pub mod relaxation;
+/// Causal material memory through the original full-coordinate pHS owner.
+pub mod transient;
 /// Original strain factors for insulated-slab membrane storage and bending memory.
 pub mod thermoelastic;
 /// Work-conjugate bilateral physical attachments in the shared shell pencil.
