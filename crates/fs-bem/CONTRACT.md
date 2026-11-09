@@ -4179,3 +4179,50 @@ Scope remains stationary prescribed compact emitters, equal mean gas
 pressures, inviscid momentum and the original relaxing compression law.
 Source feedback, finite source size, motion and additional viscosity require
 their physical owners; no independent attenuation factor is inserted here.
+
+## Original-field surface exchange across coherent observation windows
+
+`PreparedHarmonicExposure::surface_field_power_window` and
+`surface_field_energy_from_clock_dd` evaluate signed oriented acoustic power
+[W] and uniform-interval energy [J] directly from the retained pressure and
+three velocity fields. `surface_field_window` and
+`surface_field_interval_from_clock_dd` additionally return linear and angular
+wave-momentum rates [N, N m] or transport [N s, N m s]. All results retain DD
+low parts; interval queries retain a DD source epoch independently of duration.
+
+Each admitted bank prepares one shared positive temporal factor, projects all
+four fields, then forms their ten second moments before surface reduction.
+Proper peak factors retain their physical half-factor; real and deterministic
+banks retain the absolute carrier and sum-frequency terms. Original receiver
+positions, area vectors, source laws and moment origin remain authoritative.
+No pressure-only traveling-wave substitution or positivity clamp is applied.
+Other bands and shutter profiles use the original temporal pair law per bank.
+
+Queries allocate no heap, copy no field bank, and perform no new BEM solve.
+`HarmonicSurfaceFieldLimits` explicitly bounds original quadrature entries,
+including repeated and zero entries; projection work is
+`sum_b M_b*(F_b+Q*(4*F_b+10))`, while fallback work is `Q*sum_b F_b^2`.
+Admission precedes projection and cancellation publishes no partial result.
+For admitted factors the physical interval scale enters modal products before
+their potentially overflowing unscaled products are restored. Unsupported
+fallback retains its original intermediate range limits. A proper half-scale
+that underflows to zero is refused rather than silently reporting zero energy.
+
+Power-only queries retain the original relaxing-medium domain. Wave stress
+requires every original frequency owner, including silent lines, to authorize
+the homogeneous nondispersive rest-medium law
+`S=(p^2/(rho*c^2)-rho*u.u)*I/2+rho*u*u`.
+The outputs are oriented wave-pseudomomentum flux/transport. Enclosure, matching
+volume storage, source terms, total fluid momentum and body reaction are not
+inferred. The existing cached spectrum observers remain available.
+
+Six focused production-source regression groups pass with warnings denied:
+fourth-order dark power/stress/torque through 1 ps; mixed real/proper fields
+against independent time integration, including triangular fallback; DD-clock
+partitioned transport; geometry and original-medium authority; finite interval
+products when mean rates overflow; and admission/cancellation. The execution
+uses the actual exposure preparation, new surface queries, original numerical
+surface owners and current shared harmonic/math graph, with narrow carriers
+for unrelated BEM dependencies. It is not a complete BEM solver or workspace
+Cargo run. Original solver/spatial uncertainty and arbitrary-null relative
+accuracy remain uncertified.

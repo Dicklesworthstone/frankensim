@@ -47,6 +47,11 @@ pub use surface::{
     PreparedHarmonicSurfacePower,
 };
 
+mod field_surface;
+pub use field_surface::{
+    HarmonicSurfaceFieldLimits, HarmonicSurfaceFieldMoments, HarmonicSurfaceFieldTransfer,
+};
+
 mod momentum;
 pub use momentum::{
     HarmonicMomentumLimits, HarmonicWaveMomentumFlux, HarmonicWaveMomentumTransfer,

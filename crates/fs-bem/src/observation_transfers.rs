@@ -51,6 +51,7 @@ pub use harmonic::{
     HarmonicReadoutLimits, HarmonicRealizationLimits, HarmonicReceiverPair,
     HarmonicSampleClock, HarmonicSampleLimits, HarmonicSourceMapLimits,
     HarmonicSurfacePowerLimits, HarmonicSurfaceQuadrature, HarmonicVolumeQuadrature,
+    HarmonicSurfaceFieldLimits, HarmonicSurfaceFieldMoments, HarmonicSurfaceFieldTransfer,
     HarmonicWaveMomentumFlux, HarmonicWaveMomentumStorage, HarmonicWaveMomentumTransfer,
     HarmonicWorkBudget, MAX_PRESSURE_ARRAY_CHANNELS, MAX_PRESSURE_ARRAY_TAPS,
     MAX_PRESSURE_CORRELATION_PAIRS, MAX_READOUT_RECEIVER_PAIRS, MAX_SURFACE_QUADRATURE_POINTS,

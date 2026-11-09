@@ -536,6 +536,7 @@ pub use exposure::{
     HarmonicPressureCorrelationPair, HarmonicPressureTap, HarmonicReadoutCovariance,
     HarmonicReadoutLimits, HarmonicRealizationLimits, HarmonicReceiverPair,
     HarmonicSampleClock, HarmonicSampleLimits, HarmonicSurfacePowerLimits,
+    HarmonicSurfaceFieldLimits, HarmonicSurfaceFieldMoments, HarmonicSurfaceFieldTransfer,
     HarmonicSurfaceQuadrature, HarmonicVolumeQuadrature, HarmonicWaveMomentumFlux,
     HarmonicWaveMomentumStorage, HarmonicWaveMomentumTransfer, MAX_PRESSURE_ARRAY_CHANNELS,
     MAX_PRESSURE_ARRAY_TAPS, MAX_PRESSURE_CORRELATION_PAIRS, MAX_READOUT_RECEIVER_PAIRS,
