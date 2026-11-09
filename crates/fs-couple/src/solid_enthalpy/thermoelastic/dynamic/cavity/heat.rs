@@ -8,6 +8,8 @@ use fs_material::phase::EquilibriumPhaseState;
 use fs_material::state_point::{MaterialPropertySelection, ResolvedMaterialStatePoint};
 use fs_material::thermal::conduction::source::ResolvedConductionLayer;
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
+use fs_math::dd::Dd;
+use fs_thermal::enthalpy::collect_source_rates;
 use std::sync::Arc;
 
 /// One source film's accepted integral and last applied native substep sample.
@@ -136,10 +138,11 @@ pub(super) struct FilmObserver<'a, 's, 'm, O> {
     // it while their own thermal substep histories remain independent.
     law: Option<Arc<IsobaricGasLaw>>,
     pub(super) inner: O,
-    applied_w: BTreeMap<CellId, f64>,
+    applied_w: BTreeMap<CellId, Dd>,
     conductances_w_k: BTreeMap<CellId, f64>,
     pub(super) samples: Vec<CavityContactHeat>,
     pub(super) heat_j: f64,
+    retained_heat_j: Dd,
 }
 impl<'a, 's, 'm, O> FilmObserver<'a, 's, 'm, O> {
     pub(super) fn new<E>(
@@ -149,7 +152,8 @@ impl<'a, 's, 'm, O> FilmObserver<'a, 's, 'm, O> {
             Some(Arc::new(endpoint_law(gas.model(), gas.point(), gas.state())?))
         } else { None };
         Ok(Self { cavity, gas: gas.state(), law, inner, applied_w: BTreeMap::new(),
-            conductances_w_k: BTreeMap::new(), samples: Vec::new(), heat_j: 0.0 })
+            conductances_w_k: BTreeMap::new(), samples: Vec::new(), heat_j: 0.0,
+            retained_heat_j: Dd::ZERO })
     }
 }
 impl<O: DepositionObserver> DepositionObserver for FilmObserver<'_, '_, '_, O> {
@@ -157,6 +161,7 @@ impl<O: DepositionObserver> DepositionObserver for FilmObserver<'_, '_, '_, O> {
 
     fn begin(&mut self) -> Result<(), Self::Error> {
         self.heat_j = 0.0;
+        self.retained_heat_j = Dd::ZERO;
         self.samples.clear();
         self.applied_w.clear();
         self.conductances_w_k.clear();
@@ -166,8 +171,15 @@ impl<O: DepositionObserver> DepositionObserver for FilmObserver<'_, '_, '_, O> {
         &mut self, thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
-        let mut sources = self.inner.sources(thermal, checkpoint).map_err(CavityError::Observer)?;
-        let mut watts = BTreeMap::<CellId, f64>::new();
+        collect_source_rates(thermal, |emit| self.visit_sources(thermal, emit, checkpoint))
+    }
+    fn visit_sources(
+        &mut self, thermal: &DepositionSimulation<'_>,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        self.inner.visit_sources(thermal, emit, checkpoint).map_err(CavityError::Observer)?;
+        let mut watts = BTreeMap::<CellId, Dd>::new();
         let mut conductances = BTreeMap::<CellId, f64>::new();
         let mut areas = BTreeMap::<CellId, f64>::new();
         let mut samples = Vec::with_capacity(self.cavity.films.len());
@@ -190,8 +202,12 @@ impl<O: DepositionObserver> DepositionObserver for FilmObserver<'_, '_, '_, O> {
             let decay = if sample.convection.is_some() {
                 flux_decay(power, self.gas.state().temperature - local.temperature_k())?
             } else { sample.conductance_w_k };
-            let old = watts.entry(film.contact.cell).or_insert(0.0);
-            *old = number(*old + power)?;
+            // Emit each original patch before any per-cell reporting sum so
+            // an opposing source cannot erase its physical heat.
+            emit(film.contact.cell, power)?;
+            let total = watts.entry(film.contact.cell).or_insert(Dd::ZERO);
+            *total = *total + Dd::from_f64(power);
+            number(total.to_f64())?;
             let g = conductances.entry(film.contact.cell).or_insert(0.0);
             *g = number(*g + decay)?;
             samples.push(CavityContactHeat {
@@ -204,29 +220,10 @@ impl<O: DepositionObserver> DepositionObserver for FilmObserver<'_, '_, '_, O> {
                 convection: sample.convection,
             });
         }
-        let mut applied = BTreeMap::new();
-        for (&cell, &power) in &watts {
-            checkpoint()?;
-            let previous = sources.get(&cell).copied().unwrap_or(0.0);
-            let next = number(previous + power)?;
-            let actual = number(next - previous)?;
-            let authored = thermal.cells().get(&cell)
-                .ok_or(CavityError::Invalid("inactive gas-film source cell"))?.boundary.source_w;
-            let before = number(authored + previous)?;
-            let combined = number(authored + next)?;
-            if (power != 0.0 && (actual == 0.0 || combined == before))
-                || (previous != 0.0 && next == power)
-                || (authored != 0.0 && combined == next)
-            {
-                return Err(CavityError::Invalid("gas-film heat is not represented in the native cell source"));
-            }
-            sources.insert(cell, next);
-            applied.insert(cell, actual);
-        }
-        self.applied_w = applied;
+        self.applied_w = watts;
         self.conductances_w_k = conductances;
         self.samples = samples;
-        Ok(sources)
+        Ok(())
     }
     fn conductances(
         &mut self, thermal: &DepositionSimulation<'_>,
@@ -275,7 +272,17 @@ impl<O: DepositionObserver> DepositionObserver for FilmObserver<'_, '_, '_, O> {
         &mut self, thermal: &DepositionSimulation<'_>, start: f64, dt: f64, end: f64,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
-        self.inner.step_sources(thermal, start, dt, end, checkpoint).map_err(CavityError::Observer)
+        collect_source_rates(thermal, |emit| {
+            self.visit_step_sources(thermal, start, dt, end, emit, checkpoint)
+        })
+    }
+    fn visit_step_sources(
+        &mut self, thermal: &DepositionSimulation<'_>, start: f64, dt: f64, end: f64,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        self.inner.visit_step_sources(thermal, start, dt, end, emit, checkpoint)
+            .map_err(CavityError::Observer)
     }
     fn event(&mut self, event: &Event, thermal: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
         self.inner.event(event, thermal).map_err(CavityError::Observer)
@@ -288,8 +295,10 @@ impl<O: DepositionObserver> DepositionObserver for FilmObserver<'_, '_, '_, O> {
         self.inner.step(start, dt, old, thermal, checkpoint).map_err(CavityError::Observer)?;
         for &power in self.applied_w.values() {
             checkpoint()?;
-            self.heat_j = number(self.heat_j + dt * power)?;
+            self.retained_heat_j = self.retained_heat_j + Dd::from_f64(dt) * power;
+            number(self.retained_heat_j.to_f64())?;
         }
+        self.heat_j = number(self.retained_heat_j.to_f64())?;
         for row in &mut self.samples {
             checkpoint()?;
             row.heat_into_solid_j = number(row.heat_into_solid_j + dt * row.last_power_into_solid_w)?;

@@ -22,6 +22,7 @@ use fs_solid::linear3::visco::{ViscoDynamicState, ViscoDynamicStep, ViscoElement
 use fs_solid::linear3::{QuadraticThermalStrainField, TetElasticError};
 use fs_thermal::enthalpy::{
     CellId, DepositionError, DepositionObserver, DepositionSimulation, Event, HeatTransfer,
+    collect_source_rates,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -232,7 +233,6 @@ pub fn step_thermal_candidate<'p, 'a, 't, O: DepositionObserver>(
         target_s: target,
         pending: None,
         deposited_j: 0.0,
-        tolerance_j: config.energy_tolerance_j,
     };
     let (next_thermal, heating, audit) =
         thermal.advance_observed(&heating, target, config.thermal, || {
@@ -298,7 +298,6 @@ struct NativeHeat<'m, 'c, 'scope, O> {
     target_s: f64,
     pending: Option<Pending>,
     deposited_j: f64,
-    tolerance_j: f64,
 }
 impl<O: DepositionObserver> NativeHeat<'_, '_, '_, O> {
     fn admit(&self, thermal: &DepositionSimulation<'_>) -> Result<(), O::Error> {
@@ -331,9 +330,17 @@ impl<O: DepositionObserver> DepositionObserver for NativeHeat<'_, '_, '_, O> {
         thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, O::Error> {
+        collect_source_rates(thermal, |emit| self.visit_sources(thermal, emit, check))
+    }
+    fn visit_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        emit: &mut dyn FnMut(CellId, f64) -> core::result::Result<(), DepositionError>,
+        check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
+    ) -> Result<(), O::Error> {
         self.admit(thermal)?;
         self.inner
-            .sources(thermal, check)
+            .visit_sources(thermal, emit, check)
             .map_err(SolidThermalError::Observer)
     }
     fn conductances(
@@ -390,6 +397,19 @@ impl<O: DepositionObserver> DepositionObserver for NativeHeat<'_, '_, '_, O> {
         end_s: f64,
         check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, O::Error> {
+        collect_source_rates(thermal, |emit| {
+            self.visit_step_sources(thermal, start_s, dt_s, end_s, emit, check)
+        })
+    }
+    fn visit_step_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        start_s: f64,
+        dt_s: f64,
+        end_s: f64,
+        emit: &mut dyn FnMut(CellId, f64) -> core::result::Result<(), DepositionError>,
+        check: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
+    ) -> Result<(), O::Error> {
         check()?;
         self.admit(thermal)?;
         if self.pending.is_some()
@@ -403,31 +423,25 @@ impl<O: DepositionObserver> DepositionObserver for NativeHeat<'_, '_, '_, O> {
                 "stale or invalid finite-cell material-heat substep",
             ));
         }
-        let mut rates = self
-            .inner
-            .step_sources(thermal, start_s, dt_s, end_s, check)
+        self.inner
+            .visit_step_sources(thermal, start_s, dt_s, end_s, emit, check)
             .map_err(SolidThermalError::Observer)?;
         let mut deposited = 0.0;
-        let mut expected = 0.0;
         for (receiver, &watts) in self.receivers.iter().zip(&self.powers) {
             check()?;
             if watts == 0.0 {
                 continue;
             }
-            let rate = rates.entry(receiver.binding.cell).or_insert(0.0);
-            let old = *rate;
-            *rate = number(old + watts)?;
-            deposited = number(deposited + number((*rate - old) * dt_s)?)?;
-            expected = number(expected + number(watts * dt_s)?)?;
+            emit(receiver.binding.cell, watts)?;
+            deposited = number(deposited + number(watts * dt_s)?)?;
         }
-        balance(deposited - expected, self.tolerance_j)?;
         self.pending = Some(Pending {
             start_s,
             dt_s,
             end_s,
             deposited_j: deposited,
         });
-        Ok(rates)
+        Ok(())
     }
     fn event(&mut self, event: &Event, thermal: &DepositionSimulation<'_>) -> Result<(), O::Error> {
         if self.pending.is_some() || thermal.time_s().to_bits() != self.accepted_time_s.to_bits() {

@@ -7,6 +7,7 @@ use super::source::{SourceFlux, SourceSample, observer_error};
 use fs_math::dd::Dd;
 use fs_thermal::enthalpy::{
     CellId, DepositionError, DepositionObserver, DepositionSimulation, Event, HeatTransfer,
+    collect_source_rates,
 };
 use std::collections::BTreeMap;
 
@@ -40,9 +41,8 @@ pub(super) struct WallObserver<'s, 'm, O, G> {
     samples: Vec<LinkSample>,
     source_samples: Vec<SourceSample>,
     source_heat_j: Vec<Dd>,
-    applied_w: BTreeMap<CellId, f64>,
+    applied_w: BTreeMap<CellId, Dd>,
     conductances_w_k: BTreeMap<CellId, f64>,
-    representation_defect_w: Dd,
     pub(super) gas_heat_j: Vec<Dd>,
     pub(super) applied_heat_j: Dd,
     pub(super) interface_defect_j: Dd,
@@ -61,7 +61,6 @@ impl<'s, 'm, O, G> WallObserver<'s, 'm, O, G> {
                 heat_j: Dd::ZERO, temperature_k: 0.0, power_w: 0.0,
             }).collect(),
             applied_w: BTreeMap::new(), conductances_w_k: BTreeMap::new(),
-            representation_defect_w: Dd::ZERO,
             gas_heat_j: vec![Dd::ZERO; gas_temperatures.len()],
             applied_heat_j: Dd::ZERO, interface_defect_j: Dd::ZERO,
         }
@@ -103,7 +102,6 @@ impl<O: DepositionObserver, G: ThermalCavityGas> DepositionObserver for WallObse
         self.gas_heat_j.fill(Dd::ZERO);
         self.applied_heat_j = Dd::ZERO;
         self.interface_defect_j = Dd::ZERO;
-        self.representation_defect_w = Dd::ZERO;
         self.inner.begin().map_err(CavityHeatObserverError::Observer)
     }
 
@@ -111,7 +109,14 @@ impl<O: DepositionObserver, G: ThermalCavityGas> DepositionObserver for WallObse
         &mut self, thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
-        let mut sources = self.inner.sources(thermal, checkpoint)
+        collect_source_rates(thermal, |emit| self.visit_sources(thermal, emit, checkpoint))
+    }
+    fn visit_sources(
+        &mut self, thermal: &DepositionSimulation<'_>,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        self.inner.visit_sources(thermal, emit, checkpoint)
             .map_err(CavityHeatObserverError::Observer)?;
         let mut powers = BTreeMap::<CellId, Dd>::new();
         let mut conductances = BTreeMap::<CellId, Dd>::new();
@@ -123,6 +128,7 @@ impl<O: DepositionObserver, G: ThermalCavityGas> DepositionObserver for WallObse
             if link.conductance_w_k > 0.0 && contrast != 0.0 && power == 0.0 {
                 return Err(CavityHeatObserverError::Invalid("gas-wall heat power underflows"));
             }
+            emit(link.cell, power)?;
             let total = powers.entry(link.cell).or_insert(Dd::ZERO);
             *total = *total + Dd::from_f64(power);
             let decay = conductances.entry(link.cell).or_insert(Dd::ZERO);
@@ -135,6 +141,7 @@ impl<O: DepositionObserver, G: ThermalCavityGas> DepositionObserver for WallObse
             for sample in &samples {
                 checkpoint()?;
                 let row = &sample.receipt;
+                emit(row.cell, row.last_power_into_solid_w)?;
                 let total = powers.entry(row.cell).or_insert(Dd::ZERO);
                 *total = *total + Dd::from_f64(row.last_power_into_solid_w);
                 let decay = conductances.entry(row.cell).or_insert(Dd::ZERO);
@@ -142,40 +149,17 @@ impl<O: DepositionObserver, G: ThermalCavityGas> DepositionObserver for WallObse
             }
             self.source_samples = samples;
         }
-        let mut applied = BTreeMap::new();
-        let mut defect = Dd::ZERO;
-        for (&cell, &sum) in &powers {
+        for sum in powers.values() {
             checkpoint()?;
-            let power = finite(sum.to_f64())?;
-            let previous = sources.get(&cell).copied().unwrap_or(0.0);
-            let next = finite(previous + power)?;
-            let actual = finite(next - previous)?;
-            let authored = thermal.cells().get(&cell)
-                .ok_or(CavityHeatObserverError::Invalid("inactive original gas-wall cell"))?
-                .boundary.source_w;
-            let before = finite(authored + previous)?;
-            let combined = finite(authored + next)?;
-            if (power != 0.0 && (actual == 0.0 || combined == before))
-                || (previous != 0.0 && next == power)
-                || (authored != 0.0 && combined == next)
-            {
-                return Err(CavityHeatObserverError::Invalid(
-                    "gas-wall heat is not represented in the native cell source",
-                ));
-            }
-            // Preserve the low part of the declared sum before its rounding.
-            defect = defect + Dd::from_f64(finite(
-                (Dd::from_f64(actual) - sum).to_f64(),
-            )?.abs());
-            sources.insert(cell, next);
-            applied.insert(cell, actual);
+            finite(sum.to_f64())?;
         }
-        self.applied_w = applied;
-        self.representation_defect_w = defect;
+        // Per-cell reporting retains the same contributions sent individually
+        // to the thermal owner; none are flattened beside an unrelated source.
+        self.applied_w = powers;
         self.conductances_w_k = conductances.into_iter().map(|(cell, sum)| {
             Ok((cell, finite(sum.to_f64())?))
         }).collect::<Result<_, Self::Error>>()?;
-        Ok(sources)
+        Ok(())
     }
 
     fn conductances(
@@ -223,7 +207,16 @@ impl<O: DepositionObserver, G: ThermalCavityGas> DepositionObserver for WallObse
         &mut self, thermal: &DepositionSimulation<'_>, start: f64, dt: f64, end: f64,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
-        self.inner.step_sources(thermal, start, dt, end, checkpoint)
+        collect_source_rates(thermal, |emit| {
+            self.visit_step_sources(thermal, start, dt, end, emit, checkpoint)
+        })
+    }
+    fn visit_step_sources(
+        &mut self, thermal: &DepositionSimulation<'_>, start: f64, dt: f64, end: f64,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        self.inner.visit_step_sources(thermal, start, dt, end, emit, checkpoint)
             .map_err(CavityHeatObserverError::Observer)
     }
     fn event(&mut self, event: &Event, thermal: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
@@ -236,13 +229,17 @@ impl<O: DepositionObserver, G: ThermalCavityGas> DepositionObserver for WallObse
     ) -> Result<(), Self::Error> {
         self.inner.step(start, dt, old, thermal, checkpoint)
             .map_err(CavityHeatObserverError::Observer)?;
+        let mut applied = Dd::ZERO;
         for &power in self.applied_w.values() {
             checkpoint()?;
-            self.applied_heat_j = self.applied_heat_j + integral(power, dt)?;
+            applied = applied + power * Dd::from_f64(dt);
+            finite(applied.to_f64())?;
         }
+        let mut exchanged = Dd::ZERO;
         for (link, sample) in self.links.iter().zip(&mut self.samples) {
             checkpoint()?;
             let heat = integral(sample.power_w, dt)?;
+            exchanged = exchanged + heat;
             sample.heat_j = sample.heat_j + heat;
             self.gas_heat_j[link.cavity] = self.gas_heat_j[link.cavity] + heat;
             finite(sample.heat_j.to_f64())?;
@@ -252,13 +249,18 @@ impl<O: DepositionObserver, G: ThermalCavityGas> DepositionObserver for WallObse
             checkpoint()?;
             let row = &sample.receipt;
             let heat = integral(row.last_power_into_solid_w, dt)?;
+            exchanged = exchanged + heat;
             *accumulated = *accumulated + heat;
             self.gas_heat_j[row.cavity] = self.gas_heat_j[row.cavity] + heat;
             finite(accumulated.to_f64())?;
             finite(self.gas_heat_j[row.cavity].to_f64())?;
         }
-        self.interface_defect_j = self.interface_defect_j
-            + self.representation_defect_w * Dd::from_f64(dt);
+        self.applied_heat_j = self.applied_heat_j + applied;
+        // Compare the delivered per-cell integral with independent per-patch
+        // gas accounting. Final source/storage rounding belongs to thermal.
+        self.interface_defect_j = self.interface_defect_j + Dd::from_f64(
+            finite((applied - exchanged).to_f64())?.abs(),
+        );
         finite(self.applied_heat_j.to_f64())?;
         finite(self.interface_defect_j.to_f64())?;
         Ok(())

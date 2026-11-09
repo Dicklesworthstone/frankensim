@@ -19,6 +19,7 @@ use fs_math::dd::Dd;
 use fs_solid::loads3::transient::{
     TransientConfig3, response::TransientResponse3, checkpoint::TetTransientCheckpoint3,
 };
+use fs_thermal::enthalpy::collect_source_rates;
 
 /// Original source laws plus the actual loaded inertial and caloric history.
 pub struct DynamicThermoelasticSolid<'s, 'm> {
@@ -362,18 +363,32 @@ impl<O: DepositionObserver> DepositionObserver for DynamicHeat<'_, '_, '_, '_, O
     }
     fn step_sources(&mut self, thermal: &DepositionSimulation<'_>, start: f64, dt: f64, end: f64,
         check: &mut dyn FnMut() -> Result<(), DepositionError>) -> Result<BTreeMap<CellId, f64>, Self::Error> {
-        self.inner.step_sources(thermal, start, dt, end, check).map_err(ThermoelasticFeedbackError::Observer)
+        collect_source_rates(thermal, |emit| {
+            self.visit_step_sources(thermal, start, dt, end, emit, check)
+        })
     }
     fn sources(&mut self, thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        collect_source_rates(thermal, |emit| self.visit_sources(thermal, emit, checkpoint))
+    }
+    fn visit_sources(&mut self, thermal: &DepositionSimulation<'_>,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>) -> Result<(), Self::Error> {
         self.solid.admit(thermal, false, self.cx)?;
-        let mut rates = self.inner.sources(thermal, checkpoint).map_err(ThermoelasticFeedbackError::Observer)?;
+        self.inner.visit_sources(thermal, emit, checkpoint)
+            .map_err(ThermoelasticFeedbackError::Observer)?;
         for (&cell, &power) in &self.watts {
             checkpoint()?;
-            let rate = rates.entry(cell).or_insert(0.0);
-            *rate = finite(*rate + power)?;
+            emit(cell, power)?;
         }
-        Ok(rates)
+        Ok(())
+    }
+    fn visit_step_sources(&mut self, thermal: &DepositionSimulation<'_>,
+        start: f64, dt: f64, end: f64,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>) -> Result<(), Self::Error> {
+        self.inner.visit_step_sources(thermal, start, dt, end, emit, checkpoint)
+            .map_err(ThermoelasticFeedbackError::Observer)
     }
     fn conductances(&mut self, thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>) -> Result<BTreeMap<u64, f64>, Self::Error> {

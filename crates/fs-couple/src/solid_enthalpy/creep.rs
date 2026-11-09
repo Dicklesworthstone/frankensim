@@ -43,7 +43,7 @@ use fs_solid::plastic3::{
 };
 use fs_thermal::enthalpy::{
     CellId, DepositedCell, DepositionError, DepositionObserver, DepositionSimulation, EnergyAudit,
-    Event, HeatTransfer, StepConfig, ThermalLaw,
+    Event, HeatTransfer, StepConfig, ThermalLaw, collect_source_rates,
 };
 
 #[derive(Debug)]
@@ -719,26 +719,45 @@ impl<'m, O: DepositionObserver, S: CreepSourceFamily<'m>> DepositionObserver
         end: f64,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
-        self.inner
-            .step_sources(thermal, start, dt, end, check)
-            .map_err(CreepCouplingError::Observer)
+        collect_source_rates(thermal, |emit| {
+            self.visit_step_sources(thermal, start, dt, end, emit, check)
+        })
     }
     fn sources(
         &mut self,
         thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        collect_source_rates(thermal, |emit| self.visit_sources(thermal, emit, check))
+    }
+    fn visit_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
         self.solid.check_thermal(thermal, false, self.cx)?;
-        let mut rates = self
-            .inner
-            .sources(thermal, check)
+        self.inner
+            .visit_sources(thermal, emit, check)
             .map_err(CreepCouplingError::Observer)?;
         for (&cell, &watts) in &self.watts {
             check()?;
-            let rate = rates.entry(cell).or_insert(0.0);
-            *rate = finite(*rate + watts)?;
+            emit(cell, watts)?;
         }
-        Ok(rates)
+        Ok(())
+    }
+    fn visit_step_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        start: f64,
+        dt: f64,
+        end: f64,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        self.inner
+            .visit_step_sources(thermal, start, dt, end, emit, check)
+            .map_err(CreepCouplingError::Observer)
     }
     fn conductances(
         &mut self,

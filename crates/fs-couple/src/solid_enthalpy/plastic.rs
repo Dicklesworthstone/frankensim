@@ -52,7 +52,7 @@ use fs_solid::plastic3::{
 };
 use fs_thermal::enthalpy::{
     CellId, DepositedCell, DepositionError, DepositionObserver, DepositionSimulation, EnergyAudit,
-    Event, HeatTransfer, StepConfig, ThermalLaw,
+    Event, HeatTransfer, StepConfig, ThermalLaw, collect_source_rates,
 };
 
 #[derive(Debug)]
@@ -1054,26 +1054,45 @@ impl<'m, O: DepositionObserver, S: ThermoplasticSourceFamily<'m>> DepositionObse
         end_s: f64,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
-        self.inner
-            .step_sources(thermal_start, start_s, dt_s, end_s, check)
-            .map_err(ThermoplasticError::Observer)
+        collect_source_rates(thermal_start, |emit| {
+            self.visit_step_sources(thermal_start, start_s, dt_s, end_s, emit, check)
+        })
     }
     fn sources(
         &mut self,
         thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        collect_source_rates(thermal, |emit| self.visit_sources(thermal, emit, checkpoint))
+    }
+    fn visit_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
         self.solid.enthalpies(thermal, false, self.cx)?;
-        let mut rates = self
-            .inner
-            .sources(thermal, checkpoint)
+        self.inner
+            .visit_sources(thermal, emit, checkpoint)
             .map_err(ThermoplasticError::Observer)?;
         for (&cell, &watts) in &self.watts {
             checkpoint()?;
-            let rate = rates.entry(cell).or_insert(0.0);
-            *rate = finite(*rate + watts)?;
+            emit(cell, watts)?;
         }
-        Ok(rates)
+        Ok(())
+    }
+    fn visit_step_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        start: f64,
+        dt: f64,
+        end: f64,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        self.inner
+            .visit_step_sources(thermal, start, dt, end, emit, checkpoint)
+            .map_err(ThermoplasticError::Observer)
     }
     fn conductances(
         &mut self,

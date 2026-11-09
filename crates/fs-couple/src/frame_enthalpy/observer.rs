@@ -1,9 +1,10 @@
 //! Add the frame's physical/reversible heat to the original transport observer.
 //! Every native event, interval-source and transport hook remains with its owner.
 
-use super::{Cx, FrameEnthalpyError, ThermoplasticFrame, finite};
+use super::{Cx, FrameEnthalpyError, ThermoplasticFrame};
 use fs_thermal::enthalpy::{
     CellId, DepositionError, DepositionObserver, DepositionSimulation, Event, HeatTransfer,
+    collect_source_rates,
 };
 use std::collections::BTreeMap;
 
@@ -44,9 +45,9 @@ impl<O: DepositionObserver> DepositionObserver for FrameHeat<'_, '_, '_, O> {
         end_s: f64,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
-        self.inner
-            .step_sources(thermal, start_s, duration_s, end_s, check)
-            .map_err(FrameEnthalpyError::Observer)
+        collect_source_rates(thermal, |emit| {
+            self.visit_step_sources(thermal, start_s, duration_s, end_s, emit, check)
+        })
     }
 
     fn sources(
@@ -54,17 +55,38 @@ impl<O: DepositionObserver> DepositionObserver for FrameHeat<'_, '_, '_, O> {
         thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        collect_source_rates(thermal, |emit| self.visit_sources(thermal, emit, check))
+    }
+
+    fn visit_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
         self.frame.check_thermal(thermal, false, self.cx)?;
-        let mut rates = self
-            .inner
-            .sources(thermal, check)
+        self.inner
+            .visit_sources(thermal, emit, check)
             .map_err(FrameEnthalpyError::Observer)?;
         for (&cell, &watts) in &self.watts {
             check()?;
-            let rate = rates.entry(cell).or_insert(0.0);
-            *rate = finite(*rate + watts)?;
+            emit(cell, watts)?;
         }
-        Ok(rates)
+        Ok(())
+    }
+
+    fn visit_step_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        start: f64,
+        dt: f64,
+        end: f64,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        self.inner
+            .visit_step_sources(thermal, start, dt, end, emit, check)
+            .map_err(FrameEnthalpyError::Observer)
     }
 
     fn conductances(

@@ -11,7 +11,7 @@ use super::super::MaterialContact;
 use fs_contact::normal_patch::source::SourcePointContact;
 use fs_material::phase::UniformEnthalpyStep;
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionObserver,
-    DepositionSimulation, EnergyAudit, Event, HeatTransfer, StepConfig};
+    DepositionSimulation, EnergyAudit, Event, HeatTransfer, StepConfig, collect_source_rates};
 
 /// One reservoir is the SAME finite thermal cell, not another heat destination.
 /// All reservoirs and all active cells must be bound exactly once. Several
@@ -242,7 +242,16 @@ impl<O: DepositionObserver> DepositionObserver for MechanicalHeating<O> {
         start_s: f64, dt_s: f64, end_s: f64,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
         -> Result<BTreeMap<CellId, f64>, Self::Error> {
-        self.observer.step_sources(thermal_start, start_s, dt_s, end_s, checkpoint)
+        collect_source_rates(thermal_start, |emit| {
+            self.visit_step_sources(thermal_start, start_s, dt_s, end_s, emit, checkpoint)
+        })
+    }
+    fn visit_step_sources(&mut self, thermal_start: &DepositionSimulation<'_>,
+        start_s: f64, dt_s: f64, end_s: f64,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<(), Self::Error> {
+        self.observer.visit_step_sources(thermal_start, start_s, dt_s, end_s, emit, checkpoint)
             .map_err(NetworkError::Observer)
     }
 
@@ -254,16 +263,20 @@ impl<O: DepositionObserver> DepositionObserver for MechanicalHeating<O> {
     }
     fn sources(&mut self, thermal:&DepositionSimulation<'_>, checkpoint:&mut dyn FnMut()->Result<(),DepositionError>)
         ->Result<BTreeMap<CellId,f64>,Self::Error> {
-        let mut sources=self.observer.sources(thermal,checkpoint).map_err(NetworkError::Observer)?;
+        collect_source_rates(thermal, |emit| self.visit_sources(thermal, emit, checkpoint))
+    }
+    fn visit_sources(&mut self, thermal:&DepositionSimulation<'_>,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        checkpoint:&mut dyn FnMut()->Result<(),DepositionError>)
+        ->Result<(),Self::Error> {
+        self.observer.visit_sources(thermal,emit,checkpoint).map_err(NetworkError::Observer)?;
         for (&id,&power) in &self.powers {
             checkpoint()?;
             if power != 0.0 {
-                let value=sources.entry(id).or_insert(0.0);
-                *value+=power;
-                if !value.is_finite() {return Err(DepositionError::Arithmetic.into());}
+                emit(id, power)?;
             }
         }
-        Ok(sources)
+        Ok(())
     }
     fn conductances(&mut self, thermal:&DepositionSimulation<'_>, checkpoint:&mut dyn FnMut()->Result<(),DepositionError>)
         ->Result<BTreeMap<u64,f64>,Self::Error> {

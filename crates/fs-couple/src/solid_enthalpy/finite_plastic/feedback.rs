@@ -15,7 +15,7 @@ use fs_solid::hyper3::plastic::thermal::FiniteThermoplasticTetEnergy;
 use fs_solid::plastic3::dynamics::InertialEnergy;
 use fs_thermal::enthalpy::{
     CellId, DepositedCell, DepositionError, DepositionObserver, DepositionSimulation, Event,
-    HeatTransfer, StepConfig, ThermalLaw,
+    HeatTransfer, StepConfig, ThermalLaw, collect_source_rates,
 };
 
 use super::material::ReferenceCaloricMaterial;
@@ -782,18 +782,17 @@ impl<O: DepositionObserver, M: CaloricMaterial> DepositionObserver
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
         self.binding.enthalpies(thermal, false, self.cx)?;
-        let mut rates = self
-            .inner
-            .sources(thermal, checkpoint)
-            .map_err(FiniteThermoplasticError::Observer)?;
+        let mut rates = collect_source_rates(thermal, |emit| {
+            self.inner.visit_sources(thermal, emit, checkpoint)
+        }).map_err(FiniteThermoplasticError::Observer)?;
         let mut defect_w = Dd::ZERO;
         for (&cell, &watts) in &self.watts {
             checkpoint()?;
             let rate = rates.entry(cell).or_insert(0.0);
             let (next, material_defect) = compose_source_power(*rate, watts)?;
-            // Native add_step_sources performs this exact second addition.
-            // Include its error after material heat, not a hypothetical sum
-            // that omits the outer observer's contribution.
+            // Retain the scalar map view's original two-addition defect
+            // account. Native visit_sources emits the independent terms and
+            // leaves their final combination to the thermal owner instead.
             let authored = thermal.cells().get(&cell)
                 .ok_or(FiniteThermoplasticError::Invalid(
                     "finite thermoplastic source cell became inactive",
@@ -806,6 +805,38 @@ impl<O: DepositionObserver, M: CaloricMaterial> DepositionObserver
         self.source_composition_defect_w = defect_w;
         Ok(rates)
     }
+    fn visit_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        self.binding.enthalpies(thermal, false, self.cx)?;
+        // The shared thermal owner retains the original summands and accounts
+        // for their final rounding. Do not charge a second, hypothetical merge.
+        self.source_composition_defect_w = Dd::ZERO;
+        self.inner
+            .visit_sources(thermal, emit, checkpoint)
+            .map_err(FiniteThermoplasticError::Observer)?;
+        for (&cell, &watts) in &self.watts {
+            checkpoint()?;
+            emit(cell, watts)?;
+        }
+        Ok(())
+    }
+    fn visit_step_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        start: f64,
+        dt: f64,
+        end: f64,
+        emit: &mut dyn FnMut(CellId, f64) -> Result<(), DepositionError>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        self.inner
+            .visit_step_sources(thermal, start, dt, end, emit, checkpoint)
+            .map_err(FiniteThermoplasticError::Observer)
+    }
     fn step_sources(
         &mut self,
         thermal: &DepositionSimulation<'_>,
@@ -814,9 +845,9 @@ impl<O: DepositionObserver, M: CaloricMaterial> DepositionObserver
         end: f64,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
-        self.inner
-            .step_sources(thermal, start, dt, end, checkpoint)
-            .map_err(FiniteThermoplasticError::Observer)
+        collect_source_rates(thermal, |emit| {
+            self.visit_step_sources(thermal, start, dt, end, emit, checkpoint)
+        })
     }
     fn conductances(
         &mut self,
