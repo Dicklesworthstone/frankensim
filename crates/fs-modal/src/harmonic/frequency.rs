@@ -25,6 +25,7 @@ mod work;
 pub use work::{
     harmonic_mean_power_curvature_with_cancel, harmonic_mean_power_parameter_jet_with_cancel,
     harmonic_quadratic_power_curvature_with_cancel,
+    harmonic_quadratic_power_derivative_with_cancel,
     harmonic_quadratic_power_parameter_jet_with_cancel,
 };
 

@@ -1,4 +1,4 @@
-//! Second derivatives of signed physical work, with products scaled before summation.
+//! Physical work jets, with products scaled before summation.
 
 use super::super::{HarmonicResponseError, finite, invalid, parameter::PowerSum};
 use fs_math::{c64::C64, dd::Dd};
@@ -181,6 +181,65 @@ pub fn harmonic_mean_power_parameter_jet_with_cancel(
         angular_second_derivative: second.value()?,
         parameter_derivative: parameter.value()?,
         angular_parameter_derivative: mixed.value()?,
+    })
+}
+
+/// Value and first frequency derivative of original symmetric quadratic work.
+///
+/// Evaluates P=Re(v^H D v)/2 and P_omega with fixed D=(C+C^T)/2. The
+/// complete finite row-major C is supplied; gyroscopic exchange does not
+/// contribute to work. Coefficients stay inside normalized products, retaining
+/// weak physical work, subnormal coefficients and finite cancellation between
+/// otherwise overflowing products. Signed quadratic forms remain signed.
+///
+/// This entry needs only v and v_omega. In particular, a resonance refinement
+/// does not evaluate an unused curvature or require it to be representable.
+/// The same original symmetric-pair owner serves the complete higher jets.
+/// Work is O(n^2), scratch is constant, and no allocation is performed.
+pub fn harmonic_quadratic_power_derivative_with_cancel(
+    velocity: &[C64],
+    derivative: &[C64],
+    matrix: &[f64],
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<super::super::resonance::HarmonicPowerSample, HarmonicResponseError> {
+    use super::super::resonance::HarmonicPowerSample;
+
+    if cancelled() {
+        return Err(HarmonicResponseError::Cancelled);
+    }
+    let n = velocity.len();
+    if n == 0
+        || derivative.len() != n
+        || n.checked_mul(n) != Some(matrix.len())
+        || velocity.iter().chain(derivative).any(|&v| !finite(v))
+        || matrix.iter().any(|v| !v.is_finite())
+    {
+        return Err(invalid(
+            "complete finite quadratic-work fields and matrix required",
+        ));
+    }
+    let (mut value, mut first) = (PowerSum::default(), PowerSum::default());
+    for i in 0..n {
+        if cancelled() {
+            return Err(HarmonicResponseError::Cancelled);
+        }
+        for j in i..n {
+            for coefficient in symmetric_work_coefficients(matrix, n, i, j) {
+                if coefficient == 0.0 {
+                    continue;
+                }
+                value.half_inner(velocity[i], velocity[j], coefficient)?;
+                first.half_inner(derivative[i], velocity[j], coefficient)?;
+                first.half_inner(velocity[i], derivative[j], coefficient)?;
+            }
+        }
+    }
+    if cancelled() {
+        return Err(HarmonicResponseError::Cancelled);
+    }
+    Ok(HarmonicPowerSample {
+        average_power_w: value.value()?,
+        angular_derivative: first.value()?,
     })
 }
 
