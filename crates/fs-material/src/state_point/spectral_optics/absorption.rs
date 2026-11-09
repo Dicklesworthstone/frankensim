@@ -10,6 +10,12 @@ use super::{
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{MaterialCard, QueryPoint};
 
+mod temperature;
+pub use temperature::{
+    AbsorptionTemperaturePathError, AbsorptionTemperatureSampleError,
+    SpectralDielectricAbsorptionTemperaturePath,
+};
+
 /// Independently supported intensity absorption at one complete material state.
 ///
 /// This projects the SAME nine wavelength and nine alpha properties already

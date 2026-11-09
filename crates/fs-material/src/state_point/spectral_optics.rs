@@ -25,7 +25,9 @@ pub use sellmeier::{
 
 mod absorption;
 pub use absorption::{
-    SpectralDielectricAbsorptionStatePoint, resolve_spectral_dielectric_absorption_state_point,
+    AbsorptionTemperaturePathError, AbsorptionTemperatureSampleError,
+    SpectralDielectricAbsorptionStatePoint, SpectralDielectricAbsorptionTemperaturePath,
+    resolve_spectral_dielectric_absorption_state_point,
 };
 
 /// Number of original knots retained by each finite-band optical table.

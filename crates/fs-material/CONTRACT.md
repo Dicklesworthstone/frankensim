@@ -23880,3 +23880,30 @@ spectrum regressions and seven one-tone window regressions (27 total). These
 used the original material modules and original fs-math/harmonic-window owners;
 the latter passed all 90 original window tests including the nine causal tests. Full Cargo
 and Cx-backed solid/coupling integration are separate unexecuted gates.
+
+
+### Prepared original spectral absorption over temperature
+
+`state_point::SpectralDielectricAbsorptionTemperaturePath` prepares the original
+nine wavelength and nine alpha claims over a typed absolute-temperature interval,
+holding every other source coordinate fixed. Each requirement uses its exact
+selected claim through the existing matdb source-line owner; auxiliary roles,
+sampled-surface cell crossings, source holes and original interpolation policy
+remain effective. The caller bounds the complete retained breakpoint count and
+can cancel preparation without publishing a partial path.
+
+Prepared paths share compact original piecewise-affine values. Native
+temperature/wavelength queries allocate nothing and perform no material queries.
+Wavelength knots may move independently with temperature; wavelength ordering,
+positivity, nonnegative absorption and every auxiliary constitutive requirement
+are admitted at the complete source breakpoints. Runtime arithmetic still refuses
+an unrepresentable or collapsed spectrum. Transparent sources retain their finite
+bands. The common wavelength intersection over the whole temperature interval
+may be absent even though every local spectrum remains usable.
+
+This adds no absorption-temperature fit, fixed-grid resampling, extrapolation,
+phase/absorption relation, thermal evolution or uncertainty enclosure. Four
+focused source regressions cover original pins and interlaced knots, fixed-pressure
+surface slices and holes, interior crossings and auxiliary-domain exits, bounded
+cancellation, and transparent moving support. These regressions are authored and
+source-reviewed; native compilation/execution remains unverified in this session.
