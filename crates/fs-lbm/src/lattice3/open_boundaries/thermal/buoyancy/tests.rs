@@ -4,7 +4,7 @@ use crate::d3q27::{CollisionConfig27, CollisionModel27, D3q27, Equilibrium27};
 use crate::lattice3::{D3q19, Grid3, GridBudget3};
 use crate::thermal::boundary::FiniteThermalWall;
 use crate::thermal::boundary::conduction::WallCell;
-use crate::thermal::open::ThermalOpenLimits3;
+use crate::thermal::open::{ThermalOpenBoundaries3, ThermalOpenLimits3};
 use crate::thermal::tensor::DiffusivityTensor;
 
 const RHO: f64 = 1.2;
@@ -694,3 +694,5 @@ mod material_transport;
 mod reservoir_profiles;
 
 mod density;
+
+mod wall_fields;

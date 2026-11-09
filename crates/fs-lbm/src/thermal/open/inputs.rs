@@ -10,6 +10,7 @@ use super::{
     ThermalOpenError3, ThermalOpenFace3, ThermalOpenField3, ThermalOpenLimits3, ThermalWall,
     check_boundary_temperature, invalid,
 };
+use crate::thermal::boundary::ThermalWallField;
 
 fn admit_stateless(
     face: usize,
@@ -66,6 +67,65 @@ impl ThermalOpenField3 {
         // scratch. No candidate reflection or accepted temperature is reused.
         self.walls[face].fill(wall);
         self.boundaries.faces[face] = ThermalOpenFace3::Wall(wall);
+        Ok(())
+    }
+
+    /// Set a held spatial field on an existing stateless external wall.
+    ///
+    /// Spatial entries cover the full original x-fast plane: X faces use
+    /// y+ny*z, Y faces x+nx*z, and Z faces x+nx*y. Each entry may independently
+    /// prescribe temperature, inward heat flux, an ambient film or insulation.
+    /// The original reflected pair resolves its surface temperature and actual
+    /// heat exchange; no fluid cell temperature or wall heat is prescribed twice.
+    ///
+    /// Every value is admitted before any slot changes. A nonzero explicitly
+    /// authored heat flux on an inactive solid-facing slot refuses. Temperatures
+    /// and ambient film data in inactive slots still undergo ordinary admission.
+    /// Finite storage cannot be created or replaced; its retained heat sources
+    /// use set_finite_wall_heat instead.
+    ///
+    /// Spatial input reuses the already budgeted wall vectors and performs no
+    /// allocation. wall_states returns the actual field; boundaries retains the
+    /// last uniform declaration for face ownership. A later uniform setter
+    /// replaces the entire field. Scalar/flux history, clocks and receipts stay
+    /// unchanged until the original joint flow/heat step succeeds.
+    pub fn set_wall_boundary_field(
+        &mut self,
+        face: usize,
+        field: ThermalWallField<'_>,
+    ) -> Result<(), ThermalOpenError3> {
+        let ThermalWallField::Spatial(walls) = field else {
+            return self.set_wall_boundary(face, field.at(0));
+        };
+        if !matches!(
+            self.boundaries.faces.get(face),
+            Some(ThermalOpenFace3::Wall(_))
+        ) {
+            return Err(invalid("thermal field target is not an external wall face"));
+        }
+        if walls.len() != self.walls[face].len() {
+            return Err(invalid("thermal wall field shape mismatch"));
+        }
+        if self.walls[face]
+            .iter()
+            .any(|wall| matches!(wall, ThermalWall::FiniteSolid(_)))
+        {
+            return Err(invalid(
+                "finite wall storage cannot be replaced by a boundary field",
+            ));
+        }
+        for (link, &wall) in walls.iter().enumerate() {
+            admit_stateless(face, wall, self.limits)?;
+            if let ThermalWall::HeatFlux(heat) = wall
+                && heat != 0.0
+                && self.solid[boundary_cell(self.dims, face / 2, face % 2, link)]
+            {
+                return Err(invalid(
+                    "spatial wall heat flux must be zero on inactive slots",
+                ));
+            }
+        }
+        self.walls[face].copy_from_slice(walls);
         Ok(())
     }
 

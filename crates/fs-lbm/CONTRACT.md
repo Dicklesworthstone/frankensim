@@ -4135,3 +4135,30 @@ replay, physical rheology gradients, active implicit-drag/thermal endpoint
 velocities, finite-wall refusal and atomic source/control rollback. Mechanical
 wall work remains separate from prescribed sensible heat; this extension adds
 no total-energy, high-Mach or moving-geometry accuracy claim.
+
+
+## Spatial stateless walls on native thermal and buoyant flow
+
+`ThermalOpenField3::set_wall_boundary_field` and the native Boussinesq owner
+accept the existing `ThermalWallField` on each external wall plane. Individual
+links may prescribe temperature, signed inward heat flux, ambient Robin film
+or insulation. The original reflected pair and scalar transport compute actual
+surface temperatures and heat; the existing wall vectors are reused without
+allocation or a new time-step kernel. All values and shape/ownership constraints
+are admitted before mutation. Explicit nonzero spatial flux on an inactive
+solid-facing slot refuses. Finite solid storage and conduction ownership cannot
+be created or replaced through this input path.
+
+`wall_states` exposes the actual installed field; `boundaries` retains the last
+uniform declaration for face ownership. A subsequent uniform setter replaces
+the whole field. Binding a buoyancy owner admits actual per-link prescribed
+temperatures, and nonlinear source-density policies continue admitting every
+actual reflected trace. Accepted populations, thermal/force/wall history,
+receipts and clocks retain their original transactional publication rules.
+
+Four G1/G3/G4 regression groups cover independent reflection/storage on all six
+faces, uniform parity, nonlinear interior-temperature refusal, finite/inactive
+ownership, cancellation and exact retry. Pinned Rust 2024 formatting/parsing
+passed; native integration compilation and runtime execution remain unverified.
+No new temporal order, variable mass, moving-solid storage or calibrated
+heat-transfer accuracy is claimed.

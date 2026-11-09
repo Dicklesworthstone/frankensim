@@ -18,15 +18,15 @@ use super::{
     EquilibriumLattice3, GridError3, OpenBoundaryGrid3, OpenBoundaryMomentumTransport3,
     OpenThermalError3, ThermalOpenBalance3, ThermalOpenError3, ThermalOpenField3, macro_cell,
 };
-use crate::thermal::boundary::ThermalWall;
 use crate::thermal::boundary::conduction::{WallConductionControls, WallConductionLink};
+use crate::thermal::boundary::{ThermalWall, ThermalWallField};
 pub use crate::thermal::open::buoyancy::{
     BoussinesqDensityLaw3, BoussinesqDensityLawError3, BoussinesqForceLaw3, BoussinesqLaw3,
     BoussinesqLawError3, DensityDepartureLaw3,
 };
 use crate::thermal::open::immersed::ImmersedThermalBody3;
 use crate::thermal::open::immersed::conduction::ImmersedConductionLink3;
-use crate::thermal::open::{ThermalOpenBoundaries3, ThermalOpenFace3, ThermalTemperatureSample3};
+use crate::thermal::open::{ThermalOpenFace3, ThermalTemperatureSample3};
 use crate::thermal::tensor::DiffusivityField;
 use fs_exec::Cx;
 use fs_math::dd::Dd;
@@ -164,15 +164,29 @@ fn admit_boundary_temperature<E, P: BoussinesqForceLaw3>(
 
 fn admit_boundary_data<E, P: BoussinesqForceLaw3>(
     law: &P,
-    boundaries: ThermalOpenBoundaries3,
+    thermal: &ThermalOpenField3,
+    poll: &mut impl FnMut() -> Result<(), GridError3<E>>,
 ) -> Result<(), BoussinesqOpenError3<E, P::Error>> {
+    let boundaries = thermal.boundaries();
     for (face, boundary) in boundaries.faces.into_iter().enumerate() {
         match boundary {
-            ThermalOpenFace3::Reservoir { temperature }
-            | ThermalOpenFace3::Wall(ThermalWall::Temperature(temperature)) => {
+            ThermalOpenFace3::Reservoir { temperature } => {
                 admit_boundary_temperature(law, face, temperature)?;
             }
-            _ => {}
+            ThermalOpenFace3::Wall(_) => {
+                // The original per-link arrays may hold a spatial input. Its
+                // actual prescribed temperatures, including inactive slots,
+                // must be admitted before binding a new force epoch.
+                for (link, &wall) in thermal.wall_states(face).unwrap().iter().enumerate() {
+                    if link % 64 == 0 {
+                        poll()?;
+                    }
+                    if let ThermalWall::Temperature(temperature) = wall {
+                        admit_boundary_temperature(law, face, temperature)?;
+                    }
+                }
+            }
+            ThermalOpenFace3::Periodic => {}
         }
     }
     if let ThermalWall::Temperature(temperature) = boundaries.internal_wall {
@@ -263,7 +277,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize, P: BoussinesqForceLaw3>
             ));
         }
         flow.admit_thermal_faces(thermal.boundaries())?;
-        admit_boundary_data(&law, thermal.boundaries())?;
+        admit_boundary_data(&law, &thermal, poll)?;
         for face in 0..6 {
             if let Some(profile) = thermal.reservoir_temperature_profile(face) {
                 for (index, &temperature) in profile.iter().enumerate() {
@@ -381,6 +395,29 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize, P: BoussinesqForceLaw3>
         }
         self.thermal
             .set_wall_boundary(face, wall)
+            .map_err(Into::into)
+    }
+
+    /// Set per-link temperatures, inward fluxes, films or insulation on one
+    /// stateless external wall in its original x-fast plane ordering.
+    ///
+    /// Every prescribed temperature satisfies the retained buoyancy policy
+    /// before any input changes. Flux/film traces are admitted by the original
+    /// step at their actual reflected temperatures, including each individual
+    /// trace under nonlinear source-density policies. Finite solid storage is
+    /// never replaced; this reuses the original budgeted wall arrays.
+    pub fn set_wall_boundary_field(
+        &mut self,
+        face: usize,
+        field: ThermalWallField<'_>,
+    ) -> Result<(), BoussinesqOpenError3<L::Error, P::Error>> {
+        for wall in field.laws() {
+            if let ThermalWall::Temperature(temperature) = wall {
+                admit_boundary_temperature(&self.law, face, temperature)?;
+            }
+        }
+        self.thermal
+            .set_wall_boundary_field(face, field)
             .map_err(Into::into)
     }
 
