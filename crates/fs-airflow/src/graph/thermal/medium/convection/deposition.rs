@@ -13,6 +13,8 @@
 //! their own storage ownership. Geometry stays prescribed; neither resolves flow.
 
 pub mod source;
+/// Spatial fin inventory on the original finite-cell thermal timeline.
+pub mod fin;
 
 use std::collections::{BTreeMap, BTreeSet};
 use fs_conduction::transient::deposition::{CellId, DepositionError, DepositionSimulation};

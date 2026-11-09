@@ -6753,3 +6753,27 @@ The existing `PumpPowerState` and `PumpLossRouting` value types now have one neu
 Native admission checks each nonnegative pump/drive power channel against actual `H(Q)Q`, and each routed heat channel against its original fraction. Roundoff allowances scale only the same compared channel: large through-power or an unrelated loss cannot conceal invented small heat. Head-only and signed recovering sources remain valid with no power data; no efficiency or heat is inferred. Authored nonzero shutoff input/losses remain possible when hydraulic work and pipe dissipation are zero.
 
 Verification: the actual standalone production power leaf compiled with the pinned compiler, and its large-throughput/small-heat regression passed (1 test). Original native graph regressions for accepted zero/nonzero-flow power, exact query counts and failed-partition rollback, plus original pump adapter receipt assertions, were authored and formatter-parsed but not executed after loss of the prior numerical dependency projection. Full Cargo/native runtime integration remains unverified. This native slice retains values; explicit regional heat destinations are supplied by the subsequent thermal composition.
+
+
+## Finite fin storage on the original thermal timeline
+
+`deposition::fin::TransientFinTopology` lowers one constant-section fin with
+explicit axial partitions, masses, caloric identities and spatial placement
+into the original native thermal cells and links. Root/internal contacts use
+the physical cross section and explicit half-distances; lateral and optional
+tip contacts own distinct surfaces. The root retains an authored base distance
+and contact resistance. No base bare area, fluid inventory, density, heat
+capacity, steady efficiency or second thermal integrator is inferred. Identity,
+geometry, boundary, work-budget and cancellation refusals publish no topology.
+
+Five focused regression groups compiled and executed successfully against the
+exact topology and original native thermal/conduction routines in a bounded
+source projection. They cover finite fin startup storage, independent
+three-store eigenmode refinement, mass sensitivity, energy closure, nonuniform
+geometry and coverage, insulation/authored sources, and transactional refusals.
+The analytic temperature errors were 0.305197664745, 0.151894055408 and
+0.075771342836 K for steps 0.02, 0.01 and 0.005 s. Dependency-heavy unexercised
+phase and implicit module registrations were omitted; no exercised thermal
+updates were replaced. This is not a full workspace, source-film integration
+or DSR pass, nor experimental fin validation. Spatial refinement and transverse
+uniformity remain independent physical obligations.
