@@ -1,16 +1,17 @@
 //! Cached linear convolution of the original real causal basis coefficients.
 //! The original FFT owns transforms; this module only pads, normalizes, and
-//! contracts the physical Q and dt*Qdot channels. No acoustic frequency fitting.
+//! contracts explicitly mapped physical value and scaled-rate channels.
+//! No acoustic frequency fitting or harmonic reconstruction is introduced.
 use super::{AeroacError, Dd, TimedCompactSource, channels, invalid, poll};
 use fs_fft::{C64, GeneralFft, GeneralFftBudget};
 
 #[derive(Clone, Debug)]
-pub(super) struct Convolution {
+pub(super) struct Convolution<const N: usize = 8> {
     fft: GeneralFft,
     spectra: Vec<Vec<C64>>,
-    scales: [f64; 8],
+    scales: [f64; N],
 }
-impl Convolution {
+impl<const N: usize> Convolution<N> {
     pub(super) fn layout(samples: usize) -> Result<(usize, usize), AeroacError> {
         let length = samples
             .checked_mul(2)
@@ -21,7 +22,7 @@ impl Convolution {
         Ok((length, workspace))
     }
     pub(super) fn prepare(
-        coefficients: &[[f64; 8]],
+        coefficients: &[[f64; N]],
         length: usize,
         workspace: usize,
         cancelled: &mut impl FnMut() -> bool,
@@ -36,12 +37,12 @@ impl Convolution {
         )
         .map_err(AeroacError::Fft)?;
         let mut scratch = filled(fft.scratch_len(), C64::default())?;
-        let mut scales = [0.0_f64; 8];
+        let mut scales = [0.0_f64; N];
         let mut spectra = Vec::new();
         spectra
-            .try_reserve_exact(8)
+            .try_reserve_exact(N)
             .map_err(|_| invalid("causal spectrum-bank allocation failed"))?;
-        for component in 0..8 {
+        for component in 0..N {
             poll(cancelled)?;
             for (i, tap) in coefficients.iter().enumerate() {
                 if i % 64 == 0 {
@@ -69,39 +70,44 @@ impl Convolution {
             scales,
         })
     }
-    pub(super) fn apply(
+    /// The same linear FFT convolution for explicitly mapped physical channels.
+    /// Callers admit their original clocks and source units before entering.
+    pub(super) fn apply_channels<const INPUTS: usize>(
         &self,
-        source: &[TimedCompactSource],
-        dt: f64,
-        amplitudes: [f64; 2],
+        samples: usize,
+        source: impl Fn(usize, usize) -> f64,
+        amplitudes: [f64; INPUTS],
+        kernels: [[usize; INPUTS]; 4],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<[f64; 4]>, AeroacError> {
         poll(cancelled)?;
-        if amplitudes == [0.0; 2] {
-            return filled(source.len(), [0.0; 4]);
+        if kernels.iter().flatten().any(|&k| k >= N) {
+            return Err(invalid("causal convolution channel map is invalid"));
+        }
+        if amplitudes == [0.0; INPUTS] {
+            return filled(samples, [0.0; 4]);
         }
         let length = self.fft.len();
-        let mut source_spectra = [
-            filled(length, C64::default())?,
-            filled(length, C64::default())?,
-        ];
+        let mut source_spectra = Vec::new();
+        source_spectra
+            .try_reserve_exact(INPUTS)
+            .map_err(|_| invalid("causal input spectrum allocation failed"))?;
+        for _ in 0..INPUTS {
+            source_spectra.push(filled(length, C64::default())?);
+        }
         let mut scratch = filled(self.fft.scratch_len(), C64::default())?;
         let mut work = filled(length, C64::default())?;
-        let mut sums = filled(source.len(), [Dd::ZERO; 4])?;
-        for channel in 0..2 {
+        let mut sums = filled(samples, [Dd::ZERO; 4])?;
+        for channel in 0..INPUTS {
             poll(cancelled)?;
             if amplitudes[channel] == 0.0 {
                 continue;
             }
-            for (i, sample) in source.iter().enumerate() {
+            for i in 0..samples {
                 if i % 64 == 0 {
                     poll(cancelled)?;
                 }
-                let value = if channel == 0 {
-                    sample.strength.volume_flow_m3_s
-                } else {
-                    dt * sample.strength.volume_flow_rate_m3_s2
-                };
+                let value = source(i, channel);
                 source_spectra[channel][i] = C64::new(value / amplitudes[channel], 0.0);
             }
             self.fft
@@ -110,8 +116,7 @@ impl Convolution {
             poll(cancelled)?;
         }
         for component in 0..4 {
-            let (a, b) = channels(component);
-            for (channel, kernel) in [(0, a), (1, b)] {
+            for (channel, kernel) in kernels[component].into_iter().enumerate() {
                 poll(cancelled)?;
                 if amplitudes[channel] == 0.0 || self.scales[kernel] == 0.0 {
                     continue;
@@ -135,7 +140,7 @@ impl Convolution {
                     .inverse(&mut work, &mut scratch)
                     .map_err(AeroacError::Fft)?;
                 poll(cancelled)?;
-                for i in 0..source.len() {
+                for i in 0..samples {
                     if i % 64 == 0 {
                         poll(cancelled)?;
                     }
@@ -146,7 +151,7 @@ impl Convolution {
         }
         let mut result = Vec::new();
         result
-            .try_reserve_exact(source.len())
+            .try_reserve_exact(samples)
             .map_err(|_| invalid("causal convolution result allocation failed"))?;
         for (i, value) in sums.into_iter().enumerate() {
             if i % 64 == 0 {
@@ -160,6 +165,32 @@ impl Convolution {
         }
         poll(cancelled)?;
         Ok(result)
+    }
+}
+impl Convolution<8> {
+    pub(super) fn apply(
+        &self,
+        source: &[TimedCompactSource],
+        dt: f64,
+        amplitudes: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<[f64; 4]>, AeroacError> {
+        self.apply_channels(
+            source.len(),
+            |i, channel| {
+                if channel == 0 {
+                    source[i].strength.volume_flow_m3_s
+                } else {
+                    dt * source[i].strength.volume_flow_rate_m3_s2
+                }
+            },
+            amplitudes,
+            core::array::from_fn(|component| {
+                let (a, b) = channels(component);
+                [a, b]
+            }),
+            cancelled,
+        )
     }
 }
 fn filled<T: Clone>(count: usize, value: T) -> Result<Vec<T>, AeroacError> {

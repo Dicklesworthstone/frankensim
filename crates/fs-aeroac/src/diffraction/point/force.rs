@@ -235,6 +235,48 @@ fn rotate_tensor(axes: [[f64; 3]; 3], tensor: [[C64; 3]; 3]) -> [[C64; 3]; 3] {
     core::array::from_fn(|i| rotate(axes, [columns[0][i], columns[1][i], columns[2][i]]))
 }
 
+/// L times the original mixed receiver/source derivatives of L and q.
+/// Shared by harmonic and causal forces before any contour/time substitution.
+pub(super) fn mixed_geometry(
+    source: [f64; 3],
+    receiver: [f64; 3],
+    l: f64,
+    receiver_edge: [f64; 3],
+    source_edge: [f64; 3],
+) -> ([[f64; 3]; 3], [[[f64; 3]; 3]; 2]) {
+    let r = det::hypot(receiver[0], receiver[1]);
+    let rs = det::hypot(source[0], source[1]);
+    let radial = [receiver[0] / r, receiver[1] / r, 0.0];
+    let tangent = [-radial[1], radial[0], 0.0];
+    let source_radial = [source[0] / rs, source[1] / rs, 0.0];
+    let source_tangent = [-source_radial[1], source_radial[0], 0.0];
+    let [ct, st] = half_angle(radial[0], radial[1]);
+    let [cs, ss] = half_angle(source_radial[0], source_radial[1]);
+    let cosine = [ct * cs + st * ss, ct * cs - st * ss];
+    let sine = [st * cs - ct * ss, st * cs + ct * ss];
+    let mixed_edge = core::array::from_fn(|i| {
+        core::array::from_fn(|j| {
+            radial[i] * source_radial[j]
+                - (if i == 2 && j == 2 { 1.0 } else { 0.0 })
+                - receiver_edge[i] * source_edge[j]
+        })
+    });
+    let coefficient = (0.5 * l / det::sqrt(r)) / det::sqrt(rs);
+    let mixed_q = core::array::from_fn(|term| {
+        let angular_sign = if term == 0 { -1.0 } else { 1.0 };
+        core::array::from_fn(|i| {
+            core::array::from_fn(|j| {
+                coefficient
+                    * ((cosine[term] * radial[i] - sine[term] * tangent[i]) * source_radial[j]
+                        - angular_sign
+                            * (sine[term] * radial[i] + cosine[term] * tangent[i])
+                            * source_tangent[j])
+            })
+        })
+    });
+    (mixed_edge, mixed_q)
+}
+
 struct ForceKernel {
     point: PointKernel,
     source_edge: [f64; 3],
@@ -272,36 +314,13 @@ impl ForceKernel {
                 "half-plane force velocity scale is unrepresentable",
             ));
         }
-        let r = det::hypot(receiver[0], receiver[1]);
-        let rs = det::hypot(source[0], source[1]);
-        let radial = [receiver[0] / r, receiver[1] / r, 0.0];
-        let tangent = [-radial[1], radial[0], 0.0];
-        let source_radial = [source[0] / rs, source[1] / rs, 0.0];
-        let source_tangent = [-source_radial[1], source_radial[0], 0.0];
-        let [ct, st] = half_angle(radial[0], radial[1]);
-        let [cs, ss] = half_angle(source_radial[0], source_radial[1]);
-        let cosine = [ct * cs + st * ss, ct * cs - st * ss];
-        let sine = [st * cs - ct * ss, st * cs + ct * ss];
-        let mixed_edge = core::array::from_fn(|i| {
-            core::array::from_fn(|j| {
-                radial[i] * source_radial[j]
-                    - (if i == 2 && j == 2 { 1.0 } else { 0.0 })
-                    - point.edge_gradient[i] * reciprocal.edge_gradient[j]
-            })
-        });
-        let coefficient = (0.5 * l / det::sqrt(r)) / det::sqrt(rs);
-        let mixed_q = core::array::from_fn(|term| {
-            let angular_sign = if term == 0 { -1.0 } else { 1.0 };
-            core::array::from_fn(|i| {
-                core::array::from_fn(|j| {
-                    coefficient
-                        * ((cosine[term] * radial[i] - sine[term] * tangent[i]) * source_radial[j]
-                            - angular_sign
-                                * (sine[term] * radial[i] + cosine[term] * tangent[i])
-                                * source_tangent[j])
-                })
-            })
-        });
+        let (mixed_edge, mixed_q) = mixed_geometry(
+            source,
+            receiver,
+            l,
+            point.edge_gradient,
+            reciprocal.edge_gradient,
+        );
         let edge = point.phase.scale(1.0 / l);
         let edge_first = edge * C64::new(-1.0 / l, k);
         let edge_second = edge * C64::new(2.0 / l / l - k * k, -2.0 * k / l);
