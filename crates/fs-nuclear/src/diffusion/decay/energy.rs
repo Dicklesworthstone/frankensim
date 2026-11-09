@@ -169,7 +169,11 @@ impl DecayNeutronEnergyState {
             }
             partitions.push(source_partitions);
         }
-        let maximum_neutron_energy_j = model.group_energies_j().iter().copied().fold(0.0_f64, f64::max)
+        let maximum_neutron_energy_j = model
+            .group_energies_j()
+            .iter()
+            .copied()
+            .fold(0.0_f64, f64::max)
             + model
                 .reaction_energies()
                 .iter()

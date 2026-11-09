@@ -68,6 +68,9 @@ pub use fusion_neutrons::{
     NeutronKineticHeating,
 };
 
+mod decay_neutrons;
+pub use decay_neutrons::{DecayNeutronCellSource, DecayNeutronCellStep, DecayNeutronHeating};
+
 mod fusion_activation;
 pub use fusion_activation::{
     FusionNeutronActivationCellSource, FusionNeutronActivationCellStep,
@@ -266,6 +269,8 @@ pub enum FissionThermalError {
     Diffusion(DiffusionBurnupError),
     /// Original neutron kinetic-energy source, transport or accounting refusal.
     NeutronKinetic(crate::fusion_neutrons::NeutronKineticError),
+    /// Original radioactive neutron source, kinetic transfer or energy-account refusal.
+    DecayNeutrons(crate::diffusion::decay::energy::DecayNeutronEnergyError),
     /// Finite fusion-neutron activation or combined energy-account refusal.
     FusionActivation(crate::fusion_neutrons::activation::FusionNeutronActivationError),
     /// Original radiation response, coverage, work or energy-account refusal.
@@ -408,6 +413,7 @@ impl std::error::Error for FissionThermalError {
             Self::Activation(error) => Some(error),
             Self::Diffusion(error) => Some(error),
             Self::NeutronKinetic(error) => Some(error),
+            Self::DecayNeutrons(error) => Some(error),
             Self::FusionActivation(error) => Some(error),
             Self::Radiation(error) => Some(error),
             Self::EvaluatedDecay(error) => Some(error),

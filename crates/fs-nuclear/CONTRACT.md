@@ -3283,3 +3283,31 @@ emission with analytic birth/absorption history, continuum count/energy
 condensation, explicit missing-spectrum declarations, incompatible species and
 energy funding, bounded storage and late cancellation. These establish format
 and coupling behavior, not evaluated-isotope accuracy.
+
+## Shared material heating from radioactive neutron emission
+
+`thermal::{DecayNeutronCellSource, DecayNeutronHeating}` binds a complete shared
+radioactive-neutron checkpoint to distinct original thermal cells, requiring
+matching reference volumes, material identities and accepted clocks. One joint
+trial advances each final native thermal interval; every cell receives only
+its own disjoint deposited energy. The accepted physical state and interval
+report are shared across all cell views, including when thermal IDs order
+cells differently from their spatial indices.
+
+Radioactive transformations, neutron captures, source continuation, resident
+neutron storage and numerical defects retain their original owners. Shared
+energy/count defects are charged once. The original thermal transaction admits
+source and material endpoints together; cancellation, numerical refusal or a
+material-domain failure publishes neither nuclear nor thermal history.
+Material calorics and physical mass remain the original thermal owners, and no
+temperature-dependent half-life, cross section or deposition fraction is
+inferred from a temperature change.
+
+Five G1/G3/G4 integration tests cover analytic decay/capture calorimetry without
+double credit, shared spatial cell mapping, restart, clock/volume/cohort
+refusals and transaction rollback. A separate two-source/two-cell analytic
+regression checks both directed neutron transfers, each cell's capture and
+fluence, original inventories and cell-resolved heat/radiation/escape.
+These checks retain the source, transport and spectral limits stated above;
+they do not establish temperature-dependent nuclear feedback or a full
+constellation/thermal-extension gate.
