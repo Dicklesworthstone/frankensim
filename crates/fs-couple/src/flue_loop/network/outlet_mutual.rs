@@ -159,16 +159,31 @@ fn dc_curvature(load: &RelaxationImpedanceSpec) -> Option<f64> {
     (c.is_finite() && c > 0.0).then_some(c)
 }
 
+/// Sum of R/p^4 over the relaxation terms of a load [`dc_curvature`] admits:
+/// Re Z(w)/w^2 = sum R/(w^2 + p^2) falls from its DC value as -w^2 times this.
+fn dc_quartic(load: &RelaxationImpedanceSpec) -> f64 {
+    load.terms().iter().map(|t| {
+        let p2 = t.rate_per_s * t.rate_per_s;
+        t.resistance_pa_s_m3 / (p2 * p2)
+    }).sum()
+}
+
 /// sqrt(Re Z_a Re Z_b)/(mono w^2) at angular frequency `w`, mono = rho/(4 pi c).
 fn pritchard_weight(a: &RelaxationImpedanceSpec, b: &RelaxationImpedanceSpec, mono: f64, w: f64) -> f64 {
     fs_math::det::sqrt(self_resistance(a, w) * self_resistance(b, w)) / (mono * w * w)
 }
 
 /// Symmetric weight filter w[0..=half] of the bilinear-realized weight
-/// W(theta) = pritchard_weight at (2/dt) tan(theta/2), by the midpoint rule on
-/// (0, pi), scaled so that w[0] + 2 sum w[m] equals its exact DC value `dc`.
-fn pritchard_filter(a: &RelaxationImpedanceSpec, b: &RelaxationImpedanceSpec, mono: f64, dc: f64, dt: f64,
-    half: usize, out: &mut [f64],
+/// W(theta) = pritchard_weight at (2/dt) tan(theta/2): its cosine series by the
+/// midpoint rule on (0, pi), then the least change of the response (in L2 on
+/// (0, pi)) that gives it W's exact DC value `dc` and exact DC curvature `bend`
+/// = W''(0): w[0] += l1, w[m] += l1 - m^2 l2. The truncated series alone misses
+/// that curvature, and a realized weight above the one the self resistances
+/// imply leaves Re Z without a Cholesky factor wherever the exact matrix is
+/// nearly singular (openings in a line, low frequency).
+#[allow(clippy::too_many_arguments)]
+fn pritchard_filter(a: &RelaxationImpedanceSpec, b: &RelaxationImpedanceSpec, mono: f64, dc: f64, bend: f64,
+    dt: f64, half: usize, out: &mut [f64],
 ) {
     out.fill(0.0);
     #[allow(clippy::cast_precision_loss)]
@@ -186,9 +201,29 @@ fn pritchard_filter(a: &RelaxationImpedanceSpec, b: &RelaxationImpedanceSpec, mo
         }
     }
     for tap in out.iter_mut().take(half + 1) { *tap /= q; }
-    let sum = out[0] + 2.0 * out[1..=half].iter().sum::<f64>();
-    let scale = dc / sum;
-    for tap in out.iter_mut().take(half + 1) { *tap *= scale; }
+    // Value V = w[0] + 2 sum w[m], curvature K = -2 sum m^2 w[m]; solve
+    // [2T+1, -2 S2; -2 S2, 2 S4] [l1; l2] = [dc - V; bend - K], S_k = sum m^k.
+    let (mut value, mut curvature, mut s2, mut s4) = (out[0], 0.0, 0.0, 0.0);
+    for (m, &tap) in out.iter().enumerate().take(half + 1).skip(1) {
+        #[allow(clippy::cast_precision_loss)]
+        let m2 = (m * m) as f64;
+        value += 2.0 * tap;
+        curvature -= 2.0 * m2 * tap;
+        s2 += m2;
+        s4 += m2 * m2;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let t = (2 * half + 1) as f64;
+    let det = 2.0 * t * s4 - 4.0 * s2 * s2;
+    let (r1, r2) = (dc - value, bend - curvature);
+    let l1 = (2.0 * s4 * r1 + 2.0 * s2 * r2) / det;
+    let l2 = (2.0 * s2 * r1 + t * r2) / det;
+    out[0] += l1;
+    for (m, tap) in out.iter_mut().enumerate().take(half + 1).skip(1) {
+        #[allow(clippy::cast_precision_loss)]
+        let m2 = (m * m) as f64;
+        *tap += l1 - m2 * l2;
+    }
 }
 
 /// W(theta) = w[0] + 2 sum_m w[m] cos(m theta) of a symmetric filter.
@@ -327,11 +362,14 @@ impl OutletMutual {
         let (mut weighted, mut weights, mut taps) = (Vec::new(), Vec::new(), Vec::new());
         if form == OutletMutualForm::Pritchard {
             let mut curvature = Vec::with_capacity(n);
+            // d ln(Re Z/w^2)/d(w^2) at DC, per load.
+            let mut slope = Vec::with_capacity(n);
             for load in loads {
                 let Some(c) = dc_curvature(load) else {
                     return Err(invalid("outlet_mutual pritchard needs self loads whose resistance vanishes as w^2 at DC (no base resistance or compliance term)"));
                 };
                 curvature.push(c);
+                slope.push(-dc_quartic(load) / c);
             }
             for pair in &pairs {
                 if pair.delay_samples < PRITCHARD_MIN_HALF_TAPS + 1 {
@@ -348,7 +386,10 @@ impl OutletMutual {
                 weights.try_reserve(half + 1).map_err(|_| invalid("outlet_mutual allocation failed"))?;
                 weights.resize(entry.weights + half + 1, 0.0);
                 let dc = fs_math::det::sqrt(curvature[a] * curvature[b]) / mono;
-                pritchard_filter(&loads[a], &loads[b], mono, dc, dt, half, &mut weights[entry.weights..]);
+                // W = sqrt(f_a f_b)/mono, f = Re Z/w^2, w^2 = theta^2/dt^2 + O(theta^4):
+                // W''(0) = dc (f_a'/f_a + f_b'/f_b)/dt^2.
+                let bend = dc * (slope[a] + slope[b]) / (dt * dt);
+                pritchard_filter(&loads[a], &loads[b], mono, dc, bend, dt, half, &mut weights[entry.weights..]);
                 // Kernel taps at lags N - T + i: gain [(1-f), f, -(1-f), -f] at
                 // lags N..N+3, convolved with w[|s|] at shifts s = -T..T.
                 let f = pair.delay_fraction;

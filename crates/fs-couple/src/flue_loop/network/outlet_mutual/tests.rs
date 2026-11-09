@@ -402,3 +402,43 @@ fn pritchard_refuses_what_its_weight_cannot_carry() {
     // The plain row still admits that pair.
     assert!(OutletMutual::admit(&[2, 3], &[[0.0; 2], [D, 0.0]], &[lossy, b], RHO, C, DT, BAND, &gate()).is_ok());
 }
+
+/// The flute's D4 fingering as the PF661 cards play it: the foot's open end (unflanged) at the origin and three
+/// open holes in a line, each a compact load in a baffle (radii from the cards' duct rows). The truncated weight
+/// filter alone realized a weight above the one the self resistances imply, and Re Z had no Cholesky factor at low
+/// frequency.
+fn flute_d4() -> Result<OutletMutual, FlueError> {
+    let openings = [(0.009_544_1, RadiationFlange::Unflanged, 0.0), (0.0077, RadiationFlange::Baffled, -0.109),
+        (0.0077, RadiationFlange::Baffled, -0.076), (0.0077, RadiationFlange::Baffled, -0.041)];
+    let loads: Vec<RelaxationImpedanceSpec> = openings.iter()
+        .map(|&(a, flange, _)| BaffledRadiationLoad::with_flange(a, RHO, C, DT, BAND, flange, &gate()).unwrap().load())
+        .collect();
+    let centers: Vec<[f64; 2]> = openings.iter().map(|&(_, _, x)| [x, 0.0]).collect();
+    OutletMutual::admit_form(OutletMutualForm::Pritchard, &[41, 36, 38, 40], &centers, &loads, RHO, C, DT, BAND, &gate())
+}
+
+#[test]
+fn pritchard_admits_the_flute_line_with_baffled_holes() {
+    let mutual = flute_d4().unwrap();
+    let record = mutual.record().clone();
+    assert_eq!(mutual.pairs().len(), 6);
+    assert!(record.min_pivot_ratio > 0.0 && record.grid_points >= 28_799, "{record:?}");
+    assert!(record.max_band_error < 0.005, "{record:?}");
+}
+
+#[test]
+fn pritchard_weight_filter_carries_the_exact_dc_value_and_curvature() {
+    let [a, b] = loads();
+    let mono = RHO / (4.0 * PI * C);
+    let (ca, cb) = (dc_curvature(&a).unwrap(), dc_curvature(&b).unwrap());
+    let dc = (ca * cb).sqrt() / mono;
+    let bend = -dc * (dc_quartic(&a) / ca + dc_quartic(&b) / cb) / (DT * DT);
+    for half in [PRITCHARD_MIN_HALF_TAPS, PRITCHARD_MAX_HALF_TAPS] {
+        let mut w = vec![0.0; half + 1];
+        pritchard_filter(&a, &b, mono, dc, bend, DT, half, &mut w);
+        #[allow(clippy::cast_precision_loss)]
+        let curvature: f64 = -2.0 * w.iter().enumerate().skip(1).map(|(m, &t)| (m * m) as f64 * t).sum::<f64>();
+        assert!((filter_response(&w, 0.0) / dc - 1.0).abs() < 1e-12, "half {half}");
+        assert!((curvature / bend - 1.0).abs() < 1e-9, "half {half}: {curvature} vs {bend}");
+    }
+}
