@@ -3812,6 +3812,25 @@ Archimedes buoyancy and torque, native support reactions, wet/dry limits, and
 invalid coefficients and face assignments. These are discrete manufactured
 hydrostatic controls, not free-surface-flow validation.
 
+`SurfaceField3::StratifiedPressure` consumes the original prepared
+`StratifiedHydrostaticPressure` directly on selected reference faces. The same
+clipped-simplex integration used by follower pressure retains density interfaces,
+density decreases and a continuous density slope before integrating each P1
+nodal force. Three sampled pressures are not substituted for the reservoir:
+that substitution changes hydrostatic force and center of pressure on a face
+crossing a layer or free surface, and linearizes a quadratic pressure law.
+No face allocations or alternate hydrostatic law are added. Nonnegative load
+scaling acts after clipping; the original layer budget and cancellation polls
+remain active. The assembled force stays a reference dead load and feeds the
+existing static, reaction and nodal-history consumers without claiming evolving
+immersion or fluid inertia.
+
+Three additional G0/G1/G3 regressions in `tests/load_fields3.rs` cover exact
+layered-wall force and first moment on three meshes, displaced-density buoyancy,
+native support reactions, agreement with the follower owner at zero deformation,
+the single-density limit, load scaling and invalid face assignments. The wall
+case explicitly detects the error from replacing the reservoir by nodal samples.
+
 ## Material-bound spatial gravity loads
 
 `loads3::history::VolumeHistory3::FixedAcceleration` accepts uniform, nodal P1,

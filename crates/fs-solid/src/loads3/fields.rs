@@ -1,4 +1,4 @@
-//! Consistent loads from piecewise-linear fields on the retained P1 mesh.
+//! Consistent field and hydrostatic loads on the retained P1 mesh.
 //!
 //! These are field coefficients, not point-load forces: pressure/traction
 //! samples are in Pa and body-force-density samples in N/m^3. Each selected
@@ -9,6 +9,7 @@
 //! destroys first moments and work against an affine displacement.
 
 use super::*;
+use crate::hyper3::pressure::StratifiedHydrostaticPressure;
 use crate::linear3::{TetMaterialField, p1_tet_mass_scale};
 
 #[derive(Clone, Copy)]
@@ -17,8 +18,9 @@ enum AccelerationDensity3<'a> {
     NodalReference(&'a [f64]),
 }
 
-/// P1 surface fields in the canonical node order of each selected `LoadFace3`.
-/// The outer value array follows `faces`; shared vertices need not share values.
+/// Surface fields on each selected `LoadFace3`. Sampled fields use its canonical
+/// node order; shared vertices need not share values. Prepared reservoirs retain
+/// their original spatial law and are integrated against the same P1 basis.
 #[derive(Debug, Clone, Copy)]
 pub enum SurfaceField3<'a> {
     /// Three Cartesian traction vectors per selected face [Pa].
@@ -36,6 +38,19 @@ pub enum SurfaceField3<'a> {
     /// This is a reference dead load, without fluid evolution or a follower
     /// tangent; use the nonlinear pressure owner for moving immersion geometry.
     FreeSurfacePressure { faces: &'a [usize], nodal_pascals: &'a [[f64; 3]] },
+    /// Exact hydrostatic pressure from the prepared reservoir on the reference
+    /// faces, including every density interface and continuous density slope.
+    /// Sampling pressure at vertices would smear interfaces and replace the
+    /// quadratic contribution with an affine field, changing force and moment.
+    ///
+    /// The finite nonnegative factor scales pressure after clipping and never
+    /// moves a layer or the free surface. This is a dead load; moving immersion
+    /// and follower stiffness remain with the nonlinear pressure owner.
+    StratifiedPressure {
+        faces: &'a [usize],
+        profile: &'a StratifiedHydrostaticPressure,
+        load_factor: f64,
+    },
 }
 
 /// P1 body-force density [N/m^3], never a mass density or acceleration.
@@ -207,11 +222,12 @@ impl<'m> TetLoadGeometry3<'m> {
         self.finish_forces(forces, nodal, cx)
     }
 
-    /// Integrate the declared P1 pressure, traction and body fields into the
+    /// Integrate declared surface and P1 body fields into the
     /// same `TetLoadCase3` consumed by native equilibrium/stress/reaction recovery.
-    /// The interpolation is exactly the supplied affine-element field; no
-    /// reconstruction of an unknown source function or quadrature-error bound
-    /// is implied. It is not a follower force on deformed geometry.
+    /// Sampled data retains its supplied affine-element interpolation; prepared
+    /// hydrostatic profiles instead retain their exact clipped spatial law.
+    /// No reconstruction of an unknown source function or quadrature-error bound
+    /// is implied. These are not follower forces on deformed geometry.
     ///
     /// Surface selection must be nonempty, exterior and assigned at most once.
     /// Count mismatch, nonfinite coefficients/arithmetic or cancellation returns
@@ -246,6 +262,12 @@ impl<'m> TetLoadGeometry3<'m> {
                 SurfaceField3::Traction { faces, nodal_pascals } => (faces, nodal_pascals.len()),
                 SurfaceField3::Pressure { faces, nodal_pascals }
                 | SurfaceField3::FreeSurfacePressure { faces, nodal_pascals } => (faces, nodal_pascals.len()),
+                SurfaceField3::StratifiedPressure { faces, load_factor, .. } => {
+                    if !load_factor.is_finite() || load_factor < 0.0 {
+                        return Err(LoadError3::Invalid("hydrostatic load factor must be finite and nonnegative"));
+                    }
+                    (faces, faces.len())
+                }
             };
             if faces.is_empty() || faces.len() > self.faces.len() || faces.len() != count {
                 return Err(LoadError3::Invalid("one P1 field per selected exterior face required"));
@@ -262,15 +284,26 @@ impl<'m> TetLoadGeometry3<'m> {
         for row in surfaces {
             let faces = match *row {
                 SurfaceField3::Traction { faces, .. } | SurfaceField3::Pressure { faces, .. }
-                | SurfaceField3::FreeSurfacePressure { faces, .. } => faces,
+                | SurfaceField3::FreeSurfacePressure { faces, .. }
+                | SurfaceField3::StratifiedPressure { faces, .. } => faces,
             };
             for (index, &id) in faces.iter().enumerate() {
                 poll(cx)?;
                 let face = self.faces[id];
-                if let SurfaceField3::FreeSurfacePressure { nodal_pascals, .. } = *row {
-                    let weights = crate::hyper3::pressure::free_surface_face_pressure_weights(
-                        nodal_pascals[index],
-                    ).map_err(|_| LoadError3::Invalid("nonfinite free-surface pressure or moment arithmetic"))?;
+                let exact_weights = match *row {
+                    SurfaceField3::FreeSurfacePressure { nodal_pascals, .. } => Some(
+                        crate::hyper3::pressure::free_surface_face_pressure_weights(nodal_pascals[index])
+                    ),
+                    SurfaceField3::StratifiedPressure { profile, load_factor, .. } => Some(
+                        profile.reference_face_pressure_weights(face.nodes.map(|node| self.nodes[node]), load_factor, cx)
+                    ),
+                    _ => None,
+                };
+                if let Some(weights) = exact_weights {
+                    let weights = weights.map_err(|error| match error {
+                        crate::hyper3::HyperTetError::Cancelled => LoadError3::Cancelled,
+                        _ => LoadError3::Invalid("nonfinite hydrostatic pressure or moment arithmetic"),
+                    })?;
                     for (&node, weight) in face.nodes.iter().zip(weights) {
                         for c in 0..3 {
                             let contribution = finite(-finite(face.area_m2 * weight)? * face.outward_normal[c])?;
@@ -284,7 +317,8 @@ impl<'m> TetLoadGeometry3<'m> {
                     SurfaceField3::Pressure { nodal_pascals, .. } => {
                         nodal_pascals[index].map(|p| face.outward_normal.map(|n| -p * n))
                     }
-                    SurfaceField3::FreeSurfacePressure { .. } => unreachable!("wet integration handled above"),
+                    SurfaceField3::FreeSurfacePressure { .. }
+                    | SurfaceField3::StratifiedPressure { .. } => unreachable!("exact pressure integration handled above"),
                 };
                 scatter(&mut forces, face.nodes, values, face.area_m2)?;
             }

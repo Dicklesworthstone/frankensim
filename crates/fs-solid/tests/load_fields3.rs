@@ -3,6 +3,8 @@
 mod support;
 use support::{block, with_cx};
 use fs_blake3::ContentHash;
+use fs_solid::hyper3::pressure::{ClosedTetPressureSurface, HydrostaticDensityLayer,
+    StratifiedHydrostaticPressure};
 use fs_solid::linear3::{TetElasticMaterial, TetLinearElasticProblem, TetMaterialField,
     TetThermalStrainField, TetThermalStrainState};
 use fs_solid::loads3::{LoadError3, SurfaceLoad3, TetLoadGeometry3, VolumeLoad3};
@@ -56,6 +58,140 @@ fn g1_partly_submerged_wall_has_exact_hydrostatic_force_and_center_of_pressure()
             for (a, b) in moment.into_iter().zip([0.0, -load*height/3.0, load/2.0]) { close(a, b, 2e-11); }
         });
     }
+}
+
+#[test]
+fn g1_stratified_wall_retains_layer_interfaces_and_density_gradient_moments() {
+    let height: f64 = 0.83;
+    let depths: [f64; 3] = [0.0, 0.21, 0.57];
+    let densities = [1000.0, 800.0, 1200.0];
+    let gravity = 9.81;
+    let beta = 300.0;
+    for n in [1, 2, 4] {
+        let mesh = block([n; 3], [1.0; 3]);
+        with_cx(|cx| {
+            let layers = core::array::from_fn::<_, 3, _>(|i| HydrostaticDensityLayer {
+                top_depth_m: depths[i], density_kg_m3: densities[i],
+            });
+            let profile = StratifiedHydrostaticPressure::new(
+                [0.0, 0.0, height], [0.0, 0.0, -gravity], &layers, 3, cx,
+            ).unwrap().with_density_gradient(beta).unwrap();
+            let g = TetLoadGeometry3::new(&mesh.nodes, &mesh.tets, Default::default(), 2000, cx).unwrap();
+            let right: Vec<_> = g.faces().iter().enumerate()
+                .filter_map(|(i, f)| (f.outward_normal[0] > 0.99).then_some(i)).collect();
+            // Independent depth integrals of p and z*p over a unit-width wall.
+            // The density decrease is signed; it must not reverse the wet side.
+            let mut load = gravity * beta * height.powi(3) / 6.0;
+            let mut first_moment = gravity * beta * height.powi(4) / 24.0;
+            for i in 0..3 {
+                let jump = densities[i] - if i == 0 { 0.0 } else { densities[i-1] };
+                let wet_height = height - depths[i];
+                load += gravity * jump * wet_height.powi(2) / 2.0;
+                first_moment += gravity * jump * wet_height.powi(3) / 6.0;
+            }
+            for scale in [0.0, 0.25, 1.0] {
+                let case = g.assemble_p1_fields(&[SurfaceField3::StratifiedPressure {
+                    faces: &right, profile: &profile, load_factor: scale,
+                }], VolumeField3::None, &[], cx).unwrap();
+                let (force, moment) = case.resultant([0.0; 3], cx).unwrap();
+                for (a, b) in force.into_iter().zip([-scale*load, 0.0, 0.0]) { close(a, b, 1e-10); }
+                for (a, b) in moment.into_iter().zip([0.0, -scale*first_moment, scale*load/2.0]) {
+                    close(a, b, 1e-10);
+                }
+            }
+            if n == 1 {
+                let sampled: Vec<_> = right.iter().map(|&i| g.faces()[i].nodes.map(|node|
+                    profile.pressure_pa(mesh.nodes[node], cx).unwrap())).collect();
+                let interpolated = g.assemble_p1_fields(&[SurfaceField3::Pressure {
+                    faces: &right, nodal_pascals: &sampled,
+                }], VolumeField3::None, &[], cx).unwrap();
+                assert!((interpolated.resultant([0.0; 3], cx).unwrap().0[0] + load).abs() > 100.0,
+                    "vertex sampling must not masquerade as the original reservoir");
+            }
+        });
+    }
+}
+
+#[test]
+fn g1_stratified_buoyancy_matches_displaced_density_and_native_pressure_loads() {
+    let height: f64 = 0.83;
+    let gravity = 9.81;
+    let beta = 300.0;
+    let buoyancy = gravity * (1000.0*height - 200.0*(height-0.21)
+        + 400.0*(height-0.57) + beta*height.powi(2)/2.0);
+    for n in [1, 2, 4] {
+        let mesh = block([n; 3], [1.0; 3]);
+        with_cx(|cx| {
+            let layers = [
+                HydrostaticDensityLayer { top_depth_m: 0.0, density_kg_m3: 1000.0 },
+                HydrostaticDensityLayer { top_depth_m: 0.21, density_kg_m3: 800.0 },
+                HydrostaticDensityLayer { top_depth_m: 0.57, density_kg_m3: 1200.0 },
+            ];
+            let profile = StratifiedHydrostaticPressure::new(
+                [0.0, 0.0, height], [0.0, 0.0, -gravity], &layers, 3, cx,
+            ).unwrap().with_density_gradient(beta).unwrap();
+            let g = TetLoadGeometry3::new(&mesh.nodes, &mesh.tets, Default::default(), 2000, cx).unwrap();
+            let faces: Vec<_> = (0..g.faces().len()).collect();
+            let case = g.assemble_p1_fields(&[SurfaceField3::StratifiedPressure {
+                faces: &faces, profile: &profile, load_factor: 1.0,
+            }], VolumeField3::None, &[], cx).unwrap();
+            let (force, moment) = case.resultant([0.0; 3], cx).unwrap();
+            for (a, b) in force.into_iter().zip([0.0, 0.0, buoyancy]) { close(a, b, 3e-10); }
+            for (a, b) in moment.into_iter().zip([buoyancy/2.0, -buoyancy/2.0, 0.0]) { close(a, b, 3e-10); }
+            let follower = ClosedTetPressureSurface::new(
+                &mesh.nodes, &mesh.tets, Default::default(), 2000, cx,
+            ).unwrap().force_n(&vec![0.0; mesh.nodes.len()*3], profile.loading(), cx).unwrap();
+            for (dof, value) in follower.into_iter().enumerate() {
+                close(component(case.nodal_forces_n(), dof), value, 2e-11);
+            }
+            if n == 1 {
+                let material = TetElasticMaterial::try_new(2.0, 1e8, 0.25, [7; 32]).unwrap();
+                let thermal = TetThermalStrainState::try_new(300.0, 300.0, [0.0; 6], [7; 32], ContentHash([8; 32]), 0.1).unwrap();
+                let fixed: Vec<_> = mesh.nodes.iter().enumerate().filter(|(_, p)| p[2] == 0.0)
+                    .flat_map(|(i, _)| [3*i, 3*i+1, 3*i+2]).collect();
+                let problem = TetLinearElasticProblem { nodes_m: &mesh.nodes, tetrahedra: &mesh.tets,
+                    materials: TetMaterialField::Uniform(&material), fixed_dofs: &fixed, budget: Default::default() };
+                let solved = case.solve(&problem, TetThermalStrainField::Uniform(&thermal),
+                    Default::default(), ContentHash([9; 32]), 0.01, cx).unwrap();
+                assert!(solved.free_force_residual_n < 1e-6);
+                close(solved.support_reactions_n.iter().map(|r| r[2]).sum::<f64>(), -buoyancy, 1e-6);
+            }
+        });
+    }
+}
+
+#[test]
+fn g3_stratified_reference_load_reduces_to_uniform_liquid_and_refuses_invalid_scaling() {
+    let mesh = block([1; 3], [1.0; 3]);
+    with_cx(|cx| {
+        let g = TetLoadGeometry3::new(&mesh.nodes, &mesh.tets, Default::default(), 100, cx).unwrap();
+        let faces: Vec<_> = (0..g.faces().len()).collect();
+        let profile = StratifiedHydrostaticPressure::new(
+            [0.0, 0.0, 0.37], [0.0, 0.0, -10.0],
+            &[HydrostaticDensityLayer { top_depth_m: 0.0, density_kg_m3: 1000.0 }], 1, cx,
+        ).unwrap();
+        let values: Vec<_> = g.faces().iter().map(|face| face.nodes.map(|node|
+            10_000.0 * (0.37-mesh.nodes[node][2]))).collect();
+        let affine = g.assemble_p1_fields(&[SurfaceField3::FreeSurfacePressure {
+            faces: &faces, nodal_pascals: &values,
+        }], VolumeField3::None, &[], cx).unwrap();
+        let exact = g.assemble_p1_fields(&[SurfaceField3::StratifiedPressure {
+            faces: &faces, profile: &profile, load_factor: 1.0,
+        }], VolumeField3::None, &[], cx).unwrap();
+        for dof in 0..mesh.nodes.len()*3 {
+            close(component(exact.nodal_forces_n(), dof), component(affine.nodal_forces_n(), dof), 2e-12);
+        }
+        for scale in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(g.assemble_p1_fields(&[SurfaceField3::StratifiedPressure {
+                faces: &faces, profile: &profile, load_factor: scale,
+            }], VolumeField3::None, &[], cx).is_err());
+        }
+        for ids in [vec![], vec![0, 0], vec![g.faces().len()]] {
+            assert!(g.assemble_p1_fields(&[SurfaceField3::StratifiedPressure {
+                faces: &ids, profile: &profile, load_factor: 1.0,
+            }], VolumeField3::None, &[], cx).is_err());
+        }
+    });
 }
 
 #[test]

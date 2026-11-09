@@ -242,6 +242,41 @@ impl StratifiedHydrostaticPressure {
                 self.depth_gradient,
             )?;
         }
+        self.face_moments_at_depths::<TANGENT>(q, load_factor, cx)
+    }
+
+    /// Exact reference-face weights for the native linear load owner. The
+    /// density interfaces are clipped before integration, rather than replacing
+    /// the reservoir with three interpolated pressure samples.
+    pub(crate) fn reference_face_pressure_weights(
+        &self,
+        vertices_m: [[f64; 3]; 3],
+        load_factor: f64,
+        cx: &Cx<'_>,
+    ) -> Result<[f64; 3], HyperTetError> {
+        checkpoint(cx)?;
+        if !load_factor.is_finite() || load_factor < 0.0 {
+            return Err(invalid("hydrostatic load factor must be finite and nonnegative"));
+        }
+        if load_factor == 0.0 || self.is_zero() {
+            return Ok([0.0; 3]);
+        }
+        let mut q = [0.0; 3];
+        for (local, point) in vertices_m.into_iter().enumerate() {
+            for axis in 0..3 {
+                let offset = finite(finite(point[axis])? - self.surface_point_m[axis])?;
+                q[local] = finite(self.depth_gradient[axis].mul_add(offset, q[local]))?;
+            }
+        }
+        Ok(self.face_moments_at_depths::<false>(q, load_factor, cx)?.weights_pa)
+    }
+
+    fn face_moments_at_depths<const TANGENT: bool>(
+        &self,
+        q: [f64; 3],
+        load_factor: f64,
+        cx: &Cx<'_>,
+    ) -> Result<FaceMoments, HyperTetError> {
         self.admit_depth(q.into_iter().fold(0.0, f64::max), cx)?;
         let mut weights = [Sum::default(); 3];
         let mut basis = [[Sum::default(); 3]; 3];
