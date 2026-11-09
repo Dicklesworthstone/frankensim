@@ -4660,3 +4660,27 @@ operation cannot choose a thermal branch event. Four new focused integration
 cases cover prior separation/recontact and yielding, continued loaded release,
 fresh junctions and atomic foreign/control/detached refusal. Parser and format
 checks passed; cross-crate execution remains unverified in this session.
+
+## Coupled normal, vector shear and twist through temperature changes
+
+`mixed_mode::combined::motion::temperature` continues the original four-coordinate
+I/II/III motion at held approach, both elastic shear coordinates and twist. The
+original sealed normal thermal refresh authenticates independent bulk/interface
+queries and pinned source selection. Its normal-only energy change is not used
+as the work of the loaded combined contact: the original combined successor
+relaxes one common radius and rechecks stable attachment, material/geometry
+applicability and all four conjugate effort limits.
+
+Complete mobility, rates, budgets, time and step count remain unchanged. The
+cached original endpoint plus a canonical normal witness and one successor
+combined query supply separate normal-elastic, tangential-elastic, torsional-
+elastic and surface-energy changes. Their compensated sum is signed external
+parameter work, with an independent total-storage residual. No motion, impulse,
+heat, dissipation or intervening temperature-path stability is inferred.
+
+Four focused integration groups independently reconstruct the complete potential,
+retain nonzero chronology and resumed motion, recover shear-only/twist-only
+limits, preserve exact no-op/round-trip states, reject lost combined equilibrium
+when the normal model still admits, and check source/control/effort/budget and
+cancellation refusals. Pinned formatting and parsing passed; these cross-crate
+tests were not compiled or executed in the resource-constrained session.

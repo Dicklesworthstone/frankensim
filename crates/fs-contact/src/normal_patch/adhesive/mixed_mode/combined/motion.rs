@@ -25,6 +25,9 @@ use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::CancelGate;
 use fs_math::dd::Dd;
 
+/// Original temperature continuation of all four coupled contact coordinates.
+pub mod temperature;
+
 /// Component order is [normal,shear1,shear2,twist]. Mixed-unit arrays keep
 /// metre and radian tolerances, or force and torque limits, separate.
 #[derive(Clone, Copy, Debug, PartialEq)]

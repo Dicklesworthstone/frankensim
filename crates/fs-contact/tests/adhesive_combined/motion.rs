@@ -1,4 +1,7 @@
 //! Coupled four-coordinate dynamics: native mass metric, source work and hidden-turn refusal.
+#[path = "motion/temperature.rs"]
+mod temperature;
+
 use super::source;
 use core::f64::consts::PI;
 use fs_contact::normal_patch::adhesive::mixed_mode::{
