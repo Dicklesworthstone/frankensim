@@ -8,12 +8,12 @@ use super::{
 use fs_exec::CancelGate;
 use fs_math::dd::Dd;
 use fs_mbd::{
-    MassProperties, RigidBodyState,
+    MassProperties, RigidBodyState, Wrench,
     tangential_friction::{
         RigidContactBinding,
         adhesive::rolling::events::{
             RigidAdhesiveRollingEventContact, RigidAdhesiveRollingEventReport,
-            RigidAdhesiveRollingEventState, prepare_rigid_adhesive_rolling_events,
+            RigidAdhesiveRollingEventState, prepare_rigid_adhesive_rolling_events_with_wrenches,
         },
     },
 };
@@ -25,7 +25,8 @@ pub struct RigidJkrRollingDissipationHeatReport {
     pub mechanics: RigidAdhesiveRollingEventReport,
     pub heat: JkrRollingDissipationHeatReport,
     /// Delta K + Delta U_contact + Delta H + named outside work - prescribed
-    /// normal work. Plastic loss is already in H/outside, never counted twice.
+    /// normal/area work - applied body work. Plastic loss is already in H/outside,
+    /// never counted twice. Detached applied work stays mechanical.
     pub combined_energy_residual_j: f64,
     pub absolute_stage_residual_j: f64,
 }
@@ -75,11 +76,8 @@ impl<'s, 'm> RigidJkrRollingDissipationHeatCandidate<'s, 'm> {
 }
 
 impl<'s> JkrRollingDissipationHeat<'s> {
-    /// Prescribe normal approach, advance unforced native rolling, and convert
-    /// its actual plastic loss plus outgoing junction releases. Geometry and
-    /// material source remain the original sealed owners. The mechanical step
-    /// duration does not advance this same-time thermal impulse's clock.
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    /// Unforced specialization of [`Self::propose_native_with_wrenches`].
+    #[allow(clippy::too_many_arguments)]
     pub fn propose_native<'m>(
         &self,
         bodies: &[RigidBodyState],
@@ -90,6 +88,45 @@ impl<'s> JkrRollingDissipationHeat<'s> {
         thermal: &DepositionSimulation<'m>,
         expected: JkrRollingSnapHeatStamp,
         indentation_m: f64,
+        dt_s: f64,
+        controls: RigidJkrRollingSnapHeatControls,
+        gate: &CancelGate,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<RigidJkrRollingDissipationHeatCandidate<'s, 'm>, RigidJkrRollingSnapHeatError> {
+        self.propose_native_with_wrenches(
+            bodies,
+            properties,
+            state,
+            binding,
+            frame,
+            thermal,
+            expected,
+            indentation_m,
+            [Wrench::ZERO; 2],
+            dt_s,
+            controls,
+            gate,
+            checkpoint,
+        )
+    }
+
+    /// Prescribe normal approach, advance actual body motion under the ordered
+    /// world-force/body-torque pair, then convert only source-owned rolling
+    /// loss and junction release. Applied work is measured from actual native
+    /// motion, including detached travel, and never reclassified as heat.
+    /// Geometry and source stay held; `dt_s` does not advance the thermal clock.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub fn propose_native_with_wrenches<'m>(
+        &self,
+        bodies: &[RigidBodyState],
+        properties: &[MassProperties],
+        state: &RigidAdhesiveRollingEventState,
+        binding: RigidContactBinding,
+        frame: TangentFrame,
+        thermal: &DepositionSimulation<'m>,
+        expected: JkrRollingSnapHeatStamp,
+        indentation_m: f64,
+        wrenches: [Wrench; 2],
         dt_s: f64,
         controls: RigidJkrRollingSnapHeatControls,
         gate: &CancelGate,
@@ -109,7 +146,7 @@ impl<'s> JkrRollingDissipationHeat<'s> {
         if expected != self.snap.stamp || self.state() != state.source_state() {
             return Err(RigidJkrRollingSnapHeatError::HistoryMismatch);
         }
-        let native = prepare_rigid_adhesive_rolling_events(
+        let native = prepare_rigid_adhesive_rolling_events_with_wrenches(
             bodies,
             properties,
             state,
@@ -119,6 +156,7 @@ impl<'s> JkrRollingDissipationHeat<'s> {
                 source: self.source(),
             },
             indentation_m,
+            wrenches,
             dt_s,
             controls.mechanical,
             gate,
@@ -141,22 +179,22 @@ impl<'s> JkrRollingDissipationHeat<'s> {
         {
             return Err(RigidJkrRollingSnapHeatError::HistoryMismatch);
         }
-        let (kinetic, storage) = native.report.mechanical.as_ref().map_or((0.0, 0.0), |r| {
-            (
-                r.kinetic_energy_change_j,
-                r.contact.rolling().storage_change_j,
-            )
-        });
+        let storage = native
+            .report
+            .mechanical
+            .as_ref()
+            .map_or(0.0, |r| r.contact.rolling().storage_change_j);
         // The normal work/storage identity is checked independently by the
         // native owner. Eliminate it without subtracting rounded absolute
         // stores. Plastic loss is now internal to the actual caloric/outside
         // increment, so it must NOT be added as another outgoing energy here.
-        let residual = (Dd::from_f64(kinetic)
+        let residual = (Dd::from_f64(native.report.kinetic_energy_change_j)
             + Dd::from_f64(storage)
             + Dd::from_f64(h.thermal.stored_energy_change_j)
             + Dd::from_f64(h.work.other_work_j())
             - Dd::from_f64(native.report.normal.normal_released_energy_j)
-            - Dd::from_f64(native.report.normal.rolling_released_energy_j))
+            - Dd::from_f64(native.report.normal.rolling_released_energy_j)
+            - Dd::from_f64(native.report.external_work_j))
         .to_f64();
         let absolute = (Dd::from_f64(native.report.absolute_stage_residual_j)
             + Dd::from_f64(h.transfer_residual_j.abs()))
@@ -192,7 +230,7 @@ impl<'s> JkrRollingDissipationHeat<'s> {
         })
     }
 
-    /// All owners publish together after final cancellation admission.
+    /// Unforced specialization of [`Self::apply_native_with_wrenches`].
     #[allow(clippy::too_many_arguments)]
     pub fn apply_native<'m>(
         &mut self,
@@ -207,9 +245,9 @@ impl<'s> JkrRollingDissipationHeat<'s> {
         dt_s: f64,
         controls: RigidJkrRollingSnapHeatControls,
         gate: &CancelGate,
-        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<RigidJkrRollingDissipationHeatReport, RigidJkrRollingSnapHeatError> {
-        let next = self.propose_native(
+        self.apply_native_with_wrenches(
             bodies,
             properties,
             state,
@@ -218,6 +256,43 @@ impl<'s> JkrRollingDissipationHeat<'s> {
             thermal,
             expected,
             indentation_m,
+            [Wrench::ZERO; 2],
+            dt_s,
+            controls,
+            gate,
+            checkpoint,
+        )
+    }
+
+    /// Publish powered native motion, source memory and finite heat together
+    /// after the final cancellation check. No caller-authored work is accepted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_native_with_wrenches<'m>(
+        &mut self,
+        bodies: &mut [RigidBodyState],
+        properties: &[MassProperties],
+        state: &mut RigidAdhesiveRollingEventState,
+        binding: RigidContactBinding,
+        frame: TangentFrame,
+        thermal: &mut DepositionSimulation<'m>,
+        expected: JkrRollingSnapHeatStamp,
+        indentation_m: f64,
+        wrenches: [Wrench; 2],
+        dt_s: f64,
+        controls: RigidJkrRollingSnapHeatControls,
+        gate: &CancelGate,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<RigidJkrRollingDissipationHeatReport, RigidJkrRollingSnapHeatError> {
+        let next = self.propose_native_with_wrenches(
+            bodies,
+            properties,
+            state,
+            binding,
+            frame,
+            thermal,
+            expected,
+            indentation_m,
+            wrenches,
             dt_s,
             controls,
             gate,

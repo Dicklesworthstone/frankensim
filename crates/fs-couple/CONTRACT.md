@@ -10604,3 +10604,9 @@ work/heat, snapshot and nonzero prior eigenstrain-work preservation, and late
 thermal refusal/retry/cancellation. Formatting and bounded review completed;
 full original Cx-backed coupling execution remains unavailable. The expansion and
 constitutive coefficients remain fixed.
+
+## Applied-body work and rolling heat across contact events
+
+`JkrRollingDissipationHeat::propose_native_with_wrenches` and `apply_native_with_wrenches` combine actual held COM forces/body-frame torques with the original attachment/separation/recontact lifecycle and all three finite-cell loss channels. Existing unforced methods delegate with zero loads. The combined balance uses the native owner's actual kinetic increment and external work in both attached and detached branches. Converted rolling loss is already represented by caloric or named outside energy and is never counted again as outgoing dissipation. Detached applied work changes kinetic energy without inventing contact heat; subsequent attachment starts an unstrained junction.
+
+The same source replay, original caloric domains, independent work gates and all-owner cancellation/publication semantics remain active. Two further integration groups exercise sustained applied torque from rest through spring loading and plastic heat over eight steps, plus detached force/torque acceleration with zero heating followed by fresh recontact. Actual body/contact/cell energy is checked independently. Pinned formatting and recursive syntax/module resolution passed; the new integration groups remain uncompiled and unexecuted under the documented unavailable remote runners and shared resource limits. This is still prescribed-normal, held-geometry, frozen-source impulse coupling: mechanical duration does not advance the thermal clock, and conduction or temperature feedback must be supplied by their existing owners.

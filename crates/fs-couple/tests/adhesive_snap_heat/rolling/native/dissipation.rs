@@ -10,6 +10,7 @@ use fs_couple::friction_heat::adhesive::snap::{
 };
 use fs_exec::CancelGate;
 use fs_mbd::tangential_friction::adhesive::rolling::events::prepare_rigid_adhesive_rolling_events;
+use fs_mbd::{RigidBodyState, Vec3, Wrench};
 use fs_thermal::enthalpy::{CellId, DepositionError};
 use fs_tribo::HeatPartition;
 
@@ -303,4 +304,188 @@ fn plastic_heat_refusal_and_final_cancellation_roll_back_bodies_and_all_ledgers(
         Err(RigidJkrRollingSnapHeatError::HistoryMismatch)
     ));
     assert_eq!(thermal.cells(), &accepted_cells);
+}
+
+#[test]
+fn applied_torque_drives_rolling_from_rest_and_heats_finite_cells() {
+    let normal = source(0.05);
+    let events = events(&normal);
+    let (mut f, _) = fixture(&events, true);
+    f.bodies = f
+        .bodies
+        .map(|body| RigidBodyState::new(body.pose(), Vec3::ZERO, Vec3::ZERO).unwrap());
+    let gate = CancelGate::new();
+    let mut state = f
+        .contact(&events)
+        .initial_attached_state(&f.bodies, &f.properties, 0.0, controls().mechanical, &gate)
+        .unwrap();
+    let torque = 10.0
+        * state
+            .source_state()
+            .attached()
+            .unwrap()
+            .0
+            .law()
+            .critical_moment_n_m();
+    let wrenches = [
+        Wrench {
+            force_world: Vec3::ZERO,
+            torque_body: Vec3::new(torque, 0.0, 0.0),
+        },
+        Wrench::ZERO,
+    ];
+    let caloric = curves(&normal, 1.0);
+    let mut thermal = thermal(&caloric, 1.0);
+    let cells = thermal.cells().clone();
+    let mut heat = JkrRollingDissipationHeat::new(
+        binding(events, state.source_state().clone(), &caloric, &thermal),
+        HeatPartition::new(0.8, 0.1, 0.1).unwrap(),
+        Some("rolling microstructural rearrangement".into()),
+    )
+    .unwrap();
+    let mut input = 0.0;
+    for _ in 0..8 {
+        let report = heat
+            .apply_native_with_wrenches(
+                &mut f.bodies,
+                &f.properties,
+                &mut state,
+                f.binding,
+                f.frame,
+                &mut thermal,
+                heat.stamp(),
+                0.0,
+                wrenches,
+                1e-3,
+                controls(),
+                &gate,
+                || Ok(()),
+            )
+            .unwrap();
+        let mechanical = report.mechanics.mechanical.as_ref().unwrap();
+        assert!(mechanical.rolling_rate_after_rad_s > mechanical.rolling_rate_before_rad_s);
+        assert!(report.mechanics.external_work_j > 0.0);
+        assert_eq!(report.mechanics.external_wrenches, wrenches);
+        assert_eq!(report.heat.normal_release.dissipated_work_j(), 0.0);
+        assert_eq!(report.heat.rolling_release.dissipated_work_j(), 0.0);
+        assert_eq!(
+            report.heat.rolling_loss.dissipated_work_j(),
+            report.mechanics.irreversible_rolling_loss_j
+        );
+        input += report.mechanics.external_work_j;
+        assert!(report.combined_energy_residual_j.abs() <= 2e-20);
+    }
+    let kinetic: f64 = (0..2)
+        .map(|i| f.bodies[i].kinetic_energy(f.properties[i]).unwrap())
+        .sum();
+    let actual_heat: f64 = [CellId(0), CellId(1)]
+        .into_iter()
+        .map(|id| {
+            let c = &thermal.cells()[&id];
+            c.mass_kg * (c.specific_h_j_kg - cells[&id].specific_h_j_kg)
+        })
+        .sum();
+    assert!(actual_heat > 0.0);
+    assert!(heat.rolling_loss_ledger().dissipated_work_j() > 0.0);
+    let total = kinetic
+        + heat.state().rolling_storage_j()
+        + actual_heat
+        + heat.rolling_loss_ledger().other_work_j();
+    assert!((total - input).abs() <= 2e-20);
+    assert_eq!(thermal.time_s(), 0.0);
+}
+
+#[test]
+fn detached_applied_work_stays_kinetic_until_fresh_recontact() {
+    let normal = source(0.05);
+    let events = events(&normal);
+    let (mut f, mut state) = fixture(&events, true);
+    let attached = events.initial_attached_state(0.0).unwrap();
+    let torque = 10.0 * attached.attached().unwrap().0.law().critical_moment_n_m();
+    let wrenches = [
+        Wrench {
+            force_world: Vec3::new(2e-8, 0.0, 0.0),
+            torque_body: Vec3::new(torque, 0.0, 0.0),
+        },
+        Wrench::ZERO,
+    ];
+    let caloric = curves(&normal, 1.0);
+    let mut thermal = thermal(&caloric, 1.0);
+    let mut heat = JkrRollingDissipationHeat::new(
+        binding(events, state.source_state().clone(), &caloric, &thermal),
+        HeatPartition::new(0.8, 0.1, 0.1).unwrap(),
+        Some("rolling microstructural rearrangement".into()),
+    )
+    .unwrap();
+    let gate = CancelGate::new();
+    for delta in [-1e-6, 0.0] {
+        let bodies_before = f.bodies;
+        let cells = thermal.cells().clone();
+        let stored_before =
+            heat.state().normal_response().reversible_energy_j + heat.state().rolling_storage_j();
+        let report = heat
+            .apply_native_with_wrenches(
+                &mut f.bodies,
+                &f.properties,
+                &mut state,
+                f.binding,
+                f.frame,
+                &mut thermal,
+                heat.stamp(),
+                delta,
+                wrenches,
+                DT,
+                controls(),
+                &gate,
+                || Ok(()),
+            )
+            .unwrap();
+        let kinetic: f64 = (0..2)
+            .map(|i| {
+                bodies_before[i]
+                    .kinetic_energy_change_to(f.properties[i], f.bodies[i])
+                    .unwrap()
+            })
+            .sum();
+        let actual_heat: f64 = [CellId(0), CellId(1)]
+            .into_iter()
+            .map(|id| {
+                let c = &thermal.cells()[&id];
+                c.mass_kg * (c.specific_h_j_kg - cells[&id].specific_h_j_kg)
+            })
+            .sum();
+        let storage = heat.state().normal_response().reversible_energy_j
+            + heat.state().rolling_storage_j()
+            - stored_before;
+        assert!(
+            (kinetic + storage + actual_heat + report.heat.work.other_work_j()
+                - report.mechanics.applied_work_j)
+                .abs()
+                <= 2e-20
+        );
+        assert!(report.combined_energy_residual_j.abs() <= 2e-20);
+        if delta < 0.0 {
+            assert_ne!(f.bodies, bodies_before);
+            assert!(report.mechanics.external_work_j > 1e-20);
+            assert!((kinetic - report.mechanics.external_work_j).abs() <= 1e-20);
+            assert!(report.mechanics.detached_impulses.is_some());
+            assert_eq!(report.heat.work.dissipated_work_j(), 0.0);
+            assert_eq!(thermal.cells(), &cells);
+            assert!(heat.state().attached().is_none());
+            assert_eq!(heat.state().rolling_storage_j(), 0.0);
+        } else {
+            assert!(report.heat.normal_release.dissipated_work_j() > 0.0);
+            assert!(actual_heat > 0.0);
+            assert_eq!(
+                report
+                    .mechanics
+                    .mechanical
+                    .unwrap()
+                    .contact
+                    .rolling()
+                    .storage_before_j,
+                0.0
+            );
+        }
+    }
 }
