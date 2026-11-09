@@ -14562,3 +14562,38 @@ and accepted-step count; SparseGrid3's separate standalone sweep counter is not
 a free-surface transport clock. Full Cargo remains blocked in asupersync by the
 8 GiB environment limit. Thermal regressions and the full workspace gate were
 not executed; their numerical expressions are unchanged by the helper split.
+
+
+### Self-sustained regimes with original nonlinear internal loss
+
+`phs_orbit::DissipativeAutonomousHamiltonian` composes the original pHS,
+physical feedback and shared `NonlinearDissipation` law as
+`xdot=(J-R)e-D(x,e)+G*u(x,G^T e)`. All material-memory coordinates remain,
+including internal resisting flows outside G's range. The complete tangent
+`(J-R)Hxx-D_x-D_e Hxx+G du_total/dx` uses the authored TOTAL feedback
+derivative and independent state/effort loss directions exactly once. The
+shared compensated physical-field owner performs each final row rounding.
+Pointwise passive D may have a negative differential slope, which is retained.
+Stored energy, physical feedback supply, signed native R work, nonlinear
+`e dot D` and independently contracted energy rate are separate accounts.
+
+Native seeded/scaled autonomous HB solves amplitude and natural frequency
+together with a full-waveform phase condition. Native adaptive HB refines
+retained/omitted equations and successive waveform/frequency. Variational
+shooting solves the period against the original ODE and differentiates the
+same RK4 map, retaining every memory and phase multiplier. Constructor limits
+are 256 states/ports and all n declared loss tangent actions; scratch is
+`6*n+3*m+n*m` scalars plus the existing storage-tangent owner. Warm adapter
+source evaluation allocates nothing; callbacks own their resource behavior.
+Solver controls bound additional work. Refusal/cancellation publishes no
+partial cycle. This source has no parameter-sensitivity/adjoint preparation:
+storage/feedback-only wrappers do not include D's direct parameter law.
+
+Three G1/G3 tests compare the complete tangent and independent work, a
+nonlinear self-sustained mechanical/Maxwell cycle against independent RK4
+equations on three grids, generated third/fifth harmonics, independently
+determined natural frequency, separate mean supply/heat and variational
+period refinement on three grids. They also cover incomplete tangents,
+active loss, action limits, cancellation/reuse and equilibrium refusal.
+These checks do not certify infinite harmonic tails, primitive periods,
+global attraction, material validity or hybrid/nonsmooth source laws.
