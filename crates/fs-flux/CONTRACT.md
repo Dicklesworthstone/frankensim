@@ -11230,3 +11230,26 @@ original macro RCR storage equations with atomic density-work refusal. All
 density/momentum consumers. The run uses the original native dense assembly,
 transport, Picard, pressure/RCR and LU/GEMM owners. It is not full-workspace or
 sparse-route validation and makes no performance benchmark claim.
+
+### Adaptive multicomponent demixing
+
+`MulticomponentPhaseField::advance_candidate` compares one explicit interval
+with two half intervals and accepts only the fine trajectory. All independent
+component high/low inventories control composition accuracy. A separate
+whole-graph L1 norm of individual edge-energy differences controls interface
+accuracy; errors at different edges cannot cancel in a total-energy difference.
+The relative interface scale sums the larger coarse/fine energy at each edge.
+
+The original complete Maxwell–Stefan rates at an unchanged initial state are
+shared between the coarse and first-half trial and retained across retries.
+Changed midpoints evaluate fresh original rates. Accepted face receipts exclude
+all coarse/rejected transfers, while completed-step and constitutive-work
+counters include them. Explicit attempt and step-size bounds limit work, and a
+final sub-minimum remainder must satisfy the same acceptance rules.
+
+The complete requested interval independently rechecks every species, rigid
+capacity and total bulk-plus-interface energy using the original allowances.
+Failure or cancellation publishes no partial field or elapsed clock. Adaptation
+provides local temporal estimates; this explicit fourth-order evolution can
+require small steps on fine meshes and does not claim unconditional stability
+or a global trajectory error certificate.

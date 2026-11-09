@@ -260,7 +260,7 @@ impl MulticomponentMiscibilityField {
     }
 }
 
-fn count_step(steps: &mut usize) -> Result<()> {
+pub(super) fn count_step(steps: &mut usize) -> Result<()> {
     *steps = steps
         .checked_add(1)
         .ok_or(MulticomponentMiscibilityError::Arithmetic(
@@ -269,7 +269,7 @@ fn count_step(steps: &mut usize) -> Result<()> {
     Ok(())
 }
 
-fn count_evaluations(rates: &solve::Rates, evaluations: &mut usize) -> Result<()> {
+pub(super) fn count_evaluations(rates: &solve::Rates, evaluations: &mut usize) -> Result<()> {
     *evaluations = evaluations.checked_add(rates.evaluations()).ok_or(
         MulticomponentMiscibilityError::Arithmetic("adaptive constitutive-work count"),
     )?;

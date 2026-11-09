@@ -27,6 +27,9 @@ use super::*;
 
 mod solve;
 
+/// Bounded complete-window composition and interfacial-energy accuracy.
+pub mod adaptive;
+
 /// Original multicomponent thermodynamics and molecular transport with a
 /// positive species-symmetric interfacial coefficient on a fixed graph.
 #[derive(Clone, Debug, PartialEq)]
