@@ -57,7 +57,14 @@ impl Default for ThermalFilmControls {
             cell_energy_tolerance_j: 1e-8,
             total_energy_tolerance_j: 1e-7,
             combined_energy_tolerance_j: 1e-7,
-            solver: NewtonKrylovConfig::default(),
+            // Directional differences include constitutive and caloric
+            // roundoff. Do not demand an analytical-Jacobian inner residual
+            // below that stencil accuracy; the outer native joule checks
+            // still decide whether the physical endpoint may be accepted.
+            solver: NewtonKrylovConfig {
+                forcing_minimum: 1e-4,
+                ..NewtonKrylovConfig::default()
+            },
         }
     }
 }
@@ -88,13 +95,19 @@ pub enum ThermalFilmError<E> {
     CombinedEnergy { residual_j: f64, tolerance_j: f64 },
 }
 impl<E> From<DepositionError> for ThermalFilmError<E> {
-    fn from(error: DepositionError) -> Self { Self::Thermal(error) }
+    fn from(error: DepositionError) -> Self {
+        Self::Thermal(error)
+    }
 }
 impl<E> From<TransientCarreauError> for ThermalFilmError<E> {
-    fn from(error: TransientCarreauError) -> Self { Self::Film(error) }
+    fn from(error: TransientCarreauError) -> Self {
+        Self::Film(error)
+    }
 }
 impl<E> From<super::TransientFilmError> for ThermalFilmError<E> {
-    fn from(error: super::TransientFilmError) -> Self { Self::Film(error.into()) }
+    fn from(error: super::TransientFilmError) -> Self {
+        Self::Film(error.into())
+    }
 }
 impl<E: core::fmt::Debug> core::fmt::Display for ThermalFilmError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -152,10 +165,17 @@ struct Endpoint<T> {
 }
 
 fn finite(value: f64) -> Result<f64, DepositionError> {
-    if value.is_finite() { Ok(value) } else { Err(DepositionError::Arithmetic) }
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(DepositionError::Arithmetic)
+    }
 }
 fn same_positive(a: f64, b: f64) -> bool {
-    a.is_finite() && b.is_finite() && a > 0.0 && b > 0.0
+    a.is_finite()
+        && b.is_finite()
+        && a > 0.0
+        && b > 0.0
         && (a - b).abs() <= 64.0 * f64::EPSILON * a.max(b)
 }
 
@@ -169,7 +189,9 @@ fn face_temperatures(
     output[0] = boundary[0];
     let mut previous = thermal.temperature_k(cells[0])?;
     for (i, &cell) in cells.iter().enumerate().skip(1) {
-        if i % 128 == 0 { check()?; }
+        if i % 128 == 0 {
+            check()?;
+        }
         let next = thermal.temperature_k(cell)?;
         // Original caloric T interpolated on equal contiguous cells. This
         // never averages apparent viscosity or invents a conductivity law.
@@ -192,12 +214,16 @@ impl<'m> ThermalCarreauFilm<'m> {
         initial_boundary_temperatures_k: [f64; 2],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, ThermalFilmError<Infallible>> {
-        if cancelled() { return Err(DepositionError::Cancelled.into()); }
+        if cancelled() {
+            return Err(DepositionError::Cancelled.into());
+        }
         let n = flow.velocities_m_s().len();
         let volume = wetted_area_m2 * flow.spacing_m();
         let mass = flow.density_kg_m3() * volume;
-        if film_cells.len() != n || !same_positive(wetted_area_m2, wetted_area_m2)
-            || !same_positive(volume, volume) || !same_positive(mass, mass)
+        if film_cells.len() != n
+            || !same_positive(wetted_area_m2, wetted_area_m2)
+            || !same_positive(volume, volume)
+            || !same_positive(mass, mass)
             || thermal.time_s() != flow.accepted_time_s()
         {
             return Err(ThermalFilmError::Invalid(
@@ -209,10 +235,15 @@ impl<'m> ThermalCarreauFilm<'m> {
         let mut direction: Option<[f64; 3]> = None;
         let mut material = None;
         for &id in film_cells {
-            if cancelled() { return Err(DepositionError::Cancelled.into()); }
-            let cell = thermal.cells().get(&id)
+            if cancelled() {
+                return Err(DepositionError::Cancelled.into());
+            }
+            let cell = thermal
+                .cells()
+                .get(&id)
                 .ok_or(ThermalFilmError::Invalid("film thermal cell missing"))?;
-            if !seen.insert(id) || !same_positive(cell.mass_kg, mass)
+            if !seen.insert(id)
+                || !same_positive(cell.mass_kg, mass)
                 || !same_positive(cell.geometry.volume_m3, volume)
                 || material.is_some_and(|known| known != cell.material_id)
                 || previous_end.is_some_and(|point| point != cell.geometry.start_m)
@@ -221,21 +252,20 @@ impl<'m> ThermalCarreauFilm<'m> {
                     "distinct contiguous film cells must retain rho*A*dy, A*dy and one original material",
                 ));
             }
-            let delta: [f64; 3] = std::array::from_fn(|axis| {
-                cell.geometry.end_m[axis] - cell.geometry.start_m[axis]
-            });
-            let length = fs_math::det::hypot(
-                fs_math::det::hypot(delta[0], delta[1]), delta[2],
-            );
+            let delta: [f64; 3] =
+                std::array::from_fn(|axis| cell.geometry.end_m[axis] - cell.geometry.start_m[axis]);
+            let length = fs_math::det::hypot(fs_math::det::hypot(delta[0], delta[1]), delta[2]);
             if !same_positive(length, flow.spacing_m()) {
                 return Err(ThermalFilmError::Invalid(
                     "native thermal segment must span one wall-normal film cell",
                 ));
             }
             let normal = delta.map(|v| v / length);
-            if direction.is_some_and(|old| old.iter().zip(normal)
-                .any(|(a, b)| (a - b).abs() > 128.0 * f64::EPSILON))
-            {
+            if direction.is_some_and(|old| {
+                old.iter()
+                    .zip(normal)
+                    .any(|(a, b)| (a - b).abs() > 128.0 * f64::EPSILON)
+            }) {
                 return Err(ThermalFilmError::Invalid(
                     "film thermal cells must follow one straight wall normal",
                 ));
@@ -244,41 +274,67 @@ impl<'m> ThermalCarreauFilm<'m> {
             previous_end = Some(cell.geometry.end_m);
             material = Some(cell.material_id);
         }
-        if thermal.material_caloric_identity(material.expect("nonempty native film"))?.is_none() {
+        if thermal
+            .material_caloric_identity(material.expect("nonempty native film"))?
+            .is_none()
+        {
             return Err(ThermalFilmError::Invalid(
                 "film requires the original identity-bearing caloric material",
             ));
         }
         let mut temperatures = filled(n + 1)?;
         let checkpoint = RefCell::new(&mut cancelled);
-        let check = || if (checkpoint.borrow_mut())() {
-            Err(DepositionError::Cancelled)
-        } else { Ok(()) };
+        let check = || {
+            if (checkpoint.borrow_mut())() {
+                Err(DepositionError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
         face_temperatures(
-            &thermal, film_cells, initial_boundary_temperatures_k, &mut temperatures, &check,
+            &thermal,
+            film_cells,
+            initial_boundary_temperatures_k,
+            &mut temperatures,
+            &check,
         )?;
         flow.set_face_temperatures(&temperatures, || (checkpoint.borrow_mut())())?;
         let mut trial = TransientCarreauFilm::from_profile(
-            *flow.material().law(), flow.material().temperature_k(),
+            *flow.material().law(),
+            flow.material().temperature_k(),
             TransientCarreauFilmSpec {
                 density_kg_m3: flow.density_kg_m3(),
                 thickness_m: flow.thickness_m(),
                 maximum_laminar_shear_rate_per_s: flow.material().maximum_shear_rate_per_s(),
             },
-            flow.velocities_m_s().to_vec(), flow.accepted_time_s(),
+            flow.velocities_m_s().to_vec(),
+            flow.accepted_time_s(),
         )?;
         trial.set_face_temperatures(&temperatures, || (checkpoint.borrow_mut())())?;
         check()?;
         Ok(Self {
-            flow, thermal, cells: film_cells.to_vec(), area: wetted_area_m2,
-            trial, face_temperatures: temperatures, cell_heat: filled(n)?,
+            flow,
+            thermal,
+            cells: film_cells.to_vec(),
+            area: wetted_area_m2,
+            trial,
+            face_temperatures: temperatures,
+            cell_heat: filled(n)?,
         })
     }
 
-    pub fn flow(&self) -> &TransientCarreauFilm { &self.flow }
-    pub fn thermal(&self) -> &DepositionSimulation<'m> { &self.thermal }
-    pub fn film_cells(&self) -> &[CellId] { &self.cells }
-    pub const fn wetted_area_m2(&self) -> f64 { self.area }
+    pub fn flow(&self) -> &TransientCarreauFilm {
+        &self.flow
+    }
+    pub fn thermal(&self) -> &DepositionSimulation<'m> {
+        &self.thermal
+    }
+    pub fn film_cells(&self) -> &[CellId] {
+        &self.cells
+    }
+    pub const fn wetted_area_m2(&self) -> f64 {
+        self.area
+    }
 
     /// Release both accepted states for an explicit event/geometry handoff.
     /// Rebinding checks the complete physical inventory again.
@@ -323,22 +379,32 @@ impl<'m> ThermalCarreauFilm<'m> {
                 if stopped.get() || (checkpoint.borrow_mut())() {
                     stopped.set(true);
                     Err(DepositionError::Cancelled)
-                } else { Ok(()) }
+                } else {
+                    Ok(())
+                }
             };
             check()?;
-            controls.solver.validate().map_err(ThermalFilmError::Solver)?;
+            controls
+                .solver
+                .validate()
+                .map_err(ThermalFilmError::Solver)?;
             if !(1..=1_000_000).contains(&controls.maximum_thermal_cells)
                 || self.thermal.cells().len() > controls.maximum_thermal_cells
                 || !(1..=1024).contains(&controls.maximum_newton_iterations)
                 || !(1..=1_000_000).contains(&controls.maximum_endpoint_evaluations)
                 || controls.maximum_momentum_material_evaluations == 0
                 || !same_positive(controls.energy_scale_j, controls.energy_scale_j)
-                || !same_positive(controls.finite_difference_step, controls.finite_difference_step)
+                || !same_positive(
+                    controls.finite_difference_step,
+                    controls.finite_difference_step,
+                )
                 || ![
                     controls.cell_energy_tolerance_j,
                     controls.total_energy_tolerance_j,
                     controls.combined_energy_tolerance_j,
-                ].iter().all(|v| v.is_finite() && *v >= 0.0)
+                ]
+                .iter()
+                .all(|v| v.is_finite() && *v >= 0.0)
             {
                 return Err(ThermalFilmError::Invalid(
                     "bounded thermal work, scales and physical energy tolerances required",
@@ -360,106 +426,136 @@ impl<'m> ThermalCarreauFilm<'m> {
             let material_evaluations = Cell::new(0u64);
             let cells = &self.cells;
             let area = self.area;
-            let evaluate = |x: &[f64]| -> Result<
-                BackwardEulerTrial<'m, Endpoint<T>>, ThermalFilmError<E>,
-            > {
-                check()?;
-                if evaluations.get() == controls.maximum_endpoint_evaluations {
-                    return Err(ThermalFilmError::EndpointBudget);
-                }
-                evaluations.set(evaluations.get() + 1);
-                let energy = x.iter().map(|v| finite(v * controls.energy_scale_j))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let energy = step.resolvable_increments_j(&energy);
-                step.evaluate_with_boundary_conductances(
-                    &energy,
-                    |candidate| {
-                        let exchange = resolve(candidate, cells).map_err(ThermalFilmError::Source)?;
-                        let mut temperatures = temperatures.borrow_mut();
-                        face_temperatures(
-                            candidate, cells, exchange.boundary_temperatures_k,
-                            &mut temperatures, &check,
-                        )?;
-                        let mut flow = trial.borrow_mut();
-                        flow.set_face_temperatures(&temperatures, || check().is_err())?;
-                        // Reset only accepted history; preceding thermal trials
-                        // are never a starting state. Private geometry/source
-                        // identities are fixed by new(); scratch is reusable.
-                        for i in 0..cells.len() {
-                            if i % 128 == 0 { check()?; }
-                            flow.flow.velocity[i] = accepted.flow.velocity[i];
-                        }
-                        flow.flow.time = accepted.flow.time;
-                        let remaining = controls.maximum_momentum_material_evaluations
-                            - material_evaluations.get();
-                        if remaining == 0 { return Err(ThermalFilmError::MaterialBudget); }
-                        let budget = TransientCarreauControls {
-                            maximum_material_evaluations: momentum.maximum_material_evaluations.min(remaining),
-                            ..momentum
-                        };
-                        let mut heat = heat.borrow_mut();
-                        let mechanical = flow.step_with_heat(
-                            dt, drive, limits, budget, &mut heat, || check().is_err(),
-                        )?;
-                        material_evaluations.set(
-                            material_evaluations.get() + mechanical.material_evaluations,
-                        );
-                        if flow.accepted_time_s() != target_s {
-                            return Err(ThermalFilmError::Invalid(
-                                "thermal and momentum endpoint clocks differ",
-                            ));
-                        }
-                        let BoundaryStepCoefficients { mut bulk, boundaries } = exchange.heat;
-                        let other = finite(dt * candidate.external_step_power_with_boundary_conductances(
-                            &bulk.sources_w, &bulk.conductances_w_k, &boundaries, || check(),
-                        )?)?;
-                        let mut deposited = Dd::from_f64(0.0);
-                        for (&cell, &q) in cells.iter().zip(heat.iter()) {
-                            check()?;
-                            let joules = finite(area * q)?;
-                            let watts = finite(joules / dt)?;
-                            if joules < 0.0 || (q != 0.0 && joules == 0.0)
-                                || (joules != 0.0 && watts == 0.0)
-                            {
-                                return Err(DepositionError::Arithmetic.into());
+            let evaluate =
+                |x: &[f64]| -> Result<BackwardEulerTrial<'m, Endpoint<T>>, ThermalFilmError<E>> {
+                    check()?;
+                    if evaluations.get() == controls.maximum_endpoint_evaluations {
+                        return Err(ThermalFilmError::EndpointBudget);
+                    }
+                    evaluations.set(evaluations.get() + 1);
+                    let energy = x
+                        .iter()
+                        .map(|v| finite(v * controls.energy_scale_j))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let energy = step.resolvable_increments_j(&energy);
+                    step.evaluate_with_boundary_conductances(
+                        &energy,
+                        |candidate| {
+                            let exchange =
+                                resolve(candidate, cells).map_err(ThermalFilmError::Source)?;
+                            let mut temperatures = temperatures.borrow_mut();
+                            face_temperatures(
+                                candidate,
+                                cells,
+                                exchange.boundary_temperatures_k,
+                                &mut temperatures,
+                                &check,
+                            )?;
+                            let mut flow = trial.borrow_mut();
+                            flow.set_face_temperatures(&temperatures, || check().is_err())?;
+                            // Reset only accepted history; preceding thermal trials
+                            // are never a starting state. Private geometry/source
+                            // identities are fixed by new(); scratch is reusable.
+                            for i in 0..cells.len() {
+                                if i % 128 == 0 {
+                                    check()?;
+                                }
+                                flow.flow.velocity[i] = accepted.flow.velocity[i];
                             }
-                            deposited = deposited + Dd::from_f64(finite(dt * watts)?);
-                            let source = bulk.sources_w.entry(cell).or_insert(0.0);
-                            *source = finite(*source + watts)?;
-                        }
-                        Ok::<_, ThermalFilmError<E>>(BoundaryStepCoefficients {
-                            bulk: StepCoefficients {
-                                sources_w: bulk.sources_w,
-                                conductances_w_k: bulk.conductances_w_k,
-                                payload: Endpoint {
-                                    flow: mechanical, exchange: bulk.payload,
-                                    deposited_heat_j: finite(deposited.to_f64())?,
-                                    other_heat_j: other,
+                            flow.flow.time = accepted.flow.time;
+                            let remaining = controls.maximum_momentum_material_evaluations
+                                - material_evaluations.get();
+                            if remaining == 0 {
+                                return Err(ThermalFilmError::MaterialBudget);
+                            }
+                            let budget = TransientCarreauControls {
+                                maximum_material_evaluations: momentum
+                                    .maximum_material_evaluations
+                                    .min(remaining),
+                                ..momentum
+                            };
+                            let mut heat = heat.borrow_mut();
+                            let mechanical =
+                                flow.step_with_heat(dt, drive, limits, budget, &mut heat, || {
+                                    check().is_err()
+                                })?;
+                            material_evaluations
+                                .set(material_evaluations.get() + mechanical.material_evaluations);
+                            if flow.accepted_time_s() != target_s {
+                                return Err(ThermalFilmError::Invalid(
+                                    "thermal and momentum endpoint clocks differ",
+                                ));
+                            }
+                            let BoundaryStepCoefficients {
+                                mut bulk,
+                                boundaries,
+                            } = exchange.heat;
+                            let other = finite(
+                                dt * candidate.external_step_power_with_boundary_conductances(
+                                    &bulk.sources_w,
+                                    &bulk.conductances_w_k,
+                                    &boundaries,
+                                    || check(),
+                                )?,
+                            )?;
+                            let mut deposited = Dd::from_f64(0.0);
+                            for (&cell, &q) in cells.iter().zip(heat.iter()) {
+                                check()?;
+                                let joules = finite(area * q)?;
+                                let watts = finite(joules / dt)?;
+                                if joules < 0.0
+                                    || (q != 0.0 && joules == 0.0)
+                                    || (joules != 0.0 && watts == 0.0)
+                                {
+                                    return Err(DepositionError::Arithmetic.into());
+                                }
+                                deposited = deposited + Dd::from_f64(finite(dt * watts)?);
+                                let source = bulk.sources_w.entry(cell).or_insert(0.0);
+                                *source = finite(*source + watts)?;
+                            }
+                            Ok::<_, ThermalFilmError<E>>(BoundaryStepCoefficients {
+                                bulk: StepCoefficients {
+                                    sources_w: bulk.sources_w,
+                                    conductances_w_k: bulk.conductances_w_k,
+                                    payload: Endpoint {
+                                        flow: mechanical,
+                                        exchange: bulk.payload,
+                                        deposited_heat_j: finite(deposited.to_f64())?,
+                                        other_heat_j: other,
+                                    },
                                 },
-                            },
-                            boundaries,
-                        })
-                    },
-                    || check(),
-                )
-            };
+                                boundaries,
+                            })
+                        },
+                        || check(),
+                    )
+                };
             let difference = FallibleFiniteDifference::new(
-                count, controls.finite_difference_step,
+                count,
+                controls.finite_difference_step,
                 |x: &[f64]| -> Result<Vec<f64>, ThermalFilmError<E>> {
                     let result = evaluate(x)?;
-                    Ok(result.residual_j().iter().map(|v| v / controls.energy_scale_j).collect())
+                    Ok(result
+                        .residual_j()
+                        .iter()
+                        .map(|v| v / controls.energy_scale_j)
+                        .collect())
                 },
-            ).map_err(difference_error)?;
-            let initial = energy_guess_j.iter().map(|v| v / controls.energy_scale_j).collect();
+            )
+            .map_err(difference_error)?;
+            let initial = energy_guess_j
+                .iter()
+                .map(|v| v / controls.energy_scale_j)
+                .collect();
             let initialized = NewtonKrylovState::new(&difference, initial, controls.solver);
             if let Some(error) = difference.take_failure() {
                 return Err(difference_error(error));
             }
             let mut solver = initialized.map_err(ThermalFilmError::Solver)?;
-            let result = solver.run_controlled(
-                &difference, controls.maximum_newton_iterations,
-                &mut || difference.has_failed() || check().is_err(),
-            );
+            let result =
+                solver.run_controlled(&difference, controls.maximum_newton_iterations, &mut || {
+                    difference.has_failed() || check().is_err()
+                });
             if let Some(error) = difference.take_failure() {
                 return Err(difference_error(error));
             }
@@ -471,39 +567,50 @@ impl<'m> ThermalCarreauFilm<'m> {
             let maximum_cell_residual_j = final_trial.maximum_cell_residual_j();
             let (next, endpoint, audit) = final_trial.accept(
                 controls.cell_energy_tolerance_j,
-                controls.total_energy_tolerance_j, || check(),
+                controls.total_energy_tolerance_j,
+                || check(),
             )?;
             let native = endpoint.flow.flow;
             let kinetic = finite(area * native.kinetic_energy_change_j_m2)?;
-            let work = finite((
-                Dd::from_f64(native.body_work_j_m2)
+            let work = finite(
+                (Dd::from_f64(native.body_work_j_m2)
                     + Dd::from_f64(native.wall_work_j_m2)
-                    + Dd::from_f64(native.surface_work_j_m2)
-            ).to_f64() * area)?;
-            let partition = finite((
-                Dd::from_f64(endpoint.deposited_heat_j)
-                    - Dd::from_f64(area) * Dd::from_f64(native.viscous_heat_j_m2)
-            ).to_f64())?;
+                    + Dd::from_f64(native.surface_work_j_m2))
+                .to_f64()
+                    * area,
+            )?;
+            let partition = finite(
+                (Dd::from_f64(endpoint.deposited_heat_j)
+                    - Dd::from_f64(area) * Dd::from_f64(native.viscous_heat_j_m2))
+                .to_f64(),
+            )?;
             // Independent endpoint storage/work closure, not a sum of the two
             // solvers' residuals that could hide a missing heat transfer.
-            let combined = finite((
-                Dd::from_f64(audit.stored_energy_change_j)
-                    + Dd::from_f64(kinetic) - Dd::from_f64(endpoint.other_heat_j)
-                    - Dd::from_f64(work)
-            ).to_f64())?;
+            let combined = finite(
+                (Dd::from_f64(audit.stored_energy_change_j) + Dd::from_f64(kinetic)
+                    - Dd::from_f64(endpoint.other_heat_j)
+                    - Dd::from_f64(work))
+                .to_f64(),
+            )?;
             if combined.abs() > controls.combined_energy_tolerance_j {
                 return Err(ThermalFilmError::CombinedEnergy {
-                    residual_j: combined, tolerance_j: controls.combined_energy_tolerance_j,
+                    residual_j: combined,
+                    tolerance_j: controls.combined_energy_tolerance_j,
                 });
             }
             let report = ThermalFilmReport {
-                flow: endpoint.flow, thermal: audit, exchange: endpoint.exchange,
-                nonlinear: result.report, endpoint_evaluations: evaluations.get(),
+                flow: endpoint.flow,
+                thermal: audit,
+                exchange: endpoint.exchange,
+                nonlinear: result.report,
+                endpoint_evaluations: evaluations.get(),
                 momentum_material_evaluations: material_evaluations.get(),
                 maximum_cell_residual_j,
                 deposited_viscous_heat_j: endpoint.deposited_heat_j,
-                heat_partition_residual_j: partition, kinetic_energy_change_j: kinetic,
-                mechanical_work_j: work, other_heat_j: endpoint.other_heat_j,
+                heat_partition_residual_j: partition,
+                kinetic_energy_change_j: kinetic,
+                mechanical_work_j: work,
+                other_heat_j: endpoint.other_heat_j,
                 combined_energy_residual_j: combined,
             };
             check()?;
@@ -515,9 +622,7 @@ impl<'m> ThermalCarreauFilm<'m> {
     }
 }
 
-fn difference_error<E>(
-    error: FiniteDifferenceError<ThermalFilmError<E>>,
-) -> ThermalFilmError<E> {
+fn difference_error<E>(error: FiniteDifferenceError<ThermalFilmError<E>>) -> ThermalFilmError<E> {
     match error {
         FiniteDifferenceError::Source(error) => error,
         FiniteDifferenceError::Invalid(message) => ThermalFilmError::Invalid(message),

@@ -1567,13 +1567,20 @@ Streamwise transport, evolving interfaces, thermal expansion and phase
 occupancy are not introduced by this coupling. Nonlinear convergence alone
 does not establish temporal or spatial accuracy.
 
-Focused regression sources exercise viscous self-heating and source feedback,
-an independent two-cell conduction/bath balance, refinement against independent
+The coupling's default Newton controls use an inner forcing floor of `1e-4`,
+appropriate for its finite-difference Jacobian and caloric/constitutive roundoff.
+The original outer residual and physical energy gates remain independent;
+explicit caller-supplied solver controls are unchanged.
+
+All 37 focused source-linked film tests passed, including four coupled
+regressions for viscous self-heating and original-source feedback, an independent
+two-cell conduction/bath balance, first-order refinement against independent
 coupled momentum/thermal integration, and joint refusal/cancellation/retry.
-The execution environment became unavailable before this extension could be
-compiled or its new tests executed. The final reconstructed sources received
-bounded source and ownership review only; preceding film test results apply
-to the earlier prescribed-temperature and local-heat implementation.
+Executed code includes the original material laws, math, tridiagonal, thermal
+backward-Euler, finite-difference and Newton/Krylov kernels. The harness omits
+unrelated crate modules and uses an uninhabitable context type for unexercised
+runtime entrypoints. These results do not establish full-crate Cargo or
+asupersync runtime integration.
 
 ## Resolved transient Carreau films
 

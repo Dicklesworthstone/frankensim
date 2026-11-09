@@ -51,7 +51,9 @@ fn source() -> ThermalCarreauYasuda {
     ThermalCarreauYasuda::new(
         CarreauYasuda::new(2.0, 0.25, 2.0, 0.45, 2.0, [0.0, 1e5]).unwrap(),
         TemperatureShift::new(
-            TemperatureShiftModel::Arrhenius { activation_energy_j_mol: 12_000.0 },
+            TemperatureShiftModel::Arrhenius {
+                activation_energy_j_mol: 12_000.0,
+            },
             300.0,
             [280.0, 360.0],
         )
@@ -60,10 +62,16 @@ fn source() -> ThermalCarreauYasuda {
     )
 }
 fn traction() -> f64 {
-    0.5 * source().evaluate(300.0, 0.5).unwrap().dynamic_viscosity_pa_s()
+    0.5 * source()
+        .evaluate(300.0, 0.5)
+        .unwrap()
+        .dynamic_viscosity_pa_s()
 }
 fn drive() -> FilmDrive {
-    FilmDrive { surface_shear_pa: traction(), ..FilmDrive::default() }
+    FilmDrive {
+        surface_shear_pa: traction(),
+        ..FilmDrive::default()
+    }
 }
 fn controls() -> ThermalFilmControls {
     ThermalFilmControls {
@@ -80,7 +88,7 @@ fn controls() -> ThermalFilmControls {
             // while respecting representable changes to a nonzero h datum.
             absolute_tolerance: 1e-9,
             relative_tolerance: 1e-12,
-            ..NewtonKrylovConfig::default()
+            ..ThermalFilmControls::default().solver
         },
         ..ThermalFilmControls::default()
     }
@@ -142,24 +150,35 @@ fn inventory<'a>(
     DepositionSimulation::new(
         events,
         &[(MaterialId(7), law as &dyn ThermalLaw)],
-        DepositionBudget { max_cells: 4, max_links: 4, max_events: 8, max_substeps: 100 },
+        DepositionBudget {
+            max_cells: 4,
+            max_links: 4,
+            max_events: 8,
+            max_substeps: 100,
+        },
     )
     .unwrap()
     .advance_to(
         0.0,
-        StepConfig { max_dt_s: 1.0, energy_tolerance_j: 1e-9 },
+        StepConfig {
+            max_dt_s: 1.0,
+            energy_tolerance_j: 1e-9,
+        },
         || Ok(()),
     )
     .unwrap()
     .0
 }
 fn coupled(law: &Caloric, area: f64) -> ThermalCarreauFilm<'_> {
-    let flow = TransientCarreauFilm::from_profile(
-        source(), 300.0, SPEC, vec![0.125, 0.375], 0.0,
-    )
-    .unwrap();
+    let flow =
+        TransientCarreauFilm::from_profile(source(), 300.0, SPEC, vec![0.125, 0.375], 0.0).unwrap();
     ThermalCarreauFilm::new(
-        flow, inventory(law, [300.0; 2], area, 0.0, 0.0), &IDS, area, [300.0; 2], || false,
+        flow,
+        inventory(law, [300.0; 2], area, 0.0, 0.0),
+        &IDS,
+        area,
+        [300.0; 2],
+        || false,
     )
     .unwrap()
 }
@@ -184,16 +203,27 @@ fn insulated(
 
 #[test]
 fn original_caloric_storage_and_momentum_close_one_isolated_heating_transaction() {
-    let law = Caloric { cp: 0.05, datum: 1000.0 };
+    let law = Caloric {
+        cp: 0.05,
+        datum: 1000.0,
+    };
     let area = 2.5;
     let mut model = coupled(&law, area);
     let before = model.thermal().cells().clone();
     let velocity = model.flow().velocities_m_s().to_vec();
     let dt = 0.08;
-    let report = model.advance(
-        dt, drive(), LIMITS, TransientCarreauControls::default(),
-        controls(), &[0.0; 2], insulated, || false,
-    ).unwrap();
+    let report = model
+        .advance(
+            dt,
+            drive(),
+            LIMITS,
+            TransientCarreauControls::default(),
+            controls(),
+            &[0.0; 2],
+            insulated,
+            || false,
+        )
+        .unwrap();
     let mut stored = 0.0;
     for &id in &IDS {
         let cell = &model.thermal().cells()[&id];
@@ -203,8 +233,11 @@ fn original_caloric_storage_and_momentum_close_one_isolated_heating_transaction(
         assert_eq!(cell.material_id, old.material_id);
         stored += cell.mass_kg * (cell.specific_h_j_kg - old.specific_h_j_kg);
     }
-    let kinetic: f64 = velocity.iter().zip(model.flow().velocities_m_s())
-        .map(|(&old, &new)| 0.25 * area * (new - old) * (new + old)).sum();
+    let kinetic: f64 = velocity
+        .iter()
+        .zip(model.flow().velocities_m_s())
+        .map(|(&old, &new)| 0.25 * area * (new - old) * (new + old))
+        .sum();
     near(stored, report.deposited_viscous_heat_j, 5e-10);
     near(kinetic, report.kinetic_energy_change_j, 5e-13);
     near(stored + kinetic, report.mechanical_work_j, 5e-10);
@@ -216,7 +249,10 @@ fn original_caloric_storage_and_momentum_close_one_isolated_heating_transaction(
     assert_eq!(model.film_cells(), &IDS);
     assert_eq!(model.wetted_area_m2(), area);
     assert_eq!(
-        model.thermal().material_caloric_identity(MaterialId(7)).unwrap(),
+        model
+            .thermal()
+            .material_caloric_identity(MaterialId(7))
+            .unwrap(),
         law.caloric_identity(),
     );
     let t = IDS.map(|id| model.thermal().temperature_k(id).unwrap());
@@ -226,39 +262,70 @@ fn original_caloric_storage_and_momentum_close_one_isolated_heating_transaction(
         near(material.temperature_k(), expected, 2e-12);
         assert_eq!(material.law(), &source());
     }
-    let mut frozen = TransientCarreauFilm::from_profile(source(), 300.0, SPEC, velocity, 0.0).unwrap();
-    frozen.step(dt, drive(), LIMITS, TransientCarreauControls::default(), || false).unwrap();
-    assert!(model.flow().velocities_m_s().iter().zip(frozen.velocities_m_s())
-        .any(|(&actual, &fixed)| (actual - fixed).abs() > 1e-5));
+    let mut frozen =
+        TransientCarreauFilm::from_profile(source(), 300.0, SPEC, velocity, 0.0).unwrap();
+    frozen
+        .step(
+            dt,
+            drive(),
+            LIMITS,
+            TransientCarreauControls::default(),
+            || false,
+        )
+        .unwrap();
+    assert!(
+        model
+            .flow()
+            .velocities_m_s()
+            .iter()
+            .zip(frozen.velocities_m_s())
+            .any(|(&actual, &fixed)| (actual - fixed).abs() > 1e-5)
+    );
 }
 
 #[test]
 fn original_contact_and_bath_match_an_independent_two_by_two_backward_euler_step() {
-    let law = Caloric { cp: 2.0, datum: 0.0 };
+    let law = Caloric {
+        cp: 2.0,
+        datum: 0.0,
+    };
     let thermal = inventory(&law, [330.0, 310.0], 1.0, 2.0, 3.0);
     let flow = TransientCarreauFilm::new(source(), 300.0, SPEC, 2).unwrap();
-    let mut model = ThermalCarreauFilm::new(flow, thermal, &IDS, 1.0, [280.0, 310.0], || false).unwrap();
+    let mut model =
+        ThermalCarreauFilm::new(flow, thermal, &IDS, 1.0, [280.0, 310.0], || false).unwrap();
     let dt = 0.1;
-    let report = model.advance(
-        dt, FilmDrive::default(), LIMITS, TransientCarreauControls::default(),
-        controls(), &[0.0; 2],
-        |candidate, cells| {
-            let mut exchange = insulated(candidate, cells)?;
-            // The original lower-cell conductance is to a held fluid-side
-            // wall trace at 280 K; the free surface is insulated.
-            exchange.boundary_temperatures_k[0] = 280.0;
-            Ok::<_, DepositionError>(exchange)
-        },
-        || false,
-    ).unwrap();
+    let report = model
+        .advance(
+            dt,
+            FilmDrive::default(),
+            LIMITS,
+            TransientCarreauControls::default(),
+            controls(),
+            &[0.0; 2],
+            |candidate, cells| {
+                let mut exchange = insulated(candidate, cells)?;
+                // The original lower-cell conductance is to a held fluid-side
+                // wall trace at 280 K; the free surface is insulated.
+                exchange.boundary_temperatures_k[0] = 280.0;
+                Ok::<_, DepositionError>(exchange)
+            },
+            || false,
+        )
+        .unwrap();
     // Each cell has heat capacity 1 J/K, internal conductance 2 W/K, and
     // cell zero has G=3 W/K to 280 K. Solve the original BE matrix directly.
     let (a, b, d) = (1.0 / dt + 2.0 + 3.0, 2.0, 1.0 / dt + 2.0);
     let rhs = [330.0 / dt + 3.0 * 280.0, 310.0 / dt];
-    let expected = [(d * rhs[0] + b * rhs[1]) / (a * d - b * b),
-        (b * rhs[0] + a * rhs[1]) / (a * d - b * b)];
+    let expected = [
+        (d * rhs[0] + b * rhs[1]) / (a * d - b * b),
+        (b * rhs[0] + a * rhs[1]) / (a * d - b * b),
+    ];
     for i in 0..2 {
-        near(model.thermal().temperature_k(IDS[i]).unwrap(), expected[i], 3e-9);
+        near(
+            model.thermal().temperature_k(IDS[i]).unwrap(),
+            expected[i],
+            3e-9,
+        );
     }
     near(report.other_heat_j, dt * 3.0 * (280.0 - expected[0]), 5e-9);
     near(report.deposited_viscous_heat_j, 0.0, 0.0);
@@ -274,9 +341,19 @@ fn surface_rate(source: &ThermalCarreauYasuda, temperature: f64, stress: f64) ->
     let (mut low, mut high) = (0.0, 20.0);
     for _ in 0..80 {
         let midpoint = 0.5 * (low + high);
-        if midpoint == low || midpoint == high { break; }
-        let value = source.evaluate(temperature, midpoint).unwrap().dynamic_viscosity_pa_s() * midpoint;
-        if value < stress { low = midpoint; } else { high = midpoint; }
+        if midpoint == low || midpoint == high {
+            break;
+        }
+        let value = source
+            .evaluate(temperature, midpoint)
+            .unwrap()
+            .dynamic_viscosity_pa_s()
+            * midpoint;
+        if value < stress {
+            low = midpoint;
+        } else {
+            high = midpoint;
+        }
     }
     0.5 * (low + high)
 }
@@ -285,7 +362,11 @@ fn ode(source: &ThermalCarreauYasuda, state: [f64; 4]) -> [f64; 4] {
     let gamma = [4.0 * u, 2.0 * (v - u)];
     let temperatures = [t0, 0.5 * (t0 + t1)];
     let stress: [f64; 2] = std::array::from_fn(|i| {
-        source.evaluate(temperatures[i], gamma[i].abs()).unwrap().dynamic_viscosity_pa_s() * gamma[i]
+        source
+            .evaluate(temperatures[i], gamma[i].abs())
+            .unwrap()
+            .dynamic_viscosity_pa_s()
+            * gamma[i]
     });
     let wall_power = stress[0] * u;
     let inner_power = stress[1] * (v - u);
@@ -301,13 +382,15 @@ fn rk4_reference(intervals: usize) -> [f64; 4] {
     let source = source();
     let mut state = [0.125, 0.375, 300.0, 300.0];
     let h = 0.16 / intervals as f64;
-    let shifted = |a: [f64; 4], b: [f64; 4], scale: f64| std::array::from_fn(|i| a[i] + scale * b[i]);
+    let shifted =
+        |a: [f64; 4], b: [f64; 4], scale: f64| std::array::from_fn(|i| a[i] + scale * b[i]);
     for _ in 0..intervals {
         let a = ode(&source, state);
         let b = ode(&source, shifted(state, a, 0.5 * h));
         let c = ode(&source, shifted(state, b, 0.5 * h));
         let d = ode(&source, shifted(state, c, h));
-        state = std::array::from_fn(|i| state[i] + h * (a[i] + 2.0 * b[i] + 2.0 * c[i] + d[i]) / 6.0);
+        state =
+            std::array::from_fn(|i| state[i] + h * (a[i] + 2.0 * b[i] + 2.0 * c[i] + d[i]) / 6.0);
     }
     state
 }
@@ -316,22 +399,37 @@ fn rk4_reference(intervals: usize) -> [f64; 4] {
 fn endpoint_temperature_composition_has_first_order_coupled_time_convergence() {
     let reference = rk4_reference(2048);
     let comparison = rk4_reference(1024);
-    for i in 0..4 { near(reference[i], comparison[i], 2e-9); }
-    let law = Caloric { cp: 0.05, datum: 0.0 };
+    for i in 0..4 {
+        near(reference[i], comparison[i], 2e-9);
+    }
+    let law = Caloric {
+        cp: 0.05,
+        datum: 0.0,
+    };
     let mut prior = f64::INFINITY;
     for intervals in [4, 8, 16] {
         let mut model = coupled(&law, 1.0);
         for step in 1..=intervals {
-            model.advance(
-                0.16 * step as f64 / intervals as f64, drive(), LIMITS,
-                TransientCarreauControls::default(), controls(), &[0.0; 2],
-                insulated, || false,
-            ).unwrap();
+            model
+                .advance(
+                    0.16 * step as f64 / intervals as f64,
+                    drive(),
+                    LIMITS,
+                    TransientCarreauControls::default(),
+                    controls(),
+                    &[0.0; 2],
+                    insulated,
+                    || false,
+                )
+                .unwrap();
         }
-        let error = (0..2).map(|i| {
-            (model.thermal().temperature_k(IDS[i]).unwrap() - reference[i + 2]).abs()
-        }).fold(0.0_f64, f64::max);
-        assert!(error < 0.57 * prior, "intervals={intervals}, error={error:e}, previous={prior:e}");
+        let error = (0..2)
+            .map(|i| (model.thermal().temperature_k(IDS[i]).unwrap() - reference[i + 2]).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            error < 0.57 * prior,
+            "intervals={intervals}, error={error:e}, previous={prior:e}"
+        );
         prior = error;
     }
     assert!(prior < 4e-4, "{prior:e}");
@@ -339,41 +437,90 @@ fn endpoint_temperature_composition_has_first_order_coupled_time_convergence() {
 
 #[test]
 fn mapping_source_budgets_and_late_cancellation_preserve_both_original_states() {
-    let law = Caloric { cp: 0.05, datum: 0.0 };
+    let law = Caloric {
+        cp: 0.05,
+        datum: 0.0,
+    };
     let flow = || TransientCarreauFilm::new(source(), 300.0, SPEC, 2).unwrap();
-    assert!(ThermalCarreauFilm::new(
-        flow(), inventory(&law, [300.0; 2], 1.0, 0.0, 0.0), &IDS,
-        2.0, [300.0; 2], || false,
-    ).is_err());
-    assert!(ThermalCarreauFilm::new(
-        flow(), inventory(&law, [300.0; 2], 1.0, 0.0, 0.0),
-        &[IDS[1], IDS[0]], 1.0, [300.0; 2], || false,
-    ).is_err());
+    assert!(
+        ThermalCarreauFilm::new(
+            flow(),
+            inventory(&law, [300.0; 2], 1.0, 0.0, 0.0),
+            &IDS,
+            2.0,
+            [300.0; 2],
+            || false,
+        )
+        .is_err()
+    );
+    assert!(
+        ThermalCarreauFilm::new(
+            flow(),
+            inventory(&law, [300.0; 2], 1.0, 0.0, 0.0),
+            &[IDS[1], IDS[0]],
+            1.0,
+            [300.0; 2],
+            || false,
+        )
+        .is_err()
+    );
     let mut victim = coupled(&law, 1.0);
     let before = victim.thermal().cells().clone();
     let velocity = victim.flow().velocities_m_s().to_vec();
     let refused = victim.advance(
-        0.04, drive(), LIMITS, TransientCarreauControls::default(), controls(), &[0.0; 2],
-        |_, _| Err::<ThermalFilmExchange<()>, _>(DepositionError::MaterialDomain), || false,
-    );
-    assert!(matches!(refused, Err(ThermalFilmError::Source(DepositionError::MaterialDomain))));
-    let queries = Cell::new(0);
-    assert!(victim.advance(
-        0.04, drive(), LIMITS, TransientCarreauControls::default(), controls(), &[0.0; 2],
-        |thermal, cells| {
-            queries.set(queries.get() + 1);
-            let mut exchange = insulated(thermal, cells)?;
-            if queries.get() > 1 { exchange.boundary_temperatures_k[1] = 361.0; }
-            Ok::<_, DepositionError>(exchange)
-        },
+        0.04,
+        drive(),
+        LIMITS,
+        TransientCarreauControls::default(),
+        controls(),
+        &[0.0; 2],
+        |_, _| Err::<ThermalFilmExchange<()>, _>(DepositionError::MaterialDomain),
         || false,
-    ).is_err());
+    );
+    assert!(matches!(
+        refused,
+        Err(ThermalFilmError::Source(DepositionError::MaterialDomain))
+    ));
+    let queries = Cell::new(0);
+    assert!(
+        victim
+            .advance(
+                0.04,
+                drive(),
+                LIMITS,
+                TransientCarreauControls::default(),
+                controls(),
+                &[0.0; 2],
+                |thermal, cells| {
+                    queries.set(queries.get() + 1);
+                    let mut exchange = insulated(thermal, cells)?;
+                    if queries.get() > 1 {
+                        exchange.boundary_temperatures_k[1] = 361.0;
+                    }
+                    Ok::<_, DepositionError>(exchange)
+                },
+                || false,
+            )
+            .is_err()
+    );
     assert!(queries.get() > 1);
-    assert!(victim.advance(
-        0.04, drive(), LIMITS, TransientCarreauControls::default(),
-        ThermalFilmControls { maximum_endpoint_evaluations: 1, ..controls() },
-        &[0.0; 2], insulated, || false,
-    ).is_err());
+    assert!(
+        victim
+            .advance(
+                0.04,
+                drive(),
+                LIMITS,
+                TransientCarreauControls::default(),
+                ThermalFilmControls {
+                    maximum_endpoint_evaluations: 1,
+                    ..controls()
+                },
+                &[0.0; 2],
+                insulated,
+                || false,
+            )
+            .is_err()
+    );
     assert_eq!(victim.thermal().cells(), &before);
     assert_eq!(victim.flow().velocities_m_s(), velocity);
     assert_eq!(victim.thermal().time_s(), 0.0);
@@ -381,27 +528,65 @@ fn mapping_source_budgets_and_late_cancellation_preserve_both_original_states() 
 
     let mut reference = coupled(&law, 1.0);
     let mut polls = 0;
-    let expected = reference.advance(
-        0.04, drive(), LIMITS, TransientCarreauControls::default(), controls(), &[0.0; 2],
-        insulated, || { polls += 1; false },
-    ).unwrap();
+    let expected = reference
+        .advance(
+            0.04,
+            drive(),
+            LIMITS,
+            TransientCarreauControls::default(),
+            controls(),
+            &[0.0; 2],
+            insulated,
+            || {
+                polls += 1;
+                false
+            },
+        )
+        .unwrap();
     let mut cancelled = coupled(&law, 1.0);
     let mut calls = 0;
-    assert!(cancelled.advance(
-        0.04, drive(), LIMITS, TransientCarreauControls::default(), controls(), &[0.0; 2],
-        insulated, || { calls += 1; calls == polls },
-    ).is_err());
+    assert!(
+        cancelled
+            .advance(
+                0.04,
+                drive(),
+                LIMITS,
+                TransientCarreauControls::default(),
+                controls(),
+                &[0.0; 2],
+                insulated,
+                || {
+                    calls += 1;
+                    calls == polls
+                },
+            )
+            .is_err()
+    );
     assert_eq!(calls, polls);
     assert_eq!(cancelled.thermal().cells(), &before);
     assert_eq!(cancelled.flow().velocities_m_s(), velocity);
     assert_eq!(cancelled.thermal().time_s(), 0.0);
     assert_eq!(cancelled.flow().accepted_time_s(), 0.0);
-    let accepted = cancelled.advance(
-        0.04, drive(), LIMITS, TransientCarreauControls::default(), controls(), &[0.0; 2],
-        insulated, || false,
-    ).unwrap();
+    let accepted = cancelled
+        .advance(
+            0.04,
+            drive(),
+            LIMITS,
+            TransientCarreauControls::default(),
+            controls(),
+            &[0.0; 2],
+            insulated,
+            || false,
+        )
+        .unwrap();
     assert_eq!(accepted.flow, expected.flow);
-    assert_eq!(accepted.deposited_viscous_heat_j, expected.deposited_viscous_heat_j);
+    assert_eq!(
+        accepted.deposited_viscous_heat_j,
+        expected.deposited_viscous_heat_j
+    );
     assert_eq!(cancelled.thermal().cells(), reference.thermal().cells());
-    assert_eq!(cancelled.flow().velocities_m_s(), reference.flow().velocities_m_s());
+    assert_eq!(
+        cancelled.flow().velocities_m_s(),
+        reference.flow().velocities_m_s()
+    );
 }
