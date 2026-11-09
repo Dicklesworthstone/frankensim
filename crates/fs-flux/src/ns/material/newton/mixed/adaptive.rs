@@ -12,6 +12,13 @@ use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_time::PiController;
 
+mod heat_control;
+use heat_control::HeatControl;
+pub use heat_control::{
+    MaterialNavierStokesHeatAdaptiveAdvance, MaterialSdirk2HeatControls, MaterialSdirk2HeatReport,
+    MaterialSdirk2HeatTolerance,
+};
+
 /// Original physical edge laws evaluated at the actual absolute stage time [s].
 /// Topology and policy are fixed; data may vary smoothly in time and position.
 /// Velocities are m/s, total tractions Pa and positions metres.
@@ -209,15 +216,112 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         force_density: &dyn Fn(f64, [f64; 2]) -> [f64; 2],
         boundaries: &[MaterialNavierStokesTimeBoundary<'_>],
         controls: &MaterialSdirk2AdaptiveControls,
-        mut resolve: impl FnMut(
+        resolve: impl FnMut(
             f64,
             MaterialFluxRheologyPoint,
             &FluidTransportState,
         ) -> Result<MaterialFluxViscosityTangent<G>, MaterialError>,
         gate: &CancelGate,
     ) -> Result<MaterialNavierStokesAdaptiveAdvance<G>, MaterialSdirk2AdaptiveError> {
+        self.advance_mixed_sdirk2_inner(
+            start_time_s,
+            end_time_s,
+            previous_velocity,
+            force_density,
+            boundaries,
+            controls,
+            None,
+            resolve,
+            gate,
+        )
+        .map(|(flow, _)| flow)
+    }
+
+    /// Advance with additional original cell/edge heat error control and an
+    /// accepted-history budget on absolute signed SDIRK2 kinetic time defects.
+    ///
+    /// This uses the SAME six native Newton stages per comparison, source
+    /// callbacks, absolute stage times, accepted fine history and work bounds
+    /// as the velocity-only entry. Physical heat is never corrected or replaced
+    /// by the time defect. The original PI settings see the largest enabled
+    /// indicator; conservative order-three gains also bound heat-relative and
+    /// duration-allocated defect criteria whose ratios can scale as dt².
+    ///
+    /// Absolute defect credit is allocated by comparison dt/requested duration;
+    /// relative credit uses only that comparison's original generated heat.
+    /// This prevents an early stiff transient consuming the whole absolute
+    /// allowance, at the cost of additional resolution in long requested windows.
+    /// These are local temporal indicators and a time-quadrature account, not
+    /// a pressure/stress, spatial-error, thermal-evolution or passivity certificate.
+    ///
+    /// # Errors
+    /// All velocity-only refusals remain transactional. Invalid heat controls
+    /// refuse before callbacks. Failed heat/defect tolerance uses the same
+    /// bounded rejection path; no partial state, heat or defect account returns.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_navier_stokes_mixed_rheology_sdirk2_with_heat_control<G: FluidTransport>(
+        &self,
+        start_time_s: f64,
+        end_time_s: f64,
+        previous_velocity: &[f64],
+        force_density: &dyn Fn(f64, [f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialNavierStokesTimeBoundary<'_>],
+        controls: &MaterialSdirk2AdaptiveControls,
+        heat_controls: &MaterialSdirk2HeatControls,
+        resolve: impl FnMut(
+            f64,
+            MaterialFluxRheologyPoint,
+            &FluidTransportState,
+        ) -> Result<MaterialFluxViscosityTangent<G>, MaterialError>,
+        gate: &CancelGate,
+    ) -> Result<MaterialNavierStokesHeatAdaptiveAdvance<G>, MaterialSdirk2AdaptiveError> {
+        let (flow, heat_control) = self.advance_mixed_sdirk2_inner(
+            start_time_s,
+            end_time_s,
+            previous_velocity,
+            force_density,
+            boundaries,
+            controls,
+            Some(heat_controls),
+            resolve,
+            gate,
+        )?;
+        Ok(MaterialNavierStokesHeatAdaptiveAdvance {
+            flow,
+            heat_control: heat_control.ok_or(MaterialSdirk2AdaptiveError::Invalid(
+                "missing admitted heat-control account",
+            ))?,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_mixed_sdirk2_inner<G: FluidTransport>(
+        &self,
+        start_time_s: f64,
+        end_time_s: f64,
+        previous_velocity: &[f64],
+        force_density: &dyn Fn(f64, [f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialNavierStokesTimeBoundary<'_>],
+        controls: &MaterialSdirk2AdaptiveControls,
+        heat_controls: Option<&MaterialSdirk2HeatControls>,
+        mut resolve: impl FnMut(
+            f64,
+            MaterialFluxRheologyPoint,
+            &FluidTransportState,
+        ) -> Result<MaterialFluxViscosityTangent<G>, MaterialError>,
+        gate: &CancelGate,
+    ) -> Result<
+        (
+            MaterialNavierStokesAdaptiveAdvance<G>,
+            Option<MaterialSdirk2HeatReport>,
+        ),
+        MaterialSdirk2AdaptiveError,
+    > {
         poll(gate)?;
         controls.admit(start_time_s, end_time_s)?;
+        let mut heat_control = heat_controls
+            .map(|c| HeatControl::new(*c, end_time_s - start_time_s))
+            .transpose()?;
         self.system
             .sdirk2_stage_timestep(previous_velocity, controls.initial_step_s)
             .map_err(|error| {
@@ -329,7 +433,18 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
                     "unrepresentable velocity error scale",
                 ));
             }
-            let factor = controls.factor(error, error_previous)?;
+            let heat_trial = heat_control
+                .as_ref()
+                .map(|control| control.trial(&coarse, &first, &second, dt, gate))
+                .transpose()?;
+            let error = heat_trial
+                .as_ref()
+                .map_or(error, |heat| error.max(heat.error_ratio()));
+            let factor = if error.is_infinite() {
+                controls.controller.max_shrink
+            } else {
+                controls.factor(error, error_previous)?
+            };
             let suggested = (dt * factor).clamp(controls.minimum_step_s, controls.maximum_step_s);
             if error > 1.0 {
                 report.rejected_comparisons += 1;
@@ -348,6 +463,9 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             for half in [&first, &second] {
                 heat.add_integral(&half.dissipated_heat)
                     .map_err(|error| MaterialSdirk2AdaptiveError::Heat { time_s: end, error })?;
+            }
+            if let (Some(control), Some(trial)) = (&mut heat_control, heat_trial) {
+                control.accept(trial)?;
             }
             history.copy_from_slice(fine);
             history_rms = fine_rms;
@@ -374,13 +492,17 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
                 error,
             }
         })?;
+        let heat_control = heat_control.map(HeatControl::finish).transpose()?;
         poll(gate)?;
-        Ok(MaterialNavierStokesAdaptiveAdvance {
-            first_half,
-            second_half,
-            report,
-            dissipated_heat,
-        })
+        Ok((
+            MaterialNavierStokesAdaptiveAdvance {
+                first_half,
+                second_half,
+                report,
+                dissipated_heat,
+            },
+            heat_control,
+        ))
     }
 
     fn physical_rms_velocity(

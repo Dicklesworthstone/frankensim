@@ -2770,9 +2770,10 @@ and deposit energy. These outputs exclude mechanical wall/pressure work,
 advected kinetic or thermal energy, numerical upwind/SIP loss, and caloric
 state evolution. They are not a full discrete energy identity, positivity
 theorem or passivity certificate. SDIRK2 heat quadrature is second order under
-resolved smooth source/strain history and spatial/nonlinear error. The
-adaptive controller still estimates velocity error only: agreement of strongly
-damped velocity endpoints cannot certify stress or dissipation-history accuracy.
+resolved smooth source/strain history and spatial/nonlinear error. The default
+adaptive entry estimates velocity error only: agreement of strongly damped
+velocity endpoints cannot certify stress or dissipation-history accuracy.
+The optional heat-aware entry below controls additional physical indicators.
 
 Focused regressions extend the layered original thermal-Carreau fixture to
 check stage-weighted physical bulk/slip heat and original cell/edge identities.
@@ -2785,6 +2786,75 @@ heat, a late original-source refusal and clean retry. Changed Rust sources
 pass pinned rustfmt parsing; native compilation and these PDE regressions
 remain **unexecuted** because constellation dependencies and persistent storage
 capacity are unavailable. The scalar quadrature is not native PDE validation.
+
+### Heat-sensitive original-material time integration
+
+`advance_navier_stokes_mixed_rheology_sdirk2_with_heat_control` adds
+`MaterialSdirk2HeatControls` to the existing original-material adaptive driver.
+Existing velocity-only controls and entry points retain their signatures.
+The new result contains the same accepted flow and integrated original heat,
+plus a separate `MaterialSdirk2HeatReport`. The public types are available
+through `material::adaptive`.
+
+Each comparison uses the same six native Newton stages already required by
+step doubling. It compares the coarse cell bulk heat against the sum of
+both fine halves, and independently compares original edge/component slip
+heat. Local differences are divided by three for the second-order fine-path
+estimate. Separate bulk/slip sums of absolute spatial discrepancies prevent
+opposite local errors from cancelling in a total. Absolute heat tolerances
+are in J/m; relative scales use only that comparison's physical production.
+No extra constitutive callbacks, fitted viscosity or substitute heating
+operator is introduced.
+
+Each original fixed SDIRK2 step additionally retains its signed
+`temporal_kinetic_defect_j_per_m`. For original stage velocities Y1, Y2 and
+initial Un, define `d1=Y1-Un` and
+`d2=Y2-Un-((1-gamma)/gamma)*d1`. The time-quadrature defect is
+
+`D = rho*(K(d2)-K(d1)) = (rho/2)*<d2-d1, M*(d2+d1)>`.
+
+Here K and M are the native BDM velocity mass metric and rho is the original
+immutable material density. The direct signed pairing uses the original
+triangle/basis quadrature with double-double accumulation; centered stage
+increments avoid subtracting two large kinetic totals. The consumed
+mass-history allocation is reused and one O(velocity DOFs) sum vector is
+added. There is no new mass assembly or linear solve. The diagnostic concerns
+the complete time discretization, including force and boundary histories;
+it is not a viscous-only loss, a mesh/SIP/upwind loss or a full energy balance.
+
+SDIRK2 permits BOTH signs of D. The heat-aware controller therefore charges
+`|D_first_half|+|D_second_half|`, before any sign cancellation, and separately
+reports the signed accumulated value. With absolute allowance A, relative
+fraction r, total requested duration T and accepted original bulk-plus-slip
+heat H, the whole-call allowance is `sum(abs(D)) <= A+r*H`.
+A comparison receives `A*dt/T+r*H_comparison`; unused local credit is not
+borrowed. This deliberate allocation prevents an early transient from
+consuming later absolute credit, but a very short stiff transient inside a
+long requested window can require many steps. It is a resolution policy,
+not an optimal-cost or certified global-error theorem.
+
+Local costs, double-double accepted histories and a separate whole-call
+inequality keep both defect signs and small positive increments visible.
+The common PI proposal sees the largest velocity, heat or defect indicator.
+Rejected/coarse histories contribute no accepted heat or defect. Attempt,
+Newton, source, boundary, representability and cancellation limits remain
+authoritative, including a final cancellation check after the accounts are
+complete. Refusal returns no partial flow, heat or time-defect result.
+Neither sign of D is deposited as physical heat or used to correct the
+original molecular/slip heat.
+
+The existing native mass and material-flow test seams cover affine moment
+pairing, exact-velocity/non-exact-heat refinement, a stiff unforced vortical
+flow, source/work/cancellation refusal and clean retry. An independently
+executed scalar decay calculation exposes the missed mode directly: with
+lambda*h=1e6, the fine endpoint velocity estimate is only about 1.61e-6 and
+the heat estimate about 5.02e-6, yet its two fine steps carry about 0.49997
+absolute time defect from an initial kinetic energy of 0.5. At lambda*h=4,
+the coarse quadrature instead overproduces heat, giving about 0.62252 and
+negative defect about -0.13222. The signed diagnostic and absolute budget
+distinguish both failures. Pinned rustfmt parsing and these independent
+equation checks do not replace native Rust compilation or PDE execution;
+those remain unexecuted under the current dependency/storage constraints.
 
 ## Generalized-Newtonian mixed velocity/traction Stokes flow
 

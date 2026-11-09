@@ -4,6 +4,9 @@ use super::*;
 use fs_exec::CancelGate;
 use fs_flux::material::adaptive::*;
 
+#[path = "adaptive/heat_control.rs"]
+mod heat_control;
+
 fn controls(atol: f64) -> MaterialSdirk2AdaptiveControls {
     MaterialSdirk2AdaptiveControls {
         initial_step_s: 0.4,

@@ -1709,6 +1709,35 @@ impl<'m> FluxSystem<'m> {
         v.iter().all(|value| value.is_finite()).then_some(v)
     }
 
+    /// Signed velocity mass pairing on the original BDM basis and quadrature.
+    /// This is integral(left.right) dA, without density or the kinetic 1/2.
+    /// Callers retain native velocity lengths and admit finite physical results.
+    /// Direct pairing avoids subtracting nearly equal positive kinetic energies.
+    pub(crate) fn mass_inner_product(&self, left: &[f64], right: &[f64]) -> f64 {
+        use fs_math::dd::Dd;
+
+        let mut total = Dd::ZERO;
+        for t in 0..self.mesh.tris.len() {
+            let p: [[f64; 2]; 3] = core::array::from_fn(|k| self.mesh.verts[self.mesh.tris[t][k]]);
+            for (q, weight) in tri_quad(p, self.mesh.areas[t]) {
+                let mut u = [0.0; 2];
+                let mut v = [0.0; 2];
+                for i in 0..6 {
+                    let basis = eval_basis(&self.bases[t], i, q);
+                    let dof = self.dof(t, i);
+                    for axis in 0..2 {
+                        u[axis] += left[dof] * basis[axis];
+                        v[axis] += right[dof] * basis[axis];
+                    }
+                }
+                let product = Dd::from_f64(u[0]) * Dd::from_f64(v[0])
+                    + Dd::from_f64(u[1]) * Dd::from_f64(v[1]);
+                total = total + Dd::from_f64(weight) * product;
+            }
+        }
+        total.to_f64()
+    }
+
     /// Kinetic energy of a discrete velocity.
     #[must_use]
     pub fn kinetic_energy(&self, x: &[f64]) -> f64 {
@@ -1753,6 +1782,64 @@ impl<'m> FluxSystem<'m> {
             }
         }
         (l2.sqrt(), worst_div)
+    }
+}
+
+#[cfg(test)]
+mod mass_tests {
+    use super::*;
+
+    #[test]
+    fn g1_signed_mass_pairing_matches_affine_triangle_moments() {
+        for triangle in [
+            [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            [[2.0, -3.0], [4.0, -2.5], [2.3, -1.0]],
+            [[-0.2, 0.7], [3.8, 0.7], [2.8, 0.72]],
+        ] {
+            let mesh = TriMesh::from_mesh2(&fs_solid::Mesh2 {
+                nodes: triangle.to_vec(),
+                elems: vec![vec![0, 1, 2]],
+                patches: Vec::new(),
+            });
+            let system = FluxSystem::new(&mesh);
+            let left = [0.7, -0.11, 0.4, 0.03, -0.9, 0.07];
+            let right = [-0.3, 0.25, 0.6, -0.04, 0.8, 0.02];
+            let values = |coefficients: &[f64]| {
+                triangle.map(|point| {
+                    let mut value = [0.0; 2];
+                    for i in 0..6 {
+                        let basis = eval_basis(&system.bases[0], i, point);
+                        for axis in 0..2 {
+                            value[axis] += coefficients[system.dof(0, i)] * basis[axis];
+                        }
+                    }
+                    value
+                })
+            };
+            let u = values(&left);
+            let v = values(&right);
+            // Independent affine triangle moments, without native quadrature:
+            // integral(a*b) = area/12 * (sum(a)*sum(b) + sum(a*b)).
+            let exact: f64 = (0..2)
+                .map(|axis| {
+                    let a: f64 = u.iter().map(|x| x[axis]).sum();
+                    let b: f64 = v.iter().map(|x| x[axis]).sum();
+                    let ab: f64 = u.iter().zip(v).map(|(x, y)| x[axis] * y[axis]).sum();
+                    mesh.areas[0] / 12.0 * (a * b + ab)
+                })
+                .sum();
+            let actual = system.mass_inner_product(&left, &right);
+            let scale = (2.0 * system.kinetic_energy(&left)
+                * 2.0 * system.kinetic_energy(&right))
+                .sqrt();
+            assert!((actual - exact).abs() <= 3e-13 * scale);
+            assert!((system.mass_inner_product(&right, &left) - actual).abs() <= 3e-13 * scale);
+            let negative = right.map(|x| -x);
+            assert!((system.mass_inner_product(&left, &negative) + actual).abs() <= 3e-13 * scale);
+            let norm = system.mass_inner_product(&left, &left);
+            assert!((norm - 2.0 * system.kinetic_energy(&left)).abs() <= 3e-13 * norm);
+            assert_eq!(system.mass_inner_product(&left, &[0.0; 6]), 0.0);
+        }
     }
 }
 

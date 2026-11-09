@@ -13,6 +13,7 @@ use crate::ns::linearization::{FluxViscosityTangent, ViscosityLaw};
 use crate::ns::material::heat::DissipatedHeatAccumulator;
 use crate::ns::newton::{FluxSdirk2Error, FluxSdirk2Stage};
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
+use fs_math::dd::Dd;
 use std::cell::RefCell;
 
 /// Adaptive physical-time advancement on the original mixed SDIRK2 owner.
@@ -48,6 +49,12 @@ pub struct MaterialNavierStokesSdirk2Step<G> {
     /// physical step [J/m], with positive SDIRK2 weights (1−gamma, gamma).
     /// No thermal deposition or wall/fluid slip-heat partition is inferred.
     pub dissipated_heat: MaterialDissipatedHeat,
+    /// Signed kinetic quadrature defect of this SDIRK2 time step [J/m].
+    /// With d1=Y1−Un and d2=Y2−Un−((1−gamma)/gamma)*d1, this is
+    /// rho*(K(d2)−K(d1)), using the original finite-element mass quadrature.
+    /// It can have EITHER sign. It is not physical heat, nonnegative numerical
+    /// damping, spatial discretization loss or a full energy/passivity balance.
+    pub temporal_kinetic_defect_j_per_m: f64,
 }
 
 impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
@@ -263,7 +270,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             error,
         })?;
         let first_velocity = &first_stage.flow.step.solution.discrete().x[..self.system.n_u];
-        let history = self
+        let mut history = self
             .system
             .sdirk2_mass_history(previous_velocity, first_velocity)
             .map_err(|error| FluxSdirk2Error {
@@ -284,10 +291,37 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             stage: Some(FluxSdirk2Stage::Endpoint),
             error,
         })?;
+        // Reuse the consumed mass-history allocation for the difference of
+        // increments. Form the signed quadratic difference as a mass pairing
+        // instead of subtracting two nearly equal kinetic energies.
+        let endpoint_velocity = endpoint.flow.step.solution.velocity_dofs();
+        let mut sum = Vec::with_capacity(self.system.n_u);
+        let ratio = Dd::from_f64(
+            (1.0 - FluxSdirk2Stage::First.time_fraction()) / FluxSdirk2Stage::First.time_fraction(),
+        );
+        for i in 0..self.system.n_u {
+            let first = Dd::from_f64(first_velocity[i]) - Dd::from_f64(previous_velocity[i]);
+            let second = Dd::from_f64(endpoint_velocity[i])
+                - Dd::from_f64(previous_velocity[i])
+                - ratio * first;
+            history[i] = (second - first).to_f64();
+            sum.push((second + first).to_f64());
+        }
+        let pairing = self.system.mass_inner_product(&history, &sum);
+        let temporal_kinetic_defect_j_per_m = 0.5 * self.transport.density_kg_m3() * pairing;
+        if !temporal_kinetic_defect_j_per_m.is_finite()
+            || (pairing != 0.0 && temporal_kinetic_defect_j_per_m == 0.0)
+        {
+            return Err(FluxSdirk2Error {
+                stage: Some(FluxSdirk2Stage::Endpoint),
+                error: MaterialFluxError::Invalid("unrepresentable SDIRK2 kinetic time defect"),
+            });
+        }
         Ok(MaterialNavierStokesSdirk2Step {
             first_stage,
             endpoint,
             dissipated_heat,
+            temporal_kinetic_defect_j_per_m,
         })
     }
 
