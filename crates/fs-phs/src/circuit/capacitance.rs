@@ -19,7 +19,7 @@ use super::{
     assemble_circuit_with_mutual_inductance,
 };
 use super::{
-    inductance::InductorCurve,
+    inductance::{InductorCurve, MagneticStorageBlock, coupled::BoundMagneticStorage},
     scalar::{CurveError, ScalarCurve},
 };
 use crate::{
@@ -177,6 +177,7 @@ pub struct CapacitorCurve {
 struct CurveStorage {
     linear: QuadraticStorage,
     curves: Vec<(usize, ScalarCurve)>,
+    magnetic: Vec<BoundMagneticStorage>,
 }
 
 // Share the ORIGINAL scalar constitutive owner with native motor flux storage.
@@ -200,6 +201,7 @@ pub(super) fn storage_with_inductor_curve(
     Ok(Box::new(CurveStorage {
         linear,
         curves: vec![(coordinate, curve.scalar.clone())],
+        magnetic: Vec::new(),
     }))
 }
 
@@ -227,17 +229,27 @@ impl Storage for CurveStorage {
     }
 
     fn hamiltonian(&self, x: &[f64]) -> f64 {
-        self.curves
+        let energy = self
+            .curves
             .iter()
             .fold(self.linear.hamiltonian(x), |sum, (i, curve)| {
                 sum + curve.energy(x[*i]).unwrap_or(f64::NAN)
-            })
+            });
+        self.magnetic
+            .iter()
+            .fold(energy, |sum, block| sum + block.energy(x))
     }
 
     fn gradient(&self, x: &[f64], out: &mut [f64]) {
         self.linear.gradient(x, out);
         for (i, curve) in &self.curves {
             out[*i] = curve.effort(x[*i]).unwrap_or(f64::NAN);
+        }
+        for block in &self.magnetic {
+            if !block.gradient(x, out) {
+                out.fill(f64::NAN);
+                return;
+            }
         }
     }
 
@@ -254,6 +266,9 @@ impl Storage for CurveStorage {
             remainder += curve
                 .midpoint_remainder(a[*i], b[*i], mid[*i])
                 .unwrap_or(f64::NAN);
+        }
+        for block in &self.magnetic {
+            remainder += block.remainder(a, b, mid);
         }
         Some(remainder)
     }
@@ -273,6 +288,11 @@ impl ContinuousStorageTangent for CurveStorage {
             };
             out[*i] = slope * direction[*i];
         }
+        for block in &self.magnetic {
+            if !block.continuous_action(state, direction, out) {
+                return false;
+            }
+        }
         out.iter().all(|value| value.is_finite())
     }
 }
@@ -282,6 +302,12 @@ impl ConstitutiveDiscreteGradient for CurveStorage {
         self.linear.mean_gradient(a, b, mid, out);
         for (i, curve) in &self.curves {
             out[*i] = curve.discrete_effort(a[*i], b[*i]).unwrap_or(f64::NAN);
+        }
+        for block in &self.magnetic {
+            if !block.mean(a, b, out) {
+                out.fill(f64::NAN);
+                return;
+            }
         }
     }
 
@@ -312,6 +338,11 @@ impl ConstitutiveDiscreteGradient for CurveStorage {
                     .unwrap_or(f64::NAN)
                     * direction[*i]
             };
+        }
+        for block in &self.magnetic {
+            if !block.end_action(a, b, direction, out) {
+                return false;
+            }
         }
         out.iter().all(|value| value.is_finite())
     }
@@ -366,6 +397,17 @@ pub(super) fn assemble_storage_curves(
     inductors: &[InductorCurve],
     mutual: &[MutualInductance],
 ) -> Result<CircuitDae, CircuitError> {
+    assemble_storage_blocks(graph, blocks, capacitors, inductors, &[], mutual)
+}
+
+pub(super) fn assemble_storage_blocks(
+    graph: &CircuitGraph,
+    blocks: &[CapacitanceBlock],
+    capacitors: &[CapacitorCurve],
+    inductors: &[InductorCurve],
+    magnetic_blocks: &[MagneticStorageBlock],
+    mutual: &[MutualInductance],
+) -> Result<CircuitDae, CircuitError> {
     let mut ordered: Vec<_> = capacitors.iter().collect();
     ordered.sort_by_key(|entry| entry.branch);
     if ordered
@@ -409,8 +451,42 @@ pub(super) fn assemble_storage_curves(
             "scalar inductor curves cannot share a mutual-inductance link",
         ));
     }
+    let mut magnetic_branches = Vec::new();
+    for block in magnetic_blocks {
+        if block.branches.len() != block.law.turns().len()
+            || block.branches.iter().any(|&branch| {
+                !graph
+                    .branches
+                    .get(branch)
+                    .is_some_and(|b| matches!(b.2, Branch::Inductor { .. }))
+                    || ordered_inductors
+                        .binary_search_by_key(&branch, |entry| entry.branch)
+                        .is_ok()
+            })
+        {
+            return Err(invalid(
+                "magnetic blocks require original inductor branches disjoint from scalar curves",
+            ));
+        }
+        magnetic_branches.extend_from_slice(&block.branches);
+    }
+    magnetic_branches.sort_unstable();
+    if magnetic_branches.windows(2).any(|pair| pair[0] == pair[1])
+        || mutual.iter().any(|link| {
+            magnetic_branches.binary_search(&link.branches.0).is_ok()
+                || magnetic_branches.binary_search(&link.branches.1).is_ok()
+        })
+    {
+        return Err(invalid(
+            "magnetic blocks must have exclusive winding ownership and no external mutual link",
+        ));
+    }
     let mut dae = assemble_circuit_with_mutual_inductance(graph, mutual)?;
-    if ordered.is_empty() && ordered_inductors.is_empty() && blocks.is_empty() {
+    if ordered.is_empty()
+        && ordered_inductors.is_empty()
+        && blocks.is_empty()
+        && magnetic_blocks.is_empty()
+    {
         return Ok(dae);
     }
     let n = dae.system.state_dim();
@@ -421,7 +497,7 @@ pub(super) fn assemble_storage_curves(
         .expect("native circuit storage is quadratic")
         .to_vec();
     block::stamp(graph, &dae, blocks, &ordered, &mut matrix)?;
-    if ordered.is_empty() && ordered_inductors.is_empty() {
+    if ordered.is_empty() && ordered_inductors.is_empty() && magnetic_blocks.is_empty() {
         dae.system.storage = Box::new(QuadraticStorage::new(matrix, n)?);
         return Ok(dae);
     }
@@ -444,9 +520,30 @@ pub(super) fn assemble_storage_curves(
         matrix[coordinate * n + coordinate] = 0.0;
         bound.push((coordinate, entry.curve.scalar.clone()));
     }
+    let mut magnetic = Vec::with_capacity(magnetic_blocks.len());
+    for block in magnetic_blocks {
+        let coordinates = block
+            .branches
+            .iter()
+            .map(|&branch| {
+                let slot = graph.branches[..branch]
+                    .iter()
+                    .filter(|b| matches!(b.2, Branch::Inductor { .. }))
+                    .count();
+                let coordinate = dae.flux_index[slot];
+                matrix[coordinate * n + coordinate] = 0.0;
+                coordinate
+            })
+            .collect();
+        magnetic.push(BoundMagneticStorage {
+            coordinates,
+            law: block.law.clone(),
+        });
+    }
     dae.system.storage = Box::new(CurveStorage {
         linear: QuadraticStorage::new(matrix, n)?,
         curves: bound,
+        magnetic,
     });
     Ok(dae)
 }

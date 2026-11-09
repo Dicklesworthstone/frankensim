@@ -16,6 +16,10 @@ use super::{
     scalar::{CurveError, ScalarCurve},
 };
 
+/// Source-bounded common-core saturation with independent winding leakage.
+pub mod coupled;
+pub use coupled::{MagneticStorageBlock, SharedCoreInductance};
+
 /// Maximum retained knots per inductor, bounding each crossed-segment sum.
 pub const MAX_INDUCTOR_KNOTS: usize = super::scalar::MAX_SCALAR_KNOTS;
 
@@ -180,11 +184,36 @@ pub fn assemble_circuit_with_storage_curves(
     inductor_curves: &[InductorCurve],
     mutual: &[MutualInductance],
 ) -> Result<CircuitDae, CircuitError> {
-    capacitance::assemble_storage_curves(
+    assemble_circuit_with_storage_blocks(
         graph,
         capacitance_blocks,
         capacitor_curves,
         inductor_curves,
+        &[],
+        mutual,
+    )
+}
+
+/// Compose common-core nonlinear magnetic blocks, scalar flux/charge laws,
+/// reciprocal capacitance blocks and disjoint linear mutual inductance on the
+/// original Kirchhoff descriptor. Each block owns its complete magnetic energy;
+/// overlapping branches or external mutual links refuse rather than erasing a
+/// physical cross term. Positive graph coefficients are topology placeholders
+/// on bound branches, never extra magnetic storage.
+pub fn assemble_circuit_with_storage_blocks(
+    graph: &CircuitGraph,
+    capacitance_blocks: &[CapacitanceBlock],
+    capacitor_curves: &[CapacitorCurve],
+    inductor_curves: &[InductorCurve],
+    magnetic_blocks: &[MagneticStorageBlock],
+    mutual: &[MutualInductance],
+) -> Result<CircuitDae, CircuitError> {
+    capacitance::assemble_storage_blocks(
+        graph,
+        capacitance_blocks,
+        capacitor_curves,
+        inductor_curves,
+        magnetic_blocks,
         mutual,
     )
 }
