@@ -65,9 +65,9 @@ pub struct RigidHertzTransientCandidate {
 /// Full original response prepared once, including the normal-coupling row.
 #[derive(Clone, Debug)]
 pub struct PreparedRigidHertzTransient {
-    pair: PreparedRigidHertzTrajectory,
+    pub(super) pair: PreparedRigidHertzTrajectory,
     normal_response_row: Vec3,
-    transient: HertzTransientControls,
+    pub(super) transient: HertzTransientControls,
 }
 
 #[derive(Debug)]
@@ -153,8 +153,17 @@ impl PreparedRigidHertzTransient {
     ) -> Result<Self, RigidHertzTransientError> {
         let pair =
             PreparedRigidHertzTrajectory::new(bodies, properties, contact, dt_s, controls, gate)?;
+        Self::from_pair(pair, transient, gate)
+    }
+
+    /// Shared actual geometry and normal response for circular pressure laws.
+    pub(super) fn from_pair(
+        pair: PreparedRigidHertzTrajectory,
+        transient: HertzTransientControls,
+        gate: &CancelGate,
+    ) -> Result<Self, RigidHertzTransientError> {
         if relative_point(pair.points_before)?.dot(pair.axes[2]).abs()
-            > controls.velocity_tolerance_m_s
+            > pair.controls.velocity_tolerance_m_s
         {
             return Err(RigidHertzTransientError::Invalid(
                 "curved Hertz trajectory requires held closed normal motion",
@@ -202,16 +211,45 @@ impl PreparedRigidHertzTransient {
             self.transient,
             || gate.is_requested(),
         )?;
+        let capacity = law.parameters().kinetic_mu * law.parameters().normal_force_n;
+        self.finish_path(
+            path,
+            capacity.hypot((3.0 * core::f64::consts::PI / 16.0) * capacity),
+            gate,
+        )
+    }
+
+    /// Apply an original constitutive path exactly once and audit it against
+    /// the original native bodies. The supplied bound covers every actual
+    /// radius-scaled wrench, including any terminal tail.
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn finish_path(
+        &self,
+        path: HertzTransientReport,
+        scaled_wrench_bound_n: f64,
+        gate: &CancelGate,
+    ) -> Result<RigidHertzTransientCandidate, RigidHertzTransientError> {
+        poll(gate)?;
+        if !scaled_wrench_bound_n.is_finite() || scaled_wrench_bound_n < 0.0 {
+            return Err(RigidHertzTransientError::Invalid(
+                "finite nonnegative original traction bound required",
+            ));
+        }
+        let pair = &self.pair;
+        let axes = pair.axes;
+        let controls = pair.controls;
+        let initial = relative_point(pair.points_before)?;
+        let initial_spin = relative_spin(pair.points_before);
+        let velocity = [initial.dot(axes[0]), initial.dot(axes[1])];
+        let spin = initial_spin.dot(axes[2]);
         // |F| <= mu*N and |M/a| <= (3*pi/16)*mu*N for the same Hertz patch.
         // Cauchy--Schwarz bounds every intermediate normal rate, including the
         // unresolved extinction tail; checking endpoints alone is insufficient.
-        let capacity = law.parameters().kinetic_mu * law.parameters().normal_force_n;
         let moving_upper = path.stopping_time_bracket_s.map_or(pair.dt_s, |t| t[1]);
-        let normal_change = if capacity == 0.0 || moving_upper == 0.0 {
+        let normal_change = if scaled_wrench_bound_n == 0.0 || moving_upper == 0.0 {
             0.0
         } else {
-            magnitude(self.normal_response_row)
-                * (moving_upper * capacity.hypot((3.0 * core::f64::consts::PI / 16.0) * capacity))
+            magnitude(self.normal_response_row) * (moving_upper * scaled_wrench_bound_n)
         };
         let normal_bound = initial.dot(axes[2]).abs() + normal_change;
         if !normal_bound.is_finite() || normal_bound > controls.velocity_tolerance_m_s {

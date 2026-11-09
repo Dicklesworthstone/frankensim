@@ -1,3 +1,28 @@
+## Native recoil from local-speed Hertz friction
+
+`tangential_friction::hertz::rate_dependent` advances the original
+`HertzFrictionPatch` against the captured finite body's complete contact mobility.
+The actual translating/spinning pressure field supplies each local slip speed;
+no centre-speed coefficient replaces it. The law's finite speed/coefficient and
+whole-wrench bounds remain visible in the native report.
+
+The original exact/curved pair owners share geometry preparation, one summed
+point/couple impulse update and independent per-body momentum, endpoint and
+energy audits. Preparation depends on geometry and inertia without constructing
+a substitute Coulomb law. Repeated curve trials start from the same momenta and
+retain the original normal load and radius. The whole-path normal-response gate
+uses the actual admitted wrench bound. Only total work is constrained to be
+dissipative: velocity weakening can transfer translational energy into spin.
+
+Four focused native regressions cover analytic affine sliding/spin stopping and
+travel, exact Coulomb reduction, reusable curve trials, spin gain with total
+energy loss, unrelated-body preservation, geometry/normal refusal, cancellation
+and deterministic retry. The four existing curved native and six exact native
+trajectory tests also pass. Poses, load, radius, geometry and inertia remain held;
+source/temperature history, normal evolution and external drive keep their
+separate owners. Spatial pressure and physical-time errors require separate
+refinement; noncoercive domains retain the constitutive refusal.
+
 # CONTRACT: fs-mbd
 
 ## Curved native Hertz motion and reusable coefficient trials

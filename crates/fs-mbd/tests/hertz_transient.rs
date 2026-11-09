@@ -1,4 +1,7 @@
 //! G1/G3: curved original Hertz traction, finite recoil and physical stopping.
+#[path = "hertz_transient/rate_dependent.rs"]
+mod rate_dependent;
+
 use fs_exec::CancelGate;
 use fs_mbd::tangential_friction::RigidContactBinding;
 use fs_mbd::tangential_friction::hertz::transient::*;

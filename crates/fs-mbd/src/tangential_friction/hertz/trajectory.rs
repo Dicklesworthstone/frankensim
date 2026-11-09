@@ -156,9 +156,37 @@ impl PreparedRigidHertzTrajectory {
         controls: RigidHertzControls,
         gate: &CancelGate,
     ) -> Result<Self, RigidHertzError> {
+        let parameters = contact.law.parameters();
+        Self::from_geometry(
+            bodies,
+            properties,
+            contact.binding,
+            contact.frame,
+            parameters.normal_force_n,
+            parameters.contact_radius_m,
+            dt_s,
+            controls,
+            gate,
+        )
+    }
+
+    /// The original native response depends on geometry and inertia, not the
+    /// sliding curve. Rate-dependent laws share this preparation without
+    /// constructing a substitute Coulomb law.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn from_geometry(
+        bodies: &[RigidBodyState],
+        properties: &[MassProperties],
+        binding: RigidContactBinding,
+        frame: TangentFrame,
+        normal_force_n: f64,
+        radius: f64,
+        dt_s: f64,
+        controls: RigidHertzControls,
+        gate: &CancelGate,
+    ) -> Result<Self, RigidHertzError> {
         poll(gate)?;
         controls.contact.validate()?;
-        let binding = contact.binding;
         if bodies.len() != properties.len()
             || bodies.len() > controls.maximum_bodies
             || binding.body_a >= bodies.len()
@@ -166,6 +194,10 @@ impl PreparedRigidHertzTrajectory {
             || binding.body_a == binding.body_b
             || !dt_s.is_finite()
             || dt_s <= 0.0
+            || !normal_force_n.is_finite()
+            || normal_force_n < 0.0
+            || !radius.is_finite()
+            || radius <= 0.0
             || [
                 controls.geometry_tolerance_m,
                 controls.velocity_tolerance_m_s,
@@ -185,9 +217,9 @@ impl PreparedRigidHertzTrajectory {
         let pair_properties = [properties[binding.body_a], properties[binding.body_b]];
         let arms = [binding.arm_a_body, binding.arm_b_body];
         let axes = [
-            vector(contact.frame.longitudinal()),
-            vector(contact.frame.lateral()),
-            vector(contact.frame.normal()),
+            vector(frame.longitudinal()),
+            vector(frame.lateral()),
+            vector(frame.normal()),
         ];
         let old = points(before, pair_properties, arms)?;
         if magnitude(old[0].point_world.sub(old[1].point_world)) > controls.geometry_tolerance_m {
@@ -195,7 +227,6 @@ impl PreparedRigidHertzTrajectory {
                 "original contact points do not coincide",
             ));
         }
-        let radius = contact.law.parameters().contact_radius_m;
         let mobility = response(before, pair_properties, arms, axes, radius)?;
         poll(gate)?;
         Ok(Self {
@@ -208,7 +239,7 @@ impl PreparedRigidHertzTrajectory {
             radius,
             dt_s,
             controls,
-            normal_force_n: contact.law.parameters().normal_force_n,
+            normal_force_n,
         })
     }
 
@@ -220,9 +251,15 @@ impl PreparedRigidHertzTrajectory {
 
     pub(super) fn admit_law(&self, law: &HertzWrenchContact) -> Result<(), RigidHertzError> {
         let parameters = law.parameters();
-        if parameters.normal_force_n != self.normal_force_n
-            || parameters.contact_radius_m != self.radius
-        {
+        self.admit_geometry(parameters.normal_force_n, parameters.contact_radius_m)
+    }
+
+    pub(super) fn admit_geometry(
+        &self,
+        normal_force_n: f64,
+        radius: f64,
+    ) -> Result<(), RigidHertzError> {
+        if normal_force_n != self.normal_force_n || radius != self.radius {
             return Err(RigidHertzError::Invalid(
                 "trajectory coefficient trials must preserve original normal load and radius",
             ));

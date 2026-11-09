@@ -9,6 +9,8 @@
 
 /// Simultaneous original Hertz patches with shared finite-body recoil.
 pub mod multiple;
+/// Original speed-dependent Hertz traction with finite-body recoil.
+pub mod rate_dependent;
 /// Exact invariant-direction slip/spin trajectories through finite arrest.
 pub mod trajectory;
 /// Bounded curved slip/spin trajectories with original finite-body recoil.
