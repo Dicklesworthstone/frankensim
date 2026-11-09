@@ -17,10 +17,12 @@ use super::{Cell3, CutElasticity3, ElasticityError3};
 
 mod adjoint;
 mod entropy;
+pub(in crate::elastic3) mod equilibrium;
 mod jacobian;
 mod sensitivity;
 mod stress;
 
+pub use equilibrium::{ThermoelasticEquilibrium3, ThermoelasticEquilibriumSettings3};
 pub use entropy::{
     PreparedThermoelasticEntropy3, ThermoelasticCellPotential3, ThermoelasticEntropyLimits3,
 };

@@ -1057,3 +1057,74 @@ sensitivity. The existing CutFEM thermal sensitivity test target adds full
 equilibrium finite differences for Cartesian displacement/B-bar and adaptive
 joint temperature, scale and external-force variations, plus admission and
 cancellation checks.
+
+## Native material candidates and accepted thermal equilibrium
+
+Cartesian and adaptive `refresh_material_field_with` admit dependent work before
+publishing a material change. A private guard lends the same complete owner as
+an immutable candidate after swapping fully staged constitutive caches. The
+same staging buffers retain the original cell matrices, material/kinematics,
+ghost coefficients and binding. Callback refusal, late cancellation or an
+unwinding callback/checkpoint panic restores those exact values and the original
+validity of prepared loads, mass, eigenstrain and prestress. Success returns an
+owned candidate payload with the accepted binding. No geometry or adaptive
+constraint map is copied; reference inventory and stiffness scales are fixed.
+
+This boundary covers one native operator and its returned payload. Arbitrary
+external callback mutations cannot be rolled back, and independently nested
+transactions do not establish a joint multi-operator commit. Coupled owners
+must retain proposed peer state and observations until their own acceptance.
+
+`refresh_thermoelastic_equilibrium` provides a concrete accepted state using
+that transaction. It assembles the complete native thermal, external and
+optional embedded-motion right-hand side, including strong-support entries,
+and uses the original controlled solver. A true relative residual gate and an
+independent absolute free-force gate must both pass. Native actual/projected
+TOTAL and ELASTIC strain domains are checked at bulk and selected support
+points even when geometric stiffness is not requested.
+
+The result owns the solved displacement, strong-support force/moment evidence,
+matching free-strain preparation, original-density consistent mass and optional
+signed prestress. Explicit DOF, point, solver, mass-entry and prestress-entry
+bounds govern the retained work/results. Bulk physical admission allocates no
+all-point response array. Embedded reactions keep their separate native
+observer; no numerical support term is silently treated as external work.
+This fixed-reference quasistatic operation does not advance a heat equation or
+assert nonlinear stability, continuum convergence or a complete energy balance.
+
+The `cutfem_material_candidate` and `cutfem_thermoelastic_equilibrium` fixtures
+exercise native/adaptive accepted solves, retained reference mass and hanging
+maps, downstream vibration, post-solve rejection, late cancellation, unwinding,
+and selected-support admission without prestress allocation.
+
+## Physical entropy and reversible thermoelastic heat coupling
+
+`prepare_thermoelastic_entropy` integrates the original native source potential
+and freezes its physical bulk displacement derivative, S_u = -integral(beta:B),
+where beta is the fixed-TOTAL-strain stress-temperature derivative. The source
+retains its original tensor or compensated isotropic modes, integrated oriented
+expansion and native strain domains. Original B-bar and adaptive reconstruction
+and transpose remain authoritative. Numerical ghost/support storage, boundary
+work, caloric/latent charts and heat transport are excluded.
+
+`PreparedThermoelasticEntropy3` exposes extensive per-cell free energy, entropy,
+internal energy and signed fixed-total-strain elastic heat capacity. The latter
+obeys C_epsilon = T S_T and must be combined with the original caloric owner
+exactly once; it is not independently forced positive. Forward and transpose
+displacement actions share cached coefficients. The reversible mechanical heat
+rate is -T S_u v, in watts per cell, on the right side of a fixed-strain-capacity
+temperature equation. It is reversible exchange, not an added damping law.
+
+Preparation is bounded by bulk points, 30 cached scalar slots per original cell,
+and original stencil work. Repeated actions allocate no memory, query no
+sources, and integrate no quadrature. Binding, coordinate space, exact scales,
+shape and finite input admission precede output writes. Physical displacement
+changes require new preparation; algebraic directions and cotangents have no
+physical strain ceiling. Mid-action cancellation or overflow can leave partial
+output that must be discarded.
+
+The entropy regressions in `cutfem_thermal_stress_sensitivity/entropy.rs`
+check physical finite differences, source capacity, Maxwell reciprocity,
+adaptive adjoint work, expansion cooling, stale-state admission and the
+difference between physical entropy and stabilized mechanical thermal work.
+This block supplies physical coupling data, not a thermal time integrator.
