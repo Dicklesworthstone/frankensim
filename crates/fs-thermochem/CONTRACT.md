@@ -351,24 +351,51 @@ steps; explicit phase storage retains small remaining donors. An unrepresentable
 asymptotic tail may round to zero but is never labeled a finite exhaustion event.
 G0/G1/G3 cases check independent exponential/event solutions, semigroup and
 extensive scaling, zero contact/time, seeded/unseeded growth, trace stocks and
-source/domain refusal. This model has no shrinking-particle geometry, evolving
-interfacial area, crystal population, reaction/speciation, or thermal evolution.
-Its conductance and experimental applicability remain explicit caller inputs.
+source/domain refusal. Its conductance and experimental applicability remain
+explicit caller inputs; reaction/speciation and thermal evolution remain
+separate owners.
+
+`with_particle_surface(reference_solid)` selects a fixed-number, self-similar
+particle population with constant density and film coefficient. The original
+conductance applies at that reference amount; the actual exposed area gives
+`G(s)=G_ref*(s/s_ref)^(2/3)`. The phase step integrates the closed finite-bath
+radius equation `r'=-G_ref*(r^3+V*c_sat-n_total)/(3*V*s_ref^(2/3))`, where
+`r=s^(1/3)`, with bounded allocation-free scalar work. Area is not frozen at
+the beginning of the step. At `V*c_sat=n_total` the exact algebraic tail replaces
+the fixed-area exponential. Supersaturation grows existing particles; a finite
+exhaustion event removes their area and no later step silently renucleates them.
+`SeededSurface` is refused for this geometry because an inert persistent seed
+requires a different area/volume law. `saturation_deficit_half_life` refuses
+active particle kinetics, which have no constant exponential half-life.
+
+The original reference stock survives every state copy and transport/thermal
+handoff. `conductance_at` exposes the actual area dependence. G0/G1/G3 particle
+tests compare independent radius-ODE and exhaustion-integral oracles, exact
+algebraic decay, split-step composition, amount/volume rescaling, trace phases,
+growth, no-nucleation and invalid geometry. The Hixson–Crowell self-similar
+premise is explicit: <https://doi.org/10.1021/ie50260a018>. Breakup, aggregation,
+polydispersity, changing film thickness and solute-volume displacement are not
+modeled. No performance or experimental calibration claim is inferred from
+the numeric reference coefficients.
 
 ## Coupled finite-rate dissolution and thermal evolution
 
 `solution::solubility::caloric::kinetics::SolubilityThermalKineticsV1` binds
 the original caloric model and the exact ordered kinetic laws. Actual dissolved
 and solid stocks, the original solvent volume, temperature and source owner
-travel together. Different conductances, growth policies or phase heat-capacity
-sources cannot silently replace the declared physical model.
+travel together. Different conductances, particle reference stocks, growth
+policies or phase heat-capacity sources cannot silently replace the declared
+physical model.
 
 Each stage evaluates the original analytical fixed-temperature kinetic law at
 the unknown endpoint temperature. One bounded scalar heat balance solves that
 temperature using the shared sensible-plus-dissolution enthalpy equation.
 On an active branch the temperature derivative is positive phase-weighted Cp
-plus `f*n_sat*delta_H(T)^2/(R*T^2)`, with `f=1-exp(-G*h/V)`; finite-stock and
-growth-surface branches preserve the same monotone energy closure.
+plus `w*n_sat*delta_H(T)^2/(R*T^2)`. Fixed area has `w=1-exp(-G*h/V)`;
+particle area instead uses the nonnegative sensitivity of final dissolved
+amount to saturation capacity. Its scalar sensitivity ODE has positive forcing
+`G(s)/V` and zero initial value. Finite-stock and growth-surface branches preserve
+the same monotone energy closure without pretending particle area stays fixed.
 
 A full-stage/two-half-stage comparison controls changing-temperature evolution
 and accepts the two-half-stage state. This is a first-order approximation to
@@ -386,8 +413,9 @@ work exhaustion. Independent cases cover closed-surface sensible heating,
 zero-enthalpy kinetics, both heat signs, finite-rate/equilibrium limits,
 first-order convergence against an independent ODE, unequal phase Cp, shared
 bath balances and transactional refusals. The model retains fixed solvent
-volume and declared conductance over each window; simultaneous spatial
-transport, evolving surface geometry and nucleation physics remain separate.
+volume, reference conductance and particle geometry law over each window;
+actual selected particle area evolves in each phase stage. Simultaneous spatial
+transport, evolving film coefficients and nucleation physics remain separate.
 
 ## Binary liquid miscibility and source-owned thermodynamic forces
 

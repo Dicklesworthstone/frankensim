@@ -133,6 +133,45 @@ fn conserved(
 }
 
 #[test]
+fn particle_geometry_survives_thermal_stages_without_resetting_its_reference() {
+    let fixed = model(
+        vec![component("A", 1000.0, 0.0, 30.0, 30.0)],
+        &[1e-3],
+        PrecipitationPolicyV1::ExistingSolidOnly,
+    );
+    let particles = SolubilityThermalKineticsV1::new(
+        fixed.caloric().clone(),
+        vec![
+            fixed.kinetics()[0]
+                .clone()
+                .with_particle_surface(Amount::new(0.2))
+                .unwrap(),
+        ],
+    )
+    .unwrap();
+    let initial = state(&particles, &[(1.0, 0.8)]);
+    let mut ctl = controls(10.0);
+    ctl.relative_tolerance = 1e-8;
+    let result = particles
+        .advance(&initial, Time::new(50.0), 0.0, ctl, || false)
+        .unwrap();
+    let expected = 0.2 / (1.0 + (2.0 / 3.0) * 50.0_f64).powf(1.5);
+    near(
+        result.final_state().phases()[0].solid().value(),
+        expected,
+        1e-12 * expected,
+    );
+    assert_eq!(result.final_state().temperature(), initial.temperature());
+    assert_eq!(result.enthalpy_change_j(), 0.0);
+    assert_eq!(result.root_iterations(), 0);
+    assert_eq!(
+        particles.kinetics()[0].particle_reference_solid(),
+        Some(Amount::new(0.2))
+    );
+    conserved(&initial, result.final_state());
+}
+
+#[test]
 fn zero_enthalpy_recovers_exact_isothermal_rate_and_positive_donor_tail() {
     let model = model(
         vec![component("A", 1000.0, 0.0, 30.0, 30.0)],

@@ -4,7 +4,11 @@
 //! endpoint temperature. A scalar first-law solve closes that temperature with
 //! the SAME solubility law, dissolution enthalpy and phase Cp sources. On an
 //! active branch its derivative is positive phase-weighted sensible capacity
-//! plus `f * n_sat * delta_H(T)^2 / (R*T^2)`, where `f = 1-exp(-G*h/V)`.
+//! plus `w * n_sat * delta_H(T)^2 / (R*T^2)`. Here `w` is the nonnegative
+//! sensitivity of final dissolved amount to saturation capacity. Fixed area
+//! gives `w = 1-exp(-G*h/V)`. For particle area, scalar comparison of the
+//! original kinetic ODE preserves `w >= 0`: its sensitivity has positive
+//! forcing `G(s)/V` and starts at zero. No frozen-area derivative is assumed.
 //! Exhaustion and the declared growth policy retain their finite-stock limits.
 //!
 //! The thermal integration is FIRST ORDER. Bounded full-step/two-half-step
@@ -13,10 +17,13 @@
 //! error bound. A frozen-stage exhaustion time is not a continuous thermal event
 //! time and is deliberately not exposed as one.
 //!
-//! Solvent volume, conductance G=kA and growth policy stay fixed over a window.
+//! Solvent volume, reference conductance and growth policy stay fixed over a window.
+//! Selected particle area evolves through each original isothermal phase solve;
+//! its original reference stock is never reset at a temperature trial.
 //! Specified heat is delivered uniformly during that window. There is no
-//! simultaneous transport, variable surface area, nucleation or population
-//! balance. The inherited independent ideal-solute assumptions still apply.
+//! simultaneous transport, evolving film coefficient, nucleation, fragmentation
+//! or population balance. The inherited independent ideal-solute assumptions
+//! still apply.
 
 use super::{
     MAX_SOLUBILITY_CALORIC_COMPONENTS_V1, PhaseIncrement, SolubilityCaloricErrorV1,

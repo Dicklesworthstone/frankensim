@@ -8,18 +8,26 @@
 //! `V*c_sat-n_d` halves during each interval of that length while exchange
 //! remains active. This is not the time to dissolve half the initial solid.
 //! If it exhausts the finite solid stock, the exact exhaustion event ends
-//! dissolution. This is a fixed-area, well-mixed film approximation, not a
-//! shrinking-particle, nucleation, or crystal-population model.
+//! dissolution. The default is a fixed-area, well-mixed film approximation.
+//! [`SolubilityKineticsV1::with_particle_surface`] instead retains a fixed
+//! population of self-similar particles: `G(s) = G_ref (s/s_ref)^(2/3)`.
+//! Its finite-bath trajectory evolves the area throughout the step, including
+//! crystal growth and disappearance, rather than freezing the initial area.
 //!
 //! Precipitation requires existing solid or an explicitly declared persistent
 //! growth substrate. No component moles are supplied by that substrate. This
 //! scalar law does not evolve temperature or infer heat transfer. The
 //! fixed-area dissolution premise is the Noyes--Whitney model:
 //! <https://doi.org/10.1021/ja02086a003>.
+//! The self-similar surface premise is the Hixson--Crowell model:
+//! <https://doi.org/10.1021/ie50260a018>. Neither mode supplies nucleation,
+//! fragmentation, aggregation, a size distribution, or evolving film thickness.
+
+mod particles;
 
 use super::{IdealSolubilityV1, SolubilityErrorV1, SolubilityPartitionV1};
 use fs_math::decay::{attenuate, decayed_fraction};
-use fs_math::det::{expm1, ln};
+use fs_math::det::{exp, expm1, ln, pow};
 use fs_qty::{Amount, Temperature, Time, Volume, VolumetricFlowRate};
 
 /// The caller, not supersaturation alone, supplies a surface for crystal growth.
@@ -111,13 +119,16 @@ impl SolubilityKineticStateV1 {
     }
 }
 
-/// Original solubility plus an explicit fixed-area transfer conductance [m³/s].
+/// Original solubility plus an explicit transfer conductance [m³/s].
+/// The default holds area fixed; an optional original particle stock defines
+/// the reference area for self-similar dissolution and growth.
 /// Numeric conductance does not establish experimental material applicability.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SolubilityKineticsV1 {
     law: IdealSolubilityV1,
     conductance: VolumetricFlowRate,
     precipitation: PrecipitationPolicyV1,
+    particle_reference_solid: Option<Amount>,
 }
 impl SolubilityKineticsV1 {
     pub fn new(
@@ -132,17 +143,86 @@ impl SolubilityKineticsV1 {
             law,
             conductance,
             precipitation,
+            particle_reference_solid: None,
         })
     }
 
     pub const fn law(&self) -> &IdealSolubilityV1 {
         &self.law
     }
+    /// Declared fixed-area conductance, or the reference conductance at
+    /// [`Self::particle_reference_solid`] when particle evolution is selected.
     pub const fn conductance(&self) -> VolumetricFlowRate {
         self.conductance
     }
     pub const fn precipitation_policy(&self) -> PrecipitationPolicyV1 {
         self.precipitation
+    }
+
+    /// Select a fixed number of equally sized, self-similar particles with
+    /// constant density and film mass-transfer coefficient. The declared
+    /// conductance applies at `reference_solid`; actual conductance scales as
+    /// `(solid/reference_solid)^(2/3)`. This original reference is retained
+    /// across transport, temperature changes, cloning and split time steps.
+    ///
+    /// Only `ExistingSolidOnly` is admitted: when all particles disappear,
+    /// their area is zero and they cannot regrow without a new nucleation law.
+    /// A persistent inert seed has a different area/volume relation and cannot
+    /// be represented by inventing additional component moles here. Solute
+    /// volume remains negligible in the original incompressible solvent model.
+    pub fn with_particle_surface(
+        mut self,
+        reference_solid: Amount,
+    ) -> Result<Self, SolubilityErrorV1> {
+        if !reference_solid.value().is_finite()
+            || reference_solid.value() <= 0.0
+            || self.precipitation != PrecipitationPolicyV1::ExistingSolidOnly
+        {
+            return Err(SolubilityErrorV1::Invalid(
+                "particle surface requires a positive reference solid and existing-solid growth",
+            ));
+        }
+        self.particle_reference_solid = Some(reference_solid);
+        Ok(self)
+    }
+
+    /// Original stock at which the declared particle conductance applies.
+    /// `None` denotes the unchanged fixed-area model.
+    pub const fn particle_reference_solid(&self) -> Option<Amount> {
+        self.particle_reference_solid
+    }
+
+    /// Instantaneous conductance at the actual solid stock, without allocation.
+    /// Zero particle stock has zero exposed area. For fixed-area models this
+    /// returns the original conductance; the growth policy is applied by
+    /// [`Self::advance`], not by this coefficient query.
+    pub fn conductance_at(&self, solid: Amount) -> Result<VolumetricFlowRate, SolubilityErrorV1> {
+        if !nonnegative(solid.value()) {
+            return Err(SolubilityErrorV1::Invalid("finite nonnegative solid stock"));
+        }
+        let Some(reference) = self.particle_reference_solid else {
+            return Ok(self.conductance);
+        };
+        let conductance = self.conductance.value();
+        if solid.value() == 0.0 || conductance == 0.0 {
+            return Ok(VolumetricFlowRate::new(0.0));
+        }
+        if solid == reference {
+            return Ok(self.conductance);
+        }
+        let ratio = solid.value() / reference.value();
+        let direct = conductance * pow(ratio, 2.0 / 3.0);
+        let value = if ratio.is_normal() && direct.is_normal() {
+            direct
+        } else {
+            exp(ln(conductance) + (2.0 / 3.0) * (ln(solid.value()) - ln(reference.value())))
+        };
+        if !value.is_finite() || value <= 0.0 {
+            return Err(SolubilityErrorV1::Unrepresentable(
+                "positive particle conductance",
+            ));
+        }
+        Ok(VolumetricFlowRate::new(value))
     }
 
     /// Time for an active saturation deficit or supersaturation to halve [s].
@@ -166,6 +246,11 @@ impl SolubilityKineticsV1 {
         if self.conductance.value() == 0.0 {
             return Ok(None);
         }
+        if self.particle_reference_solid.is_some() {
+            return Err(SolubilityErrorV1::Invalid(
+                "evolving particle area has no constant saturation-deficit half-life",
+            ));
+        }
         let half_life = product_ratio(volume, core::f64::consts::LN_2, self.conductance.value())?;
         if !half_life.is_finite() {
             return Err(SolubilityErrorV1::Unrepresentable(
@@ -175,7 +260,11 @@ impl SolubilityKineticsV1 {
         Ok(Some(Time::new(half_life)))
     }
 
-    /// Allocation-free analytical update at fixed T, V and kA. The total is
+    /// Allocation-free isothermal update at fixed T and V. Fixed-area kinetics
+    /// use the exact exponential; particle kinetics solve the separable radius
+    /// trajectory with bounded scalar work. The original reference area and
+    /// film coefficient remain fixed, while the actual particle area evolves.
+    /// The total is
     /// unchanged, no solid crosses an interface, and refusal changes no input.
     /// Every nonlinear source evaluation remains owned by the original law.
     pub fn advance(
@@ -223,6 +312,16 @@ impl SolubilityKineticsV1 {
             || (driving > 0.0 && solid == 0.0)
         {
             return Ok(result);
+        }
+        if let Some(reference_solid) = self.particle_reference_solid {
+            return particles::advance(
+                self,
+                reference_solid,
+                solvent_volume,
+                initial,
+                duration,
+                result,
+            );
         }
         let exponent = product_ratio(
             self.conductance.value(),
@@ -373,3 +472,6 @@ fn product_ratio(a: f64, b: f64, c: f64) -> Result<f64, SolubilityErrorV1> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod particle_tests;
