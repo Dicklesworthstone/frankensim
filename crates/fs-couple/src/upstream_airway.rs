@@ -30,6 +30,14 @@
 //! `R_dc = sum 8 mu L / (pi a^4 count)` (a wall with a stiffness admits nothing at DC), so a steady flow reads `p = P_s
 //! - R_dc U_v`.
 //!
+//! Reflection, input impedance and source transfer use the native bounded
+//! [`fs_duct::compose::TwoPort`] wave blocks and Redheffer composition. The
+//! source boundary is `a_R + b_R = P_s`, so `R = S11 - S12 S21/(1+S22)` and
+//! `G = S12/(1+S22)`. No growing exponential or input-impedance pole enters
+//! those wave observables. [`AirwayChain::chain_matrix`] is an explicit ABCD
+//! diagnostic only and may refuse when a strongly attenuating line's matrix
+//! cannot be represented, even though its reflected waves remain finite.
+//!
 //! **Time domain.** [`UpstreamAirway::realize`] makes both causal FIRs on the sample clock. `R` goes through the crate's
 //! characteristic-line ladder, which sizes the taps until the tail energy and the first impedance peaks converge and
 //! refuses a converged line that is not passive on the 4x-oversampled grid; its DC bin is the exact `(R_dc - Z_s) / (R_dc
@@ -66,7 +74,8 @@ use crate::driving_point::{
     DrivingPointError, LineDc, LineLadder, LineRealization, PoleState, realize_characteristic_response,
     realize_reflectance_ir_from_positive_spectrum,
 };
-use fs_duct::{LossModel, segment_wave};
+use fs_duct::{LossModel, SegmentWave, segment_wave};
+use fs_duct::compose::{ComposeOptions, TwoPort, compose_chain, compose_chain_reflection};
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
 use fs_math::det;
@@ -269,17 +278,9 @@ impl AirwayChain {
     }
 
     fn telegraph_chain(&self, gas: &GasState, omega: f64) -> Result<[[C64; 2]; 2], DrivingPointError> {
-        let minus_i = C64::new(0.0, -1.0);
         let mut m = [[C64::ONE, C64::ZERO], [C64::ZERO, C64::ONE]];
         for s in &self.sections {
-            let wave = segment_wave(gas, s.radius_m, omega, self.loss)?;
-            let z_tube = (minus_i * wave.wavenumber * wave.characteristic_impedance).conj();
-            let mut y_tube = (minus_i * wave.wavenumber * wave.characteristic_impedance.recip()).conj();
-            if let Some(pin) = &s.wall {
-                let y_phs = wall_admittance_per_metre(pin, s.radius_m, omega)
-                    .map_err(|_| DrivingPointError::Invalid { what: "airway wall pin and frequency" })?;
-                y_tube = y_tube + y_phs.conj();
-            }
+            let (z_tube, y_tube, _) = self.tube_telegraph(s, gas, omega)?;
             let n = f64::from(s.count);
             let (z, y) = (z_tube.scale(1.0 / n), y_tube.scale(n));
             // `Z = z / gamma` keeps the matrix independent of the root's sign: both odd entries are even in gamma.
@@ -294,6 +295,49 @@ impl AirwayChain {
         Ok(m)
     }
 
+    // One actual tube's constitutive law, shared by the bounded wave path and
+    // the diagnostic matrix. Tube count changes volume flow, never its radius
+    // or the viscothermal and locally reacting wall physics.
+    fn tube_telegraph(&self, section: &AirwaySection, gas: &GasState, omega: f64)
+        -> Result<(C64, C64, f64), DrivingPointError>
+    {
+        let wave = segment_wave(gas, section.radius_m, omega, self.loss)?;
+        let minus_i = C64::new(0.0, -1.0);
+        let z = (minus_i * wave.wavenumber * wave.characteristic_impedance).conj();
+        let mut y = (minus_i * wave.wavenumber * wave.characteristic_impedance.recip()).conj();
+        if let Some(pin) = &section.wall {
+            let wall = wall_admittance_per_metre(pin, section.radius_m, omega)
+                .map_err(|_| DrivingPointError::Invalid { what: "airway wall pin and frequency" })?;
+            y = y + wall.conj();
+        }
+        Ok((z, y, wave.shear_number))
+    }
+
+    fn scattering_chain(&self, gas: &GasState, omega: f64) -> Result<TwoPort, DrivingPointError> {
+        let reference = self.port_impedance(gas);
+        let mut total = TwoPort::through(reference)?;
+        for section in &self.sections {
+            let (z, y, shear_number) = self.tube_telegraph(section, gas, omega)?;
+            let gamma = (z * y).sqrt();
+            let tube_impedance = (z / gamma).conj();
+            let tube_area = core::f64::consts::PI * section.radius_m * section.radius_m;
+            let count = f64::from(section.count);
+            // sqrt gives Re(gamma)>=0; conjugating the telegraph convention
+            // gives exp(i k x), k=Im(gamma)+i Re(gamma), with bounded decay.
+            let wave = SegmentWave {
+                wavenumber: C64::new(gamma.im, gamma.re),
+                characteristic_impedance: tube_impedance.scale(1.0 / count),
+                specific_impedance: tube_impedance.scale(tube_area),
+                shear_number,
+            };
+            let block = TwoPort::from_uniform_wave(
+                &wave, tube_area * count, section.length_m, reference,
+            )?;
+            total = total.star(block, ComposeOptions::default().maximum_condition)?.0;
+        }
+        Ok(total)
+    }
+
     /// The chain matrix `M` from the valve to the far end at `omega` [rad/s] (module doc), `e^{-iwt}` convention.
     ///
     /// # Errors
@@ -306,35 +350,39 @@ impl AirwayChain {
     /// `Z_in = M12 / M22` [Pa s/m^3], the airway seen from the valve with the far end held at a fixed pressure.
     ///
     /// # Errors
-    /// As [`Self::chain_matrix`], or a lossless pole (`M22 = 0`).
+    /// A gas-wave/wall or native scattering-conditioning refusal, or a lossless
+    /// input-impedance pole. ABCD growth alone does not refuse this observable.
     pub fn input_impedance(&self, gas: &GasState, omega: f64) -> Result<C64, DrivingPointError> {
-        let m = self.chain_matrix(gas, omega)?;
-        let z = m[0][1] / m[1][1];
-        if !(z.re.is_finite() && z.im.is_finite()) {
-            return Err(DrivingPointError::Invalid { what: "airway input impedance is unrepresentable at a lossless pole" });
-        }
-        Ok(z)
+        let scattering = self.scattering_chain(gas, omega)?;
+        Ok(compose_chain(&[scattering], Some(C64::ZERO), ComposeOptions::default())?.z_in)
     }
 
     /// `R = (M12 - Z_s M22) / (M12 + Z_s M22)`, which is `(Z_in - Z_s) / (Z_in + Z_s)` without forming `Z_in`.
     ///
     /// # Errors
-    /// As [`Self::chain_matrix`].
+    /// A gas-wave/wall or native scattering-conditioning refusal. Neither
+    /// ABCD growth nor an input-impedance pole refuses a finite reflection.
     pub fn reflectance(&self, gas: &GasState, omega: f64) -> Result<C64, DrivingPointError> {
-        let m = self.chain_matrix(gas, omega)?;
-        let zs = self.port_impedance(gas);
-        let scaled = m[1][1].scale(zs);
-        Ok((m[0][1] - scaled) / (m[0][1] + scaled))
+        let scattering = self.scattering_chain(gas, omega)?;
+        Ok(compose_chain_reflection(&[scattering], Some(C64::ZERO), ComposeOptions::default())?.reflection)
     }
 
     /// `G = Z_s / (Z_s M22 + M12)`, the wave the valve receives per unit source pressure.
     ///
     /// # Errors
-    /// As [`Self::chain_matrix`].
+    /// A gas-wave/wall or native scattering-conditioning refusal, or an
+    /// unrepresentable source transfer. An opaque line transmits zero.
     pub fn source_transfer(&self, gas: &GasState, omega: f64) -> Result<C64, DrivingPointError> {
-        let m = self.chain_matrix(gas, omega)?;
-        let zs = self.port_impedance(gas);
-        Ok(C64::from_re(zs) / (m[1][1].scale(zs) + m[0][1]))
+        let scattering = self.scattering_chain(gas, omega)?.scattering;
+        let denominator = C64::ONE + scattering[3];
+        let condition = (1.0 + scattering[3].abs()) / denominator.abs();
+        let gain = scattering[1] / denominator;
+        if !condition.is_finite() || condition > ComposeOptions::default().maximum_condition
+            || !gain.re.is_finite() || !gain.im.is_finite()
+        {
+            return Err(fs_duct::DuctError::Singular.into());
+        }
+        Ok(gain)
     }
 }
 
@@ -726,6 +774,91 @@ mod tests {
 
     fn rel(a: C64, b: C64) -> f64 {
         (a - b).abs() / b.abs().max(1.0e-300)
+    }
+
+    /// G1: wave observables preserve the original independently formed ABCD
+    /// law where it is representable, including walls and parallel branches.
+    #[test]
+    fn ua_008_bounded_waves_match_the_physical_source_boundary() {
+        let gas = air();
+        for loss in [LossModel::Lossless, LossModel::Bessel] {
+            for lining in [None, Some(wall())] {
+                let chain = AirwayChain::new(vec![
+                    tube(0.009, 0.12, 1, lining),
+                    tube(0.004, 0.07, 3, lining),
+                    tube(0.002, 0.03, 7, lining),
+                ], loss).unwrap();
+                let zs = C64::from_re(chain.port_impedance(&gas));
+                for hz in [0.01, 51.0, 713.0, 2901.0, 13007.0] {
+                    let omega = core::f64::consts::TAU * hz;
+                    let m = chain.chain_matrix(&gas, omega).unwrap();
+                    let denominator = m[0][1] + zs * m[1][1];
+                    let reflection = (m[0][1] - zs * m[1][1]) / denominator;
+                    let source = zs / denominator;
+                    assert!((chain.reflectance(&gas, omega).unwrap() - reflection).abs() < 2e-11);
+                    assert!(rel(chain.source_transfer(&gas, omega).unwrap(), source) < 2e-10);
+                    assert!(rel(chain.input_impedance(&gas, omega).unwrap(), m[0][1] / m[1][1]) < 2e-9);
+                }
+            }
+        }
+    }
+
+    /// G1/G3: an opaque real duct still reflects from its entrance impedance.
+    /// Growth of the inverse transfer matrix cannot destroy that finite field.
+    #[test]
+    fn ua_009_opaque_airways_retain_reflection_and_attenuated_source() {
+        let gas = air();
+        let radius = 0.0005;
+        let count = 8;
+        let omega = core::f64::consts::TAU * 2000.0;
+        let wave = segment_wave(&gas, radius, omega, LossModel::Bessel).unwrap();
+        let z = wave.characteristic_impedance.scale(1.0 / f64::from(count));
+        for attenuation in [40.0, 350.0, 900.0] {
+            let length = attenuation / wave.wavenumber.im;
+            let chain = AirwayChain::new(vec![tube(radius, length, count, None)], LossModel::Bessel).unwrap();
+            let zs = C64::from_re(chain.port_impedance(&gas));
+            let entrance = (z - zs) / (z + zs);
+            let phase = wave.wavenumber.re * length;
+            let travel = C64::new(phase.cos(), phase.sin()).scale((-attenuation).exp());
+            // Round-trip corrections are below 2e-35 on this declared range.
+            let source = zs.scale(2.0) * travel / (zs + z);
+            assert!((chain.reflectance(&gas, omega).unwrap() - entrance).abs() < 2e-12);
+            let got_source = chain.source_transfer(&gas, omega).unwrap();
+            assert!(rel(got_source, source) < 2e-10, "source {got_source:?}, expected {source:?}");
+            assert!(rel(chain.input_impedance(&gas, omega).unwrap(), z) < 2e-12);
+            let split = AirwayChain::new(vec![tube(radius, length / 16.0, count, None); 16], LossModel::Bessel).unwrap();
+            assert!((split.reflectance(&gas, omega).unwrap() - entrance).abs() < 2e-12);
+            assert!(rel(split.source_transfer(&gas, omega).unwrap(), source) < 2e-10);
+            if attenuation > 800.0 {
+                assert!(chain.chain_matrix(&gas, omega).is_err());
+                assert_eq!(got_source, C64::ZERO);
+            }
+        }
+    }
+
+    /// G1: an ideal pressure release returns the negative round-trip wave;
+    /// the far source travels once. At a quarter wave the input Z has a pole,
+    /// while both physically observable traveling waves stay finite.
+    #[test]
+    fn ua_010_lossless_reflection_phase_survives_an_impedance_pole() {
+        let gas = air();
+        let length = 0.13;
+        let chain = AirwayChain::new(vec![tube(0.007, length, 3, None)], LossModel::Lossless).unwrap();
+        for phase in [0.1, core::f64::consts::FRAC_PI_2, core::f64::consts::PI, 5.0] {
+            let omega = phase * gas.sound_speed / length;
+            let expected_r = -C64::new((2.0 * phase).cos(), (2.0 * phase).sin());
+            let expected_g = C64::new(phase.cos(), phase.sin());
+            assert!((chain.reflectance(&gas, omega).unwrap() - expected_r).abs() < 2e-14);
+            assert!((chain.source_transfer(&gas, omega).unwrap() - expected_g).abs() < 2e-14);
+        }
+        let quarter_wave = core::f64::consts::FRAC_PI_2 * gas.sound_speed / length;
+        assert!(chain.input_impedance(&gas, quarter_wave).is_err());
+        let mut inconsistent = gas;
+        inconsistent.sound_speed *= 1.01;
+        assert!(chain.reflectance(&inconsistent, quarter_wave).is_err());
+        assert!(chain.source_transfer(&inconsistent, quarter_wave).is_err());
+        assert!(chain.reflectance(&gas, f64::NAN).is_err());
+        assert!(chain.source_transfer(&gas, 0.0).is_err());
     }
 
     /// The DTFT `sum h_n e^{+i w n dt}` of a realized FIR (`e^{-iwt}` convention).
