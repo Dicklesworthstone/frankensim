@@ -97,7 +97,7 @@ impl PreparedQuadrupoleObserver {
                 let value = C64::new(peak.re, peak.im);
                 if value != C64::ZERO {
                     for (row, sum) in transfer.field.iter().zip(&mut *sums) {
-                        sum.add(row[entry] * value)?;
+                        sum.add_product(row[entry], value)?;
                     }
                 }
             }

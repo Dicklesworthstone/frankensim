@@ -582,7 +582,7 @@ impl Transfer {
             // Pure monopoles and dipoles need not multiply the absent mechanism.
             if value != C64::ZERO {
                 for (row, sum) in self.field.iter().zip(sums.iter_mut()) {
-                    sum.add(row[component] * value)?;
+                    sum.add_product(row[component], value)?;
                 }
             }
         }

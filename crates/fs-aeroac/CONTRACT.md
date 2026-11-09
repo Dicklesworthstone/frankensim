@@ -545,6 +545,15 @@ material scaling and domain/representability refusals.
   mechanisms sum coherently before signed active/reactive intensity is formed.
   Sixteen cached complex coefficients per source give allocation-free O(N)
   application, with explicit preparation budget and double-double reductions.
+  The source contractions preserve both scalar-product and summation residuals
+  through the coherent reduction, then round the combined physical field.
+  This also applies to the native 2D dipole, convected monopole, volume-stress
+  and recorded-source paths; a nearly cancelling pair must reproduce its small
+  residual source, not a rounded-product noise floor. Signed statistical cross
+  moments preserve their product residuals across independent factors. These
+  arithmetic guarantees do not improve the cached Green kernel's geometric or
+  physical-model accuracy, and no allocation or transcendental is added to the
+  O(source count) application.
   `CompactForceObserver::prepare_harmonic` preserves the same original source
   and observer coordinates, material and retarded phase. Force pressure does
   not acquire an extra density factor; monopole pressure does depend on density.

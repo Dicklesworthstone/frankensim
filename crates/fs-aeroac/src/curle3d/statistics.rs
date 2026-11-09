@@ -53,7 +53,7 @@ impl StatisticsSum {
         let mut entry = 0;
         for i in 0..4 {
             for j in i + 1..4 {
-                self.cross[entry].add(field[i].scale(0.5) * field[j].conj())?;
+                self.cross[entry].add_product(field[i].scale(0.5), field[j].conj())?;
                 entry += 1;
             }
         }
@@ -98,6 +98,27 @@ impl ComplexSum {
         Ok(())
     }
 
+    /// Preserve the product's low parts until all coherent sources have been
+    /// combined. Summing already-rounded products loses a weak residual even
+    /// when the subsequent addition itself uses double-double arithmetic.
+    pub(super) fn add_product(&mut self, left: C64, right: C64) -> Result<(), AeroacError> {
+        let product = |a, b| {
+            let (hi, lo) = fs_math::eft::two_prod(a, b);
+            Dd { hi, lo }
+        };
+        let real = product(left.re, right.re) - product(left.im, right.im);
+        let imaginary = product(left.re, right.im) + product(left.im, right.re);
+        if [real.hi, real.lo, imaginary.hi, imaginary.lo]
+            .iter()
+            .any(|value| !value.is_finite())
+        {
+            return Err(nonfinite("compact source product"));
+        }
+        self.re = self.re + real;
+        self.im = self.im + imaginary;
+        Ok(())
+    }
+
     pub(super) fn value(self) -> C64 {
         C64::new(self.re.to_f64(), self.im.to_f64())
     }
@@ -113,4 +134,33 @@ pub(super) fn invalid(what: &'static str) -> AeroacError {
 
 pub(super) fn nonfinite(what: &'static str) -> AeroacError {
     AeroacError::NonFinite { what }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// G0/G3: independent factors may transport nearly opposing signed work.
+    /// Peak-phasor averaging must keep the small negative flux and its 1/2.
+    #[test]
+    fn independent_factors_retain_weak_signed_intensity() {
+        let epsilon = 2.0_f64.powi(-27);
+        let mut moments = StatisticsSum::default();
+        moments
+            .add([
+                C64::from_re(1.0 + epsilon),
+                C64::from_re(1.0 - epsilon),
+                C64::ZERO,
+                C64::ZERO,
+            ])
+            .unwrap();
+        moments
+            .add([C64::ONE, -C64::ONE, C64::ZERO, C64::ZERO])
+            .unwrap();
+        let result = moments.finish("algebraic field factors").unwrap();
+        assert_eq!(result.active_intensity_w_m2, [-0.5 * epsilon * epsilon, 0.0, 0.0]);
+        assert_eq!(result.reactive_intensity_w_m2, [0.0; 3]);
+        assert!(result.mean_square_pressure_pa2 > 0.0);
+        assert!(result.velocity_covariance_m2_s2[0][0].re > 0.0);
+    }
 }

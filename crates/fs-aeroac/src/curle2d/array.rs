@@ -424,9 +424,9 @@ impl Transfer {
             if !finite(value) {
                 return Err(nonfinite("dipole source force"));
             }
-            sums[0].add(self.pressure[axis] * value)?;
+            sums[0].add_product(self.pressure[axis], value)?;
             for (velocity_axis, row) in self.velocity.iter().enumerate() {
-                sums[velocity_axis + 1].add(row[axis] * value)?;
+                sums[velocity_axis + 1].add_product(row[axis], value)?;
             }
         }
         Ok(())
@@ -452,9 +452,9 @@ impl StatisticsSum {
             }
             *sum = *sum + Dd::from_f64(square);
         }
-        self.cross[0].add(field[0].scale(0.5) * field[1].conj())?;
-        self.cross[1].add(field[0].scale(0.5) * field[2].conj())?;
-        self.cross[2].add(field[1].scale(0.5) * field[2].conj())?;
+        self.cross[0].add_product(field[0].scale(0.5), field[1].conj())?;
+        self.cross[1].add_product(field[0].scale(0.5), field[2].conj())?;
+        self.cross[2].add_product(field[1].scale(0.5), field[2].conj())?;
         Ok(())
     }
 
@@ -486,12 +486,23 @@ struct ComplexSum {
 }
 
 impl ComplexSum {
-    fn add(&mut self, value: C64) -> Result<(), AeroacError> {
-        if !finite(value) {
-            return Err(nonfinite("dipole source contribution"));
+    // The coherent contraction needs the product residual as well as the sum
+    // residual; rounding each propagated source first corrupts deep nulls.
+    fn add_product(&mut self, left: C64, right: C64) -> Result<(), AeroacError> {
+        let product = |a, b| {
+            let (hi, lo) = fs_math::eft::two_prod(a, b);
+            Dd { hi, lo }
+        };
+        let real = product(left.re, right.re) - product(left.im, right.im);
+        let imaginary = product(left.re, right.im) + product(left.im, right.re);
+        if [real.hi, real.lo, imaginary.hi, imaginary.lo]
+            .iter()
+            .any(|value| !value.is_finite())
+        {
+            return Err(nonfinite("dipole source product"));
         }
-        self.re = self.re + Dd::from_f64(value.re);
-        self.im = self.im + Dd::from_f64(value.im);
+        self.re = self.re + real;
+        self.im = self.im + imaginary;
         Ok(())
     }
     fn value(self) -> C64 {

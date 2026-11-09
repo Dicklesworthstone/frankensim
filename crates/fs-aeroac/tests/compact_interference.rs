@@ -2,7 +2,9 @@
 
 use fs_aeroac::curle3d::{
     CoherenceBudget, CompactForceObserver, CompactSourcePhasor, PreparedCompactSourceObserver,
+    ConvectedMonopoleLimits, PreparedConvectedMonopoleObserver,
 };
+use fs_aeroac::curle3d::quadrupole::{PreparedQuadrupoleObserver, QuadrupolePhasor};
 use fs_aeroac::monopole::{CompactMonopoleObserver, MonopoleLimits};
 use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_material::gas::{GasSpec, GasState};
@@ -90,6 +92,158 @@ fn reference_pressure(
                         ));
     }
     result
+}
+
+/// G3: two colocated physical sources are exactly their residual source. The
+/// residual is one ulp below either drive, so rounding each propagated source
+/// before summation produces an order-one error in the weak field.
+#[test]
+fn nearly_cancelling_source_products_preserve_pressure_velocity_and_coherence() {
+    let position = [0.1, -0.2, 0.05];
+    let receiver = [1.3, 0.7, -0.6];
+    let single = observe(1.2, 343.0, 317.0, receiver, &[position]);
+    let pair = observe(1.2, 343.0, 317.0, receiver, &[position; 2]);
+    let residual = f64::EPSILON;
+    let near_null = -1.0 + residual;
+    for component in 0..4 {
+        for amplitude in [C64::ONE, C64::new(0.0, 1.0), C64::new(1.0, 0.5)] {
+            let source = |scale| {
+                let mut value = CompactSourcePhasor::default();
+                if component == 0 {
+                    value.volume_flow_m3_s = amplitude.scale(scale);
+                } else {
+                    value.force_on_fluid_n[component - 1] = amplitude.scale(scale);
+                }
+                value
+            };
+            let expected = single.evaluate(&[source(residual)]).unwrap();
+            let drives = [source(1.0), source(near_null)];
+            let actual = pair.evaluate(&drives).unwrap();
+            for (value, reference) in core::iter::once(actual.pressure_pa)
+                .chain(actual.particle_velocity_m_s)
+                .zip(core::iter::once(expected.pressure_pa).chain(expected.particle_velocity_m_s))
+            {
+                assert!(
+                    (value - reference).abs() <= 3e-15 * reference.abs(),
+                    "component={component}, value={value:?}, reference={reference:?}"
+                );
+            }
+            let stats = pair
+                .evaluate_coherence_modes(
+                    &[&drives],
+                    CoherenceBudget {
+                        max_modes: 1,
+                        max_source_mode_pairs: 2,
+                    },
+                )
+                .unwrap();
+            let expected_power = 0.5 * expected.pressure_pa.norm_sq();
+            assert!(
+                (stats.mean_square_pressure_pa2 - expected_power).abs()
+                    <= 8e-15 * expected_power
+            );
+            for axis in 0..3 {
+                let scale = 0.5 * expected.pressure_pa.abs()
+                    * expected.particle_velocity_m_s[axis].abs();
+                assert!(
+                    (stats.active_intensity_w_m2[axis] - expected.active_intensity_w_m2[axis])
+                        .abs()
+                        <= 8e-15 * scale
+                );
+                assert!(
+                    (stats.reactive_intensity_w_m2[axis] - expected.reactive_intensity_w_m2[axis])
+                        .abs()
+                        <= 8e-15 * scale
+                );
+            }
+        }
+    }
+}
+
+/// G3: every original tensor coordinate retains its product's low component
+/// through destructive source interference, not only an extra weak source.
+#[test]
+fn nearly_cancelling_products_recover_each_residual_stress_coordinate() {
+    let observer = |positions: &[[f64; 3]]| {
+        PreparedQuadrupoleObserver::new(
+            medium(1.2, 343.0),
+            127.0,
+            [1.3, -0.8, 0.6],
+            positions,
+            positions.len(),
+        )
+        .unwrap()
+    };
+    let one = observer(&[[0.0; 3]]);
+    let pair = observer(&[[0.0; 3]; 2]);
+    for component in 0..6 {
+        let source = |scale| {
+            let mut value = QuadrupolePhasor::default();
+            value.stress_moment_n_m[component] = C64::new(scale, 0.5 * scale);
+            value
+        };
+        let expected = one.evaluate(&[source(f64::EPSILON)]).unwrap();
+        let actual = pair
+            .evaluate(&[source(1.0), source(-1.0 + f64::EPSILON)])
+            .unwrap();
+        for (value, reference) in core::iter::once(actual.pressure_pa)
+            .chain(actual.particle_velocity_m_s)
+            .zip(core::iter::once(expected.pressure_pa).chain(expected.particle_velocity_m_s))
+        {
+            assert!(
+                (value - reference).abs() <= 3e-15 * reference.abs(),
+                "component={component}, value={value:?}, reference={reference:?}"
+            );
+        }
+    }
+}
+
+/// G3: subsonic convection changes propagation, not source linearity. The
+/// remaining field of almost opposite drives includes all velocity components.
+#[test]
+fn nearly_cancelling_products_recover_the_convected_residual_source() {
+    let position = [1.4, -0.7, 0.9];
+    for flow in [[0.0; 3], [100.0, -53.0, 29.0]] {
+        let observer = |positions: &[[f64; 3]]| {
+            PreparedConvectedMonopoleObserver::new(
+                medium(1.4, 320.0),
+                flow,
+                83.0,
+                position,
+                positions,
+                positions.len(),
+                ConvectedMonopoleLimits {
+                    maximum_mach: 0.95,
+                    minimum_distance_m: 1e-5,
+                },
+            )
+            .unwrap()
+        };
+        let one = observer(&[[0.0; 3]]);
+        let pair = observer(&[[0.0; 3]; 2]);
+        let amplitude = C64::new(1.0, 0.5);
+        let expected = one.evaluate(&[amplitude.scale(f64::EPSILON)]).unwrap();
+        let actual = pair
+            .evaluate(&[amplitude, amplitude.scale(-1.0 + f64::EPSILON)])
+            .unwrap();
+        for (value, reference) in core::iter::once(actual.field.pressure_pa)
+            .chain(actual.field.particle_velocity_m_s)
+            .zip(
+                core::iter::once(expected.field.pressure_pa)
+                    .chain(expected.field.particle_velocity_m_s),
+            )
+        {
+            assert!(
+                (value - reference).abs() <= 3e-15 * reference.abs(),
+                "value={value:?}, reference={reference:?}"
+            );
+        }
+        for axis in 0..3 {
+            let value = actual.mean_perturbation_energy_flux_w_m2[axis];
+            let reference = expected.mean_perturbation_energy_flux_w_m2[axis];
+            assert!((value - reference).abs() <= 1e-14 * reference.abs());
+        }
+    }
 }
 
 #[test]

@@ -443,7 +443,7 @@ impl Path {
             return Err(nonfinite("convected volume flow"));
         }
         for (sum, &transfer) in sums.iter_mut().zip(&self.field) {
-            sum.add(transfer * flow)?;
+            sum.add_product(transfer, flow)?;
         }
         Ok(())
     }

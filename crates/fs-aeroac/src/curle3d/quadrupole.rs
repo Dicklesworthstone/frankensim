@@ -457,7 +457,7 @@ impl PreparedQuadrupoleObserver {
                 }
                 if value != C64::ZERO {
                     for (row, sum) in transfer.field.iter().zip(&mut sums) {
-                        sum.add(row[entry] * value)?;
+                        sum.add_product(row[entry], value)?;
                     }
                 }
             }

@@ -64,6 +64,48 @@ fn g0_constructive_destructive_and_quadrature_fields_have_cross_terms() {
     assert_eq!(quadrature.scope, SCOPE_STATEMENT);
 }
 
+/// G3: a small mismatch between almost opposing drives must remain observable
+/// after the cylindrical Green transfer, in both pressure and Euler velocity.
+#[test]
+fn g3_nearly_cancelling_products_recover_the_residual_line_source() {
+    let one = PreparedDipoleObserver::new(medium(), 317.0, [1.3, -0.7], &[[0.0; 2]], 1)
+        .unwrap();
+    let pair = PreparedDipoleObserver::new(medium(), 317.0, [1.3, -0.7], &[[0.0; 2]; 2], 2)
+        .unwrap();
+    for axis in 0..2 {
+        for amplitude in [C64::ONE, C64::new(0.0, 1.0), C64::new(1.0, 0.5)] {
+            let source = |scale| {
+                let mut force = [C64::ZERO; 2];
+                force[axis] = amplitude.scale(scale);
+                force
+            };
+            let drives = [source(1.0), source(-1.0 + f64::EPSILON)];
+            let expected = one.evaluate(&[source(f64::EPSILON)]).unwrap();
+            let actual = pair.evaluate(&drives).unwrap();
+            for (value, reference) in core::iter::once(actual.pressure_pa)
+                .chain(actual.particle_velocity_m_s)
+                .zip(core::iter::once(expected.pressure_pa).chain(expected.particle_velocity_m_s))
+            {
+                assert!(
+                    (value - reference).abs() <= 3e-15 * reference.abs(),
+                    "axis={axis}, value={value:?}, reference={reference:?}"
+                );
+            }
+            let stats = pair
+                .evaluate_coherence_modes(
+                    &[&drives],
+                    CoherenceBudget {
+                        max_modes: 1,
+                        max_source_mode_pairs: 2,
+                    },
+                )
+                .unwrap();
+            let power = 0.5 * expected.pressure_pa.norm_sq();
+            assert!((stats.mean_square_pressure_pa2 - power).abs() <= 8e-15 * power);
+        }
+    }
+}
+
 #[test]
 fn g1_pressure_antinode_has_zero_net_energy_flux() {
     // Opposing equal dipoles at +/-a produce equal pressures and opposite
