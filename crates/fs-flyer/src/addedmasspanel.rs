@@ -219,6 +219,8 @@ fn bracket(axis: &[f64], x: f64) -> Result<(usize, f64), Refusal> {
 
 /// Trilinear evaluation with ANALYTIC derivatives: the value and its
 /// exact gradient d/d(deflection, height, warp) of the interpolant.
+/// Values and derivatives retain the extraction's [`EXTRACTION_RHO`] density.
+/// Use [`eval_with_derivatives_at_density`] for another uniform fluid density.
 ///
 /// # Errors
 /// `crossterm-out-of-domain` (AT the bounds admits; beyond refuses).
@@ -254,6 +256,57 @@ pub fn eval_with_derivatives(
         grad[k][0] = (lerp3(1.0, ht, wt) - lerp3(0.0, ht, wt)) / dd;
         grad[k][1] = (lerp3(dt, 1.0, wt) - lerp3(dt, 0.0, wt)) / dh;
         grad[k][2] = (lerp3(dt, ht, 1.0) - lerp3(dt, ht, 0.0)) / dw;
+    }
+    Ok((value, grad))
+}
+
+/// Evaluate the retained interpolant at an explicit uniform fluid density.
+///
+/// In the original incompressible strip model, every added-mass coefficient
+/// is linear in rho. Multiplying the extracted cross column AND its exact
+/// configuration derivatives by `rho / EXTRACTION_RHO` therefore preserves
+/// the original model without another extraction or runtime geometry solve.
+/// The reference-density path retains its original arithmetic and artifact.
+///
+/// Density is held fixed while taking the three configuration derivatives.
+/// This operation supplies neither spatial-density gradients nor time-varying
+/// fluid inertia/work; those require a separate admitted physical model. The
+/// caller must use the same operating density for the other added-mass blocks.
+/// It never changes rigid-body mass or promotes the extraction's declared tier.
+///
+/// # Errors
+/// Original interpolation-domain refusals; `crossterm-density-invalid` for
+/// nonpositive/nonfinite density or unrepresentable scaled values/derivatives.
+pub fn eval_with_derivatives_at_density(
+    art: &PanelExtractedCrossTermsV1,
+    deflection_rad: f64,
+    height_m: f64,
+    warp_rad: f64,
+    rho_kg_m3: f64,
+) -> Result<([f64; 6], [[f64; 3]; 6]), Refusal> {
+    let invalid = || {
+        refuse(
+            "crossterm-density-invalid",
+            format!("density {rho_kg_m3} cannot represent the added-mass cross terms"),
+            "supply positive finite uniform fluid density with representable SI coefficients",
+        )
+    };
+    if !rho_kg_m3.is_finite() || rho_kg_m3 <= 0.0 {
+        return Err(invalid());
+    }
+    let (mut value, mut grad) = eval_with_derivatives(art, deflection_rad, height_m, warp_rad)?;
+    let ratio = rho_kg_m3 / EXTRACTION_RHO;
+    for entry in value.iter_mut().chain(grad.iter_mut().flatten()) {
+        let original = *entry;
+        let scaled = if rho_kg_m3 == EXTRACTION_RHO {
+            original
+        } else {
+            original * ratio
+        };
+        if !scaled.is_finite() || (original != 0.0 && scaled == 0.0) {
+            return Err(invalid());
+        }
+        *entry = scaled;
     }
     Ok((value, grad))
 }

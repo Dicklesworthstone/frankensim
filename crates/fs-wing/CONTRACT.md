@@ -32,6 +32,13 @@ safeguarded iteration, branch identity).
   section closure vs TRAILING-SHEET induced alpha, warm-started
   safeguarded relaxation, branch identity, enforced operator-reuse rule.
 
+The certified-ground solve requires finite freestream speed and positive
+finite physical density; malformed values refuse as `freestream-invalid`.
+Circulation remains independent of that uniform density, while all physical
+force components and surface lifts scale with it. Unrepresentable forces
+refuse as `aerodynamic-load-unrepresentable` rather than publishing nonfinite
+loads. The image battery checks both this scaling and density/overflow refusal.
+
 ### Density in unsteady aerodynamic reduction
 
 `rom::assemble_a1_lti` and `A1Lti::dc_direct` require the operating fluid's

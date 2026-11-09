@@ -8,8 +8,8 @@
 //! Repro: cargo test -p fs-flyer --test addedmasspanel_battery
 
 use fs_flyer::addedmasspanel::{
-    EXTRACTION_VERSION, ExtractionGrid, MAX_AXIS, eval_with_derivatives, extract,
-    runtime_finite_difference,
+    EXTRACTION_RHO, EXTRACTION_VERSION, ExtractionGrid, MAX_AXIS, eval_with_derivatives,
+    eval_with_derivatives_at_density, extract, runtime_finite_difference, strips_at,
 };
 
 fn jlog(case: &str, payload: &str) {
@@ -106,6 +106,76 @@ fn interpolation_is_node_exact_and_derivatives_are_analytic() {
         }
     }
     jlog("derivatives", "\"analytic_vs_offline_fd\":\"verified\"");
+}
+
+#[test]
+fn operating_density_matches_native_strip_mass_and_scales_every_derivative() {
+    let art = extract(pinned_grid()).unwrap();
+    for rho in [0.4, EXTRACTION_RHO, 2.5, 1000.0] {
+        for &d in &art.grid.deflection_rad {
+            for &h in &art.grid.height_m {
+                for &w in &art.grid.warp_rad {
+                    let (actual, _) = eval_with_derivatives_at_density(&art, d, h, w, rho).unwrap();
+                    let native = fs_flyer::addedmass::assemble_analytic_strip(
+                        rho,
+                        &strips_at(d, h, w),
+                        1,
+                        &[0.0; 6],
+                        &[0.0],
+                    )
+                    .unwrap();
+                    for (actual, expected) in actual.iter().zip(native.m_added_rc[0]) {
+                        assert!(
+                            (actual - expected).abs() <= 2e-14 * expected.abs().max(1.0),
+                            "rho={rho}, ({d},{h},{w}): {actual} != {expected}"
+                        );
+                    }
+                }
+            }
+        }
+        let reference = eval_with_derivatives(&art, 0.05, 1.0, 0.03).unwrap();
+        let actual = eval_with_derivatives_at_density(&art, 0.05, 1.0, 0.03, rho).unwrap();
+        for (value, original) in actual
+            .0
+            .iter()
+            .chain(actual.1.iter().flatten())
+            .zip(reference.0.iter().chain(reference.1.iter().flatten()))
+        {
+            let expected = original * (rho / EXTRACTION_RHO);
+            assert_eq!(value.to_bits(), expected.to_bits());
+            if rho == EXTRACTION_RHO {
+                assert_eq!(value.to_bits(), original.to_bits());
+            }
+        }
+    }
+}
+
+#[test]
+fn operating_density_refuses_invalid_or_unrepresentable_cross_terms() {
+    let art = extract(pinned_grid()).unwrap();
+    for rho in [
+        0.0,
+        -1.0,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::MAX,
+        f64::from_bits(1),
+    ] {
+        assert_eq!(
+            eval_with_derivatives_at_density(&art, 0.05, 1.0, 0.03, rho)
+                .unwrap_err()
+                .code,
+            "crossterm-density-invalid",
+            "rho={rho}",
+        );
+    }
+    assert_eq!(
+        eval_with_derivatives_at_density(&art, 0.2, 1.0, 0.03, 0.8)
+            .unwrap_err()
+            .code,
+        "crossterm-out-of-domain",
+    );
 }
 
 #[test]

@@ -229,6 +229,18 @@ The joint solve also retains the rigid body's complete inertia tensor.
 The actual extraction path uses these terms and records algorithm version
 `config-resolved-strip-v2`; its existing wire schema is unchanged.
 
+`addedmasspanel::eval_with_derivatives_at_density` evaluates that retained
+artifact at an explicit positive finite uniform fluid density. Every cross
+coefficient and analytic configuration derivative scales by
+`rho / EXTRACTION_RHO`; the original evaluator still returns the extraction
+density exactly. The caller supplies the same density to the other added-mass
+blocks. Density is fixed during configuration differentiation; this operation
+does not infer spatial density gradients, time-varying fluid-inertia work or
+changes to rigid-body mass. Nonfinite or underflowed coefficients refuse as
+`crossterm-density-invalid`. The extraction battery compares operating-density
+values directly with the native strip assembly at all grid nodes and checks
+all analytic derivative components without changing the artifact identity.
+
 G0/G2/G3 tests in `addedmass_battery` cover the thin-ellipse pitch coefficient,
 hinge/rigid recoil, finite-span subdivision, reference shifts, oblique frame
 rotation, length-to-the-fifth rotary scaling, PSD, work closure and invalid

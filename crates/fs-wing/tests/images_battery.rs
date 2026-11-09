@@ -142,6 +142,67 @@ fn ground_effect_trend_and_free_air_limit() {
 }
 
 #[test]
+fn ground_density_scales_physical_loads_without_changing_circulation() {
+    let ground = kdh_ground();
+    let panels = flat_surface(
+        SurfaceId::WingLower,
+        12.29,
+        1.981,
+        0.0,
+        ground.z_m - 1.2,
+        8,
+        2,
+    )
+    .unwrap();
+    let reference = solve_weissinger_ground(&panels, freestream(0.07), RHO, &ground).unwrap();
+    assert!(reference.total_lift_n > 0.0);
+    for factor in [0.25, 0.7, 2.0] {
+        let actual =
+            solve_weissinger_ground(&panels, freestream(0.07), RHO * factor, &ground).unwrap();
+        assert_eq!(actual.gamma, reference.gamma);
+        for (value, original) in actual.total_force_n.iter().zip(reference.total_force_n) {
+            assert!((value - factor * original).abs() <= 2e-14 * original.abs().max(1.0));
+        }
+        for ((surface, value), (original_surface, original)) in
+            actual.surface_lift_n.iter().zip(&reference.surface_lift_n)
+        {
+            assert_eq!(surface, original_surface);
+            assert!((value - factor * original).abs() <= 2e-14 * original.abs().max(1.0));
+        }
+    }
+}
+
+#[test]
+fn ground_density_refuses_nonfinite_inputs_and_overflowing_loads() {
+    let ground = kdh_ground();
+    let panels = flat_surface(
+        SurfaceId::WingLower,
+        12.29,
+        1.981,
+        0.0,
+        ground.z_m - 1.2,
+        8,
+        2,
+    )
+    .unwrap();
+    for rho in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(
+            solve_weissinger_ground(&panels, freestream(0.07), rho, &ground)
+                .unwrap_err()
+                .code,
+            "freestream-invalid",
+            "rho={rho}"
+        );
+    }
+    assert_eq!(
+        solve_weissinger_ground(&panels, freestream(0.07), f64::MAX, &ground)
+            .unwrap_err()
+            .code,
+        "aerodynamic-load-unrepresentable"
+    );
+}
+
+#[test]
 fn certificate_gate_at_band_and_next_float() {
     let fs_v = freestream(0.05);
     let p = flat_surface(SurfaceId::WingLower, 12.29, 1.981, 0.0, 1.5, 8, 2).unwrap();

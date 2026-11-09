@@ -100,7 +100,8 @@ pub(crate) fn horseshoe_with_image(
 ///
 /// # Errors
 /// Free-air refusal set plus `ground-uncertified` and
-/// `aircraft-below-ground`.
+/// `aircraft-below-ground`; `aerodynamic-load-unrepresentable` if the supplied
+/// density produces nonfinite physical forces.
 pub fn solve_weissinger_ground(
     panels: &[Panel],
     freestream_mps: [f64; 3],
@@ -123,11 +124,16 @@ pub fn solve_weissinger_ground(
         }
     }
     let vmag = (freestream_mps.iter().map(|v| v * v).sum::<f64>()).sqrt();
-    if !freestream_mps.iter().all(|v| v.is_finite()) || vmag < 1.0e-6 || rho_kg_m3 <= 0.0 {
+    if !freestream_mps.iter().all(|v| v.is_finite())
+        || !vmag.is_finite()
+        || vmag < 1.0e-6
+        || !rho_kg_m3.is_finite()
+        || rho_kg_m3 <= 0.0
+    {
         return Err(refuse(
             "freestream-invalid",
-            format!("{freestream_mps:?}"),
-            "finite",
+            format!("V {freestream_mps:?}, rho {rho_kg_m3}"),
+            "finite non-zero freestream; positive finite density",
         ));
     }
     let stream = [
@@ -220,6 +226,15 @@ pub fn solve_weissinger_ground(
     }
     // Preserve the existing lift accumulation and its exact z projection.
     total_force_n[2] = -total;
+    if total_force_n.iter().any(|force| !force.is_finite())
+        || per.iter().any(|(_, lift)| !lift.is_finite())
+    {
+        return Err(refuse(
+            "aerodynamic-load-unrepresentable",
+            "density-scaled ground-image forces are not finite".into(),
+            "supply a density, velocity and geometry with representable SI loads",
+        ));
+    }
     Ok(SolveReport {
         gamma,
         condition_est: 0.0,
