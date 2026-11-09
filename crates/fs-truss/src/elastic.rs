@@ -7,8 +7,9 @@
 //! free-coordinate solve, recovering N = EA/L (B^T u - L epsilon_0). All member
 //! directions, supports and loads retain their original ground ordering.
 //!
-//! This is infinitesimal axial elasticity with prescribed translations.
-//! It contains no bending, geometric stiffness, buckling or plastic return map.
+//! Equilibrium uses infinitesimal axial elasticity with prescribed translations;
+//! it includes no bending, geometric stiffness or plastic return map.
+//! [buckling] separately forms an initial-stress pencil from these equilibria.
 //! Acceptance measures equilibrium of the returned compatible displacement;
 //! it does not prove uniqueness or exclude unloaded mechanisms. Unloaded free
 //! coordinates with zero stiffness receive zero displacement, never a spring.
@@ -17,6 +18,9 @@ use crate::{GroundStructure, LayoutCase, TrussConstructionError};
 use fs_exec::Cx;
 use fs_solver::{CheckedCgConfig, CheckedCgError, LinearOp, checked_cg};
 use fs_sparse::precond::Precond;
+
+/// Initial-stress global buckling with fixed thermal/settlement preload.
+pub mod buckling;
 
 mod imposed;
 pub use imposed::ElasticImposedState;

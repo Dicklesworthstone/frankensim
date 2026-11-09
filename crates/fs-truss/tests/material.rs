@@ -1315,3 +1315,67 @@ fn source_bound_elastic_adjoints_keep_frozen_moduli_and_reference_strain() {
         relative(result.prescribed_displacement_gradient[0][0], 12.0, 1e-12);
     });
 }
+
+#[test]
+fn source_material_moduli_drive_fixed_prestress_global_buckling() {
+    use fs_truss::elastic::ElasticImposedState;
+    use fs_truss::elastic::buckling::{BucklingControls, BucklingLoadFamily};
+    with_cx(|cx, _| {
+        let ground = GroundStructure::try_from_parts(
+            &[[-2.0, 0.0], [0.0, 0.0], [1.0, 0.0], [0.0, -1.0]],
+            &[(0, 1), (1, 2), (1, 3)],
+            &[2.0, 1.0, 1.0],
+            GroundLimits::default(),
+            cx,
+        )
+        .unwrap();
+        let case = LayoutCase::try_new(
+            vec![[true; 2], [false; 2], [true; 2], [true; 2]],
+            vec![[0.0; 2], [1.0, 0.0], [0.0; 2], [0.0; 2]],
+            4,
+        )
+        .unwrap();
+        let source = card([8000.0; 2], [2e6, 1e6], [300e6; 2]);
+        let brace = card([1000.0; 2], [100.0; 2], [1000.0; 2]);
+        let states = [
+            material(&source, 300.0),
+            material(&source, 600.0),
+            material(&brace, 300.0),
+        ];
+        let layout = MaterialLayout::try_new(
+            &ground,
+            &case,
+            &states,
+            &[0, 1, 2],
+            LayoutLimits::default(),
+            cx,
+        )
+        .unwrap();
+        let result = layout
+            .elastic_buckling(
+                &[1.0; 3],
+                &case,
+                BucklingLoadFamily {
+                    imposed: ElasticImposedState {
+                        member_stress_free_strain: Some(&[1e-5, 1e-5, 0.0]),
+                        prescribed_displacements_m: Some(&[
+                            [0.0; 2],
+                            [0.0; 2],
+                            [2e-5, 0.0],
+                            [0.0; 2],
+                        ]),
+                    },
+                    fixed_loads_n: Some(&[[0.0; 2], [20.0, 0.0], [0.0; 2], [0.0; 2]]),
+                },
+                BucklingControls::default(),
+                cx,
+            )
+            .unwrap();
+        assert_eq!(result.buckling.loads.len(), 1);
+        relative(result.buckling.loads[0], 350.0, 1e-8);
+        relative(result.baseline.member_force_n[0], 5.0, 1e-12);
+        relative(result.baseline.member_force_n[1], -15.0, 1e-12);
+        relative(result.reference_load.member_force_n[0], 0.5, 1e-12);
+        relative(result.reference_load.member_force_n[1], -0.5, 1e-12);
+    });
+}

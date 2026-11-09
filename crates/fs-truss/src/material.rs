@@ -648,6 +648,38 @@ impl<'a> MaterialLayout<'a> {
         )
     }
 
+    /// Global planar truss buckling with original source E and a fixed preload family.
+    ///
+    /// The reference case's physical loads scale; explicit fixed nodal loads,
+    /// thermal/assembly strains and support motion remain fixed. Pass already
+    /// computed gravity loads through family.fixed_loads_n to hold them fixed.
+    /// Native initial-stress buckling supplements the separate local Euler and
+    /// strength checks; it does not change the plastic-layout sizing audit.
+    ///
+    /// # Errors
+    /// See [crate::elastic::buckling::solve]; native equilibrium, positive-base,
+    /// sparse-work and eigenpair admission must all succeed.
+    pub fn elastic_buckling(
+        &self,
+        areas_m2: &[f64],
+        reference_case: &LayoutCase,
+        family: crate::elastic::buckling::BucklingLoadFamily<'_>,
+        controls: crate::elastic::buckling::BucklingControls,
+        cx: &Cx<'_>,
+    ) -> Result<crate::elastic::buckling::TrussBuckling, crate::elastic::buckling::BucklingError>
+    {
+        let moduli = self.elastic_moduli(cx)?;
+        crate::elastic::buckling::solve(
+            self.ground,
+            reference_case,
+            areas_m2,
+            &moduli,
+            family,
+            controls,
+            cx,
+        )
+    }
+
     fn elastic_moduli(&self, cx: &Cx<'_>) -> Result<Vec<f64>, TrussConstructionError> {
         checkpoint(cx)?;
         let mut moduli = Vec::with_capacity(self.assignments.len());

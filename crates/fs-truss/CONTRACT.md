@@ -133,6 +133,67 @@ area, E, eigenstrain, support motion and actual loads, and source-bound
 heterogeneous members. G0/G4 tests preserve removed-member indexing and refuse
 malformed weights, unsupported adjoints, exhausted shared work and cancellation.
 
+## Global truss buckling with a fixed prestress baseline
+
+`elastic::buckling::solve` and `MaterialLayout::elastic_buckling` use the
+existing compatible elastic owner twice: once for fixed nodal loads, fixed
+member eigenstrain and prescribed support motion, and once for the reference
+case's nodal loads with homogeneous support motion and zero eigenstrain.
+`BucklingLoadFamily` makes that split explicit. Omitted fixed loads mean zero;
+computed self-weight can be supplied as fixed loads when gravity must remain
+constant. Every reference-case load is multiplied by the returned factor.
+The two solves share one `ElasticControls` iteration allowance.
+
+For a member's original axial direction n and transverse direction t, the
+initial-stress contribution on relative endpoint translations is
+`K_g = (N/L) t t^T`. Tension stiffens and compression softens. Using the actual
+recovered fixed and reference member forces gives the pencil
+
+`(K_e + K_g(N_fixed) + lambda K_g(N_reference)) phi = 0`.
+
+Thus eigenstrain, support settlement and fixed dead loads alter the baseline
+tangent; they are not silently multiplied with the reference load. All
+original free coordinates are retained in this pencil, including unloaded
+zero-stiffness coordinates that equilibrium alone can leave at zero motion.
+The native positive-factor gate refuses a singular or indefinite baseline
+without adding springs. A numerical/factorization refusal is not itself a
+classification of the physical instability.
+
+The domain assembles canonical sparse matrices with `fs-sparse`; it calls
+`fs-solid::stability::buckling_loads_cancellable` for scaling, positive-base
+admission, eigenpairs and physical-pencil residuals. Large pencils retain the
+existing bounded sparse factorization and generic `fs-spectral` dispatch;
+small systems retain the native bounded dense path. No new eigensolver is
+introduced. Member assembly polls cancellation every 256 members. Combined
+staged entries have an explicit caller allowance and a hard 8-million cap,
+bounding native COO sorting between checkpoints. Native default DOF, stored
+matrix, factor-memory, fill and operator-work limits also apply.
+
+`TrussBuckling` retains both admitted equilibrium states and the native
+`BucklingResult`, including the complete original-coordinate map and
+recomputed pencil residuals. At multiplier lambda, displacements and member
+forces superpose as fixed plus lambda times reference. Energies are quadratic.
+The source-material wrapper retains each original member's resolved E.
+Zero-area members supply no stiffness or prestress; their free coordinates
+still participate in stability admission.
+
+This is a small-displacement initial-stress analysis on frozen original
+geometry and areas. It does not follow geometric nonlinearity, follower
+forces, plastic redistribution, limit points, postbuckling, out-of-plane modes
+or local member flexural/torsional buckling. Local Euler/section/strength checks remain
+independent. Returned positive factors are residual-qualified numerical
+predictions, not proofs of missed-mode exclusion, mesh convergence or actual
+collapse. An empty factor list says no positive root was returned for the
+queried reference-load directions.
+
+G1/G3 tests use an analytically braced unequal-length two-bar system. They
+exercise thermal compression/tension, support settlement, independently fixed
+dead load, reference-force scaling, rotation and mode direction. Tensile and
+zero reference loads produce no positive root. G4 tests ensure unloaded
+mechanisms remain visible and refuse unstable baselines, malformed data,
+exhausted shared work/storage and cancellation. A material consumer regression
+checks the original source E assignments through the same path.
+
 ## Public types and semantics
 
 - `GroundRules` is immutable and admitted only through `try_new` or a finite
