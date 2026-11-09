@@ -1,5 +1,56 @@
 # CONTRACT: fs-plate
 
+## Full laminate harmonic response on the original MITC shell
+
+`shell::mitc::harmonic::HarmonicMitcShell` binds one complete material
+`HarmonicLaminate` per original facet to an existing `MitcShellModel`.
+It consumes the full eight work coordinates
+`[ex,ey,gxy,kx,ky,kxy,gxz,gyz]`, including membrane/shear and
+bending/shear cross terms. Native complex transverse-normal-stress elimination
+retains each full tensor's actual Prony/Kelvin storage, loss, normal strain and
+frequency band. The fixed material snapshot belongs to its authored reference
+temperature/state; this adapter does not infer a temperature shift, thermal
+strain, equilibrium prestress or a changed material history.
+
+Admission compares the original elastic A/B/D/H to the supplied shear-trial
+section in the same retained facet orientation. Actual source density moments
+I0/I1/I2 must exactly equal every original reference-inertia corner, and the
+native consistent mass choice is required. Actual harmonic stiffness may
+legitimately differ from that reference; actual layer order, faces and material
+rotations remain bound by the material owner's original source checks.
+
+The native `PreparedElementStrain` supplies both the original condensed
+director-bubble trial map and its six Bernstein controls. Its same seven-point
+degree-five rule integrates the complete material quadratic form. Cached rows
+include the original work-conjugate support map and section engineering-strain
+rotation. Repeated Arc source identities share per-frequency constitutive
+preparation. Original mass is borrowed unchanged. A private native
+`fixed_stiffness` carrier preserves numerical drilling and authored physical
+springs independently of material stiffness; connection work admission counts
+both sparse contributions. The consumer assembles actual material storage
+directly, avoiding subtraction of a much stiffer reference pencil. Numerical
+drilling and springs contribute no material heat.
+
+`prepare_harmonic_operator` returns sparse full storage and loss/omega without
+factoring a bare structural resonance. Coupled callers must invoke its
+`admit_displacement` before reporting physical motion.
+`prepare_harmonic_response` reuses the existing `fs-modal` dense harmonic
+factor on `K'(omega)-omega^2 M-iK''(omega)`; repeated original free-coordinate
+force/moment phasors reuse that factor. The shared residual and input/loss power
+diagnostics retain their original meaning. Before a solved response is
+returned, every native in-plane Bernstein control passes the material owner's
+full-thickness, coherent full-cycle strain admission, including recovered
+normal and physical layer shear strains. This convex sufficient bound may
+conservatively refuse a field inside the exact source cap.
+
+This is a **fixed Galerkin strain approximation**: the original elastic bubble
+map and declared reference shear profile remain fixed at every frequency.
+Neither is re-equilibrated against actual dispersive tensors; no actual
+interlaminar/exterior traction-equilibrium claim, frequency-dependent mass or
+modal fit is introduced. Explicit facet/layer/work/payload bounds precede
+cache, section, sparse and dense-factor allocations; cancellation checkpoints
+cover original facet, quadrature, source and recovery loops.
+
 ## Unfactored full tensor-material shell operators
 
 `TensorPronyShell::prepare_harmonic_operator` evaluates all original

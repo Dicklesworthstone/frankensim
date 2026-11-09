@@ -114,19 +114,23 @@ impl MitcShellModel {
         let nodes = self.frames.len();
         admit(connections, nodes, budget)?;
         if connections.is_empty() { return Ok(self.clone()); }
-        let work = connections.iter().try_fold(self.pencil.k.nnz(), |work, link| {
-            let width = link.terms.len().checked_mul(6)?;
-            work.checked_add(width.checked_mul(width)?)?
-                .checked_add(nodes.checked_mul(72)?)
-        });
+        let work = self.pencil.k.nnz().checked_add(self.fixed_stiffness.nnz())
+            .and_then(|initial| connections.iter().try_fold(initial, |work, link| {
+                let width = link.terms.len().checked_mul(6)?;
+                work.checked_add(width.checked_mul(width)?.checked_mul(2)?)?
+                    .checked_add(nodes.checked_mul(72)?)
+            }));
         if work.is_none_or(|w| w > budget.max_work) {
             return Err(invalid("complete shell connection stiffness exceeds work allowance"));
         }
         let mut k = Coo::new(self.pencil.free, self.pencil.free);
+        let mut fixed = Coo::new(self.pencil.free, self.pencil.free);
         for i in 0..self.pencil.free {
             poll(&mut cancelled)?;
             let (columns, values) = self.pencil.k.row(i);
             for (&j, &value) in columns.iter().zip(values) { k.push(i, j, value); }
+            let (columns, values) = self.fixed_stiffness.row(i);
+            for (&j, &value) in columns.iter().zip(values) { fixed.push(i, j, value); }
         }
         for link in connections {
             poll(&mut cancelled)?;
@@ -143,16 +147,21 @@ impl MitcShellModel {
                     if !value.is_finite() {
                         return Err(invalid("shell connection stiffness overflows"));
                     }
-                    if value != 0.0 { k.push(i, j, value); }
+                    if value != 0.0 {
+                        k.push(i, j, value);
+                        fixed.push(i, j, value);
+                    }
                 }
             }
         }
         poll(&mut cancelled)?;
         let mut out = self.clone();
         out.pencil.k = k.assemble();
+        out.fixed_stiffness = fixed.assemble();
         for i in 0..out.pencil.free {
             poll(&mut cancelled)?;
-            if out.pencil.k.row(i).1.iter().any(|x| !x.is_finite()) {
+            if out.pencil.k.row(i).1.iter()
+                .chain(out.fixed_stiffness.row(i).1).any(|x| !x.is_finite()) {
                 return Err(invalid("assembled shell connection stiffness overflows"));
             }
         }

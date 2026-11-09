@@ -15,7 +15,7 @@ use crate::PlateError;
 use fs_material::laminate::LaminateSection;
 use fs_material::sheet::SheetMatrix;
 use fs_math::det;
-use fs_sparse::Coo;
+use fs_sparse::{Coo, Csr};
 use std::collections::BTreeMap;
 
 mod element;
@@ -27,6 +27,8 @@ mod static_solver;
 pub use static_solver::{PreparedMitcStatic, PreparedShellStatic};
 /// Reusable observation of the original condensed MITC strain field.
 pub mod strain;
+/// Full dispersive laminate storage and loss in the original MITC trial space.
+pub mod harmonic;
 /// Layer-resolved physical shear from the original equilibrated laminate law.
 pub mod shear_recovery;
 /// Integrated thermal membrane strain, thickness gradients and compatible response.
@@ -498,6 +500,10 @@ const IDENTITY: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.
 #[derive(Debug, Clone)]
 pub struct MitcShellModel {
     pencil: ShellModel,
+    // Original numerical drilling and subsequently authored physical springs.
+    // Retain this independently: a softer constitutive owner must not recover
+    // it by subtracting two large, rounded elastic stiffness matrices.
+    fixed_stiffness: Csr,
     frames: Vec<[[f64; 3]; 3]>,
     mass_model: ShellMass,
     mesh: ShellMesh,
@@ -1607,6 +1613,8 @@ fn assemble_mitc3p_impl(
         });
     }
     let mut k = Coo::new(free, free);
+    // The same admitted node/facet counts bound this subset of K as well.
+    let mut fixed_stiffness = Coo::new(free, free);
     let mut m = Coo::new(free, free);
     let mut body_acceleration = ShellBodyAcceleration::empty();
     body_acceleration.initialize(full);
@@ -1739,7 +1747,9 @@ fn assemble_mitc3p_impl(
         let scale = drilling_alpha * drill_scale[node];
         for (&i, &a) in &row {
             for (&j, &b) in &row {
-                k.push(i, j, scale * a * b);
+                let stiffness = scale * a * b;
+                k.push(i, j, stiffness);
+                fixed_stiffness.push(i, j, stiffness);
                 if mass == ShellMass::Consistent {
                     // The SAME one-per-node relative-spin row regularizes
                     // inertia. It annihilates every rigid velocity, including
@@ -1771,6 +1781,7 @@ fn assemble_mitc3p_impl(
     }
     Ok(MitcShellModel {
         pencil,
+        fixed_stiffness: fixed_stiffness.assemble(),
         frames,
         mass_model: mass,
         mesh: mesh.clone(),

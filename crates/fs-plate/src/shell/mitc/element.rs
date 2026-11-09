@@ -1,7 +1,7 @@
 use super::{PlateError, ShearShellInertia, ShearShellSection, ShellMass, ShellMesh, cross, dot};
 use super::inertia::FacetInertia;
 use crate::shell::FacetGeometry;
-use fs_math::det;
+use fs_math::{dd::Dd, det};
 
 const N: usize = 20;
 type Matrix = [[f64; N]; N];
@@ -19,6 +19,57 @@ pub(super) fn relative_translations(nodal: &[f64; 18]) -> [f64; 18] {
         }
     }
     relative
+}
+
+/// Integrate a COMPLETE work-conjugate constitutive block on supplied native
+/// eight-component rows. The caller obtains these from PreparedElementStrain,
+/// preserving the same original elastic bubble map for storage and loss.
+/// Compensated actions retain signed membrane/bending/shear interference.
+pub(super) fn full_constitutive_work(
+    rows: &[[f64; 18]; 8],
+    matrix: &[f64; 64],
+    measure: f64,
+    output: &mut [[Dd; 18]; 18],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), PlateError> {
+    if !measure.is_finite() || measure <= 0.0 {
+        return Err(PlateError::BadSection {
+            what: "positive representable native harmonic quadrature measure required",
+        });
+    }
+    let mut action = [[Dd::ZERO; 18]; 8];
+    for a in 0..8 {
+        if cancelled() {
+            return Err(PlateError::Cancelled);
+        }
+        for b in 0..8 {
+            let value = matrix[8 * a + b];
+            if value != 0.0 {
+                for j in 0..18 {
+                    action[a][j] = action[a][j]
+                        + Dd::from_f64(value) * Dd::from_f64(rows[b][j]);
+                }
+            }
+        }
+    }
+    for i in 0..18 {
+        if cancelled() {
+            return Err(PlateError::Cancelled);
+        }
+        for j in i..18 {
+            let mut work = Dd::ZERO;
+            for a in 0..8 {
+                work = work + Dd::from_f64(rows[a][i]) * action[a][j];
+            }
+            output[i][j] = output[i][j] + Dd::from_f64(measure) * work;
+            if !output[i][j].hi.is_finite() || !output[i][j].lo.is_finite() {
+                return Err(PlateError::BadSection {
+                    what: "full harmonic MITC constitutive work is unrepresentable",
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn unit(v: [f64; 3]) -> [f64; 3] {
