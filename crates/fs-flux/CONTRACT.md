@@ -11466,9 +11466,9 @@ reservoir boundaries may still supply scalar or heat. Homogeneous diffusive
 flux is supported. Arbitrary volumetric sources and nonzero imposed flux need
 a separately admitted bound policy and remain on the original BDF path.
 Frozen coefficients/data, constant storage properties and the planar Estimated
-scope remain unchanged. There are no coupled species-sum constraints or new
-three-dimensional turbulence claims. Limiting may reduce local order near
-extrema.
+scope remain unchanged. Individual scalar calls do not enforce a coupled
+species sum; the joint-species entry below does. No new three-dimensional
+turbulence claims are made. Limiting may reduce local order near extrema.
 
 Ten focused integration tests and both scalar numerical unit tests passed
 using the original numerical source build. Five new integration groups
@@ -11775,3 +11775,45 @@ geometry and boundary admission remain authoritative. Five native tests cover
 exact vector impulse/work, boost/relative-CFL behavior, actual-volume force
 quadrature on all axes, zero identities, reconstructed/final-kick Mach refusal,
 and middle/final cancellation with exact replay.
+
+## Conservative joint planar species mixing
+
+`scalar::bounded::species::PreparedBoundedSpeciesTransport` transports all
+authored mass fractions together on the original P1-DG/BDM scalar owner.
+Admission requires the same borrowed mesh, effective molecular-plus-SGS
+diffusivity, spatial matrix and complete weak boundary coefficients for every
+species. Original value/inflow reservoirs may carry different compositions;
+all original Gauss samples and physical affine endpoint extrema must lie in
+the unit simplex.
+
+One correction graph is shared. Each interior and signed-reservoir
+antidiffusive vector receives the smallest admissible factor across its
+nonzero species components. Thus every species keeps its own paired
+conservative inventory, while the zero-sum correction vector preserves the
+composition sum. All species evolve independently; none is reconstructed as
+a complement. No clipping, renormalization or inventory repair occurs.
+The original scalar preparation/application, consistent mass, SSPRK2 stages,
+dyadic CFL/work bounds and boundary receipts are reused. Each component
+retains [0,1] to the original scalar roundoff allowance; unit sums are
+independently admitted at every Euler/RK endpoint with absolute allowance
+1024 machine epsilons. Cancellation or refusal returns no partial mixture.
+
+Per-species receipts retain original advective/SIP exchanges and separately
+report unremoved numerical boundary diffusion. Work scales with species times
+sparse transport work; the graph is stored once and stage scratch is reused.
+This is frozen, constant-density, source-free passive mixing with shared
+effective diffusivity, compatible with Smagorinsky, WALE and Vreman. It does
+not add differential/Maxwell-Stefan diffusion, reactions, species enthalpy
+carriage or variable-density coupling; nonzero imposed diffusive fluxes remain
+outside its admitted boundary policy.
+
+Seventeen selected native checks pass: five new species groups, ten existing
+scalar integration tests and both existing scalar numerical oracles. They
+demonstrate loss of unit sum under independent scalar limiting, joint front
+transport, closed skew-grid conservation of every species including an absent
+component, species permutation symmetry, all-model reversing signed-reservoir
+exchange, zero summed species diffusion, smooth inactive-limiter recovery and
+transactional input/work/cancellation refusal. The original consistent-mass
+LU and extreme-contrast diffusion oracles remain green. This is focused
+original-numerical-source validation, not full Cargo/runtime or experimental
+mixing qualification.

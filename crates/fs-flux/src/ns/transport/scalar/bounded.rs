@@ -19,6 +19,8 @@ use super::{PreparedScalarTransport, ScalarTransportError, finite, poll, sum};
 use fs_math::dd::Dd;
 use std::collections::BTreeSet;
 
+/// Conservative joint mass-fraction transport with a shared flux limiter.
+pub mod species;
 #[cfg(test)]
 mod tests;
 
@@ -141,7 +143,7 @@ struct Pair {
 struct Reservoir {
     dof: usize,
     face: usize,
-    value: f64,
+    quadrature: usize,
     diffusion: f64,
     incoming: f64,
 }
@@ -274,7 +276,7 @@ impl<'m> PreparedScalarTransport<'m> {
                     reservoirs.push(Reservoir {
                         dof: i,
                         face: face_index,
-                        value: face.reservoir_values[q],
+                        quadrature: q,
                         diffusion,
                         incoming: b.max(0.0),
                     });
@@ -352,6 +354,52 @@ impl PreparedBoundedScalarTransport<'_, '_> {
     ) -> Result<BoundedScalarStep> {
         poll(&mut cancelled)?;
         self.admit_values(previous)?;
+        let (count, dt) = self.substeps(timestep_s, controls)?;
+        let n = self.mass.len();
+        let zero = Dd::from_f64(0.0);
+        let mut work = self.work();
+        let mut current = previous.to_vec();
+        let mut stage = vec![0.0; n];
+        let mut second = vec![0.0; n];
+        let mut boundary_integrals = vec![[zero; 3]; self.native.boundary_fluxes.len()];
+        let mut limited_fluxes = 0;
+        for _ in 0..count {
+            limited_fluxes += self.euler(&current, dt, &mut stage, &mut work, &mut cancelled)?;
+            self.accumulate_boundaries(
+                self.native,
+                &current,
+                0.5 * dt,
+                &work.boundary_extra,
+                &mut boundary_integrals,
+            )?;
+            limited_fluxes += self.euler(&stage, dt, &mut second, &mut work, &mut cancelled)?;
+            self.accumulate_boundaries(
+                self.native,
+                &stage,
+                0.5 * dt,
+                &work.boundary_extra,
+                &mut boundary_integrals,
+            )?;
+            for i in 0..n {
+                current[i] = 0.5 * current[i] + 0.5 * second[i];
+            }
+            self.admit_values(&current)?;
+            poll(&mut cancelled)?;
+        }
+        self.finish_step(
+            self.native,
+            previous,
+            current,
+            timestep_s,
+            count,
+            dt,
+            limited_fluxes,
+            boundary_integrals,
+            &mut cancelled,
+        )
+    }
+
+    fn substeps(&self, timestep_s: f64, controls: BoundedScalarControls) -> Result<(usize, f64)> {
         if !timestep_s.is_finite()
             || timestep_s <= 0.0
             || !controls.maximum_courant.is_finite()
@@ -381,9 +429,13 @@ impl PreparedBoundedScalarTransport<'_, '_> {
                 "representable positive substep required",
             ));
         }
+        Ok((count, dt))
+    }
+
+    fn work(&self) -> Work {
         let n = self.mass.len();
         let zero = Dd::from_f64(0.0);
-        let mut work = Work {
+        Work {
             high_increment: vec![0.0; n],
             low_sum: vec![zero; n],
             low: vec![0.0; n],
@@ -395,35 +447,23 @@ impl PreparedBoundedScalarTransport<'_, '_> {
             pair_flux: vec![0.0; self.pairs.len()],
             reservoir_flux: vec![0.0; self.reservoirs.len()],
             boundary_extra: vec![zero; self.native.boundary_fluxes.len()],
-        };
-        let mut current = previous.to_vec();
-        let mut stage = vec![0.0; n];
-        let mut second = vec![0.0; n];
-        let mut boundary_integrals = vec![[zero; 3]; self.native.boundary_fluxes.len()];
-        let mut limited_fluxes = 0;
-        for _ in 0..count {
-            limited_fluxes += self.euler(&current, dt, &mut stage, &mut work, &mut cancelled)?;
-            self.accumulate_boundaries(
-                &current,
-                0.5 * dt,
-                &work.boundary_extra,
-                &mut boundary_integrals,
-            )?;
-            limited_fluxes += self.euler(&stage, dt, &mut second, &mut work, &mut cancelled)?;
-            self.accumulate_boundaries(
-                &stage,
-                0.5 * dt,
-                &work.boundary_extra,
-                &mut boundary_integrals,
-            )?;
-            for i in 0..n {
-                current[i] = 0.5 * current[i] + 0.5 * second[i];
-            }
-            self.admit_values(&current)?;
-            poll(&mut cancelled)?;
         }
-        let boundaries: Vec<_> = self
-            .native
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_step(
+        &self,
+        native: &PreparedScalarTransport<'_>,
+        previous: &[f64],
+        current: Vec<f64>,
+        timestep_s: f64,
+        count: usize,
+        dt: f64,
+        limited_fluxes: usize,
+        boundary_integrals: Vec<[Dd; 3]>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<BoundedScalarStep> {
+        let boundaries: Vec<_> = native
             .boundary_fluxes
             .iter()
             .zip(boundary_integrals)
@@ -457,7 +497,7 @@ impl PreparedBoundedScalarTransport<'_, '_> {
         )?;
         let minimum = current.iter().copied().fold(f64::INFINITY, f64::min);
         let maximum = current.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         Ok(BoundedScalarStep {
             values: current,
             timestep_s,
@@ -496,6 +536,18 @@ impl PreparedBoundedScalarTransport<'_, '_> {
         work: &mut Work,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<usize> {
+        self.prepare_euler(self.native, old, dt, work, cancelled)?;
+        self.apply_euler(self.native, old, output, work, None, cancelled)
+    }
+
+    fn prepare_euler(
+        &self,
+        native: &PreparedScalarTransport<'_>,
+        old: &[f64],
+        dt: f64,
+        work: &mut Work,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<()> {
         poll(cancelled)?;
         self.native.operator.spmv(old, &mut work.high_increment);
         // Exact inverse of the ORIGINAL 3x3 P1 triangle mass A/12*(I+11').
@@ -503,7 +555,7 @@ impl PreparedBoundedScalarTransport<'_, '_> {
         for cell in 0..self.native.mesh.tris.len() {
             poll(cancelled)?;
             let r: [f64; 3] = core::array::from_fn(|i| {
-                self.native.boundary_load[3 * cell + i] - work.high_increment[3 * cell + i]
+                native.boundary_load[3 * cell + i] - work.high_increment[3 * cell + i]
             });
             let average = 0.25 * sum(r.into_iter());
             for (i, &residual) in r.iter().enumerate() {
@@ -542,10 +594,12 @@ impl PreparedBoundedScalarTransport<'_, '_> {
         for (index, reservoir) in self.reservoirs.iter().enumerate() {
             poll(cancelled)?;
             let i = reservoir.dof;
-            work.low_sum[i] = work.low_sum[i]
-                + Dd::from_f64((dt * reservoir.incoming / self.mass[i]) * reservoir.value);
+            let value =
+                native.boundary_fluxes[reservoir.face].reservoir_values[reservoir.quadrature];
+            work.low_sum[i] =
+                work.low_sum[i] + Dd::from_f64((dt * reservoir.incoming / self.mass[i]) * value);
             let flux = finite(
-                (dt * reservoir.diffusion) * (old[i] - reservoir.value),
+                (dt * reservoir.diffusion) * (old[i] - value),
                 "scalar boundary correction",
             )?;
             work.reservoir_flux[index] = flux;
@@ -575,35 +629,64 @@ impl PreparedBoundedScalarTransport<'_, '_> {
                 work.negative[i],
             )?;
         }
+        Ok(())
+    }
+
+    fn pair_factor(&self, index: usize, work: &Work) -> f64 {
+        let pair = &self.pairs[index];
+        if work.pair_flux[index] >= 0.0 {
+            work.r_plus[pair.i].min(work.r_minus[pair.j])
+        } else {
+            work.r_minus[pair.i].min(work.r_plus[pair.j])
+        }
+    }
+
+    fn reservoir_factor(&self, index: usize, work: &Work) -> f64 {
+        let reservoir = &self.reservoirs[index];
+        if work.reservoir_flux[index] >= 0.0 {
+            work.r_plus[reservoir.dof]
+        } else {
+            work.r_minus[reservoir.dof]
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_euler(
+        &self,
+        native: &PreparedScalarTransport<'_>,
+        old: &[f64],
+        output: &mut [f64],
+        work: &mut Work,
+        common_factors: Option<(&[f64], &[f64])>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<usize> {
         let mut limited = 0;
-        for (pair, &flux) in self.pairs.iter().zip(&work.pair_flux) {
+        for (index, pair) in self.pairs.iter().enumerate() {
             poll(cancelled)?;
-            let factor = if flux >= 0.0 {
-                work.r_plus[pair.i].min(work.r_minus[pair.j])
-            } else {
-                work.r_minus[pair.i].min(work.r_plus[pair.j])
-            };
+            let flux = work.pair_flux[index];
+            let factor = common_factors
+                .map_or_else(|| self.pair_factor(index, work), |(pairs, _)| pairs[index]);
             limited += usize::from(flux != 0.0 && factor < 1.0);
             let corrected = Dd::from_f64(factor * flux);
             work.correction[pair.i] = work.correction[pair.i] + corrected;
             work.correction[pair.j] = work.correction[pair.j] - corrected;
         }
-        for (reservoir, &flux) in self.reservoirs.iter().zip(&work.reservoir_flux) {
+        for (index, reservoir) in self.reservoirs.iter().enumerate() {
             poll(cancelled)?;
-            let factor = if flux >= 0.0 {
-                work.r_plus[reservoir.dof]
-            } else {
-                work.r_minus[reservoir.dof]
-            };
+            let flux = work.reservoir_flux[index];
+            let factor = common_factors.map_or_else(
+                || self.reservoir_factor(index, work),
+                |(_, reservoirs)| reservoirs[index],
+            );
+            let value =
+                native.boundary_fluxes[reservoir.face].reservoir_values[reservoir.quadrature];
             limited += usize::from(flux != 0.0 && factor < 1.0);
             work.correction[reservoir.dof] =
                 work.correction[reservoir.dof] + Dd::from_f64(factor * flux);
             // Actual additional outward RATE. SSPRK2 integrates this alongside
             // the original native physical flux at the SAME Euler-stage state.
             work.boundary_extra[reservoir.face] = work.boundary_extra[reservoir.face]
-                + Dd::from_f64(
-                    (1.0 - factor) * reservoir.diffusion * (old[reservoir.dof] - reservoir.value),
-                );
+                + Dd::from_f64((1.0 - factor) * reservoir.diffusion * (old[reservoir.dof] - value));
         }
         for i in 0..old.len() {
             output[i] = work.low[i] + work.correction[i].to_f64() / self.mass[i];
@@ -615,12 +698,13 @@ impl PreparedBoundedScalarTransport<'_, '_> {
 
     fn accumulate_boundaries(
         &self,
+        native: &PreparedScalarTransport<'_>,
         state: &[f64],
         weight_s: f64,
         extra: &[Dd],
         total: &mut [[Dd; 3]],
     ) -> Result<()> {
-        for (index, face) in self.native.boundary_fluxes.iter().enumerate() {
+        for (index, face) in native.boundary_fluxes.iter().enumerate() {
             let local = &state[3 * face.cell..3 * face.cell + 3];
             let advection =
                 sum(face.advection.iter().zip(local).map(|(a, c)| a * c)) + face.advective_load;
