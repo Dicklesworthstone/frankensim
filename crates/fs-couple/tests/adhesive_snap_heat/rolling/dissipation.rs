@@ -1,5 +1,8 @@
 //! G1/G3: plastic rolling heat, separate spring release and finite calorics.
 
+#[path = "dissipation/timed.rs"]
+mod timed;
+
 use super::{CRITICAL_SHIFT, binding, close, controls, curves, events, loaded, source, thermal};
 use fs_couple::friction_heat::adhesive::snap::{
     JkrSnapHeatError,

@@ -10,6 +10,7 @@
 //! As with the snap owner, this is a frozen-source, same-time impulse split.
 //! The partition is supplied explicitly; it is not a solved contact conduction
 //! law. Temperature feedback and transport between physical events are separate.
+//! [`timed`] transports rolling heat over the actual thermal interval.
 
 use super::{
     JkrRollingSnapHeat, JkrRollingSnapHeatCandidate, JkrRollingSnapHeatError,
@@ -26,6 +27,9 @@ use std::collections::BTreeMap;
 
 /// Atomic native-body motion and all three source-owned heat channels.
 pub mod native;
+
+/// Plastic rolling power with native conduction, cooling and scheduled events.
+pub mod timed;
 
 /// Original snap receiver binding plus an explicit destination for plastic
 /// rolling loss. The new ledger begins at this binding; previously accumulated

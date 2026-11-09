@@ -11024,3 +11024,15 @@ source with real fs-math/fs-evidence/fs-qty. Four full pHS integration groups
 specify analytic recovery/heat, original nonlinear ODE refinement, conditioning
 and rollback, and complete-state capacity. Those full fs-couple integration
 groups remain unrun under the existing dependency build resource constraint.
+
+## Rolling plastic heat over physical thermal time
+
+`friction_heat::adhesive::snap::rolling::dissipation::timed` adds positive-duration proposals and applications to the complete original rolling heat owner. Accepted contact and thermal clocks must match exactly. Original scheduled thermal events at the start precede the prescribed normal/area update and its caloric release impulse. The original monotone angular increment then supplies only its irreversible rolling loss as explicit interval-average power into the pinned finite receiving cells.
+
+Native thermal conduction, reservoir cooling, ordinary heat sources and scheduled changes evolve over the same actual interval with their original caloric bounds and bounded substep work. The rolling source integrates power over accepted native durations and independently checks each receiving-cell total against the declared partition. Clock or power rounding must satisfy the explicit transfer gate; no endpoint heat correction or guessed dissipation repairs it. Source memory, distinct cumulative loss/release ledgers, caloric cells and accepted end time publish together only after every source, transport, energy and cancellation gate admits.
+
+The combined transfer audit adds original compensated relative native audits and independently checked contact-transfer defects. Its absolute gate keeps normal partition, normal caloric, transport and per-cell rolling defects separate. Large rounded aggregate formation enthalpies are not subtracted to invent a different residual. The report exposes initial events, normal impulse, distributed rolling loss, actual injected heat, ordinary transport heat and the advanced thermal interval.
+
+This is a frozen-source split with prescribed normal loading at interval start and average-power reconstruction of a monotone rolling step. Temporal refinement is required for within-step transients. Contact heat partition and thermal topology remain explicit caller-selected physics; temperature feedback and reciprocal contact conductance are separate operations.
+
+Four focused integration cases cover independent two-cell conduction/cooling eigenmodes, snap followed by a scheduled cooling change, budget/final-callback/stale-clock rollback, and finite caloric refusal. Pinned `rustfmt --check` passed. These integration cases were not compiled or executed under this session's resource ceiling.
