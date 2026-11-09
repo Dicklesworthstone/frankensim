@@ -23373,3 +23373,37 @@ negate the imaginary part. Source validity and full-form passivity remain on
 the original material/projection owners. Existing internal tangents and
 arithmetic are unchanged. All six original spectrum tests passed in a native
 standalone module build, including extreme-rate/time and subnormal controls.
+
+
+## Intrinsic rate-dependent felt in strain and stress units
+
+`fiber::felt_rate::RateFelt` composes the original `WoolFelt` nonlinear,
+unilateral compaction envelope with up to eight positive series Kelvin creep
+arms. Parameters use Pa and Pa s; state uses engineering strain and energy
+density. Geometry, instrument identity, fitted defaults and measured-data
+authority remain with the consumer. With no arms, original strain-driven
+stress, tangent and hysteresis remain bit-for-bit unchanged.
+
+A prepared duration caches the original exponential branch response and loss
+factors. The strain-driven response solves one monotone scalar equation and
+returns its consistent tangent, every original creep strain and a separate
+trial checkpoint. Stress control follows the original spring inverse and
+exact held-stress creep, including free recovery after stress removal. Exact
+repeated stress reuses the committed spring state and cannot create spurious
+new compaction. Invalid parameters, unresolved physical increments, failed
+work accounts and domain refusals leave the caller's state unchanged.
+
+Work integrates the declared quasistatic spring path plus the common
+held-stress Kelvin path. Recoverable spring/arm storage, direct positive
+Kelvin heat and independent original compaction heat are separate accounts;
+heat is never defined by subtracting stored energy from work. Under a varying
+strain command the endpoint held-stress discretization is first order and
+requires time refinement. Zero-force control chooses the residual spring
+strain; it does not determine the width of an open physical gap.
+
+Focused native source tests cover 10,000 histories of unchanged WoolFelt
+behavior, analytical creep/recovery and heat, consistent tangents, independent
+continuous-ODE refinement, rate-dependent stiffness, stationary stress and
+atomic numerical/domain refusals. These synthetic checks do not supply
+coupon calibration, G2 experimental evidence or consumer geometry. The shared
+owner does not yet replace the example and impact-specific adapters.

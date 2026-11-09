@@ -7,6 +7,9 @@ use crate::{MaterialAdmissibility, MaterialError};
 use fs_evidence::{Ambition, ModelCard, ValidityDomain};
 use fs_math::det;
 
+/// Intrinsic unilateral felt with passive series creep and physical heat.
+pub mod felt_rate;
+
 /// A uniaxial (fiber) constitutive law with hysteretic state.
 pub trait Uniaxial {
     /// Committed internal variables.
