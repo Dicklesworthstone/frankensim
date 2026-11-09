@@ -82,8 +82,9 @@
 //! ([`crate::turbulence_noise::ConstrictionNoise::new_fricative`]) at the constriction `k` (0-based section) opening into
 //! the section `j`, which the card names (MB 15828: the largest section between `k` and the lips): a series pressure at
 //! the junction after section `k`, reaching the mouth flow and the island's returned wave through the junction lines
-//! ([`crate::driving_point::outlet::junction_source_lines`]), with the constriction's Borda-Carnot drop in the island's
-//! junction solve ([`GlottalIsland::with_constriction`]). On the flow rig its drop and jet speed are those of the held
+//! ([`crate::driving_point::outlet::junction_source_lines`]), with the constriction's Borda-Carnot drop and Shadle's
+//! viscous term `K3 U` (MB 18431; [`crate::glottis::shadle_constriction_k3`]) in the island's junction solve
+//! ([`GlottalIsland::with_constriction`]). On the flow rig its drop and jet speed are those of the held
 //! flow through the orifice and the constriction at the schedule's pressure ([`GlottalIsland::orifice_held_flow_m3_s`]);
 //! on the folds, which have no held flow, they are those of the island's own flow of the step before (the source reads
 //! the flow it does not yet change, as the glottal sources do), and the source is silent while that flow is not positive
@@ -97,7 +98,7 @@
 //! card's section `k`'s centre as a fraction of the tract's length from the glottis; its own junction lines after that
 //! section, switched with the island's and crossfaded the same
 //! way, and its own constriction, `A_k` that section and `A_j` the shape's largest section after it: the law's `sigma`,
-//! `d` and cutoff from the switch's step on, and the island's Borda-Carnot factor with them
+//! `d` and cutoff from the switch's step on, and the island's Borda-Carnot factor and K3 with them
 //! ([`GlottalIsland::with_constriction_keyframes`]; neither is faded). A shape with no expansion after its `k`, the
 //! card's own included (a word's card is its vowel), has `sigma >= 1`, where the printed law drives no band, and the
 //! island takes no constriction on it: the source forms and turns off through the law as the tract closes and opens,
@@ -109,8 +110,8 @@
 //! there; without the field a card is bit-identical to one written before it existed. Stevens' `p_s` is defined at the
 //! obstacle (Shadle's source placement), so after `stevens` a fifth field `m` (MB 17712) puts the junction lines after
 //! section `m` instead of `k`, `k <= m` and a section after `m`: the obstacle the card names (the incisors, measured on
-//! the tract's own surface), with the law's level still read from the flow and `A_k` and the Borda-Carnot drop still at
-//! `k`; without it `m = k`, bit-identical. An obstacle section is refused with `tract_move`: a moving shape's obstacle has
+//! the tract's own surface), with the law's level still read from the flow and `A_k` and the Borda-Carnot drop and K3
+//! still at `k`; without it `m = k`, bit-identical. An obstacle section is refused with `tract_move`: a moving shape's obstacle has
 //! no correspondence built. The printed source is the source in Shadle's 5.067 cm^2 tube; the law carries Shadle's eq. 3.3
 //! duct-area factor (MB 18252; [`crate::turbulence_noise::shadle_duct_area_factor`]): at the junction after section `m`
 //! the source is the printed one times `A_tube / A_m`, `A_m` the area of section `m` (on a moving tract, where `m = k`,
@@ -2467,7 +2468,7 @@ impl VoicePerformance {
                     .switch(switch.shape, switch.fade)
                     .map_err(|e| format!("moving mouth-flow switch refused: {e}"))?;
                 // The fricative's lines take the same crossfade and its law the new shape's constriction (MB 16735
-                // piece 2); the island has already taken that shape's Borda-Carnot factor in `switch_tract`.
+                // piece 2); the island has already taken that shape's Borda-Carnot factor and K3 in `switch_tract`.
                 if let Some(source) = self.fricative.as_mut() {
                     if switch.shape >= source.shapes.len() {
                         return Err("a moving tract switch names a shape the fricative source does not have".into());
@@ -4726,7 +4727,7 @@ mod tests {
     /// The fricative source on the folds (MB 16735 piece 1): it renders finite, reaches the radiated pressure, one seed
     /// gives one noise and another seed another, and it reads the island's own flow: with no lung pressure there is no
     /// flow, no jet and no noise, so the card renders as the same card without the row's noise would (the constriction's
-    /// Borda-Carnot drop stays in the island's solve either way, and at zero flow it takes nothing).
+    /// Borda-Carnot drop and K3 term stay in the island's solve either way, and at zero flow they take nothing).
     #[test]
     fn fricative_on_the_folds_reads_the_islands_own_flow() {
         let voiced = render(&fixture(""));

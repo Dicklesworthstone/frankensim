@@ -742,10 +742,14 @@ pub struct GlottalIsland {
     /// The opt-in supraglottal constriction's kinetic factor `(1/A_k - 1/A_j)^2` [m^-4]
     /// ([`GlottalIsland::with_constriction`]), in series with the valve's own; `None` adds nothing.
     constriction_kinetic: Option<f64>,
-    /// A moving tract's constriction factor of every shape, shape 0 first, `None` for a shape with no expansion after
-    /// its constriction ([`GlottalIsland::with_constriction_keyframes`]); [`GlottalIsland::switch_tract`] puts the new
-    /// shape's in [`Self::constriction_kinetic`]. `None` keeps the one factor for the whole render.
-    constriction_shapes: Option<Vec<Option<f64>>>,
+    /// The supraglottal constriction's viscous term `K3` [Pa s/m^3] ([`shadle_constriction_k3`]; MB 18431), in series
+    /// with every junction solve's load beside its kinetic factor; `0.0` without a constriction, which adds nothing.
+    constriction_viscous: f64,
+    /// A moving tract's constriction of every shape, shape 0 first, as `(kinetic factor, K3)`, `None` for a shape with no
+    /// expansion after its constriction ([`GlottalIsland::with_constriction_keyframes`]); [`GlottalIsland::switch_tract`]
+    /// puts the new shape's in [`Self::constriction_kinetic`] and [`Self::constriction_viscous`]. `None` keeps the one
+    /// constriction for the whole render.
+    constriction_shapes: Option<Vec<Option<(f64, f64)>>>,
 }
 
 /// `eta_k`, the nonlinear coefficient of eq 1 (p. 1237), printed as 100 for both masses (p. 1250) [m^-2]. The print
@@ -1072,6 +1076,51 @@ fn junction_flow(a_coef: f64, z_series: f64, p_drive: f64) -> f64 {
     }
     let mag = 2.0 * a_coef * p / (az + det::sqrt(az * az + 4.0 * a_coef * p));
     if p_drive < 0.0 { -mag } else { mag }
+}
+
+/// Shadle's printed viscous coefficients `K3` of the circular plugs 1.0 cm long, `(A_c [m^2], K3 [Pa s/m^3])` in rising
+/// area: 175.7, 8.7 and 0.88 g/s-cm^4 at 0.020, 0.079 and 0.318 cm^2 (C. H. Shadle, The acoustics of fricative consonants,
+/// MIT RLE TR 506, 1985, Table 2.2, p. 38; 1 g/s-cm^4 = 1e5 Pa s/m^3), each fitted to eq. 2.2, `Delta p = K2 rho U^2 /
+/// (2 A_c^2) + K3 U`, over 50-690 cm^3/s (p. 37). Length 1.0 cm is the only one printed at all three areas.
+pub const SHADLE_K3_CIRCLE_LC_1CM: [(f64, f64); 3] = [(0.020e-4, 175.7e5), (0.079e-4, 8.7e5), (0.318e-4, 0.88e5)];
+
+/// A supraglottal constriction's viscous term `K3` [Pa s/m^3] at its section `A_k` (MB 18431, rule R1): log-log between
+/// the two rows of [`SHADLE_K3_CIRCLE_LC_1CM`] that bracket `A_k`, and exactly the printed value at a row. Circular rows
+/// because the tract line treats every section as a circle of its area. Outside the printed 0.020-0.318 cm^2 it
+/// continues from the nearest row by Shadle's stated rule, that K3 "should be proportional to constriction length and
+/// inversely proportional to the square of the constriction area" (p. 38): `K3_row (A_row / A_k)^2`. That continuation
+/// is an extrapolation, and Shadle warns of it (p. 39): "Recognize that extrapolation to other constrictions or ranges of
+/// U may be inaccurate." `None` for an area that is not finite and positive.
+#[must_use]
+pub fn shadle_constriction_k3(area_k_m2: f64) -> Option<f64> {
+    if !(area_k_m2.is_finite() && area_k_m2 > 0.0) {
+        return None;
+    }
+    let rows = &SHADLE_K3_CIRCLE_LC_1CM;
+    let (a_first, k_first) = rows[0];
+    let (a_last, k_last) = rows[rows.len() - 1];
+    if area_k_m2 < a_first {
+        let ratio = a_first / area_k_m2;
+        return Some(k_first * ratio * ratio);
+    }
+    if area_k_m2 > a_last {
+        let ratio = a_last / area_k_m2;
+        return Some(k_last * ratio * ratio);
+    }
+    for pair in rows.windows(2) {
+        let ((a_0, k_0), (a_1, k_1)) = (pair[0], pair[1]);
+        if area_k_m2 == a_0 {
+            return Some(k_0);
+        }
+        if area_k_m2 == a_1 {
+            return Some(k_1);
+        }
+        if area_k_m2 < a_1 {
+            let along = det::ln(area_k_m2 / a_0) / det::ln(a_1 / a_0);
+            return Some(k_0 * det::exp(along * det::ln(k_1 / k_0)));
+        }
+    }
+    None
 }
 
 /// The two-mass glottal channel of Ishizaka and Flanagan 1972 at one
@@ -1649,6 +1698,7 @@ impl GlottalIsland {
             upstream: None,
             orifice_area_m2: None,
             constriction_kinetic: None,
+            constriction_viscous: 0.0,
             constriction_shapes: None,
         })
     }
@@ -1763,7 +1813,7 @@ impl GlottalIsland {
     /// # Errors
     /// An island without keyframes, an unknown shape, or a switch during a running crossfade, by name.
     pub fn switch_tract(&mut self, index: usize, fade_samples: usize) -> Result<(), GlottisError> {
-        let kinetic = match &self.constriction_shapes {
+        let constriction = match &self.constriction_shapes {
             Some(menu) => Some(*menu.get(index).ok_or(GlottisError::Invalid {
                 what: "a tract keyframe switch names a shape with no constriction",
             })?),
@@ -1772,9 +1822,10 @@ impl GlottalIsland {
         self.line
             .switch(index, fade_samples)
             .map_err(|e| keyframe_refusal(e, "a tract keyframe switch was refused"))?;
-        // A moving constriction (with_constriction_keyframes): the new shape's factor, or none, from this step on.
-        if let Some(factor) = kinetic {
-            self.constriction_kinetic = factor;
+        // A moving constriction (with_constriction_keyframes): the new shape's factor and K3, or none, from this step on.
+        if let Some(shape) = constriction {
+            self.constriction_kinetic = shape.map(|(kinetic, _)| kinetic);
+            self.constriction_viscous = shape.map_or(0.0, |(_, viscous)| viscous);
         }
         Ok(())
     }
@@ -2118,9 +2169,12 @@ impl GlottalIsland {
 
     /// Put a supraglottal constriction's drop in series with the valve (MB 15368, rulings 15773 and 15828; NavyTower
     /// 15491): the section `A_k` opening into the duct `A_j`, a sudden expansion whose loss is Borda-Carnot's,
-    /// `rho U^2 (1/A_k - 1/A_j)^2 / 2`. The junction solve then takes `1/a_eff = 1/a + 1/a_k` with `a_k = 2 / (rho (1/A_k -
-    /// 1/A_j)^2)`, on every valve. The tract line is unchanged: the constriction's area is already a section of it, and
-    /// only the jet's kinetic loss there is added. Without this call every junction solve takes its old arithmetic.
+    /// `rho U^2 (1/A_k - 1/A_j)^2 / 2`, and Shadle's measured viscous term `K3 U` of the constriction
+    /// ([`shadle_constriction_k3`] at `A_k`; MB 18431). The junction solve then takes `1/a_eff = 1/a + 1/a_k` with `a_k =
+    /// 2 / (rho (1/A_k - 1/A_j)^2)`, and `K3` in series with its load `Z`, on every valve: the line's small-signal
+    /// resistance at the junction becomes `rho K U + K3`, Shadle's incremental resistance (TR 506, p. 39). The tract line
+    /// is unchanged: the constriction's area is already a section of it, and only the jet's kinetic loss and the viscous
+    /// term there are added. Without this call every junction solve takes its old arithmetic.
     ///
     /// # Errors
     /// An island that has stepped or already has a constriction, or areas that are not finite with `0 < A_k < A_j` (an
@@ -2140,18 +2194,23 @@ impl GlottalIsland {
                 what: "the Borda-Carnot loss needs an expansion: 0 < A_k < A_j, both finite",
             });
         }
+        let viscous = shadle_constriction_k3(area_k_m2).ok_or(GlottisError::Invalid {
+            what: "a supraglottal constriction's K3 needs a finite positive A_k",
+        })?;
         let gap = 1.0 / area_k_m2 - 1.0 / area_j_m2;
         self.constriction_kinetic = Some(gap * gap);
+        self.constriction_viscous = viscous;
         Ok(self)
     }
 
     /// Give an island with a moving tract ([`Self::with_tract_keyframes`]) the supraglottal constriction `(A_k, A_j)` of
     /// every shape, shape 0 first, in the tract line's order (MB 16735 piece 2), in place of [`Self::with_constriction`]'s
-    /// one. A shape whose `A_j` is wider than its `A_k` takes `(1/A_k - 1/A_j)^2` in series, exactly as there; a shape
-    /// with no section after `k` wider than `A_k` has no sudden expansion, so no jet and no Borda-Carnot loss: it takes no
-    /// constriction, and every junction solve on it takes the old arithmetic. Shape 0's is the island's from the first
-    /// step; [`Self::switch_tract`] puts the new shape's in from the switch's step on, while the tract line crossfades
-    /// its reflected wave: the factor itself is not faded. Without this call every switch keeps the island's one factor.
+    /// one. A shape whose `A_j` is wider than its `A_k` takes `(1/A_k - 1/A_j)^2` and its own `K3`
+    /// ([`shadle_constriction_k3`] at its `A_k`) in series, exactly as there; a shape with no section after `k` wider than
+    /// `A_k` has no sudden expansion, so no jet and no Borda-Carnot loss: it takes no constriction, neither term, and
+    /// every junction solve on it takes the old arithmetic. Shape 0's is the island's from the first step;
+    /// [`Self::switch_tract`] puts the new shape's in from the switch's step on, while the tract line crossfades its
+    /// reflected wave: neither term is faded. Without this call every switch keeps the island's one constriction.
     ///
     /// # Errors
     /// An island that has stepped or already has a constriction (either form), a count that is not the tract line's
@@ -2182,28 +2241,38 @@ impl GlottalIsland {
                     what: "a moving constriction's areas must be finite and positive",
                 });
             }
+            let viscous = shadle_constriction_k3(area_k_m2).ok_or(GlottisError::Invalid {
+                what: "a moving constriction's K3 needs a finite positive A_k",
+            })?;
             menu.push((area_j_m2 > area_k_m2).then(|| {
                 let gap = 1.0 / area_k_m2 - 1.0 / area_j_m2;
-                gap * gap
+                (gap * gap, viscous)
             }));
         }
-        self.constriction_kinetic = menu[0];
+        self.constriction_kinetic = menu[0].map(|(kinetic, _)| kinetic);
+        self.constriction_viscous = menu[0].map_or(0.0, |(_, viscous)| viscous);
         self.constriction_shapes = Some(menu);
         Ok(self)
     }
 
-    /// The quasi-steady flow [m^3/s] through the orifice and any constriction at the held drive `p_held_pa`: `sqrt(2 P /
-    /// (rho (K_o + (1/A_k - 1/A_j)^2)))` with the orifice's eq 6 factor `K_o` ([`Self::with_orifice`]), the junction
-    /// solve with no series impedance (the port's, the tract's and the airway's are dynamic and viscous; the render's own
-    /// mean flow is the measure of what they take). `None` without an orifice (a fold's flow has no held value) or for a
-    /// drive that is not positive and finite.
+    /// The quasi-steady flow [m^3/s] through the orifice and any constriction at the held drive `p_held_pa`: the root of
+    /// `P = rho K U^2 / 2 + K3 U` with `K = K_o + (1/A_k - 1/A_j)^2`, the orifice's eq 6 factor `K_o`
+    /// ([`Self::with_orifice`]) and the constriction's `K3` ([`Self::with_constriction`]), `U = (-K3 + sqrt(K3^2 + 2 rho K
+    /// P)) / (rho K)`, taken in the junction solve's own rationalized form; without a constriction `sqrt(2 P / (rho K_o))`
+    /// as before, bit for bit. It is the junction solve with no other series impedance (the port's, the tract's and the
+    /// airway's are dynamic and viscous; the render's own mean flow is the measure of what they take). `None` without an
+    /// orifice (a fold's flow has no held value) or for a drive that is not positive and finite.
     #[must_use]
     pub fn orifice_held_flow_m3_s(&self, p_held_pa: f64) -> Option<f64> {
         let area = self.orifice_area_m2?;
         if !(p_held_pa > 0.0 && p_held_pa.is_finite()) {
             return None;
         }
-        Some(det::sqrt(2.0 * p_held_pa / (self.rho * self.orifice_kinetic(area))))
+        let kinetic = self.orifice_kinetic(area);
+        Some(match self.constriction_kinetic {
+            Some(_) => junction_flow(2.0 / (self.rho * kinetic), self.constriction_viscous, p_held_pa),
+            None => det::sqrt(2.0 * p_held_pa / (self.rho * kinetic)),
+        })
     }
 
     /// Add `p_pa` to the wave the tract returns to the island at its next step (a source inside the tract, delivered
@@ -2307,8 +2376,9 @@ impl GlottalIsland {
             Some(ch) if ch.open() => {
                 let inertance = ch.series_inertance();
                 let drive = p_drive + self.momentum_pa_s / self.dt;
-                // A supraglottal constriction adds its Borda-Carnot factor to the channel's (with_constriction);
-                // without one the coefficient is the channel's own, bit for bit.
+                // A supraglottal constriction adds its Borda-Carnot factor to the channel's and its K3 to the load
+                // (with_constriction); without one the coefficient is the channel's own and the K3 is 0.0, which
+                // leaves Z unchanged, bit for bit.
                 let a_coef = match self.constriction_kinetic {
                     Some(kinetic_k) => 2.0 / (self.rho * (ch.kinetic() + kinetic_k)),
                     None => 2.0 / (self.rho * ch.kinetic()),
@@ -2316,7 +2386,11 @@ impl GlottalIsland {
                 let u = if drive.abs() > 1.0e-12 {
                     junction_flow(
                         a_coef,
-                        self.zc_flow + port.impedance + ch.series_resistance() + inertance / self.dt,
+                        self.zc_flow
+                            + port.impedance
+                            + ch.series_resistance()
+                            + inertance / self.dt
+                            + self.constriction_viscous,
                         drive,
                     )
                 } else {
@@ -2334,7 +2408,7 @@ impl GlottalIsland {
                 };
                 let u = junction_flow(
                     a_coef,
-                    self.zc_flow + port.impedance + self.viscous_resistance(flow_gap),
+                    self.zc_flow + port.impedance + self.viscous_resistance(flow_gap) + self.constriction_viscous,
                     p_drive,
                 );
                 (u, 0.0)
@@ -2387,12 +2461,16 @@ impl GlottalIsland {
     }
 
     /// [`Self::step_port`] through the fixed orifice of `area` ([`Self::with_orifice`]): the same junction solve with `a =
-    /// 2 / (rho (K_o + constriction))` against the port, the tract's `zc` and the port's impedance, the same scatter into
-    /// the tract line; no fold force, no fold step.
+    /// 2 / (rho (K_o + constriction))` against the port, the tract's `zc`, the port's impedance and any constriction's
+    /// `K3`, the same scatter into the tract line; no fold force, no fold step.
     fn step_orifice(&mut self, port: UpstreamPort, area: f64) -> Result<GlottalFrame, GlottisError> {
         let p_drive = port.open_circuit_pa - 2.0 * self.p_minus;
         let flow = if p_drive.abs() > 1.0e-12 {
-            junction_flow(2.0 / (self.rho * self.orifice_kinetic(area)), self.zc_flow + port.impedance, p_drive)
+            junction_flow(
+                2.0 / (self.rho * self.orifice_kinetic(area)),
+                self.zc_flow + port.impedance + self.constriction_viscous,
+                p_drive,
+            )
         } else {
             0.0
         };
@@ -5353,7 +5431,10 @@ mod glottis_tests {
     /// Against an open tract the steady flow at a held drive is the held junction value (an ideally open tract returns
     /// `-p+` at DC, so the port's `zc` cancels and `U^2 / a = P`), to the tract's viscous share. The fold's card reaches
     /// no number: two cards, one render, bit for bit. The constriction lowers the held flow exactly by its series factor
-    /// and the steady flow with it. Every refusal is by name, a hole wider than the tract's inlet among them.
+    /// and Shadle's K3 (MB 18431: the root of `P = rho K U^2 / 2 + K3 U`, K3 written out here from Table 2.2's circular
+    /// 1.0 cm rows) and the steady flow with it. Before K3 this fixture expected `sqrt(2 P / (rho K))`; it is re-derived
+    /// from the same data with the K3 closed form, the tolerance unchanged, and both values are printed. Every refusal is
+    /// by name, a hole wider than the tract's inlet among them.
     #[test]
     fn a_fixed_orifice_and_a_constriction_take_the_held_junction_flow_and_the_fold_reaches_nothing() {
         let hole = core::f64::consts::PI * 0.005 * 0.005;
@@ -5380,7 +5461,14 @@ mod glottis_tests {
         let (a_k, a_j) = (0.134e-4, 3.06e-4);
         let (held_k, flows_k) = run(1.0, Some((a_k, a_j)));
         let factor = (1.0 / a_k - 1.0 / a_j) * (1.0 / a_k - 1.0 / a_j);
-        let expected = (2.0 * drive / (air().density * (k_o + factor))).sqrt();
+        // K3 at A_k: log-log between the printed 0.079 and 0.318 cm^2 rows, 8.7 and 0.88 g/s-cm^4 (1 g/s-cm^4 = 1e5 Pa s/m^3).
+        let k3 = 8.7e5 * (a_k / 0.079e-4).powf((0.88_f64 / 8.7).ln() / (0.318_f64 / 0.079).ln());
+        let rho_k = air().density * (k_o + factor);
+        let expected_before_k3 = (2.0 * drive / rho_k).sqrt();
+        let expected = (-k3 + (k3 * k3 + 2.0 * rho_k * drive).sqrt()) / rho_k;
+        println!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"orifice-constriction-held-flow-k3\",\"k3_pa_s_m3\":{k3:e},\"expected_before_k3_m3_s\":{expected_before_k3:e},\"expected_m3_s\":{expected:e},\"held_k_m3_s\":{held_k:e}}}"
+        );
         assert!((held_k / expected - 1.0).abs() < 1.0e-12, "held {held_k} against {expected}");
         assert!(held_k < 0.2 * held, "the /s/ constriction carries the drop: {held_k} against {held}");
         assert!((steady(&flows_k) / held_k - 1.0).abs() < 0.02, "steady {} against the held {held_k}", steady(&flows_k));
@@ -5404,6 +5492,66 @@ mod glottis_tests {
         assert!(island.add_returning_wave_pa(f64::NAN).is_err());
         island.add_returning_wave_pa(3.0).expect("finite wave");
         assert_eq!(island.p_minus, 3.0, "the wave joins the next step's returned wave");
+    }
+
+    /// Shadle's viscous term in the junction solve (MB 18431; T1 and T2 of PREDICT-k3.txt): an orifice and the /s/
+    /// constriction `(0.134, 3.06) cm^2` with the rule's K3. A flow `U* = 5.0e-4 m^3/s` is planted, `P* = rho K U*^2 / 2
+    /// + K3 U*`, eq. 2.2 written out with Borda-Carnot's kinetic factor. The held flow at `P*` is `U*`, and 8192 steps at
+    /// `P*` settle to it within the fixture's steady-flow bound. The held solve's incremental resistance `dP/dU` at `U*`,
+    /// by a central difference, is `rho K U* + K3`, Shadle's `R_i` (TR 506, p. 39).
+    #[test]
+    fn a_constriction_carries_shadles_k3_in_the_held_flow_and_every_step() {
+        let hole = core::f64::consts::PI * 0.005 * 0.005;
+        let inlet = core::f64::consts::PI * 0.010 * 0.010;
+        let n = hole / inlet;
+        let k_o = (1.0 - 2.0 * n * (1.0 - n)) / (hole * hole);
+        let (a_k, a_j) = (0.134e-4, 3.06e-4);
+        let factor = (1.0 / a_k - 1.0 / a_j) * (1.0 / a_k - 1.0 / a_j);
+        let k3 = shadle_constriction_k3(a_k).expect("the rule's K3");
+        let rho_k = air().density * (k_o + factor);
+        let u_star = 5.0e-4;
+        let p_star = rho_k * u_star * u_star / 2.0 + k3 * u_star;
+        let mut island = island(false, 1.0)
+            .with_orifice(hole)
+            .expect("orifice")
+            .with_constriction(a_k, a_j)
+            .expect("constriction");
+        let held = |i: &GlottalIsland, p: f64| i.orifice_held_flow_m3_s(p).expect("held flow");
+        let u = held(&island, p_star);
+        assert!((u / u_star - 1.0).abs() < 1.0e-12, "held {u} against the planted {u_star} at {p_star} Pa");
+        let delta = 1.0e-4 * p_star;
+        let slope = 2.0 * delta / (held(&island, p_star + delta) - held(&island, p_star - delta));
+        let r_i = rho_k * u_star + k3;
+        assert!((slope / r_i - 1.0).abs() < 1.0e-6, "dP/dU {slope} against rho K U* + K3 = {r_i}");
+        let flows: Vec<f64> = (0..8192).map(|_| island.step(p_star).expect("step").flow_m3_s).collect();
+        let steady = flows[4096..].iter().sum::<f64>() / 4096.0;
+        assert!((steady / u_star - 1.0).abs() < 0.02, "steady {steady} against the planted {u_star}");
+    }
+
+    /// Rule R1 for Shadle's K3 (MB 18431; T3 of PREDICT-k3.txt, extended to one point each side of the printed range):
+    /// Table 2.2's circular 1.0 cm rows at their own areas, 3.647 g/s-cm^4 at the /s/ constriction's 0.134 cm^2, log-log
+    /// between rows (the geometric mean of two rows' areas takes the geometric mean of their K3), Shadle's `1 / A^2` from
+    /// the nearest row outside the range (0.010 and 0.5 cm^2), and no K3 for an area that is not finite and positive.
+    #[test]
+    fn shadles_k3_rule_is_the_printed_rows_log_log_between_and_one_over_area_squared_outside() {
+        let cgs = 1.0e5; // 1 g/s-cm^4 in Pa s/m^3
+        let k3 = |cm2: f64| shadle_constriction_k3(cm2 * 1.0e-4).expect("a K3");
+        let near = |got: f64, want: f64, tolerance: f64, what: &str| {
+            assert!((got / want - 1.0).abs() < tolerance, "{what}: {got} against {want}");
+        };
+        for (cm2, printed) in [(0.020, 175.7), (0.079, 8.7), (0.318, 0.88)] {
+            near(k3(cm2), printed * cgs, 1.0e-12, "a printed row");
+        }
+        for &(area, value) in &SHADLE_K3_CIRCLE_LC_1CM {
+            assert_eq!(shadle_constriction_k3(area), Some(value), "a row's own area takes its printed value bit for bit");
+        }
+        near(k3(0.134), 3.647 * cgs, 1.0e-3, "the /s/ constriction");
+        near(k3((0.020_f64 * 0.079).sqrt()), (175.7_f64 * 8.7).sqrt() * cgs, 1.0e-12, "log-log between rows");
+        near(k3(0.010), 175.7 * cgs * (0.020_f64 / 0.010).powi(2), 1.0e-12, "under the range, 1 / A^2 from 0.020 cm^2");
+        near(k3(0.5), 0.88 * cgs * (0.318_f64 / 0.5).powi(2), 1.0e-12, "over the range, 1 / A^2 from 0.318 cm^2");
+        for area in [0.0, -1.0e-5, f64::NAN, f64::INFINITY] {
+            assert!(shadle_constriction_k3(area).is_none(), "no K3 at {area}");
+        }
     }
 
     /// A moving constriction (MB 16735 piece 2; NavyTower 16887). Every shape's factor, shape 0 first, read through the
