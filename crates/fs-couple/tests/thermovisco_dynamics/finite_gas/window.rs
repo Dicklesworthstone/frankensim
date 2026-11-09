@@ -177,3 +177,118 @@ fn budget_source_failure_and_cancellation_publish_no_partial_window() {
         assert_eq!(input.initial.temperature_k(), 320.0);
     });
 }
+
+#[test]
+fn nonlinear_actual_wall_window_refines_to_independent_two_capacity_decay() {
+    scope(|cx, _| {
+        let source = sources(2.0, 1000.0, false, false);
+        let reservoir = gas(300.0, 1e-6);
+        let saved = reservoir.clone();
+        let body = boundary(&source, 0.0);
+        let input = input(&source, 320.0, 0.02);
+        let environment = FiniteGasThermalEnvironment {
+            gas: &reservoir,
+            body: &body,
+            gas_heat_j: 0.0,
+            gas_solve: gas_solve(),
+            exchange: exchange(1.0),
+            maximum_gas_temperature_increment_k: 20.0,
+        };
+        let wall = fs_couple::finite_gas_thermal::WallConvectionSolve {
+            temperature_increment_bracket_k: [-30.0, 30.0],
+            temperature_tolerance_k: 1e-9,
+            maximum_iterations: 128,
+        };
+        let cb = input.mass_kg * 2.0;
+        let cg = 2.5 * 100000.0 * reservoir.volume_m3() / 300.0;
+        let equilibrium = (cb * 320.0 + cg * 300.0) / (cb + cg);
+        let h0 = 80.0;
+        let slope = 0.02;
+        // h = h0[1 + slope(Twall - Teq)] gives
+        // dD/dt = -K D(1 + a D), D = Twall - Tgas.
+        // This exact solution uses neither the native step nor its time controller.
+        let a = slope * cg / (cb + cg);
+        let k = input.surface_area_m2 * h0 * (1.0 / cb + 1.0 / cg);
+        let decay = (-k * input.duration_s).exp();
+        let difference = 20.0 * decay / (1.0 + a * 20.0 * (1.0 - decay));
+        let exact = [
+            equilibrium + cg / (cb + cg) * difference,
+            equilibrium - cb / (cb + cg) * difference,
+        ];
+        let mut errors = Vec::new();
+        let mut refinements = Vec::new();
+        for tolerance in [2e-5, 5e-6, 1.25e-6] {
+            let control = controls(input.duration_s, tolerance);
+            let next = environment
+                .advance_adaptive_with_wall_convection(
+                    cx,
+                    input,
+                    control,
+                    wall,
+                    |_, temperature| {
+                        Ok::<_, core::convert::Infallible>(ConvectionCoefficient {
+                            coefficient_w_per_m2_k: h0
+                                * (1.0 + slope * (temperature - equilibrium)),
+                            source: temperature,
+                        })
+                    },
+                )
+                .unwrap();
+            let r = &next.report;
+            errors.push(
+                (next.state.temperature_k() - exact[0]).abs()
+                    + (r.next_gas.state().state().temperature - exact[1]).abs(),
+            );
+            refinements.push(r.samples.len());
+            assert!(r.rejected_comparisons > 0);
+            assert!(r.maximum_accepted_normalized_error <= 1.0);
+            assert!(r.sum_absolute_energy_defect_j <= control.energy_balance_tolerance_j);
+            close(
+                r.body_enthalpy_change_j + r.gas_internal_energy_change_j,
+                0.0,
+                control.energy_balance_tolerance_j,
+            );
+            close(r.entropy.balance_residual_j_k, 0.0, 1e-11);
+            assert_eq!(r.samples.last().unwrap().time_s, input.duration_s);
+            let mut previous = 0.0;
+            for sample in &r.samples {
+                let dt = sample.time_s - previous;
+                assert!(dt > 0.0);
+                let feedback = &sample.convection.source;
+                assert_eq!(feedback.source, feedback.temperature_k);
+                close(
+                    feedback.endpoint_source,
+                    sample.body_state.temperature_k(),
+                    1e-12,
+                );
+                assert!(feedback.temperature_residual_k.abs() <= wall.temperature_tolerance_k);
+                assert!(
+                    feedback.boundary_residual_j.abs() <= environment.exchange.source_tolerance_j
+                );
+                close(
+                    sample.convection.coefficient_w_per_m2_k,
+                    h0 * (1.0 + slope * (feedback.temperature_k - equilibrium)),
+                    1e-12,
+                );
+                close(
+                    sample.solid_to_gas_heat_j,
+                    dt * input.surface_area_m2
+                        * sample.convection.coefficient_w_per_m2_k
+                        * (sample.body_state.temperature_k() - sample.gas_temperature_k),
+                    environment.exchange.source_tolerance_j,
+                );
+                previous = sample.time_s;
+            }
+            assert!(r.samples.last().unwrap().convection.source.temperature_k < 315.0);
+            assert_eq!(reservoir, saved);
+        }
+        assert!(
+            errors.windows(2).all(|pair| pair[1] < pair[0]),
+            "{errors:?}"
+        );
+        assert!(
+            refinements.windows(2).all(|pair| pair[1] > pair[0]),
+            "{refinements:?}"
+        );
+    });
+}

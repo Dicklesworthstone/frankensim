@@ -13100,3 +13100,17 @@ The physical scope remains the original moderate-slope, statically relaxed
 in-plane film with a common proportional spectrum. This does not supply
 heterogeneous viscoelastic condensation, finite-strain 3-D tissue, wrinkling,
 in-plane inertia, shell/support exact propagation or thermal feedback.
+
+
+### Adaptive finite-gas windows with nonlinear wall feedback
+
+The original finite-gas thermal window controller can resolve convection at
+the actual wall and common gas endpoint in every coarse, fine and retried
+interval. It retains source-energy apportionment, local h/u/T/phase error
+estimation, accepted fine states and whole-window energy/entropy accounts.
+Source-aware callbacks receive the actual interval input. Initial/final
+admission hooks can refuse source/domain exits but cannot replace a native
+physical candidate; the interval controller remains private. Existing outer
+heat-bracket and gas-increment retry rules remain unchanged. Wall, material
+and source failures propagate without publishing a partial window. Temporal
+error control remains local and does not establish physical-model accuracy.

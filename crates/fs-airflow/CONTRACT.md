@@ -6529,3 +6529,18 @@ rejected proposals contribute numerical work only. Native forcing events land
 at their actual times, and final source samples follow target-time events.
 The original source, correlation, quasi-steady layer and fixed-topology limits
 remain active; temporal refinement does not establish empirical accuracy.
+
+
+### Adaptive source-conjugate finite-gas convection
+
+`ConjugateGasSurface::adaptive_isochoric_body_candidate` connects the original
+conducting surface to the existing adaptive finite-gas wall-feedback window.
+Each coarse, fine and retried proposal refreshes the actual surface and uses
+its own duration for the material/film source-work audit. Original caloric
+identity, pure-phase admission and conductivity support at actual initial and
+final native body temperatures remain mandatory, including insulation. Only
+accepted fine proposals contribute heat and retained source history. Existing
+fixed-speed and prescribed-flow films supply the native wall-window callback
+through their original isochoric coefficient API. Reference source identity,
+bulk-density velocity, full-area and disabled body-node radiation rules remain
+unchanged; no additional storage or independently integrated heat is added.

@@ -7,6 +7,9 @@
 use super::film::{FilmGasConvectionSample, FilmGasSource, FilmGasSurface};
 use super::mass_flow::MassFlowInput;
 use super::*;
+use fs_couple::finite_gas_thermal::window::{
+    FiniteGasWindowError, FiniteGasWindowReport, FiniteGasWindowSolve,
+};
 use fs_matdb::PropertyLineSlice;
 use fs_material::thermal::conduction::{
     ConvectiveLayerError, ConvectiveLayerResponse, LayerConductionConfig, ReservoirLayerGeometry,
@@ -453,6 +456,60 @@ impl<'a, 'm, F: ConjugateGasFilm> ConjugateGasSurface<'a, 'm, F> {
         Ok(next)
     }
 
+    fn admit_isochoric<G: IsochoricGasStorage<State = F::State>>(
+        &self,
+        environment: &FiniteGasThermalEnvironment<'_, G>,
+        body: UniformEnthalpyStepInput<'_>,
+    ) -> Result<(), ConjugateGasError> {
+        self.path.admit_input(body)?;
+        let area = self.area(environment.gas.state())?;
+        if !body.surface_area_m2.is_finite()
+            || body.surface_area_m2 <= 0.0
+            || (area != 0.0 && area != body.surface_area_m2)
+        {
+            return Err(ConjugateGasError::Invalid(
+                "isochoric conducting film requires full body coverage or explicit insulation",
+            ));
+        }
+        if !environment.body.transport.radiation_is_disabled() {
+            return Err(ConjugateGasError::Invalid(
+                "conducting gas surfaces require disabled body-node radiation",
+            ));
+        }
+        Ok(())
+    }
+
+    fn resolve_isochoric_coefficient(
+        &self,
+        cx: &Cx<'_>,
+        gas: &F::State,
+        body_temperature: f64,
+        body: UniformEnthalpyStepInput<'_>,
+        source_tolerance_j: f64,
+    ) -> Result<
+        ConvectionCoefficient<ConjugateGasConvectionSample<F::Sample, Temperature>>,
+        ConjugateGasError,
+    > {
+        let sample = self.resolve_at_temperature(
+            gas,
+            body_temperature,
+            Temperature::new(body_temperature),
+            || cx.checkpoint().map_err(|_| DepositionError::Cancelled),
+        )?;
+        sample
+            .source
+            .admit_work(body.duration_s, source_tolerance_j)?;
+        let area = sample.source.area_m2;
+        Ok(ConvectionCoefficient {
+            coefficient_w_per_m2_k: if area == 0.0 {
+                0.0
+            } else {
+                sample.conductance_w_k / area
+            },
+            source: sample.source,
+        })
+    }
+
     /// Use the original fixed-volume gas/body endpoint and wall-feedback owner.
     /// Its wall variable remains the BODY trace; each callback eliminates a
     /// separate physical surface through the original k(T)/film kernel.
@@ -474,40 +531,17 @@ impl<'a, 'm, F: ConjugateGasFilm> ConjugateGasSurface<'a, 'm, F> {
         let source_error = |error| ConvectionError::Convection(WallConvectionError::Source(error));
         cx.checkpoint()
             .map_err(|_| ConvectionError::Thermal(ThermalPistonError::Cancelled))?;
-        self.path.admit_input(body).map_err(source_error)?;
-        let area = self.area(environment.gas.state()).map_err(source_error)?;
-        if !body.surface_area_m2.is_finite()
-            || body.surface_area_m2 <= 0.0
-            || (area != 0.0 && area != body.surface_area_m2)
-        {
-            return Err(source_error(ConjugateGasError::Invalid(
-                "isochoric conducting film requires full body coverage or explicit insulation",
-            )));
-        }
-        if !environment.body.transport.radiation_is_disabled() {
-            return Err(source_error(ConjugateGasError::Invalid(
-                "conducting gas surfaces require disabled body-node radiation",
-            )));
-        }
+        self.admit_isochoric(environment, body)
+            .map_err(source_error)?;
         let next = environment
             .advance_with_wall_convection(cx, body, wall, |gas, body_temperature| {
-                let sample = self.resolve_at_temperature(
+                self.resolve_isochoric_coefficient(
+                    cx,
                     gas,
                     body_temperature,
-                    Temperature::new(body_temperature),
-                    || cx.checkpoint().map_err(|_| DepositionError::Cancelled),
-                )?;
-                sample
-                    .source
-                    .admit_work(body.duration_s, environment.exchange.source_tolerance_j)?;
-                Ok(ConvectionCoefficient {
-                    coefficient_w_per_m2_k: if area == 0.0 {
-                        0.0
-                    } else {
-                        sample.conductance_w_k / area
-                    },
-                    source: sample.source,
-                })
+                    body,
+                    environment.exchange.source_tolerance_j,
+                )
             })
             .map_err(|error| match error {
                 ConvectionError::Convection(WallConvectionError::Source(
@@ -519,6 +553,68 @@ impl<'a, 'm, F: ConjugateGasFilm> ConjugateGasSurface<'a, 'm, F> {
         cx.checkpoint()
             .map_err(|_| ConvectionError::Thermal(ThermalPistonError::Cancelled))?;
         Ok(next)
+    }
+
+    /// Adapt a complete physical-time window on the same original gas/body,
+    /// actual conducting surface and nonlinear wall-feedback transactions.
+    ///
+    /// Each native coarse, fine and rejected interval uses its actual duration
+    /// for the layer-work audit and admits its initial/final caloric states
+    /// against the same source and pure-phase path. Only accepted fine steps
+    /// enter the original time-error, energy and entropy accounts. Window
+    /// source energies are constant-power totals, apportioned by the sole
+    /// native controller; no conducting layer storage or extra heat is added.
+    pub fn adaptive_isochoric_body_candidate<G: IsochoricGasStorage<State = F::State>>(
+        &self,
+        cx: &Cx<'_>,
+        environment: &FiniteGasThermalEnvironment<'_, G>,
+        body: UniformEnthalpyStepInput<'_>,
+        controls: FiniteGasWindowSolve,
+        wall: WallConvectionSolve,
+    ) -> Result<
+        UniformEnthalpyStep<
+            FiniteGasWindowReport<
+                WallConvectionSample<ConjugateGasConvectionSample<F::Sample, Temperature>>,
+                G,
+            >,
+        >,
+        FiniteGasWindowError<WallConvectionError<ConjugateGasError>>,
+    > {
+        cx.checkpoint()
+            .map_err(|_| FiniteGasWindowError::Cancelled)?;
+        self.admit_isochoric(environment, body).map_err(|error| {
+            FiniteGasWindowError::Step(ConvectionError::Convection(WallConvectionError::Source(
+                error,
+            )))
+        })?;
+        environment
+            .advance_adaptive_with_wall_convection_checked(
+                cx,
+                body,
+                controls,
+                wall,
+                |gas, temperature, interval| {
+                    self.resolve_isochoric_coefficient(
+                        cx,
+                        gas,
+                        temperature,
+                        interval,
+                        environment.exchange.source_tolerance_j,
+                    )
+                },
+                |interval, state| {
+                    self.path.admit_input(interval)?;
+                    self.path.admit_state(state)
+                },
+            )
+            .map_err(|error| match error {
+                FiniteGasWindowError::Step(ConvectionError::Convection(
+                    WallConvectionError::Source(ConjugateGasError::Thermal(
+                        DepositionError::Cancelled,
+                    )),
+                )) => FiniteGasWindowError::Cancelled,
+                other => other,
+            })
     }
 }
 

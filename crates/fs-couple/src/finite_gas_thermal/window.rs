@@ -147,8 +147,109 @@ impl<G: IsochoricGasStorage> FiniteGasThermalEnvironment<'_, G> {
     /// input changes, even if work or accuracy fails late in the window.
     /// Native algebraic tolerances should be smaller than the time-error targets.
     pub fn advance_adaptive_with_convection<S, E>(
-        &self, cx: &Cx<'_>, input: UniformEnthalpyStepInput<'_>, controls: FiniteGasWindowSolve,
+        &self,
+        cx: &Cx<'_>,
+        input: UniformEnthalpyStepInput<'_>,
+        controls: FiniteGasWindowSolve,
         mut resolve: impl FnMut(&G::State) -> Result<ConvectionCoefficient<S>, E>,
+    ) -> Result<UniformEnthalpyStep<FiniteGasWindowReport<S, G>>, FiniteGasWindowError<E>> {
+        self.advance_adaptive_with_interval(cx, input, controls, |environment, interval| {
+            environment.advance_with_convection(cx, interval, &mut resolve)
+        })
+    }
+
+    /// Adapt physical time while resolving the actual wall and gas endpoint
+    /// together in EVERY native coarse, fine and retried interval.
+    ///
+    /// The original wall transaction retains both its queried and endpoint
+    /// source samples in each accepted half step. Its temperature and boundary
+    /// work tolerances remain independent of the local time-error targets.
+    /// Source energies are apportioned once by the SAME window controller.
+    /// Original wall/source failures propagate; only the existing outer heat
+    /// bracket and gas-increment admissions may cause an interval retry.
+    pub fn advance_adaptive_with_wall_convection<S, E>(
+        &self,
+        cx: &Cx<'_>,
+        input: UniformEnthalpyStepInput<'_>,
+        controls: FiniteGasWindowSolve,
+        wall: WallConvectionSolve,
+        mut resolve: impl FnMut(&G::State, f64) -> Result<ConvectionCoefficient<S>, E>,
+    ) -> Result<
+        UniformEnthalpyStep<FiniteGasWindowReport<WallConvectionSample<S>, G>>,
+        FiniteGasWindowError<WallConvectionError<E>>,
+    > {
+        self.advance_adaptive_with_wall_convection_checked(
+            cx,
+            input,
+            controls,
+            wall,
+            |gas, temperature, _| resolve(gas, temperature),
+            |_, _| Ok(()),
+        )
+    }
+
+    /// Source-adapter variant retaining interval-specific work and state gates.
+    ///
+    /// The resolver also receives the actual native interval input, including
+    /// its duration and apportioned body heat. The admission callback sees the
+    /// original initial and actual final caloric states of EVERY proposal,
+    /// including coarse and subsequently rejected intervals. It can refuse a
+    /// source/phase/domain exit, but cannot replace a native thermal candidate.
+    ///
+    /// All body/gas heat, nonlinear wall feedback, endpoint reevaluation and
+    /// energy ownership remain with advance_with_wall_convection. The adaptive
+    /// controller is private, so a source callback cannot mint a physical report.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_adaptive_with_wall_convection_checked<S, E>(
+        &self,
+        cx: &Cx<'_>,
+        input: UniformEnthalpyStepInput<'_>,
+        controls: FiniteGasWindowSolve,
+        wall: WallConvectionSolve,
+        mut resolve: impl FnMut(
+            &G::State,
+            f64,
+            UniformEnthalpyStepInput<'_>,
+        ) -> Result<ConvectionCoefficient<S>, E>,
+        mut admit: impl FnMut(UniformEnthalpyStepInput<'_>, EquilibriumPhaseState) -> Result<(), E>,
+    ) -> Result<
+        UniformEnthalpyStep<FiniteGasWindowReport<WallConvectionSample<S>, G>>,
+        FiniteGasWindowError<WallConvectionError<E>>,
+    > {
+        self.advance_adaptive_with_interval(cx, input, controls, |environment, interval| {
+            let source_error =
+                |error| ConvectionError::Convection(WallConvectionError::Source(error));
+            cx.checkpoint()
+                .map_err(|_| ConvectionError::Thermal(Error::Cancelled))?;
+            admit(interval, interval.initial).map_err(source_error)?;
+            let next = environment.advance_with_wall_convection(
+                cx,
+                interval,
+                wall,
+                |gas, temperature| resolve(gas, temperature, interval),
+            )?;
+            admit(interval, next.state).map_err(source_error)?;
+            cx.checkpoint()
+                .map_err(|_| ConvectionError::Thermal(Error::Cancelled))?;
+            Ok(next)
+        })
+    }
+
+    // The only interval producers are this module's original native gas-only
+    // and wall-feedback transactions. Source adapters can add refusal gates,
+    // never a substitute state, heat account or integration method.
+    fn advance_adaptive_with_interval<S, E>(
+        &self,
+        cx: &Cx<'_>,
+        input: UniformEnthalpyStepInput<'_>,
+        controls: FiniteGasWindowSolve,
+        mut advance: impl FnMut(
+            &FiniteGasThermalEnvironment<'_, G>,
+            UniformEnthalpyStepInput<'_>,
+        ) -> Result<
+            UniformEnthalpyStep<FiniteGasThermalReport<S, G>>,
+            ConvectionError<E>,
+        >,
     ) -> Result<UniformEnthalpyStep<FiniteGasWindowReport<S, G>>, FiniteGasWindowError<E>> {
         poll(cx)?;
         let c = controls;
@@ -193,9 +294,9 @@ impl<G: IsochoricGasStorage> FiniteGasThermalEnvironment<'_, G> {
                     exchange: self.exchange,
                     maximum_gas_temperature_increment_k: self.maximum_gas_temperature_increment_k,
                 };
-                environment.advance_with_convection(cx, UniformEnthalpyStepInput {
+                advance(&environment, UniformEnthalpyStepInput {
                     initial: body, internal_heat_j: body_heat, duration_s: end - start, ..input
-                }, &mut resolve).map_err(FiniteGasWindowError::from)
+                }).map_err(FiniteGasWindowError::from)
             };
             let proposals = (|| {
                 let coarse = interval(&gas, body, time, end)?;
