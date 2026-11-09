@@ -450,3 +450,6 @@ fn adaptive_rejection_and_unwind_restore_native_bindings_after_reduced_solves() 
 
 #[path = "cutfem_material_candidate/decision.rs"]
 mod decision;
+
+#[path = "cutfem_material_candidate/state.rs"]
+mod state;

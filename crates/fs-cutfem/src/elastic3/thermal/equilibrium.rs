@@ -143,7 +143,7 @@ pub(in crate::elastic3) fn admit_settings(
 // Bulk admission comes from the native equilibrium response below. Selected
 // support strains must also be admitted when G is not requested: a numerical
 // reaction functional by itself does not perform physical strain admission.
-fn admit_selected_supports(
+pub(super) fn admit_selected_supports(
     raw: &CutElasticity3,
     map: ThermalCoordinateMap3<'_>,
     prepared: &PreparedEigenstrain3,

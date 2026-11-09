@@ -4,6 +4,10 @@ use super::*;
 use fs_math::dd::Dd;
 use fs_mbd::Vec3 as NativeVec3;
 
+mod flow;
+pub use flow::HeatedCreepingAffineFlow;
+pub(super) use flow::AffineFlowWindow;
+
 /// Work acceptance for analytic drag on each accepted thermal interval.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HeatedExactCreepingControls {
@@ -188,26 +192,11 @@ impl AffineForceWindow {
         stop_s: f64,
         force: HeatedCreepingAffineForce,
     ) -> Result<Self, HeatedMotionError> {
-        if !start_s.is_finite()
-            || !stop_s.is_finite()
-            || stop_s < start_s
-            || !(stop_s - start_s).is_finite()
-            || !force.force_before_world_n.is_finite()
-            || !force.force_after_world_n.is_finite()
-        {
-            return Err(HeatedMotionError::Invalid(
-                "finite force endpoints and a forward representable source window required",
-            ));
-        }
-        if force.force_before_world_n != force.force_after_world_n
-            && (stop_s == start_s
-                || !force.minimum_force_variation_timescale_s.is_finite()
-                || force.minimum_force_variation_timescale_s <= 0.0)
-        {
-            return Err(HeatedMotionError::Invalid(
-                "a changing force needs a positive window and physical variation timescale",
-            ));
-        }
+        admit_affine_history(
+            [start_s, stop_s],
+            [force.force_before_world_n, force.force_after_world_n],
+            force.minimum_force_variation_timescale_s,
+        )?;
         Ok(Self { start_s, stop_s, force })
     }
 
@@ -239,37 +228,77 @@ impl AffineForceWindow {
     }
 
     fn at(self, time_s: f64) -> Result<NativeVec3, CreepingFlowError> {
-        if !time_s.is_finite() || time_s < self.start_s || time_s > self.stop_s {
-            return Err(CreepingFlowError::Invalid(
-                "thermal interval is outside the authored force window",
-            ));
-        }
-        if time_s == self.start_s {
-            return Ok(self.force.force_before_world_n);
-        }
-        if time_s == self.stop_s {
-            return Ok(self.force.force_after_world_n);
-        }
-        if self.force.force_before_world_n == self.force.force_after_world_n {
-            return Ok(self.force.force_before_world_n);
-        }
-        let fraction = (Dd::from_f64(time_s) - Dd::from_f64(self.start_s))
-            / (Dd::from_f64(self.stop_s) - Dd::from_f64(self.start_s));
-        let complement = Dd::from_f64(1.0) - fraction;
-        let interpolate = |first: f64, last: f64| {
-            (complement * Dd::from_f64(first) + fraction * Dd::from_f64(last)).to_f64()
-        };
-        let first = self.force.force_before_world_n;
-        let last = self.force.force_after_world_n;
-        let force = NativeVec3::new(
-            interpolate(first.x, last.x),
-            interpolate(first.y, last.y),
-            interpolate(first.z, last.z),
-        );
-        if force.is_finite() {
-            Ok(force)
-        } else {
-            Err(CreepingFlowError::Invalid("unrepresentable authored force interpolation"))
-        }
+        affine_vector_at(
+            [self.start_s, self.stop_s],
+            [self.force.force_before_world_n, self.force.force_after_world_n],
+            time_s,
+        )
+    }
+}
+
+/// Common source-window admission; physical meanings stay with each typed history.
+fn admit_affine_history(
+    [start_s, stop_s]: [f64; 2],
+    [before, after]: [NativeVec3; 2],
+    minimum_variation_timescale_s: f64,
+) -> Result<(), HeatedMotionError> {
+    if !start_s.is_finite()
+        || !stop_s.is_finite()
+        || stop_s < start_s
+        || !(stop_s - start_s).is_finite()
+        || !before.is_finite()
+        || !after.is_finite()
+    {
+        return Err(HeatedMotionError::Invalid(
+            "finite source endpoints and a forward representable window required",
+        ));
+    }
+    if before != after
+        && (stop_s == start_s
+            || !minimum_variation_timescale_s.is_finite()
+            || minimum_variation_timescale_s <= 0.0)
+    {
+        return Err(HeatedMotionError::Invalid(
+            "a changing source needs a positive window and physical variation timescale",
+        ));
+    }
+    Ok(())
+}
+
+/// Endpoint-preserving interpolation shared by authored force and fluid velocity.
+fn affine_vector_at(
+    [start_s, stop_s]: [f64; 2],
+    [before, after]: [NativeVec3; 2],
+    time_s: f64,
+) -> Result<NativeVec3, CreepingFlowError> {
+    if !time_s.is_finite() || time_s < start_s || time_s > stop_s {
+        return Err(CreepingFlowError::Invalid(
+            "thermal interval is outside the authored source window",
+        ));
+    }
+    if time_s == start_s {
+        return Ok(before);
+    }
+    if time_s == stop_s {
+        return Ok(after);
+    }
+    if before == after {
+        return Ok(before);
+    }
+    let fraction = (Dd::from_f64(time_s) - Dd::from_f64(start_s))
+        / (Dd::from_f64(stop_s) - Dd::from_f64(start_s));
+    let complement = Dd::from_f64(1.0) - fraction;
+    let interpolate = |first: f64, last: f64| {
+        (complement * Dd::from_f64(first) + fraction * Dd::from_f64(last)).to_f64()
+    };
+    let value = NativeVec3::new(
+        interpolate(before.x, after.x),
+        interpolate(before.y, after.y),
+        interpolate(before.z, after.z),
+    );
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(CreepingFlowError::Invalid("unrepresentable authored source interpolation"))
     }
 }

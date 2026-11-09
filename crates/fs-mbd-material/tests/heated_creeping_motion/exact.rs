@@ -5,6 +5,9 @@ use fs_mbd_material::thermal::heating::motion::creeping_flow::{
 };
 use fs_mbd::Vec3 as NativeVec3;
 
+#[path = "exact/flow.rs"]
+mod flow;
+
 fn exact_controls() -> HeatedExactCreepingControls {
     HeatedExactCreepingControls {
         maximum_step_energy_defect_j: 1e-13,

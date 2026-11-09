@@ -16,6 +16,7 @@ mod exchange;
 mod jacobian;
 mod sensitivity;
 mod stress;
+mod state;
 
 impl AdaptiveElasticity3 {
     /// Complete cell-constant thermal source in the original physical leaf.

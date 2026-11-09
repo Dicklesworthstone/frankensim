@@ -395,6 +395,12 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         self.gravity
     }
 
+    /// Prepared uniform reservoir velocity [m/s]. Explicit history consumers
+    /// carry their accepted ambient endpoints independently of this value.
+    pub const fn ambient_velocity_world(&self) -> Vec3 {
+        self.ambient_velocity_world
+    }
+
     fn admit_body(&self, body: &PrincipalBody<'_>) -> Result<(), Error> {
         let regions = body.source().regions();
         if regions.len() != 1 {
@@ -503,7 +509,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
 
     /// Shared instantaneous Stokes admission for a time-evolving uniform flow.
     /// Acceleration pressure and any history are accounted separately.
-    fn load_frame_in_flow(
+    pub(crate) fn load_frame_in_flow(
         &self,
         frame: &PrincipalFrame,
         state: RigidBodyState,
