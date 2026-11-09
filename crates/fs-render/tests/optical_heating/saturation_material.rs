@@ -99,6 +99,272 @@ fn g1_saturable_material_rates_refresh_on_the_actual_thermal_clock() {
     });
 }
 
+mod finite_pair_material {
+    use super::*;
+    use fs_material::phosphorescence::annihilation::{
+        TRIPLET_ANNIHILATION_PAIR_RATE_DIMS, TRIPLET_ANNIHILATION_PAIR_RATE_PROPERTY,
+        TRIPLET_ANNIHILATION_SINGLET_YIELD_PROPERTY, TripletAnnihilationStatePoint,
+    };
+    use fs_render::volumes::heating::luminescence::saturation::{
+        PrescribedPhotonPump, SaturableEmitterCell, SaturableLuminescentHeating,
+        annihilation::{
+            AnnihilationLimits, EmitterTripletAnnihilation, PhosphorescenceAnnihilation,
+            TripletAnnihilation,
+        },
+    };
+
+    const COUNT: f64 = 1e19;
+
+    fn coefficients(temperature: f64) -> [f64; 2] {
+        [
+            1e-19 * (1.0 + 0.1 * (temperature - 300.0)),
+            0.4 + 0.01 * (temperature - 300.0),
+        ]
+    }
+
+    fn pair_source(maximum_temperature: f64) -> (Arc<MaterialCard>, TripletAnnihilationStatePoint) {
+        let temperature = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        let mut input = claims();
+        for (index, name, dims) in [
+            (
+                0,
+                TRIPLET_ANNIHILATION_PAIR_RATE_PROPERTY,
+                TRIPLET_ANNIHILATION_PAIR_RATE_DIMS,
+            ),
+            (
+                1,
+                TRIPLET_ANNIHILATION_SINGLET_YIELD_PROPERTY,
+                fs_qty::Dims::NONE,
+            ),
+        ] {
+            let mut claim = input[0].clone();
+            claim.key = PropertyKey::new(name, dims);
+            claim.value = PropertyValue::Curve {
+                abscissa: "T".into(),
+                abscissa_dims: Temperature::DIMS,
+                knots: vec![
+                    (300.0, coefficients(300.0)[index]),
+                    (
+                        maximum_temperature,
+                        coefficients(maximum_temperature)[index],
+                    ),
+                ],
+                dims,
+            };
+            claim.validity = ValidityDomain::unconstrained().with_quantity(
+                "T",
+                temperature,
+                300.0,
+                maximum_temperature,
+            );
+            claim.interpolation = InterpolationPolicy::LinearInside;
+            claim.provenance.source = format!("manufactured finite pair thermal law: {name}");
+            input.push(claim);
+        }
+        let card = card(input);
+        let source = TripletAnnihilationStatePoint::resolve(
+            &card,
+            &point(),
+            MaterialPropertySelection::SingleClaimOnly,
+            Some("T"),
+        )
+        .unwrap();
+        (card, source)
+    }
+
+    fn prepare(
+        medium: &AbsorbingGrid<'_>,
+        thermal: &DepositionSimulation<'_>,
+        card: Arc<MaterialCard>,
+        populations: [f64; 3],
+    ) -> SaturableLuminescentHeating<2> {
+        let (singlet, triplet) = native_sources(card, &point()).unwrap();
+        let pump =
+            PrescribedPhotonPump::try_new(ContentHash([178; 32]), [400.0; 2], [0.0; 2], [0.0; 2])
+                .unwrap();
+        SaturableLuminescentHeating::try_new(
+            medium,
+            singlet,
+            triplet,
+            &[SaturableEmitterCell {
+                grid_cell: 0,
+                thermal_cell: CellId(1),
+                initial_populations: populations,
+                pump,
+            }],
+            thermal,
+            1,
+            1e-8,
+            None,
+            || Ok(()),
+        )
+        .unwrap()
+    }
+
+    fn authored(
+        heating: SaturableLuminescentHeating<2>,
+        temperature: f64,
+    ) -> SaturableLuminescentHeating<2> {
+        let [k, probability] = coefficients(temperature);
+        heating
+            .with_triplet_annihilation(
+                &[PhosphorescenceAnnihilation {
+                    grid_cell: 0,
+                    law: TripletAnnihilation::try_new(k, 1.0, probability).unwrap(),
+                }],
+                AnnihilationLimits::default(),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn g3_finite_pair_material_refreshes_after_native_heating_and_changes_delayed_light() {
+        with_cx(|cx| {
+            let (card, source) = pair_source(310.0);
+            let density = [1.0];
+            let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+            let thermal = thermal(vec![cell(1, 1.0, 1.0, 40.0)], &SENSIBLE, vec![]);
+            let initial = [0.0, 0.0, COUNT];
+            let binding =
+                EmitterTripletAnnihilation::from_material(0, card.clone(), source, 1.0).unwrap();
+            let material = prepare(&medium, &thermal, card.clone(), initial)
+                .with_triplet_annihilation_sources(
+                    &[binding],
+                    &thermal,
+                    AnnihilationLimits::default(),
+                    || Ok(()),
+                )
+                .unwrap();
+            let control = authored(prepare(&medium, &thermal, card.clone(), initial), 300.0);
+            let (warm, accepted, _) = thermal
+                .advance_observed(&material, 0.1, config(0.1), || Ok(()))
+                .unwrap();
+            let (control_warm, first_control, _) = thermal
+                .advance_observed(&control, 0.1, config(0.1), || Ok(()))
+                .unwrap();
+            for (a, b) in accepted
+                .populations(0)
+                .unwrap()
+                .into_iter()
+                .zip(first_control.populations(0).unwrap())
+            {
+                close(a / COUNT, b / COUNT);
+            }
+            close(warm.energy_j(), control_warm.energy_j());
+            assert!(accepted.energy().annihilation_heat_j > 0.0);
+            assert!(accepted.energy().emitted_j[0] > 0.0);
+            assert_eq!(accepted.absorbed_pump_energy_j(), [0.0; 2]);
+            let temperature = warm.temperature_k(CellId(1)).unwrap();
+            assert!(temperature > 301.0);
+            let [k, probability] = coefficients(temperature);
+            let refreshed = accepted.triplet_annihilation_law(0).unwrap();
+            close(refreshed.pair_rate_m3_s() * COUNT, k * COUNT);
+            close(refreshed.singlet_yield(), probability);
+
+            let next_initial = accepted.populations(0).unwrap();
+            let refreshed_control = authored(
+                prepare(&medium, &warm, card.clone(), next_initial),
+                temperature,
+            );
+            let frozen_control = authored(prepare(&medium, &warm, card, next_initial), 300.0);
+            let (next_thermal, next, _) = warm
+                .advance_observed(&accepted, 0.2, config(0.1), || Ok(()))
+                .unwrap();
+            let (expected_thermal, expected, _) = warm
+                .advance_observed(&refreshed_control, 0.2, config(0.1), || Ok(()))
+                .unwrap();
+            let (_, frozen, _) = warm
+                .advance_observed(&frozen_control, 0.2, config(0.1), || Ok(()))
+                .unwrap();
+            for (a, b) in next
+                .populations(0)
+                .unwrap()
+                .into_iter()
+                .zip(expected.populations(0).unwrap())
+            {
+                close(a / COUNT, b / COUNT);
+            }
+            close(next_thermal.energy_j(), expected_thermal.energy_j());
+            close(
+                next.energy().annihilation_heat_j - accepted.energy().annihilation_heat_j,
+                expected.energy().annihilation_heat_j,
+            );
+            for lane in 0..2 {
+                close(
+                    next.energy().emitted_j[lane] - accepted.energy().emitted_j[lane],
+                    expected.energy().emitted_j[lane],
+                );
+            }
+            assert!(
+                (next.populations(0).unwrap()[2] - frozen.populations(0).unwrap()[2]).abs()
+                    > 1e-4 * COUNT
+            );
+            close(
+                next.populations(0).unwrap().iter().sum::<f64>() / COUNT,
+                1.0,
+            );
+            close(
+                next.energy().initial_excitation_j,
+                next.energy().stored_excitation_j
+                    + next.energy().escaped_j.iter().sum::<f64>()
+                    + next.thermal_input_j(),
+            );
+        });
+    }
+
+    #[test]
+    fn g4_finite_pair_material_endpoint_refusal_preserves_law_populations_and_heat() {
+        with_cx(|cx| {
+            let (card, source) = pair_source(300.01);
+            let density = [1.0];
+            let medium = grid(cx, &density, MassAbsorptionSpectrum::constant(0.0).unwrap());
+            let thermal = thermal(vec![cell(1, 1.0, 1.0, 40.0)], &SENSIBLE, vec![]);
+            let binding =
+                EmitterTripletAnnihilation::from_material(0, card.clone(), source, 1.0).unwrap();
+            let heating = prepare(&medium, &thermal, card, [0.0, 0.0, COUNT])
+                .with_triplet_annihilation_sources(
+                    &[binding],
+                    &thermal,
+                    AnnihilationLimits::default(),
+                    || Ok(()),
+                )
+                .unwrap();
+            let before = heating.clone();
+            assert!(
+                thermal
+                    .advance_observed(&heating, 0.1, config(0.1), || Ok(()))
+                    .is_err()
+            );
+            assert_eq!(heating.populations(0), before.populations(0));
+            assert_eq!(heating.energy(), before.energy());
+            assert_eq!(
+                heating.triplet_annihilation_law(0),
+                before.triplet_annihilation_law(0)
+            );
+            assert_eq!(heating.time_s(), 0.0);
+            assert_eq!(thermal.energy_j(), 0.0);
+            let (warm, retry, _) = thermal
+                .advance_observed(&heating, 1e-4, config(1e-4), || Ok(()))
+                .unwrap();
+            let (_, fresh, _) = thermal
+                .advance_observed(&before, 1e-4, config(1e-4), || Ok(()))
+                .unwrap();
+            assert!(warm.temperature_k(CellId(1)).unwrap() < 300.01);
+            assert_eq!(retry.populations(0), fresh.populations(0));
+            assert_eq!(retry.energy(), fresh.energy());
+            assert_eq!(
+                retry.triplet_annihilation_law(0),
+                fresh.triplet_annihilation_law(0)
+            );
+            assert!(retry.energy().annihilation_heat_j > 0.0);
+            assert!(retry.cell_emission_w()[0].1[0] > 0.0);
+        });
+    }
+}
+
 mod depleting_material {
     use super::*;
     use fs_material::phosphorescence::pump::{

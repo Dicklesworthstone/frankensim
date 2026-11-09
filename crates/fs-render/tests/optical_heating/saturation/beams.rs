@@ -6,7 +6,7 @@ use fs_render::volumes::heating::luminescence::saturation::beam::{
     BeamEmitterCrossSections, DepletingPumpBeam, PumpBeamsLimits, PumpColumnLimits,
 };
 
-fn inventory(
+pub(super) fn inventory(
     medium: &AbsorbingGrid<'_>,
     populations: &[[f64; 3]],
     lifetimes: [f64; 2],
@@ -58,7 +58,7 @@ fn inventory(
     (thermal, heating)
 }
 
-fn sections(cells: usize, values: [[f64; 2]; 2]) -> Vec<BeamEmitterCrossSections> {
+pub(super) fn sections(cells: usize, values: [[f64; 2]; 2]) -> Vec<BeamEmitterCrossSections> {
     (0..cells)
         .map(|index| {
             BeamEmitterCrossSections::authored(index, ContentHash([177; 32]), values).unwrap()
@@ -66,7 +66,7 @@ fn sections(cells: usize, values: [[f64; 2]; 2]) -> Vec<BeamEmitterCrossSections
         .collect()
 }
 
-fn ray(
+pub(super) fn ray(
     cells: usize,
     reverse: bool,
     wavelengths_nm: [f64; 2],
@@ -81,7 +81,7 @@ fn ray(
     }
 }
 
-fn limits() -> PumpBeamsLimits {
+pub(super) fn limits() -> PumpBeamsLimits {
     PumpBeamsLimits {
         column: PumpColumnLimits {
             relative_tolerance: 2e-5,
@@ -92,7 +92,7 @@ fn limits() -> PumpBeamsLimits {
     }
 }
 
-fn bind(
+pub(super) fn bind(
     cx: &Cx<'_>,
     medium: &AbsorbingGrid<'_>,
     thermal: &DepositionSimulation<'_>,
@@ -120,7 +120,7 @@ fn near(actual: f64, expected: f64) {
     );
 }
 
-fn accounts(heating: &SaturableLuminescentHeating<2>) {
+pub(super) fn accounts(heating: &SaturableLuminescentHeating<2>) {
     let report = heating.depleting_pump_report().unwrap();
     let mut active = 0.0;
     let mut passive = 0.0;

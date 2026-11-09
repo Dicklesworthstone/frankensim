@@ -14,9 +14,12 @@
 //! thermal interval. Rates and local pump flux are frozen over that interval;
 //! thermal-step refinement assesses feedback error. Intrinsic lifetimes do
 //! not force lifetime-sized thermal steps. Stimulated emission, excited-state
-//! absorption, irreversible photobleaching and pair annihilation remain outside
-//! this model; reversible ground-state bleaching is part of the beam solve.
+//! absorption and irreversible photobleaching remain outside this model.
+//! Explicit triplet-pair laws include finite-inventory recovery and delayed
+//! fluorescence; reversible ground-state bleaching is part of the beam solve.
 
+/// Authored or original-material triplet-pair kinetics on the shared inventory.
+pub mod annihilation;
 /// Self-consistent finite-inventory depletion of a directed spectral pump.
 pub mod beam;
 
@@ -134,6 +137,11 @@ struct Pending<const M: usize> {
     beam_accounts: Option<beam::BeamAccounts>,
 }
 
+struct PreparedState {
+    beam: Option<Arc<beam::PreparedPumps>>,
+    annihilation: Option<Arc<annihilation::PreparedAnnihilation>>,
+}
+
 /// Saturation, triplet shelving, heat and observable afterglow on one timeline.
 /// Clones share only immutable prepared propagators and optical environment;
 /// populations and accepted accounts remain transactional. Preparation and
@@ -147,6 +155,7 @@ pub struct SaturableLuminescentHeating<const M: usize> {
     pump_window_s: Option<(f64, f64)>,
     medium_identity: ContentHash,
     beam: Option<beam::DepletingBeam>,
+    annihilation: Option<annihilation::AnnihilationFeedback>,
     source_identity: ContentHash,
     time_s: f64,
     energy_tolerance_j: f64,
@@ -314,6 +323,7 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
             pump_window_s: None,
             medium_identity: medium.content_identity(),
             beam: None,
+            annihilation: None,
             source_identity: hash.finalize(),
             time_s: thermal.time_s(),
             energy_tolerance_j,
@@ -393,7 +403,7 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
         thermal: &DepositionSimulation<'_>,
         match_clock: bool,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<Option<Arc<beam::PreparedPumps>>, OpticalHeatingError> {
+    ) -> Result<PreparedState, OpticalHeatingError> {
         checkpoint()?;
         if match_clock && self.time_s != thermal.time_s() {
             return Err(invalid("finite-population and thermal clocks differ"));
@@ -411,10 +421,17 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
         if let Some(environment) = &self.environment {
             environment.check_state(thermal, checkpoint)?;
         }
-        self.beam
+        let annihilation = self
+            .annihilation
+            .as_ref()
+            .map(|pairs| pairs.prepare(self, thermal, checkpoint))
+            .transpose()?;
+        let beam = self
+            .beam
             .as_ref()
             .map(|beam| beam.check_state(self, thermal, checkpoint))
-            .transpose()
+            .transpose()?;
+        Ok(PreparedState { beam, annihilation })
     }
 
     fn next_edge(&self, after_s: f64) -> Option<f64> {
@@ -427,7 +444,10 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
                 None
             }
         });
-        let beam = self.beam.as_ref().and_then(|beams| beams.next_edge(after_s));
+        let beam = self
+            .beam
+            .as_ref()
+            .and_then(|beams| beams.next_edge(after_s));
         match (global, beam) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (edge, None) | (None, edge) => edge,
@@ -467,7 +487,7 @@ impl<const M: usize> DepositionObserver for SaturableLuminescentHeating<M> {
         end_s: f64,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
-        self.check_state(thermal, true, checkpoint)?;
+        let prepared = self.check_state(thermal, true, checkpoint)?;
         if start_s != self.time_s
             || !duration_s.is_finite()
             || duration_s <= 0.0
@@ -491,7 +511,16 @@ impl<const M: usize> DepositionObserver for SaturableLuminescentHeating<M> {
         let mut beam_candidate = self
             .beam
             .as_ref()
-            .map(|beam| beam.advance(self, thermal, duration_s, pumped, checkpoint))
+            .map(|beam| {
+                beam.advance(
+                    self,
+                    thermal,
+                    duration_s,
+                    pumped,
+                    prepared.annihilation.as_deref(),
+                    checkpoint,
+                )
+            })
             .transpose()?;
         if let Some(candidate) = &beam_candidate {
             for &(cell, heat_j) in &candidate.passive_heat_j {
@@ -554,9 +583,21 @@ impl<const M: usize> DepositionObserver for SaturableLuminescentHeating<M> {
                     .as_ref()
                     .expect("prepared finite emitter interval");
                 previous_plan = Some(Arc::clone(plan));
-                preserve_checkpoint(checkpoint, |cancelled| {
-                    plan.advance_with_cancel(emitter.populations, cancelled)
-                })?
+                if let Some(pairs) = &prepared.annihilation {
+                    preserve_checkpoint(checkpoint, |cancelled| {
+                        plan.advance_with_annihilation(
+                            emitter.populations,
+                            pairs.laws[emitter_index],
+                            pairs.limits,
+                            cancelled,
+                        )
+                    })?
+                    .kinetics
+                } else {
+                    preserve_checkpoint(checkpoint, |cancelled| {
+                        plan.advance_with_cancel(emitter.populations, cancelled)
+                    })?
+                }
             };
             let (singlet_light, singlet_heat) =
                 partition(&self.singlet, step.radiative_decay_energy_j[0])?;
@@ -569,7 +610,9 @@ impl<const M: usize> DepositionObserver for SaturableLuminescentHeating<M> {
             let relaxation = finite(singlet_heat + triplet_heat)?;
             let mut heat = CheckedSum::default();
             heat.add(relaxation)?;
+            heat.add(step.annihilation_heat_j)?;
             accounts.relaxation.add(relaxation)?;
+            accounts.annihilation.add(step.annihilation_heat_j)?;
             for i in 0..2 {
                 accounts.absorbed[i].add(step.absorbed_pump_energy_j[i])?;
                 accounts.prompt.add(step.pump_relaxation_heat_j[i])?;
@@ -663,7 +706,7 @@ impl<const M: usize> DepositionObserver for SaturableLuminescentHeating<M> {
         thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Self::Error> {
-        let prepared_beam = self.check_state(thermal, false, checkpoint)?;
+        let prepared = self.check_state(thermal, false, checkpoint)?;
         let pending = self
             .pending
             .as_ref()
@@ -712,9 +755,12 @@ impl<const M: usize> DepositionObserver for SaturableLuminescentHeating<M> {
         }
         self.accounts = pending.accounts;
         if let (Some(beam), Some(accounts), Some(prepared)) =
-            (&mut self.beam, pending.beam_accounts, prepared_beam)
+            (&mut self.beam, pending.beam_accounts, prepared.beam)
         {
             beam.accept(accounts, prepared);
+        }
+        if let (Some(pairs), Some(prepared)) = (&mut self.annihilation, prepared.annihilation) {
+            pairs.accept(prepared);
         }
         self.mean_emission_w = pending.mean_emission_w;
         self.emission_w = emission_w;

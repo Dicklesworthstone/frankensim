@@ -12080,8 +12080,9 @@ remain bin-integrated watts and feed the existing luminescence observers.
 The default prescribed pump field must be justified as optically thin or
 externally maintained. The optional depleting beam below supplies its own
 incident/transmitted photon balance. Stimulated emission, excited-state
-absorption, irreversible photobleaching, pair annihilation and active photon
-recycling remain outside this adapter. Cross sections and rates are authored
+absorption, irreversible photobleaching and active photon recycling remain
+outside this adapter. Triplet-pair laws require the explicit binding below.
+Cross sections and rates are authored
 inputs, not a material calibration certificate. The example documents synthetic
 coefficients, a 1 us pulse and maximum ground-state optical depth 1e-3. Focused
 integration tests cover analytic saturation, triplet shelving, exact pulse
@@ -12193,6 +12194,54 @@ intersections, passive host heat and transactional retry. The existing
 afterglow. These new renderer tests and the coupled example are unexecuted:
 the native build received SIGKILL and the executor became unavailable during
 this extension. Earlier lower-owner passes do not establish this new gate.
+
+### Finite-inventory triplet-pair quenching and delayed fluorescence
+
+`SaturableLuminescentHeating::with_triplet_annihilation` binds the original
+`PhosphorescenceAnnihilation` laws to the same finite ground/singlet/triplet
+inventories used by prescribed photon fields and one or several depleting
+beams. Each pair event consumes two triplets; the authored productive yield
+creates at most one singlet, with all remaining emitters returning to ground.
+Pair recovery participates inside each controlled kinetic/optical trial,
+including during dark intervals and in cells outside every incident beam.
+It is not a pair kick applied after a completed optical history.
+
+The pair-event coefficient is in m³/s and the active volume is explicitly
+supplied by the original law. Neither beam area, thermal mass nor material
+name supplies a replacement volume or coefficient. A productive event must
+supply its singlet energy from two triplets even when its probability is small.
+`LuminescenceEnergy::annihilation_heat_j` retains physical pair heat separately
+from ordinary nonradiative decay and reverse-crossing thermal withdrawal.
+Temporary positive-reaction coordinates never become fictitious bath work.
+Integrated singlet emission includes delayed fluorescence after the pump stops
+and feeds the same accepted endpoint/mean observers and passive light routing.
+
+`with_triplet_annihilation_sources` also accepts
+`saturation::annihilation::EmitterTripletAnnihilation::from_material`. This
+preserves the original `TripletAnnihilationStatePoint` claims and fixed source
+conditions while resolving the pair coefficient and productive yield at each
+actual native temperature. The source must own an absolute-temperature axis;
+the active population volume remains caller-owned. Unchanged cell temperatures
+reuse accepted laws, and only a successful endpoint replaces cached laws,
+populations and energy accounts. Unsupported endpoints, cancellation and
+failed nonlinear/optical trials publish no partial history.
+
+Zero coefficients retain the original linear results. Existing nonlinear and
+optical budgets bound work; componentwise temporal refinement is an accuracy
+indicator, not a certified continuum error bound. Exhaustion refuses instead
+of changing a tolerance or clipping populations. These laws do not establish
+spatial encounter/diffusion physics, active photon recycling, stimulated
+emission or measured coefficients. The existing example accepts
+`--counterpropagating --annihilation`, retaining its synthetic coefficients,
+original cell volumes and separate beam and pair-heat accounts.
+
+Four authored renderer regression groups cover independent radiative/quadratic
+triplet decay, prescribed-field equilibrium, combined/overlapping beam pumping
+and delayed-light observation, and unilluminated cells with zero-law parity,
+retry/cancellation and resource refusal. Two sourced groups cover native
+temperature refresh and endpoint refusal with clean retry. These renderer
+tests are source-formatted; native renderer execution remains unverified after
+the unchanged `asupersync` dependency was killed before renderer typechecking.
 
 ## Multiply scattered nonthermal luminescence observations
 

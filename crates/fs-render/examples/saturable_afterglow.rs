@@ -5,6 +5,8 @@
 //! Add `-- --depleting` to transport and deplete the incident pump itself.
 //! Add `-- --counterpropagating` for two differently colored, staggered pumps
 //! sharing the same finite inventory in two original thermal/optical cells.
+//! Add `--annihilation` to any mode to include explicitly authored triplet-pair
+//! quenching and delayed singlet fluorescence; compare the late singlet column.
 //!
 //! All coefficients are SYNTHETIC, not measurements of a particular phosphor.
 //! A prescribed local photon flux pumps 1e13 emitters in a 1 cm cube for 1 us.
@@ -27,6 +29,9 @@
 //! The cross sections remain explicitly synthetic and constant at both colors.
 //! Output retains separate beam energy accounts and each cell's ground fraction;
 //! the reported temperature is the equal-mass mean of the two native cells.
+//! The optional pair coefficient is 1e-18 m³/s per event, with a 0.5 singlet
+//! yield and each cell's original active volume. Pair events restore ground
+//! availability during pumping and continue producing singlets after switch-off.
 
 use fs_blake3::ContentHash;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -38,6 +43,7 @@ use fs_render::volumes::heating::luminescence::{
     LuminescenceSource, SingletTripletLimits, SingletTripletSource,
     saturation::{
         PrescribedPhotonPump, SaturableEmitterCell, SaturableLuminescentHeating,
+        annihilation::{AnnihilationLimits, PhosphorescenceAnnihilation, TripletAnnihilation},
         beam::{BeamEmitterCrossSections, DepletingPumpBeam, PumpBeamsLimits, PumpColumnLimits},
     },
 };
@@ -94,7 +100,7 @@ fn source(
     )?)
 }
 
-fn run(cx: &Cx<'_>, mode: PumpMode) -> Result<(), Box<dyn Error>> {
+fn run(cx: &Cx<'_>, mode: PumpMode, annihilation: bool) -> Result<(), Box<dyn Error>> {
     let depleting = mode != PumpMode::Prescribed;
     let counterpropagating = mode == PumpMode::Counterpropagating;
     let emitters = if depleting { 1e17 } else { 1e13 };
@@ -189,6 +195,27 @@ fn run(cx: &Cx<'_>, mode: PumpMode) -> Result<(), Box<dyn Error>> {
         None,
         || Ok(()),
     )?;
+    if annihilation {
+        let pairs: Vec<_> = (0..cell_count)
+            .map(|grid_cell| {
+                Ok(PhosphorescenceAnnihilation {
+                    grid_cell,
+                    law: TripletAnnihilation::try_new(1e-18, 1e-6 / cell_count as f64, 0.5)?,
+                })
+            })
+            .collect::<Result<_, fs_thermal::luminescence::transfer::SingletTripletError>>()?;
+        heating = heating.with_triplet_annihilation(
+            &pairs,
+            AnnihilationLimits {
+                absolute_energy_tolerance_j: 1e-12,
+                relative_tolerance: 1e-4,
+                maximum_substeps: 4096,
+            },
+        )?;
+        println!(
+            "Synthetic triplet pairs: k=1e-18 m³/s per event, productive singlet probability=0.5; two triplets consumed per event."
+        );
+    }
     if counterpropagating {
         let cross_sections: Vec<_> = (0..cell_count)
             .map(|grid_cell| {
@@ -288,7 +315,8 @@ fn run(cx: &Cx<'_>, mode: PumpMode) -> Result<(), Box<dyn Error>> {
     }
     heating = heating.with_pump_window(0.0, pulse_end_s)?;
     println!(
-        "time_s,ground_fraction,singlet_fraction,triplet_fraction,absorbed_pump_J,singlet_W,triplet_W,stored_J,native_heat_J,mean_temperature_K,singlet_radiance_W_m2_sr,triplet_radiance_W_m2_sr,closure_J{}",
+        "time_s,ground_fraction,singlet_fraction,triplet_fraction,absorbed_pump_J,singlet_W,triplet_W,stored_J,native_heat_J,mean_temperature_K,singlet_radiance_W_m2_sr,triplet_radiance_W_m2_sr,closure_J{}{}",
+        if annihilation { ",pair_heat_J" } else { "" },
         if counterpropagating {
             ",left_400nm_incident_J,left_transmitted_J,left_molecular_absorption_J,left_passive_absorption_J,left_pump_closure_J,right_410nm_incident_J,right_transmitted_J,right_molecular_absorption_J,right_passive_absorption_J,right_pump_closure_J,left_ground_fraction,right_ground_fraction,kinetic_substeps,coupling_iterations"
         } else if depleting {
@@ -391,8 +419,13 @@ fn run(cx: &Cx<'_>, mode: PumpMode) -> Result<(), Box<dyn Error>> {
         } else {
             String::new()
         };
+        let pair_accounts = if annihilation {
+            format!(",{:.9e}", heating.energy().annihilation_heat_j)
+        } else {
+            String::new()
+        };
         println!(
-            "{target:.6e},{:.6e},{:.6e},{:.6e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.12},{:.9e},{:.9e},{:.3e}{beam_accounts}",
+            "{target:.6e},{:.6e},{:.6e},{:.6e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.12},{:.9e},{:.9e},{:.3e}{pair_accounts}{beam_accounts}",
             counts[0] / emitters,
             counts[1] / emitters,
             counts[2] / emitters,
@@ -412,12 +445,21 @@ fn run(cx: &Cx<'_>, mode: PumpMode) -> Result<(), Box<dyn Error>> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments: Vec<_> = std::env::args().skip(1).collect();
-    let mode = match arguments.as_slice() {
-        [] => PumpMode::Prescribed,
-        [argument] if argument == "--depleting" => PumpMode::Depleting,
-        [argument] if argument == "--counterpropagating" => PumpMode::Counterpropagating,
-        _ => return Err("usage: saturable_afterglow [--depleting | --counterpropagating]".into()),
-    };
+    let mut mode = PumpMode::Prescribed;
+    let mut annihilation = false;
+    for argument in &arguments {
+        match argument.as_str() {
+            "--depleting" if mode == PumpMode::Prescribed => mode = PumpMode::Depleting,
+            "--counterpropagating" if mode == PumpMode::Prescribed => {
+                mode = PumpMode::Counterpropagating
+            }
+            "--annihilation" if !annihilation => annihilation = true,
+            _ => return Err(
+                "usage: saturable_afterglow [--depleting | --counterpropagating] [--annihilation]"
+                    .into(),
+            ),
+        }
+    }
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     pool.scope(|arena| {
@@ -435,6 +477,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 ExecMode::Deterministic,
             ),
             mode,
+            annihilation,
         )
     })
 }
