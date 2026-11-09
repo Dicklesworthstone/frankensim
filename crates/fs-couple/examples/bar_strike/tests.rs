@@ -601,6 +601,35 @@ fn observer_row_is_optional_and_refused_when_incomplete() {
     );
 }
 
+/// The observer's rows stay JSON when a value is absent: no coarser surface admitted is `null`, not `None`,
+/// and a present value is the bare number, not `Some(..)`.
+#[test]
+fn observer_rows_print_an_absent_value_as_null() {
+    use crate::observer::{BandSolve, band_solve_row, json_opt};
+    let card = blank();
+    for (ladder, field) in [
+        (Some(0.25), "\"ladder_change\":0.25,"),
+        (None, "\"ladder_change\":null,"),
+    ] {
+        let row = band_solve_row(
+            &card,
+            &BandSolve {
+                f_hz: 50.0,
+                training: true,
+                transfers: vec![C64::new(1.0, -2.0)],
+                panels_per_wavelength: 9.5,
+                wall_s: 0.5,
+                ladder_change: ladder,
+            },
+        );
+        assert!(row.contains(field), "{row}");
+        assert!(!row.contains("Some(") && !row.contains("None"), "{row}");
+        assert!(row.ends_with("\"h_re_im\":[[1.0, -2.0]]}"), "{row}");
+    }
+    assert_eq!(json_opt(Some(1234_usize)), "1234");
+    assert_eq!(json_opt(None::<usize>), "null");
+}
+
 fn gas(card: &Card) -> fs_material::gas::GasState {
     let text = std::fs::read_to_string(&card.gas_path).expect("gas record");
     fs_material::gas_species::input::read_gas_state(&mut text.split_ascii_whitespace(), None)

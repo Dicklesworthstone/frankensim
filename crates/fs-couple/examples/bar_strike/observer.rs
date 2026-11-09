@@ -418,26 +418,36 @@ pub fn band(
     })
 }
 
+/// A value a JSON row may lack: the value itself, or `null` (`{:?}` would print `Some(..)` and `None`).
+pub fn json_opt<T: std::fmt::Display>(v: Option<T>) -> String {
+    v.map_or_else(|| "null".to_string(), |x| x.to_string())
+}
+
+/// One `observer-band-solve` JSON row: one frequency of the band, its transfers and what it cost.
+pub fn band_solve_row(card: &Card, b: &BandSolve) -> String {
+    let h: Vec<[f64; 2]> = b.transfers.iter().map(|p| [p.re, p.im]).collect();
+    format!(
+        "{{\"suite\":\"bar-strike\",\"case\":\"observer-band-solve\",\"bar\":\"{}\",\"f_hz\":{},\"role\":\"{}\",\"panels_per_wavelength\":{},\"wall_s\":{},\"ladder_change\":{},\"h_re_im\":{h:?}}}",
+        card.name,
+        b.f_hz,
+        if b.training { "training" } else { "held-out" },
+        b.panels_per_wavelength,
+        b.wall_s,
+        json_opt(b.ladder_change)
+    )
+}
+
 /// One JSON row per frequency and one for the band: what the band cost and how the surface behaved.
 pub fn report_band(card: &Card, band: &Band) {
     for b in &band.solves {
-        let h: Vec<[f64; 2]> = b.transfers.iter().map(|p| [p.re, p.im]).collect();
-        println!(
-            "{{\"suite\":\"bar-strike\",\"case\":\"observer-band-solve\",\"bar\":\"{}\",\"f_hz\":{},\"role\":\"{}\",\"panels_per_wavelength\":{},\"wall_s\":{},\"ladder_change\":{:?},\"h_re_im\":{h:?}}}",
-            card.name,
-            b.f_hz,
-            if b.training { "training" } else { "held-out" },
-            b.panels_per_wavelength,
-            b.wall_s,
-            b.ladder_change
-        );
+        println!("{}", band_solve_row(card, b));
     }
     let thread_s: f64 = band.solves.iter().map(|b| b.wall_s).sum();
     println!(
-        "{{\"suite\":\"bar-strike\",\"case\":\"observer-band\",\"bar\":\"{}\",\"panels\":{},\"coarse_panels\":{:?},\"top_hz\":{},\"training\":{},\"held_out\":{},\"threads\":{},\"band_wall_s\":{},\"fine_thread_s\":{thread_s},\"fine_s_per_frequency\":{},\"delay_s\":{},\"producer_estimate\":{},\"wiring_error\":{:e}}}",
+        "{{\"suite\":\"bar-strike\",\"case\":\"observer-band\",\"bar\":\"{}\",\"panels\":{},\"coarse_panels\":{},\"top_hz\":{},\"training\":{},\"held_out\":{},\"threads\":{},\"band_wall_s\":{},\"fine_thread_s\":{thread_s},\"fine_s_per_frequency\":{},\"delay_s\":{},\"producer_estimate\":{},\"wiring_error\":{:e}}}",
         card.name,
         band.panels,
-        band.coarse_panels,
+        json_opt(band.coarse_panels),
         band.top_hz,
         band.samples.omega_rad_s.len(),
         band.samples.held_out.len(),
