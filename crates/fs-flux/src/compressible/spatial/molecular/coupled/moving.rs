@@ -41,6 +41,58 @@ impl From<Error> for MovingTrialFailure {
 }
 
 impl<L: TransportLaw> MolecularEuler3d<L> {
+    /// Borrow instantaneous molecular stress on the accepted moving volume.
+    ///
+    /// `motion` supplies the current normal velocities of the six bounding
+    /// planes. Authored tangential slip and thermal laws remain unchanged.
+    /// After finite-piston stepping, supply the pistons' endpoint velocities
+    /// here; the interval's midpoint velocities describe a different instant.
+    /// No wall velocity is inferred from a previous step or retained by this
+    /// observer. [`Self::stress_field`] keeps its stationary-wall semantics.
+    ///
+    /// This evaluates the same native compatible stress as [`Self::step_moving`]
+    /// in existing buffers, without advancing cells, geometry, clock or loads.
+    /// It admits the same closed/periodic moving domain and refuses SGS,
+    /// retained gravity and exterior profiles. Failure or cancellation returns
+    /// no view; private material caches and scratch may change.
+    pub fn stress_field_moving(
+        &mut self,
+        motion: MeshMotion,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<StressField3d<'_>, MolecularError> {
+        poll(&mut cancelled)?;
+        self.admit_moving_domain(motion)?;
+        let operator = &mut self.molecular;
+        spatial_with_motion(
+            &operator.gas,
+            &operator.grid,
+            operator.boundaries,
+            &operator.walls,
+            Some(motion),
+            None,
+            None,
+            &self.accepted.states,
+            &mut operator.law,
+            &mut operator.work.primitive,
+            &mut operator.work.gradient,
+            &mut operator.work.viscosity,
+            &mut operator.work.flux,
+            &mut operator.work.binary,
+            #[cfg(feature = "experimental-sgs")]
+            None,
+            &mut cancelled,
+        )?;
+        poll(&mut cancelled)?;
+        Ok(StressField3d::frozen(
+            &operator.grid,
+            operator.boundaries,
+            self.accepted.time,
+            &operator.work.primitive,
+            &operator.work.flux,
+            &self.accepted.states,
+        ))
+    }
+
     /// Advance source-owned Newtonian stress, Fourier heat and ALE advection
     /// on a translating or single-axis deforming box.
     ///
@@ -115,7 +167,19 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                 "moving molecular duration or controls",
             ));
         }
+        self.admit_moving_domain(motion)
+    }
+
+    fn admit_moving_domain(&self, motion: MeshMotion) -> Result<(), MolecularError> {
         motion.admit(&self.accepted)?;
+        if self.molecular.gas != self.accepted.gas
+            || self.molecular.grid != self.accepted.grid
+            || self.molecular.boundaries != self.accepted.boundaries
+        {
+            return Err(MolecularError::Invalid(
+                "moving molecular source binding differs",
+            ));
+        }
         if self.molecular.reservoir_exchange
             || !self.molecular.uses_compatible_molecular_stress()
             || (0..3).any(|axis| match self.accepted.boundaries.axis(axis) {

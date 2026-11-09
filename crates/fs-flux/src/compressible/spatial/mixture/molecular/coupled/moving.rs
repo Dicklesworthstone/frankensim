@@ -37,6 +37,63 @@ impl From<Error> for MovingTrialFailure {
 }
 
 impl<L: TransportLaw> MolecularEuler3d<L> {
+    /// Borrow instantaneous source-owned mixture stress on the moving volume.
+    ///
+    /// `motion` supplies the current normal plane velocities. Tangential slip,
+    /// temperature and mixture composition use the accepted original owners.
+    /// After finite-piston stepping, pass endpoint piston velocities rather
+    /// than the interval's midpoint speeds. No historical velocity is inferred
+    /// or retained, and [`Self::stress_field`] retains stationary semantics.
+    ///
+    /// The original Maxwell--Stefan/Fourier/full-stress kernel is evaluated in
+    /// prepared buffers under `controls`. Cells, geometry, physical time and
+    /// all accepted interval loads remain unchanged. The same closed/periodic
+    /// domain as [`Self::step_moving`] is required; SGS, exterior profiles and
+    /// finite tangential wall inertia are refused. Failure returns no view;
+    /// reusable source caches and scratch may change.
+    pub fn stress_field_moving(
+        &mut self,
+        controls: DissipationControl,
+        motion: MeshMotion,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<crate::compressible::spatial::molecular::StressField3d<'_>, DissipationError> {
+        poll(&mut cancelled)?;
+        controls.validate()?;
+        self.admit_moving_domain(motion)?;
+        let operator = &mut self.molecular;
+        spatial_with_motion(
+            &mut operator.source,
+            &operator.grid,
+            operator.boundaries,
+            operator.pressure_outlets,
+            reservoir::View::from(&self.accepted.reservoirs),
+            &operator.walls,
+            &self.accepted.states,
+            &mut operator.work.primitive,
+            &mut operator.work.gradient,
+            &mut operator.work.viscosity,
+            &mut operator.work.flux,
+            #[cfg(feature = "experimental-sgs")]
+            None,
+            controls,
+            Some(motion),
+            None,
+            &mut cancelled,
+        )?;
+        poll(&mut cancelled)?;
+        Ok(
+            crate::compressible::spatial::molecular::StressField3d::mixture(
+                &operator.grid,
+                operator.boundaries,
+                self.accepted.time,
+                &operator.work.primitive,
+                &operator.work.flux,
+                &self.accepted.states,
+                self.accepted.gas.species_count(),
+            ),
+        )
+    }
+
     /// Advance the original evolving mixture with molecular transport on a
     /// translating or single-axis deforming Cartesian box.
     ///
@@ -111,7 +168,6 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         controls: MolecularStepControl,
         motion: MeshMotion,
     ) -> Result<(), DissipationError> {
-        admit_workspace(self.workspace_bytes(), self.maximum_workspace_bytes)?;
         controls.molecular.validate()?;
         if !positive(maximum_duration)
             || controls.maximum_coupling_retries > 32
@@ -123,6 +179,11 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                 "moving molecular mixture duration or controls",
             ));
         }
+        self.admit_moving_domain(motion)
+    }
+
+    fn admit_moving_domain(&self, motion: MeshMotion) -> Result<(), DissipationError> {
+        admit_workspace(self.workspace_bytes(), self.maximum_workspace_bytes)?;
         self.accepted.admit_motion(motion)?;
         if self.molecular.grid != self.accepted.grid
             || self.molecular.gas() != self.accepted.gas()

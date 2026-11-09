@@ -3502,6 +3502,33 @@ transport/source restrictions remain; this guided-plane composition does not
 admit piston rotation, contact stops or surface deformation and does not
 establish general FSI stability.
 
+### Instantaneous molecular stress on moving volumes
+
+Both frozen and evolving-mixture `MolecularEuler3d` owners expose
+`stress_field_moving`. The caller supplies the current `MeshMotion`; the
+mixture also receives its original `DissipationControl`. After a finite-piston
+interval, current endpoint piston velocities supply this instantaneous trace,
+while the interval's midpoint speeds remain appropriate for integrated work.
+
+The view evaluates the same native compatible molecular stress with actual
+normal wall motion in prepared buffers. It borrows the existing
+`StressField3d` facade and provides original conserved momentum density,
+source-decoded primitives and direct face traction. No normal velocity is
+inferred from historical motion or stored as hidden state. Existing
+`stress_field` keeps its authored stationary-normal-wall semantics.
+
+All cells, geometry, time, accepted loads and reports stay unchanged.
+Cancellation/refusal returns no view; reusable source caches may change.
+Observation shares the moving transport's closed/periodic/source admission
+without inventing a timestep or advancing any phase. Original viscosity,
+bulk stress, cross-strain and no-slip/Navier/free-slip traces remain the
+constitutive owners, with no independently reconstructed force model.
+
+Eight native regressions cover independent all-side normal/Navier traction,
+exact zero-motion snapshot identity, comoving zero stress for all three slip
+laws, actual piston endpoint versus midpoint velocities on all axes, and
+cancellation preserving complete accepted field and load histories.
+
 ### Exploratory subgrid stress and heat in the three-dimensional gas
 
 With `experimental-sgs`, `MolecularTransport3d::with_sgs` and

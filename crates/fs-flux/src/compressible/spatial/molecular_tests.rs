@@ -45,6 +45,9 @@ mod compatible;
 #[path = "molecular/moving_tests.rs"]
 mod moving;
 
+#[path = "molecular/moving_observation_tests.rs"]
+mod moving_observation;
+
 #[path = "molecular/vorticity_tests.rs"]
 mod vorticity;
 

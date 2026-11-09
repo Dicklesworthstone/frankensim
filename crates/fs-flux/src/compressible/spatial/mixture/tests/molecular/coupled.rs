@@ -4,6 +4,7 @@ mod driving;
 mod inertia;
 mod inertial_walls;
 mod moving;
+mod moving_observation;
 mod stabilized;
 use crate::compressible::spatial::mixture::molecular::{
     MolecularEuler3d, MolecularStepControl, MolecularStepReport3d,
