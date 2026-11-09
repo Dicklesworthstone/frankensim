@@ -432,11 +432,23 @@ pub fn audit_window(
     after: &BTreeMap<u64, ClosedGasParcel>,
     outlets: &[VacuumChannelOutletStep],
     controls: GasTransportSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<VacuumChannelWindowAudit, GasTransportError> {
+    audit_window_borrowed(before, after, outlets.iter(), controls, cancelled)
+}
+
+/// Share the native source-relative audit without cloning source catalogs in
+/// each outlet of an accepted trajectory.
+pub(super) fn audit_window_borrowed<'a>(
+    before: &BTreeMap<u64, ClosedGasParcel>,
+    after: &BTreeMap<u64, ClosedGasParcel>,
+    outlets: impl Iterator<Item = &'a VacuumChannelOutletStep> + Clone,
+    controls: GasTransportSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<VacuumChannelWindowAudit, GasTransportError> {
     check(&mut cancelled)?;
-    let work = outlets.iter().try_fold(outlets.len(), |sum, row| {
-        sum.checked_add(row.escaped_species.len())
+    let work = outlets.clone().try_fold(0usize, |sum, row| {
+        sum.checked_add(1 + row.escaped_species.len())
     });
     if before.is_empty()
         || before.len() > MAX_SNAPSHOT_PARCELS

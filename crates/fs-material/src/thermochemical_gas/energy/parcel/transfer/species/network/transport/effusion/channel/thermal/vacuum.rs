@@ -12,6 +12,9 @@
 //! temperature or entropy. Reported wall entropy is a material storage change,
 //! not total entropy production of the unmodeled escaped gas.
 
+/// Adaptive gas and finite-wall feedback with complete-window conservation.
+pub mod trajectory;
+
 use super::super::vacuum::{self as native, VacuumChannelNetworkLink, VacuumChannelNetworkStep};
 use super::{FiniteChannelError, FiniteChannelWallStep, FixedVolumeChannelWall, check};
 use crate::thermochemical_gas::energy::{

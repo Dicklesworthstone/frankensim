@@ -22886,3 +22886,35 @@ refinement, tiny and zero lengths, scaling, determinism, budgets and cancellatio
 five existing geometry tests also passed. A source-backed species/accommodation
 consumer regression is added but awaits the full material crate build. These
 focused tests do not establish full `fs-material` or `fs-couple` integration.
+
+
+### Adaptive finite-wall molecular vacuum blowdown
+
+`species::network::transport::effusion::channel::thermal::vacuum::trajectory`
+advances finite gases and finite material channel walls over one complete
+physical window. It shares the existing closed-channel time driver and original
+single-step owners: compare a full step against two resampled halves, retain
+only accepted halves, and publish both inventories or neither. Error estimates
+cover gas temperature/pressure/species, source-relative wall storage, per-outlet
+escaped and returned species, relative escaped energy and accommodation heat.
+Wall accuracy uses the original caloric integral anchored to its source domain,
+so an arbitrary storage datum cannot relax the error tolerance.
+
+The original native vacuum audit consumes borrowed accepted outlet reports;
+no source catalogs are copied into an additional flattened history. One fixed
+mass/species/energy budget covers the entire original-to-final window. Each
+finite wall's actual storage is checked against its accumulated sampled heat,
+then replaces the thermostat account. Output row bounds, attempted/accepted
+step limits, clock representability and cancellation are explicit. Only typed
+step-size/domain refusals retry. Coarse and rejected proposals never enter
+conservation accounts. Vacuum entropy is unavailable; the reported wall entropy
+is a material storage change only. This remains first-order local temporal
+error estimation with fixed geometry/areas, not a global error certificate.
+
+Four focused G1/G3/G4 test groups specify analytic monatomic blowdown, nonlinear
+finite-wall feedback versus small native steps, gas/wall energy-datum invariance,
+and work/minimum-step/late-cancellation atomicity. An independent monatomic
+calculation supports the authored discretization tolerances. Pinned Rustfmt
+and whitespace checks pass; native material/thermal integration remains
+unexecuted because the shared build filesystem lacks capacity and DSR/RCH are
+unavailable. This does not close the broader porous/capillary transport bead.
