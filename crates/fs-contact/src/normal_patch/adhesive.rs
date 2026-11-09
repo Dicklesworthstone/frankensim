@@ -18,6 +18,8 @@
 
 /// Stable applied-force and finite-loading-stiffness contact.
 pub mod fixture;
+/// Explicit rough-surface populations with each original asperity's JKR history.
+pub mod asperity;
 /// Conservative full-stick Griffith coupling of normal adhesion and shear.
 pub mod mixed_mode;
 /// Finite normal inertia, original branch events and explicit released energy.

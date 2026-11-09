@@ -4340,3 +4340,37 @@ finite-geometry reset is inferred.
 checks, point-force ODE convergence and reversal, tangent-frame covariance,
 the original normal/torsion limit, combined hidden-turn refusal and atomic
 inertia, budget, source and cancellation guards.
+
+## Explicit rough-surface adhesive populations
+
+`normal_patch::adhesive::asperity::SourceJkrAsperityContact` sums a declared,
+finite population of independent spherical JKR asperities at a prescribed
+nominal separation. Every bin retains its original source, radius, height,
+positive multiplicity and separate attachment history. Loading and unloading
+therefore give distinct area and force responses; never-touched summits do not
+inherit a neighbour's tensile branch. Signed force, true solid contact area,
+Hertz repulsive contribution, tangent, original surface/elastic storage,
+prescribed work and localized jump releases remain separate. The summed real
+area and repulsive load can feed an explicitly selected junction-shear law.
+
+This is a finite-population Fuller--Tabor approximation, using the original
+JKR branch and work owners. Greenwood (2017), DOI
+`10.1007/s11249-017-0938-1`, sections 1, 1.1 and 3, describes the superposition,
+history and summed jump-loss construction and its physical limits. Heights,
+curvatures and quadrature weights must be supplied; no Ra-to-adhesion conversion
+or Gaussian distribution is inferred. Nonoverlapping, elastically independent
+asperities and local parabolic geometry are assumptions. The authored area
+fraction screen does not certify those assumptions. There is no background
+elastic interaction, patch coalescence, plastic flattening, shear evolution,
+finite-range attraction or inferred heat conversion. Moderate Tabor values can
+change approach hysteresis even when the attached JKR branch is useful.
+
+The original ordered source must agree across all bins. Fixed arrays admit at
+most 256 bins, cancellation is checked between original bounded source calls,
+and proposals allocate no scratch or source clones. All branches publish
+together only after every bin succeeds. `tests/adhesive_asperities.rs` covers
+single-source recovery, staggered attachment/pull-off, independent dimensional
+force/area/energy/tangent sums, mixed curvature, tensile-contact shear capacity,
+closed-cycle work, path subdivision, bin partition, height-reference covariance
+and source/envelope/cancellation atomicity. These are numerical regressions,
+not calibration of a measured rough surface.
