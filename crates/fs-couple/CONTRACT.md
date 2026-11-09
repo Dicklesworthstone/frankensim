@@ -13263,3 +13263,35 @@ Those three integration tests are authored and API-reviewed but unexecuted:
 the complete Cargo dependency closure remains unavailable in this environment.
 The native slice does not establish whole-crate/workspace compilation, a
 measured performance ratio, continuum convergence or acoustic-program closure.
+
+## Mixed gas-vapor nuclei through the shared thermal acoustic adapter
+
+With `caloric-cavitation`,
+`MaterialConductingVaporBubble::with_noncondensable_gas` attaches one
+immutable original gas inventory and its explicit wet-mixture applicability
+bounds to the existing native resolved-liquid trajectory. `gas()` exposes
+that original inventory. All direct, compact-source and receiver advances
+continue to use the same native proposal, liquid-displacement source and
+original water acoustic medium. No separate gas/phase update or second
+damping model is introduced.
+
+The new `gas_vapor_cavitation` example accepts the existing explicitly
+synthetic gas-source TSV and requires wet-mixture conductivity and molecular
+diffusivity bounds as command-line inputs. It initializes a gas-supported
+10 micrometre nucleus in 353.15 K water and authors a smooth rarefaction and
+compression cycle. Output distinguishes water partial pressure, dry partial
+pressure and total pressure, retains the exact dry mass, and reports changing
+vapor inventory, liquid heat, emitted sound, gas storage/work and independently
+reconstructed cumulative thermal/mass/source-energy balances. Physical
+transport domains and the selected fast-mixing approximation are printed;
+no parameter is silently inferred from unrelated dry-gas transport.
+
+Four new coupled groups are provided for equilibrium support by original gas,
+native/adapted mixed-trajectory and causal-source agreement, complete
+observer refusal and final cancellation. They reuse original source-bearing
+synthetic fixture cards and explicit wet-mixture bounds. The original
+pure-vapor tests remain present.
+
+Fresh focused original-source validation passed: material 33/33, native cavitation 105/105, coupled conducting 10/10 (including four new mixed groups and two existing source-parser tests), and coupled vapor 5/5, for 153 freshly executed tests. The native/coupled `cavitation`-only configuration also compiled with the mixed feature disabled. DSR, RCH and the documented DSR fallback are absent; these local one-job Cargo lanes use retained facades for the actual product sources and original numerical dependencies. No full-workspace or release-gate pass is claimed.
+
+The actual `gas_vapor_cavitation` example completed 200 samples with `mixture-a.tsv`, authored wet-mixture conductivity lower bound 0.02 W/(m K), and diffusivity lower bound 2e-5 m2/s. It recorded 100 evaporation and 100 condensation samples; radius 8.48781..14.29779 micrometres; vapor mass 7.52400e-16..3.59147e-15 kg; and exactly unchanged dry mass 2.0853512985751484e-15 kg. Peak sampled receiver pressure at 0.1 m was 1.40411e-4 Pa. Maximum cumulative residuals were 7.25308e-20 J for combined thermal energy, 1.45545e-28 kg for vapor mass, and 7.23157e-24 J for original-source gas energy. These are numerical conservation results within the admitted common-temperature, rapid-mixing model using explicitly synthetic gas and authored mixture transport; they are not empirical water/air calibration or a spatial/time-convergence claim.

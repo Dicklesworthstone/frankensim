@@ -22,6 +22,14 @@ use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_qty::Temperature;
 use fs_thermochem::water::if97::If97SaturationPair;
 
+// The existing example parser constructs original source-bearing cards.
+// These fixture coefficients and wet-mixture bounds are synthetic.
+#[cfg(feature = "caloric-cavitation")]
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+#[cfg(feature = "caloric-cavitation")]
+#[path = "../../fs-material/examples/material_gas_spring/source.rs"]
+mod gas_source;
+
 const RADIUS: f64 = 100e-6;
 const TEMPERATURE: f64 = 373.15;
 const END_TIME: f64 = 2e-6;
@@ -290,4 +298,245 @@ fn final_cancellation_discards_phase_and_the_entire_resolved_liquid_history() {
     );
     assert_eq!(candidate.state(), initial());
     assert_eq!(candidate.liquid_temperatures_k(), &[TEMPERATURE; CELLS]);
+}
+
+#[cfg(feature = "caloric-cavitation")]
+mod gas_nuclei {
+    use super::*;
+    use fs_flux::cavitation::vapor::conducting::gas::{GasVaporLimits, GasVaporTransportBounds};
+    use fs_material::cavitation::vapor::gas::ConservedBubbleGas;
+    use fs_material::thermochemical_gas::energy::{GasEnergySolve, parcel::ClosedGasParcel};
+
+    const GAS_PRESSURE: f64 = 2000.0;
+
+    fn gas() -> ConservedBubbleGas {
+        let model = gas_source::load_with_pressure_support(
+            "A 1 0.028 3.5 0.001 1.7e-5 0.025",
+            "synthetic mixed cavitation integration",
+            (1.0, 1e7),
+        )
+        .unwrap();
+        ConservedBubbleGas::new(
+            ClosedGasParcel::new(
+                model,
+                gas_source::point(TEMPERATURE, GAS_PRESSURE).unwrap(),
+                (4.0 / 3.0) * core::f64::consts::PI * RADIUS.powi(3),
+            )
+            .unwrap(),
+            GasEnergySolve {
+                minimum_temperature_k: TEMPERATURE - 2.0,
+                maximum_temperature_k: TEMPERATURE + 2.0,
+                energy_tolerance_j_kg: 1e-7,
+                maximum_iterations: 100,
+            },
+        )
+        .unwrap()
+    }
+
+    fn gas_limits() -> GasVaporLimits {
+        GasVaporLimits {
+            transport: GasVaporTransportBounds {
+                minimum_temperature_k: TEMPERATURE - 2.0,
+                maximum_temperature_k: TEMPERATURE + 2.0,
+                minimum_total_pressure_pa: 90_000.0,
+                maximum_total_pressure_pa: 120_000.0,
+                minimum_vapor_mass_fraction: 0.8,
+                maximum_vapor_mass_fraction: 1.0,
+                minimum_thermal_conductivity_w_m_k: 0.02,
+                minimum_binary_diffusivity_m2_s: 2e-5,
+            },
+            maximum_total_density_ratio: 0.01,
+            maximum_mixture_mach_number: 0.01,
+            maximum_pressure_relaxation_ratio: 0.01,
+            maximum_internal_temperature_difference_k: 1.0,
+            maximum_relative_composition_gradient: 0.1,
+            maximum_thermal_response_ratio: 0.1,
+            maximum_diffusion_response_ratio: 0.1,
+            maximum_imposed_rate_per_s: 0.0,
+        }
+    }
+
+    fn mixed(
+        water: &SaturatedWaterCavitation,
+        liquid_temperature: f64,
+    ) -> MaterialConductingVaporBubble<'_> {
+        bubble(water, liquid_temperature)
+            .with_noncondensable_gas(gas(), gas_limits())
+            .unwrap()
+    }
+
+    #[test]
+    fn original_gas_supports_a_saturated_nucleus_at_its_total_pressure() {
+        let water = water();
+        let mut bubble = mixed(&water, TEMPERATURE);
+        let initial_mass = bubble.gas().unwrap().mass_kg();
+        let p = equilibrium(&water) + GAS_PRESSURE;
+        let start = bubble.observe(p, TEMPERATURE).unwrap();
+        near(start.bubble.noncondensable_pressure_pa, GAS_PRESSURE);
+        near(
+            start.bubble.bubble_pressure_pa,
+            water.state().saturation_pressure_pa() + GAS_PRESSURE,
+        );
+        assert_eq!(start.gas.unwrap().mass_kg, initial_mass);
+        let step = bubble
+            .advance(END_TIME, &numerics(), &|_| p, &|_| TEMPERATURE, &mut || {
+                false
+            })
+            .unwrap();
+        assert!((bubble.state().radius_m() - RADIUS).abs() < 1e-16);
+        assert!((bubble.state().temperature_k() - TEMPERATURE).abs() < 1e-9);
+        assert_eq!(bubble.gas().unwrap().mass_kg(), initial_mass);
+        assert_eq!(step.gas.unwrap().mass_kg, initial_mass);
+        assert!(step.bubble.noncondensable_energy_change_j.abs() < 1e-16);
+        assert!(
+            step.noncondensable_energy_residual_j.abs()
+                <= numerics().bubble.energy_balance_tolerance_j
+        );
+        assert!(step.total_energy_residual_j.abs() <= numerics().total_energy_balance_tolerance_j);
+    }
+
+    #[test]
+    fn gas_vapor_liquid_and_sound_match_the_original_joint_trajectory() {
+        let water = water();
+        let temperature = TEMPERATURE + 0.005;
+        let p = equilibrium(&water) + GAS_PRESSURE;
+        let mut native = ConductingVaporBubble::new(
+            SaturatedVaporBubble::new(water, initial(), limits()).unwrap(),
+            field(water),
+            &[temperature; CELLS],
+        )
+        .unwrap()
+        .with_noncondensable_gas(gas(), gas_limits())
+        .unwrap();
+        let mut coupled = mixed(&water, temperature);
+        let observer = coupled
+            .monopole_observer(0.1, 100_000.0, observer_limits())
+            .unwrap();
+        let expected = native
+            .advance_controlled(END_TIME, &numerics(), &|_| p, &|_| TEMPERATURE, &mut || {
+                false
+            })
+            .unwrap();
+        let actual = coupled
+            .advance_observed(
+                END_TIME,
+                &numerics(),
+                &|_| p,
+                &|_| TEMPERATURE,
+                &observer,
+                &mut || false,
+            )
+            .unwrap();
+        assert_eq!(actual.bubble, expected);
+        assert_eq!(coupled.state(), native.state());
+        assert_eq!(
+            coupled.liquid_temperatures_k(),
+            native.liquid_temperatures_k()
+        );
+        assert!(actual.bubble.bubble.supplied_heat_j > 0.0);
+        assert!(actual.bubble.bubble.noncondensable_energy_change_j > 0.0);
+        assert_eq!(actual.bubble.gas.unwrap().mass_kg, gas().mass_kg());
+        assert_eq!(
+            actual.acoustic.volume_acceleration_m3_s2,
+            expected.bubble.observation.liquid_volume_flow_rate_m3_s2
+        );
+        near(
+            actual.acoustic.arrival_time_s,
+            END_TIME + 0.1 / water.state().liquid_sound_speed_m_s(),
+        );
+        assert!(
+            actual.bubble.total_energy_residual_j.abs()
+                <= numerics().total_energy_balance_tolerance_j
+        );
+        assert!(
+            actual.bubble.noncondensable_energy_residual_j.abs()
+                <= numerics().bubble.energy_balance_tolerance_j
+        );
+    }
+
+    #[test]
+    fn observer_refusal_preserves_gas_vapor_and_all_liquid_cells() {
+        let water = water();
+        let mut bubble = mixed(&water, TEMPERATURE);
+        let gas_before = bubble.gas().unwrap().clone();
+        let wrong = CompactMonopoleObserver::new(
+            FluidAcousticState::try_new(1.2, 340.0).unwrap(),
+            0.1,
+            100_000.0,
+            observer_limits(),
+        )
+        .unwrap();
+        let pressure = equilibrium(&water) + GAS_PRESSURE - 10.0;
+        assert_eq!(
+            bubble.advance_observed(
+                END_TIME,
+                &numerics(),
+                &|_| pressure,
+                &|_| TEMPERATURE,
+                &wrong,
+                &mut || false
+            ),
+            Err(MaterialConductingVaporBubbleError::ObserverMediumMismatch),
+        );
+        let close = bubble
+            .monopole_observer(10.0 * RADIUS, 100_000.0, observer_limits())
+            .unwrap();
+        let refused = bubble.advance_observed(
+            END_TIME,
+            &numerics(),
+            &|_| pressure,
+            &|_| TEMPERATURE,
+            &close,
+            &mut || false,
+        );
+        assert!(matches!(
+            refused,
+            Err(MaterialConductingVaporBubbleError::Acoustic(_))
+        ));
+        assert_eq!(bubble.state(), initial());
+        assert_eq!(bubble.liquid_temperatures_k(), &[TEMPERATURE; CELLS]);
+        assert_eq!(bubble.gas().unwrap(), &gas_before);
+    }
+
+    #[test]
+    fn final_cancellation_retains_the_complete_mixed_nucleus() {
+        let water = water();
+        let pressure = equilibrium(&water) + GAS_PRESSURE - 10.0;
+        let mut reference = mixed(&water, TEMPERATURE);
+        let mut count = 0;
+        reference
+            .advance_compact_source(
+                END_TIME,
+                &numerics(),
+                &|_| pressure,
+                &|_| TEMPERATURE,
+                &mut || {
+                    count += 1;
+                    false
+                },
+            )
+            .unwrap();
+        let mut bubble = mixed(&water, TEMPERATURE);
+        let gas_before = bubble.gas().unwrap().clone();
+        let mut polls = 0;
+        let result = bubble.advance_compact_source(
+            END_TIME,
+            &numerics(),
+            &|_| pressure,
+            &|_| TEMPERATURE,
+            &mut || {
+                polls += 1;
+                polls == count
+            },
+        );
+        assert_eq!(
+            result,
+            Err(MaterialConductingVaporBubbleError::Dynamics(
+                ConductingVaporBubbleError::Cancelled,
+            ))
+        );
+        assert_eq!(bubble.state(), initial());
+        assert_eq!(bubble.liquid_temperatures_k(), &[TEMPERATURE; CELLS]);
+        assert_eq!(bubble.gas().unwrap(), &gas_before);
+    }
 }

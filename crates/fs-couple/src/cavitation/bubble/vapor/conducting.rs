@@ -17,6 +17,8 @@ use super::source_sample;
 use fs_aeroac::AeroacError;
 use fs_aeroac::curle3d::moving::TimedCompactSource;
 use fs_aeroac::monopole::{CompactMonopoleObserver, MonopoleLimits, MonopoleSample};
+#[cfg(feature = "caloric-cavitation")]
+use fs_flux::cavitation::vapor::conducting::gas::GasVaporLimits;
 use fs_flux::cavitation::vapor::conducting::{
     ConductingVaporBubble, ConductingVaporBubbleError, ConductingVaporBubbleNumerics,
     ConductingVaporBubbleObservation, ConductingVaporBubbleStep,
@@ -27,6 +29,8 @@ use fs_flux::cavitation::vapor::{
 };
 use fs_material::MaterialError;
 use fs_material::cavitation::SaturatedWaterCavitation;
+#[cfg(feature = "caloric-cavitation")]
+use fs_material::cavitation::vapor::gas::ConservedBubbleGas;
 use fs_material::fluid_acoustics::FluidAcoustics;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -94,6 +98,33 @@ impl<'a> MaterialConductingVaporBubble<'a> {
         let bubble = SaturatedVaporBubble::new(*source, state, limits)?;
         let model = ConductingVaporBubble::new(bubble, liquid, temperatures_k)?;
         Ok(Self { source, model })
+    }
+
+    /// Initialize the same resolved-liquid trajectory with a conserved
+    /// noncondensable inventory. Gas and water retain separate original
+    /// caloric sources; their shared temperature, pressure work and latent
+    /// exchange are advanced by the one native owner.
+    ///
+    /// The authored wet-mixture transport bounds must cover the actual
+    /// temperature, total pressure and composition. They qualify the
+    /// common-temperature and rapid-mixing approximation; the dry-gas
+    /// transport source is not silently substituted for the wet mixture.
+    #[cfg(feature = "caloric-cavitation")]
+    pub fn with_noncondensable_gas(
+        self,
+        gas: ConservedBubbleGas,
+        limits: GasVaporLimits,
+    ) -> Result<Self, MaterialConductingVaporBubbleError> {
+        Ok(Self {
+            source: self.source,
+            model: self.model.with_noncondensable_gas(gas, limits)?,
+        })
+    }
+
+    /// Immutable original gas inventory, if this bubble contains one.
+    #[cfg(feature = "caloric-cavitation")]
+    pub fn gas(&self) -> Option<&ConservedBubbleGas> {
+        self.model.gas()
     }
 
     pub const fn source(&self) -> &'a SaturatedWaterCavitation {
