@@ -1461,6 +1461,15 @@ retain actual aqueous speciation, phase/component balances, saturation and work
 counts. Solid exhaustion is a bounded endpoint, not a claimed exact continuous
 event time. A failed or cancelled advance leaves its input state unchanged.
 
+Each stage bounds its possible transfer using the initial rate and aqueous
+pH spread before evaluating a trial inventory. A short step within the declared
+pH domain does not require speciation of the distant, fully depleted donor.
+A nonzero accepted transfer must change at least one retained phase stock;
+unresolved increments refuse instead of silently accumulating lost mass.
+A final time remainder below the minimum step may be omitted only when its
+whole-motion estimate fits both phase-stock tolerances and the absolute extent
+tolerance. Its normalized bound remains in the reported maximum accepted error.
+
 The `mineral_precipitation --kinetics` mode runs the same original USGS
 iron/goethite source selection with explicit initial dissolved/solid stocks and
 a separately supplied surface rate. Its equilibrium comparison is diagnostic;

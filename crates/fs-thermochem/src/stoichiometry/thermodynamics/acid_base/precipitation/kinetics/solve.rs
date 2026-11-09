@@ -41,6 +41,17 @@ impl MineralKineticsV1 {
             let end = if h == remaining { duration.value() } else { elapsed + h };
             let h = end - elapsed;
             if h <= 0.0 || 0.5 * h == 0.0 { return Err(AcidBaseError::Arithmetic("mineral time increment loses range")); }
+            // Repeated nondecimal intervals can leave a sub-minimum final
+            // time sliver. Qualify ALL remaining motion before omitting it;
+            // this is never a per-stage licence to discard small transfers.
+            if h == remaining && h < controls.minimum_step.value() {
+                let trial = workspace.evaluate(current, &mut cancelled)?;
+                let bound = force(0.0, 1.0, det::ln(h) + det::ln(self.rate().rate_mol_s()), &trial)?;
+                if let Some(error) = omitted_tail_error_norm(&bound, current, controls) {
+                    maximum_error = maximum_error.max(error);
+                    break;
+                }
+            }
             let full = workspace.stage(current, h, controls, &mut cancelled)?;
             let middle = workspace.stage(current, 0.5 * h, controls, &mut cancelled)?;
             let fine = workspace.stage(middle.phase, h - 0.5 * h, controls, &mut cancelled)?;
@@ -102,21 +113,28 @@ impl Workspace<'_> {
             }
             return Err(AcidBaseError::Arithmetic("aqueous pH resolution does not qualify mineral driving"));
         }
-        let endpoint = transferred(initial, donor, direction)?;
+        // Affinity decreases along the physical direction, so the initial
+        // rate (including aqueous uncertainty) bounds the implicit transfer.
+        // A short supported step need not speciate the distant depleted bath.
+        let mut high = forward_extent_upper(&initial_force, donor)?;
+        let endpoint = transferred(initial, high, direction)?;
         let end_trial = self.evaluate(endpoint, cancelled)?;
-        let end_force = force(donor, direction, log_time_rate, &end_trial)?;
-        if !growing && end_force.upper() <= 0.0 {
+        let end_force = force(high, direction, log_time_rate, &end_trial)?;
+        if high == donor && !growing && end_force.upper() <= 0.0 {
             return Ok(Stage { phase: endpoint, blocked: false, exhausted: true });
         }
+        if high < donor && end_force.accepts(log_tolerance) {
+            let phase = accept_transfer(initial, endpoint, high)?;
+            return Ok(Stage { phase, blocked: false, exhausted: false });
+        }
         if end_force.lower() <= 0.0 {
-            return Err(AcidBaseError::Arithmetic("aqueous pH resolution does not resolve mineral exhaustion boundary"));
+            return Err(AcidBaseError::Arithmetic("aqueous pH resolution does not resolve mineral extent bound"));
         }
         let minimum = f64::from_bits(1);
-        if minimum >= donor { return Err(AcidBaseError::Arithmetic("nonzero interior mineral extent loses range")); }
+        if minimum >= high { return Err(AcidBaseError::Arithmetic("nonzero interior mineral extent loses range")); }
         let mut low = 0.0;
-        let mut high = donor;
         let predicted_log = log_time_rate + log_abs_drive(start.log_omega);
-        let predicted = det::exp(predicted_log.min(det::ln(donor)));
+        let predicted = det::exp(predicted_log.min(det::ln(high)));
         if predicted == 0.0 { return Err(AcidBaseError::Arithmetic("nonzero mineral transfer underflows")); }
         let mut candidate = if predicted > 0.0 && predicted < high { predicted } else { 0.5 * high };
         for _ in 0..controls.maximum_stage_iterations {
@@ -128,6 +146,7 @@ impl Workspace<'_> {
             let trial = self.evaluate(phase, cancelled)?;
             let residual = force(candidate, direction, log_time_rate, &trial)?;
             if residual.accepts(log_tolerance) {
+                let phase = accept_transfer(initial, phase, candidate)?;
                 return Ok(Stage { phase, blocked: false, exhausted: false });
             }
             if residual.lower() > 0.0 {
@@ -161,6 +180,22 @@ fn transferred(initial: Phase, magnitude: f64, direction: f64) -> Result<Phase> 
     nonnegative(phase.dissolved, "mineral extent exceeds dissolved donor")?;
     nonnegative(phase.solid, "mineral extent exceeds solid donor")?;
     Ok(phase)
+}
+
+// Tiny trial extents are valid during logarithmic bracketing. An accepted
+// nonzero extent must change at least one independently retained phase stock;
+// otherwise repeated windows would silently erase a finite accumulated transfer.
+fn accept_transfer(initial: Phase, phase: Phase, magnitude: f64) -> Result<Phase> {
+    if magnitude > 0.0
+        && phase.dissolved == initial.dissolved
+        && phase.solid == initial.solid
+    {
+        Err(AcidBaseError::Arithmetic(
+            "nonzero mineral transfer is below phase-stock resolution",
+        ))
+    } else {
+        Ok(phase)
+    }
 }
 
 // Signed physical extent residual divided by a positive logarithmic scale.
@@ -202,6 +237,41 @@ fn log_positive_expm1(value: f64) -> f64 {
     if value > 50.0 { value } else { det::ln(det::expm1(value)) }
 }
 
+fn forward_extent_upper(initial_force: &Force, donor: f64) -> Result<f64> {
+    let bound = initial_force.value.abs() + initial_force.uncertainty;
+    let log_bound = det::ln(bound) + initial_force.log_scale;
+    let log_donor = det::ln(donor);
+    if log_bound >= log_donor { return Ok(donor); }
+    if det::exp(log_bound) == 0.0 {
+        return Err(AcidBaseError::Arithmetic("nonzero mineral transfer underflows"));
+    }
+    // Include the logarithm/exponential rounding scale, not merely a single
+    // ULP of the reconstructed amount; the inventory cap remains exact.
+    let padded_log = log_bound + 32.0 * f64::EPSILON * (1.0 + log_bound.abs());
+    if padded_log >= log_donor { return Ok(donor); }
+    Ok(det::exp(padded_log).next_up().min(donor))
+}
+
+// In this autonomous monotone finite bath, the initial affinity bounds the
+// magnitude of the subsequent rate. Force already includes the aqueous
+// uncertainty, so its zero-extent bound covers the entire omitted tail.
+fn omitted_tail_error_norm(bound: &Force, phase: Phase, controls: MineralKineticControlsV1) -> Option<f64> {
+    let magnitude = bound.value.abs() + bound.uncertainty;
+    if magnitude == 0.0 { return Some(0.0); }
+    let log_bound = det::ln(magnitude) + bound.log_scale;
+    if log_bound > det::ln(controls.extent_absolute_tolerance.value()) { return None; }
+    let mut log_error = f64::NEG_INFINITY;
+    for stock in [phase.dissolved, phase.solid] {
+        let absolute = controls.amount_absolute_tolerance.value();
+        let scale = stock.max(absolute);
+        if scale == 0.0 { return None; }
+        let tolerance = absolute / scale + controls.relative_tolerance.value() * (stock / scale);
+        if tolerance == 0.0 { return None; }
+        log_error = log_error.max(log_bound - det::ln(scale) - det::ln(tolerance));
+    }
+    if log_error > 0.0 { None } else { Some(det::exp(log_error)) }
+}
+
 fn admit(duration: Time, c: MineralKineticControlsV1) -> Result<()> {
     let relative = c.relative_tolerance.value();
     let absolute = c.amount_absolute_tolerance.value();
@@ -225,4 +295,77 @@ fn temporal_error(full: Phase, fine: Phase, controls: MineralKineticControlsV1) 
             / (absolute / scale + controls.relative_tolerance.value() * (magnitude / scale)));
     }
     error
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tiny_bracket_trials_are_allowed_but_unresolved_acceptance_is_refused() {
+        let initial = Phase { dissolved: 0.001, solid: 0.109 };
+        for direction in [1.0, -1.0] {
+            let phase = transferred(initial, 1.0e-21, direction).unwrap();
+            assert_eq!(phase.dissolved, initial.dissolved);
+            assert_eq!(phase.solid, initial.solid);
+            assert!(matches!(
+                accept_transfer(initial, phase, 1.0e-21),
+                Err(AcidBaseError::Arithmetic(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn trace_donor_exhaustion_remains_resolved_with_an_unchanged_receiver() {
+        let dissolving = Phase { dissolved: 1.0, solid: 1.0e-30 };
+        let phase = transferred(dissolving, 1.0e-30, 1.0).unwrap();
+        assert_eq!(phase.dissolved, dissolving.dissolved);
+        assert_eq!(phase.solid, 0.0);
+        assert!(accept_transfer(dissolving, phase, 1.0e-30).is_ok());
+
+        let growing = Phase { dissolved: 1.0e-30, solid: 1.0 };
+        let phase = transferred(growing, 1.0e-30, -1.0).unwrap();
+        assert_eq!(phase.dissolved, 0.0);
+        assert_eq!(phase.solid, growing.solid);
+        assert!(accept_transfer(growing, phase, 1.0e-30).is_ok());
+    }
+
+    #[test]
+    fn zero_extent_can_retain_both_phase_stocks() {
+        let initial = Phase { dissolved: 0.001, solid: 0.109 };
+        assert!(accept_transfer(initial, initial, 0.0).is_ok());
+    }
+
+    #[test]
+    fn nondecimal_time_tail_has_a_reported_whole_tail_error_bound() {
+        let elapsed = (0..80).fold(0.0, |elapsed, _| elapsed + 0.00625);
+        let remaining: f64 = 0.5 - elapsed;
+        let controls = MineralKineticControlsV1::default();
+        assert!(remaining > 0.0 && remaining < controls.minimum_step.value());
+        let bound = Force { value: 1.0, uncertainty: 1.0e-10, log_scale: det::ln(remaining) + det::ln(1.0e-4) };
+        let phase = Phase { dissolved: 0.01, solid: 0.1 };
+        let error = omitted_tail_error_norm(&bound, phase, controls).unwrap();
+        assert!(error > 0.0 && error <= 1.0);
+    }
+
+    #[test]
+    fn final_tail_is_not_omitted_when_its_motion_exceeds_stock_accuracy() {
+        let mut controls = MineralKineticControlsV1::default();
+        controls.relative_tolerance = Dimensionless::new(1.0e-16);
+        controls.amount_absolute_tolerance = Amount::new(0.0);
+        controls.extent_absolute_tolerance = Amount::new(1.0e-12);
+        let bound = Force { value: 1.0, uncertainty: 0.0, log_scale: det::ln(1.0e-18) };
+        let phase = Phase { dissolved: 0.001, solid: 0.109 };
+        assert!(omitted_tail_error_norm(&bound, phase, controls).is_none());
+    }
+
+    #[test]
+    fn forward_extent_bound_is_local_uncertainty_aware_and_inventory_capped() {
+        let bound = Force { value: -1.0, uncertainty: 0.125, log_scale: det::ln(0.25) };
+        let upper = forward_extent_upper(&bound, 100.0).unwrap();
+        assert!(upper >= 0.28125 && upper < 0.2812500000001);
+        assert_eq!(forward_extent_upper(&bound, 0.1).unwrap(), 0.1);
+        let large = Force { value: 1.0, uncertainty: 1.0, log_scale: 1000.0 };
+        assert_eq!(forward_extent_upper(&large, 0.1).unwrap(), 0.1);
+    }
 }
