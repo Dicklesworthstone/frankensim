@@ -107,7 +107,7 @@ fn g1_original_stress_tangent_stage_energy_and_translation_agree() {
         &exact,
         &source,
         0.0,
-        &p,
+        &CarreauProfile::uniform(p),
         dx,
         dt,
         &mut work.flux,
@@ -158,7 +158,7 @@ fn g1_original_stress_tangent_stage_energy_and_translation_agree() {
         work.apply(
             &mut linear,
             &mut state,
-            &p,
+            &CarreauProfile::uniform(p),
             dx,
             dt,
             SlenderJetImplicitControls::default(),
@@ -228,7 +228,7 @@ fn g0_algebraic_trials_backtrack_inside_the_original_source_domain() {
         .apply(
             &mut linear,
             &mut state,
-            &p,
+            &CarreauProfile::uniform(p),
             dx,
             0.01,
             SlenderJetImplicitControls::default(),

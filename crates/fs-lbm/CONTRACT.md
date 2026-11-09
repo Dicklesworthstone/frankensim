@@ -1759,6 +1759,60 @@ Temperature does not evolve, loss is not deposited as heat, and there is no
 elastic memory or independently calibrated extensional response. Original
 slenderness/resolution limits and pre-pinch stopping remain.
 
+
+## Prescribed axial temperature and local viscous heat in nonlinear jets
+
+`set_carreau_cell_temperatures` binds one prescribed fluid temperature to each
+original Eulerian axial cell. Cell i owns the extensional stress between its
+two neighboring velocity faces. Every preparation retains the SAME original
+thermal Carreau source, with a caller-authored positive physical invariant-rate
+ceiling. The complete interval from rest to that ceiling must be supported at
+each temperature. No inferred floor, shifted reference-support clipping or
+alternative viscosity fit is introduced. The original uniform-temperature
+path remains available, including a source supported only at rest.
+
+The original `PreparedCarreau` owner evaluates each temperature shift once.
+Every explicit stress, implicit Newton tangent, residual recheck and physical
+loss then queries the original prepared curve at its actual local invariant.
+A temperature prescription also checks the accepted strain field before
+publication; failed source/allocation/cancellation leaves the preceding source
+field, trajectory, policy, diagnostics and time intact. Only reusable solver
+scratch may change. `prepared_carreau_cells` exposes the actual temperatures,
+source law and physical rate ceiling; the original parameter getter retains
+the original calibration and initial uniform temperature.
+
+An exact Newtonian degeneracy uses the old direct constant-viscosity solve only
+when all prepared zero-rate viscosities are equal. Nonuniform thermal viscosity
+uses the same cyclic weighted Jacobian; a rate-linear law needs one correction.
+Preparing a new nonuniform field after selecting implicit integration prepares
+the missing nonlinear workspace once. No scalar mean temperature or mean
+viscosity replaces a spatially varying original source.
+
+`enable_cell_viscous_heat` prepares four reusable arrays for local stage power,
+trial-step quadrature, whole-call candidate and accepted heat. Explicit SSPRK3
+and IMEX use the SAME positive weights as their existing aggregate loss report.
+Each cell accumulates `3*pi*dz*mu*A*(du/dz)^2` at actual solved stages.
+Rejected attempts contribute no heat; a domain stop retains only completed
+substeps. Error/cancellation preserves the preceding whole-call heat account;
+a successful zero-duration call publishes zero. Successful steps allocate
+nothing in this account. `cell_viscous_heat` reports the local joules, the
+identical aggregate loss and their unmodified compensated partition residual.
+
+Only physical viscous loss enters this account. Upwind dissipation, implicit
+damping and algebraic defects are not deposited. Temperature is held until an
+explicit prescription changes it; density and surface tension remain fixed.
+There is no caloric evolution, thermal expansion or Marangoni stress. A future
+thermal consumer must transport the changing cell mass and its advected energy
+as well as this heat; depositing into a frozen-mass thermal mesh is not equivalent.
+
+Focused regression definitions cover independent local stress/tangent and
+power, uniform-field trajectory parity, variable-temperature Newtonian limits,
+third-order nonlinear refinement of each local heat family, and transactional
+source/work/cancellation refusal and retry. The independent alternating-flow
+reference includes evolving areas and two original temperature-shifted laws.
+These definitions are not a claim that native Cargo tests or a performance
+benchmark have run.
+
 ## Adaptive source-owned turbulent gas heat and species transport
 
 `FvFlow::advance_turbulent_gas_species` advances a complete physical window

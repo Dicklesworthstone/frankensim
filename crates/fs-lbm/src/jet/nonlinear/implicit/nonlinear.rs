@@ -79,7 +79,7 @@ impl ConstitutiveSolve {
         &mut self,
         linear: &mut CyclicSolve,
         state: &mut Fields,
-        law: &CarreauSlenderJetParameters,
+        law: &CarreauProfile,
         dx: f64,
         dt: f64,
         controls: SlenderJetImplicitControls,
@@ -227,7 +227,7 @@ impl ConstitutiveSolve {
         &mut self,
         state: &mut Fields,
         linear: &mut CyclicSolve,
-        law: &CarreauSlenderJetParameters,
+        law: &CarreauProfile,
         dx: f64,
         dt: f64,
         mean: f64,
@@ -302,7 +302,7 @@ fn evaluate(
     velocity: &[f64],
     source: &[f64],
     mean: f64,
-    law: &CarreauSlenderJetParameters,
+    law: &CarreauProfile,
     dx: f64,
     dt: f64,
     flux: &mut [f64],
@@ -314,9 +314,9 @@ fn evaluate(
     for i in 0..n {
         poll_at(gate, i)?;
         let strain = finite((velocity[i] - velocity[previous(i, n)]) / dx)?;
-        let sample = law.sample(strain, Some(i))?;
-        let nu = positive(sample.dynamic_viscosity_pa_s() / law.density_kg_m3)?;
-        let differential = positive(sample.stress_tangent_pa_s() / law.density_kg_m3)?;
+        let [viscosity, tangent_viscosity] = law.coefficients(strain, i)?;
+        let nu = positive(viscosity / law.density_kg_m3())?;
+        let differential = positive(tangent_viscosity / law.density_kg_m3())?;
         flux[i] = finite((3.0 * nu * area[i] * strain) * (dt / dx))?;
         tangent[i] = positive(((3.0 * differential * dt) / dx / dx) * area[i])?;
     }

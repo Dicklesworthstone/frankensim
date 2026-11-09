@@ -21,18 +21,19 @@
 //!
 //! Density and surface tension are constant. Viscosity is Newtonian by default;
 //! [`CarreauSlenderJetParameters`] selects the original material Carreau-Yasuda
-//! law at fixed temperature. This generalized-Newtonian path uses the physical
+//! law at uniform or prescribed axial-cell temperatures. This generalized-Newtonian path uses the physical
 //! extensional invariant with explicit SSPRK3 or implicit IMEX, without fitted constant viscosity
 //! or lattice-relaxation clipping. The liquid is incompressible, its exterior
 //! has negligible inertia/viscosity, and the domain is periodic.
-//! No nozzle, stretching imposed by gravity, heat, gas drag, breakup topology,
+//! No nozzle, stretching imposed by gravity, caloric evolution, gas drag, breakup topology,
 //! coalescence, viscoelasticity or post-pinch continuation is represented.
 //! Authored radius, slope and resolution limits stop the calculation before
 //! leaving the admitted model. They are not error certificates.
 //!
 //! Eleven reusable f64 arrays give O(N) storage in explicit mode. Selecting
 //! implicit viscosity prepares twelve additional arrays once; a non-Newtonian
-//! Carreau law needs five more. Successful stepping reuses all arrays.
+//! Carreau law needs five more. Optional local viscous-heat accounting prepares
+//! four further cell arrays. Successful stepping reuses all arrays.
 //! Fixed serial order and the original deterministic material math retain
 //! repeatable evaluations on the same ISA.
 //! Cancellation is polled every 256 cells and immediately before publication.
@@ -40,7 +41,11 @@
 use fs_exec::CancelGate;
 
 mod carreau;
+use carreau::CarreauProfile;
 pub use carreau::CarreauSlenderJetParameters;
+
+mod heat;
+pub use heat::SlenderJetViscousHeat;
 
 mod implicit;
 pub use implicit::{
@@ -209,6 +214,7 @@ struct Spatial {
     h: Vec<f64>,
     u: Vec<f64>,
     flux: Vec<f64>,
+    heat: Option<heat::LocalHeat>,
 }
 #[derive(Clone, Copy)]
 struct Evaluation {
@@ -222,7 +228,7 @@ struct Evaluation {
 #[derive(Clone, Debug)]
 pub struct PeriodicSlenderJet {
     parameters: SlenderJetParameters,
-    carreau: Option<CarreauSlenderJetParameters>,
+    carreau: Option<CarreauProfile>,
     limits: SlenderJetLimits,
     length_m: f64,
     spacing_m: f64,
@@ -264,7 +270,7 @@ impl PeriodicSlenderJet {
     #[allow(clippy::too_many_arguments)]
     fn new_constitutive(
         parameters: SlenderJetParameters,
-        carreau: Option<CarreauSlenderJetParameters>,
+        carreau: Option<CarreauProfile>,
         length_m: f64,
         radii_m: &[f64],
         velocities_m_s: &[f64],
@@ -305,6 +311,7 @@ impl PeriodicSlenderJet {
             h: zeros(n, gate)?,
             u: zeros(n, gate)?,
             flux: zeros(n, gate)?,
+            heat: None,
         };
         let initial = evaluate_constitutive(
             &accepted,
@@ -337,7 +344,7 @@ impl PeriodicSlenderJet {
     }
 
     /// Fixed density and surface tension. For a Carreau jet, viscosity here
-    /// is its zero-rate reference at the retained temperature;
+    /// is its zero-rate reference at the first cell's held temperature;
     /// [`Self::carreau_parameters`] identifies the actual evolving law.
     #[must_use]
     pub const fn parameters(&self) -> SlenderJetParameters {
@@ -429,6 +436,7 @@ impl PeriodicSlenderJet {
             self.candidate.a[i] = self.accepted.a[i];
             self.candidate.q[i] = self.accepted.q[i];
         }
+        self.spatial.reset_viscous_heat(gate)?;
         let mut base = evaluate_constitutive(
             &self.candidate,
             self.parameters,
@@ -526,6 +534,7 @@ impl PeriodicSlenderJet {
                     .maximum_velocity_error_m_s
                     .max(estimate.maximum_velocity_error_m_s);
             }
+            self.spatial.accept_viscous_heat_step(gate)?;
             viscous_loss = finite(viscous_loss + physical_loss)?;
             upwind_loss = finite(upwind_loss + numerical_loss)?;
             core::mem::swap(&mut self.candidate, &mut self.stage);
@@ -561,7 +570,10 @@ impl PeriodicSlenderJet {
             upwind_dissipation_j: upwind_loss,
             energy_balance_residual_j: residual,
         };
+        let heat_partition = self.spatial.viscous_heat_partition(viscous_loss, gate)?;
         poll(gate)?;
+        self.spatial
+            .publish_viscous_heat(viscous_loss, heat_partition);
         core::mem::swap(&mut self.accepted, &mut self.candidate);
         self.time_s = end_time_s;
         self.diagnostics = after;
@@ -576,6 +588,7 @@ impl PeriodicSlenderJet {
         base: Evaluation,
         gate: &CancelGate,
     ) -> Result<Option<(Evaluation, f64, f64)>, NonlinearJetError> {
+        self.spatial.start_viscous_heat(dt / 6.0, gate)?;
         let first = evaluate_constitutive(
             &self.stage,
             self.parameters,
@@ -590,6 +603,7 @@ impl PeriodicSlenderJet {
         if dt > stable_step(first.rate_per_s, cfl) {
             return Ok(None);
         }
+        self.spatial.add_viscous_heat(dt / 6.0, gate)?;
         blend(&mut self.stage, &self.candidate, &self.rhs, dt, 0.25, gate)?;
         let second = evaluate_constitutive(
             &self.stage,
@@ -605,6 +619,7 @@ impl PeriodicSlenderJet {
         if dt > stable_step(second.rate_per_s, cfl) {
             return Ok(None);
         }
+        self.spatial.add_viscous_heat((2.0 / 3.0) * dt, gate)?;
         blend(
             &mut self.stage,
             &self.candidate,
@@ -725,7 +740,7 @@ fn evaluate_split(
 fn evaluate_constitutive(
     fields: &Fields,
     p: SlenderJetParameters,
-    carreau: Option<&CarreauSlenderJetParameters>,
+    carreau: Option<&CarreauProfile>,
     limits: SlenderJetLimits,
     dx: f64,
     spatial: &mut Spatial,
@@ -839,10 +854,10 @@ fn evaluate_constitutive(
         };
         let strain = velocity_jump / dx;
         let (viscosity, tangent) = if let Some(law) = carreau {
-            let sample = law.sample(strain, Some(i))?;
+            let [viscosity, tangent] = law.coefficients(strain, i)?;
             (
-                positive(sample.dynamic_viscosity_pa_s() / p.density_kg_m3)?,
-                positive(sample.stress_tangent_pa_s() / p.density_kg_m3)?,
+                positive(viscosity / p.density_kg_m3)?,
+                positive(tangent / p.density_kg_m3)?,
             )
         } else {
             (p.kinematic_viscosity_m2_s, p.kinematic_viscosity_m2_s)
@@ -858,6 +873,12 @@ fn evaluate_constitutive(
                 },
         )?;
         viscous.add(viscous_stress * strain);
+        if let Some(heat) = &mut spatial.heat {
+            heat.set_power(
+                i,
+                finite(core::f64::consts::PI * p.density_kg_m3 * dx * (viscous_stress * strain))?,
+            );
+        }
         // minmod shares the jump's sign and has no larger magnitude, so this
         // kinetic loss is nonnegative. Reconstruction stays between the
         // upwind velocity and their centered average; it adds no material nu.

@@ -85,18 +85,32 @@ impl Workspace {
         })
     }
 
+    pub(super) fn prepare_rheology(
+        &mut self,
+        law: &CarreauProfile,
+        n: usize,
+        gate: &CancelGate,
+    ) -> Result<(), NonlinearJetError> {
+        if !law.is_uniform_newtonian() && self.nonlinear.is_none() {
+            let nonlinear = ConstitutiveSolve::new(n, gate)?;
+            poll(gate)?;
+            self.nonlinear = Some(nonlinear);
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn apply(
         &mut self,
         state: &mut Fields,
         p: SlenderJetParameters,
-        carreau: Option<&CarreauSlenderJetParameters>,
+        carreau: Option<&CarreauProfile>,
         dx: f64,
         dt: f64,
         controls: SlenderJetImplicitControls,
         gate: &CancelGate,
     ) -> Result<(), NonlinearJetError> {
-        if let Some(law) = carreau.filter(|law| !law.is_newtonian()) {
+        if let Some(law) = carreau.filter(|law| !law.is_uniform_newtonian()) {
             self.nonlinear
                 .as_mut()
                 .ok_or(NonlinearJetError::InvalidState(
@@ -153,7 +167,11 @@ impl PeriodicSlenderJet {
             && self.implicit_workspace.is_none()
         {
             let mut workspace = Workspace::new(self.accepted.a.len(), gate)?;
-            if self.carreau.as_ref().is_some_and(|law| !law.is_newtonian()) {
+            if self
+                .carreau
+                .as_ref()
+                .is_some_and(|law| !law.is_uniform_newtonian())
+            {
                 workspace.nonlinear = Some(ConstitutiveSolve::new(self.accepted.a.len(), gate)?);
             }
             poll(gate)?;
@@ -175,7 +193,7 @@ pub(super) fn step(
     spatial: &mut Spatial,
     work: &mut Workspace,
     p: SlenderJetParameters,
-    carreau: Option<&CarreauSlenderJetParameters>,
+    carreau: Option<&CarreauProfile>,
     limits: SlenderJetLimits,
     dx: f64,
     dt: f64,
@@ -205,6 +223,7 @@ pub(super) fn step(
     if dt > stable_step(second.rate_per_s, cfl) {
         return Ok(None);
     }
+    spatial.start_viscous_heat(dt / 6.0, gate)?;
     copy_fields(&mut work.f2, rhs, gate)?;
     viscous_rhs(stage, spatial, p, carreau, dx, &mut work.g2, gate)?;
 
@@ -218,6 +237,7 @@ pub(super) fn step(
     if dt > stable_step(third.rate_per_s, cfl) {
         return Ok(None);
     }
+    spatial.add_viscous_heat(dt / 6.0, gate)?;
     copy_fields(&mut work.f3, rhs, gate)?;
     viscous_rhs(stage, spatial, p, carreau, dx, &mut work.g3, gate)?;
 
@@ -235,6 +255,7 @@ pub(super) fn step(
     if dt > stable_step(fourth.rate_per_s, cfl) {
         return Ok(None);
     }
+    spatial.add_viscous_heat((2.0 / 3.0) * dt, gate)?;
     viscous_rhs(stage, spatial, p, carreau, dx, &mut work.g4, gate)?;
 
     // Publish the RK weighted state, NOT the last implicit stage.
@@ -299,20 +320,20 @@ fn viscous_rhs(
     state: &Fields,
     spatial: &Spatial,
     p: SlenderJetParameters,
-    carreau: Option<&CarreauSlenderJetParameters>,
+    carreau: Option<&CarreauProfile>,
     dx: f64,
     result: &mut [f64],
     gate: &CancelGate,
 ) -> Result<(), NonlinearJetError> {
     let n = state.a.len();
-    if let Some(law) = carreau.filter(|law| !law.is_newtonian()) {
+    if let Some(law) = carreau.filter(|law| !law.is_uniform_newtonian()) {
         // Reuse the output for one source sample per cell, then differentiate
         // those SAME stresses in place. Retain the periodic wrap before writes.
         for i in 0..n {
             poll_at(gate, i)?;
             let strain = (spatial.u[i] - spatial.u[previous(i, n)]) / dx;
-            let sample = law.sample(strain, Some(i))?;
-            let nu = positive(sample.dynamic_viscosity_pa_s() / p.density_kg_m3)?;
+            let [viscosity, _] = law.coefficients(strain, i)?;
+            let nu = positive(viscosity / p.density_kg_m3)?;
             result[i] = finite(3.0 * nu * state.a[i] * strain)?;
         }
         let first = result[0];

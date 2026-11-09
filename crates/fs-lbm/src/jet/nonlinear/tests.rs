@@ -236,11 +236,16 @@ fn g0_domain_stops_retain_last_admitted_geometry() {
             &gate,
         )
         .unwrap();
+        jet.enable_cell_viscous_heat(&gate).unwrap();
         let report = jet.advance(1.0, budget(), &gate).unwrap();
         let SlenderJetOutcome::DomainLimit(violation) = report.outcome else {
             panic!("expected domain stop, got {:?}", report.outcome);
         };
         assert_eq!(violation.kind, kind);
+        let heat = jet.cell_viscous_heat().unwrap();
+        assert_eq!(heat.total_heat_j, report.viscous_dissipation_j);
+        assert!(heat.cell_heat_j.iter().all(|value| *value >= 0.0));
+        assert!(heat.partition_residual_j.abs() < 3e-12 * heat.total_heat_j);
         assert!(report.accepted_substeps > 0);
         assert!(report.end_time_s > 0.0 && report.end_time_s < 1.0);
         assert_eq!(jet.time_s(), report.end_time_s);
