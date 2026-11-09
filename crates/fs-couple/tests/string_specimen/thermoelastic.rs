@@ -15,6 +15,16 @@ fn parts(
     nonaffine: bool,
     sourced_expansion: bool,
 ) -> (LinearMaterialStringRuntime, MaterialCard, EquilibriumEnthalpyPhaseCurve) {
+    parts_with_expansion(cx, nonaffine, sourced_expansion,
+        PropertyValue::Scalar { value: ALPHA, dims: INVERSE_TEMPERATURE_DIMS })
+}
+
+fn parts_with_expansion(
+    cx: &fs_exec::Cx<'_>,
+    nonaffine: bool,
+    sourced_expansion: bool,
+    expansion: PropertyValue,
+) -> (LinearMaterialStringRuntime, MaterialCard, EquilibriumEnthalpyPhaseCurve) {
     let mut claims = ClaimSet::new();
     let mut requirements = Vec::new();
     for (name, dims, value) in [
@@ -27,8 +37,7 @@ fn parts(
         }),
         (KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY, DynViscosity::DIMS,
             PropertyValue::Scalar { value: 1e7, dims: DynViscosity::DIMS }),
-        (LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, INVERSE_TEMPERATURE_DIMS,
-            PropertyValue::Scalar { value: ALPHA, dims: INVERSE_TEMPERATURE_DIMS }),
+        (LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, INVERSE_TEMPERATURE_DIMS, expansion),
         (fs_material::conductor::ELECTRICAL_RESISTIVITY_PROPERTY,
             fs_material::conductor::ELECTRICAL_RESISTIVITY_DIMS, PropertyValue::Curve {
                 abscissa: "T".into(), abscissa_dims: fs_qty::Temperature::DIMS,
@@ -238,3 +247,5 @@ fn electrical_transport_drives_the_same_thermoelastic_state_and_retained_sound()
         assert!(powered.mechanical().modes()[0].angular_frequency_rad_s < original_frequency);
     });
 }
+
+mod expansion;

@@ -1,9 +1,11 @@
 //! Source-bound thermoelastic storage for the existing live uniform string.
 //!
 //! The fixed support length, section and reference mass retain the native sine
-//! basis. The original expansion path supplies eigenstrain; its scalar alpha
-//! and a globally affine Young's modulus supply the exact temperature
-//! derivatives of the axial and transverse Helmholtz energies. No fitted
+//! basis. The original expansion path supplies eigenstrain; a scalar or
+//! continuous piecewise-affine alpha and a globally affine Young's modulus
+//! supply the temperature derivatives of axial and transverse Helmholtz
+//! energies. Alpha may change slope at a source knot: entropy stays continuous,
+//! while the one-sided heat capacities may differ. No fitted
 //! frequency correction or second acoustic/thermal solver is introduced.
 //!
 //! Axial energy uses A*L_ref, so its derivative with respect to loaded length
@@ -22,6 +24,7 @@ use fs_material::state_point::{IntegratedIsotropicThermalExpansion,
     affine_temperature_slope, integrate_isotropic_thermal_expansion,
     resolve_material_state_point};
 use fs_matdb::{MaterialCard, PropertyValue};
+use std::sync::Arc;
 
 /// Bounded reversible-heat solve on the original caloric/transport owner.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -48,6 +51,21 @@ pub(crate) struct ThermoelasticString {
     initial_elastic_strain: f64,
     modulus_slope_pa_k: f64,
     expansion_per_k: f64,
+    // None retains the exact constant-alpha capacity admission. A varying
+    // original table stores only conservative capacity bounds, never another
+    // expansion law or a resampled eigenstrain.
+    expansion_capacity: Option<Arc<[ExpansionCapacityBound]>>,
+}
+
+/// Prepared upper bound on Psi_TT over one original CTE/caloric intersection.
+/// The modal gradient is the only changing factor; the reference inventory,
+/// source slopes and admitted small-strain envelope are immutable.
+#[derive(Clone, Copy)]
+struct ExpansionCapacityBound {
+    upper_temperature_k: f64,
+    caloric_capacity_j_k: f64,
+    axial_curvature_j_k2: f64,
+    modal_curvature_per_gradient: f64,
 }
 
 /// Free-energy and entropy terms used by the shared coupled first-law balance.
@@ -63,8 +81,12 @@ impl ThermalMaterialStringRuntime {
     /// Attach fixed-support thermoelastic feedback to the existing live string.
     ///
     /// The specimen must retain its original sourced thermal-expansion path.
-    /// Scalar expansion and globally affine Young's modulus are admitted on
-    /// the same immutable card; density and the section remain fixed. Heating
+    /// Scalar or continuous piecewise-affine expansion and globally affine
+    /// Young's modulus are admitted on the same immutable card. A varying
+    /// expansion source must cover the original solid caloric interval; a
+    /// conservative whole-interval caloric-plus-elastic capacity guard includes
+    /// its original slopes and the actual retained modal amplitudes.
+    /// Density and the section remain fixed. Heating
     /// changes tension, modes and diagnostic pressure without resetting motion.
     /// The shared thermal, electrical and finite-gas paths account for axial
     /// storage and the entropy of both axial and transverse elastic energies.
@@ -122,11 +144,6 @@ impl ThermoelasticString {
         let alpha = expansion.current().resolved()
             .property(LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY)
             .ok_or_else(|| admit("retained expansion source lacks its coefficient"))?;
-        let alpha_claim = card.claims().claim(expansion.selected_claim())
-            .ok_or_else(|| admit("retained expansion claim is absent"))?;
-        if !matches!(alpha_claim.value, PropertyValue::Scalar { .. }) {
-            return Err(admit("live thermoelastic strings require a scalar sourced expansion coefficient"));
-        }
         let modulus = material.property("young_modulus")
             .ok_or_else(|| admit("thermoelastic string needs Young's modulus"))?;
         let claim = card.claims().claim(modulus.answer().receipt.selected)
@@ -145,10 +162,12 @@ impl ThermoelasticString {
         let initial_elastic_strain = finite(
             (specimen.string().length_m-reference_stress_free_length_m)
                 / reference_stress_free_length_m-free_thermal_strain)?;
-        let law = Self { controls, expansion: expansion.clone(),
+        let mut law = Self { controls, expansion: expansion.clone(),
             reference_length_m: reference_stress_free_length_m, strain_limit: linear_strain_limit,
             initial_temperature_k, initial_modulus_pa: modulus.value_si(),
-            initial_elastic_strain, modulus_slope_pa_k, expansion_per_k: alpha.value_si() };
+            initial_elastic_strain, modulus_slope_pa_k, expansion_per_k: alpha.value_si(),
+            expansion_capacity: None };
+        law.expansion_capacity = law.prepare_expansion_capacity(cx, mechanical, card, curve)?;
         law.admit_capacity(cx, mechanical, curve)?;
         law.energy(mechanical, initial_temperature_k)?;
         check(cx)?;
@@ -207,6 +226,25 @@ impl ThermoelasticString {
         }
         let StringPrestress::FixedThermalExtension { free_thermal_strain, .. } = specimen.prestress()
             else { return Err(admit("thermoelastic energy lost its fixed-support prescription")); };
+        let expansion = specimen.thermal_expansion()
+            .ok_or_else(|| admit("thermoelastic energy lost its original expansion path"))?;
+        if expansion.selected_claim() != self.expansion.selected_claim()
+            || expansion.reference().resolved().card_identity()
+                != self.expansion.reference().resolved().card_identity()
+            || expansion.reference().resolved().query_point()
+                != self.expansion.reference().resolved().query_point()
+            || expansion.reference().resolved().axis_quantities()
+                != self.expansion.reference().resolved().axis_quantities()
+            || expansion.current().resolved().card_identity() != specimen.material().card_identity()
+            || expansion.current().resolved().query_point() != specimen.material().query_point()
+            || expansion.current().resolved().axis_quantities() != specimen.material().axis_quantities()
+            || expansion.free_linear_strain() != free_thermal_strain
+        {
+            return Err(admit("thermoelastic energy requires its unchanged original expansion source"));
+        }
+        let alpha = expansion.current().resolved()
+            .property(LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY)
+            .ok_or_else(|| admit("thermoelastic energy lacks current source expansion"))?.value_si();
         let string = specimen.string();
         let modulus = specimen.material().property("young_modulus")
             .ok_or_else(|| admit("thermoelastic energy lacks Young's modulus"))?.value_si();
@@ -214,14 +252,14 @@ impl ThermoelasticString {
             -free_thermal_strain)?;
         let volume = finite(specimen.area_m2()*self.reference_length_m)?;
         let axial_free_energy_j = finite(0.5*volume*modulus*elastic*elastic)?;
-        let mut entropy_j_k = finite(volume*(modulus*self.expansion_per_k*elastic
+        let mut entropy_j_k = finite(volume*(modulus*alpha*elastic
             -0.5*self.modulus_slope_pa_k*elastic*elastic))?;
         let mut modal_free_energy_j = 0.0;
         for (index, (mode, state)) in mechanical.modes().iter().zip(mechanical.states()).enumerate() {
             let k = finite((index+1) as f64*core::f64::consts::PI/string.length_m)?;
             let q = state.displacement_m_sqrt_kg;
             let derivative = finite((self.modulus_slope_pa_k*specimen.second_moment_m4()*k.powi(4)
-                +specimen.area_m2()*(self.modulus_slope_pa_k*elastic-modulus*self.expansion_per_k)*k*k)
+                +specimen.area_m2()*(self.modulus_slope_pa_k*elastic-modulus*alpha)*k*k)
                 /string.lin_density_kg_m)?;
             entropy_j_k = finite(entropy_j_k-0.5*derivative*q*q)?;
             let omega_q = finite(mode.angular_frequency_rad_s*q)?;
@@ -230,10 +268,101 @@ impl ThermoelasticString {
         Ok(ThermoelasticEnergy { axial_free_energy_j, modal_free_energy_j, entropy_j_k })
     }
 
+    /// Compile bounds from the selected original table, once. The native
+    /// source-line owner proves continuous support in the unchanged context.
+    /// Eigenstrain and current alpha still come from their original owners.
+    fn prepare_expansion_capacity(
+        &self,
+        cx: &fs_exec::Cx<'_>,
+        mechanical: &LinearMaterialStringRuntime,
+        card: &MaterialCard,
+        curve: &EquilibriumEnthalpyPhaseCurve,
+    ) -> Result<Option<Arc<[ExpansionCapacityBound]>>, ThermalStringError> {
+        let claim = card.claims().claim(self.expansion.selected_claim())
+            .ok_or_else(|| admit("retained expansion claim is absent"))?;
+        let source = match &claim.value {
+            PropertyValue::Scalar { .. } => return Ok(None),
+            PropertyValue::Curve { abscissa, abscissa_dims, knots, .. }
+                if abscissa == "T"
+                    && *abscissa_dims == fs_qty::Temperature::DIMS
+                    && claim.interpolation == fs_matdb::InterpolationPolicy::LinearInside
+                    && (2..=MAX_HEAT_CAPACITY_ENTHALPY_KNOTS).contains(&knots.len()) => knots,
+            _ => return Err(admit("live thermoelastic expansion must be scalar or a bounded continuous piecewise-affine temperature curve")),
+        };
+        let caloric = curve.knots();
+        if !(2..=MAX_HEAT_CAPACITY_ENTHALPY_KNOTS).contains(&caloric.len()) {
+            return Err(admit("thermoelastic expansion needs a bounded solid caloric interval"));
+        }
+        let lower = self.expansion.current().resolved().query()
+            .with("T", caloric[0].temperature_k).map_err(ThermalStringError::Query)?;
+        let upper = lower.clone().with("T", caloric[caloric.len()-1].temperature_k)
+            .map_err(ThermalStringError::Query)?;
+        card.claims().query_line_typed(&claim.key, "T", &lower, &upper,
+            fs_matdb::ClaimSelection::Pinned(self.expansion.selected_claim()))
+            .map_err(|_| admit("expansion source must continuously cover the original caloric interval"))?;
+        if source.iter().all(|(_, alpha)| *alpha == self.expansion_per_k) {
+            // An explicitly tabulated constant keeps the scalar capacity
+            // admission, after its original bounded source support is checked.
+            return Ok(None);
+        }
+        let specimen = mechanical.specimen();
+        let volume = finite(specimen.area_m2()*self.reference_length_m)?;
+        let modal_factor = finite(0.5*specimen.area_m2()/specimen.string().lin_density_kg_m)?;
+        let b = self.modulus_slope_pa_k;
+        let modulus = |temperature: f64| finite(
+            b.mul_add(temperature-self.initial_temperature_k, self.initial_modulus_pa));
+        let mut bounds = Vec::with_capacity(caloric.len()+source.len()-2);
+        let mut source_index = 0;
+        for (index, pair) in caloric.windows(2).enumerate() {
+            check(cx)?;
+            let mut lo = pair[0].temperature_k;
+            let hi = pair[1].temperature_k;
+            if !positive(hi-lo) {
+                return Err(admit("thermoelastic caloric temperatures must strictly increase"));
+            }
+            let cp_minimum = curve.sensible_heat_capacity_bounds_j_kg_k(index)
+                .map_err(|_| admit("string caloric heat capacity is unrepresentable"))?[0];
+            while lo < hi {
+                check(cx)?;
+                while source_index+1 < source.len()-1 && source[source_index+1].0 <= lo {
+                    source_index += 1;
+                }
+                let [(t0, a0), (t1, a1)] = [source[source_index], source[source_index+1]];
+                let end = hi.min(t1);
+                if lo < t0 || !positive(end-lo) || !positive(t1-t0) {
+                    return Err(admit("expansion source does not cover a complete caloric segment"));
+                }
+                // The slope uses the ORIGINAL native segment, not differences
+                // of clipped endpoint answers that can erase a small slope.
+                let alpha_max = finite(a0.abs().max(a1.abs()))?;
+                let slope_max = finite((a1-a0)/(t1-t0))?.abs();
+                let e_max = finite(modulus(lo)?.abs().max(modulus(end)?.abs()))?;
+                let cross = finite(2.0*b.abs()*alpha_max+e_max*slope_max)?;
+                // Psi_TT = V(E alpha^2 - 2 E' alpha e - E alpha' e)
+                //          - A/(2 mu) (2 E' alpha + E alpha') sum(k q)^2.
+                // The native strain admission guarantees |e| <= strain_limit.
+                // Endpoint extrema bound affine E and alpha; absolute values
+                // retain both expansion and contraction without assuming signs.
+                let outward = 1.0+256.0*f64::EPSILON;
+                bounds.push(ExpansionCapacityBound {
+                    upper_temperature_k: end,
+                    caloric_capacity_j_k: finite(specimen.mass_kg()*cp_minimum)?,
+                    axial_curvature_j_k2: finite(outward*volume
+                        *(e_max*alpha_max*alpha_max+cross*self.strain_limit))?,
+                    modal_curvature_per_gradient: finite(outward*modal_factor*cross)?,
+                });
+                lo = end;
+            }
+        }
+        Ok(Some(bounds.into()))
+    }
+
     /// Positive total fixed-q heat capacity over every original caloric segment.
-    /// This checks the actual retained amplitudes, including the mixed E'*alpha
-    /// contribution to modal storage. It never claims tautness or source support
-    /// outside an actual source-bound trial; those remain the native admissions.
+    /// This checks the actual retained amplitudes, including E'*alpha and
+    /// E*alpha' contributions. Scalar alpha keeps its exact quadratic minimum;
+    /// varying alpha uses the prepared conservative strain-envelope bounds.
+    /// It never claims tautness or mechanical source support outside an actual
+    /// source-bound trial; those remain the native admissions.
     pub(crate) fn admit_capacity(
         &self,
         cx: &fs_exec::Cx<'_>,
@@ -255,6 +384,19 @@ impl ThermoelasticString {
             let k = finite((index+1) as f64*core::f64::consts::PI/string.length_m)?;
             let kq = finite(k*state.displacement_m_sqrt_kg)?;
             modal_gradient = finite(modal_gradient+kq*kq)?;
+        }
+        if let Some(bounds) = &self.expansion_capacity {
+            for bound in bounds.iter() {
+                check(cx)?;
+                let curvature = finite(bound.axial_curvature_j_k2
+                    + bound.modal_curvature_per_gradient*modal_gradient)?;
+                let capacity = finite(bound.caloric_capacity_j_k
+                    - bound.upper_temperature_k*curvature)?;
+                if !positive(capacity) {
+                    return Err(admit("caloric capacity does not exceed the complete source-slope axial and modal thermoelastic bound"));
+                }
+            }
+            return Ok(());
         }
         let volume = finite(specimen.area_m2()*self.reference_length_m)?;
         let alpha = self.expansion_per_k;
