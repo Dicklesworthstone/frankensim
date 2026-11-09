@@ -19,7 +19,7 @@ fn phase_cp(name: &str, value: f64) -> MolarHeatCapacityCurveV1 {
     )
     .unwrap()
 }
-fn component(
+pub(super) fn component(
     name: &str,
     concentration: f64,
     enthalpy: f64,
@@ -45,7 +45,7 @@ fn component(
         .unwrap()
     }
 }
-fn model(
+pub(super) fn model(
     components: Vec<SolubilityCaloricComponentV1>,
     conductances: &[f64],
     policy: PrecipitationPolicyV1,
@@ -78,7 +78,7 @@ fn one(enthalpy: f64, conductance: f64) -> SolubilityThermalKineticsV1 {
         PrecipitationPolicyV1::SeededSurface,
     )
 }
-fn state(
+pub(super) fn state(
     model: &SolubilityThermalKineticsV1,
     phases: &[(f64, f64)],
 ) -> SolubilityThermalKineticStateV1 {
@@ -94,7 +94,7 @@ fn state(
         })
         .unwrap()
 }
-fn controls(step: f64) -> SolubilityThermalKineticControlsV1 {
+pub(super) fn controls(step: f64) -> SolubilityThermalKineticControlsV1 {
     SolubilityThermalKineticControlsV1 {
         root: SolubilityCaloricSolveV1 {
             temperature_bracket: [Temperature::new(280.0), Temperature::new(340.0)],
@@ -111,7 +111,7 @@ fn controls(step: f64) -> SolubilityThermalKineticControlsV1 {
         maximum_attempts: 8192,
     }
 }
-fn near(actual: f64, expected: f64, tolerance: f64) {
+pub(super) fn near(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance,
         "{actual:.17e} != {expected:.17e}, tolerance {tolerance:e}"

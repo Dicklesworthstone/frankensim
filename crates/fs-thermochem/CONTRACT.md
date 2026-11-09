@@ -431,7 +431,7 @@ travel together. Different conductances, particle reference stocks, growth
 policies or phase heat-capacity sources cannot silently replace the declared
 physical model.
 
-Each stage evaluates the original analytical fixed-temperature kinetic law at
+Without an interaction extension, each stage evaluates the original analytical fixed-temperature kinetic law at
 the unknown endpoint temperature. One bounded scalar heat balance solves that
 temperature using the shared sensible-plus-dissolution enthalpy equation.
 On an active branch the temperature derivative is positive phase-weighted Cp
@@ -460,6 +460,39 @@ bath balances and transactional refusals. The model retains fixed solvent
 volume, reference conductance and particle geometry law over each window;
 actual selected particle area evolves in each phase stage. Simultaneous spatial
 transport, evolving film coefficients and nucleation physics remain separate.
+
+### Temperature-qualified interactions on the same thermal owner
+
+`SolubilityThermalKineticsV1::with_interactions` binds one explicit immutable
+`SolubilityThermalInteractionV1` source to the original caloric/kinetic owner.
+The source supplies conditional saturation and the additional enthalpy increment
+from its SAME thermodynamic potential, including temperature-dependent pure-solid
+calibration. Core thermochemistry still calls each original `advance_at_saturation`
+and owns all phase states, particle laws, heat roots and adaptive stepping.
+Material interactions cannot replace kinetic laws or publish another phase state.
+The exact source Arc travels with states and outcomes; source replacement and
+cross-owner energy/advancement refuse. Temperature support is the intersection
+of the original caloric and explicitly supplied interaction domains.
+
+For interacting phases, one declared-order phase stage uses the current
+temperature, then the existing scalar heat solve projects temperature with
+the resulting stocks frozen. Source binding must qualify positive frozen-stock
+heat capacity throughout its domain. Composition convexity alone does not
+establish this thermal condition, and the independent ideal endpoint-phase
+monotonicity argument above is not asserted for interacting species. The same
+full/two-half controller measures the complete first-order splitting error.
+Native trace stocks, particle reference geometry, cumulative heat targets and
+direct original-to-final energy checks remain unchanged. Trial evaluations
+allocate nothing and use the original bounded work/cancellation limits.
+
+`MolarHeatCapacityCurveV1::heat_capacity_bounds` evaluates exact extrema of the
+original piecewise-linear curve on a supported interval, including interior
+source knots. `IdealSolubilityV1::log_saturation_ratio` and
+`dissolution_enthalpy_change_j_mol` use the original integrated van't Hoff and
+Kirchhoff kernels directly, preserving small thermal changes that subtraction
+of rounded concentrations or large enthalpy datums would erase. Focused native
+cases cover that neighboring-temperature limit, original-pair phase/heat
+splitting, exact Cp extrema, source identity and thermal-domain refusal.
 
 ## Binary liquid miscibility and source-owned thermodynamic forces
 

@@ -187,6 +187,49 @@ impl IdealSolubilityV1 {
         Ok(enthalpy)
     }
 
+    /// Direct change in the original dissolved-minus-solid molar enthalpy
+    /// [J/mol]. Integrates the SAME phase-Cp difference, retaining small thermal
+    /// increments that subtraction of large absolute enthalpies can erase.
+    pub fn dissolution_enthalpy_change_j_mol(
+        &self,
+        from: Temperature,
+        to: Temperature,
+    ) -> Result<f64, SolubilityErrorV1> {
+        self.admit_temperature(from)?;
+        self.admit_temperature(to)?;
+        match &self.phase_heat_capacities {
+            Some(phases) => phases.enthalpy_increment(from.value(), to.value()),
+            None => Ok(0.0),
+        }
+    }
+
+    /// Direct `ln(c_sat(to)/c_sat(from))` from the original integrated van't
+    /// Hoff/Kirchhoff law. No ratio or difference of rounded concentrations is
+    /// formed, so neighboring temperatures retain their small response.
+    pub fn log_saturation_ratio(
+        &self,
+        from: Temperature,
+        to: Temperature,
+    ) -> Result<f64, SolubilityErrorV1> {
+        self.admit_temperature(from)?;
+        self.admit_temperature(to)?;
+        if from == to {
+            return Ok(0.0);
+        }
+        let enthalpy = self.dissolution_enthalpy_at(from)?;
+        let mut change =
+            (enthalpy / R) * ((to.value() - from.value()) / from.value() / to.value());
+        if let Some(phases) = &self.phase_heat_capacities {
+            change += phases.log_saturation_correction(from.value(), to.value())? / R;
+        }
+        if !change.is_finite() {
+            return Err(SolubilityErrorV1::Unrepresentable(
+                "original saturation logarithmic increment",
+            ));
+        }
+        Ok(change)
+    }
+
     /// Retained identities and phase-Cp source/preparation storage, excluding
     /// inline law fields. Shared immutable allocations are counted in full.
     pub fn heap_bytes(&self) -> usize {

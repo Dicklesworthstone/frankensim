@@ -1,6 +1,7 @@
 //! Finite-rate dissolution and precipitation in one shared finite thermal bath.
 //!
-//! Each stage uses the original exact fixed-T kinetic trajectory at its unknown
+//! In the independent ideal limit, each stage uses the original exact fixed-T
+//! kinetic trajectory at its unknown
 //! endpoint temperature. A scalar first-law solve closes that temperature with
 //! the SAME solubility law, dissolution enthalpy and phase Cp sources. On an
 //! active branch its derivative is positive phase-weighted sensible capacity
@@ -22,8 +23,12 @@
 //! its original reference stock is never reset at a temperature trial.
 //! Specified heat is delivered uniformly during that window. There is no
 //! simultaneous transport, evolving film coefficient, nucleation, fragmentation
-//! or population balance. The inherited independent ideal-solute assumptions
-//! still apply.
+//! or population balance. An explicitly bound [`SolubilityThermalInteractionV1`]
+//! instead supplies conditional activity equilibrium and its consistent excess
+//! calorics. Its phase stage uses the CURRENT temperature before a frozen-stock
+//! heat projection. This first-order split retains the same native kinetics,
+//! state, adaptive controller and whole-window energy account, without assuming
+//! the ideal endpoint-phase monotonicity proof applies to interacting solutes.
 
 use super::{
     MAX_SOLUBILITY_CALORIC_COMPONENTS_V1, PhaseIncrement, SolubilityCaloricErrorV1,
@@ -33,10 +38,25 @@ use crate::solution::solubility::kinetics::{SolubilityKineticStateV1, Solubility
 use fs_qty::{Amount, Temperature, Time, Volume};
 use std::sync::Arc;
 
-#[derive(Clone, Debug, PartialEq)]
+pub mod interaction;
+pub use interaction::SolubilityThermalInteractionV1;
+
+#[derive(Clone, Debug)]
 struct ThermalKineticOwner {
     caloric: SolubilityCaloricModelV1,
     kinetics: Vec<SolubilityKineticsV1>,
+    interactions: Option<Arc<dyn SolubilityThermalInteractionV1>>,
+}
+impl PartialEq for ThermalKineticOwner {
+    fn eq(&self, other: &Self) -> bool {
+        self.caloric == other.caloric
+            && self.kinetics == other.kinetics
+            && match (&self.interactions, &other.interactions) {
+                (None, None) => true,
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                _ => false,
+            }
+    }
 }
 
 /// One immutable original caloric/kinetic source binding for a common bath.
@@ -62,8 +82,70 @@ impl SolubilityThermalKineticsV1 {
             ));
         }
         Ok(Self {
-            owner: Arc::new(ThermalKineticOwner { caloric, kinetics }),
+            owner: Arc::new(ThermalKineticOwner {
+                caloric,
+                kinetics,
+                interactions: None,
+            }),
         })
+    }
+
+    /// Bind explicit interaction thermodynamics and its excess calorics to the
+    /// SAME original laws and thermal integrator. Preparation must qualify a
+    /// positive frozen-stock heat capacity over the source's temperature support.
+    /// The original fixed-temperature interaction fit alone is not enough.
+    ///
+    /// The source Arc remains part of this owner and every state/outcome. A
+    /// different interaction source cannot replace an existing binding.
+    pub fn with_interactions(
+        &self,
+        interactions: Arc<dyn SolubilityThermalInteractionV1>,
+    ) -> Result<Self, SolubilityCaloricErrorV1> {
+        if let Some(original) = &self.owner.interactions {
+            return if Arc::ptr_eq(original, &interactions) {
+                Ok(self.clone())
+            } else {
+                Err(SolubilityCaloricErrorV1::Invalid(
+                    "thermal interaction source cannot replace an existing binding",
+                ))
+            };
+        }
+        let domain = interactions.temperature_domain();
+        let caloric = self.caloric().temperature_domain();
+        if !positive(domain[0].value())
+            || !positive(domain[1].value())
+            || domain[0].value() >= domain[1].value()
+            || domain[0].value().max(caloric[0].value())
+                >= domain[1].value().min(caloric[1].value())
+        {
+            return Err(SolubilityCaloricErrorV1::Invalid(
+                "thermal interaction source needs overlapping positive temperature support",
+            ));
+        }
+        interactions.admit_binding(self.caloric(), self.kinetics())?;
+        Ok(Self {
+            owner: Arc::new(ThermalKineticOwner {
+                caloric: self.caloric().clone(),
+                kinetics: self.kinetics().to_vec(),
+                interactions: Some(interactions),
+            }),
+        })
+    }
+
+    /// Exact immutable interaction source, if this owner explicitly selected one.
+    pub fn interaction_source(&self) -> Option<&Arc<dyn SolubilityThermalInteractionV1>> {
+        self.owner.interactions.as_ref()
+    }
+
+    /// Common caloric and interaction-temperature support; no extrapolation.
+    pub fn temperature_domain(&self) -> [Temperature; 2] {
+        let mut domain = self.caloric().temperature_domain();
+        if let Some(interactions) = &self.owner.interactions {
+            let support = interactions.temperature_domain();
+            domain[0] = Temperature::new(domain[0].value().max(support[0].value()));
+            domain[1] = Temperature::new(domain[1].value().min(support[1].value()));
+        }
+        domain
     }
 
     pub fn caloric(&self) -> &SolubilityCaloricModelV1 {
@@ -83,7 +165,7 @@ impl SolubilityThermalKineticsV1 {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<SolubilityThermalKineticStateV1, SolubilityCaloricErrorV1> {
         poll(&mut cancelled)?;
-        let domain = self.caloric().temperature_domain();
+        let domain = self.temperature_domain();
         let moles = solvent_volume.value() / self.caloric().solvent_molar_volume_m3_mol();
         if !temperature.value().is_finite()
             || !(domain[0].value()..=domain[1].value()).contains(&temperature.value())
@@ -95,9 +177,19 @@ impl SolubilityThermalKineticsV1 {
                 "thermal kinetic temperature, solvent volume or phase layout",
             ));
         }
-        for (kinetic, phase) in self.kinetics().iter().zip(phases) {
+        for (index, (kinetic, phase)) in self.kinetics().iter().zip(phases).enumerate() {
             poll(&mut cancelled)?;
-            kinetic.advance(temperature, solvent_volume, phase, Time::new(0.0))?;
+            if let Some(interactions) = &self.owner.interactions {
+                kinetic.advance_at_saturation(
+                    temperature,
+                    solvent_volume,
+                    phase,
+                    Time::new(0.0),
+                    interactions.conditional_saturation(temperature, solvent_volume, phases, index)?,
+                )?;
+            } else {
+                kinetic.advance(temperature, solvent_volume, phase, Time::new(0.0))?;
+            }
         }
         let result = SolubilityThermalKineticStateV1 {
             owner: Arc::clone(&self.owner),
@@ -308,7 +400,7 @@ impl SolubilityThermalKineticsV1 {
         controls: SolubilityThermalKineticControlsV1,
     ) -> Result<(), SolubilityCaloricErrorV1> {
         let [lo, hi] = controls.root.temperature_bracket.map(|t| t.value());
-        let domain = self.caloric().temperature_domain();
+        let domain = self.temperature_domain();
         let relative = controls.relative_tolerance;
         let amount = controls.amount_absolute_tolerance_mol;
         let temperature = controls.temperature_absolute_tolerance_k;
@@ -354,7 +446,7 @@ impl SolubilityThermalKineticsV1 {
         phases: &[SolubilityKineticStateV1],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, SolubilityCaloricErrorV1> {
-        self.caloric().phase_enthalpy_increment(
+        let base = self.caloric().phase_enthalpy_increment(
             initial.temperature,
             initial.solvent_moles,
             temperature,
@@ -368,7 +460,20 @@ impl SolubilityThermalKineticsV1 {
                 })
             },
             cancelled,
-        )
+        )?;
+        match &self.owner.interactions {
+            Some(interactions) => checked(
+                base + interactions.enthalpy_increment_j(
+                    initial.solvent_volume,
+                    initial.temperature,
+                    &initial.phases,
+                    temperature,
+                    phases,
+                )?,
+                "total interacting phase enthalpy increment",
+            ),
+            None => Ok(base),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -389,31 +494,77 @@ impl SolubilityThermalKineticsV1 {
             cancelled,
         )?;
         let required = checked(target_heat - baseline, "thermal kinetic stage heat")?;
+        // Interacting phase evolution freezes the stage's initial temperature.
+        // The subsequent heat solve changes only T, so the source-qualified
+        // positive frozen-stock heat capacity establishes a monotone root.
+        // Native phase trajectories and ordered cross-component updates remain
+        // solely owned here; no additional integrator or phase state is created.
+        let count = self.kinetics().len();
+        let mut frozen = *current;
+        let mut transfers = [0.0; MAX_SOLUBILITY_CALORIC_COMPONENTS_V1];
+        if let Some(interactions) = &self.owner.interactions {
+            for (index, kinetic) in self.kinetics().iter().enumerate() {
+                poll(cancelled)?;
+                let saturation = interactions.conditional_saturation(
+                    current.temperature,
+                    original.solvent_volume,
+                    &frozen.phases[..count],
+                    index,
+                )?;
+                let step = kinetic.advance_at_saturation(
+                    current.temperature,
+                    original.solvent_volume,
+                    &current.phases[index],
+                    duration,
+                    saturation,
+                )?;
+                frozen.phases[index] = *step.state();
+                transfers[index] = step.transferred_to_solution().value();
+            }
+        }
         let mut sample = |t| -> Result<Sample, SolubilityCaloricErrorV1> {
-            let mut state = *current;
+            let mut state = frozen;
             state.temperature = Temperature::new(t);
-            let change = self.caloric().phase_enthalpy_increment(
+            let mut change = self.caloric().phase_enthalpy_increment(
                 current.temperature,
                 original.solvent_moles,
                 state.temperature,
                 |index| {
                     let old = &current.phases[index];
-                    let step = self.kinetics()[index].advance(
-                        state.temperature,
-                        original.solvent_volume,
-                        old,
-                        duration,
-                    )?;
-                    state.phases[index] = *step.state();
+                    let transferred = if self.owner.interactions.is_some() {
+                        transfers[index]
+                    } else {
+                        let step = self.kinetics()[index].advance(
+                            state.temperature,
+                            original.solvent_volume,
+                            old,
+                            duration,
+                        )?;
+                        state.phases[index] = *step.state();
+                        step.transferred_to_solution().value()
+                    };
                     Ok(PhaseIncrement {
                         total: old.total_solute().value(),
                         solid: old.solid().value(),
                         dissolved: old.dissolved().value(),
-                        transferred: step.transferred_to_solution().value(),
+                        transferred,
                     })
                 },
                 cancelled,
             )?;
+            if let Some(interactions) = &self.owner.interactions {
+                change = checked(
+                    change + interactions.enthalpy_increment_j(
+                        original.solvent_volume,
+                        current.temperature,
+                        &current.phases[..count],
+                        state.temperature,
+                        &state.phases[..count],
+                    )?,
+                    "interacting thermal stage enthalpy increment",
+                )?;
+                poll(cancelled)?;
+            }
             Ok(Sample {
                 state,
                 residual: checked(change - required, "thermal kinetic stage residual")?,
@@ -637,3 +788,6 @@ fn normalized_difference(first: f64, second: f64, absolute: f64, relative: f64) 
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod interaction_tests;

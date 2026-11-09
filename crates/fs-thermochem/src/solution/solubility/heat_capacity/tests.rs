@@ -69,6 +69,53 @@ fn constant_phase_cp_difference_matches_integrated_kirchhoff_law() {
 }
 
 #[test]
+fn direct_thermal_increments_keep_neighboring_changes_and_original_source_domain() {
+    let model = law(1e16)
+        .with_phase_heat_capacities(constant(25.0), constant(85.0))
+        .unwrap();
+    let from = Temperature::new(300.0);
+    let to = Temperature::new(300.0_f64.next_up());
+    assert_eq!(
+        model.dissolution_enthalpy_at(from).unwrap(),
+        model.dissolution_enthalpy_at(to).unwrap()
+    );
+    let expected = 60.0 * (to.value() - from.value());
+    relative(
+        model.dissolution_enthalpy_change_j_mol(from, to).unwrap(),
+        expected,
+        2e-15,
+    );
+    relative(
+        model.dissolution_enthalpy_change_j_mol(to, from).unwrap(),
+        -expected,
+        2e-15,
+    );
+    let log_change = (1e16 / R) * ((to.value() - from.value()) / from.value() / to.value());
+    relative(model.log_saturation_ratio(from, to).unwrap(), log_change, 2e-15);
+    assert!(model.log_saturation_ratio(Temperature::new(249.0), to).is_err());
+    assert!(
+        model
+            .dissolution_enthalpy_change_j_mol(from, Temperature::new(401.0))
+            .is_err()
+    );
+
+    let ordinary = law(12_000.0)
+        .with_phase_heat_capacities(constant(25.0), constant(85.0))
+        .unwrap();
+    for (a, b) in [(270.0, 350.0), (335.0, 290.0), (300.0, 300.0)] {
+        let (a, b) = (Temperature::new(a), Temperature::new(b));
+        let increment = ordinary.log_saturation_ratio(a, b).unwrap();
+        let reverse = ordinary.log_saturation_ratio(b, a).unwrap();
+        assert!((increment + reverse).abs() < 5e-14);
+        relative(
+            ordinary.saturation_concentration(a).unwrap().value() * increment.exp(),
+            ordinary.saturation_concentration(b).unwrap().value(),
+            2e-13,
+        );
+    }
+}
+
+#[test]
 fn unequal_knots_and_independent_datums_preserve_linear_cp_analytic_solution() {
     // Cp_s=20+0.1T, Cp_d=-5+0.3T: ΔCp=-25+0.2T. Different knot locations
     // and sensible datums must neither re-fit the law nor shift ΔH_ref.

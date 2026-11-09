@@ -89,6 +89,35 @@ impl MolarHeatCapacityCurveV1 {
         )))
     }
 
+    /// Exact minimum and maximum of this original piecewise-linear curve on
+    /// an admitted closed temperature interval. Interior extrema occur only
+    /// at source knots; a pair of endpoint samples alone is insufficient.
+    /// This bound supplies constitutive thermal-stability checks without
+    /// exposing or replacing the source interpolation.
+    pub fn heat_capacity_bounds(
+        &self,
+        temperatures: [Temperature; 2],
+    ) -> Result<[MolarThermalQuantityV1; 2], BinaryCaloricErrorV1> {
+        let [lo, hi] = temperatures.map(|value| value.value());
+        if lo > hi {
+            return Err(BinaryCaloricErrorV1::Invalid(
+                "reversed molar Cp bound interval",
+            ));
+        }
+        let first = self.heat_capacity_at(temperatures[0])?.value();
+        let last = self.heat_capacity_at(temperatures[1])?.value();
+        let mut bounds = [first.min(last), first.max(last)];
+        let start = self.knots.partition_point(|&(temperature, _)| temperature <= lo);
+        for &(temperature, capacity) in &self.knots[start..] {
+            if temperature >= hi {
+                break;
+            }
+            bounds[0] = bounds[0].min(capacity);
+            bounds[1] = bounds[1].max(capacity);
+        }
+        Ok(bounds.map(MolarThermalQuantityV1::new))
+    }
+
     /// Exact integral of the declared piecewise-linear Cp interpolation [J/mol].
     /// Integrates only crossed segments, using their local temperature spans;
     /// cooling is the exact negative of the same ascending integration.
