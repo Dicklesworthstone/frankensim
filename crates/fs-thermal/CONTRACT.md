@@ -4260,9 +4260,16 @@ Each nonstationary stage solves mean radiative source rates together with
 the original common-ground optical closure. Sources are bounded by radiative
 rate times the original cell inventory. Safeguarded inverse-Broyden updates
 accelerate return modes; rejected trials retain their aggregate kinetic work.
-The dense accelerator admits at most the existing reaction-node bound of
-active source states. Optional authored triplet-pair kinetics use the same
-positive midpoint schedule. Temporal checks include physical event energies,
+Emitted-source closure retains at most `maximum_secant_history` inverse-Broyden
+rank-one corrections (default eight; zero selects safeguarded physical source
+iteration). For n radiating states and retained history m, accelerator storage
+and application are O(n m). Radiating-state counts can exceed sixty-four while
+the original per-cell kinetic node limits remain enforced. A full history
+restarts before forming the newest secant correction. Original cell/path/segment
+quotas and representable storage sizes are admitted before intermediate
+geometry, source-vector and history allocations. Source positivity, physical
+closure tolerances and work accounting retain their original meanings.
+Optional authored triplet-pair kinetics use the same positive midpoint schedule. Temporal checks include physical event energies,
 every attributed heat channel and endpoint radiative power, including when
 no pair law is present.
 
@@ -4294,14 +4301,22 @@ of -7.80e-20 J. The near-closed stationary residual was 4.14e-25 J. The mixed
 pair/recycling equilibrium used one substep and one cell evaluation, with
 a residual of -2.65e-23 J.
 
+Two additional native groups exercise the scalable closure: an independent
+65-cell transient recycling ring and a dense-reference comparison of bounded
+rank-one inverse updates. The ring uses eight substeps and 54,080 cell
+evaluations, with final S/N = 0.18471378925 against the independent E1 reference
+0.1847129753070053 and global energy residual -5.81e-21 J. Its changing
+populations exclude the stationary shortcut. The accelerator checks multiple
+directions, newest-secant satisfaction, bounded restarts, zero history,
+numerical reset, cancellation and oversized storage refusal.
+
 Together with the eighteen existing column/shared-beam/pair regressions and
-three prescribed pair-kinetics oracles, all twenty-six focused native tests
-passed with unchanged controls and no compiler diagnostics. The previously
-recovered authored source, after the pinned formatter, matches the restored
-production source byte-for-byte. The renderer now binds this owner to original
-geometry, material absorption, native heat and accepted endpoint opacity.
-Its separate full-runtime tests remain unexecuted; lower-owner checks do not
-establish that renderer gate.
+three prescribed pair-kinetics oracles, all twenty-eight focused native tests
+passed with unchanged controls and no compiler diagnostics. These use the
+actual production math, reaction and thermal sources. The renderer binds this
+owner to original geometry, material absorption, native heat and accepted
+endpoint opacity. Its separate full-runtime tests remain unexecuted;
+lower-owner checks do not establish that renderer gate.
 
 ## Stationary and harmonic prescribed throughflow
 

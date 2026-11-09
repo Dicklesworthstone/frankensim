@@ -32,6 +32,7 @@ fn controls() -> SaturableRecyclingLimits {
             maximum_substeps: 2048,
         },
         maximum_feedback_iterations: 96,
+        maximum_secant_history: 8,
     }
 }
 

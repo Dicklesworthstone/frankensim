@@ -48,6 +48,10 @@ pub struct SaturableRecyclingLimits {
     /// Per physical stage, including safeguarded trial source evaluations.
     /// All stages additionally share `pump.column.maximum_cell_evaluations`.
     pub maximum_feedback_iterations: usize,
+    /// Maximum retained inverse-secant corrections; storage and application
+    /// scale with this limit times the number of radiating source states.
+    /// Zero uses safeguarded physical source iteration without acceleration.
+    pub maximum_secant_history: usize,
 }
 
 impl Default for SaturableRecyclingLimits {
@@ -56,13 +60,15 @@ impl Default for SaturableRecyclingLimits {
             pump: PumpBeamsLimits::default(),
             annihilation: AnnihilationLimits::default(),
             maximum_feedback_iterations: 96,
+            maximum_secant_history: 8,
         }
     }
 }
 
 /// Immutable shared geometry and original spectra. Counts and accepted
-/// histories are caller-owned. At most the original reaction node limit of
-/// radiating source states participates in the dense secant accelerator.
+/// histories are caller-owned. Source closure uses a bounded rank-one history,
+/// without imposing a global reaction-node limit on the radiating states.
+/// Native per-cell kinetic limits and aggregate work limits remain in force.
 #[derive(Clone, Debug)]
 pub struct SaturablePhotonRecycling<const B: usize> {
     transport: SaturablePumpBeams<B>,
@@ -130,22 +136,70 @@ impl<const B: usize> SaturablePhotonRecycling<B> {
     ) -> Result<Self, SingletTripletError> {
         poll(&mut cancelled)?;
         if models.is_empty() || !nonnegative(fraction_roundoff) || fraction_roundoff >= 1.0 {
-            return Err(SingletTripletError::Invalid("finite recycling cells or fraction allowance"));
+            return Err(SingletTripletError::Invalid(
+                "finite recycling cells or fraction allowance",
+            ));
         }
+        // Admit the complete original geometry before allocating spectra or
+        // cloning any path. The common transport repeats these checks for its
+        // own owner; a rejected wrapper must not allocate that owner first.
+        if B == 0 || B > 64 || maximum_cells == 0 || maximum_paths == 0 || maximum_segments == 0 {
+            return Err(SingletTripletError::Invalid(
+                "pump beam lanes or admission limits",
+            ));
+        }
+        cap("pump beam cells", models.len(), maximum_cells)?;
+        let path_count = external_paths
+            .len()
+            .checked_add(emission_paths.len())
+            .ok_or(SingletTripletError::Unrepresentable(
+                "finite recycling path count",
+            ))?;
+        cap("pump beams", path_count, maximum_paths)?;
+        let mut segment_count = 0usize;
+        for path in external_paths
+            .iter()
+            .chain(emission_paths.iter().map(|emitted| &emitted.path))
+        {
+            poll(&mut cancelled)?;
+            segment_count = segment_count.checked_add(path.segments.len()).ok_or(
+                SingletTripletError::Unrepresentable("pump beam segment count"),
+            )?;
+            cap("pump beam segments", segment_count, maximum_segments)?;
+        }
+        segment_count
+            .checked_mul(B)
+            .ok_or(SingletTripletError::Unrepresentable(
+                "pump beam channel count",
+            ))?;
+        admit_storage::<[Sum; 2]>(models.len(), "finite recycling spectral weights")?;
+        admit_storage::<SingletTripletDecay>(models.len(), "finite recycling models")?;
+        admit_storage::<SaturablePumpPath<B>>(path_count, "finite recycling paths")?;
+        admit_storage::<SaturableEmissionPath<B>>(
+            emission_paths.len(),
+            "finite recycling emitted paths",
+        )?;
+        admit_storage::<SaturablePumpSegment<B>>(segment_count, "finite recycling path segments")?;
         let mut weights = vec![[Sum::default(); 2]; models.len()];
-        let mut paths = external_paths.to_vec();
+        let mut paths = Vec::with_capacity(path_count);
+        paths.extend_from_slice(external_paths);
         for emitted in emission_paths {
             poll(&mut cancelled)?;
             if emitted.source_cell >= models.len() || emitted.source_state >= 2 {
-                return Err(SingletTripletError::Invalid("finite recycling source cell/state"));
+                return Err(SingletTripletError::Invalid(
+                    "finite recycling source cell/state",
+                ));
             }
             let energy = models[emitted.source_cell].excitation_energies_j()[emitted.source_state];
             for lane in 0..B {
                 let weight = emitted.photon_fractions[lane];
-                if !nonnegative(weight) || weight > 1.0
+                if !nonnegative(weight)
+                    || weight > 1.0
                     || (weight > 0.0 && emitted.path.photon_energies_j[lane] > energy)
                 {
-                    return Err(SingletTripletError::Invalid("finite recycling photon weight or source energy"));
+                    return Err(SingletTripletError::Invalid(
+                        "finite recycling photon weight or source energy",
+                    ));
                 }
                 weights[emitted.source_cell][emitted.source_state].add(weight)?;
             }
@@ -158,12 +212,19 @@ impl<const B: usize> SaturablePhotonRecycling<B> {
                 if (model.radiative_rates_s()[state] > 0.0 || sum > 0.0)
                     && (sum - 1.0).abs() > fraction_roundoff
                 {
-                    return Err(SingletTripletError::Invalid("finite recycling conditional spectra must sum to one"));
+                    return Err(SingletTripletError::Invalid(
+                        "finite recycling conditional spectra must sum to one",
+                    ));
                 }
             }
         }
         let transport = SaturablePumpBeams::try_new(
-            models, &paths, maximum_cells, maximum_paths, maximum_segments, &mut cancelled,
+            models,
+            &paths,
+            maximum_cells,
+            maximum_paths,
+            maximum_segments,
+            &mut cancelled,
         )?;
         Ok(Self {
             transport,
@@ -173,12 +234,18 @@ impl<const B: usize> SaturablePhotonRecycling<B> {
         })
     }
 
-    pub fn models(&self) -> &[SingletTripletDecay] { self.transport.models() }
+    pub fn models(&self) -> &[SingletTripletDecay] {
+        self.transport.models()
+    }
     pub fn external_paths(&self) -> &[SaturablePumpPath<B>] {
         &self.transport.paths[..self.external_paths]
     }
-    pub fn emission_paths(&self) -> &[SaturableEmissionPath<B>] { &self.emission }
-    pub const fn fraction_roundoff(&self) -> f64 { self.fraction_roundoff }
+    pub fn emission_paths(&self) -> &[SaturableEmissionPath<B>] {
+        &self.emission
+    }
+    pub const fn fraction_roundoff(&self) -> f64 {
+        self.fraction_roundoff
+    }
 
     /// Advance all original populations once under constant external beams.
     /// Emitted photon rates are solved from this SAME stage's radiative events.
@@ -194,13 +261,30 @@ impl<const B: usize> SaturablePhotonRecycling<B> {
         limits: SaturableRecyclingLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<SaturableRecyclingStep<B>, SingletTripletError> {
-        pairs::validate(self.models(), laws, populations, duration_s, limits.annihilation, &mut cancelled)?;
-        if incident_external_s.len() != self.external_paths || limits.maximum_feedback_iterations == 0 {
-            return Err(SingletTripletError::Invalid("finite recycling external sources or feedback limit"));
+        pairs::validate(
+            self.models(),
+            laws,
+            populations,
+            duration_s,
+            limits.annihilation,
+            &mut cancelled,
+        )?;
+        if incident_external_s.len() != self.external_paths
+            || limits.maximum_feedback_iterations == 0
+        {
+            return Err(SingletTripletError::Invalid(
+                "finite recycling external sources or feedback limit",
+            ));
         }
         let mut incident = incident_external_s.to_vec();
         incident.extend((0..self.emission.len()).map(|_| [0.0; B]));
-        self.transport.validate_advance(populations, &incident, duration_s, limits.pump, &mut cancelled)?;
+        self.transport.validate_advance(
+            populations,
+            &incident,
+            duration_s,
+            limits.pump,
+            &mut cancelled,
+        )?;
         let column = limits.pump.column;
         let mut cells = 0usize;
         let mut coupling = 0usize;
@@ -208,59 +292,136 @@ impl<const B: usize> SaturablePhotonRecycling<B> {
         // Local mutable models; immutable geometry is copied only once per call.
         let mut frozen = self.transport.clone();
         if duration_s == 0.0 {
-            let history = self.frozen_history(
-                &mut frozen, populations, &incident, duration_s, limits,
-                &mut cells, &mut coupling, &mut cancelled,
-            )?.ok_or(SingletTripletError::Invalid("zero-duration photon closure"))?;
-            return self.finish(populations, history, 1, cells, coupling, feedback, 0.0,
-                column.kinetic.relative_tolerance, &mut cancelled);
+            let history = self
+                .frozen_history(
+                    &mut frozen,
+                    populations,
+                    &incident,
+                    duration_s,
+                    limits,
+                    &mut cells,
+                    &mut coupling,
+                    &mut cancelled,
+                )?
+                .ok_or(SingletTripletError::Invalid("zero-duration photon closure"))?;
+            return self.finish(
+                populations,
+                history,
+                1,
+                cells,
+                coupling,
+                feedback,
+                0.0,
+                column.kinetic.relative_tolerance,
+                &mut cancelled,
+            );
         }
         let stationary_rates = pairs::frozen_rates(populations, laws)?;
         for (index, model) in frozen.models.iter_mut().enumerate() {
             poll(&mut cancelled)?;
-            *model = pairs::frozen_model(self.models()[index], laws[index], stationary_rates[index])?;
+            *model =
+                pairs::frozen_model(self.models()[index], laws[index], stationary_rates[index])?;
         }
         feedback += 1;
         if let Some(mut history) = self.stationary_history(
-            &frozen, populations, incident_external_s, duration_s, limits,
-            &mut cells, &mut cancelled,
+            &frozen,
+            populations,
+            incident_external_s,
+            duration_s,
+            limits,
+            &mut cells,
+            &mut cancelled,
         )? {
             for (index, cell) in history.beams.cells.iter_mut().enumerate() {
-                pairs::restore(self.models()[index], frozen.models[index], populations[index],
-                    laws[index], stationary_rates[index], cell, column.kinetic.relative_tolerance)?;
+                pairs::restore(
+                    self.models()[index],
+                    frozen.models[index],
+                    populations[index],
+                    laws[index],
+                    stationary_rates[index],
+                    cell,
+                    column.kinetic.relative_tolerance,
+                )?;
             }
-            return self.finish(populations, history, 1, cells, coupling, feedback,
-                0.0, column.kinetic.relative_tolerance, &mut cancelled);
+            return self.finish(
+                populations,
+                history,
+                1,
+                cells,
+                coupling,
+                feedback,
+                0.0,
+                column.kinetic.relative_tolerance,
+                &mut cancelled,
+            );
         }
         let mut temporal = limits.annihilation;
         temporal.maximum_substeps = temporal.maximum_substeps.min(column.maximum_substeps);
         let fastest = self.fastest_rate(populations, incident_external_s, &mut cancelled)?;
         let result = pairs::midpoint(
-            populations, laws, duration_s, fastest, temporal,
-            Some((column.relative_tolerance, column.absolute_energy_tolerance_j)),
+            populations,
+            laws,
+            duration_s,
+            fastest,
+            temporal,
+            Some((
+                column.relative_tolerance,
+                column.absolute_energy_tolerance_j,
+            )),
             |initial, rates, duration, cancelled| {
                 for (index, model) in frozen.models.iter_mut().enumerate() {
                     poll(cancelled)?;
                     *model = pairs::frozen_model(self.models()[index], laws[index], rates[index])?;
                 }
                 let Some(mut history) = self.feedback(
-                    &mut frozen, initial, incident_external_s, duration, limits,
-                    &mut cells, &mut coupling, &mut feedback, cancelled,
-                )? else { return Ok(None) };
+                    &mut frozen,
+                    initial,
+                    incident_external_s,
+                    duration,
+                    limits,
+                    &mut cells,
+                    &mut coupling,
+                    &mut feedback,
+                    cancelled,
+                )?
+                else {
+                    return Ok(None);
+                };
                 for (index, cell) in history.beams.cells.iter_mut().enumerate() {
-                    pairs::restore(self.models()[index], frozen.models[index], initial[index], laws[index],
-                        rates[index], cell, column.kinetic.relative_tolerance)?;
+                    pairs::restore(
+                        self.models()[index],
+                        frozen.models[index],
+                        initial[index],
+                        laws[index],
+                        rates[index],
+                        cell,
+                        column.kinetic.relative_tolerance,
+                    )?;
                 }
                 Ok(Some(history))
             },
             |history, cancelled| {
-                self.audit_history(populations, history, column.kinetic.relative_tolerance, cancelled)
+                self.audit_history(
+                    populations,
+                    history,
+                    column.kinetic.relative_tolerance,
+                    cancelled,
+                )
             },
             |history| self.components(history, duration_s),
             &mut cancelled,
         )?;
-        self.finish(populations, result.step, result.substeps, cells, coupling, feedback,
-            result.discrepancy_j, column.kinetic.relative_tolerance, &mut cancelled)
+        self.finish(
+            populations,
+            result.step,
+            result.substeps,
+            cells,
+            coupling,
+            feedback,
+            result.discrepancy_j,
+            column.kinetic.relative_tolerance,
+            &mut cancelled,
+        )
     }
 
     fn fastest_rate(
@@ -272,36 +433,65 @@ impl<const B: usize> SaturablePhotonRecycling<B> {
         let mut upper = external.to_vec();
         for emitted in &self.emission {
             let total = inventory(initial[emitted.source_cell])?;
-            let rate = positive_product(total, self.models()[emitted.source_cell].radiative_rates_s()[emitted.source_state], "upper radiative rate")?;
+            let rate = positive_product(
+                total,
+                self.models()[emitted.source_cell].radiative_rates_s()[emitted.source_state],
+                "upper radiative rate",
+            )?;
             let mut lanes = [0.0; B];
-            for lane in 0..B { lanes[lane] = positive_product(rate, emitted.photon_fractions[lane], "upper emitted lane")?; }
+            for lane in 0..B {
+                lanes[lane] =
+                    positive_product(rate, emitted.photon_fractions[lane], "upper emitted lane")?;
+            }
             upper.push(lanes);
         }
         let mut hazards = vec![Sum::default(); initial.len()];
         for (path, rates) in self.transport.paths.iter().zip(upper) {
             for segment in &path.segments {
                 poll(cancelled)?;
-                for lane in 0..B { for target in 0..2 {
-                    hazards[segment.cell_index].add(positive_product(rates[lane], segment.optical_depth_per_ground[lane][target], "upper recycled hazard")?)?;
-                }}
+                for lane in 0..B {
+                    for target in 0..2 {
+                        hazards[segment.cell_index].add(positive_product(
+                            rates[lane],
+                            segment.optical_depth_per_ground[lane][target],
+                            "upper recycled hazard",
+                        )?)?;
+                    }
+                }
             }
         }
         let mut fastest = pairs::fastest_rate(self.models());
-        for hazard in hazards { fastest = fastest.max(hazard.value()?); }
+        for hazard in hazards {
+            fastest = fastest.max(hazard.value()?);
+        }
         Ok(fastest)
     }
 }
 
 fn inventory(populations: [f64; 3]) -> Result<f64, SingletTripletError> {
     let mut total = Sum::default();
-    for value in populations { total.add(value)?; }
+    for value in populations {
+        total.add(value)?;
+    }
     total.value()
 }
 
-#[path = "recycling/feedback.rs"]
-mod feedback;
+fn admit_storage<T>(length: usize, quantity: &'static str) -> Result<(), SingletTripletError> {
+    let bytes = length
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or(SingletTripletError::Unrepresentable(quantity))?;
+    if bytes > isize::MAX as usize {
+        return Err(SingletTripletError::Unrepresentable(quantity));
+    }
+    Ok(())
+}
+
 #[path = "recycling/accounts.rs"]
 mod accounts;
+#[path = "recycling/feedback.rs"]
+mod feedback;
+#[path = "recycling/secant.rs"]
+mod secant;
 #[path = "recycling/stationary.rs"]
 mod stationary;
 #[cfg(test)]

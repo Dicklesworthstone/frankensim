@@ -12540,6 +12540,13 @@ destination-state energy are both checked. The passive host must exclude the
 same active molecules. Molecular opacity is `N_ground * sigma / V` on the
 original cell; neither host mass density nor an invented beam area replaces it.
 
+`SaturableRecyclingLimits::maximum_secant_history` bounds the inverse-Broyden
+history (default eight; zero selects safeguarded physical source iteration).
+Coupled volumes may exceed sixty-four radiating states while retaining the
+original per-cell kinetic limits and aggregate work budgets. Accelerator
+storage and application scale with source count times retained history;
+geometry and spectral quadrature retain their separate explicit bounds.
+
 The existing shared-beam kinetic owner integrates all unique inventories once.
 Emitted spectral/directional rates are solved from that same history's
 radiative events, and absorption uses their actual receiver ground

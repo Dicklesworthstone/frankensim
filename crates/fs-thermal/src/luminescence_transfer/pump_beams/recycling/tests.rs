@@ -91,13 +91,48 @@ fn g1_self_return_matches_independent_exponential_integral_decay_and_photon_coun
     let escaped = 0.027_091_876_968_994_058 * count;
     close(step.cells[0].populations[0], count - singlets, count, 5e-4);
     close(step.cells[0].populations[1], singlets, singlets, 5e-4);
-    close(step.cells[0].radiative_events[0], radiative, radiative, 5e-4);
-    close(step.cells[0].pump_events[0], radiative - escaped, radiative, 5e-4);
-    close(step.emitted_energy_j[0][0], radiative * energy, radiative * energy, 5e-4);
-    close(step.escaped_energy_j[0][0], escaped * energy, escaped * energy, 5e-4);
-    close(step.emission_paths[0].incident_photons[0], radiative, radiative, 5e-4);
-    close(step.emission_paths[0].absorbed_photons[0], radiative - escaped, radiative, 5e-4);
-    close(step.emission_paths[0].transmitted_photons[0], escaped, escaped, 5e-4);
+    close(
+        step.cells[0].radiative_events[0],
+        radiative,
+        radiative,
+        5e-4,
+    );
+    close(
+        step.cells[0].pump_events[0],
+        radiative - escaped,
+        radiative,
+        5e-4,
+    );
+    close(
+        step.emitted_energy_j[0][0],
+        radiative * energy,
+        radiative * energy,
+        5e-4,
+    );
+    close(
+        step.escaped_energy_j[0][0],
+        escaped * energy,
+        escaped * energy,
+        5e-4,
+    );
+    close(
+        step.emission_paths[0].incident_photons[0],
+        radiative,
+        radiative,
+        5e-4,
+    );
+    close(
+        step.emission_paths[0].absorbed_photons[0],
+        radiative - escaped,
+        radiative,
+        5e-4,
+    );
+    close(
+        step.emission_paths[0].transmitted_photons[0],
+        escaped,
+        escaped,
+        5e-4,
+    );
     close(step.cells[0].populations.iter().sum(), count, count, 2e-10);
     assert_eq!(step.cells[0].populations[2], 0.0);
     assert_eq!(step.source_relaxation_heat_j, [[0.0; 2]]);
@@ -125,11 +160,7 @@ fn g1_emitted_fluence_saturates_a_finite_receiver_with_separate_stokes_heat() {
     let duration: f64 = 0.9;
     let depth = 4.0 / receiver_count;
     let models = [model(source_energy, rate), model(receiver_energy, 0.0)];
-    let network = prepare(
-        &models,
-        &[],
-        &[emission(0, path(1, depth, photon_energy))],
-    );
+    let network = prepare(&models, &[], &[emission(0, path(1, depth, photon_energy))]);
     let initial = [
         [source_count - initial_source, initial_source, 0.0],
         [receiver_count, 0.0, 0.0],
@@ -144,14 +175,39 @@ fn g1_emitted_fluence_saturates_a_finite_receiver_with_separate_stokes_heat() {
         ((depth * receiver_count).exp_m1() * (-depth * fluence).exp()).ln_1p() / depth;
     let absorbed = receiver_count - remaining_ground;
     let escaped = fluence - absorbed;
-    close(step.cells[0].populations[1], remaining_source, source_count, 5e-4);
-    close(step.cells[1].populations[0], remaining_ground, receiver_count, 5e-4);
+    close(
+        step.cells[0].populations[1],
+        remaining_source,
+        source_count,
+        5e-4,
+    );
+    close(
+        step.cells[1].populations[0],
+        remaining_ground,
+        receiver_count,
+        5e-4,
+    );
     close(step.cells[1].populations[1], absorbed, receiver_count, 5e-4);
     assert!(step.cells[1].populations[1] < receiver_count);
     assert!(step.cells[1].populations[1] > 0.9 * receiver_count);
-    close(step.emission_paths[0].incident_photons[0], fluence, fluence, 5e-4);
-    close(step.emission_paths[0].absorbed_photons[0], absorbed, absorbed, 5e-4);
-    close(step.emission_paths[0].transmitted_photons[0], escaped, escaped, 5e-4);
+    close(
+        step.emission_paths[0].incident_photons[0],
+        fluence,
+        fluence,
+        5e-4,
+    );
+    close(
+        step.emission_paths[0].absorbed_photons[0],
+        absorbed,
+        absorbed,
+        5e-4,
+    );
+    close(
+        step.emission_paths[0].transmitted_photons[0],
+        escaped,
+        escaped,
+        5e-4,
+    );
     close(
         step.source_relaxation_heat_j[0][0],
         fluence * (source_energy - photon_energy),
@@ -164,7 +220,12 @@ fn g1_emitted_fluence_saturates_a_finite_receiver_with_separate_stokes_heat() {
         absorbed * (photon_energy - receiver_energy),
         5e-4,
     );
-    close(step.escaped_energy_j[0][0], escaped * photon_energy, escaped * photon_energy, 5e-4);
+    close(
+        step.escaped_energy_j[0][0],
+        escaped * photon_energy,
+        escaped * photon_energy,
+        5e-4,
+    );
     for (cell, count) in step.cells.iter().zip([source_count, receiver_count]) {
         close(cell.populations.iter().sum(), count, count, 2e-10);
     }
@@ -192,16 +253,38 @@ fn g1_nearly_closed_return_keeps_independent_pumped_equilibrium_and_net_energy()
         &[emission(0, path(0, return_depth, energy))],
     );
     let step = network
-        .advance(&initial, &[[external_rate]], duration, &[None], limits(), || false)
+        .advance(
+            &initial,
+            &[[external_rate]],
+            duration,
+            &[None],
+            limits(),
+            || false,
+        )
         .unwrap();
     let emitted = rate * singlets * duration;
     let escaped = emitted * escape_fraction;
     for state in 0..3 {
-        close(step.cells[0].populations[state], initial[0][state], count, 2e-8);
+        close(
+            step.cells[0].populations[state],
+            initial[0][state],
+            count,
+            2e-8,
+        );
     }
     close(step.cells[0].radiative_events[0], emitted, emitted, 2e-8);
-    close(step.emission_paths[0].transmitted_photons[0], escaped, escaped, 2e-8);
-    close(step.external_beams[0].absorbed_photons[0], escaped, escaped, 2e-8);
+    close(
+        step.emission_paths[0].transmitted_photons[0],
+        escaped,
+        escaped,
+        2e-8,
+    );
+    close(
+        step.external_beams[0].absorbed_photons[0],
+        escaped,
+        escaped,
+        2e-8,
+    );
     close(
         step.cells[0].pump_relaxation_heat_j[0],
         escaped * (pump_energy - energy),
@@ -214,7 +297,10 @@ fn g1_nearly_closed_return_keeps_independent_pumped_equilibrium_and_net_energy()
     assert!(step.residual_j.abs() < 2e-8 * external_scale);
     eprintln!(
         "finite near-closed equilibrium: substeps={}, evaluations={}, radiative_events_per_emitter={:.10e}, residual_j={:.10e}",
-        step.substeps, step.cell_evaluations, step.cells[0].radiative_events[0] / count, step.residual_j,
+        step.substeps,
+        step.cell_evaluations,
+        step.cells[0].radiative_events[0] / count,
+        step.residual_j,
     );
 }
 
@@ -243,14 +329,37 @@ fn g4_no_active_return_retains_native_history_and_failed_trials_leave_retry_iden
         .advance(&initial, &rates, duration, &[None], controls, || false)
         .unwrap();
     for state in 0..3 {
-        close(step.cells[0].populations[state], old.cells[0].populations[state], 1e12, 5e-10);
+        close(
+            step.cells[0].populations[state],
+            old.cells[0].populations[state],
+            1e12,
+            5e-10,
+        );
     }
-    close(step.cells[0].radiative_events[0], old.cells[0].radiative_events[0], 1e12, 5e-10);
-    close(step.external_beams[0].absorbed_photons[0], old.beams[0].absorbed_photons[0], 1e12, 5e-10);
-    assert!(network.advance(&initial, &rates, duration, &[None], controls, || true).is_err());
+    close(
+        step.cells[0].radiative_events[0],
+        old.cells[0].radiative_events[0],
+        1e12,
+        5e-10,
+    );
+    close(
+        step.external_beams[0].absorbed_photons[0],
+        old.beams[0].absorbed_photons[0],
+        1e12,
+        5e-10,
+    );
+    assert!(
+        network
+            .advance(&initial, &rates, duration, &[None], controls, || true)
+            .is_err()
+    );
     let mut bounded = controls;
     bounded.pump.column.maximum_cell_evaluations = 1;
-    assert!(network.advance(&initial, &rates, duration, &[None], bounded, || false).is_err());
+    assert!(
+        network
+            .advance(&initial, &rates, duration, &[None], bounded, || false)
+            .is_err()
+    );
     let retry = network
         .advance(&initial, &rates, duration, &[None], controls, || false)
         .unwrap();
@@ -281,12 +390,8 @@ fn g1_recycling_and_triplet_pairs_share_an_independent_stationary_heat_balance()
     // require external absorption=2*p. These independent flow equalities
     // also give G'=0, including the pair's 2-phi returned ground emitters.
     let pair_rate = radiative_rate * singlets * escape_fraction / yield_per_pair;
-    let law = TripletAnnihilation::try_new(
-        pair_rate / (triplets * triplets),
-        1.0,
-        yield_per_pair,
-    )
-    .unwrap();
+    let law = TripletAnnihilation::try_new(pair_rate / (triplets * triplets), 1.0, yield_per_pair)
+        .unwrap();
     let external_rate = 2.0 * pair_rate / -(-external_depth * ground).exp_m1();
     let mut triplet_path = path(0, 0.0, pump_energy);
     triplet_path.segments[0].optical_depth_per_ground = [[0.0, external_depth]];
@@ -321,7 +426,12 @@ fn g1_recycling_and_triplet_pairs_share_an_independent_stationary_heat_balance()
         close(cell.populations[state], initial[0][state], count, 2e-8);
     }
     close(cell.annihilation_events, pairs, pairs, 2e-8);
-    close(cell.annihilation_singlets, yield_per_pair * pairs, pairs, 2e-8);
+    close(
+        cell.annihilation_singlets,
+        yield_per_pair * pairs,
+        pairs,
+        2e-8,
+    );
     close(cell.radiative_events[0], radiative, radiative, 2e-8);
     close(cell.pump_events[0], recycled, recycled, 2e-8);
     close(cell.pump_events[1], 2.0 * pairs, 2.0 * pairs, 2e-8);
@@ -329,18 +439,124 @@ fn g1_recycling_and_triplet_pairs_share_an_independent_stationary_heat_balance()
     let pump_heat = (pump_energy - triplet_energy) * 2.0 * pairs;
     close(cell.annihilation_heat_j, pair_heat, pair_heat, 2e-8);
     close(cell.pump_relaxation_heat_j[1], pump_heat, pump_heat, 2e-8);
-    close(step.external_beams[0].absorbed_photons[0], 2.0 * pairs, 2.0 * pairs, 2e-8);
-    close(step.escaped_energy_j[0][0], escaped * singlet_energy, escaped * singlet_energy, 2e-8);
-    close(step.external_absorbed_pump_energy_j[0][1], 2.0 * pairs * pump_energy, 2.0 * pairs * pump_energy, 2e-8);
-    close(step.recycled_absorbed_pump_energy_j[0][0], recycled * singlet_energy, recycled * singlet_energy, 2e-8);
+    close(
+        step.external_beams[0].absorbed_photons[0],
+        2.0 * pairs,
+        2.0 * pairs,
+        2e-8,
+    );
+    close(
+        step.escaped_energy_j[0][0],
+        escaped * singlet_energy,
+        escaped * singlet_energy,
+        2e-8,
+    );
+    close(
+        step.external_absorbed_pump_energy_j[0][1],
+        2.0 * pairs * pump_energy,
+        2.0 * pairs * pump_energy,
+        2e-8,
+    );
+    close(
+        step.recycled_absorbed_pump_energy_j[0][0],
+        recycled * singlet_energy,
+        recycled * singlet_energy,
+        2e-8,
+    );
     assert_eq!(cell.nonradiative_events, [0.0; 2]);
     assert_eq!(cell.crossing_events, [0.0; 2]);
     assert_eq!(cell.reverse_crossing_heat_absorbed_j, 0.0);
-    let scale = singlets * singlet_energy + triplets * triplet_energy
+    let scale = singlets * singlet_energy
+        + triplets * triplet_energy
         + external_rate * duration * pump_energy;
     assert!(step.residual_j.abs() < 2e-10 * scale);
     eprintln!(
         "finite pair/recycling equilibrium: substeps={}, evaluations={}, pair_events={:.10e}, residual_j={:.10e}",
         step.substeps, step.cell_evaluations, cell.annihilation_events, step.residual_j,
+    );
+}
+
+#[test]
+fn g1_sixty_five_radiating_cells_recycle_a_nonstationary_ring_on_original_inventories() {
+    let cells = 65usize;
+    let count = 1e12;
+    let energy = 4e-19;
+    let models = vec![model(energy, 2.0); cells];
+    let emitted: Vec<_> = (0..cells)
+        .map(|source| emission(source, path((source + 1) % cells, 2.0 / count, energy)))
+        .collect();
+    let network = SaturablePhotonRecycling::try_new(
+        &models,
+        &[],
+        &emitted,
+        64.0 * f64::EPSILON,
+        cells,
+        cells,
+        cells,
+        || false,
+    )
+    .unwrap();
+    let initial = vec![[0.8 * count, 0.2 * count, 0.0]; cells];
+    let step = network
+        .advance(&initial, &[], 0.2, &vec![None; cells], limits(), || false)
+        .unwrap();
+
+    // Every receiver has the same history by ring symmetry, so the independent
+    // self-return E1 solution applies to EACH original finite inventory.
+    // Here a*N=2, S0/N=.2 and k*t=.4. E1 differences were evaluated with
+    // 110-digit fixed-point integer series and scalar bisection:
+    // E1(x)-E1(x0)=ln(x0/x)+sum_k[((-x0)^k-(-x)^k)/(k*k!)].
+    // Euler's constant cancels. No native kinetic or temporal solver enters.
+    let singlets = 0.184_712_975_307_005_3 * count;
+    let radiative = 0.076_886_505_698_846_88 * count;
+    let escaped = 0.015_287_024_692_994_692 * count;
+    assert_eq!(step.cells.len(), cells);
+    assert_eq!(step.emission_paths.len(), cells);
+    // A real transient, with appreciable loss, cannot use a frozen equilibrium
+    // to satisfy this test merely because all source cells happen to be equal.
+    assert!(step.cells[0].populations[1] < 0.19 * count);
+    for index in 0..cells {
+        let cell = &step.cells[index];
+        close(cell.populations[0], count - singlets, count, 5e-4);
+        close(cell.populations[1], singlets, singlets, 5e-4);
+        close(cell.populations.iter().sum(), count, count, 2e-10);
+        assert_eq!(cell.populations[2], 0.0);
+        close(cell.radiative_events[0], radiative, radiative, 5e-4);
+        close(cell.pump_events[0], radiative - escaped, radiative, 5e-4);
+        close(
+            step.emission_paths[index].incident_photons[0],
+            radiative,
+            radiative,
+            5e-4,
+        );
+        close(
+            step.emission_paths[index].transmitted_photons[0],
+            escaped,
+            escaped,
+            5e-4,
+        );
+        close(
+            step.escaped_energy_j[index][0],
+            escaped * energy,
+            escaped * energy,
+            5e-4,
+        );
+    }
+    let total_escaped: f64 = step
+        .escaped_energy_j
+        .iter()
+        .map(|cell| cell[0] + cell[1])
+        .sum();
+    let expected_escaped = cells as f64 * escaped * energy;
+    close(total_escaped, expected_escaped, expected_escaped, 5e-4);
+    let original_energy = cells as f64 * 0.2 * count * energy;
+    assert!(step.residual_j.abs() < 2e-10 * original_energy);
+    eprintln!(
+        "finite 65-source transient ring: substeps={}, evaluations={}, S/N={:.10e}, escaped_j={:.10e}, residual_j={:.10e}",
+        step.substeps,
+        step.cell_evaluations,
+        step.cells[0].populations[1] / count,
+        total_escaped,
+        step.residual_j,
     );
 }

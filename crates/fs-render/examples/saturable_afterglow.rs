@@ -382,6 +382,7 @@ fn run(
                     maximum_substeps: 4096,
                 },
                 maximum_feedback_iterations: 128,
+                maximum_secant_history: 8,
             },
             || Ok(()),
         )?;
