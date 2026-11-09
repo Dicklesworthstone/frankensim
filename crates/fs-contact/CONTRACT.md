@@ -3582,6 +3582,34 @@ compare both graded wear depths and inventories with independent quadratic
 roots, retain alpha and exact claims at exposed endpoints, verify refreshed
 caps and normal work, and reject profiles exchanged between original bodies.
 
+### Further preconditioning on an already worn surface
+
+`SourceDepthHardnessWear::refresh_hardness_profiles` and its `_at_load`
+and `_with_drive` variants adopt complete newly validated original H(z, alpha)
+profiles without restarting contact or wear. Both ordered bodies retain the
+original material/card, exact indentation test and selected claim, native family
+and complete cyclic branch identity, fixed environment and declared depth
+ceiling. Native alpha cannot decrease. An ordinary fixed-profile counterface
+must remain exactly unchanged.
+
+New caps are evaluated at the existing per-body exposed depths. Original
+recession, removed volumes, accumulated plastic indentation and work survive;
+the prepared compliance operator is shared. The existing native material
+refresh applies the requested held approach, maintained force or finite spring
+directly and reports any new indentation and signed parameter work. Softening
+can reduce pressure and add a dent. Subsequent rehardening raises the admissible
+cap without healing that dent or automatically restoring the old pressure.
+Failure to support a maintained force refuses the complete successor.
+
+Regressions start with genuine J2 preconditioning followed by contact loading
+and wear. They compare held-approach softening against independent indentation,
+plastic-work and parameter-work equations, continue wear through a rehardening
+profile, retain both inventories, check force and finite-spring work, and refuse
+changed source/test/family/depth/environment, decreasing alpha, altered fixed
+counterfaces and cancellation. This is endpoint property transfer over an
+explicitly representative preconditioned column; it does not import bulk
+residual stress, heat or plastic work or certify the intermediate loading path.
+
 ## Mixed-mode JKR normal traction on structural faces
 
 `AdhesiveTractionProfile::{jkr_mixed_mode_displacement,jkr_mixed_mode_force}`

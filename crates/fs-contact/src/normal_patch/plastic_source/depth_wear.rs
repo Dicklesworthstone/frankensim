@@ -49,6 +49,8 @@ use crate::normal_patch::{
 };
 
 mod control;
+/// Accepted bulk-history profile continuation with retained contact and wear.
+pub mod history;
 pub mod integration;
 /// Prescribed independent body/interface temperatures with retained wear.
 pub mod temperature;

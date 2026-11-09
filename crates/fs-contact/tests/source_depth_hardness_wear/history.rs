@@ -1,5 +1,8 @@
 //! Original native preconditioning and graded depth enter actual contact/wear.
 
+#[path = "history/refresh.rs"]
+mod refresh;
+
 use super::*;
 use fs_matdb::{ClaimSet, MaterialStateId};
 use fs_material::SmallStrainLaw;
