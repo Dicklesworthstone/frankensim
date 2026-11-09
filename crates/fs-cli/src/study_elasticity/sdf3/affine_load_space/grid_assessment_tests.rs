@@ -330,7 +330,7 @@ fn g1_affine_grid_assessment_rebuilds_full_models_and_keeps_fine_physical_caps_s
             .assessment
             .as_ref()
             .unwrap()
-            .passed(loose_spec.affine_grid_assessment.unwrap())
+            .passed(loose_spec.affine_grid_assessment.unwrap(), loose_spec.affine_load_space.unwrap().goal)
     );
     let mut strict_stress = loose_spec.clone();
     strict_stress
@@ -356,7 +356,7 @@ fn g1_affine_grid_assessment_rebuilds_full_models_and_keeps_fine_physical_caps_s
             .assessment
             .as_ref()
             .unwrap()
-            .passed(strict_stress.affine_grid_assessment.unwrap())
+            .passed(strict_stress.affine_grid_assessment.unwrap(), strict_stress.affine_load_space.unwrap().goal)
     );
     let mut strict_response = loose_spec.clone();
     let witness = &responses.fine.witnesses[0];
@@ -376,7 +376,7 @@ fn g1_affine_grid_assessment_rebuilds_full_models_and_keeps_fine_physical_caps_s
             .assessment
             .as_ref()
             .unwrap()
-            .passed(strict_response.affine_grid_assessment.unwrap())
+            .passed(strict_response.affine_grid_assessment.unwrap(), strict_response.affine_load_space.unwrap().goal)
     );
 }
 

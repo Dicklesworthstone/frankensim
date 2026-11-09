@@ -68,13 +68,14 @@ fn recovery_allowance_finished(recovery: &resume::Recovery, spec: &Spec) -> bool
 }
 
 fn source_wants_refit(run: &Computation, spec: &Spec) -> bool {
+    let Some(config) = spec.affine_load_space else {
+        return false;
+    };
     allowance_finished(&run.state, spec)
-        && spec
-            .affine_load_space
-            .is_some_and(|c| c.feasible(run.state.selected()))
+        && config.feasible(run.state.selected())
         && spec.affine_grid_assessment.is_some_and(|policy| {
             run.state.assessment.as_ref().is_some_and(|assessment| {
-                assessment.status == "checked" && !assessment.passed(policy)
+                assessment.status == "checked" && !assessment.passed(policy, config.goal)
             })
         })
 }

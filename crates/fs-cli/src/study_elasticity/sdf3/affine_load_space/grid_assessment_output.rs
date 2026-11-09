@@ -7,7 +7,7 @@ use fs_topopt::sdf3::robust::envelope::affine_load_space::{
     stress::refinement::AffineStressChange3,
 };
 
-const SCOPE: &str = "Numerical two-grid assessment of the retained selected design. The fine grid inherits eroded physical occupancy and stiffness and dilated inventory from source parents; it does not refilter or optimize the design. Both grids independently maximize the complete affine load family and check the original compliance, signed-response and sampled-strength requirements. Mean displacement uses each grid's own reference cut-volume normalization on the same authored patch. Full-model change metrics include directions other than the compliance maximizers. Frozen-direction DWR terms and load-switch corrections are separate diagnostics. Stress aggregates use each grid's actual quadrature; matched-site changes use both complete field families on the same fine sites. Changing sample counts can change the unweighted stress aggregate. These finite-sample, floating-point observations are not continuum or interval error bounds. The optimizer checkpoint and selected coarse field artifact remain separate from this assessment.";
+const SCOPE: &str = "Numerical two-grid assessment of the retained selected design. The fine grid inherits eroded physical occupancy and stiffness and dilated inventory from source parents; it does not refilter or optimize the design. Both grids independently maximize the complete affine load family and check the original compliance or volume cap, signed-response and sampled-strength requirements. For a compliance objective the reference compliance normalizes the objective and full-model changes; physical feasibility uses the dilated-volume cap. Mean displacement uses each grid's own reference cut-volume normalization on the same authored patch. Full-model change metrics include directions other than the compliance maximizers. Frozen-direction DWR terms and load-switch corrections are separate diagnostics. Stress aggregates use each grid's actual quadrature; matched-site changes use both complete field families on the same fine sites. Changing sample counts can change the unweighted stress aggregate. These finite-sample, floating-point observations are not continuum or interval error bounds. The optimizer checkpoint and selected coarse field artifact remain separate from this assessment.";
 
 fn invalid(message: impl Into<String>) -> Failure {
     fail("cli-study-sdf3-grid-assessment-output", message)
@@ -24,16 +24,30 @@ pub(super) fn policy(p: Policy) -> String {
     )
 }
 
-fn grid(g: &AffineLoadSpaceGrid3, cap: f64, joint: f64) -> String {
+fn grid(g: &AffineLoadSpaceGrid3, config: Config, volume: f64, joint: f64) -> String {
     let o = &g.oracle;
-    let feasible = g.maximum.is_finite()
-        && g.worst_compliance.is_finite()
-        && g.maximum >= 0.0
-        && g.maximum <= 1.0
-        && g.worst_compliance >= 0.0
-        && g.worst_compliance <= cap;
+    let requirement = match config.goal {
+        AffineLoadSpaceDesignGoal3::WorstCompliance { volume_limit } => {
+            let feasible = volume.is_finite() && volume >= 0.0 && volume <= volume_limit;
+            format!(
+                "\"compliance_limit_j\":null,\"compliance_feasible\":null,\"volume_limit_fraction\":{volume_limit:.17e},\"volume_feasible\":{feasible}"
+            )
+        }
+        AffineLoadSpaceDesignGoal3::MinimumMaterial { .. } => {
+            let feasible = g.maximum.is_finite()
+                && g.worst_compliance.is_finite()
+                && (0.0..=1.0).contains(&g.maximum)
+                && g.worst_compliance >= 0.0
+                && g.worst_compliance <= config.cap_j;
+            format!(
+                "\"compliance_limit_j\":{:.17e},\"compliance_feasible\":{feasible},\"volume_limit_fraction\":null,\"volume_feasible\":null",
+                config.cap_j,
+            )
+        }
+    };
     format!(
-        "{{\"compliance_limit_j\":{cap:.17e},\"worst_compliance_j\":{:.17e},\"maximum_ratio\":{:.17e},\"compliance_feasible\":{feasible},\"joint_constraint\":{joint:.17e},\"worst_coefficients\":{:?},\"normalized_gram_row_major\":{:?},\"normalized_linear\":{:?},\"normalized_offset\":{:.17e},\"reciprocity_defect\":{:.17e},\"witness_relative_defect\":{:.17e},\"witness_relative_residual\":{:.17e},\"oracle\":{{\"branch\":{:?},\"gradient_admissible\":{},\"value_without_offset\":{:.17e},\"dual_value_without_offset\":{:.17e},\"relative_duality_gap\":{:.17e},\"stationarity_residual\":{:.17e},\"feasibility_residual\":{:.17e},\"complementarity_residual\":{:.17e},\"eigenpair_residual\":{:.17e},\"iterations\":{}}}}}",
+        "{{{requirement},\"compliance_reference_j\":{:.17e},\"dilated_volume_fraction\":{volume:.17e},\"worst_compliance_j\":{:.17e},\"maximum_ratio\":{:.17e},\"joint_constraint\":{joint:.17e},\"worst_coefficients\":{:?},\"normalized_gram_row_major\":{:?},\"normalized_linear\":{:?},\"normalized_offset\":{:.17e},\"reciprocity_defect\":{:.17e},\"witness_relative_defect\":{:.17e},\"witness_relative_residual\":{:.17e},\"oracle\":{{\"branch\":{:?},\"gradient_admissible\":{},\"value_without_offset\":{:.17e},\"dual_value_without_offset\":{:.17e},\"relative_duality_gap\":{:.17e},\"stationarity_residual\":{:.17e},\"feasibility_residual\":{:.17e},\"complementarity_residual\":{:.17e},\"eigenpair_residual\":{:.17e},\"iterations\":{}}}}}",
+        config.cap_j,
         g.worst_compliance,
         g.maximum,
         g.worst_coefficients,
@@ -248,7 +262,7 @@ fn result(
     if r.rho != state.selected().rho
         || r.policy != config.policy(spec.loads.len())?
         || r.robustness != config.options.robustness
-        || r.goal != Some(GOAL)
+        || r.goal != Some(config.goal)
         || r.constraints != config.constraint_policy()
     {
         return Err(invalid(
@@ -263,7 +277,27 @@ fn result(
     let objective_change = r
         .objective_change()
         .ok_or_else(|| invalid("invalid assessed objective change"))?;
-    let inventory_stable = objective_change <= p.inventory_tolerance;
+    let inventory_stable = inventory.volume_change.is_finite()
+        && inventory.volume_change >= 0.0
+        && inventory.volume_change <= p.inventory_tolerance;
+    let objective_tolerance = p.objective_tolerance(config.goal);
+    let objective_stable = objective_change <= objective_tolerance;
+    let (
+        objective_name, objective_unit, coarse_objective, fine_objective,
+        normalized_coarse, normalized_fine, inventory_role, requirement,
+    ) = match config.goal {
+        AffineLoadSpaceDesignGoal3::WorstCompliance { volume_limit } => (
+            "compliance", "J", r.coarse.worst_compliance, r.fine.worst_compliance,
+            r.coarse.maximum, r.fine.maximum, "volume-constraint",
+            format!("The original dilated-volume cap is {volume_limit:.8e}. The compliance reference {:.8e} J supplies objective normalization.", config.cap_j),
+        ),
+        AffineLoadSpaceDesignGoal3::MinimumMaterial { .. } => (
+            "dilated-volume-fraction", "1", inventory.coarse_volume_fraction,
+            inventory.fine_volume_fraction, inventory.coarse_objective,
+            inventory.fine_objective, "design-objective",
+            format!("The original compliance cap is {:.8e} J.", config.cap_j),
+        ),
+    };
     let native_pass = r.stable_and_feasible_with_constraint_tolerances(
         p.compliance_tolerance,
         p.response_tolerance,
@@ -272,9 +306,9 @@ fn result(
     let (responses, response_html) = responses(spec, a, r, p)?;
     let (strength, strength_html) = strength(config, r, p)?;
     let json = format!(
-        "{{\"coarse\":{},\"fine\":{},\"normalized_model_change\":{:.17e},\"normalized_maximum_change\":{:.17e},\"normalized_witness_change\":{:.17e},\"native_stable_and_feasible\":{native_pass},\"inventory\":{{\"objective\":\"dilated-volume-fraction\",\"volume_scale\":{:.17e},\"coarse_volume_fraction\":{:.17e},\"fine_volume_fraction\":{:.17e},\"volume_change\":{:.17e},\"coarse_objective\":{:.17e},\"fine_objective\":{:.17e},\"objective_change\":{objective_change:.17e},\"tolerance\":{:.17e},\"stable\":{inventory_stable}}},\"responses\":{responses},\"strength\":{strength},\"dwr\":{{\"coarse_maximizer\":{},\"fine_maximizer\":{},\"fine_switch_correction\":{:.17e},\"coarse_switch_correction\":{:.17e},\"normalized_reconstructed_change\":{:.17e},\"identity_relative_defect\":{:.17e},\"diagnostic_marking_cells\":{}}}}}",
-        grid(&r.coarse, config.cap_j, joint[0]),
-        grid(&r.fine, config.cap_j, joint[1]),
+        "{{\"coarse\":{},\"fine\":{},\"normalized_model_change\":{:.17e},\"normalized_maximum_change\":{:.17e},\"normalized_witness_change\":{:.17e},\"native_stable_and_feasible\":{native_pass},\"design_objective\":{{\"kind\":{objective_name:?},\"unit\":{objective_unit:?},\"coarse_value\":{coarse_objective:.17e},\"fine_value\":{fine_objective:.17e},\"normalized_coarse\":{normalized_coarse:.17e},\"normalized_fine\":{normalized_fine:.17e},\"normalized_change\":{objective_change:.17e},\"tolerance\":{objective_tolerance:.17e},\"stable\":{objective_stable}}},\"inventory\":{{\"objective\":\"dilated-volume-fraction\",\"role\":{inventory_role:?},\"volume_scale\":{:.17e},\"coarse_volume_fraction\":{:.17e},\"fine_volume_fraction\":{:.17e},\"volume_change\":{:.17e},\"coarse_objective\":{:.17e},\"fine_objective\":{:.17e},\"objective_change\":{:.17e},\"tolerance\":{:.17e},\"tolerance_applies_to\":\"absolute-volume-fraction-change\",\"stable\":{inventory_stable}}},\"responses\":{responses},\"strength\":{strength},\"dwr\":{{\"coarse_maximizer\":{},\"fine_maximizer\":{},\"fine_switch_correction\":{:.17e},\"coarse_switch_correction\":{:.17e},\"normalized_reconstructed_change\":{:.17e},\"identity_relative_defect\":{:.17e},\"diagnostic_marking_cells\":{}}}}}",
+        grid(&r.coarse, config, inventory.coarse_volume_fraction, joint[0]),
+        grid(&r.fine, config, inventory.fine_volume_fraction, joint[1]),
         r.normalized_model_change,
         r.normalized_maximum_change,
         r.normalized_witness_change,
@@ -284,6 +318,7 @@ fn result(
         inventory.volume_change,
         inventory.coarse_objective,
         inventory.fine_objective,
+        inventory.objective_change,
         p.inventory_tolerance,
         goal(r, false),
         goal(r, true),
@@ -294,10 +329,9 @@ fn result(
         r.marking_mass.len(),
     );
     let html = format!(
-        "<p>Worst compliance on the coarse and fine grids: {:.8e} J and {:.8e} J; original cap: {:.8e} J. Their complete joint constraints are {:.8e} and {:.8e}. The normalized whole-affine-model change is {:.8e}, against tolerance {:.8e}; the signed change of independently maximized values is {:.8e}. Native physical constraints and full-family change gates pass: {native_pass}.</p><p>Dilated volume fraction changes from {:.8e} to {:.8e}. The separate normalized inventory change is {objective_change:.8e}, against tolerance {:.8e}; inventory gate passes: {inventory_stable}. The two-grid identity defect is {:.8e}; the fine and coarse load-switch corrections are {:.8e} and {:.8e}. The retained JSON keeps both frozen-direction DWR decompositions and numerical residuals.</p>{response_html}{strength_html}",
+        "<p>Worst compliance on the coarse and fine grids: {:.8e} J and {:.8e} J. {requirement} Their complete joint constraints are {:.8e} and {:.8e}. The normalized whole-affine-model change is {:.8e}, against tolerance {:.8e}; the signed change of independently maximized values is {:.8e}. Native physical constraints and full-family change gates pass: {native_pass}.</p><p>The optimized {objective_name} changes from {coarse_objective:.8e} {objective_unit} to {fine_objective:.8e} {objective_unit}. Its normalized objective change is {objective_change:.8e}, against tolerance {objective_tolerance:.8e}; objective gate passes: {objective_stable}.</p><p>Dilated volume fraction changes from {:.8e} to {:.8e}. The separate absolute volume-fraction change is {:.8e}, against tolerance {:.8e}; inventory gate passes: {inventory_stable}. The two-grid identity defect is {:.8e}; the fine and coarse load-switch corrections are {:.8e} and {:.8e}. The retained JSON keeps both frozen-direction DWR decompositions and numerical residuals.</p>{response_html}{strength_html}",
         r.coarse.worst_compliance,
         r.fine.worst_compliance,
-        config.cap_j,
         joint[0],
         joint[1],
         r.normalized_model_change,
@@ -305,6 +339,7 @@ fn result(
         r.normalized_maximum_change,
         inventory.coarse_volume_fraction,
         inventory.fine_volume_fraction,
+        inventory.volume_change,
         p.inventory_tolerance,
         r.identity_relative_defect,
         r.fine_switch_correction,
@@ -321,8 +356,14 @@ pub(super) fn render(spec: &Spec, state: &State) -> Result<Option<(String, Strin
             Err(invalid("unrequested grid assessment cannot be published"))
         };
     };
+    let config = spec
+        .affine_load_space
+        .ok_or_else(|| invalid("missing affine design policy"))?;
     let selection = if state.best.is_some() {
-        "least-material-feasible"
+        match config.goal {
+            AffineLoadSpaceDesignGoal3::WorstCompliance { .. } => "least-compliance-feasible",
+            AffineLoadSpaceDesignGoal3::MinimumMaterial { .. } => "least-material-feasible",
+        }
     } else {
         "last-accepted"
     };
@@ -364,7 +405,7 @@ pub(super) fn render(spec: &Spec, state: &State) -> Result<Option<(String, Strin
     let reason_html = a.reason.as_ref().map_or_else(String::new, |r| {
         format!("<p>Assessment stop: {}.</p>", response_output::html_text(r))
     });
-    let passed = a.passed(p);
+    let passed = a.passed(p, config.goal);
     let json = format!(
         "{{\"schema\":\"sdf3-affine-grid-assessment.v1\",\"status\":{:?},\"passed\":{passed},\"assessed_design\":{selection:?},\"policy\":{declared},\"coarse_grid\":{{\"cells\":{},\"dofs\":{}}},\"fine_grid\":{{\"cells\":{},\"dofs\":{}}},\"reason\":{reason},\"work\":{work},\"result\":{result},\"no_claim\":{}}}",
         a.status,

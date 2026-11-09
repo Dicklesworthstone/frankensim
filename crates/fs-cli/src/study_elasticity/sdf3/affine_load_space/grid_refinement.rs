@@ -416,7 +416,7 @@ pub(super) fn prepare(
                     &source.state.selected().rho,
                     spec.loads.len(),
                     &policy,
-                    GOAL,
+                    config.goal,
                     AffineLoadSpaceRefitOptions3 {
                         design: config.options,
                         accepted_steps: effective.updates,

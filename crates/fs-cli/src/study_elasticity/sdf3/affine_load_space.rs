@@ -1,4 +1,4 @@
-//! Minimum dilated material for f = B*rho_eroded + F*q, ||q|| <= 1.
+//! Native minimum-material and fixed-volume worst-compliance affine design.
 //! Native self-weight is a common offset, never another uncertain basis column.
 use super::*;
 use fs_ascent::projected_al::{
@@ -27,15 +27,19 @@ pub(super) mod grid_assessment;
 #[path = "affine_load_space/grid_refinement.rs"]
 pub(super) mod grid_refinement;
 
-const SCOPE: &str = "Estimated fixed-grid linear-elastic minimum-material design for f=B*rho_eroded+Fq, ||q||_2<=1. The common load is native material self-weight at eroded occupancy; no separate dead load is authored. The force columns retain physical amplitudes and correlations, not probabilities. A bounded quadratic-ball solve selects the complete affine compliance witness; its primal/dual gap and residuals are numerical diagnostics, not certified bounds. Eroded material supplies stiffness and self-weight; dilated material supplies the minimized volume. With self-weight, erosion is not asserted to be the worst manufacturing realization. When strength is declared, each retained bulk quadrature point has its own adverse load direction; an unweighted p-norm bounds both relaxed and physical sampled stresses over the load ball in exact arithmetic. The declared allowable is not inferred from stiffness. Signed displacement and support-reaction limits use each inequality's own adverse load over the same full affine ball. Displacement means use each grid's reference cut volume; support forces are numerical tractions on the solid and moments are signed about the authored reference origin. Compliance, responses and strength share one conservative joint constraint and the same physical primal fields. Initial full-chain objective and constraint gradients are independently checked. Hard or unresolved load maximizers cannot supply a smooth gradient. Only accepted points passing every declared physical cap and the complete joint constraint enter the least-material archive; KKT values describe the last accepted point. Accepted results are retained before more optimization. An optional active-cell uniform enrichment re-solves the entire affine load family and assesses every original response and sampled strength while inheriting physical occupancy. Separate change gates and strict physical caps apply on both grids; an optional single bounded native refit then optimizes inherited raw controls on an unresolved enriched grid, with separate optimizer allowances and cumulative physical work. Its source design stays selected until a complete fresh candidate recheck passes, after which the promoted design receives its own finer-grid assessment. Failed assessment preserves its accepted checkpoint and charged work for a bounded retry. Cross-process resume restores accepted optimizer state under the same source and executable, verifies the native physical-problem binding, rebuilds geometry and re-solves the accepted and distinct feasible incumbent endpoints against the original work allowances. Earlier optimizer steps and the initial gradient experiment are not replayed. Failed restoration and uncheckpointed work lost after a crash cannot be durably charged; previous results remain intact. Individual kernels and ledger writes are indivisible; wall and cancellation limits are cooperative. Memory is an admission envelope. No continuum stress maximum, buckling, continuum-error, manufacturing-tolerance, global design-optimality, safety or experimental-validation claim.";
+const SCOPE: &str = "Estimated linear-elastic design for f=B*rho_eroded+Fq, ||q||_2<=1. The declared goal either minimizes dilated material under a worst-compliance cap, or minimizes worst compliance under a dilated-volume cap. In the latter mode the compliance reference is a numerical normalization scale, not a physical cap. The common load is native material self-weight at eroded occupancy; no separate dead load is authored. Force columns retain physical amplitudes and correlations, not probabilities. A bounded quadratic-ball solve selects the complete affine compliance witness; its primal/dual gap and residuals are numerical diagnostics, not certified bounds. Eroded material supplies stiffness and self-weight; dilated material supplies inventory. With self-weight, erosion is not asserted to be the worst manufacturing realization. When strength is declared, each retained bulk quadrature point has its own adverse load direction; an unweighted p-norm bounds both relaxed and physical sampled stresses over the load ball in exact arithmetic. The declared allowable is not inferred from stiffness. Signed displacement and support-reaction limits use each inequality's own adverse load over the same full affine ball. Displacement means use each grid's reference cut volume; support forces are numerical tractions on the solid and moments are signed about the authored reference origin. The goal's physical cap, responses and strength share one conservative joint constraint and the same physical primal fields. Initial full-chain objective and constraint gradients are independently checked. Hard or unresolved load maximizers cannot supply a smooth gradient. Only accepted points passing every declared physical cap and the complete joint constraint enter the feasible archive, ranked by the actual objective; KKT values describe the last accepted point. Accepted results are retained before more optimization. An optional active-cell uniform enrichment re-solves the entire affine load family and assesses every original response and sampled strength while inheriting physical occupancy. Separate objective, inventory and physical change gates apply on both grids. An optional single bounded native refit optimizes inherited raw controls with the same goal on an unresolved enriched grid, with separate optimizer allowances and cumulative physical work. Its source design stays selected until a complete fresh candidate recheck passes, after which the promoted design receives its own finer-grid assessment. Failed assessment preserves its accepted checkpoint and charged work for a bounded retry. Cross-process resume restores accepted optimizer state under the same source and executable, verifies the native physical-problem and goal binding, rebuilds geometry and re-solves accepted and distinct feasible incumbent endpoints against the original work allowances. Earlier optimizer steps and the initial gradient experiment are not replayed. Failed restoration and uncheckpointed work lost after a crash cannot be durably charged; previous results remain intact. Individual kernels and ledger writes are indivisible; wall and cancellation limits are cooperative. Memory is an admission envelope. No continuum stress maximum, buckling, continuum-error, manufacturing-tolerance, global design-optimality, safety or experimental-validation claim.";
 
-const GOAL: AffineLoadSpaceDesignGoal3 = AffineLoadSpaceDesignGoal3::MinimumMaterial {
+// The original authored mode retains its exact numerical objective. Every
+// live solve, audit, restore and refinement instead uses Config::goal.
+pub(super) const GOAL: AffineLoadSpaceDesignGoal3 = AffineLoadSpaceDesignGoal3::MinimumMaterial {
     objective: MinimumMaterialObjective3::VolumeFraction,
     volume_scale: 1.0,
 };
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Config {
+    pub goal: AffineLoadSpaceDesignGoal3,
+    /// Compliance cap for minimum material; numerical scale for worst compliance.
     pub cap_j: f64,
     pub options: AffineLoadSpaceDesignOptions3,
     pub stress: Option<AffineStressLimit3>,
@@ -68,6 +72,15 @@ impl Config {
 
     pub(super) fn validate(self, spec: &Spec) -> Result<()> {
         self.policy(spec.loads.len())?;
+        match self.goal {
+            AffineLoadSpaceDesignGoal3::WorstCompliance { volume_limit }
+                if volume_limit.is_finite() && volume_limit > 0.0 && volume_limit <= 1.0 => {}
+            AffineLoadSpaceDesignGoal3::MinimumMaterial {
+                objective: MinimumMaterialObjective3::VolumeFraction, volume_scale: 1.0,
+            } => {}
+            _ => return Err(fail("cli-study-sdf3-input",
+                "affine design requires minimum dilated volume or worst compliance with a finite dilated-volume limit in (0,1]")),
+        }
         if self.response_options != spec.affine_responses.as_ref().map(|family| family.options) {
             return Err(fail("cli-study-sdf3-input", "affine response policy must match its authored physical observations"));
         }
@@ -99,7 +112,7 @@ impl Config {
         {
             return Err(fail(
                 "cli-study-sdf3-input",
-                "affine-load-space-limited-simp requires material-acceleration, a fixed grid and model, unit basis weights, bounded updates/evaluations, positive compliance cap, 0<=threshold-offset<0.5 and initial density above its floor",
+                "affine load-space design requires material-acceleration, an admitted grid and fixed model, unit basis weights, bounded updates/evaluations, positive compliance cap or reference scale, 0<=threshold-offset<0.5 and initial density above its floor",
             ));
         }
         if let Some(stress) = self.stress {
@@ -129,7 +142,7 @@ impl Config {
         self.policy(e.policy.dimension()).is_ok_and(|policy|
             e.robustness == self.options.robustness
                 && e.constraints == self.constraint_policy()
-                && point.physically_feasible(GOAL, &policy))
+                && point.physically_feasible(self.goal, &policy))
     }
 }
 
@@ -411,7 +424,7 @@ fn compute_on_grid(
                     &basis,
                     &raw,
                     policy,
-                    GOAL,
+                    config.goal,
                     config.options,
                     config.constraints(responses),
                     &mut control,
@@ -422,7 +435,7 @@ fn compute_on_grid(
                     &basis,
                     &mut recovery.checkpoint.clone(),
                     policy,
-                    GOAL,
+                    config.goal,
                     config.options,
                     config.constraints(responses),
                     &mut control,
@@ -563,3 +576,7 @@ mod grid_assessment_tests;
 #[cfg(test)]
 #[path = "affine_load_space/grid_refinement_tests.rs"]
 mod grid_refinement_tests;
+
+#[cfg(test)]
+#[path = "affine_load_space/compliance_tests.rs"]
+mod compliance_tests;

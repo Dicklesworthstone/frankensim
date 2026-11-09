@@ -4,6 +4,7 @@ use fs_ascent::projected_al::ProjectedAlOptions;
 use fs_cutfem::elastic3::ElasticityFormulation3;
 use fs_ir::ast::{Node, NodeKind};
 use fs_topopt::sdf3::design::StressDesignOptions3;
+use fs_topopt::sdf3::robust::envelope::affine_load_space::design::AffineLoadSpaceDesignGoal3;
 use fs_topopt::sdf3::stress::{StressMeasure3, StressOptions3};
 
 #[path = "spec/csg.rs"]
@@ -60,7 +61,7 @@ pub(super) struct Spec {
     pub stress_measure: StressMeasure3,
     /// Minimum dilated material under a cap on all simultaneous load combinations.
     pub load_space: Option<load_space::Config>,
-    /// Native self-weight is a common offset to the uncertain external load space.
+    /// Native self-weight with a minimum-material or fixed-volume compliance goal.
     pub affine_load_space: Option<affine_load_space::Config>,
     /// Original signed displacement/support bounds over the same affine ball.
     pub affine_responses: Option<responses::Family>,
@@ -263,38 +264,52 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
         else { ["compliance", "minimize", "J"] };
     for (value, expected) in objective.iter().zip(objective_words) { word(value, expected)?; }
     let optimizer_items = super::super::list(&items[12], "3-D optimizer")?;
-    let affine_mode = load_space_mode && optimizer_items.get(2).is_some_and(|node|
+    let affine_compliance_mode = !stress_mode && !load_space_mode
+        && optimizer_items.get(2).is_some_and(|node|
+            matches!(&node.kind, NodeKind::Symbol(s) | NodeKind::Str(s)
+                if s == "affine-load-space-simp"));
+    let affine_mode = affine_compliance_mode || (load_space_mode && optimizer_items.get(2).is_some_and(|node|
         matches!(&node.kind, NodeKind::Symbol(s) | NodeKind::Str(s)
-            if s == "affine-load-space-limited-simp"));
+            if s == "affine-load-space-limited-simp")));
     let mut stress_measure = StressMeasure3::NormalizedAverage;
     let mut load_space = None;
     let mut affine_load_space = None;
     let (density, volume, radius, updates, move_limit, marking, max_marks, schedule, stress) =
         if affine_mode {
-            let opt = fields(&items[12], "optimizer", &[
+            let opt = fields(&items[12], "optimizer", if affine_compliance_mode { &[
+                "type", "initial-density", "filter-radius-m", "max-updates", "density-floor",
+                "volume-fraction", "compliance-reference-j", "threshold-offset",
+                "max-optimizer-evaluations", "max-backtracks", "tolerance", "penal", "beta",
+            ] } else { &[
                 "type", "initial-density", "filter-radius-m", "max-updates", "density-floor",
                 "compliance-limit-j", "threshold-offset", "max-optimizer-evaluations",
                 "max-backtracks", "tolerance", "penal", "beta",
-            ])?;
-            word(opt[0], "affine-load-space-limited-simp")?;
+            ] })?;
+            word(opt[0], if affine_compliance_mode { "affine-load-space-simp" }
+                else { "affine-load-space-limited-simp" })?;
+            let extra = usize::from(affine_compliance_mode);
+            let volume = if affine_compliance_mode { scalar(opt[5])? } else { 1.0 };
             affine_load_space = Some(affine_load_space::Config {
-                cap_j: scalar(opt[5])?,
+                goal: if affine_compliance_mode {
+                    AffineLoadSpaceDesignGoal3::WorstCompliance { volume_limit: volume }
+                } else { affine_load_space::GOAL },
+                cap_j: scalar(opt[5 + extra])?,
                 stress: None,
                 response_options: None,
                 joint_sharpness: 40.0,
                 options: fs_topopt::sdf3::robust::envelope::affine_load_space::design::AffineLoadSpaceDesignOptions3 {
-                    robustness: fs_topopt::sdf3::robust::RobustOptions3 { threshold_offset: scalar(opt[6])? },
+                    robustness: fs_topopt::sdf3::robust::RobustOptions3 { threshold_offset: scalar(opt[6 + extra])? },
                     density_floor: scalar(opt[4])?,
                     optimizer: ProjectedAlOptions {
-                        max_dimension: count(physics[3])?, max_evaluations: count(opt[7])?,
-                        max_backtracks: count(opt[8])?, tolerance: scalar(opt[9])?,
+                        max_dimension: count(physics[3])?, max_evaluations: count(opt[7 + extra])?,
+                        max_backtracks: count(opt[8 + extra])?, tolerance: scalar(opt[9 + extra])?,
                         ..Default::default()
                     },
                     ..Default::default()
                 },
             });
-            let params = SimpParams { penal: scalar(opt[10])?, beta: scalar(opt[11])?, ..Default::default() };
-            (scalar(opt[1])?, 1.0, scalar(opt[2])?, count(opt[3])?, 0.0, 0.0, 0, vec![params], None)
+            let params = SimpParams { penal: scalar(opt[10 + extra])?, beta: scalar(opt[11 + extra])?, ..Default::default() };
+            (scalar(opt[1])?, volume, scalar(opt[2])?, count(opt[3])?, 0.0, 0.0, 0, vec![params], None)
         } else if load_space_mode {
             let opt = fields(&items[12], "optimizer", &[
                 "type", "initial-density", "filter-radius-m", "max-updates", "density-floor",
@@ -404,7 +419,7 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
                 && !affine_strength && material_acceleration.is_some() && affine_responses.is_none()
                 && affine_grid_assessment.is_none() && affine_grid_refinement.is_none() => {
                 let config = affine_load_space.as_mut().ok_or_else(||
-                    invalid("affine-strength requires affine-load-space-limited-simp"))?;
+                    invalid("affine-strength requires an affine load-space optimizer"))?;
                 let values = fields(node, "affine-strength", &[
                     "stress-limit-pa", "relaxation-power", "aggregation-power",
                     "max-stress-point-fields", "joint-sharpness",
@@ -425,7 +440,7 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
                 && affine_responses.is_none() && material_acceleration.is_some()
                 && affine_grid_assessment.is_none() && affine_grid_refinement.is_none() => {
                 let config = affine_load_space.as_mut().ok_or_else(||
-                    invalid("affine-responses requires affine-load-space-limited-simp"))?;
+                    invalid("affine-responses requires an affine load-space optimizer"))?;
                 let (family, joint_sharpness) = responses::parse(node)?;
                 if affine_strength && joint_sharpness != config.joint_sharpness {
                     return Err(invalid("affine-responses and affine-strength must declare the same joint-sharpness"));

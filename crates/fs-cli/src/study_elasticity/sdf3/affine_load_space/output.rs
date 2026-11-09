@@ -10,6 +10,38 @@ mod response_output;
 #[path = "strength_output.rs"]
 mod strength;
 
+fn objective_metadata(goal: AffineLoadSpaceDesignGoal3) -> (&'static str, &'static str) {
+    match goal {
+        AffineLoadSpaceDesignGoal3::WorstCompliance { .. } => ("compliance", "J"),
+        AffineLoadSpaceDesignGoal3::MinimumMaterial { .. } => ("dilated-volume-fraction", "1"),
+    }
+}
+
+fn feasible_selection(goal: AffineLoadSpaceDesignGoal3) -> &'static str {
+    match goal {
+        AffineLoadSpaceDesignGoal3::WorstCompliance { .. } => "least-compliance-feasible",
+        AffineLoadSpaceDesignGoal3::MinimumMaterial { .. } => "least-material-feasible",
+    }
+}
+
+/// Keep the numerical compliance reference separate from the authored cap.
+/// In stiffness design the physical base constraint is dilated inventory.
+fn goal_model(config: Config) -> String {
+    let (objective, unit) = objective_metadata(config.goal);
+    let (kind, compliance_limit, volume_limit) = match config.goal {
+        AffineLoadSpaceDesignGoal3::WorstCompliance { volume_limit } => (
+            "worst-compliance", "null".into(), format!("{volume_limit:.17e}"),
+        ),
+        AffineLoadSpaceDesignGoal3::MinimumMaterial { .. } => (
+            "minimum-material", format!("{:.17e}", config.cap_j), "null".into(),
+        ),
+    };
+    format!(
+        "{{\"kind\":{kind:?},\"objective\":{objective:?},\"objective_unit\":{unit:?},\"compliance_reference_j\":{:.17e},\"compliance_limit_j\":{compliance_limit},\"volume_limit_fraction\":{volume_limit}}}",
+        config.cap_j,
+    )
+}
+
 pub(super) fn measurement(
     point: &AffineLoadSpaceDesignPoint3,
     config: Config,
@@ -25,7 +57,7 @@ pub(super) fn measurement(
         ));
     }
     let constraint = point
-        .constraint(GOAL)
+        .constraint(config.goal)
         .map_err(|e| fail("cli-study-sdf3-strength-output", e.to_string()))?;
     let strength = e
         .stress
@@ -46,8 +78,23 @@ pub(super) fn measurement(
             ));
         }
     };
+    let (_, objective_unit) = objective_metadata(config.goal);
+    let (objective_value, normalized_objective, cap_fields) = match config.goal {
+        AffineLoadSpaceDesignGoal3::WorstCompliance { volume_limit } => (
+            e.worst_compliance, e.maximum,
+            format!("\"compliance_reference_j\":{:.17e},\"compliance_limit_j\":null,\"compliance_feasible\":null,\"volume_limit_fraction\":{volume_limit:.17e},\"volume_feasible\":{}",
+                config.cap_j, p.dilated_volume_fraction.is_finite() && p.dilated_volume_fraction <= volume_limit),
+        ),
+        AffineLoadSpaceDesignGoal3::MinimumMaterial { volume_scale, .. } => (
+            p.dilated_volume_fraction, p.dilated_volume_fraction / volume_scale,
+            format!("\"compliance_reference_j\":{:.17e},\"compliance_limit_j\":{:.17e},\"compliance_feasible\":{},\"volume_limit_fraction\":null,\"volume_feasible\":null",
+                config.cap_j, config.cap_j, e.worst_compliance.is_finite()
+                    && e.worst_compliance >= 0.0 && e.worst_compliance <= config.cap_j
+                    && (0.0..=1.0).contains(&e.maximum)),
+        ),
+    };
     Ok(format!(
-        "{{\"dilated_volume_fraction\":{:.17e},\"nominal_volume_fraction\":{:.17e},\"eroded_volume_fraction\":{:.17e},\"worst_compliance_j\":{:.17e},\"maximum_ratio\":{:.17e},\"feasible\":{},\"joint_constraint\":{constraint:.17e},\"strength\":{strength}{responses},\"worst_coefficients\":{:?},\"normalized_gram_row_major\":{:?},\"normalized_linear\":{:?},\"normalized_offset\":{:.17e},\"reciprocity_defect\":{:.17e},\"witness_relative_defect\":{:.17e},\"witness_relative_residual\":{:.17e},\"oracle\":{{\"branch\":{:?},\"gradient_admissible\":{},\"value_without_offset\":{:.17e},\"dual_value_without_offset\":{:.17e},\"duality_gap\":{:.17e},\"relative_duality_gap\":{:.17e},\"relative_separation\":{:.17e},\"stationarity_residual\":{:.17e},\"feasibility_residual\":{:.17e},\"complementarity_residual\":{:.17e},\"eigenpair_residual\":{:.17e},\"iterations\":{}}}}}",
+        "{{\"objective_value\":{objective_value:.17e},\"objective_unit\":{objective_unit:?},\"normalized_objective\":{normalized_objective:.17e},{cap_fields},\"dilated_volume_fraction\":{:.17e},\"nominal_volume_fraction\":{:.17e},\"eroded_volume_fraction\":{:.17e},\"worst_compliance_j\":{:.17e},\"maximum_ratio\":{:.17e},\"feasible\":{},\"joint_constraint\":{constraint:.17e},\"strength\":{strength}{responses},\"worst_coefficients\":{:?},\"normalized_gram_row_major\":{:?},\"normalized_linear\":{:?},\"normalized_offset\":{:.17e},\"reciprocity_defect\":{:.17e},\"witness_relative_defect\":{:.17e},\"witness_relative_residual\":{:.17e},\"oracle\":{{\"branch\":{:?},\"gradient_admissible\":{},\"value_without_offset\":{:.17e},\"dual_value_without_offset\":{:.17e},\"duality_gap\":{:.17e},\"relative_duality_gap\":{:.17e},\"relative_separation\":{:.17e},\"stationarity_residual\":{:.17e},\"feasibility_residual\":{:.17e},\"complementarity_residual\":{:.17e},\"eigenpair_residual\":{:.17e},\"iterations\":{}}}}}",
         p.dilated_volume_fraction,
         p.nominal_volume_fraction,
         p.eroded_volume_fraction,
@@ -184,13 +231,18 @@ pub(super) fn persist(
             "missing affine self-weight during publication",
         )
     })?;
+    if state.gradient.goal != config.goal {
+        return Err(fail("cli-study-sdf3-goal-output", "retained gradient experiment belongs to another design goal"));
+    }
+    let goal = goal_model(config);
+    let (objective, objective_unit) = objective_metadata(config.goal);
     let source = grid_refinement_output::source(spec, ledger, state, producer)?;
     let retain_source = state
         .refinement
         .as_ref()
         .is_some_and(|context| context.uses_source_selection());
     let working_selection = if state.best.is_some() {
-        "least-material-feasible"
+        feasible_selection(config.goal)
     } else {
         "last-accepted"
     };
@@ -212,7 +264,7 @@ pub(super) fn persist(
         ""
     };
     let working_design = format!(
-        "{{\"schema\":\"sdf3-affine-load-space-design.v1\"{strength_marker}{response_marker},\"selected_design\":{working_selection:?},\"selected_feasible\":{working_feasible},\"selected\":{},\"last_accepted\":{}}}",
+        "{{\"schema\":\"sdf3-affine-load-space-design.v1\"{strength_marker}{response_marker},\"goal\":{goal},\"selected_design\":{working_selection:?},\"selected_feasible\":{working_feasible},\"selected\":{},\"last_accepted\":{}}}",
         fields(study, state.selected(), spec)?,
         fields(study, &state.accepted, spec)?
     );
@@ -238,8 +290,9 @@ pub(super) fn persist(
         );
         let _ = write!(
             table,
-            "<tr><td>{}</td><td>{:.8e}</td><td>{:.8e}</td><td>{:.8e}</td><td>{}</td></tr>",
-            row.iteration, row.dilated_volume_fraction, row.maximum, row.constraint, row.feasible
+            "<tr><td>{}</td><td>{:.8e}</td><td>{:.8e}</td><td>{:.8e}</td><td>{:.8e}</td><td>{:.8e}</td><td>{}</td></tr>",
+            row.iteration, row.objective, row.dilated_volume_fraction, row.worst_compliance,
+            row.maximum, row.constraint, row.feasible
         );
     }
     let rows =
@@ -247,10 +300,14 @@ pub(super) fn persist(
     let work = state.spent.json();
     let stop = stopping(state);
     let gradient = &state.gradient;
+    let base_constraint = match config.goal {
+        AffineLoadSpaceDesignGoal3::WorstCompliance { .. } => "volume-only",
+        AffineLoadSpaceDesignGoal3::MinimumMaterial { .. } => "compliance-only",
+    };
     let constraint_policy = gradient.constraints.stress.map_or_else(
         || {
             format!(
-                "{{\"kind\":\"compliance-only\",\"joint_sharpness\":{:.17e}}}",
+                "{{\"kind\":{base_constraint:?},\"joint_sharpness\":{:.17e}}}",
                 gradient.constraints.sharpness
             )
         },
@@ -271,7 +328,7 @@ pub(super) fn persist(
         }
     };
     let check = format!(
-        "{{\"passed\":{},\"directions\":{},\"step\":{:.17e},\"relative_tolerance\":{:.17e},\"baseline_objective\":{:.17e},\"baseline_constraint\":{:.17e},\"objective_relative_error\":{:.17e},\"constraint_relative_error\":{:.17e},\"linear_iterations\":{},\"linear_solves\":{},\"preconditioner_operator_applications\":{},\"preconditioner_galerkin_products\":{},\"constraint_policy\":{constraint_policy}}}",
+        "{{\"goal\":{goal},\"passed\":{},\"directions\":{},\"step\":{:.17e},\"relative_tolerance\":{:.17e},\"baseline_objective\":{:.17e},\"baseline_constraint\":{:.17e},\"objective_relative_error\":{:.17e},\"constraint_relative_error\":{:.17e},\"linear_iterations\":{},\"linear_solves\":{},\"preconditioner_operator_applications\":{},\"preconditioner_galerkin_products\":{},\"constraint_policy\":{constraint_policy}}}",
         gradient.passed(),
         gradient.directions,
         gradient.options.step,
@@ -319,7 +376,7 @@ pub(super) fn persist(
         format!(",\"grid_refinement\":{}", grid_refinement_output::policy(p))
     });
     let assessment = match source_selection {
-        Some(source) => Some((source.assessment.clone(), source.assessment_html()?)),
+        Some(source) => Some((source.assessment.clone(), source.assessment_html(config)?)),
         None => grid_assessment_output::render(spec, state)?,
     };
     let assessment_json = assessment.as_ref().map_or_else(String::new, |(json, _)| {
@@ -334,8 +391,16 @@ pub(super) fn persist(
         format!(",\"grid_refinement\":{json}")
     });
     let refinement_html = refinement.as_ref().map_or("", |(_, html)| html.as_str());
+    let (compliance_limit, volume_limit, objective_material, constraint_material) = match config.goal {
+        AffineLoadSpaceDesignGoal3::WorstCompliance { volume_limit } => (
+            "null".into(), format!("{volume_limit:.17e}"), "eroded", "dilated-inventory-and-eroded-physics",
+        ),
+        AffineLoadSpaceDesignGoal3::MinimumMaterial { .. } => (
+            format!("{:.17e}", config.cap_j), "null".into(), "dilated", "eroded",
+        ),
+    };
     let model = format!(
-        "{{\"force_set\":\"f=B*rho_eroded+Fq, ||q||_2<=1\",\"dead_offset\":\"zero\",\"basis_columns\":{},\"material_density_kg_m3\":{},\"acceleration_m_s2\":{:?},\"compliance_limit_j\":{},\"threshold_offset\":{},\"nominal_threshold\":{},\"penal\":{},\"beta\":{},\"constraint_material\":\"eroded\",\"objective_material\":\"dilated\",\"oracle_max_iterations\":{},\"oracle_tolerance\":{},\"oracle_separation_tolerance\":{},\"strength_constraint\":{strength_model},\"joint_sharpness\":{:.17e}{response_model}{assessment_model}{refinement_model}}}",
+        "{{\"goal\":{goal},\"force_set\":\"f=B*rho_eroded+Fq, ||q||_2<=1\",\"dead_offset\":\"zero\",\"basis_columns\":{},\"material_density_kg_m3\":{},\"acceleration_m_s2\":{:?},\"compliance_reference_j\":{},\"compliance_limit_j\":{compliance_limit},\"volume_limit_fraction\":{volume_limit},\"threshold_offset\":{},\"nominal_threshold\":{},\"penal\":{},\"beta\":{},\"constraint_material\":{constraint_material:?},\"objective_material\":{objective_material:?},\"oracle_max_iterations\":{},\"oracle_tolerance\":{},\"oracle_separation_tolerance\":{},\"strength_constraint\":{strength_model},\"joint_sharpness\":{:.17e}{response_model}{assessment_model}{refinement_model}}}",
         spec.loads.len(),
         law.density_kg_m3,
         law.acceleration_m_s2,
@@ -350,7 +415,7 @@ pub(super) fn persist(
         config.joint_sharpness
     );
     let summary = format!(
-        "{{\"driver\":{AFFINE_LOAD_SPACE3_DRIVER:?},\"study_id\":{:?},\"status\":{:?},\"optimization_status\":{:?},\"objective\":\"dilated-volume-fraction\",\"objective_unit\":\"1\",\"iterations_completed\":{},\"target_iterations\":{},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"selected\":{selected},\"last_accepted\":{accepted},\"model\":{model},\"gradient_check\":{check},\"optimizer_work\":{optimizer},\"work\":{work},\"stop\":{stop}{assessment_json}{refinement_json},\"resume_supported\":true,\"resume_mode\":{:?},\"producer\":{:?},\"authority\":\"Estimated\",\"no_claim\":{}}}",
+        "{{\"driver\":{AFFINE_LOAD_SPACE3_DRIVER:?},\"study_id\":{:?},\"status\":{:?},\"optimization_status\":{:?},\"goal\":{goal},\"objective\":{objective:?},\"objective_unit\":{objective_unit:?},\"iterations_completed\":{},\"target_iterations\":{},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"selected\":{selected},\"last_accepted\":{accepted},\"model\":{model},\"gradient_check\":{check},\"optimizer_work\":{optimizer},\"work\":{work},\"stop\":{stop}{assessment_json}{refinement_json},\"resume_supported\":true,\"resume_mode\":{:?},\"producer\":{:?},\"authority\":\"Estimated\",\"no_claim\":{}}}",
         spec.id.to_hex(),
         state.status,
         state.optimization_status,
@@ -382,15 +447,26 @@ pub(super) fn persist(
     let selected_volume =
         source_selection.map_or(chosen.physical.dilated_volume_fraction, |s| s.volume);
     let selected_compliance = source_selection.map_or(chosen.worst_compliance, |s| s.compliance);
+    let (title, requirement, ratio_label) = match config.goal {
+        AffineLoadSpaceDesignGoal3::WorstCompliance { volume_limit } => (
+            "3-D minimum worst compliance with self-weight and uncertain loads",
+            format!("Dilated volume fraction must be at most {volume_limit:.8e}. Worst compliance is minimized in joules; {:.8e} J is its optimizer normalization reference and is not a physical compliance limit. Every declared signed-response and sampled-strength bound and the joint constraint remain active.", config.cap_j),
+            "Worst compliance / reference",
+        ),
+        AffineLoadSpaceDesignGoal3::MinimumMaterial { .. } => (
+            "3-D minimum material with self-weight and uncertain loads",
+            format!("Dilated material is minimized while worst compliance must be at most {:.8e} J. Every declared signed-response and sampled-strength bound and the joint constraint remain active.", config.cap_j),
+            "Worst compliance / limit",
+        ),
+    };
     let html = format!(
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>3-D minimum material with self-weight and uncertain loads</title><body><h1>3-D minimum material with self-weight and uncertain loads</h1><p>Status: {}. Optimization status: {}. Estimated numerical results.</p><p>Selected design: {selection}; cap-feasible over the declared affine load set: {feasible}.</p><p>The selected design has dilated volume fraction {:.8e} and worst compliance {:.8e} J. The last accepted iterate has dilated volume fraction {:.8e} and worst compliance {:.8e} J; optimizer stopping and KKT diagnostics apply to that iterate.</p><p>Worst compliance must be at most {:.8e} J. The common self-weight changes with eroded occupancy; all simultaneous external-force combinations in the declared unit ball are considered.</p>{refinement_html}{constraints_html}{assessment_html}<p>{SCOPE}</p><table><tr><th>Update</th><th>Dilated volume fraction</th><th>Worst compliance / limit</th><th>Joint constraint</th><th>Feasible</th></tr>{table}</table></body></html>",
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>{title}</title><body><h1>{title}</h1><p>Status: {}. Optimization status: {}. Estimated numerical results.</p><p>Selected design: {selection}; physically feasible for the declared design goal over the complete affine load set: {feasible}.</p><p>The selected design has dilated volume fraction {:.8e} and worst compliance {:.8e} J. The last accepted iterate has dilated volume fraction {:.8e} and worst compliance {:.8e} J; optimizer stopping and KKT diagnostics apply to that iterate.</p><p>{requirement} The common self-weight changes with eroded occupancy; all simultaneous external-force combinations in the declared unit ball are considered.</p>{refinement_html}{constraints_html}{assessment_html}<p>{SCOPE}</p><table><tr><th>Update</th><th>Normalized optimizer objective</th><th>Dilated volume fraction</th><th>Worst compliance (J)</th><th>{ratio_label}</th><th>Joint constraint</th><th>Feasible</th></tr>{table}</table></body></html>",
         state.status,
         state.optimization_status,
         selected_volume,
         selected_compliance,
         latest.physical.dilated_volume_fraction,
         latest.worst_compliance,
-        config.cap_j
     );
     let constellation = hash_bytes(include_bytes!("../../../../../../constellation.lock")).to_hex();
     let mut package = EvidencePackage::new(Provenance::new(

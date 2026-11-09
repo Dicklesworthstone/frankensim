@@ -151,6 +151,22 @@ fn affine_export_keeps_common_self_weight_separate_from_uncertain_basis_fields()
 }
 
 #[test]
+fn g3_affine_compliance_export_preserves_selected_fields_and_volume_goal() {
+    let source = affine_strength_design().replace("least-material-feasible", "least-compliance-feasible");
+    let goal = r#""goal":{"kind":"worst-compliance","volume_limit_fraction":0.85},"selected_design""#;
+    let design = source.replace("\"selected_design\"", goal);
+    let projected = grid(AFFINE_LOAD_SPACE3_DRIVER, &design);
+    assert_eq!(values(&projected, "raw_density"), [0.7]);
+    assert_eq!(values(&projected, "offset_displacement"), displacement(-0.1));
+    assert_eq!(values(&projected, "sampled_physical_stress_envelope"), [120.5]);
+    assert!(render(AFFINE_LOAD_SPACE3_DRIVER, source.as_bytes()).is_err());
+    assert!(render(AFFINE_LOAD_SPACE3_DRIVER,
+        design.replace("worst-compliance", "minimum-material").as_bytes()).is_err());
+    assert!(render(AFFINE_LOAD_SPACE3_DRIVER,
+        design.replace("0.85", "0.0").as_bytes()).is_err());
+}
+
+#[test]
 fn affine_strength_export_preserves_selected_pointwise_envelopes_and_sample_counts() {
     let design = affine_strength_design();
     let grid = grid(AFFINE_LOAD_SPACE3_DRIVER, &design);

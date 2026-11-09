@@ -2016,9 +2016,48 @@ with no buckling, continuum error, manufacturing tolerance, global
 design-optimality, safety or experimental-validation claim. The base form
 declares no strength limit; the optional section below adds sampled strength.
 
+### Fixed-volume worst compliance with self-weight and uncertain loads
+
+Objective `(objective :type compliance :sense minimize :unit "J")` with
+optimizer `affine-load-space-simp` exposes the native
+`AffineLoadSpaceDesignGoal3::WorstCompliance { volume_limit }` through the same
+affine study driver. Its ordered optimizer fields are `type`, `initial-density`,
+`filter-radius-m`, `max-updates`, `density-floor`, `volume-fraction`,
+`compliance-reference-j`, `threshold-offset`, `max-optimizer-evaluations`,
+`max-backtracks`, `tolerance`, `penal`, and `beta`.
+
+The finite material cap lies in `(0,1]` and applies to **dilated** volume fraction.
+The positive compliance reference normalizes the complete worst-compliance
+objective and its gradient; it imposes no physical compliance cap. Eroded
+occupancy still supplies stiffness and native material self-weight. Signed
+responses and sampled strength retain their original physical bounds and enter
+the same conservative joint constraint with the volume cap. Initial infeasibility
+is admitted by the existing projected-AL owner; only fully feasible accepted
+points enter its lowest-compliance archive. No separate optimizer or sensitivity
+implementation is introduced.
+
+The configured native goal travels through initialization, directional gradient
+checks, endpoint restoration, raw-control refits, fresh candidate rechecks and
+complete enriched-grid assessment. Native checkpoint binding prevents changing
+that physical goal during continuation. The report, model and design retain the
+goal; selection is `least-compliance-feasible`. Physical objective values use
+joules, while `normalized_objective` and AL history use the declared compliance
+reference. `compliance_limit_j` and `compliance_feasible` are null in this mode;
+the physical base requirement is exposed as `volume_limit_fraction` and
+`volume_feasible`. The existing native response, strength and joint feasibility
+checks remain decisive. VTU recognizes the goal-bound compliance incumbent.
+
+Assessment gates the normalized compliance objective change with the compliance
+change tolerance, independently of the absolute volume-fraction inventory gate.
+Every promoted candidate retains the original volume cap and receives its own
+full-family finer-grid probe. The prior minimum-material source syntax and
+physical semantics remain available. The numerical example is
+`examples/marquee/bracket-3d-affine-compliance.fsim`; the same Estimated authority
+and continuum, manufacturing, buckling and global-optimality limitations apply.
+
 ### Joint strength under self-weight and uncertain loads
 
-The affine minimum-material mode accepts an optional `affine-strength`
+Both affine design goals accept an optional `affine-strength`
 section after `material-acceleration`, with these ordered fields:
 
 ```lisp
