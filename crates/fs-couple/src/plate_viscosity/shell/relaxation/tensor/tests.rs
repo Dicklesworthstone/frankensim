@@ -20,6 +20,7 @@ use fs_plate::shell::mitc::{
 use fs_qty::{Density, Dims, Pressure};
 
 mod kelvin;
+mod layered;
 
 fn source(band: (f64, f64), density: f64) -> Arc<ResolvedTensorMaterial> {
     source_with_kelvin(band, density, None)
@@ -29,6 +30,16 @@ fn source_with_kelvin(
     band: (f64, f64),
     density: f64,
     viscosity: Option<[[f64; 6]; 6]>,
+) -> Arc<ResolvedTensorMaterial> {
+    source_parameters(band, density, viscosity, 2e6, 0.02)
+}
+
+fn source_parameters(
+    band: (f64, f64),
+    density: f64,
+    viscosity: Option<[[f64; 6]; 6]>,
+    young_modulus: f64,
+    relaxation_time: f64,
 ) -> Arc<ResolvedTensorMaterial> {
     let mut claims = ClaimSet::new();
     let mut add = |name: &str, dims: Dims, value: f64| {
@@ -50,11 +61,11 @@ fn source_with_kelvin(
             })
             .unwrap();
     };
-    add("young_modulus", Pressure::DIMS, 2e6);
+    add("young_modulus", Pressure::DIMS, young_modulus);
     add("poisson_ratio", Dims::NONE, 0.25);
     add("density", Density::DIMS, density);
     add("strain_limit", Dims::NONE, 0.1);
-    add("tau", Dims([0, 0, 1, 0, 0, 0]), 0.02);
+    add("tau", Dims([0, 0, 1, 0, 0, 0]), relaxation_time);
     // Exact integer coefficients make a strictly passive full source tensor.
     // In-plane and both transverse shears couple to the constrained zz history.
     let vector = [120.0, 70.0, -90.0, 45.0, 85.0, -65.0];

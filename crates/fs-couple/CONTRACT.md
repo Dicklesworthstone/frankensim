@@ -10517,3 +10517,42 @@ whitespace checks pass. Focused source/API/physics review found no concrete
 blocker. These native integration tests have not been compiled or executed
 in the constrained workspace; geometry-only native tests do not prove this
 cross-crate integration.
+
+## Layer-resolved tensor damping on the original MITC shell
+
+`TensorShellRelaxation::from_layered_mitc_shell` accepts one explicitly ordered,
+contiguous stack of original `TensorShellMaterial` sources per physical facet.
+Each layer retains its own orientation, signed faces, shear correction, material
+band, complete Kelvin matrix and every Maxwell branch. The existing five-strain
+shell constraint eliminates only thickness-normal traction on the whole source.
+No independently condensed branch, proportional coating fit or numerical
+drilling loss replaces that constitutive response.
+
+The complete integrated eight-coordinate section must match the original
+A/B/D/shear operator, including absent membrane/shear and bending/shear cross
+blocks. The signed density moments must match every original corner's reference
+inertia. A gap, overlap, changed reference surface or incompatible source refuses.
+The existing support map, elastic bubble condensation, mass choice and modal
+pencil remain authoritative. Geometry and in-plane strain samples prepare once
+per facet; each layer contributes its original seven area and two thickness
+points, counted against the shared point, history and work limits.
+
+One facet-major material catalog identifies every point's actual source layer.
+The original equal-time coordinate owner shares driven histories while retaining
+reconstruction of every original point. All Kelvin channels and Maxwell memory
+attach through the existing coupled runtime and its independent physical heat
+accounts. The original single-layer entry uses this same implementation and
+keeps its established homogeneous admission and arithmetic.
+
+This is the native equivalent-single-layer displacement model with authored
+work-conjugate shear corrections. It does not resolve interlaminar stress, slip,
+delamination or warping. Material state is frozen; point strain checks do not
+certify spatial or between-step maxima, and no experimental damping fit is
+supplied.
+
+Two isolated native tests execute the actual section-integration function with
+real fs-math, checking independent original-strain quadrature for 129 fields and
+identical-layer partition invariance, including signed inertia. Four additional
+integration groups specify original 3D complex-work agreement, native coupled
+heat closure, homogeneous/partition parity and source/geometry/budget refusals.
+Pinned formatting passed; the full fs-couple integration groups remain unrun.

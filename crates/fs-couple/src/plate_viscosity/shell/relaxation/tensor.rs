@@ -18,6 +18,8 @@ use fs_plate::shell::mitc::{MitcShellModel, ShearShellSection};
 use std::ops::Range;
 use std::sync::Arc;
 
+mod layered;
+
 fn tensor_error(error: TensorMaterialError) -> AcousticRealizeError {
     match error {
         TensorMaterialError::Cancelled => AcousticRealizeError::Cancelled,
@@ -116,6 +118,7 @@ pub struct TensorShellRelaxationLimits {
 #[derive(Clone, Debug)]
 pub struct TensorShellMaterialPoint {
     facet: usize,
+    material: usize,
     barycentric: [f64; 3],
     thickness_coordinate_m: f64,
     memory: Range<usize>,
@@ -126,6 +129,10 @@ pub struct TensorShellMaterialPoint {
 impl TensorShellMaterialPoint {
     pub const fn facet(&self) -> usize {
         self.facet
+    }
+    /// Index into the facet-major material catalog, including every layer.
+    pub const fn material_index(&self) -> usize {
+        self.material
     }
     pub const fn barycentric(&self) -> [f64; 3] {
         self.barycentric
@@ -147,6 +154,7 @@ impl TensorShellMaterialPoint {
 #[derive(Clone, Debug)]
 pub struct TensorShellRelaxation {
     facets: Vec<TensorShellMaterial>,
+    facet_materials: Vec<Range<usize>>,
     points: Vec<TensorShellMaterialPoint>,
     modal: ModalShellRelaxation,
     shared: RelaxationCoordinates,
@@ -177,259 +185,23 @@ impl TensorShellRelaxation {
         gate: &CancelGate,
     ) -> Result<Self, AcousticRealizeError> {
         poll(gate)?;
-        let (mesh, directors, sections) = model.original_geometry();
-        let n = modes.len();
-        let count = facets
-            .len()
-            .checked_mul(14)
-            .ok_or_else(|| invalid("tensor shell material point extent overflows"))?;
-        if !(1..=64).contains(&limits.max_modes)
-            || n == 0
-            || n > limits.max_modes
-            || !(1..=4096).contains(&limits.max_material_points)
-            || limits.max_memory_states > 8192
-            || limits.max_projection_terms == 0
-            || facets.len() != mesh.tris.len()
-            || facets.is_empty()
-            || count > limits.max_material_points
-            || modes.iter().any(|v| v.len() != model.pencil().free)
-        {
-            return Err(invalid(
-                "tensor shell needs complete original facets, modes and bounded point/history/work capacities",
-            ));
+        if facets.len() > limits.max_material_points.min(4096) / 14 {
+            return Err(invalid("tensor shell material points exceed their bound"));
         }
-        let states = facets
-            .iter()
-            .try_fold(0usize, |sum, facet| {
-                // A thickness-normal dashpot retains one additional physical
-                // strain history, even for a source without Maxwell branches.
-                let normal = usize::from(
-                    facet
-                        .law
-                        .kv_pa_s()
-                        .is_some_and(|d| d[2].iter().any(|v| *v != 0.0)),
-                );
-                facet
-                    .law
-                    .branches()
-                    .len()
-                    .checked_mul(6)
-                    .and_then(|r| r.checked_add(normal))
-                    .and_then(|r| r.checked_mul(14))
-                    .and_then(|r| sum.checked_add(r))
-            })
-            .ok_or_else(|| invalid("tensor shell material history extent overflows"))?;
-        let setup = facets.len() as u128
-            * (PreparedElementStrain::PREPARATION_WORK + n * PreparedElementStrain::REAL_FIELD_WORK)
-                as u128
-            + model.pencil().m.nnz() as u128 * n as u128
-            + 16 * model.pencil().k.nnz() as u128 * n as u128
-            + 17 * model.pencil().free as u128 * (n as u128).pow(2)
-            + mesh.nodes.len() as u128 * 6 * n as u128
-            + count as u128 * n as u128 * 256
-            + count as u128 * (n as u128).pow(2)
-            + 64 * (n as u128).pow(3);
-        if setup >= limits.max_projection_terms as u128 {
-            return Err(invalid(
-                "tensor shell original geometry and modal pencil exceed projection work",
-            ));
-        }
-        let work = limits.max_projection_terms - setup as usize;
-        let factor_work = work / 3;
-        if states.checked_mul(n).is_none_or(|v| v > factor_work) {
-            return Err(invalid(
-                "tensor shell original histories exceed their explicit projection work",
-            ));
-        }
-        let point_work = (work - factor_work) / 2 / (count + facets.len());
-        if point_work == 0 {
-            return Err(invalid(
-                "tensor shell constitutive projection requires positive work",
-            ));
-        }
-        validate_mass_basis(model.pencil(), modes, gate)?;
-        let equilibrium_omega_squared = project_original_stiffness(model, modes, gate)?;
-        let physical = modes
-            .iter()
-            .map(|v| {
-                poll(gate)?;
-                model.expand(v).map_err(plate_error)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut rows = Vec::with_capacity(states);
-        let mut times = Vec::with_capacity(states);
-        let mut points = Vec::with_capacity(count);
-        let mut viscosity = vec![fs_math::dd::Dd::ZERO; n * n];
-        let mut band = (0.0_f64, f64::MAX);
-        let rule = integration_rule();
-        for (e, facet) in facets.iter().enumerate() {
-            poll(gate)?;
-            let unit: [[f64; 5]; 5] =
-                core::array::from_fn(|i| core::array::from_fn(|j| if i == j { 1.0 } else { 0.0 }));
-            let constitutive = PlaneStressPoint::new_shell(
-                &facet.law,
-                &unit,
-                1.0,
-                TensorProjectionBudget {
-                    max_coordinates: 6,
-                    max_scalar_terms: point_work,
-                },
-                gate,
-            )
-            .map_err(tensor_error)?
-            .viscoelastic_image(point_work, gate)
-            .map_err(tensor_error)?;
-            validate_section(
-                model,
-                e,
-                &sections[e],
-                facet,
-                constitutive.equilibrium_stiffness(),
-            )?;
-            let source_band = facet.law.band_rad_s();
-            band = (band.0.max(source_band.0), band.1.min(source_band.1));
-            let observer =
-                PreparedElementStrain::new(mesh, e, directors, &sections[e], &mut || {
-                    gate.is_requested()
-                })
-                .map_err(plate_error)?;
-            let tri = mesh.tris[e];
-            let fields = physical
-                .iter()
-                .map(|u| {
-                    observer
-                        .real_field(
-                            &core::array::from_fn(|i| u[6 * tri[i / 6] + i % 6]),
-                            &mut || gate.is_requested(),
-                        )
-                        .map_err(plate_error)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let area = mesh.facet(e).map_err(plate_error)?.area_m2;
-            let h = facet.faces_m[1] - facet.faces_m[0];
-            let center = facet.faces_m[0] + 0.5 * h;
-            let offset = 0.5 * h / det::sqrt(3.0);
-            let shear = det::sqrt(facet.shear_correction);
-            for &(lambda, weight) in &rule {
-                let strains = fields
-                    .iter()
-                    .map(|field| field.at_barycentric(lambda).map_err(plate_error))
-                    .collect::<Result<Vec<_>, _>>()?;
-                for z in [center - offset, center + offset] {
-                    poll(gate)?;
-                    let columns: Vec<[f64; 5]> = strains
-                        .iter()
-                        .map(|s| {
-                            [
-                                s.membrane[0] + z * s.gradient_per_m[0],
-                                s.membrane[1] + z * s.gradient_per_m[1],
-                                s.membrane[2] + z * s.gradient_per_m[2],
-                                shear * s.transverse_shear[1],
-                                shear * s.transverse_shear[0],
-                            ]
-                        })
-                        .collect();
-                    let image = constitutive
-                        .project_shell(
-                            &columns,
-                            area * weight * h * 0.5,
-                            TensorProjectionBudget {
-                                max_coordinates: n + 1,
-                                max_scalar_terms: point_work,
-                            },
-                            gate,
-                        )
-                        .map_err(tensor_error)?;
-                    let start = rows.len();
-                    for (total, &value) in viscosity.iter_mut().zip(image.feedthrough_viscosity()) {
-                        *total = *total + fs_math::dd::Dd::from_f64(value);
-                    }
-                    rows.extend_from_slice(image.coupling_rows());
-                    times.extend(
-                        image
-                            .relaxation_rates_per_s()
-                            .iter()
-                            .map(|rate| rate.recip()),
-                    );
-                    points.push(TensorShellMaterialPoint {
-                        facet: e,
-                        barycentric: lambda,
-                        thickness_coordinate_m: z,
-                        memory: start..rows.len(),
-                        memory_map: None,
-                        image,
-                    });
-                }
-            }
-        }
-        if band.0 != 0.0 || band.1 < band.0 || rows.len() != states || points.len() != count {
-            return Err(invalid(
-                "tensor shell needs complete zero-to-transient source support and original histories",
-            ));
-        }
-        if equilibrium_omega_squared
-            .iter()
-            .any(|&value| det::sqrt(value) > band.1)
-        {
-            return Err(invalid(
-                "original shell modal frequencies exceed source support",
-            ));
-        }
-        let shared = RelaxationCoordinates::new(
-            &rows,
-            &times,
-            n,
-            RelaxationCoordinateBudget {
-                maximum_states: limits.max_memory_states,
-                maximum_scalar_terms: factor_work,
-            },
-            || gate.is_requested(),
-        )
-        .map_err(|error| match error {
-            fs_material::visco_tensor::TensorPronyError::Cancelled => {
-                AcousticRealizeError::Cancelled
-            }
-            other => owner(other),
-        })?;
-        // Reuse the original-unit compensated passive-work owner. The full
-        // spatial matrix retains cross-modal loss, including both shears;
-        // no diagonal decay or viscosity sampled at a modal frequency is used.
-        let viscosity = ModalPlateViscosity::from_psd_modal_matrix(
-            viscosity.into_iter().map(|value| value.to_f64()).collect(),
-            n,
-            1.0,
-            gate,
-        )?;
-        for point in &mut points {
-            poll(gate)?;
-            point.memory_map = Some(shared.memory_map(point.memory.clone()).map_err(owner)?);
-        }
-        rows = shared.coupling_rows().to_vec();
-        times = shared.relaxation_times_s().to_vec();
-        poll(gate)?;
-        Ok(Self {
-            facets: facets.to_vec(),
-            points,
-            band_rad_s: band,
-            shared,
-            viscosity,
-            equilibrium_omega_squared,
-            modal: ModalShellRelaxation {
-                projected: Vec::new(),
-                rows,
-                times,
-                modes: n,
-                limits: PlateRelaxationLimits {
-                    max_modes: limits.max_modes,
-                    max_memory_states: limits.max_memory_states,
-                    max_projection_terms: limits.max_projection_terms,
-                },
-            },
-        })
+        let stacks: Vec<_> = facets.iter().map(std::slice::from_ref).collect();
+        Self::from_material_stacks(model, &stacks, modes, limits, gate)
     }
 
+    /// Original material catalog, ordered by facet and then by layer. The
+    /// homogeneous constructor retains exactly one entry per original facet.
     pub fn facets(&self) -> &[TensorShellMaterial] {
         &self.facets
+    }
+    /// All original layers attached to one physical facet, in thickness order.
+    pub fn facet_materials(&self, facet: usize) -> Option<&[TensorShellMaterial]> {
+        self.facet_materials
+            .get(facet)
+            .map(|range| &self.facets[range.clone()])
     }
     pub fn material_points(&self) -> &[TensorShellMaterialPoint] {
         &self.points
@@ -662,7 +434,8 @@ impl TensorShellRelaxation {
                 memory_map: point.memory_map.clone(),
                 // A conservative correction also bounds unscaled transverse
                 // engineering strains when kappa is below one.
-                strain_scale: (1.0 / det::sqrt(self.facets[point.facet].shear_correction)).max(1.0),
+                strain_scale: (1.0 / det::sqrt(self.facets[point.material].shear_correction))
+                    .max(1.0),
                 image: point.image.clone(),
             })
             .collect();
