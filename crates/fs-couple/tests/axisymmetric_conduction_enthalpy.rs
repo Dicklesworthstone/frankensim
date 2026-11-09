@@ -4,6 +4,8 @@
 mod common;
 #[path = "axisymmetric_conduction_enthalpy/contacts.rs"]
 mod contacts;
+#[path = "axisymmetric_conduction_enthalpy/terminals.rs"]
+mod terminals;
 
 use common::{boundary, config, material, material_with_electrical_basis, near, point};
 use fs_couple::circuit_enthalpy::{

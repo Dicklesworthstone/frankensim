@@ -13,6 +13,10 @@
 //! authored two-sided heat partitions; the bulk-only entry refuses them.
 
 pub mod contacts;
+/// Refreshed multi-terminal current, voltage and floating-electrode feedback.
+pub mod terminals;
+
+use terminals::Drive;
 
 use super::super::{
     CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients, DriverAccount, ThermalDriver,
@@ -186,7 +190,7 @@ impl ConductionThermalNetwork<'_> {
             thermal,
             target_s,
             problem,
-            drive,
+            Drive::Field(drive),
             &[],
             assembly,
             field_controls,
@@ -202,7 +206,7 @@ impl ConductionThermalNetwork<'_> {
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
         problem: &AxisymmetricConduction<C>,
-        drive: ConductionDrive<'_>,
+        drive: Drive<'_>,
         bindings: &[ConductionContactThermal<'_>],
         assembly: WeightedAssemblyLimits,
         field_controls: ConductionControls,
@@ -257,8 +261,9 @@ impl ConductionThermalNetwork<'_> {
             target_s,
             controls,
             initial_energy_increments_j,
-            |state, _remaining| {
+            |state, remaining| {
                 check(cancel)?;
+                let circuit_trials = drive.field_trials(remaining)?;
                 let coefficients = prepared
                     .resolve(state, || (*cancel.borrow_mut())())
                     .map_err(material)?;
@@ -293,16 +298,9 @@ impl ConductionThermalNetwork<'_> {
                     )
                 }
                 .map_err(field_error)?;
-                let field = drive
-                    .solve_axisymmetric(&next, field_controls, &mut || (*cancel.borrow_mut())())?;
+                let field = drive.solve(&next, field_controls, &mut || (*cancel.borrow_mut())())?;
                 let heat_j = finite(dt * field.power_w())?;
-                let supplied_work_j = finite(
-                    dt * drive.supplied_power_w(
-                        field.voltage_v(),
-                        field.power_w(),
-                        field.power_balance_residual_w(),
-                    )?,
-                )?;
+                let supplied_work_j = finite(dt * drive.supplied_power_w(&field, cancel)?)?;
                 if (field.power_w() > 0.0 && heat_j == 0.0)
                     || (heat_j - supplied_work_j).abs() > controls.total_energy_tolerance_j
                 {
@@ -335,7 +333,7 @@ impl ConductionThermalNetwork<'_> {
                     sources_w: coefficients.sources_w,
                     conductances_w_k: coefficients.conductances_w_k,
                     source: coefficients.source,
-                    circuit_trials: 1,
+                    circuit_trials,
                 })
             },
             |candidate, _dt, checkpoint| {

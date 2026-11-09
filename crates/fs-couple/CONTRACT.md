@@ -10173,6 +10173,33 @@ four contraction controls. Full `fs-couple` Cargo integration tests were not run
 in the disk-constrained session; syntax/static checks and independent complex
 work-balance calculations are distinct from that missing execution.
 
+## Axisymmetric multi-terminal electrothermal controls
+
+`axisymmetric::terminals::AxisymmetricTerminalDrive` binds complete terminal
+voltages, conserved terminal currents, or mixed voltage/current partitions to
+`ConductionThermalNetwork::step_axisymmetric_terminal_candidate`. Floating
+equipotential electrodes retain zero net current while allowing finite current
+transfer between their physical faces. Each thermal trial refreshes the original
+bulk and contact sources and rebuilds the native N-1 conductance basis; every
+basis solve consumes the existing circuit budget, with preflight admission
+before any basis solve starts.
+
+The existing enthalpy residual, Fourier links and explicit two-body contact heat
+partitions remain the sole thermal account. Source work uses authored currents
+on current-controlled terminals and native reactions on voltage-controlled
+terminals, each once. Retained relative/reference potential differences are
+combined in double-double precision before rounding, so a large common voltage
+reference does not erase a finite physical drop. Accepted continuation retains
+the refreshed electrical owner and thermal history together; invalid controls,
+budget exhaustion and cancellation leave both inputs reusable.
+
+Focused regression definitions cover floating-disk transfer, three sweep angles,
+temperature feedback, unequal caloric capacities, Fourier exchange, all three
+control modes, large common references, terminal reordering, finite-contact
+heating, exact basis budgets and deterministic retry. These new native coupled
+integration regressions have not been executed in the current dependency
+environment.
+
 ## Axisymmetric spatial electrothermal feedback
 
 `circuit_enthalpy::conduction::axisymmetric` advances the original finite

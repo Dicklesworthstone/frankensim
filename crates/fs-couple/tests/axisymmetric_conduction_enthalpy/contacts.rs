@@ -119,7 +119,7 @@ pub(super) fn binding<'a>(
     }
 }
 
-fn contact_mesh(angle: f64) -> TriComplex2 {
+pub(super) fn contact_mesh(angle: f64) -> TriComplex2 {
     TriComplex2::from_indexed_triangles(
         "two cylinder layers with a matching swept disk contact",
         vec![
@@ -137,7 +137,7 @@ fn contact_mesh(angle: f64) -> TriComplex2 {
     )
     .unwrap()
 }
-fn specimen(
+pub(super) fn specimen(
     cards: &[MaterialCard; 2],
     interface: &InterfaceSystemCard,
     angle: f64,

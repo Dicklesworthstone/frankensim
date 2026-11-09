@@ -63,6 +63,36 @@ entry continues to refuse a contact-bearing electrical owner. Both entries
 share the existing enthalpy solver and return an atomic electrical/thermal
 candidate.
 
+## Multiple terminals and floating electrodes
+
+`step_axisymmetric_terminal_candidate` accepts an
+`AxisymmetricTerminalDrive`: complete original electrode vertex sets, native
+conductance-response limits and held voltage, total-current or mixed controls.
+The original terminal order remains authoritative. Mixed current values follow
+the explicitly ordered current-terminal list; voltage values follow its
+complement. A zero-total-current terminal is equipotential and can transfer
+current between its faces. It is not an insulating boundary.
+
+At every proposed thermal endpoint, the native field rebuilds its N-1 basis
+responses from the refreshed bulk and contact material sources. It then recovers
+the simultaneous field and local bulk/contact heat, including cross terms
+between drives. No conductance matrix from an earlier material state is reused.
+The same original enthalpy residual, contact partitions and Fourier links apply.
+
+Terminal source work pairs authored total currents with solved physical voltage
+differences; voltage-source reactions supply the remaining work. The pairing
+uses retained component-relative potentials and reference differences before
+rounding, with one contribution per terminal. Recovered fields report terminal
+zero as their voltage gauge.
+
+This entry charges each native basis solve to `maximum_circuit_trials` and
+`report().circuit_trials`: N-1 per thermal evaluation, including finite-difference
+stencils and the fresh final endpoint. The remaining budget is checked before
+those solves start. Native response bounds separately constrain terminal count,
+retained storage, dense work and probe/source support. This adds held ideal
+terminal control, without circuit storage, finite electrode impedance or a new
+contact law.
+
 Focused regression definitions cover sector scaling, unequal swept triangle
 volumes, local current heating with material Fourier transfer, opposite
 voltage/current feedback, regulated-power continuation, latent-phase source

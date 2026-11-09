@@ -48,7 +48,7 @@ impl ConductionThermalNetwork<'_> {
             thermal,
             target_s,
             problem,
-            drive,
+            Drive::Field(drive),
             contacts,
             assembly,
             field_controls,
