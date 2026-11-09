@@ -19,6 +19,8 @@ use crate::polarization::dielectric::transport::connection::SurfaceConnectionRes
 use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
+mod microsurface;
+
 #[cfg(test)]
 mod anisotropic_tests;
 

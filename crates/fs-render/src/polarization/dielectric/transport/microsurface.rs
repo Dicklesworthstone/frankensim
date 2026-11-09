@@ -15,6 +15,9 @@ use super::{BeamError, PolarizationFrame, PolarizedBeam};
 use crate::conductor::microsurface::{SmithError, SmithEvent, SmithGgx, unit};
 use crate::conductor::{ConductorOptics, ConductorSurface};
 
+pub mod connection;
+
+
 pub const MAX_SMITH_FACET_EVENTS: u32 = 65_536;
 
 /// Explicit per-geometric-hit work limit. Exhaustion is an error, not a dark

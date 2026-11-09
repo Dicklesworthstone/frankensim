@@ -12411,3 +12411,61 @@ uses minimal execution/hash and homogeneous-medium wiring; it is not a full
 workspace build. A native camera regression additionally covers analyzer,
 Beer attenuation, source-before-scatter ordering and anisotropic scene dispatch;
 execution of that full scene test remains pending dependency availability.
+
+## Point-fixture illumination with complete Smith reflection
+
+`conductor::microsurface::SmithGgx` supplies fixed-direction collision
+connections and an analytic height-integrated first reflection. The polarized
+`evaluate_smith_conductor_connection` and
+`evaluate_instanced_smith_brushed_conductor_connection` APIs retain that exact
+first-order term and sample the higher orders with the original Smith walk.
+Every connection uses its own smooth complex Fresnel/Mueller response on the
+retained incoming optical prefix. Its escape probability is applied once.
+Native coherent films, local phase index, source polarization and frame
+reciprocity remain authoritative. Brushed axes/marks retain the original
+instance chart. An authored tilted shading normal keeps the existing empirical
+radiance law and its geometric/shading cosine conversion once at the endpoints.
+
+`point_lights::SmithPointLightCameraScene` connects the original calibrated
+fixtures on the complete Smith camera continuation. Native bundle shooting,
+physical irradiance, optical source polarization, Beer/GRIN propagation,
+receiver geometry, and camera n² conversion are reused. Analyzer and resolved
+sequential-lens seeds enter before every facet. Source and thermal emission
+remain on the same native camera path, including its post-microsurface prefix.
+The added Smith evaluations use fixed local state with no heap allocation;
+work is linear in the actual bounded facet count. Existing bundle owners retain
+their workspace policy. Finish frames and optical tables are not rebuilt per facet.
+
+Point fixtures cannot be hit by continuous path continuation, so their selected
+connections add without a competing endpoint strategy. The directional
+response is a stochastic BRDF contraction, NOT an outgoing marginal PDF.
+Neither a sampled response nor the hidden-path joint density is used in MIS.
+Surface decisions, continuing facets and each source-connection evaluation
+have independent logical counter domains. The first-order connection is
+integrated rather than counted again as a random collision contribution.
+
+Facet limits and original cumulative source/shooting limits bound the whole
+sample. Any unresolved path, source connection, numerical representation
+failure or cancellation refuses it; averaging only successful histories would
+bias the result. This implements the original declared point-source branches,
+not all optical images, area/environment NEE, BDPT or molecular scattering.
+Statistical micro-heights add no metric travel, delay or coherent path phase.
+
+Twenty-three focused Rust tests pass with the actual geometric walk,
+conductor/film Fresnel-Mueller mathematics, native beam/frame and reciprocal
+contraction bodies, original finish/placement mathematics, fs-math and Philox.
+Eight new groups cover independent analytic first order, hidden-height
+integration, unit-furnace and absorption agreement with sampled escapes,
+anisotropic reciprocity, actual Mueller prefixes, frame/scale/fallback behavior
+and transactional limits. Minimal execution/hash/homogeneous-medium wiring
+supplies the isolated dependency closure. Two full native point-camera
+regressions are authored for physical irradiance, Beer attenuation, independent
+connection/continuation draws and refusal; those scene tests remain unexecuted
+with the missing constellation checkouts.
+
+Two additional compiled integration probes execute the actual new point-camera
+and receiver modules and original fixture accumulation/photometry seams with
+signature fixtures for the driver, bundle and evaluator. They verify isotropic
+and brushed dispatch, radiometric composition, independent sample indices,
+work counters, contact refusal and cancellation. These are integration-shape
+checks, not execution of the full native scene/geometry solver.

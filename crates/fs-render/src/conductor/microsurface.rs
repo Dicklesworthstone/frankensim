@@ -18,6 +18,8 @@ use core::f64::consts::PI;
 use fs_geom::Vec3;
 use fs_math::det;
 
+pub mod connection;
+
 /// Semantics of the explicit height and direction sampling operation tree.
 pub const SMITH_GGX_WALK_SEMANTICS_VERSION: u32 = 1;
 

@@ -52,6 +52,9 @@ use fs_math::det;
 #[cfg(feature = "volumes")]
 pub mod participating;
 
+pub mod microsurface;
+pub use microsurface::SmithPointLightCameraScene;
+
 /// Fixed admission bound; camera rays allocate no fixture-owned workspace.
 pub const MAX_POINT_LIGHT_BRANCHES: usize = 64;
 
@@ -624,6 +627,23 @@ impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
         path: &CurvedPathResult,
         connector: &mut impl FixtureConnector,
     ) -> Result<(), PointLightCameraError> {
+        let camera = self.owner.camera;
+        self.add_contact_with_response(cx, path, connector, |receiver, connection, binding| {
+            let response = receiver.response(camera, connection, binding)?;
+            Ok((response.normal, response.factor))
+        })
+    }
+
+    // Keep the original shooting, photometry, source polarization and work
+    // accounting shared. A Smith response has no marginal proposal PDF.
+    fn add_contact_with_response(
+        &mut self,
+        cx: &Cx<'_>,
+        path: &CurvedPathResult,
+        connector: &mut impl FixtureConnector,
+        mut evaluate: impl FnMut(SurfaceReceiver, &BundleConnection, usize)
+            -> Result<(Vec3, f64), PointLightCameraError>,
+    ) -> Result<(), PointLightCameraError> {
         let contact = path
             .last_contact()
             .ok_or(PointLightCameraError::NumericalRange)?;
@@ -691,8 +711,8 @@ impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
             {
                 return Err(PointLightCameraError::NumericalRange);
             }
-            let response = receiver.response(self.owner.camera, &connection.original, index)?;
-            if response.factor == 0.0 {
+            let (response_normal, response_factor) = evaluate(receiver, &connection.original, index)?;
+            if response_factor == 0.0 {
                 continue;
             }
             // Transmission reaches the same native contact from the other
@@ -700,7 +720,7 @@ impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
             // not the camera-oriented shooting section.
             let receiving_plane = PlanarIrradianceReceiver::try_new(
                 target.position_m(),
-                response.normal,
+                response_normal,
                 target.position_tolerance_m(),
             )
             .map_err(|error| PointLightCameraError::Photometry {
@@ -750,7 +770,7 @@ impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
                     beam.power().i,
                     self.initial_index,
                     local_index,
-                    response.factor,
+                    response_factor,
                     irradiance,
                     connection.log_scattering_survival,
                 )?
@@ -759,7 +779,7 @@ impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
                     beam.power().i,
                     self.initial_index,
                     local_index,
-                    response.factor,
+                    response_factor,
                     irradiance,
                     connection.log_scattering_survival,
                 )?
