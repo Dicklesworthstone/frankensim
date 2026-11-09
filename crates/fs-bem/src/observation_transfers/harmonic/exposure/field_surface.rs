@@ -1,13 +1,13 @@
 //! Original-field surface power and wave-momentum transport before tone reduction.
 //!
-//! Short uniform bands share one temporal factor per source bank. The original
+//! Short uniform and triangular windows share one factor per source bank. The original
 //! pressure and three velocity components interfere before any product; signed
 //! surface power and the full symmetric wave stress use those same projections.
 //! Other banks retain their original real/proper pair law independently.
 
 use super::*;
 use fs_fft::harmonic_window::{
-    MAX_UNIFORM_HARMONIC_BAND_MODES, MAX_UNIFORM_HARMONIC_BAND_TONES, UniformHarmonicBandWorkspace,
+    HarmonicBandWorkspace, MAX_UNIFORM_HARMONIC_BAND_MODES, MAX_UNIFORM_HARMONIC_BAND_TONES,
 };
 
 /// Explicit per-query work admission. Queries allocate no heap memory and add
@@ -252,10 +252,10 @@ fn mode_count(bank: &Bank, window: HarmonicWindow) -> Result<Option<usize>, Tran
     let values = frequencies(bank);
     match bank.statistics {
         HarmonicExposureFactorStatistics::Real => {
-            window.uniform_real_band_mode_count_rad_s(&values[..bank.lines.len()])
+            window.real_band_mode_count_rad_s(&values[..bank.lines.len()])
         }
         HarmonicExposureFactorStatistics::ProperComplex => {
-            window.uniform_band_mode_count_rad_s(&values[..bank.lines.len()])
+            window.band_mode_count_rad_s(&values[..bank.lines.len()])
         }
     }
     .map_err(window_error)
@@ -280,14 +280,14 @@ fn projected_bank(
     }
     let values = frequencies(bank);
     let count = bank.lines.len();
-    let mut workspace = UniformHarmonicBandWorkspace::new();
+    let mut workspace = HarmonicBandWorkspace::new();
     let (factor, physical_scale) = match bank.statistics {
         HarmonicExposureFactorStatistics::Real => (
-            window.prepare_uniform_real_band_rad_s_in(&values[..count], &mut workspace),
+            window.prepare_real_band_rad_s_in(&values[..count], &mut workspace),
             scale,
         ),
         HarmonicExposureFactorStatistics::ProperComplex => (
-            window.prepare_uniform_band_rad_s_in(&values[..count], &mut workspace),
+            window.prepare_band_rad_s_in(&values[..count], &mut workspace),
             scale * Dd::from_f64(0.5),
         ),
     };

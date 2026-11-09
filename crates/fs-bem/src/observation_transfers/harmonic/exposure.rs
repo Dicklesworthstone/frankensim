@@ -120,7 +120,7 @@ pub struct HarmonicExposureLimits {
     /// Four complex p/u source-transfer products per source, receiver and line.
     pub maximum_transfer_products: usize,
     /// Receiver count times sum of squared line counts over mean/factor banks.
-    /// This is a structural source-pair cap. Admitted short uniform bands use
+    /// This is a structural source-pair cap. Admitted short uniform/triangular bands use
     /// at most 64 source columns and 17 temporal modes per receiver instead;
     /// each mode contracts the same four components and ten unique moments.
     pub maximum_receiver_frequency_pairs: usize,
@@ -174,7 +174,7 @@ struct Bank {
 ///
 /// Preparation contracts existing transfers once in O(receivers * sources *
 /// lines), without a BEM solve. Equal frequencies field-sum in source order
-/// before products. Short uniform windows share one positive temporal factor
+/// before products. Short uniform/triangular windows share one positive temporal factor
 /// per bank across receivers and components; other queries share one kernel
 /// per frequency pair. Fixed band scratch adds no heap payload. Double-double
 /// sums and products are not a relative error certificate near arbitrary nulls.
@@ -447,7 +447,7 @@ impl<'a> PreparedHarmonicExposure<'a> {
         self.factors.iter().map(|bank| bank.statistics)
     }
     /// Structural receiver/frequency-pair count after exact-frequency grouping.
-    /// Short uniform bands have an additional fixed 64-column/17-mode bound.
+    /// Short uniform/triangular bands have an additional fixed 64-column/17-mode bound.
     pub fn receiver_frequency_pairs(&self) -> usize {
         self.receiver_frequency_pairs
     }

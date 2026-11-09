@@ -2,7 +2,7 @@
 
 use super::*;
 use fs_fft::harmonic_window::{
-    MAX_UNIFORM_HARMONIC_BAND_MODES, MAX_UNIFORM_HARMONIC_BAND_TONES, UniformHarmonicBandWorkspace,
+    HarmonicBandWorkspace, MAX_UNIFORM_HARMONIC_BAND_MODES, MAX_UNIFORM_HARMONIC_BAND_TONES,
 };
 
 /// Return false before changing sums when the original pair path is required.
@@ -24,14 +24,14 @@ pub(super) fn accumulate(
         *frequency = line.omega;
     }
     poll(cancelled)?;
-    let mut workspace = UniformHarmonicBandWorkspace::new();
+    let mut workspace = HarmonicBandWorkspace::new();
     let (prepared, scale) = match bank.statistics {
         HarmonicExposureFactorStatistics::Real => (
-            window.prepare_uniform_real_band_rad_s_in(&frequencies[..count], &mut workspace),
+            window.prepare_real_band_rad_s_in(&frequencies[..count], &mut workspace),
             Dd::ONE,
         ),
         HarmonicExposureFactorStatistics::ProperComplex => (
-            window.prepare_uniform_band_rad_s_in(&frequencies[..count], &mut workspace),
+            window.prepare_band_rad_s_in(&frequencies[..count], &mut workspace),
             Dd::from_f64(0.5),
         ),
     };

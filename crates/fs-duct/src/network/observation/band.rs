@@ -6,7 +6,7 @@
 
 use super::{Dd, DuctError, HarmonicWindow, poll, window_error};
 use fs_fft::harmonic_window::{
-    MAX_UNIFORM_HARMONIC_BAND_MODES, MAX_UNIFORM_HARMONIC_BAND_TONES, UniformHarmonicBandWorkspace,
+    HarmonicBandWorkspace, MAX_UNIFORM_HARMONIC_BAND_MODES, MAX_UNIFORM_HARMONIC_BAND_TONES,
 };
 
 /// Return false when the original analytic pair kernels must be used.
@@ -35,11 +35,11 @@ pub(in crate::network) fn accumulate(
     for (slot, frequency) in omega.iter_mut().zip(frequencies) {
         *slot = frequency;
     }
-    let mut workspace = UniformHarmonicBandWorkspace::new();
+    let mut workspace = HarmonicBandWorkspace::new();
     let band = if proper {
-        window.prepare_uniform_band_rad_s_in(&omega[..count], &mut workspace)
+        window.prepare_band_rad_s_in(&omega[..count], &mut workspace)
     } else {
-        window.prepare_uniform_real_band_rad_s_in(&omega[..count], &mut workspace)
+        window.prepare_real_band_rad_s_in(&omega[..count], &mut workspace)
     }
     .map_err(window_error)?;
     let Some(band) = band else { return Ok(false) };
@@ -62,7 +62,7 @@ pub(in crate::network) fn accumulate(
         band.project_parts_dd(&flow[..count], &mut u[..modes])
             .map_err(window_error)?;
         if deterministic {
-            // The real constant Legendre coefficient is the actual window
+            // The real constant orthogonal coefficient is the weighted window
             // mean. No rounded carrier phases can swamp a cancelled mean.
             sum[0] = sum[0] + p[0][0];
             sum[1] = sum[1] + u[0][0];
@@ -86,3 +86,6 @@ pub(in crate::network) fn accumulate(
     poll(cancelled, sums.len())?;
     Ok(true)
 }
+
+#[cfg(test)]
+mod tests;

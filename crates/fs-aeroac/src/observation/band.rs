@@ -1,4 +1,4 @@
-//! Positive temporal field factors for unresolved, uniform-window bands.
+//! Positive field factors for unresolved uniform and triangular observations.
 //!
 //! One factorization serves the pressure, every velocity component and their
 //! signed cross moments. Real waveforms keep their sum-frequency terms; proper
@@ -9,8 +9,8 @@ use super::{
     window_error,
 };
 use fs_fft::harmonic_window::{
-    MAX_UNIFORM_HARMONIC_BAND_MODES, MAX_UNIFORM_HARMONIC_BAND_TONES, UniformHarmonicBandRef,
-    UniformHarmonicBandWorkspace,
+    HarmonicBandRef, HarmonicBandWorkspace, MAX_UNIFORM_HARMONIC_BAND_MODES,
+    MAX_UNIFORM_HARMONIC_BAND_TONES,
 };
 
 type Modes = [[Dd; 2]; MAX_UNIFORM_HARMONIC_BAND_MODES];
@@ -40,20 +40,16 @@ pub(super) fn accumulate<const D: usize>(
         *out = line.frequency.native();
     }
     let frequencies = &frequencies[..count];
-    let mut workspace = UniformHarmonicBandWorkspace::new();
+    let mut workspace = HarmonicBandWorkspace::new();
     let band = match (kind, angular) {
         (FactorKind::Deterministic, false) => {
-            window.prepare_uniform_real_band_hz_in(frequencies, &mut workspace)
+            window.prepare_real_band_hz_in(frequencies, &mut workspace)
         }
         (FactorKind::Deterministic, true) => {
-            window.prepare_uniform_real_band_rad_s_in(frequencies, &mut workspace)
+            window.prepare_real_band_rad_s_in(frequencies, &mut workspace)
         }
-        (FactorKind::Proper, false) => {
-            window.prepare_uniform_band_hz_in(frequencies, &mut workspace)
-        }
-        (FactorKind::Proper, true) => {
-            window.prepare_uniform_band_rad_s_in(frequencies, &mut workspace)
-        }
+        (FactorKind::Proper, false) => window.prepare_band_hz_in(frequencies, &mut workspace),
+        (FactorKind::Proper, true) => window.prepare_band_rad_s_in(frequencies, &mut workspace),
     }
     .map_err(window_error)?;
     poll(cancelled)?;
@@ -104,7 +100,7 @@ pub(super) fn accumulate<const D: usize>(
 fn project<const D: usize>(
     field: &PreparedHarmonicField<D>,
     axis: Option<usize>,
-    band: &UniformHarmonicBandRef<'_>,
+    band: &HarmonicBandRef<'_>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Modes, AeroacError> {
     let mut components = [[Dd::ZERO; 2]; MAX_UNIFORM_HARMONIC_BAND_TONES];
@@ -124,3 +120,6 @@ fn project<const D: usize>(
     poll(cancelled)?;
     Ok(modes)
 }
+
+#[cfg(test)]
+mod tests;

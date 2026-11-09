@@ -5574,3 +5574,16 @@ geometry, source, mesh, budget, contact-face and cancellation refusals.
 The existing homogeneous and layered annular wall tests also exercise
 the shared radial arithmetic. Solid data in these tests are explicitly
 synthetic constitutive fixtures, not experimental material authority.
+
+## Profile-aware coherent network observation
+
+The bounded coherent network field path now uses the actual Uniform or
+Triangular normalized temporal factor before pressure/velocity/intensity
+products. The actual-real constant mode supplies the weighted mean; proper
+factor powers retain their physical one-half scaling. Existing source,
+frequency-domain, interval and fallback semantics remain unchanged.
+
+Two focused actual-helper regressions pass with warnings denied, including
+triangular cancellation and retained-clock/fallback behavior. Numerical
+projection uses the actual shared temporal implementation with narrow outer
+duct metadata carriers. The full network solver/workspace suite was not run.

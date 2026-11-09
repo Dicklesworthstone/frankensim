@@ -2,8 +2,8 @@
 
 use super::*;
 use fs_fft::harmonic_window::{
-    MAX_UNIFORM_HARMONIC_BAND_MODES, MAX_UNIFORM_HARMONIC_BAND_TONES, UniformHarmonicBandRef,
-    UniformHarmonicBandWorkspace,
+    HarmonicBandRef, HarmonicBandWorkspace, MAX_UNIFORM_HARMONIC_BAND_MODES,
+    MAX_UNIFORM_HARMONIC_BAND_TONES,
 };
 
 type Modes = [[Dd; 2]; MAX_UNIFORM_HARMONIC_BAND_MODES];
@@ -57,20 +57,16 @@ pub(super) fn accumulate<const D: usize>(
     }
     // A self pair retains the original authored order, exactly matching its
     // local observer rather than introducing a second summation permutation.
-    let mut workspace = UniformHarmonicBandWorkspace::new();
+    let mut workspace = HarmonicBandWorkspace::new();
     let band = match (kind, angular) {
         (FactorKind::Deterministic, false) => {
-            window.prepare_uniform_real_band_hz_in(frequencies, &mut workspace)
+            window.prepare_real_band_hz_in(frequencies, &mut workspace)
         }
         (FactorKind::Deterministic, true) => {
-            window.prepare_uniform_real_band_rad_s_in(frequencies, &mut workspace)
+            window.prepare_real_band_rad_s_in(frequencies, &mut workspace)
         }
-        (FactorKind::Proper, false) => {
-            window.prepare_uniform_band_hz_in(frequencies, &mut workspace)
-        }
-        (FactorKind::Proper, true) => {
-            window.prepare_uniform_band_rad_s_in(frequencies, &mut workspace)
-        }
+        (FactorKind::Proper, false) => window.prepare_band_hz_in(frequencies, &mut workspace),
+        (FactorKind::Proper, true) => window.prepare_band_rad_s_in(frequencies, &mut workspace),
     }
     .map_err(window_error)?;
     poll(cancelled)?;
@@ -121,7 +117,7 @@ pub(super) fn accumulate<const D: usize>(
 fn project<const D: usize>(
     field: &PreparedHarmonicField<D>,
     frequencies: &[f64],
-    band: &UniformHarmonicBandRef<'_>,
+    band: &HarmonicBandRef<'_>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Projected, AeroacError> {
     let mut groups = [0; MAX_UNIFORM_HARMONIC_BAND_TONES];
@@ -167,7 +163,7 @@ fn components<const D: usize>(line: &PreparedLine<D>) -> Components {
 
 fn add<const D: usize>(
     sums: &mut CrossSums<D>,
-    band: &UniformHarmonicBandRef<'_>,
+    band: &HarmonicBandRef<'_>,
     mode: usize,
     left: Components,
     right: Components,
@@ -196,3 +192,6 @@ fn add<const D: usize>(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

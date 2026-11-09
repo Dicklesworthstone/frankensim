@@ -172,6 +172,47 @@ fn actual_real_even_and_odd_nulls_keep_mean_and_sum_frequency_energy() {
     }
 }
 
+#[test]
+fn triangular_nulls_preserve_weighted_means_and_signed_real_proper_moments() {
+    let carrier = 2.0_f64.powi(49);
+    let proper = coherent_owners([carrier, carrier + 1.0, carrier + 2.0]);
+    let real = coherent_owners([1.0, 2.0, 3.0]);
+    for duration in [1e-6_f64, 1e-9, 1e-12] {
+        let window = HarmonicWindow::with_profile(
+            -0.5 * duration,
+            duration,
+            HarmonicWindowProfile::Triangular,
+        )
+        .unwrap();
+        let coefficients = [1.0, -2.0, 1.0].map(|a| [C64::from_re(a)]);
+        let exposure = prepare(&proper, &coefficients, true);
+        verify_quiet_moments(
+            &exposure.observe_window(window).unwrap(),
+            0.0,
+            duration.powi(4) / 480.0,
+            5e-10,
+        );
+        let exposure = prepare(&real, &coefficients, false);
+        verify_quiet_moments(
+            &exposure.observe_window(window).unwrap(),
+            -duration.powi(2) / 24.0,
+            duration.powi(4) / 240.0,
+            5e-10,
+        );
+        let coefficients = [1.0, -2.0, 1.0].map(|a| [C64::new(0.0, a)]);
+        let exposure = prepare(&real, &coefficients, false);
+        // The deepest cubic residual cancels modal coefficients over 24
+        // orders. Its conditioning limit is distinct from an arbitrary-null
+        // relative-error guarantee; the existing uniform gates stay intact.
+        verify_quiet_moments(
+            &exposure.observe_window(window).unwrap(),
+            0.0,
+            duration.powi(6) / 448.0,
+            if duration < 1e-10 { 1e-7 } else { 5e-10 },
+        );
+    }
+}
+
 fn mixed_owners() -> [PreparedHarmonicObservation; 3] {
     [1.0, 2.0, 3.0].map(|omega| {
         owner(

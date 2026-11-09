@@ -4441,3 +4441,28 @@ build. Solver/cubature uncertainty and arbitrary-null relative accuracy remain
 unresolved. These are wave-pseudomomentum quantities; enclosure, matching
 surfaces, interior sources, total fluid momentum and body reaction are not
 inferred.
+
+## Profile-aware coherent receiver, surface and pressure-array observations
+
+Receiver and signed surface field factors now dispatch the actual normalized
+Uniform or Triangular temporal profile. Prepared calibrated/delayed pressure
+arrays additionally project each coherent source bank before channel powers.
+Actual-real mode zero supplies its weighted mean and real-factor averaged
+covariance. Proper-factor readout covariance separately retains the original
+absolute carrier; the relative-carrier second-moment factor cannot supply it.
+Independent source banks remain independent.
+
+Array preparation admits the larger of pair and bounded17-mode projection work,
+including doubled real preparation columns, plus the complete fixed/shared
+scratch. Original fallback and cancellation remain transactional. Physical
+surface interval integrals retain Uniform semantics. The separate selected
+pressure-channel correlation observer retains its existing pair calculation.
+
+Validation:23 focused actual-source BEM tests pass with warnings denied; the
+unchanged baseline fails five of these cases. Checks include triangular deep
+nulls, signed surface stress/torque, mixed delayed real/proper channels and
+independent readout covariance, broad-band fallback, budgets and cancellation.
+Nominal outer BEM source/receiver/error carriers supply unrelated metadata; the
+full native BEM solver and workspace suite were not run. The deepest triangular
+cubic test uses an explicit conditioning-aware1e-7 relative tolerance; this is
+not certification of arbitrary cancellation nulls.

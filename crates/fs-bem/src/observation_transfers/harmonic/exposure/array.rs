@@ -12,6 +12,8 @@
 use super::*;
 use crate::near_field::FirstOrder;
 
+mod band;
+
 /// Maximum processed pressure channels in one prepared bank.
 pub const MAX_PRESSURE_ARRAY_CHANNELS: usize = 64;
 /// Maximum authored taps over all channels, including silent/repeated taps.
@@ -48,13 +50,15 @@ pub struct HarmonicPressureArrayLimits {
     /// Calibrated microphones count sixteen real DD products per projection
     /// and complete frequency/response validation and conversion work.
     pub maximum_prepare_products: usize,
-    /// Linear real contractions, channel/frequency pairs and averaged-channel
-    /// covariance terms. Conservative counts include both matrix triangles.
+    /// Linear real contractions, temporal field products and averaged-channel
+    /// covariance terms. Each bank admits the larger of its original pair work
+    /// and a 17-mode projection bound; counts include both matrix triangles.
     pub maximum_query_products: usize,
     /// Logical retained payload plus preparation temporaries, query accumulators
     /// and one returned observation. Borrowed original fields and allocator
     /// overhead are excluded. Preparation and query temporaries do not coexist;
-    /// counting both makes this a conservative peak bound.
+    /// counting both makes this a conservative peak bound. Fixed band and
+    /// profile-preparation scratch is included when a bank can use projection.
     pub maximum_workspace_bytes: usize,
 }
 
@@ -326,15 +330,15 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
         }
         let bank_count = source.factors.len() + 1;
         let mut lines = 0usize;
-        let mut frequency_pairs = 0usize;
+        let mut temporal_products = 0usize;
+        let mut band_scratch = 0usize;
         for bank in source.banks() {
             lines = lines.checked_add(bank.lines.len()).ok_or_else(overflow)?;
-            frequency_pairs = bank
-                .lines
-                .len()
-                .checked_mul(bank.lines.len())
-                .and_then(|p| frequency_pairs.checked_add(p))
+            let (products, scratch) = band::admission(bank.lines.len(), n, bank.statistics)?;
+            temporal_products = temporal_products
+                .checked_add(products)
                 .ok_or_else(overflow)?;
+            band_scratch = band_scratch.max(scratch);
         }
         // The number of unique frequencies is at most the retained line count.
         // Use this conservative admission before sorting or allocation.
@@ -359,7 +363,7 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
         let query_products = lines
             .checked_mul(n)
             .and_then(|p| p.checked_mul(2))
-            .and_then(|p| p.checked_add(frequency_pairs.checked_mul(n)?))
+            .and_then(|p| p.checked_add(temporal_products))
             .and_then(|p| p.checked_add(n.checked_mul(n)?.checked_mul(source.factors.len())?))
             .ok_or_else(overflow)?;
         admit(prepare_products, MAX_PRODUCTS)?;
@@ -410,6 +414,7 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
                 }
             })
             .and_then(|v| v.checked_add(calibration_bytes))
+            .and_then(|v| v.checked_add(band_scratch))
             .ok_or_else(overflow)?;
         admit(workspace_bytes, limits.maximum_workspace_bytes)?;
 
@@ -651,18 +656,26 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
         for (bank_index, bank) in self.banks.iter().enumerate() {
             poll(&mut cancelled)?;
             integrated.fill([Dd::ZERO; 2]);
-            for line in &bank.lines {
-                poll(&mut cancelled)?;
-                let dc = window
-                    .product_kernel(line.omega, 0.0)
-                    .map_err(window_error)?;
-                for (sum, &a) in integrated.iter_mut().zip(&line.amplitudes) {
-                    sum[0] = sum[0]
-                        + dc.mean_real_product_parts_dd(a, [Dd::ONE, Dd::ZERO])
-                            .map_err(window_error)?;
-                    sum[1] = sum[1]
-                        + dc.mean_real_product_parts_dd([a[1], -a[0]], [Dd::ONE, Dd::ZERO])
-                            .map_err(window_error)?;
+            let projected = band::accumulate(
+                bank, window, &mut sums, &mut integrated, &mut cancelled,
+            )?;
+            // A proper temporal factor removes a common carrier only for
+            // second moments. Its mode zero cannot replace the original-clock
+            // field average used in the readout covariance.
+            if !projected || bank.statistics == HarmonicExposureFactorStatistics::ProperComplex {
+                for line in &bank.lines {
+                    poll(&mut cancelled)?;
+                    let dc = window
+                        .product_kernel(line.omega, 0.0)
+                        .map_err(window_error)?;
+                    for (sum, &a) in integrated.iter_mut().zip(&line.amplitudes) {
+                        sum[0] = sum[0]
+                            + dc.mean_real_product_parts_dd(a, [Dd::ONE, Dd::ZERO])
+                                .map_err(window_error)?;
+                        sum[1] = sum[1]
+                            + dc.mean_real_product_parts_dd([a[1], -a[0]], [Dd::ONE, Dd::ZERO])
+                                .map_err(window_error)?;
+                    }
                 }
             }
             if bank_index == 0 {
@@ -678,6 +691,9 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
                             + zero.product(integrated[row], integrated[col])?;
                     }
                 }
+            }
+            if projected {
+                continue;
             }
             for (i, a) in bank.lines.iter().enumerate() {
                 for (j, b) in bank.lines[..=i].iter().enumerate() {
@@ -780,3 +796,6 @@ pub use correlation::{
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod band_tests;

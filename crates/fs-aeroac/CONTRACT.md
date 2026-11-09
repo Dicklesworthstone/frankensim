@@ -4265,3 +4265,18 @@ lossless fluid around one infinite, ideal straight-edged sheet. Finite source
 size and stress acquisition require their original source evidence. Finite
 barriers, absorbing faces, nonuniform or mean flow, source feedback,
 unresolved SGS stresses and measured-SPL qualification are outside this owner.
+
+## Profile-aware observer and array interference
+
+Local and array field projections now dispatch actual Uniform/Triangular
+normalized temporal factors in the original Hz or rad/s source domain.
+Pressure, intensity and supported cross-channel products retain coherent
+field interference before products. Proper-factor averaged readout covariance
+continues to integrate the original carrier separately from the relative-band
+second moments. Existing union-spectrum bounds and fallback remain explicit.
+
+Three focused actual-helper regressions pass with warnings denied, including
+triangular dark leakage, real/proper statistics, retained source clocks and
+unequal-support array correlations with independent integration. Original
+ComplexSum, frequency, kernel and averaged-amplitude functions were executed.
+The full aeroac source/observer pipeline and workspace suite were not run.

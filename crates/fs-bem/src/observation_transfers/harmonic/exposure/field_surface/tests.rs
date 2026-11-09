@@ -470,9 +470,32 @@ fn work_caps_invalid_geometry_and_cancellation_refuse_without_changing_owner() {
         .is_err()
     );
     let shaped = HarmonicWindow::with_profile(0.0, 0.1, HarmonicWindowProfile::Triangular).unwrap();
+    let shaped_terms = mode_count(&exposure.mean, shaped).unwrap().unwrap() * (3 + 4 * 3 + 10);
+    let shaped_caps = HarmonicSurfaceFieldLimits {
+        maximum_temporal_projection_terms: shaped_terms,
+        ..exact
+    };
+    exposure
+        .surface_field_window(&surface(), [0.0; 3], shaped, shaped_caps, || false)
+        .unwrap();
     assert!(
         exposure
-            .surface_field_window(&surface(), [0.0; 3], shaped, exact, || false)
+            .surface_field_window(
+                &surface(),
+                [0.0; 3],
+                shaped,
+                HarmonicSurfaceFieldLimits {
+                    maximum_temporal_projection_terms: shaped_terms - 1,
+                    ..shaped_caps
+                },
+                || false
+            )
+            .is_err()
+    );
+    let broad = HarmonicWindow::with_profile(0.0, 10.0, HarmonicWindowProfile::Triangular).unwrap();
+    assert!(
+        exposure
+            .surface_field_window(&surface(), [0.0; 3], broad, exact, || false)
             .is_err()
     );
     let invalid = [HarmonicSurfaceQuadrature {
@@ -500,4 +523,44 @@ fn work_caps_invalid_geometry_and_cancellation_refuse_without_changing_owner() {
             .unwrap(),
         HarmonicSurfaceFieldMoments::default()
     );
+}
+
+#[test]
+fn triangular_dark_surface_keeps_stress_and_torque_but_intervals_remain_uniform() {
+    let carrier = 2.0_f64.powi(49);
+    let owners = plane([carrier, carrier + 1.0, carrier + 2.0]);
+    let exposure = bank(&owners, [1.0, -2.0, 1.0].map(C64::from_re), true);
+    for duration in [1e-6_f64, 1e-9, 1e-12] {
+        let start = -0.5 * duration;
+        let window =
+            HarmonicWindow::with_profile(start, duration, HarmonicWindowProfile::Triangular)
+                .unwrap();
+        let actual = exposure
+            .surface_field_window(&surface(), [0.0; 3], window, limits(), || false)
+            .unwrap();
+        let square = duration.powi(4) / 480.0;
+        close(actual.mean_power_w, 16.0 * square, 3e-12);
+        close(actual.mean_linear_momentum_rate_n[0], 4.0 * square, 3e-12);
+        close(
+            actual.mean_angular_momentum_rate_nm[1],
+            -1.6 * square,
+            3e-12,
+        );
+        close(
+            actual.mean_angular_momentum_rate_nm[2],
+            -12.0 * square,
+            3e-12,
+        );
+        let interval = exposure
+            .surface_field_interval_from_clock_dd(
+                &surface(),
+                [0.0; 3],
+                Dd::from_f64(start),
+                duration,
+                limits(),
+                || false,
+            )
+            .unwrap();
+        close(interval.energy_j, 48.0 * square * duration, 3e-12);
+    }
 }
