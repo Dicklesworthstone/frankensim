@@ -35,6 +35,39 @@ and isothermal limits, radial refinement against an independent primitive
 ODE, slit and slowly vanishing inner-wall limits, original scattering power
 and long-duct composition, and material/geometry/budget/cancellation refusals.
 
+### Resolved annular fields and irreversible heat
+
+`AnnularSection::prepare_fields` retains those SAME radial diffusion solutions
+and the original material owner. Its averaged `AnnularWave` keeps the existing
+arithmetic. For coherent peak pressure/volume-flow amplitudes at that frequency,
+`field_in_cell` returns the original P1 axial velocity and radial gradient,
+the pressure-normalized thermal response, and separate positive shear and
+heat-conduction dissipation densities. Both stationary walls have exact zero
+velocity and excess temperature. The complementary wall solution remains
+available for gradients even where the core velocity has rounded to uniform.
+
+Each complete radial ring and the whole cross section expose irreversible
+power per unit axial length. Actual `2*pi*r*dr` integration of the gradients
+supplies these channels, independently of boundary-power subtraction. The
+thermal weight `(Cp/Cv-1)*D_t/(2*K_s)` follows from the original thermodynamic
+compressibility identity, so an admitted liquid uses its own calorics and
+transport. Cp=Cv gives exact zero thermal coupling. Actual excess temperature
+in kelvin is exposed for `GasState`, using its original `1/(rho*Cp)` pressure
+derivative; a general fluid's expansion sign or temperature is not guessed.
+
+Preparation is O(radial cells), retains at most two original solution vectors
+within the existing payload cap, and polls at solve boundaries and every 64
+cells. Subsequent field, ring and total-section queries use constant work
+without allocation or another material query. The axial owner supplies the
+local amplitudes; these local W/m values are not finite-length heat integrals
+or an inferred wall/fluid heat partition. Original geometry, continuum,
+uniform-pressure and frequency limits remain. Molecular relaxation, radial
+velocity and axial-gradient/bulk dissipation are not added by this field view.
+`tests/annular_fields.rs` checks independent annular Poiseuille/temperature
+limits and h refinement, physical volume-flow recovery, both heat mechanisms
+against the local coherent-wave power gradient, Cp=Cv, source retention,
+one-query reuse, invalid fields, budget admission and cancellation.
+
 ## Purpose and layer
 
 Layer L3 (FLUX). 1D viscothermal duct/horn acoustics

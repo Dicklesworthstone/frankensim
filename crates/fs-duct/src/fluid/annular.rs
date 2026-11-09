@@ -30,6 +30,8 @@ use fs_la::eigen_complex::solve_tridiagonal_complex;
 use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
 use fs_math::{c64::C64, dd::Dd, det};
 
+/// Original radial velocity/thermal fields and local irreversible acoustic heat.
+pub mod field;
 /// Molecular heat storage solved together with the original annular wall diffusion.
 pub mod molecular;
 
@@ -112,6 +114,44 @@ pub struct AnnularSection {
     load: Vec<f64>,
     boundary_weights: [f64; 2],
     maximum_cell_fraction: f64,
+}
+
+// Retain the well-scaled solution of the SAME diffusion solve for field users.
+// In a wide gap the stored variable is 1-h, so a small physical shear gradient
+// is never obtained by subtracting two values of h already rounded near one.
+#[derive(Debug)]
+struct RadialSolution {
+    response: AnnularDiffusion,
+    interior: Vec<C64>,
+    is_wall: bool,
+}
+
+impl RadialSolution {
+    fn stored_node(&self, node: usize) -> C64 {
+        if node == 0 || node == self.interior.len() + 1 {
+            if self.is_wall { C64::ONE } else { C64::ZERO }
+        } else {
+            self.interior[node - 1]
+        }
+    }
+
+    fn node(&self, node: usize) -> C64 {
+        let value = self.stored_node(node);
+        if self.is_wall {
+            C64::ONE - value
+        } else {
+            value
+        }
+    }
+
+    fn difference(&self, cell: usize) -> C64 {
+        let difference = self.stored_node(cell + 1) - self.stored_node(cell);
+        if self.is_wall {
+            -difference
+        } else {
+            difference
+        }
+    }
 }
 
 impl AnnularSection {
@@ -300,6 +340,23 @@ impl AnnularSection {
                 &mut cancelled,
             )?)
         };
+        let wave = self.wave_from_diffusion(&state, omega, viscous, thermal, admission)?;
+        poll(&mut cancelled, self.elements())?;
+        Ok(wave)
+    }
+
+    fn wave_from_diffusion(
+        &self,
+        state: &fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluidState,
+        omega: f64,
+        viscous: AnnularDiffusion,
+        thermal: Option<AnnularDiffusion>,
+        admission: AnnularAdmission,
+    ) -> Result<AnnularWave, DuctError> {
+        let acoustic = state.acoustic();
+        let transport = state.transport();
+        let gamma = state.heat_capacity_ratio();
+        let k0 = omega / acoustic.sound_speed_m_s();
         let s = C64::new(0.0, omega);
         let series = s.scale(acoustic.density_kg_m3() / self.area_m2) / viscous.mean;
         let factor = C64::ONE + thermal.map_or(C64::ZERO, |t| t.wall.scale(gamma - 1.0));
@@ -319,10 +376,8 @@ impl AnnularSection {
         {
             return Err(bad(
                 "annular wave is unrepresentable or outside its transverse-phase envelope",
-            )
-            .into());
+            ));
         }
-        poll(&mut cancelled, self.elements())?;
         Ok(AnnularWave {
             wave: SegmentWave {
                 wavenumber,
@@ -346,9 +401,20 @@ impl AnnularSection {
         admission: AnnularAdmission,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<AnnularDiffusion, DuctError> {
+        self.diffusion_solution(omega, diffusivity, admission, cancelled)
+            .map(|solution| solution.response)
+    }
+
+    fn diffusion_solution(
+        &self,
+        omega: f64,
+        diffusivity: f64,
+        admission: AnnularAdmission,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<RadialSolution, DuctError> {
         let phase = self.gap_m / det::sqrt(diffusivity / omega);
         let alpha = phase * phase;
-        self.diffusion_scaled(
+        self.diffusion_solution_scaled(
             C64::new(0.0, alpha),
             phase,
             1.0 / phase,
@@ -369,6 +435,18 @@ impl AnnularSection {
         admission: AnnularAdmission,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<AnnularDiffusion, DuctError> {
+        self.diffusion_solution_scaled(argument, phase, gradient_scale, admission, cancelled)
+            .map(|solution| solution.response)
+    }
+
+    fn diffusion_solution_scaled(
+        &self,
+        argument: C64,
+        phase: f64,
+        gradient_scale: f64,
+        admission: AnnularAdmission,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<RadialSolution, DuctError> {
         poll(cancelled, 0)?;
         let magnitude = argument.abs();
         let maximum_cell_diffusion_phase = phase * self.maximum_cell_fraction;
@@ -518,13 +596,17 @@ impl AnnularSection {
             ));
         }
         poll(cancelled, n)?;
-        Ok(AnnularDiffusion {
-            mean,
-            wall,
-            gradient_work,
-            maximum_cell_diffusion_phase,
-            relative_backward_residual,
-            relative_work_defect,
+        Ok(RadialSolution {
+            response: AnnularDiffusion {
+                mean,
+                wall,
+                gradient_work,
+                maximum_cell_diffusion_phase,
+                relative_backward_residual,
+                relative_work_defect,
+            },
+            interior: rhs,
+            is_wall: solve_wall,
         })
     }
 }
