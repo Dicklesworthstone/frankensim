@@ -3,9 +3,10 @@
 //! Each original tetrahedron names a source region. Free-fluid regions consume
 //! FluidAcoustics; rigid porous regions consume the ORIGINAL JCA/JCAL owner,
 //! including its fluid substitution, frequency support and optional molecular
-//! calorics. Density and bulk modulus already include porosity. No conjugation,
-//! additional porosity factor or independently added air attenuation is applied:
-//! both original owners use exp(+i omega t).
+//! calorics. A free molecular gas uses the existing relaxing-fluid response,
+//! which converts its original caloric convention exactly once. All numerical
+//! responses reach FE in exp(+i omega t). Porous coefficients already include
+//! porosity; no additional factor or independent air attenuation is applied.
 //!
 //! This is the equivalent-fluid rigid-frame approximation, not elastic Biot
 //! waves, anisotropic pores, evolving saturation or a new material qualification.
@@ -31,6 +32,11 @@ use fs_math::c64::C64;
 pub enum AcousticVolumeRegion<'s> {
     /// A lossless adiabatic gas/liquid region with its original EOS closure.
     Fluid(&'s dyn FluidAcoustics),
+    /// A free gas with its original molecular heat-capacity reservoirs.
+    /// Its equilibrium density is unchanged; complex compression supplies the
+    /// original dispersion and molecular heat. This adds no pore drag, shear
+    /// viscosity, Fourier heat diffusion, bulk-viscosity fit or wall layers.
+    MolecularGas(&'s RelaxationState),
     /// One rigid porous skeleton filled by one coherent original fluid.
     Porous {
         law: &'s PorousFluidLaw,
@@ -48,6 +54,8 @@ pub enum AcousticVolumeRegion<'s> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AcousticVolumeRegionState {
     Fluid(FluidAcousticState),
+    /// Native free-gas response, with zero static resistivity and no skeleton.
+    MolecularGas(PorousFluidResponse),
     Porous(PorousFluidResponse),
 }
 
@@ -60,7 +68,7 @@ impl AcousticVolumeRegionState {
                 dynamic_density_kg_m3: C64::from_re(state.density_kg_m3()),
                 dynamic_bulk_modulus_pa: C64::from_re(state.adiabatic_bulk_modulus_pa()),
             },
-            Self::Porous(response) => EquivalentFluidCoefficients {
+            Self::MolecularGas(response) | Self::Porous(response) => EquivalentFluidCoefficients {
                 dynamic_density_kg_m3: response.dynamic_density_kg_m3(),
                 dynamic_bulk_modulus_pa: response.dynamic_bulk_modulus_pa(),
             },
@@ -223,6 +231,10 @@ impl<'f, 'c, 's> PorousRegionsInterior<'f, 'c, 's> {
                         let evaluated = match sources[region] {
                             AcousticVolumeRegion::Fluid(fluid) => {
                                 fluid.acoustic_state().map(AcousticVolumeRegionState::Fluid)
+                            }
+                            AcousticVolumeRegion::MolecularGas(relaxation) => {
+                                PorousFluidResponse::relaxing_fluid(relaxation, omega)
+                                    .map(AcousticVolumeRegionState::MolecularGas)
                             }
                             AcousticVolumeRegion::Porous { law, fluid } => law
                                 .effective_fluid(fluid, omega)

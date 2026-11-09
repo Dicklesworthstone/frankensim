@@ -66,7 +66,7 @@ impl PorousFluidResponse {
     /// molecular-relaxing gas. This adds no pore drag, thermoviscosity, thermal
     /// diffusion mode or wall conditions. Conjugate the original caloric law
     /// exactly once from exp(-i omega t) into exp(+i omega t).
-    pub(super) fn relaxing_fluid(
+    pub fn relaxing_fluid(
         relaxation: &RelaxationState,
         omega: f64,
     ) -> Result<Self, MaterialError> {

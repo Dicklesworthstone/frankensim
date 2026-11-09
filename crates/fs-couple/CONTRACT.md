@@ -95,7 +95,7 @@ It also specifies original bandwidth, geometry, source and cancellation refusals
 
 `cavity_modal::interior::heterogeneous::porous::PorousRegionsInterior` binds
 one original source slot to every tetrahedron of the complete pressure FE
-owner. Free fluids supply their coherent `FluidAcoustics` state. Rigid porous
+owner. Lossless free fluids supply their coherent `FluidAcoustics` state. Rigid porous
 regions use the original `PorousFluidLaw::effective_fluid`, or its joint
 `effective_relaxing` molecular/pore-wall response, at the exact solve frequency.
 Each used region is evaluated once after mapping and FE-budget admission;
@@ -116,6 +116,31 @@ inferred. Reprepare for changed frequency or equilibrium.
 `tests/porous_interior.rs` specifies a three-rung full-volume JCAL slab against
 the original analytic layer impedance, a free-fluid/porous layer with interface
 and area continuity, and exact source reuse, work closure and native refusals.
+
+### Free molecular gas in the same resolved pressure volume
+
+`AcousticVolumeRegion::MolecularGas` retains the original `RelaxationState` and
+uses the existing `PorousFluidResponse::relaxing_fluid` constructor, shared with
+the native free-gas layer owner. Every admitted molecular reservoir contributes
+its original dynamic heat capacity to `K(omega)=p*Cp(omega)/Cv(omega)` while the
+equilibrium density remains unchanged. That material constructor converts the
+original `exp(-i omega t)` calorics exactly once into the FE owner's positive
+exponent. The distinct `MolecularGas` state retains the frozen frequency and
+coherent gas response, with exactly zero static resistivity and no skeleton.
+
+This is molecular compression loss and dispersion, including uniform breathing
+fields; no propagation attenuation is fitted into a modulus. Stokes–Kirchhoff
+attenuation, bulk-viscosity fits, Fourier diffusion, shear and wall layers are
+not added. Source evaluation/domain admission and unused-region behavior stay
+with the existing owners. The same complete pressure solve, material-interface
+continuity, distributed mechanical-wall states and positive element heat forms
+apply. Volume heat remains separate from physical wall dissipation, and no bulk
+dispersive stored energy or thermal feedback is inferred.
+
+`tests/porous_interior/molecular.rs` specifies an independent complex reservoir
+sum and constant-pressure volume heat, the no-reservoir limit, a conforming
+molecular-gas/relaxing-porous mesh ladder against the native exact layer solution,
+and shared molecular/mechanical-wall work with retained sources and cancellation.
 
 ## Free-free cooling in reacting magnetized gas heating
 

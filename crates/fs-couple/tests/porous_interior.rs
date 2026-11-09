@@ -19,6 +19,9 @@ use fs_math::c64::C64;
 use fs_rep_mesh::TetComplex;
 use std::cell::Cell;
 
+#[path = "porous_interior/molecular.rs"]
+mod molecular;
+
 fn gas(temperature_k: f64) -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), temperature_k, 101325.0).unwrap()
 }
@@ -84,7 +87,7 @@ fn rigid_backed_porous_volume_converges_to_original_jcal_layer_impedance() {
         errors.push((actual - expected).abs() / expected.abs());
         let snapshot = match model.region_state(0).unwrap() {
             AcousticVolumeRegionState::Porous(response) => response,
-            AcousticVolumeRegionState::Fluid(_) => panic!("porous material was replaced"),
+            _ => panic!("porous material was replaced"),
         };
         assert_eq!(snapshot, law.effective_fluid(&gas, omega).unwrap());
         assert!(response.density_dissipation_w > 0.0 && response.compressional_dissipation_w > 0.0);
