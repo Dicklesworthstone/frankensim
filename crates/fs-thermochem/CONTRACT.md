@@ -4280,6 +4280,45 @@ Badnell (2017), A&A 599 A10, <https://arxiv.org/abs/1612.01017>.
 The face entropy form is nonnegative. A spatial owner must separately enforce kappa=0, convex admission over its complete temperature interval (including the possible interior interaction maximum), source D/k/Q domains, conservative finite transfers, and finite-step entropy acceptance. Changing-inventory caloric recovery stays homogeneous and uses original-source enthalpy/entropy increments without an equilibrium phase flash. Nine source-native tests cover the conjugate energy/entropy identity, reciprocal heat, variable and excess Cp, critical and trace limits, changing inventories, bounded caloric inversion, interior convexity and cancellation.
 
 
+### Original-source nonisothermal multicomponent transport calorics
+
+`solution::multicomponent::caloric::transport` supplies original homogeneous
+enthalpy and entropy changes for independently changed positive component
+amounts. Signed exchanges retain each pure-liquid datum, original Cp and Cp/T
+integrals, and the original A+B/T pair potential. Small changes use direct
+increments rather than subtraction of total cell energies. The bounded
+temperature inverse prepares composition once outside its scalar iteration;
+each trial uses only original source integrals and the exact positive Cp.
+No individual-cell entropy gate is imposed on an open exchange transaction.
+
+The finite-face source record retains every chemical effort, divided partial
+enthalpy and arithmetic mean composition in canonical species order. Enthalpy
+contrasts cancel the common species gauge before absolute-value rounding,
+retaining finite mixing heat under a large common sensible datum. In the
+zero-net-molar frame it obeys Delta(mu_i/T)=effort_i+h_star_i*Delta(1/T), up to
+one common gauge. The pure enthalpy division uses the original Gibbs–Helmholtz
+integrals, including variable Cp. Uniform composition has exactly zero
+chemical effort at unequal temperature; Soret/Dufour data are not inferred.
+The complete original positive support and abundant-carrier complement are
+retained without a concentration floor or dependent-species projection.
+
+The optional temperature-interval admission applies a sufficient global
+composition-curvature lower bound to the original full tangent-space
+eigensolve at both bracket endpoints. Its validity throughout the bracket
+uses the original interaction's affine dependence on reciprocal temperature.
+This bounded numerical test is sufficient, not necessary, and is not an
+interval certificate or phase-equilibrium calculation. These constitutive
+primitives own no mesh, transport coefficients, flow, or evolution. A spatial
+owner must enforce its molar frame, fixed-volume assumptions, closed finite
+species/energy balances and actual total entropy production.
+
+Seven source-native regressions cover signed exchange with variable Cp,
+large-datum and quadratic increments, independent affine-Cp divided
+enthalpies and the chemical-potential identity, retained trace carriers,
+whole-bracket/full-tangent admission, common-datum contrast invariance,
+unsupported targets and cancellation.
+
+
 ## Adjacent atomic charge stages on original sources
 
 `ElectronImpactRateV1` and `AtomicIonizationV1` admit the single-electron

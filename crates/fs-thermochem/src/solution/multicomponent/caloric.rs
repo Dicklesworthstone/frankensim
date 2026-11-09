@@ -15,6 +15,9 @@
 /// Conserved heating, mixing and demixing on admitted seeded local phase branches.
 pub mod equilibrium;
 
+/// Signed homogeneous inventory/energy changes and original-source face efforts.
+pub mod transport;
+
 mod entropy;
 
 use super::{
@@ -34,6 +37,11 @@ pub enum MulticomponentCaloricErrorV1 {
     Arithmetic(&'static str),
     Caloric(BinaryCaloricErrorV1),
     Thermodynamics(MulticomponentSolutionErrorV1),
+    Stability(super::stability::MulticomponentStabilityErrorV1),
+    /// The sufficient global curvature bound is not strictly positive.
+    TransportConvexity {
+        lower_bound: f64,
+    },
     /// An isolated homogeneous endpoint is not an admissible mixing process.
     EntropyDecrease {
         change_j_per_k: f64,

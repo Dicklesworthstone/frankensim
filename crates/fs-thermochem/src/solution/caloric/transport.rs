@@ -258,7 +258,7 @@ impl BinaryLiquidCaloricModelV1 {
     }
 }
 
-fn divided_enthalpy(
+pub(crate) fn divided_enthalpy(
     source: &PureLiquidHeatCapacityV1,
     left: Temperature,
     right: Temperature,
@@ -280,7 +280,7 @@ fn divided_enthalpy(
     Ok(h)
 }
 
-fn reciprocal_difference(left: f64, right: f64) -> Result<f64> {
+pub(crate) fn reciprocal_difference(left: f64, right: f64) -> Result<f64> {
     if left == right {
         return Ok(0.0);
     }
