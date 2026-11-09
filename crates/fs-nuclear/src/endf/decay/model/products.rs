@@ -6,9 +6,12 @@
 //! resolves the residual and multiplicities; neither spectra nor Q values create
 //! extra products. Modes without one represented residual remain unsupported.
 
+use std::{collections::BTreeMap, sync::Arc};
+
 use super::{DecayAssemblyError, EvaluatedDecayAssembly};
 use crate::FissionError;
 use crate::burnup::BurnupProduct;
+use crate::endf::decay::DecayEvaluation;
 use crate::irradiation::NuclideId;
 
 /// Explicit retention of emitted charged nuclei in the original burnup inventory.
@@ -40,6 +43,64 @@ pub(super) struct RetentionBinding {
     proton: Option<usize>,
 }
 
+impl RetentionBinding {
+    pub(super) fn new(
+        policy: DecayProductRetention,
+        indices: &BTreeMap<NuclideId, usize>,
+        evaluations: &[Arc<DecayEvaluation>],
+        checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<Self, DecayAssemblyError> {
+        let mut bind =
+            |enabled: bool, z: u16, a: u16| -> Result<Option<usize>, DecayAssemblyError> {
+                checkpoint()?;
+                if !enabled {
+                    return Ok(None);
+                }
+                let id = NuclideId::new(z, a, 0)?;
+                let index = *indices
+                    .get(&id)
+                    .ok_or(DecayAssemblyError::MissingRetainedProduct(id))?;
+                if evaluations[index].law().decay_constant().value() != 0.0 {
+                    return Err(DecayAssemblyError::UnstableRetainedProduct(id));
+                }
+                Ok(Some(index))
+            };
+        let alpha = bind(policy.alpha_particles, 2, 4)?;
+        let proton = bind(policy.protons, 1, 1)?;
+        checkpoint()?;
+        Ok(Self {
+            policy,
+            alpha,
+            proton,
+        })
+    }
+
+    pub(super) fn policy(&self) -> DecayProductRetention {
+        self.policy
+    }
+
+    pub(super) fn products(
+        &self,
+        residual: usize,
+        charged: ChargedMultiplicity,
+    ) -> RetainedProducts {
+        let mut products = RetainedProducts {
+            entries: [BurnupProduct {
+                nuclide: residual,
+                yield_per_event: 1.0,
+            }; 3],
+            len: 1,
+        };
+        if let Some(index) = self.alpha {
+            products.add(index, charged.alpha_particles);
+        }
+        if let Some(index) = self.proton {
+            products.add(index, charged.protons);
+        }
+        products
+    }
+}
+
 impl EvaluatedDecayAssembly {
     /// Select retained charged coproducts for subsequent burnup lowering.
     /// The original residual-lineage model, half-lives and event energies stay
@@ -52,55 +113,27 @@ impl EvaluatedDecayAssembly {
         mut checkpoint: impl FnMut() -> Result<(), FissionError>,
     ) -> Result<Self, DecayAssemblyError> {
         checkpoint()?;
-        let mut bind =
-            |enabled: bool, z: u16, a: u16| -> Result<Option<usize>, DecayAssemblyError> {
-                checkpoint()?;
-                if !enabled {
-                    return Ok(None);
-                }
-                let id = NuclideId::new(z, a, 0)?;
-                let index = self
-                    .index(id)
-                    .ok_or(DecayAssemblyError::MissingRetainedProduct(id))?;
-                if self.evaluations[index].law().decay_constant().value() != 0.0 {
-                    return Err(DecayAssemblyError::UnstableRetainedProduct(id));
-                }
-                Ok(Some(index))
-            };
-        let alpha = bind(retention.alpha_particles, 2, 4)?;
-        let proton = bind(retention.protons, 1, 1)?;
-        checkpoint()?;
-        self.product_retention = RetentionBinding {
-            policy: retention,
-            alpha,
-            proton,
-        };
+        self.product_retention = RetentionBinding::new(
+            retention,
+            &self.indices,
+            &self.evaluations,
+            &mut checkpoint,
+        )?;
         Ok(self)
     }
 
     pub fn burnup_product_retention(&self) -> DecayProductRetention {
-        self.product_retention.policy
+        self.product_retention.policy()
     }
 
     /// A fixed-capacity list is shared by lowering and exact spectral binding.
     /// At most the residual, He4 and H1 can occur, with coincident identities
     /// merged before the original BurnupModel admits its complete product budget.
     pub(super) fn burnup_products(&self, branch: usize) -> RetainedProducts {
-        let mut products = RetainedProducts {
-            entries: [BurnupProduct {
-                nuclide: self.model.branches()[branch].daughter,
-                yield_per_event: 1.0,
-            }; 3],
-            len: 1,
-        };
-        let counts = self.charged_multiplicities[branch];
-        if let Some(index) = self.product_retention.alpha {
-            products.add(index, counts.alpha_particles);
-        }
-        if let Some(index) = self.product_retention.proton {
-            products.add(index, counts.protons);
-        }
-        products
+        self.product_retention.products(
+            self.model.branches()[branch].daughter,
+            self.charged_multiplicities[branch],
+        )
     }
 }
 

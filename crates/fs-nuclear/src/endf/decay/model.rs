@@ -9,9 +9,11 @@
 //!
 //! Daughter identities follow ENDF-102 (2023), §8.4: RTYP describes an initial
 //! transformation followed by immediate particle emissions, and RFS selects the
-//! final isomer. Only modes with one represented residual nucleus are lowered.
-//! Spontaneous fission needs separately authored product yields. Unrepresented
-//! daughters are refused; no missing evaluation is assumed stable. Burnup may
+//! final isomer. The residual-lineage assembly requires one represented daughter.
+//! The sibling [`burnup`] assembly admits spontaneous fission directly into the
+//! original multi-product owner using supplied independent yields and explicit
+//! exterior-product boundaries. Unrepresented ordinary daughters are refused;
+//! no missing evaluation is assumed stable. Burnup may
 //! explicitly retain emitted alpha particles and protons as supplied He4/H1
 //! inventories. This does not infer stopping, heat, or a nuclear mass/charge ledger.
 //!
@@ -30,6 +32,9 @@ use crate::{Accumulator, EnergyChannels, FissionError, nonnegative, positive, su
 
 /// Energy-resolved emissions driven by the original integrated decay events.
 pub mod emissions;
+
+/// Evaluated multi-product decay, including independent spontaneous fission.
+pub mod burnup;
 
 mod products;
 pub use products::DecayProductRetention;
@@ -116,6 +121,7 @@ pub enum DecayAssemblyError {
     },
     Physics(FissionError),
     Decay(DecayError),
+    Burnup(crate::burnup::BurnupError),
 }
 
 impl From<FissionError> for DecayAssemblyError {
@@ -130,6 +136,12 @@ impl From<DecayError> for DecayAssemblyError {
     }
 }
 
+impl From<crate::burnup::BurnupError> for DecayAssemblyError {
+    fn from(error: crate::burnup::BurnupError) -> Self {
+        Self::Burnup(error)
+    }
+}
+
 impl core::fmt::Display for DecayAssemblyError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "evaluated decay assembly refused: {self:?}")
@@ -141,6 +153,7 @@ impl std::error::Error for DecayAssemblyError {
         match self {
             Self::Physics(error) => Some(error),
             Self::Decay(error) => Some(error),
+            Self::Burnup(error) => Some(error),
             _ => None,
         }
     }

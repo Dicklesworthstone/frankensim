@@ -2009,9 +2009,10 @@ electron-capture/positron emission, isomeric transition, alpha, neutron and
 proton emission, including immediate combinations such as 1.5 and 1.44.
 RFS selects its isomer. Every daughter must be explicitly present: absent
 evaluations never become stable sinks. Duplicate identities, unsupported
-origin codes and spontaneous fission without resolved product yields refuse.
-Branch closure, topology and model work limits are admitted by the original
-`DecayModel`, without branch normalization.
+origin codes and spontaneous fission (which has no single residual) refuse in
+this assembly. Multi-product spontaneous fission uses the sibling native burnup
+assembly described below. Branch closure, topology and model work limits are
+admitted by the original `DecayModel`, without branch normalization.
 
 `with_burnup_product_retention(DecayProductRetention { alpha_particles, protons }, ...)`
 optionally retains emitted He4/H1 in that same burnup inventory. Both switches
@@ -3468,3 +3469,52 @@ These new tests received source/API review; native execution remains unavailable
 after the workspace disconnected. Independent numerical evaluation of the
 material fixture confirms its particle balance and stays inside its caloric
 domain; it does not substitute for execution of the Rust tests.
+
+## Evaluated multi-product spontaneous decay in native burnup
+
+`endf::decay::model::burnup::EvaluatedBurnupDecayAssembly` lowers original
+MF8/MT457 modes directly into an original `BurnupModel`. Pure spontaneous
+fission (RTYP=6) requires an identified `SpontaneousFissionProductBinding` with
+independent NSUB=5 products for the exact parent/isomer. Each positive fragment
+yield is retained in an explicitly supplied nuclide evaluation or named in the
+explicit exported-product boundary. No missing evaluation becomes a stable
+sink, no fragments are pruned or renormalized, and per-fission yields receive
+no second branching factor. Fully exported fragment sets are supported.
+Compound fission modes and nonzero SF RFS without a supported single-residual
+interpretation refuse. The residual-lineage `DecayModel` is unchanged.
+
+The assembly retains original evaluations, energy routing, immutable fragment
+yield sources (including uncertainties), nuclide order and exact mode/channel
+mappings. Parent-average emitted energy uses the shared evaluated routing;
+branch Q is not additional heat. Ordinary residual resolution and optional
+retained He4/H1 coproducts use the same helpers as the original decay assembly.
+Native branch closure, allocation/topology limits and cancellation remain
+active. No new evolution solver, inventory or thermal energy ledger is added.
+
+`burnup_data` copies native declarations for explicitly appended irradiation
+channels. `bind_burnup` admits reordered decay channels/products and added
+neutron reactions while requiring unchanged identities, laws, groups, domain,
+source labels, branches, multiplicities and energy. Product comparison is
+bounded O(P log P), with cancellation during inspection. Original inventories,
+finite irradiation, compartment movement and material adapters consume the
+same native model and accepted trajectory.
+
+`BoundEvaluatedBurnupDecay` projects accepted `BurnupStep` and
+`BurnupTransportStep` reaction counts into source-ordered spontaneous-fission
+events and exported fragment births. Reports retain each original event cell;
+movement is never counted as fission. `SpontaneousFissionReportBudget` bounds
+output values, work, per-cell container count and additional noncancelling
+count-arithmetic defects. Native trajectory defects and source uncertainties
+keep their original owners. Exported products have no represented future decay
+or heat until explicitly modeled in their destination.
+
+Fragment yields do not determine neutron multiplicities or spectra. Those
+remain separately supplied inputs; ENDF spontaneous-fission neutron data in
+MF1/MF5 are not synthesized from an MF8 average or a missing spectral record.
+Seven manufactured regressions cover same-interval fragment decay and exact
+parent-average energy, partial/complete exports, reversed source/channel/product
+order with competing capture, ordinary charged-product parity, moving parents
+with local exports, unsupported source declarations, bounds and late refusal.
+Source/API and independent analytic reviews are complete; compilation and
+execution of these new tests remain unavailable after the native workspace
+failed. Existing 64-node native propagation limits remain unchanged.
