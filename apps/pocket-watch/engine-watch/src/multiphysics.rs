@@ -147,6 +147,14 @@ pub struct PerturbationInputs {
     pub magnet_pos_mm: [f64; 3],
     pub magnet_strength: f64,
     pub compensated_hairspring: bool,
+    /// High-velocity compressed air / argon nozzle power $\in [0, 1]$ ($300\text{ K}, M \approx 0.35$ shear jet).
+    pub air_jet_power: f64,
+    /// 3D impingement coordinates of the compressed air nozzle ($\text{mm}$).
+    pub air_jet_pos_mm: [f64; 3],
+    /// Ambient bell-jar chamber pressure in atmospheres ($0.0\text{ atm}$ vacuum $\to 1.0\text{ atm} \to 5.0\text{ atm}$ hyperbaric).
+    pub ambient_pressure_atm: f64,
+    /// 3D gravitational / centrifuge acceleration vector $[g_x, g_y, g_z]$ in Earth-$g$ units ($9.80665\text{ m/s}^2$).
+    pub gravity_g_vec: [f64; 3],
 }
 
 impl Default for PerturbationInputs {
@@ -162,6 +170,10 @@ impl Default for PerturbationInputs {
             magnet_pos_mm: [65.0, -11.0, 5.0],
             magnet_strength: 1.0,
             compensated_hairspring: false,
+            air_jet_power: 0.0,
+            air_jet_pos_mm: [0.0, -20.0, 3.0],
+            ambient_pressure_atm: 1.0,
+            gravity_g_vec: [0.0, -1.0, 0.0],
         }
     }
 }
@@ -205,6 +217,14 @@ pub struct CoupledWatchModifiers {
     pub rate_interval_hi_s_day: f64,
     /// Exact Stokes-Stuart oscillating-cylinder aerodynamic drag ($\text{s}^{-1}$) on the balance wheel from `fs-vkplate::air_loss`.
     pub balance_aero_drag_s_inv: f64,
+    /// Forced convective heat transfer power ($\text{W}$) removed by the high-velocity compressed air nozzle.
+    pub air_cooling_power_w: f64,
+    /// Current ambient bell-jar chamber pressure ($\text{atm}$).
+    pub ambient_pressure_atm: f64,
+    /// Current 3D gravity / centrifuge vector $[g_x, g_y, g_z]$ ($\text{g}$-units).
+    pub gravity_g_vec: [f64; 3],
+    /// Decaying mechanical shock acceleration envelope ($\text{g}$-units).
+    pub shock_envelope_g: f64,
 }
 
 /// Single 3D Lagrangian material node on the $64 \times 8$ deformable 18k Gold Bassine Case Shell.
@@ -299,6 +319,7 @@ pub struct MultiphysicsState {
     pub remanent_magnetization_mt: f64,
     pub degauss_envelope_mt: f64,
     pub degauss_phase_rad: f64,
+    pub shock_envelope_g: f64,
     pub hairspring_oxide_nm: f64,
     pub modifiers: CoupledWatchModifiers,
 }
@@ -633,6 +654,7 @@ impl MultiphysicsState {
             remanent_magnetization_mt: 0.0,
             degauss_envelope_mt: 0.0,
             degauss_phase_rad: 0.0,
+            shock_envelope_g: 0.0,
             hairspring_oxide_nm: 72.0,
             modifiers: CoupledWatchModifiers {
                 balance_inertia_ratio: 1.0,
@@ -661,6 +683,10 @@ impl MultiphysicsState {
                 rate_interval_lo_s_day: -0.5,
                 rate_interval_hi_s_day: 0.5,
                 balance_aero_drag_s_inv: 0.0,
+                air_cooling_power_w: 0.0,
+                ambient_pressure_atm: 1.0,
+                gravity_g_vec: [0.0, -1.0, 0.0],
+                shock_envelope_g: 0.0,
             },
         };
         state.aggregate_nodes_from_continuum();
@@ -671,6 +697,27 @@ impl MultiphysicsState {
     pub fn trigger_degauss(&mut self) {
         self.degauss_envelope_mt = 85.0;
         self.degauss_phase_rad = 0.0;
+    }
+
+    /// Apply a 3D mechanical bench-drop shock impulse ($G_{\text{peak}}$ in $\text{g}$-units)
+    /// to the 3D viscoplastic case shell and free-surface molten gold pool.
+    pub fn apply_mechanical_shock(&mut self, g_peak: f64) {
+        let g = g_peak.clamp(10.0, 5000.0);
+        self.shock_envelope_g = g;
+        let shock_scale = (g / 500.0).clamp(0.05, 4.0);
+        // Inertial velocity kick to softened/molten 3D case shell nodes
+        for sn in &mut self.case_shell {
+            let softness = (sn.melt_fraction
+                + 0.25 * ((sn.temperature_k - 700.0) / 550.0).clamp(0.0, 1.0))
+            .clamp(0.0, 1.0);
+            if softness > 0.01 {
+                let r_xy = (sn.pos_mm[0].powi(2) + sn.pos_mm[1].powi(2)).sqrt().max(1.0);
+                sn.vel_mm_s[0] -= 3.2 * shock_scale * softness * (sn.pos_mm[0] / r_xy);
+                sn.vel_mm_s[1] -= 4.5 * shock_scale * softness;
+                sn.vel_mm_s[2] -= 1.8 * shock_scale * softness;
+            }
+        }
+        self.recompute_modifiers();
     }
 
     pub fn ultrasonic_clean_and_relubricate(&mut self) {
@@ -715,6 +762,12 @@ impl MultiphysicsState {
             if self.degauss_envelope_mt < 0.08 {
                 self.degauss_envelope_mt = 0.0;
                 self.remanent_magnetization_mt = 0.0;
+            }
+        }
+        if self.shock_envelope_g > 0.1 {
+            self.shock_envelope_g *= (-28.0 * dt).exp();
+            if self.shock_envelope_g < 0.2 {
+                self.shock_envelope_g = 0.0;
             }
         }
 
@@ -971,6 +1024,10 @@ impl MultiphysicsState {
         // 2. External thermal & mechanical loads on each 3D shell node, enthalpy update, and 3D position integration
         let torch_active = self.inputs.blowtorch_power > 1.0e-4;
         let ln2_active = self.inputs.ln2_pour_rate > 1.0e-4;
+        let air_active = self.inputs.air_jet_power > 1.0e-4;
+        let p_atm_conv = self.inputs.ambient_pressure_atm.clamp(0.0, 5.0).sqrt();
+        let g_vec = self.inputs.gravity_g_vec;
+        let shock_g = (self.shock_envelope_g / 500.0).clamp(0.0, 3.0);
 
         for iz in 0..CASE_SHELL_N_Z {
             for it in 0..CASE_SHELL_N_THETA {
@@ -987,26 +1044,27 @@ impl MultiphysicsState {
                 let q_to_movement = 0.0028 * (node.temperature_k - t_cell);
 
                 // Ambient natural convection (`fs_convection::CorrelationId::ChurchillChuHorizontalCylinder`)
-                // + Stefan-Boltzmann thermal radiation
+                // scaled by ambient chamber pressure p_atm_conv + Stefan-Boltzmann thermal radiation
                 let dt_film = (node.temperature_k - T_REF_K).abs().max(0.5);
                 let t_film = 0.5 * (node.temperature_k + T_REF_K);
                 let d_case_m = 0.056; // 56 mm Bassine case diameter
                 let ra_case = (9.81 * (1.0 / t_film) * dt_film * d_case_m.powi(3)
                     / (1.58e-5 * 2.25e-5))
                     .clamp(1.0e-4, 1.0e11);
-                let h_nat_w_m2_k = eval_convection(
-                    CorrelationId::ChurchillChuHorizontalCylinder,
-                    CorrelationInputs::natural(ra_case, 0.71),
-                )
-                .and_then(|nu| {
-                    let _ = NaturalConvectionGeometry::HorizontalCylinder;
-                    nu.heat_transfer_coefficient(
-                        ThermalConductivity::new(0.0263),
-                        ConvLength::new(d_case_m),
+                let h_nat_w_m2_k = p_atm_conv
+                    * eval_convection(
+                        CorrelationId::ChurchillChuHorizontalCylinder,
+                        CorrelationInputs::natural(ra_case, 0.71),
                     )
-                })
-                .map(|ev| ev.value.value().clamp(6.5, 45.0))
-                .unwrap_or(14.0);
+                    .and_then(|nu| {
+                        let _ = NaturalConvectionGeometry::HorizontalCylinder;
+                        nu.heat_transfer_coefficient(
+                            ThermalConductivity::new(0.0263),
+                            ConvLength::new(d_case_m),
+                        )
+                    })
+                    .map(|ev| ev.value.value().clamp(6.5, 45.0))
+                    .unwrap_or(14.0);
                 let q_amb = h_nat_w_m2_k * node.area_m2 * (T_REF_K - node.temperature_k)
                     + GOLD_18K_CARD.emissivity
                         * STEFAN_BOLTZMANN
@@ -1060,14 +1118,37 @@ impl MultiphysicsState {
                     }
                 }
 
-                // Gravity component acting on viscoplastic / molten gold (watch held at slight bench angle)
+                // High-velocity Compressed Air Nozzle (300 K): forced convective cooling + stagnation shear
+                if air_active {
+                    let dx = node.pos_mm[0] - self.inputs.air_jet_pos_mm[0];
+                    let dy = node.pos_mm[1] - self.inputs.air_jet_pos_mm[1];
+                    let dz = node.pos_mm[2] - self.inputs.air_jet_pos_mm[2];
+                    let d2 = dx * dx + dy * dy + 0.6 * dz * dz;
+                    let w_air = (-d2 / (2.0 * 11.5 * 11.5)).exp();
+                    if w_air > 1.0e-4 {
+                        let q_air = self.inputs.air_jet_power
+                            * w_air
+                            * 0.0085
+                            * (T_REF_K - node.temperature_k);
+                        q_ext_w += q_air;
+                        let softness = (node.melt_fraction
+                            + 0.15 * ((node.temperature_k - 750.0) / 550.0).clamp(0.0, 1.0))
+                        .clamp(0.0, 1.0);
+                        let f_air = self.inputs.air_jet_power * w_air * softness * 0.042;
+                        force_n[idx][0] -= f_air * n_rad[0];
+                        force_n[idx][1] -= f_air * n_rad[1];
+                    }
+                }
+
+                // 3D Gravity & Centrifuge vector + Mechanical Shock acting on viscoplastic / molten gold
                 if node.temperature_k > 750.0 || node.melt_fraction > 0.01 {
                     let softness = (node.melt_fraction
                         + 0.12 * ((node.temperature_k - 750.0) / 550.0).clamp(0.0, 1.0))
                     .clamp(0.0, 1.0);
-                    // Gravity pulls softened/molten gold downward (-Y and -Z) and inward over the bezel ledge
-                    force_n[idx][0] -= 0.012 * softness * n_rad[0];
-                    force_n[idx][1] -= 0.018 * softness * n_rad[1] + 0.008 * softness;
+                    let g_eff_x = g_vec[0];
+                    let g_eff_y = g_vec[1] - shock_g;
+                    force_n[idx][0] += (0.008 * g_eff_x - 0.012 * n_rad[0]) * softness;
+                    force_n[idx][1] += (0.008 * g_eff_y - 0.018 * n_rad[1]) * softness;
                     force_n[idx][2] -= 0.014 * softness * (node.pos_mm[2] + 1.2).signum();
                 }
 
@@ -1434,12 +1515,38 @@ impl MultiphysicsState {
                         let smooth_bed_n =
                             -1.25 * (-dist_t_n * dist_t_n / (2.0 * 7.8 * 7.8)).exp();
 
+                        let gx_eff = self.inputs.gravity_g_vec[0];
+                        let gy_eff = self.inputs.gravity_g_vec[1]
+                            - (self.shock_envelope_g / 250.0).clamp(0.0, 4.0);
+                        let grav_pot_c = 0.08 * (gx_eff * c.x_mm + gy_eff * c.y_mm);
+                        let grav_pot_n = 0.08 * (gx_eff * nc.x_mm + gy_eff * nc.y_mm);
+
+                        // Compressed Air Nozzle stagnation pressure head blows molten gold radially outward!
+                        let air_head_c = if self.inputs.air_jet_power > 1.0e-4 {
+                            let adx = c.x_mm - self.inputs.air_jet_pos_mm[0];
+                            let ady = c.y_mm - self.inputs.air_jet_pos_mm[1];
+                            1.85 * self.inputs.air_jet_power
+                                * (-(adx * adx + ady * ady) / (2.0 * 9.5 * 9.5)).exp()
+                        } else {
+                            0.0
+                        };
+                        let air_head_n = if self.inputs.air_jet_power > 1.0e-4 {
+                            let adx = nc.x_mm - self.inputs.air_jet_pos_mm[0];
+                            let ady = nc.y_mm - self.inputs.air_jet_pos_mm[1];
+                            1.85 * self.inputs.air_jet_power
+                                * (-(adx * adx + ady * ady) / (2.0 * 9.5 * 9.5)).exp()
+                        } else {
+                            0.0
+                        };
+
                         let p_c = smooth_bed_c + c.frozen_gold_mm + c.liquid_gold_mm
-                            - 0.08 * c.y_mm
+                            + grav_pot_c
+                            + air_head_c
                             - 0.18 * l_cap_mm2 * eta_laplacian_mm[idx]
                             + coh_c;
                         let p_n = smooth_bed_n + nc.frozen_gold_mm + nc.liquid_gold_mm
-                            - 0.08 * nc.y_mm
+                            + grav_pot_n
+                            + air_head_n
                             - 0.18 * l_cap_mm2 * eta_laplacian_mm[nidx]
                             + coh_n;
 
@@ -1499,16 +1606,27 @@ impl MultiphysicsState {
                         }
                     }
 
-                    // (c) Watch oil spreading on movement substrate (isotropic 8-neighbor)
+                    // (c) Watch oil spreading on movement substrate + aerodynamic shear from Compressed Air Nozzle
                     if !c.is_gold_case && !nc.is_gold_case {
-                        let diff_oil = nc.oil_um - c.oil_um;
-                        if diff_oil.abs() > 1.5 {
+                        let air_oil_push = if self.inputs.air_jet_power > 1.0e-4 {
+                            let adx_c = c.x_mm - self.inputs.air_jet_pos_mm[0];
+                            let ady_c = c.y_mm - self.inputs.air_jet_pos_mm[1];
+                            let adx_n = nc.x_mm - self.inputs.air_jet_pos_mm[0];
+                            let ady_n = nc.y_mm - self.inputs.air_jet_pos_mm[1];
+                            let w_c = (-(adx_c * adx_c + ady_c * ady_c) / (2.0 * 9.5 * 9.5)).exp();
+                            let w_n = (-(adx_n * adx_n + ady_n * ady_n) / (2.0 * 9.5 * 9.5)).exp();
+                            38.0 * self.inputs.air_jet_power * (w_n - w_c)
+                        } else {
+                            0.0
+                        };
+                        let diff_oil = (nc.oil_um - c.oil_um) + air_oil_push;
+                        if diff_oil.abs() > 1.2 {
                             let t_avg = 0.5 * (c.temperature_k + nc.temperature_k);
                             let mu_oil = watch_oil_viscosity_pa_s(t_avg);
                             let oil_mob = (0.045 / mu_oil.max(0.008)).clamp(0.0, 1.8);
                             let d_oil = weight * 0.20 * oil_mob * diff_oil * dt_s / dist_scale;
-                            new_oil_um[idx] += d_oil;
-                            new_oil_um[nidx] -= d_oil;
+                            new_oil_um[idx] = (new_oil_um[idx] + d_oil).max(0.4);
+                            new_oil_um[nidx] = (new_oil_um[nidx] - d_oil).max(0.4);
                         }
                     }
                 }
@@ -1528,14 +1646,32 @@ impl MultiphysicsState {
             let card = c.material.card();
             let t_i = c.temperature_k;
 
-            // Natural convection + Stefan-Boltzmann radiation from cell top/bottom faces
+            // Natural convection (scaled by ambient chamber pressure) + Stefan-Boltzmann radiation
             let area_2side = 2.0 * GRID_CELL_AREA_M2;
-            let q_amb = 14.0 * area_2side * (T_REF_K - t_i)
+            let p_atm_conv = self.inputs.ambient_pressure_atm.clamp(0.0, 5.0).sqrt();
+            let q_amb = (14.0 * p_atm_conv) * area_2side * (T_REF_K - t_i)
                 + card.emissivity
                     * STEFAN_BOLTZMANN
                     * area_2side
                     * (T_REF_K.powi(4) - t_i.powi(4));
             let mut q_cell_w = net_q_w[idx] + q_amb;
+
+            // Forced convective cooling & frost blow-off from Compressed Air Nozzle (300 K)
+            if self.inputs.air_jet_power > 1.0e-4 {
+                let dx = c.x_mm - self.inputs.air_jet_pos_mm[0];
+                let dy = c.y_mm - self.inputs.air_jet_pos_mm[1];
+                let w_air = (-(dx * dx + dy * dy) / (2.0 * 11.5 * 11.5)).exp();
+                if w_air > 1.0e-4 {
+                    q_cell_w += self.inputs.air_jet_power
+                        * w_air
+                        * (0.009 * AREA_SCALE_VS_24)
+                        * (T_REF_K - t_i);
+                    if c.frost_um > 0.0 {
+                        c.frost_um =
+                            (c.frost_um - 18.0 * self.inputs.air_jet_power * w_air * dt_s).max(0.0);
+                    }
+                }
+            }
 
             // Direct blowtorch heating on cell (x_mm, y_mm, z_bed)
             if self.inputs.blowtorch_power > 1.0e-4 {
@@ -1796,8 +1932,13 @@ impl MultiphysicsState {
             .map(|vm| vm.volume_m3())
             .unwrap_or(9.2e-11);
         let poise_screw_mass_kg = 16.0 * poise_screw_vol_m3 * GOLD_18K_CARD.density_kg_m3;
-        let eval_aero = |t_k: f64| -> (f64, f64) {
-            GasState::try_new_moist_air(t_k.clamp(220.0, 365.0), 101_325.0, 0.35)
+        let p_atm_now = self.inputs.ambient_pressure_atm.clamp(0.0, 5.0);
+        let eval_aero = |t_k: f64, p_atm: f64| -> (f64, f64) {
+            if p_atm <= 0.005 {
+                return (0.0, 0.0);
+            }
+            let p_pa = (p_atm * 101_325.0).clamp(500.0, 600_000.0);
+            GasState::try_new_moist_air(t_k.clamp(220.0, 365.0), p_pa, 0.35)
                 .ok()
                 .and_then(|air_gas| {
                     oscillating_cylinder(0.275e-3, 2.0 * std::f64::consts::PI * 2.5, &air_gas)
@@ -1811,12 +1952,21 @@ impl MultiphysicsState {
                             (added_m, drag_s_inv)
                         })
                 })
-                .unwrap_or((1.8e-9, 0.018))
+                .unwrap_or((1.8e-9 * p_atm, 0.018 * p_atm.sqrt()))
         };
-        let (air_added_mass_now_kg, balance_aero_drag_s_inv) = eval_aero(t_bal);
-        let (air_added_mass_ref_kg, balance_aero_drag_ref_s_inv) = eval_aero(T_REF_K);
+        let (air_added_mass_now_kg, balance_aero_drag_s_inv) = eval_aero(t_bal, p_atm_now);
+        let (air_added_mass_ref_kg, balance_aero_drag_ref_s_inv) = eval_aero(T_REF_K, 1.0);
         let delta_air_added_mass_kg = air_added_mass_now_kg - air_added_mass_ref_kg;
-        let delta_aero_drag_s_inv = (balance_aero_drag_s_inv - balance_aero_drag_ref_s_inv).max(0.0);
+        // Signed aerodynamic damping shift: vacuum (< 0) raises balance amplitude; hyperbaric (> 0) damps it!
+        let mut delta_aero_drag_s_inv =
+            (balance_aero_drag_s_inv - balance_aero_drag_ref_s_inv).clamp(-0.022, 0.45);
+        // Compressed Air Nozzle windage buffeting when aimed near the 6h Tourbillon cage (0, -11)
+        if self.inputs.air_jet_power > 1.0e-4 {
+            let adx = self.inputs.air_jet_pos_mm[0];
+            let ady = self.inputs.air_jet_pos_mm[1] + 11.0;
+            let w_tourb = (-(adx * adx + ady * ady) / (2.0 * 11.0 * 11.0)).exp();
+            delta_aero_drag_s_inv += 0.085 * self.inputs.air_jet_power * w_tourb;
+        }
         let gold_on_bal_g = self.nodes[WatchNodeId::BalanceWheelRim as usize].molten_gold_g
             + self.nodes[WatchNodeId::BalanceWheelRim as usize].frozen_gold_g
             + 0.35
@@ -1995,8 +2145,12 @@ impl MultiphysicsState {
         } else {
             1.0
         };
+        let g_vec = self.inputs.gravity_g_vec;
+        let g_mag = (g_vec[0] * g_vec[0] + g_vec[1] * g_vec[1] + g_vec[2] * g_vec[2]).sqrt();
+        let g_load_penalty = (1.0 + 0.055 * (g_mag - 1.0).max(-0.4)).clamp(0.75, 2.5);
         let pivot_friction_multiplier = (starvation_penalty
             * clearance_penalty
+            * g_load_penalty
             * (0.65 + 0.35 * couette_torque_ratio.min(35.0)))
         .clamp(0.65, 250.0);
 
@@ -2123,6 +2277,10 @@ impl MultiphysicsState {
             ln2_boiling_power_w: self.modifiers.ln2_boiling_power_w,
             blowtorch_heating_power_w: self.modifiers.blowtorch_heating_power_w,
             blued_steel_rgb: blued_steel_interference_rgb(self.hairspring_oxide_nm, 1.0),
+            air_cooling_power_w: self.inputs.air_jet_power * 18.0,
+            ambient_pressure_atm: p_atm_now,
+            gravity_g_vec: g_vec,
+            shock_envelope_g: self.shock_envelope_g,
         };
     }
 }

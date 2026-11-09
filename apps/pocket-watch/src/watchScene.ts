@@ -8,7 +8,8 @@ import { SMAAPass } from "three/examples/jsm/postprocessing/SMAAPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import type { WatchSnapshot } from "./snapshotLayout";
 
-export type ActiveToolMode = "inspect" | "torch" | "ln2" | "oil" | "magnet" | "mic";
+export type ActiveToolMode = "inspect" | "torch" | "ln2" | "oil" | "magnet" | "air" | "mic";
+export type VectorFieldLayer = "heat" | "convection" | "magnetic" | "acoustic" | "stress";
 export type CameraPreset =
   | "overview"
   | "tourbillon"
@@ -30,6 +31,10 @@ export interface ToolRenderParams {
   oilPosMm: [number, number, number];
   magnetOn: boolean;
   magnetPosMm: [number, number, number];
+  airPower?: number;
+  airPosMm?: [number, number, number];
+  ambientPressureAtm?: number;
+  gravityGVec?: [number, number, number];
   micPosMm: [number, number, number];
   caseShellData?: Float32Array;
   spatialGridData?: Float32Array;
@@ -556,6 +561,53 @@ function updateSpiralRibbonVertices(
   geom.computeVertexNormals();
 }
 
+/**
+ * Build a unit-length 3D arrow glyph oriented along +Y (y in [0, 1]) combining a tapered
+ * cylindrical shaft (y in [0, 0.66]) and a sharp conical arrowhead (y in [0.62, 1.0])
+ * for GPU-instanced 3D vector field visualization.
+ */
+function buildUnitArrowGeometry(): THREE.BufferGeometry {
+  const radialSegs = 12;
+  const rings: Array<{ y: number; r: number }> = [
+    { y: 0.0, r: 0.0 },
+    { y: 0.0, r: 0.068 },
+    { y: 0.64, r: 0.052 },
+    { y: 0.64, r: 0.175 },
+    { y: 1.0, r: 0.0 },
+  ];
+  const vertsPerRing = radialSegs + 1;
+  const positions = new Float32Array(rings.length * vertsPerRing * 3);
+  const indices: number[] = [];
+
+  for (let ir = 0; ir < rings.length; ir++) {
+    const { y, r } = rings[ir]!;
+    for (let is = 0; is <= radialSegs; is++) {
+      const a = (is / radialSegs) * Math.PI * 2;
+      const idx = (ir * vertsPerRing + is) * 3;
+      positions[idx] = Math.cos(a) * r;
+      positions[idx + 1] = y;
+      positions[idx + 2] = Math.sin(a) * r;
+    }
+  }
+  for (let ir = 0; ir < rings.length - 1; ir++) {
+    for (let is = 0; is < radialSegs; is++) {
+      const a = ir * vertsPerRing + is;
+      const b = a + 1;
+      const c = (ir + 1) * vertsPerRing + is;
+      const d = c + 1;
+      indices.push(a, c, b, b, c, d);
+    }
+  }
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geom.setIndex(indices);
+  geom.computeVertexNormals();
+  return geom;
+}
+
+const VEC_FIELD_LATTICE_COUNT = 168;
+const VEC_UP = new THREE.Vector3(0, 1, 0);
+
 export class PocketWatchScene {
   private readonly canvas: HTMLCanvasElement;
   private readonly callbacks: SceneCallbacks;
@@ -627,7 +679,31 @@ export class PocketWatchScene {
   private readonly oilGroup = new THREE.Group();
   private readonly oilStreamMesh!: THREE.Mesh;
   private readonly magnetGroup = new THREE.Group();
+  private readonly airGroup = new THREE.Group();
+  private readonly airStreamMesh!: THREE.Mesh;
   private readonly micGroup = new THREE.Group();
+
+  // Superimposed 3D Physics Vector Fields (Heat, Convection, Magnetic, Acoustic, Stress/Gravity)
+  private readonly vectorFieldsGroup = new THREE.Group();
+  private vecHeatMesh!: THREE.InstancedMesh;
+  private vecConvectionMesh!: THREE.InstancedMesh;
+  private vecMagneticMesh!: THREE.InstancedMesh;
+  private vecAcousticMesh!: THREE.InstancedMesh;
+  private vecStressMesh!: THREE.InstancedMesh;
+  private readonly vecFieldVisible: Record<VectorFieldLayer, boolean> = {
+    heat: false,
+    convection: false,
+    magnetic: false,
+    acoustic: false,
+    stress: false,
+  };
+  private readonly vecLatticePts: Array<[number, number, number]> = [];
+  private readonly tmpMat4 = new THREE.Matrix4();
+  private readonly tmpPos = new THREE.Vector3();
+  private readonly tmpDir = new THREE.Vector3();
+  private readonly tmpQuat = new THREE.Quaternion();
+  private readonly tmpScale = new THREE.Vector3();
+  private readonly tmpColor = new THREE.Color();
 
   // Shared PBR Materials
   private readonly matGoldCase: THREE.MeshPhysicalMaterial;
@@ -906,7 +982,7 @@ export class PocketWatchScene {
     this.frostOverlayMesh.visible = false;
     this.watchRoot.add(this.frostOverlayMesh);
 
-    // Build Interactive Perturbation Tools (Blowtorch, LN2, Oil, Magnet, Studio Microphone)
+    // Build Interactive Perturbation Tools (Blowtorch, LN2, Oil, Magnet, Air Jet, Studio Microphone)
     const tools = this.buildPerturbationApparatus(finishes.softParticleTex);
     this.torchFlameCore = tools.torchFlameCore;
     this.torchFlamePlume = tools.torchFlamePlume;
@@ -914,6 +990,10 @@ export class PocketWatchScene {
     this.ln2StreamMesh = tools.ln2StreamMesh;
     this.ln2FrostCloud = tools.ln2FrostCloud;
     this.oilStreamMesh = tools.oilStreamMesh;
+    this.airStreamMesh = tools.airStreamMesh;
+
+    // Build Superimposed 3D Physics Vector Fields (Heat, Convection, Magnetic, Acoustic, Stress/Gravity)
+    this.buildVectorFieldOverlays();
 
     this.bindPointerEvents();
     this.resize();
@@ -2114,6 +2194,7 @@ export class PocketWatchScene {
     ln2StreamMesh: THREE.Mesh;
     ln2FrostCloud: THREE.Points;
     oilStreamMesh: THREE.Mesh;
+    airStreamMesh: THREE.Mesh;
   } {
     // 1. Blowtorch with multi-layered soft additive plasma cones & surface hotspot halo
     const nozzle = new THREE.Mesh(
@@ -2277,6 +2358,36 @@ export class PocketWatchScene {
     this.magnetGroup.visible = false;
     this.scene.add(this.magnetGroup);
 
+    // 4b. High-Velocity Compressed Air / Argon Shear Nozzle
+    const airNozzleBarrel = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.95, 1.5, 10.5, 24),
+      this.matPolishedSteel,
+    );
+    airNozzleBarrel.position.set(0, -10.5, 9.5);
+    airNozzleBarrel.rotation.x = 0.88;
+    const airCollar = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.68, 1.68, 2.2, 24),
+      new THREE.MeshStandardMaterial({ color: 0x38bdf8, metalness: 0.75, roughness: 0.25 }),
+    );
+    airCollar.position.set(0, -8.5, 7.8);
+    airCollar.rotation.x = 0.88;
+    const airStreamMesh = new THREE.Mesh(
+      new THREE.ConeGeometry(2.4, 13.5, 32, 1, true),
+      new THREE.MeshBasicMaterial({
+        color: 0x7dd3fc,
+        transparent: true,
+        opacity: 0.36,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      }),
+    );
+    airStreamMesh.position.set(0, -3.5, 2.5);
+    airStreamMesh.rotation.x = 0.88;
+    this.airGroup.add(airNozzleBarrel, airCollar, airStreamMesh);
+    this.airGroup.visible = false;
+    this.scene.add(this.airGroup);
+
     // 5. Studio Condenser Microphone Capsule
     const micBody = new THREE.Mesh(
       new THREE.CylinderGeometry(1.6, 1.6, 8.5, 24),
@@ -2299,7 +2410,80 @@ export class PocketWatchScene {
       ln2StreamMesh,
       ln2FrostCloud,
       oilStreamMesh,
+      airStreamMesh,
     };
+  }
+
+  /**
+   * Construct 5 GPU-instanced 3D Vector Field layers:
+   * - `heat`: Fourier heat conduction flux q = -k * grad(T) & radiative/plume flux
+   * - `convection`: Buoyant Rayleigh-Bénard plumes, impinging wall-jets, and Marangoni/free-surface flow
+   * - `magnetic`: 3D dipolar magnetic flux density B(r) + ferromagnetic remanence + AC degauss field
+   * - `acoustic`: Spherical Helmholtz/Poynting acoustic wave radiation I(r, t) toward the 3D microphone
+   * - `stress`: 3D Case Shell viscoplastic/capillary forces + Going-Train torque path + 3D Gravity g
+   */
+  private buildVectorFieldOverlays(): void {
+    const arrowGeom = buildUnitArrowGeometry();
+    const makeLayerMesh = (emissiveHex: number): THREE.InstancedMesh => {
+      const mat = new THREE.MeshStandardMaterial({
+        color: 0xffffff,
+        emissive: new THREE.Color(emissiveHex),
+        emissiveIntensity: 0.32,
+        roughness: 0.24,
+        metalness: 0.18,
+        transparent: true,
+        opacity: 0.88,
+      });
+      const mesh = new THREE.InstancedMesh(arrowGeom, mat, VEC_FIELD_LATTICE_COUNT);
+      mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      const zeroMat = new THREE.Matrix4().makeScale(0, 0, 0);
+      const defaultCol = new THREE.Color(0xffffff);
+      for (let i = 0; i < VEC_FIELD_LATTICE_COUNT; i++) {
+        mesh.setMatrixAt(i, zeroMat);
+        mesh.setColorAt(i, defaultCol);
+      }
+      mesh.visible = false;
+      mesh.frustumCulled = false;
+      return mesh;
+    };
+
+    this.vecHeatMesh = makeLayerMesh(0xff5518);
+    this.vecConvectionMesh = makeLayerMesh(0x18d8b4);
+    this.vecMagneticMesh = makeLayerMesh(0xa855f7);
+    this.vecAcousticMesh = makeLayerMesh(0x38bdf8);
+    this.vecStressMesh = makeLayerMesh(0xf59e0b);
+
+    this.vectorFieldsGroup.add(
+      this.vecHeatMesh,
+      this.vecConvectionMesh,
+      this.vecMagneticMesh,
+      this.vecAcousticMesh,
+      this.vecStressMesh,
+    );
+    this.scene.add(this.vectorFieldsGroup);
+
+    // Precompute a golden-spiral + multi-ring 3D sampling lattice (168 points across 2 z-planes + case rim)
+    this.vecLatticePts.length = 0;
+    const rings: Array<{ r: number; n: number; z: number }> = [
+      { r: 4.5, n: 8, z: 2.1 },
+      { r: 9.8, n: 16, z: 2.1 },
+      { r: 15.2, n: 24, z: 2.1 },
+      { r: 20.4, n: 28, z: 2.2 },
+      { r: 25.4, n: 36, z: 1.8 },
+      { r: 8.5, n: 14, z: 5.4 },
+      { r: 16.5, n: 20, z: 5.6 },
+      { r: 23.8, n: 22, z: 5.2 },
+    ];
+    for (const ring of rings) {
+      for (let k = 0; k < ring.n; k++) {
+        if (this.vecLatticePts.length >= VEC_FIELD_LATTICE_COUNT) break;
+        const a = (k / ring.n) * Math.PI * 2 + ring.z * 0.27;
+        this.vecLatticePts.push([Math.cos(a) * ring.r, Math.sin(a) * ring.r, ring.z]);
+      }
+    }
+    while (this.vecLatticePts.length < VEC_FIELD_LATTICE_COUNT) {
+      this.vecLatticePts.push([0, -11, 2.2]);
+    }
   }
 
   /**
@@ -2629,10 +2813,370 @@ export class PocketWatchScene {
     this.magnetGroup.visible = tools.magnetOn || this.activeTool === "magnet";
     this.magnetGroup.position.set(tools.magnetPosMm[0], tools.magnetPosMm[1], tools.magnetPosMm[2]);
 
+    const airPower = tools.airPower ?? 0.0;
+    const airPosMm = tools.airPosMm ?? [0.0, -20.0, 3.0];
+    this.airGroup.visible = airPower > 0.01 || this.activeTool === "air";
+    this.airGroup.position.set(airPosMm[0], airPosMm[1], airPosMm[2]);
+    this.airStreamMesh.visible = airPower > 0.01;
+    const airScale = Math.max(0.1, airPower);
+    this.airStreamMesh.scale.set(
+      airScale * (0.94 + Math.sin(performance.now() * 0.06) * 0.06),
+      airScale,
+      airScale * (0.94 + Math.cos(performance.now() * 0.05) * 0.06),
+    );
+
     this.micGroup.position.set(tools.micPosMm[0], tools.micPosMm[1], tools.micPosMm[2]);
+
+    // 7. Update Superimposed 3D Physics Vector Fields when any layer is active
+    this.updateVectorFieldOverlays(snap, tools);
 
     this.controls.update();
     this.composer.render();
+  }
+
+  private setArrowInstance(
+    mesh: THREE.InstancedMesh,
+    index: number,
+    px: number,
+    py: number,
+    pz: number,
+    vx: number,
+    vy: number,
+    vz: number,
+    lengthMm: number,
+    thicknessMm: number,
+    rCol: number,
+    gCol: number,
+    bCol: number,
+  ): void {
+    const mag = Math.hypot(vx, vy, vz);
+    if (mag < 1.0e-6 || lengthMm < 0.15) {
+      this.tmpMat4.makeScale(0, 0, 0);
+      mesh.setMatrixAt(index, this.tmpMat4);
+      return;
+    }
+    this.tmpPos.set(px, py, pz);
+    this.tmpDir.set(vx / mag, vy / mag, vz / mag);
+    this.tmpQuat.setFromUnitVectors(VEC_UP, this.tmpDir);
+    this.tmpScale.set(thicknessMm, lengthMm, thicknessMm);
+    this.tmpMat4.compose(this.tmpPos, this.tmpQuat, this.tmpScale);
+    mesh.setMatrixAt(index, this.tmpMat4);
+    this.tmpColor.setRGB(
+      Math.max(0, Math.min(1, rCol)),
+      Math.max(0, Math.min(1, gCol)),
+      Math.max(0, Math.min(1, bCol)),
+    );
+    mesh.setColorAt(index, this.tmpColor);
+  }
+
+  /**
+   * Compute and update the 5 superimposed 3D physics vector fields directly from the live
+   * PDE spatial grid, 3D Lagrangian case shell, magnetic dipole + remanence, acoustic wave
+   * radiation, and going-train / gravity forces.
+   */
+  private updateVectorFieldOverlays(snap: WatchSnapshot, tools: ToolRenderParams): void {
+    const tNow = performance.now() * 0.001;
+    const grid = tools.spatialGridData;
+    const shell = tools.caseShellData;
+    const airPower = tools.airPower ?? 0.0;
+    const airPos = tools.airPosMm ?? [0.0, -20.0, 3.0];
+    const gVec = tools.gravityGVec ?? [0.0, -1.0, 0.0];
+    const pAtm = tools.ambientPressureAtm ?? 1.0;
+
+    // 1. Heat Flux Vector Field: q = -k * grad(T) + buoyant/radiative axial heat flux
+    if (this.vecFieldVisible.heat && grid && grid.length >= GRID_N * GRID_N * 7) {
+      const hStep = 1.6;
+      for (let i = 0; i < VEC_FIELD_LATTICE_COUNT; i++) {
+        const [x, y, z] = this.vecLatticePts[i]!;
+        const tC = sampleSmoothPdeField(grid, x, y, 0);
+        const tXp = sampleSmoothPdeField(grid, x + hStep, y, 0);
+        const tXm = sampleSmoothPdeField(grid, x - hStep, y, 0);
+        const tYp = sampleSmoothPdeField(grid, x, y + hStep, 0);
+        const tYm = sampleSmoothPdeField(grid, x, y - hStep, 0);
+        // Fourier heat conduction vector q_xy = -grad(T)
+        let qx = -(tXp - tXm) / (2.0 * hStep);
+        let qy = -(tYp - tYm) / (2.0 * hStep);
+        let qz = (tC - 293.15) * 0.22;
+
+        // Add subtle thermoelastic dissipation wave around 6h balance & 12h barrel at room temp
+        const dBal = Math.hypot(x, y + 11.0);
+        if (Math.abs(tC - 293.15) < 1.5 && Math.hypot(qx, qy) < 0.25) {
+          const ang = Math.atan2(y + 11.0, x);
+          const pulse = 0.55 + 0.45 * Math.sin(tNow * 15.7 - dBal * 0.45);
+          qx += Math.cos(ang) * 0.9 * pulse * Math.exp(-dBal / 16.0);
+          qy += Math.sin(ang) * 0.9 * pulse * Math.exp(-dBal / 16.0);
+          qz += 0.35 * pulse;
+        }
+
+        const qMag = Math.hypot(qx, qy, qz);
+        const lenMm = Math.min(5.2, 1.35 + 1.15 * Math.log1p(qMag * 0.45));
+        const pulseShift = 0.28 * Math.sin(tNow * 5.5 - i * 0.17);
+        const px = x + (qx / Math.max(0.01, qMag)) * pulseShift;
+        const py = y + (qy / Math.max(0.01, qMag)) * pulseShift;
+
+        // Color: cryogenic cyan (<285 K) -> warm amber (300-600 K) -> incandescent white-gold (>950 K)
+        let rC = 1.0;
+        let gC = 0.58;
+        let bC = 0.16;
+        if (tC < 285.0) {
+          const cold = Math.min(1.0, (293.15 - tC) / 140.0);
+          rC = 0.18 * (1.0 - cold) + 0.15;
+          gC = 0.78 + 0.2 * cold;
+          bC = 1.0;
+        } else {
+          const hot = Math.min(1.0, (tC - 293.15) / 650.0);
+          rC = 1.0;
+          gC = 0.42 + 0.52 * hot;
+          bC = 0.12 + 0.65 * Math.max(0, hot - 0.35);
+        }
+        this.setArrowInstance(this.vecHeatMesh, i, px, py, z, qx, qy, qz, lenMm, 1.05, rC, gC, bC);
+      }
+      this.vecHeatMesh.instanceMatrix.needsUpdate = true;
+      if (this.vecHeatMesh.instanceColor) this.vecHeatMesh.instanceColor.needsUpdate = true;
+    }
+
+    // 2. Convection, Impinging Jet & Free-Surface Flow Field: u_flow(x, y, z)
+    if (this.vecFieldVisible.convection && grid && grid.length >= GRID_N * GRID_N * 7) {
+      for (let i = 0; i < VEC_FIELD_LATTICE_COUNT; i++) {
+        const [x, y, z] = this.vecLatticePts[i]!;
+        const tC = sampleSmoothPdeField(grid, x, y, 0);
+        const hLiq = sampleSmoothPdeField(grid, x, y, 3);
+
+        // (a) Buoyant Rayleigh-Bénard natural convection plume (scaled by ambient pressure)
+        const buoyZ = (tC - 293.15) * 0.035 * Math.sqrt(Math.max(0.02, pAtm));
+        let ux = -y * 0.04 * Math.sqrt(Math.max(0.05, pAtm));
+        let uy = x * 0.04 * Math.sqrt(Math.max(0.05, pAtm));
+        let uz = buoyZ;
+
+        // (b) Oscillating 5 Hz Balance Wheel & 1-Minute Tourbillon aerodynamic swirl near (0, -11)
+        const dxTourb = x;
+        const dyTourb = y + 11.0;
+        const rTourb = Math.hypot(dxTourb, dyTourb);
+        if (rTourb < 14.0 && pAtm > 0.02) {
+          const swirl =
+            (snap.balanceOmegaRadS * 0.035 + 0.45) *
+            Math.exp(-(rTourb * rTourb) / (2.0 * 6.5 * 6.5)) *
+            Math.sqrt(pAtm);
+          ux += (-dyTourb / Math.max(1.0, rTourb)) * swirl;
+          uy += (dxTourb / Math.max(1.0, rTourb)) * swirl;
+        }
+
+        // (c) Impinging Wall-Jet streamlines from Blowtorch, LN2, and Compressed Air Nozzle
+        const addWallJet = (jx: number, jy: number, power: number, tempSign: number): void => {
+          if (power <= 0.01) return;
+          const dx = x - jx;
+          const dy = y - jy;
+          const r = Math.hypot(dx, dy);
+          const w = Math.exp(-(r * r) / (2.0 * 11.5 * 11.5));
+          const radOut = (r / (r + 2.5)) * power * 3.8 * w;
+          ux += (dx / Math.max(0.5, r)) * radOut;
+          uy += (dy / Math.max(0.5, r)) * radOut;
+          uz += (z > 3.8 ? -2.2 : 1.1 * tempSign) * power * w;
+        };
+        addWallJet(tools.torchPosMm[0], tools.torchPosMm[1], tools.torchPower, 1.0);
+        addWallJet(tools.ln2PosMm[0], tools.ln2PosMm[1], tools.ln2Rate, -1.0);
+        addWallJet(airPos[0], airPos[1], airPower * 1.35, 0.2);
+
+        // (d) Molten gold Marangoni + Gravity free-surface velocity when liquid gold is present
+        if (hLiq > 0.01 && z < 3.5) {
+          ux += gVec[0] * 1.8;
+          uy += gVec[1] * 1.8;
+        }
+
+        const uMag = Math.hypot(ux, uy, uz);
+        const lenMm = Math.min(5.0, 1.45 + 1.15 * Math.log1p(uMag));
+        const phase = ((tNow * 2.4 + i * 0.13) % 1.0) - 0.5;
+        const px = x + (ux / Math.max(0.01, uMag)) * phase * 0.9;
+        const py = y + (uy / Math.max(0.01, uMag)) * phase * 0.9;
+
+        const warm = Math.max(0, Math.min(1, (tC - 260.0) / 500.0));
+        const rC = 0.12 + 0.85 * warm;
+        const gC = 0.88 - 0.22 * Math.abs(warm - 0.4);
+        const bC = 0.78 * (1.0 - warm * 0.65);
+        this.setArrowInstance(this.vecConvectionMesh, i, px, py, z, ux, uy, uz, lenMm, 1.0, rC, gC, bC);
+      }
+      this.vecConvectionMesh.instanceMatrix.needsUpdate = true;
+      if (this.vecConvectionMesh.instanceColor) this.vecConvectionMesh.instanceColor.needsUpdate = true;
+    }
+
+    // 3. 3D Magnetic Flux Density Vector Field: B(r) = B_dipole(r) + B_remanence(r) + B_ferro(r)
+    if (this.vecFieldVisible.magnetic) {
+      const mx0 = tools.magnetOn ? tools.magnetPosMm[0] : 42.0;
+      const my0 = tools.magnetOn ? tools.magnetPosMm[1] : -11.0;
+      const mz0 = tools.magnetOn ? tools.magnetPosMm[2] : 3.0;
+      const mStrength = tools.magnetOn ? 1.0 : 0.12;
+      const remStrength = snap.remanentMagnetizationMt * 0.08;
+
+      for (let i = 0; i < VEC_FIELD_LATTICE_COUNT; i++) {
+        const [x, y, z] = this.vecLatticePts[i]!;
+        // Exact 3D magnetic dipole field B(r) proportional to (3 (m . r_hat) r_hat - m) / |r|^3
+        // with dipole moment m = (-1, 0, 0) along the NdFeB North-South axis
+        const rx = x - mx0;
+        const ry = y - my0;
+        const rz = z - mz0;
+        const r2 = Math.max(28.0, rx * rx + ry * ry + rz * rz);
+        const r = Math.sqrt(r2);
+        const r5 = r2 * r2 * r;
+        const mDotR = -rx * mStrength * 4500.0;
+        let bx = (3.0 * mDotR * rx - -1.0 * mStrength * 4500.0 * r2) / r5;
+        let by = (3.0 * mDotR * ry) / r5;
+        let bz = (3.0 * mDotR * rz) / r5;
+
+        // Add residual ferromagnetic remanence dipole centered on the 6h steel pallet fork & balance
+        if (remStrength > 0.01 || !tools.magnetOn) {
+          const ex = x;
+          const ey = y + 11.0;
+          const ez = z - 0.5;
+          const er2 = Math.max(16.0, ex * ex + ey * ey + ez * ez);
+          const er = Math.sqrt(er2);
+          const er5 = er2 * er2 * er;
+          const effRem = Math.max(0.18, remStrength);
+          const emDotR = (ex * 0.85 + ey * 0.52) * effRem * 950.0;
+          bx += (3.0 * emDotR * ex - 0.85 * effRem * 950.0 * er2) / er5;
+          by += (3.0 * emDotR * ey - 0.52 * effRem * 950.0 * er2) / er5;
+          bz += (3.0 * emDotR * ez) / er5;
+        }
+
+        const bMag = Math.hypot(bx, by, bz);
+        const lenMm = Math.min(4.8, 1.55 + 1.35 * Math.log1p(bMag * 4.5));
+        const normB = Math.min(1.0, Math.log1p(bMag * 8.0) / 2.6);
+        const rC = 0.52 + 0.48 * normB;
+        const gC = 0.26 + 0.58 * (1.0 - Math.abs(normB - 0.5));
+        const bC = 1.0;
+        this.setArrowInstance(this.vecMagneticMesh, i, x, y, z, bx, by, bz, lenMm, 1.02, rC, gC, bC);
+      }
+      this.vecMagneticMesh.instanceMatrix.needsUpdate = true;
+      if (this.vecMagneticMesh.instanceColor) this.vecMagneticMesh.instanceColor.needsUpdate = true;
+    }
+
+    // 4. 3D Acoustic Wave & Poynting Intensity Field: I_ac(r, t) = p(r, t) * v_ac(r, t)
+    if (this.vecFieldVisible.acoustic) {
+      const airTrans = Math.max(0.12, Math.min(1.3, pAtm / (pAtm + 0.3)));
+      for (let i = 0; i < VEC_FIELD_LATTICE_COUNT; i++) {
+        const [x, y, z] = this.vecLatticePts[i]!;
+        // Primary spherical wave source at 6h Ruby Escapement (0, -11, 0.5)
+        const sx = x;
+        const sy = y + 11.0;
+        const sz = z - 0.5;
+        const rEsc = Math.max(2.5, Math.hypot(sx, sy, sz));
+        const kWave = 0.38;
+        const waveEnvelope =
+          (0.65 + 0.35 * Math.cos(kWave * rEsc - tNow * 31.4159)) *
+          (12.0 / (rEsc + 6.0)) *
+          airTrans;
+
+        let ax = (sx / rEsc) * waveEnvelope;
+        let ay = (sy / rEsc) * waveEnvelope;
+        let az = ((sz + 2.2) / rEsc) * waveEnvelope;
+
+        // Secondary acoustic dipole from active Blowtorch / LN2 / Air Nozzle
+        if (tools.torchPower > 0.01) {
+          const tx = x - tools.torchPosMm[0];
+          const ty = y - tools.torchPosMm[1];
+          const rT = Math.max(3.0, Math.hypot(tx, ty));
+          const wT = (tools.torchPower * 4.5) / (rT + 4.0);
+          ax += (tx / rT) * wT;
+          ay += (ty / rT) * wT;
+        }
+
+        const aMag = Math.hypot(ax, ay, az);
+        const lenMm = Math.min(4.8, 1.2 + 2.2 * aMag);
+        const crest = 0.5 + 0.5 * Math.sin(kWave * rEsc - tNow * 31.4159);
+        const rC = 0.18 + 0.72 * crest;
+        const gC = 0.78 + 0.2 * crest;
+        const bC = 1.0 - 0.35 * crest;
+        this.setArrowInstance(this.vecAcousticMesh, i, x, y, z, ax, ay, az, lenMm, 1.0, rC, gC, bC);
+      }
+      this.vecAcousticMesh.instanceMatrix.needsUpdate = true;
+      if (this.vecAcousticMesh.instanceColor) this.vecAcousticMesh.instanceColor.needsUpdate = true;
+    }
+
+    // 5. Structural Stress, Viscoplastic Case Force, Going-Train Torque & 3D Gravity Vector Field
+    if (this.vecFieldVisible.stress) {
+      let idx = 0;
+      // (a) 64 perimeter arrows around the 18k Gold Case Shell showing net inward capillary +
+      //     viscoplastic slump + thermal expansion + gravity force on the 3D continuum shell
+      if (shell && shell.length >= CASE_SHELL_NODES * 6) {
+        for (let it = 0; it < CASE_SHELL_N_THETA && idx < 64; it++) {
+          const base = (4 * CASE_SHELL_N_THETA + it) * 6;
+          const sx = shell[base]!;
+          const sy = shell[base + 1]!;
+          const sz = shell[base + 2]! + 2.2;
+          const tempK = shell[base + 4]!;
+          const melt = shell[base + 5]!;
+          const rNow = Math.hypot(sx, sy);
+          const rRef = 26.8;
+          const radialInward = Math.max(0.0, rRef - rNow);
+          const nx = -sx / Math.max(1.0, rNow);
+          const ny = -sy / Math.max(1.0, rNow);
+          const softness = Math.min(1.0, melt + Math.max(0, (tempK - 550.0) / 700.0));
+          const fx = nx * (0.65 + 2.5 * softness + radialInward * 0.4) + gVec[0] * 0.45;
+          const fy = ny * (0.65 + 2.5 * softness + radialInward * 0.4) + gVec[1] * 0.45;
+          const fz = -0.25 * softness + gVec[2] * 0.35;
+          const lenMm = Math.min(5.2, 1.65 + 2.4 * softness + radialInward * 0.35);
+          const rC = 0.98;
+          const gC = Math.max(0.22, 0.78 - 0.55 * softness);
+          const bC = 0.15 + 0.25 * softness;
+          this.setArrowInstance(this.vecStressMesh, idx++, sx, sy, sz, fx, fy, fz, lenMm, 1.08, rC, gC, bC);
+        }
+      }
+      // (b) Going-train mechanical torque transmission + 3D Gravity load field across interior points
+      const torqueScale = Math.max(0.25, snap.mainspringTorqueNm / 0.0082);
+      for (; idx < VEC_FIELD_LATTICE_COUNT; idx++) {
+        const [x, y, z] = this.vecLatticePts[idx]!;
+        // Tangential gear-train force path from 12h Mainspring Barrel (0, 11.5) -> Center (0, 0) -> 6h Tourbillon (0, -11)
+        const dBarrel = Math.hypot(x, y - 11.5);
+        const dTourb = Math.hypot(x, y + 11.0);
+        let fx = gVec[0] * 0.95;
+        let fy = gVec[1] * 0.95 - 0.55 * torqueScale * Math.exp(-(x * x) / (2.0 * 9.0 * 9.0));
+        let fz = gVec[2] * 0.95;
+        if (dBarrel < 9.5) {
+          fx += -(y - 11.5) * 0.22 * torqueScale;
+          fy += x * 0.22 * torqueScale;
+        } else if (dTourb < 9.0) {
+          fx += (y + 11.0) * 0.25 * torqueScale;
+          fy += -x * 0.25 * torqueScale;
+        }
+        const fMag = Math.hypot(fx, fy, fz);
+        const lenMm = Math.min(4.6, 1.4 + 1.35 * fMag);
+        this.setArrowInstance(
+          this.vecStressMesh,
+          idx,
+          x,
+          y,
+          z,
+          fx,
+          fy,
+          fz,
+          lenMm,
+          0.98,
+          0.96,
+          0.74,
+          0.22,
+        );
+      }
+      this.vecStressMesh.instanceMatrix.needsUpdate = true;
+      if (this.vecStressMesh.instanceColor) this.vecStressMesh.instanceColor.needsUpdate = true;
+    }
+  }
+
+  public setVectorFieldVisible(layer: VectorFieldLayer, visible: boolean): void {
+    this.vecFieldVisible[layer] = visible;
+    if (layer === "heat") this.vecHeatMesh.visible = visible;
+    else if (layer === "convection") this.vecConvectionMesh.visible = visible;
+    else if (layer === "magnetic") this.vecMagneticMesh.visible = visible;
+    else if (layer === "acoustic") this.vecAcousticMesh.visible = visible;
+    else if (layer === "stress") this.vecStressMesh.visible = visible;
+  }
+
+  public toggleVectorField(layer: VectorFieldLayer): boolean {
+    const next = !this.vecFieldVisible[layer];
+    this.setVectorFieldVisible(layer, next);
+    return next;
+  }
+
+  public isVectorFieldVisible(layer: VectorFieldLayer): boolean {
+    return this.vecFieldVisible[layer];
   }
 
   public setToolMode(mode: ActiveToolMode): void {

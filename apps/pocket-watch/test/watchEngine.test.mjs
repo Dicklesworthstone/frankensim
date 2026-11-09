@@ -95,4 +95,23 @@ test("WASM PocketWatchSim — chronometer timekeeping, winding, and all 5 multip
     sim.step(0.05);
   }
   assert.equal(sim.snapshot()[25], 0.0, "expected AC degauss coil to clear remanence");
+
+  // 7. Bell-Jar Vacuum (0.0 atm) vs Hyperbaric (5.0 atm), Compressed Air Nozzle, 3D Gravity & 500G Shock
+  sim.reset();
+  sim.set_ambient_pressure_atm(0.0);
+  assert.equal(sim.balance_aero_drag_s_inv(), 0.0, "expected zero balance aero drag in bell-jar vacuum (0 atm)");
+  sim.set_ambient_pressure_atm(1.0);
+  assert.ok(sim.balance_aero_drag_s_inv() > 0.0, "expected restored aero drag at 1.0 atm");
+
+  sim.set_air_jet(0.85, 0, -20, 3);
+  sim.set_gravity_vector(0, -4.0, 0);
+  sim.trigger_mechanical_shock(500.0);
+  sim.step(0.05);
+
+  // Verify blowtorch audio at 100% power stays comfortable and never clips full-scale
+  sim.set_blowtorch(1.0, 0, -24, 2);
+  const torchAudio = sim.render_audio_block(1024);
+  let maxTorchSample = 0;
+  for (const s of torchAudio) maxTorchSample = Math.max(maxTorchSample, Math.abs(s));
+  assert.ok(maxTorchSample < 0.85, `expected balanced blowtorch audio without full-scale clipping, got ${maxTorchSample}`);
 });

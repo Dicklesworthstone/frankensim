@@ -133,6 +133,44 @@ impl PocketWatchSim {
         self.acoustics.mic_gain = gain.clamp(0.0, 4.0);
     }
 
+    /// Configure the high-velocity compressed air / argon nozzle ($300\text{ K}, M \approx 0.35$) in 3D watch coordinates ($\text{mm}$).
+    /// Applies forced convective cooling and aerodynamic surface shear that blows molten gold and watch oil across the movement.
+    pub fn set_air_jet(&mut self, power: f64, x_mm: f64, y_mm: f64, z_mm: f64) {
+        self.multiphysics.inputs.air_jet_power = power.clamp(0.0, 1.0);
+        self.multiphysics.inputs.air_jet_pos_mm = [x_mm, y_mm, z_mm];
+        self.multiphysics.recompute_modifiers();
+        self.pack_snapshot();
+    }
+
+    /// Set the ambient bell-jar chamber pressure in atmospheres ($0.0\text{ atm}$ vacuum $\to 1.0\text{ atm} \to 5.0\text{ atm}$ hyperbaric).
+    pub fn set_ambient_pressure_atm(&mut self, pressure_atm: f64) {
+        self.multiphysics.inputs.ambient_pressure_atm = pressure_atm.clamp(0.0, 5.0);
+        self.multiphysics.recompute_modifiers();
+        self.pack_snapshot();
+    }
+
+    /// Set the 3D gravitational / centrifuge acceleration vector $[g_x, g_y, g_z]$ in Earth-$g$ units ($9.80665\text{ m/s}^2$).
+    pub fn set_gravity_vector(&mut self, gx: f64, gy: f64, gz: f64) {
+        self.multiphysics.inputs.gravity_g_vec = [
+            gx.clamp(-6.0, 6.0),
+            gy.clamp(-6.0, 6.0),
+            gz.clamp(-6.0, 6.0),
+        ];
+        self.multiphysics.recompute_modifiers();
+        self.pack_snapshot();
+    }
+
+    /// Deliver a mechanical bench-drop / G-shock impulse ($G_{\text{peak}}$ in $\text{g}$-units, e.g. $500\text{ G}$)
+    /// to the Incabloc ruby jewel suspension, balance wheel, 18k gold case shell, and molten gold pool.
+    pub fn trigger_mechanical_shock(&mut self, g_peak: f64) {
+        let g = g_peak.clamp(10.0, 5000.0);
+        self.multiphysics.apply_mechanical_shock(g);
+        self.horology
+            .apply_mechanical_shock(g, &mut self.pending_events);
+        self.flush_events_to_acoustics();
+        self.pack_snapshot();
+    }
+
     /// Advance the coupled multiphysics and horological simulation by `dt_s` seconds.
     pub fn step(&mut self, dt_s: f64) {
         let clamped_dt = dt_s.clamp(1.0e-4, 0.10);

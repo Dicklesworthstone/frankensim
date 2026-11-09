@@ -447,6 +447,21 @@ impl WatchAcousticSynth {
                     .modal_time_model
                     .apply_impulse_into(&imp, &mut self.modal_workspace);
             }
+            MechanicalAcousticEvent::MechanicalShockImpulse { energy } => {
+                // 500G bench drop shock: excites Bassine 18k gold case bell modes (0..2),
+                // brass mainplate flexural modes (3..4), and Incabloc ruby jewel rebound (6..11)
+                let e = energy.clamp(0.15, 2.2);
+                self.modes[0].excite(1.35 * e, 0.45 * e);
+                self.modes[1].excite(1.10 * e, -0.35 * e);
+                self.modes[2].excite(0.85 * e, 0.30 * e);
+                for m in 3..MODAL_COUNT {
+                    self.modes[m].excite(0.65 * e, 0.25 * e);
+                }
+                let imp = [0.75 * e; MODAL_COUNT];
+                let _ = self
+                    .modal_time_model
+                    .apply_impulse_into(&imp, &mut self.modal_workspace);
+            }
         }
     }
 
@@ -454,14 +469,20 @@ impl WatchAcousticSynth {
     pub fn render_samples(&mut self, mp: &MultiphysicsState, out: &mut [f32]) {
         self.sync_multiphysics(mp);
 
+        let p_atm = mp.inputs.ambient_pressure_atm.clamp(0.0, 5.0);
+        // Airborne acoustic transmission factor (vanishes toward structure-borne floor in a bell-jar vacuum)
+        let air_coupling = (0.08 + 0.92 * (p_atm / (p_atm + 0.30))).clamp(0.08, 1.35);
+
         let atten_case = self.distance_attenuation_from(self.modes[0].source_pos_mm);
         let atten_plate = self.distance_attenuation_from(self.modes[3].source_pos_mm);
         let atten_barrel = self.distance_attenuation_from(self.modes[5].source_pos_mm);
         let atten_esc = self.distance_attenuation_from(self.modes[6].source_pos_mm);
         let atten_torch = self.distance_attenuation_from(mp.inputs.blowtorch_pos_mm);
         let atten_ln2 = self.distance_attenuation_from(mp.inputs.ln2_pos_mm);
+        let atten_air = self.distance_attenuation_from(mp.inputs.air_jet_pos_mm);
 
         let torch_power = mp.inputs.blowtorch_power.clamp(0.0, 1.0);
+        let air_power = mp.inputs.air_jet_power.clamp(0.0, 1.0);
         let ln2_boil_level =
             ((mp.modifiers.ln2_boiling_power_w / 18.0) + 0.6 * mp.inputs.ln2_pour_rate).clamp(0.0, 1.5);
         let degauss_level = (mp.degauss_envelope_mt / 85.0).clamp(0.0, 1.0);
@@ -474,7 +495,7 @@ impl WatchAcousticSynth {
 
         // Prepare 3D Farassat retarded dipole observer (fs_aeroac::curle3d::CompactForceObserver)
         // from the blowtorch impingement point to the virtual condenser microphone
-        let curle_observer = FluidAcousticState::try_new(1.18, 343.2)
+        let curle_observer = FluidAcousticState::try_new(1.18 * p_atm.max(0.05), 343.2)
             .ok()
             .and_then(|ac| {
                 let obs_m = [
@@ -510,30 +531,42 @@ impl WatchAcousticSynth {
                 + self.modes[10].tick()
                 + self.modes[11].tick();
 
-            let mut sig = 0.20
-                * (atten_case * m_case
-                    + atten_plate * m_plate
-                    + atten_barrel * m_barrel
-                    + atten_esc * aperture_gain * m_esc)
-                + 0.04 * atten_esc * aperture_gain * fs_modal_pa;
+            let mut sig = air_coupling
+                * (0.20
+                    * (atten_case * m_case
+                        + atten_plate * m_plate
+                        + atten_barrel * m_barrel
+                        + atten_esc * aperture_gain * m_esc)
+                    + 0.04 * atten_esc * aperture_gain * fs_modal_pa);
 
-            // 2. Virtual Blowtorch turbulent jet roar + 3D Farassat Curle dipole radiation
+            // 2. Virtual Blowtorch laminar/subsonic micro-jet hiss + 3D Farassat Curle dipole radiation
+            //    Calibrated to a gentle jewelers' micro-torch level (~15-20% of escapement tick peak)
             if torch_power > 1.0e-3 {
                 let w = self.next_white_noise();
-                let prev_lp2 = self.torch_lp2;
-                self.torch_lp1 += 0.045 * (w - self.torch_lp1);
-                self.torch_lp2 += 0.18 * (w - self.torch_lp2);
-                let jet_roar = 0.65 * self.torch_lp1 + 0.35 * (self.torch_lp2 - self.torch_lp1);
+                let prev_lp1 = self.torch_lp1;
+                self.torch_lp1 += 0.032 * (w - self.torch_lp1);
+                self.torch_lp2 += 0.12 * (w - self.torch_lp2);
+                let jet_roar = 0.72 * self.torch_lp1 + 0.28 * (self.torch_lp2 - self.torch_lp1);
                 let curle_pa = curle_observer
                     .and_then(|obs| {
-                        let f_z = -0.08 * torch_power * jet_roar;
+                        let f_z = -0.0008 * torch_power * jet_roar;
                         let f_dot_z =
-                            -0.08 * torch_power * (self.torch_lp2 - prev_lp2) * AUDIO_SAMPLE_RATE_HZ;
+                            -0.0008 * torch_power * (self.torch_lp1 - prev_lp1) * AUDIO_SAMPLE_RATE_HZ;
                         obs.pressure_at_retarded([0.0, 0.0, f_z], [0.0, 0.0, f_dot_z])
                             .ok()
                     })
-                    .unwrap_or(0.0);
-                sig += 0.095 * torch_power * atten_torch * jet_roar + 0.15 * curle_pa;
+                    .unwrap_or(0.0)
+                    .clamp(-0.12, 0.12);
+                sig += air_coupling
+                    * atten_torch
+                    * (0.018 * torch_power * jet_roar + 0.025 * curle_pa);
+            }
+
+            // 2b. Compressed Air Nozzle pneumatic shear hiss
+            if air_power > 1.0e-3 {
+                let w = self.next_white_noise();
+                self.torch_lp2 += 0.24 * (w - self.torch_lp2);
+                sig += air_coupling * 0.016 * air_power * atten_air * self.torch_lp2;
             }
 
             // 3. Liquid Nitrogen (LN2) Leidenfrost vapor-film sizzle & nucleate boiling crackle

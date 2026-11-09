@@ -178,6 +178,24 @@ export class PocketWatchSim {
         wasm.pocketwatchsim_reset(this.__wbg_ptr);
     }
     /**
+     * Configure the high-velocity compressed air / argon nozzle ($300\text{ K}, M \approx 0.35$) in 3D watch coordinates ($\text{mm}$).
+     * Applies forced convective cooling and aerodynamic surface shear that blows molten gold and watch oil across the movement.
+     * @param {number} power
+     * @param {number} x_mm
+     * @param {number} y_mm
+     * @param {number} z_mm
+     */
+    set_air_jet(power, x_mm, y_mm, z_mm) {
+        wasm.pocketwatchsim_set_air_jet(this.__wbg_ptr, power, x_mm, y_mm, z_mm);
+    }
+    /**
+     * Set the ambient bell-jar chamber pressure in atmospheres ($0.0\text{ atm}$ vacuum $\to 1.0\text{ atm} \to 5.0\text{ atm}$ hyperbaric).
+     * @param {number} pressure_atm
+     */
+    set_ambient_pressure_atm(pressure_atm) {
+        wasm.pocketwatchsim_set_ambient_pressure_atm(this.__wbg_ptr, pressure_atm);
+    }
+    /**
      * Configure the virtual oxy-butane blowtorch ($T_{\text{flame}} = 2250\text{ K}$) in 3D watch coordinates ($\text{mm}$).
      * @param {number} power
      * @param {number} x_mm
@@ -193,6 +211,15 @@ export class PocketWatchSim {
      */
     set_compensated_hairspring(compensated) {
         wasm.pocketwatchsim_set_compensated_hairspring(this.__wbg_ptr, compensated);
+    }
+    /**
+     * Set the 3D gravitational / centrifuge acceleration vector $[g_x, g_y, g_z]$ in Earth-$g$ units ($9.80665\text{ m/s}^2$).
+     * @param {number} gx
+     * @param {number} gy
+     * @param {number} gz
+     */
+    set_gravity_vector(gx, gy, gz) {
+        wasm.pocketwatchsim_set_gravity_vector(this.__wbg_ptr, gx, gy, gz);
     }
     /**
      * Configure the cryogenic liquid nitrogen ($\text{LN}_2$ at $77.36\text{ K}$) pour stream in 3D watch coordinates ($\text{mm}$).
@@ -301,6 +328,14 @@ export class PocketWatchSim {
      */
     trigger_degauss() {
         wasm.pocketwatchsim_trigger_degauss(this.__wbg_ptr);
+    }
+    /**
+     * Deliver a mechanical bench-drop / G-shock impulse ($G_{\text{peak}}$ in $\text{g}$-units, e.g. $500\text{ G}$)
+     * to the Incabloc ruby jewel suspension, balance wheel, 18k gold case shell, and molten gold pool.
+     * @param {number} g_peak
+     */
+    trigger_mechanical_shock(g_peak) {
+        wasm.pocketwatchsim_trigger_mechanical_shock(this.__wbg_ptr, g_peak);
     }
     /**
      * Wind the mainspring crown by `delta_turns` (where `8.5` turns = full 42-hour wind).

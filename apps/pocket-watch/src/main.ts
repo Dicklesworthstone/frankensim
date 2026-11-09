@@ -8,7 +8,12 @@ import initWasm, { PocketWatchSim } from "./wasm-pkg/fs_pocket_watch";
 import { decodeWatchSnapshot, formatHorologicalTime, type WatchSnapshot } from "./snapshotLayout";
 import { VirtualMicrophoneAudio } from "./audioEngine";
 import { HorologicalTimegrapher, renderNodeLedgerTable } from "./timegrapher";
-import { PocketWatchScene, type ActiveToolMode, type CameraPreset } from "./watchScene";
+import {
+  PocketWatchScene,
+  type ActiveToolMode,
+  type CameraPreset,
+  type VectorFieldLayer,
+} from "./watchScene";
 
 function $<T extends Element = HTMLElement>(sel: string): T {
   const el = document.querySelector<T>(sel);
@@ -33,6 +38,11 @@ async function boot(): Promise<void> {
   let magnetOn = false;
   let magnetDistMm = 28.0;
   let magnetPosMm: [number, number, number] = [28.0, -11.0, 2.5];
+  let airPower = 0.0;
+  let airPosMm: [number, number, number] = [0.0, -20.0, 3.0];
+  let ambientPressureAtm = 1.0;
+  let gravityGVec: [number, number, number] = [0.0, -1.0, 0.0];
+  let gravityLabel = "1.0G 6h";
   let micPosMm: [number, number, number] = [0.0, -11.0, 11.0];
   let micGain = 1.4;
   let slowMo = false;
@@ -85,6 +95,11 @@ async function boot(): Promise<void> {
   const sliderMagnetDist = $<HTMLInputElement>("#slider-magnet-dist");
   const lblBField = $("#lbl-b-field");
   const lblRemanence = $("#lbl-remanence");
+  const sliderAirPower = $<HTMLInputElement>("#slider-air-power");
+  const lblAirPower = $("#lbl-air-power");
+  const sliderPressureAtm = $<HTMLInputElement>("#slider-pressure-atm");
+  const lblChamberEnv = $("#lbl-chamber-env");
+  const btnShock500g = $<HTMLButtonElement>("#btn-shock-500g");
 
   const btnToggleAudio = $<HTMLButtonElement>("#btn-toggle-audio");
   const sliderMicGain = $<HTMLInputElement>("#slider-mic-gain");
@@ -101,7 +116,12 @@ async function boot(): Promise<void> {
 
   const updatePerturbationBannerAndBadges = (): void => {
     const anyPerturbActive =
-      torchPower > 0.01 || ln2Rate > 0.01 || oilRate > 0.01 || magnetOn;
+      torchPower > 0.01 ||
+      ln2Rate > 0.01 ||
+      oilRate > 0.01 ||
+      magnetOn ||
+      airPower > 0.01 ||
+      Math.abs(ambientPressureAtm - 1.0) > 0.05;
     btnStopPerturbations.classList.toggle("hidden", !anyPerturbActive);
 
     // Highlight active subtool parameter box
@@ -117,6 +137,9 @@ async function boot(): Promise<void> {
     }
     if (activeToolMode === "magnet" || magnetOn) {
       $("#subtool-magnet").classList.add("is-focused");
+    }
+    if (activeToolMode === "air" || airPower > 0.01) {
+      $("#subtool-air").classList.add("is-focused");
     }
 
     canvasViewport.classList.toggle("tool-cursor", activeToolMode !== "inspect");
@@ -134,6 +157,8 @@ async function boot(): Promise<void> {
         stageBannerText.textContent = `💧 Precision Oiler Engaged (${Math.round(oilRate * 100)}%) — Drag across the 3D watch to deposit Pennzane oil`;
       } else if (activeToolMode === "magnet") {
         stageBannerText.textContent = `🧲 NdFeB Super-Magnet Engaged — Drag across the 3D watch to sweep the 1.32 T magnetic field`;
+      } else if (activeToolMode === "air") {
+        stageBannerText.textContent = `💨 Air Shear Nozzle Engaged (${Math.round(airPower * 100)}%) — Drag across the 3D watch to blow molten gold & oil`;
       } else if (activeToolMode === "mic") {
         stageBannerText.textContent = `🎙️ 3D Acoustic Probe Mode — Drag across the 3D watch to position the condenser microphone`;
       } else {
@@ -142,6 +167,10 @@ async function boot(): Promise<void> {
         if (ln2Rate > 0.01) activeNames.push(`❄️ LN₂ ${Math.round(ln2Rate * 100)}%`);
         if (oilRate > 0.01) activeNames.push(`💧 Oil ${Math.round(oilRate * 100)}%`);
         if (magnetOn) activeNames.push(`🧲 Magnet (${magnetDistMm.toFixed(0)} mm)`);
+        if (airPower > 0.01) activeNames.push(`💨 Air Jet ${Math.round(airPower * 100)}%`);
+        if (Math.abs(ambientPressureAtm - 1.0) > 0.05) {
+          activeNames.push(`🌍 ${ambientPressureAtm.toFixed(2)} atm`);
+        }
         stageBannerText.textContent = `Active Perturbation: ${activeNames.join(" + ")} · Orbiting 3D camera`;
       }
     } else {
@@ -154,6 +183,9 @@ async function boot(): Promise<void> {
     sim.set_liquid_nitrogen(ln2Rate, ln2PosMm[0], ln2PosMm[1], ln2PosMm[2]);
     sim.set_oil_pour(oilRate, oilPosMm[0], oilPosMm[1], oilPosMm[2]);
     sim.set_magnet(magnetOn, 1.0, magnetPosMm[0], magnetPosMm[1], magnetPosMm[2]);
+    sim.set_air_jet(airPower, airPosMm[0], airPosMm[1], airPosMm[2]);
+    sim.set_ambient_pressure_atm(ambientPressureAtm);
+    sim.set_gravity_vector(gravityGVec[0], gravityGVec[1], gravityGVec[2]);
     sim.set_microphone(micPosMm[0], micPosMm[1], micPosMm[2], micGain);
     updatePerturbationBannerAndBadges();
   };
@@ -186,6 +218,12 @@ async function boot(): Promise<void> {
           Math.max(8, Math.min(80, Math.hypot(posMm[0] + 2.2, posMm[1] + 11.0))),
         );
         sliderMagnetDist.value = String(magnetDistMm);
+      } else if (tool === "air") {
+        airPosMm = posMm;
+        if (airPower < 0.05) {
+          airPower = 0.85;
+          sliderAirPower.value = "0.85";
+        }
       } else if (tool === "mic") {
         micPosMm = posMm;
       }
@@ -193,6 +231,41 @@ async function boot(): Promise<void> {
     },
   });
   syncToolsToSim();
+
+  const ALL_VEC_LAYERS: VectorFieldLayer[] = ["heat", "convection", "magnetic", "acoustic", "stress"];
+  const btnVecAll = $<HTMLButtonElement>("#btn-vec-all");
+
+  const syncVectorFieldButtons = (): void => {
+    let allOn = true;
+    document.querySelectorAll<HTMLButtonElement>("[data-vec-field]").forEach((btn) => {
+      const layer = btn.dataset.vecField as VectorFieldLayer;
+      const isOn = scene.isVectorFieldVisible(layer);
+      btn.classList.toggle("active", isOn);
+      if (!isOn) allOn = false;
+    });
+    btnVecAll.classList.toggle("active", allOn);
+  };
+
+  const setVectorField = (layer: VectorFieldLayer, visible: boolean): void => {
+    scene.setVectorFieldVisible(layer, visible);
+    syncVectorFieldButtons();
+  };
+
+  document.querySelectorAll<HTMLButtonElement>("[data-vec-field]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const layer = btn.dataset.vecField as VectorFieldLayer;
+      scene.toggleVectorField(layer);
+      syncVectorFieldButtons();
+    });
+  });
+
+  btnVecAll.addEventListener("click", () => {
+    const anyOff = ALL_VEC_LAYERS.some((l) => !scene.isVectorFieldVisible(l));
+    for (const l of ALL_VEC_LAYERS) {
+      scene.setVectorFieldVisible(l, anyOff);
+    }
+    syncVectorFieldButtons();
+  });
 
   const selectToolMode = (mode: ActiveToolMode, autoArm = true): void => {
     activeToolMode = mode;
@@ -216,6 +289,9 @@ async function boot(): Promise<void> {
       } else if (mode === "magnet" && !magnetOn) {
         magnetOn = true;
         chkMagnetOn.checked = true;
+      } else if (mode === "air" && airPower < 0.05) {
+        airPower = 0.85;
+        sliderAirPower.value = "0.85";
       }
     }
     syncToolsToSim();
@@ -240,6 +316,15 @@ async function boot(): Promise<void> {
     magnetDistMm = 28.0;
     sliderMagnetDist.value = "28";
     magnetPosMm = [28.0, -11.0, 2.5];
+    airPower = 0.0;
+    sliderAirPower.value = "0";
+    ambientPressureAtm = 1.0;
+    sliderPressureAtm.value = "1";
+    gravityGVec = [0.0, -1.0, 0.0];
+    gravityLabel = "1.0G 6h";
+    document.querySelectorAll("[data-gravity-vec]").forEach((c, idx) => {
+      c.classList.toggle("active", idx === 0);
+    });
     selectToolMode("inspect", false);
   };
 
@@ -398,6 +483,32 @@ async function boot(): Promise<void> {
     sim.trigger_degauss();
   });
 
+  // Compressed Air Shear Nozzle, Bell-Jar Pressure, 3D Gravity & 500G Shock Controls
+  sliderAirPower.addEventListener("input", () => {
+    airPower = Number(sliderAirPower.value);
+    syncToolsToSim();
+  });
+
+  sliderPressureAtm.addEventListener("input", () => {
+    ambientPressureAtm = Number(sliderPressureAtm.value);
+    syncToolsToSim();
+  });
+
+  btnShock500g.addEventListener("click", () => {
+    sim.trigger_mechanical_shock(500.0);
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-gravity-vec]").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      document.querySelectorAll("[data-gravity-vec]").forEach((c) => c.classList.remove("active"));
+      chip.classList.add("active");
+      const raw = (chip.dataset.gravityVec ?? "0,-1,0,1.0G 6h").split(",");
+      gravityGVec = [Number(raw[0] ?? 0), Number(raw[1] ?? -1), Number(raw[2] ?? 0)];
+      gravityLabel = raw[3] ?? "1.0G";
+      syncToolsToSim();
+    });
+  });
+
   // 3D Virtual Microphone Controls
   btnToggleAudio.addEventListener("click", async () => {
     const running = await micAudio.toggle(sim);
@@ -501,7 +612,46 @@ async function boot(): Promise<void> {
           sliderMagnetDist.value = "13";
           magnetPosMm = [13.0, -11.0, 2.5];
           syncToolsToSim();
+          setVectorField("magnetic", true);
           applyCameraPreset("tourbillon");
+          break;
+
+        case "air-blow-gold":
+          stopAllPerturbations();
+          sim.reset();
+          sim.set_blowtorch(1.0, 0.0, -25.0, 1.5);
+          for (let i = 0; i < 120; i++) sim.step(0.05);
+          sim.set_blowtorch(0.0, 0.0, -25.0, 1.5);
+          airPosMm = [0.0, -24.0, 2.5];
+          airPower = 0.92;
+          sliderAirPower.value = "0.92";
+          syncToolsToSim();
+          for (let i = 0; i < 30; i++) sim.step(0.05);
+          setVectorField("convection", true);
+          applyCameraPreset("overview");
+          break;
+
+        case "vacuum-chamber":
+          stopAllPerturbations();
+          sim.reset();
+          ambientPressureAtm = 0.0;
+          sliderPressureAtm.value = "0";
+          syncToolsToSim();
+          for (let i = 0; i < 45; i++) sim.step(0.05);
+          setVectorField("convection", true);
+          applyCameraPreset("tourbillon");
+          break;
+
+        case "shock-centrifuge":
+          stopAllPerturbations();
+          sim.reset();
+          gravityGVec = [0.0, -4.0, 0.0];
+          gravityLabel = "4.0G Centr";
+          syncToolsToSim();
+          sim.trigger_mechanical_shock(500.0);
+          for (let i = 0; i < 15; i++) sim.step(0.05);
+          setVectorField("stress", true);
+          applyCameraPreset("overview");
           break;
       }
     });
@@ -525,7 +675,28 @@ async function boot(): Promise<void> {
     } else if (key === "5") {
       selectToolMode("magnet", true);
     } else if (key === "6") {
+      selectToolMode("air", true);
+    } else if (key === "7") {
       selectToolMode("mic", false);
+    } else if (key === "h") {
+      scene.toggleVectorField("heat");
+      syncVectorFieldButtons();
+    } else if (key === "c") {
+      scene.toggleVectorField("convection");
+      syncVectorFieldButtons();
+    } else if (key === "b") {
+      scene.toggleVectorField("magnetic");
+      syncVectorFieldButtons();
+    } else if (key === "a") {
+      scene.toggleVectorField("acoustic");
+      syncVectorFieldButtons();
+    } else if (key === "g") {
+      scene.toggleVectorField("stress");
+      syncVectorFieldButtons();
+    } else if (key === "v") {
+      btnVecAll.click();
+    } else if (key === "s") {
+      sim.trigger_mechanical_shock(500.0);
     } else if (key === "x") {
       stopAllPerturbations();
     } else if (key === "w") {
@@ -590,6 +761,8 @@ async function boot(): Promise<void> {
     lblOilRate.textContent = `${snap.nodes[9]!.oilFilmUm.toFixed(1)} µm film`;
     lblBField.textContent = `${snap.bFieldEscapementMt.toFixed(1)} mT`;
     lblRemanence.textContent = `${snap.remanentMagnetizationMt.toFixed(1)} mT`;
+    lblAirPower.textContent = `${Math.round(airPower * 100)}% (${Math.round(airPower * 120)} m/s)`;
+    lblChamberEnv.textContent = `${ambientPressureAtm.toFixed(2)} atm · ${gravityLabel}`;
     const splDb = sim.mic_spl_db();
     const sone = sim.mic_loudness_sone();
     const acum = sim.mic_sharpness_acum();
@@ -638,6 +811,10 @@ async function boot(): Promise<void> {
       oilPosMm,
       magnetOn,
       magnetPosMm,
+      airPower,
+      airPosMm,
+      ambientPressureAtm,
+      gravityGVec,
       micPosMm,
       caseShellData: sim.case_shell_snapshot(),
       spatialGridData: sim.spatial_grid_snapshot(),

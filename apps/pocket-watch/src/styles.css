@@ -931,10 +931,111 @@ input[type="range"]::-webkit-slider-thumb:hover {
   border-color: rgba(217, 178, 98, 0.48);
 }
 
+/* Floating 3D Superimposed Physics Vector Fields Bar */
+#vector-field-bar {
+  position: absolute;
+  top: 50px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  max-width: calc(100% - 20px);
+  overflow-x: auto;
+  background: rgba(10, 14, 22, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  backdrop-filter: blur(12px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  z-index: 12;
+  scrollbar-width: none;
+}
+
+#vector-field-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.vec-btn {
+  cursor: pointer;
+  font-size: 10.6px;
+  font-weight: 600;
+  padding: 3.5px 9px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  white-space: nowrap;
+  transition: all 0.14s ease;
+}
+
+.vec-btn:hover {
+  color: var(--text-main);
+  border-color: rgba(217, 178, 98, 0.45);
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.vec-btn.vec-heat.active {
+  background: rgba(255, 119, 51, 0.24);
+  border-color: #ff8547;
+  color: #ffcbb0;
+  box-shadow: 0 0 10px rgba(255, 119, 51, 0.28);
+}
+
+.vec-btn.vec-conv.active {
+  background: rgba(24, 216, 180, 0.22);
+  border-color: #2ce6c4;
+  color: #b4fff0;
+  box-shadow: 0 0 10px rgba(24, 216, 180, 0.26);
+}
+
+.vec-btn.vec-mag.active {
+  background: rgba(168, 85, 247, 0.24);
+  border-color: #c084fc;
+  color: #ebd5ff;
+  box-shadow: 0 0 10px rgba(168, 85, 247, 0.28);
+}
+
+.vec-btn.vec-ac.active {
+  background: rgba(56, 189, 248, 0.24);
+  border-color: #38bdf8;
+  color: #ccefff;
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.28);
+}
+
+.vec-btn.vec-stress.active {
+  background: rgba(245, 158, 11, 0.24);
+  border-color: #fbbf24;
+  color: #fde68a;
+  box-shadow: 0 0 10px rgba(245, 158, 11, 0.28);
+}
+
+.vec-btn.vec-all.active {
+  background: rgba(217, 178, 98, 0.26);
+  border-color: var(--gold-bright);
+  color: var(--gold-bright);
+}
+
+.tool-btn.tool-air.active {
+  border-color: #38bdf8;
+  background: rgba(56, 189, 248, 0.16);
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.32);
+}
+
+.btn-shock {
+  border-color: rgba(255, 119, 51, 0.48) !important;
+  color: #ffb894 !important;
+  background: rgba(255, 119, 51, 0.14) !important;
+}
+
+.btn-shock:hover {
+  background: rgba(255, 119, 51, 0.26) !important;
+}
+
 /* Contextual Active Tool Banner */
 .stage-banner {
   position: absolute;
-  top: 54px;
+  top: 88px;
   left: 50%;
   transform: translateX(-50%);
   display: flex;

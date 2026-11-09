@@ -89,6 +89,15 @@ export class PocketWatchSim {
      */
     reset(): void;
     /**
+     * Configure the high-velocity compressed air / argon nozzle ($300\text{ K}, M \approx 0.35$) in 3D watch coordinates ($\text{mm}$).
+     * Applies forced convective cooling and aerodynamic surface shear that blows molten gold and watch oil across the movement.
+     */
+    set_air_jet(power: number, x_mm: number, y_mm: number, z_mm: number): void;
+    /**
+     * Set the ambient bell-jar chamber pressure in atmospheres ($0.0\text{ atm}$ vacuum $\to 1.0\text{ atm} \to 5.0\text{ atm}$ hyperbaric).
+     */
+    set_ambient_pressure_atm(pressure_atm: number): void;
+    /**
      * Configure the virtual oxy-butane blowtorch ($T_{\text{flame}} = 2250\text{ K}$) in 3D watch coordinates ($\text{mm}$).
      */
     set_blowtorch(power: number, x_mm: number, y_mm: number, z_mm: number): void;
@@ -96,6 +105,10 @@ export class PocketWatchSim {
      * Toggle between traditional High-Carbon Blued Steel (`false`) and Compensated Invar/Fe-36Ni (`true`) hairspring.
      */
     set_compensated_hairspring(compensated: boolean): void;
+    /**
+     * Set the 3D gravitational / centrifuge acceleration vector $[g_x, g_y, g_z]$ in Earth-$g$ units ($9.80665\text{ m/s}^2$).
+     */
+    set_gravity_vector(gx: number, gy: number, gz: number): void;
     /**
      * Configure the cryogenic liquid nitrogen ($\text{LN}_2$ at $77.36\text{ K}$) pour stream in 3D watch coordinates ($\text{mm}$).
      */
@@ -139,6 +152,11 @@ export class PocketWatchSim {
      */
     trigger_degauss(): void;
     /**
+     * Deliver a mechanical bench-drop / G-shock impulse ($G_{\text{peak}}$ in $\text{g}$-units, e.g. $500\text{ G}$)
+     * to the Incabloc ruby jewel suspension, balance wheel, 18k gold case shell, and molten gold pool.
+     */
+    trigger_mechanical_shock(g_peak: number): void;
+    /**
      * Wind the mainspring crown by `delta_turns` (where `8.5` turns = full 42-hour wind).
      */
     wind_crown(delta_turns: number): void;
@@ -168,8 +186,11 @@ export interface InitOutput {
     readonly pocketwatchsim_rate_sensitivity_s_day_per_k: (a: number) => number;
     readonly pocketwatchsim_render_audio_block: (a: number, b: number) => [number, number];
     readonly pocketwatchsim_reset: (a: number) => void;
+    readonly pocketwatchsim_set_air_jet: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly pocketwatchsim_set_ambient_pressure_atm: (a: number, b: number) => void;
     readonly pocketwatchsim_set_blowtorch: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly pocketwatchsim_set_compensated_hairspring: (a: number, b: number) => void;
+    readonly pocketwatchsim_set_gravity_vector: (a: number, b: number, c: number, d: number) => void;
     readonly pocketwatchsim_set_liquid_nitrogen: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly pocketwatchsim_set_magnet: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly pocketwatchsim_set_microphone: (a: number, b: number, c: number, d: number, e: number) => void;
@@ -180,6 +201,7 @@ export interface InitOutput {
     readonly pocketwatchsim_status_label: (a: number) => [number, number];
     readonly pocketwatchsim_step: (a: number, b: number) => void;
     readonly pocketwatchsim_trigger_degauss: (a: number) => void;
+    readonly pocketwatchsim_trigger_mechanical_shock: (a: number, b: number) => void;
     readonly pocketwatchsim_wind_crown: (a: number, b: number) => void;
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;

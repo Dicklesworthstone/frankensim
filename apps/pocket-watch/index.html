@@ -130,13 +130,21 @@
                 </span>
                 <kbd>5</kbd>
               </button>
+              <button data-tool="air" class="tool-btn tool-air" type="button">
+                <span class="tool-icon">💨</span>
+                <span class="tool-meta">
+                  <b>Air Shear Jet</b>
+                  <small>Blows Au/oil &amp; cools</small>
+                </span>
+                <kbd>6</kbd>
+              </button>
               <button data-tool="mic" class="tool-btn tool-mic" type="button">
                 <span class="tool-icon">🎙️</span>
                 <span class="tool-meta">
                   <b>3D Acoustic Mic</b>
                   <small>Position probe in 3D</small>
                 </span>
-                <kbd>6</kbd>
+                <kbd>7</kbd>
               </button>
             </div>
 
@@ -228,6 +236,54 @@
                 <button id="btn-degauss" class="btn btn-mini" type="button">⚡ Fire AC Degauss Coil</button>
               </div>
             </div>
+
+            <!-- Compressed Air Shear Nozzle Controls -->
+            <div id="subtool-air" class="subtool-box air-box">
+              <div class="subtool-title">
+                <span>💨 Compressed Air Nozzle (<i>M</i> ≈ 0.35 Shear Jet)</span>
+                <strong id="lbl-air-power">0% (0 m/s)</strong>
+              </div>
+              <input
+                id="slider-air-power"
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+                value="0"
+                aria-label="Compressed air nozzle power"
+              />
+            </div>
+
+            <!-- Bell-Jar Vacuum, 3D Gravity & 500G Shock Chamber -->
+            <div id="subtool-chamber" class="subtool-box chamber-box">
+              <div class="subtool-title">
+                <span>🌍 Bell-Jar Pressure, 3D Gravity &amp; Shock</span>
+                <strong id="lbl-chamber-env">1.00 atm · 1.0 G (6h)</strong>
+              </div>
+              <div class="control-row">
+                <label for="slider-pressure-atm">Bell-Jar Air</label>
+                <input
+                  id="slider-pressure-atm"
+                  type="range"
+                  min="0"
+                  max="5"
+                  step="0.05"
+                  value="1"
+                  aria-label="Ambient chamber pressure in atmospheres"
+                />
+                <button id="btn-shock-500g" class="btn btn-mini btn-shock" type="button" title="Deliver a 500G bench drop shock (Shortcut: S)">
+                  💥 500G Shock
+                </button>
+              </div>
+              <div class="target-chips">
+                <span>Pose / G:</span>
+                <button data-gravity-vec="0,-1,0,1.0G 6h" class="chip active" type="button">1G 6h Down</button>
+                <button data-gravity-vec="1,0,0,1.0G 3h" class="chip" type="button">1G 3h Flank</button>
+                <button data-gravity-vec="0,0,-1,0G Flat" class="chip" type="button">Dial Up Flat</button>
+                <button data-gravity-vec="0,0,0,0.0G Space" class="chip" type="button">0G Space</button>
+                <button data-gravity-vec="0,-4,0,4.0G Centr" class="chip" type="button">4G Centrifuge</button>
+              </div>
+            </div>
           </section>
 
           <!-- Card 2: Guided Multiphysics Scenarios (Mobile tab "scenarios") -->
@@ -285,6 +341,27 @@
                   <span class="preset-tag tag-mag">Ferromagnetic</span>
                 </div>
                 <span>Dipole gradient skews beat error &amp; pins steel lever pallet fork</span>
+              </button>
+              <button data-preset="air-blow-gold" class="preset-btn" type="button">
+                <div class="preset-top">
+                  <b>8. Blow Molten Gold with Air Jet</b>
+                  <span class="preset-tag tag-cryo">Aero Shear</span>
+                </div>
+                <span>Compressed air nozzle blows liquid gold waves across the bridges</span>
+              </button>
+              <button data-preset="vacuum-chamber" class="preset-btn" type="button">
+                <div class="preset-top">
+                  <b>9. Bell-Jar Vacuum Chronometry (0 atm)</b>
+                  <span class="preset-tag tag-ok">Zero Aero Drag</span>
+                </div>
+                <span>Evacuates air → zero Stokes-Stuart drag → balance surges &gt;310°</span>
+              </button>
+              <button data-preset="shock-centrifuge" class="preset-btn" type="button">
+                <div class="preset-top">
+                  <b>10. 500G Drop Shock &amp; 4G Centrifuge</b>
+                  <span class="preset-tag tag-gold">Inertial G-Load</span>
+                </div>
+                <span>500G Incabloc jewel impact + 4G centrifuge load &amp; stress field</span>
               </button>
             </div>
           </section>
@@ -360,6 +437,29 @@
               <button data-cam="escapement" class="cam-btn" type="button">Ruby Escapement</button>
               <button data-cam="barrel" class="cam-btn" type="button">12h Barrel &amp; Train</button>
               <button data-cam="side" class="cam-btn" type="button">Coaxial Profile</button>
+            </div>
+
+            <!-- Floating 3D Superimposed Physics Vector Fields Bar -->
+            <div id="vector-field-bar" role="toolbar" aria-label="3D Physics Vector Field Overlays">
+              <span class="cam-label">3D FIELDS:</span>
+              <button data-vec-field="heat" class="vec-btn vec-heat" type="button" title="Toggle 3D Heat Flux Vector Field q = -k∇T (Shortcut: H)">
+                🔥 Heat Flux
+              </button>
+              <button data-vec-field="convection" class="vec-btn vec-conv" type="button" title="Toggle 3D Buoyant Plume, Wall-Jet & Marangoni Flow Vectors (Shortcut: C)">
+                🌊 Convection
+              </button>
+              <button data-vec-field="magnetic" class="vec-btn vec-mag" type="button" title="Toggle 3D Magnetic Flux Density Vector Field B(r) (Shortcut: B)">
+                🧲 Magnetic B
+              </button>
+              <button data-vec-field="acoustic" class="vec-btn vec-ac" type="button" title="Toggle 3D Acoustic Wave & Poynting Intensity Vectors (Shortcut: A)">
+                🔊 Acoustic
+              </button>
+              <button data-vec-field="stress" class="vec-btn vec-stress" type="button" title="Toggle 3D Viscoplastic Stress, Train Torque & Gravity Vectors (Shortcut: G)">
+                ⚙️ Stress &amp; G
+              </button>
+              <button id="btn-vec-all" class="vec-btn vec-all" type="button" title="Toggle all 3D physics vector fields (Shortcut: V)">
+                ✨ All
+              </button>
             </div>
 
             <!-- Contextual Active Tool / Scenario Banner on 3D Stage -->
