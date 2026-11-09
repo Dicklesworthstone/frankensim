@@ -1477,8 +1477,20 @@ avoid a fresh global search at every output frame; a bounded local bisection
 fallback handles rounded roots. No sample-density, additional pitch, or Doppler
 amplitude multiplier is applied. Complete source/receiver speed envelopes admit
 the declared received band, including common translation, before publication.
-They constrain the Doppler clock rate; arbitrary geometric/amplitude modulation
-remains part of the producer's explicit receiver-band declaration.
+When one endpoint is fixed in resting air, a bandwidth refusal is additionally
+refined by the continuous directional maximum of every original linear span.
+The radial projection toward the fixed endpoint is nonincreasing on each span,
+so an outward interval enclosure at its first event bounds that complete span.
+Source recession uses `1/(1-M_radial)`; receiver motion uses `1+M_toward_source`.
+Coincident or unresolved directions retain the speed-only bound. Moving both
+endpoints and nonzero uniform flow retain the original envelope admission.
+Already-admitted scenes do not pay for this extra scan; it allocates no memory
+and polls cancellation at the original frame cadence. Every refined segment,
+including repeated receiver scans for different sources, is charged to the
+existing work budget before its scan using the known minimum output work;
+final preflight also includes the exact propagated and convolved output horizon.
+These bounds constrain the Doppler clock rate; arbitrary geometric/amplitude
+modulation remains part of the producer's explicit receiver-band declaration.
 
 `RetardedSincUniformFlow` extends the same reconstruction with one finite
 laboratory medium velocity `U [m/s]`. All supplied positions remain in the

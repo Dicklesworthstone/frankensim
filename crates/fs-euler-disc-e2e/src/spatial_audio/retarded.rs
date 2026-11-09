@@ -10,6 +10,7 @@
 //! fs-aeroac; they cannot be inferred from a dry modal stem.
 
 use super::*;
+use fs_ivl::Interval;
 
 #[derive(Clone, Copy)]
 struct VelocityEnvelope {
@@ -68,7 +69,7 @@ pub(super) fn admit(
     input: SpatialAudioRenderInput<'_>,
     frames: usize,
     checkpoint_fn: &mut impl FnMut() -> Result<(), SpatialAudioError>,
-) -> Result<u64, SpatialAudioError> {
+) -> Result<(u64, u64), SpatialAudioError> {
     if frames < 2 || frames as u64 > (1_u64 << 53) {
         return Err(invalid(
             "retarded source history with representable sample clocks",
@@ -98,6 +99,7 @@ pub(super) fn admit(
         checkpoint_fn,
     )?;
     let mut last_arrival = (frames - 1) as f64;
+    let mut refinement_work = 0_u64;
     for source in input.sources {
         checkpoint_fn()?;
         let source_frames = if matches!(source.positions, SourcePositionTrack::Static(_)) {
@@ -121,7 +123,7 @@ pub(super) fn admit(
                 .abs()
                 .max((motion.high[j] - receiver.low[j]).abs())
         }));
-        let maximum_rate = if difference == 0.0 {
+        let mut maximum_rate = if difference == 0.0 {
             1.0
         } else {
             let margin = (1.0 - motion.speed.next_up()).next_down();
@@ -132,6 +134,68 @@ pub(super) fn admit(
                 .min((1.0 + difference.next_up() / margin).next_up())
                 .next_up()
         };
+        // Refine only a bandwidth refusal, so already-admitted scenes retain
+        // their preparation cost. Against a fixed endpoint in resting air,
+        // the first radial projection bounds each COMPLETE linear span.
+        if flow_step == [0.0; 3]
+            && source_bandwidth_hz * maximum_rate > receiver_bandwidth_hz
+        {
+            let refinement_frames = match (input.listener, source.positions) {
+                (ListenerPoseTrack::Static(_), _) => source_frames,
+                (_, SourcePositionTrack::Static(_)) => receiver_frames,
+                _ => 0,
+            };
+            if refinement_frames > 1 {
+                refinement_work = refinement_work
+                    .checked_add((refinement_frames - 1) as u64)
+                    .ok_or_else(|| invalid("directional admission work"))?;
+                let source_count = input.sources.len() as u64;
+                let total_input_frames = source_count
+                    .checked_mul(frames as u64)
+                    .ok_or_else(|| invalid("spatial source work"))?;
+                let listener_frames = match input.listener {
+                    ListenerPoseTrack::Static(_) => frames,
+                    ListenerPoseTrack::PerFrame(poses) => poses.len(),
+                };
+                // Before scanning, charge the already-known minimum work.
+                // Both output policies retain at least the input horizon;
+                // preflight charges the exact propagated/convolved tail later.
+                validate_work_budget(
+                    total_input_frames,
+                    frames as u64,
+                    frames as u64,
+                    input.room_ir.map_or(0, StereoRoomImpulseResponse::len),
+                    retarded_work_units(
+                        source_count,
+                        frames as u64,
+                        listener_frames as u64,
+                        refinement_work,
+                    )?,
+                    config.budget,
+                )?;
+            }
+            if let ListenerPoseTrack::Static(listener) = input.listener {
+                maximum_rate = fixed_endpoint_maximum_rate(
+                    source_frames,
+                    |i| source.positions.position(i),
+                    listener.position_m,
+                    sound_step,
+                    true,
+                    maximum_rate,
+                    checkpoint_fn,
+                )?;
+            } else if let SourcePositionTrack::Static(position) = source.positions {
+                maximum_rate = fixed_endpoint_maximum_rate(
+                    receiver_frames,
+                    |i| input.listener.pose(i).position_m,
+                    position,
+                    sound_step,
+                    false,
+                    maximum_rate,
+                    checkpoint_fn,
+                )?;
+            }
+        }
         if !maximum_rate.is_finite() || source_bandwidth_hz * maximum_rate > receiver_bandwidth_hz {
             return Err(invalid(
                 "receiver bandwidth covering both source and receiver Doppler",
@@ -149,7 +213,83 @@ pub(super) fn admit(
     if !last_arrival.is_finite() || last_arrival >= (1_u64 << 53) as f64 {
         return Err(invalid("representable retarded output horizon"));
     }
-    Ok(last_arrival.ceil() as u64 + 1)
+    Ok((last_arrival.ceil() as u64 + 1, refinement_work))
+}
+
+/// Tighten the complete-history bound when one endpoint is fixed in resting
+/// air. For either moving endpoint let r = fixed - moving and beta = v/c.
+/// On a linear span, d(n.beta)/ds = -(|beta|² - (n.beta)²)/|r| <= 0
+/// (s is distance travelled by sound). Thus the source rate 1/(1-n.beta)
+/// and the receiver rate 1+n.beta both attain their maximum at span start.
+/// A crossing only jumps from approach to recession; every new span is still
+/// checked, so velocity changes cannot hide behind the first history sample.
+fn fixed_endpoint_maximum_rate(
+    frames: usize,
+    position: impl Fn(usize) -> [f64; 3],
+    fixed: [f64; 3],
+    sound_step: f64,
+    moving_source: bool,
+    fallback: f64,
+    checkpoint_fn: &mut impl FnMut() -> Result<(), SpatialAudioError>,
+) -> Result<f64, SpatialAudioError> {
+    let mut maximum = 0.0_f64;
+    for i in 1..frames {
+        if i % SPATIAL_AUDIO_CANCELLATION_POLL_FRAMES == 0 {
+            checkpoint_fn()?;
+        }
+        let start = position(i - 1);
+        let end = position(i);
+        let rate = fixed_endpoint_segment_rate(start, end, fixed, sound_step, moving_source)
+            .unwrap_or(fallback);
+        maximum = maximum.max(rate);
+    }
+    Ok(if frames < 2 { 1.0 } else { maximum.min(fallback) })
+}
+
+fn fixed_endpoint_segment_rate(
+    start: [f64; 3],
+    end: [f64; 3],
+    fixed: [f64; 3],
+    sound_step: f64,
+    moving_source: bool,
+) -> Option<f64> {
+    if start == end {
+        return Some(1.0);
+    }
+    let ray: [Interval; 3] =
+        core::array::from_fn(|axis| Interval::point(fixed[axis]) - Interval::point(start[axis]));
+    let scale = ray.iter().map(|x| x.abs().hi()).fold(0.0_f64, f64::max);
+    if !scale.is_finite() || scale == 0.0 {
+        return None;
+    }
+    // Scale before squaring, and enclose every subtraction/product/division.
+    // An unresolved coincident start or near-sonic denominator retains the
+    // original speed-only bound instead of guessing a propagation direction.
+    let ray = ray.map(|x| x / Interval::point(scale));
+    let mut square = Interval::point(0.0);
+    let mut radial = Interval::point(0.0);
+    for axis in 0..3 {
+        square = square + ray[axis] * ray[axis];
+        let beta = (Interval::point(end[axis]) - Interval::point(start[axis]))
+            / Interval::point(sound_step);
+        radial = radial + ray[axis] * beta;
+    }
+    let radius = square.sqrt();
+    if radius.lo() <= 0.0 || !radius.hi().is_finite() {
+        return None;
+    }
+    radial = radial / radius;
+    let one = Interval::point(1.0);
+    let rate = if moving_source {
+        let denominator = one - radial;
+        if denominator.lo() <= 0.0 {
+            return None;
+        }
+        (one / denominator).hi()
+    } else {
+        (one + radial).hi()
+    };
+    (rate.is_finite() && rate > 0.0).then_some(rate)
 }
 
 fn last_reception(
@@ -527,5 +667,92 @@ mod tests {
                 samples[i].to_bits()
             );
         }
+    }
+
+    /// G1/G3: a straight span has an analytic radial extremum, including
+    /// flybys and a collinear crossing. Check both independent clock laws.
+    #[test]
+    fn fixed_endpoint_directional_bound_covers_complete_linear_spans() {
+        for (start, end, sound_step) in [
+            ([4.0, 0.0, 0.0], [3.25, 0.0, 0.0], 1.0),
+            ([4.0, 0.0, 0.0], [4.75, 0.0, 0.0], 1.0),
+            ([2.0, 1.0, 0.0], [-2.0, 1.0, 0.0], 8.0),
+            ([1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], 4.0),
+            ([4.0, 3.0, 2.0], [4.125, 3.25, 2.375], 1.0),
+        ] {
+            let beta: [f64; 3] =
+                core::array::from_fn(|axis| (end[axis] - start[axis]) / sound_step);
+            for moving_source in [true, false] {
+                let bound =
+                    fixed_endpoint_segment_rate(start, end, [0.0; 3], sound_step, moving_source)
+                        .unwrap();
+                for step in 0..=128 {
+                    let fraction = f64::from(step) / 128.0;
+                    let ray: [f64; 3] = core::array::from_fn(|axis| {
+                        -(start[axis] + fraction * (end[axis] - start[axis]))
+                    });
+                    let distance = ray.iter().map(|x| x * x).sum::<f64>().sqrt();
+                    if distance == 0.0 {
+                        continue;
+                    }
+                    let radial = ray
+                        .iter()
+                        .zip(beta)
+                        .map(|(r, v)| r * v / distance)
+                        .sum::<f64>();
+                    let exact = if moving_source {
+                        1.0 / (1.0 - radial)
+                    } else {
+                        1.0 + radial
+                    };
+                    assert!(exact <= bound, "{moving_source}: {exact} > {bound}");
+                    if step == 0 {
+                        assert!(bound - exact < 1.0e-12, "resolved first-event extremum");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_endpoint_refinement_retains_coincidence_fallback_and_cancellation() {
+        for moving_source in [true, false] {
+            assert!(
+                fixed_endpoint_segment_rate(
+                    [0.0; 3],
+                    [0.25, 0.0, 0.0],
+                    [0.0; 3],
+                    1.0,
+                    moving_source,
+                )
+                .is_none()
+            );
+            let bound = fixed_endpoint_maximum_rate(
+                2,
+                |i| [i as f64 * 0.25, 0.0, 0.0],
+                [0.0; 3],
+                1.0,
+                moving_source,
+                4.0,
+                &mut || Ok(()),
+            )
+            .unwrap();
+            assert_eq!(bound, 4.0);
+        }
+        let mut polls = 0;
+        let result = fixed_endpoint_maximum_rate(
+            512,
+            |i| [1.0 + i as f64 * 0.25, 0.0, 0.0],
+            [0.0; 3],
+            1.0,
+            true,
+            4.0,
+            &mut || {
+                polls += 1;
+                Err(SpatialAudioError::Cancelled)
+            },
+        );
+        assert!(matches!(result, Err(SpatialAudioError::Cancelled)));
+        assert_eq!(polls, 1);
     }
 }

@@ -1214,12 +1214,15 @@ fn preflight(
     checkpoint_fn()?;
     let input_identity = hasher.finalize();
 
-    let natural_direct_output_frames = if retarded {
+    let (natural_direct_output_frames, refinement_work) = if retarded {
         retarded::admit(spatializer.config, input, frame_count, checkpoint_fn)?
     } else {
-        (frame_count as u64)
-            .checked_add(maximum_arrival_offset)
-            .ok_or_else(|| invalid("direct output frame count"))?
+        (
+            (frame_count as u64)
+                .checked_add(maximum_arrival_offset)
+                .ok_or_else(|| invalid("direct output frame count"))?,
+            0,
+        )
     };
     let room_tail = input
         .room_ir
@@ -1254,11 +1257,12 @@ fn preflight(
         final_output_frames,
         input.room_ir.map_or(0, StereoRoomImpulseResponse::len),
         if retarded {
-            (input.sources.len() as u64)
-                .checked_mul(direct_output_frames)
-                .and_then(|n| n.checked_mul(96))
-                .and_then(|n| n.checked_add(listener_frames as u64))
-                .ok_or_else(|| invalid("retarded reconstruction work"))?
+            retarded_work_units(
+                input.sources.len() as u64,
+                direct_output_frames,
+                listener_frames as u64,
+                refinement_work,
+            )?
         } else {
             0
         },
@@ -1684,6 +1688,20 @@ fn validate_memory_budget(
         requested,
         budget.maximum_owned_sample_bytes,
     )
+}
+
+fn retarded_work_units(
+    sources: u64,
+    direct_frames: u64,
+    listener_frames: u64,
+    refinement_work: u64,
+) -> Result<u64, SpatialAudioError> {
+    sources
+        .checked_mul(direct_frames)
+        .and_then(|n| n.checked_mul(96))
+        .and_then(|n| n.checked_add(listener_frames))
+        .and_then(|n| n.checked_add(refinement_work))
+        .ok_or_else(|| invalid("retarded reconstruction and admission work"))
 }
 
 fn validate_work_budget(
@@ -2454,6 +2472,199 @@ mod tests {
             }
             assert!(checked > 1_000, "complete causal test window");
         }
+    }
+
+    /// G1: receding sources need their actual compressed received band, not
+    /// the expansion a source with the same speed would have on approach.
+    #[test]
+    fn retarded_directional_admission_renders_receding_sources_and_checks_every_span() {
+        let count = 512;
+        let signal: Vec<f64> = (0..count)
+            .map(|i| (core::f64::consts::TAU * 128.0 * i as f64 / 8_192.0).sin())
+            .collect();
+        let positions: Vec<[f64; 3]> = (0..count)
+            .map(|i| [0.0, 0.0, -192.0 * i as f64 / 8_192.0])
+            .collect();
+        let cfg = SpatialAudioConfig {
+            delay_policy: SpatialDelayPolicy::RetardedSinc {
+                source_bandwidth_hz: 1_800.0,
+                receiver_bandwidth_hz: 1_200.0,
+            },
+            ..retarded_config()
+        };
+        let listener = ListenerPoseTrack::Static(listener_at([0.0, 0.0, 64.0]));
+        let output = render_single(
+            cfg,
+            &signal,
+            SourcePositionTrack::PerFrame(&positions),
+            listener,
+            None,
+        )
+        .unwrap();
+        let mut checked = 0;
+        for (frame, sample) in output.samples().iter().enumerate() {
+            let emission = (frame as f64 - 2_048.0) / 1.75;
+            if !(32.0..=(count - 33) as f64).contains(&emission) {
+                continue;
+            }
+            let expected =
+                (core::f64::consts::TAU * 128.0 * emission / 8_192.0).sin() * det::sqrt(0.5);
+            assert!((sample.left_fs - expected).abs() < 3.0e-4);
+            assert_eq!(sample.left_fs.to_bits(), sample.right_fs.to_bits());
+            checked += 1;
+        }
+        assert!(checked > 700);
+        for turn_around in [false, true] {
+            let approaching: Vec<[f64; 3]> = (0..count)
+                .map(|i| {
+                    let travel = if turn_around {
+                        (i as f64 - 256.0).abs() - 256.0
+                    } else {
+                        i as f64
+                    };
+                    [0.0, 0.0, 192.0 * travel / 8_192.0]
+                })
+                .collect();
+            assert!(
+                render_single(
+                    cfg,
+                    &signal,
+                    SourcePositionTrack::PerFrame(&approaching),
+                    listener,
+                    None,
+                )
+                .is_err(),
+                "approach, including after a receding span, must retain aliasing refusal"
+            );
+        }
+    }
+
+    /// G1: receiver recession is a numerator change, distinct from source
+    /// recession. Physical reception poses and the finite tail remain required.
+    #[test]
+    fn retarded_directional_admission_uses_the_moving_receiver_clock() {
+        let count = 512;
+        let signal: Vec<f64> = (0..count)
+            .map(|i| (core::f64::consts::TAU * 128.0 * i as f64 / 8_192.0).sin())
+            .collect();
+        let poses: Vec<ListenerPose> = (0..8_192)
+            .map(|i| listener_at([0.0, 0.0, 16.0 + 192.0 * f64::from(i) / 8_192.0]))
+            .collect();
+        let cfg = SpatialAudioConfig {
+            delay_policy: SpatialDelayPolicy::RetardedSinc {
+                source_bandwidth_hz: 1_800.0,
+                receiver_bandwidth_hz: 600.0,
+            },
+            ..retarded_config()
+        };
+        let output = render_single(
+            cfg,
+            &signal,
+            SourcePositionTrack::Static([0.0; 3]),
+            ListenerPoseTrack::PerFrame(&poses),
+            None,
+        )
+        .unwrap();
+        let mut checked = 0;
+        for (frame, sample) in output.samples().iter().enumerate() {
+            let emission = 0.25 * frame as f64 - 512.0;
+            if !(32.0..=(count - 33) as f64).contains(&emission) {
+                continue;
+            }
+            let expected =
+                (core::f64::consts::TAU * 128.0 * emission / 8_192.0).sin() * det::sqrt(0.5);
+            assert!((sample.left_fs - expected).abs() < 3.0e-4);
+            checked += 1;
+        }
+        assert!(checked > 1_700);
+        let approaching: Vec<ListenerPose> = (0..8_192)
+            .map(|i| listener_at([0.0, 0.0, 16.0 - 192.0 * f64::from(i) / 8_192.0]))
+            .collect();
+        assert!(
+            render_single(
+                cfg,
+                &signal,
+                SourcePositionTrack::Static([0.0; 3]),
+                ListenerPoseTrack::PerFrame(&approaching),
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn retarded_directional_refinement_charges_each_source_scan_only_when_needed() {
+        let signal = [0.25; 32];
+        let poses: Vec<ListenerPose> = (0..4_096)
+            .map(|i| listener_at([0.0, 0.0, 1.0 + 192.0 * f64::from(i) / 8_192.0]))
+            .collect();
+        let sources: [SpatialAudioSource<'_>; 3] = core::array::from_fn(|i| SpatialAudioSource {
+            source_identity: identity("budgeted fixed source"),
+            signal: SpatialMonoSignal::Samples(&signal),
+            positions: SourcePositionTrack::Static([0.0, 0.0, -(i as f64)]),
+            gain_linear: 1.0,
+            authority: SpatialAudioAuthority::PhysicallyParameterized,
+        });
+        let input = SpatialAudioRenderInput {
+            sources: &sources,
+            listener: ListenerPoseTrack::PerFrame(&poses),
+            room_ir: None,
+        };
+        let mut cfg = SpatialAudioConfig {
+            delay_policy: SpatialDelayPolicy::RetardedSinc {
+                source_bandwidth_hz: 1_800.0,
+                receiver_bandwidth_hz: 3_500.0,
+            },
+            output_horizon: SpatialOutputHorizon::ClampToInputFrames,
+            ..retarded_config()
+        };
+        with_cx(false, |cx| {
+            // Ask the public admission result for the unchanged wide-band work.
+            // The long receiver history remains input even for clamped output.
+            cfg.budget.maximum_work_units = 1;
+            let original_work = match OfflineSpatializer::try_new(cfg, cx)
+                .unwrap()
+                .spatialize(input, cx)
+            {
+                Err(SpatialAudioError::ResourceLimit {
+                    resource: "work units",
+                    requested,
+                    ..
+                }) => requested,
+                other => panic!("expected original work-budget diagnostic, got {other:?}"),
+            };
+            cfg.budget.maximum_work_units = original_work;
+            let wide = OfflineSpatializer::try_new(cfg, cx)
+                .unwrap()
+                .spatialize(input, cx)
+                .unwrap();
+
+            cfg.delay_policy = SpatialDelayPolicy::RetardedSinc {
+                source_bandwidth_hz: 1_800.0,
+                receiver_bandwidth_hz: 600.0,
+            };
+            let per_source_scan = (poses.len() - 1) as u64;
+            assert!(matches!(
+                OfflineSpatializer::try_new(cfg, cx).unwrap().spatialize(input, cx),
+                Err(SpatialAudioError::ResourceLimit {
+                    resource: "work units", requested, ..
+                }) if requested == original_work + per_source_scan
+            ));
+            let full_work = original_work + sources.len() as u64 * per_source_scan;
+            cfg.budget.maximum_work_units = full_work - 1;
+            assert!(matches!(
+                OfflineSpatializer::try_new(cfg, cx).unwrap().spatialize(input, cx),
+                Err(SpatialAudioError::ResourceLimit {
+                    resource: "work units", requested, ..
+                }) if requested == full_work
+            ));
+            cfg.budget.maximum_work_units = full_work;
+            let narrow = OfflineSpatializer::try_new(cfg, cx)
+                .unwrap()
+                .spatialize(input, cx)
+                .unwrap();
+            assert_eq!(narrow.samples(), wide.samples());
+        });
     }
 
     /// G1: fixed laboratory endpoints retain their source frequency. Wind
