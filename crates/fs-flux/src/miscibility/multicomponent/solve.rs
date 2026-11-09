@@ -11,6 +11,11 @@ pub(super) struct Rates {
     maximum_molar_frame_residual_mol_m2_s: f64,
     dissipation_rate_w: f64,
 }
+impl Rates {
+    pub(super) const fn evaluations(&self) -> usize {
+        self.evaluations
+    }
+}
 
 pub(super) fn step(
     initial: &MulticomponentMiscibilityField,

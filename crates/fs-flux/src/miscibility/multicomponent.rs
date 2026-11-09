@@ -30,6 +30,9 @@ use std::sync::Arc;
 
 mod solve;
 
+/// Composition accuracy over complete physical intervals with bounded work.
+pub mod adaptive;
+
 /// Fixed cell geometry; the common concentration sets its molar capacity.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MulticomponentMiscibilityCell {
@@ -478,7 +481,9 @@ impl MulticomponentMiscibilityField {
     pub const fn network(&self) -> &MulticomponentMiscibilityNetwork {
         &self.network
     }
-    /// Cell-major, then canonical original species order.
+    /// Published cell-major amounts in canonical original species order.
+    /// Thermodynamic and material states use these representable amounts;
+    /// conservation and adaptive errors also retain their carried low words.
     pub fn component_moles(&self) -> &[f64] {
         &self.amounts
     }

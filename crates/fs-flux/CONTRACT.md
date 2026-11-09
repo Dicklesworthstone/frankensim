@@ -9809,3 +9809,40 @@ independent physical viscosity/heat/storage checks and source-domain refusal.
 The new FEM/material tests remain UNEXECUTED at the pinned-asupersync build gate.
 Rust formatting/parsing and bounded static signature/ownership checks passed;
 the prior unchanged scalar BDF/RCR tests are separate evidence.
+
+### Adaptive multicomponent physical intervals
+
+`miscibility::multicomponent::adaptive` compares one full explicit step with
+two half steps, accepts only the fine trajectory, and independently controls
+every species' mole-fraction error. The error estimate includes the conserved
+amount low words, so a trace or sub-ulp transfer cannot disappear because a
+dominant fraction rounds to one. A relative allowance that underflows to zero
+requires exact agreement. This is a local temporal estimate, not a global
+space/time error certificate.
+
+Positivity and free-energy refusals trigger bounded refinement. Invalid original
+constitutive data, unsupported states, arithmetic failures and cancellation
+remain explicit refusals. No partial interval is published on exhausted work or
+accuracy. The actual representable clock endpoints are retained, including the
+last remainder below the nominal minimum step.
+
+Physical face receipts include only accepted fine steps. Work reports distinguish
+completed numerical steps and completed original Maxwell–Stefan evaluations;
+refused incomplete solves can perform additional work within the attempt bound.
+The original single species/capacity/free-energy allowance is checked again
+over the entire requested interval rather than accumulated per accepted step.
+
+The complete initial rates are shared by the full and first-half trial and
+retained across smaller-step retries at the same field. A normal accepted
+attempt therefore needs two constitutive sweeps rather than three; the midpoint
+still resolves the full original nonlinear friction system. Cached rates are
+invalidated on every accepted field change. Thermodynamic/material states use
+the published representable component amounts; the carried amount low words
+additionally enter conservation and temporal-error accounting.
+
+Validation: all 103 focused numerical miscibility unit tests passed, including
+six adaptive regression groups. These cover independent small-perturbation
+relaxation, accepted-only ternary receipts, positivity-driven refinement and
+rate reuse, work/accuracy/cancellation refusals, independent positive-trace low
+words, and exact short-remainder endpoints.
+
