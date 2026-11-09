@@ -97,6 +97,50 @@ impl SaturableSingletTripletPlan {
         limits: DecayLimits,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, SingletTripletError> {
+        Self::prepare_impl(
+            model,
+            pump_rates_s,
+            pump_energies_j,
+            duration_s,
+            limits,
+            false,
+            cancelled,
+        )
+    }
+
+    /// Also retain the native population-time integral for each real state.
+    /// This includes a stable ground state and does not divide removal counts
+    /// by an artificial or vanishing rate. The extra preparation work remains
+    /// subject to the original kinetic limits.
+    pub fn prepare_with_population_integrals(
+        model: SingletTripletDecay,
+        pump_rates_s: [f64; 2],
+        pump_energies_j: [f64; 2],
+        duration_s: f64,
+        limits: DecayLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, SingletTripletError> {
+        Self::prepare_impl(
+            model,
+            pump_rates_s,
+            pump_energies_j,
+            duration_s,
+            limits,
+            true,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_impl(
+        model: SingletTripletDecay,
+        pump_rates_s: [f64; 2],
+        pump_energies_j: [f64; 2],
+        duration_s: f64,
+        limits: DecayLimits,
+        with_population_integrals: bool,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, SingletTripletError> {
         if !pump_rates_s.into_iter().all(nonnegative)
             || !pump_energies_j.into_iter().all(nonnegative)
             || (0..2).any(|i| pump_rates_s[i] > 0.0 && pump_energies_j[i] < model.energies_j[i])
@@ -141,13 +185,14 @@ impl SaturableSingletTripletPlan {
                 });
             }
         }
-        let evolution = ReactionPlan::prepare(
-            &[ground_rate, model.total_rates_s[0], model.total_rates_s[1]],
-            &edges,
-            duration_s,
-            limits,
-            cancelled,
-        )?;
+        let rates = [ground_rate, model.total_rates_s[0], model.total_rates_s[1]];
+        let evolution = if with_population_integrals {
+            ReactionPlan::prepare_with_population_integrals(
+                &rates, &edges, duration_s, limits, cancelled,
+            )?
+        } else {
+            ReactionPlan::prepare(&rates, &edges, duration_s, limits, cancelled)?
+        };
         Ok(Self {
             model,
             pump_rates_s,
@@ -174,6 +219,19 @@ impl SaturableSingletTripletPlan {
     /// Prepared interval length, seconds.
     pub const fn duration_s(&self) -> f64 {
         self.duration_s
+    }
+
+    /// Population-time integrals `[ground, singlet, triplet]` in count-seconds.
+    /// Requires `prepare_with_population_integrals`; inputs are unchanged.
+    pub fn integrate_populations_with_cancel(
+        &self,
+        populations: [f64; 3],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<[f64; 3], SingletTripletError> {
+        let result = self
+            .evolution
+            .integrate_populations_with_cancel(&populations, cancelled)?;
+        Ok([result[0], result[1], result[2]])
     }
 
     /// Advance finite nonnegative `[ground, singlet, triplet]` counts.

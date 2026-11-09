@@ -3950,3 +3950,39 @@ admission/cancellation/resource failures. These seven tests passed using the
 unchanged production math, reaction and thermal source files with the pinned
 Rust toolchain. Full-workspace and renderer-integration gates were not run
 successfully in this session.
+
+## Photon-conservative depletion of a finite-population pump column
+
+`luminescence::transfer::pump_column::SaturablePumpColumn` couples the original
+ground/singlet/triplet kinetics to one ordered, collimated spectral pump. Each
+lane can excite both destinations; its photons compete between those channels
+and independently declared passive host absorption. Molecular depth is the
+original cross section times ray length divided by cell volume, multiplied by
+the complete cell's instantaneous ground inventory. No density multiplier or
+invented beam area replaces that inventory.
+
+A bounded scalar solve matches the Beer field to exact integrated ground
+residence from the shared stiff kinetic propagator. Whole-column temporal
+refinement resolves bleaching and the correlation of upstream transmission
+with downstream exposure. Only the accepted finer history enters the returned
+accounts. Actual pump transitions, independently transmitted photons, passive
+heat, stored excitation and emitted state energy are audited without clipping,
+renormalization, extrapolation or residual-to-heat correction. Wavelength-order
+pump energies remain separate from destination-order kinetic energies, including
+weak higher-energy channels whose relaxation heat is smaller than one ULP of
+the mean pump energy. Work, accuracy and cancellation bounds are explicit.
+
+This is a spatially homogeneous cell closure with quasistatic photon flight and
+fixed constitutive coefficients during each call. Spatial and native thermal
+interval refinement remain separate requirements. Pump scattering/reflection,
+stimulated emission, excited-state absorption, multiple overlapping beams and
+active recycling of emitted photons are outside this column's scope. Thermal
+and optical owners supply original geometry and refresh their own material state.
+
+Seven focused native tests cover exact ground residence, passive spectral
+transport, the independent saturable-slab fluence solution, two-cell bleaching
+and pulse composition, competing spectral/destination channels, weak energetic
+branches, and bounded work/cancellation. These and all 64 preceding thermal
+luminescence tests passed against the actual production math and reaction
+sources with the pinned Rust toolchain. Renderer/material integration tests
+are separate from these 71 executed lower-owner tests.
