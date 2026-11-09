@@ -24,6 +24,9 @@
 
 use super::*;
 
+/// Resolved elastic coatings terminated by the original local support laws.
+pub mod supported;
+
 /// Three original material states and a nonnegative slab thickness [m].
 #[derive(Debug)]
 pub struct IsotropicElasticLayer<'a> {
@@ -190,84 +193,24 @@ impl<'a> IsotropicElasticLayer<'a> {
             .exterior
             .prepare_wave_traces(side, mode, cosine, cancelled)?;
         let incident_speed = self.exterior.speeds[side.index()][mode.index().min(1)];
-        let sine = det::sqrt((1.0 - cosine) * (1.0 + cosine));
         let p = exterior.tangential_slowness_s_m;
-        let mut modes = [None; 3];
-        for kind in 0..3 {
-            poll(cancelled)?;
-            let speed = self.speeds[kind.min(1)];
-            let normal = normal_ratio(incident_speed, speed, cosine)?;
-            let wave_cosine = normal.scale(speed / incident_speed);
-            let wave_sine = sine * (speed / incident_speed);
-            let normal_slowness = divided(normal, incident_speed);
-            let k0 = omega / speed;
-            let full_phase = wave_cosine.scale(k0 * self.thickness_m);
-            if !k0.is_finite()
-                || k0 == 0.0
-                || !(k0 * self.thickness_m).is_finite()
-                || !finite(wave_cosine)
-                || !wave_sine.is_finite()
-                || !finite(full_phase)
-                || (normal != C64::ZERO && normal_slowness == C64::ZERO)
-            {
-                return Err(invalid("elastic layer normal phase is unrepresentable"));
-            }
-            let mut waves = [empty_trace(); 2];
-            let mut unit = [empty_trace(); 2];
-            for direction in 0..2 {
-                let sign = if direction == 0 { 1.0 } else { -1.0 };
-                waves[direction] = trace(
-                    self.layer,
-                    self.impedances,
-                    kind,
-                    sign,
-                    wave_sine,
-                    wave_cosine,
-                    p,
-                    normal_slowness,
-                )?;
-                // Only the q-linear parity of this algebraic trace is used.
-                // No unit-cosine state is substituted for the actual wave.
-                unit[direction] = trace(
-                    self.layer,
-                    self.impedances,
-                    kind,
-                    sign,
-                    wave_sine,
-                    C64::ONE,
-                    p,
-                    C64::from_re(1.0 / speed),
-                )?;
-            }
-            let parity = if kind == 1 { -1.0 } else { 1.0 };
-            let regular = [
-                FieldTrace::combine(
-                    FieldTrace::wave(waves[0]),
-                    C64::from_re(0.5),
-                    FieldTrace::wave(waves[1]),
-                    C64::from_re(0.5 * parity),
-                ),
-                FieldTrace::combine(
-                    FieldTrace::wave(unit[0]),
-                    C64::from_re(0.5),
-                    FieldTrace::wave(unit[1]),
-                    C64::from_re(-0.5 * parity),
-                ),
-            ];
-            modes[kind] = Some(ModeBasis {
-                waves,
-                cosine: wave_cosine,
-                k0,
-                regular,
-                regularized: full_phase.abs() <= 0.5,
-            });
-        }
+        let basis = prepare_basis(
+            self.layer,
+            self.speeds,
+            self.impedances,
+            incident_speed,
+            cosine,
+            p,
+            omega,
+            self.thickness_m,
+            cancelled,
+        )?;
         let mut prepared = PreparedElasticLayer {
             exterior,
             layer: self.layer,
             thickness_m: self.thickness_m,
             frequency_hz,
-            basis: Some(modes.map(Option::unwrap)),
+            basis: Some(basis),
             interior: [[C64::ZERO; 6]; 6],
         };
         if self.exterior.states.iter().all(|state| {
@@ -388,23 +331,7 @@ impl<'a> PreparedElasticLayer<'a> {
         let basis = self
             .basis
             .ok_or_else(|| invalid("an absent elastic layer has no interior field"))?;
-        let traces = basis.map(|mode| mode.at(depth_m, self.thickness_m));
-        let values: [C64; 12] = core::array::from_fn(|i| {
-            complex_sum((0..6).map(|j| traces[j / 2][j % 2].0[i] * coefficients[j]))
-        });
-        let velocity_m_s = core::array::from_fn(|i| values[i]);
-        let traction_pa = core::array::from_fn(|i| values[3 + i]);
-        let normal_flux_w_m2 =
-            -0.5 * real_sum((0..3).map(|i| (velocity_m_s[i].conj() * traction_pa[i]).re));
-        if values.iter().any(|&v| !finite(v)) || !normal_flux_w_m2.is_finite() {
-            return Err(invalid("elastic layer field is unrepresentable"));
-        }
-        Ok(ElasticLayerField {
-            velocity_m_s,
-            traction_pa,
-            strain_mandel: core::array::from_fn(|i| values[6 + i]),
-            normal_flux_w_m2,
-        })
+        layer_field(basis, coefficients, depth_m, self.thickness_m)
     }
 
     fn prepare_homogeneous(&mut self) -> Result<(), MaterialError> {
@@ -557,6 +484,118 @@ impl ElasticLayerResponse<'_, '_> {
     pub fn field_at(&self, depth_m: f64) -> Result<ElasticLayerField, MaterialError> {
         self.prepared.field_at(self.coefficients, depth_m)
     }
+}
+
+// Both two-sided slabs and supported coatings use the SAME original-tensor
+// basis, with critical regularization and decaying evanescence unchanged.
+fn prepare_basis(
+    state: &ElasticAcousticState,
+    speeds: [f64; 2],
+    impedances: [f64; 2],
+    incident_speed: f64,
+    cosine: f64,
+    p: f64,
+    omega: f64,
+    thickness_m: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<[ModeBasis; 3], MaterialError> {
+    let sine = det::sqrt((1.0 - cosine) * (1.0 + cosine));
+    let mut modes = [None; 3];
+    for kind in 0..3 {
+        poll(cancelled)?;
+        let speed = speeds[kind.min(1)];
+        let normal = normal_ratio(incident_speed, speed, cosine)?;
+        let wave_cosine = normal.scale(speed / incident_speed);
+        let wave_sine = sine * (speed / incident_speed);
+        let normal_slowness = divided(normal, incident_speed);
+        let k0 = omega / speed;
+        let full_phase = wave_cosine.scale(k0 * thickness_m);
+        if !k0.is_finite()
+            || k0 == 0.0
+            || !(k0 * thickness_m).is_finite()
+            || !finite(wave_cosine)
+            || !wave_sine.is_finite()
+            || !finite(full_phase)
+            || (normal != C64::ZERO && normal_slowness == C64::ZERO)
+        {
+            return Err(invalid("elastic layer normal phase is unrepresentable"));
+        }
+        let mut waves = [empty_trace(); 2];
+        let mut unit = [empty_trace(); 2];
+        for direction in 0..2 {
+            let sign = if direction == 0 { 1.0 } else { -1.0 };
+            waves[direction] = trace(
+                state,
+                impedances,
+                kind,
+                sign,
+                wave_sine,
+                wave_cosine,
+                p,
+                normal_slowness,
+            )?;
+            // Only the q-linear parity of this algebraic trace is used.
+            // No unit-cosine state is substituted for the actual wave.
+            unit[direction] = trace(
+                state,
+                impedances,
+                kind,
+                sign,
+                wave_sine,
+                C64::ONE,
+                p,
+                C64::from_re(1.0 / speed),
+            )?;
+        }
+        let parity = if kind == 1 { -1.0 } else { 1.0 };
+        let regular = [
+            FieldTrace::combine(
+                FieldTrace::wave(waves[0]),
+                C64::from_re(0.5),
+                FieldTrace::wave(waves[1]),
+                C64::from_re(0.5 * parity),
+            ),
+            FieldTrace::combine(
+                FieldTrace::wave(unit[0]),
+                C64::from_re(0.5),
+                FieldTrace::wave(unit[1]),
+                C64::from_re(-0.5 * parity),
+            ),
+        ];
+        modes[kind] = Some(ModeBasis {
+            waves,
+            cosine: wave_cosine,
+            k0,
+            regular,
+            regularized: full_phase.abs() <= 0.5,
+        });
+    }
+    Ok(modes.map(Option::unwrap))
+}
+
+fn layer_field(
+    basis: [ModeBasis; 3],
+    coefficients: [C64; 6],
+    depth_m: f64,
+    thickness_m: f64,
+) -> Result<ElasticLayerField, MaterialError> {
+    let traces = basis.map(|mode| mode.at(depth_m, thickness_m));
+    let values: [C64; 12] = core::array::from_fn(|i| {
+        complex_sum((0..6).map(|j| traces[j / 2][j % 2].0[i] * coefficients[j]))
+    });
+    let velocity_m_s = core::array::from_fn(|i| values[i]);
+    let traction_pa = core::array::from_fn(|i| values[3 + i]);
+    let normal_flux_w_m2 =
+        -0.5 * real_sum((0..3).map(|i| (velocity_m_s[i].conj() * traction_pa[i]).re));
+    if values.iter().any(|&v| !finite(v)) || !normal_flux_w_m2.is_finite() {
+        return Err(invalid("elastic layer field is unrepresentable"));
+    }
+    Ok(ElasticLayerField {
+        velocity_m_s,
+        traction_pa,
+        strain_mandel: core::array::from_fn(|i| values[6 + i]),
+        normal_flux_w_m2,
+    })
 }
 
 impl ModeBasis {

@@ -19044,6 +19044,32 @@ Opposite-face anchoring keeps evanescent exponentials decaying. A regular even/o
 
 Eight independent slab regressions and ten existing interface controls pass in the focused original-source numerical build. They cover independent Fabry–Perot coefficients, homogeneous and absent-layer limits, original-tensor traction and displacement gradients, coherent power, weighted unitarity and reciprocity, an analytic evanescent barrier across more than fifty decades of transmitted power, adjacent critical-angle branches, hidden interior strain antinodes and cancellation. The build uses the existing narrow validation facade and is not full-workspace or experimental qualification. The model is one infinite planar perfectly bonded slab; attenuation, prestress, anisotropic states, compliant contact, finite edges, arbitrary layer stacks and initial free guided modes are not supplied.
 
+### Finite elastic coatings terminated by physical supports
+
+`elastic::acoustic::interface::layer::supported::IsotropicElasticCoating` binds
+the original incident solid and coating to a free, clamped, scalar-impedance or
+reciprocal tensor-impedance rear support. The coating retains all P/SV/SH modes
+and the same original-tensor critical/decaying basis as the two-sided slab.
+One row-scaled native 12 by 12 solve retains reflected amplitudes, six coating
+coordinates and the actual rear velocity; cached maps make coherent drives and
+depth sampling allocation-free. No fictitious exterior incident evanescence or
+scalar effective coating substitutes for the full boundary problem.
+
+Both original strain domains remain authoritative. Coherent front, interior
+and rear fluxes are checked independently against positive support work. The
+coating itself is lossless: evanescence and standing waves do not create heat.
+Explicit rear support velocity/traction retain weak motion beside stiff loads;
+the unmodified modal field reconstruction can have lower relative accuracy at
+such an endpoint. Exactly zero thickness delegates to the original surface
+and has no coating interior. Source isotropy, small strain, stationary linear
+support, infinite lateral extent and perfect front bonding remain the domain.
+
+Six focused regression definitions cover exact absence, analytic impedance
+transformation and quarter-wave matching, homogeneous tensor phase, an
+independent 70-digit oblique critical-mode solution, critical/evanescent SH
+transport, stiff support work, original domains and cancellation. Native
+compilation and execution status are reported separately.
+
 ## Coherent two-sided fluid and elastic interface
 
 `FluidElasticInterface` borrows the original `FluidAcoustics` owner and explicitly isotropic elastic state. The fluid's coherent acoustic coefficients are evaluated once and retained with the original owner; no material-name or ambient-air fallback is selected. `PreparedFluidElasticInterface` admits fluid P and solid P/SV/SH excitation from either side, including simultaneous coherent illumination at one tangential slowness. A row-scaled native 3 by 3 complex factorization enforces normal velocity, normal traction and zero solid shear traction. SH reflects independently. Tangential fluid and solid velocities may slip.

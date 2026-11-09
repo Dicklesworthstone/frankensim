@@ -103,13 +103,16 @@ impl ElasticSurfaceImpedanceTensor {
         &self.matrix_pa_s_m
     }
 
-    pub(super) fn traction(&self, velocity: [C64; 3]) -> [C64; 3] {
+    pub(in crate::elastic::acoustic::interface) fn traction(&self, velocity: [C64; 3]) -> [C64; 3] {
         core::array::from_fn(|axis| {
             -complex_dot((0..3).map(|j| (self.matrix_pa_s_m[axis][j], velocity[j])))
         })
     }
 
-    pub(super) fn absorbed_power(&self, velocity: [C64; 3]) -> Result<f64, MaterialError> {
+    pub(in crate::elastic::acoustic::interface) fn absorbed_power(
+        &self,
+        velocity: [C64; 3],
+    ) -> Result<f64, MaterialError> {
         // R=L L^T. Sum |L^T v|^2/2 rather than cancelling Cartesian cross
         // terms or subtracting outgoing power from incoming power.
         let mut power = Dd::ZERO;
