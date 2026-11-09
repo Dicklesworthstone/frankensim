@@ -24,6 +24,12 @@ use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
 use fs_material::relaxation::RelaxationState;
 use fs_math::{c64::C64, det};
 
+mod field;
+pub use field::{
+    MolecularRectangularDissipationPerLength, MolecularRectangularField,
+    MolecularRectangularReservoirField, PreparedMolecularRectangularFields,
+};
+
 impl RectangularSection {
     /// Molecular dispersion and rectangular wall diffusion from one original gas.
     /// The returned native wave and TwoPort use the same density, actual area,

@@ -354,6 +354,44 @@ storage, equilibrated/frozen caloric endpoints, pressure/rate/geometry scaling,
 passive reciprocal scattering and resolution/cancellation refusals. Its
 reservoir fixtures are manufactured constitutive checks, not measured data.
 
+#### Resolved molecular temperatures and irreversible work
+
+`RectangularSection::prepare_molecular_fields` retains the same immutable
+`RelaxationState`, native mean wave, actual rectangular modes and authored
+resolution. It exposes axial velocity, both transverse velocity gradients,
+actual gas temperature and both temperature gradients. Each original
+species/reservoir can be observed separately through
+`T_j=T/(1-i*omega*tau_j)`; its source identity, heat capacity and relaxation
+time remain borrowed from the original material. Fast-reservoir thermal lags
+are evaluated directly, avoiding subtraction of nearly equal temperatures.
+
+The same prepared modes give three independently positive cycle-mean channels:
+`mu*|grad(u)|²/2`, `conductivity*|grad(T)|²/(2*T0)`, and
+`rho*C_j*|T-T_j|²/(2*T0*tau_j)`. Analytic cross-section integrals expose their
+separate work per axial metre and each reservoir's contribution without a
+spatial quadrature or a pressure-flux residual. Molecular dissipation and wall
+heat conduction share the same dynamic heat-capacity diffusion field; an
+equilibrium thermal shunt, Stokes--Kirchhoff coefficient or extra bulk viscosity
+would double-count those owners. A source with no reservoirs preserves the
+original equilibrium wave and fields, with exactly zero reservoir work.
+
+Preparation uses two fallibly allocated, originally capped mode arrays and at
+most the material's 32 evaluated reservoirs. Work is O(N+R) at preparation,
+O(N) for allocation-free point observations and O(1) for integrated work.
+Cancellation polls each reservoir and every 32 transverse terms. The existing
+mean-tail bounds do not certify pointwise temperatures or gradients; local
+observations need authored mode refinement, particularly near corners. The
+original linear continuum, plane-pressure, no-slip, isothermal-wall and
+no-axial-heat assumptions remain; these are harmonic thermal observations,
+not a background-heating, species-evolution or wall-temperature solver.
+
+`tests/rectangular_molecular_fields.rs` checks independent two-dimensional
+energy-equation convergence, original no-reservoir parity, each reservoir's
+temperature equation and source identity, all four walls, fast/frozen limits,
+positive conduction/relaxation separation, local-work quadrature and native
+pressure/flow energy balance, including bounded cancellation and domain
+refusals. The reservoir data are manufactured constitutive fixtures.
+
 ### Homogeneous bulk viscosity with traction ports
 
 `fluid::bulk::BulkTractionCylinder` propagates the original

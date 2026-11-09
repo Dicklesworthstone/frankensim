@@ -74,10 +74,12 @@ struct FieldMode {
 }
 
 #[derive(Debug)]
-struct DiffusionField {
+pub(super) struct DiffusionField {
     modes: Vec<FieldMode>,
     /// sqrt(integral |grad h|² dA), evaluated from original modal gradients.
-    gradient_norm: f64,
+    pub(super) gradient_norm: f64,
+    /// sqrt(integral |h|² dA), for original molecular-reservoir work.
+    pub(super) field_norm: f64,
 }
 
 /// Source-bound fields of the same finite Fourier section as the mean wave.
@@ -138,12 +140,12 @@ impl RectangularSection {
         let acoustic = state.acoustic();
         let transport = state.transport();
         let viscous = self.prepare_diffusion_fields(
-            omega / transport.kinematic_viscosity_m2_s(),
+            C64::new(0.0, omega / transport.kinematic_viscosity_m2_s()),
             &mut cancelled,
         )?;
         let thermal = if wave.thermal.is_some() {
             Some(self.prepare_diffusion_fields(
-                omega / transport.thermal_diffusivity_m2_s(),
+                C64::new(0.0, omega / transport.thermal_diffusivity_m2_s()),
                 &mut cancelled,
             )?)
         } else {
@@ -188,9 +190,9 @@ impl RectangularSection {
         })
     }
 
-    fn prepare_diffusion_fields(
+    pub(super) fn prepare_diffusion_fields(
         &self,
-        frequency: f64,
+        argument: C64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<DiffusionField, DuctError> {
         let mut modes = Vec::new();
@@ -198,11 +200,12 @@ impl RectangularSection {
             .try_reserve_exact(self.terms())
             .map_err(|_| bad("rectangular field allocation exceeds available memory"))?;
         let mut energy = Dd::ZERO;
+        let mut field_energy = Dd::ZERO;
         for (index, mode) in self.modes.iter().enumerate() {
             if index % 32 == 0 {
                 poll(cancelled, index)?;
             }
-            let response = mode_response(mode, self.long_m, C64::new(0.0, frequency))?;
+            let response = mode_response(mode, self.long_m, argument)?;
             let phase = PI * (2 * index + 1) as f64;
             let amplitude = response.factor.scale(4.0 / phase);
             let q = response.q;
@@ -228,6 +231,10 @@ impl RectangularSection {
                 return Err(bad("rectangular modal gradient integral is unrepresentable"));
             }
             energy = energy + Dd::from_f64(norm * norm);
+            let field_norm = det::sqrt(0.5 * self.short_m)
+                * amplitude.abs()
+                * det::sqrt(field_integral);
+            field_energy = field_energy + Dd::from_f64(field_norm * field_norm);
             modes.push(FieldMode {
                 phase,
                 transverse: phase / self.short_m,
@@ -240,9 +247,14 @@ impl RectangularSection {
         if !positive(gradient_norm) {
             return Err(bad("rectangular total gradient integral is unrepresentable"));
         }
+        let field_norm = det::sqrt(field_energy.to_f64());
+        if !field_norm.is_finite() || field_norm < 0.0 {
+            return Err(bad("rectangular total field integral is unrepresentable"));
+        }
         Ok(DiffusionField {
             modes,
             gradient_norm,
+            field_norm,
         })
     }
 }
@@ -391,7 +403,7 @@ impl PreparedRectangularFields<'_, '_, GasState> {
 }
 
 impl DiffusionField {
-    fn at(
+    pub(super) fn at(
         &self,
         fraction: f64,
         z: f64,
@@ -452,7 +464,7 @@ fn decay_pair(z: C64) -> (C64, C64) {
     )
 }
 
-fn amplitudes(pressure: C64, flow: C64) -> Result<(), DuctError> {
+pub(super) fn amplitudes(pressure: C64, flow: C64) -> Result<(), DuctError> {
     if !finite(pressure) || !finite(flow) {
         Err(bad("rectangular pressure and volume flow must be finite"))
     } else {
