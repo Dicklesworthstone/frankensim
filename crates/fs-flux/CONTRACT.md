@@ -8534,6 +8534,36 @@ of nonideal mixing heat, directed circulation, unequal-volume analytic donor
 decay, complete species/energy receipts, zero-operator limits, macro-time
 refinement, finite work and cancellation/replay.
 
+
+### Adaptive stirred nonisothermal mixtures
+
+`miscibility::nonisothermal::transport::adaptive` controls the COMPLETE
+advection/chemical/Fourier operator with independent composition and Kelvin
+tolerances. Each coarse or half trial has exactly one donor step, and its macro
+interval is capped by the original volume-flow CFL bound. This prevents
+identical internal subcycles from falsely reporting zero temporal error.
+The two-half-step result is accepted; rejected/coarse trials contribute solver
+work but never physical species/enthalpy receipts. Both independently retained
+species, including compensated low words, participate in the shared estimator.
+A zero trace tolerance cannot hide a nonzero amount discrepancy.
+
+The owner reuses original calorics, sourced molecular diffusivity, graph and
+prepared flow. It applies the original whole-window component/capacity,
+enthalpy and entropy allowances after the complete requested interval.
+Temperature-bracket and numerical solve failures may refine within explicit
+attempt/minimum-step bounds; original source failures and cancellation remain
+refusals. Only accepted face receipts accumulate, the original clock reaches
+the requested endpoint, and a short final remainder retains all admission
+checks. This is first-order local time-error control, not a global or spatial
+accuracy certificate. Six focused regressions cover independent thermal and
+composition modes, CFL aliasing, accepted-path balances, work/minimum-step
+refusal, continuation and cancellation/replay.
+
+The preceding 70-test core miscibility run passed on the pinned Rust toolchain.
+These six additional adaptive regressions and the changed shared estimator
+were source-reviewed but could not be compiled or executed after the execution
+environment became unavailable.
+
 ### Compatible molecular stress with variable viscosity
 
 Frozen-composition planar and spatial molecular owners sample the original

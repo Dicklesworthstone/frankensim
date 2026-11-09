@@ -4,6 +4,9 @@
 //! first order; CFL subcycling alone does not control coupled temporal error.
 //! The final original-state audit applies one energy/entropy/species allowance.
 
+/// Accuracy control for the complete stirred heat/species evolution.
+pub mod adaptive;
+
 use super::advection::BinaryNonisothermalAdvectionStep;
 use super::*;
 use crate::miscibility::advection::{

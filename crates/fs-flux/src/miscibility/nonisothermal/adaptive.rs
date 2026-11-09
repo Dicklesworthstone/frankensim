@@ -89,25 +89,7 @@ impl BinaryNonisothermalField {
         poll(&mut cancelled)?;
         admit_controls(controls)?;
         let t = time.composition;
-        if !positive(duration_s)
-            || !positive(t.initial_step_s)
-            || !positive(t.minimum_step_s)
-            || !positive(t.maximum_step_s)
-            || t.minimum_step_s > t.initial_step_s
-            || t.initial_step_s > t.maximum_step_s
-            || !(1..=1_000_000).contains(&t.maximum_attempts)
-            || !nonnegative(t.absolute_mole_fraction_tolerance)
-            || !nonnegative(t.relative_mole_fraction_tolerance)
-            || t.absolute_mole_fraction_tolerance + t.relative_mole_fraction_tolerance == 0.0
-            || !nonnegative(time.absolute_temperature_tolerance_k)
-            || !nonnegative(time.relative_temperature_tolerance)
-            || time.absolute_temperature_tolerance_k + time.relative_temperature_tolerance == 0.0
-        {
-            return Err(BinaryNonisothermalError::Invalid(
-                "finite ordered steps, positive work and composition/temperature accuracy required",
-            )
-            .into());
-        }
+        admit_time(duration_s, time)?;
         let target = finite(self.elapsed_s() + duration_s, "nonisothermal target time")
             .map_err(BinaryNonisothermalError::from)?;
         if target <= self.elapsed_s() {
@@ -153,7 +135,7 @@ impl BinaryNonisothermalField {
                 let second = first
                     .field()
                     .step_candidate(dt - half, controls, &mut cancelled)?;
-                let ratio = error_ratio(coarse.field(), second.field(), time)?;
+                let ratio = error_ratio(coarse.field(), second.field(), time, &mut cancelled)?;
                 Ok((coarse, first, second, ratio))
             })();
             let (coarse, first, second, ratio) = match trial {
@@ -241,7 +223,30 @@ impl BinaryNonisothermalField {
     }
 }
 
-fn retryable(error: &BinaryNonisothermalError) -> bool {
+pub(super) fn admit_time(duration_s: f64, time: BinaryNonisothermalTimeControl) -> Result<()> {
+    let t = time.composition;
+    if !positive(duration_s)
+        || !positive(t.initial_step_s)
+        || !positive(t.minimum_step_s)
+        || !positive(t.maximum_step_s)
+        || t.minimum_step_s > t.initial_step_s
+        || t.initial_step_s > t.maximum_step_s
+        || !(1..=1_000_000).contains(&t.maximum_attempts)
+        || !nonnegative(t.absolute_mole_fraction_tolerance)
+        || !nonnegative(t.relative_mole_fraction_tolerance)
+        || t.absolute_mole_fraction_tolerance + t.relative_mole_fraction_tolerance == 0.0
+        || !nonnegative(time.absolute_temperature_tolerance_k)
+        || !nonnegative(time.relative_temperature_tolerance)
+        || time.absolute_temperature_tolerance_k + time.relative_temperature_tolerance == 0.0
+    {
+        return Err(BinaryNonisothermalError::Invalid(
+            "finite ordered steps, positive work and composition/temperature accuracy required",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn retryable(error: &BinaryNonisothermalError) -> bool {
     matches!(
         error,
         BinaryNonisothermalError::PairIterationLimit
@@ -252,25 +257,42 @@ fn retryable(error: &BinaryNonisothermalError) -> bool {
             | BinaryNonisothermalError::Caloric(BinaryCaloricErrorV1::IterationLimit)
     )
 }
-fn factor(error: f64) -> f64 {
+pub(super) fn factor(error: f64) -> f64 {
     if error == 0.0 {
         2.0
     } else {
         (0.9 / error.sqrt()).clamp(0.25, 2.0)
     }
 }
-fn error_ratio(
+pub(super) fn error_ratio(
     a: &BinaryNonisothermalField,
     b: &BinaryNonisothermalField,
     time: BinaryNonisothermalTimeControl,
+    cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64> {
     let mut worst = 0.0_f64;
     for cell in 0..a.temperatures.len() {
+        poll(cancelled)?;
         for s in 0..2 {
             let [x, y] = [a.state.fractions[cell][s], b.state.fractions[cell][s]];
             let tolerance = time.composition.absolute_mole_fraction_tolerance
                 + time.composition.relative_mole_fraction_tolerance * x.abs().max(y.abs());
-            worst = worst.max(scaled_difference(x, y, tolerance)?);
+            // Include independent trace inventories and carried sub-ULP changes
+            // even when the dominant mole fraction rounds to one.
+            let mut difference = Sum::default();
+            difference.add(a.state.amounts[cell][s])?;
+            difference.add(-b.state.amounts[cell][s])?;
+            difference.add(a.state.amount_remainders[cell][s])?;
+            difference.add(-b.state.amount_remainders[cell][s])?;
+            let amount_error = difference.value()?.abs();
+            // Test a zero tolerance before normalizing: a representable amount
+            // difference must not disappear when its fraction underflows.
+            let fraction_error = if tolerance == 0.0 {
+                amount_error
+            } else {
+                amount_error / a.network().owner.capacities_mol[cell]
+            };
+            worst = worst.max(scaled_difference(fraction_error, 0.0, tolerance)?);
         }
         let [x, y] = [a.temperatures[cell].value(), b.temperatures[cell].value()];
         let tolerance = time.absolute_temperature_tolerance_k
