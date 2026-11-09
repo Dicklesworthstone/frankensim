@@ -5,6 +5,9 @@ use fs_material::laminate::strength::{LaminaStrengthProperties, LaminaStrengthSe
 use fs_qty::QuantitySpec;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 
+#[path = "thermoelastic/motion.rs"]
+mod motion;
+
 fn kelvin() -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,

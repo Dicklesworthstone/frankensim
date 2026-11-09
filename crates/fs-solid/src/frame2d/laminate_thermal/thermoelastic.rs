@@ -21,6 +21,9 @@ use fs_material::laminate::thermal::beam::thermoelastic::{
 use fs_material::laminate::thermal::thermoelastic::AffineLaminaThermoelastic;
 use std::sync::Arc;
 
+/// Compatible station rates and reversible heat from accepted native motion.
+pub mod motion;
+
 /// One original layer's reversible contribution per reference member length.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrameLaminateThermoelasticLayer {
@@ -92,6 +95,28 @@ fn finite(value: f64) -> Result<f64, SolidError> {
             "laminate thermoelastic aggregate is unrepresentable",
         ))
     }
+}
+
+fn layer_heat_rate(
+    layer: usize,
+    state: LaminateBeamThermoelasticState,
+    temperature_k: f64,
+    generalized_strain_rate: [f64; 2],
+    temperature_rate: f64,
+) -> Result<FrameLaminateThermoelasticLayerHeatRate, SolidError> {
+    let [n_t, m_t] = state.generalized_force_temperature_derivative;
+    let deformation_heat_w_m = finite(
+        temperature_k * n_t.mul_add(generalized_strain_rate[0], m_t * generalized_strain_rate[1]),
+    )?;
+    let temperature_heat_w_m = finite(-state.heat_capacity_j_m_k * temperature_rate)?;
+    Ok(FrameLaminateThermoelasticLayerHeatRate {
+        layer,
+        temperature_k,
+        elastic_heat_capacity_j_m_k: state.heat_capacity_j_m_k,
+        deformation_heat_w_m,
+        temperature_heat_w_m,
+        reversible_heat_w_m: finite(deformation_heat_w_m + temperature_heat_w_m)?,
+    })
 }
 
 fn accepted(
@@ -347,20 +372,13 @@ impl Frame2d {
             let temperature_k = law
                 .layer_temperature_k(layer)
                 .ok_or_else(|| invalid("original layer temperature is absent"))?;
-            let [n_t, m_t] = state.generalized_force_temperature_derivative;
-            let deformation_heat_w_m = finite(
-                temperature_k
-                    * n_t.mul_add(generalized_strain_rate[0], m_t * generalized_strain_rate[1]),
-            )?;
-            let temperature_heat_w_m = finite(-state.heat_capacity_j_m_k * temperature_rate)?;
-            layers.push(FrameLaminateThermoelasticLayerHeatRate {
+            layers.push(layer_heat_rate(
                 layer,
+                state,
                 temperature_k,
-                elastic_heat_capacity_j_m_k: state.heat_capacity_j_m_k,
-                deformation_heat_w_m,
-                temperature_heat_w_m,
-                reversible_heat_w_m: finite(deformation_heat_w_m + temperature_heat_w_m)?,
-            });
+                generalized_strain_rate,
+                temperature_rate,
+            )?);
         }
         checkpoint(cx)?;
         Ok(FrameLaminateThermoelasticHeatRate {
