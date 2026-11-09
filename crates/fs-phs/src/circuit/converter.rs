@@ -25,16 +25,23 @@
 use crate::linear_exact::{LinearSplitBudget, PreparedExactZoh};
 use crate::{PhsError, PortHamiltonian, PreparedStepError, PreparedStepRecord, QuadraticStorage};
 
-/// Finite charge and voltage response of capacitor-backed source/load terminals.
-pub mod capacitor_terminals;
 /// Finite SOC/OCV battery supply through physical leads and regulated demand.
 pub mod battery_fed;
+/// Finite charge and voltage response of capacitor-backed source/load terminals.
+pub mod capacitor_terminals;
+/// Source-bounded nonlinear winding storage on the same finite-bus power stage.
+pub mod inductance;
 /// Nonlinear regulated-power bus loads with current limits and voltage foldback.
 pub mod power_load;
 /// Explicit complementary gate intervals on these SAME storage coordinates.
 pub mod switching;
 /// Finite source resistances and resistive loads on these SAME bus terminals.
 pub mod terminals;
+
+pub use inductance::{
+    NonlinearAveragedBuckBoost, NonlinearConverterControls, NonlinearConverterStep,
+    PreparedNonlinearAveragedBuckBoost,
+};
 
 /// Five distinct heat owners, in the same order as [`ConductionHeat::joules`].
 pub const CONDUCTION_CHANNELS: usize = 5;

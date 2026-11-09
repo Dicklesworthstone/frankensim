@@ -3442,3 +3442,39 @@ loss, thermal law or moving core. Native resistor heat uses discrete-effort
 quadrature, not an exact continuous RMS-current integral. Source support and
 native nonlinear-step refusals publish no accepted state. Time refinement and
 source interpolation error remain separate from finite-step work closure.
+
+## Nonlinear winding in the averaged buck/boost stage
+
+`AveragedBuckBoost::with_inductor_curve` consumes the admitted linear stage and
+replaces only its magnetic potential with the complete source-bounded
+`InductorFluxCurve`. The resulting `NonlinearAveragedBuckBoost` keeps the SAME
+three original flux/charge coordinates, reciprocal bridge J, five physical
+conduction resistances, finite bus capacitances and two signed current ports.
+The former constant L contributes no remaining energy or current. Initialization
+inverts the original supported current law; `into_system` retains that nonlinear
+owner for native composition. The separate type cannot silently enter existing
+linear-only adapters that reconstruct storage from fixed converter parameters.
+
+The prepared native discrete-gradient step uses exact magnetic work and its
+analytic source derivative. `NonlinearConverterStep` independently evaluates
+the source magnetic-energy change, both capacitor changes, both terminal works
+and all five nonnegative heat channels. Original winding, individual bus, native
+receipt and whole-stage balances gate publication using actual-transfer scales,
+not unchanged stored energy. Native dissipation and conduction-channel totals
+describe the same debit. Preparation allocates fixed three-state scratch;
+successful warm source callbacks and account evaluation allocate nothing. Source
+support, nonlinear solve, physical account and cancellation refusals publish
+neither state nor bus-voltage output; a retry starts from caller-owned state.
+Relative balance allowances lie in `[0,1)` and are never raised. The default
+zero absolute allowance can refuse a correct rounded endpoint when a charge
+increment is small relative to the stored charge. Callers must explicitly admit
+the corresponding physical energy granularity; no background-energy multiplier
+silently enlarges the requested tolerance.
+
+The winding effort is the exact energy secant over the flux interval and bus
+efforts are midpoint voltages. Signed terminal work is `dt I_terminal V_discrete`;
+negative work represents regeneration or load delivery. These are native
+discrete-effort accounts, not continuous-time averages or RMS-current integrals.
+Conduction uses `dt R I_discrete^2` with each original duty-weighted resistance.
+Saturation adds no PWM ripple, switching loss, hysteresis, core-loss or thermal
+law. Source interpolation and time refinement remain separate accuracy duties.

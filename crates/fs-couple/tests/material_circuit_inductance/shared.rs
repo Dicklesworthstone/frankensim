@@ -330,3 +330,95 @@ fn source_support_leakage_branch_ownership_and_cancellation_refuse() {
         Err(fs_couple::material_circuit::MaterialCircuitError::Cancelled)
     ));
 }
+
+#[test]
+fn material_saturation_drives_the_native_converter_and_its_finite_bus_work() {
+    use fs_phs::circuit::converter::{
+        AveragedBuckBoost, BridgeModulation, BuckBoostParameters, NonlinearConverterControls,
+    };
+
+    let source = MaterialReversibleInductor::new(
+        0,
+        material(&[(0.0, 0.0), (1.0, 1.0), (3.0, 9.0)]),
+        ReversibleInductorGeometry {
+            turns: 2.0,
+            core_area_m2: 0.5,
+            core_length_m: 2.0,
+            gap_reluctance_per_h: 3.0,
+            leakage_inductance_h: 0.1,
+        },
+    )
+    .unwrap();
+    let capacitance = [0.5, 0.25];
+    let model = AveragedBuckBoost::new(
+        BuckBoostParameters {
+            // Consuming source binding must replace this descriptive linear
+            // store completely, including physical current initialization.
+            inductance_h: 999.0,
+            bus_capacitance_f: capacitance,
+            winding_resistance_ohm: 0.05,
+            input_on_resistance_ohm: [0.02, 0.03],
+            output_on_resistance_ohm: [0.04, 0.05],
+        },
+        BridgeModulation {
+            input_high_fraction: 0.8,
+            output_high_fraction: 0.6,
+        },
+    )
+    .unwrap()
+    .with_inductor_curve(source.curve().clone())
+    .unwrap();
+    let mut state = model.state(0.2, [5.0, 1.0]).unwrap();
+    near(state[0], source.flux_linkage_wb(0.2).unwrap(), 1e-14);
+    let initial_magnetic = source.operating_point(state[0]).unwrap().stored_energy_j;
+    let initial_total = initial_magnetic + 0.5 * capacitance[0] * 25.0 + 0.5 * capacitance[1];
+    let controls = NonlinearConverterControls {
+        absolute_energy_tolerance_j: 2e-11,
+        relative_balance_tolerance: 2e-10,
+        ..Default::default()
+    };
+    let mut prepared = model.prepare_controlled(0.01, controls, || false).unwrap();
+    let mut heat = [0.0; 5];
+    let mut crossed_material_knee = false;
+    for _ in 0..180 {
+        let before = source.operating_point(state[0]).unwrap();
+        let mut next = [0.0; 3];
+        let mut voltage = [0.0; 2];
+        let record = prepared
+            .step_controlled(&state, &[0.0; 2], &mut next, &mut voltage, || false)
+            .unwrap();
+        let after = source.operating_point(next[0]).unwrap();
+        near(
+            record.magnetic_energy_change_j,
+            after.stored_energy_j - before.stored_energy_j,
+            2e-11,
+        );
+        let mut bus_energy = 0.0;
+        for p in 0..2 {
+            let old_voltage = state[p + 1] / capacitance[p];
+            let new_voltage = next[p + 1] / capacitance[p];
+            let old_energy = 0.5 * capacitance[p] * old_voltage * old_voltage;
+            let new_energy = 0.5 * capacitance[p] * new_voltage * new_voltage;
+            near(
+                record.bus_energy_change_j[p],
+                new_energy - old_energy,
+                2e-11,
+            );
+            near(record.terminal_work_j[p], 0.0, 0.0);
+            bus_energy += new_energy;
+        }
+        for (total, increment) in heat.iter_mut().zip(record.conduction.joules) {
+            assert!(increment >= 0.0);
+            *total += increment;
+        }
+        near(
+            after.stored_energy_j + bus_energy + heat.iter().sum::<f64>(),
+            initial_total,
+            2e-9,
+        );
+        crossed_material_knee |= after.core_flux_density_t.abs() > 1.0;
+        state = next;
+    }
+    assert!(crossed_material_knee);
+    assert!(heat.iter().all(|value| *value > 0.0));
+}
