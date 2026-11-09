@@ -744,3 +744,89 @@ translation/rotation/homothety identities, both sides of a repeated-root packet,
 guard exclusion, absent positive roots, work and cancellation refusal. The
 existing modal tests continue to exercise the shared geometry contraction and
 its separate consistent-inertia contribution.
+
+## Objective network elasticity and nonlinear continuation
+
+`geometric::GeometricTruss` analyzes the complete selected pin-jointed network
+using current chord lengths and directions. `MaterialLayout::geometric_truss`
+retains each original member's source-resolved Young modulus through the same
+owner. Geometry, connectivity, original areas, material state, support flags
+and authored stress-free strains remain immutable during the solve/path.
+
+For original length L, current length l, reference area A and fixed stress-free
+engineering strain e0, the admitted axial model is
+
+`e = (l-L)/L`, `e_el = e-e0`, `N = EA e_el`, `U = EA L e_el²/2`.
+
+Its exact current-chord tangent on relative endpoint translations is
+`H = (EA/L) n nᵀ + (N/l) (I - n nᵀ)`. Tension stiffens and compression softens
+the transverse response. This uses actual deformed directions and l, rather
+than superposing the existing frozen-reference buckling pencil. Rigid finite
+rotations and common translations preserve the scalar material strain and
+energy to floating-point accuracy. Original coordinates are not overwritten.
+
+Large rotations do not establish a finite-strain material law. The caller
+must author a finite `maximum_absolute_elastic_strain` in (0,1); every trial
+and reported state must satisfy it. This bound is not source calibration,
+a yield/failure limit, or proof of validity of the linear axial model. e0 uses
+the original reference length, and `L (1+e0)` must remain positive. No thermal
+expansion coefficient, current area, Poisson contraction or evolving material
+state is inferred. Reported axial stress is **nominal** N/A, not Cauchy stress.
+Zero area removes that member's energy/force/tangent while retaining its
+original output index; removed members have zero strain/force/stress outputs.
+All original free translations remain, including mechanisms.
+
+`GeometricLoading` separates fixed physical dead forces, fixed thermal/misfit
+and fixed support displacement from reference-case dead forces and support
+motion per factor. Thus `f = f_fixed + lambda f_reference` and
+`u_support = u_fixed + lambda g`. Both support-load components are retained
+in reactions. `GeometricScales` defines `u_free = L_scale q` and
+`R = R_physical / F_scale`; the exact tangent is `K_ff L_scale/F_scale`, and
+the parameter column is `-dR/dlambda = (f_reference,f - K_fc g)/F_scale`.
+The deformed K_fc term is essential for displacement-controlled paths.
+
+`equilibrate` uses native `fs-solver::nonlinear::NewtonKrylovState` with its
+original globalization, cancellation and iteration budget. Right Jacobi
+preconditioning changes numerical coordinates only; zero diagonal rows gain
+no spring. Accepted responses independently re-evaluate the physical member
+force equation against the requested dimensionless residual target.
+`start_from` admits an equilibrated complete physical displacement, including
+exact current support values. A fixed thermal/gravity baseline can first use
+`equilibrate`. `advance` uses the existing `fs-solid::continuation` Keller
+bordered corrector and step control to traverse simple load-factor folds.
+It stages a clone: any requested-step failure or cancellation returns no
+candidate and leaves the supplied checkpoint unchanged. Resume with the same
+immutable problem and scaling; public native path values do not authenticate
+problem identity. Starting/resuming rechecks the original force equation.
+
+The graph's canonical CSR pattern and each member's row scatter offsets are
+prepared once with `fs-sparse`. Warm force/tangent assembly is O(nodes + members
++ stored entries), without repeated COO sorting. Native residual, tangent and
+parameter callbacks at an identical state share one physical assembly. No
+new nonlinear solver, Krylov recurrence or continuation algorithm is introduced.
+The preparation admits at most 800000 original coordinates, 100000 free
+coordinates and 8000000 staged contributions under explicit caller limits.
+The conservative payload allowance is `512*original_dofs + 256*members +
+128*staged + 2048*free_dofs + 65536` bytes, plus `32*(free_dofs+1)²` when the
+native border uses its bounded dense branch. Solver/path histories reserve
+512 bytes per admitted entry. Native Newton restart/cycles are bounded by
+64/320; outer attempts by 10000. Path advances admit at most 1000000 steps
+and 128 corrector iterations each. Malformed checkpoint vector lengths refuse
+before cloning. Node/member/operator loops poll cancellation at bounded strides;
+the one bounded native COO sort is checked immediately before and after.
+
+Physical responses retain original displacements, signed member forces and
+nominal stresses, elastic energy, supported reactions and **all** free force
+residuals. A raw response does not assert equilibrium. The reported potential
+`U - f dot u` holds the parameter fixed; it is not accumulated work along
+moving-support/loading histories. Numerical equilibrium and path events do not
+prove stability, missed branches, collapse, local Euler capacity, out-of-plane
+behavior, buckling of an individual member, contact, plasticity or bending.
+
+G1/G3/G4 tests in `tests/geometric_truss.rs` cover analytic loaded thermal
+extension with prescribed support motion and forces on supports; independent
+finite differences of the full coupled tangent, energy and parameter column;
+finite rigid rotations with free thermal expansion; the closed-form shallow
+two-bar force curve through both folds; bit-identical split path resumption;
+collapsed/domain-invalid members, removed mechanisms, exhausted work/payload,
+unbalanced seeds, malformed checkpoints and cancellation.
