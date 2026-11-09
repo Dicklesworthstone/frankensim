@@ -4,6 +4,8 @@
 //! Reference Tet10 geometry is prepared once. Element matrices are accumulated
 //! locally before sparse assembly; the native sparse LDLᵀ analysis is reused
 //! across Newton iterates. Native Newton–Krylov supplies residual globalization.
+//! Moving supports participate in that same step through consistent tangent
+//! lifting; their constraint rows do not change the physical KKT inertia gate.
 //! A positive work-conjugate scaling preserves the saddle-point inertia and
 //! prevents forces [N] from being compared directly with volumes [m³].
 //!
@@ -853,25 +855,42 @@ impl<L: MixedFiniteStrainPotential> PreparedMixedUpProblem<'_, L> {
         for step in 1..=self.problem.settings.load_steps {
             checkpoint(cx)?;
             let load = step as f64 / self.problem.settings.load_steps as f64;
+            // Prescribed motion must be lifted with the interior response.
+            // Injecting a large boundary jump alone can invert an otherwise
+            // admissible compressed body before Newton can move its interior.
+            let mut moving = Vec::new();
             for &(d, value) in self.problem.prescribed_m {
-                u[d / 3][d % 3] = load * value;
+                let target = load * value;
+                if self.free_displacements == 0 {
+                    // With no interior response, admit the authored pose directly.
+                    u[d / 3][d % 3] = target;
+                } else if u[d / 3][d % 3] != target {
+                    moving.push((d, target));
+                }
             }
+            moving.sort_unstable_by_key(|&(d, _)| d);
             if let (Some(pin), Some((_, value))) =
                 (self.gauge_pressure, self.problem.pressure_gauge)
             {
                 p[pin] = load * value;
             }
-            let initial: Vec<_> = self
+            let mut initial: Vec<_> = self
                 .free
                 .iter()
                 .map(|&d| {
                     (if d < nu { u[d / 3][d % 3] } else { p[d - nu] }) / self.variable_scale(d)
                 })
                 .collect();
+            initial.extend(
+                moving
+                    .iter()
+                    .map(|&(d, _)| u[d / 3][d % 3] / self.variable_scale(d)),
+            );
             let endpoint = Endpoint {
                 prepared: self,
                 base_u: &u,
                 base_p: &p,
+                moving: &moving,
                 load,
                 inertia,
                 cx,
@@ -919,6 +938,12 @@ impl<L: MixedFiniteStrainPotential> PreparedMixedUpProblem<'_, L> {
                 });
             }
             // Zero-residual initial states also need the stability/gauge gate.
+            // Publish the exact authored support values, even when the native
+            // stopping tolerance allowed a small remaining constraint residual.
+            // Recheck both stability and physical equilibrium at that endpoint.
+            for (j, &(d, target)) in moving.iter().enumerate() {
+                newton.x[self.free.len() + j] = target / self.variable_scale(d);
+            }
             endpoint.ensure_linearization(&newton.x)?;
             let (next_u, next_p) = endpoint.physical_state(&newton.x)?;
             let state = self.evaluate_at_load(&next_u, &next_p, false, inertia, load, cx)?;
@@ -985,8 +1010,46 @@ impl<L: MixedFiniteStrainPotential> PreparedMixedUpProblem<'_, L> {
 
 struct Linearization {
     x: Vec<f64>,
+    // Only the original symmetric free KKT block is factored and inertia-tested.
     matrix: Csr,
     factor: LdltFactor,
+    // Free residual rows versus moving support coordinates, already scaled.
+    coupling: Option<Csr>,
+}
+
+impl Linearization {
+    // The augmented Jacobian is [Kff Kfp; 0 I], not a symmetric KKT matrix.
+    // Native FGMRES consumes this action; LDLᵀ sees Kff alone.
+    fn apply(&self, direction: &[f64], output: &mut [f64]) {
+        let n = self.matrix.nrows();
+        self.matrix.spmv(&direction[..n], &mut output[..n]);
+        if let Some(coupling) = &self.coupling {
+            for (i, value) in output[..n].iter_mut().enumerate() {
+                let (cols, entries) = coupling.row(i);
+                for (&j, &entry) in cols.iter().zip(entries) {
+                    *value += entry * direction[n + j];
+                }
+            }
+        }
+        output[n..].copy_from_slice(&direction[n..]);
+    }
+
+    fn solve(&self, residual: &[f64], output: &mut [f64]) {
+        let n = self.matrix.nrows();
+        if let Some(coupling) = &self.coupling {
+            let mut lifted = residual[..n].to_vec();
+            for (i, value) in lifted.iter_mut().enumerate() {
+                let (cols, entries) = coupling.row(i);
+                for (&j, &entry) in cols.iter().zip(entries) {
+                    *value -= entry * residual[n + j];
+                }
+            }
+            output[..n].copy_from_slice(&self.factor.solve(&lifted));
+        } else {
+            output[..n].copy_from_slice(&self.factor.solve(&residual[..n]));
+        }
+        output[n..].copy_from_slice(&residual[n..]);
+    }
 }
 
 fn point_deformation(
@@ -1011,6 +1074,8 @@ struct Endpoint<'p, 'a, 'c, 'scope, L: MixedFiniteStrainPotential> {
     prepared: &'p PreparedMixedUpProblem<'a, L>,
     base_u: &'p [[f64; 3]],
     base_p: &'p [f64],
+    // Sorted global displacement DOFs and exact physical endpoint targets.
+    moving: &'p [(usize, f64)],
     load: f64,
     inertia: Option<&'p crate::inertia::BackwardEulerInertia<'p>>,
     cx: &'c Cx<'scope>,
@@ -1026,7 +1091,7 @@ impl<L: MixedFiniteStrainPotential> Endpoint<'_, '_, '_, '_, L> {
     }
 
     fn physical_state(&self, x: &[f64]) -> Result<(Vec<[f64; 3]>, Vec<f64>), MixedUpError> {
-        if x.len() != self.prepared.free.len() || x.iter().any(|v| !v.is_finite()) {
+        if x.len() != self.dimension() || x.iter().any(|v| !v.is_finite()) {
             return Err(invalid("native mixed Newton state is invalid"));
         }
         let mut u = self.base_u.to_vec();
@@ -1039,6 +1104,17 @@ impl<L: MixedFiniteStrainPotential> Endpoint<'_, '_, '_, '_, L> {
             } else {
                 p[d - nu] = physical;
             }
+        }
+        for (j, &(d, target)) in self.moving.iter().enumerate() {
+            let value = x[self.prepared.free.len() + j];
+            let scale = self.prepared.variable_scale(d);
+            // Recover the exact authored value at the normalized target; this
+            // avoids a divide/multiply round trip changing a fixed boundary.
+            u[d / 3][d % 3] = if value == target / scale {
+                target
+            } else {
+                value * scale
+            };
         }
         self.prepared.validate_state(&u, &p)?;
         Ok((u, p))
@@ -1095,6 +1171,7 @@ impl<L: MixedFiniteStrainPotential> Endpoint<'_, '_, '_, '_, L> {
         }
         let n = self.prepared.free.len();
         let mut coo = Coo::new(n, n);
+        let mut coupling = (!self.moving.is_empty()).then(|| Coo::new(n, self.moving.len()));
         for (i, &d) in self.prepared.free.iter().enumerate() {
             if i % 128 == 0 {
                 checkpoint(self.cx)?;
@@ -1104,6 +1181,10 @@ impl<L: MixedFiniteStrainPotential> Endpoint<'_, '_, '_, '_, L> {
             for (&col, &value) in cols.iter().zip(values) {
                 if let Some(j) = self.prepared.free_index[col] {
                     coo.push(i, j, row_scale * value * self.prepared.variable_scale(col));
+                } else if let Some(coupling) = &mut coupling
+                    && let Ok(j) = self.moving.binary_search_by_key(&col, |&(d, _)| d)
+                {
+                    coupling.push(i, j, row_scale * value * self.prepared.variable_scale(col));
                 }
             }
         }
@@ -1140,6 +1221,7 @@ impl<L: MixedFiniteStrainPotential> Endpoint<'_, '_, '_, '_, L> {
             x: x.to_vec(),
             matrix,
             factor,
+            coupling: coupling.map(|coo| coo.assemble()),
         });
         Ok(())
     }
@@ -1152,7 +1234,7 @@ impl<L: MixedFiniteStrainPotential> Endpoint<'_, '_, '_, '_, L> {
 
 impl<L: MixedFiniteStrainPotential> NonlinearProblem for Endpoint<'_, '_, '_, '_, L> {
     fn dimension(&self) -> usize {
-        self.prepared.free.len()
+        self.prepared.free.len() + self.moving.len()
     }
 
     fn residual(&self, x: &[f64], residual: &mut [f64]) {
@@ -1175,6 +1257,10 @@ impl<L: MixedFiniteStrainPotential> NonlinearProblem for Endpoint<'_, '_, '_, '_
                     };
                     *out = physical * self.prepared.variable_scale(d) / self.prepared.work_scale_j;
                 }
+                for (j, &(d, target)) in self.moving.iter().enumerate() {
+                    let index = self.prepared.free.len() + j;
+                    residual[index] = x[index] - target / self.prepared.variable_scale(d);
+                }
                 *self.trial_error.borrow_mut() = None;
             }
             Err(error) => {
@@ -1196,8 +1282,7 @@ impl<L: MixedFiniteStrainPotential> NonlinearProblem for Endpoint<'_, '_, '_, '_
                 .borrow()
                 .as_ref()
                 .expect("cached tangent")
-                .matrix
-                .spmv(direction, output),
+                .apply(direction, output),
             Err(error) => self.refuse_callback(output, error),
         }
     }
@@ -1211,16 +1296,66 @@ impl<L: MixedFiniteStrainPotential> NonlinearProblem for Endpoint<'_, '_, '_, '_
         output: &mut [f64],
     ) {
         match self.ensure_linearization(x) {
-            Ok(()) => output.copy_from_slice(
-                &self
-                    .linearization
-                    .borrow()
-                    .as_ref()
-                    .expect("cached factor")
-                    .factor
-                    .solve(residual),
-            ),
+            Ok(()) => self
+                .linearization
+                .borrow()
+                .as_ref()
+                .expect("cached factor")
+                .solve(residual, output),
             Err(error) => self.refuse_callback(output, error),
+        }
+    }
+}
+
+#[cfg(test)]
+mod prescribed_motion_tests {
+    use super::*;
+
+    #[test]
+    fn support_lifting_preserves_the_saddle_block_and_solves_the_triangular_jacobian() {
+        let mut free = Coo::new(3, 3);
+        for (i, row) in [[4.0, 1.0, 1.0], [1.0, 3.0, 2.0], [1.0, 2.0, -1.0]]
+            .iter()
+            .enumerate()
+        {
+            for (j, &value) in row.iter().enumerate() {
+                free.push(i, j, value);
+            }
+        }
+        let matrix = free.assemble();
+        let symbolic = SymbolicLdlt::analyze(&matrix, DirectOrdering::Amd).unwrap();
+        let factor = symbolic.factor(&matrix, &LdltOptions::default()).unwrap();
+        assert_eq!(
+            factor.inertia(),
+            Inertia {
+                positive: 2,
+                negative: 1
+            }
+        );
+        let mut coupling = Coo::new(3, 2);
+        for (i, row) in [[2.0, -3.0], [4.0, 1.0], [5.0, -2.0]].iter().enumerate() {
+            for (j, &value) in row.iter().enumerate() {
+                coupling.push(i, j, value);
+            }
+        }
+        let linearization = Linearization {
+            x: Vec::new(),
+            matrix,
+            factor,
+            coupling: Some(coupling.assemble()),
+        };
+        let direction = [0.3, -0.2, 0.5, 0.7, -0.4];
+        let mut action = [f64::NAN; 5];
+        linearization.apply(&direction, &mut action);
+        // Independent dense multiplication of [Kff Kfp; 0 I].
+        let expected = [4.1, 3.1, 3.7, 0.7, -0.4];
+        for (actual, expected) in action.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 2e-14);
+        }
+        let mut recovered = [f64::NAN; 5];
+        linearization.solve(&action, &mut recovered);
+        for (actual, expected) in recovered.into_iter().zip(direction) {
+            assert!((actual - expected).abs() < 2e-14);
         }
     }
 }

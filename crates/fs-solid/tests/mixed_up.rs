@@ -347,6 +347,113 @@ fn residual(evaluation: &MixedUpEvaluation) -> Vec<f64> {
 }
 
 #[test]
+fn large_prescribed_compression_moves_the_quadratic_interior_with_its_boundary() {
+    with_cx(|cx| {
+        let stretch = 0.55_f64;
+        // Physical units and a warm start must not change the normalized solve.
+        // The second case also exercises the native trust-region globalizer.
+        for (length, stress, initial_stretch, trust_region) in [
+            (1.0, 1.0, 1.0, false),
+            (1e-4, 1e-6, 1.08, true),
+            (1e4, 1e6, 0.82, false),
+        ] {
+            let mu = 2.0 * stress;
+            let bulk = 20.0 * mu;
+            let material = law(mu, bulk);
+            let (p1, tets) = block([1, 1, 1], [length; 3]);
+            let (nodes, elements) = promote_p1_to_p2(&p1, &tets, None, cx).unwrap();
+            let supports: Vec<_> = nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, point)| point.iter().any(|&x| x == 0.0 || x == length))
+                .flat_map(|(node, point)| {
+                    (0..3).map(move |axis| (3 * node + axis, (stretch - 1.0) * point[axis]))
+                })
+                .collect();
+            let mut p = problem(
+                &nodes,
+                &elements,
+                &material,
+                &supports,
+                &[],
+                VolumetricTreatment::OriginalMaterial,
+            );
+            p.settings = settings(length, mu);
+            p.settings.load_steps = 1;
+            if trust_region {
+                p.settings.newton.globalization = fs_solver::nonlinear::Globalization::TrustRegion(
+                    fs_solver::nonlinear::TrustRegionConfig::default(),
+                );
+            }
+            let prepared = p.prepare(cx).unwrap();
+            let initial: Vec<[f64; 3]> = nodes
+                .iter()
+                .map(|point| point.map(|x| (initial_stretch - 1.0) * x))
+                .collect();
+            let pressure = vec![
+                bulk * (initial_stretch * initial_stretch * initial_stretch - 1.0);
+                prepared.pressure_nodes().len()
+            ];
+            let free = 3 * nodes.len() - supports.len();
+            assert_eq!(free, 3, "the body-diagonal P2 node must remain free");
+            if initial_stretch >= 1.0 {
+                let mut injected = initial.clone();
+                for &(d, value) in &supports {
+                    injected[d / 3][d % 3] = value;
+                }
+                assert!(
+                    matches!(
+                        prepared.evaluate(&injected, &pressure, false, cx),
+                        Err(MixedUpError::Material { .. })
+                    ),
+                    "boundary-only injection must expose the original folded trial"
+                );
+            }
+            let result = prepared.solve_from(&initial, &pressure, cx).unwrap();
+            assert!(result.steps.iter().all(|step| step.converged));
+            assert_eq!(result.kkt_inertia.positive, free);
+            assert_eq!(result.kkt_inertia.negative, result.pressure_pa.len());
+            for (point, displacement) in nodes.iter().zip(&result.displacement_m) {
+                for axis in 0..3 {
+                    near(
+                        displacement[axis] / length,
+                        (stretch - 1.0) * point[axis] / length,
+                        2e-9,
+                    );
+                }
+            }
+            for &(d, value) in &supports {
+                assert_eq!(result.displacement_m[d / 3][d % 3], value);
+            }
+            let j = stretch.powi(3);
+            let expected_pressure = bulk * (j - 1.0);
+            for &value in &result.pressure_pa {
+                near(value / bulk, expected_pressure / bulk, 2e-9);
+            }
+            near(result.min_det_f, j, 2e-9);
+            // An isotropic stretch has zero isochoric energy and nominal
+            // stress P = p cof(F). These are independent material references.
+            near(
+                result.potential_j / (bulk * length.powi(3)),
+                0.5 * (j - 1.0).powi(2),
+                2e-9,
+            );
+            let right_reaction: f64 = result
+                .reactions_n
+                .iter()
+                .filter(|(d, _)| d % 3 == 0 && nodes[d / 3][0] == length)
+                .map(|(_, force)| force)
+                .sum();
+            near(
+                right_reaction / (bulk * length * length),
+                (j - 1.0) * stretch * stretch,
+                2e-9,
+            );
+        }
+    });
+}
+
+#[test]
 fn full_mixed_tangent_matches_finite_differences_and_superposed_rotation() {
     with_cx(|cx| {
         let p1 = [
