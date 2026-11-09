@@ -1,4 +1,6 @@
 //! Uniform-current inertia, affine momentum and prescribed-flow source work.
+#[path = "addedmass_uniform_flow/affine.rs"]
+mod affine;
 use fs_flyer::addedmass::articulated::{
     LinkedStrip, UniformFlow, UniformFlowAssembly, assemble_articulated_strips,
     assemble_articulated_strips_in_uniform_flow,

@@ -17,6 +17,8 @@
 //! rotating-frame current derivative and source work, rather than treating
 //! ground speed as fluid-relative speed. Its storage diagnostics concern smooth
 //! motion; existing impact receipts do not account for this affine momentum.
+//! [`AffineFlow`] additionally transports the finite strip modes through an
+//! authored spatial gradient and includes its variational reaction forces.
 
 use super::{
     AeroGeneralizedLoads, MAX_CONTROL_COORDS, MAX_STRIPS, Strip, admit_strip, refuse, strip_modes,
@@ -24,6 +26,9 @@ use super::{
 use crate::Refusal;
 use fs_ga::{Twist, Vec3, Wrench};
 use fs_mbd::articulated::generalized::GeneralizedKinematics;
+
+mod affine;
+pub use affine::{AffineFlow, AffineFlowAssembly, assemble_articulated_strips_in_affine_flow};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct LocalMode {
@@ -36,6 +41,9 @@ struct LocalMode {
 pub struct LinkedStrip {
     link: usize,
     modes: [LocalMode; 3],
+    center: Vec3,
+    normal: Vec3,
+    span: Vec3,
 }
 
 impl LinkedStrip {
@@ -66,7 +74,14 @@ impl LinkedStrip {
                 covector: Wrench::new(Vec3::new(j[3], j[4], j[5]), Vec3::new(j[0], j[1], j[2])),
             }
         });
-        Ok(Self { link, modes })
+        let vector = |v: [f64; 3]| Vec3::new(v[0], v[1], v[2]);
+        Ok(Self {
+            link,
+            modes,
+            center: vector(strip_in_link.position_m),
+            normal: vector(strip_in_link.normal),
+            span: vector(strip_in_link.span_axis),
+        })
     }
 
     /// Index in the native model's root-first link order.
@@ -124,7 +139,8 @@ pub struct UniformFlowReaction {
     pub force_world: Vec3,
     /// Mechanical power delivered by fluid to the actual body motion [W].
     pub body_power_w: f64,
-    /// Power supplied by the prescribed ambient flow, `U_world · F_world` [W].
+    /// Power supplied by the prescribed ambient flow [W]. For uniform flow this
+    /// is `U_world · F_world`; affine flow additionally retains gradient work.
     pub ambient_power_w: f64,
     /// Independently reconstructed disturbance kinetic-energy derivative [W].
     pub storage_rate_w: f64,
@@ -176,6 +192,14 @@ impl UniformFlowAssembly {
     /// Wrong acceleration shape, nonfinite input or result, or a work balance
     /// outside its arithmetic-resolution tolerance.
     pub fn reaction(&self, acceleration: &[f64]) -> Result<UniformFlowReaction, Refusal> {
+        self.reaction_with_ambient(acceleration, None)
+    }
+
+    fn reaction_with_ambient(
+        &self,
+        acceleration: &[f64],
+        ambient: Option<&affine::AffinePower>,
+    ) -> Result<UniformFlowReaction, Refusal> {
         let n = self.loads.q_added_bias.len();
         if acceleration.len() != n || !acceleration.iter().all(|a| a.is_finite()) {
             return Err(refuse(
@@ -222,7 +246,10 @@ impl UniformFlowAssembly {
         let force_world = self.base_axes_world[0].scale(generalized_force[0])
             + self.base_axes_world[1].scale(generalized_force[1])
             + self.base_axes_world[2].scale(generalized_force[2]);
-        let ambient_power_w = self.flow.velocity_world_mps.dot(force_world);
+        let ambient_power_w = ambient.map_or_else(
+            || self.flow.velocity_world_mps.dot(force_world),
+            |power| power.evaluate(acceleration, &mut work_scale),
+        );
         let balance_residual_w = storage_rate_w + body_power_w - ambient_power_w;
         let balance_tolerance_w = 2048.0 * f64::EPSILON * (1.0 + work_scale);
         if !generalized_force.iter().all(|v| v.is_finite())
@@ -303,6 +330,7 @@ pub fn assemble_articulated_strips_in_uniform_flow(
         kinematics,
         Some(flow),
         Some(&mut diagnostics),
+        None,
     )?;
     if ![
         diagnostics.energy,
@@ -321,8 +349,18 @@ pub fn assemble_articulated_strips_in_uniform_flow(
             "use representable flow, geometry, density and native motion",
         ));
     }
+    let base_axes_world = base_axes_world(kinematics)?;
+    Ok(UniformFlowAssembly {
+        loads,
+        flow,
+        base_axes_world,
+        diagnostics,
+    })
+}
+
+fn base_axes_world(kinematics: &GeneralizedKinematics) -> Result<[Vec3; 3], Refusal> {
     // Native root translation columns map base translation into root-link
-    // axes. This remains correct for a nonidentity root mounting transform.
+    // axes, including a nonidentity root mounting transform.
     let root_rotation = kinematics.world_from_link(0).rotation();
     let root_columns = kinematics.body_jacobian(0);
     let mut base_axes_world = [Vec3::default(); 3];
@@ -337,12 +375,7 @@ pub fn assemble_articulated_strips_in_uniform_flow(
                 )
             })?;
     }
-    Ok(UniformFlowAssembly {
-        loads,
-        flow,
-        base_axes_world,
-        diagnostics,
-    })
+    Ok(base_axes_world)
 }
 
 fn native_column(flyer_column: usize) -> usize {
@@ -374,7 +407,7 @@ pub fn assemble_articulated_strips(
     strips: &[LinkedStrip],
     kinematics: &GeneralizedKinematics,
 ) -> Result<AeroGeneralizedLoads, Refusal> {
-    assemble(rho_kg_m3, strips, kinematics, None, None)
+    assemble(rho_kg_m3, strips, kinematics, None, None, None)
 }
 
 fn assemble(
@@ -383,6 +416,7 @@ fn assemble(
     kinematics: &GeneralizedKinematics,
     flow: Option<UniformFlow>,
     mut diagnostics: Option<&mut FlowDiagnostics>,
+    mut affine: Option<(&AffineFlow, &mut affine::AffinePower)>,
 ) -> Result<AeroGeneralizedLoads, Refusal> {
     let nc = kinematics.dof_count();
     if nc > MAX_CONTROL_COORDS {
@@ -429,6 +463,10 @@ fn assemble(
         let velocity = kinematics.body_twist(strip.link);
         let acceleration = kinematics.body_bias_acceleration(strip.link);
         let jacobian = kinematics.body_jacobian(strip.link);
+        let prescribed = affine
+            .as_ref()
+            .map(|(flow, _)| flow.prepare(strip, kinematics))
+            .transpose()?;
         let (relative_velocity, relative_acceleration) = if let Some(flow) = moving_flow {
             let world_to_link = kinematics.world_from_link(strip.link).rotation().inverse();
             let local_flow = world_to_link.rotate(flow.velocity_world_mps).map_err(|_| {
@@ -458,7 +496,7 @@ fn assemble(
         } else {
             (velocity, acceleration)
         };
-        for mode in strip.modes {
+        for (index, mode) in strip.modes.into_iter().enumerate() {
             let inertia = rho_kg_m3 * mode.inertia_per_density;
             if !inertia.is_finite() || inertia <= 0.0 {
                 return Err(refuse(
@@ -468,23 +506,43 @@ fn assemble(
                 ));
             }
             let covector = mode.covector;
-            let speed = covector.pairing(relative_velocity);
-            let bias_speed = covector.pairing(relative_acceleration);
+            let ambient_mode = prescribed.as_ref().map(|modes| &modes[index]);
+            let (speed, bias_speed) = ambient_mode.map_or_else(
+                || {
+                    (
+                        covector.pairing(relative_velocity),
+                        covector.pairing(relative_acceleration),
+                    )
+                },
+                |ambient| {
+                    (
+                        covector.pairing(velocity) - ambient.speed,
+                        covector.pairing(acceleration) - ambient.time_rate - ambient.body_rate,
+                    )
+                },
+            );
             let mut row = [0.0; 6 + MAX_CONTROL_COORDS];
             for a in 0..6 + nc {
                 let column = jacobian[native_column(a)];
                 row[a] = covector.pairing(column);
-                // <J_a, ad*_W p> = -<p, [W, J_a]>: use the original
-                // Lie bracket to include angular AND linear transport once.
-                result.q_added_bias[a] += inertia
-                    * (speed * covector.pairing(relative_velocity.bracket(column))
-                        - row[a] * bias_speed);
+                // Use the original angular/linear Lie bracket. Uniform flow
+                // combines its configuration derivative into W; affine flow
+                // retains the full V bracket and its explicit D_beta term.
+                let transport = ambient_mode.map_or_else(
+                    || covector.pairing(relative_velocity.bracket(column)),
+                    |ambient| covector.pairing(velocity.bracket(column)) - ambient.variation[a],
+                );
+                result.q_added_bias[a] += inertia * (speed * transport - row[a] * bias_speed);
             }
             if let Some(d) = diagnostics.as_deref_mut() {
                 let absolute_speed = covector.pairing(velocity);
                 let storage = inertia * (speed * bias_speed);
-                let transport =
-                    inertia * (speed * covector.pairing(relative_velocity.bracket(velocity)));
+                let transport = inertia
+                    * (speed
+                        * ambient_mode.map_or_else(
+                            || covector.pairing(relative_velocity.bracket(velocity)),
+                            |ambient| -ambient.body_rate,
+                        ));
                 let body = inertia * (absolute_speed * bias_speed);
                 d.energy += 0.5 * inertia * speed * speed;
                 d.storage_bias_rate += storage;
@@ -494,6 +552,9 @@ fn assemble(
                     d.momentum[a] += inertia * (speed * row[a]);
                     d.homogeneous_momentum[a] += inertia * (absolute_speed * row[a]);
                 }
+            }
+            if let (Some(ambient), Some((_, power))) = (ambient_mode, affine.as_mut()) {
+                power.add(ambient, inertia, speed, bias_speed, &row[..6 + nc]);
             }
             for a in 0..6 {
                 for b in 0..6 {

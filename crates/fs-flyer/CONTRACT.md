@@ -396,6 +396,38 @@ and MIT 13.012
 [fluid-force notes](https://web.mit.edu/13.012/www/handouts/2003/Reading7.pdf);
 the latter separate displaced-fluid pressure force from added mass.
 
+### Affine ambient flow in articulated inertia
+
+`assemble_articulated_strips_in_affine_flow` accepts a fixed world reference
+point and instantaneous `U(x,t)=U0(t)+A(t)*(x-xref)`, with explicit Eulerian
+partial derivatives of both U0 and A. The three existing finite-plate modes
+sample `beta = [n dot U(center), -n dot A(chord), n dot A(span)]`: centroid
+normal velocity is in m/s, while chord/span normal-velocity slopes are in
+1/s and pair with the original rotary inertias. Their derivatives include
+motion of the sample point AND rotation of the plate normal, chord and span.
+The body-path derivative uses the actual material-point velocity; the fluid
+material acceleration is separately `partial_t U + A*U`.
+
+For each original mode covector lambda, `y=lambda dot V-beta` and disturbance
+storage is `m*y*y/2`. The same generalized mass assembly adds the full bias
+`m*[y*(lambda dot [V,J]-D_beta[J]) - (lambda dot J)*
+(lambda dot c-partial_t beta-D_beta[V])]`. Thus convective acceleration and
+configuration-gradient recoil enter together, without finite differences,
+new kinematics, or a second solve. The smooth power receipt includes the
+prescribed-field port `-sum(m*(beta*dy/dt+y*D_beta[V]))`; using only U0 times
+net force would omit gradient work. Zero A AND zero partial_t A delegate
+exactly to the previous uniform/still owner, including its receipts.
+
+This is a variational extension of the declared three-mode strip kinetic
+model. Arbitrary shear, strain or vorticity does not acquire the authority of
+a solved nonuniform potential-flow boundary-value problem. Density changes,
+cross-surface interactions, viscous effects and displaced-volume pressure
+forces remain separate. The existing midpoint load callback consumes these
+blocks at its actual stage. Focused tests use independent material-point
+energy and generalized configuration variations, rotating comoving flow,
+and the analytic material-acceleration/native trajectory of an incompressible
+irrotational linear strain. Native execution status is reported separately.
+
 ### Moving dry links and fluid in one coupled step
 
 `partitioned::articulated::step` advances the native free-base articulated
