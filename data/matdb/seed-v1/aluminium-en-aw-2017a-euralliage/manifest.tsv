@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	aluminium-en-aw-2017a-euralliage
+redistribution	permitted	Numerical values retained as facts with attribution; no sheet text, table layout or figure is reproduced; the ratios are arithmetic by the pack author on the printed values
+citation	Euralliage, 2017A (EN AW-2017A, AW-AlCu4MgSi(A), AU4G) technical sheet, table "Elastic and physical properties" (E 72500 MPa, G 27200 MPa, nu 0.33, density 2790 kg/m3), https://www.euralliage.com/2017A_english.htm, accessed 2026-11-09; the isotropic ratios derived by the pack author
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

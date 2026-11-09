@@ -2,16 +2,25 @@
   "schema": "frankensim.instrument-status.v1",
   "family": "vibraphone",
   "title": "Vibraphone",
-  "reference_instrument": null,
-  "summary": "No vibraphone is rendered. A real Iowa sustained mf C4-B4 recording has been downloaded and pinned in references-supplemental.json; the instrument still needs measured geometry and a controlled comparison.",
-  "physics_present": [],
-  "physics_missing": [
-    "A segmented, specimen-aware comparison using the acquired recording and its documented recording chain",
-    "Published aluminium-bar dimensions and undercut for one real instrument",
-    "Resonator tubes with their rotating fan valves, which give the vibrato",
-    "The tubular resonator coupling that the marimba also lacks"
+  "reference_instrument": "Iowa MIS vibraphone (model NA; the page states neither the bar alloy, the resonator geometry nor whether the fan motor ran). C4 is compared with its sustained mf C4-B4 file; its pp and ff files give the ruler its other dynamic",
+  "summary": "One aluminium bar, C4, alone in free air: not yet a vibraphone. The bar is a builder's C4 in EN AW-2017A, its undercut solved in the engine so the first partial sits at equal temperament on A4 = 442 Hz with f2 = 4 f1. The builder's resonator tube is NOT coupled: the engine refused the bar over its tube before any sound, because the mutual radiation resistance between the tube's fifth mode and the bar's third vertical mode is not passive at aluminium's small loss. The bar's loss is a measured 2024-T4 beam's, and the fundamental decays four to five times slower than the recording's. The bar is not the recording's instrument, and the rubber mallet is a stand-in.",
+  "physics_present": [
+    "A three-dimensional bar with the C4 outline of a builder's F3-F6 vibraphone design (the Wyndorps DIY vibraphone pages: 323 x 57.15 x 12.0 mm, read from the builder's bar-set drawing), in EN AW-2017A aluminium with the Euralliage sheet's modulus, shear modulus, Poisson ratio and density, on a 56 x 6 x 3 mesh",
+    "A circular-arc undercut solved in the engine from the modes alone, for f1 at equal temperament on A4 = 442 Hz and f2 = 4 f1, the tuning rule a maker uses; 442 Hz is the tuning a maker prints for its M55-type vibraphones, and the grader's own read puts the recording's C4 to B4 within a few cents of it. The third mode is not aimed at",
+    "One loss factor on every bar mode, eta 9.788e-5, the 1 atm mean of W. E. Howell's clean 2024-T4 aluminium beams (NASA TM X-2852, 1974): a thinner beam of a sister alloy, not a vibraphone bar, and its value holds that beam's own share of air loss",
+    "A Hertz contact mallet, the marimba cards' hard rubber row (Chaigne and Doutaut 1997) at 1.0 m/s, a declared stand-in on aluminium",
+    "Burton-Miller boundary-element radiation from the bar up to the band the card states, with no box, heard through the broadband observer"
   ],
-  "blocked": "The reference recording is available, but the recorded instrument's bar, undercut and resonator geometry remain unidentified. The xylophone bar slice is a starting point; no vibraphone render or grading claim is made.",
+  "physics_missing": [
+    "The resonator: the builder's tube (its bore and air column inferred from the builder's CAD part, the bar-to-tube gap a stand-in) was coupled and the engine refused it before any sound. Each bar mode exchanges with its nearest tube mode at that tube mode's frequency, and the engine puts no radiation damping on a bar mode itself, so against aluminium's small loss the mutual resistance between the tube's fifth mode and the bar's third vertical mode is not covered. This page is the bar alone; the tube's lift of the fundamental and its share of the decay are absent",
+    "The right decay: the loss row alone decays the fundamental at 0.70 dB/s (T60 85 s), while the recording's fundamental, with its tube on, decays at 2.77 to 3.25 dB/s (T60 18 to 22 s, three strikes). The support cords and felts, the mallet's contact loss and the bar's own radiation damping are not modelled, and nothing is adjusted to close the gap",
+    "The recording's mallet: vibraphone mallets are usually cord- or yarn-wrapped and the recording names none. In this render, with the rubber stand-in and no tube, the bar's third vertical partial stands above its fundamental and the spectral centroid sits far above the recording's; the two causes are not separated",
+    "The fan valves that give the vibraphone its vibrato: not modelled. The recording's notes carry no envelope modulation at one rate common to all of them, so its motor was off",
+    "A measured vibraphone bar: the undercut is solved from the tuning rule, not measured, and the recording's bar alloy and outline are not stated",
+    "Neighbouring bars, the frame and the damper",
+    "A second take: the ruler compares the recording's pp and ff C4 and its neighbouring notes, and has no other take of the note, since the Iowa page carries one take of each note at each dynamic"
+  ],
+  "blocked": null,
   "beads": [
     "pexfp.274"
   ]

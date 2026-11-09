@@ -220,7 +220,7 @@ for c in CANDS:
             continue
         target = cand_t[0]
         real = ref_audio(target, WAVDIR)
-        inh = c["inst"] in ("xylophone", "marimba")
+        inh = c["inst"] in ("xylophone", "marimba", "vibraphone")
         dr = describe(real, kind, hz_of(nm), inharmonic=inh, band_split_hz=band_split_hz)
         do = describe(ours, kind, hz_of(nm), inharmonic=inh, band_split_hz=band_split_hz)
         rl = rulers(LIB, dict(target, desc=dr))

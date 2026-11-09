@@ -5,10 +5,10 @@
  "storage": "audio is never committed; fetch with data/instruments/fetch-references.sh into FRANKENSIM_REFERENCE_DIR off the Mac Data volume",
  "source_index": {
   "path": "apps/instrument-lab/tools/instrgrade/uiowa-links.json",
-  "sha256": "46b50e792be079a2b118a3adeb632ef719d2b785f3750a6b71ea2ed14960e74d",
-  "pages": 21,
-  "links": 1190,
-  "unique_links": 1176
+  "sha256": "39a1406f8e409f890aaada93cc28a51101a4064bf5fcb8f1abe9388e0d9b3301",
+  "pages": 22,
+  "links": 1230,
+  "unique_links": 1216
  },
  "licences": [
   {
@@ -164,11 +164,12 @@
    "low_cutoff_status": "undocumented",
    "pages": [
     "MISxylophone.html",
-    "Mismarimba.html"
+    "Mismarimba.html",
+    "Misvibraphone.html"
    ],
    "source_url": "https://theremin.music.uiowa.edu/MIS.html",
    "retrieved_utc": "2026-10-18T18:33:37Z",
-   "notes": "2013 percussion sessions publish stereo only; which microphones feed left and right is not stated on the page. MISPost2012Intro.html (https://theremin.music.uiowa.edu/MISPost2012Intro.html, read 2026-10-21) says the percussion instruments were done between March and June 2013 at a 24-bit, 44.1 kHz format with 3 Earthworks QTC40 microphones in a Decca Tree configuration; the same page describes mid-side processing applied 'whenever possible' to widen the stereo field of the files it edits (it describes the ff files); this note does not claim the mf files graded here were so processed. MISxylophone.html (session of 10 June 2013, Earthworks QTC40, Metric Halo 2882, 24-bit 44.1 kHz stereo, 5 feet) has sections 'Hard Rubber Mallets' and 'Rosewood Mallets', so 'rosewood' in the file names xylophone.rosewood.* names the MALLETS; the page gives Model NA and states neither the bar material nor whether resonators were present."
+   "notes": "2013 percussion sessions publish stereo only; which microphones feed left and right is not stated on the page. MISPost2012Intro.html (https://theremin.music.uiowa.edu/MISPost2012Intro.html, read 2026-10-21) says the percussion instruments were done between March and June 2013 at a 24-bit, 44.1 kHz format with 3 Earthworks QTC40 microphones in a Decca Tree configuration; the same page describes mid-side processing applied 'whenever possible' to widen the stereo field of the files it edits (it describes the ff files); this note does not claim the mf files graded here were so processed. MISxylophone.html (session of 10 June 2013, Earthworks QTC40, Metric Halo 2882, 24-bit 44.1 kHz stereo, 5 feet) has sections 'Hard Rubber Mallets' and 'Rosewood Mallets', so 'rosewood' in the file names xylophone.rosewood.* names the MALLETS; the page gives Model NA and states neither the bar material nor whether resonators were present. Misvibraphone.html (read 2026-11-09) gives the same session day, 10 June 2013, the same Earthworks QTC40 at 5 feet, Metric Halo 2882 and 24-bit 44.1 kHz stereo, performer Andrew Thierauf, and Model NA; it states neither the bar alloy, the resonator geometry nor whether the fan motor ran."
   }
  ],
  "pages": [
@@ -455,6 +456,19 @@
    "instrument": "Marimba",
    "model": null,
    "session_date": "2013-03-20",
+   "chain": "uiowa-mis-qtc40-2013-stereo",
+   "ambient": "absent-on-page"
+  },
+  {
+   "page": "Misvibraphone.html",
+   "url": "https://theremin.music.uiowa.edu/Misvibraphone.html",
+   "sha256": "1b04bfd873f795f842c158a43fd1fdab32bb92a0687841ef010070ad0529be19",
+   "retrieved_utc": "2026-11-09T06:57:45Z",
+   "links": 40,
+   "duplicate_links": [],
+   "instrument": "Vibraphone",
+   "model": null,
+   "session_date": "2013-06-10",
    "chain": "uiowa-mis-qtc40-2013-stereo",
    "ambient": "absent-on-page"
   }
@@ -24455,7 +24469,256 @@
    "pair": null,
    "gradable": true,
    "channel_policy": "stereo-only session: channel 0 graded as one microphone; left/right microphone assignment undocumented"
+  },
+  {
+   "id": "uiowa-vibraphone-vibraphone-sustain-pp-c4b4",
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.sustain.pp.C4B4.aif",
+   "page": "Misvibraphone.html",
+   "url": "https://theremin.music.uiowa.edu/sound%20files/MIS/Percussion/Vibraphone/Vibraphone.sustain.pp.C4B4.aif",
+   "path": "sound files/MIS/Percussion/Vibraphone/Vibraphone.sustain.pp.C4B4.aif",
+   "sha256": "eca8e7391ac5e9f016baf95810f83d8e3684ba01a8c3c8bd235ff1cacda042b9",
+   "bytes": 54449572,
+   "kind": "chromatic-scale",
+   "instrument": "Vibraphone",
+   "articulation": "sustain",
+   "dynamic": "pp",
+   "range": "C4B4",
+   "chain": "uiowa-mis-qtc40-2013-stereo",
+   "licence": "uiowa-mis",
+   "ledger_source_id": "uiowa-mis",
+   "channels": "stereo",
+   "pair": null,
+   "gradable": true,
+   "channel_policy": "stereo-only session: channel 0 graded as one microphone; left/right microphone assignment undocumented"
+  },
+  {
+   "id": "uiowa-vibraphone-vibraphone-sustain-mf-c4b4",
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.sustain.mf.C4B4.aif",
+   "page": "Misvibraphone.html",
+   "url": "https://theremin.music.uiowa.edu/sound%20files/MIS/Percussion/Vibraphone/Vibraphone.sustain.mf.C4B4.aif",
+   "path": "sound files/MIS/Percussion/Vibraphone/Vibraphone.sustain.mf.C4B4.aif",
+   "sha256": "ca311594e031bb877c52190f59c3612889471c81e72f0afce20203ff1c0eaff4",
+   "bytes": 84447610,
+   "kind": "chromatic-scale",
+   "instrument": "Vibraphone",
+   "articulation": "sustain",
+   "dynamic": "mf",
+   "range": "C4B4",
+   "chain": "uiowa-mis-qtc40-2013-stereo",
+   "licence": "uiowa-mis",
+   "ledger_source_id": "uiowa-mis",
+   "channels": "stereo",
+   "pair": null,
+   "gradable": true,
+   "channel_policy": "stereo-only session: channel 0 graded as one microphone; left/right microphone assignment undocumented"
+  },
+  {
+   "id": "uiowa-vibraphone-vibraphone-sustain-ff-c4b4",
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.sustain.ff.C4B4.aif",
+   "page": "Misvibraphone.html",
+   "url": "https://theremin.music.uiowa.edu/sound%20files/MIS/Percussion/Vibraphone/Vibraphone.sustain.ff.C4B4.aif",
+   "path": "sound files/MIS/Percussion/Vibraphone/Vibraphone.sustain.ff.C4B4.aif",
+   "sha256": "7ac70e55507372026eea85b5d40240c12b3225a76b9bcba914c17d8fc8aed521",
+   "bytes": 90693610,
+   "kind": "chromatic-scale",
+   "instrument": "Vibraphone",
+   "articulation": "sustain",
+   "dynamic": "ff",
+   "range": "C4B4",
+   "chain": "uiowa-mis-qtc40-2013-stereo",
+   "licence": "uiowa-mis",
+   "ledger_source_id": "uiowa-mis",
+   "channels": "stereo",
+   "pair": null,
+   "gradable": true,
+   "channel_policy": "stereo-only session: channel 0 graded as one microphone; left/right microphone assignment undocumented"
   }
  ],
- "excluded": []
+ "excluded": [
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.sustain.pp.C3B3.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.sustain.pp.C5B5.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.sustain.pp.C6F6.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.sustain.mf.C3B3.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.sustain.mf.C5B5.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.sustain.mf.C6F6.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.sustain.ff.C3B3.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.sustain.ff.C5B5.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.sustain.ff.C6F6.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.dampen.pp.C3B3.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.dampen.pp.C4B4.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.dampen.pp.C5B5.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.dampen.pp.C6F6.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.dampen.mf.C3B3.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.dampen.mf.C4B4.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.dampen.mf.C5B5.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.dampen.mf.C6F6.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.dampen.ff.C3B3.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.dampen.ff.C4B4.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.dampen.ff.C5B5.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.dampen.ff.C6F6.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.shortsustain.pp.C3B3.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.shortsustain.pp.C4B4.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.shortsustain.pp.C5B5.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.shortsustain.pp.C6F6.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.shortsustain.mf.C3B3.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.shortsustain.mf.C4B4.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.shortsustain.mf.C5B5.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.shortsustain.mf.C6F6.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.shortsustain.ff.C3B3.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.shortsustain.ff.C4B4.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.shortsustain.ff.C5B5.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.shortsustain.ff.C6F6.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.bow.C3B3.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.bow.C4B4.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.bow.C5B5.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  },
+  {
+   "link": "sound files/MIS/Percussion/Vibraphone/Vibraphone.bow.C6F6.aif",
+   "page": "Misvibraphone.html",
+   "reason": "not pinned yet: the vibraphone pilot pins only the recording its first page grades (Vibraphone.sustain.mf.C4B4) and the two its ruler compares across dynamics (sustain pp and ff C4B4); this one takes its sha256 and byte count when a page needs it"
+  }
+ ]
 }

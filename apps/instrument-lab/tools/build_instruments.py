@@ -165,7 +165,7 @@ FAMILIES: list[tuple[str, str, str | None]] = [
     ("guitar", "Classical guitar", "Guitar"),
     ("marimba", "Marimba", "Marimba"),
     ("xylophone", "Xylophone", "Xylophone"),
-    ("vibraphone", "Vibraphone", None),
+    ("vibraphone", "Vibraphone", "Vibraphone"),
     ("recorder", "Recorder", None),
     ("tin-whistle", "Tin whistle", None),
     ("pan-pipes", "Pan pipes", None),

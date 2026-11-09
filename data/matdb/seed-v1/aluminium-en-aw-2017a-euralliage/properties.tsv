@@ -1,0 +1,33 @@
+frankensim.matdb-source.v1
+observation	e2017a	EN AW-2017A aluminium alloy (AlCu4MgSi(A)), grade-level values of a supplier sheet, temper and product form not tied to the values	Printed in the sheet's elastic and physical properties table: E 72500 MPa, G 27200 MPa, nu 0.33, density 2790 kg/m3	A supplier's typical values, not measurements on the bars of any instrument; no test temperature, temper or scatter printed. The builder of the bar set names this alloy; the bars' own temper is not printed
+observation	iso	The same alloy, read as an isotropic solid	Arithmetic by the pack author: et_over_el = er_over_el = 1, every shear ratio = G/E = 27200/72500 with the printed G, every Poisson ratio = the printed nu 0.33, so bar_strike's orthotropic slots hold an isotropic metal	Rolled or drawn bar stock can carry a small texture anisotropy, not printed; the printed G differs from E/(2(1+nu)) = 27256 MPa by 0.2 percent, and the pack keeps the printed G
+scalar	density	e2017a	density	2790	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature_known	0	0	1
+scalar	young-modulus-longitudinal	e2017a	young_modulus_longitudinal	72500	MPa	constant
+uncertainty	young-modulus-longitudinal	unstated	-	-	-	-
+validity	young-modulus-longitudinal	temperature_known	0	0	1
+scalar	et-over-el	iso	et_over_el	1	1	constant
+uncertainty	et-over-el	unstated	-	-	-	-
+validity	et-over-el	temperature_known	0	0	1
+scalar	er-over-el	iso	er_over_el	1	1	constant
+uncertainty	er-over-el	unstated	-	-	-	-
+validity	er-over-el	temperature_known	0	0	1
+scalar	glt-over-el	iso	glt_over_el	0.37517241379310345	1	constant
+uncertainty	glt-over-el	unstated	-	-	-	-
+validity	glt-over-el	temperature_known	0	0	1
+scalar	grt-over-el	iso	grt_over_el	0.37517241379310345	1	constant
+uncertainty	grt-over-el	unstated	-	-	-	-
+validity	grt-over-el	temperature_known	0	0	1
+scalar	glr-over-el	iso	glr_over_el	0.37517241379310345	1	constant
+uncertainty	glr-over-el	unstated	-	-	-	-
+validity	glr-over-el	temperature_known	0	0	1
+scalar	nu-lt	iso	nu_lt	0.33	1	constant
+uncertainty	nu-lt	unstated	-	-	-	-
+validity	nu-lt	temperature_known	0	0	1
+scalar	nu-lr	iso	nu_lr	0.33	1	constant
+uncertainty	nu-lr	unstated	-	-	-	-
+validity	nu-lr	temperature_known	0	0	1
+scalar	nu-tr	iso	nu_tr	0.33	1	constant
+uncertainty	nu-tr	unstated	-	-	-	-
+validity	nu-tr	temperature_known	0	0	1

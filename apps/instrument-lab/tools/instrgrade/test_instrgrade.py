@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -111,6 +112,20 @@ class Guards(unittest.TestCase):
                 self.assertEqual(refusal["error"], "IRPGRADE_RADIATED_CANDIDATE_REFUSED")
                 self.assertIn("DIAGNOSTIC-ONLY", refusal["message"])
                 self.assertFalse(output.exists())
+
+    def test_vibraphone_entry_is_a_decaying_inharmonic_bar(self):
+        """A UIowa Vibraphone stem is a struck bar like the marimba's: its library entry is decaying and described inharmonic."""
+        t = np.arange(int(2.5 * ig.SR)) / ig.SR
+        f1 = 440 * 2 ** (-9 / 12)
+        bar = sum(a * np.sin(2 * np.pi * r * f1 * t) * np.exp(-d * t) for r, a, d in ((1, 1.0, 0.4), (4, 0.3, 2.0), (9.2, 0.1, 6.0)))
+        x = np.concatenate([np.zeros(int(0.2 * ig.SR)), bar])
+        wav = self.work / "vibraphone" / "Vibraphone.sustain.mf.C4.wav"
+        wav.parent.mkdir()
+        ig.write_wav(wav, 0.5 * x / np.abs(x).max())
+        with mock.patch.object(ig, "describe", wraps=ig.describe) as spy:
+            entries = ig.library_entries(wav, heavy=False)
+        self.assertEqual([(e["inst"], e["kind"], e["name"]) for e in entries], [("vibraphone", "decaying", "C4")])
+        self.assertEqual([(c.args[1], c.kwargs["inharmonic"]) for c in spy.call_args_list], [("decaying", True)])
 
     def test_results_and_receipt_record_pass_and_failed_reproduction(self):
         """G0: real CLI computes identity, binds hashes, and fails a 1 dB mismatch."""

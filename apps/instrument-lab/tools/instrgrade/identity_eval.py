@@ -99,7 +99,7 @@ def cand_job(args):
         y, _ = refs.aligned(e)
         n = refs.note(e)
         f0 = hz_of(e["note"])
-        inh = e["inst"] in ("xylophone", "marimba")
+        inh = e["inst"] in ("xylophone", "marimba", "vibraphone")
         out["real"] = idn.features(n)
         nulls = freeze.null_signals(y, f0, n.B if e["kind"] == "decaying" and not inh else 0.0)
         if inh:
@@ -346,7 +346,7 @@ def dcand_job(e):
         refs = _D["refs"]
         y, _ = refs.aligned(e)
         f0 = hz_of(e["note"])
-        inh = e["inst"] in ("xylophone", "marimba")
+        inh = e["inst"] in ("xylophone", "marimba", "vibraphone")
         out["real"] = idn.decay_features(y, f0)
         B = 0.0 if inh else refs.note(e).B
         zs = freeze.null_signals(y, f0, B)

@@ -121,7 +121,7 @@ def cand_job(c):
     out = dict(c)
     try:
         f0 = hz_of(midi_of(c["note"]))
-        inh = c["inst"] in ("xylophone", "marimba")
+        inh = c["inst"] in ("xylophone", "marimba", "vibraphone")
         if c["source"] == "null":
             refs = _R[c["which"]]
             refs.band_hz = c.get("band_hz")

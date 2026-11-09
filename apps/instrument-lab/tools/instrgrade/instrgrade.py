@@ -806,7 +806,7 @@ def library_entries(p: Path, heavy: bool = True):
             return []
         labels = [m for m, _ in refusal.verified]
         spans = [s for _, s in refusal.verified]
-    kind = "decaying" if (meta["art"] == "pizz" or meta["inst"] in ("guitar", "xylophone", "marimba", "piano")) else "sustained"
+    kind = "decaying" if (meta["art"] == "pizz" or meta["inst"] in ("guitar", "xylophone", "marimba", "vibraphone", "piano")) else "sustained"
     entries = []
     for k, (a, b) in enumerate(spans):
         y = x[a:b]
@@ -815,7 +815,7 @@ def library_entries(p: Path, heavy: bool = True):
         if len(y) < int(0.35 * SR):
             continue
         hint = hz_of(labels[k]) if labels else None
-        d = describe(y, kind, hint, inharmonic=meta["inst"] in ("xylophone", "marimba"), _skip_q3_heavy=not heavy)
+        d = describe(y, kind, hint, inharmonic=meta["inst"] in ("xylophone", "marimba", "vibraphone"), _skip_q3_heavy=not heavy)
         if d is None:
             continue
         midi = int(round(69 + 12 * math.log2(d["f0"] / 440))) if d["f0"] and np.isfinite(d["f0"]) else None
