@@ -1,3 +1,34 @@
+## Reynolds-dependent turbulent friction in native inertial graphs
+
+The original `InertialGraph` accepts source-bearing `TurbulentPipeLoss`
+branches alongside linear and quadratic losses. Each candidate midpoint uses
+the original Colebrook pressure law's positive secant `Delta p(Q*) / Q*`.
+The same port-Hamiltonian descriptor advances branch impulse and quadratic
+kinetic energy; no startup friction factor, new momentum integrator or
+constant-coefficient substitute is introduced.
+
+The actual native midpoint is re-evaluated with the original nonlinear law
+before the existing impulse and mechanical-energy gates can accept. The
+reported average flow supplies transport, and the original pressure drop times
+that flow supplies dissipated work. A material trial may refresh viscosity,
+while retaining the original pipe geometry, roughness, law/source identity and
+reference momentum density. Rechecking a thermal response preserves the
+proposed native trajectory and tests its new physical residuals.
+
+Initial, midpoint and final flows must stay in the authored Reynolds interval.
+A sign reversal refuses because it crosses unsupported laminar/transition
+flow, even if both endpoints are turbulent. Graph continuity, pressure ports,
+resource limits, cancellation and immutable trial publication retain their
+existing owners. A failed proposal or acceptance changes no accepted momentum.
+
+Focused regressions cover signed mixed-network pressure/impulse/work against
+an independent Colebrook solve, second-order unsteady decay and the steady
+limit, viscosity refresh and stale-response rejection, and Reynolds/transition
+refusal. This is developed, quasi-steady turbulent wall friction in an
+incompressible fixed-reference-density graph. It does not supply turbulent
+startup/transition, frequency-dependent wall-shear memory or compressible
+acoustic storage.
+
 # CONTRACT: fs-airflow
 
 ## Source-exact liquid channel energy
@@ -5588,8 +5619,9 @@ differential resistance at actual solved flow, in addition to its unchanged
 coefficient and hA gates. Its existing omitted-dissipation watt budget still
 accounts for actual `dp Q`; no power is silently deposited twice.
 
-Constant-coefficient axial aggregation and the constant-drag inertial
-descriptor explicitly refuse nonlinear pipe branches. This feature adds no
+Constant-coefficient axial aggregation still refuses nonlinear pipe branches.
+The original inertial graph also accepts these pipes through its native
+midpoint/secant closure, as described below. This feature adds no
 second network solver, transient turbulence model, rough-wall heat-transfer
 correlation, source-domain extension or uncertainty certificate. Five added
 regressions in existing test files cover junction/reversed flow and pressure

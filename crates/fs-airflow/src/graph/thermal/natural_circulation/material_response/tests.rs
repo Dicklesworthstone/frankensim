@@ -399,8 +399,8 @@ fn turbulent_fan_intersection_uses_actual_nonlinear_curve_and_private_zero_flow_
 }
 
 #[test]
-fn turbulent_continuation_and_fixed_coefficient_consumers_never_admit_unsupported_physics() {
-    use crate::graph::inertial::{InertialBranch, InertialGraph, InertialGraphError};
+fn turbulent_continuation_refuses_unsupported_physics_and_native_inertia_retains_the_law() {
+    use crate::graph::inertial::{InertialBranch, InertialGraph};
     use crate::graph::thermal::natural_circulation::distributed_response::{
         DistributedResponseError, evaluate_distributed_material_graph,
     };
@@ -440,10 +440,10 @@ fn turbulent_continuation_and_fixed_coefficient_consumers_never_admit_unsupporte
             }
         }
         assert!(pipe.evaluate(VolumetricFlowRate::new(0.0)).is_err());
-        assert!(matches!(InertialGraph::try_new(cx, &response.graph, Density::new(1000.0),
+        let inertial = InertialGraph::try_new(cx, &response.graph, Density::new(1000.0),
             &[InertialBranch { length_m: 1.0, flow_area_m2: pipe.law().flow_area().value() }],
-            &[boundary(0, 6000.0), boundary(1, 0.0)], &[1e-4], 0.0, 8),
-            Err(InertialGraphError::Invalid(_))));
+            &[boundary(0, 6000.0), boundary(1, 0.0)], &[1e-4], 0.0, 8).unwrap();
+        assert_eq!(inertial.volume_flows_m3_s(), vec![1e-4]);
         assert!(matches!(evaluate_distributed_material_graph(cx, &template(), density(),
             &[vec![turbulent_law(1.0, 1e-5)]], &[1e-4],
             vec![vec![source("bulk", 900.0, 0.001, 0.5)]], vec![vec![vec![]]]),

@@ -6,21 +6,25 @@
 //! Coefficients may be re-resolved at a thermal trial; all accepted flows and
 //! work come from the same native midpoint step. This is an incompressible,
 //! fixed-reference-density approximation, not acoustic or compressible storage.
+//! Developed turbulent pipes retain their original Reynolds-dependent
+//! Colebrook law at the actual midpoint. This is quasi-steady wall friction;
+//! it supplies no frequency-dependent turbulent wall-shear memory. Initial,
+//! midpoint and final flow must remain on one admitted turbulent branch.
 
 use std::sync::Arc;
 
 use fs_exec::Cx;
 use fs_phs::{DescriptorPortHamiltonian, PhsError, QuadraticStorage, StepRecord};
-use fs_qty::Density;
+use fs_qty::{Density, VolumetricFlowRate};
 
 use super::{FixedPressure, GraphError, LossGraph, Sum, checkpoint};
 
+/// Unsteady circular laminar flow with physical viscous profile memory.
+pub mod laminar;
 /// Vector reaction loads on the original fixed pipe geometry.
 pub mod loads;
 /// Explicit total-pressure junctions, with static traction and kinetic streams.
 pub mod total_pressure;
-/// Unsteady circular laminar flow with physical viscous profile memory.
-pub mod laminar;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PressureChart {
@@ -125,8 +129,9 @@ pub struct InertialGraph {
 
 /// Original-law diagnostics and actual native step-average transport.
 /// Pressures are interval multipliers, not a new steady solution. Original
-/// A Q+B Q|Q| loss, inertia and explicit driving heads complete each branch
-/// equation. Endpoint flows must not replace average-flow advection.
+/// linear/quadratic or source-owned Colebrook loss, inertia and explicit
+/// driving heads complete each branch equation. Endpoint flows must not
+/// replace average-flow advection.
 #[derive(Clone, Debug)]
 pub struct InertialGraphReport {
     pub duration_s: f64,
@@ -254,6 +259,8 @@ impl InertialGraph {
     /// identities. Each component needs a datum; multiple pressure boundaries
     /// describe physical external ports, whose mass/heat streams remain explicit
     /// in the thermal owner. Initial free-node flow must close within roundoff.
+    /// A turbulent pipe requires an initial flow in its original Reynolds band;
+    /// this owner does not supply laminar startup or transition through zero.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         cx: &Cx<'_>,
@@ -328,6 +335,9 @@ impl InertialGraph {
         let mut g = vec![0.0; states * edges];
         for (edge, (geometry, branch)) in branches.iter().zip(graph.branches()).enumerate() {
             checkpoint(cx)?;
+            if graph.turbulent_losses()[edge].is_some() {
+                secant(graph, edge, initial_flows_m3_s[edge])?;
+            }
             let inertance = reference_density.value() * (geometry.length_m / geometry.flow_area_m2);
             let impulse = inertance * initial_flows_m3_s[edge];
             if !positive(geometry.length_m)
@@ -419,6 +429,12 @@ impl InertialGraph {
     /// identities and applicability checks. This adapter independently checks
     /// the supplied graph law at actual flow, its Darcy binding at the speed
     /// envelope, and original impulse/work residuals before acceptance.
+    /// Colebrook pipes evaluate their original nonlinear secant at every
+    /// candidate; neither friction nor Reynolds number is frozen at startup.
+    /// Their fixed geometry/source and reference momentum density are retained
+    /// when a thermal trial refreshes the original material snapshot. Both
+    /// endpoints and the actual midpoint must stay inside the authored band
+    /// with the same flow sign; no transition continuation is accepted.
     ///
     /// Native dense stepping is bounded by maximum_states and its existing
     /// nonlinear budget. Checkpoints bracket it and every graph traversal.
@@ -610,6 +626,22 @@ impl InertialGraph {
         for (edge, branch) in graph.branches().iter().enumerate() {
             checkpoint(cx)?;
             let flow = finite(average[edge], "native average flow")?;
+            if graph.turbulent_losses()[edge].is_some() {
+                // The midpoint trajectory is affine between endpoints. With
+                // one sign, checking both endpoints covers its full Reynolds
+                // interval for this held material state; a reversal crosses
+                // unsupported laminar/transition flow even if both ends are
+                // individually turbulent.
+                if initial[edge].is_sign_negative() != final_flows[edge].is_sign_negative() {
+                    return Err(GraphError::InvalidBranch {
+                        branch: edge,
+                        reason: "turbulent inertial step crosses unsupported transition flow",
+                    }
+                    .into());
+                }
+                secant(graph, edge, initial[edge])?;
+                secant(graph, edge, final_flows[edge])?;
+            }
             let resistance = secant(graph, edge, flow)?;
             admit_drag(c, edge, resistance, dt, controls.maximum_drag_step)?;
             let loss = finite(resistance * flow, "original branch loss")?;
@@ -759,6 +791,26 @@ fn admit_topology(c: &Compiled, graph: &LossGraph) -> Result<(), InertialGraphEr
         ));
     }
     admit_reference(graph, c.reference_density.value())?;
+    for (edge, (original, current)) in c
+        .topology
+        .turbulent_losses()
+        .iter()
+        .zip(graph.turbulent_losses())
+        .enumerate()
+    {
+        let same_law = match (original, current) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.law() == b.law() && a.source() == b.source(),
+            _ => false,
+        };
+        if !same_law {
+            return Err(GraphError::InvalidBranch {
+                branch: edge,
+                reason: "original turbulent pipe law or source identity changed",
+            }
+            .into());
+        }
+    }
     match (graph.gravity(), c.topology.gravity()) {
         (None, None) => {}
         (Some(a), Some(b))
@@ -774,11 +826,6 @@ fn admit_topology(c: &Compiled, graph: &LossGraph) -> Result<(), InertialGraphEr
     Ok(())
 }
 fn admit_reference(graph: &LossGraph, rho: f64) -> Result<(), InertialGraphError> {
-    if graph.has_turbulent_losses() {
-        return Err(InertialGraphError::Invalid(
-            "inertial descriptor requires constant linear/quadratic drag; Reynolds-dependent pipes need a nonlinear transient owner",
-        ));
-    }
     if graph
         .gravity()
         .is_some_and(|g| g.reference_transport().density_kg_m3() != rho)
@@ -787,6 +834,11 @@ fn admit_reference(graph: &LossGraph, rho: f64) -> Result<(), InertialGraphError
             .iter()
             .flatten()
             .any(|l| l.material().is_some_and(|m| m.gas.density != rho))
+        || graph
+            .turbulent_losses()
+            .iter()
+            .flatten()
+            .any(|l| l.momentum_density_kg_m3() != rho)
     {
         return Err(InertialGraphError::Invalid(
             "hydraulic sources and inertia require the same reference density",
@@ -795,6 +847,21 @@ fn admit_reference(graph: &LossGraph, rho: f64) -> Result<(), InertialGraphError
     Ok(())
 }
 fn secant(graph: &LossGraph, edge: usize, flow: f64) -> Result<f64, InertialGraphError> {
+    if let Some(pipe) = &graph.turbulent_losses()[edge] {
+        let original = pipe
+            .evaluate(VolumetricFlowRate::new(flow))
+            .map_err(|source| GraphError::Resistance {
+                branch: edge,
+                source,
+            })?;
+        let resistance = original.pressure_drop_pa / flow;
+        if !positive(resistance) {
+            return Err(InertialGraphError::Invalid(
+                "original turbulent secant resistance is unrepresentable",
+            ));
+        }
+        return Ok(resistance);
+    }
     let value = graph.linear_losses()[edge]
         .as_ref()
         .map_or(0.0, |l| l.resistance.value())

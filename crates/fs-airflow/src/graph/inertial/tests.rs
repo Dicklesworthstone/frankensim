@@ -8,6 +8,8 @@ use crate::{SourceProvenance, ToleranceBasis};
 use fs_material::fluid_transport::FluidTransportState;
 use fs_material::gas::{GasSpec, GasState};
 
+mod turbulent;
+
 fn gas(t: f64) -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), t, 101325.0).unwrap()
 }
