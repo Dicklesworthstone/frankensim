@@ -1413,3 +1413,31 @@ flow. It does not evolve a free surface, infer turbulent transition, resolve
 entrance effects or change material temperature/composition. Midpoint may
 oscillate on unresolved stiff modes; conservation and linear stability do not
 replace temporal or spatial resolution checks for the forcing bandwidth.
+
+## Source-resolved Carreau viscosity in nonlinear slender jets
+
+`PeriodicSlenderJet::new_carreau` retains an original
+`ThermalCarreauYasuda` law and fixed physical temperature, density and surface
+tension. Each original SSPRK3 stage queries the material at
+`gamma=sqrt(3)*|du/dz|`, the invariant of incompressible uniaxial extension.
+The conservative axial stress is `3*mu*du/dz`; the same sample supplies
+`3*mu*(du/dz)^2` to the existing integrated viscous-loss account. No lattice
+tau cap, fitted Newtonian substitute or second constitutive implementation enters.
+
+The explicit viscous step bound retains both apparent and differential
+viscosity. The apparent conductance is necessary near strongly thinning states:
+a small tangent alone can allow an Euler stage to overshoot through zero strain.
+Every trial stage rechecks the bound and the original source support. Source
+refusal or cancellation preserves accepted area, momentum, geometry and time.
+The native numerical workspace is reused without additional per-cell arrays.
+
+Regression definitions cover exact Newtonian-degeneracy trajectories, shifted
+temperature, independent tensor stress and heat, conservative momentum/volume,
+strong-thinning dissipation, the viscous timestep bound, and refusal/rollback.
+These definitions require execution in the repository's Rust validation lane;
+they are not a claim that a new convergence or performance campaign has run.
+
+The existing implicit-viscosity policy requires a Newtonian law and explicitly
+refuses the Carreau selection. Temperature does not evolve, loss is not deposited
+as heat, and there is no elastic memory or independently calibrated extensional
+response. Original slenderness/resolution limits and pre-pinch stopping remain.

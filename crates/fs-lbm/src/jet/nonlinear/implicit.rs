@@ -94,6 +94,11 @@ impl PeriodicSlenderJet {
         gate: &CancelGate,
     ) -> Result<(), NonlinearJetError> {
         poll(gate)?;
+        if method == SlenderJetIntegrationMethod::ImplicitViscosity && self.carreau.is_some() {
+            return Err(NonlinearJetError::InvalidInput(
+                "Carreau viscosity requires explicit SSPRK3; the implicit solver is Newtonian",
+            ));
+        }
         if method == SlenderJetIntegrationMethod::ImplicitViscosity
             && self.implicit_workspace.is_none()
         {

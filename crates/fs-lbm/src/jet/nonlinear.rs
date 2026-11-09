@@ -1,4 +1,4 @@
-//! Conservative nonlinear evolution of a periodic Newtonian slender jet.
+//! Conservative nonlinear evolution of a periodic viscous slender jet.
 //!
 //! This advances the axisymmetric one-dimensional equations of Eggers and
 //! Dupont (1994), equations (17)-(18), with full surface-of-revolution curvature:
@@ -14,12 +14,16 @@
 //! viscosity preserve the circular geometry. Mass-consistent upwind
 //! momentum transport uses a minmod-limited linear reconstruction and exposes
 //! its numerical dissipation. Explicit SSPRK3 is the default; optional IMEX
-//! treats viscosity implicitly. Adaptive steps retain advection, drainage and
+//! treats Newtonian viscosity implicitly. Adaptive steps retain advection, drainage and
 //! capillary-Jacobian bounds; explicit mode also limits viscous diffusion. Smooth transport, capillary and viscous
 //! terms are second order in space; the limiter reduces order at extrema.
 //!
-//! All coefficients are constant. The liquid is incompressible/Newtonian,
-//! its exterior has negligible inertia/viscosity, and the domain is periodic.
+//! Density and surface tension are constant. Viscosity is Newtonian by default;
+//! [`CarreauSlenderJetParameters`] selects the original material Carreau-Yasuda
+//! law at fixed temperature. This generalized-Newtonian path uses the physical
+//! extensional invariant and explicit SSPRK3, without fitted constant viscosity
+//! or lattice-relaxation clipping. The liquid is incompressible, its exterior
+//! has negligible inertia/viscosity, and the domain is periodic.
 //! No nozzle, stretching imposed by gravity, heat, gas drag, breakup topology,
 //! coalescence, viscoelasticity or post-pinch continuation is represented.
 //! Authored radius, slope and resolution limits stop the calculation before
@@ -27,10 +31,14 @@
 //!
 //! Eleven reusable f64 arrays give O(N) storage in explicit mode. Selecting
 //! implicit viscosity prepares twelve additional arrays once; stepping allocates nothing.
-//! Fixed serial order and arithmetic/sqrt give deterministic evaluations.
+//! Fixed serial order and the original deterministic material math retain
+//! repeatable evaluations on the same ISA.
 //! Cancellation is polled every 256 cells and immediately before publication.
 
 use fs_exec::CancelGate;
+
+mod carreau;
+pub use carreau::CarreauSlenderJetParameters;
 
 mod implicit;
 pub use implicit::{SlenderJetIntegrationMethod, SlenderJetTemporalError};
@@ -122,7 +130,8 @@ pub struct SlenderJetAdvance {
     /// Largest embedded local time-error indicator across accepted substeps.
     /// Present for implicit viscosity; not a global error bound or certificate.
     pub temporal_error: Option<SlenderJetTemporalError>,
-    /// RK quadrature of 3*pi*rho*nu*integral(A*u_z^2 dz), not evolved heat.
+    /// RK quadrature of 3*pi*integral(mu*A*u_z^2 dz), not evolved heat.
+    /// With Carreau rheology, mu is evaluated at each local stage strain.
     pub viscous_dissipation_j: f64,
     /// RK quadrature of limited-upwind momentum dissipation; not material viscosity.
     pub upwind_dissipation_j: f64,
@@ -132,7 +141,7 @@ pub struct SlenderJetAdvance {
 }
 
 /// Admission/numerical refusal; advance never partially publishes an Err.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum NonlinearJetError {
     InvalidInput(&'static str),
     InvalidState(&'static str),
@@ -142,6 +151,12 @@ pub enum NonlinearJetError {
     SubstepBudget,
     /// Constructor refusal. During advance this becomes a normal DomainLimit.
     InitialDomain(SlenderJetViolation),
+    /// Original material refusal, preserving its source-domain diagnostic.
+    /// `None` denotes the zero-rate reference query before a grid exists.
+    Rheology {
+        cell: Option<usize>,
+        source: fs_material::MaterialError,
+    },
 }
 impl core::fmt::Display for NonlinearJetError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -152,7 +167,7 @@ impl std::error::Error for NonlinearJetError {}
 
 /// Shared evolution interface for native and material-bound jet owners.
 pub trait SlenderJetEvolution {
-    /// Return the accepted state whose constant coefficients this owner retains.
+    /// Return the accepted state whose original constitutive law this owner retains.
     fn state(&self) -> &PeriodicSlenderJet;
 
     /// Advance that same state. Errors preserve the full pre-call state; a
@@ -197,6 +212,7 @@ struct Evaluation {
 #[derive(Clone, Debug)]
 pub struct PeriodicSlenderJet {
     parameters: SlenderJetParameters,
+    carreau: Option<CarreauSlenderJetParameters>,
     limits: SlenderJetLimits,
     length_m: f64,
     spacing_m: f64,
@@ -217,6 +233,21 @@ impl PeriodicSlenderJet {
     /// cross-sectional area is pi*h^2 and physical volume flux is pi*q.
     pub fn new(
         parameters: SlenderJetParameters,
+        length_m: f64,
+        radii_m: &[f64],
+        velocities_m_s: &[f64],
+        limits: SlenderJetLimits,
+        gate: &CancelGate,
+    ) -> Result<Self, NonlinearJetError> {
+        Self::new_constitutive(
+            parameters, None, length_m, radii_m, velocities_m_s, limits, gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_constitutive(
+        parameters: SlenderJetParameters,
+        carreau: Option<CarreauSlenderJetParameters>,
         length_m: f64,
         radii_m: &[f64],
         velocities_m_s: &[f64],
@@ -258,17 +289,20 @@ impl PeriodicSlenderJet {
             u: zeros(n, gate)?,
             flux: zeros(n, gate)?,
         };
-        let initial = evaluate(
+        let initial = evaluate_constitutive(
             &accepted,
             parameters,
+            carreau.as_ref(),
             limits,
             dx,
             &mut spatial,
             &mut rhs,
+            true,
             gate,
         )?;
         Ok(Self {
             parameters,
+            carreau,
             limits,
             length_m,
             spacing_m: dx,
@@ -284,6 +318,9 @@ impl PeriodicSlenderJet {
         })
     }
 
+    /// Fixed density and surface tension. For a Carreau jet, viscosity here
+    /// is its zero-rate reference at the retained temperature;
+    /// [`Self::carreau_parameters`] identifies the actual evolving law.
     #[must_use]
     pub const fn parameters(&self) -> SlenderJetParameters {
         self.parameters
@@ -374,9 +411,10 @@ impl PeriodicSlenderJet {
             self.candidate.a[i] = self.accepted.a[i];
             self.candidate.q[i] = self.accepted.q[i];
         }
-        let mut base = evaluate_split(
+        let mut base = evaluate_constitutive(
             &self.candidate,
             self.parameters,
+            self.carreau.as_ref(),
             self.limits,
             self.spacing_m,
             &mut self.spatial,
@@ -445,9 +483,10 @@ impl PeriodicSlenderJet {
                 Ok(None) => {
                     step_cap = positive(0.5 * dt)?;
                     // Rebuild the current-state RHS overwritten by the rejected stage.
-                    base = evaluate_split(
+                    base = evaluate_constitutive(
                         &self.candidate,
                         self.parameters,
+                        self.carreau.as_ref(),
                         self.limits,
                         self.spacing_m,
                         &mut self.spatial,
@@ -517,26 +556,30 @@ impl PeriodicSlenderJet {
         base: Evaluation,
         gate: &CancelGate,
     ) -> Result<Option<(Evaluation, f64, f64)>, NonlinearJetError> {
-        let first = evaluate(
+        let first = evaluate_constitutive(
             &self.stage,
             self.parameters,
+            self.carreau.as_ref(),
             self.limits,
             self.spacing_m,
             &mut self.spatial,
             &mut self.rhs,
+            true,
             gate,
         )?;
         if dt > stable_step(first.rate_per_s, cfl) {
             return Ok(None);
         }
         blend(&mut self.stage, &self.candidate, &self.rhs, dt, 0.25, gate)?;
-        let second = evaluate(
+        let second = evaluate_constitutive(
             &self.stage,
             self.parameters,
+            self.carreau.as_ref(),
             self.limits,
             self.spacing_m,
             &mut self.spatial,
             &mut self.rhs,
+            true,
             gate,
         )?;
         if dt > stable_step(second.rate_per_s, cfl) {
@@ -550,13 +593,15 @@ impl PeriodicSlenderJet {
             2.0 / 3.0,
             gate,
         )?;
-        let end = evaluate(
+        let end = evaluate_constitutive(
             &self.stage,
             self.parameters,
+            self.carreau.as_ref(),
             self.limits,
             self.spacing_m,
             &mut self.spatial,
             &mut self.rhs,
+            true,
             gate,
         )?;
         if dt > stable_step(end.rate_per_s, cfl) {
@@ -619,6 +664,7 @@ fn validate_parameters(
     Ok(())
 }
 
+#[cfg(test)]
 fn evaluate(
     fields: &Fields,
     p: SlenderJetParameters,
@@ -634,6 +680,23 @@ fn evaluate(
 fn evaluate_split(
     fields: &Fields,
     p: SlenderJetParameters,
+    limits: SlenderJetLimits,
+    dx: f64,
+    spatial: &mut Spatial,
+    rhs: &mut Fields,
+    explicit_viscosity: bool,
+    gate: &CancelGate,
+) -> Result<Evaluation, NonlinearJetError> {
+    evaluate_constitutive(
+        fields, p, None, limits, dx, spatial, rhs, explicit_viscosity, gate,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_constitutive(
+    fields: &Fields,
+    p: SlenderJetParameters,
+    carreau: Option<&CarreauSlenderJetParameters>,
     limits: SlenderJetLimits,
     dx: f64,
     spatial: &mut Spatial,
@@ -703,6 +766,7 @@ fn evaluate_split(
     }
     let coefficient = p.surface_tension_n_m / p.density_kg_m3;
     let (mut capillary_jacobian, mut drainage_rate) = (0.0_f64, 0.0_f64);
+    let mut maximum_viscous_scale = 0.0_f64;
     for i in 0..n {
         poll_at(gate, i)?;
         let l = previous(i, n);
@@ -745,7 +809,17 @@ fn evaluate_split(
             spatial.u[i] - 0.5 * limited_slope
         };
         let strain = velocity_jump / dx;
-        let viscous_stress = 3.0 * p.kinematic_viscosity_m2_s * a * strain;
+        let (viscosity, tangent) = if let Some(law) = carreau {
+            let sample = law.sample(strain, Some(i))?;
+            (
+                positive(sample.dynamic_viscosity_pa_s() / p.density_kg_m3)?,
+                positive(sample.stress_tangent_pa_s() / p.density_kg_m3)?,
+            )
+        } else {
+            (p.kinematic_viscosity_m2_s, p.kinematic_viscosity_m2_s)
+        };
+        maximum_viscous_scale = maximum_viscous_scale.max(viscosity.max(tangent));
+        let viscous_stress = 3.0 * viscosity * a * strain;
         spatial.flux[i] = finite(
             mass_flux * advected_u + coefficient * capillary_stress
                 - if explicit_viscosity {
@@ -781,7 +855,11 @@ fn evaluate_split(
     };
     let capillary_rate = 2.0 * coefficient.sqrt() * capillary_jacobian.sqrt() / dx;
     let viscous_rate = if explicit_viscosity {
-        12.0 * p.kinematic_viscosity_m2_s / dx / dx
+        // Bound both the apparent conductance and the stress derivative.
+        // The latter alone can vanish under strong thinning and permit an
+        // Euler step to overshoot through zero strain. Each trial stage
+        // rechecks this bound using the same original local material samples.
+        12.0 * maximum_viscous_scale / dx / dx
     } else {
         0.0
     };
