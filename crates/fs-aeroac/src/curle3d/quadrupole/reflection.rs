@@ -201,13 +201,14 @@ impl PreparedQuadrupoleObserver {
     ) -> Result<(), AeroacError> {
         for (transfer, sum) in self.transfers.iter().zip(sums) {
             poll(cancelled)?;
-            let displacement =
-                core::array::from_fn(|axis| receiver[axis] - transfer.source_m[axis]);
+            let path = HarmonicPath::between(receiver, transfer.source_m).ok_or_else(|| {
+                invalid("quadrupole image separation or transfer is not representable")
+            })?;
             let field = kernel::transfer(
                 self.acoustic.density_kg_m3(),
                 self.wavenumber_per_m,
                 self.frequency_hz,
-                displacement,
+                path,
             )
             .ok_or_else(|| {
                 invalid("quadrupole image separation or transfer is not representable")

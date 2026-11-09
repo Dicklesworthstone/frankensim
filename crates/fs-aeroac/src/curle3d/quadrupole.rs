@@ -23,13 +23,14 @@
 //! <https://ntrs.nasa.gov/citations/19940017407>.
 
 use super::array::IdealAcousticPlane;
+use super::path::HarmonicPath;
 use super::statistics::{ComplexSum, StatisticsSum, finite, invalid, nonfinite};
 use super::{CoherenceBudget, CoherentCompactField, CompactFieldStatistics};
 use crate::AeroacError;
 use crate::material::MaterialAeroacError;
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_material::relaxation::RelaxationState;
-use fs_math::{c64::C64, det};
+use fs_math::c64::C64;
 
 /// Native accepted compressible flow states as resolved inviscid stress sources.
 #[cfg(feature = "compressible-volume")]
@@ -248,16 +249,15 @@ impl PreparedQuadrupoleObserver {
             if source.iter().any(|x| !x.is_finite()) {
                 return Err(nonfinite("quadrupole source position"));
             }
-            let displacement = core::array::from_fn(|i| observer_m[i] - source[i]);
+            let path = HarmonicPath::between(observer_m, *source).ok_or_else(|| {
+                invalid("quadrupole separation or field transfer is not representable")
+            })?;
             let field =
-                kernel::transfer(acoustic.density_kg_m3(), wave, frequency_hz, displacement)
+                kernel::transfer(acoustic.density_kg_m3(), wave, frequency_hz, path)
                     .ok_or_else(|| {
                         invalid("quadrupole separation or field transfer is not representable")
                     })?;
-            let range = det::hypot(
-                det::hypot(displacement[0], displacement[1]),
-                displacement[2],
-            );
+            let range = path.radius_m;
             let delay_s = range / acoustic.sound_speed_m_s();
             let phase_delay_s = if molecular.is_some() {
                 range * (wave.re / omega)

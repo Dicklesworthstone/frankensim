@@ -5,6 +5,7 @@
 //! u_l = Q_ij d_l d_i d_j G / (i rho omega). Both trace and shear survive.
 //! These are exact point-tensor transfers, including their near fields.
 
+use super::HarmonicPath;
 use fs_math::{c64::C64, det};
 
 /// Physical tensor entries, without engineering-shear factors.
@@ -15,20 +16,16 @@ pub(super) fn transfer(
     rho: f64,
     wave: C64,
     frequency: f64,
-    displacement: [f64; 3],
+    path: HarmonicPath,
 ) -> Option<[[C64; 6]; 4]> {
     let omega = core::f64::consts::TAU * frequency;
     let k = wave.re;
     let rho_omega = rho * omega;
-    let r = det::hypot(
-        det::hypot(displacement[0], displacement[1]),
-        displacement[2],
-    );
+    let r = path.radius_m;
     let inv_r = 1.0 / r;
     if [rho, frequency, omega, k, rho_omega, r, inv_r]
         .iter()
         .any(|x| !x.is_finite() || *x <= 0.0)
-        || displacement.iter().any(|x| !x.is_finite())
         || !(k * r).is_finite()
         || !wave.im.is_finite()
         || wave.im < 0.0
@@ -36,9 +33,8 @@ pub(super) fn transfer(
     {
         return None;
     }
-    let n = displacement.map(|x| x / r);
-    let (sin, cos) = det::sin_cos(k * r);
-    let mut green = C64::new(cos, sin).scale((0.25 / core::f64::consts::PI) / r);
+    let n = path.direction;
+    let mut green = path.phase(k)?.scale((0.25 / core::f64::consts::PI) / r);
     let inv_r2 = inv_r * inv_r;
     let inv_r3 = inv_r2 * inv_r;
     // Hessian: G [a n_i n_j + b delta_ij]. The real branch retains the
@@ -110,7 +106,8 @@ mod tests {
     }
 
     fn apply(x: [f64; 3], q: [C64; 6]) -> [C64; 4] {
-        transfer(1.2, wave(127.0), 127.0, x).unwrap().map(|row| {
+        let path = HarmonicPath::between(x, [0.0; 3]).unwrap();
+        transfer(1.2, wave(127.0), 127.0, path).unwrap().map(|row| {
             row.into_iter()
                 .zip(q)
                 .fold(C64::ZERO, |s, (h, q)| s + h * q)
@@ -277,10 +274,11 @@ mod tests {
         for x in [0.0, -1.0, f64::INFINITY, f64::NAN] {
             assert!(reynolds_moment(x, 0.5, [1.0; 3]).is_none());
             assert!(reynolds_moment(1.0, x, [1.0; 3]).is_none());
-            assert!(transfer(1.2, wave(x), x, [1.0; 3]).is_none());
+            let path = HarmonicPath::between([1.0; 3], [0.0; 3]).unwrap();
+            assert!(transfer(1.2, wave(x), x, path).is_none());
         }
-        assert!(transfer(1.2, wave(127.0), 127.0, [0.0; 3]).is_none());
-        assert!(transfer(1.2, wave(127.0), 127.0, [f64::NAN; 3]).is_none());
+        assert!(HarmonicPath::between([0.0; 3], [0.0; 3]).is_none());
+        assert!(HarmonicPath::between([f64::NAN; 3], [0.0; 3]).is_none());
         assert!(reynolds_moment(1.0, 1.0, [f64::INFINITY; 3]).is_none());
     }
 }

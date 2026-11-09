@@ -31,6 +31,7 @@
 //! automatically an isolated radiator. These SI transfers do not turn 2D
 //! force-per-span data into 3D sources or validate a physical source model.
 
+use super::path::HarmonicPath;
 use super::statistics::{ComplexSum, StatisticsSum, finite, invalid, nonfinite};
 use super::{CoherenceBudget, CompactFieldStatistics};
 use crate::AeroacError;
@@ -272,8 +273,10 @@ impl PreparedCompactSourceObserver {
             if source.iter().any(|v| !v.is_finite()) {
                 return Err(nonfinite("compact source position"));
             }
-            let dx = core::array::from_fn::<_, 3, _>(|i| observer_m[i] - source[i]);
-            let r = det::hypot(det::hypot(dx[0], dx[1]), dx[2]);
+            let path = HarmonicPath::between(observer_m, *source).ok_or_else(|| {
+                invalid("compact source-observer separation is not representable")
+            })?;
+            let r = path.radius_m;
             let kr = k.scale(r);
             let inv_r = 1.0 / r;
             let delay_s = r / acoustic.sound_speed_m_s();
@@ -291,10 +294,12 @@ impl PreparedCompactSourceObserver {
                     "compact source-observer separation is not representable",
                 ));
             }
-            let n = dx.map(|v| v / r);
-            let (sin, cos) = det::sin_cos(kr.re);
+            let n = path.direction;
+            let phase = path.phase(k.re).ok_or_else(|| {
+                invalid("compact source-observer phase is not representable")
+            })?;
             let decay = if k.im == 0.0 { 1.0 } else { det::exp(-kr.im) };
-            let green = C64::new(cos, sin).scale(((0.25 / core::f64::consts::PI) / r) * decay);
+            let green = phase.scale(((0.25 / core::f64::consts::PI) / r) * decay);
             // a = -G'; pressure of a force dipole is a (n.F).
             let radial = green * C64::new(inv_r + k.im, -k.re);
             // a' = G (k² + 2 i k/r - 2/r²), including the derivative

@@ -25,6 +25,9 @@ mod corner;
 #[path = "compact_interference/wedge.rs"]
 mod wedge;
 
+#[path = "compact_interference/path_phase.rs"]
+mod path_phase;
+
 fn medium(rho: f64, c: f64) -> FluidAcousticState {
     FluidAcousticState::try_new(rho, c).unwrap()
 }

@@ -573,6 +573,18 @@ material scaling and domain/representability refusals.
   arithmetic guarantees do not improve the cached Green kernel's geometric or
   physical-model accuracy, and no allocation or transcendental is added to the
   O(source count) application.
+  Harmonic monopole/dipole and volume-stress preparation now share an extended
+  source-to-receiver path: authored binary64 coordinates are subtracted, scaled
+  and normed in DD, and `Re(k)*r` stays extended through trigonometric reduction.
+  Short path differences therefore survive long carrier paths before the
+  original C64 field coefficients are cached. This applies to the same native
+  lossless/molecular kernels and their ideal images; source geometry and the
+  material's original wave number are not altered or recalibrated. Distance
+  metadata and cached coefficients remain binary64, and arbitrary near-null
+  relative accuracy is not certified. `tests/compact_interference/path_phase.rs`
+  checks an ultrasonic spatial null, a sub-ULP separation on a long path, and
+  coherent mixed volume/stress cancellation against factored analytic Green
+  derivatives. Repeated field/coherence evaluation incurs no added work.
   `CompactForceObserver::prepare_harmonic` preserves the same original source
   and observer coordinates, material and retarded phase. Force pressure does
   not acquire an extra density factor; monopole pressure does depend on density.

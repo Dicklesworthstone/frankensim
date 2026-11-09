@@ -20,6 +20,7 @@ pub mod array;
 pub mod energy;
 /// Retarded pressure from prescribed moving compact volume and force sources.
 pub mod moving;
+mod path;
 /// Analytic whole-sphere power of coherent compact-source arrays.
 pub mod power;
 /// Coherent radiation of resolved three-dimensional Lighthill volume stresses.
