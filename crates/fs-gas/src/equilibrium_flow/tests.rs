@@ -15,6 +15,8 @@ mod nozzle;
 mod nozzle_prepared;
 #[cfg(feature = "material")]
 mod nozzle_material;
+#[cfg(feature = "material")]
+mod nozzle_blowdown;
 
 const R: f64 = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
 const T0: f64 = 1000.0;

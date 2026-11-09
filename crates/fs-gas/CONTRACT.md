@@ -9664,3 +9664,74 @@ transport-domain refusal, mismatched Gibbs controls, loose-HP rejection,
 exact zero flow and final cancellation with deterministic retry. These material
 feature tests require the full original dependency graph; their execution is
 reported separately from the native SP/HP source-flow tests.
+
+### Prepared reacting nozzle flow with direct local energy
+
+The existing converging-nozzle owner now supports an internal prepared-path
+consumer while keeping its public steady inlet law. Its scalar trials reuse
+the original chemical isentrope and allocate source receipts only at accepted
+publication. `EquilibriumNozzleFlow::specific_enthalpy_change_j_kg` is the actual
+outlet-minus-current-inlet drop; `sample` may retain an earlier tank-birth
+reference. The native opaque caloric anchor resolves this local drop directly.
+Birth entropy, actual source residuals, reacting acoustics, pressure work
+ceilings and final publication checks remain active.
+
+Focused source tests in `equilibrium_flow/tests/nozzle_prepared.rs` cover a
+weak subsonic drop after depletion that exposes rounded birth-difference loss,
+reacting source/energy closure, source/normalization/stale-state refusal and
+final cancellation. The shared midpoint tests independently check an exact
+linear result, three-rung second-order convergence, inventory limits, exact
+rest, cancellation and bounded actual-source failures. Execution of full
+material reservoir integration is reported separately from these small native
+source tests.
+
+### Finite reacting converging-nozzle discharge
+
+With `material`, `equilibrium_flow::nozzle::blowdown::equilibrium_nozzle_blowdown`
+connects the existing `EquilibriumGasReservoir` to an authored fixed back
+pressure and effective area over a positive physical interval. It follows
+choked and subsonic discharge on the original ordinary single-sonic branch.
+Every trial uses the same prepared birth isentrope, original equilibrium
+response and direct current caloric anchor. It neither freezes gamma nor
+re-equilibrates a newly invented reservoir reference at each rate query.
+
+The original shared midpoint owner solves
+`dm = dt*mdot(m_old-dm/2)`. Its safeguarded derivative uses
+`dh_chamber/dm = c_chamber^2/m`, with `d(mdot)/dh_chamber = mdot/v_exit^2`
+at fixed subsonic back pressure and `mdot/c_throat^2` at an ordinary sonic
+maximum. Only the actual represented mass-rate residual accepts a root.
+Initial, midpoint and endpoint nozzle regimes all undergo original admission;
+only the accepted midpoint allocates a full nozzle receipt. A trial beyond
+outward pressure drive supplies a zero-flux bracket bound; no physical endpoint
+below ambient is accepted. Pressure crossing or excess outgoing fraction
+refuses without clipping the interval, inventory or energy.
+
+The physical endpoint and integrated exported stagnation enthalpy come from
+the original finite withdrawal owner. Its source-relative `U=m*h-p*V` change
+is the sole energy export; `dm*h_mid`, flow work and jet kinetic energy are
+not additional debits. Elements per mass retain the original well-mixed feed
+ratios while molecular composition re-equilibrates. Tank species-inventory
+differences are not presented as exhaust species fluxes. Equal pressure or
+zero area preserves the exact accepted tank and reports zero exchange, even
+after prior depletion. Final cancellation refuses publication, and all work
+inherits the original bounded composition, entropy, density, pressure-search
+and mass-iteration policies with actual pressure-query counts reported.
+
+Smooth time accuracy is second order; the midpoint mass residual and outgoing
+fraction bound are not temporal error estimates. This is a rigid adiabatic
+well-mixed tank discharging to an external pressure boundary, not a finite
+receiver, reverse-flow connection, wall-heating law, reaction kinetics,
+resolved jet or inferred discharge coefficient.
+
+Conformance in `equilibrium_flow/tests/nozzle_blowdown.rs` covers independent
+perfect-gas transient cooling/energy and three-rung time refinement, a reacting
+choked-to-subsonic trajectory with elemental and total-energy closure, ambient
+crossing and inventory refusal, exact rest after depletion, and final
+cancellation with deterministic retry, and safe path replacement that attempts to rebase
+birth entropy or loosen controls. Native execution of this original
+reservoir integration is reported independently of the scalar/source tests. The public prepared reservoir rejects a replaced path with a
+different birth reference, feed normalization or thermochemical policy before
+any subsequent density sample or finite endpoint publication. The original
+reservoir implementation lives in one dependency-light leaf and is reexported
+through all existing public paths; rocket and converging consumers retain the
+same physical owner.

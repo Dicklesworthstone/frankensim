@@ -26,6 +26,10 @@ use fs_thermochem::equilibrium::composition::{
 #[cfg(feature = "material")]
 pub mod material;
 
+/// Finite back-pressure-aware depletion of the original reacting reservoir.
+#[cfg(feature = "material")]
+pub mod blowdown;
+
 /// Whole-call pressure work ceiling, including preparation and re-publication.
 pub const MAX_NOZZLE_PRESSURE_EVALUATIONS: usize = crate::nozzle::MAX_PRESSURE_EVALUATIONS;
 

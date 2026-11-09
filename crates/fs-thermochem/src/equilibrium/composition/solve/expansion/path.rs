@@ -234,6 +234,8 @@ impl<'a> EquilibriumIsentropeV1<'a> {
     }
     /// Original complete source-bearing reference state.
     pub const fn reference_state(&self) -> &EquilibriumThermodynamicStateV1 { &self.reference_state }
+    /// Immutable entropy, composition and source-domain policy of this path.
+    pub const fn controls(&self) -> EquilibriumEntropySolveV1 { self.controls }
     /// Original conserved feed mass [kg], independent of numerical product residuals.
     pub fn feed_mass_kg(&self) -> f64 { self.work.initial_mass * self.work.scale }
 

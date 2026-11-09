@@ -4491,3 +4491,15 @@ for independent Maxwell latent data, sensible inversion and derivatives, datum
 invariance and small heat, cross-phase H/S/reversal, and domain/work/cancellation
 boundaries. This is a constitutive closure; heat integration, phase kinetics and
 a global multicomponent flash certificate remain outside its claim.
+
+### Direct caloric anchors on an immutable chemical isentrope
+
+`composition::isentrope::EquilibriumCaloricAnchorV1` captures an accepted
+current workspace's normalized species amounts and original source enthalpies.
+`caloric_anchor` and `specific_enthalpy_change_from` are bounded, cancellable
+operations on the existing source-integral owner. A direct difference rejects
+changed species sources, elemental/charge inventory or feed normalization and
+never rebases the path's birth entropy. Failed current samples cannot supply
+an anchor or a direct difference. This resolves weak current energy changes
+after a large historical change without subtracting rounded absolute or
+birth-relative enthalpies. It is a caloric operation, not a flow integrator.

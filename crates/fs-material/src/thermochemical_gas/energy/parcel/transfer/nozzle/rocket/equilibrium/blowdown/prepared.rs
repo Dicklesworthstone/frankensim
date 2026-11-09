@@ -1,6 +1,10 @@
 //! One original birth-isentrope workspace for external finite-outflow consumers.
 
-use super::*;
+use super::{EquilibriumBlowdownCandidate, EquilibriumBlowdownError, EquilibriumBlowdownSolve,
+    EquilibriumGasReservoir, reservoir::{check_cancel, positive}};
+use fs_thermochem::equilibrium::composition::isentrope::{
+    EquilibriumIsentropeV1, density::EquilibriumDensityQueryV1,
+};
 
 /// Reusable original reservoir thermodynamics; trials never mutate the tank.
 ///
@@ -15,17 +19,6 @@ pub struct EquilibriumReservoirDepletion<'a> {
 }
 
 impl EquilibriumGasReservoir {
-    /// Scalar state on the immutable birth reference and original feed basis.
-    pub const fn isentropic_sample(&self) -> EquilibriumIsentropeSampleV1 {
-        self.sample
-    }
-
-    /// Exact source/amount caloric snapshot of the accepted physical tank.
-    /// Its local energy datum is separate from the immutable birth entropy.
-    pub const fn caloric_anchor(&self) -> &EquilibriumCaloricAnchorV1 {
-        &self.caloric
-    }
-
     /// Prepare one source-bound depletion path for a finite physical interval.
     pub fn prepare_depletion(
         &self,
@@ -33,7 +26,7 @@ impl EquilibriumGasReservoir {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<EquilibriumReservoirDepletion<'_>, EquilibriumBlowdownError> {
         check_cancel(&mut cancelled)?;
-        controls.validate(self.sample.pressure.value())?;
+        controls.validate(self.isentropic_sample().pressure.value())?;
         let path = self.path(&mut cancelled)?;
         check_cancel(&mut cancelled)?;
         Ok(EquilibriumReservoirDepletion { reservoir: self, path, controls })
@@ -42,7 +35,9 @@ impl EquilibriumGasReservoir {
 
 impl<'a> EquilibriumReservoirDepletion<'a> {
     /// Original reusable chemistry. Queries may update numerical warm starts;
-    /// the immutable birth reference and the borrowed physical tank do not move.
+    /// the borrowed physical tank does not move. Replacing this path is allowed
+    /// by Rust, but a changed birth reference, feed or policy is rejected before
+    /// every subsequent density sample and finite endpoint publication.
     pub fn isentrope(&mut self) -> &mut EquilibriumIsentropeV1<'a> {
         &mut self.path
     }
@@ -55,7 +50,8 @@ impl<'a> EquilibriumReservoirDepletion<'a> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<EquilibriumDensityQueryV1, EquilibriumBlowdownError> {
         check_cancel(&mut cancelled)?;
-        if !positive(mass_kg) || mass_kg > self.reservoir.mass_kg {
+        self.reservoir.admit_prepared_path(&self.path)?;
+        if !positive(mass_kg) || mass_kg > self.reservoir.mass_kg() {
             return Err(EquilibriumBlowdownError::Invalid("depletion sample must retain a positive original tank inventory"));
         }
         self.reservoir.density_at_mass(&mut self.path, mass_kg, self.controls, &mut cancelled)
@@ -70,6 +66,7 @@ impl<'a> EquilibriumReservoirDepletion<'a> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<EquilibriumBlowdownCandidate, EquilibriumBlowdownError> {
         check_cancel(&mut cancelled)?;
+        self.reservoir.admit_prepared_path(&self.path)?;
         self.reservoir.candidate_at_mass(&mut self.path, mass_kg, self.controls, &mut cancelled)
     }
 }
