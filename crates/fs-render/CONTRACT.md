@@ -13159,6 +13159,25 @@ geometry execution remain outside this focused probe.
 
 ### Calibrated point fixtures with complete rough-glass response
 
+The original full-glass raster now exposes six additional detector routes:
+ordinary and resolved-lens QE energy/photon measurements, their spectral-analyzer
+variants, and ordinary/resolved-lens spectral-analyzer CIE measurements.
+All channels share the original four wavelength paths. The original five
+surface/facet/source RNG domains, source receipts, work accounting and
+receiving-medium index conversions are unchanged. A detector's full wavelength
+band is admitted before tracing, including a fully clipped lens packet.
+
+A spectral analyzer is installed at the sensor before the coated lens and
+rough-glass reciprocal polarization response. Steady complete-lens beams do
+not request an unavailable group clock. Detector and pupil weights are applied
+once; a clipped lane keeps its original quarter proposal mass and zero source
+work. Two native integration groups cover anisotropic glass from both media,
+source polarization, replay/work parity, nonconstant QE/photon arithmetic,
+coated-lens analyzer ordering, clipping and band refusal. Changed Rust was
+parsed and independently source/API reviewed; these full-scene fixtures were
+not executed in this editing environment.
+
+
 `SmithDielectricPointLightCameraScene` explicitly selects complete opaque and
 two-sided dielectric Smith transport for the original point-fixture camera.
 Its shared receiving-contact adapter validates both original adjacent medium
