@@ -20,6 +20,8 @@ use fs_la::tridiagonal::TridiagonalWorkspace;
 use fs_matdb::QueryPoint;
 use fs_qty::{AmountConcentration, QuantitySpec, Temperature, Volume};
 
+pub(super) mod populations;
+
 /// Original equilibrium law or its independently sourced LOCAL kinetic law.
 /// A finite-batch clock/volume correlation cannot substitute for the local law.
 #[derive(Clone, Copy, Debug)]
@@ -304,66 +306,7 @@ impl<'a, const N: usize> LangmuirStorage<'a, N> {
         let Some(b) = self.bindings[i][k] else {
             return Ok(());
         };
-        let loading = finite(bound / b.dry_mass_kg_m2)?;
-        if bound > 0.0 && loading == 0.0 {
-            return Err(DiluteSoluteError::Invalid(
-                "positive loading is unrepresentable",
-            ));
-        }
-        let volume = Volume::new(integrated_flux(self.area, water)?);
-        match b.law {
-            LangmuirSoluteLaw::Equilibrium(model) => {
-                let point = b
-                    .conditions
-                    .clone()
-                    .with_quantity(
-                        LOADING_AXIS,
-                        QuantitySpec::dimensional(AdsorbentLoading::DIMS),
-                        loading,
-                    )
-                    .and_then(|p| {
-                        p.with_quantity(
-                            VOLUME_AXIS,
-                            QuantitySpec::dimensional(Volume::DIMS),
-                            volume.value(),
-                        )
-                    })
-                    .map_err(|e| {
-                        self.refuse(LangmuirSoluteError::EquilibriumSource {
-                            cell: i,
-                            species: k,
-                            error: e.into(),
-                        })
-                    })?;
-                model
-                    .admit_loading_point(AmountConcentration::new(c), b.temperature, &point)
-                    .map_err(|error| {
-                        self.refuse(LangmuirSoluteError::EquilibriumSource {
-                            cell: i,
-                            species: k,
-                            error,
-                        })
-                    })?;
-            }
-            LangmuirSoluteLaw::Kinetic(model) => {
-                model
-                    .admit_loading_point(
-                        AmountConcentration::new(c),
-                        AdsorbentLoading::new(loading),
-                        volume,
-                        b.temperature,
-                        b.conditions,
-                    )
-                    .map_err(|error| {
-                        self.refuse(LangmuirSoluteError::KineticSource {
-                            cell: i,
-                            species: k,
-                            error,
-                        })
-                    })?;
-            }
-        }
-        Ok(())
+        admit_site_source(b, i, k, c, water, self.area, bound).map_err(|error| self.refuse(error))
     }
 
     fn response(&mut self, i: usize, k: usize, c: f64) -> Result<(f64, f64)> {
@@ -371,66 +314,28 @@ impl<'a, const N: usize> LangmuirStorage<'a, N> {
             return Ok((0.0, 0.0));
         };
         self.tick()?;
-        let (retained, weight) = weights(b.law.rate(), self.duration)?;
-        if weight == 0.0 {
-            self.admit_source(i, k, c, self.final_water[i], self.original[i][k])?;
-            self.bound[i][k] = self.original[i][k];
-            self.vacant[i][k] = self.original_vacant[i][k];
-            self.exchange[i][k] = 0.0;
-            return Ok((0.0, 0.0));
-        }
-        let (q, vacant_q, tangent_q) =
-            b.law.equilibrium().loading_components(c).map_err(|error| {
-                self.refuse(LangmuirSoluteError::EquilibriumSource {
-                    cell: i,
-                    species: k,
-                    error,
-                })
-            })?;
-        let target = integrated_flux(b.dry_mass_kg_m2, q)?;
-        let vacant_target = integrated_flux(b.dry_mass_kg_m2, vacant_q)?;
-        let endpoint = interpolate(self.original[i][k], target, retained, weight)?;
-        let vacant = interpolate(self.original_vacant[i][k], vacant_target, retained, weight)?;
-        self.admit_source(i, k, c, self.final_water[i], endpoint)?;
-        let actual = finite(endpoint - self.original[i][k])?;
-        let target_difference =
-            if self.original[i][k] > self.original_vacant[i][k] && target > vacant_target {
-                finite(self.original_vacant[i][k] - vacant_target)?
-            } else {
-                finite(target - self.original[i][k])?
-            };
-        let predicted = integrated_flux(weight, target_difference)?;
-        let residual = finite(actual - predicted)?;
-        let allowance = finite(
-            self.controls.transport.absolute_equation_tolerance_mol_m2[k]
-                + self.controls.transport.relative_equation_tolerance
-                    * actual.abs().max(predicted.abs()),
-        )?;
-        let capacity = integrated_flux(b.dry_mass_kg_m2, b.law.equilibrium().capacity().value())?;
-        let site_defect = site_balance(endpoint, vacant, capacity)?;
-        if endpoint > capacity
-            || vacant > capacity
-            || residual.abs() > allowance
-            || site_defect.abs() > self.controls.transport.absolute_equation_tolerance_mol_m2[k]
-        {
-            return Err(DiluteSoluteError::Sorption {
-                cell: i,
-                species: k,
-                residual_mol_m2: if residual.abs() > allowance {
-                    residual
-                } else {
-                    site_defect
-                },
-                allowance_mol_m2: allowance,
-            });
-        }
-        self.bound[i][k] = endpoint;
-        self.vacant[i][k] = vacant;
-        self.exchange[i][k] = actual;
-        self.maximum_defect[k] = self.maximum_defect[k].max(residual.abs());
-        self.maximum_site_defect[k] = self.maximum_site_defect[k].max(site_defect.abs());
-        let tangent = integrated_flux(weight, integrated_flux(b.dry_mass_kg_m2, tangent_q)?)?;
-        Ok((actual, tangent))
+        let response = site_response(
+            b,
+            i,
+            k,
+            self.original[i][k],
+            self.original_vacant[i][k],
+            c,
+            self.final_water[i],
+            self.area,
+            self.duration,
+            self.controls.transport,
+        )
+        .map_err(|error| match error {
+            LangmuirSoluteError::Transport(error) => error,
+            error => self.refuse(error),
+        })?;
+        self.bound[i][k] = response.bound;
+        self.vacant[i][k] = response.vacant;
+        self.exchange[i][k] = response.exchange;
+        self.maximum_defect[k] = self.maximum_defect[k].max(response.equation_defect.abs());
+        self.maximum_site_defect[k] = self.maximum_site_defect[k].max(response.site_defect.abs());
+        Ok((response.exchange, response.tangent))
     }
 
     pub(super) fn finish(
@@ -595,6 +500,160 @@ impl<const N: usize> ImmobileStorage<N> for LangmuirStorage<'_, N> {
     }
 }
 
+/// One physical site's response, shared by the original one-population path
+/// and the sparse multiple-population adapter. Source admission and arithmetic
+/// stay here; neither spatial adapter invents its own isotherm or kinetic law.
+struct SiteResponse {
+    bound: f64,
+    vacant: f64,
+    exchange: f64,
+    tangent: f64,
+    equation_defect: f64,
+    site_defect: f64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn admit_site_source(
+    b: LangmuirSoluteSorption<'_>,
+    i: usize,
+    k: usize,
+    c: f64,
+    water: f64,
+    area: f64,
+    bound: f64,
+) -> core::result::Result<(), LangmuirSoluteError> {
+    let loading = finite(bound / b.dry_mass_kg_m2)?;
+    if bound > 0.0 && loading == 0.0 {
+        return Err(DiluteSoluteError::Invalid("positive loading is unrepresentable").into());
+    }
+    let volume = Volume::new(integrated_flux(area, water)?);
+    match b.law {
+        LangmuirSoluteLaw::Equilibrium(model) => {
+            let point = b
+                .conditions
+                .clone()
+                .with_quantity(
+                    LOADING_AXIS,
+                    QuantitySpec::dimensional(AdsorbentLoading::DIMS),
+                    loading,
+                )
+                .and_then(|p| {
+                    p.with_quantity(
+                        VOLUME_AXIS,
+                        QuantitySpec::dimensional(Volume::DIMS),
+                        volume.value(),
+                    )
+                })
+                .map_err(|e| LangmuirSoluteError::EquilibriumSource {
+                    cell: i,
+                    species: k,
+                    error: e.into(),
+                })?;
+            model
+                .admit_loading_point(AmountConcentration::new(c), b.temperature, &point)
+                .map_err(|error| LangmuirSoluteError::EquilibriumSource {
+                    cell: i,
+                    species: k,
+                    error,
+                })?;
+        }
+        LangmuirSoluteLaw::Kinetic(model) => {
+            model
+                .admit_loading_point(
+                    AmountConcentration::new(c),
+                    AdsorbentLoading::new(loading),
+                    volume,
+                    b.temperature,
+                    b.conditions,
+                )
+                .map_err(|error| LangmuirSoluteError::KineticSource {
+                    cell: i,
+                    species: k,
+                    error,
+                })?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn site_response<const N: usize>(
+    b: LangmuirSoluteSorption<'_>,
+    i: usize,
+    k: usize,
+    original: f64,
+    original_vacant: f64,
+    c: f64,
+    water: f64,
+    area: f64,
+    duration: f64,
+    controls: DiluteSoluteControls<N>,
+) -> core::result::Result<SiteResponse, LangmuirSoluteError> {
+    let (retained, weight) = weights(b.law.rate(), duration)?;
+    if weight == 0.0 {
+        admit_site_source(b, i, k, c, water, area, original)?;
+        return Ok(SiteResponse {
+            bound: original,
+            vacant: original_vacant,
+            exchange: 0.0,
+            tangent: 0.0,
+            equation_defect: 0.0,
+            site_defect: 0.0,
+        });
+    }
+    let (q, vacant_q, tangent_q) = b.law.equilibrium().loading_components(c).map_err(|error| {
+        LangmuirSoluteError::EquilibriumSource {
+            cell: i,
+            species: k,
+            error,
+        }
+    })?;
+    let target = integrated_flux(b.dry_mass_kg_m2, q)?;
+    let vacant_target = integrated_flux(b.dry_mass_kg_m2, vacant_q)?;
+    let endpoint = interpolate(original, target, retained, weight)?;
+    let vacant = interpolate(original_vacant, vacant_target, retained, weight)?;
+    admit_site_source(b, i, k, c, water, area, endpoint)?;
+    let actual = finite(endpoint - original)?;
+    let target_difference = if original > original_vacant && target > vacant_target {
+        finite(original_vacant - vacant_target)?
+    } else {
+        finite(target - original)?
+    };
+    let predicted = integrated_flux(weight, target_difference)?;
+    let residual = finite(actual - predicted)?;
+    let allowance = finite(
+        controls.absolute_equation_tolerance_mol_m2[k]
+            + controls.relative_equation_tolerance * actual.abs().max(predicted.abs()),
+    )?;
+    let capacity = integrated_flux(b.dry_mass_kg_m2, b.law.equilibrium().capacity().value())?;
+    let site_defect = site_balance(endpoint, vacant, capacity)?;
+    if endpoint > capacity
+        || vacant > capacity
+        || residual.abs() > allowance
+        || site_defect.abs() > controls.absolute_equation_tolerance_mol_m2[k]
+    {
+        return Err(DiluteSoluteError::Sorption {
+            cell: i,
+            species: k,
+            residual_mol_m2: if residual.abs() > allowance {
+                residual
+            } else {
+                site_defect
+            },
+            allowance_mol_m2: allowance,
+        }
+        .into());
+    }
+    Ok(SiteResponse {
+        bound: endpoint,
+        vacant,
+        exchange: actual,
+        tangent: integrated_flux(weight, integrated_flux(b.dry_mass_kg_m2, tangent_q)?)?,
+        equation_defect: residual,
+        site_defect,
+    })
+}
+
 fn weights(rate: Option<f64>, dt: f64) -> Result<(f64, f64)> {
     let Some(k) = rate else {
         return Ok((0.0, 1.0));
@@ -638,8 +697,12 @@ fn interpolate(old: f64, target: f64, retained: f64, weight: f64) -> Result<f64>
 }
 
 fn site_balance(occupied: f64, vacant: f64, capacity: f64) -> Result<f64> {
+    compensated_sum([occupied, vacant, -capacity])
+}
+
+fn compensated_sum(values: impl IntoIterator<Item = f64>) -> Result<f64> {
     let (mut total, mut correction) = (0.0_f64, 0.0_f64);
-    for value in [occupied, vacant, -capacity] {
+    for value in values {
         let next = finite(total + value)?;
         correction += if total.abs() >= value.abs() {
             (total - next) + value

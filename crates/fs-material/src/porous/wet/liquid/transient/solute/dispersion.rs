@@ -8,7 +8,7 @@
 //! Calibration scale remains an explicit physical source coordinate, not a
 //! numerical cell width. The reference supplies no material-specific alpha.
 
-use super::langmuir::LangmuirSoluteError;
+use super::langmuir::{LangmuirSoluteError, populations::MultiLangmuirSoluteError};
 use super::transport::{
     self, DiluteSoluteControls, DiluteSoluteError, finite, integrated_flux, nonnegative, poll,
     positive,
@@ -50,6 +50,7 @@ pub enum SoluteDispersionError {
     },
     Transport(DiluteSoluteError),
     Langmuir(LangmuirSoluteError),
+    MultiLangmuir(MultiLangmuirSoluteError),
 }
 impl From<MatDbError> for SoluteDispersionError {
     fn from(e: MatDbError) -> Self {
@@ -292,6 +293,17 @@ impl<'a> PreparedDispersion<'a> {
         SoluteDispersionError::Langmuir(match error {
             LangmuirSoluteError::Transport(e) => {
                 LangmuirSoluteError::Transport(self.restore_budget(e))
+            }
+            other => other,
+        })
+    }
+    pub(super) fn multi_langmuir_error(
+        &self,
+        error: MultiLangmuirSoluteError,
+    ) -> SoluteDispersionError {
+        SoluteDispersionError::MultiLangmuir(match error {
+            MultiLangmuirSoluteError::Transport(e) => {
+                MultiLangmuirSoluteError::Transport(self.restore_budget(e))
             }
             other => other,
         })

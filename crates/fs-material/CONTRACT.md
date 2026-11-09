@@ -17349,6 +17349,50 @@ sorption heat, evolving site capacity or hydraulic feedback is inferred.
 Newton convergence and residual budgets do not certify global convergence,
 temporal error, or experimental validity of the caller's material sources.
 
+### Multiple source-bound sorbent populations during porous solute transport
+
+`transport_multi_langmuir_dilute_solutes` extends both the original hydraulic
+candidate and its prepared dispersion interval with separately identified
+independent sorbent populations. Each retains its original `AqueousLangmuir`
+or `LocalLangmuirTransfer`, dry mass per physical area, occupied stock and
+independent vacant stock. Different finite LDF rates retain distinct uptake and
+desorption histories even when aggregate bound inventories coincide. These are
+disjoint site populations, not competing species on a shared capacity.
+
+The one-population owner and this extension share the same source-admitted
+local response. Each population's analytic backward-Euler storage change and
+nonnegative tangent are summed with compensated arithmetic into ONE original
+damped Newton/native tridiagonal aqueous solve. Darcy advection and molecular
+or source-qualified mechanical dispersion keep their original physical face
+laws. The accepted report retains each population in caller order as well as
+aggregate bound and combined aqueous/bound balances; continuation uses the
+separate occupied/vacant stocks, without repartitioning an aggregate.
+
+Sparse cell/constituent bindings are grouped once with CSR offsets. Up to the
+original batch owner's 128 populations may occupy a slot, under an additional
+explicit total-population cap. Newton trials allocate no population arrays.
+A shared source-evaluation cap counts initial, trial and accepted points;
+linear-solve and numerical-payload caps cover the complete solve, including
+CSR, retained per-population outputs and prepared dispersion storage. Every
+source checks its actual concentration/loading, physical cell solution volume
+and prescribed temperature. Source boxes must intersect, all populations in a
+physical cell must share one liquid temperature across constituents, and
+equilibrium populations require consistent original loading. Refusals identify
+the original population index. Inputs remain unchanged on refusal/cancellation.
+
+Eight focused native groups plus the existing 60 passed (68 total), using
+exact production owners and genuine unchanged dependencies. Independent
+two-rate closed-cell quadratics check opposing uptake/desorption and the stiff
+limit; frozen/slow limits and one-population arithmetic are checked separately.
+Equal-total/different-partition states retain distinct desorption memory.
+A heterogeneous advection/dispersion face oracle, sparse constituent ordering,
+original multi-population `AdsorptionBatch` parity at the same two BE half steps,
+source/temperature refusals and combined resource limits also pass. This
+bounded proof does not type-check the full hydraulic adapter or full workspace,
+which remain resource-blocked. The model is first-order passive transport with
+fixed independent site populations; it adds no shared-site competition,
+sorbent motion, thermal feedback, evolving capacity or global time-error bound.
+
 ### Source-qualified longitudinal mechanical dispersion in porous liquid
 
 `LiquidSaturationCandidate::with_solute_dispersion` prepares one exact hydraulic

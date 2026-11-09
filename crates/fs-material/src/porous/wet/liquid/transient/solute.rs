@@ -25,6 +25,10 @@ pub use dispersion::{
 };
 mod sorption;
 mod transport;
+pub use langmuir::populations::{
+    LangmuirPopulationState, LangmuirSolutePopulation, MultiLangmuirSoluteControls,
+    MultiLangmuirSoluteError, MultiLangmuirSoluteStep,
+};
 pub use langmuir::{
     LangmuirSoluteControls, LangmuirSoluteError, LangmuirSoluteLaw, LangmuirSoluteSorption,
     LangmuirSoluteStep,
@@ -36,6 +40,52 @@ pub use transport::{
 };
 
 impl LiquidSaturationCandidate {
+    /// Transport with multiple independent original-source sorbent populations
+    /// in each cell/constituent. Every population retains its own occupied and
+    /// vacant stocks, dry mass and equilibrium or local LDF source. Sparse
+    /// bindings are grouped once; their analytic storage changes/tangents enter
+    /// one original aqueous solve. No population is updated by operator splitting.
+    ///
+    /// Distinct IDs denote disjoint site inventories, not competing species on
+    /// shared sites. Common concentration support is required; equilibrium
+    /// populations must already be equilibrated. See the one-population entry
+    /// for physical-area, source, passive-flow and first-order-time assumptions.
+    #[allow(clippy::too_many_arguments)]
+    pub fn transport_multi_langmuir_dilute_solutes<'a, const N: usize>(
+        &self,
+        original: &LiquidSaturationColumn,
+        initial_aqueous_amount_mol_m2: &[[f64; N]],
+        populations: &'a [LangmuirSolutePopulation<'a>],
+        transverse_area_m2: f64,
+        aqueous_diffusivity_m2_s: &[[f64; N]],
+        transport_tortuosity: &[f64],
+        boundaries: [DiluteSoluteBoundary<N>; 2],
+        controls: MultiLangmuirSoluteControls<N>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MultiLangmuirSoluteStep<N>, MultiLangmuirSoluteError> {
+        let mut storage = langmuir::populations::MultiLangmuirStorage::new(
+            original.cells.len(),
+            self.step.duration_s,
+            populations,
+            transverse_area_m2,
+            controls,
+            &mut cancelled,
+        )?;
+        let result = self.transport_solute_storage(
+            original,
+            initial_aqueous_amount_mol_m2,
+            aqueous_diffusivity_m2_s,
+            transport_tortuosity,
+            boundaries,
+            controls.langmuir.transport,
+            &mut storage,
+            None,
+            &mut cancelled,
+        );
+        let aqueous = storage.recover(result)?;
+        storage.finish(initial_aqueous_amount_mol_m2, aqueous, &mut cancelled)
+    }
+
     /// Prepare source-qualified longitudinal mixing on this exact accepted
     /// water interval. Each adjacent cell uses its OWN endpoint liquid volume
     /// fraction and the SAME face volume/duration. Opposite faces never cancel.
@@ -326,6 +376,53 @@ pub struct DispersiveSoluteInterval<'a> {
     prepared: dispersion::PreparedDispersion<'a>,
 }
 impl<'a> DispersiveSoluteInterval<'a> {
+    /// Multiple independently sourced sorbent populations with the prepared
+    /// physical molecular/longitudinal dispersion and original aqueous flow.
+    #[allow(clippy::too_many_arguments)]
+    pub fn transport_multi_langmuir_dilute_solutes<'b, const N: usize>(
+        self,
+        initial_aqueous_amount_mol_m2: &[[f64; N]],
+        populations: &'b [LangmuirSolutePopulation<'b>],
+        transverse_area_m2: f64,
+        aqueous_diffusivity_m2_s: &[[f64; N]],
+        transport_tortuosity: &[f64],
+        boundaries: [DiluteSoluteBoundary<N>; 2],
+        mut controls: MultiLangmuirSoluteControls<N>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<DispersiveSoluteStep<'a, MultiLangmuirSoluteStep<N>>, SoluteDispersionError> {
+        controls.langmuir.transport = self
+            .prepared
+            .transport_controls(controls.langmuir.transport)?;
+        let mut storage = langmuir::populations::MultiLangmuirStorage::new(
+            self.original.cells.len(),
+            self.hydraulic.step.duration_s,
+            populations,
+            transverse_area_m2,
+            controls,
+            &mut cancelled,
+        )
+        .map_err(|error| self.prepared.multi_langmuir_error(error))?;
+        let result = self.hydraulic.transport_solute_storage(
+            self.original,
+            initial_aqueous_amount_mol_m2,
+            aqueous_diffusivity_m2_s,
+            transport_tortuosity,
+            boundaries,
+            controls.langmuir.transport,
+            &mut storage,
+            Some(&self.prepared.report.mechanical_bulk_m2_s),
+            &mut cancelled,
+        );
+        let mut aqueous = storage
+            .recover(result)
+            .map_err(|error| self.prepared.multi_langmuir_error(error))?;
+        aqueous.report.workspace_bytes += self.prepared.report.preparation_storage_bytes;
+        let result = storage
+            .finish(initial_aqueous_amount_mol_m2, aqueous, &mut cancelled)
+            .map_err(|error| self.prepared.multi_langmuir_error(error))?;
+        Ok(self.prepared.finish(result))
+    }
+
     pub fn dispersion(&self) -> &SoluteDispersionReport {
         &self.prepared.report
     }
