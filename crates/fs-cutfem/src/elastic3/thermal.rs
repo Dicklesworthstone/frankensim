@@ -19,6 +19,7 @@ mod adjoint;
 mod entropy;
 pub(in crate::elastic3) mod equilibrium;
 mod jacobian;
+mod linear_response;
 mod sensitivity;
 mod stress;
 
@@ -27,6 +28,11 @@ pub use entropy::{
     PreparedThermoelasticEntropy3, ThermoelasticCellPotential3, ThermoelasticEntropyLimits3,
 };
 pub use jacobian::{PreparedThermalResidualJacobian3, ThermalJacobianLimits3};
+pub use linear_response::{
+    PreparedThermoelasticLinearResponse3, ThermoelasticLinearResponseLimits3,
+    ThermoelasticLinearSolveSettings3, ThermoelasticTemperaturePullback3,
+    ThermoelasticTemperatureResponse3,
+};
 pub(in crate::elastic3) use jacobian::ThermalCoordinateMap3;
 pub use stress::ThermoelasticStressPullback3;
 pub use adjoint::{
