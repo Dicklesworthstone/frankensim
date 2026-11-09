@@ -31,7 +31,19 @@ OC optimizer still requires nonpositive sensitivities; self-weight can
 violate that condition even at higher SIMP penalization and is refused by
 its existing gradient gate. The stress optimizer has no such sign restriction. The
 zero-centered `load-space-limited-simp` mode explicitly refuses this common
-offset because its force-ellipsoid model does not include affine loading.
+offset because its force-ellipsoid model does not include affine loading. Use
+the `affine-load-space-limited-simp` mode below to combine self-weight with a
+continuous external-load uncertainty set.
+
+## Nearly incompressible 3-D materials
+
+Add `:formulation bbar` as the last field of the `physics` section to select the
+native B-bar volumetric-strain formulation. This admits Poisson ratios through
+0.4999 and propagates through bulk, surface-loaded, embedded-support,
+material-acceleration and refined-grid operators. Omitting the field preserves
+the existing displacement formulation and its Poisson-ratio limit of 1/3.
+The formulation is included in the study identity; it does not add nonlinear
+material response or a continuum error bound.
 
 ## Robust 3-D minimum-material design
 
@@ -61,8 +73,9 @@ feasible point with least dilated material. It retains the worst combination,
 cross-compliance spectrum, separate material fields, actual displacement
 fields, initial directional gradient checks and original work consumption.
 Accepted prefixes are durable and exportable. `--budget N` limits updates in
-this invocation; an incomplete run exits 6. This new fixed-grid mode does not
-yet restore optimizer state across processes, so `study --resume` refuses it.
+this invocation; an incomplete run exits 6. `study --resume` restores the
+accepted optimizer state and feasible archive under the original budgets,
+rebuilding geometry and verifying retained endpoint responses before continuing.
 `max-optimizer-evaluations` limits the optimizer's evaluations; the initial
 gradient probes additionally consume the same total Krylov and wall budgets.
 
@@ -70,6 +83,39 @@ These results are numerical estimates for the declared linear-elastic model.
 They do not establish continuum error, stress/buckling safety, global
 optimality, physical validation or a manufacturing tolerance. The example's
 modulus and geometry are numerical demonstration inputs, not a calibrated part.
+
+## Minimum material with self-weight and uncertain external loads
+
+`bracket-3d-affine-load-space.fsim` extends the design problem to
+`f = B*rho_eroded + Fq`, `||q||₂ <= 1`. Material acceleration supplies the
+common self-weight, which changes as material is removed. The authored load
+columns describe simultaneous uncertain external forces. They have unit
+weights, while their SI components carry amplitudes and correlations.
+
+```sh
+frankensim --json study examples/marquee/bracket-3d-affine-load-space.fsim affine.db --budget 2
+frankensim --json report study-<receipt-hash> affine.db
+frankensim --json package study-<receipt-hash> affine.db
+```
+
+Replace the placeholder with the returned run ID. The first command limits the
+run to two updates; omit `--budget 2` to use the declared update allowance.
+The native affine maximizer accounts for cross terms between self-weight and
+external loads when finding the worst compliance. This mode has no
+`spectral-temperature` parameter. The report records the actual worst-load
+coefficients, offset, numerical gap and residuals, initial gradient checks,
+and separate last-accepted and least-material feasible designs.
+
+Report export writes the retained eroded/nominal/dilated density fields and
+offset, basis and worst displacements to VTU. An infeasible selected design
+does not produce a field export. Incomplete runs retain their accepted results
+and exit 6; this affine mode explicitly refuses `study --resume` because its
+native optimizer currently has no cross-process restoration API.
+
+Stiffness and self-weight both use eroded occupancy, while the objective uses
+dilated volume. Under self-weight this does not establish erosion as the worst
+manufacturing realization. The example uses numerical demonstration inputs
+and makes the same limited linear-elastic claims as the robust example above.
 
 ## Thermal cooling-hole radius study
 

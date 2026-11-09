@@ -388,3 +388,6 @@ mod stress;
 
 #[path = "study_sdf3_cli/field_export.rs"]
 mod field_export;
+
+#[path = "study_sdf3_cli/affine.rs"]
+mod affine;

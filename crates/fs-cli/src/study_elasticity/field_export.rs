@@ -4,8 +4,8 @@
 use fs_viz::vtu::{CellType, DataArray, DataAssociation, DataValues, UnstructuredGrid, VtuWriter};
 
 use super::{
-    JsonValue as J, LOAD_SPACE3_DRIVER, MAX_ARTIFACT_BYTES, Result, SDF3_DRIVER, STRESS3_DRIVER,
-    fail,
+    AFFINE_LOAD_SPACE3_DRIVER, JsonValue as J, LOAD_SPACE3_DRIVER, MAX_ARTIFACT_BYTES,
+    Result, SDF3_DRIVER, STRESS3_DRIVER, fail,
 };
 
 const MAX_SCALARS: usize = 1_048_576;
@@ -19,6 +19,10 @@ pub(super) enum Projection {
 
 fn bad(message: impl Into<String>) -> super::Failure {
     fail("cli-study-sdf3-field-export", message)
+}
+
+fn is_load_space(driver: &str) -> bool {
+    matches!(driver, LOAD_SPACE3_DRIVER | AFFINE_LOAD_SPACE3_DRIVER)
 }
 
 fn array<'a>(value: &'a J, name: &str) -> Result<&'a [J]> {
@@ -78,7 +82,8 @@ fn selected<'a>(driver: &str, design: &'a J) -> Result<std::result::Result<&'a J
             _ => Err(bad("unrecognized retained adaptive design state")),
         },
         (STRESS3_DRIVER, Some("sdf3-stress-design.v1"))
-        | (LOAD_SPACE3_DRIVER, Some("sdf3-load-space-design.v1")) => {
+        | (LOAD_SPACE3_DRIVER, Some("sdf3-load-space-design.v1"))
+        | (AFFINE_LOAD_SPACE3_DRIVER, Some("sdf3-affine-load-space-design.v1")) => {
             if design.str_field("state") == Some("no-solved-baseline") {
                 return Ok(Err("no-solved-baseline"));
             }
@@ -90,7 +95,7 @@ fn selected<'a>(driver: &str, design: &'a J) -> Result<std::result::Result<&'a J
             let selection = design.str_field("selected_design");
             let recognized = selection == Some("last-accepted")
                 || selection
-                    == Some(if driver == LOAD_SPACE3_DRIVER {
+                    == Some(if is_load_space(driver) {
                         "least-material-feasible"
                     } else {
                         "best-feasible"
@@ -190,7 +195,7 @@ pub(super) fn render(driver: &str, bytes: &[u8]) -> Result<Projection> {
         }
         grid.add_cell(CellType::Voxel, &ids);
     }
-    let densities: &[&str] = if driver == LOAD_SPACE3_DRIVER {
+    let densities: &[&str] = if is_load_space(driver) {
         &[
             "raw_density",
             "eroded_density",
@@ -225,7 +230,7 @@ pub(super) fn render(driver: &str, bytes: &[u8]) -> Result<Projection> {
             }),
         );
     }
-    let (field_name, prefix, layout) = if driver == LOAD_SPACE3_DRIVER {
+    let (field_name, prefix, layout) = if is_load_space(driver) {
         (
             "basis_displacements_m",
             "basis_displacement",
@@ -258,13 +263,21 @@ pub(super) fn render(driver: &str, bytes: &[u8]) -> Result<Projection> {
             &mut remaining,
         )?;
     }
-    if driver == LOAD_SPACE3_DRIVER {
+    if is_load_space(driver) {
         vectors(
             &mut grid,
             "worst_displacement".into(),
             array(fields, "worst_displacement_m")?,
             &mut remaining,
         )?;
+        if driver == AFFINE_LOAD_SPACE3_DRIVER {
+            vectors(
+                &mut grid,
+                "offset_displacement".into(),
+                array(fields, "offset_displacement_m")?,
+                &mut remaining,
+            )?;
+        }
     } else if driver == STRESS3_DRIVER {
         let stress = array(fields, "cell_relaxed_max_pa")?;
         if stress.len() != cells.len() {

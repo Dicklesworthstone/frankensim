@@ -1950,16 +1950,55 @@ charged; previous results remain intact. Authority remains Estimated, with no
 stress, buckling, continuum, mesh-independent optimum, geometric manufacturing
 tolerance or experimental-validation claim.
 
+### Fixed-grid 3-D minimum material with self-weight and uncertain loads
+
+With `sdf3-study`, objective `dilated-volume-fraction` and optimizer
+`affine-load-space-limited-simp` minimize dilated material under the physical
+compliance cap for every `f=B*rho_eroded+Fq`, `||q||_2<=1`. The required
+`material-acceleration` section supplies full-material density and a common
+occupancy-dependent load. Authored body/pressure/traction cases are unit-weight
+columns of `F`, carrying their physical amplitudes and correlations. The common
+load is assembled once at eroded occupancy, separately from these columns.
+There is no separately authored dead offset.
+
+The optimizer fields are `type`, `initial-density`, `filter-radius-m`,
+`max-updates`, `density-floor`, `compliance-limit-j`, `threshold-offset`,
+`max-optimizer-evaluations`, `max-backtracks`, `tolerance`, `penal`, `beta`, in
+that order. This mode uses the native bounded quadratic-ball maximizer and has
+no spectral-temperature field. Reports retain the affine witness, cross terms,
+offset, primal/dual gap and numerical residuals; initial full-chain objective
+and constraint gradients must pass independent directional checks. Hard or
+unresolved maximizers cannot supply a smooth optimization gradient.
+
+Geometry, supports, grid and projection thresholds remain fixed. Eroded
+material supplies stiffness and self-weight; dilated material supplies the
+objective. With self-weight, erosion is not asserted to be the worst
+manufacturing realization. Only accepted physically cap-feasible points enter
+the least-material archive; KKT diagnostics describe the last accepted point.
+Only convergence at a cap-feasible current point reports `completed`.
+
+`--budget N` caps additional optimizer updates in the invocation. All solves
+and gradient probes spend the original Krylov and wall allowances; accepted
+results are saved before further optimization. Reports and packages retain
+offset, basis and worst displacement fields without a new solve. Resume
+explicitly refuses: the native affine optimizer does not expose cross-process
+state restoration. The example is
+`examples/marquee/bracket-3d-affine-load-space.fsim`. Authority is Estimated,
+with no stress, buckling, continuum error, manufacturing tolerance, global
+design-optimality, safety or experimental-validation claim.
+
 ### Scientific field export for 3-D studies
 
 `report <study-run> <ledger.db>` also exports `<study-run>.vtu` for the adaptive
-SIMP, stress-limited and robust load-space 3-D producers. The generic exporter
+SIMP, stress-limited, robust load-space and affine load-space 3-D producers. The generic exporter
 uses the sealed selected-design artifact and needs neither original source
 files nor a new solve. It retains physical node coordinates, VTK voxel corner
 ordering, raw and projected cell densities, cut-cell volumes and the available
 displacement fields. Stress exports retain sampled relaxed stress; load-space
 exports retain all robust density realizations, basis displacements and the
-worst-combination displacement. The source artifact hash and explicit export
+worst-combination displacement. Affine studies also retain the common
+`offset_displacement`, so the complete worst field can be reconstructed from
+the retained basis and coefficients. The source artifact hash and explicit export
 status accompany the path in text and JSON output. No field is invented when
 there is no solved baseline or no feasible selected design.
 

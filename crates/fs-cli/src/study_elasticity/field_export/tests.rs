@@ -100,6 +100,23 @@ fn stress_export_uses_selected_incumbent_and_sampled_stress() {
 }
 
 #[test]
+fn affine_export_keeps_common_self_weight_separate_from_uncertain_basis_fields() {
+    let affine = incumbent(true)
+        .replace("sdf3-load-space-design.v1", "sdf3-affine-load-space-design.v1")
+        .replace("\"worst_displacement_m\":", &format!(
+            "\"offset_displacement_m\":{:?},\"worst_displacement_m\":", displacement(-0.1)));
+    let grid = grid(AFFINE_LOAD_SPACE3_DRIVER, &affine);
+    assert_eq!(values(&grid, "offset_displacement"), displacement(-0.1));
+    assert_eq!(values(&grid, "basis_displacement_0"), displacement(0.0));
+    assert_eq!(values(&grid, "worst_displacement"), displacement(0.2));
+    assert_eq!(grid.arrays.len(), 9);
+    let missing = incumbent(true)
+        .replace("sdf3-load-space-design.v1", "sdf3-affine-load-space-design.v1");
+    assert!(render(AFFINE_LOAD_SPACE3_DRIVER, missing.as_bytes()).is_err());
+    assert!(render(LOAD_SPACE3_DRIVER, affine.as_bytes()).is_err());
+}
+
+#[test]
 fn load_space_export_preserves_all_robust_densities_and_worst_combination() {
     let design = incumbent(true);
     let grid = grid(LOAD_SPACE3_DRIVER, &design);

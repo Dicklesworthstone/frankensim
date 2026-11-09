@@ -43,6 +43,7 @@ const DRIVER: &str = "free-boundary-elasticity-study-v1";
 const SDF3_DRIVER: &str = "adaptive-sdf3-elasticity-study-v1";
 const STRESS3_DRIVER: &str = "stress-sdf3-elasticity-study-v1";
 const LOAD_SPACE3_DRIVER: &str = "load-space-sdf3-elasticity-study-v1";
+const AFFINE_LOAD_SPACE3_DRIVER: &str = "affine-load-space-sdf3-elasticity-study-v1";
 const RECEIPT_KIND: &str = "study-run-receipt";
 const MAX_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
 /// Reported (never enforced) tolerance on the final material area of the
@@ -601,7 +602,7 @@ fn ir(id: ContentHash, ordinal: usize) -> String {
 }
 
 fn ir_for(driver: &str, id: ContentHash, ordinal: usize) -> String {
-    let objective = if matches!(driver, STRESS3_DRIVER | LOAD_SPACE3_DRIVER) { "1" } else { "J" };
+    let objective = if matches!(driver, STRESS3_DRIVER | LOAD_SPACE3_DRIVER | AFFINE_LOAD_SPACE3_DRIVER) { "1" } else { "J" };
     format!(
         "{{\"driver\":{driver:?},\"study_id\":\"{}\",\"ordinal\":{ordinal},\"units\":\"SI\",\"objective\":{objective:?}}}",
         id.to_hex()
@@ -928,7 +929,7 @@ fn load(ledger: &Ledger, pointer: &str) -> Result<Loaded> {
         .map_err(|error| fail("cli-study-elasticity-receipt", error.to_string()))?;
     let driver = value.str_field("driver");
     if value.str_field("schema") != Some(STUDY_RUN_RECEIPT_SCHEMA)
-        || !matches!(driver, Some(DRIVER | SDF3_DRIVER | STRESS3_DRIVER | LOAD_SPACE3_DRIVER))
+        || !matches!(driver, Some(DRIVER | SDF3_DRIVER | STRESS3_DRIVER | LOAD_SPACE3_DRIVER | AFFINE_LOAD_SPACE3_DRIVER))
     {
         return Err(fail(
             "cli-study-elasticity-receipt",
@@ -1145,7 +1146,7 @@ pub(crate) fn resume_path(
                 .ok_or_else(|| fail("cli-study-elasticity-ledger-path", "ledger path is not UTF-8"))?,
         )?;
         let old = load(&ledger, pointer)?;
-        if matches!(old.value.str_field("driver"), Some(SDF3_DRIVER | STRESS3_DRIVER | LOAD_SPACE3_DRIVER)) {
+        if matches!(old.value.str_field("driver"), Some(SDF3_DRIVER | STRESS3_DRIVER | LOAD_SPACE3_DRIVER | AFFINE_LOAD_SPACE3_DRIVER)) {
             #[cfg(feature = "sdf3-study")]
             return sdf3::resume(&ledger, &old, override_text, &CancelGate::new());
             #[cfg(not(feature = "sdf3-study"))]
@@ -1186,7 +1187,7 @@ pub(crate) fn owns_run(pointer: &str, path: &Path) -> bool {
         return false;
     };
     value.str_field("schema") == Some(STUDY_RUN_RECEIPT_SCHEMA)
-        && matches!(value.str_field("driver"), Some(DRIVER | SDF3_DRIVER | STRESS3_DRIVER | LOAD_SPACE3_DRIVER))
+        && matches!(value.str_field("driver"), Some(DRIVER | SDF3_DRIVER | STRESS3_DRIVER | LOAD_SPACE3_DRIVER | AFFINE_LOAD_SPACE3_DRIVER))
 }
 
 pub(crate) fn looks_like(path: &Path) -> bool {
@@ -1243,7 +1244,7 @@ pub(crate) fn export(
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
         let fields: &[(&str, &str, &str)] = if command == "package" {
             &[("package", "study-package", "fspkg")]
-        } else if matches!(loaded.value.str_field("driver"), Some(SDF3_DRIVER | STRESS3_DRIVER | LOAD_SPACE3_DRIVER)) {
+        } else if matches!(loaded.value.str_field("driver"), Some(SDF3_DRIVER | STRESS3_DRIVER | LOAD_SPACE3_DRIVER | AFFINE_LOAD_SPACE3_DRIVER)) {
             &[
                 ("report_html", "study-report-html", "html"),
                 ("report_json", "study-report-json", "json"),
