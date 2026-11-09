@@ -6,7 +6,7 @@
 
 use super::{FieldMotionCandidate, FieldMotionInput, FieldMotionStep, MaterialFieldMotion};
 use crate::material_circuit::conductivity::{ConductivityDriver, ConductivitySample,
-    ConductivityIteration, ConductorResponse, solve_native};
+    ConductivityIteration, ConductivityTrial, ConductorResponse, solve_native};
 use crate::material_circuit::conductivity::contact::{ContactConductivitySample, ContactResponse};
 use crate::material_circuit::contacts::{ContactHeat, SeriesElectricalContact};
 use crate::material_circuit::{MaterialCircuitError, MaterialCircuitSolve, MaterialResistor,
@@ -33,6 +33,13 @@ pub struct FieldConductivityCandidate {
     step: FieldConductivityStep,
 }
 impl FieldConductivityCandidate {
+    fn from_trial(trial: ConductivityTrial<FieldMotionCandidate>) -> Self {
+        let (motion, field) = trial.candidate.into_parts();
+        Self { motion, step: FieldConductivityStep { field,
+            evaluated: trial.evaluated, evaluated_contacts: trial.evaluated_contacts,
+            iterations: trial.iterations, source_evaluations: trial.source_evaluations } }
+    }
+
     /// Proposed original coupled state; field and motion cannot be split.
     pub const fn motion(&self) -> &MaterialFieldMotion { &self.motion }
     /// Native energy transfer and separate constitutive residuals.
@@ -123,7 +130,8 @@ impl MaterialFieldMotion {
     /// gap. Conductor/contact geometry, field coefficients and body inertia stay
     /// fixed. Optional support retains its frozen thermal state. Motional
     /// conductor transport, interface storage, arcing, opening contacts, thermal
-    /// field entropy and live thermoelastic supports need their own owners.
+    /// field entropy retain their own owners. Thermally live support requires
+    /// the joint enthalpy/reversible-heat entrypoint; this fixed-state route refuses it.
     #[allow(clippy::too_many_arguments)]
     pub fn conductivity_with_contact_response_candidate(
         &self, seeds: Vec<MaterialResistor>, contacts: Vec<SeriesElectricalContact>,
@@ -135,10 +143,25 @@ impl MaterialFieldMotion {
             controls, solve, |applied, interfaces, check| {
                 self.step_with_contacts_candidate(applied, interfaces, input, controls, check)
             }, cancelled)?;
-        let (motion, field) = trial.candidate.into_parts();
-        Ok(FieldConductivityCandidate { motion, step: FieldConductivityStep { field,
-            evaluated: trial.evaluated, evaluated_contacts: trial.evaluated_contacts,
-            iterations: trial.iterations,
-            source_evaluations: trial.source_evaluations } })
+        Ok(FieldConductivityCandidate::from_trial(trial))
+    }
+
+    // Only the joint support/enthalpy owner may supply this proposed section.
+    // Every electrical iteration restarts the SAME accepted physical history
+    // with that section; parameter/reversible heat remains with the outer owner.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn conductivity_thermal_support_candidate(
+        &self, section: fs_material::section::thermal::ConcentricThermoelasticSection,
+        seeds: Vec<MaterialResistor>, contacts: Vec<SeriesElectricalContact>,
+        sources: &[ConductorResponse<'_>], contact_sources: Option<&[ContactResponse<'_>]>,
+        input: FieldMotionInput<'_>, controls: MaterialCircuitSolve,
+        solve: impl Into<ConductivityIteration>, cancelled: impl FnMut() -> bool,
+    ) -> Result<FieldConductivityCandidate, MaterialCircuitError> {
+        let trial = solve_native(self.circuit(), seeds, sources, contacts, contact_sources,
+            controls, solve, |applied, interfaces, check| {
+                self.step_thermal_support_candidate(section.clone(), applied, interfaces,
+                    input, controls, check)
+            }, cancelled)?;
+        Ok(FieldConductivityCandidate::from_trial(trial))
     }
 }

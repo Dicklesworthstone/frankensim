@@ -10,10 +10,15 @@ use crate::circuit_enthalpy::conductivity::{
     self as coupled_conductivity, ConductivityEnthalpyCandidate,
 };
 use crate::material_circuit::conductivity::{
-    ConductionAxis, ConductionCoordinate, ConductivitySample, ConductivitySolve, ConductorResponse,
+    ConductionAxis, ConductionCoordinate, ConductivityIteration, ConductivitySample,
+    ConductivitySolve, ConductorResponse,
 };
 use crate::circuit_enthalpy::motion::{FieldMotionEnthalpyInput, conductivity as motion_conductivity};
+use crate::circuit_enthalpy::motion::support::{self, SupportThermalBinding,
+    SupportThermalCandidate, SupportThermalError};
+use crate::circuit_enthalpy::contacts::ContactThermalCoefficients;
 use crate::material_circuit::motion::MaterialFieldMotion;
+use crate::material_circuit::motion::conductivity::FieldConductivityStep;
 
 /// Electrical response of an existing whole-cell resistor.
 /// Every original resistor needs exactly one entry, including constant laws.
@@ -417,6 +422,54 @@ impl PreparedMaterialNetwork<'_, '_> {
         match result {
             Err(CircuitEnthalpyError::Source(MaterialNetworkError::Thermal(
                 DepositionError::Cancelled))) => Err(CircuitEnthalpyError::Cancelled),
+            other => other,
+        }
+    }
+
+    /// Couple this prepared E/J-dependent material network to its thermally live
+    /// axial support. Original selected bundles supply electrical resistance AND
+    /// the solved-field Fourier coefficients; the shared support residual owns
+    /// expansion, native gap/momentum and reversible heat. No thermal coefficient
+    /// is retained at a seed E/J after the electrical trajectory has changed.
+    ///
+    /// Use the existing prepare_conductivity/resolve_conductivity_seeds path for
+    /// source admission and initial circuit construction. Scalar and declared
+    /// directional links retain their original source/geometry owners. This
+    /// prepared bulk frontend has no electrical interfaces; the shared support
+    /// conductivity entrypoint accepts their explicitly resolved sources/routes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn field_motion_support_conductivity_candidate<'m>(
+        &self, thermal: &DepositionSimulation<'m>, target_s: f64,
+        motion: &MaterialFieldMotion, ports: &[f64], external_force_n: f64,
+        responses: &[CellConductionResponse<'_>], binding: &SupportThermalBinding<'_>,
+        controls: CircuitEnthalpySolve, conductivity: impl Into<ConductivityIteration>,
+        guess_j: &[f64], cancelled: impl FnMut() -> bool,
+    ) -> Result<SupportThermalCandidate<'m, MaterialNetworkSample, FieldConductivityStep>,
+        CircuitEnthalpyError<SupportThermalError<MaterialNetworkError>>> {
+        let cancel = RefCell::new(cancelled);
+        let source_error = |error| match error {
+            MaterialNetworkError::Thermal(DepositionError::Cancelled) => CircuitEnthalpyError::Cancelled,
+            other => CircuitEnthalpyError::Source(SupportThermalError::Heat(other)),
+        };
+        let plan = response_plan(self.network, responses, &mut || (*cancel.borrow_mut())())
+            .map_err(source_error)?;
+        if plan.bases != self.bases {
+            return Err(source_error(MaterialNetworkError::Invalid(
+                "conductivity response bases must retain the prepared source choices")));
+        }
+        let result = support::step_conductivity_candidate(self.network, thermal, target_s,
+            motion, ports, external_force_n, &plan.sources, None, &[], binding, controls,
+            conductivity, guess_j, |state| self.network.resolve_bound(state, &self.bases,
+                Some(&self.pins), Some(&plan.axes), self.directional.as_ref(),
+                || (*cancel.borrow_mut())()).map(|bulk|
+                    ContactThermalCoefficients { bulk, contacts: Vec::new() }),
+            |state, electrical, coefficients| self.network.resolve_conductivity_transport(
+                state, &electrical.evaluated, coefficients, self.directional.as_ref(),
+                || (*cancel.borrow_mut())()), |_| 0.0, || (*cancel.borrow_mut())());
+        match result {
+            Err(CircuitEnthalpyError::Source(SupportThermalError::Heat(
+                MaterialNetworkError::Thermal(DepositionError::Cancelled)))) =>
+                    Err(CircuitEnthalpyError::Cancelled),
             other => other,
         }
     }

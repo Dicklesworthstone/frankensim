@@ -357,7 +357,7 @@ fn g0_legacy_and_typed_carriers_are_never_implicitly_coerced() {
     legacy_on_typed.check(&mut findings);
     assert_eq!(codes(&findings), ["bc-typed-payload-required"]);
 
-    let typed_on_legacy = BoundaryCondition {
+    let typed_temperature = BoundaryCondition {
         region: "heated-wall".to_string(),
         physics: Physics::Thermal,
         kind: BcKind::Dirichlet,
@@ -366,8 +366,10 @@ fn g0_legacy_and_typed_carriers_are_never_implicitly_coerced() {
         frame: 0,
     };
     findings.clear();
-    typed_on_legacy.check(&mut findings);
-    assert_eq!(codes(&findings), ["bc-legacy-value-required"]);
+    typed_temperature.check(&mut findings);
+    // Thermal rows now explicitly admit canonical scalar payloads; this is not
+    // an implicit conversion to a legacy value or to a directionless vector.
+    assert!(findings.is_empty(), "{findings:?}");
 
     let typed_mass_flow = BoundaryCondition {
         region: "inlet".to_string(),

@@ -13569,3 +13569,55 @@ retry. Three full-host groups are authored for independent accepted-trajectory
 heat, motion parity, continued attachment, canonical routes, rollback and retry.
 The full impact-host groups remain unrun in this bounded environment; native
 pHS and caloric source checks do not substitute for that integration run.
+
+## Nonlinear electrical response in thermally live actuator supports
+
+`PreparedMaterialNetwork::field_motion_support_conductivity_candidate` connects
+the original prepared E/J material-response owner to the same live-support
+enthalpy transaction. Initial source selection and circuit construction use
+`prepare_conductivity` and `resolve_conductivity_seeds`. The existing
+`solve_native` electrical iteration resolves bulk E/J and the actual reciprocal
+field/body trajectory at each proposed thermal endpoint. The original prepared
+transport owner then refreshes scalar or directional Fourier coefficients from
+those same solved-field bundles before the shared heat residual is evaluated.
+A thermal link cannot retain its seed-field coefficient after electrical
+response changes.
+
+`motion::support::step_conductivity_candidate` provides the same closure for
+explicitly resolved original interface sources and A/B heat routes. Each
+contact retains its own V/I/J coordinate and source orientation; the containing
+branch does not replace the interface voltage. The transport callback receives
+the admitted native operating point and may refresh its independently owned
+heat paths and source observations. It must not advance history or add native
+Joule/reversible heat a second time. Closed-enclosure numerical net heat retains
+its explicit internal classification.
+
+All entrypoints share the existing support Helmholtz/entropy law, reversible
+heat, native moving descriptor and finite-enthalpy residual. Native
+`FieldConductivityStep` reports retain applied/evaluated material and interface
+residuals. Every inner descriptor trial consumes the outer circuit budget,
+including discarded thermal stencils and final admission; narrowing remaining
+work preserves authored fixed/adaptive source-coordinate relaxation. Source
+refusal, nonconvergence, budget exhaustion and cancellation publish no thermal,
+electrical or support/mechanical history. Default report parameters and the
+previous plain-network/complete-heat APIs retain their existing reduction.
+
+The support potential and fixed caloric charts still require electrically
+independent consumed properties and applicability. A zero-field-valid modulus
+or heat-capacity claim cannot silently remain frozen after E/J changes.
+Stationary conductor geometry, fixed reference mass/inertia, constant field
+coefficients and the original endpoint-temperature timing remain restrictions.
+This does not infer field-dependent mechanical thermodynamics, motional
+conductor work, arcs or interface storage. Complete heat providers retain their
+own coordinate-admission rules; the new prepared frontend reuses the existing
+bulk conductivity owner rather than weakening static heat-assembly admission.
+
+Four focused regressions cover E/T-dependent resistance and thermal links through
+the public prepared frontend; original nonlinear contact sources with independent
+series laws, per-cell heat and total internal energy; exact accounting of all
+inner native trials, late refusal/nonconvergence/budget/cancellation/retry;
+reduction to the prior complete heat-support path; and refusal of electrical
+applicability hidden in mechanical/caloric sources. Pinned rustfmt parsed the
+changed Rust sources and the scoped diff check passed. These regressions were
+not executed in this implementation session; compilation, runtime acceptance
+and experimental validation are not claimed.

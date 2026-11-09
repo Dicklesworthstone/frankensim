@@ -1,4 +1,6 @@
 use super::*;
+#[path = "support/conductivity.rs"]
+mod conductivity;
 #[path = "../../../fs-conduction/tests/radiation_material/common.rs"]
 mod radiation_common;
 use fs_conduction::{AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS as CONTACT_RD,
