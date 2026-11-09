@@ -29,6 +29,10 @@
 //! owner. Particle area follows actual local crystal stock and retains its
 //! reference across transport. No equilibrium target replaces an actual
 //! inventory; no phase heat, particle breakup or nucleation law is inferred.
+//! [`electrolyte`] retains original ionic mineral kinetics on this same water
+//! timeline. Fully reflecting membranes carry solvent only; fast aqueous
+//! speciation follows every candidate volume. Its conserved amounts are
+//! analytical cation/family/spectator pools, not changing protonation forms.
 //! Ideal selective membranes can use quasi-steady concentration films, which
 //! reconstruct actual membrane-face concentrations without hidden inventories.
 //! Nonideal compartments use their shared free-energy pressure with fully
@@ -37,7 +41,8 @@
 //! [`transient`], ideal or nonideal fast-ion water exchange in [`donnan`], and
 //! finite-rate charged swelling in [`electrodiffusion`]. These isothermal owners
 //! supply neither solvent inertia nor mechanical inertia or heat evolution.
-//! Water transport and constant-data pairwise diffusion allocate no memory.
+//! Ordinary water transport and constant-data pairwise diffusion allocate no
+//! memory. Reactive ionic water trials allocate original speciation payloads.
 //! Material-sourced solution diffusion allocates transient original queries and
 //! receipts; its prepared-storage estimate is not a peak-memory bound. Failed,
 //! cancelled or exhausted advances publish neither state nor time.
@@ -69,6 +74,9 @@ pub mod transient;
 
 /// Finite water exchange with conservative, fast-ion Donnan equilibrium.
 pub mod donnan;
+
+/// Original ionic mineral kinetics coupled to fully retaining water membranes.
+pub mod electrolyte;
 
 mod mechanics;
 mod solubility;
@@ -102,6 +110,10 @@ pub enum OsmoticNetworkError {
     Mechanical(fs_material::MaterialError),
     /// The original finite solid/dissolved partition refused the state.
     Solubility(FiniteSolubilityError),
+    /// Original ionic mineral/speciation source or analytical phase balance.
+    ElectrolyteSolubility(
+        fs_material::osmosis::solubility::electrolyte::ElectrolyteSolubilityError,
+    ),
     /// Source-owned solution thermodynamics or original MS friction refused.
     SolutionDiffusion(fs_material::osmosis::diffusion::SolutionDiffusionError),
     /// A smaller physical diffusion step may satisfy withdrawal or passivity.
@@ -291,6 +303,7 @@ pub struct OsmoticCompartment {
     solution: AqueousSolution,
     solubility: Option<FiniteSolubilitySolution>,
     kinetic_solubility: Option<KineticSolubilitySolution>,
+    kinetic_electrolyte: Option<electrolyte::KineticElectrolyte>,
     pressure: OsmoticPressureVolume,
     minimum_volume_m3: f64,
 }
@@ -304,6 +317,7 @@ impl Clone for OsmoticCompartment {
                 .as_ref()
                 .map(FiniteSolubilitySolution::independent_clone),
             kinetic_solubility: self.kinetic_solubility.clone(),
+            kinetic_electrolyte: self.kinetic_electrolyte.clone(),
             pressure: self.pressure,
             minimum_volume_m3: self.minimum_volume_m3,
         }
@@ -329,6 +343,7 @@ impl OsmoticCompartment {
             solution,
             solubility: None,
             kinetic_solubility: None,
+            kinetic_electrolyte: None,
             pressure,
             minimum_volume_m3,
         })
@@ -400,7 +415,15 @@ impl OsmoticCompartment {
     }
 
     fn has_phase_inventory(&self) -> bool {
-        self.solubility.is_some() || self.kinetic_solubility.is_some()
+        self.solubility.is_some()
+            || self.kinetic_solubility.is_some()
+            || self.kinetic_electrolyte.is_some()
+    }
+
+    /// Molecular/energy paths may opt into the original neutral kinetic owner
+    /// only. Ionic reaction requires different analytical and Gibbs accounts.
+    fn unsupported_diffusion_phases(&self, neutral_kinetics: bool) -> bool {
+        self.has_phase_inventory() && !(neutral_kinetics && self.kinetic_solubility.is_some())
     }
 
     /// Equilibrium cells expose their exchangeable total to the active-set
@@ -467,6 +490,11 @@ impl OsmoticCompartment {
         volume_m3: f64,
         totals: &[f64],
     ) -> Result<(), OsmoticNetworkError> {
+        if self.kinetic_electrolyte.is_some() {
+            return Err(OsmoticNetworkError::Invalid(
+                "reactive ionic inventories require the original analytical owner, not species replacement",
+            ));
+        }
         if let Some(phases) = &mut self.kinetic_solubility {
             phases.replace_dissolved_inventories(volume_m3, totals)?;
             self.solution
@@ -496,6 +524,10 @@ impl OsmoticCompartment {
                 .kinetic_solubility
                 .as_ref()
                 .map_or(0, KineticSolubilitySolution::heap_bytes)
+            + self
+                .kinetic_electrolyte
+                .as_ref()
+                .map_or(0, |phase| phase.material.workspace_heap_bytes())
     }
 }
 
@@ -629,15 +661,29 @@ pub struct OsmoticStepReport {
     /// discarded adaptive trials. Zero-duration transport target refreshes are
     /// additional work. Zero for networks without finite-rate phase owners.
     pub phase_evaluations: usize,
+    /// Attempted original fast-aqueous volume re-speciations, including
+    /// discarded water trials. Each uses its source's bounded pH controls.
+    /// Native mineral advance calls are counted by `phase_evaluations`; their
+    /// nested bounded aqueous solves are additional work, not included here.
+    pub electrolyte_volume_speciations: usize,
     /// Largest accepted step-doubling error divided by its requested scale.
     pub maximum_scaled_error: f64,
     /// Final minus initial sum of compartment solvent volumes [m³].
     pub water_balance_residual_m3: f64,
     /// Final minus initial TOTAL amount for each species [mol], including
     /// retained solids; only the first `species_count` entries are active.
+    /// Reactive ionic networks have no active entries: their conserved
+    /// analytical inventories are reported by `electrolyte_balances` instead.
     pub solute_balance_residual_mol: [f64; MAX_OSMOTIC_SPECIES],
     /// Number of active entries in the amount balance.
     pub species_count: usize,
+    /// Original analytical inventories checked per compartment for fully
+    /// retaining reactive ionic water transport. `Some` distinguishes this
+    /// conservation axis explicitly; individual H+/OH-/family-form amounts
+    /// may change. Residuals use independent dissolved/solid endpoint changes
+    /// and the outer absolute-plus-relative amount scale. No reaction Gibbs
+    /// or heat balance is inferred from these amount balances.
+    pub electrolyte_balances: Option<Vec<electrolyte::ElectrolyteCompartmentBalance>>,
     /// Reference-cancelled original-to-final free-energy change [J].
     /// With kinetic solids this uses their original solid-relative chemical
     /// potential and includes dissolution/precipitation as well as mixing.
@@ -676,12 +722,16 @@ pub struct OsmoticNetwork {
 }
 
 impl OsmoticNetwork {
-    /// Prepare all storage, binding one explicit ordering of independent
-    /// species. Finite solid-bearing cells must retain identical original pair
+    /// Prepare retained numerical storage, binding one explicit ordering of
+    /// aqueous species. Finite solid-bearing cells must retain identical original pair
     /// laws and the declared solute identities; kinetic conductances and seeding
     /// policies may differ by compartment. Named ions in ordinary aqueous
     /// cells must already be separate species; this function never infers
     /// dissociation or a van't Hoff multiplier.
+    /// Reactive ionic cells instead conserve original analytical pools; their
+    /// report marks that different conservation axis explicitly. Their byte
+    /// budget counts retained numerical state, excluding pre-existing shared
+    /// immutable chemical sources and transient speciation/report allocations.
     pub fn new(
         species: Vec<String>,
         cells: Vec<OsmoticCompartment>,
@@ -716,6 +766,7 @@ impl OsmoticNetwork {
                 "all cells need one solvent, temperature and species ordering",
             ));
         }
+        electrolyte::admit(&species, &cells, &membranes)?;
         let reference_phases = cells.iter().find_map(|cell| cell.solubility.as_ref());
         for phases in cells.iter().filter_map(|cell| cell.solubility.as_ref()) {
             if phases
@@ -797,9 +848,12 @@ impl OsmoticNetwork {
                 ));
             }
         }
-        // Four complete state buffers; input excess capacities and immutable
-        // material/species data are counted conservatively. Bounded stack
-        // scratch in the scalar solve is additional (under 8 KiB).
+        // Four complete state buffers; input excess capacities are included.
+        // Ordinary material/species payloads are charged conservatively. Ionic
+        // cells charge cloned numerical/publication payloads, excluding their
+        // pre-existing immutable Arc sources and transient native speciation.
+        // Scalar stack scratch and returned report allocations are additional;
+        // this is retained numerical storage, not a peak-memory bound.
         let cell_bytes = core::mem::size_of::<OsmoticCompartment>();
         let required = cells
             .capacity()
@@ -904,16 +958,26 @@ impl OsmoticNetwork {
             implicit.begin_window();
         }
         let (water_before, amounts_before) = totals(&self.cells, self.species.len());
+        let reactive_ionic = self
+            .cells
+            .iter()
+            .any(|cell| cell.kinetic_electrolyte.is_some());
         let mut report = OsmoticStepReport {
             interval_s: [self.time_s, end_time],
             accepted_steps: 0,
             rejected_steps: 0,
             residual_evaluations: 0,
             phase_evaluations: 0,
+            electrolyte_volume_speciations: 0,
             maximum_scaled_error: 0.0,
             water_balance_residual_m3: 0.0,
             solute_balance_residual_mol: [0.0; MAX_OSMOTIC_SPECIES],
-            species_count: self.species.len(),
+            species_count: if reactive_ionic {
+                0
+            } else {
+                self.species.len()
+            },
+            electrolyte_balances: None,
             diffusion_free_energy_change_j: None,
             coupled_potential_change: None,
             electroneutral_diffusion: None,
@@ -948,6 +1012,7 @@ impl OsmoticNetwork {
                     controls,
                     &mut report.residual_evaluations,
                     &mut report.phase_evaluations,
+                    &mut report.electrolyte_volume_speciations,
                     &mut cancelled,
                 )?;
                 sweep_all(
@@ -965,6 +1030,7 @@ impl OsmoticNetwork {
                     controls,
                     &mut report.residual_evaluations,
                     &mut report.phase_evaluations,
+                    &mut report.electrolyte_volume_speciations,
                     &mut cancelled,
                 )?;
                 sweep_all(
@@ -982,6 +1048,7 @@ impl OsmoticNetwork {
                     controls,
                     &mut report.residual_evaluations,
                     &mut report.phase_evaluations,
+                    &mut report.electrolyte_volume_speciations,
                     &mut cancelled,
                 )
             })();
@@ -1029,8 +1096,16 @@ impl OsmoticNetwork {
             ));
         }
         report.water_balance_residual_m3 = water_after - water_before;
-        for i in 0..self.species.len() {
+        for i in 0..report.species_count {
             report.solute_balance_residual_mol[i] = amounts_after[i] - amounts_before[i];
+        }
+        if reactive_ionic {
+            report.electrolyte_balances = Some(electrolyte::balances(
+                &self.cells,
+                &self.work,
+                controls,
+                &mut cancelled,
+            )?);
         }
         let kinetic_phases = self
             .cells
@@ -1178,6 +1253,10 @@ fn copy_state(
     to: &mut [OsmoticCompartment],
 ) -> Result<(), OsmoticNetworkError> {
     for (source, dest) in from.iter().zip(to) {
+        if let Some(phases) = &source.kinetic_electrolyte {
+            electrolyte::install(dest, phases.material.clone())?;
+            continue;
+        }
         if let Some(phases) = &source.kinetic_solubility {
             let target = dest
                 .kinetic_solubility
@@ -1227,7 +1306,7 @@ fn scaled_error(
                         + controls.relative_tolerance * before.abs().max(after.abs())),
             );
         }
-        if old.has_phase_inventory() {
+        if old.solubility.is_some() || old.kinetic_solubility.is_some() {
             // A saturated dissolved view can stay fixed while a finite solid
             // reservoir drains. Control the conserved stock independently.
             for i in 0..old.solution.solute_moles().len() {
@@ -1260,6 +1339,19 @@ fn scaled_error(
                 );
             }
         }
+        if let (Some(before), Some(coarse), Some(after)) = (
+            &old.kinetic_electrolyte,
+            &coarse.kinetic_electrolyte,
+            &fine.kinetic_electrolyte,
+        ) {
+            let before = before.material.solid_amount().value();
+            let after = after.material.solid_amount().value();
+            error = error.max(
+                (after - coarse.material.solid_amount().value()).abs()
+                    / (controls.absolute_amount_tolerance_mol
+                        + controls.relative_tolerance * before.abs().max(after.abs())),
+            );
+        }
     }
     error
 }
@@ -1270,6 +1362,11 @@ fn totals(cells: &[OsmoticCompartment], species: usize) -> (f64, [f64; MAX_OSMOT
     let mut corrections = [0.0; MAX_OSMOTIC_SPECIES];
     for cell in cells {
         compensated_add(&mut volume, &mut vc, cell.solution.solvent_volume_m3());
+        // Reactive ionic inventories have a per-cell analytical axis. Their
+        // changing H+/OH-/family forms are not conserved transport species.
+        if cell.kinetic_electrolyte.is_some() {
+            continue;
+        }
         for i in 0..species {
             if let Some(phases) = &cell.kinetic_solubility {
                 let state = phases.last_steps()[i].state();
@@ -1309,12 +1406,13 @@ fn sweep_all(
     controls: OsmoticStepControls,
     evaluations: &mut usize,
     phase_evaluations: &mut usize,
+    electrolyte_evaluations: &mut usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), OsmoticNetworkError> {
     if let Some(coupled) = coupled {
         let kinetic_phases = cells.iter().any(|cell| cell.kinetic_solubility.is_some());
         if kinetic_phases {
-            advance_phases(cells, 0.5 * dt, phase_evaluations, cancelled)?;
+            advance_phases(cells, 0.5 * dt, controls, phase_evaluations, cancelled)?;
         }
         coupled::sweep(
             cells,
@@ -1332,7 +1430,7 @@ fn sweep_all(
             cancelled,
         )?;
         if kinetic_phases {
-            advance_phases(cells, 0.5 * dt, phase_evaluations, cancelled)?;
+            advance_phases(cells, 0.5 * dt, controls, phase_evaluations, cancelled)?;
             diffusion::qualify_sources(cells, links, cancelled)?;
         }
         return Ok(());
@@ -1341,7 +1439,7 @@ fn sweep_all(
         Some(physical) => {
             let kinetic_phases = cells.iter().any(|cell| cell.kinetic_solubility.is_some());
             if kinetic_phases {
-                advance_phases(cells, 0.5 * dt, phase_evaluations, cancelled)?;
+                advance_phases(cells, 0.5 * dt, controls, phase_evaluations, cancelled)?;
             }
             diffusion::sweep(
                 cells,
@@ -1357,7 +1455,7 @@ fn sweep_all(
                 cancelled,
             )?;
             if kinetic_phases {
-                advance_phases(cells, 0.5 * dt, phase_evaluations, cancelled)?;
+                advance_phases(cells, 0.5 * dt, controls, phase_evaluations, cancelled)?;
                 // Reaction changes the actual source query point after the
                 // molecular stage; stale pair samples cannot qualify it.
                 diffusion::qualify_sources(cells, links, cancelled)?;
@@ -1365,9 +1463,17 @@ fn sweep_all(
             Ok(())
         }
         None => {
-            advance_phases(cells, 0.5 * dt, phase_evaluations, cancelled)?;
-            sweep(cells, membranes, dt, controls, evaluations, cancelled)?;
-            advance_phases(cells, 0.5 * dt, phase_evaluations, cancelled)
+            advance_phases(cells, 0.5 * dt, controls, phase_evaluations, cancelled)?;
+            sweep(
+                cells,
+                membranes,
+                dt,
+                controls,
+                evaluations,
+                electrolyte_evaluations,
+                cancelled,
+            )?;
+            advance_phases(cells, 0.5 * dt, controls, phase_evaluations, cancelled)
         }
     }
 }
@@ -1378,6 +1484,7 @@ fn sweep_all(
 fn advance_phases(
     cells: &mut [OsmoticCompartment],
     dt: f64,
+    controls: OsmoticStepControls,
     evaluations: &mut usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), OsmoticNetworkError> {
@@ -1393,6 +1500,7 @@ fn advance_phases(
                 phases.solution().solute_moles(),
             )?;
         }
+        electrolyte::advance_phase(cell, dt, controls, evaluations, cancelled)?;
     }
     Ok(())
 }
@@ -1403,19 +1511,26 @@ fn sweep(
     dt: f64,
     controls: OsmoticStepControls,
     evaluations: &mut usize,
+    electrolyte_evaluations: &mut usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), OsmoticNetworkError> {
     for membrane in membranes {
         poll(cancelled)?;
-        let endpoint = exchange(
+        let endpoint = exchange_counted(
             &cells[membrane.left],
             &cells[membrane.right],
             membrane,
             dt,
             controls,
             evaluations,
+            electrolyte_evaluations,
             cancelled,
         )?;
+        if let Some([left, right]) = endpoint.electrolytes {
+            electrolyte::install(&mut cells[membrane.left], left)?;
+            electrolyte::install(&mut cells[membrane.right], right)?;
+            continue;
+        }
         let count = cells[membrane.left].solution.solute_moles().len();
         cells[membrane.left].replace_inventories(endpoint.volumes[0], &endpoint.left[..count])?;
         cells[membrane.right].replace_inventories(endpoint.volumes[1], &endpoint.right[..count])?;
@@ -1430,6 +1545,12 @@ struct PairEndpoint {
     left: [f64; MAX_OSMOTIC_SPECIES],
     right: [f64; MAX_OSMOTIC_SPECIES],
     residual_m3: f64,
+    // Original source-bound ionic endpoints, already re-speciated at the
+    // candidate volumes. Carry these through acceptance without a second solve.
+    electrolytes: Option<[
+        fs_material::osmosis::solubility::electrolyte::kinetics::KineticElectrolyteSolubilitySolution;
+        2
+    ]>,
 }
 
 /// Eliminate implicit solute transfers analytically at a proposed water transfer.
@@ -1448,6 +1569,7 @@ fn pair_endpoint(
         left: [0.0; MAX_OSMOTIC_SPECIES],
         right: [0.0; MAX_OSMOTIC_SPECIES],
         residual_m3: 0.0,
+        electrolytes: None,
     };
     let [vl, vr] = endpoint.volumes;
     if !positive(vl) || !positive(vr) || vl < left.minimum_volume_m3 || vr < right.minimum_volume_m3
@@ -1570,6 +1692,31 @@ fn exchange(
     evaluations: &mut usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<PairEndpoint, OsmoticNetworkError> {
+    // Existing molecular/coupled callers refuse reactive ionic cells during
+    // shared admission; retain their established entry point and arithmetic.
+    exchange_counted(
+        left,
+        right,
+        membrane,
+        dt,
+        controls,
+        evaluations,
+        &mut 0,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn exchange_counted(
+    left: &OsmoticCompartment,
+    right: &OsmoticCompartment,
+    membrane: &OsmoticMembrane,
+    dt: f64,
+    controls: OsmoticStepControls,
+    evaluations: &mut usize,
+    electrolyte_evaluations: &mut usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<PairEndpoint, OsmoticNetworkError> {
     let area_time = dt * membrane.area_m2;
     if !positive(area_time) {
         return Err(OsmoticNetworkError::StepUnderflow);
@@ -1582,7 +1729,19 @@ fn exchange(
     let mut evaluate = |water| {
         poll(cancelled)?;
         *evaluations += 1;
-        pair_endpoint(left, right, membrane, area_time, water)
+        if left.kinetic_electrolyte.is_some() || right.kinetic_electrolyte.is_some() {
+            electrolyte::pair_endpoint(
+                left,
+                right,
+                membrane,
+                area_time,
+                water,
+                electrolyte_evaluations,
+                cancelled,
+            )
+        } else {
+            pair_endpoint(left, right, membrane, area_time, water)
+        }
     };
     let at_zero = evaluate(0.0)?;
     if at_zero.residual_m3.abs() <= atol {

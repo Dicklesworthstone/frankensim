@@ -346,9 +346,7 @@ pub(super) fn prepare_solution_diffusion(
     maximum_workspace_bytes: usize,
     kinetic_phases: bool,
 ) -> Result<usize, OsmoticNetworkError> {
-    if cells.iter().any(|cell| {
-        cell.solubility.is_some() || (cell.kinetic_solubility.is_some() && !kinetic_phases)
-    }) {
+    if cells.iter().any(|cell| cell.unsupported_diffusion_phases(kinetic_phases)) {
         return Err(OsmoticNetworkError::Invalid(
             "solution diffusion does not evolve solid phase inventories or their free energy",
         ));

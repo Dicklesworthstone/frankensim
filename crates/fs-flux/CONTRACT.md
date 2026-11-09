@@ -5992,6 +5992,52 @@ timeline with an independent continuous dissolution/permeation ODE, verify
 temporal refinement and decreasing conductance, retain a receiver's inert
 crystals, and close the complete solid-plus-dissolved inventory.
 
+### Ionic mineral reactions during osmotic water exchange
+
+`OsmoticCompartment::with_kinetic_electrolyte_solubility` retains the original
+`KineticElectrolyteSolubilitySolution`, its complete analytical stocks and native
+mineral controls on the existing `OsmoticNetwork` timeline. Native finite-rate
+phase half-stages surround the implicit water sweep. Every candidate solvent
+volume re-solves the original acid/base and charge equations while retaining
+actual dissolved components and solid formula units. Accepted candidates carry
+their resolved material owner into the next stage without a redundant solve.
+
+All compartments must retain the same original aqueous source layout, explicit
+activity basis and dissolved species ordering. Bare membranes have full solute
+reflection and zero solute permeance; analytical solutes and crystals stay in
+their original cells. Mechanical pressure and the actual dissolved particles
+jointly drive water motion. The existing full-step/two-half-step controller
+checks solvent volume, every aqueous particle and independently retained solid.
+The complete scheme retains its first-order implicit membrane substage.
+
+Native temporal tolerances remain below the outer amount scales. Root-location
+accuracy uses the maximum of initial and candidate phase stocks, converted
+through the original stoichiometry, so an initially empty phase retains its
+legitimate relative allowance as it appears. The caller's stricter extent limit
+is preserved. A phase stage normally needs one native advance; insufficient
+endpoint accuracy permits at most three attempts from the same unchanged
+initial state, with every attempt counted and only a qualified endpoint used.
+
+Individual H+, OH- and protonation-form inventories change through chemistry.
+Accordingly reactive reports set `species_count` to zero and return typed
+`electrolyte_balances` for each original cation, acid family and fixed spectator.
+Balances use independent dissolved/solid endpoint changes, exact retained
+analytical ledgers and original mineral coefficients. They also expose actual
+solid change and final charge residual. Attempted volume re-speciations and
+native phase advances are counted separately, including discarded trials.
+Cancellation or refusal publishes neither a partial state nor clock.
+
+The retained numerical workspace estimate includes mutable aqueous/phase
+payloads; pre-existing immutable shared chemical sources and transient native
+solve/report allocations are outside that estimate. Reactive trials allocate.
+This rung supplies isothermal ideal-dilute chemistry with the original source
+and kinetic policies, not reactive charged permeation, membrane films, reaction
+heat or a reaction free-energy certificate. Those incompatible existing paths
+refuse these phase owners. Focused native regressions compare simultaneous
+water-driven growth and dissolution with an independent charge-balance/RK4
+continuous reference, and cover temporal refinement, hydrolysis, conservation,
+source compatibility, unsupported transport and atomic cancellation.
+
 ## Nonideal finite-volume osmosis
 
 `OsmoticCompartment` retains the shared `AqueousSolution`; original

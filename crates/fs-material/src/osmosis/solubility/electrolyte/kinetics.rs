@@ -20,7 +20,7 @@ use super::{
 };
 use fs_qty::{Amount, Time, Volume};
 use fs_thermochem::stoichiometry::thermodynamics::acid_base::{
-    SpeciationOptions,
+    AcidBaseSpecies, FamilySpeciation, SpeciationOptions,
     precipitation::kinetics::{
         MineralKineticControlsV1, MineralKineticOutcomeV1, MineralKineticStateV1, MineralKineticsV1,
     },
@@ -120,6 +120,32 @@ impl KineticElectrolyteSolubilitySolution {
     }
     pub const fn solution(&self) -> &AqueousSolution {
         &self.solution
+    }
+    /// Retained numerical buffers that are copied with this material state,
+    /// excluding the inline value. This includes the actual aqueous report and
+    /// published particle inventory, with their retained identifier buffers.
+    ///
+    /// Immutable source models, analytical stocks and the species axis are
+    /// shared through `Arc` and excluded: they already exist before numerical
+    /// workspace preparation. Transient allocations inside a native chemistry
+    /// solve are also excluded. This is a per-state numerical storage estimate,
+    /// not a bound on total or peak solver memory.
+    pub fn workspace_heap_bytes(&self) -> usize {
+        let aqueous = self.aqueous();
+        let mut bytes = self.solution.heap_bytes()
+            + aqueous.families.capacity() * core::mem::size_of::<FamilySpeciation>()
+            + aqueous.spectators.capacity() * core::mem::size_of::<SpectatorIon>();
+        for family in &aqueous.families {
+            bytes += family.id.capacity()
+                + family.forms.capacity() * core::mem::size_of::<AcidBaseSpecies>();
+            for form in &family.forms {
+                bytes += form.species.heap_bytes();
+            }
+        }
+        for spectator in &aqueous.spectators {
+            bytes += spectator.species.heap_bytes();
+        }
+        bytes
     }
     pub fn species(&self) -> &[SpeciesId] {
         &self.species

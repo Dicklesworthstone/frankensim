@@ -478,7 +478,14 @@ fn solid_stocks_refuse_unmodeled_films_ions_and_inconsistent_pair_identity() {
         )
         .is_err()
     );
-    let prepared = network(cells.to_vec(), vec![]);
+    // The exact byte-bound check needs identical input String capacities.
+    let prepared = OsmoticNetwork::new(
+        vec!["solute-0".into()],
+        cells.to_vec(),
+        vec![],
+        1 << 20,
+    )
+    .unwrap();
     assert!(matches!(
         OsmoticNetwork::new(
             vec!["solute-0".into()],
