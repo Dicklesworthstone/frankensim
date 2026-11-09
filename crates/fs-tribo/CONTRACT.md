@@ -1,3 +1,31 @@
+## Driven Hertz shear and spin with retained physical mode
+
+`HertzWrenchContact::advance_driven` advances one held-load/radius/coefficient/
+external-drive phase in the original three radius-scaled shear/spin coordinates
+and complete symmetric positive-definite mobility. Its explicit `Resting` or
+`Sliding` checkpoint controls static admission; a small moving rate never grants
+access to the larger static set. Resting-drive feasibility and breakaway reuse
+the original joint Hertz static/kinetic support owner, including coupled force
+and moment demand. Release from rest and admitted invariant rays have constant-
+acceleration solutions, exact first-zero splitting, and subsequent static hold
+or overdriven restart.
+
+Changing-direction motion uses bounded first-order kinetic endpoint projections
+with held traction and linear velocity. `maximum_step_s` is a required temporal
+refinement axis; curved endpoint arrest is explicitly timestep-resolved. Such
+capture also requires a strictly interior original kinetic-drive feasibility
+probe. Both represented endpoint powers must be nonpositive. Physical heat pairs
+acting traction with midpoint travel. Generalized drive work is `(W^-1*a) dot
+travel`, independently gated against original-matrix kinetic change plus heat
+and endpoint momentum compatibility.
+
+Original support evaluations, retries, effort limits and cancellation remain
+bounded. Unresolved direction, work, and rounded zero without a resolved event
+refuse before publication. Geometry/load evolution, exact curved-arrest timing
+and speed-dependent driven branch selection remain outside this owner. Focused
+tests cover analytic pressure-moment events, coupled static separation, reversal
+and hysteresis, fixed-grid ODE refinement, and bounded atomic refusal.
+
 ## Local-speed Hertz traction through finite-body relaxation
 
 `HertzFrictionPatch::advance_transient` evolves the original local-speed Hertz

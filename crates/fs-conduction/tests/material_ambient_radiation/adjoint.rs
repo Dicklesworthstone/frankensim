@@ -1,4 +1,6 @@
 //! Original-source derivatives, with an independent latent-plateau inverse.
+#[path = "adjoint/sdirk_parameters.rs"]
+mod sdirk_parameters;
 use super::*;
 use fs_conduction::radiation::pointwise::material::MaterialRadiationSmoothnessError;
 use fs_conduction::radiation::pointwise::material::adjoint::MaterialEmissivityGradient;

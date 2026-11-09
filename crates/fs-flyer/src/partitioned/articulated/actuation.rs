@@ -18,6 +18,10 @@ use fs_mbd::rotordynamics::transient::drive::RotorCurrentDrive;
 use fs_mbd::rotordynamics::transient::drive::voltage::{RotorVoltageControl, RotorWindingMotor};
 use std::cell::Cell;
 
+/// Original sustained Coulomb contact with the same winding/current solve.
+#[path = "actuation/contact.rs"]
+pub mod contact;
+
 /// One held terminal-voltage command and its original motor/source owner.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct JointVoltageDrive {
@@ -140,6 +144,127 @@ fn admit_current(drive: JointVoltageDrive, current: f64) -> Result<(), Refusal> 
     Ok(())
 }
 
+struct PreparedDrives {
+    impedance: Vec<JointImpedance>,
+    drives: Vec<PreparedDrive>,
+}
+
+impl PreparedDrives {
+    fn new(
+        model: &ArticulatedModel,
+        impedance: &[JointImpedance],
+        state: &VoltageDrivenState,
+        drives: &[JointVoltageDrive],
+        dt_s: f64,
+        is_cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, Refusal> {
+        if is_cancelled() {
+            return Err(cancelled());
+        }
+        let nc = model.dof_count();
+        if nc > MAX_CONTROL_COORDS
+            || impedance.len() != nc
+            || drives.len() > nc
+            || state.currents_a.len() != drives.len()
+            || state.mechanical.motion.joint_velocity.len() != nc
+            || !dt_s.is_finite()
+            || dt_s <= 0.0
+        {
+            return Err(invalid(
+                "invalid drive count, native joint shape or duration",
+            ));
+        }
+        // Adding motor damping must not hide an invalid authored passive element.
+        if !impedance.iter().all(|p| {
+            p.damping.is_finite()
+                && p.damping >= 0.0
+                && p.stiffness.is_finite()
+                && p.stiffness >= 0.0
+                && p.rest_position.is_finite()
+        }) {
+            return Err(invalid("invalid original passive joint impedance"));
+        }
+        let mut rotational = [false; MAX_CONTROL_COORDS];
+        for (link, data) in model.links().iter().enumerate() {
+            if let Some(joint) = model.dof_index(link) {
+                rotational[joint] = matches!(
+                    data.joint().kind(),
+                    JointKind::Revolute | JointKind::Helical
+                );
+            }
+        }
+        let mut occupied = [false; MAX_CONTROL_COORDS];
+        let mut effective = impedance.to_vec();
+        let mut prepared = Vec::with_capacity(drives.len());
+        let half = Dd::from_f64(dt_s) * Dd::from_f64(0.5);
+        for (&input, &initial_current) in drives.iter().zip(&state.currents_a) {
+            if is_cancelled() {
+                return Err(cancelled());
+            }
+            let motor = input.motor;
+            let drive = motor.drive;
+            drive
+                .admit(nc, input.control.source, input.command_voltage_v)
+                .map_err(invalid)?;
+            let joint = drive.shaft_coordinate;
+            if occupied[joint]
+                || !rotational[joint]
+                || !motor.inductance_h.is_finite()
+                || motor.inductance_h <= 0.0
+                || !input.control.absolute_current_tolerance_a.is_finite()
+                || input.control.absolute_current_tolerance_a < 0.0
+            {
+                return Err(invalid(
+                    "duplicate/nonrotational drive or invalid winding storage/current allowance",
+                ));
+            }
+            occupied[joint] = true;
+            admit_current(input, initial_current)?;
+            drive
+                .admit_speed(state.mechanical.motion.joint_velocity[joint])
+                .map_err(invalid)?;
+            let voltage = input.command_voltage_v.clamp(
+                -drive.maximum_terminal_voltage_v,
+                drive.maximum_terminal_voltage_v,
+            );
+            let l = Dd::from_f64(motor.inductance_h);
+            let k = Dd::from_f64(drive.torque_constant_nm_per_a);
+            let denominator = l + half * Dd::from_f64(drive.winding_resistance_ohm);
+            if finite(denominator)? <= 0.0 {
+                return Err(invalid("unresolved winding midpoint impedance"));
+            }
+            let free_current = finite(
+                (l * Dd::from_f64(initial_current) + half * Dd::from_f64(voltage)) / denominator,
+            )?;
+            let current_per_speed = finite(half * k / denominator)?;
+            let torque_bias = finite(k * Dd::from_f64(free_current))?;
+            let damping = finite(k * Dd::from_f64(current_per_speed))?;
+            effective[joint].damping =
+                finite(Dd::from_f64(effective[joint].damping) + Dd::from_f64(damping))?;
+            prepared.push(PreparedDrive {
+                input,
+                initial_current,
+                voltage,
+                free_current,
+                current_per_speed,
+                torque_bias,
+                damping,
+            });
+        }
+        Ok(Self { impedance: effective, drives: prepared })
+    }
+
+    fn apply(&self, mut loads: ArticulatedLoads) -> Result<ArticulatedLoads, Refusal> {
+        if loads.joint_effort.len() != self.impedance.len() {
+            return Err(invalid("load joint shape differs from drive owner"));
+        }
+        for drive in &self.drives {
+            loads.joint_effort[drive.input.motor.drive.shaft_coordinate] += drive.torque_bias;
+        }
+        Ok(loads)
+    }
+}
+
 /// Advance finite-inductance drives and the original articulated body together.
 ///
 /// One drive may bind each native revolute/helical coordinate. The native tree
@@ -173,119 +298,22 @@ pub fn step_with_voltage_drives<F>(
 where
     F: Fn(f64, &ArticulatedState, &GeneralizedKinematics) -> Result<ArticulatedLoads, Refusal>,
 {
-    if is_cancelled() {
-        return Err(cancelled());
-    }
+    let prepared = PreparedDrives::new(model, impedance, state, drives, dt_s, &mut is_cancelled)?;
     let nc = model.dof_count();
-    if nc > MAX_CONTROL_COORDS
-        || impedance.len() != nc
-        || drives.len() > nc
-        || state.currents_a.len() != drives.len()
-        || state.mechanical.motion.joint_velocity.len() != nc
-        || !dt_s.is_finite()
-        || dt_s <= 0.0
-    {
-        return Err(invalid(
-            "invalid drive count, native joint shape or duration",
-        ));
-    }
-    // Adding motor damping must not hide an invalid authored passive element.
-    if !impedance.iter().all(|p| {
-        p.damping.is_finite()
-            && p.damping >= 0.0
-            && p.stiffness.is_finite()
-            && p.stiffness >= 0.0
-            && p.rest_position.is_finite()
-    }) {
-        return Err(invalid("invalid original passive joint impedance"));
-    }
-    let mut rotational = [false; MAX_CONTROL_COORDS];
-    for (link, data) in model.links().iter().enumerate() {
-        if let Some(joint) = model.dof_index(link) {
-            rotational[joint] = matches!(
-                data.joint().kind(),
-                JointKind::Revolute | JointKind::Helical
-            );
-        }
-    }
-    let mut occupied = [false; MAX_CONTROL_COORDS];
-    let mut effective = impedance.to_vec();
-    let mut prepared = Vec::with_capacity(drives.len());
-    let half = Dd::from_f64(dt_s) * Dd::from_f64(0.5);
-    for (&input, &initial_current) in drives.iter().zip(&state.currents_a) {
-        if is_cancelled() {
-            return Err(cancelled());
-        }
-        let motor = input.motor;
-        let drive = motor.drive;
-        drive
-            .admit(nc, input.control.source, input.command_voltage_v)
-            .map_err(invalid)?;
-        let joint = drive.shaft_coordinate;
-        if occupied[joint]
-            || !rotational[joint]
-            || !motor.inductance_h.is_finite()
-            || motor.inductance_h <= 0.0
-            || !input.control.absolute_current_tolerance_a.is_finite()
-            || input.control.absolute_current_tolerance_a < 0.0
-        {
-            return Err(invalid(
-                "duplicate/nonrotational drive or invalid winding storage/current allowance",
-            ));
-        }
-        occupied[joint] = true;
-        admit_current(input, initial_current)?;
-        drive
-            .admit_speed(state.mechanical.motion.joint_velocity[joint])
-            .map_err(invalid)?;
-        let voltage = input.command_voltage_v.clamp(
-            -drive.maximum_terminal_voltage_v,
-            drive.maximum_terminal_voltage_v,
-        );
-        let l = Dd::from_f64(motor.inductance_h);
-        let k = Dd::from_f64(drive.torque_constant_nm_per_a);
-        let denominator = l + half * Dd::from_f64(drive.winding_resistance_ohm);
-        if finite(denominator)? <= 0.0 {
-            return Err(invalid("unresolved winding midpoint impedance"));
-        }
-        let free_current = finite(
-            (l * Dd::from_f64(initial_current) + half * Dd::from_f64(voltage)) / denominator,
-        )?;
-        let current_per_speed = finite(half * k / denominator)?;
-        let torque_bias = finite(k * Dd::from_f64(free_current))?;
-        let damping = finite(k * Dd::from_f64(current_per_speed))?;
-        effective[joint].damping =
-            finite(Dd::from_f64(effective[joint].damping) + Dd::from_f64(damping))?;
-        prepared.push(PreparedDrive {
-            input,
-            initial_current,
-            voltage,
-            free_current,
-            current_per_speed,
-            torque_bias,
-            damping,
-        });
-    }
     // The existing owner accepts the candidate whose midpoint was evaluated.
     // Retain those actual rates; do not reconstruct them by subtracting large
     // joint positions or invoke the load callback again after acceptance.
     let midpoint_rates = Cell::new([0.0; MAX_CONTROL_COORDS]);
     let mechanical = super::step(
         model,
-        &effective,
+        &prepared.impedance,
         &state.mechanical,
         memory_inputs,
         t_s,
         dt_s,
         config,
         |time, stage, map| {
-            let mut loads = evaluate(time, stage, map)?;
-            if loads.joint_effort.len() != nc {
-                return Err(invalid("load joint shape differs from drive owner"));
-            }
-            for drive in &prepared {
-                loads.joint_effort[drive.input.motor.drive.shaft_coordinate] += drive.torque_bias;
-            }
+            let loads = prepared.apply(evaluate(time, stage, map)?)?;
             let mut rates = [0.0; MAX_CONTROL_COORDS];
             rates[..nc].copy_from_slice(&stage.motion.joint_velocity);
             midpoint_rates.set(rates);
@@ -294,19 +322,12 @@ where
         &mut is_cancelled,
     )?;
     let rates = midpoint_rates.get();
-    let mut receipts = Vec::with_capacity(prepared.len());
-    for drive in prepared {
+    let mut receipts = Vec::with_capacity(prepared.drives.len());
+    for drive in prepared.drives {
         if is_cancelled() {
             return Err(cancelled());
         }
-        let joint = drive.input.motor.drive.shaft_coordinate;
-        drive
-            .input
-            .motor
-            .drive
-            .admit_speed(mechanical.state.motion.joint_velocity[joint])
-            .map_err(invalid)?;
-        receipts.push(drive.receipt(rates[joint], dt_s)?);
+        receipts.push(drive.accepted_receipt(&mechanical.state, &rates[..nc], dt_s)?);
     }
     if is_cancelled() {
         return Err(cancelled());
@@ -318,6 +339,19 @@ where
 }
 
 impl PreparedDrive {
+    fn accepted_receipt(
+        self,
+        endpoint: &ArticulatedState,
+        midpoint_rates: &[f64],
+        dt_s: f64,
+    ) -> Result<JointVoltageReceipt, Refusal> {
+        let joint = self.input.motor.drive.shaft_coordinate;
+        self.input.motor.drive
+            .admit_speed(endpoint.motion.joint_velocity[joint])
+            .map_err(invalid)?;
+        self.receipt(midpoint_rates[joint], dt_s)
+    }
+
     fn receipt(self, speed: f64, dt_s: f64) -> Result<JointVoltageReceipt, Refusal> {
         let motor = self.input.motor;
         let drive = motor.drive;

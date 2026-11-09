@@ -23,7 +23,9 @@ use fs_duct::network::NetworkMedia;
 
 mod prepared;
 mod molecular;
-pub use molecular::MolecularRadiatingNetwork;
+pub use molecular::{
+    MolecularRadiatingFieldRequest, MolecularRadiatingNetwork, PreparedMolecularRadiatingFields,
+};
 pub use prepared::{
     PreparedRadiatingSourceControl,
     PreparedRadiatingWelchBand, PreparedRadiatingWelchBandFarField,

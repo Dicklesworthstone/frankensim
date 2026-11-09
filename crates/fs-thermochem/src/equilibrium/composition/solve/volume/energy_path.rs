@@ -9,6 +9,9 @@
 /// Repeatable reacting internal-energy calorics at fixed conserved density.
 pub mod isochoric;
 
+/// Source-relative UV queries anchored to an accepted original SP state.
+pub mod anchored;
+
 use super::super::expansion::path::Reference;
 use super::*;
 

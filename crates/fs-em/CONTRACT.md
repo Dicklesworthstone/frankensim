@@ -6856,6 +6856,39 @@ exact stationary/zero-GVD bulk identities. Source-bound integration fixtures
 were added and parsed/reviewed; full `fs-em` material integration was not
 executed in this editing environment.
 
+### Principal-crystal Fresnel boundary dispersion
+
+`PrincipalPlaneUniaxialInterface::boundary_frequency_dispersion` and its signed
+tangential-index counterpart retain the unchanged native carrier and normal
+propagation response, and add raw complex first/second frequency derivatives
+of reflected tangential E, transmitted tangential E and normalized conjugate H.
+The existing `FresnelAmplitudeDispersion` owner supplies phase delay and GDD
+where an amplitude is nonzero. Raw jets remain available at a Brewster zero;
+an undefined logarithmic phase is never replaced by zero.
+
+Both frequency constraints require the original incident-law jet for boundary
+admittance, including fixed dimensional transverse wavenumber. The existing
+normal-only query retains its broader admission. An already prepared
+`UniaxialFrequencyDispersion` can add the boundary response without another
+native Maxwell/root solve, using its exact retained incidence coordinate.
+
+The analytic fixed-size DD contractions use the original independent electric
+and magnetic transmission numerators, the outgoing gradient root, and the
+source-bound principal spectra. This retains tilted negative/zero normal phase,
+matched grazing and representable unmatched grazing derivatives. Reflected and
+transmitted normal-power slopes retain both field jets; TIR keeps exact constant
+normal powers while preserving its complex phase dispersion. Critical roots,
+unsupported source jets and unrepresentable derivatives refuse. These local
+boundary slopes do not provide finite-crystal interference, pulse reshaping or
+a single delay for an interfering pair of modes.
+
+Seven new numerical fixtures and three source-owner fixtures cover original
+isotropic parity, independent derivatives, both frequency constraints, magnetic
+contrast, zeros, TIR, source endpoints and grazing limits. They were parsed and
+independently source/math reviewed. They were not executed because the bounded
+native-build capacity check failed; the earlier 66-test native execution covers
+the previously published carrier and normal-propagation kernels only.
+
 ### Arbitrarily oriented transparent crystals
 
 `uniaxial::oriented::OrientedUniaxialInterface` retains the same original
@@ -8722,3 +8755,64 @@ old-source 1 ps triangular null probe reproduced a real result about 3.3e10 time
 too large and an incorrectly zero proper result. Validation used actual numerical
 leaf sources with narrow outer metadata adapters; the full material/field/FFT
 pipeline and native workspace suite were not run in this environment.
+
+## Nonuniform nonlinear contacts on original tetrahedral faces
+
+`SpatialConductionResponse::with_contact_quadrature` uses the same source-owned
+sampling policy and constitutive closure on matching original triangular faces.
+Each subdivision uses positive vertex/midpoint/centroid weights exact through
+degree three. Integer barycentric keys merge shared points deterministically;
+`3*n*n+3*n+1` points per face are charged against the global contact budget.
+
+The original triangular contact operator, current and heat share those same
+point resistances and physical area weights. Endpoint densities are recovered
+from actual endpoint samples; the public sample report retains both applied
+and evaluated complete original source states. The original constant-R''
+triangle mass matrix remains a separate exact path. All-point relaxation,
+source-domain refusal, source-query counts, work acceptance and cancellation
+reuse the common nonlinear contact owner. The policy also survives native
+frozen handoffs consumed by existing finite-thermal and circuit couplers.
+
+Two focused native regression groups cover spatially varying current-dependent
+contacts at multiple resolutions and external temperatures, an independent
+pointwise quadratic current law, source identity, native bulk/contact/source
+work, exact query counts, budgets, cancellation and continuing source policy.
+The rule remains a caller-refined discretization, not a quadrature-error or
+measured-material certificate. Moving/sliding contact surfaces and interface
+electrical memory remain outside this memoryless fixed-geometry law.
+
+## Sampled-volume reversible film energy and stable storage changes
+
+The original prepared exposure layer now exposes `volume_energy` on explicit
+`AngularSpectrumEnergyVolumeSample` quadrature: original grid index, depth in
+the selected film and nonnegative physical volume in cubic metres. The retained
+owner reports electromagnetic, polarization restoring, polarization kinetic and
+total energy in joules, or signed analytic endpoint changes on the original DD
+source clock. It shares the point observer's original normalized material
+coordinates, real/proper ensemble law and binary-scaled field products.
+
+Preparation groups positive-weight samples deterministically by depth, sharing
+each original source-bank frequency reconstruction across all selected points
+and reservoirs at that depth. Limits admit authored samples (including zero
+weights, hard cap65,536), active depths, original line/FFT work, retained coordinate
+terms and explicit workspace before reconstruction. Every authored entry is
+validated. The original layer and quadrature remain borrowed; repeated queries
+allocate no heap and perform no field/material solve. Volume and constitutive
+scales meet original field products before restoration to DD range. Analytic
+field increments retain finite changes when bright endpoint energies overflow.
+
+This is sampled physical volume quadrature, not a certificate of spatial
+resolution, a continuous Fourier-cell integral, an enclosing force surface,
+thermal storage or switch-on dynamics. Original prescribed settled fields and
+material ownership remain authoritative.
+
+Validation: five new actual numerical volume tests and seven existing point
+energy tests pass. Independent mixed-source ensemble and nonuniform volume
+checks cover deep real/proper cancellation, every energy account, extreme
+physical scales, signed spatial exchange, precise clocks and partitioned changes.
+Four additional narrow adapter checks execute the complete preparation body
+against manufactured original frequency fields: batching, point/volume agreement,
+all work/memory refusals before reconstruction, zero-weight validation, and late
+cancellation/reuse. The adapter preserves the callable owner shape but does not
+execute the native Maxwell/material/FFT pipeline. That full pipeline and the
+native workspace suite remain unrun here.

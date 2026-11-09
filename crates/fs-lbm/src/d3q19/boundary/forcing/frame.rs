@@ -213,16 +213,7 @@ impl RigidFrame3 {
                 ));
             }
             if !CORIOLIS_ONLY && boundary.is_periodic() {
-                let axis = face.axis();
-                if (0..3).any(|other| {
-                    other != axis
-                        && (self.angular_velocity[other] != 0.0
-                            || self.angular_acceleration[other] != 0.0)
-                }) {
-                    return Err(Invalid(
-                        "rigid-frame inertial forces are not periodic along this axis",
-                    ));
-                }
+                self.admit_periodic_axis(face.axis()).map_err(Invalid)?;
             }
         }
         Ok(denominator)
@@ -255,6 +246,19 @@ impl RigidFrame3 {
             return Err(BoundaryForcingError3::Unphysical { cell });
         }
         Ok((previous, next, velocity))
+    }
+
+    // Position-dependent inertial forces must survive the periodic translation
+    // itself; a periodic fluid velocity does not make a rotating torus physical.
+    pub(crate) fn admit_periodic_axis(self, axis: usize) -> Result<(), &'static str> {
+        if (0..3).any(|other| {
+            other != axis
+                && (self.angular_velocity[other] != 0.0
+                    || self.angular_acceleration[other] != 0.0)
+        }) {
+            return Err("rigid-frame inertial forces are not periodic along this axis");
+        }
+        Ok(())
     }
 
     // Shared by dense and sparse free-surface owners. Admission is once per
@@ -299,13 +303,23 @@ impl RigidFrame3 {
         acceleration: [f64; 3],
         denominator: f64,
     ) -> [f64; 3] {
+        let base = self.position_acceleration(position, acceleration);
+        midpoint_acceleration(self.angular_velocity, velocity, base, denominator)
+    }
+
+    // The native endpoint owner resolves the same position-dependent law
+    // before its implicit velocity solve; no source term is evaluated twice.
+    pub(crate) fn position_acceleration(
+        self,
+        position: [f64; 3],
+        acceleration: [f64; 3],
+    ) -> [f64; 3] {
         let r = core::array::from_fn(|axis| position[axis] - self.origin[axis]);
         let euler = cross(self.angular_acceleration, r);
         let centrifugal = cross(self.angular_velocity, cross(self.angular_velocity, r));
-        let base = core::array::from_fn(|axis| {
+        core::array::from_fn(|axis| {
             acceleration[axis] - self.origin_acceleration[axis] - euler[axis] - centrifugal[axis]
-        });
-        midpoint_acceleration(self.angular_velocity, velocity, base, denominator)
+        })
     }
 }
 

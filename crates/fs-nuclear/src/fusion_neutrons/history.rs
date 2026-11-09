@@ -327,6 +327,14 @@ pub struct NeutronKineticHistoryStep {
     pub substeps: usize,
     pub initial_kinetic_energy_j: f64,
     pub final_kinetic_energy_j: f64,
+    pub initial_precursor_energy_j: f64,
+    pub final_precursor_energy_j: f64,
+    /// Reserved energy internally converted into delayed-neutron energy [J].
+    pub precursor_conversion_energy_j: f64,
+    /// Reserved energy exported by original material outflows, separate from
+    /// released heat, radiation and neutron leakage [J].
+    pub cell_exported_precursor_energy_j: Vec<f64>,
+    pub exported_precursor_energy_j: f64,
     pub injected_neutrons: f64,
     pub injected_kinetic_energy_j: f64,
     /// Signed prompt Q per original material cell over this request [J].
@@ -375,6 +383,7 @@ impl NeutronKineticState {
             &mut checkpoint,
         )?;
         let initial = self.kinetic_energy_j()?;
+        let initial_precursor = self.precursor_energy_j()?;
         let mut candidate = self.clone();
         let mut time = start.value();
         let mut substeps = 0;
@@ -386,6 +395,8 @@ impl NeutronKineticState {
         let mut count_defect = Accumulator::new(0.0);
         let mut cells = vec![[Accumulator::new(0.0); 3]; self.model().diffusion().cell_count()];
         let mut nuclear_cells = vec![Accumulator::new(0.0); cells.len()];
+        let mut precursor_cells = vec![Accumulator::new(0.0); cells.len()];
+        let mut precursor_conversion = Accumulator::new(0.0);
         while time < end.value() {
             checkpoint()?;
             if substeps >= budget.maximum_substeps {
@@ -414,6 +425,15 @@ impl NeutronKineticState {
             count_defect.add(report.diffusion.population_roundoff)?;
             count_defect.add(nr.abs())?;
             energy_defect.add(report.energy_roundoff_j)?;
+            energy_defect.add(
+                precursor_conversion.add(report.precursor_conversion_energy_j)?.abs(),
+            )?;
+            for (target, &value) in precursor_cells
+                .iter_mut()
+                .zip(&report.cell_exported_precursor_energy_j)
+            {
+                energy_defect.add(target.add(value)?.abs())?;
+            }
             energy_defect.add(er.abs())?;
             energy_defect.add(injected_energy.add(report.injected_kinetic_energy_j)?.abs())?;
             count_defect.add(
@@ -469,14 +489,25 @@ impl NeutronKineticState {
             energy_defect.add(nuclear_total.add(cell.value())?.abs())?;
         }
         energy_defect.add(export_defect(nuclear_total))?;
+        let mut precursor_exported = Accumulator::new(0.0);
+        for &cell in &precursor_cells {
+            energy_defect.add(export_defect(cell))?;
+            energy_defect.add(precursor_exported.add(cell.value())?.abs())?;
+        }
+        energy_defect.add(export_defect(precursor_exported))?;
+        energy_defect.add(export_defect(precursor_conversion))?;
         let released = crate::channel_values(totals);
         let final_energy = candidate.kinetic_energy_j()?;
+        let final_precursor = candidate.precursor_energy_j()?;
         let residual = checked(crate::sum(&[
             final_energy,
+            final_precursor,
             -initial,
+            -initial_precursor,
             released.deposited_j,
             released.radiation_j,
             released.escaped_j,
+            precursor_exported.value(),
             -injected_energy.value(),
             -nuclear_total.value(),
         ]))?;
@@ -495,6 +526,14 @@ impl NeutronKineticState {
                 substeps,
                 initial_kinetic_energy_j: initial,
                 final_kinetic_energy_j: final_energy,
+                initial_precursor_energy_j: initial_precursor,
+                final_precursor_energy_j: final_precursor,
+                precursor_conversion_energy_j: precursor_conversion.value(),
+                cell_exported_precursor_energy_j: precursor_cells
+                    .into_iter()
+                    .map(Accumulator::value)
+                    .collect(),
+                exported_precursor_energy_j: precursor_exported.value(),
                 injected_neutrons: injected_number.value(),
                 injected_kinetic_energy_j: injected_energy.value(),
                 cell_nuclear_reaction_energy_j: nuclear_cells

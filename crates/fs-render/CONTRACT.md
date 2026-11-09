@@ -5323,7 +5323,37 @@ explicitly authored. Cinematic paths
 validate the outgoing wavelength's exterior against their original initial
 medium stack before transport.
 Depth is axial distance from the sensor, and surface normal/albedo AOVs remain
-available. Motion stays unavailable until a lens-aware inverse mapping exists.
+available. Aligned motion output remains unavailable until it consumes the explicit
+wavelength- and pupil-specific inverse projection below.
+
+`PhysicalCamera::project_sequential_point` supplies a local inverse for an
+explicit original wavelength and `LensSample`. It replays the original steady
+spectral lens generator at trial sensor coordinates; the fixed original sample
+retains both the direct/ghost selection and remapped conditional pupil. Snell
+geometry, spectral/coating support, full optical throughput and clipping remain
+with their existing owners. Group timing is not required. The target must lie
+beyond the complete front cap, and every accepted residual uses a nonnegative
+forward distance along an actual native ray to the target's axial plane.
+
+`SequentialProjectionOptions` specifies the local sensor seed, physical miss
+tolerance, finite-difference step, maximum sensor step and total native trace
+budget. Fixed-size double-double plane residuals and a scaled 2x2 solve drive
+bounded monotone backtracking. Clipped probes may shorten the step or supply
+a one-sided local direction; source errors propagate. The difference stencil
+guides the solve and makes no certified-gradient claim. Clipped seeds, singular
+or unresolved solves, exhausted work and cancellation return explicit
+`SequentialProjectionError` values. Every ray evaluation, including failed
+probes, counts against the original caller's cap.
+
+The returned `SequentialProjection` retains sensor tangents, NDC, axial depth,
+achieved physical residual and actual trace count. Off-screen coordinates are
+valid. This is one locally converged conditional image; it does not establish
+visibility, uniqueness, all ghost images, or a pupil-averaged projection of a
+defocused point. Three G1/G3 integration fixtures specify native spectral/pupil/
+ghost and world-pose round trips, an independent closest-point residual,
+chromatic geometry, steady absorbing coatings, and work/clipping/cancellation
+refusals. The changed Rust passed parser and source/API review; the full
+renderer integration fixtures were not executed in this editing environment.
 
 The film convention is sensor irradiance divided by
 `pi*rear_clear_radius^2/rear_vertex_z^2`; multiplying by that factor recovers
@@ -10052,9 +10082,9 @@ This is frozen-geometry, frozen-medium, incoherent spectral envelope transport
 with a narrow-band group-delay approximation. It supplies no carrier phase,
 within-bin pulse reshaping, moving-medium frequency shift, fluorescence,
 unmodeled lens transit, interface/coating residence time, or temporal environment,
-volume or point-source-connection history. The finite-area adapters below
-support timed clear-medium and molecular connections. Unbound sources remain
-explicitly steady.
+volume history. The finite-area and point-fixture adapters below support timed
+clear-medium and molecular connections, including native refracted source
+images. Unbound sources remain explicitly steady.
 
 Seven G1/G3/G4 tests cover native static/RNG parity, distinct per-source delays,
 chromatic pulse arrivals, an independent curved-path group integral, large-epoch
@@ -10402,6 +10432,61 @@ The adapter borrows exactly the same prepared camera as the area-source owner an
 `sample_ray_with_samples_at_time` returns the complete native radiance and per-image work at a DD observation clock. `sample_ray_with_samples_during_exposure` requests each source's mean over its individually retarded shutter interval on that same frozen transport, then returns mean radiance and integrated radiance [J/(m² sr nm)]. No temporal path sampling, extra image tracing, midpoint source substitution, or additional geometric delay is introduced. Geometry/optical coefficients stay frozen; moving media, pulse reshaping, interface residence time, point-source connections, and molecular-scattering connections are outside this adapter.
 
 Four focused regression groups cover unity/native-sample and work parity, dispersive group clocks at a large epoch, triangular shutter integration on both MIS strategies, distinct refracted-image clocks, and complete refusal for missing connection group delay or source failures. They were authored and formatter/parser checked; native numerical execution was unavailable in the editing environment.
+
+## Retarded point-fixture connections
+
+`camera::transient::point_lights::TransientCurvedPointLightCameraScene` binds
+`PointEmissionHistory` to the exact borrowed `PhotometricSource` and an explicit
+nonzero content identity. Instantaneous and finite-shutter queries observe the
+original accepted point-light connection, with its calibrated source direction,
+camera and connection group paths, and complete sequential-lens DD delay prefix.
+Surface-emission histories retain their original object identities. Unbound
+fixtures are steady and require no new group-delay evidence.
+
+The observer scales the native point-light intensity before logarithmic range
+admission; a unit history preserves the existing arithmetic. Point fixtures
+remain additive delta-endpoint next-event estimates. Clipped, zero-survival and
+otherwise noncontributing connections acquire no fabricated source event.
+Missing group evidence, source-history failures and cancellation refuse the
+whole requested observation. Steady raw-beam and timed sequential-lens methods
+retain the native polarization analyzer and optical transport.
+
+These histories assume frozen geometry and optics. Environment, LTE and volume
+emission remain steady. Molecular point connections and discovered source
+images use the additional adapters below. Three regression fixtures cover separate
+surface/fixture clocks, native work parity, timed analyzed lens pulses and
+shutters, and admission/refusal cases. They were source reviewed and parsed;
+the complete renderer test target was not executed in the editing environment.
+
+## Retarded molecular point fixtures and refracted images
+
+With `volumes`, `TransientCurvedRayleighPointLightCameraScene` and
+`TransientCurvedRayleighImageLightCameraScene` apply the same exact-source
+histories at native surface and accepted molecular vertices. Prescribed
+connections and every deduplicated refracted source image retain their actual
+camera-prefix and connection group paths, source polarization, photometric
+normalization, and independent source-survival realization. Duplicate search
+seeds do not duplicate source events or source streams.
+
+Instantaneous and finite-shutter methods accept ideal rays or complete timed
+sequential-lens beams. The DD lens prefix enters the clock once. Original
+zero-survival, zero-phase and noncontributing guards precede history evaluation;
+null molecular candidates create no invented emission event. A steady
+raw-beam launch remains available without requiring group timing. Surface,
+flight and source-counter streams, original geometry searches, trace budgets
+and cumulative work accounting remain with their native workers.
+
+History/source identity and camera ownership are admitted against every actual
+attached surface, volume and image fixture. Unbound fixtures remain steady and
+bypass new group eligibility; missing group evidence and original history
+failures preserve typed refusal of the entire observation. Frozen geometry and
+optics, steady environment, LTE and volume emission remain explicit limits.
+
+Three additional regression fixtures cover heterogeneous null/real candidates
+and source stochastic zero, distinct polarized images and shutter means with
+exact native trace budgets, and chromatic analyzed-lens timing at a real
+molecular vertex. They were parsed and independently source/API/math reviewed;
+renderer execution was unavailable in this editing environment.
 
 ## Retarded molecular finite-area source connections
 
@@ -12863,3 +12948,30 @@ full native scene regressions are authored but unrun; the absent sibling
 workspace graph prevents full Cargo, resolved geometry/GRIN, raster, clippy,
 material-state or remote-runner validation. These are numerical-model checks,
 not experimental validation of arbitrary measured rough glass.
+
+## Original optical finishes across accepted material states
+
+`MaterialOpticalBinding::with_surface_finish` binds an explicitly authored native
+finish while retaining the exact accepted bulk optical law and original source
+receipts. Visible and spectral accepted-state refreshes retain the full
+dielectric tangent, anisotropic GGX law and compact coherent coating, or the
+conductor's isotropic finish and transparent, absorbing or periodic coating.
+Fresh bulk coefficients continue to come from the original pinned material
+claims at the complete accepted state.
+
+Independently authored coating laws and thicknesses stay fixed until explicitly
+replaced; bulk temperature changes do not infer surface evolution. Original
+per-query wavelength support, tangent-frame admission, scalar reflection and
+polarized transport remain authoritative, including zero-thickness coating
+support. The existing material content identity covers the complete finish.
+Bulk-law, optical-family, source and zero-surface-identity substitutions refuse
+without changing either the original binding or accepted physical state. The
+Euler scene bridge preserves this refusal through its existing material-state
+error.
+
+Focused native fixtures cover visible and spectral endpoint continuation,
+coated anisotropic dielectric scalar/polarized reflection, all three original
+conductor coating families, retained source and interpolation policy, and
+independent narrower coating support. They do not establish measured finish
+calibration, bulk birefringence, inter-facet multiple scattering, or inferred
+thermal evolution of the coatings.

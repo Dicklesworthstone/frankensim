@@ -1,3 +1,30 @@
+## Driven original-body Hertz shear and spin
+
+`tangential_friction::hertz::driven` advances held external world forces and
+body-frame torques together with the original joint Hertz sliding/spin law.
+Original masses, full inertia, orientations and contact arms supply the complete
+three-coordinate mobility. The explicit resting/sliding mode survives accepted
+continuation. Static admission, breakaway and arrest belong to the original
+pressure-resolved surface; no separate force/spin caps or velocity clamp replace it.
+
+Each original body receives one summed external/contact impulse. Actual native
+momenta and compensated kinetic change independently check the law endpoint and
+work. External work retains common-body motion: the analytically integrated free
+source work is corrected by `g dot (travel - free_travel)`, where `W g = a_drive`.
+It is never inferred from heat, numerical loss or rounded free endpoint storage.
+Static force transmission can accelerate both bodies with nonzero drive work and
+zero frictional heat. The full balance is `Delta K + Q_friction - W_external`.
+Bodies and retained mode publish together only after every original gate passes.
+
+Poses, arms, inertia, normal load and radius remain held. A conservative full-path
+normal-response bound refuses unsupported opening. Invariant directions retain
+exact constant-acceleration events; curved motion and curved capture retain the
+law's explicit first-order timestep approximation. Finite pose/normal evolution,
+changing source drive and general driven rate-weakening laws remain separate.
+Focused native tests cover analytic common-motion work, motor spin and split
+continuation, an independent full-body power/trajectory ODE, world/body-frame
+covariance, unrepresentable source work, atomic refusal and unaffected bodies.
+
 ## Native recoil from local-speed Hertz friction
 
 `tangential_friction::hertz::rate_dependent` advances the original
@@ -9996,3 +10023,51 @@ work. Cancellation is checked before and after constructing the immutable
 successor; foreign predecessor history refuses. Validation in this increment
 was source review, pinned formatting and recursive parsing, not an executed
 cross-crate native test or a finite-rotation/thermoelastic validation.
+
+### Held viscous kinetics on the original Maxwell graph
+
+HeldRelaxationKinetics supplies one nonnegative Kelvin multiplier per original
+connector and one positive relaxation-time ratio per original branch.
+PreparedRelaxationNetwork::new_with_kinetics and the corresponding moving
+entries apply these coefficients to the original reference laws. Each effective
+time and its reciprocal must remain finite and positive. The existing
+PassiveBushingMatrix::scaled owner admits each Kelvin form while retaining its
+Gram directions and coordinate scales; no matrix or memory factor is refitted.
+
+The effective Kelvin matrix supplies geometry preparation, full resistance,
+positive source rows and integrated passive-wrench observations consistently.
+The effective branch time supplies pHS resistance, independently positive
+Maxwell heat and the cached exact null-history decay/heat. Every elastic Gram
+row, original branch order and complete memory coordinate remains unchanged.
+Changing only these dissipative coefficients changes no stored elastic energy
+and introduces no parameter work. Original constructors and moving entries
+delegate to the same implementation with identity kinetics.
+
+The public allocation-free validate method checks the complete bank and all
+effective Kelvin forms, times and rates without preparing dense flow. It shares
+the preparation's coefficient admission helpers, so a thermal owner can admit
+its final refreshed endpoint coefficients without advancing body, history or
+clock. Prepared-source getters expose the actual effective Kelvin form and
+per-branch relaxation time without allocation. Extra cached times remain
+inside the existing complete native storage bound.
+
+Both source halves of a moving native interval use the same borrowed kinetic
+bank while retaining the existing full body/history/heat/work transaction.
+The composing material and thermal owners supply subsequent banks from their
+original calibrated reference laws; rates must not be compounded from earlier
+shifted results. This native layer supplies no temperature calibration,
+temperature-dependent stiffness, entropy model or history reinitialization.
+Coefficient variation within an interval still requires independent temporal
+refinement; exact held-source heat is not a thermal trajectory error bound.
+
+Verification: All five focused kinetics groups passed natively against the final source:
+bit-identical identity kinetics; nonuniform Kelvin and branch-clock scaling
+against the independent full native-coordinate momentum/history/heat/work ODE;
+changing clocks with original tiny null histories, zero-time storage invariance
+and no compounded shifting; matching coefficient admission and atomic retry;
+and both moving source halves with full tensors, native loads, mixed world/
+material-held actuation and cancellation. All nine pre-existing fixed/moving
+hereditary groups also passed (14/14 total). These bounded isolated runs use
+the actual native MBD/time, pHS and linear-algebra numerical sources without
+numerical substitutes; they are not a full workspace build. Pinned Rust
+formatting passed for the two modified modules and two new test files.

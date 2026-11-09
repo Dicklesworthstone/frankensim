@@ -11,7 +11,7 @@ fn load() -> RansHeatLoad<'static> {
     }
 }
 
-fn physical_heating(
+pub(super) fn physical_heating(
     solver: &RansSolver,
     grid: &RansChannelGrid,
     old: &RansFieldState,

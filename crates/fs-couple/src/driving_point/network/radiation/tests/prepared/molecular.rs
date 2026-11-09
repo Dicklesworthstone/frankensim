@@ -12,6 +12,8 @@ use fs_material::relaxation::{
 };
 use fs_thermochem::SpeciesId;
 
+mod fields;
+
 fn regional() -> RadiatingNetwork {
     let base = two_source_model();
     let media = NetworkMedia::new(

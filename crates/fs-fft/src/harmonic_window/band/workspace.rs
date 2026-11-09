@@ -148,6 +148,19 @@ impl UniformHarmonicBandRef<'_> {
         self.modes
     }
 
+    /// Unrotated basis coefficient with the prepared profile normalization.
+    ///
+    /// Consumers supply the original source-clock rotation and, for real
+    /// fields, even-real/odd-imaginary parity. Modal second moments retain
+    /// their `2*mode+1` weight. This exposes a linear coefficient so original
+    /// physical binary scales need not be rounded before field interference.
+    pub fn centered_coefficient_dd(self, mode: usize, source: usize) -> Result<Dd, WindowError> {
+        if mode >= self.modes || source >= self.source_count() {
+            return Err(WindowError::InvalidBandShape);
+        }
+        Ok(self.coefficients[mode * self.source_count() + source])
+    }
+
     /// Logical source projection terms plus one squared norm per mode.
     #[must_use]
     pub fn power_work(&self) -> usize {

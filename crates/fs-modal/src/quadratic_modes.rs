@@ -22,6 +22,10 @@ use fs_math::{c64::C64, det};
 /// Shared local-pole accuracy and resource options; reference rate is physical.
 pub use fs_la::nonlinear_eig::PoleOptions;
 
+mod polynomial;
+/// Full forced particular response on this same signed, nonsymmetric pencil.
+pub mod forced;
+
 mod response;
 pub use response::{
     PoleResponseOptions, PreparedQuadraticResponse, PreparedQuadraticSensitivities,
@@ -347,8 +351,7 @@ impl<'a> PreparedQuadraticModes<'a> {
             for j in 0..self.n {
                 let index = i * self.n + j;
                 let [m, c, k] = self.scaled.each_ref().map(|a| a[index]);
-                matrix[index] = s * (s.scale(m) + C64::from_re(c)) + C64::from_re(k);
-                derivative[index] = s.scale(m).scale(2.0) + C64::from_re(c);
+                (matrix[index], derivative[index]) = polynomial::entry(m,c,k,s);
             }
         }
         let radius = s.abs().max(self.options.spectral_scale);

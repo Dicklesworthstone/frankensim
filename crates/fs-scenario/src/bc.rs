@@ -144,7 +144,7 @@ pub enum Expectation {
     /// A value with exactly these SI exponents.
     Value(Dims),
     /// A legacy scalar/signal/profile or an explicitly typed scalar with these
-    /// dimensions. The pressure row also checks the exact physical semantics.
+    /// dimensions. Each physical role also checks its exact quantity semantics.
     ValueOrScalar(Dims),
     /// A legacy scalar/signal/profile or an explicitly typed Cartesian vector
     /// with these dimensions. Legacy values retain their wire meaning and do
@@ -202,9 +202,9 @@ pub fn expectation(physics: Physics, kind: BcKind) -> Expectation {
         (Physics::IncompressibleFlow, BcKind::PressureOutlet) => ValueOrScalar(dims::PRESSURE),
         (Physics::IncompressibleFlow, BcKind::Traction) => Value(dims::PRESSURE),
         (Physics::IncompressibleFlow, BcKind::WallNoSlip | BcKind::WallSlip) => NoValue,
-        (Physics::Thermal, BcKind::Dirichlet) => Value(dims::TEMPERATURE),
-        (Physics::Thermal, BcKind::Neumann) => Value(dims::HEAT_FLUX),
-        (Physics::Thermal, BcKind::Robin) => Value(dims::HTC),
+        (Physics::Thermal, BcKind::Dirichlet) => ValueOrScalar(dims::TEMPERATURE),
+        (Physics::Thermal, BcKind::Neumann) => ValueOrScalar(dims::HEAT_FLUX),
+        (Physics::Thermal, BcKind::Robin) => ValueOrScalar(dims::HTC),
         (Physics::Elasticity, BcKind::Dirichlet) => ValueOrVector(dims::DISPLACEMENT),
         (Physics::Elasticity, BcKind::Neumann) => Typed {
             kind: PayloadKind::Vector,
@@ -332,17 +332,27 @@ impl BoundaryCondition {
                 {
                     self.check_typed_payload(payload, PayloadKind::Scalar, Some(expected), ctx, out);
                     if let Payload::Scalar(value) = payload {
-                        if !crate::scalar::pressure_contract(value.meta().contract()) {
+                        let thermal = self.physics == Physics::Thermal;
+                        let admitted = if thermal {
+                            crate::scalar::thermal_contract(self.kind, value.meta().contract())
+                        } else {
+                            crate::scalar::pressure_contract(value.meta().contract())
+                        };
+                        if !admitted {
                             out.push(Violation {
-                                code: "bc-pressure-semantics",
-                                what: format!("{ctx}: fluid pressure requires Pa or static/instantaneous Pressure semantics"),
-                                fix: "declare fluid Pressure, not stress or an acoustic amplitude".to_string(),
+                                code: if thermal { "bc-thermal-semantics" } else { "bc-pressure-semantics" },
+                                what: format!("{ctx}: scalar quantity semantics do not match the physical boundary role"),
+                                fix: if thermal {
+                                    "declare absolute temperature for Dirichlet, outward heat flux for Neumann, or heat-transfer coefficient for Robin"
+                                } else {
+                                    "declare fluid Pressure, not stress or an acoustic amplitude"
+                                }.to_string(),
                             });
                         }
                         if value.meta().orientation() != OrientationParity::Even {
                             out.push(Violation {
-                                code: "bc-pressure-parity",
-                                what: format!("{ctx}: fluid pressure requires ordinary even scalar parity"),
+                                code: if thermal { "bc-thermal-parity" } else { "bc-pressure-parity" },
+                                what: format!("{ctx}: the boundary requires ordinary even scalar parity"),
                                 fix: "declare OrientationParity::Even".to_string(),
                             });
                         }

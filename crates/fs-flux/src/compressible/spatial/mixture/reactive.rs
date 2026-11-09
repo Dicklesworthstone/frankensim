@@ -4,9 +4,10 @@
 //! all three momenta. Chemistry/waves/chemistry use one actual accepted time
 //! interval; heat-release-induced CFL reductions restart the complete trial.
 //! Optional source-owned molecular half intervals add species diffusion,
-//! Fourier heat and full three-dimensional viscous work. Moving boundaries,
-//! resolved physical detonation thickness and a fully discrete entropy law
-//! remain separate capabilities.
+//! Fourier heat and full three-dimensional viscous work. The explicit moving
+//! entry composes these same sources with conservative ALE volumes. Resolved
+//! physical detonation thickness and a fully discrete entropy law remain
+//! separate capabilities.
 
 use super::super::{BoundarySide, StepControl};
 use super::forcing::{self, ForcingWorkspace3d};
@@ -29,7 +30,14 @@ pub use fs_gas::multicomponent::reactive::{
 };
 use fs_qty::{Time, Volume};
 
+mod moving;
 mod timed;
+pub use moving::MovingReactiveStepReport3d;
+mod inertial_walls;
+pub use inertial_walls::{
+    InertialWallLoad, InertialWallsControl, Piston, PistonError, ReactiveInertialWallsError,
+    ReactiveInertialWallsStep,
+};
 
 /// Bounded whole-interval restarts and original wave controls.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1144,6 +1152,9 @@ fn copy_physical(
         &source.reservoirs.finite,
         cancelled,
     )?;
+    // A discarded or previously accepted moving trial can leave the reusable
+    // frame on another geometry. Restore it with the accepted physical state.
+    target.grid = source.grid;
     target.time = source.time;
     target.last_step = source.last_step;
     Ok(())

@@ -65,10 +65,10 @@ pub use observation::{
     HeterogeneousSurfaceProbe, ProbeLocationLimits, SurfaceProbeLimits, TransientAcousticSample,
 };
 
-mod source;
+pub(super) mod source;
 pub use source::{MAX_VOLUME_SOURCES, VolumeVelocitySource};
 
-mod boundary_source;
+pub(super) mod boundary_source;
 pub use boundary_source::{BoundaryVelocitySource, MAX_BOUNDARY_SOURCES};
 
 mod boundary_admittance;

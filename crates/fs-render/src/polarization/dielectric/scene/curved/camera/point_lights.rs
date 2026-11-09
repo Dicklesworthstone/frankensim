@@ -43,7 +43,7 @@ use crate::polarization::dielectric::scene::curved::bundle::connection::{
 };
 use crate::polarization::dielectric::scene::curved::{CurvedPolarizedScene, CurvedTraceEvent, SceneMedium};
 use crate::polarization::dielectric::scene::PathTermination;
-use crate::polarization::dielectric::transport::PolarizationFrame;
+use crate::polarization::dielectric::transport::{PolarizationFrame, PolarizedBeam};
 use fs_exec::Cx;
 use fs_geom::Vec3;
 use fs_math::det;
@@ -362,6 +362,10 @@ impl<'a, 's, 'm, 'l> CurvedPointLightCameraScene<'a, 's, 'm, 'l> {
         self.camera
     }
 
+    pub(super) fn contains_source(&self, source: &PhotometricSource) -> bool {
+        self.branches.iter().any(|branch| core::ptr::eq(branch.source, source))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn sample_ray(
         &self,
@@ -415,9 +419,38 @@ impl<'a, 's, 'm, 'l> CurvedPointLightCameraScene<'a, 's, 'm, 'l> {
         settings: PointLightCameraSettings,
         surface_samples: impl FnMut(u32) -> [f64; 3],
     ) -> Result<PointLightCameraSample, PointLightCameraError> {
+        self.sample_with_modulation(cx,
+            || self.camera.launch(ray, wavelength_nm, initial_medium),
+            initial_medium, settings, surface_samples, |_| Ok(1.0))
+    }
+
+    /// Retain the complete steady real-lens Stokes beam without requesting a
+    /// group clock. Active steady coatings remain in the original lens owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_sequential_ray_with_samples(
+        &self, cx: &Cx<'_>, optical: &crate::camera::SequentialCameraBeam,
+        initial_medium: usize, settings: PointLightCameraSettings,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
+    ) -> Result<PointLightCameraSample, PointLightCameraError> {
+        self.sample_with_modulation(cx,
+            || self.camera.launch_sequential(optical, initial_medium),
+            initial_medium, settings, surface_samples, |_| Ok(1.0))
+    }
+
+    // Launch and source intensity are the only adapter seams. Native branch
+    // solves, source Stokes, camera samples and all connection work stay here.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn sample_with_modulation(
+        &self, cx: &Cx<'_>,
+        launch: impl FnOnce() -> Result<PolarizedBeam, CameraRadianceError>,
+        initial_medium: usize, settings: PointLightCameraSettings,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
+        mut source_scale: impl FnMut(PointSourcePath<'_>) -> Result<f64, PointLightCameraError>,
+    ) -> Result<PointLightCameraSample, PointLightCameraError> {
         cx.checkpoint()?;
         validate_settings(settings)?;
-        let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
+        let beam = launch()?;
+        let wavelength_nm = beam.wavelength_nm();
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
         let mut emission = SurfaceEmission::new(self.camera, initial_index);
         let mut fixtures = FixtureContributions::new(self, settings, initial_index);
@@ -431,8 +464,12 @@ impl<'a, 's, 'm, 'l> CurvedPointLightCameraScene<'a, 's, 'm, 'l> {
             &self.camera.spatial_volume_emitters,
             |event| match event {
                 CurvedTraceEvent::Arrival(path) => {
-                    emission.observe(path)?;
-                    fixtures.observe(cx, path)
+                    let scale = source_scale(PointSourcePath::Surface(path)).map_err(|error| {
+                        fixtures.error = Some(error);
+                        CurvedSceneError::NumericalRange
+                    })?;
+                    emission.observe_weighted_modulated(path, 1.0, scale)?;
+                    fixtures.observe_with_modulation(cx, path, &mut source_scale)
                 }
                 CurvedTraceEvent::Departure { path, .. } => {
                     emission.depart(path);
@@ -523,6 +560,17 @@ struct FixtureConnectionRequest<'p> {
     policy: BundleBranchPolicy<'p>,
 }
 
+/// Actual source event supplied only after original radiometry has validated
+/// a contributing connection. No receiver/object ID substitutes for a fixture.
+pub(super) enum PointSourcePath<'p> {
+    Surface(&'p CurvedPathResult),
+    Connected {
+        source: &'p PhotometricSource,
+        camera: &'p CurvedPathResult,
+        connection: &'p BundleConnection,
+    },
+}
+
 struct FixtureConnection {
     original: BundleConnection,
     work: ConnectionWork,
@@ -609,6 +657,17 @@ impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
         self.observe_with_connector(cx, path, &mut connector)
     }
 
+    fn observe_with_modulation(
+        &mut self, cx: &Cx<'_>, path: &CurvedPathResult,
+        source_scale: &mut impl FnMut(PointSourcePath<'_>) -> Result<f64, PointLightCameraError>,
+    ) -> Result<(), CurvedSceneError> {
+        let mut connector = ClearFixtureConnector { scene: self.owner.camera.scene };
+        self.add_contact_modulated(cx, path, &mut connector, source_scale).map_err(|error| {
+            self.error = Some(error);
+            CurvedSceneError::NumericalRange
+        })
+    }
+
     fn observe_with_connector(
         &mut self,
         cx: &Cx<'_>,
@@ -634,6 +693,19 @@ impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
         })
     }
 
+    fn add_contact_modulated(
+        &mut self, cx: &Cx<'_>, path: &CurvedPathResult,
+        connector: &mut impl FixtureConnector,
+        source_scale: &mut impl FnMut(PointSourcePath<'_>) -> Result<f64, PointLightCameraError>,
+    ) -> Result<(), PointLightCameraError> {
+        let camera = self.owner.camera;
+        self.add_contact_with_response_modulated(cx, path, connector,
+            |receiver, connection, binding| {
+                let response = receiver.response(camera, connection, binding)?;
+                Ok((response.normal, response.factor))
+            }, source_scale)
+    }
+
     // Keep the original shooting, photometry, source polarization and work
     // accounting shared. A Smith response has no marginal proposal PDF.
     fn add_contact_with_response(
@@ -641,8 +713,18 @@ impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
         cx: &Cx<'_>,
         path: &CurvedPathResult,
         connector: &mut impl FixtureConnector,
+        evaluate: impl FnMut(SurfaceReceiver, &BundleConnection, usize)
+            -> Result<(Vec3, f64), PointLightCameraError>,
+    ) -> Result<(), PointLightCameraError> {
+        self.add_contact_with_response_modulated(cx, path, connector, evaluate, &mut |_| Ok(1.0))
+    }
+
+    fn add_contact_with_response_modulated(
+        &mut self, cx: &Cx<'_>, path: &CurvedPathResult,
+        connector: &mut impl FixtureConnector,
         mut evaluate: impl FnMut(SurfaceReceiver, &BundleConnection, usize)
             -> Result<(Vec3, f64), PointLightCameraError>,
+        source_scale: &mut impl FnMut(PointSourcePath<'_>) -> Result<f64, PointLightCameraError>,
     ) -> Result<(), PointLightCameraError> {
         let contact = path
             .last_contact()
@@ -765,29 +847,48 @@ impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
                 return Err(CameraRadianceError::Unresolved(PathTermination::Extinguished).into());
             }
             let local_index = phase_index(beam.medium(), wavelength_nm)?;
-            let contribution = if receiver.is_rough() {
-                directional_fixture_contribution(
-                    beam.power().i,
-                    self.initial_index,
-                    local_index,
-                    response_factor,
-                    irradiance,
-                    connection.log_scattering_survival,
-                )?
-            } else {
-                fixture_contribution(
-                    beam.power().i,
-                    self.initial_index,
-                    local_index,
-                    response_factor,
-                    irradiance,
-                    connection.log_scattering_survival,
-                )?
-            };
+            let scale = source_scale(PointSourcePath::Connected {
+                source: branch.source, camera: path, connection: &connection.original,
+            })?;
+            let contribution = modulated_fixture_contribution(
+                beam.power().i, self.initial_index, local_index,
+                response_factor, irradiance, connection.log_scattering_survival,
+                scale, !receiver.is_rough(),
+            )?;
             self.radiance = nonnegative(self.radiance + contribution)?;
         }
         Ok(())
     }
+}
+
+// Source history multiplies calibrated intensity, never connection density or
+// survival. Preserve every original steady operation at unit scale; other
+// positive scales join the logarithmic product before range is decided.
+#[allow(clippy::too_many_arguments)]
+fn modulated_fixture_contribution(
+    prefix: f64, initial_index: f64, local_index: f64, factor: f64,
+    irradiance: f64, log_survival: f64, scale: f64, diffuse: bool,
+) -> Result<f64, PointLightCameraError> {
+    if scale == 1.0 {
+        return if diffuse {
+            fixture_contribution(prefix, initial_index, local_index, factor, irradiance, log_survival)
+        } else {
+            directional_fixture_contribution(prefix, initial_index, local_index, factor, irradiance, log_survival)
+        };
+    }
+    nonnegative(scale)?;
+    if scale == 0.0 { return Ok(0.0); }
+    let ratio = initial_index / local_index;
+    let response = if diffuse { factor / core::f64::consts::PI } else { factor };
+    let value = prefix * (ratio * ratio) * (response * irradiance)
+        * det::exp(log_survival) * scale;
+    if value.is_finite() && value > 0.0 { return Ok(value); }
+    let logarithm = det::ln(prefix) + 2.0 * (det::ln(initial_index) - det::ln(local_index))
+        + det::ln(factor) + det::ln(irradiance) + log_survival + det::ln(scale)
+        - if diffuse { det::ln(core::f64::consts::PI) } else { 0.0 };
+    let value = det::exp(logarithm);
+    if value.is_finite() && value > 0.0 { Ok(value) }
+    else { Err(PointLightCameraError::NumericalRange) }
 }
 
 // The original polarized BSDF already owns all local angular/Fresnel factors.

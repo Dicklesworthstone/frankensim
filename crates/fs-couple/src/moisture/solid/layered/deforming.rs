@@ -19,9 +19,15 @@ use crate::moisture::layered::MoistureLayeredMetric;
 
 #[path = "deforming/atmosphere.rs"]
 mod atmosphere;
+#[path = "deforming/solution.rs"]
+mod solution;
 pub use atmosphere::{
     MoistureSpatialAtmosphereCandidate, MoistureSpatialAtmosphereControls,
     MoistureSpatialAtmosphereReport,
+};
+pub use solution::{
+    MoistureSpatialPairedSolutionCandidate, MoistureSpatialPairedSolutionControls,
+    MoistureSpatialPairedSolutionReport,
 };
 
 // One counter follows every RH trial and nonlinear geometry evaluation.

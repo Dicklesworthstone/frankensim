@@ -57,12 +57,12 @@ pub use harmonic::{
     HarmonicPowerGradient, MAX_HARMONIC_TONES, ModalAffineTonePowerGradient,
     ModalAffineTonePowerSourceGradient, ModalAffineTonePullback, ModalAffineToneSourcePullback,
     ModalToneBudget, ModalTonePowerDerivative, ModalTonePowerFrequencyGradient,
-    ModalTonePowerGradient, ModalTonePowerGradientBudget, ModalTonePowerSourceGradient,
-    ModalTonePullback, ModalToneSensitivityBudget, ModalToneSensitivityFrame,
-    ModalToneSourcePullback, ModalToneSourceSensitivity, PreparedHarmonicForce,
-    PreparedHarmonicForceSensitivity, PreparedHarmonicPowerSensitivity, PreparedModalHarmonic,
-    PreparedModalTonePowerFrequencyGradient, PreparedModalTonePowerGradient,
-    PreparedModalToneSensitivity, PreparedModalTones,
+    ModalTonePowerGradient, ModalTonePowerGradientBudget, ModalTonePowerMechanicalGradient,
+    ModalTonePowerSourceGradient, ModalTonePullback, ModalToneSensitivityBudget,
+    ModalToneSensitivityFrame, ModalToneSourcePullback, ModalToneSourceSensitivity,
+    PreparedHarmonicForce, PreparedHarmonicForceSensitivity, PreparedHarmonicPowerSensitivity,
+    PreparedModalHarmonic, PreparedModalTonePowerFrequencyGradient, PreparedModalTonePowerGradient,
+    PreparedModalTonePowerMechanicalGradient, PreparedModalToneSensitivity, PreparedModalTones,
 };
 
 /// Maximum number of modes admitted by one runtime model.

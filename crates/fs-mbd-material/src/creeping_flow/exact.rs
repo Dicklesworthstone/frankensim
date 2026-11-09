@@ -161,13 +161,36 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         controls: ExactCreepingAffineStepControls,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ExactCreepingAffineStep, Error> {
+        poll(&mut cancelled)?;
+        self.admit_body(body)?;
+        self.step_exact_frame_with_affine_force(
+            body.frame(),
+            state,
+            wrench_before,
+            force_after_world,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Same physical flow for an already admitted current spherical frame.
+    /// Thermal owners retain geometry/source admission and momentum transfer.
+    pub(crate) fn step_exact_frame_with_affine_force(
+        &self,
+        frame: &PrincipalFrame,
+        state: RigidBodyState,
+        wrench_before: Wrench,
+        force_after_world: Vec3,
+        controls: ExactCreepingAffineStepControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ExactCreepingAffineStep, Error> {
         let ExactCreepingAffineStepControls {
             step: controls,
             minimum_force_variation_timescale_s,
         } = controls;
         if wrench_before.force_world == force_after_world {
-            let flow = self.step_exact_with_wrench(
-                body,
+            let flow = self.step_exact_frame_with_wrench(
+                frame,
                 state,
                 wrench_before,
                 controls,
@@ -178,7 +201,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
             let speed = |state: RigidBodyState| {
                 norm(
                     state
-                        .center_of_mass_velocity_world(body.properties())?
+                        .center_of_mass_velocity_world(frame.properties())?
                         .sub(self.ambient_velocity_world),
                 )
             };
@@ -196,26 +219,11 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
                 drive_diffusion_ratio: 0.0,
             });
         }
-        poll(&mut cancelled)?;
-        self.admit_body(body)?;
-        if !minimum_force_variation_timescale_s.is_finite()
-            || minimum_force_variation_timescale_s <= 0.0
-        {
-            return Err(Error::Invalid(
-                "a positive finite physical force-variation timescale is required",
-            ));
-        }
         let drive_diffusion_ratio =
-            finite(self.diffusion_time_s / minimum_force_variation_timescale_s)?;
-        if drive_diffusion_ratio > self.limits.maximum_diffusion_ratio {
-            return Err(Error::UnsteadyDrive {
-                diffusion_ratio: drive_diffusion_ratio,
-                maximum: self.limits.maximum_diffusion_ratio,
-            });
-        }
+            self.exact_drive_diffusion_ratio(minimum_force_variation_timescale_s)?;
         vector(force_after_world)?;
         let prepared = self.prepare_exact_frame(
-            body.frame(),
+            frame,
             state,
             wrench_before,
             controls,
@@ -254,7 +262,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         let displacement = components(dynamics.displacement_world).map(dd);
         let applied_work = dd(dynamics.applied_work_j) - force_work(buoyancy, displacement);
         let flow = self.finish_exact_frame(
-            body.frame(),
+            frame,
             state,
             dynamics,
             applied_work,
@@ -268,6 +276,30 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
             maximum_translation_reynolds_bound,
             drive_diffusion_ratio,
         })
+    }
+
+    /// Admit a changing source history at the CURRENT radius, independently
+    /// of numerical subdivision or rounded equality of local force samples.
+    pub(crate) fn exact_drive_diffusion_ratio(
+        &self,
+        minimum_force_variation_timescale_s: f64,
+    ) -> Result<f64, Error> {
+        if !minimum_force_variation_timescale_s.is_finite()
+            || minimum_force_variation_timescale_s <= 0.0
+        {
+            return Err(Error::Invalid(
+                "a positive finite physical force-variation timescale is required",
+            ));
+        }
+        let drive_diffusion_ratio =
+            finite(self.diffusion_time_s / minimum_force_variation_timescale_s)?;
+        if drive_diffusion_ratio > self.limits.maximum_diffusion_ratio {
+            return Err(Error::UnsteadyDrive {
+                diffusion_ratio: drive_diffusion_ratio,
+                maximum: self.limits.maximum_diffusion_ratio,
+            });
+        }
+        Ok(drive_diffusion_ratio)
     }
 
     /// Same native flow for a current, already admitted spherical configuration.

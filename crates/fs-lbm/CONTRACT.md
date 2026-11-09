@@ -1,3 +1,86 @@
+## Native full rigid-frame evolution
+
+`ForcedGrid3::try_new_with_rigid_frame_preserving_velocity` attaches the full
+instantaneous frame force without an initial half kick. Serial/pooled
+`advance_*_with_rigid_frame` and moving-wall variants evolve it in the original
+collision/stream transaction. For cell-center displacement `r = x - origin`,
+the non-Coriolis acceleration is
+`b = g - a_origin - alpha cross r - Omega cross (Omega cross r)`.
+The same admitted `RigidFrame3` position law and analytic skew inverse close
+`F_next = rho_next*(b_next - 2*Omega_next cross u_next)` with
+`rho_next*u_next = m_raw,next + F_next/2` after actual native transport and
+wall reflection. Endpoint terms run in the existing tiles, without another
+population buffer, source sweep or force iteration. The input acceleration
+vector becomes accepted force storage only after full physical admission.
+
+Caller-authored endpoint frame histories use lattice units and must supply
+consistent angular velocity/acceleration and body-acceleration components in
+frame axes. Grid and wall velocities are relative to those axes; no inertial
+initial-condition remap is inferred. A periodic axis requires both Omega and
+alpha parallel to it. Pure translation is compatible with all periodic axes;
+zero frame motion retains the existing acceleration path exactly.
+
+Original wall impulse, torque and relative wall work remain separate from
+frame sources. Coriolis endpoint power vanishes; this does not assert a global
+inertial energy balance or finite-inertia vessel dynamics. Refusal/cancellation
+publishes no population, source history or step count. Focused regressions
+exercise changing frames on D3Q19/D3Q27 collision families, actual transported
+density/velocity, relative wall balances, free fall, zero-frame replay,
+periodic-axis refusal, late Mach refusal and cancelled transaction replay.
+
+## Transient reservoir work on the original source-caloric Stokes clock
+
+The existing `march_natural_convection_with_enthalpy_and_viscous_heat`
+entries, including implicit material endpoints and material solids, now admit
+one opposed Pressure/Outlet pair alongside walls/symmetry. The physical-heating
+opt-in selects the same normal-traction, zero-tangential-trace mouth operator
+as steady pressure-work Stokes. Original spatial profiles, scalar programs,
+independent plane histories and component-local pressure references remain
+the mechanical pressure owners. Source thermodynamic pressure is unchanged.
+
+The native backward-Euler momentum row remains intact. Each mirrored mouth
+row represents a physical half cell: its kinetic storage and time loss use
+one half of the mirrored `rho*area*width` inertia. Interior masses retain
+their original arithmetic. Signed reservoir work is sampled independently
+from the actual projected flux and the same centered boundary pressures used
+by momentum. The transient sampler consumes already-centered solver pressure;
+the steady public-field sampler subtracts its current physical datum exactly
+once. Large changing common pressure cannot enter either work calculation.
+
+`UnsteadyHeatingAudit::pressure_work_j` retains the signed contribution of
+each original plane, and `supplied_pressure_work_j` retains the total.
+Positive work supplies the fluid; negative work returns energy to a reservoir
+during braking. Per-step and accumulated accounts close wall + body +
+reservoir work + bounded continuity defect against physical dissipation,
+actual native kinetic change and the separately reported backward-Euler loss.
+Only original molecular/drag dissipation enters the existing caloric source.
+Pressure supply, kinetic energy and numerical loss are never added as heat.
+
+The same signed projected face field carries the original thermal inflow and
+backflow enthalpy. Explicit source epochs, jointly converged implicit epochs,
+nonlinear source h(T), material solids, contacts and thermostats retain their
+existing owners. Failed admission, physical balance, source evaluation or
+cancellation returns no accepted march or partial account. No new public
+march wrapper, per-step pressure graph walk or pressure-field reconstruction
+is introduced.
+
+This is constant-density unsteady Stokes with the existing Reynolds ceiling
+at most 0.1. Momentum convection and advected kinetic energy are omitted
+together; the extension makes no Navier–Stokes open-energy claim. BDF2, SGS,
+moving reservoir tangential traces, multiple opening axes, finite reservoir
+storage and source EOS pressure evolution remain outside this heating owner.
+The separate retained phase-momentum entry keeps its closed-domain admission.
+
+Validation in this session: five tests compiled and passed using the exact
+production kinetic-increment and extensive heating-account source, including
+signed reservoir acceleration/braking and atomic balance/overflow refusal.
+All eight changed Rust files parsed with the pinned formatter. Added native
+regression definitions exercise graded-mouth inertia on all axes, changing
+common-pressure invariance, and explicit/implicit source-caloric reversal with
+physical heat and thermal backflow. These full native solver/thermal tests
+were not compiled or executed because the fs-exec/asupersync dependency
+closure is unavailable.
+
 ## Native implicit Coriolis evolution
 
 `ForcedGrid3::try_new_with_coriolis_preserving_velocity` attaches the local
@@ -61,9 +144,9 @@ before changing either the scalar factor or offsets. Invalid roles, overflow
 or cancellation publish no partial load/march. Programs control at most six
 whole boundary planes; separate openings on one plane share its program.
 They prescribe incompressible mechanical pressure, not thermodynamic source
-pressure, compressibility or reservoir storage. Existing physical-heating
-admission is unchanged; transient open-reservoir viscous heating is not
-enabled by these controls.
+pressure, compressibility or reservoir storage. Selecting these controls alone
+does not enable physical heating. The source-caloric viscous-heating opt-in
+separately admits one opposed traction-mouth pair under its BE Stokes gates.
 
 Focused regressions exercise production reference arithmetic, independent
 all-axis flow reversal and thermal backflow under BE/BDF2, three-opening
@@ -3556,3 +3639,135 @@ with the original source-conductivity option, both SDIRK2 physical-stage roots,
 and changing prescribed latent inventory. Changed Rust sources were parsed
 with the pinned compiler's formatter. Full native integration execution was
 unavailable: DSR and RCH are absent and the local workspace has no build space.
+
+## Original-source Fourier integrals in conservative NSF gas energy
+
+`ThermochemicalNsfGas::with_source_conductivity` explicitly selects
+`NsfSourceConductivityControl` for the existing NSF total-energy owner.
+The original midpoint conductivity remains the default. Source mode retains
+the original selected pure-species viscosity/conductivity lines and WMS
+mixture, with an explicit quadrature tolerance and maximum actual WMS
+evaluations per face or complete nonlinear boundary root.
+
+All molecular Fourier paths use the selected convention: internal fluid faces,
+prescribed reservoir faces, global/local isothermal walls, finite ambient
+films, characteristic energy fluxes, and the characteristic incoming-enthalpy
+temperature root. A film or characteristic root prepares its source interval
+once and shares its actual point-query allowance across every temperature
+candidate. An exactly isothermal source face uses one original point query;
+it does not construct an artificial epsilon bracket.
+
+For a wide internal face, source mode applies the native temperature stencil
+to the original conductivity primitive: `[27*integral(Ti,Tj,k) -
+integral(Tm,Tp,k)]/24`, with the native unit conversion and one held face
+pressure. It does not multiply a single secant conductivity by the wide
+temperature gradient. The original SGS contribution retains its separate
+temperature-gradient convention and original molecular/model ratio admission.
+Fallback and boundary faces retain their original full-/half-cell lengths,
+orientation and single-valued flux ownership.
+
+The held pressure is the existing actual adjacent-pressure interpolation for
+that face; walls retain the adjacent gas pressure. Source preparation requires
+continuous admitted support over the complete involved temperature bracket.
+The native sensible internal-energy chart, density-derived pressure, pressure
+force, enthalpy-flow work, stress work and conservative total-energy flux remain
+with the same NSF owner. There is no extra heat deposit or change of species
+composition. Default midpoint expressions and arithmetic order are preserved;
+the selected source policy enters the state identity.
+
+Quadrature error is an embedded conductivity estimate, not a certified energy
+bound or additional physical joules. The original face-pressure interpolation,
+spatial discretization, fixed-composition and continuum/Mach limitations remain;
+this does not establish new general fourth-order accuracy for variable pressure
+or experimental flow validation. Existing native cancellation checkpoints
+remain, with additional face/root work bounded by the declared evaluation,
+quadrature and source-knot limits.
+
+Five G0/G1/G3/G5 native regression groups cover exact piecewise-integral
+interior fluxes, finite-film/isothermal equivalence, characteristic upstream
+enthalpy counted once, source/work refusal with rollback, and formation-datum
+and worker-count replay. All eight changed Rust files were syntax-parsed with
+the pinned formatter. Independent scalar integral and film-root calculations
+were checked; the native regression groups were not executed because DSR/RCH
+and a usable local build graph/space were unavailable.
+
+## Bounded midpoint transport of SGS history
+
+`LagrangianAdvection` explicitly selects original Euler tracing or midpoint
+RK2 with a positive authored u8 substep count. The same policy transports
+signed stress, independent heat and common-component contraction histories,
+including the advected stress used by adaptive momentum memory. Each midpoint
+stage samples the current physical velocity through the original positive
+trilinear stencil. Channel half-cells interpolate to the actual moving-wall
+velocity. Accepted history retains its original positive interpolation and
+is remapped only once at the final departure, so trajectory substeps do not
+introduce repeated history-remap diffusion.
+
+Every stage and accumulated per-axis travel must satisfy the existing
+departure limit, and every sampled stage must remain inside physical walls.
+Each characteristic trace is bounded to 255 substeps and at most 510 velocity
+evaluations, with cancellation checks at most eight substeps apart. Joint
+histories may each trace their departure. Selection precedes the first accepted
+sample; trial forks preserve the policy, and rejected work cannot publish
+history, clock or normalization. No full-grid arrays are added and original
+numerical byte budgets remain unchanged.
+
+NSF exposes explicit policy selection through
+`with_lagrangian_thermal_sgs_advection` and reports it through
+`lagrangian_sgs_advection`. The original builder retains Euler. Existing
+force-corrected current velocity, moving-wall refresh, independent relaxation
+times, molecular wall heat, endpoint transactions and reversible native
+intervals remain authoritative.
+
+All 106 actual-source shared SGS tests passed in the focused native build
+using complete production math and the original model, Vreman, tangent and
+dynamic subtrees without numerical or runtime stubs. Six new groups include
+independent curved-characteristic and actual emitted-SGS-viscosity refinement,
+policy agreement across stress/heat/species, moving-wall interpolation on all
+axes, physical-unit changes, unchanged payloads and every-poll cancellation
+with exact retry, including adaptive momentum memory. One additional NSF
+runtime regression is authored and format-parsed but was not compiled or
+executed in this environment.
+
+Second-order convergence applies to smooth frozen-field trajectories only.
+Unsteady velocity/source sampling, history-remap accuracy and the complete
+physical solver are not upgraded or newly qualified. This adds no inflow
+memory, large-Courant qualification, SGS-energy model or DNS calibration.
+
+## Porous momentum and native thermal velocity epochs
+
+`ResistanceOpenGrid3::{prepare_thermal_field, step_serial_with_thermal,
+step_serial_with_thermal_tensor_diffusion}` binds the original D3Q7 thermal
+carrier to the accepted implicit porous momentum owner. No independent
+force-only step or replacement advection/collision kernel is introduced.
+The returned `ResistanceOpenThermalStep3` retains the complete original
+resistance momentum/work receipt and independent thermal balance.
+
+Opening thermal collision, flux-history correction, reservoir transport and
+the first source half-kick use each cell's accepted physical velocity,
+including its retained implicit half force. The porous owner stages its
+original collision/pull, constitutive endpoint solve, complete wall/periodic
+account and work admission once. The closing heat half-kick then uses the
+staged populations and their actual resolved endpoint force. Raw population
+momentum and a frozen opening force are not substituted for that velocity.
+
+Scalar relaxation and uniform/per-cell SPD diffusivity tensors retain the
+existing thermal definitions. Thermal tensors are resolved in grid axes
+independently of porous principal axes. Existing reservoir/backflow data,
+stationary finite-wall conduction, immersed storage, temperature/kinetic
+budgets and moving-finite-wall refusals remain authoritative. Geometry,
+solid masks, boundary ownership and accepted step counts must agree.
+
+The composition reuses all native and thermal scratch. Populations,
+force/drag history, finite thermal state, flux history, both receipts and
+time counters publish only after every momentum, thermal and cancellation
+gate succeeds. A thermal refusal after staging momentum preserves both
+accepted states and permits the same deterministic retry.
+
+This is passive fixed-reference-capacity heat transport under held porous
+laws and fixed geometry. The caller's heat source remains explicit; relative
+drag dissipation, skeleton work and mechanical wall work are reported without
+an inferred fluid/solid heat partition. Temperature-dependent resistance,
+porosity evolution, compressible enthalpy and a total transported fluid-energy
+balance are outside this composition. The source ordering is the existing
+partitioned native ordering, without a new temporal-order claim.

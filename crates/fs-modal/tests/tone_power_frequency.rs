@@ -5,6 +5,9 @@ use fs_modal::time::{
     ModalToneSensitivityBudget, PreparedHarmonicForce, PreparedModalTones,
 };
 
+#[path = "tone_power_frequency/affine.rs"]
+mod affine;
+
 fn state(q: f64, v: f64) -> ModalAcousticState {
     ModalAcousticState {
         displacement_m_sqrt_kg: q,
@@ -477,6 +480,8 @@ fn physical_units_and_all_admissions_leave_original_bank_reusable() {
     assert!(
         affine
             .prepare_power_frequency_gradients(cold, query, || false)
+            .unwrap()
+            .gradients_mode(0, state(0.0, 0.0), &[0.0; 2], &[0.0; 2], || false)
             .is_err()
     );
     let prepared = bank

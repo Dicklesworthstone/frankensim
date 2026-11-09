@@ -48,6 +48,7 @@ pub fn model_with_temperature_limit(
         k_scale,
         temperature_max,
         0.001,
+        None,
     );
     from_packs(
         &[SpeciesPackRef {
@@ -65,8 +66,8 @@ pub fn model_with_temperature_limit(
 /// Water's thermal coefficients remain a synthetic coupling fixture.
 #[allow(dead_code)]
 pub fn moist_model(water_fraction: f64, a7: f64) -> ThermochemicalGasModel {
-    let carrier = source_packs("manufactured", 0.028, a7, 250000.0, 1.0, 700.0, 0.001);
-    let water = source_packs("water", 0.01801528, a7, 250000.0, 1.0, 700.0, 0.001);
+    let carrier = source_packs("manufactured", 0.028, a7, 250000.0, 1.0, 700.0, 0.001, None);
+    let water = source_packs("water", 0.01801528, a7, 250000.0, 1.0, 700.0, 0.001, None);
     from_packs(
         &[
             SpeciesPackRef {
@@ -94,7 +95,7 @@ pub fn moist_model(water_fraction: f64, a7: f64) -> ThermochemicalGasModel {
 #[allow(dead_code)]
 pub fn constant_cp_model(a7: f64, k_scale: f64) -> ThermochemicalGasModel {
     let (species, nasa9, transport) =
-        source_packs("manufactured", 0.028, a7, 250000.0, k_scale, 700.0, 0.0);
+        source_packs("manufactured", 0.028, a7, 250000.0, k_scale, 700.0, 0.0, None);
     from_packs(
         &[SpeciesPackRef {
             species: &species,
@@ -107,6 +108,27 @@ pub fn constant_cp_model(a7: f64, k_scale: f64) -> ThermochemicalGasModel {
     .unwrap()
 }
 
+/// Explicit original piecewise-affine conductivity for nonlinear face tests.
+#[allow(dead_code)]
+pub fn conductivity_model(
+    a7: f64,
+    pressure_max: f64,
+    knots: Vec<(f64, f64)>,
+) -> ThermochemicalGasModel {
+    let (species, nasa9, transport) = source_packs(
+        "manufactured", 0.028, a7, pressure_max, 1.0, 700.0, 0.001, Some(knots),
+    );
+    from_packs(
+        &[SpeciesPackRef {
+            species: &species,
+            nasa9: Some(&nasa9),
+            transport: Some((&transport, MaterialPropertySelection::SingleClaimOnly)),
+        }],
+        Composition::new(CompositionBasis::MoleFraction, vec![1.0]).unwrap(),
+        None,
+    ).unwrap()
+}
+
 fn source_packs(
     name: &str,
     molar_mass: f64,
@@ -115,6 +137,7 @@ fn source_packs(
     k_scale: f64,
     temperature_max: f64,
     cp_slope: f64,
+    conductivity: Option<Vec<(f64, f64)>>,
 ) -> (
     NormalizedSpeciesPack,
     NormalizedModelPack,
@@ -263,11 +286,20 @@ fn source_packs(
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::new(name, dims),
-                value: PropertyValue::Curve {
-                    abscissa: "pressure".into(),
-                    abscissa_dims: Pressure::DIMS,
-                    knots: vec![(1000.0, 0.5 * base), (250000.0, 1.5 * base)],
-                    dims,
+                value: if name == "thermal_conductivity" && conductivity.is_some() {
+                    PropertyValue::Curve {
+                        abscissa: "temperature".into(),
+                        abscissa_dims: Temperature::DIMS,
+                        knots: conductivity.clone().unwrap(),
+                        dims,
+                    }
+                } else {
+                    PropertyValue::Curve {
+                        abscissa: "pressure".into(),
+                        abscissa_dims: Pressure::DIMS,
+                        knots: vec![(1000.0, 0.5 * base), (250000.0, 1.5 * base)],
+                        dims,
+                    }
                 },
                 validity: ValidityDomain::unconstrained()
                     .with_quantity(

@@ -7,6 +7,8 @@
 //! is not endpoint arrest: a coarse phase that would assist slip or spin at an
 //! endpoint refuses and requires the trajectory owner to refine its interval.
 
+/// Powered shear/spin trajectories with original external force and torque work.
+pub mod driven;
 /// Simultaneous original Hertz patches with shared finite-body recoil.
 pub mod multiple;
 /// Original speed-dependent Hertz traction with finite-body recoil.

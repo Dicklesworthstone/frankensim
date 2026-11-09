@@ -287,7 +287,9 @@ pub use unsteady::{
 /// SGS, wall-heat and source-material endpoint marches.
 /// Version 13 admits independent pressure-opening histories while centering
 /// each component on its own moving reservoir reference.
-pub const CHT_SEMANTICS_VERSION: u32 = 13;
+/// Version 14 closes source-caloric BE Stokes heating with opposed reservoir
+/// traction, physical mouth kinetic storage and signed pressure work.
+pub const CHT_SEMANTICS_VERSION: u32 = 14;
 
 /// Structured refusal from any stage of the conjugate pipeline.
 #[derive(Debug, Clone, PartialEq)]

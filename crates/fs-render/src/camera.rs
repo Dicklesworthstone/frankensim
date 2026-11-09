@@ -57,7 +57,7 @@ mod sequential;
 pub use sequential::{
     LensCoating, LensCoatingLayer, LensGhostPath, LensSurface, ParaxialFocusSensitivity,
     SequentialCameraBeam, SequentialCameraRay, SequentialLens, SequentialLensFocus,
-    SequentialLensRay,
+    SequentialLensRay, SequentialProjection, SequentialProjectionError, SequentialProjectionOptions,
 };
 
 const PI: f64 = core::f64::consts::PI;

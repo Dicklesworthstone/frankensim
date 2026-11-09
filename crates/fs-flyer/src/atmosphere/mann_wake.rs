@@ -25,9 +25,10 @@ use fs_atmo::mann_field::wall::MannPlaneWall;
 use fs_atmo::{FlatSiteLogLaw, FlowSample};
 use fs_vpm::farfield3d::FarField;
 use fs_vpm::filament3d::{
-    FilamentWake, Refusal, SelfInducedShed, WakeAdaptiveReport, WakeAdvectionReport, WakeBoundary,
-    WakeTimeSpec, WakeTreeSpec,
+    FilamentWake, Refusal, RigidWakeBoundary, SelfInducedShed, WakeAdaptiveReport,
+    WakeAdvectionReport, WakeBoundary, WakeTimeSpec, WakeTreeSpec,
 };
+use fs_vpm::images3d::ImagePlane;
 
 /// Physical observation and shared conditional-path identity.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -320,7 +321,7 @@ impl MannWakeWind {
             near.ticks,
             near.cert.shed_hz,
             config,
-            boundary,
+            boundary.image_plane,
             sampling,
             budget,
             cancelled,
@@ -390,7 +391,7 @@ impl MannWakeWind {
             near.ticks,
             near.cert.shed_hz,
             config,
-            boundary,
+            boundary.image_plane,
             sampling,
             budget,
             cancelled,
@@ -414,13 +415,122 @@ impl MannWakeWind {
         )
     }
 
+    /// Advance the native near wake under a rigidly moving lifting line and
+    /// the same conditioned atmospheric history as [Self::shed_near].
+    ///
+    /// The line's translating pivot and angular velocity use the common z-up
+    /// Mann/VPM world frame. Its pivot is at the start of this shedding
+    /// interval; advance that pivot before the next call when it translates.
+    /// Each native stage evaluates the rigid source geometry and the physical
+    /// wind at its actual free-vertex position and elapsed time. No line
+    /// material velocity is added to the atmospheric fluid velocity.
+    ///
+    /// Exact or affine sampling, native direct/tree midpoint or adaptive
+    /// integration, budgets and joint publication retain their original owners.
+    /// Direct midpoint retains the established DirectMidpoint report convention:
+    /// its native field-work receipt is not included in this adapter report;
+    /// atmospheric counters and the native work limit still apply.
+    ///
+    /// # Errors
+    /// Existing wind/wake admission, work or cancellation refusals and native
+    /// rigid-motion/path-travel refusals. Neither accepted owner changes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn shed_near_rigid(
+        &mut self,
+        near: &mut FilamentWake,
+        gamma: &[f64],
+        config: SelfInducedShed,
+        boundary: RigidWakeBoundary,
+        integration: MannWakeIntegration,
+        sampling: MannWakeSampling,
+        budget: MannWakeBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MannWakeStepReport, Refusal> {
+        self.advance_interval(
+            near.ticks,
+            near.cert.shed_hz,
+            config,
+            boundary.image_plane,
+            sampling,
+            budget,
+            cancelled,
+            |variation, cancelled| match integration {
+                MannWakeIntegration::Midpoint { tree } => near
+                    .shed_self_induced_with_rigid_line(
+                        gamma, config, boundary, tree, variation, cancelled,
+                    )
+                    .map(|report| match tree {
+                        Some(_) => MannWakeAdvection::TreeMidpoint(report),
+                        None => MannWakeAdvection::DirectMidpoint,
+                    }),
+                MannWakeIntegration::Adaptive { time, tree } => near
+                    .shed_self_induced_adaptive_with_rigid_line(
+                        gamma, config, time, boundary, tree, variation, cancelled,
+                    )
+                    .map(MannWakeAdvection::Adaptive),
+            },
+        )
+    }
+
+    /// The rigid-line counterpart of [Self::shed_hybrid_with_sampling].
+    /// All retained near/far vertices observe one conditioned atmospheric
+    /// history while the original native owner samples the same analytic rigid
+    /// line at every fixed, accepted or rejected stage. Shared vertices,
+    /// circulation, cores, image handling and far-cell rebuilding are unchanged.
+    ///
+    /// Motion/frame, explicit sampling and direct-report conventions are those
+    /// of [Self::shed_near_rigid]. Retain the supplied motion and sampling policy
+    /// alongside the native near/far and atmospheric checkpoints for replay.
+    ///
+    /// # Errors
+    /// Existing coupled wind/wake and rigid-line refusals. Near wake, far wake
+    /// and accepted wind clock all remain unchanged on every failure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn shed_hybrid_rigid(
+        &mut self,
+        near: &mut FilamentWake,
+        far: &mut FarField,
+        gamma: &[f64],
+        config: SelfInducedShed,
+        boundary: RigidWakeBoundary,
+        integration: MannWakeIntegration,
+        sampling: MannWakeSampling,
+        budget: MannWakeBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MannWakeStepReport, Refusal> {
+        self.advance_interval(
+            near.ticks,
+            near.cert.shed_hz,
+            config,
+            boundary.image_plane,
+            sampling,
+            budget,
+            cancelled,
+            |variation, cancelled| match integration {
+                MannWakeIntegration::Midpoint { tree } => far
+                    .shed_self_induced_with_rigid_line(
+                        near, gamma, config, boundary, tree, variation, cancelled,
+                    )
+                    .map(|report| match tree {
+                        Some(_) => MannWakeAdvection::TreeMidpoint(report),
+                        None => MannWakeAdvection::DirectMidpoint,
+                    }),
+                MannWakeIntegration::Adaptive { time, tree } => far
+                    .shed_self_induced_adaptive_with_rigid_line(
+                        near, gamma, config, time, boundary, tree, variation, cancelled,
+                    )
+                    .map(MannWakeAdvection::Adaptive),
+            },
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn advance_interval(
         &mut self,
         wake_tick: u64,
         shed_hz: f64,
         config: SelfInducedShed,
-        boundary: WakeBoundary<'_>,
+        image_plane: Option<ImagePlane>,
         sampling: MannWakeSampling,
         budget: MannWakeBudget,
         mut cancelled: impl FnMut() -> bool,
@@ -458,7 +568,7 @@ impl MannWakeWind {
             .step()
             .checked_add(1)
             .ok_or_else(|| error("mann-wake-clock", "wind step overflows"))?;
-        let matching_wall = match (self.config.wall, boundary.image_plane) {
+        let matching_wall = match (self.config.wall, image_plane) {
             (None, None) => true,
             (Some(wall), Some(plane)) => {
                 wall.height_m() == plane.z0_m && config.ambient_velocity_mps[2] == 0.0

@@ -1215,6 +1215,43 @@ cover high-Q mass/stiffness/loss, descriptor RLC constraints, Maxwell strength
 and relaxation time, coupled mutual/gyroscopic/port changes, conjugate port
 scales `1e-120..1e120`, nonlinear total `dT`, exact antiresonance and admission.
 
+### Complete physical frequency and parameter jets
+
+`HarmonicFactor::response_with_frequency_curvature` returns the original
+response and its first two angular-frequency derivatives.
+`response_with_frequency_parameter_derivative` adds the complete physical
+parameter and mixed frequency/parameter response. Optional original-port source
+laws supply `u_omega`, `u_omegaomega`, `u_theta` and `u_omega_theta`
+independently; None means zero. Every original differential state, algebraic
+reaction and material history remains. The descriptor `E=diag(I_n_diff,0)`
+is fixed by this chart; material directions enter J/R/Q/G/T. Changing descriptor
+rank or coordinates and missing bias/material derivatives are not inferred.
+
+The implicit equations reuse one original scaled LU and its bounded residual
+refinement. Curvature solves
+`A*x_omegaomega=G*u_omegaomega+2*i*E*x_omega`; the mixed right-hand side is
+`L_theta*x_omega+i*E*x_theta+G_theta*u_omega+G*u_omega_theta`.
+Exactly five state solves supply the complete jet: primal, first/second
+frequency, parameter and mixed. The parameter owner reuses the original primal.
+Recovery preserves `Q*x_omega_theta+Q_theta*x_omega` and both output-map
+terms `G^T*e_omega_theta+G_theta^T*e_omega` through compensated contractions.
+
+Independent cycle-mean storage, per-port physical work, aggregate source work
+and original R/T work carry complete curvature and mixed product rules. Signed
+nonlinear incremental T work remains distinct from total biased-source heat.
+Selected-port source sums remain unrounded for independent boundary accounts.
+Curvature admits three ordinary work scores and ordinary payload plus
+`256*n+128*ports` bytes; the complete jet admits six scores and plus
+`512*n+256*ports`. Failed admission, cancellation, arithmetic or residual
+checks publish no partial jet and preserve the reusable factor.
+
+Focused native tests compare
+independently differentiated oscillator, Maxwell and Kirchhoff-constrained RLC
+laws, source delay/gain, conjugate-port changes, coherent notches with internal
+energy, weak work, nonlinear total T/dT, capacity refusal and cancellation.
+High-Q stationary work can be ill-conditioned despite a small backward residual;
+these residuals do not certify forward accuracy or exact zero derivatives.
+
 ### Original nonlinear coefficient-direction contractions
 
 `PortHamiltonian::prepare_parameter_direction` binds complete original
@@ -4050,3 +4087,32 @@ nonsymmetric R is retained without positivity repair or the symmetric
 effort/input derivatives; the source owner does not infer that chain.
 A focused actual-source regression preserves weak net work amid opposing
 `2^54` terms and checks the original nonsymmetric resistance algebra.
+
+## Nonlinear material memory in exact-linear propagation
+
+The original Maxwell storage exposes a quadratic split for explicitly declared
+at-most-quadratic strain maps. It retains the base storage's complete Q and
+each original normalized memory's z²/2. The full
+k*epsilon(x)²/2-sqrt(k)*epsilon(x)*z coupling remains in the existing implicit
+nonlinear remainder; complete storage is marked nonquadratic. No tangent
+linearization, frozen strain, constitutive update or memory elimination is
+introduced. Linear projection arms keep their original Q arithmetic and exact
+flag.
+
+The existing mapped polynomial work, complete gradient and continuous tangent
+remain authoritative, including geometric stress curvature and every
+mechanical/history cross derivative. PreparedNonlinearZoh propagates only its
+declared linear block exactly and integrates the same positive R along its
+accepted held-remainder trajectory. The ordinary discrete-gradient path and
+its heat are unchanged. Strain maps without an explicit quadratic declaration
+still refuse this split.
+Caller-owned material bands, strain/history domains, nonlinear refinement and
+the existing complete-state/cache limits remain binding.
+
+Three new native groups and the original linear-Q bit/energy/force parity test
+passed with actual pHS numerical owners. They cover exact held-strain recovery
+through dt/tau=20, independent coupled two-mode/two-arm response, positive
+heat and signed work with a 40/80/160-step refinement ladder, opaque-map
+refusal, cancellation and retry. The retained finest-response gate is 3e-5;
+native execution exited zero. This bounded source run does not claim a full
+workspace or physical membrane-host test.

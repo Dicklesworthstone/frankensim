@@ -7,6 +7,12 @@ pub(crate) type StrainParts = [[Dd; 2]; 6];
 type Spectrum = [(f64, i32); 2];
 type Channel = [Sum; 2];
 
+mod field;
+use field::FieldModes;
+
+#[cfg(test)]
+mod interference_tests;
+
 /// Shared temporal cache. Original material factors are supplied per point.
 pub(crate) struct HarmonicEnergySpectrum {
     duration: f64,
@@ -16,6 +22,7 @@ pub(crate) struct HarmonicEnergySpectrum {
     end: Vec<[Dd; 2]>,
     gram: Vec<[Dd; 2]>,
     means: Vec<Dd>,
+    field_modes: Option<FieldModes>,
 }
 
 fn project_parts(row: &[f64; 6], strain: &StrainParts, spectrum: Spectrum) -> Channel {
@@ -38,16 +45,26 @@ impl HarmonicEnergySpectrum {
     }
 
     pub(crate) fn new_at_clock(
-        frequencies: &[f64], start_s: Dd, duration_s: f64,
+        frequencies: &[f64],
+        start_s: Dd,
+        duration_s: f64,
     ) -> Result<Self, WindowError> {
         if !start_s.hi.is_finite() || !start_s.lo.is_finite() {
             return Err(WindowError::InvalidWindow);
         }
         let start_s = Dd::from_pair(start_s.hi, start_s.lo);
-        Self::at_clock(frequencies, HarmonicWindow::from_clock_dd(start_s, duration_s)?, start_s)
+        Self::at_clock(
+            frequencies,
+            HarmonicWindow::from_clock_dd(start_s, duration_s)?,
+            start_s,
+        )
     }
 
-    fn at_clock(frequencies: &[f64], window: HarmonicWindow, start_s: Dd) -> Result<Self, WindowError> {
+    fn at_clock(
+        frequencies: &[f64],
+        window: HarmonicWindow,
+        start_s: Dd,
+    ) -> Result<Self, WindowError> {
         if frequencies.len() > MAX_SPECTRUM_LINES {
             return Err(WindowError::Unrepresentable);
         }
@@ -80,10 +97,14 @@ impl HarmonicEnergySpectrum {
             // windows without subtracting two rounded endpoint phases.
             means.push(window.product_kernel(omega, 0.0)?.centered_gram_dd()[0]);
         }
-        let mut gram = Vec::with_capacity(frequencies.len() * frequencies.len());
-        for &a in frequencies {
-            for &b in frequencies {
-                gram.push(window.product_kernel(a, b)?.centered_gram_dd());
+        let field_modes = FieldModes::new(frequencies, window)?;
+        let mut gram = Vec::new();
+        if field_modes.is_none() {
+            gram.reserve_exact(frequencies.len() * frequencies.len());
+            for &a in frequencies {
+                for &b in frequencies {
+                    gram.push(window.product_kernel(a, b)?.centered_gram_dd());
+                }
             }
         }
         Ok(Self {
@@ -94,6 +115,7 @@ impl HarmonicEnergySpectrum {
             end,
             gram,
             means,
+            field_modes,
         })
     }
 
@@ -104,6 +126,10 @@ impl HarmonicEnergySpectrum {
                     + 3 * core::mem::size_of::<[Dd; 2]>()
                     + core::mem::size_of::<Dd>())
             + self.gram.len() * core::mem::size_of::<[Dd; 2]>()
+            + self
+                .field_modes
+                .as_ref()
+                .map_or(0, FieldModes::heap_payload_bytes)
     }
 
     fn centered(
@@ -120,6 +146,10 @@ impl HarmonicEnergySpectrum {
     }
 
     fn product_integral(&self, a: &[Channel], b: &[Channel], denominator: &[f64], total: &mut Sum) {
+        if let Some(modes) = &self.field_modes {
+            modes.add_product(a, b, self.duration, denominator, total);
+            return;
+        }
         let n = self.frequencies.len();
         for i in 0..n {
             for j in 0..n {
@@ -183,6 +213,31 @@ impl HarmonicEnergySpectrum {
                 );
             }
             let values = self.centered(row, strains, spectrum);
+            if self.field_modes.is_some() {
+                // For the actual real spring, Delta q is the original field
+                // increment sum_i omega_i*T*sinc(omega_i*T/2)*Im(q_i(mid)).
+                // Keep every factor outside physical units and interfere the
+                // increments before their storage product. This remains a
+                // physical Uniform interval, not a shaped detector exposure.
+                let mut increment = Sum::default();
+                for (i, value) in values[..n].iter().enumerate() {
+                    weighted(
+                        &mut increment,
+                        value[1],
+                        dd(self.means[i]),
+                        Dd::ONE,
+                        &[self.frequencies[i], self.duration],
+                        &[],
+                    );
+                }
+                let mut average = endpoints[0];
+                add(&mut average, scaled(increment, Dd::from_f64(0.5)));
+                weighted(&mut totals[2], increment, average, Dd::ONE, &[], &[]);
+                if let Some(tau) = tau {
+                    self.product_integral(&values[..n], &values[..n], &[tau], &mut totals[3]);
+                }
+                continue;
+            }
             for i in 0..n {
                 if constant.fraction != Dd::ZERO {
                     weighted(
@@ -306,7 +361,7 @@ impl HarmonicEnergySpectrum {
                     project_parts(&unit, &strains[j], [(0.0, 0), (self.frequencies[j], 0)]),
                     self.center[j],
                 );
-                if constant.fraction != Dd::ZERO {
+                if self.field_modes.is_none() && constant.fraction != Dd::ZERO {
                     weighted(
                         total,
                         constant,
@@ -316,6 +371,16 @@ impl HarmonicEnergySpectrum {
                         &[],
                     );
                 }
+            }
+            if let Some(modes) = &self.field_modes {
+                weighted(
+                    total,
+                    constant,
+                    modes.mean(&rate[..n]),
+                    Dd::ONE,
+                    &[self.duration],
+                    &[],
+                );
             }
             self.product_integral(&stress[..n], &rate[..n], &[], total);
         }

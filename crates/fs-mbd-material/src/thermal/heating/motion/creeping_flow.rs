@@ -11,10 +11,10 @@
 pub mod heat_exchange;
 
 mod exact;
-pub use exact::HeatedExactCreepingControls;
+pub use exact::{HeatedCreepingAffineForce, HeatedExactCreepingControls};
 
 use super::*;
-use crate::creeping_flow::exact::ExactCreepingStepControls;
+use crate::creeping_flow::exact::{ExactCreepingAffineStepControls, ExactCreepingStepControls};
 use crate::creeping_flow::{CreepingFlowError, CreepingLoad, CreepingSphere, CreepingStepControls};
 use fs_material::fluid_transport::FluidTransport;
 
@@ -45,6 +45,9 @@ pub struct HeatedCreepingAudit {
     pub viscous_heat_j: f64,
     /// Signed work supplied by maintaining the original background flow [J].
     pub background_work_j: f64,
+    /// Integrated external COM-force work [J], excluding gravity, buoyancy,
+    /// fluid resistance and configuration work. Zero for unforced entries.
+    pub applied_work_j: f64,
     /// Buoyancy potential rho_fluid*V*g dot x_COM [J], with the same world-origin
     /// datum as native gravity. This unbounded reservoir has no pressure datum.
     pub buoyancy_potential_before_j: f64,
@@ -60,10 +63,17 @@ pub struct HeatedCreepingAudit {
     pub numerical_energy_change_j: f64,
     pub absolute_numerical_energy_change_j: f64,
     /// Thermal + mechanical + buoyancy storage + fluid loss, less external
-    /// heat, maintained-flow work, configuration work and numerical defect [J].
+    /// heat, maintained-flow and external-force work, configuration work and numerical defect [J].
     pub combined_residual_j: f64,
     /// Largest admitted fluid/body diffusion ratio, including updated endpoints.
     pub maximum_diffusion_ratio: f64,
+    /// Largest fluid-diffusion / declared force-variation timescale ratio,
+    /// including updated-radius endpoints. Zero for an unforced or held drive.
+    pub maximum_drive_diffusion_ratio: f64,
+    /// Largest admitted translational Reynolds bound over mechanical intervals
+    /// and updated-radius endpoints. Affine intervals use their complete-path
+    /// conservative bound, which may exceed the actual peak.
+    pub maximum_translation_reynolds_bound: f64,
 }
 
 impl<'a> HeatedRigidBody<'a> {
@@ -165,7 +175,9 @@ impl<'a> HeatedRigidBody<'a> {
             ));
         }
         stepper.validate()?;
-        if matches!(stepper, CreepingStepper::Exact(_)) && sphere.rotational_lift_enabled() {
+        if matches!(stepper, CreepingStepper::Exact(_) | CreepingStepper::ExactAffine(..))
+            && sphere.rotational_lift_enabled()
+        {
             return Err(HeatedMotionError::Invalid(
                 "exact creeping motion does not admit selected rotational lift",
             ));
@@ -182,8 +194,11 @@ impl<'a> HeatedRigidBody<'a> {
             stepper,
             viscous_heat_j: 0.0,
             background_work_j: 0.0,
+            applied_work_j: 0.0,
             displacement_work_j: 0.0,
             maximum_diffusion_ratio: 0.0,
+            maximum_drive_diffusion_ratio: 0.0,
+            maximum_translation_reynolds_bound: 0.0,
         })
     }
 
@@ -199,11 +214,20 @@ impl<'a> HeatedRigidBody<'a> {
         let work = observer.motion.work;
         let viscous_heat_j = observer.viscous_heat_j;
         let background_work_j = observer.background_work_j;
+        let applied_work_j = observer.applied_work_j;
         let displacement_parameter_work_j = observer.displacement_work_j;
         let maximum_diffusion_ratio = observer
             .maximum_diffusion_ratio
             .max(before.diffusion_ratio)
             .max(after.diffusion_ratio);
+        let maximum_drive_diffusion_ratio = observer
+            .maximum_drive_diffusion_ratio
+            .max(before.drive_diffusion_ratio)
+            .max(after.drive_diffusion_ratio);
+        let maximum_translation_reynolds_bound = observer
+            .maximum_translation_reynolds_bound
+            .max(before.load.translation_reynolds)
+            .max(after.load.translation_reynolds);
         let next = Self {
             thermal,
             motion: observer.motion,
@@ -216,6 +240,7 @@ impl<'a> HeatedRigidBody<'a> {
                 + (after.buoyancy_potential_j - before.buoyancy_potential_j)
                 + viscous_heat_j
                 - background_work_j
+                - applied_work_j
                 - work.parameter_j
                 - work.numerical_j,
         )?;
@@ -232,6 +257,7 @@ impl<'a> HeatedRigidBody<'a> {
                 load_after: after.load,
                 viscous_heat_j,
                 background_work_j,
+                applied_work_j,
                 buoyancy_potential_before_j: before.buoyancy_potential_j,
                 buoyancy_potential_after_j: after.buoyancy_potential_j,
                 parameter_work_j: work.parameter_j,
@@ -241,6 +267,8 @@ impl<'a> HeatedRigidBody<'a> {
                 absolute_numerical_energy_change_j: work.absolute_numerical_j,
                 combined_residual_j,
                 maximum_diffusion_ratio,
+                maximum_drive_diffusion_ratio,
+                maximum_translation_reynolds_bound,
             },
         ))
     }
@@ -251,6 +279,7 @@ struct CreepingSnapshot {
     load: CreepingLoad,
     buoyancy_potential_j: f64,
     diffusion_ratio: f64,
+    drive_diffusion_ratio: f64,
 }
 
 struct CreepingExpansion<'a, 'm, 'f, F: FluidTransport + ?Sized> {
@@ -259,8 +288,11 @@ struct CreepingExpansion<'a, 'm, 'f, F: FluidTransport + ?Sized> {
     stepper: CreepingStepper,
     viscous_heat_j: f64,
     background_work_j: f64,
+    applied_work_j: f64,
     displacement_work_j: f64,
     maximum_diffusion_ratio: f64,
+    maximum_drive_diffusion_ratio: f64,
+    maximum_translation_reynolds_bound: f64,
 }
 impl<F: FluidTransport + ?Sized> Clone for CreepingExpansion<'_, '_, '_, F> {
     fn clone(&self) -> Self {
@@ -270,8 +302,11 @@ impl<F: FluidTransport + ?Sized> Clone for CreepingExpansion<'_, '_, '_, F> {
             stepper: self.stepper,
             viscous_heat_j: self.viscous_heat_j,
             background_work_j: self.background_work_j,
+            applied_work_j: self.applied_work_j,
             displacement_work_j: self.displacement_work_j,
             maximum_diffusion_ratio: self.maximum_diffusion_ratio,
+            maximum_drive_diffusion_ratio: self.maximum_drive_diffusion_ratio,
+            maximum_translation_reynolds_bound: self.maximum_translation_reynolds_bound,
         }
     }
 }
@@ -294,11 +329,13 @@ impl<'f, F: FluidTransport + ?Sized> CreepingExpansion<'_, '_, 'f, F> {
             sphere.load_frame(&self.motion.principal, self.motion.state, cancelled)
         })?;
         let (_, diffusion_ratio) = sphere.timescales_frame(&self.motion.principal)?;
+        let drive_diffusion_ratio = self.stepper.drive_diffusion_ratio(&sphere)?;
         Ok(CreepingSnapshot {
             radius_m: sphere.radius_m(),
             load,
             buoyancy_potential_j: sphere.buoyancy_potential_j(self.motion.state)?,
             diffusion_ratio,
+            drive_diffusion_ratio,
         })
     }
 }
@@ -307,8 +344,11 @@ impl<F: FluidTransport + ?Sized> DepositionObserver for CreepingExpansion<'_, '_
     fn begin(&mut self) -> Result<(), Self::Error> {
         self.viscous_heat_j = 0.0;
         self.background_work_j = 0.0;
+        self.applied_work_j = 0.0;
         self.displacement_work_j = 0.0;
         self.maximum_diffusion_ratio = 0.0;
+        self.maximum_drive_diffusion_ratio = 0.0;
+        self.maximum_translation_reynolds_bound = 0.0;
         self.motion.begin()
     }
     fn event(
@@ -347,6 +387,7 @@ impl<F: FluidTransport + ?Sized> DepositionObserver for CreepingExpansion<'_, '_
                 &self.motion.principal,
                 self.motion.state,
                 dt_s,
+                [start_s, thermal.time_s()],
                 cancelled,
             )
         })?;
@@ -375,10 +416,18 @@ impl<F: FluidTransport + ?Sized> DepositionObserver for CreepingExpansion<'_, '_
         }
         self.viscous_heat_j = finite(self.viscous_heat_j + step.viscous_heat_j)?;
         self.background_work_j = finite(self.background_work_j + step.background_work_j)?;
+        self.applied_work_j = finite(self.applied_work_j + step.applied_work_j)?;
         self.maximum_diffusion_ratio = self
             .maximum_diffusion_ratio
             .max(step.diffusion_ratio)
             .max(after.diffusion_ratio);
+        self.maximum_drive_diffusion_ratio = self
+            .maximum_drive_diffusion_ratio
+            .max(after.drive_diffusion_ratio);
+        self.maximum_translation_reynolds_bound = self
+            .maximum_translation_reynolds_bound
+            .max(step.maximum_translation_reynolds_bound)
+            .max(after.load.translation_reynolds);
         checkpoint()?;
         Ok(())
     }
@@ -390,6 +439,7 @@ impl<F: FluidTransport + ?Sized> DepositionObserver for CreepingExpansion<'_, '_
 enum CreepingStepper {
     Midpoint(HeatedCreepingControls),
     Exact(HeatedExactCreepingControls),
+    ExactAffine(HeatedExactCreepingControls, exact::AffineForceWindow),
 }
 
 struct CreepingInterval {
@@ -397,7 +447,9 @@ struct CreepingInterval {
     energy_defect_j: f64,
     viscous_heat_j: f64,
     background_work_j: f64,
+    applied_work_j: f64,
     diffusion_ratio: f64,
+    maximum_translation_reynolds_bound: f64,
 }
 
 impl CreepingStepper {
@@ -414,7 +466,8 @@ impl CreepingStepper {
                 }
                 controls.maximum_step_energy_defect_j
             }
-            Self::Exact(controls) => controls.maximum_step_energy_defect_j,
+            Self::Exact(controls) | Self::ExactAffine(controls, _) =>
+                controls.maximum_step_energy_defect_j,
         };
         if !budget.is_finite() || budget <= 0.0 {
             return Err(HeatedMotionError::Invalid(
@@ -424,12 +477,23 @@ impl CreepingStepper {
         Ok(())
     }
 
+    fn drive_diffusion_ratio<F: FluidTransport + ?Sized>(
+        self,
+        sphere: &CreepingSphere<'_, F>,
+    ) -> Result<f64, CreepingFlowError> {
+        match self {
+            Self::ExactAffine(_, force) => force.drive_diffusion_ratio(sphere),
+            Self::Midpoint(_) | Self::Exact(_) => Ok(0.0),
+        }
+    }
+
     fn step<F: FluidTransport + ?Sized>(
         self,
         sphere: &CreepingSphere<'_, F>,
         frame: &PrincipalFrame,
         state: RigidBodyState,
         duration_s: f64,
+        time_window_s: [f64; 2],
         cancelled: impl FnMut() -> bool,
     ) -> Result<CreepingInterval, CreepingFlowError> {
         match self {
@@ -449,7 +513,10 @@ impl CreepingStepper {
                     energy_defect_j: step.energy_defect_j,
                     viscous_heat_j: step.viscous_heat_j,
                     background_work_j: step.background_work_j,
+                    applied_work_j: step.applied_work_j,
                     diffusion_ratio: step.diffusion_ratio,
+                    maximum_translation_reynolds_bound: step.load_before.translation_reynolds
+                        .max(step.load_after.translation_reynolds),
                 })
             }
             Self::Exact(controls) => {
@@ -467,7 +534,42 @@ impl CreepingStepper {
                     energy_defect_j: step.energy_defect_j,
                     viscous_heat_j: step.viscous_heat_j,
                     background_work_j: step.background_work_j,
+                    applied_work_j: step.applied_work_j,
                     diffusion_ratio: step.diffusion_ratio,
+                    maximum_translation_reynolds_bound: step.load_before.translation_reynolds
+                        .max(step.load_after.translation_reynolds),
+                })
+            }
+            Self::ExactAffine(controls, force) => {
+                let [before, after] = force.endpoints(time_window_s)?;
+                let affine = sphere.step_exact_frame_with_affine_force(
+                    frame,
+                    state,
+                    Wrench {
+                        force_world: before,
+                        torque_body: fs_mbd::Vec3::ZERO,
+                    },
+                    after,
+                    ExactCreepingAffineStepControls {
+                        step: ExactCreepingStepControls {
+                            duration_s,
+                            maximum_energy_defect_j: controls.maximum_step_energy_defect_j,
+                        },
+                        minimum_force_variation_timescale_s:
+                            force.minimum_variation_timescale_s(),
+                    },
+                    cancelled,
+                )?;
+                let step = affine.flow;
+                Ok(CreepingInterval {
+                    state_after: step.dynamics.state_after,
+                    energy_defect_j: step.energy_defect_j,
+                    viscous_heat_j: step.viscous_heat_j,
+                    background_work_j: step.background_work_j,
+                    applied_work_j: step.applied_work_j,
+                    diffusion_ratio: step.diffusion_ratio,
+                    maximum_translation_reynolds_bound:
+                        affine.maximum_translation_reynolds_bound,
                 })
             }
         }

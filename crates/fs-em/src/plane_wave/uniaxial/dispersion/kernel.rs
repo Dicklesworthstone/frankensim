@@ -8,6 +8,8 @@ use super::super::kernel::{Incidence, UniaxialMode, UniaxialWaveKind, binary_sca
 use crate::plane_wave::dispersion::IncidenceFrequencyConstraint;
 use fs_math::{c64::C64, dd::Dd, det};
 
+pub(super) mod boundary;
+
 const C0: f64 = 299_792_458.0;
 type Result<T> = core::result::Result<T, &'static str>;
 

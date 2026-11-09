@@ -8,6 +8,9 @@
 //! the same two-cell harmonic viscosity and physical half-edge volume. Material
 //! SGS uses the native mouth-edge closure in that total viscosity; resistance
 //! fractions split molecular heat from modeled transfer without heating it twice.
+//! The source-caloric BE Stokes owner reuses these mouths with their physical
+//! half-cell inertia and signed reservoir work. The steady entry below has
+//! no kinetic storage; neither entry admits momentum convection.
 use super::*;
 
 /// Quasisteady source-viscosity flow through opposed reservoir-traction mouths.

@@ -254,6 +254,287 @@ fn common_ion_dosing_preserves_solid_then_drives_finite_rate_precipitation() {
 }
 
 #[test]
+fn short_salt_dissolution_after_dilution_stays_within_the_declared_ph_domain() {
+    let mut options = aqueous_options();
+    options.ph_bracket = [Dimensionless::new(6.0), Dimensionless::new(8.0)];
+    let rate = MineralSurfaceRateV1::new(1e-4, MineralGrowthPolicyV1::ExistingSolidOnly).unwrap();
+    let model = MineralKineticsV1::from_salt(salt(T, 4e-6), rate).unwrap();
+    let original = KineticElectrolyteSolubilitySolution::new(
+        model,
+        basis(),
+        Volume::new(VOLUME),
+        Amount::new(0.01),
+        Amount::new(0.1),
+        vec![(FAMILY.into(), Amount::new(0.04))],
+        vec![],
+        options,
+        || false,
+    )
+    .unwrap();
+    let diluted = original.with_solvent_volume_m3(2.0 * VOLUME).unwrap();
+    assert_eq!(diluted.dissolved_cation(), original.dissolved_cation());
+    assert_eq!(diluted.solid_amount(), original.solid_amount());
+    assert_eq!(diluted.state().amount_at_unit_activity(), Amount::new(2.0));
+    near(diluted.aqueous().ph.value(), 7.0, 1e-12);
+    near(diluted.state().log_saturation_ratio().unwrap().value().exp(), 0.125, 1e-12);
+
+    // The full-dissolution endpoint has pH 8.04134 and is outside this declared
+    // pH window. A short local step must not require that unreachable trial state.
+    assert!(matches!(
+        diluted.model().prepare(
+            Amount::new(0.11),
+            Amount::new(0.0),
+            vec![(FAMILY.into(), Amount::new(0.24))],
+            vec![],
+            Amount::new(2.0),
+            options,
+            || false,
+        ),
+        Err(AcidBaseError::OutsideBracket)
+    ));
+    let mut control = controls();
+    control.aqueous = options;
+    control.initial_step = Time::new(0.001);
+    control.maximum_step = Time::new(0.001);
+    control.extent_absolute_tolerance = Amount::new(1e-16);
+    let advanced = diluted.advance(Time::new(0.001), control, || false).unwrap();
+    let endpoint = advanced.solution();
+
+    // Independent charge-cubic speciation plus RK4 integration of
+    // d(n_Ca)/dt = 1e-4 * (1 - a_Ca*a_CN^2/4e-6), with n_ref = 2 mol.
+    // The tolerances include the accepted implicit half-step truncation error.
+    near(endpoint.dissolved_cation().value(), 0.010000087499835936, 1e-12);
+    near(endpoint.solid_amount().value(), 0.09999991250016406, 1e-12);
+    near(endpoint.aqueous().ph.value(), 7.00000379990097, 2e-10);
+    assert!((6.0..=8.0).contains(&endpoint.aqueous().ph.value()));
+    assert_eq!(endpoint.component_total(), original.component_total());
+    assert_eq!(endpoint.family_totals(), original.family_totals());
+    assert_eq!(endpoint.state().options().ph_bracket, options.ph_bracket);
+    assert!(std::ptr::eq(endpoint.model().source(), original.model().source()));
+    assert!(std::ptr::eq(endpoint.species(), original.species()));
+    check_salt_balances(endpoint);
+}
+
+#[test]
+fn short_hydrolysis_after_dosing_stays_within_the_declared_ph_domain() {
+    let mut options = aqueous_options();
+    options.ph_bracket = [Dimensionless::new(6.0), Dimensionless::new(8.0)];
+    let rate = MineralSurfaceRateV1::new(1e-6, MineralGrowthPolicyV1::ExistingSolidOnly).unwrap();
+    let model = MineralKineticsV1::from_hydrolysis(hydrolysis(T, 1e-9), rate).unwrap();
+    let original = KineticElectrolyteSolubilitySolution::new(
+        model,
+        basis(),
+        Volume::new(2.0 * VOLUME),
+        Amount::new(2e-6),
+        Amount::new(1e-4),
+        vec![],
+        vec![SpectatorIon {
+            species: id("Cl[-](aq)"),
+            charge: -1,
+            amount: Amount::new(4e-6),
+        }],
+        options,
+        || false,
+    )
+    .unwrap();
+    // Dose the explicitly declared aqueous Ca/Cl pools, retaining actual solid.
+    let dosed = original
+        .with_dissolved_analytical_totals(
+            Amount::new(1e-5),
+            &[],
+            &[Amount::new(2e-5)],
+            || false,
+        )
+        .unwrap();
+    assert_eq!(dosed.solid_amount(), original.solid_amount());
+    near(dosed.component_total().value(), 1.1e-4, 1e-18);
+    near(dosed.aqueous().ph.value(), 7.0, 1e-12);
+    near(dosed.state().log_saturation_ratio().unwrap().value().exp(), 0.5, 1e-12);
+
+    // Exhausting the solid would produce pH 10.0000004, outside [6,8].
+    // The actual short-time trajectory only reaches about pH 7.00010855.
+    assert!(matches!(
+        dosed.model().prepare(
+            Amount::new(1.1e-4),
+            Amount::new(0.0),
+            vec![],
+            dosed.spectators().to_vec(),
+            Amount::new(2.0),
+            options,
+            || false,
+        ),
+        Err(AcidBaseError::OutsideBracket)
+    ));
+    let mut control = controls();
+    control.aqueous = options;
+    control.initial_step = Time::new(1e-4);
+    control.maximum_step = Time::new(1e-4);
+    control.extent_absolute_tolerance = Amount::new(1e-17);
+    let advanced = dosed.advance(Time::new(1e-4), control, || false).unwrap();
+    let endpoint = advanced.solution();
+
+    // Independent water/charge quadratic and RK4 integration of
+    // d(n_Ca)/dt = 1e-6 * (1 - a_Ca*1e-9/a_H^2), with n_ref = 2 mol.
+    near(endpoint.dissolved_cation().value(), 1.0000049987375e-5, 2e-14);
+    near(endpoint.aqueous().ph.value(), 7.000108546204506, 5e-8);
+    assert!(endpoint.solid_amount().value() < dosed.solid_amount().value());
+    assert!((6.0..=8.0).contains(&endpoint.aqueous().ph.value()));
+    assert_eq!(endpoint.component_total(), dosed.component_total());
+    assert_eq!(endpoint.spectators(), dosed.spectators());
+    assert_eq!(endpoint.state().options().ph_bracket, options.ph_bracket);
+    assert!(std::ptr::eq(endpoint.model().source(), original.model().source()));
+    assert!(std::ptr::eq(endpoint.species(), original.species()));
+    near(
+        endpoint.dissolved_cation().value() + endpoint.solid_amount().value(),
+        dosed.component_total().value(),
+        1e-18,
+    );
+}
+
+#[test]
+fn stiff_precipitation_publishes_and_continues_positive_dissolved_traces() {
+    // Independent charge equations and saturation products give the three
+    // limiting formula-equivalent amounts below. Each is much smaller than
+    // an ulp of its initial dissolved donor, so extent subtraction erases it.
+    let cases = [
+        ("cation-limited salt", 0.01, Some(0.04), 1e-30, 5.011217930852647e-22),
+        ("family-limited salt", 0.04, Some(0.02), 1e-60, 2.8867561572004e-30),
+        ("hydrolysis", 0.01, None, 1e20, 4.0000000002e-24),
+    ];
+    for (label, dissolved, family, equilibrium_constant, reference) in cases {
+        let family_limited = family.is_some_and(|amount| 0.5 * amount < dissolved);
+        let rate = MineralSurfaceRateV1::new(0.01, MineralGrowthPolicyV1::ExistingSolidOnly).unwrap();
+        let model = match family {
+            Some(_) => MineralKineticsV1::from_salt(salt(T, equilibrium_constant), rate),
+            None => MineralKineticsV1::from_hydrolysis(hydrolysis(T, equilibrium_constant), rate),
+        }
+        .unwrap();
+        let spectators = if family.is_none() {
+            vec![SpectatorIon {
+                species: id("Cl[-](aq)"),
+                charge: -1,
+                amount: Amount::new(0.02),
+            }]
+        } else {
+            vec![]
+        };
+        let original = KineticElectrolyteSolubilitySolution::new(
+            model,
+            basis(),
+            Volume::new(VOLUME),
+            Amount::new(dissolved),
+            Amount::new(0.1),
+            family.map(|amount| vec![(FAMILY.into(), Amount::new(amount))]).unwrap_or_default(),
+            spectators,
+            aqueous_options(),
+            || false,
+        )
+        .unwrap();
+        let mut control = controls();
+        control.initial_step = Time::new(1.0);
+        control.maximum_step = Time::new(1.0);
+        control.amount_absolute_tolerance = Amount::new(1e-20);
+        control.extent_absolute_tolerance = Amount::new(1e-12);
+        let advanced = original.advance(Time::new(1.0), control, || false).unwrap();
+        let continued = advanced.solution().advance(Time::new(1.0), control, || false).unwrap();
+        for endpoint in [advanced.solution(), continued.solution()] {
+            let pool = if family_limited {
+                endpoint.dissolved_family().unwrap().value()
+            } else {
+                endpoint.dissolved_cation().value()
+            };
+            let trace = if family_limited { 0.5 * pool } else { pool };
+            assert!(trace > 0.0 && trace < f64::EPSILON * 0.01, "{label}");
+            near(trace / reference, 1.0, 5e-8);
+            near(endpoint.state().log_saturation_ratio().unwrap().value().exp(), 1.0, 5e-8);
+
+            // Check the actual published particles, including both acid-family
+            // forms when the family supplies the remaining trace.
+            let names: &[&str] = if family_limited { &[HC, CN] } else { &[CA] };
+            let published: f64 = names
+                .iter()
+                .map(|name| {
+                    let index = endpoint.species().iter().position(|species| species == &id(name)).unwrap();
+                    endpoint.solution().solute_moles()[index]
+                })
+                .sum();
+            assert!(published > 0.0, "{label}");
+            near(published / pool, 1.0, 8.0 * f64::EPSILON);
+            assert_eq!(endpoint.component_total(), original.component_total());
+            assert_eq!(endpoint.family_totals(), original.family_totals());
+            assert_eq!(endpoint.spectators(), original.spectators());
+            assert!(std::ptr::eq(endpoint.model().source(), original.model().source()));
+            assert!(std::ptr::eq(endpoint.species(), original.species()));
+            near(
+                endpoint.dissolved_cation().value() + endpoint.solid_amount().value(),
+                original.component_total().value(),
+                2e-14,
+            );
+            if family.is_some() {
+                check_salt_balances(endpoint);
+            } else {
+                near(endpoint.aqueous().ph.value(), 1.69897000432516, 1e-10);
+            }
+        }
+
+        if label == "cation-limited salt" {
+            // Also start directly at the independent saturation reference:
+            // its force is within numerical activity uncertainty, unlike a
+            // just-accepted implicit root that can retain a resolved drive.
+            let at_reference = advanced
+                .solution()
+                .with_dissolved_analytical_totals(
+                    Amount::new(reference),
+                    &[Amount::new(0.02 + 2.0 * reference)],
+                    &[],
+                    || false,
+                )
+                .unwrap();
+            let maintained = at_reference.advance(Time::new(1.0), control, || false).unwrap();
+            near(maintained.solution().dissolved_cation().value() / reference, 1.0, 5e-8);
+            near(
+                maintained.solution().state().log_saturation_ratio().unwrap().value().exp(),
+                1.0,
+                5e-8,
+            );
+            assert_eq!(maintained.solution().component_total(), at_reference.component_total());
+            assert_eq!(maintained.solution().family_totals(), at_reference.family_totals());
+            assert!(std::ptr::eq(maintained.solution().model().source(), original.model().source()));
+        }
+    }
+}
+
+#[test]
+fn strict_short_equilibrium_window_uses_its_finite_motion_bound() {
+    let original = salt_material(0.01, 0.1, 0.04, MineralGrowthPolicyV1::ExistingSolidOnly);
+    let mut control = controls();
+    control.initial_step = Time::new(1e-4);
+    control.maximum_step = Time::new(1e-4);
+    control.relative_tolerance = Dimensionless::new(0.0);
+    control.amount_absolute_tolerance = Amount::new(1e-16);
+    control.extent_absolute_tolerance = Amount::new(1e-16);
+
+    // The independently authored equilibrium is pH 7 and Omega 1. Its
+    // numerical activity uncertainty can fail an all-future displacement
+    // bound while still resolving this short finite window to 1e-16 mol.
+    let advanced = original.advance(Time::new(1e-4), control, || false).unwrap();
+    let endpoint = advanced.solution();
+    near(endpoint.dissolved_cation().value(), original.dissolved_cation().value(), 1e-16);
+    near(endpoint.solid_amount().value(), original.solid_amount().value(), 1e-16);
+    near(
+        endpoint.dissolved_family().unwrap().value(),
+        original.dissolved_family().unwrap().value(),
+        1e-16,
+    );
+    assert_eq!(endpoint.component_total(), original.component_total());
+    assert_eq!(endpoint.family_totals(), original.family_totals());
+    assert!(std::ptr::eq(endpoint.model().source(), original.model().source()));
+    assert!(endpoint.state().log_saturation_numerical_spread().unwrap().value().is_finite());
+    let error = advanced.kinetics().maximum_accepted_error_norm();
+    assert!(error.is_finite() && (0.0..=1.0).contains(&error));
+}
+
+#[test]
 fn nucleation_policy_and_late_cancellation_never_trigger_implicit_equilibrium() {
     let absent = salt_material(0.03, 0.0, 0.08, MineralGrowthPolicyV1::ExistingSolidOnly);
     let blocked = absent.advance(Time::new(0.1), controls(), || false).unwrap();

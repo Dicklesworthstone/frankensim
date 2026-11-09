@@ -114,6 +114,19 @@ impl PreparedUniformHarmonicBand {
         self.modes
     }
 
+    /// Unrotated, profile-normalized basis coefficient for one source and mode.
+    ///
+    /// This linear factor lets consumers retain binary-scaled physical fields
+    /// without first restoring them into ordinary DD amplitudes. Apply the same
+    /// source-clock rotation as this band: relative frequencies for an analytic
+    /// band, absolute frequencies for an actual-real band. Real modes retain
+    /// the centered real component for even modes and imaginary component for
+    /// odd modes. Second moments still require the weight `2*mode+1`; the
+    /// common `(-i)^mode` phase is omitted only for those products.
+    pub fn centered_coefficient_dd(&self, mode: usize, source: usize) -> Result<Dd, WindowError> {
+        self.view().centered_coefficient_dd(mode, source)
+    }
+
     /// Logical complex projection terms plus one squared norm per mode.
     #[must_use]
     pub fn power_work(&self) -> usize {

@@ -9,8 +9,8 @@
 
 use super::*;
 use crate::conduction::response::contact::{
-    self, ContactResponseControls, ContactResponseError, ContactResponseSample,
-    ContactResponseSources,
+    self, ContactResponseControls, ContactResponseError, ContactResponseQuadrature,
+    ContactResponseSample, ContactResponseSources,
 };
 pub use crate::conduction::response::terminals::{
     ConductionTerminalControl, ConductionTerminalDrive, ConductionTerminalLimits,
@@ -68,7 +68,10 @@ impl From<ConductorError> for SpatialConductionResponseError {
 }
 impl From<ContactResponseError> for SpatialConductionResponseError {
     fn from(error: ContactResponseError) -> Self {
-        Self::Contact(error)
+        match error {
+            ContactResponseError::Cancelled => Self::Cancelled,
+            other => Self::Contact(other),
+        }
     }
 }
 impl core::fmt::Display for SpatialConductionResponseError {
@@ -336,6 +339,30 @@ impl SpatialConductionResponse {
         })
     }
 
+    /// Close nonuniform interface laws at explicit positive triangular
+    /// quadrature points, shared by native assembly, current and heat.
+    ///
+    /// Each face uses `3*n*n+3*n+1` points for `n=subdivisions`, including its
+    /// original vertices. The total point limit is independent of field solves.
+    /// The caller owns refinement; no quadrature-error bound is inferred.
+    /// Every solve restarts these memoryless states from each refreshed contact
+    /// seed. The public contact source is the first-point reference state, never
+    /// an average resistance; full applied/evaluated point states are reported.
+    pub fn with_contact_quadrature(
+        mut self,
+        quadrature: ContactResponseQuadrature,
+    ) -> Result<Self> {
+        quadrature.triangle_points(self.contacts().len())?;
+        let bindings =
+            self.contact_sources
+                .take()
+                .ok_or(SpatialConductionResponseError::Invalid(
+                    "contact quadrature requires original interface response laws",
+                ))?;
+        self.contact_sources = Some(bindings.with_quadrature(quadrature)?);
+        Ok(self)
+    }
+
     /// Select a fixed source-coordinate relaxation weight in `(0, 1]`.
     /// One preserves the original undamped Picard path. Smaller weights can
     /// stabilize alternating resistance responses by requerying original laws
@@ -480,7 +507,7 @@ impl SpatialConductionResponse {
     /// reusable terminal response charges all N-1 basis solves before work.
     /// Source bounds, nonconvergence and cancellation publish no candidate.
     /// This is a bounded Picard closure, not a claim of global convergence,
-    /// uniqueness, nonuniform nonlinear contact quadrature or a transient thermal solve.
+    /// uniqueness, a quadrature-error certificate or a transient thermal solve.
     #[allow(clippy::too_many_arguments)]
     pub fn solve_candidate<'d>(
         &self,
@@ -771,6 +798,24 @@ impl SpatialConductionResponse {
         }
         let mut applied = seeds.clone();
         let mut applied_contacts = contacts.clone();
+        let quadrature = self
+            .contact_sources
+            .as_ref()
+            .and_then(|bindings| bindings.quadrature());
+        let mut applied_contact_samples = Vec::new();
+        if let Some(quadrature) = quadrature {
+            let points = quadrature
+                .triangle_points(contacts.len())
+                .map_err(SpatialConductionResponseError::from)?;
+            for contact in &contacts {
+                let mut states = Vec::with_capacity(points);
+                for _ in 0..points {
+                    check(cancelled)?;
+                    states.push(contact.source.clone());
+                }
+                applied_contact_samples.push(states);
+            }
+        }
         let mut field_solves = 0usize;
         let mut adaptive = self
             .adaptive_relaxation
@@ -798,6 +843,16 @@ impl SpatialConductionResponse {
             }
             // All applied bundles come from their original admitted source
             // (construction or the preceding actual-field query).
+            if let Some(bindings) = &self.contact_sources {
+                for (law, states) in bindings.laws().iter().zip(&applied_contact_samples) {
+                    for state in states {
+                        check(cancelled)?;
+                        law.admit(state)
+                            .map_err(ContactResponseError::from)
+                            .map_err(SpatialConductionResponseError::from)?;
+                    }
+                }
+            }
             let native = SpatialConduction::assemble_admitted(
                 Arc::clone(&self.native.geometry),
                 applied,
@@ -806,16 +861,31 @@ impl SpatialConductionResponse {
                 |_| true,
             )
             .map_err(SpatialConductionResponseError::from)?
-            .bind_admitted_contacts(
+            .bind_contact_coefficients(
                 applied_contacts,
                 self.native.contact_liquid_mass_fraction_axes.clone(),
                 assembly,
                 cancelled,
                 |i, s, a| {
-                    contact::admit_source(i, s, a, self.contact_sources.as_ref()).map_err(|_| {
-                        SpatialConductionError::Invalid(
-                            "3D contact response source admission refused",
-                        )
+                    let resistance = contact::admit_source(i, s, a, self.contact_sources.as_ref())
+                        .map_err(|_| {
+                            SpatialConductionError::Invalid(
+                                "3D contact response source admission refused",
+                            )
+                        })?;
+                    Ok(match quadrature {
+                        Some(quadrature) => {
+                            crate::conduction::contact_quadrature::ContactCoefficient::Sampled {
+                                subdivisions: quadrature.subdivisions,
+                                resistance_ohm_m2: applied_contact_samples[i]
+                                    .iter()
+                                    .map(|state| state.resistance_ohm_m2())
+                                    .collect(),
+                            }
+                        }
+                        None => crate::conduction::contact_quadrature::ContactCoefficient::Uniform(
+                            resistance,
+                        ),
                     })
                 },
             )
@@ -825,6 +895,7 @@ impl SpatialConductionResponse {
             let mut evaluated = Vec::with_capacity(seeds.len());
             let mut next = Vec::with_capacity(seeds.len());
             let mut next_contacts = native.contacts().to_vec();
+            let mut next_contact_samples = Vec::with_capacity(applied_contact_samples.len());
             let mut evaluated_contacts = Vec::new();
             let mut converged = true;
             maximum_sigma = 0.0;
@@ -878,18 +949,29 @@ impl SpatialConductionResponse {
                 for (index, law) in bindings.laws().iter().enumerate() {
                     check(cancelled)?;
                     let heat = &field.contacts[index];
-                    let (sample, contact_converged) = contact::evaluate(
-                        index,
-                        law,
-                        &contacts[index].source,
-                        &native.contacts()[index].source,
-                        heat.voltage_jump_v,
-                        heat.current_density_a_m2,
-                        heat.power_w,
-                        bindings.controls(),
-                    )
+                    let (sample, contact_converged) = match quadrature {
+                        Some(_) => contact::evaluate_sampled(
+                            index,
+                            law,
+                            &contacts[index].source,
+                            &applied_contact_samples[index],
+                            &heat.quadrature,
+                            bindings.controls(),
+                            cancelled,
+                        ),
+                        None => contact::evaluate(
+                            index,
+                            law,
+                            &contacts[index].source,
+                            &native.contacts()[index].source,
+                            heat.voltage_jump_v,
+                            heat.current_density_a_m2,
+                            heat.power_w,
+                            bindings.controls(),
+                        ),
+                    }
                     .map_err(SpatialConductionResponseError::from)?;
-                    contact_queries = contact_queries.checked_add(3).ok_or(
+                    contact_queries = contact_queries.checked_add(sample.evaluated.len()).ok_or(
                         SpatialConductionResponseError::Invalid(
                             "contact source query count overflows",
                         ),
@@ -906,6 +988,9 @@ impl SpatialConductionResponse {
                     absolute_power = sum;
                     converged &= contact_converged;
                     next_contacts[index].source = sample.evaluated[0].clone();
+                    if quadrature.is_some() {
+                        next_contact_samples.push(sample.evaluated.clone());
+                    }
                     evaluated_contacts.push(sample);
                 }
             }
@@ -962,22 +1047,30 @@ impl SpatialConductionResponse {
                     if let Some(bindings) = &self.contact_sources {
                         for (index, law) in bindings.laws().iter().enumerate() {
                             check(cancelled)?;
-                            for (axis, _) in law.axes() {
-                                operating_coordinates.push(
-                                    native.contacts()[index]
-                                        .source
-                                        .resolved()
-                                        .state_coordinate(axis)
-                                        .zip(
-                                            next_contacts[index]
-                                                .source
-                                                .resolved()
-                                                .state_coordinate(axis),
-                                        )
-                                        .ok_or(SpatialConductionResponseError::Invalid(
-                                            "missing owned contact coordinate",
-                                        ))?,
-                                );
+                            let (current, following): (&[_], &[_]) = if quadrature.is_some() {
+                                (
+                                    &applied_contact_samples[index],
+                                    &next_contact_samples[index],
+                                )
+                            } else {
+                                (
+                                    std::slice::from_ref(&native.contacts()[index].source),
+                                    std::slice::from_ref(&next_contacts[index].source),
+                                )
+                            };
+                            for (current, following) in current.iter().zip(following) {
+                                check(cancelled)?;
+                                for (axis, _) in law.axes() {
+                                    operating_coordinates.push(
+                                        current
+                                            .resolved()
+                                            .state_coordinate(axis)
+                                            .zip(following.resolved().state_coordinate(axis))
+                                            .ok_or(SpatialConductionResponseError::Invalid(
+                                                "missing owned contact coordinate",
+                                            ))?,
+                                    );
+                                }
                             }
                         }
                     }
@@ -1012,25 +1105,40 @@ impl SpatialConductionResponse {
                     for (index, law) in bindings.laws().iter().enumerate() {
                         check(cancelled)?;
                         if !law.axes().is_empty() {
-                            next_contacts[index].source = law
-                                .relax_operating_point(
-                                    &native.contacts()[index].source,
-                                    &next_contacts[index].source,
-                                    relaxation,
+                            let (current, following): (&[_], &mut [_]) = if quadrature.is_some() {
+                                (
+                                    &applied_contact_samples[index],
+                                    &mut next_contact_samples[index],
                                 )
-                                .map_err(ContactResponseError::from)
-                                .map_err(SpatialConductionResponseError::from)?;
-                            relaxation_queries = relaxation_queries.checked_add(1).ok_or(
-                                SpatialConductionResponseError::Invalid(
-                                    "source query count overflows",
-                                ),
-                            )?;
+                            } else {
+                                (
+                                    std::slice::from_ref(&native.contacts()[index].source),
+                                    std::slice::from_mut(&mut next_contacts[index].source),
+                                )
+                            };
+                            for (current, following) in current.iter().zip(following) {
+                                check(cancelled)?;
+                                *following = law
+                                    .relax_operating_point(current, following, relaxation)
+                                    .map_err(ContactResponseError::from)
+                                    .map_err(SpatialConductionResponseError::from)?;
+                                relaxation_queries = relaxation_queries.checked_add(1).ok_or(
+                                    SpatialConductionResponseError::Invalid(
+                                        "source query count overflows",
+                                    ),
+                                )?;
+                            }
+                            if quadrature.is_some() {
+                                next_contacts[index].source =
+                                    next_contact_samples[index][0].clone();
+                            }
                         }
                     }
                 }
             }
             applied = next;
             applied_contacts = next_contacts;
+            applied_contact_samples = next_contact_samples;
         }
         Err(SpatialConductionResponseError::NotConverged {
             iterations: controls.maximum_iterations,

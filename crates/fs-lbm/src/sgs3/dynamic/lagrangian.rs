@@ -5,8 +5,10 @@
 //! `D I_MM / Dt = (M:M - I_MM)/T`.
 //! Backtracking uses the current physical velocity and trilinear interpolation
 //! of the accepted history, followed by exact exponential relaxation for a
-//! frozen current source. This is first-order trajectory/source integration;
-//! its departure-distance limit is explicit. Numerators and denominators are
+//! frozen current source. Euler tracing is the original default; an explicit
+//! [`LagrangianAdvection`] policy can resolve curved, frozen-field trajectories
+//! with bounded midpoint substeps. Source/time sampling remains first order;
+//! the departure-distance limit is explicit. Numerators and denominators are
 //! transported separately, and negative fitted coefficients produce zero
 //! viscosity while their signed history is retained.
 //!
@@ -40,6 +42,10 @@ mod memory;
 pub use memory::AdaptiveLagrangianMemory;
 use memory::AdaptiveUpdate;
 
+#[path = "lagrangian/advection.rs"]
+mod advection;
+pub use advection::LagrangianAdvection;
+
 /// Joint momentum/scalar pathline histories with independent scalar transport.
 #[path = "lagrangian/scalar.rs"]
 pub mod scalar;
@@ -52,8 +58,8 @@ pub struct LagrangianSgsConfig {
     /// With an explicitly adaptive owner this is the upper bound on local T.
     pub memory_time: f64,
     /// Maximum backtracked distance per axis in cells, in (0, 1].
-    /// This bounds the first-order trajectory approximation; it is not a CFL
-    /// stability theorem for the flow solver.
+    /// Euler bounds its departure. Midpoint also bounds accumulated per-axis
+    /// travel and every stage. Neither is a CFL theorem for the flow solver.
     pub maximum_departure_cells: f64,
     /// Upper admission bound on the fitted C_s squared.
     pub maximum_coefficient_squared: f64,
@@ -102,6 +108,7 @@ pub struct LagrangianDynamicSgs {
     history_log_scale: Option<f64>,
     adaptive_memory: Option<AdaptiveLagrangianMemory>,
     accepted_memory_time_range: Option<[f64; 2]>,
+    advection: LagrangianAdvection,
 }
 
 /// A fully admitted candidate. Its viscosities are valid until it is dropped
@@ -216,6 +223,7 @@ impl LagrangianDynamicSgs {
             history_log_scale: None,
             adaptive_memory: None,
             accepted_memory_time_range: None,
+            advection: LagrangianAdvection::Euler,
         };
         let required = result.workspace_bytes();
         if required > maximum_bytes {
@@ -370,9 +378,9 @@ impl LagrangianDynamicSgs {
         }
         if !time.is_finite()
             || time < 0.0
-            || self.accepted_time.is_some_and(|previous| {
-                time < previous || (!allow_refresh && time == previous)
-            })
+            || self
+                .accepted_time
+                .is_some_and(|previous| time < previous || (!allow_refresh && time == previous))
         {
             return Err(DynamicSgsError::Invalid(
                 "finite increasing Lagrangian sample times required",
@@ -403,9 +411,11 @@ impl LagrangianDynamicSgs {
             // The adaptive path computes its own per-cell weights. Admit its
             // fastest possible relaxation here: an enormous upper time bound
             // must not reject a representable local adaptive update.
-            self.adaptive_memory.map_or(config.memory_time, |memory| memory.minimum_time),
+            self.adaptive_memory
+                .map_or(config.memory_time, |memory| memory.minimum_time),
             config.maximum_departure_cells,
-        )?;
+        )?
+        .with_advection(self.advection, walls);
         let adaptive = self.adaptive_memory.map(|memory| {
             AdaptiveUpdate::new(
                 memory,
@@ -425,17 +435,24 @@ impl LagrangianDynamicSgs {
         for cell in 0..self.history.len() {
             poll(&mut cancelled, cell)?;
             let (pair, memory_time) = if let Some(adaptive) = &adaptive {
-                adaptive.pair(
+                adaptive.pair_with_field(
                     &update,
                     cell,
-                    velocity[cell],
+                    velocity,
                     density[cell],
                     &self.history,
                     &self.flow.contraction,
+                    &mut cancelled,
                 )?
             } else {
                 (
-                    update.pair(cell, velocity[cell], &self.history, &self.flow.contraction)?,
+                    update.pair_with_field(
+                        cell,
+                        velocity,
+                        &self.history,
+                        &self.flow.contraction,
+                        &mut cancelled,
+                    )?,
                     config.memory_time,
                 )
             };
@@ -482,8 +499,13 @@ impl LagrangianDynamicSgs {
                 report.maximum_coefficient_squared.max(coefficient);
             report.maximum_eddy_viscosity = report.maximum_eddy_viscosity.max(viscosity);
         }
-        let common_log = adaptive.as_ref().map_or(update.common_log, |a| a.common_log());
-        let update = HistoryUpdate { common_log, ..update };
+        let common_log = adaptive
+            .as_ref()
+            .map_or(update.common_log, |a| a.common_log());
+        let update = HistoryUpdate {
+            common_log,
+            ..update
+        };
         let log_scale = update.normalize(&mut self.candidate, amplitude, &mut cancelled)?;
         poll(&mut cancelled, 0)?;
         Ok((
@@ -513,6 +535,8 @@ struct HistoryUpdate {
     new_scale: f64,
     old_weight: f64,
     fresh: f64,
+    advection: LagrangianAdvection,
+    wall_velocity: [[f64; 3]; 2],
 }
 
 impl HistoryUpdate {
@@ -528,7 +552,11 @@ impl HistoryUpdate {
         // A same-time constitutive refresh has no current-source weight.
         // Ignore that source's scale instead of risking loss of accepted
         // history against an arbitrarily larger, but unused, current source.
-        let current_log = if initialized && elapsed == 0.0 { None } else { current_log };
+        let current_log = if initialized && elapsed == 0.0 {
+            None
+        } else {
+            current_log
+        };
         let common_log = match (previous_log, current_log) {
             (Some(a), Some(b)) => a.max(b),
             (Some(a), None) | (None, Some(a)) => a,
@@ -558,6 +586,8 @@ impl HistoryUpdate {
             new_scale,
             old_weight,
             fresh,
+            advection: LagrangianAdvection::Euler,
+            wall_velocity: [[0.0; 3]; 2],
         })
     }
 
@@ -567,6 +597,15 @@ impl HistoryUpdate {
         velocity: [f64; 3],
         history: &[[f64; 2]],
         contraction: &[[f64; 2]],
+    ) -> Result<[f64; 2], DynamicSgsError> {
+        self.pair_using(cell, contraction, || self.advected(cell, velocity, history))
+    }
+
+    fn pair_using(
+        &self,
+        cell: usize,
+        contraction: &[[f64; 2]],
+        advect: impl FnOnce() -> Result<[f64; 2], DynamicSgsError>,
     ) -> Result<[f64; 2], DynamicSgsError> {
         let pair = if !self.initialized {
             let mut pair = [0.0; 2];
@@ -586,7 +625,7 @@ impl HistoryUpdate {
             }
             pair
         } else {
-            let advected = self.advected(cell, velocity, history)?;
+            let advected = advect()?;
             let current = contraction[cell];
             if (self.old_weight > 0.0 && self.old_scale == 0.0 && advected[1] != 0.0)
                 || (self.fresh > 0.0 && self.new_scale == 0.0 && current[1] != 0.0)
@@ -671,6 +710,24 @@ fn sample_history(
     departure: [f64; 3],
     history: &[[f64; 2]],
 ) -> Result<[f64; 2], DynamicSgsError> {
+    let mut result = [0.0; 2];
+    each_history_sample(geometry, shape, cell, departure, |j, weight| {
+        for k in 0..2 {
+            result[k] += weight * history[j][k];
+        }
+    })?;
+    Ok(result)
+}
+
+// One original positive stencil, shared by history and physical-velocity
+// sampling. Preserve the original donor order and history arithmetic.
+fn each_history_sample(
+    geometry: FilterGeometry,
+    shape: [usize; 3],
+    cell: usize,
+    departure: [f64; 3],
+    mut visit: impl FnMut(usize, f64),
+) -> Result<(), DynamicSgsError> {
     let p = coordinates(shape, cell);
     let normal = match geometry {
         FilterGeometry::Periodic => None,
@@ -705,7 +762,6 @@ fn sample_history(
     // rem_euclid can round a tiny negative periodic coordinate to the extent.
     // Retain the original wrapped index even in that endpoint case.
     let lower = core::array::from_fn::<_, 3, _>(|a| lower[a] % shape[a]);
-    let mut result = [0.0; 2];
     for z in 0..2 {
         for y in 0..2 {
             for x in 0..2 {
@@ -720,13 +776,11 @@ fn sample_history(
                         }
                     })
                     .product::<f64>();
-                for k in 0..2 {
-                    result[k] += weight * history[index(shape, q)][k];
-                }
+                visit(index(shape, q), weight);
             }
         }
     }
-    Ok(result)
+    Ok(())
 }
 
 #[cfg(test)]

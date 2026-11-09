@@ -1,6 +1,7 @@
 use super::*;
 
 mod body_force;
+mod pressure;
 
 // Solve in physical pressure/volume-flow coordinates. No scattering,
 // transformer waves or hybrid condensation is used by this oracle.
@@ -8,6 +9,22 @@ fn physical_source_closure(
     z: &[C64],
     y: &[C64],
     map: &[f64],
+    source_flow: &[C64],
+    h_ref: f64,
+    l_ref: f64,
+    incident: [C64; 2],
+) -> Vec<C64> {
+    physical_source_closure_both(
+        z, y, map, &vec![C64::ZERO; source_flow.len()], source_flow, h_ref, l_ref, incident,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn physical_source_closure_both(
+    z: &[C64],
+    y: &[C64],
+    map: &[f64],
+    source_pressure: &[C64],
     source_flow: &[C64],
     h_ref: f64,
     l_ref: f64,
@@ -21,10 +38,11 @@ fn physical_source_closure(
     let mut rhs = vec![C64::ZERO; 2 * n];
     a[..n].copy_from_slice(&z[..n]);
     a[0] = a[0] + C64::from_re(h_ref);
-    rhs[0] = incident[0].scale(2.0 * h_ref.sqrt());
+    rhs[0] = incident[0].scale(2.0 * h_ref.sqrt()) - source_pressure[0];
     for i in 0..m {
         let row = 1 + i;
         a[row * 2 * n..row * 2 * n + n].copy_from_slice(&z[hports[i] * n..(hports[i] + 1) * n]);
+        rhs[row] = -source_pressure[hports[i]];
         for j in 0..m {
             a[row * 2 * n + n + lports[j]] = C64::from_re(-map[j * m + i]);
         }
@@ -169,7 +187,7 @@ fn g2_spatial_heat_drives_both_regions_with_independent_nonorthogonal_port_closu
     source_work_closes(&emitted);
     assert!(emitted.power.external_input_w < 0.0);
     assert!(emitted.power.source_input_w > emitted.power.dissipated_w());
-    assert!(emitted.helmholtz.amplitudes.iter().any(|z| z.abs() > 0.0));
+    assert!(emitted.helmholtz.amplitudes.iter().any(|z| *z != [0.0; 2]));
     let unforced = prepared.response(&incident, &|| false).unwrap();
     for i in 0..2 {
         let expected = unforced.outgoing[i] + emitted.outgoing[i];

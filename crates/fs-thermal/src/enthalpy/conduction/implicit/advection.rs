@@ -71,6 +71,11 @@ pub(super) struct ImplicitAdvectionStage<'a> {
     pub(super) multiplier: f64,
 }
 
+impl ImplicitAdvectionStage<'_> {
+    /// Same immutable scheduled snapshot used by the original endpoint owner.
+    pub(super) fn flow(&self) -> &Advected<()> { self.flow.as_ref() }
+}
+
 /// One immutable original flux evaluation and its physical outflow topology.
 pub(super) struct StationaryAdvection {
     pub(super) transport: TransportStepCoefficients<()>,

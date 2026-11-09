@@ -2645,9 +2645,11 @@ Newton trials and final reaction assembly; a failed endpoint changes no caller
 history and publishes no partial pair. Newton work limits apply separately
 to both stages. There is no hidden clipping, substepping or boundary fallback.
 
-Physical pressure, bulk molecular heat, Navier loss, advected kinetic power and
-upwind dissipation retain their existing separate owners. These are stage
-rates, not integrated heat deposition or a full discrete energy balance.
+Physical pressure, bulk molecular power, Navier loss, advected kinetic power
+and upwind dissipation retain their existing separate stage owners. The
+returned `dissipated_heat` also integrates original bulk and slip powers with
+the SDIRK2 weights, as specified below. This is generated heat, not thermal
+deposition or a full discrete energy balance.
 Temperature/composition are fixed external fields within each stage and may
 differ between stages; density remains fixed. Smooth temporal data and resolved
 spatial/nonlinear errors are required for second order. Linear L-stability
@@ -2709,8 +2711,9 @@ This controls local velocity time error under smooth data and resolved
 spatial/nonlinear errors. It does not certify pressure or stress, global error,
 adaptive derivatives, positivity, passivity or thermal evolution. Two strongly
 damped endpoints can agree while underresolving fast-mode dissipation history.
-Retained bulk heat, Navier loss and transport remain instantaneous original
-stage rates, not an integrated heat balance or heat-accuracy certificate.
+Retained stage powers and transport remain available. Whole-interval
+`dissipated_heat` accumulates only accepted fine-stage production as specified
+below; velocity acceptance is not a heat-accuracy certificate.
 
 Three focused regression groups cover absolute stage times and retained
 thermal Carreau sources; tolerance refinement and physical RMS invariance
@@ -2722,6 +2725,66 @@ pinned rustfmt parsing. Native compilation and these regressions remain
 and persistent storage capacity. An independent scalar cubic-translation
 calculation gives accumulated errors 1.43913e-4 and 5.94509e-6 for absolute
 tolerances 1e-4 and 1e-6; this is not native PDE validation.
+
+## Accepted original-stage viscous and Navier-slip heat
+
+The original mixed SDIRK2 owner now returns `MaterialDissipatedHeat` with every
+successful fixed step. For original triangle i, its bulk energy is
+`h*area_i*((1-gamma)*Phi_i(stage1) + gamma*Phi_i(stage2))` [J/m], where Phi
+is the existing source-owned `mu*gamma_dot^2` power density [W/m³]. Each
+boundary edge uses the SAME positive weights on its retained Navier-slip
+power `integral beta*|(u-wall)_t|^2` [W/m]. The method supplies its own
+original timestep and cell areas; callers cannot reconstruct or substitute
+those metadata after a solve. No constitutive, strain or heating kernel is
+duplicated, and no material or boundary callback is repeated.
+
+`DiscreteBoundaryReaction::slip_dissipation` exposes the existing retained
+kinematic scalar. `MaterialStokesSolution::boundary_slip_dissipation` provides
+an allocation-free checked view in physical W/m using the same immutable
+reference density. Every entry retains its original edge and connected
+component. Heat needs neither a pressure datum nor a moment origin and does
+not allocate/evaluate full boundary wrenches. Non-slip and perfect-slip edges
+remain present with zero power.
+
+The integrated result exposes elapsed seconds, original-cell bulk energies,
+original-edge/component slip energies, and separate compensated bulk/slip
+totals in J/m of out-of-plane span. Dividing a cell energy by its original
+area gives integrated density in J/m³. Original fixed-step material owners
+remain on the returned two stages. A shared compensated accumulator uses
+O(cells + boundary edges) storage and refuses nonfinite, negative or
+unrepresentable contributions and sums.
+
+Adaptive advancement sums these integrals from BOTH accepted fine half steps
+over the ENTIRE requested interval. Coarse comparison heat, rejected attempts
+and failed stage pairs contribute nothing. Earlier accepted source objects
+are not archived: spatial identity and cumulative physical heat are retained
+in bounded storage, while the final fine stages retain their exact original
+sources. Any later source, boundary, cancellation or representation refusal
+publishes neither partial flow nor partial heat. An accumulated-heat refusal
+is terminal and retains the physical endpoint time; it is not a smaller-step
+retry signal.
+
+Bulk heat and Navier-slip production remain distinct. Slip heat is explicitly
+unassigned between fluid and wall; a thermal owner must choose that partition
+and deposit energy. These outputs exclude mechanical wall/pressure work,
+advected kinetic or thermal energy, numerical upwind/SIP loss, and caloric
+state evolution. They are not a full discrete energy identity, positivity
+theorem or passivity certificate. SDIRK2 heat quadrature is second order under
+resolved smooth source/strain history and spatial/nonlinear error. The
+adaptive controller still estimates velocity error only: agreement of strongly
+damped velocity endpoints cannot certify stress or dissipation-history accuracy.
+
+Focused regressions extend the layered original thermal-Carreau fixture to
+check stage-weighted physical bulk/slip heat and original cell/edge identities.
+A manufactured affine shear u=(1+t)y with mu=0.6 Pa s and two Navier walls of
+beta=1.2 Pa s/m has exact bulk and total slip heat each 1.4 J/m over [0,1] s.
+An independent scalar quadrature gives errors 7.582521472e-4, 1.895630368e-4
+and 4.739075920e-5 for 4, 8 and 16 intervals. A separate cubic translation plus
+steady shear fixture exercises rejected adaptive comparisons, whole-interval
+heat, a late original-source refusal and clean retry. Changed Rust sources
+pass pinned rustfmt parsing; native compilation and these PDE regressions
+remain **unexecuted** because constellation dependencies and persistent storage
+capacity are unavailable. The scalar quadrature is not native PDE validation.
 
 ## Generalized-Newtonian mixed velocity/traction Stokes flow
 
@@ -11081,8 +11144,9 @@ The interface oracle retains both one-sided contributions at contrast 1e18.
 These focused builds used the original numerical kernels without numerical
 stubs; full Cargo/runtime integration was not run. This is passive transport
 with fixed storage properties, without variable-Cp enthalpy, phase change,
-buoyancy/thermal feedback, scalar positivity enforcement or three-dimensional
-LES qualification.
+buoyancy/thermal feedback or three-dimensional LES qualification. The original
+BDF entries do not enforce scalar bounds; the explicit bounded lane is described
+below.
 
 ## Resolved moving liquid heat around a phase-changing vapor bubble
 
@@ -11274,3 +11338,231 @@ These source receipts qualify completed endpoints, not each internal/rejected
 adaptive trial. Full pair diffusivities and kappa remain explicitly authored
 numerical inputs; endpoint source refresh does not imply dynamically sourced
 transport coefficients or two-way variable-density momentum coupling.
+
+## Local-temperature multicomponent phase separation
+
+The experimental multicomponent phase-field owner can bind the original
+multicomponent liquid caloric law and evolve all independent species together
+with local cell temperatures. The original A+B/T mixing law and pure-liquid
+Cp curves supply source-conjugate chemical efforts, divided partial-enthalpy
+carriage and bounded caloric inversion. Authored heat-of-transport contrasts
+remain reciprocal in species and energy transport; no Soret coefficient is
+inferred from the interaction law.
+
+Constant energetic interfaces retain exactly the existing species-symmetric
+edge law E_e=kappa*A/(4*d)*sum_s(delta x_s)^2 and carry no interface entropy.
+Each cell stores U_i=H_i+half the sum of its incident edge energies. The
+interface entropy-conjugate species potential is
+sum_j K_ij*(1/T_i+1/T_j)*(x_i,s-x_j,s)/N_i, with K_ij=kappa*A/(4*d).
+Actual admitted published molar totals supply N_i. A canonical graph pass
+assembles these potentials before the original coupled Maxwell--Stefan sweep.
+The inverse-temperature weight uses (1+T_min/T_max)/T_min rather than a
+potentially overflowing reciprocal sum or temperature product.
+
+All species and paired total-local-energy transfers are simultaneous. After
+the independent inventories determine their original fractions, each changed
+edge deducts half its energy increment from BOTH endpoint bulk-enthalpy targets.
+The same original caloric inverse then recovers each affected temperature,
+including spectators whose published composition did not change. Bulk enthalpy,
+interface energy and total-energy residual remain separate receipt quantities.
+
+The original thermal inventory and caloric-resolution checks are shared, not
+reimplemented. Publication requires complete all-species/cell-capacity closure,
+actual homogeneous enthalpy PLUS interface energy conservation, and nondecreasing
+original homogeneous entropy within the offered numerical allowances. Positive
+initial constitutive entropy production does not replace that finite-step audit.
+
+Only the private positive-interface owner may retain the original caloric
+closure's explicit nonconvex-bracket result. Both original endpoint domains and
+curvature evaluations still run; source, stability, arithmetic and cancellation
+failures propagate. Public homogeneous thermal binding keeps its full-bracket
+convexity requirement. Neither a raw homogeneous field nor a nonconvex
+zero-gradient network escapes from the new public owner.
+
+The model retains rigid geometry, equal fixed partial molar volumes, static
+pressure, common positive support and constant energetic kappa. Its explicit
+time update has no unconditional stability claim. Phase-field advection and
+hydrodynamic capillary work remain separate unimplemented couplings.
+
+Focused regression sources compare variable-Cp/B/T spinodal heating, unchanged-
+composition spectator heating and cooling, unequal-temperature/unequal-pair
+friction with reciprocal heat, an independent total-entropy directional
+derivative, binary normalization, and species/energy conservation through the
+supported species limit. Additional cases retain ordinary convexity admission,
+workspace boundaries and transactional cancellation. These are numerical
+oracles, not material calibration or spatial-convergence certificates.
+
+## Conservative bounds for planar SGS scalar transport
+
+`PreparedScalarTransport::prepare_bounded_transport` adds an opt-in invariant
+interval for passive concentration or constant-Cp temperature. It uses the
+original P1-DG advection/SIP matrix, original BDM velocity and the same
+molecular plus authored SGS diffusivity. Symmetric algebraic graph diffusion
+and original lumped P1 storage form a monotone Euler predictor. Limited paired
+antidiffusive fluxes restore consistent mass and high-order transport where
+the available scalar inventory permits. Equal-and-opposite interior corrections
+conserve inventory; no scalar clipping, redistribution or mass repair is applied.
+
+Complete signed weak boundary coefficients are retained on the original
+two-Gauss traces, including SIP and reversing-flow interpolation. The discrete
+constant-mode identity is explicitly admitted before claiming bounds.
+Reservoir admission includes the affine trace's physical endpoint extrema.
+The bounded SSPRK2 driver subcycles the complete interval under the actual
+low-order advection/diffusion CFL and an explicit work cap. Both Euler stages
+and the returned P1 field retain authored bounds up to the declared
+floating-point allowance. Failure or cancellation returns no partial interval
+and leaves the supplied history unchanged.
+
+Accepted boundary accounts integrate the original advective and SIP diffusive
+fluxes on those same stages, plus any boundary graph diffusion not removed by
+limiting. This extra numerical exchange is reported separately from molecular
+or SGS mixing. Source-free means no volumetric source; value and advective
+reservoir boundaries may still supply scalar or heat. Homogeneous diffusive
+flux is supported. Arbitrary volumetric sources and nonzero imposed flux need
+a separately admitted bound policy and remain on the original BDF path.
+Frozen coefficients/data, constant storage properties and the planar Estimated
+scope remain unchanged. There are no coupled species-sum constraints or new
+three-dimensional turbulence claims. Limiting may reduce local order near
+extrema.
+
+Ten focused integration tests and both scalar numerical unit tests passed
+using the original numerical source build. Five new integration groups
+demonstrate a sharp-front failure of unrestricted DG and the inventory error
+of clipping, bounded propagation, skew-grid thermal conservation, all-model
+and disabled-SGS coupling, reversing reservoirs, smooth-grid refinement,
+explicit source refusal and atomic cancellation. A new private oracle on
+obtuse triangles verifies signed SIP reservoir terms: inactive limiting
+matches original consistent-mass LU evolution, while bounded heating closes
+the budget with nonzero limiter boundary exchange. The prior six scalar
+checks also remain green. Full Cargo/runtime validation was not run.
+
+
+### Reacting gas on translating and deforming three-dimensional volumes
+
+`spatial::mixture::reactive::ReactingEuler3d::step_moving` composes the original
+prepared cell chemistry as C(dt/2), conservative ALE(dt), C(dt/2). The chemistry
+halves use the actual old and new cell volumes, retain all three momenta and
+physical chemical-plus-kinetic energy, and report their original species and
+referenced-energy source changes. `step_moving_with_dissipation` surrounds this
+composition with the original molecular D(dt/2) intervals on the same old/new
+geometry. Maxwell--Stefan species transport, partial enthalpies, Fourier heat,
+full Newtonian stress and normal moving-wall work retain their original owners
+and prepared numerical buffers.
+
+Closed reflecting and periodic domains admit translation and the existing
+single-axis deformation. All phases share one actual accepted interval; an ALE
+shortening restarts the complete source/transport composition. The final state
+must remain inside the chemistry temperature interval and the mesh-relative
+acoustic bound after the last source, including inviscid heat release. No
+per-trial whole-field allocation or alternative reaction/transport law is added.
+
+`MovingReactiveStepReport3d` retains the complete original reacting report and
+separate six-side molecular mechanical-work and wall-heat integrals. Species
+and referenced-energy residuals subtract the actual chemical source, while an
+independent physical-energy residual restores the species energy references
+using conservative differences. Pressure work remains in the central ALE
+report. Chemistry contributes no boundary species flux or external force.
+
+Accepted cells, geometry, physical time, source binding, reports and complete
+face transfers publish together after the final cancellation checkpoint. A
+refused trial leaves the accepted owners unchanged; reusable trial geometry is
+reset from the accepted field before either moving or stationary stepping.
+Open ports, retained SGS histories, finite tangential wall inertia and
+simultaneous deformation of multiple axes are not composed by these entries.
+The selected reactor method retains its own accuracy; symmetric ordering does
+not establish a fully discrete entropy law or a splitting convergence order.
+
+Focused regressions cover stationary native-path parity, translating exothermic
+flow against the original homogeneous reactor, whole-interval acoustic replay,
+all three deformation axes with stress/heat/source balance, energy-reference
+invariance, source rebinding and early/late cancellation. An independent
+bimolecular logistic solution checks concentration-dependent conversion on both
+actual volumes under compression and expansion on every axis.
+
+
+### Finite guided pistons driven by reacting spatial mixtures
+
+`spatial::mixture::reactive::ReactingEuler3d::step_with_inertial_walls`
+composes the original cell reactor and conservative ALE field with the shared
+simultaneous two-piston mechanical solve. Every held midpoint-speed proposal
+restarts the same accepted gas and executes C(dt/2), ALE(dt), C(dt/2), with
+each chemistry half using its actual old or new physical cell volume. The
+reactor fixes all three cell momenta; chemical conversion changes the original
+calorics and pressure that subsequently drive finite piston acceleration.
+There is no separate combustion force, duplicate heat-release source, or new
+mechanical solver.
+
+`step_with_dissipation_and_inertial_walls` adds the original molecular half
+intervals around that reacting split. Maxwell--Stefan diffusion, partial
+enthalpies, Fourier heat and full compatible Newtonian stress retain their
+original source owners. Actual pressure and viscous face impulses drive both
+finite masses with their conjugate mechanical work. Direct Fourier/Navier heat
+remains external thermal exchange and is not inferred by subtracting large
+mechanical-work values from total energy.
+
+`ReactiveInertialWallsStep` reuses the existing generic guided-piston receipt.
+Fixed transverse walls can absorb axial viscous momentum; that support impulse
+is explicitly removed from the combined axial mechanical residual. Translation
+and orientation guides carry the actual transverse and angular impulses from
+all accepted end-plane faces and do no work. Both the actual chemical-plus-
+kinetic gas energy and its stored referenced-energy equation must pass the
+authored mechanical tolerance. Physical energy uses differences of species
+mass before multiplying their individual source references. The independent
+referenced gate subtracts `chemistry.referenced_energy_change_j` exactly once.
+
+A shorter ALE interval or a source/mechanical refusal restarts the complete
+physical interval. The prepared reactor, field and molecular buffers are
+reused across proposals. Accepted cells, geometry, time, combined reports and
+loads, external molecular binding/report/loads, and both finite piston states
+publish only after the final cancellation checkpoint. The molecular variant's
+explicit byte budget covers both complete reacting and molecular owners.
+
+The selected axis has two reflecting ends; other directions are periodic or
+stationary reflecting supports. Authored tangential wall velocities are zero.
+Original moving-source restrictions remain, including refusal of unsupported
+exterior/finite reservoirs, SGS histories and finite tangential wall inertia.
+This is a bounded engineering composition with the original chemistry and
+shock-capturing limitations. It does not establish general FSI stability,
+global entropy stability, resolved flame/detonation thickness, or experimental
+combustion accuracy. Mechanical energy tolerance must accommodate the authored
+cell-reactor accuracy over the whole accepted interval.
+
+Six focused native regressions pass on the default thread stack. They cover
+reaction-driven piston acceleration against thermoneutral gas; compression
+and expansion on all three axes; identical physical dynamics under unequal
+species reference-chart changes with large formation energies and nonzero
+conversion; molecular heat, side supports and guide loads; cancellation and
+root-exhaustion rollback of both accepted owners; and whole-interval replay
+after reaction-induced wave shortening. These use manufactured mechanisms
+and original source solvers; they establish numerical composition behavior,
+not experimental reaction-rate or combustion validation.
+
+## Adaptive local-temperature multicomponent phase separation
+
+The thermal phase-field owner advances a complete requested interval with
+explicit time and work limits. One full interval is compared with two half
+intervals of the SAME coupled species, total-local-energy and caloric-recovery
+kernel. Independent original all-species inventory and Kelvin norms are joined
+by a graph L1 norm of per-edge interface-energy differences. Opposing changes
+on different edges cannot cancel in the temporal error estimate. Relative
+interface scaling sums max(coarse, fine) energy over each physical edge.
+
+The unchanged initial coupled face rates are reused by the coarse and first
+half stages and across rejected retries. Midpoint rates are recomputed, and
+acceptance invalidates the cache. The original shared thermal admission,
+caloric-bracket retry policy, precision failures and work counters retain their
+semantics. Positivity, bounded caloric inversion, energy and entropy refusals
+can request smaller intervals; cancellation, original-source and unresolved
+inventory precision failures remain transactional refusals.
+
+Only the two accepted half-step paths contribute physical species and total
+local-energy transfers. Completed steps, constitutive evaluations and caloric
+iterations separately report numerical work, including completed rejected or
+coarse work. A final complete-window audit rechecks all independent inventories,
+cell capacities, original caloric precision, total homogeneous enthalpy plus
+interface energy, and original entropy before publishing the endpoint.
+
+The controller exposes local time-discretization estimates, not an
+unconditional stability, global trajectory-error or spatial-convergence
+certificate. Constant energetic kappa and the fixed-geometry transport model
+remain the same as the fixed-step owner.

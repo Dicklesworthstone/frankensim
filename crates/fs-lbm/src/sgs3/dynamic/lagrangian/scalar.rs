@@ -151,6 +151,17 @@ impl LagrangianScalarTrial<'_> {
 }
 
 impl LagrangianDynamicScalar {
+    /// Select one trajectory policy for momentum and scalar histories before
+    /// their first accepted sample. No field storage or scalar timescale changes.
+    pub fn with_advection(mut self, policy: LagrangianAdvection) -> Result<Self, DynamicSgsError> {
+        self.flow = self.flow.with_advection(policy)?;
+        Ok(self)
+    }
+
+    pub const fn advection(&self) -> LagrangianAdvection {
+        self.flow.advection()
+    }
+
     /// Configure only momentum memory before this joint trajectory starts.
     /// Scalar relaxation remains controlled by its own authored memory time.
     pub fn with_adaptive_momentum_memory(
@@ -276,10 +287,7 @@ impl LagrangianDynamicScalar {
     /// freshly allocated within the supplied budget; stale/rejected candidate
     /// fields are deliberately not copied. Future preparations overwrite all
     /// scratch before consuming it. The two trajectories never share history.
-    pub(crate) fn fork_for_trial(
-        &self,
-        maximum_bytes: usize,
-    ) -> Result<Self, DynamicSgsError> {
+    pub(crate) fn fork_for_trial(&self, maximum_bytes: usize) -> Result<Self, DynamicSgsError> {
         let mut fork = Self::new_geometry(
             self.shape(),
             self.flow.flow.spacing,
@@ -290,6 +298,7 @@ impl LagrangianDynamicScalar {
         fork.flow.accepted_time = self.flow.accepted_time;
         fork.flow.history_log_scale = self.flow.history_log_scale;
         fork.flow.adaptive_memory = self.flow.adaptive_memory;
+        fork.flow.advection = self.flow.advection;
         fork.flow.accepted_memory_time_range = self.flow.accepted_memory_time_range;
         fork.scalar.history.copy_from_slice(&self.scalar.history);
         fork.scalar.history_log_scale = self.scalar.history_log_scale;
@@ -313,8 +322,16 @@ impl LagrangianDynamicScalar {
         cancelled: impl FnMut() -> bool,
     ) -> Result<LagrangianScalarTrial<'_>, DynamicSgsError> {
         self.prepare_scaled_at(
-            momentum, config, time, density, velocity, wall_velocity, scalar,
-            scalar_walls, true, cancelled,
+            momentum,
+            config,
+            time,
+            density,
+            velocity,
+            wall_velocity,
+            scalar,
+            scalar_walls,
+            true,
+            cancelled,
         )
         .map(|(trial, _)| trial)
     }
@@ -402,8 +419,16 @@ impl LagrangianDynamicScalar {
         cancelled: impl FnMut() -> bool,
     ) -> Result<(LagrangianScalarTrial<'_>, InputScales), DynamicSgsError> {
         self.prepare_scaled_at(
-            momentum, config, time, density, velocity, wall_velocity, scalar,
-            scalar_walls, false, cancelled,
+            momentum,
+            config,
+            time,
+            density,
+            velocity,
+            wall_velocity,
+            scalar,
+            scalar_walls,
+            false,
+            cancelled,
         )
     }
 
@@ -488,7 +513,11 @@ impl LagrangianDynamicScalar {
             elapsed,
             config.memory_time,
             config.maximum_departure_cells,
-        )?;
+        )?
+        .with_advection(
+            momentum.owner.advection,
+            wall_velocity.unwrap_or([[0.0; 3]; 2]),
+        );
         let (report, log_scale) = prepare_history(
             &mut self.scalar.workspace,
             &self.scalar.history,
@@ -533,7 +562,8 @@ fn prepare_history(
     let mut amplitude: f64 = 0.0;
     for cell in 0..history.len() {
         poll(cancelled, cell)?;
-        let pair = update.pair(cell, velocity[cell], history, &workspace.contraction)?;
+        let pair =
+            update.pair_with_field(cell, velocity, history, &workspace.contraction, cancelled)?;
         let raw = if pair[1] == 0.0 {
             report.undetermined_cells += 1;
             0.0

@@ -1,5 +1,8 @@
 //! The actual thermal-only nonlinear owner, starting without a solved endpoint.
 use super::*;
+
+#[path = "implicit/adaptive.rs"]
+mod adaptive;
 use fs_couple::circuit_enthalpy::contacts::heat::{
     PreparedHeatNetwork,
     thermal::{HeatAssemblySolve, step_heat_assembly_candidate},
@@ -39,6 +42,22 @@ fn with_fixture(
         &DepositionSimulation<'_>,
     ),
 ) {
+    with_scheduled_fixture(scale, reversed, &[], run);
+}
+
+fn with_scheduled_fixture(
+    scale: f64,
+    reversed: bool,
+    scheduled: &[TimedEvent],
+    run: impl FnOnce(
+        &fs_exec::Cx<'_>,
+        &fs_exec::CancelGate,
+        &PreparedHeatNetwork<'_, '_>,
+        &PreparedSourceConjugateLinks<'_, '_>,
+        &LiquidTemperatureLaw<'_>,
+        &DepositionSimulation<'_>,
+    ),
+) {
     let (solid_card, solid_caloric) = wall_source(scale);
     let solid_point = wall_point(310.0);
     let layer = wall_layer(
@@ -51,6 +70,25 @@ fn with_fixture(
     let liquid = liquid_law(&fluid_card);
     let fluid_point = context(290.0);
     let thermal = pair(solid_caloric.curve(), &fluid_caloric, reversed, 0.0);
+    let thermal = if scheduled.is_empty() {
+        thermal
+    } else {
+        let mut events = thermal.cells().values().cloned().map(|cell| TimedEvent {
+            time_s: 0.0, event: Event::Birth(cell),
+        }).collect::<Vec<_>>();
+        events.extend(thermal.links().values().cloned().map(|link| TimedEvent {
+            time_s: 0.0, event: Event::Contact(link),
+        }));
+        events.extend_from_slice(scheduled);
+        DepositionSimulation::new(events, &[
+            (MaterialId(0), solid_caloric.curve() as &dyn ThermalLaw),
+            (MaterialId(1), fluid_caloric.curve() as &dyn ThermalLaw),
+        ], DepositionBudget {
+            max_cells: 2, max_links: 1, max_events: 3 + scheduled.len(), max_substeps: 200,
+        }).unwrap().advance_to(0.0, StepConfig {
+            max_dt_s: 1.0, energy_tolerance_j: 1e-10,
+        }, || Ok(())).unwrap().0
+    };
     let owner =
         PreparedSourceConjugateLinks::new(&thermal, &[binding(&layer)], 1, || Ok(())).unwrap();
     let initial = owner

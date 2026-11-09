@@ -289,23 +289,34 @@ fn count_step(
     steps: &mut usize,
     iterations: &mut u64,
 ) -> Result<()> {
+    count_completed_step(step.caloric_iterations, steps, iterations)
+}
+
+pub(in crate::miscibility::multicomponent) fn count_completed_step(
+    caloric_iterations: u64,
+    steps: &mut usize,
+    iterations: &mut u64,
+) -> Result<()> {
     *steps = steps
         .checked_add(1)
         .ok_or(MulticomponentMiscibilityError::Arithmetic(
             "thermal completed-step count",
         ))?;
-    *iterations = iterations.checked_add(step.caloric_iterations).ok_or(
+    *iterations = iterations.checked_add(caloric_iterations).ok_or(
         MulticomponentMiscibilityError::Arithmetic("thermal completed-caloric count"),
     )?;
     Ok(())
 }
-fn count_evaluations(rates: &solve::Rates, evaluations: &mut usize) -> Result<()> {
+pub(in crate::miscibility::multicomponent) fn count_evaluations(
+    rates: &solve::Rates,
+    evaluations: &mut usize,
+) -> Result<()> {
     *evaluations = evaluations.checked_add(rates.evaluations()).ok_or(
         MulticomponentMiscibilityError::Arithmetic("thermal constitutive-work count"),
     )?;
     Ok(())
 }
-pub(super) fn admit_time(
+pub(in crate::miscibility::multicomponent) fn admit_time(
     duration: f64,
     time: MulticomponentNonisothermalTimeControl,
 ) -> Result<()> {
@@ -320,7 +331,7 @@ pub(super) fn admit_time(
     }
     Ok(())
 }
-pub(super) fn retryable(error: &MulticomponentNonisothermalError) -> bool {
+pub(in crate::miscibility::multicomponent) fn retryable(error: &MulticomponentNonisothermalError) -> bool {
     matches!(
         error,
         MulticomponentNonisothermalError::Spatial(
@@ -333,7 +344,7 @@ pub(super) fn retryable(error: &MulticomponentNonisothermalError) -> bool {
             ))
     )
 }
-pub(super) fn error_ratio(
+pub(in crate::miscibility::multicomponent) fn error_ratio(
     a: &MulticomponentNonisothermalField,
     b: &MulticomponentNonisothermalField,
     time: MulticomponentNonisothermalTimeControl,

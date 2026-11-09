@@ -159,10 +159,14 @@ impl PortHamiltonian {
     /// Each arm stores `(sqrt(k)*epsilon(x)-z)^2/2`, gives the exact reaction
     /// `-sqrt(k)*(sqrt(k)*epsilon-z)*gradient(epsilon)` on canonical momenta,
     /// and has `R_zz=1/tau`. Existing ports, state order and original storage
-    /// remain. This is a nonlinear pHS system: a quadratic/exact-flow claim is
-    /// deliberately unavailable, and the existing discrete-gradient solver
-    /// advances mechanical and memory coordinates together. Its accepted
-    /// dissipated energy is `dt*e_z^2/tau`, using the full discrete effort.
+    /// remain. This is a nonlinear pHS system. An explicitly quadratic strain
+    /// map retains the original base quadratic block and each z²/2 storage for
+    /// the existing exponential discrete-gradient owner; all strain/history
+    /// coupling remains implicit. The complete energy is never marked quadratic.
+    /// The ordinary discrete-gradient owner is unchanged: its accepted loss is
+    /// `dt*e_z^2/tau`. The exponential owner instead integrates the SAME positive
+    /// resistance along its accepted held-remainder trajectory. Only its linear
+    /// propagation is exact; nonlinear accuracy still needs time refinement.
     /// Mapped evaluation currently uses bounded temporary derivative vectors;
     /// this reference nonlinear path does not claim allocation-free execution.
     /// If the original storage declares a continuous tangent, the complete
@@ -201,3 +205,6 @@ impl PortHamiltonian {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod exponential_tests;

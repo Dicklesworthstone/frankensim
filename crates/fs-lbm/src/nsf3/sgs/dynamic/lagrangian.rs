@@ -7,7 +7,9 @@
 
 use super::*;
 use crate::sgs3::dynamic::lagrangian::scalar::{LagrangianScalarConfig, LagrangianScalarTrial};
-use crate::sgs3::dynamic::lagrangian::{AdaptiveLagrangianMemory, LagrangianSgsConfig};
+use crate::sgs3::dynamic::lagrangian::{
+    AdaptiveLagrangianMemory, LagrangianAdvection, LagrangianSgsConfig,
+};
 use std::sync::MutexGuard;
 
 /// Independent momentum and temperature histories in lattice units.
@@ -99,11 +101,33 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// Openings, interior solids and concurrent local/instantaneous SGS refuse.
     /// Reversible thermal intervals fork their own bounded history workspace.
     pub fn with_lagrangian_thermal_sgs(
-        mut self,
+        self,
         config: NsfLagrangianThermalSgsConfig,
         maximum_workspace_bytes: usize,
     ) -> Result<Self, NsfError> {
+        self.with_lagrangian_thermal_sgs_advection(
+            config,
+            LagrangianAdvection::Euler,
+            maximum_workspace_bytes,
+        )
+    }
+
+    /// Attach the same accepted-time momentum/heat history with an explicit
+    /// replayable characteristic policy. Midpoint substeps sample the current
+    /// physical force-corrected velocity along each path and honor the current
+    /// moving-wall values. They add no full-grid arrays and do not change the
+    /// 264-byte nominal payload, independent relaxation times, source sampling,
+    /// molecular wall heat, or joint endpoint publication. Only frozen-field
+    /// trajectory accuracy improves; the full unsteady closure remains first
+    /// order. Reversible native intervals preserve the selected policy.
+    pub fn with_lagrangian_thermal_sgs_advection(
+        mut self,
+        config: NsfLagrangianThermalSgsConfig,
+        advection: LagrangianAdvection,
+        maximum_workspace_bytes: usize,
+    ) -> Result<Self, NsfError> {
         config.validate()?;
+        advection.validate().map_err(NsfError::DynamicSgs)?;
         if self.sgs.is_some() || self.dynamic_sgs.is_some() {
             return Err(NsfError::Input(
                 "attach Lagrangian SGS to a molecular NSF grid",
@@ -136,6 +160,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             ),
             None => LagrangianDynamicScalar::new(self.spec.dims, [1.0; 3], maximum_workspace_bytes),
         }
+        .map_err(NsfError::DynamicSgs)?
+        .with_advection(advection)
         .map_err(NsfError::DynamicSgs)?;
         if let Some(memory) = config.adaptive_momentum_memory {
             workspace = workspace
@@ -200,6 +226,19 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             DynamicState::Lagrangian { config, .. } => Some(*config),
             _ => None,
         }
+    }
+
+    /// Characteristic policy retained by this trajectory; other closure
+    /// families and molecular-only grids return None.
+    pub fn lagrangian_sgs_advection(&self) -> Result<Option<LagrangianAdvection>, NsfError> {
+        self.dynamic_sgs
+            .as_ref()
+            .map(|dynamic| {
+                dynamic
+                    .lagrangian_workspace()
+                    .map(|workspace| workspace.as_ref().map(|workspace| workspace.advection()))
+            })
+            .unwrap_or(Ok(None))
     }
 
     /// Last committed model sample in lattice timesteps. For this native
@@ -311,3 +350,6 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod advection_tests;

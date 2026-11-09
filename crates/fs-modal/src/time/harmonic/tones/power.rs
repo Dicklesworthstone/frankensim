@@ -2,14 +2,17 @@
 
 mod frequency;
 mod gradient;
+mod mechanical;
+mod quadratic;
 pub use frequency::{ModalTonePowerFrequencyGradient, PreparedModalTonePowerFrequencyGradient};
 pub use gradient::{
     ModalAffineTonePowerGradient, ModalAffineTonePowerSourceGradient, ModalTonePowerDerivative,
     ModalTonePowerGradient, ModalTonePowerGradientBudget, ModalTonePowerSourceGradient,
     PreparedModalTonePowerGradient,
 };
+pub use mechanical::{ModalTonePowerMechanicalGradient, PreparedModalTonePowerMechanicalGradient};
 
-use super::super::affine::{double_delta, small_delta};
+use super::super::affine::{EndpointMoments, double_delta, small_delta};
 use super::super::integrals::{NODES, augmented_flow, heat_rotation};
 use super::super::{DampedTransition, double_force, invalid, small_force};
 use super::{MAX_COORDINATES, Sum};
@@ -18,7 +21,9 @@ use fs_math::det;
 
 #[derive(Clone, Debug)]
 pub(super) struct TonePower {
-    affine: bool,
+    // Degree two uses the complementary clock basis u*(1-u), u*u. It is a
+    // companion for original affine banks, not a new public forcing law.
+    envelope_degree: usize,
     h: f64,
     omega: f64,
     scale: f64,
@@ -37,10 +42,20 @@ pub(super) struct TonePower {
 // rate/ratio law so motion, cost admission and heat use exactly the same loss.
 pub(super) fn scaling_with_envelope(
     omega: f64,
-    mut drag: f64,
+    drag: f64,
     frequencies: &[f64],
     h: f64,
     affine: bool,
+) -> Result<(f64, f64, f64, f64, usize), ModalAcousticTimeError> {
+    scaling_with_degree(omega, drag, frequencies, h, usize::from(affine))
+}
+
+fn scaling_with_degree(
+    omega: f64,
+    mut drag: f64,
+    frequencies: &[f64],
+    h: f64,
+    degree: usize,
 ) -> Result<(f64, f64, f64, f64, usize), ModalAcousticTimeError> {
     let mut angle = omega * h;
     let mut scale = angle.max(1.0);
@@ -58,7 +73,9 @@ pub(super) fn scaling_with_envelope(
     }
     let mut time = scale;
     let mut doublings = 0;
-    let threshold = 0.125 / (frequencies.len() * if affine { 2 } else { 1 } + 2) as f64;
+    // The complementary quadratic source block also contains the 2/h
+    // envelope transfer. Its full generator, not only the carrier, is resolved.
+    let threshold = 0.125 / (frequencies.len() * (degree + 1) + 2 * degree.max(1)) as f64;
     while drag.max(time) > threshold {
         angle *= 0.5;
         drag *= 0.5;
@@ -75,7 +92,7 @@ impl TonePower {
         frequencies: &[f64],
         h: f64,
     ) -> Result<Self, ModalAcousticTimeError> {
-        Self::prepare(omega, drag, frequencies, h, false)
+        Self::prepare(omega, drag, frequencies, h, 0)
     }
 
     pub(super) fn try_new_affine(
@@ -84,7 +101,7 @@ impl TonePower {
         frequencies: &[f64],
         h: f64,
     ) -> Result<Self, ModalAcousticTimeError> {
-        Self::prepare(omega, drag, frequencies, h, true)
+        Self::prepare(omega, drag, frequencies, h, 1)
     }
 
     fn prepare(
@@ -92,12 +109,14 @@ impl TonePower {
         original_drag: f64,
         frequencies: &[f64],
         h: f64,
-        affine: bool,
+        envelope_degree: usize,
     ) -> Result<Self, ModalAcousticTimeError> {
+        let affine = envelope_degree > 0;
+        let quadratic = envelope_degree == 2;
         let (angle, drag, mut time, scale, doublings) =
-            scaling_with_envelope(omega, original_drag, frequencies, h, affine)?;
+            scaling_with_degree(omega, original_drag, frequencies, h, envelope_degree)?;
         let ratio = (omega * h) / scale;
-        let width = if affine { 4 } else { 2 };
+        let width = 2 * (envelope_degree + 1);
         let n = 2 + width * frequencies.len();
         let mut phases = frequencies
             .iter()
@@ -113,7 +132,7 @@ impl TonePower {
             fraction *= 0.5;
         }
         let mut result = Self {
-            affine,
+            envelope_degree,
             h,
             omega,
             scale,
@@ -128,8 +147,16 @@ impl TonePower {
         let mut force_product = vec![0.0; n * n];
         let mut forces = vec![[0.0; 4]; frequencies.len()];
         let mut deltas = vec![[0.0; 4]; if affine { frequencies.len() } else { 0 }];
-        let mut row = [0.0; MAX_COORDINATES];
-        let mut phase_row = [0.0; MAX_COORDINATES];
+        let mut moments = vec![
+            EndpointMoments {
+                start: [0.0; 4],
+                clock_start: [0.0; 4],
+                clock_end: [0.0; 4],
+            };
+            if quadratic { frequencies.len() } else { 0 }
+        ];
+        let mut row = vec![0.0; n];
+        let mut phase_row = vec![0.0; n];
         // The shared degree-15 Gaussian rule is used only after resolving the
         // full augmented generator. Long beating/oscillatory windows compose
         // these local integrals; they are never sampled with only eight nodes.
@@ -148,15 +175,33 @@ impl TonePower {
                 pair[0] = c;
                 pair[1] = s;
                 if affine {
-                    pair[2] = fraction * node * c;
-                    pair[3] = fraction * node * s;
+                    let u = fraction * node;
+                    pair[2] = u * c;
+                    pair[3] = u * s;
+                    if quadratic {
+                        pair[2] *= 1.0 - u;
+                        pair[3] *= 1.0 - u;
+                        pair[4] = u * u * c;
+                        pair[5] = u * u * s;
+                    }
                 }
             }
             if affine {
                 for (delta, &phase) in deltas.iter_mut().zip(&phases) {
                     *delta = small_delta(angle * node, drag * node, phase * node);
                 }
-                fill_affine_flow(
+                for (((moment, &phase), &force), &delta) in
+                    moments.iter_mut().zip(&phases).zip(&forces).zip(&deltas)
+                {
+                    *moment = EndpointMoments::small(
+                        angle * node,
+                        drag * node,
+                        phase * node,
+                        force,
+                        delta,
+                    );
+                }
+                fill_envelope_flow(
                     &mut e,
                     flow,
                     &forces,
@@ -166,6 +211,7 @@ impl TonePower {
                     time * node,
                     ratio,
                     fraction * node,
+                    quadratic.then_some(moments.as_slice()),
                 );
             } else {
                 fill_flow(&mut e, flow, &forces, &phases, node, time * node, ratio);
@@ -184,10 +230,15 @@ impl TonePower {
         for (delta, &phase) in deltas.iter_mut().zip(&phases) {
             *delta = small_delta(angle, drag, phase);
         }
+        for (((moment, &phase), &force), &delta) in
+            moments.iter_mut().zip(&phases).zip(&forces).zip(&deltas)
+        {
+            *moment = EndpointMoments::small(angle, drag, phase, force, delta);
+        }
         let mut flow_fraction = fraction;
         for _ in 0..doublings {
             if affine {
-                fill_affine_flow(
+                fill_envelope_flow(
                     &mut e,
                     flow,
                     &forces,
@@ -197,6 +248,7 @@ impl TonePower {
                     time,
                     ratio,
                     flow_fraction,
+                    quadratic.then_some(moments.as_slice()),
                 );
             } else {
                 fill_flow(&mut e, flow, &forces, &phases, 1.0, time, ratio);
@@ -214,6 +266,9 @@ impl TonePower {
                 result.append_pair(velocity, force);
             }
             for (index, (force, phase)) in forces.iter_mut().zip(&mut phases).enumerate() {
+                if quadratic {
+                    moments[index] = moments[index].double(*force, deltas[index], flow, *phase);
+                }
                 if affine {
                     deltas[index] = double_delta(deltas[index], *force, flow, *phase);
                 }
@@ -292,7 +347,7 @@ impl TonePower {
         deltas: Option<(&[f64], &[f64])>,
     ) -> Result<(f64, f64, f64, f64), ModalAcousticTimeError> {
         let x = self.coordinates(state, cosine, sine, deltas)?;
-        let n = 2 + (if self.affine { 4 } else { 2 }) * cosine.len();
+        let n = 2 + 2 * (self.envelope_degree + 1) * cosine.len();
         let x = &x[..n];
         let mut heat = Sum::default();
         let mut heat_scale = 0.0;
@@ -345,12 +400,32 @@ impl TonePower {
         sine: &[f64],
         deltas: Option<(&[f64], &[f64])>,
     ) -> Result<[f64; MAX_COORDINATES], ModalAcousticTimeError> {
-        if self.affine != deltas.is_some() {
+        if self.envelope_degree > 1 {
+            return Err(invalid(
+                "quadratic power companions require their source-clock query",
+            ));
+        }
+        let mut x = [0.0; MAX_COORDINATES];
+        self.coordinates_into(state, cosine, sine, deltas, &mut x)?;
+        Ok(x)
+    }
+
+    fn coordinates_into(
+        &self,
+        state: ModalAcousticState,
+        cosine: &[f64],
+        sine: &[f64],
+        deltas: Option<(&[f64], &[f64])>,
+        x: &mut [f64],
+    ) -> Result<(), ModalAcousticTimeError> {
+        if (self.envelope_degree > 0) != deltas.is_some() {
             return Err(invalid("tone power must use its prepared envelope law"));
         }
-        let width = if self.affine { 4 } else { 2 };
+        let width = 2 * (self.envelope_degree + 1);
         let n = 2 + width * cosine.len();
-        let mut x = [0.0; MAX_COORDINATES];
+        if x.len() < n {
+            return Err(invalid("complete tone power coordinate scratch required"));
+        }
         let mut total = Sum::default();
         x[0] = state.velocity_m_sqrt_kg_per_s;
         for (tone, (&c, &s)) in cosine.iter().zip(sine).enumerate() {
@@ -362,6 +437,12 @@ impl TonePower {
             if let Some((dc, ds)) = deltas {
                 x[4 + width * tone] = (self.h * dc[tone]) / self.scale;
                 x[5 + width * tone] = (self.h * ds[tone]) / self.scale;
+                if self.envelope_degree == 2 {
+                    // u = u*(1-u)+u*u: the nominal original envelope remains
+                    // affine without forming a difference of clock covectors.
+                    x[6 + width * tone] = x[4 + width * tone];
+                    x[7 + width * tone] = x[5 + width * tone];
+                }
             }
         }
         let restoring = (self.omega * state.displacement_m_sqrt_kg) * (self.omega * self.h);
@@ -371,7 +452,7 @@ impl TonePower {
                 "simultaneous-tone power coordinates must be finite",
             ));
         }
-        Ok(x)
+        Ok(())
     }
 }
 
@@ -410,9 +491,9 @@ fn right_multiply(a: &[f64], e: &[f64], product: &mut [f64], n: usize, width: us
                 let pair = 2 + width * ((j - 2) / width);
                 value +=
                     a[i * n + pair] * e[pair * n + j] + a[i * n + pair + 1] * e[(pair + 1) * n + j];
-                if width == 4 {
-                    value += a[i * n + pair + 2] * e[(pair + 2) * n + j]
-                        + a[i * n + pair + 3] * e[(pair + 3) * n + j];
+                for offset in (2..width).step_by(2) {
+                    value += a[i * n + pair + offset] * e[(pair + offset) * n + j]
+                        + a[i * n + pair + offset + 1] * e[(pair + offset + 1) * n + j];
                 }
             }
             product[i * n + j] = value;
@@ -435,12 +516,31 @@ fn fill_affine_flow(
     ratio: f64,
     fraction: f64,
 ) {
-    let n = 2 + 4 * phases.len();
+    fill_envelope_flow(
+        e, flow, forces, deltas, phases, node, time, ratio, fraction, None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fill_envelope_flow(
+    e: &mut [f64],
+    flow: DampedTransition,
+    forces: &[[f64; 4]],
+    deltas: &[[f64; 4]],
+    phases: &[f64],
+    node: f64,
+    time: f64,
+    ratio: f64,
+    fraction: f64,
+    moments: Option<&[EndpointMoments]>,
+) {
+    let width = if moments.is_some() { 6 } else { 4 };
+    let n = 2 + width * phases.len();
     e.fill(0.0);
     for (tone, ((&force, &delta), &phase)) in forces.iter().zip(deltas).zip(phases).enumerate() {
         let phase = phase * node;
         let block = augmented_flow(flow, force, phase, time, ratio);
-        let c = 2 + 4 * tone;
+        let c = 2 + width * tone;
         for i in 0..2 {
             e[i * n] = block[i][0];
             e[i * n + 1] = block[i][1];
@@ -455,12 +555,50 @@ fn fill_affine_flow(
         e[c + 3] = time * fraction * (qs + phase * dqc);
         e[n + c + 2] = fraction * (vc + flow.drag * qc - phase * (dvs + flow.drag * dqs));
         e[n + c + 3] = fraction * (vs + flow.drag * qs + phase * (dvc + flow.drag * dqc));
+        if let Some(moments) = moments {
+            let moment = moments[tone];
+            let f = fraction;
+            // The complementary clock basis uses the ORIGINAL endpoint
+            // moments. Never subtract almost-equal ramp/quadratic gains after
+            // a long decay. Every composed half interval has 0 <= f <= 1/2.
+            let complement = |i: usize| (1.0 - f) * delta[i] + f * moment.clock_start[i];
+            let endpoint = |i: usize| (1.0 - 2.0 * f) * force[i] + 2.0 * f * moment.start[i];
+            e[c + 2] = time * f * (endpoint(0) - phase * complement(1));
+            e[c + 3] = time * f * (endpoint(1) + phase * complement(0));
+            e[n + c + 2] = f
+                * (endpoint(2) + flow.drag * endpoint(0)
+                    - phase * (complement(3) + flow.drag * complement(1)));
+            e[n + c + 3] = f
+                * (endpoint(3)
+                    + flow.drag * endpoint(1)
+                    + phase * (complement(2) + flow.drag * complement(0)));
+            e[c + 4] = time * f * f * (2.0 * dqc - phase * moment.clock_end[1]);
+            e[c + 5] = time * f * f * (2.0 * dqs + phase * moment.clock_end[0]);
+            e[n + c + 4] = f
+                * f
+                * (2.0 * (dvc + flow.drag * dqc)
+                    - phase * (moment.clock_end[3] + flow.drag * moment.clock_end[1]));
+            e[n + c + 5] = f
+                * f
+                * (2.0 * (dvs + flow.drag * dqs)
+                    + phase * (moment.clock_end[2] + flow.drag * moment.clock_end[0]));
+        }
         for i in 0..2 {
             for j in 0..2 {
                 let rotation = block[2 + i][2 + j];
                 e[(c + i) * n + c + j] = rotation;
-                e[(c + i) * n + c + j + 2] = fraction * rotation;
-                e[(c + i + 2) * n + c + j + 2] = rotation;
+                if moments.is_some() {
+                    let f = fraction;
+                    e[(c + i) * n + c + j + 2] = f * (1.0 - f) * rotation;
+                    e[(c + i) * n + c + j + 4] = f * f * rotation;
+                    e[(c + i + 2) * n + c + j + 2] = (1.0 - 2.0 * f) * rotation;
+                    e[(c + i + 2) * n + c + j + 4] = 2.0 * f * rotation;
+                    e[(c + i + 4) * n + c + j + 2] = -2.0 * f * rotation;
+                    e[(c + i + 4) * n + c + j + 4] = (1.0 + 2.0 * f) * rotation;
+                } else {
+                    e[(c + i) * n + c + j + 2] = fraction * rotation;
+                    e[(c + i + 2) * n + c + j + 2] = rotation;
+                }
             }
         }
     }

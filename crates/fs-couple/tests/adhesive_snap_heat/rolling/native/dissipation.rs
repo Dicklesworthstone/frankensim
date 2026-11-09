@@ -3,6 +3,9 @@
 #[path = "dissipation/timed.rs"]
 mod timed;
 
+#[path = "dissipation/temperature.rs"]
+mod temperature;
+
 use super::{DT, binding, controls, curves, events, fixture, source, thermal};
 use fs_couple::friction_heat::adhesive::snap::{
     JkrSnapHeatError,

@@ -184,38 +184,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
 
     fn admit_moving_domain(&self, motion: MeshMotion) -> Result<(), DissipationError> {
         admit_workspace(self.workspace_bytes(), self.maximum_workspace_bytes)?;
-        self.accepted.admit_motion(motion)?;
-        if self.molecular.grid != self.accepted.grid
-            || self.molecular.gas() != self.accepted.gas()
-            || self.molecular.boundaries != self.accepted.boundaries
-        {
-            return Err(DissipationError::Invalid(
-                "moving molecular source binding differs",
-            ));
-        }
-        if self.molecular.inertia.is_some() {
-            return Err(DissipationError::Invalid(
-                "moving molecular volumes do not compose finite tangential wall inertia",
-            ));
-        }
-        #[cfg(feature = "experimental-sgs")]
-        if self.molecular.sgs.is_some() {
-            return Err(DissipationError::Invalid(
-                "moving molecular volumes do not compose retained subgrid models",
-            ));
-        }
-        for axis in 0..3 {
-            if let AxisBoundaries::Ends { lower, upper } = self.accepted.boundaries.axis(axis)
-                && [lower, upper]
-                    .into_iter()
-                    .any(|bc| bc != BoundaryCondition::Reflecting)
-            {
-                return Err(DissipationError::Invalid(
-                    "moving molecular volumes require closed walls or periodic boundaries",
-                ));
-            }
-        }
-        Ok(())
+        self.molecular.admit_moving_field(&self.accepted, motion)
     }
 
     /// Fixed-duration, unpublished complete split. Finite-body coupling may
@@ -347,8 +316,8 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
     pub(super) fn publish_moving(&mut self, report: MovingMolecularStepReport3d) {
         std::mem::swap(&mut self.accepted, &mut self.trial);
         std::mem::swap(&mut self.boundary_impulses, &mut self.boundary_trial);
-        self.molecular.grid = self.accepted.grid;
-        self.molecular.publish(report.transport.second, None);
+        self.molecular
+            .publish_moving(self.accepted.grid, report.transport.second);
         self.last_step = Some(report.transport);
     }
 }
@@ -389,9 +358,57 @@ fn relative_rate(
 }
 
 impl<L: TransportLaw> MolecularTransport3d<L> {
+    /// Shared source/topology admission for molecular and reacting moving owners.
+    pub(in crate::compressible::spatial::mixture) fn admit_moving_field(
+        &self,
+        flow: &MixtureEuler3d,
+        motion: MeshMotion,
+    ) -> Result<(), DissipationError> {
+        flow.admit_motion(motion)?;
+        if self.grid != flow.grid || self.gas() != flow.gas() || self.boundaries != flow.boundaries
+        {
+            return Err(DissipationError::Invalid(
+                "moving molecular source binding differs",
+            ));
+        }
+        if self.inertia.is_some() {
+            return Err(DissipationError::Invalid(
+                "moving molecular volumes do not compose finite tangential wall inertia",
+            ));
+        }
+        #[cfg(feature = "experimental-sgs")]
+        if self.sgs.is_some() {
+            return Err(DissipationError::Invalid(
+                "moving molecular volumes do not compose retained subgrid models",
+            ));
+        }
+        for axis in 0..3 {
+            if let AxisBoundaries::Ends { lower, upper } = flow.boundaries.axis(axis)
+                && [lower, upper]
+                    .into_iter()
+                    .any(|bc| bc != BoundaryCondition::Reflecting)
+            {
+                return Err(DissipationError::Invalid(
+                    "moving molecular volumes require closed walls or periodic boundaries",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The composing owner has admitted the complete trial and final checkpoint.
+    pub(in crate::compressible::spatial::mixture) fn publish_moving(
+        &mut self,
+        grid: CartesianGrid,
+        report: MolecularReport,
+    ) {
+        self.grid = grid;
+        self.publish(report, None);
+    }
+
     /// One native SSP interval at the split's current geometry. Only private
     /// trial cells change here; the accepted molecular binding never moves.
-    fn advance_moving_unpublished(
+    pub(in crate::compressible::spatial::mixture) fn advance_moving_unpublished(
         &mut self,
         flow: &mut MixtureEuler3d,
         duration: Time,

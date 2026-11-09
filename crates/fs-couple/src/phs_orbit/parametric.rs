@@ -20,6 +20,12 @@ use fs_orbit::{
 };
 use fs_phs::PortHamiltonian;
 
+mod sensitivity;
+pub use sensitivity::{
+    ParametricParameterDirection, ParametricPowerObjective, PreparedParametricPowerAdjoint,
+    PreparedParametricSensitivity,
+};
+
 /// Hard source limits, independent of every solver's own numerical budgets.
 pub const MAX_PARAMETRIC_STATES: usize = 256;
 /// Maximum positive harmonic index of the authored pump.
@@ -35,6 +41,8 @@ pub enum ParametricError {
     Orbit(OrbitError),
     Shooting(VariationalShootError),
     Sideband(SidebandError),
+    Physical(fs_phs::PhsError),
+    Sensitivity(fs_orbit::sensitivity::ForcedSensitivityError),
 }
 impl core::fmt::Display for ParametricError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -221,6 +229,22 @@ struct Scratch {
     flow: Vec<f64>,
 }
 
+impl Scratch {
+    fn new(n: usize, m: usize, harmonics: usize) -> Self {
+        Self {
+            q: vec![0.0; n * n],
+            q_rate: vec![0.0; n * n],
+            phases: vec![C64::ZERO; harmonics + 1],
+            time: None,
+            has_rate: false,
+            effort: vec![0.0; n],
+            ports: vec![0.0; m],
+            direction: vec![0.0; n],
+            flow: vec![0.0; n],
+        }
+    }
+}
+
 /// Instantaneous power identity of the original explicitly driven Hamiltonian.
 /// Positive pump/port power enters the system; resistance power leaves it.
 #[derive(Clone, Copy, Debug)]
@@ -298,17 +322,7 @@ impl<'a> ParametricHamiltonian<'a> {
             input,
             modulation,
             tangent,
-            scratch: RefCell::new(Scratch {
-                q: vec![0.0; n * n],
-                q_rate: vec![0.0; n * n],
-                phases: vec![C64::ZERO; modulation.harmonics + 1],
-                time: None,
-                has_rate: false,
-                effort: vec![0.0; n],
-                ports: vec![0.0; m],
-                direction: vec![0.0; n],
-                flow: vec![0.0; n],
-            }),
+            scratch: RefCell::new(Scratch::new(n, m, modulation.harmonics)),
             source_refused: Cell::new(false),
         })
     }

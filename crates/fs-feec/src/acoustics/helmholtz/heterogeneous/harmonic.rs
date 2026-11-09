@@ -748,6 +748,27 @@ impl PreparedHeterogeneous<'_, '_, '_> {
     ) -> Result<Vec<C64>, HeterogeneousError> {
         poll(cancelled)?;
         Self::admit_velocity_faces_for(pressure_release, inward_velocity, cancelled)?;
+        Self::project_sources_with_boundary_exclusions(
+            owner,
+            &pressure_release.faces,
+            inward_velocity,
+            boundary_sources,
+            volume_sources,
+            cancelled,
+        )
+    }
+
+    /// Shared original source projection; exclusions carry the receiving
+    /// owner's physical boundary laws without introducing another trace map.
+    pub(in crate::acoustics::helmholtz) fn project_sources_with_boundary_exclusions(
+        owner: PressureSourceOwner<'_, '_, '_>,
+        excluded_faces: &BTreeSet<[u32; 3]>,
+        inward_velocity: &[VelocityTrace],
+        boundary_sources: &[(&BoundaryVelocitySource<'_, '_, '_>, C64)],
+        volume_sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<C64>, HeterogeneousError> {
+        poll(cancelled)?;
         super::boundary_source::admit_count(boundary_sources.len())?;
         super::source::admit_count(volume_sources.len())?;
         for &(source, amplitude) in boundary_sources {
@@ -756,12 +777,12 @@ impl PreparedHeterogeneous<'_, '_, '_> {
             if !finite(amplitude) {
                 return Err(invalid("finite harmonic boundary-velocity amplitude required").into());
             }
-            if !pressure_release.faces.is_empty() {
+            if !excluded_faces.is_empty() {
                 for face in &source.faces {
                     poll(cancelled)?;
-                    if pressure_release.faces.contains(face) {
+                    if excluded_faces.contains(face) {
                         return Err(invalid(
-                            "pressure-release and prepared boundary-source faces must not overlap",
+                            "prepared boundary source overlaps a constrained boundary law",
                         )
                         .into());
                     }
@@ -814,7 +835,7 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         Ok(())
     }
 
-    pub(super) fn source_power(
+    pub(in crate::acoustics::helmholtz) fn source_power(
         pressure_pa: &[C64],
         boundary_sources: &[(&BoundaryVelocitySource<'_, '_, '_>, C64)],
         volume_sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64)],

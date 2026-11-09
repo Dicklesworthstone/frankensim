@@ -13,6 +13,8 @@ use fs_math::det;
 use super::{HertzSlidingPatch, HertzSlidingPatchParameters, shape_factors};
 use crate::TriboError;
 
+/// Held external drives, retained rest, breakaway and shear/spin continuation.
+pub mod driven;
 /// Instantaneous finite-patch impulses with coupled translation and spin.
 pub mod impulse;
 /// Simultaneous original Hertz patches with full cross-contact response.

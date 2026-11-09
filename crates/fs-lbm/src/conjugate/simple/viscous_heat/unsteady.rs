@@ -3,8 +3,12 @@
 //! Dotting M(u1-u0)/dt + A(u1) + grad(p1) = f by u1 gives
 //! W_wall + W_body + W_pressure = Q_physical + (K1-K0) + N_BE,
 //! with K = sum(M*u^2)/2 and N_BE = sum(M*(u1-u0)^2)/2.
-//! M uses the SAME staggered half-cell volumes as momentum(), including graded
-//! grids. N_BE is numerical loss; it is reported and NEVER deposited into h.
+//! M uses the SAME physical staggered volumes as momentum(), including graded
+//! grids and the HALF cells at normal-traction reservoir mouths. W_pressure
+//! includes their signed mechanical supply and the bounded continuity defect.
+//! N_BE is numerical loss; it is reported and NEVER deposited into h.
+//! This is unsteady Stokes: momentum convection and its kinetic-energy flux
+//! are omitted together. The existing low-Reynolds applicability gate remains.
 //! W_body includes material buoyancy and external forces. Buoyancy's signed
 //! subset is attributed separately, without a gravitational-potential store.
 
@@ -81,6 +85,13 @@ pub struct UnsteadyHeatingAudit {
     kinetic_energy_change: Dd,
     pub wall_work_j: [f64; 6],
     pub supplied_wall_work_j: f64,
+    /// Signed reservoir work by original plane, in Face3::ALL order [J].
+    /// Positive supplies mechanical energy; negative returns it to a reservoir.
+    /// Each component uses the same current reference as native momentum.
+    pub pressure_work_j: [f64; 6],
+    /// Sum of pressure_work_j, separate from the continuity-constraint defect.
+    /// This is mechanical supply, never an additional thermal source.
+    pub supplied_pressure_work_j: f64,
     /// TOTAL signed work of buoyancy and external body forces.
     pub supplied_body_work_j: f64,
     /// Signed buoyancy subset of supplied_body_work_j, not additional supply
@@ -138,10 +149,21 @@ impl UnsteadyHeatingAudit {
         for (sum, power) in next.wall_work_j.iter_mut().zip(step.power.wall_power_w) {
             add(sum, step.duration_s * power)?;
         }
+        for (sum, power) in next
+            .pressure_work_j
+            .iter_mut()
+            .zip(step.power.pressure_power_w)
+        {
+            add(sum, step.duration_s * power)?;
+        }
         for (sum, power) in [
             (
                 &mut next.supplied_wall_work_j,
                 step.power.supplied_wall_power_w,
+            ),
+            (
+                &mut next.supplied_pressure_work_j,
+                step.power.supplied_pressure_power_w,
             ),
             (
                 &mut next.supplied_body_work_j,
@@ -172,6 +194,7 @@ impl UnsteadyHeatingAudit {
             "unsteady_heat.residual",
             (Dd::from_f64(next.supplied_wall_work_j)
                 + Dd::from_f64(next.supplied_body_work_j)
+                + Dd::from_f64(next.supplied_pressure_work_j)
                 + Dd::from_f64(next.pressure_constraint_work_j)
                 - Dd::from_f64(next.generated_heat_j)
                 - next.kinetic_energy_change
@@ -223,6 +246,7 @@ impl UnsteadyHeatingAudit {
         next.residual_j = finite_value("capture.residual",
             (Dd::from_f64(next.supplied_wall_work_j)
                 + Dd::from_f64(next.supplied_body_work_j)
+                + Dd::from_f64(next.supplied_pressure_work_j)
                 + Dd::from_f64(next.pressure_constraint_work_j)
                 - Dd::from_f64(next.generated_heat_j)
                 - next.kinetic_energy_change
@@ -243,10 +267,27 @@ impl Solver<'_> {
         &mut self,
         controls: ViscousHeatControls,
     ) -> Result<(), ChtError> {
-        admit_heating(self.domain, self.config, controls)?;
+        let pressure_work_axis = if self
+            .config
+            .faces
+            .iter()
+            .any(|face| face.prescribed_pressure().is_some())
+        {
+            Some(pressure::admit_pressure_work_heating(
+                self.domain,
+                self.config,
+                controls,
+            )?)
+        } else {
+            admit_heating(self.domain, self.config, controls)?;
+            None
+        };
         // Only momentum convection is omitted. Native rho*V/dt, pressure,
         // full symmetric stress and stationary Darcy coefficients remain.
+        // The existing heat opt-in selects normal traction and zero tangential
+        // trace at an opposed reservoir pair, exactly as in steady Stokes.
         self.creeping = true;
+        self.pressure_work_axis = pressure_work_axis;
         Ok(())
     }
 
@@ -290,12 +331,19 @@ impl Solver<'_> {
             .time
             .as_ref()
             .ok_or_else(|| invalid_power("transient heat requires native time levels"))?;
-        if !self.creeping || time.scheme != TimeScheme::BackwardEuler || time.older.is_some() {
+        if !self.creeping
+            || time.scheme != TimeScheme::BackwardEuler
+            || time.older.is_some()
+            || time.face_mass_kg.is_some()
+        {
             return Err(invalid_power(
-                "transient heat requires one native backward-Euler Stokes step",
+                "transient heat requires one native constant-density backward-Euler Stokes step",
             ));
         }
-        let mut power = self.sample_viscous_power(&self.field(), &self.pressure, controls, gate)?;
+        // Native pressure is already centered; never subtract the physical
+        // component datum a second time or reconstruct a large absolute field.
+        let mut power =
+            self.sample_viscous_power::<false>(&self.field(), &self.pressure, controls, gate)?;
         let (cell_buoyancy_power_w, supplied_buoyancy_power_w) = match buoyancy_force_n_m3 {
             Some(force) => {
                 let (cells, power) = self.body_force_power(force, controls, gate)?;
@@ -316,8 +364,17 @@ impl Solver<'_> {
         for a in 0..3 {
             for &index in &self.comps[a].unknowns {
                 poll(gate)?;
-                // Exactly rho*face_area*length from the native inertia row.
-                let mass = self.interior_face_mass_kg(a, index);
+                // Interior rows retain their exact original mass arithmetic.
+                // A traction-mouth row mirrors one cell and is weighted by
+                // one half in physical work, so its kinetic mass must likewise
+                // use half of that row's rho*area*width inertia.
+                let mass = if matches!(self.comps[a].kind[index], Kind::Outlet(_)) {
+                    let (cell, _, weight) = self.power_face_cells(a, index);
+                    weight
+                        * (self.rho * self.comp_face_area(a, index) * self.domain.width(a, cell[a]))
+                } else {
+                    self.interior_face_mass_kg(a, index)
+                };
                 let old = time.previous[a][index];
                 let new = self.vel[a][index];
                 initial = finite_value(
@@ -360,5 +417,238 @@ impl Solver<'_> {
             backward_euler_loss: numerical_loss,
             residual_j,
         })
+    }
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+
+    // Exact one-degree-of-freedom BE balances exercise the production
+    // extensive account. Native mouth geometry is tested separately below.
+    fn pressure_step(before: f64, force: f64, start: f64) -> UnsteadyMechanicalStep {
+        let mass = 2.0;
+        let dt = 0.25;
+        let resistance = 0.5;
+        let after = (mass * before + dt * force) / (mass + dt * resistance);
+        let increment = FaceKineticIncrement::new(mass, before, after);
+        let heat = resistance * after * after;
+        let supplied = force * after;
+        let kinetic = increment.stored_j();
+        let numerical = increment.backward_euler_loss_j();
+        let power = ViscousPower {
+            cell_heat_w: vec![heat],
+            heat_w: heat,
+            molecular_heat_w: heat,
+            darcy_heat_w: 0.0,
+            forchheimer_heat_w: 0.0,
+            cell_darcy_heat_w: None,
+            cell_forchheimer_heat_w: None,
+            wall_power_w: [0.0; 6],
+            wall_tangential_force_n: [[0.0; 3]; 6],
+            supplied_wall_power_w: 0.0,
+            pressure_power_w: [0.0, supplied, 0.0, 0.0, 0.0, 0.0],
+            supplied_pressure_power_w: supplied,
+            cell_body_power_w: None,
+            supplied_body_power_w: 0.0,
+            pressure_constraint_power_w: 0.0,
+            residual_w: supplied - heat,
+            reynolds: 0.01,
+        };
+        UnsteadyMechanicalStep {
+            start_s: start,
+            duration_s: dt,
+            end_s: start + dt,
+            residual_j: (Dd::from_f64(dt) * Dd::from_f64(power.residual_w) - kinetic - numerical)
+                .to_f64(),
+            power,
+            cell_buoyancy_power_w: None,
+            supplied_buoyancy_power_w: 0.0,
+            initial_kinetic_energy_j: 0.5 * mass * before * before,
+            final_kinetic_energy_j: 0.5 * mass * after * after,
+            kinetic_energy_change_j: kinetic.to_f64(),
+            kinetic_energy_change: kinetic,
+            backward_euler_loss_j: numerical.to_f64(),
+            backward_euler_loss: numerical,
+        }
+    }
+
+    #[test]
+    fn signed_reservoir_work_closes_acceleration_braking_and_physical_heat() {
+        let controls = ViscousHeatControls {
+            maximum_reynolds: 0.1,
+            power_tolerance_w: 1e-12,
+        };
+        let mut audit = UnsteadyHeatingAudit::default();
+        let mut before = 0.0;
+        let mut returned_work = false;
+        let mut supplied = 0.0;
+        for (step, force) in [2.0, -1.0, -2.0, 0.0].into_iter().enumerate() {
+            let receipt = pressure_step(before, force, step as f64 * 0.25);
+            receipt.admit_balance(controls).unwrap();
+            returned_work |= receipt.power.supplied_pressure_power_w < 0.0;
+            supplied += receipt.duration_s * receipt.power.supplied_pressure_power_w;
+            audit.accept(&receipt, controls).unwrap();
+            // Recover the signed accepted endpoint from its independent BE row.
+            before = (2.0 * before + 0.25 * force) / 2.125;
+        }
+        assert!(returned_work);
+        assert!(audit.generated_heat_j > 0.0);
+        assert!(audit.backward_euler_loss_j > 0.0);
+        assert_eq!(audit.supplied_pressure_work_j, supplied);
+        assert_eq!(audit.pressure_work_j[1], supplied);
+        assert_eq!(audit.supplied_wall_work_j, 0.0);
+        assert_eq!(audit.supplied_body_work_j, 0.0);
+        assert_eq!(audit.pressure_constraint_work_j, 0.0);
+        assert!(
+            (supplied
+                - audit.generated_heat_j
+                - audit.kinetic_energy_change_j
+                - audit.backward_euler_loss_j)
+                .abs()
+                < 1e-14
+        );
+        assert_eq!(audit.generated_heat_j, audit.molecular_heat_j);
+    }
+
+    #[test]
+    fn rejected_pressure_work_preserves_the_accepted_extensive_account() {
+        let controls = ViscousHeatControls {
+            maximum_reynolds: 0.1,
+            power_tolerance_w: 1e-12,
+        };
+        let mut audit = UnsteadyHeatingAudit::default();
+        let first = pressure_step(0.0, 2.0, 0.0);
+        audit.accept(&first, controls).unwrap();
+        let saved = audit;
+        let mut wrong = pressure_step(0.5 / 2.125, -1.0, 0.25);
+        wrong.power.supplied_pressure_power_w += 1.0;
+        assert!(audit.accept(&wrong, controls).is_err());
+        assert_eq!(audit, saved);
+
+        let mut overflow = pressure_step(0.5 / 2.125, -1.0, 0.25);
+        overflow.duration_s = 2.0;
+        overflow.power.pressure_power_w[0] = f64::MAX;
+        assert!(audit.accept(&overflow, controls).is_err());
+        assert_eq!(audit, saved);
+    }
+}
+
+#[cfg(test)]
+mod pressure_mouth_tests {
+    use super::*;
+
+    fn near(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 2e-10,
+            "{actual:e} != {expected:e}"
+        );
+    }
+
+    #[test]
+    fn native_pressure_mouth_inertia_and_regenerative_work_use_physical_half_cells() {
+        let gate = CancelGate::new_clock_free();
+        let fluid = FluidProperties {
+            density_kg_m3: 2.0,
+            specific_heat_j_kg_k: 2.0,
+            conductivity_w_m_k: 0.01,
+            kinematic_viscosity_m2_s: 1.0,
+        };
+        let controls = ViscousHeatControls {
+            maximum_reynolds: 0.1,
+            power_tolerance_w: 1e-9,
+        };
+        for axis in 0..3 {
+            let mut widths = [vec![0.5], vec![0.75], vec![0.5]];
+            widths[axis] = vec![0.5, 1.0, 1.5];
+            let domain = VoxelDomain::graded(widths).unwrap();
+            let area = domain.volume(0) / domain.width(axis, 0);
+            let mass = fluid.density_kg_m3 * 3.0 * area;
+            let mut faces = [FvBoundary::Symmetry; 6];
+            faces[2 * axis] = FvBoundary::Outlet;
+            faces[2 * axis + 1] = FvBoundary::Outlet;
+            let mut config = SimpleConfig::new(faces);
+            config.tolerance = 1e-11;
+            config.pressure_tolerance = 1e-13;
+            config.momentum_tolerance = 1e-12;
+            let viscosity = vec![
+                fluid.density_kg_m3 * fluid.kinematic_viscosity_m2_s;
+                domain.cell_count()
+            ];
+            let run = |common: f64| {
+                let mut solver =
+                    material_solver(&domain, &fluid, &viscosity, None, None, &config, &gate).unwrap();
+                solver.enable_unsteady_stokes_heat(controls).unwrap();
+                let mut audit = UnsteadyHeatingAudit::default();
+                let mut records = Vec::new();
+                let mut expected = 0.0;
+                for (step, head) in [0.0625, 0.0625, -0.0625, -0.125, -0.125]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let previous = expected;
+                    expected += 0.125 * head / (fluid.density_kg_m3 * 3.0);
+                    let datum = common + step as f64 * (common / 8.0);
+                    let mut offsets = [0.0; 6];
+                    offsets[2 * axis] = datum + head;
+                    offsets[2 * axis + 1] = datum;
+                    solver.set_pressure_loads(1.0, offsets, &gate).unwrap();
+                    solver.start_time(0.125, TimeScheme::BackwardEuler);
+                    let mut settled = false;
+                    for _ in 0..1000 {
+                        let (mass, momentum) = solver.sweep(&gate).unwrap();
+                        if mass <= 1e-11 && momentum <= 1e-11 {
+                            settled = true;
+                            break;
+                        }
+                    }
+                    assert!(settled);
+                    solver.project(&gate).unwrap();
+                    let receipt = solver
+                        .unsteady_mechanical_step(
+                            step as f64 * 0.125,
+                            (step + 1) as f64 * 0.125,
+                            None,
+                            controls,
+                            &gate,
+                        )
+                        .unwrap();
+                    for &face in &solver.comps[axis].unknowns {
+                        near(solver.vel[axis][face], expected);
+                    }
+                    near(
+                        receipt.initial_kinetic_energy_j,
+                        0.5 * mass * previous * previous,
+                    );
+                    near(
+                        receipt.final_kinetic_energy_j,
+                        0.5 * mass * expected * expected,
+                    );
+                    near(
+                        receipt.kinetic_energy_change_j,
+                        0.5 * mass * (expected - previous) * (expected + previous),
+                    );
+                    near(
+                        receipt.backward_euler_loss_j,
+                        0.5 * mass * (expected - previous).powi(2),
+                    );
+                    near(
+                        receipt.power.supplied_pressure_power_w,
+                        head * area * expected,
+                    );
+                    near(receipt.power.heat_w, 0.0);
+                    audit.accept(&receipt, controls).unwrap();
+                    records.push(receipt);
+                }
+                assert!(records[2].power.supplied_pressure_power_w < 0.0);
+                assert!(solver.vel[axis][solver.comps[axis].unknowns[0]] < 0.0);
+                assert!(audit.backward_euler_loss_j > 0.0);
+                near(audit.generated_heat_j, 0.0);
+                (solver.vel, audit, records)
+            };
+            let baseline = run(0.0);
+            let shifted = run(1_099_511_627_776.0);
+            assert_eq!(baseline, shifted);
+        }
     }
 }

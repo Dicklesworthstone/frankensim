@@ -10,6 +10,10 @@ use super::*;
 use fs_bem::observation_transfers::PreparedRadiationOptions;
 use fs_duct::network::molecular::{MolecularEdge, MolecularNetwork};
 use fs_duct::network::{CoupledSourceBank, PortSource};
+use fs_duct::molecular::MolecularCompliantWall;
+
+mod fields;
+pub use fields::{MolecularRadiatingFieldRequest, PreparedMolecularRadiatingFields};
 
 /// Frequency-dependent interior storage, absorption and optional wall diffusion
 /// attached to one original network/exterior owner. Neither binding nor a
@@ -48,14 +52,37 @@ impl RadiatingNetwork {
         maximum_blocks: usize,
         gate: &CancelGate,
     ) -> Result<MolecularRadiatingNetwork<'_>, ExteriorNetworkError> {
+        self.bind_molecular_with_compliant_walls(edges, Vec::new(), maximum_blocks, gate)
+    }
+
+    /// Bind original molecular gases and source-owned local mechanical walls
+    /// to the same full exterior. Exact edge ids retain each supplied Arc,
+    /// including its material state, relaxation law and radius/frequency domain.
+    /// Unlisted edges keep their original media pin or explicit rigid limit.
+    ///
+    /// Wall compliance changes the solved opening flows before BEM observation.
+    /// The exterior surface stays rigid outside its original opening patches;
+    /// this binding does not invent exterior radiation from distributed walls.
+    /// Gas availability, wall work and exterior work remain separate channels.
+    ///
+    /// Duplicate/unknown wall identities and conflicting pin/custom bindings
+    /// refuse in the native molecular owner before radial spectra preparation.
+    pub fn bind_molecular_with_compliant_walls(
+        &self,
+        edges: Vec<MolecularEdge>,
+        walls: Vec<(String, MolecularCompliantWall)>,
+        maximum_blocks: usize,
+        gate: &CancelGate,
+    ) -> Result<MolecularRadiatingNetwork<'_>, ExteriorNetworkError> {
         poll(gate)?;
         let media = self.media.as_ref().ok_or_else(|| {
             bad("molecular radiation requires the original explicit regional gas records")
         })?;
-        let interior = MolecularNetwork::new_controlled(
+        let interior = MolecularNetwork::new_with_compliant_walls_controlled(
             self.driving.network().clone(),
             media.clone(),
             edges,
+            walls,
             maximum_blocks,
             &mut || gate.is_requested(),
         )?;

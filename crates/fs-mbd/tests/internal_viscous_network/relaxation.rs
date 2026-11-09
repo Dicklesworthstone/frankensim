@@ -1,4 +1,7 @@
 //! Complete Maxwell memory, exact native graph recoil and independent heat.
+
+#[path = "relaxation/kinetics.rs"]
+mod kinetics;
 use super::*;
 use fs_mbd::spatial_loads::internal_impulse::viscous::network::{
     driven::{DrivenViscousNetworkLimits, PreparedDrivenViscousNetwork},

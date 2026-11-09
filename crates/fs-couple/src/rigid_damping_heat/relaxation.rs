@@ -7,10 +7,13 @@
 //! matching caloric interval accepts. No equilibrium spring or temperature
 //! dependence of the retained memory law is inferred.
 
+/// Calibrated WLF/Arrhenius kinetics with retained history and finite-cell feedback.
+pub mod temperature;
+
 use super::{
-    FrozenSource, MechanicalAdvance, MechanicalStep, Result, RigidDampingThermalCandidate,
-    RigidDampingThermalError, RigidDampingThermalInput, RigidDampingThermalReport, ThermalControls,
-    advance_with_source,
+    DampingSource, FrozenSource, MechanicalAdvance, MechanicalStep, Result,
+    RigidDampingThermalCandidate, RigidDampingThermalError, RigidDampingThermalInput,
+    RigidDampingThermalReport, ThermalControls, advance_with_source,
 };
 use fs_mbd::{
     RigidBodyState,
@@ -23,6 +26,7 @@ use fs_mbd::{
         },
         internal_motion::viscous::network::relaxation::{
             RelaxationNetworkMotionError, step_relaxation_network_with_loads,
+            step_relaxation_network_with_loads_and_kinetics,
         },
     },
 };
@@ -31,7 +35,8 @@ use std::borrow::Cow;
 
 pub use fs_mbd::spatial_loads::{
     internal_impulse::viscous::network::relaxation::{
-        RelaxationNetworkLimits, RelaxationNetworkMemory, SpatialRelaxationBranch,
+        HeldRelaxationKinetics, RelaxationNetworkLimits, RelaxationNetworkMemory,
+        SpatialRelaxationBranch,
     },
     internal_motion::viscous::{
         driven::HeldInternalEffort, network::relaxation::RelaxationNetworkMotionControls,
@@ -132,6 +137,35 @@ pub fn advance_candidate<'m, O: DepositionObserver>(
     config: RelaxationDampingThermalConfig,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<RelaxationDampingThermalCandidate<'m, O>, O::Error> {
+    let links = prepare_links(input, config, &mut cancelled)?;
+    let mechanics = RelaxationMotion {
+        links: &links,
+        initial_memory: input.memory,
+        memory: Cow::Borrowed(input.memory),
+        efforts: input.efforts,
+        controls: config.mechanical,
+    };
+    let (native, _, mechanics) = advance_with_source(
+        input.mechanical,
+        thermal,
+        observer,
+        FrozenSource(input.mechanical.links),
+        mechanics,
+        target_s,
+        config.into(),
+        cancelled,
+    )?;
+    Ok(RelaxationDampingThermalCandidate {
+        native,
+        memory: mechanics.memory.into_owned(),
+    })
+}
+
+fn prepare_links<E, S>(
+    input: RelaxationDampingThermalInput<'_>,
+    config: RelaxationDampingThermalConfig,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<RelaxationNetworkLink>, E, S> {
     if cancelled() {
         return Err(RigidDampingThermalError::Cancelled);
     }
@@ -172,27 +206,7 @@ pub fn advance_candidate<'m, O: DepositionObserver>(
             branches: branches.clone(),
         });
     }
-    let mechanics = RelaxationMotion {
-        links: &links,
-        initial_memory: input.memory,
-        memory: Cow::Borrowed(input.memory),
-        efforts: input.efforts,
-        controls: config.mechanical,
-    };
-    let (native, _, mechanics) = advance_with_source(
-        input.mechanical,
-        thermal,
-        observer,
-        FrozenSource(input.mechanical.links),
-        mechanics,
-        target_s,
-        config.into(),
-        cancelled,
-    )?;
-    Ok(RelaxationDampingThermalCandidate {
-        native,
-        memory: mechanics.memory.into_owned(),
-    })
+    Ok(links)
 }
 
 #[derive(Clone)]
@@ -217,17 +231,66 @@ impl MechanicalAdvance for RelaxationMotion<'_> {
         dt_s: f64,
         requested: &dyn Fn() -> bool,
     ) -> Result<MechanicalStep, E, S> {
-        let mut native = step_relaxation_network_with_loads(
-            states,
-            input.properties,
-            self.links,
+        self.step_native(input, states, None, dt_s, requested)
+    }
+    fn step_with_source<E, S: DampingSource>(
+        &self,
+        input: RigidDampingThermalInput<'_>,
+        states: &[RigidBodyState],
+        source: &S,
+        dt_s: f64,
+        requested: &dyn Fn() -> bool,
+    ) -> Result<MechanicalStep, E, S::Error> {
+        self.step_native(input, states, source.relaxation_kinetics(), dt_s, requested)
+    }
+    fn accept<E, S>(&mut self, step: &mut MechanicalStep) -> Result<(), E, S> {
+        self.memory = Cow::Owned(step.relaxation_memory.take().ok_or(
+            RigidDampingThermalError::Invalid("native Maxwell step lost its complete memory bank"),
+        )?);
+        Ok(())
+    }
+    fn memory_energy_change<E, S>(&self) -> Result<f64, E, S> {
+        Ok(relaxation_memory_energy_change(
+            self.initial_memory,
             &self.memory,
-            self.efforts,
-            input.loads,
-            dt_s,
-            self.controls,
-            requested,
-        )?;
+        )?)
+    }
+}
+
+impl RelaxationMotion<'_> {
+    fn step_native<E, S>(
+        &self,
+        input: RigidDampingThermalInput<'_>,
+        states: &[RigidBodyState],
+        kinetics: Option<HeldRelaxationKinetics<'_>>,
+        dt_s: f64,
+        requested: &dyn Fn() -> bool,
+    ) -> Result<MechanicalStep, E, S> {
+        let mut native = match kinetics {
+            Some(kinetics) => step_relaxation_network_with_loads_and_kinetics(
+                states,
+                input.properties,
+                self.links,
+                &self.memory,
+                self.efforts,
+                kinetics,
+                input.loads,
+                dt_s,
+                self.controls,
+                requested,
+            )?,
+            None => step_relaxation_network_with_loads(
+                states,
+                input.properties,
+                self.links,
+                &self.memory,
+                self.efforts,
+                input.loads,
+                dt_s,
+                self.controls,
+                requested,
+            )?,
+        };
         let connector_dissipation_j = core::mem::take(&mut native.connector_dissipation_j);
         let connector_actuator_work_j =
             Some(core::mem::take(&mut native.connector_actuator_work_j));
@@ -249,17 +312,5 @@ impl MechanicalAdvance for RelaxationMotion<'_> {
             native_drift_energy_defect_j,
             pair_relaxations: 0,
         })
-    }
-    fn accept<E, S>(&mut self, step: &mut MechanicalStep) -> Result<(), E, S> {
-        self.memory = Cow::Owned(step.relaxation_memory.take().ok_or(
-            RigidDampingThermalError::Invalid("native Maxwell step lost its complete memory bank"),
-        )?);
-        Ok(())
-    }
-    fn memory_energy_change<E, S>(&self) -> Result<f64, E, S> {
-        Ok(relaxation_memory_energy_change(
-            self.initial_memory,
-            &self.memory,
-        )?)
     }
 }

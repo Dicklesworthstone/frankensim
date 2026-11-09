@@ -17,6 +17,10 @@ use super::super::sdirk::{
 };
 use super::*;
 use crate::interface::temperature::TemperatureContactEvaluation;
+use crate::interface::ContactResistanceGradient;
+use crate::radiation::pointwise::PointwiseRadiationParameterGradient;
+use crate::radiation::pointwise::material::adjoint::MaterialRadiationParameterGradient;
+use crate::radiation::pointwise_enclosure::material::adjoint::MaterialEnclosureParameterGradient;
 
 /// Complete two-stage implicit pullback. Array order is first, second stage.
 #[derive(Debug)]
@@ -45,6 +49,54 @@ pub struct EnthalpySdirk2ConductivityGradient {
     pub shared_scales: Vec<f64>,
 }
 
+/// Additional work admission for the original physical parameter contractions.
+/// Ordinary history/source pullbacks do not request these controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnthalpySdirk2ParameterBudget {
+    /// Matching face pairs plus retained overlap triangles at EACH stage.
+    /// Both stages together may traverse twice this allowance. Zero is valid
+    /// without contacts; source selection and contact geometry remain fixed.
+    pub max_contact_face_pairs_per_stage: usize,
+    /// Sum of the two original radiation workspace allowances admitted during
+    /// linearization, including material control templates and contraction
+    /// scratch. Zero is valid without radiation. This is an entry/work bound,
+    /// not peak resident memory: the stage tangents and returned controls coexist.
+    pub max_radiation_entries: usize,
+}
+
+/// Original radiation controls at one actual tableau stage.
+/// Material laws retain their scalar, curve or surface ordinates and identities;
+/// they are never substituted with frozen nodal emissivity controls.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EnthalpySdirk2RadiationGradient {
+    /// Fixed gray ambient or gray/spectral reflected-enclosure declarations.
+    Pointwise(PointwiseRadiationParameterGradient),
+    /// Original material emissivity and one independent black bath per patch.
+    MaterialAmbient(MaterialRadiationParameterGradient),
+    /// Original material emissivity and the sole open-enclosure bath, if any.
+    MaterialEnclosure(MaterialEnclosureParameterGradient),
+}
+
+/// Independent physical controls in one stage's original declaration order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnthalpySdirk2StageParameters {
+    /// Whole-law resistance multipliers at one, in canonical interface order.
+    /// Includes fixed and evolving contacts; the complete state feedback is
+    /// already in the same stage adjoint. Geometry and source selection are fixed.
+    pub resistance_multipliers: Vec<ContactResistanceGradient>,
+    pub radiation: Option<EnthalpySdirk2RadiationGradient>,
+}
+
+/// One complete thermal block transpose and its original physical controls.
+#[derive(Debug)]
+pub struct EnthalpySdirk2ParameterGradient {
+    pub transport: EnthalpySdirk2Gradient,
+    /// First and second physical stage contributions. Add matching controls
+    /// when a declaration is shared between stages; different stage owners must
+    /// retain their separate identities. No further tableau weight is needed.
+    pub stages: [EnthalpySdirk2StageParameters; 2],
+}
+
 #[derive(Debug)]
 struct StageTangent {
     tangent: Csr,
@@ -55,6 +107,11 @@ struct StageTangent {
     // Original stage K_eff*T only, excluding storage and all external loads.
     conductive_loads: Vec<[f64; 4]>,
     radiation: Option<PointwiseBoundaryAssembly>,
+    material_ambient: bool,
+    radiation_entries: usize,
+    // Live contacts already retain their exact physical operator in the primal
+    // stage receipt. Fixed interfaces need their own unchanged geometry snapshot.
+    fixed_interfaces: Option<ThermalInterfaces>,
 }
 
 /// Both accepted physical stages and their exact spatial h tangents.
@@ -303,6 +360,9 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             inverse_diagonal,
             conductive_loads,
             radiation: stage.radiation,
+            material_ambient: matches!(radiation, Some(PointwiseBoundary::MaterialAmbient(_))),
+            radiation_entries,
+            fixed_interfaces: input.interfaces.cloned(),
         })
     }
 }
@@ -434,6 +494,139 @@ impl EnthalpySdirk2Linearization<'_> {
         }
         poll(cx, elements)?;
         Ok(EnthalpySdirk2ConductivityGradient { stage_scales, shared_scales })
+    }
+
+    /// Contract physical contact and radiation controls with the unchanged
+    /// multipliers returned by [Self::pullback] or [Self::pullback_stages].
+    ///
+    /// Each stage uses `gamma*dt*lambda` on its own free rows. Contact resistance
+    /// scales contract the original contact operator; outward radiation uses
+    /// the negative of that load weight. The eliminated block transpose already
+    /// carries stage-one influence. No extra RK weight, k/T/phase chain rule,
+    /// thermal transpose, nonlinear solve or material query is performed.
+    /// Reflected radiation uses its existing retained radiosity contraction.
+    ///
+    /// Fixed contact geometry is retained once per stage at binding; live
+    /// contacts reuse their original physical stage receipts. Radiation controls
+    /// preserve the original scalar/curve/surface or spectral representation.
+    /// Direct objective dependence, geometry, view factors, chart and time-grid
+    /// controls remain caller-owned. This entry cannot check that caller-supplied
+    /// multipliers came from this linearization; the combined pullbacks can.
+    ///
+    /// # Errors
+    /// Wrong/nonfinite multipliers, exhausted original contact/radiation work,
+    /// unsupported source controls, allocation/arithmetic refusal or cancellation
+    /// return no partial parameter report and change no accepted physical state.
+    pub fn parameter_pullback(
+        &self,
+        cx: &Cx<'_>,
+        full_stage_joule_multipliers: [&[f64]; 2],
+        budget: EnthalpySdirk2ParameterBudget,
+    ) -> Result<[EnthalpySdirk2StageParameters; 2], EnthalpyAdjointError> {
+        self.admit_parameters(cx, budget)?;
+        for multiplier in full_stage_joule_multipliers {
+            vector(cx, multiplier, self.masses.len())?;
+        }
+        let parameters = [
+            self.stage_parameters(cx, 0, full_stage_joule_multipliers[0], budget)?,
+            self.stage_parameters(cx, 1, full_stage_joule_multipliers[1], budget)?,
+        ];
+        poll(cx, self.masses.len())?;
+        Ok(parameters)
+    }
+
+    /// Endpoint enthalpy objective with original contact/radiation controls,
+    /// using exactly the same two thermal transposes as [Self::pullback].
+    pub fn pullback_with_parameters(
+        &self,
+        cx: &Cx<'_>,
+        seed: &[f64],
+        config: LinearConfig,
+        budget: EnthalpySdirk2ParameterBudget,
+    ) -> Result<EnthalpySdirk2ParameterGradient, EnthalpyAdjointError> {
+        self.admit_parameters(cx, budget)?;
+        let transport = self.pullback(cx, seed, config)?;
+        let stages = self.parameter_pullback(
+            cx, [&transport.stage_adjoint[0], &transport.stage_adjoint[1]], budget,
+        )?;
+        Ok(EnthalpySdirk2ParameterGradient { transport, stages })
+    }
+
+    /// Independent objectives at both actual stages, retaining the same
+    /// complete stage/history/source/bath derivative and physical controls.
+    pub fn pullback_stages_with_parameters(
+        &self,
+        cx: &Cx<'_>,
+        seeds: [&[f64]; 2],
+        config: LinearConfig,
+        budget: EnthalpySdirk2ParameterBudget,
+    ) -> Result<EnthalpySdirk2ParameterGradient, EnthalpyAdjointError> {
+        self.admit_parameters(cx, budget)?;
+        let transport = self.pullback_stages(cx, seeds, config)?;
+        let stages = self.parameter_pullback(
+            cx, [&transport.stage_adjoint[0], &transport.stage_adjoint[1]], budget,
+        )?;
+        Ok(EnthalpySdirk2ParameterGradient { transport, stages })
+    }
+
+    fn admit_parameters(&self, cx: &Cx<'_>, budget: EnthalpySdirk2ParameterBudget)
+        -> Result<(), EnthalpyAdjointError>
+    {
+        poll(cx, 0)?;
+        self.stages[0].radiation_entries.checked_add(self.stages[1].radiation_entries)
+            .filter(|&entries| entries <= budget.max_radiation_entries)
+            .ok_or(EnthalpyAdjointError::InvalidInput(
+                "SDIRK2 physical controls exceed their combined radiation-entry allowance",
+            ))?;
+        budget.max_contact_face_pairs_per_stage.checked_mul(2)
+            .ok_or(EnthalpyAdjointError::InvalidInput(
+                "SDIRK2 physical contact work allowance overflow",
+            ))?;
+        Ok(())
+    }
+
+    fn stage_parameters(
+        &self, cx: &Cx<'_>, index: usize, multiplier: &[f64],
+        budget: EnthalpySdirk2ParameterBudget,
+    ) -> Result<EnthalpySdirk2StageParameters, EnthalpyAdjointError> {
+        let stage = &self.stages[index];
+        let primal = if index == 0 { &self.primal.first_stage } else { &self.primal.second_stage };
+        let mut load = Vec::new();
+        load.try_reserve_exact(self.masses.len()).map_err(|_|
+            EnthalpyAdjointError::InvalidInput("SDIRK2 parameter load allocation refused"))?;
+        for (vertex, &lambda) in multiplier.iter().enumerate() {
+            if vertex % ASSEMBLY_TILE == 0 { poll(cx, vertex)?; }
+            load.push(if stage.prescribed[vertex] { 0.0 } else { finite(self.diagonal_dt * lambda)? });
+        }
+        let contacts = primal.physical_contacts.as_ref()
+            .map(TemperatureContactEvaluation::frozen_interfaces)
+            .or(stage.fixed_interfaces.as_ref());
+        let resistance_multipliers = match contacts {
+            Some(contacts) => contacts.resistance_scale_pullback(
+                cx, &primal.temperature, &load, budget.max_contact_face_pairs_per_stage,
+            )?,
+            None => Vec::new(),
+        };
+        for (vertex, weight) in load.iter_mut().enumerate() {
+            if vertex % ASSEMBLY_TILE == 0 { poll(cx, vertex)?; }
+            *weight = -*weight;
+        }
+        let radiation = match &stage.radiation {
+            None => None,
+            Some(PointwiseBoundaryAssembly::Ambient(owner)) if stage.material_ambient =>
+                Some(EnthalpySdirk2RadiationGradient::MaterialAmbient(
+                    owner.material_parameter_pullback(cx, &load)?,
+                )),
+            Some(PointwiseBoundaryAssembly::MaterialEnclosure(owner)) =>
+                Some(EnthalpySdirk2RadiationGradient::MaterialEnclosure(
+                    owner.material_parameter_pullback(cx, &load)?,
+                )),
+            Some(owner) => Some(EnthalpySdirk2RadiationGradient::Pointwise(
+                owner.parameter_pullback(cx, &load)?,
+            )),
+        };
+        poll(cx, self.masses.len())?;
+        Ok(EnthalpySdirk2StageParameters { resistance_multipliers, radiation })
     }
 
     /// Apply the complete block Jacobian of the eliminated two-stage balance.

@@ -1461,6 +1461,33 @@ retain actual aqueous speciation, phase/component balances, saturation and work
 counts. Solid exhaustion is a bounded endpoint, not a claimed exact continuous
 event time. A failed or cancelled advance leaves its input state unchanged.
 
+Each stage bounds its possible transfer using the initial rate and aqueous
+pH spread before evaluating a trial inventory. A short step within the declared
+pH domain does not require speciation of the distant, fully depleted donor.
+A nonzero accepted transfer must change at least one retained phase stock;
+unresolved increments refuse instead of silently accumulating lost mass.
+A final time remainder below the minimum step may be omitted only when its
+whole-motion estimate fits both phase-stock tolerances and the absolute extent
+tolerance. Its normalized bound remains in the reported maximum accepted error.
+
+Strong precipitation solves the implicit relation in the logarithm of the
+remaining dissolved formula stock when an extent subtraction would lose that
+stock. The residual is `ln(Omega(u))-ln(1+(u_start-u)/(h*K_A))`; both terms
+are evaluated without overflowing the rate product or saturation ratio. The
+original salt stoichiometry and terminal-anion charge balance, or the original
+hydrolysis charge balance, supply its monotone lower slope. Aqueous pH spread
+and floating-point logarithm margins contribute to numerical root-location
+estimates, with both relative trace accuracy and the caller's extent/amount
+tolerances enforced. These are numerical estimates, not interval certificates.
+
+The positive remaining donor is retained directly alongside the solid stock.
+A state close to saturation may remain unchanged when either its estimated
+maximum possible later relaxation or the motion over the whole remaining
+window fits the same tolerances. The time-limited allowance uses the remaining
+window rather than accumulating independently omitted small stages. Root and
+stationary allowances contribute to the existing temporal error comparison,
+so a small positive dissolved trace remains usable on subsequent advances.
+
 The `mineral_precipitation --kinetics` mode runs the same original USGS
 iron/goethite source selection with explicit initial dissolved/solid stocks and
 a separately supplied surface rate. Its equilibrium comparison is diagnostic;
@@ -4532,3 +4559,28 @@ moving-phase derivatives, weak heat under large reference datums, composition
 and reversal, source/density/phase refusals and late cancellation. These new
 regressions were authored but could not be compiled or executed while the
 development executor was unavailable.
+
+
+### Source-relative receiving UV equilibrium from an accepted SP state
+
+The prepared `composition::volume::energy_path` owner accepts an opaque
+`EquilibriumCaloricAnchorV1` through `sample_from_caloric_anchor`. Exact original
+chemistry, elemental/charge inventory and feed normalization must agree. The
+original TV/Gibbs closure and safeguarded UV root solve the requested extensive
+`U-U_anchor`; per-species source integrals and amount-reference terms precede
+summation. The shared internal-energy integral retains double-double amount,
+formation-energy and RT arithmetic, matching the existing enthalpy treatment.
+Neither the prepared UV birth reference nor the anchor's SP entropy reference
+changes. The returned anchored balances are separate from the ordinary sample's
+immutable UV-reference balances. Failure or cancellation invalidates current
+publication. Direct SP entropy differences use the same source/mixing-entropy
+owner and exact anchor binding.
+
+This is a caloric/source integration seam, not a mass-flow law or a different
+reaction solver. A receiving-volume consumer owns its mass scaling, finite
+exported enthalpy, EOS reconciliation and total energy/entropy acceptance.
+Focused frozen-limit, large-formation-datum and source/cancellation regressions
+are in `fs-gas::equilibrium_flow::tests::nozzle_pair_anchor`.
+
+Three focused native integration regressions are authored but uncompiled and
+unexecuted while the development executor is disconnected.

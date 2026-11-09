@@ -61,6 +61,10 @@ pub struct DiluteSoluteReport<const N: usize> {
     /// Signed left-to-right integrals at all cells+1 faces [mol/m²].
     /// These are distinct mechanisms; neither should be applied a second time.
     pub advective_face_amount_mol_m2: Vec<[f64; N]>,
+    /// Molecular transfer through the original entry points. Through a prepared
+    /// dispersion interval this is the TOTAL gradient-driven molecular plus
+    /// mechanical transfer; only that sum is continuous across heterogeneous
+    /// interfaces. It is not an additional independently applied mechanism.
     pub diffusive_face_amount_mol_m2: Vec<[f64; N]>,
 }
 
@@ -363,6 +367,7 @@ pub(super) fn transport<const N: usize>(
     )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn transport_with_storage<const N: usize>(
     interval_s: [f64; 2],
@@ -377,6 +382,41 @@ pub(super) fn transport_with_storage<const N: usize>(
     boundaries: [DiluteSoluteBoundary<N>; 2],
     controls: DiluteSoluteControls<N>,
     storage: &mut impl ImmobileStorage<N>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<DiluteSoluteStep<N>> {
+    transport_with_dispersion(
+        interval_s,
+        duration_s,
+        before_water_m,
+        after_water_m,
+        widths_m,
+        water_face_m,
+        initial,
+        diffusivity_m2_s,
+        tortuosity,
+        boundaries,
+        controls,
+        storage,
+        None,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(super) fn transport_with_dispersion<const N: usize>(
+    interval_s: [f64; 2],
+    duration_s: f64,
+    before_water_m: &[f64],
+    after_water_m: &[f64],
+    widths_m: &[f64],
+    water_face_m: &[f64],
+    initial: &[[f64; N]],
+    diffusivity_m2_s: &[[f64; N]],
+    tortuosity: &[f64],
+    boundaries: [DiluteSoluteBoundary<N>; 2],
+    controls: DiluteSoluteControls<N>,
+    storage: &mut impl ImmobileStorage<N>,
+    mechanical_bulk_m2_s: Option<&[[f64; 2]]>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<DiluteSoluteStep<N>> {
     poll(&mut cancelled)?;
@@ -384,6 +424,13 @@ pub(super) fn transport_with_storage<const N: usize>(
     let (cell_species, original_bytes) = admit_extent(n, controls)?;
     let workspace_bytes = original_bytes
         .checked_add(storage.additional_bytes())
+        .and_then(|bytes| {
+            bytes.checked_add(if mechanical_bulk_m2_s.is_some() {
+                n * core::mem::size_of::<f64>()
+            } else {
+                0
+            })
+        })
         .ok_or(DiluteSoluteError::Invalid(
             "sorption storage extent overflow",
         ))?;
@@ -399,6 +446,7 @@ pub(super) fn transport_with_storage<const N: usize>(
         || water_face_m.len() != n + 1
         || diffusivity_m2_s.len() != n
         || tortuosity.len() != n
+        || mechanical_bulk_m2_s.is_some_and(|values| values.len() != n)
         || !positive(duration_s)
         || !interval_s.iter().all(|v| v.is_finite())
         || interval_s[1] <= interval_s[0]
@@ -486,6 +534,7 @@ pub(super) fn transport_with_storage<const N: usize>(
     let mut upper = vec![0.0; n - 1];
     let mut rhs = vec![0.0; n];
     let mut resistance = vec![0.0; n];
+    let mut right_resistance = mechanical_bulk_m2_s.map(|_| vec![0.0; n]);
     let mut conductance_dt = vec![0.0; n + 1];
     let mut solver = TridiagonalWorkspace::new(n)?;
     for k in 0..N {
@@ -495,6 +544,44 @@ pub(super) fn transport_with_storage<const N: usize>(
                 poll(&mut cancelled)?;
             }
             let d = diffusivity_m2_s[i][k];
+            if let Some(mechanical) = mechanical_bulk_m2_s {
+                if !mechanical[i].iter().all(|&value| nonnegative(value)) {
+                    return Err(DiluteSoluteError::Invalid(
+                        "finite nonnegative mechanical bulk coefficients required",
+                    ));
+                }
+                let molecular = if d == 0.0 {
+                    0.0
+                } else {
+                    (after_water_m[i] / widths_m[i]) * d / tortuosity[i]
+                };
+                if !nonnegative(molecular) || (d > 0.0 && molecular == 0.0) {
+                    return Err(DiluteSoluteError::Invalid(
+                        "positive wet-cell molecular coefficient is unrepresentable",
+                    ));
+                }
+                let mut halves = [0.0; 2];
+                for side in 0..2 {
+                    // Mechanical dispersion acts in parallel with molecular
+                    // diffusion inside each half cell, before series assembly.
+                    let coefficient = finite(molecular + mechanical[i][side])?;
+                    halves[side] = if coefficient == 0.0 {
+                        f64::INFINITY
+                    } else {
+                        (0.5 * widths_m[i]) / coefficient
+                    };
+                    if coefficient > 0.0 && !positive(halves[side]) {
+                        return Err(DiluteSoluteError::Invalid(
+                            "mixed half-cell resistance is unrepresentable",
+                        ));
+                    }
+                }
+                resistance[i] = halves[0];
+                right_resistance
+                    .as_mut()
+                    .expect("mechanical workspace admitted")[i] = halves[1];
+                continue;
+            }
             if d == 0.0 {
                 resistance[i] = f64::INFINITY;
                 continue;
@@ -512,22 +599,30 @@ pub(super) fn transport_with_storage<const N: usize>(
             if face % 128 == 0 {
                 poll(&mut cancelled)?;
             }
-            if resistance[face - 1].is_finite() && resistance[face].is_finite() {
+            let left = right_resistance
+                .as_ref()
+                .map_or(resistance[face - 1], |r| r[face - 1]);
+            if left.is_finite() && resistance[face].is_finite() {
                 conductance_dt[face] =
-                    integrated_flux(duration_s, series(resistance[face - 1], resistance[face])?)?;
+                    integrated_flux(duration_s, series(left, resistance[face])?)?;
             }
         }
         for (side, face, cell) in [(0, 0, 0), (1, n, n - 1)] {
+            let half = if side == 0 {
+                resistance[cell]
+            } else {
+                right_resistance
+                    .as_ref()
+                    .map_or(resistance[cell], |r| r[cell])
+            };
             if let DiluteSoluteBoundary::Reservoir {
                 film_resistance_s_m,
                 ..
             } = boundaries[side]
-                && resistance[cell].is_finite()
+                && half.is_finite()
             {
-                conductance_dt[face] = integrated_flux(
-                    duration_s,
-                    series(resistance[cell], film_resistance_s_m[k])?,
-                )?;
+                conductance_dt[face] =
+                    integrated_flux(duration_s, series(half, film_resistance_s_m[k])?)?;
             }
         }
         for i in 0..n {

@@ -246,7 +246,7 @@ impl TonePower {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<[ModalTonePowerDerivative; MAX_COORDINATES], ModalAcousticTimeError> {
         let x = self.coordinates(state, cosine, sine, deltas)?;
-        let n = 2 + (if self.affine { 4 } else { 2 }) * cosine.len();
+        let n = 2 + 2 * (self.envelope_degree + 1) * cosine.len();
         let mut work = [Sum::default(); MAX_COORDINATES];
         let mut heat = work;
         // Work = scale * (R*x)^T(T*x), heat = c*h * ||R*x||^2.
@@ -297,14 +297,14 @@ impl TonePower {
             0 => -((row[1] * self.omega) * (self.omega * self.h)) / self.scale,
             1 => row[0],
             _ => {
-                let width = if self.affine { 4 } else { 2 };
+                let width = 2 * (self.envelope_degree + 1);
                 let component = (column - 2) % width;
                 let mut sum = Sum::default();
                 if component == 0 {
                     sum.add(row[1]);
                 }
                 sum.add(row[column]);
-                if self.affine && component < 2 {
+                if self.envelope_degree == 1 && component < 2 {
                     sum.add(-row[column + 2]);
                 }
                 (self.h / self.scale) * sum.value()

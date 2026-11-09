@@ -6,6 +6,7 @@ pub(super) struct GasStep<R> {
     pub work_pressure_pa: f64,
     pub sampling_temperature_k: f64,
     pub sampling_pressure_pa: f64,
+    pub sampling_state: Option<MembraneGasSample>,
     pub report: R,
 }
 
@@ -17,6 +18,7 @@ pub(super) trait HeatVolumeLaw: Copy {
         volume: f64,
         heat: f64,
         controls: GasEnergySolve,
+        retain_sample: bool,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<GasStep<Self>, GasMembraneMotionError>;
     fn stored_energy_change_j(self) -> f64;
@@ -30,15 +32,24 @@ impl HeatVolumeLaw for GasHeatVolumeStep {
         volume: f64,
         heat: f64,
         controls: GasEnergySolve,
+        retain_sample: bool,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<GasStep<Self>, GasMembraneMotionError> {
-        let (endpoint, temperature, pressure, report) = match gas {
+        let (endpoint, temperature, pressure, sample, report) = match gas {
             MembraneGas::Ideal(gas) => {
                 let candidate = gas.midpoint_heat_volume(volume, heat, controls, cancelled)?;
                 let temperature = candidate.midpoint().state().temperature;
                 let pressure = candidate.midpoint().state().pressure;
+                let sample =
+                    retain_sample.then(|| MembraneGasSample::Ideal(candidate.midpoint().clone()));
                 let (endpoint, report) = candidate.into_parts();
-                (MembraneGas::Ideal(endpoint), temperature, pressure, report)
+                (
+                    MembraneGas::Ideal(endpoint),
+                    temperature,
+                    pressure,
+                    sample,
+                    report,
+                )
             }
             MembraneGas::PengRobinson(gas) => {
                 let candidate = gas
@@ -47,11 +58,14 @@ impl HeatVolumeLaw for GasHeatVolumeStep {
                     .midpoint_heat_volume(volume, heat, controls, cancelled)?;
                 let temperature = candidate.midpoint().temperature_k();
                 let pressure = candidate.midpoint().pressure_pa();
+                let sample = retain_sample
+                    .then(|| MembraneGasSample::PengRobinson(candidate.midpoint().clone()));
                 let (endpoint, report) = candidate.into_parts();
                 (
                     MembraneGas::PengRobinson(ClosedRealGasParcel::from_isochoric(endpoint)),
                     temperature,
                     pressure,
+                    sample,
                     report,
                 )
             }
@@ -61,6 +75,7 @@ impl HeatVolumeLaw for GasHeatVolumeStep {
             work_pressure_pa: pressure,
             sampling_temperature_k: temperature,
             sampling_pressure_pa: pressure,
+            sampling_state: sample,
             report,
         })
     }
@@ -81,16 +96,25 @@ impl HeatVolumeLaw for GasDiscreteGradientStep {
         volume: f64,
         heat: f64,
         controls: GasEnergySolve,
+        retain_sample: bool,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<GasStep<Self>, GasMembraneMotionError> {
-        let (endpoint, temperature, pressure, report) = match gas {
+        let (endpoint, temperature, pressure, sample, report) = match gas {
             MembraneGas::Ideal(gas) => {
                 let candidate =
                     gas.discrete_gradient_heat_volume(volume, heat, controls, cancelled)?;
                 let temperature = candidate.thermodynamic_mean().state().temperature;
                 let pressure = candidate.thermodynamic_mean().state().pressure;
+                let sample = retain_sample
+                    .then(|| MembraneGasSample::Ideal(candidate.thermodynamic_mean().clone()));
                 let (endpoint, report) = candidate.into_parts();
-                (MembraneGas::Ideal(endpoint), temperature, pressure, report)
+                (
+                    MembraneGas::Ideal(endpoint),
+                    temperature,
+                    pressure,
+                    sample,
+                    report,
+                )
             }
             MembraneGas::PengRobinson(gas) => {
                 let candidate = gas
@@ -99,11 +123,15 @@ impl HeatVolumeLaw for GasDiscreteGradientStep {
                     .discrete_gradient_heat_volume(volume, heat, controls, cancelled)?;
                 let temperature = candidate.thermodynamic_mean().temperature_k();
                 let pressure = candidate.thermodynamic_mean().pressure_pa();
+                let sample = retain_sample.then(|| {
+                    MembraneGasSample::PengRobinson(candidate.thermodynamic_mean().clone())
+                });
                 let (endpoint, report) = candidate.into_parts();
                 (
                     MembraneGas::PengRobinson(ClosedRealGasParcel::from_isochoric(endpoint)),
                     temperature,
                     pressure,
+                    sample,
                     report,
                 )
             }
@@ -115,6 +143,7 @@ impl HeatVolumeLaw for GasDiscreteGradientStep {
             work_pressure_pa: report.work_pressure_pa,
             sampling_temperature_k: temperature,
             sampling_pressure_pa: pressure,
+            sampling_state: sample,
             report,
         })
     }
@@ -196,6 +225,7 @@ pub(super) struct Trial<R = GasHeatVolumeStep> {
 }
 
 impl<R: HeatVolumeLaw> Trial<R> {
+    #[cfg(test)]
     pub(super) fn new(
         model: &GasMembrane<'_>,
         initial: &GasMembraneThermalEvaluation,
@@ -204,6 +234,31 @@ impl<R: HeatVolumeLaw> Trial<R> {
         heat: f64,
         exterior_heat: Option<f64>,
         controls: GasMembraneThermalControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, GasMembraneMotionError> {
+        Self::new_sampled(
+            model,
+            initial,
+            stage_q,
+            endpoint_q,
+            heat,
+            exterior_heat,
+            controls,
+            false,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_sampled(
+        model: &GasMembrane<'_>,
+        initial: &GasMembraneThermalEvaluation,
+        stage_q: &[f64],
+        endpoint_q: &[f64],
+        heat: f64,
+        exterior_heat: Option<f64>,
+        controls: GasMembraneThermalControls,
+        retain_sample: bool,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, GasMembraneMotionError> {
         let stage = geometry(model, stage_q, &mut *cancelled)?;
@@ -223,6 +278,7 @@ impl<R: HeatVolumeLaw> Trial<R> {
             endpoint.volume,
             heat,
             controls.gas,
+            retain_sample,
             &mut *cancelled,
         )?;
         let exterior = if let Some(old) = &initial.exterior_gas {
@@ -231,6 +287,7 @@ impl<R: HeatVolumeLaw> Trial<R> {
                 endpoint.exterior_volume.expect("sealed volume"),
                 exterior_heat.expect("admitted exterior heat"),
                 controls.exterior_gas.expect("admitted exterior controls"),
+                false,
                 &mut *cancelled,
             )?)
         } else {

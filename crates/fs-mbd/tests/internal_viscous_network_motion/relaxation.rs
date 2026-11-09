@@ -1,4 +1,7 @@
 //! Corotated histories under finite native motion, original work and heat.
+
+#[path = "relaxation/kinetics.rs"]
+mod kinetics;
 use super::*;
 use fs_mbd::spatial_loads::internal_impulse::viscous::network::{
     driven::DrivenViscousNetworkLimits,

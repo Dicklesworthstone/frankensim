@@ -126,7 +126,7 @@ pub struct SpatialConduction<C = ResolvedConductorState> {
     contact_liquid_mass_fraction_axes: Vec<[Option<String>; 2]>,
     contact_faces: BTreeSet<usize>,
     contact_cells: Vec<[usize; 2]>,
-    contact_conductance_s: Vec<f64>,
+    contact_conductance_s: Vec<contact::ContactConductance>,
     /// Electrical connectivity includes conducting contacts between disjoint
     /// volume complexes; the geometry itself retains its original components.
     components: Vec<usize>,

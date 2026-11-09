@@ -25,7 +25,7 @@ pub enum MoistureSolutionPort {
     Second,
 }
 impl MoistureSolutionPort {
-    const fn index(self) -> usize {
+    pub(in crate::moisture) const fn index(self) -> usize {
         match self {
             Self::First => 0,
             Self::Second => 1,
@@ -84,6 +84,18 @@ pub struct PairedSolutionMoistureCandidate<
     step: PairedSolutionMoistureStep<Report, FACES>,
 }
 impl<Field, Report, const FACES: usize> PairedSolutionMoistureCandidate<Field, Report, FACES> {
+    pub(in crate::moisture) fn from_accepted(
+        solutions: [FiniteMoistureSolution; 2],
+        moisture: Field,
+        step: PairedSolutionMoistureStep<Report, FACES>,
+    ) -> Self {
+        Self {
+            solutions,
+            moisture,
+            step,
+        }
+    }
+
     pub const fn solutions(&self) -> &[FiniteMoistureSolution; 2] {
         &self.solutions
     }
@@ -203,95 +215,48 @@ pub(in crate::moisture) fn advance_pair<F: ReservoirField<N>, const N: usize>(
     controls: PairedSolutionMoistureSolve,
     cx: &Cx<'_>,
     face_water: impl Fn(&F::Report) -> [f64; N],
-    mut charge_field: impl FnMut() -> Result<(), SolutionMoistureError>,
+    charge_field: impl FnMut() -> Result<(), SolutionMoistureError>,
 ) -> Result<PairedSolutionMoistureCandidate<F, F::Report, N>, SolutionMoistureError> {
     poll(cx)?;
-    if controls.maximum_evaluations == 0
-        || controls.maximum_evaluations > 100_000
-        || !positive(controls.mass_tolerance_kg)
-        || !positive(dt_s)
-    {
-        return Err(SolutionMoistureError::Invalid(
-            "paired solutions need positive duration and water tolerance, with bounded cumulative evaluations",
-        ));
-    }
     let [first, second] = solutions;
     let temperature = first.solution().temperature_k();
-    if second.solution().temperature_k().to_bits() != temperature.to_bits()
-        || field.inventory().temperature_kelvin().to_bits() != temperature.to_bits()
-        || first.solvent_molar_mass_kg_mol().to_bits()
-            != second.solvent_molar_mass_kg_mol().to_bits()
-    {
-        return Err(SolutionMoistureError::Invalid(
-            "paired solutions require the same declared water molar mass and prescribed field temperature",
-        ));
-    }
-    if let (Some(a), Some(b)) = (
-        first.electrolyte_solubility(),
-        second.electrolyte_solubility(),
-    ) && a.solvent() != b.solvent()
-    {
-        return Err(SolutionMoistureError::Invalid(
-            "paired ionic solutions must identify the same original solvent species",
-        ));
-    }
     let assignments = std::array::from_fn(|i| faces[i].as_ref().map(|face| face.solution));
     let sealed = [
         !assignments.contains(&Some(MoistureSolutionPort::First)),
         !assignments.contains(&Some(MoistureSolutionPort::Second)),
     ];
-    let mut evaluations = 0_usize;
-    let (second_next, accepted, second_step) = second.advance_exchange(
-        dt_s,
-        sealed[1],
-        controls.solutions[1],
-        cx,
-        |second_activity| {
-            let (first_next, accepted, first_step) = first.advance_exchange(
-                dt_s,
-                sealed[0],
-                controls.solutions[0],
-                cx,
-                |first_activity| {
+    let ([first_next, second_next], (moisture, report), [first_step, second_step], evaluations) =
+        advance_baths(
+            solutions,
+            field.inventory().temperature_kelvin(),
+            dt_s,
+            sealed,
+            controls,
+            cx,
+            |activities| {
+                let mut boundary = std::array::from_fn(|_| ResolvedMoistureFace::default());
+                for (side, face) in faces.iter().enumerate() {
                     poll(cx)?;
-                    if evaluations == controls.maximum_evaluations {
-                        return Err(SolutionMoistureError::EvaluationBudget {
-                            evaluations,
-                            maximum: controls.maximum_evaluations,
-                        });
+                    if let Some(face) = face {
+                        boundary[side] = face
+                            .sorption
+                            .resolve(temperature, activities[face.solution.index()])?;
                     }
-                    // The adaptive consumer charges this same physical trial
-                    // against its whole-window budget, even if it later fails.
-                    charge_field()?;
-                    evaluations += 1;
-                    let activities = [first_activity, second_activity];
-                    let mut boundary = std::array::from_fn(|_| ResolvedMoistureFace::default());
-                    for (side, face) in faces.iter().enumerate() {
-                        poll(cx)?;
-                        if let Some(face) = face {
-                            boundary[side] = face
-                                .sorption
-                                .resolve(temperature, activities[face.solution.index()])?;
-                        }
-                    }
-                    let (next, report) = field.advance_resolved(dt_s, boundary, transport, cx)?;
-                    let transfers = face_water(&report);
-                    let received: [f64; 2] = std::array::from_fn(|port| {
-                        water_sum(transfers.iter().zip(&assignments).filter_map(
-                            |(&water, assignment)| match *assignment {
-                                Some(p) if p.index() == port => Some(water),
-                                _ => None,
-                            },
-                        ))
-                    });
-                    Ok(((next, report, received[1]), received[0]))
-                },
-            )?;
-            let (next, report, received) = accepted;
-            Ok(((first_next, next, report, first_step), received))
-        },
-    )?;
-    let (first_next, moisture, report, first_step) = accepted;
+                }
+                let (next, report) = field.advance_resolved(dt_s, boundary, transport, cx)?;
+                let transfers = face_water(&report);
+                let received = std::array::from_fn(|port| {
+                    water_sum(transfers.iter().zip(&assignments).filter_map(
+                        |(&water, assignment)| match *assignment {
+                            Some(p) if p.index() == port => Some(water),
+                            _ => None,
+                        },
+                    ))
+                });
+                Ok(((next, report), received))
+            },
+            charge_field,
+        )?;
     let old = field.inventory();
     let next = moisture.inventory();
     let water_change_kg = field.water_change_to(&moisture);
@@ -363,4 +328,95 @@ pub(in crate::moisture) fn advance_pair<F: ReservoirField<N>, const N: usize>(
             field_evaluations: evaluations,
         },
     })
+}
+
+/// Original nested solvent balance for any native field/solid transaction.
+/// The callback returns each bath's actual assigned signed face transfer.
+/// No trial may restart from a previously rejected field or phase inventory.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(in crate::moisture) fn advance_baths<T>(
+    solutions: [&FiniteMoistureSolution; 2],
+    field_temperature_k: f64,
+    dt_s: f64,
+    sealed: [bool; 2],
+    controls: PairedSolutionMoistureSolve,
+    cx: &Cx<'_>,
+    mut propose: impl FnMut([f64; 2]) -> Result<(T, [f64; 2]), SolutionMoistureError>,
+    mut charge_field: impl FnMut() -> Result<(), SolutionMoistureError>,
+) -> Result<
+    (
+        [FiniteMoistureSolution; 2],
+        T,
+        [SolutionMoistureExchange; 2],
+        usize,
+    ),
+    SolutionMoistureError,
+> {
+    poll(cx)?;
+    if controls.maximum_evaluations == 0
+        || controls.maximum_evaluations > 100_000
+        || !positive(controls.mass_tolerance_kg)
+        || !positive(dt_s)
+    {
+        return Err(SolutionMoistureError::Invalid(
+            "paired solutions need positive duration and water tolerance, with bounded cumulative evaluations",
+        ));
+    }
+    let [first, second] = solutions;
+    let temperature = first.solution().temperature_k();
+    if second.solution().temperature_k().to_bits() != temperature.to_bits()
+        || field_temperature_k.to_bits() != temperature.to_bits()
+        || first.solvent_molar_mass_kg_mol().to_bits()
+            != second.solvent_molar_mass_kg_mol().to_bits()
+    {
+        return Err(SolutionMoistureError::Invalid(
+            "paired solutions require the same declared water molar mass and prescribed field temperature",
+        ));
+    }
+    if let (Some(a), Some(b)) = (
+        first.electrolyte_solubility(),
+        second.electrolyte_solubility(),
+    ) && a.solvent() != b.solvent()
+    {
+        return Err(SolutionMoistureError::Invalid(
+            "paired ionic solutions must identify the same original solvent species",
+        ));
+    }
+    let mut evaluations = 0_usize;
+    let (second_next, accepted, second_step) = second.advance_exchange(
+        dt_s,
+        sealed[1],
+        controls.solutions[1],
+        cx,
+        |second_activity| {
+            let (first_next, accepted, first_step) = first.advance_exchange(
+                dt_s,
+                sealed[0],
+                controls.solutions[0],
+                cx,
+                |first_activity| {
+                    poll(cx)?;
+                    if evaluations == controls.maximum_evaluations {
+                        return Err(SolutionMoistureError::EvaluationBudget {
+                            evaluations,
+                            maximum: controls.maximum_evaluations,
+                        });
+                    }
+                    charge_field()?;
+                    evaluations += 1;
+                    let (value, received) = propose([first_activity, second_activity])?;
+                    Ok(((value, received[1]), received[0]))
+                },
+            )?;
+            let (value, received) = accepted;
+            Ok(((first_next, value, first_step), received))
+        },
+    )?;
+    let (first_next, value, first_step) = accepted;
+    Ok((
+        [first_next, second_next],
+        value,
+        [first_step, second_step],
+        evaluations,
+    ))
 }

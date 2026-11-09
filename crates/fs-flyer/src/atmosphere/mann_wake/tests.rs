@@ -8,6 +8,9 @@ use fs_vpm::images3d::ImagePlane;
 #[path = "tests/affine.rs"]
 mod affine;
 
+#[path = "tests/rigid.rs"]
+mod rigid;
+
 const MODES: usize = 8;
 const BYTES: usize = 4 * 88 * MODES;
 const DT: f64 = 0.05;

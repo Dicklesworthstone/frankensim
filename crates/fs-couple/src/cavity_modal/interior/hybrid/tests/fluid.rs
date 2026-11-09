@@ -60,7 +60,11 @@ fn same_fields(actual: &HybridResponse, expected: &HybridResponse, temperature_s
     same_phasors(&actual.outgoing, &expected.outgoing, 1.0);
     same_phasors(&actual.pressure_pa, &expected.pressure_pa, 1.0);
     same_phasors(&actual.inward_flow_m3_s, &expected.inward_flow_m3_s, 1.0);
-    same_phasors(&actual.helmholtz.amplitudes, &expected.helmholtz.amplitudes, 1.0);
+    let h_actual = actual.helmholtz.amplitudes.iter()
+        .map(|p| C64::new(p[0], p[1])).collect::<Vec<_>>();
+    let h_expected = expected.helmholtz.amplitudes.iter()
+        .map(|p| C64::new(p[0], p[1])).collect::<Vec<_>>();
+    same_phasors(&h_actual, &h_expected, 1.0);
     same_phasors(
         &actual.thermoviscous.pressure_pa,
         &expected.thermoviscous.pressure_pa,

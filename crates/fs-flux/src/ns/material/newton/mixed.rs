@@ -5,10 +5,12 @@ use super::{
     MaterialFluxSystem, MaterialFluxViscosityTangent, RheologyField, retain_tangent,
 };
 use crate::material::{
-    MaterialNavierStokesBoundary, MaterialNavierStokesRheologyStep, with_kinematic_boundaries,
+    MaterialDissipatedHeat, MaterialNavierStokesBoundary, MaterialNavierStokesRheologyStep,
+    with_kinematic_boundaries,
 };
 use crate::ns::boundary::NavierStokesStep;
 use crate::ns::linearization::{FluxViscosityTangent, ViscosityLaw};
+use crate::ns::material::heat::DissipatedHeatAccumulator;
 use crate::ns::newton::{FluxSdirk2Error, FluxSdirk2Stage};
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use std::cell::RefCell;
@@ -42,6 +44,10 @@ pub struct MaterialNavierStokesSdirk2Step<G> {
     pub first_stage: MaterialNavierStokesNewtonStep<G>,
     /// Stiffly accurate endpoint, including its own original material sources.
     pub endpoint: MaterialNavierStokesNewtonStep<G>,
+    /// Original-stage bulk and Navier-slip production integrated over this
+    /// physical step [J/m], with positive SDIRK2 weights (1−gamma, gamma).
+    /// No thermal deposition or wall/fluid slip-heat partition is inferred.
+    pub dissipated_heat: MaterialDissipatedHeat,
 }
 
 impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
@@ -187,9 +193,11 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
     /// enters only its inertial load and is never a constitutive initial state.
     ///
     /// Each accepted stage retains its own physical pressure, source owners,
-    /// tangents, reactions and `mu*gamma²` heating. Bulk molecular heat, Navier
-    /// loss, kinetic transport and upwind damping remain separate endpoint
-    /// rates. This adds no caloric evolution or integrated energy balance.
+    /// tangents, reactions and `mu*gamma²` heating. Positive SDIRK2 weights
+    /// (1−gamma, gamma) integrate those original stage powers into separate
+    /// cell bulk and boundary-slip heat [J/m]. No source is queried again.
+    /// Kinetic transport, wall work and numerical damping remain separate.
+    /// This adds no caloric evolution, slip-heat partition or full energy balance.
     /// Temperature/composition may differ between stages but density remains
     /// fixed. Work limits apply per stage; temporal order requires smooth stage
     /// data and resolved spatial/nonlinear errors. Linear L-stability is not a
@@ -244,6 +252,16 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             })
         };
         let first_stage = solve(FluxSdirk2Stage::First, previous_velocity, previous_velocity)?;
+        let mut heat = DissipatedHeatAccumulator::new(self.system.mesh.areas.len());
+        heat.add_stage(
+            &self.system.mesh.areas,
+            &first_stage.flow.step.solution,
+            timestep_s - stage_dt,
+        )
+        .map_err(|error| FluxSdirk2Error {
+            stage: Some(FluxSdirk2Stage::First),
+            error,
+        })?;
         let first_velocity = &first_stage.flow.step.solution.discrete().x[..self.system.n_u];
         let history = self
             .system
@@ -253,9 +271,23 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
                 error: MaterialFluxError::Newton(error),
             })?;
         let endpoint = solve(FluxSdirk2Stage::Endpoint, first_velocity, &history)?;
+        heat.add_stage(
+            &self.system.mesh.areas,
+            &endpoint.flow.step.solution,
+            stage_dt,
+        )
+        .map_err(|error| FluxSdirk2Error {
+            stage: Some(FluxSdirk2Stage::Endpoint),
+            error,
+        })?;
+        let dissipated_heat = heat.finish(timestep_s).map_err(|error| FluxSdirk2Error {
+            stage: Some(FluxSdirk2Stage::Endpoint),
+            error,
+        })?;
         Ok(MaterialNavierStokesSdirk2Step {
             first_stage,
             endpoint,
+            dissipated_heat,
         })
     }
 

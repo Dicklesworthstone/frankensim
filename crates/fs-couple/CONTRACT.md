@@ -135,6 +135,56 @@ incompatibility, late failure/cancellation, work-budget refusal and exact retry.
 All six plus the five original Hertz heat regressions pass in the bounded
 actual-source closure; full workspace proof remains separate.
 
+## Finite-body thermal contact in nonlinear membrane pressure motion
+
+`GasMembraneThermalMotion::thermal_discrete_gradient_candidate` solves one
+reciprocal heat transfer between the first original gas and an explicit finite
+enthalpy/phase body over the same nonlinear mechanical interval. Each trial
+delegates the existing native Gibbs pressure/work trajectory and original
+enthalpy entropy chart. The shared bounded heat-feedback solver closes
+`Q = dt G (theta_body - theta_gas)`; no gas law, time integrator, scalar
+root method or thermal storage model is replaced.
+
+`MembraneGasSample` retains the actual ideal or homogeneous Peng--Robinson
+thermodynamic mean, including its original source/transport state. The callback
+also receives the actual body enthalpy midpoint, preserving latent phase
+fractions. The thermal force uses the body's original `Delta h / Delta s`,
+which generally differs from midpoint temperature. Work pressure remains the
+native discrete Gibbs effort and is distinct from the sample's EOS pressure.
+Only this new path copies the first gas's final source sample; existing
+midpoint/Gibbs calls and intermediate Newton caches retain their prior behavior.
+
+One signed Q is debited from the body and credited to the first gas. Prescribed
+first-gas, body and opposing-gas heat remain separate. A sealed opposing chamber
+keeps its original volume/work/heat law. Reports independently retain all
+mechanical and caloric storage, pressure work, source residual, body energy,
+original gas/body entropy and evaluated nonnegative Fourier-contact production.
+The entropy allowance derives from native gas, body and heat-law error budgets.
+Structural integration error stays in the existing mechanical-energy account;
+it is never converted into heat or used to correct the gas Gibbs balance.
+
+The joint candidate contains motion, original finite-body proposal and balances.
+All root trials use one private scratch trajectory; complete accepted history
+is copied only for the final candidate. Source, body, interface, work, energy,
+entropy or cancellation refusal preserves both gas states, body input and
+accepted mechanical history. Conductance callbacks must remain repeatable and
+defer irreversible side effects until joint publication.
+
+The body retains fixed mass/geometry and negligible-pV-work enthalpy storage.
+It is an explicitly supplied thermal inventory; membrane calorics, thermal
+expansion, spatial equilibration and moving thermal geometry are not inferred.
+The original fixed-perimeter structural and homogeneous-gas limits apply.
+Positive evaluated contact entropy does not establish temporal or constitutive
+accuracy; physical-step refinement remains necessary.
+
+Four focused native regression definitions cover hot/cold continuing motion,
+independent variable-Cv/finite-body balances and insulating parity, latent
+melting/freezing with a heated opposing chamber, full PR source-sample identity
+and work-pressure separation, and late source/cancellation/work refusal with
+exact retry. All changed Rust sources parse; the implementation and new test
+modules were formatted. The full coupled tests were not compiled or executed because
+the available dependency closure lacks the original material/solid/time stack.
+
 ## Discrete Gibbs pressure in native nonlinear membrane motion
 
 `GasMembraneThermalMotion::step_discrete_gradient` connects the original ideal
@@ -434,6 +484,47 @@ changed-temperature free-gas and porous responses with the original joint
 reservoir owners and retained source composition. The wall child exercises
 source-backed temperature-dependent walls, independent frozen-source heat and
 field reconstruction, changed-wall work/cache behavior, and refusal rollback.
+
+#### Coherent physical excitation during temperature feedback
+
+`InteriorTemperatureAcoustics` retains explicit `boundary_drives` and
+`traction_drives` alongside its existing linear velocity traces. An
+`InteriorTemperatureBoundaryDrive` supplies the original dimensionless
+six-node quadratic trace, explicit source quadrature and complex peak inward
+velocity [m/s]. An `InteriorTemperatureTractionDrive` supplies the original
+global hierarchical `WallTractionProfile` and complex peak outward pressure
+[Pa]. All drives share the native exp(+i omega t) convention and preserve
+their signed shape and relative phase. Traction drives wall momentum;
+the complete pressure, displacement, velocity and Maxwell memory remain solved.
+
+Each changed fluid/wall temperature creates one native equivalent-fluid
+preparation. Its original quadratic-source and wall-traction owners prepare
+against that exact factor, then `solve_with_sources` combines every drive
+before one coherent full-field solve. An old prepared source is never reused
+with new constitutive coefficients. The authored shapes and amplitudes stay
+fixed; unchanged temperatures reuse the existing immutable field/heat snapshot
+without source projection or material evaluation. There is no factorization
+per drive, substitute source equation or prescribed mechanical velocity.
+
+Existing source-count limits and finite amplitudes are admitted before material
+evaluation. Native source quadrature, original wall coordinates, boundary
+support, pressure-release conflicts and cancellation retain their existing
+refusals. Fluid and wall material refresh, physical fields, thermal cells and
+heat receipts still publish through the original common transaction.
+
+The field retains signed boundary-source and applied-traction work separately.
+The thermal timeline receives only the existing positive volume-loss and
+wall-resistance/relaxation forms; source work, internal pressure exchange,
+Robin loss and numerical residuals are not added as another heat input.
+Accepted-start power and actual native substep duration determine deposited
+joules. These remain frozen harmonic source drives within quasisteady thermal
+feedback, without acoustic startup, external-actuator dynamics, transient
+mechanical-memory transfer or parametric stored-energy work.
+
+`porous_heating/interior/tests/feedback/sources.rs` defines focused original
+field/work comparisons, physical heat accounting, material refresh and source
+admission/rollback cases. Native parsing, formatting, compilation and execution
+were unavailable for this extension; source review alone is not runtime proof.
 
 ## Optional local material tangents in finite-solid motion
 
@@ -7147,6 +7238,49 @@ exchange, sealed internal diffusion with kinetic dissolution, and source/budget
 refusals. Rust parsing and formatting were checked; these new integration
 regressions have not been executed in the full dependency build.
 
+### Finite solution baths with compatible swelling feedback
+
+`MoistureLayeredSolid::advance_spatial_diffusion_paired_solutions` couples two
+independently finite aqueous inventories to the original nonlinear spatial
+moisture/solid transaction. Each exterior face explicitly selects one bath or
+is sealed; a sealed physical transfer law cannot be opened by an assignment.
+The original layered constructor supplies common temperature and material
+activity support. Bath temperature, solvent molar mass and exposed source
+context are admitted before native transport, and each bath retains its own
+solute totals, nonideal activity law and optional equilibrium/kinetic phases.
+
+The original paired solvent roots now share one private callback transaction
+with ordinary slab/Cartesian/radial paired transport. The first-bath inner and
+second-bath outer order is unchanged. Every activity pair restarts the original
+field and phase stocks. Native compatible mechanics evaluates source swelling,
+elasticity, reference wet inertia and the signed prestressed vibration pencil.
+The same candidate's actual inverse axial stretch squared enters bulk flux;
+its actual current area enters finite surface/contact conductance. The dry
+skeleton and water capacity stay on their original reference inventory. Neither
+independent cell expansion nor a refitted diffusivity replaces these owners.
+
+Only each bath's assigned signed face transfers enter its solvent balance.
+Separate bath checks, field/face conservation, whole-system water increments
+and a compensated direct sum of represented cell/bath endpoint/start inventories
+must pass before either solution, the field or its actual solid state returns.
+One explicit transport-proposal cap covers all nested bath trials; a separate
+cumulative native-solid cap includes rejected geometric and bath proposals and
+is reserved before each solve. Source, geometry, work and cancellation failures
+publish no partial state.
+
+This remains first-order isothermal exchange through the equal-pressure
+vapor-equilibrium bridge, with current-frame scalar diffusivity and the existing
+small-strain separable-prism reduction. Shear, bending or taper beyond the
+specified geometry tolerance refuses. No immersed-liquid permeability, osmotic
+traction, chemical-potential stress feedback, displaced bath-vessel volume or
+thermal feedback is inferred; reservoir chemical work is outside the mechanical
+energy account. Seven authored G1/G3/G4 groups specify independent length/area
+flux balances, native source-driven shape/modal scaling, heterogeneous contact
+through-flow with finite crystals, zero-swelling compatibility, retained wet/dry
+histories, sealed kinetics and cumulative-work/source/cancellation refusals.
+All eight changed Rust files passed the pinned formatter/parser check; the
+integration groups remain unexecuted because dependencies block fs-couple.
+
 ### Adaptive heterogeneous slab and radial diffusion
 
 `MoistureLayeredSlab::advance_sdirk2_adaptive_to` and the backward-Euler and
@@ -11421,7 +11555,7 @@ Geometry, material domains and source parameters remain authoritative. The
 opt-in exact linear block removes midpoint decay/phase error from original
 linear modes and Kelvin recovery; nonlinear contact and conditioning still
 require temporal refinement. This route does not yet admit nonlinear contact
-drag, shell/support potentials, nonlinear mapped-strain memory, or thermal feedback.
+drag, shell/support potentials, undeclared or nonquadratic strain maps, or thermal feedback.
 It does not certify a rendered waveform or measured felt calibration.
 
 Seven focused native source tests passed with pinned nightly-2026-07-06:
@@ -12160,7 +12294,7 @@ admission. Pinned Rust parsing and formatting passed. Full fs-couple execution
 of these four groups remains outstanding; no numerical or replacement-host
 substitute is claimed as runtime verification.
 
-Nonlinear mapped-strain memory, shell/support body potentials, nonlinear
+Shell/support body potentials, undeclared or nonquadratic strain maps, nonlinear
 contact drag and thermal feedback remain outside this entry. A passive
 authored acoustic pole model still requires separate geometry validation.
 Exact linear propagation does not remove nonlinear contact, source/model,
@@ -12532,6 +12666,61 @@ routing with transport/events, and source/clock/late refusal/retry/cancellation
 isolation. Native execution and shared-helper type checking were unavailable
 when this extension was authored; no runtime validation is inferred.
 
+## Molecular duct fields and sound under the same full exterior load
+
+`RadiatingNetwork::bind_molecular_with_compliant_walls` binds original molecular
+edge laws and exact edge-id `MolecularCompliantWall` Arc owners to the retained
+regional network and exterior. Complete material state, source identities,
+Maxwell response, thickness/restraint and radius/frequency support remain in
+the original wall law, including the existing `LocalMaterialWall` implementation.
+Native media pins remain live on unlisted edges; unknown/duplicate ids and
+overlapping pin/custom declarations refuse through the same duct owner.
+
+`MolecularRadiatingNetwork::prepare_fields` accepts a
+`MolecularRadiatingFieldRequest` with the physical frequency, source clock,
+complete scalar/coupled generators, non-opening scalar loads, original probes
+and `NetworkFieldBudget`. It computes the original full BEM opening basis
+once, then supplies that exact mutual radiation matrix to the native molecular
+field preparation and its single loaded network factorization. The existing
+exterior observation code consumes an exact clone of that solved native port
+bank; it does not independently reconstruct the interior or choose new sources.
+`prepare_fields_with_radiation` derives its optional angular observation from
+the SAME unit-opening BEM solutions.
+
+The returned `PreparedMolecularRadiatingFields` exposes `interior()` and
+`radiating()`. Internal pressure, directed volume flow, coherent moments and
+source-owned cylindrical losses share source coordinates and phases with the
+actual opening flows, directional microphone fields and far-field response.
+Source-amplitude and covariance-factor queries are contractions only. No new
+material evaluation, radial eigensolve, duct factorization or BEM solve occurs
+during these observations.
+
+The original exterior field allowance additionally admits four
+port-by-source complex arrays and one source vector for the retained port-bank
+clone before the BEM solve. Native interior probe/transfer/chain caps remain
+separately binding, as do exterior geometry, angular work, loaded conditioning
+and cancellation. Refusal returns no partial paired preparation and leaves the
+original molecular, material and exterior owners usable.
+
+Mechanical compliance changes the loaded opening flows. The exterior remains
+rigid outside its original opening patches; distributed wall radiation needs
+its own source/trace owner. Gas absorption, mechanical wall work and actual
+opening/exterior work stay separate. Only the native viscous channel is
+declared direct gas caloric heat; thermal and molecular availability and wall
+work do not specify an automatic thermal receiver. Far-field power observes
+the existing exterior load work and is never added again as an energy debit.
+
+Three native regressions in
+`driving_point/network/radiation/tests/prepared/molecular/fields.rs` use the
+original resolved material and Maxwell membrane APIs. They compare independent
+complex line loading, native interior gas/wall work and a separately assembled
+physical BEM velocity boundary; coherent loss, microphone and angular source
+factors; and original material support, retained-bank/field budgets,
+cancellation and retry. The source claims are synthetic implementation
+fixtures, not empirical material validation. These tests and Rust
+parser/formatter checks were not executed because the workspace was
+unavailable; the production source received a bounded independent review.
+
 ## Finite thermal bodies in moving molecular networks
 
 - `molecular_exchange::network::thermal::{step_candidate, step_candidate_with_convection}` couples finite enthalpy and phase-change bodies to the original moving-gas molecular network. Bodies sharing a gas use the existing simultaneous implicit thermal solve. Independent gas groups start from the same snapshot; the original molecular transaction then samples the complete heated snapshot. Both operators cover the same physical duration, with first-order Lie splitting.
@@ -12576,3 +12765,352 @@ interval, work budgets and late cancellation. Original caloric support,
 phase/source ownership and transactional publication remain binding. These
 checks establish numerical model/accounting targets, not measured-material
 authority or a spatial/time/quadrature error certificate.
+
+## Complete thermal assemblies for thermally live actuator supports
+
+`circuit_enthalpy::motion::support::step_heat_assembly_candidate` and
+`PreparedHeatNetwork::field_motion_support_candidate` connect the original
+thermally live axial support to the complete existing `HeatAssembly`. The plain
+material-network and electrical-contact entrypoints retain their existing API
+and share the same implementation. Defaulted report/sample type parameters
+preserve their original payload while complete providers retain their own
+source observations and typed errors.
+
+At every proposed finite-enthalpy endpoint, the original prepared assembly
+resolves its bulk links, source-bound thermal and electrical contacts, closed
+radiation, integrated/directional transport, and any composed coolant or
+prescribed-reservoir sources. Its original material/caloric inventory and
+electrical heat destinations admit the support; no independent heat map or
+constitutive state is invented. That same endpoint feeds the existing section
+Helmholtz/entropy law and native reciprocal field/body descriptor. Per-layer
+reversible heat, bulk Joule heat and each interface's A/B heat partition enter
+the original finite cells once.
+
+The physical balance encloses caloric, support internal, field and kinetic
+energy. Authored source/reservoir exchange remains external. Finite links and
+closed radiation remain internal; the enclosure's numerical net power is
+explicitly excluded from external heat and remains visible in the enclosing
+energy residual. No balancing heat, stored-energy correction or second
+mechanical/thermal solver is introduced. Source refusal, circuit-budget
+exhaustion and cancellation return no thermal, electrical or mechanical
+endpoint; retries start from the same accepted owners.
+
+The original restrictions persist: wholly solid source-compatible layers,
+fixed reference inventory/inertia, constant enclosed field coefficients,
+affine modulus/declared expansion, fixed electrical geometry and generally
+first-order endpoint-temperature coupling. Thermal link geometry, interface
+pressure, exposed patch area and radiative view factors remain authored over
+the interval. Support motion does not infer remeshing, changing contact,
+coolant volume, phase transfer, arcing or nonlinear E/J constitutive response.
+
+The focused `circuit_enthalpy_motion::support` regression definitions exercise
+source-dependent thermal contact plus native radiosity, per-cell heat and an
+independent total internal-energy account, transport changes reaching native
+gap/momentum, and exact reduction to the original contact-support path when
+extra heat mechanisms are absent. A complete-provider test composes the native
+`fs-convection` coefficient with a prescribed fluid reservoir, checks its
+external heat separately from closed radiation, retains the provider's sample
+and error types, and injects late source/budget/cancellation refusals. These new
+regressions were source-reviewed but not executed in this implementation
+session because the execution environment became unavailable; compilation,
+runtime acceptance and experimental validation are not claimed here.
+
+## Actual-cell temperature continuation of loaded adhesive angular contacts
+
+The rolling-dissipation and torsion heat owners expose attached, same-time
+native temperature continuations. The exact original receiver identities,
+material caloric objects, accepted time, source history and caller stamp are
+admitted before either bulk temperature is read from its actual finite cell.
+The independently supplied interface temperature drives its original adhesion
+query. Original ordered cards, source applicability and angular calibration
+remain bound through the sealed normal, angular and lifecycle continuations.
+
+The native state and heat/source binding publish together after the final
+caller checkpoint and cancellation check. Full spring history and all three
+normal-release, angular-release and plastic-loss ledgers survive exactly, as
+do their partitions, outside destinations, receiver bindings and clocks.
+The next native motion uses the refreshed source and retained pair geometry.
+No old loss is deposited again, and this coefficient update changes neither
+body momentum nor caloric enthalpy.
+
+Reports retain the original source temperature report, both observed bulk
+temperatures, prescribed interface temperature and a named external driver for
+signed normal-plus-angular parameter work. A finite nonnegative bound limits
+its absolute total. The mechanical JKR potential is not a caloric entropy
+model, so storage work is not silently removed from the receivers or declared
+irreversible heat. Thermal branch changes, coupled area stability, changing
+yield calibration and closed thermoelastic feedback remain outside this
+attached-endpoint operation.
+
+Four new focused native/thermal cases cover independent E/G/W expectations,
+all three nonzero prior ledgers, retained memory and actual thermal/body state,
+subsequent native advancement, stale history, wrong cards/clock, invalid or
+exceeded work controls and final-publication cancellation. Pinned formatting,
+recursive parsing and independent source review passed. These new cross-crate
+tests were not compiled or executed because the session's dependency build
+was blocked by exhausted memory/disk; the separate 20-test production angular
+leaf harness passed and does not substitute for integrated execution.
+
+### Complete sensitivities and pump-work objectives for modulated Hamiltonians
+
+`ParametricHamiltonian::prepare_sensitivity` binds the original
+`H0(x)+x^T Q(theta) x/2`, drive, complete H0 tangent and physical clock to the
+shared fs-orbit factor and independent cached AFT trajectories.
+`PreparedParametricSensitivity::solve_parameter` accepts simultaneous original
+J/R/G/H0, symmetric Fourier Q, input Fourier and clock directions. Its effort
+partial is `H0_xp+Q_p*x` at fixed phase; fs-phs owns the physical contractions,
+and the existing sI clock column contributes `i*n*Omega_p*X_n` once. Pump/input
+direction dimensions, original clock and retained bandwidth are admitted.
+Directions may introduce pump harmonics above the base pump bandwidth when
+retained by the orbit. Maximum direction matrix/phase/state scratch is reserved
+before generic numerical preparation; existing source/callback storage/work
+exclusions and hard modulation bounds remain explicit. No finite-difference
+or quadratic-storage replacement is introduced.
+
+`power_objective` and `prepare_power_adjoint` expose six independent original
+accounts: mean pump/port/resistance power and corresponding energy per actual
+cycle. Pump is `x^T Qdot x/2`, with full state gradient `Qdot*x`; port/loss use
+`e=grad(H0)+Q*x` and the full Hessian `H0_xx+Q`. Generic two-grid checks cover
+value and complete covector in the selected power/energy units, then each grid
+combines its own direct objective mean with the cached dual. Automatic complete
+directions retain signed pump, port and resistance laws separately. The mean-pump
+explicit clock derivative is `(Omega_p/Omega)*P`; for pump energy per cycle it
+cancels the explicit period derivative analytically. The solved waveform clock
+chain remains. Port/loss work includes its ordinary period derivative.
+Parameter queries reuse the original factor/dual without fresh objective
+Hessians, orbit solves or waveform-direction solves; original source/parameter
+laws still evaluate the cached states.
+
+Three new focused groups and all seven original parametric tests pass natively.
+The new evidence compares complete nonlinear-memory and off-diagonal phased-pump
+directions with independently rebuilt neighboring HB sources and an independent
+physical ODE integrator; evaluates six separate power/work neighbor oracles;
+checks the isolated-clock identity and changing-period counterexample; admits a
+new retained pump harmonic; and checks original-clock/bandwidth rejection,
+bounded scratch refusal, incomplete material actions and cancellation/retry.
+These fixed-order derivatives and accounts do not certify infinite harmonic
+resolution, stability, passivity or a heat destination.
+
+## Tetrahedral sampled contact response in finite thermal feedback
+
+The same explicit contact quadrature policy is retained by
+`SpatialConductionResponse` through the existing thermal source refresh and
+frozen-source handoff. The native triangular contact response carries its
+integrated loss and original point observations; existing
+`step_response_contact_candidate` heat routing consumes that integral once
+through the original receiving cells and specified contact partitions. The
+representative contact source remains the external-context seed, while
+constitutive closure and acceptance use every point's applied/evaluated source.
+
+Bulk/contact source support, caloric phase ownership, independent supplied
+electrical work, field-trial budgets and atomic continuation keep their
+existing meanings. No face-average nonlinear resistance or additional heat
+source is introduced.
+
+A focused three-dimensional thermal regression reuses the original material
+and contact fixtures with varying exterior voltage. Two accepted intervals
+check each point's original source temperature and independent quadratic
+current law, each body's finite-capacity storage and Fourier exchange, contact
+heat partitions and total supplied work. Native triangular regressions and
+the planar analytic thermal endpoint provide complementary checks. Integration
+execution and mesh/time/quadrature error bounds remain separate validation.
+
+## Calibrated spatial relaxation with finite temperature feedback
+
+`rigid_damping_heat::relaxation::temperature` feeds actual finite-cell
+temperatures into the original complete Kelvin/Maxwell graph. Its borrowed
+`CalibratedRelaxationDamping` binds the original connector forms, original
+branch factors/times/order and one existing material `TemperatureShift` per
+connector. WLF and Arrhenius coefficients, reference temperatures and support
+are supplied explicitly. Reusing shifted outputs as original calibration
+refuses when the bound source differs.
+
+The shared material convention is a_T=tau(T)/tau_ref. All original branch times
+and the original Kelvin viscosity of each thermorheologically simple connector
+receive that same factor. The low-level native held-kinetics bank keeps all
+elastic factors and memory coordinates unchanged. A change in rates therefore
+creates no stored-energy change, parameter work or independent heat impulse.
+Native physical dissipation still integrates Kelvin and Maxwell losses along
+the same complete coupled trajectory; original signed actuation remains
+separate. No history is reset or reinterpreted.
+
+Each connector names its original caloric CellId independently of heat routes.
+Shared cells are sampled once per synchronization, and unchanged connector
+temperatures reuse their admitted material coefficients. Same-time births
+complete before source sampling. Every actual native thermal interval freezes
+kinetics at its initial temperature; original material histories advance only
+when their matching mechanical/caloric/observer candidate accepts. After all
+final thermal events, the source admits both the calibration domain and all
+effective Kelvin forms, branch times and reciprocal rates without preparing a
+dense flow. Endpoint refusal discards the complete candidate.
+
+The candidate exposes original accepted bodies/history, finite thermal state,
+the shared energy report, actual endpoint temperatures and a_T values. Original
+reference laws are retained for continuation. Cached additional storage is
+linear in the already admitted connector and branch counts. There is no new
+constitutive law, eigensolve, thermodynamic state transfer or source fit.
+
+Temperature feedback is explicit and first order. Its max_dt_s refinement is
+independent of mechanical geometry refinement and tight energy balance.
+Vertical modulus shifts, thermal expansion, moisture calibration, entropy
+models and measured source qualification remain separate physical inputs.
+
+Verification: All five focused temperature-feedback groups passed natively:
+independent WLF/Arrhenius isothermal body/history/heat/work response;
+16/32/64-step self-heating refinement against an independent coupled physical
+ODE with nonlinear finite calorics; exact continuation across original thermal
+events; empty-memory parity with the existing calibrated Kelvin feedback;
+and final-endpoint calibration/reference/cancellation/observer refusals with
+unchanged original inputs and deterministic retry. All four fixed-history
+thermal regressions and four driven thermal regressions passed after the shared
+source dispatch changed. These runs execute the original TemperatureShift,
+MBD/pHS, caloric timeline and observer numerical owners in a bounded build.
+No full workspace or complete impact-host execution is claimed.
+
+
+### Adaptive complete nonlinear heat assemblies
+
+`advance_heat_assembly_adaptive_candidate` connects the original thermal-only
+heat transaction to `AdaptiveConductionStepper`. Coarse and two-half-step
+proposals use the same complete nonlinear assembly; only accepted fine
+intervals contribute physical storage, energy and original caloric entropy.
+Native events and explicit continuous-source transition times split the clock.
+Cell inventories, caloric objects, topology and contact coverage remain fixed.
+One source-evaluation cap includes failed, coarse, rejected and final queries.
+Original source/material/energy refusals and cancellation remain typed terminal
+failures; native numerical nonconvergence and temporal error can reduce the
+interval. A late refusal publishes no partial window. Final source evidence is
+refreshed after target-time events. Entropy retains unclassified source terms;
+local temporal error control does not establish global or model accuracy.
+
+### Adaptive original continuum momentum and caloric evolution
+
+The opt-in fs-couple laminar-enthalpy feature exposes
+laminar_enthalpy::adaptive through LaminarEnthalpy::advance_adaptive and
+advance_boussinesq_adaptive. Both compose the original coupled native BDF1
+step without replacing its convective momentum, source-rheology, same-endpoint
+density-buoyancy, sign-split BDM transport, caloric inventory, or local/global
+thermal acceptance owners. The original force, physical boundary and slip
+routes remain held for the whole window. Material/exchange callbacks must be
+pure and smooth throughout the window and valid on native nonlinear probes.
+No thermal event strictly inside the window is consumed: original
+BackwardEulerStep admission refuses before a native step. Events exactly at
+the target remain pending in the original left-limit state.
+
+Each comparison solves one coarse interval and two original fine intervals
+from the same accepted joint history. The second fine interval uses the first
+fine thermal state and actual BDM velocity. Only both fine reports and the
+final original field/material state survive acceptance; no Richardson field,
+interpolated material, or extrapolated heat is substituted. The existing
+ConductionTimeOrder::First owner supplies the fine-error correction for the
+actual two representable spans and the accepted/rejected step multipliers.
+The final suggested_step_s can seed the next window without resetting the
+controller; it remains a proposal subject to new admission, not an error bound.
+A computed endpoint exactly one representable floating-point value below the
+target rounds to that target. Actual spans, including this cap-rounding
+effect, still enter all original solves, work and error arithmetic; no broad
+epsilon drops an unresolved physical interval.
+
+The joint local-error maximum compares original per-cell stored-energy
+changes in joules, original caloric temperature, and physical affine BDM
+velocity at every original triangle vertex. Energy differences are formed
+before mass multiplication and relative tolerances scale interval changes,
+so a formation-enthalpy datum, absolute Kelvin value or uniform velocity
+translation cannot inflate an error allowance. The Euclidean affine error
+attains its maximum at a triangle vertex; raw edge-moment orientation and
+centroid-only sampling do not define the momentum norm. Original energy
+coordinates still detect latent storage when temperature remains flat.
+Separate coarse-versus-summed-fine discrepancies also bound integrated bulk
+strain heat, routed slip heat, signed external stream enthalpy, other external
+heat and mechanical buoyancy work. Cancellation between these accounts
+cannot make inaccurate transfer reports pass merely because total thermal
+storage is unchanged. These are local estimates; finite sampling does not
+certify unresolved source oscillations, a global trajectory error, pressure
+accuracy, or whole-system passivity.
+
+Global native-step and endpoint-evaluation ceilings include coarse and
+rejected comparisons. Every native call receives only the remaining
+endpoint allowance, and a terminal failed call reports that upper allowance
+beside completed native evaluation counts. Original source, nonlinear,
+momentum, thermal, event and cancellation failures are terminal; only a
+successful but inaccurate comparison may refine. The original thermal
+inventory's substep ceiling and the explicit accepted-report cap both bound
+retained fine intervals. The minimum step bounds full comparisons; accepted
+halves and a target-clipped final comparison can be shorter. An unresolved
+comparison at its allowed floor refuses rather than claiming convergence.
+
+Only accepted fine reports enter compensated physical accounts. Final
+storage is independently measured as the sum of original mass times each
+cell's final-minus-initial specific stored energy. Its difference from
+accepted strain/slip/stream/other heat must satisfy the separate whole-window
+joule gate. Buoyancy work remains an independently integrated mechanical
+observation and never enters that thermal balance. Coarse/rejected heat,
+SIP/upwind/backflow/BDF numerical loss and partial accepted prefixes are never
+published as physical heat or replacement histories. All input histories
+remain immutable through late failure.
+
+Five native regression groups are authored: reversible two-cell transport
+against an independent backward-Euler recurrence and continuous exact
+solution under two caloric datums; naturally loaded uniform Boussinesq
+acceleration with independent accepted-interval velocity/work quadrature and
+24 J original caloric heating; fixed-temperature flow whose time-varying
+stream heat and explicit cooling cancel; bounded work/source/late-cancellation
+rollback; and original pending-event left limits, decimal endpoint rounding
+and accuracy-floor refusal. The new Rust source and these tests have received
+bounded source/API review only in this session: executor availability
+prevented parser/formatter, compiler and native FEM/thermal test execution.
+No passing integration-test claim is made.
+
+## Nonlinear membrane damping in the original exponential impact solve
+
+ExponentialImpactSystem constructors now admit the existing MembranePotential
+with its original bounded proportional material preparation.
+The same fs-plate condensed film supplies the complete projected linear
+tension/bending matrix and original nonlinear stretching energy. Uniform
+proportional material spectra automatically retain every original mixed-pair
+Maxwell history through ImpactSystem::with_body_relaxation. Existing felt,
+elastic contact, reciprocal volumes, spatial damping and passive radiation
+continue to use their original owners and the same accepted state transaction.
+
+The quadratic block contains the complete film pencil and every normalized
+memory's z²/2. The original nonlinear strain/history coupling remains implicit
+in PreparedNonlinearZoh; no lagged strain or separately advanced material state
+is substituted. A stable original facet-work callback preserves tiny stretching
+work without subtracting large total energies. Original mapped callbacks still
+use their bounded temporary derivative vectors; allocation-free complete
+impact execution is not claimed.
+
+All film histories count against the unchanged dense capacity before assembly.
+Source-bound films retain their complete strain/history tangent envelope and
+material band, additionally checked against the original 0.9*pi sampled limit.
+Bare films without this original complete envelope refuse; the existing
+explicit zero-arm spectrum admits bounded lossless films without dummy states.
+Original dt/tau<=2, slope/history/energy, duplicate intrinsic loss, radiation
+coupling and transactional cancellation gates remain. Exact linear propagation
+does not certify nonlinear transients or permit coarser source data.
+
+Three complete film integration groups are authored: independent
+Duffing-Maxwell response/heat refinement, signed mixed-mode acoustic loading
+with rollback, and complete-state/source admission. They remain unrun because
+the full original impact dependency closure is unavailable in the bounded
+native build. The separately exercised original film-work and native mapped
+pHS seams do not stand in for that full integration run.
+
+The physical scope remains the original moderate-slope, statically relaxed
+in-plane film with a common proportional spectrum. This does not supply
+heterogeneous viscoelastic condensation, finite-strain 3-D tissue, wrinkling,
+in-plane inertia, shell/support exact propagation or thermal feedback.
+
+
+### Adaptive finite-gas windows with nonlinear wall feedback
+
+The original finite-gas thermal window controller can resolve convection at
+the actual wall and common gas endpoint in every coarse, fine and retried
+interval. It retains source-energy apportionment, local h/u/T/phase error
+estimation, accepted fine states and whole-window energy/entropy accounts.
+Source-aware callbacks receive the actual interval input. Initial/final
+admission hooks can refuse source/domain exits but cannot replace a native
+physical candidate; the interval controller remains private. Existing outer
+heat-bracket and gas-increment retry rules remain unchanged. Wall, material
+and source failures propagate without publishing a partial window. Temporal
+error control remains local and does not establish physical-model accuracy.

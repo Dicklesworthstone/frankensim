@@ -4,6 +4,8 @@ use fs_couple::moisture::layered::MoistureActivityTransfer;
 
 #[path = "deforming/atmosphere.rs"]
 mod atmosphere;
+#[path = "deforming/solution.rs"]
+mod solution;
 
 fn root(mut lo: f64, mut hi: f64, residual: impl Fn(f64) -> f64) -> f64 {
     assert!(residual(lo) <= 0.0 && residual(hi) >= 0.0);

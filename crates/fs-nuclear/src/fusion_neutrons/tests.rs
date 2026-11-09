@@ -15,6 +15,9 @@ mod secondary;
 #[path = "tests/fission.rs"]
 mod fission;
 
+#[path = "tests/precursors.rs"]
+mod precursors;
+
 const MEV: f64 = 1.602_176_634e-13;
 
 fn data(energies_mev: &[f64], cells: usize) -> DiffusionData {

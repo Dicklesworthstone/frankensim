@@ -6,6 +6,8 @@ use fs_flux::{MaterialNavierStokesBoundary, OpenBoundaryPolicy};
 
 #[path = "mixed_sdirk2/adaptive.rs"]
 mod adaptive;
+#[path = "mixed_sdirk2/heat.rs"]
+mod heat;
 
 fn moments(mesh: &TriMesh, velocity: &dyn Fn([f64; 2]) -> [f64; 2]) -> Vec<f64> {
     mesh.edges
@@ -184,6 +186,47 @@ fn g1_mixed_sdirk2_thermal_carreau_keeps_layer_stress_slip_and_original_stages()
         let all: Vec<_> = (0..mesh.edges.len())
             .filter(|edge| mesh.is_boundary(*edge))
             .collect();
+        let heat = &result.dissipated_heat;
+        assert_eq!(heat.duration_s(), timestep);
+        let gamma = FluxSdirk2Stage::First.time_fraction();
+        near(
+            heat.bulk_energy_j_per_m(),
+            timestep
+                * ((1.0 - gamma) * 2.0 * amplitude(times[0]) * stresses[0]
+                    + gamma * 2.0 * amplitude(times[1]) * stresses[1]),
+            2e-5 * density,
+        );
+        near(
+            heat.slip_energy_j_per_m(),
+            timestep
+                * ((1.0 - gamma) * 2.0 * stresses[0].powi(2) / resistance[0]
+                    + gamma * 2.0 * stresses[1].powi(2) / resistance[1]),
+            2e-5 * density,
+        );
+        for (cell, &energy) in heat.cell_bulk_energy_j_per_m().iter().enumerate() {
+            let gradient = if mesh.centroids[cell][1] < 0.5 {
+                3.0
+            } else {
+                1.0
+            };
+            near(
+                energy,
+                mesh.areas[cell]
+                    * timestep
+                    * gradient
+                    * ((1.0 - gamma) * amplitude(times[0]) * stresses[0]
+                        + gamma * amplitude(times[1]) * stresses[1]),
+                2e-5 * density * mesh.areas[cell],
+            );
+        }
+        assert_eq!(heat.boundary_slip_energy().len(), all.len());
+        for (entry, &edge) in heat.boundary_slip_energy().iter().zip(&all) {
+            assert_eq!((entry.edge, entry.component), (edge, 0));
+            assert!(entry.energy_j_per_m.is_finite() && entry.energy_j_per_m >= 0.0);
+            if !horizontal.contains(&edge) {
+                assert_eq!(entry.energy_j_per_m, 0.0);
+            }
+        }
         for (i, result) in [&result.first_stage, &result.endpoint]
             .into_iter()
             .enumerate()
@@ -204,7 +247,18 @@ fn g1_mixed_sdirk2_thermal_carreau_keeps_layer_stress_slip_and_original_stages()
                 2.0 * amplitude(times[i]) * stresses[i],
                 2e-5 * density,
             );
+            let slip_powers: Vec<_> = flow
+                .boundary_slip_dissipation()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(slip_powers.len(), all.len());
+            let independent_slip: f64 = slip_powers.iter().map(|edge| edge.power_w_per_m).sum();
             let loads = flow.boundary_loads(&horizontal, [0.0; 2], &[None]).unwrap();
+            near(
+                independent_slip,
+                loads.slip_dissipation_w_per_m,
+                1e-12 * density,
+            );
             near(
                 loads.slip_dissipation_w_per_m,
                 2.0 * stresses[i].powi(2) / resistance[i],

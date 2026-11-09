@@ -294,3 +294,56 @@ fn g4_feedback_refusal_endpoint_budget_and_late_cancellation_preserve_both_histo
         assert_eq!(old.time_s(), 0.0);
     });
 }
+
+#[test]
+fn g1_decimal_interval_cap_reaches_authored_events_in_both_drive_modes() {
+    with_cx(|cx| {
+        for thermal_feedback in [false, true] {
+            let law = Caloric;
+            let old = inventory(&law, &[300.0; 3]);
+            let owner = model(cx, &old, 1, false);
+            let state = owner.momentum().rest_state(&[None; 2], cx).unwrap();
+            let held = ports(300.0, 0.2, 3000.0);
+            let mut policy = permissive();
+            policy.maximum_interval_s = 0.037;
+            let mut workspace = owner.momentum().workspace().unwrap();
+            let solved = if thermal_feedback {
+                advance_resolved_with_thermal_drive(
+                    cx, &owner, &old, &state, &mut workspace, 0.111,
+                    &[0.037, 0.074], controls(), policy,
+                    |_, _, _, _| Ok::<_, ()>(held.clone()),
+                    |_, candidate, flow, _| Ok::<_, ()>(heated(candidate, flow)),
+                )
+            } else {
+                advance_resolved_with_drive(
+                    cx, &owner, &old, &state, &mut workspace, 0.111,
+                    &[0.037, 0.074], controls(), policy,
+                    |_, _| Ok::<_, ()>(held.clone()),
+                    |_, candidate, flow, _| Ok::<_, ()>(heated(candidate, flow)),
+                )
+            }.unwrap();
+            assert_eq!(solved.thermal.time_s(), 0.111);
+            assert_eq!(solved.momentum.accepted_time_s(), 0.111);
+            assert_eq!(solved.report.work.native_steps, 9);
+            assert_eq!(solved.report.estimates.len(), 3);
+            assert_eq!(solved.report.steps.len(), 6);
+            let mut previous_end = 0.0;
+            for sample in &solved.report.drive_samples {
+                assert_eq!(sample.start_s, previous_end);
+                assert!(sample.start_s < sample.sample_time_s);
+                assert!(sample.sample_time_s < sample.end_s);
+                for event in [0.037, 0.074] {
+                    assert!(!(sample.start_s < event && event < sample.end_s));
+                }
+                previous_end = sample.end_s;
+            }
+            for endpoint in [0.037, 0.074, 0.111] {
+                assert!(solved.report.drive_samples.iter()
+                    .any(|sample| sample.end_s == endpoint));
+            }
+            assert_eq!(previous_end, 0.111);
+            assert_eq!(state.accepted_time_s(), 0.0);
+            assert_eq!(old.time_s(), 0.0);
+        }
+    });
+}

@@ -4,6 +4,7 @@ use crate::fixtures::{kuhn_cube, single_tet};
 use fs_rep_mesh::TetComplex;
 
 mod molecular;
+mod sources;
 
 const AIR: Medium = Medium {
     density_kg_m3: 1.2,

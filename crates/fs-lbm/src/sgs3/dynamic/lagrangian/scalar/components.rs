@@ -130,6 +130,20 @@ impl LagrangianComponentsTrial<'_> {
 }
 
 impl LagrangianDynamicComponents {
+    /// One replayable characteristic policy for stress, heat and every
+    /// common-component history. Select before the first accepted joint fit.
+    pub fn with_advection(
+        mut self,
+        policy: super::super::LagrangianAdvection,
+    ) -> Result<Self, DynamicSgsError> {
+        self.flow = self.flow.with_advection(policy)?;
+        Ok(self)
+    }
+
+    pub const fn advection(&self) -> super::super::LagrangianAdvection {
+        self.flow.advection()
+    }
+
     /// Select adaptive momentum memory before the first joint fit. Heat and
     /// component relaxation keep their independently authored memory times.
     pub fn with_adaptive_momentum_memory(
@@ -399,7 +413,11 @@ impl LagrangianDynamicComponents {
             elapsed,
             config.memory_time,
             config.maximum_departure_cells,
-        )?;
+        )?
+        .with_advection(
+            joint.momentum.owner.advection,
+            wall_velocity.unwrap_or([[0.0; 3]; 2]),
+        );
         let (report, log_scale) = prepare_history(
             &mut self.components.workspace.scalar,
             &self.components.history,

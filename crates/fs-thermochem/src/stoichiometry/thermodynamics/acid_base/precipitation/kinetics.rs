@@ -250,8 +250,11 @@ pub struct MineralKineticControlsV1 {
     pub maximum_step: Time,
     pub relative_tolerance: Dimensionless,
     pub amount_absolute_tolerance: Amount,
-    /// Each implicit extent residual, INCLUDING its inner pH uncertainty,
-    /// must fit this positive molar tolerance. It does not floor a donor.
+    /// Numerical implicit-root error allowance, INCLUDING inner pH uncertainty.
+    /// A residual or a monotone remaining-stock displacement estimate qualifies
+    /// the root; growth also limits relative donor error and honors the phase
+    /// amount tolerances. This is not an interval-arithmetic certificate and
+    /// does not floor a donor.
     pub extent_absolute_tolerance: Amount,
     pub maximum_stage_iterations: usize,
     pub maximum_attempts: usize,
@@ -314,6 +317,7 @@ struct Trial {
     aqueous: AcidBaseTrial,
     log_omega: Option<f64>,
     spread: f64,
+    log_roundoff: f64,
 }
 impl<'a> Workspace<'a> {
     fn new(model: &'a MineralKineticsV1, stocks: &'a Stocks, basis: Amount, options: SpeciationOptions, cancelled: &mut impl FnMut() -> bool) -> Result<Self> {
@@ -352,34 +356,40 @@ impl<'a> Workspace<'a> {
         self.counts.solves += 1;
         self.counts.iterations += aqueous.iterations();
         let width = aqueous.ph_bracket().iter().map(|ph| (ph - aqueous.ph()).abs()).fold(0.0, f64::max);
-        let (log_omega, spread) = match &self.model.owner.source {
+        let (log_omega, spread, log_roundoff) = match &self.model.owner.source {
             MineralKineticSourceV1::Salt(source) => {
                 let index = self.model.owner.family_index.expect("salt family");
                 let anion = self.prepared.terminal_activity(index, &aqueous)?;
-                let logarithm = if metal == 0.0 || anion == 0.0 { None } else {
+                let (logarithm, rounding) = if metal == 0.0 || anion == 0.0 { (None, 0.0) } else {
+                    let terms = [
+                        p * det::ln(metal), -p * det::ln(self.basis),
+                        q * det::ln(anion), source.standard().log_equilibrium_constant().value(),
+                    ];
                     let mut sum = Sum::default();
-                    sum.add(p * det::ln(metal))?;
-                    sum.add(-p * det::ln(self.basis))?;
-                    sum.add(q * det::ln(anion))?;
-                    sum.add(source.standard().log_equilibrium_constant().value())?;
-                    Some(sum.finish()?)
+                    for value in terms { sum.add(value)?; }
+                    (Some(sum.finish()?), logarithmic_roundoff(&terms))
                 };
-                (logarithm, q * source.aqueous_model().families()[index].steps().len() as f64 * core::f64::consts::LN_10 * width)
+                (logarithm, q * source.aqueous_model().families()[index].steps().len() as f64 * core::f64::consts::LN_10 * width, rounding)
             }
             MineralKineticSourceV1::Hydrolysis(source) => {
                 let z = f64::from(self.model.owner.cation_charge);
-                let logarithm = if metal == 0.0 { None } else {
+                let (logarithm, rounding) = if metal == 0.0 { (None, 0.0) } else {
+                    let log_metal = det::ln(metal);
+                    let log_basis = det::ln(self.basis);
+                    let proton = -z * det::ln(aqueous.proton_activity());
+                    let constant = source.standard().log_equilibrium_constant().value();
                     let mut sum = Sum::default();
-                    sum.add(det::ln(metal) - det::ln(self.basis))?;
-                    sum.add(-z * det::ln(aqueous.proton_activity()))?;
-                    sum.add(source.standard().log_equilibrium_constant().value())?;
-                    Some(sum.finish()?)
+                    sum.add(log_metal - log_basis)?;
+                    sum.add(proton)?;
+                    sum.add(constant)?;
+                    (Some(sum.finish()?), logarithmic_roundoff(&[log_metal, log_basis, proton, constant]))
                 };
-                (logarithm, z * core::f64::consts::LN_10 * width)
+                (logarithm, z * core::f64::consts::LN_10 * width, rounding)
             }
         };
         let spread = finite(spread, "kinetic saturation numerical spread")?;
-        Ok(Trial { phase, metal, family, aqueous, log_omega, spread })
+        let log_roundoff = finite(log_roundoff, "kinetic logarithmic roundoff scale")?;
+        Ok(Trial { phase, metal, family, aqueous, log_omega, spread, log_roundoff })
     }
     fn finish(mut self, model: &MineralKineticsV1, stocks: Arc<Stocks>, phase: Phase, basis: Amount, options: SpeciationOptions, cancelled: &mut impl FnMut() -> bool) -> Result<(MineralKineticStateV1, Counts)> {
         let trial = self.evaluate(phase, cancelled)?;
@@ -399,6 +409,14 @@ impl<'a> Workspace<'a> {
             cation_residual: Amount::new(cation_residual), family_residual,
         }, self.counts))
     }
+}
+
+// Numerical allowance for elementary logarithms and cancellation in a sum.
+// Scale BEFORE adding magnitudes to avoid an unnecessary large-source overflow.
+// This is a floating-point estimate, not an interval-arithmetic certificate.
+fn logarithmic_roundoff(terms: &[f64]) -> f64 {
+    let factor = 32.0 * f64::EPSILON;
+    terms.iter().fold(factor, |sum, term| sum + factor * term.abs())
 }
 
 fn finite(value: f64, message: &'static str) -> Result<f64> {

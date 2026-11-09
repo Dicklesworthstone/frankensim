@@ -13,6 +13,9 @@ use crate::lattice3::wall_loads::WallMomentumProbe3;
 use core::marker::PhantomData;
 use fs_exec::KernelRunner;
 
+/// Original D3Q7 thermal transport with this implicit porous velocity owner.
+pub mod thermal;
+
 pub use crate::d3q19::{DarcyForchheimer3, LinearResistance3, ResistanceMomentumExchange3};
 
 /// A held porous medium with native D3Q19/D3Q27 through-flow and moving walls.
@@ -201,6 +204,20 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ResistanceOpenGrid3<L, Q> {
         collisions: Option<&[L::Collision]>,
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<ResistanceMomentumExchange3, GridError3<L::Error>> {
+        let (receipt, step) = self.stage_inner(pool, collisions, poll)?;
+        poll()?;
+        self.publish_step(step, receipt);
+        Ok(receipt)
+    }
+
+    // Composing heat/material owners admit their candidate before any physical
+    // momentum, force, drag or receipt epoch is published.
+    fn stage_inner<P: KernelRunner>(
+        &mut self,
+        pool: Option<(&P, &CancelGate)>,
+        collisions: Option<&[L::Collision]>,
+        poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
+    ) -> Result<(ResistanceMomentumExchange3, usize), GridError3<L::Error>> {
         poll()?;
         let endpoint = Some((
             EndpointSource3::Resistance(&self.laws),
@@ -221,14 +238,18 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ResistanceOpenGrid3<L, Q> {
             )?
         };
         let receipt = self.measure(open, collisions, poll)?;
-        poll()?;
+        Ok((receipt, step))
+    }
+
+    // The complete native candidate and every composing gate have succeeded.
+    // Publication only swaps admitted buffers and cannot fail.
+    fn publish_step(&mut self, step: usize, receipt: ResistanceMomentumExchange3) {
         core::mem::swap(&mut self.flow.inner.grid.f, &mut self.flow.inner.grid.next);
         core::mem::swap(&mut self.flow.forces, &mut self.flow.pending_forces);
         core::mem::swap(&mut self.drag, &mut self.pending_drag);
         self.flow.inner.grid.completed_steps = step;
         self.flow.inner.publish_wall_exchange();
         self.last_exchange = Some(receipt);
-        Ok(receipt)
     }
 
     fn measure(

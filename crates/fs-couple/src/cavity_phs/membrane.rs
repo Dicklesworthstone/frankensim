@@ -12,6 +12,7 @@ pub use vibration::GasMembraneVibration;
 mod motion;
 pub use motion::{GasMembraneMotion, GasMembraneMotionControls, GasMembraneMotionError, GasMembraneMotionStep};
 pub use motion::{
+    GasMembraneContactCandidate, GasMembraneContactError, GasMembraneContactStep, MembraneGasSample,
     GasMembraneDiscreteGradientStep, GasMembraneHeatVolumeStep, GasMembraneThermalControls,
     GasMembraneThermalEvaluation, GasMembraneThermalMotion, GasMembraneThermalStep,
 };

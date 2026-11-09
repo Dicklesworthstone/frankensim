@@ -40,6 +40,8 @@ pub use layered::{
     MoistureLayerSolidSource, MoistureLayeredSolid, MoistureLayeredSolidStep,
     MoistureSpatialAtmosphereCandidate, MoistureSpatialAtmosphereControls,
     MoistureSpatialAtmosphereReport, MoistureSpatialDiffusionReport,
+    MoistureSpatialPairedSolutionCandidate, MoistureSpatialPairedSolutionControls,
+    MoistureSpatialPairedSolutionReport,
 };
 pub use radial::{MoistureRadialSolid, MoistureRadialSolidMesh, MoistureRadialSolidStep};
 

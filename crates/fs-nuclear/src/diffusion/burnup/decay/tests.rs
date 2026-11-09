@@ -20,6 +20,9 @@ use crate::{EnergyChannels, FissionError};
 use fs_qty::Frequency;
 use fs_thermochem::decay::DecayLawV1;
 
+#[path = "precursor_tests.rs"]
+mod precursors;
+
 fn budget() -> DiffusionBurnupBudget {
     let mut budget = super::super::tests::budget();
     budget.max_iterations = 128;

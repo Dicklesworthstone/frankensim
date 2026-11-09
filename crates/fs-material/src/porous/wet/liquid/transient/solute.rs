@@ -8,13 +8,21 @@
 //! ordering is required in every constituent array. The caller qualifies D/tau
 //! and the passive dilute approximation at the actual aqueous state. Solutes do not alter water
 //! pressure, saturation, viscosity, density or retention. Activity/cross-friction,
-//! ionic migration, reaction and hydrodynamic dispersion need their own laws.
+//! ionic migration and reaction need their own laws. Longitudinal mechanical
+//! dispersion has a separate original-source interval adapter.
 //! Explicit linear and original-source Langmuir extensions add reversible
 //! immobile storage; sorption is never inferred from aqueous D or tortuosity.
 
 use super::{LiquidSaturationCandidate, LiquidSaturationColumn};
 
+mod dispersion;
 mod langmuir;
+pub use dispersion::{
+    DISPERSIVITY_PARAMETER, DispersionCellState, DispersiveSoluteStep, LIQUID_SATURATION_AXIS,
+    LONGITUDINAL_DISPERSION_LAW, LongitudinalDispersivity, PORE_SPEED_AXIS, POROSITY_AXIS,
+    SoluteDispersionCell, SoluteDispersionControls, SoluteDispersionError, SoluteDispersionReport,
+    TRANSPORT_SCALE_AXIS,
+};
 mod sorption;
 mod transport;
 pub use langmuir::{
@@ -28,6 +36,50 @@ pub use transport::{
 };
 
 impl LiquidSaturationCandidate {
+    /// Prepare source-qualified longitudinal mixing on this exact accepted
+    /// water interval. Each adjacent cell uses its OWN endpoint liquid volume
+    /// fraction and the SAME face volume/duration. Opposite faces never cancel.
+    /// The original hydraulic interval freezes its chosen face flux; this does
+    /// not resolve within-interval changes or reversals. Refine water intervals
+    /// to resolve those histories. No grid-dependent dispersivity is inferred.
+    pub fn with_solute_dispersion<'a>(
+        &'a self,
+        original: &'a LiquidSaturationColumn,
+        cells: &'a [SoluteDispersionCell<'a>],
+        controls: SoluteDispersionControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<DispersiveSoluteInterval<'a>, SoluteDispersionError> {
+        transport::poll(&mut cancelled)?;
+        self.admit_solute_interval(original)?;
+        if cells.len() != original.cells.len() {
+            return Err(SoluteDispersionError::Invalid(
+                "one dispersion source binding per original hydraulic cell required",
+            ));
+        }
+        let prepared = dispersion::prepare(
+            [original.elapsed_s, self.state.elapsed_s],
+            self.step.duration_s,
+            cells,
+            controls,
+            |i| {
+                let cell = &original.cells[i];
+                let saturation = self.state.saturations[i];
+                DispersionCellState {
+                    porosity: cell.porosity,
+                    liquid_saturation: saturation,
+                    liquid_volume_fraction: (cell.capacity_m() * saturation) / cell.thickness_m,
+                }
+            },
+            |face| transport::integrated_flux(self.step.duration_s, self.step.face_flux_m_s[face]),
+            &mut cancelled,
+        )?;
+        Ok(DispersiveSoluteInterval {
+            hydraulic: self,
+            original,
+            prepared,
+        })
+    }
+
     /// Transport passive analytical-element solutes with original source-bound
     /// Langmuir storage, optionally at the independently sourced LOCAL LDF rate.
     /// Each cell/constituent slot has independent sites; there is no competition
@@ -79,6 +131,7 @@ impl LiquidSaturationCandidate {
             boundaries,
             controls.transport,
             &mut storage,
+            None,
             &mut cancelled,
         );
         let aqueous = storage.recover(result)?;
@@ -129,6 +182,7 @@ impl LiquidSaturationCandidate {
             boundaries,
             controls,
             &mut storage,
+            None,
             &mut cancelled,
         )?;
         storage.finish(initial_aqueous_amount_mol_m2, aqueous, &mut cancelled)
@@ -178,6 +232,7 @@ impl LiquidSaturationCandidate {
             boundaries,
             controls,
             &mut (),
+            None,
             cancelled,
         )
     }
@@ -192,6 +247,7 @@ impl LiquidSaturationCandidate {
         boundaries: [DiluteSoluteBoundary<N>; 2],
         controls: DiluteSoluteControls<N>,
         storage: &mut impl transport::ImmobileStorage<N>,
+        mechanical_bulk_m2_s: Option<&[[f64; 2]]>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DiluteSoluteStep<N>, DiluteSoluteError> {
         if cancelled() {
@@ -199,15 +255,7 @@ impl LiquidSaturationCandidate {
         }
         let n = original.cells.len();
         transport::admit_extent(n, controls)?;
-        if self.original_elapsed_s != original.elapsed_s
-            || self.original_saturations != original.saturations
-            || self.state.cells != original.cells
-            || self.state.elapsed_s != original.elapsed_s + self.step.duration_s
-        {
-            return Err(DiluteSoluteError::Invalid(
-                "solute transport requires the exact original hydraulic interval and material cells",
-            ));
-        }
+        self.admit_solute_interval(original)?;
         let mut before = Vec::with_capacity(n);
         let mut after = Vec::with_capacity(n);
         let mut widths = Vec::with_capacity(n);
@@ -233,7 +281,7 @@ impl LiquidSaturationCandidate {
             }
             faces.push(volume);
         }
-        transport::transport_with_storage(
+        transport::transport_with_dispersion(
             [original.elapsed_s, self.state.elapsed_s],
             self.step.duration_s,
             &before,
@@ -246,8 +294,159 @@ impl LiquidSaturationCandidate {
             boundaries,
             controls,
             storage,
+            mechanical_bulk_m2_s,
             cancelled,
         )
+    }
+
+    fn admit_solute_interval(
+        &self,
+        original: &LiquidSaturationColumn,
+    ) -> Result<(), DiluteSoluteError> {
+        if self.original_elapsed_s != original.elapsed_s
+            || self.original_saturations != original.saturations
+            || self.state.cells != original.cells
+            || self.state.elapsed_s != original.elapsed_s + self.step.duration_s
+        {
+            return Err(DiluteSoluteError::Invalid(
+                "solute transport requires the exact original hydraulic interval and material cells",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One prepared physical interval. Each consuming method reuses the original
+/// transport/storage owner; preparation arrays move into the result without a
+/// deep clone. Failure leaves the borrowed hydraulic and constituent states
+/// unchanged. All passive species share the declared mechanical calibration.
+pub struct DispersiveSoluteInterval<'a> {
+    hydraulic: &'a LiquidSaturationCandidate,
+    original: &'a LiquidSaturationColumn,
+    prepared: dispersion::PreparedDispersion<'a>,
+}
+impl<'a> DispersiveSoluteInterval<'a> {
+    pub fn dispersion(&self) -> &SoluteDispersionReport {
+        &self.prepared.report
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn transport_dilute_solutes<const N: usize>(
+        self,
+        initial_amount_mol_m2: &[[f64; N]],
+        aqueous_diffusivity_m2_s: &[[f64; N]],
+        transport_tortuosity: &[f64],
+        boundaries: [DiluteSoluteBoundary<N>; 2],
+        controls: DiluteSoluteControls<N>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<DispersiveSoluteStep<'a, DiluteSoluteStep<N>>, SoluteDispersionError> {
+        let controls = self.prepared.transport_controls(controls)?;
+        let mut step = self
+            .hydraulic
+            .transport_solute_storage(
+                self.original,
+                initial_amount_mol_m2,
+                aqueous_diffusivity_m2_s,
+                transport_tortuosity,
+                boundaries,
+                controls,
+                &mut (),
+                Some(&self.prepared.report.mechanical_bulk_m2_s),
+                cancelled,
+            )
+            .map_err(|error| self.prepared.transport_error(error))?;
+        step.report.workspace_bytes += self.prepared.report.preparation_storage_bytes;
+        Ok(self.prepared.finish(step))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn transport_sorbing_dilute_solutes<const N: usize>(
+        self,
+        initial_aqueous_amount_mol_m2: &[[f64; N]],
+        initial_sorbed_amount_mol_m2: &[[f64; N]],
+        sorption_laws: &[[LinearSoluteSorption; N]],
+        aqueous_diffusivity_m2_s: &[[f64; N]],
+        transport_tortuosity: &[f64],
+        boundaries: [DiluteSoluteBoundary<N>; 2],
+        controls: DiluteSoluteControls<N>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<DispersiveSoluteStep<'a, SorbingDiluteSoluteStep<N>>, SoluteDispersionError> {
+        let controls = self.prepared.transport_controls(controls)?;
+        let mut storage = sorption::SorptionStorage::new(
+            self.original.cells.len(),
+            self.hydraulic.step.duration_s,
+            initial_sorbed_amount_mol_m2,
+            sorption_laws,
+            controls,
+            &mut cancelled,
+        )
+        .map_err(|error| self.prepared.transport_error(error))?;
+        let mut aqueous = self
+            .hydraulic
+            .transport_solute_storage(
+                self.original,
+                initial_aqueous_amount_mol_m2,
+                aqueous_diffusivity_m2_s,
+                transport_tortuosity,
+                boundaries,
+                controls,
+                &mut storage,
+                Some(&self.prepared.report.mechanical_bulk_m2_s),
+                &mut cancelled,
+            )
+            .map_err(|error| self.prepared.transport_error(error))?;
+        aqueous.report.workspace_bytes += self.prepared.report.preparation_storage_bytes;
+        let result = storage
+            .finish(initial_aqueous_amount_mol_m2, aqueous, &mut cancelled)
+            .map_err(|error| self.prepared.transport_error(error))?;
+        Ok(self.prepared.finish(result))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn transport_langmuir_dilute_solutes<'b, const N: usize>(
+        self,
+        initial_aqueous_amount_mol_m2: &[[f64; N]],
+        initial_sorbed_amount_mol_m2: &'b [[f64; N]],
+        initial_vacant_amount_mol_m2: &'b [[f64; N]],
+        sorption: &'b [[Option<LangmuirSoluteSorption<'b>>; N]],
+        transverse_area_m2: f64,
+        aqueous_diffusivity_m2_s: &[[f64; N]],
+        transport_tortuosity: &[f64],
+        boundaries: [DiluteSoluteBoundary<N>; 2],
+        mut controls: LangmuirSoluteControls<N>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<DispersiveSoluteStep<'a, LangmuirSoluteStep<N>>, SoluteDispersionError> {
+        controls.transport = self.prepared.transport_controls(controls.transport)?;
+        let mut storage = langmuir::LangmuirStorage::new(
+            self.original.cells.len(),
+            self.hydraulic.step.duration_s,
+            initial_sorbed_amount_mol_m2,
+            initial_vacant_amount_mol_m2,
+            sorption,
+            transverse_area_m2,
+            controls,
+            &mut cancelled,
+        )
+        .map_err(|error| self.prepared.langmuir_error(error))?;
+        let result = self.hydraulic.transport_solute_storage(
+            self.original,
+            initial_aqueous_amount_mol_m2,
+            aqueous_diffusivity_m2_s,
+            transport_tortuosity,
+            boundaries,
+            controls.transport,
+            &mut storage,
+            Some(&self.prepared.report.mechanical_bulk_m2_s),
+            &mut cancelled,
+        );
+        let mut aqueous = storage
+            .recover(result)
+            .map_err(|error| self.prepared.langmuir_error(error))?;
+        aqueous.report.workspace_bytes += self.prepared.report.preparation_storage_bytes;
+        let result = storage
+            .finish(initial_aqueous_amount_mol_m2, aqueous, &mut cancelled)
+            .map_err(|error| self.prepared.langmuir_error(error))?;
+        Ok(self.prepared.finish(result))
     }
 }
 

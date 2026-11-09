@@ -830,16 +830,21 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     /// retain their existing nonlinear owners. Generated heat in a fixed cell
     /// is accounted as equal physical source and thermostat rejection.
     ///
-    /// The returned receipt separates molecular heat, wall/buoyancy supply,
-    /// native face kinetic energy, pressure-constraint defect and BE numerical
+    /// The returned receipt separates molecular heat, wall/buoyancy/reservoir
+    /// supply, native face kinetic energy, pressure-constraint defect and BE numerical
     /// loss. Only molecular heat is deposited. Material transport/buoyancy
     /// retain the explicit first-order lag; no gravitational-potential store,
     /// SGS dissipation or second thermal/momentum advance is introduced.
     ///
     /// # Errors
-    /// Requires the existing closed-wall/symmetry unsteady-Stokes admission,
-    /// backward Euler, Reynolds at most the declared ceiling (<=0.1), no fans
-    /// or configured resistance, and the native physical-work tolerance.
+    /// Admits closed walls/symmetry or one opposed Pressure/Outlet pair.
+    /// The latter prescribes normal mechanical traction and zero tangential
+    /// trace, sharing the steady pressure-work mouth operator. Endpoint pressure
+    /// programs and signed thermal backflow use the same projected faces.
+    /// Requires backward Euler, Reynolds at most the declared ceiling (<=0.1),
+    /// no fans or configured resistance, and the native physical-work tolerance.
+    /// Momentum convection and advected kinetic energy are omitted together;
+    /// pressure work is never deposited again as heat or source EOS work.
     /// Source, thermal, mechanical or cancellation refusal returns no result
     /// or partial audit. Existing non-heated entries remain unchanged.
     #[cfg(feature = "enthalpy-coupling")]
@@ -907,8 +912,9 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     /// must fit the native power tolerance before the endpoint can be accepted.
     /// One accepted mechanical account is retained per physical step.
     ///
-    /// Original closed-wall/symmetry, Reynolds <= 0.1 and physical power gates
-    /// remain. BE numerical loss, pressure work and buoyancy supply are not
+    /// Closed walls/symmetry or one opposed normal-traction reservoir pair
+    /// share the native Reynolds <= 0.1 and physical power gates. BE numerical
+    /// loss, signed reservoir work and buoyancy supply are not
     /// added as heat. Coupled time accuracy is first order; no SGS is selected.
     ///
     /// # Errors

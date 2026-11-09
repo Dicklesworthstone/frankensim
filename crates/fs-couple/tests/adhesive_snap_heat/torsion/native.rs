@@ -1,5 +1,8 @@
 //! G1/G3/G4: actual finite-body twist and calorics share physical time.
 
+#[path = "native/temperature.rs"]
+mod temperature;
+
 use super::{
     CRITICAL_TWIST, binding, controls as heat_controls, curves, events, ledgers, source, thermal,
 };

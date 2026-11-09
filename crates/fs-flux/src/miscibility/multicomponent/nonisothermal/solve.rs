@@ -7,7 +7,7 @@ use fs_thermochem::solution::multicomponent::MAX_REGULAR_SOLUTION_SPECIES_V1;
 /// One immutable right-hand side, shared by full/first-half trials and by
 /// retries at the same accepted state. The friction workspace is reused across
 /// every face; no independent binary approximation replaces the coupled solve.
-pub(super) struct Rates {
+pub(in crate::miscibility::multicomponent) struct Rates {
     fluxes: Vec<f64>,
     energy_fluxes: Vec<f64>,
     evaluations: usize,
@@ -16,7 +16,7 @@ pub(super) struct Rates {
     entropy_production_rate_w_per_k: f64,
 }
 impl Rates {
-    pub(super) const fn evaluations(&self) -> usize {
+    pub(in crate::miscibility::multicomponent) const fn evaluations(&self) -> usize {
         self.evaluations
     }
 }
@@ -49,8 +49,35 @@ pub(super) fn rates(
     controls: MulticomponentNonisothermalSolve,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Rates> {
+    rates_with_gradient(initial, None, controls, cancelled)
+}
+
+/// Extra cell-major entropy-conjugate chemical potentials divided by R. Only
+/// the interfacial owner supplies these; source efforts, friction, reciprocal
+/// heat carriage and entropy diagnostics remain in this one original kernel.
+pub(in crate::miscibility::multicomponent) fn rates_with_gradient(
+    initial: &MulticomponentNonisothermalField,
+    extra_reduced_potentials: Option<&[f64]>,
+    controls: MulticomponentNonisothermalSolve,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Rates> {
     poll(cancelled)?;
     admit_controls(controls)?;
+    if let Some(potentials) = extra_reduced_potentials {
+        if potentials.len() != initial.component_moles().len() {
+            return Err(MulticomponentNonisothermalError::Invalid(
+                "one extra thermal chemical potential per cell and original species required",
+            ));
+        }
+        for row in potentials.chunks(initial.network().species_count()) {
+            poll(cancelled)?;
+            if row.iter().any(|value| !value.is_finite()) {
+                return Err(MulticomponentNonisothermalError::Invalid(
+                    "finite interfacial thermal chemical potentials required",
+                ));
+            }
+        }
+    }
     let network = initial.network();
     let n = network.species_count();
     let mut fluxes = vec![0.0; network.faces().len() * n];
@@ -100,6 +127,14 @@ pub(super) fn rates(
                 (efforts.chemical_efforts_j_per_mol_k[s] - a0) / R - (q / R) * delta_beta,
                 "source-conjugate thermal chemical effort",
             )?;
+            if let Some(potentials) = extra_reduced_potentials {
+                let mut total = Sum::default();
+                total.add(reduced[s])?;
+                // Remove each cell's common species gauge before differencing.
+                total.add(potentials[j * n + s] - potentials[j * n])?;
+                total.add(-(potentials[i * n + s] - potentials[i * n]))?;
+                reduced[s] = total.value()?;
+            }
             enthalpy_contrasts[s] = finite(
                 efforts.partial_enthalpy_contrasts_j_per_mol[s] + q,
                 "original divided enthalpy and reciprocal heat contrast",
@@ -208,6 +243,35 @@ pub(super) fn candidate_from_rates(
     controls: MulticomponentNonisothermalSolve,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<MulticomponentNonisothermalCandidate> {
+    let trial = conservative_trial_from_rates(initial, duration_s, rates, controls, cancelled)?;
+    let candidate = recover_candidate(initial, trial, rates, controls, cancelled)?;
+    admit_energy_entropy(
+        candidate.step.energy_residual_j,
+        candidate.step.entropy_change_j_per_k,
+        controls,
+    )?;
+    poll(cancelled)?;
+    Ok(candidate)
+}
+
+/// Private synchronous inventory/energy stage. The interfacial caller may
+/// deduct its half-edge storage changes from the bulk enthalpy changes before
+/// the SAME original caloric inverse runs. No trial is a public accepted state.
+pub(in crate::miscibility::multicomponent) struct Trial {
+    pub(in crate::miscibility::multicomponent) field: MulticomponentNonisothermalField,
+    pub(in crate::miscibility::multicomponent) energy_changes: Vec<Sum>,
+    duration_s: f64,
+    transferred_mol: Vec<Vec<f64>>,
+    transferred_energy_j: Vec<f64>,
+}
+
+pub(in crate::miscibility::multicomponent) fn conservative_trial_from_rates(
+    initial: &MulticomponentNonisothermalField,
+    duration_s: f64,
+    rates: &Rates,
+    controls: MulticomponentNonisothermalSolve,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Trial> {
     poll(cancelled)?;
     admit_controls(controls)?;
     let elapsed = admit_duration(initial, duration_s)?;
@@ -245,6 +309,67 @@ pub(super) fn candidate_from_rates(
         energy_changes[j].add(energy)?;
         transferred_energy_j.push(energy);
     }
+    field.state.elapsed_s = elapsed;
+    poll(cancelled)?;
+    Ok(Trial {
+        field,
+        energy_changes,
+        duration_s,
+        transferred_mol,
+        transferred_energy_j,
+    })
+}
+
+/// Only an interface owner needs fractions before caloric recovery. Ordinary
+/// homogeneous transport avoids this additional original-law evaluation.
+pub(in crate::miscibility::multicomponent) fn prepare_trial_composition(
+    trial: &mut Trial,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<()> {
+    let network = trial.field.state.network.clone();
+    let n = network.species_count();
+    for cell in 0..network.cells().len() {
+        poll(cancelled)?;
+        let amounts = &trial.field.state.amounts[cell * n..(cell + 1) * n];
+        for (species, &trial_mol) in amounts.iter().enumerate() {
+            if !positive(trial_mol) {
+                return Err(MulticomponentMiscibilityError::Positivity {
+                    cell,
+                    species,
+                    trial_mol,
+                }
+                .into());
+            }
+        }
+        let fractions = network.fractions(amounts, cancelled)?;
+        trial.field.state.fractions[cell * n..(cell + 1) * n]
+            .copy_from_slice(&fractions[..n]);
+    }
+    poll(cancelled)?;
+    Ok(())
+}
+
+/// Recover all local bulk enthalpies and retain the original precision account.
+/// The caller must audit its complete stored energy and entropy before exposing
+/// the result: homogeneous H here, H plus interface energy for phase fields.
+pub(in crate::miscibility::multicomponent) fn recover_candidate(
+    initial: &MulticomponentNonisothermalField,
+    trial: Trial,
+    rates: &Rates,
+    controls: MulticomponentNonisothermalSolve,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<MulticomponentNonisothermalCandidate> {
+    poll(cancelled)?;
+    admit_controls(controls)?;
+    let network = initial.network();
+    let n = network.species_count();
+    let Trial {
+        mut field,
+        energy_changes,
+        duration_s,
+        transferred_mol,
+        transferred_energy_j,
+    } = trial;
     let mut caloric_iterations = 0_u64;
     // Recover each cell only after all synchronous debits/credits are present.
     // A cell is an open subsystem: only the closed graph owns the entropy gate.
@@ -293,13 +418,12 @@ pub(super) fn candidate_from_rates(
         }
         field.state.fractions[cell * n..(cell + 1) * n].copy_from_slice(fractions);
     }
-    field.state.elapsed_s = elapsed;
     let (
         component_residual_mol,
         maximum_capacity_residual_mol,
         energy_residual_j,
         entropy_change_j_per_k,
-    ) = initial.balances(&field, controls, cancelled)?;
+    ) = initial.caloric_balances(&field, controls, cancelled)?;
     poll(cancelled)?;
     Ok(MulticomponentNonisothermalCandidate {
         field,

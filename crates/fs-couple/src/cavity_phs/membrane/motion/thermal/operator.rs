@@ -100,9 +100,10 @@ impl<'a, 'p, R: gas::HeatVolumeLaw, C: FnMut() -> bool> ThermalOperator<'a, 'p, 
         &self,
         stage: &[f64],
         endpoint: &[f64],
+        retain_sample: bool,
     ) -> Result<gas::Trial<R>, GasMembraneMotionError> {
         self.gas_trials.set(self.gas_trials.get() + 1);
-        gas::Trial::<R>::new(
+        gas::Trial::<R>::new_sampled(
             self.model,
             self.initial,
             stage,
@@ -110,6 +111,7 @@ impl<'a, 'p, R: gas::HeatVolumeLaw, C: FnMut() -> bool> ThermalOperator<'a, 'p, 
             self.heat,
             self.exterior_heat,
             self.controls,
+            retain_sample,
             &mut || self.cancelled(),
         )
     }
@@ -134,7 +136,7 @@ impl<'a, 'p, R: gas::HeatVolumeLaw, C: FnMut() -> bool> ThermalOperator<'a, 'p, 
             .zip(q)
             .map(|(&old, &stage)| old + 2.0 * (stage - old))
             .collect();
-        match self.fresh(q, &endpoint) {
+        match self.fresh(q, &endpoint, false) {
             Ok(trial) => {
                 *self.cache.borrow_mut() = Some(trial);
                 true
@@ -148,6 +150,7 @@ impl<'a, 'p, R: gas::HeatVolumeLaw, C: FnMut() -> bool> ThermalOperator<'a, 'p, 
     pub(super) fn final_trial(
         &self,
         endpoint: &[f64],
+        retain_sample: bool,
     ) -> Result<gas::Trial<R>, GasMembraneMotionError> {
         if !self.begin() {
             return Err(self.take_stop().expect("stopped operator"));
@@ -158,7 +161,7 @@ impl<'a, 'p, R: gas::HeatVolumeLaw, C: FnMut() -> bool> ThermalOperator<'a, 'p, 
             .zip(endpoint)
             .map(|(&old, &end)| old + 0.5 * (end - old))
             .collect();
-        self.fresh(&stage, endpoint)
+        self.fresh(&stage, endpoint, retain_sample)
     }
 }
 

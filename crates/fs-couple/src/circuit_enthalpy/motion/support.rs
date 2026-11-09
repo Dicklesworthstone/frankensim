@@ -12,11 +12,13 @@ use super::super::{
     CircuitEnthalpyError, CircuitEnthalpyInput, CircuitEnthalpyReport,
     CircuitEnthalpySolve, DrivenCoefficients, coupled_driver_candidate, finite,
     contacts::{self, ContactHeatCells, ContactThermalCoefficients,
-        material::{ElectricalContactNetwork, ElectricalContactNetworkError}},
+        material::{ElectricalContactNetwork, ElectricalContactNetworkError},
+        heat::{HeatAssembly, HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork}},
     material::{MaterialNetwork, MaterialNetworkError, MaterialNetworkSample},
 };
 use crate::material_circuit::motion::{FieldMotionInput, FieldMotionStep, MaterialFieldMotion};
 use crate::material_circuit::storage::MaterialStorageElement;
+use fs_exec::Cx;
 use fs_matdb::EvaluationDecision;
 use fs_material::{
     conductor::ElectricalPropertyBasis,
@@ -37,19 +39,21 @@ pub struct SupportThermalBinding<'a> {
 }
 
 #[derive(Debug)]
-pub enum SupportThermalError {
+pub enum SupportThermalError<E = HeatNetworkError> {
     Network(MaterialNetworkError),
     Contact(ElectricalContactNetworkError),
     Material(MaterialStatePointError),
+    /// Original complete-assembly source failure, without losing its type.
+    Heat(E),
     Invalid(&'static str),
 }
-impl core::fmt::Display for SupportThermalError {
+impl<E: core::fmt::Debug> core::fmt::Display for SupportThermalError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "thermoelastic actuator support: {self:?}")
     }
 }
-impl std::error::Error for SupportThermalError {}
-type Error = CircuitEnthalpyError<SupportThermalError>;
+impl<E: core::fmt::Debug> std::error::Error for SupportThermalError<E> {}
+type Error<E = HeatNetworkError> = CircuitEnthalpyError<SupportThermalError<E>>;
 
 /// Physical endpoints of one layer, using its reference volume A_i L.
 #[derive(Clone, Debug, PartialEq)]
@@ -64,52 +68,53 @@ pub struct SupportLayerSample {
     pub reversible_heat_j: f64,
 }
 #[derive(Clone, Debug, PartialEq)]
-pub struct SupportThermalSource {
-    pub network: MaterialNetworkSample,
+pub struct SupportThermalSource<S = MaterialNetworkSample> {
+    pub network: S,
     /// Original ordered interface heat partitions, separate from reversible heat.
     pub contact_destinations: Vec<ContactHeatCells>,
     pub layers: Vec<SupportLayerSample>,
     pub support_internal_energy_j: [f64; 2],
     pub reversible_heat_j: f64,
 }
-pub struct SupportThermalReport {
+pub struct SupportThermalReport<S = MaterialNetworkSample> {
     /// Original descriptor and finite enthalpy records. The native elastic
     /// starting energy uses the trial endpoint temperatures at the INITIAL gap.
     /// Its non_electrical_heat_j includes the reversible heat supplied above.
-    pub coupled: CircuitEnthalpyReport<SupportThermalSource, FieldMotionStep>,
-    /// Authored boundaries and sources, excluding internal Joule/reversible heat.
+    pub coupled: CircuitEnthalpyReport<SupportThermalSource<S>, FieldMotionStep>,
+    /// Authored boundaries and sources, excluding internal Joule/reversible heat
+    /// and the original closed enclosure's numerical net radiation exchange.
     pub external_heat_j: f64,
     /// Independent delta(U_caloric + U_support + H_field + K) minus supplies.
     pub total_energy_residual_j: f64,
 }
-pub struct SupportThermalCandidate<'m> {
+pub struct SupportThermalCandidate<'m, S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'m>,
     motion: MaterialFieldMotion,
-    report: SupportThermalReport,
+    report: SupportThermalReport<S>,
 }
-impl<'m> SupportThermalCandidate<'m> {
+impl<'m, S> SupportThermalCandidate<'m, S> {
     pub const fn thermal(&self) -> &DepositionSimulation<'m> { &self.thermal }
     pub const fn motion(&self) -> &MaterialFieldMotion { &self.motion }
-    pub const fn report(&self) -> &SupportThermalReport { &self.report }
+    pub const fn report(&self) -> &SupportThermalReport<S> { &self.report }
     /// Publish all histories together. Both internal heat transfers are present.
-    pub fn into_parts(self) -> (DepositionSimulation<'m>, MaterialFieldMotion, SupportThermalReport) {
+    pub fn into_parts(self) -> (DepositionSimulation<'m>, MaterialFieldMotion, SupportThermalReport<S>) {
         (self.thermal, self.motion, self.report)
     }
 }
 
-fn invalid(message: &'static str) -> Error {
+fn invalid<E>(message: &'static str) -> Error<E> {
     CircuitEnthalpyError::Source(SupportThermalError::Invalid(message))
 }
-fn material(error: MaterialStatePointError) -> Error {
+fn material<E>(error: MaterialStatePointError) -> Error<E> {
     CircuitEnthalpyError::Source(SupportThermalError::Material(error))
 }
-fn network(error: MaterialNetworkError) -> Error {
+fn network<E>(error: MaterialNetworkError) -> Error<E> {
     match error {
         MaterialNetworkError::Thermal(DepositionError::Cancelled) => CircuitEnthalpyError::Cancelled,
         other => CircuitEnthalpyError::Source(SupportThermalError::Network(other)),
     }
 }
-fn contact(error: ElectricalContactNetworkError) -> Error {
+fn contact<E>(error: ElectricalContactNetworkError) -> Error<E> {
     match error {
         ElectricalContactNetworkError::Thermal(DepositionError::Cancelled)
         | ElectricalContactNetworkError::Bulk(MaterialNetworkError::Thermal(DepositionError::Cancelled))
@@ -117,22 +122,22 @@ fn contact(error: ElectricalContactNetworkError) -> Error {
         other => CircuitEnthalpyError::Source(SupportThermalError::Contact(other)),
     }
 }
-fn check(cancel: &RefCell<impl FnMut() -> bool>) -> Result<(), Error> {
+fn check<E>(cancel: &RefCell<impl FnMut() -> bool>) -> Result<(), Error<E>> {
     if (*cancel.borrow_mut())() { Err(CircuitEnthalpyError::Cancelled) } else { Ok(()) }
 }
-fn temperatures(thermal: &DepositionSimulation<'_>, cells: &[CellId]) -> Result<Vec<f64>, Error> {
+fn temperatures<E>(thermal: &DepositionSimulation<'_>, cells: &[CellId]) -> Result<Vec<f64>, Error<E>> {
     cells.iter().map(|&id| thermal.temperature_k(id).map_err(Into::into)).collect()
 }
-fn strain(motion: &MaterialFieldMotion) -> Result<f64, Error> {
+fn strain<E>(motion: &MaterialFieldMotion) -> Result<f64, Error<E>> {
     let support = motion.support().ok_or_else(|| invalid("an existing axial member is required"))?;
     Ok(finite((motion.gap_m() - support.reference_gap_m()) / support.length_m())?)
 }
 
-fn admit(
+fn admit<E>(
     material_network: &MaterialNetwork<'_>, thermal: &DepositionSimulation<'_>,
     motion: &MaterialFieldMotion, binding: &SupportThermalBinding<'_>,
     cancel: &RefCell<impl FnMut() -> bool>,
-) -> Result<ConcentricThermoelasticState, Error> {
+) -> Result<ConcentricThermoelasticState, Error<E>> {
     check(cancel)?;
     let support = motion.support().ok_or_else(|| invalid("an existing axial member is required"))?;
     if !support.is_thermally_live()
@@ -253,21 +258,22 @@ impl MaterialNetwork<'_> {
                     bulk: prepared.resolve(trial, || (*cancel.borrow_mut())()).map_err(network)?,
                     contacts: Vec::new(),
                 })
-            }, || (*cancel.borrow_mut())())
+            }, |_| 0.0, || (*cancel.borrow_mut())())
     }
 
-    // Both public material frontends use one thermoelastic residual and one
+    // All public material frontends use one thermoelastic residual and one
     // native field/body trajectory. Only the existing source resolver differs.
     #[allow(clippy::too_many_arguments)]
-    fn resolved_field_motion_support_candidate<'m>(
+    fn resolved_field_motion_support_candidate<'m, S, E>(
         &self, thermal: &DepositionSimulation<'m>, target_s: f64,
         motion: &MaterialFieldMotion, ports: &[f64], external_force_n: f64,
         routes: &[ContactHeatCells], binding: &SupportThermalBinding<'_>,
         controls: CircuitEnthalpySolve, guess_j: &[f64],
         resolve: impl Fn(&DepositionSimulation<'m>)
-            -> Result<ContactThermalCoefficients<MaterialNetworkSample>, Error>,
+            -> Result<ContactThermalCoefficients<S>, Error<E>>,
+        internal_heat_w: impl Fn(&S) -> f64,
         cancelled: impl FnMut() -> bool,
-    ) -> Result<SupportThermalCandidate<'m>, Error> {
+    ) -> Result<SupportThermalCandidate<'m, S>, Error<E>> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         let routes = contacts::admit_routes(thermal, motion.circuit(), routes, || {
@@ -344,7 +350,9 @@ impl MaterialNetwork<'_> {
                         contact_destinations: routes.clone(), layers,
                         support_internal_energy_j: internal, reversible_heat_j: reversible_heat } })
             }, || (*cancel.borrow_mut())())?;
-        let external_heat = finite(coupled.non_electrical_heat_j - coupled.source.reversible_heat_j)?;
+        let internal_heat = finite(dt * internal_heat_w(&coupled.source.network))?;
+        let external_heat = finite(coupled.non_electrical_heat_j
+            - coupled.source.reversible_heat_j - internal_heat)?;
         let step = &coupled.electrical;
         let internal = coupled.source.support_internal_energy_j;
         let residual = finite((next_thermal.energy_j() - thermal.energy_j())
@@ -389,6 +397,59 @@ impl ElectricalContactNetwork<'_> {
         self.bulk.resolved_field_motion_support_candidate(thermal, target_s, motion, ports,
             external_force_n, &routes, binding, controls, guess_j,
             |trial| prepared.resolve(trial, || (*cancel.borrow_mut())()).map_err(contact),
-            || (*cancel.borrow_mut())())
+            |_| 0.0, || (*cancel.borrow_mut())())
+    }
+}
+
+/// Advance a thermally live actuator through its complete original heat assembly.
+/// Native thermal contacts, enclosure radiation, source-integrated/directional
+/// links and composed coolant/reservoir laws all resolve at the SAME proposed
+/// layer temperatures as electrical resistance and support expansion. The
+/// original prepared assembly retains every source pin and both electrical
+/// heat routes; its complete sample is retained in the accepted support report.
+///
+/// This uses the same thermoelastic residual, per-layer reversible heat and
+/// reciprocal field/body trajectory as the plain material entrypoints. Closed
+/// enclosure exchange remains internal, including its numerical net; physical
+/// reservoir exchange remains external. All heat enters the existing finite
+/// cells once. Source, budget and cancellation failures publish no histories.
+///
+/// Thermal link and radiating geometry remain authored and fixed over this
+/// interval. Support displacement does not infer changing contact area,
+/// pressure, view factors or moving coolant volume. All original live-support
+/// material, inertia, field-storage and endpoint-timing restrictions still apply.
+#[allow(clippy::too_many_arguments)]
+pub fn step_heat_assembly_candidate<'m, A: HeatAssembly + ?Sized>(
+    assembly: &A, cx: &Cx<'_>, thermal: &DepositionSimulation<'m>, target_s: f64,
+    motion: &MaterialFieldMotion, ports: &[f64], external_force_n: f64,
+    binding: &SupportThermalBinding<'_>, controls: CircuitEnthalpySolve,
+    guess_j: &[f64],
+) -> Result<SupportThermalCandidate<'m, A::Sample>, Error<A::Error>> {
+    cx.checkpoint().map_err(|_| CircuitEnthalpyError::Cancelled)?;
+    super::super::admit_driver_unknowns(thermal, controls, guess_j)?;
+    let prepared = assembly.prepared_heat_network();
+    let routes = prepared.heat_destinations(thermal).map_err(|error| match error {
+        HeatNetworkError::Cancelled => CircuitEnthalpyError::Cancelled,
+        other => CircuitEnthalpyError::Source(SupportThermalError::Heat(other.into())),
+    })?;
+    prepared.field_storage_material_network().resolved_field_motion_support_candidate(
+        thermal, target_s, motion, ports, external_force_n, &routes, binding, controls,
+        guess_j, |trial| assembly.resolve_heat(cx, trial)
+            .map_err(|error| error.map_source(SupportThermalError::Heat)),
+        |sample| sample.as_ref().radiation_net_power_w(), || cx.checkpoint().is_err())
+}
+
+impl PreparedHeatNetwork<'_, '_> {
+    /// Continue this source-pinned heat assembly with the original live support.
+    /// See [`step_heat_assembly_candidate`] for transport and work ownership.
+    #[allow(clippy::too_many_arguments)]
+    pub fn field_motion_support_candidate<'m>(
+        &self, cx: &Cx<'_>, thermal: &DepositionSimulation<'m>, target_s: f64,
+        motion: &MaterialFieldMotion, ports: &[f64], external_force_n: f64,
+        binding: &SupportThermalBinding<'_>, controls: CircuitEnthalpySolve,
+        guess_j: &[f64],
+    ) -> Result<SupportThermalCandidate<'m, HeatNetworkSample>, Error> {
+        step_heat_assembly_candidate(self, cx, thermal, target_s, motion, ports,
+            external_force_n, binding, controls, guess_j)
     }
 }

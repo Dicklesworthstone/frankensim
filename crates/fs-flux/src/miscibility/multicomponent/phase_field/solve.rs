@@ -141,7 +141,16 @@ pub(super) fn candidate_from_rates(
 
 /// Per-edge storage is also the non-cancelling interface error coordinate.
 pub(super) fn edge_energy_j(field: &MulticomponentPhaseField, face_index: usize) -> Result<f64> {
-    let network = field.network();
+    edge_energy_from_fractions_j(field.network(), field.mole_fractions(), face_index)
+}
+
+/// One canonical interface-energy law shared by fixed- and local-temperature
+/// owners. The slices belong to already admitted original species inventories.
+pub(super) fn edge_energy_from_fractions_j(
+    network: &MulticomponentPhaseFieldNetwork,
+    fractions: &[f64],
+    face_index: usize,
+) -> Result<f64> {
     let coefficient = network.edge_coefficients_j[face_index];
     if coefficient == 0.0 {
         return Ok(0.0);
@@ -150,8 +159,7 @@ pub(super) fn edge_energy_j(field: &MulticomponentPhaseField, face_index: usize)
     let n = network.species_count();
     let mut energy = Sum::default();
     for species in 0..n {
-        let jump = field.bulk.fractions[j * n + species]
-            - field.bulk.fractions[i * n + species];
+        let jump = fractions[j * n + species] - fractions[i * n + species];
         let term = bulk_solve::product3(jump.abs(), jump.abs(), coefficient)?;
         if jump != 0.0 && term == 0.0 {
             return Err(MulticomponentMiscibilityError::Arithmetic(
@@ -170,7 +178,22 @@ pub(super) fn edge_energy_change_j(
     next: &MulticomponentPhaseField,
     face_index: usize,
 ) -> Result<f64> {
-    let network = initial.network();
+    edge_energy_change_from_fractions_j(
+        initial.network(),
+        initial.mole_fractions(),
+        next.mole_fractions(),
+        face_index,
+    )
+}
+
+/// Direct edge increment also used to allocate local bulk-plus-interface energy
+/// before the original caloric inverse. No full field clone is required.
+pub(super) fn edge_energy_change_from_fractions_j(
+    network: &MulticomponentPhaseFieldNetwork,
+    initial_fractions: &[f64],
+    next_fractions: &[f64],
+    face_index: usize,
+) -> Result<f64> {
     let coefficient = network.edge_coefficients_j[face_index];
     if coefficient == 0.0 {
         return Ok(0.0);
@@ -181,11 +204,11 @@ pub(super) fn edge_energy_change_j(
     for species in 0..n {
         let left = i * n + species;
         let right = j * n + species;
-        let old_jump = initial.bulk.fractions[right] - initial.bulk.fractions[left];
-        let new_jump = next.bulk.fractions[right] - next.bulk.fractions[left];
+        let old_jump = initial_fractions[right] - initial_fractions[left];
+        let new_jump = next_fractions[right] - next_fractions[left];
         let mut difference = Sum::default();
-        difference.add(next.bulk.fractions[right] - initial.bulk.fractions[right])?;
-        difference.add(-(next.bulk.fractions[left] - initial.bulk.fractions[left]))?;
+        difference.add(next_fractions[right] - initial_fractions[right])?;
+        difference.add(-(next_fractions[left] - initial_fractions[left]))?;
         let difference = difference.value()?;
         let sum = finite(old_jump + new_jump, "interface midpoint jump")?;
         let product = bulk_solve::product3(difference, sum.abs(), coefficient)?;

@@ -1,11 +1,13 @@
-//! Radioactive neutrons from the same finite stocks that undergo irradiation.
+//! Radioactive neutrons and delayed families from the finite irradiated stocks.
 //!
 //! Each Picard iterate freezes the admitted neutron-induced hazards and spatial
 //! coefficients, then propagates the complete neutron/nuclide block once. A
 //! source edge uses the parent's spontaneous-channel fractions, never its total
 //! removal hazard. Capture therefore consumes the emitter without producing a
-//! fictitious radioactive neutron. Daughter birth, continuous feed and emission
-//! retain their ages in the joint positive propagator.
+//! fictitious radioactive neutron or precursor. Daughter birth, continuous
+//! feed and emission retain their ages in the joint positive propagator. Native
+//! delayed families decay and move through their existing neutron operator;
+//! creating a precursor never creates its eventual neutron prematurely.
 //!
 //! The original reaction-consistency iteration also checks the actual mean
 //! target and integrated flux, including initially empty targets/fields. This
@@ -23,7 +25,8 @@ use fs_la::decay::{
 };
 
 use super::super::{
-    Accounts, DiffusionEvolution, SOURCE_NEUTRONS, account_add, checked, owner_call,
+    Accounts, DelayedGroup, DiffusionEvolution, SOURCE_NEUTRONS, SOURCE_PRECURSORS,
+    account_add, checked, owner_call,
     source::{PreparedPlan, SourceRates, injected_counts},
 };
 use super::transport::{InventoryOwner, InventoryTrial};
@@ -36,15 +39,17 @@ use crate::burnup::transport::{
 };
 use crate::burnup::{BurnupError, BurnupInventory, BurnupModel, BurnupRate, BurnupStep};
 use crate::irradiation::GroupFlux;
-use crate::{Accumulator, FissionError, nonnegative, sum};
+use crate::{Accumulator, FissionError, nonnegative, positive, sum};
 
-/// Parent-wide expected radioactive neutron yields on an exact burnup model.
+/// Parent-wide radioactive neutron and precursor yields on an exact burnup model.
 /// Neutron-induced reactions and spontaneous decays share that model's stock.
 #[derive(Clone, Debug)]
 pub struct BurnupDecayNeutronEmission {
     data_id: String,
     model: Arc<BurnupModel>,
     neutron_yields: Vec<Vec<f64>>,
+    delayed_groups: Vec<DelayedGroup>,
+    precursor_yields: Vec<Vec<f64>>,
 }
 
 impl BurnupDecayNeutronEmission {
@@ -53,20 +58,62 @@ impl BurnupDecayNeutronEmission {
         model: Arc<BurnupModel>,
         neutron_yields: Vec<Vec<f64>>,
     ) -> Result<Self, DiffusionBurnupError> {
-        if data_id.trim().is_empty() || neutron_yields.len() != model.nuclides().len() {
+        let precursor_yields = vec![vec![]; model.nuclides().len()];
+        Self::new_with_precursors(data_id, model, neutron_yields, vec![], precursor_yields)
+    }
+
+    /// Supply immediate group yields and births into explicitly identified
+    /// native delayed families per spontaneous parent decay. Family spectra
+    /// describe the eventual emitted neutron; they do not create it at birth.
+    /// Every nuclide has one row in both arrays, including stable zero rows.
+    /// All family metadata must match the bound diffusion model exactly.
+    pub fn new_with_precursors(
+        data_id: String,
+        model: Arc<BurnupModel>,
+        neutron_yields: Vec<Vec<f64>>,
+        delayed_groups: Vec<DelayedGroup>,
+        precursor_yields: Vec<Vec<f64>>,
+    ) -> Result<Self, DiffusionBurnupError> {
+        if data_id.trim().is_empty()
+            || neutron_yields.len() != model.nuclides().len()
+            || precursor_yields.len() != model.nuclides().len()
+        {
             return Err(DiffusionBurnupError::Invalid(
-                "identified decay-neutron yields in original burnup nuclide order required",
+                "identified neutron and precursor yields in original burnup nuclide order required",
             ));
         }
-        for (nuclide, row) in model.nuclides().iter().zip(&neutron_yields) {
-            if row.len() != model.groups().len()
-                || !row.iter().copied().all(nonnegative)
-                || !sum(row).is_finite()
-                || (nuclide.law.decay_constant().value() == 0.0
-                    && row.iter().any(|&value| value != 0.0))
+        if delayed_groups.len() > MAX_DECAY_NODES {
+            return Err(BurnupError::Budget("radioactive delayed-family width").into());
+        }
+        for family in &delayed_groups {
+            if family.data_id.trim().is_empty()
+                || !positive(family.decay_constant_s_inv)
+                || family.spectrum.len() != model.groups().len()
+                || !family.spectrum.iter().copied().all(nonnegative)
+                || !positive(sum(&family.spectrum))
+                || (sum(&family.spectrum) - 1.0).abs() > 64.0 * f64::EPSILON
             {
                 return Err(DiffusionBurnupError::Invalid(
-                    "finite nonnegative group yields and zero stable-nuclide emission required",
+                    "identified delayed families require positive decay and a normalized spectrum",
+                ));
+            }
+        }
+        for ((nuclide, row), precursors) in model
+            .nuclides()
+            .iter()
+            .zip(&neutron_yields)
+            .zip(&precursor_yields)
+        {
+            if row.len() != model.groups().len()
+                || precursors.len() != delayed_groups.len()
+                || !row.iter().chain(precursors).copied().all(nonnegative)
+                || !sum(row).is_finite()
+                || !sum(precursors).is_finite()
+                || (nuclide.law.decay_constant().value() == 0.0
+                    && row.iter().chain(precursors).any(|&value| value != 0.0))
+            {
+                return Err(DiffusionBurnupError::Invalid(
+                    "finite nonnegative group/family yields and zero stable-nuclide emission required",
                 ));
             }
         }
@@ -74,6 +121,8 @@ impl BurnupDecayNeutronEmission {
             data_id,
             model,
             neutron_yields,
+            delayed_groups,
+            precursor_yields,
         })
     }
 
@@ -86,6 +135,17 @@ impl BurnupDecayNeutronEmission {
     pub fn neutron_yields(&self) -> &[Vec<f64>] {
         &self.neutron_yields
     }
+    pub fn delayed_groups(&self) -> &[DelayedGroup] {
+        &self.delayed_groups
+    }
+    pub fn precursor_yields(&self) -> &[Vec<f64>] {
+        &self.precursor_yields
+    }
+}
+
+pub(super) struct DecayBirths {
+    pub(super) neutrons: Vec<Vec<f64>>,
+    pub(super) precursors: Vec<Vec<f64>>,
 }
 
 impl DiffusionBurnupState {
@@ -94,7 +154,9 @@ impl DiffusionBurnupState {
     /// Every cell supplies its exact original model, including explicit zero
     /// rows. Transported stocks retain their original movement and require the
     /// same parent-wide yields in every compartment: movement cannot change a
-    /// nuclide's decay spectrum on this common neutron grid.
+    /// nuclide's decay spectrum or family yields on this common neutron grid.
+    /// An immediate-only source supplies zero precursor births even when the
+    /// neutron model already contains delayed families from other reactions.
     pub fn with_decay_neutrons(
         mut self,
         emissions: Vec<Arc<BurnupDecayNeutronEmission>>,
@@ -107,10 +169,14 @@ impl DiffusionBurnupState {
         if self.transport().is_some()
             && emissions
                 .windows(2)
-                .any(|pair| pair[0].neutron_yields() != pair[1].neutron_yields())
+                .any(|pair| {
+                    pair[0].neutron_yields() != pair[1].neutron_yields()
+                        || pair[0].delayed_groups() != pair[1].delayed_groups()
+                        || pair[0].precursor_yields() != pair[1].precursor_yields()
+                })
         {
             return Err(DiffusionBurnupError::Invalid(
-                "transported nuclides require unchanged decay-neutron yields across cells",
+                "transported nuclides require unchanged radioactive neutron and family yields",
             ));
         }
         let mut nodes = self.neutrons.model.nodes;
@@ -118,6 +184,13 @@ impl DiffusionBurnupState {
             if !Arc::ptr_eq(source.model(), inventory.model()) {
                 return Err(DiffusionBurnupError::Invalid(
                     "decay-neutron source must retain its exact original burnup model",
+                ));
+            }
+            if !source.delayed_groups().is_empty()
+                && source.delayed_groups() != self.neutrons.model.delayed_groups()
+            {
+                return Err(DiffusionBurnupError::Invalid(
+                    "radioactive delayed families must match the original neutron model exactly",
                 ));
             }
             nodes = nodes
@@ -145,7 +218,7 @@ impl DiffusionBurnupState {
         sources: Option<&DiffusionBurnupSources>,
         budget: DiffusionBurnupBudget,
         checkpoint: &mut dyn FnMut() -> Result<(), FissionError>,
-    ) -> Result<(DiffusionState, DiffusionStep, InventoryTrial, Vec<Vec<f64>>), DiffusionBurnupError>
+    ) -> Result<(DiffusionState, DiffusionStep, InventoryTrial, DecayBirths), DiffusionBurnupError>
     {
         // Keep this joint solver monomorphic across the public trial adapters.
         // The local closure also satisfies the original owners' sized callback
@@ -167,6 +240,7 @@ impl DiffusionBurnupState {
         let inventories = self.inventories();
         let neutron_nodes = neutron_initial.model.nodes;
         let groups = neutron_initial.model.groups().len();
+        let families = neutron_initial.model.delayed_groups().len();
         let limits = budget.burnup.limits.propagation;
         let nodes = inventories
             .iter()
@@ -264,10 +338,16 @@ impl DiffusionBurnupState {
                     })?;
                 }
             }
-            for (parent, row) in emissions[cell].neutron_yields().iter().enumerate() {
+            for (parent, (row, precursors)) in emissions[cell]
+                .neutron_yields()
+                .iter()
+                .zip(emissions[cell].precursor_yields())
+                .enumerate()
+            {
                 checkpoint()?;
-                for (group, &yield_) in row.iter().enumerate() {
-                    let spontaneous = fractions[parent].value();
+                let spontaneous = fractions[parent].value();
+                for (output, &yield_) in row.iter().chain(precursors).enumerate() {
+                    checkpoint()?;
                     let coefficient = if spontaneous == 0.0 || yield_ == 0.0 {
                         0.0
                     } else if transported {
@@ -283,7 +363,13 @@ impl DiffusionBurnupState {
                             &mut edges,
                             ReactionEdge {
                                 parent: offset + parent,
-                                daughter: cell * groups + group,
+                                daughter: if output < groups {
+                                    cell * groups + output
+                                } else {
+                                    neutron_initial.model.neutron_nodes
+                                        + cell * families
+                                        + output - groups
+                                },
                                 yield_per_removal: coefficient,
                             },
                             limits.maximum_edges,
@@ -444,6 +530,7 @@ impl DiffusionBurnupState {
             emissions,
             &trial.reports,
             groups,
+            families,
             &mut injected,
             &mut accounts,
             checkpoint,
@@ -467,7 +554,7 @@ impl DiffusionBurnupState {
     }
 }
 
-// Reported local radioactive events fund both stationary and moved sources.
+// Reported local radioactive events fund stationary and moved neutron/family sources.
 // This attaches an injection account to the accepted neutron trajectory; it
 // never adds the emitted particles to the propagator a second time.
 fn account_births(
@@ -475,11 +562,16 @@ fn account_births(
     emissions: &[Arc<BurnupDecayNeutronEmission>],
     reports: &[BurnupStep],
     groups: usize,
+    families: usize,
     injected: &mut [f64],
     accounts: &mut Accounts,
     checkpoint: &mut dyn FnMut() -> Result<(), FissionError>,
-) -> Result<Vec<Vec<f64>>, DiffusionBurnupError> {
-    let mut births = Vec::with_capacity(inventories.len());
+) -> Result<DecayBirths, DiffusionBurnupError> {
+    let mut births = DecayBirths {
+        neutrons: Vec::with_capacity(inventories.len()),
+        precursors: Vec::with_capacity(inventories.len()),
+    };
+    let neutron_nodes = inventories.len() * groups;
     for (cell, (inventory, report)) in inventories.iter().zip(reports).enumerate() {
         checkpoint()?;
         let n = inventory.populations().len();
@@ -497,41 +589,56 @@ fn account_births(
                     .add(decays[reaction.parent].add(count)?.abs())?;
             }
         }
-        let mut born = vec![Accumulator::new(0.0); groups];
-        for ((&decays, mut count_error), row) in decays
+        let mut born = vec![Accumulator::new(0.0); groups + families];
+        for (((&decays, mut count_error), row), precursors) in decays
             .iter()
             .zip(decay_count_errors)
             .zip(emissions[cell].neutron_yields())
+            .zip(emissions[cell].precursor_yields())
         {
             checkpoint()?;
             let count = checked(decays.value())?;
             count_error.add(checked(sum(&[decays.hi, decays.lo, -count]))?.abs())?;
             let count_error = upper_value(&count_error)?;
-            for (group, &yield_) in row.iter().enumerate() {
-                // Convert nuclei to neutrons before charging their allowance.
+            for (output, &yield_) in row.iter().chain(precursors).enumerate() {
+                checkpoint()?;
+                // Convert parent events to emitted particles before charging
+                // their common native neutron/precursor count allowance.
                 let source_error = accounts.multiply(count_error, yield_)?;
                 accounts.error.add(source_error)?;
                 let value = accounts.multiply(count, yield_)?;
-                account_add(&mut born[group], value, &mut accounts.error)?;
+                account_add(&mut born[output], value, &mut accounts.error)?;
             }
         }
-        let mut row = Vec::with_capacity(groups);
-        for (group, count) in born.into_iter().enumerate() {
+        let mut neutron_births = Vec::with_capacity(groups);
+        let mut precursor_births = Vec::with_capacity(families);
+        for (output, count) in born.into_iter().enumerate() {
+            checkpoint()?;
             let value = checked(count.value())?;
             accounts
                 .error
                 .add(checked(sum(&[count.hi, count.lo, -value]))?.abs())?;
-            let index = cell * groups + group;
+            let index = if output < groups {
+                cell * groups + output
+            } else {
+                neutron_nodes + cell * families + output - groups
+            };
             let mut total = Accumulator::new(injected[index]);
             account_add(&mut total, value, &mut accounts.error)?;
             injected[index] = checked(total.value())?;
             accounts
                 .error
                 .add(checked(sum(&[total.hi, total.lo, -injected[index]]))?.abs())?;
-            accounts.total(SOURCE_NEUTRONS, value)?;
-            row.push(value);
+            if output < groups {
+                accounts.total(SOURCE_NEUTRONS, value)?;
+                neutron_births.push(value);
+            } else {
+                accounts.total(SOURCE_PRECURSORS, value)?;
+                precursor_births.push(value);
+            }
         }
-        births.push(row);
+        births.neutrons.push(neutron_births);
+        births.precursors.push(precursor_births);
     }
     Ok(births)
 }

@@ -17,7 +17,7 @@
 //! # The Robin seam
 //!
 //! `fs-scenario`'s Robin row carries the transfer coefficient ONLY:
-//! `expectation(Physics::Thermal, BcKind::Robin) == Value(HTC)`. There
+//! `expectation(Physics::Thermal, BcKind::Robin) == ValueOrScalar(HTC)`. There
 //! is no companion `T_ref` field on `BoundaryCondition`. This crate
 //! therefore requires `T_ref` to be named at the lowering call — either
 //! explicitly, or from the scenario's
@@ -172,6 +172,16 @@ impl ThermalBc {
         environment: &Environment,
         t_ref: Option<f64>,
     ) -> Result<ThermalBc, ConductionError> {
+        Self::from_scenario_value(row, environment, t_ref, uniform_value(row)?)
+    }
+
+    // All runtime carriers lower through the same dimensional/sign/Robin owner.
+    fn from_scenario_value(
+        row: &BoundaryCondition,
+        environment: &Environment,
+        t_ref: Option<f64>,
+        value: fs_qty::QtyAny,
+    ) -> Result<ThermalBc, ConductionError> {
         if row.physics != Physics::Thermal {
             return Err(ConductionError::ScenarioRow {
                 region: row.region.clone(),
@@ -180,7 +190,7 @@ impl ThermalBc {
             });
         }
         let expected = match expectation(row.physics, row.kind) {
-            Expectation::Value(dims) => dims,
+            Expectation::Value(dims) | Expectation::ValueOrScalar(dims) => dims,
             other => {
                 return Err(ConductionError::ScenarioRow {
                     region: row.region.clone(),
@@ -193,7 +203,6 @@ impl ThermalBc {
                 });
             }
         };
-        let value = uniform_value(row)?;
         if value.dims != expected {
             return Err(ConductionError::Dimensions {
                 context: format!("scenario row on {:?} ({:?})", row.region, row.kind),
@@ -249,8 +258,8 @@ fn uniform_value(row: &BoundaryCondition) -> Result<fs_qty::QtyAny, ConductionEr
         Some(BcValue::Typed(payload)) => Err(ConductionError::ScenarioRow {
             region: row.region.clone(),
             what: format!("the row carries a typed {:?} payload", payload.kind()),
-            fix: "thermal rows use the legacy scalar carrier in fs-scenario's own \
-                  expectation table"
+            fix: "use ThermalBc::from_scenario_row_at_in_frames with explicit physical time \
+                  and the payload's frame tree, or bind a ThermalBoundaryHistory"
                 .to_string(),
         }),
         None => Err(ConductionError::ScenarioRow {

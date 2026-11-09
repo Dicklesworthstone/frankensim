@@ -124,13 +124,13 @@ struct Workspace {
 /// Used for both instantaneous rates and their SSP quadrature; no thermal
 /// residual is reconstructed by subtracting a potentially enormous wall work.
 #[derive(Clone, Copy, Default)]
-struct WallTransfer {
-    mechanical: [f64; 6],
-    heat: [f64; 6],
+pub(in crate::compressible::spatial::mixture) struct WallTransfer {
+    pub(in crate::compressible::spatial::mixture) mechanical: [f64; 6],
+    pub(in crate::compressible::spatial::mixture) heat: [f64; 6],
 }
 
 impl WallTransfer {
-    fn add_scaled(
+    pub(in crate::compressible::spatial::mixture) fn add_scaled(
         &mut self,
         other: Self,
         scale: f64,

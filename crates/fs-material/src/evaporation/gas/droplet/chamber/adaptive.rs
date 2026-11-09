@@ -20,6 +20,9 @@
 //! work allowance returns refusal, never a clipped physical state. The local
 //! estimator is not a certified bound on accumulated trajectory error.
 
+/// Complete gas-network accuracy and accepted physical-window accounting.
+pub mod network;
+
 mod account;
 pub use account::{
     GasDropletEvolutionAudit, GasDropletEvolutionSpeciesAudit, GasDropletEvolutionSurfaceAudit,
@@ -100,7 +103,9 @@ impl AdaptiveGasDropletControls {
         }
     }
 
-    fn validate(self, duration_s: f64, count: usize) -> Result<(), GasEvaporationError> {
+    /// Admit numerical time, accuracy and roster controls without querying laws.
+    /// Original interval owners still admit their physical solver/source inputs.
+    pub fn validate(self, duration_s: f64, count: usize) -> Result<(), GasEvaporationError> {
         if !duration_s.is_finite()
             || duration_s < 0.0
             || self.solve.maximum_surfaces == 0

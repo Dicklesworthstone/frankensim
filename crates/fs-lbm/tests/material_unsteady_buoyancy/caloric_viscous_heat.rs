@@ -287,3 +287,175 @@ fn rotating_material_march_keeps_coriolis_out_of_heat_and_be_loss_out_of_enthalp
 
 #[path = "caloric_viscous_heat/implicit.rs"]
 mod implicit;
+
+#[test]
+fn transient_pressure_work_heats_original_caloric_flow_and_preserves_backflow() {
+    use fs_lbm::conjugate::{MaterialEndpointConfig, PressureOffsetProgram};
+
+    let domain = VoxelDomain::new(3, 2, 1, 0.25).unwrap();
+    let reference = source(300.0).unwrap();
+    let bound = MaterialChtFluid::try_new(&reference).unwrap();
+    let mut faces = [FvBoundary::wall(); 6];
+    faces[0] = FvBoundary::Outlet;
+    faces[1] = FvBoundary::Outlet;
+    faces[4] = FvBoundary::Symmetry;
+    faces[5] = FvBoundary::Symmetry;
+    let mut flow = SimpleConfig::new(faces);
+    flow.tolerance = 1e-11;
+    flow.pressure_tolerance = 1e-13;
+    flow.momentum_tolerance = 1e-12;
+    let mut thermal_faces = [ThermalFace::Adiabatic; 6];
+    thermal_faces[0] = ThermalFace::Outflow {
+        backflow_temperature: 302.0,
+    };
+    thermal_faces[1] = ThermalFace::Outflow {
+        backflow_temperature: 298.0,
+    };
+    let thermal = ThermalSetup::new(thermal_faces);
+    let initial = vec![300.0; domain.cell_count()];
+    let caloric = Caloric;
+    let gate = CancelGate::new_clock_free();
+    let mut unsteady = clock(0.5, 4);
+    unsteady.opening_pressure_programs[0] = Some(
+        PressureOffsetProgram::new(&[(0.0, 0.125), (1.0, 0.125), (1.5, -0.125), (2.0, -0.125)])
+            .unwrap(),
+    );
+    let endpoint = MaterialEndpointConfig {
+        maximum_passes_per_step: 80,
+        maximum_momentum_solves: 1000,
+        maximum_energy_solves: 2000,
+        maximum_source_refreshes: 2001,
+        temperature_tolerance_k: 1e-9,
+        transport_relative_tolerance: 1e-10,
+        force_tolerance_n_m3: 1e-11,
+        temperature_relaxation: 1.0,
+    };
+    let run = |flow: &SimpleConfig, time: &UnsteadyConfig, implicit: bool, gate: &CancelGate| {
+        if implicit {
+            bound
+                .march_natural_convection_with_enthalpy_and_viscous_heat_implicit(
+                    &domain,
+                    &[],
+                    flow,
+                    &thermal,
+                    &energy(),
+                    &initial,
+                    caloric_bounds(),
+                    &caloric,
+                    controls(),
+                    time,
+                    heat_controls(),
+                    endpoint,
+                    |_| 1.0,
+                    |_| 1.0,
+                    None,
+                    gate,
+                    |_, t, _| source(t),
+                )
+                .map(|result| result.solution)
+        } else {
+            bound.march_natural_convection_with_enthalpy_and_viscous_heat(
+                &domain,
+                &[],
+                flow,
+                &thermal,
+                &energy(),
+                &initial,
+                caloric_bounds(),
+                &caloric,
+                controls(),
+                time,
+                heat_controls(),
+                |_| 1.0,
+                |_| 1.0,
+                None,
+                gate,
+                |_, t, _| source(t),
+            )
+        }
+    };
+    for implicit in [false, true] {
+        let result = run(&flow, &unsteady, implicit, &gate).unwrap();
+        let march = &result.thermal.convection.march;
+        assert!(march.flow.flow.field.flux_x(0, 0, 0) < 0.0);
+        assert!(result.heating.generated_heat_j > 0.0);
+        assert!(result.heating.final_kinetic_energy_j > 0.0);
+        assert!(result.heating.backward_euler_loss_j > 0.0);
+        assert!(result.mechanical_steps[0].power.supplied_pressure_power_w > 0.0);
+        for (mechanical, heat) in result.mechanical_steps.iter().zip(&march.energy_records) {
+            close(
+                heat.source_j,
+                unsteady.time_step_s * mechanical.power.heat_w,
+                1e-9,
+            );
+            close(
+                heat.stored_energy_change_j + heat.boundary_outflow_j,
+                heat.source_j,
+                1e-8,
+            );
+            close(mechanical.residual_j, 0.0, 1e-8);
+            close(mechanical.power.pressure_constraint_power_w, 0.0, 1e-8);
+        }
+        let stored: f64 = march
+            .temperature
+            .iter()
+            .enumerate()
+            .map(|(cell, &t)| domain.volume(cell) * h(t))
+            .sum();
+        let boundary: f64 = march
+            .energy_records
+            .iter()
+            .map(|r| r.boundary_outflow_j)
+            .sum();
+        close(stored + boundary, result.heating.generated_heat_j, 1e-8);
+        close(
+            result.heating.supplied_pressure_work_j + result.heating.pressure_constraint_work_j,
+            result.heating.generated_heat_j
+                + result.heating.kinetic_energy_change_j
+                + result.heating.backward_euler_loss_j,
+            1e-8,
+        );
+        assert_eq!(result.heating.supplied_wall_work_j, 0.0);
+        assert_eq!(result.heating.supplied_body_work_j, 0.0);
+        // Signed inflow uses each reservoir's original caloric boundary.
+        assert!(march.energy_records[0].max_temperature_k > 300.0);
+        assert!(march.temperature.iter().any(|t| *t < 300.0));
+
+        let common = 1_099_511_627_776.0;
+        let mut shifted_time = unsteady;
+        shifted_time.opening_pressure_programs[0] = Some(
+            PressureOffsetProgram::new(&[
+                (0.0, common + 0.125),
+                (1.0, common + 256.125),
+                (1.5, common - 256.125),
+                (2.0, common - 256.125),
+            ])
+            .unwrap(),
+        );
+        shifted_time.opening_pressure_programs[1] = Some(
+            PressureOffsetProgram::new(&[
+                (0.0, common),
+                (1.0, common + 256.0),
+                (1.5, common - 256.0),
+                (2.0, common - 256.0),
+            ])
+            .unwrap(),
+        );
+        let shifted = run(&flow, &shifted_time, implicit, &gate).unwrap();
+        assert_eq!(shifted.heating, result.heating);
+        assert_eq!(shifted.mechanical_steps, result.mechanical_steps);
+        let shifted_march = &shifted.thermal.convection.march;
+        assert_eq!(shifted_march.temperature, march.temperature);
+        assert_eq!(shifted_march.flow.flow.field, march.flow.flow.field);
+        assert_eq!(shifted_march.flow.records, march.flow.records);
+    }
+    let mut unsupported = flow.clone();
+    unsupported.faces[3] = FvBoundary::Outlet;
+    assert!(run(&unsupported, &unsteady, false, &gate).is_err());
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert!(run(&flow, &unsteady, false, &cancelled).is_err());
+    assert_eq!(initial, vec![300.0; domain.cell_count()]);
+    assert_eq!(bound.transport(), &reference);
+    assert!(thermal.power_w.is_empty());
+}

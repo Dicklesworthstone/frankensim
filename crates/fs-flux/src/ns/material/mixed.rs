@@ -24,11 +24,11 @@ mod resistance;
 pub use resistance::{MaterialStokesResistancePort, MaterialStokesResistanceSolution};
 #[path = "mixed/windkessel.rs"]
 mod windkessel;
-pub(crate) use windkessel::{physical_windkessel, with_kinematic_windkessel};
 pub use windkessel::{
     MaterialStokesWindkesselBalance, MaterialStokesWindkesselHistory, MaterialStokesWindkesselPort,
     MaterialStokesWindkesselSolution,
 };
+pub(crate) use windkessel::{physical_windkessel, with_kinematic_windkessel};
 
 /// Conservative evolving density and native IMEX momentum on one fixed mesh.
 #[path = "mixed/density_transport.rs"]
@@ -92,6 +92,19 @@ pub struct MaterialBoundaryLoad {
     /// Selected component references: None retains its traction datum;
     /// Some(offset) adds that authored [Pa] offset to its mean-zero pressure.
     pub pressure_offsets_pa: Vec<(usize, Option<f64>)>,
+}
+
+/// Retained Navier-slip production on one original boundary edge, in SI.
+/// Non-slip and perfect-slip edges carry zero power. This is dissipation of
+/// relative tangential motion, separate from wall work and upwind damping.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialBoundarySlipPower {
+    /// Original mesh boundary edge.
+    pub edge: usize,
+    /// Original connected fluid component.
+    pub component: usize,
+    /// Integral beta*|(u-wall)_t|² [W/m], with no fluid/wall heat partition.
+    pub power_w_per_m: f64,
 }
 
 /// Source-density conversion of the original convective boundary exchange.
@@ -224,6 +237,35 @@ pub struct MaterialStokesSolution {
 }
 
 impl MaterialStokesSolution {
+    /// Physical Navier-slip production in original boundary-edge order.
+    ///
+    /// This allocation-free view uses the SAME retained reaction quadrature
+    /// and reference density as boundary loads. No pressure datum, moment
+    /// origin, source callback or boundary reassembly is needed. All original
+    /// boundary edges are present, including zero-power non-slip edges.
+    ///
+    /// # Errors
+    /// Each iterator item refuses an unrepresentable physical conversion.
+    pub fn boundary_slip_dissipation(
+        &self,
+    ) -> impl ExactSizeIterator<Item = Result<MaterialBoundarySlipPower, MaterialFluxError>> + '_
+    {
+        let density = self.transport.density_kg_m3();
+        self.flow.reactions.edges().iter().map(move |reaction| {
+            let power_w_per_m = density * reaction.slip_dissipation();
+            if !power_w_per_m.is_finite() || power_w_per_m < 0.0 {
+                return Err(MaterialFluxError::Invalid(
+                    "unrepresentable physical wall-slip loss",
+                ));
+            }
+            Ok(MaterialBoundarySlipPower {
+                edge: reaction.edge,
+                component: reaction.component,
+                power_w_per_m,
+            })
+        })
+    }
+
     /// Source-density-scaled volume/momentum/kinetic exchange from the original
     /// admitted upwind traces, with a uniform carried-velocity frame offset.
     /// No source callbacks, pressure datum, or boundary reassembly are needed.

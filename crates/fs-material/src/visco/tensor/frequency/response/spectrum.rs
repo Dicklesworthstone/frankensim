@@ -29,10 +29,12 @@ pub struct TensorPronyHarmonicSpectrum<'a> {
     weights: Vec<Vec<PronySpectrumWeights>>,
 }
 
-/// Cached exact temporal pair moments, reusable across original material points.
-/// Preparation takes O(F²) work and storage for F distinct frequencies. A point
-/// uses O(F²*(branches+1)*6) contractions with fixed stack scratch and no heap
-/// allocation. Source geometry, frequency/strain domain and coefficients stay fixed.
+/// Cached real temporal moments, reusable across original material points.
+/// Short actual-real bands of 3..32 frequencies with max(omega)*duration/2 <= 0.5
+/// use at most M=17 positive field modes. Preparation and storage are O(F*M),
+/// and point work is O(F*M*(branches+1)*6). Other bands retain O(F²) temporal
+/// pairs and point work O(F²*(branches+1)*6). Point scratch is fixed and no heap
+/// is allocated. Original frequency/strain domains and coefficients stay fixed.
 pub struct TensorPronySpectrumWindow<'p, 'a> {
     source: &'p TensorPronyHarmonicSpectrum<'a>,
     window: HarmonicWindow,
@@ -332,10 +334,13 @@ impl<'p, 'a> TensorPronySpectrumWindow<'p, 'a> {
             - core::mem::size_of::<HarmonicEnergySpectrum>()
     }
 
-    /// Exact real-field pair moments retain carrier and beat interference.
+    /// Real-field moments retain carrier and beat interference. Admitted short
+    /// bands interfere original binary-scaled fields before heat/work products.
     /// Heat comes from original positive Gram channels; work comes independently
-    /// from stress : strain_rate. Storage change integrates the original spring
-    /// derivatives instead of subtracting two rounded endpoint energies.
+    /// from stress : strain_rate. Original spring increments (or the pair path's
+    /// integrated derivatives) retain storage change without subtracting two
+    /// rounded endpoint energies. The shared finite-mode tail bound excludes
+    /// roundoff; this is not a relative-error certificate near arbitrary nulls.
     pub fn evaluate(
         &self,
         strains: &[[C64; 6]],

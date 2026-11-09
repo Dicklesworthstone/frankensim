@@ -21,6 +21,7 @@ use fs_math::c64::C64;
 /// Small-signal analysis at an admitted equilibrium of the original nonlinear storage.
 pub mod equilibrium;
 mod frequency;
+mod mixed;
 mod parameter;
 mod poles;
 /// Bracketed driven-output peaks and half-power bandwidth from the original system.
@@ -28,6 +29,7 @@ pub mod resonance;
 /// Continuous wave feedback, closed before factorization with physical power accounts.
 pub mod scattering;
 pub use frequency::HarmonicFrequencyResponse;
+pub use mixed::{HarmonicFrequencyCurvatureResponse, HarmonicFrequencyParameterResponse};
 pub use parameter::{HarmonicParameterDirection, HarmonicParameterResponse};
 /// Prepared physical port participation of complete descriptor modes.
 pub use poles::response;

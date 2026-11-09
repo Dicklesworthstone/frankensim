@@ -108,17 +108,22 @@ impl Reference {
         &self, owner: &IdealGasEquilibriumV1, work: &Workspace,
         temperature: Temperature, cancelled: &mut impl FnMut() -> bool)
         -> Result<f64, EquilibriumExpansionErrorV1> {
-        let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
-        let mut du = Sum::default();
+        let rt = Dd::from_f64(UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K)
+            * Dd::from_f64(self.temperature.value());
+        let mut du = Dd::ZERO;
         for &i in &work.active {
             poll(cancelled)?;
             let sensible = owner.models[i].molar_internal_energy_change(self.temperature, temperature)
                 .map_err(|source| owner.species_error(i, source))?.value();
-            du.add((work.n[i] - self.amounts[i]) * (self.enthalpies[i] - r * self.temperature.value()));
-            du.add(work.n[i] * sensible);
+            let amount = Dd::from_f64(work.n[i]);
+            let change = amount - Dd::from_f64(self.amounts[i]);
+            // Retain the original formation datum, amount subtraction and RT
+            // product tails exactly as the shared enthalpy owner does.
+            du = du + change * (Dd::from_f64(self.enthalpies[i]) - rt)
+                + amount * Dd::from_f64(sensible);
         }
-        let value = du.value() * work.scale;
-        if !value.is_finite() {
+        let value = (du * Dd::from_f64(work.scale)).to_f64();
+        if !du.hi.is_finite() || !du.lo.is_finite() || !value.is_finite() {
             return Err(E::Arithmetic("relative reacting internal energy").into());
         }
         Ok(value)
@@ -200,6 +205,17 @@ pub struct EquilibriumCaloricAnchorV1 {
 impl EquilibriumCaloricAnchorV1 {
     /// Exact accepted sample at capture, still expressed on its birth reference.
     pub const fn sample(&self) -> EquilibriumIsentropeSampleV1 { self.sample }
+
+    pub(in crate::equilibrium::composition::solve) fn reference_for(
+        &self, owner: &IdealGasEquilibriumV1, work: &Workspace,
+    ) -> Result<&Reference, EquilibriumExpansionErrorV1> {
+        if self.owner != *owner || self.inventory != work.inventory
+            || self.scale != work.scale || self.normalized_mass != work.initial_mass {
+            return Err(EquilibriumExpansionErrorV1::Invalid(
+                "caloric anchor must retain the same source, inventory and normalization"));
+        }
+        Ok(&self.reference)
+    }
 }
 
 impl<'a> EquilibriumIsentropeV1<'a> {
@@ -268,16 +284,33 @@ impl<'a> EquilibriumIsentropeV1<'a> {
         poll(&mut cancelled)?;
         let sample = self.current.ok_or(EquilibriumExpansionErrorV1::Invalid(
             "no accepted isentrope query for a direct caloric difference"))?;
-        if anchor.owner != *self.owner || anchor.inventory != self.work.inventory
-            || anchor.scale != self.work.scale || anchor.normalized_mass != self.work.initial_mass {
-            return Err(EquilibriumExpansionErrorV1::Invalid(
-                "caloric anchor must retain the same source, inventory and normalization"));
-        }
-        let change = (anchor.reference.normalized_enthalpy_change(
+        let reference = anchor.reference_for(self.owner, &self.work)?;
+        let change = (reference.normalized_enthalpy_change(
             self.owner, &self.work, sample.temperature, &mut cancelled)?
             / Dd::from_f64(self.work.initial_mass)).to_f64();
         if !change.is_finite() {
             return Err(E::Arithmetic("direct anchored specific enthalpy").into());
+        }
+        poll(&mut cancelled)?;
+        Ok(change)
+    }
+
+    /// Direct current-minus-anchor specific entropy [J/(kg K)].
+    ///
+    /// Uses the same original species and mixing-entropy difference as the SP
+    /// residual. The two accepted states may have different birth entropies;
+    /// neither birth reference changes. Exact source/feed binding is required.
+    pub fn specific_entropy_change_from(
+        &self, anchor: &EquilibriumCaloricAnchorV1, mut cancelled: impl FnMut() -> bool,
+    ) -> Result<f64, EquilibriumExpansionErrorV1> {
+        poll(&mut cancelled)?;
+        let sample = self.current.ok_or(EquilibriumExpansionErrorV1::Invalid(
+            "no accepted isentrope query for a direct entropy difference"))?;
+        let reference = anchor.reference_for(self.owner, &self.work)?;
+        let change = reference.entropy_change(
+            self.owner, &self.work, sample.temperature, &mut cancelled)? / self.feed_mass_kg();
+        if !change.is_finite() {
+            return Err(E::Arithmetic("direct anchored specific entropy").into());
         }
         poll(&mut cancelled)?;
         Ok(change)

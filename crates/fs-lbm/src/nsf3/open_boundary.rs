@@ -916,10 +916,13 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         sig: &[[f64; 6]],
         transport: &[NsfSgsTransport],
     ) -> Result<(f64, f64, f64), NsfError> {
-        let mut k = self.spec.gas.face_conductivity(
+        let conductivity = self.spec.gas.prepare_face_conductivity(
             &self.law,
-            0.5 * (theta[i] + face.theta),
             0.5 * (self.law.pressure_pa(rho[i], theta[i]) + face.pressure_pa),
+            [theta[i], face.theta],
+        )?;
+        let mut k = conductivity.mean_lattice(
+            theta[i], face.theta, 0.5 * (theta[i] + face.theta),
         )?;
         // The modeled coefficient is extrapolated from this adjacent cell;
         // the original characteristic temperature owns the half-cell gradient.

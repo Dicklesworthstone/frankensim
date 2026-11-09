@@ -5,8 +5,8 @@
 //! admission and readback use the supplied F_(n+1). Thus a periodic domain's
 //! total momentum receives (sum(F_n) + sum(F_(n+1)))/2 per step. This is the
 //! trapezoidal source convention, not a switch that adds a spurious half kick.
-//! Source endpoints may be prescribed or resolved by the native Coriolis or
-//! resistance owners. This is not a heat solver or a total-energy model.
+//! Source endpoints may be prescribed or resolved by native rigid-frame,
+//! Coriolis or resistance owners. This is not a heat solver or a total-energy model.
 
 use super::moving_walls::WallMotion3;
 use super::{
@@ -18,7 +18,8 @@ use fs_exec::{CancelGate, Cx, KernelRunner};
 
 mod acceleration;
 mod coriolis;
-pub(super) use coriolis::CoriolisEndpoint3;
+mod rigid_frame;
+pub(super) use rigid_frame::FrameEndpoint3;
 /// Source-preserving material viscosity and density-driven buoyancy.
 pub mod material;
 use acceleration::EndpointForcing;
@@ -366,7 +367,7 @@ fn serial_with_wall_motion<L: ForcedLattice3<Q>, const Q: usize, R>(
         poll()?;
         data.process(&grid.f, chunk, tile * 64, false)?;
     }
-    let (forces, mut acceleration, coriolis) = end.split();
+    let (forces, mut acceleration, frame) = end.split();
     let admit_endpoint = acceleration.is_none();
     let data = StepData { forces, ..data };
     for (tile, chunk) in grid.next.chunks_mut(64).enumerate() {
@@ -392,7 +393,7 @@ fn serial_with_wall_motion<L: ForcedLattice3<Q>, const Q: usize, R>(
                 &mut values[tile * 64..tile * 64 + chunk.len()],
                 tile * 64,
                 L::forcing_maximum_mach,
-                coriolis,
+                frame,
             )?;
         }
     }
@@ -460,7 +461,7 @@ fn pooled_with_wall_motion<L: ForcedLattice3<Q>, const Q: usize, P: KernelRunner
         marker: PhantomData,
     };
     run_pass(&data, &grid.f, &mut grid.post, false, pool, gate)?;
-    let (forces, acceleration, coriolis) = end.split();
+    let (forces, acceleration, frame) = end.split();
     let data = StepData { forces, ..data };
     run_pass_with_endpoint_acceleration(
         &data,
@@ -471,7 +472,7 @@ fn pooled_with_wall_motion<L: ForcedLattice3<Q>, const Q: usize, P: KernelRunner
         gate,
         motion,
         acceleration.map(|values| {
-            (values, L::forcing_maximum_mach as fn(L::Collision) -> f64, coriolis)
+            (values, L::forcing_maximum_mach as fn(L::Collision) -> f64, frame)
         }),
     )?;
     poll()?;

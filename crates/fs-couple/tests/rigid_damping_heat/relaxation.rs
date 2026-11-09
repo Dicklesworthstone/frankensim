@@ -1,4 +1,7 @@
 //! Original Maxwell storage, finite heat and accepted history continuation.
+
+#[path = "relaxation/temperature.rs"]
+mod temperature;
 use super::*;
 use fs_couple::rigid_damping_heat::{
     driven::network::{DrivenNetworkDampingThermalConfig, advance_candidate as advance_driven},

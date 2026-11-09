@@ -1,4 +1,4 @@
-//! Reversible electromagnetic and original polarization energy at one film point.
+//! Reversible electromagnetic and polarization energy at film points and volumes.
 //!
 //! Complete coherent fields are summed before squaring. Endpoint changes use
 //! analytic field increments, delta U = delta q * (2 q + delta q) / 2, rather
@@ -8,6 +8,12 @@
 use super::*;
 use fs_fft::harmonic_window::phase_rad_s_dd_from_clock_dd;
 use integrated_heat::ScaledDd;
+
+mod volume;
+pub use volume::{
+    AngularSpectrumEnergyVolumeLimits, AngularSpectrumEnergyVolumeSample,
+    AngularSpectrumExposureLayerVolumeEnergy, PreparedAngularSpectrumExposureLayerVolumeEnergy,
+};
 
 type Complex = [ScaledDd; 2];
 type Vector = [Complex; 3];
@@ -217,48 +223,15 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             if points.is_empty() {
                 continue;
             }
-            let coordinates = core::iter::once(Coordinate::Electric)
-                .chain(core::iter::once(Coordinate::Magnetic))
-                .chain((0..self.law.pole_count()).map(Coordinate::Restoring))
-                .chain(
-                    (self.law.debye_poles.len()..self.law.pole_count()).map(Coordinate::Kinetic),
-                );
-            for coordinate in coordinates {
-                poll(&mut cancelled)?;
-                let start = lines.len();
-                for point in &points {
-                    poll(&mut cancelled)?;
-                    let (offset, transfer) = match coordinate {
-                        Coordinate::Electric => (0, C64::ONE),
-                        Coordinate::Magnetic => (3, C64::ONE),
-                        Coordinate::Restoring(pole) => {
-                            (0, self.frequencies[point.cache].poles[pole].storage)
-                        }
-                        Coordinate::Kinetic(pole) => {
-                            (0, self.frequencies[point.cache].poles[pole].kinetic_storage)
-                        }
-                    };
-                    lines.push(EnergyLine {
-                        omega: point.omega,
-                        field: core::array::from_fn(|c| {
-                            filtered(point.field[c + offset], transfer)
-                        }),
-                    });
-                }
-                let (account, coefficient) = match coordinate {
-                    Coordinate::Electric => (0, self.law.epsilon_infinity),
-                    Coordinate::Magnetic => (0, self.law.permeability),
-                    Coordinate::Restoring(_) => (1, 1.0),
-                    Coordinate::Kinetic(_) => (2, 1.0),
-                };
-                banks.push(EnergyBank {
-                    start,
-                    end: lines.len(),
-                    proper,
-                    account,
-                    scale: ScaledDd::from_f64(coefficient) * ScaledDd::from_f64(0.5),
-                });
-            }
+            retain_coordinates(
+                self,
+                points.iter(),
+                proper,
+                ScaledDd::from_f64(1.0),
+                &mut banks,
+                &mut lines,
+                &mut cancelled,
+            )?;
         }
         poll(&mut cancelled)?;
         Ok(PreparedAngularSpectrumExposureLayerEnergy {
@@ -271,6 +244,59 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             workspace_bytes,
         })
     }
+}
+
+// Point and volume observers retain identical original material coordinates.
+// Physical volume scales meet the products before restoration to DD range.
+fn retain_coordinates<'a>(
+    layer: &PreparedAngularSpectrumExposureLayer<'_, '_, '_, '_>,
+    points: impl Iterator<Item = &'a PointField> + Clone,
+    proper: bool,
+    physical_scale: ScaledDd,
+    banks: &mut Vec<EnergyBank>,
+    lines: &mut Vec<EnergyLine>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), AngularSpectrumError> {
+    let coordinates = core::iter::once(Coordinate::Electric)
+        .chain(core::iter::once(Coordinate::Magnetic))
+        .chain((0..layer.law.pole_count()).map(Coordinate::Restoring))
+        .chain((layer.law.debye_poles.len()..layer.law.pole_count()).map(Coordinate::Kinetic));
+    for coordinate in coordinates {
+        poll(cancelled)?;
+        let start = lines.len();
+        for point in points.clone() {
+            poll(cancelled)?;
+            let (offset, transfer) = match coordinate {
+                Coordinate::Electric => (0, C64::ONE),
+                Coordinate::Magnetic => (3, C64::ONE),
+                Coordinate::Restoring(pole) => {
+                    (0, layer.frequencies[point.cache].poles[pole].storage)
+                }
+                Coordinate::Kinetic(pole) => (
+                    0,
+                    layer.frequencies[point.cache].poles[pole].kinetic_storage,
+                ),
+            };
+            lines.push(EnergyLine {
+                omega: point.omega,
+                field: core::array::from_fn(|c| filtered(point.field[c + offset], transfer)),
+            });
+        }
+        let (account, coefficient) = match coordinate {
+            Coordinate::Electric => (0, layer.law.epsilon_infinity),
+            Coordinate::Magnetic => (0, layer.law.permeability),
+            Coordinate::Restoring(_) => (1, 1.0),
+            Coordinate::Kinetic(_) => (2, 1.0),
+        };
+        banks.push(EnergyBank {
+            start,
+            end: lines.len(),
+            proper,
+            account,
+            scale: physical_scale * ScaledDd::from_f64(coefficient) * ScaledDd::from_f64(0.5),
+        });
+    }
+    Ok(())
 }
 
 fn overflow() -> AngularSpectrumError {
@@ -323,6 +349,27 @@ fn energy(
     duration: Option<f64>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<AngularSpectrumExposureLayerEnergyDensity, AngularSpectrumError> {
+    let [
+        electromagnetic_j_m3,
+        polarization_restoring_j_m3,
+        polarization_kinetic_j_m3,
+        total_j_m3,
+    ] = energy_accounts(banks, lines, time, duration, cancelled)?;
+    Ok(AngularSpectrumExposureLayerEnergyDensity {
+        electromagnetic_j_m3,
+        polarization_restoring_j_m3,
+        polarization_kinetic_j_m3,
+        total_j_m3,
+    })
+}
+
+fn energy_accounts(
+    banks: &[EnergyBank],
+    lines: &[EnergyLine],
+    time: Dd,
+    duration: Option<f64>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<[Dd; 4], AngularSpectrumError> {
     poll(cancelled)?;
     if !time.hi.is_finite() || !time.lo.is_finite() {
         return Err(bad("film energy source clock is nonfinite"));
@@ -404,12 +451,12 @@ fn energy(
     let polarization_kinetic_j_m3 = physical(accounts[2])?;
     let total_j_m3 = physical(accounts[0] + accounts[1] + accounts[2])?;
     poll(cancelled)?;
-    Ok(AngularSpectrumExposureLayerEnergyDensity {
+    Ok([
         electromagnetic_j_m3,
         polarization_restoring_j_m3,
         polarization_kinetic_j_m3,
         total_j_m3,
-    })
+    ])
 }
 
 #[cfg(test)]

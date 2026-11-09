@@ -24,6 +24,9 @@ use std::collections::BTreeMap;
 
 /// Native rigid-body motion and event-timed snap heat in one accepted candidate.
 pub mod native;
+
+/// Explicit temperature-driver work for loaded rolling and torsion histories.
+pub mod angular_temperature;
 mod normal_motion;
 mod power;
 /// Retained rolling cycles with separate normal-snap and spring-release heating.

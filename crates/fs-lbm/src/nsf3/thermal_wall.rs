@@ -23,8 +23,8 @@ pub enum NsfWallThermal {
     /// Prescribed heat flux [W/m²], positive into the gas on either side.
     HeatFlux(f64),
     /// Molecular half-cell conduction in series with a prescribed ambient film.
-    /// Conductivity is evaluated at the fluid/interface mean temperature and
-    /// adjacent gas pressure, using the same source as an isothermal wall.
+    /// Conductivity uses the same midpoint or explicit source-integral policy
+    /// as an isothermal wall, at the adjacent gas pressure.
     Film {
         coefficient_w_m2_k: f64,
         ambient_temperature_k: f64,
@@ -333,11 +333,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             NsfWallThermal::Adiabatic => return Ok(0.0),
             NsfWallThermal::Isothermal(t) => {
                 let tw = self.law.theta_of_kelvin(t);
-                let k = self.spec.gas.face_conductivity(
+                let conductivity = self.spec.gas.prepare_face_conductivity(
                     &self.law,
-                    0.5 * (theta + tw),
                     self.law.pressure_pa(rho, theta),
+                    [theta, tw],
                 )?;
+                let k = conductivity.mean_lattice(theta, tw, 0.5 * (theta + tw))?;
                 // Keep the original isothermal wall arithmetic on both sides.
                 let flux = if direction > 0 {
                     -k * (tw - theta) / 0.5
@@ -384,20 +385,26 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         coefficient: f64,
         ambient: f64,
     ) -> Result<f64, NsfError> {
-        let difference = self.law.theta_of_kelvin(ambient) - theta;
+        let ambient_theta = self.law.theta_of_kelvin(ambient);
+        let difference = ambient_theta - theta;
         if coefficient == 0.0 || difference == 0.0 {
             return Ok(0.0);
         }
         let film =
             coefficient * (3.0 * self.law.temperature_ref_k) / self.law.heat_flux_unit_w_m2();
         let pressure = self.law.pressure_pa(rho, theta);
+        // Retain one original source selection and one shared work allowance
+        // over every candidate surface temperature of this film root.
+        let conductivity = self.spec.gas.prepare_face_conductivity(
+            &self.law, pressure, [theta, ambient_theta],
+        )?;
         let evaluate = |fraction: f64| -> Result<(f64, f64), NsfError> {
-            // Tw = Tcell + fraction*(Tambient-Tcell). The source is evaluated
-            // at the actual fluid/interface mean, not at bulk/ambient mean.
-            let k = self.spec.gas.face_conductivity(
-                &self.law,
+            // Tw = Tcell + fraction*(Tambient-Tcell). The molecular path ends
+            // at this actual interface, not at the remote film ambient.
+            let k = conductivity.mean_lattice(
+                theta,
+                if fraction == 1.0 { ambient_theta } else { theta + fraction * difference },
                 theta + 0.5 * fraction * difference,
-                pressure,
             )?;
             let molecular = 2.0 * k;
             if !(molecular.is_finite() && molecular > 0.0) {

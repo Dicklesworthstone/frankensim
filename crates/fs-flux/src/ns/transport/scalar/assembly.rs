@@ -260,6 +260,9 @@ impl<'m> FluxSystem<'m> {
                 diffusion: [0.0; 3],
                 advective_load: 0.0,
                 diffusive_load: 0.0,
+                reservoir_coefficients: [[0.0; 2]; 3],
+                reservoir_values: [0.0; 2],
+                prescribed_flux: false,
             };
             let (value, outward, inflow) = match owner {
                 ScalarBoundary::Value { value, .. } => (Some(value), None, Some(value)),
@@ -284,6 +287,9 @@ impl<'m> FluxSystem<'m> {
                 None
             };
             let flux_samples = outward.map(sample).transpose()?;
+            flux.reservoir_values = value_samples.or(incoming).unwrap_or([0.0; 2]);
+            flux.prescribed_flux =
+                flux_samples.is_some_and(|values| values.iter().any(|&v| v != 0.0));
             let penalty = finite(controls.penalty * d_left, "scalar boundary penalty")?;
             for (q, (point, weight)) in gauss.into_iter().enumerate() {
                 let phi = bases[left].value(point);
@@ -293,6 +299,8 @@ impl<'m> FluxSystem<'m> {
                         let row_flux =
                             diffusivity_m2_s[left] * dot(bases[left].gradient[i], edge.normal);
                         boundary_load[3 * left + i] += weight * (-row_flux + penalty * phi[i]) * g;
+                        flux.reservoir_coefficients[i][q] +=
+                            weight * (-row_flux + penalty * phi[i]);
                         flux.diffusion[i] += weight * (-row_flux + penalty * phi[i]);
                         for j in 0..3 {
                             let col_flux =
@@ -339,6 +347,9 @@ impl<'m> FluxSystem<'m> {
                     )?;
                     for i in 0..3 {
                         boundary_load[3 * left + i] -= weight * normal * donor * phi[i];
+                        let coefficient = -weight * normal * phi[i];
+                        flux.reservoir_coefficients[i][0] += coefficient * (1.0 - fraction);
+                        flux.reservoir_coefficients[i][1] += coefficient * fraction;
                     }
                     flux.advective_load += weight * normal * donor;
                 }

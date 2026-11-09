@@ -19,7 +19,7 @@ use super::super::area_lights::camera::{
 use super::super::{CameraRadianceError, CameraRadianceSample};
 use super::exposure::{ExposureWindow, average_history, integrate_rate};
 use super::{
-    LIGHT_M_S, SurfaceEmissionQuery, TransientCameraError, TransientCurvedCameraScene, admit_time,
+    SurfaceEmissionQuery, TransientCameraError, TransientCurvedCameraScene, admit_time,
     retarded_time, sample_history,
 };
 use crate::charts::Ray;
@@ -315,25 +315,12 @@ impl<'a, 'h, 's, 'm, 'l> TransientCurvedAreaLightCameraScene<'a, 'h, 's, 'm, 'l>
             return Ok(1.0);
         };
         cx.checkpoint()?;
-        let group = |length: Option<f64>| {
-            length
-                .filter(|length| length.is_finite() && *length >= 0.0)
-                .ok_or(TransientCameraError::MissingGroupDelay { object_id })
-        };
-        let camera_group_m = group(camera_group_m)?;
-        let connection_group_m = group(connection_group_m)?;
-        let group_delay_s = (Dd::from_f64(camera_group_m) + Dd::from_f64(connection_group_m))
-            / Dd::from_f64(LIGHT_M_S);
-        if (camera_group_m > 0.0 || connection_group_m > 0.0) && !Dd::ZERO.lt(group_delay_s) {
-            return Err(TransientCameraError::UnresolvedClock { object_id });
-        }
-        // A resolved lens is a prefix shared by both source strategies. Keep
-        // the original sensor clock and each connection image's own scene path.
-        let group_delay_s = if launch_delay_s == Dd::ZERO {
-            group_delay_s
-        } else {
-            launch_delay_s + group_delay_s
-        };
+        let group_delay_s = super::connected_group_delay(
+            camera_group_m, connection_group_m, launch_delay_s,
+        ).map_err(|error| match error {
+            super::ConnectionClockError::MissingGroupDelay => TransientCameraError::MissingGroupDelay { object_id },
+            super::ConnectionClockError::UnresolvedClock => TransientCameraError::UnresolvedClock { object_id },
+        })?;
         let observation_time_s = observation.open_s();
         let query = SurfaceEmissionQuery {
             object_id,

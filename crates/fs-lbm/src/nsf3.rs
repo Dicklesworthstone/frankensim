@@ -31,6 +31,10 @@
 //! ThermochemicalNsfGas::energy_reference_j_kg, so an arbitrary formation-energy
 //! datum cannot drive this hybrid mass/energy discretization. Composition is
 //! frozen; no reaction, species diffusion or phase conversion is implied.
+//! Optional original-source conductivity integration applies the same Fourier
+//! stencil to the WMS conductivity primitive at each actual face pressure,
+//! including wall/film and characteristic enthalpy contacts. It retains this
+//! total-energy owner; quadrature estimates never become heat supplies.
 //! The original GasSpec arithmetic and qualification remain separate from
 //! physical validation of this source-driven extension.
 //! NamedMixtureNsfGas uses the same local material path with the original
@@ -86,7 +90,9 @@ use fs_material::gas::GasSpec;
 use material::NsfCellMaterial;
 
 mod material;
-pub use material::{NamedMixtureNsfGas, NsfGasMedium, ThermochemicalNsfGas};
+pub use material::{
+    NamedMixtureNsfGas, NsfGasMedium, NsfSourceConductivityControl, ThermochemicalNsfGas,
+};
 mod bulk;
 pub use bulk::{NsfBulkViscosityPoint, NsfBulkViscositySample, NsfBulkViscositySource};
 mod sgs;
@@ -158,7 +164,9 @@ pub const MAX_QUALIFIED_MACH: f64 = 0.2;
 /// 11: pressure-work divergence uses single-valued face velocities through
 /// wall/solid stencil transitions and isolated reservoir-adjacent cells.
 /// This corrects the pressure/viscous ledger split, not the fluid trajectory.
-pub const NSF3_BIT_SEMANTICS_VERSION: u32 = 11;
+/// 12: optional original-source conductivity primitive on molecular faces;
+/// the default midpoint trajectory and its arithmetic are unchanged.
+pub const NSF3_BIT_SEMANTICS_VERSION: u32 = 12;
 
 /// Refusals of the NSF grid. A failed step leaves the published state unchanged.
 #[derive(Clone, Debug, PartialEq)]
@@ -1368,33 +1376,43 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             let Some(j) = self.fluid_at(x, a, 1) else {
                 return Ok(0.0);
             };
-            let mut kf = self.spec.gas.face_conductivity(
-                &self.law,
-                0.5 * (theta[i] + theta[j]),
-                0.5 * (self.law.pressure_pa(rho[i], theta[i])
-                    + self.law.pressure_pa(rho[j], theta[j])),
-            )?;
-            // One face value shared by both cells preserves the total-energy
-            // telescoping ledger. Never add modeled heat flux through an
-            // impermeable wall; its molecular half-cell law below is retained.
-            if let (Some(left), Some(right)) = (transport.get(i), transport.get(j)) {
-                let modeled =
-                    0.5 * (left.turbulent_conductivity_lu + right.turbulent_conductivity_lu);
-                self.admit_dynamic_heat_ratio(i, modeled, kf)?;
-                kf += modeled;
-            }
             let wide = match (self.fluid_at(x, a, -1), self.fluid_at(self.at(j), a, 1)) {
                 (Some(m), Some(p)) => Some((m, p)),
                 _ => None,
             };
+            let mut range = [theta[i].min(theta[j]), theta[i].max(theta[j])];
+            if let Some((m, p)) = wide {
+                range[0] = range[0].min(theta[m]).min(theta[p]);
+                range[1] = range[1].max(theta[m]).max(theta[p]);
+            }
+            let conductivity = self.spec.gas.prepare_face_conductivity(
+                &self.law,
+                0.5 * (self.law.pressure_pa(rho[i], theta[i])
+                    + self.law.pressure_pa(rho[j], theta[j])),
+                range,
+            )?;
+            let kf = conductivity.mean_lattice(theta[i], theta[j], 0.5 * (theta[i] + theta[j]))?;
+            // One face value shared by both cells preserves the total-energy
+            // telescoping ledger. Never add modeled heat flux through an
+            // impermeable wall; its molecular half-cell law below is retained.
+            let modeled = if let (Some(left), Some(right)) = (transport.get(i), transport.get(j)) {
+                let modeled =
+                    0.5 * (left.turbulent_conductivity_lu + right.turbulent_conductivity_lu);
+                self.admit_dynamic_heat_ratio(i, modeled, kf)?;
+                modeled
+            } else {
+                0.0
+            };
+            let conductive = conductivity.gradient_lattice(
+                [theta[i], theta[j]], wide.map(|(m, p)| [theta[m], theta[p]]), kf, modeled,
+            )?;
             Ok(match wide {
                 Some((m, p)) => {
                     let gf =
                         (7.0 / 12.0) * (g[i][a] + g[j][a]) - (1.0 / 12.0) * (g[m][a] + g[p][a]);
-                    let dt4 = (27.0 * (theta[j] - theta[i]) - (theta[p] - theta[m])) / 24.0;
-                    gf - kf * dt4
+                    gf - conductive
                 }
-                None => 0.5 * (g[i][a] + g[j][a]) - kf * (theta[j] - theta[i]),
+                None => 0.5 * (g[i][a] + g[j][a]) - conductive,
             })
         };
         let mut plus: Vec<Result<[f64; 3], NsfError>> = vec![Ok([0.0; 3]); n];
@@ -1422,11 +1440,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 };
                 let stress_work = row[0] * b.u[0] + row[1] * b.u[1] + row[2] * b.u[2];
                 let gb = (b.energy + b.rho * b.theta) * b.u[a] - stress_work;
-                let mut k = self.spec.gas.face_conductivity(
+                let conductivity = self.spec.gas.prepare_face_conductivity(
                     &self.law,
-                    0.5 * (theta[i] + b.theta),
                     0.5 * (self.law.pressure_pa(rho[i], theta[i])
                         + self.law.pressure_pa(b.rho, b.theta)),
+                    [theta[i], b.theta],
+                )?;
+                let mut k = conductivity.mean_lattice(
+                    theta[i], b.theta, 0.5 * (theta[i] + b.theta),
                 )?;
                 // Extrapolate adjacent SGS transport to the prescribed ghost.
                 // The original full-cell temperature difference and one shared
@@ -1445,11 +1466,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 Some(tw) => {
                     // Same local pressure as the adjacent cell; only the wall
                     // temperature changes across its half-cell resistance.
-                    let kf = self.spec.gas.face_conductivity(
+                    let conductivity = self.spec.gas.prepare_face_conductivity(
                         &self.law,
-                        0.5 * (theta[i] + tw),
                         self.law.pressure_pa(rho[i], theta[i]),
+                        [theta[i], tw],
                     )?;
+                    let kf = conductivity.mean_lattice(theta[i], tw, 0.5 * (theta[i] + tw))?;
                     if s > 0 {
                         -kf * (tw - theta[i]) / 0.5
                     } else {
@@ -2498,6 +2520,16 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         }
         for wall in &self.thermal_walls {
             wall.feed_hash(&mut feed);
+        }
+        if let NsfGasMedium::Thermochemical(gas) = &self.spec.gas {
+            if let Some(control) = gas.source_conductivity() {
+                feed(11.0);
+                feed(control.quadrature.absolute_tolerance_w_m_k);
+                feed(control.quadrature.relative_tolerance);
+                feed(control.quadrature.maximum_subdivisions as f64);
+                feed(f64::from(control.quadrature.maximum_depth));
+                feed(control.maximum_evaluations_per_face as f64);
+            }
         }
         h
     }
