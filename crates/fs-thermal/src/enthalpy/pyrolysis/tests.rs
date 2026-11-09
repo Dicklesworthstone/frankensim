@@ -4,6 +4,9 @@ use crate::enthalpy::{CellGeometry, DepositionBudget, StepConfig, ThermalLink, T
 #[path = "tests/thermal_cells.rs"]
 mod thermal_cells;
 
+#[path = "tests/conduction.rs"]
+mod conduction;
+
 struct Caloric {
     cp: f64,
     offset: f64,

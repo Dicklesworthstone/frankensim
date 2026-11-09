@@ -12,12 +12,15 @@
 //! it does not rerun the entire graph for every matrix column. Matrix/vector
 //! storage is reused. The original heat owner still allocates its bounded rate
 //! maps, and candidate/result storage is allocated per advance.
+//! Attached conductivity sources also use those one-cell reaction probes for
+//! complete paired-flux derivatives, including composition and latent h.
 //!
 //! The explicit conduction CFL no longer limits accepted intervals. This is
 //! nevertheless first-order time integration, not an accuracy, unconditional
 //! nonlinear-convergence, or entropy theorem. Original material/source domains,
 //! finite-rate kinetics and physical depletion refusals remain in force.
 
+use super::conduction::ConductivityProbe;
 use super::*;
 use fs_la::prepared_lu::{LuWorkspace, LuWorkspaceError};
 
@@ -56,6 +59,7 @@ pub struct ImplicitWorkspace {
     probe: Vec<f64>,
     residual: Vec<f64>,
     slope: Vec<f64>,
+    conductivity_probes: Vec<ConductivityProbe>,
     conductance: Vec<f64>,
     matrix: Vec<f64>,
     rhs: Vec<f64>,
@@ -155,6 +159,7 @@ impl PyrolysisSimulation<'_> {
             probe: vec![0.0; n],
             residual: vec![0.0; n],
             slope: vec![0.0; n],
+            conductivity_probes: vec![ConductivityProbe::default(); n],
             conductance: vec![0.0; n * n],
             matrix: vec![0.0; n * n],
             rhs: vec![0.0; n],
@@ -172,7 +177,8 @@ impl<'a> PyrolysisSimulation<'a> {
     /// automatic halving hides nonlinear/material refusal. Every accepted
     /// interval closes local and aggregate physical energy and kinetic-roundoff
     /// budgets; cancellation/refusal leaves `self` unchanged. Geometry and
-    /// authored coefficients are frozen over each call. A moving-slab owner
+    /// authored boundary coefficients are frozen over each call. Explicitly
+    /// attached conductivity sources resolve every candidate. A moving-slab owner
     /// must rezone and resolve its coefficients between these advances.
     pub fn advance_implicit_to(
         &self,
@@ -450,6 +456,7 @@ fn evaluate(
         }
         steps.push(step);
     }
+    candidate.refresh_conductivity(checkpoint)?;
     let rates = candidate.thermal.heat_rates_with_calorics(
         f64::MAX,
         |id, cell| candidate.calorics(id, cell),
@@ -474,7 +481,7 @@ fn derivative(
     solve: ImplicitSolve,
     work: &mut Work,
     checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
-) -> Result<f64, ImplicitError> {
+) -> Result<(f64, ConductivityProbe), ImplicitError> {
     let reactive = initial.inventories.contains_key(&id);
     let direction = if reactive {
         let model = initial.materials[&initial.cells()[&id].material_id];
@@ -502,7 +509,18 @@ fn derivative(
                     // heat-only body: dT/de = 0 retains its latent energy in
                     // the common residual instead of inventing a large Cp.
                     if positive(slope) || (!reactive && slope == 0.0) {
-                        return Ok(slope);
+                        let conductivity = match &initial.conduction {
+                            None => ConductivityProbe::default(),
+                            Some(binding) => match binding.probe(initial, id, &probe, actual) {
+                                Ok(value) => value,
+                                Err(
+                                    DepositionError::MaterialDomain
+                                    | DepositionError::EnergyBalance(_),
+                                ) => continue,
+                                Err(error) => return Err(error.into()),
+                            },
+                        };
+                        return Ok((slope, conductivity));
                     }
                 }
                 Err(DepositionError::MaterialDomain | DepositionError::EnergyBalance(_)) => {}
@@ -544,8 +562,11 @@ fn nonlinear_step(
         if norm <= threshold {
             return Ok(external_w);
         }
+        if candidate.conduction.is_some() {
+            prepare_conductance(candidate, w, checkpoint)?;
+        }
         for (j, &id) in w.ids.iter().enumerate() {
-            w.slope[j] = derivative(
+            (w.slope[j], w.conductivity_probes[j]) = derivative(
                 initial,
                 id,
                 dt,
@@ -565,6 +586,17 @@ fn nonlinear_step(
                     dt * w.conductance[i * n + j] * w.slope[j] + if i == j { 1.0 } else { 0.0 },
                 )?;
             }
+        }
+        if let Some(binding) = &candidate.conduction {
+            binding.add_tangent(
+                candidate,
+                &w.ids,
+                &w.steps,
+                &w.conductivity_probes,
+                dt,
+                &mut w.matrix,
+                checkpoint,
+            )?;
         }
         w.lu.solve_into(&w.matrix, &w.rhs, &mut w.delta)?;
         work.linear += 1;

@@ -10,6 +10,8 @@
 //! The base owner has fixed geometry and instantaneous removal of volatiles at
 //! their local production temperature. The `implicit` extension couples endpoint
 //! conduction and reaction without the explicit conduction timestep limit.
+//! The optional `conduction` attachment uses original conductivity sources and
+//! explicit component-volume arrangements at the current reactive endpoint.
 //! The `slab` extension adds moving geometry and conservative component/enthalpy
 //! rezoning at explicitly supplied virgin and optional char densities.
 //! This reduced first-order model does not model pore
@@ -33,6 +35,10 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Coupled backward-Euler heat transport and finite-rate decomposition.
 #[path = "pyrolysis/implicit.rs"]
 pub mod implicit;
+
+/// Original conductivity sources on fixed reactive and passive thermal cells.
+#[path = "pyrolysis/conduction.rs"]
+pub mod conduction;
 
 /// Conservative moving geometry and rezoning of homogeneous reactive slabs.
 #[path = "pyrolysis/slab.rs"]
@@ -248,6 +254,7 @@ pub struct PyrolysisSimulation<'a> {
     thermal: DepositionSimulation<'a>,
     materials: BTreeMap<MaterialId, PyrolysisMaterial<'a>>,
     inventories: BTreeMap<CellId, PyrolysisCell>,
+    conduction: Option<conduction::Conduction<'a>>,
 }
 
 impl PyrolysisMaterial<'_> {
@@ -442,6 +449,7 @@ impl<'a> PyrolysisSimulation<'a> {
             thermal,
             materials: map,
             inventories,
+            conduction: None,
         })
     }
 
@@ -507,14 +515,24 @@ impl<'a> PyrolysisSimulation<'a> {
     }
 
     /// Atomically replace supplied link conductances through the original owner.
-    /// Material/porosity-dependent conductivity must be explicitly resolved by
-    /// the caller; changing composition never silently invents a mixing rule.
+    /// Attached conductivity sources retain sole ownership of their links.
+    /// Other links can be resolved by the caller; changing composition never
+    /// silently invents a conductivity, porosity or mixing rule.
     pub fn set_conductances(
         &mut self,
         conductances_w_k: &BTreeMap<u64, f64>,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), DepositionError> {
         checkpoint()?;
+        if self.conduction.as_ref().is_some_and(|binding| {
+            conductances_w_k
+                .keys()
+                .any(|id| binding.links.contains_key(id))
+        }) {
+            return Err(DepositionError::InvalidInput(
+                "attached conductivity sources already own these pyrolysis links",
+            ));
+        }
         let mut trial = self.thermal.clone();
         trial.set_step_conductances(conductances_w_k, &mut checkpoint)?;
         checkpoint()?;
@@ -583,6 +601,7 @@ impl<'a> PyrolysisSimulation<'a> {
             }
             let remaining_s = target_s - next.time_s();
             let requested = controls.maximum_dt_s.min(remaining_s);
+            next.refresh_conductivity(&mut checkpoint)?;
             let rates = next.thermal.heat_rates_with_calorics(
                 requested,
                 |id, cell| next.calorics(id, cell),
@@ -663,6 +682,9 @@ impl<'a> PyrolysisSimulation<'a> {
             next.thermal.time_s = endpoint;
             audit.thermal.substeps += 1;
         }
+        // Admit and retain the current source coefficients at the accepted
+        // endpoint, including the final step of an explicit advance.
+        next.refresh_conductivity(&mut checkpoint)?;
         audit.thermal.external_heat_j = external.value();
         audit.thermal.stored_energy_change_j = stored.value();
         audit.thermal.residual_j = energy.value();

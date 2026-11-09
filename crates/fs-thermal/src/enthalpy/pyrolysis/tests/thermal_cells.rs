@@ -447,6 +447,140 @@ fn heat_only_materials_are_explicit_and_reacting_calorics_require_enthalpy() {
 }
 
 #[test]
+fn latent_conductivity_feedback_uses_enthalpy_and_native_adaptive_steps() {
+    use crate::enthalpy::conduction::{ConductiveLink, ConductivityLaw};
+    use crate::enthalpy::pyrolysis::conduction::PyrolysisConductivity;
+    use crate::enthalpy::pyrolysis::implicit::adaptive::AdaptiveControls;
+    use crate::enthalpy::pyrolysis::slab::ConductivityMixing;
+    struct VirginK;
+    impl ConductivityLaw for VirginK {
+        fn conductivity_w_m_k(&self, _: f64) -> Result<f64, DepositionError> {
+            Ok(10.0)
+        }
+    }
+    struct LatentK;
+    impl ConductivityLaw for LatentK {
+        fn conductivity_w_m_k(&self, h: f64) -> Result<f64, DepositionError> {
+            if !(40_000.0..=150_000.0).contains(&h) {
+                return Err(DepositionError::MaterialDomain);
+            }
+            Ok(10.0 + (h - 50_000.0) / 1000.0)
+        }
+    }
+    let sink = HeatSink {
+        basis: ThermalStorageBasis::Enthalpy,
+        latent: true,
+    };
+    let gas = |t| Ok(2000.0 * (t - 300.0) + 200_000.0);
+    let state = PyrolysisSimulation::new_with_thermal_materials(
+        thermal_pair(&sink, 50_000.0),
+        &[model(&VIRGIN, None, &gas, 0.0, 1.0)],
+        &[MaterialId(2)],
+        || Ok(()),
+    )
+    .unwrap()
+    .with_conductivity(
+        &[
+            (
+                MaterialId(1),
+                PyrolysisConductivity::Reactive {
+                    virgin: &VirginK,
+                    char: None,
+                    densities_kg_m3: [1000.0; 2],
+                    mixing: ConductivityMixing::Series,
+                    source: "constant manufactured virgin conductivity",
+                },
+            ),
+            (MaterialId(2), PyrolysisConductivity::Thermal(&LatentK)),
+        ],
+        &[ConductiveLink {
+            link_id: 1,
+            half_distances_m: [0.0025; 2],
+            contact_resistance_m2_k_w: 0.0,
+        }],
+        || Ok(()),
+    )
+    .unwrap();
+    let reaction = (0.01 * 0.1 / 1.1) * 200_000.0;
+    let (mut lo, mut hi) = (0.0, 20.0 * (50.0 - reaction / 20.0));
+    for _ in 0..100 {
+        let q = 0.5 * (lo + hi);
+        let k = 10.0 + q / 20.0;
+        let g = 0.005 / (0.0025 / 10.0 + 0.0025 / k);
+        if q > 0.1 * g * (50.0 - (q + reaction) / 20.0) {
+            hi = q;
+        } else {
+            lo = q;
+        }
+    }
+    for implicit in [false, true] {
+        let (next, audit) = advance_pair(&state, implicit);
+        let q = if implicit { 0.5 * (lo + hi) } else { 50.0 };
+        close(
+            next.temperature_k(CellId(1)).unwrap(),
+            650.0 - (q + reaction) / 20.0,
+            1e-8,
+        );
+        assert_eq!(next.temperature_k(CellId(2)).unwrap(), 600.0);
+        close(
+            next.cells()[&CellId(2)].specific_h_j_kg,
+            50_000.0 + q / 0.02,
+            1e-6,
+        );
+        close(
+            next.conductivity_w_m_k(CellId(2)).unwrap(),
+            10.0 + q / 20.0,
+            1e-8,
+        );
+        check_account(&state, &next, &audit);
+    }
+    // Independent coupled ODE with the SAME authored k(h), no artificial Cp
+    // on the 600 K plateau: m Cp Tdot = -Q - m L, mdot=-m, Edot_buffer=Q.
+    let derivative = |y: [f64; 3]| {
+        let [temperature, mass, buffer_energy] = y;
+        let k = 10.0 + (buffer_energy / 0.02 - 50_000.0) / 1000.0;
+        let q = 0.005 / (0.0025 / 10.0 + 0.0025 / k) * (temperature - 600.0);
+        [(-q - mass * 200_000.0) / (2000.0 * mass), -mass, q]
+    };
+    let mut exact = [650.0, 0.01, 1000.0];
+    let dt = 0.2 / 2048.0;
+    for _ in 0..2048 {
+        let a = derivative(exact);
+        let b = derivative(std::array::from_fn(|i| exact[i] + 0.5 * dt * a[i]));
+        let c = derivative(std::array::from_fn(|i| exact[i] + 0.5 * dt * b[i]));
+        let d = derivative(std::array::from_fn(|i| exact[i] + dt * c[i]));
+        exact =
+            std::array::from_fn(|i| exact[i] + dt * (a[i] + 2.0 * b[i] + 2.0 * c[i] + d[i]) / 6.0);
+    }
+    let (next, report) = state
+        .advance_adaptive_implicit_to(
+            0.2,
+            PyrolysisControls {
+                maximum_dt_s: 0.2,
+                ..Default::default()
+            },
+            ImplicitSolve::default(),
+            AdaptiveControls {
+                initial_dt_s: 0.2,
+                ..Default::default()
+            },
+            &mut state.implicit_workspace().unwrap(),
+            || Ok(()),
+        )
+        .unwrap();
+    assert!(report.accuracy_rejections > 0);
+    assert_eq!(next.temperature_k(CellId(2)).unwrap(), 600.0);
+    close(next.temperature_k(CellId(1)).unwrap(), exact[0], 0.05);
+    close(next.cells()[&CellId(1)].mass_kg, exact[1], 2e-6);
+    close(
+        0.02 * next.cells()[&CellId(2)].specific_h_j_kg,
+        exact[2],
+        0.2,
+    );
+    check_account(&state, &next, &report.physical.pyrolysis);
+}
+
+#[test]
 fn heat_only_caloric_refusal_and_cancellation_leave_reactive_history_unchanged() {
     let sink = HeatSink {
         basis: ThermalStorageBasis::Enthalpy,

@@ -240,6 +240,7 @@ impl<'a> RecedingSlab<'a> {
         let n = solid.thermal.cells.len();
         if !(1..=MAX_RECEDING_SLAB_CELLS).contains(&n)
             || solid.inventories.len() != n
+            || solid.conduction.is_some()
             || !positive(geometry.area_m2)
             || !positive(geometry.density_kg_m3)
             || !positive(geometry.conductivity_w_m_k)
@@ -860,21 +861,61 @@ fn component_conductivity(
     let Some(char) = char else {
         return Ok(geometry.conductivity_w_m_k);
     };
-    let volume = component_volume(inventory, geometry, Some(char))?;
     let virgin_volume = inventory.virgin_mass_kg / geometry.density_kg_m3;
     let char_volume = inventory.char_mass_kg / char.density_kg_m3;
-    let conductivity = finite(match char.conductivity_mixing {
-        ConductivityMixing::Parallel => {
-            (virgin_volume * geometry.conductivity_w_m_k + char_volume * char.conductivity_w_m_k)
-                / volume
-        }
+    mixed_conductivity(
+        [virgin_volume, char_volume],
+        [geometry.conductivity_w_m_k, char.conductivity_w_m_k],
+        char.conductivity_mixing,
+    )
+}
+
+// Shared declared component arrangement. Zero conductivity is physical
+// insulation; an absent component contributes neither volume nor resistance.
+pub(super) fn mixed_conductivity(
+    volumes: [f64; 2],
+    conductivities: [f64; 2],
+    mixing: ConductivityMixing,
+) -> Result<f64, DepositionError> {
+    if !volumes.into_iter().all(super::nonnegative)
+        || !conductivities.into_iter().all(super::nonnegative)
+    {
+        return Err(DepositionError::MaterialDomain);
+    }
+    let [virgin_volume, char_volume] = volumes;
+    let [virgin_k, char_k] = conductivities;
+    let volume = finite(virgin_volume + char_volume)?;
+    if !positive(volume) {
+        return Err(DepositionError::Arithmetic);
+    }
+    let conductivity = finite(match mixing {
+        ConductivityMixing::Parallel => (virgin_volume * virgin_k + char_volume * char_k) / volume,
         ConductivityMixing::Series => {
+            if volumes
+                .into_iter()
+                .zip(conductivities)
+                .any(|(v, k)| v > 0.0 && k == 0.0)
+            {
+                return Ok(0.0);
+            }
             volume
-                / (virgin_volume / geometry.conductivity_w_m_k
-                    + char_volume / char.conductivity_w_m_k)
+                / (if virgin_volume == 0.0 {
+                    0.0
+                } else {
+                    virgin_volume / virgin_k
+                } + if char_volume == 0.0 {
+                    0.0
+                } else {
+                    char_volume / char_k
+                })
         }
     })?;
-    if !positive(conductivity) {
+    if conductivity == 0.0
+        && volumes
+            .into_iter()
+            .zip(conductivities)
+            .any(|(v, k)| v > 0.0 && k > 0.0)
+    {
         return Err(DepositionError::Arithmetic);
     }
     Ok(conductivity)

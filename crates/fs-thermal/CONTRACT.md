@@ -1455,6 +1455,36 @@ failures and cancellation preserve both original histories. The homogeneous
 receding-slab owner refuses graphs containing heat-only bodies before indexing
 reactive inventory; moving mixed-material geometry is not inferred.
 
+`with_conductivity` binds selected original links to their existing
+`ConductiveLink` half-distances/contact resistance and `ConductivityLaw`
+sources. Heat-only bodies query their original stored-energy coordinate,
+including k(h) variation while temperature is on a latent plateau. Reactive
+cells query each present constituent's ORIGINAL h(T) at the common solved
+temperature, then apply the explicitly selected Series or Parallel arrangement
+using actual virgin/char volumes and caller-sourced constant constituent
+densities. Absent components make no conductivity query; a present zero-k
+component insulates a series arrangement. The slab and fixed-geometry paths
+share the same mixing arithmetic.
+
+Conductivities resolve once per participating cell at each explicit substep or
+implicit candidate. Original series/contact arithmetic supplies G, and the
+existing heat owner applies the same equal-and-opposite pair transfer. Newton
+uses the existing one-cell reactive probes for both temperature and conductivity
+response, including the dG/d(absorbed-energy) contribution to the paired flux.
+It does not rerun a complete graph/reaction solve for every Jacobian column.
+The original no-attachment constant-conductance path is retained. Adaptive
+implicit time control automatically includes the attached nonlinear transport.
+
+This attachment owns fixed reference face metrics only. Constituent volume
+fractions do not infer pore-gas transport, porosity, swelling or recession from
+lost volatile mass; an effective porous-char conductivity must be admitted by
+its original source. Bound links reject manual coefficient overwrites, and
+moving-slab adoption refuses the fixed attachment. Original source domains,
+heat/mass accounts, cancellation and refusal remain authoritative. Focused
+G1 tests cover independently solved nonlinear and char-insulating endpoints,
+continuous char-mixture and latent-buffer trajectories, explicit/implicit
+refinement, absent-source/zero-k behavior and transactional workspace reuse.
+
 One first-order non-oxidative reaction converts virgin material into an explicit
 char mass yield and outgoing volatiles. Its accepted endpoint temperature
 determines the backward-Euler inventory, retained char and outgoing enthalpy:
