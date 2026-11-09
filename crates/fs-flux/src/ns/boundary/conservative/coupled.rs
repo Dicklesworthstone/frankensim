@@ -22,6 +22,10 @@ pub mod rheology;
 #[path = "coupled/windkessel.rs"]
 pub mod windkessel;
 
+#[path = "coupled/transport.rs"]
+mod transport;
+pub use transport::{CoupledDensityMomentumControls, CoupledDensityTransportReport};
+
 enum CoupledViscosity<'a, const N: usize> {
     Spatial(&'a dyn Fn(usize, [f64; 2], &DensityTransportCell<N>) -> f64),
     Rheology(&'a rheology::CellRheology<'a, N>),
@@ -32,6 +36,10 @@ pub struct CoupledDensityMomentumStep<const N: usize> {
     /// Physical inventories, pressure, boundary reactions and native velocity.
     /// Both reported flow residuals belong to the reassembled coupled endpoint.
     pub step: DensityMomentumStep<N>,
+    /// Original transport and density work of the ACCEPTED endpoint assembly.
+    /// Rejected Picard trials are not extra physical time; their repeated work
+    /// is bounded separately by the nonlinear and per-assembly density budgets.
+    pub density_work: CoupledDensityTransportReport<N>,
     /// Completed native Picard momentum solves.
     pub iterations: usize,
     /// Last velocity correction BEFORE under-relaxation.
@@ -70,13 +78,18 @@ impl<'m> FluxSystem<'m> {
     /// all come from that last endpoint assembly, not the preceding trial.
     /// All input callbacks must be pure throughout the solve.
     ///
-    /// This is first-order endpoint-ADVECTOR coupling: donor densities/specifics
-    /// still originate in the old state and use this FluxSystem's configured
-    /// spatial reconstruction.
-    /// It is not a fully implicit density update. Positivity retains the original
-    /// outgoing-volume CFL cap, enforced at EVERY trial, and the stated local
-    /// divergence tolerance. The caller reduces the timestep after a refusal;
-    /// no advector projection, flux clipping or unreported substep occurs.
+    /// This is first-order endpoint-ADVECTOR coupling. Passing the original
+    /// DensityMomentumControls retains one Euler density step and its macro CFL
+    /// refusal. Passing DensityMomentumSubcycleControls or
+    /// DensityMomentumSspRk2Controls selects their original bounded dyadic density
+    /// work instead. Each trial starts from the old inventories, holds its own
+    /// endpoint advector fixed through the selected stages, and uses their actual
+    /// accumulated mass flux in the macro momentum equation. All stages retain
+    /// this system's spatial reconstruction, positivity CFL and divergence cap.
+    /// SSPRK2 is second order only for the fixed-advector density subsystem;
+    /// momentum and endpoint coupling remain BDF1. Dyadic work can change between
+    /// trials, and a count transition can still exhaust nonlinear convergence.
+    /// No advector projection, flux clipping or forced acceptance occurs.
     ///
     /// The previous velocity is the initial guess. Its divergence must already
     /// meet transport admission, while endpoint boundary values may change.
@@ -104,7 +117,7 @@ impl<'m> FluxSystem<'m> {
         cells: &[DensityTransportCell<N>],
         inflow: &[Option<DensityTransportCell<N>>],
         timestep_s: f64,
-        controls: DensityMomentumControls,
+        controls: impl Into<CoupledDensityMomentumControls>,
         nonlinear: StokesRheologyControls,
         cancelled: impl FnMut() -> bool,
     ) -> Result<CoupledDensityMomentumStep<N>> {
@@ -117,7 +130,7 @@ impl<'m> FluxSystem<'m> {
             cells,
             inflow,
             timestep_s,
-            controls,
+            controls.into(),
             nonlinear,
             None,
             cancelled,
@@ -167,10 +180,11 @@ impl<'m> FluxSystem<'m> {
         cells: &[DensityTransportCell<N>],
         inflow: &[Option<DensityTransportCell<N>>],
         timestep_s: f64,
-        controls: DensityMomentumControls,
+        controls: impl Into<CoupledDensityMomentumControls>,
         nonlinear: StokesRheologyControls,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CoupledDensityMomentumFlowControlStep<N>> {
+        let controls = controls.into();
         let solved = self.coupled_density_momentum_bdf1(
             numerics,
             dynamic_viscosity,
@@ -189,7 +203,7 @@ impl<'m> FluxSystem<'m> {
             )),
             &mut cancelled,
         )?;
-        physical_flow_control(solved, controls, &mut cancelled)
+        physical_flow_control(solved, controls.momentum(), &mut cancelled)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -203,7 +217,7 @@ impl<'m> FluxSystem<'m> {
         cells: &[DensityTransportCell<N>],
         inflow: &[Option<DensityTransportCell<N>>],
         timestep_s: f64,
-        controls: DensityMomentumControls,
+        controls: CoupledDensityMomentumControls,
         nonlinear: StokesRheologyControls,
         flow_control: Option<FlowControl<'_>>,
         cancelled: impl FnMut() -> bool,
@@ -236,7 +250,7 @@ impl<'m> FluxSystem<'m> {
         cells: &[DensityTransportCell<N>],
         inflow: &[Option<DensityTransportCell<N>>],
         timestep_s: f64,
-        controls: DensityMomentumControls,
+        controls: CoupledDensityMomentumControls,
         nonlinear: StokesRheologyControls,
         flow_control: Option<FlowControl<'_>>,
         mut cancelled: impl FnMut() -> bool,
@@ -262,7 +276,7 @@ impl<'m> FluxSystem<'m> {
         let retained = RefCell::new(None);
         let response = RefCell::new(match dynamic_viscosity {
             CoupledViscosity::Spatial(_) => Vec::new(),
-            CoupledViscosity::Rheology(_) => rheology::response_buffer(self, controls)?,
+            CoupledViscosity::Rheology(_) => rheology::response_buffer(self, controls.momentum())?,
         });
         let assemble = |velocity: &[f64]| {
             let candidate = (|| -> Result<_> {
@@ -270,7 +284,7 @@ impl<'m> FluxSystem<'m> {
                 // An old candidate owns no accepted state. Drop it before the
                 // replacement's transport allocation, even when this trial fails.
                 drop(retained.borrow_mut().take());
-                let mut prepared = self.prepare_density_momentum_bdf1(
+                let (mut prepared, density_work) = self.prepare_coupled_density_momentum(
                     numerics,
                     force_density,
                     boundaries,
@@ -304,7 +318,7 @@ impl<'m> FluxSystem<'m> {
                     weights,
                 )?;
                 poll(&mut *cancelled.borrow_mut())?;
-                *retained.borrow_mut() = Some(prepared);
+                *retained.borrow_mut() = Some((prepared, density_work));
                 Ok(momentum)
             })();
             candidate.map_err(|error| {
@@ -324,7 +338,7 @@ impl<'m> FluxSystem<'m> {
             return Err(error);
         }
         let solved = solved?;
-        let prepared = retained
+        let (prepared, density_work) = retained
             .into_inner()
             .ok_or_else(|| invalid("accepted coupled endpoint transport required"))?;
         let step = observe_step(
@@ -335,7 +349,7 @@ impl<'m> FluxSystem<'m> {
             cells,
             previous_velocity,
             &prepared.conservative.faces,
-            controls,
+            controls.momentum(),
             &mut *cancelled.borrow_mut(),
         )?;
         poll(&mut *cancelled.borrow_mut())?;
@@ -343,6 +357,7 @@ impl<'m> FluxSystem<'m> {
             StokesFlowControlSolution {
                 flow: CoupledDensityMomentumStep {
                     step,
+                    density_work,
                     iterations: solved.flow.iterations,
                     relative_update: solved.flow.relative_update,
                     nonlinear_residual: solved.flow.nonlinear_residual,

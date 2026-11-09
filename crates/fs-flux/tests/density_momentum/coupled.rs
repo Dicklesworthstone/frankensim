@@ -3,6 +3,9 @@
 use super::*;
 use fs_flux::ns::boundary::StokesRheologyControls;
 
+#[path = "coupled/transport.rs"]
+mod transport;
+
 #[path = "coupled/rheology.rs"]
 mod rheology;
 

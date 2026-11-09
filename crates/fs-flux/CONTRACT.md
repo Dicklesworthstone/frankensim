@@ -11187,3 +11187,46 @@ friction and dissipation equations, binary normalization, component permutation,
 all-species conservation through the supported species limit, scoped nonconvex
 admission, workspace limits and transactional refusal. These numerical oracles
 do not constitute experimental calibration or a G2 physical benchmark.
+
+
+## Bounded density stages inside the coupled momentum endpoint
+
+All six coupled density/momentum, molecular-rheology, integral-flow and RCR
+entries accept `Into<CoupledDensityMomentumControls>`. Existing ordinary
+`DensityMomentumControls` retain strict single-Euler-step behavior and macro-CFL
+refusal. Passing the existing `DensityMomentumSubcycleControls` or
+`DensityMomentumSspRk2Controls` explicitly selects their bounded dyadic density
+work; no additional public solver-entry family is introduced.
+
+Every Picard trial starts again from the SAME immutable old density, inventories
+and momentum history. Its candidate endpoint velocity is held fixed only within
+that trial's density stages. Native Euler subcycling or SSPRK2 retains the actual
+accumulated/RK-weighted donor and face mass flux. That original flux and the
+macro old/new density metrics enter the same native macro momentum assembly;
+flux is never reconstructed from final density. The accepted `density_work`
+variant retains its original native count, duration, CFL and complete transport
+report, identical to the physical inventory report in `step`.
+
+These work counts describe the accepted transport assembly, not discarded
+nonlinear trials. Each assembly enforces the original substep and per-owner
+storage allowances; the existing finite nonlinear budget bounds repeated trial
+work. A changing dyadic count can still exhaust Picard convergence. Original
+unrelaxed-correction and reassembled endpoint-residual checks remain decisive;
+failure or cancellation returns no partial fluid or hydraulic history.
+
+Momentum, endpoint-advector coupling and external RCR histories remain macro
+BDF1. SSPRK2 has second-order integration only for the fixed-advector density
+subsystem. Rejected iterations and density stages do not advance extra physical
+time or repeatedly debit inventories. Molecular heat, native numerical kinetic
+losses, external resistor losses and RCR BDF defects remain separate.
+
+Four new native integration regressions cover macro CFL above one under
+donor-cell, bounded-linear density and bounded-linear inventory reconstruction;
+exact independent replay of accepted native transport; nonuniform-density,
+nonzero-shear macro kinetic-work closure; pressure/rheology propagation; and
+original macro RCR storage equations with atomic density-work refusal. All
+34 focused tests pass: these four, 14 existing coupled/rheology/flow/RCR tests,
+10 original frozen Euler-subcycle/SSPRK2 consumers and six original single-step
+density/momentum consumers. The run uses the original native dense assembly,
+transport, Picard, pressure/RCR and LU/GEMM owners. It is not full-workspace or
+sparse-route validation and makes no performance benchmark claim.

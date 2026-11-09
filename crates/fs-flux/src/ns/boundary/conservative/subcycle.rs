@@ -9,8 +9,9 @@
 
 use super::{
     DensityMomentumAssembly, DensityMomentumControls, DensityMomentumStep, DensityTransportCell,
-    FluxParams, FluxSystem, MaterialFluxNumerics, MaterialNavierStokesBoundary, Result,
-    StokesAssembly, admit_transport_buffers, allocate, invalid, poll, positive,
+    FluxParams, FluxSystem, MaterialFluxNumerics, MaterialNavierStokesBoundary,
+    PreparedDensityMomentum, Result, StokesAssembly, admit_transport_buffers, allocate, invalid,
+    poll, positive,
 };
 use crate::ns::transport::density::subcycle::{DensitySubcycleControls, DensitySubcycleReport};
 
@@ -105,6 +106,46 @@ impl<'m> FluxSystem<'m> {
         controls: DensityMomentumSubcycleControls,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DensityMomentumSubcycleAssembly<'a, 'm, N>> {
+        let (mut prepared, subcycles) = self.prepare_density_momentum_subcycled_bdf1(
+            numerics,
+            force_density,
+            boundaries,
+            advector,
+            previous_velocity,
+            cells,
+            inflow,
+            timestep_s,
+            controls,
+            &mut cancelled,
+        )?;
+        let weights = core::mem::take(&mut prepared.current_weights);
+        let momentum = prepared.assemble(
+            &|cell, point| dynamic_viscosity(cell, point, &prepared.cells[cell]),
+            weights,
+        )?;
+        poll(&mut cancelled)?;
+        Ok(DensityMomentumSubcycleAssembly {
+            momentum: prepared.into_assembly(momentum),
+            subcycles,
+        })
+    }
+
+    // Both frozen-advector and endpoint Picard callers retain the original
+    // substeps' accumulated mass flux, never reconstruct it from final density.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_density_momentum_subcycled_bdf1<'a, const N: usize>(
+        &'a self,
+        numerics: MaterialFluxNumerics,
+        force_density: &dyn Fn(usize, [f64; 2], &DensityTransportCell<N>) -> [f64; 2],
+        boundaries: &[MaterialNavierStokesBoundary<'_>],
+        advector: &[f64],
+        previous_velocity: &'a [f64],
+        cells: &'a [DensityTransportCell<N>],
+        inflow: &[Option<DensityTransportCell<N>>],
+        timestep_s: f64,
+        controls: DensityMomentumSubcycleControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(PreparedDensityMomentum<'a, 'm, N>, DensitySubcycleReport<N>)> {
         poll(&mut cancelled)?;
         let maximum_substeps = controls.maximum_substeps;
         let controls = controls.momentum;
@@ -153,9 +194,8 @@ impl<'m> FluxSystem<'m> {
             work.prepare_mass_flux(controls.maximum_transport_storage_bytes, &mut cancelled)?;
         drop(work);
         drop(plan);
-        let momentum = self.assemble_transported_density_momentum_bdf1(
+        let prepared = self.prepare_transported_density_momentum_bdf1(
             params,
-            dynamic_viscosity,
             force_density,
             boundaries,
             previous_velocity,
@@ -167,10 +207,7 @@ impl<'m> FluxSystem<'m> {
             controls,
             &mut cancelled,
         )?;
-        Ok(DensityMomentumSubcycleAssembly {
-            momentum,
-            subcycles,
-        })
+        Ok((prepared, subcycles))
     }
 
     /// Prepare and solve [`Self::assemble_density_momentum_subcycled_bdf1`]

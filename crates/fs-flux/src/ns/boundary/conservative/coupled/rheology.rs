@@ -4,7 +4,7 @@ use super::super::{
     DensityMomentumControls, DensityMomentumError, DensityTransportCell, FluxSystem,
     MaterialFluxNumerics, MaterialNavierStokesBoundary, Result, Sums, allocate, invalid, poll,
 };
-use super::{CoupledDensityMomentumStep, CoupledViscosity};
+use super::{CoupledDensityMomentumControls, CoupledDensityMomentumStep, CoupledViscosity};
 use crate::ns::boundary::{StokesBoundaryError, StokesRheologyControls};
 use crate::ns::transport::density::DensityTransportError;
 use fs_material::MaterialError;
@@ -76,10 +76,11 @@ impl FluxSystem<'_> {
         cells: &[DensityTransportCell<N>],
         inflow: &[Option<DensityTransportCell<N>>],
         timestep_s: f64,
-        controls: DensityMomentumControls,
+        controls: impl Into<CoupledDensityMomentumControls>,
         nonlinear: StokesRheologyControls,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CoupledDensityMomentumRheologyStep<N>> {
+        let controls = controls.into();
         let (solved, response) = self.coupled_density_momentum_bdf1_viscosity(
             numerics,
             CoupledViscosity::Rheology(dynamic_viscosity),
@@ -94,7 +95,7 @@ impl FluxSystem<'_> {
             None,
             &mut cancelled,
         )?;
-        self.finish_coupled_rheology(solved.flow, response, controls, &mut cancelled)
+        self.finish_coupled_rheology(solved.flow, response, controls.momentum(), &mut cancelled)
     }
 
     pub(super) fn finish_coupled_rheology<const N: usize>(

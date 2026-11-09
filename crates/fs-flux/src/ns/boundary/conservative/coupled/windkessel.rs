@@ -2,9 +2,9 @@
 
 use super::rheology::CoupledDensityMomentumRheologyCell;
 use super::{
-    CoupledDensityMomentumStep, CoupledViscosity, DensityMomentumControls, DensityTransportCell,
-    FluxSystem, MaterialFluxNumerics, MaterialNavierStokesBoundary, StokesRheologyControls,
-    invalid, poll,
+    CoupledDensityMomentumControls, CoupledDensityMomentumStep, CoupledViscosity,
+    DensityTransportCell, FluxSystem, MaterialFluxNumerics, MaterialNavierStokesBoundary,
+    StokesRheologyControls, invalid, poll,
 };
 use crate::material::mixed::{physical_windkessel, with_kinematic_windkessel};
 use crate::material::{
@@ -103,7 +103,7 @@ impl FluxSystem<'_> {
         cells: &[DensityTransportCell<N>],
         inflow: &[Option<DensityTransportCell<N>>],
         timestep_s: f64,
-        controls: DensityMomentumControls,
+        controls: impl Into<CoupledDensityMomentumControls>,
         nonlinear: StokesRheologyControls,
         absolute_pressure_tolerance_pa: f64,
         absolute_flow_tolerance_m2_s: f64,
@@ -120,7 +120,7 @@ impl FluxSystem<'_> {
             cells,
             inflow,
             timestep_s,
-            controls,
+            controls.into(),
             nonlinear,
             absolute_pressure_tolerance_pa,
             absolute_flow_tolerance_m2_s,
@@ -146,7 +146,7 @@ impl FluxSystem<'_> {
         cells: &[DensityTransportCell<N>],
         inflow: &[Option<DensityTransportCell<N>>],
         timestep_s: f64,
-        controls: DensityMomentumControls,
+        controls: CoupledDensityMomentumControls,
         nonlinear: StokesRheologyControls,
         absolute_pressure_tolerance_pa: f64,
         absolute_flow_tolerance_m2_s: f64,
@@ -158,7 +158,7 @@ impl FluxSystem<'_> {
         mut cancelled: C,
     ) -> Result<MaterialStokesWindkesselSolution<S>> {
         poll(&mut cancelled)?;
-        let reference = controls.reference_density_kg_m3;
+        let reference = controls.momentum().reference_density_kg_m3;
         // The nested result preserves both original error owners without
         // replacing transport/cancellation failures by a normalization error.
         let native = with_kinematic_windkessel(
@@ -208,7 +208,7 @@ impl FluxSystem<'_> {
                     // metric. Recover native per-depth units from the accepted
                     // heterogeneous-density observation, not kinetic_energy(u).
                     let physical_energy = solved.flow.step.observations.kinetic_energy_after_j;
-                    let energy_per_depth = physical_energy / controls.depth_m;
+                    let energy_per_depth = physical_energy / controls.momentum().depth_m;
                     let native_energy = energy_per_depth / reference;
                     if !energy_per_depth.is_finite()
                         || !native_energy.is_finite()

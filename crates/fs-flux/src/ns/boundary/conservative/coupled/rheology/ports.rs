@@ -2,7 +2,7 @@
 
 use super::super::windkessel::DensityMomentumWindkesselError;
 use super::super::{
-    CoupledViscosity, DensityMomentumControls, DensityTransportCell, FluxSystem,
+    CoupledDensityMomentumControls, CoupledViscosity, DensityTransportCell, FluxSystem,
     MaterialFluxNumerics, MaterialNavierStokesBoundary, Result, StokesRheologyControls,
     physical_flow_control,
 };
@@ -50,10 +50,11 @@ impl FluxSystem<'_> {
         cells: &[DensityTransportCell<N>],
         inflow: &[Option<DensityTransportCell<N>>],
         timestep_s: f64,
-        controls: DensityMomentumControls,
+        controls: impl Into<CoupledDensityMomentumControls>,
         nonlinear: StokesRheologyControls,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CoupledDensityMomentumRheologyFlowControlStep<N>> {
+        let controls = controls.into();
         let (solved, response) = self.coupled_density_momentum_bdf1_viscosity(
             numerics,
             CoupledViscosity::Rheology(dynamic_viscosity),
@@ -72,12 +73,12 @@ impl FluxSystem<'_> {
             )),
             &mut cancelled,
         )?;
-        let physical = physical_flow_control(solved, controls, &mut cancelled)?;
+        let physical = physical_flow_control(solved, controls.momentum(), &mut cancelled)?;
         Ok(CoupledDensityMomentumRheologyFlowControlStep {
             step: self.finish_coupled_rheology(
                 physical.step,
                 response,
-                controls,
+                controls.momentum(),
                 &mut cancelled,
             )?,
             pressure_offsets_pa: physical.pressure_offsets_pa,
@@ -113,7 +114,7 @@ impl FluxSystem<'_> {
         cells: &[DensityTransportCell<N>],
         inflow: &[Option<DensityTransportCell<N>>],
         timestep_s: f64,
-        controls: DensityMomentumControls,
+        controls: impl Into<CoupledDensityMomentumControls>,
         nonlinear: StokesRheologyControls,
         absolute_pressure_tolerance_pa: f64,
         absolute_flow_tolerance_m2_s: f64,
@@ -122,6 +123,7 @@ impl FluxSystem<'_> {
         MaterialStokesWindkesselSolution<CoupledDensityMomentumRheologyStep<N>>,
         DensityMomentumWindkesselError,
     > {
+        let controls = controls.into();
         self.coupled_density_momentum_bdf1_windkessel_viscosity(
             numerics,
             CoupledViscosity::Rheology(dynamic_viscosity),
@@ -138,7 +140,7 @@ impl FluxSystem<'_> {
             absolute_pressure_tolerance_pa,
             absolute_flow_tolerance_m2_s,
             |step, response, cancelled| {
-                self.finish_coupled_rheology(step, response, controls, cancelled)
+                self.finish_coupled_rheology(step, response, controls.momentum(), cancelled)
             },
             cancelled,
         )

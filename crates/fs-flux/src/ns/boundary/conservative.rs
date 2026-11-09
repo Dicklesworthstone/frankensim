@@ -468,46 +468,8 @@ impl<'m> FluxSystem<'m> {
         )
     }
 
-    // The single-step and density-subcycled paths share this exact original
-    // momentum owner. No density stage may rebuild or solve it independently.
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-    fn assemble_transported_density_momentum_bdf1<'a, const N: usize>(
-        &'a self,
-        params: FluxParams,
-        dynamic_viscosity: &dyn Fn(usize, [f64; 2], &DensityTransportCell<N>) -> f64,
-        force_density: &dyn Fn(usize, [f64; 2], &DensityTransportCell<N>) -> [f64; 2],
-        boundaries: &[MaterialNavierStokesBoundary<'_>],
-        previous_velocity: &'a [f64],
-        cells: &'a [DensityTransportCell<N>],
-        next: Vec<DensityTransportCell<N>>,
-        transport: DensityTransportReport<N>,
-        mass_flux: PreparedDensityMassFlux<'m>,
-        inv_dt: f64,
-        controls: DensityMomentumControls,
-        mut cancelled: impl FnMut() -> bool,
-    ) -> Result<DensityMomentumAssembly<'a, 'm, N>> {
-        let mut prepared = self.prepare_transported_density_momentum_bdf1(
-            params,
-            force_density,
-            boundaries,
-            previous_velocity,
-            cells,
-            next,
-            transport,
-            mass_flux,
-            inv_dt,
-            controls,
-            &mut cancelled,
-        )?;
-        let weights = core::mem::take(&mut prepared.current_weights);
-        let momentum = prepared.assemble(
-            &|cell, point| dynamic_viscosity(cell, point, &prepared.cells[cell]),
-            weights,
-        )?;
-        poll(&mut cancelled)?;
-        Ok(prepared.into_assembly(momentum))
-    }
-
+    // Every density integrator retains this same macro momentum owner and its
+    // actual accumulated mass flux. No density stage assembles or solves it.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn prepare_transported_density_momentum_bdf1<'a, const N: usize>(
         &'a self,
