@@ -28,6 +28,10 @@ pub mod recycling;
 #[path = "luminescence_transfer/annihilation.rs"]
 pub mod annihilation;
 
+/// Finite emitter inventory, ground-state depletion and pump saturation.
+#[path = "luminescence_transfer/saturation.rs"]
+pub mod saturation;
+
 /// Physical admission or a refusal from the existing positive evolution owner.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SingletTripletError {
