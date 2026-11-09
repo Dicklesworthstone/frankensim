@@ -9936,3 +9936,32 @@ entropy integral with second-order refinement, extreme frozen formation-gauge
 invariance, separate transported and moving-wall work, and final-poll rollback.
 This algebraic source does not solve piston inertia, infer wall geometry or
 claim experimental validation or a complete workspace gate.
+
+
+## Prepared chemical pressure feedback in compact mixture volumes
+
+`multicomponent::network::Plenum::react_candidate_into` advances a stationary
+finite inventory through the existing prepared `reactive::CellChemistry`.
+The original mechanism, fixed-U,V solve, elemental/charge admission, caloric
+reconstruction and formation-energy convention remain authoritative. Chemical
+conversion changes the stored sensible-energy gauge by the opposite species
+reference change; the adapter adds no separate heat-release source.
+
+The method preserves volume and zero momentum, writes into an already prepared
+species buffer, and returns the original `ChemistryReport` for the caller to
+publish with its candidate. All output writes follow the final cancellation
+poll. Successful warm calls reuse the existing reactor and output storage.
+Diagnostic cell indices are supplied by the composing owner without affecting
+physics. Shape, original source-domain, precision, work and cancellation
+refusals leave the output unchanged.
+
+Three actual-source native groups passed: independent reversible decay under
+backward Euler and SDIRK2, exothermic temperature/pressure and chemical-energy
+closure under positive/negative formation shifts, retained absent species and
+prepared storage, last-poll rollback/deterministic retry, malformed output and
+the original extreme-reference precision refusal. The bounded build executes
+the original prepared reactor, nonlinear stages, cell conversion/caloric
+reconstruction, and original fs-la decay/reaction dependency. Unrelated
+network orchestration, molecular/piston wrappers and finite thermal-partner
+wrappers are outside that source slice. No full workspace Cargo/DSR verdict,
+coupled temporal-order guarantee or combustion validation is claimed.
