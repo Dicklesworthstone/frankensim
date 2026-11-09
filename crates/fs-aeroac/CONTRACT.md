@@ -3909,3 +3909,35 @@ Sommerfeld reference values, both faces' exact boundary conditions, analytic
 velocity against independent pressure derivatives, the full Helmholtz residual,
 illuminated/shadow/transition asymptotic limits, skew incidence, material density
 scaling, observation-line parity and domain/cancellation refusals (G1/G2/G3).
+
+## Complete causal returns between opposing ideal walls
+
+`curle3d::slab::PreparedSlabSourceObserver` observes the original stationary
+volume, force and symmetric-stress histories between two infinite parallel
+rigid or pressure-release planes. Both equal and mixed boundary conditions are
+supported. The same source projections used by the molecular propagator retain
+full near/far pressure, vector particle velocity, force impulse and stress
+integral; this lossless owner introduces no molecular filter or other damping.
+Image parity and vector/tensor orientation are applied to cached geometry.
+Physical source indices remain unchanged and each image queries its own
+retarded time on the original double-double clock.
+
+An explicit initially-resting epoch and finite duration T make the infinite
+image series finite without a bounce-order approximation. For slab width L,
+the retained periods satisfy N > cT/(2L), including a rounding guard. Omitted
+images have path length at least 2NL and therefore cannot arrive during the
+declared window. Insufficient path budgets refuse the complete preparation;
+later receiver times refuse rather than returning a truncated reverberant
+field. Queries check compatible zero-onset data, observe no source before its
+wavefront, and sum coherent fields before forming instantaneous p*u. Preparation
+is O(paths) with bounded cancellation polls; evaluation allocates nothing and
+uses cached coefficients with O(paths) work and no transcendental evaluation.
+
+`tests/transient_slab_reflection.rs` contains G1/G3/G4 checks against an
+independent, larger physical-source image sum, first and repeated echoes,
+both ideal wall conditions for full force/stress orientation, rotated frames,
+large epochs, window extension, coherent cancellation, and preparation/query
+refusals. These are numerical checks of prescribed compact sources in a
+stationary homogeneous lossless slab. Finite wall impedance, finite edges,
+arbitrary rooms, moving sources/walls, radiation reaction, source bandwidth
+qualification and measured-SPL validation are not supplied.

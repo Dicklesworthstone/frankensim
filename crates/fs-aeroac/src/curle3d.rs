@@ -26,6 +26,8 @@ pub mod power;
 pub mod quadrupole;
 /// Causal molecular propagation of complete volume, force and stress fields.
 pub use quadrupole::transient::molecular::sources as molecular;
+/// Causal repeated reflection of complete stationary sources between ideal walls.
+pub use quadrupole::transient::molecular::sources::slab;
 /// Geometrical transmission of stationary monopoles across a two-fluid plane.
 pub mod refraction;
 mod statistics;

@@ -31,6 +31,8 @@ pub use crate::curle3d::quadrupole::recorded::QuadrupoleSampleClock as Molecular
 
 /// Original accepted samples with explicit finite C2 history reconstruction.
 pub mod history;
+/// Complete causal returns between two opposing ideal acoustic planes.
+pub mod slab;
 
 const SCOPE: &str = "Initially resting prescribed stationary compact 3D volume, force and \
 stress sources in one homogeneous molecularly relaxing gas. Complete coherent pressure \
