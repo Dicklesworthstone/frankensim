@@ -490,6 +490,32 @@ reversal, complete cyclic branches and late atomic refusals. Its Archard fixture
 uses each local hardness and shows why averaging H changes removal; it does not
 qualify measured material behavior or solve reciprocal bulk/contact loading.
 
+## Original thermal hardness at native Hex8 points
+
+`ThermalHexProblem::bind_hardness_field` pins the original mesh, formulation,
+source-family order and one exact indentation test per cell.
+`ThermalHexHardnessBinding::at_accepted` observes every actual caloric point
+temperature, accepted assumed strain and complete native J2/Voce/Chaboche
+history. The existing thermal family admits the complete state, and the
+original hardness source evaluates its supported H(T, alpha) without another
+constitutive solve. Source resolution retains the original mechanical,
+caloric and hardness selections. The typed field preserves receipts and native
+element/Gauss order; all points must succeed before publication.
+
+Observation changes no native history, stress, heat or energy account. It
+neither averages point temperatures nor substitutes a yield/hardness
+correlation. The full typed endpoints allocate source receipts. Unsupported
+temperature/history ranges, inconsistent stored temperatures, changed owners,
+budgets and cancellation refuse atomically. The binding covers accepted
+endpoints, not intermediate trajectories, annealing or unimplemented material
+families.
+
+`tests/plastic_hex_thermal_hardness.rs` exercises independent point temperatures
+and plastic histories under loading, heating/cooling and reversal, Standard/B-bar
+formulations, complete Chaboche branches, exact test selection, unchanged native
+energy and late-point refusals. These synthetic fixtures verify implementation
+and source use; they do not establish measured thermal-hardness accuracy.
+
 ## Owned finite-strain membrane reference continuation
 
 `OwnedFiniteViscoMembraneMotion::change_reference` delegates to the original

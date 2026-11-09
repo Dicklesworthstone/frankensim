@@ -25,6 +25,9 @@ use fs_material::plastic::section::thermal::source::{
     ThermalSectionIncrement, ThermalSectionSourceError, ThermalSectionSourceFamily,
 };
 
+/// Original indentation hardness at accepted thermal integration points.
+pub mod hardness;
+
 type History<'a, F> = <<F as ThermalSectionSourceFamily<'a>>::Material as SmallStrainLaw>::State;
 
 /// One immutable family per original cell; temperatures vary independently at
