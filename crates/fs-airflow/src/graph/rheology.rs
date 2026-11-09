@@ -6,8 +6,10 @@
 //! viscosity, secant conductance or regularizing resistance is substituted.
 //! The existing checked matrix-free CG owns each linear solve.
 //!
-//! All branches carry one frozen-temperature rheological fluid at fixed density.
-//! Pressure is a gauge relative to one common reference; orientation is only
+//! All branches carry one original rheological fluid at fixed density, with a
+//! prescribed uniform temperature within each pipe. Different branches may have
+//! different held temperatures; no junction heat mixing or thermal evolution is
+//! inferred. Pressure is a gauge relative to one common reference; orientation is only
 //! bookkeeping. These are nominal, fully developed, no-slip laminar estimates.
 //! Source rate ceilings, constitutive inversion and quadrature controls remain
 //! the original pipe's authority. No inertia, gravity, entrance, turbulence,
@@ -225,8 +227,9 @@ pub struct CarreauPipeGraph {
 }
 
 impl CarreauPipeGraph {
-    /// Retain a single original frozen-temperature rheological fluid. Geometry
-    /// and declared laminar rate ceilings can differ between its pipes.
+    /// Retain a single original rheological fluid at fixed density. Geometry,
+    /// prescribed temperatures and laminar rate ceilings can differ by pipe.
+    /// Each pipe remains axially developed and isothermal within its section.
     pub fn new(
         node_count: usize,
         branches: Vec<CarreauPipeBranch>,
@@ -248,13 +251,8 @@ impl CarreauPipeGraph {
             if branch.name.trim().is_empty() || !names.insert(branch.name.clone()) {
                 return Err(invalid("branch names must be nonblank and unique").into());
             }
-            if branch.pipe.law() != reference.law()
-                || branch.pipe.temperature_k() != reference.temperature_k()
-            {
-                return Err(invalid(
-                    "Carreau graph requires one original law and frozen temperature",
-                )
-                .into());
+            if branch.pipe.law() != reference.law() {
+                return Err(invalid("Carreau graph requires one original rheological law").into());
             }
             adjacency[branch.from].push(index);
             adjacency[branch.to].push(index);
@@ -270,6 +268,39 @@ impl CarreauPipeGraph {
     }
     pub fn branches(&self) -> &[CarreauPipeBranch] {
         &self.branches
+    }
+
+    /// Re-evaluate every original pipe at its prescribed local temperature.
+    ///
+    /// Temperatures follow original branch order. Every original thermal law,
+    /// geometry and physical rate ceiling is retained; a source refusal or
+    /// cancellation returns no partially updated graph. The caller owns thermal
+    /// evolution and junction mixing. Each section remains isothermal, and the
+    /// common fixed-density approximation must remain valid across the change.
+    pub fn at_temperatures(
+        &self,
+        temperatures_k: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<Self, CarreauGraphError> {
+        checkpoint(cx)?;
+        if temperatures_k.len() != self.branches.len() {
+            return Err(GraphError::InvalidInput("one prescribed temperature per Carreau branch required").into());
+        }
+        let mut graph = self.clone();
+        for (branch, (owner, &temperature)) in graph
+            .branches
+            .iter_mut()
+            .zip(temperatures_k)
+            .enumerate()
+        {
+            checkpoint(cx)?;
+            owner.pipe = owner
+                .pipe
+                .at_temperature(temperature)
+                .map_err(|source| CarreauGraphError::Pipe { branch, source })?;
+        }
+        checkpoint(cx)?;
+        Ok(graph)
     }
 
     /// Solve continuity using the original nonlinear radial material response.

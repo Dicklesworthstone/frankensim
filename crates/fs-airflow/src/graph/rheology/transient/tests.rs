@@ -140,6 +140,15 @@ fn balance(step: &TransientCarreauStep) {
 
 #[test]
 fn g3_temperature_continuation_preserves_radial_and_storage_history() {
+    temperature_continuation([330.0, 330.0]);
+}
+
+#[test]
+fn g3_regional_temperature_continuation_preserves_radial_and_storage_history() {
+    temperature_continuation([285.0, 345.0]);
+}
+
+fn temperature_continuation(temperatures: [f64; 2]) {
     let graph = CarreauPipeGraph::new(
         3,
         vec![
@@ -180,12 +189,20 @@ fn g3_temperature_continuation_preserves_radial_and_storage_history() {
         );
     }
     let before = snapshot(&state);
-    let changed = with_cx(|cx| model.at_temperature(330.0, cx)).unwrap();
+    let changed = with_cx(|cx| {
+        if temperatures[0] == temperatures[1] {
+            model.at_temperature(temperatures[0], cx)
+        } else {
+            model.at_temperatures(&temperatures, cx)
+        }
+    })
+    .unwrap();
     assert_eq!(snapshot(&state), before);
     assert_eq!(changed.storage(), model.storage());
-    for (old, new) in model.pipes().iter().zip(changed.pipes()) {
+    for ((old, new), temperature) in model.pipes().iter().zip(changed.pipes()).zip(temperatures) {
         assert_eq!(old.pipe().temperature_k(), 300.0);
-        assert_eq!(new.pipe().temperature_k(), 330.0);
+        assert_eq!(new.pipe().temperature_k(), temperature);
+        assert_eq!(new.pipe(), &old.pipe().at_temperature(temperature).unwrap());
         assert_eq!(old.density_kg_m3(), new.density_kg_m3());
         assert_eq!(old.radial_cells(), new.radial_cells());
     }
@@ -194,9 +211,10 @@ fn g3_temperature_continuation_preserves_radial_and_storage_history() {
             .graph()
             .branches()
             .iter()
-            .all(|b| b.pipe.temperature_k() == 330.0)
+            .zip(temperatures)
+            .all(|(branch, temperature)| branch.pipe.temperature_k() == temperature)
     );
-    // A separately constructed original hot-law network receives the complete
+    // A separately constructed original local-law network receives the complete
     // measured radial history and storage state as its initial condition.
     let fresh = TransientCarreauGraph::new(
         changed.graph().clone(),
@@ -219,6 +237,8 @@ fn g3_temperature_continuation_preserves_radial_and_storage_history() {
     })
     .unwrap();
     let mut reference_work = fresh.workspace().unwrap();
+    let mut cold_state = state.clone();
+    let mut cold_work = model.workspace().unwrap();
     for pressure in [500.0, -100.0, 0.0] {
         let actual = with_cx(|cx| {
             changed.step(
@@ -251,7 +271,22 @@ fn g3_temperature_continuation_preserves_radial_and_storage_history() {
             expected.storage_energy_change_j
         );
         assert_eq!(actual.viscous_heat_j, expected.viscous_heat_j);
+        let cold = with_cx(|cx| {
+            model.step(
+                &mut cold_state,
+                &mut cold_work,
+                &[boundary(0, pressure)],
+                &[],
+                0.003,
+                controls(),
+                cx,
+            )
+        })
+        .unwrap();
+        assert_ne!(snapshot(&state), snapshot(&cold_state));
+        assert_ne!(actual.viscous_heat_j, cold.viscous_heat_j);
         balance(&actual);
+        balance(&cold);
     }
 }
 
@@ -287,6 +322,13 @@ fn g4_temperature_continuation_refuses_a_later_branch_without_clipping_its_rate(
         with_cx(|cx| model.at_temperature(290.0, cx)),
         Err(TransientCarreauError::Radial { branch: 1, .. })
     ));
+    assert!(matches!(
+        with_cx(|cx| model.at_temperatures(&[330.0, 290.0], cx)),
+        Err(TransientCarreauError::Radial { branch: 1, .. })
+    ));
+    for temperatures in [vec![], vec![330.0], vec![330.0; 3]] {
+        assert!(with_cx(|cx| model.at_temperatures(&temperatures, cx)).is_err());
+    }
     assert_eq!(snapshot(&state), before);
     assert!(
         model
@@ -410,6 +452,7 @@ fn dense_storage_step(
     old_p: [f64; 2],
     reservoir: f64,
     dt: f64,
+    viscosities: [f64; 2],
 ) -> (Vec<Vec<f64>>, [f64; 2]) {
     let cells = old_u[0].len();
     let unknowns = 2 * cells + 2;
@@ -436,7 +479,8 @@ fn dense_storage_step(
         for i in 0..cells {
             let distance = if i + 1 == cells { 0.5 * dr } else { dr };
             let stiffness =
-                0.2 * 2.0 * core::f64::consts::PI * (i + 1) as f64 * dr * length / distance;
+                viscosities[edge] * 2.0 * core::f64::consts::PI * (i + 1) as f64 * dr * length
+                    / distance;
             a[offset + i][offset + i] += 0.5 * dt * stiffness;
             b[offset + i] -= 0.5 * dt * stiffness * old_u[edge][i];
             if i + 1 < cells {
@@ -461,6 +505,15 @@ fn dense_storage_step(
 
 #[test]
 fn g1_two_storage_nodes_match_independent_coupled_radial_matrix() {
+    storage_matrix_at_temperatures([300.0, 300.0]);
+}
+
+#[test]
+fn g1_regional_temperatures_match_independent_coupled_radial_matrix() {
+    storage_matrix_at_temperatures([285.0, 345.0]);
+}
+
+fn storage_matrix_at_temperatures(temperatures: [f64; 2]) {
     let graph = CarreauPipeGraph::new(
         3,
         vec![
@@ -476,6 +529,12 @@ fn g1_two_storage_nodes_match_independent_coupled_radial_matrix() {
         vec![None, storage(2e-9), storage(3e-9)],
     )
     .unwrap();
+    let model = with_cx(|cx| model.at_temperatures(&temperatures, cx)).unwrap();
+    // Independent original Arrhenius viscosity enters every radial face of
+    // the simultaneous dense momentum/compliance equations.
+    let viscosities = temperatures.map(|temperature| {
+        0.2 * ((9000.0 / 8.314_462_618_153_24) * (1.0 / temperature - 1.0 / 300.0)).exp()
+    });
     let mut state = with_cx(|cx| {
         model.rest_state(
             &[None, Some(Pressure::new(12.0)), Some(Pressure::new(-7.0))],
@@ -487,7 +546,8 @@ fn g1_two_storage_nodes_match_independent_coupled_radial_matrix() {
     let mut old_u = vec![vec![0.0; 6]; 2];
     let mut old_p = [12.0, -7.0];
     for pressure in [200.0, 50.0, -100.0, 0.0, 150.0] {
-        let (expected_u, mid_p) = dense_storage_step(&old_u, old_p, pressure, 0.003);
+        let (expected_u, mid_p) =
+            dense_storage_step(&old_u, old_p, pressure, 0.003, viscosities);
         let report = with_cx(|cx| {
             model.step(
                 &mut state,
@@ -1056,6 +1116,12 @@ fn g4_context_cancellation_and_foreign_histories_publish_nothing() {
         );
         assert!(matches!(
             model.at_temperature(330.0, &cx),
+            Err(TransientCarreauError::Graph(CarreauGraphError::Graph(
+                GraphError::Interrupted
+            )))
+        ));
+        assert!(matches!(
+            model.at_temperatures(&[330.0; 5], &cx),
             Err(TransientCarreauError::Graph(CarreauGraphError::Graph(
                 GraphError::Interrupted
             )))

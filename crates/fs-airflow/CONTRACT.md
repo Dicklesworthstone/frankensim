@@ -280,7 +280,9 @@ power-driven coupled solid/stream balance.
 `RadialCarreauPipe` histories through ideal pressure junctions and explicitly
 authored linear hydraulic storage. Every branch retains its complete annular
 velocity field, original thermal Carreau law and rate ceiling. Density is fixed
-and temperature is held during each interval. This consumer adds coupled dynamics
+and each branch's prescribed temperature is held during each interval. The
+developed section remains isothermal; different branches may have different
+temperatures. This consumer adds coupled dynamics
 to the existing Carreau topology; it does not fit an effective resistance or
 replace the radial field with a mean-flow inertance.
 
@@ -316,7 +318,8 @@ refusal, work exhaustion, invalid storage and cancellation preserve accepted
 history and permit an identical retry.
 
 `TransientCarreauGraph::at_temperature` continues this same network at one
-prescribed uniform temperature between intervals. Every original pipe must
+prescribed uniform temperature between intervals; `at_temperatures` accepts
+one local temperature per original branch in branch order. Every original pipe must
 admit its unchanged physical rate ceiling against the shifted reference support;
 a refusal in any branch or cancellation returns no partially rebound graph.
 The original topology, density, annular masses, compliance laws and compatibility
@@ -326,9 +329,11 @@ neither radial history nor solve buffers. The actual new nonlinear viscosity
 enters each subsequent original pressure trial and physical heat calculation.
 This requires the authored fixed-density and fixed-compliance approximations
 to remain valid; temperature evolution, thermal energy and expansion need their
-own owner. G3/G4 tests exercise retained storage/radial history, both old and
-new workspace compatibility, the original hot-source trajectory, cancellation
-and atomic refusal of a later branch's reduced-rate ceiling.
+own owner. No thermal mixing or axial temperature profile is inferred.
+G1/G3/G4 tests exercise retained storage/radial history, both old and new
+workspace compatibility, original uniform and regional source trajectories,
+an independent dense radial/compliance matrix with local Arrhenius viscosities,
+cancellation and atomic refusal of a later branch's reduced-rate ceiling.
 
 Each transient connected component may instead be sealed and anchored by its
 own positive physical storage. Stored pressures remain unknowns in the original
@@ -368,10 +373,27 @@ to the shared pressure operator.
 `graph::rheology::CarreauPipeGraph` connects original `LaminarCarreauPipe`
 owners through arbitrary ideal pressure junctions, including parallel paths,
 loops, flow reversal and disconnected components with their own reservoirs.
-Every branch retains the same original thermal Carreau-Yasuda law and frozen
-temperature; geometry and explicit laminar wall-rate ceilings may differ.
-Volume continuity assumes one incompressible fluid at fixed density. This is
-not a variable-density mass-flow or thermal-feedback solve.
+Every branch retains the same original thermal Carreau-Yasuda law; geometry,
+prescribed local temperature and explicit laminar wall-rate ceilings may differ.
+Each developed pipe remains isothermal within its own section. Volume continuity
+assumes one incompressible fluid at fixed density, with no variable-density
+mass-flow, junction heat mixing or thermal evolution inferred.
+
+`CarreauPipeGraph::at_temperatures` prepares all original branch laws at the
+authored local temperatures without replacing a source law, geometry or physical
+rate ceiling. Malformed rosters, source refusal or cancellation publish no
+partial owner. The resolved local viscosities and differential conductances
+change the actual pressure/flow split and viscous heat. An independent
+Arrhenius/Poiseuille loop fixture checks pressures, branch flows, tangents,
+source retention and power. The single-inventory `ThermalCarreauGraph` explicitly
+requires equal branch temperatures; it refuses a nonuniform hydraulic graph
+rather than discarding regional thermal state.
+
+The initial regional-temperature implementation and regression sources passed
+the pinned formatter and whitespace checks. Native Cargo compilation and test
+execution were unavailable after shared-host resource exhaustion and loss of
+the executor. The focused patch was recovered from the pinned source baseline;
+no executed test pass or post-recovery native formatting pass is claimed.
 
 `solve_with_injections` also admits signed prescribed nodal volume ports:
 positive inputs supply fluid and negative inputs withdraw it. The required

@@ -212,9 +212,20 @@ impl<'a> ThermalCarreauGraph<'a> {
         if !nonnegative(time_s) {
             return Err(GraphError::InvalidInput("invalid Carreau thermal clock").into());
         }
-        // CarreauPipeGraph already admits one original law/temperature and
-        // a nonempty topology. Geometry and physical rate ceilings may differ.
+        // The hydraulic owner admits one original law and a nonempty topology,
+        // but may carry distinct prescribed branch temperatures. This caloric
+        // owner has one shared inventory and therefore requires a uniform state.
         let reference = graph.branches[0].pipe;
+        if graph
+            .branches
+            .iter()
+            .any(|branch| branch.pipe.temperature_k() != reference.temperature_k())
+        {
+            return Err(GraphError::InvalidInput(
+                "one-inventory Carreau thermal graph requires uniform temperature",
+            )
+            .into());
+        }
         let source_span = reference.law().temperature_shift().validity_k();
         let storage_span = storage.temperature_span_k();
         let span = [

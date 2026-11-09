@@ -164,6 +164,133 @@ fn g1_newtonian_bridge_matches_independent_grounded_network_and_power() {
     check_power(&result);
 }
 
+#[test]
+fn g1_g3_regional_temperatures_change_the_original_hydraulic_split_and_power() {
+    let lengths = [0.5, 1.0, 1.5, 2.0, 0.75];
+    let edges = [(0, 1), (1, 3), (2, 1), (0, 2), (2, 3)];
+    let temperatures = [280.0, 310.0, 345.0, 325.0, 295.0];
+    let graph = CarreauPipeGraph::new(
+        4,
+        edges
+            .into_iter()
+            .zip(lengths)
+            .enumerate()
+            .map(|(i, ((from, to), length))| {
+                branch(&format!("regional-{i}"), from, to, pipe(length, true, 1e4))
+            })
+            .collect(),
+    )
+    .unwrap();
+    let regional = with_cx(|cx| graph.at_temperatures(&temperatures, cx)).unwrap();
+    // Independent Arrhenius viscosity and Poiseuille conductance, followed by
+    // an explicit two-unknown Kirchhoff solve; no native material evaluation.
+    let conductances: [f64; 5] = core::array::from_fn(|i| {
+        let viscosity = 3.0
+            * ((12_000.0 / 8.314_462_618_153_24)
+                * (1.0 / temperatures[i] - 1.0 / 300.0))
+                .exp();
+        core::f64::consts::PI * 0.01_f64.powi(4) / (8.0 * viscosity * lengths[i])
+    });
+    let [g0, g1, g2, g3, g4] = conductances;
+    let pressure = 1200.0;
+    let (a, c) = (g0 + g1 + g2, g3 + g4 + g2);
+    let determinant = a * c - g2 * g2;
+    let p1 = pressure * (g0 * c + g2 * g3) / determinant;
+    let p2 = pressure * (g3 * a + g2 * g0) / determinant;
+    let expected_pressures = [pressure, p1, p2, 0.0];
+    let boundaries = [boundary(0, pressure), boundary(3, 0.0)];
+    let result = with_cx(|cx| regional.solve(&boundaries, controls(), cx)).unwrap();
+    let cold = with_cx(|cx| graph.solve(&boundaries, controls(), cx)).unwrap();
+    assert_ne!(result.pressures, cold.pressures);
+    for (actual, expected) in result.pressures.iter().zip(expected_pressures) {
+        close(actual.value(), expected, 2e-12);
+    }
+    for (i, actual) in result.branches.iter().enumerate() {
+        let (from, to) = edges[i];
+        let pressure_drop = expected_pressures[from] - expected_pressures[to];
+        close(
+            actual.profile.flow().volumetric_flow_m3_s,
+            conductances[i] * pressure_drop,
+            2e-12,
+        );
+        close(
+            actual.differential_conductance_m3_s_pa,
+            conductances[i],
+            2e-14,
+        );
+        close(
+            actual.profile.flow().dissipated_power_w,
+            conductances[i] * pressure_drop * pressure_drop,
+            3e-12,
+        );
+        assert_eq!(graph.branches()[i].pipe.temperature_k(), 300.0);
+        assert_eq!(regional.branches()[i].pipe.temperature_k(), temperatures[i]);
+        assert_eq!(regional.branches()[i].pipe.law(), graph.branches()[i].pipe.law());
+        assert_eq!(
+            regional.branches()[i].pipe,
+            graph.branches()[i].pipe.at_temperature(temperatures[i]).unwrap()
+        );
+        assert_eq!(actual.profile.pipe(), &regional.branches()[i].pipe);
+    }
+    assert_eq!(result.newton_iterations, 1);
+    check_power(&result);
+
+    // Direct regional construction uses exactly the same original owners.
+    let direct = CarreauPipeGraph::new(4, regional.branches().to_vec()).unwrap();
+    let reference = with_cx(|cx| direct.solve(&boundaries, controls(), cx)).unwrap();
+    assert_eq!(result.pressures, reference.pressures);
+    assert_eq!(result.branches, reference.branches);
+}
+
+#[test]
+fn g0_g4_regional_temperature_roster_source_and_cancellation_are_atomic() {
+    let graph = CarreauPipeGraph::new(
+        3,
+        vec![
+            branch("first", 0, 1, pipe(0.5, false, 1e4)),
+            branch("second", 1, 2, pipe(0.7, false, 1e4)),
+        ],
+    )
+    .unwrap();
+    let original = graph.branches().to_vec();
+    for temperatures in [vec![], vec![300.0], vec![300.0; 3]] {
+        assert!(matches!(
+            with_cx(|cx| graph.at_temperatures(&temperatures, cx)),
+            Err(CarreauGraphError::Graph(GraphError::InvalidInput(_)))
+        ));
+    }
+    assert!(matches!(
+        with_cx(|cx| graph.at_temperatures(&[330.0, 361.0], cx)),
+        Err(CarreauGraphError::Pipe { branch: 1, .. })
+    ));
+    assert_eq!(graph.branches(), original);
+    let gate = CancelGate::new();
+    gate.request();
+    let cancelled = ArenaPool::new(ArenaConfig::default()).scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 17,
+                kernel_id: 711,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        graph.at_temperatures(&[290.0, 330.0], &cx)
+    });
+    assert!(matches!(
+        cancelled,
+        Err(CarreauGraphError::Graph(GraphError::Interrupted))
+    ));
+    assert_eq!(graph.branches(), original);
+    let retry = with_cx(|cx| graph.at_temperatures(&[290.0, 330.0], cx)).unwrap();
+    assert_eq!(retry.branches()[0].pipe.temperature_k(), 290.0);
+    assert_eq!(retry.branches()[1].pipe.temperature_k(), 330.0);
+}
+
 fn nonlinear_bridge() -> CarreauPipeGraph {
     let base = pipe(1.0, false, 1e4);
     let specifications = [
@@ -507,11 +634,11 @@ fn g0_invalid_topology_boundaries_controls_and_mixed_materials_refuse() {
         )
         .is_err()
     );
-    let warmer = LaminarCarreauPipe::new(law(false), 320.0, 0.01, 0.5, 1e4).unwrap();
+    let different = LaminarCarreauPipe::new(law(true), 300.0, 0.01, 0.5, 1e4).unwrap();
     assert!(
         CarreauPipeGraph::new(
             3,
-            vec![branch("cold", 0, 1, physical), branch("hot", 1, 2, warmer)]
+            vec![branch("first", 0, 1, physical), branch("different", 1, 2, different)]
         )
         .is_err()
     );

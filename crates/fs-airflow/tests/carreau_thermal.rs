@@ -167,6 +167,34 @@ fn root(mut lo: f64, mut hi: f64, residual: impl Fn(f64) -> f64) -> f64 {
 }
 
 #[test]
+fn g0_one_inventory_thermal_owner_refuses_distinct_regional_temperatures() {
+    let storage = TabulatedHeatStorage::try_new(&[[280.0, 20.0], [360.0, 20.0]]).unwrap();
+    let uniform = graph(true, ViscosityShiftMode::Vertical, 300.0, 1e5, &[0.5, 0.7]);
+    let regional = with_gate(&CancelGate::new(), |cx| {
+        uniform.at_temperatures(&[290.0, 330.0], cx)
+    })
+    .unwrap();
+    // Regional hydraulic viscosity is admissible, but this caloric owner has
+    // only one inventory temperature and cannot discard the second region.
+    let hydraulics = with_gate(&CancelGate::new(), |cx| {
+        regional.solve(
+            &[boundary(0, 1000.0), boundary(2, 0.0)],
+            controls().hydraulics,
+            cx,
+        )
+    })
+    .unwrap();
+    assert!(hydraulics.dissipated_power_w > 0.0);
+    assert!(matches!(
+        ThermalCarreauGraph::new(regional, &storage, 0.0),
+        Err(ThermalCarreauError::Hydraulic(CarreauGraphError::Graph(
+            GraphError::InvalidInput(_)
+        )))
+    ));
+    assert!(ThermalCarreauGraph::new(uniform, &storage, 0.0).is_ok());
+}
+
+#[test]
 fn g1_cooling_has_exact_caloric_midpoint_and_second_order_time_refinement() {
     let storage = TabulatedHeatStorage::try_new(&[[280.0, 20.0], [360.0, 20.0]]).unwrap();
     let original = ThermalCarreauGraph::new(

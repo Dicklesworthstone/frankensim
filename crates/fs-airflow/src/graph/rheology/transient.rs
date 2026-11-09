@@ -17,9 +17,11 @@
 //! on a declared pressure interval. Its energy is `C*p*p/2` in the same pressure
 //! reference as the ports. The owner does not infer bulk modulus, nominal
 //! volume, density changes, acoustic wave propagation, cavitation, temperature
-//! evolution or entrance/junction losses. Prescribed uniform temperature can
-//! change between intervals through [`TransientCarreauGraph::at_temperature`]
-//! without resetting radial history or hydraulic storage. Radial and temporal
+//! evolution or entrance/junction losses. Prescribed temperature can change
+//! uniformly through [`TransientCarreauGraph::at_temperature`] or by branch through
+//! [`TransientCarreauGraph::at_temperatures`] between intervals, without resetting
+//! radial history or hydraulic storage. Each branch remains isothermal within
+//! its developed section. Radial and temporal
 //! discretization errors remain; midpoint energy accounting does not certify
 //! time resolution.
 
@@ -378,12 +380,41 @@ impl TransientCarreauGraph {
         temperature_k: f64,
         cx: &Cx<'_>,
     ) -> Result<Self, TransientCarreauError> {
+        self.prepare_temperatures(std::iter::repeat_n(temperature_k, self.pipes.len()), cx)
+    }
+
+    /// Continue original radial histories at independently prescribed branch temperatures.
+    ///
+    /// Temperatures follow original branch order and are held uniformly within
+    /// each developed pipe section during the next interval. All source laws,
+    /// physical rate ceilings, density, meshes and hydraulic storage remain
+    /// unchanged. Existing states and workspaces retain compatibility. A refusal
+    /// or cancellation publishes no partial owner and changes no history.
+    ///
+    /// Temperature evolution, thermal energy, junction mixing and expansion
+    /// belong to an external thermal owner; they are not inferred here.
+    pub fn at_temperatures(
+        &self,
+        temperatures_k: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<Self, TransientCarreauError> {
+        self.prepare_temperatures(temperatures_k.iter().copied(), cx)
+    }
+
+    fn prepare_temperatures(
+        &self,
+        temperatures_k: impl ExactSizeIterator<Item = f64>,
+        cx: &Cx<'_>,
+    ) -> Result<Self, TransientCarreauError> {
         checkpoint(cx)?;
+        if temperatures_k.len() != self.pipes.len() {
+            return Err(GraphError::InvalidInput("one prescribed temperature per transient Carreau branch required").into());
+        }
         let mut pipes = Vec::new();
         pipes
             .try_reserve_exact(self.pipes.len())
             .map_err(|_| TransientCarreauError::Capacity)?;
-        for (branch, pipe) in self.pipes.iter().enumerate() {
+        for (branch, (pipe, temperature_k)) in self.pipes.iter().zip(temperatures_k).enumerate() {
             checkpoint(cx)?;
             pipes.push(
                 pipe.at_temperature(temperature_k)
