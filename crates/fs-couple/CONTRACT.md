@@ -87,6 +87,61 @@ states against independent triangle/Maxwell heat integrals, native energy and
 event accounting, contact-driven timestep admission, split observer history,
 zero-drive parity, complete area/mass/caloric binding, and late refusal rollback.
 
+### Accepted-temperature feedback through the full interior pressure field
+
+`porous_heating::interior::feedback::TemperatureInteriorHeating` connects the
+original native caloric temperatures to the existing `PorousTemperatureFluid`
+gas/liquid/molecular sources and complete equivalent-fluid FE owner. Each original
+tetrahedron retains its own fluid state and, where declared, the original fixed
+`PorousFluidLaw` response. Spatially distinct temperatures are never averaged.
+Initial acoustic material sampling occurs after native FE work/storage admission;
+later refreshes reevaluate only changed cells before one global coherent solve.
+Original pressure, all distributed mechanical coordinates and their separate
+volume/wall physical loss forms remain in that solve.
+
+The native thermal step consumes powers from its accepted START state. Those
+watts times the actual admitted duration enter the shared four-mechanism account
+before endpoint material/field refresh. The returned acoustic owner is already
+evaluated at the returned thermal temperatures. Unchanged temperatures, including
+latent plateaus, retain the same immutable prepared factor and heat snapshot.
+Cloning shares those immutable operators, while candidate work and energy
+accounts remain independent. Source, field, binding, domain or cancellation
+failure publishes neither a partial thermal state nor a partial acoustic cache.
+
+This is explicitly quasisteady feedback at prescribed source pressure and
+composition. The native thermal law must justify thermally lumped specimen
+storage and its common fluid/skeleton temperature. Thermal mass, geometry,
+caloric object and storage basis remain unchanged; mass is never replaced by
+rho(T)*volume. The closure does not evolve a sealed gas inventory, background
+flow, pressure or separate constituent temperatures. An ordinary free-fluid entry
+uses its refreshed lossless adiabatic EOS; viscosity alone is not an invented bulk
+attenuation. Original molecular sources reevaluate the complete reservoir law
+and explicit composition at the new gas state, using `effective_relaxing` in
+pores and the native free molecular response outside them. They never rescale
+old reservoir times or add molecular attenuation to an equilibrium pore law.
+The geometry-free `PorousTemperatureFluid::volume_response` hook consumes these
+same cached source states. A custom source without this explicit constitutive
+hook refuses, preserving dispersive behavior instead of falling back silently
+to its equilibrium `ThermoviscousFluid` tuple. The existing coherent-layer hook
+retains its own unchanged native owner.
+
+The owned frequency, coherent velocity drive, Robin data and mechanical wall
+coefficients remain fixed explicitly. Wall motion and heat still respond to
+the changed volume field, but this owner does not refresh material-wall laws.
+Thermal timestep refinement must resolve feedback independently of conduction
+CFL; acoustic startup, parametric stored-energy work and moving geometry remain
+outside this cycle-mean approximation. The accepted factor remains live while
+a new preparation is built, adding its retained storage to the native
+per-preparation memory allowance. Native substep and FE budgets remain binding.
+
+`porous_heating/interior/tests/feedback.rs` specifies original-source field
+parity at distinct temperatures, accepted-start joules with native contacts and
+events, split continuation, latent/one-cell cache reuse, source-domain and
+cancellation rollback, and temporal refinement against independently
+orchestrated original material/FE/frozen-heat owners. Its molecular child compares
+changed-temperature free-gas and porous responses with the original joint
+reservoir owners and retained source composition.
+
 ## Optional local material tangents in finite-solid motion
 
 `FiniteSolidBody::with_tangent_storage` selects ordinary midpoint Newton tangent

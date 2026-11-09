@@ -14,6 +14,7 @@ use fs_thermal::enthalpy::{
 use fs_thermal::observers::CoupledObservers;
 
 mod walls;
+mod feedback;
 
 const IDS: [CellId; 2] = [CellId(91), CellId(7)];
 const VOLUMES: [f64; 2] = [1.0 / 6.0, 1.0 / 3.0];

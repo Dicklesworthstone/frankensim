@@ -8,11 +8,13 @@
 //! normalization retain the parent owner's explicit quasisteady assumptions.
 
 use super::{IsobaricPorousGas, PorousHeatingError, PorousTemperatureFluid};
+use crate::cavity_modal::interior::heterogeneous::porous::AcousticVolumeRegionState;
 use fs_duct::porous::PorousLayer;
+use fs_material::MaterialError;
 use fs_material::fluid_acoustics::thermoviscous::{ThermoviscousFluid, ThermoviscousFluidState};
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
-use fs_material::porous::PorousFluidLaw;
+use fs_material::porous::{PorousFluidLaw, PorousFluidResponse};
 use fs_material::relaxation::{RelaxationAbsorption, RelaxationState, RelaxingMedium};
 use std::sync::Arc;
 
@@ -102,6 +104,20 @@ impl PorousTemperatureFluid for IsobaricRelaxingPorousGas<'_> {
     }
     fn temperature_k(&self, state: &Self::State) -> f64 {
         state.source.gas().temperature
+    }
+    fn volume_response(
+        &self,
+        state: &Self::State,
+        material: Option<&PorousFluidLaw>,
+        omega: f64,
+    ) -> Result<AcousticVolumeRegionState, MaterialError> {
+        match material {
+            Some(law) => law
+                .effective_relaxing(state.source(), omega)
+                .map(AcousticVolumeRegionState::Porous),
+            None => PorousFluidResponse::relaxing_fluid(state.source(), omega)
+                .map(AcousticVolumeRegionState::MolecularGas),
+        }
     }
     #[allow(clippy::too_many_arguments)]
     fn prepare_layer<'a>(

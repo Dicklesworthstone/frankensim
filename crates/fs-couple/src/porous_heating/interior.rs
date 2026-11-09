@@ -10,19 +10,26 @@
 //! The map is caller-authored: equal volumes do not establish spatial overlap.
 //! Each destination must represent that complete physical element and its own
 //! thermally lumped caloric law. The acoustic split does not assign separate
-//! fluid/skeleton temperatures. Coefficients and coherent pressure remain frozen
-//! during an advance; refresh the acoustic/material owner when that approximation
-//! ceases to hold. No acoustic startup or temperature feedback is inferred.
+//! fluid/skeleton temperatures. [`InteriorAcousticHeating`] holds coefficients
+//! and coherent pressure fixed during an advance. The [`feedback`] owner refreshes
+//! the original material and complete acoustic solve at accepted temperatures.
+//! Both use an explicit quasisteady closure, without inferred acoustic startup.
 
 use fs_feec::acoustics::helmholtz::heterogeneous::{
     HeterogeneousError, MechanicalWallPhasors, PreparedEquivalentFluid,
 };
-use fs_math::{c64::C64, dd::Dd};
+use fs_math::c64::C64;
 use fs_thermal::enthalpy::{
     CellGeometry, CellId, DepositionError, DepositionObserver, DepositionSimulation, EnergyAudit,
     Event, MaterialId, StepConfig, ThermalLaw, ThermalStorageBasis,
 };
 use std::collections::BTreeMap;
+use std::sync::Arc;
+
+/// Quasisteady full-volume acoustics refreshed from accepted thermal states.
+pub mod feedback;
+mod heat;
+use heat::{InteriorHeatAccount, InteriorHeatState};
 
 /// Hard storage/work ceiling; a caller may request a smaller cell budget.
 pub const MAX_INTERIOR_HEATING_CELLS: usize = 4096;
@@ -196,10 +203,8 @@ struct BoundWall<'t> {
 pub struct InteriorAcousticHeating<'p, 'f, 'c, 't> {
     prepared: &'p PreparedEquivalentFluid<'f, 'c>,
     pressure_pa: &'p [C64],
-    cells: Vec<BoundCell<'t>>,
     wall_phasors: Option<&'p [MechanicalWallPhasors]>,
-    walls: Vec<BoundWall<'t>>,
-    sources_w: BTreeMap<CellId, f64>,
+    heat: Arc<InteriorHeatState<'t>>,
 }
 
 /// Acoustic-only work over the accepted native thermal substeps.
@@ -323,10 +328,12 @@ impl<'p, 'f, 'c, 't> InteriorAcousticHeating<'p, 'f, 'c, 't> {
         Ok(Self {
             prepared,
             pressure_pa,
-            cells,
             wall_phasors: None,
-            walls: Vec::new(),
-            sources_w,
+            heat: Arc::new(InteriorHeatState {
+                cells,
+                walls: Vec::new(),
+                sources_w,
+            }),
         })
     }
 
@@ -394,10 +401,12 @@ impl<'p, 'f, 'c, 't> InteriorAcousticHeating<'p, 'f, 'c, 't> {
         if let Some(error) = refusal {
             return Err(error.into());
         }
-        source.walls.reserve(wall_count);
+        let state =
+            Arc::get_mut(&mut source.heat).expect("newly created interior heat is uniquely owned");
+        state.walls.reserve(wall_count);
         for (wall, (route, power)) in wall_destinations.iter().zip(powers?).enumerate() {
             checkpoint()?;
-            if source.sources_w.contains_key(&route.cell) {
+            if state.sources_w.contains_key(&route.cell) {
                 return Err(InteriorHeatingError::Invalid(
                     "interior volume and wall destinations must be distinct",
                 ));
@@ -422,8 +431,8 @@ impl<'p, 'f, 'c, 't> InteriorAcousticHeating<'p, 'f, 'c, 't> {
             if heat.resistance_dissipation_w < 0.0 || heat.relaxation_dissipation_w < 0.0 {
                 return Err(InteriorHeatingError::Invalid("wall heat must be passive"));
             }
-            source.sources_w.insert(route.cell, watts);
-            source.walls.push(BoundWall { heat, binding });
+            state.sources_w.insert(route.cell, watts);
+            state.walls.push(BoundWall { heat, binding });
         }
         source.wall_phasors = Some(wall_phasors);
         checkpoint()?;
@@ -442,12 +451,12 @@ impl<'p, 'f, 'c, 't> InteriorAcousticHeating<'p, 'f, 'c, 't> {
 
     /// Cached original element powers in caller-authored destination order.
     pub fn cells(&self) -> impl ExactSizeIterator<Item = &InteriorCellHeating> {
-        self.cells.iter().map(|cell| &cell.heat)
+        self.heat.cells()
     }
 
     /// Cached original mechanical-wall powers, separate from volume heat.
     pub fn walls(&self) -> impl ExactSizeIterator<Item = &InteriorWallHeating> {
-        self.walls.iter().map(|wall| &wall.heat)
+        self.heat.walls()
     }
 
     #[must_use]
@@ -460,16 +469,7 @@ impl<'p, 'f, 'c, 't> InteriorAcousticHeating<'p, 'f, 'c, 't> {
         thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), InteriorHeatingError> {
-        for binding in self
-            .cells
-            .iter()
-            .map(|bound| &bound.binding)
-            .chain(self.walls.iter().map(|bound| &bound.binding))
-        {
-            checkpoint()?;
-            binding.validate(thermal)?;
-        }
-        Ok(())
+        self.heat.validate(thermal, checkpoint)
     }
 
     /// Start a composable native observer with a zero acoustic work account.
@@ -477,9 +477,7 @@ impl<'p, 'f, 'c, 't> InteriorAcousticHeating<'p, 'f, 'c, 't> {
     pub fn observer(&self) -> InteriorHeatingObserver<'_, 'p, 'f, 'c, 't> {
         InteriorHeatingObserver {
             owner: self,
-            cell_energy: vec![Dd::ZERO; self.cells.len()],
-            wall_energy: vec![Dd::ZERO; self.walls.len()],
-            mechanisms: [Dd::ZERO; 4],
+            account: InteriorHeatAccount::new(&self.heat),
         }
     }
 
@@ -499,18 +497,9 @@ impl<'p, 'f, 'c, 't> InteriorAcousticHeating<'p, 'f, 'c, 't> {
         self.validate(initial, &mut checkpoint)?;
         let (thermal, observer, heat_report) =
             initial.advance_observed(&self.observer(), target_s, config, &mut checkpoint)?;
-        self.validate(&thermal, &mut checkpoint)?;
-        let acoustic = observer.energy()?;
-        let cell_energy_j = observer.cell_energy_j()?;
-        let wall_energy_j = observer.wall_energy_j()?;
-        checkpoint()?;
-        Ok(InteriorHeatingStep {
-            thermal,
-            heat_report,
-            acoustic,
-            cell_energy_j,
-            wall_energy_j,
-        })
+        observer
+            .account
+            .finish(&self.heat, thermal, heat_report, &mut checkpoint)
     }
 }
 
@@ -522,44 +511,20 @@ impl<'p, 'f, 'c, 't> InteriorAcousticHeating<'p, 'f, 'c, 't> {
 #[derive(Clone)]
 pub struct InteriorHeatingObserver<'a, 'p, 'f, 'c, 't> {
     owner: &'a InteriorAcousticHeating<'p, 'f, 'c, 't>,
-    cell_energy: Vec<Dd>,
-    wall_energy: Vec<Dd>,
-    mechanisms: [Dd; 4],
+    account: InteriorHeatAccount,
 }
 
 impl InteriorHeatingObserver<'_, '_, '_, '_, '_> {
     pub fn energy(&self) -> Result<InteriorHeatingEnergy, InteriorHeatingError> {
-        let deposited = self
-            .cell_energy
-            .iter()
-            .chain(&self.wall_energy)
-            .copied()
-            .fold(Dd::ZERO, |a, b| a + b);
-        Ok(InteriorHeatingEnergy {
-            density_dissipation_j: finite(self.mechanisms[0].to_f64())?,
-            compressional_dissipation_j: finite(self.mechanisms[1].to_f64())?,
-            wall_resistance_dissipation_j: finite(self.mechanisms[2].to_f64())?,
-            wall_relaxation_dissipation_j: finite(self.mechanisms[3].to_f64())?,
-            deposited_j: finite(deposited.to_f64())?,
-        })
+        self.account.energy()
     }
 
     pub fn cell_energy_j(&self) -> Result<Vec<(CellId, f64)>, InteriorHeatingError> {
-        self.owner
-            .cells
-            .iter()
-            .zip(&self.cell_energy)
-            .map(|(cell, energy)| Ok((cell.heat.cell, finite(energy.to_f64())?)))
-            .collect()
+        self.account.cell_energy_j(&self.owner.heat)
     }
 
     pub fn wall_energy_j(&self) -> Result<Vec<(CellId, f64)>, InteriorHeatingError> {
-        self.owner
-            .walls
-            .iter()
-            .zip(&self.wall_energy)
-            .map(|(wall, energy)| Ok((wall.heat.cell, finite(energy.to_f64())?)))
-            .collect()
+        self.account.wall_energy_j(&self.owner.heat)
     }
 }
 
@@ -572,7 +537,7 @@ impl DepositionObserver for InteriorHeatingObserver<'_, '_, '_, '_, '_> {
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
         self.owner.validate(thermal, checkpoint)?;
-        Ok(self.owner.sources_w.clone())
+        Ok(self.owner.heat.sources())
     }
 
     fn event(&mut self, _: &Event, thermal: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
@@ -588,27 +553,7 @@ impl DepositionObserver for InteriorHeatingObserver<'_, '_, '_, '_, '_> {
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Self::Error> {
         self.owner.validate(thermal, checkpoint)?;
-        for (cell, energy) in self.owner.cells.iter().zip(&mut self.cell_energy) {
-            checkpoint()?;
-            *energy = *energy + Dd::from_f64(finite(cell.heat.absorbed_power_w() * dt)?);
-            for (sum, power) in self.mechanisms.iter_mut().zip([
-                cell.heat.density_dissipation_w,
-                cell.heat.compressional_dissipation_w,
-            ]) {
-                *sum = *sum + Dd::from_f64(finite(power * dt)?);
-            }
-        }
-        for (wall, energy) in self.owner.walls.iter().zip(&mut self.wall_energy) {
-            checkpoint()?;
-            *energy = *energy + Dd::from_f64(finite(wall.heat.absorbed_power_w() * dt)?);
-            for (sum, power) in self.mechanisms[2..].iter_mut().zip([
-                wall.heat.resistance_dissipation_w,
-                wall.heat.relaxation_dissipation_w,
-            ]) {
-                *sum = *sum + Dd::from_f64(finite(power * dt)?);
-            }
-        }
-        Ok(())
+        self.account.record(&self.owner.heat, dt, checkpoint)
     }
 }
 

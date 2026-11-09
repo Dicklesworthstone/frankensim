@@ -5,8 +5,10 @@
 //! the authored thermal masses, geometry or fixed exterior acoustic reference.
 
 use super::{IsobaricPorousGas, PorousHeatingError};
+use crate::cavity_modal::interior::heterogeneous::porous::AcousticVolumeRegionState;
 use fs_duct::porous::PorousLayer;
 use fs_matdb::MaterialCard;
+use fs_material::MaterialError;
 use fs_material::fluid_acoustics::thermoviscous::{ThermoviscousFluid, ThermoviscousFluidState};
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
@@ -32,6 +34,25 @@ pub trait PorousTemperatureFluid: Clone {
     fn evaluate(&self, temperature_k: f64) -> Result<Self::State, PorousHeatingError>;
     /// Actual absolute temperature carried by the returned native state [K].
     fn temperature_k(&self, state: &Self::State) -> f64;
+
+    /// Original homogeneous volume response from this exact cached state.
+    /// `None` denotes a free fluid; `Some` retains that original porous skeleton.
+    /// Responses use the material/FE exp(+i omega t) convention, without added
+    /// attenuation, geometry or another temperature evaluation.
+    ///
+    /// Sources must opt in explicitly: an equilibrium thermoviscous snapshot
+    /// cannot reveal additional molecular or dispersive state retained by a
+    /// custom layer implementation. The default refuses instead of dropping it.
+    fn volume_response(
+        &self,
+        _state: &Self::State,
+        _material: Option<&PorousFluidLaw>,
+        _omega: f64,
+    ) -> Result<AcousticVolumeRegionState, MaterialError> {
+        Err(MaterialError::Parameters {
+            what: "temperature source must declare its original acoustic volume response".into(),
+        })
+    }
 
     /// Prepare the original porous response from this exact cached state.
     /// The default preserves the equilibrium-fluid path. A dispersive source
@@ -71,12 +92,33 @@ impl PorousTemperatureFluid for IsobaricPorousGas<'_> {
     fn temperature_k(&self, state: &GasState) -> f64 {
         state.temperature
     }
+    fn volume_response(
+        &self,
+        state: &Self::State,
+        material: Option<&PorousFluidLaw>,
+        omega: f64,
+    ) -> Result<AcousticVolumeRegionState, MaterialError> {
+        equilibrium_volume_response(state, material, omega)
+    }
+}
+
+fn equilibrium_volume_response<M: ThermoviscousFluid + ?Sized>(
+    state: &M,
+    material: Option<&PorousFluidLaw>,
+    omega: f64,
+) -> Result<AcousticVolumeRegionState, MaterialError> {
+    match material {
+        Some(law) => law
+            .effective_fluid(state, omega)
+            .map(AcousticVolumeRegionState::Porous),
+        None => state.acoustic_state().map(AcousticVolumeRegionState::Fluid),
+    }
 }
 
 // Refuse a material adapter that silently substitutes a reference temperature.
 // The original porous material owner admits the complete thermoviscous tuple
 // when constructing its frequency response; no second acoustic law is added.
-pub(super) fn evaluate<F: PorousTemperatureFluid>(
+pub(crate) fn evaluate<F: PorousTemperatureFluid>(
     fluid: &F,
     temperature_k: f64,
 ) -> Result<F::State, PorousHeatingError> {
@@ -239,5 +281,13 @@ impl PorousTemperatureFluid for IsobaricPorousLiquid<'_> {
     }
     fn temperature_k(&self, state: &PorousLiquidState) -> f64 {
         state.source.response().temperature_k()
+    }
+    fn volume_response(
+        &self,
+        state: &Self::State,
+        material: Option<&PorousFluidLaw>,
+        omega: f64,
+    ) -> Result<AcousticVolumeRegionState, MaterialError> {
+        equilibrium_volume_response(state, material, omega)
     }
 }
