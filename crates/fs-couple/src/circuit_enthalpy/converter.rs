@@ -8,6 +8,8 @@ pub mod capacitor;
 pub mod battery;
 /// Finite voltage sources/loads and all seven material heat paths.
 pub mod voltage;
+/// Source-bound independent gates, body-diode conduction and finite material heat.
+pub mod commutation;
 
 use super::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,

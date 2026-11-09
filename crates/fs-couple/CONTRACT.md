@@ -8138,6 +8138,49 @@ chemical depletion/calorimetry, foldback and current limits, shared-body thermal
 feedback, disabled-load history, invalid mapping, caloric-domain refusal and
 late-cancellation rollback/retry.
 
+## Source-bound semiconductor commutation and material heat
+
+`converter::commutation::CommutatedConverterThermalNetwork` joins the original
+three-state finite-resistance commutation owner to the shared finite-cell
+enthalpy residual. Four explicit device packages retain their original material
+cards, selected claims, caloric bodies and seven typed source keys: channel ON
+and OFF resistance, body-diode forward threshold and differential resistance,
+maximum reverse voltage, maximum channel current and maximum diode current.
+The original source owner refreshes the complete bundle at each proposed
+junction temperature and declared phase coordinate. Unowned current, voltage,
+gate and frequency dependent source laws are refused; no nominal parameter,
+leakage, limit or device dataset is invented.
+
+Three ordinary channels retain the existing scalar/bulk material resistance
+adapters for the winding and both supply resistors. Actual winding, four
+channel/leakage, four body-diode and two source-resistor heats remain separately
+visible in the native cycle report. Each channel and its body diode heat the
+declared package body once; shared receivers accumulate in double-double
+arithmetic before deposition. Optional wholly dissipative load receivers absorb
+only actual delivered work. Regeneration remains signed ideal-source work.
+Independent device/converter, each source/load path and complete storage/work
+balances precede internal routing.
+
+Every proposal restarts the same accepted flux and charges, gate intervals and
+source/load commands. An exact 31-word coefficient key includes all device
+thresholds/slopes/limits and the three ordinary resistances; unchanged resistance
+alone cannot reuse a trajectory when diode voltage or applicability changes.
+Source and caloric admission still run on cache hits, and the full electrical
+subdivision count is charged to the shared trial budget. The complete electrical
+cycle must reach the same represented endpoint as the thermal solve. Refusal or
+cancellation publishes neither history.
+
+This is the native quasi-static conduction model with finite authored OFF
+resistance and endpoint material feedback. Temporal refinement is required;
+sampled device limits do not certify unobserved waveform peaks or a full
+semiconductor safe operating area. Junction/output capacitance, gate dynamics,
+reverse recovery, avalanche and transition losses are outside this lane.
+`tests/commutated_converter_enthalpy.rs` defines independent steady KCL/KVL
+calorimetry with regeneration and shared load heat, diode-threshold feedback
+with every resistance held constant, and source-domain/quantity/limit,
+clock/budget/cancellation refusal. Its material curves are manufactured fixtures,
+not measured device qualification.
+
 ## Finite source impedance, regulated demand and material heat
 
 `converter::voltage::power_load` adds `step_power_loaded_candidate` to the
