@@ -28,6 +28,11 @@ pub use tensor::{AffineThermoelastic, ThermoelasticSymmetry};
 pub mod mechanics;
 pub use mechanics::FrozenThermoelasticLaw;
 
+/// Original isothermal tensors, reference inertia and thermal derivatives.
+pub mod isothermal;
+pub use isothermal::{IsothermalThermoelasticInput, IsothermalThermoelasticState,
+    ThermoelasticTemperatureDerivatives};
+
 #[derive(Debug)]
 pub enum ThermoelasticError {
     Source(MaterialStatePointError),
@@ -110,6 +115,33 @@ struct IsotropicThermalResponse {
     expansion_per_k:f64,
     expansion_slope_per_k2:f64,
     free_linear_strain:f64,
+}
+
+// Keep the independent modes and their thermal derivatives before forming a
+// dense tensor. A weak mode can be lost in rounded normal-block coefficients.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct IsotropicThermalModuli {
+    bulk: f64,
+    shear: f64,
+    bulk_first: f64,
+    shear_first: f64,
+    bulk_second: f64,
+    shear_second: f64,
+}
+
+fn isotropic_thermal_moduli(e: f64, nu: f64, et: f64, nut: f64)
+    -> Result<IsotropicThermalModuli, ThermoelasticError> {
+    let d=1.0-2.0*nu; let q=1.0+nu;
+    let bulk=finite(e/(3.0*d))?;
+    let shear=finite(e/(2.0*q))?;
+    let bulk_first=finite((et+2.0*e*nut/d)/(3.0*d))?;
+    let shear_first=finite((et-e*nut/q)/(2.0*q))?;
+    if bulk_first==0.0 && shear_first==0.0 && (et!=0.0 || nut!=0.0) {
+        return Err(ThermoelasticError::Invalid("nonconstant thermoelastic stiffness derivatives underflow"));
+    }
+    let bulk_second=finite(4.0*nut*bulk_first/d)?;
+    let shear_second=finite(-2.0*nut*shear_first/q)?;
+    Ok(IsotropicThermalModuli {bulk,shear,bulk_first,shear_first,bulk_second,shear_second})
 }
 
 /// Integrated elastic-field potentials, separate from the caloric chart.
@@ -301,6 +333,9 @@ fn upper_div(a:f64,b:f64)->Result<f64,ThermoelasticError> {
 
 impl ResolvedThermoelastic {
     pub fn temperature_k(&self)->f64 {self.temperature_k}
+    /// Original inclusive bound on every TOTAL and ELASTIC Mandel component.
+    /// This is a component box, not a tensor Frobenius ball.
+    pub fn maximum_absolute_mandel_strain(&self)->f64 {self.maximum_absolute_mandel_strain}
     /// Scalar isotropic free strain. A directional tensor must use the complete
     /// Mandel accessor; it cannot silently lose its expansion or shear axes.
     pub fn free_strain(&self)->Result<f64,ThermoelasticError> {
@@ -368,18 +403,9 @@ impl ResolvedThermoelastic {
         let mean=trace/3.0;
         let deviator_squared=finite(elastic_strain_mandel.iter().enumerate()
             .map(|(k,e)|if k<3 {(e-mean).powi(2)}else{e*e}).sum())?;
-        let e=response.material.youngs;
-        let nu=response.material.poisson;
-        let d=1.0-2.0*nu; let q=1.0+nu;
-        let bulk=finite(e/(3.0*d))?;
-        let bulk_first=finite((response.youngs_slope_pa_k+2.0*e*response.poisson_slope_per_k/d)/(3.0*d))?;
-        let shear_first=finite((response.youngs_slope_pa_k-e*response.poisson_slope_per_k/q)/(2.0*q))?;
-        if bulk_first==0.0 && shear_first==0.0
-            && (response.youngs_slope_pa_k!=0.0 || response.poisson_slope_per_k!=0.0) {
-            return Err(ThermoelasticError::Invalid("nonconstant thermoelastic stiffness derivatives underflow"));
-        }
-        let bulk_second=finite(4.0*response.poisson_slope_per_k*bulk_first/d)?;
-        let shear_second=finite(-2.0*response.poisson_slope_per_k*shear_first/q)?;
+        let IsotropicThermalModuli {bulk,bulk_first,shear_first,bulk_second,shear_second,..} =
+            isotropic_thermal_moduli(response.material.youngs,response.material.poisson,
+                response.youngs_slope_pa_k,response.poisson_slope_per_k)?;
         let alpha=response.expansion_per_k;
         let stress_temperature_derivative_mandel_pa_k=core::array::from_fn(|k| {
             if k<3 {

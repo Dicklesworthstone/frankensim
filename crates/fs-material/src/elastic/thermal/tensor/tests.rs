@@ -195,3 +195,55 @@ fn elastic_and_expansion_symmetries_remain_independent_and_isotropic_arithmetic_
         }
     }}
 }
+
+#[test]
+fn isothermal_views_preserve_source_symmetry_and_rotated_thermal_derivatives() {
+    let card=card(false);
+    let input=super::super::IsothermalThermoelasticInput {reference_density_kg_m3:2.0,
+        mechanical_material_identity:ContentHash([71;32])};
+    for elastic_isotropic in [false,true] {for expansion_isotropic in [false,true] {
+        let (e,a)=sources(&card,300.0,elastic_isotropic,expansion_isotropic);
+        let law=AffineThermoelastic::new(&card,&e,&a,
+            if elastic_isotropic {ThermoelasticSymmetry::Isotropic}
+                else {ThermoelasticSymmetry::OrientedOrthotropic {principal_to_target:QS}},
+            if expansion_isotropic {ThermoelasticSymmetry::Isotropic}
+                else {ThermoelasticSymmetry::OrientedOrthotropic {principal_to_target:QA}},
+            [280.0,360.0],0.1).unwrap();
+        let at=law.at_temperature(321.0).unwrap();
+        let frozen=at.isothermal_elasticity(input).unwrap();
+        assert_eq!(frozen.source(),&at);
+        assert_eq!(frozen.acoustic().is_explicitly_isotropic(),elastic_isotropic);
+        assert_eq!(frozen.acoustic().frobenius_strain_limit(),None);
+        for (actual,expected) in frozen.acoustic().stiffness_mandel_pa().iter().flatten()
+            .zip(at.stiffness_mandel_pa().into_iter().flatten()) {
+            assert_eq!(actual.to_bits(),expected.to_bits());
+        }
+        let derivatives=at.temperature_derivatives().unwrap();
+        assert_eq!(derivatives.isotropic_moduli_pa_k.is_some(),elastic_isotropic);
+        assert_eq!(derivatives.isotropic_moduli_pa_k2.is_some(),elastic_isotropic);
+        let h=0.02;
+        let lower=law.at_temperature(321.0-h).unwrap();
+        let upper=law.at_temperature(321.0+h).unwrap();
+        let c=at.stiffness_mandel_pa();let lo=lower.stiffness_mandel_pa();let hi=upper.stiffness_mandel_pa();
+        for i in 0..6 {
+            close(derivatives.free_strain_mandel_per_k[i],
+                (upper.free_strain_mandel()[i]-lower.free_strain_mandel()[i])/(2.0*h),2e-12);
+            close(derivatives.free_strain_mandel_per_k2[i],
+                (upper.free_strain_mandel()[i]-2.0*at.free_strain_mandel()[i]
+                    +lower.free_strain_mandel()[i])/(h*h),2e-10);
+            for j in 0..6 {
+                close(derivatives.stiffness_mandel_pa_k[i][j],(hi[i][j]-lo[i][j])/(2.0*h),2e-6);
+                close(derivatives.stiffness_mandel_pa_k2[i][j],(hi[i][j]-2.0*c[i][j]+lo[i][j])/(h*h),2e-6);
+            }
+        }
+        if !expansion_isotropic {
+            assert!(at.free_strain_mandel()[5].abs()>1e-5);
+            let mut expected=[[0.0;3];3];let mut slope=[[0.0;3];3];
+            for i in 0..3 {expected[i][i]=ALPHA[i]+21.0*ALPHAT[i];slope[i][i]=ALPHAT[i];}
+            for (actual,expected) in derivatives.free_strain_mandel_per_k.into_iter()
+                .zip(mandel(rotate(expected,QA))) {close(actual,expected,1e-17);}
+            for (actual,expected) in derivatives.free_strain_mandel_per_k2.into_iter()
+                .zip(mandel(rotate(slope,QA))) {close(actual,expected,1e-18);}
+        }
+    }}
+}

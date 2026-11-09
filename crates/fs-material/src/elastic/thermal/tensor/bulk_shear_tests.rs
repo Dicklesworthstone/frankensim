@@ -209,6 +209,66 @@ fn close(a: f64, b: f64, tolerance: f64) {
     assert!((a - b).abs() <= tolerance, "{a:e} != {b:e}");
 }
 
+#[test]
+fn isothermal_independent_moduli_retain_native_matrices_modes_and_derivatives() {
+    use crate::elastic::thermal::IsothermalThermoelasticInput;
+    use fs_blake3::ContentHash;
+    let input=IsothermalThermoelasticInput {reference_density_kg_m3:2.0,
+        mechanical_material_identity:ContentHash([72;32])};
+    let rotation=[[0.8,0.0,0.6],[0.0,1.0,0.0],[-0.6,0.0,0.8]];
+    for young_shear in [false,true] {
+        let card=card(young_shear,false);
+        for expansion in [ThermoelasticSymmetry::Isotropic,
+            ThermoelasticSymmetry::OrientedOrthotropic {principal_to_target:rotation}] {
+            let law=law(&card,expansion,young_shear);
+            let t=321.0;let h=0.02;
+            let at=law.at_temperature(t).unwrap();
+            let frozen=at.isothermal_elasticity(input).unwrap();
+            assert!(frozen.acoustic().is_explicitly_isotropic());
+            assert_eq!(frozen.acoustic().frobenius_strain_limit(),None);
+            for (actual,expected) in frozen.acoustic().stiffness_mandel_pa().iter().flatten()
+                .zip(at.stiffness_mandel_pa().into_iter().flatten()) {
+                assert_eq!(actual.to_bits(),expected.to_bits());
+            }
+            let (bulk,shear)=frozen.acoustic().isotropic_bulk_shear_pa().unwrap();
+            let expected_shear=G+GT*(t-300.0);
+            let expected_bulk=if young_shear {1.0/(9.0/(E+ET*(t-300.0))-3.0/expected_shear)}
+                else {K+KT*(t-300.0)};
+            close(bulk,expected_bulk,2e-12);close(shear,expected_shear,1e-12);
+            let derivatives=at.temperature_derivatives().unwrap();
+            let samples=[-1.0,0.0,1.0].map(|offset| law.at_temperature(t+offset*h).unwrap()
+                .isothermal_elasticity(input).unwrap().acoustic().isotropic_bulk_shear_pa().unwrap());
+            let (kt,gt)=derivatives.isotropic_moduli_pa_k.unwrap();
+            let (ktt,gtt)=derivatives.isotropic_moduli_pa_k2.unwrap();
+            close(kt,(samples[2].0-samples[0].0)/(2.0*h),2e-6);
+            close(gt,(samples[2].1-samples[0].1)/(2.0*h),2e-8);
+            close(ktt,(samples[2].0-2.0*samples[1].0+samples[0].0)/(h*h),2e-6);
+            close(gtt,(samples[2].1-2.0*samples[1].1+samples[0].1)/(h*h),2e-6);
+            if !young_shear {
+                assert!(derivatives.stiffness_mandel_pa_k2.iter().flatten().all(|value| *value==0.0));
+                assert_eq!((ktt,gtt),(0.0,0.0));
+            }
+        }
+    }
+}
+
+#[test]
+fn isothermal_bulk_metadata_does_not_reconstruct_the_weak_mode_from_tensor_rows() {
+    use crate::elastic::thermal::IsothermalThermoelasticInput;
+    use fs_blake3::ContentHash;
+    let bulk=1e-9;
+    let card=card_with_first_modulus(BULK_MODULUS_PROPERTY,bulk,0.0,false);
+    let at=law(&card,ThermoelasticSymmetry::Isotropic,false).at_temperature(300.0).unwrap();
+    let frozen=at.isothermal_elasticity(IsothermalThermoelasticInput {
+        reference_density_kg_m3:2.0,mechanical_material_identity:ContentHash([73;32]),
+    }).unwrap();
+    assert_eq!(frozen.acoustic().isotropic_bulk_shear_pa(),Some((bulk,G)));
+    let c=frozen.acoustic().stiffness_mandel_pa();
+    assert_ne!(((c[0][0]+c[0][1]+c[0][2])/3.0).to_bits(),bulk.to_bits());
+    let pressure=frozen.acoustic().hydrostatic_response(1e-12).unwrap();
+    close(pressure.volumetric_strain,-1e-12/bulk,1e-17);
+}
+
 // Trace/deviatoric invariants, independent of the production Mandel matrix.
 fn oracle(
     t: f64,

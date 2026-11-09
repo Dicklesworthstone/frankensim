@@ -187,7 +187,7 @@ impl ElasticAcousticState {
         Ok(state)
     }
 
-    fn from_isotropic_parts(
+    pub(in crate::elastic) fn from_isotropic_parts(
         stiffness_mandel_pa: Tangent6,
         bulk: f64,
         shear: f64,

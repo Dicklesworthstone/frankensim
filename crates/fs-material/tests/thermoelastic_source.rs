@@ -251,3 +251,6 @@ fn g3_capacity_floor_includes_poisson_curvature_and_all_mandel_shears() {
 
 #[path = "thermoelastic_source/acoustic.rs"]
 mod acoustic;
+
+#[path = "thermoelastic_source/isothermal.rs"]
+mod isothermal;

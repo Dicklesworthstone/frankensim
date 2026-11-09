@@ -226,7 +226,7 @@ impl AffineTensorThermoelastic {
         let delta = t - self.reference_temperature_k;
         let coefficients = self.elastic_coefficients.iter().map(|x| x.at(&elastic, delta)).collect::<Result<Vec<_>, _>>()?;
         let slopes: Vec<_> = self.elastic_coefficients.iter().map(|x| x.slope).collect();
-        let (mut stiffness, mut first, mut second) = principal_stiffness(self.stiffness,
+        let (mut stiffness, mut first, mut second, isotropic_moduli) = principal_stiffness(self.stiffness,
             &coefficients, &slopes, self.maximum_absolute_mandel_strain)?;
         let q = self.stiffness.rotation();
         // The original solid owner also applies its shared Bond rotation for
@@ -257,6 +257,7 @@ impl AffineTensorThermoelastic {
         let response = TensorThermalResponse {
             stiffness_mandel_pa: stiffness, stiffness_derivative_mandel_pa_k: first,
             stiffness_second_derivative_mandel_pa_k2: second,
+            isotropic_moduli,
             free_strain_mandel: rotate_diagonal(free, self.expansion.rotation()),
             expansion_mandel_per_k: rotate_diagonal(instantaneous, self.expansion.rotation()),
             expansion_derivative_mandel_per_k2: rotate_diagonal(derivative, self.expansion.rotation()),
@@ -345,8 +346,8 @@ fn rotation_norm_bound(q: [[f64; 3]; 3]) -> Result<f64, ThermoelasticError> {
 
 /// Exact first/second temperature derivatives of the native compliance inverse.
 fn principal_stiffness(symmetry: ThermoelasticSymmetry, values: &[f64], slopes: &[f64], limit: f64)
-    -> Result<(Tangent6, Tangent6, Tangent6), ThermoelasticError> {
-    let (e, nu, et, nut, c) = match symmetry {
+    -> Result<(Tangent6, Tangent6, Tangent6, Option<IsotropicThermalModuli>), ThermoelasticError> {
+    let (e, nu, et, nut, c, isotropic_moduli) = match symmetry {
         ThermoelasticSymmetry::IsotropicBulkShear | ThermoelasticSymmetry::IsotropicYoungShear => {
             let (bulk, bulk_first, bulk_second) = if symmetry == ThermoelasticSymmetry::IsotropicYoungShear {
                 young_shear_bulk(values[0], values[1], slopes[0], slopes[1])?
@@ -358,18 +359,21 @@ fn principal_stiffness(symmetry: ThermoelasticSymmetry, values: &[f64], slopes: 
                 || c[0][0] + 2.0 * c[0][1] <= 0.0 || c[3][3] <= 0.0 {
                 return Err(ThermoelasticError::Invalid("bulk/shear stiffness loses positive representability"));
             }
+            let moduli=IsotropicThermalModuli {bulk,shear:values[1],bulk_first,
+                shear_first:slopes[1],bulk_second,shear_second:0.0};
             return Ok((c, bulk_shear_matrix(bulk_first, slopes[1])?,
-                bulk_shear_matrix(bulk_second, 0.0)?));
+                bulk_shear_matrix(bulk_second, 0.0)?,Some(moduli)));
         }
         ThermoelasticSymmetry::Isotropic => {
             let law = IsotropicElastic::new(values[0], values[1], limit)?;
-            ([values[0]; 3], [values[1]; 3], [slopes[0]; 3], [slopes[1]; 3], law.stiffness())
+            let moduli=isotropic_thermal_moduli(values[0],values[1],slopes[0],slopes[1])?;
+            ([values[0]; 3], [values[1]; 3], [slopes[0]; 3], [slopes[1]; 3], law.stiffness(),Some(moduli))
         }
         ThermoelasticSymmetry::OrientedOrthotropic { .. } => {
             let e = [values[0], values[1], values[2]];
             let nu = [values[3], values[4], values[5]];
             let law = OrthotropicElastic::new(e, nu, [values[6], values[7], values[8]], limit)?;
-            (e, nu, [slopes[0], slopes[1], slopes[2]], [slopes[3], slopes[4], slopes[5]], law.stiffness())
+            (e, nu, [slopes[0], slopes[1], slopes[2]], [slopes[3], slopes[4], slopes[5]], law.stiffness(),None)
         }
     };
     let mut st = [[0.0; 3]; 3]; let mut stt = [[0.0; 3]; 3];
@@ -409,7 +413,7 @@ fn principal_stiffness(symmetry: ThermoelasticSymmetry, values: &[f64], slopes: 
     if c.iter().flatten().any(|x| !x.is_finite()) {
         return Err(ThermoelasticError::Invalid("native orthotropic stiffness is unrepresentable"));
     }
-    Ok((c, first, second))
+    Ok((c, first, second,isotropic_moduli))
 }
 
 // For affine E/G, D=3G-E is affine but K=EG/(3D) is rational. Ratios avoid
@@ -437,7 +441,7 @@ fn young_shear_bulk(e: f64, g: f64, et: f64, gt: f64)
 // C = 3 K P_vol + 2 G P_dev in Mandel coordinates. Form the diagonal
 // directly so a negative Lamé coupling cannot cancel the shear increment.
 // The same linear map applies to signed temperature derivatives.
-fn bulk_shear_matrix(bulk: f64, shear: f64) -> Result<Tangent6, ThermoelasticError> {
+pub(super) fn bulk_shear_matrix(bulk: f64, shear: f64) -> Result<Tangent6, ThermoelasticError> {
     let diagonal = finite(bulk + (4.0 / 3.0) * shear)?;
     let coupling = finite(bulk - (2.0 / 3.0) * shear)?;
     let distortion = finite(2.0 * shear)?;
@@ -573,6 +577,9 @@ pub(super) struct TensorThermalResponse {
     pub(super) stiffness_mandel_pa: Tangent6,
     pub(super) stiffness_derivative_mandel_pa_k: Tangent6,
     pub(super) stiffness_second_derivative_mandel_pa_k2: Tangent6,
+    // Source-declared isotropy survives independent expansion orientation.
+    // Never recover these modes by adding rounded tensor coefficients.
+    pub(super) isotropic_moduli: Option<IsotropicThermalModuli>,
     pub(super) free_strain_mandel: [f64; 6],
     pub(super) expansion_mandel_per_k: [f64; 6],
     pub(super) expansion_derivative_mandel_per_k2: [f64; 6],
