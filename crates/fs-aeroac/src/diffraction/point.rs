@@ -28,6 +28,8 @@ use core::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, PI, SQRT_2, TAU};
 use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::{c64::C64, dd::Dd, det};
 
+mod flow;
+
 /// The same physical p/Q and u/Q tolerances and bounded adaptive work controls
 /// used by the existing spherical-wave interface propagator.
 pub use crate::curle3d::refraction::full_wave::FullWaveMonopoleLimits as HalfPlaneMonopoleLimits;
@@ -60,6 +62,7 @@ pub struct HalfPlaneMonopoleDiagnostics {
 pub struct PreparedHalfPlaneMonopole {
     acoustic: FluidAcousticState,
     frequency_hz: f64,
+    edge_flow_velocity_m_s: f64,
     frame: HalfPlaneFrame,
     boundary: IdealPlaneBoundary,
     source_position_m: [f64; 3],
@@ -86,6 +89,45 @@ impl PreparedHalfPlaneMonopole {
         source_position_m: [f64; 3],
         receiver: HalfPlaneReceiver,
         limits: HalfPlaneMonopoleLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        Self::with_edge_parallel_flow(
+            acoustic,
+            frequency_hz,
+            frame,
+            boundary,
+            source_position_m,
+            receiver,
+            0.0,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// A stationary physical volume source in uniform subsonic mean flow
+    /// parallel to the sheet edge. The source and observation frequency remain
+    /// on the laboratory clock; the supplied velocity is the FLUID velocity.
+    ///
+    /// The source enters continuity as Q*delta, with no additional force or
+    /// vorticity injection. The original potential solves the convected wave
+    /// equation; p=-rho*(partial_t+U*partial_z)*phi and u=grad(phi).
+    /// A finite source contains all edge wave numbers, so its pressure and
+    /// velocity require the complete Lorentz transform, not one intrinsic
+    /// plane-wave frequency. The original material state is retained.
+    ///
+    /// # Errors
+    /// Supersonic/nonfinite flow, invalid original source geometry, unresolved
+    /// transformed coefficients/tolerances, exhausted work or cancellation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_edge_parallel_flow(
+        acoustic: FluidAcousticState,
+        frequency_hz: f64,
+        frame: HalfPlaneFrame,
+        boundary: IdealPlaneBoundary,
+        source_position_m: [f64; 3],
+        receiver: HalfPlaneReceiver,
+        edge_flow_velocity_m_s: f64,
+        limits: HalfPlaneMonopoleLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, AeroacError> {
         poll(&mut cancelled)?;
@@ -107,20 +149,38 @@ impl PreparedHalfPlaneMonopole {
         }
         let source = frame.local_receiver(HalfPlaneReceiver::WorldPosition(source_position_m))?;
         let point = frame.local_receiver(receiver)?;
-        let kernel = PointKernel::new(
-            source,
-            point,
-            k,
-            pressure_scale,
-            boundary,
-            frame.axes(),
-            controls,
-        )?;
-        let result = integrate_spectrum::<4, 1>(&kernel, [0.0; 4], controls, &mut cancelled)?;
+        let (result, minimum_edge_path_m) = if edge_flow_velocity_m_s == 0.0 {
+            // Keep the original zero-flow arithmetic and original world axes.
+            let kernel = PointKernel::new(
+                source,
+                point,
+                k,
+                pressure_scale,
+                boundary,
+                frame.axes(),
+                controls,
+            )?;
+            let result = integrate_spectrum::<4, 1>(&kernel, [0.0; 4], controls, &mut cancelled)?;
+            (result, kernel.distance)
+        } else {
+            flow::prepare(
+                acoustic,
+                k,
+                pressure_scale,
+                source,
+                point,
+                boundary,
+                frame.axes(),
+                edge_flow_velocity_m_s,
+                controls,
+                &mut cancelled,
+            )?
+        };
         poll(&mut cancelled)?;
         Ok(Self {
             acoustic,
             frequency_hz,
+            edge_flow_velocity_m_s,
             frame,
             boundary,
             source_position_m,
@@ -130,7 +190,7 @@ impl PreparedHalfPlaneMonopole {
                 evaluations: result.evaluations,
                 maximum_depth_reached: result.maximum_depth_reached,
                 retained_panels: result.retained_panels,
-                minimum_edge_path_m: kernel.distance,
+                minimum_edge_path_m,
                 pressure_quadrature_error_pa_per_m3_s: result.error[0],
                 velocity_quadrature_error_per_m2: [
                     result.error[1],
@@ -146,6 +206,13 @@ impl PreparedHalfPlaneMonopole {
     }
     pub const fn frequency_hz(&self) -> f64 {
         self.frequency_hz
+    }
+    /// Original uniform fluid velocity along the placed edge [m/s].
+    pub const fn edge_flow_velocity_m_s(&self) -> f64 {
+        self.edge_flow_velocity_m_s
+    }
+    pub fn mean_flow_velocity_m_s(&self) -> [f64; 3] {
+        self.frame.axes()[2].map(|axis| axis * self.edge_flow_velocity_m_s)
     }
     pub const fn frame(&self) -> HalfPlaneFrame {
         self.frame
@@ -198,8 +265,25 @@ impl PreparedHalfPlaneMonopole {
             particle_velocity_m_s: line.particle_velocity_m_s,
             active_intensity_w_m2: flux.map(|v| v.re),
             reactive_intensity_w_m2: flux.map(|v| v.im),
-            scope: SCOPE,
+            scope: if self.edge_flow_velocity_m_s == 0.0 {
+                SCOPE
+            } else {
+                flow::SCOPE
+            },
         })
+    }
+    /// Mean perturbation energy and laboratory transport from the same full
+    /// coherent field. The flux includes mean-flow advection U*<E> in addition
+    /// to the pressure work reported by evaluate().
+    pub fn evaluate_energy_transport(
+        &self,
+        volume_flow_m3_s: C64,
+    ) -> Result<crate::curle3d::energy::AcousticEnergyTransport, AeroacError> {
+        super::energy_transport(
+            self.acoustic,
+            self.mean_flow_velocity_m_s(),
+            self.evaluate_harmonic_line(volume_flow_m3_s)?,
+        )
     }
 }
 

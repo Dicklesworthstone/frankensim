@@ -4037,7 +4037,7 @@ source, placed ideal half-plane, receiver, material and positive frequency.
 It resolves the full three-dimensional Biot--Tolstoy/Sommerfeld Green function
 for rigid or pressure-release sheets, including spherical spreading, reactive
 near fields, geometrical shadow transitions and either explicit sheet face.
-The source clock is retained: `p/Q=-i*omega*rho*G` and `u/Q=-grad(G)`
+The stationary-fluid source clock is retained: `p/Q=-i*omega*rho*G` and `u/Q=-grad(G)`
 under exp(-i*omega*t). Velocity comes from differentiating the same field;
 there is no plane-wave pressure/impedance replacement or independent ray gain.
 
@@ -4070,11 +4070,10 @@ coherent composition before intensity or time-domain observation. Occluded
 image coincidence is finite; a visible source singularity, edge evaluation,
 source on the closed sheet, or ambiguous sheet-face receiver refuses.
 
-This is a stationary homogeneous lossless-fluid ideal half-plane solution.
-It adds no finite-barrier, impedance coating, arbitrary-wedge, moving-source,
-mean-flow, absorption or reciprocal source-loading approximation. The existing
-edge-parallel-flow plane-wave API remains separate because a finite source
-contains a continuum of edge wave numbers and intrinsic frequencies.
+The default entry point uses a stationary homogeneous lossless fluid. Its
+uniform edge-parallel-flow extension is described below. Neither entry point
+adds a finite-barrier, impedance coating, arbitrary-wedge, moving-source,
+absorption or reciprocal source-loading approximation.
 
 Eight focused native tests compile the exact new implementation, original
 plane-wave/frame owner, actual shared quadrature and fs-math, with the original
@@ -4097,3 +4096,52 @@ Fixed scratch preserves allocation-free observation and the existing supplied-li
 Eligible uniform pair observations use one shared union-frequency temporal factor, with zeros for absent receiver frequencies, original order for self-pairs and canonical order for cross-pairs. Pressure/pressure, pressure/velocity, velocity/pressure and velocity/velocity moments retain signed products and source-factor identity. Real time-average covariance comes from the constant mode; proper time-average covariance integrates the original DD carrier fields before scaled-half outer products.
 
 Queries remain allocation-free, with at most 64 analytic or 32 real union tones and 17 modes. Unsupported unions retain the original kernels. DD cancellation and finite modal truncation do not provide an arbitrary-null-relative or global array PSD certificate; different receiver pairs can select different temporal truncations. `tests/harmonic_array_short_band.rs` exercises self/local consistency, unequal-support phase and reciprocity, independent-factor zero covariance, physical-carrier averaging and finite peak normalization.
+
+## Finite source diffraction in uniform edge-parallel flow
+
+`PreparedHalfPlaneMonopole::with_edge_parallel_flow` extends the original
+point-source owner to uniform subsonic mean fluid motion along the placed
+straight edge. Source and sheet remain stationary; the original laboratory
+frequency, material snapshot, source amplitude, and world geometry are retained.
+The prescribed volume source enters continuity as Q*delta with no separate
+force or vorticity injection.
+
+For M=U/c and beta²=1-M², the exact potential Green function is
+`G_U=exp(-i*k*M*dz/beta²)*G_0(x',s';k/beta)/beta`, with z'=z/beta.
+The original ideal sheet is unchanged by this transform because the flow is
+tangent to its faces and edge. The potential gives
+`p/Q=rho*(-i*omega+U*partial_z)*G_U` and `u/Q=-grad(G_U)`.
+Thus pressure and axial velocity mix during the Lorentz transform; substituting
+one effective sound speed or one plane-wave intrinsic frequency is insufficient.
+The governing transform and free-space fundamental solution are Proposition 2.1
+and (2.2) of <https://www.waves.kit.edu/downloads/CRC1173_Preprint_2022-16.pdf>.
+
+The existing stationary contour, both shadow-transition regions and analytic
+gradients are reused. Every quadrature sample is transformed into actual
+world-space pressure and velocity BEFORE the original error test. Conservative
+back-propagated tolerances control only phase refinement of its tail.
+Double-double contractions retain cancellation between pressure and axial
+velocity contributions. The caller's evaluation, depth, allocation and
+cancellation bounds remain authoritative. Diagnostics retain physical geometric
+path length, not stretched coordinates. Zero flow uses the unchanged original
+kernel arithmetic and reproduces its prepared transfer exactly.
+
+`evaluate_energy_transport` uses the original coherent energy owner to report
+mean perturbation energy and laboratory flux `<p*u>+U*<E>`; `evaluate`
+continues to report signed active/reactive pressure work. Preparation adds no
+larger solve or sampled edge spectrum, and subsequent source amplitudes still
+use four cached complex products without allocation or quadrature.
+
+Six focused G1/G3 flow tests and all eight original stationary tests passed
+with the pinned July 6 compiler. Checks include the independent convected
+spherical Green function, momentum/continuity/convected-Helmholtz residuals,
+divergence-free mean energy transport away from the source, both sheet faces,
+flow-reversed reciprocity, distant-source convergence in pressure AND velocity,
+world/phase covariance, zero-flow parity and bounded refusals. This is an
+exact-source numerical leaf using the original fs-math, field, quadrature,
+frame and numerical material snapshot with narrowed error carriers; full
+Cargo/workspace validation was not executed in the storage-constrained session.
+
+Nonuniform/sheared or cross-edge flow, source motion, supersonic propagation,
+finite geometry, thermal/viscous bulk attenuation, and source feedback remain
+outside this admitted flow class.
