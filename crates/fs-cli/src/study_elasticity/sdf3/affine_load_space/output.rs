@@ -3,6 +3,8 @@ use super::*;
 
 #[path = "grid_assessment_output.rs"]
 mod grid_assessment_output;
+#[path = "grid_refinement_output.rs"]
+mod grid_refinement_output;
 #[path = "response_output.rs"]
 mod response_output;
 #[path = "strength_output.rs"]
@@ -182,13 +184,22 @@ pub(super) fn persist(
             "missing affine self-weight during publication",
         )
     })?;
-    let selection = if state.best.is_some() {
+    let source = grid_refinement_output::source(spec, ledger, state, producer)?;
+    let retain_source = state
+        .refinement
+        .as_ref()
+        .is_some_and(|context| context.uses_source_selection());
+    let working_selection = if state.best.is_some() {
         "least-material-feasible"
     } else {
         "last-accepted"
     };
-    let feasible = config.feasible(state.selected());
-    let selected = measurement(state.selected(), config, spec)?;
+    let working_feasible = config.feasible(state.selected());
+    let working_selected = measurement(state.selected(), config, spec)?;
+    let source_selection = source.as_ref().filter(|_| retain_source);
+    let selection = source_selection.map_or(working_selection, |s| s.selection.as_str());
+    let feasible = source_selection.map_or(working_feasible, |s| s.feasible);
+    let selected = source_selection.map_or(working_selected.as_str(), |s| s.measurement.as_str());
     let accepted = measurement(&state.accepted, config, spec)?;
     let strength_marker = if config.stress.is_some() {
         ",\"strength_constrained\":true"
@@ -200,11 +211,14 @@ pub(super) fn persist(
     } else {
         ""
     };
-    let design = format!(
-        "{{\"schema\":\"sdf3-affine-load-space-design.v1\"{strength_marker}{response_marker},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"selected\":{},\"last_accepted\":{}}}",
+    let working_design = format!(
+        "{{\"schema\":\"sdf3-affine-load-space-design.v1\"{strength_marker}{response_marker},\"selected_design\":{working_selection:?},\"selected_feasible\":{working_feasible},\"selected\":{},\"last_accepted\":{}}}",
         fields(study, state.selected(), spec)?,
         fields(study, &state.accepted, spec)?
     );
+    // Never serialize a source point against the candidate operator. The
+    // installed design remains the immutable source artifact until promotion.
+    let design = source_selection.map_or(working_design.as_str(), |s| s.design.as_str());
     let mut history = String::new();
     let mut table = String::new();
     for (i, row) in state.history.iter().enumerate() {
@@ -271,8 +285,13 @@ pub(super) fn persist(
         gradient.work.preconditioner_operator_applications,
         gradient.work.preconditioner_galerkin_products
     );
+    let evaluation_scope = if state.refinement.is_some() {
+        "working-grid optimizer and restored endpoint evaluations; each grid has its declared evaluation allowance, while gradient probes, fresh rechecks and all grids share cumulative physical allowances"
+    } else {
+        "optimizer and restored endpoint evaluations; initial gradient probes share the original Krylov and wall allowances"
+    };
     let optimizer = format!(
-        "{{\"iterations\":{},\"evaluations\":{},\"multiplier_updates\":{},\"rejected_trials\":{},\"restoration_evaluations\":{},\"evaluation_budget_scope\":\"optimizer and restored endpoint evaluations; initial gradient probes share the original Krylov and wall allowances\"}}",
+        "{{\"iterations\":{},\"evaluations\":{},\"multiplier_updates\":{},\"rejected_trials\":{},\"restoration_evaluations\":{},\"evaluation_budget_scope\":{evaluation_scope:?}}}",
         state.optimizer.iterations,
         state.optimizer.evaluations,
         state.optimizer.multiplier_updates,
@@ -296,13 +315,27 @@ pub(super) fn persist(
     let assessment_model = spec.affine_grid_assessment.map_or_else(String::new, |p| {
         format!(",\"grid_assessment\":{}", grid_assessment_output::policy(p))
     });
-    let assessment = grid_assessment_output::render(spec, state)?;
+    let refinement_model = spec.affine_grid_refinement.map_or_else(String::new, |p| {
+        format!(",\"grid_refinement\":{}", grid_refinement_output::policy(p))
+    });
+    let assessment = match source_selection {
+        Some(source) => Some((source.assessment.clone(), source.assessment_html()?)),
+        None => grid_assessment_output::render(spec, state)?,
+    };
     let assessment_json = assessment.as_ref().map_or_else(String::new, |(json, _)| {
         format!(",\"grid_assessment\":{json}")
     });
     let assessment_html = assessment.as_ref().map_or("", |(_, html)| html.as_str());
+    let refinement = source
+        .as_ref()
+        .map(|source| grid_refinement_output::render(spec, study, state, source, &working_selected))
+        .transpose()?;
+    let refinement_json = refinement.as_ref().map_or_else(String::new, |(json, _)| {
+        format!(",\"grid_refinement\":{json}")
+    });
+    let refinement_html = refinement.as_ref().map_or("", |(_, html)| html.as_str());
     let model = format!(
-        "{{\"force_set\":\"f=B*rho_eroded+Fq, ||q||_2<=1\",\"dead_offset\":\"zero\",\"basis_columns\":{},\"material_density_kg_m3\":{},\"acceleration_m_s2\":{:?},\"compliance_limit_j\":{},\"threshold_offset\":{},\"nominal_threshold\":{},\"penal\":{},\"beta\":{},\"constraint_material\":\"eroded\",\"objective_material\":\"dilated\",\"oracle_max_iterations\":{},\"oracle_tolerance\":{},\"oracle_separation_tolerance\":{},\"strength_constraint\":{strength_model},\"joint_sharpness\":{:.17e}{response_model}{assessment_model}}}",
+        "{{\"force_set\":\"f=B*rho_eroded+Fq, ||q||_2<=1\",\"dead_offset\":\"zero\",\"basis_columns\":{},\"material_density_kg_m3\":{},\"acceleration_m_s2\":{:?},\"compliance_limit_j\":{},\"threshold_offset\":{},\"nominal_threshold\":{},\"penal\":{},\"beta\":{},\"constraint_material\":\"eroded\",\"objective_material\":\"dilated\",\"oracle_max_iterations\":{},\"oracle_tolerance\":{},\"oracle_separation_tolerance\":{},\"strength_constraint\":{strength_model},\"joint_sharpness\":{:.17e}{response_model}{assessment_model}{refinement_model}}}",
         spec.loads.len(),
         law.density_kg_m3,
         law.acceleration_m_s2,
@@ -317,7 +350,7 @@ pub(super) fn persist(
         config.joint_sharpness
     );
     let summary = format!(
-        "{{\"driver\":{AFFINE_LOAD_SPACE3_DRIVER:?},\"study_id\":{:?},\"status\":{:?},\"optimization_status\":{:?},\"objective\":\"dilated-volume-fraction\",\"objective_unit\":\"1\",\"iterations_completed\":{},\"target_iterations\":{},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"selected\":{selected},\"last_accepted\":{accepted},\"model\":{model},\"gradient_check\":{check},\"optimizer_work\":{optimizer},\"work\":{work},\"stop\":{stop}{assessment_json},\"resume_supported\":true,\"resume_mode\":{:?},\"producer\":{:?},\"authority\":\"Estimated\",\"no_claim\":{}}}",
+        "{{\"driver\":{AFFINE_LOAD_SPACE3_DRIVER:?},\"study_id\":{:?},\"status\":{:?},\"optimization_status\":{:?},\"objective\":\"dilated-volume-fraction\",\"objective_unit\":\"1\",\"iterations_completed\":{},\"target_iterations\":{},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"selected\":{selected},\"last_accepted\":{accepted},\"model\":{model},\"gradient_check\":{check},\"optimizer_work\":{optimizer},\"work\":{work},\"stop\":{stop}{assessment_json}{refinement_json},\"resume_supported\":true,\"resume_mode\":{:?},\"producer\":{:?},\"authority\":\"Estimated\",\"no_claim\":{}}}",
         spec.id.to_hex(),
         state.status,
         state.optimization_status,
@@ -339,12 +372,22 @@ pub(super) fn persist(
         }
         _ => String::new(),
     };
+    let constraints_html = match source_selection {
+        Some(source) => format!(
+            "{}<section><h2>Working grid constraint results</h2><p>The following selected and last-accepted values describe the working grid's own optimizer archive, separately from the installed source design.</p>{strength_html}{response_html}</section>",
+            source.selected_constraints_html()?
+        ),
+        None => format!("{strength_html}{response_html}"),
+    };
+    let selected_volume =
+        source_selection.map_or(chosen.physical.dilated_volume_fraction, |s| s.volume);
+    let selected_compliance = source_selection.map_or(chosen.worst_compliance, |s| s.compliance);
     let html = format!(
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>3-D minimum material with self-weight and uncertain loads</title><body><h1>3-D minimum material with self-weight and uncertain loads</h1><p>Status: {}. Optimization status: {}. Estimated numerical results.</p><p>Selected design: {selection}; cap-feasible over the declared affine load set: {feasible}.</p><p>The selected design has dilated volume fraction {:.8e} and worst compliance {:.8e} J. The last accepted iterate has dilated volume fraction {:.8e} and worst compliance {:.8e} J; optimizer stopping and KKT diagnostics apply to that iterate.</p><p>Worst compliance must be at most {:.8e} J. The common self-weight changes with eroded occupancy; all simultaneous external-force combinations in the declared unit ball are considered.</p>{strength_html}{response_html}{assessment_html}<p>{SCOPE}</p><table><tr><th>Update</th><th>Dilated volume fraction</th><th>Worst compliance / limit</th><th>Joint constraint</th><th>Feasible</th></tr>{table}</table></body></html>",
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>3-D minimum material with self-weight and uncertain loads</title><body><h1>3-D minimum material with self-weight and uncertain loads</h1><p>Status: {}. Optimization status: {}. Estimated numerical results.</p><p>Selected design: {selection}; cap-feasible over the declared affine load set: {feasible}.</p><p>The selected design has dilated volume fraction {:.8e} and worst compliance {:.8e} J. The last accepted iterate has dilated volume fraction {:.8e} and worst compliance {:.8e} J; optimizer stopping and KKT diagnostics apply to that iterate.</p><p>Worst compliance must be at most {:.8e} J. The common self-weight changes with eroded occupancy; all simultaneous external-force combinations in the declared unit ball are considered.</p>{refinement_html}{constraints_html}{assessment_html}<p>{SCOPE}</p><table><tr><th>Update</th><th>Dilated volume fraction</th><th>Worst compliance / limit</th><th>Joint constraint</th><th>Feasible</th></tr>{table}</table></body></html>",
         state.status,
         state.optimization_status,
-        chosen.physical.dilated_volume_fraction,
-        chosen.worst_compliance,
+        selected_volume,
+        selected_compliance,
         latest.physical.dilated_volume_fraction,
         latest.worst_compliance,
         config.cap_j
@@ -357,12 +400,16 @@ pub(super) fn persist(
         ),
         &constellation,
     ));
-    for (name, payload) in [
+    let mut claims = vec![
         ("source", spec.canonical.as_str()),
         ("report_json", summary.as_str()),
-        ("design", design.as_str()),
+        ("design", design),
         ("iterations", rows.as_str()),
-    ] {
+    ];
+    if state.refinement.is_some() {
+        claims.push(("working_design", working_design.as_str()));
+    }
+    for (name, payload) in claims {
         package = package.with_claim(fs_package::Claim::estimated(
             format!("study.sdf3-affine-load-space.{name}"),
             format!(
@@ -383,8 +430,8 @@ pub(super) fn persist(
     let package = package
         .to_json()
         .map_err(|e| fail("cli-study-sdf3-package", e.to_string()))?;
-    let checkpoint = resume::encode(spec, state, producer, &design, &rows);
-    let artifacts = [
+    let checkpoint = resume::encode(spec, state, producer, &working_design, &rows);
+    let mut artifacts = vec![
         ("iterations", "study-iterations", rows.as_bytes()),
         ("design", "study-design", design.as_bytes()),
         ("report_html", "study-report-html", html.as_bytes()),
@@ -392,6 +439,9 @@ pub(super) fn persist(
         ("package", "study-package", package.as_bytes()),
         ("checkpoint", resume::KIND, checkpoint.as_bytes()),
     ];
+    if state.refinement.is_some() {
+        artifacts.push(("working_design", "study-design", working_design.as_bytes()));
+    }
     if artifacts
         .iter()
         .any(|(_, _, bytes)| bytes.len() as u64 > MAX_ARTIFACT_BYTES)
@@ -422,6 +472,12 @@ pub(super) fn persist(
         rows.as_bytes(),
     );
     let predecessor = previous.map_or_else(|| "null".into(), |p| quoted(&p.to_hex()));
+    let refinement_context = state
+        .refinement
+        .as_ref()
+        .map_or_else(String::new, |context| {
+            format!(",\"grid_refinement\":{}", context.json())
+        });
     ledger.begin()?;
     let result = (|| -> Result<Outcome> {
         let op = ledger.begin_op(Some(spec.id.as_bytes()),
@@ -431,16 +487,25 @@ pub(super) fn persist(
         if let Some(previous) = previous {
             ledger.link(op, &previous, EdgeRole::In)?;
         }
+        if let Some(context) = &state.refinement {
+            if previous != Some(context.source_receipt) {
+                ledger.link(op, &context.source_receipt, EdgeRole::In)?;
+            }
+        }
         let source = ledger.put_artifact("study-source", spec.canonical.as_bytes(), None)?;
         ledger.link(op, &source.hash, EdgeRole::In)?;
         let mut refs = String::new();
+        let mut linked_outputs = Vec::with_capacity(artifacts.len());
         for (name, kind, bytes) in artifacts {
             let artifact = ledger.put_artifact(kind, bytes, None)?;
-            ledger.link(op, &artifact.hash, EdgeRole::Out)?;
+            if !linked_outputs.contains(&artifact.hash) {
+                ledger.link(op, &artifact.hash, EdgeRole::Out)?;
+                linked_outputs.push(artifact.hash);
+            }
             let _ = write!(refs, ",{name:?}:\"{}\"", artifact.hash.to_hex());
         }
         let receipt = format!(
-            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"driver\":{AFFINE_LOAD_SPACE3_DRIVER:?},\"study_id\":{:?},\"status\":{:?},\"optimization_status\":{:?},\"source\":{:?},\"iterations_completed\":{},\"target_iterations\":{},\"iteration_limit_this_invocation\":{limit},\"trace_hash\":{:?},\"consumed_wall_s\":{},\"work\":{work},\"optimizer_work\":{optimizer},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"stop\":{stop},\"predecessor\":{predecessor},\"resume_supported\":true,\"resume_mode\":{:?},\"producer\":{:?}{refs}}}",
+            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"driver\":{AFFINE_LOAD_SPACE3_DRIVER:?},\"study_id\":{:?},\"status\":{:?},\"optimization_status\":{:?},\"source\":{:?},\"iterations_completed\":{},\"target_iterations\":{},\"iteration_limit_this_invocation\":{limit},\"trace_hash\":{:?},\"consumed_wall_s\":{},\"work\":{work},\"optimizer_work\":{optimizer},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"stop\":{stop},\"predecessor\":{predecessor},\"resume_supported\":true,\"resume_mode\":{:?},\"producer\":{:?}{refinement_context}{refs}}}",
             spec.id.to_hex(),
             state.status,
             state.optimization_status,

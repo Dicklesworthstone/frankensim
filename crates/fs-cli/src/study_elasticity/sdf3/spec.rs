@@ -66,6 +66,8 @@ pub(super) struct Spec {
     pub affine_responses: Option<responses::Family>,
     /// A separate native enriched-grid check of the selected physical design.
     pub affine_grid_assessment: Option<affine_load_space::grid_assessment::Policy>,
+    /// One bounded finer-grid redesign with its own native optimizer allowance.
+    pub affine_grid_refinement: Option<affine_load_space::grid_refinement::Policy>,
 }
 
 fn invalid(message: impl Into<String>) -> Failure {
@@ -161,7 +163,7 @@ fn linear_solver(node: &Node) -> Result<solver::Policy> {
 pub(super) fn parse(source: &str) -> Result<Spec> {
     let root = fs_ir::sexpr::parse(source).map_err(|e| invalid(e.to_string()))?;
     let items = super::super::list(&root, "3-D study")?;
-    if !(13..=19).contains(&items.len())
+    if !(13..=20).contains(&items.len())
         || !matches!(&items[0].kind, NodeKind::Symbol(s) if s == "fsim-sdf3-study")
         || !matches!(&items[1].kind, NodeKind::Keyword(s) if s == "version")
         || !matches!(items[2].kind, NodeKind::Int(1))
@@ -371,23 +373,24 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
     let mut affine_strength = false;
     let mut affine_responses = None;
     let mut affine_grid_assessment = None;
+    let mut affine_grid_refinement = None;
     for node in &items[13..] {
         let section = super::super::list(node, "optional 3-D study section")?;
         match section.first().map(|n| &n.kind) {
             Some(NodeKind::Symbol(name)) if name == "design-regions"
                 && region_node.is_none() && matches!(solver, solver::Policy::Legacy)
                 && material_acceleration.is_none() && !affine_strength && affine_responses.is_none()
-                && affine_grid_assessment.is_none() => {
+                && affine_grid_assessment.is_none() && affine_grid_refinement.is_none() => {
                 region_node = Some(node);
             }
             Some(NodeKind::Symbol(name)) if name == "linear-solver"
                 && matches!(solver, solver::Policy::Legacy) && material_acceleration.is_none()
-                && !affine_strength && affine_responses.is_none() && affine_grid_assessment.is_none() => {
+                && !affine_strength && affine_responses.is_none() && affine_grid_assessment.is_none() && affine_grid_refinement.is_none() => {
                 solver = linear_solver(node)?;
             }
             Some(NodeKind::Symbol(name)) if name == "material-acceleration"
                 && material_acceleration.is_none() && !affine_strength && affine_responses.is_none()
-                && affine_grid_assessment.is_none() => {
+                && affine_grid_assessment.is_none() && affine_grid_refinement.is_none() => {
                 let values = fields(node, "material-acceleration", &[
                     "density-kg-m3", "acceleration-m-s2", "max-stencil-terms",
                 ])?;
@@ -399,7 +402,7 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
             }
             Some(NodeKind::Symbol(name)) if name == "affine-strength"
                 && !affine_strength && material_acceleration.is_some() && affine_responses.is_none()
-                && affine_grid_assessment.is_none() => {
+                && affine_grid_assessment.is_none() && affine_grid_refinement.is_none() => {
                 let config = affine_load_space.as_mut().ok_or_else(||
                     invalid("affine-strength requires affine-load-space-limited-simp"))?;
                 let values = fields(node, "affine-strength", &[
@@ -420,7 +423,7 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
             }
             Some(NodeKind::Symbol(name)) if name == "affine-responses"
                 && affine_responses.is_none() && material_acceleration.is_some()
-                && affine_grid_assessment.is_none() => {
+                && affine_grid_assessment.is_none() && affine_grid_refinement.is_none() => {
                 let config = affine_load_space.as_mut().ok_or_else(||
                     invalid("affine-responses requires affine-load-space-limited-simp"))?;
                 let (family, joint_sharpness) = responses::parse(node)?;
@@ -433,7 +436,7 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
             }
             Some(NodeKind::Symbol(name)) if name == "affine-grid-assessment"
                 && affine_grid_assessment.is_none() && material_acceleration.is_some()
-                && affine_load_space.is_some() => {
+                && affine_load_space.is_some() && affine_grid_refinement.is_none() => {
                 let values = fields(node, "affine-grid-assessment", &[
                     "max-transfer-terms", "compliance-change-tolerance", "response-change-tolerance",
                     "stress-change-tolerance", "inventory-change-tolerance",
@@ -446,7 +449,16 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
                     inventory_tolerance: scalar(values[4])?,
                 });
             }
-            _ => return Err(invalid("optional sections must be design-regions, linear-solver, material-acceleration, affine-strength, affine-responses, then affine-grid-assessment, without duplicates or unknown fields")),
+            Some(NodeKind::Symbol(name)) if name == "affine-grid-refinement"
+                && affine_grid_assessment.is_some() && affine_grid_refinement.is_none() => {
+                let values = fields(node, "affine-grid-refinement", &[
+                    "max-updates", "max-optimizer-evaluations",
+                ])?;
+                affine_grid_refinement = Some(affine_load_space::grid_refinement::Policy {
+                    max_updates: count(values[0])?, max_evaluations: count(values[1])?,
+                });
+            }
+            _ => return Err(invalid("optional sections must be design-regions, linear-solver, material-acceleration, affine-strength, affine-responses, affine-grid-assessment, then affine-grid-refinement, without duplicates or unknown fields")),
         }
     }
     let canonical = fs_ir::sexpr::print(&root).map_err(|e| invalid(e.to_string()))?;
@@ -468,7 +480,7 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
         leaves: count(physics[3])?, youngs: scalar(physics[4])?, poisson: scalar(physics[5])?, formulation,
         loads, surfaces, material_acceleration, density, volume, radius, updates, move_limit, marking, max_marks,
         schedule, regions: Vec::new(), solver, stress, stress_measure, load_space, affine_load_space,
-        affine_responses, affine_grid_assessment,
+        affine_responses, affine_grid_assessment, affine_grid_refinement,
     };
     // Validate the physical frame and grid envelope before deriving any indices.
     spec.validate()?;
@@ -495,13 +507,14 @@ impl Spec {
         {
             return Err(invalid("wall, memory, Krylov or quadrature budget exceeds the admitted envelope"));
         }
+        let leaf_limit = if self.affine_grid_refinement.is_some() { 4096 } else { 2048 };
         if !(1..=2).contains(&self.level)
             || !(self.level..=5).contains(&self.max_level)
-            || !(8usize.pow(self.level)..=2048).contains(&self.leaves)
+            || !(8usize.pow(self.level)..=leaf_limit).contains(&self.leaves)
             || (self.stress.is_none() && self.load_space.is_none() && self.affine_load_space.is_none()
                 && !(1..=8).contains(&self.max_marks))
         {
-            return Err(invalid("initial octree level must be 1..=2, maximum 5, at most 2048 leaves and 1..=8 marks"));
+            return Err(invalid("initial octree level must be 1..=2, maximum 5, at most 2048 leaves (4096 with affine-grid-refinement) and 1..=8 adaptive marks"));
         }
         self.solver.validate(self.level)?;
         if let Some(law) = self.material_acceleration {
@@ -524,6 +537,7 @@ impl Spec {
             .saturating_add(self.material_acceleration.map_or(0, |law| law.memory_envelope()))
             .saturating_add(self.affine_responses.as_ref().map_or(0, |family| family.memory_envelope()))
             .saturating_add(self.affine_grid_assessment.map_or(0, |policy| policy.memory_envelope(self)))
+            .saturating_add(self.affine_grid_refinement.map_or(0, |policy| policy.memory_envelope(self)))
             .saturating_add(self.solver.memory_envelope(self.level));
         if admitted_memory > self.memory {
             return Err(invalid("declared memory is too small for the requested geometry/field/solver envelope"));

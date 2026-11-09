@@ -184,7 +184,7 @@ pub(super) fn run(
             loading::build_operator(spec, bounds, grid, domain, &material, quadrature)
                 .map_err(GoalRefinementError3::from)
         };
-        let corrections = solver::correction_spaces(spec, &mut build, &mut poll)?;
+        let corrections = grid_refinement::corrections(spec, tree, &mut build, &mut poll)?;
         let operator = build(&fine_tree, &mut poll)?;
         out.fine_cells = operator.cells();
         out.fine_dofs = operator.n();

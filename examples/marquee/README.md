@@ -255,6 +255,43 @@ and VTU fields remain those of the selected initial-grid design. This example
 checks numerical grid dependence; it does not claim a mesh-independent optimum
 or a continuum strength/serviceability certificate.
 
+## Automatic finer-grid redesign of the joint affine problem
+
+`bracket-3d-affine-grid-refinement.fsim` extends the assessed joint design with
+one automatic native refit. After the source optimizer converges or finishes
+its declared update allowance, a feasible selected design with a checked but
+unresolved grid assessment starts a finer-grid candidate. The candidate inherits
+raw density controls and protected regions, refilters on its own grid, rebuilds
+material self-weight and preserves every original physical constraint.
+
+```sh
+frankensim --json study examples/marquee/bracket-3d-affine-grid-refinement.fsim refined.db --budget 2
+frankensim --json study --resume study-<receipt-hash> refined.db --budget 2
+frankensim --json report study-<receipt-hash> refined.db
+```
+
+The final `affine-grid-refinement` section declares candidate `max-updates` and
+`max-optimizer-evaluations`. The invocation `--budget` caps additional accepted
+updates across both source and candidate; it never renews either optimizer's
+allowance. Geometry, linear-solver work and wall time remain cumulative. The
+example reserves level 3 and 512 leaves for the candidate and its own subsequent
+probe, with a 2 GiB memory admission allowance.
+
+`grid_refinement.phase` distinguishes `preparing`, `candidate` and `promoted`.
+Throughout preparation and candidate optimization, the selected `design` and
+VTU remain exactly the original source design. `working_design` and its native
+checkpoint retain the finer candidate separately. Resume restores that candidate's
+accepted state, feasible archive and original gradient audit without repeating
+its earlier updates. Reports keep the two grids' histories and quotas separate.
+
+Promotion requires a completed candidate allowance and a fresh complete-family
+recheck passing compliance, every signed response, sampled strength and the joint
+constraint. The promoted design then receives a new finer-grid assessment;
+promotion alone does not establish grid convergence. Read that assessment and
+`optimization_status` alongside the phase. The CLI attempts one refit, retains
+stopped prefixes for bounded continuation and does not claim cross-grid material
+descent or a continuum optimum.
+
 ## Thermal cooling-hole radius study
 
 `thermal-2d.fsim` runs normalized scalar Poisson physics through the CLI,

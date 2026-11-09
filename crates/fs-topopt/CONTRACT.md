@@ -759,6 +759,17 @@ including positive values for infeasible designs, while refusing inconsistent
 constraint bindings. The strict feasibility gate uses these same values;
 normalization and change tolerances do not relax any physical bound.
 
+`prepare_affine_load_space_refit_with_constraints` exposes the same checked
+refit preparation independently of optimizer execution. Its seed contains the
+actual finer study and literal parent-inherited raw controls, after material,
+region, filter, transfer, response and native acceleration admission. Preparation
+does not run a gradient experiment or solve equilibrium. Callers can then retain
+bounded slices of the existing `AffineLoadSpaceDesign3` owner. An admitted
+`AffineLoadSpaceRefit3` also retains its exact live optimizer checkpoint after
+updates and the optional fresh physical recheck, including interrupted prefixes.
+Restoration belongs to that same physical grid; it preserves the original audit,
+accepted history and feasible archive without transferring AL state across grids.
+
 `affine_load_space::campaign::AffineLoadSpaceCampaign3` automatically repeats
 full assessment and refitting for BOTH design goals. Its original physical cap,
 objective, filter/SIMP parameters, pure dead/basis laws and native acceleration

@@ -24,8 +24,10 @@ mod resume;
 mod response_binding;
 #[path = "affine_load_space/grid_assessment.rs"]
 pub(super) mod grid_assessment;
+#[path = "affine_load_space/grid_refinement.rs"]
+pub(super) mod grid_refinement;
 
-const SCOPE: &str = "Estimated fixed-grid linear-elastic minimum-material design for f=B*rho_eroded+Fq, ||q||_2<=1. The common load is native material self-weight at eroded occupancy; no separate dead load is authored. The force columns retain physical amplitudes and correlations, not probabilities. A bounded quadratic-ball solve selects the complete affine compliance witness; its primal/dual gap and residuals are numerical diagnostics, not certified bounds. Eroded material supplies stiffness and self-weight; dilated material supplies the minimized volume. With self-weight, erosion is not asserted to be the worst manufacturing realization. When strength is declared, each retained bulk quadrature point has its own adverse load direction; an unweighted p-norm bounds both relaxed and physical sampled stresses over the load ball in exact arithmetic. The declared allowable is not inferred from stiffness. Signed displacement and support-reaction limits use each inequality's own adverse load over the same full affine ball. Displacement means use each grid's reference cut volume; support forces are numerical tractions on the solid and moments are signed about the authored reference origin. Compliance, responses and strength share one conservative joint constraint and the same physical primal fields. Initial full-chain objective and constraint gradients are independently checked. Hard or unresolved load maximizers cannot supply a smooth gradient. Only accepted points passing every declared physical cap and the complete joint constraint enter the least-material archive; KKT values describe the last accepted point. Accepted results are retained before more optimization. An optional active-cell uniform enrichment re-solves the entire affine load family and assesses every original response and sampled strength while inheriting physical occupancy. Separate change gates and strict physical caps apply on both grids; the initial-grid optimizer remains unchanged. Failed assessment preserves its accepted checkpoint and charged work for a bounded retry. Cross-process resume restores accepted optimizer state under the same source and executable, verifies the native physical-problem binding, rebuilds geometry and re-solves the accepted and distinct feasible incumbent endpoints against the original work allowances. Earlier optimizer steps and the initial gradient experiment are not replayed. Failed restoration and uncheckpointed work lost after a crash cannot be durably charged; previous results remain intact. Individual kernels and ledger writes are indivisible; wall and cancellation limits are cooperative. Memory is an admission envelope. No continuum stress maximum, buckling, continuum-error, manufacturing-tolerance, global design-optimality, safety or experimental-validation claim.";
+const SCOPE: &str = "Estimated fixed-grid linear-elastic minimum-material design for f=B*rho_eroded+Fq, ||q||_2<=1. The common load is native material self-weight at eroded occupancy; no separate dead load is authored. The force columns retain physical amplitudes and correlations, not probabilities. A bounded quadratic-ball solve selects the complete affine compliance witness; its primal/dual gap and residuals are numerical diagnostics, not certified bounds. Eroded material supplies stiffness and self-weight; dilated material supplies the minimized volume. With self-weight, erosion is not asserted to be the worst manufacturing realization. When strength is declared, each retained bulk quadrature point has its own adverse load direction; an unweighted p-norm bounds both relaxed and physical sampled stresses over the load ball in exact arithmetic. The declared allowable is not inferred from stiffness. Signed displacement and support-reaction limits use each inequality's own adverse load over the same full affine ball. Displacement means use each grid's reference cut volume; support forces are numerical tractions on the solid and moments are signed about the authored reference origin. Compliance, responses and strength share one conservative joint constraint and the same physical primal fields. Initial full-chain objective and constraint gradients are independently checked. Hard or unresolved load maximizers cannot supply a smooth gradient. Only accepted points passing every declared physical cap and the complete joint constraint enter the least-material archive; KKT values describe the last accepted point. Accepted results are retained before more optimization. An optional active-cell uniform enrichment re-solves the entire affine load family and assesses every original response and sampled strength while inheriting physical occupancy. Separate change gates and strict physical caps apply on both grids; an optional single bounded native refit then optimizes inherited raw controls on an unresolved enriched grid, with separate optimizer allowances and cumulative physical work. Its source design stays selected until a complete fresh candidate recheck passes, after which the promoted design receives its own finer-grid assessment. Failed assessment preserves its accepted checkpoint and charged work for a bounded retry. Cross-process resume restores accepted optimizer state under the same source and executable, verifies the native physical-problem binding, rebuilds geometry and re-solves the accepted and distinct feasible incumbent endpoints against the original work allowances. Earlier optimizer steps and the initial gradient experiment are not replayed. Failed restoration and uncheckpointed work lost after a crash cannot be durably charged; previous results remain intact. Individual kernels and ledger writes are indivisible; wall and cancellation limits are cooperative. Memory is an admission envelope. No continuum stress maximum, buckling, continuum-error, manufacturing-tolerance, global design-optimality, safety or experimental-validation claim.";
 
 const GOAL: AffineLoadSpaceDesignGoal3 = AffineLoadSpaceDesignGoal3::MinimumMaterial {
     objective: MinimumMaterialObjective3::VolumeFraction,
@@ -73,6 +75,9 @@ impl Config {
             family.validate(spec)?;
         }
         if let Some(policy) = spec.affine_grid_assessment {
+            policy.validate(spec)?;
+        }
+        if let Some(policy) = spec.affine_grid_refinement {
             policy.validate(spec)?;
         }
         self.options
@@ -142,6 +147,9 @@ struct State {
     status: &'static str,
     optimization_status: &'static str,
     assessment: Option<grid_assessment::Outcome>,
+    refinement: Option<grid_refinement::Context>,
+    refinement_recheck: Option<std::result::Result<AffineLoadSpaceDesignPoint3, EvaluationStop>>,
+    refinement_failure: Option<String>,
     checkpoint: AffineLoadSpaceDesignCheckpoint3,
 }
 impl State {
@@ -161,6 +169,9 @@ impl State {
             status: "checkpointed",
             optimization_status: "checkpointed",
             assessment: None,
+            refinement: None,
+            refinement_recheck: None,
+            refinement_failure: None,
             checkpoint: design.checkpoint(),
         }
     }
@@ -195,6 +206,7 @@ impl State {
 struct Computation {
     study: CutDensityStudy3<AdaptiveSolveSpace3>,
     state: State,
+    tree: Octree3,
 }
 
 fn numerical_failure(
@@ -233,6 +245,19 @@ fn compute_observed(
     limit: usize,
     recovery: Option<&resume::Recovery>,
     preparation_wall_s: f64,
+    observed: impl FnMut(&CutDensityStudy3<AdaptiveSolveSpace3>, &State) -> Result<()>,
+) -> Result<Computation> {
+    compute_on_grid(spec, gate, limit, recovery, preparation_wall_s, None, observed)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compute_on_grid(
+    spec: &Spec,
+    gate: &CancelGate,
+    limit: usize,
+    recovery: Option<&resume::Recovery>,
+    preparation_wall_s: f64,
+    prepared: Option<grid_refinement::Prepared>,
     mut observed: impl FnMut(&CutDensityStudy3<AdaptiveSolveSpace3>, &State) -> Result<()>,
 ) -> Result<Computation> {
     let config = spec.affine_load_space.ok_or_else(|| {
@@ -243,12 +268,15 @@ fn compute_observed(
     })?;
     config.validate(spec)?;
     let policy = config.policy(spec.loads.len())?;
-    let prior = recovery.map_or(Spent::default(), |r| r.spent).add(
+    let context = prepared.as_ref().map(|p| p.context.clone())
+        .or_else(|| recovery.and_then(|r| r.refinement.clone()));
+    let prior = prepared.as_ref().map(|p| p.spent)
+        .unwrap_or_else(|| recovery.map_or(Spent::default(), |r| r.spent)).add(
         SolveWork::default(),
         QuadratureWork3::default(),
         preparation_wall_s,
     )?;
-    prior.validate(spec)?;
+    prior.require_remaining(spec)?;
     let start = Instant::now();
     let poll = || {
         if gate.is_requested() || prior.wall_s + start.elapsed().as_secs_f64() >= spec.wall_s {
@@ -268,8 +296,11 @@ fn compute_observed(
             },
         });
     }
-    let tree = Octree3::uniform(spec.level as u8, spec.max_level as u8, spec.leaves)
-        .map_err(|e| fail("cli-study-sdf3-background", e.to_string()))?;
+    let tree = match &prepared {
+        Some(prepared) => prepared.tree.clone(),
+        None => grid_refinement::tree(spec, context.as_ref(), &poll)
+            .map_err(|e| grid_refinement::numerical(e, gate, poll().is_break()))?,
+    };
     let legacy = Domain {
         height: spec.height,
         curvature: spec.curvature,
@@ -293,37 +324,40 @@ fn compute_observed(
         &mut cp,
     )
     .map_err(|e| fail("cli-study-sdf3-geometry", e.to_string()))?;
-    let prepared = (|| -> std::result::Result<AdaptiveSolveSpace3, GoalRefinementError3> {
-        let mut build = |grid: &Octree3, checkpoint: &mut dyn FnMut() -> ControlFlow<()>| {
-            if checkpoint().is_break() {
-                return Err(EvaluationStop::Cancelled.into());
-            }
-            loading::build_operator(spec, bounds, grid, domain, &material, &mut quadrature)
-                .map_err(GoalRefinementError3::from)
-        };
-        let corrections = solver::correction_spaces(spec, &mut build, &mut || poll())?;
-        let operator = build(&tree, &mut || poll())?;
-        let refs: Vec<_> = corrections.iter().collect();
-        spec.solver.wrap(operator, &refs, || poll())
-    })();
-    let operator = prepared.map_err(|e| Failure {
-        code: "cli-study-sdf3-geometry",
-        message: e.to_string(),
-        exit: if gate.is_requested() {
-            exit::CANCELLED
-        } else if poll().is_break() || geometry_budget(&e) || solver::setup_budget(&e) {
-            exit::BUDGET
-        } else {
-            exit::REFUSED
-        },
-    })?;
+    let (mut study, raw) = if let Some(prepared) = prepared {
+        (prepared.study, prepared.inherited_rho)
+    } else {
+        let operator = (|| -> std::result::Result<AdaptiveSolveSpace3, GoalRefinementError3> {
+            let mut build = |grid: &Octree3, checkpoint: &mut dyn FnMut() -> ControlFlow<()>| {
+                if checkpoint().is_break() {
+                    return Err(EvaluationStop::Cancelled.into());
+                }
+                loading::build_operator(spec, bounds, grid, domain, &material, &mut quadrature)
+                    .map_err(GoalRefinementError3::from)
+            };
+            let corrections = grid_refinement::corrections(spec, &tree, &mut build, &mut || poll())?;
+            let operator = build(&tree, &mut || poll())?;
+            let refs: Vec<_> = corrections.iter().collect();
+            spec.solver.wrap(operator, &refs, || poll())
+        })().map_err(|e| Failure {
+            code: "cli-study-sdf3-geometry",
+            message: e.to_string(),
+            exit: if gate.is_requested() {
+                exit::CANCELLED
+            } else if poll().is_break() || geometry_budget(&e) || solver::setup_budget(&e) {
+                exit::BUDGET
+            } else {
+                exit::REFUSED
+            },
+        })?;
+        let study = regions::bind(
+            CutDensityStudy3::new(operator, spec.radius, spec.schedule[0]), spec,
+        )?;
+        let study = loading::bind_material_acceleration(study, spec, gate, || poll())?;
+        let raw = vec![spec.density; study.cells()];
+        (study, raw)
+    };
     let geometry = quadrature.work();
-    let study = regions::bind(
-        CutDensityStudy3::new(operator, spec.radius, spec.schedule[0]),
-        spec,
-    )?;
-    let mut study = loading::bind_material_acceleration(study, spec, gate, || poll())?;
-    let raw = vec![spec.density; study.cells()];
     let mut cp = |_| poll();
     let mut control = SolveControl::new(
         SolveBudget {
@@ -397,6 +431,7 @@ fn compute_observed(
             .map_err(|e| numerical_failure(e, gate, poll().is_break()))?;
             let result = design.run(0);
             let mut state = State::capture(&design, result);
+            state.refinement = context.clone();
             if let Some(recovery) = recovery.filter(|r| r.optimizer_finished(spec)) {
                 if let (Some(report), Some(stop)) = (&mut state.report, recovery.optimizer_stop) {
                     // Restoring an endpoint is not a new search that can
@@ -419,6 +454,35 @@ fn compute_observed(
                 observed(design.study(), &state)?;
                 let result = design.run(1);
                 state = State::capture(&design, result);
+                state.refinement = context.clone();
+            }
+            match context.as_ref().map(|c| c.phase) {
+                Some(grid_refinement::Phase::Candidate) if state.error.is_none()
+                    && state.report.as_ref().is_some_and(|r| r.stop == ProjectedAlStop::Converged
+                        || (r.stop == ProjectedAlStop::IterationLimit
+                            && state.optimizer.iterations == spec.updates)) => {
+                    // Save the complete accepted candidate before its independent
+                    // physical recheck. A failed check never installs its fields.
+                    state.spent = prior.add(design.work(), geometry, start.elapsed().as_secs_f64())?;
+                    state.optimization_status = recovery.filter(|r| r.optimizer_finished(spec))
+                        .map_or_else(|| state.terminal(config, gate, state.spent.wall_s >= spec.wall_s),
+                            |r| r.optimization_status);
+                    observed(design.study(), &state)?;
+                    state.refinement_recheck = Some(design.recheck_best().and_then(|point| point.ok_or(
+                        EvaluationStop::Breakdown { stage: "cli-sdf3-affine-refinement-no-feasible-candidate" }
+                    )));
+                    state.checkpoint = design.checkpoint();
+                }
+                Some(grid_refinement::Phase::Promoted) => {
+                    // Restore independently solved both native retained endpoints;
+                    // keep that evidence without replaying an optimizer experiment.
+                    if !config.feasible(state.selected()) {
+                        return Err(fail("cli-study-sdf3-refinement",
+                            "restored promoted design failed its complete physical caps"));
+                    }
+                    state.refinement_recheck = Some(Ok(state.selected().clone()));
+                }
+                _ => {}
             }
             Ok(state)
         })
@@ -428,7 +492,17 @@ fn compute_observed(
         .map_or_else(|| state.terminal(config, gate, state.spent.wall_s >= spec.wall_s),
             |r| r.optimization_status);
     state.status = state.optimization_status;
-    if let Some(assessment) = spec.affine_grid_assessment {
+    if let Some(Err(error)) = &state.refinement_recheck {
+        state.status = if gate.is_requested() { "cancelled" }
+            else if state.spent.wall_s >= spec.wall_s
+                || matches!(error, EvaluationStop::LinearBudget { .. } | EvaluationStop::TotalBudget { .. })
+            { "budget-exhausted" }
+            else if matches!(error, EvaluationStop::Cancelled) { "cancelled" }
+            else { "numerical-failure" };
+        state.refinement_failure = Some(error.to_string());
+    }
+    if let Some(assessment) = spec.affine_grid_assessment.filter(|_| context.as_ref()
+        .is_none_or(|c| c.phase == grid_refinement::Phase::Promoted)) {
         // Retain the complete accepted AL slice before any enriched physics.
         // Pending assessment is not a claim of full study completion.
         state.status = "checkpointed";
@@ -437,7 +511,7 @@ fn compute_observed(
             &mut quadrature, &mut control, gate, &poll);
         state.spent = prior.add(control.work(), quadrature.work(), start.elapsed().as_secs_f64())?;
     }
-    Ok(Computation { study, state })
+    Ok(Computation { study, state, tree })
 }
 
 pub(super) fn drive(
@@ -446,7 +520,11 @@ pub(super) fn drive(
     cap: Option<usize>,
     gate: &CancelGate,
 ) -> Result<Outcome> {
-    resume::drive(spec, ledger, cap, gate, None)
+    if spec.affine_grid_refinement.is_some() {
+        grid_refinement::drive(spec, ledger, cap, gate, None)
+    } else {
+        resume::drive(spec, ledger, cap, gate, None)
+    }
 }
 
 pub(super) fn resume(
@@ -459,7 +537,11 @@ pub(super) fn resume(
     let source = std::str::from_utf8(&source)
         .map_err(|e| fail("cli-study-sdf3-affine-load-space-checkpoint", e.to_string()))?;
     let spec = spec::parse(source)?;
-    resume::drive(&spec, ledger, cap, gate, Some(old))
+    if spec.affine_grid_refinement.is_some() {
+        grid_refinement::drive(&spec, ledger, cap, gate, Some(old))
+    } else {
+        resume::drive(&spec, ledger, cap, gate, Some(old))
+    }
 }
 
 #[cfg(test)]
@@ -477,3 +559,7 @@ mod response_tests;
 #[cfg(test)]
 #[path = "affine_load_space/grid_assessment_tests.rs"]
 mod grid_assessment_tests;
+
+#[cfg(test)]
+#[path = "affine_load_space/grid_refinement_tests.rs"]
+mod grid_refinement_tests;

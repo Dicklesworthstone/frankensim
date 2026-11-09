@@ -12,7 +12,8 @@ pub(super) struct Recovery {
     pub(super) spent: Spent,
     pub(super) optimization_status: &'static str,
     pub(super) optimizer_stop: Option<ProjectedAlStop>,
-    assessment_checked: bool,
+    pub(super) assessment_checked: bool,
+    pub(super) refinement: Option<grid_refinement::Context>,
 }
 impl Recovery {
     pub(super) fn optimizer_finished(&self, spec: &Spec) -> bool {
@@ -24,7 +25,7 @@ impl Recovery {
 fn invalid(message: impl Into<String>) -> Failure {
     fail("cli-study-sdf3-affine-load-space-checkpoint", message)
 }
-fn status(value: Option<&str>) -> Result<&'static str> {
+pub(super) fn status(value: Option<&str>) -> Result<&'static str> {
     match value {
         Some("completed") => Ok("completed"),
         Some("no-feasible-descent") => Ok("no-feasible-descent"),
@@ -92,8 +93,10 @@ pub(super) fn encode(
         .best_feasible_density
         .as_ref()
         .map_or_else(|| "null".into(), |v| format!("{v:?}"));
+    let refinement = state.refinement.as_ref().map_or_else(String::new,
+        |context| format!(",\"grid_refinement\":{}", context.json()));
     format!(
-        "{{\"schema\":{SCHEMA:?},\"study_id\":{:?},\"producer\":{:?},\"binding\":{:?},\"design\":{:?},\"iterations\":{:?},\"restoration_evaluations\":{},\"point\":{:?},\"best_feasible_density\":{best},\"sample\":{{\"objective\":{:.17e},\"constraint\":{:.17e},\"gradient\":{:?},\"constraint_gradient\":{:?}}},\"work\":{{\"iterations\":{},\"evaluations\":{},\"multiplier_updates\":{},\"rejected_trials\":{}}},\"multiplier\":{:.17e},\"penalty\":{:.17e},\"spectral_step\":{:.17e},\"inner_tolerance\":{:.17e},\"previous_violation\":{previous}}}",
+        "{{\"schema\":{SCHEMA:?},\"study_id\":{:?},\"producer\":{:?},\"binding\":{:?},\"design\":{:?},\"iterations\":{:?},\"restoration_evaluations\":{},\"point\":{:?},\"best_feasible_density\":{best},\"sample\":{{\"objective\":{:.17e},\"constraint\":{:.17e},\"gradient\":{:?},\"constraint_gradient\":{:?}}},\"work\":{{\"iterations\":{},\"evaluations\":{},\"multiplier_updates\":{},\"rejected_trials\":{}}},\"multiplier\":{:.17e},\"penalty\":{:.17e},\"spectral_step\":{:.17e},\"inner_tolerance\":{:.17e},\"previous_violation\":{previous}{refinement}}}",
         spec.id.to_hex(),
         producer.to_hex(),
         c.binding.to_hex(),
@@ -157,8 +160,82 @@ fn gradient(report: &JsonValue, spec: &Spec) -> Result<AffineLoadSpaceGradientCh
     Ok(check)
 }
 
-fn recover(spec: &Spec, ledger: &Ledger, old: &Loaded, producer: ContentHash) -> Result<Recovery> {
+/// Reconstruct only the immutable source topology, never its physics or AL
+/// history. This prevents a retained mark list from silently changing which
+/// cells the resumed candidate enriches.
+fn verify_refinement_source(
+    spec: &Spec, ledger: &Ledger, old: &Loaded, producer: ContentHash,
+    context: &grid_refinement::Context,
+) -> Result<()> {
+    let source = load(ledger, &format!("study-{}", context.source_receipt.to_hex()))?;
+    let receipt = &source.value;
+    let op = ledger.artifact_output_seal(&old.hash)?
+        .ok_or_else(|| invalid("unsealed refinement receipt"))?;
+    if source.hash == old.hash || !ledger.edge_exists(op, &source.hash, EdgeRole::In)?
+        || receipt.str_field("driver") != Some(AFFINE_LOAD_SPACE3_DRIVER)
+        || receipt.str_field("study_id") != Some(spec.id.to_hex().as_str())
+        || receipt.str_field("producer") != Some(producer.to_hex().as_str())
+        || receipt.str_field("source") != Some(hash_bytes(spec.canonical.as_bytes()).to_hex().as_str())
+        || receipt.get("grid_refinement").is_some()
+        || integer(receipt, "target_iterations")? != spec.updates
+        || receipt.get("selected_feasible") != Some(&JsonValue::Bool(true))
+        || (context.uses_source_selection() && old.value.str_field("design") != receipt.str_field("design"))
+        || (!context.uses_source_selection()
+            && old.value.str_field("design") != old.value.str_field("working_design"))
+    {
+        return Err(invalid("refinement source, selection or original grid identity changed"));
+    }
+    let report = document(&linked(ledger, receipt, "report_json", "study-report-json")?)?;
+    let assessment = field(&report, "grid_assessment")?;
+    let finished = match field(&report, "stop")?.str_field("reason") {
+        Some("Converged") => true,
+        Some("IterationLimit") => integer(receipt, "iterations_completed")? == spec.updates,
+        _ => false,
+    };
+    if !finished || report.get("selected_feasible") != Some(&JsonValue::Bool(true))
+        || assessment.str_field("status") != Some("checked")
+        || assessment.get("passed") != Some(&JsonValue::Bool(false))
+    {
+        return Err(invalid("refinement source is not a completed feasible unresolved grid endpoint"));
+    }
+    let design = document(&linked(ledger, receipt, "design", "study-design")?)?;
+    let cells = field(field(&design, "selected")?, "cells")?.as_array()
+        .ok_or_else(|| invalid("missing source active cells"))?;
+    if cells.is_empty() || cells.len() != context.source_marks.len() {
+        return Err(invalid("refinement marks do not cover the source active cells"));
+    }
+    let tree = Octree3::uniform(spec.level as u8, spec.max_level as u8, spec.leaves)
+        .map_err(|e| invalid(e.to_string()))?;
+    let background: Vec<_> = tree.leaves().iter().copied().collect();
+    let mut marks = Vec::with_capacity(cells.len());
+    for cell in cells {
+        if integer(cell, "level")? != spec.level as usize {
+            return Err(invalid("refinement source is not the original uniform grid"));
+        }
+        let index = field(cell, "index")?.as_array()
+            .filter(|v| v.len() == 3).ok_or_else(|| invalid("invalid source cell index"))?;
+        let mut coordinates = [0u32; 3];
+        for (coordinate, value) in coordinates.iter_mut().zip(index) {
+            *coordinate = value.as_f64().filter(|v| v.is_finite() && *v >= 0.0
+                && *v < (1u32 << spec.level) as f64 && v.fract() == 0.0)
+                .ok_or_else(|| invalid("invalid source cell coordinate"))? as u32;
+        }
+        marks.push(background.iter().position(|leaf| leaf.index() == coordinates)
+            .ok_or_else(|| invalid("source cell is absent from original background"))?);
+    }
+    marks.sort_unstable();
+    if marks != context.source_marks {
+        return Err(invalid("retained refinement marks changed the source topology"));
+    }
+    Ok(())
+}
+
+pub(super) fn recover(original: &Spec, ledger: &Ledger, old: &Loaded, producer: ContentHash) -> Result<Recovery> {
     let receipt = &old.value;
+    let refinement = grid_refinement::Context::read(original, receipt)?;
+    let effective = grid_refinement::effective_spec(original, refinement.as_ref())?;
+    let spec = &effective;
+    let design_key = if refinement.is_some() { "working_design" } else { "design" };
     if receipt.str_field("resume_mode") != Some(MODE)
         || receipt.get("resume_supported") != Some(&JsonValue::Bool(true))
     {
@@ -190,12 +267,24 @@ fn recover(spec: &Spec, ledger: &Ledger, old: &Loaded, producer: ContentHash) ->
     if data.str_field("schema") != Some(SCHEMA)
         || data.str_field("study_id") != receipt.str_field("study_id")
         || data.str_field("producer") != receipt.str_field("producer")
-        || data.str_field("design") != receipt.str_field("design")
+        || data.str_field("design") != receipt.str_field(design_key)
+        || data.get("grid_refinement") != receipt.get("grid_refinement")
         || data.str_field("iterations") != receipt.str_field("iterations")
     {
         return Err(invalid(
             "affine checkpoint does not bind its source, fields and history",
         ));
+    }
+    // Validate the same sealed working artifact that the native checkpoint
+    // binds. The public source design may belong to a different grid.
+    let design_hash = receipt.str_field(design_key).and_then(ContentHash::from_hex)
+        .ok_or_else(|| invalid("missing retained working design"))?;
+    if !ledger.edge_exists(op, &design_hash, EdgeRole::Out)? {
+        return Err(invalid("working design is not an output of the checkpoint operation"));
+    }
+    linked(ledger, receipt, design_key, "study-design")?;
+    if let Some(context) = &refinement {
+        verify_refinement_source(original, ledger, old, producer, context)?;
     }
     let binding = data
         .str_field("binding")
@@ -255,6 +344,9 @@ fn recover(spec: &Spec, ledger: &Ledger, old: &Loaded, producer: ContentHash) ->
         "report_json",
         "study-report-json",
     )?)?;
+    if grid_refinement::Context::read(original, &report)? != refinement {
+        return Err(invalid("retained report and checkpoint grid contexts disagree"));
+    }
     let optimization_status = status(receipt.str_field("optimization_status")
         .or_else(|| receipt.str_field("status")))?;
     let optimizer_stop = match field(&report, "stop")?.str_field("reason") {
@@ -321,7 +413,7 @@ fn recover(spec: &Spec, ledger: &Ledger, old: &Loaded, producer: ContentHash) ->
     };
     let spent = Spent::read(receipt)?;
     spent.validate(spec)?;
-    Ok(Recovery { checkpoint, spent, optimization_status, optimizer_stop, assessment_checked })
+    Ok(Recovery { checkpoint, spent, optimization_status, optimizer_stop, assessment_checked, refinement })
 }
 
 pub(super) fn drive(

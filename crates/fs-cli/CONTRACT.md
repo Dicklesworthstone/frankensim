@@ -2133,7 +2133,7 @@ support capacity.
 
 ### Enriched-grid assessment of the complete affine design
 
-An optional final `affine-grid-assessment` section rechecks the selected design
+An optional `affine-grid-assessment` section rechecks the selected design
 after a retained optimizer slice on a uniformly enriched active grid:
 
 ```lisp
@@ -2187,6 +2187,64 @@ the native endpoint verification work required for restoration. Existing design
 and VTU fields describe the selected initial-grid design; the assessment is a
 separate physical recheck and does not promote a fine-grid optimum. The joint
 example is `examples/marquee/bracket-3d-affine-grid-assessment.fsim`.
+
+### Bounded automatic refinement of the complete affine design
+
+An optional final section after `affine-grid-assessment` enables one native
+finer-grid redesign:
+
+```lisp
+(affine-grid-refinement
+  :max-updates 20
+  :max-optimizer-evaluations 500)
+```
+
+Candidate updates lie in `1..=1024`, and candidate optimizer evaluations in
+`2..=10000`. The original grid envelope must admit two further uniform levels:
+one for the candidate, another for its final full-family assessment. This mode
+admits at most 4096 leaves, while other CLI modes keep their existing 2048-leaf
+limit. The conservative memory envelope includes simultaneous refinement,
+response, strength, native body-map and correction-ladder storage. The authored
+initial level remains the reference for physical regions and observation bands;
+the actual working tree determines the numerical hierarchy and exported fields.
+
+A candidate starts only after source convergence or completion of the authored
+source update allowance, with a physically feasible selected design and a checked
+unresolved assessment. Stalled, penalty-limited, interrupted or failed source
+optimization does not authorize a refit. The native preparation owner transfers
+literal raw controls and physical region labels, preserves filter/SIMP/material
+identity, and rebuilds material acceleration on the actual finer grid. Each grid
+reintegrates the original reference loads and response laws, including its own
+reference cut-volume normalization. No coarse primal, adjoint or AL state is
+prolonged into the candidate optimizer.
+
+The source and candidate have separate explicit AL allowances. `--budget` counts
+additional accepted updates across both within one invocation. Geometry, linear
+iterations and elapsed time spend the original cumulative physical allowances;
+linear solves and preconditioner applications/setup products also retain
+cumulative work counters. A retained preparation intent fixes one
+candidate identity; completed seed-preparation cost is retained before candidate
+gradient admission. Failed gradient admission or restoration can still consume
+uncheckpointed work, as described by the existing restoration limitation.
+
+Receipts retain `grid_refinement` context, exact original source marks and the
+source receipt. `preparing` retains source AL state; `candidate` retains the
+actual finer-grid checkpoint, history, audit and feasible archive. Restoration
+reconstructs the bound topology, validates the original source and independently
+re-solves the native endpoints. It neither repeats completed AL updates nor
+reruns the admitted gradient experiment. The immutable public `design` remains
+byte-identical to the source until promotion, while `working_design` binds the
+live optimizer fields. Both artifacts are sealed outputs. Reports explicitly
+identify the grids of selected, last-accepted and gradient-check evidence.
+
+Only a completed candidate allowance plus a fresh complete-family native check
+passing every original physical cap and joint constraint authorizes `promoted`.
+Promotion is retained before a fresh candidate-to-finer assessment. An interrupted
+final probe can therefore resume without repeating the candidate optimization;
+a completed final probe is idempotent on resume. The original source assessment
+never substitutes for this probe. One promotion is the CLI bound, not a claim of
+grid convergence, cross-grid objective descent or continuum feasibility.
+`examples/marquee/bracket-3d-affine-grid-refinement.fsim` demonstrates the input.
 
 ### Scientific field export for 3-D studies
 
