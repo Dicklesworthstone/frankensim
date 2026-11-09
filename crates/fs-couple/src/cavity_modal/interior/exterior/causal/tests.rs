@@ -163,10 +163,164 @@ fn original_box_bake_prepares_and_advances_its_own_full_field_and_volume_source(
     assert!(heard);
     assert_eq!(time.accepted_steps(), 4);
 
+    quadratic_feeds_preserve_the_original_radiation_and_signed_work(
+        &fe,
+        &owner,
+        &source,
+        time_limits,
+        &gate,
+    );
+
     let cancelled = CancelGate::new();
     cancelled.request();
     assert!(matches!(
         owner.prepare(&[], &[&source], &[], time_limits, &cancelled),
+        Err(CausalRadiationError::Geometry(RadiationError::Cancelled))
+    ));
+}
+
+fn quadratic_feeds_preserve_the_original_radiation_and_signed_work(
+    fe: &HelmholtzFe<'_>,
+    owner: &BoundCausalRadiation<'_, '_>,
+    volume: &VolumeVelocitySource<'_, '_, '_>,
+    limits: CausalTimeLimits,
+    gate: &CancelGate,
+) {
+    use fs_feec::acoustics::helmholtz::heterogeneous::HeterogeneousError;
+
+    let face = fe
+        .boundary_faces()
+        .into_iter()
+        .find(|f| f.iter().all(|&v| fe.positions()[v as usize][0] == 0.03))
+        .unwrap();
+    let shape = [0.0, 0.0, 0.0, 1.0, -1.0, 0.0];
+    let source = owner
+        .field()
+        .quadratic_velocity_source(&[(face, shape)], &mut || false)
+        .unwrap();
+    assert!(source.integrated_shape_m2().abs() < 1e-18);
+    assert!(source.has_nonzero_projection());
+
+    // For g=4 lambda0 lambda1 - 4 lambda1 lambda2, the three exact P1
+    // pressure moments are area/15 * [1,0,-1]. The independent linear
+    // profile 4/5 * (lambda0-lambda2) has precisely those moments. This
+    // analytic equivalence checks all full-field coordinates and the loaded
+    // history without inspecting or reusing the quadratic source's weights.
+    let equivalent = vec![(face, [0.8, 0.0, -0.8])];
+    let independent_load = fe.boundary_linear_load(&equivalent).unwrap();
+    let mut ports = owner.ports().to_vec();
+    ports.push(ExactVelocityPort {
+        profile: equivalent,
+    });
+    let mut reference = CausalInteriorTime::new(
+        owner.field(),
+        owner.load().time_step_s(),
+        &[],
+        &ports,
+        owner.exterior_ports(),
+        &[volume],
+        &[],
+        CausalExteriorLoad::Rational(owner.load().clone()),
+        limits,
+        &mut || false,
+    )
+    .unwrap();
+    let mut actual = owner
+        .prepare_with_boundary_sources(&[], &[&source], &[volume], &[], limits, gate)
+        .unwrap();
+    assert_eq!(actual.driven_ports(), &[1]);
+    assert_eq!(actual.exterior_ports(), owner.exterior_ports());
+    assert_eq!(actual.interior().port_count(), 2);
+
+    for (velocity, injection) in [(0.002, 0.0), (-0.001, 1e-7), (0.0, -1e-7), (0.0, 0.0)] {
+        let before = actual.state().pressure_potential_pa_s().to_vec();
+        let step = actual
+            .step(&[velocity], &[injection], &mut || false)
+            .unwrap();
+        let expected = reference
+            .step(&[velocity], &[injection], &mut || false)
+            .unwrap();
+        let pressure_scale = actual
+            .state()
+            .pressure_pa()
+            .iter()
+            .chain(reference.state().pressure_pa())
+            .fold(1e-8_f64, |scale, p| scale.max(p.abs()));
+        for (&a, &b) in actual
+            .state()
+            .pressure_pa()
+            .iter()
+            .zip(reference.state().pressure_pa())
+        {
+            assert!((a - b).abs() < 5e-9 * pressure_scale);
+        }
+        let feed_work = velocity
+            * independent_load
+                .iter()
+                .zip(&before)
+                .zip(actual.state().pressure_potential_pa_s())
+                .map(|((&weight, &start), &end)| weight * (end - start))
+                .sum::<f64>();
+        let scale = step
+            .work
+            .source_work_j
+            .abs()
+            .max(step.work.delta_fluid_energy_j.abs())
+            .max(step.work.exterior_exchange_work_j.abs())
+            .max(1e-24);
+        assert!((step.work.boundary_drive_work_j - feed_work).abs() < 4e-8 * scale);
+        assert!(
+            (step.work.source_work_j - feed_work - step.work.volume_source_work_j).abs()
+                < 4e-8 * scale
+        );
+        assert!(
+            (step.work.exterior_exchange_work_j - expected.work.exterior_exchange_work_j).abs()
+                < 4e-8 * scale
+        );
+        assert!(step.work.balance_residual_j().abs() < 4e-8 * scale);
+    }
+    assert!(actual.state().pressure_pa().iter().any(|p| p.abs() > 1e-9));
+    assert_eq!(actual.accepted_steps(), 4);
+    let fresh = owner
+        .prepare_with_boundary_sources(&[], &[&source], &[volume], &[], limits, gate)
+        .unwrap();
+    assert_eq!(fresh.accepted_steps(), 0);
+    assert!(fresh.state().pressure_pa().iter().all(|&p| p == 0.0));
+    let CausalExteriorLoad::Rational(load) = fresh.exterior() else {
+        panic!()
+    };
+    assert_eq!(load.pole_states(), owner.load().pole_states());
+
+    // Equal coefficients and geometry do not authorize a substituted owner.
+    let foreign = HeterogeneousHelmholtzFe::new::<AcousticFeError>(
+        fe,
+        3,
+        &mut |_, _| Ok(fe.medium()),
+        &mut || false,
+    )
+    .unwrap();
+    let foreign_source = foreign
+        .quadratic_velocity_source(&[(face, shape)], &mut || false)
+        .unwrap();
+    assert!(matches!(
+        owner.prepare_with_boundary_sources(&[], &[&foreign_source], &[volume], &[], limits, gate),
+        Err(CausalRadiationError::Time(CausalTimeError::Interior(
+            HeterogeneousError::Acoustic(AcousticFeError::InvalidInput { .. })
+        )))
+    ));
+    let opening_face = owner.ports()[0].profile[0].0;
+    let overlap = owner
+        .field()
+        .quadratic_velocity_source(&[(opening_face, shape)], &mut || false)
+        .unwrap();
+    assert!(matches!(
+        owner.prepare_with_boundary_sources(&[], &[&overlap], &[volume], &[], limits, gate),
+        Err(CausalRadiationError::Time(CausalTimeError::Invalid(_)))
+    ));
+    let cancelled = CancelGate::new();
+    cancelled.request();
+    assert!(matches!(
+        owner.prepare_with_boundary_sources(&[], &[&source], &[volume], &[], limits, &cancelled),
         Err(CausalRadiationError::Geometry(RadiationError::Cancelled))
     ));
 }

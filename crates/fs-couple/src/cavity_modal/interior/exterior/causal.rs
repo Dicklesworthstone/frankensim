@@ -33,7 +33,7 @@ use fs_feec::acoustics::helmholtz::AcousticFeError;
 use fs_feec::acoustics::helmholtz::heterogeneous::time::ResistiveBoundary;
 use fs_feec::acoustics::helmholtz::heterogeneous::time::exact::ExactVelocityPort;
 use fs_feec::acoustics::helmholtz::heterogeneous::{
-    HeterogeneousHelmholtzFe, VolumeVelocitySource,
+    BoundaryVelocitySource, HeterogeneousHelmholtzFe, VolumeVelocitySource,
 };
 use fs_feec::acoustics::helmholtz::multiport::BoundaryMode;
 use fs_math::{c64::C64, det};
@@ -134,9 +134,9 @@ fn invalid(what: &'static str) -> CausalRadiationError {
 /// One immutable physical field/mode definition, original exterior samples,
 /// measured rational-order ladder, and zero-history native exact-ZOH load.
 ///
-/// Construct volume sources and probes from field(); prepare() then binds
-/// those original source owners to this same complete pressure field. Separate
-/// prepared simulations have independent native load histories.
+/// Construct volume sources, quadratic boundary sources and probes from field();
+/// preparation binds those original owners to this same complete pressure field.
+/// Separate prepared simulations have independent native load histories.
 pub struct BoundCausalRadiation<'f, 'c> {
     field: HeterogeneousHelmholtzFe<'f, 'c>,
     ports: Vec<ExactVelocityPort>,
@@ -301,12 +301,49 @@ impl<'f, 'c> BoundCausalRadiation<'f, 'c> {
         limits: CausalTimeLimits,
         gate: &CancelGate,
     ) -> Result<CausalInteriorTime<'_, 'f, 'c>, CausalRadiationError> {
+        self.prepare_with_boundary_sources(
+            boundaries,
+            &[],
+            volume_sources,
+            pressure_release_faces,
+            limits,
+            gate,
+        )
+    }
+
+    /// Drive the original BEM-loaded time field with complete quadratic inward
+    /// boundary motion and volume injection, without rebuilding the exterior.
+    ///
+    /// Prepare every source through `field()`. The native exact FE owner keeps
+    /// its original cached spatial projection, including midside-only and signed
+    /// zero-net-flow shapes; no corner interpolation or area normalization is
+    /// performed. Held real boundary amplitudes have units m/s, and their signed
+    /// work is already included once in `CausalTimeWork::boundary_drive_work_j`.
+    ///
+    /// Original unselected linear ports remain first in `driven_ports()` order,
+    /// followed by these sources in supplied order. BEM mode indices, native
+    /// force/velocity units and fitted load states remain unchanged. A supplied
+    /// boundary source is a prescribed interior feed, so it cannot share any
+    /// exterior opening face, even when its full integral or amplitude is zero.
+    /// Pressure-release, owner-identity, resource and cancellation refusals pass
+    /// through the original exact-time closure. A successful preparation starts
+    /// a separate zero-history load; advancing it never changes this template.
+    pub fn prepare_with_boundary_sources(
+        &self,
+        boundaries: &[ResistiveBoundary],
+        boundary_sources: &[&BoundaryVelocitySource<'_, '_, '_>],
+        volume_sources: &[&VolumeVelocitySource<'_, '_, '_>],
+        pressure_release_faces: &[[u32; 3]],
+        limits: CausalTimeLimits,
+        gate: &CancelGate,
+    ) -> Result<CausalInteriorTime<'_, 'f, 'c>, CausalRadiationError> {
         poll(gate)?;
-        CausalInteriorTime::new(
+        CausalInteriorTime::new_with_boundary_sources(
             &self.field,
             self.load.time_step_s(),
             boundaries,
             &self.ports,
+            boundary_sources,
             &self.exterior_ports,
             volume_sources,
             pressure_release_faces,

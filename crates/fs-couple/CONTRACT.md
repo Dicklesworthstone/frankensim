@@ -959,6 +959,38 @@ direct radiation from a moving structural wall requires its own reciprocal
 coupling. Prescribed injection does not infer combustion, mean-flow sources,
 acoustic startup or a causal realization.
 
+## Original quadratic feeds in source-bound causal radiation
+
+`BoundCausalRadiation::prepare_with_boundary_sources` binds original six-node
+boundary motion and volume injection to its complete pressure field and the
+same admitted full self/mutual BEM realization. Sources must be prepared
+through `field()`. The original exact-time owner uses their cached spatial
+columns without resampling faces, discarding midsides, dividing by net flow,
+refitting an exterior or replacing the native propagation algorithm.
+
+Original prescribed linear feeds precede the supplied quadratic feeds. Held
+real boundary amplitudes are inward velocity [m/s], while volume amplitudes
+remain m^3/s. The native exact pressure-trajectory contraction includes their
+signed source work once; there is no harmonic half factor. All pressure
+coordinates, local wall loss, exterior history and same-interval reciprocal
+reaction remain in the original accepted step. The fitted source's finite-band
+accuracy, passivity class and held-flow exchange limits are unchanged.
+
+These extra sources act on interior feed faces. Their support cannot overlap
+the original exterior openings even for zero integral or amplitude. They
+cannot silently become new BEM modes or radiating wall patches. Exact source
+identity, release-face exclusions, full-state budgets and cancellation retain
+their native refusals. Each preparation has independent zero exterior history;
+advancing one leaves the admitted source template reusable.
+
+The existing native BEM bake regression now also exercises a signed, purely
+midside feed with zero net volume flow. An independent analytic P1 projection
+checks the complete transient pressure field, boundary work and exterior
+exchange with simultaneous volume injection, followed by original-owner,
+overlap, fresh-history and cancellation checks. Formatting and source review
+completed; the required sibling dependency manifest remains absent, so the
+extended regression has not been compiled or executed.
+
 ## Distributed injection drives full structural and exterior fields
 
 `HeterogeneousHelmholtzFe::project_source_load` supplies the original signed
