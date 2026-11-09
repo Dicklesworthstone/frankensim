@@ -1400,6 +1400,7 @@ dependencies = [
  "fs-ivl",
  "fs-la",
  "fs-material",
+ "fs-math",
  "fs-solver",
  "fs-sparse",
 ]

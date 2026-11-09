@@ -708,3 +708,6 @@ mod entropy;
 
 #[path = "cutfem_thermal_stress_sensitivity/linear_response.rs"]
 mod linear_response;
+
+#[path = "cutfem_thermal_stress_sensitivity/finite_exchange.rs"]
+mod finite_exchange;

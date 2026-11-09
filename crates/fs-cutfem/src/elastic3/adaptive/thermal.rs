@@ -12,6 +12,7 @@ use crate::elastic3::thermal::ThermoelasticResponse3;
 
 mod entropy;
 mod equilibrium;
+mod exchange;
 mod jacobian;
 mod sensitivity;
 mod stress;

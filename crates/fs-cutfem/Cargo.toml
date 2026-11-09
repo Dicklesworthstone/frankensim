@@ -22,6 +22,7 @@ fs-blake3 = { path = "../fs-blake3" }
 fs-ivl = { path = "../fs-ivl" }
 fs-la = { path = "../fs-la" }
 fs-material = { path = "../fs-material" }
+fs-math = { path = "../fs-math" }
 fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
 

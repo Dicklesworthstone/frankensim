@@ -26,7 +26,7 @@ pub use tensor::{AffineThermoelastic, ThermoelasticSymmetry};
 
 /// Retained finite thermal work and energy on the original source potential.
 pub mod exchange;
-pub use exchange::ThermoelasticExchange;
+pub use exchange::{PreparedThermoelasticExchange, ThermoelasticExchange};
 
 /// Prepared native mechanical views of the original frozen thermal potential.
 pub mod mechanics;

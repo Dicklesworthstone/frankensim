@@ -82,6 +82,7 @@ fn dot(a: &[Dd; 6], b: &[Dd; 6]) -> Dd {
 
 // Original source-declared modes must survive even when the rounded dense
 // normal block cannot represent the weak bulk or shear coefficient.
+#[derive(Debug)]
 enum Operator {
     Isotropic { bulk: Dd, shear: Dd },
     Tensor([[Dd; 6]; 6]),
@@ -137,31 +138,42 @@ fn operators(
     )))
 }
 
+/// One original thermal interval, resolved once and reusable at bulk points.
+///
+/// Source/card resolution, exact coefficient increments and thermal derivatives
+/// are prepared once. Evaluation retains the ordinary source strain admission
+/// and potential; it performs no material lookup and allocates no point storage.
+/// Reference volume is supplied per evaluation so retained quadrature weights
+/// can be streamed without constructing an array of point responses.
+#[derive(Debug)]
+pub struct PreparedThermoelasticExchange {
+    before: ResolvedThermoelastic,
+    changed: Option<ResolvedThermoelastic>,
+    c0: Operator,
+    ct0: Operator,
+    c1: Operator,
+    ct1: Operator,
+    dc: Operator,
+    dct: Operator,
+    alpha: [Dd; 6],
+    delta_alpha: [Dd; 6],
+    delta_free: [Dd; 6],
+    delta_temperature: Dd,
+    mean_temperature: Dd,
+}
+
 impl AffineThermoelastic {
-    /// Integrate one declared endpoint-work interval on this original source.
+    /// Resolve one source-owned interval before integrating many strain points.
     ///
-    /// Both temperatures, stiffness/expansion axes, reference strain and source
-    /// claims belong to this SAME law. It admits both total and elastic strain
-    /// component boxes and uses the original fixed reference volume. The
-    /// returned states are the ordinary native potential evaluations, suitable
-    /// for comparison with actual mechanical stress recovery.
-    ///
-    /// The admitted instantaneous expansion is affine, so its finite integral
-    /// is mean(alpha) * Delta T, retained before subtracting total strain.
-    /// Elastic coefficient increments use the original affine engineering
-    /// paths and exact rational/compliance-inverse identities. This avoids
-    /// subtracting rounded free-strain, stiffness or derivative endpoints.
-    /// The finite work is a trapezoidal approximation and requires refinement
-    /// on changing-temperature/load paths. This does not assert entropy
-    /// conservation, solve mechanics or advance a caloric history.
-    pub fn exchange(
+    /// Both endpoints retain this same original law and its admitted range.
+    /// This preparation does not change the finite path approximation used by
+    /// exchange: endpoint-average mechanical stress still requires temporal
+    /// refinement on changing-temperature/load paths.
+    pub fn prepare_exchange(
         &self,
         before_temperature_k: f64,
-        before_total_strain_mandel: [f64; 6],
         after_temperature_k: f64,
-        after_total_strain_mandel: [f64; 6],
-        reference_volume_m3: f64,
-    ) -> Result<ThermoelasticExchange, ThermoelasticError> {
+    ) -> Result<PreparedThermoelasticExchange, ThermoelasticError> {
         let source0 = self.at_temperature(before_temperature_k)?;
         let changed = if after_temperature_k == before_temperature_k {
             None
@@ -169,8 +181,6 @@ impl AffineThermoelastic {
             Some(self.at_temperature(after_temperature_k)?)
         };
         let source1 = changed.as_ref().unwrap_or(&source0);
-        let before = source0.state(before_total_strain_mandel, reference_volume_m3)?;
-        let after = source1.state(after_total_strain_mandel, reference_volume_m3)?;
         let d0 = source0.temperature_derivatives()?;
         let d1 = source1.temperature_derivatives()?;
         let [c0, ct0] = operators(&source0)?;
@@ -186,22 +196,98 @@ impl AffineThermoelastic {
         };
         let half = dd(0.5);
         let dt = dd(after_temperature_k) - dd(before_temperature_k);
-        let total_increment: [Dd; 6] = core::array::from_fn(|i| {
-            dd(after_total_strain_mandel[i]) - dd(before_total_strain_mandel[i])
-        });
         let alpha: [Dd; 6] = core::array::from_fn(|i| {
             half * (dd(d0.free_strain_mandel_per_k[i])
                 + dd(d1.free_strain_mandel_per_k[i]))
         });
-        let delta_alpha: [Dd; 6] = core::array::from_fn(|i| {
+        let delta_alpha = core::array::from_fn(|i| {
             half * (dd(d0.free_strain_mandel_per_k2[i])
                 + dd(d1.free_strain_mandel_per_k2[i])) * dt
         });
-        let delta_free: [Dd; 6] = core::array::from_fn(|i| alpha[i] * dt);
+        let delta_free = core::array::from_fn(|i| alpha[i] * dt);
+        Ok(PreparedThermoelasticExchange {
+            before: source0,
+            changed,
+            c0,
+            ct0,
+            c1,
+            ct1,
+            dc,
+            dct,
+            alpha,
+            delta_alpha,
+            delta_free,
+            delta_temperature: dt,
+            mean_temperature: half * (dd(before_temperature_k) + dd(after_temperature_k)),
+        })
+    }
+
+    /// Integrate one declared endpoint-work interval on this original source.
+    ///
+    /// Both temperatures, stiffness/expansion axes, reference strain and source
+    /// claims belong to this SAME law. It admits both total and elastic strain
+    /// component boxes and uses the original fixed reference volume.
+    ///
+    /// Affine instantaneous expansion is integrated before strain subtraction.
+    /// Coefficient increments use original engineering paths and exact rational
+    /// or compliance-inverse identities, without subtracting rounded free-strain,
+    /// stiffness or derivative endpoints. Work is a trapezoidal approximation;
+    /// it does not assert entropy conservation or advance a caloric history.
+    /// For multiple points at the same temperatures, reuse prepare_exchange.
+    pub fn exchange(
+        &self,
+        before_temperature_k: f64,
+        before_total_strain_mandel: [f64; 6],
+        after_temperature_k: f64,
+        after_total_strain_mandel: [f64; 6],
+        reference_volume_m3: f64,
+    ) -> Result<ThermoelasticExchange, ThermoelasticError> {
+        self.prepare_exchange(before_temperature_k, after_temperature_k)?.evaluate(
+            before_total_strain_mandel,
+            after_total_strain_mandel,
+            reference_volume_m3,
+        )
+    }
+}
+
+impl PreparedThermoelasticExchange {
+    /// Original source resolved at the start of this interval.
+    #[must_use]
+    pub fn before_source(&self) -> &ResolvedThermoelastic {
+        &self.before
+    }
+
+    /// Original source resolved at the end of this interval.
+    #[must_use]
+    pub fn after_source(&self) -> &ResolvedThermoelastic {
+        self.changed.as_ref().unwrap_or(&self.before)
+    }
+
+    /// Evaluate one reference-volume weight with retained source increments.
+    ///
+    /// Total and elastic component boxes are admitted at BOTH endpoints.
+    /// The seven retained extensive increments stay in double-double precision;
+    /// callers may sum and scale them before rounding their final report.
+    pub fn evaluate(
+        &self,
+        before_total_strain_mandel: [f64; 6],
+        after_total_strain_mandel: [f64; 6],
+        reference_volume_m3: f64,
+    ) -> Result<ThermoelasticExchange, ThermoelasticError> {
+        let before = self.before_source().state(
+            before_total_strain_mandel, reference_volume_m3,
+        )?;
+        let after = self.after_source().state(
+            after_total_strain_mandel, reference_volume_m3,
+        )?;
+        let half = dd(0.5);
+        let total_increment: [Dd; 6] = core::array::from_fn(|i| {
+            dd(after_total_strain_mandel[i]) - dd(before_total_strain_mandel[i])
+        });
         // Do not recover this from rounded (total - free) endpoints: those
         // may be identical even when the original input increment is nonzero.
         let de: [Dd; 6] = core::array::from_fn(|i| {
-            total_increment[i] - delta_free[i]
+            total_increment[i] - self.delta_free[i]
         });
         let e0 = before.elastic_strain_mandel.map(dd);
         let e1 = after.elastic_strain_mandel.map(dd);
@@ -211,22 +297,23 @@ impl AffineThermoelastic {
         });
         let volume = dd(reference_volume_m3);
         let work = volume * dot(&mean_stress, &total_increment);
-        let expansion_work = -volume * dot(&mean_stress, &delta_free);
-        let stiffness_work = volume * half * dc.bilinear(&e0, &e1);
+        let expansion_work = -volume * dot(&mean_stress, &self.delta_free);
+        let stiffness_work = volume * half * self.dc.bilinear(&e0, &e1);
         let free_change = volume * dot(&mean_stress, &de) + stiffness_work;
         // Delta(alpha:sigma) - Delta(e:C_T:e)/2, polarized before summation.
         let entropy_change = volume * (
-            dot(&delta_alpha, &mean_stress)
-                + half * (c0.bilinear(&alpha, &de) + c1.bilinear(&alpha, &de))
-                + dc.bilinear(&alpha, &mean_e)
+            dot(&self.delta_alpha, &mean_stress)
+                + half * (self.c0.bilinear(&self.alpha, &de)
+                    + self.c1.bilinear(&self.alpha, &de))
+                + self.dc.bilinear(&self.alpha, &mean_e)
                 - half * (
-                    ct0.bilinear(&e0, &de) + ct1.bilinear(&e1, &de)
-                        + dct.bilinear(&e0, &e1)
+                    self.ct0.bilinear(&e0, &de) + self.ct1.bilinear(&e1, &de)
+                        + self.dct.bilinear(&e0, &e1)
                 )
         );
-        let temperature = half * (dd(before_temperature_k) + dd(after_temperature_k));
         let entropy = half * (dd(before.entropy_j_k) + dd(after.entropy_j_k));
-        let internal_change = free_change + temperature * entropy_change + entropy * dt;
+        let internal_change = free_change
+            + self.mean_temperature * entropy_change + entropy * self.delta_temperature;
         Ok(ThermoelasticExchange {
             before,
             after,
