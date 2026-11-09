@@ -56,6 +56,7 @@ pub mod hex;
 /// Trilinear bricks with full-tensor B-bar stiffness and consistent mass.
 pub mod hex8;
 mod isoparametric;
+pub use isoparametric::acceleration::ReferenceAccelerationField;
 pub use isoparametric::thermal_field::QuadraticThermalStrainField;
 pub use isoparametric::thermal_response::prestress::QuadraticPrestressedAssembly;
 pub use isoparametric::thermal_response::{
@@ -1847,6 +1848,11 @@ pub enum TetElasticError {
         /// Local displacement DOF when force evaluation failed, if applicable.
         local_dof: Option<usize>,
     },
+    /// A reference body-acceleration field or its consistent force is invalid.
+    InvalidBodyAcceleration {
+        /// Failed count, finite-value or force-representation invariant.
+        what: &'static str,
+    },
     /// A caller-supplied dead nodal force was malformed.
     InvalidNodalForce {
         /// Full node-major xyz displacement DOF.
@@ -1992,6 +1998,9 @@ impl core::fmt::Display for TetElasticError {
                 f,
                 "FS-SOLID-TET-STRESS-INPUT: solution belongs to different physical inputs"
             ),
+            Self::InvalidBodyAcceleration { what } => {
+                write!(f, "invalid reference body acceleration: {what}")
+            }
             Self::InvalidNodalForce {
                 dof,
                 full_dofs,

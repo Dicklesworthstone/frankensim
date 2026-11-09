@@ -14121,3 +14121,12 @@ source was syntax-checked with pinned rustfmt; the recovered event-scheduler
 extension has source review only. This is uniform prescribed reference dead
 loading in the small-strain owner; it does not infer follower geometry,
 spatial stress interpolation or a finite-deformation Cauchy-to-Piola conversion.
+
+
+### Consistent acceleration loads on graded reference inventory
+
+`ReferenceAccelerationField::{Uniform, PerNode}` and the native `assemble_acceleration_load_with_reference_density` methods integrate `rho_ref N_i a_h dV_ref` on Tet10, Hex8, Hex20 and Hex27. The returned node-major xyz load includes supported rows and acceleration supplied on supported nodes. Quadratic shape-function signs remain intact. Uniform acceleration and identical nodal values produce identical loads; callers supply the physical acceleration and its sign in mesh Cartesian axes.
+
+A shared matrix-free mass action uses the same positive P1/Q1 density interpolation, original geometry and native mass quadrature as consistent mass assembly. It constructs no global stiffness or mass matrix. Hex8 retains Standard/BBar-independent mass integration; curved graded Tet10/Hex20/Hex27 retain their existing quadrature floors. Material density metadata cannot replace an explicit reference profile. Existing mesh/work admission and cancellation apply, with finite acceleration and force checks. These are prescribed reference dead loads for the existing equilibrium, reaction and prestress owners; no follower geometry or transient acceleration law is inferred.
+
+Four focused regression groups cover analytical force/centroid torque/rigid work on affine and curved maps, full consistent mass action and supported columns, actual native self-weight equilibrium/reactions at equal total mass, and quadrature/field/overflow/cancellation refusal. All four and fourteen existing Hex mass/prestress regressions passed in the native source-subset harness; full workspace Cargo validation was unavailable.

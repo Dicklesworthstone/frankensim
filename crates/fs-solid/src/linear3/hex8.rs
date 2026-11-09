@@ -32,7 +32,7 @@
 //! does not certify global injectivity of a warped brick. No finite-strain,
 //! general shear-locking or continuum-convergence claim is made.
 
-use super::hex::{HEX27_REFERENCE_NODES, hex8_point, hex8_shapes};
+use super::hex::{HEX27_REFERENCE_NODES, hex8_point, q1_reference_density};
 use super::{
     TetAssemblyBudget, TetElasticAssembly, TetElasticError, TetMaterialField, isoparametric,
 };
@@ -105,6 +105,63 @@ impl Hex8ElasticProblem<'_> {
         self.assemble_reference_density(Some(corner_density_kg_m3), cx)
     }
 
+    /// Full consistent body-acceleration load for the original positive Q1
+    /// eight-corner reference inventory [kg/m³].
+    ///
+    /// Uses the same native mass rule and warped reference geometry as
+    /// `assemble_with_reference_density`, independently of Standard/B-bar
+    /// strain. The matrix-free action returns every sorted, unique full xyz
+    /// DOF/force [N] pair for native equilibrium and support-reaction solvers.
+    /// Supported rows and acceleration samples are retained even when no free
+    /// vibration DOFs remain. This held reference load has no follower tangent.
+    pub fn assemble_acceleration_load_with_reference_density(
+        &self,
+        corner_density_kg_m3: &[[f64; 8]],
+        acceleration: super::ReferenceAccelerationField<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<(usize, f64)>, TetElasticError> {
+        self.validate(false, cx)?;
+        self.validate_reference_density(corner_density_kg_m3, cx)?;
+        isoparametric::acceleration::assemble::<8, _>(
+            self.nodes_m,
+            self.hexahedra,
+            self.materials,
+            acceleration,
+            &tensor_rule(self.stiffness_points_per_dir.max(3)),
+            |nodes, reference, element, point| self.point(nodes, reference, element, point),
+            |element, reference| {
+                q1_reference_density(
+                    corner_density_kg_m3[element],
+                    self.materials.at(element).density_kg_m3,
+                    reference,
+                )
+            },
+            cx,
+        )
+    }
+
+    fn validate_reference_density(
+        &self,
+        densities: &[[f64; 8]],
+        cx: &Cx<'_>,
+    ) -> Result<(), TetElasticError> {
+        if densities.len() != self.hexahedra.len() {
+            return Err(TetElasticError::MaterialCountMismatch {
+                expected: self.hexahedra.len(),
+                got: densities.len(),
+            });
+        }
+        for density in densities {
+            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+            if density.iter().any(|rho| !rho.is_finite() || *rho <= 0.0) {
+                return Err(TetElasticError::InvalidMaterial {
+                    what: "HEX8 corner reference densities must be finite and positive",
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn assemble_reference_density(
         &self,
         corner_density_kg_m3: Option<&[[f64; 8]]>,
@@ -112,20 +169,7 @@ impl Hex8ElasticProblem<'_> {
     ) -> Result<TetElasticAssembly, TetElasticError> {
         let minimum_probe = self.validate(true, cx)?;
         if let Some(densities) = corner_density_kg_m3 {
-            if densities.len() != self.hexahedra.len() {
-                return Err(TetElasticError::MaterialCountMismatch {
-                    expected: self.hexahedra.len(),
-                    got: densities.len(),
-                });
-            }
-            for density in densities {
-                cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
-                if density.iter().any(|rho| !rho.is_finite() || *rho <= 0.0) {
-                    return Err(TetElasticError::InvalidMaterial {
-                        what: "HEX8 corner reference densities must be finite and positive",
-                    });
-                }
-            }
+            self.validate_reference_density(densities, cx)?;
         }
         let stiffness_rule = tensor_rule(self.stiffness_points_per_dir);
         let extra_mass_rule = (self.stiffness_points_per_dir < 3).then(|| tensor_rule(3));
@@ -143,17 +187,7 @@ impl Hex8ElasticProblem<'_> {
             |nodes, reference, element, point| self.point(nodes, reference, element, point),
             |element, reference| {
                 let density = corner_density_kg_m3?[element];
-                if density
-                    .iter()
-                    .all(|rho| *rho == self.materials.at(element).density_kg_m3)
-                {
-                    None
-                } else if density.iter().all(|rho| *rho == density[0]) {
-                    Some(density[0])
-                } else {
-                    let weights = hex8_shapes(reference).0;
-                    Some((0..8).map(|a| weights[a] * density[a]).sum())
-                }
+                q1_reference_density(density, self.materials.at(element).density_kg_m3, reference)
             },
             cx,
         )?;

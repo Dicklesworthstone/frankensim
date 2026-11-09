@@ -10,6 +10,7 @@ use fs_blake3::DomainHasher;
 use fs_exec::Cx;
 use fs_sparse::Coo;
 
+pub(super) mod acceleration;
 pub(super) mod thermal_field;
 
 pub(super) struct Point<const N: usize> {

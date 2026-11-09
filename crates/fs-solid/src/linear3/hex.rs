@@ -78,6 +78,23 @@ pub fn hex8_shapes(p: [f64; 3]) -> ([f64; 8], [[f64; 3]; 8]) {
     (n, d)
 }
 
+// Shared by Hex8/20/27 mass assembly and full acceleration loads. Preserve the
+// original scalar arithmetic when the profile matches its material density.
+pub(super) fn q1_reference_density(
+    density: [f64; 8],
+    material_density: f64,
+    coordinate: [f64; 3],
+) -> Option<f64> {
+    if density.iter().all(|rho| *rho == material_density) {
+        None
+    } else if density.iter().all(|rho| *rho == density[0]) {
+        Some(density[0])
+    } else {
+        let weights = hex8_shapes(coordinate).0;
+        Some((0..8).map(|a| weights[a] * density[a]).sum())
+    }
+}
+
 /// Quadratic serendipity shapes and reference gradients on [-1,1]^3.
 pub fn hex20_shapes(p: [f64; 3]) -> ([f64; 20], [[f64; 3]; 20]) {
     let mut n = [0.0; 20];
@@ -622,17 +639,11 @@ impl HexElasticProblem<'_> {
         let mass_rule = separate_mass_rule.as_deref().unwrap_or(&q);
         let density_at = |element: usize, coordinate: [f64; 3]| {
             let density = reference_density?.0[element];
-            if density
-                .iter()
-                .all(|rho| *rho == self.materials.at(element).density_kg_m3)
-            {
-                None
-            } else if density.iter().all(|rho| *rho == density[0]) {
-                Some(density[0])
-            } else {
-                let weights = hex8_shapes(coordinate).0;
-                Some((0..8).map(|a| weights[a] * density[a]).sum())
-            }
+            q1_reference_density(
+                density,
+                self.materials.at(element).density_kg_m3,
+                coordinate,
+            )
         };
         match self.elements {
             HexConnectivity::Hex20(elements) => super::isoparametric::assemble::<20, 60, _>(
@@ -677,6 +688,110 @@ impl HexElasticProblem<'_> {
                 density_at,
                 cx,
             ),
+        }
+    }
+
+    /// Full consistent body-acceleration load for the original positive Q1
+    /// eight-corner density [kg/m³], independently of stiffness quadrature.
+    ///
+    /// Returns sorted, unique full node-major xyz DOF/force [N] pairs directly
+    /// usable by existing thermal/dead-load/support and prestress solvers.
+    /// Every supported row and acceleration sample remains present, including
+    /// fully fixed bodies. Signed quadratic shapes preserve physical force,
+    /// density-weighted moments and virtual work without nodal lumping.
+    ///
+    /// Density and mass-rule admission match `assemble_with_reference_density`:
+    /// a nontrivial curved profile requires at least six Gauss points per
+    /// direction. The matrix-free M*a action assembles neither stiffness nor
+    /// a global mass matrix. This held reference load has no follower tangent.
+    pub fn assemble_acceleration_load_with_reference_density(
+        &self,
+        corner_density_kg_m3: &[[f64; 8]],
+        mass_quadrature: HexQuadrature,
+        acceleration: super::ReferenceAccelerationField<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<(usize, f64)>, TetElasticError> {
+        match self.elements {
+            HexConnectivity::Hex20(elements) => {
+                self.validate(elements, false, cx)?;
+                self.validate_reference_density(
+                    elements,
+                    corner_density_kg_m3,
+                    mass_quadrature,
+                    cx,
+                )?;
+            }
+            HexConnectivity::Hex27(elements) => {
+                self.validate(elements, false, cx)?;
+                self.validate_reference_density(
+                    elements,
+                    corner_density_kg_m3,
+                    mass_quadrature,
+                    cx,
+                )?;
+            }
+        }
+        let mass_rule = mass_quadrature.points()?;
+        let density_at = |element: usize, reference| {
+            q1_reference_density(
+                corner_density_kg_m3[element],
+                self.materials.at(element).density_kg_m3,
+                reference,
+            )
+        };
+        match self.elements {
+            HexConnectivity::Hex20(elements) => {
+                super::isoparametric::acceleration::assemble::<20, _>(
+                    self.nodes_m,
+                    elements,
+                    self.materials,
+                    acceleration,
+                    &mass_rule,
+                    |nodes, reference, element, point| {
+                        let p = hex20_point(
+                            nodes,
+                            reference,
+                            self.budget.minimum_scaled_jacobian,
+                            element,
+                            point,
+                        )?;
+                        Ok(super::isoparametric::Point {
+                            shapes: p.shapes,
+                            gradients: p.gradients,
+                            determinant: p.determinant_m3,
+                            scaled_jacobian: p.scaled_jacobian,
+                        })
+                    },
+                    density_at,
+                    cx,
+                )
+            }
+            HexConnectivity::Hex27(elements) => {
+                super::isoparametric::acceleration::assemble::<27, _>(
+                    self.nodes_m,
+                    elements,
+                    self.materials,
+                    acceleration,
+                    &mass_rule,
+                    |nodes, reference, element, point| {
+                        let p = hex27_point(
+                            nodes,
+                            reference,
+                            self.budget.minimum_scaled_jacobian,
+                            element,
+                            point,
+                        )?;
+                        Ok(super::isoparametric::Point {
+                            shapes: p.shapes,
+                            gradients: p.gradients,
+                            determinant: p.determinant_m3,
+                            scaled_jacobian: p.scaled_jacobian,
+                        })
+                    },
+                    density_at,
+                    cx,
+                )
+            }
         }
     }
 

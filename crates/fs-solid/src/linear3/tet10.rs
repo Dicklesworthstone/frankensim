@@ -393,6 +393,62 @@ impl QuadraticTetProblem<'_> {
         self.assemble_with_thermal_materials(Some(field.into()), Some(corner_density_kg_m3), cx)
     }
 
+    fn validate_reference_density(
+        &self,
+        densities: &[[f64; 4]],
+        cx: &Cx<'_>,
+    ) -> Result<(), TetElasticError> {
+        if densities.len() != self.elements.len() {
+            return Err(TetElasticError::MaterialCountMismatch {
+                expected: self.elements.len(),
+                got: densities.len(),
+            });
+        }
+        for (element, (tet, density)) in self.elements.iter().zip(densities).enumerate() {
+            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+            if density.iter().any(|rho| !rho.is_finite() || *rho <= 0.0) {
+                return Err(TetElasticError::InvalidMaterial {
+                    what: "TET10 corner reference densities must be finite and positive",
+                });
+            }
+            let reference = self.materials.at(element).density_kg_m3;
+            if density.iter().all(|rho| *rho == reference) {
+                continue;
+            }
+            let affine = TET10_EDGES.iter().enumerate().all(|(edge, &[a, b])| {
+                (0..3).all(|k| {
+                    self.nodes_m[tet[edge + 4]][k]
+                        == f64::midpoint(self.nodes_m[tet[a]][k], self.nodes_m[tet[b]][k])
+                })
+            });
+            if !affine && self.quadrature.mass_points_per_dir < 6 {
+                return Err(TetElasticError::QuadratureInadmissible {
+                    what: "curved TET10 reference density requires at least six mass Duffy points",
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn reference_density_at(
+        &self,
+        densities: Option<&[[f64; 4]]>,
+        element: usize,
+        lambda: [f64; 4],
+    ) -> Option<f64> {
+        let density = densities?[element];
+        if density
+            .iter()
+            .all(|rho| *rho == self.materials.at(element).density_kg_m3)
+        {
+            None
+        } else if density.iter().all(|rho| *rho == density[0]) {
+            Some(density[0])
+        } else {
+            Some((0..4).map(|a| lambda[a] * density[a]).sum())
+        }
+    }
+
     fn assemble_with_thermal_materials(
         &self,
         material_samples: Option<QuadraticThermalStrainField<'_>>,
@@ -401,35 +457,7 @@ impl QuadraticTetProblem<'_> {
     ) -> Result<TetElasticAssembly, TetElasticError> {
         self.validate(true, cx)?;
         if let Some(densities) = corner_density_kg_m3 {
-            if densities.len() != self.elements.len() {
-                return Err(TetElasticError::MaterialCountMismatch {
-                    expected: self.elements.len(),
-                    got: densities.len(),
-                });
-            }
-            for (element, (tet, density)) in self.elements.iter().zip(densities).enumerate() {
-                cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
-                if density.iter().any(|rho| !rho.is_finite() || *rho <= 0.0) {
-                    return Err(TetElasticError::InvalidMaterial {
-                        what: "TET10 corner reference densities must be finite and positive",
-                    });
-                }
-                let reference = self.materials.at(element).density_kg_m3;
-                if density.iter().all(|rho| *rho == reference) {
-                    continue;
-                }
-                let affine = TET10_EDGES.iter().enumerate().all(|(edge, &[a, b])| {
-                    (0..3).all(|k| {
-                        self.nodes_m[tet[edge + 4]][k]
-                            == f64::midpoint(self.nodes_m[tet[a]][k], self.nodes_m[tet[b]][k])
-                    })
-                });
-                if !affine && self.quadrature.mass_points_per_dir < 6 {
-                    return Err(TetElasticError::QuadratureInadmissible {
-                        what: "curved TET10 reference density requires at least six mass Duffy points",
-                    });
-                }
-            }
+            self.validate_reference_density(densities, cx)?;
         }
         let kq = duffy_quadrature(self.quadrature.stiffness_points_per_dir);
         let mq = duffy_quadrature(self.quadrature.mass_points_per_dir);
@@ -458,18 +486,55 @@ impl QuadraticTetProblem<'_> {
                     scaled_jacobian: p.determinant_m3 / (h * h * h),
                 })
             },
+            |element, lambda| self.reference_density_at(corner_density_kg_m3, element, lambda),
+            cx,
+        )
+    }
+
+    /// Full consistent body-acceleration load for the original positive P1
+    /// corner-density inventory [kg/m³], using the native mass quadrature.
+    ///
+    /// Returns every node-major xyz DOF paired with its force [N], sorted and
+    /// unique, for the existing thermal/dead-load equilibrium and prestress
+    /// entry points. Supported rows AND acceleration samples remain present,
+    /// including on a fully fixed body. Signed quadratic contributions are
+    /// retained; equal nodal sharing would lose density-weighted moments.
+    ///
+    /// Density and curved-map admission match `assemble_with_reference_density`.
+    /// The matrix-free action integrates M*a without assembling stiffness or a
+    /// global mass matrix. This held reference load has no follower tangent.
+    pub fn assemble_acceleration_load_with_reference_density(
+        &self,
+        corner_density_kg_m3: &[[f64; 4]],
+        acceleration: super::ReferenceAccelerationField<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<(usize, f64)>, TetElasticError> {
+        self.validate(false, cx)?;
+        self.validate_reference_density(corner_density_kg_m3, cx)?;
+        super::isoparametric::acceleration::assemble::<10, _>(
+            self.nodes_m,
+            self.elements,
+            self.materials,
+            acceleration,
+            &duffy_quadrature(self.quadrature.mass_points_per_dir),
+            |nodes, lambda, element, point| {
+                let p = tet10_point(
+                    nodes,
+                    lambda,
+                    self.budget.minimum_scaled_jacobian,
+                    element,
+                    point,
+                )?;
+                let h = maximum_edge_length([nodes[0], nodes[1], nodes[2], nodes[3]]);
+                Ok(super::isoparametric::Point {
+                    shapes: p.shapes,
+                    gradients: p.gradients,
+                    determinant: p.determinant_m3,
+                    scaled_jacobian: p.determinant_m3 / (h * h * h),
+                })
+            },
             |element, lambda| {
-                let density = corner_density_kg_m3?[element];
-                if density
-                    .iter()
-                    .all(|rho| *rho == self.materials.at(element).density_kg_m3)
-                {
-                    None
-                } else if density.iter().all(|rho| *rho == density[0]) {
-                    Some(density[0])
-                } else {
-                    Some((0..4).map(|a| lambda[a] * density[a]).sum())
-                }
+                self.reference_density_at(Some(corner_density_kg_m3), element, lambda)
             },
             cx,
         )
