@@ -80,6 +80,38 @@ pub mod tracer;
 #[cfg(feature = "volumes")]
 pub mod volumes;
 
+/// Height-correlated Smith masking-shadowing from the two directional G1s.
+///
+/// G2 = 1/(1 + Lambda_o + Lambda_i), with G1 = 1/(1 + Lambda).
+/// The same facet height controls masking and shadowing; multiplying the two
+/// marginal G1s instead treats those events as independent. This is the
+/// single-scattering model in PBRT 4e, section 9.6.2, not inter-facet returns:
+/// https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory
+/// Inputs are admitted directional masking probabilities in [0,1].
+#[cfg(feature = "tracer")]
+#[inline]
+pub(crate) fn smith_correlated_geometry(masking_o: f64, masking_i: f64) -> f64 {
+    // Multiply the smaller masking by a bounded weight. Forming G1o*G1i
+    // first can underflow even when the final grazing G2 is representable.
+    let (small, large) = if masking_o <= masking_i {
+        (masking_o, masking_i)
+    } else {
+        (masking_i, masking_o)
+    };
+    small * smith_correlated_weight(small, large)
+}
+
+/// G2/G1(wo) for the existing visible-normal proposal. No distribution,
+/// Fresnel coefficient, or small sampled PDF needs to be divided out.
+#[cfg(feature = "tracer")]
+#[inline]
+pub(crate) fn smith_correlated_weight(masking_o: f64, masking_i: f64) -> f64 {
+    if masking_i == 0.0 {
+        return 0.0;
+    }
+    masking_i / (masking_i + masking_o * (1.0 - masking_i))
+}
+
 /// The van der Corput / Halton radical inverse of `i` in the given `base`
 /// (a deterministic low-discrepancy coordinate in `[0, 1)`).
 #[must_use]
@@ -297,4 +329,40 @@ pub fn mis_integrate_unit(f: impl Fn(f64) -> f64, n: usize) -> f64 {
         est += balance_heuristic(nu, pg_l, nu, pf_l) * f(xl) / pg_l;
     }
     est / n as f64
+}
+
+#[cfg(all(test, feature = "tracer"))]
+mod correlated_smith_tests {
+    use super::{smith_correlated_geometry, smith_correlated_weight};
+
+    #[test]
+    fn g1_correlated_visibility_matches_independent_lambda_law() {
+        for lambda_o in [0.0, 0.03, 0.5, 4.0, 1000.0] {
+            for lambda_i in [0.0, 0.07, 0.8, 7.0, 2000.0] {
+                let g_o = 1.0 / (1.0 + lambda_o);
+                let g_i = 1.0 / (1.0 + lambda_i);
+                let expected = 1.0 / (1.0 + lambda_o + lambda_i);
+                let actual = smith_correlated_geometry(g_o, g_i);
+                assert!((actual / expected - 1.0).abs() < 5.0e-16);
+                let weight = smith_correlated_weight(g_o, g_i);
+                assert!((weight / (expected / g_o) - 1.0).abs() < 5.0e-16);
+                assert!(weight <= 1.0);
+                assert!(actual + 1.0e-16 >= g_o * g_i);
+                assert!(actual <= g_o.min(g_i));
+            }
+        }
+    }
+
+    #[test]
+    fn g3_correlated_visibility_is_symmetric_and_retains_grazing_power() {
+        for a in [0.0, 1.0e-300, 1.0e-30, 0.1, 0.7, 1.0] {
+            for b in [0.0, 1.0e-300, 1.0e-30, 0.1, 0.7, 1.0] {
+                assert_eq!(smith_correlated_geometry(a, b), smith_correlated_geometry(b, a));
+            }
+            assert_eq!(smith_correlated_geometry(a, 1.0), a);
+        }
+        let g = smith_correlated_geometry(1.0e-300, 1.0e-300);
+        assert!((g / 5.0e-301 - 1.0).abs() < 2.0e-16);
+        assert_eq!(smith_correlated_weight(1.0e-300, 1.0e-300), 0.5);
+    }
 }

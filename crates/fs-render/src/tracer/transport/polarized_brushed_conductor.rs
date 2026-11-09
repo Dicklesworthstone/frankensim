@@ -32,7 +32,7 @@ impl PolarizedBeam {
     /// Invalid frames, alpha values and uniforms are errors, not zero samples.
     /// No rejection is resampled or removed from the proposal normalization.
     ///
-    /// Forward power uses `F_mueller * G1(wi) * C`, where
+    /// Forward power uses `F_mueller * (G2/G1(wo)) * C`, where
     /// `C = (ns.wo / ng.wo) * (ng.wi / ns.wi)`. This is the adjoint of the
     /// existing effective radiance BSDF. The small `ns.wi` cancels analytically
     /// against masking before division. Never clamp C to one: a valid weighted
@@ -94,20 +94,24 @@ impl PolarizedBeam {
         ))?;
         let reflected = self.reflect_conductor(facet, optics)?.beam;
         // Native f_radiance = D*G*F/(4 ns.wo ng.wi), and the VNDF PDF is
-        // D*G1(wo)/(4 ns.wo). Thus f_radiance*ng.wi/pdf = F*G1(wi).
+        // D*G1(wo)/(4 ns.wo). Thus f_radiance*ng.wi/pdf = F*G2/G1(wo).
         // Select it before forming the forward-power correction C, avoiding
         // its real geometric-horizon singularity on a finite camera sample.
+        let masking_o = smith_g1_aniso(alpha_x, alpha_y, wo_local);
         let weight = if radiance || frame.geometric_normal == frame.shading_normal {
-            smith_g1_aniso(alpha_x, alpha_y, wi_local)
+            crate::smith_correlated_weight(
+                masking_o, smith_g1_aniso(alpha_x, alpha_y, wi_local),
+            )
         } else {
-            // G1(wi)/ns.wi = 2/(ns.wi + |(ax*wi.x,ay*wi.y,wi.z)|).
+            // (G2/G1(wo))/ns.wi = 2/(G1o*length_i + (2-G1o)*ns.wi).
             // This avoids the removable shading-horizon singularity and the
             // huge D/pdf intermediates of a narrow lobe. The ng.wo horizon is
             // a real singularity of the authored shading approximation.
             let length = det::hypot(
                 det::hypot(alpha_x * wi_local[0], alpha_y * wi_local[1]), wi_local[2],
             );
-            (2.0 * geometric_in / (wi_local[2] + length)) * (wo_local[2] / geometric_out)
+            (2.0 * geometric_in / (masking_o * length + (2.0 - masking_o) * wi_local[2]))
+                * (wo_local[2] / geometric_out)
         };
         if !weight.is_finite() || weight < 0.0 {
             return Err(BeamError::NumericalRange.into());

@@ -1,7 +1,8 @@
 //! Authored anisotropic GGX slopes in a physical tangent frame.
 //!
 //! Reflection and transmission retain the original Walter half-vector,
-//! Fresnel, masking-product and radiance Jacobians. Only D, directional G1
+//! Fresnel, height-correlated Smith geometry and radiance Jacobians. Only D,
+//! directional G1
 //! and the two-axis stretch in the original visible-normal warp differ.
 //! See Walter et al., EGSR 2007, <https://doi.org/10.2312/EGWR/EGSR07/195-206>
 //! and Heitz, JCGT 2018, <https://jcgt.org/published/0007/04/01/>.

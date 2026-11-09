@@ -46,10 +46,13 @@ impl PolarizedBeam {
         let facet = unit(Vec3::new(wo.x + wi.x, wo.y + wi.y, wo.z + wi.z))?;
         let alpha = surface.roughness_alpha();
         let pdf = ggx_vndf_reflection_pdf(alpha, normal, wo, facet);
-        let mask = smith_g1(alpha, normal.dot(wi).clamp(0.0, 1.0));
+        let mask = crate::smith_correlated_weight(
+            smith_g1(alpha, normal.dot(wo).clamp(0.0, 1.0)),
+            smith_g1(alpha, normal.dot(wi).clamp(0.0, 1.0)),
+        );
         let reflected = camera.reflect_conductor(facet, optics)?.beam;
         let response = reciprocal_contraction(reflected, source_frame, normalized_source)?;
-        // Native f = pdf * G1(wi) * F / geometric_cos_i. Retain this
+        // Native f = pdf * (G2/G1(wo)) * F / geometric_cos_i. Retain this
         // factorization, avoiding division by a possibly tiny reflectance.
         let value = checked_product(pdf, mask)? / normal.dot(wi);
         let factor = checked_product(value, response)?;
@@ -97,7 +100,10 @@ impl PolarizedBeam {
         let pdf = ggx_vndf_reflection_pdf_aniso(
             alpha_x, alpha_y, wo_local, brushed_local(&frame, facet),
         );
-        let mask = smith_g1_aniso(alpha_x, alpha_y, wi_local);
+        let mask = crate::smith_correlated_weight(
+            smith_g1_aniso(alpha_x, alpha_y, wo_local),
+            smith_g1_aniso(alpha_x, alpha_y, wi_local),
+        );
         let reflected = camera.reflect_conductor(facet, optics)?.beam;
         let response = reciprocal_contraction(reflected, source_frame, normalized_source)?;
         let value = checked_product(pdf, mask)? / geometric_in;

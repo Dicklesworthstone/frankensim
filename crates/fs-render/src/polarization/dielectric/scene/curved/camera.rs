@@ -21,7 +21,7 @@
 //! approximation is retained, including exact-zero rejected microfacets. No
 //! inter-facet multiple scattering or acceptance-conditioned resampling is added.
 //! Body-locked brushing uses the native effective radiance law, including
-//! authored normal tilt: F_mueller*G1(wi) under its native VNDF proposal. The
+//! authored normal tilt: F_mueller*G2/G1(wo) under its native VNDF proposal. The
 //! forward-power owner instead uses the importance adjoint with its shading-
 //! normal projection correction. The camera selects its law at each facet,
 //! before forming that correction; directions, PDFs and both horizons agree.

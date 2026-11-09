@@ -34,8 +34,8 @@ fn conductor_binding(surface: ConductorSurface) -> SurfaceBinding {
     }
 }
 
-fn smith_g1(alpha: f64, cosine: f64) -> f64 {
-    2.0 / (1.0 + (1.0 + alpha * alpha * (1.0 - cosine * cosine) / (cosine * cosine)).sqrt())
+fn smith_lambda(alpha: f64, cosine: f64) -> f64 {
+    0.5 * ((1.0 + alpha * alpha * (1.0 - cosine * cosine) / (cosine * cosine)).sqrt() - 1.0)
 }
 
 #[test]
@@ -89,9 +89,11 @@ fn g1_rough_camera_coated_metal_matches_fresnel_masking_and_physical_beer_path()
                         let half = Vec3::new(wo.x + wi.x, wo.y + wi.y, wo.z + wi.z);
                         let half = half.scale(1.0 / half.norm());
                         let fresnel = metals[0].fresnel(550.0, index, wo.dot(half)).unwrap();
-                        // For GGX visible-normal sampling, f*cos/pdf reduces to F*G1(wi).
+                        // The unchanged VNDF proposal cancels to F*G2/G1(wo).
+                        let lambda_o = smith_lambda(alpha, cosine);
+                        let lambda_i = smith_lambda(alpha, -wi.z);
                         let expected = fresnel
-                            * smith_g1(alpha, -wi.z)
+                            * (1.0 + lambda_o) / (1.0 + lambda_o + lambda_i)
                             * (-0.12 * result.path().traveled_m()).exp();
                         near(result.transport_weight(), expected, 3e-6);
                         near(result.radiance_w_m2_sr_nm(), 3.0 * expected, 9e-6);

@@ -43,7 +43,7 @@ fn same_stokes(a: Stokes, b: Stokes) {
     }
 }
 
-// Independent directional Walter D and Smith G1, evaluated in the authored
+// Independent directional Walter D and correlated Smith G2, evaluated in the authored
 // tangent plane. This test does not call the production anisotropic kernels.
 fn dg(normal: Vec3, h: Vec3, wo: Vec3, wi: Vec3) -> (f64, f64, f64) {
     let t = Vec3::new(0.6, 0.8, 0.0);
@@ -54,12 +54,11 @@ fn dg(normal: Vec3, h: Vec3, wo: Vec3, wi: Vec3) -> (f64, f64, f64) {
             * 0.63
             * ((h.dot(t) / 0.17).powi(2) + (h.dot(b) / 0.63).powi(2) + h.dot(normal).powi(2))
                 .powi(2));
-    let g = |v: Vec3| {
+    let lambda = |v: Vec3| {
         let z = v.dot(normal).abs();
-        2.0 / (1.0
-            + (1.0 + ((0.17 * v.dot(t)).powi(2) + (0.63 * v.dot(b)).powi(2)) / (z * z)).sqrt())
+        0.5 * ((1.0 + ((0.17 * v.dot(t)).powi(2) + (0.63 * v.dot(b)).powi(2)) / (z * z)).sqrt() - 1.0)
     };
-    (d, g(wo), g(wi))
+    (d, 1.0 / (1.0 + lambda(wo)), 1.0 / (1.0 + lambda(wo) + lambda(wi)))
 }
 
 #[test]
@@ -100,7 +99,7 @@ fn anisotropic_beam_samples_match_independent_walter_density_and_full_stokes_pow
                 if h.dot(normal) < 0.0 {
                     h = h.scale(-1.0);
                 }
-                let (d, go, gi) = dg(normal, h, wo, wi);
+                let (d, go, g2) = dg(normal, h, wo, wi);
                 let a = wo.dot(h);
                 let b = wi.dot(h);
                 let fresnel = fresnel_dielectric_polarized(a, eta_i, eta_t).unwrap();
@@ -109,14 +108,14 @@ fn anisotropic_beam_samples_match_independent_walter_density_and_full_stokes_pow
                     (
                         fresnel.transmission,
                         eta * eta * b.abs() / denominator,
-                        d * go * gi * eta * eta * (a * b).abs()
+                        d * g2 * eta * eta * (a * b).abs()
                             / (normal.dot(wo) * denominator * sample.pdf),
                     )
                 } else {
                     (
                         fresnel.reflection,
                         1.0 / (4.0 * a.abs()),
-                        d * go * gi / (4.0 * normal.dot(wo) * sample.pdf),
+                        d * g2 / (4.0 * normal.dot(wo) * sample.pdf),
                     )
                 };
                 let density = d * go * a.abs() / normal.dot(wo) * jacobian * matrix.0[0][0];

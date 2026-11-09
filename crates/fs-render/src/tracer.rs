@@ -187,7 +187,9 @@ mod transport;
 /// retaining unit ray directions and the cosine proposal at both poles.
 /// Version 8 uses native chart departure bounds for continuations and shadows,
 /// preserving resolvable nearby surfaces without changing physical hit points.
-pub const TRACER_BIT_SEMANTICS_VERSION: u32 = 8;
+/// Version 9 correlates GGX masking and shadowing through their shared facet
+/// height, retaining the original visible-normal proposal and its density.
+pub const TRACER_BIT_SEMANTICS_VERSION: u32 = 9;
 
 /// Bit-affecting semantics of the optional motion-time path. This is versioned
 /// separately because the legacy static entry points do not draw a shutter
@@ -208,11 +210,14 @@ pub const CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
 // displacement must not jump over a thin material's opposite interface.
 // v19 carries native chart departures through both dielectric hemispheres and
 // the matching finite-interface proposal/reverse-MIS source records.
-pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 19;
+// v20 shares height-correlated Smith geometry with conductor reflection for
+// both reflected and transmitted rough events, including polarized consumers.
+pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 20;
 
 /// Radiance-mode shading-normal projection for brushed GGX conductors.
 /// Version 2 removes spurious gain at geometric grazing incidence.
-pub const BRUSHED_CONDUCTOR_BSDF_SEMANTICS_VERSION: u32 = 2;
+/// Version 3 uses height-correlated Smith masking and shadowing.
+pub const BRUSHED_CONDUCTOR_BSDF_SEMANTICS_VERSION: u32 = 3;
 
 /// Domain for deterministic identities of complete tracer material values.
 pub const MATERIAL_CONTENT_IDENTITY_DOMAIN: &str = "org.frankensim.render.material.v1";
@@ -21318,6 +21323,43 @@ mod tests {
     }
 
     #[test]
+    fn g1_grazing_reflection_uses_shared_height_visibility() {
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let cosine = 0.1_f64;
+        let sine = (1.0 - cosine * cosine).sqrt();
+        let wo = Vec3::new(sine, 0.0, cosine);
+        let wi = Vec3::new(-sine, 0.0, cosine);
+        let alpha = 0.5_f64;
+        let optics = ConductorOptics::representative_tungsten();
+        let legacy = Material::Ggx { reflectance: lift_rgb([0.8; 3]), alpha };
+        let conductor = Material::Conductor {
+            optics,
+            surface: ConductorSurface::try_rough(alpha).unwrap(),
+        };
+        // Independent slope-form Lambda and the analytic D at the normal.
+        let lambda = 0.5 * ((1.0 + alpha * alpha * sine * sine / (cosine * cosine)).sqrt() - 1.0);
+        let geometry = 1.0 / (1.0 + 2.0 * lambda);
+        let independent = 1.0 / ((1.0 + lambda) * (1.0 + lambda));
+        assert!(geometry > 1.5 * independent);
+        let distribution = 1.0 / (PI * alpha * alpha);
+        for material in [legacy, conductor] {
+            let fresnel = match &material {
+                Material::Ggx { reflectance, .. } => {
+                    let f0 = reflectance.eval(550.0);
+                    f0 + (1.0 - f0) * (1.0 - cosine).powi(5)
+                }
+                Material::Conductor { optics, .. } => optics.fresnel(550.0, 1.0, cosine).unwrap(),
+                _ => unreachable!(),
+            };
+            let expected = fresnel * distribution * geometry / (4.0 * cosine * cosine);
+            let actual = opaque_bsdf_eval(&material, normal, wo, wi, 550.0, None, None).unwrap();
+            assert!((actual / expected - 1.0).abs() < 2.0e-14);
+            let reverse = opaque_bsdf_eval(&material, normal, wi, wo, 550.0, None, None).unwrap();
+            assert_eq!(actual, reverse);
+        }
+    }
+
+    #[test]
     fn conductor_bsdf_is_reciprocal_medium_aware_and_energy_bounded() {
         let normal = Vec3::new(0.0, 0.0, 1.0);
         let wo_raw = Vec3::new(0.23, -0.11, 0.97);
@@ -21644,13 +21686,13 @@ mod tests {
         const SIDE: u32 = 64;
 
         // Independent uniform-solid-angle quadrature of the analytic
-        // anisotropic GGX law with the real-form conductor Fresnel equations:
+        // height-correlated anisotropic GGX law with real-form conductor Fresnel:
         // 256 cosine bins x 512 azimuth bins, stainless eta=2.718, k=3.948
         // at 550 nm. These are numerical references, not measured materials.
         for (cosine, reference) in [
-            (0.1_f64, 0.491_798_510_589_084_64),
-            (1.0e-3, 0.490_279_987_152_601_5),
-            (1.0e-6, 0.490_284_931_380_583_54),
+            (0.1_f64, 0.496_370_141_914_479_9),
+            (1.0e-3, 0.497_495_761_396_914_6),
+            (1.0e-6, 0.497_534_729_034_272_6),
         ] {
             let wo = Vec3::new(-(1.0 - cosine * cosine).sqrt(), 0.0, cosine);
             let mut radiance = 0.0;
@@ -21668,7 +21710,7 @@ mod tests {
                         opaque_bsdf_eval(&material, n, wo, wi, 550.0, None, Some(&frame)).unwrap();
                     let weight = value * n.dot(wi) / pdf;
                     // For this visible-normal proposal the radiance weight
-                    // reduces to Fresnel * G1(wi), bounded by one. Rejected
+                    // reduces to Fresnel * G2/G1(wo), bounded by one. Rejected
                     // directions contribute zero; do not renormalize them.
                     assert!(
                         weight.is_finite() && (0.0..=1.0 + 1.0e-10).contains(&weight),
@@ -23016,7 +23058,9 @@ fn bsdf_eval(mat: &Material, n: Vec3, wo: Vec3, wi: Vec3, lambda: f64) -> f64 {
             }
             let m = hsum.scale(1.0 / hn);
             let d = ggx_d(*alpha, n.dot(m));
-            let g = smith_g1(*alpha, cos_o) * smith_g1(*alpha, cos_i);
+            let g = crate::smith_correlated_geometry(
+                smith_g1(*alpha, cos_o), smith_g1(*alpha, cos_i),
+            );
             let f = schlick(reflectance.eval(lambda), wo.dot(m).max(0.0));
             d * g * f / (4.0 * cos_o * cos_i)
         }
@@ -23136,8 +23180,10 @@ fn opaque_bsdf_eval(
             return Ok(0.0);
         }
         let d = ggx_d_aniso(alpha_x, alpha_y, m_local);
-        let g =
-            smith_g1_aniso(alpha_x, alpha_y, wo_local) * smith_g1_aniso(alpha_x, alpha_y, wi_local);
+        let g = crate::smith_correlated_geometry(
+            smith_g1_aniso(alpha_x, alpha_y, wo_local),
+            smith_g1_aniso(alpha_x, alpha_y, wi_local),
+        );
         let incident_eta = medium_ior(incident_medium, lambda)?;
         let fresnel = optics.fresnel(
             lambda,
@@ -23175,7 +23221,7 @@ fn opaque_bsdf_eval(
     let microfacet_normal = hsum.scale(1.0 / hn);
     let alpha = surface.roughness_alpha();
     let d = ggx_d(alpha, n.dot(microfacet_normal));
-    let g = smith_g1(alpha, cos_o) * smith_g1(alpha, cos_i);
+    let g = crate::smith_correlated_geometry(smith_g1(alpha, cos_o), smith_g1(alpha, cos_i));
     let incident_eta = medium_ior(incident_medium, lambda)?;
     let fresnel = optics.fresnel(
         lambda,

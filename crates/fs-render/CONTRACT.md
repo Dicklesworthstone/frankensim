@@ -66,6 +66,32 @@ differentiable lift). Pure Rust throughout.
 
 ## Public types and semantics
 
+All native GGX reflection uses height-correlated Smith masking-shadowing,
+`G2 = 1/(1 + Lambda_o + Lambda_i)`, with directional `G1 = 1/(1 + Lambda)`.
+The same facet height governs visibility from both directions; the two
+marginal masking probabilities are no longer multiplied as independent events.
+This is the statistical single-scattering law of
+[PBRT 4e section 9.6.2](https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory).
+Legacy spectral GGX, exact conductor and body-locked anisotropic conductor
+evaluation share it with both hemispheres of rough dielectric transport.
+Fresnel, coherent films, the original visible-normal proposal and its PDFs,
+rejected-facet probability mass and radiance eta factors retain their owners.
+
+Polarized metal samples and finite-direction connections use the same
+`G2/G1(wo)` weight, including the existing adjoint for tilted shading normals.
+That ratio is evaluated directly from admitted G1 probabilities; a weak
+Fresnel channel or narrow-lobe density is never divided out. Shared G2
+evaluation orders its bounded factors to retain representable grazing power.
+Work is constant with no allocation or additional random samples. Source
+semantics change to tracer 9, dielectric 20, conductor 2 and brushed 3.
+This still omits inter-facet multiple scattering: the missing single-scattered
+energy is not a physical absorptance or thermal debit. Smooth conductor
+emission/absorption and the separate EON rough-diffuse thermal law retain their
+original constitutive owners. No rough-metal thermal closure is inferred.
+Focused G1/G3 controls compare independent slope-form Smith/Walter equations,
+grazing reflection, sampled reflection/transmission weights, reciprocity and
+angular power integrals; native scalar/polarized controls exercise shared use.
+
 - `radical_inverse(base, i)` / `halton(dim, i)` — deterministic low-discrepancy
   coordinates (an image is as replayable as a solve).
 - `cosine_sample_hemisphere(u1, u2) -> (dir, pdf)` — cosine-weighted hemisphere
@@ -726,7 +752,7 @@ differentiable lift). Pure Rust throughout.
   environment radiance before source evaluation. Native rough dielectric/conductor and anisotropic brushing
   retain their original directional proposal, Fresnel, masking and
   single-scattering approximation. Authored brushed-normal tilt now uses the
-  scalar camera law `F_mueller*G1(wi)`, selected before forming the forward-power
+  scalar camera law `F_mueller*G2/G1(wo)`, selected before forming the forward-power
   adjoint's correction `(ns.wo/ng.wo)*(ng.wi/ns.wi)`. Both laws keep the same
   body-local frame, mark, spectral/host optics, PDF and horizon support. Public
   forward-beam and molecular-power APIs retain their original importance law;

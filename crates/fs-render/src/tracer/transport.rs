@@ -228,8 +228,9 @@ mod polarized_conductor {
         /// owner evaluates bare, transparent-coated or absorbing-coated Fresnel
         /// phase at the sampled facet, using the beam's actual phase index.
         ///
-        /// For this proposal, `BSDF * cos / pdf = G1(outgoing) * Fresnel`.
-        /// Cancel the distribution and incoming masking analytically rather
+        /// For this proposal, `BSDF * cos / pdf = G2/G1(incoming) * Fresnel`.
+        /// Retain correlated Smith visibility. Cancel the distribution and
+        /// incoming masking analytically rather
         /// than divide by a near-zero scalar reflectance or subtract absorbed
         /// power. The returned PDF is the unchanged native solid-angle proposal;
         /// only the direction is normalized into the physical beam frame.
@@ -271,7 +272,10 @@ mod polarized_conductor {
             // Reuse the one frame-aware conductor response; do not evaluate
             // its scalar Fresnel law again or divide by its mean reflectance.
             let reflected = self.reflect_conductor(facet, optics)?.beam;
-            let mask = smith_g1(alpha, normal.dot(direction).clamp(0.0, 1.0));
+            let mask = crate::smith_correlated_weight(
+                smith_g1(alpha, normal.dot(wo).clamp(0.0, 1.0)),
+                smith_g1(alpha, normal.dot(direction).clamp(0.0, 1.0)),
+            );
             if !mask.is_finite() || !(0.0..=1.0).contains(&mask) {
                 return Err(BeamError::NumericalRange.into());
             }

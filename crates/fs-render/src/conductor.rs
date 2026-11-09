@@ -30,7 +30,8 @@ pub use multilayer::{
 /// Bit semantics of table validation, interpolation, and Fresnel evaluation.
 pub const CONDUCTOR_OPTICS_SEMANTICS_VERSION: u32 = 3;
 /// Bit semantics of the single-scattering isotropic-GGX conductor BSDF.
-pub const CONDUCTOR_BSDF_SEMANTICS_VERSION: u32 = 1;
+/// Version 2 retains shared-height correlation in Smith masking-shadowing.
+pub const CONDUCTOR_BSDF_SEMANTICS_VERSION: u32 = 2;
 /// Fixed number of knots in a conductor optical table.
 pub const CONDUCTOR_IOR_SAMPLE_COUNT: usize = 9;
 /// Legacy visible constructor's maximum interval between adjacent optical knots.

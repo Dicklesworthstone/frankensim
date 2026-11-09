@@ -1718,10 +1718,11 @@ fn evaluate_rough_with_fresnel(
         || smith_g1(roughness_alpha, cos_o),
         |frame| frame.masking(wo),
     );
-    let geometry = masking_o * anisotropy.map_or_else(
+    let masking_i = anisotropy.map_or_else(
         || smith_g1(roughness_alpha, cos_i.abs()),
         |frame| frame.masking(wi),
     );
+    let geometry = crate::smith_correlated_geometry(masking_o, masking_i);
 
     if reflection {
         if wi_dot_m <= 0.0 {

@@ -57,7 +57,8 @@ fn equal_slopes_preserve_the_original_isotropic_bits_and_null_measure() {
     }
 }
 
-// Independently evaluated Walter BSDF and Smith VNDF density. This oracle uses
+// Independent Walter BSDF with correlated Smith geometry and VNDF density.
+// This oracle uses
 // tangent-plane slopes, scalar Snell/Fresnel and the explicit half-vector
 // Jacobian; it never invokes the production D, G1 or sampler.
 fn oracle(wo: Vec3, wi: Vec3, eta_i: f64, eta_t: f64, ax: f64, ay: f64) -> (f64, f64) {
@@ -84,19 +85,20 @@ fn oracle(wo: Vec3, wi: Vec3, eta_i: f64, eta_t: f64, ax: f64, ay: f64) -> (f64,
     };
     let slope_denominator = 1.0 + (m.x / (ax * m.z)).powi(2) + (m.y / (ay * m.z)).powi(2);
     let d = 1.0 / (PI * ax * ay * m.z.powi(4) * slope_denominator.powi(2));
-    let g1 = |w: Vec3| {
-        2.0 / (1.0 + (1.0 + ((ax * w.x).powi(2) + (ay * w.y).powi(2)) / w.z.powi(2)).sqrt())
+    let lambda = |w: Vec3| {
+        0.5 * ((1.0 + ((ax * w.x).powi(2) + (ay * w.y).powi(2)) / w.z.powi(2)).sqrt() - 1.0)
     };
-    let visible = d * g1(wo) * a / wo.z;
+    let visible = d / (1.0 + lambda(wo)) * a / wo.z;
+    let geometry = 1.0 / (1.0 + lambda(wo) + lambda(wi));
     if reflection {
         (
-            f * d * g1(wo) * g1(wi) / (4.0 * wo.z * wi.z),
+            f * d * geometry / (4.0 * wo.z * wi.z),
             visible * f / (4.0 * a),
         )
     } else {
         let den = a + eta * b;
         (
-            (1.0 - f) * d * g1(wo) * g1(wi) * (a * b).abs() / (wo.z * wi.z.abs() * den * den),
+            (1.0 - f) * d * geometry * (a * b).abs() / (wo.z * wi.z.abs() * den * den),
             visible * (1.0 - f) * eta * eta * b.abs() / (den * den),
         )
     }
@@ -154,6 +156,38 @@ fn reflected_and_refracted_values_match_independent_anisotropic_walter_equations
 }
 
 #[test]
+fn g1_grazing_glass_samples_retain_correlated_reflection_and_transmission_weights() {
+    let mut counts = [0; 2];
+    for (ax, ay) in [(0.5, 0.5), (0.15, 0.8)] {
+        let interface = surface(ax, ay).interface(550.0, false).unwrap();
+        let wo = normalized(Vec3::new(1.0, 0.3, 0.04));
+        let lambda = |v: Vec3| {
+            0.5 * ((1.0 + ((ax * v.x).powi(2) + (ay * v.y).powi(2)) / v.z.powi(2))
+                .sqrt() - 1.0)
+        };
+        for (eta_i, eta_t) in [(1.0_f64, 1.5_f64), (1.5, 1.0)] {
+            for draw in 0..64 {
+                for branch in [0.0, 0.99] {
+                    let u = (draw as f64 + 0.5) / 64.0;
+                    let v = ((draw * 23 % 64) as f64 + 0.5) / 64.0;
+                    let Some(sample) = interface.sample_rough(n(), wo, eta_i, eta_t, ax, u, v, branch)
+                        .unwrap() else { continue; };
+                    let transmission = sample.event == DielectricEvent::Transmission;
+                    counts[usize::from(transmission)] += 1;
+                    let eta_scale = if transmission { (eta_t / eta_i).powi(2) } else { 1.0 };
+                    let expected = (1.0 + lambda(wo))
+                        / (1.0 + lambda(wo) + lambda(sample.direction));
+                    let weight = sample.radiance_weight * eta_scale;
+                    close(weight, expected, 4.0e-11);
+                    assert!((0.0..=1.0 + 1.0e-12).contains(&weight));
+                }
+            }
+        }
+    }
+    assert!(counts[0] > 50 && counts[1] > 50, "both physical branches: {counts:?}");
+}
+
+#[test]
 fn both_hemispheres_keep_sampling_density_reciprocity_and_radiance_eta_factors() {
     let surface = surface(0.18, 0.72);
     let mut reflected = 0;
@@ -200,11 +234,12 @@ fn both_hemispheres_keep_sampling_density_reciprocity_and_radiance_eta_factors()
             close(reverse.value, sample.value * factor, 2.0e-11);
             assert!(reverse.pdf > 0.0 && reverse.pdf.is_finite());
             let wi = sample.direction;
-            let g1 = 2.0
-                / (1.0
-                    + (1.0 + ((0.18 * wi.x).powi(2) + (0.72 * wi.y).powi(2)) / wi.z.powi(2))
-                        .sqrt());
-            close(sample.radiance_weight * factor, g1, 2.0e-11);
+            let lambda = |v: Vec3| {
+                0.5 * ((1.0 + ((0.18 * v.x).powi(2) + (0.72 * v.y).powi(2)) / v.z.powi(2))
+                    .sqrt() - 1.0)
+            };
+            let visibility_weight = (1.0 + lambda(wo)) / (1.0 + lambda(wo) + lambda(wi));
+            close(sample.radiance_weight * factor, visibility_weight, 2.0e-11);
         }
     }
     assert!(reflected > 50 && transmitted > 50);

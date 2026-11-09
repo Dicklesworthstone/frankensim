@@ -126,8 +126,8 @@ fn g1_polarized_point_fixture_retains_brewster_contrast_and_counts_polarizer_los
             // Brewster reflection. Irradiance already supplies cos(theta)/r².
             let rs = ((1.0 - index * index) / (1.0 + index * index)).powi(2);
             let fresnel = [0.5 * rs, rs, 0.0][slot];
-            let g1 = 2.0 / (1.0 + (1.0 + alpha * alpha * index * index).sqrt());
-            let expected = intensity(lamp) * fresnel * g1 * g1
+            let g2 = 1.0 / (1.0 + alpha * alpha * index * index).sqrt();
+            let expected = intensity(lamp) * fresnel * g2
                 / (4.0 * PI * alpha * alpha * cosine);
             near(sample.fixture_radiance_w_m2_sr_nm(), expected);
             assert_eq!(sample.connections(), 1);
