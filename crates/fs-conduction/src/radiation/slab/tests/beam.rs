@@ -1,5 +1,7 @@
 use super::*;
 
+mod immersion;
+
 fn layers(depths: &[f64], indices: &[f64]) -> Vec<AbsorbingLayer> {
     depths
         .iter()

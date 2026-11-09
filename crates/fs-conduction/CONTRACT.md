@@ -5854,3 +5854,38 @@ transfer, energy and entropy, source limits, original Cp variation, contact
 Biot refusal, representation errors and cancellation. Pinned Rust parsing
 was available; native Cargo compilation and test execution were unavailable
 in this resource-exhausted session.
+
+## Illumination of immersed dielectric slabs
+
+`SlabBeamResponse::new_in_medium` prepares the original layered beam response
+with one explicit, sourced, lossless exterior dielectric shared by both faces.
+Layer indices remain absolute. Conserved transverse optical direction supplies
+each layer's Snell angle and the original polarized Fresnel power fractions;
+the existing linear-time reflection elimination retains every propagating
+internal return. Input irradiation is physical W/m² through the face, so no
+second cosine or index-squared radiance factor is applied.
+
+A layer outside the propagating cone has zero ray field and zero beam heating,
+and its adjacent interfaces reflect completely. A low-index interior gap can
+therefore separate two independently illuminated absorbing regions. This is
+the incoherent geometric-optics model: it does not infer evanescent absorption,
+frustrated total reflection, coherent films or interfacial complex extinction.
+The source must support the original temperature and gray/band domain. Different
+exterior media and surrounding-medium thermal emission remain outside this API.
+The original index-one constructors retain their explicit environment; thermal
+superposition refuses an immersed beam against their different diffuse model.
+
+Four focused Rust regression groups specify independent single-layer Fresnel/
+Beer series, entrance and interior-gap TIR, local heating, index rescaling,
+reversal/subdivision, critical-angle admission and transactional environment
+refusal. Their native compilation was interrupted by the shared execution
+environment outage; no Rust pass is claimed. A separate numerical cross-check
+of 306 configurations, both polarizations and both incidence sides compared the
+coefficient elimination with independently assembled directional boundary
+equations: maximum absolute response discrepancy 3.34e-16, maximum unit-power
+partition defect 4.45e-16. That arithmetic check does not replace native tests.
+
+The original Fresnel and incoherent-layer assumptions follow
+[PBRT 4e §9.3](https://pbr-book.org/4ed/Reflection_Models/Specular_Reflection_and_Transmission)
+and [Byrnes §6](https://arxiv.org/abs/1603.02720).
+
