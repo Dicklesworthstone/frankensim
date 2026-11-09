@@ -4372,3 +4372,44 @@ output, work and physical heat with the original linear Maxwell owner over
 35 relaxation times. Three existing memory-limit tests
 preserve the linear and Kelvin-Voigt limits and their work/heat accounting.
 General nonquadratic mapped-strain split preparation remains unsupported.
+
+
+### Nonpolynomial original strain under coherent harmonic driving
+
+`RelaxationStrainMap::discrete_gradient_rule` optionally supplies a symmetric
+`RelaxationStrainDiscreteGradient` of the ORIGINAL scalar strain. The existing
+Maxwell storage composes its work as mean(sqrt(k)*epsilon-z) times that strain
+rule, with the reciprocal original memory effort. Independent base kinetic
+coordinates remain unchanged. The endpoint action includes both the change
+of material stress and the derivative of the actual scalar rule; the continuous
+tangent still includes prestress curvature and every memory cross term. A
+missing endpoint action retains the existing bounded Newton probing path.
+Incomplete/nonfinite writes refuse; a polynomial is never inferred from samples.
+
+These maps retain the declared base quadratic block plus each z²/2 block for
+existing coherent constant/affine exponential discrete-gradient stepping.
+They remain nonexact quadratic splits: all nonpolynomial geometry and memory
+coupling stays in the original implicit storage. No sampled local stiffness
+or effective damping replaces it. Four original-prefix vectors are prepared
+once and reused across general arms for gradients, continuous tangents and
+component work/actions; source callbacks retain their own resource behavior.
+Existing quadratic images and exact declared linear Maxwell dyads are unchanged.
+Maps without an explicit scalar work law retain their previous fallback.
+
+`LogarithmicStrainMap` supplies epsilon=ln(reference_stretch+projection.x),
+its original gradient/Hessian, symmetric strain divided difference and exact
+analytic endpoint action. Positive stretch is required; projection units must
+make stretch dimensionless. Near-coincident stretches use analytic normalized
+series, and an independent original strain remainder retains small geometric
+work beside prestress. It does not derive energy change from the update or
+port/loss account. The native scalar map has no warm allocations. This is not
+a tensor finite-strain material model or authority for a material's strain range.
+
+Four G0/G1/G3 tests pass natively: original component work and both tangents;
+near-coincident stretches and geometric-unit rescaling over 1e-100 to 1e100;
+constant/affine coherent drive with separate viscous/Maxwell heat and 24/48/96
+step convergence against independently written 8192/16384-step original ODEs;
+and fixed-extension exact memory decay over 20 relaxation times, invalid
+stretch, cancellation and atomic output. Six existing mapped-material tests
+also pass. Only the quadratic propagation is exact; nonlinear temporal error
+still needs refinement. No measured material/instrument fidelity is claimed.

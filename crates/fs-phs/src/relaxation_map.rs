@@ -6,6 +6,33 @@ use fs_math::det;
 use std::rc::Rc;
 
 pub(super) mod constitutive;
+mod logarithmic;
+pub use logarithmic::LogarithmicStrainMap;
+
+/// Symmetric discrete gradient of the ORIGINAL scalar strain, in its original
+/// coordinates. Its contraction with `b-a` is `epsilon(b)-epsilon(a)` and its
+/// coincident value is the analytic strain gradient. This explicit capability
+/// admits smooth nonpolynomial geometry without substituting a fitted strain.
+/// Callbacks are read-only, fill every output and refuse invalid source support.
+pub trait RelaxationStrainDiscreteGradient {
+    fn evaluate(&self, a: &[f64], b: &[f64], midpoint: &[f64], out: &mut [f64]) -> bool;
+
+    /// Derivative of this strain rule with respect to the second endpoint.
+    /// Missing actions retain the existing bounded Newton probing path.
+    fn end_jacobian_action(
+        &self, _a: &[f64], _b: &[f64], _direction: &[f64], _out: &mut [f64],
+    ) -> bool { false }
+
+    /// Optional independent Maxwell energy remainder
+    /// `H(b)-H(a)-grad H(mid).(b-a)` for `H=(scale*epsilon-z)^2/2`.
+    /// Offsets are the actual memory coordinates at a, b and midpoint. This
+    /// must come from the original strain algebra, never the update equation
+    /// or its port/loss account. None retains endpoint-energy subtraction.
+    fn midpoint_energy_remainder(
+        &self, _a: &[f64], _b: &[f64], _midpoint: &[f64],
+        _scale: f64, _offsets: [f64; 3],
+    ) -> Option<f64> { None }
+}
 
 /// One scalar strain and its exact derivatives on the original state prefix.
 /// The map is immutable geometry, never an evolving constitutive history.
@@ -18,6 +45,10 @@ pub trait RelaxationStrainMap: core::fmt::Debug {
     fn strain(&self, state: &[f64]) -> f64;
     fn gradient(&self, state: &[f64], output: &mut [f64]);
     fn hessian_vector(&self, state: &[f64], direction: &[f64], output: &mut [f64]);
+    /// Optional exact scalar work law for general smooth strain. Its presence
+    /// retains component work and the base kinetic law in discrete-gradient
+    /// stepping, including the original exponential/coherent-tone owner.
+    fn discrete_gradient_rule(&self) -> Option<&dyn RelaxationStrainDiscreteGradient> { None }
     /// Explicit declaration of a globally at-most-quadratic STRAIN map. This does not
     /// make its Maxwell energy quadratic in the complete state. It permits a
     /// cancellation-stable exact remainder using the same derivatives. Within
@@ -115,6 +146,11 @@ impl RelaxationCoupling {
         za:f64,zb:f64,zm:f64)->Option<f64>
     {
         let Self::Mapped {strain,scale}=self else {return None;};
+        if !strain.is_quadratic_strain() {
+            return strain.discrete_gradient_rule()?.midpoint_energy_remainder(
+                a, b, mid, *scale, [za, zb, zm],
+            );
+        }
         quadratic_strain_midpoint_energy_remainder(strain.as_ref(), *scale, a, b, mid, [za,zb,zm])
     }
     pub(super) fn strain(&self, x: &[f64]) -> f64 {
@@ -164,6 +200,7 @@ impl super::ContinuousStorageTangent for super::RelaxationStorage {
             return false;
         }
         let mut mapped_scratch: Option<(Vec<f64>, Vec<f64>)> = None;
+        let mut cached = self.strain_scratch.as_ref().map(|s| s.borrow_mut());
         for (arm, coupling) in self.couplings.iter().enumerate() {
             let memory = self.base_dim + arm;
             let mut change = -direction[memory];
@@ -190,9 +227,15 @@ impl super::ContinuousStorageTangent for super::RelaxationStorage {
                     }
                 }
                 RelaxationCoupling::Mapped { strain, scale } => {
-                    let (gradient, curvature) = mapped_scratch.get_or_insert_with(|| {
-                        (vec![f64::NAN; self.base_dim], vec![f64::NAN; self.base_dim])
-                    });
+                    let (gradient, curvature) = if let Some(scratch) = cached.as_mut() {
+                        let constitutive::StrainScratch { gradient, action, .. } = &mut **scratch;
+                        (gradient, action)
+                    } else {
+                        let (gradient, curvature) = mapped_scratch.get_or_insert_with(|| {
+                            (vec![f64::NAN; self.base_dim], vec![f64::NAN; self.base_dim])
+                        });
+                        (gradient, curvature)
+                    };
                     gradient.fill(f64::NAN);
                     curvature.fill(f64::NAN);
                     let x = &state[..self.base_dim];
@@ -241,7 +284,13 @@ impl PortHamiltonian {
     /// ceiling cache their analytic derivative image. Those native callbacks
     /// allocate no warm derivative/remainder scratch, and the componentwise
     /// discrete gradient preserves the base kinetic law and each branch's work.
-    /// General/larger maps retain the original temporary-vector fallback.
+    /// A general smooth map with its own `discrete_gradient_rule` preserves
+    /// that SAME scalar work law, the base kinetic effort and each branch's
+    /// memory work. Four original-prefix vectors are cached once and reused
+    /// across such arms, including gradient and continuous/endpoint actions.
+    /// The declared base quadratic part and z²/2 block remain available to
+    /// coherent exponential stepping; all nonpolynomial strain stays implicit.
+    /// General maps without this capability retain the original fallback.
     /// Allocation-free execution also requires allocation-free source callbacks.
     /// If the original storage declares a continuous tangent, the complete
     /// relaxed storage retains it. Its exact action includes the geometric

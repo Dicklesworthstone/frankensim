@@ -10,6 +10,25 @@ use super::{RelaxationCoupling, RelaxationStrainMap};
 use crate::interconnection::accumulation::Sum;
 use crate::{ConstitutiveDiscreteGradient, RelaxationStorage};
 
+/// One reusable original-coordinate payload for every general strain arm.
+/// Polynomial/linear-only storage retains its previous allocation footprint.
+pub(crate) struct StrainScratch {
+    discrete: Vec<f64>,
+    pub(crate) gradient: Vec<f64>,
+    pub(crate) action: Vec<f64>,
+    midpoint: Vec<f64>,
+}
+impl StrainScratch {
+    pub(crate) fn new(n: usize) -> Self {
+        Self {
+            discrete: vec![0.0; n],
+            gradient: vec![0.0; n],
+            action: vec![0.0; n],
+            midpoint: vec![0.0; n],
+        }
+    }
+}
+
 /// A constant analytic derivative image of an explicitly declared polynomial.
 /// The original callback still evaluates strain, including its source domain.
 pub(crate) struct QuadraticStrainImage {
@@ -159,16 +178,18 @@ impl QuadraticStrainImage {
 
 impl RelaxationStorage {
     pub(crate) fn has_constitutive_rule(&self) -> bool {
-        // Preserve existing unsupported/global-Gonzalez behavior when an arm
-        // lacks a declared image. Nested native constitutive laws remain native.
+        // A general map must supply its own scalar work law. No fitted
+        // polynomial or all-coordinate Gonzalez correction establishes one.
         (self.base.discrete_gradient_rule().is_some()
             || self.base.exact_quadratic_matrix().is_some()
-            || self.polynomial.iter().any(Option::is_some))
-            && self
-                .couplings
-                .iter()
-                .zip(&self.polynomial)
-                .all(|(c, p)| matches!(c, RelaxationCoupling::Linear(_)) || p.is_some())
+            || self.polynomial.iter().any(Option::is_some)
+            || self.strain_scratch.is_some())
+            && self.couplings.iter().zip(&self.polynomial).all(|(c, p)| {
+                matches!(c, RelaxationCoupling::Linear(_))
+                    || p.is_some()
+                    || matches!(c, RelaxationCoupling::Mapped { strain, .. }
+                        if strain.discrete_gradient_rule().is_some())
+            })
     }
 
     fn mean_strain_gradient(&self, arm: usize, a: &[f64], b: &[f64], i: usize) -> f64 {
@@ -211,12 +232,35 @@ impl ConstitutiveDiscreteGradient for RelaxationStorage {
             &mut out[..d],
             d,
         );
+        let mut scratch = self.strain_scratch.as_ref().map(|s| s.borrow_mut());
         for (arm, coupling) in self.couplings.iter().enumerate() {
             let z = d + arm;
             let effort = f64::midpoint(
                 coupling.strain(&a[..d]) - a[z],
                 coupling.strain(&b[..d]) - b[z],
             );
+            if self.polynomial[arm].is_none()
+                && let RelaxationCoupling::Mapped { strain, scale } = coupling
+            {
+                let (Some(rule), Some(scratch)) =
+                    (strain.discrete_gradient_rule(), scratch.as_mut())
+                else {
+                    out.fill(f64::NAN);
+                    return;
+                };
+                scratch.discrete.fill(f64::NAN);
+                if !rule.evaluate(&a[..d], &b[..d], &mid[..d], &mut scratch.discrete)
+                    || scratch.discrete.iter().any(|v| !v.is_finite())
+                {
+                    out.fill(f64::NAN);
+                    return;
+                }
+                for (value, &gradient) in out[..d].iter_mut().zip(&scratch.discrete) {
+                    *value += effort * (scale * gradient);
+                }
+                out[z] = -effort;
+                continue;
+            }
             for (i, value) in out[..d].iter_mut().enumerate() {
                 *value += effort * self.mean_strain_gradient(arm, &a[..d], &b[..d], i);
             }
@@ -250,12 +294,65 @@ impl ConstitutiveDiscreteGradient for RelaxationStorage {
         ) {
             return false;
         }
+        let mut scratch = self.strain_scratch.as_ref().map(|s| s.borrow_mut());
         for (arm, coupling) in self.couplings.iter().enumerate() {
             let z = d + arm;
             let effort = f64::midpoint(
                 coupling.strain(&a[..d]) - a[z],
                 coupling.strain(&b[..d]) - b[z],
             );
+            if self.polynomial[arm].is_none()
+                && let RelaxationCoupling::Mapped { strain, scale } = coupling
+            {
+                let (Some(rule), Some(scratch)) =
+                    (strain.discrete_gradient_rule(), scratch.as_mut())
+                else {
+                    return false;
+                };
+                let StrainScratch {
+                    discrete,
+                    gradient,
+                    action,
+                    midpoint,
+                } = &mut **scratch;
+                for i in 0..d {
+                    midpoint[i] = f64::midpoint(a[i], b[i]);
+                }
+                discrete.fill(f64::NAN);
+                gradient.fill(f64::NAN);
+                action.fill(f64::NAN);
+                strain.gradient(&b[..d], gradient);
+                if !rule.evaluate(&a[..d], &b[..d], midpoint, discrete)
+                    || !rule.end_jacobian_action(&a[..d], &b[..d], &direction[..d], action)
+                    || discrete
+                        .iter()
+                        .chain(&*gradient)
+                        .chain(&*action)
+                        .any(|v| !v.is_finite())
+                {
+                    return false;
+                }
+                let mut change = Sum::default();
+                if change.product(-0.5, direction[z]).is_none() {
+                    return false;
+                }
+                for i in 0..d {
+                    if change
+                        .product(0.5 * scale * gradient[i], direction[i])
+                        .is_none()
+                    {
+                        return false;
+                    }
+                }
+                let Some(change) = change.value() else {
+                    return false;
+                };
+                for i in 0..d {
+                    out[i] += change * (scale * discrete[i]) + effort * (scale * action[i]);
+                }
+                out[z] = -change;
+                continue;
+            }
             let mut change = Sum::default();
             if change.product(-0.5, direction[z]).is_none() {
                 return false;
