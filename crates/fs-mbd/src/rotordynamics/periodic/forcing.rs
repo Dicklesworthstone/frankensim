@@ -17,7 +17,10 @@ pub struct RotorPeriodicTrajectory {
     pub boundary_states: Vec<RotorTransientState>,
     /// Maximum row-relative defect of the original affine increment equation,
     /// reconstructed in double-double arithmetic on the actual returned states.
-    /// This is not a continuum integration or state-error bound.
+    /// Each row retains its largest actual chronological increment as a scale
+    /// when motion cancels over the complete period. Other coordinates and
+    /// large unchanged states cannot enlarge that scale. This is a consistency
+    /// check at the authored boundaries, not a state-error bound.
     pub relative_affine_residual: f64,
 }
 
@@ -99,7 +102,10 @@ impl PreparedRotorCycle {
     /// segment starts from its actually returned original q/v boundary.
     /// The final check uses the ORIGINAL affine increment equation row by row:
     /// (x_end-x_start) - (P-I)x_start - b = 0. A small physical load is not
-    /// hidden by the magnitude of a large unchanged state.
+    /// hidden by the magnitude of a large unchanged state. Each row's largest
+    /// actual boundary-to-boundary increment also enters its scale, retaining
+    /// resolved motion whose net cycle increment cancels. Unsampled interior
+    /// excursions are not inferred; a boundary-only check may still refuse.
     pub fn advance(
         &self,
         initial: &RotorTransientState,
@@ -138,6 +144,15 @@ impl PreparedRotorCycle {
             &self.physical_offset,
             &initial_values,
             &final_values,
+            |i| {
+                row_activity(states.iter().map(|state| {
+                    if i < self.report.dofs {
+                        state.displacement[i]
+                    } else {
+                        state.velocity[i - self.report.dofs]
+                    }
+                }))
+            },
             relative_residual_tolerance,
             &mut cancelled,
         )?;
@@ -184,6 +199,7 @@ impl PreparedRotorCycle {
             &self.physical_offset,
             &original,
             &original,
+            |_| Ok(0.0),
             relative_residual_tolerance,
             &mut cancelled,
         )?;
@@ -318,13 +334,33 @@ pub(super) fn apply_affine(
     Ok(result)
 }
 
+// Actual activity in ONE original physical coordinate, without another
+// coordinate's magnitude or a user-independent absolute floor. The largest
+// increment is bounded without summing possibly overflowing absolute states.
+pub(super) fn row_activity(values: impl IntoIterator<Item = f64>) -> Result<f64, RotorError> {
+    let mut values = values.into_iter();
+    let Some(mut previous) = values.next() else {
+        return Ok(0.0);
+    };
+    let mut maximum = 0.0_f64;
+    for value in values {
+        let increment = Dd::from_f64(value) - Dd::from_f64(previous);
+        maximum = maximum.max(finite(increment.to_f64().abs())?);
+        previous = value;
+    }
+    Ok(maximum)
+}
+
 // Original, rowwise increment equation. Keeping P-I and endpoint differences
 // in DD prevents the large unchanged state from setting a false residual scale.
+// Advance checks retain actual chronological row activity when the complete
+// cycle cancels; fixed-point solves pass zero and keep the strict force scale.
 pub(super) fn affine_residual(
     matrix: &[f64],
     offset: &[f64],
     before: &[f64],
     after: &[f64],
+    mut activity: impl FnMut(usize) -> Result<f64, RotorError>,
     tolerance: f64,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, RotorError> {
@@ -335,7 +371,13 @@ pub(super) fn affine_residual(
         poll(cancelled)?;
         let increment = Dd::from_f64(after[i]) - Dd::from_f64(before[i]);
         let mut residual = increment - Dd::from_f64(offset[i]);
-        magnitudes[0] = finite(increment.to_f64().abs())?;
+        let activity = finite(activity(i)?)?;
+        if activity < 0.0 {
+            return Err(RotorError::Invalid(
+                "nonnegative original row activity required",
+            ));
+        }
+        magnitudes[0] = finite(increment.to_f64().abs())?.max(activity);
         magnitudes[1] = offset[i].abs();
         for j in 0..d {
             let coefficient =
@@ -402,8 +444,7 @@ pub(super) fn solve_periodic_initial(
     poll(cancelled)?;
     let norm_equation = norm_one(&equation, d)?;
     let norm_period = norm_one(monodromy, d)?;
-    let resolvent_gain_estimate =
-        finite((condition / norm_equation) * finite(1.0 + norm_period)?)?;
+    let resolvent_gain_estimate = finite((condition / norm_equation) * finite(1.0 + norm_period)?)?;
     if condition <= 0.0 || resolvent_gain_estimate <= 0.0 {
         return Err(RotorError::Invalid(
             "periodic resolvent estimate is unrepresentable",
@@ -419,4 +460,68 @@ pub(super) fn solve_periodic_initial(
     factor.solve(&mut balanced);
     poll(cancelled)?;
     Ok((balanced, resolvent_gain_estimate))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cycle_cancellation_uses_its_own_chronological_motion_without_hiding_defects() {
+        // The net cycle displacement is zero, but the physical coordinate
+        // moves one unit between authored boundaries. Endpoint roundoff is
+        // small relative to that same coordinate's actual motion.
+        for endpoint in [1e-16, 1e-4] {
+            let path = [0.0, 1.0, endpoint];
+            let result = affine_residual(
+                &[1.0],
+                &[0.0],
+                &[path[0]],
+                &[endpoint],
+                |_| row_activity(path),
+                1e-12,
+                &mut || false,
+            );
+            if endpoint == 1e-16 {
+                assert!(result.unwrap() <= 1e-12);
+            } else {
+                assert!(matches!(result, Err(RotorError::Residual { .. })));
+            }
+        }
+    }
+
+    #[test]
+    fn strong_row_motion_cannot_hide_a_small_unresolved_force_in_another_row() {
+        let strong = [0.0, 1e80, 0.0];
+        let weak = [0.0, 0.0, 0.0];
+        let result = affine_residual(
+            &[1.0, 0.0, 0.0, 1.0],
+            &[0.0, 1e-80],
+            &[0.0, 0.0],
+            &[0.0, 0.0],
+            |i| row_activity(if i == 0 { strong } else { weak }),
+            1e-12,
+            &mut || false,
+        );
+        assert!(matches!(
+            result,
+            Err(RotorError::Residual { relative, .. }) if relative == 1.0
+        ));
+
+        // Fixed-point queries deliberately receive no trajectory allowance.
+        // A large unchanged state must still not erase an unresolved source.
+        let fixed = affine_residual(
+            &[1.0],
+            &[1e-80],
+            &[1e80],
+            &[1e80],
+            |_| Ok(0.0),
+            1e-12,
+            &mut || false,
+        );
+        assert!(matches!(
+            fixed,
+            Err(RotorError::Residual { relative, .. }) if relative == 1.0
+        ));
+    }
 }

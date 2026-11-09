@@ -1415,9 +1415,10 @@ recovery motion, nonunit matched and finite-depth wave references, material and
 storage directions, resource/query limits, cancellation and replay. Five
 private numerical regressions cover a retained `-1e-200` shift at an exact
 zero, product/low-word/partial-subnormal loss, and higher-order-zero refusal.
-The implementation and these eleven groups were source-reviewed; they were not
-compiled or executed in this delivery because the execution environment became
-unavailable before the native validation run.
+All eleven groups now pass natively, together with seven ordinary and seven
+loaded-wave peak-parameter regressions (25 tests total). This focused Cargo
+fallback compiles the actual pHS and shared numerical source modules; it is
+not a full-workspace build or DSR verdict.
 
 ### Physical parameter motion of observed resonance peaks
 

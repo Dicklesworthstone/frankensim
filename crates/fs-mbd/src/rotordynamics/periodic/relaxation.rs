@@ -560,6 +560,18 @@ impl PreparedRotorMaxwellCycle {
             &self.physical_offset,
             &values,
             &final_values,
+            |row| {
+                let n = self.report.dofs;
+                affine::row_activity(states.iter().map(|state| {
+                    if row < n {
+                        state.displacement[row]
+                    } else if row < 2 * n {
+                        state.velocity[row - n]
+                    } else {
+                        state.branch_stress[row - 2 * n]
+                    }
+                }))
+            },
             relative_residual_tolerance,
             &mut cancelled,
         )?;

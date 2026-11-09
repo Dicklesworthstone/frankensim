@@ -135,6 +135,7 @@ impl PreparedRotorMaxwellCycle {
             &self.physical_offset,
             &original,
             &original,
+            |_| Ok(0.0),
             relative_residual_tolerance,
             &mut cancelled,
         )?;

@@ -9892,13 +9892,34 @@ response and asymmetric load cycles, relaxed static equilibrium, dark/slow
 memories, full inertia and signed gyroscopic congruence, original complex
 Maxwell phases/stresses, DC plus tones, independent original-ODE transients,
 secular lossless forcing and cancellation/admission. Independent source and
-physical-oracle review found no defect. These NEW groups are not yet compiled
-or executed because the execution environment is unavailable; previous native
-results cover the earlier homogeneous and ordinary-source owners only.
+physical-oracle review was followed by native execution: all eleven groups now
+pass in the focused actual-source Cargo build, together with six existing
+homogeneous-memory groups and the ordinary forcing regressions. The build uses
+the original numerical modules without substitute implementations; it is not
+a full-workspace or DSR verdict.
 
 The declared piecewise coefficients and finite source spectrum carry no smooth
 modulation or waveform-truncation error bound. This motion/orbit extension does
 not add a physical work/heat ledger, nonlinear bearing law or eigenvalue enclosure.
+
+## Resolved lossless motion at cancelling cycle boundaries
+
+The ordinary and hereditary affine advance checks retain the largest actual
+boundary-to-boundary increment separately in each original q, velocity and
+stress coordinate. It supplements the original net-increment, force-offset
+and (P-I)x scales when complete-cycle cancellation makes the net increment
+nearly zero. Strong activity in another coordinate and a large unchanged
+state never enlarge this allowance. Fixed-point queries supply zero activity
+and retain their strict original force scale. The native trajectory, damping,
+source coefficients and caller tolerance are unchanged.
+
+The lossless Fourier fixture with simultaneous DC, resonant and off-resonant
+forcing now advances with its analytic secular growth at amplitudes
+1e-80, 1 and 1e80. Both new activity/refusal unit groups pass; all six Fourier,
+nine forced-cycle and six harmonic groups pass, including the independent
+small-force/large-unchanged-velocity refusal. The check measures consistency
+at authored boundaries, not forward error, and does not infer unresolved
+intra-segment excursions. Some nodal sampling configurations may still refuse.
 
 ## Complete spatial Maxwell histories on native rigid-body graphs
 

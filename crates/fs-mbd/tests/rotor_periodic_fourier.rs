@@ -274,54 +274,59 @@ fn lossless_resonant_tone_grows_with_the_steady_and_off_resonant_response() {
         model: &model,
         duration_seconds: TAU / 4.0,
     }; 4];
-    let tones = [
-        RotorHarmonicForce {
-            cosine: &[1.0],
-            sine: &[0.0],
-        },
-        RotorHarmonicForce {
-            cosine: &[0.6],
-            sine: &[0.0],
-        },
-    ];
-    let forces = [RotorFourierForce {
-        steady: &[0.3],
-        harmonics: &tones,
-    }; 4];
-    let plan = prepare_fourier_cycle(
-        0.0,
-        &segments,
-        &forces,
-        &[1, 3],
-        1e-12,
-        RotorFloquetBudget::default(),
-        || false,
-    )
-    .unwrap();
-    let mut initial = RotorTransientState {
-        displacement: vec![0.0],
-        velocity: vec![0.0],
-    };
-    for cycle in 0..2 {
-        let motion = plan.advance(&initial, 1e-9, || false).unwrap();
-        for (&local, state) in motion
-            .boundary_times_seconds
-            .iter()
-            .zip(&motion.boundary_states)
-        {
-            let t = local + cycle as f64 * TAU;
-            let q = 0.3 * (1.0 - t.cos())
-                + 0.5 * t * t.sin()
-                + 0.6 / (1.0 - 9.0) * ((3.0 * t).cos() - t.cos());
-            let v = 0.3 * t.sin()
-                + 0.5 * (t.sin() + t * t.cos())
-                + 0.6 / (1.0 - 9.0) * (-3.0 * (3.0 * t).sin() + t.sin());
-            near(state.displacement[0], q, 2e-10);
-            near(state.velocity[0], v, 2e-10);
+    for amplitude in [1e-80, 1.0, 1e80] {
+        let fundamental = [amplitude];
+        let third = [0.6 * amplitude];
+        let steady = [0.3 * amplitude];
+        let tones = [
+            RotorHarmonicForce {
+                cosine: &fundamental,
+                sine: &[0.0],
+            },
+            RotorHarmonicForce {
+                cosine: &third,
+                sine: &[0.0],
+            },
+        ];
+        let forces = [RotorFourierForce {
+            steady: &steady,
+            harmonics: &tones,
+        }; 4];
+        let plan = prepare_fourier_cycle(
+            0.0,
+            &segments,
+            &forces,
+            &[1, 3],
+            1e-12,
+            RotorFloquetBudget::default(),
+            || false,
+        )
+        .unwrap();
+        let mut initial = RotorTransientState {
+            displacement: vec![0.0],
+            velocity: vec![0.0],
+        };
+        for cycle in 0..2 {
+            let motion = plan.advance(&initial, 1e-9, || false).unwrap();
+            for (&local, state) in motion
+                .boundary_times_seconds
+                .iter()
+                .zip(&motion.boundary_states)
+            {
+                let t = local + cycle as f64 * TAU;
+                let q = 0.3 * (1.0 - t.cos())
+                    + 0.5 * t * t.sin()
+                    + 0.6 / (1.0 - 9.0) * ((3.0 * t).cos() - t.cos());
+                let v = 0.3 * t.sin()
+                    + 0.5 * (t.sin() + t * t.cos())
+                    + 0.6 / (1.0 - 9.0) * (-3.0 * (3.0 * t).sin() + t.sin());
+                near(state.displacement[0] / amplitude, q, 2e-10);
+                near(state.velocity[0] / amplitude, v, 2e-10);
+            }
+            initial = motion.boundary_states.last().unwrap().clone();
         }
-        initial = motion.boundary_states.last().unwrap().clone();
+        assert!(plan.periodic_orbit(1e-9, 1e8, || false).is_err());
     }
-    assert!(plan.periodic_orbit(1e-9, 1e8, || false).is_err());
 }
 
 #[test]
