@@ -56,6 +56,71 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         transport_controls: MolecularStepControl,
         loads: [InertialWallLoad; 2],
         controls: InertialWallsControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<
+        MolecularInertialWallsStep<MovingMolecularStepReport3d>,
+        MolecularInertialWallsError<DissipationError>,
+    > {
+        self.step_inertial_walls_impl(
+            axis,
+            walls,
+            maximum_duration,
+            transport_controls,
+            loads,
+            controls,
+            None,
+            cancelled,
+        )
+    }
+
+    /// Couple held body forcing, original molecular transport and both finite
+    /// pistons in one D/2--K/2--ALE--K/2--D/2 transaction.
+    ///
+    /// The native kinetic-work source is external to gas-plus-piston mechanics.
+    /// Its actual accepted impulse/work is subtracted from both mechanical
+    /// balance gates, while wall heat and transverse supports retain their
+    /// separate accounts. No body impulse is credited to a piston. Every root
+    /// proposal replays from accepted storage with original finite mass and
+    /// source laws; scratch, Mach, relative-wave and parabolic limits all apply.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_inertial_walls_and_forcing(
+        &mut self,
+        axis: usize,
+        walls: &mut [Piston; 2],
+        maximum_duration: Time,
+        transport_controls: MolecularStepControl,
+        loads: [InertialWallLoad; 2],
+        controls: InertialWallsControl,
+        force: BodyForce3d<'_>,
+        force_controls: ForceControl3d,
+        workspace: &mut ForcingWorkspace3d,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<
+        MolecularInertialWallsStep<MovingMolecularStepReport3d>,
+        MolecularInertialWallsError<DissipationError>,
+    > {
+        self.step_inertial_walls_impl(
+            axis,
+            walls,
+            maximum_duration,
+            transport_controls,
+            loads,
+            controls,
+            Some((force, force_controls, workspace)),
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_inertial_walls_impl(
+        &mut self,
+        axis: usize,
+        walls: &mut [Piston; 2],
+        maximum_duration: Time,
+        transport_controls: MolecularStepControl,
+        loads: [InertialWallLoad; 2],
+        controls: InertialWallsControl,
+        mut forcing: Option<forcing::Context<'_, '_>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<
         MolecularInertialWallsStep<MovingMolecularStepReport3d>,
@@ -73,6 +138,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             transport_controls,
             MeshMotion::default(),
         )?;
+        self.admit_moving_forcing(&mut forcing, &mut cancelled)?;
         let grid = self.accepted.grid;
         let sides = admit_planes(grid, self.accepted.boundaries, self.molecular.walls, axis)?;
         let area = grid.face_area(sides[0]) * grid.face_count(sides[0]) as f64;
@@ -86,6 +152,11 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             let p = cell(row, n)
                 .primitive(&self.accepted.gas, &mut cancelled)
                 .map_err(DissipationError::from)?;
+            if let Some((_, control, _)) = forcing.as_ref() {
+                control
+                    .admit_velocity::<Error>(p.velocity, p.sound_speed)
+                    .map_err(DissipationError::from)?;
+            }
             let local: f64 = (0..3)
                 .map(|a| {
                     let speed = if a == axis {
@@ -135,10 +206,13 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     motion.lower_velocity[axis] = speed[0];
                     motion.upper_velocity[axis] = speed[1];
                     let gas = self
-                        .trial_moving(
+                        .trial_moving_with_forcing(
                             dt,
                             transport_controls,
                             motion,
+                            forcing
+                                .as_mut()
+                                .map(|(force, control, work)| (*force, *control, &mut **work)),
                             before,
                             retry,
                             &mut cancelled,
@@ -196,13 +270,15 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                             (after.species_masses[k] - before.species_masses[k])
                                 * self.accepted.gas.energy_references()[k]
                         }))
-                        .chain(gas.wall_heat_j.map(|q| -q)));
+                        .chain(gas.wall_heat_j.map(|q| -q))
+                        .chain(forcing.as_ref().map(|_| -gas.transport.source_change.work)));
                     let displacement = displacement(grid, self.trial.grid, axis, speed)?;
                     Ok(WallGasExchange {
                         gas,
                         momentum_change_n_s: after.momentum[axis]
                             - before.momentum[axis]
-                            - side_impulse[axis],
+                            - side_impulse[axis]
+                            - gas.transport.source_change.impulse[axis],
                         energy_change_j: physical_change,
                         boundary_impulse_n_s: inward.map(|q| q[n + axis]),
                         boundary_work_j: work,
@@ -217,6 +293,11 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     mechanics.gas.transport.after.energy - before.energy,
                 )
                 .chain(mechanics.gas.wall_heat_j.map(|q| -q))
+                .chain(
+                    forcing
+                        .as_ref()
+                        .map(|_| -mechanics.gas.transport.source_change.work),
+                )
                 .chain((0..2).map(|i| {
                     mechanics.kinetic_energy_change_j[i] + mechanics.exterior_pressure_work_j[i]
                         - mechanics.external_force_work_j[i]

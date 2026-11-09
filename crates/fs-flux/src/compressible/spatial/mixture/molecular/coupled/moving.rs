@@ -119,10 +119,51 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         maximum_duration: Time,
         controls: MolecularStepControl,
         motion: MeshMotion,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MovingMolecularStepReport3d, DissipationError> {
+        self.step_moving_impl(maximum_duration, controls, motion, None, cancelled)
+    }
+
+    /// Compose D/2--K/2--ALE--K/2--D/2 through the original molecular and
+    /// mechanical source owners. The two kicks use actual species masses and
+    /// old/new volumes; source impulse/work stays separate from wall exchange.
+    ///
+    /// Native molecular stages retain their original admissibility. Physical
+    /// Mach and mesh-relative acoustic bounds also admit the last molecular
+    /// endpoint. The complete workspace budget includes the supplied prepared
+    /// force scratch. Every shortened or refused proposal restarts the whole
+    /// physical interval without publishing source binding or boundary loads.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_moving_with_forcing(
+        &mut self,
+        maximum_duration: Time,
+        controls: MolecularStepControl,
+        motion: MeshMotion,
+        force: BodyForce3d<'_>,
+        force_controls: ForceControl3d,
+        workspace: &mut ForcingWorkspace3d,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MovingMolecularStepReport3d, DissipationError> {
+        self.step_moving_impl(
+            maximum_duration,
+            controls,
+            motion,
+            Some((force, force_controls, workspace)),
+            cancelled,
+        )
+    }
+
+    fn step_moving_impl(
+        &mut self,
+        maximum_duration: Time,
+        controls: MolecularStepControl,
+        motion: MeshMotion,
+        mut forcing: Option<forcing::Context<'_, '_>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MovingMolecularStepReport3d, DissipationError> {
         poll(&mut cancelled)?;
         self.admit_moving(maximum_duration.value(), controls, motion)?;
+        self.admit_moving_forcing(&mut forcing, &mut cancelled)?;
         let n = self.accepted.gas.species_count();
         let before = checked_totals(
             &self.accepted.states,
@@ -130,14 +171,38 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             n,
             &mut cancelled,
         )?;
-        let rate = relative_rate(&self.accepted, motion, &mut cancelled)?;
+        let rate = if let Some((_, control, _)) = forcing.as_ref() {
+            forcing::admit_moving_field(
+                &self.accepted.gas,
+                &self.accepted.grid,
+                &self.accepted.states,
+                *control,
+                motion,
+                &mut cancelled,
+            )?
+        } else {
+            relative_rate(&self.accepted, motion, &mut cancelled)?
+        };
         let mut dt = maximum_duration
             .value()
             .min(0.8 * controls.advection.cfl / rate);
         let mut last = DissipationError::Invalid("no moving molecular mixture trial");
         let mut last_dt = dt;
         for retry in 0..=controls.maximum_coupling_retries {
-            match self.trial_moving(dt, controls, motion, before, retry, &mut cancelled) {
+            let trial = if let Some((force, control, work)) = forcing.as_mut() {
+                self.trial_moving_with_forcing(
+                    dt,
+                    controls,
+                    motion,
+                    Some((*force, *control, &mut **work)),
+                    before,
+                    retry,
+                    &mut cancelled,
+                )
+            } else {
+                self.trial_moving(dt, controls, motion, before, retry, &mut cancelled)
+            };
+            match trial {
                 Ok(report) => {
                     self.publish_moving(report);
                     return Ok(report);
@@ -160,6 +225,30 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             step_s: last_dt,
             last: Box::new(last),
         })
+    }
+
+    /// Admit all supplied scratch, including an authored zero force, once at
+    /// the enclosing transaction boundary. The original zero path stays exact.
+    pub(super) fn admit_moving_forcing(
+        &self,
+        forcing: &mut Option<forcing::Context<'_, '_>>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), DissipationError> {
+        if let Some((force, control, workspace)) = forcing.as_mut() {
+            control.admit::<Error>()?;
+            workspace.admit(&self.accepted)?;
+            let bytes = self
+                .workspace_bytes()
+                .checked_add(workspace.workspace_bytes())
+                .ok_or(DissipationError::Invalid(
+                    "moving molecular force workspace overflow",
+                ))?;
+            admit_workspace(bytes, self.maximum_workspace_bytes)?;
+            if !force.admit::<Error>(self.accepted.cell_count(), cancelled)? {
+                *forcing = None;
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn admit_moving(
@@ -195,6 +284,20 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         dt: f64,
         controls: MolecularStepControl,
         motion: MeshMotion,
+        before: Totals,
+        retry: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MovingMolecularStepReport3d, MovingTrialFailure> {
+        self.trial_moving_with_forcing(dt, controls, motion, None, before, retry, cancelled)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn trial_moving_with_forcing(
+        &mut self,
+        dt: f64,
+        controls: MolecularStepControl,
+        motion: MeshMotion,
+        mut forcing: Option<forcing::Context<'_, '_>>,
         before: Totals,
         retry: usize,
         cancelled: &mut impl FnMut() -> bool,
@@ -235,10 +338,21 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             &mut self.boundary_trial,
             cancelled,
         )?;
-        let advection = self
-            .trial
-            .step_moving(Time::new(dt), controls.advection, motion, &mut *cancelled)
-            .map_err(DissipationError::from)?;
+        let advection = if let Some((force, control, workspace)) = forcing.as_mut() {
+            self.trial.step_moving_with_forcing(
+                Time::new(dt),
+                controls.advection,
+                motion,
+                *force,
+                *control,
+                workspace,
+                &mut *cancelled,
+            )
+        } else {
+            self.trial
+                .step_moving(Time::new(dt), controls.advection, motion, &mut *cancelled)
+        }
+        .map_err(DissipationError::from)?;
         if advection.elapsed.value() != dt {
             return Err(MovingTrialFailure {
                 error: DissipationError::Invalid("ALE shortened moving molecular mixture interval"),
@@ -265,7 +379,18 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         )?;
         // The final molecular half can heat or accelerate the gas after the
         // last wave stage. Admit its actual new-volume acoustic rate too.
-        let final_rate = relative_rate(&self.trial, motion, cancelled)?;
+        let final_rate = if let Some((_, control, _)) = forcing.as_ref() {
+            forcing::admit_moving_field(
+                &self.trial.gas,
+                &self.trial.grid,
+                &self.trial.states,
+                *control,
+                motion,
+                cancelled,
+            )?
+        } else {
+            relative_rate(&self.trial, motion, cancelled)?
+        };
         stepping::check_cfl::<Error>(final_rate * dt, controls.advection.cfl)
             .map_err(DissipationError::from)?;
         let n = self.trial.gas.species_count();

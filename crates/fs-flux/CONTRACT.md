@@ -11976,3 +11976,30 @@ Gas state, geometry, clock, wall impulses, reports, molecular binding and both
 piston states publish together after the final checkpoint. Force coefficients
 are held in original cell order through motion and retries. Existing closed
 or periodic domains and single-axis affine deformation remain authoritative.
+
+
+### Body forcing in moving molecular mixtures and finite pistons
+
+Mixture `MolecularEuler3d::step_moving_with_forcing` composes
+`D/2–K/2–ALE–K/2–D/2` on actual old/new volumes. Evolving species,
+source-owned mechanical work, and original Maxwell–Stefan diffusion, species
+enthalpy, Fourier heat and full molecular stress remain in their existing
+accounts. Final laboratory Mach and mesh-relative acoustic admission precede
+publication. The complete owner budget includes prepared forcing scratch.
+
+Both mixture Euler and molecular Euler expose
+`step_with_inertial_walls_and_forcing`, reusing the original bounded
+simultaneous finite-mass solve. Every root proposal replays one unpublished
+physical interval. Actual gas-body impulse and work are explicit external
+inputs, excluded from piston face loads and subtracted from combined momentum
+and both referenced/physical energy gates. Molecular heat, fixed-side supports,
+guide impulse and torque remain explicit. Each piston receives its actual
+accepted boundary traction and work; additional body loads on pistons remain
+separately authored.
+
+Zero-source reductions preserve the original compensated summation order.
+Cancellation or refusal preserves accepted cells, geometry, clock, molecular
+binding, reports, face loads and both piston states. The original source and
+transport workspaces are reused without per-proposal full-field allocation.
+Coefficients remain held in original cell order, and the existing moving-domain
+and single-axis deformation limits continue to apply.

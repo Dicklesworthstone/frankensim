@@ -1,4 +1,6 @@
 use super::*;
+
+mod forced;
 use crate::compressible::spatial::mixture::molecular::{
     InertialWallLoad, InertialWallsControl, MolecularInertialWallsError,
     MolecularInertialWallsStep, Piston,

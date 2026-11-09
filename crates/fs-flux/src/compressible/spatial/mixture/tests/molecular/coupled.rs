@@ -1,6 +1,7 @@
 use super::*;
 
 mod driving;
+mod forced_moving;
 mod inertia;
 mod inertial_walls;
 mod moving;

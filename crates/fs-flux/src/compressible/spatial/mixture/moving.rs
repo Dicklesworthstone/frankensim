@@ -9,6 +9,9 @@
 use super::super::super::positive;
 use super::*;
 
+mod forced;
+pub(super) use forced::{account_source, attempt_source};
+
 impl MixtureEuler3d {
     /// Advance this field on the same moving box as the frozen gas owner.
     ///
@@ -155,56 +158,22 @@ impl MixtureEuler3d {
                     _ => Error::Invalid("moving mixture geometry"),
                 })?;
                 let stats = if let Some((force, control, workspace)) = forcing.as_mut() {
-                    copy_values(&self.states, &mut workspace.kicked, cancelled)?;
-                    let mut source = forcing::Accumulator::default();
-                    forcing::kick_field(
-                        &self.gas,
-                        &grid,
-                        &mut workspace.kicked,
-                        *force,
-                        *control,
-                        0.5 * dt,
-                        &mut source,
-                        false,
-                        cancelled,
-                    )?;
-                    let mut stats = attempt_with_forcing(
+                    let (stats, change) = attempt_source(
                         &self.gas,
                         &grid,
                         &next,
                         self.boundaries,
                         &self.reservoirs,
                         motion,
-                        &workspace.kicked,
+                        &self.states,
                         &mut self.work,
                         dt,
                         controls.cfl,
                         reconstruction,
-                        Some(*control),
+                        (*force, *control, &mut **workspace),
                         cancelled,
                     )?;
-                    forcing::kick_field(
-                        &self.gas,
-                        &next,
-                        &mut self.work.candidate,
-                        *force,
-                        *control,
-                        0.5 * dt,
-                        &mut source,
-                        false,
-                        cancelled,
-                    )?;
-                    let final_rate = forcing::admit_moving_field(
-                        &self.gas,
-                        &next,
-                        &self.work.candidate,
-                        *control,
-                        motion,
-                        cancelled,
-                    )?;
-                    stepping::check_cfl::<Error>(final_rate * dt, controls.cfl)?;
-                    stats.rate = stats.rate.max(final_rate);
-                    source_change = source.finish()?;
+                    source_change = change;
                     stats
                 } else {
                     attempt(
@@ -239,22 +208,7 @@ impl MixtureEuler3d {
             &mut cancelled,
         )?;
         if forcing.is_some() {
-            report.source_change = source_change;
-            for axis in 0..3 {
-                report.conservation_residual.momentum[axis] -= source_change.impulse[axis];
-            }
-            report.conservation_residual.energy -= source_change.work;
-            report.absolute_energy_residual_j =
-                report.conservation_residual.absolute_energy(&self.gas)?;
-            if !report
-                .conservation_residual
-                .momentum
-                .iter()
-                .all(|v| v.is_finite())
-                || !report.conservation_residual.energy.is_finite()
-            {
-                return Err(Error::Invalid("moving mixture forced balance overflow"));
-            }
+            account_source(&mut report, &self.gas, source_change)?;
         }
         stepping::poll::<Error>(&mut cancelled)?;
         std::mem::swap(&mut self.states, &mut self.work.candidate);

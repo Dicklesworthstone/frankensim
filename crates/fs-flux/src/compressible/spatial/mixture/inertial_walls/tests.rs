@@ -2,6 +2,8 @@ use super::*;
 use crate::compressible::mixture::tests::{close, gas, source, standard};
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
+mod forced;
+
 const WALL: AxisBoundaries = AxisBoundaries::Ends {
     lower: BoundaryCondition::Reflecting,
     upper: BoundaryCondition::Reflecting,
