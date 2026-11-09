@@ -185,6 +185,40 @@ pub struct SolveReport {
     pub total_force_n: [f64; 3],
 }
 
+/// Complete material-relative incident flow at the two native panel locations.
+///
+/// Control-point samples drive no-penetration; bound-midpoint samples drive
+/// Kutta--Joukowsky force. Both use the same Cartesian frame as the panels.
+/// The declared common reference velocity still sets straight trailing legs.
+#[derive(Clone, Copy, Debug)]
+pub struct PanelIncidentFlow<'a> {
+    /// One velocity [m/s] at `Panel::ctrl`, in panel order.
+    pub control_mps: &'a [[f64; 3]],
+    /// One velocity [m/s] at `(Panel::a + Panel::b)/2`, in panel order.
+    pub bound_mps: &'a [[f64; 3]],
+}
+
+impl PanelIncidentFlow<'_> {
+    pub(crate) fn admit(self, count: usize) -> Result<(), Refusal> {
+        if self.control_mps.len() != count
+            || self.bound_mps.len() != count
+            || !self
+                .control_mps
+                .iter()
+                .chain(self.bound_mps)
+                .flatten()
+                .all(|value| value.is_finite())
+        {
+            return Err(refuse(
+                "incident-flow-invalid",
+                "one finite control and bound velocity per panel is required".into(),
+                "sample both physical locations in the same frame and stage",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// The WeissingerLLinear solve: no-penetration at every control point,
 /// Γ from one deterministic dense LU (partial pivoting with a FIXED
 /// deterministic tie rule), Kutta–Joukowsky strip forces.
@@ -199,6 +233,34 @@ pub fn solve_weissinger_linear(
     freestream_mps: [f64; 3],
     rho_kg_m3: f64,
 ) -> Result<SolveReport, Refusal> {
+    solve_weissinger_linear_impl(panels, freestream_mps, rho_kg_m3, None)
+}
+
+/// Native no-penetration solve with spatially resolved incident velocity.
+///
+/// The reference sets only the straight wake direction. Each actual control
+/// velocity supplies its own boundary-condition right-hand side; each actual
+/// bound velocity supplies its own force. This is an explicit linear screen,
+/// not a fallback after a nonlinear section refusal or an unsteady wake model.
+///
+/// # Errors
+/// The original linear admissions plus `incident-flow-invalid` for incomplete
+/// or nonfinite samples. Geometry, density and factorization have one owner.
+pub fn solve_weissinger_linear_with_incident(
+    panels: &[Panel],
+    wake_reference_mps: [f64; 3],
+    rho_kg_m3: f64,
+    incident: PanelIncidentFlow<'_>,
+) -> Result<SolveReport, Refusal> {
+    solve_weissinger_linear_impl(panels, wake_reference_mps, rho_kg_m3, Some(incident))
+}
+
+fn solve_weissinger_linear_impl(
+    panels: &[Panel],
+    freestream_mps: [f64; 3],
+    rho_kg_m3: f64,
+    incident: Option<PanelIncidentFlow<'_>>,
+) -> Result<SolveReport, Refusal> {
     let n = panels.len();
     if n == 0 || n > MAX_PANELS {
         return Err(refuse(
@@ -206,6 +268,9 @@ pub fn solve_weissinger_linear(
             format!("{n} panels outside [1, {MAX_PANELS}]"),
             "the Tier-A target is ~80 panels",
         ));
+    }
+    if let Some(flow) = incident {
+        flow.admit(n)?;
     }
     let vmag = norm(freestream_mps);
     if !freestream_mps.iter().all(|v| v.is_finite())
@@ -248,7 +313,8 @@ pub fn solve_weissinger_linear(
             let v = horseshoe_velocity(panels[i].ctrl, panels[j].a, panels[j].b, stream);
             a[i * n + j] = dot(v, panels[i].normal);
         }
-        rhs[i] = -dot(freestream_mps, panels[i].normal);
+        let velocity = incident.map_or(freestream_mps, |flow| flow.control_mps[i]);
+        rhs[i] = -dot(velocity, panels[i].normal);
     }
     // Deterministic dense LU with partial pivoting (fixed tie rule: the
     // smallest row index among equal-magnitude pivots wins).
@@ -331,7 +397,8 @@ pub fn solve_weissinger_linear(
     let mut total_force_n = [0.0; 3];
     for (j, p) in panels.iter().enumerate() {
         let seg = sub(p.b, p.a);
-        let f_vec = cross3(freestream_mps, seg);
+        let velocity = incident.map_or(freestream_mps, |flow| flow.bound_mps[j]);
+        let f_vec = cross3(velocity, seg);
         let lift = -rho_kg_m3 * gamma[j] * f_vec[2];
         total += lift;
         let force_scale = rho_kg_m3 * gamma[j];
@@ -346,6 +413,17 @@ pub fn solve_weissinger_linear(
     }
     // Preserve the existing lift accumulation and its exact z projection.
     total_force_n[2] = -total;
+    if incident.is_some()
+        && (!gamma.iter().all(|value| value.is_finite())
+            || !total_force_n.iter().all(|value| value.is_finite())
+            || !per.iter().all(|(_, value)| value.is_finite()))
+    {
+        return Err(refuse(
+            "incident-flow-invalid",
+            "panel circulation or force is not representable".into(),
+            "supply a finite resolved incident flow within the linear model's range",
+        ));
+    }
     Ok(SolveReport {
         gamma,
         condition_est,

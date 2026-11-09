@@ -215,6 +215,41 @@ admission. These pass with the existing 30 numerical tests in a 35-test native
 run of actual wing and solver numerical sources. This is not full-workspace or
 frontend qualification.
 
+### Spatial incident flow at native control and force points
+
+`PanelIncidentFlow` carries complete relative velocities at every actual
+control point and bound midpoint. `solve_weissinger_linear_with_incident`
+shares the original geometry, matrix assembly, deterministic LU and condition
+estimate; only each row's boundary right-hand side and force velocity change.
+The declared common reference continues to set straight trailing-leg geometry.
+This remains an explicit linear screen and never an automatic nonlinear fallback.
+
+`InfluenceOperator::build_with_panel_incident` uses that native solution for
+cold circulation and chord-row shares. Its identity additionally binds both
+sample arrays. `solve_nonlinear_with_panel_incident` requires the same samples,
+the existing section frames and an explicitly selected representative velocity
+per strip. Changed control or bound samples require an operator rebuild. Each
+sample must be forward in its owning section frame; malformed, nonfinite and
+unrepresentable inputs/forces refuse.
+
+The original nonlinear section/induction equation still determines each strip
+total. Actual control flow determines its row distribution, and actual bound
+flow determines each Kutta--Joukowsky force. Substantial opposing row loads whose
+sum is at the absolute floor or within 64 eps times their magnitude refuse as
+`panel-row-loading-degenerate`; the new lane cannot replace a resolved moment
+with equal shares. Existing uniform/strip APIs retain their arithmetic.
+
+This resolves spatial boundary loading and panel forces, not a new unsteady
+polar, chordwise nonlinear pressure solve, pitch-rate constitutive law, free-wake
+model or added mass. The representative section sample remains an explicit
+modeling choice. Preparation is O(N) sampling/hashing plus the original dense
+solve; the existing nonlinear loop adds no sample callbacks or vector induction.
+
+Three focused `tests/panel_incident.rs` fixtures cover uniform exact parity,
+manufactured circulation/no-penetration, independent resolved force and row-share
+integrals, stale traces, reversed rows, incomplete/nonfinite flow and opposing-row
+cancellation. These fixtures are authored; no execution is claimed here.
+
 ### Noncontracting alternating strip modes
 
 The nonlinear owner also detects two successive residual-vector reversals

@@ -21,7 +21,10 @@
 //! refusal (`influence-operator-stale`) — the reuse rule is enforced, not
 //! advisory.
 
-use crate::{MAX_PANELS, Panel, Refusal, SolveReport, solve_weissinger_linear};
+use crate::{
+    MAX_PANELS, Panel, PanelIncidentFlow, Refusal, SolveReport, solve_weissinger_linear,
+    solve_weissinger_linear_with_incident,
+};
 use fs_blake3::hash_domain;
 use fs_math::det;
 
@@ -117,8 +120,19 @@ pub type SectionClosure<'a> = &'a dyn Fn(usize, f64) -> (f64, StripRegime);
 #[derive(Clone, Debug)]
 pub struct InfluenceOperator {
     geometry_hash: String,
+    panel_incident_hash: Option<String>,
     /// The linear solution (cold-start Γ and row-split ratios).
     linear: SolveReport,
+}
+
+fn panel_incident_hash(flow: PanelIncidentFlow<'_>) -> String {
+    let mut payload = Vec::with_capacity((flow.control_mps.len() + flow.bound_mps.len()) * 24);
+    for point in flow.control_mps.iter().chain(flow.bound_mps) {
+        for value in point {
+            payload.extend_from_slice(&value.to_bits().to_le_bytes());
+        }
+    }
+    hash_domain("org.frankensim.fs-wing.panel-incident.v1", &payload).to_hex()
 }
 
 fn geometry_hash(panels: &[Panel], freestream: [f64; 3]) -> String {
@@ -149,6 +163,30 @@ impl InfluenceOperator {
         let linear = solve_weissinger_linear(panels, freestream, rho)?;
         Ok(InfluenceOperator {
             geometry_hash: geometry_hash(panels, freestream),
+            panel_incident_hash: None,
+            linear,
+        })
+    }
+
+    /// Prepare native row loading from the actual control-point velocities.
+    ///
+    /// The accepted control and bound samples belong to this operator snapshot;
+    /// a subsequent solve must supply the same trace. Changed motion or wind
+    /// requires rebuilding, even when the panel geometry itself is unchanged.
+    ///
+    /// # Errors
+    /// The original linear geometry/conditioning and panel-flow admissions.
+    pub fn build_with_panel_incident(
+        panels: &[Panel],
+        wake_reference_mps: [f64; 3],
+        rho: f64,
+        incident: PanelIncidentFlow<'_>,
+    ) -> Result<Self, Refusal> {
+        let linear =
+            solve_weissinger_linear_with_incident(panels, wake_reference_mps, rho, incident)?;
+        Ok(Self {
+            geometry_hash: geometry_hash(panels, wake_reference_mps),
+            panel_incident_hash: Some(panel_incident_hash(incident)),
             linear,
         })
     }
@@ -197,6 +235,7 @@ pub fn solve_nonlinear(
         warm_start,
         None,
         None,
+        None,
     )
 }
 
@@ -233,6 +272,7 @@ pub fn solve_nonlinear_with_incident(
         Some(strip_incident_mps),
         strip_du_axial,
         warm_start,
+        None,
         None,
         None,
     )
@@ -279,6 +319,48 @@ pub fn solve_nonlinear_with_section_frames(
         warm_start,
         Some(frames),
         None,
+        None,
+    )
+}
+
+/// Nonlinear strip closure with panel-resolved boundary loading and forces.
+///
+/// `strip_incident_mps` remains the explicitly selected representative flow of
+/// each two-dimensional section law. Actual control samples determine the
+/// linear chord-row split; actual bound samples determine every panel force.
+/// These roles are distinct: this does not infer an unsteady/pitch-rate polar
+/// from two point samples. All samples must have positive flow in their owning
+/// normal-section chord direction. The common reference sets straight wakes.
+///
+/// # Errors
+/// Original framed-solve refusals; a changed/missing cached panel trace refuses
+/// with `influence-operator-stale`. No linear fallback follows a closure failure.
+#[allow(clippy::too_many_arguments)]
+pub fn solve_nonlinear_with_panel_incident(
+    op: &InfluenceOperator,
+    panels: &[Panel],
+    strips: &[StripSpec],
+    wake_reference_mps: [f64; 3],
+    rho: f64,
+    closure: SectionClosure<'_>,
+    frames: &[SectionFrame],
+    strip_incident_mps: &[[f64; 3]],
+    panel_incident: PanelIncidentFlow<'_>,
+    warm_start: Option<&[f64]>,
+) -> Result<NonlinearReport, Refusal> {
+    solve_nonlinear_impl(
+        op,
+        panels,
+        strips,
+        wake_reference_mps,
+        rho,
+        closure,
+        Some(strip_incident_mps),
+        None,
+        warm_start,
+        Some(frames),
+        None,
+        Some(panel_incident),
     )
 }
 
@@ -295,12 +377,23 @@ fn solve_nonlinear_impl(
     warm_start: Option<&[f64]>,
     section_frames: Option<&[SectionFrame]>,
     mut continuation: Option<&mut continuation::Guard<'_>>,
+    panel_incident: Option<PanelIncidentFlow<'_>>,
 ) -> Result<NonlinearReport, Refusal> {
     if geometry_hash(panels, freestream) != op.geometry_hash {
         return Err(refuse(
             "influence-operator-stale",
             "panels/freestream do not match the operator's geometry hash".into(),
             "rebuild the operator — canard deflection, warp, attitude, or images changed it",
+        ));
+    }
+    if let Some(flow) = panel_incident {
+        flow.admit(panels.len())?;
+    }
+    if panel_incident.map(panel_incident_hash) != op.panel_incident_hash {
+        return Err(refuse(
+            "influence-operator-stale",
+            "panel incident velocities do not match the prepared row loading".into(),
+            "rebuild the operator after changing control or bound flow samples",
         ));
     }
     if section_frames.is_none() && (!rho.is_finite() || rho <= 0.0) {
@@ -372,6 +465,10 @@ fn solve_nonlinear_impl(
         for (frame, strip) in frames.iter().zip(strips) {
             for &j in &strip.panel_indices {
                 frame.admit_panel(&panels[j])?;
+                if let Some(flow) = panel_incident {
+                    frame.flow(flow.control_mps[j])?;
+                    frame.flow(flow.bound_mps[j])?;
+                }
             }
         }
     }
@@ -467,6 +564,18 @@ fn solve_nonlinear_impl(
     let mut strip_gamma: Vec<f64> = Vec::with_capacity(strips.len());
     for s in strips {
         let total: f64 = s.panel_indices.iter().map(|&i| lin[i]).sum();
+        if panel_incident.is_some() && s.panel_indices.len() > 1 {
+            let magnitude: f64 = s.panel_indices.iter().map(|&i| lin[i].abs()).sum();
+            if total.abs() <= ROW_SUM_FLOOR.max(64.0 * f64::EPSILON * magnitude)
+                && magnitude > ROW_SUM_FLOOR
+            {
+                return Err(refuse(
+                    "panel-row-loading-degenerate",
+                    "opposing chord-row circulations have an unresolved strip total".into(),
+                    "the strip closure cannot normalize this resolved loading; use a resolved aerodynamic model",
+                ));
+            }
+        }
         let r: Vec<f64> = if total.abs() > ROW_SUM_FLOOR {
             s.panel_indices.iter().map(|&i| lin[i] / total).collect()
         } else {
@@ -705,7 +814,8 @@ fn solve_nonlinear_impl(
     let mut total = 0.0;
     let mut total_force_n = [0.0; 3];
     for (j, p) in panels.iter().enumerate() {
-        let freestream = local_velocity[panel_strip[j]];
+        let freestream =
+            panel_incident.map_or(local_velocity[panel_strip[j]], |flow| flow.bound_mps[j]);
         let seg = [p.b[0] - p.a[0], p.b[1] - p.a[1], p.b[2] - p.a[2]];
         // Statement-split (guzez.7.2.1): no within-expression
         // mul-sub/mul-add for LLVM to contract into FMA.
@@ -726,6 +836,13 @@ fn solve_nonlinear_impl(
     }
     // Preserve the existing lift accumulation and its exact z projection.
     total_force_n[2] = -total;
+    if panel_incident.is_some() && !total_force_n.iter().all(|value| value.is_finite()) {
+        return Err(refuse(
+            "nonlinear-did-not-converge",
+            "resolved panel forces are not representable".into(),
+            "reduce the physical input range; no partial force receipt is returned",
+        ));
+    }
     Ok(NonlinearReport {
         gamma,
         residual,

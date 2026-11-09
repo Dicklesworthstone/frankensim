@@ -251,6 +251,7 @@ fn solve_impl(
         previous.map(WingContinuation::gamma),
         frames,
         Some(&mut guard),
+        None,
     )?;
     let maximum_incidence_change_rad = previous.map_or(0.0, |anchor| {
         guard
