@@ -17,6 +17,7 @@ use fs_exec::Cx;
 use fs_solid::linear3::{TetLinearElasticProblem, TetStaticSolveConfig, TetThermalStrainField};
 use fs_solid::reduce::thermal::{
     ThermalPressureLoadedValve, ThermalValveControls, reduce_pressure_loaded_valve,
+    reduce_pressure_loaded_valve_with_nodal_reference_density,
 };
 use fs_solid::reduce::{OrificeSpec, ReduceError, ValveCardRequest, ValveElementOrder};
 use fs_thermal::enthalpy::{DepositionError, DepositionSimulation, EnergyAudit, StepConfig};
@@ -97,6 +98,7 @@ impl SolidEnthalpyState<'_> {
     ) -> Result<ThermalPressureLoadedValve, HeatedValveError> {
         input.reduce_state(
             &self.problem(input.fixed_dofs),
+            None,
             self.thermal_strains(),
             self.mesh_frame,
             self.maximum_absolute_mandel_strain,
@@ -112,6 +114,7 @@ impl HeatedValveReduction<'_> {
     pub(super) fn reduce_state(
         &self,
         problem: &TetLinearElasticProblem<'_>,
+        nodal_reference_density_kg_m3: Option<&[f64]>,
         thermal: TetThermalStrainField<'_>,
         mesh_frame: ContentHash,
         maximum_absolute_mandel_strain: f64,
@@ -130,19 +133,31 @@ impl HeatedValveReduction<'_> {
             loss_factor: self.loss_factor,
             source_id: self.source_id,
         };
-        let valve = reduce_pressure_loaded_valve(
-            &request,
-            thermal,
-            self.equilibrium_nodal_forces_n,
-            self.nodal_load_per_pa_m2,
-            ThermalValveControls {
-                solve: self.static_solve,
-                mesh_frame,
-                maximum_absolute_mandel_strain,
-                maximum_nodal_displacement_m: self.maximum_nodal_displacement_m,
-            },
-            cx,
-        )?;
+        let controls = ThermalValveControls {
+            solve: self.static_solve,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
+            maximum_nodal_displacement_m: self.maximum_nodal_displacement_m,
+        };
+        let valve = match nodal_reference_density_kg_m3 {
+            Some(density) => reduce_pressure_loaded_valve_with_nodal_reference_density(
+                &request,
+                density,
+                thermal,
+                self.equilibrium_nodal_forces_n,
+                self.nodal_load_per_pa_m2,
+                controls,
+                cx,
+            )?,
+            None => reduce_pressure_loaded_valve(
+                &request,
+                thermal,
+                self.equilibrium_nodal_forces_n,
+                self.nodal_load_per_pa_m2,
+                controls,
+                cx,
+            )?,
+        };
         poll(cx)?;
         Ok(valve)
     }

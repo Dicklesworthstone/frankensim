@@ -184,7 +184,9 @@ impl ThermalValveModalMotion {
     /// its displacement offset before projection; it never resets vibration.
     ///
     /// Reference mesh, frame, discretization, constrained DOFs and consistent
-    /// mass must be identical. New source modes may reorder, rotate or change
+    /// mass must be identical. Explicit P1 density profiles must also agree on
+    /// every original vertex, including constrained components invisible to the
+    /// reduced matrix. New source modes may reorder, rotate or change
     /// count; the generic transfer admits physical residuals and energy
     /// explicitly. A new pressure observation is supplied for that new basis.
     /// Refusal leaves this accepted source, state and clock unchanged.
@@ -205,9 +207,11 @@ impl ThermalValveModalMotion {
             || old_card.discretization != new_card.discretization
             || old_pencil.free_dofs != new_pencil.free_dofs
             || old_pencil.mass != new_pencil.mass
+            || self.valve.nodal_reference_density_kg_m3()
+                != next.nodal_reference_density_kg_m3()
             || self.valve.equilibrium().displacement_m().len() != next.equilibrium().displacement_m().len()
         {
-            return Err(ThermalValveMotionError::Invalid("source transfer requires the same reference mesh, frame, supports and consistent mass"));
+            return Err(ThermalValveMotionError::Invalid("source transfer requires the same reference mesh, frame, supports, density profile and consistent mass"));
         }
         let offset: Vec<_> = old_pencil.free_dofs.iter().map(|&dof| {
             self.valve.equilibrium().displacement_m()[dof / 3][dof % 3]

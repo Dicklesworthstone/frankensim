@@ -88,6 +88,7 @@ pub struct ThermalPressureLoadedValve {
     valve: PressureLoadedValve,
     equilibrium: ThermalValveEquilibrium,
     observation_nodes_m: Vec<[f64; 3]>,
+    nodal_reference_density_kg_m3: Option<Vec<f64>>,
     mesh_frame: ContentHash,
     identity: ContentHash,
 }
@@ -110,6 +111,14 @@ impl ThermalPressureLoadedValve {
     #[must_use]
     pub fn observation_nodes_m(&self) -> &[[f64; 3]] {
         &self.observation_nodes_m
+    }
+
+    /// Original explicit P1 inventory, in reference mesh vertex order [kg/m³].
+    /// Scalar material-density reductions return None. Retaining the entire
+    /// field distinguishes distributions with identical reduced mass matrices.
+    #[must_use]
+    pub fn nodal_reference_density_kg_m3(&self) -> Option<&[f64]> {
+        self.nodal_reference_density_kg_m3.as_deref()
     }
 
     /// Coordinate frame of the retained source mesh and tensor fields.
@@ -174,6 +183,57 @@ pub fn reduce_pressure_loaded_valve(
     controls: ThermalValveControls,
     cx: &Cx<'_>,
 ) -> Result<ThermalPressureLoadedValve, ReduceError> {
+    reduce_with_reference_density(
+        request, thermal, equilibrium_nodal_forces_n, nodal_load_per_pa_m2,
+        controls, None, cx,
+    )
+}
+
+/// The same thermal pressure reduction with a retained positive P1 reference
+/// density [kg/m³] at every original node.
+///
+/// All density moments enter the native consistent mass; a cell mean cannot
+/// replace the supplied field. Equilibrium, signed initial stress, pressure
+/// compliance and mode projection retain their existing owners. This field
+/// belongs to the closed reference body and must be retained across thermal
+/// updates; current constitutive density does not redefine its inertia.
+///
+/// The current native nodal-density path admits affine Tet4 cells only.
+/// Quadratic requests refuse explicitly instead of discarding this inventory.
+/// Reference density is included in the equilibrium/valve identity. No new
+/// geometry or interpolation solve is introduced by this entry point.
+#[allow(clippy::too_many_arguments)]
+pub fn reduce_pressure_loaded_valve_with_nodal_reference_density(
+    request: &ValveCardRequest<'_, TetMaterialField<'_>>,
+    reference_density_kg_m3: &[f64],
+    thermal: TetThermalStrainField<'_>,
+    equilibrium_nodal_forces_n: &[(usize, f64)],
+    nodal_load_per_pa_m2: &[[f64; 3]],
+    controls: ThermalValveControls,
+    cx: &Cx<'_>,
+) -> Result<ThermalPressureLoadedValve, ReduceError> {
+    poll(cx)?;
+    if !matches!(request.element_order, ValveElementOrder::Tet4) {
+        return Err(ReduceError::Invalid {
+            what: "thermal nodal reference-density reduction requires affine Tet4 cells",
+        });
+    }
+    reduce_with_reference_density(
+        request, thermal, equilibrium_nodal_forces_n, nodal_load_per_pa_m2,
+        controls, Some(reference_density_kg_m3), cx,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reduce_with_reference_density(
+    request: &ValveCardRequest<'_, TetMaterialField<'_>>,
+    thermal: TetThermalStrainField<'_>,
+    equilibrium_nodal_forces_n: &[(usize, f64)],
+    nodal_load_per_pa_m2: &[[f64; 3]],
+    controls: ThermalValveControls,
+    reference_density_kg_m3: Option<&[f64]>,
+    cx: &Cx<'_>,
+) -> Result<ThermalPressureLoadedValve, ReduceError> {
     poll(cx)?;
     if !controls.maximum_nodal_displacement_m.is_finite()
         || controls.maximum_nodal_displacement_m <= 0.0
@@ -202,14 +262,25 @@ pub fn reduce_pressure_loaded_valve(
                 controls.solve,
                 cx,
             )?;
-            let tangent = problem.assemble_thermal_tangent_with_nodal_forces(
-                &displacement,
-                thermal,
-                equilibrium_nodal_forces_n,
-                controls.mesh_frame,
-                controls.maximum_absolute_mandel_strain,
-                cx,
-            )?;
+            let tangent = match reference_density_kg_m3 {
+                Some(density) => problem.assemble_thermal_tangent_with_nodal_reference_density(
+                    &displacement,
+                    thermal,
+                    equilibrium_nodal_forces_n,
+                    density,
+                    controls.mesh_frame,
+                    controls.maximum_absolute_mandel_strain,
+                    cx,
+                )?,
+                None => problem.assemble_thermal_tangent_with_nodal_forces(
+                    &displacement,
+                    thermal,
+                    equilibrium_nodal_forces_n,
+                    controls.mesh_frame,
+                    controls.maximum_absolute_mandel_strain,
+                    cx,
+                )?,
+            };
             let geometry = problem.update_geometry_from_displacement(
                 &displacement,
                 controls.maximum_nodal_displacement_m,
@@ -280,11 +351,13 @@ pub fn reduce_pressure_loaded_valve(
             identity.update(&value.to_bits().to_le_bytes());
         }
     }
+    let nodal_reference_density_kg_m3 = reference_density_kg_m3.map(<[f64]>::to_vec);
     poll(cx)?;
     Ok(ThermalPressureLoadedValve {
         valve,
         equilibrium,
         observation_nodes_m,
+        nodal_reference_density_kg_m3,
         mesh_frame: controls.mesh_frame,
         identity: identity.finalize(),
     })

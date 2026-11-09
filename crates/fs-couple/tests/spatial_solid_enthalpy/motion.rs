@@ -48,10 +48,22 @@ fn with_run<R>(
     cp: f64,
     f: impl FnOnce(&mut SpatialHeatedValveMotion<'_, '_, '_, '_, '_>, &ThermalBoundary, &Cx<'_>) -> R,
 ) -> R {
+    with_run_density(cp, None, f)
+}
+
+fn with_run_density<R>(
+    cp: f64,
+    density: Option<&[f64]>,
+    f: impl FnOnce(&mut SpatialHeatedValveMotion<'_, '_, '_, '_, '_>, &ThermalBoundary, &Cx<'_>) -> R,
+) -> R {
     with_cx(|cx| {
         let (card, caloric) = fixture(2.0, 1000.0, 1e-5, cp, 500.0, 750.0);
         let mesh = mesh();
         let native = native(&mesh, caloric.curve(), 6.0, cx);
+        let native = match density {
+            Some(density) => native.with_nodal_reference_density(cx, density).unwrap(),
+            None => native,
+        };
         let context = point(300.0);
         let source = bind(&native, source(&card, caloric.curve(), &context), cx).unwrap();
         let fixed: Vec<_> = (0..11).collect();
@@ -182,6 +194,70 @@ fn g1_nodal_heat_changes_native_motion_and_observation_without_resetting_state()
             );
             (u, v) = (next_u, next_v);
         }
+    });
+}
+
+#[test]
+fn g1_graded_inventory_drives_heat_and_modal_motion_without_mean_density_aliasing() {
+    let density = [3.0, 5.0, 7.0, 9.0];
+    with_run_density(10.0, Some(&density), |run, boundary, cx| {
+        // P1 source q=200*rho deposits 200 J/(kg s) at every original node.
+        // Thus T remains uniform while its original graded inventory is exact:
+        // M_33 = V*(sum(rho)+2*rho_3)/60 = 7/60, not mean(rho)*V/10.
+        let input = ScalarField::nodal(
+            "uniform heating per reference mass",
+            4,
+            density.map(|rho| 200.0 * rho).to_vec(),
+        ).unwrap();
+        let mass = 7.0 / 60.0;
+        let initial_mass = run.motion().valve().equilibrium().pencil().mass.clone();
+        near(initial_mass.get(0, 0), mass, 1e-14);
+        assert!((initial_mass.get(0, 0) - 0.1).abs() > 0.01);
+        let initial = run.motion().nodal_motion(cx).unwrap();
+        let mut u = initial.displacement_m[3][2];
+        let mut v = initial.velocity_m_s[3][2];
+        let mut temperature = 300.0;
+        for _ in 0..6 {
+            let pressure = 0.04;
+            let (equilibrium, k) = pencil(temperature);
+            let omega = (k / mass).sqrt();
+            let (sin, cos) = (omega * DT).sin_cos();
+            let driven_equilibrium = equilibrium + pressure / k;
+            let next_u = driven_equilibrium + (u - driven_equilibrium) * cos + v * sin / omega;
+            let next_v = -(u - driven_equilibrium) * omega * sin + v * cos;
+            let result = run.step(
+                pressure, boundary, None, &input, thermal_config(), controls(), observation, cx,
+            ).unwrap();
+            temperature += 200.0 * DT / 10.0;
+            let (next_equilibrium, next_k) = pencil(temperature);
+            let old_energy = 0.5 * mass * next_v.powi(2)
+                + 0.5 * k * (next_u - equilibrium).powi(2);
+            let new_energy = 0.5 * mass * next_v.powi(2)
+                + 0.5 * next_k * (next_u - next_equilibrium).powi(2);
+            let nodes = run.motion().nodal_motion(cx).unwrap();
+            near(nodes.displacement_m[3][2], next_u, 2e-12);
+            near(nodes.velocity_m_s[3][2], next_v, 2e-11);
+            near(result.endpoint_observer_pressure_pa, 2.0 * next_v, 4e-11);
+            near(result.transfer.parameter_work_j, new_energy - old_energy, 1e-11);
+            near(result.transfer.retained_modal_energy_j, new_energy, 1e-11);
+            near(result.thermal.stored_energy_change_j, 200.0 * DT, 1e-8);
+            for &t in &result.thermal.temperature {
+                near(t, temperature, 1e-8);
+            }
+            assert_eq!(run.motion().valve().equilibrium().pencil().mass, initial_mass);
+            assert_eq!(run.motion().valve().nodal_reference_density_kg_m3(), Some(density.as_slice()));
+            near(run.motion().valve().equilibrium().pencil().total_mass_kg, 1.0, 1e-12);
+            (u, v) = (next_u, next_v);
+        }
+        let old_h = run.specific_enthalpy_j_kg().to_vec();
+        let old_motion = run.motion().clone();
+        assert!(matches!(run.step(
+            0.04, boundary, None, &input, thermal_config(), controls(),
+            |_| Err::<Vec<C64>, _>("graded observer refused"), cx,
+        ), Err(SpatialValveMotionError::Observation("graded observer refused"))));
+        assert_eq!(run.specific_enthalpy_j_kg(), old_h);
+        assert_eq!(run.motion().model().states(), old_motion.model().states());
+        assert_eq!(run.motion().accepted_steps(), old_motion.accepted_steps());
     });
 }
 

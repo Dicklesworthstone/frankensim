@@ -13,6 +13,7 @@ use fs_solid::linear3::{
 use fs_solid::reduce::thermal::motion::ThermalValveModalMotion;
 use fs_solid::reduce::thermal::{
     ThermalPressureLoadedValve, ThermalValveControls, reduce_pressure_loaded_valve,
+    reduce_pressure_loaded_valve_with_nodal_reference_density,
 };
 use fs_solid::reduce::{OrificeSpec, ValveCardRequest, ValveElementOrder};
 
@@ -39,6 +40,13 @@ fn close(a: f64, b: f64, tolerance: f64) {
 fn valve(young: f64, density: f64, expansion: f64, free: usize, frame: ContentHash,
     cx: &Cx<'_>) -> ThermalPressureLoadedValve
 {
+    valve_density(young, density, expansion, free, frame, None, cx)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn valve_density(young: f64, density: f64, expansion: f64, free: usize, frame: ContentHash,
+    reference_density: Option<&[f64]>, cx: &Cx<'_>) -> ThermalPressureLoadedValve
+{
     let material = TetElasticMaterial::try_new(density, young, 0.25, [7; 32]).unwrap();
     let thermal = TetThermalStrainState::try_new(
         300.0 + 1000.0 * expansion, 300.0, [expansion, expansion, expansion, 0.0, 0.0, 0.0],
@@ -47,8 +55,7 @@ fn valve(young: f64, density: f64, expansion: f64, free: usize, frame: ContentHa
     let fixed = (0..12).filter(|&dof| dof != free).collect::<Vec<_>>();
     let mut pressure = [[0.0; 3]; 4];
     pressure[free / 3][free % 3] = 0.03;
-    reduce_pressure_loaded_valve(
-        &ValveCardRequest {
+    let request = ValveCardRequest {
             nodes_m: &NODES,
             tetrahedra: &TETS,
             element_order: ValveElementOrder::Tet4,
@@ -60,12 +67,17 @@ fn valve(young: f64, density: f64, expansion: f64, free: usize, frame: ContentHa
             },
             window_hz: (0.1, 100.0), retained_compliance_floor: 0.999,
             loss_factor: 0.0, source_id: "manufactured/one-tet-thermal-motion",
-        },
-        TetThermalStrainField::Uniform(&thermal), &[], &pressure,
-        ThermalValveControls { solve: TetStaticSolveConfig::default(), mesh_frame: frame,
-            maximum_absolute_mandel_strain: 0.1, maximum_nodal_displacement_m: 0.02 },
-        cx,
-    ).unwrap()
+        };
+    let controls = ThermalValveControls { solve: TetStaticSolveConfig::default(), mesh_frame: frame,
+        maximum_absolute_mandel_strain: 0.1, maximum_nodal_displacement_m: 0.02 };
+    match reference_density {
+        Some(density) => reduce_pressure_loaded_valve_with_nodal_reference_density(
+            &request, density, TetThermalStrainField::Uniform(&thermal),
+            &[], &pressure, controls, cx),
+        None => reduce_pressure_loaded_valve(
+            &request, TetThermalStrainField::Uniform(&thermal),
+            &[], &pressure, controls, cx),
+    }.unwrap()
 }
 
 fn observations(valve: &ThermalPressureLoadedValve) -> Vec<C64> {
@@ -160,6 +172,61 @@ fn thermal_source_update_preserves_physical_motion_clock_and_explicit_storage_ch
         assert_eq!(cold_frame.time_s, hot_frame.time_s);
         assert_ne!(cold_frame.modal.observer_pressure_pa, hot_frame.modal.observer_pressure_pa);
         assert_ne!(old.nodal_motion(cx).unwrap(), updated.nodal_motion(cx).unwrap());
+    });
+}
+
+#[test]
+fn graded_reference_density_preserves_exact_mass_moments_and_heated_motion() {
+    with_cx(|cx| {
+        let density = [3.0, 5.0, 7.0, 9.0];
+        let uniform = valve(1000.0, 6.0, 0.0, 11, FRAME, cx);
+        let uniform_field = valve_density(
+            1000.0, 6.0, 0.0, 11, FRAME, Some(&[6.0; 4]), cx);
+        assert_eq!(uniform.equilibrium().pencil().mass, uniform_field.equilibrium().pencil().mass);
+        let left = uniform.valve().source_modes();
+        let right = uniform_field.valve().source_modes();
+        assert_eq!(left.len(), right.len());
+        for (a, b) in left.iter().zip(right) {
+            assert_eq!(a.lambda.to_bits(), b.lambda.to_bits());
+            assert_eq!(a.phi, b.phi);
+        }
+        let source = valve_density(1000.0, 6.0, 0.0, 11, FRAME, Some(&density), cx);
+        let mass = 7.0 / 60.0; // V*(sum(rho)+2*rho_3)/60, V=1/6.
+        close(source.equilibrium().pencil().mass.get(0, 0), mass, 1e-14);
+        close(source.equilibrium().pencil().total_mass_kg, 1.0, 1e-14);
+        close(source.valve().source_modes()[0].lambda, 200.0 / mass, 1e-9);
+        let observation = observations(&source);
+        let mut run = ThermalValveModalMotion::new(
+            source, RATE,
+            &[ModalAcousticState { displacement_m_sqrt_kg: 3e-4, velocity_m_sqrt_kg_per_s: 4e-3 }],
+            &observation, ModalAcousticTimeBudget::audible_reference(), cx,
+        ).unwrap();
+        run.step_pressure(0.4, cx).unwrap();
+        let before = run.nodal_motion(cx).unwrap();
+        // Constitutive density may change, but the original explicit inventory
+        // controls both old and new pencils without a scalar-density substitute.
+        let hot = valve_density(1600.0, 4.0, 0.001, 11, FRAME, Some(&density), cx);
+        let observation = observations(&hot);
+        let (updated, transfer) = run.rebind_candidate(hot, &observation, controls(), cx).unwrap();
+        let after = updated.nodal_motion(cx).unwrap();
+        close(after.displacement_m[3][2], before.displacement_m[3][2], 1e-12);
+        close(mass * after.velocity_m_s[3][2], mass * before.velocity_m_s[3][2], 1e-13);
+        close(updated.valve().equilibrium().pencil().total_mass_kg, 1.0, 1e-14);
+        close(updated.valve().equilibrium().pencil().mass.get(0, 0), mass, 1e-14);
+        assert!(transfer.kinetic_residual_j < 1e-20);
+        assert_eq!(updated.valve().nodal_reference_density_kg_m3(), Some(density.as_slice()));
+        // Both a changed free-node mass moment and a redistribution invisible
+        // to this constrained pencil are different original inventories.
+        for changed_density in [[9.0, 7.0, 5.0, 3.0], [5.0, 3.0, 7.0, 9.0]] {
+            let changed = valve_density(
+                1600.0, 4.0, 0.001, 11, FRAME, Some(&changed_density), cx);
+            if changed_density[3] == density[3] {
+                assert_eq!(changed.equilibrium().pencil().mass,
+                    updated.valve().equilibrium().pencil().mass);
+            }
+            let observation = observations(&changed);
+            assert!(updated.rebind_candidate(changed, &observation, controls(), cx).is_err());
+        }
     });
 }
 

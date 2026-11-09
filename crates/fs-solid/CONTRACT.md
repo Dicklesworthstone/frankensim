@@ -7285,13 +7285,25 @@ its original mass-normalized mode shapes and exact pressure-load projections.
 Pressure steps use the original exact ZOH owner; applied work is conjugate to
 swept volume, and nodal observations reconstruct equilibrium plus vibration.
 
+For affine Tet4 cells,
+`reduce::thermal::reduce_pressure_loaded_valve_with_nodal_reference_density`
+uses the exact original P1 density field in the native consistent mass and
+initial-stress pencil. It retains that complete field on the thermal valve;
+neither a cell mean nor endpoint constitutive density substitutes for it.
+Quadratic requests on this entry point refuse explicitly. The original
+scalar-density reduction keeps its existing arithmetic.
+
 Candidate source updates preserve the exact sample clock and use the shared
 mass-inner-product transfer on the same reference mesh, frame, supports and
-consistent mass. New equilibrium, stiffness, mode count/order and supplied
+consistent mass. Explicit P1 profiles must also agree at every original vertex:
+equal reduced matrices do not identify density redistributed at constrained
+nodes. The G1/G3 graded-inventory regression in `tests/thermal_valve_motion.rs`
+checks exact cubic mass moments, uniform-field parity, thermal momentum
+continuity and refusal of a density change hidden by the reduced matrix. New equilibrium, stiffness, mode count/order and supplied
 pressure observations are admitted with explicit state-loss and signed
 incremental-storage budgets. Updates and pressure steps publish only complete
 candidates. Discarded state is not damping or heat; bore feedback, radiation
-reaction and reciprocal thermoelastic heat are not inferred. Three focused
+reaction and reciprocal thermoelastic heat are not inferred. Focused
 one-tetrahedron tests use independent consistent mass, stiffness, thermal
 equilibrium and oscillator references to check motion/work, source-update
 continuity, changed pressure response and refused/cancelled candidates.

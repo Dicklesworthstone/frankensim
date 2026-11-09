@@ -2542,6 +2542,15 @@ original tetrahedral Newmark thermal-update owner. Displacement, velocity,
 acceleration and step history continue; the original operator owner retains
 reference mass and rebuilds changed stiffness.
 
+`SpatialSolidState::reduce_pressure_valve` also carries the native heat owner's
+retained P1 reference-density profile into the common thermal pressure reducer.
+Its exact consistent mass controls the pressure response and existing
+`SpatialHeatedValveMotion` state transfer; original nodal caloric mass controls
+heating. A constitutive density query at the new temperature changes neither
+inventory. The G1 graded-inventory definition in
+`tests/spatial_solid_enthalpy/motion.rs` compares both owners against an
+independent heated one-DOF oscillator and checks late refusal atomically.
+
 The previous mechanical material/eigenstrain state and clock must match the
 accepted run. Both endpoints retain their reference mesh, frame, material
 assignment, caloric chart, source laws, strain envelope and reference inventory.

@@ -111,6 +111,27 @@ impl TetLinearElasticProblem<'_> {
         self.assemble_tangent_from_stress(stress, self.materials, None, cx)
     }
 
+    /// The same source-bound thermal/dead-load tangent with an explicit positive
+    /// P1 density on the original reference vertices.
+    ///
+    /// The retained field supplies the exact consistent mass and inventory.
+    /// Constitutive density still belongs to stress recovery and cannot replace
+    /// this inertia when temperature changes. The accepted displacement, load
+    /// vector, thermal field and supports retain their original exact binding.
+    /// The ordinary scalar-density entry point keeps its original arithmetic.
+    #[allow(clippy::too_many_arguments)]
+    pub fn assemble_thermal_tangent_with_nodal_reference_density(
+        &self, solution: &TetThermalDisplacementSolution,
+        thermal: TetThermalStrainField<'_>, nodal_forces_n: &[(usize, f64)],
+        reference_density_kg_m3: &[f64], mesh_frame: ContentHash,
+        maximum_absolute_mandel_strain: f64, cx: &Cx<'_>,
+    ) -> Result<PrestressedTetAssembly, TetElasticError> {
+        let stress = self.recover_thermal_stress_with_nodal_forces(solution, thermal,
+            nodal_forces_n, mesh_frame, maximum_absolute_mandel_strain, cx)?;
+        self.assemble_tangent_from_stress(
+            stress, self.materials, Some(reference_density_kg_m3), cx)
+    }
+
     /// Initial-stress pencil about the same prescribed-displacement equilibrium.
     ///
     /// Recover stress through the original Dirichlet-lift owner, binding the
