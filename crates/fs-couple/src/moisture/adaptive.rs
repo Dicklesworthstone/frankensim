@@ -18,8 +18,13 @@ mod paired;
 mod radial;
 mod shared;
 mod solution_accuracy;
+mod solution_pair;
 
 pub use solution_accuracy::{KineticPhaseAccuracy, SolutionMoistureTimeControls};
+pub use solution_pair::{
+    PairedSolutionMoistureAdvanceReport, PairedSolutionMoistureTimeControls,
+    SolutionMoistureAdvanceAccount,
+};
 
 pub use layered::LayeredMoistureAdvanceReport;
 pub use paired::{AtmosphereMoistureAdvanceAccount, PairedAtmosphereMoistureAdvanceReport};

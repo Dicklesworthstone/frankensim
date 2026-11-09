@@ -196,7 +196,7 @@ impl FiniteMoistureSolution {
 
     // These original single-bath checks also apply independently to each bath
     // of a pair. Finite phases never become a different bath's solute stock.
-    fn admit_exchanged_components(
+    pub(in crate::moisture) fn admit_exchanged_components(
         &self,
         reservoir: &Self,
         cx: &Cx<'_>,

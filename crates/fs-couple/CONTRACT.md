@@ -3950,6 +3950,45 @@ sealed kinetic evolution, native geometry, depletion, work and cancellation
 refusals. Changed Rust sources passed parsing; these integration regressions
 remain unexecuted because the dependency build is blocked before fs-couple.
 
+## Adaptive diffusion between two finite solution baths
+
+`FiniteMoistureSolution::advance_paired_adaptive_to`,
+`advance_paired_cartesian_adaptive_to` and `advance_paired_radial_adaptive_to`
+complete a requested physical duration through the original first-order paired
+endpoint and original full-versus-two-half controller. Every cell's moisture,
+each bath's solvent mass and each bath's activity enter independent temporal
+comparisons. Optional per-bath kinetic tolerances additionally compare every
+original component's actual dissolved AND crystalline stocks; the original
+phase identity/order and rate laws remain authoritative. Radial transport also
+retains its mass-weighted shell-discrepancy norm.
+
+Only accepted native half-step face transfers enter the complete-window water
+accounts. Each bath closes against its own assigned faces even when opposite
+exchanges leave almost no net specimen uptake. Final original-to-endpoint
+component audits, separate bath balances, field/face conservation and an
+independent compensated sum of represented bath/cell endpoint/start water
+inventories must pass before any state publishes. A failed duration exposes no
+accepted prefix. Last-step source receipts describe the final physical half
+step; they are not a retained history of rejected probes.
+
+`PairedSolutionMoistureTimeControls::maximum_field_evaluations` bounds actual
+nested field proposals cumulatively across coarse, fine, rejected and failed
+temporal trials. It supplements both endpoint-call and per-endpoint root caps.
+The shared charge occurs before native surface/field admission; source and
+phase owners retain their original work bounds. Supplied solvent brackets are
+neither widened nor recentered, and source/domain refusals remain fatal.
+
+This is a local asymptotic first-order error estimate, not SDIRK2 or a global
+accuracy guarantee. Temperature and face assignments remain prescribed; the
+original equal-pressure vapor-equilibrium bridge supplies no liquid immersion
+permeability, solute permeation, pressure osmosis or thermal feedback. Six
+G1/G3/G4 regression groups specify an analytic time-refinement ladder,
+independent continuous through-flow and dissolution references, native
+Cartesian/curved geometry, cumulative-work atomicity and cancellation. All
+eight changed Rust files passed the pinned formatter/parser check. These
+integration regressions remain unexecuted because dependency compilation is
+blocked before fs-couple.
+
 ## Adaptive second-order diffusion with shared finite solutions
 
 `FiniteMoistureSolution::advance_shared_cartesian_sdirk2_adaptive_to` completes

@@ -2,6 +2,9 @@
 //! Source coefficients below are authored numerical fixtures, not calibration.
 
 use super::*;
+
+#[path = "paired/adaptive.rs"]
+mod adaptive;
 use fs_blake3::ContentHash;
 use fs_couple::moisture::{
     cartesian::{MoistureCartesian, MoistureCartesianGeometry},

@@ -20,7 +20,7 @@ fn snapshot(state: &MoistureRadial) -> Result<Snapshot<'_>, MoistureError> {
 /// Form local differences before multiplying by dry mass, avoiding subtraction
 /// of large stored totals. Relative tolerance scales the actual transported
 /// water, not the potentially much larger water already bound in the specimen.
-fn water_distance<E>(
+pub(super) fn water_distance<E>(
     original: &MoistureRadial,
     coarse: &MoistureRadial,
     fine: &MoistureRadial,

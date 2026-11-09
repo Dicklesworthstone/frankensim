@@ -132,6 +132,7 @@ impl FiniteMoistureSolution {
             controls,
             cx,
             |report| report.boundary_water_kg,
+            || Ok(()),
         )
     }
 
@@ -159,6 +160,7 @@ impl FiniteMoistureSolution {
             controls,
             cx,
             |report| report.boundary_water_kg,
+            || Ok(()),
         )
     }
 
@@ -186,12 +188,13 @@ impl FiniteMoistureSolution {
             controls,
             cx,
             |report| report.boundary_water_kg,
+            || Ok(()),
         )
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn advance_pair<F: ReservoirField<N>, const N: usize>(
+pub(in crate::moisture) fn advance_pair<F: ReservoirField<N>, const N: usize>(
     solutions: [&FiniteMoistureSolution; 2],
     field: &F,
     dt_s: f64,
@@ -200,6 +203,7 @@ fn advance_pair<F: ReservoirField<N>, const N: usize>(
     controls: PairedSolutionMoistureSolve,
     cx: &Cx<'_>,
     face_water: impl Fn(&F::Report) -> [f64; N],
+    mut charge_field: impl FnMut() -> Result<(), SolutionMoistureError>,
 ) -> Result<PairedSolutionMoistureCandidate<F, F::Report, N>, SolutionMoistureError> {
     poll(cx)?;
     if controls.maximum_evaluations == 0
@@ -256,6 +260,9 @@ fn advance_pair<F: ReservoirField<N>, const N: usize>(
                             maximum: controls.maximum_evaluations,
                         });
                     }
+                    // The adaptive consumer charges this same physical trial
+                    // against its whole-window budget, even if it later fails.
+                    charge_field()?;
                     evaluations += 1;
                     let activities = [first_activity, second_activity];
                     let mut boundary = std::array::from_fn(|_| ResolvedMoistureFace::default());

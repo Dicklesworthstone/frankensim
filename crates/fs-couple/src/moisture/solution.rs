@@ -53,6 +53,7 @@ mod radial;
 mod shared;
 
 pub use exchange::SolutionMoistureExchange;
+pub(super) use pair::advance_pair;
 pub use pair::{
     MoistureSolutionPort, PairedCartesianSolutionMoistureCandidate,
     PairedRadialSolutionMoistureCandidate, PairedSolutionMoistureCandidate,
