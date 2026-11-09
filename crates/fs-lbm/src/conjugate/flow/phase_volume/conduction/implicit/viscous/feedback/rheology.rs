@@ -1,6 +1,7 @@
-//! Joint thermal and native endpoint-rate feedback on one original inventory.
+//! Joint thermal and native endpoint-rate feedback with optional material SGS.
 
 use super::*;
+use crate::conjugate::FvSgsConfig;
 use crate::conjugate::flow::phase_volume::momentum::resolve_endpoint_rheology_sources;
 
 /// One accepted implicit thermal/rheological endpoint and one material advance.
@@ -8,8 +9,9 @@ use crate::conjugate::flow::phase_volume::momentum::resolve_endpoint_rheology_so
 pub struct ImplicitThermorheologicalThermalVolumeMomentumStep {
     /// Exact thermal source receipts, independent bulk response, used/actual
     /// molecular heat and aggregate thermal/native work retain their owners.
+    /// Modeled SGS transfer remains in the separate material-viscosity report.
     pub evolution: ImplicitThermoviscousThermalVolumeMomentumStep,
-    /// Cell RMS sqrt(2 dev(D):dev(D)) [1/s] at the accepted native molecular
+    /// Cell RMS sqrt(2 dev(D):dev(D)) [1/s] at the accepted native stress
     /// endpoint, before force/pressure and advection. Fixed solids are zero.
     pub endpoint_shear_rate_per_s: Vec<f64>,
     /// Whole coefficient-field updates across the original predictor and ALL
@@ -79,6 +81,123 @@ impl FlowField {
         feedback: ThermalViscosityFeedbackControls,
         workspace: &mut ImplicitThermalVolumeWorkspace,
         gate: &CancelGate,
+        resolve: impl FnMut(
+            usize,
+            &EquilibriumPhaseState,
+            f64,
+        ) -> Result<(ResolvedPhaseTransportState, f64), ChtError>,
+    ) -> Result<ImplicitThermorheologicalThermalVolumeMomentumStep, ChtError> {
+        self.advance_implicit_thermorheological_feedback(
+            domain,
+            reservoir,
+            conductivity,
+            baths,
+            solids,
+            contacts,
+            input,
+            boundaries,
+            None,
+            controls,
+            viscosity_controls,
+            solve,
+            feedback,
+            workspace,
+            gate,
+            resolve,
+        )
+    }
+
+    /// Close original temperature/rate rheology and resolved SGS at the same
+    /// implicit fluid/finite-solid thermal endpoint.
+    ///
+    /// Every thermal trial starts from the original inventories. Its native
+    /// momentum solve resolves mu and independent zeta at the trial's exact
+    /// phase and unweighted physical endpoint shear rate. The SGS closure then
+    /// refreshes cell, interior-edge and reservoir-mouth stresses and caps with
+    /// those molecular coefficients before the common nonlinear residual.
+    /// Original `rho = M/V` supplies SGS dynamic stress and local shear caps;
+    /// source density does not replace native inertia or the SGS density field.
+    ///
+    /// Only molecular dissipation supplies heat to the implicit graph. Modeled
+    /// transfer remains separate in the accepted material-viscosity report;
+    /// it is neither immediate heat nor an evolved subgrid-energy store.
+    /// Conductivity retains the original molecular source. Shared finite-solid
+    /// storage, baths, contacts and thermal work keep their existing owners.
+    ///
+    /// The original whole-call thermal and momentum work bounds include every
+    /// rejected trial and its inner source/SGS iterations. Once both endpoints
+    /// converge, force, pressure and conservative material transport advance
+    /// once. Optional opposed reservoir mouths retain their zero tangential
+    /// trace and subsequent pressure load. SGS retains its exploratory policy;
+    /// zero model coefficients follow the exact original thermorheological path.
+    ///
+    /// # Errors
+    /// Model, source, phase, local cap, thermal or stress nonconvergence, work,
+    /// conservation and cancellation refusals publish no partial endpoint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_isotropic_implicit_conjugate_thermorheological_thermal_volume_momentum_with_baths_and_sgs(
+        &self,
+        domain: &VoxelDomain,
+        reservoir: Option<([FlowFace; 6], StaggeredBoundaryPressure<'_>)>,
+        conductivity: &PreparedPhaseConductivity<'_>,
+        baths: ThermalVolumeBoundaries<'_>,
+        solids: &[ThermalVolumeSolidCell<'_, '_>],
+        contacts: &[ThermalVolumeContact<'_>],
+        input: ThermalVolumeMomentumInput<'_>,
+        boundaries: [FvBoundary; 6],
+        sgs: FvSgsConfig,
+        controls: ConductiveThermalVolumeMomentumControls,
+        viscosity_controls: MaterialViscosityControls,
+        solve: ImplicitThermalVolumeSolveControls,
+        feedback: ThermalViscosityFeedbackControls,
+        workspace: &mut ImplicitThermalVolumeWorkspace,
+        gate: &CancelGate,
+        resolve: impl FnMut(
+            usize,
+            &EquilibriumPhaseState,
+            f64,
+        ) -> Result<(ResolvedPhaseTransportState, f64), ChtError>,
+    ) -> Result<ImplicitThermorheologicalThermalVolumeMomentumStep, ChtError> {
+        poll(gate)?;
+        sgs.validate()?;
+        self.advance_implicit_thermorheological_feedback(
+            domain,
+            reservoir,
+            conductivity,
+            baths,
+            solids,
+            contacts,
+            input,
+            boundaries,
+            Some(sgs),
+            controls,
+            viscosity_controls,
+            solve,
+            feedback,
+            workspace,
+            gate,
+            resolve,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn advance_implicit_thermorheological_feedback(
+        &self,
+        domain: &VoxelDomain,
+        reservoir: Option<([FlowFace; 6], StaggeredBoundaryPressure<'_>)>,
+        conductivity: &PreparedPhaseConductivity<'_>,
+        baths: ThermalVolumeBoundaries<'_>,
+        solids: &[ThermalVolumeSolidCell<'_, '_>],
+        contacts: &[ThermalVolumeContact<'_>],
+        input: ThermalVolumeMomentumInput<'_>,
+        boundaries: [FvBoundary; 6],
+        sgs: Option<FvSgsConfig>,
+        controls: ConductiveThermalVolumeMomentumControls,
+        viscosity_controls: MaterialViscosityControls,
+        solve: ImplicitThermalVolumeSolveControls,
+        feedback: ThermalViscosityFeedbackControls,
+        workspace: &mut ImplicitThermalVolumeWorkspace,
+        gate: &CancelGate,
         mut resolve: impl FnMut(
             usize,
             &EquilibriumPhaseState,
@@ -119,35 +238,52 @@ impl FlowField {
                     });
                 }
                 let mut endpoint = None;
-                let prepared = self.prepare_material_rheology_with_source(
-                    domain,
-                    faces,
-                    mouth,
-                    input.volume.mass_kg,
-                    input.momentum_kg_m_s,
-                    boundaries,
-                    controls.evolution.mechanics.reconstruction,
-                    controls.evolution.mechanics.projection.duration_s,
-                    remaining,
-                    gate,
-                    |rates| {
-                        let sources = resolve_endpoint_rheology_sources(
-                            domain,
-                            curve,
-                            |cell| {
-                                phases[cell].ok_or_else(|| {
-                                    refuse("endpoint rheology needs a native fluid phase")
-                                })
-                            },
-                            rates,
-                            &mut resolve,
-                            &mut work.source_evaluations,
-                            gate,
-                        )?;
-                        endpoint = Some((sources.receipts, sources.bulk_pa_s.clone()));
-                        Ok((sources.shear_pa_s, sources.bulk_pa_s))
-                    },
-                )?;
+                let resolve_coefficients = |rates: &[f64]| {
+                    let sources = resolve_endpoint_rheology_sources(
+                        domain,
+                        curve,
+                        |cell| {
+                            phases[cell].ok_or_else(|| {
+                                refuse("endpoint rheology needs a native fluid phase")
+                            })
+                        },
+                        rates,
+                        &mut resolve,
+                        &mut work.source_evaluations,
+                        gate,
+                    )?;
+                    endpoint = Some((sources.receipts, sources.bulk_pa_s.clone()));
+                    Ok((sources.shear_pa_s, sources.bulk_pa_s))
+                };
+                let prepared = match sgs {
+                    Some(sgs) => self.prepare_material_rheology_with_source_and_sgs(
+                        domain,
+                        faces,
+                        mouth,
+                        input.volume.mass_kg,
+                        input.momentum_kg_m_s,
+                        boundaries,
+                        controls.evolution.mechanics.reconstruction,
+                        controls.evolution.mechanics.projection.duration_s,
+                        sgs,
+                        remaining,
+                        gate,
+                        resolve_coefficients,
+                    ),
+                    None => self.prepare_material_rheology_with_source(
+                        domain,
+                        faces,
+                        mouth,
+                        input.volume.mass_kg,
+                        input.momentum_kg_m_s,
+                        boundaries,
+                        controls.evolution.mechanics.reconstruction,
+                        controls.evolution.mechanics.projection.duration_s,
+                        remaining,
+                        gate,
+                        resolve_coefficients,
+                    ),
+                }?;
                 add_work(&mut source_updates, prepared.source_updates)?;
                 add_molecular_work(work, &prepared.viscosity)?;
                 let (receipts, bulk_pa_s) = endpoint.ok_or_else(|| {

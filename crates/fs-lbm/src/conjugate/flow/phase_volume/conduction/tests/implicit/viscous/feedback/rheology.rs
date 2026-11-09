@@ -1,5 +1,7 @@
 //! Genuine T/rate source surfaces must close on the same native heat endpoint.
 
+mod sgs;
+
 use super::*;
 
 fn joint_response(

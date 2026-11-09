@@ -3154,3 +3154,29 @@ the final source was reviewed and prepared through GitHub, without a completed
 Rust formatting, type-check or test-execution gate. The earlier dependency
 build limitation also remains. No runtime or turbulent-accuracy claim is made
 from these authored but unexecuted regressions.
+
+## Implicit temperature/rate rheology with SGS momentum
+
+`advance_isotropic_implicit_conjugate_thermorheological_thermal_volume_momentum_with_baths_and_sgs`
+composes the existing implicit fluid/finite-solid thermal feedback with native
+endpoint-rate molecular shear, independent bulk response and the selected
+Smagorinsky, WALE or Vreman closure. Every predictor and thermal trial resolves
+the original material source at that trial's exact phase and physical shear
+rate; accepted SGS stresses and local molecular-relative caps use those same
+coefficients and actual original M/V. Optional opposed reservoir-mouth stresses
+retain their native boundary owner.
+
+All trials retain original fluid M/P/h and finite-solid storage. Only physical
+molecular dissipation supplies heat; modeled SGS transfer stays separately
+reported. Conductivity in this entry remains molecular. The original shared
+non-cancelling heat/energy gates and whole-call source, stress and thermal work
+ceilings apply across every rejected trial. Force, pressure and material
+transport run once after coupled acceptance. Zero coefficients retain the
+original thermorheological result; source/phase/cap/work/cancellation refusals
+return no partial material or solid endpoint. SGS remains explicit exploration.
+
+Focused regressions use the original temperature/rate material-card fixture and
+an independent scalar momentum root with analytically eliminated thermal rows.
+They cover joint source coordinates, molecular-only heating, separate modeled
+transfer, original finite-wall history, all three zero closures, refreshed
+thermal molecular caps, bounded work, cancellation and deterministic retry.
