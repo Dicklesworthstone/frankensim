@@ -3750,6 +3750,20 @@ authority.
   regression in `tests/temperature_contact_enthalpy/surface_dirichlet.rs`
   compares event-aligned and explicit endpoints against an independent P1
   contact root, including bath storage jumps, replay and transactional refusal.
+
+  `ScanningEnthalpyRun` admits the same unique prescribed temperatures for
+  moving-source endpoints, event-aligned histories and adaptive half steps,
+  including nonlinear conductivity and ambient radiation. The physical bath
+  reaction accounts for both prescribed-node storage and absorbed source power.
+  Prescribed equation rows are eliminated without dropping their source-basis
+  columns from the consistent P1 mass action. Forward and reverse-history
+  sensitivities retain free-state propagation, all seven heater controls and
+  prescribed-temperature pullbacks; fixed caloric history has no endpoint-state
+  influence. `tests/scanning_enthalpy.rs` checks independent latent-interior
+  balances, held bath/source events, transactional refusal and adaptive reservoir
+  sums. `tests/scanning_sensitivity.rs` checks those controls against finite
+  differences with nonlinear conductivity, radiation and reverse propagation.
+
   Geometry and energetic internal
   variables are frozen; there is no material motion, expansion, pressure work,
   remapping, phase kinetics or vaporization. The basic `advance` entry point

@@ -30,7 +30,7 @@ use super::{HeatSourceHistory, ThermalHistoryProblem, poll};
 use super::events;
 use crate::bc::history::ThermalBoundaryHistory;
 use crate::{ConductionError, ConductionProblem, ConductivityModel, ElementMaterials,
-    ScalarField, ThermalBc, ThermalBoundary, ThermalInterfaces};
+    ScalarField, ThermalBoundary, ThermalInterfaces};
 use crate::material::LiquidMassFractionConductivity;
 use crate::transient::enthalpy::{EnthalpyBudget, EnthalpyError, EnthalpyStepConfig, EnthalpyStepSolution};
 use crate::transient::enthalpy::material::phase::MaterialPhaseTransport;
@@ -442,13 +442,6 @@ impl<'h, 'm, 'c> EnthalpyHistoryRun<'h, 'm, 'c> {
         self.accepted_steps += 1;
         Ok(())
     }
-}
-
-fn natural_only(boundary: &ThermalBoundary) -> Result<(), HeterogeneousEnthalpyError> {
-    if boundary.conditions().iter().any(|row| matches!(row, ThermalBc::Dirichlet { .. })) {
-        return Err(EnthalpyError::UnsupportedDirichlet.into());
-    }
-    Ok(())
 }
 
 fn conduction(error: ConductionError) -> HeterogeneousEnthalpyError { EnthalpyError::from(error).into() }

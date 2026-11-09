@@ -1,7 +1,7 @@
 //! End-to-end scanning, phase, source superposition and radiation tests.
 mod support;
 use fs_blake3::ContentHash;
-use fs_conduction::bc::history::{ThermalBoundaryHistory};
+use fs_conduction::bc::history::{ThermalBoundaryHistory, ThermalRegionHistory};
 use fs_conduction::bc::history::march::{HeatSourceHistory, ThermalHistoryProblem};
 use fs_conduction::bc::history::march::moving::{MovingHeatBudget, MovingHeatSource};
 use fs_conduction::bc::history::march::moving::motion::ScanMotionLimit;
@@ -10,8 +10,8 @@ use fs_conduction::bc::history::march::enthalpy::scanning::{ScanningEnthalpyRun,
 use fs_conduction::bc::history::march::enthalpy::adaptive::PhaseErrorTolerance;
 use fs_conduction::bc::history::march::events::adaptive::AdaptiveHistoryConfig;
 use fs_conduction::bc::history::march::radiation::RadiationRegionHistory;
-use fs_conduction::transient::enthalpy::{EnthalpyBudget, EnthalpyStepConfig};
-use fs_conduction::transient::enthalpy::heterogeneous::ReferenceEnthalpyMaterial;
+use fs_conduction::transient::enthalpy::{EnthalpyBudget, EnthalpyError, EnthalpyStepConfig};
+use fs_conduction::transient::enthalpy::heterogeneous::{HeterogeneousEnthalpyError, ReferenceEnthalpyMaterial};
 use fs_conduction::{ConductionMesh, ConductionProblem, ConductivityModel, ScalarField,
     ThermalBc, ThermalBoundaryBuilder, COMPONENT_POWER_DIMS, TEMPERATURE_DIMS};
 use fs_exec::Cx;
@@ -19,6 +19,7 @@ use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EnthalpyPhaseKnot};
 use fs_qty::{Dims, QtyAny};
 use fs_rep_mesh::TetComplex;
 use fs_scenario::scenario::Environment;
+use fs_scenario::bc::{BcKind, BcValue, BoundaryCondition, Physics};
 use fs_scenario::signal::{TimeSignal, Interp};
 use fs_solver::NewtonKrylovConfig;
 use support::{with_cx, with_cancelled_cx};
@@ -229,5 +230,164 @@ fn g1_scanning_keeps_optional_radiation_and_its_physical_heat_balance() {
         assert!(report.physical_energy_residual_j.abs()<=config().energy_tolerance_j);
         assert!(report.physical_residual_norm_j<=report.physical_residual_tolerance_j);
         assert!((report.conduction.source_w-(0.5+2.*mesh.total_volume())).abs()<1e-10);
+    });
+}
+
+#[test]
+fn g1_prescribed_scan_wall_keeps_latent_interior_and_consistent_p1_source_load() {
+    let mesh = mesh();
+    let curve = curve();
+    let material = ConductivityModel::isotropic_declared(2.).unwrap();
+    with_cx(|cx| {
+        let history = ThermalBoundaryHistory::new(cx, ThermalBoundaryBuilder::new(&mesh)
+            .region("bath", |face| face.centroid[0] == 0., ThermalBc::dirichlet(305.).unwrap()).unwrap()
+            .remainder("surface", ThermalBc::adiabatic()).unwrap(),
+            &Environment::earth_lab(), Vec::new(), 0.).unwrap();
+        let source = heater(constant(0.1, LENGTH), constant(0.5, COMPONENT_POWER_DIMS));
+        let sampled = source.at(cx, &mesh, 0.).unwrap();
+        let mut scan = ScanningEnthalpyRun::new(cx, base(cx, &history, &material, &curve, 2),
+            vec![source], 1, None).unwrap();
+        // The compact footprint has no value at the free vertex, but its
+        // P1 source columns on prescribed vertices still load that free row.
+        assert_eq!(sampled.source.at(1), 0.);
+        let volume = 1. / 48.;
+        let mass = volume / 4.;
+        let source_sum: f64 = (0..4).map(|i| 2. + sampled.source.at(i)).sum();
+        let free_load = volume * (source_sum + 2. + sampled.source.at(1)) / 20.;
+        let first_body_power = volume * source_sum / 4.;
+        let conductance = 2. * volume * 4.; // grad(N1) = (2,0,0).
+        let dt = 0.025;
+        let mut old_free_h = 150.;
+        let mut old_fixed_h = 150.;
+        let mut old = vec![150.; 8];
+        assert_eq!(scan.conduction().specific_enthalpy_j_kg(), old.as_slice());
+        for end in [dt, 2. * dt] {
+            let step = scan.advance_to(cx, end, config()).unwrap();
+            let solved = step.solution();
+            let expected_h = old_free_h + dt * (free_load - conductance * (310. - 305.)) / mass;
+            assert!((100. ..200.).contains(&expected_h));
+            assert!((solved.specific_enthalpy_j_kg[1] - expected_h).abs() < 1e-8);
+            assert_eq!(solved.temperature[1], 310.);
+            for vertex in [0, 2, 3] {
+                assert!((solved.specific_enthalpy_j_kg[vertex] - 50.).abs() < 1e-9);
+                assert_eq!(solved.temperature[vertex], 305.);
+            }
+            for vertex in 4..8 {
+                assert!((solved.specific_enthalpy_j_kg[vertex] - (150. + 2. * end)).abs() < 1e-9);
+            }
+            let reaction = 3. * mass * (50. - old_fixed_h) / dt
+                - conductance * (310. - 305.) - (first_body_power - free_load);
+            let storage: f64 = solved.specific_enthalpy_j_kg.iter().zip(&old)
+                .map(|(h, previous)| mass * (h - previous)).sum();
+            assert!((solved.dirichlet_in_w - reaction).abs() < 1e-8);
+            assert!((solved.source_w - (0.5 + 2. / 24.)).abs() < 1e-10);
+            assert!((storage - dt * (solved.source_w + reaction)).abs() < 1e-9);
+            assert!((solved.stored_energy_change_j - storage).abs() < 1e-9);
+            old.clone_from(&solved.specific_enthalpy_j_kg);
+            old_free_h = expected_h;
+            old_fixed_h = 50.;
+        }
+    });
+}
+
+#[test]
+fn g1_scan_bath_events_charge_storage_once_and_refuse_ambiguous_temperatures_atomically() {
+    let mesh = mesh();
+    let curve = curve();
+    let material = ConductivityModel::isotropic_declared(2.).unwrap();
+    with_cx(|cx| {
+        let bath = BoundaryCondition {
+            region: "bath".into(), physics: Physics::Thermal, kind: BcKind::Dirichlet,
+            value: Some(BcValue::Signal(TimeSignal::Table {
+                times: vec![0., 0.125, 0.25, 0.375, 0.5],
+                values: vec![305., 330., 310., 500., 305.],
+                dims: TEMPERATURE_DIMS, interp: Interp::Hold,
+            })), compatibility: None, frame: 0,
+        };
+        let history = ThermalBoundaryHistory::new(cx, ThermalBoundaryBuilder::new(&mesh)
+            .remainder("bath", ThermalBc::dirichlet(305.).unwrap()).unwrap(),
+            &Environment::earth_lab(), vec![ThermalRegionHistory {
+                row: bath, reference_temperature: None,
+            }], 0.).unwrap();
+        let source = heater(TimeSignal::Table {
+            times: vec![0., 0.125], values: vec![0.1, 1.1], dims: LENGTH, interp: Interp::Hold,
+        }, constant(0.2, COMPONENT_POWER_DIMS));
+        let mut scan = ScanningEnthalpyRun::new(cx, base(cx, &history, &material, &curve, 3),
+            vec![source], 1, None).unwrap();
+        assert_eq!(scan.conduction().specific_enthalpy_j_kg(), &[150.; 8]);
+        let mut previous_h = 150.;
+        for (ordinal, (end, expected_h, center_x)) in
+            [(0.125, 50., 0.1), (0.25, 400., 1.1)].into_iter().enumerate()
+        {
+            let step = scan.advance_event_step(cx, 1., 2., config()).unwrap();
+            assert_eq!(step.end_time_s, end);
+            assert_eq!(step.report.deposition[0].center_m[0], center_x);
+            let solved = step.report.solution();
+            assert!(solved.specific_enthalpy_j_kg.iter().all(|h| (h - expected_h).abs() < 1e-9));
+            let storage = (expected_h - previous_h) / 24.;
+            let source_w = 0.2 + 2. / 24.;
+            assert!((solved.stored_energy_change_j - storage).abs() < 1e-9);
+            assert!((solved.source_w - source_w).abs() < 1e-10);
+            assert!((solved.dirichlet_in_w - (storage / 0.125 - source_w)).abs() < 1e-8);
+            assert!(solved.energy_residual_j.abs() <= config().energy_tolerance_j);
+            assert_eq!(scan.conduction().accepted_steps(), ordinal + 1);
+            previous_h = expected_h;
+        }
+        let old_h = scan.conduction().specific_enthalpy_j_kg().to_vec();
+        let old_t = scan.conduction().temperature().to_vec();
+        let old_f = scan.conduction().liquid_mass_fraction().to_vec();
+        with_cancelled_cx(|cancelled| assert!(scan.advance_to(cancelled, 0.5, config()).is_err()));
+        assert!(matches!(scan.advance_event_step(cx, 1., 2., config()),
+            Err(HeterogeneousEnthalpyError::Enthalpy(EnthalpyError::AmbiguousPrescribedTemperature { .. }))));
+        assert!(matches!(scan.advance_to(cx, 0.4, config()),
+            Err(HeterogeneousEnthalpyError::Enthalpy(EnthalpyError::PrescribedTemperatureOutsideDomain { .. }))));
+        assert_eq!(scan.conduction().specific_enthalpy_j_kg(), old_h.as_slice());
+        assert_eq!(scan.conduction().temperature(), old_t.as_slice());
+        assert_eq!(scan.conduction().liquid_mass_fraction(), old_f.as_slice());
+        assert_eq!(scan.conduction().time_s(), 0.25);
+        assert_eq!(scan.conduction().accepted_steps(), 2);
+        // Explicit endpoint stepping keeps its documented right-side semantics;
+        // refused and cancelled work did not consume this last physical slot.
+        let retry = scan.advance_to(cx, 0.5, config()).unwrap();
+        assert!(retry.solution().temperature.iter().all(|t| *t == 305.));
+        assert_eq!(scan.conduction().accepted_steps(), 3);
+    });
+}
+
+#[test]
+fn g3_adaptive_scan_bath_retains_both_half_step_reservoir_accounts() {
+    let mesh = mesh();
+    let curve = curve();
+    let material = ConductivityModel::isotropic_declared(2.).unwrap();
+    with_cx(|cx| {
+        let history = ThermalBoundaryHistory::new(cx, ThermalBoundaryBuilder::new(&mesh)
+            .remainder("bath", ThermalBc::dirichlet(330.).unwrap()).unwrap(),
+            &Environment::earth_lab(), Vec::new(), 0.).unwrap();
+        let source = heater(constant(0.1, LENGTH), constant(0.5, COMPONENT_POWER_DIMS));
+        let make = || ScanningEnthalpyRun::new(cx, base(cx, &history, &material, &curve, 2),
+            vec![source.clone()], 1, None).unwrap();
+        let mut adaptive = make();
+        let mut manual = make();
+        let pair = adaptive.advance_adaptive_step(cx, 0.1, 0.1, config(), AdaptiveHistoryConfig {
+            absolute_temperature_k: 0.001, relative_temperature: 0.,
+            min_step_s: 1e-6, max_step_s: 0.1, max_attempts: 4,
+        }, PhaseErrorTolerance {
+            absolute_enthalpy_j_kg: 0.01, relative_enthalpy: 0., absolute_liquid_fraction: 0.001,
+        }).unwrap();
+        assert_eq!(pair.rejected_attempts, 0);
+        for (end, half) in [(pair.midpoint_time_s, &pair.first_half), (pair.end_time_s, &pair.second_half)] {
+            let reference = manual.advance_to(cx, end, config()).unwrap();
+            assert_eq!(half.solution().specific_enthalpy_j_kg, reference.solution().specific_enthalpy_j_kg);
+            assert_eq!(half.solution().dirichlet_in_w.to_bits(), reference.solution().dirichlet_in_w.to_bits());
+        }
+        let first = pair.first_half.solution();
+        let second = pair.second_half.solution();
+        assert!((first.stored_energy_change_j - 250. / 24.).abs() < 1e-9);
+        assert!(second.stored_energy_change_j.abs() < 1e-9);
+        let delivered = (pair.midpoint_time_s - pair.start_time_s) * (first.source_w + first.dirichlet_in_w)
+            + (pair.end_time_s - pair.midpoint_time_s) * (second.source_w + second.dirichlet_in_w);
+        assert!((delivered - 250. / 24.).abs() < 1e-9);
+        assert_eq!(adaptive.conduction().accepted_steps(), 2);
+        assert_eq!(adaptive.conduction().specific_enthalpy_j_kg(), manual.conduction().specific_enthalpy_j_kg());
     });
 }

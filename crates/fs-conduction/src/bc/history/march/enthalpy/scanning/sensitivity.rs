@@ -10,7 +10,7 @@
 pub mod objective;
 mod fraction;
 
-use super::{ScanningEnthalpyRun, ScanStep, events, natural_only, patches_before, poll};
+use super::{ScanningEnthalpyRun, ScanStep, events, patches_before, poll};
 use super::super::super::moving::sensitivity::{MovingHeatGradient, MovingHeatLinearization};
 use crate::{ConductionError, LinearConfig};
 use crate::transient::enthalpy::EnthalpyStepConfig;
@@ -99,9 +99,11 @@ impl ScanStepLinearization<'_> {
     pub fn transport(&self) -> &HeterogeneousEnthalpyStepLinearization<'_> { &self.transport }
 
     /// Pull back an objective seed in nodal specific-enthalpy coordinates.
-    /// Complete radiation feedback enters the common transpose, but reservoir
-    /// and emissivity PARAMETER gradients are not returned by this source API.
-    /// Geometry, phase charts, conductivity and boundary histories remain fixed.
+    /// Complete radiation feedback enters the common transpose, but radiative
+    /// reservoir and emissivity PARAMETER gradients are not returned here.
+    /// Prescribed nodal bath-temperature gradients remain in `storage.transport`;
+    /// their constraint multipliers never enter the source or history pullbacks.
+    /// Geometry, phase charts, conductivity and boundary schedules remain fixed.
     pub fn pullback(&self, cx: &Cx<'_>, seed: &[f64], linear: LinearConfig)
         -> Result<ScanStepGradient, ScanSensitivityError>
     {
@@ -215,7 +217,7 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
         // The existing binder independently reassembles the complete endpoint.
         let boundary = if left { events::boundary_before(cx, self.run.problem.boundary, end)? }
             else { self.run.problem.boundary.at(cx, end)? };
-        natural_only(&boundary)?;
+        self.run.storage.admit_prescribed_boundary(cx, &boundary)?;
         let (source, _) = self.source_at(cx, end, left)?;
         let problem = self.run.conduction_problem(&boundary, &source)?;
         let accepted = report.solution().clone();

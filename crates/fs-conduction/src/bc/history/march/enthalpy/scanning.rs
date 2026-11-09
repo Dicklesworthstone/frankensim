@@ -5,12 +5,15 @@
 //! and fixed matching contacts stay with the original run. There is no alternate
 //! heat equation, phase update or implicit reset of history. A source is a
 //! discretely normalized deposition profile, not an optical or melt-flow model.
+//! Prescribed temperatures resolve through each node's original caloric chart;
+//! the physical bath reaction includes constrained-node storage and absorbed
+//! power. A latent-plateau temperature cannot select an unprovided phase state.
 
 /// Implicit endpoint derivatives with respect to moving-source controls.
 pub mod sensitivity;
 
 use super::{EnthalpyHistoryRun, EnthalpyStepConfig, EnthalpyStepSolution,
-    HeterogeneousEnthalpyError, conduction, invalid, natural_only, poll};
+    HeterogeneousEnthalpyError, conduction, invalid, poll};
 use super::adaptive::{PhaseErrorTolerance, phase_error};
 use super::super::{events, moving::MovingHeatSource};
 use super::super::moving::motion::ScanMotionLimit;
@@ -46,7 +49,7 @@ pub struct ScanDeposition {
 /// The original physical response; radiative reports are not flattened.
 #[derive(Debug, Clone)]
 pub enum ScanTransport {
-    /// Natural-boundary nonlinear conduction and latent storage.
+    /// Nonlinear conduction, latent storage and any prescribed-bath reaction.
     Conduction(EnthalpyStepSolution),
     /// The same storage with separate convection and physical radiation audits.
     Radiation(Box<EnthalpyRadiationStepSolution>),
@@ -62,7 +65,10 @@ pub struct ScanStep {
     pub deposition: Vec<ScanDeposition>,
 }
 impl ScanStep {
-    /// Common physical enthalpy, temperature, phase and energy response.
+    /// Common accepted enthalpy, temperature, phase and inner transport response.
+    /// For radiation, the Robin totals and `dirichlet_in_w` use the retained
+    /// inner boundary. Its variant also retains `physical_dirichlet_in_w` and
+    /// the nonlinear radiative heat for the separately checked physical balance.
     #[must_use]
     pub fn solution(&self) -> &EnthalpyStepSolution {
         match &self.transport {
@@ -271,7 +277,10 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
     {
         let boundary = if left { events::boundary_before(cx, self.run.problem.boundary, end) }
             else { self.run.problem.boundary.at(cx, end) }.map_err(conduction)?;
-        natural_only(&boundary)?;
+        // Admit the actual left/right endpoint before projecting any source.
+        // The existing storage owner imposes these temperatures and accounts
+        // for their physical heat, without changing the accepted old enthalpy.
+        self.run.storage.admit_prescribed_boundary(cx, &boundary)?;
         let (source, deposition) = self.source_at(cx, end, left)?;
         let problem = self.run.conduction_problem(&boundary, &source)?;
         let transport = match &self.radiation {

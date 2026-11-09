@@ -47,6 +47,12 @@ fn history<'m>(cx:&Cx<'_>,m:&'m ConductionMesh)->ThermalBoundaryHistory<'m>{
     ThermalBoundaryHistory::new(cx,ThermalBoundaryBuilder::new(m).remainder("surface",ThermalBc::adiabatic()).unwrap(),
         &Environment::earth_lab(),vec![],0.).unwrap()
 }
+fn bath_history<'m>(cx:&Cx<'_>,m:&'m ConductionMesh,bath:f64)->ThermalBoundaryHistory<'m>{
+    ThermalBoundaryHistory::new(cx,ThermalBoundaryBuilder::new(m)
+        .region("bath",|face|face.centroid[2]==0.,ThermalBc::dirichlet(bath).unwrap()).unwrap()
+        .remainder("surface",ThermalBc::adiabatic()).unwrap(),
+        &Environment::earth_lab(),vec![],0.).unwrap()
+}
 fn radiation()->ScanRadiation{
     let mut claims=ClaimSet::new();claims.insert_claim(PropertyClaim{
         key:PropertyKey::new(SURFACE_EMISSIVITY_PROPERTY,EMISSIVITY_DIMS),
@@ -160,5 +166,80 @@ fn g0_derivative_refusals_are_atomic_and_event_binding_keeps_the_primal_side(){
         assert_eq!(endpoint.end_time_s(),0.01);assert_eq!(endpoint.report().deposition[0].absorbed_power_w,3.);
         assert!(endpoint.pullback(cx,&[],linear()).is_err());
         assert_eq!(events.conduction().accepted_steps(),1);
+    });
+}
+
+#[test]
+fn g3_prescribed_scan_baths_keep_source_mass_coupling_and_physical_controls(){
+    let m=mesh();let curve=chart();let mat=ConductivityModel::isotropic(
+        ConductivityTable::declared_curve(vec![(280.,1.),(380.,3.)]).unwrap());
+    with_cx(|cx|{
+        let bath=299.;let hist=bath_history(cx,&m,bath);
+        let p=[0.2,0.25,0.3,1.4,1.3,1.2,3.];let old=[10.,20.,30.,40.];
+        let seed=[0.3,-0.1,0.7,0.5];
+        for rad in [false,true]{
+            let mut evolving=run(cx,&hist,&mat,&curve,&old,vec![heater(p)],rad);
+            let endpoint=evolving.advance_linearized_to(cx,0.002,config(),budget()).unwrap();
+            let gradient=endpoint.pullback_temperature(cx,&seed,linear()).unwrap();
+            assert_eq!(&endpoint.report().solution().temperature[..3],&[bath;3]);
+            assert_eq!(&gradient.storage.transport.previous_specific_enthalpy[..3],&[0.;3]);
+            // Source coefficients at fixed nodes still load the neighboring
+            // free row through the ORIGINAL consistent P1 source mass matrix.
+            assert!(gradient.storage.transport.source_density.iter().all(|&value|value>0.));
+            let mut direct=run(cx,&hist,&mat,&curve,&old,vec![heater(p)],rad);
+            assert_eq!(endpoint.report().solution().specific_enthalpy_j_kg,
+                direct.advance_to(cx,0.002,config()).unwrap().solution().specific_enthalpy_j_kg);
+            let objective=|point,bath|{
+                let history=bath_history(cx,&m,bath);
+                let mut trial=run(cx,&history,&mat,&curve,&old,vec![heater(point)],rad);
+                let step=trial.advance_to(cx,0.002,config()).unwrap();
+                seed.iter().zip(&step.solution().temperature).map(|(s,t)|s*t).sum::<f64>()
+            };
+            let controls=flatten(&gradient.sources[0]);let eps=2e-5;
+            for i in 0..7{let(mut plus,mut minus)=(p,p);plus[i]+=eps;minus[i]-=eps;
+                close(controls[i],(objective(plus,bath)-objective(minus,bath))/(2.*eps));}
+            close(gradient.storage.transport.prescribed_temperature.iter().sum(),
+                (objective(p,bath+eps)-objective(p,bath-eps))/(2.*eps));
+
+            // A fixed-node temperature observation has only its own bath
+            // derivative. Its nonzero constraint multiplier is not heat input.
+            let fixed=endpoint.pullback_temperature(cx,&[1.,0.,0.,0.],linear()).unwrap();
+            for value in flatten(&fixed.sources[0]){close(value,0.);}
+            for value in fixed.storage.transport.previous_specific_enthalpy{close(value,0.);}
+            for (i,value) in fixed.storage.transport.prescribed_temperature.into_iter().enumerate(){
+                close(value,if i==0{1.}else{0.});
+            }
+        }
+    });
+}
+
+#[test]
+fn g3_prescribed_scan_reverse_history_propagates_only_free_caloric_state(){
+    let m=mesh();let curve=chart();let mat=ConductivityModel::isotropic_declared(2.).unwrap();
+    with_cx(|cx|{
+        let bath=299.;let hist=bath_history(cx,&m,bath);
+        let p=[0.2,0.25,0.3,1.4,1.3,1.2,3.];let old=[10.,20.,30.,40.];
+        let seed=[0.3,-0.1,0.7,0.5];
+        let mut evolving=run(cx,&hist,&mat,&curve,&old,vec![heater(p)],false);
+        let first=evolving.advance_linearized_to(cx,0.002,config(),budget()).unwrap();
+        let last=evolving.advance_linearized_to(cx,0.005,config(),budget()).unwrap();
+        let last_g=last.pullback_temperature(cx,&seed,linear()).unwrap();
+        let first_g=first.pullback(cx,&last_g.storage.transport.previous_specific_enthalpy,linear()).unwrap();
+        let objective=|point,bath,old:[f64;4]|{
+            let history=bath_history(cx,&m,bath);
+            let mut trial=run(cx,&history,&mat,&curve,&old,vec![heater(point)],false);
+            trial.advance_to(cx,0.002,config()).unwrap();
+            let end=trial.advance_to(cx,0.005,config()).unwrap();
+            seed.iter().zip(&end.solution().temperature).map(|(s,t)|s*t).sum::<f64>()
+        };
+        let a=flatten(&first_g.sources[0]);let b=flatten(&last_g.sources[0]);let eps=2e-5;
+        for i in 0..7{let(mut plus,mut minus)=(p,p);plus[i]+=eps;minus[i]-=eps;
+            close(a[i]+b[i],(objective(plus,bath,old)-objective(minus,bath,old))/(2.*eps));}
+        close(first_g.storage.transport.prescribed_temperature.iter().sum::<f64>()
+            +last_g.storage.transport.prescribed_temperature.iter().sum::<f64>(),
+            (objective(p,bath+eps,old)-objective(p,bath-eps,old))/(2.*eps));
+        for i in 0..4{let(mut plus,mut minus)=(old,old);plus[i]+=eps;minus[i]-=eps;
+            close(first_g.storage.transport.previous_specific_enthalpy[i],
+                (objective(p,bath,plus)-objective(p,bath,minus))/(2.*eps));}
     });
 }
