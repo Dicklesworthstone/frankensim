@@ -5,6 +5,10 @@ use fs_sparse::direct::{
 };
 use fs_sparse::{Coo, Csr};
 
+mod relaxation;
+pub(super) use relaxation::BranchSource;
+pub use relaxation::{SparseStructuralMemoryWork, SparseStructuralRelaxationLimits};
+
 /// Limits for original sparse forms and the existing native LDLT owner.
 #[derive(Clone, Copy, Debug)]
 pub struct SparseStructuralTimeLimits {
@@ -169,6 +173,7 @@ pub(super) struct SparseMidpoint {
     scales: Vec<f64>,
     duration_s: f64,
     limits: SparseStructuralTimeLimits,
+    branches: relaxation::Branches,
 }
 
 /// Every original coefficient and a clock, bound to its exact preparation.
@@ -178,6 +183,7 @@ pub struct SparseStructuralTimeState<'p> {
     time_s: f64,
     position: Vec<f64>,
     velocity: Vec<f64>,
+    stress: Vec<f64>,
 }
 impl core::fmt::Debug for SparseStructuralTimeState<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -209,6 +215,11 @@ impl SparseStructuralTimeState<'_> {
     pub fn pressure_pa(&self) -> &[f64] {
         &self.velocity[self.owner.structural_dofs()..]
     }
+    /// Actual original Maxwell stresses, in authored branch order.
+    #[must_use]
+    pub fn branch_stresses(&self) -> &[f64] {
+        &self.stress
+    }
 }
 
 /// Physical storage; pressure is the velocity of pressure potential.
@@ -218,6 +229,8 @@ pub struct SparseStructuralTimeEnergy {
     pub structural_elastic_j: f64,
     pub acoustic_kinetic_j: f64,
     pub acoustic_compression_j: f64,
+    /// Actual sigma^2/(2k); relaxed spatial stiffness excludes these branches.
+    pub relaxation_j: f64,
 }
 impl SparseStructuralTimeEnergy {
     #[must_use]
@@ -230,7 +243,7 @@ impl SparseStructuralTimeEnergy {
     }
     #[must_use]
     pub fn total_j(self) -> f64 {
-        self.structural_j() + self.acoustic_j()
+        self.structural_j() + self.acoustic_j() + self.relaxation_j
     }
 }
 
@@ -250,6 +263,10 @@ pub struct SparseStructuralTimeWork {
     pub acoustic_interface_work_j: f64,
     pub structural_dissipation_j: f64,
     pub wall_dissipation_j: f64,
+    pub relaxation_energy_change_j: f64,
+    pub structural_to_relaxation_work_j: f64,
+    pub acoustic_to_relaxation_work_j: f64,
+    pub relaxation_dissipation_j: f64,
     pub maximum_relative_residual: f64,
 }
 impl SparseStructuralTimeWork {
@@ -258,19 +275,29 @@ impl SparseStructuralTimeWork {
         (Dd::from_f64(self.structural_energy_change_j)
             - Dd::from_f64(self.structural_input_work_j)
             - Dd::from_f64(self.fluid_to_structure_work_j)
-            + Dd::from_f64(self.structural_dissipation_j))
+            + Dd::from_f64(self.structural_dissipation_j)
+            + Dd::from_f64(self.structural_to_relaxation_work_j))
         .to_f64()
     }
     #[must_use]
     pub fn acoustic_balance_residual_j(self) -> f64 {
         (Dd::from_f64(self.acoustic_energy_change_j) - Dd::from_f64(self.acoustic_input_work_j)
             + Dd::from_f64(self.acoustic_interface_work_j)
-            + Dd::from_f64(self.wall_dissipation_j))
+            + Dd::from_f64(self.wall_dissipation_j)
+            + Dd::from_f64(self.acoustic_to_relaxation_work_j))
         .to_f64()
     }
     #[must_use]
     pub fn interface_balance_residual_j(self) -> f64 {
         self.fluid_to_structure_work_j - self.acoustic_interface_work_j
+    }
+    #[must_use]
+    pub fn relaxation_balance_residual_j(self) -> f64 {
+        (Dd::from_f64(self.relaxation_energy_change_j)
+            + Dd::from_f64(self.relaxation_dissipation_j)
+            - Dd::from_f64(self.structural_to_relaxation_work_j)
+            - Dd::from_f64(self.acoustic_to_relaxation_work_j))
+        .to_f64()
     }
     #[must_use]
     pub fn balance_residual_j(self) -> f64 {
@@ -279,7 +306,9 @@ impl SparseStructuralTimeWork {
             - Dd::from_f64(self.structural_input_work_j)
             - Dd::from_f64(self.acoustic_input_work_j)
             + Dd::from_f64(self.structural_dissipation_j)
-            + Dd::from_f64(self.wall_dissipation_j))
+            + Dd::from_f64(self.wall_dissipation_j)
+            + Dd::from_f64(self.relaxation_energy_change_j)
+            + Dd::from_f64(self.relaxation_dissipation_j))
         .to_f64()
     }
 }
@@ -293,6 +322,8 @@ pub struct SparseStructuralTimeStep<'p> {
     pub fluid_force: Vec<f64>,
     /// Midpoint original pressure-basis outward volume-flow load B v [m³/s].
     pub displaced_flow_m3_s: Vec<f64>,
+    /// Separate original branch storage, work and heat, in source order.
+    pub memory: Vec<SparseStructuralMemoryWork>,
 }
 
 impl SparseMidpoint {
@@ -300,6 +331,24 @@ impl SparseMidpoint {
         forms: SparseForms,
         duration_s: f64,
         limits: SparseStructuralTimeLimits,
+        cancelled: &impl Fn() -> bool,
+    ) -> Result<Self> {
+        Self::new_relaxing(
+            forms,
+            duration_s,
+            limits,
+            &[],
+            SparseStructuralRelaxationLimits::default(),
+            cancelled,
+        )
+    }
+
+    pub(super) fn new_relaxing(
+        forms: SparseForms,
+        duration_s: f64,
+        limits: SparseStructuralTimeLimits,
+        sources: &[BranchSource<'_>],
+        memory_limits: SparseStructuralRelaxationLimits,
         cancelled: &impl Fn() -> bool,
     ) -> Result<Self> {
         poll(cancelled)?;
@@ -352,12 +401,27 @@ impl SparseMidpoint {
             admit_form(&forms.stiffness[d], false, &limits, cancelled)?;
             admit_form(&forms.damping[d], false, &limits, cancelled)?;
         }
+        let branches = relaxation::Branches::prepare(
+            sources,
+            n,
+            ns,
+            t,
+            entries,
+            &limits,
+            memory_limits,
+            cancelled,
+        )?;
+        let dimension = n
+            .checked_add(branches.len())
+            .ok_or(SparseStructuralTimeError::Invalid(
+                "augmented material coordinate extent overflow",
+            ))?;
         // Midpoint velocities [v_mid,p_mid] are simultaneous unknowns:
         // [ A_s  -t B^T ][v] = [ M_s v0 + t F - t K_s u0 ]
         // [ -t B -A_a   ][p]   [-M_a p0 - t s + t K_a psi0].
         // Multiplying ONLY the acoustic equation by -1 makes this symmetric.
         // Neither K nor the acoustic static operator is inverted.
-        let mut effective = Coo::new(n, n);
+        let mut effective = Coo::new(dimension, dimension);
         for (d, size) in [ns, na].into_iter().enumerate() {
             let offset = if d == 0 { 0 } else { ns };
             let sign = if d == 0 { 1.0 } else { -1.0 };
@@ -389,15 +453,21 @@ impl SparseMidpoint {
                 push(&mut effective, col, ns + row, -t * value, &limits)?;
             }
         }
+        // Scalar Maxwell histories keep a sparse augmented column, never b*b^T.
+        branches.assemble(&mut effective, n, &limits, cancelled)?;
         let mut effective = effective.assemble();
-        let mut scales = Vec::with_capacity(n);
-        for row in 0..n {
+        let mut scales = Vec::with_capacity(dimension);
+        for row in 0..dimension {
             poll(cancelled)?;
             let diagonal = effective.get(row, row);
-            if !diagonal.is_finite()
-                || (row < ns && diagonal <= 0.0)
-                || (row >= ns && diagonal >= 0.0)
-            {
+            let sign = if row < ns {
+                1.0
+            } else if row < n {
+                -1.0
+            } else {
+                branches.sign(row - n)
+            };
+            if !diagonal.is_finite() || sign * diagonal <= 0.0 {
                 return Err(SparseStructuralTimeError::Invalid(
                     "original midpoint block diagonal is not definite",
                 ));
@@ -412,7 +482,9 @@ impl SparseMidpoint {
         }
         scale_form(&mut effective, &scales, cancelled)?;
         let factor = factor(&effective, &limits, cancelled)?;
-        if factor.inertia().positive != ns || factor.inertia().negative != na {
+        if factor.inertia().positive != ns + branches.acoustic
+            || factor.inertia().negative != na + branches.len() - branches.acoustic
+        {
             return Err(SparseStructuralTimeError::Invalid(
                 "coupled midpoint factor has unexpected inertia",
             ));
@@ -424,7 +496,11 @@ impl SparseMidpoint {
             scales,
             duration_s,
             limits,
+            branches,
         })
+    }
+    pub(super) fn branch_count(&self) -> usize {
+        self.branches.len()
     }
     pub(super) fn structural_dofs(&self) -> usize {
         self.forms.mass[0].nrows()
@@ -446,6 +522,7 @@ impl SparseMidpoint {
             time_s: 0.0,
             position: vec![0.0; n],
             velocity: vec![0.0; n],
+            stress: vec![0.0; self.branches.len()],
         }
     }
     pub(super) fn state(
@@ -455,6 +532,28 @@ impl SparseMidpoint {
         v: &[f64],
         psi: &[f64],
         p: &[f64],
+        cancelled: &impl Fn() -> bool,
+    ) -> Result<SparseStructuralTimeState<'_>> {
+        self.state_with_stresses(
+            time_s,
+            u,
+            v,
+            psi,
+            p,
+            &vec![0.0; self.branches.len()],
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn state_with_stresses(
+        &self,
+        time_s: f64,
+        u: &[f64],
+        v: &[f64],
+        psi: &[f64],
+        p: &[f64],
+        stresses: &[f64],
         cancelled: &impl Fn() -> bool,
     ) -> Result<SparseStructuralTimeState<'_>> {
         poll(cancelled)?;
@@ -476,6 +575,7 @@ impl SparseMidpoint {
                 "complete finite original state and nonnegative clock required",
             ));
         }
+        self.branches.energy(stresses, cancelled)?;
         let mut position = Vec::with_capacity(ns + na);
         position.extend_from_slice(u);
         position.extend_from_slice(psi);
@@ -487,6 +587,7 @@ impl SparseMidpoint {
             time_s,
             position,
             velocity,
+            stress: stresses.to_vec(),
         };
         self.energy(&state, cancelled)?;
         Ok(state)
@@ -511,7 +612,7 @@ impl SparseMidpoint {
         &self,
         state: &SparseStructuralTimeState<'_>,
         cancelled: &impl Fn() -> bool,
-    ) -> Result<(SparseStructuralTimeEnergy, [f64; 2])> {
+    ) -> Result<(SparseStructuralTimeEnergy, [f64; 3])> {
         self.check(state)?;
         let (ks, kscale) = positive(&self.forms.mass[0], state.structural_velocity(), cancelled)?;
         let (es, escale) = positive(
@@ -534,13 +635,21 @@ impl SparseMidpoint {
             structural_elastic_j: elastic_s,
             acoustic_kinetic_j: kinetic_a,
             acoustic_compression_j: compression,
+            relaxation_j: self.branches.energy(&state.stress, cancelled)?,
         };
         if !result.total_j().is_finite() {
             return Err(SparseStructuralTimeError::Invalid(
                 "physical storage overflow",
             ));
         }
-        Ok((result, [0.5 * (kscale + escale), 0.5 * (ascale + cscale)]))
+        Ok((
+            result,
+            [
+                0.5 * (kscale + escale),
+                0.5 * (ascale + cscale),
+                result.relaxation_j,
+            ],
+        ))
     }
     pub(super) fn step<'p>(
         &'p self,
@@ -570,7 +679,7 @@ impl SparseMidpoint {
                 "time increment is unrepresentable",
             ));
         }
-        let mut midpoint = vec![0.0; n];
+        let mut midpoint = vec![0.0; n + self.branches.len()];
         for (d, load) in [force, source].into_iter().enumerate() {
             let (offset, size) = if d == 0 { (0, ns) } else { (ns, na) };
             for row in 0..size {
@@ -592,6 +701,8 @@ impl SparseMidpoint {
                     rhs * self.scales[offset + row] * if d == 0 { 1.0 } else { -1.0 };
             }
         }
+        self.branches
+            .rhs(&initial.stress, &mut midpoint[n..], cancelled)?;
         finite(&midpoint)?;
         poll(cancelled)?;
         self.factor.solve_in_place(&mut midpoint);
@@ -605,6 +716,9 @@ impl SparseMidpoint {
             time_s: next_time,
             position: vec![0.0; n],
             velocity: vec![0.0; n],
+            stress: self
+                .branches
+                .next_stresses(&initial.stress, &midpoint[n..], cancelled)?,
         };
         for i in 0..n {
             next.position[i] = h.mul_add(midpoint[i], initial.position[i]);
@@ -628,23 +742,34 @@ impl SparseMidpoint {
                 + Dd::from_f64(next.velocity[i]) * Dd::from_f64(0.5))
             .to_f64();
         }
+        let memory = self.branches.audit(
+            &initial.stress,
+            &next.stress,
+            &midpoint[..n],
+            h,
+            &self.limits,
+            cancelled,
+        )?;
         let (fluid_force, displaced_flow) = interface(
             &self.forms.coupling,
             &midpoint[..ns],
-            &midpoint[ns..],
+            &midpoint[ns..n],
             cancelled,
         )?;
-        let residual = self.residual(
-            initial,
-            &next,
-            &midpoint,
-            &middle_q,
-            force,
-            source,
-            &fluid_force,
-            &displaced_flow,
-            cancelled,
-        )?;
+        let residual = self
+            .residual(
+                initial,
+                &next,
+                &midpoint,
+                &middle_q,
+                force,
+                source,
+                &fluid_force,
+                &displaced_flow,
+                &memory.reaction,
+                cancelled,
+            )?
+            .max(memory.relative_residual);
         if residual > self.limits.maximum_relative_residual {
             return Err(SparseStructuralTimeError::Residual {
                 observed: residual,
@@ -686,9 +811,9 @@ impl SparseMidpoint {
             loss_scales[d] = h * scale;
         }
         let (input_s, input_s_scale) = pair(h, force, &midpoint[..ns])?;
-        let (input_a, input_a_scale) = pair(h, source, &midpoint[ns..])?;
+        let (input_a, input_a_scale) = pair(h, source, &midpoint[ns..n])?;
         let (exchange_s, exchange_s_scale) = pair(h, &fluid_force, &midpoint[..ns])?;
-        let (exchange_a, exchange_a_scale) = pair(h, &displaced_flow, &midpoint[ns..])?;
+        let (exchange_a, exchange_a_scale) = pair(h, &displaced_flow, &midpoint[ns..n])?;
         let work = SparseStructuralTimeWork {
             initial_energy,
             final_energy,
@@ -700,6 +825,10 @@ impl SparseMidpoint {
             acoustic_interface_work_j: exchange_a,
             structural_dissipation_j: losses[0],
             wall_dissipation_j: losses[1],
+            relaxation_energy_change_j: memory.energy_change,
+            structural_to_relaxation_work_j: memory.work[0],
+            acoustic_to_relaxation_work_j: memory.work[1],
+            relaxation_dissipation_j: memory.dissipation,
             maximum_relative_residual: residual,
         };
         let scales = [
@@ -708,26 +837,45 @@ impl SparseMidpoint {
                 + exchange_s_scale
                 + loss_scales[0]
                 + initial_roundoff[0]
-                + final_roundoff[0],
+                + final_roundoff[0]
+                + memory.work_scale[0],
             change_scales[1]
                 + input_a_scale
                 + exchange_a_scale
                 + loss_scales[1]
                 + initial_roundoff[1]
-                + final_roundoff[1],
+                + final_roundoff[1]
+                + memory.work_scale[1],
         ];
         for (account, defect, physical, roundoff) in [
             (
                 "structural",
                 work.structural_balance_residual_j(),
-                changes[0].abs() + input_s.abs() + exchange_s.abs() + losses[0].abs(),
+                changes[0].abs()
+                    + input_s.abs()
+                    + exchange_s.abs()
+                    + losses[0].abs()
+                    + memory.work[0].abs(),
                 scales[0],
             ),
             (
                 "acoustic",
                 work.acoustic_balance_residual_j(),
-                changes[1].abs() + input_a.abs() + exchange_a.abs() + losses[1].abs(),
+                changes[1].abs()
+                    + input_a.abs()
+                    + exchange_a.abs()
+                    + losses[1].abs()
+                    + memory.work[1].abs(),
                 scales[1],
+            ),
+            (
+                "material memory",
+                work.relaxation_balance_residual_j(),
+                memory.energy_change.abs()
+                    + memory.dissipation
+                    + memory.work[0].abs()
+                    + memory.work[1].abs(),
+                memory.energy_scale + initial_roundoff[2] + final_roundoff[2],
             ),
             (
                 "interface",
@@ -743,8 +891,14 @@ impl SparseMidpoint {
                     + input_s.abs()
                     + input_a.abs()
                     + losses[0].abs()
-                    + losses[1].abs(),
-                scales[0] + scales[1],
+                    + losses[1].abs()
+                    + memory.energy_change.abs()
+                    + memory.dissipation,
+                scales[0]
+                    + scales[1]
+                    + memory.energy_scale
+                    + initial_roundoff[2]
+                    + final_roundoff[2],
             ),
         ] {
             let maximum = self.limits.energy_balance_tolerance * physical + ROUND * roundoff;
@@ -767,6 +921,7 @@ impl SparseMidpoint {
             work,
             fluid_force,
             displaced_flow_m3_s: displaced_flow,
+            memory: memory.memory,
         })
     }
     #[allow(clippy::too_many_arguments)]
@@ -780,6 +935,7 @@ impl SparseMidpoint {
         source: &[f64],
         fluid_force: &[f64],
         displaced_flow: &[f64],
+        memory_reaction: &[f64],
         cancelled: &impl Fn() -> bool,
     ) -> Result<f64> {
         let ns = self.structural_dofs();
@@ -817,11 +973,13 @@ impl SparseMidpoint {
                 } else {
                     displaced_flow[row]
                 };
+                let memory = memory_reaction.get(offset + row).copied().unwrap_or(0.0);
                 let defect = (momentum
-                    + h * (drag + spring + Dd::from_f64(exchange) - Dd::from_f64(load[row])))
+                    + h * (drag + spring + Dd::from_f64(exchange) - Dd::from_f64(load[row])
+                        + Dd::from_f64(memory)))
                 .to_f64();
-                let scale =
-                    momentum_scale + self.duration_s * (ds + ks + exchange.abs() + load[row].abs());
+                let scale = momentum_scale
+                    + self.duration_s * (ds + ks + exchange.abs() + load[row].abs() + memory.abs());
                 maximum = maximum.max(relative(defect, scale)?);
                 let i = offset + row;
                 let defect = (Dd::from_f64(next.position[i])

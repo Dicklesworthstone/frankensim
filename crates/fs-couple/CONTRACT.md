@@ -14222,3 +14222,98 @@ body/open-traction/buoyancy work, separate 24 J original caloric heating,
 retained original source identity, and source/late-cancellation rollback.
 The changed Rust files pass the pinned parser/formatter. Native FEM/thermal
 compilation and integration test execution remain unverified in this session.
+
+## Sparse original structural and acoustic Maxwell histories
+
+`cavity_modal::interior::structure::sparse::PreparedSparseStructuralInterior::
+new_relaxing` and `from_tet_elastic_relaxing` extend the existing complete
+sparse owner with the original `fs_modal::relaxation_modes::
+MaxwellDampingBranch` data. Each source retains its full authored
+[u, pressure-potential] strain direction, positive stiffness k and positive
+physical time tau. The constitutive equation remains
+
+`sigma_dot = k * b^T * [v,p] - sigma/tau`.
+
+The spatial stiffness is RELAXED; adding the branch stiffness to K as well
+would double-count it. A structural-only map supplies hereditary material
+stress. A pressure-potential-only map supplies the causal acoustic wall
+admittance `k*tau/(1+s*tau)*b*b^T`. Original zero maps retain their actual
+stress, storage and free relaxation rather than disappearing. Branch order
+is source order. A mixed structural/acoustic direction refuses intact
+because it does not preserve this real symmetric signed factorization;
+the existing general exact and harmonic owners remain its implementation.
+Gyroscopic or nonsymmetric spatial forms also retain their existing scope.
+
+The same physical M/K/C/B forms, geometry adapter, source projection and
+full spatial coordinates are used. The memoryless requirement on the
+original C blocks still applies; the new stress states carry the hereditary
+response separately. No material law is inferred from a frequency sample,
+damping ratio, scalar loss fit or post-hoc energy deficit.
+
+For half-step t=h/2 and nu=tau/(tau+t), a branch adds the scaled unknown
+sigma_mid/sqrt(k*nu). Its diagonal is -1 for structural memory and +1 for
+acoustic memory; its sparse column contains the original direction times
+t*sqrt(k*nu), with the corresponding physical sign. Thus one native bounded
+LDLT factor advances all velocities, pressures and memories simultaneously.
+The branch is not expanded into a dense b*b^T update. This is significant for
+nonlocal original strain maps: the 112-spatial-coordinate test admits
+48-entry and 64-entry directions with a 3000-entry staging ceiling, while
+their dense outer products alone would require 6400 entries.
+
+`state_with_stresses` imports every actual initial stress in source order.
+The existing `state` and `zero_state` explicitly initialize all admitted
+branches at zero stress. Returned states preserve original fields, source
+clock and stress histories under one owner identity. State reuse across
+another owner, source or timestep refuses. No relaxation law, factorization
+or material query is reconstructed during a step.
+
+Storage includes sigma^2/(2k). Each step separately reports every branch's
+initial/final storage, polarized storage change, structural or acoustic
+work, independently evaluated h*sigma_mid^2/(k*tau) heat and original
+constitutive-equation residual. Structural, acoustic, interface, aggregate
+memory and total work accounts all gate publication; every individual
+branch account also gates. Momentum equations include the original
+b*sigma_mid reaction, and audits reconstruct midpoints from accepted
+candidate endpoints. No negative heat is clipped, and no physical loss is
+manufactured from a balance residual. Cancellation or refusal leaves the
+initial fields, histories and clock unchanged.
+
+`SparseStructuralRelaxationLimits` bounds branch count and the full source
+coefficient scan before sparse lowering. Retained strain entries and
+augmented staging also obey the existing matrix-entry limit; the full
+augmented factor obeys the native symbolic/fill/frontal/work and payload
+bounds. Dense caller source arrays, allocator metadata and accepted state
+vectors are additional. Congruence or nonzero material coupling that cannot
+be represented refuses. Cancellation polls through source directions,
+augmented assembly, branch RHS/recovery and physical audits, as well as
+around the original synchronous native solve.
+
+The method remains passive second-order implicit midpoint on admitted
+frozen linear forms. It is not an exact or L-stable relaxation integrator;
+short relaxation times need their own temporal refinement. Existing
+spatial h/p, source bandwidth and constitutive validity requirements remain.
+This entry does not add thermoelasticity, molecular/thermal volume memory,
+nonlinear or changing material laws, mixed cross-domain Maxwell channels,
+exterior radiation, arbitrary positive-real wall realizations or measured
+material validation.
+
+Seven new G1/G3 numerical source tests cover dark original stresses;
+independently prescribed continuous fields and work with both solid and
+wall memory; full off-diagonal original endpoint equations solved by an
+independent nonsymmetric Gaussian elimination; 112-coordinate full fields
+with nonlocal maps; original material strain-unit congruence; analytic
+sinusoidal wall admittance and retained potential gauge; and source,
+budget, cancellation, foreign-owner and exact-retry refusals. Temporal
+continuous-field errors decrease 1.58353e-5, 3.96088e-6, 9.90350e-7; the
+wall-admittance refinement decreases 1.64801e-4, 4.12133e-5, 1.03041e-5.
+
+The final focused native run passes those seven tests, all eight existing
+sparse-field tests and one comparison with the pinned pre-change owner:
+100 forced no-memory steps retain identical field, interface and physical
+work bits. The build uses full actual fs-sparse and fs-math with the final
+production sparse numerical owners. One additional public FE/Cx integration
+test compares the original Maxwell trajectories against the existing exact
+coupled owner. It is authored, formatted and API-reviewed but unexecuted
+because full Cargo dependency closure is unavailable; the three previously
+authored FE/Cx tests also remain outside the native numerical slice. This is
+not whole-crate/workspace Cargo success or a measured performance ratio.

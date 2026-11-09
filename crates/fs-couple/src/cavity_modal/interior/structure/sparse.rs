@@ -11,9 +11,12 @@
 //! linear model. Temporal phase needs refinement independently of spatial and
 //! material quadrature. The existing exact owner remains the appropriate small
 //! system route for exact held-input evolution and gyroscopic structures.
-//! Frequency-local damping, viscoelastic histories, changing material laws,
-//! thermal diffusion, exterior radiation and pressure release are not inferred.
-//! They require their respective original dynamic owners.
+//! Original Maxwell channels optionally retain structural material or acoustic
+//! wall memory through their own stress states and positive heat. Relaxed K
+//! excludes these branch stiffnesses. Frequency-local damping samples do not
+//! authorize a time law. Mixed structural/acoustic channels, gyroscopic forms,
+//! changing material laws, thermal diffusion, exterior radiation and pressure
+//! release require their respective original dynamic owners.
 //!
 //! Preparation copies only sparse physical forms and caches one native bounded
 //! LDLT factor. Steps allocate O(n) candidate/audit vectors and perform sparse
@@ -37,10 +40,12 @@ use std::collections::BTreeSet;
 mod physics;
 /// Original source columns on the existing complete sparse midpoint timeline.
 pub mod sources;
-use physics::{SparseForms, SparseMidpoint, bound, poll};
+pub use fs_modal::relaxation_modes::MaxwellDampingBranch;
+use physics::{BranchSource, SparseForms, SparseMidpoint, bound, poll};
 pub use physics::{
-    SparseStructuralTimeEnergy, SparseStructuralTimeError, SparseStructuralTimeLimits,
-    SparseStructuralTimeState, SparseStructuralTimeStep, SparseStructuralTimeWork,
+    SparseStructuralMemoryWork, SparseStructuralRelaxationLimits, SparseStructuralTimeEnergy,
+    SparseStructuralTimeError, SparseStructuralTimeLimits, SparseStructuralTimeState,
+    SparseStructuralTimeStep, SparseStructuralTimeWork,
 };
 
 /// Geometry/trace errors preserve the original owner; time refusals retain
@@ -100,11 +105,63 @@ impl<'a, 'f, 'c> PreparedSparseStructuralInterior<'a, 'f, 'c> {
         limits: SparseStructuralTimeLimits,
         cx: &Cx<'_>,
     ) -> Result<Self, SparseStructuralInteriorError> {
+        Self::new_relaxing(
+            interior,
+            structure,
+            normal_traces,
+            walls,
+            &[],
+            duration_s,
+            limits,
+            SparseStructuralRelaxationLimits::default(),
+            cx,
+        )
+    }
+
+    /// Keep original Maxwell material/wall histories in the SAME full sparse
+    /// solve. K must be RELAXED: branch stiffness is not also included in K.
+    ///
+    /// Each original strain follows complete [u,psi] coordinate order. A
+    /// structural-only map supplies hereditary solid stress. A potential-only
+    /// map gives the causal wall admittance k*tau/(1+s*tau)*b*b^T. Empty maps
+    /// retain their original unforced stress relaxation. Mixed cross-domain
+    /// maps refuse intact; the original general exact owner supports them.
+    ///
+    /// The cached sparse factor adds one scalar per branch with its original
+    /// local sparse direction; it never forms dense b*b^T updates. Original
+    /// storage, reaction work and sigma^2/(k*tau) heat remain separate. Implicit
+    /// midpoint needs temporal refinement to resolve short relaxation times;
+    /// it is passive but is neither exact nor an L-stable history integrator.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_relaxing(
+        interior: &'a HeterogeneousHelmholtzFe<'f, 'c>,
+        structure: StructuralMatrices<'_>,
+        normal_traces: &[Vec<NormalDisplacementTrace>],
+        walls: &[ResistiveBoundary],
+        branches: &[MaxwellDampingBranch],
+        duration_s: f64,
+        limits: SparseStructuralTimeLimits,
+        memory_limits: SparseStructuralRelaxationLimits,
+        cx: &Cx<'_>,
+    ) -> Result<Self, SparseStructuralInteriorError> {
         let cancelled = || cx.checkpoint().is_err();
         poll(&cancelled)?;
         let ns = structure.mass.nrows();
         let na = interior.ndof();
-        limits.admit(ns, na)?;
+        let n = limits.admit(ns, na)?;
+        bound(
+            "material branches",
+            branches.len(),
+            memory_limits.maximum_branches,
+        )?;
+        bound(
+            "material source coefficients",
+            n.checked_mul(branches.len())
+                .ok_or(SparseStructuralTimeError::Invalid(
+                    "material source extent overflow",
+                ))?,
+            memory_limits.maximum_source_entries,
+        )?;
         if normal_traces.len() != ns {
             return Err(SparseStructuralTimeError::Invalid(
                 "one trace collection per complete structural coordinate required",
@@ -236,23 +293,38 @@ impl<'a, 'f, 'c> PreparedSparseStructuralInterior<'a, 'f, 'c> {
             entries,
             limits.maximum_matrix_entries,
         )?;
-        let evolution = SparseMidpoint::new(
-            SparseForms {
-                mass: [structure.mass.clone(), interior.mass().clone()],
-                stiffness: [structure.stiffness.clone(), interior.stiffness().clone()],
-                damping: [
-                    structure
-                        .damping
-                        .cloned()
-                        .unwrap_or_else(|| Coo::new(ns, ns).assemble()),
-                    conductance,
-                ],
-                coupling,
-            },
-            duration_s,
-            limits,
-            &cancelled,
-        )?;
+        let branch_sources = branches
+            .iter()
+            .map(|b| BranchSource {
+                strain: &b.strain,
+                stiffness: b.stiffness,
+                relaxation_time_s: b.relaxation_time_s,
+            })
+            .collect::<Vec<_>>();
+        let forms = SparseForms {
+            mass: [structure.mass.clone(), interior.mass().clone()],
+            stiffness: [structure.stiffness.clone(), interior.stiffness().clone()],
+            damping: [
+                structure
+                    .damping
+                    .cloned()
+                    .unwrap_or_else(|| Coo::new(ns, ns).assemble()),
+                conductance,
+            ],
+            coupling,
+        };
+        let evolution = if branch_sources.is_empty() {
+            SparseMidpoint::new(forms, duration_s, limits, &cancelled)?
+        } else {
+            SparseMidpoint::new_relaxing(
+                forms,
+                duration_s,
+                limits,
+                &branch_sources,
+                memory_limits,
+                &cancelled,
+            )?
+        };
         Ok(Self {
             interior,
             evolution,
@@ -273,6 +345,33 @@ impl<'a, 'f, 'c> PreparedSparseStructuralInterior<'a, 'f, 'c> {
         limits: SparseStructuralTimeLimits,
         cx: &Cx<'_>,
     ) -> Result<Self, SparseStructuralInteriorError> {
+        Self::from_tet_elastic_relaxing(
+            interior,
+            solid,
+            damping,
+            walls,
+            &[],
+            duration_s,
+            limits,
+            SparseStructuralRelaxationLimits::default(),
+            cx,
+        )
+    }
+
+    /// Original conforming free-tetrahedron trace plus authored Maxwell maps
+    /// on its complete [free structural DOFs, pressure potential] space.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_tet_elastic_relaxing(
+        interior: &'a HeterogeneousHelmholtzFe<'f, 'c>,
+        solid: ConformingTetStructure<'_>,
+        damping: Option<&Csr>,
+        walls: &[ResistiveBoundary],
+        branches: &[MaxwellDampingBranch],
+        duration_s: f64,
+        limits: SparseStructuralTimeLimits,
+        memory_limits: SparseStructuralRelaxationLimits,
+        cx: &Cx<'_>,
+    ) -> Result<Self, SparseStructuralInteriorError> {
         limits.admit(solid.assembly.free_dofs.len(), interior.ndof())?;
         let maximum_terms =
             solid
@@ -288,7 +387,7 @@ impl<'a, 'f, 'c> PreparedSparseStructuralInterior<'a, 'f, 'c> {
             limits.maximum_trace_terms,
         )?;
         let traces = conforming_tet_traces(interior, &solid, cx)?;
-        Self::new(
+        Self::new_relaxing(
             interior,
             StructuralMatrices {
                 mass: &solid.assembly.mass,
@@ -297,10 +396,17 @@ impl<'a, 'f, 'c> PreparedSparseStructuralInterior<'a, 'f, 'c> {
             },
             &traces,
             walls,
+            branches,
             duration_s,
             limits,
+            memory_limits,
             cx,
         )
+    }
+    /// Every supplied original scalar history, including dark branches.
+    #[must_use]
+    pub fn branch_count(&self) -> usize {
+        self.evolution.branch_count()
     }
     #[must_use]
     pub fn duration_s(&self) -> f64 {
@@ -340,7 +446,8 @@ impl<'a, 'f, 'c> PreparedSparseStructuralInterior<'a, 'f, 'c> {
     pub fn zero_state(&self) -> SparseStructuralTimeState<'_> {
         self.evolution.zero_state()
     }
-    /// Import complete original coordinates; nothing is projected or removed.
+    /// Import complete original coordinates with explicitly zero initial stress
+    /// in every admitted Maxwell branch. Nothing is projected or removed.
     #[allow(clippy::too_many_arguments)]
     pub fn state(
         &self,
@@ -354,6 +461,22 @@ impl<'a, 'f, 'c> PreparedSparseStructuralInterior<'a, 'f, 'c> {
         self.evolution
             .state(time_s, u, v, psi, p, &|| cx.checkpoint().is_err())
     }
+    /// Import original nonzero stresses in authored order. They are independent
+    /// initial histories, not inferred from displacement or assumed relaxed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn state_with_stresses(
+        &self,
+        time_s: f64,
+        u: &[f64],
+        v: &[f64],
+        psi: &[f64],
+        p: &[f64],
+        stresses: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<SparseStructuralTimeState<'_>, SparseStructuralTimeError> {
+        self.evolution
+            .state_with_stresses(time_s, u, v, psi, p, stresses, &|| cx.checkpoint().is_err())
+    }
     pub fn energy(
         &self,
         state: &SparseStructuralTimeState<'_>,
@@ -362,8 +485,9 @@ impl<'a, 'f, 'c> PreparedSparseStructuralInterior<'a, 'f, 'c> {
         self.evolution.energy(state, &|| cx.checkpoint().is_err())
     }
     /// Midpoint structural forces and original projected inward volume flow.
-    /// Each return includes independent structural, acoustic, interface and
-    /// total work residuals, plus original momentum/kinematic residuals.
+    /// Each return includes independent structural, acoustic, interface,
+    /// material-memory and total work residuals; every original branch ODE
+    /// and branch energy balance is checked before publishing the candidate.
     pub fn step<'p>(
         &'p self,
         initial: &SparseStructuralTimeState<'p>,
