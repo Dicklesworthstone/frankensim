@@ -18,6 +18,9 @@
 //! A passive scalar resonator with one weak Maxwell arm instead solves the
 //! small relaxation-pole shift directly, retaining weak mechanical decay
 //! without subtracting nearly equal eigenvalues (see `weak_scalar_maxwell`).
+//! Weak passive scalar multi-arm materials use positive physical loss sums for
+//! the conjugate pair and source-rate brackets for every real material pole;
+//! repeated-rate and uncoupled material states keep their full multiplicity.
 //!
 //! For symmetric K and positive-semidefinite symmetric part of C, the branch
 //! storage `s^2/(2 k_b)` gives physical heat rate `s^2/(k_b tau)`; gyroscopic
@@ -34,6 +37,7 @@ use fs_la::{
 };
 use fs_math::{c64::C64, dd::Dd, det};
 
+mod scalar;
 mod shapes;
 pub use shapes::{
     MaxwellBranchDirection, MaxwellForceResidue, MaxwellMode, MaxwellModeError, MaxwellModeResidue,
@@ -169,6 +173,13 @@ pub fn maxwell_eigenvalues_with_cancel(
             if cancelled() {
                 return Err(ModalError::Cancelled);
             }
+            return Ok(poles);
+        }
+    }
+    if n == 1 && branches.len() > 1 {
+        if let Some(poles) =
+            scalar::weak_scalar_multi_maxwell(m[0], c[0], k[0], branches, &mut cancelled)?
+        {
             return Ok(poles);
         }
     }

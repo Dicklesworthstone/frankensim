@@ -180,7 +180,28 @@ products retain physical decay even when its dimensionless shift underflows;
 unrepresentable physical poles refuse. G1/G3 tests in
 `tests/relaxation_modes.rs` cover manufactured finite-loss roots, relative weak
 decay down to 1e-300, separated relaxation rates and changes of units.
-Other scalar regimes and coupled/multi-arm systems retain the dense solver.
+
+For two or more arms on a passive scalar resonator, `C/(m*omega) <= 1` and
+`sum(k_j*b_j^2/K) <= 1/16` admit a bounded fixed point of the **original**
+rational pencil. The dimensionless pair variables `d=decay/omega` and
+`P=(decay^2+frequency^2)/omega^2` remain in `[0,0.55] x [1,1.1]`; the map's
+infinity-norm derivative is below 0.4. Positive factored dimensional loss
+sums recover the pair without trace subtraction or erasing loss when an
+intermediate dimensionless ratio underflows. Each distinct active source
+rate contributes a bracketed real material pole; repeated-time stress
+combinations and zero-strain arms retain their exact dark poles. No branch
+is collapsed or discarded. Brackets use the original factored source
+coefficients and DD summation, remain short relative to each source rate,
+and retain separated rates. Colliding rounded reciprocals of distinct
+source times or an unresolved contraction/bracket select the dense fallback;
+unrepresentable physical poles refuse. Work is quadratic in arm count with
+linear storage and bounded 64-step iterations. Inline G0/G1/G3 scalar tests
+cover complete manufactured finite-loss spectra, original characteristic
+residuals, 200-decade rate separation, relative decay through 1e-300, exact
+multiplicities, coordinate scaling, underflow recovery and cancellation.
+The public-owner regression uses one QR sweep to guard this route's wiring.
+
+Other scalar regimes and coupled mechanical systems retain the dense solver.
 The default QR cap is 120 sweeps per active window;
 `_with_cancel` accepts an explicit cap and cancellation, returning no partial
 spectrum on refusal. Invalid source data and failed mass factors also refuse.

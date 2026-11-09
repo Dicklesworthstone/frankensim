@@ -458,3 +458,30 @@ fn invalid_materials_shapes_and_cancel_never_return_a_partial_spectrum() {
         .is_err()
     );
 }
+
+#[test]
+fn multi_arm_weak_decay_uses_physical_loss_even_with_one_qr_sweep() {
+    // The three-arm rational pencil has a physical loss of 2.5e-101
+    // at omega=1; the separated arms contribute only 1e-200 corrections.
+    // A full-spectrum trace cannot resolve this loss beside a 1e100 rate.
+    let arms = [
+        branch(1e-100, 1e-100, &[1.0]),
+        branch(1e-100, 1.0, &[1.0]),
+        branch(1e-100, 1e100, &[1.0]),
+    ];
+    let poles =
+        maxwell_eigenvalues_with_cancel(&[1.0], &[0.0], &[1.0], 1, &arms, 1, || false).unwrap();
+    assert_eq!(poles.len(), 5);
+    assert_eq!(poles.iter().filter(|s| s.im != 0.0).count(), 2);
+    for pole in poles.iter().filter(|s| s.im != 0.0) {
+        assert!((pole.re / -2.5e-101 - 1.0).abs() < 8e-15, "{pole:?}");
+        assert!((pole.im.abs() - 1.0).abs() < 8e-15);
+    }
+    for (&pole, expected) in poles
+        .iter()
+        .filter(|s| s.im == 0.0)
+        .zip([-1e100, -1.0, -1e-100])
+    {
+        assert!((pole.re / expected - 1.0).abs() < 8e-15, "{pole:?}");
+    }
+}
