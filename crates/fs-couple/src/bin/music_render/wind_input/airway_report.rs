@@ -28,9 +28,9 @@ pub(super) fn head(p: &FlueFilePerformance) -> Option<String> {
     let airway = p.renderer().voice().upstream_airway()?;
     let r = airway.receipt();
     Some(format!(
-        "\"source\":{},\"generations\":{},\"duct_sections\":{},\"sections\":{},\"wall\":{},\"port_impedance_pa_s_m3\":{:e},\"dc_resistance_pa_s_m3\":{:e},\"same_sample_reflection\":{:e},\"reflectance_taps\":{},\"source_taps\":{},\"clock_hz\":{}",
+        "\"source\":{},\"generations\":{},\"duct_sections\":{},\"sections\":{},\"wall\":{},\"two_way\":{},\"port_impedance_pa_s_m3\":{:e},\"dc_resistance_pa_s_m3\":{:e},\"same_sample_reflection\":{:e},\"reflectance_taps\":{},\"source_taps\":{},\"clock_hz\":{}",
         json_string(&record.source), record.generations, record.duct_sections, record.chain.sections().len(),
-        record.wall.is_some(),
+        record.wall.is_some(), record.two_way,
         r.port_impedance, r.dc_resistance, r.same_sample_reflection, r.reflectance.n_fft, r.source_taps,
         airway.sample_rate_hz()))
 }
@@ -50,10 +50,10 @@ impl AirwayReport {
     pub(super) fn json(&self) -> String {
         let index = |i: Option<u64>| i.map_or_else(|| "null".to_owned(), |i| i.to_string());
         let no_flow = self.seen.get().map_or_else(|| "null".to_owned(), |c| format!(
-            "{{\"samples\":{},\"runs\":{},\"first_sample\":{},\"last_sample\":{},\"least_open_circuit_pa\":{:e},\"arrival_samples\":{:e},\"lung_before_arrival_pa\":{:e},\"least_before_arrival_pa\":{:e},\"samples_from_arrival\":{},\"first_sample_from_arrival\":{},\"least_from_arrival_pa\":{:e},\"scope\":\"accepted samples whose open-circuit pressure at the windway was not positive: the windway passed no flow and the airway saw a closed end; kept apart before the source FIR's arrival (arrival_samples, where its band-limited pre-ringing of a sub-sample arrival lies) and from it\"}}",
+            "{{\"samples\":{},\"runs\":{},\"first_sample\":{},\"last_sample\":{},\"least_open_circuit_pa\":{:e},\"arrival_samples\":{:e},\"lung_before_arrival_pa\":{:e},\"least_before_arrival_pa\":{:e},\"samples_from_arrival\":{},\"first_sample_from_arrival\":{},\"least_from_arrival_pa\":{:e},\"least_flow_m3_s\":{:e},\"scope\":\"accepted samples whose open-circuit pressure at the windway was not positive: no jet; one way (two_way false) the windway passed no flow and the airway saw a closed end, two way it drew air back (least_flow_m3_s); kept apart before the source FIR's arrival (arrival_samples, where its band-limited pre-ringing of a sub-sample arrival lies) and from it\"}}",
             c.samples, c.runs, index(c.first_sample), index(c.last_sample), c.least_open_circuit_pa, c.arrival_samples,
             c.lung_before_arrival_pa, c.least_before_arrival_pa, c.samples_from_arrival, index(c.first_sample_from_arrival),
-            c.least_from_arrival_pa));
+            c.least_from_arrival_pa, c.least_flow_m3_s));
         format!("\"upstream_airway\":{{{},\"no_flow\":{no_flow}}},", self.head)
     }
 }

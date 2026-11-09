@@ -9,6 +9,11 @@
 //! row. The source token names where the duct's areas come from. The airway is realized on the mechanics clock, on the
 //! characteristic line's ladder at its default tolerances with a ceiling of [`UPSTREAM_AIRWAY_MAX_TAPS`] taps. Omitting
 //! the record leaves every result bit-identical.
+//!
+//! An optional last token `two-way` after the source token runs the windway two ways
+//! ([`crate::flue_loop::FlueVoice::with_two_way_windway`], MB 18587): a negative open-circuit pressure draws air back by
+//! the windway's own law, signed, with the forward coefficients, a declared stand-in. Without it the windway runs one
+//! way, bit for bit.
 
 use super::{FlueInputError, Rows, bad};
 use crate::driving_point::LineLadder;
@@ -35,7 +40,12 @@ pub struct FlueAirwayRecord {
     pub source: String,
     /// The pin every tube carries; `None` is rigid.
     pub wall: Option<WallPin>,
+    /// The `two-way` token: the windway draws air back on a negative open-circuit pressure.
+    pub two_way: bool,
 }
+
+/// The record's optional last token.
+pub const UPSTREAM_AIRWAY_TWO_WAY: &str = "two-way";
 
 /// The ladder every flue airway is realized on.
 pub(super) fn ladder() -> LineLadder {
@@ -57,6 +67,14 @@ pub(super) fn read(rows: &mut Rows<'_>) -> Result<Option<FlueAirwayRecord>, Flue
     let source = row.fields.next()
         .ok_or_else(|| bad(line, "upstream_airway needs an explicit source token"))?
         .to_string();
+    if source == UPSTREAM_AIRWAY_TWO_WAY {
+        return Err(bad(line, "upstream_airway needs an explicit source token before `two-way`"));
+    }
+    let two_way = match row.fields.next() {
+        None => false,
+        Some(UPSTREAM_AIRWAY_TWO_WAY) => true,
+        Some(_) => return Err(bad(line, "upstream_airway's only optional last token is `two-way`")),
+    };
     row.end()?;
     if !(1..=24).contains(&generations) {
         return Err(bad(line, "upstream_airway generations must be in 1..=24"));
@@ -93,5 +111,5 @@ pub(super) fn read(rows: &mut Rows<'_>) -> Result<Option<FlueAirwayRecord>, Flue
     let chain = AirwayChain::new(sections, LossModel::Bessel)
         .and_then(|duct| duct.ahead_of(&tree))
         .map_err(|_| bad(line, "upstream_airway's duct and tree do not form one airway"))?;
-    Ok(Some(FlueAirwayRecord { chain, generations, duct_sections, source, wall }))
+    Ok(Some(FlueAirwayRecord { chain, generations, duct_sections, source, wall, two_way }))
 }

@@ -25,7 +25,7 @@
 //! windway, for the gain, the gate and the band alike (the windway's own speed is not used). Omitting the row leaves
 //! every result bit-identical.
 //!
-//! Optional `upstream_airway weibel-1963 saab-2021-table-1-B GENERATIONS SECTIONS SOURCE_TOKEN` after `jet_limits` and
+//! Optional `upstream_airway weibel-1963 saab-2021-table-1-B GENERATIONS SECTIONS SOURCE_TOKEN [two-way]` after `jet_limits` and
 //! `jet_noise`, with SECTIONS `airway_section LENGTH_M AREA_M2` records from the windway toward the lungs and an
 //! optional `airway_wall SURFACE_DENSITY STIFFNESS_PER_AREA RESISTANCE`: the player's airway ahead of the windway
 //! (`flue_loop::airway`), the duct then Weibel's tree. The gesture's blowing pressure becomes the lung pressure at the
@@ -79,7 +79,7 @@ mod window;
 pub(crate) mod excitation;
 mod airway;
 use excitation::{FlueFlowInput, FlueJetInput};
-pub use airway::{FlueAirwayRecord, MAX_UPSTREAM_AIRWAY_SECTIONS, UPSTREAM_AIRWAY_MAX_TAPS};
+pub use airway::{FlueAirwayRecord, MAX_UPSTREAM_AIRWAY_SECTIONS, UPSTREAM_AIRWAY_MAX_TAPS, UPSTREAM_AIRWAY_TWO_WAY};
 pub use wall::{FlueWallRecord, MAX_FLUE_WALL_PACK_BYTES};
 pub use window::{ERNOULT_FABRE_SPANS, ErnoultFabreSpans, ErnoultFabreWindow, FlueWindowRecord};
 pub use duct::HoleInnerLength;
@@ -768,8 +768,10 @@ impl FlueFilePerformance {
         };
         // After every windway and jet row, so the rows held on the held pressure refuse it by name.
         let voice = match &upstream_airway {
-            Some(record) => voice.with_upstream_airway(&record.chain, &airway::ladder())
-                .map_err(FlueInputError::Physics)?,
+            Some(record) => {
+                let voice = voice.with_upstream_airway(&record.chain, &airway::ladder()).map_err(FlueInputError::Physics)?;
+                if record.two_way { voice.with_two_way_windway().map_err(FlueInputError::Physics)? } else { voice }
+            }
             None => voice,
         };
         let voice = match &window {

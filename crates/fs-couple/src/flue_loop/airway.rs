@@ -42,6 +42,21 @@
 //! [`FlueVoice::transit_s`] at THAT sample's speed, never at the speed the sample before left, which after a no-flow
 //! sample is zero. No delay is clamped: at or above the jet's minimum speed the delay lies inside its retained history.
 //!
+//! **A two-way windway (opt-in, [`FlueVoice::with_two_way_windway`]; MB 18587).** By default the windway runs one way
+//! (above). With the two-way windway a negative open-circuit pressure draws air BACK through the windway by the same
+//! law, signed: `P_oc - Z A u = a u + rho u |u| / 2`, whose one root is `u = sign(P_oc) 2 |P_oc| / (a' + sqrt(a'^2 + 2
+//! rho |P_oc|))` and whose foot pressure is `(a + rho |u| / 2) u`, odd in `P_oc` bit for bit and zero at zero; on a
+//! positive open-circuit pressure it is the one-way law's own arithmetic, so those samples keep their bits. The airway
+//! is committed the reverse flux, so it no longer sees a closed end. The reverse coefficients are the forward ones, a
+//! DECLARED STAND-IN: the measured windway tapers (opening to exit area about 1.7, Bouterse 2010) and its exit carries
+//! the block's chamfer, so drawn back it enters at the chamfered exit (an entrance loss nobody prints) and leaves into
+//! the mouth at the wider opening. The quadratic coefficient lies between `rho / 2` (the exit-height head, taken) and
+//! `rho / (2 x 1.7^2)` (outflow at the opening's area). A reverse sample has no jet, as a no-flow sample has none:
+//! the jet reads zero speed and zero foot pressure, so nothing convects, the breath noise reads zero and the blowing
+//! work takes nothing from the reverse flux. Limits: the air drawn back comes from the window side at ambient pressure
+//! (the airway and the pipe still exchange no waves); the airway stays filled with the source gas, mixing has no model;
+//! the reverse coefficient is the stand-in above.
+//!
 //! **Refused by name.** The rows that hold the jet on the HELD blowing pressure, which with an airway is no longer the
 //! foot's: the developing windway (Shah's law held at that pressure), the unsteady windway (its channel is driven by the
 //! gesture's pressure, not by the port) and the card centreline speed (held at attachment). Also the separated-jet slit
@@ -101,6 +116,10 @@ pub struct FlueAirwayClosures {
     pub first_sample_from_arrival: Option<u64>,
     /// Their most negative open-circuit pressure [Pa]; zero when none was below zero.
     pub least_from_arrival_pa: f64,
+    /// The most negative windway flux committed to the airway [m^3/s]: zero with the one-way windway, the largest flow
+    /// drawn back with the two-way windway ([`FlueVoice::with_two_way_windway`]), on whose samples counted here a
+    /// negative open-circuit pressure passed reverse flow rather than none.
+    pub least_flow_m3_s: f64,
 }
 
 impl FlueAirwayClosures {
@@ -192,9 +211,10 @@ pub struct FlueAirwayFrame {
     pub lung_pa: f64,
     /// The Thevenin source the windway saw this sample.
     pub port: UpstreamPort,
-    /// The solved foot pressure the jet read [Pa].
+    /// The windway's solved foot pressure [Pa]: the jet's, or negative on a reverse sample of the two-way windway,
+    /// where the jet reads zero.
     pub foot_pa: f64,
-    /// The windway's volume flux `u h W` committed to the airway [m^3/s].
+    /// The windway's volume flux `u h W` committed to the airway [m^3/s], negative when drawn back.
     pub flow_m3_s: f64,
     /// The pressure the airway returned on commit [Pa]; the foot pressure up to rounding.
     pub valve_pa: f64,
@@ -208,14 +228,29 @@ pub(super) struct FlueUpstream {
     pub(super) airway: UpstreamAirway,
     pub(super) frame: Option<FlueAirwayFrame>,
     pub(super) closures: FlueAirwayClosures,
+    /// The two-way windway ([`FlueVoice::with_two_way_windway`]); `false` runs it one way.
+    pub(super) two_way: bool,
 }
 
-/// This sample's port and its closure, before the sample is accepted.
+/// This sample's port and its closure, before the sample is accepted: the windway's signed foot pressure and bulk
+/// speed, negative only on a reverse sample of the two-way windway.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct AirwayFoot {
     pub(super) port: UpstreamPort,
     pub(super) foot_pa: f64,
     pub(super) speed_m_s: f64,
+}
+
+impl AirwayFoot {
+    /// The foot pressure the jet reads: the windway's, or zero on a reverse sample, which has no jet.
+    pub(super) fn jet_foot_pa(&self) -> f64 {
+        if self.foot_pa > 0.0 { self.foot_pa } else { 0.0 }
+    }
+
+    /// The jet's bulk speed: the windway's, or zero on a reverse sample.
+    pub(super) fn jet_speed_m_s(&self) -> f64 {
+        if self.speed_m_s > 0.0 { self.speed_m_s } else { 0.0 }
+    }
 }
 
 pub(super) fn airway_error(error: DrivingPointError) -> FlueError {
@@ -243,6 +278,26 @@ fn slit_linear(law: Option<ViscousSlit>, opening_m: f64) -> Result<f64, FlueErro
 pub fn foot_pressure(port: UpstreamPort, linear_pa_s_m: f64, exit_area_m2: f64, density: f64)
     -> Result<(f64, f64), FlueError>
 {
+    closure(port, linear_pa_s_m, exit_area_m2, density, false)
+}
+
+/// The two-way windway's closure against `port` (module doc): the signed bulk speed `u` with `P_oc - Z A u = a u + rho
+/// u |u| / 2`, returned as `(foot pressure, u)`, the foot pressure `(a + rho |u| / 2) u`. Odd in the open-circuit
+/// pressure bit for bit, `(0, 0)` at zero, and on a positive one the same bits as [`foot_pressure`].
+///
+/// # Errors
+/// As [`foot_pressure`].
+pub fn foot_pressure_two_way(port: UpstreamPort, linear_pa_s_m: f64, exit_area_m2: f64, density: f64)
+    -> Result<(f64, f64), FlueError>
+{
+    closure(port, linear_pa_s_m, exit_area_m2, density, true)
+}
+
+/// Both closures: one way (`two_way` false) a non-positive open-circuit pressure passes no flow; two way it draws
+/// the flow back by the same law on its magnitude.
+fn closure(port: UpstreamPort, linear_pa_s_m: f64, exit_area_m2: f64, density: f64, two_way: bool)
+    -> Result<(f64, f64), FlueError>
+{
     let p = port.open_circuit_pa;
     if !p.is_finite() {
         return Err(FlueError::Invalid { what: "the airway's open-circuit pressure is not finite" });
@@ -251,11 +306,14 @@ pub fn foot_pressure(port: UpstreamPort, linear_pa_s_m: f64, exit_area_m2: f64, 
     if !(a.is_finite() && a >= 0.0 && density.is_finite() && density > 0.0) {
         return Err(FlueError::Invalid { what: "the windway's closure against the airway needs finite non-negative coefficients" });
     }
-    if p <= 0.0 {
+    if p == 0.0 || (p < 0.0 && !two_way) {
         return Ok((0.0, 0.0));
     }
-    let speed = 2.0 * p / (a + (a * a + 2.0 * density * p).sqrt());
-    let foot = (linear_pa_s_m + 0.5 * density * speed) * speed;
+    // On a positive pressure `drive` is `p` itself, so the forward arithmetic is the one-way law's, bit for bit.
+    let drive = p.abs();
+    let magnitude = 2.0 * drive / (a + (a * a + 2.0 * density * drive).sqrt());
+    let speed = if p < 0.0 { -magnitude } else { magnitude };
+    let foot = (linear_pa_s_m + 0.5 * density * magnitude) * speed;
     if !(speed.is_finite() && foot.is_finite()) {
         return Err(FlueError::Invalid { what: "the windway's closure against the airway left the finite set" });
     }
@@ -296,8 +354,29 @@ impl FlueVoice {
         // The source FIR's arrival, as the realization computes its transit.
         let arrival_samples = chain.path_length_m() / self.gas.sound_speed * rate;
         let closures = FlueAirwayClosures { arrival_samples, ..FlueAirwayClosures::default() };
-        self.upstream_airway = Some(Box::new(FlueUpstream { airway, frame: None, closures }));
+        self.upstream_airway = Some(Box::new(FlueUpstream { airway, frame: None, closures, two_way: false }));
         Ok(self)
+    }
+
+    /// Run the attached airway's windway two ways (module doc, MB 18587): a negative open-circuit pressure draws air
+    /// back by the windway's own law, signed, with the forward coefficients (a declared stand-in). Opt-in; without it
+    /// the windway runs one way, bit for bit.
+    ///
+    /// # Errors
+    /// No airway attached, a voice that has accepted a sample, a poisoned voice, or a repeated call.
+    pub fn with_two_way_windway(mut self) -> Result<Self, FlueError> {
+        let cold = !self.poisoned && self.samples == 0;
+        let Some(up) = self.upstream_airway.as_deref_mut().filter(|up| cold && !up.two_way) else {
+            return Err(FlueError::Invalid { what: "a two-way windway requires one cold call after the upstream airway" });
+        };
+        up.two_way = true;
+        Ok(self)
+    }
+
+    /// Whether the attached airway's windway runs two ways; `false` without an airway.
+    #[must_use]
+    pub fn upstream_airway_two_way(&self) -> bool {
+        self.upstream_airway.as_deref().is_some_and(|up| up.two_way)
     }
 
     /// The realized airway ahead of the windway, if any.
@@ -330,7 +409,7 @@ impl FlueVoice {
         let rho = self.rho;
         let Some(up) = self.upstream_airway.as_deref_mut() else { return Ok(None) };
         let port = up.airway.port(lung_pa).map_err(airway_error)?;
-        let (foot_pa, speed_m_s) = foot_pressure(port, linear, area, rho)?;
+        let (foot_pa, speed_m_s) = closure(port, linear, area, rho, up.two_way)?;
         Ok(Some(AirwayFoot { port, foot_pa, speed_m_s }))
     }
 
@@ -344,7 +423,9 @@ impl FlueVoice {
         let valve_pa = up.airway.commit(flow_m3_s).map_err(airway_error)?;
         up.frame = Some(FlueAirwayFrame { lung_pa, port: foot.port, foot_pa: foot.foot_pa, flow_m3_s, valve_pa, jet_transit_s });
         up.closures.note(index, lung_pa, foot.port.open_circuit_pa);
-        self.jet_speed_m_s = foot.speed_m_s;
+        up.closures.least_flow_m3_s = up.closures.least_flow_m3_s.min(flow_m3_s);
+        // The jet's stored speed: zero on a reverse sample, which has no jet.
+        self.jet_speed_m_s = foot.jet_speed_m_s();
         Ok(())
     }
 }
@@ -435,10 +516,40 @@ mod tests {
         let index = |i: Option<u64>| i.map_or_else(|| "null".to_owned(), |i| i.to_string());
         format!("{{\"samples\":{},\"runs\":{},\"first_sample\":{},\"last_sample\":{},\"least_open_circuit_pa\":{:e},\
             \"arrival_samples\":{:e},\"lung_before_arrival_pa\":{:e},\"least_before_arrival_pa\":{:e},\
-            \"samples_from_arrival\":{},\"first_sample_from_arrival\":{},\"least_from_arrival_pa\":{:e}}}",
+            \"samples_from_arrival\":{},\"first_sample_from_arrival\":{},\"least_from_arrival_pa\":{:e},\"least_flow_m3_s\":{:e}}}",
             c.samples, c.runs, index(c.first_sample), index(c.last_sample), c.least_open_circuit_pa,
             c.arrival_samples, c.lung_before_arrival_pa, c.least_before_arrival_pa,
-            c.samples_from_arrival, index(c.first_sample_from_arrival), c.least_from_arrival_pa)
+            c.samples_from_arrival, index(c.first_sample_from_arrival), c.least_from_arrival_pa, c.least_flow_m3_s)
+    }
+
+    /// The windway law the voice holds, signed, evaluated by its own owner: the bulk speed at a foot pressure of either
+    /// sign (the slit law's `evaluate` takes a signed drop; the inviscid head is `sign(P) sqrt(2 |P| / rho)`).
+    fn signed_law_speed(v: &FlueVoice, foot_pa: f64) -> f64 {
+        let g = v.geometry;
+        match v.viscous_windway() {
+            None => (2.0 * foot_pa.abs() / v.rho).sqrt().copysign(foot_pa),
+            Some(law) => law.evaluate(g.flue_width_m, g.flue_height_m, v.rho, foot_pa).unwrap().flow_m3_s
+                / (g.flue_width_m * g.flue_height_m),
+        }
+    }
+
+    /// The signed foot pressure by bisection on `P_oc - Z A u(P_f) - P_f`, decreasing in `P_f`, over `[P_oc, 0]` for a
+    /// negative open-circuit pressure.
+    fn direct_reverse_foot(v: &FlueVoice, port: UpstreamPort) -> f64 {
+        let area = v.geometry.flue_width_m * v.geometry.flue_height_m;
+        let residual = |foot: f64| port.open_circuit_pa - port.impedance * area * signed_law_speed(v, foot) - foot;
+        let (mut lo, mut hi) = (port.open_circuit_pa, 0.0);
+        assert!(residual(lo) >= 0.0 && residual(hi) <= 0.0);
+        for _ in 0..200 {
+            let mid = 0.5 * (lo + hi);
+            if mid <= lo || mid >= hi { break; }
+            if residual(mid) >= 0.0 { lo = mid; } else { hi = mid; }
+        }
+        0.5 * (lo + hi)
+    }
+
+    fn two_way(v: FlueVoice) -> FlueVoice {
+        v.with_two_way_windway().unwrap()
     }
 
     /// MB 18430/18441 on `v`'s closures, held pressure `held_pa`: before the arrival the least open-circuit pressure is
@@ -775,5 +886,121 @@ mod tests {
         println!("{{\"suite\":\"fs-couple\",\"case\":\"ua-flue-008\",\"tau\":{tau:e},\"b\":{at:e},\"b_max_near_50\":{near_50:e},\"b_max_near_1000\":{near_1000:e},\"step_height\":{step:e},\"step_sample\":{peak}}}");
         assert_eq!(step, sums[peak], "the first maximum from the arrival");
         assert!(step >= 1.0, "the fixture's chain narrows toward the windway: step {step:e}");
+    }
+
+    /// The two-way windway keeps the one-way bits wherever the windway passes forward flow (MB 18587, test a). No held
+    /// step from rest on this realization keeps its open-circuit pressure positive (before the arrival the source FIR's
+    /// band-limited pre-ringing goes negative, `ua_flue_002`), so the test is in two parts. A, the law: on 4000 positive
+    /// open-circuit pressures from 1e-9 to 1e6 Pa, at several impedances and linear coefficients, the two-way closure
+    /// returns the one-way closure's bits. B, the voice: on the fixture's held step, with no windway law and with the
+    /// slit, a two-way and a one-way voice give the same output bits and frames on every sample before the first
+    /// negative open-circuit pressure, and from that sample on the two-way voice has drawn air back (a negative flux).
+    #[test]
+    fn ua_flue_009_the_two_way_windway_keeps_the_forward_bits() {
+        for (impedance, linear) in [(1.0e3, 0.0), (2.55e7, 0.0), (1.0e6, 6.0e3), (2.55e7, 6.0e3)] {
+            for k in 0..1000 {
+                let p = 1.0e-9 * 10f64.powf(f64::from(k) * 15.0 / 999.0);
+                let port = UpstreamPort { open_circuit_pa: p, impedance };
+                let one = foot_pressure(port, linear, 1.0e-5, 1.2).unwrap();
+                let two = foot_pressure_two_way(port, linear, 1.0e-5, 1.2).unwrap();
+                assert_eq!((one.0.to_bits(), one.1.to_bits()), (two.0.to_bits(), two.1.to_bits()), "P_oc {p:e}, Z {impedance:e}");
+            }
+        }
+        for slit in [false, true] {
+            let fresh = || if slit { with_airway(voice().with_viscous_windway(0.06).unwrap()) } else { with_airway(voice()) };
+            let (mut one, mut two) = (fresh(), two_way(fresh()));
+            assert!(two.upstream_airway_two_way() && !one.upstream_airway_two_way());
+            let mut first_reverse = None;
+            for n in 0..1024 {
+                let (bits_one, frame_one) = held(&mut one);
+                let (bits_two, frame_two) = held(&mut two);
+                if first_reverse.is_none() && frame_two.port.open_circuit_pa < 0.0 {
+                    first_reverse = Some(n);
+                }
+                match first_reverse {
+                    None => assert_eq!((bits_one, frame_one), (bits_two, frame_two), "slit {slit}, sample {n}: the forward bits moved"),
+                    Some(at) if at == n => assert!(frame_two.flow_m3_s < 0.0 && frame_one.flow_m3_s == 0.0,
+                        "slit {slit}, sample {n}: the first negative open-circuit pressure drew no air back"),
+                    Some(_) => {}
+                }
+            }
+            let at = first_reverse.expect("a negative open-circuit pressure on the held step");
+            println!("{{\"suite\":\"fs-couple\",\"case\":\"ua-flue-009\",\"slit\":{slit},\"same_bits_through\":{at},\"two_way\":{}}}",
+                closures_json(two.upstream_airway_closures().expect("an airway")));
+        }
+    }
+
+    /// The two-way closed form against a direct solve on its reverse samples (MB 18587, test b): the fixture's held step
+    /// and the ramp of `ua_flue_001`, with no windway law and with the slit. On every sample whose open-circuit pressure
+    /// is negative the foot pressure matches the bisection root of the signed law (the slit's own `evaluate` on a signed
+    /// drop) to 1e-11 of that pressure, the airway's returned pressure matches the foot to 1e-9, the flux is negative,
+    /// and the jet has none: zero stored speed and an infinite transit. Without reverse samples it fails.
+    #[test]
+    fn ua_flue_010_the_reverse_closed_form_is_the_direct_solve() {
+        for slit in [false, true] {
+            let mut results = Vec::new();
+            for ramp in [false, true] {
+                let mut v = two_way(if slit { with_airway(voice().with_viscous_windway(0.06).unwrap()) } else { with_airway(voice()) });
+                let lungs: Vec<f64> = if ramp {
+                    (0..480).map(|n| HOLD_PA * f64::from(n) / 480.0).chain(core::iter::repeat_n(HOLD_PA, 960)).collect()
+                } else { vec![HOLD_PA; 1440] };
+                let (mut worst, mut worst_valve, mut reverse) = (0.0_f64, 0.0_f64, 0usize);
+                for lung in lungs {
+                    let frame = step(&mut v, lung);
+                    if frame.port.open_circuit_pa >= 0.0 { continue; }
+                    reverse += 1;
+                    let scale = -frame.port.open_circuit_pa;
+                    worst = worst.max((frame.foot_pa - direct_reverse_foot(&v, frame.port)).abs() / scale);
+                    worst_valve = worst_valve.max((frame.valve_pa - frame.foot_pa).abs() / scale);
+                    assert!(frame.flow_m3_s < 0.0 && frame.foot_pa < 0.0 && frame.foot_pa >= frame.port.open_circuit_pa);
+                    assert_eq!((v.jet_speed_m_s(), frame.jet_transit_s), (0.0, f64::INFINITY), "a reverse sample with a jet");
+                }
+                println!("{{\"suite\":\"fs-couple\",\"case\":\"ua-flue-010\",\"slit\":{slit},\"ramp\":{ramp},\"reverse_samples\":{reverse},\"worst_direct\":{worst:e},\"worst_valve\":{worst_valve:e},\"closures\":{}}}",
+                    closures_json(v.upstream_airway_closures().expect("an airway")));
+                results.push((ramp, reverse, worst, worst_valve));
+            }
+            for (ramp, reverse, worst, worst_valve) in results {
+                assert!(reverse > 0, "slit {slit}, ramp {ramp}: no reverse sample to test");
+                assert!(worst < 1.0e-11, "slit {slit}, ramp {ramp}: closed form against the direct solve {worst:e}");
+                assert!(worst_valve < 1.0e-9, "slit {slit}, ramp {ramp}: the airway's pressure against the foot {worst_valve:e}");
+            }
+        }
+    }
+
+    /// The two-way law is odd and passes through zero (MB 18587, test c and its addition): on pressures from 1e-300 to
+    /// 1e6 Pa at several impedances and linear coefficients, `u(-P) = -u(P)` and `P_f(-P) = -P_f(P)` bit for bit; at
+    /// `P = 0` and `P = -0` both are exactly zero, finite, and the smallest pressures give finite speeds that shrink toward
+    /// zero, so the closed form has no kink and no NaN at zero.
+    #[test]
+    fn ua_flue_011_the_two_way_law_is_odd_and_zero_at_zero() {
+        for (impedance, linear) in [(1.0e3, 0.0), (2.55e7, 0.0), (1.0e6, 6.0e3), (2.55e7, 6.0e3)] {
+            let law = |p: f64| foot_pressure_two_way(UpstreamPort { open_circuit_pa: p, impedance }, linear, 1.0e-5, 1.2).unwrap();
+            for zero in [0.0, -0.0] {
+                let (foot, speed) = law(zero);
+                assert!(foot == 0.0 && speed == 0.0 && foot.is_finite() && speed.is_finite(), "Z {impedance:e}: at {zero}");
+            }
+            let mut previous = 0.0_f64;
+            for k in 0..=1000 {
+                let p = 1.0e-300 * 10f64.powf(f64::from(k) * 306.0 / 1000.0);
+                let ((foot, speed), (foot_back, speed_back)) = (law(p), law(-p));
+                assert_eq!((foot_back.to_bits(), speed_back.to_bits()), ((-foot).to_bits(), (-speed).to_bits()), "Z {impedance:e}: P {p:e}");
+                assert!(speed.is_finite() && speed > 0.0 && speed >= previous, "Z {impedance:e}: P {p:e} speed {speed:e}");
+                previous = speed;
+            }
+            assert!(law(1.0e-300).1 < 1.0e-290, "Z {impedance:e}: the speed does not shrink to zero");
+        }
+    }
+
+    /// The two-way windway is opt-in on an attached airway before any sample, once; a voice without it runs one way.
+    #[test]
+    fn ua_flue_012_the_two_way_windway_is_one_cold_opt_in() {
+        const WHAT: &str = "a two-way windway requires one cold call after the upstream airway";
+        assert_eq!(refusal(voice().with_two_way_windway()), WHAT);
+        assert_eq!(refusal(two_way(with_airway(voice())).with_two_way_windway()), WHAT);
+        let mut v = with_airway(voice());
+        step(&mut v, HOLD_PA);
+        assert_eq!(refusal(v.with_two_way_windway()), WHAT);
+        assert!(!voice().upstream_airway_two_way() && !with_airway(voice()).upstream_airway_two_way());
+        assert!(two_way(with_airway(voice())).upstream_airway_two_way());
     }
 }

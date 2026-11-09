@@ -4,7 +4,8 @@
 //! Auvray drive, breath noise), recorder f1 (the fully developed slit) and the flute D4 forced Bickley jet with breath
 //! noise. With the row, the two recorder windows take Story's (2008) /u/ tract, lips first, ahead of all 24 printed
 //! generations of Weibel's tree with the voice cards' tract wall, and render other bits from a port that is never the
-//! ideal one.
+//! ideal one. Without the row's `two-way` token they keep the one-way windows recorded on the one-way tree; with it the
+//! windway draws air back in the attack (MB 18587), a declared stand-in coefficient.
 use fs_couple::flue_loop::airway::{
     FlueAirwayClosures, FlueAirwayFrame, closed_end_jump_pa, sampled_step_undershoot, source_step_height,
 };
@@ -89,6 +90,13 @@ fn with_row(text: &str) -> String {
     let start = text.find(anchor).expect("an anchor row") + 1;
     let end = start + text[start..].find('\n').expect("anchor row end") + 1;
     format!("{}{record}{}", &text[..end], &text[end..])
+}
+
+/// The cut card with the airway row ending in the `two-way` token (MB 18587).
+fn with_row_two_way(text: &str) -> String {
+    let one_way = with_row(text);
+    assert_eq!(one_way.matches(" story-2008-table-I-u\n").count(), 1);
+    one_way.replacen(" story-2008-table-I-u\n", " story-2008-table-I-u two-way\n", 1)
 }
 
 /// The rendered window's digest, the voice's last airway frame and the samples the windway passed no flow.
@@ -222,18 +230,64 @@ fn the_attack_closure_check_bites() {
         attack.samples, attack.runs, late.split(':').next().unwrap_or(""));
 }
 
+/// The one-way row's window digests, recorded on the one-way tree (fa17, export 2b00d383c) before the two-way windway
+/// existed: without the `two-way` token the row keeps them (MB 18587, test d).
+const ONE_WAY: [(&str, u64); 2] = [("recorder-c2-held", 0x1ce0_c8b0_47d5_56d3), ("recorder-f1", 0xee87_e8e8_0a88_a49c)];
+
+/// Without the `two-way` token the Story /u/ row renders the one-way windows bit for bit (MB 18587, test d).
+#[test]
+fn the_row_without_the_token_keeps_its_one_way_bits() {
+    for (name, want) in ONE_WAY {
+        let (got, _, closed) = render(&with_row(&card(name)));
+        println!("{{\"suite\":\"fs-couple\",\"case\":\"flue-airway-one-way\",\"card\":\"{name}\",\"digest\":\"{got:016x}\"}}");
+        assert_eq!(closed.expect("closures").least_flow_m3_s, 0.0, "{name}: one way, no flow drawn back");
+        assert_eq!(got, want, "{name}: without the token the bits moved ({got:016x} against {want:016x})");
+    }
+}
+
+/// With the `two-way` token the Story /u/ row draws air back (MB 18587, test e). On both recorder windows the attack's
+/// negative open-circuit pressures pass reverse flow, counted as before and none after `ATTACK_CLOSURES_END`; the
+/// most negative flux is negative; the window's bits differ from the one-way window's; the last frame passes forward
+/// flow, finite. The line prints the counts, the span, the least open-circuit pressure and the least flux beside the
+/// one-way values recorded in `ONE_WAY`.
+#[test]
+fn the_story_u_row_two_way_draws_air_back() {
+    for (name, one_way) in ONE_WAY {
+        let text = with_row_two_way(&card(name));
+        let file = FlueFilePerformance::from_bytes(text.as_bytes(), 256, &gate()).unwrap_or_else(|e| panic!("{e}"));
+        assert!(file.upstream_airway().expect("the record").two_way && file.renderer().voice().upstream_airway_two_way());
+        drop(file);
+        let (got, frame, closed) = render(&text);
+        let (frame, c) = (frame.expect("a frame"), closed.expect("closures"));
+        let index = |i: Option<u64>| i.map_or_else(|| "null".to_owned(), |i| i.to_string());
+        println!("{{\"suite\":\"fs-couple\",\"case\":\"flue-airway-two-way\",\"card\":\"{name}\",\"digest\":\"{got:016x}\",\"one_way_digest\":\"{one_way:016x}\",\"reverse_or_no_flow_samples\":{},\"runs\":{},\"first_sample\":{},\"last_sample\":{},\"least_open_circuit_pa\":{:e},\"least_flow_m3_s\":{:e},\"samples_from_arrival\":{},\"least_before_arrival_pa\":{:e},\"least_from_arrival_pa\":{:e},\"lung_pa\":{:e},\"foot_pa\":{:e},\"flow_m3_s\":{:e}}}",
+            c.samples, c.runs, index(c.first_sample), index(c.last_sample), c.least_open_circuit_pa, c.least_flow_m3_s,
+            c.samples_from_arrival, c.least_before_arrival_pa, c.least_from_arrival_pa, frame.lung_pa, frame.foot_pa,
+            frame.flow_m3_s);
+        assert!(c.samples > 0 && c.least_flow_m3_s < 0.0, "{name}: no air drawn back {c:?}");
+        if let Err(e) = attack_closures_end(&c) { panic!("{name}: {e}"); }
+        assert_ne!(got, one_way, "{name}: the token did not reach the window");
+        assert!(frame.flow_m3_s > 0.0 && frame.foot_pa > 0.0 && frame.foot_pa < frame.port.open_circuit_pa);
+    }
+}
+
 /// The render binary's sidecar states the voice's own no-flow samples and the airway's receipt for the slit card with
-/// the row, the same as the library's render of the same text, and carries no airway record without the row.
+/// the row, one way and two ways, the same as the library's render of the same text, and carries no airway record
+/// without the row.
 #[test]
 fn the_render_sidecar_states_the_no_flow_samples() {
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
     let dir = std::env::temp_dir().join(format!("fs-flue-airway-{}-{stamp}", std::process::id()));
     std::fs::create_dir(&dir).unwrap();
-    for row in [true, false] {
-        let text = if row { with_row(&card("recorder-f1")) } else { card("recorder-f1") };
-        let input = dir.join(format!("recorder-f1-{row}.performance"));
+    for (row, two) in [(true, false), (true, true), (false, false)] {
+        let text = match (row, two) {
+            (true, true) => with_row_two_way(&card("recorder-f1")),
+            (true, false) => with_row(&card("recorder-f1")),
+            _ => card("recorder-f1"),
+        };
+        let input = dir.join(format!("recorder-f1-{row}-{two}.performance"));
         std::fs::write(&input, &text).unwrap();
-        let out = dir.join(format!("recorder-f1-{row}.wav"));
+        let out = dir.join(format!("recorder-f1-{row}-{two}.wav"));
         let result = std::process::Command::new(env!("CARGO_BIN_EXE_music_render"))
             .arg("wind").arg(&input).arg(&out).args(["--block", "256"]).output().unwrap();
         assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
@@ -244,14 +298,14 @@ fn the_render_sidecar_states_the_no_flow_samples() {
             continue;
         };
         let index = |i: Option<u64>| i.map_or_else(|| "null".to_owned(), |i| i.to_string());
-        let want = format!("\"no_flow\":{{\"samples\":{},\"runs\":{},\"first_sample\":{},\"last_sample\":{},\"least_open_circuit_pa\":{:e},\"arrival_samples\":{:e},\"lung_before_arrival_pa\":{:e},\"least_before_arrival_pa\":{:e},\"samples_from_arrival\":{},\"first_sample_from_arrival\":{},\"least_from_arrival_pa\":{:e},",
+        let want = format!("\"no_flow\":{{\"samples\":{},\"runs\":{},\"first_sample\":{},\"last_sample\":{},\"least_open_circuit_pa\":{:e},\"arrival_samples\":{:e},\"lung_before_arrival_pa\":{:e},\"least_before_arrival_pa\":{:e},\"samples_from_arrival\":{},\"first_sample_from_arrival\":{},\"least_from_arrival_pa\":{:e},\"least_flow_m3_s\":{:e},",
             c.samples, c.runs, index(c.first_sample), index(c.last_sample), c.least_open_circuit_pa, c.arrival_samples,
             c.lung_before_arrival_pa, c.least_before_arrival_pa, c.samples_from_arrival, index(c.first_sample_from_arrival),
-            c.least_from_arrival_pa);
-        println!("{{\"suite\":\"fs-couple\",\"case\":\"flue-airway-sidecar\",\"card\":\"recorder-f1\",{}}}}}",
+            c.least_from_arrival_pa, c.least_flow_m3_s);
+        println!("{{\"suite\":\"fs-couple\",\"case\":\"flue-airway-sidecar\",\"card\":\"recorder-f1\",\"two_way\":{two},{}}}}}",
             &want[..want.len() - 1]);
-        assert!(row && sidecar.contains(
-            "\"upstream_airway\":{\"source\":\"story-2008-table-I-u\",\"generations\":24,\"duct_sections\":44,\"sections\":68,\"wall\":true,"),
+        assert!(row && sidecar.contains(&format!(
+            "\"upstream_airway\":{{\"source\":\"story-2008-table-I-u\",\"generations\":24,\"duct_sections\":44,\"sections\":68,\"wall\":true,\"two_way\":{two},")),
             "{sidecar}");
         assert!(sidecar.contains(&want), "{want} not in {sidecar}");
     }
@@ -266,6 +320,10 @@ fn the_row_refuses_what_it_does_not_cover() {
         ("upstream_airway weibel-1963 saab-2021-table-1-B 24 44 story-2008-table-I-u", "upstream_airway weibel-1963 saab-2021-table-1-B 24 44"),
         ("upstream_airway weibel-1963 saab-2021-table-1-B 24 44 story", "upstream_airway weibel-1963 saab-2021-table-1-B 24 45 story"),
         ("airway_wall 15 ", "airway_wall -15 "),
+        // The `two-way` token (MB 18587): only as the last token, after an explicit source token.
+        ("upstream_airway weibel-1963 saab-2021-table-1-B 24 44 story-2008-table-I-u\n", "upstream_airway weibel-1963 saab-2021-table-1-B 24 44 story-2008-table-I-u twoway\n"),
+        ("upstream_airway weibel-1963 saab-2021-table-1-B 24 44 story-2008-table-I-u\n", "upstream_airway weibel-1963 saab-2021-table-1-B 24 44 two-way\n"),
+        ("upstream_airway weibel-1963 saab-2021-table-1-B 24 44 story-2008-table-I-u\n", "upstream_airway weibel-1963 saab-2021-table-1-B 24 44 story-2008-table-I-u two-way two-way\n"),
     ] {
         assert_eq!(text.matches(from).count(), 1, "{from}");
         assert!(FlueFilePerformance::from_bytes(text.replacen(from, to, 1).as_bytes(), 256, &gate()).is_err(), "{to}");

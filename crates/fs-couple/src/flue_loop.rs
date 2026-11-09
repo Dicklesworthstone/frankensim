@@ -2154,7 +2154,8 @@ impl FlueVoice {
             // Opt-in airway (see `airway`): this sample's foot pressure from the lungs' port. Without it the foot
             // pressure is the gesture's own, the ideal port, and every reader below takes that same value.
             let airway_foot = self.airway_foot(self.blow_pa)?;
-            let foot_pressure_pa = airway_foot.map_or(self.blow_pa, |foot| foot.foot_pa);
+            // The jet reads the windway's foot pressure and speed, zero on a reverse sample of the two-way windway.
+            let foot_pressure_pa = airway_foot.map_or(self.blow_pa, |foot| foot.jet_foot_pa());
             let mut windway_trial = self.unsteady_windway.as_ref()
                 .map(|windway| windway.prepare(self.blow_pa, self.card_centreline.is_some())).transpose()?;
             let u = if let Some(windway) = &windway_trial {
@@ -2169,7 +2170,7 @@ impl FlueVoice {
                 windway_numerical += frame.numerical_dissipation_j;
                 windway_defect += frame.energy_residual_j;
                 frame.bulk_speed_m_s
-            } else { airway_foot.map_or_else(|| self.jet_speed_m_s(), |foot| foot.speed_m_s) };
+            } else { airway_foot.map_or_else(|| self.jet_speed_m_s(), |foot| foot.jet_speed_m_s()) };
             // The bulk speed carries the flux; the card's own speed (the bulk speed unless the
             // card centreline speed is attached) sets its convection, band, seed and Reynolds number.
             let card_u = match &windway_trial {
@@ -2259,7 +2260,8 @@ impl FlueVoice {
                         if transit.is_finite() && transit / dt >= 1.0 {
                             (delay_samples * dt / transit).min(1.0)
                         } else { 1.0 })?,
-                    // A no-flow sample of the airway's one-way windway has no jet: its lookup is skipped (MB 18363).
+                    // A no-flow sample of the airway's one-way windway, or a reverse sample of the two-way windway, has
+                    // no jet: its lookup is skipped (MB 18363, 18587).
                     None if airway_foot.is_some() && u == 0.0 => rest,
                     None if delay_samples > (self.history.len() - 1) as f64 && onset
                         && precedes_motion(delay_samples, self.history_moving) => rest,
