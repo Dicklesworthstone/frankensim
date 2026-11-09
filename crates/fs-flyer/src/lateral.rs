@@ -13,8 +13,8 @@
 //!   module consumes the SIGNED total loaded twist [rad] (positive =
 //!   right wing down, control-signs-v1).
 //! - Roll: differential lift moment ∝ q·S·b·clα·Θ_L·k_arm against a
-//!   strip-theory damping term ∝ q·S·b²·clα·p/(4u); first-order ṗ,
-//!   φ̇ = p.
+//!   strip-theory damping term ∝ q·S·b²·clα·p/(4u); the held-coefficient
+//!   linear rate equation and φ̇ = p are integrated analytically together.
 //! - Yaw decomposition (published rows summed by the sim plane; the
 //!   view REFUSES a broken split):
 //!   - induced-drag differential yaw opposes the warp command when the
@@ -28,6 +28,7 @@
 //!   caller closes the run; nothing saturates silently).
 
 use crate::Refusal;
+use fs_math::{decay, det};
 
 mod gust;
 pub use gust::{DistributedLateralLoads, LateralMomentsNm};
@@ -78,7 +79,7 @@ pub struct YawDecompositionNm {
     pub induced_drag_yaw_nm: f64,
     /// Rudder linkage yaw moment (0 when decoupled).
     pub rudder_yaw_nm: f64,
-    /// Profile/other yaw moment (reduced damping term).
+    /// Step-mean profile/other yaw moment (reduced damping term).
     pub profile_yaw_nm: f64,
 }
 
@@ -96,9 +97,9 @@ impl YawDecompositionNm {
 pub struct LateralTick {
     /// Post-integration state.
     pub state: LateralState,
-    /// Roll moment applied this tick [N·m] (before integration).
+    /// Held differential-lift roll moment this tick [N·m], excluding damping.
     pub roll_moment_nm: f64,
-    /// Yaw-moment decomposition applied this tick [N·m].
+    /// Step-mean yaw-moment decomposition applied this tick [N·m].
     pub yaw: YawDecompositionNm,
     /// Total LOADED twist consumed this tick [rad] (signed).
     pub loaded_twist_rad: f64,
@@ -112,9 +113,9 @@ pub struct ForcedLateralTick {
     pub reduced: LateralTick,
     /// Additional body-FRD moments, applied once in the original rate update.
     pub incident: LateralMomentsNm,
-    /// Total roll moment including control, damping and incident load [N m].
+    /// Step-mean roll moment including control, damping and incident load [N m].
     pub net_roll_moment_nm: f64,
-    /// Total yaw moment including control, damping and incident load [N m].
+    /// Step-mean yaw moment including control, damping and incident load [N m].
     pub net_yaw_moment_nm: f64,
 }
 
@@ -164,11 +165,14 @@ impl LateralModel {
         }
     }
 
-    /// One 120 Hz lateral step.
+    /// One lateral step, normally called at 120 Hz.
     ///
     /// `loaded_twist_rad`: signed total loaded twist from the warp model
-    /// (positive = right wing down). `u_mps`: body airspeed. `rho`:
-    /// air density.
+    /// (positive = right wing down). `u_mps`: nonnegative body airspeed.
+    /// Density and duration are positive. Aerodynamic coefficients and external
+    /// moments are held over the interval; rate-dependent damping evolves with
+    /// the actual rate. Both angular rate and its integral are analytic for
+    /// that local model, including the zero-damping limit.
     ///
     /// # Errors
     /// `lateral-envelope-exceeded` on non-finite inputs/state or a
@@ -181,17 +185,26 @@ impl LateralModel {
         rho_kg_m3: f64,
         dt_s: f64,
     ) -> Result<LateralTick, Refusal> {
-        self.step_with_moments(state, loaded_twist_rad, u_mps, rho_kg_m3, dt_s,
-            LateralMomentsNm::default()).map(|step| step.reduced)
+        self.step_with_moments(
+            state,
+            loaded_twist_rad,
+            u_mps,
+            rho_kg_m3,
+            dt_s,
+            LateralMomentsNm::default(),
+        )
+        .map(|step| step.reduced)
     }
 
     /// Advance the same reduced lateral state with resolved incident torques.
     ///
     /// `incident` is the sum of actual distributed panel, profile-drag and
     /// propeller moments, not a second warp or damping law. Both controls and
-    /// incident moments use the same accepted starting rates and one rate/
-    /// attitude update. Zero moments preserve the original arithmetic. The
-    /// additional load remains separate from the original yaw attribution.
+    /// incident moments enter the same held-coefficient rate/attitude solution.
+    /// Returned damping and total moments are interval means, so their impulses
+    /// match the accepted rate change to roundoff. Zero moments preserve the
+    /// unforced entry's arithmetic. The additional load remains separate from
+    /// the original yaw attribution.
     /// This remains a reduced lateral response, not a banked six-DoF path.
     ///
     /// # Errors
@@ -214,18 +227,42 @@ impl LateralModel {
                 ranked_repairs: vec!["retain the finite accepted distributed loads".into()],
             });
         }
-        if ![loaded_twist_rad, u_mps, rho_kg_m3, dt_s]
-            .iter()
-            .all(|v| v.is_finite())
+        if ![
+            loaded_twist_rad,
+            u_mps,
+            rho_kg_m3,
+            dt_s,
+            self.wing_area_m2,
+            self.wing_span_m,
+            self.cl_alpha,
+            self.arm_factor,
+            state.phi_rad,
+            state.p_rad_s,
+            state.psi_rad,
+            state.r_rad_s,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
+            || u_mps < 0.0
+            || rho_kg_m3 <= 0.0
+            || dt_s <= 0.0
+            || self.wing_area_m2 <= 0.0
+            || self.wing_span_m <= 0.0
+            || self.cl_alpha < 0.0
+            || !(0.0..=0.5).contains(&self.arm_factor)
+            || state.phi_rad.abs() > PHI_CAP_RAD
+            || state.r_rad_s.abs() > R_CAP_RAD_S
+            || matches!(self.rudder, RudderLinkage::Linked { gain_nm_per_rad }
+                if !gain_nm_per_rad.is_finite())
         {
-            return Err(Refusal {
-                code: "lateral-envelope-exceeded",
-                message: "non-finite lateral input".into(),
-                ranked_repairs: vec!["check the warp/atmosphere upstream stages".into()],
-            });
+            return Err(invalid(
+                "finite in-envelope state, nonnegative speed/slope, positive density/duration/geometry and a physical arm factor required",
+            ));
         }
         let q_dyn = 0.5 * rho_kg_m3 * u_mps * u_mps;
-        let speed_floor = u_mps.max(0.1);
+        // q/u = rho*u/2 has a regular zero-speed limit. An arbitrary speed
+        // floor changes the declared linear damping law near rest.
+        let q_over_speed = 0.5 * rho_kg_m3 * u_mps;
         // Differential-lift roll moment: the signed total twist already
         // carries the antisymmetry of the strip distribution.
         let roll_moment = q_dyn
@@ -235,21 +272,24 @@ impl LateralModel {
             * loaded_twist_rad
             * self.arm_factor
             * 0.5;
-        // Strip-theory roll damping: Clp ≈ −clα/4 evaluated at p·b/(2u).
-        let roll_damping = -q_dyn
+        // Preserve the declared reduced damping: clα/4 at p·b/(4u).
+        let roll_damping_coefficient = q_over_speed
             * self.wing_area_m2
             * self.wing_span_m
             * self.cl_alpha
             * 0.25
-            * (state.p_rad_s * self.wing_span_m / (4.0 * speed_floor));
-        let mut net_roll_moment_nm = roll_moment + roll_damping;
-        if incident.roll_nm != 0.0 {
-            net_roll_moment_nm += incident.roll_nm;
-        }
-        let p_dot = net_roll_moment_nm / FLYER_ROLL_INERTIA_KG_M2;
-        let p_new = state.p_rad_s + p_dot * dt_s;
-        let phi_new = state.phi_rad + p_new * dt_s;
-        if !phi_new.is_finite() || !p_new.is_finite() || phi_new.abs() > PHI_CAP_RAD {
+            * (self.wing_span_m / 4.0);
+        let roll_forcing = roll_moment + incident.roll_nm;
+        let roll = held_rate_step(
+            state.p_rad_s,
+            roll_forcing,
+            roll_damping_coefficient,
+            FLYER_ROLL_INERTIA_KG_M2,
+            dt_s,
+        )?;
+        let p_new = roll.endpoint;
+        let phi_new = state.phi_rad + roll.mean * dt_s;
+        if !phi_new.is_finite() || phi_new.abs() > PHI_CAP_RAD {
             return Err(Refusal {
                 code: "lateral-envelope-exceeded",
                 message: format!(
@@ -262,6 +302,37 @@ impl LateralModel {
                 ],
             });
         }
+        // A forced reversal has one interior angular extremum. Checking only
+        // the endpoint would admit a coarse step that exits and re-enters the
+        // reduced model's roll envelope.
+        if state.p_rad_s != 0.0
+            && p_new != 0.0
+            && state.p_rad_s.is_sign_negative() != p_new.is_sign_negative()
+        {
+            let initial_time = -state.p_rad_s / (roll_forcing / FLYER_ROLL_INERTIA_KG_M2);
+            let z = roll_damping_coefficient / FLYER_ROLL_INERTIA_KG_M2 * initial_time;
+            let one_plus_z = 1.0 + z;
+            let turn_time = initial_time
+                * if one_plus_z == 1.0 {
+                    1.0
+                } else {
+                    det::ln(one_plus_z) / (one_plus_z - 1.0)
+                };
+            if !turn_time.is_finite() || turn_time <= 0.0 || turn_time >= dt_s {
+                return Err(invalid("unrepresentable lateral reversal time"));
+            }
+            let turn = held_rate_step(
+                state.p_rad_s,
+                roll_forcing,
+                roll_damping_coefficient,
+                FLYER_ROLL_INERTIA_KG_M2,
+                turn_time,
+            )?;
+            if (state.phi_rad + turn.mean * turn_time).abs() > PHI_CAP_RAD {
+                return Err(invalid("roll reversal crosses the admitted attitude band"));
+            }
+        }
+        let net_roll_moment_nm = roll_forcing - roll_damping_coefficient * roll.mean;
 
         // Yaw decomposition (published order fixes the float sum).
         // Induced drag rises quadratically in CL; an antisymmetric twist
@@ -275,22 +346,25 @@ impl LateralModel {
             RudderLinkage::Linked { gain_nm_per_rad } => gain_nm_per_rad * loaded_twist_rad,
         };
         // Reduced profile term: yaw damping only at this tier.
-        let profile = -q_dyn
-            * self.wing_area_m2
-            * self.wing_span_m
-            * 0.06
-            * (state.r_rad_s * self.wing_span_m / (2.0 * speed_floor));
+        let yaw_damping_coefficient =
+            q_over_speed * self.wing_area_m2 * self.wing_span_m * 0.06 * (self.wing_span_m / 2.0);
+        let yaw_step = held_rate_step(
+            state.r_rad_s,
+            (induced + rudder) + incident.yaw_nm,
+            yaw_damping_coefficient,
+            REDUCED_YAW_INERTIA_KG_M2,
+            dt_s,
+        )?;
         let yaw = YawDecompositionNm {
             induced_drag_yaw_nm: induced,
             rudder_yaw_nm: rudder,
-            profile_yaw_nm: profile,
+            profile_yaw_nm: -yaw_damping_coefficient * yaw_step.mean,
         };
         let mut net_yaw_moment_nm = yaw.net();
         if incident.yaw_nm != 0.0 {
             net_yaw_moment_nm += incident.yaw_nm;
         }
-        let r_dot = net_yaw_moment_nm / REDUCED_YAW_INERTIA_KG_M2;
-        let r_new = state.r_rad_s + r_dot * dt_s;
+        let r_new = yaw_step.endpoint;
         if r_new.abs() > R_CAP_RAD_S {
             return Err(Refusal {
                 code: "lateral-envelope-exceeded",
@@ -301,8 +375,11 @@ impl LateralModel {
                 ],
             });
         }
-        let psi_new = state.psi_rad + r_new * dt_s;
-        if !psi_new.is_finite() || !r_new.is_finite() {
+        let psi_new = state.psi_rad + yaw_step.mean * dt_s;
+        if ![psi_new, net_roll_moment_nm, net_yaw_moment_nm]
+            .into_iter()
+            .all(f64::is_finite)
+        {
             return Err(Refusal {
                 code: "lateral-envelope-exceeded",
                 message: "non-finite yaw state".into(),
@@ -327,4 +404,56 @@ impl LateralModel {
             net_yaw_moment_nm,
         })
     }
+}
+
+fn invalid(message: &str) -> Refusal {
+    Refusal {
+        code: "lateral-envelope-exceeded",
+        message: message.into(),
+        ranked_repairs: vec![
+            "use finite physical inputs inside the reduced lateral envelope".into(),
+        ],
+    }
+}
+
+struct RateStep {
+    endpoint: f64,
+    mean: f64,
+}
+
+// I w' = torque - damping*w, with all coefficients held. For x=damping*dt/I,
+// w1 = exp(-x)*w0 + (torque/I)*dt*phi1(-x), and the mean is
+// phi1(-x)*w0 + (torque/I)*dt*phi2(-x). Integrating the mean advances angle
+// without the spurious extra half-impulse of an endpoint-Euler drift.
+fn held_rate_step(
+    initial: f64,
+    torque: f64,
+    damping: f64,
+    inertia: f64,
+    dt: f64,
+) -> Result<RateStep, Refusal> {
+    let rate = damping / inertia;
+    let exposure = rate * dt;
+    if ![torque, damping, exposure].into_iter().all(f64::is_finite) || damping < 0.0 {
+        return Err(invalid("unrepresentable lateral torque or damping"));
+    }
+    let phi1 = if exposure == 0.0 {
+        1.0
+    } else {
+        decay::decayed_fraction(exposure) / exposure
+    };
+    let phi2 = if exposure < 1e-3 {
+        // Avoid subtracting nearly equal numbers as damping tends to zero.
+        0.5 + exposure
+            * (-1.0 / 6.0 + exposure * (1.0 / 24.0 + exposure * (-1.0 / 120.0 + exposure / 720.0)))
+    } else {
+        (1.0 - phi1) / exposure
+    };
+    let acceleration = torque / inertia;
+    let endpoint = decay::attenuate(initial, exposure) + acceleration * (dt * phi1);
+    let mean = initial * phi1 + acceleration * (dt * phi2);
+    if !endpoint.is_finite() || !mean.is_finite() {
+        return Err(invalid("unrepresentable lateral angular motion"));
+    }
+    Ok(RateStep { endpoint, mean })
 }

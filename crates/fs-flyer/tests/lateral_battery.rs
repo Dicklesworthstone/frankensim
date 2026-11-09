@@ -15,7 +15,8 @@
 //! Repro: cargo test -p fs-flyer --test lateral_battery
 
 use fs_flyer::lateral::{
-    FLYER_ROLL_INERTIA_KG_M2, LateralModel, LateralState, PHI_CAP_RAD, R_CAP_RAD_S, RudderLinkage,
+    FLYER_ROLL_INERTIA_KG_M2, LateralModel, LateralMomentsNm, LateralState, PHI_CAP_RAD,
+    R_CAP_RAD_S, REDUCED_YAW_INERTIA_KG_M2, RudderLinkage,
 };
 
 fn jlog(case: &str, payload: &str) {
@@ -212,4 +213,321 @@ fn roll_damping_limits_the_uncommanded_rate_growth() {
         "roll damping must decay the rate once the command stops"
     );
     let _ = FLYER_ROLL_INERTIA_KG_M2;
+}
+
+fn close(actual: f64, expected: f64, tolerance: f64) {
+    assert!(
+        (actual - expected).abs() <= tolerance,
+        "{actual:e} != {expected:e}"
+    );
+}
+
+fn damping(model: LateralModel, speed: f64, density: f64) -> [f64; 2] {
+    let scale = density * speed * model.wing_area_m2 * model.wing_span_m.powi(2);
+    [scale * model.cl_alpha / 32.0, scale * 0.06 / 4.0]
+}
+
+#[test]
+fn g1_coarse_unforced_damping_decays_without_reversal_or_energy_creation() {
+    let model = LateralModel::wright_v1(RudderLinkage::Decoupled);
+    let initial = LateralState {
+        phi_rad: 0.1,
+        p_rad_s: 0.01,
+        psi_rad: -0.2,
+        r_rad_s: -0.3,
+    };
+    let [cp, cr] = damping(model, U_TRIM, RHO);
+    for dt in [0.1, 1.0, 10.0] {
+        let mut state = initial;
+        let step = model.step(&mut state, 0.0, U_TRIM, RHO, dt).unwrap();
+        let lp = cp / FLYER_ROLL_INERTIA_KG_M2;
+        let lr = cr / REDUCED_YAW_INERTIA_KG_M2;
+        close(state.p_rad_s, initial.p_rad_s * (-lp * dt).exp(), 2e-16);
+        close(state.r_rad_s, initial.r_rad_s * (-lr * dt).exp(), 2e-15);
+        close(
+            state.phi_rad,
+            initial.phi_rad - initial.p_rad_s * (-lp * dt).exp_m1() / lp,
+            2e-15,
+        );
+        close(
+            state.psi_rad,
+            initial.psi_rad - initial.r_rad_s * (-lr * dt).exp_m1() / lr,
+            2e-15,
+        );
+        assert!(state.p_rad_s >= 0.0 && state.p_rad_s <= initial.p_rad_s);
+        assert!(state.r_rad_s <= 0.0 && state.r_rad_s >= initial.r_rad_s);
+        let energy = |s: LateralState| {
+            0.5 * (FLYER_ROLL_INERTIA_KG_M2 * s.p_rad_s.powi(2)
+                + REDUCED_YAW_INERTIA_KG_M2 * s.r_rad_s.powi(2))
+        };
+        assert!(energy(state) <= energy(initial));
+        close(
+            step.yaw.net() * dt,
+            REDUCED_YAW_INERTIA_KG_M2 * (state.r_rad_s - initial.r_rad_s),
+            2e-12,
+        );
+    }
+}
+
+#[test]
+fn g1_external_torque_has_exact_constant_acceleration_at_rest_and_weak_damping() {
+    let model = LateralModel::wright_v1(RudderLinkage::Decoupled);
+    let initial = LateralState {
+        phi_rad: 0.1,
+        p_rad_s: 0.02,
+        psi_rad: -0.2,
+        r_rad_s: -0.03,
+    };
+    let torque = LateralMomentsNm {
+        roll_nm: 23.0,
+        yaw_nm: -19.0,
+    };
+    let dt = 0.3;
+    let ap = torque.roll_nm / FLYER_ROLL_INERTIA_KG_M2;
+    let ar = torque.yaw_nm / REDUCED_YAW_INERTIA_KG_M2;
+    for speed in [0.0, 1e-14] {
+        let mut state = initial;
+        let step = model
+            .step_with_moments(&mut state, 0.0, speed, RHO, dt, torque)
+            .unwrap();
+        close(state.p_rad_s, initial.p_rad_s + dt * ap, 3e-16);
+        close(state.r_rad_s, initial.r_rad_s + dt * ar, 3e-16);
+        close(
+            state.phi_rad,
+            initial.phi_rad + dt * initial.p_rad_s + 0.5 * dt * dt * ap,
+            3e-16,
+        );
+        close(
+            state.psi_rad,
+            initial.psi_rad + dt * initial.r_rad_s + 0.5 * dt * dt * ar,
+            3e-16,
+        );
+        close(
+            step.net_roll_moment_nm * dt,
+            FLYER_ROLL_INERTIA_KG_M2 * (state.p_rad_s - initial.p_rad_s),
+            2e-13,
+        );
+        close(
+            step.net_yaw_moment_nm * dt,
+            REDUCED_YAW_INERTIA_KG_M2 * (state.r_rad_s - initial.r_rad_s),
+            2e-13,
+        );
+    }
+}
+
+#[test]
+fn g1_held_torque_relaxes_to_its_equilibrium_and_reports_mean_impulse() {
+    let model = LateralModel::wright_v1(RudderLinkage::Decoupled);
+    let initial = LateralState {
+        phi_rad: 0.1,
+        p_rad_s: -0.02,
+        psi_rad: -0.2,
+        r_rad_s: -0.03,
+    };
+    let torque = LateralMomentsNm {
+        roll_nm: 120.0,
+        yaw_nm: 35.0,
+    };
+    let dt = 0.4;
+    let [cp, cr] = damping(model, U_TRIM, RHO);
+    let mut state = initial;
+    let step = model
+        .step_with_moments(&mut state, 0.0, U_TRIM, RHO, dt, torque)
+        .unwrap();
+    for (old_rate, old_angle, new_rate, new_angle, force, drag, inertia, mean_force) in [
+        (
+            initial.p_rad_s,
+            initial.phi_rad,
+            state.p_rad_s,
+            state.phi_rad,
+            torque.roll_nm,
+            cp,
+            FLYER_ROLL_INERTIA_KG_M2,
+            step.net_roll_moment_nm,
+        ),
+        (
+            initial.r_rad_s,
+            initial.psi_rad,
+            state.r_rad_s,
+            state.psi_rad,
+            torque.yaw_nm,
+            cr,
+            REDUCED_YAW_INERTIA_KG_M2,
+            step.net_yaw_moment_nm,
+        ),
+    ] {
+        let equilibrium = force / drag;
+        let lambda = drag / inertia;
+        close(
+            new_rate,
+            equilibrium + (old_rate - equilibrium) * (-lambda * dt).exp(),
+            2e-15,
+        );
+        close(
+            new_angle,
+            old_angle + equilibrium * dt
+                - (old_rate - equilibrium) * (-lambda * dt).exp_m1() / lambda,
+            3e-15,
+        );
+        close(mean_force * dt, inertia * (new_rate - old_rate), 2e-12);
+    }
+}
+
+#[test]
+fn g3_held_lateral_motion_agrees_with_subdivided_steps() {
+    let model = LateralModel::wright_v1(RudderLinkage::Linked {
+        gain_nm_per_rad: 66.0,
+    });
+    let initial = LateralState {
+        phi_rad: 0.05,
+        p_rad_s: 0.01,
+        psi_rad: -0.1,
+        r_rad_s: -0.02,
+    };
+    let torque = LateralMomentsNm {
+        roll_nm: 20.0,
+        yaw_nm: 15.0,
+    };
+    let mut coarse = initial;
+    let large = model
+        .step_with_moments(&mut coarse, 0.005, U_TRIM, RHO, 0.4, torque)
+        .unwrap();
+    let mut fine = initial;
+    let mut impulse = [0.0; 2];
+    for _ in 0..40 {
+        let step = model
+            .step_with_moments(&mut fine, 0.005, U_TRIM, RHO, 0.01, torque)
+            .unwrap();
+        impulse[0] += step.net_roll_moment_nm * 0.01;
+        impulse[1] += step.net_yaw_moment_nm * 0.01;
+    }
+    close(coarse.phi_rad, fine.phi_rad, 3e-15);
+    close(coarse.psi_rad, fine.psi_rad, 3e-15);
+    close(coarse.p_rad_s, fine.p_rad_s, 3e-15);
+    close(coarse.r_rad_s, fine.r_rad_s, 3e-15);
+    close(large.net_roll_moment_nm * 0.4, impulse[0], 2e-12);
+    close(large.net_yaw_moment_nm * 0.4, impulse[1], 2e-12);
+}
+
+#[test]
+fn g0_invalid_physical_inputs_refuse_without_mutating_state() {
+    let model = LateralModel::wright_v1(RudderLinkage::Decoupled);
+    let initial = LateralState {
+        phi_rad: 0.1,
+        p_rad_s: 0.02,
+        psi_rad: -0.2,
+        r_rad_s: -0.03,
+    };
+    for (speed, density, dt) in [
+        (-1.0, RHO, DT),
+        (U_TRIM, 0.0, DT),
+        (U_TRIM, -1.0, DT),
+        (U_TRIM, RHO, 0.0),
+        (U_TRIM, RHO, -DT),
+        (f64::NAN, RHO, DT),
+        (U_TRIM, f64::INFINITY, DT),
+    ] {
+        let mut state = initial;
+        assert_eq!(
+            model
+                .step(&mut state, 0.0, speed, density, dt)
+                .unwrap_err()
+                .code,
+            "lateral-envelope-exceeded"
+        );
+        assert_eq!(state, initial);
+    }
+    for bad in [
+        LateralModel {
+            wing_area_m2: -1.0,
+            ..model
+        },
+        LateralModel {
+            wing_span_m: 0.0,
+            ..model
+        },
+        LateralModel {
+            cl_alpha: -1.0,
+            ..model
+        },
+        LateralModel {
+            arm_factor: 0.6,
+            ..model
+        },
+        LateralModel {
+            rudder: RudderLinkage::Linked {
+                gain_nm_per_rad: f64::NAN,
+            },
+            ..model
+        },
+    ] {
+        let mut state = initial;
+        assert!(bad.step(&mut state, 0.0, U_TRIM, RHO, DT).is_err());
+        assert_eq!(state, initial);
+    }
+    for mut state in [
+        LateralState {
+            phi_rad: PHI_CAP_RAD + 0.01,
+            ..initial
+        },
+        LateralState {
+            r_rad_s: R_CAP_RAD_S + 0.01,
+            ..initial
+        },
+        LateralState {
+            p_rad_s: f64::NAN,
+            ..initial
+        },
+    ] {
+        let bits = |s: LateralState| [s.phi_rad, s.p_rad_s, s.psi_rad, s.r_rad_s].map(f64::to_bits);
+        let before = bits(state);
+        assert!(model.step(&mut state, 0.0, U_TRIM, RHO, DT).is_err());
+        assert_eq!(bits(state), before);
+    }
+
+    // Finite state evolution can still overflow its reported damping moment.
+    // Refuse the complete row before publishing any of the trial state.
+    let extreme = LateralModel {
+        wing_area_m2: 1.0,
+        wing_span_m: 1.0,
+        cl_alpha: 1e308,
+        ..model
+    };
+    let mut state = LateralState {
+        p_rad_s: 1e307,
+        ..initial
+    };
+    let before = state;
+    assert_eq!(
+        extreme
+            .step(&mut state, 0.0, 1.0, 1.0, 1e-308)
+            .unwrap_err()
+            .code,
+        "lateral-envelope-exceeded"
+    );
+    assert_eq!(state, before);
+}
+
+#[test]
+fn g0_roll_reversal_checks_the_interior_attitude_extremum() {
+    let model = LateralModel::wright_v1(RudderLinkage::Decoupled);
+    let initial = LateralState {
+        phi_rad: 1.19,
+        p_rad_s: 0.3,
+        ..LateralState::default()
+    };
+    let mut state = initial;
+    // With p'= -2, phi(0.3) = phi(0), but phi(0.15) = 1.2125 > 1.2.
+    let torque = LateralMomentsNm {
+        roll_nm: -2.0 * FLYER_ROLL_INERTIA_KG_M2,
+        yaw_nm: 0.0,
+    };
+    assert_eq!(
+        model
+            .step_with_moments(&mut state, 0.0, 0.0, RHO, 0.3, torque)
+            .unwrap_err()
+            .code,
+        "lateral-envelope-exceeded"
+    );
+    assert_eq!(state, initial);
 }

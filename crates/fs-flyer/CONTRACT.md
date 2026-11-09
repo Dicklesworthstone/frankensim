@@ -1631,6 +1631,26 @@ sensitivity + pinned golden. JSONL receipts per case.
 - No aerodynamic force model lives here; sections are fs-airfoil, planform
   effects are fs-wing.
 
+### Reduced lateral velocity integration
+
+`LateralModel::{step, step_with_moments}` integrates each declared uncoupled
+equation `I rate' = held torque - damping * rate` and its angle integral
+analytically with deterministic exponential kernels. The zero-damping limit is
+constant angular acceleration. The original `q / speed` damping law uses its
+continuous `rho * speed / 2` form, without a speed floor. Controls, airspeed,
+density and external torque remain held within a step; this does not make a
+changing aerodynamic or coupled six-DOF trajectory exact.
+
+Returned profile damping and total moments are step means: their impulses
+match the actual angular-rate changes to roundoff, including incident loads.
+Positive density/duration/geometry, nonnegative speed/lift slope, finite model
+coefficients and in-envelope initial state are required. Refusals publish no
+state, including a roll reversal whose interior angular extremum exceeds the
+envelope despite an admissible endpoint. The focused lateral batteries check
+analytic decay, forced motion, the weak/zero damping limit, subdivision
+equivalence, impulse closure and atomic domain/envelope refusals. The reduced
+model's existing aerodynamic and inertial no-claim boundaries remain in force.
+
 
 ## Transient wake, shaft and aircraft propulsion
 

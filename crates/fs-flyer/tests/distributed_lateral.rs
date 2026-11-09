@@ -121,17 +121,33 @@ fn incident_torque_and_reduced_controls_share_one_rate_and_attitude_update() {
     let out = model
         .step_with_moments(&mut forced, 0.01, 13.86, RHO, dt, incident)
         .unwrap();
-    let dp = dt * incident.roll_nm / FLYER_ROLL_INERTIA_KG_M2;
-    let dr = dt * incident.yaw_nm / REDUCED_YAW_INERTIA_KG_M2;
+    let roll_decay = RHO * 13.86 * model.wing_area_m2 * model.wing_span_m.powi(2) * model.cl_alpha
+        / (32.0 * FLYER_ROLL_INERTIA_KG_M2);
+    let yaw_decay = RHO * 13.86 * model.wing_area_m2 * model.wing_span_m.powi(2) * 0.06
+        / (4.0 * REDUCED_YAW_INERTIA_KG_M2);
+    let roll_response = -(-roll_decay * dt).exp_m1() / roll_decay;
+    let yaw_response = -(-yaw_decay * dt).exp_m1() / yaw_decay;
+    let dp = roll_response * incident.roll_nm / FLYER_ROLL_INERTIA_KG_M2;
+    let dr = yaw_response * incident.yaw_nm / REDUCED_YAW_INERTIA_KG_M2;
+    let dphi = (dt - roll_response) / roll_decay * incident.roll_nm / FLYER_ROLL_INERTIA_KG_M2;
+    let dpsi = (dt - yaw_response) / yaw_decay * incident.yaw_nm / REDUCED_YAW_INERTIA_KG_M2;
     assert!((forced.p_rad_s - plain.p_rad_s - dp).abs() < 1e-15);
     assert!((forced.r_rad_s - plain.r_rad_s - dr).abs() < 1e-15);
-    assert!((forced.phi_rad - plain.phi_rad - dt * dp).abs() < 1e-15);
-    assert!((forced.psi_rad - plain.psi_rad - dt * dr).abs() < 1e-15);
+    assert!((forced.phi_rad - plain.phi_rad - dphi).abs() < 1e-15);
+    assert!((forced.psi_rad - plain.psi_rad - dpsi).abs() < 1e-15);
     assert_eq!(
-        out.reduced.yaw, base.yaw,
+        out.reduced.yaw.induced_drag_yaw_nm, base.yaw.induced_drag_yaw_nm,
         "do not relabel gust yaw as rudder/drag calibration"
     );
-    assert_eq!(out.net_yaw_moment_nm, base.yaw.net() + incident.yaw_nm);
+    assert_eq!(out.reduced.yaw.rudder_yaw_nm, base.yaw.rudder_yaw_nm);
+    // The incident load changes the within-step rate and hence the mean
+    // damping. All returned moments describe the actual accepted impulse.
+    assert!(
+        (out.net_yaw_moment_nm / REDUCED_YAW_INERTIA_KG_M2 * dt
+            - (forced.r_rad_s - original.r_rad_s))
+            .abs()
+            < 1e-15
+    );
     assert!(
         (out.net_roll_moment_nm / FLYER_ROLL_INERTIA_KG_M2 * dt
             - (forced.p_rad_s - original.p_rad_s))
