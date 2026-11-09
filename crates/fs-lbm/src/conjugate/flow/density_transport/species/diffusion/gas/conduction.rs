@@ -13,7 +13,7 @@ use crate::conjugate::{
     TensorCaloricRadiationReport, TensorCaloricSdirk2Step, TensorCaloricStep, TensorCaloricStorage,
     TensorConductivityLaw, TensorNonlinearConfig, ThermalSetup, TransientRecord,
     advance_caloric_tensor_conduction, advance_caloric_tensor_conduction_radiating,
-    advance_caloric_tensor_conduction_sdirk2,
+    advance_caloric_tensor_conduction_radiating_sdirk2, advance_caloric_tensor_conduction_sdirk2,
 };
 
 mod conductivity;
@@ -60,6 +60,10 @@ pub enum ThermochemicalConductionAdvance {
         step: TensorCaloricStep,
         radiation: TensorCaloricRadiationReport,
     },
+    RadiatingSdirk2 {
+        step: TensorCaloricSdirk2Step,
+        radiation: [TensorCaloricRadiationReport; 2],
+    },
 }
 
 impl ThermochemicalConductionAdvance {
@@ -68,6 +72,7 @@ impl ThermochemicalConductionAdvance {
             Self::BackwardEuler(step) => &step.endpoint,
             Self::Sdirk2(step) => &step.stages[1],
             Self::RadiatingBackwardEuler { step, .. } => &step.endpoint,
+            Self::RadiatingSdirk2 { step, .. } => &step.stages[1],
         }
     }
 
@@ -77,6 +82,7 @@ impl ThermochemicalConductionAdvance {
             Self::BackwardEuler(step) => &step.record,
             Self::Sdirk2(step) => &step.record,
             Self::RadiatingBackwardEuler { step, .. } => &step.record,
+            Self::RadiatingSdirk2 { step, .. } => &step.record,
         }
     }
 
@@ -85,6 +91,7 @@ impl ThermochemicalConductionAdvance {
         match self {
             Self::BackwardEuler(_) | Self::Sdirk2(_) => &[],
             Self::RadiatingBackwardEuler { radiation, .. } => core::slice::from_ref(radiation),
+            Self::RadiatingSdirk2 { radiation, .. } => radiation,
         }
     }
 }
@@ -180,25 +187,40 @@ fn advance_native(
     gate: &CancelGate,
 ) -> Result<ThermochemicalConductionAdvance, ChtError> {
     if let Some(radiation) = radiation {
-        if controls.scheme != ThermochemicalConductionScheme::BackwardEuler {
-            return Err(invalid(
-                "radiating gas/solid conduction requires backward Euler",
-            ));
-        }
-        let (step, radiation) = advance_caloric_tensor_conduction_radiating(
-            domain,
-            solids,
-            setup,
-            conductivity_laws,
-            storage,
-            prescribed,
-            start_time_s,
-            duration_s,
-            &controls.thermal,
-            radiation,
-            gate,
-        )?;
-        return Ok(ThermochemicalConductionAdvance::RadiatingBackwardEuler { step, radiation });
+        return match controls.scheme {
+            ThermochemicalConductionScheme::BackwardEuler => {
+                let (step, radiation) = advance_caloric_tensor_conduction_radiating(
+                    domain,
+                    solids,
+                    setup,
+                    conductivity_laws,
+                    storage,
+                    prescribed,
+                    start_time_s,
+                    duration_s,
+                    &controls.thermal,
+                    radiation,
+                    gate,
+                )?;
+                Ok(ThermochemicalConductionAdvance::RadiatingBackwardEuler { step, radiation })
+            }
+            ThermochemicalConductionScheme::Sdirk2 => {
+                let (step, radiation) = advance_caloric_tensor_conduction_radiating_sdirk2(
+                    domain,
+                    solids,
+                    [setup, setup],
+                    conductivity_laws,
+                    storage,
+                    [prescribed, prescribed],
+                    start_time_s,
+                    duration_s,
+                    &controls.thermal,
+                    radiation,
+                    gate,
+                )?;
+                Ok(ThermochemicalConductionAdvance::RadiatingSdirk2 { step, radiation })
+            }
+        };
     }
     match controls.scheme {
         ThermochemicalConductionScheme::BackwardEuler => Ok(

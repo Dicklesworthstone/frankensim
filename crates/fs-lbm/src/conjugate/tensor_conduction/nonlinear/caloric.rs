@@ -20,6 +20,7 @@ mod radiation;
 mod storage;
 pub use radiation::{
     TensorCaloricRadiationReport, advance_caloric_tensor_conduction_radiating,
+    advance_caloric_tensor_conduction_radiating_sdirk2,
 };
 pub use adaptive::{
     TensorCaloricAdaptiveConfig, TensorCaloricAdaptiveError, TensorCaloricAdaptiveReport,

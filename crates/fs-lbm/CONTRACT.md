@@ -3502,7 +3502,8 @@ late cancellation and original-input replay.
 ### Radiation on original gas/solid caloric storage
 
 With `enthalpy-coupling`, `advance_caloric_tensor_conduction_radiating`
-couples the original backward-Euler tensor/caloric owner to the existing gray
+and `advance_caloric_tensor_conduction_radiating_sdirk2` couple the original
+backward-Euler and SDIRK2 tensor/caloric owners to the existing gray
 radiation geometry and checked enclosure radiosity. Every radiative retry
 retains the same physical starting specific energies and reference masses.
 Original nonlinear conductivity, caloric slopes and source contacts remain
@@ -3523,10 +3524,22 @@ no accepted interval.
 `MaterialAdvectionStep::conduct_thermochemical_species_with_solids_radiating`
 uses the same mixed original gas/solid preparation, original species composition,
 finite masses, and gas caloric/source-conductivity budgets. Its returned
-`ThermochemicalConductionAdvance::RadiatingBackwardEuler` retains both native
-heat and radiation evidence; `radiation_reports()` borrows the evidence.
+`ThermochemicalConductionAdvance::RadiatingBackwardEuler` or
+`ThermochemicalConductionAdvance::RadiatingSdirk2` retains both native heat
+and radiation evidence; `radiation_reports()` borrows the stage reports.
 Gas-only continuation still uses the separately masked original gas enthalpy
-field. This entry initially requires the explicit backward-Euler scheme.
+field. The selected backward-Euler or SDIRK2 scheme drives the same original
+mixed constitutive objects throughout the interval.
+
+SDIRK2 converges physical radiation separately at both original stage times
+using one prepared radiation geometry and one interval work budget. The second
+stage carries actual first-stage radiative heat on free cells; prescribed-cell
+carry retains its original storage/thermostat convention. The physical heat
+record uses the original tableau weights and the same initial energy in both
+storage equations. `record.radiated_w` remains the final endpoint power. The
+integrated radiative energy is duration times `(1-gamma)*P1 + gamma*P2`, using
+the two reports. Smooth-segment second-order accuracy does not apply across an
+unresolved phase corner or boundary discontinuity.
 
 The reused radiation discretization emits at exposed solid voxel CELL
 temperatures, with transparent gas and the original gray/diffuse/opaque
@@ -3539,6 +3552,7 @@ and nonlinear residuals are numerical estimates, not certified error bounds.
 Focused G0/G1/G3/G4 regression definitions exercise independent quartic energy
 balance, exact latent plateaus, reciprocal enclosure transfer, prescribed
 latent inventory, source/budget/cancellation refusal, and mixed gas/solid heat
-with the original source-conductivity option. Changed Rust sources were parsed
+with the original source-conductivity option, both SDIRK2 physical-stage roots,
+and changing prescribed latent inventory. Changed Rust sources were parsed
 with the pinned compiler's formatter. Full native integration execution was
 unavailable: DSR and RCH are absent and the local workspace has no build space.

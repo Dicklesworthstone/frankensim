@@ -6,11 +6,15 @@
 
 use fs_exec::CancelGate;
 
+use super::super::super::sdirk::{
+    TENSOR_SDIRK2_GAMMA, interval_record_with_storage, stage_carry_with_storage, stage_clock,
+};
 use super::super::coordinate::CellCoordinate;
 use super::super::sdirk::remaining_controls;
 use super::{
-    CaloricStage, PreparedCaloric, TensorCaloricEndpoint, TensorCaloricStep, TensorCaloricStorage,
-    TensorConductivityLaw, TensorNonlinearConfig, end_time, solve_stage,
+    CaloricStage, PreparedCaloric, TensorCaloricEndpoint, TensorCaloricSdirk2Step,
+    TensorCaloricStep, TensorCaloricStorage, TensorConductivityLaw, TensorNonlinearConfig,
+    end_time, solve_stage,
 };
 use crate::conjugate::radiation::{RadiationConfig, Radiators};
 use crate::conjugate::tensor_conduction::invalid;
@@ -122,6 +126,169 @@ pub fn advance_caloric_tensor_conduction_radiating(
     ))
 }
 
+/// Advance original caloric storage with radiation at BOTH SDIRK2 stages.
+///
+/// Each native stage converges the original emission/irradiation law while
+/// retaining the same physical start energy. Stage two carries the actual
+/// first-stage heat, including physical radiation rather than its last
+/// tangent. Prescribed cells carry their original storage rate including the
+/// thermostat; radiation is not subtracted from those cells a second time.
+///
+/// Geometry, emissivities and declared radiative surroundings remain fixed
+/// throughout this interval. The two ThermalSetup and prescribed-energy
+/// samples retain the original SDIRK stage times and ownership. All native
+/// work limits and RadiationConfig::max_iterations are shared across BOTH
+/// stages and every radiative retry; no second stage resets a budget.
+///
+/// The record integrates actual stage heat with the original SDIRK weights.
+/// Its radiated_w is the FINAL endpoint power, matching TransientRecord;
+/// the two reports expose the separate physical stage powers. Their weighted
+/// average, (1-gamma)*P1 + gamma*P2, times the duration gives radiative energy.
+/// Cell-centered radiation and the original sharp-corner/time-accuracy
+/// limitations of caloric SDIRK2 remain explicit.
+///
+/// # Errors
+/// Either stage's source, convergence, work or cancellation refusal returns
+/// no interval and leaves the original energy/mass inventory untouched.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn advance_caloric_tensor_conduction_radiating_sdirk2(
+    domain: &VoxelDomain,
+    solids: &[SolidMaterial],
+    setups: [&ThermalSetup; 2],
+    conductivity_laws: &[&dyn TensorConductivityLaw],
+    storage: TensorCaloricStorage<'_>,
+    prescribed_specific_energy_j_kg: [&[(usize, f64)]; 2],
+    start_time_s: f64,
+    time_step_s: f64,
+    config: &TensorNonlinearConfig,
+    radiation: &RadiationConfig,
+    gate: &CancelGate,
+) -> Result<(TensorCaloricSdirk2Step, [TensorCaloricRadiationReport; 2]), ChtError> {
+    poll(gate)?;
+    domain.check_materials(solids.len())?;
+    let (a, stage_time_s) = stage_clock(start_time_s, time_step_s).ok_or_else(|| {
+        invalid("radiating caloric SDIRK2 requires strictly ordered finite stage times")
+    })?;
+    let mut work = RadiationWork::new(config, radiation)?;
+    let prepared = PreparedCaloric::new(domain, conductivity_laws.len(), storage, a, gate)?;
+    let radiators = Radiators::build(domain, solids, radiation, gate)?;
+    let mut first = {
+        let stage = prepared.stage(setups[0], prescribed_specific_energy_j_kg[0], gate)?;
+        solve_radiating_stage(
+            domain,
+            solids,
+            setups[0],
+            conductivity_laws,
+            &stage,
+            storage.previous_specific_energy_j_kg,
+            &vec![0.0; domain.cell_count()],
+            None,
+            &radiators,
+            radiation,
+            &mut work,
+            gate,
+        )?
+    };
+    let first_record =
+        physical_stage_record(domain, setups[0], &prepared, &first, stage_time_s[0], a)?;
+    // The original helper owns authored sources, sinks, actual tensor faces
+    // and thermostat storage. Radiation enters here once as physical power;
+    // no radiative tangent has been appended to this original setup.
+    let mut carried_power_w = stage_carry_with_storage(
+        domain,
+        setups[0],
+        &first.endpoint.solution.solution,
+        |cell| prepared.storage_rate_w(cell, first.endpoint.specific_energy_j_kg[cell]),
+        gate,
+    )?;
+    for (index, &(cell, _)) in setups[0].fixed_temperature.iter().enumerate() {
+        if index.is_multiple_of(4096) {
+            poll(gate)?;
+        }
+        first.physical_power_w[cell] = 0.0;
+    }
+    let weight = (1.0 - TENSOR_SDIRK2_GAMMA) / TENSOR_SDIRK2_GAMMA;
+    for (cell, (carry, radiation_w)) in carried_power_w
+        .iter_mut()
+        .zip(first.physical_power_w)
+        .enumerate()
+    {
+        if cell.is_multiple_of(512) {
+            poll(gate)?;
+        }
+        *carry = (-weight).mul_add(radiation_w, *carry);
+        finite("tensor.caloric.radiation.carried_power_w", *carry)?;
+    }
+    let mut seed = Vec::with_capacity(domain.cell_count());
+    for (cell, &energy) in first.endpoint.specific_energy_j_kg.iter().enumerate() {
+        if cell.is_multiple_of(512) {
+            poll(gate)?;
+        }
+        seed.push(energy - storage.previous_specific_energy_j_kg[cell]);
+    }
+    let second = {
+        let stage = prepared.stage(setups[1], prescribed_specific_energy_j_kg[1], gate)?;
+        solve_radiating_stage(
+            domain,
+            solids,
+            setups[1],
+            conductivity_laws,
+            &stage,
+            storage.previous_specific_energy_j_kg,
+            &seed,
+            Some(&carried_power_w),
+            &radiators,
+            radiation,
+            &mut work,
+            gate,
+        )?
+    };
+    let iterations = first
+        .endpoint
+        .solution
+        .solution
+        .report
+        .iterations
+        .checked_add(second.endpoint.solution.solution.report.iterations)
+        .ok_or_else(|| invalid("radiating caloric SDIRK2 Krylov count overflowed"))?;
+    let mut record = interval_record_with_storage(
+        domain,
+        setups[1],
+        &first_record,
+        &second.endpoint.solution.solution,
+        |cell| prepared.stored_j(cell, second.endpoint.specific_energy_j_kg[cell]),
+        &carried_power_w,
+        stage_time_s[1],
+        a,
+        iterations,
+        gate,
+    )?;
+    // The shared interval ledger already integrated the first PHYSICAL
+    // record and corrected fixed-cell stage carry. Only the second stage's
+    // free-cell tangent discrepancy remains, with its actual tableau weight.
+    record.boundary_outflow_j = a.mul_add(
+        second.report.net_outflow_correction_w,
+        record.boundary_outflow_j,
+    );
+    record.closure_j =
+        record.stored_energy_change_j - (record.source_j - record.boundary_outflow_j);
+    record.radiated_w = second.report.radiated_w;
+    finite(
+        "tensor.caloric.radiation.boundary_outflow_j",
+        record.boundary_outflow_j,
+    )?;
+    finite("tensor.caloric.radiation.closure_j", record.closure_j)?;
+    poll(gate)?;
+    Ok((
+        TensorCaloricSdirk2Step {
+            stage_time_s,
+            stages: [first.endpoint, second.endpoint],
+            record,
+        },
+        [first.report, second.report],
+    ))
+}
+
 /// Work belongs to the whole interval, never to an individual radiation retry.
 struct RadiationWork {
     remaining: TensorNonlinearConfig,
@@ -161,6 +328,8 @@ impl RadiationWork {
 struct RadiatingStage {
     endpoint: TensorCaloricEndpoint,
     report: TensorCaloricRadiationReport,
+    // Original powers, consumed only when forming physical SDIRK carry.
+    physical_power_w: Vec<f64>,
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -298,6 +467,7 @@ fn solve_radiating_stage(
             return Ok(RadiatingStage {
                 endpoint: next,
                 report,
+                physical_power_w: physical.cell_power_w,
             });
         }
         // Only the numerical seed changes. The stage still borrows the SAME

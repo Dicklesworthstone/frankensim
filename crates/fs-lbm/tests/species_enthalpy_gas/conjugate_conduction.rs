@@ -676,72 +676,91 @@ fn radiating_gas_solid_interval_cools_latent_inventory_and_reuses_original_gas_s
     // enclosure. Every ray sees the same temperature, so no fitted view factor
     // is used by this independent physical-energy calculation.
     let radiated_w = 0.8 * 5.670_374_419e-8 * (300.0_f64.powi(4) - 250.0_f64.powi(4));
-    let mut control = controls(ThermochemicalConductionScheme::BackwardEuler);
-    control.conductivity = ThermochemicalConductivityModel::SourceIntegral {
-        quadrature: GasConductivityQuadrature {
-            absolute_tolerance_w_m_k: 1e-12,
-            relative_tolerance: 1e-10,
-            maximum_subdivisions: 256,
-            maximum_depth: 16,
-        },
-        maximum_evaluations: 2_000_000,
-    };
-    let result = carrier
-        .conduct_thermochemical_species_with_solids_radiating(
-            &domain, &species, &h, &solids, &bindings, &setup, 0.0, duration, &source, control,
-            &radiation, &gate,
-        )
-        .unwrap();
-    let expected_gas_t = 300.0 + 50.0 / (1.0 + duration * conductance / capacity);
-    let gas_change = capacity * (expected_gas_t - 350.0);
-    let expected_solid_h = 60.0 + (-gas_change - duration * radiated_w) / 2.0;
-    assert!(expected_solid_h > 0.0 && expected_solid_h < 100.0);
-    let endpoint = result.thermal.endpoint();
-    near(
-        endpoint.solution.solution.temperature[0],
-        expected_gas_t,
-        2e-7,
-    );
-    near(endpoint.solution.solution.temperature[1], 300.0, 1e-10);
-    near(endpoint.specific_energy_j_kg[1], expected_solid_h, 2e-6);
-    near(
-        result.gas_specific_enthalpy_j_kg[0] - h[0],
-        gas_change / mass[0],
-        2e-4,
-    );
-    assert_eq!(result.gas_specific_enthalpy_j_kg[1], 0.0);
-    near(result.thermal.record().radiated_w, radiated_w, 1e-8);
-    near(
-        result.thermal.record().boundary_outflow_j,
-        duration * radiated_w,
-        2e-7,
-    );
-    assert!(result.thermal.record().closure_j.abs() < HEAT_BUDGET_J);
-    assert_eq!(result.thermal.radiation_reports().len(), 1);
-    assert!(result.report.conductivity_evaluations > 0);
-
-    let exhausted = ThermochemicalConductionControls {
-        maximum_caloric_queries: 1,
-        ..control
-    };
-    assert!(
-        carrier
+    for scheme in [
+        ThermochemicalConductionScheme::BackwardEuler,
+        ThermochemicalConductionScheme::Sdirk2,
+    ] {
+        let mut control = controls(scheme);
+        control.conductivity = ThermochemicalConductivityModel::SourceIntegral {
+            quadrature: GasConductivityQuadrature {
+                absolute_tolerance_w_m_k: 1e-12,
+                relative_tolerance: 1e-10,
+                maximum_subdivisions: 256,
+                maximum_depth: 16,
+            },
+            maximum_evaluations: 2_000_000,
+        };
+        let result = carrier
             .conduct_thermochemical_species_with_solids_radiating(
-                &domain, &species, &h, &solids, &bindings, &setup, 0.0, duration, &source,
-                exhausted, &radiation, &gate,
+                &domain, &species, &h, &solids, &bindings, &setup, 0.0, duration, &source, control,
+                &radiation, &gate,
             )
-            .is_err()
-    );
-    let cancelled = CancelGate::new_clock_free();
-    cancelled.request();
-    assert!(matches!(
-        carrier.conduct_thermochemical_species_with_solids_radiating(
-            &domain, &species, &h, &solids, &bindings, &setup, 0.0, duration, &source, control,
-            &radiation, &cancelled,
-        ),
-        Err(ChtError::Cancelled)
-    ));
-    assert_eq!(carrier, before);
-    assert_eq!(bindings[0].specific_energy_j_kg, 60.0);
-    assert_eq!(species, [[0.02], [0.0]]);
+            .unwrap();
+        let z = duration * conductance / capacity;
+        let decay = match scheme {
+            ThermochemicalConductionScheme::BackwardEuler => 1.0 / (1.0 + z),
+            ThermochemicalConductionScheme::Sdirk2 => {
+                let gamma = TENSOR_SDIRK2_GAMMA;
+                (1.0 + (2.0 * gamma - 1.0) * z) / (1.0 + gamma * z).powi(2)
+            }
+        };
+        let expected_gas_t = 300.0 + 50.0 * decay;
+        let gas_change = capacity * (expected_gas_t - 350.0);
+        let expected_solid_h = 60.0 + (-gas_change - duration * radiated_w) / 2.0;
+        assert!(expected_solid_h > 0.0 && expected_solid_h < 100.0);
+        let endpoint = result.thermal.endpoint();
+        near(
+            endpoint.solution.solution.temperature[0],
+            expected_gas_t,
+            2e-7,
+        );
+        near(endpoint.solution.solution.temperature[1], 300.0, 1e-10);
+        near(endpoint.specific_energy_j_kg[1], expected_solid_h, 2e-6);
+        near(
+            result.gas_specific_enthalpy_j_kg[0] - h[0],
+            gas_change / mass[0],
+            2e-4,
+        );
+        assert_eq!(result.gas_specific_enthalpy_j_kg[1], 0.0);
+        near(result.thermal.record().radiated_w, radiated_w, 1e-8);
+        near(
+            result.thermal.record().boundary_outflow_j,
+            duration * radiated_w,
+            2e-7,
+        );
+        assert!(result.thermal.record().closure_j.abs() < HEAT_BUDGET_J);
+        assert_eq!(
+            result.thermal.radiation_reports().len(),
+            match scheme {
+                ThermochemicalConductionScheme::BackwardEuler => 1,
+                ThermochemicalConductionScheme::Sdirk2 => 2,
+            }
+        );
+        assert!(result.report.conductivity_evaluations > 0);
+
+        let exhausted = ThermochemicalConductionControls {
+            maximum_caloric_queries: 1,
+            ..control
+        };
+        assert!(
+            carrier
+                .conduct_thermochemical_species_with_solids_radiating(
+                    &domain, &species, &h, &solids, &bindings, &setup, 0.0, duration, &source,
+                    exhausted, &radiation, &gate,
+                )
+                .is_err()
+        );
+        let cancelled = CancelGate::new_clock_free();
+        cancelled.request();
+        assert!(matches!(
+            carrier.conduct_thermochemical_species_with_solids_radiating(
+                &domain, &species, &h, &solids, &bindings, &setup, 0.0, duration, &source, control,
+                &radiation, &cancelled,
+            ),
+            Err(ChtError::Cancelled)
+        ));
+        assert_eq!(carrier, before);
+        assert_eq!(bindings[0].specific_energy_j_kg, 60.0);
+        assert_eq!(species, [[0.02], [0.0]]);
+    }
 }

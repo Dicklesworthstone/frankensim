@@ -5,8 +5,10 @@ use fs_blake3::ContentHash;
 use fs_exec::CancelGate;
 use fs_lbm::conjugate::{
     CellSink, ChtError, ConductivityTensor, EnergyConfig, RadiationConfig, STEFAN_BOLTZMANN,
-    SolidMaterial, TensorCaloricLaw, TensorCaloricStorage, TensorNonlinearConfig, ThermalFace,
-    ThermalSetup, Voxel, VoxelDomain, advance_caloric_tensor_conduction_radiating,
+    SolidMaterial, TENSOR_SDIRK2_GAMMA, TensorCaloricLaw, TensorCaloricStorage,
+    TensorNonlinearConfig, ThermalFace, ThermalSetup, Voxel, VoxelDomain,
+    advance_caloric_tensor_conduction_radiating,
+    advance_caloric_tensor_conduction_radiating_sdirk2,
 };
 use fs_material::phase::{
     EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, HeatCapacityKnot, SolidLiquidPhase,
@@ -355,6 +357,170 @@ fn fixed_temperature_keeps_explicit_phase_energy_and_thermostat_heat() {
         close(report.net_outflow_correction_w, 0.0);
     }
     assert_eq!(previous, [20.0, 0.0]);
+}
+
+#[test]
+fn sdirk_uses_physical_first_stage_heat_and_one_original_energy_reference() {
+    let (domain, solids, setup, radiation) = exposed_pair(300.0);
+    let curve = constant_cp(0.0);
+    let laws: [&dyn TensorCaloricLaw; 2] = [&curve, &curve];
+    let previous = [200.0, 0.0];
+    let k = conductivity();
+    let dt = 0.25;
+    let a = TENSOR_SDIRK2_GAMMA * dt;
+    let b = (1.0 - TENSOR_SDIRK2_GAMMA) * dt;
+    let outflow = |t: f64| (t - 300.0) + radiant_power(t, 300.0);
+    let first = root(300.0, 400.0, |t| MASS * CP * (t - 400.0) + a * outflow(t));
+    let final_t = root(300.0, first, |t| {
+        MASS * CP * (t - 400.0) + b * outflow(first) + a * outflow(t)
+    });
+    let (step, reports) = advance_caloric_tensor_conduction_radiating_sdirk2(
+        &domain,
+        &solids,
+        [&setup, &setup],
+        &[&k, &k],
+        TensorCaloricStorage {
+            laws: &laws,
+            reference_mass_kg: &[MASS; 2],
+            previous_specific_energy_j_kg: &previous,
+        },
+        [&[(1, 0.0)], &[(1, 0.0)]],
+        3.0,
+        dt,
+        &controls(),
+        &radiation,
+        &CancelGate::new(),
+    )
+    .unwrap();
+    for (stage, expected) in step.stages.iter().zip([first, final_t]) {
+        close(stage.solution.solution.temperature[0], expected);
+        close(stage.specific_energy_j_kg[0], CP * (expected - 300.0));
+        assert_eq!(stage.specific_energy_j_kg[1], 0.0);
+    }
+    close(step.stage_time_s[0], 3.0 + a);
+    close(step.stage_time_s[1], 3.0 + dt);
+    close(
+        step.record.stored_energy_change_j,
+        MASS * CP * (final_t - 400.0),
+    );
+    close(
+        step.record.boundary_outflow_j,
+        b * outflow(first) + a * outflow(final_t),
+    );
+    close(step.record.source_j, 0.0);
+    close(step.record.radiated_w, radiant_power(final_t, 300.0));
+    close(step.record.closure_j, 0.0);
+    assert!(
+        reports
+            .iter()
+            .map(|report| report.iterations)
+            .sum::<usize>()
+            <= radiation.max_iterations
+    );
+    for report in &reports {
+        assert!(report.relative_power_defect <= radiation.tolerance);
+    }
+    assert_eq!(previous, [200.0, 0.0]);
+}
+
+#[test]
+fn changing_prescribed_masks_carry_latent_storage_and_physical_radiation_once() {
+    let (domain, solids, setup, radiation) = exposed_pair(250.0);
+    let curve = melting();
+    let laws: [&dyn TensorCaloricLaw; 2] = [&curve, &curve];
+    let previous = [20.0; 2];
+    let k = conductivity();
+    let dt = 0.25;
+    let a = TENSOR_SDIRK2_GAMMA * dt;
+    let b = (1.0 - TENSOR_SDIRK2_GAMMA) * dt;
+    let power = radiant_power(300.0, 250.0);
+    let sources = [17.0, 11.0];
+    let radiative = [power, 0.0];
+    // Every state stays strictly inside the SAME 300 K latent plateau.
+    // Heat therefore has a constant independent physical value in both stages.
+    let free_rate = [sources[0] - power, sources[1]];
+
+    // Exercise both directions: an emitting fixed cell becomes free, and
+    // an emitting free cell becomes fixed. A fixed emitter's thermostat
+    // already owns radiation; its carried storage must not lose it again.
+    for first_fixed in [0, 1] {
+        let second_fixed = 1 - first_fixed;
+        let mut first = setup.clone();
+        first.fixed_temperature = vec![(first_fixed, 300.0)];
+        first.power_w = sources.to_vec();
+        let mut second = first.clone();
+        second.fixed_temperature = vec![(second_fixed, 300.0)];
+        let saved = [first.clone(), second.clone()];
+        let prescribed_first = [(first_fixed, 40.0)];
+        let prescribed_second = [(second_fixed, 60.0)];
+        let mut expected_first = [0.0; 2];
+        expected_first[first_fixed] = 40.0;
+        expected_first[second_fixed] = previous[second_fixed] + a * free_rate[second_fixed] / MASS;
+        let mut expected_final = [0.0; 2];
+        expected_final[second_fixed] = 60.0;
+        expected_final[first_fixed] = previous[first_fixed]
+            + (b / a) * (40.0 - previous[first_fixed])
+            + a * free_rate[first_fixed] / MASS;
+        assert!(
+            expected_first
+                .iter()
+                .chain(&expected_final)
+                .all(|h| (0.0..100.0).contains(h))
+        );
+        let (step, reports) = advance_caloric_tensor_conduction_radiating_sdirk2(
+            &domain,
+            &solids,
+            [&first, &second],
+            &[&k, &k],
+            TensorCaloricStorage {
+                laws: &laws,
+                reference_mass_kg: &[MASS; 2],
+                previous_specific_energy_j_kg: &previous,
+            },
+            [&prescribed_first, &prescribed_second],
+            0.0,
+            dt,
+            &controls(),
+            &radiation,
+            &CancelGate::new(),
+        )
+        .unwrap();
+        for (stage, expected) in step.stages.iter().zip([expected_first, expected_final]) {
+            assert_eq!(stage.solution.solution.temperature, vec![300.0; 2]);
+            for (cell, expected_h) in expected.into_iter().enumerate() {
+                close(stage.specific_energy_j_kg[cell], expected_h);
+                close(
+                    curve
+                        .values_at_specific_enthalpy(stage.specific_energy_j_kg[cell])
+                        .unwrap()
+                        .liquid_mass_fraction,
+                    expected_h / 100.0,
+                );
+            }
+        }
+
+        // Independent thermostat balances: stage one supplies its prescribed
+        // storage plus emitted heat. Stage two supplies its prescribed
+        // storage minus the already carried physical first-stage rate.
+        let thermostat_first = MASS * (40.0 - previous[first_fixed]) / a + radiative[first_fixed];
+        let thermostat_second =
+            (MASS * (60.0 - previous[second_fixed]) - b * free_rate[second_fixed]) / a
+                + radiative[second_fixed];
+        let expected_outflow = b * (power - thermostat_first) + a * (power - thermostat_second);
+        let expected_source = b * sources[second_fixed] + a * sources[first_fixed];
+        let expected_stored =
+            MASS * ((expected_final[0] - previous[0]) + (expected_final[1] - previous[1]));
+        close(step.record.source_j, expected_source);
+        close(step.record.boundary_outflow_j, expected_outflow);
+        close(step.record.stored_energy_change_j, expected_stored);
+        close(step.record.closure_j, 0.0);
+        close(
+            b * reports[0].radiated_w + a * reports[1].radiated_w,
+            dt * power,
+        );
+        assert_eq!(previous, [20.0; 2]);
+        assert_eq!([first, second], saved);
+    }
 }
 
 #[test]

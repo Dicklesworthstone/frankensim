@@ -32,6 +32,7 @@ pub use caloric::{
     TensorCaloricStorage, advance_caloric_tensor_conduction,
     advance_caloric_tensor_conduction_sdirk2,
     TensorCaloricRadiationReport, advance_caloric_tensor_conduction_radiating,
+    advance_caloric_tensor_conduction_radiating_sdirk2,
 };
 use coordinate::{CellCoordinate, KelvinCoordinate};
 use super::contact::{ContactHeat, PreparedSources, joint_heat};
