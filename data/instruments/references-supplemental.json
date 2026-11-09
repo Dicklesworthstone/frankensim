@@ -146,6 +146,13 @@
       "url": "https://depositonce.tu-berlin.de/items/f81ba73c-4d9b-48de-9fbc-31cb03d5b9bc/full",
       "credit": "Henrik von Coler, Jonas Margraf and Paul Schuladen; violinist Michiko Feuerlein; recording engineer Philipp Pawlowski; TU Berlin Electronic Music Studio",
       "notes": "Keep the distributed recordings and labels unchanged. Source record and package insert: DOI 10.14279/depositonce-6747. No recording bytes are redistributed in Git."
+    },
+    {
+      "id": "commons-pedal-tone-cc-by-sa-4",
+      "name": "CC BY-SA 4.0",
+      "url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "credit": "Ovinus Real (Commons user Ovinus), own work, Wikimedia Commons, 2020-05-08",
+      "notes": "Licence read from the Commons file page (https://commons.wikimedia.org/wiki/File:Pedal_tone_demonstration2.ogg) on 2026-11-09. Attribution and share-alike apply to derived clips and spectra; no recording bytes are redistributed in Git."
     }
   ],
   "chains": [
@@ -207,6 +214,16 @@
       "format": "distributed selected files: 16-bit/96 kHz mono PCM WAV",
       "room": "anechoic chamber, SIM Berlin",
       "notes": "Package insert states 24-bit/96 kHz capture. All 20 selected distributed WAVs independently decode as pcm_s16le at 96 kHz. Two microphones observe the same performances. Exact distance and specimen geometry are not supplied by the insert; single-note table is referenced to A4 = 443 Hz. Original segmentation files are preserved."
+    },
+    {
+      "id": "commons-pedal-tone-2020",
+      "source_url": "https://upload.wikimedia.org/wikipedia/commons/5/59/Pedal_tone_demonstration2.ogg",
+      "mic": null,
+      "distance_m": null,
+      "format": "Ogg Vorbis, 44.1 kHz mono, about 108 kbit/s (ffprobe)",
+      "room": "not stated",
+      "notes": "No microphone, distance, room or recording chain is stated on the file page. Original audio retained without normalization or retuning.",
+      "source_sha256": "cd488df30dd8e8b3d255e5d601f39097c9222eb184a35666fc627b25e3916cfd"
     }
   ],
   "files": [
@@ -1660,6 +1677,31 @@
         "bits_per_sample": 24,
         "decode_check": "ffmpeg full decode succeeded"
       }
+    },
+    {
+      "id": "commons-pedal-tone-demonstration2",
+      "instrument": "Tenor trombone",
+      "kind": "pedal-tone-demonstration",
+      "path": "CommonsPedalTone/Pedal_tone_demonstration2.ogg",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/5/59/Pedal_tone_demonstration2.ogg",
+      "sha256": "cd488df30dd8e8b3d255e5d601f39097c9222eb184a35666fc627b25e3916cfd",
+      "bytes": 83578,
+      "licence": "commons-pedal-tone-cc-by-sa-4",
+      "source_page": "https://commons.wikimedia.org/wiki/File:Pedal_tone_demonstration2.ogg",
+      "chain": "commons-pedal-tone-2020",
+      "articulation": "three successive notes in first position, Bb3 then Bb2 then Bb1 (the pedal tone)",
+      "range": "Bb3, Bb2, Bb1 (pedal)",
+      "dynamic": null,
+      "notes": "Amateur demonstration clip of one tenor trombonist (Commons user Ovinus; the file page gives the instrument as tenor trombone and says all three notes are in first position and that this is a better-quality version of an earlier upload). The Bb1 note is the third, about 1.7 s by the library's silence segmenter. Specimen, mouthpiece, player, dynamic, microphone and room are not stated. A pedal tone has a weak fundamental: the clip's harmonic series spaces at about 58.1 Hz with no strong peak at 58 Hz. Share-alike: cut clips and spectra derived from it carry the same licence.",
+      "gradable": false,
+      "audio": {
+        "sample_rate_hz": 44100,
+        "channels": 1,
+        "duration_s": 6.211338,
+        "codec_name": "vorbis",
+        "decode_check": "ffmpeg full decode to 48 kHz mono PCM succeeded"
+      },
+      "source_checksum": "md5:128f7cb6c837909dfa303b2305187daf"
     }
   ],
   "acquisition_check": {
