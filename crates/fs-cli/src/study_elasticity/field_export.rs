@@ -10,7 +10,7 @@ use super::{
 
 const MAX_SCALARS: usize = 1_048_576;
 const MAX_VTU_BYTES: usize = 64 * 1024 * 1024;
-pub(super) const SCOPE: &str = "Estimated fields on the retained selected design's active octree background in metres. Cells show their full background boxes; cut_volume_m3 is the retained integrated material-domain measure, not a clipped surface. Density thresholds and displaced views are visualization choices, not manufactured geometry or continuum certificates. Load-space displacement fields use the retained eroded material. Affine stress arrays combine independently adverse load directions at retained quadrature points; worst_displacement is the compliance witness. Stress sample counts identify cells with retained stress evidence.";
+pub(super) const SCOPE: &str = "Estimated fields on the retained selected design's active octree background in metres. Cells show their full background boxes; cut_volume_m3 is the retained integrated material-domain measure, not a clipped surface. Density thresholds and displaced views are visualization choices, not manufactured geometry or continuum certificates. Load-space displacement fields use the retained eroded material. Affine stress arrays combine independently adverse load directions at retained quadrature points; worst_displacement is the compliance witness. Stress sample counts identify cells with retained stress evidence. Response displacement arrays use each original signed limit's retained adverse coefficients with the common offset and uncertain basis fields.";
 
 pub(super) enum Projection {
     Available(String),
@@ -155,6 +155,135 @@ fn affine_strength(
         unit: Some("1".into()),
         values: DataValues::Int64(counts),
     });
+    Ok(())
+}
+
+fn affine_responses(
+    design: &J,
+    fields: &J,
+    grid: &mut UnstructuredGrid,
+    remaining: &mut usize,
+) -> Result<()> {
+    let declared = match design.get("response_constrained") {
+        None | Some(J::Bool(false)) => false,
+        Some(J::Bool(true)) => true,
+        _ => return Err(bad("invalid retained response constraint flag")),
+    };
+    let responses = match (declared, fields.get("responses")) {
+        (false, None) => return Ok(()),
+        (true, Some(value)) if value.as_object().is_some() => value,
+        _ => {
+            return Err(bad(
+                "retained affine response fields disagree with their declaration",
+            ));
+        }
+    };
+    if responses.str_field("schema") != Some("sdf3-affine-response-fields.v1") {
+        return Err(bad("unrecognized retained affine response fields"));
+    }
+    let witnesses = array(responses, "witnesses")?;
+    if witnesses.is_empty() || witnesses.len() > 64 {
+        return Err(bad("retained response witness count must be in 1..=64"));
+    }
+    let offset = array(fields, "offset_displacement_m")?;
+    let basis = array(fields, "basis_displacements_m")?;
+    let scalars = grid
+        .points
+        .len()
+        .checked_mul(3)
+        .ok_or_else(|| bad("response displacement component count overflows"))?;
+    if offset.len() != scalars || basis.is_empty() || basis.len() > 64 {
+        return Err(bad("invalid retained affine response displacement family"));
+    }
+    // Admit every output and coefficient before allocating reconstructed fields.
+    // A bound is never silently omitted to fit the export allowance.
+    let output_scalars = scalars
+        .checked_add(basis.len())
+        .and_then(|count| count.checked_mul(witnesses.len()))
+        .ok_or_else(|| bad("response displacement expansion overflows"))?;
+    charge(remaining, output_scalars)?;
+    let basis = basis
+        .iter()
+        .map(|field| {
+            field
+                .as_array()
+                .filter(|values| values.len() == scalars)
+                .ok_or_else(|| bad("retained response basis does not cover every physical node"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut names = std::collections::BTreeSet::new();
+    for (index, witness) in witnesses.iter().enumerate() {
+        if witness
+            .get("index")
+            .and_then(J::number_raw)
+            .and_then(|v| v.parse::<usize>().ok())
+            != Some(index)
+        {
+            return Err(bad(
+                "retained response witnesses are not in original bound order",
+            ));
+        }
+        let name = witness
+            .str_field("name")
+            .filter(|name| {
+                !name.is_empty()
+                    && name.len() <= 64
+                    && name
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+            })
+            .ok_or_else(|| bad("invalid retained response witness name"))?;
+        if !names.insert(name) {
+            return Err(bad("retained response witness names must be unique"));
+        }
+        if !matches!(
+            (witness.str_field("kind"), witness.str_field("unit")),
+            (Some("mean-displacement"), Some("m"))
+                | (Some("support-force"), Some("N"))
+                | (Some("support-moment"), Some("N*m"))
+        ) || !matches!(witness.str_field("sense"), Some("at-most" | "at-least"))
+        {
+            return Err(bad(
+                "retained response kind, physical unit or signed sense is invalid",
+            ));
+        }
+        let coefficients = array(witness, "coefficients")?;
+        if coefficients.len() != basis.len() {
+            return Err(bad(
+                "retained response coefficients differ from the force-basis dimension",
+            ));
+        }
+        let coefficients = coefficients
+            .iter()
+            .map(finite)
+            .collect::<Result<Vec<_>>>()?;
+        let norm_squared: f64 = coefficients.iter().map(|q| q * q).sum();
+        if !norm_squared.is_finite() || norm_squared > 1.0 + 1e-10 {
+            return Err(bad(
+                "retained response coefficients lie outside the declared unit ball",
+            ));
+        }
+        let mut values = Vec::with_capacity(scalars);
+        for (component, common) in offset.iter().enumerate() {
+            let mut value = finite(common)?;
+            for (coefficient, column) in coefficients.iter().zip(&basis) {
+                value += coefficient * finite(&column[component])?;
+                if !value.is_finite() {
+                    return Err(bad(
+                        "retained response displacement superposition is nonfinite",
+                    ));
+                }
+            }
+            values.push(value);
+        }
+        grid.add_array(DataArray {
+            name: format!("response_displacement_{index}_{name}"),
+            association: DataAssociation::PointData,
+            components: 3,
+            unit: Some("m".into()),
+            values: DataValues::Float64(values),
+        });
+    }
     Ok(())
 }
 
@@ -362,6 +491,7 @@ pub(super) fn render(driver: &str, bytes: &[u8]) -> Result<Projection> {
                 &mut remaining,
             )?;
             affine_strength(&design, fields, &mut grid, &mut remaining)?;
+            affine_responses(&design, fields, &mut grid, &mut remaining)?;
         }
     } else if driver == STRESS3_DRIVER {
         let stress = array(fields, "cell_relaxed_max_pa")?;

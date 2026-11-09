@@ -2155,6 +2155,17 @@ their existing field layout. The source artifact hash and explicit export
 status accompany the path in text and JSON output. No field is invented when
 there is no solved baseline or no feasible selected design.
 
+Response-constrained affine studies also export one point-vector array named
+`response_displacement_<index>_<name>` for every original signed inequality.
+Each is reconstructed in metres from the retained common offset and ordered
+basis fields using that limit's own adverse coefficients. Scalar force and
+moment bounds remain in N and N*m in the report. The exporter validates source
+order, unique names, observation units, signed senses, coefficient dimension,
+unit-ball membership and finite superposition. It admits the complete field
+expansion against the existing scalar budget before allocating output vectors;
+no limit is silently omitted. Existing studies without responses retain their
+previous field layout, and export performs no new equilibrium solve.
+
 These cells are the active octree background boxes, not a reconstructed cut
 surface or manufactured solid. Export preserves the selected incumbent's
 Estimated authority. Bounded allocation and validation reject malformed field

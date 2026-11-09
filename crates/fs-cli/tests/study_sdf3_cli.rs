@@ -394,3 +394,6 @@ mod affine;
 
 #[path = "study_sdf3_cli/strength.rs"]
 mod strength;
+
+#[path = "study_sdf3_cli/responses.rs"]
+mod responses;

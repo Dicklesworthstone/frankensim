@@ -68,6 +68,16 @@ fn affine_strength_design() -> String {
     )
 }
 
+const RESPONSE_WITNESSES: &str = r#"[{"index":0,"name":"tip_lower","kind":"mean-displacement","unit":"m","sense":"at-least","coefficients":[-1,0]},{"index":1,"name":"support-upper","kind":"support-force","unit":"N","sense":"at-most","coefficients":[0.6,0.8]},{"index":2,"name":"moment-upper","kind":"support-moment","unit":"N*m","sense":"at-most","coefficients":[0,-1]}]"#;
+
+fn affine_response_design(witnesses: &str) -> String {
+    affine_strength_design()
+        .replace("\"strength_constrained\":true", "\"strength_constrained\":true,\"response_constrained\":true")
+        .replace("\"strength\":{", &format!(
+            "\"responses\":{{\"schema\":\"sdf3-affine-response-fields.v1\",\"witnesses\":{witnesses}}},\"strength\":{{",
+        ))
+}
+
 fn grid(driver: &str, design: &str) -> UnstructuredGrid {
     let Projection::Available(xml) = render(driver, design.as_bytes()).unwrap() else {
         panic!("a solved feasible design must have a field projection");
@@ -194,6 +204,97 @@ fn affine_strength_export_refuses_missing_or_invalid_sampled_evidence() {
             "accepted malformed affine strength fields: {malformed}"
         );
     }
+}
+
+#[test]
+fn affine_response_export_keeps_every_signed_bound_adversary_and_common_offset() {
+    let original = affine_response_design(RESPONSE_WITNESSES);
+    let (selected, accepted) = original.split_once("\"last_accepted\":").unwrap();
+    let design = format!(
+        "{selected}\"last_accepted\":{}",
+        accepted.replace("[-1,0]", "[0,1]")
+    );
+    let grid = grid(AFFINE_LOAD_SPACE3_DRIVER, &design);
+    let offset = displacement(-0.1);
+    let first = displacement(0.0);
+    let second = displacement(0.1);
+    for (name, coefficients) in [
+        ("response_displacement_0_tip_lower", [-1.0, 0.0]),
+        ("response_displacement_1_support-upper", [0.6, 0.8]),
+        ("response_displacement_2_moment-upper", [0.0, -1.0]),
+    ] {
+        let expected: Vec<_> = (0..offset.len())
+            .map(|i| (offset[i] + coefficients[0] * first[i]) + coefficients[1] * second[i])
+            .collect();
+        assert_eq!(values(&grid, name), expected);
+        let array = grid.arrays.iter().find(|a| a.name == name).unwrap();
+        assert_eq!(array.association, DataAssociation::PointData);
+        assert_eq!(array.components, 3);
+        assert_eq!(array.unit.as_deref(), Some("m"));
+    }
+    assert_eq!(grid.arrays.len(), 15);
+    assert_eq!(values(&grid, "sampled_physical_stress_envelope"), [120.5]);
+    assert_eq!(values(&grid, "worst_displacement"), displacement(0.2));
+}
+
+#[test]
+fn affine_response_export_refuses_missing_reordered_or_invalid_adversaries() {
+    let original = affine_response_design(RESPONSE_WITNESSES);
+    for malformed in [
+        original.replace(
+            "\"response_constrained\":true",
+            "\"response_constrained\":false",
+        ),
+        original.replace("\"responses\":", "\"missing_responses\":"),
+        original.replace("sdf3-affine-response-fields.v1", "unknown-response-fields"),
+        original.replace(RESPONSE_WITNESSES, "[]"),
+        original.replace("\"index\":1", "\"index\":0"),
+        original.replace("\"index\":1", "\"index\":1.0"),
+        original.replace("support-upper", "tip_lower"),
+        original.replace("tip_lower", "tip/lower"),
+        original.replace("\"unit\":\"m\"", "\"unit\":\"N\""),
+        original.replace("at-least", "absolute"),
+        original.replace("[0.6,0.8]", "[0.6]"),
+        original.replace("[0.6,0.8]", "[1,1]"),
+        original.replace("[0.6,0.8]", "[1e999,0]"),
+    ] {
+        assert!(
+            render(AFFINE_LOAD_SPACE3_DRIVER, malformed.as_bytes()).is_err(),
+            "accepted invalid response witness fields: {malformed}"
+        );
+    }
+    let oversized = (0..65).map(|index| format!(
+        "{{\"index\":{index},\"name\":\"limit-{index}\",\"kind\":\"mean-displacement\",\"unit\":\"m\",\"sense\":\"at-most\",\"coefficients\":[1,0]}}"
+    )).collect::<Vec<_>>().join(",");
+    assert!(
+        render(
+            AFFINE_LOAD_SPACE3_DRIVER,
+            affine_response_design(&format!("[{oversized}]")).as_bytes()
+        )
+        .is_err()
+    );
+    let huge = format!("{:?}", vec![f64::MAX; 24]);
+    let overflow = original
+        .replace("[-1,0]", "[1,0]")
+        .replace(&format!("{:?}", displacement(-0.1)), &huge)
+        .replace(&format!("{:?}", displacement(0.0)), &huge);
+    assert!(render(AFFINE_LOAD_SPACE3_DRIVER, overflow.as_bytes()).is_err());
+}
+
+#[test]
+fn affine_response_export_admits_the_complete_expansion_before_allocating_fields() {
+    let design = J::parse(&affine_response_design(RESPONSE_WITNESSES)).unwrap();
+    let fields = design.get("selected").unwrap();
+    let mut grid = grid(AFFINE_LOAD_SPACE3_DRIVER, &affine_strength_design());
+    let count = grid.arrays.len();
+    // Three bound fields, each with 24 displacement scalars and two coefficients.
+    let mut insufficient = 77;
+    assert!(affine_responses(&design, fields, &mut grid, &mut insufficient).is_err());
+    assert_eq!(grid.arrays.len(), count);
+    let mut exact = 78;
+    affine_responses(&design, fields, &mut grid, &mut exact).unwrap();
+    assert_eq!(exact, 0);
+    assert_eq!(grid.arrays.len(), count + 3);
 }
 
 #[test]

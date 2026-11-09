@@ -205,6 +205,13 @@ remeasured combined-field witness. Reports show all original bounds and their
 physical units, with selected and last-accepted values. Resume preserves the
 full constraint family and original gradient evidence.
 
+Report export includes one `response_displacement_<index>_<name>` VTU vector
+field, in metres, for every original signed bound. The fields combine the
+retained common offset and basis displacements with each bound's own adverse
+coefficients. A displacement window consequently has two governing fields.
+The physical force and moment values and their N/N*m units remain in the
+report. Export checks the entire bounded expansion and requires no new solve.
+
 The implementation shares offset/basis primal fields with compliance and
 strength. Response adjoints are bounded by the smaller of the number of
 limits and the number of affine fields. A response with exactly zero
