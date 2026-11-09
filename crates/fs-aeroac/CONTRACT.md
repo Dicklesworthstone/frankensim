@@ -3904,7 +3904,7 @@ observations without a visibility mask, second propagation delay or pressure
 squared substitute for signed energy flux. The exact edge and exactly grazing
 incidence refuse. This is an infinite, zero-thickness, stationary ideal sheet;
 finite barriers, impedance, point-source incidence, arbitrary wedges, losses,
-flow and source loading remain separate models.
+flow across the edge and source loading remain separate models.
 
 The implementation follows Sommerfeld A3--A4 in
 [the NIST half-plane study](https://pmc.ncbi.nlm.nih.gov/articles/PMC4844525/).
@@ -3921,6 +3921,44 @@ Sommerfeld reference values, both faces' exact boundary conditions, analytic
 velocity against independent pressure derivatives, the full Helmholtz residual,
 illuminated/shadow/transition asymptotic limits, skew incidence, material density
 scaling, observation-line parity and domain/cancellation refusals (G1/G2/G3).
+
+### Exact diffraction with edge-parallel mean flow
+
+`HalfPlaneDiffraction::with_edge_parallel_flow` and
+`PreparedHalfPlaneSpectrum::with_edge_parallel_flow` extend the same exact
+Sommerfeld owner to a stationary sheet in uniform subsonic flow along its edge.
+For each incident wave normal n, the laboratory frequency omega obeys
+`omega = c*k + U*kz`, with `kz = k*n_edge`. The intrinsic frequency is
+`Omega = omega/(1 + U*n_edge/c)`. Translational symmetry retains kz in every
+diffracted term, so the material derivative is exactly `-i*Omega`: both
+pressure and physical particle velocity come from the original separated
+Helmholtz/Euler solution. This is a direct reduction of the uniform-flow
+linearized Euler equations, rather than a general-flow approximation.
+
+The incident direction is a wave normal; laboratory group velocity is
+`c*n + U`. All observation lines keep the original laboratory frequency.
+World-space preparation uses each component's own spatial wave number when
+moving its source phase to the edge, then retains coherent interference and
+rotates the complete velocity into world coordinates. Different directions
+at one laboratory frequency generally have different intrinsic frequencies.
+
+Existing active intensity remains pressure work `<p*u>`.
+`evaluate_energy_transport` reuses the original quadratic-energy owner to
+return `<E>` and `<p*u> + U*<E>` after coherent assembly. It therefore retains
+the advection of interference energy even when pressure-work divergence alone
+is nonzero. Preparation remains O(N); observation is allocation-free O(N),
+with the original cancellation checks and component bounds.
+
+Zero flow preserves the original solution. The admitted speed is strictly
+subsonic and parallel to the edge; both rigid and pressure-release faces remain
+available. Cross-edge flow, shear, wakes/Kutta conditions, finite barriers,
+impedance, losses and source feedback are not supplied. The new
+`diffraction::flow_tests` exercise the original pressure/momentum equations,
+both sheet faces, zero-flow equality, laboratory clocks, placed coherent
+spectra, and energy-flux divergence (G1/G3). Independent Fresnel quadrature and
+finite-difference equation checks were executed during implementation; the
+native regression file and full crate integration still require a Cargo run
+because the execution host became unavailable.
 
 ### Placed straight edges and coherent angular spectra
 
@@ -3948,7 +3986,7 @@ or angular interpolation. A continuous incident spectrum requires its own
 angular-refinement evidence. The operator accepts only propagating components
 whose resolved normal direction exceeds 64 epsilons in magnitude, refusing
 unresolved grazing incidence after world projection. It adds no evanescent incidence, source reconstruction, finite
-barrier, impedance edge or moving-medium approximation. The angular-spectrum
+barrier, impedance edge or cross-edge/sheared-flow model. The angular-spectrum
 convention follows [JASA 148, EL333 (2020), §2.1](https://pmc.ncbi.nlm.nih.gov/articles/PMC7567611/).
 
 `diffraction::spectrum::tests` checks world rotations and phase-reference changes,

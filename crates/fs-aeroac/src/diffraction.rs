@@ -16,12 +16,16 @@
 //! approximation. See A3--A4 in
 //! <https://pmc.ncbi.nlm.nih.gov/articles/PMC4844525/>. The edge-parallel
 //! wave-number component separates as exp(i kz z), with transverse k = sqrt(k²-kz²).
+//! [`HalfPlaneDiffraction::with_edge_parallel_flow`] retains that separation
+//! for uniform subsonic flow along the edge. Each incident direction has
+//! intrinsic frequency `Omega = omega / (1 + U n_z/c)` and `k = Omega/c`;
+//! the observed frequency remains the original laboratory `omega`.
 //!
 //! Analytic derivatives retain the singular 1/sqrt(r) edge velocity and
 //! signed active/reactive flux. The edge itself therefore refuses. This
 //! stationary, zero-thickness, infinite, ideal sheet does not approximate
 //! finite barriers, impedance coatings, point sources, arbitrary wedges,
-//! absorption, flow, or reciprocal source loading.
+//! absorption, flow across the edge, or reciprocal source loading.
 
 use crate::AeroacError;
 use crate::curle3d::{CoherentCompactField, IdealPlaneBoundary};
@@ -42,6 +46,12 @@ fluid; exact Sommerfeld pressure and Euler velocity, including shadow and transi
 No finite barrier, finite-impedance wall, finite-source, arbitrary-wedge, flow, absorption, \
 source-feedback or measured-SPL qualification.";
 
+const FLOW_SCOPE: &str = "Prescribed plane-wave diffraction by one infinite straight-edged, \
+zero-thickness rigid or pressure-release half-plane with uniform subsonic flow parallel \
+to its edge; exact separated linearized-Euler pressure and perturbation velocity. \
+Active intensity is pressure work, excluding mean-flow energy advection. No cross-edge \
+flow, shear, finite barrier, wall impedance, absorption, source feedback or measured-SPL qualification.";
+
 /// One material and incident direction bound to the exact half-plane solution.
 ///
 /// The complex input amplitude is pressure [Pa] at the edge-frame origin on
@@ -53,6 +63,8 @@ source-feedback or measured-SPL qualification.";
 pub struct HalfPlaneDiffraction {
     acoustic: FluidAcousticState,
     frequency_hz: f64,
+    intrinsic_omega: f64,
+    edge_flow_velocity_m_s: f64,
     k: f64,
     transverse_k: f64,
     direction: [f64; 3],
@@ -69,14 +81,47 @@ impl HalfPlaneDiffraction {
         propagation_direction: [f64; 3],
         boundary: IdealPlaneBoundary,
     ) -> Result<Self, AeroacError> {
+        Self::with_edge_parallel_flow(
+            acoustic,
+            frequency_hz,
+            propagation_direction,
+            boundary,
+            0.0,
+        )
+    }
+
+    /// Bind a stationary sheet in uniform subsonic mean flow along its z edge.
+    /// The direction is the incident WAVE NORMAL, not its laboratory ray/group
+    /// velocity (which is `c*n + U*e_z`). The supplied frequency and incident
+    /// pressure refer to the laboratory clock and the edge-frame origin.
+    ///
+    /// Translational symmetry retains kz in every diffracted term. Thus the
+    /// material derivative is exactly `-i*(omega-U*kz)`, and the original
+    /// Sommerfeld pressure AND velocity solve the linearized Euler system at
+    /// that intrinsic frequency. No effective sound speed or stationary-fluid
+    /// pressure-to-velocity conversion is used. Rigid/release boundary data
+    /// remain valid because the mean flow is tangent to both faces and edge.
+    /// Cross-edge flow, shear and a Kutta/wake model are outside this owner.
+    pub fn with_edge_parallel_flow(
+        acoustic: FluidAcousticState,
+        frequency_hz: f64,
+        propagation_direction: [f64; 3],
+        boundary: IdealPlaneBoundary,
+        edge_flow_velocity_m_s: f64,
+    ) -> Result<Self, AeroacError> {
         let [dx, dy, dz] = propagation_direction;
         let transverse = det::hypot(dx, dy);
         let length = det::hypot(transverse, dz);
         let omega = core::f64::consts::TAU * frequency_hz;
-        let k = omega / acoustic.sound_speed_m_s();
+        let mach = edge_flow_velocity_m_s / acoustic.sound_speed_m_s();
+        let intrinsic_omega = omega / (1.0 + mach * dz);
+        let k = intrinsic_omega / acoustic.sound_speed_m_s();
         let transverse_k = k * transverse;
         if !frequency_hz.is_finite()
             || frequency_hz <= 0.0
+            || !edge_flow_velocity_m_s.is_finite()
+            || !mach.is_finite()
+            || mach.abs() >= 1.0
             || propagation_direction.iter().any(|v| !v.is_finite())
             || (length - 1.0).abs() > 64.0 * f64::EPSILON
             || dy == 0.0
@@ -84,16 +129,18 @@ impl HalfPlaneDiffraction {
             || k <= 0.0
             || !transverse_k.is_finite()
             || transverse_k <= 0.0
-            || !(omega * acoustic.density_kg_m3()).is_finite()
-            || omega * acoustic.density_kg_m3() <= 0.0
+            || !(intrinsic_omega * acoustic.density_kg_m3()).is_finite()
+            || intrinsic_omega * acoustic.density_kg_m3() <= 0.0
         {
             return Err(invalid(
-                "half-plane needs a finite non-grazing unit wave and positive resolved frequency",
+                "half-plane needs a finite non-grazing unit wave, subsonic edge flow and positive resolved frequency",
             ));
         }
         Ok(Self {
             acoustic,
             frequency_hz,
+            intrinsic_omega,
+            edge_flow_velocity_m_s,
             k,
             transverse_k,
             direction: propagation_direction,
@@ -107,7 +154,29 @@ impl HalfPlaneDiffraction {
         self.acoustic
     }
 
-    /// Coherent total pressure, Cartesian Euler velocity and physical flux.
+    /// Original laboratory frequency [Hz], unchanged by a stationary sheet.
+    pub const fn laboratory_frequency_hz(&self) -> f64 {
+        self.frequency_hz
+    }
+
+    /// Material-frame angular frequency `omega - U*kz` [rad/s].
+    pub const fn intrinsic_angular_frequency_rad_s(&self) -> f64 {
+        self.intrinsic_omega
+    }
+
+    /// Incident spatial wave-number magnitude [rad/m], relative to the fluid.
+    pub const fn wavenumber_rad_m(&self) -> f64 {
+        self.k
+    }
+
+    /// Original uniform mean-fluid velocity [m/s] in the edge frame.
+    pub const fn mean_flow_velocity_m_s(&self) -> [f64; 3] {
+        [0.0, 0.0, self.edge_flow_velocity_m_s]
+    }
+
+    /// Coherent total pressure, Cartesian perturbation velocity and pressure work.
+    /// In flow, active intensity is `<p u>`; transported perturbation energy
+    /// additionally contains `U*<E>` (see [`Self::evaluate_energy_transport`]).
     ///
     /// Coordinates are metres in the documented edge frame. Signed y = +/-0
     /// selects a sheet face for x > 0. At x < 0 both signed zeros describe the
@@ -132,8 +201,25 @@ impl HalfPlaneDiffraction {
             particle_velocity_m_s: velocity,
             active_intensity_w_m2: flux.map(|value| value.re),
             reactive_intensity_w_m2: flux.map(|value| value.im),
-            scope: SCOPE,
+            scope: if self.edge_flow_velocity_m_s == 0.0 {
+                SCOPE
+            } else {
+                FLOW_SCOPE
+            },
         })
+    }
+
+    /// Time-averaged quadratic energy and its laboratory flux, including mean
+    /// advection. Reduces the complete coherent field, preserving near-edge
+    /// motion; this is not a plane-wave pressure-squared approximation.
+    pub fn evaluate_energy_transport(
+        &self,
+        position_m: [f64; 3],
+        incident_pressure_pa: C64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<crate::curle3d::energy::AcousticEnergyTransport, AeroacError> {
+        let line = self.evaluate_harmonic_line(position_m, incident_pressure_pa, cancelled)?;
+        energy_transport(self.acoustic, self.mean_flow_velocity_m_s(), line)
     }
 
     /// Feed the original finite-window/sampled acoustic observation pipeline.
@@ -205,8 +291,7 @@ impl HalfPlaneDiffraction {
         let derivative = edge_phase
             * C64::new(INV_SQRT_TWO_PI, -INV_SQRT_TWO_PI)
                 .scale(core::f64::consts::FRAC_1_SQRT_2 * det::sqrt(self.transverse_k / radius));
-        let inverse_rho_omega =
-            1.0 / (core::f64::consts::TAU * self.frequency_hz * self.acoustic.density_kg_m3());
+        let inverse_rho_omega = 1.0 / (self.intrinsic_omega * self.acoustic.density_kg_m3());
         let edge_velocity = C64::new(derivative.im, -derivative.re).scale(inverse_rho_omega);
         let inverse_impedance = 1.0 / self.acoustic.characteristic_impedance_pa_s_m();
         let velocity = [
@@ -229,6 +314,43 @@ impl HalfPlaneDiffraction {
         poll(&mut cancelled)?;
         Ok(result)
     }
+}
+
+// A peak harmonic's mean quadratic energy is the half-sum of its two real
+// quadratures. Reuse the original energy owner so both material modulus and
+// mean-flow transport have the same semantics as the other acoustic solvers.
+fn energy_transport(
+    acoustic: FluidAcousticState,
+    flow: [f64; 3],
+    line: HarmonicFieldLine<3>,
+) -> Result<crate::curle3d::energy::AcousticEnergyTransport, AeroacError> {
+    use crate::curle3d::energy;
+    let real = energy::instantaneous(
+        acoustic,
+        flow,
+        line.pressure_pa.re,
+        line.particle_velocity_m_s.map(|v| v.re),
+    )?;
+    let imag = energy::instantaneous(
+        acoustic,
+        flow,
+        line.pressure_pa.im,
+        line.particle_velocity_m_s.map(|v| v.im),
+    )?;
+    let half_sum = |a, b| {
+        (Dd::from_f64(a) * Dd::from_f64(0.5)
+            + Dd::from_f64(b) * Dd::from_f64(0.5))
+        .to_f64()
+    };
+    Ok(energy::AcousticEnergyTransport {
+        energy_density_j_m3: half_sum(real.energy_density_j_m3, imag.energy_density_j_m3),
+        pressure_work_flux_w_m2: core::array::from_fn(|i| {
+            half_sum(real.pressure_work_flux_w_m2[i], imag.pressure_work_flux_w_m2[i])
+        }),
+        energy_flux_w_m2: core::array::from_fn(|i| {
+            half_sum(real.energy_flux_w_m2[i], imag.energy_flux_w_m2[i])
+        }),
+    })
 }
 
 // theta is in [0, 2pi], so sin(theta/2) >= 0 and the sign of cos(theta/2)
@@ -347,3 +469,6 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), AeroacError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod flow_tests;

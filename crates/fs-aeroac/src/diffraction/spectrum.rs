@@ -25,6 +25,13 @@ pressure and Euler velocity; the caller owns angular quadrature convergence. No 
 incidence, finite-source reconstruction, finite barriers, wall impedance, general wedges, \
 flow, absorption, source feedback or measured-SPL qualification.";
 
+const FLOW_SCOPE: &str = "Prescribed coherent propagating angular spectrum diffracted by \
+one placed ideal half-plane with uniform subsonic flow parallel to its edge. Each \
+direction retains its own intrinsic frequency and wave number on one laboratory clock; \
+coherent pressure and perturbation velocity are summed before pressure work or advected \
+energy. No cross-edge flow, shear, finite barrier, wall impedance, absorption, source \
+feedback or measured-SPL qualification.";
+
 /// A placed half-plane: origin on its edge, z along the edge and y its normal.
 ///
 /// The sheet extends in the positive x direction, `x = y cross z`. Both fluid
@@ -179,6 +186,36 @@ impl PreparedHalfPlaneSpectrum {
         reference_point_m: [f64; 3],
         incident: &[HalfPlaneIncidentWave],
         budget: HalfPlaneSpectrumBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        Self::with_edge_parallel_flow(
+            acoustic,
+            frequency_hz,
+            frame,
+            boundary,
+            0.0,
+            reference_point_m,
+            incident,
+            budget,
+            cancelled,
+        )
+    }
+
+    /// Prepare one laboratory-frequency spectrum in a uniform flow along the
+    /// placed edge. Speed is signed along `frame.axes()[2]`; the incident
+    /// directions are wave normals, not laboratory group-velocity directions.
+    /// Each component has its own `k = omega/(c + U*n_edge)`, including in
+    /// the reference-point phase. A common scalar wave number would erase
+    /// physical interference between upstream and downstream components.
+    pub fn with_edge_parallel_flow(
+        acoustic: FluidAcousticState,
+        frequency_hz: f64,
+        frame: HalfPlaneFrame,
+        boundary: IdealPlaneBoundary,
+        edge_flow_velocity_m_s: f64,
+        reference_point_m: [f64; 3],
+        incident: &[HalfPlaneIncidentWave],
+        budget: HalfPlaneSpectrumBudget,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, AeroacError> {
         poll(&mut cancelled)?;
@@ -210,7 +247,13 @@ impl PreparedHalfPlaneSpectrum {
                     "half-plane incidence is grazing or unresolved in the world frame",
                 ));
             }
-            let kernel = HalfPlaneDiffraction::new(acoustic, frequency_hz, direction, boundary)?;
+            let kernel = HalfPlaneDiffraction::with_edge_parallel_flow(
+                acoustic,
+                frequency_hz,
+                direction,
+                boundary,
+                edge_flow_velocity_m_s,
+            )?;
             let phase = Dd::from_f64(kernel.k)
                 * translated_dot(
                     component.propagation_direction,
@@ -254,7 +297,14 @@ impl PreparedHalfPlaneSpectrum {
         self.components[0].0.acoustic()
     }
 
-    /// Coherent total p/u and active/reactive intensity, all in the world frame.
+    /// Original uniform mean-fluid velocity in world coordinates [m/s].
+    pub fn mean_flow_velocity_m_s(&self) -> [f64; 3] {
+        let speed = self.components[0].0.edge_flow_velocity_m_s;
+        self.frame.axes[2].map(|axis| speed * axis)
+    }
+
+    /// Coherent total p/u and active/reactive pressure work in the world frame.
+    /// Use [`Self::evaluate_energy_transport`] to include mean-flow advection.
     pub fn evaluate(
         &self,
         receiver: HalfPlaneReceiver,
@@ -274,8 +324,24 @@ impl PreparedHalfPlaneSpectrum {
             particle_velocity_m_s: line.particle_velocity_m_s,
             active_intensity_w_m2: flux.map(|v| v.re),
             reactive_intensity_w_m2: flux.map(|v| v.im),
-            scope: SCOPE,
+            scope: if self.components[0].0.edge_flow_velocity_m_s == 0.0 {
+                SCOPE
+            } else {
+                FLOW_SCOPE
+            },
         })
+    }
+
+    /// Mean perturbation energy and laboratory flux of the complete coherent
+    /// spectrum. All cross-component terms survive, including the axial
+    /// advection of interference energy, which varies along a flowing edge.
+    pub fn evaluate_energy_transport(
+        &self,
+        receiver: HalfPlaneReceiver,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<crate::curle3d::energy::AcousticEnergyTransport, AeroacError> {
+        let line = self.evaluate_harmonic_line(receiver, cancelled)?;
+        super::energy_transport(self.acoustic(), self.mean_flow_velocity_m_s(), line)
     }
 
     /// Supply the existing finite-window/sampled observations without a new
