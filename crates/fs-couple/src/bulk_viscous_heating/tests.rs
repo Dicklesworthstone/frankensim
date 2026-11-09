@@ -1,4 +1,7 @@
 //! Authored constitutive fixtures establish coupling, not material calibration.
+#[path = "finite_window/tests.rs"]
+mod finite_window;
+
 use super::*;
 use fs_duct::{compose::ComposeOptions, fluid::bulk::BulkTractionCylinder};
 use fs_material::{

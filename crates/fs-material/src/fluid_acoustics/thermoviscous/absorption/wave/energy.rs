@@ -37,6 +37,9 @@ pub struct BulkWaveAbsorption {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BulkWaveField {
     pub velocity_m_s: C64,
+    /// Original longitudinal strain-rate phasor du/dx [1/s]. Retained before
+    /// squaring so coherent frequencies can supply physical finite-time heat.
+    pub velocity_gradient_per_s: C64,
     pub pressure_pa: C64,
     pub normal_traction_pa: C64,
     pub temperature_perturbation_k: C64,
@@ -165,10 +168,11 @@ impl BulkWaveAbsorption {
         let pressure = self.wave.pressure_impedance_pa_s_m() * velocity;
         let traction = self.wave.traction_impedance_pa_s_m() * velocity;
         let heat_flux = -gradient_t.scale(kappa);
+        let gradient_u = ik * velocity;
         // Weight before squaring; small physical phasors need not have a
         // representable unweighted square. Every loss is an original positive
         // constitutive form, not a pressure-work or endpoint-power subtraction.
-        let viscous = (ik * velocity)
+        let viscous = gradient_u
             .scale(det::sqrt(0.5 * self.longitudinal_viscosity))
             .norm_sq();
         let conductive = gradient_t.scale(det::sqrt(0.5 * kappa / t0)).norm_sq();
@@ -179,9 +183,16 @@ impl BulkWaveAbsorption {
         let thermal = temperature
             .scale(det::sqrt((0.5 * kappa / t0) * k.im))
             .norm_sq();
-        if ![velocity, pressure, traction, temperature, heat_flux]
-            .into_iter()
-            .all(finite)
+        if ![
+            velocity,
+            gradient_u,
+            pressure,
+            traction,
+            temperature,
+            heat_flux,
+        ]
+        .into_iter()
+        .all(finite)
             || ![
                 viscous,
                 conductive,
@@ -199,6 +210,7 @@ impl BulkWaveAbsorption {
         }
         Ok(BulkWaveField {
             velocity_m_s: velocity,
+            velocity_gradient_per_s: gradient_u,
             pressure_pa: pressure,
             normal_traction_pa: traction,
             temperature_perturbation_k: temperature,

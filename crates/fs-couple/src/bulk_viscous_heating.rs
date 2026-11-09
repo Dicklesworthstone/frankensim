@@ -25,6 +25,10 @@ use fs_thermal::enthalpy::{
 };
 use std::collections::BTreeMap;
 
+/// Original coherent spectral heat integrated on each actual thermal interval.
+#[path = "bulk_viscous_heating/finite_window.rs"]
+pub mod finite_window;
+
 /// Hard bound on a complete, explicitly authored thermal partition.
 pub const MAX_BULK_HEATING_CELLS: usize = 4096;
 

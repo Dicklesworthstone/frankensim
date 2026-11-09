@@ -95,16 +95,24 @@ impl BulkCoherentWaveSegment {
         let temperature = prepared.temperature_over_velocity * difference;
         let gradient_t = ik * (prepared.temperature_over_velocity * velocity);
         let heat_flux = -gradient_t.scale(kappa);
-        let viscous = (ik * difference)
+        let gradient_u = ik * difference;
+        let viscous = gradient_u
             .scale(det::sqrt(0.5 * prepared.longitudinal_viscosity))
             .norm_sq();
         let conductive = gradient_t.scale(det::sqrt(0.5 * kappa / t0)).norm_sq();
         let entropy = conductive / t0;
         let mechanical = 0.5 * (traction * velocity.conj()).re;
         let thermal = (0.5 / t0) * (temperature * heat_flux.conj()).re;
-        if ![velocity, pressure, traction, temperature, heat_flux]
-            .into_iter()
-            .all(finite)
+        if ![
+            velocity,
+            gradient_u,
+            pressure,
+            traction,
+            temperature,
+            heat_flux,
+        ]
+        .into_iter()
+        .all(finite)
             || ![
                 viscous,
                 conductive,
@@ -122,6 +130,7 @@ impl BulkCoherentWaveSegment {
         }
         Ok(BulkWaveField {
             velocity_m_s: velocity,
+            velocity_gradient_per_s: gradient_u,
             pressure_pa: pressure,
             normal_traction_pa: traction,
             temperature_perturbation_k: temperature,
