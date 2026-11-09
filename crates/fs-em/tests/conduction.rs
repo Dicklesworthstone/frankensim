@@ -2,6 +2,8 @@
 //! These are synthetic physical-law checks, not measured material qualification.
 #[path = "conduction/axisymmetric.rs"]
 mod axisymmetric;
+#[path = "conduction/axisymmetric_matrix.rs"]
+mod axisymmetric_matrix;
 mod common;
 #[path = "conduction/contacts.rs"]
 mod contacts;

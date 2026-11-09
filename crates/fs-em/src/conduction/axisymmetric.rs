@@ -30,6 +30,12 @@ use fs_phs::circuit::Branch;
 use fs_rep_mesh::TriComplex2;
 use fs_solver::SolveReport;
 
+mod matrix;
+pub use matrix::{
+    AxisymmetricConductanceControls, AxisymmetricConductanceMatrix, AxisymmetricMixedConductance,
+    AxisymmetricMixedConductanceControls,
+};
+
 type Result<T> = core::result::Result<T, ConductionError>;
 
 /// Original radial geometry and complete, immutable conductivity sources.
@@ -140,17 +146,11 @@ impl<C: PlanarOhmicResponse> AxisymmetricConduction<C> {
         controls: ConductionControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<AxisymmetricResistance<'_, C>> {
-        let terminals = [positive_terminal, negative_terminal];
-        // Native trace admission checks all indices and terminal overlap first.
-        scalar_potential::terminal_boundary(self.mesh(), &terminals, &[0.0; 2], cancelled)?;
-        let mut owners = vec![None; self.mesh().vertices().len()];
-        for (terminal, vertices) in terminals.into_iter().enumerate() {
-            for &vertex in vertices {
-                poll(cancelled)?;
-                owners[vertex] = Some(terminal);
-            }
-        }
-        admit_physical_traces(self.mesh(), &owners, cancelled)?;
+        admit_terminal_traces(
+            self.mesh(),
+            &[positive_terminal, negative_terminal],
+            cancelled,
+        )?;
         let response = self.core.resistance_at_reference_voltage(
             positive_terminal,
             negative_terminal,
@@ -163,6 +163,31 @@ impl<C: PlanarOhmicResponse> AxisymmetricConduction<C> {
             response,
         })
     }
+}
+
+// Validate every electrode separately: an axis-only terminal must not borrow
+// positive area from the neighboring edge of another electrode.
+fn admit_terminal_traces(
+    mesh: &TriComplex2,
+    terminals: &[&[usize]],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<()> {
+    poll(cancelled)?;
+    if terminals.len() < 2 || terminals.len() > mesh.vertices().len() {
+        return Err(ConductionError::Invalid(
+            "bounded physical axisymmetric terminal traces required",
+        ));
+    }
+    // Native admission checks every index, duplicate, overlap and edge first.
+    scalar_potential::terminal_boundary(mesh, terminals, &vec![0.0; terminals.len()], cancelled)?;
+    let mut owners = vec![None; mesh.vertices().len()];
+    for (terminal, vertices) in terminals.iter().enumerate() {
+        for &vertex in *vertices {
+            poll(cancelled)?;
+            owners[vertex] = Some(terminal);
+        }
+    }
+    admit_physical_traces(mesh, &owners, cancelled)
 }
 
 // Integral(N_i r ds)/integral(r ds) = (1+r_i/(r_0+r_1))/3.
@@ -195,9 +220,9 @@ fn admit_physical_traces(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<()> {
     poll(cancelled)?;
-    let trace = mesh.boundary_trace().map_err(|_| {
-        ConductionError::Invalid("invalid axisymmetric electrical boundary trace")
-    })?;
+    let trace = mesh
+        .boundary_trace()
+        .map_err(|_| ConductionError::Invalid("invalid axisymmetric electrical boundary trace"))?;
     let mut supported = vec![false; owners.len()];
     for edge in &trace.edges {
         poll(cancelled)?;

@@ -7,7 +7,7 @@ use fs_material::conductor::planar::{
     PRINCIPAL_CONDUCTIVITY_PROPERTIES, PlanarElectricalFrame, resolve_orthotropic_conductor2,
 };
 
-fn rectangle(a: f64, b: f64, h: f64, nr: usize, nz: usize, angle: f64) -> TriComplex2 {
+pub(super) fn rectangle(a: f64, b: f64, h: f64, nr: usize, nz: usize, angle: f64) -> TriComplex2 {
     let mut vertices = Vec::new();
     let mut faces = Vec::new();
     for j in 0..=nz {

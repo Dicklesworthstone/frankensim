@@ -1556,6 +1556,20 @@ at every recovered amplitude. This is the same dissipative circuit component;
 the spatial heat must not be credited a second time. Temperature or material
 changes require a new source-bound preparation.
 
+`AxisymmetricConductanceMatrix` prepares the reciprocal terminal map with
+exactly N-1 native field solves and a bounded, equilibrated dense factor.
+Disjoint positive-area surfaces of revolution define ideal equipotential
+electrodes; one electrode may join multiple original mesh pieces. Recovered
+voltage, conserved total-current and mixed drives use the retained native
+operator and source-domain/current/work checks. A zero-total-current electrode
+floats while its local surface currents can transfer charge between faces.
+`AxisymmetricMixedConductance` factors an arbitrary current-terminal subset
+once; repeated controls require no new field solve. Common voltage bias is
+removed before arithmetic, and simultaneous local Joule heat includes all
+quadratic cross terms. Tests in `tests/conduction/axisymmetric_matrix.rs` use
+independent cylinder/coaxial laws, floating-electrode current transfer,
+geometry scaling, actual local heat and bounded/cancelled rejection cases.
+
 Fields and anisotropic axes are local radial/axial components with a decoupled
 azimuthal direction. A partial angular span is a symmetry sector. This owner
 does not add azimuthal current, induction, Hall response, contact transfer,
