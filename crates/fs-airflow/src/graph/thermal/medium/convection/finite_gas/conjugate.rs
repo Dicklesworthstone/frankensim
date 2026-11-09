@@ -4,6 +4,9 @@
 //! the original gas film. Only the combined conductance enters the reciprocal
 //! heat solve; film hA is diagnostic and is never applied as a second source.
 
+/// Conducting material surfaces on one shared finite-gas adaptive window.
+pub mod multiple;
+
 use super::film::{FilmGasConvectionSample, FilmGasSource, FilmGasSurface};
 use super::mass_flow::MassFlowInput;
 use super::*;
@@ -456,13 +459,14 @@ impl<'a, 'm, F: ConjugateGasFilm> ConjugateGasSurface<'a, 'm, F> {
         Ok(next)
     }
 
-    fn admit_isochoric<G: IsochoricGasStorage<State = F::State>>(
+    fn admit_isochoric(
         &self,
-        environment: &FiniteGasThermalEnvironment<'_, G>,
+        gas: &F::State,
+        environment: &fs_conduction::lumped::LumpedThermalEnvironment,
         body: UniformEnthalpyStepInput<'_>,
     ) -> Result<(), ConjugateGasError> {
         self.path.admit_input(body)?;
-        let area = self.area(environment.gas.state())?;
+        let area = self.area(gas)?;
         if !body.surface_area_m2.is_finite()
             || body.surface_area_m2 <= 0.0
             || (area != 0.0 && area != body.surface_area_m2)
@@ -471,7 +475,7 @@ impl<'a, 'm, F: ConjugateGasFilm> ConjugateGasSurface<'a, 'm, F> {
                 "isochoric conducting film requires full body coverage or explicit insulation",
             ));
         }
-        if !environment.body.transport.radiation_is_disabled() {
+        if !environment.transport.radiation_is_disabled() {
             return Err(ConjugateGasError::Invalid(
                 "conducting gas surfaces require disabled body-node radiation",
             ));
@@ -531,7 +535,7 @@ impl<'a, 'm, F: ConjugateGasFilm> ConjugateGasSurface<'a, 'm, F> {
         let source_error = |error| ConvectionError::Convection(WallConvectionError::Source(error));
         cx.checkpoint()
             .map_err(|_| ConvectionError::Thermal(ThermalPistonError::Cancelled))?;
-        self.admit_isochoric(environment, body)
+        self.admit_isochoric(environment.gas.state(), environment.body, body)
             .map_err(source_error)?;
         let next = environment
             .advance_with_wall_convection(cx, body, wall, |gas, body_temperature| {
@@ -582,11 +586,12 @@ impl<'a, 'm, F: ConjugateGasFilm> ConjugateGasSurface<'a, 'm, F> {
     > {
         cx.checkpoint()
             .map_err(|_| FiniteGasWindowError::Cancelled)?;
-        self.admit_isochoric(environment, body).map_err(|error| {
-            FiniteGasWindowError::Step(ConvectionError::Convection(WallConvectionError::Source(
-                error,
-            )))
-        })?;
+        self.admit_isochoric(environment.gas.state(), environment.body, body)
+            .map_err(|error| {
+                FiniteGasWindowError::Step(ConvectionError::Convection(
+                    WallConvectionError::Source(error),
+                ))
+            })?;
         environment
             .advance_adaptive_with_wall_convection_checked(
                 cx,

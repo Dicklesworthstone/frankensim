@@ -411,3 +411,10 @@ fn sum(values: impl IntoIterator<Item = f64>) -> Result<f64, Error> {
     if total.is_finite() { Ok(total) }
     else { Err(Error::Invalid("shared gas/body account is unrepresentable")) }
 }
+
+/// Adaptive simultaneous convection over a complete physical-time window.
+pub mod window;
+pub use window::{
+    FiniteGasBodiesWindowCandidate, FiniteGasBodiesWindowError, FiniteGasBodiesWindowReport,
+    FiniteGasBodiesWindowSample, FiniteGasBodiesWindowSolve, FiniteGasBodyWindowReport,
+};

@@ -6586,3 +6586,30 @@ This remains first-order split evolution with local error estimates, fixed
 volumes, positive droplet seeds and prescribed relative speed/heat coefficients.
 It adds no dry-out event, droplet dynamics, external reservoir, or coupled
 entropy/passivity certificate.
+
+
+## Multiple conducting bodies on one adaptive finite-gas window
+
+`conjugate::multiple::adaptive_isochoric_bodies_candidate` binds each physical
+body ID to its original `ConjugateGasSurface` and uses the original simultaneous
+multiple-body gas controller. Canonical bounded ID lookup keeps distinct
+material/caloric sources attached to their own bodies throughout coarse, fine
+and retried proposals. Each source eliminates its own actual fluid-facing
+temperature against the common gas endpoint. No sequential gas update or heat
+redistribution is introduced.
+
+The original layer-work audit uses each actual interval duration and one body
+share of the prescribed source-work allowance. Initial and final states of
+every proposal retain exact caloric-object identity, pure-phase and actual
+conductivity support admission, including insulation. Full positive exposed
+area or explicit insulation, disabled body-node radiation and original Biot
+admission remain mandatory. The controller alone apportions prescribed heats
+and retains accepted fine heat, entropy and original source reports.
+
+These remain quasi-steady normal conducting paths with independent lumped
+bodies and a well-mixed gas. There is no added layer storage, lateral spreading,
+spatial gas field or empirical accuracy claim. Three G1/G3/G4 regression groups
+cover independent nonlinear layer/film powers, simultaneous native half-step
+agreement, body-order invariance, original source identity/domain refusal and
+cancellation. Pinned formatting/parsing passed; native integration compilation
+and runtime execution remain unverified.

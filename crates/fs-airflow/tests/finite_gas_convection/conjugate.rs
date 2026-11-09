@@ -652,3 +652,6 @@ fn isochoric_conjugate_heat_keeps_native_energy_entropy_biot_and_surface_ownersh
         assert_eq!(old, saved);
     });
 }
+
+#[path = "conjugate/multiple.rs"]
+mod multiple;

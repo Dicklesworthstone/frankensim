@@ -418,3 +418,5 @@ fn g4_shared_wall_refusal_and_cancellation_preserve_all_original_histories() {
         assert_eq!(bodies[1].input.initial, inputs[1].initial);
     });
 }
+
+mod window;

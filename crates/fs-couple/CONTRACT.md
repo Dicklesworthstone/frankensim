@@ -14020,3 +14020,38 @@ unchanged physical-time laws and authored Hessian under nested 3x2 views,
 response-clock neighboring-source gradients, mapped-bandwidth refusal and
 cancellation/reuse. Existing parametric and parameter-objective tests remain
 applicable to the original one-period chart.
+
+
+## Adaptive convection of multiple bodies sharing one finite gas
+
+`FiniteGasBodiesEnvironment::advance_adaptive` and its source/wall-feedback
+variants advance distinct original enthalpy bodies through one common gas
+inventory. Every coarse, fine and retried proposal uses the original
+simultaneous native solve. Temporal error checks each body's enthalpy,
+temperature and liquid fraction independently and checks the gas's original
+fixed-density internal energy and temperature once. Opposing transfers cannot
+cancel component error. Only accepted fine intervals contribute physical heat,
+elapsed time and retained entropy/source history.
+
+Constant-power total window heats are apportioned through cumulative source
+endpoints. Original body IDs, caloric objects, masses, geometry, environments
+and gas source remain fixed. The checked wall API exposes actual interval
+descriptors and admits initial/final states of every native proposal, including
+coarse and rejected ones. Callbacks can refuse unsupported source states but
+cannot mint physical candidates. Original wall-law work allowances remain
+shared across bodies.
+
+The native-attempt budget includes rejected and refused calls. An independent
+body-step cap bounds retained component history and refuses before further
+proposals when exhausted. Final component storage, gas storage, source
+apportionment, matching and summed absolute local defects pass the common
+whole-window energy allowance. Independent endpoint absolute defects also
+prevent cancellation between component residuals. No partial physical window
+is published on failure or cancellation.
+
+This remains a fixed-volume, fixed-composition, well-mixed gas coupled to
+independent native lumped bodies. It introduces no direct body/body contact,
+spatial gas field, alternate caloric law, global time-error guarantee or
+experimental qualification. Four G1/G3/G4 regression groups are authored.
+The changed sources passed the pinned parser and an independent continuous
+cooling oracle was checked; native compilation and execution remain pending.
