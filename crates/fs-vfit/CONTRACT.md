@@ -167,7 +167,9 @@ pole refusal and transactional refusal.
   first-order/biquad sections (`K = omega_pw / tan(omega_pw T/2)`);
   exact at the prewarp frequency; the improper term maps to the exact
   lossless differentiator section (pole at `z = -1`, admitted by the
-  stability check as marginal BY DESIGN). `eval_f32_quantized` is the
+  stability check as marginal BY DESIGN). A declared `residue/s` compliance
+  maps to the exact Tustin integrator at `z = +1`; neither storage element
+  is BIBO-stable in isolation. `eval_f32_quantized` is the
   coefficient-quantization probe. `bilinear_state_space` — the same
   map in Tustin state-space form; the improper coefficient is returned
   as `e_leftover` for the caller's extra section (a named seam, not a
@@ -180,12 +182,20 @@ pole refusal and transactional refusal.
   spurious negative resistance. The manufactured inertance regressions in
   `tests/lossless_spectrum.rs` compare independent high-precision reactance
   references and prewarp agreement.
+  Exact compliance sections use the dual imaginary cotangent response, keeping
+  zero resistance near DC. Their nonzero DC storage pole returns a nonfinite
+  imaginary response; it is not replaced with leakage. An identically zero
+  compliance section evaluates to zero even at DC. This extends the declared
+  storage path only: the continuous global checker and tabulated fitting still
+  retain their strict continuous-pole admission.
 - `discretize::check_digital_passivity` checks the entire frequency circle
   using outward-rounded Bernstein factors of the actual stored coefficients.
   Ordinary sections require established strict Jury stability. Parallel terms
   are admitted by their combined real part; negative individual sections or
-  feedthrough can be compensated. Exact Tustin differentiators retain their
-  zero real part and a nonnegative summed boundary-storage coefficient.
+  feedthrough can be compensated. Exact Tustin differentiators and integrators
+  retain zero real part and separately nonnegative summed boundary-storage
+  coefficients at Nyquist and DC. Positive inertance cannot compensate negative
+  compliance. Arbitrary marginal-pole numerators remain unadmitted.
   Exact coefficient expansions preserve endpoint zeros and weak negative
   remainders; unresolved conditioning or finite work limits never become a
   pass. This is coefficient-level positive realness, not a roundoff-free
@@ -222,8 +232,16 @@ pole refusal and transactional refusal.
   advances only the original filter memories. No reflection refit, extra delay,
   gain correction or per-sample allocation is introduced. All boundary outputs
   and candidate filter memories are checked before committing a sample.
+  This includes declared exact DC compliance: the original implicit wave solve
+  closes its storage pole without a leak or extra sample. G1/G3 tests compare
+  pure compliance and series RLC reflection against the independent physical
+  midpoint owner, including returned energy and resistor heat; negative
+  compliance refuses even in the presence of positive resistance/inertance.
   Reported `p*U*T` is signed supplied work; it does not invent a dissipation or
   storage decomposition, a physical data-error bound, or a runtime energy proof.
+  The capacitor/spring mapping follows J. O. Smith, *Physical Audio Signal
+  Processing*, "A Physical Derivation of Wave Digital Elements" and
+  "Digitizing Elementary Reflectances by Bilinear Transform".
 
 ### Analytic multiport impedance derivatives
 

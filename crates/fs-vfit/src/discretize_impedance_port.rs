@@ -63,9 +63,10 @@ pub struct ImpedanceScatteringFrame {
 /// actual stored coefficients; stepping and [`Self::response`] allocate nothing.
 ///
 /// The coefficient certificate is not a rounded runtime-work proof or evidence
-/// of the physical validity of fitted data. The original lossless Tustin
-/// differentiator is supported; a DC integrator not admitted by the digital
-/// checker is refused rather than approximated with leakage.
+/// of the physical validity of fitted data. Exact lossless Tustin inertance
+/// and compliance are supported, including the compliance's DC storage pole.
+/// The wave boundary closes that integrator implicitly; it introduces no
+/// leakage, frequency-domain pole shift or extra sample of delay.
 #[derive(Debug, Clone)]
 pub struct ImpedanceScatteringPort {
     filter: DigitalFilter,
@@ -265,6 +266,92 @@ mod tests {
             returned,
             "reactive history must return energy after excitation ends"
         );
+    }
+
+    /// G1/G3: an independent physical-coordinate midpoint RLC owner supplies
+    /// pressure, flow, storage and heat, including the lossless cavity limit.
+    #[test]
+    fn compliance_and_rlc_scattering_match_physical_storage_without_leakage() {
+        use crate::impedance::{SeriesImpedance, SeriesImpedanceSpec};
+
+        for (resistance, inertance) in [(0.0, 0.0), (0.0, 0.0002), (0.3, 0.0002)] {
+            let compliance = 0.0002;
+            let model = RationalModel {
+                terms: vec![PoleTerm::Real {
+                    pole: 0.0,
+                    residue: 1.0 / compliance,
+                }],
+                d: resistance,
+                e: inertance,
+            };
+            let mut load = port(&model, 2.0);
+            let original_filter = load.filter().clone();
+            let mut physical = SeriesImpedance::new(
+                SeriesImpedanceSpec {
+                    resistance_pa_s_m3: resistance,
+                    inertance_pa_s2_m3: inertance,
+                    compliance_m3_pa: Some(compliance),
+                },
+                2.0,
+                1.0 / 48_000.0,
+            )
+            .unwrap();
+            let (mut work, mut heat) = (0.0, 0.0);
+            let mut returned = false;
+            for n in 0..1024 {
+                let incident = if n < 128 {
+                    det::cos(0.1 * f64::from(n))
+                } else {
+                    0.0
+                };
+                let affine = load.response().unwrap();
+                let actual = load.push(incident).unwrap();
+                let expected = physical.step(incident).unwrap();
+                for (a, b) in [
+                    (actual.pressure_pa, expected.pressure_pa),
+                    (actual.volume_flow_m3_s, expected.flow_m3_s),
+                    (actual.reflected_pressure_pa, expected.reflected_pressure_pa),
+                    (
+                        actual.reflected_pressure_pa,
+                        affine.incoming(incident).unwrap(),
+                    ),
+                ] {
+                    assert!((a - b).abs() < 2e-11 * a.abs().max(b.abs()).max(1.0));
+                }
+                work += actual.supplied_work_j;
+                heat += expected.dissipated_energy_j;
+                returned |= n >= 128 && actual.supplied_work_j < 0.0;
+                assert!((work - heat - expected.stored_energy_j).abs() < 2e-13);
+            }
+            assert!(returned, "the compliance must return its stored energy");
+            assert_eq!(
+                *load.filter(),
+                original_filter,
+                "no pole shift or leakage repair"
+            );
+        }
+    }
+
+    #[test]
+    fn negative_compliance_cannot_enter_a_passive_scattering_port() {
+        let model = RationalModel {
+            terms: vec![PoleTerm::Real {
+                pole: 0.0,
+                residue: -1.0,
+            }],
+            d: 100.0,
+            e: 100.0,
+        };
+        let filter = bilinear(&model, 1.0 / 48_000.0, 0.0).unwrap();
+        assert!(matches!(
+            ImpedanceScatteringPort::new(filter, 1.0, GlobalPassivityBudget::default()),
+            Err(ImpedanceScatteringError::Uncertified(
+                GlobalPassivityReport {
+                    verdict: GlobalPassivityVerdict::Violated,
+                    ..
+                }
+            ))
+        ));
     }
 
     #[test]

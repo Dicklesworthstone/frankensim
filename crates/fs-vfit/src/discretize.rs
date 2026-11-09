@@ -50,6 +50,9 @@ pub struct Biquad {
 
 impl Biquad {
     /// Frequency response at `z = e^{i*omega*t_s}`.
+    /// Exact Tustin storage elements retain zero resistance. A nonzero
+    /// compliance has no finite DC response: its imaginary component is
+    /// infinite at zero frequency. An identically zero section stays zero.
     #[must_use]
     pub fn eval(&self, omega: f64, t_s: f64) -> C64 {
         let phase = omega * t_s;
@@ -59,6 +62,23 @@ impl Biquad {
             // quotient then manufactures a real part of -g in a lossless
             // element. Preserve its exact zero resistance analytically.
             return C64::new(0.0, self.b[0] * det::tan(0.5 * phase));
+        }
+        if phase.is_finite() && self.b[0].is_finite() && is_lossless_integrator(self) {
+            // g * (1+z^-1)/(1-z^-1) = -i*g*cot(theta/2).
+            // Near DC, cos(theta) rounds to 1 and the ordinary complex
+            // quotient invents a resistance of -g in an ideal compliance.
+            if self.b[0] == 0.0 {
+                return C64::ZERO;
+            }
+            let half_phase = 0.5 * phase;
+            let reactance = if half_phase == 0.0 && phase != 0.0 {
+                // The analytic limit also preserves a representable ratio
+                // when halving a subnormal nonzero phase underflows.
+                -2.0 * (self.b[0] / phase)
+            } else {
+                -self.b[0] / det::tan(half_phase)
+            };
+            return C64::new(0.0, reactance);
         }
         let zi = C64::new(det::cos(phase), -det::sin(phase));
         let zi2 = zi * zi;
@@ -125,14 +145,16 @@ impl DigitalFilter {
         acc
     }
 
-    /// All sections stable? The exact lossless differentiator the
-    /// improper `e` term maps to (`b1 = -b0`, pole exactly at
-    /// `z = -1`) is marginally stable BY DESIGN and is admitted.
+    /// All sections strictly stable or exact lossless storage elements?
+    /// The Tustin differentiator (`z = -1`) and compliance integrator
+    /// (`z = +1`) are admitted as marginal by design, not BIBO-stable.
+    /// This checks pole structure, not the sign of stored energy; use
+    /// [`check_digital_passivity`] to admit a passive impedance.
     #[must_use]
     pub fn is_stable(&self) -> bool {
         self.sections
             .iter()
-            .all(|s| s.is_stable() || is_lossless_differentiator(s))
+            .all(|s| s.is_stable() || is_lossless_differentiator(s) || is_lossless_integrator(s))
     }
 
     /// Zero DF-II memory for every parallel section.
@@ -1100,6 +1122,16 @@ fn is_lossless_differentiator(s: &Biquad) -> bool {
     #[allow(clippy::float_cmp)]
     fn exact(s: &Biquad) -> bool {
         s.b[1] == -s.b[0] && s.b[2] == 0.0 && s.a == [1.0, 0.0]
+    }
+    exact(s)
+}
+
+fn is_lossless_integrator(s: &Biquad) -> bool {
+    // Exact image of residue/s under Tustin; never move a nearby pole or
+    // adjust a numerator to turn a leaky or active element into this one.
+    #[allow(clippy::float_cmp)]
+    fn exact(s: &Biquad) -> bool {
+        s.b[1] == s.b[0] && s.b[2] == 0.0 && s.a == [-1.0, 0.0]
     }
     exact(s)
 }

@@ -31,6 +31,13 @@ fn differentiator(gain: f64) -> Biquad {
     }
 }
 
+fn integrator(gain: f64) -> Biquad {
+    Biquad {
+        b: [gain, gain, 0.0],
+        a: [-1.0, 0.0],
+    }
+}
+
 #[test]
 fn g1_global_admission_keeps_compensating_terms_and_impedance_units() {
     for gain in [1.0e-250, 1.0, 1.0e250] {
@@ -134,6 +141,73 @@ fn g1_lossless_inertance_uses_summed_boundary_storage_not_a_frequency_grid() {
             .sum();
         let storage = model.t_s * coordinate * coordinate;
         assert!((work - storage).abs() <= 2.0e-14 * model.t_s);
+    }
+}
+
+#[test]
+fn g1_lossless_compliance_has_independent_positive_dc_storage() {
+    for gain in [1.0e-250, 1.0, 1.0e250] {
+        let model = filter(0.0, vec![integrator(gain)]);
+        assert!(model.is_stable());
+        assert_certified(&model);
+    }
+    assert_certified(&filter(
+        0.25,
+        vec![integrator(-3.0), integrator(4.0), differentiator(2.0)],
+    ));
+    assert_certified(&filter(0.0, vec![integrator(-1.0), integrator(1.0)]));
+    for sections in [
+        // Positive inertance cannot hide negative compliance, or vice versa.
+        vec![integrator(-1.0), differentiator(100.0)],
+        vec![integrator(100.0), differentiator(-1.0)],
+        // Retain the small negative DC residue lost by ordinary summation.
+        vec![integrator(1.0e16), integrator(-1.0), integrator(-1.0e16)],
+    ] {
+        let report =
+            check_digital_passivity(&filter(2.0, sections), GlobalPassivityBudget::default())
+                .unwrap();
+        assert_eq!(report.verdict, GlobalPassivityVerdict::Violated);
+        assert!(report.violation_frequency_rad_s.is_none());
+    }
+
+    // Independent compliance work identity: the charge/displaced-volume
+    // coordinate is the cumulative flow, without an alternating sign.
+    let gain = 0.75;
+    let model = filter(0.0, vec![integrator(gain)]);
+    let mut state = model.zero_state();
+    let (mut coordinate, mut work) = (0.0, 0.0);
+    for flow in [1.0, -0.5, 0.25, 0.0, -0.125, 0.75, 0.0] {
+        work += model.t_s * model.step(&mut state, flow).unwrap() * flow;
+        coordinate += flow;
+        let storage = model.t_s * gain * coordinate * coordinate;
+        assert!((work - storage).abs() <= 2.0e-14 * model.t_s);
+    }
+}
+
+#[test]
+fn g0_noncanonical_dc_poles_are_not_silently_repaired() {
+    // This change admits only the exact Tustin storage identity. Neither an
+    // arbitrary numerator nor a pole outside the circle gets that exception.
+    for section in [
+        Biquad {
+            b: [1.0, 0.0, 0.0],
+            a: [-1.0, 0.0],
+        },
+        Biquad {
+            b: [1.0, 1.0_f64.next_down(), 0.0],
+            a: [-1.0, 0.0],
+        },
+        Biquad {
+            b: [1.0, 1.0, 0.0],
+            a: [-1.0_f64.next_up(), 0.0],
+        },
+    ] {
+        let report = check_digital_passivity(
+            &filter(1.0, vec![section]),
+            GlobalPassivityBudget::default(),
+        )
+        .unwrap();
+        assert_ne!(report.verdict, GlobalPassivityVerdict::Certified);
     }
 }
 

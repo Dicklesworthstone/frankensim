@@ -3,9 +3,10 @@
 //! With t = sin²(theta/2), each section's real part is a quadratic numerator
 //! over its strictly positive squared denominator. Direct Bernstein products
 //! retain DC/Nyquist endpoint structure without an expanded power polynomial.
-//! Exact differentiators are handled by their boundary-pole storage condition.
+//! Exact differentiators and integrators have separate boundary-pole storage
+//! conditions at Nyquist and DC, respectively.
 
-use super::{Biquad, DigitalFilter, DiscretizeError};
+use super::{DigitalFilter, DiscretizeError, is_lossless_differentiator, is_lossless_integrator};
 use crate::passivity::global::{
     MAX_GLOBAL_ORDER, bernstein_add, bernstein_mul, check_bernstein_nonnegative,
     interval_add as add, interval_mul as mul, value as bernstein_value,
@@ -21,12 +22,13 @@ use fs_math::det;
 ///
 /// All stored binary64 coefficients are treated as exact real inputs. Ordinary
 /// sections must satisfy strict Jury stability. Exact Tustin differentiators
-/// are summed before checking their nonnegative boundary-pole coefficient.
+/// and integrators are summed separately before checking their nonnegative
+/// boundary-pole coefficients. Positive inertance cannot hide negative compliance.
 /// Neither the direct slot nor an individual section must be nonnegative.
 ///
 /// The report concerns the emitted coefficients, not the continuous fit or a
 /// finite frequency grid. It does not prove roundoff-free runtime work. A
-/// negative summed differentiator coefficient yields a violation without a
+/// negative summed storage-element coefficient yields a violation without a
 /// frequency witness: its failure is the boundary-pole storage condition.
 /// Unestablished strict stability or unrepresentable arithmetic yields an
 /// unresolved NumericRange report, never a pass. A frequency witness is omitted
@@ -35,7 +37,7 @@ use fs_math::det;
 ///
 /// The budget's max_order bounds both the number of sections and the accumulated
 /// ordinary polynomial degree (one for a first-order section, otherwise two),
-/// with the shared hard cap of 64. Constant sections and differentiators need no
+/// with the shared hard cap of 64. Constant sections and exact storage elements need no
 /// polynomial degree. The original filter and its state are never modified.
 ///
 /// # Errors
@@ -84,6 +86,7 @@ pub fn check_digital_passivity(
     };
     let mut constants = vec![direct];
     let mut differentiators = Vec::new();
+    let mut integrators = Vec::new();
     let mut factors = Vec::with_capacity(filter.sections.len());
     let mut degree = 0usize;
 
@@ -95,8 +98,12 @@ pub fn check_digital_passivity(
             };
             *output = scaled;
         }
-        if exact_differentiator(section) {
+        if is_lossless_differentiator(section) {
             differentiators.push(b[0]);
+            continue;
+        }
+        if is_lossless_integrator(section) {
+            integrators.push(b[0]);
             continue;
         }
         let [a1, a2] = section.a;
@@ -123,9 +130,13 @@ pub fn check_digital_passivity(
     // For a differentiator, u_n = w_(n+1)+w_n and p_n = g*(w_(n+1)-w_n).
     // Thus T*p_n*u_n = T*g*(w_(n+1)^2-w_n^2). Parallel copies have the
     // same zero-state recurrence; their SUMMED g must be nonnegative.
+    // For an integrator, u_n=w_(n+1)-w_n and p_n=g*(w_(n+1)+w_n),
+    // giving the same storage identity with an independent DC coordinate.
     // Expansion arithmetic retains even a weak negative remainder between
     // individually large positive and negative gains.
-    if expansion_sign(&exact_sum(&differentiators)) < 0 {
+    if expansion_sign(&exact_sum(&differentiators)) < 0
+        || expansion_sign(&exact_sum(&integrators)) < 0
+    {
         return Ok(GlobalPassivityReport {
             verdict: GlobalPassivityVerdict::Violated,
             subdivisions: 0,
@@ -186,11 +197,6 @@ fn unresolved(reason: GlobalPassivityUnresolved) -> GlobalPassivityReport {
 fn scaled_coefficient(value: f64, unit: f64) -> Option<f64> {
     let scaled = value / unit;
     (scaled.is_finite() && scaled * unit == value).then_some(scaled)
-}
-
-#[allow(clippy::float_cmp)]
-fn exact_differentiator(section: &Biquad) -> bool {
-    section.a == [1.0, 0.0] && section.b[2] == 0.0 && section.b[1] == -section.b[0]
 }
 
 // Inputs have already been bounded by normalization or strict Jury's necessary

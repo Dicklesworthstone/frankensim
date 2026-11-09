@@ -2,7 +2,7 @@
 
 use fs_math::c64::C64;
 use fs_vfit::discretize::{Biquad, bilinear};
-use fs_vfit::RationalModel;
+use fs_vfit::{PoleTerm, RationalModel};
 
 #[test]
 fn lossless_differentiator_retains_zero_resistance_near_nyquist() {
@@ -37,4 +37,59 @@ fn prewarped_inertance_has_exact_zero_resistance_and_correct_reactance() {
     assert_eq!(filter.eval(0.0), C64::ZERO);
     let close_to_nyquist = (core::f64::consts::PI - 2.0_f64.powi(-30)) / dt;
     assert_eq!(filter.eval(close_to_nyquist).re, 0.0);
+}
+
+#[test]
+fn lossless_compliance_retains_zero_resistance_near_dc() {
+    for gain in [1.0, 0.125, -2.0, 0.0] {
+        let section = Biquad {
+            b: [gain, gain, 0.0],
+            a: [-1.0, 0.0],
+        };
+        for phase in [2.0_f64.powi(-20), 2.0_f64.powi(-30), 2.0_f64.powi(-40)] {
+            // Independent Laurent expansion: cot(theta/2) =
+            // 2/theta - theta/6 - theta^3/360 + O(theta^5).
+            let expected = -gain * (2.0 / phase - phase / 6.0 - phase.powi(3) / 360.0);
+            let actual = section.eval(phase, 1.0);
+            assert_eq!(
+                actual.re, 0.0,
+                "a compliance acquired resistance: {actual:?}"
+            );
+            assert!((actual.im - expected).abs() <= 3e-15 * expected.abs().max(1.0));
+            assert_eq!(section.eval(-phase, 1.0), actual.conj());
+        }
+    }
+    let subnormal = f64::from_bits(1);
+    let section = Biquad {
+        b: [subnormal, subnormal, 0.0],
+        a: [-1.0, 0.0],
+    };
+    assert_eq!(section.eval(subnormal, 1.0), C64::new(0.0, -2.0));
+}
+
+#[test]
+fn prewarped_compliance_keeps_its_true_dc_pole() {
+    let residue = 0.7;
+    let model = RationalModel {
+        terms: vec![PoleTerm::Real { pole: 0.0, residue }],
+        d: 0.0,
+        e: 0.0,
+    };
+    let (dt, prewarp) = (0.01, 80.0);
+    let filter = bilinear(&model, dt, prewarp).unwrap();
+    let at_warp = filter.eval(prewarp);
+    assert_eq!(at_warp.re, 0.0);
+    assert!((at_warp.im + residue / prewarp).abs() < 3e-17);
+    let dc = filter.eval(0.0);
+    assert_eq!(dc.re, 0.0);
+    assert_eq!(
+        dc.im,
+        f64::NEG_INFINITY,
+        "DC storage must not become leakage"
+    );
+    let zero = Biquad {
+        b: [0.0; 3],
+        a: [-1.0, 0.0],
+    };
+    assert_eq!(zero.eval(0.0, dt), C64::ZERO);
 }
