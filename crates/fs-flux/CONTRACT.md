@@ -10538,3 +10538,31 @@ cancellation, and explicit large-reference parcel refusal. The long
 retaining independent 2e-9 K and 1e-8 J endpoint checks. No mechanical-work,
 two-way momentum, thermal expansion or multicomponent interfacial owner is
 introduced by these prescribed incompressible-volume operators.
+
+## Original material sources through thermal multicomponent stirring
+
+The source-bound local-temperature multicomponent field also wraps
+`advect_candidate`, `transport_candidate` and
+`advance_transport_candidate`. All five thermal evolution paths retain the
+same exact original liquid/caloric law references and share one endpoint
+refresh. Every accepted cell is requalified at its actual temperature and
+independent composition, with original pressure, material receipts, cell cap
+and source-derived volume allowance. A late source failure leaves the
+caller's accepted field unchanged.
+
+Donor, coupled-step and coupled-adaptive candidates expose their numerical
+receipts unchanged, including original parcel energy, all species transfers,
+energy/entropy audits, accepted work/error metrics and parcel-resolution
+estimates. Source qualification covers the complete accepted endpoint; it
+does not imply dynamic material-derived face coefficients or qualification
+of every internal/rejected trial.
+
+The two original-source thermal regression groups now also compare raw and
+source-bound endpoints and receipts for all three stirring paths, independently
+check variable-Cp plus B/T total enthalpy, refresh actual-temperature material
+properties, and exercise late original-domain/volume refusal after a
+numerically successful coupled step. These extensions are formatted and
+source-reviewed; material compilation/test execution remains blocked by the
+asupersync prerequisite compiler SIGKILL. The separate actual-source
+numerical suite passes all 145 tests, including the eleven thermal stirring
+and coupled-adaptation cases.

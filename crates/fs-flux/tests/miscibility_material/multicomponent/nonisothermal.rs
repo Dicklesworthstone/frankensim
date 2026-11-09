@@ -2,10 +2,12 @@
 //! Every property and interaction below is synthetic numerical test data.
 
 use super::*;
+use fs_flux::miscibility::multicomponent::advection::MulticomponentMiscibilityAdvectionFace;
 use fs_flux::miscibility::multicomponent::nonisothermal::{
     MulticomponentNonisothermalError, MulticomponentNonisothermalFace,
     MulticomponentNonisothermalField, MulticomponentNonisothermalSolve,
     adaptive::MulticomponentNonisothermalTimeControl,
+    advection::MulticomponentNonisothermalAdvectionControls,
     material::MulticomponentMiscibilityMaterialNonisothermalError as ThermalError,
 };
 use fs_material::liquid::solution::multicomponent::caloric::MulticomponentLiquidCaloricLaw;
@@ -380,6 +382,76 @@ fn original_ternary_calorics_follow_actual_local_temperatures_and_replay_atomica
     assert_eq!(replay.field().field(), end.field());
     assert_eq!(replay.field().cells(), end.cells());
     assert_eq!(replay.step(), candidate.step());
+    let flow = network
+        .prepare_advection(
+            vec![MulticomponentMiscibilityAdvectionFace {
+                forward_m3_s: 2e-4,
+                reverse_m3_s: 2e-4,
+            }],
+            0.0,
+            || false,
+        )
+        .unwrap();
+    let stirring = MulticomponentNonisothermalAdvectionControls::default();
+    let advected = local
+        .advect_candidate(&flow, 0.001, stirring, controls, || false)
+        .unwrap();
+    let raw_advection = before
+        .advect_candidate(&flow, 0.001, stirring, controls, || false)
+        .unwrap();
+    assert_eq!(advected.field().field(), raw_advection.field());
+    assert_eq!(advected.step(), raw_advection.step());
+    let transported = local
+        .transport_candidate(&flow, 0.001, stirring, controls, || false)
+        .unwrap();
+    let raw_transport = before
+        .transport_candidate(&flow, 0.001, stirring, controls, || false)
+        .unwrap();
+    assert_eq!(transported.field().field(), raw_transport.field());
+    assert_eq!(transported.step(), raw_transport.step());
+    let advanced_transport = local
+        .advance_transport_candidate(&flow, 0.01, stirring, controls, thermal_time(), || false)
+        .unwrap();
+    let raw_advanced_transport = before
+        .advance_transport_candidate(&flow, 0.01, stirring, controls, thermal_time(), || false)
+        .unwrap();
+    assert_eq!(
+        advanced_transport.field().field(),
+        raw_advanced_transport.field()
+    );
+    assert_eq!(
+        advanced_transport.advance(),
+        raw_advanced_transport.advance()
+    );
+    for endpoint in [
+        advected.field(),
+        transported.field(),
+        advanced_transport.field(),
+    ] {
+        assert!(std::ptr::eq(endpoint.source(), &liquid));
+        assert!(std::ptr::eq(endpoint.caloric_law(), &caloric));
+        assert_eq!(endpoint.field().transport_faces(), faces());
+        near(enthalpy(endpoint.field()), enthalpy(&before));
+        for (cell, resolved) in endpoint.cells().iter().enumerate() {
+            let t = endpoint.field().temperatures()[cell].value();
+            assert_eq!(
+                resolved.component_moles(),
+                endpoint.field().cell_component_moles(cell).unwrap()
+            );
+            assert_eq!(resolved.thermodynamics().temperature(), Temperature::new(t));
+            near(resolved.volume_m3(), 0.001);
+            near(
+                resolved.transport_state().unwrap().specific_heat_j_kg_k(),
+                3500.0 + 500.0 * (t - 300.0) / 300.0,
+            );
+            let receipt = resolved.liquid().material();
+            assert_eq!(receipt.card_identity(), card.content_hash());
+            assert_eq!(receipt.state_coordinate("T"), Some(t));
+            assert_eq!(receipt.state_coordinate("pressure"), Some(100_000.0));
+        }
+    }
+    assert_eq!(local.field(), &before);
+    assert_eq!(local.cells(), before_cells);
     let advanced = local
         .advance_candidate(0.01, thermal_time(), controls, || false)
         .unwrap();
@@ -442,5 +514,39 @@ fn completed_thermal_candidates_cannot_escape_original_composition_or_volume_sou
         assert_eq!(local.cells(), before_cells);
         assert!(std::ptr::eq(local.source(), &liquid));
         assert!(std::ptr::eq(local.caloric_law(), &caloric));
+        // A tiny real circulation retains the uphill cross-diffusion endpoint;
+        // neither completed stirring nor successful thermal inversion waives
+        // the final original composition/volume source gate.
+        let flow = numerical
+            .network()
+            .prepare_advection(
+                vec![MulticomponentMiscibilityAdvectionFace {
+                    forward_m3_s: 1e-10,
+                    reverse_m3_s: 1e-10,
+                }],
+                0.0,
+                || false,
+            )
+            .unwrap();
+        let stirring = MulticomponentNonisothermalAdvectionControls::default();
+        before
+            .transport_candidate(&flow, 0.1, stirring, controls, || false)
+            .unwrap();
+        let refusal = local
+            .transport_candidate(&flow, 0.1, stirring, controls, || false)
+            .unwrap_err();
+        if expect_source {
+            assert!(matches!(
+                refusal,
+                ThermalError::Material(Error::Source { cell: 1, .. })
+            ));
+        } else {
+            assert!(matches!(
+                refusal,
+                ThermalError::Material(Error::VolumeMismatch { .. })
+            ));
+        }
+        assert_eq!(local.field(), &before);
+        assert_eq!(local.cells(), before_cells);
     }
 }

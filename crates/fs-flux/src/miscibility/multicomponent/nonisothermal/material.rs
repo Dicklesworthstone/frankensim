@@ -16,12 +16,19 @@ use super::adaptive::{
     MulticomponentNonisothermalAdvance, MulticomponentNonisothermalAdvanceError,
     MulticomponentNonisothermalTimeControl,
 };
+use super::advection::{
+    MulticomponentNonisothermalAdvectionControls, MulticomponentNonisothermalAdvectionStep,
+};
+use super::transport::{
+    MulticomponentNonisothermalTransportStep, adaptive::MulticomponentNonisothermalTransportAdvance,
+};
 use super::{
     MulticomponentNonisothermalError, MulticomponentNonisothermalFace,
     MulticomponentNonisothermalField, MulticomponentNonisothermalSolve,
     MulticomponentNonisothermalStep,
 };
 use crate::miscibility::multicomponent::MulticomponentMiscibilityNetwork;
+use crate::miscibility::multicomponent::advection::MulticomponentMiscibilityAdvection;
 use crate::miscibility::multicomponent::material::{
     MulticomponentMiscibilityMaterialError as MaterialError, ResolvedMulticomponentMiscibilityField,
 };
@@ -203,6 +210,84 @@ impl<'caloric, 'liquid, 'card>
         Ok(MulticomponentMiscibilityMaterialNonisothermalAdvanceCandidate { field, advance })
     }
 
+    /// Complete prescribed stirring of every species and its original donor
+    /// enthalpy, then qualify the actual endpoint through the retained sources.
+    pub fn advect_candidate(
+        &self,
+        flow: &MulticomponentMiscibilityAdvection,
+        duration_s: f64,
+        advection: MulticomponentNonisothermalAdvectionControls,
+        controls: MulticomponentNonisothermalSolve,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<
+        MulticomponentMiscibilityMaterialNonisothermalAdvectionCandidate<'caloric, 'liquid, 'card>,
+    > {
+        let (numerical, step) = self
+            .numerical
+            .advect_candidate(flow, duration_s, advection, controls, &mut cancelled)?
+            .into_parts();
+        let field = self.refresh(numerical, &mut cancelled)?;
+        Ok(MulticomponentMiscibilityMaterialNonisothermalAdvectionCandidate { field, step })
+    }
+
+    /// Complete stirring and molecular/heat exchange over the same physical
+    /// interval. Only the final endpoint receives original material receipts.
+    pub fn transport_candidate(
+        &self,
+        flow: &MulticomponentMiscibilityAdvection,
+        duration_s: f64,
+        advection: MulticomponentNonisothermalAdvectionControls,
+        controls: MulticomponentNonisothermalSolve,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<
+        MulticomponentMiscibilityMaterialNonisothermalTransportCandidate<'caloric, 'liquid, 'card>,
+    > {
+        let (numerical, step) = self
+            .numerical
+            .transport_candidate(flow, duration_s, advection, controls, &mut cancelled)?
+            .into_parts();
+        let field = self.refresh(numerical, &mut cancelled)?;
+        Ok(MulticomponentMiscibilityMaterialNonisothermalTransportCandidate { field, step })
+    }
+
+    /// Complete the bounded adaptive stirring/mixing interval and preserve its
+    /// accepted species/energy receipts before final source qualification.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_transport_candidate(
+        &self,
+        flow: &MulticomponentMiscibilityAdvection,
+        duration_s: f64,
+        advection: MulticomponentNonisothermalAdvectionControls,
+        controls: MulticomponentNonisothermalSolve,
+        time: MulticomponentNonisothermalTimeControl,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<
+        MulticomponentMiscibilityMaterialNonisothermalTransportAdvanceCandidate<
+            'caloric,
+            'liquid,
+            'card,
+        >,
+    > {
+        let (numerical, advance) = self
+            .numerical
+            .advance_transport_candidate(
+                flow,
+                duration_s,
+                advection,
+                controls,
+                time,
+                &mut cancelled,
+            )?
+            .into_parts();
+        let field = self.refresh(numerical, &mut cancelled)?;
+        Ok(
+            MulticomponentMiscibilityMaterialNonisothermalTransportAdvanceCandidate {
+                field,
+                advance,
+            },
+        )
+    }
+
     fn refresh(
         &self,
         numerical: MulticomponentNonisothermalField,
@@ -332,6 +417,103 @@ impl<'caloric, 'liquid, 'card>
     ) -> (
         ResolvedMulticomponentMiscibilityNonisothermalField<'caloric, 'liquid, 'card>,
         MulticomponentNonisothermalAdvance,
+    ) {
+        (self.field, self.advance)
+    }
+}
+
+/// Complete original-enthalpy stirring and its source-qualified endpoint.
+#[derive(Debug)]
+pub struct MulticomponentMiscibilityMaterialNonisothermalAdvectionCandidate<
+    'caloric,
+    'liquid,
+    'card,
+> {
+    field: ResolvedMulticomponentMiscibilityNonisothermalField<'caloric, 'liquid, 'card>,
+    step: MulticomponentNonisothermalAdvectionStep,
+}
+impl<'caloric, 'liquid, 'card>
+    MulticomponentMiscibilityMaterialNonisothermalAdvectionCandidate<'caloric, 'liquid, 'card>
+{
+    pub const fn field(
+        &self,
+    ) -> &ResolvedMulticomponentMiscibilityNonisothermalField<'caloric, 'liquid, 'card> {
+        &self.field
+    }
+    pub const fn step(&self) -> &MulticomponentNonisothermalAdvectionStep {
+        &self.step
+    }
+    pub fn into_parts(
+        self,
+    ) -> (
+        ResolvedMulticomponentMiscibilityNonisothermalField<'caloric, 'liquid, 'card>,
+        MulticomponentNonisothermalAdvectionStep,
+    ) {
+        (self.field, self.step)
+    }
+}
+
+/// Complete stirring/molecular step and its source-qualified local temperatures.
+#[derive(Debug)]
+pub struct MulticomponentMiscibilityMaterialNonisothermalTransportCandidate<
+    'caloric,
+    'liquid,
+    'card,
+> {
+    field: ResolvedMulticomponentMiscibilityNonisothermalField<'caloric, 'liquid, 'card>,
+    step: MulticomponentNonisothermalTransportStep,
+}
+impl<'caloric, 'liquid, 'card>
+    MulticomponentMiscibilityMaterialNonisothermalTransportCandidate<'caloric, 'liquid, 'card>
+{
+    pub const fn field(
+        &self,
+    ) -> &ResolvedMulticomponentMiscibilityNonisothermalField<'caloric, 'liquid, 'card> {
+        &self.field
+    }
+    pub const fn step(&self) -> &MulticomponentNonisothermalTransportStep {
+        &self.step
+    }
+    pub fn into_parts(
+        self,
+    ) -> (
+        ResolvedMulticomponentMiscibilityNonisothermalField<'caloric, 'liquid, 'card>,
+        MulticomponentNonisothermalTransportStep,
+    ) {
+        (self.field, self.step)
+    }
+}
+
+/// Complete adaptive stirring interval and unchanged accepted physical receipts.
+#[derive(Debug)]
+pub struct MulticomponentMiscibilityMaterialNonisothermalTransportAdvanceCandidate<
+    'caloric,
+    'liquid,
+    'card,
+> {
+    field: ResolvedMulticomponentMiscibilityNonisothermalField<'caloric, 'liquid, 'card>,
+    advance: MulticomponentNonisothermalTransportAdvance,
+}
+impl<'caloric, 'liquid, 'card>
+    MulticomponentMiscibilityMaterialNonisothermalTransportAdvanceCandidate<
+        'caloric,
+        'liquid,
+        'card,
+    >
+{
+    pub const fn field(
+        &self,
+    ) -> &ResolvedMulticomponentMiscibilityNonisothermalField<'caloric, 'liquid, 'card> {
+        &self.field
+    }
+    pub const fn advance(&self) -> &MulticomponentNonisothermalTransportAdvance {
+        &self.advance
+    }
+    pub fn into_parts(
+        self,
+    ) -> (
+        ResolvedMulticomponentMiscibilityNonisothermalField<'caloric, 'liquid, 'card>,
+        MulticomponentNonisothermalTransportAdvance,
     ) {
         (self.field, self.advance)
     }
