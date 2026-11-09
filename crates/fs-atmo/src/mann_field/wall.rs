@@ -89,7 +89,8 @@ impl ModePoint {
             if mode.polarization.iter().any(|p| p[2] != 0.0) {
                 return Err(invalid("vertical Mann mode has a normal amplitude"));
             }
-            let phase = [det::cos(phase), det::sin(phase)];
+            let (sine, cosine) = det::sin_cos(phase);
+            let phase = [cosine, sine];
             return Ok(Self {
                 k,
                 q,
@@ -104,7 +105,8 @@ impl ModePoint {
         if decay == 0.0 {
             // The represented correction has vanished. Do not evaluate an
             // irrelevant distant-plane phase that could overflow.
-            let phase = [det::cos(phase), det::sin(phase)];
+            let (sine, cosine) = det::sin_cos(phase);
+            let phase = [cosine, sine];
             return Ok(Self {
                 k,
                 q,
@@ -123,7 +125,8 @@ impl ModePoint {
         if !wall_angle.is_finite() {
             return Err(invalid("Mann wall trace phase is not representable"));
         }
-        let wall_trig = [det::cos(wall_angle), det::sin(wall_angle)];
+        let (wall_sine, wall_cosine) = det::sin_cos(wall_angle);
+        let wall_trig = [wall_cosine, wall_sine];
         let wall_phase = wall_trig.map(|v| decay * v);
         let delta = k[2] * height;
         let (phase, difference) = if delta.abs() <= 0.5 && attenuation <= 0.5 {
@@ -145,7 +148,8 @@ impl ModePoint {
                 ],
             )
         } else {
-            let phase = [det::cos(phase), det::sin(phase)];
+            let (sine, cosine) = det::sin_cos(phase);
+            let phase = [cosine, sine];
             (phase, core::array::from_fn(|i| phase[i] - wall_phase[i]))
         };
         Ok(Self {

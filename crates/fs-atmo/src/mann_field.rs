@@ -732,7 +732,7 @@ fn sample_modes(
         if !phase.is_finite() {
             return Err(invalid("sample phase is not representable"));
         }
-        let (s, c) = (det::sin(phase), det::cos(phase));
+        let (s, c) = det::sin_cos(phase);
         let a0 = amplitudes[0][index];
         let b0 = amplitudes[1][index];
         let a1 = amplitudes[2][index];

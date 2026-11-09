@@ -195,7 +195,7 @@ impl Mode {
     /// therefore include spatially constant, time-dependent coefficients.
     fn accumulate(&self, h_m: f64, st: f64, ct: f64, sample: &mut FlowSample) {
         let m = self;
-        let (sh, ch) = (det::sin(m.kh * h_m), det::cos(m.kh * h_m));
+        let (sh, ch) = det::sin_cos(m.kh * h_m);
         let [ax, ay, az] = m.a;
         let u = &mut sample.u;
         let grad = &mut sample.grad;
@@ -328,7 +328,7 @@ impl TurbulenceField {
         };
         for m in &self.modes {
             let theta = m.kx * (x_m - self.u_adv_mps * t) + m.ky * y_m + m.phi;
-            let (st, ct) = (det::sin(theta), det::cos(theta));
+            let (st, ct) = det::sin_cos(theta);
             m.accumulate(h_m, st, ct, &mut sample);
         }
         sample

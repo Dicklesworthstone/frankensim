@@ -234,7 +234,7 @@ pub(crate) fn sample(
         for (m, mode) in model.modes.iter().enumerate() {
             poll(&mut cancelled)?;
             let phase = super::dot(mode.k, position);
-            let (s, c) = (det::sin(phase), det::cos(phase));
+            let (s, c) = det::sin_cos(phase);
             for i in 0..3 {
                 vectors[m][0][i] = mode.polarization[0][i]
                     * (amplitudes[0][m] * c + amplitudes[1][m] * s)

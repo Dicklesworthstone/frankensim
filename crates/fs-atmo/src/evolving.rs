@@ -178,7 +178,7 @@ impl EvolvingTurbulenceField {
             .zip(self.sine.amplitudes())
         {
             let theta = m.kx * (x - self.basis.u_adv_mps * t) + m.ky * y + m.phi;
-            let (s, c) = (det::sin(theta), det::cos(theta));
+            let (s, c) = det::sin_cos(theta);
             // Preserve the derivative pair: modulate the potential, not
             // individual velocity components after projection.
             m.accumulate(h, a * s - b * c, a * c + b * s, &mut sample);

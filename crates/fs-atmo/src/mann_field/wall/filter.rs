@@ -301,7 +301,8 @@ fn averaged_geometry(
     }
     let attenuation = q * (height - radius);
     let decay = det::exp(-attenuation);
-    let mut phase = [bulk * det::cos(angle), bulk * det::sin(angle)];
+    let (sine, cosine) = det::sin_cos(angle);
+    let mut phase = [bulk * cosine, bulk * sine];
     if q == 0.0 || decay == 0.0 {
         if q == 0.0 && mode.polarization.iter().any(|p| p[2] != 0.0) {
             return Err(error(
@@ -336,7 +337,8 @@ fn averaged_geometry(
             "wall phase is not representable",
         ));
     }
-    let wall_trig = [det::cos(wall_angle), det::sin(wall_angle)];
+    let (wall_sine, wall_cosine) = det::sin_cos(wall_angle);
+    let wall_trig = [wall_cosine, wall_sine];
     let rotate = |v: [f64; 2]| {
         [
             wall_trig[0] * v[0] - wall_trig[1] * v[1],
