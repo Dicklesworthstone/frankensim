@@ -480,6 +480,74 @@ state and seven-heat refinement, resolved winding ripple heat, changing commands
 over shared caches, actual branch curtailment, numerical work limits, and
 transactional retry.
 
+## Explicit dead-time and body-diode conduction
+
+`circuit::converter::commutation::PreparedCommutatedSwitchCycle`
+retains the original inductor flux and two finite bus charges while closing
+both physical half-bridge midpoint KCLs. Each of four MOS channels has an
+independent gate command, authored positive finite ON and OFF resistances, and
+a separately authored unilateral body-diode law
+`I_d = max(0, (V_source-drain - V_f) / R_d)`. No device defaults,
+diode clipping by inductor-current sign, or inferred switching efficiency is
+introduced. The positive OFF conductance is declared physical leakage; it gives
+a unique algebraic node at zero current and during both-off dead time. Both-on
+commands retain finite shoot-through current and heat.
+
+`HalfBridgeConduction` is a reusable static owner. It enumerates four
+affine diode active sets, admits only an original-law/KCL solution within
+arithmetic roundoff, and returns its exact differential response. Four bounded
+candidates also cover a supported negative bus with both diodes conducting.
+The left node draws the original inductor current and the right node draws its
+negative. Those algebraic responses, the existing finite-resistance voltage
+source currents and regulated-load laws enter the SAME native three-state
+discrete-gradient/Newton workspace with analytic storage and port tangents.
+There is no second dynamic solver or additional node-storage approximation.
+
+`DeviceOperatingBounds` requires explicit maximum reverse voltage,
+absolute channel current and body-diode current. The actual device points are
+checked at each substep's initial, discrete and final efforts, including every
+authored gate edge. Unsupported operations refuse; limits are never clipping
+laws. These samples do not certify unresolved continuous-time peaks. Device
+coefficients and bounds remain frozen over the cycle; source/temperature
+qualification belongs to the material coupling owner.
+
+`CommutatedStep` separates winding heat, four channel heats (including
+OFF leakage), four body-diode heats, two source-resistor heats, signed ideal
+source work, net converter-boundary work, actual regulated-load work and
+curtailment. Each diode's heat is its accepted forward voltage times its
+accepted forward current; each channel's heat is its own voltage/current
+product. Device heat is independently contracted from those constitutive
+currents and never manufactured from a global energy residual. Native
+dissipation includes the same nine internal heat owners exactly once.
+Endpoint/accumulated storage, native dissipation, bus work, each external
+source/resistor/load partition and full-cycle energy must all reconcile before
+either output publishes. Mean source current is integrated over the cycle;
+`last_devices` and `last_loads` are only the final accepted discrete
+points, not averaged modes or endpoint witnesses.
+
+The existing physical gate-interval cap, explicit 1–256 subdivisions per
+interval, checked Newton/backtracking work count and reused gate/duration
+workspaces bound preparation and stepping. A positive compensated remainder
+must retain each original gate edge in the represented clock. One
+`PowerSwitchCommand` per original interval preserves source/load/gate
+correlation even when workspaces share a cache. Cancellation, late command
+failure, unsupported device state or energy refusal leaves both output buffers
+unchanged and permits an identical retry.
+
+This is a quasi-static conduction model. It has no node/output capacitance,
+gate charge, reverse-recovery state, avalanche, finite gate-transition dynamics
+or associated transition-loss claim. Explicit temporal refinement is required
+for stiff near-zero-current motion and diode branch crossings; energy closure
+does not establish temporal accuracy, nonlinear root uniqueness or control
+stability. The external ideal supplies have finite impedance, not finite energy.
+
+Focused synthetic-data regressions independently exercise all diode active
+sets, KCL closed forms and tangents, unique zero-current dead time, signed
+commutation, reverse channel/diode sharing, finite shoot-through capacitor
+discharge, a manufactured steady transfer, original-KCL bisection/RK4 state
+and heat refinement, endpoint/intermediate-gate support, and transactional
+cancellation/failure/retry. They do not constitute measured device qualification.
+
 ## Averaged bidirectional power conversion
 
 `circuit::converter::AveragedBuckBoost` assembles the original flux and both bus

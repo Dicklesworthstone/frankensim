@@ -29,6 +29,8 @@ use crate::{PhsError, PortHamiltonian, PreparedStepError, PreparedStepRecord, Qu
 pub mod battery_fed;
 /// Finite charge and voltage response of capacitor-backed source/load terminals.
 pub mod capacitor_terminals;
+/// Finite-leakage MOS channels and explicit body-diode commutation.
+pub mod commutation;
 /// Source-bounded nonlinear winding storage on the same finite-bus power stage.
 pub mod inductance;
 /// Nonlinear regulated-power bus loads with current limits and voltage foldback.

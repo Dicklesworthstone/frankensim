@@ -224,13 +224,13 @@ pub struct VoltagePowerLoadedStep {
 }
 
 #[derive(Clone, Copy)]
-struct VoltageSources {
+pub(super) struct VoltageSources {
     voltage_v: [f64; 2],
     resistance_ohm: [f64; 2],
-    conductance_s: [f64; 2],
+    pub(super) conductance_s: [f64; 2],
 }
 impl VoltageSources {
-    fn new(voltage_v: [f64; 2], resistance_ohm: [f64; 2]) -> Result<Self, PhsError> {
+    pub(super) fn new(voltage_v: [f64; 2], resistance_ohm: [f64; 2]) -> Result<Self, PhsError> {
         let conductance_s = resistance_ohm.map(|r| 1.0 / r);
         if voltage_v.iter().any(|v| !v.is_finite())
             || resistance_ohm.iter().any(|r| !positive(*r))
@@ -246,7 +246,7 @@ impl VoltageSources {
             conductance_s,
         })
     }
-    fn current_a(self, port: usize, bus_voltage_v: f64) -> f64 {
+    pub(super) fn current_a(self, port: usize, bus_voltage_v: f64) -> f64 {
         (self.voltage_v[port] - bus_voltage_v) / self.resistance_ohm[port]
     }
 }
