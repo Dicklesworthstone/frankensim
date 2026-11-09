@@ -2,8 +2,10 @@
 
 use super::{
     MaterialFluxError, MaterialFluxRheologyPoint, MaterialFluxRheologyStep, MaterialFluxSystem,
+    MaterialStokesBoundary, MaterialStokesRheologySolution, mixed::with_physical_boundaries,
     rheology::RheologyField,
 };
+use crate::ns::boundary::StokesRheologySolution;
 use crate::ns::linearization::FluxViscosityTangent;
 use crate::ns::newton::{FluxNewtonControls, FluxNewtonError};
 use fs_material::MaterialError;
@@ -43,7 +45,136 @@ impl<G> MaterialFluxNewtonStep<G> {
     }
 }
 
+/// Material-bound mixed Stokes Newton endpoint in physical units.
+pub struct MaterialStokesRheologyNewtonSolution<G> {
+    /// Accepted flow, original cell sources, pressure datum, bulk heat and
+    /// physical boundary reactions, using the existing mixed-flow owner.
+    pub flow: MaterialStokesRheologySolution<G>,
+    /// Total line-search candidates rejected by the original Newton owner.
+    pub backtracks: usize,
+    derivatives_pa_s2: Vec<f64>,
+}
+
+impl<G> MaterialStokesRheologyNewtonSolution<G> {
+    /// Exact dynamic-viscosity derivatives [Pa s²] at the accepted cell rates,
+    /// in the same order as `flow.samples()`. No source is evaluated again.
+    #[must_use]
+    pub fn viscosity_derivatives_pa_s2(&self) -> &[f64] {
+        &self.derivatives_pa_s2
+    }
+}
+
+// Both velocity-only and mixed-boundary Newton entries retain the SAME
+// original-source derivative and reject unrepresentable density scaling.
+fn retain_tangent<G>(
+    response: MaterialFluxViscosityTangent<G>,
+    point: MaterialFluxRheologyPoint,
+    density: f64,
+    derivatives: &RefCell<Vec<f64>>,
+) -> Result<G, MaterialError> {
+    let derivative = response.derivative_pa_s2;
+    let normalized = derivative / density;
+    if !derivative.is_finite()
+        || !normalized.is_finite()
+        || (derivative != 0.0 && normalized == 0.0)
+        || (point.shear_rate_per_s == 0.0 && derivative != 0.0)
+    {
+        return Err(MaterialError::State {
+            what: "material Newton viscosity derivative must be finite, representable after density scaling, and zero at zero strain".into(),
+        });
+    }
+    derivatives.borrow_mut()[point.cell] = derivative;
+    Ok(response.material)
+}
+
 impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
+    /// Solve steady mixed velocity, total-traction and Navier-slip Stokes flow
+    /// using original material viscosities and their analytic rate derivatives.
+    ///
+    /// Force density is N/m³, total traction Pa, wall velocity m/s and Navier
+    /// resistance Pa s/m. Viscosity, its derivative, force, traction and slip
+    /// resistance all use the SAME fixed reference density for normalization.
+    /// Each cell/rate retains one original material response and its derivative;
+    /// changing that density or refusing any source query terminates the solve,
+    /// including during line search and the final reaction assembly.
+    ///
+    /// The existing mixed Newton owner differentiates the original symmetric
+    /// stress and viscosity-weighted interfaces. Traction and wall resistance
+    /// remain fixed physical data. Pressure retains the original traction datum
+    /// or componentwise closed-domain gauge. Accepted heat is `mu * gamma²`;
+    /// wall-slip loss stays in the physical boundary loads. Reporting reuses
+    /// the accepted sources without reevaluating their transport properties.
+    ///
+    /// Temperature and composition are fixed constitutive inputs. This is
+    /// steady creeping flow with a smooth finite radial viscosity law; it adds
+    /// no convection, time history, thermal evolution or viscoelastic memory.
+    ///
+    /// # Errors
+    /// Preserves original material errors and refuses invalid tangents,
+    /// density changes, inadmissible boundaries and unconverged nonlinear flow.
+    pub fn solve_stokes_mixed_rheology_newton<G: FluidTransport>(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialStokesBoundary<'_>],
+        initial_velocity: &[f64],
+        controls: FluxNewtonControls,
+        mut resolve: impl FnMut(
+            MaterialFluxRheologyPoint,
+            &FluidTransportState,
+        ) -> Result<MaterialFluxViscosityTangent<G>, MaterialError>,
+    ) -> Result<MaterialStokesRheologyNewtonSolution<G>, MaterialFluxError> {
+        let density = self.transport.density_kg_m3();
+        let derivatives = RefCell::new(vec![0.0; self.system.mesh.tris.len()]);
+        let field = RheologyField::new(
+            &self.system.mesh.centroids,
+            &self.transport,
+            |point, reference| {
+                retain_tangent(resolve(point, reference)?, point, density, &derivatives)
+            },
+        );
+        let result = with_physical_boundaries(boundaries, density, |primitive| {
+            let tangent = |cell, _, rate| {
+                let nu = field.viscosity(cell, rate);
+                FluxViscosityTangent {
+                    nu,
+                    derivative: if field.is_valid() {
+                        derivatives.borrow()[cell] / density
+                    } else {
+                        0.0
+                    },
+                }
+            };
+            self.system.solve_stokes_mixed_rheology_newton_checked(
+                self.params,
+                &tangent,
+                &|point| {
+                    let physical = force_density(point);
+                    [physical[0] / density, physical[1] / density]
+                },
+                primitive,
+                initial_velocity,
+                controls,
+                &|| field.is_valid(),
+            )
+        })
+        .map_err(MaterialFluxError::Newton);
+        let (solved, samples) = field.finish(result)?;
+        let flow = self.material_stokes_rheology_solution(
+            StokesRheologySolution {
+                solution: solved.solution,
+                iterations: solved.iterations,
+                relative_update: solved.relative_update,
+                nonlinear_residual: solved.nonlinear_residual,
+            },
+            samples,
+        )?;
+        Ok(MaterialStokesRheologyNewtonSolution {
+            flow,
+            backtracks: solved.backtracks,
+            derivatives_pa_s2: derivatives.into_inner(),
+        })
+    }
+
     /// Solve steady shear-dependent flow using the original material
     /// viscosities and analytic tangents. `initial_velocity` contains an
     /// immutable guess in m/s; no time history or mass term is introduced.
@@ -249,20 +380,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             &self.system.mesh.centroids,
             &self.transport,
             |point, reference| {
-                let response = resolve(point, reference)?;
-                let derivative = response.derivative_pa_s2;
-                let normalized = derivative / density;
-                if !derivative.is_finite()
-                    || !normalized.is_finite()
-                    || (derivative != 0.0 && normalized == 0.0)
-                    || (point.shear_rate_per_s == 0.0 && derivative != 0.0)
-                {
-                    return Err(MaterialError::State {
-                        what: "material Newton viscosity derivative must be finite, representable after density scaling, and zero at zero strain".into(),
-                    });
-                }
-                derivatives.borrow_mut()[point.cell] = derivative;
-                Ok(response.material)
+                retain_tangent(resolve(point, reference)?, point, density, &derivatives)
             },
         );
         let result = self.with_inputs(

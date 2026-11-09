@@ -147,6 +147,30 @@ impl<'m> FluxSystem<'m> {
         initial_velocity: &[f64],
         controls: FluxNewtonControls,
     ) -> Result<StokesRheologyNewtonSolution, FluxNewtonError> {
+        self.solve_stokes_mixed_rheology_newton_checked(
+            params,
+            law,
+            force,
+            boundaries,
+            initial_velocity,
+            controls,
+            &|| true,
+        )
+    }
+
+    // Preserve a material owner's original refusal through every Newton trial
+    // and the final reaction assembly; fallback coefficients never publish.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn solve_stokes_mixed_rheology_newton_checked(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> FluxViscosityTangent,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[StokesBoundary<'_>],
+        initial_velocity: &[f64],
+        controls: FluxNewtonControls,
+        source_is_valid: &dyn Fn() -> bool,
+    ) -> Result<StokesRheologyNewtonSolution, FluxNewtonError> {
         let admitted = self
             .admit_stokes_problem(params, boundaries)
             .map_err(FluxNewtonError::Boundary)?;
@@ -160,18 +184,20 @@ impl<'m> FluxSystem<'m> {
             0.0,
             None,
             controls,
-            &|| true,
+            source_is_valid,
             Some(&admitted),
         )?;
         let rates = self.shear_rates(&step.solution.x);
-        let endpoint = self
-            .assemble_stokes_admitted_viscosity(
-                params,
-                &|cell, point| law(cell, point, rates[cell]).nu,
-                force,
-                &admitted,
-            )
-            .map_err(FluxNewtonError::Boundary)?;
+        let endpoint = self.assemble_stokes_admitted_viscosity(
+            params,
+            &|cell, point| law(cell, point, rates[cell]).nu,
+            force,
+            &admitted,
+        );
+        if !source_is_valid() {
+            return Err(FluxNewtonError::Invalid("constitutive source refused"));
+        }
+        let endpoint = endpoint.map_err(FluxNewtonError::Boundary)?;
         let (_, original, scaled) = rheology_residual(
             self,
             &endpoint.matrix,
@@ -572,5 +598,59 @@ impl<'m> FluxSystem<'m> {
             current_pressures = pressures;
         }
         unreachable!("a nonzero budget accepts or refuses its final candidate")
+    }
+}
+
+#[cfg(test)]
+mod source_refusal_tests {
+    use super::*;
+    use crate::TriMesh;
+    use fs_solid::Mesh2;
+    use std::cell::Cell;
+
+    #[test]
+    fn checked_mixed_newton_refuses_source_loss_in_final_reaction_assembly() {
+        let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 1, 1));
+        let system = FluxSystem::new(&mesh);
+        let wall = |_: [f64; 2]| [0.0; 2];
+        let boundaries: Vec<_> = mesh
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(edge, _)| mesh.is_boundary(*edge))
+            .map(|(edge, _)| StokesBoundary::Velocity { edge, value: &wall })
+            .collect();
+        let final_assembly = Cell::new(false);
+        let source_is_valid = Cell::new(true);
+        let law = |_: usize, _: [f64; 2], _: f64| {
+            if final_assembly.get() {
+                source_is_valid.set(false);
+            }
+            FluxViscosityTangent {
+                nu: 1.0,
+                derivative: 0.0,
+            }
+        };
+        // Zero flow already solves the first nonlinear assembly. Only the
+        // subsequent reaction assembly loses support; its finite fallback
+        // must not escape as an otherwise converged physical endpoint.
+        let result = system.solve_stokes_mixed_rheology_newton_checked(
+            FluxParams::default(),
+            &law,
+            &|_| [0.0; 2],
+            &boundaries,
+            &vec![0.0; system.n_u],
+            FluxNewtonControls::default(),
+            &|| {
+                let valid = source_is_valid.get();
+                final_assembly.set(true);
+                valid
+            },
+        );
+        assert!(!source_is_valid.get(), "exercise final source refusal");
+        assert!(matches!(
+            result,
+            Err(FluxNewtonError::Invalid("constitutive source refused"))
+        ));
     }
 }

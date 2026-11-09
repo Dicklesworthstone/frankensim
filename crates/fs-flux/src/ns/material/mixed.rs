@@ -437,13 +437,15 @@ impl<G> MaterialStokesRheologySolution<G> {
     pub fn samples(&self) -> &[MaterialFluxRheologySample<G>] {
         &self.samples
     }
-    /// Completed Picard flow updates. Flow control additionally solves one
-    /// pressure response per controlled port in each update.
+    /// Completed nonlinear flow updates (Picard or Newton, by entry point).
+    /// Flow control additionally solves one pressure response per controlled
+    /// port in each update.
     #[must_use]
     pub const fn iterations(&self) -> usize {
         self.flow.iterations
     }
-    /// Final undamped relative velocity correction.
+    /// Final relative velocity correction: undamped for Picard, accepted
+    /// after line search for Newton.
     #[must_use]
     pub const fn relative_update(&self) -> f64 {
         self.flow.relative_update
@@ -693,8 +695,8 @@ impl<'s, 'm, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, '_, F> {
 }
 
 // Keep velocity, traction and Navier resistance under one fixed normalization,
-// shared by homogeneous and spatial source-owned linear Stokes entries.
-fn with_physical_boundaries<R>(
+// shared by homogeneous, spatial and nonlinear source-owned Stokes entries.
+pub(super) fn with_physical_boundaries<R>(
     boundaries: &[MaterialStokesBoundary<'_>],
     density: f64,
     run: impl FnOnce(&[StokesBoundary<'_>]) -> R,

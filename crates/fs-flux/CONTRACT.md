@@ -2520,8 +2520,9 @@ arithmetic so a large common traction pressure cannot hide weak unconverged
 flow. Final pressure interpretation and boundary reactions are rebuilt at the
 accepted viscosity and velocity. Initial state remains unchanged on refusal.
 Temperatures, composition and reference density stay fixed; this adds no
-convective mixed Newton solve, thermal evolution, viscoelastic memory,
-unregularized yield stress or material-bound mixed Newton adapter.
+convective mixed Newton solve, thermal evolution, viscoelastic memory or
+unregularized yield stress. The material-bound entry below supplies physical
+units and retains the original source owners through this same Newton solve.
 
 Focused tests in `mixed_rheology.rs` use exactly representable pressure-driven
 extension and layered Couette flow to check nonlinear stress, pressure-datum
@@ -2531,6 +2532,45 @@ primal differences at finite/perfect slip and spatial viscosity contrast.
 Invalid tangent refusal preserves the input state. These new tests are authored
 but **not executed**: the session's executor became unavailable before native
 compilation. Their presence is not a convergence, performance or validation claim.
+
+## Material-bound mixed Newton flow
+
+`MaterialFluxSystem::solve_stokes_mixed_rheology_newton` connects the original
+source-owned viscosity and analytic `dmu/dgamma` to the existing mixed-boundary
+Newton owner. One immutable reference density normalizes dynamic viscosity,
+its derivative, physical force density [N/m³], total traction [Pa] and Navier
+resistance [Pa s/m]. No fitted duplicate rheology, scalar pressure shift or
+alternate nonlinear solver is introduced. The material response and derivative
+share the same cell, physical position, strain rate and fixed temperature /
+composition. Density changes, unrepresentable derivatives, nonfinite tangents
+and nonzero radial derivatives at zero strain refuse the solve.
+
+`MaterialStokesRheologyNewtonSolution` retains the existing physical mixed
+flow owner, the accepted dynamic-viscosity derivatives [Pa s²] and the actual
+backtrack count. Its `flow` supplies velocity, pressure in the original datum,
+kinetic energy, original endpoint sources and physical boundary reactions.
+Bulk heat remains the original `mu * gamma²`; finite-slip wall heat remains
+a separate boundary loss. The shared cell/rate cache reads each source once
+and supplies the final stress and heat without a reporting requery.
+
+Source-support failures are terminal even in a line-search trial or the final
+reaction assembly. They cannot be hidden by taking a smaller step, accepting
+fallback viscosity or returning a partial physical endpoint. The original
+typed material error has precedence, and caller state is immutable. Scope is
+steady creeping generalized-Newtonian flow with smooth finite viscosity and
+fixed constitutive context; no thermal evolution or variable-density momentum
+is claimed.
+
+Focused tests in `material_flow/newton/mixed.rs` cover exact pressure-driven
+extension at two densities and two pressure datums, failure of undamped Picard
+for the same stiff law, retained original layer sources, finite Navier slip,
+independent bulk/wall/work closure, and an actual thermal Carreau--Yasuda source
+with its analytic derivative. Refusal tests exercise a genuine Newton trial,
+density changes, invalid tangents and invalid initial state. A private checked
+owner test isolates source loss in the final reaction assembly. All changed
+Rust sources pass the pinned rustfmt parser. These new tests are authored but
+**not executed** in this environment; parser acceptance is not compilation,
+convergence, performance or physical validation evidence.
 
 ## Generalized-Newtonian mixed velocity/traction Stokes flow
 

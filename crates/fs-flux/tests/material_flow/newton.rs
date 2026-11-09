@@ -9,6 +9,8 @@ use fs_material::fluid_transport::rheology::{
 };
 use fs_material::visco::temperature::{TemperatureShift, TemperatureShiftModel};
 
+#[path = "newton/mixed.rs"]
+mod mixed;
 #[path = "newton/sdirk2.rs"]
 mod sdirk2;
 

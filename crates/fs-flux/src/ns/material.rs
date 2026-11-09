@@ -54,7 +54,10 @@ pub(crate) use navier_stokes::with_kinematic_boundaries;
 pub use navier_stokes::{
     MaterialNavierStokesBoundary, MaterialNavierStokesRheologyStep, MaterialNavierStokesStep,
 };
-pub use newton::{MaterialFluxNewtonStep, MaterialFluxSdirk2Step, MaterialFluxViscosityTangent};
+pub use newton::{
+    MaterialFluxNewtonStep, MaterialFluxSdirk2Step, MaterialFluxViscosityTangent,
+    MaterialStokesRheologyNewtonSolution,
+};
 pub use porous::{
     MaterialBrinkmanDragExchange, MaterialBrinkmanSolution, MaterialForchheimerSolution,
 };

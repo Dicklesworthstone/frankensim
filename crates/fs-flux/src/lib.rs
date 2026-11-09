@@ -86,8 +86,9 @@ pub use material::{
     MaterialForchheimerSolution, MaterialNavierStokesBoundary, MaterialNavierStokesRheologyStep,
     MaterialNavierStokesStep, MaterialStokesBoundary, MaterialStokesCell, MaterialStokesField,
     MaterialStokesFieldSolution, MaterialStokesFlowControlSolution, MaterialStokesResistancePort,
-    MaterialStokesResistanceSolution, MaterialStokesRheologySolution, MaterialStokesSolution,
-    MaterialStokesWindkesselBalance, MaterialStokesWindkesselHistory, MaterialStokesWindkesselPort,
+    MaterialStokesResistanceSolution, MaterialStokesRheologyNewtonSolution,
+    MaterialStokesRheologySolution, MaterialStokesSolution, MaterialStokesWindkesselBalance,
+    MaterialStokesWindkesselHistory, MaterialStokesWindkesselPort,
     MaterialStokesWindkesselSolution, MaterialViscousDissipation,
 };
 #[cfg(feature = "continuum")]
@@ -99,9 +100,8 @@ pub use ns::boundary::{
     OpenBoundaryPolicy, PreparedStokesFlowControl, StokesAssembly, StokesBoundary,
     StokesBoundaryError, StokesFlowControlSolution, StokesPressureReference, StokesResistancePort,
     StokesResistanceSolution, StokesRheologyControls, StokesRheologyNewtonSolution,
-    StokesRheologySolution, StokesSolution,
-    StokesWindkesselBalance, StokesWindkesselHistory, StokesWindkesselPort,
-    StokesWindkesselSolution,
+    StokesRheologySolution, StokesSolution, StokesWindkesselBalance, StokesWindkesselHistory,
+    StokesWindkesselPort, StokesWindkesselSolution,
 };
 #[cfg(feature = "continuum")]
 pub use ns::linearization::{
