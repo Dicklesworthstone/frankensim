@@ -15030,3 +15030,52 @@ Sources, models and channels must agree across peak and bandwidth queries.
 Grid resolution, local feature isolation and constitutive validity remain
 caller obligations. Cancellation, missing/flat crossings, inconsistent samples
 and source/physical refusals publish no partial query result.
+
+### Complete material-memory power and receiver resonance queries
+
+`PreparedStructuralInteriorRelaxation` now resolves original signed-power
+extrema and coherent field peaks/notches, their independently bracketed
+half-power crossings, linewidth/Q, local physical-parameter derivatives and
+grid-resolved surveys. All queries reuse the shared `fs-modal` numerical owner;
+no reduced pole fit, sampled damping, invented loss floor or finite model
+perturbation replaces the original coupled response.
+
+Power selections retain structural/acoustic source work, reciprocal interface
+exchange, structural and wall heat, material-memory heat and separately owned
+structural/acoustic work into each original Maxwell branch. Total dissipation
+adds structural, wall and relaxation heat once. Negative source/interface work
+keeps its sign; heat is observed from the original constitutive channels.
+The first-frequency response now carries independent first-order power and
+per-arm work/heat accounts. The normalized quadratic-work owner excludes gyro
+exchange and retains original weak and subnormal coefficients.
+
+Receiver selections cover original displacement, velocity, pressure potential,
+physical pressure, fluid force and displaced flow. Complex receiver weights
+act as coherent linear rows without conjugation. Pressure retains every
+kinematic derivative of `-i*omega*psi`. A pressure-point receiver may supply its
+original basis evaluation row. Authored frequency/parameter receiver jets
+include changing geometry or observation laws explicitly; no such derivative
+is inferred from a label. Simple cancellation notches retain their frequency
+and total complex-amplitude derivatives, with absent phase/log-amplitude at
+an exact zero.
+
+Source and receiver spectrum traits lend reusable buffers. Frequency requests
+supply complete values/slopes; final parameter requests supply all five local
+orders. One native factor per frequency serves two state solves during
+refinement, three for a final power curvature, or five for final physical
+parameter jets. Original material/geometry directions are prepared once and
+remain bound to the same immutable preparation. Full response jets are not
+computed at every refinement trial. Provider domain/work limits remain with
+the authored laws; cancellation is checked around provider calls and native
+solves. Existing complete-state and adapter admission remains in force.
+
+Power widths cross `P_peak/2`; receiver widths cross `|H_peak|^2/2`. Both report
+actual measured peak frequency divided by width, rather than equating a driven
+response Q with pole decay or a material loss factor. Source, receiver, channel
+and model must match the supplied peak. Final jets must reproduce the same
+first-order sample; inconsistent observations refuse. Strictly local feature
+isolation, positive cavity frequencies, grid resolution, fixed coordinates and
+topology remain caller obligations. Cancellation, missing/flat crossings,
+capacity failure or physical refusal publishes no partial query. Native tests
+execute original coupled recovery and query physics; they do not establish
+complete outer FE mesh-construction or full-workspace Cargo validation.

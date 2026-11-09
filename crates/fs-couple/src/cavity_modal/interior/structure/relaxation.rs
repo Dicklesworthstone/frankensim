@@ -22,15 +22,24 @@ use fs_phs::harmonic::resonance::{search_resonance, survey_resonances};
 pub use fs_phs::mechanical::MechanicalRelaxationDirection as StructuralInteriorRelaxationBranchDirection;
 
 mod fields;
+mod power;
+mod sources;
+mod transfer;
 use fields::StructuralInteriorRelaxationHarmonicError as Error;
 pub use fields::{
-    StructuralInteriorRelaxationCurvatureResponse,
+    StructuralInteriorRelaxationCurvatureResponse, StructuralInteriorRelaxationFixedReceiver,
     StructuralInteriorRelaxationFrequencyParameterResponse,
     StructuralInteriorRelaxationFrequencyResponse, StructuralInteriorRelaxationHarmonicError,
     StructuralInteriorRelaxationHarmonicLimits, StructuralInteriorRelaxationMemoryCurvature,
-    StructuralInteriorRelaxationMemoryParameterJet, StructuralInteriorRelaxationMemoryResponse,
-    StructuralInteriorRelaxationParameterDirection, StructuralInteriorRelaxationPowerCurvature,
-    StructuralInteriorRelaxationPowerParameterJet, StructuralInteriorRelaxationResponse,
+    StructuralInteriorRelaxationMemoryFrequency, StructuralInteriorRelaxationMemoryParameterJet,
+    StructuralInteriorRelaxationMemoryResponse, StructuralInteriorRelaxationParameterDirection,
+    StructuralInteriorRelaxationPowerCurvature, StructuralInteriorRelaxationPowerFrequency,
+    StructuralInteriorRelaxationPowerParameterJet, StructuralInteriorRelaxationReceiverJet,
+    StructuralInteriorRelaxationReceiverSpectrum, StructuralInteriorRelaxationResponse,
+};
+pub use power::StructuralInteriorRelaxationPowerChannel;
+pub use sources::{
+    StructuralInteriorRelaxationSourceOrder, StructuralInteriorRelaxationSourceSpectrum,
 };
 
 /// Source-bound complete linear image; all frequencies share native assembly.

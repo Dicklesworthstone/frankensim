@@ -518,3 +518,9 @@ mod curvature;
 mod parameter;
 #[path = "tests/parameter_coupled.rs"]
 mod parameter_coupled;
+
+#[path = "tests/power.rs"]
+mod power;
+
+#[path = "tests/transfer.rs"]
+mod transfer;

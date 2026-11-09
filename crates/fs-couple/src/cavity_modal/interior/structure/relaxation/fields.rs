@@ -110,6 +110,12 @@ type Limits = StructuralInteriorRelaxationHarmonicLimits;
 
 mod curvature;
 mod parameter;
+pub(super) mod transfer;
+pub use transfer::{
+    StructuralInteriorRelaxationFixedReceiver, StructuralInteriorRelaxationReceiverJet,
+    StructuralInteriorRelaxationReceiverSpectrum,
+};
+pub(super) mod power;
 pub use curvature::{
     StructuralInteriorRelaxationCurvatureResponse, StructuralInteriorRelaxationMemoryCurvature,
     StructuralInteriorRelaxationPowerCurvature,
@@ -119,6 +125,9 @@ pub use parameter::{
     StructuralInteriorRelaxationFrequencyParameterResponse,
     StructuralInteriorRelaxationMemoryParameterJet, StructuralInteriorRelaxationParameterDirection,
     StructuralInteriorRelaxationPowerParameterJet,
+};
+pub use power::{
+    StructuralInteriorRelaxationMemoryFrequency, StructuralInteriorRelaxationPowerFrequency,
 };
 
 /// One original Maxwell arm in caller order, using peak phasors.
@@ -204,6 +213,9 @@ pub struct StructuralInteriorRelaxationFrequencyResponse {
     pub fluid_force_derivative_per_rad_s: Vec<C64>,
     pub displaced_flow_derivative_m3_s_per_rad_s: Vec<C64>,
     pub relaxation_stress_derivative_per_rad_s: Vec<C64>,
+    /// Independent physical heat/work, evaluated with the same two state solves.
+    pub power: StructuralInteriorRelaxationPowerFrequency,
+    pub memory: Vec<StructuralInteriorRelaxationMemoryFrequency>,
     /// Maximum native and original differentiated-equation backward residual.
     pub relative_derivative_residual: f64,
     pub original_relative_derivative_residual: f64,
@@ -686,14 +698,25 @@ impl Factor<'_, '_> {
             residual,
             cancelled,
         )?;
-        let potential = derivative.q.split_off(p.source.structural);
-        let pressure = derivative.velocity.split_off(p.source.structural);
         let (force, flow) = response::interface(
             p.source.coupling,
-            &derivative.velocity,
-            &pressure,
+            &derivative.velocity[..p.source.structural],
+            &derivative.velocity[p.source.structural..],
             cancelled,
         )?;
+        let (power, memory) = power::observe(
+            p,
+            &response,
+            &derivative,
+            &force,
+            input,
+            slope_input,
+            &native.response.effort,
+            &native.effort_derivative,
+            cancelled,
+        )?;
+        let potential = derivative.q.split_off(p.source.structural);
+        let pressure = derivative.velocity.split_off(p.source.structural);
         poll(cancelled)?;
         Ok(StructuralInteriorRelaxationFrequencyResponse {
             response,
@@ -704,6 +727,8 @@ impl Factor<'_, '_> {
             fluid_force_derivative_per_rad_s: force,
             displaced_flow_derivative_m3_s_per_rad_s: flow,
             relaxation_stress_derivative_per_rad_s: derivative.stress,
+            power,
+            memory,
             relative_derivative_residual: native
                 .relative_derivative_residual
                 .max(derivative_residual),
