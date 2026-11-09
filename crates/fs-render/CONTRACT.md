@@ -3754,8 +3754,17 @@ history-level covariance, work limits and atomic refusal share the original
 reducer. Surviving power at the last admitted scattering event remains
 unresolved; truncation is not credited as heat. The same native
 `ScatteringHeating` consumer admits either report. Collision weighting remains
-available, and force/polarized queries retain that estimator. Continuous
-weighting can reduce heat noise in thin absorbers; no universal variance or
+available, and the existing force/polarized queries retain that estimator.
+The continuous momentum/wrench variants integrate positive absorption impulse
+along every traversed native cell segment and elastic recoil at each original
+scattering position, within the same histories. Distributed absorption retains
+the actual ray line of action for orbital torque; no cell-center approximation
+or extra force traversal is used. The final capped event samples its outgoing
+phase when momentum is observed, closing recoil with directed unresolved
+radiation. Power reports match the continuous heat query, and force/torque
+retain original per-history covariance, reference geometry and finite-rate
+refusals. Native heat admission consumes only the absorbed-power account.
+Continuous weighting can reduce heat noise in thin absorbers; no universal variance or
 runtime improvement is claimed. Focused regressions cover the exact
 absorption-only limit, layered first-scatter integrals, an independent analog
 cube reference, native-cell subdivision/replay, prepared cell sources,

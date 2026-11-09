@@ -98,6 +98,36 @@ impl ScatteringGrid<'_> {
         let momentum = tallies.finish(&mut || checkpoint(cx), &power, unit_direction)?;
         Ok(ScatteringMomentumDeposition { power, momentum })
     }
+
+    /// Joint continuous-absorption heat and radiation force on original cells.
+    ///
+    /// Each traversed absorbing segment transfers its positive Beer loss along
+    /// the ray. Elastic scattering transfers the surviving packet's actual
+    /// change of direction, including the last capped event. Heat, force and
+    /// directed unresolved radiation share one bounded native traversal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn deposit_continuous_absorption_momentum<const N: usize>(
+        &self,
+        cx: &Cx<'_>,
+        origin: Point3,
+        unit_direction: Vec3,
+        wavelengths_nm: &[f64; N],
+        incident_power_w: &[f64; N],
+        config: ScatteringDepositionConfig,
+    ) -> Result<ScatteringMomentumDeposition<N>, VolumeTransportError> {
+        let mut tallies = MomentumTallies::new(config.max_deposition_cells);
+        let power = self.deposit_continuous_observed(
+            cx,
+            origin,
+            unit_direction,
+            wavelengths_nm,
+            incident_power_w,
+            config,
+            Some(&mut tallies),
+        )?;
+        let momentum = tallies.finish(&mut || checkpoint(cx), &power, unit_direction)?;
+        Ok(ScatteringMomentumDeposition { power, momentum })
+    }
 }
 
 impl<const N: usize> CellScatteringGrid<'_, '_, N> {
@@ -132,6 +162,48 @@ impl<const N: usize> CellScatteringGrid<'_, '_, N> {
     ) -> Result<ScatteringMomentumDeposition<N>, VolumeTransportError> {
         let mut tallies = MomentumTallies::new(config.max_deposition_cells);
         let power = deposit_prepared_observed(
+            self,
+            check,
+            origin,
+            unit_direction,
+            incident_power_w,
+            config,
+            Some(&mut tallies),
+        )?;
+        let momentum = tallies.finish(check, &power, unit_direction)?;
+        Ok(ScatteringMomentumDeposition { power, momentum })
+    }
+
+    /// Continuous absorption and elastic recoil from the original local optics.
+    pub fn deposit_continuous_absorption_momentum(
+        &self,
+        cx: &Cx<'_>,
+        origin: Point3,
+        unit_direction: Vec3,
+        incident_power_w: &[f64; N],
+        config: ScatteringDepositionConfig,
+    ) -> Result<ScatteringMomentumDeposition<N>, VolumeTransportError> {
+        self.deposit_continuous_absorption_momentum_with_checkpoint(
+            &mut || checkpoint(cx),
+            origin,
+            unit_direction,
+            incident_power_w,
+            config,
+        )
+    }
+
+    /// Hosting-solver checkpoint variant of the joint continuous heat/force solve.
+    /// Every original work, output-cell and finite-momentum refusal is atomic.
+    pub fn deposit_continuous_absorption_momentum_with_checkpoint(
+        &self,
+        check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
+        origin: Point3,
+        unit_direction: Vec3,
+        incident_power_w: &[f64; N],
+        config: ScatteringDepositionConfig,
+    ) -> Result<ScatteringMomentumDeposition<N>, VolumeTransportError> {
+        let mut tallies = MomentumTallies::new(config.max_deposition_cells);
+        let power = super::continuous::deposit(
             self,
             check,
             origin,

@@ -84,6 +84,37 @@ impl ScatteringGrid<'_> {
         )?;
         tallies.finish_wrench(&mut || checkpoint(cx), power, origin, unit_direction)
     }
+
+    /// Continuous-absorption heat, force and orbital torque from the same paths.
+    ///
+    /// Distributed absorption retains the ray's line of action through every
+    /// native segment; elastic recoil acts at the actual scattering position.
+    /// No cell-center approximation or separate force/torque retrace is used.
+    /// The original finite reference, photon-momentum and work limits apply.
+    #[allow(clippy::too_many_arguments)]
+    pub fn deposit_continuous_absorption_wrench<const N: usize>(
+        &self,
+        cx: &Cx<'_>,
+        origin: Point3,
+        unit_direction: Vec3,
+        wavelengths_nm: &[f64; N],
+        incident_power_w: &[f64; N],
+        reference_point: Point3,
+        config: ScatteringDepositionConfig,
+    ) -> Result<ScatteringWrenchDeposition<N>, VolumeTransportError> {
+        let mut tallies =
+            MomentumTallies::with_orbital(config.max_deposition_cells, reference_point)?;
+        let power = self.deposit_continuous_observed(
+            cx,
+            origin,
+            unit_direction,
+            wavelengths_nm,
+            incident_power_w,
+            config,
+            Some(&mut tallies),
+        )?;
+        tallies.finish_wrench(&mut || checkpoint(cx), power, origin, unit_direction)
+    }
 }
 
 impl<const N: usize> CellScatteringGrid<'_, '_, N> {
@@ -125,6 +156,52 @@ impl<const N: usize> CellScatteringGrid<'_, '_, N> {
         let mut tallies =
             MomentumTallies::with_orbital(config.max_deposition_cells, reference_point)?;
         let power = deposit_prepared_observed(
+            self,
+            check,
+            origin,
+            unit_direction,
+            incident_power_w,
+            config,
+            Some(&mut tallies),
+        )?;
+        tallies.finish_wrench(check, power, origin, unit_direction)
+    }
+
+    /// Joint continuous heat/force/torque using this field's original local optics.
+    #[allow(clippy::too_many_arguments)]
+    pub fn deposit_continuous_absorption_wrench(
+        &self,
+        cx: &Cx<'_>,
+        origin: Point3,
+        unit_direction: Vec3,
+        incident_power_w: &[f64; N],
+        reference_point: Point3,
+        config: ScatteringDepositionConfig,
+    ) -> Result<ScatteringWrenchDeposition<N>, VolumeTransportError> {
+        self.deposit_continuous_absorption_wrench_with_checkpoint(
+            &mut || checkpoint(cx),
+            origin,
+            unit_direction,
+            incident_power_w,
+            reference_point,
+            config,
+        )
+    }
+
+    /// Hosting-solver variant preserving each refusal across all three accounts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn deposit_continuous_absorption_wrench_with_checkpoint(
+        &self,
+        check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
+        origin: Point3,
+        unit_direction: Vec3,
+        incident_power_w: &[f64; N],
+        reference_point: Point3,
+        config: ScatteringDepositionConfig,
+    ) -> Result<ScatteringWrenchDeposition<N>, VolumeTransportError> {
+        let mut tallies =
+            MomentumTallies::with_orbital(config.max_deposition_cells, reference_point)?;
+        let power = super::super::continuous::deposit(
             self,
             check,
             origin,

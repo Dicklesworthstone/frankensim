@@ -349,3 +349,59 @@ fn continuous_absorption_heats_native_cells_without_waiting_for_a_rare_collision
         assert!(after.cells()[&CellId(11)].specific_h_j_kg > 0.0);
     });
 }
+
+#[test]
+fn continuous_wrench_deposits_native_heat_without_reclassifying_radiation_force() {
+    with_cx(|cx| {
+        let medium = ScatteringGrid::try_new(
+            cx,
+            grid(cx, &[1.0, 2.0], MassAbsorptionSpectrum::constant(1e-7).unwrap()),
+            MassScatteringSpectrum::constant(1e-12).unwrap(),
+            PhaseFunction::Isotropic,
+        )
+        .unwrap();
+        let report = medium
+            .deposit_continuous_absorption_wrench(
+                cx,
+                Point3::new(-1.0, 0.25, 0.75),
+                Vec3::new(1.0, 0.0, 0.0),
+                &[550.0],
+                &[100.0],
+                Point3::new(0.0, 0.0, 0.0),
+                ScatteringDepositionConfig {
+                    histories_per_lane: 32,
+                    max_collisions_per_history: 8,
+                    max_total_segments: 256,
+                    max_deposition_cells: 2,
+                    seed: 1927,
+                    source_id: 11,
+                },
+            )
+            .unwrap();
+        let expected_w = 100.0 * -(-3e-7_f64).exp_m1();
+        let expected_n = expected_w / 299_792_458.0;
+        assert!((report.momentum.force.mean_n[0][0] / expected_n - 1.0).abs() < 2e-13);
+        assert!((report.orbital.torque.mean_n_m[0][1] / (0.75 * expected_n) - 1.0).abs() < 2e-13);
+        assert!((report.orbital.torque.mean_n_m[0][2] / (-0.25 * expected_n) - 1.0).abs() < 2e-13);
+        let original = thermal(vec![cell(11, 2.0, 2.0, 0.0)], &SENSIBLE, vec![]);
+        let heating = ScatteringHeating::try_new(
+            report.power,
+            &[(0, CellId(11)), (1, CellId(11))],
+            &original,
+            ScatteringHeatingTolerance {
+                power_roundoff_w: 1e-10,
+                max_unresolved_w: 0.0,
+                max_total_standard_error_w: 0.0,
+                max_cell_standard_error_w: 0.0,
+            },
+            || Ok(()),
+        )
+        .unwrap();
+        let (after, account, audit) = original
+            .advance_observed(&heating, 2.0, config(0.17), || Ok(()))
+            .unwrap();
+        close(audit.external_heat_j, 2.0 * expected_w);
+        close(account.energy().thermal_input_j, 2.0 * expected_w);
+        close(after.cells()[&CellId(11)].specific_h_j_kg, expected_w);
+    });
+}

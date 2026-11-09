@@ -36,6 +36,28 @@ impl ScatteringGrid<'_> {
         incident_power_w: &[f64; N],
         config: ScatteringDepositionConfig,
     ) -> Result<ScatteringPowerDeposition<N>, VolumeTransportError> {
+        self.deposit_continuous_observed(
+            cx,
+            origin,
+            unit_direction,
+            wavelengths_nm,
+            incident_power_w,
+            config,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn deposit_continuous_observed<const N: usize>(
+        &self,
+        cx: &Cx<'_>,
+        origin: Point3,
+        unit_direction: Vec3,
+        wavelengths_nm: &[f64; N],
+        incident_power_w: &[f64; N],
+        config: ScatteringDepositionConfig,
+        momentum: Option<&mut MomentumTallies<N>>,
+    ) -> Result<ScatteringPowerDeposition<N>, VolumeTransportError> {
         checkpoint(cx)?;
         validate_ray(origin, unit_direction, f64::INFINITY)?;
         if N == 0 {
@@ -50,6 +72,7 @@ impl ScatteringGrid<'_> {
                 unit_direction,
                 incident_power_w,
                 config,
+                momentum,
             );
         }
         let (absorption, scattering, extinction) = self.coefficients(wavelengths_nm)?;
@@ -67,6 +90,7 @@ impl ScatteringGrid<'_> {
             unit_direction,
             incident_power_w,
             config,
+            momentum,
         )
     }
 }
@@ -99,17 +123,27 @@ impl<const N: usize> CellScatteringGrid<'_, '_, N> {
         incident_power_w: &[f64; N],
         config: ScatteringDepositionConfig,
     ) -> Result<ScatteringPowerDeposition<N>, VolumeTransportError> {
-        deposit(self, check, origin, unit_direction, incident_power_w, config)
+        deposit(
+            self,
+            check,
+            origin,
+            unit_direction,
+            incident_power_w,
+            config,
+            None,
+        )
     }
 }
 
-fn deposit<const N: usize>(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn deposit<const N: usize>(
     medium: &impl PreparedOptics<N>,
     check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
     origin: Point3,
     unit_direction: Vec3,
     incident_power_w: &[f64; N],
     config: ScatteringDepositionConfig,
+    momentum: Option<&mut MomentumTallies<N>>,
 ) -> Result<ScatteringPowerDeposition<N>, VolumeTransportError> {
     deposit_prepared_sampled(
         medium,
@@ -118,7 +152,7 @@ fn deposit<const N: usize>(
         unit_direction,
         incident_power_w,
         config,
-        None,
+        momentum,
         &[ScalarPhase; N],
         AbsorptionEstimator::Continuous,
     )
@@ -126,7 +160,7 @@ fn deposit<const N: usize>(
 
 /// One DDA per flight, no copied grid, temporary cell list or second traversal.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn trace_history(
+pub(super) fn trace_history<const N: usize>(
     medium: &impl PreparedOptics<1>,
     check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
     source: (Point3, Vec3, f64),
@@ -134,6 +168,7 @@ pub(super) fn trace_history(
     traced_segments: &mut u64,
     random: &mut impl FnMut() -> f64,
     capture: &mut impl FnMut(usize, f64) -> Result<(), VolumeTransportError>,
+    mut momentum: Option<&mut HistoryMomentum<'_, N>>,
 ) -> Result<HistoryOutcome, VolumeTransportError> {
     let (mut position, mut direction, source_w) = source;
     let mut power = source_w;
@@ -196,11 +231,27 @@ pub(super) fn trace_history(
                         // a rounded survivor nor discarded heat closes its account.
                         outcome[3] = power;
                         precision_limited = true;
+                        if let Some(tally) = momentum.as_deref_mut() {
+                            tally.leave(2, power, ray.position(segment.start_m), direction)?;
+                        }
                         break 'flights;
                     }
                     if heat > 0.0 {
                         captured.add(heat)?;
                         capture(segment.cell, heat)?;
+                        if let Some(tally) = momentum.as_deref_mut() {
+                            // Along this straight segment, (r + t*d) x d is
+                            // constant. Its positive distributed absorption
+                            // has exactly the segment-start line of action.
+                            tally.capture(
+                                segment.cell,
+                                ray.position(segment.start_m),
+                                heat,
+                                0.0,
+                                direction,
+                                direction,
+                            )?;
+                        }
                     }
                     // Compensated cumulative depth retains many tiny losses,
                     // including flights that revisit the same physical cell.
@@ -215,17 +266,38 @@ pub(super) fn trace_history(
                     if !distance.is_finite() || (distance > 0.0 && next_position == position) {
                         return Err(VolumeTransportError::Unrepresentable);
                     }
-                    if collision + 1 == limits.0 {
+                    let capped = collision + 1 == limits.0;
+                    if capped && momentum.is_none() {
                         outcome[3] = power;
                         break 'flights;
                     }
-                    direction = ScalarPhase.sample(
+                    let outgoing = ScalarPhase.sample(
                         medium.phase(segment.cell),
                         medium.wavelengths()[0],
                         direction,
                         check,
                         random,
                     )?;
+                    if let Some(tally) = momentum.as_deref_mut() {
+                        // Absorption was already integrated along the flight.
+                        // Only the elastic change of direction acts here.
+                        tally.capture(
+                            segment.cell,
+                            next_position,
+                            0.0,
+                            power,
+                            direction,
+                            outgoing,
+                        )?;
+                        if capped {
+                            tally.leave(2, power, next_position, outgoing)?;
+                        }
+                    }
+                    if capped {
+                        outcome[3] = power;
+                        break 'flights;
+                    }
+                    direction = outgoing;
                     position = next_position;
                     continue 'flights;
                 }
@@ -235,7 +307,11 @@ pub(super) fn trace_history(
                 }
             }
         }
-        outcome[usize::from(collision != 0)] = power;
+        let escape = usize::from(collision != 0);
+        outcome[escape] = power;
+        if let Some(tally) = momentum.as_deref_mut() {
+            tally.leave(escape, power, position, direction)?;
+        }
         break;
     }
     outcome[2] = captured.value();

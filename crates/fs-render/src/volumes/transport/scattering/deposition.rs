@@ -66,7 +66,9 @@ impl DepositionPhase for ScalarPhase {
         _: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
         random: &mut impl FnMut() -> f64,
     ) -> Result<Vec3, VolumeTransportError> {
-        Ok(phase.sample_packet(&[wavelength_nm], direction, random(), random())?.direction)
+        Ok(phase
+            .sample_packet(&[wavelength_nm], direction, random(), random())?
+            .direction)
     }
 }
 
@@ -264,8 +266,15 @@ fn deposit_prepared_observed<const N: usize>(
     momentum: Option<&mut MomentumTallies<N>>,
 ) -> Result<ScatteringPowerDeposition<N>, VolumeTransportError> {
     deposit_prepared_sampled(
-        medium, check, origin, unit_direction, incident_power_w, config,
-        momentum, &[ScalarPhase; N], AbsorptionEstimator::Collision,
+        medium,
+        check,
+        origin,
+        unit_direction,
+        incident_power_w,
+        config,
+        momentum,
+        &[ScalarPhase; N],
+        AbsorptionEstimator::Collision,
     )
 }
 
@@ -284,7 +293,7 @@ fn deposit_prepared_sampled<const N: usize>(
     let wavelengths_nm = medium.wavelengths();
     check()?;
     validate_ray(origin, unit_direction, f64::INFINITY)?;
-    if N == 0 || (absorption_estimator == AbsorptionEstimator::Continuous && momentum.is_some()) {
+    if N == 0 {
         return Err(VolumeTransportError::Sample);
     }
     if config.histories_per_lane < 2 || config.max_collisions_per_history == 0 {
@@ -391,6 +400,7 @@ fn deposit_prepared_sampled<const N: usize>(
                     &mut result.traced_segments,
                     &mut || random.next_f64(),
                     &mut capture,
+                    history_momentum.as_mut(),
                 ),
             }?;
             if let Some(tally) = history_momentum {
@@ -461,8 +471,15 @@ fn trace_history_observed<const N: usize>(
     momentum: Option<&mut HistoryMomentum<'_, N>>,
 ) -> Result<HistoryOutcome, VolumeTransportError> {
     trace_history_sampled(
-        medium, check, source, limits, traced_segments, random, capture,
-        momentum, &mut ScalarPhase,
+        medium,
+        check,
+        source,
+        limits,
+        traced_segments,
+        random,
+        capture,
+        momentum,
+        &mut ScalarPhase,
     )
 }
 
@@ -551,7 +568,11 @@ fn trace_history_sampled<const N: usize>(
         // A monochromatic matched phase sample has physical/PDF
         // weight one, including interpolated spectral phase tables.
         let outgoing = phase.sample(
-            medium.phase(event.cell_index), medium.wavelengths()[0], direction, check, random,
+            medium.phase(event.cell_index),
+            medium.wavelengths()[0],
+            direction,
+            check,
+            random,
         )?;
         if let Some(tally) = momentum.as_deref_mut() {
             tally.capture(

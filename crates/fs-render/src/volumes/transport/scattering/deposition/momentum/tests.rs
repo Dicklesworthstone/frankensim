@@ -690,3 +690,5 @@ fn g4_wrench_refuses_invalid_reference_overflow_budget_and_cancellation_atomical
         assert_eq!(m.content_identity(), identity);
     });
 }
+
+mod continuous;
