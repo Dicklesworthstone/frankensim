@@ -28,6 +28,9 @@ use fs_material::liquid::solution::multicomponent::{
 };
 use std::sync::Arc;
 
+/// Original material receipts for prescribed stirring and coupled transport.
+pub mod transport;
+
 /// Original source incompatibility or an atomic numerical/material refusal.
 #[derive(Clone, Debug, PartialEq)]
 pub enum MulticomponentMiscibilityMaterialError {

@@ -16,6 +16,8 @@ use fs_thermochem::transport::maxwell_stefan::MaxwellStefanV1;
 
 const MASSES: [f64; 3] = [0.002, 0.028, 0.044];
 
+mod transport;
+
 fn species(index: usize) -> SpeciesId {
     SpeciesId::new(["A", "B", "C"][index]).unwrap()
 }

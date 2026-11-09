@@ -10056,3 +10056,27 @@ attempt was followed by loss of the execution environment. Reviewed source was
 recovered through GitHub without a new successful compile or test run. The last
 completed numerical result remains 107 passing tests BEFORE this extension.
 
+### Original materials for prescribed multicomponent stirring
+
+`miscibility::multicomponent::material::transport` retains the exact borrowed
+original liquid source across prescribed advection, one-interval stirring plus
+molecular diffusion, and complete adaptive stirring/mixing windows. Each wrapper
+delegates the numerical operation and refreshes every final cell through the
+existing source resolver exactly once at the complete endpoint.
+
+Original pressure, chart axes, species/molar-mass mapping, property claims,
+resolved-cell budget and source-volume allowance persist. The complete
+numerical report is preserved unchanged. A late source-domain, volume mismatch
+or final cancellation refusal publishes no field or partial physical report.
+This qualifies final endpoints, not internal adaptive trials, and never
+replaces spatial compositions with phase-equilibrium flashes.
+
+Two additional integration regression groups exercise all three wrapper paths,
+independent final property resolution, source identity, volume/clock/report
+retention, replay and late failures. Their source/API review and pre-outage
+formatting completed, but compilation and execution remain unverified: the
+earlier original-material dependency build was blocked by asupersync SIGKILL,
+and the later numerical stirring build lost the execution environment. These
+claims do not promote material execution or the ten new numerical stirring
+tests to passing status.
+
