@@ -167,94 +167,11 @@ pub(super) fn prepare(
         poll(cancelled, staged)?;
         let original = coo.assemble();
         drop(coo);
-        if (0..original.nrows()).any(|row| original.row(row).1.iter().any(|v| !v.is_finite()))
-            || rhs.iter().any(|v| !v.is_finite())
-        {
-            return Err(bad("rectangular thermal matrix or forcing is unrepresentable").into());
-        }
-        let mut scaled = original.clone();
-        let mut scale = filled(2 * free, 1.0)?;
-        for i in 0..free {
-            let diagonal = det::hypot(original.get(2 * i, 2 * i), original.get(2 * i, 2 * i + 1));
-            if !diagonal.is_finite() || diagonal <= 0.0 {
-                return Err(bad("rectangular thermal diagonal scale is unrepresentable").into());
-            }
-            let s = 1.0 / det::sqrt(diagonal);
-            scale[2 * i] = s;
-            scale[2 * i + 1] = s;
-        }
-        for i in 0..2 * free {
-            if i % 64 == 0 {
-                poll(cancelled, i)?;
-            }
-            let columns = scaled.row(i).0.to_vec();
-            for (&j, value) in columns.iter().zip(scaled.row_values_mut(i)) {
-                // Identical factor ordering preserves exact numeric symmetry.
-                let (a, b) = if i <= j { (i, j) } else { (j, i) };
-                *value = (*value * scale[a]) * scale[b];
-            }
-        }
-        let mut direct = limits.sparse;
-        direct.max_symbolic_entries = direct
-            .max_symbolic_entries
-            .min((limits.maximum_payload_bytes - fixed) / 64);
-        let gate = RefCell::new(&mut *cancelled);
-        let checkpoint = || (*gate.borrow_mut())();
-        let symbolic =
-            SymbolicLdlt::analyze_bounded(&scaled, DirectOrdering::Amd, &direct, &checkpoint)?;
-        let symbolic_bytes = symbolic.symbolic_bytes();
-        let remaining = limits
-            .maximum_payload_bytes
-            .checked_sub(fixed)
-            .and_then(|v| v.checked_sub(symbolic_bytes))
-            .ok_or_else(|| bad("rectangular thermal symbolic payload exceeds admission"))?;
-        let factor = symbolic.factor_bounded(
-            &scaled,
-            &LdltOptions {
-                max_factor_bytes: Some(remaining),
-                ..LdltOptions::default()
-            },
-            &direct,
-            &checkpoint,
-        )?;
-        if factor.inertia().positive != free || factor.inertia().negative != free {
-            return Err(bad("rectangular complex thermal factor has inconsistent inertia").into());
-        }
-        nnz = factor.stats().nnz_l;
-        peak += symbolic_bytes + factor.stats().peak_factor_bytes;
-        let scaled_rhs: Vec<_> = rhs.iter().zip(&scale).map(|(r, s)| r * s).collect();
-        if checkpoint() {
-            return Err(fs_sparse::LdltError::Cancelled.into());
-        }
-        let mut answer = factor.solve(&scaled_rhs);
-        if checkpoint() {
-            return Err(fs_sparse::LdltError::Cancelled.into());
-        }
-        for (v, s) in answer.iter_mut().zip(&scale) {
-            *v *= *s;
-        }
-        for i in 0..2 * free {
-            if i % 64 == 0 && checkpoint() {
-                return Err(fs_sparse::LdltError::Cancelled.into());
-            }
-            let (columns, entries) = original.row(i);
-            let mut difference = -Dd::from_f64(rhs[i]);
-            let mut row_scale = Dd::from_f64(rhs[i].abs());
-            for (&j, &a) in columns.iter().zip(entries) {
-                difference = difference + Dd::from_f64(a) * Dd::from_f64(answer[j]);
-                row_scale = row_scale + Dd::from_f64(a.abs()) * Dd::from_f64(answer[j].abs());
-            }
-            residual =
-                residual.max(difference.to_f64().abs() / row_scale.to_f64().max(f64::MIN_POSITIVE));
-        }
-        if !residual.is_finite()
-            || residual > limits.maximum_relative_residual
-            || answer.iter().any(|v| !v.is_finite())
-        {
-            return Err(
-                bad("rectangular thermal original-equation residual exceeds admission").into(),
-            );
-        }
+        let solved = solve_assembled(&original, &rhs, free, limits, fixed, cancelled)?;
+        residual = solved.relative_residual;
+        peak = solved.peak_payload_bytes;
+        nnz = solved.factor_nonzeros;
+        let answer = solved.answer;
         for (node, &index) in map.iter().enumerate() {
             if index != usize::MAX {
                 stored[node] = C64::new(answer[2 * index], answer[2 * index + 1]);
@@ -277,6 +194,117 @@ pub(super) fn prepare(
     result.integrate(cancelled)?;
     poll(cancelled, nodes)?;
     Ok(result)
+}
+
+/// Same scaled native solve for gas-only and conjugate gas/solid Q1 owners.
+pub(super) struct SparseThermalSolution {
+    pub answer: Vec<f64>,
+    pub relative_residual: f64,
+    pub peak_payload_bytes: usize,
+    pub factor_nonzeros: usize,
+}
+pub(super) fn solve_assembled(
+    original: &fs_sparse::Csr,
+    rhs: &[f64],
+    free: usize,
+    limits: RectangularThermalLimits,
+    fixed: usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<SparseThermalSolution, Error> {
+    let (mut residual, mut peak) = (0.0_f64, fixed);
+    if (0..original.nrows()).any(|row| original.row(row).1.iter().any(|v| !v.is_finite()))
+        || rhs.iter().any(|v| !v.is_finite())
+    {
+        return Err(bad("rectangular thermal matrix or forcing is unrepresentable").into());
+    }
+    let mut scaled = original.clone();
+    let mut scale = filled(2 * free, 1.0)?;
+    for i in 0..free {
+        let diagonal = det::hypot(original.get(2 * i, 2 * i), original.get(2 * i, 2 * i + 1));
+        if !diagonal.is_finite() || diagonal <= 0.0 {
+            return Err(bad("rectangular thermal diagonal scale is unrepresentable").into());
+        }
+        let s = 1.0 / det::sqrt(diagonal);
+        scale[2 * i] = s;
+        scale[2 * i + 1] = s;
+    }
+    for i in 0..2 * free {
+        if i % 64 == 0 {
+            poll(cancelled, i)?;
+        }
+        let columns = scaled.row(i).0.to_vec();
+        for (&j, value) in columns.iter().zip(scaled.row_values_mut(i)) {
+            // Identical factor ordering preserves exact numeric symmetry.
+            let (a, b) = if i <= j { (i, j) } else { (j, i) };
+            *value = (*value * scale[a]) * scale[b];
+        }
+    }
+    let mut direct = limits.sparse;
+    direct.max_symbolic_entries = direct
+        .max_symbolic_entries
+        .min((limits.maximum_payload_bytes - fixed) / 64);
+    let gate = RefCell::new(&mut *cancelled);
+    let checkpoint = || (*gate.borrow_mut())();
+    let symbolic =
+        SymbolicLdlt::analyze_bounded(&scaled, DirectOrdering::Amd, &direct, &checkpoint)?;
+    let symbolic_bytes = symbolic.symbolic_bytes();
+    let remaining = limits
+        .maximum_payload_bytes
+        .checked_sub(fixed)
+        .and_then(|v| v.checked_sub(symbolic_bytes))
+        .ok_or_else(|| bad("rectangular thermal symbolic payload exceeds admission"))?;
+    let factor = symbolic.factor_bounded(
+        &scaled,
+        &LdltOptions {
+            max_factor_bytes: Some(remaining),
+            ..LdltOptions::default()
+        },
+        &direct,
+        &checkpoint,
+    )?;
+    if factor.inertia().positive != free || factor.inertia().negative != free {
+        return Err(bad("rectangular complex thermal factor has inconsistent inertia").into());
+    }
+    let nnz = factor.stats().nnz_l;
+    peak += symbolic_bytes + factor.stats().peak_factor_bytes;
+    let scaled_rhs: Vec<_> = rhs.iter().zip(&scale).map(|(r, s)| r * s).collect();
+    if checkpoint() {
+        return Err(fs_sparse::LdltError::Cancelled.into());
+    }
+    let mut answer = factor.solve(&scaled_rhs);
+    if checkpoint() {
+        return Err(fs_sparse::LdltError::Cancelled.into());
+    }
+    for (v, s) in answer.iter_mut().zip(&scale) {
+        *v *= *s;
+    }
+    for i in 0..2 * free {
+        if i % 64 == 0 && checkpoint() {
+            return Err(fs_sparse::LdltError::Cancelled.into());
+        }
+        let (columns, entries) = original.row(i);
+        let mut difference = -Dd::from_f64(rhs[i]);
+        let mut row_scale = Dd::from_f64(rhs[i].abs());
+        for (&j, &a) in columns.iter().zip(entries) {
+            difference = difference + Dd::from_f64(a) * Dd::from_f64(answer[j]);
+            row_scale = row_scale + Dd::from_f64(a.abs()) * Dd::from_f64(answer[j].abs());
+        }
+        residual =
+            residual.max(difference.to_f64().abs() / row_scale.to_f64().max(f64::MIN_POSITIVE));
+    }
+    if !residual.is_finite()
+        || residual > limits.maximum_relative_residual
+        || answer.iter().any(|v| !v.is_finite())
+    {
+        return Err(bad("rectangular thermal original-equation residual exceeds admission").into());
+    }
+
+    Ok(SparseThermalSolution {
+        answer,
+        relative_residual: residual,
+        peak_payload_bytes: peak,
+        factor_nonzeros: nnz,
+    })
 }
 fn add_rhs(rhs: &mut [f64], row: usize, value: C64) {
     rhs[2 * row] += value.re;

@@ -11,6 +11,9 @@
 //! G/C require caller authority. No planar solid, empirical data, gas-film
 //! coefficient, wall accommodation, or thermoelastic motion is fabricated.
 
+/// Source-bound solid jackets with resolved transverse and corner conduction.
+pub mod conduction;
+
 use super::{
     FluidDuctError, RectangularAdmission, RectangularSection, admit_tail, bad,
     field::{DiffusionField, amplitudes},
@@ -36,9 +39,11 @@ use physics::ThermalField;
 /// This is a spatial refinement choice, not a continuum-error certificate.
 #[derive(Clone, Copy, Debug)]
 pub struct RectangularThermalLimits {
-    /// Elements along [short, long] sides; each >=2, at most 16384 total nodes.
+    /// Gas elements along [short, long] sides; each >=2. The complete gas or
+    /// conjugate gas/solid mesh admits at most 16384 total physical nodes.
     pub cells: [usize; 2],
-    /// max(cell widths)*sqrt(|i omega rho Cp/k|), in (0,1].
+    /// max(cell widths)*sqrt(|i omega rho Cp/k|), in (0,1]. A conjugate solid
+    /// uses its original volumetric capacity and smallest conductivity eigenvalue.
     pub maximum_cell_diffusion_phase: f64,
     /// Original algebraic and physical thermal-work residual, in (0,1).
     pub maximum_relative_residual: f64,
@@ -55,6 +60,12 @@ pub enum RectangularThermalWallError {
     Fluid(FluidDuctError),
     Duct(DuctError),
     Sparse(LdltError),
+    Transport(fs_material::thermal::transport::ThermalTransportError),
+}
+impl From<fs_material::thermal::transport::ThermalTransportError> for RectangularThermalWallError {
+    fn from(v: fs_material::thermal::transport::ThermalTransportError) -> Self {
+        Self::Transport(v)
+    }
 }
 impl From<FluidDuctError> for RectangularThermalWallError {
     fn from(v: FluidDuctError) -> Self {

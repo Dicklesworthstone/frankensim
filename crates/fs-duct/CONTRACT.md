@@ -5746,3 +5746,86 @@ The thermochemical native slice reexports its actual species-id owner.
 This execution does not claim a full Cargo/workspace test, lint or dependency
 closure. The test G/C values and molecular fixtures are explicitly synthetic
 constitutive inputs, not measured material authority.
+
+## Resolved source-backed rectangular solid jackets
+
+`fluid::rectangular::thermal_wall::conduction` extends the original gas Q1
+thermal field into one to eight nested rectangular material layers. Each
+`RectangularSolidLayer` borrows an original
+`PreparedOrthotropicThermalTransport<2>`, declares positive thickness and
+element counts on all four faces, and retains its selected density, specific
+heat, principal conductivities, material axes and source identity. Sources
+are evaluated at the coherent gas background temperature without extrapolation.
+Their specific-heat constraint remains caller-selected; scalar conductivity
+is not used to infer isotropy. Coordinates and tensor components follow the
+original [short, long] gas axes, independently of constructor argument order.
+
+The domain is the actual gas rectangle plus complete nested rectangular
+shells. A cell belongs to the outermost layer reached along either coordinate;
+this explicitly defines the material occupying every corner. Gas and solids
+share one conforming bilinear temperature field with perfect thermal contact.
+The original full two-dimensional conductivity tensors retain off-diagonal,
+lateral and corner transport. No local-normal reduction or independent wall
+film is introduced. Each outer face independently admits zero perturbation
+temperature, insulation, or a finite nonnegative conductance to the common
+background bath.
+
+Under peak `exp(-i omega t)` phasors the gas obeys
+`-i omega rho Cp(-i omega) T - div(k grad(T)) = -i omega p`; each solid obeys
+`-i omega C_vol T - div(K grad(T)) = 0`. Original molecular Cp enters once.
+The original analytic rectangular no-slip shear, section area, plane-pressure
+admission and stable uniform `TwoPort` remain the acoustic owners. A shared
+native sparse LDLT helper preserves the preceding gas-only solver arithmetic,
+complex-symmetric lowering, congruence scaling, inertia gate and original
+equation residual. The opaque gas lift cancels its constant particular
+solution analytically while retaining the interface forcing and original
+solid temperatures and gradients.
+
+Prepared observations expose actual gas and solid temperatures, both
+transverse gradients, full tensor heat flux, separate gas conduction,
+molecular exchange, solid conduction and bath availability losses, and each
+layer's reversible quadratic storage `C_vol integral(|T|^2)/(4 T0)` and
+oscillatory thermal energy `C_vol integral(T)`. Availability losses use the
+original positive material forms and sum to the same physical acoustic port
+work. They do not prescribe how mean heating is subsequently assigned.
+Finite/insulated face flux uses its original `G T` law; the separately
+reported one-sided Q1 tensor flux is a spatial approximation requiring
+refinement. The total signed bath heat uses the original summed isothermal
+weak reaction, without distributing corner reactions among face points.
+Original complex heat balance and acoustic availability balance are checked
+separately against the declared tolerance.
+
+Gas and solids together admit at most 16384 physical nodes. Every solid cell
+must satisfy the caller's diffusion-phase ceiling using its actual volumetric
+capacity and smallest conductivity eigenvalue, including tangential cell
+widths. Explicit payload and native sparse symbolic/work/front ceilings are
+never raised automatically. Node and staging extents are checked before
+mesh allocation. Preparation polls cancellation through assembly, native
+factorization and physical integration. Pointwise thermal queries use two
+axis binary searches and one Q1 cell; integrated observations are O(1),
+allocate nothing and perform no source reevaluation. The mesh and algebraic
+checks are not continuum-error certificates. This owner remains a frozen
+linear, fully developed, rigid no-slip, uniform-pressure gas model without
+axial heat transport, contact resistance, thermoelastic motion, background
+evolution, mean flow, rarefaction or inferred phase changes.
+
+Eleven new G1/G3 test groups execute alongside all eleven preceding
+rectangular-wall groups. An independent continuous double-sine solution with
+forcing only on the original gas subrectangle gives mean errors of 0.7403%,
+0.1858% and 0.04648% on 8/16/32 gas cells per direction. The resolved thin
+jacket approaches the preceding local G/C owner with errors 0.2830%, 0.1454%
+and 0.07376%. Further groups cover rotated-tensor corners, asymmetric baths,
+reflection, physical length/conductivity scaling, exact homogeneous layer
+splitting, opaque nonzero gradients, source validity/coherence, exact empty
+reservoir behavior, cancellation and explicit resource refusals. A source-
+backed two-layer case independently integrates the physical loss forms along
+a finite segment and matches native TwoPort incident/outgoing power.
+
+All 22 checked-in groups passed in a focused native source build retaining
+the actual gas/coherence, molecular construction/caloric response, complete
+thermal transport and orthotropic owners, original Fourier fields and stable
+uniform-port arithmetic. Complete native `fs-math`, `fs-sparse`, `fs-qty`,
+`fs-blake3`, `fs-obs`, `fs-evidence`, `fs-ivl` and `fs-matdb` were used. This
+does not claim a full Cargo/workspace test, lint or dependency closure.
+Material cards and reservoir parameters in these tests are explicitly
+synthetic constitutive fixtures, not measured source authority.
