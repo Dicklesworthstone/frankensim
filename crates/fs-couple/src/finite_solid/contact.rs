@@ -37,6 +37,8 @@ pub mod step;
 /// Physical material directions transported by original rigid/solid geometry.
 pub mod texture;
 
+pub(crate) mod geometry;
+
 use super::impulse::{FiniteSolidImpulse, FiniteSolidImpulseControls, FiniteSolidPoint};
 use super::{Cx, FiniteSolidBody, FiniteSolidError};
 use fs_contact::frictional_multicontact::{
@@ -585,7 +587,7 @@ pub(crate) fn mixed_contact_candidate_with<
         let property = rigid_properties[c.point.body];
         let kinematics = rigid.point_kinematics(property, c.point.arm_body)?;
         let first = RigidIncidence::new(c.point, 1.0, axes, rigid, property)?;
-        let (second_point, second_velocity, second, solid_row) = match c.counterpart {
+        let (second_point, second_velocity, second, solid_row, separation) = match c.counterpart {
             FiniteSolidContactCounterpart::Solid(point) => {
                 let offset = rows.len();
                 rows.extend(axes.map(|axis| (point, array(axis))));
@@ -595,6 +597,12 @@ pub(crate) fn mixed_contact_candidate_with<
                     vector(trace.velocity_mps),
                     None,
                     Some(offset),
+                    geometry::separation(
+                        array(rigid.pose().position_world()),
+                        array(kinematics.arm_world),
+                        trace.position_m,
+                        [0.0; 3],
+                    ),
                 )
             }
             FiniteSolidContactCounterpart::Rigid(point) => {
@@ -605,16 +613,23 @@ pub(crate) fn mixed_contact_candidate_with<
                 }
                 let body = rigid_bodies[point.body];
                 let property = rigid_properties[point.body];
-                let kinematics = body.point_kinematics(property, point.arm_body)?;
+                let second_kinematics = body.point_kinematics(property, point.arm_body)?;
                 (
-                    kinematics.point_world,
-                    kinematics.point_velocity_world,
+                    second_kinematics.point_world,
+                    second_kinematics.point_velocity_world,
                     Some(RigidIncidence::new(point, -1.0, axes, body, property)?),
                     None,
+                    geometry::separation(
+                        array(rigid.pose().position_world()),
+                        array(kinematics.arm_world),
+                        array(body.pose().position_world()),
+                        array(second_kinematics.arm_world),
+                    ),
                 )
             }
         };
-        let separation = kinematics.point_world.sub(second_point);
+        let separation =
+            vector(separation.ok_or(E::Invalid("native contact separation is not representable"))?);
         let gap = n.dot(separation);
         if magnitude(separation.sub(n.scale(gap))) > controls.geometry_tolerance_m {
             return Err(E::Invalid("contact witnesses do not share a normal line"));

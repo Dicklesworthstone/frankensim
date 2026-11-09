@@ -177,6 +177,73 @@ fn audit(r: &InelasticImpactReport) {
 }
 
 #[test]
+fn g3_viscoelastic_contact_keeps_an_open_gap_under_common_translation() {
+    with_cx(|_, cx| {
+        let law = ViscoHyperelastic::new(
+            Hyperelastic::new(
+                HyperelasticModel::NeoHookean {
+                    mu: 1200.0,
+                    lambda: 2400.0,
+                },
+                4.0,
+            )
+            .unwrap(),
+            vec![FiniteStrainBranch {
+                energy: BranchEnergy::NeoHookean { mu_pa: 3600.0 },
+                tau_s: 0.07,
+            }],
+        )
+        .unwrap();
+        for shift in [0.0, 2.0_f64.powi(48), -2.0_f64.powi(48)] {
+            // Unit element edges remain resolved. Only the smaller rigid
+            // material arm would be lost by rounding its absolute witness.
+            let nodes = NODES.map(|[x, y, z]| [x, y, z + shift]);
+            let solid = FiniteViscoTetSolid::try_new(
+                &nodes,
+                &TETS,
+                ViscoelasticLawField::Uniform(&law),
+                TetAssemblyBudget::default(),
+                cx,
+            )
+            .unwrap();
+            let motion =
+                FiniteViscoTetMotion::try_new_with_nodal_density(solid, &RHO, &[[0.0; 3]; 4], cx)
+                    .unwrap();
+            let rigid = RigidBodyState::new(
+                Pose::new(vector(nodes[1]), UnitQuaternion::IDENTITY).unwrap(),
+                Vec3::new(0.0, 0.0, -2.0),
+                Vec3::ZERO,
+            )
+            .unwrap();
+            let event = visco_rigid_impact_candidate(
+                &motion,
+                &[],
+                rigid,
+                properties(),
+                InelasticRigidContact {
+                    solid_point: POINT,
+                    rigid_arm_body_m: Vec3::new(0.0, 0.0, 0.015625),
+                    normal_world: Vec3::new(0.0, 0.0, 1.0),
+                    activation_tolerance_m: 0.0,
+                    restitution: 0.0,
+                },
+                nodes[1],
+                controls(),
+                cx,
+            )
+            .unwrap();
+            assert_eq!(event.report.gap_m, 0.015625);
+            assert!(!event.report.contact.impacted);
+            assert_eq!(event.report.contact.normal_impulse, 0.0);
+            assert_eq!(event.rigid, rigid);
+            assert_eq!(event.solid.velocity_mps(), motion.velocity_mps());
+            assert_eq!(event.report.contact.dissipated_energy, 0.0);
+            audit(&event.report);
+        }
+    });
+}
+
+#[test]
 fn relaxed_viscoelastic_body_collides_through_full_rigid_inertia_and_moving_supports() {
     with_cx(|gate, cx| {
         let law = ViscoHyperelastic::new(

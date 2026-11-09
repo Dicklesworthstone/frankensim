@@ -143,6 +143,124 @@ fn unchanged_history(before: &ViscoDynamicState<'_, '_>, after: &ViscoDynamicSta
 }
 
 #[test]
+fn g3_translated_prony_contact_retains_displacement_gap_and_angular_impulse() {
+    with_cx(|_, cx| {
+        let law = material();
+        let offset = 0.015625;
+        for shift in [0.0, 2.0_f64.powi(48), -2.0_f64.powi(48)] {
+            let nodes = NODES.map(|[x, y, z]| [x, y, z + shift]);
+            let mesh = ViscoElements::new_with_full_reference_mass(
+                SolidMeshRef::Tet4 {
+                    nodes_m: &nodes,
+                    elements: &TETS,
+                },
+                TetViscoField::Uniform(&law),
+                &[],
+                TetAssemblyBudget::standard(),
+                ViscoStateBudget {
+                    max_internal_variables: 1000,
+                },
+                cx,
+            )
+            .unwrap();
+            let prepared = mesh.dynamic_operator(1e-5, config(), cx).unwrap();
+            let mut history = mesh.state(cx).unwrap();
+            let mut displacement = [0.0; 12];
+            displacement[5] = offset;
+            history
+                .step_internal_force(&displacement, 0.01, cx)
+                .unwrap();
+            let initial = prepared.start(history, &[0.0; 12], cx).unwrap();
+            let before_rigid = RigidBodyState::new(
+                Pose::new(vector(nodes[1]), UnitQuaternion::IDENTITY).unwrap(),
+                Vec3::new(-2.0, 0.0, 0.0),
+                Vec3::ZERO,
+            )
+            .unwrap();
+            let mut solid = initial.clone();
+            let mut rigid = before_rigid;
+            let report = apply_linear_visco_rigid_impact(
+                &mut solid,
+                &mut rigid,
+                properties(),
+                InelasticRigidContact {
+                    solid_point: 1,
+                    rigid_arm_body_m: Vec3::new(0.0, 0.0, offset),
+                    normal_world: Vec3::new(1.0, 0.0, 0.0),
+                    activation_tolerance_m: 0.0,
+                    restitution: 0.0,
+                },
+                nodes[1],
+                impact_controls(),
+                cx,
+            )
+            .unwrap();
+            // The local z offset remains the moment arm even when the world
+            // point rounds onto the reference node. I^-1_yy = 25/12 kg^-1 m^-2.
+            let impulse = 1.0 / (16.0 + 0.5 + offset * offset * 25.0 / 12.0);
+            near(report.contact.normal_impulse, impulse, 2e-12);
+            near(rigid.angular_momentum_body().y, offset * impulse, 2e-12);
+            assert_eq!(report.gap_m, 0.0);
+            unchanged_history(&initial, &solid);
+            check_report(&report);
+
+            // Independent consistent-mass momenta about the translated node.
+            // Form physical arms directly from the mesh and displacement,
+            // without first rounding their absolute world coordinates.
+            let sums: [f64; 3] =
+                core::array::from_fn(|a| (0..4).map(|n| solid.velocity_mps()[3 * n + a]).sum());
+            let mut linear = rigid.linear_momentum_world();
+            let mut angular = rigid.angular_momentum_body();
+            for node in 0..4 {
+                let p = vector(core::array::from_fn(|a| {
+                    (solid.velocity_mps()[3 * node + a] + sums[a]) / 20.0
+                }));
+                let arm = vector(core::array::from_fn(|a| {
+                    (nodes[node][a] - nodes[1][a]) + displacement[3 * node + a]
+                }));
+                linear = linear.add(p);
+                angular = angular.add(arm.cross(p));
+            }
+            near(
+                norm(linear.sub(before_rigid.linear_momentum_world())),
+                0.0,
+                2e-11,
+            );
+            near(norm(angular), 0.0, 2e-11);
+
+            let mut solid = initial.clone();
+            let mut rigid =
+                RigidBodyState::new(before_rigid.pose(), Vec3::new(0.0, 0.0, -2.0), Vec3::ZERO)
+                    .unwrap();
+            let before_rigid = rigid;
+            let report = apply_linear_visco_rigid_impact(
+                &mut solid,
+                &mut rigid,
+                properties(),
+                InelasticRigidContact {
+                    solid_point: 1,
+                    rigid_arm_body_m: Vec3::new(0.0, 0.0, 2.0 * offset),
+                    normal_world: Vec3::new(0.0, 0.0, 1.0),
+                    activation_tolerance_m: 0.0,
+                    restitution: 0.0,
+                },
+                nodes[1],
+                impact_controls(),
+                cx,
+            )
+            .unwrap();
+            assert_eq!(report.gap_m, offset);
+            assert!(!report.contact.impacted);
+            assert_eq!(report.contact.normal_impulse, 0.0);
+            assert_eq!(rigid, before_rigid);
+            assert_eq!(solid.velocity_mps(), initial.velocity_mps());
+            unchanged_history(&initial, &solid);
+            check_report(&report);
+        }
+    });
+}
+
+#[test]
 fn native_prony_contact_uses_consistent_mass_and_full_inertia_without_resetting_history() {
     with_cx(|_, cx| {
         let law = material();

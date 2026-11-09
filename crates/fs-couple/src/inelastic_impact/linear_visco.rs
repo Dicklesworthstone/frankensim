@@ -111,7 +111,6 @@ pub fn apply_linear_visco_rigid_impact<'p, 'a>(
         ));
     }
     let node = contact.solid_point;
-    let point = position(solid, node)?;
     let before_velocity = nodal(solid.velocity_mps(), node);
     let rigid_point = rigid
         .point_kinematics(properties, contact.rigid_arm_body_m)
@@ -120,7 +119,17 @@ pub fn apply_linear_visco_rigid_impact<'p, 'a>(
         .directional_effective_mass(properties, contact.rigid_arm_body_m, contact.normal_world)
         .map_err(LinearViscoImpactError::Rigid)?;
     let normal = mobility.unit_direction_world;
-    let separation = rigid_point.point_world.sub(point);
+    let separation = vector(
+        super::geometry::separation(
+            array(rigid.pose().position_world()),
+            array(rigid_point.arm_world),
+            solid.reference_nodes_m()[node],
+            array(nodal(solid.material_history().displacement_m(), node)),
+        )
+        .ok_or(LinearViscoImpactError::Invalid(
+            "native contact separation is not representable",
+        ))?,
+    );
     let gap_m = separation.dot(normal);
     if !gap_m.is_finite()
         || magnitude(separation.sub(normal.scale(gap_m))) > controls.geometry_tolerance_m
@@ -190,7 +199,7 @@ pub fn apply_linear_visco_rigid_impact<'p, 'a>(
         if i % 256 == 0 {
             poll(cx)?;
         }
-        let arm = position(solid, i)?.sub(origin);
+        let arm = position_relative_to(solid, i, origin)?;
         let r = array(arm).map(Dd::from_f64);
         let p: [Dd; 3] = core::array::from_fn(|d| {
             Dd::from_f64(nodal_impulse[3 * i + d])
@@ -295,18 +304,21 @@ pub fn apply_linear_visco_rigid_impact<'p, 'a>(
 fn nodal(values: &[f64], node: usize) -> Vec3 {
     Vec3::new(values[3 * node], values[3 * node + 1], values[3 * node + 2])
 }
-fn position(
+fn position_relative_to(
     solid: &ViscoDynamicState<'_, '_>,
     node: usize,
+    origin: Vec3,
 ) -> Result<Vec3, LinearViscoImpactError> {
-    let point = vector(solid.reference_nodes_m()[node])
-        .add(nodal(solid.material_history().displacement_m(), node));
-    if !point.is_finite() {
-        return Err(LinearViscoImpactError::Invalid(
-            "native contact position is not representable",
-        ));
-    }
-    Ok(point)
+    super::geometry::separation(
+        solid.reference_nodes_m()[node],
+        array(nodal(solid.material_history().displacement_m(), node)),
+        array(origin),
+        [0.0; 3],
+    )
+    .map(vector)
+    .ok_or(LinearViscoImpactError::Invalid(
+        "native contact arm is not representable",
+    ))
 }
 fn poll(cx: &Cx<'_>) -> Result<(), LinearViscoImpactError> {
     cx.checkpoint()

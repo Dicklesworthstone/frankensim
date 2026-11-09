@@ -23,6 +23,7 @@ pub mod trajectory;
 /// Nodal impacts on continuing linear tensor-Prony dynamics.
 pub mod linear_visco;
 
+use crate::finite_solid::contact::geometry;
 use fs_contact::impact::{
     NormalImpactError, NormalImpactInput, NormalImpactResult, solve_normal_impact,
 };
@@ -341,7 +342,17 @@ fn finish<M, E>(
     cx: &Cx<'_>,
 ) -> Result<InelasticImpactCandidate<M>, InelasticImpactError<E>> {
     poll(cx)?;
-    let separation = p.rigid_point.point_world.sub(vector(before.position_m));
+    let separation = vector(
+        geometry::separation(
+            array(p.rigid.pose().position_world()),
+            array(p.rigid_point.arm_world),
+            before.position_m,
+            [0.0; 3],
+        )
+        .ok_or(InelasticImpactError::Invalid(
+            "native contact separation is not representable",
+        ))?,
+    );
     let gap = separation.dot(p.normal);
     if magnitude(separation.sub(p.normal.scale(gap))) > p.controls.geometry_tolerance_m {
         return Err(InelasticImpactError::Invalid(

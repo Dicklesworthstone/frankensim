@@ -214,6 +214,108 @@ fn rigid_only_chain_has_no_solid_mass_columns_and_preserves_solid_state() {
 }
 
 #[test]
+fn g3_translating_a_rigid_pair_cannot_activate_a_separated_contact() {
+    with_cx(|_, cx| {
+        let material = bind(&source_card(6.0, 1.0, false, false));
+        let solid = FiniteSolidBody::new(
+            problem(&material, &[], &[]),
+            &[[0.0; 3]; 4],
+            &[[0.0; 3]; 4],
+            0.0,
+            Default::default(),
+            cx,
+        )
+        .unwrap();
+        let property = MassProperties::new(1.0, Vec3::ZERO, Vec3::new(0.5, 0.5, 0.5)).unwrap();
+        let contact = rigid_pair(
+            1,
+            RigidImpactPoint {
+                body: 0,
+                arm_body: Vec3::new(0.0, 0.0, 0.375),
+            },
+            RigidImpactPoint {
+                body: 1,
+                arm_body: Vec3::new(0.0, 0.0, 0.25),
+            },
+        );
+        for shift in [0.0, 2.0_f64.powi(53), -2.0_f64.powi(53)] {
+            let origin = [shift; 3];
+            let pose = Pose::new(vec(origin), UnitQuaternion::IDENTITY).unwrap();
+            let bodies = [
+                RigidBodyState::new(pose, Vec3::new(0.0, 0.0, -1.0), Vec3::ZERO).unwrap(),
+                RigidBodyState::new(pose, Vec3::ZERO, Vec3::ZERO).unwrap(),
+            ];
+            let (next, rigid, report) = solid
+                .mixed_contact_candidate(
+                    &bodies,
+                    &[property; 2],
+                    &[contact],
+                    origin,
+                    Default::default(),
+                    cx,
+                )
+                .unwrap();
+            // The native arms retain a 1/8 m open gap. Rounding their world
+            // witnesses first erases it at large shifts and transfers 1/2 Ns.
+            assert_eq!(rigid, bodies);
+            assert_eq!(report.contact.impulses, vec![[0.0; 3]]);
+            assert_eq!(report.kinetic_change_j, 0.0);
+            assert_eq!(next.native_state(), solid.native_state());
+            assert!(report.solid_mass_solves.is_empty());
+            audit(&report);
+        }
+    });
+}
+
+#[test]
+fn g3_translating_a_rigid_pair_cannot_hide_an_off_normal_witness() {
+    with_cx(|_, cx| {
+        let material = bind(&source_card(6.0, 1.0, false, false));
+        let solid = FiniteSolidBody::new(
+            problem(&material, &[], &[]),
+            &[[0.0; 3]; 4],
+            &[[0.0; 3]; 4],
+            0.0,
+            Default::default(),
+            cx,
+        )
+        .unwrap();
+        let contact = rigid_pair(
+            1,
+            RigidImpactPoint {
+                body: 0,
+                arm_body: Vec3::new(0.125, 0.0, 0.25),
+            },
+            RigidImpactPoint {
+                body: 1,
+                arm_body: Vec3::new(0.0, 0.0, 0.25),
+            },
+        );
+        for shift in [0.0, 2.0_f64.powi(53), -2.0_f64.powi(53)] {
+            let origin = [shift; 3];
+            let pose = Pose::new(vec(origin), UnitQuaternion::IDENTITY).unwrap();
+            let bodies = [
+                RigidBodyState::new(pose, Vec3::new(0.0, 0.0, -1.0), Vec3::ZERO).unwrap(),
+                RigidBodyState::new(pose, Vec3::ZERO, Vec3::ZERO).unwrap(),
+            ];
+            assert!(matches!(
+                solid.mixed_contact_candidate(
+                    &bodies,
+                    &[properties(); 2],
+                    &[contact],
+                    origin,
+                    Default::default(),
+                    cx,
+                ),
+                Err(FiniteSolidRigidContactError::Invalid(
+                    "contact witnesses do not share a normal line"
+                ))
+            ));
+        }
+    });
+}
+
+#[test]
 fn directional_mixed_stack_uses_physical_sliding_impulse_and_spin() {
     with_cx(|_, cx| {
         let material = bind(&source_card(6.0, 1.0, false, false));
