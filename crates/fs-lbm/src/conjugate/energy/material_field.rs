@@ -40,7 +40,7 @@ impl EnergyConfig {
         molecular_w_m_k: &[[f64; 3]],
         gate: &CancelGate,
     ) -> Result<EnergySolution, ChtError> {
-        self.solve_with_fields(
+        let solution = self.solve_with_fields(
             domain,
             fluid,
             solids,
@@ -50,7 +50,9 @@ impl EnergyConfig {
             None,
             None,
             gate,
-        )
+        )?;
+        solution.admit_kelvin(gate)?;
+        Ok(solution)
     }
 
     /// Native transient storage and radiation reuse the same admitted material
@@ -127,8 +129,12 @@ impl EnergyConfig {
         enthalpy: AdvectiveEnthalpyField<'_>,
         gate: &CancelGate,
     ) -> Result<EnergySolution, ChtError> {
-        self.solve_with_fields(domain, fluid, solids, flow, setup, molecular_w_m_k,
-            Some(enthalpy), None, gate)
+        let solution = self.solve_with_fields(
+            domain, fluid, solids, flow, setup, molecular_w_m_k,
+            Some(enthalpy), None, gate,
+        )?;
+        solution.admit_kelvin(gate)?;
+        Ok(solution)
     }
 
     /// Evaluate the supplied material fields at an unchanged steady endpoint.

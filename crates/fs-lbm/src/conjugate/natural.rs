@@ -460,6 +460,7 @@ pub fn natural_convection(
                 let coupling_residual =
                     coupling_residual_k / temperature_range(&energy.temperature);
                 if coupling_residual.is_finite() && coupling_residual <= config.steady_tolerance {
+                    energy.admit_kelvin(gate)?;
                     poll(gate)?;
                     return Ok(NaturalConvection {
                         field,

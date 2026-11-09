@@ -23,6 +23,8 @@ mod nonlinear_compact;
 mod compact_transient;
 #[path = "conjugate/compact_coupled.rs"]
 mod compact_coupled;
+#[path = "conjugate/absolute_temperature.rs"]
+mod absolute_temperature;
 use fs_lbm::Face3;
 use fs_lbm::conjugate::turbulence::{eddy_viscosity_ratio, law_of_the_wall_ratios, wall_distance};
 use fs_lbm::conjugate::{
@@ -45,6 +47,11 @@ const OPEN_X: [FlowFace; 6] = [
     FlowFace::Wall,
     FlowFace::Wall,
 ];
+
+// The analytic benchmark coordinates use a unit temperature difference.
+// The physical CHT entry points take Kelvin, so retain an explicit positive
+// datum and subtract it only when observing a normalized reference solution.
+const BENCHMARK_BASE_K: f64 = 1.0;
 
 fn unit_fluid() -> FluidProperties {
     FluidProperties {
@@ -1215,11 +1222,11 @@ fn plates(n: usize, pe_dh: f64, length_gaps: usize) -> (VoxelDomain, FlowField, 
 fn isothermal_plate_nusselt(n: usize) -> (f64, f64) {
     let gate = CancelGate::new();
     let (domain, flow, h) = plates(n, 100.0, 12);
-    let tw = 1.0;
+    let tw = BENCHMARK_BASE_K + 1.0;
     let mut faces = [ThermalFace::Adiabatic; 6];
-    faces[0] = ThermalFace::Inflow { temperature: 0.0 };
+    faces[0] = ThermalFace::Inflow { temperature: BENCHMARK_BASE_K };
     faces[1] = ThermalFace::Outflow {
-        backflow_temperature: 0.0,
+        backflow_temperature: BENCHMARK_BASE_K,
     };
     faces[4] = ThermalFace::Temperature(tw);
     faces[5] = ThermalFace::Temperature(tw);
@@ -1292,9 +1299,9 @@ fn conjugate_heated_walls_reach_uniform_flux_nusselt() {
     .unwrap();
     let flux = 2.0; // W/m^2 into each outer face
     let mut faces = [ThermalFace::Adiabatic; 6];
-    faces[0] = ThermalFace::Inflow { temperature: 0.0 };
+    faces[0] = ThermalFace::Inflow { temperature: BENCHMARK_BASE_K };
     faces[1] = ThermalFace::Outflow {
-        backflow_temperature: 0.0,
+        backflow_temperature: BENCHMARK_BASE_K,
     };
     faces[4] = ThermalFace::HeatFlux(flux);
     faces[5] = ThermalFace::HeatFlux(flux);
@@ -1409,7 +1416,7 @@ fn wall_conductivity_spreads_a_hot_spot() {
 fn duct_profile(ny: usize, nz: usize, dx: f64) -> Vec<f64> {
     let gate = CancelGate::new();
     let section = VoxelDomain::new(1, ny, nz, dx).unwrap();
-    let mut faces = [ThermalFace::Temperature(0.0); 6];
+    let mut faces = [ThermalFace::Temperature(BENCHMARK_BASE_K); 6];
     faces[0] = ThermalFace::Adiabatic;
     faces[1] = ThermalFace::Adiabatic;
     let mut setup = ThermalSetup::new(faces);
@@ -1424,8 +1431,9 @@ fn duct_profile(ny: usize, nz: usize, dx: f64) -> Vec<f64> {
         &gate,
     )
     .unwrap();
-    let mean = solution.temperature.iter().sum::<f64>() / (ny * nz) as f64;
-    solution.temperature.iter().map(|w| w / mean).collect()
+    let mean = solution.temperature.iter().map(|t| t - BENCHMARK_BASE_K).sum::<f64>()
+        / (ny * nz) as f64;
+    solution.temperature.iter().map(|w| (w - BENCHMARK_BASE_K) / mean).collect()
 }
 
 fn rect_duct_nusselt(
@@ -1437,10 +1445,11 @@ fn rect_duct_nusselt(
 ) -> (f64, ChtReport) {
     let gate = CancelGate::new();
     let k = fluid.conductivity_w_m_k;
+    let tw = BENCHMARK_BASE_K + tw;
     let mut faces = [ThermalFace::Temperature(tw); 6];
-    faces[0] = ThermalFace::Inflow { temperature: 0.0 };
+    faces[0] = ThermalFace::Inflow { temperature: BENCHMARK_BASE_K };
     faces[1] = ThermalFace::Outflow {
-        backflow_temperature: 0.0,
+        backflow_temperature: BENCHMARK_BASE_K,
     };
     let solution = solve_energy(
         domain,
@@ -1624,7 +1633,7 @@ fn refusals_are_structured() {
             .unwrap();
     // Flow leaves through a face declared adiabatic.
     let mut faces = [ThermalFace::Adiabatic; 6];
-    faces[0] = ThermalFace::Inflow { temperature: 0.0 };
+    faces[0] = ThermalFace::Inflow { temperature: BENCHMARK_BASE_K };
     let err = solve_energy(
         &domain,
         &unit_fluid(),
@@ -1755,10 +1764,10 @@ fn developing_duct_rung(b: usize, nx: usize, re_nominal: f64) -> (f64, f64, f64)
         report.collision,
         report.realized_inflow_m3_s / report.nominal_inflow_m3_s
     );
-    let mut faces = [ThermalFace::Temperature(1.0); 6];
-    faces[0] = ThermalFace::Inflow { temperature: 0.0 };
+    let mut faces = [ThermalFace::Temperature(BENCHMARK_BASE_K + 1.0); 6];
+    faces[0] = ThermalFace::Inflow { temperature: BENCHMARK_BASE_K };
     faces[1] = ThermalFace::Outflow {
-        backflow_temperature: 0.0,
+        backflow_temperature: BENCHMARK_BASE_K,
     };
     let solution = solve_energy(
         &domain,
@@ -1771,7 +1780,7 @@ fn developing_duct_rung(b: usize, nx: usize, re_nominal: f64) -> (f64, f64, f64)
     )
     .unwrap();
     let q = report.realized_inflow_m3_s;
-    let t_out = solution.report.balance.advective_outflow_w / q; // rho c = 1, T_in = 0
+    let t_out = solution.report.balance.advective_outflow_w / q; // rho c = 1, outlet-minus-inlet rise
     let re = q / area * dh / fluid.kinematic_viscosity_m2_s;
     let gz = re * 0.72 * dh / (nx as f64 * dx);
     let nu_m = gz / 4.0 * fs_math::det::ln(1.0 / (1.0 - t_out));
@@ -1833,12 +1842,12 @@ fn de_vahl_davis(
     let beta = rayleigh * fluid.kinematic_viscosity_m2_s * alpha / (g * h * h * h);
     let domain = VoxelDomain::new(n, n, 4, dx).unwrap();
     let mut faces = [ThermalFace::Adiabatic; 6];
-    faces[0] = ThermalFace::Temperature(1.0);
-    faces[1] = ThermalFace::Temperature(0.0);
+    faces[0] = ThermalFace::Temperature(BENCHMARK_BASE_K + 1.0);
+    faces[1] = ThermalFace::Temperature(BENCHMARK_BASE_K);
     let config = BuoyancyConfig {
         gravity_m_s2: [0.0, -g, 0.0],
         expansion_per_k: beta,
-        reference_temperature_k: 0.5,
+        reference_temperature_k: BENCHMARK_BASE_K + 0.5,
         tau,
         periodic: [false, false, true],
         steady_tolerance: tolerance,
@@ -1857,7 +1866,7 @@ fn de_vahl_davis(
     for z in 0..4 {
         for y in 0..n {
             let t = run.energy.temperature[domain.index(0, y, z)];
-            heat += 2.0 * dx * alpha * (1.0 - t);
+            heat += 2.0 * dx * alpha * (BENCHMARK_BASE_K + 1.0 - t);
         }
     }
     let nu = heat / (alpha * 1.0 / h * h * 4.0 * dx);
@@ -1904,13 +1913,13 @@ fn natural_convection_endpoint_and_partial_batch_respect_the_original_step_budge
         kinematic_viscosity_m2_s: 0.71e-3,
     };
     let mut faces = [ThermalFace::Adiabatic; 6];
-    faces[0] = ThermalFace::Temperature(1.0);
-    faces[1] = ThermalFace::Temperature(0.0);
+    faces[0] = ThermalFace::Temperature(BENCHMARK_BASE_K + 1.0);
+    faces[1] = ThermalFace::Temperature(BENCHMARK_BASE_K);
     let setup = ThermalSetup::new(faces);
     let mut config = BuoyancyConfig {
         gravity_m_s2: [0.0, -9.81, 0.0],
         expansion_per_k: 1e3 * 0.71e-6 / (9.81 * 8.0_f64.powi(3)),
-        reference_temperature_k: 0.5,
+        reference_temperature_k: BENCHMARK_BASE_K + 0.5,
         tau: 0.8,
         periodic: [false, false, true],
         coupling_interval: 160,
@@ -1998,15 +2007,15 @@ fn heated_block_enclosure_closes_energy_and_responds_to_buoyancy() {
             kinematic_viscosity_m2_s: 0.71 * alpha,
         };
         let mut faces = [ThermalFace::Adiabatic; 6];
-        faces[0] = ThermalFace::Temperature(0.0);
-        faces[1] = ThermalFace::Temperature(0.0);
-        faces[3] = ThermalFace::Temperature(0.0);
+        faces[0] = ThermalFace::Temperature(BENCHMARK_BASE_K);
+        faces[1] = ThermalFace::Temperature(BENCHMARK_BASE_K);
+        faces[3] = ThermalFace::Temperature(BENCHMARK_BASE_K);
         let mut setup = ThermalSetup::new(faces);
         setup.add_uniform_power(&domain, 4e-3, |p| (6.0..10.0).contains(&p[0]) && p[1] < 1.0);
         let config = BuoyancyConfig {
             gravity_m_s2: [0.0, -9.81, 0.0],
             expansion_per_k: beta,
-            reference_temperature_k: 0.0,
+            reference_temperature_k: BENCHMARK_BASE_K,
             tau: 0.8,
             periodic: [false, false, true],
             steady_tolerance: 1e-6,
@@ -2027,10 +2036,10 @@ fn heated_block_enclosure_closes_energy_and_responds_to_buoyancy() {
             "{balance:?}"
         );
         assert!(
-            result.energy.temperature.iter().all(|&t| t >= -1e-9),
+            result.energy.temperature.iter().all(|&t| t >= BENCHMARK_BASE_K - 1e-9),
             "maximum principle"
         );
-        result.energy.max_where(|c| !domain.is_fluid(c)).unwrap().1
+        result.energy.max_where(|c| !domain.is_fluid(c)).unwrap().1 - BENCHMARK_BASE_K
     };
     // beta for Rayleigh numbers of roughly 6e2 and 3e3 on the enclosure
     // height at the block's ~0.36 K temperature rise.
@@ -2069,7 +2078,7 @@ fn transient_lumped_cube_follows_backward_euler_and_the_exponential() {
     let domain = VoxelDomain::from_fn(4, 4, 4, dx, |_| Voxel::Solid(0)).unwrap();
     let (h, k, rho_c) = (10.0, 1e6, 1e3);
     let solids = [SolidMaterial::new("block", k).with_heat_capacity(rho_c)];
-    let setup = ThermalSetup::new([ThermalFace::Convective { h, ambient: 0.0 }; 6]);
+    let setup = ThermalSetup::new([ThermalFace::Convective { h, ambient: BENCHMARK_BASE_K }; 6]);
     let face = dx * dx / (1.0 / h + 0.5 * dx / k);
     let conductance = 6.0 * 16.0 * face;
     let capacity = rho_c * 64.0 * dx * dx * dx;
@@ -2083,7 +2092,7 @@ fn transient_lumped_cube_follows_backward_euler_and_the_exponential() {
             &solids,
             &FlowField::quiescent(&domain),
             &setup,
-            &vec![1.0; domain.cell_count()],
+            &vec![BENCHMARK_BASE_K + 1.0; domain.cell_count()],
             |_| 1.0,
             &TransientConfig {
                 time_step_s: dt,
@@ -2102,7 +2111,7 @@ fn transient_lumped_cube_follows_backward_euler_and_the_exponential() {
     };
     let coarse = run(dt, steps);
     let recursion = (1.0 / (1.0 + dt / tau)).powi(steps as i32);
-    let t_end = coarse.temperature[0];
+    let t_end = coarse.temperature[0] - BENCHMARK_BASE_K;
     println!(
         "lumped cube: T(2 tau) = {t_end:.10}, BE recursion {recursion:.10}, exp {:.10}",
         (-2.0f64).exp()
@@ -2115,7 +2124,7 @@ fn transient_lumped_cube_follows_backward_euler_and_the_exponential() {
     let fine = run(dt / 2.0, 2 * steps);
     let (e1, e2) = (
         (t_end - (-2.0f64).exp()).abs(),
-        (fine.temperature[0] - (-2.0f64).exp()).abs(),
+        (fine.temperature[0] - BENCHMARK_BASE_K - (-2.0f64).exp()).abs(),
     );
     println!("time error: dt {e1:.3e}, dt/2 {e2:.3e}");
     assert!((e1 / e2 - 2.0).abs() < 0.1, "first-order ratio {}", e1 / e2);
@@ -2145,9 +2154,9 @@ fn transient_heated_channel_closes_energy_and_settles_to_the_steady_solution() {
     })
     .unwrap();
     let mut faces = [ThermalFace::Adiabatic; 6];
-    faces[0] = ThermalFace::Inflow { temperature: 0.0 };
+    faces[0] = ThermalFace::Inflow { temperature: BENCHMARK_BASE_K };
     faces[1] = ThermalFace::Outflow {
-        backflow_temperature: 0.0,
+        backflow_temperature: BENCHMARK_BASE_K,
     };
     let mut setup = ThermalSetup::new(faces);
     setup.add_uniform_power(&domain, 2.0, |p| p[2] < dx && (1.0..3.0).contains(&p[0]));
@@ -2168,7 +2177,7 @@ fn transient_heated_channel_closes_energy_and_settles_to_the_steady_solution() {
         &solids,
         &flow,
         &setup,
-        &vec![0.0; domain.cell_count()],
+        &vec![BENCHMARK_BASE_K; domain.cell_count()],
         |_| 1.0,
         &TransientConfig {
             time_step_s: 0.05,
@@ -2196,7 +2205,7 @@ fn transient_heated_channel_closes_energy_and_settles_to_the_steady_solution() {
         .zip(&steady.temperature)
         .map(|(a, b)| (a - b).abs())
         .fold(0.0, f64::max);
-    let peak = steady.temperature.iter().copied().fold(0.0, f64::max);
+    let peak = steady.temperature.iter().copied().fold(0.0, f64::max) - BENCHMARK_BASE_K;
     println!(
         "channel: stored {stored:.9} J vs net {net:.9} J, worst step closure {worst:.2e} J, |T(20 s) - T_steady| = {gap:.2e} K of {peak:.4}"
     );
@@ -2216,7 +2225,7 @@ fn transient_heated_channel_closes_energy_and_settles_to_the_steady_solution() {
         &[SolidMaterial::new("plate", 20.0)],
         &flow,
         &setup,
-        &vec![0.0; domain.cell_count()],
+        &vec![BENCHMARK_BASE_K; domain.cell_count()],
         |_| 1.0,
         &TransientConfig {
             time_step_s: 0.05,
@@ -2620,8 +2629,8 @@ fn fv_de_vahl_davis(
     let beta = rayleigh * fluid.kinematic_viscosity_m2_s * alpha / g;
     let domain = VoxelDomain::new(n, n, 1, dx).unwrap();
     let mut faces = [ThermalFace::Adiabatic; 6];
-    faces[0] = ThermalFace::Temperature(1.0);
-    faces[1] = ThermalFace::Temperature(0.0);
+    faces[0] = ThermalFace::Temperature(BENCHMARK_BASE_K + 1.0);
+    faces[1] = ThermalFace::Temperature(BENCHMARK_BASE_K);
     let mut flow = SimpleConfig::new([
         FvBoundary::wall(),
         FvBoundary::wall(),
@@ -2631,7 +2640,7 @@ fn fv_de_vahl_davis(
         FvBoundary::Symmetry,
     ]);
     flow.tolerance = 1e-7;
-    let config = FvBuoyancyConfig::new([0.0, -g, 0.0], beta, 0.5, flow);
+    let config = FvBuoyancyConfig::new([0.0, -g, 0.0], beta, BENCHMARK_BASE_K + 0.5, flow);
     let run = fv_natural_convection(
         &domain,
         &fluid,
@@ -2644,7 +2653,7 @@ fn fv_de_vahl_davis(
     assert!(run.energy.report.balance.relative_residual < 1e-9);
     // Hot-wall heat over the conduction heat k dT / H through the same wall.
     let heat: f64 = (0..n)
-        .map(|y| 2.0 * dx * alpha * (1.0 - run.energy.temperature[domain.index(0, y, 0)]))
+        .map(|y| 2.0 * dx * alpha * (BENCHMARK_BASE_K + 1.0 - run.energy.temperature[domain.index(0, y, 0)]))
         .sum();
     (heat / (alpha * dx), run.report)
 }
@@ -2993,13 +3002,13 @@ fn fv_chimney(n: usize, aspect: usize) -> (f64, f64, fs_lbm::conjugate::FvNatura
     let beta = 20.0 * fluid.kinematic_viscosity_m2_s * alpha / (g * b * b * b);
     let domain = VoxelDomain::new(n, n * aspect, 1, dx).unwrap();
     let mut thermal = [ThermalFace::Adiabatic; 6];
-    thermal[0] = ThermalFace::Temperature(1.0);
-    thermal[1] = ThermalFace::Temperature(1.0);
+    thermal[0] = ThermalFace::Temperature(BENCHMARK_BASE_K + 1.0);
+    thermal[1] = ThermalFace::Temperature(BENCHMARK_BASE_K + 1.0);
     thermal[2] = ThermalFace::Outflow {
-        backflow_temperature: 0.0,
+        backflow_temperature: BENCHMARK_BASE_K,
     };
     thermal[3] = ThermalFace::Outflow {
-        backflow_temperature: 0.0,
+        backflow_temperature: BENCHMARK_BASE_K,
     };
     let mut flow = SimpleConfig::new([
         FvBoundary::wall(),
@@ -3010,7 +3019,7 @@ fn fv_chimney(n: usize, aspect: usize) -> (f64, f64, fs_lbm::conjugate::FvNatura
         FvBoundary::Symmetry,
     ]);
     flow.tolerance = 1e-8;
-    let config = FvBuoyancyConfig::new([0.0, -g, 0.0], beta, 0.0, flow);
+    let config = FvBuoyancyConfig::new([0.0, -g, 0.0], beta, BENCHMARK_BASE_K, flow);
     let run = fv_natural_convection(
         &domain,
         &fluid,
@@ -3486,7 +3495,7 @@ fn simplec_fan_inlet_settles_at_the_fan_and_system_curve_intersection() {
 }
 
 /// Steady conduction along `axis` through a 12-cell bar between faces held
-/// at 1 K and 0 K (other faces adiabatic): the heat rate.
+/// one kelvin apart (other faces adiabatic): heat rate and normalized profile.
 fn bar_heat(
     solids: &[SolidMaterial],
     material_of: impl Fn(usize) -> u16,
@@ -3502,8 +3511,8 @@ fn bar_heat(
     })
     .unwrap();
     let mut faces = [ThermalFace::Adiabatic; 6];
-    faces[2 * axis] = ThermalFace::Temperature(1.0);
-    faces[2 * axis + 1] = ThermalFace::Temperature(0.0);
+    faces[2 * axis] = ThermalFace::Temperature(BENCHMARK_BASE_K + 1.0);
+    faces[2 * axis + 1] = ThermalFace::Temperature(BENCHMARK_BASE_K);
     let mut setup = ThermalSetup::new(faces);
     setup.contacts = contacts;
     let solution = solve_energy(
@@ -3521,7 +3530,7 @@ fn bar_heat(
         .map(|i| {
             let mut at = [0usize; 3];
             at[axis] = i;
-            solution.temperature[domain.index(at[0], at[1], at[2])]
+            solution.temperature[domain.index(at[0], at[1], at[2])] - BENCHMARK_BASE_K
         })
         .collect();
     (heat, profile)

@@ -34,7 +34,9 @@
 use fs_exec::CancelGate;
 
 use super::domain::{FluidProperties, SolidMaterial, VoxelDomain};
-use super::energy::{EnergyConfig, EnergySolution, ThermalFace, ThermalSetup, solve_energy};
+use super::energy::{
+    EnergyConfig, EnergySolution, ThermalFace, ThermalSetup, solve_energy_inner,
+};
 use super::flow::FlowField;
 use super::radiation::{RadiationConfig, RadiationEndpoint, Radiators, reference_temperature};
 use super::simple::{FvFlow, SimpleConfig, Solver, Turbulence, admit};
@@ -247,13 +249,14 @@ pub fn fv_natural_convection(
                 .sinks,
         );
     }
-    let mut temperature = solve_energy(
+    let mut temperature = solve_energy_inner(
         domain,
         fluid,
         solids,
         &FlowField::quiescent(domain),
         &seed,
         &config.energy,
+        None,
         gate,
     )?
     .temperature;
@@ -296,13 +299,14 @@ pub fn fv_natural_convection(
             // pressure after that gate could otherwise invalidate the pair.
             solver.project(gate)?;
         }
-        let energy = solve_energy(
+        let energy = solve_energy_inner(
             domain,
             fluid,
             solids,
             &solver.field(),
             &energy_setup(radiation_endpoint.as_ref(), &solver.heat_eddy_viscosity()),
             &config.energy,
+            None,
             gate,
         )?;
         let next_radiation = evaluate_radiation(&energy.temperature)?;
@@ -357,6 +361,7 @@ pub fn fv_natural_convection(
             let radiated_w = next_radiation.as_ref().map(|endpoint| endpoint.radiated_w);
             // The accepted flow and heat already share one projected epoch.
             // Reporting it must not launch another pressure or energy solve.
+            energy.admit_kelvin(gate)?;
             let flow = solver.finish_projected(fluid, sweeps, residuals);
             return Ok(FvNaturalConvection {
                 flow,

@@ -242,7 +242,10 @@ pub use unsteady::{
 /// Version 8 solves thermal increments about a held Kelvin reference and audits
 /// conductive heat from temperature differences, retaining native advective
 /// datum/divergence and source-owned affine enthalpy semantics.
-pub const CHT_SEMANTICS_VERSION: u32 = 8;
+/// Version 9 admits only positive Kelvin at physical thermal boundaries,
+/// initial states and returned scalar/axis-aligned thermal endpoints. Signed
+/// solver increments and internal nonlinear proposals remain numerical work.
+pub const CHT_SEMANTICS_VERSION: u32 = 9;
 
 /// Structured refusal from any stage of the conjugate pipeline.
 #[derive(Debug, Clone, PartialEq)]

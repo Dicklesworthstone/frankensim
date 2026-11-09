@@ -120,8 +120,11 @@ pub fn march_energy(
             ),
         });
     }
-    for &t in initial_temperature {
-        finite("transient.initial_temperature", t)?;
+    for (cell, &t) in initial_temperature.iter().enumerate() {
+        if cell.is_multiple_of(4096) {
+            poll(gate)?;
+        }
+        finite_positive("transient.initial_temperature", t)?;
     }
     domain.check_materials(solids.len())?;
     let capacity = heat_capacity(domain, fluid, solids, setup, initial_temperature, gate)?;
@@ -319,6 +322,7 @@ fn energy_step(
         domain, fluid, solids, flow, setup, energy, storage, previous, dt, radiation,
         molecular_w_m_k, gate,
     )?;
+    next.admit_kelvin(gate)?;
     let record = storage_record(domain, solids, setup, capacity, previous, &next,
         (time_s, dt, solids_present), (radiated_w, radiation_outflow_correction_w), gate)?;
     Ok((next, record))

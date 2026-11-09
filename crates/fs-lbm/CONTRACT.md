@@ -146,6 +146,28 @@ are unchanged. The historical core golden remains a kernel sentinel with its
 original explicitly authored raw initial populations in a native unit test;
 its hash is unchanged and does not certify the new initialization behavior.
 
+## Positive Kelvin in physical conjugate heat transfer
+
+The scalar and axis-aligned CHT entry points require positive finite Kelvin
+for prescribed boundaries, ambient and backflow reservoirs, fixed cells, sinks
+and initial storage states. Steady solves, transient steps and converged native
+buoyancy results also admit their complete physical temperature fields and
+compact junction temperatures before returning an accepted result. Cooling
+that reaches zero or negative Kelvin refuses instead of publishing a clamped
+or unphysical endpoint. CHT semantics version 9 records this admission.
+
+Signed temperature increments and intermediate native k(T) linear proposals
+remain numerical work. Their final physical endpoint must satisfy the Kelvin
+domain; an intermediate proposal alone does not establish failure. Native
+buoyancy pseudo-time and coupling candidates follow the same distinction.
+The native lattice passive-scalar API retains its own scalar contract.
+Existing normalized CHT benchmarks now declare an explicit positive Kelvin
+datum and subtract it only from their analytic reference observations.
+
+Focused regression definitions cover boundary and storage admission, steady
+and transient overcooling, valid cooling with the original heat balance, and a
+nonlinear conductive root whose first frozen-coefficient proposal is negative.
+
 ## Centered temperatures in conjugate conduction
 
 The native scalar/axis-aligned finite-volume energy solve uses temperature

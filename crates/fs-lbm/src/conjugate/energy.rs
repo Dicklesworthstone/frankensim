@@ -408,6 +408,23 @@ pub(super) struct SolidStorageHeat {
 }
 
 impl EnergySolution {
+    /// Validate a physical endpoint, not an intermediate linear proposal.
+    /// A signed increment or Picard trial is not an absolute temperature;
+    /// admitted results and compact junctions must remain positive Kelvin.
+    pub(super) fn admit_kelvin(&self, gate: &CancelGate) -> Result<(), ChtError> {
+        for (cell, &temperature) in self.temperature.iter().enumerate() {
+            if cell.is_multiple_of(4096) {
+                super::poll(gate)?;
+            }
+            finite_positive("thermal.temperature_k", temperature)?;
+        }
+        for junction in &self.junctions {
+            super::poll(gate)?;
+            finite_positive("thermal.junction_temperature_k", junction.temperature_k)?;
+        }
+        super::poll(gate)
+    }
+
     /// The native table owner may refresh its secant inside a source-fluid
     /// solve. Outer caloric audits must use that applied rate, not their
     /// initial reference capacity. Rows stay sorted by cell index.
@@ -842,7 +859,9 @@ pub fn solve_energy(
     config: &EnergyConfig,
     gate: &CancelGate,
 ) -> Result<EnergySolution, ChtError> {
-    solve_energy_inner(domain, fluid, solids, flow, setup, config, None, gate)
+    let solution = solve_energy_inner(domain, fluid, solids, flow, setup, config, None, gate)?;
+    solution.admit_kelvin(gate)?;
+    Ok(solution)
 }
 
 /// Implicit pseudo-time storage `coefficient_c (T_c - previous_c)` (W) added
@@ -1160,7 +1179,7 @@ fn solve_energy_field_kernel(
     }
     let mut fixed = vec![None; cells];
     for &(c, t) in &setup.fixed_temperature {
-        finite("thermal.fixed_temperature", t)?;
+        finite_positive("thermal.fixed_temperature", t)?;
         if c >= cells {
             return Err(ChtError::InvalidInput {
                 field: "thermal.fixed_temperature",
@@ -1172,17 +1191,17 @@ fn solve_energy_field_kernel(
     for (face, rule) in Face3::ALL.into_iter().zip(setup.faces) {
         match rule {
             ThermalFace::Adiabatic => {}
-            ThermalFace::Temperature(t) => finite("thermal.face.temperature", t)?,
+            ThermalFace::Temperature(t) => finite_positive("thermal.face.temperature", t)?,
             ThermalFace::HeatFlux(q) => finite("thermal.face.heat_flux", q)?,
             ThermalFace::Convective { h, ambient } => {
                 finite_positive("thermal.face.h", h)?;
-                finite("thermal.face.ambient", ambient)?;
+                finite_positive("thermal.face.ambient", ambient)?;
             }
-            ThermalFace::Inflow { temperature } => finite("thermal.face.inflow", temperature)?,
+            ThermalFace::Inflow { temperature } => finite_positive("thermal.face.inflow", temperature)?,
             ThermalFace::Outflow {
                 backflow_temperature,
             } => {
-                finite("thermal.face.backflow", backflow_temperature)?;
+                finite_positive("thermal.face.backflow", backflow_temperature)?;
             }
         }
         if !rule.is_open() {
@@ -1425,7 +1444,7 @@ fn solve_energy_field_kernel(
             });
         }
         finite("thermal.cell_sinks.conductance_w_k", sink.conductance_w_k)?;
-        finite("thermal.cell_sinks.temperature_k", sink.temperature_k)?;
+        finite_positive("thermal.cell_sinks.temperature_k", sink.temperature_k)?;
         if sink.conductance_w_k < 0.0 {
             return Err(ChtError::InvalidInput {
                 field: "thermal.cell_sinks.conductance_w_k",
