@@ -407,3 +407,162 @@ fn missing_links_invalid_flow_and_late_cancellation_return_no_partial_loads() {
     assert_eq!(seen, polls);
     assert_eq!(initial, before);
 }
+
+#[test]
+fn chord_rows_resolve_control_and_bound_motion_and_preserve_joint_virtual_work() {
+    let model = model(true);
+    let panels = flat_surface(SurfaceId::WingLower, 2.0, 1.0, 1.0, 0.0, 2, 3).unwrap();
+    let strips: Vec<_> = (0..2)
+        .map(|s| StripSpec {
+            panel_indices: vec![s, 2 + s, 4 + s],
+            chord_m: 1.0,
+            twist_rad: 0.0,
+        })
+        .collect();
+    let surfaces = LinkedLiftingSurfaces::new(&panels, &strips, &[1, 1]).unwrap();
+    let mut original = state(true, 0.12, 0.3);
+    original.motion.base.twist_body.angular = Vec3::new(0.02, -0.03, 0.04);
+    let kinematics = map(&model, &original);
+    let samples = RefCell::new(Vec::new());
+    let actual = surfaces
+        .evaluate(
+            &kinematics,
+            REFERENCE,
+            RHO,
+            &closure,
+            |point| {
+                samples.borrow_mut().push(point);
+                wind(point)
+            },
+            None,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(samples.borrow().len(), 2 * panels.len());
+    let (sin, cos) = (0.12_f64.sin(), 0.12_f64.cos());
+    let rotate = |p: Vec3| Vec3::new(cos * p.x + sin * p.z, p.y, -sin * p.x + cos * p.z);
+    let angular = original.motion.base.twist_body.angular + Vec3::new(0.0, 0.3, 0.0);
+    let mut force = Vec3::default();
+    let mut torque = Vec3::default();
+    let mut power = 0.0;
+    for (j, panel) in panels.iter().enumerate() {
+        let control = rotate(v(panel.ctrl));
+        let point = rotate((v(panel.a) + v(panel.b)).scale(0.5));
+        let material = v(REFERENCE) + angular.cross(point);
+        let relative = material - v(wind(a(point)).unwrap());
+        let control_relative = v(REFERENCE) + angular.cross(control) - v(wind(a(control)).unwrap());
+        close(v(samples.borrow()[2 * j]), control, 2e-14);
+        close(v(samples.borrow()[2 * j + 1]), point, 2e-14);
+        close(
+            v(actual.panel_control_relative_velocity_world_mps[j]),
+            control_relative,
+            2e-14,
+        );
+        close(
+            v(actual.panel_bound_relative_velocity_world_mps[j]),
+            relative,
+            2e-14,
+        );
+        assert!((control_relative - relative).norm() > 0.01);
+        let row_force = relative
+            .cross(rotate(v(panel.b) - v(panel.a)))
+            .scale(RHO * actual.nonlinear.gamma[j]);
+        force = force + row_force;
+        torque = torque + point.cross(row_force);
+        power += row_force.dot(material);
+    }
+    close(actual.world_wrenches[1].force, force, 2e-11);
+    close(actual.world_wrenches[1].torque, torque, 2e-11);
+    close(v(actual.nonlinear.total_force_n), force, 2e-11);
+    let generalized = kinematics
+        .project_world_wrenches(&actual.world_wrenches)
+        .unwrap();
+    let mut rates = original.motion.base.twist_body.to_array().to_vec();
+    rates.extend(&original.motion.joint_velocity);
+    let projected: f64 = generalized.iter().zip(rates).map(|(f, u)| f * u).sum();
+    assert!((projected - power).abs() < 3e-11);
+    assert!(
+        (v(actual.panel_bound_relative_velocity_world_mps[0])
+            - v(actual.panel_bound_relative_velocity_world_mps[4]))
+        .norm()
+            > 0.1
+    );
+    // Actual native row loading must respond to the differing control-point
+    // velocities. The old constant-reference row split cannot reproduce it.
+    let world_panels: Vec<_> = panels
+        .iter()
+        .map(|p| Panel {
+            a: a(rotate(v(p.a))),
+            b: a(rotate(v(p.b))),
+            ctrl: a(rotate(v(p.ctrl))),
+            normal: a(rotate(v(p.normal))),
+            ..*p
+        })
+        .collect();
+    let frames: Vec<_> = strips
+        .iter()
+        .map(|s| SectionFrame::from_panel(&world_panels[s.panel_indices[0]]).unwrap())
+        .collect();
+    let frozen_operator = InfluenceOperator::build(&world_panels, REFERENCE, RHO).unwrap();
+    let frozen = solve_nonlinear_with_section_frames(
+        &frozen_operator,
+        &world_panels,
+        &strips,
+        REFERENCE,
+        RHO,
+        &closure,
+        &frames,
+        &actual.strip_relative_velocity_world_mps,
+        None,
+    )
+    .unwrap();
+    assert!(
+        actual
+            .nonlinear
+            .gamma
+            .iter()
+            .zip(&frozen.gamma)
+            .any(|(a, b)| (a - b).abs() > 1e-4)
+    );
+
+    // Frame covariance includes both sampled locations and the resolved row
+    // loads, with a common wind/body boost removed before rotational slip.
+    let rotation = So3::exp(So3Tangent::new(Vec3::new(0.2, -0.3, 0.4))).unwrap();
+    let pose = Se3::from_parts(rotation, Vec3::new(2.0, -3.0, 1.0)).unwrap();
+    let boost = Vec3::new(100.0, -50.0, 30.0);
+    let mut moved = original;
+    moved.motion.base.world_from_base = pose;
+    moved.motion.base.twist_body.linear = v(REFERENCE) + rotation.inverse().rotate(boost).unwrap();
+    let transformed = surfaces
+        .evaluate(
+            &map(&model, &moved),
+            a(rotation.rotate(v(REFERENCE)).unwrap()),
+            RHO,
+            &closure,
+            |point| {
+                let local = pose.inverse().unwrap().transform_point(v(point)).unwrap();
+                Ok(a(rotation.rotate(v(wind(a(local))?)).unwrap() + boost))
+            },
+            None,
+            || false,
+        )
+        .unwrap();
+    for (a, b) in transformed
+        .nonlinear
+        .gamma
+        .iter()
+        .zip(&actual.nonlinear.gamma)
+    {
+        assert!((a - b).abs() < 3e-9);
+    }
+    close(
+        transformed.world_wrenches[1].force,
+        rotation.rotate(force).unwrap(),
+        3e-8,
+    );
+    close(
+        transformed.world_wrenches[1].torque,
+        rotation.rotate(torque).unwrap(),
+        3e-8,
+    );
+}

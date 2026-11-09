@@ -12,10 +12,10 @@ use fs_ga::{Vec3, Wrench};
 use fs_mbd::articulated::generalized::GeneralizedKinematics;
 use fs_wing::nonlinear::{
     InfluenceOperator, NonlinearReport, SectionClosure, SectionFrame, StripSpec,
-    solve_nonlinear_with_section_frames,
+    solve_nonlinear_with_panel_incident,
 };
 use fs_wing::wrench::CirculatoryWrenchAccumulator;
-use fs_wing::{MAX_PANELS, Panel};
+use fs_wing::{MAX_PANELS, Panel, PanelIncidentFlow};
 
 /// Native panel/strip geometry, with one original articulated link per strip.
 ///
@@ -46,9 +46,15 @@ pub struct ArticulatedCirculation {
     /// Actual front bound-row midpoint sampled for each native strip [m].
     pub strip_points_world_m: Vec<[f64; 3]>,
     /// Material-point velocity minus prescribed fluid velocity, in world axes
-    /// [m/s]. The original one-velocity-per-strip force/closure model uses this
-    /// same vector for its owned chordwise rows; this is not chord-resolved flow.
+    /// [m/s]. This representative velocity drives the strip's section closure;
+    /// the actual row velocities below drive its boundary loading and forces.
     pub strip_relative_velocity_world_mps: Vec<[f64; 3]>,
+    /// Actual material-relative velocity at every transformed control point,
+    /// in native panel order [m/s]. These determine the chord-row loading.
+    pub panel_control_relative_velocity_world_mps: Vec<[f64; 3]>,
+    /// Actual material-relative velocity at every transformed bound midpoint,
+    /// in native panel order [m/s]. These determine panel forces and moments.
+    pub panel_bound_relative_velocity_world_mps: Vec<[f64; 3]>,
 }
 
 impl<'a> LinkedLiftingSurfaces<'a> {
@@ -119,20 +125,22 @@ impl<'a> LinkedLiftingSurfaces<'a> {
     /// Evaluate actual articulated circulation without changing state or history.
     ///
     /// All inputs describe the same physical stage. The caller's complete world
-    /// fluid field is sampled once at each front bound-row midpoint. In link
+    /// fluid field is sampled at each control point and bound midpoint. In link
     /// axes the relative velocity is v_link - R^-1 U + omega_link cross r;
     /// inherited serial-joint motion is already in the original link twist.
     /// Subtracting the translational flow before adding the rotational term
     /// avoids erasing a small local rotational slip under a common large drift.
     ///
     /// wake_reference_velocity_world_mps is a declared common relative-air
-    /// vector. It sets the original straight trailing-leg geometry and linear
-    /// row ratios; it does not replace the actual strip air velocities. Native
+    /// vector. It sets the original straight trailing-leg geometry; actual
+    /// control velocities determine linear row ratios. Native
     /// positive chordwise-flow, conditioning and nonlinear-iteration admissions
     /// remain authoritative. Geometry is rebuilt at this stage, so no stale
     /// operator can survive a changed link pose. An optional accepted warm
     /// circulation uses the original fixed panel ownership.
     ///
+    /// The section polar still uses its representative front-bound velocity;
+    /// resolved row loading does not supply a new unsteady/pitch-rate polar.
     /// This quasi-steady circulatory model excludes profile/induced-drag
     /// closures, prescribed wake roll-up, added mass and unsteady pressure.
     /// It adds no hinge effort separately from the physical link wrenches.
@@ -163,10 +171,14 @@ impl<'a> LinkedLiftingSurfaces<'a> {
             ));
         }
         let mut panels = Vec::with_capacity(self.panels.len());
+        let mut control_incident = Vec::with_capacity(self.panels.len());
+        let mut bound_incident = Vec::with_capacity(self.panels.len());
         for (j, panel) in self.panels.iter().enumerate() {
             checkpoint(&mut cancelled)?;
             let link = self.strip_links[self.panel_strips[j]];
             let pose = kinematics.world_from_link(link);
+            let rotation = pose.rotation();
+            let velocity = kinematics.body_twist(link);
             let point = |value| {
                 pose.transform_point(vector(value))
                     .map(array)
@@ -183,6 +195,25 @@ impl<'a> LinkedLiftingSurfaces<'a> {
                 ),
                 ..*panel
             });
+            let mut relative_at = |local: Vec3| -> Result<[f64; 3], Refusal> {
+                let position = pose.transform_point(local).map_err(geometry)?;
+                let wind = vector(wind_world(array(position))?);
+                let slip = velocity.linear - rotation.inverse().rotate(wind).map_err(geometry)?
+                    + velocity.angular.cross(local);
+                let relative = rotation.rotate(slip).map_err(geometry)?;
+                if !array(position)
+                    .into_iter()
+                    .chain(array(relative))
+                    .all(f64::is_finite)
+                {
+                    return Err(invalid(
+                        "unrepresentable material point or relative air velocity",
+                    ));
+                }
+                Ok(array(relative))
+            };
+            control_incident.push(relative_at(vector(panel.ctrl))?);
+            bound_incident.push(relative_at((vector(panel.a) + vector(panel.b)).scale(0.5))?);
         }
         let mut frames = Vec::with_capacity(self.strips.len());
         let mut points = Vec::with_capacity(self.strips.len());
@@ -195,20 +226,6 @@ impl<'a> LinkedLiftingSurfaces<'a> {
             let panel = self.panels[strip.panel_indices[0]];
             let local_point = (vector(panel.a) + vector(panel.b)).scale(0.5);
             let point = pose.transform_point(local_point).map_err(geometry)?;
-            let wind = vector(wind_world(array(point))?);
-            let velocity = kinematics.body_twist(link);
-            let slip = velocity.linear - rotation.inverse().rotate(wind).map_err(geometry)?
-                + velocity.angular.cross(local_point);
-            let relative = rotation.rotate(slip).map_err(geometry)?;
-            if !array(point)
-                .into_iter()
-                .chain(array(relative))
-                .all(f64::is_finite)
-            {
-                return Err(invalid(
-                    "unrepresentable material point or relative air velocity",
-                ));
-            }
             let local_frame = self.frames[s];
             frames.push(
                 SectionFrame::new(
@@ -226,13 +243,21 @@ impl<'a> LinkedLiftingSurfaces<'a> {
                 .map_err(wing_error)?,
             );
             points.push(array(point));
-            incident.push(array(relative));
+            incident.push(bound_incident[strip.panel_indices[0]]);
         }
         checkpoint(&mut cancelled)?;
-        let operator =
-            InfluenceOperator::build(&panels, wake_reference_velocity_world_mps, density_kg_m3)
-                .map_err(wing_error)?;
-        let nonlinear = solve_nonlinear_with_section_frames(
+        let panel_incident = PanelIncidentFlow {
+            control_mps: &control_incident,
+            bound_mps: &bound_incident,
+        };
+        let operator = InfluenceOperator::build_with_panel_incident(
+            &panels,
+            wake_reference_velocity_world_mps,
+            density_kg_m3,
+            panel_incident,
+        )
+        .map_err(wing_error)?;
+        let nonlinear = solve_nonlinear_with_panel_incident(
             &operator,
             &panels,
             self.strips,
@@ -241,6 +266,7 @@ impl<'a> LinkedLiftingSurfaces<'a> {
             closure,
             &frames,
             &incident,
+            panel_incident,
             warm_start,
         )
         .map_err(wing_error)?;
@@ -261,7 +287,7 @@ impl<'a> LinkedLiftingSurfaces<'a> {
             let owner = &mut owners[self.strip_links[s]];
             for &j in &strip.panel_indices {
                 owner
-                    .add_panel(&panels[j], nonlinear.gamma[j], incident[s])
+                    .add_panel(&panels[j], nonlinear.gamma[j], bound_incident[j])
                     .map_err(wing_error)?;
             }
         }
@@ -271,6 +297,8 @@ impl<'a> LinkedLiftingSurfaces<'a> {
             world_wrenches: owners.into_iter().map(|owner| owner.total()).collect(),
             strip_points_world_m: points,
             strip_relative_velocity_world_mps: incident,
+            panel_control_relative_velocity_world_mps: control_incident,
+            panel_bound_relative_velocity_world_mps: bound_incident,
         })
     }
 }
