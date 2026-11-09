@@ -9,12 +9,15 @@
 //! Construction explicitly authors a piecewise-linear locus between original
 //! observations. It does not change the claim's interpolation policy or create
 //! measured values between knots. Every source knot and receipt is retained.
-//! Each prepared locus is frozen at the selected absolute
+//! Each prepared tabulated locus is frozen at the selected absolute
 //! temperature, and uses only the original positive plastic-strain-rate
 //! applicability interval. Both are checked against actual runtime inputs.
 //! Curves depend on triaxiality alone. Two-coordinate loci retain the original
 //! source triangles in triaxiality and `xi = (27/2) det(s) / q^3`; neither a
 //! bounding rectangle nor an inferred convex hull fills gaps in those data.
+//! The separate Johnson--Cook resolver admits one pinned, versioned model fit;
+//! its original typed rate and temperature bounds remain live at runtime. It
+//! does not fit a Johnson--Cook model to these tabulated observations.
 //! Initiation is an empirical criterion, not stiffness degradation, fracture
 //! energy, a separated surface, or experimentally validated component failure.
 
@@ -34,6 +37,12 @@ use crate::state_point::{ResolvedMaterialStatePoint, is_fixed_external_coordinat
 
 mod stress_state;
 pub use stress_state::{DuctileStressSurface, resolve_ductile_stress_locus};
+
+mod johnson_cook;
+pub use johnson_cook::{
+    JOHNSON_COOK_INITIATION_LAW_ID, JohnsonCookCalibrationSource, ResolvedJohnsonCookInitiation,
+    resolve_johnson_cook_initiation,
+};
 
 /// Local accumulated equivalent plastic strain at ductile initiation.
 pub const FRACTURE_PLASTIC_STRAIN_PROPERTY: &str = "ductile-fracture-equivalent-plastic-strain";

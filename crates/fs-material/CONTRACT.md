@@ -1,5 +1,35 @@
 # fs-material — CONTRACT
 
+## Source-bound Johnson--Cook ductile initiation
+
+`ductile::source::resolve_johnson_cook_initiation` admits one explicitly pinned
+`ConstitutiveModelCard` carried by the original immutable material card. Law
+`ductile-johnson-cook-minus-triaxiality`, law/state version 1, fixes the
+`exp(-d3*eta)` convention and virgin accumulated plastic strain/utilization.
+All eight scalar parameters are mandatory and unit-checked: dimensionless
+`d1`–`d5`, `reference_strain_rate_s_inv`, and absolute-kelvin
+`transition_temperature_k`/`melting_temperature_k`. No original plus-exponent
+convention, independent parameter fit, tabulated strain observation, or coupon
+elongation is silently converted. The whole fit and its calibration artifact
+hashes, provenance, material identity and complete typed context are retained.
+
+Original typed triaxiality, equivalent-plastic-strain-rate and absolute-temperature
+bounds stay live, including temperatures beyond the original admission point.
+The numeric constructor checks the complete finite calibration rectangle;
+runtime queries enforce it without source queries or allocations. Extra evolving
+coordinates and a second temperature axis refuse. Other environmental coordinates
+stay fixed and source binding compares them in both directions. Matching an
+existing material bundle uses its retained coordinate views without allocation.
+
+`ResolvedJohnsonCookInitiation` delegates the native response and analytical
+triaxiality/rate derivatives, so existing small- and finite-strain progressive
+ductility laws use the same onset chain rule. This source adapter supplies no
+temperature-dependent mechanical coefficients, caloric feedback, parameter fit,
+post-fracture topology, or independent experimental validation. Focused G0/G1/G3
+regressions in `tests/ductile_johnson_cook_source.rs` cover the analytic response,
+rate/temperature-sensitive irreversible initiation, native progressive parity,
+derivatives, exact fit selection, source/context binding, and calibration refusals.
+
 ## Exact finite-support ductile completion
 
 `DuctileWorkEvolution` selects the post-initiation profile explicitly; all existing numeric and source constructors retain `Exponential`. `FiniteSupportQuadratic` uses `x=(h/Gp) integral R d(alpha)`, `r=max(1-x/3,0)`, `g=r^2`, and `dg/dx=-2r/3` below its support, zero thereafter. Exact failure occurs at `x=3`, after undegraded equivalent work `3Gp`; `integral g dx=1`, so `Gp` remains integrated degraded equivalent plastic-work capacity, not total thermodynamic fracture energy.
