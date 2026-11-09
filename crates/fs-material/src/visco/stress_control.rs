@@ -472,7 +472,7 @@ impl StressControlledMaxwell {
 // modal strain-rate trajectory. No rate separation is assumed: coincident
 // relaxation rates use their analytic divided-difference limit.
 fn convolved_relaxation(tau: f64, rate: f64, dt: f64) -> (f64, f64) {
-    let average = |x| if x == 0.0 { 1.0 } else { -det::expm1(-x) / x };
+    let average = |x: f64| if x == 0.0 { 1.0 } else { -det::expm1(-x) / x };
     let r = dt / tau;
     let s = rate * dt;
     if r.is_infinite() && s.is_infinite() {

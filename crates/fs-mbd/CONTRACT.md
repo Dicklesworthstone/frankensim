@@ -8693,6 +8693,41 @@ isolated free modes, distant origins and common velocity boosts, inactive
 sources, explicit resource boundaries, late physical refusal, and cancellation
 with unchanged-input retry.
 
+## Moving full-spatial viscous connector networks
+
+`spatial_loads::internal_motion::viscous::network` composes the original passive
+graph sources with one native finite-motion step per body. Shared bodies,
+cycles, parallel connectors and isolated bodies retain their complete mass and
+inertia. Both half sources are prepared from their actual endpoint geometry;
+evolved attitudes, off-center arms and transported opposite couples therefore
+participate in the second exchange. Held native loads, uniform gravity and
+prepared material-point/world-couple loads use the existing motion/work owners.
+
+`ViscousNetworkMotionControls` separately authors source subdivisions and
+physical balance tolerances. Its resource limits cover both stages' total pair
+calls and the complete logical peak storage before allocation. Each source
+preparation is released before the next, and the final source receipt owns the
+endpoint state bank without a duplicate output copy. Storage stays linear in
+bodies plus connectors; no global matrix or new source kernel is introduced.
+
+The returned per-connector heat is the sum of independent positive source
+integrals, available for explicit thermal allocation. Applied work, gravity
+potential, native numerical drift defects and physical damping loss remain
+distinct. Every native body drift passes its own gate before the complete
+original-to-final momentum and mechanical-energy/heat audit. Any source,
+motion, resource or cancellation refusal publishes no partially accepted state.
+
+The smooth moving-geometry composition is second order under temporal
+refinement. The graph source is separately second order under its explicit
+subdivisions; passive exact pair exchanges do not make a coarse whole-graph
+trajectory exact. No joint constraint, spring storage, temperature evolution,
+thermal coefficient update or microscopic damping mechanism is inferred.
+`tests/internal_viscous_network_motion.rs` exercises G1 continuous graph-mode
+position/velocity/heat refinement and a full moving six-axis cycle against
+independent Newton-Euler RK4; G3 original pair/zero-law/isolated-body behavior,
+gravity separation and rotating point-load work; and bounded-resource and late
+cancellation refusal with exact retry.
+
 ## Native simultaneous full-stick normal, shear and twist adhesion
 
 `adhesive::jkr_combined` consumes the original four-coordinate circular JKR

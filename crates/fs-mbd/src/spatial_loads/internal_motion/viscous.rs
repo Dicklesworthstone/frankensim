@@ -18,6 +18,9 @@ use crate::spatial_loads::internal_impulse::viscous::{
 use crate::{DynamicsError, MassProperties, RigidBodyState, RigidKineticEnergyChange, Vec3};
 use fs_math::dd::Dd;
 
+/// Finite motion with shared-body networks of the same passive spatial laws.
+pub mod network;
+
 /// One passive spatial law attached to the original material frames.
 ///
 /// The full SI damping matrix acts on the transported relative twist at B,

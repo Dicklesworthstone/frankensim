@@ -232,23 +232,7 @@ impl PreparedViscousNetwork {
             calls,
             limits.maximum_pair_relaxations as u128,
         )?;
-        let retained = poses.len() as u128
-            * (core::mem::size_of::<Pose>() + core::mem::size_of::<MassProperties>()) as u128
-            + active as u128 * core::mem::size_of::<PreparedLink>() as u128;
-        let staged = poses.len() as u128
-            * (core::mem::size_of::<RigidBodyState>() + core::mem::size_of::<IntendedImpulse>())
-                as u128
-            + links.len() as u128
-                * (core::mem::size_of::<Dd>() + core::mem::size_of::<f64>()) as u128;
-        // Original six-coordinate Jacobi owner's conservative aggregate
-        // 4*n*n+3*n envelope, including index storage at the wider scalar size.
-        let spectral = if active == 0 {
-            0
-        } else {
-            (4 * 6 * 6 + 3 * 6)
-                * core::mem::size_of::<f64>().max(core::mem::size_of::<usize>()) as u128
-        };
-        let bytes = retained + staged.max(spectral);
+        let bytes = planned_live_bytes(poses.len(), links.len(), active);
         admit_limit("live bytes", bytes, limits.maximum_live_bytes as u128)?;
         let full_step = if active == 0 {
             0.0
@@ -518,7 +502,31 @@ impl PreparedViscousNetwork {
     }
 }
 
-fn nonzero(damping: &PassiveBushingMatrix) -> bool {
+// Shared with the finite-motion consumer so the complete trajectory admits
+// its peak before allocating either original source preparation.
+pub(in crate::spatial_loads) fn planned_live_bytes(
+    bodies: usize,
+    connectors: usize,
+    active: usize,
+) -> u128 {
+    let retained = bodies as u128
+        * (core::mem::size_of::<Pose>() + core::mem::size_of::<MassProperties>()) as u128
+        + active as u128 * core::mem::size_of::<PreparedLink>() as u128;
+    let staged = bodies as u128
+        * (core::mem::size_of::<RigidBodyState>() + core::mem::size_of::<IntendedImpulse>())
+            as u128
+        + connectors as u128 * (core::mem::size_of::<Dd>() + core::mem::size_of::<f64>()) as u128;
+    // Original six-coordinate Jacobi owner's conservative aggregate
+    // 4*n*n+3*n envelope, including index storage at the wider scalar size.
+    let spectral = if active == 0 {
+        0
+    } else {
+        (4 * 6 * 6 + 3 * 6) * core::mem::size_of::<f64>().max(core::mem::size_of::<usize>()) as u128
+    };
+    retained + staged.max(spectral)
+}
+
+pub(in crate::spatial_loads) fn nonzero(damping: &PassiveBushingMatrix) -> bool {
     damping
         .native_coefficients()
         .iter()
