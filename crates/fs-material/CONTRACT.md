@@ -23768,3 +23768,32 @@ RateFelt, empty/zero-clock/invalid-state behavior, and direct Prony realization.
 All eleven existing felt/Prony source groups also pass. This source harness
 uses original numerical functions and real fs-math/fs-evidence dependencies;
 full fs-material/runtime integration remains unverified.
+
+## Collective spherical droplets in one finite atmosphere
+
+`evaporation::gas::droplet::chamber` derives each physical droplet's area and
+diameter from its positive mass, original enthalpy chart and liquid density.
+Explicit molecular D and diameter-based Sh supply `k_m = Sh D / diameter`.
+Stable IDs canonically order heterogeneous droplets; duplicate IDs and rosters
+above the caller's positive work bound refuse before phase work.
+
+One original chamber owns the shared vapor donor, species update and gas
+caloric endpoint. Gross condensation cannot spend another droplet's same-step
+evaporation. Optional reciprocal sensible heat uses the original simultaneous
+shared-gas heat owner, followed by the same joint phase interval. Original
+finite kinetics, caloric reference compatibility, endpoint equilibrium and
+inventory/temperature limits remain active. Latent and carried energy are not
+added twice. Receipts retain individual phase/heat accounts plus the sole gas
+account and noncancelling extensive mass/energy defects.
+
+Geometry and transfer inputs freeze for this first-order interval. Accepted
+radii use actual final mass and source density, including heat-only density
+changes at D=0. Any source, geometry, conservation or cancellation refusal
+returns no partial candidate. Gas volume stays externally prescribed; no
+displacement work, statistical parcel weights, droplet shielding, trajectories,
+breakup, coalescence, nucleation or complete dry-out is inferred.
+
+Five focused G0/G3/G4 regression groups specify independent spherical rates,
+mixed directions/sizes, original scalar/collective equivalence, permutation,
+shared donor limits, reciprocal heat and atomic retry. Pinned rustfmt parsing
+and formatting checks passed; compilation and runtime execution were unavailable.

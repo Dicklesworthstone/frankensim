@@ -17,6 +17,9 @@
 //! motion, breakup, a forced-convection correlation and rarefied transport are
 //! not supplied. Correlation selection/admission belongs to the transport owner.
 
+/// Spherical inventories sharing one original finite-gas donor and caloric solve.
+pub mod chamber;
+
 use super::{
     GasEvaporationError, GasEvaporationSolve, GasEvaporationStep, GasFilmHeatSolve,
     GasFilmHeatStep, GasLiquidBinding, advance_surface_with_gas, advance_surface_with_gas_and_heat,
