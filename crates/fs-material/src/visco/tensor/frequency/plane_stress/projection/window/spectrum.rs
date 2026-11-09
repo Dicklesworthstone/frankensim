@@ -147,7 +147,7 @@ impl HarmonicEnergySpectrum {
 
     fn product_integral(&self, a: &[Channel], b: &[Channel], denominator: &[f64], total: &mut Sum) {
         if let Some(modes) = &self.field_modes {
-            modes.add_product(a, b, self.duration, denominator, total);
+            modes.add_product(a, b, Sum::default(), self.duration, denominator, total);
             return;
         }
         let n = self.frequencies.len();
@@ -373,16 +373,17 @@ impl HarmonicEnergySpectrum {
                 }
             }
             if let Some(modes) = &self.field_modes {
-                weighted(
-                    total,
+                modes.add_product(
+                    &stress[..n],
+                    &rate[..n],
                     constant,
-                    modes.mean(&rate[..n]),
-                    Dd::ONE,
-                    &[self.duration],
+                    self.duration,
                     &[],
+                    total,
                 );
+            } else {
+                self.product_integral(&stress[..n], &rate[..n], &[], total);
             }
-            self.product_integral(&stress[..n], &rate[..n], &[], total);
         }
     }
 }
@@ -547,3 +548,4 @@ mod tests {
         near(actual, integral, integral);
     }
 }
+

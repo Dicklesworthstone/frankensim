@@ -24,6 +24,111 @@ fn imaginary_strains(scale: f64) -> [StrainParts; 3] {
 }
 
 #[test]
+fn g1_relaxed_bias_interferes_with_ac_before_storage_and_work() {
+    for tones in 1..=2 {
+        let frequencies: &[f64] = &([1.0, 2.0])[..tones];
+        let strains: Vec<StrainParts> = frequencies
+            .iter()
+            .map(|_| {
+                let mut strain = [[Dd::ZERO; 2]; 6];
+                strain[0][0] = Dd::ONE;
+                strain
+            })
+            .collect();
+        let spectrum = vec![[(1.0, 0), (0.0, 0)]; tones];
+        let mut bias = [Dd::ZERO; 6];
+        bias[0] = Dd::from_f64(-(tones as f64));
+        for duration in [1e-12, 1e-16, 1e-20] {
+            // q(t)=sum(cos(omega*t)-1). The half-angle identity supplies
+            // an independent oracle without subtracting any near-unit cosine.
+            let residual: f64 = frequencies
+                .iter()
+                .map(|w| -2.0 * (w * duration / 2.0).sin().powi(2))
+                .sum();
+            let energy = 0.5 * residual * residual;
+            for (start, sign) in [(0.0, 1.0), (-duration, -1.0)] {
+                let temporal = HarmonicEnergySpectrum::new(
+                    frequencies,
+                    HarmonicWindow::new(start, duration).unwrap(),
+                )
+                .unwrap();
+                let response = temporal
+                    .spring_with_bias(&one_channel(1.0), &strains, &spectrum, None, &bias)
+                    .unwrap();
+                close(response[2], sign * energy, 5e-13);
+                close(response[if sign > 0.0 { 1 } else { 0 }], energy, 5e-13);
+                // Separated endpoint rotations can leave DD phase roundoff
+                // at a returning null; it must remain below physical energy.
+                assert!(response[if sign > 0.0 { 0 } else { 1 }] <= 1e-25 * energy);
+                let mut work = Sum::default();
+                // An independently supplied constitutive matrix controls
+                // stress work; storage or a closure residual cannot supply it.
+                temporal.add_stress_work_with_bias(
+                    &one_channel(3.0),
+                    &strains,
+                    &spectrum,
+                    &bias,
+                    &mut work,
+                );
+                close(work.value(), 3.0 * sign * energy, 5e-13);
+            }
+        }
+    }
+}
+
+#[test]
+fn g3_biased_work_keeps_original_binary_stiffness_and_strain() {
+    let duration = 2_f64.powi(-200);
+    let amplitude = 2_f64.powi(200);
+    let mut strain = [[Dd::ZERO; 2]; 6];
+    strain[0][0] = Dd::from_f64(amplitude);
+    let mut bias = [Dd::ZERO; 6];
+    bias[0] = Dd::from_f64(-amplitude);
+    let temporal =
+        HarmonicEnergySpectrum::new(&[1.0], HarmonicWindow::new(0.0, duration).unwrap()).unwrap();
+    let spectrum = [[(1.0, 0), (0.0, 0)]];
+    let response = temporal
+        .spring_with_bias(
+            &one_channel(2_f64.powi(500)),
+            &[strain],
+            &spectrum,
+            None,
+            &bias,
+        )
+        .unwrap();
+    // The AC stress alone exceeds f64, but the DC cancellation and physical
+    // interval make its actual work finite: 2^1000 * 2^400 * T^4 / 8.
+    assert!((2_f64.powi(1000) * amplitude).is_infinite());
+    let expected = 2_f64.powi(597);
+    close(response[1], expected, 3e-13);
+    close(response[2], expected, 3e-13);
+    let mut work = Sum::default();
+    temporal.add_stress_work_with_bias(
+        &one_channel(2_f64.powi(1000)),
+        &[strain],
+        &spectrum,
+        &bias,
+        &mut work,
+    );
+    close(work.value(), expected, 3e-13);
+}
+
+#[test]
+fn g0_singleton_dc_factor_obeys_payload_and_original_width_admission() {
+    let narrow =
+        HarmonicEnergySpectrum::new(&[1.0], HarmonicWindow::new(0.0, 1.0).unwrap()).unwrap();
+    assert!(narrow.field_modes.is_some());
+    let bound = core::mem::size_of::<HarmonicEnergySpectrum>() + 128 + 272;
+    assert!(narrow.numerical_payload_bytes() <= bound);
+    let broad =
+        HarmonicEnergySpectrum::new(&[1.0], HarmonicWindow::new(0.0, 1.01).unwrap()).unwrap();
+    assert!(broad.field_modes.is_none());
+    assert_eq!(broad.gram.len(), 1);
+    let empty = HarmonicEnergySpectrum::new(&[], HarmonicWindow::new(0.0, 1.0).unwrap()).unwrap();
+    assert!(empty.field_modes.is_none());
+}
+
+#[test]
 fn g1_two_tone_kelvin_null_retains_physical_heat_and_independent_work() {
     let frequencies = [1.0, 2.0];
     let duration = 1e-12;

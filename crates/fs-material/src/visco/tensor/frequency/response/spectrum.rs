@@ -30,11 +30,13 @@ pub struct TensorPronyHarmonicSpectrum<'a> {
 }
 
 /// Cached real temporal moments, reusable across original material points.
-/// Short actual-real bands of 2..32 frequencies with max(omega)*duration/2 <= 0.5
+/// Short actual-real bands of 1..32 frequencies with max(omega)*duration/2 <= 0.5
 /// use at most M=17 positive field modes. Preparation and storage are O(F*M),
 /// and point work is O(F*M*(branches+1)*6). Other bands retain O(F²) temporal
 /// pairs and point work O(F²*(branches+1)*6). Point scratch is fixed and no heap
 /// is allocated. Original frequency/strain domains and coefficients stay fixed.
+/// An authored relaxed DC strain interferes in the constant field mode before
+/// stress work, including when only one AC tone is present.
 pub struct TensorPronySpectrumWindow<'p, 'a> {
     source: &'p TensorPronyHarmonicSpectrum<'a>,
     window: HarmonicWindow,
@@ -489,3 +491,4 @@ impl<'p, 'a> TensorPronySpectrumWindow<'p, 'a> {
         Ok(result)
     }
 }
+

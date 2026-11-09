@@ -20,7 +20,18 @@ impl FieldModes {
         // Physical storage/heat/work are unweighted interval integrals. Only
         // the shared Uniform real factor applies; its absolute frequencies
         // retain both sum and beat terms without a real-peak half factor.
-        let Some(band) = window.prepare_uniform_real_band_rad_s(frequencies)? else {
+        // One AC tone can interfere with an independently authored relaxed
+        // strain. The shared owner needs two source columns for admission;
+        // use its exact zero-frequency column to admit this real/DC pair,
+        // then retain only the original AC column. Constant strain is added
+        // to mode zero at contraction, never to a fictitious material line.
+        let single = [frequencies.first().copied().unwrap_or(0.0), 0.0];
+        let supplied = if frequencies.len() == 1 {
+            &single[..]
+        } else {
+            frequencies
+        };
+        let Some(band) = window.prepare_uniform_real_band_rad_s(supplied)? else {
             return Ok(None);
         };
         let mut coefficients = Vec::with_capacity(band.mode_count() * frequencies.len());
@@ -49,26 +60,29 @@ impl FieldModes {
         total
     }
 
-    pub(super) fn mean(&self, fields: &[Channel]) -> Sum {
-        self.project(0, fields)
-    }
-
     pub(super) fn add_product(
         &self,
         left: &[Channel],
         right: &[Channel],
+        left_bias: Sum,
         duration: f64,
         denominator: &[f64],
         total: &mut Sum,
     ) {
         let same_field = core::ptr::eq(left, right);
         for mode in 0..self.modes {
-            let a = self.project(mode, left);
+            let mut a = self.project(mode, left);
             let b = if same_field {
                 a
             } else {
                 self.project(mode, right)
             };
+            // The real DC field occupies only the constant basis function.
+            // Interfere it with AC stress before multiplying by strain rate;
+            // adding a separately rounded DC-work term destroys dark fields.
+            if mode == 0 {
+                add(&mut a, left_bias);
+            }
             weighted(
                 total,
                 a,
