@@ -7,6 +7,7 @@
 //! Phase-count crossings and acoustic stencil failures refuse: a bubble/dew kink
 //! may choke without a smooth sonic root and needs a separate one-sided model.
 
+use crate::nozzle::{PressureSearch, SearchError, Station};
 use fs_material::thermochemical_gas::nonideal::ThermochemicalPengRobinsonModel;
 use fs_material::thermochemical_gas::nonideal::flash::{
     ThermochemicalFlashError,
@@ -26,7 +27,7 @@ use fs_math::det;
 use fs_qty::{Area, MassFlowRate, Pressure, Temperature};
 
 /// Bound on pressure queries, including the original stagnation state.
-pub const MAX_NOZZLE_PRESSURE_EVALUATIONS: usize = 256;
+pub const MAX_NOZZLE_PRESSURE_EVALUATIONS: usize = crate::nozzle::MAX_PRESSURE_EVALUATIONS;
 /// One preparation plus bounded PS and acoustic work for every pressure query.
 pub const MAX_NOZZLE_PT_EVALUATIONS: usize = 1 + MAX_NOZZLE_PRESSURE_EVALUATIONS
     * (MAX_ENTROPY_FLASH_EVALUATIONS + PHASE_ACOUSTIC_PT_EVALUATIONS);
@@ -61,6 +62,17 @@ pub struct MixtureNozzleControl {
     pub maximum_pt_evaluations: usize,
 }
 impl MixtureNozzleControl {
+    fn pressure_search(self) -> PressureSearch {
+        PressureSearch {
+            minimum_pressure_pa: self.minimum_pressure_pa,
+            pressure_step_ratio: self.pressure_step_ratio,
+            absolute_sonic_tolerance_m2_s2: self.absolute_sonic_tolerance_m2_s2,
+            relative_sonic_tolerance: self.relative_sonic_tolerance,
+            absolute_pressure_tolerance_pa: self.absolute_pressure_tolerance_pa,
+            relative_pressure_tolerance: self.relative_pressure_tolerance,
+        }
+    }
+
     #[must_use]
     pub fn new(temperature_bracket: [Temperature; 2], minimum_pressure: Pressure) -> Self {
         let acoustics = PhaseEquilibriumAcousticControls::default();
@@ -290,79 +302,24 @@ pub fn equilibrium_mixture_nozzle(
             &mut cancelled,
         );
     }
-    let floor = pb.max(controls.minimum_pressure_pa);
-    let mut upper = initial;
-    let (mut lower, mut upper) = loop {
-        let high = upper.pressure();
-        let next = (high * controls.pressure_step_ratio).max(floor);
-        if !(next > 0.0 && next < high) {
-            return Err(Error::NotConverged {
-                pressure_bracket_pa: [next, high],
-                sonic_residual_m2_s2: upper.sonic,
-            });
-        }
-        let trial = context.sample(next, true, &mut work, &mut cancelled)?;
-        context.check_descent(&trial, &upper)?;
-        if trial.sonic <= 0.0 {
-            break (trial, upper);
-        }
-        if next == pb {
-            return finish(trial, inlet, pb, area, None, controls, work, &mut cancelled);
-        }
-        if next == floor {
-            return Err(Error::OutsidePressureBracket {
-                minimum_pressure_pa: floor,
-                back_pressure_pa: pb,
-                sonic_residual_m2_s2: trial.sonic,
-            });
-        }
-        upper = trial;
-    };
-    loop {
-        poll(&mut cancelled)?;
-        let bracket = [lower.pressure(), upper.pressure()];
-        let pressure_tolerance =
-            controls.absolute_pressure_tolerance_pa + controls.relative_pressure_tolerance * p0;
-        let best = if lower.sonic.abs() < upper.sonic.abs() {
-            &lower
-        } else {
-            &upper
-        };
-        if bracket[1] - bracket[0] <= pressure_tolerance
-            && best.sonic.abs() <= context.sonic_tolerance(best)
-        {
-            let accepted = if lower.sonic.abs() < upper.sonic.abs() {
-                lower
-            } else {
-                upper
-            };
-            return finish(
-                accepted,
-                inlet,
-                pb,
-                area,
-                Some(bracket),
-                controls,
-                work,
-                &mut cancelled,
-            );
-        }
-        let mid = bracket[0] + 0.5 * (bracket[1] - bracket[0]);
-        if !(mid > bracket[0] && mid < bracket[1]) {
-            return Err(Error::NotConverged {
-                pressure_bracket_pa: bracket,
-                sonic_residual_m2_s2: best.sonic,
-            });
-        }
-        let trial = context.sample(mid, true, &mut work, &mut cancelled)?;
-        context.check_descent(&lower, &trial)?;
-        context.check_descent(&trial, &upper)?;
-        if trial.sonic <= 0.0 {
-            lower = trial;
-        } else {
-            upper = trial;
-        }
-    }
+    let (accepted, bracket) = crate::nozzle::resolve(
+        initial,
+        pb,
+        controls.pressure_search(),
+        |pressure, cancelled| context.sample(pressure, true, &mut work, cancelled),
+        &mut cancelled,
+    )
+    .map_err(search_error)?;
+    finish(
+        accepted,
+        inlet,
+        pb,
+        area,
+        bracket,
+        controls,
+        work,
+        &mut cancelled,
+    )
 }
 
 struct Work {
@@ -395,9 +352,15 @@ struct Sample {
     velocity_squared: f64,
     sonic: f64,
 }
-impl Sample {
+impl Station for Sample {
     fn pressure(&self) -> f64 {
         self.equilibrium.state().pressure_pa()
+    }
+    fn velocity_squared(&self) -> f64 {
+        self.velocity_squared
+    }
+    fn sonic(&self) -> f64 {
+        self.sonic
     }
 }
 struct Context<'m, 'p> {
@@ -499,21 +462,36 @@ impl Context<'_, '_> {
             sonic,
         })
     }
+}
 
-    fn sonic_tolerance(&self, sample: &Sample) -> f64 {
-        let c2 = sample.velocity_squared + sample.sonic;
-        self.controls.absolute_sonic_tolerance_m2_s2
-            + self.controls.relative_sonic_tolerance * c2.abs().max(sample.velocity_squared)
-    }
-
-    fn check_descent(&self, lower: &Sample, upper: &Sample) -> Result<(), Error> {
-        if lower.sonic > upper.sonic + self.sonic_tolerance(lower) + self.sonic_tolerance(upper) {
-            return Err(Error::NonMonotone {
-                pressure_bracket_pa: [lower.pressure(), upper.pressure()],
-                sonic_residuals_m2_s2: [lower.sonic, upper.sonic],
-            });
-        }
-        Ok(())
+fn search_error(error: SearchError<Error>) -> Error {
+    match error {
+        SearchError::Invalid(reason) => Error::Invalid(reason),
+        SearchError::Source(error) => error,
+        SearchError::Cancelled => Error::Cancelled,
+        SearchError::NonMonotone {
+            pressure_bracket_pa,
+            sonic_residuals_m2_s2,
+        } => Error::NonMonotone {
+            pressure_bracket_pa,
+            sonic_residuals_m2_s2,
+        },
+        SearchError::OutsidePressureBracket {
+            minimum_pressure_pa,
+            back_pressure_pa,
+            sonic_residual_m2_s2,
+        } => Error::OutsidePressureBracket {
+            minimum_pressure_pa,
+            back_pressure_pa,
+            sonic_residual_m2_s2,
+        },
+        SearchError::NotConverged {
+            pressure_bracket_pa,
+            sonic_residual_m2_s2,
+        } => Error::NotConverged {
+            pressure_bracket_pa,
+            sonic_residual_m2_s2,
+        },
     }
 }
 

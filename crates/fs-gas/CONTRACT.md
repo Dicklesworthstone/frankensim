@@ -9531,3 +9531,64 @@ retain the original source, acoustic, parabolic, geometry and held-stage
 accuracy limitations; they add no hydrostatic equilibrium, entropy theorem
 or cross-piston heat inventory.
 
+
+
+## Reacting converging-nozzle mass flow and sonic choking
+
+`equilibrium_flow::nozzle::equilibrium_nozzle_flow` resolves pressure-driven
+discharge from an equilibrium stagnation reservoir through an explicit effective
+area. The original prepared chemical SP path supplies each trial's species,
+density, direct source-relative enthalpy/entropy changes and reacting sound
+speed. Velocity satisfies `v^2 = -2 Delta h`; the existing ordinary-branch
+pressure search selects either the requested subsonic back-pressure state or
+the smooth sonic limit `c_eq^2 - v^2 = 0`. Actual flow is `area * rho * v`.
+Feed amounts set an elemental/charge inventory and its original reference,
+not a prescribed mass-flow rate. Formation energy and flow work remain in h
+exactly once. Frozen Cp/Cv or gamma never selects a reacting throat.
+
+The private common pressure search is shared with the existing fixed-species
+phase-equilibrium nozzle. Its descending scan, two-sided sonic/pressure
+acceptance and sampled monotonicity checks retain the existing arithmetic.
+The phase consumer retains its original PT/EOS work accounting, phase-count
+admission, prepared entropy path and native equilibrium acoustics. Chemical
+flow retains the original Gibbs conservation/response acceptance and bounded
+temperature/backtracking solves. Neither owner substitutes another EOS.
+
+The caller declares a connected, ordinary single-sonic branch, a positive
+source-supported pressure floor, explicit physical sonic/pressure/energy
+tolerances and a whole-call pressure-work ceiling of at most 256. The source
+floor is a search limit; it cannot stand in for an unsupported exit or throat.
+The selected sonic bracket must meet both its pressure-width and sonic-residual
+allowances. Sampled monotonicity is numerical evidence, not a global uniqueness
+or choking certificate for arbitrary authored caloric laws. A shallow supported
+expansion does not first require the source to support an unused sonic state.
+Vacuum back pressure still requires a supported positive-pressure throat.
+
+Equal pressures or zero area return the exact original equilibrium inlet and
+zero flow after one preparation. Negative area, reverse pressure drive,
+unresolved positive enthalpy release, nonfinite/underflowed mass flow,
+unsupported source states, insufficient pressure brackets, exhausted budgets
+and cancellation refuse without publishing a partial stream or consuming a
+physical reservoir. The native SP workspace is reused throughout; only inlet
+and final outlet publish complete source receipts. If the final bracket selects
+an earlier workspace state, an explicitly charged original query restores and
+rechecks it before publication. Reported pressure/composition/temperature work
+includes that query. Cancellation is checked immediately before publication.
+
+The accepted result retains source-bound inlet/outlet states, the final chemical
+SP sample, original feed mass, effective area, mass flow, speed, reacting Mach
+number, choking status, source-relative stagnation-enthalpy residual and the
+sonic pressure bracket. This is the steady adiabatic inviscid chemical-equilibrium
+limit with negligible reservoir velocity and potential-energy change. It does
+not infer a discharge coefficient, heat/friction, finite-rate reaction, shocks,
+divergent geometry, recipient mixing or finite reservoir depletion. The existing
+reacting rocket/finite-blowdown owner keeps its separate geometry and scope.
+
+G1 regressions compare zero/subsonic/choked flow with the constant-Cp analytic
+limit and reacting A2 <=> 2A with independent mass-action entropy, enthalpy and
+acoustic derivatives. The reacting sonic station coincides with that oracle's
+mass-flux maximum. G3 covers feed normalization, area scaling, choked back-pressure
+independence and weak pressure drive under large energy/entropy reference datums.
+G0/G4 covers exact rest, shallow source support, work/floor/input refusals and
+final cancellation with deterministic retry. These are numerical conformance
+tests, not empirical validation or interval certificates.

@@ -22,6 +22,9 @@ use fs_thermochem::equilibrium::composition::{
     isentrope::EquilibriumIsentropeV1,
 };
 
+/// Pressure-driven converging flow with reacting sonic choking.
+pub mod nozzle;
+
 /// Existing source-bearing material parcels over this same process balance.
 #[cfg(feature = "material")]
 pub mod material;
@@ -137,18 +140,27 @@ pub struct EquilibriumFlowRates {
 }
 impl EquilibriumFlowBalance {
     /// Scale this same conserved inventory to an explicit positive mass flow.
-    pub fn rates(self, mass_flow: MassFlowRate) -> Result<EquilibriumFlowRates, EquilibriumFlowError> {
+    pub fn rates(
+        self,
+        mass_flow: MassFlowRate,
+    ) -> Result<EquilibriumFlowRates, EquilibriumFlowError> {
         if !positive(mass_flow.value()) || !positive(self.mass_kg) {
-            return Err(EquilibriumFlowError::Invalid("positive finite feed mass and mass flow required"));
+            return Err(EquilibriumFlowError::Invalid(
+                "positive finite feed mass and mass flow required",
+            ));
         }
         let factor = mass_flow.value() / self.mass_kg;
         if !positive(factor) {
-            return Err(EquilibriumFlowError::Invalid("unrepresentable stream inventory rate"));
+            return Err(EquilibriumFlowError::Invalid(
+                "unrepresentable stream inventory rate",
+            ));
         }
         let scale = |value: f64| {
             let result = value * factor;
             if !result.is_finite() || (value != 0.0 && result == 0.0) {
-                Err(EquilibriumFlowError::Invalid("unrepresentable stream power or entropy rate"))
+                Err(EquilibriumFlowError::Invalid(
+                    "unrepresentable stream power or entropy rate",
+                ))
             } else {
                 Ok(result)
             }
@@ -195,9 +207,23 @@ pub fn equilibrium_pressure_change(
     poll(&mut cancelled)?;
     admit(controls, process, inlet_pressure, outlet_pressure)?;
     let mut path = EquilibriumEnthalpyPressurePathV1::new(
-        chemistry, inlet_temperature, inlet_pressure, feed, controls.enthalpy, &mut cancelled,
-    ).map_err(|source| chemistry_error(EquilibriumFlowStage::Inlet, source))?;
-    resolve(&mut path, chemistry, feed, outlet_pressure, process, controls, &mut cancelled)
+        chemistry,
+        inlet_temperature,
+        inlet_pressure,
+        feed,
+        controls.enthalpy,
+        &mut cancelled,
+    )
+    .map_err(|source| chemistry_error(EquilibriumFlowStage::Inlet, source))?;
+    resolve(
+        &mut path,
+        chemistry,
+        feed,
+        outlet_pressure,
+        process,
+        controls,
+        &mut cancelled,
+    )
 }
 
 struct Endpoint<S> {
@@ -213,28 +239,52 @@ trait EnthalpyOwner {
     fn reference(&self) -> &Self::State;
     fn chemical_reference(&self) -> &EquilibriumThermodynamicStateV1;
     fn mass_kg(&self) -> f64;
-    fn query(&mut self, pressure: Pressure, work: Energy, cancelled: &mut impl FnMut() -> bool)
-        -> Result<Endpoint<Self::State>, EquilibriumFlowError>;
+    fn query(
+        &mut self,
+        pressure: Pressure,
+        work: Energy,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Endpoint<Self::State>, EquilibriumFlowError>;
 }
 impl EnthalpyOwner for EquilibriumEnthalpyPressurePathV1<'_> {
     type State = EquilibriumThermodynamicStateV1;
-    fn reference(&self) -> &Self::State { self.reference_state() }
-    fn chemical_reference(&self) -> &EquilibriumThermodynamicStateV1 { self.reference_state() }
-    fn mass_kg(&self) -> f64 { self.feed_mass_kg() }
-    fn query(&mut self, pressure: Pressure, work: Energy, cancelled: &mut impl FnMut() -> bool)
-        -> Result<Endpoint<Self::State>, EquilibriumFlowError> {
-        let sample = self.sample(pressure, work, &mut *cancelled)
+    fn reference(&self) -> &Self::State {
+        self.reference_state()
+    }
+    fn chemical_reference(&self) -> &EquilibriumThermodynamicStateV1 {
+        self.reference_state()
+    }
+    fn mass_kg(&self) -> f64 {
+        self.feed_mass_kg()
+    }
+    fn query(
+        &mut self,
+        pressure: Pressure,
+        work: Energy,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Endpoint<Self::State>, EquilibriumFlowError> {
+        let sample = self
+            .sample(pressure, work, &mut *cancelled)
             .map_err(|source| chemistry_error(EquilibriumFlowStage::Outlet, source))?;
-        let state = self.publish_current(cancelled)
+        let state = self
+            .publish_current(cancelled)
             .map_err(|source| chemistry_error(EquilibriumFlowStage::Outlet, source))?;
-        Ok(Endpoint { state, enthalpy_change_j: sample.enthalpy_change_j, sample })
+        Ok(Endpoint {
+            state,
+            enthalpy_change_j: sample.enthalpy_change_j,
+            sample,
+        })
     }
 }
 
 fn resolve<O: EnthalpyOwner>(
-    path: &mut O, chemistry: &IdealGasEquilibriumV1, feed: &[(SpeciesId, Amount)],
-    outlet_pressure: Pressure, process: EquilibriumPressureProcess,
-    controls: EquilibriumFlowSolve, cancelled: &mut impl FnMut() -> bool,
+    path: &mut O,
+    chemistry: &IdealGasEquilibriumV1,
+    feed: &[(SpeciesId, Amount)],
+    outlet_pressure: Pressure,
+    process: EquilibriumPressureProcess,
+    controls: EquilibriumFlowSolve,
+    cancelled: &mut impl FnMut() -> bool,
 ) -> Result<EquilibriumPressureChange<O::State>, EquilibriumFlowError> {
     poll(cancelled)?;
     let reference = path.chemical_reference();
@@ -243,13 +293,21 @@ fn resolve<O: EnthalpyOwner>(
     let mass = path.mass_kg();
     admit(controls, process, initial.pressure(), outlet_pressure)?;
     if !positive(mass) || !initial.is_bound_to(chemistry) {
-        return Err(EquilibriumFlowError::Invalid("process inlet must retain the original source and feed mass"));
+        return Err(EquilibriumFlowError::Invalid(
+            "process inlet must retain the original source and feed mass",
+        ));
     }
     let mut balance = EquilibriumFlowBalance {
-        mass_kg: mass, process, isentropic_enthalpy_change_j: None,
-        shaft_work_j: 0.0, enthalpy_change_j: 0.0, energy_residual_j: 0.0,
-        entropy_production_j_k: 0.0, relative_mass_residual: initial.relative_mass_residual(),
-        composition_iterations: initial.composition_iterations(), temperature_iterations: 0,
+        mass_kg: mass,
+        process,
+        isentropic_enthalpy_change_j: None,
+        shaft_work_j: 0.0,
+        enthalpy_change_j: 0.0,
+        energy_residual_j: 0.0,
+        entropy_production_j_k: 0.0,
+        relative_mass_residual: initial.relative_mass_residual(),
+        composition_iterations: initial.composition_iterations(),
+        temperature_iterations: 0,
     };
     if initial.pressure() == outlet_pressure {
         if !matches!(process, EquilibriumPressureProcess::Throttle) {
@@ -257,23 +315,37 @@ fn resolve<O: EnthalpyOwner>(
         }
         poll(cancelled)?;
         return Ok(EquilibriumPressureChange {
-            outlet: inlet.clone(), inlet, isentropic_outlet: None, balance,
+            outlet: inlet.clone(),
+            inlet,
+            isentropic_outlet: None,
+            balance,
         });
     }
     let isentropic_outlet = if matches!(process, EquilibriumPressureProcess::Throttle) {
         None
     } else {
         let mut reversible = EquilibriumIsentropeV1::new(
-            chemistry, initial.temperature(), initial.pressure(), feed,
-            controls.isentropic, &mut *cancelled,
-        ).map_err(|source| chemistry_error(EquilibriumFlowStage::Isentropic, source))?;
+            chemistry,
+            initial.temperature(),
+            initial.pressure(),
+            feed,
+            controls.isentropic,
+            &mut *cancelled,
+        )
+        .map_err(|source| chemistry_error(EquilibriumFlowStage::Isentropic, source))?;
         // Identical original Gibbs policy must establish the same physical and
         // source reference, including trace species; no fitted reference offset.
         if reversible.reference_state() != reference || reversible.feed_mass_kg() != mass {
-            return Err(EquilibriumFlowError::Invalid("HP and SP must share the identical original equilibrium inlet"));
+            return Err(EquilibriumFlowError::Invalid(
+                "HP and SP must share the identical original equilibrium inlet",
+            ));
         }
-        balance.composition_iterations += reversible.reference_state().equilibrium().composition_iterations();
-        let sample = reversible.sample(outlet_pressure, &mut *cancelled)
+        balance.composition_iterations += reversible
+            .reference_state()
+            .equilibrium()
+            .composition_iterations();
+        let sample = reversible
+            .sample(outlet_pressure, &mut *cancelled)
             .map_err(|source| chemistry_error(EquilibriumFlowStage::Isentropic, source))?;
         balance.composition_iterations += sample.composition_iterations;
         balance.temperature_iterations += sample.temperature_iterations;
@@ -281,28 +353,43 @@ fn resolve<O: EnthalpyOwner>(
         admit_work(process, ideal)?;
         balance.isentropic_enthalpy_change_j = Some(ideal);
         balance.shaft_work_j = match process {
-            EquilibriumPressureProcess::Compressor { isentropic_efficiency } => ideal / isentropic_efficiency,
-            EquilibriumPressureProcess::Expander { isentropic_efficiency } => ideal * isentropic_efficiency,
+            EquilibriumPressureProcess::Compressor {
+                isentropic_efficiency,
+            } => ideal / isentropic_efficiency,
+            EquilibriumPressureProcess::Expander {
+                isentropic_efficiency,
+            } => ideal * isentropic_efficiency,
             EquilibriumPressureProcess::Throttle => unreachable!(),
         };
         admit_work(process, balance.shaft_work_j)?;
-        Some(reversible.publish_current(&mut *cancelled)
-            .map_err(|source| chemistry_error(EquilibriumFlowStage::Isentropic, source))?)
+        Some(
+            reversible
+                .publish_current(&mut *cancelled)
+                .map_err(|source| chemistry_error(EquilibriumFlowStage::Isentropic, source))?,
+        )
     };
-    let endpoint = path.query(outlet_pressure, Energy::new(balance.shaft_work_j), cancelled)?;
+    let endpoint = path.query(
+        outlet_pressure,
+        Energy::new(balance.shaft_work_j),
+        cancelled,
+    )?;
     balance.enthalpy_change_j = endpoint.enthalpy_change_j;
     balance.energy_residual_j = endpoint.enthalpy_change_j - balance.shaft_work_j;
     balance.entropy_production_j_k = endpoint.sample.entropy_change_j_k;
     balance.relative_mass_residual = endpoint.sample.relative_mass_residual;
     balance.composition_iterations += endpoint.sample.composition_iterations;
     balance.temperature_iterations += endpoint.sample.temperature_iterations;
-    if !balance.energy_residual_j.is_finite() || balance.energy_residual_j.abs() > controls.energy_tolerance_j {
+    if !balance.energy_residual_j.is_finite()
+        || balance.energy_residual_j.abs() > controls.energy_tolerance_j
+    {
         return Err(EquilibriumFlowError::Energy {
-            residual_j: balance.energy_residual_j, tolerance_j: controls.energy_tolerance_j,
+            residual_j: balance.energy_residual_j,
+            tolerance_j: controls.energy_tolerance_j,
         });
     }
     if !balance.entropy_production_j_k.is_finite()
-        || balance.entropy_production_j_k < -controls.entropy_production_tolerance_j_k {
+        || balance.entropy_production_j_k < -controls.entropy_production_tolerance_j_k
+    {
         return Err(EquilibriumFlowError::Entropy {
             change_j_k: balance.entropy_production_j_k,
             tolerance_j_k: controls.entropy_production_tolerance_j_k,
@@ -312,35 +399,60 @@ fn resolve<O: EnthalpyOwner>(
         admit_work(process, balance.enthalpy_change_j)?;
     }
     poll(cancelled)?;
-    Ok(EquilibriumPressureChange { inlet, outlet: endpoint.state, isentropic_outlet, balance })
+    Ok(EquilibriumPressureChange {
+        inlet,
+        outlet: endpoint.state,
+        isentropic_outlet,
+        balance,
+    })
 }
 
-fn admit(controls: EquilibriumFlowSolve, process: EquilibriumPressureProcess,
-    inlet: Pressure, outlet: Pressure) -> Result<(), EquilibriumFlowError> {
-    if !positive(inlet.value()) || !positive(outlet.value())
+fn admit(
+    controls: EquilibriumFlowSolve,
+    process: EquilibriumPressureProcess,
+    inlet: Pressure,
+    outlet: Pressure,
+) -> Result<(), EquilibriumFlowError> {
+    if !positive(inlet.value())
+        || !positive(outlet.value())
         || !positive(controls.energy_tolerance_j)
-        || !positive(controls.entropy_production_tolerance_j_k) {
-        return Err(EquilibriumFlowError::Invalid("positive finite pressures and physical residual allowances required"));
+        || !positive(controls.entropy_production_tolerance_j_k)
+    {
+        return Err(EquilibriumFlowError::Invalid(
+            "positive finite pressures and physical residual allowances required",
+        ));
     }
     let efficiency = match process {
         EquilibriumPressureProcess::Throttle => None,
-        EquilibriumPressureProcess::Compressor { isentropic_efficiency }
-        | EquilibriumPressureProcess::Expander { isentropic_efficiency } => Some(isentropic_efficiency),
+        EquilibriumPressureProcess::Compressor {
+            isentropic_efficiency,
+        }
+        | EquilibriumPressureProcess::Expander {
+            isentropic_efficiency,
+        } => Some(isentropic_efficiency),
     };
     if let Some(efficiency) = efficiency {
         if !positive(efficiency) || efficiency > 1.0 {
-            return Err(EquilibriumFlowError::Invalid("isentropic efficiency must be finite and in (0,1]"));
+            return Err(EquilibriumFlowError::Invalid(
+                "isentropic efficiency must be finite and in (0,1]",
+            ));
         }
         if controls.enthalpy.equilibrium != controls.isentropic.equilibrium {
-            return Err(EquilibriumFlowError::Invalid("HP and SP require identical original Gibbs controls"));
+            return Err(EquilibriumFlowError::Invalid(
+                "HP and SP require identical original Gibbs controls",
+            ));
         }
     }
     let direction_ok = match process {
         EquilibriumPressureProcess::Compressor { .. } => outlet.value() >= inlet.value(),
-        EquilibriumPressureProcess::Throttle | EquilibriumPressureProcess::Expander { .. } => outlet.value() <= inlet.value(),
+        EquilibriumPressureProcess::Throttle | EquilibriumPressureProcess::Expander { .. } => {
+            outlet.value() <= inlet.value()
+        }
     };
     if !direction_ok {
-        return Err(EquilibriumFlowError::Invalid("outlet pressure contradicts the declared process"));
+        return Err(EquilibriumFlowError::Invalid(
+            "outlet pressure contradicts the declared process",
+        ));
     }
     Ok(())
 }
@@ -351,21 +463,35 @@ fn admit_work(process: EquilibriumPressureProcess, work: f64) -> Result<(), Equi
         EquilibriumPressureProcess::Throttle => work == 0.0,
     };
     if !work.is_finite() || !sign_ok {
-        Err(EquilibriumFlowError::Invalid("nonzero pressure change requires resolved correctly signed source work"))
+        Err(EquilibriumFlowError::Invalid(
+            "nonzero pressure change requires resolved correctly signed source work",
+        ))
     } else {
         Ok(())
     }
 }
-fn positive(value: f64) -> bool { value.is_finite() && value > 0.0 }
-fn chemistry_error(stage: EquilibriumFlowStage, source: EquilibriumExpansionErrorV1) -> EquilibriumFlowError {
-    if matches!(source, EquilibriumExpansionErrorV1::Equilibrium(CompositionEquilibriumErrorV1::Cancelled)) {
+fn positive(value: f64) -> bool {
+    value.is_finite() && value > 0.0
+}
+fn chemistry_error(
+    stage: EquilibriumFlowStage,
+    source: EquilibriumExpansionErrorV1,
+) -> EquilibriumFlowError {
+    if matches!(
+        source,
+        EquilibriumExpansionErrorV1::Equilibrium(CompositionEquilibriumErrorV1::Cancelled)
+    ) {
         EquilibriumFlowError::Cancelled
     } else {
         EquilibriumFlowError::Chemistry { stage, source }
     }
 }
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), EquilibriumFlowError> {
-    if cancelled() { Err(EquilibriumFlowError::Cancelled) } else { Ok(()) }
+    if cancelled() {
+        Err(EquilibriumFlowError::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -18,6 +18,9 @@ pub mod chemistry;
 /// Reacting adiabatic throttles, compressors and expanders over original sources.
 pub mod equilibrium_flow;
 
+// Shared source-owned converging-nozzle pressure/sonic search.
+mod nozzle;
+
 /// Finite D-T fuel, helium ash and two-temperature nuclear energy accounting.
 pub mod fusion;
 
