@@ -431,6 +431,7 @@ impl<'g, 'a, 'c, 's, 'm, 'o, 'l>
                         let view = CurvedPointLightCameraScene {
                             camera: self.owner.point_lights.camera,
                             branches: core::slice::from_ref(&branch),
+                            source_polarizations: self.owner.point_lights.source_polarizations,
                         };
                         let mut contribution =
                             FixtureContributions::new(&view, fixtures.settings, fixtures.initial_index);

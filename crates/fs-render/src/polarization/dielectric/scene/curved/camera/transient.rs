@@ -45,6 +45,8 @@ use fs_math::dd::Dd;
 const LIGHT_M_S: f64 = 299_792_458.0;
 
 pub mod area_lights;
+/// Retarded histories for exact calibrated point fixtures and their native connections.
+pub mod point_lights;
 pub mod exposure;
 #[cfg(feature = "volumes")]
 pub mod participating;
@@ -602,6 +604,13 @@ fn retarded_time(
     group_delay_s: Dd,
     object_id: u64,
 ) -> Result<Dd, TransientCameraError> {
+    checked_retarded_time(observation_time_s, group_delay_s)
+        .ok_or(TransientCameraError::UnresolvedClock { object_id })
+}
+
+// The same DD subtraction/resolution check serves finite surfaces and exact
+// point fixtures. Source-specific identities are attached by their own owner.
+fn checked_retarded_time(observation_time_s: Dd, group_delay_s: Dd) -> Option<Dd> {
     let emission_time_s = observation_time_s - group_delay_s;
     let error = ((observation_time_s - emission_time_s) - group_delay_s).abs();
     let allowance = group_delay_s * Dd::from_f64(64.0 * f64::EPSILON);
@@ -610,9 +619,35 @@ fn retarded_time(
         || (Dd::ZERO.lt(group_delay_s)
             && (!emission_time_s.lt(observation_time_s) || allowance.lt(error)))
     {
-        return Err(TransientCameraError::UnresolvedClock { object_id });
+        return None;
     }
-    Ok(emission_time_s)
+    Some(emission_time_s)
+}
+
+#[derive(Clone, Copy)]
+enum ConnectionClockError {
+    MissingGroupDelay,
+    UnresolvedClock,
+}
+
+// Preserve both original scene legs as DD terms before adding the independent
+// sensor-to-scene lens prefix. This is shared by area and point connections.
+fn connected_group_delay(
+    camera_group_m: Option<f64>,
+    connection_group_m: Option<f64>,
+    launch_delay_s: Dd,
+) -> Result<Dd, ConnectionClockError> {
+    let group = |length: Option<f64>| length
+        .filter(|length| length.is_finite() && *length >= 0.0)
+        .ok_or(ConnectionClockError::MissingGroupDelay);
+    let camera_group_m = group(camera_group_m)?;
+    let connection_group_m = group(connection_group_m)?;
+    let group_delay_s = (Dd::from_f64(camera_group_m) + Dd::from_f64(connection_group_m))
+        / Dd::from_f64(LIGHT_M_S);
+    if (camera_group_m > 0.0 || connection_group_m > 0.0) && !Dd::ZERO.lt(group_delay_s) {
+        return Err(ConnectionClockError::UnresolvedClock);
+    }
+    Ok(if launch_delay_s == Dd::ZERO { group_delay_s } else { launch_delay_s + group_delay_s })
 }
 
 fn finite_dd(time: Dd) -> bool {

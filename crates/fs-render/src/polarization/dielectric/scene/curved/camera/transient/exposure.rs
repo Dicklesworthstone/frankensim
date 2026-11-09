@@ -281,6 +281,22 @@ impl TransientCurvedCameraScene<'_, '_, '_> {
     }
 }
 
+// Shared source-clock interval check; callers preserve their own source identity.
+pub(super) fn checked_exposure_close(
+    emission_open_s: Dd,
+    group_delay_s: Dd,
+    window: ExposureWindow,
+) -> Option<Dd> {
+    let emission_close_s = checked_retarded_time(window.close_s, group_delay_s)?;
+    let duration_error = ((emission_close_s - emission_open_s) - window.duration_s).abs();
+    if !emission_open_s.lt(emission_close_s)
+        || (window.duration_s * Dd::from_f64(64.0 * f64::EPSILON)).lt(duration_error)
+    {
+        return None;
+    }
+    Some(emission_close_s)
+}
+
 pub(super) fn average_history(
     cx: &Cx<'_>,
     binding: SurfaceEmissionHistoryBinding<'_>,
@@ -288,13 +304,8 @@ pub(super) fn average_history(
     window: ExposureWindow,
 ) -> Result<f64, TransientCameraError> {
     let object_id = binding.object_id;
-    let emission_close_s = retarded_time(window.close_s, opening.group_delay_s, object_id)?;
-    let duration_error = ((emission_close_s - opening.emission_time_s) - window.duration_s).abs();
-    if !opening.emission_time_s.lt(emission_close_s)
-        || (window.duration_s * Dd::from_f64(64.0 * f64::EPSILON)).lt(duration_error)
-    {
-        return Err(TransientCameraError::UnresolvedClock { object_id });
-    }
+    let emission_close_s = checked_exposure_close(opening.emission_time_s, opening.group_delay_s, window)
+        .ok_or(TransientCameraError::UnresolvedClock { object_id })?;
     let scale = binding
         .history
         .average(

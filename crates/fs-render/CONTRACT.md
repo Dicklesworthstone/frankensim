@@ -10082,9 +10082,9 @@ This is frozen-geometry, frozen-medium, incoherent spectral envelope transport
 with a narrow-band group-delay approximation. It supplies no carrier phase,
 within-bin pulse reshaping, moving-medium frequency shift, fluorescence,
 unmodeled lens transit, interface/coating residence time, or temporal environment,
-volume or point-source-connection history. The finite-area adapters below
-support timed clear-medium and molecular connections. Unbound sources remain
-explicitly steady.
+volume history. The finite-area adapters below support timed clear-medium and
+molecular connections; the point-fixture adapter adds retarded clear-medium
+connections. Unbound sources remain explicitly steady.
 
 Seven G1/G3/G4 tests cover native static/RNG parity, distinct per-source delays,
 chromatic pulse arrivals, an independent curved-path group integral, large-epoch
@@ -10432,6 +10432,31 @@ The adapter borrows exactly the same prepared camera as the area-source owner an
 `sample_ray_with_samples_at_time` returns the complete native radiance and per-image work at a DD observation clock. `sample_ray_with_samples_during_exposure` requests each source's mean over its individually retarded shutter interval on that same frozen transport, then returns mean radiance and integrated radiance [J/(m² sr nm)]. No temporal path sampling, extra image tracing, midpoint source substitution, or additional geometric delay is introduced. Geometry/optical coefficients stay frozen; moving media, pulse reshaping, interface residence time, point-source connections, and molecular-scattering connections are outside this adapter.
 
 Four focused regression groups cover unity/native-sample and work parity, dispersive group clocks at a large epoch, triangular shutter integration on both MIS strategies, distinct refracted-image clocks, and complete refusal for missing connection group delay or source failures. They were authored and formatter/parser checked; native numerical execution was unavailable in the editing environment.
+
+## Retarded point-fixture connections
+
+`camera::transient::point_lights::TransientCurvedPointLightCameraScene` binds
+`PointEmissionHistory` to the exact borrowed `PhotometricSource` and an explicit
+nonzero content identity. Instantaneous and finite-shutter queries observe the
+original accepted point-light connection, with its calibrated source direction,
+camera and connection group paths, and complete sequential-lens DD delay prefix.
+Surface-emission histories retain their original object identities. Unbound
+fixtures are steady and require no new group-delay evidence.
+
+The observer scales the native point-light intensity before logarithmic range
+admission; a unit history preserves the existing arithmetic. Point fixtures
+remain additive delta-endpoint next-event estimates. Clipped, zero-survival and
+otherwise noncontributing connections acquire no fabricated source event.
+Missing group evidence, source-history failures and cancellation refuse the
+whole requested observation. Steady raw-beam and timed sequential-lens methods
+retain the native polarization analyzer and optical transport.
+
+These histories assume frozen geometry and optics. Environment, LTE and volume
+emission remain steady, and this clear-medium adapter does not make molecular
+point connections time dependent. Three regression fixtures cover separate
+surface/fixture clocks, native work parity, timed analyzed lens pulses and
+shutters, and admission/refusal cases. They were source reviewed and parsed;
+the complete renderer test target was not executed in the editing environment.
 
 ## Retarded molecular finite-area source connections
 
