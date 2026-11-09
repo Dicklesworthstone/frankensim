@@ -15,7 +15,12 @@ use fs_solver::op::LinearOp;
 use super::eigenstrain::{EigenstrainResponse3, PreparedEigenstrain3, physical_response};
 use super::{Cell3, CutElasticity3, ElasticityError3};
 
+mod adjoint;
 mod sensitivity;
+pub use adjoint::{
+    ThermoelasticAdjointSettings3, ThermoelasticMotion3, ThermoelasticObjective3,
+    ThermoelasticSensitivity3,
+};
 
 /// Mechanical response and elastic contribution to the native thermal potential.
 ///
@@ -189,9 +194,12 @@ impl CutElasticity3 {
                     "thermoelastic response requires a native thermal source in every cell",
                 ));
             }
-            points = points.checked_add(cell.rules.bulk().len()).ok_or(
-                ElasticityError3::Invalid("thermoelastic point count overflow"),
-            )?;
+            points =
+                points
+                    .checked_add(cell.rules.bulk().len())
+                    .ok_or(ElasticityError3::Invalid(
+                        "thermoelastic point count overflow",
+                    ))?;
             if points > max_points {
                 return Err(ElasticityError3::Invalid(
                     "thermoelastic point allowance exhausted",
@@ -237,14 +245,18 @@ impl CutElasticity3 {
                 let entropy_j_k = scale * potential.entropy_j_k;
                 let internal_energy_j = scale * potential.internal_energy_j;
                 let heat_capacity_j_k = scale * potential.heat_capacity_j_k;
-                let stress_temperature_derivative = from_mandel(
-                    &potential.stress_temperature_derivative_mandel_pa_k,
-                )
-                .map(|value| scale * value);
-                if [free_energy_j, entropy_j_k, internal_energy_j, heat_capacity_j_k]
-                    .iter()
-                    .chain(&stress_temperature_derivative)
-                    .any(|v| !v.is_finite())
+                let stress_temperature_derivative =
+                    from_mandel(&potential.stress_temperature_derivative_mandel_pa_k)
+                        .map(|value| scale * value);
+                if [
+                    free_energy_j,
+                    entropy_j_k,
+                    internal_energy_j,
+                    heat_capacity_j_k,
+                ]
+                .iter()
+                .chain(&stress_temperature_derivative)
+                .any(|v| !v.is_finite())
                 {
                     return Err(ElasticityError3::Invalid(
                         "scaled thermoelastic potential overflow",

@@ -136,6 +136,41 @@ fn motion_temperature_work(
 }
 
 impl CutElasticity3 {
+    pub(in crate::elastic3) fn admit_thermal_temperature_points(
+        &self,
+        max_points: usize,
+        mut checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<(), ElasticityError3> {
+        poll(&mut checkpoint)?;
+        let mut points = self.ghosts.len();
+        for (id, cell) in self.cells.iter().enumerate() {
+            poll(&mut checkpoint)?;
+            points = points
+                .checked_add(cell.rules.bulk().len())
+                .and_then(|n| {
+                    n.checked_add(
+                        self.embedded
+                            .as_ref()
+                            .map_or(0, |data| data.selected_points(id).len()),
+                    )
+                })
+                .ok_or(ElasticityError3::Invalid(
+                    "thermal temperature point count overflow",
+                ))?;
+            if points > max_points {
+                return Err(ElasticityError3::Invalid(
+                    "thermal temperature point allowance exhausted",
+                ));
+            }
+            if cell.material.thermal_state().is_none() {
+                return Err(ElasticityError3::Invalid(
+                    "temperature pullback requires a native thermoelastic source in every cell",
+                ));
+            }
+        }
+        poll(&mut checkpoint)
+    }
+
     /// Exact partial-temperature transpose of `R = K(T)u - b_free(T) - f`.
     ///
     /// Returns `dual^T dR/dT_cell` in original active-cell order. Temperatures
@@ -284,32 +319,7 @@ impl CutElasticity3 {
                 }
             }
         }
-        let mut points = self.ghosts.len();
-        for (id, cell) in self.cells.iter().enumerate() {
-            poll(&mut checkpoint)?;
-            points = points
-                .checked_add(cell.rules.bulk().len())
-                .and_then(|n| {
-                    n.checked_add(
-                        self.embedded
-                            .as_ref()
-                            .map_or(0, |data| data.selected_points(id).len()),
-                    )
-                })
-                .ok_or(ElasticityError3::Invalid(
-                    "thermal temperature point count overflow",
-                ))?;
-            if points > max_points {
-                return Err(ElasticityError3::Invalid(
-                    "thermal temperature point allowance exhausted",
-                ));
-            }
-            if cell.material.thermal_state().is_none() {
-                return Err(ElasticityError3::Invalid(
-                    "temperature pullback requires a native thermoelastic source in every cell",
-                ));
-            }
-        }
+        self.admit_thermal_temperature_points(max_points, &mut checkpoint)?;
         let mut ghost_needed = vec![false; self.cells.len()];
         for face in &self.ghosts {
             poll(&mut checkpoint)?;

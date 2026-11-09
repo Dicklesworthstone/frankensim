@@ -942,3 +942,34 @@ remain unchanged. Generic tensors retain their complete source matrix and are
 never fitted to isotropy. Extreme independent K/G regressions cover both weak
 bulk and weak shear response and adjoint work, without asserting that the dense
 assembled stiffness can resolve arbitrarily ill-conditioned global solves.
+
+
+## Complete thermoelastic objective adjoints
+
+Cartesian and adaptive `solve_thermoelastic_adjoint` solve the native source-owned
+thermal equilibrium, admit its physical strain domain, and evaluate one supplied
+objective of displacement, scaled bulk stress and cell temperature. Its declared
+partials feed the original reference-stress transpose and the SAME native elastic
+solver for the adjoint. The total temperature derivative is the explicit objective
+partial plus local stress-temperature work minus the native residual-temperature
+transpose. Original C(T), integrated expansion, B-bar, both ghost-side coefficients,
+Nitsche consistency/penalties and optional temperature-dependent support motion
+therefore enter once. No Krylov iteration is differentiated.
+
+Both solves must pass their original true-residual gates within one aggregate
+iteration allowance. The complete temperature point budget is admitted before
+preparation, solving or objective callbacks. Adaptive reconstruction and restriction
+remain with their original owners. The finite algebraic dual has no physical
+strain-amplitude ceiling. Failed, cancelled and successful calls leave the original
+operator and scales unchanged; no partial sensitivity is returned.
+
+Force derivatives hold the authored objective and temperatures fixed. Geometry,
+reference density, stiffness scales, strong box clamps and source selection are
+fixed. Explicit force dependence, temperature-dependent external forces, heat-flow
+adjoints and derivatives of the caller's constitutive/source-selection policy remain
+separate. Stress cotangents include caller-specified quadrature weights and pair
+with physical tensor shear components. Sampled stress functionals do not certify
+continuum maxima; the original supported problem must be well posed. G0/G1/G3
+regressions extend `fs-solid/tests/cutfem_thermal_sensitivity.rs` with nonlinear
+stress/displacement objectives, physical source refresh, original hanging maps,
+moving supports, shared iteration bounds and objective-callback cancellation.
