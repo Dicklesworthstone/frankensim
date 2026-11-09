@@ -44,7 +44,9 @@ pub use rate::{HoffmanLauritzenConfig, HoffmanLauritzenRate};
 
 #[path = "crystallization/population.rs"]
 mod population;
-pub use population::{CrystallizationPopulation, CrystallizationPopulationStep};
+pub use population::{
+    AdaptiveCrystallizationPopulationStep, CrystallizationPopulation, CrystallizationPopulationStep,
+};
 
 #[path = "crystallization/adaptive.rs"]
 mod adaptive;
@@ -572,6 +574,32 @@ impl<'a> CrystallizationLaw<'a> {
         check_cancelled(&mut cancelled)?;
         let heat = finite(final_h_j_kg - current.specific_enthalpy_j_kg)?;
         let initial_rate = self.rate_s_inv(current.temperature_k)?;
+        if heat == 0.0
+            && (initial_rate == 0.0
+                || current.crystalline_mass_fraction
+                    == self.config.maximum_crystalline_mass_fraction)
+        {
+            // A stationary accepted inverse may retain either sign of caloric
+            // residual at its phase boundary. Re-inversion would create false
+            // undercooling or refuse an unchanged state. Tightened budgets and
+            // original sources must still admit that complete state.
+            self.validate_state(current, solve)?;
+            let residual = finite(
+                self.specific_enthalpy_j_kg(
+                    current.temperature_k,
+                    current.crystalline_mass_fraction,
+                )? - current.specific_enthalpy_j_kg,
+            )?;
+            check_cancelled(&mut cancelled)?;
+            return Ok(CrystallizationStep {
+                initial: current,
+                state: current,
+                duration_s,
+                specific_heat_j_kg: 0.0,
+                caloric_residual_j_kg: residual,
+                midpoint_rate_s_inv: initial_rate,
+            });
+        }
         let midpoint_exposure = self.advance_exposure(current, initial_rate, 0.5 * duration_s)?;
         let midpoint = self.state_at_enthalpy(
             finite(current.specific_enthalpy_j_kg + 0.5 * heat)?,

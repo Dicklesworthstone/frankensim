@@ -20,6 +20,8 @@
 //! Input masses must come from the caller's conservative transport owner.
 //! The explicit midpoint heat-path step is second order on smooth trajectories;
 //! its timestep and convergence are the transport owner's responsibility.
+//! Optional bounded step doubling resolves every retained cohort's conversion
+//! and shared age increment on that same prescribed enthalpy path.
 
 use std::sync::Arc;
 
@@ -30,6 +32,10 @@ use super::{
 
 const MAXIMUM_COHORTS: usize = 1_000_000;
 const CHECKPOINT_STRIDE: usize = 32;
+
+#[path = "population/adaptive.rs"]
+mod adaptive;
+pub use adaptive::AdaptiveCrystallizationPopulationStep;
 
 #[derive(Clone, Copy)]
 struct Cohort {
@@ -249,6 +255,21 @@ impl<'a> CrystallizationPopulation<'a> {
         self.validate(solve, &mut cancelled)?;
         let heat = finite(final_h_j_kg - self.specific_enthalpy_j_kg)?;
         let rate = self.law.rate_s_inv(self.temperature_k)?;
+        if heat == 0.0 && (rate == 0.0 || self.fully_crystallized) {
+            // No physical derivative is active. Re-inverting an already
+            // accepted caloric residual can introduce artificial undercooling
+            // at Tm and restart growth during a stationary hold.
+            let residual = finite(
+                self.law
+                    .specific_enthalpy_j_kg(self.temperature_k, self.crystalline_mass_fraction)?
+                    - self.specific_enthalpy_j_kg,
+            )?;
+            let mut next = self.clone();
+            next.caloric = solve;
+            let step = self.report(&next, duration_s, rate, residual)?;
+            check_cancelled(&mut cancelled)?;
+            return Ok((next, step));
+        }
         let midpoint_increment = self.next_exposure(rate, 0.5 * duration_s)?;
         let (midpoint_fraction, _) = self.fraction_at(midpoint_increment, &mut cancelled)?;
         let midpoint_t = self.law.temperature_at_enthalpy_fraction(

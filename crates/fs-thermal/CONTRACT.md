@@ -431,6 +431,22 @@ recalescence inside one outer step, latent reheating and a stationary plateau,
 energy accounting, deterministic replay, budget exhaustion and cancellation;
 these integration cases require the complete native thermal dependency graph.
 
+`CrystallizationPopulation::advance_specific_enthalpy_adaptive` applies the same
+bounded step-doubling controls to thermally equilibrated, distinct-age cohorts.
+Every candidate uses the existing population midpoint/caloric owner and shares
+its immutable cohort buffer. Acceptance checks temperature, the common exposure
+increment, and every cohort's crystalline mass fraction as well as its aggregate;
+a low-mass history cannot hide unresolved conversion in a mass-weighted mean.
+The exact final enthalpy, original masses and separate ages survive. Active
+endpoint kinetics prevent accepting false zero-growth onset. Failed refinements,
+source failures and cancellation return no partial population. Stationary
+zero-heat/zero-growth holds preserve accepted caloric residuals bitwise, avoiding
+artificial undercooling and renewed growth at melting. This irreversible
+population path adds no remelting, spatial-mixing or molecular-memory model;
+its local discrepancies carry the same global/source-resolution limitations.
+Focused regressions use an analytic cohort recalescence solution, a rare-cohort
+error that an aggregate test misses, cooling onset, replay, and rollback.
+
 Layer L3. Shared conservative thermal transport and solid/vapor exchange.
 Runtime dependencies: std, fs-la, fs-math, fs-solver. Spatial discretizations and material
 constitutive data remain owned by their existing crates.

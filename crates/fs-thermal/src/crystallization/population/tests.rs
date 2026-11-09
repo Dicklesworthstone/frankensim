@@ -1,5 +1,7 @@
 use super::*;
-use crate::crystallization::{CrystallizationCaloric, CrystallizationConfig, CrystallizationRate};
+use crate::crystallization::{
+    CrystallizationAdaptivity, CrystallizationCaloric, CrystallizationConfig, CrystallizationRate,
+};
 
 struct AffineCaloric {
     datum_j_kg: f64,
@@ -457,4 +459,339 @@ fn g4_late_cancellation_publishes_no_mixed_or_advanced_population() {
         replayed.cohort_state(1).unwrap(),
         expected.cohort_state(1).unwrap()
     );
+}
+
+#[test]
+fn g1_adaptive_population_resolves_recalescence_without_collapsing_ages() {
+    // Independent closed form from the n=1 cohort balance: if
+    // C=sum(m_i exp(-z_i))/sum(m_i), then exp(y)=(exp(.1(1-C)t)-C)/(1-C).
+    let rate = |temperature: f64| Ok(0.1 * (350.0 - temperature) / 50.0);
+    let law = CrystallizationLaw::new(
+        &AMORPHOUS,
+        &CRYSTALLINE,
+        &rate,
+        CrystallizationConfig {
+            avrami_exponent: 1.0,
+            maximum_crystalline_mass_fraction: 1.0,
+            temperature_range_k: [250.0, 350.0],
+            melting_temperature_k: 350.0,
+            ..config()
+        },
+    )
+    .unwrap();
+    let solve = CrystallizationSolve::default();
+    let initial = CrystallizationPopulation::new(
+        law,
+        &[
+            (1.0, law.state_at_temperature(300.0, 0.0).unwrap()),
+            (3.0, law.state_at_temperature(300.0, 0.8).unwrap()),
+        ],
+        2,
+        solve,
+        || false,
+    )
+    .unwrap();
+    let h = initial.specific_enthalpy_j_kg();
+    let controls = CrystallizationAdaptivity {
+        maximum_dt_s: 12.0,
+        temperature_tolerance_k: 1e-6,
+        crystalline_mass_fraction_tolerance: 1e-8,
+        exposure_tolerance: 1e-8,
+        ..CrystallizationAdaptivity::default()
+    };
+    let (grown, report) = initial
+        .advance_specific_enthalpy_adaptive(h, 12.0, solve, controls, || false)
+        .unwrap();
+    let c = (1.0 + 3.0 * (-0.8_f64).exp()) / 4.0;
+    let expected_increment = (((0.1 * (1.0 - c) * 12.0).exp() - c) / (1.0 - c)).ln();
+    let expected_fraction = 1.0 - c * (-expected_increment).exp();
+    let expected_temperature = 300.0 + 50.0 * c * (1.0 - (-expected_increment).exp());
+    near(grown.temperature_k(), expected_temperature, 1e-4);
+    near(grown.crystalline_mass_fraction(), expected_fraction, 2e-6);
+    near(
+        grown.cohort_state(0).unwrap().unwrap().exposure(),
+        expected_increment,
+        2e-6,
+    );
+    near(
+        grown.cohort_state(1).unwrap().unwrap().exposure(),
+        0.8 + expected_increment,
+        2e-6,
+    );
+    assert!(report.rejected_trials > 0);
+    assert!(report.accepted_substeps > 2);
+    assert_eq!(
+        report.attempted_trials,
+        report.rejected_trials + report.accepted_substeps / 2
+    );
+    assert!(report.maximum_temperature_discrepancy_k <= controls.temperature_tolerance_k);
+    assert!(
+        report.maximum_crystalline_mass_fraction_discrepancy
+            <= controls.crystalline_mass_fraction_tolerance
+    );
+    assert!(report.maximum_exposure_discrepancy <= controls.exposure_tolerance);
+    assert_eq!(report.specific_heat_j_kg, 0.0);
+    assert_eq!(grown.specific_enthalpy_j_kg().to_bits(), h.to_bits());
+    assert_eq!(grown.mass_kg(), initial.mass_kg());
+    near(
+        report.crystallized_mass_kg,
+        4.0 * (grown.crystalline_mass_fraction() - initial.crystalline_mass_fraction()),
+        0.0,
+    );
+    assert!(Arc::ptr_eq(&initial.cohorts, &grown.cohorts));
+    let (replay, replay_report) = initial
+        .advance_specific_enthalpy_adaptive(h, 12.0, solve, controls, || false)
+        .unwrap();
+    assert_eq!(replay_report, report);
+    assert_eq!(
+        replay.cohort_state(0).unwrap(),
+        grown.cohort_state(0).unwrap()
+    );
+    assert_eq!(initial.cohort_state(0).unwrap().unwrap().exposure(), 0.0);
+}
+
+#[test]
+fn g0_small_cohort_conversion_error_cannot_hide_in_aggregate_fraction() {
+    let rate = |temperature: f64| Ok(((temperature - 300.0) / 100.0).powi(2));
+    let law = law(&rate);
+    let solve = CrystallizationSolve::default();
+    let initial = CrystallizationPopulation::new(
+        law,
+        &[
+            (
+                100_000_000.0,
+                law.state_at_temperature(300.0, 10.0).unwrap(),
+            ),
+            (1.0, law.state_at_temperature(300.0, 0.0).unwrap()),
+        ],
+        2,
+        solve,
+        || false,
+    )
+    .unwrap();
+    let h = initial.specific_enthalpy_j_kg();
+    let (coarse, _) = initial
+        .advance_specific_enthalpy(h + 100_000.0, 1.0, solve, || false)
+        .unwrap();
+    let (first, _) = initial
+        .advance_specific_enthalpy(h + 50_000.0, 0.5, solve, || false)
+        .unwrap();
+    let (refined, _) = first
+        .advance_specific_enthalpy(h + 100_000.0, 0.5, solve, || false)
+        .unwrap();
+    let rare_difference = (coarse
+        .cohort_state(1)
+        .unwrap()
+        .unwrap()
+        .crystalline_mass_fraction()
+        - refined
+            .cohort_state(1)
+            .unwrap()
+            .unwrap()
+            .crystalline_mass_fraction())
+    .abs();
+    assert!(rare_difference > 0.01);
+    assert!(
+        (coarse.crystalline_mass_fraction() - refined.crystalline_mass_fraction()).abs() < 1e-8
+    );
+    let controls = CrystallizationAdaptivity {
+        maximum_dt_s: 1.0,
+        maximum_trials: 1,
+        temperature_tolerance_k: 1.0,
+        crystalline_mass_fraction_tolerance: 1e-3,
+        exposure_tolerance: 1.0,
+        ..CrystallizationAdaptivity::default()
+    };
+    assert!(matches!(
+        initial.advance_specific_enthalpy_adaptive(h + 100_000.0, 1.0, solve, controls, || false),
+        Err(CrystallizationError::NonConverged)
+    ));
+    let (_, admitted) = initial
+        .advance_specific_enthalpy_adaptive(
+            h + 100_000.0,
+            1.0,
+            solve,
+            CrystallizationAdaptivity {
+                crystalline_mass_fraction_tolerance: 0.1,
+                ..controls
+            },
+            || false,
+        )
+        .unwrap();
+    near(
+        admitted.maximum_crystalline_mass_fraction_discrepancy,
+        rare_difference,
+        0.0,
+    );
+    assert_eq!(admitted.attempted_trials, 1);
+}
+
+#[test]
+fn g1_adaptive_population_cooling_resolves_late_growth_onset() {
+    let rate = |temperature: f64| Ok(0.001 * (500.0 - temperature).max(0.0));
+    let law = CrystallizationLaw::new(
+        &AMORPHOUS,
+        &CRYSTALLINE,
+        &rate,
+        CrystallizationConfig {
+            temperature_range_k: [250.0, 650.0],
+            ..config()
+        },
+    )
+    .unwrap();
+    let solve = CrystallizationSolve::default();
+    let initial = CrystallizationPopulation::new(
+        law,
+        &[(2.0, law.state_at_temperature(600.0, 0.0).unwrap())],
+        1,
+        solve,
+        || false,
+    )
+    .unwrap();
+    let target_h = 240_000.0; // Original completely amorphous enthalpy at 490 K.
+    let (unresolved, _) = initial
+        .advance_specific_enthalpy(target_h, 1.0, solve, || false)
+        .unwrap();
+    assert_eq!(unresolved.crystalline_mass_fraction(), 0.0);
+    let (resolved, report) = initial
+        .advance_specific_enthalpy_adaptive(
+            target_h,
+            1.0,
+            solve,
+            CrystallizationAdaptivity::default(),
+            || false,
+        )
+        .unwrap();
+    assert!(resolved.crystalline_mass_fraction() > 0.0);
+    assert!(resolved.temperature_k() > 490.0);
+    assert_eq!(resolved.specific_enthalpy_j_kg(), target_h);
+    assert!(report.rejected_trials > 0);
+    assert_eq!(
+        report.specific_heat_j_kg,
+        target_h - initial.specific_enthalpy_j_kg()
+    );
+}
+
+#[test]
+fn g4_adaptive_population_budget_and_late_cancellation_keep_every_original_age() {
+    let rate = |temperature: f64| Ok(0.001 * (500.0 - temperature));
+    let law = law(&rate);
+    let solve = CrystallizationSolve::default();
+    let initial = CrystallizationPopulation::new(
+        law,
+        &[
+            (1.0, law.state_at_temperature(320.0, 0.2).unwrap()),
+            (2.0, law.state_at_temperature(360.0, 0.7).unwrap()),
+        ],
+        2,
+        solve,
+        || false,
+    )
+    .unwrap();
+    let before = [
+        initial.cohort_state(0).unwrap(),
+        initial.cohort_state(1).unwrap(),
+    ];
+    let h = initial.specific_enthalpy_j_kg() - 1500.0;
+    let controls = CrystallizationAdaptivity {
+        maximum_dt_s: 0.2,
+        ..CrystallizationAdaptivity::default()
+    };
+    let mut checks = 0;
+    let (_, expected) = initial
+        .advance_specific_enthalpy_adaptive(h, 1.0, solve, controls, || {
+            checks += 1;
+            false
+        })
+        .unwrap();
+    assert!(expected.accepted_substeps >= 10);
+    assert!(matches!(
+        initial.advance_specific_enthalpy_adaptive(
+            h,
+            1.0,
+            solve,
+            CrystallizationAdaptivity {
+                maximum_trials: 1,
+                ..controls
+            },
+            || false
+        ),
+        Err(CrystallizationError::NonConverged)
+    ));
+    let mut interrupted = 0;
+    assert!(matches!(
+        initial.advance_specific_enthalpy_adaptive(h, 1.0, solve, controls, || {
+            interrupted += 1;
+            interrupted == checks
+        }),
+        Err(CrystallizationError::Cancelled)
+    ));
+    assert_eq!(initial.cohort_state(0).unwrap(), before[0]);
+    assert_eq!(initial.cohort_state(1).unwrap(), before[1]);
+}
+
+#[test]
+fn g0_population_stationary_hold_preserves_accepted_caloric_residual() {
+    let rate = |temperature: f64| Ok(0.001 * (500.0 - temperature).max(0.0));
+    let law = CrystallizationLaw::new(
+        &AMORPHOUS,
+        &CRYSTALLINE,
+        &rate,
+        CrystallizationConfig {
+            temperature_range_k: [250.0, 550.0],
+            ..config()
+        },
+    )
+    .unwrap();
+    let solve = CrystallizationSolve::default();
+    let mut initial = CrystallizationPopulation::new(
+        law,
+        &[(1.0, law.state_at_temperature(500.0, 0.3).unwrap())],
+        1,
+        solve,
+        || false,
+    )
+    .unwrap();
+    // Represent accepted bounded inverses with either residual sign at Tm.
+    for residual in [-5e-9, 5e-9] {
+        initial.temperature_k = 500.0;
+        initial.specific_enthalpy_j_kg = law
+            .specific_enthalpy_j_kg(500.0, initial.crystalline_mass_fraction)
+            .unwrap()
+            + residual;
+        initial.validate(solve, || false).unwrap();
+        let h = initial.specific_enthalpy_j_kg();
+        let (held, step) = initial
+            .advance_specific_enthalpy(h, 1e6, solve, || false)
+            .unwrap();
+        assert_eq!(
+            held.temperature_k().to_bits(),
+            initial.temperature_k().to_bits()
+        );
+        assert_eq!(held.specific_enthalpy_j_kg().to_bits(), h.to_bits());
+        assert_eq!(
+            held.exposure_increment.to_bits(),
+            initial.exposure_increment.to_bits()
+        );
+        assert_eq!(step.specific_heat_j_kg, 0.0);
+        assert_eq!(step.crystallized_mass_kg, 0.0);
+        let (adaptive, _) = initial
+            .advance_specific_enthalpy_adaptive(
+                h,
+                1.0,
+                solve,
+                CrystallizationAdaptivity::default(),
+                || false,
+            )
+            .unwrap();
+        assert_eq!(
+            adaptive.temperature_k().to_bits(),
+            initial.temperature_k().to_bits()
+        );
+        assert_eq!(adaptive.specific_enthalpy_j_kg().to_bits(), h.to_bits());
+        assert_eq!(
+            adaptive.cohort_state(0).unwrap(),
+            initial.cohort_state(0).unwrap()
+        );
+    }
 }

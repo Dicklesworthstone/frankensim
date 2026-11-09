@@ -135,7 +135,12 @@ impl CrystallizationLaw<'_> {
             }
         }
         let heat = finite(final_h_j_kg - current.specific_enthalpy_j_kg())?;
-        self.check_adaptive_enthalpy_range(current, final_h_j_kg, remelting.is_some())?;
+        // Preserve already validated stationary boundary states with an
+        // admitted caloric residual. An unchanged account needs no new exact
+        // range admission; original stage kernels still admit every trajectory.
+        if heat != 0.0 {
+            self.check_adaptive_enthalpy_range(current, final_h_j_kg, remelting.is_some())?;
+        }
         let mut result = AdaptiveCrystallizationStep {
             initial: current,
             state: current,

@@ -512,3 +512,74 @@ fn g0_saturated_and_entirely_superheated_domains_keep_their_original_history() {
     assert_eq!(step.state.exposure(), 0.0);
     assert_eq!(step.specific_heat_j_kg, -50_000.0);
 }
+
+#[test]
+fn g0_irreversible_stationary_hold_keeps_both_signs_of_admitted_caloric_residual() {
+    let parent = Affine {
+        cp: 1000.0,
+        datum: 0.0,
+    };
+    let crystal = Affine {
+        cp: 1000.0,
+        datum: -100_000.0,
+    };
+    let rate = |t: f64| Ok(0.002 * (500.0 - t).max(0.0));
+    let law = CrystallizationLaw::new(&parent, &crystal, &rate, config()).unwrap();
+    let solve = CrystallizationSolve::default();
+    let exact = law.state_at_temperature(500.0, 0.3).unwrap();
+    for residual in [-5e-9, 5e-9] {
+        // The original bounded inverse admits this rounding defect. No physical
+        // heat or growth can remove it during a hold at exactly Tm.
+        let current = CrystallizationState {
+            specific_enthalpy_j_kg: exact.specific_enthalpy_j_kg() + residual,
+            ..exact
+        };
+        law.validate_state(current, solve).unwrap();
+        let h = current.specific_enthalpy_j_kg();
+        let held = law
+            .advance_specific_enthalpy(current, h, 1e6, solve, || false)
+            .unwrap();
+        assert_eq!(held.state, current);
+        assert_eq!(held.specific_heat_j_kg, 0.0);
+        assert_eq!(
+            held.caloric_residual_j_kg,
+            exact.specific_enthalpy_j_kg() - h
+        );
+        let adaptive = law
+            .advance_specific_enthalpy_adaptive(current, h, 1.0, solve, controls(1.0), None, || {
+                false
+            })
+            .unwrap();
+        assert_eq!(adaptive.state, current);
+        assert_eq!(adaptive.accepted_substeps, 2);
+        assert_eq!(adaptive.rejected_trials, 0);
+
+        let tighter = CrystallizationSolve {
+            specific_enthalpy_tolerance_j_kg: 1e-12,
+            ..solve
+        };
+        assert_eq!(
+            law.advance_specific_enthalpy(current, h, 1.0, tighter, || false),
+            Err(CrystallizationError::StateMismatch)
+        );
+        assert_eq!(
+            law.advance_specific_enthalpy_adaptive(
+                current,
+                h,
+                1.0,
+                tighter,
+                controls(1.0),
+                None,
+                || false,
+            ),
+            Err(CrystallizationError::StateMismatch)
+        );
+        let cooled = law
+            .advance_specific_enthalpy(current, h - 10_000.0, 0.5, solve, || false)
+            .unwrap();
+        assert!(cooled.state.temperature_k() < 500.0);
+        assert!(cooled.state.exposure() > current.exposure());
+        assert!(cooled.state.crystalline_mass_fraction() > current.crystalline_mass_fraction());
+        assert_eq!(cooled.state.specific_enthalpy_j_kg(), h - 10_000.0);
+    }
+}
