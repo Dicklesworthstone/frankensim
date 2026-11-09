@@ -78,7 +78,7 @@ impl FacePlan {
         })
     }
 
-    fn exterior_wall_velocity<E>(
+    pub(super) fn exterior_wall_velocity<E>(
         &self,
         p: [usize; 3],
         direction: [i32; 3],
