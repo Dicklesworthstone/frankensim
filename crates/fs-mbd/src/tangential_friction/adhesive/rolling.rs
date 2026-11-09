@@ -16,8 +16,10 @@
 //! Held applied COM forces and body torques can drive the same solve. Their
 //! native work is kept separate from contact storage and loss; a driven
 //! reversal requires a refined interval rather than the unforced orbit bound.
-//! Pose evolution, normal-area evolution, history transport, arbitrary vector
-//! rolling and heat allocation remain with their physical owners.
+//! [`normal`] explicitly continues the original attached normal area before a
+//! rolling phase, retaining its spring memory and separate prescribed work.
+//! Pose evolution, history transport, arbitrary vector rolling and heat
+//! allocation remain with their physical owners.
 
 use super::super::hertz::RigidHertzError;
 use super::super::{RigidContactBinding, RigidFrictionError, poll, vector};
@@ -31,6 +33,9 @@ use fs_tribo::partial_slip::TangentFrame;
 
 /// Physical-step and native work/momentum gates shared with bonded torsion.
 pub use super::moment::RigidAdhesiveMomentControls as RigidAdhesiveRollingControls;
+
+/// Prescribed attached-area continuation and native recoil with retained memory.
+pub mod normal;
 
 /// Physical pair and coincident reaction markers; longitudinal is the rolling axis.
 #[derive(Clone, Copy, Debug)]

@@ -8690,6 +8690,37 @@ cases in `tests/adhesive_rolling.rs` cover analytic elastic pair recoil, tensile
 yielding, full inertia in rotated frames, weak work beside common translation,
 and atomic cancellation, geometry and numerical-budget refusals.
 
+## Prescribed normal loading with retained adhesive rolling memory
+
+`tangential_friction::adhesive::rolling::normal` extends the native rolling
+phase with a prescribed attached JKR indentation update. The original normal
+source determines the new contact area while the exact elastic fraction and
+accumulated rolling angle are held. Material, curvature, critical rolling shift,
+calibration and small-shift applicability remain bound to the original source.
+The resulting radius-dependent stiffness then drives the existing native
+midpoint recoil using both actual body inertias.
+
+Receipts separate original normal-contact work, signed rolling parameter work,
+applied body-wrench work, recoverable storage and irreversible rolling loss.
+Changing stiffness at held elastic shift supplies or returns rolling energy; it
+does not manufacture dissipation. Original factored incremental work/storage
+primitives retain weak changes beside large preload. Independently observed
+absolute storage differences are cross-checked with an explicit rounding
+allowance, while native mechanical work retains its original acceptance gate.
+
+Preparation returns an immutable candidate. Publication updates both native
+body momenta, the original-source continuation and its sealed rolling history
+together, only after all domain, geometry, work and cancellation checks.
+Below-fold indentation, changed geometry, invalid wrenches or cancellation
+cannot publish a partial area or history update.
+
+This is a prescribed normal stage followed by rolling recoil at held body poses
+and frame. It does not solve normal body motion or its impulse, rolling-induced
+changes of equilibrium contact area, detachment, frame transport, material
+refresh or caloric deposition. The tests in `tests/adhesive_rolling/normal.rs`
+exercise analytic area-dependent recoil with retained preload, exact replay of
+an unchanged normal state, and atomic refusal/retry of all participating owners.
+
 ## Bonded adhesive torsion on a native rigid pair
 
 `tangential_friction::adhesive::torsion` binds the original JKR torsional source

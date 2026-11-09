@@ -10,6 +10,9 @@ use fs_mbd::tangential_friction::{RigidContactBinding, adhesive::rolling::*};
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3, Wrench};
 use fs_tribo::partial_slip::TangentFrame;
 
+#[path = "adhesive_rolling/normal.rs"]
+mod normal;
+
 fn source(tensile: bool) -> SourceJkrRollingContact {
     let a = common::solid("rolling-A", 1000.0, 1e7);
     let b = common::solid("rolling-B", 2000.0, 2e7);
