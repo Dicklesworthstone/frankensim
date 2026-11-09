@@ -36,6 +36,9 @@ mod keller_miksis;
 mod population;
 #[path = "cavitation/stepper.rs"]
 mod stepper;
+/// Frequency-dependent gas heat diffusion with an isothermal bubble interface.
+#[path = "cavitation/thermal.rs"]
+pub mod thermal;
 
 pub use cluster::{
     BubbleCluster, BubbleClusterError, BubbleClusterLimits, BubbleClusterNumerics,
@@ -48,6 +51,9 @@ pub use population::{
     PopulationAdvance, PopulationEquilibrium, PopulationEquilibriumReport,
     PopulationEvolutionError, PopulationEvolutionLimits, PopulationEvolutionNumerics,
     PopulationEvolutionStep, PopulationObservation,
+};
+pub use thermal::{
+    IsothermalWallBubble, ThermalBubbleError, ThermalBubbleLimits, ThermalBubbleResponse,
 };
 
 /// Invalid input, an explicit model boundary, or an unsuccessful integration.
@@ -158,6 +164,23 @@ impl BubbleGas {
     }
     pub const fn polytropic_exponent(self) -> f64 {
         self.polytropic_exponent
+    }
+
+    /// Evaluate this original inventory at a finite positive radius [m].
+    /// Material consumers can resolve the noncondensable gas at its actual
+    /// partial pressure without reconstructing or resetting the gas law.
+    /// A positive inventory whose pressure underflows is refused, not erased.
+    pub fn pressure_at_radius(self, radius_m: f64) -> Result<f64, CavitationError> {
+        if !positive(radius_m) {
+            return Err(CavitationError::InvalidInput("positive bubble radius"));
+        }
+        let pressure = self.pressure(radius_m)?;
+        if self.reference_pressure_pa > 0.0 && pressure == 0.0 {
+            return Err(CavitationError::NonFiniteDerived(
+                "gas partial pressure underflow",
+            ));
+        }
+        Ok(pressure)
     }
 
     fn pressure(self, radius_m: f64) -> Result<f64, CavitationError> {

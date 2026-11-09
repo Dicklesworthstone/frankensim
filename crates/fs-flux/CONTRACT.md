@@ -8952,3 +8952,48 @@ cavitation tests passed, including the original-reference pressure-excursion
 guard, with the original numerical source and restricted dependency facades.
 Full Cargo/DSR remains unavailable because the seven constellation siblings
 and DSR/RCH are absent.
+
+
+## Thermal diffusion in retained cavitation nuclei
+
+`cavitation::thermal::IsothermalWallBubble` prepares the original native
+Keller--Miksis bubble at its current stable equilibrium with a coherent
+`GasState` evaluated at the same gas partial pressure and interface temperature.
+The static inventory must be explicitly isothermal; the material's gamma
+enters only the harmonic gas heat equation. The native transport owner supplies
+D = k/(rho cp), rather than a fitted damping rate or an independent gas table.
+`BubbleGas::pressure_at_radius` exposes the checked retained pressure law for
+material preparation without reconstructing the original inventory.
+
+For exp(-i omega t), spherical gas diffusion with a fixed-temperature interface
+supplies kappa = gamma/[1 + 3(gamma-1)(z coth(z)-1)/z^2],
+z^2 = -i omega R^2/D. This follows Commander and Prosperetti (1989), equations
+19--28, with the Fourier convention conjugated. The low-frequency series
+preserves small thermal loss, the middle branch uses scaled exponentials, and
+the high-frequency branch retains the algebraic loss while omitting only a
+sub-roundoff exponential correction. DC returns the original native compliance.
+Frequency queries require no allocation, iteration, gas-source lookup or root.
+
+The complete complex restoring pressure enters the SAME native KM operator,
+including its pressure-derivative forcing and viscous acceleration contribution.
+The impedance form avoids cancellation between low-frequency radiation terms.
+Cycle-mean gas thermal absorption per squared fractional-radius amplitude is
+-6 pi R^3 omega p_g Im(kappa); it excludes viscous loss and radiated/scattered
+power. It is not a nonlinear thermal state or a complete heat-deposition account.
+
+Preparation rejects stale or inconsistent gas snapshots, non-isothermal static
+inventories, volatile water in the noncondensable gas, unstable tangents,
+excessive gas density or vapor fraction, and an excessive equilibrium pressure
+shift from the original frozen-liquid reference. Queries independently admit
+gas omega R/c_g; liquid compactness cannot replace that condition. Ideal-gas
+continuum conduction, small amplitude and an isothermal interface remain
+explicit assumptions. Liquid thermal impedance, vapor mass/latent heat,
+molecular relaxation and nonlinear thermal collapse remain outside this owner.
+
+All 71 native cavitation tests passed in the focused original-source build,
+including six new groups: independent spherical heat eigenmodes with a bounded
+truncation tail, isothermal/adiabatic limits and branch continuity, retained gas
+and DC compliance, the complete expanded KM operator, cycle-averaged gas work,
+and material/physical-domain refusals. Native gas coherence and transport code
+were included verbatim through restricted dependency facades. Full Cargo/DSR
+remains unavailable without the seven constellation siblings and DSR/RCH.
