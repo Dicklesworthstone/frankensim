@@ -10425,6 +10425,32 @@ Finite exposures use each source's retarded interval mean on frozen transport, t
 Two focused regression groups cover complete static CIE/QE parity, one-versus-three-channel shared work, large-epoch chromatic camera-plus-connection group clocks, native QE energy/photon conversion, late source failure with deterministic replay, and cancellation. Formatter/parser checks passed; native numerical execution was unavailable in the editing environment.
 
 
+### Steady coated-lens molecular area-light pixels
+
+The original molecular raster also exposes
+`sample_pixel_sequential_rayleigh_area_lights` and
+`sample_pixel_sensor_sequential_rayleigh_area_lights`, each with
+`_analyzed` and `_spectrally_analyzed` variants. These use the original
+steady lens integrators with timing disabled, so coated or absorbing lens
+optics need no group-delay model to produce CIE or multichannel QE images.
+
+A detector row is applied at the physical sensor before the full polarized
+lens. Native lens transmission, Beer absorption, molecular scattering,
+finite-area source images and complementary MIS retain their original
+correlation. All six methods reuse the original five sampling streams and
+molecular raster worker. Wavelengths clipped by the pupil contribute zero
+with the full proposal mass; detector channels share paths and work.
+Spectral analyzer support is admitted before tracing, including fully clipped
+packets. No source clock or additional coating phase derivative is inferred.
+
+One native fixture specifies positive finite-area radiometry with independent
+molecular source survival through absorbing coatings, all six detector modes,
+CIE/photon integration and unchanged work. It also checks that the same
+active coating refuses an unsupported timed-lens query while steady rendering
+succeeds, plus complete clipping, missing analyzer support and cancellation.
+The four changed Rust files passed parser and source/API review; this renderer
+integration fixture was not executed in the editing environment.
+
 ### Timed real-lens molecular area-light pixels
 
 `camera::raster::transient::area_lights::participating` exposes

@@ -21,6 +21,8 @@ use crate::spectral::detector::QuantumEfficiencySensor;
 use fs_exec::Cx;
 use fs_rand::philox::philox4x32_10;
 
+mod sequential;
+
 /// A complete original physical-camera pixel and its per-wavelength source
 /// and molecular work. The contained area result includes both weighted
 /// next-event terms and complementary emitter hits in its total radiance.

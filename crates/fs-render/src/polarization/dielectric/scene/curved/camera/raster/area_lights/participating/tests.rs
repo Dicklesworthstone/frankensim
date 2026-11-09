@@ -3,6 +3,7 @@
 use super::*;
 
 mod transient;
+mod sequential;
 use super::super::super::tests as fixtures;
 use crate::charts::TriMesh;
 use crate::dielectric::{BeerLambertAbsorption, CauchyIor, DielectricGlass, GlassProvenance};
