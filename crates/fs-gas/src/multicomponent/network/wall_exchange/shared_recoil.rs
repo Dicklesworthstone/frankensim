@@ -80,12 +80,21 @@ impl NetworkWallOperator<'_> {
         prepared
             .try_reserve_exact(branches.len())
             .map_err(|_| WallExchangeError::Invalid("shared support allocation"))?;
-        for (shape, support) in self.branches.iter().zip(branches) {
+        for (branch, (shape, support)) in self.branches.iter().zip(branches).enumerate() {
             poll(&mut cancelled)?;
             let Some(support) = support else {
                 prepared.push(None);
                 continue;
             };
+            if self
+                .transport
+                .as_ref()
+                .is_some_and(|transport| transport.couples_drag(branch))
+            {
+                return Err(WallExchangeError::Invalid(
+                    "source-coupled wall drag requires prescribed wall motion",
+                ));
+            }
             let count = shape.mesh.cell_count();
             if !positive(support.mass_kg) || !support.velocity_m_s.is_finite() {
                 return Err(WallExchangeError::Invalid(
