@@ -115,12 +115,12 @@ fn finite_derivative(value: f64, stage: &'static str) -> Result<f64, Correlation
 
 fn input_is_interior(evaluation: &NusseltEvaluation, axis: &'static str) -> bool {
     let moving_axes: &[&str] = match axis {
-        "Re" => &["Re", "Pe", "Gz"],
-        "Pr" => &["Pr", "Pe", "Gz"],
-        "L_over_Dh" => &["L_over_Dh", "Gz"],
+        "Re" => &["Re", "Pe", "Gz", "Sieder_Tate_entry_factor"],
+        "Pr" => &["Pr", "Pe", "Gz", "Sieder_Tate_entry_factor"],
+        "L_over_Dh" => &["L_over_Dh", "Gz", "Sieder_Tate_entry_factor"],
         "aspect_ratio" => &["aspect_ratio"],
         "Ra" => &["Ra"],
-        "mu_bulk_over_surface" => &["mu_bulk_over_surface"],
+        "mu_bulk_over_surface" => &["mu_bulk_over_surface", "Sieder_Tate_entry_factor"],
         "inclination_degrees" => &["inclination_degrees"],
         _ => return false,
     };
@@ -197,6 +197,12 @@ fn input_elasticity(
         }
         CorrelationId::SiederTateTurbulent => match axis {
             "Pr" => 1.0 / 3.0,
+            "mu_bulk_over_surface" => 0.14,
+            _ => 0.0,
+        },
+        CorrelationId::SiederTateLaminar => match axis {
+            "Pr" => 1.0 / 3.0,
+            "L_over_Dh" => -1.0 / 3.0,
             "mu_bulk_over_surface" => 0.14,
             _ => 0.0,
         },
@@ -389,7 +395,7 @@ impl NusseltEvaluation {
         if !self.evidence().model.in_domain { return Ok(None); }
         // These groups change proportionally to Re with the other inputs fixed.
         // Pr/aspect/L_over_Dh boundaries do not by themselves block this partial.
-        for axis in ["Re", "Pe", "Gz"] {
+        for axis in ["Re", "Pe", "Gz", "Sieder_Tate_entry_factor"] {
             if let Some(&(low, high)) = self.card().model.validity.bounds().get(axis) {
                 let value = self.groups().get(axis).copied().ok_or(CorrelationError::InvalidGroup {
                     axis, value_bits: f64::NAN.to_bits(),
@@ -410,6 +416,7 @@ impl NusseltEvaluation {
                 (0.0668*gz/(1.0+b))/nu*(1.0+b/3.0)/(1.0+b)
             }
             CorrelationId::DittusBoelter | CorrelationId::SiederTateTurbulent => 0.8,
+            CorrelationId::SiederTateLaminar => 1.0 / 3.0,
             CorrelationId::Gnielinski => {
                 let re = group("Re")?; let pr = group("Pr")?;
                 let z = 0.79*det::ln(re)-1.64;

@@ -92,9 +92,9 @@ fn assert_level_a_convection_limit(case_id: &str, observed: f64) {
 }
 
 #[test]
-fn catalog_has_twenty_four_sourced_cards_and_no_unlabeled_discrepancy() {
+fn catalog_has_twenty_five_sourced_cards_and_no_unlabeled_discrepancy() {
     let catalog = correlation_catalog();
-    assert_eq!(catalog.len(), 24);
+    assert_eq!(catalog.len(), 25);
     assert_eq!(catalog.len(), CorrelationId::ALL.len());
 
     let mut names = std::collections::BTreeSet::new();

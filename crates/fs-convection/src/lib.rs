@@ -98,12 +98,14 @@ pub enum CorrelationId {
     HollandsInclinedAirLayer,
     /// Total transfer across a sealed vertical air cavity, including finite height.
     WrightVerticalAirLayer,
+    /// Thermally developing laminar tube with explicit bulk-to-wall viscosity.
+    SiederTateLaminar,
 }
 
 impl CorrelationId {
     /// Complete catalog order. This is stable audit order, not a selection
     /// preference.
-    pub const ALL: [CorrelationId; 24] = [
+    pub const ALL: [CorrelationId; 25] = [
         Self::CircularDuctLaminarCwt,
         Self::CircularDuctLaminarChf,
         Self::CircularDuctHausen,
@@ -128,6 +130,7 @@ impl CorrelationId {
         Self::WrightVerticalAirLayer,
         Self::SiederTateTurbulent,
         Self::GnielinskiDeveloping,
+        Self::SiederTateLaminar,
     ];
 
     /// Stable model-card identifier.
@@ -146,6 +149,7 @@ impl CorrelationId {
             Self::Gnielinski => "convection.gnielinski",
             Self::GnielinskiDeveloping => "convection.gnielinski-developing",
             Self::SiederTateTurbulent => "convection.sieder-tate-turbulent",
+            Self::SiederTateLaminar => "convection.sieder-tate-laminar-developing",
             Self::FlatPlateLaminarAverage => "convection.flat-plate-laminar-average",
             Self::FlatPlateTurbulentAverage => "convection.flat-plate-turbulent-average",
             Self::ChurchillBernsteinCylinder => "convection.churchill-bernstein-cylinder",
@@ -194,6 +198,9 @@ impl CorrelationId {
             }
             Self::SiederTateTurbulent => {
                 "Nu_D = 0.027 Re_D^(4/5) Pr^(1/3) (mu_bulk/mu_surface)^0.14"
+            }
+            Self::SiederTateLaminar => {
+                "Nu_D = 1.86 [Re_D Pr/(L/D)]^(1/3) (mu_bulk/mu_surface)^0.14"
             }
             Self::FlatPlateLaminarAverage => "Nu_L = 0.664 Re_L^(1/2) Pr^(1/3)",
             Self::FlatPlateTurbulentAverage => "Nu_L = (0.037 Re_L^0.8 - 871) Pr^(1/3)",
@@ -456,6 +463,10 @@ impl CorrelationInputs {
     /// [`CorrelationId::SiederTateTurbulent`] also uses bulk Re, Pr and k,
     /// but admits heating and cooling ratios in the declared implementation
     /// envelope `[0.1, 10]`. Its wall viscosity is never inferred from direction.
+    /// [`CorrelationId::SiederTateLaminar`] retains the source's open ratio
+    /// interval `(0.0044, 9.75)` and requires a thermally developing entrance.
+    /// Bulk properties use the mean bulk temperature; the wall contributes
+    /// only its dynamic viscosity.
     #[must_use]
     pub const fn with_viscosity_ratio(mut self, mu_bulk_over_surface: f64) -> Self {
         self.viscosity_ratio = Some(mu_bulk_over_surface);
@@ -516,6 +527,18 @@ impl CorrelationInputs {
             self.length_over_hydraulic_diameter,
         ) {
             insert_group(&mut groups, "Gz", re * pr / length_ratio, mixed)?;
+        }
+        if id == CorrelationId::SiederTateLaminar
+            && let (Some(gz), Some(ratio)) = (
+                groups.get("Gz").copied(),
+                groups.get("mu_bulk_over_surface").copied(),
+            )
+        {
+            // The source recommends Gz^(1/3) (mu_b/mu_w)^0.14 > 2.
+            // Retain this coupled admission axis and reuse the same factor
+            // in Nu; a rectangular Gz-only gate loses the wall correction.
+            let entry = det::pow(gz, 1.0 / 3.0) * det::pow(ratio, 0.14);
+            insert_group(&mut groups, "Sieder_Tate_entry_factor", entry, false)?;
         }
         Ok(groups)
     }
@@ -938,6 +961,7 @@ fn evaluate_formula(
             0.027 * det::pow(group("Re"), 0.8) * det::pow(group("Pr"), 1.0 / 3.0)
                 * det::pow(group("mu_bulk_over_surface"), 0.14)
         }
+        CorrelationId::SiederTateLaminar => 1.86 * group("Sieder_Tate_entry_factor"),
         CorrelationId::Gnielinski => {
             let re = group("Re");
             let pr = group("Pr");
@@ -1048,6 +1072,10 @@ fn card_for(id: CorrelationId) -> CorrelationCard {
     const SIEDER_TATE_TURBULENT: SourceProvenance = SourceProvenance {
         citation: "T. Matuska and V. Zmrhal, A Mathematical Model and Design Tool KOLEKTOR 2.2, Czech Technical University in Prague, Reference Handbook (3rd draft, January 2009), Table 2.5, p. 28, Sieder-Tate turbulent relation",
         identifier: "https://users.fs.cvut.cz/tomas.matuska/wordpress/wp-content/uploads/2015/02/Reference_Handbook_KOLEKTOR_012009.pdf#page=28",
+    };
+    const SIEDER_TATE_LAMINAR: SourceProvenance = SourceProvenance {
+        citation: "T. Matuska and V. Zmrhal, A Mathematical Model and Design Tool KOLEKTOR 2.2, Czech Technical University in Prague, Reference Handbook (3rd draft, January 2009), Table 2.4, p. 27, Sieder-Tate laminar relation",
+        identifier: "https://users.fs.cvut.cz/tomas.matuska/wordpress/wp-content/uploads/2015/02/Reference_Handbook_KOLEKTOR_012009.pdf#page=27",
     };
     const FLAT_PLATE_LAMINAR: SourceProvenance = SourceProvenance {
         citation: "E. Pohlhausen, Der Waermeaustausch zwischen festen Koerpern und Fluessigkeiten mit kleiner Reibung und kleiner Waermeleitung, ZAMM 1, 1921, 115-121",
@@ -1251,6 +1279,32 @@ fn card_for(id: CorrelationId) -> CorrelationCard {
                 "strong property variation",
             ],
             0.10,
+            DiscrepancyBasis::EngineeringAllowance,
+        ),
+        CorrelationId::SiederTateLaminar => (
+            SIEDER_TATE_LAMINAR,
+            ValidityDomain::unconstrained()
+                .with("L_over_Dh", 1.0, 1.0e6)
+                .with("Pr", 0.48_f64.next_up(), 16_700.0_f64.next_down())
+                .with("Re", 1.0, 2_000.0)
+                .with("mu_bulk_over_surface", 0.0044_f64.next_up(), 9.75_f64.next_down())
+                .with("Sieder_Tate_entry_factor", 2.0_f64.next_up(), 1.0e6),
+            vec![
+                "smooth straight circular tube with uniform wall temperature",
+                "single-phase Newtonian laminar thermal entrance flow; mean coefficient over the full heated length",
+                "Re, Pr and conductivity use mean bulk fluid properties; only the denominator viscosity uses wall temperature",
+                "bulk and wall viscosity belong to the same fluid, pressure and composition",
+                "Table 2.4 supplies open Pr and viscosity-ratio intervals and recommends Gz^(1/3) (mu_bulk/mu_wall)^0.14 > 2",
+                "1 <= Re <= 2000, 1 <= L/D <= 1e6 and entry factor <= 1e6 are implementation admission limits, not source-published validation bounds",
+                "the mean coefficient uses the arithmetic mean bulk temperature difference; it is not a local axial coefficient",
+            ],
+            vec![
+                "fully developed thermal flow, transition or turbulence; no clipping to a constant Nusselt limit",
+                "non-circular ducts, roughness, phase change, non-Newtonian rheology, strong buoyancy or viscous dissipation",
+                "large property changes other than the represented viscosity correction",
+                "the empirical relation and engineering allowance are not an experimental validation certificate",
+            ],
+            0.25,
             DiscrepancyBasis::EngineeringAllowance,
         ),
         CorrelationId::SiederTateTurbulent => (

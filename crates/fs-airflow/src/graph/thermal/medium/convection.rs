@@ -38,7 +38,8 @@ pub mod tube;
 pub use tube::{
     MaterialLaminarTubeSection, MaterialTubeConvection, MaterialTurbulentTubeSection,
     TubeSectionDetails, TurbulentTubeSectionDetails,
-    evaluate_laminar_tube_section_from_material, evaluate_tube_from_material,
+    evaluate_laminar_tube_from_material, evaluate_laminar_tube_section_from_material,
+    evaluate_tube_from_material,
     evaluate_turbulent_tube_section_from_material,
 };
 

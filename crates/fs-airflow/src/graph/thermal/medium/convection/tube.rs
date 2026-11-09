@@ -73,6 +73,58 @@ pub fn evaluate_tube_from_material<'a, B: FluidTransport + ?Sized, S: FluidTrans
     diameter: Length,
     length_over_diameter: f64,
 ) -> Result<MaterialTubeConvection<'a, B, S>, MaterialConvectionError> {
+    evaluate_tube_card_from_material(
+        CorrelationId::SiederTateTurbulent,
+        bulk,
+        surface,
+        speed_m_s,
+        diameter,
+        length_over_diameter,
+    )
+}
+
+/// Evaluate mean laminar entrance heat transfer with the original wall viscosity.
+///
+/// This is the Sieder-Tate laminar relation over the complete physical heated
+/// length of a smooth circular tube at uniform wall temperature. Bulk transport
+/// belongs to the mean bulk temperature; only the surface fluid's dynamic
+/// viscosity enters the wall correction. The coefficient uses the arithmetic
+/// mean bulk temperature difference, not a local cell or log-mean temperature.
+///
+/// Both source owners must describe the same Newtonian fluid, pressure and
+/// composition. This generic seam retains the owners but does not prove that
+/// identity. Unsupported thermal-development, laminar or property conditions
+/// refuse through the original correlation card; no fully developed fallback
+/// or turbulent model is selected automatically.
+pub fn evaluate_laminar_tube_from_material<
+    'a,
+    B: FluidTransport + ?Sized,
+    S: FluidTransport + ?Sized,
+>(
+    bulk: &'a B,
+    surface: &'a S,
+    speed_m_s: f64,
+    diameter: Length,
+    length_over_diameter: f64,
+) -> Result<MaterialTubeConvection<'a, B, S>, MaterialConvectionError> {
+    evaluate_tube_card_from_material(
+        CorrelationId::SiederTateLaminar,
+        bulk,
+        surface,
+        speed_m_s,
+        diameter,
+        length_over_diameter,
+    )
+}
+
+fn evaluate_tube_card_from_material<'a, B: FluidTransport + ?Sized, S: FluidTransport + ?Sized>(
+    correlation: CorrelationId,
+    bulk: &'a B,
+    surface: &'a S,
+    speed_m_s: f64,
+    diameter: Length,
+    length_over_diameter: f64,
+) -> Result<MaterialTubeConvection<'a, B, S>, MaterialConvectionError> {
     let transport = bulk.transport_state()?;
     let surface_transport = surface.transport_state()?;
     let reynolds = transport.reynolds(speed_m_s, diameter.value())?;
@@ -81,7 +133,7 @@ pub fn evaluate_tube_from_material<'a, B: FluidTransport + ?Sized, S: FluidTrans
         .with_length_ratio(length_over_diameter)
         .with_viscosity_ratio(ratio);
     let bulk = finish(
-        CorrelationId::SiederTateTurbulent,
+        correlation,
         bulk,
         transport,
         diameter,
@@ -97,6 +149,50 @@ pub fn evaluate_tube_from_material<'a, B: FluidTransport + ?Sized, S: FluidTrans
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn g1_laminar_tube_retains_bulk_state_and_only_surface_viscosity() {
+        let bulk = FluidTransportState::try_new(1000.0, 4000.0, 0.5, 0.001).unwrap();
+        let surface = FluidTransportState::try_new(850.0, 5100.0, 0.8, 0.0005).unwrap();
+        let result = evaluate_laminar_tube_from_material(
+            &bulk, &surface, 0.1, Length::new(0.01), 10.0,
+        ).unwrap();
+        let nu = 1.86 * 800.0_f64.cbrt() * 2.0_f64.powf(0.14);
+        assert_eq!(result.bulk().nusselt().card().id, CorrelationId::SiederTateLaminar);
+        assert_eq!(result.bulk().nusselt().groups()["Re"], 1000.0);
+        assert_eq!(result.bulk().nusselt().groups()["Pr"], 8.0);
+        assert_eq!(result.bulk().nusselt().groups()["mu_bulk_over_surface"], 2.0);
+        assert!((result.bulk().coefficient().value.value() / (50.0 * nu) - 1.0).abs() < 3e-13);
+        assert!(core::ptr::eq(result.bulk().fluid(), &bulk));
+        assert!(core::ptr::eq(result.surface_fluid(), &surface));
+        let changed_surface = FluidTransportState::try_new(1200.0, 3000.0, 0.3, 0.0005).unwrap();
+        let same = evaluate_laminar_tube_from_material(
+            &bulk, &changed_surface, 0.1, Length::new(0.01), 10.0,
+        ).unwrap();
+        assert_eq!(same.bulk().coefficient().value, result.bulk().coefficient().value);
+        let boundary = result.bulk().robin_boundary(Temperature::new(300.0)).unwrap();
+        assert_eq!(boundary.coefficient().value, result.bulk().coefficient().value);
+    }
+
+    #[test]
+    fn g0_laminar_tube_does_not_infer_a_wall_or_switch_regimes() {
+        let bulk = FluidTransportState::try_new(1000.0, 4000.0, 0.5, 0.001).unwrap();
+        let settings = ForcedConvectionSettings {
+            length_over_hydraulic_diameter: Some(10.0),
+            ..Default::default()
+        };
+        assert!(evaluate_forced_from_material(
+            CorrelationId::SiederTateLaminar, &bulk, 0.1, Length::new(0.01), settings,
+        ).is_err());
+        for (speed, length) in [(0.0, 10.0), (1.0, 10.0), (0.1, 10_000.0)] {
+            assert!(evaluate_laminar_tube_from_material(
+                &bulk, &bulk, speed, Length::new(0.01), length,
+            ).is_err());
+        }
+        assert!(evaluate_tube_from_material(
+            &bulk, &bulk, 0.1, Length::new(0.01), 10.0,
+        ).is_err());
+    }
 
     #[test]
     fn g1_tube_retains_bulk_transport_and_only_wall_viscosity() {

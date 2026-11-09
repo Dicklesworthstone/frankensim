@@ -21,13 +21,15 @@ correlation.
 
 ## Public types and semantics
 
-- `CorrelationId` names twenty-four implemented relations: circular-duct 3.66 and
+- `CorrelationId` names twenty-five implemented relations: circular-duct 3.66 and
   4.36 limits; a thermally developing circular-duct relation; rectangular-
   duct constant-temperature and constant-flux limits; one simultaneously
   developing constant-temperature rectangular-duct table slice at
   `alpha*=0.5`, `Pr=0.72`; Dittus-Boelter; Gnielinski; a separate constant-property
   Gnielinski (2013) developing turbulent tube; Sieder-Tate turbulent
-  tube convection with explicit bulk/wall viscosity correction; laminar and
+  tube convection with explicit bulk/wall viscosity correction; the separate
+  Sieder-Tate laminar thermal-entrance relation with its coupled entrance gate;
+  laminar and
   leading-edge-corrected turbulent average flat-plate relations;
   Churchill-Bernstein cylinder crossflow; and Churchill-Chu vertical-plate
   natural convection; Churchill-Chu horizontal-cylinder natural convection;
@@ -719,3 +721,35 @@ comparisons, derivative additivity under subdivision, the original first-section
 limit, dimensional k/L partials, short sections and selective endpoint refusal.
 These regressions were parsed and API reviewed; native execution remains pending
 the resource-blocked constellation build.
+
+## Laminar tube convection with bulk-to-wall viscosity
+
+`SiederTateLaminar` evaluates the mean entrance-region relation
+`Nu = 1.86 [Re Pr/(L/D)]^(1/3) (mu_bulk/mu_wall)^0.14` from Matuska and
+Zmrhal, KOLEKTOR 2.2 (January 2009), Table 2.4, p. 27
+([source](https://users.fs.cvut.cz/tomas.matuska/wordpress/wp-content/uploads/2015/02/Reference_Handbook_KOLEKTOR_012009.pdf#page=27)).
+It retains the source's open intervals `0.48 < Pr < 16700` and
+`0.0044 < mu_bulk/mu_wall < 9.75`, and its coupled entrance requirement
+`[Re Pr/(L/D)]^(1/3) (mu_bulk/mu_wall)^0.14 > 2`. The latter is an actual
+admission axis, `Sieder_Tate_entry_factor`, reused in the formula. Unsupported
+fully developed states refuse instead of clipping Nu to a constant value.
+
+The additional intervals `1 <= Re <= 2000`, `1 <= L/D <= 1e6` and entry
+factor at most `1e6` are explicit implementation limits, not measured validation
+bounds. The 25% engineering discrepancy allowance is not a confidence interval.
+The model assumes a smooth circular tube, uniform wall temperature and a
+single-phase Newtonian fluid. It excludes strong buoyancy, viscous heating,
+phase change and non-Newtonian flow.
+
+Re, Pr and k use the mean bulk state; only the denominator viscosity uses the
+wall state of that same fluid. The coefficient is a mean over the complete
+heated entrance length, with an arithmetic mean bulk temperature difference.
+It must not be applied as a local axial coefficient or restarted at each mesh
+cell. The existing typed coefficient/Robin lowering and analytic sensitivities
+are available. Re and Pr elasticities are 1/3, L/D is -1/3, and viscosity-ratio
+elasticity is 0.14; their moving coupled validity boundary is retained.
+
+`tests/laminar_tube_viscosity.rs` supplies independent source-formula anchors,
+heating/cooling and length scaling, coupled-domain refusals, finite-difference
+partial checks, deterministic replay and typed Robin integration. These tests
+verify implementation of the empirical relation, not new experimental evidence.
