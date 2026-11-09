@@ -1962,3 +1962,41 @@ build's resource requirement.
 This is the existing explicit fixed-reference-capacity Boussinesq split with
 local exploratory closures, not a variable-density total-energy model,
 buoyancy-production turbulence closure or new temporal-order qualification.
+
+## Forced open-flow SGS momentum and heat
+
+`ForcedOpenBoundaryGrid3::step_serial_with_thermal_sgs` and
+`advance_serial_with_thermal_sgs` combine explicit local Smagorinsky,
+WALE or Vreman momentum/heat transport with held or advancing spatial force
+fields on D3Q19 and D3Q27. Preparation uses the accepted physical velocity,
+including each cell's Guo half-force correction F_n/2; a proposed endpoint
+force does not enter that incoming fit. The existing shared coefficient
+preparation supplies one eddy-viscosity field to native shear relaxation
+and to D3Q7 heat diffusivity through `alpha_t=nu_t/Pr_t`.
+Callers supply fresh molecular transport each time, preserving the original
+closure, coefficient-ratio and disabled-model admissions.
+
+The original joint forced-thermal transaction retains force-buffer exchange,
+reservoir transport, prescribed thermal-source half-kicks, finite stationary
+wall storage, wall-work receipts, histories and counters. One existing SGS
+workspace supplies all coefficient storage; the wrapper introduces no
+per-step allocation or alternate physical state. Publication occurs only
+after the original native transaction succeeds. Refusal or cancellation
+leaves accepted physical fields and caller-owned endpoint forces unchanged;
+scratch may change.
+
+This serial API remains fixed-reference-capacity temperature transport:
+modeled mechanical transfer and body work are not deposited as heat. It
+does not add a total-energy model, wall function, pooled force/thermal owner
+or empirical turbulence validation.
+
+Three regression groups are authored for both lattices and all three
+closures: constant physical velocity under spatial forcing versus a
+wrong-force-frame negative control; coefficient/Prandtl agreement, native
+joint-transaction equivalence, disabled controls and storage reuse; and
+invalid endpoint force, late thermal failure, diffusivity-ratio refusal,
+cancellation and retry. Pinned-nightly syntax/format checks and source
+review passed. Native compilation and execution of this extension remain
+unverified: real-graph builds exhausted memory upstream in `asupersync`
+before reaching LBM. No test-pass or performance claim is made for those
+unexecuted cases.

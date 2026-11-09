@@ -8,6 +8,7 @@
 use super::*;
 use crate::sgs3::{SgsConfig, SgsLattice3, SgsReport, SgsStepError, SgsWorkspace3};
 
+mod forced;
 mod forcing;
 mod thermal;
 pub use thermal::{
