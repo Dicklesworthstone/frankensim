@@ -3,6 +3,9 @@
 mod source;
 pub use source::{FilmGasSource, PengRobinsonFilmSource};
 
+mod mass_flow;
+pub use mass_flow::{GasMassFlowState, PrescribedMassFlowGasSurface};
+
 use super::super::{
     AidingVerticalPlateSettings, evaluate_aiding_vertical_plate_from_material,
     evaluate_natural_from_material, evaluate_flat_plate_section_from_material,
@@ -233,6 +236,9 @@ pub struct FilmGasConvectionSample<S = ResolvedThermochemicalGasState, W = Equil
     /// duct-section laws, mean-film properties
     /// otherwise. None only for an explicitly isolated zero-area patch.
     pub property_gas: Option<S>,
+    /// Explicit prescribed-flow inputs and velocity from this ORIGINAL bulk
+    /// trial's density. Film density never replaces it in the flow conversion.
+    pub prescribed_mass_flow: Option<GasMassFlowState>,
 }
 
 impl FilmGasHeatLaw {
@@ -311,16 +317,18 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
         gas: &M::State,
         body: EquilibriumPhaseState,
     ) -> Result<ConductanceSample<FilmGasConvectionSample<M::State>>, MaterialConvectionError> {
-        self.resolve_at_temperature(gas, body.temperature_k(), body)
+        self.resolve_at_temperature(None, gas, body.temperature_k(), body)
     }
 
     fn resolve_at_temperature<W>(
         self,
+        flow: Option<mass_flow::MassFlowInput>,
         gas: &M::State,
         wall: f64,
         body: W,
     ) -> Result<ConductanceSample<FilmGasConvectionSample<M::State, W>>, MaterialConvectionError> {
-        let area_m2 = self.law.area()?;
+        let (law, prescribed_mass_flow) = self.bind_flow(flow, gas)?;
+        let area_m2 = law.area()?;
         let bulk = gas.temperature_k();
         if !wall.is_finite() || wall <= 0.0 {
             return Err(invalid("film convection needs a positive body temperature"));
@@ -336,10 +344,11 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
                         evaluation: None,
                     },
                     property_gas: None,
+                    prescribed_mass_flow,
                 },
             });
         }
-        let property_temperature = match self.law {
+        let property_temperature = match law {
             FilmGasHeatLaw::BulkForced(_)
                 | FilmGasHeatLaw::BulkForcedTubeSection(_)
                 | FilmGasHeatLaw::BulkForcedLaminarTubeSection(_)
@@ -359,7 +368,7 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
             thermal.volumetric_expansion_per_k()
                 .ok_or_else(|| invalid("film buoyancy requires source-owned volumetric expansion"))
         };
-        let evaluation = match self.law {
+        let evaluation = match law {
             FilmGasHeatLaw::ForcedPlateSection(surface) => {
                 let evaluated = evaluate_flat_plate_section_from_material(
                     surface.correlation, &property, surface.speed_m_s, surface.start, surface.end,
@@ -474,8 +483,20 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
                     evaluation,
                 },
                 property_gas: Some(property),
+                prescribed_mass_flow,
             },
         })
+    }
+
+    fn bind_flow(
+        self,
+        flow: Option<mass_flow::MassFlowInput>,
+        gas: &M::State,
+    ) -> Result<(FilmGasHeatLaw, Option<GasMassFlowState>), MaterialConvectionError> {
+        match flow {
+            Some(flow) => flow.bind(self.law, gas).map(|(law, state)| (law, Some(state))),
+            None => Ok((self.law, None)),
+        }
     }
 
     /// Advance heat, source-backed gas energy, finite body enthalpy and piston
@@ -491,6 +512,23 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
         body: UniformEnthalpyStepInput<'_>,
         controls: PistonSolve,
         exchange: HeatExchangeSolve,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<
+        ThermalPistonCandidate<FilmGasConvectionSample<M::State>, G>,
+        ThermalPistonError<MaterialConvectionError>,
+    > {
+        self.finite_body_candidate_with(None, piston, input, body, controls, exchange, cancelled)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finite_body_candidate_with<G: PistonGas<State = M::State>>(
+        self,
+        flow: Option<mass_flow::MassFlowInput>,
+        piston: &GasPiston<G>,
+        input: PistonInput,
+        body: UniformEnthalpyStepInput<'_>,
+        controls: PistonSolve,
+        exchange: HeatExchangeSolve,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<
         ThermalPistonCandidate<FilmGasConvectionSample<M::State>, G>,
@@ -499,7 +537,9 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
         if cancelled() {
             return Err(ThermalPistonError::Cancelled);
         }
-        let area = self.law.area().map_err(ThermalPistonError::Interface)?;
+        let (law, _) = self.bind_flow(flow, piston.gas().state())
+            .map_err(ThermalPistonError::Interface)?;
+        let area = law.area().map_err(ThermalPistonError::Interface)?;
         if !body.surface_area_m2.is_finite()
             || body.surface_area_m2 <= 0.0
             || area > body.surface_area_m2
@@ -513,7 +553,7 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
             body,
             controls,
             exchange,
-            |gas, wall| self.resolve(gas, wall),
+            |gas, wall| self.resolve_at_temperature(flow, gas, wall.temperature_k(), wall),
             cancelled,
         )
     }
@@ -540,8 +580,26 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
         >,
         ConvectionError<WallConvectionError<MaterialConvectionError>>,
     > {
+        self.isochoric_body_candidate_with(None, cx, environment, body, wall)
+    }
+
+    fn isochoric_body_candidate_with<G: IsochoricGasStorage<State = M::State>>(
+        self,
+        flow: Option<mass_flow::MassFlowInput>,
+        cx: &Cx<'_>,
+        environment: &FiniteGasThermalEnvironment<'_, G>,
+        body: UniformEnthalpyStepInput<'_>,
+        wall: WallConvectionSolve,
+    ) -> Result<
+        UniformEnthalpyStep<
+            FiniteGasThermalReport<WallConvectionSample<FilmGasConvectionSample<M::State, Temperature>>, G>,
+        >,
+        ConvectionError<WallConvectionError<MaterialConvectionError>>,
+    > {
         cx.checkpoint().map_err(|_| ConvectionError::Thermal(ThermalPistonError::Cancelled))?;
-        let area = self.law.area().map_err(|error| {
+        let (law, _) = self.bind_flow(flow, environment.gas.state())
+            .map_err(|error| ConvectionError::Convection(WallConvectionError::Source(error)))?;
+        let area = law.area().map_err(|error| {
             ConvectionError::Convection(WallConvectionError::Source(error))
         })?;
         if !body.surface_area_m2.is_finite() || body.surface_area_m2 <= 0.0
@@ -552,7 +610,7 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
             )));
         }
         environment.advance_with_wall_convection(cx, body, wall, |gas, temperature_k| {
-            let sample = self.resolve_at_temperature(gas, temperature_k, Temperature::new(temperature_k))?;
+            let sample = self.resolve_at_temperature(flow, gas, temperature_k, Temperature::new(temperature_k))?;
             let coefficient_w_per_m2_k = sample.source.interface.evaluation.as_ref()
                 .map_or(0.0, |value| value.coefficient.value.value());
             Ok(ConvectionCoefficient { coefficient_w_per_m2_k, source: sample.source })

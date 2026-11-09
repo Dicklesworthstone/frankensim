@@ -10,6 +10,8 @@ use fs_qty::semantic::{Composition, CompositionBasis};
 
 #[path = "film/mixed.rs"]
 mod mixed;
+#[path = "film/mass_flow.rs"]
+mod mass_flow;
 
 fn natural_surface() -> NaturalGasSurface {
     NaturalGasSurface {
