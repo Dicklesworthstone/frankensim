@@ -17,7 +17,8 @@
 //! including its bounded sparse/fs-spectral dispatch for large pencils.
 
 use super::{
-    ElasticControls, ElasticError, ElasticImposedState, ElasticResponse, checkpoint, invalid,
+    ElasticControls, ElasticError, ElasticImposedState, ElasticResponse, MemberTangent, checkpoint,
+    invalid,
 };
 use crate::{GroundStructure, LayoutCase, TrussConstructionError};
 use fs_exec::Cx;
@@ -237,7 +238,7 @@ pub fn solve(
     )?;
     let mut base = Coo::new(free_count, free_count);
     let mut reference = Coo::new(free_count, free_count);
-    for (index, &(a, b)) in ground.members().iter().enumerate() {
+    for index in 0..ground.members().len() {
         if index % 256 == 0 {
             checkpoint(cx)?;
         }
@@ -251,25 +252,17 @@ pub fn solve(
         if !fixed_geometric.is_finite() || !reference_geometric.is_finite() {
             return Err(invalid("truss geometric stiffness", "N/L must remain finite").into());
         }
-        let dx = (ground.nodes()[b][0] - ground.nodes()[a][0]) / length;
-        let dy = (ground.nodes()[b][1] - ground.nodes()[a][1]) / length;
-        let axial = [-dx, -dy, dx, dy];
-        let transverse = [dy, -dx, -dy, dx];
-        let ends = [2 * a, 2 * a + 1, 2 * b, 2 * b + 1];
-        for (i, &row_end) in ends.iter().enumerate() {
+        let member = MemberTangent::new(ground, index);
+        for (i, &row_end) in member.ends.iter().enumerate() {
             let Some(row) = dof_map[row_end] else {
                 continue;
             };
-            for (j, &column_end) in ends.iter().enumerate() {
+            for (j, &column_end) in member.ends.iter().enumerate() {
                 let Some(column) = dof_map[column_end] else {
                     continue;
                 };
-                // Multiply direction products first: transposed entries have
-                // identical floating-point contributions and reduction order.
-                let transverse_product = transverse[i] * transverse[j];
-                let fixed =
-                    stiffness * (axial[i] * axial[j]) + fixed_geometric * transverse_product;
-                let scaled = reference_geometric * transverse_product;
+                let fixed = member.entry(stiffness, fixed_geometric, i, j);
+                let scaled = member.entry(0.0, reference_geometric, i, j);
                 if !fixed.is_finite() || !scaled.is_finite() {
                     return Err(
                         invalid("truss buckling pencil", "entries must remain finite").into(),

@@ -194,6 +194,60 @@ mechanisms remain visible and refuse unstable baselines, malformed data,
 exhausted shared work/storage and cancellation. A material consumer regression
 checks the original source E assignments through the same path.
 
+## Prestressed vibration with original reference mass
+
+`elastic::modal::assemble` and `MaterialLayout::elastic_modal_pencil`
+bind one accepted compatible equilibrium to its immutable sparse tangent,
+consistent reference mass and complete original free-coordinate map.
+The material route retains each original assigned source state's modulus and
+reference density. It does not infer a dynamic material law or change density
+when an explicit eigenstrain or support settlement changes.
+
+Each member contributes `M_e = rho A L / 6 [2I I; I 2I]` in the two Cartesian
+translations. This retains transverse kinetic energy and endpoint coupling;
+mass is not projected onto the bar axis or silently lumped. Optional explicit
+nonnegative joint masses add isotropic translational inertia. Zero-area
+members contribute neither stiffness nor mass. The reported physical inventory
+is `sum(rho A L) + sum(joint_mass)`, including supported material and joints;
+it is not the reduced mass trace. No thermal or prestress mass is created.
+
+The same private member kernel used by global buckling supplies
+`K_t = K_e + K_g(N_actual)`, with `K_g = (N/L) t t^T`.
+The actual nodal load case, stress-free strains and prescribed translations
+establish the base state using the existing checked-CG equilibrium owner.
+Modal perturbations keep those loads/imposed states fixed and have zero
+displacement on supported coordinates. Original reference geometry is frozen:
+this is small-displacement initial-stress vibration, not a finite-deformation
+path, follower-load tangent, damping model or local member bending model.
+
+Every original free coordinate remains in the pencil, including zero-stiffness
+coordinates and mechanisms. The pencil's `slice_windows` method calls the
+existing `fs-modal::slice_windows` owner with caller-supplied windows, explicit
+factor/payload budgets and the same cancellation authority. Its mass-SPD gate,
+endpoint inertia counts, sparse shift-invert solve, mass normalization and
+original-pencil residual checks remain in force. Singular/massless subsystems
+are not repaired with invented mass or static condensation. Assembly alone
+does not claim positive mass, positive stiffness or complete stability.
+
+Returned eigenvalues are signed `omega^2` in inverse square seconds, never
+clipped. Only an interval resolved strictly above zero permits an oscillation
+frequency; a strictly negative interval indicates linearized exponential
+growth. The native relative interval-width gate can refuse unresolved
+near-zero modes, which remain present in the physical pencil. Successful
+windows do not establish stability outside the requested spectrum. Repeated
+window requests reuse the original equilibrium and physical assembly.
+
+Equilibrium retains its existing budget. Assembly admits at most 100000 free
+coordinates and 800000 original coordinates; combined tangent/mass triplets
+are caller-bounded with an 8000000 hard ceiling. Loops poll every 256 entries;
+the bounded native COO sort is checked immediately before and after.
+Density, areas, moduli, optional joint masses and all assembled sums must remain
+admissible and finite. G1/G3 regressions cover consistent-mass bar/serial
+frequencies, source material assignments, joint/support mass inventory,
+rigid/transverse inertia, rotation covariance and thermal/settlement prestress
+softening into negative modes. G4 covers malformed inertia, massless free
+coordinates, work limits and cancellation.
+
 ## Public types and semantics
 
 - `GroundRules` is immutable and admitted only through `try_new` or a finite

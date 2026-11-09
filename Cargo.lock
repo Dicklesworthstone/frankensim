@@ -3102,6 +3102,7 @@ dependencies = [
  "fs-ivl",
  "fs-matdb",
  "fs-material",
+ "fs-modal",
  "fs-qty",
  "fs-solid",
  "fs-solver",

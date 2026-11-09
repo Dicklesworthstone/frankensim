@@ -680,6 +680,54 @@ impl<'a> MaterialLayout<'a> {
         )
     }
 
+    /// Assemble loaded vibration with each original source state's E and density.
+    ///
+    /// The same compatible equilibrium and initial-stress tangent used by the
+    /// elastic owners feed a consistent reference mass pencil. Explicit joint
+    /// masses are additional physical inertia, including supported masses in
+    /// the inventory. Thermal/assembly eigenstrain and support settlement do
+    /// not alter the admitted reference density or create mass.
+    ///
+    /// Pass actual areas and the paired converged load case for a body-load
+    /// design. Source state, geometry and loads stay frozen during vibration;
+    /// no dynamic modulus, damping or thermal expansion law is inferred.
+    ///
+    /// # Errors
+    /// See [crate::elastic::modal::assemble]. The returned immutable pencil
+    /// delegates signed spectral windows and mass admission to fs-modal.
+    pub fn elastic_modal_pencil(
+        &self,
+        areas_m2: &[f64],
+        case: &LayoutCase,
+        imposed: crate::elastic::ElasticImposedState<'_>,
+        joint_mass_kg: Option<&[f64]>,
+        controls: crate::elastic::modal::ModalAssemblyControls,
+        cx: &Cx<'_>,
+    ) -> Result<crate::elastic::modal::TrussModalPencil, crate::elastic::modal::TrussModalError>
+    {
+        let moduli = self.elastic_moduli(cx)?;
+        let mut densities = Vec::with_capacity(self.assignments.len());
+        for (index, &assignment) in self.assignments.iter().enumerate() {
+            if index % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            densities.push(self.materials[assignment].density);
+        }
+        crate::elastic::modal::assemble(
+            self.ground,
+            case,
+            areas_m2,
+            &moduli,
+            imposed,
+            crate::elastic::modal::ModalInertia {
+                member_density_kg_m3: &densities,
+                joint_mass_kg,
+            },
+            controls,
+            cx,
+        )
+    }
+
     fn elastic_moduli(&self, cx: &Cx<'_>) -> Result<Vec<f64>, TrussConstructionError> {
         checkpoint(cx)?;
         let mut moduli = Vec::with_capacity(self.assignments.len());

@@ -1379,3 +1379,94 @@ fn source_material_moduli_drive_fixed_prestress_global_buckling() {
         relative(result.reference_load.member_force_n[1], -0.5, 1e-12);
     });
 }
+
+#[test]
+fn source_moduli_and_reference_densities_drive_the_same_loaded_modal_pencil() {
+    use fs_truss::elastic::ElasticImposedState;
+    use fs_truss::elastic::modal::ModalAssemblyControls;
+    with_cx(|cx, _| {
+        let (ground, case) = two_members(cx, 1e-4);
+        let source = card([3.0, 6.0], [12.0, 24.0], [300.0; 2]);
+        let states = [material(&source, 300.0), material(&source, 600.0)];
+        let areas = [0.5, 0.25];
+        let joints = [2.0, 0.0, 0.75];
+        let entry = |a: &fs_sparse::Csr, i: usize, j: usize| {
+            let (columns, values) = a.row(i);
+            columns.binary_search(&j).map_or(0.0, |p| values[p])
+        };
+        for assignments in [[0, 1], [1, 0]] {
+            let layout = MaterialLayout::try_new(
+                &ground,
+                &case,
+                &states,
+                &assignments,
+                LayoutLimits::default(),
+                cx,
+            )
+            .unwrap();
+            let pencil = layout
+                .elastic_modal_pencil(
+                    &areas,
+                    &case,
+                    ElasticImposedState {
+                        member_stress_free_strain: Some(&[1e-5, -2e-5]),
+                        prescribed_displacements_m: Some(&[[3e-5, 0.0], [0.0; 2], [0.0; 2]]),
+                    },
+                    Some(&joints),
+                    ModalAssemblyControls::default(),
+                    cx,
+                )
+                .unwrap();
+            let k1 = [12.0, 24.0][assignments[0]] * areas[0];
+            let k2 = [12.0, 24.0][assignments[1]] * areas[1];
+            let m1 = [3.0, 6.0][assignments[0]] * areas[0];
+            let m2 = [3.0, 6.0][assignments[1]] * areas[1];
+            let m00 = (m1 + m2) / 3.0;
+            let m01 = m2 / 6.0;
+            let m11 = m2 / 3.0 + joints[2];
+            relative(entry(pencil.tangent(), 0, 0), k1 + k2, 1e-12);
+            relative(entry(pencil.tangent(), 0, 1), -k2, 1e-12);
+            relative(entry(pencil.mass(), 0, 0), m00, 1e-12);
+            relative(entry(pencil.mass(), 0, 1), m01, 1e-12);
+            relative(entry(pencil.mass(), 1, 1), m11, 1e-12);
+            relative(pencil.total_reference_mass_kg(), m1 + m2 + 2.75, 1e-12);
+            for &force in &pencil.equilibrium().member_force_n {
+                relative(force, 1e-4, 1e-12);
+            }
+            let unstrained = layout
+                .elastic_modal_pencil(
+                    &areas,
+                    &case,
+                    ElasticImposedState::default(),
+                    Some(&joints),
+                    ModalAssemblyControls::default(),
+                    cx,
+                )
+                .unwrap();
+            for i in 0..2 {
+                for j in 0..2 {
+                    assert_eq!(entry(pencil.mass(), i, j), entry(unstrained.mass(), i, j));
+                }
+            }
+            let plan = fs_modal::WindowPlan {
+                windows: vec![(0.001, 1000.0)],
+                threads: 1,
+                maximum_windows: 1,
+                maximum_bytes: 64 * 1024 * 1024,
+                maximum_relative_halfwidth: 1e-7,
+                coordinates: None,
+            };
+            let mut options = fs_modal::SliceOptions::default();
+            options.ldlt.max_factor_bytes = Some(8 * 1024 * 1024);
+            let report = pencil.slice_windows(&plan, &options, cx).unwrap();
+            let det_m = m00 * m11 - m01 * m01;
+            let trace = (m11 * (k1 + k2) + m00 * k2 + 2.0 * m01 * k2) / det_m;
+            let determinant = k1 * k2 / det_m;
+            let difference = (trace * trace - 4.0 * determinant).sqrt();
+            assert_eq!(report.reports[0].modes.len(), 2);
+            for (mode, sign) in report.reports[0].modes.iter().zip([-1.0, 1.0]) {
+                relative(mode.lambda, 0.5 * (trace + sign * difference), 2e-8);
+            }
+        }
+    });
+}

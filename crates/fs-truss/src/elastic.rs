@@ -9,7 +9,7 @@
 //!
 //! Equilibrium uses infinitesimal axial elasticity with prescribed translations;
 //! it includes no bending, geometric stiffness or plastic return map.
-//! [buckling] separately forms an initial-stress pencil from these equilibria.
+//! [buckling] and [modal] form initial-stress pencils from these equilibria.
 //! Acceptance measures equilibrium of the returned compatible displacement;
 //! it does not prove uniqueness or exclude unloaded mechanisms. Unloaded free
 //! coordinates with zero stiffness receive zero displacement, never a spring.
@@ -21,6 +21,8 @@ use fs_sparse::precond::Precond;
 
 /// Initial-stress global buckling with fixed thermal/settlement preload.
 pub mod buckling;
+/// Prestressed vibration with original consistent member and explicit joint mass.
+pub mod modal;
 
 mod imposed;
 pub use imposed::ElasticImposedState;
@@ -132,6 +134,34 @@ impl Member {
         let dx = value(self.ends[2]) - value(self.ends[0]);
         let dy = value(self.ends[3]) - value(self.ends[1]);
         self.direction[2] * dx + self.direction[3] * dy
+    }
+}
+
+/// Frozen-reference bar directions shared by buckling and loaded vibration.
+struct MemberTangent {
+    ends: [usize; 4],
+    axial: [f64; 4],
+    transverse: [f64; 4],
+}
+
+impl MemberTangent {
+    fn new(ground: &GroundStructure, index: usize) -> Self {
+        let (a, b) = ground.members()[index];
+        let length = ground.lengths()[index];
+        let dx = (ground.nodes()[b][0] - ground.nodes()[a][0]) / length;
+        let dy = (ground.nodes()[b][1] - ground.nodes()[a][1]) / length;
+        Self {
+            ends: [2 * a, 2 * a + 1, 2 * b, 2 * b + 1],
+            axial: [-dx, -dy, dx, dy],
+            transverse: [dy, -dx, -dy, dx],
+        }
+    }
+
+    #[inline]
+    fn entry(&self, axial_stiffness: f64, force_per_length: f64, i: usize, j: usize) -> f64 {
+        // Direction products first preserve identical transposed contributions.
+        axial_stiffness * (self.axial[i] * self.axial[j])
+            + force_per_length * (self.transverse[i] * self.transverse[j])
     }
 }
 
