@@ -13,16 +13,27 @@ differencing occurs. Fixed-size wavelength queries allocate no storage.
 Actual temperature and SI permeability belong to a separate complete snapshot
 on the original immutable material card. Reference-state glass coefficients
 and catalog reference/coordinate atmospheres stay fixed. Rebinding always
-starts from that reference. Nonzero source absorption, unsupported coordinates,
-a wrong reference temperature, disjoint bands and unsupported derivative
-neighbourhoods refuse. Admitted phase-only table knots remain usable. The law
-supplies no thermal absorption, expansion, stress or causal transient reservoir.
+starts from that reference. Unsupported coordinates, a wrong reference
+temperature, disjoint bands and unsupported derivative neighbourhoods refuse.
+Admitted phase-only table knots remain usable.
 
-Three material curvature controls and four native Maxwell regression groups
+`try_lossless` continues to refuse nonzero original absorption.
+`try_with_reference_absorption` explicitly holds the original intensity
+absorption spectrum fixed while correcting real phase index. The complete
+imaginary index and its analytic wavelength derivatives reach complex
+permittivity, interfaces, film interiors/heating and angular spectra. This
+retains zero attenuation dispersion for constant alpha and the original loss
+dispersion for sloped spectra. The selected absorption policy participates in
+source continuity and survives temperature rebinding. It is an authored
+temperature-independent-loss approximation, not a newly supplied thermal
+absorption law. No expansion, stress or causal transient reservoir is inferred.
+
+Three material curvature controls and seven native Maxwell regression groups
 cover independent TIE-19 derivatives, source/domain ownership, changed Fresnel
-and film response, interface frequency derivatives, fixed reference air and
-multifrequency source continuity. The actual shared material's 16 tests passed
-in an isolated Rust compilation; the native EM integration tests remain unrun.
+and film response, interface frequency derivatives, fixed reference air,
+complex loss jets, local/interior heat and multifrequency source continuity.
+The actual shared material's 16 tests passed in an isolated Rust compilation;
+the native EM integration tests remain unrun.
 
 ## Original temperature-resolved Corning 7980 refraction
 

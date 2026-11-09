@@ -129,8 +129,8 @@ pub enum DielectricResponse<'a> {
     /// supplies thermal/group derivatives, but no causal transient reservoir.
     SilicaOptical(SilicaOpticalResponse<'a>),
     /// Original dielectric reference with source-owned SCHOTT temperature
-    /// correction and actual-state mu. Explicitly lossless, without a causal
-    /// transient reservoir or an inferred thermal absorption law.
+    /// correction and actual-state mu. Explicitly zero loss or retained original
+    /// spectral absorption; no inferred thermal loss or causal reservoir.
     ThermoOpticOptical(ThermoOpticOpticalResponse<'a>),
     /// Original molecular phase/group law and an explicitly selected magnetic
     /// source, prepared at one frequency. Lossless coherent approximation;

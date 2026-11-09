@@ -125,6 +125,9 @@ fn thermal_phase(wavelength_nm: f64, temperature: f64) -> f64 {
             + (4e-6 * dt - 5e-9 * dt.powi(2)) / (square - 0.18_f64.powi(2)))
 }
 fn glass_card(alpha: f64, revision: u32) -> MaterialCard {
+    glass_card_spectrum([alpha; 9], revision)
+}
+fn glass_card_spectrum(alpha: [f64; 9], revision: u32) -> MaterialCard {
     let dimensionless = QuantitySpec::dimensional(Dims::NONE);
     let length = QuantitySpec::dimensional(Dims([1, 0, 0, 0, 0, 0]));
     let square = QuantitySpec::dimensional(Dims([2, 0, 0, 0, 0, 0]));
@@ -157,7 +160,7 @@ fn glass_card(alpha: f64, revision: u32) -> MaterialCard {
         properties.push(claim(
             SPECTRAL_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES[i],
             SPECTRAL_DIELECTRIC_ABSORPTION_QUANTITY,
-            alpha,
+            alpha[i],
         ));
         properties.push(claim(
             SPECTRAL_DIELECTRIC_IOR_PROPERTIES[i],
@@ -583,4 +586,310 @@ fn catalog_air_stays_fixed_and_native_beams_retain_complete_thermal_sources() {
         ),
         Ok(_) => panic!("a finite-band thermal glass fit does not supply a causal reservoir"),
     }
+}
+
+#[test]
+fn retained_reference_loss_keeps_intensity_absorption_and_full_frequency_jets() {
+    let wavelength_nm = 1525.0;
+    let wavelength_m = wavelength_nm * 1e-9;
+    let omega = FREQUENCY_WAVELENGTH_NM / wavelength_nm;
+    for slope_per_m2 in [0.0, 2e9] {
+        let alpha_at = |lambda_m: f64| 1000.0 + slope_per_m2 * lambda_m;
+        let card = glass_card_spectrum(
+            core::array::from_fn(|i| alpha_at((800.0 + 150.0 * i as f64) * 1e-9)),
+            0,
+        );
+        let original =
+            SpectralSellmeierStatePoint::try_from_material(resolve(&card, &point(300.0))).unwrap();
+        let reference = reference(&original);
+        let law = law();
+        for temperature in [210.0, 450.0] {
+            let actual = resolve(&card, &point(temperature));
+            assert!(
+                ThermoOpticOpticalResponse::try_lossless(reference, &law, &actual, "T").is_err()
+            );
+            let response = ThermoOpticOpticalResponse::try_with_reference_absorption(
+                reference, &law, &actual, "T",
+            )
+            .unwrap();
+            assert!(response.retains_reference_absorption());
+            let index = response.complex_index(omega).unwrap();
+            assert_eq!(index.im, reference.complex_index(omega).unwrap().im);
+            near(index.re, thermal_phase(wavelength_nm, temperature), 1e-15);
+            let bulk = DielectricResponse::ThermoOpticOptical(response)
+                .bulk_dispersion(omega)
+                .unwrap();
+            near(
+                -2.0 * bulk.wavenumber_rad_m().im,
+                alpha_at(wavelength_m),
+                3e-11,
+            );
+            let group_loss = slope_per_m2 * wavelength_m.powi(2) / (4.0 * core::f64::consts::PI);
+            near(
+                bulk.wavenumber_derivative_s_m().im * VACUUM_SPEED_M_S,
+                group_loss,
+                2e-17,
+            );
+            near(
+                bulk.wavenumber_second_derivative_s2_m().im * omega * VACUUM_SPEED_M_S,
+                -2.0 * group_loss,
+                4e-17,
+            );
+            if slope_per_m2 == 0.0 {
+                assert_eq!(bulk.wavenumber_derivative_s_m().im, 0.0);
+                assert_eq!(bulk.wavenumber_second_derivative_s2_m().im, 0.0);
+            }
+            // Differentiate an independent N(T,lambda)^2 equation. Both real/
+            // imaginary cross terms must reach the native permittivity jet.
+            let normalized_epsilon = |frequency: f64| {
+                let lambda_nm = FREQUENCY_WAVELENGTH_NM / frequency;
+                let lambda_m = lambda_nm * 1e-9;
+                let n = C64::new(
+                    thermal_phase(lambda_nm, temperature),
+                    -alpha_at(lambda_m) * lambda_m / (4.0 * core::f64::consts::PI),
+                );
+                n * n
+            };
+            let h = 1e-3;
+            let f = [-2.0, -1.0, 0.0, 1.0, 2.0].map(|k| normalized_epsilon(omega * (1.0 + k * h)));
+            let first = (f[0] - f[1].scale(8.0) + f[3].scale(8.0) - f[4]).scale(1.0 / (12.0 * h));
+            let second = (-f[4] + f[3].scale(16.0) - f[2].scale(30.0) + f[1].scale(16.0) - f[0])
+                .scale(1.0 / (12.0 * h * h));
+            let jet = response.frequency_jet(omega).unwrap();
+            let scale = response.permeability_h_m() * VACUUM_SPEED_M_S.powi(2);
+            complex_near(jet.epsilon_derivatives[0].scale(scale), first, 2e-9);
+            complex_near(jet.epsilon_derivatives[1].scale(scale), second, 2e-8);
+            let distance = 2e-4;
+            near(
+                bulk.propagation(distance).unwrap().transfer.norm_sq(),
+                (-alpha_at(wavelength_m) * distance).exp(),
+                3e-15,
+            );
+        }
+    }
+}
+
+#[test]
+fn absorbing_thermal_films_conserve_power_and_heat_the_native_interior_and_beam() {
+    let alpha = 80_000.0;
+    let card = glass_card(alpha, 0);
+    let original =
+        SpectralSellmeierStatePoint::try_from_material(resolve(&card, &point(300.0))).unwrap();
+    let law = law();
+    let actual = resolve(&card, &point(337.5));
+    let response = ThermoOpticOpticalResponse::try_with_reference_absorption(
+        reference(&original),
+        &law,
+        &actual,
+        "T",
+    )
+    .unwrap();
+    let ambient = port();
+    let wavelength_nm = 1550.0;
+    let omega = FREQUENCY_WAVELENGTH_NM / wavelength_nm;
+    let k0 = omega / VACUUM_SPEED_M_S;
+    let ci = 0.8_f64;
+    let si = (1.0 - ci * ci).sqrt();
+    let thickness = 2e-6;
+    let n = C64::new(
+        thermal_phase(wavelength_nm, 337.5),
+        -alpha * wavelength_nm * 1e-9 / (4.0 * core::f64::consts::PI),
+    );
+    let square = n * n - C64::from_re(si * si);
+    let q_re = (0.5 * (square.abs() + square.re)).sqrt();
+    let q = C64::new(q_re, square.im / (2.0 * q_re));
+    let propagate = |depth: f64| {
+        let angle = -k0 * q.re * depth;
+        C64::new(angle.cos(), angle.sin()).scale((k0 * q.im * depth).exp())
+    };
+    let p = propagate(thickness);
+    let stack = PlanarDielectricLayers::try_new(
+        &ambient,
+        DielectricResponse::Lossless(&ambient),
+        omega,
+        &[DielectricLayer {
+            response: DielectricResponse::ThermoOpticOptical(response),
+            thickness_m: thickness,
+        }],
+    )
+    .unwrap();
+    let interface = PlanarDielectricInterface::try_new(
+        &ambient,
+        DielectricResponse::ThermoOpticOptical(response),
+    )
+    .unwrap();
+    for polarization in [Polarization::Te, Polarization::Tm] {
+        let yi = match polarization {
+            Polarization::Te => ci,
+            Polarization::Tm => ci.recip(),
+        } / (MU * VACUUM_SPEED_M_S);
+        let yt = match polarization {
+            Polarization::Te => q,
+            Polarization::Tm => n * n / q,
+        }
+        .scale(1.0 / (response.permeability_h_m() * VACUUM_SPEED_M_S));
+        let r = (C64::from_re(yi) - yt) / (C64::from_re(yi) + yt);
+        let denominator = C64::ONE - r * r * p * p;
+        let reflected = r * (C64::ONE - p * p) / denominator;
+        let transmitted = p * (C64::ONE - r * r) / denominator;
+        complex_near(
+            interface
+                .response(omega, ci, polarization)
+                .unwrap()
+                .reflected_tangential_e,
+            r,
+            5e-15,
+        );
+        let observed = stack.response(ci, polarization).unwrap();
+        complex_near(observed.reflected_tangential_e, reflected, 3e-14);
+        complex_near(observed.transmitted_tangential_e, transmitted, 3e-14);
+        near(
+            observed.reflected_power_fraction
+                + observed.transmitted_power_fraction
+                + observed.absorbed_power_fraction,
+            1.0,
+            4e-15,
+        );
+        let expected_heat = 0.5 * yi * (1.0 - reflected.norm_sq() - transmitted.norm_sq());
+        assert!(expected_heat > 0.0);
+        let field = stack.prepare_layer_field(0, ci, polarization).unwrap();
+        near(field.absorbed_power_w_m2(), expected_heat, 3e-17);
+        let amplitude = (C64::ONE + r) / denominator;
+        for depth in [0.0, 0.3 * thickness, thickness] {
+            let forward = amplitude * propagate(depth);
+            let backward = -r * amplitude * p * p / propagate(depth);
+            let sample = field.field(depth).unwrap();
+            complex_near(sample.electric_v_per_m, forward + backward, 5e-14);
+            complex_near(
+                sample.conjugate_magnetic_a_per_m,
+                yt * (forward - backward),
+                3e-16,
+            );
+        }
+        // Independent local epsilon loss, including longitudinal TM electric
+        // field. Its depth integral must equal the native positive film work.
+        let epsilon = response.permittivity_f_m(omega).unwrap();
+        let mut heat_integral = 0.0;
+        let intervals = 1024;
+        for i in 0..=intervals {
+            let sample = field
+                .field(thickness * i as f64 / intervals as f64)
+                .unwrap();
+            let longitudinal = match polarization {
+                Polarization::Te => C64::ZERO,
+                Polarization::Tm => {
+                    (sample.conjugate_magnetic_a_per_m / epsilon).scale(-k0 * si / omega)
+                }
+            };
+            let heat = -0.5
+                * omega
+                * epsilon.im
+                * (sample.electric_v_per_m.norm_sq() + longitudinal.norm_sq());
+            let weight = if i == 0 || i == intervals {
+                1.0
+            } else if i % 2 == 0 {
+                2.0
+            } else {
+                4.0
+            };
+            heat_integral += weight * heat;
+        }
+        heat_integral *= thickness / (3.0 * intervals as f64);
+        near(
+            field.absorbed_power_w_m2(),
+            heat_integral,
+            expected_heat * 5e-8,
+        );
+        let grid = AngularSpectrumGrid {
+            width: 1,
+            height: 1,
+            spacing_m: [2e-6; 2],
+        };
+        let jones = match polarization {
+            Polarization::Te => [C64::ZERO, C64::ONE],
+            Polarization::Tm => [C64::ONE, C64::ZERO],
+        };
+        let beam = PlanarAngularSpectrum::prepare_with_carrier(
+            &stack,
+            grid,
+            [k0 * si, 0.0],
+            &[jones],
+            AngularSpectrumLimits {
+                maximum_grid_points: 1,
+                maximum_workspace_bytes: 2_000_000,
+                maximum_fft_work: 100_000,
+            },
+            || false,
+        )
+        .unwrap();
+        let power = beam.power();
+        near(power.film_absorbed_w, expected_heat * 4e-12, 2e-27);
+        near(
+            power.reflected_w / power.incident_w,
+            reflected.norm_sq(),
+            4e-14,
+        );
+        near(
+            power.transmitted_w / power.incident_w,
+            transmitted.norm_sq(),
+            4e-14,
+        );
+        near(power.balance_defect_w(), 0.0, 2e-27);
+    }
+}
+
+#[test]
+fn absorption_policy_refresh_and_original_loss_cusps_remain_owned() {
+    let card = glass_card(0.0, 0);
+    let original =
+        SpectralSellmeierStatePoint::try_from_material(resolve(&card, &point(300.0))).unwrap();
+    let law = law();
+    let actual = resolve(&card, &point(337.5));
+    let zero =
+        ThermoOpticOpticalResponse::try_lossless(reference(&original), &law, &actual, "T").unwrap();
+    let held = ThermoOpticOpticalResponse::try_with_reference_absorption(
+        reference(&original),
+        &law,
+        &actual,
+        "T",
+    )
+    .unwrap();
+    assert!(!zero.retains_reference_absorption());
+    assert!(held.retains_reference_absorption());
+    assert!(!zero.same_source(held));
+    let mut absorption = [2000.0; 9];
+    absorption[4] = 3000.0;
+    let card = glass_card_spectrum(absorption, 0);
+    let original =
+        SpectralSellmeierStatePoint::try_from_material(resolve(&card, &point(300.0))).unwrap();
+    let actual = resolve(&card, &point(337.5));
+    let changed = resolve(&card, &point(450.0));
+    let response = ThermoOpticOpticalResponse::try_with_reference_absorption(
+        reference(&original),
+        &law,
+        &actual,
+        "T",
+    )
+    .unwrap();
+    let refreshed = response.at_state(&changed, "T").unwrap();
+    assert!(refreshed.retains_reference_absorption());
+    assert!(!response.same_source(refreshed));
+    let cusp =
+        core::f64::consts::TAU * VACUUM_SPEED_M_S / original.absorption_samples()[4].wavelength_m;
+    let index = response.complex_index(cusp).unwrap();
+    assert_eq!(
+        index.im,
+        reference(&original).complex_index(cusp).unwrap().im
+    );
+    assert_eq!(refreshed.complex_index(cusp).unwrap().im, index.im);
+    assert_ne!(refreshed.complex_index(cusp).unwrap().re, index.re);
+    assert!(response.frequency_jet(cusp).is_err());
+    assert!(refreshed.frequency_jet(cusp).is_err());
+    for edge in response.frequency_range_rad_s() {
+        assert!(response.complex_index(edge).is_ok());
+        assert!(response.frequency_jet(edge).is_err());
+    }
+    let omega = FREQUENCY_WAVELENGTH_NM / 1525.0;
+    assert!(response.frequency_jet(omega).is_ok());
+    assert!(refreshed.frequency_jet(omega).is_ok());
 }

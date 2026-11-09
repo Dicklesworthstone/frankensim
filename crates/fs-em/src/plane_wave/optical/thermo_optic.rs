@@ -1,8 +1,9 @@
 //! Source-owned SCHOTT temperature correction in native Maxwell transport.
 //!
 //! The original absolute spectral reference and the actual material temperature
-//! remain distinct. This explicitly lossless composition never reheats the
-//! catalog reference atmosphere or replaces the original dispersion by a fit.
+//! remain distinct. The caller selects zero loss or explicitly holds the
+//! original absorption spectrum fixed. Neither mode reheats the catalog
+//! reference atmosphere or replaces the original dispersion by a fit.
 
 use super::{
     FREQUENCY_WAVELENGTH_NM, ReflectionError, SpectralOpticalResponse, SpectralOpticalSource,
@@ -27,22 +28,26 @@ fn invalid(message: &'static str) -> ReflectionError {
 
 /// One original glass reference, a source-bounded thermal law and actual state.
 ///
-/// The reference is a transparent dielectric table, analytic Sellmeier source,
+/// The reference is a dielectric table, analytic Sellmeier source,
 /// or explicitly air-corrected catalog law. Material-card references must be
 /// resolved at the thermal law's original reference temperature. Both magnetic
 /// snapshots must belong to the same immutable material card, but Maxwell
 /// transport always uses the actual state's permeability. A catalog's fixed
 /// reference atmosphere does not supply the actual glass temperature.
 ///
-/// Preparation refuses nonzero absorption instead of silently deleting it.
-/// Thermal absorption, expansion, stress, spatial gradients and causal energy
-/// reservoirs require additional source laws. Phase transport remains valid at
+/// The lossless constructor refuses nonzero absorption. The separate reference-
+/// absorption constructor preserves the original intensity loss at every
+/// wavelength while changing only real phase index. This is an explicit frozen-
+/// loss approximation, not a supplied temperature-dependent absorption law.
+/// Expansion, stress, spatial gradients and causal energy reservoirs require
+/// additional source laws. Phase transport remains valid at
 /// admitted table knots; group/GVD require the original two-sided derivative.
 #[derive(Clone, Copy, Debug)]
 pub struct ThermoOpticOpticalResponse<'a> {
     reference: SpectralOpticalResponse<'a>,
     law: &'a SchottThermoOpticLaw,
     source: &'a ResolvedMaterialStatePoint,
+    retain_reference_absorption: bool,
     temperature_k: f64,
     frequency_range_rad_s: [f64; 2],
     permeability_h_m: f64,
@@ -62,6 +67,32 @@ impl<'a> ThermoOpticOpticalResponse<'a> {
         source: &'a ResolvedMaterialStatePoint,
         temperature_axis: &str,
     ) -> Result<Self> {
+        Self::try_new(reference, law, source, temperature_axis, false)
+    }
+
+    /// Apply the original real-index thermal law while retaining reference loss.
+    ///
+    /// The reference source's intensity absorption alpha(lambda) and complete
+    /// complex-index derivatives remain unchanged at the same vacuum frequency.
+    /// This explicitly selects temperature-independent loss within the original
+    /// reference band; it does not infer an absorption law at the new temperature.
+    /// Native field heating uses the resulting complete complex permittivity.
+    pub fn try_with_reference_absorption(
+        reference: SpectralOpticalResponse<'a>,
+        law: &'a SchottThermoOpticLaw,
+        source: &'a ResolvedMaterialStatePoint,
+        temperature_axis: &str,
+    ) -> Result<Self> {
+        Self::try_new(reference, law, source, temperature_axis, true)
+    }
+
+    fn try_new(
+        reference: SpectralOpticalResponse<'a>,
+        law: &'a SchottThermoOpticLaw,
+        source: &'a ResolvedMaterialStatePoint,
+        temperature_axis: &str,
+        retain_reference_absorption: bool,
+    ) -> Result<Self> {
         let temperature_k = temperature(source, temperature_axis)?;
         let [min_t, max_t] = law.temperature_range_k();
         if !temperature_k.is_finite() || !(min_t..=max_t).contains(&temperature_k) {
@@ -79,10 +110,11 @@ impl<'a> ThermoOpticOpticalResponse<'a> {
         let constant_m = core::f64::consts::TAU * VACUUM_SPEED_M_S;
         let (constant, lower, upper) = match reference.source() {
             SpectralOpticalSource::DielectricSellmeier(value) => {
-                if value
-                    .absorption_samples()
-                    .iter()
-                    .any(|s| s.absorption_per_m != 0.0)
+                if !retain_reference_absorption
+                    && value
+                        .absorption_samples()
+                        .iter()
+                        .any(|s| s.absorption_per_m != 0.0)
                 {
                     return Err(invalid(
                         "lossless thermo-optic composition cannot discard original absorption",
@@ -92,7 +124,9 @@ impl<'a> ThermoOpticOpticalResponse<'a> {
                 (constant_m, lo, hi)
             }
             SpectralOpticalSource::TabulatedDielectric(value) => {
-                if value.samples().iter().any(|s| s.absorption_per_m != 0.0) {
+                if !retain_reference_absorption
+                    && value.samples().iter().any(|s| s.absorption_per_m != 0.0)
+                {
                     return Err(invalid(
                         "lossless thermo-optic composition cannot discard original absorption",
                     ));
@@ -144,6 +178,7 @@ impl<'a> ThermoOpticOpticalResponse<'a> {
             reference,
             law,
             source,
+            retain_reference_absorption,
             temperature_k,
             frequency_range_rad_s,
             permeability_h_m,
@@ -167,6 +202,10 @@ impl<'a> ThermoOpticOpticalResponse<'a> {
     pub const fn material(self) -> &'a ResolvedMaterialStatePoint {
         self.source
     }
+    /// Whether this response explicitly holds the original loss spectrum fixed.
+    pub const fn retains_reference_absorption(self) -> bool {
+        self.retain_reference_absorption
+    }
     pub const fn temperature_k(self) -> f64 {
         self.temperature_k
     }
@@ -183,21 +222,47 @@ impl<'a> ThermoOpticOpticalResponse<'a> {
         source: &'a ResolvedMaterialStatePoint,
         temperature_axis: &str,
     ) -> Result<Self> {
-        Self::try_lossless(self.reference, self.law, source, temperature_axis)
+        Self::try_new(
+            self.reference,
+            self.law,
+            source,
+            temperature_axis,
+            self.retain_reference_absorption,
+        )
     }
 
     /// Phase and thermal derivatives without requiring spectral differentiability.
     pub fn phase_sample(self, omega_rad_s: f64) -> Result<ThermoOpticSample> {
+        self.phase_with_reference(omega_rad_s)
+            .map(|(sample, _)| sample)
+    }
+
+    fn phase_with_reference(self, omega_rad_s: f64) -> Result<(ThermoOpticSample, C64)> {
         let wavelength = self.wavelength(omega_rad_s)?;
-        let n0 = self.reference.complex_index(omega_rad_s)?.re;
+        let reference = self.reference.complex_index(omega_rad_s)?;
         self.law
-            .prepare(wavelength, n0, None)
+            .prepare(wavelength, reference.re, None)
             .and_then(|value| value.sample(self.temperature_k))
+            .map(|sample| (sample, reference))
             .map_err(|_| invalid("original thermo-optic phase response is unavailable"))
     }
 
-    /// Analytic phase/group/curvature at fixed actual material temperature.
+    /// Analytic REAL phase/group/curvature at fixed actual material temperature.
+    /// Native Maxwell frequency jets additionally retain the selected original
+    /// extinction derivatives; real group index is not an energy velocity.
     pub fn refractive_index_jet(self, omega_rad_s: f64) -> Result<ThermoOpticRefractiveIndexJet> {
+        self.spectral_with_reference(omega_rad_s)
+            .map(|(sample, _, _)| sample)
+    }
+
+    fn spectral_with_reference(
+        self,
+        omega_rad_s: f64,
+    ) -> Result<(
+        ThermoOpticRefractiveIndexJet,
+        C64,
+        frequency::OpticalFrequencyJet,
+    )> {
         let wavelength = self.wavelength(omega_rad_s)?;
         let [lo, hi] = self.frequency_range_rad_s;
         if omega_rad_s <= lo || omega_rad_s >= hi {
@@ -206,20 +271,29 @@ impl<'a> ThermoOpticOpticalResponse<'a> {
             ));
         }
         let reference = self.reference.frequency_jet(omega_rad_s)?;
-        let n0 = self.reference.complex_index(omega_rad_s)?.re;
+        let index = self.reference.complex_index(omega_rad_s)?;
         self.law
             .refractive_index_jet(
                 wavelength,
                 self.temperature_k,
-                n0,
+                index.re,
                 reference.first_s_m.re * VACUUM_SPEED_M_S,
                 reference.second_scaled_s_m.re * VACUUM_SPEED_M_S,
             )
+            .map(|sample| (sample, index, reference))
             .map_err(|_| invalid("original thermo-optic frequency derivatives are unavailable"))
     }
 
     pub fn complex_index(self, omega_rad_s: f64) -> Result<C64> {
-        Ok(C64::from_re(self.phase_sample(omega_rad_s)?.phase_index))
+        let (sample, reference) = self.phase_with_reference(omega_rad_s)?;
+        Ok(C64::new(
+            sample.phase_index,
+            if self.retain_reference_absorption {
+                reference.im
+            } else {
+                0.0
+            },
+        ))
     }
 
     pub fn permittivity_f_m(self, omega_rad_s: f64) -> Result<C64> {
@@ -249,18 +323,34 @@ impl<'a> ThermoOpticOpticalResponse<'a> {
         self,
         omega: f64,
     ) -> Result<frequency::OpticalFrequencyJet> {
-        let sample = self.refractive_index_jet(omega)?;
+        let (sample, reference_index, reference) = self.spectral_with_reference(omega)?;
+        let (extinction, group_loss, curvature_loss) = if self.retain_reference_absorption {
+            (
+                reference_index.im,
+                reference.first_s_m.im * VACUUM_SPEED_M_S,
+                reference.second_scaled_s_m.im * VACUUM_SPEED_M_S,
+            )
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+        // N=n-i*k. Preserve the ORIGINAL imaginary wavelength jet, including
+        // alpha slopes: lambda*N_im' = N_im - N_group,im. finish forms all
+        // cross terms of epsilon=N²/(mu*c0²) with the heated real index.
         frequency::finish(
-            C64::from_re(sample.phase_index),
+            C64::new(sample.phase_index, extinction),
             self.index_to_sqrt_permittivity,
-            C64::from_re(sample.scaled_wavelength_derivatives[0]),
-            C64::from_re(sample.scaled_wavelength_derivatives[1]),
-            C64::from_re(sample.group_index),
+            C64::new(
+                sample.scaled_wavelength_derivatives[0],
+                extinction - group_loss,
+            ),
+            C64::new(sample.scaled_wavelength_derivatives[1], curvature_loss),
+            C64::new(sample.group_index, group_loss),
         )
     }
 
     pub(in crate::plane_wave) fn same_source(self, other: Self) -> bool {
-        self.reference.same_source(other.reference)
+        self.retain_reference_absorption == other.retain_reference_absorption
+            && self.reference.same_source(other.reference)
             && core::ptr::eq(self.law, other.law)
             && core::ptr::eq(self.source, other.source)
     }
