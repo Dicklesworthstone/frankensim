@@ -420,3 +420,162 @@ fn g4_coupled_cancellation_and_source_domain_refusal_publish_no_state() {
         Err(DtFusionError::Radiation(BremsstrahlungErrorV1::Domain(_)))
     ));
 }
+
+#[test]
+fn g1_stiff_driven_coulomb_exchange_matches_independent_variable_conductance_ode() {
+    let (model, initial) = source::plasma([0.0, 0.0, 5e19], 1.0, [5.0; 2]);
+    let original = initial.clone();
+    let mut transport = thermal_sources(&initial);
+    transport.bremsstrahlung = None;
+    let coulomb = transport.coulomb.as_ref().unwrap();
+    let ch = initial.heavy_heat_capacity_j_k();
+    let ce = initial.electron_heat_capacity_j_k();
+    let total_capacity = ch + ce;
+    let reduced_capacity = ch * ce / total_capacity;
+    let mean_temperature = initial.heavy_temperature().value();
+    let conductance = |difference: f64| {
+        coulomb
+            .evaluate_point(
+                initial.amounts(),
+                initial.volume(),
+                Temperature::new(mean_temperature + ce / total_capacity * difference),
+                Temperature::new(mean_temperature - ch / total_capacity * difference),
+                || false,
+            )
+            .unwrap()
+            .electron_heavy_thermal_conductance_w_m3_k()
+            * initial.volume().value()
+    };
+    let inverse_capacity = 1.0 / ch + 1.0 / ce;
+    let initial_rate = conductance(0.0) * inverse_capacity;
+    let duration = 100.0 / initial_rate;
+    let power = reduced_capacity * (0.001 * mean_temperature) * initial_rate;
+    let mut heat = heating(0.8);
+    heat.heavy_power = Power::new(power);
+    heat.electron_power = Power::new(-power);
+
+    // Independent scalar continuum integration, sharing only the original
+    // constitutive G(Th,Te). Equal/opposite powers fix the weighted mean T.
+    // RK4 does not use the production exponential maps or timestep controller.
+    let derivative = |difference: f64| {
+        inverse_capacity * (power - conductance(difference) * difference)
+    };
+    let reference = |intervals: u32| {
+        let dt = duration / f64::from(intervals);
+        let mut difference = 0.0;
+        for _ in 0..intervals {
+            let k1 = derivative(difference);
+            let k2 = derivative(difference + 0.5 * dt * k1);
+            let k3 = derivative(difference + 0.5 * dt * k2);
+            let k4 = derivative(difference + dt * k3);
+            difference += dt * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0;
+        }
+        difference
+    };
+    let coarse_reference = reference(2048);
+    let expected_difference = reference(4096);
+    close(expected_difference, coarse_reference, 2e-10, 1e-5);
+    assert!(expected_difference > 0.0009 * mean_temperature);
+
+    let mut c = controls();
+    c.relative_tolerance = 1e-7;
+    c.energy_tolerance_j = 1e-5;
+    c.initial_step_s = duration;
+    c.maximum_step_s = duration;
+    let result = advance_dt_fusion_with_transport(
+        &initial,
+        &model,
+        heat,
+        &transport,
+        Time::new(duration),
+        c,
+        || false,
+    )
+    .unwrap();
+    close(
+        result.state().heavy_temperature().value() - result.state().electron_temperature().value(),
+        expected_difference,
+        1e-4,
+        1e-3,
+    );
+    close(
+        result.balance().electron_to_heavy_coulomb_energy_j,
+        reduced_capacity * expected_difference - power * duration,
+        1e-6,
+        1e-5,
+    );
+    assert!(result.balance().rejected_steps > 0);
+    assert!(result.balance().total_energy_residual_j.abs() < 1e-5);
+    assert_eq!(result.state().amounts(), initial.amounts());
+
+    c.minimum_step_s = duration;
+    c.maximum_steps = 1;
+    assert_eq!(
+        advance_dt_fusion_with_transport(
+            &initial,
+            &model,
+            heat,
+            &transport,
+            Time::new(duration),
+            c,
+            || false,
+        ),
+        Err(DtFusionError::StepBudget),
+    );
+    assert_eq!(initial, original);
+}
+
+#[test]
+fn g1_unforced_and_equal_rate_heated_coulomb_exchange_keep_large_steps() {
+    let (model, initial) = source::plasma([0.0, 0.0, 5e19], 1.0, [5.01, 5.0]);
+    let mut transport = thermal_sources(&initial);
+    transport.bremsstrahlung = None;
+    let ch = initial.heavy_heat_capacity_j_k();
+    let ce = initial.electron_heat_capacity_j_k();
+    let conductance = transport
+        .coulomb
+        .as_ref()
+        .unwrap()
+        .evaluate_at_state(&initial, || false)
+        .unwrap()
+        .electron_heavy_thermal_conductance_w_m3_k()
+        * initial.volume().value();
+    let duration = 100.0 / (conductance / ch + conductance / ce);
+    let equilibrium = (ch * initial.heavy_temperature().value()
+        + ce * initial.electron_temperature().value())
+        / (ch + ce);
+    for temperature_rate in [0.0, 1.0] {
+        let mut heat = heating(0.8);
+        heat.heavy_power = Power::new(ch * temperature_rate);
+        heat.electron_power = Power::new(ce * temperature_rate);
+        let mut c = controls();
+        c.initial_step_s = duration;
+        c.minimum_step_s = duration;
+        c.maximum_step_s = duration;
+        c.maximum_steps = 1;
+        let result = advance_dt_fusion_with_transport(
+            &initial,
+            &model,
+            heat,
+            &transport,
+            Time::new(duration),
+            c,
+            || false,
+        )
+        .unwrap();
+        for temperature in [
+            result.state().heavy_temperature(),
+            result.state().electron_temperature(),
+        ] {
+            close(
+                temperature.value(),
+                equilibrium + temperature_rate * duration,
+                2e-12,
+                1e-5,
+            );
+        }
+        assert_eq!(result.balance().accepted_steps, 1);
+        assert_eq!(result.balance().rejected_steps, 0);
+        assert!(result.balance().total_energy_residual_j.abs() < 1e-6);
+    }
+}

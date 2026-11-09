@@ -1,7 +1,8 @@
 //! Original-source thermal operators within the finite-fuel midpoint solve.
 
 use super::super::thermal::{
-    admit_confinement_resolution, confined_energy, evaluate, exchange_energy, radiated_energy,
+    admit_confinement_resolution, admit_exchange_resolution, confined_energy, evaluate,
+    exchange_energy, radiated_energy,
 };
 use super::*;
 
@@ -47,7 +48,7 @@ impl Problem<'_> {
                         .zip(law.exterior_temperatures())
                         .any(|(&temperature, exterior)| temperature != exterior.value())
                 }));
-        if self.transport.energy_confinement.is_some() {
+        if self.transport.energy_confinement.is_some() || sources.conductance_w_k > 0.0 {
             let reacting = old.limiting_fuel > 0.0;
             admit_confinement_resolution(
                 self.transport,
@@ -59,6 +60,19 @@ impl Problem<'_> {
                         || self.heating.electron_power.value() != 0.0,
                 ],
             )?;
+            if sources.conductance_w_k > 0.0 {
+                admit_exchange_resolution(
+                    self.transport,
+                    sources,
+                    self.capacities(old),
+                    dt,
+                    [
+                        self.heating.heavy_power.value(),
+                        self.heating.electron_power.value(),
+                    ],
+                    reacting,
+                )?;
+            }
         }
         let supplied = self.exchange_particles(old, 0.5 * dt, particle_drive, cancelled)?;
         let first = self.thermal_step(supplied, 0.5 * dt, sources, cancelled)?;

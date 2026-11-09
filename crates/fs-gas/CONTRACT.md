@@ -250,6 +250,17 @@ non-particle energy term and must exclude energy already carried by these
 ports. The published transfers allow an explicitly coupled receiver to debit
 or credit its own finite inventory without inventing that receiver here.
 
+A particle substep resolves at most one removal e-fold for each populated
+thermal species or nonzero incoming source when supply, nuclear reactions or
+another thermal source also acts. Otherwise saturated coarse/fine exhaust maps can
+both erase the sustained solution `N=S/lambda` while reporting a small local
+difference. The physical drive is retained across both particle substeps;
+reaction products created between them are checked before the second exhaust.
+Pure unforced exhaust keeps its unrestricted exact map. Empty sinks do not
+impose this restriction, and kinetic He4 is never counted as removable thermal
+ash. The original attempt and minimum-step budgets remain binding; insufficient
+resolution returns `StepBudget` without publishing an accepted result.
+
 Fuel replenishment and helium removal are distinct physical needs in a
 sustained burn; see the [UKAEA PROCESS fuel and ash exhaust discussion](https://ukaea.github.io/PROCESS/eng-models/cryostat-and-vacuum-system/).
 The rates here are caller-authored closures, not a fitted pumping or magnetic
@@ -289,6 +300,18 @@ closure. Numerical tests cover analytic relaxation, signed reservoir heating,
 stiff and tiny exposures, burn feedback, restart, compression/work refinement,
 kinetic-alpha accounting and atomic refusal. `compressed_fusion` compares the
 existing rigid and compression cases with an explicit finite-confinement case.
+
+When a pool also receives imposed power, nuclear/alpha heat, reciprocal
+exchange, radiation or particle exchange, each frozen source interval resolves
+at most one of that pool's confinement e-folds. Saturated full/two-half cooling
+maps can otherwise agree after erasing a continuously supplied thermal store.
+For constant power and an initially equilibrated pool, the exact solution is
+`U-Uexterior = P*tau*(1-exp(-t/tau))`. Unforced relaxation retains its
+unrestricted exact map, and an inactive pool's shorter time does not constrain
+an independently heated pool. The original attempt and minimum-step budgets
+apply; unresolved coupled sources return `StepBudget` without publishing
+state. This guard prevents the false saturated estimate; it does not replace
+temporal refinement or establish a global error bound.
 
 All three result families expose `neutron_emission()`, returning the shared
 L1 `FusionNeutronEmissionV1`. This preserves the original accepted D-T and
@@ -603,6 +626,22 @@ from each stage's actual composition. The method is second order for smooth
 admitted evolution, as checked by fixed step refinement; the cutoff crossover
 need not have a smooth local-error expansion. Step doubling remains an
 estimate, not a global error certificate.
+
+Driven reciprocal exchange also resolves its frozen relaxation exposure
+`G*(1/Ch+1/Ce)*dt <= 1` before comparing trial paths. For
+`D=Th-Te`, the frozen equation is
+`D' = Ph/Ch-Pe/Ce-G*(1/Ch+1/Ce)*D`; saturated split maps can both return
+`D=0` while missing the forced steady temperature difference, even when the
+total energy balance closes. Differential imposed heating, selected particle
+exchange, radiation, unequal confinement laws and nuclear/kinetic-alpha heat
+activate this admission in the shared D-T/network source owner, including
+kinetic and prescribed-volume callers. Zero conductance and unforced exchange
+retain their unrestricted maps; equal imposed temperature rates alone do not
+activate this restriction. Capacities are those at the start of the source map.
+Changing populations still require coefficient refresh and temporal refinement;
+this is not a bound on every intermediate relaxation time. A caller that
+prohibits the required resolution receives the existing atomic `StepBudget`
+refusal.
 
 The publication account is
 `delta(Uh+Ue) + En + Ephotons - Q - Eexternal = 0`.

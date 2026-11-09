@@ -745,3 +745,46 @@ fn g4_network_cancellation_work_and_source_domain_refuse_without_partial_state()
     ));
     assert_eq!(state, initial);
 }
+
+#[test]
+fn g4_network_stiff_differential_coulomb_heating_requires_resolution() {
+    let (plasma, initial) = fixture::plasma([0.0, 0.0, 0.0, 0.0, 5e19], 1.0, [5.0; 2]);
+    let original = initial.clone();
+    let mut source = transport(&initial);
+    source.bremsstrahlung = None;
+    let ch = initial.heavy_heat_capacity_j_k();
+    let ce = initial.electron_heat_capacity_j_k();
+    let conductance = source
+        .coulomb
+        .as_ref()
+        .unwrap()
+        .evaluate_at_state(&initial, || false)
+        .unwrap()
+        .electron_heavy_thermal_conductance_w_m3_k()
+        * initial.volume().value();
+    let rate = conductance / ch + conductance / ce;
+    let duration = 100.0 / rate;
+    let power = (ch * ce / (ch + ce)) * (0.001 * initial.heavy_temperature().value()) * rate;
+    let mut heat = heating();
+    heat.heavy_power = Power::new(power);
+    heat.electron_power = Power::new(-power);
+    let mut c = controls();
+    c.initial_step_s = duration;
+    c.minimum_step_s = duration;
+    c.maximum_step_s = duration;
+    c.maximum_steps = 1;
+    assert_eq!(
+        advance_fusion_network(
+            &initial,
+            &plasma,
+            FusionNetworkChannels::NONE,
+            heat,
+            &source,
+            Time::new(duration),
+            c,
+            || false,
+        ),
+        Err(FusionNetworkError::StepBudget),
+    );
+    assert_eq!(initial, original);
+}

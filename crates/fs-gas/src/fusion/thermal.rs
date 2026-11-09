@@ -50,6 +50,49 @@ pub(super) fn admit_confinement_resolution(
     Ok(())
 }
 
+/// Resolve driven electron/ion equilibration before its split maps saturate.
+/// For D = Th-Te, frozen exchange gives D' = F-G(1/Ch+1/Ce)D. Two saturated
+/// trial maps can both return D=0 while missing the forced steady difference.
+/// Unforced exchange, and equal imposed temperature rates, need no such cap.
+pub(super) fn admit_exchange_resolution(
+    transport: &DtFusionTransport,
+    sources: ThermalSources,
+    capacities: [f64; 2],
+    dt: f64,
+    imposed_powers: [f64; 2],
+    nuclear_or_alpha_heat: bool,
+) -> Result<(), DtFusionError> {
+    let conductance = sources.conductance_w_k;
+    if conductance == 0.0 || dt == 0.0 {
+        return Ok(());
+    }
+    let imposed_rates = [
+        imposed_powers[0] / capacities[0],
+        imposed_powers[1] / capacities[1],
+    ];
+    let differential_power = imposed_rates[0] != imposed_rates[1]
+        || imposed_rates.iter().any(|rate| !rate.is_finite());
+    let particles = transport.particles.is_some_and(|law| {
+        law.injection_rates_mol_s().iter().any(|rate| *rate > 0.0)
+            || law.removal_hazards().iter().any(|rate| rate.value() > 0.0)
+    });
+    let differential_confinement = transport.energy_confinement.is_some_and(|law| {
+        let times = law.confinement_times();
+        let exterior = law.exterior_temperatures();
+        times[0] != times[1] || exterior[0] != exterior[1]
+    });
+    let driven = nuclear_or_alpha_heat
+        || differential_power
+        || particles
+        || differential_confinement
+        || sources.radiation_w_per_sqrt_k > 0.0;
+    let exposure = (conductance / capacities[0] + conductance / capacities[1]) * dt;
+    if driven && exposure > 1.0 {
+        return Err(DtFusionError::StepBudget);
+    }
+    Ok(())
+}
+
 /// Refresh the selected thermal laws at the actual admitted populations and
 /// temperatures. The owning integrator checks their original-bank identity.
 pub(super) fn evaluate(

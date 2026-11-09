@@ -606,7 +606,7 @@ impl<'a> Problem<'a> {
                             old.amounts[self.plasma.indices()[species_slot(species)]].value > 0.0
                         })
                 }));
-        if self.transport.energy_confinement.is_some() {
+        if self.transport.energy_confinement.is_some() || sources.thermal.conductance_w_k > 0.0 {
             let indices = self.plasma.indices();
             let reacting = FusionReactionV1::ALL.iter().enumerate().any(|(r, reaction)| {
                 sources.events[r].is_some()
@@ -635,6 +635,19 @@ impl<'a> Problem<'a> {
                     electron_products || kinetic_heat || self.heating.electron_power.value() != 0.0,
                 ],
             )?;
+            if sources.thermal.conductance_w_k > 0.0 {
+                thermal::admit_exchange_resolution(
+                    self.transport,
+                    sources.thermal,
+                    self.capacities(old),
+                    dt,
+                    [
+                        self.heating.heavy_power.value(),
+                        self.heating.electron_power.value(),
+                    ],
+                    reacting || kinetic_heat,
+                )?;
+            }
         }
         let mut births = [Sum::default(); 2];
         let supplied = self.exchange_particles(old, 0.5 * dt, particle_drive, cancelled)?;
