@@ -14,6 +14,9 @@
 //! pressure integrity, rotation or spatial thermal equilibration. Original
 //! source, Biot, caloric, finite-inventory and mechanical limits remain active.
 
+/// Error-controlled physical windows with finite wall, gas and vehicle feedback.
+pub mod trajectory;
+
 use super::{
     EffusionOutlet, EffusionRocketEnvironment, EffusionRocketError, EffusionRocketSolve,
     EffusionRocketStep, GasRocketState, MAX_SNAPSHOT_TRANSFERS, Sum,

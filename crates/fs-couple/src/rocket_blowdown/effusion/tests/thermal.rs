@@ -1,6 +1,8 @@
 //! G0/G1/G3/G4: finite wall storage, molecular recoil, frame and atomic refusal.
 //! Manufactured caloric/transport inputs do not validate a physical heat law.
 
+mod trajectory;
+
 use super::*;
 use crate::cavity_phs::piston::thermal::HeatExchangeSolve;
 use crate::finite_gas_thermal::{ConvectionCoefficient, ConvectionError};

@@ -122,7 +122,7 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), EffusionTrajectoryEr
         Ok(())
     }
 }
-fn ratio(
+pub(super) fn ratio(
     coarse: f64,
     fine: f64,
     scale: f64,
@@ -146,11 +146,11 @@ fn components(v: Vec3) -> [f64; 3] {
 // previously absent species, so its zero original mass must still participate
 // in every local error comparison. Sources remain borrowed, without rebuilding
 // a composition or copying material cards for each trial.
-struct SpeciesAxis<'a> {
-    sources: Vec<&'a Nasa9StandardStateModelV1>,
+pub(super) struct SpeciesAxis<'a> {
+    pub(super) sources: Vec<&'a Nasa9StandardStateModelV1>,
 }
 impl<'a> SpeciesAxis<'a> {
-    fn new(
+    pub(super) fn new(
         gases: impl IntoIterator<Item = &'a ClosedGasParcel>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, EffusionTrajectoryError> {
@@ -179,7 +179,7 @@ impl<'a> SpeciesAxis<'a> {
         })
     }
 
-    fn masses(
+    pub(super) fn masses(
         &self,
         state: &GasRocketState,
         cancelled: &mut impl FnMut() -> bool,
@@ -225,7 +225,7 @@ impl<'a> SpeciesAxis<'a> {
     }
 }
 
-fn normalized_error(
+pub(super) fn normalized_error(
     before: &GasRocketState,
     coarse: &GasRocketState,
     fine: &GasRocketState,
@@ -363,20 +363,10 @@ struct ControlledTrajectory<S, const N: usize> {
     totals: [f64; N],
 }
 
-fn integrate<'a, S, const N: usize, C: FnMut() -> bool>(
-    original: &'a GasRocketState,
-    source_gases: impl IntoIterator<Item = &'a ClosedGasParcel>,
+pub(super) fn admit_adaptive(
     duration_s: f64,
     adaptive: EffusionAdaptiveSolve,
-    mut advance: impl FnMut(
-        &GasRocketState,
-        f64,
-        &mut C,
-    ) -> Result<(GasRocketState, S), EffusionRocketError>,
-    receipt_values: impl Fn(&S) -> [f64; N],
-    cancelled: &mut C,
-) -> Result<ControlledTrajectory<S, N>, EffusionTrajectoryError> {
-    poll(cancelled)?;
+) -> Result<(), EffusionTrajectoryError> {
     if !duration_s.is_finite()
         || duration_s <= 0.0
         || ![
@@ -403,6 +393,56 @@ fn integrate<'a, S, const N: usize, C: FnMut() -> bool>(
             "positive bounded time, dimensional tolerances and work limits required",
         ));
     }
+    Ok(())
+}
+
+// Shared by thermal/recoil evolution: neither a split thermal stage nor a
+// rounded final tail may create or discard elapsed physical time.
+pub(super) fn trial_times(
+    elapsed: f64,
+    next_step: f64,
+    duration_s: f64,
+    minimum_step_s: f64,
+) -> Result<(f64, f64, f64, f64), EffusionTrajectoryError> {
+    let remaining = duration_s - elapsed;
+    let mut h = next_step.min(remaining);
+    let tail = remaining - h;
+    if tail > 0.0 && tail < minimum_step_s && 0.5 * remaining >= minimum_step_s {
+        h = 0.5 * remaining;
+    }
+    let half = 0.5 * h;
+    let end = elapsed + h;
+    let midpoint = elapsed + half;
+    if half <= 0.0
+        || half + half != h
+        || end <= elapsed
+        || end > duration_s
+        || midpoint <= elapsed
+        || midpoint >= end
+        || (h == remaining && end != duration_s)
+    {
+        return Err(EffusionTrajectoryError::Unrepresentable(
+            "trial halves or final physical time cannot advance exactly",
+        ));
+    }
+    Ok((h, half, midpoint, end))
+}
+
+fn integrate<'a, S, const N: usize, C: FnMut() -> bool>(
+    original: &'a GasRocketState,
+    source_gases: impl IntoIterator<Item = &'a ClosedGasParcel>,
+    duration_s: f64,
+    adaptive: EffusionAdaptiveSolve,
+    mut advance: impl FnMut(
+        &GasRocketState,
+        f64,
+        &mut C,
+    ) -> Result<(GasRocketState, S), EffusionRocketError>,
+    receipt_values: impl Fn(&S) -> [f64; N],
+    cancelled: &mut C,
+) -> Result<ControlledTrajectory<S, N>, EffusionTrajectoryError> {
+    poll(cancelled)?;
+    admit_adaptive(duration_s, adaptive)?;
     let species = SpeciesAxis::new(
         std::iter::once(original.reservoir()).chain(source_gases),
         cancelled,
@@ -421,33 +461,8 @@ fn integrate<'a, S, const N: usize, C: FnMut() -> bool>(
                 accepted_intervals: accepted,
             });
         }
-        let remaining = duration_s - elapsed;
-        let mut h = next_step.min(remaining);
-        // A rounded clock can put the last requested endpoint just beyond
-        // the held step. Split the remaining pair instead of manufacturing
-        // an unrepresentably small final gas withdrawal or skipping time.
-        let tail = remaining - h;
-        if tail > 0.0
-            && tail < adaptive.minimum_step_s
-            && 0.5 * remaining >= adaptive.minimum_step_s
-        {
-            h = 0.5 * remaining;
-        }
-        let half = 0.5 * h;
-        let end = elapsed + h;
-        let midpoint_time = elapsed + half;
-        if half <= 0.0
-            || half + half != h
-            || end <= elapsed
-            || end > duration_s
-            || midpoint_time <= elapsed
-            || midpoint_time >= end
-            || (h == remaining && end != duration_s)
-        {
-            return Err(EffusionTrajectoryError::Unrepresentable(
-                "trial halves or final physical time cannot advance exactly",
-            ));
-        }
+        let (h, half, midpoint_time, end) =
+            trial_times(elapsed, next_step, duration_s, adaptive.minimum_step_s)?;
         attempts += 1;
         let trial = (|| {
             let mut perform = |state: &GasRocketState, dt: f64, at: f64, cancel: &mut C| {
