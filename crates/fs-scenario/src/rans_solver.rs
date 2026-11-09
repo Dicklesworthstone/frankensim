@@ -2,7 +2,9 @@
 //!
 //! Frozen-turbulence one-dimensional mean-flow/scalar screen with:
 //! `k` and modified dissipation are supplied fields, not transported unknowns.
-//! This is not a validated two-equation RANS solver; see the crate contract.
+//! `advance_launder_sharma` separately transports momentum, k and modified
+//! dissipation over a physical interval. Neither entry implies empirically
+//! validated general RANS; see the method and crate contracts.
 //! - Explicit stretched-grid wall-normal transport; wall resolution is caller supplied
 //! - Scalar thermal transport with prescribed wall heat flux
 //! - Darcy-Forchheimer porous medium sink terms ($S_p = -\frac{\mu}{\kappa} u - \frac{1}{2} C_F \rho |u| u$)
@@ -13,6 +15,9 @@
 //! without axial heat removal. This screen does not add that missing transport.
 
 use crate::rans_card::{BoussinesqOption, LaunderSharmaCoefficients, PorousFinSink, RansModelCard};
+
+mod transport;
+pub use transport::{RansTransportError, RansTransportReport, RansTransportWorkspace};
 
 /// Convergence termination reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,8 +114,8 @@ impl RansFieldState {
     pub fn new_initial(grid: &RansChannelGrid, u_bulk: f64, t_ambient_k: f64) -> Self {
         let n = grid.num_cells + 1;
         let mut u = vec![0.0; n];
-        let mut k = vec![1e-6; n];
-        let mut eps = vec![1e-5; n];
+        let mut k = vec![0.0; n];
+        let mut eps = vec![0.0; n];
         let nu_t = vec![1e-8; n];
         let temp_k = vec![t_ambient_k; n];
 

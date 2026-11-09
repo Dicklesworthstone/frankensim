@@ -1055,19 +1055,19 @@ control code renders BITWISE identical audio through the render API.
 
 ## No-claim boundaries
 
-- **The `rans-rung` fixture is not a turbulence model**: the feature-gated
-  1-D channel Launder–Sharma rung is a convergence-of-toy check, not RANS or LES
-  on a mesh. Turbulence modelling was retired from v1 by owner decision
-  2026-09-01 (bead frankensim-rc-root-q61wp.25); the promise is preserved in
-  deferred epic frankensim-rc-root-q61wp.41 and un-parks only behind a consumer
-  journey. Its native solver admits positive finite density, viscosity, heat
-  capacity, conductivity and turbulent Prandtl number before changing state.
-  The same density supplies `-dp/dx / rho` and `k / (rho*cp)`; finite update
-  checks precede every residual maximum so NaN cannot masquerade as zero
-  residual or convergence. Unrepresentable field updates refuse before being
-  stored. `tests/rans_solver.rs` checks these refusals and independent pressure
-  acceleration/thermal-storage scaling in the existing single-iteration fixture;
-  this does not upgrade the rung's physical-fidelity claim.
+- **The legacy `rans-rung` relaxation is a frozen-turbulence screen**:
+  its `solve_steady_channel` entry keeps supplied k and modified dissipation
+  fixed while relaxing mean velocity and temperature. It is not a transported
+  two-equation solution. The separate `advance_launder_sharma` entry now owns
+  the bounded physical-time mechanical channel described below; neither entry
+  supplies general mesh RANS/LES or empirically validated turbulence. The older
+  v1 retirement/deferred epics are historical scope records, not a claim that
+  this new channel implementation has completed those broader journeys.
+  The legacy screen admits positive finite density, viscosity, heat capacity,
+  conductivity and turbulent Prandtl number before changing state. The same
+  density supplies `-dp/dx / rho` and `k / (rho*cp)`; finite update checks
+  precede every residual maximum. `tests/rans_solver.rs` checks these refusals
+  and independent pressure-acceleration/thermal-storage scaling.
 
 - **Acoustic assemblies are descriptions, not instruments**:
   `AcousticAssembly` can name a reed, bow, plate, and tone holes as data.
@@ -1533,3 +1533,55 @@ exact-knot behavior, interpolation and clamped tails. G0/G4 regressions in
 values, malformed unsampled data, and cancellation during validation,
 recurrence and publication. These are source-level tests, not a measured
 cancellation-latency guarantee.
+
+## Physical-time Launder–Sharma channel transport
+
+Under `rans-rung`, `RansSolver::advance_launder_sharma` advances mean
+velocity, turbulent kinetic energy and modified dissipation over the same
+physical interval on the existing stretched wall-normal channel grid. This
+is constant-property, fully developed, incompressible 1-D mechanical flow.
+The stationary resolved wall prescribes U=k=modified-epsilon=0; the
+zero-flux centerline has its own solved half control volume. The model-card
+coefficients are used without dimensional floors. Turbulent nodes require
+strictly positive k and modified epsilon; the globally zero laminar state is
+an exact invariant. Mixed zero turbulence is explicitly refused.
+
+The low-Re closure retains
+`nu_t=C_mu exp[-3.4/(1+Re_t/50)^2] k^2/modified-epsilon`,
+`Re_t=k^2/(nu modified-epsilon)`,
+`D=2 nu |d sqrt(k)/dy|^2`,
+`f2=1-0.3 exp(-Re_t^2)`, and the additive modified-epsilon source
+`E=2 nu nu_t |d²U/dy²|²`.
+The source equations follow NASA TM-110446 Part B section 3
+(<https://ntrs.nasa.gov/api/citations/19970017828/downloads/19970017828.pdf>);
+the admitted card retains the original Ceps1=1.44 convention. Three
+linear-time tridiagonal solves use backward-Euler diffusion and positive
+Patankar destruction with lagged constitutive coefficients. This is a
+first-order segregated step, not a converged nonlinear endpoint. No thermal,
+buoyancy, porous, transition, wall-function or 3-D model is implied.
+
+Shared-face eddy work lost by the mean equation supplies exactly one k
+production term. The returned report separates molecular dissipation,
+eddy transfer, wall k loss, actual discrete destruction and backward-Euler
+temporal loss. Mean and turbulent balance defects are computed from local
+inventory increments. These are discrete mechanical accounts per unit
+density and span, not total thermodynamic energy. Updated k and epsilon
+recompute the returned eddy viscosity.
+
+`RansTransportWorkspace::try_new` admits a caller-supplied node ceiling
+and allocates nine reusable f64 fields (72 bytes per node, excluding
+allocator bookkeeping). A step allocates no numerical buffers.
+Cancellation is checked throughout numerical loops and immediately before
+joint field publication. Invalid input, singular mixed-zero turbulence,
+allocation failure, unrepresentable arithmetic or cancellation returns
+without changing accepted fields; scratch may change.
+
+Eight native transport regression groups cover an independent dense laminar
+momentum solve; large-step positivity and buffer reuse; analytic stretched-grid
+D/E including centerline curvature; independently integrated mean/k budgets
+and epsilon-equation residual; unforced decay; signed reversal and consistent
+unit rescaling; invalid/late-failure rollback; and every cancellation poll
+with retry. With the original card and BLAKE3 owner, all 19 module tests and
+8 existing RANS integration tests passed on pinned nightly-2026-07-06.
+This is native validation of these source modules, not a full-workspace test
+or an empirical turbulent-channel calibration.
