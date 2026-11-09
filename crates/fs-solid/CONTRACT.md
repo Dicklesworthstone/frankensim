@@ -1975,6 +1975,30 @@ The existing `hex8_thermal` tests check independent anisotropic polynomial
 geometric work, signed thermal/mechanical shifts, unchanged mass and supports,
 reactions, zero-stress recovery, cancellation and fully fixed refusal.
 
+## Native plane elastic stress, storage and support reactions
+
+`LinearProblem::response` and `response_with_element_scales` recover original
+P1/Q1 quadrature strains, full three-dimensional Cauchy stress, elastic storage
+and pre-elimination nodal residuals without assembling a stiffness matrix.
+Standard and B-bar response use the same strain columns, original loads and
+supports as the solve. Plane stress retains relaxed thickness strain; plane
+strain retains transverse stress. B-bar reports compatible in-plane strain
+separately from its two-normal assumed strain.
+
+Forces and integrated storage are N/m and J/m of reference thickness. Body and
+traction loads on constrained rows enter support reactions before elimination;
+free-row residuals remain visible. Support entries are physical reactions only
+for an equilibrated displacement satisfying the original prescriptions.
+Recovery subtracts a uniform nodal translation before differentiating, and
+polls cancellation between elements and loaded edges without publishing partial
+results. Ordinary/scaled solves and recovery share material, geometry and
+support admission. This adds no finite-strain, calibrated strain-domain or
+continuum-convergence claim to the existing linear-kinematic model.
+
+`tests/linear_response.rs` covers analytical plane-stress/plane-strain extension,
+shear, heterogeneous moduli, B-bar energy derivatives against the original
+stiffness, support force/moment balance, translation and typed refusals.
+
 ## Static elasticity preserves the original force scale
 
 The plane P1/Q1 and native P1 tetrahedral, TET10, HEX8, HEX20 and HEX27 static

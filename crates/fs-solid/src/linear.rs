@@ -16,6 +16,9 @@ use fs_sparse::precond::Precond;
 use fs_sparse::{Coo, Csr};
 use std::collections::BTreeMap;
 
+/// Original quadrature stress, elastic storage and physical support forces.
+pub mod response;
+
 /// Plane reduction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaneKind {
@@ -110,7 +113,8 @@ impl LinearProblem<'_> {
     /// Assemble and solve; returns nodal displacements (2 per node).
     ///
     /// # Errors
-    /// [`SolidError::SolveFailed`], [`SolidError::UnknownPatch`].
+    /// Invalid material, geometry, supports or loads return `InvalidInput`.
+    /// Unknown patches and missed equilibrium gates propagate separately.
     pub fn solve(&self) -> Result<Vec<[f64; 2]>, SolidError> {
         self.solve_scaled(None, &|| false)
     }
@@ -140,99 +144,28 @@ impl LinearProblem<'_> {
             }
         };
         checkpoint()?;
-        let (lambda, mu) = lame(self.youngs, self.poisson, self.plane);
-        if let Some(scales) = scales {
-            if scales.len() != self.mesh.elems.len()
-                || self.symmetry.iter().any(|(_, component)| *component >= 2)
-                || self.mesh.elems.iter().any(|conn| {
-                    crate::mesh2::checked_reference_element(&self.mesh.nodes, conn).is_none()
-                })
-                || self.mesh.patches.iter().any(|(_, edges)| {
-                    edges
-                        .iter()
-                        .any(|&(a, b)| a >= self.mesh.node_count() || b >= self.mesh.node_count())
-                })
-                || !self.youngs.is_finite()
-                || self.youngs <= 0.0
-                || !self.poisson.is_finite()
-                || !(-1.0..0.5).contains(&self.poisson)
-                || self.poisson == -1.0
-                || scales.iter().any(|&s| {
-                    !s.is_finite()
-                        || s <= 0.0
-                        || !(mu * s > 0.0)
-                        || !(lambda * s).is_finite()
-                        || !((lambda + 2.0 * mu) * s).is_finite()
-                })
-            {
-                return Err(SolidError::InvalidInput {
-                    what: "element-scaled elasticity requires valid P1/Q1 geometry and supports, one finite positive multiplier per element and representable stable isotropic coefficients".into(),
-                });
-            }
-        }
+        let (lambda, mu) = self.validate(scales)?;
         let n = self.mesh.node_count();
         let ndof = 2 * n;
-        // Strong Dirichlet values by node/component.
-        let mut fixed: BTreeMap<usize, f64> = BTreeMap::new();
-        for (patch, g) in &self.dirichlet {
-            if self.mesh.patch_edges(*patch).is_none() {
-                return Err(SolidError::UnknownPatch { patch: *patch });
-            }
-            for node in self.mesh.patch_nodes(*patch) {
-                let p = self.mesh.nodes[node];
-                let val = g(p[0], p[1]);
-                if val.iter().any(|value| !value.is_finite()) {
-                    return Err(SolidError::InvalidInput {
-                        what: format!("prescribed displacement at node {node} must be finite"),
-                    });
-                }
-                fixed.insert(2 * node, val[0]);
-                fixed.insert(2 * node + 1, val[1]);
-            }
-        }
-        for (patch, comp) in &self.symmetry {
-            if self.mesh.patch_edges(*patch).is_none() {
-                return Err(SolidError::UnknownPatch { patch: *patch });
-            }
-            assert!(*comp < 2, "symmetry component index {comp} out of range");
-            for node in self.mesh.patch_nodes(*patch) {
-                // entry-or-insert: explicit Dirichlet wins on shared nodes.
-                fixed.entry(2 * node + comp).or_insert(0.0);
-            }
-        }
+        let fixed = self.fixed_values()?;
         let mut coo = Coo::new(ndof, ndof);
         let mut rhs = vec![0.0f64; ndof];
         for (element, conn) in self.mesh.elems.iter().enumerate() {
             checkpoint()?;
             let scale = scales.map_or(1.0, |values| values[element]);
             let (k, fl) = self.element(conn, lambda * scale, mu * scale);
+            if k.iter().flatten().chain(&fl).any(|v| !v.is_finite()) {
+                return Err(SolidError::InvalidInput {
+                    what: format!("element {element} has nonfinite stiffness or body load"),
+                });
+            }
             scatter_constrained(&mut coo, &mut rhs, conn, &k, &fl, &fixed);
         }
-        // Traction terms (dead loads along patch edges, 2-pt Gauss).
-        for (patch, t) in &self.traction {
-            let edges = self
-                .mesh
-                .patch_edges(*patch)
-                .ok_or(SolidError::UnknownPatch { patch: *patch })?;
-            for &(a, b) in edges {
-                let (pa, pb) = (self.mesh.nodes[a], self.mesh.nodes[b]);
-                let len = ((pb[0] - pa[0]).powi(2) + (pb[1] - pa[1]).powi(2)).sqrt();
-                let g = 0.5 / 3.0f64.sqrt();
-                for s in [0.5 - g, 0.5 + g] {
-                    let p = [pa[0] + s * (pb[0] - pa[0]), pa[1] + s * (pb[1] - pa[1])];
-                    let tv = t(p[0], p[1]);
-                    let w = 0.5 * len;
-                    for (node, shape) in [(a, 1.0 - s), (b, s)] {
-                        for (c, tc) in tv.iter().enumerate() {
-                            let dof = 2 * node + c;
-                            if !fixed.contains_key(&dof) {
-                                rhs[dof] += w * shape * tc;
-                            }
-                        }
-                    }
-                }
+        self.traction_forces(&checkpoint, |dof, force| {
+            if !fixed.contains_key(&dof) {
+                rhs[dof] += force;
             }
-        }
+        })?;
         // Fixed columns have already entered the physical free-force RHS.
         // Keep identity rows homogeneous during the solve: known displacement
         // values in metres must not enter a force residual in newtons. Restore
@@ -275,6 +208,152 @@ impl LinearProblem<'_> {
             .collect())
     }
 
+    // Solving and observing must admit the same physical material and mesh.
+    // In particular the ordinary path cannot bypass checks by omitting scales.
+    fn validate(&self, scales: Option<&[f64]>) -> Result<(f64, f64), SolidError> {
+        let (lambda, mu) = lame(self.youngs, self.poisson, self.plane);
+        if scales.is_some_and(|s| s.len() != self.mesh.elems.len())
+            || self.symmetry.iter().any(|(_, component)| *component >= 2)
+            || self.mesh.nodes.iter().flatten().any(|v| !v.is_finite())
+            || self.mesh.elems.iter().any(|conn| {
+                crate::mesh2::checked_reference_element(&self.mesh.nodes, conn).is_none()
+            })
+            || self.mesh.patches.iter().any(|(_, edges)| {
+                edges
+                    .iter()
+                    .any(|&(a, b)| a >= self.mesh.node_count() || b >= self.mesh.node_count())
+            })
+            || !(self.youngs.is_finite() && self.youngs > 0.0)
+            || !(self.poisson.is_finite() && self.poisson > -1.0 && self.poisson < 0.5)
+            || !(mu.is_finite() && mu > 0.0 && lambda.is_finite())
+            || !(lambda + 2.0 * mu).is_finite()
+            || (0..self.mesh.elems.len()).any(|element| {
+                let s = scales.map_or(1.0, |values| values[element]);
+                !s.is_finite()
+                    || s <= 0.0
+                    || !(mu * s > 0.0)
+                    || !(lambda * s).is_finite()
+                    || !((lambda + 2.0 * mu) * s).is_finite()
+            })
+        {
+            return Err(SolidError::InvalidInput {
+                what: "linear elasticity requires valid P1/Q1 geometry and supports, finite positive element multipliers and representable stable isotropic coefficients".into(),
+            });
+        }
+        Ok((lambda, mu))
+    }
+
+    fn fixed_values(&self) -> Result<BTreeMap<usize, f64>, SolidError> {
+        let mut fixed = BTreeMap::new();
+        for (patch, g) in &self.dirichlet {
+            if self.mesh.patch_edges(*patch).is_none() {
+                return Err(SolidError::UnknownPatch { patch: *patch });
+            }
+            for node in self.mesh.patch_nodes(*patch) {
+                let p = self.mesh.nodes[node];
+                let val = g(p[0], p[1]);
+                if val.iter().any(|value| !value.is_finite()) {
+                    return Err(SolidError::InvalidInput {
+                        what: format!("prescribed displacement at node {node} must be finite"),
+                    });
+                }
+                fixed.insert(2 * node, val[0]);
+                fixed.insert(2 * node + 1, val[1]);
+            }
+        }
+        for (patch, comp) in &self.symmetry {
+            if self.mesh.patch_edges(*patch).is_none() {
+                return Err(SolidError::UnknownPatch { patch: *patch });
+            }
+            for node in self.mesh.patch_nodes(*patch) {
+                // entry-or-insert: explicit Dirichlet wins on shared nodes.
+                fixed.entry(2 * node + comp).or_insert(0.0);
+            }
+        }
+        Ok(fixed)
+    }
+
+    // Keep full external forces available to the reaction observer, including
+    // loads on prescribed rows. Elimination is the solve caller's decision.
+    fn traction_forces(
+        &self,
+        checkpoint: &impl Fn() -> Result<(), SolidError>,
+        mut visit: impl FnMut(usize, f64),
+    ) -> Result<(), SolidError> {
+        for (patch, t) in &self.traction {
+            let edges = self
+                .mesh
+                .patch_edges(*patch)
+                .ok_or(SolidError::UnknownPatch { patch: *patch })?;
+            for &(a, b) in edges {
+                checkpoint()?;
+                let (pa, pb) = (self.mesh.nodes[a], self.mesh.nodes[b]);
+                let len = (pb[0] - pa[0]).hypot(pb[1] - pa[1]);
+                let g = 0.5 / 3.0f64.sqrt();
+                for s in [0.5 - g, 0.5 + g] {
+                    let p = [pa[0] + s * (pb[0] - pa[0]), pa[1] + s * (pb[1] - pa[1])];
+                    let tv = t(p[0], p[1]);
+                    if tv.iter().any(|v| !v.is_finite()) || !len.is_finite() {
+                        return Err(SolidError::InvalidInput {
+                            what: "boundary traction and its physical measure must be finite"
+                                .into(),
+                        });
+                    }
+                    let w = 0.5 * len;
+                    for (node, shape) in [(a, 1.0 - s), (b, s)] {
+                        for (c, tc) in tv.iter().enumerate() {
+                            let force = w * shape * tc;
+                            if !force.is_finite() {
+                                return Err(SolidError::InvalidInput {
+                                    what: "unrepresentable integrated boundary force".into(),
+                                });
+                            }
+                            visit(2 * node + c, force);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // The same assumed strain enters stiffness, recovered stress and virtual
+    // work. Keep the mean gradient independent of the displacement field.
+    fn mean_gradients(&self, conn: &[usize]) -> Option<Vec<[f64; 2]>> {
+        if self.formulation != Formulation::BBar {
+            return None;
+        }
+        let mut mean = vec![[0.0; 2]; conn.len()];
+        let mut area = 0.0;
+        for (xi, eta, w) in quad_points(conn.len()) {
+            let (_, gradients, determinant) = shapes_at(&self.mesh.nodes, conn, xi, eta);
+            for (average, gradient) in mean.iter_mut().zip(gradients) {
+                for i in 0..2 {
+                    average[i] += w * determinant * gradient[i];
+                }
+            }
+            area += w * determinant;
+        }
+        for gradient in &mut mean {
+            for value in gradient {
+                *value /= area;
+            }
+        }
+        Some(mean)
+    }
+
+    fn point_body_force(&self, conn: &[usize], shape: &[f64]) -> Option<[f64; 2]> {
+        self.body_force.map(|body| {
+            let mut point = [0.0; 2];
+            for (a, &node) in conn.iter().enumerate() {
+                for (i, value) in point.iter_mut().enumerate() {
+                    *value += shape[a] * self.mesh.nodes[node][i];
+                }
+            }
+            body(point[0], point[1])
+        })
+    }
+
     /// One element's stiffness and body-force load (B-matrix form,
     /// Voigt [εxx, εyy, γxy]).
     pub(crate) fn element(
@@ -290,47 +369,15 @@ impl LinearProblem<'_> {
             [0.0, 0.0, mu],
         ];
         let pts = quad_points(nn);
-        // B-bar: element-average dilatational gradient.
-        let mut bbar = vec![[0.0f64; 2]; nn];
-        let mut vol = 0.0f64;
-        if self.formulation == Formulation::BBar {
-            for &(xi, eta, w) in &pts {
-                let (_, grads, det) = shapes_at(&self.mesh.nodes, conn, xi, eta);
-                for (a, g) in grads.iter().enumerate() {
-                    bbar[a][0] += w * det * g[0];
-                    bbar[a][1] += w * det * g[1];
-                }
-                vol += w * det;
-            }
-            for g in &mut bbar {
-                g[0] /= vol;
-                g[1] /= vol;
-            }
-        }
+        let bbar = self.mean_gradients(conn);
         let mut k = vec![vec![0.0f64; 2 * nn]; 2 * nn];
         let mut fl = vec![0.0f64; 2 * nn];
         for &(xi, eta, w) in &pts {
             let (shape, grads, det) = shapes_at(&self.mesh.nodes, conn, xi, eta);
             let wq = w * det;
-            // Rows of B per node/component, with the B-bar dilatation
-            // swap when enabled.
-            let b_of = |a: usize, c: usize| -> [f64; 3] {
-                let g = grads[a];
-                let mut b = if c == 0 {
-                    [g[0], 0.0, g[1]]
-                } else {
-                    [0.0, g[1], g[0]]
-                };
-                if self.formulation == Formulation::BBar {
-                    let corr = 0.5 * (bbar[a][c] - g[c]);
-                    b[0] += corr;
-                    b[1] += corr;
-                }
-                b
-            };
             for a in 0..nn {
                 for ca in 0..2 {
-                    let ba = b_of(a, ca);
+                    let ba = strain_column(&grads, bbar.as_deref(), a, ca);
                     let db = [
                         d[0][0] * ba[0] + d[0][1] * ba[1],
                         d[1][0] * ba[0] + d[1][1] * ba[1],
@@ -338,20 +385,14 @@ impl LinearProblem<'_> {
                     ];
                     for b in 0..nn {
                         for cb in 0..2 {
-                            let bb = b_of(b, cb);
+                            let bb = strain_column(&grads, bbar.as_deref(), b, cb);
                             k[2 * a + ca][2 * b + cb] +=
                                 wq * (db[0] * bb[0] + db[1] * bb[1] + db[2] * bb[2]);
                         }
                     }
                 }
             }
-            if let Some(bf) = self.body_force {
-                let mut p = [0.0f64; 2];
-                for (a, &node) in conn.iter().enumerate() {
-                    p[0] += shape[a] * self.mesh.nodes[node][0];
-                    p[1] += shape[a] * self.mesh.nodes[node][1];
-                }
-                let f = bf(p[0], p[1]);
+            if let Some(f) = self.point_body_force(conn, &shape) {
                 for a in 0..nn {
                     fl[2 * a] += wq * shape[a] * f[0];
                     fl[2 * a + 1] += wq * shape[a] * f[1];
@@ -360,6 +401,27 @@ impl LinearProblem<'_> {
         }
         (k, fl)
     }
+}
+
+// Engineering-shear column [epsilon_xx, epsilon_yy, gamma_xy].
+fn strain_column(
+    gradients: &[[f64; 2]],
+    mean: Option<&[[f64; 2]]>,
+    node: usize,
+    component: usize,
+) -> [f64; 3] {
+    let g = gradients[node];
+    let mut b = if component == 0 {
+        [g[0], 0.0, g[1]]
+    } else {
+        [0.0, g[1], g[0]]
+    };
+    if let Some(mean) = mean {
+        let correction = 0.5 * (mean[node][component] - g[component]);
+        b[0] += correction;
+        b[1] += correction;
+    }
+    b
 }
 
 /// Scatter an element matrix with strong-Dirichlet elimination
