@@ -10,6 +10,8 @@ mod gas_fixture;
 mod finite_gas_heat;
 #[path = "wind_input/observation_filter.rs"]
 mod observation_filter;
+#[path = "wind_input/airway_report.rs"]
+mod airway_report;
 use std::io::{Read, Write};
 use std::path::Path;
 use fs_blake3::ContentHash;
@@ -441,6 +443,8 @@ struct Loaded {
     // A source that already owns multirate physical observation reports THAT
     // clock/filter history; the identity PCM wrapper must not call it 48k mechanics.
     observation_json:Option<String>,
+    // A flue card's upstream airway: its record, and the samples it passed no flow, read once the render ends.
+    airway:Option<airway_report::AirwayReport>,
 }
 
 pub(super) fn resolved_provenance(
@@ -1391,7 +1395,7 @@ fn load_with_all_sources(
         return Ok(Loaded {
             source: Box::new(p.into_renderer()), rate: info.sample_rate_hz, samples: info.samples,
             full_scale_pa: info.full_scale_pa, hash: info.input_hash,
-            fixture: "resolved-dg-input", source_json, observation_json: None,
+            fixture: "resolved-dg-input", source_json, observation_json: None, airway: None,
         });
     }
     if bytes.starts_with(b"frankensim-material-modal-dg-valve-v1\n") {
@@ -1406,7 +1410,7 @@ fn load_with_all_sources(
         return Ok(Loaded {
             source: Box::new(p.into_renderer()), rate: i.output_rate_hz,
             samples: i.samples, full_scale_pa: i.full_scale_pa, hash: i.input_hash,
-            fixture: "material-modal-dg-input", source_json, observation_json: None,
+            fixture: "material-modal-dg-input", source_json, observation_json: None, airway: None,
         });
     }
     if bytes.starts_with(b"frankensim-material-modal-valve-v1\n") {
@@ -1427,7 +1431,7 @@ fn load_with_all_sources(
             microphone.filter_delay_samples(), microphone.delay_samples.0, microphone.delay_samples.1);
         return Ok(Loaded { source: Box::new(p.into_renderer()), rate: i.output_rate_hz,
             samples: i.samples, full_scale_pa: i.full_scale_pa, hash: i.input_hash,
-            fixture: "material-modal-valve-input", source_json, observation_json: Some(observation_json) });
+            fixture: "material-modal-valve-input", source_json, observation_json: Some(observation_json), airway: None });
     }
     // Exact versioned source header selects the existing owner; filenames and
     // instrument labels never choose geometry or material constants.
@@ -1447,7 +1451,7 @@ fn load_with_all_sources(
         let source_json = flue_dg_provenance(&p);
         return Ok(Loaded { source: Box::new(p.into_renderer()), rate: i.sample_rate_hz,
             samples: i.samples, full_scale_pa: i.full_scale_pa, hash: i.input_hash,
-            fixture: "flue-dg-input", source_json, observation_json: None });
+            fixture: "flue-dg-input", source_json, observation_json: None, airway: None });
     }
     if bytes.starts_with(b"frankensim-flue-performance-v1\n") {
         if policy == ObservationPolicy::Acceptance {
@@ -1467,15 +1471,17 @@ fn load_with_all_sources(
         let observation_json = format!("{{\"mechanics_sample_rate_hz\":{},\"mechanics_samples\":{mechanical_samples},\"output_sample_rate_hz\":{RATE},\"ratio\":{ratio},\"filter\":\"shared multirate differentiating Rayleigh receiver with bandlimited propagation\",\"delay_output_samples\":{},\"propagation_fir_support_output_samples\":[{},{}],\"first_output_source_index\":{},\"initial_history\":\"zero\",\"delay_compensated\":false,\"tail\":\"no-flush-declared-window\"}}",
             i.mechanics_rate_hz,renderer.receiver().filter_delay_samples(),propagation.0,
             propagation.1,ratio-1);
+        let airway_head = airway_report::head(&p);
         let renderer = match flow_tap {
             Some((sink, false)) => p.into_renderer().with_aperture_flow_tap(sink).map_err(|e| e.to_string())?,
             Some((sink, true)) => p.into_renderer().with_aperture_flow_and_labium_tap(sink)
                 .map_err(|e| e.to_string())?,
             None => p.into_renderer(),
         };
-        Ok(Loaded { source:Box::new(renderer),rate:i.sample_rate_hz,samples:i.samples,
+        let (source, airway) = airway_report::tap(renderer, airway_head);
+        Ok(Loaded { source,rate:i.sample_rate_hz,samples:i.samples,
             full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"flue-input",source_json,
-            observation_json:Some(observation_json) })
+            observation_json:Some(observation_json),airway })
     } else if bytes.starts_with(b"frankensim-plate-valve-performance-v1\n") {
         if policy == ObservationPolicy::Acceptance {
             return Err("--acceptance selects the explicit ReedPerformance flanged-development path; plate-valve files require explicit matched-load builder admission".into());
@@ -1520,7 +1526,7 @@ fn load_with_all_sources(
             i.input_hash.to_hex(),i.nodes,i.triangles,i.sections,i.memory_branches,i.compiled_controls,
             requested,i.represented_tube_length_m,plate.mass_kg(),plate.stiffness_n_m(),plate.pressure_area_m2());
         Ok(Loaded{source:Box::new(p.into_renderer()),rate:i.sample_rate_hz,samples:i.samples,
-            full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"plate-valve-input",source_json,observation_json:None})
+            full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"plate-valve-input",source_json,observation_json:None,airway:None})
     } else {
         let p=ReedPerformance::from_bytes_with_sources_and_outlet_latency(bytes,block,policy,sources,load_material,outlet_latency).map_err(|e|e.to_string())?;
         let i=p.info();
@@ -1540,7 +1546,7 @@ fn load_with_all_sources(
         let source_json=format!("\"reed_input\":{{\"schema\":\"{REED_PERFORMANCE_SCHEMA}\",\"observation_policy\":\"{policy_name}\",\"blake3\":\"{}\",\"segments\":{},\"tone_holes\":{},\"massive_reed\":{},\"gesture_events\":{},\"compiled_controls\":{}{observer_json}{slit_json}{observer_receipt}}}",
             i.input_hash.to_hex(),i.segments,i.tone_holes,i.massive_reed,i.gesture_events,i.compiled_controls);
         Ok(Loaded{source:Box::new(p),rate:i.sample_rate_hz,samples:i.samples,
-            full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"reed-input",source_json,observation_json:None})
+            full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"reed-input",source_json,observation_json:None,airway:None})
     }
 }
 
@@ -1758,12 +1764,14 @@ fn run_with_prepared_sources(
         "{{\"{source_clock}_sample_rate_hz\":{},\"{source_clock}_samples\":{},\"output_sample_rate_hz\":{RATE},\"ratio\":{},\"filter\":\"{}\",\"delay_output_samples\":{},\"first_output_source_index\":{},\"initial_history\":\"zero\",\"delay_compensated\":false,\"tail\":\"no-flush-declared-window\"}}",
         loaded.rate,loaded.samples,observation.ratio,observation.filter_profile,
         observation.delay_output_samples,observation.first_output_source_index));
+    // Read after the render: the airway's closures are the whole render's.
+    let airway_json = loaded.airway.as_ref().map_or_else(String::new, airway_report::AirwayReport::json);
     let provenance = format!(
         "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"{fixture}\",\
          \"sample_rate_hz\":{RATE},\"samples\":{samples},\"block\":{block},\
          \"full_scale_pa\":{:e},\"clipped_samples\":{},\"peak_pa\":{:e},\"rms_pa\":{:e},\
          \"wav_blake3\":\"{wav_hash}\",\
-         \"encoder\":\"fs_couple::pcm_wav (mono PCM16, never peak-normalized)\",{},\
+         \"encoder\":\"fs_couple::pcm_wav (mono PCM16, never peak-normalized)\",{},{airway_json}\
          \"observation\":{observation_json}}}",
         loaded.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,loaded.source_json,
     );

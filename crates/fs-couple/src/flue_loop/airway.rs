@@ -1,0 +1,779 @@
+//! The player's airway ahead of the windway (opt-in, [`FlueVoice::with_upstream_airway`]): the duct from the windway's
+//! inlet back to the lungs, as [`crate::upstream_airway`] realizes it, in place of the ideal blowing source.
+//!
+//! **The source.** With an airway the gesture's blowing pressure is the pressure at the airway's far end (the lungs).
+//! Each sample the windway's inlet, the foot, sees the airway's port `p = P_oc - Z Q` ([`UpstreamAirway::port`]), with
+//! `Q = u h W` the windway's volume flux at its bulk speed `u` over the exit `h W`.
+//!
+//! **The foot pressure.** The windway's own quasi-steady law closes the sample. With no windway law the jet takes the
+//! inviscid `P_f = rho u^2 / 2`; with the fully developed slit (`windway slit`,
+//! [`crate::bernoulli_aperture::viscous::ViscousSlit`]) `P_f = a u + rho u^2 / 2` with `a = 12 mu L / h^2`. Against the
+//! port, `P_oc = (a + Z h W) u + rho u^2 / 2`, a quadratic in `u` whose one non-negative root is taken in the
+//! rationalized form `u = 2 P_oc / (a' + sqrt(a'^2 + 2 rho P_oc))`, `a' = a + Z h W`, and the foot pressure is the law's
+//! own `P_f = (a + rho u / 2) u`, with no cancellation. With no slit term this is `sqrt(P_f) = (-k + sqrt(k^2 + 4
+//! P_oc)) / 2`, `k = Z h W sqrt(2 / rho)`.
+//!
+//! **What reads it.** Every per-sample reader of the blowing pressure reads the foot pressure instead: the jet's bulk
+//! speed (its flux), the card's speed, the breath noise's foot pressure and the blowing work. After the sample is
+//! accepted, [`UpstreamAirway::commit`] takes `Q` and sends its wave down the airway. Without an airway nothing here
+//! runs: the foot pressure is the gesture's, the ideal port, bit for bit.
+//!
+//! **A one-way windway.** The jet's law runs one way, as the voice without an airway refuses a negative blowing
+//! pressure. On a sample whose open-circuit pressure is not positive the windway passes no flow: the jet's speed and
+//! flux and the foot pressure it reads are zero, and the airway is committed a zero flow, so it sees a closed end that
+//! sample. Air drawn back through the windway has no law here. Those samples are counted and the most negative
+//! open-circuit pressure is kept ([`FlueVoice::upstream_airway_closures`]), so a reverse drive is reported, never
+//! hidden. From rest, until the lung pressure's wave reaches the windway, the open-circuit pressure is the source
+//! FIR's taps ahead of the airway's travel time, zero up to its realization and of either sign.
+//!
+//! **The arrival.** The lung pressure's wave reaches the windway after the airway's travel time `tau = L f_s / c`,
+//! rarely a whole number of samples. Before it, the band-limited source FIR carries the sinc's pre-ringing of that
+//! sub-sample arrival, alternating in sign each sample, so samples before `tau` can close the windway; nothing in the
+//! realization lies at negative time. The closures are kept before and from the arrival apart: before it the most
+//! negative open-circuit pressure is judged against [`sampled_step_undershoot`] at the airway's own `tau` times the
+//! closed-end jump the chain itself realizes ([`closed_end_jump_pa`]: the source FIR's step height at its first maximum
+//! after the arrival times the drive of the largest lung pressure there, twice that pressure only where the step height
+//! is one), from it every sample against the no-reverse-drive bound. A
+//! later fall of the lung pressure rings the same way about its own arrival, which then lies after `tau`: a render
+//! with a release names those closures.
+//!
+//! **The jet at each sample's speed.** A no-flow sample has no jet: nothing convects and the jet reads no retarded
+//! mouth velocity ([`FlueAirwayFrame::jet_transit_s`] is infinite). An open sample's jet convects by the transit law of
+//! [`FlueVoice::transit_s`] at THAT sample's speed, never at the speed the sample before left, which after a no-flow
+//! sample is zero. No delay is clamped: at or above the jet's minimum speed the delay lies inside its retained history.
+//!
+//! **Refused by name.** The rows that hold the jet on the HELD blowing pressure, which with an airway is no longer the
+//! foot's: the developing windway (Shah's law held at that pressure), the unsteady windway (its channel is driven by the
+//! gesture's pressure, not by the port) and the card centreline speed (held at attachment). Also the separated-jet slit
+//! law, which no flue row selects.
+//!
+//! **Limits, not hidden.** The windway sees the airway through its quasi-steady law alone, and the jet's speed reads
+//! the foot pressure and nothing else, so the bore's acoustic pressure at the mouth never reaches the airway: the
+//! airway and the pipe exchange no waves. With a held lung pressure the airway settles to `P_f = P_lung - R_dc Q`
+//! (both FIRs carry exact DC bins), and between holds it shapes the attack and the release. Every tube is filled with
+//! the voice's own source gas. The forced jet's reference pressure (the Reynolds number of its integration) stays the
+//! gesture's held pressure. Everything [`crate::upstream_airway`] states as its limits applies.
+
+use super::{FlueError, FlueVoice};
+use crate::acoustic_realize::AcousticRealizeError;
+use crate::bernoulli_aperture::viscous::ViscousSlit;
+use crate::driving_point::{DrivingPointError, LineLadder};
+use crate::upstream_airway::{AirwayChain, UpstreamAirway, UpstreamPort};
+
+/// The developing windway holds Shah's law at the held blowing pressure.
+pub const AIRWAY_REFUSES_DEVELOPING_WINDWAY: &str =
+    "an upstream airway refuses the developing windway: Shah's law is held at the held blowing pressure, not at the airway's foot pressure";
+/// The unsteady windway's channel is driven by the gesture's pressure.
+pub const AIRWAY_REFUSES_UNSTEADY_WINDWAY: &str =
+    "an upstream airway refuses the unsteady windway: its channel is driven by the gesture's pressure, not by the airway's port";
+/// The card centreline speed is held at attachment on the held blowing pressure.
+pub const AIRWAY_REFUSES_CARD_CENTRELINE: &str =
+    "an upstream airway refuses the card centreline speed: it is held on the held blowing pressure, not on the airway's foot pressure";
+/// No flue row selects the separated-jet slit law; the foot closure is written for the fully developed one.
+pub const AIRWAY_REFUSES_SEPARATED_SLIT: &str =
+    "an upstream airway takes no windway law or the fully developed slit, not the separated-jet slit";
+/// The accepted samples on which the windway passed no flow (module doc, a one-way windway), in all and split at the
+/// source FIR's arrival (module doc, the arrival). Sample indices count the voice's own clock from its first accepted
+/// sample.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct FlueAirwayClosures {
+    /// Accepted samples whose open-circuit pressure was not positive.
+    pub samples: u64,
+    /// Runs of consecutive such samples.
+    pub runs: u64,
+    /// The first such sample's index; `None` when there was none.
+    pub first_sample: Option<u64>,
+    /// The last such sample's index; `None` when there was none.
+    pub last_sample: Option<u64>,
+    /// The most negative open-circuit pressure on those samples [Pa]; zero when none was below zero.
+    pub least_open_circuit_pa: f64,
+    /// The source FIR's arrival `tau` [samples]: the airway's travel time from the lungs to the windway, `L f_s / c`,
+    /// as the airway realizes it. A sample `n < tau` lies before the arrival.
+    pub arrival_samples: f64,
+    /// The largest lung pressure on the accepted samples before the arrival [Pa]: the drive of the closed-end jump
+    /// ([`closed_end_jump_pa`]) the pre-arrival ringing is judged against ([`sampled_step_undershoot`]).
+    pub lung_before_arrival_pa: f64,
+    /// The most negative open-circuit pressure on the no-flow samples before the arrival [Pa]; zero when none.
+    pub least_before_arrival_pa: f64,
+    /// The no-flow samples from the arrival on (`n >= tau`).
+    pub samples_from_arrival: u64,
+    /// The first of them; `None` when there was none.
+    pub first_sample_from_arrival: Option<u64>,
+    /// Their most negative open-circuit pressure [Pa]; zero when none was below zero.
+    pub least_from_arrival_pa: f64,
+}
+
+impl FlueAirwayClosures {
+    /// Count the accepted sample `index` at the lung pressure `lung_pa` if its open-circuit pressure `open_circuit_pa`
+    /// passed no flow, before or from the arrival.
+    fn note(&mut self, index: u64, lung_pa: f64, open_circuit_pa: f64) {
+        // A sample index is far below 2^53, so the cast is exact.
+        #[allow(clippy::cast_precision_loss)]
+        let before = (index as f64) < self.arrival_samples;
+        if before {
+            self.lung_before_arrival_pa = self.lung_before_arrival_pa.max(lung_pa);
+        }
+        if open_circuit_pa > 0.0 {
+            return;
+        }
+        if self.last_sample.is_none_or(|last| last + 1 != index) {
+            self.runs += 1;
+        }
+        self.samples += 1;
+        self.first_sample.get_or_insert(index);
+        self.last_sample = Some(index);
+        self.least_open_circuit_pa = self.least_open_circuit_pa.min(open_circuit_pa);
+        if before {
+            self.least_before_arrival_pa = self.least_before_arrival_pa.min(open_circuit_pa);
+        } else {
+            self.samples_from_arrival += 1;
+            self.first_sample_from_arrival.get_or_insert(index);
+            self.least_from_arrival_pa = self.least_from_arrival_pa.min(open_circuit_pa);
+        }
+    }
+}
+
+/// The deepest undershoot `B` before its arrival of the ideal lossless band-limited unit step delayed by
+/// `arrival_samples` (`tau`) and sampled from 0: `B = -min over n < tau of sum_{k=0..=n} sinc(k - tau)`, zero when no
+/// partial sum is negative (MB 18430).
+///
+/// A causal chain has nothing before its arrival. A band-limited realization of a delay that is not a whole number of
+/// samples cannot be zero on `[0, tau)`: its samples there are the sinc's tails, alternating in sign and rising toward
+/// the arrival, so a step's running sum dips below zero just before it. A realization with loss and the Nyquist rolloff
+/// rings no more than this lossless brickwall one at the same `tau`, so `B` times the closed-end jump bounds the
+/// open-circuit pressure before the arrival. A whole-sample delay gives zero. Over every fraction, `B` is 0.1338 at
+/// `tau` near 20 samples, 0.1381 near 50, 0.1404 near 200 and 0.1411 in the limit of a long delay (all at a fraction
+/// near 0.42). Under about 10 samples the step's missing negative-time part raises it (0.217 near 1.4).
+#[must_use]
+pub fn sampled_step_undershoot(arrival_samples: f64) -> f64 {
+    let sinc = |x: f64| if x == 0.0 { 1.0 } else { (core::f64::consts::PI * x).sin() / (core::f64::consts::PI * x) };
+    let (mut sum, mut least, mut n) = (0.0_f64, 0.0_f64, 0.0_f64);
+    while n < arrival_samples {
+        sum += sinc(n - arrival_samples);
+        least = least.min(sum);
+        n += 1.0;
+    }
+    0.0 - least
+}
+
+/// The chain's own step height at the windway (MB 18441): the running sum of `airway`'s realized source FIR at its
+/// first maximum at or after the arrival `arrival_samples`, its first overshoot included; zero when the FIR ends first.
+/// A chain that narrows toward the windway raises it above one.
+#[must_use]
+pub fn source_step_height(airway: &UpstreamAirway, arrival_samples: f64) -> f64 {
+    let (mut sum, mut step, mut n) = (0.0_f64, 0.0_f64, 0.0_f64);
+    let mut rising = false;
+    for &g in airway.source_taps() {
+        sum += g;
+        if n >= arrival_samples {
+            if rising && sum < step {
+                break;
+            }
+            rising = true;
+            step = sum;
+        }
+        n += 1.0;
+    }
+    step
+}
+
+/// The closed-end jump [Pa] a lung pressure `lung_pa` makes at the windway on `airway`: the chain's own step height
+/// ([`source_step_height`]) times the drive `2 lung_pa / (1 - r0)` the port's open-circuit pressure carries
+/// ([`UpstreamAirway::port`]). It is `2 lung_pa` only where the step height is one.
+#[must_use]
+pub fn closed_end_jump_pa(airway: &UpstreamAirway, arrival_samples: f64, lung_pa: f64) -> f64 {
+    2.0 * lung_pa / (1.0 - airway.receipt().same_sample_reflection) * source_step_height(airway, arrival_samples)
+}
+
+/// One accepted sample at the windway's inlet with an airway attached.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlueAirwayFrame {
+    /// The gesture's blowing pressure, held at the airway's far end (the lungs) [Pa].
+    pub lung_pa: f64,
+    /// The Thevenin source the windway saw this sample.
+    pub port: UpstreamPort,
+    /// The solved foot pressure the jet read [Pa].
+    pub foot_pa: f64,
+    /// The windway's volume flux `u h W` committed to the airway [m^3/s].
+    pub flow_m3_s: f64,
+    /// The pressure the airway returned on commit [Pa]; the foot pressure up to rounding.
+    pub valve_pa: f64,
+    /// The jet's convective transit this sample used [s]: the law of [`FlueVoice::transit_s`] at this sample's own
+    /// speed, infinite on a no-flow sample, which has no jet.
+    pub jet_transit_s: f64,
+}
+
+/// The realized airway, the last accepted frame and the samples it passed no flow.
+pub(super) struct FlueUpstream {
+    pub(super) airway: UpstreamAirway,
+    pub(super) frame: Option<FlueAirwayFrame>,
+    pub(super) closures: FlueAirwayClosures,
+}
+
+/// This sample's port and its closure, before the sample is accepted.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct AirwayFoot {
+    pub(super) port: UpstreamPort,
+    pub(super) foot_pa: f64,
+    pub(super) speed_m_s: f64,
+}
+
+pub(super) fn airway_error(error: DrivingPointError) -> FlueError {
+    match error {
+        DrivingPointError::Invalid { what } => FlueError::Invalid { what },
+        other => FlueError::Physics(AcousticRealizeError::Nonlinear(format!("upstream airway refused: {other}"))),
+    }
+}
+
+/// The slit's linear coefficient `a = 12 mu L / h^2` [Pa s/m], as the slit law forms it; zero with no windway law.
+fn slit_linear(law: Option<ViscousSlit>, opening_m: f64) -> Result<f64, FlueError> {
+    match law {
+        None => Ok(0.0),
+        Some(law) if law.is_separated_jet() => Err(FlueError::Invalid { what: AIRWAY_REFUSES_SEPARATED_SLIT }),
+        Some(law) => Ok((12.0 * (law.dynamic_viscosity_pa_s() * law.length_m()) / opening_m) / opening_m),
+    }
+}
+
+/// The windway's closure against `port` (module doc): the bulk speed `u >= 0` with `P_oc - Z A u = a u + rho u^2 / 2`,
+/// returned as `(foot pressure, u)`, the foot pressure the law's own `(a + rho u / 2) u`. A non-positive open-circuit
+/// pressure passes no flow, `(0, 0)` (a one-way windway).
+///
+/// # Errors
+/// A non-finite open-circuit pressure, a non-finite or negative coefficient, or a non-finite result.
+pub fn foot_pressure(port: UpstreamPort, linear_pa_s_m: f64, exit_area_m2: f64, density: f64)
+    -> Result<(f64, f64), FlueError>
+{
+    let p = port.open_circuit_pa;
+    if !p.is_finite() {
+        return Err(FlueError::Invalid { what: "the airway's open-circuit pressure is not finite" });
+    }
+    let a = linear_pa_s_m + port.impedance * exit_area_m2;
+    if !(a.is_finite() && a >= 0.0 && density.is_finite() && density > 0.0) {
+        return Err(FlueError::Invalid { what: "the windway's closure against the airway needs finite non-negative coefficients" });
+    }
+    if p <= 0.0 {
+        return Ok((0.0, 0.0));
+    }
+    let speed = 2.0 * p / (a + (a * a + 2.0 * density * p).sqrt());
+    let foot = (linear_pa_s_m + 0.5 * density * speed) * speed;
+    if !(speed.is_finite() && foot.is_finite()) {
+        return Err(FlueError::Invalid { what: "the windway's closure against the airway left the finite set" });
+    }
+    Ok((foot, speed))
+}
+
+impl FlueVoice {
+    /// Put the player's airway ahead of the windway (module doc) before any accepted sample: `chain` from the windway's
+    /// inlet to the lungs, realized in the voice's own source gas on its own clock with `ladder`. From then on the
+    /// blowing pressure is the lung pressure and the jet reads the foot pressure each sample.
+    ///
+    /// # Errors
+    /// Late or repeated attachment, a poisoned voice, the developing or unsteady windway or the card centreline speed
+    /// (by name, [`AIRWAY_REFUSES_DEVELOPING_WINDWAY`], [`AIRWAY_REFUSES_UNSTEADY_WINDWAY`],
+    /// [`AIRWAY_REFUSES_CARD_CENTRELINE`]), the separated-jet slit, a clock that is not a whole number of hertz, or the
+    /// airway's own realization refusal.
+    pub fn with_upstream_airway(mut self, chain: &AirwayChain, ladder: &LineLadder) -> Result<Self, FlueError> {
+        if self.poisoned || self.samples != 0 || self.upstream_airway.is_some() {
+            return Err(FlueError::Invalid { what: "an upstream airway requires one cold attachment" });
+        }
+        if self.developing_windway.is_some() {
+            return Err(FlueError::Invalid { what: AIRWAY_REFUSES_DEVELOPING_WINDWAY });
+        }
+        if self.unsteady_windway.is_some() {
+            return Err(FlueError::Invalid { what: AIRWAY_REFUSES_UNSTEADY_WINDWAY });
+        }
+        if self.card_centreline.is_some() {
+            return Err(FlueError::Invalid { what: AIRWAY_REFUSES_CARD_CENTRELINE });
+        }
+        slit_linear(self.viscous_windway, self.geometry.flue_height_m)?;
+        let rate = (1.0 / self.dt).round();
+        if !(rate >= 1.0 && rate <= f64::from(u32::MAX)) || 1.0 / rate != self.dt {
+            return Err(FlueError::Invalid { what: "an upstream airway needs a flue clock of a whole number of hertz" });
+        }
+        // The guard above bounds `rate` to the u32 range.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let airway = UpstreamAirway::realize(chain, &self.gas, rate as u32, ladder).map_err(airway_error)?;
+        // The source FIR's arrival, as the realization computes its transit.
+        let arrival_samples = chain.path_length_m() / self.gas.sound_speed * rate;
+        let closures = FlueAirwayClosures { arrival_samples, ..FlueAirwayClosures::default() };
+        self.upstream_airway = Some(Box::new(FlueUpstream { airway, frame: None, closures }));
+        Ok(self)
+    }
+
+    /// The realized airway ahead of the windway, if any.
+    #[must_use]
+    pub fn upstream_airway(&self) -> Option<&UpstreamAirway> {
+        self.upstream_airway.as_deref().map(|up| &up.airway)
+    }
+
+    /// The last accepted sample at the windway's inlet with an airway attached.
+    #[must_use]
+    pub fn upstream_airway_frame(&self) -> Option<&FlueAirwayFrame> {
+        self.upstream_airway.as_deref().and_then(|up| up.frame.as_ref())
+    }
+
+    /// The accepted samples on which the windway passed no flow, and the most negative open-circuit pressure among
+    /// them (module doc, a one-way windway), if an airway is attached.
+    #[must_use]
+    pub fn upstream_airway_closures(&self) -> Option<FlueAirwayClosures> {
+        self.upstream_airway.as_deref().map(|up| up.closures)
+    }
+
+    /// This sample's port at the lung pressure `lung_pa` and the windway's closure against it; `None` without an airway.
+    pub(super) fn airway_foot(&mut self, lung_pa: f64) -> Result<Option<AirwayFoot>, FlueError> {
+        // Without an airway nothing is read or computed.
+        if self.upstream_airway.is_none() {
+            return Ok(None);
+        }
+        let linear = slit_linear(self.viscous_windway, self.geometry.flue_height_m)?;
+        let area = self.geometry.flue_height_m * self.geometry.flue_width_m;
+        let rho = self.rho;
+        let Some(up) = self.upstream_airway.as_deref_mut() else { return Ok(None) };
+        let port = up.airway.port(lung_pa).map_err(airway_error)?;
+        let (foot_pa, speed_m_s) = foot_pressure(port, linear, area, rho)?;
+        Ok(Some(AirwayFoot { port, foot_pa, speed_m_s }))
+    }
+
+    /// Close an accepted sample: commit the windway's flux at `foot`'s speed and keep the frame, with the jet's transit
+    /// `jet_transit_s` [s] this sample used.
+    pub(super) fn airway_commit(&mut self, lung_pa: f64, foot: AirwayFoot, jet_transit_s: f64) -> Result<(), FlueError> {
+        let flow_m3_s = foot.speed_m_s * self.geometry.flue_height_m * self.geometry.flue_width_m;
+        // This sample's index: the voice counts it once it is accepted, after this commit.
+        let index = self.samples;
+        let Some(up) = self.upstream_airway.as_deref_mut() else { return Ok(()) };
+        let valve_pa = up.airway.commit(flow_m3_s).map_err(airway_error)?;
+        up.frame = Some(FlueAirwayFrame { lung_pa, port: foot.port, foot_pa: foot.foot_pa, flow_m3_s, valve_pa, jet_transit_s });
+        up.closures.note(index, lung_pa, foot.port.open_circuit_pa);
+        self.jet_speed_m_s = foot.speed_m_s;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::float_cmp)]
+mod tests {
+    use super::*;
+    use crate::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec, TubeSection};
+    use crate::flue_loop::{FlueControl, FlueGeometry, network};
+    use crate::upstream_airway::AirwaySection;
+    use fs_duct::LossModel;
+    use fs_exec::CancelGate;
+    use fs_material::gas::{GasSpec, GasState};
+
+    // Plumbing fixtures on a 48 kHz clock, not instrument specimens: a straight pipe, a two-section duct (its first
+    // section's Z_s near the windway's own dP/dQ, so the loop rings down fast) ahead of eight generations of
+    // Weibel's tree, rigid.
+    const RATE: u32 = 48_000;
+    const HOLD_PA: f64 = 300.0;
+    // The held pressure of the existing developing-windway and centreline tests, inside Shah's validity here.
+    const HELD_PA: f64 = 100.0;
+
+    fn gas() -> GasState {
+        GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap()
+    }
+
+    fn geometry() -> FlueGeometry {
+        FlueGeometry { flue_width_m: 0.010, flue_height_m: 0.001, cut_up_m: 0.004, labium_offset_m: 0.0,
+            jet_angle_rad: 0.0, bore_area_m2: core::f64::consts::PI * 0.006 * 0.006, mouth_loss_rel: 0.02 }
+    }
+
+    fn voice() -> FlueVoice {
+        let gas = gas();
+        let source = network::FlueNetworkSpec {
+            graph: TubeNetworkSpec {
+                nodes: vec![NetworkNode::Inlet, NetworkNode::Termination { reflection: -0.7 }],
+                sections: vec![TubeSection { nodes: [0, 1], length_m: 0.3, radius_m: 0.006, max_length_error_m: 0.005 }],
+                sound_speed_m_s: gas.sound_speed, max_wave_memory_bytes: 1_000_000,
+            },
+            gases: vec![gas], viscothermal: vec![], minimum_jet_speed_m_s: 1.0,
+            maximum_jet_mach: 0.3, max_jet_history_samples: 4096,
+        };
+        FlueVoice::from_network(Some(&fs_aeroac::jetcard::mint_tonal_interim_card().unwrap()),
+            90.0, 1e-6, geometry(), source, RATE, 3, 0, &CancelGate::new_clock_free()).unwrap()
+    }
+
+    fn chain() -> AirwayChain {
+        let duct = AirwayChain::new(vec![
+            AirwaySection::from_area(0.02, 2.0e-4, 1, None).unwrap(),
+            AirwaySection::from_area(0.10, 3.0e-4, 1, None).unwrap(),
+        ], LossModel::Bessel).unwrap();
+        duct.ahead_of(&AirwayChain::weibel_saab_2021_b(8, None).unwrap()).unwrap()
+    }
+
+    fn with_airway(v: FlueVoice) -> FlueVoice {
+        v.with_upstream_airway(&chain(), &LineLadder::default()).unwrap()
+    }
+
+    fn refusal<T>(result: Result<T, FlueError>) -> &'static str {
+        match result {
+            Err(FlueError::Invalid { what }) => what,
+            Err(other) => panic!("refused, not by name: {other:?}"),
+            Ok(_) => panic!("admitted"),
+        }
+    }
+
+    // One control and one sample at a time, so every sample carries its own lung pressure.
+    fn step(v: &mut FlueVoice, lung_pa: f64) -> FlueAirwayFrame {
+        v.apply(FlueControl::SetBlowingPressure(lung_pa)).unwrap();
+        let mut out = [0.0];
+        v.step_block(&mut out).unwrap();
+        assert!(out[0].is_finite());
+        *v.upstream_airway_frame().expect("a frame with an airway")
+    }
+
+    /// The windway law the voice holds, evaluated by its own owner: the bulk speed at a foot pressure.
+    fn law_speed(v: &FlueVoice, foot_pa: f64) -> f64 {
+        let g = v.geometry;
+        match v.viscous_windway() {
+            None => (2.0 * foot_pa / v.rho).sqrt(),
+            Some(law) => law.evaluate(g.flue_width_m, g.flue_height_m, v.rho, foot_pa).unwrap().flow_m3_s
+                / (g.flue_width_m * g.flue_height_m),
+        }
+    }
+
+    fn closures_json(c: FlueAirwayClosures) -> String {
+        let index = |i: Option<u64>| i.map_or_else(|| "null".to_owned(), |i| i.to_string());
+        format!("{{\"samples\":{},\"runs\":{},\"first_sample\":{},\"last_sample\":{},\"least_open_circuit_pa\":{:e},\
+            \"arrival_samples\":{:e},\"lung_before_arrival_pa\":{:e},\"least_before_arrival_pa\":{:e},\
+            \"samples_from_arrival\":{},\"first_sample_from_arrival\":{},\"least_from_arrival_pa\":{:e}}}",
+            c.samples, c.runs, index(c.first_sample), index(c.last_sample), c.least_open_circuit_pa,
+            c.arrival_samples, c.lung_before_arrival_pa, c.least_before_arrival_pa,
+            c.samples_from_arrival, index(c.first_sample_from_arrival), c.least_from_arrival_pa)
+    }
+
+    /// MB 18430/18441 on `v`'s closures, held pressure `held_pa`: before the arrival the least open-circuit pressure is
+    /// at least `-B(tau)` times the chain's own closed-end jump, from the arrival on at least `-1e-6` of the held
+    /// pressure. `B` at the airway's own `tau` ([`sampled_step_undershoot`]) is the lossless brickwall's, at most 0.1412
+    /// for any `tau` of 20 samples or more. The jump is the chain's realized step height times the drive
+    /// ([`closed_end_jump_pa`]); twice the lung pressure is printed beside it, being the jump only where the step is one.
+    /// Returns the line's fields.
+    fn judge(v: &FlueVoice, held_pa: f64, what: &str) -> String {
+        let c = v.upstream_airway_closures().expect("an airway");
+        let airway = v.upstream_airway().expect("an airway");
+        let b = sampled_step_undershoot(c.arrival_samples);
+        let step = source_step_height(airway, c.arrival_samples);
+        let jump = closed_end_jump_pa(airway, c.arrival_samples, c.lung_before_arrival_pa);
+        let fields = format!("\"undershoot_b\":{b:e},\"step_height\":{step:e},\"jump_chain_pa\":{jump:e},\"jump_2_lung_pa\":{:e},\"no_flow\":{}",
+            2.0 * c.lung_before_arrival_pa, closures_json(c));
+        assert!(c.arrival_samples >= 20.0 && b <= 0.1412, "{what}: B {b:e} at tau {:e}", c.arrival_samples);
+        assert!(c.least_before_arrival_pa >= -b * jump, "{what}: before the arrival, past B of the chain's jump: {fields}");
+        assert!(c.least_from_arrival_pa >= -1.0e-6 * held_pa, "{what}: a reverse drive from the arrival on: {fields}");
+        fields
+    }
+
+    // The closures' line fields without judging them, for a print ahead of the asserts.
+    fn judged_fields(v: &FlueVoice) -> String {
+        let c = v.upstream_airway_closures().expect("an airway");
+        let airway = v.upstream_airway().expect("an airway");
+        format!("\"undershoot_b\":{:e},\"step_height\":{:e},\"jump_chain_pa\":{:e},\"jump_2_lung_pa\":{:e},\"no_flow\":{}",
+            sampled_step_undershoot(c.arrival_samples), source_step_height(airway, c.arrival_samples),
+            closed_end_jump_pa(airway, c.arrival_samples, c.lung_before_arrival_pa), 2.0 * c.lung_before_arrival_pa,
+            closures_json(c))
+    }
+
+    /// A realized FIR against its physical arrival `arrival` [samples]: the largest tap, then the energy fraction and
+    /// the most negative running sum of the taps before the arrival, and the same over the last quarter of the
+    /// circular buffer, where a wrapped precursor would sit. A causal realization has neither.
+    fn ir_json(taps: &[f64], arrival: f64) -> String {
+        let total: f64 = taps.iter().map(|h| h * h).sum();
+        let part = |taps: &[f64]| {
+            let (mut sum, mut least, mut at) = (0.0_f64, 0.0_f64, 0_usize);
+            for (k, h) in taps.iter().enumerate() {
+                sum += h;
+                if sum < least { least = sum; at = k; }
+            }
+            (taps.iter().map(|h| h * h).sum::<f64>() / total, least, at)
+        };
+        let before = (arrival.floor() as usize).min(taps.len());
+        let tail = 3 * (taps.len() / 4);
+        let (pre_energy, pre_least, pre_at) = part(&taps[..before]);
+        let (tail_energy, tail_least, tail_at) = part(&taps[tail..]);
+        let peak = (0..taps.len()).fold(0, |best, k| if taps[k].abs() > taps[best].abs() { k } else { best });
+        format!("{{\"taps\":{},\"arrival\":{arrival:e},\"peak_sample\":{peak},\"pre_arrival\":{{\"energy\":{pre_energy:e},\
+            \"least_cumsum\":{pre_least:e},\"at\":{pre_at}}},\"last_quarter\":{{\"from\":{tail},\"energy\":{tail_energy:e},\
+            \"least_cumsum\":{tail_least:e},\"at\":{}}}}}", taps.len(), tail + tail_at)
+    }
+
+    /// The foot pressure by bisection on `P_oc - Z A u(P_f) - P_f`, decreasing in `P_f` over `[0, P_oc]`.
+    fn direct_foot(v: &FlueVoice, port: UpstreamPort) -> f64 {
+        let area = v.geometry.flue_width_m * v.geometry.flue_height_m;
+        let residual = |foot: f64| port.open_circuit_pa - port.impedance * area * law_speed(v, foot) - foot;
+        let (mut lo, mut hi) = (0.0, port.open_circuit_pa);
+        assert!(residual(lo) >= 0.0 && residual(hi) <= 0.0);
+        for _ in 0..200 {
+            let mid = 0.5 * (lo + hi);
+            if mid <= lo || mid >= hi { break; }
+            if residual(mid) >= 0.0 { lo = mid; } else { hi = mid; }
+        }
+        0.5 * (lo + hi)
+    }
+
+    /// The closed form against a direct solve on unsteady samples: a 10 ms rise from rest and 20 ms held, one sample
+    /// per step, with no windway law and with the fully developed slit. On every sample the foot pressure matches the
+    /// bisection root of the same port to 1e-11 of the open-circuit pressure, on every sample that passes flow the
+    /// airway's own returned pressure matches it to 1e-9 (a no-flow sample sees a closed end, so the airway holds its
+    /// open-circuit pressure there while the foot is zero), and the sample is counted unsteady where the foot pressure
+    /// moved more than 1e-6 of the held pressure from the sample before. Hundreds of them are. Samples that passed no
+    /// flow (a non-positive open-circuit pressure, the one-way windway) are printed and judged (`judge`): before the
+    /// arrival within the band-limited step's own undershoot of the chain's jump, from it none below -1e-6 of the held
+    /// pressure, no reverse drive. Both windways print before either is asserted.
+    #[test]
+    fn ua_flue_001_the_closed_form_foot_pressure_is_the_direct_solve_on_unsteady_samples() {
+        let mut results = Vec::new();
+        for slit in [false, true] {
+            let mut v = if slit { with_airway(voice().with_viscous_windway(0.06).unwrap()) } else { with_airway(voice()) };
+            let lungs = (0..480).map(|n| HOLD_PA * f64::from(n) / 480.0).chain(core::iter::repeat_n(HOLD_PA, 960));
+            let (mut worst, mut worst_valve, mut unsteady, mut previous) = (0.0_f64, 0.0_f64, 0usize, 0.0_f64);
+            for lung in lungs {
+                let frame = step(&mut v, lung);
+                let scale = frame.port.open_circuit_pa.max(1.0);
+                let direct = if frame.port.open_circuit_pa > 0.0 { direct_foot(&v, frame.port) } else { 0.0 };
+                worst = worst.max((frame.foot_pa - direct).abs() / scale);
+                if frame.port.open_circuit_pa > 0.0 {
+                    worst_valve = worst_valve.max((frame.valve_pa - frame.foot_pa).abs() / scale);
+                }
+                if (frame.foot_pa - previous).abs() > 1.0e-6 * HOLD_PA { unsteady += 1; }
+                previous = frame.foot_pa;
+                assert!(frame.foot_pa >= 0.0 && frame.foot_pa <= frame.port.open_circuit_pa.max(0.0));
+                let flux_speed = frame.flow_m3_s / (v.geometry.flue_width_m * v.geometry.flue_height_m);
+                assert!((v.jet_speed_m_s() - flux_speed).abs() <= 1e-14 * flux_speed, "the committed flux is the jet's");
+            }
+            let closed = v.upstream_airway_closures().expect("an airway");
+            println!("{{\"suite\":\"fs-couple\",\"case\":\"ua-flue-001\",\"slit\":{slit},\"worst_direct\":{worst:e},\"worst_valve\":{worst_valve:e},\"unsteady_samples\":{unsteady},{}}}",
+                judged_fields(&v));
+            results.push((slit, v, closed, worst, worst_valve, unsteady));
+        }
+        for (slit, v, closed, worst, worst_valve, unsteady) in results {
+            // The first sample's lung pressure is zero, so it passes no flow.
+            assert_eq!(closed.first_sample, Some(0), "slit {slit}");
+            judge(&v, HOLD_PA, &format!("slit {slit}"));
+            assert!(worst < 1.0e-11, "slit {slit}: closed form against the direct solve {worst:e}");
+            assert!(worst_valve < 1.0e-9, "slit {slit}: the airway's pressure against the foot {worst_valve:e}");
+            assert!(unsteady >= 100, "slit {slit}: only {unsteady} unsteady samples");
+        }
+    }
+
+    /// A held lung pressure settles to the Poiseuille drop: after three lengths of both FIRs held at 300 Pa, `P_lung -
+    /// P_f = R_dc Q` to 1e-6 of the drop, with no windway law and with the slit, and the foot pressure moves less than
+    /// 1e-9 of the lung pressure over the last length. The step from rest also prints where its no-flow samples sit
+    /// against the realized airway (MB 18339): both FIRs against their physical arrivals (`ir_json`; the source
+    /// transfer arrives after one transit, the reflectance after two), then, for each sample up to two transits and
+    /// 32 more, the running sum of the source taps (the step response), the open-circuit pressure and whether the
+    /// sample passed no flow. Both windways print before either is asserted.
+    #[test]
+    fn ua_flue_002_a_held_lung_pressure_settles_to_the_poiseuille_drop() {
+        let gas = gas();
+        let r_dc = chain().dc_resistance(&gas);
+        let transit = chain().path_length_m() / gas.sound_speed * f64::from(RATE);
+        let onset = (2.0 * transit).ceil() as usize + 32;
+        let mut results = Vec::new();
+        for slit in [false, true] {
+            let mut v = if slit { with_airway(voice().with_viscous_windway(0.06).unwrap()) } else { with_airway(voice()) };
+            let airway = v.upstream_airway().unwrap();
+            let length = airway.reflectance_taps().len() + airway.source_taps().len() + 8;
+            let (source, reflect) = (airway.source_taps().to_vec(), airway.reflectance_taps().to_vec());
+            let mut frame = step(&mut v, HOLD_PA);
+            let mut onset_pa = vec![frame.port.open_circuit_pa];
+            for _ in 1..2 * length {
+                frame = step(&mut v, HOLD_PA);
+                if onset_pa.len() < onset { onset_pa.push(frame.port.open_circuit_pa); }
+            }
+            let mut running = 0.0_f64;
+            let rows: Vec<String> = onset_pa.iter().zip(&source).enumerate().map(|(n, (p, g))| {
+                running += g;
+                format!("[{n},{running:e},{p:e},{}]", u8::from(*p <= 0.0))
+            }).collect();
+            println!("{{\"suite\":\"fs-couple\",\"case\":\"ua-flue-002-onset\",\"slit\":{slit},\"transit\":{transit:e},\"source_ir\":{},\"reflectance_ir\":{},\"step_n_cumsum_poc_noflow\":[{}]}}",
+                ir_json(&source, transit), ir_json(&reflect, 2.0 * transit), rows.join(","));
+            let before = frame.foot_pa;
+            for _ in 0..length { frame = step(&mut v, HOLD_PA); }
+            let drop = HOLD_PA - frame.foot_pa;
+            let miss = (drop - r_dc * frame.flow_m3_s).abs() / (r_dc * frame.flow_m3_s);
+            let drift = (frame.foot_pa - before).abs() / HOLD_PA;
+            let closed = v.upstream_airway_closures().expect("an airway");
+            println!("{{\"suite\":\"fs-couple\",\"case\":\"ua-flue-002\",\"slit\":{slit},\"r_dc\":{r_dc:e},\"flow\":{:e},\"drop_pa\":{drop:e},\"miss\":{miss:e},\"drift\":{drift:e},\"length\":{length},{}}}",
+                frame.flow_m3_s, judged_fields(&v));
+            results.push((slit, v, closed, drop, miss, drift));
+        }
+        for (slit, v, closed, drop, miss, drift) in results {
+            // The record's arrival is the source FIR's own transit.
+            assert!((closed.arrival_samples - transit).abs() <= 1e-12 * transit, "slit {slit}: arrival {:e}", closed.arrival_samples);
+            judge(&v, HOLD_PA, &format!("slit {slit}"));
+            assert!(drop > 0.0 && miss < 1.0e-6, "slit {slit}: P_lung - P_f against R_dc Q: {miss:e}");
+            assert!(drift < 1.0e-9, "slit {slit}: the foot pressure still moves: {drift:e}");
+        }
+    }
+
+    /// The three rows that hold the jet on the held blowing pressure refuse the airway by name, in either order.
+    #[test]
+    fn ua_flue_003_the_three_held_pressure_rows_refuse_by_name() {
+        let ladder = LineLadder::default();
+        assert_eq!(refusal(voice().with_developing_windway(0.015, HELD_PA).unwrap().with_upstream_airway(&chain(), &ladder)),
+            AIRWAY_REFUSES_DEVELOPING_WINDWAY);
+        assert_eq!(refusal(with_airway(voice()).with_developing_windway(0.015, HELD_PA)), AIRWAY_REFUSES_DEVELOPING_WINDWAY);
+        assert_eq!(refusal(voice().with_unsteady_windway(0.015, 8, 8).unwrap().with_upstream_airway(&chain(), &ladder)),
+            AIRWAY_REFUSES_UNSTEADY_WINDWAY);
+        assert_eq!(refusal(with_airway(voice()).with_unsteady_windway(0.015, 8, 8)), AIRWAY_REFUSES_UNSTEADY_WINDWAY);
+        assert_eq!(refusal(voice().with_card_centreline_speed(HELD_PA).unwrap().with_upstream_airway(&chain(), &ladder)),
+            AIRWAY_REFUSES_CARD_CENTRELINE);
+        assert_eq!(refusal(with_airway(voice()).with_card_centreline_speed(HELD_PA)), AIRWAY_REFUSES_CARD_CENTRELINE);
+        // And the fully developed slit is admitted either side of the airway's closure.
+        assert!(voice().with_viscous_windway(0.06).unwrap().with_upstream_airway(&chain(), &ladder).is_ok());
+    }
+
+    /// Without an airway the voice keeps no frame, counts no closures and takes the gesture's pressure; with one, a
+    /// non-positive open-circuit pressure passes no flow, a positive one does; a non-finite one refuses.
+    #[test]
+    fn ua_flue_004_no_airway_keeps_no_frame_and_the_windway_runs_one_way() {
+        let mut v = voice();
+        v.apply(FlueControl::SetBlowingPressure(HOLD_PA)).unwrap();
+        let mut out = [0.0; 64];
+        v.step_block(&mut out).unwrap();
+        assert!(v.upstream_airway().is_none() && v.upstream_airway_frame().is_none());
+        assert_eq!(v.upstream_airway_closures(), None);
+        assert_eq!(v.jet_speed_m_s(), (2.0 * HOLD_PA / v.rho).sqrt());
+        for p in [-1.0e-3, -0.0, 0.0] {
+            let port = UpstreamPort { open_circuit_pa: p, impedance: 1.0e6 };
+            assert_eq!(foot_pressure(port, 0.0, 1.0e-5, 1.2).unwrap(), (0.0, 0.0), "{p}");
+        }
+        let (foot, speed) = foot_pressure(UpstreamPort { open_circuit_pa: 1.0e-3, impedance: 1.0e6 }, 0.0, 1.0e-5, 1.2).unwrap();
+        assert!(foot > 0.0 && speed > 0.0 && foot < 1.0e-3);
+        assert!(foot_pressure(UpstreamPort { open_circuit_pa: f64::NAN, impedance: 1.0e6 }, 0.0, 1.0e-5, 1.2).is_err());
+        // A fresh airway counts nothing and holds only its arrival.
+        let c = with_airway(voice()).upstream_airway_closures().expect("an airway");
+        assert!(c.arrival_samples > 0.0, "arrival {:e}", c.arrival_samples);
+        assert_eq!(c, FlueAirwayClosures { arrival_samples: c.arrival_samples, ..FlueAirwayClosures::default() });
+    }
+
+    /// The closures count samples, runs of consecutive samples, the first and last index and the most negative
+    /// open-circuit pressure; a positive one is not counted. They split at the arrival: an index below it counts before,
+    /// with the largest lung pressure there, any other from it. From rest at zero lung pressure every sample closes, on
+    /// the voice's own clock from index 0.
+    #[test]
+    fn ua_flue_005_closures_count_runs_on_the_voice_clock() {
+        let mut c = FlueAirwayClosures { arrival_samples: 2.5, ..FlueAirwayClosures::default() };
+        for (index, lung, p) in [(0, 0.0, 0.0), (1, 10.0, -1.0e-3), (2, 20.0, 5.0), (3, 30.0, -2.0e-3), (7, 70.0, -0.0), (8, 80.0, 1.0e-9)] {
+            c.note(index, lung, p);
+        }
+        assert_eq!((c.samples, c.runs, c.first_sample, c.last_sample), (4, 3, Some(0), Some(7)));
+        assert_eq!(c.least_open_circuit_pa, -2.0e-3);
+        // Indexes 0 to 2 lie before the arrival at 2.5 (index 2 passed flow but carries its lung pressure); 3 and 7 from it.
+        assert_eq!((c.lung_before_arrival_pa, c.least_before_arrival_pa), (20.0, -1.0e-3));
+        assert_eq!((c.samples_from_arrival, c.first_sample_from_arrival, c.least_from_arrival_pa), (2, Some(3), -2.0e-3));
+        let mut v = with_airway(voice());
+        for _ in 0..3 {
+            let frame = step(&mut v, 0.0);
+            assert_eq!((frame.foot_pa, frame.flow_m3_s), (0.0, 0.0));
+        }
+        let c = v.upstream_airway_closures().unwrap();
+        assert_eq!((c.samples, c.runs, c.first_sample, c.last_sample, c.least_open_circuit_pa),
+            (3, 1, Some(0), Some(2), 0.0));
+        assert_eq!((c.lung_before_arrival_pa, c.least_before_arrival_pa, c.samples_from_arrival), (0.0, 0.0, 0));
+    }
+
+    // One held sample: its output's bits and its frame.
+    fn held(v: &mut FlueVoice) -> (u64, FlueAirwayFrame) {
+        v.apply(FlueControl::SetBlowingPressure(HOLD_PA)).unwrap();
+        let mut out = [0.0];
+        v.step_block(&mut out).unwrap();
+        assert!(out[0].is_finite());
+        (out[0].to_bits(), *v.upstream_airway_frame().expect("a frame with an airway"))
+    }
+
+    /// The fixture's jet is the island chain, whose convection reads the retarded mouth velocity, and its card speed is
+    /// the bulk speed: the transit at speed `u` is `W / (c_p/U u)`.
+    fn island_transit(v: &FlueVoice, u: f64) -> f64 {
+        assert!(v.forced.is_none() && v.nolle.is_none() && v.auvray.is_none() && v.card_centreline.is_none());
+        v.geometry.cut_up_m / (v.island.convection_ratio * u)
+    }
+
+    /// An open sample after a no-flow sample convects at its OWN speed (MB 18359/18363). A no-flow sample commits the
+    /// jet speed zero. Read from that stored zero, the next open sample's transit was unbounded, past the jet's retained
+    /// history, and once the jet had passed its minimum speed the voice refused ("jet convection exceeds its finite
+    /// retained history"). Planted, with no windway law and with the slit: 480 held samples (the jet passes its minimum
+    /// speed), then the stored speed a no-flow sample leaves (zero), then 64 held samples. A: each renders. B: each
+    /// one's transit is `W / (c_p/U u)` of its own committed speed to 1e-12 and inside the retained history, and a twin
+    /// voice that kept its true stored speed gives the same output bits and frames, so no reader of the stored speed is
+    /// left in an airway sample.
+    #[test]
+    fn ua_flue_006_an_open_sample_after_a_no_flow_sample_convects_at_its_own_speed() {
+        for slit in [false, true] {
+            let fresh = || if slit { with_airway(voice().with_viscous_windway(0.06).unwrap()) } else { with_airway(voice()) };
+            let (mut planted, mut twin) = (fresh(), fresh());
+            for _ in 0..480 {
+                assert_eq!(held(&mut planted), held(&mut twin), "slit {slit}: the twins differ before the plant");
+            }
+            assert!(planted.reached_minimum_speed, "slit {slit}: the jet never passed its minimum speed");
+            planted.jet_speed_m_s = 0.0;
+            let (dt, ring) = (planted.dt, (planted.history.len() - 1) as f64);
+            let area = planted.geometry.flue_width_m * planted.geometry.flue_height_m;
+            for n in 0..64 {
+                let (bits, frame) = held(&mut planted);
+                let u = frame.flow_m3_s / area;
+                assert!(u >= planted.minimum_jet_speed_m_s(), "slit {slit}, sample {n}: speed {u:e}");
+                let want = island_transit(&planted, u);
+                assert!((frame.jet_transit_s - want).abs() <= 1e-12 * want,
+                    "slit {slit}, sample {n}: transit {:e} against W/(c_p/U u) {want:e}", frame.jet_transit_s);
+                assert!(frame.jet_transit_s / dt <= ring, "slit {slit}, sample {n}: past the retained history");
+                assert_eq!((bits, frame), held(&mut twin), "slit {slit}, sample {n}: the stored speed reached the sample");
+            }
+        }
+    }
+
+    /// A no-flow onset renders (MB 18363): the held step from rest of `ua_flue_002`, whose first samples pass no flow
+    /// on this realization. C: every sample renders, every no-flow sample has no jet (no flux, an infinite transit), and
+    /// every open sample convects at its own speed to 1e-12. C needs its no-flow samples: with none to test it fails.
+    #[test]
+    fn ua_flue_007_a_no_flow_onset_renders() {
+        for slit in [false, true] {
+            let mut v = if slit { with_airway(voice().with_viscous_windway(0.06).unwrap()) } else { with_airway(voice()) };
+            let area = v.geometry.flue_width_m * v.geometry.flue_height_m;
+            let mut no_flow = 0usize;
+            for n in 0..2048 {
+                let (_, frame) = held(&mut v);
+                if frame.port.open_circuit_pa <= 0.0 {
+                    no_flow += 1;
+                    assert_eq!((frame.foot_pa, frame.flow_m3_s, frame.jet_transit_s), (0.0, 0.0, f64::INFINITY),
+                        "slit {slit}, sample {n}: a no-flow sample with a jet");
+                } else {
+                    let u = frame.flow_m3_s / area;
+                    let want = island_transit(&v, u);
+                    assert!(u > 0.0 && (frame.jet_transit_s - want).abs() <= 1e-12 * want,
+                        "slit {slit}, sample {n}: transit {:e} against W/(c_p/U u) {want:e}", frame.jet_transit_s);
+                }
+            }
+            println!("{{\"suite\":\"fs-couple\",\"case\":\"ua-flue-007\",\"slit\":{slit},\"no_flow_samples\":{no_flow},{}}}",
+                judged_fields(&v));
+            assert!(no_flow > 0, "slit {slit}: no no-flow sample to test");
+        }
+    }
+
+    /// The undershoot `B` (MB 18430), planted: zero at a whole-sample delay; at the fixture's own arrival
+    /// 49.57553507152286 samples 0.1284407524 to 1e-9; its largest over 200 fractions near 50 samples inside
+    /// (0.1380, 0.1382); at most 0.1412 near 1000 samples. And the chain's own step height on the fixture is the
+    /// running sum of its source taps at the first maximum from the arrival on, at least one (the chain narrows).
+    #[test]
+    fn ua_flue_008_the_band_limited_step_undershoot() {
+        for tau in [20.0, 50.0, 200.0] {
+            assert!(sampled_step_undershoot(tau) < 1e-12, "tau {tau}: {:e}", sampled_step_undershoot(tau));
+        }
+        let at = sampled_step_undershoot(49.575_535_071_522_86);
+        assert!((at - 0.128_440_752_4).abs() < 1e-9, "the fixture's B {at:e}");
+        let near_50 = (0..200).map(|k| sampled_step_undershoot(50.0 + f64::from(k) / 200.0)).fold(0.0_f64, f64::max);
+        assert!(near_50 > 0.1380 && near_50 < 0.1382, "the largest B near 50 samples {near_50:e}");
+        let near_1000 = (0..50).map(|k| sampled_step_undershoot(1000.0 + f64::from(k) / 50.0)).fold(0.0_f64, f64::max);
+        assert!(near_1000 <= 0.1412, "the largest B near 1000 samples {near_1000:e}");
+        let v = with_airway(voice());
+        let (airway, tau) = (v.upstream_airway().unwrap(), v.upstream_airway_closures().unwrap().arrival_samples);
+        assert!((tau - 49.575_535_071_522_86).abs() < 1e-9, "the fixture's arrival {tau:e}");
+        let step = source_step_height(airway, tau);
+        // The step height is a running sum of the taps at an index from the arrival on, and no later sum before the
+        // first decrease is larger.
+        let sums: Vec<f64> = airway.source_taps().iter().scan(0.0_f64, |s, g| { *s += g; Some(*s) }).collect();
+        let from = tau.ceil() as usize;
+        let peak = (from..sums.len()).find(|&k| k + 1 == sums.len() || sums[k + 1] < sums[k]).unwrap();
+        println!("{{\"suite\":\"fs-couple\",\"case\":\"ua-flue-008\",\"tau\":{tau:e},\"b\":{at:e},\"b_max_near_50\":{near_50:e},\"b_max_near_1000\":{near_1000:e},\"step_height\":{step:e},\"step_sample\":{peak}}}");
+        assert_eq!(step, sums[peak], "the first maximum from the arrival");
+        assert!(step >= 1.0, "the fixture's chain narrows toward the windway: step {step:e}");
+    }
+}

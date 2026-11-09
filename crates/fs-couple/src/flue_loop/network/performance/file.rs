@@ -25,6 +25,14 @@
 //! windway, for the gain, the gate and the band alike (the windway's own speed is not used). Omitting the row leaves
 //! every result bit-identical.
 //!
+//! Optional `upstream_airway weibel-1963 saab-2021-table-1-B GENERATIONS SECTIONS SOURCE_TOKEN` after `jet_limits` and
+//! `jet_noise`, with SECTIONS `airway_section LENGTH_M AREA_M2` records from the windway toward the lungs and an
+//! optional `airway_wall SURFACE_DENSITY STIFFNESS_PER_AREA RESISTANCE`: the player's airway ahead of the windway
+//! (`flue_loop::airway`), the duct then Weibel's tree. The gesture's blowing pressure becomes the lung pressure at the
+//! tree's far end, and every sample the jet reads the foot pressure the airway's port and the windway's law give. The
+//! developing and unsteady windways and `jet_speed card-centreline` refuse it by name. Omitting the record leaves every
+//! result bit-identical.
+//!
 //! Optional `observer_gas LAW MAX_PATHS MAX_FILTER_TAPS MAX_KERNEL_TERMS`
 //! immediately after `receiver` selects `stokes-kirchhoff` or `lossless`.
 //! `observer_gas molecular MAX_PATHS MAX_FILTER_TAPS MAX_KERNEL_TERMS LAW`
@@ -69,7 +77,9 @@ mod material;
 mod boundary;
 mod window;
 pub(crate) mod excitation;
+mod airway;
 use excitation::{FlueFlowInput, FlueJetInput};
+pub use airway::{FlueAirwayRecord, MAX_UPSTREAM_AIRWAY_SECTIONS, UPSTREAM_AIRWAY_MAX_TAPS};
 pub use wall::{FlueWallRecord, MAX_FLUE_WALL_PACK_BYTES};
 pub use window::{ERNOULT_FABRE_SPANS, ErnoultFabreSpans, ErnoultFabreWindow, FlueWindowRecord};
 pub use duct::HoleInnerLength;
@@ -186,6 +196,7 @@ pub struct FlueFilePerformance {
     jet_forcing_area_m2: Option<f64>,
     jet_source_on_strip: bool,
     hole_inner_lengths: Vec<HoleInnerLength>,
+    upstream_airway: Option<FlueAirwayRecord>,
 }
 impl FlueFilePerformance {
     /// Parse the fixed-order source shown in `examples/flue.performance`.
@@ -586,6 +597,8 @@ impl FlueFilePerformance {
             spec.validate().map_err(|what| bad(rows.line, what))?;
             Some(spec)
         } else { None };
+        // Optional opt-in player's airway after `jet_limits` and `jet_noise` (see `airway`).
+        let upstream_airway = airway::read(&mut rows)?;
         let mut row = rows.row("wave_memory_bytes")?;
         let max_wave_memory_bytes: usize = row.number()?;
         row.end()?;
@@ -753,6 +766,12 @@ impl FlueFilePerformance {
             Some(spec) => voice.with_jet_noise(spec).map_err(FlueInputError::Physics)?,
             None => voice,
         };
+        // After every windway and jet row, so the rows held on the held pressure refuse it by name.
+        let voice = match &upstream_airway {
+            Some(record) => voice.with_upstream_airway(&record.chain, &airway::ladder())
+                .map_err(FlueInputError::Physics)?,
+            None => voice,
+        };
         let voice = match &window {
             Some(record) => voice.with_window_mass(record.mass_per_density(),
                 record.riser_mass_per_density).map_err(FlueInputError::Physics)?,
@@ -853,7 +872,7 @@ impl FlueFilePerformance {
             jet_card_hash: card.content_hash(), jet_card_source, compiled_controls: renderer.controls.len() };
         Ok(Self { info, renderer, geometry, card, gas_records, wall_records, boundary_records,
             radiation_bindings, mimo_radiation_record, computed_radiation_record, window,
-            jet_forcing_area_m2, jet_source_on_strip, hole_inner_lengths })
+            jet_forcing_area_m2, jet_source_on_strip, hole_inner_lengths, upstream_airway })
     }
     /// Original identity and finite clocks, separate from the evolving solver.
     #[must_use] pub const fn info(&self) -> FluePerformanceInfo { self.info }
@@ -888,6 +907,8 @@ impl FlueFilePerformance {
     #[must_use] pub const fn jet_source_on_strip(&self) -> bool { self.jet_source_on_strip }
     /// The side holes' inner lengths added by `inner` rows, in row order.
     #[must_use] pub fn hole_inner_lengths(&self) -> &[HoleInnerLength] { &self.hole_inner_lengths }
+    /// The player's airway an `upstream_airway` record put ahead of the windway, when selected.
+    #[must_use] pub const fn upstream_airway(&self) -> Option<&FlueAirwayRecord> { self.upstream_airway.as_ref() }
     /// Move the original physical pressure producer into streaming/PCM output.
     #[must_use] pub fn into_renderer(self) -> FlueOutletPerformance { self.renderer }
 }

@@ -145,6 +145,9 @@ pub mod jet_swing_limit;
 /// Opt-in jet drive of Auvray et al. (2012, 2014) in place of the island's band chain.
 pub mod auvray_jet;
 
+/// Opt-in player's airway ahead of the windway: the lungs' pressure through the tract, in place of the ideal source.
+pub mod airway;
+
 /// Philox kernel id of the flue onset seed stream (logical identity;
 /// never a scheduling artifact).
 pub const FLUE_SEED_KERNEL: u32 = 0x666c_7565; // "flue"
@@ -781,6 +784,8 @@ pub struct FlueVoice {
     auvray: Option<auvray_jet::AuvrayJet>,
     // Opt-in breath noise in series in the mouth (see `JetNoiseSpec`); None = the original, byte-identical loop.
     jet_noise: Option<JetNoise>,
+    // Opt-in airway ahead of the windway (see `airway`); None = the gesture's pressure at the foot, the ideal port.
+    upstream_airway: Option<Box<airway::FlueUpstream>>,
     // Declared minimum bulk jet speed, which sizes the retained history, and most retained
     // jet-response input samples.
     minimum_jet_speed_m_s: f64,
@@ -915,6 +920,7 @@ impl FlueVoice {
             momentum: None,
             bickley_momentum: None,
             jet_noise: None,
+            upstream_airway: None,
             minimum_jet_speed_m_s: minimum_jet_speed,
             max_jet_history_samples: max_history,
             inertance,
@@ -966,8 +972,9 @@ impl FlueVoice {
             FlueControl::SetBlowingPressure(p) => {
                 let speed = self.validated_jet_speed(p)?;
                 self.blow_pa = p;
-                // A pressure control supplies force; it never overwrites moving gas.
-                if self.unsteady_windway.is_none() { self.jet_speed_m_s = speed; }
+                // A pressure control supplies force; it never overwrites moving gas. With an airway the
+                // pressure is the lungs', and each sample's foot pressure sets the speed.
+                if self.unsteady_windway.is_none() && self.upstream_airway.is_none() { self.jet_speed_m_s = speed; }
             }
             FlueControl::SetJetAngle(angle) => {
                 self.validate_jet_angle(angle)?;
@@ -1101,6 +1108,9 @@ impl FlueVoice {
         if self.forced.is_some() || self.nolle.is_some() || self.auvray.is_some() {
             return Err(FlueError::Invalid { what: "card centreline speed refuses the jet transfers, which own their exit speed" });
         }
+        if self.upstream_airway.is_some() {
+            return Err(FlueError::Invalid { what: airway::AIRWAY_REFUSES_CARD_CENTRELINE });
+        }
         if !(held_pressure_pa > 0.0 && held_pressure_pa.is_finite()) {
             return Err(FlueError::Invalid { what: "card centreline speed requires a positive held blowing pressure" });
         }
@@ -1213,6 +1223,9 @@ impl FlueVoice {
         if self.poisoned || self.samples != 0 || self.viscous_windway.is_some()
             || self.developing_windway.is_some() || self.unsteady_windway.is_some() {
             return Err(FlueError::Invalid { what: "developing windway requires one cold attachment and no other windway" });
+        }
+        if self.upstream_airway.is_some() {
+            return Err(FlueError::Invalid { what: airway::AIRWAY_REFUSES_DEVELOPING_WINDWAY });
         }
         if self.auvray.is_some() {
             return Err(FlueError::Invalid { what: auvray_jet::WINDWAY_REFUSAL });
@@ -1420,6 +1433,9 @@ impl FlueVoice {
         if self.poisoned || self.samples != 0 || self.viscous_windway.is_some()
             || self.developing_windway.is_some() || self.unsteady_windway.is_some() {
             return Err(FlueError::Invalid { what: "unsteady windway requires one cold source-channel attachment" });
+        }
+        if self.upstream_airway.is_some() {
+            return Err(FlueError::Invalid { what: airway::AIRWAY_REFUSES_UNSTEADY_WINDWAY });
         }
         if self.auvray.is_some() {
             return Err(FlueError::Invalid { what: auvray_jet::WINDWAY_REFUSAL });
@@ -1737,6 +1753,19 @@ impl FlueVoice {
             return jet.transit_s(self.jet_speed_m_s());
         }
         self.geometry.cut_up_m / (self.island.convection_ratio * self.card_speed_m_s())
+    }
+
+    // The law of `transit_s` at one sample's inlet pressure and bulk speed: the opt-in airway's own (module `airway`),
+    // where each sample's foot pressure sets the speed. The airway refuses the card centreline speed and the unsteady
+    // windway, so the card speed is `card_speed_at` here.
+    fn transit_at(&self, pressure_pa: f64, bulk_m_s: f64) -> f64 {
+        if let Some(jet) = &self.nolle {
+            return jet.transit_s(jet.centre_over_bulk() * bulk_m_s);
+        }
+        if let Some(jet) = &self.auvray {
+            return jet.transit_s(bulk_m_s);
+        }
+        self.geometry.cut_up_m / (self.island.convection_ratio * self.card_speed_at(pressure_pa, bulk_m_s))
     }
 
     // Evaluate the original filter, displacement and cut law without advancing
@@ -2122,6 +2151,10 @@ impl FlueVoice {
         let mut windway_numerical = 0.0;
         let mut windway_defect = 0.0;
         for slot in out.iter_mut() {
+            // Opt-in airway (see `airway`): this sample's foot pressure from the lungs' port. Without it the foot
+            // pressure is the gesture's own, the ideal port, and every reader below takes that same value.
+            let airway_foot = self.airway_foot(self.blow_pa)?;
+            let foot_pressure_pa = airway_foot.map_or(self.blow_pa, |foot| foot.foot_pa);
             let mut windway_trial = self.unsteady_windway.as_ref()
                 .map(|windway| windway.prepare(self.blow_pa, self.card_centreline.is_some())).transpose()?;
             let u = if let Some(windway) = &windway_trial {
@@ -2136,12 +2169,12 @@ impl FlueVoice {
                 windway_numerical += frame.numerical_dissipation_j;
                 windway_defect += frame.energy_residual_j;
                 frame.bulk_speed_m_s
-            } else { self.jet_speed_m_s() };
+            } else { airway_foot.map_or_else(|| self.jet_speed_m_s(), |foot| foot.speed_m_s) };
             // The bulk speed carries the flux; the card's own speed (the bulk speed unless the
             // card centreline speed is attached) sets its convection, band, seed and Reynolds number.
             let card_u = match &windway_trial {
                 Some(windway) if self.card_centreline.is_some() => windway.centre_speed_m_s(),
-                _ => self.card_speed_at(self.blow_pa, u),
+                _ => self.card_speed_at(foot_pressure_pa, u),
             };
             // The same candidate centre speed controls transport, instability
             // and Mach admission before any source or bore state is published.
@@ -2157,8 +2190,12 @@ impl FlueVoice {
                     Some(flux) => u * self.geometry.flue_height_m * self.geometry.flue_width_m * flux,
                 }
             };
+            // With an airway this sample's foot pressure sets the speed, so the jet convects by L/u of THIS sample; the
+            // stored speed is the last sample's, zero after a no-flow sample (MB 18359/18363).
             let transit = if card_u == 0.0 { f64::INFINITY } else if windway_trial.is_some() {
                 self.geometry.cut_up_m / (self.island.convection_ratio * card_u)
+            } else if airway_foot.is_some() {
+                self.transit_at(foot_pressure_pa, u)
             } else { self.transit_s() };
             let seed_scale = self.island.seed_amplitude_rel * card_u;
             let reynolds = card_u * self.geometry.flue_height_m / self.nu;
@@ -2222,6 +2259,8 @@ impl FlueVoice {
                         if transit.is_finite() && transit / dt >= 1.0 {
                             (delay_samples * dt / transit).min(1.0)
                         } else { 1.0 })?,
+                    // A no-flow sample of the airway's one-way windway has no jet: its lookup is skipped (MB 18363).
+                    None if airway_foot.is_some() && u == 0.0 => rest,
                     None if delay_samples > (self.history.len() - 1) as f64 && onset
                         && precedes_motion(delay_samples, self.history_moving) => rest,
                     None if delay_samples > (self.history.len() - 1) as f64 && below_edge => {
@@ -2269,7 +2308,7 @@ impl FlueVoice {
             // The opt-in breath noise: ONE draw per accepted sample, before any nonlinear trial, from its own stream, on
             // Verge's U_j of the instantaneous foot pressure (not on card_u, the loop's own jet speed).
             let (flue_height_m, gas_density, kinematic_viscosity) = (self.geometry.flue_height_m, self.rho, self.nu);
-            let foot_pa = self.blow_pa;
+            let foot_pa = foot_pressure_pa;
             let noise_pa = self.jet_noise.as_mut()
                 .and_then(|noise| noise.pressure_pa(foot_pa, flue_height_m, gas_density, kinematic_viscosity, dt));
             let (mouth, trial, separation_power) =
@@ -2282,7 +2321,7 @@ impl FlueVoice {
             if eta > y0 {
                 pipe_side += 1;
             }
-            blow_work += self.blow_pa * flow * dt;
+            blow_work += foot_pressure_pa * flow * dt;
             let next_separation = separation + separation_power*dt;
             if !next_separation.is_finite() {
                 return Err(FlueError::Invalid { what: "mouth separation energy overflow" });
@@ -2305,6 +2344,8 @@ impl FlueVoice {
                 && committed.to_bits() != mouth.incoming_pa.to_bits() {
                 return Err(FlueError::Invalid { what: "mouth solve and committed reflection disagree" });
             }
+            // The accepted sample's windway flux goes down the airway.
+            if let Some(foot) = airway_foot { self.airway_commit(self.blow_pa, foot, transit)?; }
             if let Some(windway) = windway_candidate {
                 self.unsteady_windway = Some(windway);
                 self.jet_speed_m_s = u;
