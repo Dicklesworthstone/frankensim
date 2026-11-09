@@ -1,4 +1,5 @@
 //! G0/G1/G3/G4: one snapshot, physical moments, original shared inventory.
+mod thermal;
 mod trajectory;
 
 use super::*;

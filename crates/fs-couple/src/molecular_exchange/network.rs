@@ -10,6 +10,9 @@
 /// Adaptive histories of the same simultaneous finite-inventory transaction.
 pub mod trajectory;
 
+/// Finite material-body heat feeding the same moving-gas transaction.
+pub mod thermal;
+
 use super::{
     DriftingEffusiveExchange, EffusiveDriftInterface, GasEnergyError, MAX_EFFUSIVE_SPECIES,
     MolecularExchangeError, MolecularExchangeSurface, MovingGasBoundaryError,
