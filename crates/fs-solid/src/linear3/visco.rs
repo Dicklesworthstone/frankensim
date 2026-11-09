@@ -69,6 +69,8 @@ mod harmonic_material;
 pub use harmonic_material::{
     ViscoHarmonicMaterialBudget, ViscoHarmonicMaterialField, ViscoHarmonicMaterialObserver,
     ViscoHarmonicMaterialPoint, ViscoHarmonicMaterialWindowField, ViscoHarmonicMaterialWindowPoint,
+    ViscoHarmonicMaterialSpectrumField, ViscoHarmonicMaterialSpectrumObserver,
+    ViscoHarmonicMaterialSpectrumPoint,
 };
 mod poles;
 pub use poles::{

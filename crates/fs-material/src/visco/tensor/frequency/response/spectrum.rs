@@ -61,15 +61,24 @@ impl TensorProny {
                 });
             }
             super::super::admit_frequency(self, omega)?;
-            let group = frequencies.iter().position(|&w| w == omega).unwrap_or_else(|| {
-                frequencies.push(omega);
-                frequencies.len() - 1
-            });
+            let group = frequencies
+                .iter()
+                .position(|&w| w == omega)
+                .unwrap_or_else(|| {
+                    frequencies.push(omega);
+                    frequencies.len() - 1
+                });
             groups.push(group);
         }
-        let weights = frequencies.iter().map(|&omega| {
-            self.branches.iter().map(|b| PronySpectrumWeights::new(omega, b.tau_s).ok_or_else(invalid)).collect()
-        }).collect::<Result<Vec<Vec<_>>, _>>()?;
+        let weights = frequencies
+            .iter()
+            .map(|&omega| {
+                self.branches
+                    .iter()
+                    .map(|b| PronySpectrumWeights::new(omega, b.tau_s).ok_or_else(invalid))
+                    .collect()
+            })
+            .collect::<Result<Vec<Vec<_>>, _>>()?;
         Ok(TensorPronyHarmonicSpectrum {
             law: self,
             authored_frequencies: angular_frequencies_rad_s.to_vec(),
@@ -95,7 +104,11 @@ impl<'a> TensorPronyHarmonicSpectrum<'a> {
             + self.groups.len() * core::mem::size_of::<usize>()
             + self.frequencies.capacity() * core::mem::size_of::<f64>()
             + self.weights.len() * core::mem::size_of::<Vec<PronySpectrumWeights>>()
-            + self.weights.iter().map(|w| w.len() * core::mem::size_of::<PronySpectrumWeights>()).sum::<usize>()
+            + self
+                .weights
+                .iter()
+                .map(|w| w.len() * core::mem::size_of::<PronySpectrumWeights>())
+                .sum::<usize>()
     }
 
     /// Admit the complete coherent strain waveform, not just its sampled window.
@@ -108,9 +121,15 @@ impl<'a> TensorPronyHarmonicSpectrum<'a> {
         self.admitted_strains(strains).map(|_| ())
     }
 
-    fn admitted_strains(&self, strains: &[[C64; 6]]) -> Result<[StrainParts; MAX_SPECTRUM_LINES], ViscoError> {
+    fn admitted_strains(
+        &self,
+        strains: &[[C64; 6]],
+    ) -> Result<[StrainParts; MAX_SPECTRUM_LINES], ViscoError> {
         if strains.len() != self.authored_frequencies.len()
-            || strains.iter().flatten().any(|z| !z.re.is_finite() || !z.im.is_finite())
+            || strains
+                .iter()
+                .flatten()
+                .any(|z| !z.re.is_finite() || !z.im.is_finite())
         {
             return Err(ViscoError::Parameters {
                 what: "one finite Mandel strain phasor per original spectral line required",
@@ -134,7 +153,11 @@ impl<'a> TensorPronyHarmonicSpectrum<'a> {
             for word in 0..2 {
                 let phasor: [C64; 6] = core::array::from_fn(|i| {
                     let z = result[group][i];
-                    if word == 0 { C64::new(z[0].hi, z[1].hi) } else { C64::new(z[0].lo, z[1].lo) }
+                    if word == 0 {
+                        C64::new(z[0].hi, z[1].hi)
+                    } else {
+                        C64::new(z[0].lo, z[1].lo)
+                    }
                 });
                 let peak = super::super::strain::peak_norm(&phasor).ok_or_else(invalid)?;
                 envelope = envelope + Dd::from_f64(peak);
@@ -145,8 +168,10 @@ impl<'a> TensorPronyHarmonicSpectrum<'a> {
         } else {
             Dd::ZERO
         };
-        if !envelope.hi.is_finite() || !envelope.lo.is_finite()
-            || (self.law.strain_limit.is_finite() && (excess.hi > 0.0 || (excess.hi == 0.0 && excess.lo > 0.0)))
+        if !envelope.hi.is_finite()
+            || !envelope.lo.is_finite()
+            || (self.law.strain_limit.is_finite()
+                && (excess.hi > 0.0 || (excess.hi == 0.0 && excess.lo > 0.0)))
         {
             return Err(ViscoError::Parameters {
                 what: "coherent waveform strain bound exceeds the original tensor material domain",
@@ -158,7 +183,10 @@ impl<'a> TensorPronyHarmonicSpectrum<'a> {
     /// Cache unweighted physical interval products once, for every source point.
     /// Additional temporal payload is bounded by size_of::<TensorPronySpectrumWindow>()
     /// + 256*F + 64*F² bytes. Source spectrum payload is retained separately.
-    pub fn prepare_window(&self, window: HarmonicWindow) -> Result<TensorPronySpectrumWindow<'_, 'a>, ViscoError> {
+    pub fn prepare_window(
+        &self,
+        window: HarmonicWindow,
+    ) -> Result<TensorPronySpectrumWindow<'_, 'a>, ViscoError> {
         if window.profile() != HarmonicWindowProfile::Uniform {
             return Err(ViscoError::Parameters {
                 what: "physical material energy requires a uniform observation window",
@@ -167,7 +195,8 @@ impl<'a> TensorPronyHarmonicSpectrum<'a> {
         Ok(TensorPronySpectrumWindow {
             source: self,
             window,
-            temporal: HarmonicEnergySpectrum::new(&self.frequencies, window).map_err(|_| invalid())?,
+            temporal: HarmonicEnergySpectrum::new(&self.frequencies, window)
+                .map_err(|_| invalid())?,
         })
     }
 }
@@ -189,7 +218,10 @@ impl<'p, 'a> TensorPronySpectrumWindow<'p, 'a> {
     /// Heat comes from original positive Gram channels; work comes independently
     /// from stress : strain_rate. Storage change integrates the original spring
     /// derivatives instead of subtracting two rounded endpoint energies.
-    pub fn evaluate(&self, strains: &[[C64; 6]]) -> Result<TensorPronyHarmonicWindowPoint, ViscoError> {
+    pub fn evaluate(
+        &self,
+        strains: &[[C64; 6]],
+    ) -> Result<TensorPronyHarmonicWindowPoint, ViscoError> {
         self.evaluate_with_checkpoint(strains, || Ok(()))
     }
 
@@ -208,37 +240,50 @@ impl<'p, 'a> TensorPronySpectrumWindow<'p, 'a> {
         let strains = &grouped[..n];
         let law = self.source.law;
         let mut spectrum = [[(1.0, 0), (0.0, 0)]; MAX_SPECTRUM_LINES];
-        let equilibrium = self.temporal.spring(&law.equilibrium_gram, strains, &spectrum[..n], None).map_err(|_| invalid())?;
+        let equilibrium = self
+            .temporal
+            .spring(&law.equilibrium_gram, strains, &spectrum[..n], None)
+            .map_err(|_| invalid())?;
         let mut storage = [equilibrium[0], equilibrium[1], equilibrium[2]].map(Dd::from_f64);
         let mut heat = Dd::ZERO;
         let mut work = Sum::default();
         checkpoint()?;
-        self.temporal.add_stress_work(&law.c_eq, strains, &spectrum[..n], &mut work);
+        self.temporal
+            .add_stress_work(&law.c_eq, strains, &spectrum[..n], &mut work);
         for (index, branch) in law.branches.iter().enumerate() {
             checkpoint()?;
             for i in 0..n {
                 spectrum[i] = self.source.weights[i][index].primal_binary();
             }
             let gram = branch.resolved_gram_rows(&law.factors[index]);
-            let response = self.temporal.spring(&gram, strains, &spectrum[..n], Some(branch.tau_s)).map_err(|_| invalid())?;
+            let response = self
+                .temporal
+                .spring(&gram, strains, &spectrum[..n], Some(branch.tau_s))
+                .map_err(|_| invalid())?;
             for j in 0..3 {
                 storage[j] = storage[j] + Dd::from_f64(response[j]);
             }
             heat = heat + Dd::from_f64(response[3]);
             checkpoint()?;
-            self.temporal.add_stress_work(&branch.c_pa, strains, &spectrum[..n], &mut work);
+            self.temporal
+                .add_stress_work(&branch.c_pa, strains, &spectrum[..n], &mut work);
         }
         checkpoint()?;
         let kelvin = if let Some(factor) = &law.kv_factor {
             let gram = core::array::from_fn(|i| core::array::from_fn(|j| factor[j][i]));
-            self.temporal.kelvin_heat(&gram, strains).map_err(|_| invalid())?
-        } else { 0.0 };
+            self.temporal
+                .kelvin_heat(&gram, strains)
+                .map_err(|_| invalid())?
+        } else {
+            0.0
+        };
         if let Some(viscosity) = &law.kv_pa_s {
             checkpoint()?;
             for (spectrum, &omega) in spectrum.iter_mut().zip(&self.source.frequencies) {
                 *spectrum = [(0.0, 0), (omega, 0)];
             }
-            self.temporal.add_stress_work(viscosity, strains, &spectrum[..n], &mut work);
+            self.temporal
+                .add_stress_work(viscosity, strains, &spectrum[..n], &mut work);
         }
         let work = scalar(work.value())?;
         let total_heat = heat + Dd::from_f64(kelvin);
@@ -250,7 +295,9 @@ impl<'p, 'a> TensorPronySpectrumWindow<'p, 'a> {
             maxwell_heat_j_m3: positive(heat.to_f64())?,
             material_heat_j_m3: positive(total_heat.to_f64())?,
             stress_work_j_m3: work,
-            energy_balance_residual_j_m3: scalar((Dd::from_f64(work) - storage[2] - total_heat).to_f64())?,
+            energy_balance_residual_j_m3: scalar(
+                (Dd::from_f64(work) - storage[2] - total_heat).to_f64(),
+            )?,
         };
         checkpoint()?;
         Ok(result)

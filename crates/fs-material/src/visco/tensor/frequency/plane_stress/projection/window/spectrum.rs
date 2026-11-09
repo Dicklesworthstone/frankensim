@@ -64,11 +64,17 @@ impl HarmonicEnergySpectrum {
 
     pub(crate) fn numerical_payload_bytes(&self) -> usize {
         core::mem::size_of::<Self>()
-            + self.frequencies.len() * (core::mem::size_of::<f64>() + 3 * core::mem::size_of::<[Dd; 2]>())
+            + self.frequencies.len()
+                * (core::mem::size_of::<f64>() + 3 * core::mem::size_of::<[Dd; 2]>())
             + self.gram.len() * core::mem::size_of::<[Dd; 2]>()
     }
 
-    fn centered(&self, row: &[f64; 6], strains: &[StrainParts], spectrum: &[Spectrum]) -> [Channel; MAX_SPECTRUM_LINES] {
+    fn centered(
+        &self,
+        row: &[f64; 6],
+        strains: &[StrainParts],
+        spectrum: &[Spectrum],
+    ) -> [Channel; MAX_SPECTRUM_LINES] {
         let mut values = [[Sum::default(); 2]; MAX_SPECTRUM_LINES];
         for i in 0..strains.len() {
             values[i] = rotate(project_parts(row, &strains[i], spectrum[i]), self.center[i]);
@@ -81,14 +87,27 @@ impl HarmonicEnergySpectrum {
         for i in 0..n {
             for j in 0..n {
                 for k in 0..2 {
-                    weighted(total, a[i][k], b[j][k], self.gram[i * n + j][k], &[self.duration], denominator);
+                    weighted(
+                        total,
+                        a[i][k],
+                        b[j][k],
+                        self.gram[i * n + j][k],
+                        &[self.duration],
+                        denominator,
+                    );
                 }
             }
         }
     }
 
     /// Original spring energy, direct storage-rate integral, and physical heat.
-    pub(crate) fn spring(&self, gram: &[[f64; 6]; 6], strains: &[StrainParts], spectrum: &[Spectrum], tau: Option<f64>) -> Result<[f64; 4], WindowError> {
+    pub(crate) fn spring(
+        &self,
+        gram: &[[f64; 6]; 6],
+        strains: &[StrainParts],
+        spectrum: &[Spectrum],
+        tau: Option<f64>,
+    ) -> Result<[f64; 4], WindowError> {
         let n = self.frequencies.len();
         let mut totals = [Sum::default(); 4];
         for row in gram {
@@ -99,12 +118,26 @@ impl HarmonicEnergySpectrum {
                 add(&mut endpoints[1], rotate(z, self.end[i])[0]);
             }
             for i in 0..2 {
-                weighted(&mut totals[i], endpoints[i], endpoints[i], Dd::ONE, &[0.5], &[]);
+                weighted(
+                    &mut totals[i],
+                    endpoints[i],
+                    endpoints[i],
+                    Dd::ONE,
+                    &[0.5],
+                    &[],
+                );
             }
             let values = self.centered(row, strains, spectrum);
             for i in 0..n {
                 let g = self.gram[i * n + i];
-                weighted(&mut totals[2], values[i][0], values[i][1], g[0] - g[1], &[self.frequencies[i], self.duration], &[]);
+                weighted(
+                    &mut totals[2],
+                    values[i][0],
+                    values[i][1],
+                    g[0] - g[1],
+                    &[self.frequencies[i], self.duration],
+                    &[],
+                );
                 for j in i + 1..n {
                     let [cc, ss] = self.gram[i * n + j];
                     // Differentiate each cross product as a sum- and a beat-
@@ -113,7 +146,8 @@ impl HarmonicEnergySpectrum {
                     let mut sum_frequency = Sum::default();
                     sum_frequency.add([self.frequencies[i], 1.0, 1.0, 1.0]);
                     sum_frequency.add([self.frequencies[j], 1.0, 1.0, 1.0]);
-                    let difference = dd(Dd::from_f64(self.frequencies[j]) - Dd::from_f64(self.frequencies[i]));
+                    let difference =
+                        dd(Dd::from_f64(self.frequencies[j]) - Dd::from_f64(self.frequencies[i]));
                     let xy = product(values[i][0], values[j][1]);
                     let yx = product(values[i][1], values[j][0]);
                     let mut symmetric = Sum::default();
@@ -122,18 +156,41 @@ impl HarmonicEnergySpectrum {
                     let mut antisymmetric = Sum::default();
                     add(&mut antisymmetric, xy);
                     add(&mut antisymmetric, scaled(yx, -Dd::ONE));
-                    weighted(&mut totals[2], symmetric, sum_frequency, cc - ss, &[0.5, self.duration], &[]);
-                    weighted(&mut totals[2], antisymmetric, difference, cc + ss, &[0.5, self.duration], &[]);
+                    weighted(
+                        &mut totals[2],
+                        symmetric,
+                        sum_frequency,
+                        cc - ss,
+                        &[0.5, self.duration],
+                        &[],
+                    );
+                    weighted(
+                        &mut totals[2],
+                        antisymmetric,
+                        difference,
+                        cc + ss,
+                        &[0.5, self.duration],
+                        &[],
+                    );
                 }
             }
             if let Some(tau) = tau {
                 self.product_integral(&values[..n], &values[..n], &[tau], &mut totals[3]);
             }
         }
-        Ok([positive(totals[0].value())?, positive(totals[1].value())?, finite(totals[2].value())?, positive(totals[3].value())?])
+        Ok([
+            positive(totals[0].value())?,
+            positive(totals[1].value())?,
+            finite(totals[2].value())?,
+            positive(totals[3].value())?,
+        ])
     }
 
-    pub(crate) fn kelvin_heat(&self, gram: &[[f64; 6]; 6], strains: &[StrainParts]) -> Result<f64, WindowError> {
+    pub(crate) fn kelvin_heat(
+        &self,
+        gram: &[[f64; 6]; 6],
+        strains: &[StrainParts],
+    ) -> Result<f64, WindowError> {
         let n = self.frequencies.len();
         let mut rates = [[(0.0, 0); 2]; MAX_SPECTRUM_LINES];
         for (rate, &omega) in rates.iter_mut().zip(&self.frequencies) {
@@ -148,7 +205,13 @@ impl HarmonicEnergySpectrum {
     }
 
     /// Original stress : strain_rate, independent of storage and loss factors.
-    pub(crate) fn add_stress_work(&self, matrix: &[[f64; 6]; 6], strains: &[StrainParts], spectrum: &[Spectrum], total: &mut Sum) {
+    pub(crate) fn add_stress_work(
+        &self,
+        matrix: &[[f64; 6]; 6],
+        strains: &[StrainParts],
+        spectrum: &[Spectrum],
+        total: &mut Sum,
+    ) {
         let n = self.frequencies.len();
         for (i, row) in matrix.iter().enumerate() {
             let stress = self.centered(row, strains, spectrum);
@@ -156,7 +219,10 @@ impl HarmonicEnergySpectrum {
             let mut unit = [0.0; 6];
             unit[i] = 1.0;
             for j in 0..n {
-                rate[j] = rotate(project_parts(&unit, &strains[j], [(0.0, 0), (self.frequencies[j], 0)]), self.center[j]);
+                rate[j] = rotate(
+                    project_parts(&unit, &strains[j], [(0.0, 0), (self.frequencies[j], 0)]),
+                    self.center[j],
+                );
             }
             self.product_integral(&stress[..n], &rate[..n], &[], total);
         }
@@ -168,17 +234,24 @@ mod tests {
     use super::*;
 
     fn near(actual: f64, expected: f64, scale: f64) {
-        assert!((actual - expected).abs() < 3e-11 * scale, "{actual:e} != {expected:e}, scale={scale:e}");
+        assert!(
+            (actual - expected).abs() < 3e-11 * scale,
+            "{actual:e} != {expected:e}, scale={scale:e}"
+        );
     }
 
     #[test]
     fn independent_real_maxwell_odes_close_multitone_storage_heat_and_work() {
         let frequencies = [2.7, 3.1, 11.0];
         let tau = 0.3;
-        let strains: [StrainParts; 3] = core::array::from_fn(|f| core::array::from_fn(|i| {
-            [Dd::from_f64((f + 1) as f64 * (i as f64 - 2.0) * 0.001),
-                Dd::from_f64((2.0 - f as f64) * (3.0 - i as f64) * 0.0007)]
-        }));
+        let strains: [StrainParts; 3] = core::array::from_fn(|f| {
+            core::array::from_fn(|i| {
+                [
+                    Dd::from_f64((f + 1) as f64 * (i as f64 - 2.0) * 0.001),
+                    Dd::from_f64((2.0 - f as f64) * (3.0 - i as f64) * 0.0007),
+                ]
+            })
+        });
         let spectrum: [Spectrum; 3] = frequencies.map(|w| {
             let x = w * tau;
             [(x * x / (1.0 + x * x), 0), (x / (1.0 + x * x), 0)]
@@ -186,10 +259,14 @@ mod tests {
         let mut gram = [[0.0; 6]; 6];
         gram[0] = [1.0, -2.0, 0.3, 0.0, 0.5, -0.1];
         gram[1] = [0.2, 0.0, -0.6, 0.7, 0.1, -0.2];
-        let matrix = core::array::from_fn(|i| core::array::from_fn(|j| (0..6).map(|k| gram[k][i] * gram[k][j]).sum()));
+        let matrix = core::array::from_fn(|i| {
+            core::array::from_fn(|j| (0..6).map(|k| gram[k][i] * gram[k][j]).sum())
+        });
         let window = HarmonicWindow::new(0.37, 1.9).unwrap();
         let temporal = HarmonicEnergySpectrum::new(&frequencies, window).unwrap();
-        let response = temporal.spring(&gram, &strains, &spectrum, Some(tau)).unwrap();
+        let response = temporal
+            .spring(&gram, &strains, &spectrum, Some(tau))
+            .unwrap();
         let mut work = Sum::default();
         temporal.add_stress_work(&matrix, &strains, &spectrum, &mut work);
         // Independently solve tau*q_dot+q=tau*epsilon_dot in real fields.
@@ -207,16 +284,27 @@ mod tests {
                     rate[i] += w * (im * c - re * s);
                 }
             }
-            let stress: [f64; 6] = core::array::from_fn(|i| (0..6).map(|j| matrix[i][j] * q[j]).sum());
+            let stress: [f64; 6] =
+                core::array::from_fn(|i| (0..6).map(|j| matrix[i][j] * q[j]).sum());
             let square: f64 = q.iter().zip(stress).map(|(a, b)| a * b).sum();
-            [0.5 * square, square / tau, rate.iter().zip(stress).map(|(a, b)| a * b).sum()]
+            [
+                0.5 * square,
+                square / tau,
+                rate.iter().zip(stress).map(|(a, b)| a * b).sum(),
+            ]
         };
         let (mut heat, mut direct_work) = (0.0, 0.0);
         let panels = 8192;
         for i in 0..=panels {
             let t = window.start_s() + window.duration_s() * i as f64 / panels as f64;
             let [_, h, w] = instant(t);
-            let weight = if i == 0 || i == panels { 1.0 } else if i % 2 == 1 { 4.0 } else { 2.0 };
+            let weight = if i == 0 || i == panels {
+                1.0
+            } else if i % 2 == 1 {
+                4.0
+            } else {
+                2.0
+            };
             heat += weight * h;
             direct_work += weight * w;
         }
@@ -238,15 +326,26 @@ mod tests {
         let omega = 3.0;
         let e = [C64::new(1e-150, -0.4e-150); 6];
         let strains: [StrainParts; 1] = [e.map(|z| [Dd::from_f64(z.re), Dd::from_f64(z.im)])];
-        let gram = core::array::from_fn(|i| core::array::from_fn(|j| if i == j { 1e150 } else { 0.0 }));
+        let gram =
+            core::array::from_fn(|i| core::array::from_fn(|j| if i == j { 1e150 } else { 0.0 }));
         let transfer = [(0.5, -1100), (0.7, -550)];
         let tau = 1e-300;
         let window = HarmonicWindow::new(0.4, 1e-12).unwrap();
-        let single = HarmonicEnergyWindow::new(omega, window).unwrap().spring(&gram, &e, transfer, Some(tau)).unwrap();
-        let multiple = HarmonicEnergySpectrum::new(&[omega], window).unwrap().spring(&gram, &strains, &[transfer], Some(tau)).unwrap();
+        let single = HarmonicEnergyWindow::new(omega, window)
+            .unwrap()
+            .spring(&gram, &e, transfer, Some(tau))
+            .unwrap();
+        let multiple = HarmonicEnergySpectrum::new(&[omega], window)
+            .unwrap()
+            .spring(&gram, &strains, &[transfer], Some(tau))
+            .unwrap();
         assert!(single[3] > 0.0);
         for (a, b) in multiple.into_iter().zip(single) {
-            if b == 0.0 { assert_eq!(a, b); } else { near(a, b, b.abs()); }
+            if b == 0.0 {
+                assert_eq!(a, b);
+            } else {
+                near(a, b, b.abs());
+            }
         }
     }
 
@@ -255,17 +354,35 @@ mod tests {
         let frequencies = [10.0, 10.2];
         let mut e = [[Dd::ZERO; 2]; 6];
         e[0][0] = Dd::from_f64(0.01);
-        let gram = core::array::from_fn(|i| core::array::from_fn(|j| if i == j { 2.0 } else { 0.0 }));
+        let gram =
+            core::array::from_fn(|i| core::array::from_fn(|j| if i == j { 2.0 } else { 0.0 }));
         let window = HarmonicWindow::new(0.0, 0.7).unwrap();
-        let actual = HarmonicEnergySpectrum::new(&frequencies, window).unwrap().kelvin_heat(&gram, &[e; 2]).unwrap();
-        let diagonal: f64 = frequencies.iter().map(|&w| HarmonicEnergySpectrum::new(&[w], window).unwrap().kelvin_heat(&gram, &[e]).unwrap()).sum();
+        let actual = HarmonicEnergySpectrum::new(&frequencies, window)
+            .unwrap()
+            .kelvin_heat(&gram, &[e; 2])
+            .unwrap();
+        let diagonal: f64 = frequencies
+            .iter()
+            .map(|&w| {
+                HarmonicEnergySpectrum::new(&[w], window)
+                    .unwrap()
+                    .kelvin_heat(&gram, &[e])
+                    .unwrap()
+            })
+            .sum();
         assert!(actual > 1.9 * diagonal);
         let mut integral = 0.0;
         let panels = 8192;
         for i in 0..=panels {
             let t = window.duration_s() * i as f64 / panels as f64;
             let rate: f64 = frequencies.iter().map(|&w| -w * 0.01 * (w * t).sin()).sum();
-            let weight = if i == 0 || i == panels { 1.0 } else if i % 2 == 1 { 4.0 } else { 2.0 };
+            let weight = if i == 0 || i == panels {
+                1.0
+            } else if i % 2 == 1 {
+                4.0
+            } else {
+                2.0
+            };
             integral += weight * 4.0 * rate * rate;
         }
         integral *= window.duration_s() / (3.0 * panels as f64);

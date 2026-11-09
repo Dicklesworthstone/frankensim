@@ -13172,6 +13172,42 @@ Those four new solid integration tests are present but remain unexecuted under
 the shared runtime build constraint. Their material owner passed seven native
 selected-source interval tests and eighteen existing numerical regressions.
 
+### Coherent multitone material heating on original solid fields
+
+`ViscoElements::prepare_harmonic_material_spectrum_observer` connects the same
+original free/support maps and constitutive quadrature to the shared
+`TensorPronyHarmonicSpectrum` material owner. It accepts up to 64 positive
+source-admitted angular frequencies; `observe_window` consumes one complete
+free-coordinate displacement vector per authored line. This applies to every
+element family already served by `ViscoElements`, with every original compatible
+strain independently retained and admitted alongside B-bar constitutive strain.
+
+Equal-frequency fields combine before source admission and energy contractions.
+Distinct-frequency sum and beat terms remain in actual finite-interval Kelvin
+heat, Maxwell heat, recoverable storage and stress work. No common period or
+independent-phase assumption is imposed. Each point exposes the original tone
+order, reference-volume weight and physical material account. Volume integration
+uses compensated totals and direct pointwise storage increments; stress work and
+positive physical heat are computed independently of the signed balance defect.
+
+Preparation admits authored line count, complete point count, numerical payload
+and conservative quadratic-in-lines work before allocating spectra or fields.
+One material temporal cache per element and one gathered nodal buffer serve all
+its points; original frequency spectra are reused across forcing cases/windows.
+Cancellation polls between material channels/branches as well as original points.
+Refusal returns no partial field and changes no source or accepted history.
+
+The material owner uses a conservative sum of distinct-line peak strain norms to
+admit the complete waveform. It can refuse physically valid waveforms whose
+separate peaks cannot coincide. This is settled linear viscoelastic response at
+fixed material conditions, without startup memory, a DC preload, temperature
+feedback, spatial convergence or an external-force solution certificate.
+The G1/G3 tests in `visco_harmonic_window` compare affine tetrahedral and nonuniform
+HEX8 B-bar fields with independent real Maxwell fields/Simpson quadrature, exercise
+clock translation and split intervals, reject incompatible strain/budget/profile
+inputs, preserve coherent duplicate cancellation and one-tone limits, and feed
+the existing dispersive mechanical solutions directly into the shared observer.
+
 ### Thermal retained porous solids with independently sealed cavities
 
 `hyper3::plastic::porous::thermal::FiniteThermalPorousTetSolid::advance_with_cavities`

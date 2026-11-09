@@ -9,6 +9,12 @@ use fs_material::visco::{
 use fs_math::{c64::C64, dd::Dd};
 use fs_modal::harmonic::HarmonicResponseError;
 
+mod spectrum;
+pub use spectrum::{
+    ViscoHarmonicMaterialSpectrumField, ViscoHarmonicMaterialSpectrumObserver,
+    ViscoHarmonicMaterialSpectrumPoint,
+};
+
 /// Cold cache plus returned field admission. The original geometry/laws and
 /// displacement input are borrowed, not included in this additional payload.
 #[derive(Clone, Copy, Debug)]

@@ -5,7 +5,7 @@ use fs_exec::Cx;
 use fs_fft::harmonic_window::{HarmonicWindow, HarmonicWindowProfile};
 use fs_material::visco::{Mandel6, PronyBranch, TensorProny};
 use fs_math::c64::C64;
-use fs_modal::harmonic::HarmonicResponseError;
+use fs_modal::harmonic::{HarmonicResponseControls, HarmonicResponseError};
 use fs_solid::linear::Formulation;
 use fs_solid::linear3::TetAssemblyBudget;
 use fs_solid::linear3::visco::*;
@@ -449,5 +449,433 @@ fn compatible_strain_limit_cannot_be_hidden_by_bbar_projection() {
                 .observe_window(&displacement, HarmonicWindow::new(0.0, 0.1).unwrap(), cx)
                 .is_err()
         );
+    });
+}
+
+// Independent real-field superposition BEFORE the quadratic constitutive
+// contractions. This retains coherent beat terms without using a spectral
+// window, a complex material modulus, or the production energy observer.
+fn instantaneous_spectrum(law: &TensorProny, tones: &[(f64, [C64; 6])], t: f64) -> [f64; 4] {
+    let mut strain = [0.0; 6];
+    let mut rate = [0.0; 6];
+    for (omega, e) in tones {
+        let (sin, cos) = (omega * t).sin_cos();
+        for i in 0..6 {
+            strain[i] += e[i].re * cos + e[i].im * sin;
+            rate[i] += omega * (-e[i].re * sin + e[i].im * cos);
+        }
+    }
+    let mut stress = apply(law.c_eq(), &strain);
+    let mut energy = 0.5 * dot(&strain, &stress);
+    let viscous = apply(law.kv_pa_s().unwrap(), &rate);
+    let kelvin = dot(&rate, &viscous);
+    for i in 0..6 {
+        stress[i] += viscous[i];
+    }
+    let mut maxwell = 0.0;
+    for branch in law.branches() {
+        let mut spring = [0.0; 6];
+        for (omega, e) in tones {
+            let x = omega * branch.tau_s;
+            let (a, b) = (x * x / (1.0 + x * x), x / (1.0 + x * x));
+            let (sin, cos) = (omega * t).sin_cos();
+            for i in 0..6 {
+                spring[i] += (a * e[i].re + b * e[i].im) * cos + (a * e[i].im - b * e[i].re) * sin;
+            }
+        }
+        let branch_stress = apply(&branch.c_pa, &spring);
+        let quadratic = dot(&spring, &branch_stress);
+        energy += 0.5 * quadratic;
+        maxwell += quadratic / branch.tau_s;
+        for i in 0..6 {
+            stress[i] += branch_stress[i];
+        }
+    }
+    [energy, kelvin, maxwell, dot(&stress, &rate)]
+}
+
+fn integrate_spectrum(
+    law: &TensorProny,
+    tones: &[(f64, [C64; 6])],
+    window: HarmonicWindow,
+) -> [f64; 3] {
+    let n = 8192;
+    let step = window.duration_s() / n as f64;
+    let mut sum = [0.0; 3];
+    for k in 0..=n {
+        let values = instantaneous_spectrum(law, tones, window.start_s() + step * k as f64);
+        let weight = if k == 0 || k == n {
+            1.0
+        } else if k % 2 == 0 {
+            2.0
+        } else {
+            4.0
+        };
+        for i in 0..3 {
+            sum[i] += weight * values[i + 1];
+        }
+    }
+    sum.map(|value| value * step / 3.0)
+}
+
+fn spectrum_budget() -> ViscoHarmonicMaterialBudget {
+    ViscoHarmonicMaterialBudget {
+        maximum_work: 100_000_000,
+        ..budget()
+    }
+}
+
+#[test]
+fn coherent_tetrahedral_beats_match_real_fields_and_preserve_the_source_clock() {
+    with_cx(|cx, _| {
+        let law = law();
+        let source = solid(tet_mesh(), law.clone(), cx);
+        let tones = [
+            (7.0, strain()),
+            (8.7, strain().map(|z| z * C64::new(0.6, -0.2))),
+        ];
+        let frequencies = tones.map(|(omega, _)| omega);
+        let displacements = tones.map(|(_, e)| affine(&TET, e));
+        let input = displacements.each_ref().map(Vec::as_slice);
+        let observer = source
+            .prepare_harmonic_material_spectrum_observer(&frequencies, spectrum_budget(), cx)
+            .unwrap();
+        assert!(core::ptr::eq(observer.source(), &source));
+        assert_eq!(observer.angular_frequencies_rad_s(), frequencies);
+        let volume = 1.0 / 6.0;
+        for window in [
+            HarmonicWindow::new(0.137, 0.41).unwrap(),
+            HarmonicWindow::new(-0.29, 0.00003).unwrap(),
+        ] {
+            let field = observer.observe_window(&input, window, cx).unwrap();
+            let start = volume * instantaneous_spectrum(&law, &tones, window.start_s())[0];
+            let end = volume
+                * instantaneous_spectrum(&law, &tones, window.start_s() + window.duration_s())[0];
+            let [kelvin, maxwell, work] =
+                integrate_spectrum(&law, &tones, window).map(|x| volume * x);
+            let scale = start.abs().max(end.abs()).max(work.abs());
+            assert_eq!(field.points.len(), 1);
+            assert_eq!(field.angular_frequencies_rad_s, frequencies);
+            assert_eq!(field.points[0].strain_mandel.len(), 2);
+            assert!(field.points[0].compatible_strain_mandel.is_none());
+            near(field.start_stored_energy_j, start, scale);
+            near(field.end_stored_energy_j, end, scale);
+            near(field.stored_energy_change_j, end - start, scale);
+            near(field.kelvin_heat_j, kelvin, kelvin);
+            near(field.maxwell_heat_j, maxwell, maxwell);
+            near(field.material_heat_j, kelvin + maxwell, kelvin + maxwell);
+            near(field.stress_work_j, work, scale);
+            near(field.energy_balance_residual_j, 0.0, scale);
+            assert_eq!(field, observer.observe_window(&input, window, cx).unwrap());
+        }
+        let window = HarmonicWindow::new(0.137, 0.41).unwrap();
+        let field = observer.observe_window(&input, window, cx).unwrap();
+        let incoherent: f64 = tones
+            .iter()
+            .map(|tone| {
+                let [kelvin, maxwell, _] = integrate_spectrum(&law, &[*tone], window);
+                volume * (kelvin + maxwell)
+            })
+            .sum();
+        assert!((field.material_heat_j - incoherent).abs() > 0.1 * field.material_heat_j);
+
+        let shift = 1.7;
+        let translated = tones.map(|(omega, e)| {
+            let (sin, cos) = (omega * shift).sin_cos();
+            affine(&TET, e.map(|z| z * C64::new(cos, sin)))
+        });
+        let translated_input = translated.each_ref().map(Vec::as_slice);
+        let shifted = observer
+            .observe_window(
+                &translated_input,
+                HarmonicWindow::new(window.start_s() + shift, window.duration_s()).unwrap(),
+                cx,
+            )
+            .unwrap();
+        near(
+            shifted.material_heat_j,
+            field.material_heat_j,
+            field.material_heat_j,
+        );
+        near(
+            shifted.stress_work_j,
+            field.stress_work_j,
+            field.start_stored_energy_j,
+        );
+        near(
+            shifted.stored_energy_change_j,
+            field.stored_energy_change_j,
+            field.start_stored_energy_j,
+        );
+
+        let left = observer
+            .observe_window(&input, HarmonicWindow::new(0.137, 0.17).unwrap(), cx)
+            .unwrap();
+        let right = observer
+            .observe_window(&input, HarmonicWindow::new(0.307, 0.24).unwrap(), cx)
+            .unwrap();
+        near(
+            left.material_heat_j + right.material_heat_j,
+            field.material_heat_j,
+            field.material_heat_j,
+        );
+        near(
+            left.stress_work_j + right.stress_work_j,
+            field.stress_work_j,
+            field.start_stored_energy_j,
+        );
+        near(
+            left.stored_energy_change_j + right.stored_energy_change_j,
+            field.stored_energy_change_j,
+            field.start_stored_energy_j,
+        );
+    });
+}
+
+#[test]
+fn coherent_bbar_spectrum_keeps_every_original_constitutive_and_compatible_point() {
+    with_cx(|cx, _| {
+        let law = law();
+        let source = solid(hex_mesh(), law.clone(), cx);
+        let frequencies = [4.0, 6.3];
+        let amplitudes = [(0.003, 0.001), (0.002, -0.0007)];
+        let displacements = amplitudes.map(|(amplitude, imaginary)| {
+            HEX.iter()
+                .flat_map(|p| {
+                    [
+                        C64::new(amplitude * p[0] * p[1], imaginary * p[0]),
+                        C64::ZERO,
+                        C64::ZERO,
+                    ]
+                })
+                .collect::<Vec<_>>()
+        });
+        let input = displacements.each_ref().map(Vec::as_slice);
+        let observer = source
+            .prepare_harmonic_material_spectrum_observer(&frequencies, spectrum_budget(), cx)
+            .unwrap();
+        let window = HarmonicWindow::new(-0.12, 0.39).unwrap();
+        let field = observer.observe_window(&input, window, cx).unwrap();
+        assert_eq!(field.points.len(), 8);
+        let (mut start, mut end) = (0.0, 0.0);
+        let mut integrated = [0.0; 3];
+        let g = 1.0 / 3.0_f64.sqrt();
+        for x in [(1.0 - g) * 0.5, (1.0 + g) * 0.5] {
+            for y in [(1.0 - g) * 0.5, (1.0 + g) * 0.5] {
+                let tones = core::array::from_fn::<_, 2, _>(|i| {
+                    let (projected, _) = bbar_strain(x, y, amplitudes[i].0, amplitudes[i].1);
+                    (frequencies[i], projected)
+                });
+                start += 0.25 * instantaneous_spectrum(&law, &tones, window.start_s())[0];
+                end += 0.25
+                    * instantaneous_spectrum(&law, &tones, window.start_s() + window.duration_s())
+                        [0];
+                for (sum, value) in integrated
+                    .iter_mut()
+                    .zip(integrate_spectrum(&law, &tones, window))
+                {
+                    *sum += 0.25 * value;
+                }
+            }
+        }
+        for point in &field.points {
+            near(point.volume_m3, 0.125, 0.125);
+            let raw = point.compatible_strain_mandel.as_ref().unwrap();
+            assert_eq!(raw.len(), 2);
+            for i in 0..2 {
+                let projected = point.strain_mandel[i];
+                near(
+                    projected[..3].iter().map(|z| z.re).sum(),
+                    0.5 * amplitudes[i].0,
+                    amplitudes[i].0,
+                );
+                near(
+                    raw[i][0].re + 3.0 * projected[1].re,
+                    0.5 * amplitudes[i].0,
+                    amplitudes[i].0,
+                );
+            }
+        }
+        near(field.start_stored_energy_j, start, start);
+        near(field.end_stored_energy_j, end, end);
+        near(field.stored_energy_change_j, end - start, start.max(end));
+        near(field.kelvin_heat_j, integrated[0], integrated[0]);
+        near(field.maxwell_heat_j, integrated[1], integrated[1]);
+        near(field.stress_work_j, integrated[2], start.max(end));
+        near(field.energy_balance_residual_j, 0.0, start.max(end));
+
+        // B-bar projection admits each combined constitutive strain, while
+        // the original compatible field exceeds the source's small-strain band.
+        let excessive: Vec<_> = HEX
+            .iter()
+            .flat_map(|p| [C64::from_re(0.0215 * p[0] * p[1]), C64::ZERO, C64::ZERO])
+            .collect();
+        let zero = vec![C64::ZERO; 24];
+        assert!(
+            observer
+                .observe_window(&[&excessive, &zero], window, cx)
+                .is_err()
+        );
+        assert_eq!(field, observer.observe_window(&input, window, cx).unwrap());
+    });
+}
+
+#[test]
+fn coherent_material_admission_and_single_tone_limits_are_transactional() {
+    with_cx(|cx, gate| {
+        let source = solid(tet_mesh(), law(), cx);
+        let displacement = affine(&TET, strain());
+        let window = HarmonicWindow::new(0.1, 0.4).unwrap();
+        let spectrum = source
+            .prepare_harmonic_material_spectrum_observer(&[7.0], spectrum_budget(), cx)
+            .unwrap();
+        let single = source
+            .prepare_harmonic_material_observer(7.0, budget(), cx)
+            .unwrap()
+            .observe_window(&displacement, window, cx)
+            .unwrap();
+        let field = spectrum
+            .observe_window(&[&displacement], window, cx)
+            .unwrap();
+        near(
+            field.material_heat_j,
+            single.material_heat_j,
+            single.material_heat_j,
+        );
+        near(
+            field.stress_work_j,
+            single.stress_work_j,
+            single.start_stored_energy_j,
+        );
+        near(
+            field.stored_energy_change_j,
+            single.stored_energy_change_j,
+            single.start_stored_energy_j,
+        );
+
+        let coherent = source
+            .prepare_harmonic_material_spectrum_observer(&[7.0, 7.0], spectrum_budget(), cx)
+            .unwrap();
+        let huge = affine(&TET, strain().map(|z| z.scale(100.0)));
+        let opposite: Vec<_> = huge.iter().map(|z| z.scale(-1.0)).collect();
+        let cancelled = coherent
+            .observe_window(&[&huge, &opposite], window, cx)
+            .unwrap();
+        assert_eq!(cancelled.material_heat_j, 0.0);
+        assert_eq!(cancelled.stress_work_j, 0.0);
+        assert_eq!(cancelled.start_stored_energy_j, 0.0);
+        assert_eq!(cancelled.end_stored_energy_j, 0.0);
+        assert_eq!(cancelled.stored_energy_change_j, 0.0);
+
+        for frequencies in [&[][..], &[0.0], &[f64::NAN], &[7.0, 101.0], &[7.0; 65]] {
+            assert!(
+                source
+                    .prepare_harmonic_material_spectrum_observer(frequencies, spectrum_budget(), cx)
+                    .is_err()
+            );
+        }
+        for denied in [
+            ViscoHarmonicMaterialBudget {
+                maximum_points: 0,
+                ..spectrum_budget()
+            },
+            ViscoHarmonicMaterialBudget {
+                maximum_payload_bytes: 0,
+                ..spectrum_budget()
+            },
+            ViscoHarmonicMaterialBudget {
+                maximum_work: 0,
+                ..spectrum_budget()
+            },
+        ] {
+            assert!(
+                source
+                    .prepare_harmonic_material_spectrum_observer(&[7.0], denied, cx)
+                    .is_err()
+            );
+        }
+        assert!(spectrum.observe_window(&[], window, cx).is_err());
+        assert!(spectrum.observe_window(&[&[]], window, cx).is_err());
+        assert!(
+            spectrum
+                .observe_window(&[&[C64::from_re(f64::NAN); 12]], window, cx)
+                .is_err()
+        );
+        assert!(spectrum.observe_window(&[&huge], window, cx).is_err());
+        assert!(
+            spectrum
+                .observe_window(
+                    &[&displacement],
+                    HarmonicWindow::with_profile(0.1, 0.4, HarmonicWindowProfile::Triangular,)
+                        .unwrap(),
+                    cx
+                )
+                .is_err()
+        );
+        assert_eq!(
+            field,
+            spectrum
+                .observe_window(&[&displacement], window, cx)
+                .unwrap()
+        );
+        gate.request();
+        assert!(
+            spectrum
+                .observe_window(&[&displacement], window, cx)
+                .is_err()
+        );
+    });
+}
+
+#[test]
+fn existing_dispersive_solid_solutions_feed_coherent_physical_heat_without_refitting() {
+    with_cx(|cx, _| {
+        let source = solid(tet_mesh(), law(), cx);
+        let frequencies = [7.0, 14.0];
+        let controls = HarmonicResponseControls {
+            maximum_coordinates: 12,
+            maximum_payload_bytes: 1 << 20,
+            maximum_relative_residual: 2e-12,
+        };
+        let solutions = frequencies.map(|omega| {
+            let mut force = vec![C64::ZERO; 12];
+            force[3] = C64::new(0.001, 0.0004);
+            force[0] = force[3].scale(-1.0);
+            force[6] = C64::new(-0.0003, 0.0007);
+            force[9] = force[6].scale(-1.0);
+            source
+                .prepare_harmonic_response(omega, controls, cx)
+                .unwrap()
+                .solve(&force, cx)
+                .unwrap()
+        });
+        let input = solutions
+            .each_ref()
+            .map(|solution| solution.displacement_m.as_slice());
+        let observer = source
+            .prepare_harmonic_material_spectrum_observer(&frequencies, spectrum_budget(), cx)
+            .unwrap();
+        let period = core::f64::consts::TAU / frequencies[0];
+        let field = observer
+            .observe_window(&input, HarmonicWindow::new(0.123, period).unwrap(), cx)
+            .unwrap();
+        let input_work = period
+            * solutions
+                .iter()
+                .map(|solution| solution.average_input_power_w)
+                .sum::<f64>();
+        let mechanical_heat = period
+            * solutions
+                .iter()
+                .map(|solution| solution.average_material_heat_w)
+                .sum::<f64>();
+        near(field.material_heat_j, mechanical_heat, mechanical_heat);
+        near(field.stress_work_j, input_work, input_work);
+        near(
+            field.stored_energy_change_j,
+            0.0,
+            field.start_stored_energy_j.max(field.material_heat_j),
+        );
+        near(field.energy_balance_residual_j, 0.0, field.material_heat_j);
     });
 }
