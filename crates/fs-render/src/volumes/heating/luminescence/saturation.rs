@@ -326,7 +326,8 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
         })
     }
 
-    /// Restrict the prescribed pump to one exact `[start, end)` pulse.
+    /// Restrict all pumps to one exact global `[start, end)` pulse.
+    /// Individual beam windows, when bound, intersect this global gate.
     /// Both edges split the native thermal interval; afterglow continues in the
     /// dark. Bind before advancing. Without a window the pump stays on.
     pub fn with_pump_window(
@@ -392,7 +393,7 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
         thermal: &DepositionSimulation<'_>,
         match_clock: bool,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<Option<Arc<beam::PreparedColumn>>, OpticalHeatingError> {
+    ) -> Result<Option<Arc<beam::PreparedPumps>>, OpticalHeatingError> {
         checkpoint()?;
         if match_clock && self.time_s != thermal.time_s() {
             return Err(invalid("finite-population and thermal clocks differ"));
@@ -417,7 +418,7 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
     }
 
     fn next_edge(&self, after_s: f64) -> Option<f64> {
-        self.pump_window_s.and_then(|(start, end)| {
+        let global = self.pump_window_s.and_then(|(start, end)| {
             if after_s < start {
                 Some(start)
             } else if after_s < end {
@@ -425,7 +426,12 @@ impl<const M: usize> SaturableLuminescentHeating<M> {
             } else {
                 None
             }
-        })
+        });
+        let beam = self.beam.as_ref().and_then(|beams| beams.next_edge(after_s));
+        match (global, beam) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (edge, None) | (None, edge) => edge,
+        }
     }
 }
 

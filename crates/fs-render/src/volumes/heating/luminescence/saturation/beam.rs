@@ -1,6 +1,7 @@
 //! Depleting spectral pumps on the original cell and thermal timeline.
 //!
-//! One collimated, quadrature-weighted beam is transported in native DDA order.
+//! Mutually incoherent, quadrature-weighted pumps share one finite inventory.
+//! Each beam is transported in its own native DDA order.
 //! Its molecular optical depth is cross section times the complete cell's
 //! ground inventory times ray length / cell volume. The coupled thermal owner
 //! solves that inventory and the transmitted photons together. This is an
@@ -21,12 +22,23 @@ use crate::volumes::transport::{AbsorbingGrid, VolumeTransportError, positive_pr
 use fs_exec::Cx;
 use fs_thermal::enthalpy::CellId;
 use fs_thermal::luminescence::transfer::pump_column::{
-    PumpColumnStep, SaturablePumpCell, SaturablePumpColumn,
+    SaturablePumpCell, SaturablePumpColumn,
 };
 use fs_thermal::luminescence::transfer::saturation::SaturableSingletTripletStep;
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
+use fs_thermal::luminescence::transfer::pump_beams::{
+    SaturablePumpBeams, SaturablePumpPath, SaturablePumpSegment,
+};
 
 pub use fs_thermal::luminescence::transfer::pump_column::PumpColumnLimits;
+pub use fs_thermal::luminescence::transfer::pump_beams::PumpBeamsLimits;
+
+mod accounts;
+mod binding;
+mod evolution;
+pub use accounts::{DepletingPumpBeamEnergy, DepletingPumpEnergy, DepletingPumpReport};
+pub use binding::DepletingPumpBeam;
+pub(super) use accounts::BeamAccounts;
 
 #[derive(Clone, Debug)]
 enum CrossSections {
@@ -136,90 +148,10 @@ impl BeamEmitterCrossSections {
     }
 }
 
-/// Accepted cumulative pump ledger, in incident wavelength order. Molecular
-/// absorption supplies excitation plus relaxation heat; passive host absorption
-/// supplies heat directly. Neither emission nor a detector alters this ledger.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct DepletingPumpEnergy {
-    pub duration_s: f64,
-    pub incident_j: [f64; 2],
-    pub transmitted_j: [f64; 2],
-    pub absorbed_j: [f64; 2],
-    pub passive_absorbed_j: [f64; 2],
-    /// Incident minus transmitted, molecular absorption and passive absorption.
-    pub residual_j: [f64; 2],
-    pub accepted_kinetic_substeps: u64,
-    pub cell_evaluations: u64,
-    /// Largest accepted whole-column time-refinement discrepancy, joules.
-    /// This is an estimator, not a certified continuum or experimental bound.
-    pub maximum_energy_discrepancy_j: f64,
-}
-
-#[derive(Clone, Debug, Default)]
-pub(super) struct BeamAccounts {
-    duration: CheckedSum,
-    incident: [CheckedSum; 2],
-    transmitted: [CheckedSum; 2],
-    absorbed: [CheckedSum; 2],
-    passive: [CheckedSum; 2],
-    report: DepletingPumpEnergy,
-}
-
-impl BeamAccounts {
-    fn add(
-        &mut self,
-        step: &PumpColumnStep<2>,
-        duration_s: f64,
-        energy_tolerance_j: f64,
-    ) -> Result<(), OpticalHeatingError> {
-        self.duration.add(duration_s)?;
-        self.report.duration_s = self.duration.value()?;
-        for lane in 0..2 {
-            self.incident[lane].add(step.incident_energy_j[lane])?;
-            self.transmitted[lane].add(step.transmitted_energy_j[lane])?;
-            self.absorbed[lane].add(step.absorbed_energy_j[lane])?;
-            self.passive[lane].add(step.passive_absorbed_energy_j[lane])?;
-            self.report.incident_j[lane] = self.incident[lane].value()?;
-            self.report.transmitted_j[lane] = self.transmitted[lane].value()?;
-            self.report.absorbed_j[lane] = self.absorbed[lane].value()?;
-            self.report.passive_absorbed_j[lane] = self.passive[lane].value()?;
-            let mut balance = CheckedSum::default();
-            for value in [
-                self.report.incident_j[lane],
-                -self.report.transmitted_j[lane],
-                -self.report.absorbed_j[lane],
-                -self.report.passive_absorbed_j[lane],
-            ] {
-                balance.add(value)?;
-            }
-            self.report.residual_j[lane] = balance.value()?;
-            if self.report.residual_j[lane].abs() > energy_tolerance_j {
-                return Err(invalid(
-                    "depleting pump incident, transmitted and absorbed energies do not balance",
-                ));
-            }
-        }
-        self.report.accepted_kinetic_substeps = self
-            .report
-            .accepted_kinetic_substeps
-            .checked_add(step.substeps as u64)
-            .ok_or_else(|| invalid("depleting pump work counter overflow"))?;
-        self.report.cell_evaluations = self
-            .report
-            .cell_evaluations
-            .checked_add(step.cell_evaluations as u64)
-            .ok_or_else(|| invalid("depleting pump work counter overflow"))?;
-        self.report.maximum_energy_discrepancy_j = self
-            .report
-            .maximum_energy_discrepancy_j
-            .max(step.max_energy_discrepancy_j);
-        Ok(())
-    }
-}
-
 #[derive(Clone, Debug)]
 struct BeamCell {
-    emitter_index: usize,
+    /// Index in the unique shared-inventory vector, not this beam's path index.
+    cell_index: usize,
     length_m: f64,
     volume_m3: f64,
     passive_optical_depth: [f64; 2],
@@ -227,27 +159,43 @@ struct BeamCell {
 }
 
 #[derive(Debug)]
-struct BeamModel {
-    cells: Vec<BeamCell>,
+struct BeamPath {
+    source_identity: ContentHash,
     wavelengths_nm: [f64; 2],
     photon_energies_j: [f64; 2],
     incident_photon_rates_s: [f64; 2],
-    limits: PumpColumnLimits,
+    pump_window_s: Option<(f64, f64)>,
+    cells: Vec<BeamCell>,
+}
+
+#[derive(Debug)]
+struct BeamModel {
+    /// Original owner emitter indices, unique and in native cell order.
+    cells: Vec<usize>,
+    paths: Vec<BeamPath>,
+    limits: PumpBeamsLimits,
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct DepletingBeam {
     model: Arc<BeamModel>,
-    prepared: Option<Arc<PreparedColumn>>,
+    prepared: Option<Arc<PreparedPumps>>,
     accounts: BeamAccounts,
 }
 
-/// Constitutive values only: populations and photon histories are never cached.
-/// Accepted snapshots share this bounded immutable column across observer clones.
 #[derive(Debug)]
-pub(super) struct PreparedColumn {
+enum PreparedSolver {
+    /// Preserve the original one-column algorithm and work for one beam.
+    Column(SaturablePumpColumn<2>),
+    Beams(SaturablePumpBeams<2>),
+}
+
+/// Only immutable constitutive data is shared across accepted snapshots.
+/// Populations, pulse activity and photon histories are never cached here.
+#[derive(Debug)]
+pub(super) struct PreparedPumps {
     temperatures: Vec<u64>,
-    column: SaturablePumpColumn<2>,
+    solver: PreparedSolver,
 }
 
 pub(super) struct BeamCandidate {
@@ -255,337 +203,4 @@ pub(super) struct BeamCandidate {
     pub passive_heat_j: Vec<(CellId, f64)>,
     pub absolute_roundoff_j: f64,
     pub accounts: BeamAccounts,
-}
-
-impl<const M: usize> SaturableLuminescentHeating<M> {
-    /// Couple one two-wavelength beam to the original finite emitter inventory.
-    /// Bind before advancing; existing prescribed pump hazards must be zero.
-    /// Each wavelength can excite both states through its own cross sections.
-    /// Multiple overlapping beams require a simultaneous shared-inventory solve
-    /// and are not represented by independently summing this observer.
-    ///
-    /// Original mass absorption is declared PASSIVE host absorption, in addition
-    /// to molecular absorption. Its coefficients must exclude these same active
-    /// emitters to avoid double counting. Every traversed emitter needs explicit
-    /// cross sections. A passive absorbing cell needs an original thermal
-    /// receiver, which can be bound as a zero-population emitter. Transparent
-    /// cells with no inventory need no binding. Emission-band propagation keeps
-    /// the existing explicit passive absorption/scattering environment.
-    #[allow(clippy::too_many_arguments)]
-    pub fn with_depleting_beam(
-        mut self,
-        cx: &Cx<'_>,
-        medium: &AbsorbingGrid<'_>,
-        source_identity: ContentHash,
-        beam: IncidentBeam<2>,
-        cross_sections: &[BeamEmitterCrossSections],
-        thermal: &DepositionSimulation<'_>,
-        max_path_cells: usize,
-        limits: PumpColumnLimits,
-        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
-    ) -> Result<Self, OpticalHeatingError> {
-        self.check_state(thermal, true, &mut checkpoint)?;
-        if self.energy.duration_s != 0.0
-            || self.pending.is_some()
-            || self.beam.is_some()
-            || source_identity == ContentHash([0; 32])
-            || medium.content_identity() != self.medium_identity
-            || !beam
-                .wavelengths_nm
-                .into_iter()
-                .all(|v| v.is_finite() && v > 0.0)
-            || !beam.incident_power_w.into_iter().all(nonnegative)
-            || cross_sections.len() > max_path_cells
-            || self
-                .emitters
-                .iter()
-                .any(|e| e.binding.pump.rates_s != [0.0; 2])
-        {
-            return Err(invalid(
-                "invalid depleting beam, source snapshot or nonzero prescribed pump",
-            ));
-        }
-        let path = medium
-            .population_beam_cell_path(
-                cx,
-                beam.origin,
-                beam.unit_direction,
-                beam.max_distance_m,
-                max_path_cells,
-            )
-            .map_err(|error| match error {
-                VolumeTransportError::Cancelled => {
-                    OpticalHeatingError::Thermal(DepositionError::Cancelled)
-                }
-                _ => invalid("depleting pump geometry or traversal budget"),
-            })?;
-        let mut bindings = BTreeMap::new();
-        for binding in cross_sections {
-            checkpoint()?;
-            if bindings
-                .insert(binding.grid_cell, binding.clone())
-                .is_some()
-            {
-                return Err(OpticalHeatingError::DuplicateCell(binding.grid_cell));
-            }
-        }
-        let mut photon_energies_j = [0.0; 2];
-        let mut incident_photon_rates_s = [0.0; 2];
-        let mut hash = DomainHasher::new("org.frankensim.render.depleting-luminescence-pump.v1");
-        hash.update(self.source_identity.as_bytes());
-        hash.update(source_identity.as_bytes());
-        for lane in 0..2 {
-            photon_energies_j[lane] = finite(super::HC_J_NM / beam.wavelengths_nm[lane])?;
-            if photon_energies_j[lane] <= 0.0 {
-                return Err(invalid("unrepresentable pump photon energy"));
-            }
-            incident_photon_rates_s[lane] =
-                finite(beam.incident_power_w[lane] / photon_energies_j[lane])?;
-            if beam.incident_power_w[lane] > 0.0 && incident_photon_rates_s[lane] == 0.0 {
-                return Err(invalid("positive pump photon rate is below representation"));
-            }
-            hash.update(&beam.wavelengths_nm[lane].to_bits().to_le_bytes());
-            hash.update(&beam.incident_power_w[lane].to_bits().to_le_bytes());
-        }
-        let mut cells = Vec::with_capacity(path.len());
-        for segment in path {
-            checkpoint()?;
-            let coefficients = medium
-                .coefficients_at_cell(segment.cell_index, &beam.wavelengths_nm)
-                .map_err(|_| invalid("passive host does not support pump wavelength"))?;
-            let density = medium
-                .cell_density_kg_m3(segment.cell_index)
-                .ok_or(OpticalHeatingError::UnmappedCell(segment.cell_index))?;
-            let mut passive_optical_depth = [0.0; 2];
-            for lane in 0..2 {
-                if coefficients[lane] > 0.0 && density > 0.0 {
-                    passive_optical_depth[lane] = finite(positive_product(
-                        coefficients[lane],
-                        density,
-                        segment.length_m,
-                    ))?;
-                    if passive_optical_depth[lane] == 0.0 {
-                        return Err(invalid(
-                            "positive passive pump optical depth is below representation",
-                        ));
-                    }
-                }
-            }
-            let index = self
-                .emitters
-                .binary_search_by_key(&segment.cell_index, |e| e.binding.grid_cell);
-            let emitter_index = match index {
-                Ok(index) => index,
-                Err(_) if passive_optical_depth == [0.0; 2] => continue,
-                Err(_) => return Err(OpticalHeatingError::UnmappedCell(segment.cell_index)),
-            };
-            let source = bindings
-                .remove(&segment.cell_index)
-                .ok_or(OpticalHeatingError::UnmappedCell(segment.cell_index))?;
-            hash.update(&(segment.cell_index as u64).to_le_bytes());
-            hash.update(&segment.length_m.to_bits().to_le_bytes());
-            hash.update(&segment.cell_volume_m3.to_bits().to_le_bytes());
-            hash.update(source.identity().as_bytes());
-            for depth in passive_optical_depth {
-                hash.update(&depth.to_bits().to_le_bytes());
-            }
-            match &source.source {
-                CrossSections::Authored { values, .. } => {
-                    for value in values.iter().flatten() {
-                        hash.update(&value.to_bits().to_le_bytes());
-                    }
-                }
-                #[cfg(feature = "material-state")]
-                CrossSections::Material { .. } => {}
-            }
-            cells.push(BeamCell {
-                emitter_index,
-                length_m: segment.length_m,
-                volume_m3: segment.cell_volume_m3,
-                passive_optical_depth,
-                cross_sections: source,
-            });
-        }
-        if !bindings.is_empty() {
-            return Err(invalid(
-                "pump cross-section binding is outside the traversed inventory",
-            ));
-        }
-        let mut pump = DepletingBeam {
-            model: Arc::new(BeamModel {
-                cells,
-                wavelengths_nm: beam.wavelengths_nm,
-                photon_energies_j,
-                incident_photon_rates_s,
-                limits,
-            }),
-            prepared: None,
-            accounts: BeamAccounts::default(),
-        };
-        pump.prepared = Some(pump.prepare(&self, thermal, &mut checkpoint)?);
-        checkpoint()?;
-        self.source_identity = hash.finalize();
-        self.beam = Some(pump);
-        Ok(self)
-    }
-
-    /// Accepted incident/transmitted/molecular/passive pump energies by actual
-    /// wavelength. Absent for the original externally maintained local field.
-    pub fn depleting_pump_energy(&self) -> Option<&DepletingPumpEnergy> {
-        self.beam.as_ref().map(|beam| &beam.accounts.report)
-    }
-}
-
-impl DepletingBeam {
-    fn prepare<const M: usize>(
-        &self,
-        owner: &SaturableLuminescentHeating<M>,
-        thermal: &DepositionSimulation<'_>,
-        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<Arc<PreparedColumn>, OpticalHeatingError> {
-        // Native lifecycle hooks can inspect an unchanged accepted state several
-        // times. Reuse its exact constitutive snapshot, while checking every
-        // original cell and cancellation without allocating or re-querying data.
-        if let Some(prepared) = &self.prepared {
-            let mut matches = true;
-            for (cell, expected) in self.model.cells.iter().zip(&prepared.temperatures) {
-                checkpoint()?;
-                let thermal_cell = owner.emitters[cell.emitter_index].binding.thermal_cell;
-                if thermal.temperature_k(thermal_cell)?.to_bits() != *expected {
-                    matches = false;
-                    break;
-                }
-            }
-            if matches {
-                return Ok(Arc::clone(prepared));
-            }
-        }
-        let mut cells = Vec::with_capacity(self.model.cells.len());
-        let mut temperatures = Vec::with_capacity(self.model.cells.len());
-        let mut cache = None;
-        for cell in &self.model.cells {
-            checkpoint()?;
-            let binding = owner.emitters[cell.emitter_index].binding;
-            let temperature = thermal.temperature_k(binding.thermal_cell)?;
-            temperatures.push(temperature.to_bits());
-            let model = resolve_model(&owner.singlet, &owner.triplet, temperature, &mut cache)?;
-            let sections = cell
-                .cross_sections
-                .evaluate(self.model.wavelengths_nm, temperature)?;
-            let mut depth = [[0.0; 2]; 2];
-            for lane in 0..2 {
-                for target in 0..2 {
-                    let source = if target == 0 {
-                        &owner.singlet
-                    } else {
-                        owner.triplet.triplet()
-                    };
-                    let (lo, hi) = source.fluorescence().excitation_bounds_nm();
-                    if sections[lane][target] > 0.0
-                        && !(lo..=hi).contains(&self.model.wavelengths_nm[lane])
-                    {
-                        return Err(invalid(
-                            "molecular pump cross section exceeds original excitation support",
-                        ));
-                    }
-                    depth[lane][target] = super::super::rate_power(
-                        sections[lane][target],
-                        cell.length_m,
-                        cell.volume_m3,
-                    )?;
-                    if sections[lane][target] > 0.0 && depth[lane][target] == 0.0 {
-                        return Err(invalid(
-                            "positive molecular pump optical depth is below representation",
-                        ));
-                    }
-                }
-            }
-            cells.push(SaturablePumpCell {
-                model,
-                optical_depth_per_ground: depth,
-                passive_optical_depth: cell.passive_optical_depth,
-            });
-        }
-        let column = preserve_checkpoint(checkpoint, |cancelled| {
-            SaturablePumpColumn::try_new(
-                &cells,
-                self.model.photon_energies_j,
-                self.model.cells.len().max(1),
-                cancelled,
-            )
-        })?;
-        Ok(Arc::new(PreparedColumn {
-            temperatures,
-            column,
-        }))
-    }
-
-    pub(super) fn check_state<const M: usize>(
-        &self,
-        owner: &SaturableLuminescentHeating<M>,
-        thermal: &DepositionSimulation<'_>,
-        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<Arc<PreparedColumn>, OpticalHeatingError> {
-        self.prepare(owner, thermal, checkpoint)
-    }
-
-    pub(super) fn advance<const M: usize>(
-        &self,
-        owner: &SaturableLuminescentHeating<M>,
-        thermal: &DepositionSimulation<'_>,
-        duration_s: f64,
-        pumped: bool,
-        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<BeamCandidate, OpticalHeatingError> {
-        let prepared = self.prepare(owner, thermal, checkpoint)?;
-        let populations: Vec<_> = self
-            .model
-            .cells
-            .iter()
-            .map(|cell| owner.emitters[cell.emitter_index].populations)
-            .collect();
-        let rates = if pumped {
-            self.model.incident_photon_rates_s
-        } else {
-            [0.0; 2]
-        };
-        let step = preserve_checkpoint(checkpoint, |cancelled| {
-            prepared.column.advance(
-                &populations,
-                rates,
-                duration_s,
-                self.model.limits,
-                cancelled,
-            )
-        })?;
-        let mut accounts = self.accounts.clone();
-        accounts.add(&step, duration_s, owner.energy_tolerance_j)?;
-        let mut roundoff = CheckedSum::default();
-        roundoff.add(step.residual_j.abs())?;
-        for lane in 0..2 {
-            roundoff.add(finite(
-                step.photon_residual[lane].abs() * self.model.photon_energies_j[lane],
-            )?)?;
-        }
-        let mut steps = vec![None; owner.emitters.len()];
-        let mut passive_heat_j = Vec::with_capacity(self.model.cells.len());
-        for (cell, result) in self.model.cells.iter().zip(step.cells) {
-            checkpoint()?;
-            let binding = owner.emitters[cell.emitter_index].binding;
-            passive_heat_j.push((binding.thermal_cell, result.passive_heat_j));
-            steps[cell.emitter_index] = Some(result.kinetics);
-        }
-        checkpoint()?;
-        Ok(BeamCandidate {
-            steps,
-            passive_heat_j,
-            absolute_roundoff_j: roundoff.value()?,
-            accounts,
-        })
-    }
-
-    pub(super) fn accept(&mut self, accounts: BeamAccounts, prepared: Arc<PreparedColumn>) {
-        self.accounts = accounts;
-        self.prepared = Some(prepared);
-    }
 }

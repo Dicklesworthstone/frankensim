@@ -3,6 +3,8 @@
 //! Run: cargo run -p fs-render --example saturable_afterglow \
 //!   --no-default-features --features optical-heating
 //! Add `-- --depleting` to transport and deplete the incident pump itself.
+//! Add `-- --counterpropagating` for two differently colored, staggered pumps
+//! sharing the same finite inventory in two original thermal/optical cells.
 //!
 //! All coefficients are SYNTHETIC, not measurements of a particular phosphor.
 //! A prescribed local photon flux pumps 1e13 emitters in a 1 cm cube for 1 us.
@@ -17,6 +19,14 @@
 //! ground inventory sets absorption as the sample bleaches and recovers.
 //! Populations are homogeneous within this single cell; a resolved bleaching
 //! front needs spatial refinement. Passive host absorption is explicitly zero.
+//!
+//! Counterpropagating mode divides the same cube and inventory into two cells.
+//! A 400 nm beam enters from the left for 0–8 us, and a 410 nm beam enters
+//! from the right for 3–10 us, each supplying 2.5e22 photons/s. Their incoherent
+//! intensities compete for each cell's shared ground state during the overlap.
+//! The cross sections remain explicitly synthetic and constant at both colors.
+//! Output retains separate beam energy accounts and each cell's ground fraction;
+//! the reported temperature is the equal-mass mean of the two native cells.
 
 use fs_blake3::ContentHash;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -28,7 +38,7 @@ use fs_render::volumes::heating::luminescence::{
     LuminescenceSource, SingletTripletLimits, SingletTripletSource,
     saturation::{
         PrescribedPhotonPump, SaturableEmitterCell, SaturableLuminescentHeating,
-        beam::{BeamEmitterCrossSections, PumpColumnLimits},
+        beam::{BeamEmitterCrossSections, DepletingPumpBeam, PumpBeamsLimits, PumpColumnLimits},
     },
 };
 use fs_render::volumes::transport::luminescence::LuminescenceGrid;
@@ -42,6 +52,13 @@ use std::error::Error;
 
 const HC_J_NM: f64 = 6.626_070_15e-34 * 299_792_458.0 * 1e9;
 const CROSS_SECTION_M2: f64 = 1e-20;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PumpMode {
+    Prescribed,
+    Depleting,
+    Counterpropagating,
+}
 
 struct Caloric;
 impl ThermalLaw for Caloric {
@@ -77,17 +94,26 @@ fn source(
     )?)
 }
 
-fn run(cx: &Cx<'_>, depleting: bool) -> Result<(), Box<dyn Error>> {
+fn run(cx: &Cx<'_>, mode: PumpMode) -> Result<(), Box<dyn Error>> {
+    let depleting = mode != PumpMode::Prescribed;
+    let counterpropagating = mode == PumpMode::Counterpropagating;
     let emitters = if depleting { 1e17 } else { 1e13 };
     let pulse_end_s = if depleting { 1e-5 } else { 1e-6 };
-    let density = [1000.0];
+    let cell_count = if counterpropagating { 2 } else { 1 };
+    let cell_width_m = 0.01 / cell_count as f64;
+    let density = vec![1000.0; cell_count];
     let medium = AbsorbingGrid::try_new(
         cx,
-        VolumeGrid::new([1; 3], &density, [0.0; 3], [0.01; 3]),
+        VolumeGrid::new(
+            [cell_count, 1, 1],
+            &density,
+            [0.0; 3],
+            [cell_width_m, 0.01, 0.01],
+        ),
         MassAbsorptionSpectrum::constant(0.0)?,
         None,
         AbsorbingGridBudget {
-            max_grid_cells: 1,
+            max_grid_cells: cell_count,
             max_steps_per_segment: 8,
         },
     )?;
@@ -97,34 +123,36 @@ fn run(cx: &Cx<'_>, depleting: bool) -> Result<(), Box<dyn Error>> {
         energy_tolerance_j: 1e-12,
     };
     let empty = DepositionSimulation::new(
-        vec![TimedEvent {
-            time_s: 0.0,
-            event: Event::Birth(DepositedCell {
-                id: CellId(1),
-                segment_id: 1,
-                body_id: 1,
-                material_id: MaterialId(1),
-                mass_kg: 0.001,
-                specific_h_j_kg: 0.0,
-                geometry: CellGeometry {
-                    start_m: [0.0, 0.005, 0.005],
-                    end_m: [0.01, 0.005, 0.005],
-                    volume_m3: 1e-6,
-                    surface_area_m2: 6e-4,
-                },
-                boundary: Boundary {
-                    ambient_k: 300.0,
-                    htc_w_m2_k: 0.0,
-                    reservoir: None,
-                    source_w: 0.0,
-                },
-            }),
-        }],
+        (0..cell_count)
+            .map(|index| TimedEvent {
+                time_s: 0.0,
+                event: Event::Birth(DepositedCell {
+                    id: CellId(index as u64 + 1),
+                    segment_id: index as u64 + 1,
+                    body_id: 1,
+                    material_id: MaterialId(1),
+                    mass_kg: 0.001 / cell_count as f64,
+                    specific_h_j_kg: 0.0,
+                    geometry: CellGeometry {
+                        start_m: [index as f64 * cell_width_m, 0.005, 0.005],
+                        end_m: [(index + 1) as f64 * cell_width_m, 0.005, 0.005],
+                        volume_m3: 1e-6 / cell_count as f64,
+                        surface_area_m2: 2.0 * (1e-4 + 0.02 * cell_width_m),
+                    },
+                    boundary: Boundary {
+                        ambient_k: 300.0,
+                        htc_w_m2_k: 0.0,
+                        reservoir: None,
+                        source_w: 0.0,
+                    },
+                }),
+            })
+            .collect(),
         &[(MaterialId(1), &caloric)],
         DepositionBudget {
-            max_cells: 1,
+            max_cells: cell_count,
             max_links: 0,
-            max_events: 1,
+            max_events: cell_count,
             max_substeps: 1000,
         },
     )?;
@@ -142,23 +170,86 @@ fn run(cx: &Cx<'_>, depleting: bool) -> Result<(), Box<dyn Error>> {
         [CROSS_SECTION_M2, 0.0],
         if depleting { [0.0; 2] } else { [5e26, 0.0] },
     )?;
+    let bindings: Vec<_> = (0..cell_count)
+        .map(|grid_cell| SaturableEmitterCell {
+            grid_cell,
+            thermal_cell: CellId(grid_cell as u64 + 1),
+            initial_populations: [emitters / cell_count as f64, 0.0, 0.0],
+            pump,
+        })
+        .collect();
     let mut heating = SaturableLuminescentHeating::try_new(
         &medium,
         singlet,
         triplet,
-        &[SaturableEmitterCell {
-            grid_cell: 0,
-            thermal_cell: CellId(1),
-            initial_populations: [emitters, 0.0, 0.0],
-            pump,
-        }],
+        &bindings,
         &thermal,
-        1,
+        cell_count,
         1e-12,
         None,
         || Ok(()),
     )?;
-    if depleting {
+    if counterpropagating {
+        let cross_sections: Vec<_> = (0..cell_count)
+            .map(|grid_cell| {
+                BeamEmitterCrossSections::authored(
+                    grid_cell,
+                    ContentHash([245; 32]),
+                    [[CROSS_SECTION_M2, 0.0], [0.0; 2]],
+                )
+            })
+            .collect::<Result<_, _>>()?;
+        let beams = [
+            DepletingPumpBeam {
+                source_identity: ContentHash([244; 32]),
+                beam: IncidentBeam {
+                    origin: Point3::new(-0.001, 0.005, 0.005),
+                    unit_direction: Vec3::new(1.0, 0.0, 0.0),
+                    max_distance_m: 0.012,
+                    wavelengths_nm: [400.0; 2],
+                    incident_power_w: [2.5e22 * HC_J_NM / 400.0, 0.0],
+                },
+                cross_sections: &cross_sections,
+                pump_window_s: Some((0.0, 8e-6)),
+            },
+            DepletingPumpBeam {
+                source_identity: ContentHash([246; 32]),
+                beam: IncidentBeam {
+                    origin: Point3::new(0.011, 0.005, 0.005),
+                    unit_direction: Vec3::new(-1.0, 0.0, 0.0),
+                    max_distance_m: 0.012,
+                    wavelengths_nm: [410.0; 2],
+                    incident_power_w: [2.5e22 * HC_J_NM / 410.0, 0.0],
+                },
+                cross_sections: &cross_sections,
+                pump_window_s: Some((3e-6, 1e-5)),
+            },
+        ];
+        heating = heating.with_depleting_beams(
+            cx,
+            &medium,
+            &beams,
+            &thermal,
+            2,
+            2 * cell_count,
+            PumpBeamsLimits {
+                column: PumpColumnLimits {
+                    relative_tolerance: 1e-4,
+                    absolute_energy_tolerance_j: 1e-12,
+                    maximum_substeps: 4096,
+                    ..PumpColumnLimits::default()
+                },
+                maximum_coupling_iterations: 128,
+            },
+            || Ok(()),
+        )?;
+        println!(
+            "Synthetic counterpropagating pumps: 1e17 shared emitters in two cells, initial total optical depth=10."
+        );
+        println!(
+            "Left 400 nm: 0–8 us; right 410 nm: 3–10 us; each 2.5e22 photons/s, full-face, incoherent, zero passive absorption."
+        );
+    } else if depleting {
         heating = heating.with_depleting_beam(
             cx,
             &medium,
@@ -197,14 +288,18 @@ fn run(cx: &Cx<'_>, depleting: bool) -> Result<(), Box<dyn Error>> {
     }
     heating = heating.with_pump_window(0.0, pulse_end_s)?;
     println!(
-        "time_s,ground_fraction,singlet_fraction,triplet_fraction,absorbed_pump_J,singlet_W,triplet_W,stored_J,native_heat_J,temperature_K,singlet_radiance_W_m2_sr,triplet_radiance_W_m2_sr,closure_J{}",
-        if depleting {
+        "time_s,ground_fraction,singlet_fraction,triplet_fraction,absorbed_pump_J,singlet_W,triplet_W,stored_J,native_heat_J,mean_temperature_K,singlet_radiance_W_m2_sr,triplet_radiance_W_m2_sr,closure_J{}",
+        if counterpropagating {
+            ",left_400nm_incident_J,left_transmitted_J,left_molecular_absorption_J,left_passive_absorption_J,left_pump_closure_J,right_410nm_incident_J,right_transmitted_J,right_molecular_absorption_J,right_passive_absorption_J,right_pump_closure_J,left_ground_fraction,right_ground_fraction,kinetic_substeps,coupling_iterations"
+        } else if depleting {
             ",incident_J,transmitted_J,molecular_absorption_J,passive_absorption_J,pump_closure_J,cumulative_transmission_fraction,ground_optical_depth,kinetic_substeps"
         } else {
             ""
         }
     );
-    let report_times = if depleting {
+    let report_times = if counterpropagating {
+        &[1e-7, 1e-6, 3e-6, 5e-6, 8e-6, 1e-5, 2e-5, 5e-5, 1e-4][..]
+    } else if depleting {
         &[1e-7, 1e-6, 2e-6, 5e-6, 1e-5, 2e-5, 5e-5, 1e-4][..]
     } else {
         &[1e-7, 1e-6, 2e-6, 1e-5, 5e-5, 1e-4][..]
@@ -218,17 +313,31 @@ fn run(cx: &Cx<'_>, depleting: bool) -> Result<(), Box<dyn Error>> {
         if (audit.external_heat_j - (heating.thermal_input_j() - previous_heat)).abs() > 1e-12 {
             return Err("native heat audit disagrees with luminescence heat".into());
         }
-        let counts = heating
-            .populations(0)
-            .ok_or("missing accepted emitter cell")?;
-        let emission = heating.cell_emission_w()[0].1;
+        let mut counts = [0.0; 3];
+        let mut mean_temperature_k = 0.0;
+        for cell in 0..cell_count {
+            let population = heating
+                .populations(cell)
+                .ok_or("missing accepted emitter cell")?;
+            for level in 0..3 {
+                counts[level] += population[level];
+            }
+            mean_temperature_k +=
+                thermal.temperature_k(CellId(cell as u64 + 1))? / cell_count as f64;
+        }
+        let emission = heating
+            .cell_emission_w()
+            .iter()
+            .fold([0.0; 2], |sum, (_, power)| {
+                [sum[0] + power[0], sum[1] + power[1]]
+            });
         let view = LuminescenceGrid::try_new(
             cx,
             &medium,
             heating.emission_source_identity(),
             [600.0, 750.0],
             heating.cell_emission_w(),
-            1,
+            cell_count,
         )?;
         let observed = view.transport(
             cx,
@@ -236,7 +345,34 @@ fn run(cx: &Cx<'_>, depleting: bool) -> Result<(), Box<dyn Error>> {
             Vec3::new(1.0, 0.0, 0.0),
             0.03,
         )?;
-        let beam_accounts = if let Some(pump) = heating.depleting_pump_energy() {
+        let beam_accounts = if counterpropagating {
+            let report = heating
+                .depleting_pump_report()
+                .ok_or("missing accepted simultaneous-pump accounts")?;
+            let mut columns = String::new();
+            // Each beam owns its wavelengths: do not combine ordinal lanes
+            // from distinct colors into one spectral-energy packet.
+            for pump in &report.beams {
+                columns.push_str(&format!(
+                    ",{:.9e},{:.9e},{:.9e},{:.9e},{:.3e}",
+                    pump.incident_j.iter().sum::<f64>(),
+                    pump.transmitted_j.iter().sum::<f64>(),
+                    pump.absorbed_j.iter().sum::<f64>(),
+                    pump.passive_absorbed_j.iter().sum::<f64>(),
+                    pump.residual_j.iter().sum::<f64>(),
+                ));
+            }
+            columns.push_str(&format!(
+                ",{:.6e},{:.6e},{},{}",
+                heating.populations(0).ok_or("missing left cell")?[0]
+                    / (emitters / cell_count as f64),
+                heating.populations(1).ok_or("missing right cell")?[0]
+                    / (emitters / cell_count as f64),
+                report.accepted_kinetic_substeps,
+                report.coupling_iterations,
+            ));
+            columns
+        } else if let Some(pump) = heating.depleting_pump_energy() {
             let incident = pump.incident_j.iter().sum::<f64>();
             let transmitted = pump.transmitted_j.iter().sum::<f64>();
             let molecular = pump.absorbed_j.iter().sum::<f64>();
@@ -265,7 +401,7 @@ fn run(cx: &Cx<'_>, depleting: bool) -> Result<(), Box<dyn Error>> {
             emission[1],
             heating.energy().stored_excitation_j,
             heating.thermal_input_j(),
-            thermal.temperature_k(CellId(1))?,
+            mean_temperature_k,
             observed.emitted_radiance_w_m2_sr[0],
             observed.emitted_radiance_w_m2_sr[1],
             heating.energy().residual_j,
@@ -276,10 +412,11 @@ fn run(cx: &Cx<'_>, depleting: bool) -> Result<(), Box<dyn Error>> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments: Vec<_> = std::env::args().skip(1).collect();
-    let depleting = match arguments.as_slice() {
-        [] => false,
-        [argument] if argument == "--depleting" => true,
-        _ => return Err("usage: saturable_afterglow [--depleting]".into()),
+    let mode = match arguments.as_slice() {
+        [] => PumpMode::Prescribed,
+        [argument] if argument == "--depleting" => PumpMode::Depleting,
+        [argument] if argument == "--counterpropagating" => PumpMode::Counterpropagating,
+        _ => return Err("usage: saturable_afterglow [--depleting | --counterpropagating]".into()),
     };
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
@@ -297,7 +434,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Budget::INFINITE,
                 ExecMode::Deterministic,
             ),
-            depleting,
+            mode,
         )
     })
 }

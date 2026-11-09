@@ -19,6 +19,9 @@ const COUNT: f64 = 1e19;
 #[path = "saturation/beam.rs"]
 mod beam;
 
+#[path = "saturation/beams.rs"]
+mod beams;
+
 include!("saturation_environment.rs");
 
 fn source(level_nm: f64, lifetime_s: f64, weights: [f64; 2], id: u8) -> LuminescenceSource<2> {

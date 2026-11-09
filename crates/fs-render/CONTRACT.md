@@ -12065,8 +12065,9 @@ the same transactional semantics as the original observer.
 This is a cell-uniform, quasistatic, one-pass pump model. Spatial refinement
 resolves longitudinal/transverse saturation; native thermal interval refinement
 resolves temperature feedback separately from the inner population/opacity
-solve. Pump scattering, reflection, stimulated emission, excited-state
-absorption and simultaneous overlapping beams are outside its scope. Existing
+solve. Pump scattering, reflection, stimulated emission and excited-state
+absorption are outside its scope. Simultaneous beams use the shared extension
+below. Existing
 passive emitted-light transport and camera observation remain authoritative.
 The synthetic `saturable_afterglow --depleting` example supplies an initial
 optical depth of 10 and a 10 microsecond pulse, then reports both afterglow
@@ -12079,6 +12080,58 @@ Material fixtures compare both wavelengths with independently authored cold
 and warm cross sections, then check endpoint domain refusal and clean retry.
 These renderer tests are authored and formatted; their native execution is not
 established by the independently passing lower-owner and material-source tests.
+
+### Simultaneous and counterpropagating molecular pumps
+
+`saturation::beam::DepletingPumpBeam` and
+`SaturableLuminescentHeating::with_depleting_beams` bind multiple directed
+spectral pumps to the same unique finite emitter inventories. Each declared
+beam retains its original wavelength nodes, molecular source, native ordered
+cell path and optional half-open pulse window. Different paths can overlap,
+cross or oppose one another. A cell's complete ground/singlet/triplet state
+advances once under all incident channels together; independent per-beam
+population updates are not summed. Distinct rays may share a source identity
+without deduplicating their physical powers.
+
+The lower thermal owner handles the simultaneous optical/kinetic solve. The
+renderer compiles the original geometry and refreshes the original molecular
+claims at each beam wavelength and actual shared cell temperature. Its cache
+contains only immutable constitutive data, keyed by every unique cell's exact
+temperature. Pulse activity, populations and photon histories are excluded
+from the cache. The original one-beam entry point delegates to the same binding
+and retains its one-column evolution path.
+
+Each beam's pulse intersects the existing global pump window. Every strictly
+future edge splits the native thermal interval, so staggered pulses, overlap
+and dark recovery share one accepted clock. Populations, all beam accounts,
+heat/light channels and changed-temperature constitutive data commit together;
+a failed material query, coupling solve, resource cap or cancellation publishes
+none of the trial history.
+
+`depleting_pump_report()` returns per-beam incident, transmitted, molecular and
+passive energy in original declaration order with explicit wavelengths and
+source identities. Shared kinetic work and temporal discrepancy are reported
+once for the complete system. `depleting_pump_energy()` retains its original
+single-beam meaning and returns no ambiguous summed spectral account for a
+multi-beam system. Passive host heat from all paths is accumulated once into
+each original thermal receiver.
+
+These beams are mutually incoherent, with additive intensities. Optical phase,
+interference, coherent population dynamics, pump scattering/reflection and
+active recycling of emitted photons are outside this rate model. Within a
+cell, every beam addresses the same homogeneous inventory; separated beam
+footprints or a resolved saturation front require spatial refinement. Material
+and native thermal interval limits remain distinct from inner optical coupling
+and temporal-refinement controls.
+
+Focused integration tests compare split and combined illumination, mirrored
+counterpropagating colors and declaration order, exact per-beam/global pulse
+intersections, passive host heat and transactional retry. The existing
+`saturable_afterglow --counterpropagating` example uses two original cells,
+400/410 nm opposed pumps, staggered pulses, separate beam accounts and observed
+afterglow. These new renderer tests and the coupled example are unexecuted:
+the native build received SIGKILL and the executor became unavailable during
+this extension. Earlier lower-owner passes do not establish this new gate.
 
 ## Multiply scattered nonthermal luminescence observations
 
