@@ -15,9 +15,9 @@
 //! changes no stored energy and therefore generates no extra work or heat.
 
 use super::{
-    DampingSource, Result, RigidDampingThermalCandidate, RigidDampingThermalConfig,
-    RigidDampingThermalError, RigidDampingThermalInput, RigidDampingThermalReport,
-    advance_with_source,
+    DampingSource, MechanicalAdvance, NetworkMotion, Result, RigidDampingThermalCandidate,
+    RigidDampingThermalConfig, RigidDampingThermalError, RigidDampingThermalInput,
+    RigidDampingThermalReport, ThermalControls, advance_with_source,
 };
 use fs_mbd::RigidBodyState;
 use fs_mbd::spatial_loads::internal_impulse::viscous::{
@@ -123,6 +123,35 @@ pub fn advance_candidate<'m, O: DepositionObserver, L: TemperatureDampingLaw>(
     config: RigidDampingThermalConfig,
     cancelled: impl FnMut() -> bool,
 ) -> Result<TemperatureDampingThermalCandidate<'m, O>, O::Error, L::Error> {
+    advance_with_motion(
+        input,
+        thermal,
+        observer,
+        law,
+        temperature_cells,
+        NetworkMotion(config.mechanical),
+        target_s,
+        config.into(),
+        cancelled,
+    )
+}
+
+pub(super) fn advance_with_motion<
+    'm,
+    O: DepositionObserver,
+    L: TemperatureDampingLaw,
+    M: MechanicalAdvance,
+>(
+    input: RigidDampingThermalInput<'_>,
+    thermal: &DepositionSimulation<'m>,
+    observer: &O,
+    law: &L,
+    temperature_cells: &[CellId],
+    mechanics: M,
+    target_s: f64,
+    config: ThermalControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<TemperatureDampingThermalCandidate<'m, O>, O::Error, L::Error> {
     if temperature_cells.len() != input.links.len() {
         return Err(RigidDampingThermalError::Invalid(
             "one explicit temperature coordinate per original connector required",
@@ -137,7 +166,7 @@ pub fn advance_candidate<'m, O: DepositionObserver, L: TemperatureDampingLaw>(
         evaluations: 0,
     };
     let (native, source) = advance_with_source(
-        input, thermal, observer, source, target_s, config, cancelled,
+        input, thermal, observer, source, mechanics, target_s, config, cancelled,
     )?;
     Ok(TemperatureDampingThermalCandidate {
         native,

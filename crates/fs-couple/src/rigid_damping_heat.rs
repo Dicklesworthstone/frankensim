@@ -17,6 +17,9 @@
 /// Temperature-dependent passive laws on the same accepted native timeline.
 pub mod temperature;
 
+/// Simultaneous internal actuation, damping heat and finite caloric feedback.
+pub mod driven;
+
 use fs_math::{dd::Dd, eft::two_sum};
 use fs_mbd::spatial_loads::internal_impulse::viscous::network::ViscousNetworkLink;
 use fs_mbd::spatial_loads::internal_motion::{
@@ -80,6 +83,8 @@ pub struct RigidDampingThermalReport {
     pub external_thermal_heat_j: f64,
     /// Applied force/couple work; gravity is in mechanical potential storage.
     pub mechanical_work_j: f64,
+    /// Signed internal actuator supply/recovery, independent of passive heat [J].
+    pub actuator_work_j: f64,
     pub mechanical_energy_change_j: f64,
     pub mechanical_residual_j: f64,
     pub native_drift_energy_defect_j: f64,
@@ -130,6 +135,7 @@ impl<'m, O> RigidDampingThermalCandidate<'m, O> {
 pub enum RigidDampingThermalError<E, S = Infallible> {
     Invalid(&'static str),
     Motion(ViscousNetworkMotionError),
+    DrivenMotion(fs_mbd::spatial_loads::internal_motion::viscous::driven::DrivenViscousMotionError),
     Thermal(DepositionError),
     Observer(E),
     /// Original connector index and the authored source's own refusal.
@@ -223,8 +229,9 @@ pub fn advance_candidate<'m, O: DepositionObserver>(
         thermal,
         observer,
         FrozenSource(input.links),
+        NetworkMotion(config.mechanical),
         target_s,
-        config,
+        config.into(),
         cancelled,
     )
     .map(|(candidate, _)| candidate)
@@ -258,13 +265,103 @@ impl DampingSource for FrozenSource<'_> {
     }
 }
 
-fn advance_with_source<'m, O: DepositionObserver, S: DampingSource>(
+// A small private adapter shares the original thermal transaction between the
+// native network and native driven-pair solvers. It does not integrate motion.
+#[derive(Clone, Copy)]
+struct ThermalControls {
+    thermal: StepConfig,
+    maximum_heat_bindings: usize,
+    energy_tolerance_j: f64,
+}
+impl From<RigidDampingThermalConfig> for ThermalControls {
+    fn from(config: RigidDampingThermalConfig) -> Self {
+        Self {
+            thermal: config.thermal,
+            maximum_heat_bindings: config.maximum_heat_bindings,
+            energy_tolerance_j: config.energy_tolerance_j,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct MechanicalStep {
+    states_after: Vec<RigidBodyState>,
+    connector_dissipation_j: Vec<f64>,
+    dissipated_energy_j: f64,
+    applied_work_j: f64,
+    actuator_work_j: f64,
+    work_heat_residual_j: f64,
+    native_drift_energy_defect_j: f64,
+    pair_relaxations: usize,
+}
+impl From<ViscousNetworkMotionStep> for MechanicalStep {
+    fn from(step: ViscousNetworkMotionStep) -> Self {
+        let [_, endpoint] = step.half_sources;
+        Self {
+            states_after: endpoint.states_after,
+            connector_dissipation_j: step.connector_dissipation_j,
+            dissipated_energy_j: step.dissipated_energy_j,
+            applied_work_j: step.external_loads.applied_work_j,
+            actuator_work_j: 0.0,
+            work_heat_residual_j: step.work_heat_residual_j,
+            native_drift_energy_defect_j: step.native_drift_energy_defect_j,
+            pair_relaxations: step.pair_relaxations,
+        }
+    }
+}
+trait MechanicalAdvance: Clone {
+    fn admit<E, S>(&self, input: RigidDampingThermalInput<'_>) -> Result<(), E, S>;
+    fn step<E, S>(
+        &self,
+        input: RigidDampingThermalInput<'_>,
+        states: &[RigidBodyState],
+        links: &[ViscousNetworkLink],
+        dt_s: f64,
+        requested: &dyn Fn() -> bool,
+    ) -> Result<MechanicalStep, E, S>;
+}
+#[derive(Clone, Copy)]
+struct NetworkMotion(ViscousNetworkMotionControls);
+impl MechanicalAdvance for NetworkMotion {
+    fn admit<E, S>(&self, input: RigidDampingThermalInput<'_>) -> Result<(), E, S> {
+        if input.states.len() > self.0.limits.maximum_bodies
+            || input.links.len() > self.0.limits.maximum_connectors
+        {
+            return Err(RigidDampingThermalError::Invalid(
+                "complete original body and connector banks must fit mechanical limits",
+            ));
+        }
+        Ok(())
+    }
+    fn step<E, S>(
+        &self,
+        input: RigidDampingThermalInput<'_>,
+        states: &[RigidBodyState],
+        links: &[ViscousNetworkLink],
+        dt_s: f64,
+        requested: &dyn Fn() -> bool,
+    ) -> Result<MechanicalStep, E, S> {
+        Ok(step_viscous_network_with_loads(
+            states,
+            input.properties,
+            links,
+            input.loads,
+            dt_s,
+            self.0,
+            requested,
+        )?
+        .into())
+    }
+}
+
+fn advance_with_source<'m, O: DepositionObserver, S: DampingSource, M: MechanicalAdvance>(
     input: RigidDampingThermalInput<'_>,
     thermal: &DepositionSimulation<'m>,
     observer: &O,
     source: S,
+    mechanics: M,
     target_s: f64,
-    config: RigidDampingThermalConfig,
+    config: ThermalControls,
     cancelled: impl FnMut() -> bool,
 ) -> Result<(RigidDampingThermalCandidate<'m, O>, S), O::Error, S::Error> {
     let cancellation = RefCell::new(cancelled);
@@ -283,8 +380,6 @@ fn advance_with_source<'m, O: DepositionObserver, S: DampingSource>(
         || input.states.len() != input.properties.len()
         || input.states.len() != input.loads.wrenches.len()
         || input.links.len() != input.heat_fractions.len()
-        || input.states.len() > config.mechanical.limits.maximum_bodies
-        || input.links.len() > config.mechanical.limits.maximum_connectors
         || !config.energy_tolerance_j.is_finite()
         || config.energy_tolerance_j < 0.0
         || !config.thermal.energy_tolerance_j.is_finite()
@@ -295,6 +390,7 @@ fn advance_with_source<'m, O: DepositionObserver, S: DampingSource>(
             "synchronized forward clocks, complete original banks/routes and finite energy limits required",
         ));
     }
+    mechanics.admit::<O::Error, S::Error>(input)?;
     let mut binding_count = 0_usize;
     let mut remainders = Vec::with_capacity(input.links.len());
     for route in input.heat_fractions {
@@ -326,6 +422,7 @@ fn advance_with_source<'m, O: DepositionObserver, S: DampingSource>(
     let coupled = HeatObserver {
         input,
         source,
+        mechanics,
         states: Cow::Borrowed(input.states),
         time_s: input.time_s,
         inner: Cow::Borrowed(observer),
@@ -378,7 +475,7 @@ fn advance_with_source<'m, O: DepositionObserver, S: DampingSource>(
         .map_err(ViscousNetworkMotionError::from)?
         + potential;
     let accounts = &coupled.accounts;
-    let mechanical = mechanical_change + accounts.heat - accounts.work;
+    let mechanical = mechanical_change + accounts.heat - accounts.work - accounts.actuator;
     let handoff = accounts.deposited + accounts.unallocated - accounts.heat;
     let combined = mechanical + Dd::from_f64(audit.residual_j) + handoff;
     for residual in [
@@ -405,6 +502,7 @@ fn advance_with_source<'m, O: DepositionObserver, S: DampingSource>(
         unallocated_energy_j: value(accounts.unallocated)?,
         external_thermal_heat_j: value(Dd::from_f64(audit.external_heat_j) - accounts.deposited)?,
         mechanical_work_j: value(accounts.work)?,
+        actuator_work_j: value(accounts.actuator)?,
         mechanical_energy_change_j: value(mechanical_change)?,
         mechanical_residual_j: value(mechanical)?,
         native_drift_energy_defect_j: value(accounts.drift)?,
@@ -434,6 +532,7 @@ struct Accounts {
     deposited: Dd,
     unallocated: Dd,
     work: Dd,
+    actuator: Dd,
     defect: Dd,
     drift: Dd,
     absolute_defect: Dd,
@@ -444,27 +543,30 @@ struct Pending {
     start_s: f64,
     dt_s: f64,
     end_s: f64,
-    step: ViscousNetworkMotionStep,
+    step: MechanicalStep,
     deposited: Dd,
     unallocated: Dd,
     absolute_handoff: Dd,
 }
 #[derive(Clone)]
-struct HeatObserver<'a, 'g, O: Clone, S: DampingSource> {
+struct HeatObserver<'a, 'g, O: Clone, S: DampingSource, M: MechanicalAdvance> {
     input: RigidDampingThermalInput<'a>,
     source: S,
+    mechanics: M,
     states: Cow<'a, [RigidBodyState]>,
     time_s: f64,
     inner: Cow<'g, O>,
     remainders: &'g [Dd],
-    config: RigidDampingThermalConfig,
+    config: ThermalControls,
     requested: &'g dyn Fn() -> bool,
     pending: Option<Pending>,
     accounts: Accounts,
     connector_heat: Vec<Dd>,
     pair_relaxations: usize,
 }
-impl<O: DepositionObserver, S: DampingSource> DepositionObserver for HeatObserver<'_, '_, O, S> {
+impl<O: DepositionObserver, S: DampingSource, M: MechanicalAdvance> DepositionObserver
+    for HeatObserver<'_, '_, O, S, M>
+{
     type Error = RigidDampingThermalError<O::Error, S::Error>;
     fn begin(&mut self) -> Result<(), O::Error, S::Error> {
         self.inner
@@ -577,13 +679,11 @@ impl<O: DepositionObserver, S: DampingSource> DepositionObserver for HeatObserve
             .to_mut()
             .step_sources(thermal, start_s, dt_s, end_s, check)
             .map_err(RigidDampingThermalError::Observer)?;
-        let step = step_viscous_network_with_loads(
+        let step = self.mechanics.step::<O::Error, S::Error>(
+            self.input,
             &self.states,
-            self.input.properties,
             self.source.links(),
-            self.input.loads,
             dt_s,
-            self.config.mechanical,
             self.requested,
         )?;
         let mut allocated = BTreeMap::<CellId, Dd>::new();
@@ -713,7 +813,8 @@ impl<O: DepositionObserver, S: DampingSource> DepositionObserver for HeatObserve
         a.heat = a.heat + Dd::from_f64(step.dissipated_energy_j);
         a.deposited = a.deposited + pending.deposited;
         a.unallocated = a.unallocated + pending.unallocated;
-        a.work = a.work + Dd::from_f64(step.external_loads.applied_work_j);
+        a.work = a.work + Dd::from_f64(step.applied_work_j);
+        a.actuator = a.actuator + Dd::from_f64(step.actuator_work_j);
         a.defect = a.defect + Dd::from_f64(step.work_heat_residual_j);
         a.drift = a.drift + Dd::from_f64(step.native_drift_energy_defect_j);
         a.absolute_defect = a.absolute_defect + Dd::from_f64(step.work_heat_residual_j.abs());
@@ -724,7 +825,7 @@ impl<O: DepositionObserver, S: DampingSource> DepositionObserver for HeatObserve
             .pair_relaxations
             .checked_add(step.pair_relaxations)
             .ok_or(DepositionError::Budget("complete damper pair relaxations"))?;
-        self.states = Cow::Owned(step.into_states_after());
+        self.states = Cow::Owned(step.states_after);
         self.time_s = pending.end_s;
         check()?;
         Ok(())

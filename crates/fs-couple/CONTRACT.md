@@ -10422,3 +10422,40 @@ stored-energy ledger, or causal/passivity certificate for an arbitrary supplied
 frequency law. Four focused G0/G1/G3/G4/G5 groups cover loaded ABCD and closed
 limits, compliant reflection phase and FIR DC bins, reciprocal-coordinate
 realtime agreement, extreme scales, invalid inputs and callback cancellation.
+
+## Driven spatial damping with finite caloric feedback
+
+`rigid_damping_heat::driven` connects the original simultaneous driven-pair
+motion owner to the existing native thermal event/transport transaction.
+The input is exactly two original bodies and one [0, 1] connector; arbitrary
+driven graphs are not inferred. Original attachment arms, full inertias,
+passive spatial cross-coupling and material/world-held effort retain their
+native interpretation. Every actual thermal interval performs the original
+two endpoint source preparations and native finite motion.
+
+The shared report now exposes signed `actuator_work_j` separately from held
+external applied work, gravitational storage and positive damping heat.
+Only the independently integrated native damping loss is routed to finite
+caloric cells. Actuator recovery remains negative supplied work; it cannot
+become heat. The same original caloric inversions, heat fractions, unallocated
+outflow, source/transport hooks, event clipping and whole-window energy gates
+remain active. A small private mechanical adapter shares this existing thermal
+transaction; it does not introduce another time integrator or thermal store.
+
+The temperature entry reuses `TemperatureDampingLaw` and
+`CalibratedKelvinDamping` with the original reference form and an explicitly
+selected source CellId. Accepted start temperatures select each interval's
+viscous form; the original caloric endpoint must also admit its refreshed law
+before publication. Held effort itself does not acquire a temperature model.
+Source, observer, caloric, budget and cancellation refusals discard both physical
+candidates. Moving geometry and lagged-temperature feedback still require
+independent temporal refinement; feedback remains first order.
+
+Six focused regression groups specify analytic terminal slip with positive
+actuator supply and negative recovery, zero-law heat, native event/source clocks,
+an independent coupled mechanical/caloric ODE ladder, endpoint-source and late
+cancellation atomicity, and topology/coordinate admission. Pinned rustfmt passed.
+An independent scalar calculation gives successive feedback error ratios
+2.00107, 2.00103 and 2.00064, with balance residuals below 1.95e-15 J.
+Native integration execution remains outstanding under the existing dependency
+build resource constraint; these calculations are not full crate validation.
