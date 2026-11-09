@@ -1192,13 +1192,22 @@ fn source_moduli_and_actual_catalog_areas_drive_compatible_elastic_displacements
         let source = card([8000.0; 2], [4e9, 2e9], [300e6; 2]);
         let states = [material(&source, 300.0), material(&source, 600.0)];
         let layout = MaterialLayout::try_new(
-            &ground, &case, &states, &[0, 1], LayoutLimits::default(), cx,
+            &ground,
+            &case,
+            &states,
+            &[0, 1],
+            LayoutLimits::default(),
+            cx,
         )
         .unwrap();
-        let response = layout.elastic_response(
-            &[2e-6, 3e-6], &case, fs_truss::elastic::ElasticControls::default(), cx,
-        )
-        .unwrap();
+        let response = layout
+            .elastic_response(
+                &[2e-6, 3e-6],
+                &case,
+                fs_truss::elastic::ElasticControls::default(),
+                cx,
+            )
+            .unwrap();
         relative(response.displacements_m[1][0], 12.0 / (4e9 * 2e-6), 1e-12);
         relative(
             response.displacements_m[2][0],
@@ -1209,5 +1218,57 @@ fn source_moduli_and_actual_catalog_areas_drive_compatible_elastic_displacements
             relative(force, 12.0, 1e-12);
         }
         relative(response.compliance_j, 2.0 * response.strain_energy_j, 1e-12);
+    });
+}
+
+#[test]
+fn imposed_reference_state_keeps_each_original_material_modulus() {
+    use fs_truss::elastic::{ElasticControls, ElasticImposedState};
+    with_cx(|cx, _| {
+        let (ground, case) = two_members(cx, 12.0);
+        let source = card([8000.0; 2], [4e9, 2e9], [300e6; 2]);
+        let states = [material(&source, 300.0), material(&source, 600.0)];
+        let layout = MaterialLayout::try_new(
+            &ground,
+            &case,
+            &states,
+            &[0, 1],
+            LayoutLimits::default(),
+            cx,
+        )
+        .unwrap();
+        let response = layout
+            .elastic_response_with_imposed(
+                &[2e-4, 3e-4],
+                &case,
+                ElasticImposedState {
+                    member_stress_free_strain: Some(&[4e-5, -1e-5]),
+                    prescribed_displacements_m: Some(&[[3e-5, 0.0], [0.0; 2], [0.0; 2]]),
+                },
+                ElasticControls::default(),
+                cx,
+            )
+            .unwrap();
+        // The source temperatures select E only. These explicit eigenstrains
+        // are independent caller-owned reference data, not an inferred alpha.
+        assert_eq!(response.displacements_m[0][0], 3e-5);
+        relative(response.displacements_m[1][0], 8.5e-5, 1e-12);
+        relative(response.displacements_m[2][0], 9.5e-5, 1e-12);
+        relative(
+            response.member_elastic_strain[0],
+            12.0 / (4e9 * 2e-4),
+            1e-12,
+        );
+        relative(
+            response.member_elastic_strain[1],
+            12.0 / (2e9 * 3e-4),
+            1e-12,
+        );
+        for force in &response.member_force_n {
+            relative(*force, 12.0, 1e-12);
+        }
+        relative(response.support_reactions_n[0][0], -12.0, 1e-12);
+        relative(response.strain_energy_j, 210e-6, 1e-12);
+        relative(response.compliance_j, 1140e-6, 1e-12);
     });
 }

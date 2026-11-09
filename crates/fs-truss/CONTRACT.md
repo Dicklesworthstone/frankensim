@@ -29,13 +29,42 @@ count. Member/recovery loops poll cancellation every 256 entries; native CG
 retains its own iteration checkpoints. The total iteration budget also covers
 at most two defect corrections. No new numerical recurrence is used.
 
-The returned original-order displacements generate signed axial strains,
-forces and stresses. Support reactions include loads applied at supported
-nodes. Strain energy and load compliance use those same fields. Acceptance
-recomputes equilibrium from recovered forces on every original free coordinate;
-a recursive CG residual alone cannot publish an accepted response. Zero-area
-members contribute no stiffness. Unloaded zero-stiffness coordinates receive
-zero displacement; loaded ones refuse without regularizing springs.
+`ElasticImposedState` adds optional complete original-order member stress-free
+engineering strains and nodal prescribed translations. Omission means zero
+without zero-array allocation. Prescribed nonzero values are admitted only on
+supported coordinates; free-coordinate values must be zero. All supplied
+entries must be finite, including removed members. A caller supplies thermal
+strain from its own expansion law and reference temperature, or explicit
+assembly misfit. No expansion coefficient, stress or modified modulus is
+inferred. Geometry remains the original infinitesimal reference geometry.
+
+`elastic::solve_with_imposed` and
+`MaterialLayout::elastic_response_with_imposed` share the same native solve.
+With elastic extension `e_el = B^T u - L epsilon_0`, the member force is
+`N = (EA/L) e_el`. Known supported motion is lifted exactly into the free RHS:
+`K_ff u_f = f_f + g_f`, where
+`g_f = B_f diag(EA/L) (L epsilon_0 - B_p^T u_p)`.
+The material consumer retains each original source-resolved modulus at its
+admitted material state. Its separate stress-free reference is caller-owned.
+
+The returned original-order displacements generate total strain
+`member_strain`, elastic strain `member_elastic_strain`, signed forces and
+stresses. Supported displacements equal the prescribed values exactly.
+Support reactions are recovered internal forces minus actual nodal loads,
+including loads applied directly at moving supports. Physical stored energy is
+`U = sum(1/2 N e_el)`; external-load compliance is `f dot u`. With eigenstrain
+or support motion compliance need not equal `2 U`. Equilibrium instead gives
+`2 U = f dot u + R dot u_p - sum(N L epsilon_0)`, where R is the support reaction.
+
+Acceptance recomputes physical equilibrium from recovered forces on every
+original free coordinate. The normalized Euclidean residual uses
+`max(||f_f||, ||g_f||, ||f_f + g_f||)` as its reference; this avoids a singular
+relative measure when external loads vanish or imposed and external loads
+cancel. If that reference vanishes, the residual is absolute in newtons.
+A recursive CG residual alone cannot publish an accepted response. Zero-area
+members contribute no stiffness, strain, force or energy. Unloaded
+zero-stiffness free coordinates receive zero displacement; loaded ones refuse
+without regularizing springs.
 
 This explicitly supplements the existing **plastic-equilibrium** layout/sizing
 audit: a redundant truss's statically admissible LP/refitted force distribution
@@ -43,14 +72,20 @@ need not be elastically compatible after snapping. Callers may pass the paired
 `areas_m2` and `load_case` of a `MaterialBodyLoadDesign`, retaining its actual
 self-weight loads. The original audit's semantics are unchanged. Reanalysis
 does not certify strength, displacement limits, uniqueness, stability, buckling,
-finite deformation, bending, or inelastic redistribution. Numerical equilibrium
-alone does not exclude an unloaded mechanism.
+finite deformation, bending, geometric prestress stiffness or inelastic
+redistribution. Numerical equilibrium alone does not exclude an unloaded
+mechanism. Explicit stress-free strain supplies axial prestress, but does not
+establish the stability of that prestressed configuration.
 
 G1/G3 regressions exercise serial members, a redundant three-member analytic
 solution, stiffness-dependent load redistribution, supported loads/reactions,
 energy, rotation covariance, load reversal and pruning. G4 regressions target
 loaded mechanisms, invalid material arrays, exhausted work and cancellation.
-A material consumer regression carries source-resolved moduli through this path.
+Imposed-state regressions cover free thermal expansion, fully restrained
+thermal stress, heterogeneous serial expansion, support settlement with
+external loads, the full energy-work identity, zero-state compatibility,
+pruned-member semantics, malformed inputs and cancellation. Material consumer
+regressions carry source-resolved moduli through both paths.
 
 ## Public types and semantics
 

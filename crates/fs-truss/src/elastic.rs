@@ -2,25 +2,29 @@
 //!
 //! Plastic layout forces need only satisfy nodal equilibrium. After selecting
 //! areas, redundant members instead share load according to their actual EA/L.
-//! This owner solves K u = f with K = B diag(EA/L) B^T, applies that operator
-//! without assembling a global matrix, and recovers N = EA/L B^T u. All member
+//! This owner applies K = B diag(EA/L) B^T without assembling a global matrix.
+//! Explicit stress-free strains and prescribed support motion use the same
+//! free-coordinate solve, recovering N = EA/L (B^T u - L epsilon_0). All member
 //! directions, supports and loads retain their original ground ordering.
 //!
-//! This is infinitesimal axial elasticity with fixed translational supports.
-//! It contains no bending, prestress stiffness, buckling or plastic return map.
+//! This is infinitesimal axial elasticity with prescribed translations.
+//! It contains no bending, geometric stiffness, buckling or plastic return map.
 //! Acceptance measures equilibrium of the returned compatible displacement;
-//! it does not prove uniqueness or exclude unloaded mechanisms. Zero-stiffness
-//! unloaded coordinates receive zero displacement, never an invented spring.
+//! it does not prove uniqueness or exclude unloaded mechanisms. Unloaded free
+//! coordinates with zero stiffness receive zero displacement, never a spring.
 
 use crate::{GroundStructure, LayoutCase, TrussConstructionError};
 use fs_exec::Cx;
 use fs_solver::{CheckedCgConfig, CheckedCgError, LinearOp, checked_cg};
 use fs_sparse::precond::Precond;
 
+mod imposed;
+pub use imposed::ElasticImposedState;
+
 /// Accuracy and bounded work for the native matrix-free elastic solve.
 #[derive(Debug, Clone, Copy)]
 pub struct ElasticControls {
-    /// Relative Euclidean residual of actual member forces on free DOFs.
+    /// Normalized Euclidean residual of actual member forces on free DOFs.
     pub relative_tolerance: f64,
     /// Total native CG iterations, including at most two defect corrections.
     pub maximum_iterations: usize,
@@ -71,22 +75,28 @@ impl std::error::Error for ElasticError {}
 /// One compatible, numerically equilibrated linear response in coherent SI.
 #[derive(Debug, Clone)]
 pub struct ElasticResponse {
-    /// Original node ordering; supported coordinates are exactly zero [m].
+    /// Original node ordering; supported coordinates equal prescribed motion [m].
     pub displacements_m: Vec<[f64; 2]>,
-    /// Original member ordering; zero-area members return zero strain/force/stress.
+    /// Total axial engineering strain in original member ordering.
+    /// Zero-area members return zero strain, elastic strain, force and stress.
     pub member_strain: Vec<f64>,
+    /// Total strain minus explicit stress-free strain; determines stress/energy.
+    pub member_elastic_strain: Vec<f64>,
     /// Positive tension, negative compression [N].
     pub member_force_n: Vec<f64>,
     /// Signed axial Cauchy stress to infinitesimal-strain accuracy [Pa].
     pub member_stress_pa: Vec<f64>,
-    /// K u - f on supported coordinates, zero on free coordinates [N].
-    /// Includes external loads applied directly to supports.
+    /// Recovered internal force minus external load on supported coordinates [N].
+    /// Zero on free coordinates; includes external loads applied to supports.
     pub support_reactions_n: Vec<[f64; 2]>,
-    /// Sum of 1/2 N delta_length over actual members [J].
+    /// Sum of 1/2 N * elastic_extension over actual members [J].
     pub strain_energy_j: f64,
-    /// External nodal load dotted with compatible displacement [J].
+    /// External nodal load dotted with total compatible displacement [J].
+    /// With eigenstrain or support motion this need not equal twice the energy.
     pub compliance_j: f64,
     /// Recomputed from recovered forces on ALL original free coordinates.
+    /// With imposed state, scaled by the largest Euclidean norm of external,
+    /// imposed equivalent and effective free loads (see [solve_with_imposed]).
     pub relative_equilibrium_residual: f64,
     /// Total native CG iteration count.
     pub iterations: usize,
@@ -97,15 +107,26 @@ fn invalid(field: &'static str, requirement: &'static str) -> TrussConstructionE
 }
 
 fn checkpoint(cx: &Cx<'_>) -> Result<(), TrussConstructionError> {
-    cx.checkpoint().map_err(|_| TrussConstructionError::Cancelled {
-        stage: "truss elastic response",
-    })
+    cx.checkpoint()
+        .map_err(|_| TrussConstructionError::Cancelled {
+            stage: "truss elastic response",
+        })
 }
 
 struct Member {
     ends: [usize; 4],
     direction: [f64; 4],
     stiffness: f64,
+}
+
+impl Member {
+    /// Project relative endpoint motion so a rigid translation cancels exactly.
+    #[inline]
+    fn extension(&self, mut value: impl FnMut(usize) -> f64) -> f64 {
+        let dx = value(self.ends[2]) - value(self.ends[0]);
+        let dy = value(self.ends[3]) - value(self.ends[1]);
+        self.direction[2] * dx + self.direction[3] * dy
+    }
 }
 
 struct Operator<'a, 'cx> {
@@ -132,12 +153,7 @@ impl LinearOp for Operator<'_, '_> {
             if member.stiffness == 0.0 {
                 continue;
             }
-            let extension = (0..4)
-                .map(|i| {
-                    self.dof_map[member.ends[i]]
-                        .map_or(0.0, |dof| member.direction[i] * x[dof])
-                })
-                .sum::<f64>();
+            let extension = member.extension(|slot| self.dof_map[slot].map_or(0.0, |dof| x[dof]));
             let force = member.stiffness * extension;
             for i in 0..4 {
                 if let Some(dof) = self.dof_map[member.ends[i]] {
@@ -150,9 +166,7 @@ impl LinearOp for Operator<'_, '_> {
 
 impl Precond for Operator<'_, '_> {
     fn apply(&self, r: &[f64], z: &mut [f64]) {
-        for (i, ((value, &rhs), &diagonal)) in
-            z.iter_mut().zip(r).zip(&self.diagonal).enumerate()
-        {
+        for (i, ((value, &rhs), &diagonal)) in z.iter_mut().zip(r).zip(&self.diagonal).enumerate() {
             if i % 256 == 0 && checkpoint(self.cx).is_err() {
                 *value = f64::NAN;
                 return;
@@ -179,12 +193,55 @@ impl Precond for Operator<'_, '_> {
 /// # Errors
 /// Invalid arrays, material/controls, nonfinite arithmetic, unresolved loads
 /// and cancellation return no accepted response.
-#[allow(clippy::too_many_lines)] // Admission, native solve, and physical recovery.
 pub fn solve(
     ground: &GroundStructure,
     case: &LayoutCase,
     areas_m2: &[f64],
     young_pa: &[f64],
+    controls: ElasticControls,
+    cx: &Cx<'_>,
+) -> Result<ElasticResponse, ElasticError> {
+    solve_with_imposed(
+        ground,
+        case,
+        areas_m2,
+        young_pa,
+        ElasticImposedState::default(),
+        controls,
+        cx,
+    )
+}
+
+/// Solve with explicit member eigenstrain and prescribed support translations.
+///
+/// For each retained member, total extension is B^T u and elastic extension is
+/// B^T u - L epsilon_0. The existing native CG solves
+/// K_ff u_f = f_f + B_f diag(EA/L) (L epsilon_0 - B_p^T u_p).
+/// Only the right-hand side changes: the source Young's moduli, stiffness,
+/// original geometry, area-pruning semantics and free DOFs remain authoritative.
+///
+/// Recovered equilibrium uses the physical forces, not equivalent nodal loads.
+/// Its reference norm is max(||f_f||, ||g_f||, ||f_f + g_f||), where g_f is the
+/// imposed-state right-hand side contribution. This remains meaningful when
+/// thermal/support loads balance each other or external loads vanish. If all
+/// three vanish, the residual is absolute in newtons, as in [solve].
+///
+/// Stored energy uses elastic extension. External-load compliance includes
+/// loads on moving supports and need not be twice the energy. With reactions R,
+/// equilibrium instead gives 2 U = f dot u + R dot u_p - sum(N L epsilon_0).
+/// No thermal expansion law, reference temperature or initial stress is guessed.
+///
+/// # Errors
+/// Inherits [solve]'s refusals. Imposed arrays must have their exact original
+/// shape, all entries must be finite, and free-coordinate prescribed motion
+/// must be zero. Unrepresentable imposed loads and recovery refuse.
+#[allow(clippy::too_many_lines)] // Admission, native solve, and physical recovery.
+pub fn solve_with_imposed(
+    ground: &GroundStructure,
+    case: &LayoutCase,
+    areas_m2: &[f64],
+    young_pa: &[f64],
+    imposed: ElasticImposedState<'_>,
     controls: ElasticControls,
     cx: &Cx<'_>,
 ) -> Result<ElasticResponse, ElasticError> {
@@ -215,7 +272,9 @@ pub fn solve(
         )
         .into());
     }
+    imposed.admit(ground, case, cx)?;
     let mut diagonal = vec![0.0; 2 * ground.nodes().len()];
+    let mut imposed_rhs = imposed.is_supplied().then(|| vec![0.0; diagonal.len()]);
     let mut members = Vec::with_capacity(count);
     for (index, &(a, b)) in ground.members().iter().enumerate() {
         if index % 256 == 0 {
@@ -251,11 +310,23 @@ pub fn solve(
         for i in 0..4 {
             diagonal[member.ends[i]] += stiffness * member.direction[i].powi(2);
         }
+        if stiffness > 0.0 {
+            if let Some(loads) = &mut imposed_rhs {
+                let force = imposed.equivalent_force(index, length, &member)?;
+                for i in 0..4 {
+                    let slot = member.ends[i];
+                    if !case.supported()[slot / 2][slot % 2] {
+                        loads[slot] += member.direction[i] * force;
+                    }
+                }
+            }
+        }
         members.push(member);
     }
     let mut dof_map = vec![None; diagonal.len()];
     let mut free_diagonal = Vec::new();
     let mut rhs = Vec::new();
+    let mut load_scale = 0.0_f64;
     for (node, support) in case.supported().iter().enumerate() {
         if node % 256 == 0 {
             checkpoint(cx)?;
@@ -268,15 +339,24 @@ pub fn solve(
             if fixed {
                 continue;
             }
+            let load = case.loads()[node][axis];
+            let imposed_load = imposed_rhs
+                .as_ref()
+                .map_or(0.0, |values| values[2 * node + axis]);
+            let effective_load = load + imposed_load;
+            if !effective_load.is_finite() {
+                return Err(invalid("elastic imposed loads", "must remain finite").into());
+            }
+            load_scale = load_scale.max(load.abs()).max(imposed_load.abs());
             if d == 0.0 {
-                if case.loads()[node][axis] != 0.0 {
+                if effective_load != 0.0 {
                     return Err(ElasticError::UnsupportedLoad { node, axis });
                 }
                 continue;
             }
             dof_map[2 * node + axis] = Some(rhs.len());
             free_diagonal.push(d);
-            rhs.push(case.loads()[node][axis]);
+            rhs.push(effective_load);
         }
     }
     let operator = Operator {
@@ -314,11 +394,13 @@ pub fn solve(
             checkpoint(cx)?;
         }
         for (axis, value) in u.iter_mut().enumerate() {
-            *value = operator.dof_map[2 * node + axis].map_or(0.0, |i| solution.x[i]);
+            *value = operator.dof_map[2 * node + axis]
+                .map_or_else(|| imposed.displacement(node, axis), |i| solution.x[i]);
         }
     }
     let mut forces = Vec::with_capacity(count);
     let mut strains = Vec::with_capacity(count);
+    let mut elastic_strains = Vec::with_capacity(count);
     let mut stresses = Vec::with_capacity(count);
     let mut internal = vec![[0.0; 2]; displacement.len()];
     let mut energy = 0.0;
@@ -329,27 +411,30 @@ pub fn solve(
         if member.stiffness == 0.0 {
             forces.push(0.0);
             strains.push(0.0);
+            elastic_strains.push(0.0);
             stresses.push(0.0);
             continue;
         }
-        let extension = (0..4)
-            .map(|i| {
-                let slot = member.ends[i];
-                member.direction[i] * displacement[slot / 2][slot % 2]
-            })
-            .sum::<f64>();
-        let force = member.stiffness * extension;
-        let strain = extension / ground.lengths()[index];
-        let stress = young_pa[index] * strain;
-        energy += 0.5 * force * extension;
+        let extension = member.extension(|slot| displacement[slot / 2][slot % 2]);
+        let length = ground.lengths()[index];
+        let elastic_extension = extension - length * imposed.stress_free_strain(index);
+        let force = member.stiffness * elastic_extension;
+        let strain = extension / length;
+        let elastic_strain = elastic_extension / length;
+        let stress = young_pa[index] * elastic_strain;
+        energy += 0.5 * force * elastic_extension;
         forces.push(force);
         strains.push(strain);
+        elastic_strains.push(elastic_strain);
         stresses.push(stress);
         for i in 0..4 {
             let slot = member.ends[i];
             internal[slot / 2][slot % 2] += member.direction[i] * force;
         }
-        if [force, strain, stress, energy].iter().any(|v| !v.is_finite()) {
+        if [force, strain, elastic_strain, stress, energy]
+            .iter()
+            .any(|v| !v.is_finite())
+        {
             return Err(invalid(
                 "elastic recovery",
                 "member force, strain, stress and energy must remain finite",
@@ -360,8 +445,9 @@ pub fn solve(
     let mut reactions = vec![[0.0; 2]; displacement.len()];
     let mut residual = 0.0_f64;
     let mut load_norm = 0.0_f64;
+    let mut imposed_norm = 0.0_f64;
+    let mut effective_norm = 0.0_f64;
     // Normalize first: overflowing absolute load norms cannot hide defects.
-    let load_scale = rhs.iter().map(|v| v.abs()).fold(0.0, f64::max);
     let load_scale = if load_scale == 0.0 { 1.0 } else { load_scale };
     let mut compliance = 0.0;
     for node in 0..displacement.len() {
@@ -376,6 +462,11 @@ pub fn solve(
             } else {
                 residual = residual.hypot(defect / load_scale);
                 load_norm = load_norm.hypot(load / load_scale);
+                let imposed_load = imposed_rhs
+                    .as_ref()
+                    .map_or(0.0, |values| values[2 * node + axis]);
+                imposed_norm = imposed_norm.hypot(imposed_load / load_scale);
+                effective_norm = effective_norm.hypot((load + imposed_load) / load_scale);
             }
             compliance += load * displacement[node][axis];
             if !defect.is_finite() || !compliance.is_finite() {
@@ -387,7 +478,12 @@ pub fn solve(
             }
         }
     }
-    let relative = if load_norm == 0.0 { residual } else { residual / load_norm };
+    let reference_norm = load_norm.max(imposed_norm).max(effective_norm);
+    let relative = if reference_norm == 0.0 {
+        residual
+    } else {
+        residual / reference_norm
+    };
     if !relative.is_finite() || relative >= controls.relative_tolerance {
         return Err(ElasticError::NotConverged {
             relative_residual: relative,
@@ -398,6 +494,7 @@ pub fn solve(
     Ok(ElasticResponse {
         displacements_m: displacement,
         member_strain: strains,
+        member_elastic_strain: elastic_strains,
         member_force_n: forces,
         member_stress_pa: stresses,
         support_reactions_n: reactions,

@@ -569,6 +569,38 @@ impl<'a> MaterialLayout<'a> {
         controls: crate::elastic::ElasticControls,
         cx: &Cx<'_>,
     ) -> Result<crate::elastic::ElasticResponse, crate::elastic::ElasticError> {
+        self.elastic_response_with_imposed(
+            areas_m2,
+            case,
+            crate::elastic::ElasticImposedState::default(),
+            controls,
+            cx,
+        )
+    }
+
+    /// Reanalyze explicit stress-free strain and support motion using source E.
+    ///
+    /// Each original member retains its resolved material state's Young's
+    /// modulus. The caller supplies any thermal/assembly eigenstrain from its
+    /// own reference state; this method does not infer thermal expansion from
+    /// temperature, alter material properties or change the plastic-layout
+    /// audit. Actual body-load designs pass their paired areas and load case.
+    ///
+    /// Total strain includes the imposed stress-free part; recovered stresses
+    /// and energy use elastic strain alone. External-load compliance need not
+    /// equal twice the stored energy when supports move or eigenstrain exists.
+    ///
+    /// # Errors
+    /// See [crate::elastic::solve_with_imposed]; original-order admission,
+    /// unresolved loads, nonfinite arithmetic and cancellation fail closed.
+    pub fn elastic_response_with_imposed(
+        &self,
+        areas_m2: &[f64],
+        case: &LayoutCase,
+        imposed: crate::elastic::ElasticImposedState<'_>,
+        controls: crate::elastic::ElasticControls,
+        cx: &Cx<'_>,
+    ) -> Result<crate::elastic::ElasticResponse, crate::elastic::ElasticError> {
         checkpoint(cx)?;
         let mut moduli = Vec::with_capacity(self.assignments.len());
         for (index, &assignment) in self.assignments.iter().enumerate() {
@@ -577,7 +609,15 @@ impl<'a> MaterialLayout<'a> {
             }
             moduli.push(self.materials[assignment].youngs);
         }
-        crate::elastic::solve(self.ground, case, areas_m2, &moduli, controls, cx)
+        crate::elastic::solve_with_imposed(
+            self.ground,
+            case,
+            areas_m2,
+            &moduli,
+            imposed,
+            controls,
+            cx,
+        )
     }
 
     /// Solve through the existing PDHG owner, retaining both physical totals.
