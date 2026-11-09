@@ -21,6 +21,7 @@ use super::{
 use crate::thermal::boundary::ThermalWall;
 use crate::thermal::boundary::conduction::{WallConductionControls, WallConductionLink};
 pub use crate::thermal::open::buoyancy::{BoussinesqLaw3, BoussinesqLawError3};
+use crate::thermal::open::immersed::ImmersedThermalBody3;
 use crate::thermal::open::{ThermalOpenBoundaries3, ThermalOpenFace3};
 use fs_exec::Cx;
 use fs_math::dd::Dd;
@@ -303,6 +304,28 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> BoussinesqOpenGrid3<L, Q> {
     }
     pub fn clear_wall_conduction(&mut self, axis: usize) -> Result<(), ThermalOpenError3> {
         self.thermal.clear_wall_conduction(axis)
+    }
+
+    /// Install shared lumped storage on original solid obstacles. The body
+    /// temperature follows the thermal model's domain; its actual fluid-side
+    /// traces must also satisfy the Boussinesq envelope at every step.
+    pub fn set_immersed_thermal_bodies(
+        &mut self,
+        bodies: &[ImmersedThermalBody3<'_>],
+        maximum_storage_bytes: usize,
+    ) -> Result<(), ThermalOpenError3> {
+        self.thermal
+            .set_immersed_thermal_bodies(bodies, maximum_storage_bytes)
+    }
+
+    /// Change the heat supplied to one whole immersed body without detaching
+    /// thermal, momentum or buoyancy history.
+    pub fn set_immersed_body_heat(
+        &mut self,
+        body: usize,
+        heat_per_step: f64,
+    ) -> Result<(), ThermalOpenError3> {
+        self.thermal.set_immersed_body_heat(body, heat_per_step)
     }
 
     /// Advance heat and buoyant flow once, then publish their common epoch.

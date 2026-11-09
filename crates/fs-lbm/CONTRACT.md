@@ -56,9 +56,37 @@ This enables forced throughflow with laterally conducting finite boundaries usin
 
 `OpenBoundaryGrid3::prepare_thermal_field` binds a bounded D3Q7 scalar carrier to the original native D3Q19/D3Q27 geometry, solid mask, physical velocity and accepted time. `step_serial_with_thermal` stages the original momentum step and thermal transport with one final joint publication point. Sources use the existing equilibrium half-kicks and retained advective-flux history; optional per-cell thermal relaxation is admitted for the step. Persistent candidate arrays and histories are reused.
 
-Every velocity/pressure face requires explicit reservoir temperature, including nominal outlets. Accepted local force-corrected normal velocity selects Danckwerts total-flux inflow or zero-conductive-flux outflow independently at each boundary link. Receipts measure actual incoming-minus-outgoing scalar populations. Stationary external walls retain independent finite cells per active fluid link; internal obstacle laws remain stateless and do not create hidden solid storage. Temperature, velocity, source, resource, cancellation and independently measured fluid/solid balance gates precede publication of populations, wall state, histories, receipts and counters.
+Every velocity/pressure face requires explicit reservoir temperature, including nominal outlets. Accepted local force-corrected normal velocity selects Danckwerts total-flux inflow or zero-conductive-flux outflow independently at each boundary link. Receipts measure actual incoming-minus-outgoing scalar populations. Stationary external walls retain independent finite cells per active fluid link; unassigned internal obstacle laws remain stateless and do not create hidden solid storage. Temperature, velocity, source, resource, cancellation and independently measured fluid/solid balance gates precede publication of populations, wall state, histories, receipts and counters.
 
 The conserved scalar uses fixed reference volumetric heat capacity. This is passive low-Mach temperature transport, not compressible mass-specific enthalpy or automatic buoyancy feedback. Its heat receipt must not be replaced by the momentum reservoir mass receipt times temperature. The scalar component velocity envelope is additional to native Mach admission. No nonreflecting-outlet or general coupled time-order claim is made.
+
+## Finite immersed bodies in native convection
+
+`ThermalOpenField3::set_immersed_thermal_bodies` groups explicitly selected
+original solid voxels into finite lumped thermal bodies. Each body has ONE
+temperature, heat capacity and held external source across every exposed
+D3Q7 link. The original native flow mask and no-slip obstacle stay unchanged.
+The same capability is available through `BoussinesqOpenGrid3`, retaining
+native buoyancy/heat publication and the separate fluid density envelope.
+
+Each body's backward-Euler balance sums the original reflected-pair resistance
+law over actual post-collision outgoing populations. All faces use the common
+endpoint; neither capacity nor source is multiplied by voxel/face count.
+Per-body receipts measure actual reflected heat and independently computed
+storage. Internal-wall and combined fluid/solid receipts include each body
+once. Refusal or cancellation preserves body temperatures, accepted receipts,
+thermal populations/history and native flow. Interface lists are prepared in
+streaming order, with explicit additional storage bounds and no step allocation
+or geometry lookup.
+
+This is an isothermal-interior approximation with fixed heat capacity and a
+common authored bulk-to-surface resistance per exposed link. Its applicability
+requires negligible internal temperature gradients; it does not resolve solid
+diffusion, body contact, moving interfaces, variable caloric properties or
+surface-area error of stair-stepped native voxels. Focused regressions check
+the analytic ten-face/two-voxel step, capacity-weighted closed-box equilibrium,
+separate hot/cold body inventories, periodic seams, exact refused-step retry,
+and ownership, storage-budget and temperature-domain admission.
 
 ## Spatial finite-wall conduction on native thermal slabs
 
@@ -738,8 +766,9 @@ installed persistently or substituted into later scalar calls.
 The original source half-kicks, advective-flux history, native force-corrected
 velocities, actual wall/reservoir heat, finite-wall storage and final joint
 publication remain shared with scalar transport. Solid grid cells carry no
-thermal inventory; their declared wall links retain the original boundary
-law. Per-cell field dimensions are admitted before any candidate staging.
+thermal population inventory; explicitly configured immersed bodies retain
+separate shared storage, while unassigned obstacle links retain the original
+boundary law. Per-cell field dimensions are admitted before any candidate staging.
 Refused or cancelled attempts publish no heat, momentum, wall state or time.
 The original scalar collision path retains its arithmetic. G0 tests compare
 the isotropic limit for D3Q19/D3Q27 flow with reversed reservoirs and sources,

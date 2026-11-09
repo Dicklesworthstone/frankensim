@@ -24,6 +24,8 @@ use super::tensor::DiffusivityField;
 pub mod buoyancy;
 /// Implicit conduction between existing finite walls of the native open grid.
 pub mod conduction;
+/// Shared finite thermal storage on explicitly grouped immersed solid cells.
+pub mod immersed;
 
 /// Heat ownership on one native face, in XMin/XMax/YMin/YMax/ZMin/ZMax order.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -41,7 +43,9 @@ pub enum ThermalOpenFace3 {
 pub struct ThermalOpenBoundaries3 {
     pub faces: [ThermalOpenFace3; 6],
     /// Law on fluid-to-solid links. Finite solid cells require independent
-    /// link identity and are supported on external planes only by this owner.
+    /// link identity. Shared finite immersed bodies can be installed through
+    /// `ThermalOpenField3::set_immersed_thermal_bodies`; unassigned links retain
+    /// this stateless law.
     pub internal_wall: ThermalWall,
 }
 
@@ -52,8 +56,8 @@ pub struct ThermalOpenLimits3 {
     /// Bounds all persistent thermal arrays, including retained source/flux
     /// scratch and both copies of every finite wall state. Native momentum
     /// storage and allocator metadata are outside this thermal-only budget.
-    /// Optional wall graphs have additional explicit per-pair limits through
-    /// `WallConductionControls`; their factors/workspace are not counted here.
+    /// Optional wall graphs and immersed bodies have separate explicit storage
+    /// limits; their factors/workspace are not counted here.
     pub maximum_storage_bytes: usize,
     /// Admitted fluid temperatures, reservoir data and resolved wall traces.
     pub temperature_range: [f64; 2],
@@ -145,6 +149,7 @@ pub struct ThermalOpenField3 {
     walls: [Vec<ThermalWall>; 6],
     trial_walls: [Vec<ThermalWall>; 6],
     conduction: [Option<WallConduction>; 3],
+    immersed: Option<immersed::ImmersedBodies3>,
     completed_steps: usize,
     last_balance: Option<ThermalOpenBalance3>,
 }
@@ -208,13 +213,16 @@ impl WallSum {
         }
         self.links += 1;
         if let Some(solid) = response.solid {
-            self.has_solid = true;
-            self.solid_heat.add(solid.heat_in);
-            self.solid_storage.add(solid.stored_change);
-            self.solid_source.add(solid.source);
-            self.solid_conducted.add(solid.conducted_in);
-            self.maximum_defect = self.maximum_defect.max(solid.maximum_link_defect);
+            self.add_solid(solid);
         }
+    }
+    fn add_solid(&mut self, solid: FiniteThermalWallExchange) {
+        self.has_solid = true;
+        self.solid_heat.add(solid.heat_in);
+        self.solid_storage.add(solid.stored_change);
+        self.solid_source.add(solid.source);
+        self.solid_conducted.add(solid.conducted_in);
+        self.maximum_defect = self.maximum_defect.max(solid.maximum_link_defect);
     }
     fn finish(self) -> Option<ThermalWallExchange> {
         (self.links != 0).then(|| ThermalWallExchange {
@@ -289,7 +297,9 @@ impl ThermalOpenField3 {
             check_boundary_temperature(6, value, limits)?;
         }
         if matches!(boundaries.internal_wall, ThermalWall::FiniteSolid(_)) {
-            return Err(invalid("internal finite solids need individually owned links").into());
+            return Err(
+                invalid("internal finite solids require explicit immersed thermal bodies").into(),
+            );
         }
         let mut wall_entries = 0usize;
         for (face, law) in boundaries.faces.iter().enumerate() {
@@ -351,6 +361,7 @@ impl ThermalOpenField3 {
             completed_steps,
             last_balance: None,
             conduction: core::array::from_fn(|_| None),
+            immersed: None,
         };
         field.solid.copy_from_slice(solid);
         field
@@ -534,6 +545,9 @@ impl ThermalOpenField3 {
         }
         poll()?;
         self.prepare_wall_conduction()?;
+        if let Some(immersed) = &mut self.immersed {
+            immersed.prepare(&self.post, self.limits, &mut poll)?;
+        }
         poll()?;
         let mut balance = self.stream(&mut poll)?;
         balance.source = source.total();
@@ -553,6 +567,7 @@ impl ThermalOpenField3 {
         let mut outflow_heat = [Sum::default(); 6];
         let mut inward_volume = [Sum::default(); 6];
         let mut outward_volume = [Sum::default(); 6];
+        let mut immersed_link = 0;
         let strides = [1, self.dims[0], self.dims[0] * self.dims[1]];
         for cell in 0..self.populations.len() {
             if cell % 64 == 0 {
@@ -648,8 +663,16 @@ impl ThermalOpenField3 {
                             cell - strides[axis]
                         };
                         if self.solid[from] {
-                            let mut law = self.boundaries.internal_wall;
-                            let response = law.reflect_and_advance(outgoing, weight);
+                            let response = self
+                                .immersed
+                                .as_ref()
+                                .and_then(|bodies| {
+                                    bodies.reflection(cell, q, outgoing, &mut immersed_link)
+                                })
+                                .unwrap_or_else(|| {
+                                    let mut law = self.boundaries.internal_wall;
+                                    law.reflect_and_advance(outgoing, weight)
+                                });
                             check_wall_response(6, &response, self.limits)?;
                             internal.add(outgoing, &response);
                             response.incoming
@@ -669,6 +692,12 @@ impl ThermalOpenField3 {
             exchange.outflow_heat = outflow_heat[face].total();
             exchange.inward_volume = inward_volume[face].total();
             exchange.outward_volume = outward_volume[face].total();
+        }
+        if let Some(immersed) = &self.immersed {
+            debug_assert_eq!(immersed_link, immersed.link_count());
+            for exchange in immersed.trial_exchanges() {
+                internal.add_solid(exchange);
+            }
         }
         balance.internal_wall = internal.finish();
         Ok(balance)
@@ -809,6 +838,9 @@ impl ThermalOpenField3 {
         core::mem::swap(&mut self.populations, &mut self.trial);
         core::mem::swap(&mut self.history, &mut self.trial_history);
         core::mem::swap(&mut self.walls, &mut self.trial_walls);
+        if let Some(immersed) = &mut self.immersed {
+            immersed.publish();
+        }
         self.completed_steps = step;
         self.last_balance = Some(balance);
     }
