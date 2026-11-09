@@ -11,7 +11,8 @@ use crate::filament3d::advection::stage::{
 };
 use crate::filament3d::advection::{LineMotion, append_near_sources, prepare_near};
 use crate::filament3d::{
-    FilamentWake, Refusal, SelfInducedShed, WakeAdaptiveReport, WakeAdvectionReport, WakeBoundary,
+    FilamentWake, Refusal, RigidLineMotion, RigidWakeBoundary, SelfInducedShed,
+    WakeAdaptiveReport, WakeAdvectionReport, WakeBoundary,
     WakeTimeSpec, WakeTreeSpec,
 };
 
@@ -74,7 +75,7 @@ impl FarField {
         cancelled: impl FnMut() -> bool,
     ) -> Result<(), Refusal> {
         self.advance_self_induced(
-            near, gamma, config, boundary, None, None, variation, cancelled,
+            near, gamma, config, boundary, None, None, None, variation, cancelled,
         )
         .map(|_| ())
     }
@@ -103,6 +104,7 @@ impl FarField {
             gamma,
             config,
             boundary,
+            None,
             Some(tree),
             None,
             variation,
@@ -142,6 +144,73 @@ impl FarField {
             gamma,
             config,
             boundary,
+            None,
+            tree,
+            Some(time),
+            variation,
+            cancelled,
+        )
+    }
+
+    /// Evolve connected near/far material vertices with exact rigid lifting-line
+    /// motion, using the original common midpoint RK2 source stages.
+    /// See [FilamentWake::shed_self_induced_with_rigid_line] for the motion,
+    /// physical incident field, path-travel guard and optional tree semantics.
+    /// Shared free vertices remain independent of the prescribed solid line.
+    ///
+    /// # Errors
+    /// Existing coupled environment/tree refusals and invalid rigid motion.
+    /// Neither near nor far state publishes on an error.
+    #[allow(clippy::too_many_arguments)]
+    pub fn shed_self_induced_with_rigid_line(
+        &mut self,
+        near: &mut FilamentWake,
+        gamma: &[f64],
+        config: SelfInducedShed,
+        boundary: RigidWakeBoundary,
+        tree: Option<WakeTreeSpec>,
+        variation: impl FnMut([f64; 3], f64) -> Result<[f64; 3], Refusal>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<WakeAdvectionReport, Refusal> {
+        self.advance_self_induced(
+            near,
+            gamma,
+            config,
+            WakeBoundary { line_endpoint_m: None, image_plane: boundary.image_plane },
+            Some(boundary.line_motion),
+            tree,
+            None,
+            variation,
+            cancelled,
+        )
+        .map(|report| report.advection)
+    }
+
+    /// Evolve the same connected near/far system with the original adaptive
+    /// RK3(2) owner and analytic rigid line at each trial's elapsed time.
+    /// See [FilamentWake::shed_self_induced_adaptive_with_rigid_line].
+    ///
+    /// # Errors
+    /// Existing coupled adaptive and rigid-motion refusals. Both physical
+    /// partitions, their ages and endpoint emission remain atomic.
+    #[allow(clippy::too_many_arguments)]
+    pub fn shed_self_induced_adaptive_with_rigid_line(
+        &mut self,
+        near: &mut FilamentWake,
+        gamma: &[f64],
+        config: SelfInducedShed,
+        time: WakeTimeSpec,
+        boundary: RigidWakeBoundary,
+        tree: Option<WakeTreeSpec>,
+        variation: impl FnMut([f64; 3], f64) -> Result<[f64; 3], Refusal>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<WakeAdaptiveReport, Refusal> {
+        self.advance_self_induced(
+            near,
+            gamma,
+            config,
+            WakeBoundary { line_endpoint_m: None, image_plane: boundary.image_plane },
+            Some(boundary.line_motion),
             tree,
             Some(time),
             variation,
@@ -156,6 +225,7 @@ impl FarField {
         gamma: &[f64],
         config: SelfInducedShed,
         boundary: WakeBoundary<'_>,
+        rigid_line: Option<RigidLineMotion>,
         tree: Option<WakeTreeSpec>,
         time: Option<WakeTimeSpec>,
         mut variation: impl FnMut([f64; 3], f64) -> Result<[f64; 3], Refusal>,
@@ -184,7 +254,7 @@ impl FarField {
         admit_circulation(near, self, &mut cancelled)?;
         let (mut points, bindings) = shared_nodes(near, self, &mut cancelled)?;
         let mut candidate = proposal.near;
-        let line = LineMotion::new(&candidate, boundary)?;
+        let line = LineMotion::new(&candidate, boundary, rigid_line, proposal.dt_s)?;
         let settings = StageSettings {
             dt_s: proposal.dt_s,
             source_bound,

@@ -26,7 +26,8 @@ use fs_blake3::hash_domain;
 pub(crate) mod advection;
 pub use advection::stage::{PreparedWakeTree, WakeTreeAccuracy, WakeTreeQueryReport};
 pub use advection::{
-    SelfInducedShed, WakeAdaptiveReport, WakeAdvectionReport, WakeBoundary, WakeTimeSpec,
+    RigidLineMotion, RigidWakeBoundary, SelfInducedShed, WakeAdaptiveReport,
+    WakeAdvectionReport, WakeBoundary, WakeTimeSpec,
     WakeTreeSpec,
 };
 

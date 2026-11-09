@@ -9,6 +9,11 @@ use crate::images3d::ImagePlane;
 pub(crate) mod stage;
 use stage::{PreparedSources, StageSettings, integrate_adaptive_nodes, integrate_nodes};
 
+#[path = "advection/rigid.rs"]
+mod rigid;
+pub use rigid::{RigidLineMotion, RigidWakeBoundary};
+use rigid::PreparedRigidMotion;
+
 /// Prescribed geometry and stationary slip boundary for one shedding interval.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WakeBoundary<'a> {
@@ -212,6 +217,7 @@ impl FilamentWake {
             boundary,
             None,
             None,
+            None,
             incident_variation,
             cancelled,
         )
@@ -241,6 +247,7 @@ impl FilamentWake {
             gamma,
             config,
             boundary,
+            None,
             Some(tree),
             None,
             incident_variation,
@@ -284,6 +291,82 @@ impl FilamentWake {
             gamma,
             config,
             boundary,
+            None,
+            tree,
+            Some(time),
+            incident_variation,
+            cancelled,
+        )
+    }
+
+    /// Evolve the existing wake with exact prescribed rigid lifting-line
+    /// geometry at every midpoint stage, then emit at the rotated endpoint.
+    ///
+    /// The held world angular velocity and translating pivot describe the
+    /// solid line only. Free wake points still follow the physical world
+    /// fluid velocity; no rotational frame velocity is added to that field.
+    /// The incident callback and optional tree have the same units and
+    /// ownership as the original environment/tree methods. None selects direct
+    /// evaluation. Prescribed motion does not determine bound circulation:
+    /// the caller still supplies gamma for the one endpoint emission.
+    ///
+    /// The line resolution guard uses a conservative path-length bound, not
+    /// endpoint separation, so full turns cannot hide unresolved line travel.
+    /// Work accounting, finite cores, source ordering and atomic publication
+    /// use the original fixed RK2 owner.
+    ///
+    /// # Errors
+    /// Existing environment/tree refusals, invalid rigid motion, or excessive
+    /// line travel. A refusal leaves the original wake unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn shed_self_induced_with_rigid_line(
+        &mut self,
+        gamma: &[f64],
+        config: SelfInducedShed,
+        boundary: RigidWakeBoundary,
+        tree: Option<WakeTreeSpec>,
+        incident_variation: impl FnMut([f64; 3], f64) -> Result<[f64; 3], Refusal>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<WakeAdvectionReport, Refusal> {
+        self.advance_self_induced(
+            gamma,
+            config,
+            WakeBoundary { line_endpoint_m: None, image_plane: boundary.image_plane },
+            Some(boundary.line_motion),
+            tree,
+            None,
+            incident_variation,
+            cancelled,
+        )
+        .map(|report| report.advection)
+    }
+
+    /// Adaptive RK3(2) evolution with the same rigid line and physical sources
+    /// as [Self::shed_self_induced_with_rigid_line]. Each accepted or retried
+    /// stage samples the same analytic motion at elapsed seconds, with no
+    /// incremental rotation drift or separate line-integration schedule.
+    /// The path bound scales with each trial duration, allowing native
+    /// temporal/resolution control to refine a rapidly moving line.
+    ///
+    /// # Errors
+    /// The original adaptive refusals and the rigid-line motion refusals.
+    /// All trials, ages and endpoint emission publish together on success.
+    #[allow(clippy::too_many_arguments)]
+    pub fn shed_self_induced_adaptive_with_rigid_line(
+        &mut self,
+        gamma: &[f64],
+        config: SelfInducedShed,
+        time: WakeTimeSpec,
+        boundary: RigidWakeBoundary,
+        tree: Option<WakeTreeSpec>,
+        incident_variation: impl FnMut([f64; 3], f64) -> Result<[f64; 3], Refusal>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<WakeAdaptiveReport, Refusal> {
+        self.advance_self_induced(
+            gamma,
+            config,
+            WakeBoundary { line_endpoint_m: None, image_plane: boundary.image_plane },
+            Some(boundary.line_motion),
             tree,
             Some(time),
             incident_variation,
@@ -297,6 +380,7 @@ impl FilamentWake {
         gamma: &[f64],
         config: SelfInducedShed,
         boundary: WakeBoundary<'_>,
+        rigid_line: Option<RigidLineMotion>,
         tree: Option<WakeTreeSpec>,
         time: Option<WakeTimeSpec>,
         mut incident_variation: impl FnMut([f64; 3], f64) -> Result<[f64; 3], Refusal>,
@@ -311,7 +395,7 @@ impl FilamentWake {
         }
         let proposal = prepare_near(self, gamma, config)?;
         let mut state = proposal.near;
-        let line = LineMotion::new(&state, boundary)?;
+        let line = LineMotion::new(&state, boundary, rigid_line, proposal.dt_s)?;
         let mut points: Vec<_> = state
             .rows
             .iter()
@@ -488,11 +572,17 @@ pub(crate) fn append_near_sources(
 pub(crate) struct LineMotion<'a> {
     start: Vec<[f64; 3]>,
     end: Option<&'a [[f64; 3]]>,
+    rigid: Option<PreparedRigidMotion>,
     plane: Option<ImagePlane>,
 }
 
 impl<'a> LineMotion<'a> {
-    pub(crate) fn new(near: &FilamentWake, boundary: WakeBoundary<'a>) -> Result<Self, Refusal> {
+    pub(crate) fn new(
+        near: &FilamentWake,
+        boundary: WakeBoundary<'a>,
+        rigid_line: Option<RigidLineMotion>,
+        dt_s: f64,
+    ) -> Result<Self, Refusal> {
         if let Some(plane) = boundary.image_plane {
             plane.admit(near)?;
         }
@@ -509,14 +599,23 @@ impl<'a> LineMotion<'a> {
                 "invalid endpoint lifting line",
             ));
         }
+        let rigid = rigid_line
+            .map(|motion| {
+                PreparedRigidMotion::new(motion, dt_s, &near.line_nodes, boundary.image_plane)
+            })
+            .transpose()?;
         Ok(Self {
             start: near.line_nodes.clone(),
             end: boundary.line_endpoint_m,
+            rigid,
             plane: boundary.image_plane,
         })
     }
 
     pub(crate) fn step_distance(&self, substeps: usize) -> f64 {
+        if let Some(rigid) = &self.rigid {
+            return rigid.travel_m / substeps as f64;
+        }
         self.end.map_or(0.0, |end| {
             self.start
                 .iter()
@@ -528,6 +627,20 @@ impl<'a> LineMotion<'a> {
     }
 
     pub(crate) fn apply(&self, near: &mut FilamentWake, fraction: f64) -> Result<(), Refusal> {
+        if let Some(rigid) = &self.rigid {
+            // One SO(3) exponential for the complete line at this RK time.
+            let stage = rigid.stage(fraction)?;
+            for (point, &start) in near.line_nodes.iter_mut().zip(&self.start) {
+                *point = stage.position(start)?;
+                if self.plane.is_some_and(|plane| point[2] <= plane.z0_m) {
+                    return Err(refusal(
+                        "wake-advection-line-invalid",
+                        "rigid-line stage crosses the image plane",
+                    ));
+                }
+            }
+            return Ok(());
+        }
         let Some(end) = self.end else { return Ok(()) };
         for ((p, start), end) in near.line_nodes.iter_mut().zip(&self.start).zip(end) {
             *p = if fraction == 0.0 {

@@ -1443,6 +1443,63 @@ existing entry point, checks independent space/time-dependent transport and
 moving-frame covariance, verifies image dynamics against direct finite-core
 line integration, and exercises boundary/callback/work-limit rollback.
 
+### Exact rigid lifting-line motion
+
+The opt-in `shed_self_induced_with_rigid_line` and
+`shed_self_induced_adaptive_with_rigid_line` methods on `FilamentWake` and
+`FarField` use the existing connected material-vertex owners with a
+`RigidWakeBoundary`. Its `RigidLineMotion` holds a world pivot position
+`P0`, pivot velocity `V` [m/s], and world angular velocity `omega` [rad/s].
+For elapsed seconds `t` within the shedding interval, the prescribed line is
+
+`x(t) = P0 + V*t + Exp(omega*t) * (x(0) - P0)`.
+
+Positive angular velocity follows the right-hand rule. This finite rotation
+preserves station distances at intermediate stages, including large angles
+and multiple turns. `point_and_velocity` samples the same physical law and
+returns `V + omega cross (x(t) - P0 - V*t)` for the material line velocity.
+The pivot position is explicitly at the start of this interval: callers
+advance it by `V / shed_hz` before the next interval when translation is
+nonzero. The accepted line supplies the next interval's initial geometry;
+there is no independent pose history or body motion integrator.
+
+One shared `fs-ga::So3` exponential supplies the complete line at each
+absolute stage time within the interval. Source assembly, direct/tree field
+evaluation, RK2 or adaptive RK3(2), near/far vertex sharing, ages, cores,
+Kelvin topology and endpoint emission keep their original owners. Free wake
+vertices remain in world coordinates and follow the physical incident plus
+induced fluid velocity. The line's rotational velocity is not added to that
+fluid field. The incident callback still excludes internal wake induction
+and images. The caller supplies endpoint bound circulation; this motion
+prescription neither solves a new bound aerodynamic system nor changes
+retained circulation. It provides no thrust, pressure, actuator-work or
+exact supported-system energy/impulse claim.
+
+The line resolution guard uses the conservative full-interval path bound
+
+`|V*dt| + max_nodes |(omega*dt) cross (x(0)-P0)|`.
+
+It is divided by fixed substeps, or scaled by each adaptive trial's fraction
+of the interval. Endpoint chord length would miss full turns and understate
+finite rotational travel. The same core/edge limit therefore controls these
+motions and can cause native adaptive refinement. It remains a resolution
+guard, separate from the embedded free-vertex temporal estimate.
+
+Endpoint motion is admitted before integration; each sampled stage and the
+accepted endpoint must stay finite and strictly above any image plane.
+As with the original boundary API, these samples do not certify complete
+swept clearance between stages. Invalid motion, sampled crossings, work/time
+refusals and cancellation publish neither physical partition. The original
+linear `WakeBoundary` APIs retain their interpolation and arithmetic;
+zero rigid motion reproduces their fixed-line geometry.
+
+`tests/rigid_line_advection3d.rs` covers independent Rodrigues/material
+velocity references, preserved distances, zero-motion parity, pure
+translation, an independently reconstructed native midpoint trajectory,
+actual rotating-wake refinement against endpoint-chord interpolation,
+full-turn path guarding/adaptive refinement, connected near/far direct/tree
+parity, Kelvin/age/emission semantics and transactional refusal/cancellation.
+
 ### Error-controlled tree dynamics
 
 Both near and combined near/far systems expose `shed_self_induced_with_tree`.

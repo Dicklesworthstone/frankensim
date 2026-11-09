@@ -3211,6 +3211,7 @@ dependencies = [
  "fs-alloc",
  "fs-blake3",
  "fs-exec",
+ "fs-ga",
  "fs-la",
  "fs-material",
  "fs-math",
