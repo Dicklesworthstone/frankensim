@@ -439,6 +439,43 @@ injection and reservoir work. Source, partial-work and cancellation refusals
 leave the complete state unchanged. Existing steady Carreau regressions apply
 to the shared pressure operator.
 
+## Self-heating of retained Carreau momentum
+
+`graph::rheology::thermal::transient::TransientThermalCarreauGraph`
+couples the original radial Carreau histories and hydraulic compliance to one
+explicitly shared, well-mixed `TabulatedHeatStorage` inventory. Its capacity
+includes all pipes, compliant volumes and returning reservoir fluid. Every
+thermal trial starts from the same accepted velocities, stored pressures and
+clock, prepares original viscosity at the trial midpoint temperature, and
+performs the original coupled transient pressure/radial solve.
+
+Only the native trajectory's integrated nonnegative viscous heat enters
+sensible storage. Pressure/reservoir/injection/head work, radial kinetic energy
+and hydraulic compliance energy retain their separate original owners. Thus
+startup can store pump work as momentum, coastdown can heat the fluid without
+pressure input, and an opposing pressure head can recover mechanical energy
+while the fluid still dissipates heat. The existing bounded scalar caloric
+midpoint bracket/refinement is shared with the quasisteady thermal owner;
+original source support and physical rate ceilings remain unchanged.
+
+`advance` and `advance_with_heads` borrow the accepted history and return the
+complete next temperature owner, radial/storage state and work report together.
+The same original workspace remains compatible across accepted temperatures.
+Failed trials, endpoint source admission, energy refusal, exhausted shared
+hydraulic/branch work and cancellation publish no partial physical state.
+Both sensible-energy and combined mechanical-plus-thermal residuals must meet
+declared tolerances; those numerical gates do not certify discretization error.
+
+Temperature is uniform within this entire declared inventory; there is no
+spatial enthalpy advection, finite mixing time, open-stream donor temperature,
+density change, thermal expansion, or inferred fluid mass/heat capacity.
+The scalar continuation selects a bounded local heating/cooling branch and
+does not certify uniqueness or unresolved equilibria. Radial and temporal
+refinement remain necessary. Independent two-annulus momentum/caloric equations
+cover startup, coastdown and recovering heads; a simultaneous pressure/storage
+oracle separates compliance energy from heat. Zero-flow cooling, the balanced
+steady limit, original-workspace continuation and atomic retry are also tested.
+
 ## Steady shear-thinning hydraulic networks
 
 `graph::rheology::CarreauPipeGraph` connects original `LaminarCarreauPipe`
@@ -460,11 +497,12 @@ source retention and power. The single-inventory `ThermalCarreauGraph` explicitl
 requires equal branch temperatures; it refuses a nonuniform hydraulic graph
 rather than discarding regional thermal state.
 
-The initial regional-temperature implementation and regression sources passed
-the pinned formatter and whitespace checks. Native Cargo compilation and test
-execution were unavailable after shared-host resource exhaustion and loss of
-the executor. The focused patch was recovered from the pinned source baseline;
-no executed test pass or post-recovery native formatting pass is claimed.
+The regional-temperature and transient caloric changes passed the pinned
+formatter, whitespace checks and a 48-test source-linked Carreau battery.
+That check compiled the original material, radial, graph, checked-CG and caloric
+algorithms and their real regression sources. Execution-context glue was isolated
+because the native crate dependency build could not complete; no full-crate or
+asynchronous-runtime integration pass is claimed.
 
 `solve_with_injections` also admits signed prescribed nodal volume ports:
 positive inputs supply fluid and negative inputs withdraw it. The required

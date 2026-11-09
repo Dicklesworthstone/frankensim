@@ -26,6 +26,9 @@
 //! spatial temperature fields, open-stream enthalpy, phase change and thermal
 //! expansion remain outside this reduction.
 
+/// Resolved radial momentum, hydraulic storage and one shared caloric inventory.
+pub mod transient;
+
 use fs_material::thermal::transport::{ThermalTransportError, storage::TabulatedHeatStorage};
 
 use super::{
@@ -108,6 +111,7 @@ impl ThermalCarreauBoundary {
 #[derive(Debug)]
 pub enum ThermalCarreauError {
     Hydraulic(CarreauGraphError),
+    TransientHydraulic(super::transient::TransientCarreauError),
     Caloric(ThermalTransportError),
     TemperatureDomain { temperature_k: f64 },
     HydraulicSolveBudget,
@@ -125,6 +129,11 @@ impl From<GraphError> for ThermalCarreauError {
 impl From<CarreauGraphError> for ThermalCarreauError {
     fn from(value: CarreauGraphError) -> Self {
         Self::Hydraulic(value)
+    }
+}
+impl From<super::transient::TransientCarreauError> for ThermalCarreauError {
+    fn from(value: super::transient::TransientCarreauError) -> Self {
+        Self::TransientHydraulic(value)
     }
 }
 impl From<ThermalTransportError> for ThermalCarreauError {
@@ -194,13 +203,13 @@ struct Point {
     allowance: f64,
 }
 
-struct Trial {
+struct Trial<H = CarreauGraphSolution> {
     point: Point,
     stored: f64,
     heat: f64,
     imposed: f64,
     bath: f64,
-    hydraulics: CarreauGraphSolution,
+    hydraulics: H,
 }
 
 impl<'a> ThermalCarreauGraph<'a> {
@@ -212,33 +221,7 @@ impl<'a> ThermalCarreauGraph<'a> {
         if !nonnegative(time_s) {
             return Err(GraphError::InvalidInput("invalid Carreau thermal clock").into());
         }
-        // The hydraulic owner admits one original law and a nonempty topology,
-        // but may carry distinct prescribed branch temperatures. This caloric
-        // owner has one shared inventory and therefore requires a uniform state.
-        let reference = graph.branches[0].pipe;
-        if graph
-            .branches
-            .iter()
-            .any(|branch| branch.pipe.temperature_k() != reference.temperature_k())
-        {
-            return Err(GraphError::InvalidInput(
-                "one-inventory Carreau thermal graph requires uniform temperature",
-            )
-            .into());
-        }
-        let source_span = reference.law().temperature_shift().validity_k();
-        let storage_span = storage.temperature_span_k();
-        let span = [
-            source_span[0].max(storage_span[0]),
-            source_span[1].min(storage_span[1]),
-        ];
-        let temperature = reference.temperature_k();
-        if span[0] >= span[1] || temperature < span[0] || temperature > span[1] {
-            return Err(ThermalCarreauError::TemperatureDomain {
-                temperature_k: temperature,
-            });
-        }
-        storage.heat_capacity_j_k(temperature)?;
+        let span = shared_temperature_span(&graph, storage)?;
         Ok(Self {
             graph,
             storage,
@@ -350,103 +333,19 @@ impl<'a> ThermalCarreauGraph<'a> {
             })
         };
 
-        let initial = solve(initial_temperature)?;
-        let initial_point = initial.point;
-        let (accepted, width) = if initial.point.residual == 0.0 {
-            (initial, 0.0)
-        } else {
-            // Bracket only in the physical initial heating/cooling direction.
-            // Keep scalar endpoints; native profile vectors need not be retained.
-            drop(initial);
-            let direction = -initial_point.residual.signum();
-            let bound = if direction > 0.0 {
-                (initial_temperature + controls.maximum_temperature_change_k)
-                    .min(self.temperature_span_k[1])
-            } else {
-                (initial_temperature - controls.maximum_temperature_change_k)
-                    .max(self.temperature_span_k[0])
-            };
-            let limit = (bound - initial_temperature).abs();
-            if !positive(limit) {
-                return Err(ThermalCarreauError::UnbracketedTemperature);
-            }
-            let scale = finite(
-                self.storage.heat_capacity_j_k(initial_temperature)?
-                    + (0.5 * duration_s) * boundary.bath_conductance_w_k,
-                "Carreau thermal initial slope",
-            )?;
-            let mut distance = (initial_point.residual.abs() / scale).min(limit);
-            if !positive(distance) {
-                return Err(ThermalCarreauError::TemperatureResolution);
-            }
-            let outer = loop {
-                let temperature = if distance == limit {
-                    bound
-                } else {
-                    initial_temperature + direction * distance
-                };
-                if temperature == initial_temperature {
-                    return Err(ThermalCarreauError::TemperatureResolution);
-                }
-                let trial = solve(temperature)?;
-                if trial.point.residual == 0.0
-                    || trial.point.residual.signum() != initial_point.residual.signum()
-                {
-                    break trial;
-                }
-                if distance == limit {
-                    return Err(ThermalCarreauError::UnbracketedTemperature);
-                }
-                distance = (2.0 * distance).min(limit);
-            };
-            if outer.point.residual == 0.0 {
-                (outer, 0.0)
-            } else {
-                let (mut low, mut high) = if direction > 0.0 {
-                    (initial_point, outer.point)
-                } else {
-                    (outer.point, initial_point)
-                };
-                drop(outer);
-                loop {
-                    let width = high.temperature - low.temperature;
-                    let a = low.residual.abs();
-                    let b = high.residual.abs();
-                    let fraction = if a >= b {
-                        1.0 / (1.0 + b / a)
-                    } else {
-                        let ratio = a / b;
-                        ratio / (1.0 + ratio)
-                    };
-                    let fraction = if (0.1..=0.9).contains(&fraction) {
-                        fraction
-                    } else {
-                        0.5
-                    };
-                    let temperature = low.temperature + fraction * width;
-                    if temperature <= low.temperature || temperature >= high.temperature {
-                        return Err(ThermalCarreauError::TemperatureResolution);
-                    }
-                    let trial = solve(temperature)?;
-                    if trial.point.residual == 0.0
-                        || width <= controls.temperature_tolerance_k
-                            && trial.point.residual.abs() <= trial.point.allowance
-                    {
-                        let accepted_width = if trial.point.residual == 0.0 {
-                            0.0
-                        } else {
-                            width
-                        };
-                        break (trial, accepted_width);
-                    }
-                    if trial.point.residual.signum() == low.residual.signum() {
-                        low = trial.point;
-                    } else {
-                        high = trial.point;
-                    }
-                }
-            }
-        };
+        let initial_slope = finite(
+            self.storage.heat_capacity_j_k(initial_temperature)?
+                + (0.5 * duration_s) * boundary.bath_conductance_w_k,
+            "Carreau thermal initial slope",
+        )?;
+        let (accepted, width, initial_point) = solve_temperature(
+            initial_temperature,
+            self.temperature_span_k,
+            controls.maximum_temperature_change_k,
+            controls.temperature_tolerance_k,
+            initial_slope,
+            &mut solve,
+        )?;
         drop(solve);
         if accepted.point.residual.abs() > accepted.point.allowance {
             return Err(ThermalCarreauError::EnergyBalance);
@@ -522,6 +421,142 @@ impl<'a> ThermalCarreauGraph<'a> {
             },
         })
     }
+}
+
+fn solve_temperature<H>(
+    initial_temperature: f64,
+    temperature_span_k: [f64; 2],
+    maximum_temperature_change_k: f64,
+    temperature_tolerance_k: f64,
+    initial_slope: f64,
+    solve: &mut impl FnMut(f64) -> Result<Trial<H>, ThermalCarreauError>,
+) -> Result<(Trial<H>, f64, Point), ThermalCarreauError> {
+    let initial = solve(initial_temperature)?;
+    let initial_point = initial.point;
+    let (accepted, width) = if initial.point.residual == 0.0 {
+        (initial, 0.0)
+    } else {
+        // Bracket only in the physical initial heating/cooling direction.
+        // Keep scalar endpoints; native profile vectors need not be retained.
+        drop(initial);
+        let direction = -initial_point.residual.signum();
+        let bound = if direction > 0.0 {
+            (initial_temperature + maximum_temperature_change_k).min(temperature_span_k[1])
+        } else {
+            (initial_temperature - maximum_temperature_change_k).max(temperature_span_k[0])
+        };
+        let limit = (bound - initial_temperature).abs();
+        if !positive(limit) {
+            return Err(ThermalCarreauError::UnbracketedTemperature);
+        }
+        let scale = initial_slope;
+        let mut distance = (initial_point.residual.abs() / scale).min(limit);
+        if !positive(distance) {
+            return Err(ThermalCarreauError::TemperatureResolution);
+        }
+        let outer = loop {
+            let temperature = if distance == limit {
+                bound
+            } else {
+                initial_temperature + direction * distance
+            };
+            if temperature == initial_temperature {
+                return Err(ThermalCarreauError::TemperatureResolution);
+            }
+            let trial = solve(temperature)?;
+            if trial.point.residual == 0.0
+                || trial.point.residual.signum() != initial_point.residual.signum()
+            {
+                break trial;
+            }
+            if distance == limit {
+                return Err(ThermalCarreauError::UnbracketedTemperature);
+            }
+            distance = (2.0 * distance).min(limit);
+        };
+        if outer.point.residual == 0.0 {
+            (outer, 0.0)
+        } else {
+            let (mut low, mut high) = if direction > 0.0 {
+                (initial_point, outer.point)
+            } else {
+                (outer.point, initial_point)
+            };
+            drop(outer);
+            loop {
+                let width = high.temperature - low.temperature;
+                let a = low.residual.abs();
+                let b = high.residual.abs();
+                let fraction = if a >= b {
+                    1.0 / (1.0 + b / a)
+                } else {
+                    let ratio = a / b;
+                    ratio / (1.0 + ratio)
+                };
+                let fraction = if (0.1..=0.9).contains(&fraction) {
+                    fraction
+                } else {
+                    0.5
+                };
+                let temperature = low.temperature + fraction * width;
+                if temperature <= low.temperature || temperature >= high.temperature {
+                    return Err(ThermalCarreauError::TemperatureResolution);
+                }
+                let trial = solve(temperature)?;
+                if trial.point.residual == 0.0
+                    || width <= temperature_tolerance_k
+                        && trial.point.residual.abs() <= trial.point.allowance
+                {
+                    let accepted_width = if trial.point.residual == 0.0 {
+                        0.0
+                    } else {
+                        width
+                    };
+                    break (trial, accepted_width);
+                }
+                if trial.point.residual.signum() == low.residual.signum() {
+                    low = trial.point;
+                } else {
+                    high = trial.point;
+                }
+            }
+        }
+    };
+    Ok((accepted, width, initial_point))
+}
+
+fn shared_temperature_span(
+    graph: &CarreauPipeGraph,
+    storage: &TabulatedHeatStorage,
+) -> Result<[f64; 2], ThermalCarreauError> {
+    // The hydraulic owner admits one original law and a nonempty topology,
+    // but may carry distinct prescribed branch temperatures. This caloric
+    // owner has one shared inventory and therefore requires a uniform state.
+    let reference = graph.branches[0].pipe;
+    if graph
+        .branches
+        .iter()
+        .any(|branch| branch.pipe.temperature_k() != reference.temperature_k())
+    {
+        return Err(GraphError::InvalidInput(
+            "one-inventory Carreau thermal graph requires uniform temperature",
+        )
+        .into());
+    }
+    let source_span = reference.law().temperature_shift().validity_k();
+    let storage_span = storage.temperature_span_k();
+    let span = [
+        source_span[0].max(storage_span[0]),
+        source_span[1].min(storage_span[1]),
+    ];
+    let temperature = reference.temperature_k();
+    if span[0] >= span[1] || temperature < span[0] || temperature > span[1] {
+        return Err(ThermalCarreauError::TemperatureDomain {
+            temperature_k: temperature,
+        });
+    }
+    storage.heat_capacity_j_k(temperature)?;
+    Ok(span)
 }
 
 fn prepare_temperature(
