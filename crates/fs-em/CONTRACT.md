@@ -8913,3 +8913,10 @@ and exercise unresolved, point/work-budget and late-cancellation refusals.
 The integration regressions have been authored and formatted, but not compiled
 or executed in this environment. Resolution convergence is an estimate, not a
 quadrature, mesh-error, uniqueness or empirical material certificate.
+
+
+### Field-preserving finite-aperture temporal interference
+
+Finite-aperture normalized-window moments now optionally project each original E/H source bank into bounded positive temporal modes before continuous rectangle products. Both Uniform and Triangular shutters retain actual real carrier sums and proper-complex difference statistics, original joint center phases, all spatial modes and Nyquist terms, signed Poynting, Jones-before-product analyses and Maxwell stress. M<=17, source limits 2..32 real or 2..64 proper and half-band<=0.5 remain shared-core admission. Additional logical payload is 31,504+192*N*M bytes; work reserves max(N²F²,N*F*M+N²*M) per selected bank. Tight existing budgets and unsupported bands keep the original pair law. The separate wrench, interferometer and energy-control owners are not covered by this generic measurement change.
+
+Focused verification passed 13 exact numerical tests and two full dispatch-body tests with manufactured reconstruction adapters under -Dwarnings. These cover real/proper dark residuals, both profiles, independent field quadrature, continuous rectangle partitions including unpaired Nyquist modes, exact budget boundaries, cancellation and single reconstruction per original frequency. The centered 1ps real two-tone fixture previously returned 9.183549615799121e-41 instead of the physical leading value 2.8125e-50; the projected route preserves that residual. This is focused numerical and dispatch validation, without a native Maxwell/material/FFT reconstruction or full workspace claim. It does not certify relative error at arbitrary joint spatial nulls.

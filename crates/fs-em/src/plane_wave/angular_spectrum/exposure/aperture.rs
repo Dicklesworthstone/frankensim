@@ -13,6 +13,7 @@ type FieldParts = [[Dd; 2]; 6];
 
 mod gram;
 mod interferometer;
+mod temporal;
 pub use interferometer::{
     AngularSpectrumExposureApertureArm, AngularSpectrumApertureInterferenceLimits,
     PreparedAngularSpectrumApertureInterferometer,
@@ -35,8 +36,13 @@ pub use stress::{AngularSpectrumExposureApertureStress, AngularSpectrumExposureA
 
 /// Additional bounds for a joint aperture/shutter observation.
 ///
-/// Pair work is N² times the sum of F² across the mean and factor banks, where
-/// N is the modal grid size and each F counts that bank's distinct frequencies.
+/// The original pair work is N² times the sum of F² across the mean and factor
+/// banks, where N is the modal grid size and F counts distinct frequencies.
+/// Admitted narrow bands project fields into at most 17 positive temporal
+/// modes before spatial products. Their work is N*F*M + N²*M. The larger of
+/// these two bounds is reserved per selected bank; tight legacy budgets retain
+/// the original pair path. Additional projection storage is admitted before
+/// field reconstruction and includes the shared fixed preparation scratch.
 /// Reconstruction retains the original banks' admitted line-work bounds. Peak
 /// logical workspace conservatively includes the largest original bank query,
 /// retained DD fields, spatial caches and compensated result. Banks stream one at a time; no
@@ -216,7 +222,7 @@ where
         real |= f != 0 && !is_proper;
         proper |= f != 0 && is_proper;
     }
-    admit::<A>(
+    let (pair_work, workspace) = admit::<A>(
         anchor.grid(),
         frequency_pairs,
         bank_workspace,
@@ -224,6 +230,8 @@ where
         proper,
         limits,
     )?;
+    let mut projection_headroom = limits.maximum_mode_frequency_pairs - pair_work;
+    let workspace_headroom = limits.maximum_workspace_bytes - workspace;
     // Both caches use the ACTUAL admitted modal wavevectors, not differences
     // derived from a rounded fundamental that could shift a distant fringe.
     let spatial_real = real
@@ -237,6 +245,14 @@ where
         if bank.frequency_count() == 0 {
             continue;
         }
+        let projected_modes = temporal::admit(
+            window,
+            &bank.frequencies,
+            anchor.modes.len(),
+            is_proper,
+            &mut projection_headroom,
+            workspace_headroom,
+        )?;
         if is_proper {
             accumulate_bank(
                 bank,
@@ -246,6 +262,7 @@ where
                 side,
                 distance,
                 window,
+                projected_modes,
                 &mut sum,
                 cancelled,
             )?;
@@ -258,6 +275,7 @@ where
                 side,
                 distance,
                 window,
+                projected_modes,
                 &mut sum,
                 cancelled,
             )?;
@@ -275,7 +293,7 @@ fn admit<A: Accumulator>(
     real: bool,
     proper: bool,
     limits: AngularSpectrumExposureApertureLimits,
-) -> Result<(), AngularSpectrumError> {
+) -> Result<(usize, usize), AngularSpectrumError> {
     let n = grid
         .width
         .checked_mul(grid.height)
@@ -315,7 +333,7 @@ fn admit<A: Accumulator>(
             "aperture exposure exceeds its pair work or workspace budget",
         ));
     }
-    Ok(())
+    Ok((pairs, bytes))
 }
 
 trait Kernel: Copy {
@@ -326,6 +344,8 @@ trait Kernel: Copy {
     fn prepare_dd(window: HarmonicWindow, a: Dd, b: Dd) -> Result<Self, AngularSpectrumError>;
     fn compose(self, other: Self) -> Self;
     fn product(self, a: [Dd; 2], b: [Dd; 2]) -> Dd;
+    /// One positive temporal mode, retaining real even/odd spatial parity.
+    fn temporal_mode(mode: usize) -> Self;
 }
 
 // Each observation selects only its required contractions. The original
@@ -416,6 +436,14 @@ impl Kernel for RealKernel {
     fn product(self, a: [Dd; 2], b: [Dd; 2]) -> Dd {
         a[0] * b[0] * self.0[0] + a[1] * b[1] * self.0[1]
     }
+    fn temporal_mode(mode: usize) -> Self {
+        let weight = Dd::from_f64((2 * mode + 1) as f64);
+        if mode % 2 == 0 {
+            Self([weight, Dd::ZERO])
+        } else {
+            Self([Dd::ZERO, weight])
+        }
+    }
 }
 
 /// Complex mean exp(-i (a-b) coordinate), with the physical factor 1/2 applied
@@ -447,6 +475,9 @@ impl Kernel for ProperKernel {
     }
     fn product(self, [ar, ai]: [Dd; 2], [br, bi]: [Dd; 2]) -> Dd {
         ((ar * br + ai * bi) * self.0[0] - (ai * br - ar * bi) * self.0[1]) * Dd::from_f64(0.5)
+    }
+    fn temporal_mode(mode: usize) -> Self {
+        Self([Dd::from_f64((2 * mode + 1) as f64), Dd::ZERO])
     }
 }
 
@@ -555,12 +586,11 @@ fn accumulate_bank<K: Kernel, A: Accumulator>(
     side: ExposureSide,
     distance: f64,
     window: HarmonicWindow,
+    projected_modes: Option<usize>,
     sum: &mut A,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), AngularSpectrumError> {
     let f = bank.frequency_count();
-    // Shared harmonic kernels use negative-time phasors; EM uses positive time.
-    let temporal = pair_kernels(f, window, |i| -bank.frequencies[i], cancelled)?;
     let mut fields = Vec::new();
     fields
         .try_reserve_exact(f)
@@ -581,7 +611,21 @@ fn accumulate_bank<K: Kernel, A: Accumulator>(
         }
         fields.push(field);
     }
-    integrate(spatial, &temporal, &fields, sum, cancelled)
+    if let Some(modes) = projected_modes {
+        temporal::integrate(
+            spatial,
+            window,
+            &bank.frequencies,
+            &fields,
+            modes,
+            sum,
+            cancelled,
+        )
+    } else {
+        // Shared harmonic kernels use negative-time phasors; EM uses positive time.
+        let temporal = pair_kernels(f, window, |i| -bank.frequencies[i], cancelled)?;
+        integrate(spatial, &temporal, &fields, sum, cancelled)
+    }
 }
 
 fn integrate<K: Kernel, A: Accumulator>(
