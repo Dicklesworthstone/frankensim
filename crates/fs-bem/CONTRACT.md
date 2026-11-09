@@ -2869,6 +2869,86 @@ work to the radial integral of `omega*Im(1/K)*|p|²/2`. Native execution remains
 blocked; formatting and an independent scalar oracle check do not establish
 production numerical passes.
 
+### Finite rigid-frame porous bodies with physical transmission
+
+`helmholtz::transmission::porous::PorousFluidInterface` binds one original
+`PorousFluidLaw`, its borrowed `PoreFluid::{Fluid, RelaxingGas}` source, one
+outward closed `SpherePanels` surface, and one original lossless exterior
+`FluidAcoustics` owner at a shared angular frequency. The existing material
+owner evaluates JCA/JCAL dynamic density and bulk modulus, including its
+coupled molecular/pore thermal equation when requested. Source-band and
+coherent-state refusals propagate; no independent damping fit, ambient gas,
+or duplicate porous constitutive law is introduced. The sampled material
+response retains its original exp(+i omega t) convention; the BEM coefficients
+are conjugated once into exp(-i omega t).
+
+The original two-trace transmission assembly now admits the physical complex
+density ratio `eta=rho_eff/rho_out`. Its same real pressure-coordinate scale
+gives `q_out/k_ref=i*rho_out*c_out*v`, while the interior normal derivative is
+`q_in=i*omega*rho_eff*v`. A real-density specialization preserves the original
+operation graph. Analytic weak-contrast Green differences, equivalent-disc
+self terms, worker-dependent dense LU and payload admission remain shared
+with the original real and molecular transmission owners. The complete closed
+body includes all front/rear/rim interactions; it is not a fitted local
+surface impedance or infinite planar transfer coefficient. One factorization
+serves repeated coherent plane, volume, force and mixed exterior incidents.
+
+`PorousTransmissionField` retains total and outgoing physical traces,
+adaptive paired exterior/interior p/u, and signed outward interface work.
+Pressure and superficial normal velocity are continuous. The original
+porosity factors already occur in rho_eff and K_eff and are not applied to
+velocity a second time. The shared adaptive receiver contracts the boundary
+derivative with complex rho_eff and converts the pressure gradient with the
+same complex momentum. Every pressure/gradient quadrature discrepancy remains
+available; real momentum recovers the existing receiver values and errors
+exactly. Exterior total fields include the original analytic illumination,
+preserving coherent cross terms and reactive/angular velocity.
+
+`interior_absorption_adaptive_at` uses the same interior field and reports
+two direct nonnegative rates per total porous volume:
+`omega*Im(rho_eff)*sum(|u_j|^2)/2` and
+`omega*Im(1/K_eff)*|p|^2/2` [W/m3]. All three superficial-velocity components
+participate. Positive square-root coefficients are applied before squaring
+amplitudes. Bulk-compliance loss includes pore heat diffusion and any coupled
+molecular reservoirs; this is not a gas/solid heat partition or temperature
+feedback solve. Heat never comes from a rounded reflection coefficient or
+a redistributed boundary-power residual. The negative real outward work is
+the continuum absorbed power of the source-free body. Its numerical residual
+remains signed; its interval encloses panel-dot roundoff only.
+
+Both the exterior and complex interior wavelengths pass the original mesh
+gate. Dense matrices/factorization, source/panel/receiver products, adaptive
+kernel work, retained row bytes and cancellation retain existing limits.
+Receiver options exclude bounded output/geometry scratch, including the two
+local-heating vectors; their cardinality remains bounded by receiver admission.
+Finite sources must stay outside the body and receivers must pass the original
+closed-component winding and actual triangle-clearance checks. The scope is
+one homogeneous isotropic rigid-frame body: no frame/Biot displacement, pore-
+resolved field, mean transport, disconnected-body interaction, or experimental
+qualification is inferred. P0 centroid interactions and equivalent-disc self
+terms remain the original discretization. Wavelength admission alone does not
+certify physical-thickness or close-opposing-face resolution; those need
+geometry refinement.
+
+Four new regressions exercise complex-to-real operator reduction, exact real
+receiver parity, source retention and original coupled porous relaxation,
+source/region/resource/cancellation refusals, and coherent/phase-invariant
+heating. An independent spherical-Bessel/Hankel oracle compares its positive
+viscous and compressional volume integrals to inward work, then checks
+pressure, velocity, local heat and boundary-work convergence over 20/80/320
+panels for the original melamine card at 500 Hz. The declared final fixture
+bounds are 8% for paired fields, 15% for boundary work, and 16% for each local
+heat channel; these are not general accuracy certificates.
+
+The focused native Rust slice passed these four tests and both original
+adaptive complex Green-gradient/quadrature tests with the pinned July 6
+compiler. It compiled the actual new owner and shared assembly/receiver edits,
+original full fs-math and complex LU, original mesh/geometry/source kernels,
+and original gas/thermoviscous/JCA/JCAL numerical laws. Only construction of the
+declared synthetic relaxation fixture bypassed text parsing/species ownership;
+its original caloric and porous response laws remained intact. The complete
+workspace Cargo graph and unrelated transmission integrations were not run.
+
 ## Mutually reflecting penetrable fluid bodies
 
 `helmholtz::transmission::multiple::FluidBodies` extends the original fluid

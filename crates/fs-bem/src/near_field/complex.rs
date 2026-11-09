@@ -38,7 +38,7 @@ pub(crate) struct Fields {
 
 pub(crate) struct Prepared<'a> {
     surface: &'a SpherePanels,
-    rho_omega: f64,
+    rho_omega: C64,
     rows: Vec<Vec<Integral>>,
     kernel_evaluations: usize,
 }
@@ -54,17 +54,31 @@ impl<'a> Prepared<'a> {
         options: Options,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, HelmholtzError> {
+        Self::new_equivalent_fluid(geometry, wave, C64::from_re(rho_omega), options, cancelled)
+    }
+
+    /// The same receiver bank with the physical complex momentum density of
+    /// a passive equivalent fluid. Its exp(-iwt) convention requires Im(rho)>=0.
+    /// Real inertia follows exactly the original contractions and divisions.
+    pub(crate) fn new_equivalent_fluid(
+        geometry: &Geometry<'a>,
+        wave: DampedWaveNumber,
+        rho_omega: C64,
+        options: Options,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, HelmholtzError> {
         poll(cancelled)?;
         options.validate()?;
         if !finite(wave.k)
             || wave.k.re <= 0.0
             || wave.k.im < 0.0
             || wave.phase_origin_m != 0.0
-            || !rho_omega.is_finite()
-            || rho_omega <= 0.0
+            || !finite(rho_omega)
+            || rho_omega.re <= 0.0
+            || rho_omega.im < 0.0
         {
             return Err(bad(
-                "complex receiver needs outgoing unshifted k and real positive rho*omega",
+                "complex receiver needs outgoing unshifted k and finite passive rho*omega",
             ));
         }
         let surface = geometry.surface;
@@ -140,6 +154,11 @@ impl<'a> Prepared<'a> {
                 return Err(bad("nonfinite complex receiver trace"));
             }
         }
+        let normal_factor = if self.rho_omega.im == 0.0 {
+            C64::new(0.0, self.rho_omega.re)
+        } else {
+            C64::new(-self.rho_omega.im, self.rho_omega.re)
+        };
         let receivers = self.rows.len();
         let mut result = Fields {
             pressure_pa: Vec::with_capacity(receivers),
@@ -159,7 +178,7 @@ impl<'a> Prepared<'a> {
                 if panel % 128 == 0 {
                     poll(cancelled)?;
                 }
-                let q = v * C64::new(0.0, self.rho_omega);
+                let q = v * normal_factor;
                 p_sum.add(cell.d * p - cell.s * q);
                 p_error += p.abs() * cell.error_d + q.abs() * cell.error_s;
                 for axis in 0..3 {
@@ -197,7 +216,11 @@ impl<'a> Prepared<'a> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<VectorObservation, HelmholtzError> {
         let mut fields = self.evaluate_fields(pressure, actual_velocity, cancelled)?;
-        let inverse = C64::new(0.0, -1.0 / self.rho_omega);
+        let inverse = if self.rho_omega.im == 0.0 {
+            C64::new(0.0, -1.0 / self.rho_omega.re)
+        } else {
+            C64::new(0.0, -1.0) / self.rho_omega
+        };
         for (velocity, error) in fields
             .gradient_pa_per_m
             .iter_mut()
@@ -206,7 +229,11 @@ impl<'a> Prepared<'a> {
             poll(cancelled)?;
             for axis in 0..3 {
                 velocity[axis] = velocity[axis] * inverse;
-                error[axis] /= self.rho_omega;
+                if self.rho_omega.im == 0.0 {
+                    error[axis] /= self.rho_omega.re;
+                } else {
+                    error[axis] *= inverse.abs();
+                }
                 if !finite(velocity[axis]) || !error[axis].is_finite() {
                     return Err(bad("nonfinite complex receiver particle velocity"));
                 }

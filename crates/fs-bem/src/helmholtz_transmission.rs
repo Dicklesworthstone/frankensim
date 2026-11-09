@@ -31,6 +31,10 @@ use fs_la::eigen_complex::{
 use fs_material::MaterialError;
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 
+/// Finite rigid-frame porous bodies with original JCA/JCAL material sources.
+#[path = "helmholtz_transmission/porous.rs"]
+pub mod porous;
+
 /// Original molecular compression on both sides of a transmitting interface.
 #[path = "helmholtz_transmission/molecular.rs"]
 pub mod molecular;
@@ -597,16 +601,40 @@ fn assemble(
     )
 }
 
+// Preserve the original real-density arithmetic, while equivalent-fluid
+// porous interiors use their physical complex dynamic-density ratio. The
+// Green operator and real pressure-coordinate scale remain shared.
+trait DensityRatio: Copy {
+    fn multiply(self, value: C64) -> C64;
+    fn half_jump(self) -> C64;
+}
+impl DensityRatio for f64 {
+    fn multiply(self, value: C64) -> C64 {
+        value.scale(self)
+    }
+    fn half_jump(self) -> C64 {
+        C64::from_re(0.5 * self)
+    }
+}
+impl DensityRatio for C64 {
+    fn multiply(self, value: C64) -> C64 {
+        value * self
+    }
+    fn half_jump(self) -> C64 {
+        self.scale(0.5)
+    }
+}
+
 // The same two-trace operator with an explicit REAL pressure-coordinate
 // scaling. Molecular propagation may change k without changing rho*omega.
 #[allow(clippy::too_many_arguments)]
-fn assemble_wave<K: WaveNumber>(
+fn assemble_wave<K: WaveNumber, R: DensityRatio>(
     surface: &SpherePanels,
     k_o: K,
     k_i: K,
     k_reference: f64,
-    eta: f64,
-    delta_rho: f64,
+    eta: R,
+    delta_rho: R,
     gate: &CancelGate,
     kernel_difference: impl Fn(K, K, [f64; 3], [f64; 3], [f64; 3], [f64; 3]) -> [C64; 4],
     self_contrast: impl Fn(K, K, f64) -> (C64, C64, C64),
@@ -646,10 +674,14 @@ fn assemble_wave<K: WaveNumber>(
                 (s.scale(area), dp.scale(area), ds, dd, ddp, dn)
             };
             matrix[i * m + j] = dd;
-            matrix[i * m + n + j] = (-s.scale(delta_rho) - ds.scale(eta)).scale(k_reference);
+            matrix[i * m + n + j] = (-delta_rho.multiply(s) - eta.multiply(ds)).scale(k_reference);
             matrix[(n + i) * m + j] = dn.scale(1.0 / k_reference);
-            matrix[(n + i) * m + n + j] = -dp.scale(delta_rho) - ddp.scale(eta)
-                + C64::from_re(if i == j { 0.5 * delta_rho } else { 0.0 });
+            matrix[(n + i) * m + n + j] = -delta_rho.multiply(dp) - eta.multiply(ddp)
+                + if i == j {
+                    delta_rho.half_jump()
+                } else {
+                    C64::ZERO
+                };
         }
     }
     if matrix.iter().any(|&z| !finite(z)) {
