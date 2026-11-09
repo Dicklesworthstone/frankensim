@@ -1,4 +1,4 @@
-//! Turbulent heat and constituent enthalpy share one original gas endpoint.
+//! Source molecular/turbulent heat and constituent enthalpy share one gas endpoint.
 
 use super::adaptive::{TurbulentGasSpeciesAdvance, advance_prepared};
 use super::{
@@ -15,6 +15,7 @@ struct PreparedTurbulentHeat<'a> {
     domain: &'a VoxelDomain,
     heat_eddy_viscosity_m2_s: &'a [f64],
     turbulent_prandtl: f64,
+    include_molecular: bool,
 }
 
 fn invalid(reason: &'static str) -> SpeciesNetworkError {
@@ -31,6 +32,7 @@ impl<'a> PreparedTurbulentHeat<'a> {
         domain: &'a VoxelDomain,
         parcels: &BTreeMap<u64, ClosedGasParcel>,
         endpoints: &BTreeMap<u64, GasEnergySolve>,
+        include_molecular: bool,
         gate: &CancelGate,
     ) -> Result<Self, ChtError> {
         poll(gate)?;
@@ -75,6 +77,7 @@ impl<'a> PreparedTurbulentHeat<'a> {
             domain,
             heat_eddy_viscosity_m2_s: &flow.heat_eddy_viscosity_m2_s,
             turbulent_prandtl: flow.turbulent_prandtl,
+            include_molecular,
         })
     }
 
@@ -95,7 +98,7 @@ impl<'a> PreparedTurbulentHeat<'a> {
             check(cancelled)?;
             let state = parcel.state().state();
             let eddy = self.heat_eddy_viscosity_m2_s[id as usize];
-            let k = if eddy == 0.0 {
+            let turbulent = if eddy == 0.0 {
                 0.0
             } else {
                 let k = state.density * state.specific_heat_cp * (eddy / self.turbulent_prandtl);
@@ -105,6 +108,22 @@ impl<'a> PreparedTurbulentHeat<'a> {
                     ));
                 }
                 k
+            };
+            // Molecular and unresolved transport act in parallel INSIDE each
+            // material half-cell. Put their sum through the original series
+            // face resistance; summing two separately harmonic face laws would
+            // impose different fictitious interface temperatures.
+            let k = if self.include_molecular {
+                let molecular = state.thermal_conductivity;
+                let total = molecular + turbulent;
+                if !positive(molecular) || !positive(total) {
+                    return Err(invalid(
+                        "source molecular plus turbulent conductivity is unrepresentable",
+                    ));
+                }
+                total
+            } else {
+                turbulent
             };
             conductivity.insert(id, k);
         }
@@ -181,6 +200,8 @@ impl FvFlow {
     ///
     /// Solid, exterior and zero-conductivity faces are adiabatic for this
     /// component. Molecular conduction and wall heat exchange are not supplied.
+    /// [`Self::diffuse_turbulent_gas_transport_with_molecular_heat`] explicitly
+    /// includes the original gas conductivity in the same interior face law.
     /// This explicit snapshot is first order in time and has no unconditional
     /// stability or finite-step entropy claim. Use a resolved interval, or
     /// [`Self::advance_turbulent_gas_transport`] for source refresh, local error
@@ -198,6 +219,72 @@ impl FvFlow {
         controls: SpeciesNetworkSolve,
         gate: &CancelGate,
     ) -> Result<TurbulentGasSpeciesStep, ChtError> {
+        self.gas_transport_snapshot(
+            domain,
+            carrier,
+            parcels,
+            turbulent_schmidt,
+            duration_s,
+            endpoints,
+            controls,
+            false,
+            gate,
+        )
+    }
+
+    /// Combine original molecular conduction, turbulent heat and species.
+    ///
+    /// Every cell supplies `k = k_source(T,Y) + rho cp(T,Y) nu_t,heat / Pr_t`
+    /// from the SAME original material snapshot. The total cell conductivities
+    /// enter the graded half-cell series resistance before heat is sampled.
+    /// Conducting fluid faces therefore retain molecular heat transfer when
+    /// either thermal eddy viscosity vanishes. At zero SGS this recovers the
+    /// original source's molecular conduction, with variable caloric inversion.
+    ///
+    /// All heat and turbulent species streams enter one original gas endpoint;
+    /// partial species enthalpy is carried once. The heat ledger records the
+    /// total paired heat and must not be combined with another molecular solve
+    /// on the same interval. No molecular species diffusion, Soret/Dufour law,
+    /// wall heat transfer or external reservoir is supplied. This retains the
+    /// existing explicit first-order snapshot and its fixed source/work bounds.
+    #[allow(clippy::too_many_arguments)]
+    pub fn diffuse_turbulent_gas_transport_with_molecular_heat(
+        &self,
+        domain: &VoxelDomain,
+        carrier: &MaterialAdvectionStep,
+        parcels: &BTreeMap<u64, ClosedGasParcel>,
+        turbulent_schmidt: f64,
+        duration_s: f64,
+        endpoints: &BTreeMap<u64, GasEnergySolve>,
+        controls: SpeciesNetworkSolve,
+        gate: &CancelGate,
+    ) -> Result<TurbulentGasSpeciesStep, ChtError> {
+        self.gas_transport_snapshot(
+            domain,
+            carrier,
+            parcels,
+            turbulent_schmidt,
+            duration_s,
+            endpoints,
+            controls,
+            true,
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gas_transport_snapshot(
+        &self,
+        domain: &VoxelDomain,
+        carrier: &MaterialAdvectionStep,
+        parcels: &BTreeMap<u64, ClosedGasParcel>,
+        turbulent_schmidt: f64,
+        duration_s: f64,
+        endpoints: &BTreeMap<u64, GasEnergySolve>,
+        controls: SpeciesNetworkSolve,
+        include_molecular: bool,
+        gate: &CancelGate,
+    ) -> Result<TurbulentGasSpeciesStep, ChtError> {
         let prepared = PreparedTurbulentGasMixing::new(
             self,
             domain,
@@ -208,7 +295,8 @@ impl FvFlow {
             controls,
             gate,
         )?;
-        let heat = PreparedTurbulentHeat::new(self, domain, parcels, endpoints, gate)?;
+        let heat =
+            PreparedTurbulentHeat::new(self, domain, parcels, endpoints, include_molecular, gate)?;
         let mut cancelled = || gate.is_requested();
         let heat = heat
             .sample(parcels, duration_s, &mut cancelled)
@@ -253,6 +341,76 @@ impl FvFlow {
         temporal: SpeciesNetworkAdvanceControls,
         gate: &CancelGate,
     ) -> Result<TurbulentGasSpeciesAdvance, ChtError> {
+        self.gas_transport_window(
+            domain,
+            carrier,
+            parcels,
+            turbulent_schmidt,
+            duration_s,
+            endpoints,
+            physical,
+            temporal,
+            false,
+            gate,
+        )
+    }
+
+    /// Advance combined molecular/turbulent heat and turbulent species.
+    ///
+    /// This uses [`Self::diffuse_turbulent_gas_transport_with_molecular_heat`]'s
+    /// total half-cell conductivity in the existing adaptive material owner.
+    /// Every trial refreshes original source conductivity, density, heat
+    /// capacity, composition and donor partial enthalpy together; source
+    /// conductivity is never frozen at the beginning of the whole interval.
+    /// Only accepted fine steps enter the signed total-heat ledger. Original
+    /// source failures, thermal-bracket recovery, physical budgets and
+    /// cancellation keep [`Self::advance_turbulent_gas_transport`]'s semantics.
+    ///
+    /// Molecular conduction persists as the thermal SGS field vanishes.
+    /// Molecular species diffusion and external wall heat require their own
+    /// declared models. The held flow epoch and first-order locally controlled
+    /// integration have the same limits as the turbulent-only entry.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_turbulent_gas_transport_with_molecular_heat(
+        &self,
+        domain: &VoxelDomain,
+        carrier: &MaterialAdvectionStep,
+        parcels: &BTreeMap<u64, ClosedGasParcel>,
+        turbulent_schmidt: f64,
+        duration_s: f64,
+        endpoints: &BTreeMap<u64, GasEnergySolve>,
+        physical: GasTransportSolve,
+        temporal: SpeciesNetworkAdvanceControls,
+        gate: &CancelGate,
+    ) -> Result<TurbulentGasSpeciesAdvance, ChtError> {
+        self.gas_transport_window(
+            domain,
+            carrier,
+            parcels,
+            turbulent_schmidt,
+            duration_s,
+            endpoints,
+            physical,
+            temporal,
+            true,
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gas_transport_window(
+        &self,
+        domain: &VoxelDomain,
+        carrier: &MaterialAdvectionStep,
+        parcels: &BTreeMap<u64, ClosedGasParcel>,
+        turbulent_schmidt: f64,
+        duration_s: f64,
+        endpoints: &BTreeMap<u64, GasEnergySolve>,
+        physical: GasTransportSolve,
+        temporal: SpeciesNetworkAdvanceControls,
+        include_molecular: bool,
+        gate: &CancelGate,
+    ) -> Result<TurbulentGasSpeciesAdvance, ChtError> {
         let prepared = PreparedTurbulentGasMixing::new(
             self,
             domain,
@@ -263,7 +421,8 @@ impl FvFlow {
             physical.exchange,
             gate,
         )?;
-        let heat = PreparedTurbulentHeat::new(self, domain, parcels, endpoints, gate)?;
+        let heat =
+            PreparedTurbulentHeat::new(self, domain, parcels, endpoints, include_molecular, gate)?;
         advance_prepared(
             &prepared,
             parcels,

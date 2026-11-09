@@ -1794,3 +1794,29 @@ native recovery, single source reads, and late-refusal replay. Scoped pinned
 formatting and whitespace checks passed; native execution remains pending the
 pinned dependency build's resource requirement. This composition adds no
 turbulent-flow, unresolved roughness or wall-resolution validation claim.
+
+## Source molecular conductivity in turbulent gas transport
+
+`FvFlow::diffuse_turbulent_gas_transport_with_molecular_heat` and
+`advance_turbulent_gas_transport_with_molecular_heat` explicitly compose
+original gas molecular conduction with the existing turbulent heat/species
+update. Each current material state supplies
+`k_total = k_source + rho cp nu_t,heat / Pr_t`. These total cell conductivities
+enter the graded half-cell series resistance; independently harmonic molecular
+and eddy face conductances are not added. Molecular heat therefore persists
+when either cell's thermal eddy viscosity vanishes.
+
+Every adaptive probe refreshes original conductivity, density, heat capacity
+and donor partial enthalpy at its own state. One original caloric update receives
+all heat and species streams. Its accepted-only heat ledger reports total
+molecular-plus-turbulent paired heat; callers must not add another molecular
+conduction step for the same interval. Existing turbulent-only entries retain
+their original component semantics. This supplies neither molecular species
+diffusion nor Soret/Dufour, external-wall or reservoir transport.
+
+The original bounded first-order snapshot/adaptive owner, formation-reference
+invariance, fixed mass/energy/entropy allowances and cancellation behavior
+remain. Focused regressions cover the zero-SGS molecular limit, total half-cell
+resistance, source retention and adaptive accuracy. New numerical code/tests
+are scoped-formatted and statically reviewed; native execution remains blocked
+before the changed crate by the pinned dependency build's resource requirement.

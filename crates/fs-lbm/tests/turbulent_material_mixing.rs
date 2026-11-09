@@ -10,6 +10,9 @@ mod heat;
 #[path = "turbulent_material_mixing/adaptive.rs"]
 mod adaptive;
 
+#[path = "turbulent_material_mixing/molecular_heat.rs"]
+mod molecular_heat;
+
 use fs_exec::CancelGate;
 use fs_lbm::conjugate::{
     DensityProjectionControls, FlowFace, FlowField, FluidProperties, FvBoundary, FvFlow,
