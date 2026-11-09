@@ -67,6 +67,19 @@ rule). Layer: L2 (MORPH). Runtime deps: `std`, fs-geom.
   and refuses a rank-deficient projected search block instead of returning
   fewer than `k` modes. A returned mode count is not a convergence or
   spectral-completeness certificate.
+  `compute_with_fixed_vertices` adds homogeneous Dirichlet constraints on
+  selected original vertices: it solves the principal free-coordinate
+  stiffness/mass pencil, retaining diagonal stiffness from edges incident
+  on fixed vertices. Sparse row allocations are reused; eigensolver work
+  depends on the free count. Original components touching any fixed vertex
+  lose their constant mode, including when a fixed separator splits the free
+  graph. Untouched components retain independent constants. Full-layout modes
+  contain exact zeros at fixed vertices, so displacement, projection and
+  coefficient transfer preserve those positions. Constraint index order and
+  repetition do not affect the problem; out-of-range indices and requests
+  exceeding the free dimension panic. Residuals are recomputed on free rows;
+  fixed rows may carry nonzero reactions. An all-fixed surface admits `k=0`.
+  The unconstrained entry uses this same owner with an empty constraint set.
 
 - `elastic` module (plan Bet 6 / §9, bead wqd.27; [F], behind
   `elastic-shapes`, implies `manifold-harmonics`): elastic shape-space
@@ -164,9 +177,13 @@ lattices, and validity refusals.
 - The signed cotangent form preserves finite-element Dirichlet energy,
   including on obtuse triangles. It does not impose an intrinsic Delaunay
   triangulation or claim a discrete maximum principle. An open surface
-  uses natural Neumann boundary conditions; essential boundary constraints
-  require a separate constrained operator. Chordal meshes still approximate
-  a smooth surface's intrinsic geometry.
+  uses natural Neumann boundary conditions except at explicitly fixed
+  vertices, where `compute_with_fixed_vertices` enforces homogeneous
+  Dirichlet conditions. Constraints hold scalar normal displacement, not
+  slope, tangential motion, material stiffness or bending-plate mechanics;
+  these eigenvalues are shape frequencies in inverse-square geometry units,
+  not physical vibration frequencies. Chordal meshes still approximate a
+  smooth surface's intrinsic geometry.
 - Meshes only in this tier: the SDF narrow-band (implicit-surface)
   Laplacian variant the plan sketches is follow-up scope — the input is
   deliberately a plain (positions, triangles) surface so no VOLUMETRIC
@@ -177,13 +194,19 @@ lattices, and validity refusals.
   convergence guarantee at a fixed iteration count. Repeated eigenspaces
   do not give uniquely identifiable individual eigenvectors.
 - `transfer` assumes refresh-in-place (shared vertex set); remeshing
-  transfers need a resampling front end.
+  transfers need a resampling front end. Callers must reapply fixed vertices
+  when constructing a refreshed basis; transfer alone does not add constraints.
 
 `tests/harmonics.rs` adds focused G0/G3 checks: exact affine-field energy
 on an obtuse triangle (the former clamp produced 3.0 instead of 0.25),
 the complete analytic single-triangle spectrum, spectrum and residual
 unit scaling by `2^-300` and `2^300`, independent original-pencil residual
 recomputation, and distinct constant offsets on disconnected components.
+The constrained checks compare the exact single-triangle Dirichlet spectrum
+and reaction rows, preserve an untouched component's nullspace, exercise
+projection/refresh with fixed positions, and verify mixed Dirichlet/Neumann
+strip refinement, mass orthogonality and geometry-unit covariance through
+both dense and iterative solver routes.
 
 ## No-claim boundaries (elastic)
 

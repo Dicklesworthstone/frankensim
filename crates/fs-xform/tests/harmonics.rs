@@ -533,3 +533,150 @@ fn mh_009_disconnected_components_keep_independent_constant_modes() {
         assert!((p[2] - expected).abs() < 1e-12, "component offset was lost");
     }
 }
+
+#[test]
+fn mh_010_fixed_vertices_use_the_original_dirichlet_pencil() {
+    let surface = Surface {
+        positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        triangles: vec![[0, 1, 2]],
+    };
+    // Fix vertex 1. In coordinates (0,2), 6 L_ff = [[6,-3],[-3,3]],
+    // while M_ff = I/6. Removing the edge to the fixed vertex from the
+    // diagonal would instead invent an unphysical constant mode.
+    let basis = ManifoldBasis::compute_with_fixed_vertices(&surface, &[1], 2, 100);
+    let (rows, mass) = fs_xform::harmonics::cotan_laplacian(&surface);
+    for (j, expected) in [(9.0 - 45.0_f64.sqrt()) / 2.0, (9.0 + 45.0_f64.sqrt()) / 2.0]
+        .into_iter()
+        .enumerate()
+    {
+        assert!((basis.eigenvalues[j] - expected).abs() < 3e-14);
+        let psi = &basis.modes[j];
+        assert_eq!(psi[1], 0.0);
+        let mut residual_squared = 0.0;
+        for i in [0, 2] {
+            let lp: f64 = rows[i].iter().map(|&(c, w)| w * psi[c]).sum();
+            let residual = (lp - expected * mass[i] * psi[i]) / mass[i].sqrt();
+            residual_squared += residual * residual;
+        }
+        assert!((basis.residuals[j] - residual_squared.sqrt()).abs() < 3e-14);
+        assert!((basis.dirichlet_energy(j) - expected).abs() < 3e-14);
+        let reaction: f64 = rows[1].iter().map(|&(c, w)| w * psi[c]).sum();
+        assert!(
+            reaction.abs() > 0.1,
+            "fixed rows carry real constraint reactions"
+        );
+    }
+    let one = ManifoldBasis::compute_with_fixed_vertices(&surface, &[2, 1, 2], 1, 100);
+    assert!((one.eigenvalues[0] - 6.0).abs() < 1e-14);
+    assert_eq!(one.modes[0][1..], [0.0, 0.0]);
+    assert_eq!(
+        ManifoldBasis::compute_with_fixed_vertices(&surface, &[0, 1, 2], 0, 100).dof(),
+        0
+    );
+    assert!(
+        std::panic::catch_unwind(|| {
+            ManifoldBasis::compute_with_fixed_vertices(&surface, &[0, 1, 2], 1, 100)
+        })
+        .is_err()
+    );
+    assert!(
+        std::panic::catch_unwind(|| {
+            ManifoldBasis::compute_with_fixed_vertices(&surface, &[3], 0, 100)
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn mh_011_only_unfixed_components_keep_null_modes_and_transfer_preserves_pins() {
+    let surface = Surface {
+        positions: vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [4.0, 0.0, 0.0],
+            [5.0, 0.0, 0.0],
+            [4.0, 1.0, 0.0],
+        ],
+        triangles: vec![[0, 1, 2], [3, 4, 5]],
+    };
+    let basis = ManifoldBasis::compute_with_fixed_vertices(&surface, &[0], 5, 100);
+    for (&actual, expected) in basis.eigenvalues.iter().zip([0.0, 3.0, 3.0, 3.0, 9.0]) {
+        assert!((actual - expected).abs() < 3e-14);
+    }
+    assert_eq!(basis.modes[0][..3], [0.0; 3]);
+    assert!(basis.modes[0][3..].iter().all(|&x| x > 0.0));
+    let field = [7.0, 0.2, -0.1, 0.3, -0.4, 0.5];
+    let theta = basis.project(&field);
+    let displaced = basis.displace(&theta);
+    assert_eq!(displaced.positions[0], surface.positions[0]);
+    for i in 1..6 {
+        assert!((displaced.positions[i][2] - field[i]).abs() < 1e-14);
+    }
+    let refreshed = ManifoldBasis::compute_with_fixed_vertices(&displaced, &[0], 5, 100);
+    let transferred = transfer(&basis, &refreshed, &theta);
+    assert_eq!(
+        refreshed.displace(&transferred).positions[0],
+        surface.positions[0]
+    );
+    let plain = ManifoldBasis::compute(&surface, 6, 100);
+    let empty = ManifoldBasis::compute_with_fixed_vertices(&surface, &[], 6, 100);
+    assert_eq!(plain.eigenvalues, empty.eigenvalues);
+    assert_eq!(plain.modes, empty.modes);
+    assert_eq!(plain.residuals, empty.residuals);
+}
+
+#[test]
+fn mh_012_mixed_boundary_strip_converges_and_keeps_original_units() {
+    // Dirichlet at x=0,2 and natural Neumann at y=0,0.5. Its first
+    // three continuum eigenfunctions are sin(m*pi*x/2), constant in y.
+    let mut previous_error = f64::INFINITY;
+    for nx in [8, 16] {
+        let surface = strip(nx, 4, 0.0);
+        let fixed: Vec<usize> = (0..=4)
+            .flat_map(|j| [j * (nx + 1), j * (nx + 1) + nx])
+            .collect();
+        let basis = ManifoldBasis::compute_with_fixed_vertices(&surface, &fixed, 3, 600);
+        let (_, mass) = fs_xform::harmonics::cotan_laplacian(&surface);
+        let mut error = 0.0;
+        for j in 0..3 {
+            let exact = ((j + 1) as f64 * std::f64::consts::PI / 2.0).powi(2);
+            error += (basis.eigenvalues[j] / exact - 1.0).abs();
+            assert!(basis.residuals[j] < 1e-7, "residual {:?}", basis.residuals);
+            for &i in &fixed {
+                assert_eq!(basis.modes[j][i], 0.0);
+            }
+            for l in 0..3 {
+                let inner: f64 = basis.modes[j]
+                    .iter()
+                    .zip(&basis.modes[l])
+                    .zip(&mass)
+                    .map(|((a, b), m)| a * b * m)
+                    .sum();
+                assert!((inner - f64::from(j == l)).abs() < 1e-9);
+            }
+        }
+        assert!(
+            error < previous_error * 0.3,
+            "refinement error {error} vs {previous_error}"
+        );
+        previous_error = error;
+        // A real m->mm geometry change rescales lambda by length^-2 and
+        // the mass-normalized shape amplitudes by length^-1.
+        let mut millimeters = surface.clone();
+        for p in &mut millimeters.positions {
+            for x in p {
+                *x *= 1000.0;
+            }
+        }
+        let scaled = ManifoldBasis::compute_with_fixed_vertices(&millimeters, &fixed, 3, 600);
+        for j in 0..3 {
+            assert!((scaled.eigenvalues[j] * 1e6 / basis.eigenvalues[j] - 1.0).abs() < 1e-10);
+        }
+        assert_eq!(
+            basis.displace(&[0.1, -0.2, 0.3]).positions[fixed[0]],
+            surface.positions[fixed[0]]
+        );
+    }
+    assert!(previous_error < 0.05);
+}

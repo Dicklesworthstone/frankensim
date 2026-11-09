@@ -157,10 +157,10 @@ pub fn cotan_laplacian(surface: &Surface) -> (Vec<Vec<(usize, f64)>>, Vec<f64>) 
 
 /// One manifold-harmonic basis: k modes of `L ψ = λ M ψ`,
 /// M-orthonormal, deterministically signed and ordered. The first modes
-/// are EXPLICIT constants (λ = 0), one per connected component ordered
-/// by its lowest vertex index. For a connected surface, θ₀ is uniform
-/// normal offset. Independent inflation of disconnected components is
-/// retained rather than collapsed into a single global constant.
+/// are EXPLICIT constants (λ = 0), one per unconstrained connected component
+/// ordered by its lowest vertex index. For a connected surface without fixed
+/// vertices, θ₀ is uniform normal offset. A component touching a fixed vertex
+/// has no constant mode; every mode is exactly zero at all fixed vertices.
 #[derive(Debug, Clone)]
 pub struct ManifoldBasis {
     /// The surface the basis was computed on.
@@ -171,8 +171,9 @@ pub struct ManifoldBasis {
     pub modes: Vec<Vec<f64>>,
     /// Unit vertex normals frozen at computation time.
     pub normals: Vec<[f64; 3]>,
-    /// Recomputed whitened residuals `||M^-1/2 L ψ - λ M^1/2 ψ||₂`,
-    /// in inverse-square geometry units (G0 numerical evidence).
+    /// Recomputed whitened residuals `||M^-1/2 L ψ - λ M^1/2 ψ||₂`
+    /// on the free vertices, in inverse-square geometry units (G0 numerical
+    /// evidence). Fixed-vertex rows carry constraint reactions, not residuals.
     pub residuals: Vec<f64>,
 }
 
@@ -207,9 +208,56 @@ impl ManifoldBasis {
     /// still be unconverged; inspect their residuals.
     #[must_use]
     pub fn compute(surface: &Surface, k: usize, iters: usize) -> ManifoldBasis {
-        let (mut rows, mass) = cotan_laplacian(surface);
-        let n = mass.len();
-        assert!(k <= n, "harmonic count must not exceed the vertex count");
+        Self::compute_with_fixed_vertices(surface, &[], k, iters)
+    }
+
+    /// Compute shape harmonics with homogeneous Dirichlet constraints.
+    ///
+    /// Each listed vertex has exactly zero normal displacement in every mode,
+    /// so finite spectral coefficients preserve those mounting/interface
+    /// positions. Unlisted boundary vertices retain natural Neumann conditions.
+    /// Indices refer to the original surface; their order and repetition do not
+    /// matter. Empty constraints reproduce [`Self::compute`].
+    ///
+    /// The original finite-element stiffness and lumped mass are restricted to
+    /// free coordinates BEFORE solving. Couplings to fixed vertices remain in
+    /// the diagonal: deleting them or zeroing unconstrained eigenvectors after
+    /// solving would change the spectrum. Only components with no fixed vertex
+    /// retain their constant null mode. The shared dense/LOBPCG path works on
+    /// the smaller free-coordinate problem and expands modes with exact zeros.
+    /// Residuals use that original constrained pencil; fixed rows may have
+    /// nonzero reactions. This is a scalar shape basis, not a clamped bending
+    /// plate or a material-dependent vibration-frequency model.
+    ///
+    /// Projection, displacement and transfer use the full vertex layout.
+    /// Reapply the same constraints when computing a refreshed basis.
+    ///
+    /// # Panics
+    /// On an out-of-range fixed index, `k` exceeding the free-vertex count,
+    /// or the geometry and solver admission failures of [`Self::compute`].
+    #[must_use]
+    pub fn compute_with_fixed_vertices(
+        surface: &Surface,
+        fixed_vertices: &[usize],
+        k: usize,
+        iters: usize,
+    ) -> ManifoldBasis {
+        let (full_rows, full_mass) = cotan_laplacian(surface);
+        let vertex_count = full_mass.len();
+        let mut fixed = vec![false; vertex_count];
+        for &vertex in fixed_vertices {
+            assert!(
+                vertex < vertex_count,
+                "fixed harmonic vertex is out of range"
+            );
+            fixed[vertex] = true;
+        }
+        let free: Vec<usize> = (0..vertex_count).filter(|&i| !fixed[i]).collect();
+        let n = free.len();
+        assert!(
+            k <= n,
+            "harmonic count must not exceed the free-vertex count"
+        );
         if k == 0 {
             return ManifoldBasis {
                 surface: surface.clone(),
@@ -220,11 +268,44 @@ impl ManifoldBasis {
             };
         }
         assert!(
-            mass.iter().all(|m| m.is_finite() && *m > 0.0),
+            full_mass.iter().all(|m| m.is_finite() && *m > 0.0),
             "every harmonic vertex must have finite positive mass"
         );
+        let mut free_index = vec![usize::MAX; vertex_count];
+        for (i, &vertex) in free.iter().enumerate() {
+            free_index[vertex] = i;
+        }
+        // Identify nullspaces on the ORIGINAL surface. Removing a fixed
+        // separator can split the free graph, but neither side gains a new
+        // constant mode: both still see the retained Dirichlet stiffness.
+        let components: Vec<Vec<usize>> = connected_components(&full_rows)
+            .into_iter()
+            .filter(|vertices| vertices.iter().all(|&i| !fixed[i]))
+            .map(|vertices| vertices.into_iter().map(|i| free_index[i]).collect())
+            .collect();
+        let (mut rows, mass) = if n == vertex_count {
+            (full_rows, full_mass)
+        } else {
+            // Reuse each admitted sparse row's allocation while restricting
+            // columns, instead of retaining a second copy of the full matrix.
+            let rows: Vec<Vec<(usize, f64)>> = full_rows
+                .into_iter()
+                .enumerate()
+                .filter_map(|(i, mut row)| {
+                    if fixed[i] {
+                        return None;
+                    }
+                    row.retain(|&(j, _)| !fixed[j]);
+                    for (j, _) in &mut row {
+                        *j = free_index[*j];
+                    }
+                    Some(row)
+                })
+                .collect();
+            let mass: Vec<f64> = free.iter().map(|&i| full_mass[i]).collect();
+            (rows, mass)
+        };
         let sqm: Vec<f64> = mass.iter().map(|m| m.sqrt()).collect();
-        let components = connected_components(&rows);
         let component_mass: Vec<f64> = components
             .iter()
             .map(|vertices| vertices.iter().map(|&i| mass[i]).sum())
@@ -400,6 +481,20 @@ impl ManifoldBasis {
             k,
             "harmonic search block lost rank after nullspace projection; increase iterations"
         );
+        let modes = if n == vertex_count {
+            modes
+        } else {
+            modes
+                .into_iter()
+                .map(|mode| {
+                    let mut full = vec![0.0; vertex_count];
+                    for (&vertex, value) in free.iter().zip(mode) {
+                        full[vertex] = value;
+                    }
+                    full
+                })
+                .collect()
+        };
         ManifoldBasis {
             surface: surface.clone(),
             eigenvalues,
