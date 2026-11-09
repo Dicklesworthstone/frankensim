@@ -4022,3 +4022,41 @@ shared caloric and conductivity query-budget exhaustion. A native regression
 also checks immediate source-budget refusal inside a Newton trial at the
 timestep floor. These tests are syntax-parsed but not natively executed in
 this environment.
+
+## Spatial and time-updated native wall velocity
+
+`OpenBoundaryGrid3::set_wall_velocity_profile` resolves prescribed tangential
+velocity at each actual halfway-link point `p + 1/2 - e_q/2`, including diagonal
+links and wall/open intersections. Both D3Q19 and D3Q27 retain the original
+moving reflection; every reflected population, relative wall impulse, torque
+and work uses that same link sample. Rheology and SGS use the corresponding
+straight-normal link at their halfway-wall gradient sample. Spatial-force and
+implicit porous owners expose the same controls without detaching force or
+drag history. Their scalar/tensor thermal compositions retain physical opening
+and closing velocities and the original moving finite-wall refusal.
+
+Sampling occurs only during explicit control updates, in canonical plane-cell
+and native-direction order. Two reused face buffers hold Q velocity vectors
+per plane cell; inactive solid/non-crossing slots are zero. The caller's byte
+cap covers both buffers of all attached wall profiles. Stepping allocates no
+profile storage and invokes no source callback. Caller owns units, temporal
+sampling and spatial resolution; geometry, interior voxels and skeleton motion
+are not changed by a prescribed exterior drive.
+
+Tangency, native collision/grid Mach limits, shared-corner compatibility and
+zero moving mass source at each fluid cell must all hold. Tangential fields
+with incompatible discrete surface divergence refuse without correction or
+reservoir compensation. Normal/swept wall motion still requires a geometry
+owner. A failed source query, storage check, physical admission or cancellation
+retains the previous complete trace and accepted fluid state. Clearing a trace
+re-admits its uniform fallback with the remaining walls. Uniform rebinding on
+an actively profiled face refuses; unrelated controls preserve all profiles.
+An accepted control update remains held if a subsequent fluid step refuses.
+
+Focused regression definitions cover exact uniform-trace/native parity and
+analytic Couette flow, independent spatial first-step velocity and work,
+time-updated original closed-wall parity, wall/open link ownership with pooled
+replay, physical rheology gradients, active implicit-drag/thermal endpoint
+velocities, finite-wall refusal and atomic source/control rollback. Mechanical
+wall work remains separate from prescribed sensible heat; this extension adds
+no total-energy, high-Mach or moving-geometry accuracy claim.

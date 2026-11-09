@@ -12,6 +12,9 @@ const SEED: u64 = 0x0B03_D327;
 #[path = "lattice3_open_boundaries/moving_walls.rs"]
 mod moving_walls;
 
+#[path = "lattice3_open_boundaries/wall_profiles.rs"]
+mod wall_profiles;
+
 #[path = "lattice3_open_boundaries/velocity_profiles.rs"]
 mod velocity_profiles;
 

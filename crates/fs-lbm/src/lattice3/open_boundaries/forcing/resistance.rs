@@ -5,7 +5,8 @@
 //! accounting publish together. Coefficients and skeleton velocity are held.
 
 use super::*;
-use super::super::{EndpointSource3, EndpointWorkspace3, FaceBoundary3, StepData, coordinates};
+use super::super::{EndpointSource3, EndpointWorkspace3, FaceBoundary3, StepData, coordinates,
+    WallVelocityProfileReport3, wall_profile_values};
 use crate::d3q19::BoundaryStepError3;
 use crate::lattice3::moving_walls::WallExchange;
 use crate::lattice3::sources::resistance::{SourceEndpoint3, admit_drag, held_exchange};
@@ -303,6 +304,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ResistanceOpenGrid3<L, Q> {
             }
         }
         let mut walls = WallExchange::default();
+        let wall_profiles = wall_profile_values(&self.flow.inner.wall_profiles);
         for (index, link) in self.walls.links.iter().enumerate() {
             if index.is_multiple_of(64) {
                 poll()?;
@@ -311,8 +313,9 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ResistanceOpenGrid3<L, Q> {
             let velocity = if link.solid.is_some() {
                 [0.0; 3]
             } else {
-                self.flow.inner.plan.exterior_wall_velocity(
-                    coordinates(link.cell, grid.dims), L::E[q],
+                self.flow.inner.plan.exterior_wall_velocity::<L::Error, Q>(
+                    &wall_profiles,
+                    coordinates(link.cell, grid.dims), L::E[q], q,
                 )?.ok_or(GridError3::Input("resistance wall probe lost wall ownership"))?
             };
             walls.add(
@@ -338,6 +341,25 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> ResistanceOpenGrid3<L, Q> {
         gate: &CancelGate,
     ) -> Result<(), GridError3<L::Error>> {
         self.flow.rebind_open_boundaries(boundaries, gate)
+    }
+
+    /// Drive the same actual halfway-wall links used by porous streaming and
+    /// its complete wall/skeleton/open receipt. Accepted force history is held.
+    pub fn set_wall_velocity_profile(
+        &mut self, face: Face3, maximum_storage_bytes: usize, gate: &CancelGate,
+        sample: impl FnMut([f64; 3]) -> Result<[f64; 3], GridError3<L::Error>>,
+    ) -> Result<WallVelocityProfileReport3, GridError3<L::Error>> {
+        self.flow.set_wall_velocity_profile(face, maximum_storage_bytes, gate, sample)
+    }
+
+    pub fn clear_wall_velocity_profile(
+        &mut self, face: Face3, gate: &CancelGate,
+    ) -> Result<(), GridError3<L::Error>> {
+        self.flow.clear_wall_velocity_profile(face, gate)
+    }
+
+    pub fn wall_velocity_profile(&self, face: Face3) -> Option<&[[f64; 3]]> {
+        self.flow.wall_velocity_profile(face)
     }
 
     /// Resolve a spatial/time-updated inlet before the next native interval.

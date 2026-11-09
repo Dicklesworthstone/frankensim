@@ -10,9 +10,10 @@
 //! Open faces occupy one Cartesian axis. At wall/open seams, only open-owned
 //! incoming rows are replaced: prescribed full moments apply to face interiors,
 //! not to the intersection of incompatible wall and reservoir conditions.
-//! Pressure and velocity profiles are held on their native face planes;
-//! geometry and the uniform body force remain fixed. Tangential wall motion uses the
-//! native moving reflection and a separate wall impulse/work account.
+//! Pressure and velocity profiles are held on their native face planes.
+//! Tangential wall traces are resolved at actual halfway-link positions;
+//! geometry remains fixed. Native moving reflection and its separate wall
+//! impulse/work account use those same held link velocities.
 //! An optional linear isothermal characteristic outlet leaves pressure and
 //! normal velocity free to carry the outgoing acoustic wave together.
 
@@ -34,6 +35,7 @@ mod endpoint;
 pub mod forcing;
 pub use characteristic::CharacteristicOutlet3;
 mod moving_walls;
+pub use moving_walls::WallVelocityProfileReport3;
 mod pressure;
 mod rheology;
 /// Explicit local turbulent momentum and heat on original reservoir geometry.
@@ -44,6 +46,7 @@ mod velocity;
 
 use characteristic::PreparedOutlet3;
 use endpoint::{EndpointSource3, EndpointWorkspace3};
+use moving_walls::{WallProfileView3, WallVelocityProfile3, wall_profile_values};
 use pressure::PressureProfile3;
 use velocity::VelocityProfile3;
 
@@ -54,6 +57,7 @@ pub struct OpenBoundaryGrid3<L: EquilibriumLattice3<Q>, const Q: usize> {
     plan: FacePlan,
     pressure_profiles: [Option<PressureProfile3>; 6],
     velocity_profiles: [Option<VelocityProfile3>; 6],
+    wall_profiles: [Option<WallVelocityProfile3>; 6],
     characteristic_outlets: [Option<PreparedOutlet3>; 6],
     wall_exchange: Option<super::moving_walls::MovingWallMomentum3>,
     pending_wall_exchange: Option<super::moving_walls::MovingWallMomentum3>,
@@ -80,7 +84,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         boundaries: BoundarySpec3,
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<Self, GridError3<L::Error>> {
-        let plan = FacePlan::admit(&grid, boundaries, poll)?;
+        let plan = FacePlan::admit(&grid, boundaries, [None; 6], poll)?;
         for (index, cell) in plan.cells().enumerate() {
             if index % 64 == 0 {
                 poll()?;
@@ -101,6 +105,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
             plan,
             pressure_profiles: core::array::from_fn(|_| None),
             velocity_profiles: core::array::from_fn(|_| None),
+            wall_profiles: core::array::from_fn(|_| None),
             characteristic_outlets: [None; 6],
             wall_exchange: None,
             pending_wall_exchange: None,
@@ -135,7 +140,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
     /// Atomically replace values on existing velocity/pressure/wall faces.
     /// Changing kinds or periodicity requires a different owner;
     /// this update performs no streaming, impulse or hidden population reset.
-    /// Spatial pressure/velocity profiles remain authoritative: clear a profile
+    /// Spatial pressure/velocity/wall profiles remain authoritative: clear a profile
     /// before changing its held uniform fallback, or update the profile itself.
     /// Unrelated wall/reservoir updates preserve every attached profile.
     pub fn rebind_open_boundaries(
@@ -187,6 +192,13 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
                 ));
             }
             if self.plan.boundaries.face(face) != boundaries.face(face)
+                && self.wall_profiles[face as usize].is_some()
+            {
+                return Err(GridError3::Input(
+                    "clear or update the wall profile before changing its uniform target",
+                ));
+            }
+            if self.plan.boundaries.face(face) != boundaries.face(face)
                 && self.characteristic_outlets[face as usize].is_some()
             {
                 return Err(GridError3::Input(
@@ -194,7 +206,9 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
                 ));
             }
         }
-        let candidate = FacePlan::admit(&self.grid, boundaries, poll)?;
+        let candidate = FacePlan::admit(
+            &self.grid, boundaries, wall_profile_values(&self.wall_profiles), poll,
+        )?;
         poll()?;
         Ok(candidate)
     }
@@ -325,6 +339,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
             plan,
             pressure_profiles: &self.pressure_profiles,
             velocity_profiles: &self.velocity_profiles,
+            wall_profiles: wall_profile_values(&self.wall_profiles),
             characteristic_outlets: &self.characteristic_outlets,
             endpoint,
         };
@@ -438,6 +453,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
             plan,
             pressure_profiles: &self.pressure_profiles,
             velocity_profiles: &self.velocity_profiles,
+            wall_profiles: wall_profile_values(&self.wall_profiles),
             characteristic_outlets: &self.characteristic_outlets,
             endpoint,
         };
@@ -528,6 +544,7 @@ impl FacePlan {
     fn admit<L: EquilibriumLattice3<Q>, const Q: usize>(
         grid: &Grid3<L, Q>,
         boundaries: BoundarySpec3,
+        wall_profiles: WallProfileView3<'_>,
         poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<Self, GridError3<L::Error>> {
         boundaries.try_validate().map_err(|error| match error {
@@ -557,7 +574,17 @@ impl FacePlan {
                         0,
                         grid.budget.maximum_mach,
                     )?;
-                    moving |= velocity != [0.0; 3];
+                    if let Some(values) = wall_profiles[face as usize] {
+                        for chunk in values.chunks(64) {
+                            poll()?;
+                            if chunk.iter().any(|&value| value != [0.0; 3]) {
+                                moving = true;
+                                break;
+                            }
+                        }
+                    } else {
+                        moving |= velocity != [0.0; 3];
+                    }
                 }
                 FaceBoundary3::Velocity { velocity } => {
                     initial::admit_velocity::<L, Q>(
@@ -583,7 +610,7 @@ impl FacePlan {
             stride: axis.map_or(1, |a| grid.dims[..a].iter().product()),
             moving,
         };
-        plan.admit_wall_motion(grid, poll)?;
+        plan.admit_wall_motion(grid, wall_profiles, poll)?;
         Ok(plan)
     }
 
@@ -675,6 +702,7 @@ struct OpenStep<'a, L: EquilibriumLattice3<Q>, const Q: usize> {
     plan: FacePlan,
     pressure_profiles: &'a [Option<PressureProfile3>; 6],
     velocity_profiles: &'a [Option<VelocityProfile3>; 6],
+    wall_profiles: WallProfileView3<'a>,
     characteristic_outlets: &'a [Option<PreparedOutlet3>; 6],
     endpoint: Option<EndpointSource3<'a>>,
 }

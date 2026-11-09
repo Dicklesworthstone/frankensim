@@ -123,6 +123,63 @@ fn moving_open_channel_recovers_physical_wall_shear_without_frame_offset() {
     });
 }
 
+fn spatial_wall_gradient<L: EquilibriumLattice3<Q>, const Q: usize>(collision: L::Collision) {
+    with_cx(|cx| {
+        let dims = [5, 6, 5];
+        let slope = 0.002;
+        let velocity = |p: [usize; 3]| {
+            [
+                slope * (p[1] as f64 + 0.5) * (p[2] as f64 + 0.5) / dims[1] as f64,
+                0.0,
+                0.0,
+            ]
+        };
+        let mut faces = [FaceBoundary3::Periodic; 6];
+        faces[0] = FaceBoundary3::Velocity {
+            velocity: [0.01, 0.0, 0.0],
+        };
+        faces[1] = FaceBoundary3::Pressure { density: 1.3 };
+        faces[2] = FaceBoundary3::stationary_wall();
+        faces[3] = FaceBoundary3::stationary_wall();
+        let mut flow = make::<L, Q>(cx, dims, collision, [0.0; 3], faces, |_| false, velocity);
+        flow.set_wall_velocity_profile(
+            Face3::YMax,
+            1024 * 1024,
+            &CancelGate::new_clock_free(),
+            |point| Ok([slope * point[2], 0.0, 0.0]),
+        )
+        .unwrap();
+        let field: Vec<_> = (0..flow.populations().len())
+            .map(|cell| velocity(coordinates(cell, dims)))
+            .collect();
+        for z in 1..dims[2] - 1 {
+            for y in 0..dims[1] {
+                for x in 0..dims[0] {
+                    let cell = (z * dims[1] + y) * dims[0] + x;
+                    let gradient = flow.rheology_gradient(cell, &field);
+                    near(
+                        gradient[0][1],
+                        slope * (z as f64 + 0.5) / dims[1] as f64,
+                        3e-17,
+                    );
+                    near(
+                        gradient[0][2],
+                        slope * (y as f64 + 0.5) / dims[1] as f64,
+                        3e-17,
+                    );
+                    near(gradient[0][0], 0.0, 3e-17);
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn spatial_wall_trace_uses_the_actual_normal_link_for_rheology_and_sgs() {
+    spatial_wall_gradient::<D3q19, 19>(CollisionModel3::Bgk { tau: 0.9 });
+    spatial_wall_gradient::<D3q27, 27>(bgk());
+}
+
 fn uniform_source<L: EquilibriumLattice3<Q> + ViscousLattice3<Q>, const Q: usize>(
     collision: L::Collision,
 ) {

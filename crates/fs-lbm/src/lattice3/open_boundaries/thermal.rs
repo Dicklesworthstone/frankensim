@@ -235,7 +235,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         thermal: ThermalOpenBoundaries3,
     ) -> Result<(), OpenThermalError3<L::Error>> {
         for face in Face3::ALL {
-            if matches!(self.plan.boundaries.face(face), FaceBoundary3::Wall { velocity } if velocity != [0.0; 3])
+            if self.wall_face_moves(face)
                 && matches!(
                     thermal.faces[face as usize],
                     ThermalOpenFace3::Wall(crate::thermal::boundary::ThermalWall::FiniteSolid(_))

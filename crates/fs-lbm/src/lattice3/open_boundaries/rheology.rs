@@ -22,7 +22,9 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         let mut gradient =
             self.grid
                 .velocity_gradient_with_walls(cell, velocity, |cell, axis, upper| {
-                    self.plan.gradient_wall_velocity(cell, axis, upper)
+                    self.plan.gradient_wall_velocity::<L, Q>(
+                        &self.wall_profiles, cell, axis, upper,
+                    )
                 });
         let Some((face, first)) = self.plan.locate(cell) else {
             return gradient;
