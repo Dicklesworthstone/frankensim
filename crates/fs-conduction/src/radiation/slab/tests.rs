@@ -1,6 +1,7 @@
 use super::*;
 
 mod beam;
+mod depth;
 mod diffuse;
 mod heterogeneous;
 

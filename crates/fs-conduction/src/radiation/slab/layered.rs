@@ -29,6 +29,7 @@ pub(super) fn rule(
     correction: &mut [f64],
     cancelled: &mut impl FnMut() -> bool,
     evaluations: &mut usize,
+    interval: Option<(usize, [f64; 2])>,
 ) -> Result<(), ConductionError> {
     output.fill(0.0);
     correction.fill(0.0);
@@ -87,18 +88,49 @@ pub(super) fn rule(
                         };
                     }
                 }
-                accumulate(
-                    &t[..n],
-                    &a[..n],
-                    &r[..=n],
-                    &e[..=n],
-                    lower == 0.0,
-                    true,
-                    0.5 * q,
-                    output,
-                    correction,
-                    None,
-                );
+                if let Some((target, [start, end])) = interval {
+                    if indices[target + 1] > lower {
+                        let material = &layers[target];
+                        let path = |distance| {
+                            super::beam::optical_path(
+                                material.absorption_m_inv(),
+                                distance,
+                                mu[target + 1],
+                            )
+                        };
+                        let loss = decayed_fraction(path(end - start));
+                        let attenuation = [
+                            remaining_fraction(path(start)),
+                            remaining_fraction(path(material.thickness_m() - end)),
+                        ];
+                        accumulate_depth(
+                            &t[..n],
+                            &a[..n],
+                            &r[..=n],
+                            &e[..=n],
+                            lower == 0.0,
+                            target,
+                            loss,
+                            attenuation,
+                            0.5 * q,
+                            output,
+                            correction,
+                        );
+                    }
+                } else {
+                    accumulate(
+                        &t[..n],
+                        &a[..n],
+                        &r[..=n],
+                        &e[..=n],
+                        lower == 0.0,
+                        true,
+                        0.5 * q,
+                        output,
+                        correction,
+                        None,
+                    );
+                }
             }
             *evaluations += 1;
         }
@@ -119,19 +151,16 @@ fn joined(r: f64, e: f64, t: f64, a: f64, back: f64, deficit: f64) -> (f64, f64,
     (r + e * (t * t * back * crossing), loss * crossing, crossing)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn accumulate(
-    t: &[f64],
-    a: &[f64],
-    r: &[f64],
-    e: &[f64],
-    exterior: bool,
-    thermal_exchange: bool,
-    q: f64,
-    output: &mut [f64],
-    correction: &mut [f64],
-    mut beam_fields: Option<&mut [[[f64; 2]; 2]]>,
-) {
+struct Returns {
+    left: [f64; MAX_SLAB_LAYERS],
+    right: [f64; MAX_SLAB_LAYERS],
+    left_deficit: [f64; MAX_SLAB_LAYERS],
+    right_deficit: [f64; MAX_SLAB_LAYERS],
+    cross_left: [f64; MAX_SLAB_LAYERS],
+    cross_right: [f64; MAX_SLAB_LAYERS],
+}
+
+fn returns(t: &[f64], a: &[f64], r: &[f64], e: &[f64]) -> Returns {
     let n = a.len();
     let mut left = [0.0; MAX_SLAB_LAYERS];
     let mut right = [0.0; MAX_SLAB_LAYERS];
@@ -163,6 +192,38 @@ pub(super) fn accumulate(
             right_deficit[i + 1],
         );
     }
+    Returns {
+        left,
+        right,
+        left_deficit,
+        right_deficit,
+        cross_left,
+        cross_right,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn accumulate(
+    t: &[f64],
+    a: &[f64],
+    r: &[f64],
+    e: &[f64],
+    exterior: bool,
+    thermal_exchange: bool,
+    q: f64,
+    output: &mut [f64],
+    correction: &mut [f64],
+    mut beam_fields: Option<&mut [[[f64; 2]; 2]]>,
+) {
+    let n = a.len();
+    let Returns {
+        left,
+        right,
+        left_deficit,
+        right_deficit,
+        cross_left,
+        cross_right,
+    } = returns(t, a, r, e);
     if exterior {
         let (front, _, mut field) = joined(r[0], e[0], t[0], a[0], right[0], right_deficit[0]);
         let front_channel = output.len() - 2;
@@ -234,5 +295,99 @@ pub(super) fn accumulate(
             add(&mut output[channel], &mut correction[channel], q * exchange);
             field *= t[j] * cross_right[j];
         }
+    }
+}
+
+// Couplings into an interval from the two exterior faces and every other
+// original layer. Source-layer self-return is eliminated by detailed balance
+// in the caller's difference form, not by subtracting large emission terms.
+#[allow(clippy::too_many_arguments)]
+fn accumulate_depth(
+    t: &[f64],
+    a: &[f64],
+    r: &[f64],
+    e: &[f64],
+    exterior: bool,
+    target: usize,
+    loss: f64,
+    attenuation: [f64; 2],
+    q: f64,
+    output: &mut [f64],
+    correction: &mut [f64],
+) {
+    if loss == 0.0 {
+        return;
+    }
+    let n = a.len();
+    let Returns {
+        left,
+        right,
+        left_deficit,
+        right_deficit,
+        cross_left,
+        cross_right,
+    } = returns(t, a, r, e);
+    let from_front = loss * (attenuation[0] + t[target] * right[target] * attenuation[1]);
+    let from_back = loss * (attenuation[1] + t[target] * left[target] * attenuation[0]);
+    if exterior {
+        let (_, _, mut field) = joined(r[0], e[0], t[0], a[0], right[0], right_deficit[0]);
+        for i in 0..target {
+            field *= t[i];
+            field *= cross_right[i];
+        }
+        add(&mut output[0], &mut correction[0], q * from_front * field);
+        let (_, _, mut field) = joined(
+            r[n],
+            e[n],
+            t[n - 1],
+            a[n - 1],
+            left[n - 1],
+            left_deficit[n - 1],
+        );
+        for i in (target + 1..n).rev() {
+            field *= t[i];
+            field *= cross_left[i];
+        }
+        add(&mut output[1], &mut correction[1], q * from_back * field);
+    }
+    let mut path = 1.0;
+    for source in (0..target).rev() {
+        path *= cross_right[source];
+        if path == 0.0 {
+            break;
+        }
+        if a[source] > 0.0 {
+            let denominator = a[source] * (1.0 + t[source])
+                + t[source]
+                    * t[source]
+                    * (left_deficit[source] + left[source] * right_deficit[source]);
+            let emitted = (a[source] / denominator) * (1.0 + t[source] * left[source]);
+            add(
+                &mut output[2 + source],
+                &mut correction[2 + source],
+                q * emitted * path * from_front,
+            );
+        }
+        path *= t[source];
+    }
+    let mut path = 1.0;
+    for source in target + 1..n {
+        path *= cross_left[source];
+        if path == 0.0 {
+            break;
+        }
+        if a[source] > 0.0 {
+            let denominator = a[source] * (1.0 + t[source])
+                + t[source]
+                    * t[source]
+                    * (left_deficit[source] + left[source] * right_deficit[source]);
+            let emitted = (a[source] / denominator) * (1.0 + t[source] * right[source]);
+            add(
+                &mut output[2 + source],
+                &mut correction[2 + source],
+                q * emitted * path * from_back,
+            );
+        }
+        path *= t[source];
     }
 }

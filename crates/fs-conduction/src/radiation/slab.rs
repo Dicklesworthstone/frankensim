@@ -37,10 +37,12 @@ use super::spectral::planck::{GL8, GL16};
 use crate::ConductionError;
 
 mod beam;
+mod depth;
 mod diffuse;
 mod layered;
 mod refraction;
 pub use beam::{SlabBeamExchange, SlabBeamResponse};
+pub use depth::{SlabDepthReport, SlabDepthResponse};
 pub use diffuse::{SlabDiffuseDepthReport, SlabDiffuseDepthResponse};
 
 /// Maximum physical layers in one prepared slab.
@@ -340,6 +342,7 @@ impl AbsorbingSlab {
                         &mut rule_correction,
                         &mut cancelled,
                         &mut report.angular_evaluations,
+                        None,
                     )?;
                 } else if refractive_index == 1.0 {
                     rule(

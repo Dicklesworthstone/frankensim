@@ -455,7 +455,7 @@ fn interval_absorptance(
 // Use original finite coefficients, not possibly infinite total optical depth
 // times a depth fraction. Divide the smaller factor first to retain weak
 // grazing attenuation. Overflow is an opaque optical path, not a material input.
-fn optical_path(absorption: f64, distance: f64, mu: f64) -> f64 {
+pub(super) fn optical_path(absorption: f64, distance: f64, mu: f64) -> f64 {
     if absorption == 0.0 || distance == 0.0 {
         0.0
     } else {

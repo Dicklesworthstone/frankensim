@@ -5631,6 +5631,25 @@ thermal emission or interlayer exchange. Regressions use independent E3 interval
 oracles, original whole-layer heat, additive spatial cells, refractive reversal,
 weak narrow and shallow opaque cells, cancellation and exhausted work controls.
 
+`AbsorbingSlab::depth_response` prepares net heating of an original depth
+interval from external diffuse irradiation and all original thermal layers.
+`SlabDepthResponse` retains positive face and interlayer couplings, integrating
+the existing conserved-Snell elimination across every relevant critical-index
+band. The common d(p²) measure includes n² thermal radiance and trapped channels.
+Original finite Beer interval factors preserve weak losses without inserting
+physical layers or interfaces.
+
+`net_flux` applies each coupling to the incident/source exitance minus target
+exitance. Detailed balance cancels self-emission and reabsorption analytically;
+uniform equilibrium is exactly zero, including large common backgrounds.
+Finite signed deviations from one common background are supported. Each
+original layer keeps its uniform temperature and material scope. Applications
+cost O(N), without allocation, angular integration or repeated ray solves.
+Bounded preparation retains work counts and embedded coefficient discrepancies,
+not certified error bounds. Tests cover E3 thermal-cell integrals, full-layer
+correspondence, interval sums, reciprocal cell couplings, port balance, opaque
+n² exchange, weak trapped absorption and refusal paths.
+
 G0/G1/G3 tests compare transparent two-interface reflection, opaque n² exchange,
 independent polarized boundary-return ray sweeps, isothermal subdivision,
 reversal, and equilibrium. The index source must support the layer temperature
