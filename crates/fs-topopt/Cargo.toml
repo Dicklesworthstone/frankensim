@@ -32,6 +32,9 @@ fs-spectral = { path = "../fs-spectral" }
 
 [dev-dependencies]
 fs-rand = { path = "../fs-rand" }
+fs-matdb = { path = "../fs-matdb" }
+fs-evidence = { path = "../fs-evidence" }
+fs-qty = { path = "../fs-qty" }
 
 [features]
 # Live-IR structural Newton design; only existing workspace crates are used.
@@ -228,4 +231,8 @@ required-features = ["cutfem-marquee"]
 
 [[example]]
 name = "adaptive_material_modal_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "thermoelastic_sdf3"
 required-features = ["cutfem-marquee"]

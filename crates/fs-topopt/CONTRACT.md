@@ -1226,3 +1226,47 @@ v1 codec refuses thermal checkpoints instead of discarding their context.
 `eigenstrain_stress_design_sdf3` adds five regression sources for actual volume
 updates, positive thermal gradients, segmented restart, changed physical inputs,
 and interrupted trials preserving the accepted design and matching fields.
+
+## Source-temperature thermoelastic density objectives
+
+`sdf3::CutDensityStudy3::evaluate_thermoelastic` composes the original
+Cartesian/adaptive CutFEM joint design adjoint with the existing graph filter,
+Heaviside projection, physical-region override and SIMP map. Each evaluated
+operator retains its original source-owned C(T), integrated expansion, thermal
+stress derivative, B-bar/hanging maps, ghost work and embedded prescribed-motion
+derivative. The native owner performs the primal and one adjoint; this adapter
+adds no mechanical solve or derivative matrix.
+
+The pure objective callback receives accepted displacement, native thermal bulk
+responses, projected occupancy and the actual external-plus-body force after
+strong-clamp masking. Native partials cover displacement, physical stress,
+temperature and stiffness scales. An optional direct occupancy partial is taken
+at fixed scale and force. An optional direct force partial is added to the native
+equilibrium force adjoint before the original body's occupancy transpose. Thus
+external-work objectives retain both body-force terms. That force chain must not
+also be included in the direct occupancy partial. The reported total derivative
+with respect to authored force is zero at strong clamps; unmodified native
+sensitivities remain separately available.
+
+Original reference density and acceleration remain fixed while occupancy
+changes. The returned temperature derivative holds reference inventory and
+effective external force fixed. A temperature-dependent density/force, evolving
+geometry, source reassignment or solved temperature field needs its own chain
+rule; no heat-equation adjoint is inferred. Protected physical solid/void slopes
+vanish before the shared filter transpose, so their raw controls may still
+influence adjacent design cells. Volume and its derivative use the same design.
+
+Native `ThermoelasticAdjointSettings3` bounds primal-plus-adjoint CG iterations
+and physical/source point admission per evaluation. The supplied `SolveControl`
+retains cumulative filter and pullback work and supplies native cancellation
+checkpoints. No replacement control is created, and native mechanical iterations
+are reported by their original owner rather than charged as filter iterations.
+Success, refusal, cancellation and unwinding objective/checkpoint callbacks
+restore incoming operator scales; returned fields retain their evaluated scales.
+
+`tests/thermoelastic_sdf3.rs`, under `cutfem-marquee`, defines three native
+regression groups for Cartesian displacement/B-bar and adaptive hanging fields:
+joint raw-density/temperature/force finite differences, physical body work,
+explicit partials, protected regions, volume, callback count, scale restoration,
+budgets, cancellation and panic unwinding. The authored material curves verify
+discrete implementation, not calibration, continuum error or an optimum.

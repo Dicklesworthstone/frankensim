@@ -32,6 +32,8 @@ pub mod robust;
 pub mod modal;
 /// Fixed thermal/manufacturing free strain through the original density pipeline.
 pub mod eigenstrain;
+/// Source-temperature objectives through the original physical density map.
+pub mod thermal;
 pub use operator::{AdaptiveSdf3Elasticity, Sdf3Elasticity};
 pub(crate) use operator::{
     admit_affine_material_domain, admit_load_space_material_domain, admit_material_domain,
