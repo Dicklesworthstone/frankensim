@@ -3,11 +3,15 @@
 //! All native enthalpy residuals, Newton work and acceptance remain in
 //! `cell_driver_candidate`. No circuit or independent thermal state is created.
 
+/// Local temporal accuracy through the original native heat controller.
+pub mod adaptive;
+
 use super::{HeatAssembly, HeatNetworkError, as_circuit_error, closed_balance};
 use crate::circuit_enthalpy::{
     CircuitEnthalpyError, CircuitEnthalpySolve, DrivenCoefficients, DriverAccount, ThermalDriver,
-    cell_driver_candidate,
+    cell_driver_candidate_entropy_option,
 };
+use crate::circuit_enthalpy::entropy::CircuitEntropyAudit;
 use crate::material_circuit::MaterialCircuitSolve;
 use fs_exec::Cx;
 use fs_solver::{NewtonKrylovConfig, NewtonReport};
@@ -129,18 +133,41 @@ pub fn step_heat_assembly_candidate<'m, A: HeatAssembly + ?Sized>(
     (DepositionSimulation<'m>, HeatAssemblyStepReport<A::Sample>),
     CircuitEnthalpyError<A::Error>,
 > {
+    step_with_entropy(
+        assembly, cx, thermal, target_s, controls, guess_j, false, || Ok(()),
+    ).map(|(next, report, _)| (next, report))
+}
+
+// The original energy-only entry point keeps exactly its source queries and
+// native arithmetic. Adaptive consumers request entropy only at each interval's
+// fresh final acceptance and charge every attempted assembly query externally.
+#[allow(clippy::too_many_arguments)]
+fn step_with_entropy<'m, A: HeatAssembly + ?Sized>(
+    assembly: &A,
+    cx: &Cx<'_>,
+    thermal: &DepositionSimulation<'m>,
+    target_s: f64,
+    controls: HeatAssemblySolve,
+    guess_j: &[f64],
+    with_entropy: bool,
+    before_evaluation: impl Fn() -> Result<(), CircuitEnthalpyError<A::Error>>,
+) -> Result<
+    (DepositionSimulation<'m>, HeatAssemblyStepReport<A::Sample>, Option<CircuitEntropyAudit>),
+    CircuitEnthalpyError<A::Error>,
+> {
     cx.checkpoint()
         .map_err(|_| CircuitEnthalpyError::Cancelled)?;
     assembly
         .prepared_heat_network()
         .admit_thermal_only()
         .map_err(|error| as_circuit_error(error).map_source(A::Error::from))?;
-    let (next, (), report) = cell_driver_candidate(
+    let (next, (), report, entropy) = cell_driver_candidate_entropy_option(
         thermal,
         target_s,
         controls.native(),
         guess_j,
         |state, _| {
+            before_evaluation()?;
             let coefficients = assembly.resolve_heat(cx, state)?;
             if !coefficients.bulk.resistors.is_empty() || !coefficients.contacts.is_empty() {
                 return Err(CircuitEnthalpyError::Source(
@@ -162,6 +189,7 @@ pub fn step_heat_assembly_candidate<'m, A: HeatAssembly + ?Sized>(
             checkpoint()?;
             Ok(BTreeMap::new())
         },
+        with_entropy,
         || cx.checkpoint().is_err(),
     )?;
     let duration_s = target_s - thermal.time_s();
@@ -193,5 +221,6 @@ pub fn step_heat_assembly_candidate<'m, A: HeatAssembly + ?Sized>(
             external_heat_j,
             energy_residual_j,
         },
+        entropy,
     ))
 }

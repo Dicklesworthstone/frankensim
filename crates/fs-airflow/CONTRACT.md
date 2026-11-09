@@ -6516,3 +6516,16 @@ events; and late source/cancellation refusals, endpoint budgets and retry.
 The new source and tests were inspected statically against native APIs. Their
 compilation, formatter check and execution are not claimed while the execution
 workspace is unavailable.
+
+
+### Adaptive conjugate finite-cell convection
+
+Complete source-conjugate heat assemblies can advance through the original
+adaptive implicit heat controller. Original wall conductivity, eliminated
+surface temperature, source-pinned fluid properties and reciprocal conductance
+are refreshed in every native coarse/fine/retried solve. The accepted fine
+trajectory retains the original finite stores and heat/entropy account;
+rejected proposals contribute numerical work only. Native forcing events land
+at their actual times, and final source samples follow target-time events.
+The original source, correlation, quasi-steady layer and fixed-topology limits
+remain active; temporal refinement does not establish empirical accuracy.

@@ -12820,3 +12820,19 @@ thermal regressions and four driven thermal regressions passed after the shared
 source dispatch changed. These runs execute the original TemperatureShift,
 MBD/pHS, caloric timeline and observer numerical owners in a bounded build.
 No full workspace or complete impact-host execution is claimed.
+
+
+### Adaptive complete nonlinear heat assemblies
+
+`advance_heat_assembly_adaptive_candidate` connects the original thermal-only
+heat transaction to `AdaptiveConductionStepper`. Coarse and two-half-step
+proposals use the same complete nonlinear assembly; only accepted fine
+intervals contribute physical storage, energy and original caloric entropy.
+Native events and explicit continuous-source transition times split the clock.
+Cell inventories, caloric objects, topology and contact coverage remain fixed.
+One source-evaluation cap includes failed, coarse, rejected and final queries.
+Original source/material/energy refusals and cancellation remain typed terminal
+failures; native numerical nonconvergence and temporal error can reduce the
+interval. A late refusal publishes no partial window. Final source evidence is
+refreshed after target-time events. Entropy retains unclassified source terms;
+local temporal error control does not establish global or model accuracy.
