@@ -14,7 +14,7 @@ pub use crate::conjugate::simple::viscous_heat::material_momentum::{
 };
 use crate::conjugate::simple::viscous_heat::material_momentum::{
     NativeMaterialRheologyInput, NativeMaterialRheologyStep, NativeMaterialViscosityInput, kick,
-    kick_with_sgs, kick_with_source,
+    kick_with_sgs, kick_with_source, kick_with_source_and_sgs,
 };
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_math::dd::Dd;
@@ -865,6 +865,76 @@ impl FlowField {
         gate: &CancelGate,
         resolve: impl FnMut(&[f64]) -> Result<(Vec<f64>, Vec<f64>), ChtError>,
     ) -> Result<PreparedMaterialRheology, ChtError> {
+        self.prepare_material_rheology_with_source_mode(
+            domain,
+            faces,
+            pressure_mouth_axis,
+            mass_kg,
+            momentum_kg_m_s,
+            boundaries,
+            reconstruction_controls,
+            duration_s,
+            None,
+            viscosity_controls,
+            gate,
+            resolve,
+        )
+    }
+
+    /// Refresh source rheology and actual-density SGS on the SAME native
+    /// endpoint. The source observes the unit molecular strain quadrature,
+    /// without eddy-viscosity weighting; both stresses then share one residual
+    /// and retain separate physical heat and modeled-transfer accounts.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::conjugate::flow) fn prepare_material_rheology_with_source_and_sgs(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        pressure_mouth_axis: Option<usize>,
+        mass_kg: &[f64],
+        momentum_kg_m_s: &[[f64; 3]],
+        boundaries: [FvBoundary; 6],
+        reconstruction_controls: DensityMomentumReconstructionControls,
+        duration_s: f64,
+        sgs: FvSgsConfig,
+        viscosity_controls: MaterialViscosityControls,
+        gate: &CancelGate,
+        resolve: impl FnMut(&[f64]) -> Result<(Vec<f64>, Vec<f64>), ChtError>,
+    ) -> Result<PreparedMaterialRheology, ChtError> {
+        poll(gate)?;
+        sgs.validate()?;
+        self.prepare_material_rheology_with_source_mode(
+            domain,
+            faces,
+            pressure_mouth_axis,
+            mass_kg,
+            momentum_kg_m_s,
+            boundaries,
+            reconstruction_controls,
+            duration_s,
+            Some(sgs),
+            viscosity_controls,
+            gate,
+            resolve,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_material_rheology_with_source_mode(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        pressure_mouth_axis: Option<usize>,
+        mass_kg: &[f64],
+        momentum_kg_m_s: &[[f64; 3]],
+        boundaries: [FvBoundary; 6],
+        reconstruction_controls: DensityMomentumReconstructionControls,
+        duration_s: f64,
+        sgs: Option<FvSgsConfig>,
+        viscosity_controls: MaterialViscosityControls,
+        gate: &CancelGate,
+        resolve: impl FnMut(&[f64]) -> Result<(Vec<f64>, Vec<f64>), ChtError>,
+    ) -> Result<PreparedMaterialRheology, ChtError> {
         poll(gate)?;
         let n = domain.cell_count();
         if n > viscosity_controls.max_cells
@@ -884,25 +954,25 @@ impl FlowField {
         )?;
         let face_mass =
             material_viscosity_face_masses(domain, &reconstructed, pressure_mouth_axis, gate)?;
+        let native = NativeMaterialRheologyInput {
+            field: &reconstructed.field,
+            mass_kg,
+            momentum_kg_m_s,
+            face_mass_kg: face_mass,
+            boundaries,
+            pressure_mouth_axis,
+            duration_s,
+        };
         let NativeMaterialRheologyStep {
             viscosity,
             endpoint_shear_rate_per_s,
             source_updates,
-        } = kick_with_source(
-            domain,
-            NativeMaterialRheologyInput {
-                field: &reconstructed.field,
-                mass_kg,
-                momentum_kg_m_s,
-                face_mass_kg: face_mass,
-                boundaries,
-                pressure_mouth_axis,
-                duration_s,
-            },
-            viscosity_controls,
-            gate,
-            resolve,
-        )?;
+        } = match sgs {
+            Some(sgs) => {
+                kick_with_source_and_sgs(domain, native, sgs, viscosity_controls, gate, resolve)?
+            }
+            None => kick_with_source(domain, native, viscosity_controls, gate, resolve)?,
+        };
         Ok(PreparedMaterialRheology {
             viscosity: PreparedMaterialViscosity {
                 momentum_kg_m_s: viscosity.momentum_kg_m_s,

@@ -1,10 +1,11 @@
 //! Endpoint shear rheology on original material inertia and caloric history.
 
 use super::*;
+use crate::conjugate::FvSgsConfig;
 use crate::conjugate::flow::material_momentum::PreparedMaterialRheology;
 use fs_material::fluid_transport::viscous::NewtonianViscosity;
 
-/// One source-resolved nonlinear molecular step before pressure and advection.
+/// One source-resolved nonlinear stress step before pressure and advection.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EndpointRheologyThermalVolumeMomentumStep {
     pub evolution: ViscousThermalVolumeMomentumStep,
@@ -79,6 +80,97 @@ impl FlowField {
         controls: ThermalVolumeMomentumControls,
         viscosity_controls: MaterialViscosityControls,
         gate: &CancelGate,
+        resolve: impl FnMut(
+            usize,
+            &EquilibriumPhaseState,
+            f64,
+        ) -> Result<(ResolvedPhaseTransportState, f64), ChtError>,
+    ) -> Result<EndpointRheologyThermalVolumeMomentumStep, ChtError> {
+        self.advance_endpoint_rheology_thermal_volume(
+            domain,
+            reservoir,
+            curve,
+            input,
+            boundaries,
+            None,
+            controls,
+            viscosity_controls,
+            gate,
+            resolve,
+        )
+    }
+
+    /// Resolve original nonlinear molecular shear and independent bulk response
+    /// together with SGS on the same native material-momentum endpoint.
+    ///
+    /// Each coupled sweep first observes the physical molecular shear rate
+    /// without eddy-viscosity weighting, then resolves the original phase source
+    /// mu(rate) and zeta. The selected closure refreshes its actual-M/V cell and
+    /// reciprocal-edge stress before the common residual and work readback.
+    /// Its molecular shear cap uses those refreshed source coefficients;
+    /// independent bulk viscosity supplies no modeled bulk stress or cap relief.
+    ///
+    /// Only physical molecular dissipation heats the original phase chart.
+    /// SGS transfer remains in the separate material-viscosity report. The
+    /// original thermal state is held during the nonlinear predictor; caloric
+    /// state, compatible volume, pressure and accepted mass-route transport
+    /// subsequently advance once. This does not add implicit temperature/rate
+    /// feedback. Optional opposed reservoirs retain the same zero tangential
+    /// trace and single subsequent pressure load.
+    ///
+    /// The original phase/source support and sweep budgets remain mandatory.
+    /// SGS retains its explicit exploratory policy and filter assumptions;
+    /// a zero model coefficient follows the exact molecular endpoint path.
+    ///
+    /// # Errors
+    /// Source, phase, model, local cap, nonlinear stress, physical-work, caloric,
+    /// conservation or cancellation refusal publishes no partial endpoint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_piecewise_thermal_volume_momentum_with_endpoint_rheology_and_sgs(
+        &self,
+        domain: &VoxelDomain,
+        reservoir: Option<([FlowFace; 6], StaggeredBoundaryPressure<'_>)>,
+        curve: &EquilibriumEnthalpyPhaseCurve,
+        input: ThermalVolumeMomentumInput<'_>,
+        boundaries: [FvBoundary; 6],
+        sgs: FvSgsConfig,
+        controls: ThermalVolumeMomentumControls,
+        viscosity_controls: MaterialViscosityControls,
+        gate: &CancelGate,
+        resolve: impl FnMut(
+            usize,
+            &EquilibriumPhaseState,
+            f64,
+        ) -> Result<(ResolvedPhaseTransportState, f64), ChtError>,
+    ) -> Result<EndpointRheologyThermalVolumeMomentumStep, ChtError> {
+        poll(gate)?;
+        sgs.validate()?;
+        self.advance_endpoint_rheology_thermal_volume(
+            domain,
+            reservoir,
+            curve,
+            input,
+            boundaries,
+            Some(sgs),
+            controls,
+            viscosity_controls,
+            gate,
+            resolve,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn advance_endpoint_rheology_thermal_volume(
+        &self,
+        domain: &VoxelDomain,
+        reservoir: Option<([FlowFace; 6], StaggeredBoundaryPressure<'_>)>,
+        curve: &EquilibriumEnthalpyPhaseCurve,
+        input: ThermalVolumeMomentumInput<'_>,
+        boundaries: [FvBoundary; 6],
+        sgs: Option<FvSgsConfig>,
+        controls: ThermalVolumeMomentumControls,
+        viscosity_controls: MaterialViscosityControls,
+        gate: &CancelGate,
         mut resolve: impl FnMut(
             usize,
             &EquilibriumPhaseState,
@@ -103,35 +195,51 @@ impl FlowField {
         };
         let mut source_evaluations = 0;
         let mut accepted_sources = None;
-        let prepared: PreparedMaterialRheology = self.prepare_material_rheology_with_source(
-            domain,
-            faces,
-            mouth,
-            input.volume.mass_kg,
-            input.momentum_kg_m_s,
-            boundaries,
-            controls.mechanics.reconstruction,
-            controls.mechanics.projection.duration_s,
-            viscosity_controls,
-            gate,
-            |rates| {
-                let source = resolve_endpoint_rheology_sources(
-                    domain,
-                    curve,
-                    |cell| {
-                        input.volume.phase_states[cell].ok_or_else(|| {
-                            refuse("endpoint rheology needs an original fluid phase")
-                        })
-                    },
-                    rates,
-                    &mut resolve,
-                    &mut source_evaluations,
-                    gate,
-                )?;
-                accepted_sources = Some((source.receipts, source.bulk_pa_s.clone()));
-                Ok((source.shear_pa_s, source.bulk_pa_s))
-            },
-        )?;
+        let resolve_coefficients = |rates: &[f64]| {
+            let source = resolve_endpoint_rheology_sources(
+                domain,
+                curve,
+                |cell| {
+                    input.volume.phase_states[cell]
+                        .ok_or_else(|| refuse("endpoint rheology needs an original fluid phase"))
+                },
+                rates,
+                &mut resolve,
+                &mut source_evaluations,
+                gate,
+            )?;
+            accepted_sources = Some((source.receipts, source.bulk_pa_s.clone()));
+            Ok((source.shear_pa_s, source.bulk_pa_s))
+        };
+        let prepared: PreparedMaterialRheology = match sgs {
+            Some(sgs) => self.prepare_material_rheology_with_source_and_sgs(
+                domain,
+                faces,
+                mouth,
+                input.volume.mass_kg,
+                input.momentum_kg_m_s,
+                boundaries,
+                controls.mechanics.reconstruction,
+                controls.mechanics.projection.duration_s,
+                sgs,
+                viscosity_controls,
+                gate,
+                resolve_coefficients,
+            ),
+            None => self.prepare_material_rheology_with_source(
+                domain,
+                faces,
+                mouth,
+                input.volume.mass_kg,
+                input.momentum_kg_m_s,
+                boundaries,
+                controls.mechanics.reconstruction,
+                controls.mechanics.projection.duration_s,
+                viscosity_controls,
+                gate,
+                resolve_coefficients,
+            ),
+        }?;
         let (endpoint_sources, bulk_viscosity_pa_s) = accepted_sources
             .ok_or_else(|| refuse("endpoint rheology requires accepted source receipts"))?;
         // The same rounded authored-plus-molecular heat used by the existing

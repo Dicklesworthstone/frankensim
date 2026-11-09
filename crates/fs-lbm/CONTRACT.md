@@ -3050,3 +3050,49 @@ executed in this environment; the shared numerical tests do not establish
 full NSF/runtime integration. This remains exploratory LES, without a wall
 function, shock closure, complete compressible SGS-energy model, DNS
 calibration or acceptance-render qualification.
+
+## Nonlinear material rheology with SGS and thermal-volume transport
+
+`FlowField::advance_piecewise_thermal_volume_momentum_with_endpoint_rheology_and_sgs`
+extends the existing liquid material/phase owner with SGS at the SAME native
+viscous endpoint. Every coupled sweep observes the original unit molecular
+quadrature `sqrt(2 dev(D):dev(D))`, resolves the original source's shear and
+independent bulk response, then refreshes cell, interior-edge and reservoir-edge
+SGS from that velocity before the common residual. The original time level,
+actual M/V density and face masses are retained throughout one bounded solve.
+
+Physical rate observation temporarily moves out both the cell eddy field and
+the state containing all edge closures, swaps in unit molecular coefficients,
+then restores the original fields on success, observation refusal or cancellation.
+This retains cache allocations and prevents modeled coefficients from biasing
+source operating coordinates, including pressure-mouth half-edges. The first
+exact source coefficients are installed before SGS initialization and cap
+admission; an arbitrary initialization viscosity never sets applicability.
+All later caps use freshly resolved molecular shear viscosity. SGS adds no
+bulk response and shares no inferred material law.
+
+The accepted molecular and SGS stresses share one native momentum/work audit.
+Only original molecular shear/bulk heat joins authored heat in the existing
+caloric owner. Compatible volume change, pressure work and accepted material
+transport then run once. Returned physical source rates, original phase
+receipts, bulk coefficients, nonlinear work counts and separate modeled-energy
+accounts describe that same viscous endpoint. The original temperature is held
+during this constitutive solve; simultaneous temperature/rate/SGS feedback is
+not supplied by this entry.
+
+The existing fully liquid phase support, source validity, fixed geometry and
+optional opposed normal-traction mouths remain. Zero closure coefficients
+recover the original endpoint-rheology result exactly after configuration
+admission. Source, cap, phase, nonlinear-work or cancellation refusal publishes
+no partial material endpoint.
+
+Five focused regression groups are authored: pure-rate observation and cache
+restoration; true initial-source ownership of the cap; three independently
+derived nonlinear source/SGS roots with original material receipts and
+molecular-only calorics; all disabled models; and late source, cap, phase,
+work and cancellation refusals with retry. Independent scalar energy identities
+were checked. The local executor became unavailable during this increment;
+the final source was reviewed and prepared through GitHub, without a completed
+Rust formatting, type-check or test-execution gate. The earlier dependency
+build limitation also remains. No runtime or turbulent-accuracy claim is made
+from these authored but unexecuted regressions.

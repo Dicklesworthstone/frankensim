@@ -490,3 +490,5 @@ fn endpoint_work_source_and_cancellation_refusals_preserve_original_retry() {
     assert_eq!(retry, expected);
     assert_eq!(calls.get(), retry.source_evaluations);
 }
+
+mod sgs;

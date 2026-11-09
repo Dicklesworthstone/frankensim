@@ -12,7 +12,7 @@
 
 mod rheology;
 pub(in crate::conjugate) use rheology::{
-    NativeMaterialRheologyInput, NativeMaterialRheologyStep, kick_with_source,
+    NativeMaterialRheologyInput, NativeMaterialRheologyStep, kick_with_source, kick_with_source_and_sgs,
 };
 
 use super::*;

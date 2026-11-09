@@ -34,6 +34,57 @@ pub(in crate::conjugate) fn kick_with_source(
     input: NativeMaterialRheologyInput<'_>,
     controls: MaterialViscosityControls,
     gate: &CancelGate,
+    resolve: impl FnMut(&[f64]) -> Result<(Vec<f64>, Vec<f64>), ChtError>,
+) -> Result<NativeMaterialRheologyStep, ChtError> {
+    kick_with_source_mode(domain, input, None, controls, gate, resolve)
+}
+
+/// Endpoint source rheology and resolved-gradient SGS on the SAME native time
+/// level. The source sees only physical unit-quadrature strain. Its shear and
+/// independent bulk coefficients are installed before refreshing SGS and its
+/// material caps; molecular heat and modeled transfer remain separate.
+pub(in crate::conjugate) fn kick_with_source_and_sgs(
+    domain: &VoxelDomain,
+    input: NativeMaterialRheologyInput<'_>,
+    sgs: crate::conjugate::FvSgsConfig,
+    controls: MaterialViscosityControls,
+    gate: &CancelGate,
+    resolve: impl FnMut(&[f64]) -> Result<(Vec<f64>, Vec<f64>), ChtError>,
+) -> Result<NativeMaterialRheologyStep, ChtError> {
+    poll(gate)?;
+    sgs.validate()?;
+    if sgs.model.coefficient() == 0.0 {
+        return kick_with_source(domain, input, controls, gate, resolve);
+    }
+    kick_with_source_mode(domain, input, Some(sgs), controls, gate, resolve)
+}
+
+/// Temporarily expose the pure molecular unit operator, including reservoir
+/// half-edges. Both the cell field AND the cached edge closures must be absent:
+/// a unit molecular coefficient alone would still produce SGS-weighted rates.
+/// Moving the buffers out and back retains all storage and restores the exact
+/// accepted coefficients even when observation refuses or is cancelled.
+fn observe_molecular_rate(
+    solver: &mut Solver<'_>,
+    unit_viscosity: &mut Vec<f64>,
+    gate: &CancelGate,
+) -> Result<Vec<f64>, ChtError> {
+    let sgs = solver.sgs.take();
+    let eddy = std::mem::take(&mut solver.eddy_viscosity);
+    std::mem::swap(&mut solver.molecular_viscosity, unit_viscosity);
+    let observed = solver.molecular_shear_rates(gate);
+    std::mem::swap(&mut solver.molecular_viscosity, unit_viscosity);
+    solver.eddy_viscosity = eddy;
+    solver.sgs = sgs;
+    observed
+}
+
+fn kick_with_source_mode(
+    domain: &VoxelDomain,
+    input: NativeMaterialRheologyInput<'_>,
+    sgs: Option<crate::conjugate::FvSgsConfig>,
+    controls: MaterialViscosityControls,
+    gate: &CancelGate,
     mut resolve: impl FnMut(&[f64]) -> Result<(Vec<f64>, Vec<f64>), ChtError>,
 ) -> Result<NativeMaterialRheologyStep, ChtError> {
     poll(gate)?;
@@ -57,6 +108,8 @@ pub(in crate::conjugate) fn kick_with_source(
     let mut unit_viscosity = vec![1.0; n];
     let mut endpoint_shear_rate_per_s = Vec::new();
     let mut source_updates = 0_usize;
+    let mut sgs_initialized = false;
+    let mass = input.mass_kg;
     let viscosity = kick_with_refresh(
         domain,
         NativeMaterialViscosityInput {
@@ -73,13 +126,9 @@ pub(in crate::conjugate) fn kick_with_source(
         controls,
         gate,
         |solver| {
-            // Only coefficient weighting changes during this observation.
             // Velocity, wall traces, original inertia and TimeLevels.previous
-            // stay untouched. Restore even when observation is cancelled.
-            std::mem::swap(&mut solver.molecular_viscosity, &mut unit_viscosity);
-            let observed = solver.molecular_shear_rates(gate);
-            std::mem::swap(&mut solver.molecular_viscosity, &mut unit_viscosity);
-            let rates = observed?;
+            // stay untouched throughout this kinematic source observation.
+            let rates = observe_molecular_rate(solver, &mut unit_viscosity, gate)?;
             poll(gate)?;
             let resolved = resolve(&rates);
             poll(gate)?;
@@ -103,6 +152,20 @@ pub(in crate::conjugate) fn kick_with_source(
             }
             solver.set_material_transport(&shear, None, gate)?;
             set_bulk_viscosity(solver, &shear, &bulk, gate)?;
+            if let Some(sgs) = sgs {
+                if !sgs_initialized {
+                    // The initialization seed never enters SGS admission.
+                    // The first exact original source coefficients are already
+                    // installed, including independently authored bulk response.
+                    solver.set_sgs_density(mass, gate)?;
+                    solver.enable_sgs(sgs, gate)?;
+                    sgs_initialized = true;
+                }
+                // Refresh all cell, interior-edge and reservoir-edge closures
+                // at this SAME endpoint and its freshly resolved molecular mu,
+                // before any common momentum residual or power acceptance.
+                solver.update_sgs(gate)?;
+            }
             source_updates = source_updates
                 .checked_add(1)
                 .ok_or_else(|| refuse("endpoint rheology source work count overflow"))?;
@@ -117,3 +180,6 @@ pub(in crate::conjugate) fn kick_with_source(
         source_updates,
     })
 }
+
+#[cfg(test)]
+mod tests;
