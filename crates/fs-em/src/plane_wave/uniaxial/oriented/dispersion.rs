@@ -5,7 +5,9 @@
 //! their coherent sum is not assigned a scalar pulse or group delay.
 
 use super::super::UniaxialMode;
-use super::super::dispersion::{kernel as dispersion_kernel, material_derivatives};
+use super::super::dispersion::{
+    MaterialDerivatives, kernel as dispersion_kernel, material_derivatives,
+};
 use super::{
     Incidence, OrientedCrystalResponse, OrientedUniaxialInterface, PreparedOrientedCrystalField,
     ReflectionError, ResolvedFrequency, Result,
@@ -183,6 +185,25 @@ fn prepare<'s, 'm>(
 ) -> Result<OrientedCrystalFrequencyDispersion<'s, 'm>> {
     let derivatives =
         material_derivatives(source.incident, source.crystal, original.omega, constraint)?;
+    prepare_with_derivatives(
+        source,
+        original,
+        incidence,
+        boundary,
+        constraint,
+        &derivatives,
+    )
+}
+
+/// Share the original material evaluation with the full boundary-jet owner.
+pub(super) fn prepare_with_derivatives<'s, 'm>(
+    source: &'s OrientedUniaxialInterface<'m>,
+    original: ResolvedFrequency,
+    incidence: Incidence,
+    boundary: OrientedCrystalResponse,
+    constraint: IncidenceFrequencyConstraint,
+    derivatives: &MaterialDerivatives,
+) -> Result<OrientedCrystalFrequencyDispersion<'s, 'm>> {
     if original.no == original.ne
         && source.optic_axis[1] != 0.0
         && (derivatives.relative_permittivity[1] != derivatives.relative_permittivity[2]

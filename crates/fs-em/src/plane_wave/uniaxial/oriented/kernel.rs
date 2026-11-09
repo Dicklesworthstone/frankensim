@@ -8,6 +8,8 @@ const C0: f64 = 299_792_458.0;
 type Vector = [C64; 3];
 type Result<T> = core::result::Result<T, &'static str>;
 
+pub(super) mod boundary;
+
 #[path = "propagation.rs"]
 mod propagation;
 pub(super) use propagation::{FieldSum, WaveGeometry, field};
@@ -108,6 +110,16 @@ pub(super) struct Eigenbasis {
     pub(super) scale: f64,
     pub(super) ratio_mu: f64,
     pub(super) modes: [Mode; 2],
+}
+
+/// Exact native carrier gauge retained for analytic boundary derivatives.
+/// Fixed-size only: no material resolution, root reconstruction or field solve.
+#[derive(Clone, Copy)]
+pub(super) struct BoundaryWitness {
+    pub(super) basis: Eigenbasis,
+    pub(super) coefficients: [C64; 2],
+    pub(super) amplitude: f64,
+    pub(super) incident_electric: [C64; 2],
 }
 
 pub(super) fn eigenbasis(data: Input) -> Result<Eigenbasis> {
@@ -264,8 +276,23 @@ pub(super) fn eigenvectors(
     isotropic: bool,
     inverse: impl Fn(Vector) -> Vector,
 ) -> Result<(Vector, Vector)> {
+    let (e, h) = raw_eigenvectors(axis, q, ordinary, isotropic, inverse);
+    let basis_scale = positive(e.iter().chain(&h).fold(0.0_f64, |v, z| v.max(z.abs())))?;
+    Ok((
+        e.map(|z| z.scale(1.0 / basis_scale)),
+        h.map(|z| z.scale(1.0 / basis_scale)),
+    ))
+}
+
+fn raw_eigenvectors(
+    axis: [f64; 3],
+    q: Vector,
+    ordinary: bool,
+    isotropic: bool,
+    inverse: impl Fn(Vector) -> Vector,
+) -> (Vector, Vector) {
     let a = axis.map(C64::from_re);
-    let (e, h) = if isotropic || axis[1] == 0.0 {
+    if isotropic || axis[1] == 0.0 {
         if ordinary {
             let e = [C64::ZERO, C64::ONE, C64::ZERO];
             (e, cross(q, e))
@@ -279,15 +306,28 @@ pub(super) fn eigenvectors(
     } else {
         let h = cross(q, a);
         (inverse(cross(q, h).map(|z| -z)), h)
-    };
-    let basis_scale = positive(e.iter().chain(&h).fold(0.0_f64, |v, z| v.max(z.abs())))?;
-    Ok((
-        e.map(|z| z.scale(1.0 / basis_scale)),
-        h.map(|z| z.scale(1.0 / basis_scale)),
-    ))
+    }
 }
 
 pub(super) fn solve(data: Input) -> Result<OrientedCrystalResponse> {
+    solve_into(data, None)
+}
+
+pub(super) fn solve_with_witness(
+    data: Input,
+) -> Result<(OrientedCrystalResponse, BoundaryWitness)> {
+    let mut witness = None;
+    let boundary = solve_into(data, Some(&mut witness))?;
+    Ok((
+        boundary,
+        witness.ok_or("native crystal boundary witness is missing")?,
+    ))
+}
+
+fn solve_into(
+    data: Input,
+    capture: Option<&mut Option<BoundaryWitness>>,
+) -> Result<OrientedCrystalResponse> {
     if data.electric.iter().any(|z| !finite(*z)) {
         return Err(invalid("finite crystal incident field required"));
     }
@@ -299,6 +339,7 @@ pub(super) fn solve(data: Input) -> Result<OrientedCrystalResponse> {
     let ei = data
         .electric
         .map(|z| C64::new(z.re / amplitude, z.im / amplitude));
+    let basis = eigenbasis(data)?;
     let Eigenbasis {
         i,
         p,
@@ -306,7 +347,7 @@ pub(super) fn solve(data: Input) -> Result<OrientedCrystalResponse> {
         scale,
         ratio_mu,
         mut modes,
-    } = eigenbasis(data)?;
+    } = basis;
     let ko = modes[0].kind;
     // Eliminate the reflected field. The two equations below are the exact
     // tangential Maxwell conditions with the incident admittances multiplied
@@ -423,6 +464,14 @@ pub(super) fn solve(data: Input) -> Result<OrientedCrystalResponse> {
     {
         return Err(invalid("oriented crystal fields are unrepresentable"));
     }
+    if let Some(capture) = capture {
+        *capture = Some(BoundaryWitness {
+            basis,
+            coefficients,
+            amplitude,
+            incident_electric: data.electric,
+        });
+    }
     Ok(result)
 }
 
@@ -494,7 +543,11 @@ pub(super) fn mode_velocities(
                 (axis[0] * qz - axis[2] * qx) / ne,
                 (axis[1] * qx) / ne,
             ];
-            if ![qx, qz, along].into_iter().chain(across).all(f64::is_finite) {
+            if ![qx, qz, along]
+                .into_iter()
+                .chain(across)
+                .all(f64::is_finite)
+            {
                 return Err(invalid(
                     "uniaxial group-wave coordinates are unrepresentable",
                 ));
@@ -506,8 +559,7 @@ pub(super) fn mode_velocities(
                     sum + value * value
                 }),
             ];
-            let Some(denominator) =
-                dispersive_group_denominator(weights, [no, ne], group_indices)?
+            let Some(denominator) = dispersive_group_denominator(weights, [no, ne], group_indices)?
             else {
                 continue;
             };

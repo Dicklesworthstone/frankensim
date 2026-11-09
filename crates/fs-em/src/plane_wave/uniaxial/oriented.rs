@@ -26,6 +26,9 @@ use fs_math::{c64::C64, det};
 mod dispersion;
 pub use dispersion::OrientedCrystalFrequencyDispersion;
 
+mod boundary;
+pub use boundary::{OrientedCrystalBoundaryFrequencyDispersion, OrientedCrystalVectorFrequencyJet};
+
 mod group;
 pub use group::OrientedCrystalGroupResponse;
 
@@ -68,7 +71,11 @@ impl ResolvedFrequency {
         incidence: Incidence,
         electric: [C64; 2],
     ) -> Result<OrientedCrystalResponse> {
-        kernel::solve(Input {
+        kernel::solve(self.input(axis, incidence, electric)).map_err(ReflectionError::Invalid)
+    }
+
+    fn input(self, axis: [f64; 3], incidence: Incidence, electric: [C64; 2]) -> Input {
+        Input {
             omega: self.omega,
             ni: self.ni,
             no: self.no,
@@ -78,8 +85,7 @@ impl ResolvedFrequency {
             axis,
             incidence,
             electric,
-        })
-        .map_err(ReflectionError::Invalid)
+        }
     }
 }
 
@@ -99,6 +105,7 @@ pub struct PreparedOrientedCrystalField<'s, 'm> {
     omega_rad_s: f64,
     incidence: Incidence,
     boundary: OrientedCrystalResponse,
+    boundary_witness: kernel::BoundaryWitness,
 }
 
 impl<'s, 'm> PreparedOrientedCrystalField<'s, 'm> {
@@ -198,12 +205,11 @@ impl<'a> OrientedUniaxialInterface<'a> {
         incidence_cosine: f64,
         incident_tangential_e_v_m: [C64; 2],
     ) -> Result<PreparedOrientedCrystalField<'_, 'a>> {
-        Ok(PreparedOrientedCrystalField {
-            source: self,
+        self.prepare_field_with_incidence(
             omega_rad_s,
-            incidence: Incidence::Cosine(incidence_cosine),
-            boundary: self.response(omega_rad_s, incidence_cosine, incident_tangential_e_v_m)?,
-        })
+            Incidence::Cosine(incidence_cosine),
+            incident_tangential_e_v_m,
+        )
     }
 
     /// Conserved signed kx/k0 counterpart, including exact critical inputs.
@@ -214,15 +220,32 @@ impl<'a> OrientedUniaxialInterface<'a> {
         tangential_index: f64,
         incident_tangential_e_v_m: [C64; 2],
     ) -> Result<PreparedOrientedCrystalField<'_, 'a>> {
+        self.prepare_field_with_incidence(
+            omega_rad_s,
+            Incidence::TangentialIndex(tangential_index),
+            incident_tangential_e_v_m,
+        )
+    }
+
+    fn prepare_field_with_incidence(
+        &self,
+        omega_rad_s: f64,
+        incidence: Incidence,
+        incident_tangential_e_v_m: [C64; 2],
+    ) -> Result<PreparedOrientedCrystalField<'_, 'a>> {
+        let original = self.resolve_frequency(omega_rad_s)?;
+        let (boundary, boundary_witness) = kernel::solve_with_witness(original.input(
+            self.optic_axis,
+            incidence,
+            incident_tangential_e_v_m,
+        ))
+        .map_err(ReflectionError::Invalid)?;
         Ok(PreparedOrientedCrystalField {
             source: self,
             omega_rad_s,
-            incidence: Incidence::TangentialIndex(tangential_index),
-            boundary: self.response_at_tangential_index(
-                omega_rad_s,
-                tangential_index,
-                incident_tangential_e_v_m,
-            )?,
+            incidence,
+            boundary,
+            boundary_witness,
         })
     }
 

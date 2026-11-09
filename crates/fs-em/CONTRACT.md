@@ -7033,8 +7033,50 @@ Original-source fixtures retain carrier/source identity, mode-specific
 propagation, prepared/direct parity, source-domain and spectral-crossing
 refusals. These source-bound fixtures passed parser/API review but were not
 executed in the full material dependency build. This remains local modal
-propagation; boundary-amplitude and finite slab/stack transfer derivatives
-require their own consumers.
+propagation. The separate vector-boundary owner below supplies interface
+amplitude derivatives; finite slab/stack transfer derivatives remain separate.
+
+### Arbitrary-axis vector boundary frequency dispersion
+
+`OrientedUniaxialInterface::boundary_frequency_dispersion` and its signed
+tangential-index counterpart provide source-bound first and second angular
+frequency derivatives of the complete incident, reflected, ordinary and
+extraordinary Cartesian E/H fields. `PreparedOrientedCrystalField` adds the same
+response without another native boundary/root solve. The unchanged carrier,
+exact original incidence, normalized eigenbasis and solved coefficients are
+retained in a fixed-size preparation witness; the ordinary steady solve captures
+no witness.
+
+Both explicit incidence-frequency constraints require original two-sided
+lossless incident and principal material jets for boundary admittance. The
+normal-only owner keeps its broader fixed-transverse-wavenumber admission.
+Critical branches, unsupported source endpoints/cusps, unrepresentable results
+and unresolved out-of-plane spectral degeneracy refuse. No neighboring
+frequency, fitted law, frequency-dependent normalization switch or per-query
+allocation enters the derivative calculation.
+
+The native 2-by-2 Maxwell boundary system and vector eigenfields are
+differentiated analytically in a frozen local gauge. Double-double normalized
+wave-coordinate derivatives retain weak material slopes that would disappear
+when subtracting bulk wavenumber terms. Exact local index-scaling, matched
+isotropic and decoupled principal-plane identities protect admitted grazing
+limits without a tolerance cutoff. Shared axial cosine factors cancel before
+transverse material derivatives, including mixed incident polarization. The original steady carrier arithmetic remains authoritative.
+
+`OrientedCrystalVectorFrequencyJet` exposes raw E/H derivatives and optional
+per-Cartesian-component logarithmic phase/delay/GDD. Exact component zeros keep
+their raw jets, including nonzero derivatives, and have no invented phase.
+The transmitted boundary query coherently sums both modal jets; separate normal
+propagation is still explicit. No single modal-average delay is assigned to an
+interfering vector field.
+
+Eight numerical controls and four original-source fixtures cover independent
+derivatives under both constraints, Maxwell continuity, weak slopes, zero modal
+excitation, native carrier identity, prepared/direct parity, source support,
+critical/degenerate refusal and grazing limits. The changed Rust was parsed
+and independently source/API reviewed. These new numerical and integration
+fixtures were not executed here because the available native-build storage
+remained below the admitted budget; earlier numerical results are separate.
 
 ### Retained vector polarization on the native planar Gauss solve
 

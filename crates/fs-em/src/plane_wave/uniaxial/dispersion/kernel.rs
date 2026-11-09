@@ -32,6 +32,25 @@ pub(in crate::plane_wave::uniaxial) struct Input {
 }
 
 pub(in crate::plane_wave::uniaxial) fn normal_derivatives(data: Input) -> Result<[C64; 2]> {
+    let [first, second] = frequency_derivatives(data, None)?;
+    Ok([first.finish()?, second.finish()?])
+}
+
+/// Scaled derivatives [omega*q', omega²*q''] of q=c0*kz/(omega*scale).
+/// Vector boundary differentiation supplies the exact native dimensionless
+/// root, avoiding a rounded dimensional-wavenumber round trip and subtraction
+/// of the bulk carrier from K'. The fixed binary scale is frequency independent.
+pub(in crate::plane_wave::uniaxial) fn normal_index_derivatives(
+    data: Input,
+    native_index: C64,
+) -> Result<[Z; 2]> {
+    if !finite(native_index) {
+        return Err("finite native crystal phase index required");
+    }
+    frequency_derivatives(data, Some(native_index))
+}
+
+fn frequency_derivatives(data: Input, native_index: Option<C64>) -> Result<[Z; 2]> {
     let omega = positive(data.omega)?;
     let [ni, no, ne] = data.indices;
     for value in data.indices {
@@ -55,7 +74,10 @@ pub(in crate::plane_wave::uniaxial) fn normal_derivatives(data: Input) -> Result
     }
     let scale = binary_scale(ni.max(no).max(ne));
     let kscale = positive((omega / C0) * scale)?;
-    let q = Z::from_c64(data.normal_wavenumber).scale(Dd::ONE / Dd::from_f64(kscale));
+    let q = native_index.map_or_else(
+        || Z::from_c64(data.normal_wavenumber).scale(Dd::ONE / Dd::from_f64(kscale)),
+        Z::from_c64,
+    );
     let i = Dd::from_f64(positive(ni / scale)?);
     let o = Dd::from_f64(positive(no / scale)?);
     let e = Dd::from_f64(positive(ne / scale)?);
@@ -114,91 +136,108 @@ pub(in crate::plane_wave::uniaxial) fn normal_derivatives(data: Input) -> Result
     let [xx, yy, zz, xz] = [ax * ax, ay * ay, az * az, ax * az].map(|v| v / axis2);
     let fixed_angle = data.constraint == IncidenceFrequencyConstraint::FixedAngle;
 
-    // Preserve the original bulk jets in exactly axial principal limits.
-    // These identities also avoid rebuilding the zero GVD of linear n(lambda).
-    if p == Dd::ZERO {
-        let principal = match mode {
-            UniaxialMode::Ordinary => Some(0),
-            UniaxialMode::Extraordinary if xx == Dd::ZERO && yy == Dd::ZERO => Some(0),
-            UniaxialMode::Extraordinary if zz == Dd::ZERO => Some(1),
-            _ => None,
-        };
-        if let Some(principal) = principal {
-            return bulk_multiple(
-                Z::real(Dd::ONE),
-                data.principal_wavenumber_derivatives[principal],
-                omega,
-            );
-        }
-    }
-
-    if fixed_angle {
-        let matched = match mode {
-            UniaxialMode::Ordinary if ni == no && ri == ro => Some(0),
-            UniaxialMode::Extraordinary
-                if xx == Dd::ZERO && yy == Dd::ZERO && ni == ne && ri == re =>
-            {
-                Some(0)
-            }
-            UniaxialMode::Extraordinary
-                if yy == Dd::ZERO && zz == Dd::ZERO && ni == no && ri == ro =>
-            {
-                Some(1)
-            }
-            UniaxialMode::Extraordinary
-                if xx == Dd::ZERO && zz == Dd::ZERO && ni == ne && ri == re =>
-            {
-                Some(1)
-            }
-            _ => None,
-        };
-        if let Some(principal) = matched {
-            // The matched cutoff is exact in the original local jets. Keep
-            // the authored cosine even when its square rounds out of 1-c^2.
-            // Equal phase indices with DISTINCT slopes never enter here.
-            return bulk_multiple(
-                Z::real(Dd::from_f64(cosine)),
-                data.principal_wavenumber_derivatives[principal],
-                omega,
-            );
-        }
+    if native_index.is_some() && fixed_angle {
         let common = match mode {
             UniaxialMode::Ordinary => ri == ro,
             UniaxialMode::Extraordinary => ri == ro && ro == re,
         };
         if common {
-            // The entire local index ellipsoid scales with the incident
-            // index. Its original normal carrier is a constant multiple of Ko.
-            return bulk_multiple(
-                q.scale(Dd::ONE / o),
-                data.principal_wavenumber_derivatives[0],
-                omega,
-            );
+            let [first, second] = ri.map(Dd::from_f64);
+            return Ok([
+                q.scale(first * Dd::from_f64(0.5)),
+                q.scale(second * Dd::from_f64(0.5) - first * first * Dd::from_f64(0.25)),
+            ]);
         }
     }
 
-    if !fixed_angle {
-        if mode == UniaxialMode::Ordinary {
-            // At fixed kx, use the ORIGINAL bulk K jets directly:
-            // kz'=K*K'/kz and kz''=K*K''/kz-K'^2*kx^2/kz^3.
-            // This preserves exactly stationary/anomalous bulk slopes and
-            // avoids rebuilding them by subtracting index derivative terms.
-            let conversion = Dd::from_f64(scale) / Dd::from_f64(C0);
-            let [first, second_scaled] =
-                data.principal_wavenumber_derivatives[0].map(|v| Dd::from_f64(v) / conversion);
-            let first_over_q = Z::real(first).divide(q)?;
-            let first_normal = first_over_q.scale(o * conversion).finish()?;
-            let second_normal = Z::real(o * second_scaled)
-                .sub(first_over_q.mul(first_over_q).scale(p2))
-                .divide(q)?
-                .scale(conversion / Dd::from_f64(omega))
-                .finish()?;
-            return Ok([first_normal, second_normal]);
+    // The original dimensional bulk identities remain specific to K derivatives.
+    // A vector eigenbasis needs q derivatives from the constitutive law itself.
+    if native_index.is_none() {
+        // Preserve the original bulk jets in exactly axial principal limits.
+        // These identities also avoid rebuilding the zero GVD of linear n(lambda).
+        if p == Dd::ZERO {
+            let principal = match mode {
+                UniaxialMode::Ordinary => Some(0),
+                UniaxialMode::Extraordinary if xx == Dd::ZERO && yy == Dd::ZERO => Some(0),
+                UniaxialMode::Extraordinary if zz == Dd::ZERO => Some(1),
+                _ => None,
+            };
+            if let Some(principal) = principal {
+                return bulk_multiple(
+                    Z::real(Dd::ONE),
+                    data.principal_wavenumber_derivatives[principal],
+                    omega,
+                );
+            }
         }
-        if data.principal_wavenumber_derivatives == [[0.0; 2]; 2] {
-            // Both original principal K are locally stationary through second
-            // order, so the whole fixed-kx crystal carrier is stationary too.
-            return Ok([C64::ZERO; 2]);
+
+        if fixed_angle {
+            let matched = match mode {
+                UniaxialMode::Ordinary if ni == no && ri == ro => Some(0),
+                UniaxialMode::Extraordinary
+                    if xx == Dd::ZERO && yy == Dd::ZERO && ni == ne && ri == re =>
+                {
+                    Some(0)
+                }
+                UniaxialMode::Extraordinary
+                    if yy == Dd::ZERO && zz == Dd::ZERO && ni == no && ri == ro =>
+                {
+                    Some(1)
+                }
+                UniaxialMode::Extraordinary
+                    if xx == Dd::ZERO && zz == Dd::ZERO && ni == ne && ri == re =>
+                {
+                    Some(1)
+                }
+                _ => None,
+            };
+            if let Some(principal) = matched {
+                // The matched cutoff is exact in the original local jets. Keep
+                // the authored cosine even when its square rounds out of 1-c^2.
+                // Equal phase indices with DISTINCT slopes never enter here.
+                return bulk_multiple(
+                    Z::real(Dd::from_f64(cosine)),
+                    data.principal_wavenumber_derivatives[principal],
+                    omega,
+                );
+            }
+            let common = match mode {
+                UniaxialMode::Ordinary => ri == ro,
+                UniaxialMode::Extraordinary => ri == ro && ro == re,
+            };
+            if common {
+                // The entire local index ellipsoid scales with the incident
+                // index. Its original normal carrier is a constant multiple of Ko.
+                return bulk_multiple(
+                    q.scale(Dd::ONE / o),
+                    data.principal_wavenumber_derivatives[0],
+                    omega,
+                );
+            }
+        }
+
+        if !fixed_angle {
+            if mode == UniaxialMode::Ordinary {
+                // At fixed kx, use the ORIGINAL bulk K jets directly:
+                // kz'=K*K'/kz and kz''=K*K''/kz-K'^2*kx^2/kz^3.
+                // This preserves exactly stationary/anomalous bulk slopes and
+                // avoids rebuilding them by subtracting index derivative terms.
+                let conversion = Dd::from_f64(scale) / Dd::from_f64(C0);
+                let [first, second_scaled] =
+                    data.principal_wavenumber_derivatives[0].map(|v| Dd::from_f64(v) / conversion);
+                let first_over_q = Z::real(first).divide(q)?;
+                let first_normal = first_over_q.scale(o * conversion);
+                let second_normal = Z::real(o * second_scaled)
+                    .sub(first_over_q.mul(first_over_q).scale(p2))
+                    .divide(q)?
+                    .scale(conversion / Dd::from_f64(omega));
+                return Ok([first_normal, second_normal]);
+            }
+            if data.principal_wavenumber_derivatives == [[0.0; 2]; 2] {
+                // Both original principal K are locally stationary through second
+                // order, so the whole fixed-kx crystal carrier is stationary too.
+                return Ok([Z::real(Dd::ZERO); 2]);
+            }
         }
     }
 
@@ -286,13 +325,15 @@ pub(in crate::plane_wave::uniaxial) fn normal_derivatives(data: Input) -> Result
             (first, second)
         }
     };
+    if native_index.is_some() {
+        return Ok([q1, q2]);
+    }
     let conversion = Dd::from_f64(scale) / Dd::from_f64(C0);
-    let first = q.add(q1).scale(conversion).finish()?;
+    let first = q.add(q1).scale(conversion);
     let second = q1
         .scale(two)
         .add(q2)
-        .scale(conversion / Dd::from_f64(omega))
-        .finish()?;
+        .scale(conversion / Dd::from_f64(omega));
     Ok([first, second])
 }
 
@@ -386,12 +427,10 @@ fn product(a: [Dd; 3], b: [Dd; 3]) -> [Dd; 3] {
     ]
 }
 
-fn bulk_multiple(factor: Z, [first, second_scaled]: [f64; 2], omega: f64) -> Result<[C64; 2]> {
+fn bulk_multiple(factor: Z, [first, second_scaled]: [f64; 2], omega: f64) -> Result<[Z; 2]> {
     Ok([
-        factor.scale(Dd::from_f64(first)).finish()?,
-        factor
-            .scale(Dd::from_f64(second_scaled) / Dd::from_f64(omega))
-            .finish()?,
+        factor.scale(Dd::from_f64(first)),
+        factor.scale(Dd::from_f64(second_scaled) / Dd::from_f64(omega)),
     ])
 }
 
@@ -410,45 +449,45 @@ fn finite(value: C64) -> bool {
 // Only fixed-size complex DD contractions are needed. Smith's ratio division
 // avoids squaring a weak normal gradient or overflowing a large one.
 #[derive(Clone, Copy)]
-struct Z {
-    re: Dd,
-    im: Dd,
+pub(in crate::plane_wave::uniaxial) struct Z {
+    pub(in crate::plane_wave::uniaxial) re: Dd,
+    pub(in crate::plane_wave::uniaxial) im: Dd,
 }
 impl Z {
-    fn real(re: Dd) -> Self {
+    pub(in crate::plane_wave::uniaxial) fn real(re: Dd) -> Self {
         Self { re, im: Dd::ZERO }
     }
-    fn from_c64(value: C64) -> Self {
+    pub(in crate::plane_wave::uniaxial) fn from_c64(value: C64) -> Self {
         Self {
             re: Dd::from_f64(value.re),
             im: Dd::from_f64(value.im),
         }
     }
-    fn add(self, other: Self) -> Self {
+    pub(in crate::plane_wave::uniaxial) fn add(self, other: Self) -> Self {
         Self {
             re: self.re + other.re,
             im: self.im + other.im,
         }
     }
-    fn sub(self, other: Self) -> Self {
+    pub(in crate::plane_wave::uniaxial) fn sub(self, other: Self) -> Self {
         Self {
             re: self.re - other.re,
             im: self.im - other.im,
         }
     }
-    fn mul(self, other: Self) -> Self {
+    pub(in crate::plane_wave::uniaxial) fn mul(self, other: Self) -> Self {
         Self {
             re: self.re * other.re - self.im * other.im,
             im: self.re * other.im + self.im * other.re,
         }
     }
-    fn scale(self, value: Dd) -> Self {
+    pub(in crate::plane_wave::uniaxial) fn scale(self, value: Dd) -> Self {
         Self {
             re: self.re * value,
             im: self.im * value,
         }
     }
-    fn divide(self, denominator: Self) -> Result<Self> {
+    pub(in crate::plane_wave::uniaxial) fn divide(self, denominator: Self) -> Result<Self> {
         if denominator.re == Dd::ZERO && denominator.im == Dd::ZERO {
             return Err("crystal normal-frequency gradient is unresolved");
         }
@@ -472,7 +511,7 @@ impl Z {
         }
         Ok(Self { re, im })
     }
-    fn finish(self) -> Result<C64> {
+    pub(in crate::plane_wave::uniaxial) fn finish(self) -> Result<C64> {
         let value = C64::new(self.re.to_f64(), self.im.to_f64());
         if !finite(value)
             || (value.re == 0.0 && self.re != Dd::ZERO)
