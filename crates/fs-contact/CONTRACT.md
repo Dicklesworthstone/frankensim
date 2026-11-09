@@ -4574,3 +4574,9 @@ reciprocal rolling-area equilibrium, body impulse, temperature evolution or
 inferred destination for outgoing energy. G1/G3/G4 cases in
 `tests/adhesive_rolling/events.rs` specify independent spinodal release formulas,
 fresh recontact, subdivision, weak-work retention and atomic input refusal.
+
+## Retained bonded torsion through attached normal loading
+
+`SourceJkrTorsionContact::advance_normal` continues the original attached JKR branch at prescribed indentation while holding its complete loaded twist history. Radius and both shear moduli remain source-owned. Original normal contact work and signed torsional-stiffness work have distinct ports; neither becomes plastic heat. The independent critical-twist calibration and mode-III release/adhesion ceiling survive the update, and the ceiling is checked again at the changed area. Immutable normal receipts are shared through `Arc` rather than deeply copied per proposal. A foreign state, below-fold target, applicability violation or arithmetic refusal publishes no successor.
+
+This is an explicit prescribed-area, homogeneous-twist approximation. It does not replace the separate relaxed I/III equilibrium owner or claim reciprocal normal effort, stress-free annular recruitment, separation, thermal feedback or moving-frame transport. Three new source integration groups cover tensile loaded continuation and cubic energy return, subdivision/sub-ULP history, continued yield, source identity and changing-area applicability refusal. These groups were written and formatted but were not compiled or executed in the constrained session; the underlying seven production torsion unit tests passed.

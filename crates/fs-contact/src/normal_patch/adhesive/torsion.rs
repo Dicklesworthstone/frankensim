@@ -10,15 +10,21 @@
 //! G_III = d(K_phi phi^2/2)/d(pi a^2) = 4 G_bar a phi^2/pi.
 //! G_III/W is an approximation-envelope screen, not a bound on radius error or
 //! a solution of mixed-mode Griffith equilibrium, especially near a fold.
+//! `advance_normal` explicitly changes the prescribed mode-I area at held
+//! homogeneous twist, retaining history and reporting signed parameter work.
+//! It supplies neither reciprocal normal effort nor stress-free recruitment
+//! of newly bonded annuli; those require different equilibrium/history owners.
 //! No plastic loss, normal storage or adhesion release is counted as heat here.
 
 use super::{JkrError, JkrResponse, SourceJkrSphereContact};
 use core::f64::consts::PI;
 use fs_blake3::{ContentHash, DomainHasher};
+use fs_math::dd::Dd;
 use fs_tribo::adhesive::torsion::{
     AdhesiveTorsionContact, AdhesiveTorsionError, AdhesiveTorsionParameters, AdhesiveTorsionState,
     AdhesiveTorsionStep,
 };
+use std::sync::Arc;
 
 /// Independent irreversible threshold and explicit frozen-area approximation.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -86,13 +92,57 @@ impl SourceJkrTorsionStep {
     }
 }
 
+/// Original attached normal continuation at held elastic and total twist.
+/// The original JKR work and signed torsion parameter work remain distinct.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourceJkrTorsionNormalStep {
+    source: SourceJkrTorsionContact,
+    state: SourceJkrTorsionState,
+    normal_contact_work_j: f64,
+    torsion_storage_before_j: f64,
+    torsion_storage_after_j: f64,
+    torsion_parameter_work_j: f64,
+    applied_work_j: f64,
+}
+impl SourceJkrTorsionNormalStep {
+    pub const fn source(&self) -> &SourceJkrTorsionContact {
+        &self.source
+    }
+    pub const fn state(&self) -> SourceJkrTorsionState {
+        self.state
+    }
+    /// Original integral F_JKR d(delta); excludes twist work and branch jumps.
+    pub const fn normal_contact_work_j(&self) -> f64 {
+        self.normal_contact_work_j
+    }
+    pub const fn torsion_storage_before_j(&self) -> f64 {
+        self.torsion_storage_before_j
+    }
+    pub const fn torsion_storage_after_j(&self) -> f64 {
+        self.torsion_storage_after_j
+    }
+    /// Signed reversible work supplied to the retained spring by changing area.
+    pub const fn torsion_parameter_work_j(&self) -> f64 {
+        self.torsion_parameter_work_j
+    }
+    pub const fn applied_work_j(&self) -> f64 {
+        self.applied_work_j
+    }
+    pub fn into_parts(self) -> (SourceJkrTorsionContact, SourceJkrTorsionState) {
+        (self.source, self.state)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SourceJkrTorsionContact {
-    normal: SourceJkrSphereContact,
+    // Normal proposals share immutable material receipts instead of copying
+    // their owned strings and vectors on each physical step.
+    normal: Arc<SourceJkrSphereContact>,
     response: JkrResponse,
     law: AdhesiveTorsionContact,
     identity: ContentHash,
     maximum_mode_iii_release: f64,
+    controls: JkrTorsionControls,
 }
 impl SourceJkrTorsionContact {
     /// Re-evaluate the original normal source; no caller-supplied radius or
@@ -118,41 +168,21 @@ impl SourceJkrTorsionContact {
             critical_twist_angle_rad: controls.critical_twist_angle_rad,
             maximum_critical_twist_angle_rad: controls.maximum_critical_twist_angle_rad,
         })?;
-        let angle = controls.critical_twist_angle_rad;
-        let maximum_mode_iii_release = (4.0 / PI)
-            * (law.reduced_shear_modulus_pa() * angle)
-            * (response.contact_radius_m * angle);
-        let ratio = maximum_mode_iii_release / normal.normal_state().adhesion_energy_j_per_m2();
-        if !ratio.is_finite() || ratio < 0.0 {
-            return Err(SourceJkrTorsionError::Invalid {
-                field: "unrepresentable mode-III release",
-            });
-        }
-        if ratio > limit {
-            return Err(SourceJkrTorsionError::OutsideFrozenArea { ratio, limit });
-        }
-        let mut hash = DomainHasher::new("org.frankensim.fs-contact.jkr-torsion.v1");
-        hash.update(normal.identity().as_bytes());
-        for value in [
-            indentation_m,
-            controls.critical_twist_angle_rad,
-            controls.maximum_critical_twist_angle_rad,
-            limit,
-        ] {
-            hash.update(&value.to_bits().to_le_bytes());
-        }
+        let maximum_mode_iii_release = admit_release(&normal, &law, controls)?;
+        let identity = identity(&normal, indentation_m, controls);
         Ok(Self {
-            normal,
+            normal: Arc::new(normal),
             response,
             law,
-            identity: hash.finalize(),
+            identity,
             maximum_mode_iii_release,
+            controls,
         })
     }
     pub const fn identity(&self) -> ContentHash {
         self.identity
     }
-    pub const fn normal_source(&self) -> &SourceJkrSphereContact {
+    pub fn normal_source(&self) -> &SourceJkrSphereContact {
         &self.normal
     }
     /// Normal storage remains separate from the torsional storage below.
@@ -165,6 +195,9 @@ impl SourceJkrTorsionContact {
     /// Omitted mode-III release evaluated at the critical elastic twist [J/m2].
     pub const fn maximum_mode_iii_release_j_m2(&self) -> f64 {
         self.maximum_mode_iii_release
+    }
+    pub const fn controls(&self) -> JkrTorsionControls {
+        self.controls
     }
     pub fn initial_state(&self) -> SourceJkrTorsionState {
         SourceJkrTorsionState {
@@ -194,10 +227,108 @@ impl SourceJkrTorsionContact {
             torsion,
         })
     }
+    /// Prescribe one attached approach segment while retaining the original
+    /// homogeneous bonded twist and all plastic history. Split normal reversals
+    /// into separate calls. The original normal source and mode-III/adhesion
+    /// ceiling are rechecked at the changed area; increasing radius increases
+    /// the maximum omitted release, even if normal force becomes compressive.
+    ///
+    /// Both endpoints remain attached. Below-fold targets refuse, with no snap
+    /// release or memory reset. Signed parameter work belongs to the prescribed
+    /// area controller, separately from physical twist work and plastic loss.
+    /// The same mode-I approximation is retained; no reciprocal normal force
+    /// or mixed-mode equilibrium is inferred. Failure changes no accepted state.
+    pub fn advance_normal(
+        &self,
+        state: &SourceJkrTorsionState,
+        indentation_m: f64,
+    ) -> Result<SourceJkrTorsionNormalStep, SourceJkrTorsionError> {
+        self.check(state)?;
+        let response = self.normal.evaluate_attached(indentation_m)?;
+        let refresh = self
+            .law
+            .refresh_contact_radius(&state.constitutive, response.contact_radius_m)?;
+        let maximum_mode_iii_release = admit_release(&self.normal, refresh.law(), self.controls)?;
+        let normal_contact_work_j = self
+            .normal
+            .reversible_work_between(self.response.indentation_m, indentation_m)?;
+        let torsion_storage_before_j = refresh.storage_before_j();
+        let torsion_storage_after_j = refresh.storage_after_j();
+        let torsion_parameter_work_j = refresh.storage_change_j();
+        let applied_work_j =
+            (Dd::from_f64(normal_contact_work_j) + Dd::from_f64(torsion_parameter_work_j)).to_f64();
+        if !applied_work_j.is_finite() {
+            return Err(AdhesiveTorsionError::Unrepresentable {
+                field: "normal and torsion parameter work",
+            }
+            .into());
+        }
+        let (law, constitutive) = refresh.into_parts();
+        let identity = identity(&self.normal, indentation_m, self.controls);
+        Ok(SourceJkrTorsionNormalStep {
+            source: Self {
+                normal: self.normal.clone(),
+                response,
+                law,
+                identity,
+                maximum_mode_iii_release,
+                controls: self.controls,
+            },
+            state: SourceJkrTorsionState {
+                identity,
+                constitutive,
+            },
+            normal_contact_work_j,
+            torsion_storage_before_j,
+            torsion_storage_after_j,
+            torsion_parameter_work_j,
+            applied_work_j,
+        })
+    }
     fn check(&self, state: &SourceJkrTorsionState) -> Result<(), SourceJkrTorsionError> {
         if state.identity != self.identity {
             return Err(SourceJkrTorsionError::StateMismatch);
         }
         Ok(())
     }
+}
+
+fn admit_release(
+    normal: &SourceJkrSphereContact,
+    law: &AdhesiveTorsionContact,
+    controls: JkrTorsionControls,
+) -> Result<f64, SourceJkrTorsionError> {
+    let angle = controls.critical_twist_angle_rad;
+    let release = (4.0 / PI)
+        * (law.reduced_shear_modulus_pa() * angle)
+        * (law.parameters().contact_radius_m * angle);
+    let ratio = release / normal.normal_state().adhesion_energy_j_per_m2();
+    if !ratio.is_finite() || ratio < 0.0 {
+        return Err(SourceJkrTorsionError::Invalid {
+            field: "unrepresentable mode-III release",
+        });
+    }
+    let limit = controls.maximum_mode_iii_energy_release_to_adhesion;
+    if ratio > limit {
+        return Err(SourceJkrTorsionError::OutsideFrozenArea { ratio, limit });
+    }
+    Ok(release)
+}
+
+fn identity(
+    normal: &SourceJkrSphereContact,
+    indentation_m: f64,
+    controls: JkrTorsionControls,
+) -> ContentHash {
+    let mut hash = DomainHasher::new("org.frankensim.fs-contact.jkr-torsion.v1");
+    hash.update(normal.identity().as_bytes());
+    for value in [
+        indentation_m,
+        controls.critical_twist_angle_rad,
+        controls.maximum_critical_twist_angle_rad,
+        controls.maximum_mode_iii_energy_release_to_adhesion,
+    ] {
+        hash.update(&value.to_bits().to_le_bytes());
+    }
+    hash.finalize()
 }

@@ -2883,3 +2883,9 @@ tests check unequal half-space compliance, radius-cubed scaling, unloading,
 yield reversal, hysteresis, monotone subdivision, tiny increments and refusal.
 The normal source owns area/attachment applicability; changing area, normal
 axis, material state or temperature needs an explicit work/history transfer.
+
+## Bonded torsion under a prescribed radius change
+
+`AdhesiveTorsionContact::refresh_contact_radius` retains the complete double-double elastic fraction and accumulated twist while the original normal owner prescribes a new circular radius. Both original shear moduli and the calibrated critical twist stay fixed; stiffness and yield moment retain their cubic radius dependence. Signed storage work is evaluated from the coefficient difference before multiplying retained history. Shrinking area returns reversible work rather than inventing plastic loss or heat. Invalid radius, foreign history and unrepresentable arithmetic refuse without mutation.
+
+This is homogeneous bonded twist on the changed disk. It supplies no reciprocal normal effort, stress-free recruitment of annuli, mixed-mode equilibrium, separation or thermal destination. The two added G1/G3 unit groups cover cubic storage/work, loaded yield continuation, reversible radius cycles, sub-ULP memory and invalid/foreign trials. The complete production torsion leaf's seven unit tests passed with pinned nightly and the original moment kernel plus real fs-math; this is not a workspace or cross-crate integration gate.

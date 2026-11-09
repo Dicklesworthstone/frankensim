@@ -12,9 +12,13 @@
 //! constant-moment continuation. There is no universal atomistic threshold.
 //! This is a lumped bonded-contact idealization, not the local Coulomb partial-
 //! slip solution: that solution develops edge slip before global saturation.
-//! The normal owner supplies one attached, frozen circular area and must screen
-//! its applicability. Sliding, mixed-mode area change, detachment, frame
-//! transport and heat partition are separate physical operations. One signed
+//! The normal owner supplies the attached circular area and must screen its
+//! applicability. An explicit held-twist radius refresh retains the complete
+//! elastic/plastic memory and returns signed parameter work. This prescribes
+//! homogeneous bonded twist on the changed disk; stress-free recruitment of
+//! newly attached annuli needs a separate spatial-history model. Sliding,
+//! reciprocal mixed-mode area change, detachment, frame transport and heat
+//! partition are separate physical operations. One signed
 //! increment is one monotone path; the exact return/work integration shares
 //! the rolling law's allocation-free scalar kernel.
 
@@ -80,6 +84,38 @@ pub struct AdhesiveTorsionStep {
     /// Work entering the junction = storage change + irreversible loss [J].
     pub applied_work_j: f64,
     pub plastic_twist_increment_rad: f64,
+}
+
+/// Held-twist change of the attached radius with the original calibration.
+/// Complete double-double twist and elastic memory survive unchanged. Its
+/// signed storage change is reversible parameter work, not plastic loss.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdhesiveTorsionRefresh {
+    law: AdhesiveTorsionContact,
+    state: AdhesiveTorsionState,
+    storage_before_j: f64,
+    storage_after_j: f64,
+    storage_change_j: f64,
+}
+impl AdhesiveTorsionRefresh {
+    pub const fn law(&self) -> &AdhesiveTorsionContact {
+        &self.law
+    }
+    pub const fn state(&self) -> AdhesiveTorsionState {
+        self.state
+    }
+    pub const fn storage_before_j(&self) -> f64 {
+        self.storage_before_j
+    }
+    pub const fn storage_after_j(&self) -> f64 {
+        self.storage_after_j
+    }
+    pub const fn storage_change_j(&self) -> f64 {
+        self.storage_change_j
+    }
+    pub fn into_parts(self) -> (AdhesiveTorsionContact, AdhesiveTorsionState) {
+        (self.law, self.state)
+    }
 }
 
 /// Fixed circular patch with elastic twist and separately retained yield loss.
@@ -172,6 +208,47 @@ impl AdhesiveTorsionContact {
             return Err(AdhesiveTorsionError::StateMismatch);
         }
         Ok(())
+    }
+    /// Prescribe a changed attached disk while holding elastic and total twist.
+    /// Both original shear moduli, the critical angle and the approximation
+    /// ceiling remain fixed. The changed stiffness K=(16/3) G_bar a^3 requires
+    /// signed work (K_new-K_old) phi_elastic^2/2 from the area controller.
+    /// Shrinking the disk therefore returns energy rather than creating heat.
+    /// This lumped update supplies neither reciprocal normal effort nor a
+    /// local history of stress-free annuli entering or leaving contact.
+    pub fn refresh_contact_radius(
+        &self,
+        old: &AdhesiveTorsionState,
+        contact_radius_m: f64,
+    ) -> Result<AdhesiveTorsionRefresh, AdhesiveTorsionError> {
+        self.admit(old)?;
+        let law = Self::new(AdhesiveTorsionParameters {
+            contact_radius_m,
+            ..self.parameters
+        })?;
+        let state = AdhesiveTorsionState {
+            parameters: law.parameters,
+            elastic_fraction: old.elastic_fraction,
+            angle: old.angle,
+        };
+        let storage_before_j = self.stored_energy_j(old)?;
+        let storage_after_j = law.stored_energy_j(&state)?;
+        // Subtract coefficients before applying the retained elastic fraction;
+        // never subtract two rounded endpoint stored energies for weak work.
+        let storage_change_j = finite(
+            ((Dd::from_f64(law.yield_energy) - Dd::from_f64(self.yield_energy))
+                * old.elastic_fraction
+                * old.elastic_fraction)
+                .to_f64(),
+            "contact-radius storage change",
+        )?;
+        Ok(AdhesiveTorsionRefresh {
+            law,
+            state,
+            storage_before_j,
+            storage_after_j,
+            storage_change_j,
+        })
     }
     /// Exact monotone increment, with signed unloading and yield reversal.
     /// No accepted state is mutated, including on arithmetic resolution refusal.
@@ -381,5 +458,89 @@ mod tests {
         assert!(law.advance(&state, f64::NAN).is_err());
         assert!(law.advance(&state, f64::MAX).is_err());
         assert_eq!(state, law.initial_state());
+    }
+
+    #[test]
+    fn g1_radius_refresh_retains_twist_and_returns_signed_cubic_storage_work() {
+        let p = parameters();
+        let law = AdhesiveTorsionContact::new(p).unwrap();
+        let g = (p.shear_moduli_pa[0].recip() + p.shear_moduli_pa[1].recip()).recip();
+        for angle in [0.4, -0.4, 3.0, -3.0].map(|x| x * p.critical_twist_angle_rad) {
+            let loaded = law.advance(&law.initial_state(), angle).unwrap();
+            for scale in [0.5_f64, 0.75, 2.0] {
+                let a = scale * p.contact_radius_m;
+                let refresh = law.refresh_contact_radius(&loaded.state, a).unwrap();
+                let k = (16.0 / 3.0) * g * a.powi(3);
+                let phi = loaded.state.elastic_twist_rad();
+                close(refresh.law().stiffness_nm_per_rad(), k);
+                close(refresh.storage_after_j(), 0.5 * k * phi * phi);
+                close(
+                    refresh.storage_change_j(),
+                    (scale.powi(3) - 1.0) * loaded.storage_after_j,
+                );
+                assert_eq!(
+                    refresh.state().elastic_fraction,
+                    loaded.state.elastic_fraction
+                );
+                assert_eq!(refresh.state().angle, loaded.state.angle);
+                let returned = refresh
+                    .law()
+                    .refresh_contact_radius(&refresh.state(), p.contact_radius_m)
+                    .unwrap();
+                assert_eq!(returned.state(), loaded.state);
+                assert_eq!(returned.law(), &law);
+                assert_eq!(returned.storage_change_j(), -refresh.storage_change_j());
+                // After area change, ordinary yield continues at the changed
+                // physical moment, with the already loaded elastic spring.
+                let increment = angle.signum() * 2.0 * p.critical_twist_angle_rad;
+                let next = refresh.law().advance(&refresh.state(), increment).unwrap();
+                balance(&next, increment);
+                close(
+                    next.endpoint_moment_n_m.abs(),
+                    k * p.critical_twist_angle_rad,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g3_radius_refresh_keeps_sub_ulp_history_and_rejects_foreign_or_invalid_trials() {
+        let p = parameters();
+        let law = AdhesiveTorsionContact::new(p).unwrap();
+        let half = law
+            .advance(&law.initial_state(), 0.5 * p.critical_twist_angle_rad)
+            .unwrap();
+        let tiny = law
+            .advance(&half.state, 1e-20 * p.critical_twist_angle_rad)
+            .unwrap();
+        assert_ne!(tiny.state, half.state);
+        assert_eq!(tiny.storage_after_j, half.storage_after_j);
+        let refresh = law
+            .refresh_contact_radius(&tiny.state, 1.25 * p.contact_radius_m)
+            .unwrap();
+        let returned = refresh
+            .law()
+            .refresh_contact_radius(&refresh.state(), p.contact_radius_m)
+            .unwrap();
+        assert_eq!(returned.state(), tiny.state);
+        assert_eq!(
+            law.refresh_contact_radius(&tiny.state, p.contact_radius_m)
+                .unwrap()
+                .state(),
+            tiny.state
+        );
+        let foreign = AdhesiveTorsionContact::new(AdhesiveTorsionParameters {
+            critical_twist_angle_rad: 2.0 * p.critical_twist_angle_rad,
+            ..p
+        })
+        .unwrap();
+        assert_eq!(
+            foreign.refresh_contact_radius(&tiny.state, p.contact_radius_m),
+            Err(AdhesiveTorsionError::StateMismatch)
+        );
+        for radius in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::MAX] {
+            assert!(law.refresh_contact_radius(&tiny.state, radius).is_err());
+        }
+        assert_eq!(tiny.state, returned.state());
     }
 }
