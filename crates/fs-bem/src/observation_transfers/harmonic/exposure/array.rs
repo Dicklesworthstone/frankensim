@@ -14,6 +14,7 @@ use crate::near_field::FirstOrder;
 
 mod band;
 mod readout;
+mod tap_phase;
 
 /// Maximum processed pressure channels in one prepared bank.
 pub const MAX_PRESSURE_ARRAY_CHANNELS: usize = 64;
@@ -44,12 +45,15 @@ pub struct HarmonicPressureChannel {
 pub struct HarmonicPressureArrayLimits {
     pub maximum_channels: usize,
     pub maximum_taps: usize,
-    /// Tap phasors, tap/field contractions and frequency/bank lookups. A lookup
-    /// performs at most thirteen comparisons under the original 4096-line cap.
+    /// Common carrier phasors per nonempty bank/tap, relative-frequency phases,
+    /// phase/gain composition and tap/field contractions per retained line/tap.
+    /// Calibration lookups perform at most thirteen comparisons under the
+    /// original 4096-line cap; the original line/bank lookup bound is retained.
     /// Explicit microphone patterns add eight coefficient products per original
     /// receiver and four field projections per receiver and retained line.
     /// Calibrated microphones count sixteen real DD products per projection
-    /// and complete frequency/response validation and conversion work.
+    /// and complete frequency/response validation and conversion work, including
+    /// eight coefficient conversions per receiver and retained bank line.
     pub maximum_prepare_products: usize,
     /// Linear real contractions, temporal field products and averaged-channel
     /// covariance terms. Each bank admits the larger of its original pair work
@@ -333,11 +337,13 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
         }
         let bank_count = source.factors.len() + 1;
         let mut lines = 0usize;
+        let mut nonempty_banks = 0usize;
         let mut temporal_products = 0usize;
         let mut readout_products = 0usize;
         let mut band_scratch = 0usize;
         for bank in source.banks() {
             lines = lines.checked_add(bank.lines.len()).ok_or_else(overflow)?;
+            nonempty_banks += usize::from(!bank.lines.is_empty());
             let (products, scratch) = band::admission(bank.lines.len(), n, bank.statistics)?;
             temporal_products = temporal_products
                 .checked_add(products)
@@ -351,6 +357,13 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
         // Use this conservative admission before sorting or allocation.
         let microphone_products = if let Some(calibration) = calibration {
             microphone::extra_work(calibration.len(), microphones, lines)?
+                .checked_add(
+                    microphones
+                        .checked_mul(lines)
+                        .and_then(|v| v.checked_mul(8))
+                        .ok_or_else(overflow)?,
+                )
+                .ok_or_else(overflow)?
         } else {
             microphones.checked_mul(
                 lines.checked_mul(4).and_then(|v| v.checked_add(8)).ok_or_else(overflow)?
@@ -363,7 +376,8 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
         };
         let prepare_products = lines
             .checked_mul(taps)
-            .and_then(|p| p.checked_mul(2))
+            .and_then(|p| p.checked_mul(3))
+            .and_then(|p| p.checked_add(nonempty_banks.checked_mul(taps)?))
             .and_then(|p| p.checked_add(lines.checked_mul(bank_count)?))
             .and_then(|p| p.checked_add(microphone_products))
             .ok_or_else(overflow)?;
@@ -497,33 +511,38 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
         if let Some(calibration) = calibration {
             microphone::admit_frequencies(calibration, &frequencies, &mut cancelled)?;
         }
-        let mut weights = storage(taps)?;
-        weights.resize(taps, [Dd::ZERO; 2]);
-        for (frequency, omega) in frequencies.into_iter().enumerate() {
-            poll(&mut cancelled)?;
-            if let Some(calibration) = calibration {
-                microphone::coefficients(
-                    &calibration[frequency], &mut calibrated_projections, &mut cancelled,
-                )?;
+        // One reusable tap cache keeps a common phase for each coherent bank.
+        // A global carrier could be far from another bank's narrow spectrum.
+        let mut carrier_phases = storage(taps)?;
+        for tap in 0..taps {
+            if tap % 128 == 0 {
+                poll(&mut cancelled)?;
             }
+            carrier_phases.push([Dd::ZERO; 2]);
+        }
+        for (bank_index, bank) in source.banks().enumerate() {
+            poll(&mut cancelled)?;
+            let Some(reference) = bank.lines.first() else {
+                continue;
+            };
             let mut index = 0;
             for channel in channels {
                 for &tap in &channel.taps {
                     poll(&mut cancelled)?;
-                    weights[index] = delayed_weight(omega, tap.weight, tap.delay_s)?;
+                    carrier_phases[index] = tap_phase::carrier(reference.omega, tap.delay_s)?;
                     index += 1;
                 }
             }
-            for (bank_index, bank) in source.banks().enumerate()
-            {
+            for (line_index, input) in bank.lines.iter().enumerate() {
                 poll(&mut cancelled)?;
-                let Ok(line_index) = bank
-                    .lines
-                    .binary_search_by(|line| line.omega.total_cmp(&omega))
-                else {
-                    continue;
-                };
-                let input = &bank.lines[line_index];
+                if let Some(calibration) = calibration {
+                    let frequency = frequencies
+                        .binary_search_by(|omega| omega.total_cmp(&input.omega))
+                        .map_err(|_| bad("pressure array calibration frequency is unavailable"))?;
+                    microphone::coefficients(
+                        &calibration[frequency], &mut calibrated_projections, &mut cancelled,
+                    )?;
+                }
                 let output = &mut banks[bank_index].lines[line_index];
                 for (receiver, ((field, weights), signal)) in input
                     .fields
@@ -567,7 +586,12 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
                         } else {
                             projected[tap.receiver]
                         };
-                        let [wr, wi] = weights[offset + j];
+                        let [wr, wi] = tap_phase::weight(
+                            reference.omega,
+                            input.omega,
+                            *tap,
+                            carrier_phases[offset + j],
+                        )?;
                         sum[0] = sum[0] + a[0] * wr - a[1] * wi;
                         sum[1] = sum[1] + a[0] * wi + a[1] * wr;
                     }
@@ -753,38 +777,6 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
     }
 }
 
-// Keep omega*delay and the near-unit cosine decrement through the entire tap
-// contraction. Existing deterministic f64 trig supplies the leaves; DD does
-// not certify relative error at an arbitrary beamforming null.
-fn delayed_weight(omega: f64, weight: f64, delay: f64) -> Result<[Dd; 2], TransferError> {
-    fn phase(x: f64) -> [Dd; 2] {
-        let (s, c) = fs_math::det::sin_cos(x);
-        let cosine = if c > 0.5 {
-            let q = Dd::from_f64(fs_math::det::sin(0.5 * x));
-            Dd::ONE - Dd::from_f64(2.0) * q * q
-        } else if c < -0.5 {
-            let q = Dd::from_f64(fs_math::det::cos(0.5 * x));
-            -Dd::ONE + Dd::from_f64(2.0) * q * q
-        } else {
-            Dd::from_f64(c)
-        };
-        [cosine, Dd::from_f64(s)]
-    }
-    let angle = Dd::from_f64(omega) * Dd::from_f64(delay);
-    if !finite(angle) {
-        return Err(bad("pressure array delay phase is unrepresentable"));
-    }
-    let [ar, ai] = phase(angle.hi);
-    let [br, bi] = phase(angle.lo);
-    let weight = Dd::from_f64(weight);
-    let result = [(ar * br - ai * bi) * weight, (ar * bi + ai * br) * weight];
-    if result.iter().any(|&x| !finite(x)) {
-        Err(bad("pressure array delayed gain is unrepresentable"))
-    } else {
-        Ok(result)
-    }
-}
-
 fn value(v: Dd) -> Result<f64, TransferError> {
     let out = v.to_f64();
     if finite(v) && out.is_finite() {
@@ -809,4 +801,7 @@ mod band_tests;
 
 #[cfg(test)]
 mod readout_tests;
+
+#[cfg(test)]
+mod tap_tests;
 

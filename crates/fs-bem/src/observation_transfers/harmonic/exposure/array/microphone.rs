@@ -175,7 +175,7 @@ pub(super) fn admit_frequencies(
     Ok(())
 }
 
-// Convert once per unique frequency, shared across all mean/factor banks.
+// Convert the exact native-frequency row for one retained bank line.
 // No response lookup or coefficient conversion occurs during later sampling.
 pub(super) fn coefficients(
     row: &HarmonicMicrophoneCalibrationLine,
@@ -222,3 +222,4 @@ pub(super) fn project(
     }
     Ok(())
 }
+
