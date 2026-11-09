@@ -3890,6 +3890,38 @@ The three focused groups compare manual event-cut composition, isolate a
 large independent birth datum from actual conductive/latent heat, and exercise
 late physical/source/work/cancellation refusals.
 
+## Diffusion between two finite solution baths
+
+`FiniteMoistureSolution::advance_paired`, `advance_paired_cartesian` and
+`advance_paired_radial` couple one original native moisture field to two
+independently evolving aqueous inventories. Each face names its bath explicitly;
+its signed native transfer debits only that bath. A stationary solid-water total
+can therefore retain nonzero through-flow between solutions with different
+activities. Each bath keeps its own ideal/nonideal activity law, original
+nonvolatile stocks and optional equilibrium or finite-rate phases.
+
+The original safeguarded solvent-volume root and phase audit are shared with
+the existing single/shared-bath paths. An inner first-bath root is resolved for
+each outer second-bath trial; every trial restarts all original inventories.
+The two independent solvent balances, field/face balance and compensated direct
+whole-system endpoint/start water balance must all pass before either bath or
+the specimen publishes. One cumulative field-evaluation budget covers every
+nested trial, including rejected ones. Positive source-supported brackets are
+never widened; an inadmissible or unbracketed inner probe can refuse even when
+a coupled root exists elsewhere. Sealed baths retain solvent while their own
+finite-rate phase kinetics may continue.
+
+Native slab/Cartesian/radial diffusion, actual geometry, nonlinear material
+sources and finite surface laws remain authoritative. This is the original
+isothermal, equal-pressure vapor-equilibrium bridge with first-order endpoint
+coupling. It does not infer immersed-liquid permeability, solute permeation,
+pressure-driven osmosis, sorption heat or a temporal error guarantee.
+Seven authored G1/G3/G4 regression groups specify distinct ideal/nonideal baths,
+zero-net-uptake through-flow, identical-bath symmetry, independent finite phases,
+sealed kinetic evolution, native geometry, depletion, work and cancellation
+refusals. Changed Rust sources passed parsing; these integration regressions
+remain unexecuted because the dependency build is blocked before fs-couple.
+
 ## Adaptive second-order diffusion with shared finite solutions
 
 `FiniteMoistureSolution::advance_shared_cartesian_sdirk2_adaptive_to` completes

@@ -15,6 +15,8 @@ use std::sync::Arc;
 mod electrolyte;
 #[path = "solution/kinetics.rs"]
 mod kinetics;
+#[path = "solution/paired.rs"]
+mod paired;
 #[path = "solution/shared.rs"]
 mod shared;
 #[path = "solution/slab_sdirk.rs"]

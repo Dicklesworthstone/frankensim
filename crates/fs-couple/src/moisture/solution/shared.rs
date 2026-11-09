@@ -76,13 +76,6 @@ impl<Field, Report> SharedSolutionMoistureCandidate<Field, Report> {
 pub type SharedCartesianSolutionMoistureCandidate =
     SharedSolutionMoistureCandidate<MoistureCartesian, MoistureCartesianReport>;
 
-struct Trial<Field, Report> {
-    reservoir: FiniteMoistureSolution,
-    solids: Vec<SharedMoistureSolid<Field, Report>>,
-    water_to_solids_kg: f64,
-    residual_kg: f64,
-}
-
 pub(super) fn admit_count(count: usize, maximum: usize) -> Result<(), SolutionMoistureError> {
     if count == 0
         || maximum == 0
@@ -201,234 +194,37 @@ impl FiniteMoistureSolution {
             }
             body.admit(cx)?;
         }
-        let initial_volume = self.solution().solvent_volume_m3();
-        let [mut lower, mut upper] = controls.solvent_volume_bracket_m3;
-        if !positive(lower)
-            || !positive(upper)
-            || lower >= upper
-            || initial_volume < lower
-            || initial_volume > upper
-            || !positive(controls.mass_tolerance_kg)
-            || controls.maximum_iterations == 0
-            || controls.maximum_iterations > 256
-        {
-            return Err(SolutionMoistureError::Invalid(
-                "positive source-supported volume bracket containing the start, finite mass tolerance and bounded iterations required",
-            ));
-        }
-        let evaluate = |volume: f64| -> Result<Trial<P::Field, P::Report>, SolutionMoistureError> {
-            poll(cx)?;
-            let reservoir = self.at_endpoint_volume(volume, dt_s, || cx.checkpoint().is_err())?;
-            let activity = reservoir.solution().water_activity()?;
-            let mut solids = Vec::with_capacity(ordered.len());
-            for body in &ordered {
-                poll(cx)?;
-                let (moisture, transport) = body.advance(dt_s, temperature, activity, cx)?;
-                solids.push(SharedMoistureSolid {
-                    id: body.id(),
-                    moisture,
-                    transport,
-                });
-            }
-            // Each dry inventory appears once. Opposing signed changes are
-            // compensated in stable ID order, not averaged into equilibrium.
-            let water_to_solids_kg = water_sum(
-                ordered
-                    .iter()
-                    .zip(&solids)
-                    .map(|(body, next)| body.water_change(&next.moisture)),
-            );
-            let residual_kg =
-                (volume - initial_volume) * self.solvent_density_kg_m3 + water_to_solids_kg;
-            if !residual_kg.is_finite() || !water_to_solids_kg.is_finite() {
-                return Err(SolutionMoistureError::Invalid(
-                    "finite solution water balance is unrepresentable",
-                ));
-            }
-            Ok(Trial {
-                reservoir,
-                solids,
-                water_to_solids_kg,
-                residual_kg,
-            })
-        };
-
-        let mut iterations = 0;
-        let start = evaluate(initial_volume)?;
-        let accepted = if start.residual_kg.abs() <= controls.mass_tolerance_kg {
-            start
-        } else if ordered.iter().all(|body| body.sealed()) {
-            return Err(SolutionMoistureError::MassBalance {
-                residual_kg: start.residual_kg,
-                tolerance_kg: controls.mass_tolerance_kg,
-            });
-        } else if self.kinetic_solubility().is_none()
-            && self
-                .solution()
-                .solute_moles()
-                .iter()
-                .all(|&amount| amount == 0.0)
-        {
-            // Pure-solvent activity is exactly one at every positive volume.
-            // Initially undissolved kinetic stocks do not satisfy this premise:
-            // their phase evolution changes activity during the interval.
-            // Every native field is already correct; only one finite external
-            // inventory moves by the sum of actual local exchanges.
-            let volume = initial_volume - start.water_to_solids_kg / self.solvent_density_kg_m3;
-            if !positive(volume) || volume < lower || volume > upper {
-                return Err(SolutionMoistureError::Unbracketed {
-                    residual_kg: [
-                        (lower - initial_volume) * self.solvent_density_kg_m3
-                            + start.water_to_solids_kg,
-                        (upper - initial_volume) * self.solvent_density_kg_m3
-                            + start.water_to_solids_kg,
-                    ],
-                });
-            }
-            Trial {
-                reservoir: self.at_endpoint_volume(volume, dt_s, || cx.checkpoint().is_err())?,
-                residual_kg: (volume - initial_volume) * self.solvent_density_kg_m3
-                    + start.water_to_solids_kg,
-                ..start
-            }
-        } else {
-            drop(start);
-            let low = evaluate(lower)?;
-            let high = evaluate(upper)?;
-            if low.residual_kg.abs() <= controls.mass_tolerance_kg {
-                low
-            } else if high.residual_kg.abs() <= controls.mass_tolerance_kg {
-                high
-            } else {
-                if low.residual_kg.is_sign_positive() == high.residual_kg.is_sign_positive() {
-                    return Err(SolutionMoistureError::Unbracketed {
-                        residual_kg: [low.residual_kg, high.residual_kg],
+        let (reservoir, solids, exchange) = self.advance_exchange(
+            dt_s,
+            ordered.iter().all(|body| body.sealed()),
+            controls,
+            cx,
+            |activity| {
+                let mut solids = Vec::with_capacity(ordered.len());
+                for body in &ordered {
+                    poll(cx)?;
+                    let (moisture, transport) = body.advance(dt_s, temperature, activity, cx)?;
+                    solids.push(SharedMoistureSolid {
+                        id: body.id(),
+                        moisture,
+                        transport,
                     });
                 }
-                let mut low_residual = low.residual_kg;
-                let mut high_residual = high.residual_kg;
-                // Root refinement retains signs, not two extra complete sets
-                // of source fields and specimens throughout the solve.
-                drop(low);
-                drop(high);
-                loop {
-                    poll(cx)?;
-                    let scale = low_residual.abs().max(high_residual.abs());
-                    let low_weight = low_residual.abs() / scale;
-                    let high_weight = high_residual.abs() / scale;
-                    let fraction = (low_weight / (low_weight + high_weight)).clamp(0.05, 0.95);
-                    let volume = lower + fraction * (upper - lower);
-                    if volume <= lower || volume >= upper {
-                        return Err(SolutionMoistureError::NotConverged {
-                            residual_kg: low_residual.abs().min(high_residual.abs()),
-                            iterations,
-                        });
-                    }
-                    let trial = evaluate(volume)?;
-                    iterations += 1;
-                    if trial.residual_kg.abs() <= controls.mass_tolerance_kg {
-                        break trial;
-                    }
-                    if iterations == controls.maximum_iterations {
-                        return Err(SolutionMoistureError::NotConverged {
-                            residual_kg: trial.residual_kg,
-                            iterations,
-                        });
-                    }
-                    if trial.residual_kg.is_sign_positive() == low_residual.is_sign_positive() {
-                        lower = volume;
-                        low_residual = trial.residual_kg;
-                    } else {
-                        upper = volume;
-                        high_residual = trial.residual_kg;
-                    }
-                }
-            }
-        };
-
-        let reservoir = accepted.reservoir;
-        if let Some(initial) = self.solubility() {
-            let endpoint = reservoir
-                .solubility()
-                .ok_or(SolutionMoistureError::Invalid(
-                    "finite solid inventories were not retained by the moisture candidate",
-                ))?;
-            if initial.components().len() != endpoint.components().len() {
-                return Err(SolutionMoistureError::Invalid(
-                    "finite solubility component layout changed during moisture exchange",
-                ));
-            }
-            for ((original, component), partition) in initial
-                .components()
-                .iter()
-                .zip(endpoint.components())
-                .zip(endpoint.phase_partitions())
-            {
-                let total = original.total().value();
-                let residual =
-                    water_sum([partition.dissolved.value(), partition.solid.value(), -total]);
-                if component != original
-                    || !residual.is_finite()
-                    || residual.abs() > 8.0 * f64::EPSILON * total
-                {
-                    return Err(SolutionMoistureError::Invalid(
-                        "dissolved plus solid solute failed its original component balance",
-                    ));
-                }
-            }
-        }
-        if let Some(initial) = self.kinetic_solubility() {
-            let endpoint = reservoir
-                .kinetic_solubility()
-                .ok_or(SolutionMoistureError::Invalid(
-                    "kinetic phase inventories were not retained by the moisture candidate",
-                ))?;
-            if initial.models() != endpoint.models()
-                || initial.last_steps().len() != endpoint.last_steps().len()
-            {
-                return Err(SolutionMoistureError::Invalid(
-                    "kinetic source laws or component layout changed during moisture exchange",
-                ));
-            }
-            for (before, after) in initial.last_steps().iter().zip(endpoint.last_steps()) {
-                poll(cx)?;
-                let total = before.state().total_solute().value();
-                let phase = after.state();
-                let residual =
-                    water_sum([phase.dissolved().value(), phase.solid().value(), -total]);
-                if phase.total_solute() != before.state().total_solute()
-                    || !residual.is_finite()
-                    || residual.abs() > 8.0 * f64::EPSILON * total
-                {
-                    return Err(SolutionMoistureError::Invalid(
-                        "kinetic dissolved plus solid solute failed its original component balance",
-                    ));
-                }
-            }
-        }
-        if let Some(initial) = self.electrolyte_solubility() {
-            let endpoint =
-                reservoir
-                    .electrolyte_solubility()
-                    .ok_or(SolutionMoistureError::Invalid(
-                        "source-bound ionic phases were not retained by the moisture candidate",
-                    ))?;
-            if initial.component_total() != endpoint.component_total()
-                || initial.family_totals() != endpoint.family_totals()
-                || initial.spectators() != endpoint.spectators()
-                || initial.species() != endpoint.species()
-                || initial.solvent() != endpoint.solvent()
-            {
-                return Err(SolutionMoistureError::Invalid(
-                    "ionic analytical inventories or species layout changed during solvent exchange",
-                ));
-            }
-        }
-        let solvent_mass_kg = [self.solvent_mass_kg(), reservoir.solvent_mass_kg()];
-        let residual = solvent_mass_kg[1] - solvent_mass_kg[0] + accepted.water_to_solids_kg;
+                // Each original dry inventory appears once, in stable ID order.
+                let water = water_sum(
+                    ordered
+                        .iter()
+                        .zip(&solids)
+                        .map(|(body, next)| body.water_change(&next.moisture)),
+                );
+                Ok((solids, water))
+            },
+        )?;
+        let solvent_mass_kg = exchange.solvent_mass_kg;
+        let residual = exchange.water_balance_residual_kg;
         let mut originals = Vec::with_capacity(ordered.len());
         let mut endpoints = Vec::with_capacity(ordered.len());
-        for (body, next) in ordered.iter().zip(&accepted.solids) {
+        for (body, next) in ordered.iter().zip(&solids) {
             poll(cx)?;
             originals.push(body.water_mass_kg(None));
             endpoints.push(body.water_mass_kg(Some(&next.moisture)));
@@ -464,25 +260,19 @@ impl FiniteMoistureSolution {
         }
         let step = SharedSolutionMoistureStep {
             interval_s: [time_s, time_s + dt_s],
-            water_activity: [
-                self.solution().water_activity()?,
-                reservoir.solution().water_activity()?,
-            ],
-            osmotic_pressure_pa: [
-                self.solution().osmotic_pressure_pa()?,
-                reservoir.solution().osmotic_pressure_pa()?,
-            ],
+            water_activity: exchange.water_activity,
+            osmotic_pressure_pa: exchange.osmotic_pressure_pa,
             solvent_mass_kg,
             solid_water_kg,
-            water_to_solids_kg: accepted.water_to_solids_kg,
+            water_to_solids_kg: exchange.water_to_solid_kg,
             water_balance_residual_kg: residual,
             direct_water_balance_residual_kg: direct_residual,
-            iterations,
+            iterations: exchange.iterations,
         };
         poll(cx)?;
         Ok(SharedSolutionMoistureCandidate {
             reservoir,
-            solids: accepted.solids,
+            solids,
             step,
         })
     }

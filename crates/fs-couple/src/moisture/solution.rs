@@ -45,10 +45,19 @@
 //! Mechanical response is one way; elastic work does not feed solvent chemical
 //! potential, and no closed chemo-mechanical energy balance is claimed.
 
+mod exchange;
 mod field;
 mod layered;
+mod pair;
 mod radial;
 mod shared;
+
+pub use exchange::SolutionMoistureExchange;
+pub use pair::{
+    MoistureSolutionPort, PairedCartesianSolutionMoistureCandidate,
+    PairedRadialSolutionMoistureCandidate, PairedSolutionMoistureCandidate,
+    PairedSolutionMoistureSolve, PairedSolutionMoistureStep, SolutionMoistureFace,
+};
 
 // These are views of the original physical fields and their native receipts;
 // they carry no vapor inventory or atmospheric solver state.
@@ -70,8 +79,8 @@ pub use radial::{
 pub use shared::{
     CartesianSolutionSdirk2Candidate, CartesianSolutionSdirk2Step,
     SharedCartesianSolutionMoistureCandidate, SharedCartesianSolutionSdirk2Candidate,
-    SharedSlabSolutionSdirk2Candidate, SharedSolutionMoistureCandidate,
-    SharedSolutionMoistureStep, SlabSolutionSdirk2Candidate, SlabSolutionSdirk2Step,
+    SharedSlabSolutionSdirk2Candidate, SharedSolutionMoistureCandidate, SharedSolutionMoistureStep,
+    SlabSolutionSdirk2Candidate, SlabSolutionSdirk2Step,
 };
 
 use super::{
@@ -109,6 +118,8 @@ pub enum SolutionMoistureError {
     Unbracketed { residual_kg: [f64; 2] },
     /// The bounded scalar solve did not close the requested water balance.
     NotConverged { residual_kg: f64, iterations: usize },
+    /// Cumulative native field trials across both nested finite-bath balances.
+    EvaluationBudget { evaluations: usize, maximum: usize },
     /// Accepted endpoints do not close the original finite inventories.
     MassBalance { residual_kg: f64, tolerance_kg: f64 },
 }
