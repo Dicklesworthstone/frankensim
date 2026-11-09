@@ -12,6 +12,9 @@
 //! in MIT Unified Engineering, Thermodynamics 18.2:
 //! https://web.mit.edu/16.unified/www/FALL/thermodynamics/notes/node128.html.
 
+/// Conservative spatial fins with locally resolved conductivity and convection.
+pub mod nonlinear;
+
 /// Explicit physical or floating-point admission failure.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FinError {

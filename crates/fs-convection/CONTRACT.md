@@ -819,3 +819,39 @@ BVP refinement, original side/tip formulas, signed heat, zero/short/long limits,
 physical scaling and input refusal. The finite-volume conductance and tip
 errors decrease approximately fourfold across 64/128/256-cell refinement.
 This focused kernel execution is not a full crate, workspace or DSR pass.
+
+
+## Locally nonlinear straight-fin convection
+
+`fin::nonlinear::solve` resolves a quasi-steady axial temperature field with
+the original local k(T), side film h(x,T), and independently selected tip film.
+Its conservative nodal control volumes include half lateral areas at both
+ends. Each axial face consumes the original source's exact integral-mean
+conductivity, including interior material knots and the equal-temperature
+limit. Side loss uses nodal trapezoidal quadrature. Positive-coefficient
+admittance sweeps solve each frozen system in O(N) work with O(N) retained
+storage; explicit relaxed Picard iterations resolve the nonlinear laws.
+
+The initial field is the actual base temperature. Every subsequently queried
+temperature lies between base and fluid; unused fluid-temperature material
+support is not required. Returned side nodes and the optional separate tip
+retain their original source payloads without a Clone bound. Base, side and
+tip heat use the reported Kelvin states, with a global heat defect and the sum
+of absolute non-Dirichlet node defects. A mathematically small axial gradient
+that cannot be represented in those states cannot silently carry heat.
+Exact thermal equilibrium returns zero heat with the frozen local limiting
+conductance. Segments, iterations, all source queries, temperature correction,
+heat residual, relaxation and sampled local transverse Biot limits are explicit.
+Source-domain failures, exhaustion and cancellation return no partial result.
+
+Six added regression groups and the four original analytic-fin groups compiled
+against the exact production modules using pinned Rust 2024 and passed.
+The new groups cover constant-law refinement, a nonlinear Kirchhoff closed-form
+refinement, a spatial manufactured film and nonlinear tip-only Fourier balance,
+equilibrium/insulated support, unrepresentable Kelvin drops, and bounded
+source-work/cancellation/refusal. These are implementation checks, not a full
+crate or DSR pass, experimental calibration, or an axial error enclosure.
+Refine the mesh separately from nonlinear tolerances. Arbitrary callbacks do
+not imply solution uniqueness; this path adds no transient fin storage,
+radiation, root contact resistance, fluid-temperature field, array interference
+or validity for a correlation evaluated on a non-isothermal surface.

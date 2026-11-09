@@ -6700,3 +6700,48 @@ response, latent cancellation, original half-step source equivalence,
 nonadvecting wall cooling, work/source/event refusal and cancellation. They
 were parsed with the pinned formatter but have not been compiled or executed
 in this environment. This is a local temporal estimate, not a global error bound.
+
+
+## Distributed nonlinear source fins on the original finite-gas owner
+
+`finite_gas::fin::nonlinear::NonlinearSourceFinGasSurface` resolves the axial
+fin field with the original all-solid conductivity curve and original gas-film
+selection. Every edge consumes the curve's exact integral mean, including all
+crossed source knots. Every side/tip node queries the original film at its actual
+temperature and retains that typed source payload. Fixed-speed and prescribed
+mass-flow constructors keep the original bulk-density velocity convention.
+The initial uniform base field never requires solid conductivity at an unused
+gas-reservoir temperature. Unsupported states refuse without extrapolation.
+
+Bare base area, covered root footprints and wetted fin area remain distinct.
+The accepted base side sample supplies the bare-base coefficient without an
+extra source query; a single combined base-to-gas conductance enters the native
+heat owner. Node film h*A values remain evidence only. Reports retain the
+actual temperature field, original conductivity source, signed base/side/tip
+heat and the array's signed and sum-absolute spatial heat defects. The fin
+material may differ from the base body's material, and no fin mass is inferred.
+
+The absolute heat tolerance covers the whole repeated array and is divided by
+fin count before the representative spatial solve. The original finite-body
+wall-feedback convenience path additionally caps that tolerance by its actual
+interval source-energy allowance divided by duration, and disables relative
+widening of that allowance. Native body-node radiation must remain disabled.
+Initial, trial and actual accepted endpoints use the same source gates and
+return the original body/gas transaction or a typed refusal, with no partial
+physical publication. Cancellation retains the original checkpoint error.
+
+This model remains one-dimensional and quasi-steady, with a uniform gas
+inventory and explicit local film interpretation. The selected correlation's
+authored characteristic length and physical domain remain authoritative;
+local evaluation does not establish a resolved non-isothermal boundary layer,
+fin-array interference, fan power, transient fin storage, contact resistance,
+radiation or arbitrary nonlinear uniqueness. Transverse Biot admission applies
+to evaluated local states, not an unsampled global constitutive bound. Spatial
+refinement remains separate from nonlinear tolerance.
+
+Three integration regression groups independently reconstruct original-source
+face and surface heat, check source retention and support/refusal behavior,
+and couple the profile to actual reciprocal body/gas energy. They were parsed
+and reviewed but remain uncompiled and unexecuted in this environment. The
+exact numerical fin module's ten tests, including six nonlinear groups, were
+compiled and executed successfully; that is not a full fs-airflow/DSR pass.

@@ -244,6 +244,29 @@ fn with_speed(
 }
 
 impl<'g, M: FilmGasSource> PrescribedMassFlowGasSurface<'g, M> {
+    /// Resolve spatial fin conductivity and local film properties while keeping
+    /// the original bulk-density mass-flow conversion on every gas trial.
+    pub fn with_nonlinear_straight_fins<'a, 'm>(
+        self,
+        material: &'a fs_material::thermal::conduction::source::ResolvedConductionLayer<'m>,
+        geometry: super::super::fin::StraightFinArray,
+        controls: fs_convection::fin::nonlinear::NonlinearFinControls,
+    ) -> Result<
+        super::super::fin::nonlinear::NonlinearSourceFinGasSurface<
+            'a,
+            'm,
+            super::super::conjugate::ConjugateFilmSelection<'g, M>,
+        >,
+        super::super::fin::nonlinear::NonlinearSourceFinError,
+    > {
+        super::super::fin::nonlinear::NonlinearSourceFinGasSurface::new(
+            super::super::conjugate::ConjugateFilmSelection::new(self.surface, Some(self.flow)),
+            material,
+            geometry,
+            controls,
+        )
+    }
+
     /// Preserve the original bulk-density stream velocity while applying the
     /// source fin's one base-to-gas conductance on the native heat owner.
     pub fn with_straight_fins<'a, 'm>(

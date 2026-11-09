@@ -10,6 +10,9 @@
 //! correlation. Fin mass, radiation, contact resistance and mutual shielding
 //! require separately resolved models.
 
+/// Distributed source-dependent conductivity and film properties along a fin.
+pub mod nonlinear;
+
 use super::conjugate::{ConjugateFilmSelection, ConjugateGasFilm};
 use super::film::{FilmGasSource, FilmGasSurface};
 use super::*;
