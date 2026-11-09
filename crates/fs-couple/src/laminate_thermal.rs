@@ -15,6 +15,9 @@
 /// Reciprocal finite-heat evolution with retained compatible shell equilibrium.
 pub mod reciprocal;
 
+/// Original causal CST/DKT layer memory and its finite caloric heat handoff.
+pub mod harmonic;
+
 use fs_material::laminate::thermal::source::{
     LaminaSourceInput, LaminateThermalSource, LaminateThermalSourceError, ResolvedLaminateThermal,
 };

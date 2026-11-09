@@ -11564,3 +11564,37 @@ files from their complete original patches, including the final reporting
 cancellation polls; their recovered formatting was not rechecked. These
 cross-crate native regressions were authored and source/API reviewed but
 were not compiled or executed; no repository-wide DSR verdict is claimed.
+
+## Causal shell material heat into original layered caloric cells
+
+`laminate_thermal::harmonic::CausalLayeredShell` constructs the original CST/DKT
+shell from complete resolved tensor material sources and the existing
+`BoundLayeredThermalBody`. Every thermal subdivision becomes an original
+mechanical sublamina. Exact cards and fixed query contexts, validity-wide
+temperature independence, patch area, cell volume and reference mass must
+agree; coincident authored coefficients do not establish source identity.
+
+`heat_candidate` advances the general causal shell observer once, integrates
+its actual positive quadrature heat per original thermal cell, and supplies
+that energy to the existing nonlinear
+`LayeredThermalStep::with_cell_energy_j(...).solve(...)` owner. Thermal
+iterations reuse this fixed heat input. Original memory and caloric endpoints
+are returned together only after source, complete DD/f64 clock, handoff and
+combined-energy gates. Refusal or cancellation leaves both accepted histories
+unchanged, including a late thermal-solver failure.
+
+The receipt separates original material stress work, direct storage change,
+physical heat, deposited cell energy, other external thermal heat and the
+combined constitutive/caloric residual. Generated heat is an internal transfer
+and is removed once from the external-heat account. No Kelvin/Maxwell partition
+is invented when the material controller provides combined dissipation.
+
+The thermal model resolves its original through-thickness cells and homogenizes
+lateral temperature over their patch area. Interval heat becomes mean power in
+the original backward-Euler residual; temporal refinement is needed to resolve
+beat-driven transport. Mechanical coefficients, reference geometry and thermal
+strain remain frozen; reciprocal temperature feedback or force equilibrium is
+not inferred. `tests/laminate_harmonic_heat.rs` contains independent startup
+heat and three-cell thermal references plus retained-memory, source, late
+failure, retry and cancellation cases. Source checks do not establish executed
+runtime validation.
