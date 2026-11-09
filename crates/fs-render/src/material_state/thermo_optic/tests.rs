@@ -7,6 +7,8 @@ use crate::gradient_index::bundle::{BundleOptions, ProjectionOptions, propagate_
 use crate::gradient_index::{GradientIndexOptions, propagate, propagate_with_control};
 use fs_material::thermo_optic::ThermoOpticCoefficients;
 
+pub(super) mod absorption;
+
 struct PolynomialTemperature {
     centre_k: f64,
     gradient: Vec3,

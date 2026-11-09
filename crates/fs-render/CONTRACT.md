@@ -2350,20 +2350,41 @@ authored and formatted; execution remains blocked by the upstream build resource
 
 With `material-state`, `MaterialThermoOpticField` binds the original reference
 glass and `fs-material::thermo_optic::SchottThermoOpticLaw` to one immutable
-thermal snapshot. Its usable wavelengths are the intersection of reference
-phase/absorption and thermo-optic support. Preparing a wavelength evaluates
-reference dispersion and the spectral material coefficients once; optical
-stages still query the actual spatial temperature and its analytic derivatives.
+thermal snapshot. The default constructor intersects reference phase/absorption
+and thermo-optic support. Preparing a wavelength evaluates reference dispersion
+and the spectral material coefficients once; optical stages still query the
+actual spatial temperature and its analytic derivatives.
 
 The original gradient-index and ray-bundle owners consume
 `grad(n) = n_T grad(T)` and
 `Hess(n) = n_T Hess(T) + n_TT grad(T) grad(T)^T`, including mixed terms.
-Phase and available group optical distance retain the original material law;
-absorption remains the explicitly declared reference law. The same bound
-source supplies the native temperature trait. No finite-difference field,
-temperature-dependent absorption, moving state, expansion or stress response
-is invented. Each material/contact discontinuity requires a separate region
-and the native boundary event, not a smooth integration across the jump.
+Phase and available group optical distance retain the original material law.
+The default absorption remains the explicitly declared reference law. The same
+bound source supplies the native temperature trait. No finite-difference field,
+moving state, expansion or stress response is invented. Each material/contact
+discontinuity requires a separate region and the native boundary event.
+
+`MaterialThermoOpticField::try_with_absorption_source` additionally borrows an
+original `SpectralDielectricAbsorptionTemperaturePath`. Local refraction and
+intensity absorption read the same temperature; native ray and bundle optical
+depth integrates that alpha along the actual curved path. The source preserves
+its original selected claims, auxiliary requirements, temperature breakpoints
+and moving spectral knots. Preparation checks continuous source support once;
+optical stages perform bounded searches with no allocation or material query.
+The joined temperature domain and common spectral band remain explicit,
+including for transparent spectra. Replaced reference absorption does not
+restrict the independently retained phase and current-absorption bands.
+
+The exact absorption source survives P1 mesh transitions, bundle gradient-jump
+collars and curved contact reflection/transmission collars. Retained contact
+arrivals require the same source; native scene identities bind its prepared
+identity, while the default reference-loss identity is unchanged. The caller
+associates phase reference, thermal law and absorption with the same specimen
+and held environment. This retains the original weak-loss geometric-optics
+model and frozen thermal snapshot; no complex-interface law, thermal evolution
+or constitutive data is inferred. Regressions compare curved-ray/bundle optical
+depth and mesh gradient jumps with independent analytic integrals, and check
+source bands, scene identity, cancellation and the retained reference policy.
 
 `thermo_optic::conduction::PlanarConductionTemperatureField` borrows one original
 `GeneratedLayeredWallSolution` profile, with an explicit world origin and unit

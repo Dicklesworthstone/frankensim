@@ -635,6 +635,11 @@ fn same_region(a: &Binding<'_>, b: &Binding<'_>) -> bool {
         && a.temperature_source().element == b.temperature_source().element
         && core::ptr::eq(a.reference_glass(), b.reference_glass())
         && core::ptr::eq(a.law(), b.law())
+        && match (a.absorption_source(), b.absorption_source()) {
+            (None, None) => true,
+            (Some(a), Some(b)) => core::ptr::eq(a, b),
+            _ => false,
+        }
 }
 fn optical_sample(
     binding: &Binding<'_>,

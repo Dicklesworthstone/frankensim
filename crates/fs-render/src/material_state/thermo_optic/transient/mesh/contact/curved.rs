@@ -312,18 +312,8 @@ impl<'a> P1CurvedContactInterface<'a> {
         });
         let a = &self.contact.sides[incident_side];
         let b = &self.contact.sides[1 - incident_side];
-        let source = MaterialThermoOpticField::try_new(
-            a.binding.reference_glass(),
-            a.binding.law(),
-            &sources[incident_side],
-            a.binding.snapshot_identity(),
-        )?;
-        let target = MaterialThermoOpticField::try_new(
-            b.binding.reference_glass(),
-            b.binding.law(),
-            &sources[1 - incident_side],
-            b.binding.snapshot_identity(),
-        )?;
+        let source = a.binding.with_temperature_source(&sources[incident_side]);
+        let target = b.binding.with_temperature_source(&sources[1 - incident_side]);
         // Prepare each wavelength law once for both its interface sample and
         // outgoing ODE stages. Temperature and its gradient remain spatially live.
         let source = source.prepare(wavelength_nm)?;

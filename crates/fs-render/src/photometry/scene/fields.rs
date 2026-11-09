@@ -228,6 +228,10 @@ fn identity<F: TemperatureGradientField + ?Sized>(
     hash.update(reference.as_bytes());
     hash.update(field.law().identity().as_bytes());
     hash.update(field.snapshot_identity().as_bytes());
+    if let Some(absorption) = field.absorption_source() {
+        hash.update(b"current-material-absorption\0");
+        hash.update(absorption.identity().as_bytes());
+    }
     hash.finalize()
 }
 

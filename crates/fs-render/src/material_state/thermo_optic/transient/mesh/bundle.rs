@@ -93,12 +93,7 @@ impl<'a> P1ConductionMesh<'a> {
             current: Cell::new(start),
             previous: Cell::new(None),
         };
-        let original = MaterialThermoOpticField::try_new(
-            binding.reference_glass(),
-            binding.law(),
-            &cursor,
-            binding.snapshot_identity(),
-        )?;
+        let original = binding.with_temperature_source(&cursor);
         let prepared = original.prepare(wavelength_nm)?;
         self.propagate_bundle_prepared(
             cx, &cursor, &prepared, ray, transverse_axis, wavelength_nm, max_distance_m, options,

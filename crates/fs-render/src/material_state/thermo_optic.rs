@@ -10,19 +10,26 @@
 //! Reference glass must describe absolute vacuum-wavelength indices at the
 //! law's reference temperature. The snapshot supplies the actual material
 //! temperature, not the reservoir temperature. Absorption retains the declared
-//! reference-glass law; no temperature dependence, thermal expansion, stress
-//! birefringence, moving-medium correction or missing material data is inferred.
+//! reference-glass law unless an original material absorption path is supplied.
+//! That path evaluates the same local temperature without material queries in
+//! the ray stages. No thermal expansion, stress birefringence, moving-medium
+//! correction or missing material data is inferred.
 //! An optical path sees one frozen, isotropic state. At material interfaces or
 //! thermal contact jumps, callers must use separate regions and native boundary
 //! events rather than integrate a smooth segment across the discontinuity.
 
 use fs_blake3::ContentHash;
 use fs_geom::{Point3, Vec3};
+use fs_material::state_point::{
+    AbsorptionTemperatureSampleError, SpectralDielectricAbsorptionTemperaturePath,
+};
 use fs_material::thermo_optic::{
     PreparedThermoOptic, SchottThermoOpticLaw, ThermoOpticError, ThermoOpticSample,
 };
 
-use crate::dielectric::{DielectricError, DielectricGlass, GlassProvenance, SchottThermoOpticIor};
+use crate::dielectric::{
+    BeerLambertAbsorption, DielectricError, DielectricGlass, GlassProvenance, SchottThermoOpticIor,
+};
 use crate::gradient_index::bundle::{IndexHessian, IndexJet, SecondOrderIndexField};
 use crate::gradient_index::thermal::TemperatureField;
 use crate::gradient_index::{
@@ -105,6 +112,8 @@ pub struct MaterialThermoOpticField<'a, F: TemperatureGradientField + ?Sized> {
     temperature: &'a F,
     snapshot_identity: ContentHash,
     wavelength_range_nm: [f64; 2],
+    temperature_range_k: [f64; 2],
+    absorption: Option<&'a SpectralDielectricAbsorptionTemperaturePath>,
 }
 
 impl<'a, F: TemperatureGradientField + ?Sized> MaterialThermoOpticField<'a, F> {
@@ -118,14 +127,72 @@ impl<'a, F: TemperatureGradientField + ?Sized> MaterialThermoOpticField<'a, F> {
         temperature: &'a F,
         snapshot_identity: ContentHash,
     ) -> Result<Self, ThermoOpticFieldError> {
+        Self::from_sources(reference, law, temperature, snapshot_identity, None)
+    }
+
+    /// Combine original SCHOTT refraction with the original material's prepared
+    /// temperature-dependent intensity absorption. Both read the same pointwise
+    /// temperature, including inside native element-transition collars.
+    ///
+    /// The caller associates the phase reference, thermal law and absorption
+    /// source with the same physical specimen and held environment. The path
+    /// retains its original selected claims and all supplied requirements; its
+    /// construction checks their continuous temperature support. A changed
+    /// snapshot requires a fresh binding. No spatial absorption fit is made.
+    ///
+    /// Only wavelengths supported throughout the declared absorption path are
+    /// available. The discarded reference loss does not restrict this band.
+    /// Thermal support is the intersection of the phase and absorption laws.
+    /// Prepared ray/bundle samples allocate nothing and perform no card queries.
+    pub fn try_with_absorption_source(
+        reference: &'a DielectricGlass,
+        law: &'a SchottThermoOpticLaw,
+        temperature: &'a F,
+        absorption: &'a SpectralDielectricAbsorptionTemperaturePath,
+        snapshot_identity: ContentHash,
+    ) -> Result<Self, ThermoOpticFieldError> {
+        Self::from_sources(
+            reference,
+            law,
+            temperature,
+            snapshot_identity,
+            Some(absorption),
+        )
+    }
+
+    fn from_sources(
+        reference: &'a DielectricGlass,
+        law: &'a SchottThermoOpticLaw,
+        temperature: &'a F,
+        snapshot_identity: ContentHash,
+        absorption: Option<&'a SpectralDielectricAbsorptionTemperaturePath>,
+    ) -> Result<Self, ThermoOpticFieldError> {
         if snapshot_identity == ContentHash([0; 32]) {
             return Err(ThermoOpticFieldError::MissingSnapshotIdentity);
         }
-        let (reference_min, reference_max) = reference.wavelength_bounds_nm()?;
+        let (reference_min, reference_max) = if absorption.is_some() {
+            reference.ior().wavelength_bounds_nm()
+        } else {
+            reference.wavelength_bounds_nm()?
+        };
         let [law_min, law_max] = law.wavelength_range_nm();
-        let wavelength_range_nm = [reference_min.max(law_min), reference_max.min(law_max)];
+        let mut wavelength_range_nm = [reference_min.max(law_min), reference_max.min(law_max)];
+        let mut temperature_range_k = law.temperature_range_k();
+        if let Some(source) = absorption {
+            let (lo, hi) = source
+                .common_wavelength_bounds_m()
+                .ok_or(ThermoOpticFieldError::DisjointSpectralSupport)?;
+            wavelength_range_nm[0] = wavelength_range_nm[0].max(lo * 1.0e9);
+            wavelength_range_nm[1] = wavelength_range_nm[1].min(hi * 1.0e9);
+            let [minimum, maximum] = source.temperature_range_k();
+            temperature_range_k[0] = temperature_range_k[0].max(minimum);
+            temperature_range_k[1] = temperature_range_k[1].min(maximum);
+        }
         if wavelength_range_nm[0] > wavelength_range_nm[1] {
             return Err(ThermoOpticFieldError::DisjointSpectralSupport);
+        }
+        if temperature_range_k[0] > temperature_range_k[1] {
+            return Err(ThermoOpticFieldError::DisjointTemperatureSupport);
         }
         Ok(Self {
             reference,
@@ -133,6 +200,8 @@ impl<'a, F: TemperatureGradientField + ?Sized> MaterialThermoOpticField<'a, F> {
             temperature,
             snapshot_identity,
             wavelength_range_nm,
+            temperature_range_k,
+            absorption,
         })
     }
 
@@ -151,6 +220,29 @@ impl<'a, F: TemperatureGradientField + ?Sized> MaterialThermoOpticField<'a, F> {
     pub const fn wavelength_range_nm(&self) -> [f64; 2] {
         self.wavelength_range_nm
     }
+    pub const fn temperature_range_k(&self) -> [f64; 2] {
+        self.temperature_range_k
+    }
+    pub const fn absorption_source(&self) -> Option<&SpectralDielectricAbsorptionTemperaturePath> {
+        self.absorption
+    }
+
+    // Only replace the geometry cursor of the SAME frozen snapshot. Internal
+    // face traversal must retain the exact absorption policy and prepared source.
+    fn with_temperature_source<'b, G: TemperatureGradientField + ?Sized>(
+        &'b self,
+        temperature: &'b G,
+    ) -> MaterialThermoOpticField<'b, G> {
+        MaterialThermoOpticField {
+            reference: self.reference,
+            law: self.law,
+            temperature,
+            snapshot_identity: self.snapshot_identity,
+            wavelength_range_nm: self.wavelength_range_nm,
+            temperature_range_k: self.temperature_range_k,
+            absorption: self.absorption,
+        }
+    }
 
     /// Evaluate reference phase/group/absorption and thermo-optic spectral
     /// coefficients once. The prepared field still queries original temperature
@@ -164,8 +256,42 @@ impl<'a, F: TemperatureGradientField + ?Sized> MaterialThermoOpticField<'a, F> {
         {
             return Err(DielectricError::InvalidWavelength.into());
         }
-        let reference = HomogeneousIndexField::new(self.reference)
-            .sample(Point3::new(0.0, 0.0, 0.0), wavelength_nm)?;
+        let (reference, absorption) = if let Some(source) = self.absorption {
+            // Reuse native phase/group admission without evaluating discarded
+            // reference alpha or accidentally retaining its narrower band.
+            let phase = DielectricGlass::with_ior(
+                *self.reference.ior(),
+                BeerLambertAbsorption::CLEAR,
+                self.reference.provenance(),
+            );
+            let sample = HomogeneousIndexField::new(&phase)
+                .sample(Point3::new(0.0, 0.0, 0.0), wavelength_nm)?;
+            let (lo, hi) = source
+                .common_wavelength_bounds_m()
+                .ok_or(ThermoOpticFieldError::DisjointSpectralSupport)?;
+            // Preserve exact original SI endpoints across the nm presentation.
+            let wavelength_m = if wavelength_nm == lo * 1.0e9 {
+                lo
+            } else if wavelength_nm == hi * 1.0e9 {
+                hi
+            } else {
+                wavelength_nm * 1.0e-9
+            };
+            (
+                sample,
+                PreparedAbsorption::Current {
+                    source,
+                    wavelength_m,
+                },
+            )
+        } else {
+            let sample = HomogeneousIndexField::new(self.reference)
+                .sample(Point3::new(0.0, 0.0, 0.0), wavelength_nm)?;
+            (
+                sample,
+                PreparedAbsorption::Reference(sample.absorption_per_m()),
+            )
+        };
         let prepared = self.law.prepare(
             wavelength_nm,
             reference.phase_index(),
@@ -174,7 +300,7 @@ impl<'a, F: TemperatureGradientField + ?Sized> MaterialThermoOpticField<'a, F> {
         Ok(PreparedMaterialThermoOpticField {
             field: self,
             prepared,
-            absorption_per_m: reference.absorption_per_m(),
+            absorption,
         })
     }
 
@@ -187,7 +313,7 @@ impl<'a, F: TemperatureGradientField + ?Sized> MaterialThermoOpticField<'a, F> {
     }
 
     fn admit_temperature(&self, temperature_k: f64) -> Result<(), GradientIndexError> {
-        let [minimum, maximum] = self.law.temperature_range_k();
+        let [minimum, maximum] = self.temperature_range_k;
         if !temperature_k.is_finite() || !(minimum..=maximum).contains(&temperature_k) {
             return Err(GradientIndexError::OutsideFieldDomain);
         }
@@ -195,12 +321,21 @@ impl<'a, F: TemperatureGradientField + ?Sized> MaterialThermoOpticField<'a, F> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum PreparedAbsorption<'a> {
+    Reference(f64),
+    Current {
+        source: &'a SpectralDielectricAbsorptionTemperaturePath,
+        wavelength_m: f64,
+    },
+}
+
 /// Stack-owned spectral preparation borrowing the original thermal snapshot.
 pub struct PreparedMaterialThermoOpticField<'binding, 'source, F: TemperatureGradientField + ?Sized>
 {
     field: &'binding MaterialThermoOpticField<'source, F>,
     prepared: PreparedThermoOptic,
-    absorption_per_m: f64,
+    absorption: PreparedAbsorption<'source>,
 }
 
 impl<F: TemperatureGradientField + ?Sized> PreparedMaterialThermoOpticField<'_, '_, F> {
@@ -234,10 +369,19 @@ impl<F: TemperatureGradientField + ?Sized> PreparedMaterialThermoOpticField<'_, 
             return Err(GradientIndexError::InvalidSample.into());
         }
         let sample = self.prepared.sample(temperature.temperature_k)?;
+        let absorption_per_m = match self.absorption {
+            PreparedAbsorption::Reference(value) => value,
+            PreparedAbsorption::Current {
+                source,
+                wavelength_m,
+            } => source
+                .absorption_per_m_at(temperature.temperature_k, wavelength_m)
+                .map_err(ThermoOpticFieldError::Absorption)?,
+        };
         let optical = GradientIndexSample::try_new(
             sample.phase_index,
             gradient.scale(sample.derivative_temperature_per_k),
-            self.absorption_per_m,
+            absorption_per_m,
             sample.group_index,
         )?;
         Ok((optical, sample))
@@ -366,6 +510,8 @@ impl<F: TemperatureGradientField + ?Sized> TemperatureField
 pub enum ThermoOpticFieldError {
     MissingSnapshotIdentity,
     DisjointSpectralSupport,
+    DisjointTemperatureSupport,
+    Absorption(AbsorptionTemperatureSampleError),
     Material(ThermoOpticError),
     Optics(DielectricError),
     Field(GradientIndexError),
@@ -382,6 +528,15 @@ impl ThermoOpticFieldError {
             }
             Self::Material(ThermoOpticError::TemperatureOutsideRange) => {
                 GradientIndexError::OutsideFieldDomain
+            }
+            Self::Absorption(AbsorptionTemperatureSampleError::TemperatureOutsideRange) => {
+                GradientIndexError::OutsideFieldDomain
+            }
+            Self::Absorption(AbsorptionTemperatureSampleError::WavelengthOutsideRange) => {
+                DielectricError::InvalidWavelength.into()
+            }
+            Self::Absorption(AbsorptionTemperatureSampleError::NumericalRange) => {
+                GradientIndexError::NumericalRange
             }
             _ => GradientIndexError::InvalidSample,
         }

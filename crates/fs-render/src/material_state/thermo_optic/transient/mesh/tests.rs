@@ -276,6 +276,132 @@ fn original_face_ids_carry_uniform_and_affine_rays_through_twelve_tetrahedra() {
 }
 
 #[test]
+fn sourced_local_absorption_survives_primal_and_bundle_faces_and_gradient_jump_collars() {
+    use super::bundle::P1MeshBundleOptions;
+    use crate::material_state::thermo_optic::tests::absorption::absorption_path;
+
+    with_cx(|_, cx| {
+        let absorption = absorption_path([280.0, 360.0]);
+        let source_identity = absorption.identity();
+        let glass = reference();
+        let law = law();
+        for reverse in [false, true] {
+            for gradient_jump in [false, true] {
+                let mesh = column(reverse);
+                let values: Vec<_> = mesh
+                    .positions()
+                    .iter()
+                    .map(|p| {
+                        300.0 + 8.0 * p[0] - 5.0 * p[1]
+                            + if gradient_jump {
+                                (if p[2] < 0.0 { 12.0 } else { -7.0 }) * p[2]
+                            } else {
+                                0.0
+                            }
+                    })
+                    .collect();
+                let before = values.clone();
+                let snapshot =
+                    P1ConductionTemperatureSnapshot::try_new(cx, &mesh, &values).unwrap();
+                let prepared = P1ConductionMesh::try_new(cx, snapshot).unwrap();
+                let ray = launch();
+                let element = locate(snapshot, ray.origin);
+                let binding = MaterialThermoOpticField::try_with_absorption_source(
+                    &glass,
+                    &law,
+                    &element,
+                    &absorption,
+                    ContentHash([114; 32]),
+                )
+                .unwrap();
+                let length = 1.7;
+                let result = prepared
+                    .propagate(
+                        cx,
+                        &binding,
+                        ray,
+                        Vec3::new(1.0, 0.0, 0.0),
+                        1500.0,
+                        length,
+                        options(),
+                    )
+                    .unwrap();
+                let bundle = prepared
+                    .propagate_bundle(
+                        cx,
+                        &binding,
+                        ray,
+                        Vec3::new(1.0, 0.0, 0.0),
+                        1500.0,
+                        length,
+                        P1MeshBundleOptions {
+                            mesh: options(),
+                            position_derivative_tolerance_m: 2.0e-12,
+                            direction_derivative_tolerance: 2.0e-12,
+                        },
+                    )
+                    .unwrap();
+                assert!(result.internal_faces >= 5);
+                assert!(bundle.internal_faces >= 5);
+                assert_eq!(result.termination, BoundaryTermination::DistanceLimit);
+                assert_eq!(bundle.termination, BoundaryTermination::DistanceLimit);
+
+                let initial_t = 300.0 + 8.0 * ray.origin.x - 5.0 * ray.origin.y
+                    + if gradient_jump { 12.0 * ray.origin.z } else { 0.0 };
+                let n0 = 1.5 + 0.00125 * (initial_t - 300.0);
+                let g0 = Vec3::new(0.01, -0.00625, if gradient_jump { 0.015 } else { 0.0 });
+                let (expected, phase) = if gradient_jump {
+                    // Two exact affine-index rays meet on the unsmoothed z=0
+                    // face. Independent bisection locates its physical arc.
+                    let (mut lo, mut hi) = (0.0, length);
+                    for _ in 0..60 {
+                        let mid = 0.5 * (lo + hi);
+                        if affine(ray, n0, g0, mid).0.origin.z < 0.0 {
+                            lo = mid;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    let crossing = 0.5 * (lo + hi);
+                    let (mut first, phase0) = affine(ray, n0, g0, crossing);
+                    first.origin.z = 0.0;
+                    let n1 = 1.5 + 0.00125 * (8.0 * first.origin.x - 5.0 * first.origin.y);
+                    let (last, phase1) = affine(
+                        first,
+                        n1,
+                        Vec3::new(0.01, -0.00625, -0.00875),
+                        length - crossing,
+                    );
+                    (last, phase0 + phase1)
+                } else {
+                    affine(ray, n0, g0, length)
+                };
+                // alpha=.8+.02*(T-300), n=1.5+.00125*(T-300).
+                // This integral is exact on both sides of every thermal face.
+                let expected_depth = 0.8 * length + 16.0 * (phase - 1.5 * length);
+                for propagation in [&result.propagation, bundle.bundle.propagation()] {
+                    point_near(propagation.ray.origin, expected.origin, 4.0e-9);
+                    vector_near(propagation.ray.dir, expected.dir, 4.0e-9);
+                    near(propagation.optical_path_length_m, phase, 5.0e-9);
+                    near(propagation.optical_depth, expected_depth, 1.0e-7);
+                    near(
+                        propagation.optical_depth,
+                        0.8 * length + 16.0 * (propagation.optical_path_length_m - 1.5 * length),
+                        3.0e-10,
+                    );
+                    near(propagation.power_transmittance(), (-expected_depth).exp(), 8.0e-8);
+                }
+                let frozen = trace(cx, &prepared, &values, ray, length, options()).unwrap();
+                near(frozen.propagation.optical_depth, 0.2 * length, 3.0e-12);
+                assert!(result.propagation.optical_depth - frozen.propagation.optical_depth > 0.5);
+                assert_eq!(values, before);
+                assert_eq!(absorption.identity(), source_identity);
+            }
+        }
+    });
+}
+
+#[test]
 fn continuous_temperature_gradient_jump_matches_two_independent_affine_solutions() {
     with_cx(|_, cx| {
         let mesh = column(false);
