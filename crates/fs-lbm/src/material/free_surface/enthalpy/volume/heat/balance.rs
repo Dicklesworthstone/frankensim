@@ -8,6 +8,14 @@ pub(super) struct Response {
     pub work_derivative_kg: Dd,
 }
 
+/// A composing thermal owner supplies its original integrated energy residual
+/// and analytic tangent; pressure work retains its independent native account.
+pub(super) struct EnergyResidual {
+    pub residual_j: Dd,
+    pub derivative_kg: Dd,
+    pub work_j: Dd,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Solution {
     pub increment_j_kg: f64,
@@ -35,11 +43,40 @@ pub(super) fn solve<E>(
     max_evaluations: usize,
     mut response: impl FnMut(f64) -> Result<Response, E>,
 ) -> Result<Solution, Failure<E>> {
+    if !heat_j.is_finite() {
+        return Err(Failure::Invalid("invalid slab heat input"));
+    }
+    solve_residual(
+        mass_kg,
+        heat_j / number(mass_kg),
+        bracket_j_kg,
+        tolerance_j,
+        max_evaluations,
+        |increment| {
+            let value = response(increment)?;
+            Ok(EnergyResidual {
+                residual_j: mass_kg * Dd::from_f64(increment) + value.work_j - Dd::from_f64(heat_j),
+                derivative_kg: mass_kg + value.work_derivative_kg,
+                work_j: value.work_j,
+            })
+        },
+    )
+}
+
+/// The same bracket, acceptance and work budget for a composed source response.
+/// A finite joule residual is the only convergence criterion.
+pub(super) fn solve_residual<E>(
+    mass_kg: Dd,
+    guess_j_kg: f64,
+    bracket_j_kg: [f64; 2],
+    tolerance_j: f64,
+    max_evaluations: usize,
+    mut response: impl FnMut(f64) -> Result<EnergyResidual, E>,
+) -> Result<Solution, Failure<E>> {
     let mass = number(mass_kg);
     let [mut lower, mut upper] = bracket_j_kg;
     if !mass.is_finite()
         || mass <= 0.0
-        || !heat_j.is_finite()
         || !lower.is_finite()
         || !upper.is_finite()
         || lower >= upper
@@ -54,8 +91,8 @@ pub(super) fn solve<E>(
         let value = response(increment).map_err(Failure::Evaluation)?;
         evaluations += 1;
         let enthalpy = mass_kg * Dd::from_f64(increment);
-        let residual = number(enthalpy + value.work_j - Dd::from_f64(heat_j));
-        let derivative = number(mass_kg + value.work_derivative_kg);
+        let residual = number(value.residual_j);
+        let derivative = number(value.derivative_kg);
         let enthalpy = number(enthalpy);
         let work = number(value.work_j);
         if [residual, derivative, enthalpy, work]
@@ -97,9 +134,8 @@ pub(super) fn solve<E>(
         });
     }
     let mut lower_positive = left.residual_j.is_sign_positive();
-    let guess = heat_j / mass;
-    let mut x = if guess > lower && guess < upper {
-        guess
+    let mut x = if guess_j_kg > lower && guess_j_kg < upper {
+        guess_j_kg
     } else {
         0.5 * lower + 0.5 * upper
     };

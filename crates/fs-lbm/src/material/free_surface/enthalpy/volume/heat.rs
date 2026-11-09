@@ -6,8 +6,12 @@
 use super::*;
 use crate::conjugate::{FlowFace, InternalPressureFace};
 use fs_material::liquid_temperature::{LiquidCaloricEndpoint, LiquidCaloricError};
+use fs_material::phase::EquilibriumPhaseState;
 
 mod balance;
+
+/// Fixed-bath/applied-power heating with the same native mechanical-work split.
+pub mod bath;
 
 /// One authored heat interval and its original source/pressure accuracy limits.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -213,6 +217,41 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     ) -> Result<FreeSurfaceSlabHeatPlan<'a, 's, 'm>, FreeSurfaceSlabHeatError> {
         checkpoint(gate, cx)?;
         self.admit_uniform_slab_sources(supplied_heat_j)?;
+        let prepared = self.prepare_uniform_slab_heat_state(anchored_face, controls, gate, cx)?;
+        let solution = balance::solve(
+            prepared.mass,
+            supplied_heat_j,
+            controls.net_specific_enthalpy_bracket_j_kg,
+            controls.maximum_heat_defect_j,
+            controls.maximum_source_evaluations,
+            |increment| prepared.pressure_response(increment, gate, cx),
+        )
+        .map_err(|failure| match failure {
+            balance::Failure::Invalid(what) => FreeSurfaceSlabHeatError::Invalid(what),
+            balance::Failure::Evaluation(error) => FreeSurfaceSlabHeatError::Native(error),
+            balance::Failure::Balance {
+                evaluations,
+                residual_j,
+            } => FreeSurfaceSlabHeatError::Balance {
+                evaluations,
+                residual_j,
+            },
+        })?;
+        prepared.finish(solution, supplied_heat_j, gate, cx)
+    }
+
+    // All heat-source entries share the SAME native geometry, inertia and
+    // incoming-momentum admission. Only their physical source residual differs.
+    #[allow(clippy::too_many_lines)]
+    fn prepare_uniform_slab_heat_state<'a>(
+        &'a self,
+        anchored_face: Face3,
+        controls: FreeSurfaceSlabHeatControls,
+        gate: &CancelGate,
+        cx: &Cx<'_>,
+    ) -> Result<SlabHeatState<'a, 's, 'm>, FreeSurfaceSlabHeatError> {
+        checkpoint(gate, cx)?;
+        self.admit_uniform_slab_sources(0.0)?;
         for budget in [
             controls.maximum_heat_defect_j,
             controls.maximum_pressure_work_defect_j,
@@ -419,79 +458,109 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             .map_or(0.0, |v| v.affine_rate_s_inv);
         let incoming_speed = slab::product_ratio([incoming_rate, height, 1.0, 1.0], [1.0, 1.0]);
         let reference_density = self.flow.scaling.material().density_kg_m3();
-        let rho0 = initial.bulk_density_kg_m3();
-        let solution = balance::solve(
-            mass,
-            supplied_heat_j,
-            controls.net_specific_enthalpy_bracket_j_kg,
-            controls.maximum_heat_defect_j,
-            controls.maximum_source_evaluations,
-            |increment| -> Result<balance::Response, Error> {
-                checkpoint(gate, cx)?;
-                let next = self.caloric.advance_specific_energy(initial, increment)?;
-                if next.phase() != SolidLiquidPhase::Liquid {
-                    return Err(Error::Invalid(
-                        "slab heat bracket leaves the original liquid phase",
-                    ));
-                }
-                let rho1 = next.bulk_density_kg_m3();
-                // Same stable specific-volume difference as the native demand.
-                let relative = (rho0 - rho1) / rho0.max(rho1);
-                let speed = slab::product_ratio(
-                    [reference_density, height, relative, 1.0],
-                    [rho0.min(rho1), dt],
-                );
-                let slope = self
-                    .caloric
-                    .specific_volume_derivative_at_specific_enthalpy(
-                        next.specific_enthalpy_j_kg(),
-                    )?;
-                let speed_slope =
-                    slab::product_ratio([reference_density, height, slope, 1.0], [dt, 1.0]);
-                if !speed.is_finite()
-                    || !speed_slope.is_finite()
-                    || !incoming_speed.is_finite()
-                    || (rho0 != rho1 && speed == 0.0)
-                    || (slope != 0.0 && speed_slope == 0.0)
-                {
-                    return Err(Error::Invalid(
-                        "slab heat density/velocity response is unrepresentable",
-                    ));
-                }
-                Ok(balance::pressure_response(
-                    inertia,
-                    speed,
-                    incoming_speed,
-                    speed_slope,
-                ))
-            },
-        )
-        .map_err(|failure| match failure {
-            balance::Failure::Invalid(what) => FreeSurfaceSlabHeatError::Invalid(what),
-            balance::Failure::Evaluation(error) => FreeSurfaceSlabHeatError::Native(error),
-            balance::Failure::Balance {
-                evaluations,
-                residual_j,
-            } => FreeSurfaceSlabHeatError::Balance {
-                evaluations,
-                residual_j,
-            },
-        })?;
-        let endpoint = self.law.prepare_caloric_endpoint(
-            self.caloric,
+        Ok(SlabHeatState {
+            original: self,
             initial,
+            anchored_face,
+            controls,
+            mass,
+            dt,
+            height,
+            inertia,
+            incoming_speed,
+            reference_density,
+        })
+    }
+}
+
+struct SlabHeatState<'a, 's, 'm> {
+    original: &'a MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+    initial: EquilibriumPhaseState,
+    anchored_face: Face3,
+    controls: FreeSurfaceSlabHeatControls,
+    mass: Dd,
+    dt: f64,
+    height: f64,
+    inertia: f64,
+    incoming_speed: f64,
+    reference_density: f64,
+}
+
+impl<'a, 's, 'm> SlabHeatState<'a, 's, 'm> {
+    fn pressure_response(
+        &self,
+        increment: f64,
+        gate: &CancelGate,
+        cx: &Cx<'_>,
+    ) -> Result<balance::Response, Error> {
+        checkpoint(gate, cx)?;
+        let next = self
+            .original
+            .caloric
+            .advance_specific_energy(self.initial, increment)?;
+        if next.phase() != SolidLiquidPhase::Liquid {
+            return Err(Error::Invalid(
+                "slab heat bracket leaves the original liquid phase",
+            ));
+        }
+        let (rho0, rho1) = (self.initial.bulk_density_kg_m3(), next.bulk_density_kg_m3());
+        // Same stable specific-volume difference as the native demand.
+        let relative = (rho0 - rho1) / rho0.max(rho1);
+        let speed = slab::product_ratio(
+            [self.reference_density, self.height, relative, 1.0],
+            [rho0.min(rho1), self.dt],
+        );
+        let slope = self
+            .original
+            .caloric
+            .specific_volume_derivative_at_specific_enthalpy(next.specific_enthalpy_j_kg())?;
+        let speed_slope = slab::product_ratio(
+            [self.reference_density, self.height, slope, 1.0],
+            [self.dt, 1.0],
+        );
+        if !speed.is_finite()
+            || !speed_slope.is_finite()
+            || !self.incoming_speed.is_finite()
+            || (rho0 != rho1 && speed == 0.0)
+            || (slope != 0.0 && speed_slope == 0.0)
+        {
+            return Err(Error::Invalid(
+                "slab heat density/velocity response is unrepresentable",
+            ));
+        }
+        Ok(balance::pressure_response(
+            self.inertia,
+            speed,
+            self.incoming_speed,
+            speed_slope,
+        ))
+    }
+
+    fn finish(
+        self,
+        solution: balance::Solution,
+        supplied_heat_j: f64,
+        gate: &CancelGate,
+        cx: &Cx<'_>,
+    ) -> Result<FreeSurfaceSlabHeatPlan<'a, 's, 'm>, FreeSurfaceSlabHeatError> {
+        let endpoint = self.original.law.prepare_caloric_endpoint(
+            self.original.caloric,
+            self.initial,
             solution.increment_j_kg,
-            controls.volume.volume.maximum_source_density_defect_kg_m3,
+            self.controls
+                .volume
+                .volume
+                .maximum_source_density_defect_kg_m3,
         )?;
         checkpoint(gate, cx)?;
         Ok(FreeSurfaceSlabHeatPlan {
-            original: self,
+            original: self.original,
             endpoint,
-            anchored_face,
-            controls,
+            anchored_face: self.anchored_face,
+            controls: self.controls,
             supplied_heat_j,
             solution,
-            surface_speed_inertia_kg: inertia,
+            surface_speed_inertia_kg: self.inertia,
         })
     }
 }

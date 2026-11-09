@@ -1,4 +1,7 @@
 //! Native heat-driven volume evolution, with independently calculated face inertia.
+#[path = "heat/bath.rs"]
+mod bath;
+
 use super::*;
 use fs_lbm::material::free_surface::enthalpy::volume::{
     FreeSurfaceSlabHeatControls, FreeSurfaceSlabHeatError,
