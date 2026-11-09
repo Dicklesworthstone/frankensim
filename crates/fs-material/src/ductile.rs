@@ -35,6 +35,9 @@ pub mod source;
 /// Progressive length-scaled ductile degradation on the native J2 owner.
 pub mod evolution;
 
+/// Progressive axial work degradation with the original native J2 history.
+pub mod uniaxial;
+
 /// Calibration bounds for triaxiality, rate and temperature. Every interval
 /// is closed; a degenerate interval represents a fixed calibrated condition.
 /// Multiaxis laws additionally enforce their original support: these bounds

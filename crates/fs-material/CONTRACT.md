@@ -1,5 +1,28 @@
 # fs-material — CONTRACT
 
+## Native progressive axial ductility
+
+`ductile::uniaxial::UniaxialDuctileJ2` shares immutable native J2,
+initiation and receiving-band parameters. Owned nongeneric states retain their
+exact model identity across frame clones and physical-interval preparation.
+The explicitly one-dimensional model attenuates all axial stored energy and
+stress in both signs; it does not inherit the three-dimensional intact
+compressive-bulk split or a crack-closure law.
+
+Its tangent differentiates native plasticity and moving rate-dependent onset.
+Original native energy closes endpoint work into stored energy, plastic loss,
+damage release and numerical loss, with separate accounts. The existing
+`DuctileWorkEvolution` supplies exponential and exact finite-support profiles;
+`Gp` keeps its degraded equivalent-plastic-work capacity meaning, not a new
+total fracture-surface-energy claim. Last accepted incremental energy is
+retained without another return map; unchanged-strain holds record zero work.
+Negative and zero tangents remain physical outputs for the structural owner.
+
+The six `ductile_uniaxial` regressions cover original native parity, independent
+softening/work integrals and tangents, rate sensitivity, reversals and energy,
+band scaling/terminal failure, and clone/owner/refusal boundaries. No stiffness
+floor, erosion, heat partition, finite-strain necking or crack contact is added.
+
 ## Mixed multiplicative J2 plasticity
 
 `plastic::finite::mixed::FrozenFiniteJ2Remainder` borrows the original
