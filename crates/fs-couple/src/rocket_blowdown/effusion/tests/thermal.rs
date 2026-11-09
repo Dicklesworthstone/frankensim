@@ -1,6 +1,7 @@
 //! G0/G1/G3/G4: finite wall storage, molecular recoil, frame and atomic refusal.
 //! Manufactured caloric/transport inputs do not validate a physical heat law.
 
+mod exchange;
 mod trajectory;
 
 use super::*;

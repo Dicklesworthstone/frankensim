@@ -14,6 +14,8 @@
 //! pressure integrity, rotation or spatial thermal equilibration. Original
 //! source, Biot, caloric, finite-inventory and mechanical limits remain active.
 
+/// Finite-wall heat with original bidirectional and drifting molecular ports.
+pub mod exchange;
 /// Error-controlled physical windows with finite wall, gas and vehicle feedback.
 pub mod trajectory;
 
@@ -33,7 +35,10 @@ use fs_material::{
     phase::{EquilibriumPhaseState, UniformEnthalpyStep, UniformEnthalpyStepInput},
     thermochemical_gas::{
         ResolvedThermochemicalGasState,
-        energy::{GasEnergySolve, parcel::ClosedGasParcel},
+        energy::{
+            GasEnergySolve,
+            parcel::{ClosedGasParcel, transfer::species::effusion::EffusiveInterface},
+        },
     },
 };
 
@@ -119,6 +124,160 @@ impl<S> EffusionWallCandidate<S> {
     }
 }
 
+// The vacuum and bidirectional wrappers share these exact finite storage and
+// caloric owners. Only their original particle-exchange transaction differs.
+fn admit_wall<E>(
+    original: &GasRocketState,
+    cx: &Cx<'_>,
+    environment: EffusionRocketEnvironment,
+    wall: UniformEnthalpyStepInput<'_>,
+    controls: EffusionWallSolve,
+    port_count: usize,
+) -> Result<(), EffusionWallError<E>> {
+    cx.checkpoint().map_err(|_| EffusionWallError::Cancelled)?;
+    let density = wall.initial.bulk_density_kg_m3();
+    let material_volume = wall.mass_kg / density;
+    if !wall.mass_kg.is_finite()
+        || wall.mass_kg <= 0.0
+        || wall.mass_kg > original.vehicle.dry_mass_kg
+        || !material_volume.is_finite()
+        || material_volume <= 0.0
+        || !wall.volume_m3.is_finite()
+        || wall.volume_m3 <= 0.0
+        || (wall.volume_m3 - material_volume).abs()
+            > 64.0 * f64::EPSILON * wall.volume_m3.max(material_volume)
+        || !wall.duration_s.is_finite()
+        || wall.duration_s <= 0.0
+        || !controls.combined_energy_tolerance_j.is_finite()
+        || controls.combined_energy_tolerance_j < 0.0
+        || environment.inertial_frame != original.inertial_frame
+        || port_count > MAX_SNAPSHOT_TRANSFERS
+    {
+        return Err(EffusionWallError::Invalid(
+            "finite wall must fit dry mass and fixed material volume; require positive duration, matching frame and finite energy budget",
+        ));
+    }
+    for knot in wall.curve.knots() {
+        cx.checkpoint().map_err(|_| EffusionWallError::Cancelled)?;
+        if knot.bulk_density_kg_m3 != density {
+            return Err(EffusionWallError::Invalid(
+                "fixed-volume wall requires constant-density calorics; expansion needs its work owner",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn admit_original_gas<'a, E>(
+    original: &GasRocketState,
+    cx: &Cx<'_>,
+    apertures: impl IntoIterator<Item = (u64, f64, &'a EffusiveInterface)>,
+) -> Result<(), EffusionWallError<E>> {
+    // Heating must not hide an initially unqualified active aperture. Closed
+    // paths retain the original no-source-query behavior.
+    for (id, area_m2, interface) in apertures {
+        cx.checkpoint().map_err(|_| EffusionWallError::Cancelled)?;
+        if !area_m2.is_finite() || area_m2 < 0.0 {
+            return Err(EffusionWallError::Invalid(
+                "finite nonnegative outlet area required",
+            ));
+        }
+        if area_m2 > 0.0 {
+            interface
+                .admit_parcel(&original.reservoir, || cx.checkpoint().is_err())
+                .map_err(|error| EffusionRocketError::Source { outlet: id, error })?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn exchange_heat<S, E>(
+    original: &GasRocketState,
+    cx: &Cx<'_>,
+    wall: UniformEnthalpyStepInput<'_>,
+    body: &LumpedThermalEnvironment,
+    gas_heat_j: f64,
+    controls: EffusionWallSolve,
+    resolve: impl FnMut(&ResolvedThermochemicalGasState) -> Result<ConvectionCoefficient<S>, E>,
+) -> Result<
+    (
+        GasRocketState,
+        UniformEnthalpyStep<FiniteGasThermalReport<S>>,
+    ),
+    EffusionWallError<E>,
+> {
+    let gas = original.reservoir.clone().into_isochoric();
+    let thermal = FiniteGasThermalEnvironment {
+        gas: &gas,
+        body,
+        gas_heat_j,
+        gas_solve: controls.gas,
+        exchange: controls.exchange,
+        maximum_gas_temperature_increment_k: controls.maximum_gas_temperature_increment_k,
+    }
+    .advance_with_convection(cx, wall, resolve)
+    .map_err(EffusionWallError::Thermal)?;
+    let mut heated = original.clone();
+    heated.reservoir = ClosedGasParcel::from_isochoric(thermal.report.next_gas.clone());
+    if heated.reservoir.mass_kg().to_bits() != original.reservoir.mass_kg().to_bits()
+        || heated.reservoir.volume_m3().to_bits() != original.reservoir.volume_m3().to_bits()
+    {
+        return Err(EffusionWallError::Invalid(
+            "thermal stage changed fixed gas inventory or volume",
+        ));
+    }
+    Ok((heated, thermal))
+}
+
+struct WallEnergyAccount {
+    external_thermal_heat_j: f64,
+    combined_energy_residual_j: f64,
+    absolute_energy_residual_sum_j: f64,
+    energy_uncertainty_bound_j: f64,
+}
+
+fn energy_account<S, E>(
+    thermal: &UniformEnthalpyStep<FiniteGasThermalReport<S>>,
+    wall: UniformEnthalpyStepInput<'_>,
+    gas_heat_j: f64,
+    native_energy_residual_j: f64,
+    energy_uncertainty_bound_j: f64,
+    tolerance_j: f64,
+) -> Result<WallEnergyAccount, EffusionWallError<E>> {
+    let mut energy = Sum::default();
+    energy.add(thermal.report.combined_energy_residual_j)?;
+    energy.add(native_energy_residual_j)?;
+    let combined_energy_residual_j = energy.total();
+    let absolute_energy_residual_sum_j =
+        thermal.report.combined_energy_residual_j.abs() + native_energy_residual_j.abs();
+    if !absolute_energy_residual_sum_j.is_finite()
+        || !energy_uncertainty_bound_j.is_finite()
+        || absolute_energy_residual_sum_j > tolerance_j
+        || energy_uncertainty_bound_j > tolerance_j - absolute_energy_residual_sum_j
+    {
+        return Err(EffusionWallError::EnergyBalance {
+            residual_j: combined_energy_residual_j,
+            absolute_residual_sum_j: absolute_energy_residual_sum_j,
+            uncertainty_bound_j: energy_uncertainty_bound_j,
+        });
+    }
+    let mut external_heat = Sum::default();
+    for heat in [
+        wall.internal_heat_j,
+        gas_heat_j,
+        thermal.report.radiation_heat_j,
+    ] {
+        external_heat.add(heat)?;
+    }
+    Ok(WallEnergyAccount {
+        external_thermal_heat_j: external_heat.total(),
+        combined_energy_residual_j,
+        absolute_energy_residual_sum_j,
+        energy_uncertainty_bound_j,
+    })
+}
+
 impl GasRocketState {
     /// Exchange heat with a finite material wall and emit from the heated gas.
     ///
@@ -185,77 +344,15 @@ impl GasRocketState {
         controls: EffusionWallSolve,
         resolve: impl FnMut(&ResolvedThermochemicalGasState) -> Result<ConvectionCoefficient<S>, E>,
     ) -> Result<EffusionWallCandidate<S>, EffusionWallError<E>> {
-        cx.checkpoint().map_err(|_| EffusionWallError::Cancelled)?;
-        let density = wall.initial.bulk_density_kg_m3();
-        let material_volume = wall.mass_kg / density;
-        if !wall.mass_kg.is_finite()
-            || wall.mass_kg <= 0.0
-            || wall.mass_kg > self.vehicle.dry_mass_kg
-            || !material_volume.is_finite()
-            || material_volume <= 0.0
-            || !wall.volume_m3.is_finite()
-            || wall.volume_m3 <= 0.0
-            || (wall.volume_m3 - material_volume).abs()
-                > 64.0 * f64::EPSILON * wall.volume_m3.max(material_volume)
-            || !wall.duration_s.is_finite()
-            || wall.duration_s <= 0.0
-            || !controls.combined_energy_tolerance_j.is_finite()
-            || controls.combined_energy_tolerance_j < 0.0
-            || environment.inertial_frame != self.inertial_frame
-            || outlets.len() > MAX_SNAPSHOT_TRANSFERS
-        {
-            return Err(EffusionWallError::Invalid(
-                "finite wall must fit dry mass and fixed material volume; require positive duration, matching frame and finite energy budget",
-            ));
-        }
-        for knot in wall.curve.knots() {
-            cx.checkpoint().map_err(|_| EffusionWallError::Cancelled)?;
-            if knot.bulk_density_kg_m3 != density {
-                return Err(EffusionWallError::Invalid(
-                    "fixed-volume wall requires constant-density calorics; expansion needs its work owner",
-                ));
-            }
-        }
-        // Heating must not hide an initially unqualified active aperture. Closed
-        // outlets retain the original no-source-query behavior.
-        for outlet in outlets {
-            cx.checkpoint().map_err(|_| EffusionWallError::Cancelled)?;
-            if !outlet.area_m2.is_finite() || outlet.area_m2 < 0.0 {
-                return Err(EffusionWallError::Invalid(
-                    "finite nonnegative outlet area required",
-                ));
-            }
-            if outlet.area_m2 > 0.0 {
-                outlet
-                    .interface
-                    .interface()
-                    .admit_parcel(&self.reservoir, || cx.checkpoint().is_err())
-                    .map_err(|error| EffusionRocketError::Source {
-                        outlet: outlet.id,
-                        error,
-                    })?;
-            }
-        }
-        let gas = self.reservoir.clone().into_isochoric();
-        let thermal = FiniteGasThermalEnvironment {
-            gas: &gas,
-            body,
-            gas_heat_j,
-            gas_solve: controls.gas,
-            exchange: controls.exchange,
-            maximum_gas_temperature_increment_k: controls.maximum_gas_temperature_increment_k,
-        }
-        .advance_with_convection(cx, wall, resolve)
-        .map_err(EffusionWallError::Thermal)?;
-        let mut heated = self.clone();
-        heated.reservoir = ClosedGasParcel::from_isochoric(thermal.report.next_gas.clone());
-        if heated.reservoir.mass_kg().to_bits() != self.reservoir.mass_kg().to_bits()
-            || heated.reservoir.volume_m3().to_bits() != self.reservoir.volume_m3().to_bits()
-        {
-            return Err(EffusionWallError::Invalid(
-                "thermal stage changed fixed gas inventory or volume",
-            ));
-        }
+        admit_wall(self, cx, environment, wall, controls, outlets.len())?;
+        admit_original_gas(
+            self,
+            cx,
+            outlets
+                .iter()
+                .map(|outlet| (outlet.id, outlet.area_m2, outlet.interface.interface())),
+        )?;
+        let (heated, thermal) = exchange_heat(self, cx, wall, body, gas_heat_j, controls, resolve)?;
         let (endpoint, recoil) = heated
             .advance_effusion_with_environment(
                 environment,
@@ -266,34 +363,14 @@ impl GasRocketState {
                 || cx.checkpoint().is_err(),
             )?
             .into_parts();
-        let mut energy = Sum::default();
-        energy.add(thermal.report.combined_energy_residual_j)?;
-        energy.add(recoil.energy_residual_j)?;
-        let combined_energy_residual_j = energy.total();
-        let absolute_energy_residual_sum_j =
-            thermal.report.combined_energy_residual_j.abs() + recoil.energy_residual_j.abs();
-        let energy_uncertainty_bound_j =
-            recoil.initial_inventory_kinetic_correction_j.abs() + recoil.gravity_work_uncertainty_j;
-        if !absolute_energy_residual_sum_j.is_finite()
-            || !energy_uncertainty_bound_j.is_finite()
-            || absolute_energy_residual_sum_j > controls.combined_energy_tolerance_j
-            || energy_uncertainty_bound_j
-                > controls.combined_energy_tolerance_j - absolute_energy_residual_sum_j
-        {
-            return Err(EffusionWallError::EnergyBalance {
-                residual_j: combined_energy_residual_j,
-                absolute_residual_sum_j: absolute_energy_residual_sum_j,
-                uncertainty_bound_j: energy_uncertainty_bound_j,
-            });
-        }
-        let mut external_heat = Sum::default();
-        for heat in [
-            wall.internal_heat_j,
+        let account = energy_account(
+            &thermal,
+            wall,
             gas_heat_j,
-            thermal.report.radiation_heat_j,
-        ] {
-            external_heat.add(heat)?;
-        }
+            recoil.energy_residual_j,
+            recoil.initial_inventory_kinetic_correction_j.abs() + recoil.gravity_work_uncertainty_j,
+            controls.combined_energy_tolerance_j,
+        )?;
         cx.checkpoint().map_err(|_| EffusionWallError::Cancelled)?;
         Ok(EffusionWallCandidate {
             endpoint,
@@ -301,10 +378,10 @@ impl GasRocketState {
                 duration_s: wall.duration_s,
                 thermal,
                 recoil,
-                external_thermal_heat_j: external_heat.total(),
-                combined_energy_residual_j,
-                absolute_energy_residual_sum_j,
-                energy_uncertainty_bound_j,
+                external_thermal_heat_j: account.external_thermal_heat_j,
+                combined_energy_residual_j: account.combined_energy_residual_j,
+                absolute_energy_residual_sum_j: account.absolute_energy_residual_sum_j,
+                energy_uncertainty_bound_j: account.energy_uncertainty_bound_j,
             },
         })
     }

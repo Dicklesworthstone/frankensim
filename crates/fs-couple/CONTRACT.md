@@ -10225,3 +10225,12 @@ Focused regressions specify original nozzle transport, independent final EOS
 and native velocity, complete-system species/mass/caloric balances, empty-path
 equivalence, late coverage refusal, retry and cancellation. These newly added
 regressions have been reviewed statically but not executed.
+
+
+## Finite material-wall heat with bidirectional molecular supply and ambient gas
+
+`rocket_blowdown::effusion::thermal::exchange` composes the original implicit finite material-wall/gas heat transaction with the original bidirectional molecular particle transaction. Vacuum outlets, comoving reservoirs and fixed-inertial ambient Maxwellians sample one heated gas state, pool gross original-species withdrawals before incoming credit, and update the actual vessel once. Active apertures admit the unheated original gas first; zero-area sources remain inactive. Incoming molecular energy and tangential momentum remain in their particle streams and are not added as a second heat source.
+
+Wall storage remains part of the existing dry vessel, with fixed geometry and constant-density calorics. Both stages share one physical interval and retain first-order splitting; source support, Biot, finite-inventory, drift, frame and mechanical gates remain authoritative. The shared source-relative energy account sums absolute thermal/particle defects and native inventory/gravity reserves under one fixed budget. Wall, gas and vehicle publish together; late source, withdrawal, callback, balance or cancellation refusal leaves inputs unchanged. Prescribed source inventories remain external and undepleted. Exterior wall-pressure forces, rotation, spatial thermal equilibration and empirical heat-transfer accuracy are not inferred.
+
+Four focused regression groups cover independently calculated comoving supply/discharge and finite heat, mixed ambient/comoving/vacuum ports and inertial transforms, exact insulated-wall parity and inventory reserves, and atomic source/withdrawal/callback/cancellation refusals. Production formatting/source checks and an independent monatomic balance calculation completed before the executor outage; full owner tests were not compiled or run. Production sources were recovered byte-for-byte; the new test source was recovered from its complete pre-format patch.
